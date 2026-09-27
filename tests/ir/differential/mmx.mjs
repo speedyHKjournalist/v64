@@ -55,6 +55,9 @@ for(const release of [false,true]){
             set32(0x3004+n*8,(base&0xFF000000)|(base>>>16&255)|access<<8|0xCF0000);
         }
         function fpu_state(){
+            // Materialize dirty f64 x87 shadow values (the default x87 cache):
+            // raw F80 memory is not authoritative before a sync.
+            e.fpu_sync_all();
             return {
                 empty:linear8[816],
                 top:linear8[1032],

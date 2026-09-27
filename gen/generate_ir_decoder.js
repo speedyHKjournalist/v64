@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import assert from "node:assert/strict";
 import table from "./x86_table.js";
-import {experimentalLowering as experimental_lowering, experimentalTests as experimental_tests} from "./ir_semantics.js";
+import {lowering, loweringTests as lowering_tests} from "./ir_semantics.js";
 const hex = n => n.toString(16).toUpperCase();
 const family_key = opcode => (opcode & 0xFF00) === 0x0F00 ? opcode & 0xFFFF : opcode & 0xFF;
 const family_modrm = new Map();
@@ -50,12 +50,11 @@ for(const e of rows) for(const operand_size of e.os ? [16, 32] : [null])
         const invalid = e.group_ud || operand === "reg" && e.reg_ud || operand === "mem" && e.mem_ud;
         forms.push({encoding_id: e.id, key: `${hex(e.opcode)}/${e.fixed_g ?? "-"}/${operand_size ?? "fixed"}/${address_size}/${operand}`,
             operand_size, address_size, operand,
-            lowering: invalid ? "BaselineUD" : "Pending",
-            experimental_lowering: invalid ? "BaselineUD" : experimental_lowering(e, operand),
-            tests: invalid ? ["tests/ir/decode/decode.rs", "tests/ir/semantics/invalid.rs", "tests/ir/differential/invalid.mjs"] : experimental_tests(e, operand)});
+            lowering: invalid ? "BaselineUD" : lowering(e, operand),
+            tests: invalid ? ["tests/ir/decode/decode.rs", "tests/ir/semantics/invalid.rs", "tests/ir/differential/invalid.mjs"] : lowering_tests(e, operand)});
     }
-const coverage = {schema: 1, source: "gen/x86_table.js", encodings: rows.length, forms,
-    note: "Encoding forms are not a claim of semantic coverage. Pending includes unimplemented native and helper lowering. Prefix repetitions, mode guards and nested x87 subforms require additional tests."};
+const coverage = {schema: 2, source: "gen/x86_table.js", encodings: rows.length, forms,
+    note: "lowering is the IR compiler's path for each form (Pending: none attributed). Encoding forms are not a claim of semantic coverage. Prefix repetitions, mode guards and nested x87 subforms require additional tests."};
 const coverage_text = JSON.stringify({...coverage, forms: undefined}, null, 2).slice(0, -2) +
     ',\n  "forms": [\n' + forms.map(f => "    " + JSON.stringify(f)).join(",\n") + "\n  ]\n}\n";
 const outputs = [["src/rust/ir/frontend/encodings.rs", rust], ["docs/ir-coverage.json", coverage_text]];

@@ -566,7 +566,7 @@ ir-tests: ir-generated-check build/v86.wasm build/libv86.mjs build/jit-capacity.
 ir-coverage: ir-generated-check
 	node tests/ir/coverage.mjs
 
-# This gate intentionally fails until production lowering coverage is complete.
+# Every valid decoder form must have an attributed IR lowering path.
 ir-default-gate: ir-generated-check
 	node tests/ir/coverage.mjs --require-complete
 
@@ -942,7 +942,7 @@ ir-mmx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-releas
 
 .PHONY: ir-coverage-tests
 ir-coverage-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
-	node tests/ir/coverage.mjs --require-experimental-complete
+	node tests/ir/coverage.mjs --require-complete
 	cargo test ir::coverage_tests
 	node tests/ir/differential/coverage.mjs
 

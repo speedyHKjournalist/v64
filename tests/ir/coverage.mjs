@@ -1,38 +1,21 @@
+// Counts of the IR lowering path per decoder form (docs/ir-coverage.json).
+// --require-complete: every valid form has an attributed lowering path.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 const catalogue = JSON.parse(fs.readFileSync("docs/ir-coverage.json"));
+assert.equal(catalogue.schema, 2, "regenerate docs/ir-coverage.json (gen/generate_ir_decoder.js)");
 assert.equal(new Set(catalogue.forms.map(f => f.key)).size, catalogue.forms.length, "duplicate coverage key");
 for(const form of catalogue.forms) {
-    const covered = form.experimental_lowering !== "Pending";
-    assert(!covered || form.tests.length > 0, `missing suite attribution: ${form.key}`);
+    assert(form.lowering === "Pending" || form.tests.length > 0, `missing suite attribution: ${form.key}`);
     for(const path of form.tests) assert(fs.existsSync(path), `missing coverage suite ${path}`);
 }
-const experimental_pending = catalogue.forms.filter(f => f.experimental_lowering === "Pending").length;
-const x87 = catalogue.forms.filter(f => f.experimental_lowering === "CpuX87Helper").length;
-const fp_state = catalogue.forms.filter(f => f.experimental_lowering === "CpuFpStateHelper").length;
-const sse_fp = catalogue.forms.filter(f => f.experimental_lowering === "CpuSseFpHelper").length;
-const mmx = catalogue.forms.filter(f => f.experimental_lowering === "CpuMmxHelper").length;
-const baseline = catalogue.forms.filter(f => f.experimental_lowering === "CpuBaselineHelper").length;
-const sti = catalogue.forms.filter(f => f.experimental_lowering === "CpuStiHIR").length;
-const far_control = catalogue.forms.filter(f => f.experimental_lowering === "CpuFarControlHelper").length;
-const branches = catalogue.forms.filter(f => f.experimental_lowering === "TerminalBranchHIR").length;
-const pending = catalogue.forms.filter(f => f.lowering === "Pending").length;
-const experimental = catalogue.forms.filter(f => f.experimental_lowering === "NativeHIR").length;
-const memory = catalogue.forms.filter(f => f.experimental_lowering === "CpuMemoryHIR").length;
-const stack = catalogue.forms.filter(f => f.experimental_lowering === "CpuStackHIR").length;
-const control = catalogue.forms.filter(f => f.experimental_lowering === "CpuControlHIR").length;
-const arithmetic = catalogue.forms.filter(f => f.experimental_lowering === "CpuArithmeticHIR").length;
-const state = catalogue.forms.filter(f => f.experimental_lowering === "CpuStateHIR").length;
-const strings = catalogue.forms.filter(f => f.experimental_lowering === "CpuStringHIR").length;
-const io = catalogue.forms.filter(f => f.experimental_lowering === "CpuIoHIR").length;
-const rep = catalogue.forms.filter(f => f.experimental_lowering === "CpuRepHelper").length;
-const cpu_info = catalogue.forms.filter(f => f.experimental_lowering === "CpuInfoHelper").length;
-const cpu_system = catalogue.forms.filter(f => f.experimental_lowering === "CpuSystemHelper").length;
-const control_regs = catalogue.forms.filter(f => f.experimental_lowering === "CpuControlRegHelper").length;
-const descriptor = catalogue.forms.filter(f => f.experimental_lowering === "CpuDescriptorHelper").length;
-const task_regs = catalogue.forms.filter(f => f.experimental_lowering === "CpuTaskRegHelper").length;
-const simd = catalogue.forms.filter(f => f.experimental_lowering === "CpuSimdHIR").length;
-const selector_query = catalogue.forms.filter(f => f.experimental_lowering === "CpuSelectorQueryHelper").length;
-console.log(`${catalogue.encodings} encodings; ${catalogue.forms.length} forms; ${pending} production Pending; ${experimental_pending} experimental Pending; ${x87} experimental x87 forms; ${far_control} experimental far-control forms; ${fp_state} experimental FP-state forms; ${sse_fp} experimental SSE FP forms; ${mmx} experimental MMX forms; ${baseline} explicit baseline forms; ${sti} experimental STI forms; ${experimental} experimental NativeHIR forms; ${memory} experimental CPU memory forms; ${stack} experimental CPU stack forms; ${control} experimental CPU control forms; ${arithmetic} experimental CPU arithmetic forms; ${branches} experimental terminal branch forms; ${state} experimental CPU state forms; ${strings} experimental non-REP CPU string forms; ${io} experimental CPU I/O forms; ${rep} experimental REP helper forms; ${cpu_info} experimental CPU information helper forms; ${cpu_system} experimental CPU system helper forms; ${control_regs} experimental control/debug register helper forms; ${descriptor} experimental descriptor/system-word helper forms; ${task_regs} experimental task/LDTR helper forms; ${selector_query} experimental selector-query helper forms; ${simd} experimental XMM forms`);
-if(process.argv.includes("--require-complete")) assert.equal(pending, 0, "IR cannot become the default backend while production forms remain Pending");
-if(process.argv.includes("--require-experimental-complete")) assert.equal(experimental_pending, 0, "experimental coarse forms must retain an attributed lowering path");
+const counts = new Map();
+for(const form of catalogue.forms) counts.set(form.lowering, (counts.get(form.lowering) || 0) + 1);
+const pending = counts.get("Pending") || 0;
+const categories = [...counts].filter(([name]) => name !== "Pending").sort((a, b) => b[1] - a[1]);
+console.log(`${catalogue.encodings} encodings; ${catalogue.forms.length} forms; ${pending} Pending; ` +
+    categories.map(([name, count]) => `${count} ${name}`).join(", "));
+if(process.argv.includes("--require-complete")) {
+    const missing = catalogue.forms.filter(f => f.lowering === "Pending").slice(0, 10).map(f => f.key);
+    assert.equal(pending, 0, `forms without an IR lowering path: ${missing.join(" ")}`);
+}

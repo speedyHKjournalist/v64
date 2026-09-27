@@ -5,14 +5,14 @@ Run `make ir-coverage` for counts and `make ir-generated-check` to validate that
 The stable encoding ID is `(opcode << 4) | (fixed_g + 1)`, using zero for an opcode
 without a ModRM group. It does not depend on table ordering.
 
-`lowering` is the **production** status. `experimental_lowering` separately records
-experimental capability. Of 3,972 coarse forms, 244 explicit invalid reg/mem and missing-group forms
-are BaselineUD and **3,728 production forms remain Pending**. Of those production-
-Pending forms, zero remain `experimental_lowering: Pending`. Each has an
-experimental native/helper path or explicit baseline behavior, including baseline
-unsupported/debug-assert and release-#UD cases. This is a coarse catalogue milestone,
-not full prefix/mode/exception acceptance or production-default qualification.
-Current experimental capabilities are:
+`lowering` is the IR compiler's path for each form (IR is the only compiler;
+until the legacy JIT was removed, a separate `experimental_lowering` column held
+this while `lowering` tracked the legacy-default build). Of 3,972 coarse forms,
+244 explicit invalid reg/mem and missing-group forms are BaselineUD and **none
+remain Pending**: each has a native/helper path or explicit baseline behavior,
+including baseline unsupported/debug-assert and release-#UD cases. This is a
+coarse catalogue milestone, not full prefix/mode/exception acceptance.
+Current capabilities are:
 
 | Category | Forms | Contract / evidence |
 |---|---:|---|
@@ -41,10 +41,9 @@ Current experimental capabilities are:
 | CpuArithmeticHIR | 14 | [DIV/IDIV](ir-multiply.md), [AAM](ir-misc.md) |
 | TerminalBranchHIR | 152 | [Jcc/JMP design](ir-design.md), [counter branches](ir-loops.md) |
 
-These counts are not completed production coverage. `make ir-default-gate`
-rejects nonzero production Pending. No helper coverage is claimed simply because
-an old CPU helper or emitter exists. The release runtime still uses the legacy
-backend; [ir-progress.md](ir-progress.md) tracks the full migration requirements.
+`make ir-default-gate` (and `make ir-coverage-tests`) reject any Pending form, so
+a new decoder form must be given a lowering path. No helper coverage is claimed
+simply because an old CPU helper or emitter exists.
 
 The forms expand catalogue operand size, address size and reg/mem selectors.
 Implicit widths retain the opcode table's fixed-width classification; Rust lowering
@@ -56,16 +55,15 @@ The `tests` list points to the relevant fixture generator and executable suite
 for each implemented family. The coverage check requires attributed paths to
 exist. This navigation is not exhaustive per-form proof; actual tested dimensions
 and deliberate policies are recorded in the linked contracts and
-[validation report](ir-validation.md). Pending experimental forms carry no test
-claim; invalid forms reference the decoder suite.
+[validation report](ir-validation.md). Pending forms would carry no test claim;
+invalid forms reference the decoder suite.
 
 Decode facts distinguish `fetch_modrm` (the opcode family's fetch before mandatory
 prefix dispatch) from `e` (the selected form's EA semantics), retaining the pinned
-baseline's invalid-form lengths. Production analysis uses the catalogue's `custom`
-attribute to retain helper observer boundaries. Both are covered by the actual
-legacy-analyzer differential, independently of experimental lowering capability.
+baseline's invalid-form lengths. Region analysis uses the catalogue's `custom`
+attribute to retain helper observer boundaries.
 
-[CMPXCHG8B](ir-cmpxchg8b.md) adds four experimental memory forms with native
-RAM execution and ordered CPU slow paths; production coverage is unchanged.
+[CMPXCHG8B](ir-cmpxchg8b.md) adds four memory forms with native RAM execution
+and ordered CPU slow paths.
 
 The shared interpreter rules, explicit missing groups and expanded acceptance matrix are documented in [the contract increment](ir-contract-matrix.md).
