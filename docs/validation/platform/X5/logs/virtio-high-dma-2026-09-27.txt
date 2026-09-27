@@ -1,0 +1,5 @@
+PASS VirtIO high direct rings, partial blobs, used ring, no low32 alias
+PASS VirtIO high indirect table, mixed low/high payload, final 36-bit byte
+PASS VirtIO high snapshot/reset and legacy signed32 snapshot
+PASS VirtIO unsupported 64-bit register values preserved and rejected
+PASS VirtIO out-of-range DMA and nested indirect descriptor fail without completion

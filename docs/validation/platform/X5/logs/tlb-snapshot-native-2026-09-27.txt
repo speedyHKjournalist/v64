@@ -1,0 +1,13 @@
+   Compiling v86 v0.1.0 (/Users/renruisi/Desktop/Code/v86)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.23s
+     Running unittests src/rust/lib.rs (/tmp/v86-x5-native/debug/deps/v86-b5b8956f68152fb3)
+
+running 5 tests
+test x64::paging::tests::portable_tlb_exports_only_live_epoch_and_empty_restore_clears ... ok
+test x64::paging::tests::portable_tlb_preserves_supervisor_wp_bypass_permissions ... ok
+test x64::paging::tests::portable_large_page_invlpg_and_unused_witness_validation ... ok
+test x64::paging::tests::portable_tlb_preserves_high_tags_witnesses_and_stale_translation ... ok
+test x64::paging::tests::portable_tlb_invalid_record_rejects_entire_transaction ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 342 filtered out; finished in 0.00s
+

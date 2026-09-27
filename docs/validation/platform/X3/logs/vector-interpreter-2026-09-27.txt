@@ -1,0 +1,2 @@
+QEMU vector reference: 949 real long-mode cases
+v86 vector/x87: 949 cases pass (5 explicit SDM cases for documented QEMU gaps)

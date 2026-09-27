@@ -70,6 +70,31 @@ pub const x87_shadow_dirty: *mut u32 = 1348 as *mut u32;
 /// Nonzero while generated IR code may inline fast-math x87 on that cache.
 pub const x87_native_policy: *mut u8 = 1352 as *mut u8;
 pub const slice_budget: *mut u32 = 1356 as *mut u32;
+pub const x64_gpr_hi: *mut u32 = 1360 as *mut u32;
+pub const x64_gpr_ext_lo: *mut u32 = 1424 as *mut u32;
+pub const x64_xmm_ext: *mut reg128 = 1456 as *mut reg128;
+pub const x64_rip_hi: *mut u32 = 1584 as *mut u32;
+pub const x64_previous_ip_hi: *mut u32 = 1588 as *mut u32;
+pub const x64_idtr_base_hi: *mut u32 = 1592 as *mut u32;
+pub const x64_gdtr_base_hi: *mut u32 = 1596 as *mut u32;
+pub const x64_cr_hi: *mut u32 = 1600 as *mut u32;
+pub const x64_dr_hi: *mut u32 = 1632 as *mut u32;
+pub const x64_segment_base_hi: *mut u32 = 1664 as *mut u32;
+pub const x64_efer: *mut u64 = 1696 as *mut u64;
+pub const x64_kernel_gs_base: *mut u64 = 1704 as *mut u64;
+pub const x64_star: *mut u64 = 1712 as *mut u64;
+pub const x64_lstar: *mut u64 = 1720 as *mut u64;
+pub const x64_cstar: *mut u64 = 1728 as *mut u64;
+pub const x64_sfmask: *mut u64 = 1736 as *mut u64;
+pub const x64_cs_long: *mut u8 = 1744 as *mut u8;
+pub const x64_rex: *mut u8 = 1748 as *mut u8;
+pub const x64_cr8: *mut u64 = 1752 as *mut u64;
+pub const x64_sysenter_esp_hi: *mut u32 = 1760 as *mut u32;
+pub const x64_sysenter_eip_hi: *mut u32 = 1764 as *mut u32;
+pub const x64_fpu_ip_hi: *mut u32 = 1768 as *mut u32;
+pub const x64_fpu_dp_hi: *mut u32 = 1772 as *mut u32;
+pub const x64_pat: *mut u64 = 1776 as *mut u64;
+pub const x64_tsc_aux: *mut u32 = 1784 as *mut u32;
 /// Address of cpu::tlb_data, written at startup. Generated IR code loads it
 /// from this fixed slot (below --global-base) instead of calling an import.
 pub const ir_tlb_base: *mut u32 = 2048 as *mut u32;

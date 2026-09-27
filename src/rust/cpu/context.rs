@@ -55,6 +55,8 @@ pub unsafe fn context_switch(old: u32, new: u32) {
 #[no_mangle]
 pub unsafe fn context_reset(core: u32) {
     assert!(core < 8);
+    crate::cpu::exceptions::init(core);
+    crate::x64::memory::invalidate_core(core as usize);
     CONTEXTS[core as usize].tlb.clear();
     if core == apic::current_core() as u32 {
         cpu::full_clear_tlb();
@@ -62,6 +64,7 @@ pub unsafe fn context_reset(core: u32) {
 }
 #[no_mangle]
 pub unsafe fn context_reset_all() {
+    crate::cpu::exceptions::reset();
     let offset = (cpu::js::microtick() * cpu::TSC_RATE) as u64;
     for core in 0..8 { context_reset(core); CONTEXTS[core as usize].tsc_offset = offset; }
     cpu::tsc_offset = offset;
@@ -98,4 +101,11 @@ pub unsafe fn context_tsc_get(core: u32, high: bool) -> u32 {
 pub unsafe fn context_tsc_set(core: u32, low: u32, high: u32) {
     assert!(core < 8);
     CONTEXTS[core as usize].tsc_offset = low as u64 | (high as u64) << 32;
+}
+
+/// A physical mapping change invalidates address translations, not vCPU state.
+pub unsafe fn invalidate_all_tlbs() {
+    crate::x64::memory::invalidate_all_tlbs();
+    for core in 0..8 { CONTEXTS[core].tlb.clear(); }
+    cpu::full_clear_tlb();
 }

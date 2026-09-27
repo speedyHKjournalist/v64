@@ -1,3 +1,4 @@
+import { state_stream_server } from "./state_stream_transport.js";
 // Browser-side ownership boundary. Guest RAM and synchronous devices live only
 // in the worker; this side owns DOM adapters and asynchronous GPU execution.
 import { GraphicsPerformance } from "./graphics_performance.js";
@@ -317,6 +318,45 @@ export class CPUWorkerController
                 g?.["releaseCheckpoint"]();
                 this.restore_checkpoint = null;
                 if(running && !this.emulator.destroyed && (ok || kind === "save")) await this.rpc("run");
+            }
+        });
+    }
+
+    state_stream(kind, value)
+    {
+        return this.serialize(async () => {
+            const running = this.emulator.is_running();
+            await this.stop();
+            const graphics = this.emulator["graphics_adapter"];
+            const channel = new globalThis.MessageChannel();
+            const server = state_stream_server(channel.port1, kind, value);
+            let success = false;
+            try
+            {
+                if(kind === "save")
+                {
+                    await graphics?.["prepareSaveState"]();
+                    const checkpoint = graphics ? graphics["serializeCheckpoint"]() : null;
+                    await this.rpc("save-stream", [checkpoint, channel.port2], [channel.port2]);
+                }
+                else
+                {
+                    this.restore_checkpoint = null;
+                    graphics?.["beginStateRestore"]();
+                    await graphics?.["waitForIdle"](false, true);
+                    await this.rpc("restore-stream", [server["size"], channel.port2], [channel.port2]);
+                    graphics?.["onPCIStateRestored"](this.restore_checkpoint);
+                    await graphics?.["finishStateRestore"]();
+                }
+                success = true;
+            }
+            catch(error) { graphics?.["cancelStateRestore"](); throw error; }
+            finally
+            {
+                server["close"]();
+                graphics?.["releaseCheckpoint"]();
+                this.restore_checkpoint = null;
+                if(running && !this.emulator.destroyed && (success || kind === "save")) await this.rpc("run");
             }
         });
     }

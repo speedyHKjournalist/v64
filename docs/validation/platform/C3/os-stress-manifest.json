@@ -1,0 +1,201 @@
+{
+  "date": "2026-09-27",
+  "node": "v25.6.0",
+  "clang": "Apple clang 21.0.0 (clang-2100.3.34.2)",
+  "platform": "arm64-apple-darwin27.0.0",
+  "scope": "4-core Linux4 guest SMP + physical emulated IDE/NE2K + stop/save/restore/restart/ACPI S5",
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "quantums": [
+    257,
+    4096
+  ],
+  "rounds_per_process": 256,
+  "cores": 4,
+  "results": [
+    {
+      "build": "debug",
+      "mode": "interpreter",
+      "report": "build/c3-os-fixed-debug/os-stress-interpreter.json",
+      "report_sha256": "c246d46a1fdf54e26f465f95923b2e1e02530830be8cef35f69ff75d5b3f7300",
+      "media_sha256": {
+        "javascript_entry": "005a18598b04a77fc10c1050b9fd323e2d9f30df02d969cf3c300550889d04cb",
+        "wasm": "7920e19210e04e8cb1b0972a9ad41dea2e9fbf6ff34d2c1fbb49cae4eef3c52b",
+        "linux4": "a8ea434ab3b177c55f01275dcc1d35f52cfbee9bd44a32e74765c975b58bcc73",
+        "guest": "7e4f90c2793e5a66c8020075a0f74178a15d271ad6b2ef0d11d1987aa890ac61",
+        "disk_sha256": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "disk": "4 MiB zero-filled disposable IDE disk; writes at 1 MiB + (seed & 31) * 8192"
+      },
+      "cases": 20,
+      "snapshot_replays": 2,
+      "wall_ms_including_boot_restart": 162299,
+      "completed_cpu_checks_including_replays": 22528,
+      "network_packets": 704,
+      "network_received": 704,
+      "observed_frame_lengths": [
+        78
+      ],
+      "workload_disk_read_bytes": 2883584,
+      "workload_disk_write_bytes": 2883584,
+      "workload_compiled_activations": 0,
+      "reboot_reonlines_all_cores": true,
+      "acpi_s5_events": 1
+    },
+    {
+      "build": "debug",
+      "mode": "tier0",
+      "report": "build/c3-os-fixed-debug/os-stress-tier0.json",
+      "report_sha256": "55d7d5f544b93ab418cb4796f663051d460303a49c97f2c3df0760ee5f8898d1",
+      "media_sha256": {
+        "javascript_entry": "005a18598b04a77fc10c1050b9fd323e2d9f30df02d969cf3c300550889d04cb",
+        "wasm": "7920e19210e04e8cb1b0972a9ad41dea2e9fbf6ff34d2c1fbb49cae4eef3c52b",
+        "linux4": "a8ea434ab3b177c55f01275dcc1d35f52cfbee9bd44a32e74765c975b58bcc73",
+        "guest": "7e4f90c2793e5a66c8020075a0f74178a15d271ad6b2ef0d11d1987aa890ac61",
+        "disk_sha256": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "disk": "4 MiB zero-filled disposable IDE disk; writes at 1 MiB + (seed & 31) * 8192"
+      },
+      "cases": 20,
+      "snapshot_replays": 2,
+      "wall_ms_including_boot_restart": 64213,
+      "completed_cpu_checks_including_replays": 22528,
+      "network_packets": 704,
+      "network_received": 704,
+      "observed_frame_lengths": [
+        78
+      ],
+      "workload_disk_read_bytes": 2883584,
+      "workload_disk_write_bytes": 2883584,
+      "workload_compiled_activations": 8218436,
+      "reboot_reonlines_all_cores": true,
+      "acpi_s5_events": 1
+    },
+    {
+      "build": "debug",
+      "mode": "region",
+      "report": "build/c3-os-fixed-debug/os-stress-region.json",
+      "report_sha256": "1614df708a1a8a9632e7e29b5cc5658248ecfee547d32d671ee6f25b2d8d32a3",
+      "media_sha256": {
+        "javascript_entry": "005a18598b04a77fc10c1050b9fd323e2d9f30df02d969cf3c300550889d04cb",
+        "wasm": "7920e19210e04e8cb1b0972a9ad41dea2e9fbf6ff34d2c1fbb49cae4eef3c52b",
+        "linux4": "a8ea434ab3b177c55f01275dcc1d35f52cfbee9bd44a32e74765c975b58bcc73",
+        "guest": "7e4f90c2793e5a66c8020075a0f74178a15d271ad6b2ef0d11d1987aa890ac61",
+        "disk_sha256": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "disk": "4 MiB zero-filled disposable IDE disk; writes at 1 MiB + (seed & 31) * 8192"
+      },
+      "cases": 20,
+      "snapshot_replays": 2,
+      "wall_ms_including_boot_restart": 154933,
+      "completed_cpu_checks_including_replays": 22528,
+      "network_packets": 704,
+      "network_received": 704,
+      "observed_frame_lengths": [
+        78
+      ],
+      "workload_disk_read_bytes": 2883584,
+      "workload_disk_write_bytes": 2883584,
+      "workload_compiled_activations": 55577188,
+      "reboot_reonlines_all_cores": true,
+      "acpi_s5_events": 1
+    },
+    {
+      "build": "release",
+      "mode": "interpreter",
+      "report": "build/c3-os-fixed-release/os-stress-interpreter.json",
+      "report_sha256": "8be942fcbf4e8b9ddc890123fed6b710bdaa33ce1076fcfb5be4270f205bcf3c",
+      "media_sha256": {
+        "javascript_entry": "005a18598b04a77fc10c1050b9fd323e2d9f30df02d969cf3c300550889d04cb",
+        "wasm": "549160bc21296edc03b997d3034d4b9f13b07211bdaf695437284e4ca0699243",
+        "linux4": "a8ea434ab3b177c55f01275dcc1d35f52cfbee9bd44a32e74765c975b58bcc73",
+        "guest": "7e4f90c2793e5a66c8020075a0f74178a15d271ad6b2ef0d11d1987aa890ac61",
+        "disk_sha256": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "disk": "4 MiB zero-filled disposable IDE disk; writes at 1 MiB + (seed & 31) * 8192"
+      },
+      "cases": 20,
+      "snapshot_replays": 2,
+      "wall_ms_including_boot_restart": 214485,
+      "completed_cpu_checks_including_replays": 22528,
+      "network_packets": 704,
+      "network_received": 704,
+      "observed_frame_lengths": [
+        78
+      ],
+      "workload_disk_read_bytes": 2883584,
+      "workload_disk_write_bytes": 2883584,
+      "workload_compiled_activations": 0,
+      "reboot_reonlines_all_cores": true,
+      "acpi_s5_events": 1
+    },
+    {
+      "build": "release",
+      "mode": "tier0",
+      "report": "build/c3-os-fixed-release/os-stress-tier0.json",
+      "report_sha256": "0a7a542abb85ba024a1b8c72c437c4bec0fc787e3914f3675dc9b367b3812c3a",
+      "media_sha256": {
+        "javascript_entry": "005a18598b04a77fc10c1050b9fd323e2d9f30df02d969cf3c300550889d04cb",
+        "wasm": "549160bc21296edc03b997d3034d4b9f13b07211bdaf695437284e4ca0699243",
+        "linux4": "a8ea434ab3b177c55f01275dcc1d35f52cfbee9bd44a32e74765c975b58bcc73",
+        "guest": "7e4f90c2793e5a66c8020075a0f74178a15d271ad6b2ef0d11d1987aa890ac61",
+        "disk_sha256": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "disk": "4 MiB zero-filled disposable IDE disk; writes at 1 MiB + (seed & 31) * 8192"
+      },
+      "cases": 20,
+      "snapshot_replays": 2,
+      "wall_ms_including_boot_restart": 66461,
+      "completed_cpu_checks_including_replays": 22528,
+      "network_packets": 704,
+      "network_received": 704,
+      "observed_frame_lengths": [
+        78
+      ],
+      "workload_disk_read_bytes": 2883584,
+      "workload_disk_write_bytes": 2883584,
+      "workload_compiled_activations": 8120148,
+      "reboot_reonlines_all_cores": true,
+      "acpi_s5_events": 1
+    },
+    {
+      "build": "release",
+      "mode": "region",
+      "report": "build/c3-os-fixed-release/os-stress-region.json",
+      "report_sha256": "b6e6e4475f082c08e1ae8031a19a522c3785b5d55b4569356dbbb14b5c085a8a",
+      "media_sha256": {
+        "javascript_entry": "005a18598b04a77fc10c1050b9fd323e2d9f30df02d969cf3c300550889d04cb",
+        "wasm": "549160bc21296edc03b997d3034d4b9f13b07211bdaf695437284e4ca0699243",
+        "linux4": "a8ea434ab3b177c55f01275dcc1d35f52cfbee9bd44a32e74765c975b58bcc73",
+        "guest": "7e4f90c2793e5a66c8020075a0f74178a15d271ad6b2ef0d11d1987aa890ac61",
+        "disk_sha256": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+        "disk": "4 MiB zero-filled disposable IDE disk; writes at 1 MiB + (seed & 31) * 8192"
+      },
+      "cases": 20,
+      "snapshot_replays": 2,
+      "wall_ms_including_boot_restart": 110409,
+      "completed_cpu_checks_including_replays": 22528,
+      "network_packets": 704,
+      "network_received": 704,
+      "observed_frame_lengths": [
+        78
+      ],
+      "workload_disk_read_bytes": 2883584,
+      "workload_disk_write_bytes": 2883584,
+      "workload_compiled_activations": 57859706,
+      "reboot_reonlines_all_cores": true,
+      "acpi_s5_events": 1
+    }
+  ],
+  "negative_control": {
+    "mutation": "network-corruption",
+    "expected": "C3_FAIL network payload",
+    "exit_code": 1,
+    "log": "build/c3-os-fixed-negative.log"
+  }
+}

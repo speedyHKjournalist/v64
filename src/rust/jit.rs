@@ -169,6 +169,7 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
 pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
+    unsafe { crate::x64::cache::x64_native_reset(); }
     crate::ir::runtime::live::invalidate();
     crate::ir::runtime::cache::invalidate();
     crate::ir::runtime::schedule::invalidate();

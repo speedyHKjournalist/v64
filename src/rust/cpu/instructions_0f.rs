@@ -803,6 +803,10 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
         },
         3 => set_cr3(data),
         4 => {
+            if crate::x64::state::efer() & crate::x64::state::EFER_LME != 0 {
+                if let Err(fault) = crate::x64::system::write_cr(4, data as u32 as u64) { crate::x64::system::raise(fault); }
+                return;
+            }
             dbg_log!("cr4 <- {:x}", data);
             if 0 != data as u32
                 & ((1 << 11 | 1 << 12 | 1 << 15 | 1 << 16 | 1 << 19) as u32 | 0xFFC00000)
@@ -815,7 +819,7 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
                 if 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_PAE) {
                     full_clear_tlb();
                 }
-                if data & CR4_PAE != 0
+                if data & CR4_PAE != 0 && *cr & CR0_PG != 0
                     && 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_SMEP)
                 {
                     load_pdpte(*cr.offset(3));
@@ -1221,6 +1225,14 @@ pub unsafe fn wrmsr_checked() -> bool {
         dbg_log!("wrmsr ecx={:x} data={:x}:{:x}", index, high, low);
     }
 
+    if (0xC0000080..=0xC0000084).contains(&(index as u32)) ||
+        crate::x64::state::efer() & crate::x64::state::EFER_LME != 0 {
+        match crate::x64::system::write_msr(index as u32, low as u32 as u64 | (high as u32 as u64) << 32) {
+            Ok(true) => return true,
+            Err(fault) => { crate::x64::system::raise(fault); return false; },
+            Ok(false) => {},
+        }
+    }
     match index {
         IA32_SYSENTER_CS => *sysenter_cs = low & 0xFFFF,
         IA32_SYSENTER_EIP => *sysenter_eip = low,
@@ -1310,6 +1322,14 @@ pub unsafe fn instr_0F32() {
     let mut low = 0;
     let mut high = 0;
 
+    if (0xC0000080..=0xC0000084).contains(&(index as u32)) ||
+        crate::x64::state::efer() & crate::x64::state::EFER_LME != 0 {
+        match crate::x64::system::read_msr(index as u32) {
+            Ok(Some(value)) => { write_reg32(EAX, value as i32); write_reg32(EDX, (value >> 32) as i32); return; },
+            Err(fault) => { crate::x64::system::raise(fault); return; },
+            Ok(None) => {},
+        }
+    }
     match index {
         IA32_SYSENTER_CS => low = *sysenter_cs,
         IA32_SYSENTER_EIP => low = *sysenter_eip,
@@ -1372,6 +1392,10 @@ pub unsafe fn instr_0F33() {
 #[no_mangle]
 pub unsafe fn instr_0F34() {
     // sysenter
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Err(fault) = crate::x64::system::fast_call(0x0F34, false, crate::x64::state::read_rip()) { crate::x64::system::raise(fault); }
+        return;
+    }
     let seg = *sysenter_cs & 0xFFFC;
     if !*protected_mode || seg == 0 {
         trigger_gp(0);
@@ -1402,6 +1426,10 @@ pub unsafe fn instr_0F34() {
 #[no_mangle]
 pub unsafe fn instr_0F35() {
     // sysexit
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Err(fault) = crate::x64::system::fast_call(0x0F35, false, crate::x64::state::read_rip()) { crate::x64::system::raise(fault); }
+        return;
+    }
     let seg = *sysenter_cs & 0xFFFC;
     if !*protected_mode || 0 != *cpl || seg == 0 {
         trigger_gp(0);
@@ -3299,6 +3327,56 @@ pub unsafe fn instr32_0FA1() {
         return;
     };
 }
+// Internal OS qualification switch. The supported public CPU remains the
+// legacy profile until the independent X1–X5/XC acceptance gates pass. A test
+// must opt in on each newly created machine; this is never a user config knob.
+static mut X64_TEST_CAPABILITIES: bool = false;
+
+#[no_mangle]
+pub unsafe fn set_x64_test_capabilities(enabled: bool) { X64_TEST_CAPABILITIES = enabled; }
+
+fn apply_x64_test_capabilities(enabled: bool, leaf: u32, registers: &mut [u32; 4]) {
+    if !enabled {
+        return;
+    }
+    match leaf {
+        1 => registers[2] |= 1 << 13, // CMPXCHG16B
+        0x8000_0000 => registers[0] = 0x8000_0008,
+        0x8000_0001 => {
+            registers[2] |= 1; // LAHF/SAHF in long mode
+            registers[3] |= (1 << 11) | (1 << 20) | (1 << 29); // SYSCALL, NX, LM
+        },
+        0x8000_0008 => registers[0] = 36 | 48 << 8, // physical / linear address bits
+        _ => {},
+    }
+}
+
+#[cfg(test)]
+mod x64_cpuid_tests {
+    use super::apply_x64_test_capabilities;
+
+    #[test]
+    fn internal_profile_is_opt_in_and_has_only_implemented_extensions() {
+        for leaf in [1, 7, 0x8000_0000, 0x8000_0001, 0x8000_0008] {
+            let original = [0x1234, 0x5678, 0xABCD, 0xEF00];
+            let mut result = original;
+            apply_x64_test_capabilities(false, leaf, &mut result);
+            assert_eq!(result, original);
+        }
+        for (leaf, expected) in [
+            (1, [0, 0, 1 << 13, 0]),
+            (7, [0; 4]),
+            (0x8000_0000, [0x8000_0008, 0, 0, 0]),
+            (0x8000_0001, [0, 0, 1, (1 << 11) | (1 << 20) | (1 << 29)]),
+            (0x8000_0008, [36 | 48 << 8, 0, 0, 0]),
+        ] {
+            let mut result = [0; 4];
+            apply_x64_test_capabilities(true, leaf, &mut result);
+            assert_eq!(result, expected);
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe fn instr_0FA2() {
     // cpuid
@@ -3446,6 +3524,7 @@ pub unsafe fn instr_0FA2() {
     }
 
     let mut topology = [eax as u32, ebx as u32, ecx as u32, edx as u32];
+    apply_x64_test_capabilities(X64_TEST_CAPABILITIES, level, &mut topology);
     crate::cpu::topology::apply(level, read_reg32(ECX) as u32, crate::cpu::apic::core_count() as u32,
         crate::cpu::apic::current_core() as u32, &mut topology);
     let [eax, ebx, ecx, edx] = topology.map(|x| x as i32);
@@ -4025,6 +4104,11 @@ pub unsafe fn instr16_0FC7_1_mem(addr: i32) {
     }
     else {
         *flags &= !FLAG_ZERO;
+        // CMPXCHG8B performs a write cycle even when comparison fails. Besides
+        // RAM permissions, this matters for MMIO devices observing writes and
+        // for the shared code-page invalidation barrier. Both pages were
+        // checked before the first read, so no partial operand can commit.
+        safe_write64(addr, m64).unwrap();
         write_reg32(EAX, m64_low);
         write_reg32(EDX, m64_high);
     }

@@ -1,0 +1,212 @@
+{
+  "schema": 1,
+  "started_utc": "2026-09-27T11:38:37.851Z",
+  "host": {
+    "platform": "darwin",
+    "release": "27.0.0",
+    "architecture": "arm64",
+    "model": "Apple M1 Pro",
+    "logical_cpus": 10,
+    "memory_bytes": 17179869184,
+    "node": "v25.6.0",
+    "v8": "14.1.146.11-node.19",
+    "load_average_start": [
+      6.7275390625,
+      6.60302734375,
+      7.20263671875
+    ],
+    "os_version": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428",
+    "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+    "clang": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "java": "openjdk 25.0.2 2026-01-20\nOpenJDK Runtime Environment Homebrew (build 25.0.2)\nOpenJDK 64-Bit Server VM Homebrew (build 25.0.2, mixed mode, sharing)",
+    "load_average_end": [
+      8.60302734375,
+      7.0849609375,
+      7.33642578125
+    ]
+  },
+  "method": {
+    "build_command": "make build/v86.wasm build/libv86.mjs (independent worktrees/target directories, WASM_OPT=false)",
+    "clock": "normal (default)",
+    "cpu_cores": 1,
+    "acpi": true,
+    "memory_bytes": 134217728,
+    "jit": "default",
+    "sample_count": 5,
+    "warmups_per_revision": 1,
+    "order": "alternating AB/BA pairs, fresh Node process and VM each sample",
+    "start": "performance.now immediately before emulator.run after emulator-loaded",
+    "end": "serial0-output-byte callback completing Linux shell prompt '~% '",
+    "boot_source": "linux4.iso default bootloader/kernel command line, through SeaBIOS POST",
+    "excludes": "build, module import, WebAssembly instantiation and initial BIOS/image loading before emulator-loaded; guest disk I/O during boot remains included",
+    "workload": {
+      "bytes": 16777216,
+      "md5": "2c7ab85a893283e98c931e9511add182",
+      "command": "dd if=/dev/zero bs=1024 count=16384 2>/dev/null | md5sum"
+    },
+    "boot_median_max_ratio": 1.1
+  },
+  "artifacts": {
+    "baseline": {
+      "root": "/tmp/v86-c0-before",
+      "commit": "bb8979f384b2fdeb5a653a238f61932579fa9aa7",
+      "working_tree": "",
+      "wasm_sha256": "dd8f903b1602e96076253145ca146f2c5a9080c65074537442804a0dd046f6c8",
+      "js_sha256": "7671e29abe4714a9b4c301bdbc8cf86932c2720dab0304634c6db52f0ef147ed",
+      "softfloat_sha256": "eb584841ff0c77c586cca3b43a94e6c2986a2c604fd3d1fae95dc91bbbf3243c",
+      "zstd_sha256": "c9bfed38538c8bc7c088c9c6496a7e0ea60ca7f0a33273b3f1339758e06ab852",
+      "closure_compiler_sha256": "64f161c65a3dba42c9a4f5a79db335ac0e757fcba486cd7928205ac4c258ef08"
+    },
+    "current": {
+      "root": "/tmp/v86-c0-final-20260927",
+      "commit": null,
+      "working_tree": null,
+      "wasm_sha256": "2302582144c278048cea19d6741874fbadc5a5444ebf545bcc27bfc578bca741",
+      "js_sha256": "9cc52a49b1d007e8e69c3e0653778ccfa6dab81146c611cd089432d138674562",
+      "softfloat_sha256": "2f3624511602c76c23dc4c46daa1ee1566a3636728366683a537e29316ee8648",
+      "zstd_sha256": "3bf66d0055272198f8ad91a7cf9620c3ea4faf39ef0864b27eb14543f9bc6ef7",
+      "closure_compiler_sha256": "64f161c65a3dba42c9a4f5a79db335ac0e757fcba486cd7928205ac4c258ef08"
+    }
+  },
+  "inputs": {
+    "bios/seabios.bin": {
+      "bytes": 131072,
+      "sha256": "73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98"
+    },
+    "bios/vgabios.bin": {
+      "bytes": 36352,
+      "sha256": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880"
+    },
+    "images/linux4.iso": {
+      "bytes": 7731200,
+      "sha256": "a8ea434ab3b177c55f01275dcc1d35f52cfbee9bd44a32e74765c975b58bcc73"
+    }
+  },
+  "runner_sha256": "a1aae4036634d7e442ec97903dc9e1de6b2d45a9089d94e5092f8021b732ce45",
+  "warmups": [
+    {
+      "label": "baseline",
+      "index": 0,
+      "transcript": "normal-up-final-2026-09-27-serial/warmup-0-baseline.log",
+      "boot_wall_ms": 3660.7571660000003,
+      "workload_wall_ms": 797.1935420000004,
+      "instruction_counter": 809778593,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "current",
+      "index": 0,
+      "transcript": "normal-up-final-2026-09-27-serial/warmup-0-current.log",
+      "boot_wall_ms": 3922.3546250000004,
+      "workload_wall_ms": 835.8615829999999,
+      "instruction_counter": 801410923,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    }
+  ],
+  "samples": [
+    {
+      "label": "baseline",
+      "index": 1,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-1-baseline.log",
+      "boot_wall_ms": 3758.525584,
+      "workload_wall_ms": 962.7851659999997,
+      "instruction_counter": 811384638,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "current",
+      "index": 1,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-1-current.log",
+      "boot_wall_ms": 3959.216709,
+      "workload_wall_ms": 723.1091670000001,
+      "instruction_counter": 799024931,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "current",
+      "index": 2,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-2-current.log",
+      "boot_wall_ms": 4005.2605000000003,
+      "workload_wall_ms": 727.5057919999999,
+      "instruction_counter": 800704079,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "baseline",
+      "index": 2,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-2-baseline.log",
+      "boot_wall_ms": 3545.913083,
+      "workload_wall_ms": 807.7713330000001,
+      "instruction_counter": 810625921,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "baseline",
+      "index": 3,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-3-baseline.log",
+      "boot_wall_ms": 3642.225375,
+      "workload_wall_ms": 966.3519170000004,
+      "instruction_counter": 817791299,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "current",
+      "index": 3,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-3-current.log",
+      "boot_wall_ms": 3953.140542,
+      "workload_wall_ms": 757.6292920000001,
+      "instruction_counter": 800295645,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "current",
+      "index": 4,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-4-current.log",
+      "boot_wall_ms": 3977.37025,
+      "workload_wall_ms": 736.2565420000005,
+      "instruction_counter": 798034110,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "baseline",
+      "index": 4,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-4-baseline.log",
+      "boot_wall_ms": 3631.50725,
+      "workload_wall_ms": 923.3869159999999,
+      "instruction_counter": 815694289,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "baseline",
+      "index": 5,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-5-baseline.log",
+      "boot_wall_ms": 3686.140209,
+      "workload_wall_ms": 821.7610830000003,
+      "instruction_counter": 805514906,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    },
+    {
+      "label": "current",
+      "index": 5,
+      "transcript": "normal-up-final-2026-09-27-serial/sample-5-current.log",
+      "boot_wall_ms": 3956.064958,
+      "workload_wall_ms": 837.7516249999999,
+      "instruction_counter": 805953129,
+      "serial_sha256": "9703f3a9aea22b5e64ccb80fd102c87dda3c78475776a03a181b2d8760d175d8"
+    }
+  ],
+  "summary": {
+    "boot_wall_ms": {
+      "baseline_median": 3642.225375,
+      "current_median": 3959.216709,
+      "ratio": 1.0870323226497207
+    },
+    "workload_wall_ms": {
+      "baseline_median": 923.3869159999999,
+      "current_median": 736.2565420000005,
+      "ratio": 0.7973434854257785
+    }
+  },
+  "passed": true,
+  "finished_utc": "2026-09-27T11:39:36.252Z"
+}

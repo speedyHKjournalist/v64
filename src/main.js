@@ -1,5 +1,5 @@
 import { CPU } from "./cpu.js";
-import { save_state, restore_state } from "./state.js";
+import { save_state, restore_state, save_state_stream, restore_state_stream } from "./state.js";
 export { V86 } from "./browser/starter.js";
 
 /**
@@ -30,6 +30,7 @@ export function v86(bus, wasm)
 
 v86.prototype.run = function()
 {
+    if(this.state_busy) { this.state_busy.resume = true; return; }
     this.stopping = false;
     this.cpu.clock.resume();
 
@@ -89,6 +90,7 @@ v86.prototype.yield_callback = function(tick)
 
 v86.prototype.stop = function()
 {
+    if(this.state_busy) { this.state_busy.resume = false; return; }
     if(this.running)
     {
         this.stopping = true;
@@ -103,6 +105,7 @@ v86.prototype.destroy = function()
 
 v86.prototype.restart = function()
 {
+    if(this.state_busy) throw new Error("Snapshot transaction is in progress");
     this.cpu.reboot_internal();
 };
 
@@ -244,8 +247,63 @@ else
     v86.prototype.unregister_yield = function() {};
 }
 
+// Async snapshots keep the scheduler stopped for the entire writer/read cycle,
+// including backpressure. External input cannot start new DMA while draining.
+v86.prototype.state_transaction = function(operation, resume_on_error)
+{
+    const previous = this.state_operation || Promise.resolve();
+    const next = previous.then(async () => {
+        const transaction = { resume: this.running && !this.stopping };
+        this.state_busy = transaction;
+        ++this.tick_counter;
+        this.running = this.stopping = false;
+        this.idle = true;
+        this.cpu.clock.pause();
+        this.bus.send("emulator-stopped");
+        const input = this.bus.pair, pending = [];
+        const send = input && input.send;
+        if(input) input.send = (...args) => { pending.push(args); };
+        let success = false;
+        try
+        {
+            const deadline = Date.now() + 30000;
+            while(this.cpu["snapshot_io_pending"])
+            {
+                if(Date.now() >= deadline) throw new Error("Snapshot timed out waiting for device I/O");
+                await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            const result = await operation();
+            success = true;
+            return result;
+        }
+        finally
+        {
+            this.state_busy = null;
+            if(input)
+            {
+                input.send = send;
+                for(const args of pending) send.apply(input, args);
+            }
+            if(transaction.resume && (success || resume_on_error)) this.run();
+        }
+    });
+    this.state_operation = next.then(() => {}, () => {});
+    return next;
+};
+
+v86.prototype.save_state_stream = function(write)
+{
+    return this.state_transaction(() => save_state_stream(this.cpu, write), true);
+};
+
+v86.prototype.restore_state_stream = function(source)
+{
+    return this.state_transaction(() => restore_state_stream(this.cpu, source), false);
+};
+
 v86.prototype.save_state = function()
 {
+    if(this.state_busy) return this.state_transaction(() => save_state(this.cpu), true);
     if(this.cpu.in_cpu) return Promise.resolve().then(() => this.save_state());
     const paused = this.cpu.clock.paused;
     this.cpu.clock.pause();
@@ -255,6 +313,7 @@ v86.prototype.save_state = function()
 
 v86.prototype.restore_state = function(state)
 {
+    if(this.state_busy) return this.state_transaction(() => restore_state(this.cpu, state), false);
     if(this.cpu.in_cpu) return Promise.resolve().then(() => this.restore_state(state));
     const paused = this.cpu.clock.paused;
     this.cpu.clock.pause();

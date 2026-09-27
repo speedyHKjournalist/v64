@@ -12,7 +12,7 @@ pub fn supports(i: &DecodedInstruction) -> bool {
     )
 }
 /// LOCK forms whose complete memory RMW path has a checked affine pair. Other
-/// prefixes/forms remain compile stops, including the pinned interpreter's TODOs.
+/// valid forms remain compile stops if this backend cannot lower their RMW.
 pub fn lock_supported(i: &DecodedInstruction) -> bool {
     if i.ea.is_none() {
         return false;

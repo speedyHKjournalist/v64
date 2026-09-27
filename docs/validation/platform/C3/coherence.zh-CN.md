@@ -51,8 +51,8 @@ SMP_MUTATION=no-shootdown SMP_SEEDS=1 SMP_QUANTUMS=257 SMP_MODES=interpreter nod
 
 ## 未由本门槛证明的内容
 
-- 跨页第二页缺页、写保护、MMIO 副作用和异常部分提交下的 LOCK/CMPXCHG8B；本夹具仅覆盖合法 RAM。
-- CMPXCHG16B、x86-64、真实宿主并行和内存序 litmus 测试。
+- 本夹具仅覆盖合法 RAM；跨页第二页缺页、写保护、MMIO 副作用、非法 LOCK 以及无锁队列由[原子与内存顺序门槛](atomic-memory-order.zh-CN.md)独立覆盖。
+- CMPXCHG16B、x86-64、真实宿主并行及其 store-buffering 等内存序 litmus 测试。
 - 快照发生在未完成异步发布时的取消/epoch 验证、旧快照导入、全部设备状态恢复；由另一个 C3 状态门槛负责。
 - 真实 DMA 设备队列、磁盘/网络长期压力、恶意输入、完整 load 优化差分矩阵。
 - S3/S4/热插拔等未公开的平台能力。

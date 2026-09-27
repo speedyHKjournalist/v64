@@ -77,6 +77,9 @@ export function V86(options)
         "microtick": () => cpu ? cpu.clock.now() : v86.microtick(),
         "get_rand_int": function() { return get_rand_int(); },
         "stop_idling": function() { return cpu.stop_idling(); },
+        "x64_native_publish": (token, pointer, length) => cpu.publish_wide_native(token, pointer, length),
+        "x64_native_execute": (token, budget) => cpu.wide_native_functions.get(token)?.(budget) || 0,
+        "x64_native_discard": () => cpu.wide_native_functions.clear(),
 
         "io_port_read8": function(addr) { return cpu.io.port_read8(addr); },
         "io_port_read16": function(addr) { return cpu.io.port_read16(addr); },
@@ -794,6 +797,7 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                         "mmap_read8", "mmap_read32",
                         "mmap_write8", "mmap_write16", "mmap_write32", "mmap_write64", "mmap_write128",
                         "ir_codegen_finalize", "jit_clear_func",
+                        "x64_native_publish", "x64_native_execute", "x64_native_discard",
                     ].map(f => [f, () => console.error("zstd worker unexpectedly called " + f)]));
 
                     env["__indirect_function_table"] = new WebAssembly.Table({ element: "anyfunc", initial: 1024 });
@@ -1064,6 +1068,57 @@ V86.prototype.save_state = async function()
             if(graphics["releaseCheckpoint"]) graphics["releaseCheckpoint"]();
         }
     }, true);
+};
+
+/**
+ * Save a V7 snapshot with bounded RAM buffers and writer backpressure.
+ * @param {function(!Uint8Array): (void|!Promise<void>)} write
+ * @return {!Promise<void>}
+ */
+V86.prototype.save_state_stream = async function(write)
+{
+    if(typeof write !== "function") throw new TypeError("Snapshot writer must be a function");
+    if(this.worker_controller) return this.worker_controller.state_stream("save", write);
+    if(!this["graphics_adapter"]) return this.v86.save_state_stream(write);
+    return this.with_graphics_state(async () => {
+        const graphics = this["graphics_adapter"];
+        try
+        {
+            await graphics["prepareSaveState"]();
+            await this.v86.save_state_stream(write);
+        }
+        finally
+        {
+            if(graphics["releaseCheckpoint"]) graphics["releaseCheckpoint"]();
+        }
+    }, true);
+};
+
+/**
+ * Restore a V7 stream from a Blob or a random-access byte source.
+ * A read failure during restoration leaves the machine stopped.
+ * @param {*} source
+ * @return {!Promise<void>}
+ */
+V86.prototype.restore_state_stream = async function(source)
+{
+    if(this.worker_controller) return this.worker_controller.state_stream("restore", source);
+    const graphics = this["graphics_adapter"];
+    if(!graphics) return this.v86.restore_state_stream(source);
+    return this.with_graphics_state(async () => {
+        graphics["beginStateRestore"]();
+        try
+        {
+            await graphics["waitForIdle"](false, true);
+            await this.v86.restore_state_stream(source);
+            await graphics["finishStateRestore"]();
+        }
+        catch(error)
+        {
+            graphics["cancelStateRestore"]();
+            throw error;
+        }
+    }, false);
 };
 
 // Serialize saves/restores and pause the CPU while graphics jobs can still
@@ -1731,7 +1786,7 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
 V86.prototype.read_memory = function(offset, length)
 {
     if(this.worker_controller) return this.worker_controller.rpc("read_memory", [offset, length]);
-    return this.v86.cpu.read_blob(offset, length);
+    return this.v86.cpu.read_blob_physical(offset, length);
 };
 
 /**
@@ -1743,7 +1798,22 @@ V86.prototype.read_memory = function(offset, length)
 V86.prototype.write_memory = function(blob, offset)
 {
     if(this.worker_controller) return this.worker_controller.rpc("write_memory", [blob, offset]);
-    this.v86.cpu.write_blob(blob, offset);
+    this.v86.cpu.write_blob_physical(blob, offset);
+};
+
+/** Read a physical range with bounded allocations, including addresses above 4 GiB.
+ * @param {number} offset
+ * @param {number} length
+ * @param {number=} chunk_size
+ */
+V86.prototype.read_memory_chunks = async function*(offset, length, chunk_size = 1024 * 1024)
+{
+    if(!Number.isSafeInteger(offset) || offset < 0 || offset >= 0x1000000000 ||
+        !Number.isSafeInteger(length) || length < 0 || offset + length > 0x1000000000 ||
+        !Number.isInteger(chunk_size) || chunk_size < 1 || chunk_size > 16 * 1024 * 1024)
+        throw new RangeError("Invalid physical range or chunk size");
+    for(let done = 0; done < length; done += chunk_size)
+        yield await this.read_memory(offset + done, Math.min(chunk_size, length - done));
 };
 
 /*
@@ -1832,6 +1902,9 @@ FileNotFoundError.prototype = Error.prototype;
 V86.prototype["add_listener"] = V86.prototype.add_listener;
 V86.prototype["remove_listener"] = V86.prototype.remove_listener;
 V86.prototype["write_memory"] = V86.prototype.write_memory;
+V86.prototype["read_memory_chunks"] = V86.prototype.read_memory_chunks;
+V86.prototype["save_state_stream"] = V86.prototype.save_state_stream;
+V86.prototype["restore_state_stream"] = V86.prototype.restore_state_stream;
 /* eslint-enable no-self-assign */
 
 if(typeof module !== "undefined" && typeof module.exports !== "undefined")

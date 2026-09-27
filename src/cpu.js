@@ -72,6 +72,7 @@ export function CPU(bus, wm, stop_idling)
     this.wm = wm;
     this.clock = new MachineClock({ now: v86.microtick });
     this.execution_epoch = 0;
+    this.wide_native_functions = new Map();
     this.in_cpu = false;
     this.reset_pending = false;
     this.scheduler_quantum = 4096;
@@ -357,9 +358,95 @@ CPU.prototype.read_blob = function(offset, length)
     return this.mem8.subarray(offset, offset + length);
 };
 
+/** Validate a complete 36-bit DMA range without reading any device. */
+CPU.prototype.validate_physical_range = function(address, length)
+{
+    if(!Number.isSafeInteger(address) || !Number.isSafeInteger(length) || address < 0 || address >= 0x1000000000 || length < 0 ||
+        address + length > 0x1000000000) throw new RangeError("Physical address exceeds the 36-bit bus");
+    const resolve = this.wm.exports["x64_phys_resolve"];
+    for(let at = address; at < address + length;)
+    {
+        const end = Math.min(address + length, Math.floor(at / 4096 + 1) * 4096);
+        if(resolve(at >>> 0, Math.floor(at / 0x100000000)) < 0 ||
+            resolve((end - 1) >>> 0, Math.floor((end - 1) / 0x100000000)) < 0)
+            throw new RangeError("Physical range is not mapped");
+        at = end;
+    }
+};
+
+/** @param {number} address @param {number} width @return {number} */
+CPU.prototype.read_physical_scalar = function(address, width)
+{
+    this.validate_physical_range(address, width / 8);
+    const value = this.wm.exports["x64_phys_read" + width](address >>> 0, Math.floor(address / 0x100000000));
+    if(value < 0) throw new RangeError("Physical range is not mapped");
+    return value;
+};
+CPU.prototype.read8_physical = function(address) { return this.read_physical_scalar(address, 8); };
+CPU.prototype.read16_physical = function(address) { return this.read_physical_scalar(address, 16); };
+CPU.prototype.read32_physical = function(address) { return this.read_physical_scalar(address, 32); };
+CPU.prototype.write_physical_scalar = function(address, value, width)
+{
+    this.validate_physical_range(address, width / 8);
+    if(!this.wm.exports["x64_phys_write" + width](address >>> 0, Math.floor(address / 0x100000000), value >>> 0))
+        throw new RangeError("Physical range is not mapped");
+};
+CPU.prototype.write8_physical = function(address, value) { this.write_physical_scalar(address, value, 8); };
+CPU.prototype.write16_physical = function(address, value) { this.write_physical_scalar(address, value, 16); };
+CPU.prototype.write32_physical = function(address, value) { this.write_physical_scalar(address, value, 32); };
+
+/** Copy one requested chunk; never allocate based on a physical address. */
+CPU.prototype.read_blob_physical = function(address, length)
+{
+    this.validate_physical_range(address, length);
+    const result = new Uint8Array(length);
+    for(let done = 0; done < length;)
+    {
+        const at = address + done;
+        const count = Math.min(length - done, 4096 - at % 4096);
+        const backing = this.wm.exports["x64_phys_resolve"](at >>> 0, Math.floor(at / 0x100000000));
+        if(this.wm.exports["x64_phys_kind"](at >>> 0, Math.floor(at / 0x100000000)) === 1)
+            result.set(this.mem8.subarray(backing, backing + count), done);
+        else for(let i = 0; i < count; i++) result[done + i] = this.read8_physical(at + i);
+        done += count;
+    }
+    return result;
+};
+CPU.prototype.write_blob_physical = function(blob, address)
+{
+    this.validate_physical_range(address, blob.length);
+    for(let done = 0; done < blob.length;)
+    {
+        const at = address + done;
+        const count = Math.min(blob.length - done, 4096 - at % 4096);
+        const backing = this.wm.exports["x64_phys_resolve"](at >>> 0, Math.floor(at / 0x100000000));
+        if(this.wm.exports["x64_phys_kind"](at >>> 0, Math.floor(at / 0x100000000)) === 1)
+        {
+            this.jit_dirty_cache(backing, backing + count);
+            this.mem8.set(blob.slice(done, done + count), backing);
+        }
+        else for(let i = 0; i < count; i++) this.write8_physical(at + i, blob[done + i]);
+        done += count;
+    }
+};
+
 CPU.prototype.clear_stats = function()
 {
     this.wm.exports["profiler_init"]();
+};
+
+CPU.prototype.publish_wide_native = function(token, pointer, length)
+{
+    const epoch = this.execution_epoch;
+    const bytes = new Uint8Array(this.wasm_memory.buffer, pointer, length).slice();
+    const exports = this.wm.exports;
+    WebAssembly.instantiate(bytes, { "e": { "m": this.wasm_memory,
+        "x64_native_guard": exports["x64_native_guard"] } }).then(result => {
+        if(epoch === this.execution_epoch && exports["x64_native_ready"](token, true))
+            this.wide_native_functions.set(token, result.instance.exports["f"]);
+    }, () => {
+        if(epoch === this.execution_epoch) exports["x64_native_ready"](token, false);
+    });
 };
 
 CPU.prototype.create_jit_imports = function()
@@ -490,7 +577,7 @@ CPU.prototype.jit_clear_func = function(index)
     this.wm.wasm_table.set(index + WASM_TABLE_OFFSET, null);
 };
 
-CPU.prototype.get_state = function()
+CPU.prototype.get_state = function(skip_memory = false)
 {
     // Capture one machine time before collecting devices or per-core TSC offsets.
     const clock_state = this.clock.get_state();
@@ -588,9 +675,13 @@ CPU.prototype.get_state = function()
     state[74] = this.fpu_dp_selector[0];
     state[75] = this.fpu_opcode[0];
 
-    const { packed_memory, bitmap } = this.pack_memory();
-    state[77] = packed_memory;
-    state[78] = new Uint8Array(bitmap.get_buffer());
+    if(skip_memory) { state[77] = null; state[78] = null; }
+    else
+    {
+        const { packed_memory, bitmap } = this.pack_memory();
+        state[77] = packed_memory;
+        state[78] = new Uint8Array(bitmap.get_buffer());
+    }
 
     state[79] = this.devices.uart1;
     state[80] = this.devices.uart2;
@@ -615,8 +706,53 @@ CPU.prototype.get_state = function()
 
     state[95] = clock_state;
     state[96] = this.get_machine_core_state();
+    state[97] = [1, this.get_physical_windows()];
     return state;
 };
+
+/** A temporary host buffer never aliases guest RAM or survives its callback. */
+CPU.prototype.with_wide_state_buffer = function(words, operation)
+{
+    const ex = this.wm.exports;
+    const pointer = ex["v86_malloc"](Math.max(4, words.byteLength));
+    try
+    {
+        new Uint32Array(this.wasm_memory.buffer, pointer, words.length).set(words);
+        return operation(pointer, words.length);
+    }
+    finally { ex["v86_free"](pointer); }
+};
+
+CPU.prototype.get_physical_windows = function()
+{
+    const words = new Uint32Array(80);
+    for(let slot = 0; slot < 16; slot++) for(let field = 0; field < 5; field++)
+        words[slot * 5 + field] = this.wm.exports["x64_phys_get_window"](slot, field);
+    return words;
+};
+
+CPU.prototype.get_wide_tlb = function(id)
+{
+    const ex = this.wm.exports;
+    const words = new Uint32Array(ex["x64_tlb_snapshot_dwords"](id));
+    this.with_wide_state_buffer(words, (pointer, count) => {
+        if(ex["x64_tlb_snapshot_write"](id, pointer, count) !== count) throw new Error("Cannot capture wide TLB");
+        words.set(new Uint32Array(this.wasm_memory.buffer, pointer, count));
+    });
+    return words;
+};
+
+CPU.prototype.validate_physical_state = function(state)
+{
+    if(state === undefined) return;
+    if(!Array.isArray(state) || state[0] !== 1 || !(state[1] instanceof Uint32Array) || state[1].length !== 80 ||
+        !this.with_wide_state_buffer(state[1], (pointer, count) => this.wm.exports["x64_phys_validate_windows"](pointer, count)))
+        throw new Error("Invalid physical memory map in snapshot");
+};
+
+// Version 1 predates the x64 extension banks. Keep exact byte ranges for import.
+const CORE_STATE_RANGES_V1 = [[64, 108], [112, 552], [556, 620], [628, 652], [668, 716],
+    [724, 812], [816, 960], [968, 1132], [1152, 1280]];
 
 /** All cores at a scheduler boundary; versioned independently of legacy single-core slots. */
 CPU.prototype.get_machine_core_state = function()
@@ -631,10 +767,11 @@ CPU.prototype.get_machine_core_state = function()
             new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id), ex["apic_aux_size"]()).slice(),
             this.apic_peek_core_events(id), !!this.apic_core_nmi_pending(id),
             [ex["context_tsc_get"](id, false) >>> 0, ex["context_tsc_get"](id, true) >>> 0],
-            tlb, core.slices, core.steps];
+            tlb, core.slices, core.steps,
+            new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id), ex["core_statistics_size"]()).slice(), ex["exception_shutdown"](id), this.get_wide_tlb(id)];
     });
-    return [1, this.cores.length, this.active_core, this.scheduler_quantum,
-        this.scheduler_seed, this.scheduler_round, cores];
+    return [2, this.cores.length, this.active_core, this.scheduler_quantum,
+        this.scheduler_seed, this.scheduler_round, cores, CORE_STATE_RANGES.map(range => range.slice())];
 };
 
 CPU.prototype.validate_machine_core_state = function(state)
@@ -645,21 +782,27 @@ CPU.prototype.validate_machine_core_state = function(state)
         return;
     }
     const fail = () => { throw new Error("Invalid multicore snapshot or topology mismatch"); };
-    if(state[0] !== 1 || state[1] !== this.cores.length || !Array.isArray(state[6]) || state[6].length !== state[1] ||
+    const ranges = state[0] === 1 ? CORE_STATE_RANGES_V1 : CORE_STATE_RANGES;
+    if(state[0] !== 1 && state[0] !== 2 || state[1] !== this.cores.length || !Array.isArray(state[6]) || state[6].length !== state[1] ||
         !Number.isInteger(state[2]) || state[2] < 0 || state[2] >= state[1] ||
         !Number.isInteger(state[3]) || state[3] < 1 || state[3] > 100000 ||
         !Number.isSafeInteger(state[4]) || state[4] < 0 || state[4] > 0xFFFFFFFF ||
         !Number.isSafeInteger(state[5]) || state[5] < 0) fail();
+    if(state[0] === 2 && JSON.stringify(state[7]) !== JSON.stringify(CORE_STATE_RANGES)) fail();
     for(const core of state[6])
     {
         if(!Array.isArray(core) || typeof core[0] !== "boolean" || !Array.isArray(core[1]) ||
-            core[1].length !== CORE_STATE_RANGES.length || !(core[2] instanceof Uint8Array) || core[2].length !== 184 ||
+            core[1].length !== ranges.length || !(core[2] instanceof Uint8Array) || core[2].length !== 184 ||
             !(core[3] instanceof Uint8Array) || core[3].length !== this.wm.exports["apic_aux_size"]() ||
             !Array.isArray(core[6]) || core[6].length !== 2 ||
+            core[11] !== undefined && (!Number.isInteger(core[11]) || core[11] < 0 || core[11] > 2) ||
+            core[10] !== undefined && (!(core[10] instanceof Uint8Array) || core[10].length !== this.wm.exports["core_statistics_size"]()) ||
             !(core[7] instanceof Uint32Array) || core[7].length % 2 || core[7].length > 20000) fail();
-        CORE_STATE_RANGES.forEach(([start, end], i) => {
+        ranges.forEach(([start, end], i) => {
             if(!(core[1][i] instanceof Uint8Array) || core[1][i].length !== end - start) fail();
         });
+        if(core[12] !== undefined && (!(core[12] instanceof Uint32Array) || core[12].length > 256 * 18 ||
+            !this.with_wide_state_buffer(core[12], (pointer, count) => this.wm.exports["x64_tlb_snapshot_validate"](pointer, count)))) fail();
         const pages = new Set();
         for(let i = 0; i < core[7].length; i += 2)
         {
@@ -673,13 +816,32 @@ CPU.prototype.set_machine_core_state = function(state)
 {
     const ex = this.wm.exports;
     ex["context_reset_all"]();
+    ex["core_statistics_reset"]();
     state[6].forEach((saved, id) => {
-        this.cores[id] = { running: saved[0], saved: saved[1].map(bytes => bytes.slice()), slices: saved[8], steps: saved[9] };
+        const ranges = state[0] === 1 ? CORE_STATE_RANGES_V1 : CORE_STATE_RANGES;
+        const fixed = CORE_STATE_RANGES.map(([start, end]) => {
+            const index = ranges.findIndex(range => range[0] === start && range[1] === end);
+            if(index !== -1) return saved[1][index].slice();
+            const bytes = new Uint8Array(end - start);
+            if(start <= STATE_OFFSETS.x64_pat && end >= STATE_OFFSETS.x64_pat + 8)
+            {
+                const view = new DataView(bytes.buffer);
+                view.setUint32(STATE_OFFSETS.x64_pat - start, 0x00070406, true);
+                view.setUint32(STATE_OFFSETS.x64_pat - start + 4, 0x00070406, true);
+            }
+            return bytes;
+        });
+        this.cores[id] = { running: saved[0], saved: fixed, slices: saved[8], steps: saved[9] };
         new Uint8Array(this.wasm_memory.buffer, this.apic_addr(id), 184).set(saved[2]);
         new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id), ex["apic_aux_size"]()).set(saved[3]);
         this.apic_restore_core_events(id, saved[4], saved[5]);
+        ex["exception_restore"](id, saved[11] || 0);
         ex["context_tsc_set"](id, saved[6][0], saved[6][1]);
+        if(saved[10]) new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id), ex["core_statistics_size"]()).set(saved[10]);
         for(let i = 0; i < saved[7].length; i += 2) ex["context_tlb_push"](id, saved[7][i], saved[7][i + 1]);
+        if(saved[12]) this.with_wide_state_buffer(saved[12], (pointer, count) => {
+            if(!ex["x64_tlb_snapshot_restore"](id, pointer, count)) throw new Error("Cannot restore wide TLB");
+        });
     });
     this.active_core = state[2];
     this.apic_set_current_core(this.active_core);
@@ -743,9 +905,22 @@ CPU.prototype.get_state_ioapic = function()
     return new Uint8Array(this.wasm_memory.buffer, this.get_ioapic_addr(), IOAPIC_STRUCT_SIZE);
 };
 
-CPU.prototype.set_state = function(state)
+CPU.prototype.validate_state = function(state)
 {
     this.validate_machine_core_state(state[96]);
+    this.validate_physical_state(state[97]);
+    // A remapped snapshot must retain the RAM/MMIO split used when validating
+    // its windows. Reject this before changing clocks, RAM, or CPU state.
+    if(state[97] && state[0] !== this.memory_size[0] &&
+        state[97][1].some((word, index) => index % 5 === 4 && word !== 0))
+        throw new Error("Snapshot RAM size differs from its physical memory map");
+    if(!Number.isSafeInteger(state[0]) || state[0] <= 0 || state[0] > this.mem8.length || state[0] % 4096)
+        throw new Error("Invalid snapshot RAM size");
+};
+
+CPU.prototype.set_state = function(state, skip_memory = false)
+{
+    this.validate_state(state);
     if(state[95]) this.clock.set_state(state[95]);
     this.wm.exports["take_clock_progress"]();
     this.wm.exports["set_deterministic_execution"](this.clock.mode === "deterministic");
@@ -887,15 +1062,20 @@ CPU.prototype.set_state = function(state)
     if(state[87] !== undefined) this.fpu_status_word = state[87];
     if(state[88] !== undefined) this.mxcsr = state[88];
 
-    const bitmap = new Bitmap(state[78].buffer);
-    const packed_memory = state[77];
-    this.unpack_memory(bitmap, packed_memory);
+    if(!skip_memory)
+    {
+        const bitmap = new Bitmap(state[78].buffer);
+        this.unpack_memory(bitmap, state[77]);
+    }
 
     this.update_state_flags();
 
     this.full_clear_tlb();
 
     this.jit_clear_cache();
+    this.with_wide_state_buffer(state[97] ? state[97][1] : new Uint32Array(80), (pointer, count) => {
+        if(!this.wm.exports["x64_phys_restore_windows"](pointer, count)) throw new Error("Cannot restore physical memory map");
+    });
 
     // Older single-core snapshots predate NMI state and APIC enable storage.
     this.apic_enabled[0] = state[94] ? state[94][0] : this.acpi_enabled[0];
@@ -904,6 +1084,16 @@ CPU.prototype.set_state = function(state)
     this.wm.exports["apic_restore_legacy_aux"](0, !!this.apic_enabled[0]);
     new Uint8Array(this.wasm_memory.buffer)[STATE_OFFSETS.interrupt_shadow] = 0;
     if(state[96]) this.set_machine_core_state(state[96]);
+    else
+    {
+        this.wm.exports["core_statistics_reset"]();
+        const bytes = new Uint8Array(this.wasm_memory.buffer);
+        for(const [start, end] of CORE_STATE_RANGES) if(start >= 1360) bytes.fill(0, start, end);
+        new Uint32Array(this.wasm_memory.buffer, STATE_OFFSETS.x64_pat, 2).fill(0x00070406);
+        this.with_wide_state_buffer(new Uint32Array(0), (pointer, count) => this.wm.exports["x64_tlb_snapshot_restore"](0, pointer, count));
+        this.wm.exports["exception_restore"](0, 0);
+        this.cores[0].slices = this.cores[0].steps = 0;
+    }
     if(!state[95])
     {
         // Legacy snapshots stored host-absolute deadlines without a shared
@@ -978,6 +1168,7 @@ CPU.prototype.setup_cores = function()
     const count = this.platform.cores;
     this.apic_set_core_count(count);
     this.wm.exports["context_reset_all"]();
+    this.wm.exports["core_statistics_reset"]();
     this.core_reset_state = this.save_core_state();
     this.active_core = 0;
     // the BSP runs from reset; the APs wait for INIT and a start-up IPI
@@ -991,6 +1182,7 @@ CPU.prototype.reset_cores = function()
     this.switch_core(0);
     this.apic_set_core_count(this.cores.length);
     this.wm.exports["context_reset_all"]();
+    this.wm.exports["core_statistics_reset"]();
     this.execution_epoch++;
     this.scheduler_round = 0;
     this.cores.forEach((core, i) => {
@@ -1031,6 +1223,7 @@ CPU.prototype.take_core_events = function(core)
 
     if(events & CORE_EVENT_INIT)
     {
+        if(this.wm.exports["exception_shutdown"](core) === 2) return;
         dbg_log("core " + core + ": INIT", LOG_CPU);
         this.apic_init_core(core);
         this.wm.exports["context_reset"](core);
@@ -1085,6 +1278,8 @@ CPU.prototype.core_runnable = function(core)
         const view = new DataView(state.saved[index].buffer, offset - CORE_STATE_RANGES[index][0], size);
         return size === 1 ? view.getUint8(0) : view.getInt32(0, true);
     };
+    const shutdown = this.wm.exports["exception_shutdown"](core);
+    if(shutdown) return shutdown === 1 && !!this.apic_core_nmi_pending(core) && !field(STATE_OFFSETS.nmi_blocked, 1);
     const halted = field(STATE_OFFSETS.in_hlt, 1) !== 0;
     if(!halted)
     {
@@ -1132,7 +1327,10 @@ CPU.prototype.run_cores = function()
         }
         this.switch_core(core);
         const state = this.cores[core];
-        state.steps += this.run_cpu_slice(this.scheduler_quantum);
+        const epoch = this.execution_epoch;
+        const steps = this.run_cpu_slice(this.scheduler_quantum);
+        if(epoch !== this.execution_epoch) return 0;
+        state.steps += steps;
         state.slices++;
         ran = true;
         if(!this.in_hlt[0]) next = 0;
@@ -1229,9 +1427,14 @@ CPU.prototype.get_diagnostics = function()
         };
         const lapic = new Int32Array(this.wasm_memory.buffer, this.apic_addr(core), 46);
         return {
-            "state": !state.running ? "wait-for-sipi" : field(STATE_OFFSETS.in_hlt, 1) ? "halted" : "runnable",
+            "state": this.wm.exports["exception_shutdown"](core) ? "shutdown" : !state.running ? "wait-for-sipi" : field(STATE_OFFSETS.in_hlt, 1) ? "halted" : "runnable",
             "slices": state.slices,
             "interpreter_steps": state.steps,
+            "retired_instructions": this.wm.exports["core_statistics_get"](core, 0),
+            "rep_elements": this.wm.exports["core_statistics_get"](core, 1),
+            "faults": this.wm.exports["core_statistics_get"](core, 2),
+            "halt_count": this.wm.exports["core_statistics_get"](core, 3),
+            "runtime_ms": this.wm.exports["core_statistics_get"](core, 4),
             "ipi_sent": this.wm.exports["apic_core_ipi_sent"](core) >>> 0,
             "ipi_received": this.wm.exports["apic_core_ipi_received"](core) >>> 0,
             "apic_id": lapic[0] >>> 24,
@@ -1421,11 +1624,15 @@ CPU.prototype.unpack_memory = function(bitmap, packed_memory)
 /** @param {function():number} run @return {number} */
 CPU.prototype.execute_cpu = function(run)
 {
+    const core = this.active_core;
+    const start = v86.microtick();
     this.in_cpu = true;
     try { return run(); }
     finally
     {
         this.in_cpu = false;
+        this.wm.exports["core_statistics_runtime"](core, Math.max(0, v86.microtick() - start));
+        if(this.wm.exports["exception_take_bsp_reset"]()) this.reset_pending = true;
         if(this.reset_pending)
         {
             this.reset_pending = false;
@@ -1445,6 +1652,7 @@ CPU.prototype.reboot_internal = function()
     }
     this.clock.now();
     this.reset_cores();
+    this.wm.exports["reset_interrupt_controllers"]();
     this.reset_cpu();
     this.wm.exports["context_reset_all"]();
 

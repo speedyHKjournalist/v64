@@ -1,0 +1,7 @@
+PASS physical Wasm RAM relocation, split windows, all-or-nothing invalid range
+PASS physical Wasm high MMIO, no premature MMIO effects, cross-4GiB scalar
+PASS real PCI-register VirtIO high rings, indirect table, DMA blob and completion
+PASS real 8237 DMA low holes, normal transfer, 32-bit limit, async remap rejection
+PASS real IDE PRDT low holes, full-transfer preflight, device abort, 32-bit limits
+PASS real VirtIO balloon high free-page hint zeros correct backing only
+PASS physical window restore transaction rejects bad set and refreshes generation

@@ -1,0 +1,33 @@
+{
+  "date": "2026-09-27T11:33:38.454Z",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "cpu": "Apple M1 Pro",
+  "node": "v25.6.0",
+  "results": {
+    "sparse_virtio_groups": 5,
+    "debug_physical_bus_groups": 7,
+    "debug_machine_snapshot_groups": 3,
+    "native_portable_tlb_tests": 5
+  },
+  "artifacts": {
+    "build/v86-debug.wasm": "06087355df86ba5361b0fb24953d6841dd3971750fcac974dc3e212c07b540e2",
+    "tests/smp/virtio_high_dma.mjs": "723a5297323e28083629674d02e2821129b438a5d61a059dbbf7cf2e57724de2",
+    "tests/smp/physical_bus.mjs": "056419c271954551e22522a89f8cd607a7a0c9b57c3f42e6476d08c817b45c13",
+    "tests/smp/x64_snapshot.mjs": "3139615e89502bd362e87a0ea35f294c9c96e6a0d361b643d31db4e7b35d4ef3",
+    "src/virtio.js": "9d403dbffda7820540e47b76c2b53949ae69bb5c794b092feb01703ac237cff4",
+    "src/dma.js": "aa3254fbbfd49bdc6b9d7e196f51c2ca74b6f756001226f72528a2e1f324775b",
+    "src/ide.js": "c2d6ea06f0ddf856a057b7f7770a449c7d20d4d91b4c3166f755800803fa12c6",
+    "src/virtio_balloon.js": "dc7f1938a7f7fdc5eb35a7344d74ce2b47a682c4b0cc7f28d6b2dcce274e5df9",
+    "src/rust/x64/physical.rs": "79aab752666bdfebebaef60eb4382d98b0b9a421c340812e4eb5aa300fc967da",
+    "src/rust/x64/paging.rs": "f9a538eccd90080127259b88a6c01812c7b2e3a6ebab8bf0d53d6ea99ffd44a9",
+    "src/rust/x64/memory.rs": "f935c930cd144cef423db283be15faafd220829e677c59827f786acf100f2d62"
+  },
+  "logs": {
+    "docs/validation/platform/X5/logs/virtio-high-dma-2026-09-27.txt": "05ad6454f0e79c4bb19d43af04c4f131ad785d3326a2542bff6a6551214ef759",
+    "docs/validation/platform/X5/logs/physical-bus-debug-2026-09-27.txt": "f6440c313910f094c88ed14abf19a072ee8426c5d6d01761783c0e8eaaee04b8",
+    "docs/validation/platform/X5/logs/x64-snapshot-debug-2026-09-27.txt": "618bd36be6fce930af36b09acb0067db24c551029e06350a24e577e374ee97db",
+    "docs/validation/platform/X5/logs/tlb-snapshot-native-2026-09-27.txt": "d3d30defbf617b026353b05e7c2013730e9a025d62e336a096a439cf970f4eb7"
+  },
+  "limits": "Guest x64 OS and high code/page-table/SMC execution are not covered by these direct-bus and injected-cache fixtures; no release run in this manifest."
+}

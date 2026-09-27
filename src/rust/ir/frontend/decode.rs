@@ -248,7 +248,8 @@ pub fn decode(
     };
     let extra_immediate =
         if encoding.extra_bytes > 0 { Some(c.integer(encoding.extra_bytes)? as u16) } else { None };
-    let baseline_ud = if ea.is_some() { encoding.mem_ud } else { encoding.reg_ud };
+    let baseline_ud = (if ea.is_some() { encoding.mem_ud } else { encoding.reg_ud })
+        || prefixes.lock && !crate::decode_rules::lock_allowed(base_opcode, modrm);
     let flow = if encoding.jump_offset_imm {
         Flow::Relative {
             displacement: immediate.unwrap() as i32,

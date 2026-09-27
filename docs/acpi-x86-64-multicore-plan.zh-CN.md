@@ -1,6 +1,6 @@
 # v86：完整 ACPI、x86-64 与单路多核心实施计划
 
-> 状态：A1、A2、P1、P2a（布局与归属、换核原型）已实施；C1 的解释器调度、AP 启动/路由与 SeaBIOS 子门槛已实施，完整 C1 仍待 C0 和其余中断语义验收（见 §5 与本轮验证报告）。
+> 状态（2026-09-27 更新）：C0/C1 的实现与主要门槛已通过；C2 每核指标及三后端 Linux 拓扑已通过，Windows SMP 仍待适配验证；C3 原子/内存序及 debug/release Linux OS 压力矩阵已通过，region 重启故障已修复；Windows SMP 及依赖 A3 的电源门槛仍未关闭。X1 状态/解码、X2 系统状态、X3 整数解释器、X4 原生寄存器块、X5 高地址 DMA/快照已推进并有局部门槛；x64 OS/XC 尚未验收。详见各阶段记录。
 > 基线：2026-09-27，`8af0560e`（PR #55 合并后，工作区干净）。原稿基线 `dfd8ac23 + 未提交修改` 已过时。
 > 本轮 review/推进的实际接手点为 `8edd6d69 + 未提交修改`；验证环境和 fixture 见 [C1 记录](validation/platform/C1/review-and-validation.zh-CN.md)。
 > §2 的事实均经源码审计，标注“探针”的条目另经客户机运行确认（buildroot Linux 6.8，`acpi: true`）。
@@ -188,15 +188,15 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 | P1 平台描述/测试入口 | P0 | 共用平台描述、带超时和结构化结果的 runner、诊断导出 | L | — | **已实施**（确定性时钟归 C0） |
 | A2 固件表/路由闭环 | A1、P1 | table-loader 安装的表（含 XSDT、FADT rev3+ RESET_REG）、AML 与设备资源一致 | L | R-ACPI | **已实施**（Windows 未验收） |
 | P2a 布局单一来源 | P0 | 生成的 offset/accessor、状态区归属表与断言；单核行为不变 | L | — | **已实施**（子任务 3、4 随 X1） |
-| C0 确定性机器时钟 | P1 | 可注入/可按指令推进的时钟；PIT/RTC/LAPIC/PM/TSC 同源；固定输入得到相同 IRQ 序列 | M | — | 待实施 |
-| C1 每核 LAPIC/AP 启动 | A1、P2a、C0 | 状态块换入换出、按核 LAPIC、INIT/SIPI/IPI；32 位 trampoline 与 SeaBIOS 在 2/4/8 核启动 | XL | — | **部分实施**（解释器/AP 启动子门槛通过；C0、ExtINT 等未闭环） |
-| C2 单路拓扑/轮转 | C1、A2 | 32 位 Linux 识别 1×N×1，各核执行任务（解释器） | L | — | 待实施 |
-| C3 跨核一致性/JIT | C2 | 原子、TLB shootdown、SMC、快照；Tier-0/区域后端在多核下通过 | XL | R-SMP32 | 待实施 |
-| X1 64 位状态/解码 | P2a | 模式矩阵、REX/寄存器/地址尺寸单测通过 | L | — | 待实施 |
-| X2 MMU/异常/系统状态 | X1 | 长模式切换、分页/NX/异常帧测试通过 | XL | — | 待实施 |
-| X3 64 位解释器闭环 | X2、A2 | 单核 x64 OS + 32 位进程，无 JIT 正确运行 | XL | — | 待实施 |
-| X4 IR 各层 x64 | X3 | 解释器/Tier-0/区域管线差分和 OS 回归通过 | XL | — | 待实施 |
-| X5 36 位物理地址/设备 | X3；最终合并 X4 | 高位 MMIO、4 GiB 以上的 RAM 重映射（总量 ≤ wasm32 可用）、DMA 地址宽度、快照 | L | R-x64-UP | 待实施 |
+| C0 确定性机器时钟 | P1 | 可注入/可按指令推进的时钟；PIT/RTC/LAPIC/PM/TSC 同源；固定输入得到相同 IRQ 序列 | M | — | **已实施，最终产物性能复测中** |
+| C1 每核 LAPIC/AP 启动 | A1、P2a、C0 | 状态块换入换出、按核 LAPIC、INIT/SIPI/IPI；32 位 trampoline 与 SeaBIOS 在 2/4/8 核启动 | XL | — | **已实施**（含 ExtINT/APIC enable/NMI/EOI，2/3/4/8 核固件门槛） |
+| C2 单路拓扑/轮转 | C1、A2 | 32 位 Linux 识别 1×N×1，各核执行任务（解释器） | L | — | **实现完成，Linux 已验收，Windows SMP 待验证** |
+| C3 跨核一致性/JIT | C2 | 原子、TLB shootdown、SMC、快照；Tier-0/区域后端在多核下通过 | XL | R-SMP32 | **进行中**（Linux 三后端负载/恢复/重启/S5 已通过，Windows SMP 与 A3 依赖未关闭） |
+| X1 64 位状态/解码 | P2a | 模式矩阵、REX/寄存器/地址尺寸单测通过 | L | — | **实施中**（宽状态 bank、33,088 个独立解码对照用例通过） |
+| X2 MMU/异常/系统状态 | X1 | 长模式切换、分页/NX/异常帧测试通过 | XL | — | **实施中**（四级页表、系统状态与 21 个真实 guest 系统用例） |
+| X3 64 位解释器闭环 | X2、A2 | 单核 x64 OS + 32 位进程，无 JIT 正确运行 | XL | — | **实施中**（1,540 个 QEMU 整数差分通过；SIMD/FPU 与 OS 待闭环） |
+| X4 IR 各层 x64 | X3 | 解释器/Tier-0/区域管线差分和 OS 回归通过 | XL | — | **实施中**（原生 i64 寄存器块与完整地址缓存；完整 IR/OS 门槛未关闭） |
+| X5 36 位物理地址/设备 | X3；最终合并 X4 | 高位 MMIO、4 GiB 以上的 RAM 重映射（总量 ≤ wasm32 可用）、DMA 地址宽度、快照 | L | R-x64-UP | **实施中**（36 位物理总线、VirtIO/IDE/DMA 和整机快照通过局部验证；固件/OS 待后续） |
 | XC x64 × 多核集成 | X4、X5、C3 | C2/C3 的矩阵在 x64 OS 上通过 | L | R-x64-SMP | 待实施 |
 | A3 睡眠/休眠 | A2；S4 另需磁盘持久化策略；多核 S3 需 C3 | S4（OS 主导 soft-off + 恢复）与 S3 在单核/多核下闭环 | L | R-ACPI 完整 | 待实施 |
 | W0 显式上下文 ABI | XC | ctx_ptr ABI、静态状态逐项归属；单线程行为与性能不回退 | XL | — | 待实施 |
@@ -427,7 +427,7 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 - [x] SMT 层 count=1，core/package 层报告 N；package ID 始终为 0。3 核用合适 ID 位宽，不能用 N 直接当 shift。所有核的 CPUID 只在该不同处不同。
 - [x] MADT 和 AML 各核对象 ID 与 CPUID 对齐；若生成 SMBIOS，Type 4 应反映一个处理器封装、N 核，不生成 N 个 socket。旧 MP table 只提供其能表达的信息，不能推翻 CPUID 拓扑。
 - [x] 扩展 C1 的调度器，在预算/事件边界轮转，处理忙等、长 REP 和 HLT；定义 JIT 自循环/跨页链接的预算接口，C3 完成一致性后才开启。设备计时每台 Machine 推进一次，AP 运行不重复调用全局设备 timer。
-- [ ] 为所有核设置合理预算上限，并提供每核提交指令、运行时间、IPI 和 halt 计数诊断。
+- [x] 为所有核设置合理预算上限，并提供每核提交指令、REP 元素、故障、运行时间、IPI 和 halt 计数诊断。三后端逐核精确值、JIT 实际命中、快照和复位均通过；旧单核快照没有指标时清零，宿主运行时间不参与确定性重放比较。见 [C2 统计验证](validation/platform/C2/core-statistics.zh-CN.md)。
 
 **退出条件**：Linux `lscpu` 显示 `Socket(s)=1`、`Core(s) per socket=N`、`Thread(s) per core=1`；`/sys/devices/system/cpu/*/topology` 一致；Windows 拓扑 API/系统工具同样确认。核绑定程序在所有核执行并得到独立进度，不能只检查 `/proc/cpuinfo` 条目数。
 
@@ -436,7 +436,7 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 **修改范围**：共享内存总线、atomic/fence 指令、IR 内存优化和安全点、页 generation、快照/复位协调。
 
 - [ ] 将 C1 的解释器原子事务保证推广到所有 JIT 路径：LOCK、隐式锁定 XCHG、CMPXCHG8B/16B 不可分割；跨页/未对齐/MMIO 的故障和部分提交按指令契约处理。不得仅把 LOCK 当可忽略前缀。
-- [ ] 明确 x86 内存顺序要求。轮转执行可采用更强的顺序作为正确性起点；IR 不能把跨核可能改变的 RAM load 在安全点前后永久复用，优化需要有效失效 guard。
+- [x] 明确 x86 内存顺序要求。轮转执行可采用更强的顺序作为正确性起点；IR 不能把跨核可能改变的 RAM load 在安全点前后永久复用，优化需要有效失效 guard。
 - [x] TLB 每核独立：本核 INVLPG/CR3 操作按规范生效，其他核通过客户机 IPI shootdown 刷新。不要让“任一页表写自动 flush 所有核”掩盖 shootdown 缺陷。
 - [x] 代码写入更新 Machine 级物理页 generation，通知所有相关 JIT。活动帧必须在保证的观察边界退出；待发布的旧快照编译结果被拒绝，table slot 只在安全回收后复用。
 - [x] **先通过多核 JIT 最小安全门槛再运行 OS**：每核状态隔离、LOCK 事务、所有核代码页失效、load 优化边界和异步发布校验的微测试全绿；之后开启 C2 预留的 JIT 预算/链接路径，并重跑 C2 的完整 OS/拓扑矩阵。
@@ -447,7 +447,7 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **本次实施记录（2026-09-27，C0–C3）**：
 
-- C0 已接入 `cpu_clock`（normal/deterministic）、全部 PIT/RTC/PM/LAPIC/TSC 时间读取及 pause/resume/save/restore 策略。确定性模式使用解释器提交账本，普通成功指令与已完成 REP 元素推进时钟，faulting dispatch 不退休；停止时冻结，长宿主间隔最多补入 1000ms 并计诊断。参见 [时钟及设备验证](validation/platform/C0/clock-and-devices.zh-CN.md)。正常单核已启动，但尚未建立同环境 P0 wall-time 对照，不能将“性能无显著差异”门槛写为通过。
+- C0 已接入 `cpu_clock`（normal/deterministic）、全部 PIT/RTC/PM/LAPIC/TSC 时间读取及 pause/resume/save/restore 策略。确定性模式使用解释器提交账本，普通成功指令与已完成 REP 元素推进时钟，faulting dispatch 不退休；停止时冻结，长宿主间隔最多补入 1000ms 并计诊断。参见 [时钟及设备验证](validation/platform/C0/clock-and-devices.zh-CN.md)。历史提交 `bb8979f3→fc79557e` 的同环境正常单核启动中位数增加 0.619%，通过 10% 阈值；本轮新增统计/LOCK 校验后仍需最终构建重测。见 [性能对照](validation/platform/C0/normal-up-boot.zh-CN.md)。
 - C1 补齐 APIC_BASE/SVR、ExtINT 到 AP、ESR/保留编码、同 vector pending TMR、timer mask/phase，并保留 BSP virtual-wire 启动策略。硬件禁用 APIC 不再接收 APIC 消息；软件禁用不屏蔽 NMI/INIT/SIPI。参见 [中断语义补齐](validation/platform/C1/interrupt-completion.zh-CN.md)。
 - C2 的 1..8 CPUID/MADT/AML/fw_cfg/CMOS 一致性与真实 Linux 1/2/3/4/8 核单 package、逐核 affinity 计算均已通过；在一致性微测试门槛之后，interpreter/Tier-0/region 三后端的 15 个 OS 配置全部通过，JIT 模式同时检查每核绑定工作阶段真实 compiled activations。核数为 3 时使用 ceil(log2 N) 的 APIC ID 位宽。当前 BIOS 不生成 SMBIOS Type 4；没有 Windows 测试镜像。参见 [拓扑及 Linux 原始记录](validation/platform/C2/topology-and-linux.zh-CN.md)。调度提供 `cpu_quantum`、`cpu_schedule_seed`、每核 slices/dispatch steps/IPI；尚不把混合 dispatch/JIT step 统计当作完整的每核退休量和运行时间诊断。
 - C3 新增每核稀疏 TLB 保存/恢复，不因换核而刷新客户机映射；按机器代码页状态重新同步 TLB 的 code 标志。独立 TSC offset、LAPIC/AUX、NMI/ExtINT/INIT/SIPI、REP/HLT、机器时钟和调度顺序纳入全机快照，核数不匹配在修改 RAM/设备之前拒绝。旧单核快照仍接受，旧 host-absolute timer 的相位采用文档化 best-effort 重锚。
@@ -455,6 +455,16 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 - CF9/8042 客户机复位延迟到指令返回安全点执行；restore/reset 的 execution epoch 阻止旧异步编译回调安装或取消新一代 table slot。快照事务冻结统一时间，恢复后继续同一调度与 REP 结果。
 
 `make multicore-clock-tests`、`multicore-boot-tests`、`multicore-topology-tests`、`multicore-coherence-tests` 均有 `-release` 对应目标。真实 Linux 使用 `multicore-linux-tests`，JIT OS 模式见 C2 记录。完整 C3/R-SMP32 **仍未关闭**：跨页故障/MMIO 的原子部分提交、线程/信号迁移、真实磁盘/网卡长期压力，以及 S3（依赖 A3）尚需独立验收；CMPXCHG16B/x64 留给已列明的 x64/XC 范围。现有勾选表示对应实现及局部门槛，不替代各阶段尚未完成的退出条件。
+
+**本轮继续实施与审查（2026-09-27）**：
+
+- C3 新增真实 guest 原子边界：三个后端各 107 场景，覆盖跨页、未对齐、缺页、写保护、RAM/MMIO 混合，以及非法 LOCK 的 #UD；修复解释器和 region helper 的 CMPXCHG8B 失败路径遗漏写回，以及 MMIO read64 低 DWORD 符号扩展。无锁发布/队列 96 场景在 debug/release 均通过，提前发布负向控制会失败。见 [原子与内存序报告](validation/platform/C3/atomic-memory-order.zh-CN.md)。
+- C3 每个后端使用真实 Linux `fork`/共享映射、逐核迁移、SIGUSR1、NE2K 帧回环和 IDE O_DIRECT 读写；debug/release 各 60 个负载场景和 6 次负载快照重放通过，三个后端均完成整机重启、四核重新上线和 S5。发现并修复整机复位遗漏共享 PIC/IOAPIC、旧定时器 ISR 阻塞 Linux 校准的问题；AP INIT 保持共享控制器状态。见 [OS 压力报告](validation/platform/C3/os-stress.zh-CN.md)。
+- 异常交付新增 Intel double-fault 分类与 shutdown 状态：BSP 三重故障由主板在安全点复位全机；AP shutdown 保持独立，普通情形可由 NMI/INIT 唤醒，NMI 内 shutdown 只能机器复位。修复 IRET/IDT/GDT/TSS 的客户机无效输入导致 host panic、描述符整长/跨页检查，以及复位后旧调度轮次记账。见 [异常与生命周期验证](validation/platform/C3/exception-lifecycle.zh-CN.md)。
+- 用户提供的 Windows XP 原盘只读检查为 Standard PC EISA/ISA 单处理器 HAL，不能直接用它证明 SMP 拓扑。只读原盘已实际进入桌面并通过单核 Win32 探针；临时内存覆盖层替换匹配 MP HAL/kernel 后四核进入 NT 内核，但停在 idle、尚未完成用户态逐核探针。需继续与独立模拟器比较适配路径；x64 Windows 验收不由 XP 替代。
+- X1 共享解码有 33,088 个 iced-x86 对照用例；X3 的真实 NASM guest 从 32 位进入长模式并跳转高 RIP，1,540 个整数/flags/原子用例与 QEMU 一致。X2 另有 15 个 QEMU 系统/异常/IST/系统调用差分及 6 个独立 SDM 非法状态断言。X4 原生 i64 寄存器子集已有独立差分，完整 IR 和 OS 门槛继续实施。
+- X5 的真实高 RAM/MMIO、36 位 VirtIO、32 位 IDE/8237 边界和 balloon DMA 已加入测试；整机快照保留物理窗口与每核完整宽 TLB，坏输入在机器状态修改前拒绝。见 [物理总线](validation/platform/X5/physical-bus.zh-CN.md)、[宽 TLB 快照](validation/platform/X5/tlb-snapshot.zh-CN.md)。
+- 仍不公布 LM 能力，不表示 x64 OS、完整 Tier-0/region 或 XC 已通过。普通用户配置仍只需 `cpu_cores`，没有新增 `cpu_profile`/`cpu_execution` 选择。
 
 ### XC：x64 × 多核集成
 

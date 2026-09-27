@@ -91,6 +91,24 @@ static PIC: Mutex<Pic> = Mutex::new(Pic {
     },
 });
 
+pub fn reset() {
+    let mut pic = get_pic();
+    let Pic { master, slave } = &mut *pic;
+    for state in [master, slave] {
+        state.irq_mask = 0;
+        state.irq_map = 0;
+        state.isr = 0;
+        state.irr = 0;
+        state.irq_value = 0;
+        state.expect_icw4 = false;
+        state.state = 0;
+        state.read_isr = false;
+        state.auto_eoi = false;
+        state.special_mask_mode = false;
+        state.elcr = 0;
+    }
+}
+
 fn get_pic() -> MutexGuard<'static, Pic> { PIC.try_lock().unwrap() }
 
 // called from javascript for saving/restoring state

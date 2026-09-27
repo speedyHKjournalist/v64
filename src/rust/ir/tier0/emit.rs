@@ -299,7 +299,8 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
     if let Some(form) = simd::classify(i) {
         return Some(Form::Simd(form));
     }
-    // LOCK is a no-op for the interpreter too (single CPU, no #UD check).
+    // Invalid LOCK forms are rejected by the shared decoder. A valid locked
+    // RMW stays inside one activation, including its guarded slow path.
     let p = i.prefixes;
     if p.rep || p.repne || i.baseline_ud {
         return None;

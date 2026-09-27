@@ -136,6 +136,20 @@ function gen_instruction_body(encodings, size)
         code.push(`let modrm_byte = ${wrap_imm_call("read_imm8()")};`);
     }
 
+    // Prefixes and the 0F escape only collect decode state. Validate once the
+    // actual opcode and (where present) ModRM are known, before EA/operand I/O.
+    const base_opcode = encoding.opcode & 0xFFFF;
+    if(![0x0F, 0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3].includes(base_opcode))
+    {
+        code.push({
+            type: "if-else",
+            if_blocks: [{
+                condition: `*prefixes & prefix::PREFIX_LOCK != 0 && !crate::decode_rules::lock_allowed(0x${base_opcode.toString(16)}, ${encoding.e ? "Some(modrm_byte as u8)" : "None"})`,
+                body: ["trigger_ud();", "return;"],
+            }],
+        });
+    }
+
     if(has_66.length || has_f2.length || has_f3.length)
     {
         const if_blocks = [];

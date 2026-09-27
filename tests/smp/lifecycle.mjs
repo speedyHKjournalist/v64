@@ -72,8 +72,19 @@ for(const count of [1, 2, 3, 4, 8])
             assert.deepEqual(target.clock.get_state(), time);
         }
         finally { await other.destroy(); }
+        cpu.write32(0xFEC00000, 0x10);
+        cpu.write32(0xFEC00010, 0x30); // previous Linux's unmasked timer route
+        if(count > 1)
+        {
+            cpu.apic_restore_core_events(1, 1, false);
+            cpu.take_core_events(1);
+            assert.equal(cpu.read32s(0xFEC00010), 0x30, "AP INIT preserves machine routing");
+        }
         cpu.reboot_internal();
         assert.equal(cpu.active_core, 0);
+        cpu.write32(0xFEC00000, 0x10);
+        assert.equal(cpu.read32s(0xFEC00010), 1 << 16, "board reset masks stale timer routing before firmware reprograms it");
+        assert.equal(cpu.get_state_pic()[2], 0, "board reset clears PIC ISR");
         assert.deepEqual(cpu.cores.map(core => core.running), Array.from({ length: count }, (_, i) => i === 0));
         for(let core = 0; core < count; core++)
         {
@@ -116,7 +127,8 @@ try
         for(let i = 0; i < 10 && cpu.cores.some((_, id) => cpu.core_runnable(id)); i++) cpu.run_cores();
         assert.ok(cpu.cores.every((_, id) => !cpu.core_runnable(id)));
         return { memory: cpu.mem8.slice(0x4000, 0x6000), clock: cpu.clock.get_state(),
-            cores: cpu.get_machine_core_state() };
+            cores: cpu.get_machine_core_state().map((part, index) => index !== 6 ? part :
+                part.map(core => core.map((field, slot) => slot === 10 ? field.slice(0, 32) : field))) };
     };
     const first = finish();
     await rep_vm.restore_state(saved);

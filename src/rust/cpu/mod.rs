@@ -17,3 +17,4 @@ pub mod vga;
 pub mod context;
 pub mod topology;
 pub mod execution;
+pub mod exceptions;

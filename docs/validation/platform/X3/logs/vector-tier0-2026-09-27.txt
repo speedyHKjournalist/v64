@@ -1,0 +1,3 @@
+QEMU vector reference: 949 real long-mode cases
+native retirement=1440442 backend=tier0
+v86 vector/x87: 949 cases pass (5 explicit SDM cases for documented QEMU gaps)

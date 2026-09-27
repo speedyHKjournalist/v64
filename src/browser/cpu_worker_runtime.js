@@ -1,3 +1,4 @@
+import { state_stream_client } from "./state_stream_transport.js";
 import { wasm_fallback_path } from "./wasm_paths.js";
 // Dedicated-worker entry. Never transfer the WebAssembly.Memory buffer.
 import { V86 } from "./starter.js";
@@ -220,6 +221,25 @@ export function start_cpu_worker()
             await emulator.restore_state(state);
             await audio_reset();
             flush_screen(); stats();
+        },
+        "save-stream": async (value, port) => {
+            if(emulator.is_running() || inflight.size) throw new Error("Save requires a drained, stopped CPU");
+            const stream = state_stream_client(port);
+            checkpoint = value;
+            try { await emulator.save_state_stream(stream["write"]); }
+            finally { checkpoint = null; stream["close"](); }
+        },
+        "restore-stream": async (size, port) => {
+            if(emulator.is_running() || inflight.size) throw new Error("Restore requires a drained, stopped CPU");
+            const stream = state_stream_client(port);
+            try
+            {
+                await change_epoch();
+                await emulator.restore_state_stream({ "size": size, "read": stream["read"] });
+                await audio_reset();
+                flush_screen(); stats();
+            }
+            finally { stream["close"](); }
         },
         "restart": async () => { await change_epoch(); await emulator.restart(); await audio_reset(); flush_screen(); stats(); },
         "power_button": () => emulator.power_button(),

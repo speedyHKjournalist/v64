@@ -69,7 +69,7 @@ unsafe fn string_instruction(
     let multicore = crate::cpu::apic::core_count() > 1;
     let limit = if multicore { 256 } else { u32::MAX };
     let result = string_instruction_bounded(is_asize_32, ds_or_prefix, instruction, size, rep, limit);
-    crate::cpu::execution::record_string(result);
+    if !matches!(rep, Rep::None) { crate::cpu::execution::record_string(result); }
     if multicore && result.outcome == StringOutcome::Repeat {
         crate::cpu::cpu::core_yield = true;
         crate::cpu::cpu::jit_block_boundary = true;
@@ -212,6 +212,7 @@ unsafe fn string_instruction_bounded(
 
     // unaligned movs is properly handled in the fast path
     let mut rep_fast = (instruction == Instruction::Movs || is_aligned)
+        && crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0
         && is_asize_32 // 16-bit address wraparound
         && match rep {
             Rep::NZ | Rep::Z => true,

@@ -610,6 +610,7 @@ multicore-clock-tests: build/v86-debug.wasm
 multicore-coherence-tests: build/v86-debug.wasm state-layout-check
 	node tests/smp/coherence.mjs
 	node tests/smp/lifecycle.mjs
+	node tests/smp/exception_lifecycle.mjs
 	node tests/smp/publication.mjs
 
 multicore-clock-tests-release: build/libv86.mjs build/v86.wasm
@@ -619,7 +620,34 @@ multicore-clock-tests-release: build/libv86.mjs build/v86.wasm
 multicore-coherence-tests-release: build/libv86.mjs build/v86.wasm state-layout-check
 	TEST_RELEASE_BUILD=1 node tests/smp/coherence.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/lifecycle.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/exception_lifecycle.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/publication.mjs
+
+multicore-atomic-tests: build/v86-debug.wasm state-layout-check
+	node tests/smp/atomic_boundaries.mjs
+
+multicore-atomic-tests-release: build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/atomic_boundaries.mjs
+
+multicore-memory-order-tests: build/v86-debug.wasm
+	node tests/smp/memory_order.mjs
+
+multicore-memory-order-tests-release: build/libv86.mjs build/v86.wasm
+	TEST_RELEASE_BUILD=1 node tests/smp/memory_order.mjs
+
+multicore-statistics-tests: build/v86-debug.wasm
+	node tests/smp/core_statistics.mjs
+
+multicore-statistics-tests-release: build/libv86.mjs build/v86.wasm
+	TEST_RELEASE_BUILD=1 node tests/smp/core_statistics.mjs
+
+multicore-os-stress-tests: build/v86-debug.wasm images/linux4.iso
+	node tests/smp/os_stress.mjs
+
+multicore-os-stress-tests-release: build/libv86.mjs build/v86.wasm images/linux4.iso
+	TEST_RELEASE_BUILD=1 node tests/smp/os_stress.mjs
+
+.PHONY: multicore-atomic-tests multicore-atomic-tests-release multicore-memory-order-tests multicore-memory-order-tests-release multicore-statistics-tests multicore-statistics-tests-release multicore-os-stress-tests multicore-os-stress-tests-release
 
 .PHONY: multicore-clock-tests multicore-clock-tests-release multicore-coherence-tests multicore-coherence-tests-release
 

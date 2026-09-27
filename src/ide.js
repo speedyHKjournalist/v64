@@ -1,3 +1,4 @@
+import { begin_state_io, track_state_io } from "./state_io.js";
 import { LOG_DISK } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
@@ -1172,6 +1173,38 @@ IDEInterface.prototype.ata_abort_command = function()
     this.push_irq();
 };
 
+IDEInterface.prototype.dma_abort = function()
+{
+    this.channel.dma_status = this.channel.dma_status & ~1 | 2;
+    this.current_command = -1;
+    this.ata_abort_command();
+};
+
+// Bus-master IDE has 32-bit PRDT and buffer addresses. Validate every segment
+// before any payload transfer, including holes created by RAM relocation.
+IDEInterface.prototype.dma_segments = function(byte_count)
+{
+    let table = this.channel.prdt_addr >>> 0;
+    let offset = 0;
+    const segments = [];
+    while(offset < byte_count)
+    {
+        if(table + 8 > 0x100000000) throw new RangeError("IDE PRDT exceeds 32-bit address width");
+        this.cpu.validate_physical_range(table, 8);
+        const address = this.cpu.read32_physical(table);
+        const count = this.cpu.read16_physical(table + 4) || 0x10000;
+        const end = this.cpu.read8_physical(table + 7) & 0x80;
+        const length = Math.min(count, byte_count - offset);
+        if(address + length > 0x100000000) throw new RangeError("IDE DMA exceeds 32-bit address width");
+        this.cpu.validate_physical_range(address, length);
+        segments.push({ address, offset, length });
+        offset += length;
+        if(end && offset < byte_count) throw new RangeError("IDE PRDT ends before the requested transfer");
+        table += 8;
+    }
+    return segments;
+};
+
 IDEInterface.prototype.capture_regs = function()
 {
     return `ST=${h(this.status_reg & 0xFF)} ER=${h(this.error_reg & 0xFF)} ` +
@@ -1794,7 +1827,7 @@ IDEInterface.prototype.do_write = function()
     this.ata_advance(this.current_command, this.data_length / 512);
     this.push_irq();
 
-    this.buffer.set(this.write_dest, data, function()
+    track_state_io(this.cpu, done => this.buffer.set(this.write_dest, data, done), function()
     {
     });
 
@@ -1947,47 +1980,18 @@ IDEInterface.prototype.do_atapi_dma = function()
         dbg_log(this.name + ": ATAPI DMA transfer len=" + this.data_length, LOG_DISK);
     }
 
-    var prdt_start = this.channel.prdt_addr;
-    var offset = 0;
-
-    var data = this.data;
-
-    do {
-        var addr = this.cpu.read32s(prdt_start);
-        var count = this.cpu.read16(prdt_start + 4);
-        var end = this.cpu.read8(prdt_start + 7) & 0x80;
-
-        if(!count)
+    try
+    {
+        for(const segment of this.dma_segments(this.data_length))
         {
-            count = 0x10000;
-        }
-
-        if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
-        {
-            dbg_log(this.name + ": DMA read dest=" + h(addr) + " count=" + h(count) + " datalen=" + h(this.data_length), LOG_DISK);
-        }
-        this.cpu.write_blob(data.subarray(offset, Math.min(offset + count, this.data_length)), addr);
-
-        offset += count;
-        prdt_start += 8;
-
-        if(offset >= this.data_length && !end)
-        {
-            if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
-            {
-                dbg_log(this.name + ": leave early end=" + (+end) +
-                        " offset=" + h(offset) +
-                        " data_length=" + h(this.data_length) +
-                        " cmd=" + h(this.current_command), LOG_DISK);
-            }
-            break;
+            this.cpu.write_blob_physical(this.data.subarray(segment.offset, segment.offset + segment.length), segment.address);
         }
     }
-    while(!end);
-
-    if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
+    catch(error)
     {
-        dbg_log(this.name + ": end offset=" + offset, LOG_DISK);
+        if(!(error instanceof RangeError)) throw error;
+        this.dma_abort();
+        return;
     }
 
     this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
@@ -2353,38 +2357,21 @@ IDEInterface.prototype.do_ata_read_sectors_dma = function()
         {
             dbg_log(this.name + ": do_ata_read_sectors_dma: Data arrived", LOG_DISK);
         }
-        var prdt_start = this.channel.prdt_addr;
-        var offset = 0;
-
-        dbg_assert(orig_prdt_start === prdt_start);
-
-        do {
-            var prd_addr = this.cpu.read32s(prdt_start);
-            var prd_count = this.cpu.read16(prdt_start + 4);
-            var end = this.cpu.read8(prdt_start + 7) & 0x80;
-
-            if(!prd_count)
+        dbg_assert(orig_prdt_start === this.channel.prdt_addr);
+        try
+        {
+            for(const segment of this.dma_segments(byte_count))
             {
-                prd_count = 0x10000;
-                if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
-                {
-                    dbg_log(this.name + ": DMA: prd count was 0", LOG_DISK);
-                }
+                this.cpu.write_blob_physical(data.subarray(segment.offset, segment.offset + segment.length), segment.address);
             }
-
-            if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
-            {
-                dbg_log(this.name + ": DMA read transfer dest=" + h(prd_addr) +
-                    " prd_count=" + h(prd_count), LOG_DISK);
-            }
-            this.cpu.write_blob(data.subarray(offset, offset + prd_count), prd_addr);
-
-            offset += prd_count;
-            prdt_start += 8;
         }
-        while(!end);
-
-        dbg_assert(offset === byte_count);
+        catch(error)
+        {
+            if(!(error instanceof RangeError)) throw error;
+            this.dma_abort();
+            this.report_read_end(0);
+            return;
+        }
 
         this.ata_advance(this.current_command, count);
         this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
@@ -2472,50 +2459,22 @@ IDEInterface.prototype.do_ata_write_sectors_dma = function()
     var byte_count = count * this.sector_size;
     var start = lba * this.sector_size;
 
-    var prdt_start = this.channel.prdt_addr;
-    var offset = 0;
-
-    if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
-    {
-        dbg_log(this.name + ": prdt addr: " + h(prdt_start, 8), LOG_DISK);
-    }
-
     const buffer = new Uint8Array(byte_count);
-
-    do {
-        var prd_addr = this.cpu.read32s(prdt_start);
-        var prd_count = this.cpu.read16(prdt_start + 4);
-        var end = this.cpu.read8(prdt_start + 7) & 0x80;
-
-        if(!prd_count)
+    try
+    {
+        for(const segment of this.dma_segments(byte_count))
         {
-            prd_count = 0x10000;
-            dbg_log(this.name + ": DMA: prd count was 0", LOG_DISK);
+            buffer.set(this.cpu.read_blob_physical(segment.address, segment.length), segment.offset);
         }
-
-        if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
-        {
-            dbg_log(this.name + ": DMA write transfer dest=" + h(prd_addr) + " prd_count=" + h(prd_count), LOG_DISK);
-        }
-
-        var slice = this.cpu.mem8.subarray(prd_addr, prd_addr + prd_count);
-        dbg_assert(slice.length === prd_count);
-
-        buffer.set(slice, offset);
-
-        //if(DEBUG)
-        //{
-        //    dbg_log(hex_dump(slice), LOG_DISK);
-        //}
-
-        offset += prd_count;
-        prdt_start += 8;
     }
-    while(!end);
+    catch(error)
+    {
+        if(!(error instanceof RangeError)) throw error;
+        this.dma_abort();
+        return;
+    }
 
-    dbg_assert(offset === buffer.length);
-
-    this.buffer.set(start, buffer, () =>
+    track_state_io(this.cpu, done => this.buffer.set(start, buffer, done), () =>
     {
         if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
         {
@@ -2811,10 +2770,13 @@ IDEInterface.prototype.read_buffer = function(start, length, callback)
 {
     const id = this.last_io_id++;
     const abort = new AbortController();
+    const complete = begin_state_io(this.cpu);
+    abort["snapshot_done"] = complete;
     this.in_progress_io_ids.set(id, abort);
 
-    this.buffer.get(start, length, data =>
+    try { this.buffer.get(start, length, data =>
     {
+        complete();
         if(this.cancelled_io_ids.delete(id))
         {
             dbg_assert(!this.in_progress_io_ids.has(id));
@@ -2825,7 +2787,13 @@ IDEInterface.prototype.read_buffer = function(start, length, callback)
         dbg_assert(removed);
 
         callback(data);
-    }, { signal: abort.signal });
+    }, { signal: abort.signal }); }
+    catch(error)
+    {
+        complete();
+        this.in_progress_io_ids.delete(id);
+        throw error;
+    }
 };
 
 IDEInterface.prototype.cancel_io_operations = function()
@@ -2834,6 +2802,7 @@ IDEInterface.prototype.cancel_io_operations = function()
     {
         this.cancelled_io_ids.add(id);
         abort.abort();
+        abort["snapshot_done"]?.();
     }
     this.in_progress_io_ids.clear();
 };

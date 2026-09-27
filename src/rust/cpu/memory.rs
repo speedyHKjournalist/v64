@@ -27,6 +27,10 @@ use std::ptr;
 
 #[allow(non_upper_case_globals)]
 pub static mut mem8: *mut u8 = ptr::null_mut();
+// The first relocated low RAM byte, or memory_size when no RAM was relocated.
+// Ordinary RAM below this threshold retains the original single bound check.
+#[allow(non_upper_case_globals)]
+pub static mut ram_fast_limit: u32 = 0;
 
 #[no_mangle]
 pub fn allocate_memory(size: u32) -> u32 {
@@ -38,6 +42,7 @@ pub fn allocate_memory(size: u32) -> u32 {
     let ptr = unsafe { alloc::alloc(layout) as u32 };
     unsafe {
         mem8 = ptr as *mut u8;
+        ram_fast_limit = size;
     };
     ptr
 }
@@ -73,7 +78,28 @@ pub fn svga_allocate_memory(size: u32) -> u32 {
 
 #[no_mangle]
 pub fn in_mapped_range(addr: u32) -> bool {
-    return addr >= 0xA0000 && addr < 0xC0000 || addr >= unsafe { *memory_size };
+    addr >= 0xA0000 && addr < 0xC0000
+        || addr >= unsafe { ram_fast_limit }
+            && (addr >= unsafe { *memory_size }
+                || unsafe { crate::x64::physical::is_low_ram_hole(addr) })
+}
+
+#[inline]
+fn low_ram_hole(addr: u32) -> bool {
+    addr >= unsafe { ram_fast_limit }
+        && addr < unsafe { *memory_size }
+        && unsafe { crate::x64::physical::is_low_ram_hole(addr) }
+}
+
+#[inline]
+fn mapped_width(addr: u32, bytes: u32) -> bool {
+    in_mapped_range(addr)
+        || addr & 4095 > 4096 - bytes && in_mapped_range(addr.wrapping_add(bytes - 1))
+}
+
+#[inline]
+fn touches_low_hole(addr: u32, bytes: u32) -> bool {
+    low_ram_hole(addr) || low_ram_hole(addr.wrapping_add(bytes - 1))
 }
 
 pub const VGA_LFB_ADDRESS: u32 = 0xE0000000;
@@ -84,39 +110,37 @@ pub fn in_svga_lfb(addr: u32) -> bool {
 #[no_mangle]
 pub fn read8(addr: u32) -> i32 {
     if in_mapped_range(addr) {
-        if in_svga_lfb(addr) {
+        if low_ram_hole(addr) {
+            0xFF
+        } else if in_svga_lfb(addr) {
             unsafe { *vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as i32 }
-        }
-        else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
+        } else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
             apic::read32((addr - APIC_MEM_ADDRESS) & !3) as i32 >> 8 * (addr & 3) & 0xFF
-        }
-        else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
+        } else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
             ioapic::read32((addr - IOAPIC_MEM_ADDRESS) & !3) as i32 >> 8 * (addr & 3) & 0xFF
-        }
-        else {
+        } else {
             unsafe { ext::mmap_read8(addr) }
         }
-    }
-    else {
+    } else {
         read8_no_mmap_check(addr)
     }
 }
-pub fn read8_no_mmap_check(addr: u32) -> i32 { unsafe { *mem8.offset(addr as isize) as i32 } }
+pub fn read8_no_mmap_check(addr: u32) -> i32 {
+    unsafe { *mem8.offset(addr as isize) as i32 }
+}
 
 #[no_mangle]
 pub fn read16(addr: u32) -> i32 {
-    if in_mapped_range(addr) {
+    if mapped_width(addr, 2) {
         if in_svga_lfb(addr) {
             unsafe {
                 ptr::read_unaligned(vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *const u16)
                     as i32
             }
+        } else {
+            read8(addr) | read8(addr.wrapping_add(1)) << 8
         }
-        else {
-            read8(addr) | read8(addr + 1) << 8
-        }
-    }
-    else {
+    } else {
         read16_no_mmap_check(addr)
     }
 }
@@ -126,23 +150,24 @@ pub fn read16_no_mmap_check(addr: u32) -> i32 {
 
 #[no_mangle]
 pub fn read32s(addr: u32) -> i32 {
-    if in_mapped_range(addr) {
-        if in_svga_lfb(addr) {
+    if mapped_width(addr, 4) {
+        if addr & 4095 > 4092 || touches_low_hole(addr, 4) {
+            read8(addr)
+                | read8(addr.wrapping_add(1)) << 8
+                | read8(addr.wrapping_add(2)) << 16
+                | read8(addr.wrapping_add(3)) << 24
+        } else if in_svga_lfb(addr) {
             unsafe {
                 ptr::read_unaligned(vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *const i32)
             } // XXX
-        }
-        else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
+        } else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
             apic::read32(addr - APIC_MEM_ADDRESS) as i32
-        }
-        else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
+        } else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
             ioapic::read32(addr - IOAPIC_MEM_ADDRESS) as i32
-        }
-        else {
+        } else {
             unsafe { ext::mmap_read32(addr) }
         }
-    }
-    else {
+    } else {
         read32_no_mmap_check(addr)
     }
 }
@@ -151,36 +176,34 @@ pub fn read32_no_mmap_check(addr: u32) -> i32 {
 }
 
 pub unsafe fn read64s(addr: u32) -> i64 {
-    if in_mapped_range(addr) {
+    if mapped_width(addr, 8) {
         if in_svga_lfb(addr) {
             ptr::read_unaligned(vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *const i64)
+        } else {
+            // Preserve the low dword's bits without sign-extending into the
+            // high dword. MMIO exposes two independent 32-bit bus reads.
+            read32s(addr) as u32 as i64 | (read32s(addr.wrapping_add(4)) as i64) << 32
         }
-        else {
-            read32s(addr) as i64 | (read32s(addr + 4) as i64) << 32
-        }
-    }
-    else {
+    } else {
         ptr::read_unaligned(mem8.offset(addr as isize) as *const i64)
     }
 }
 
 pub unsafe fn read128(addr: u32) -> reg128 {
-    if in_mapped_range(addr) {
+    if mapped_width(addr, 16) {
         if in_svga_lfb(addr) {
             ptr::read_unaligned(vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *const reg128)
-        }
-        else {
+        } else {
             reg128 {
                 i32: [
                     read32s(addr + 0),
-                    read32s(addr + 4),
-                    read32s(addr + 8),
-                    read32s(addr + 12),
+                    read32s(addr.wrapping_add(4)),
+                    read32s(addr.wrapping_add(8)),
+                    read32s(addr.wrapping_add(12)),
                 ],
             }
         }
-    }
-    else {
+    } else {
         ptr::read_unaligned(mem8.offset(addr as isize) as *const reg128)
     }
 }
@@ -189,11 +212,15 @@ pub unsafe fn read128(addr: u32) -> reg128 {
 pub unsafe fn write8(addr: u32, value: i32) {
     if in_mapped_range(addr) {
         mmap_write8(addr, value & 0xFF);
-    }
-    else {
-        jit::jit_dirty_page(Page::page_of(addr));
-        write8_no_mmap_or_dirty_check(addr, value);
+    } else {
+        write8_ram(addr, value);
     };
+}
+
+#[inline]
+pub unsafe fn write8_ram(addr: u32, value: i32) {
+    jit::jit_dirty_page(Page::page_of(addr));
+    write8_no_mmap_or_dirty_check(addr, value);
 }
 
 pub unsafe fn write8_no_mmap_or_dirty_check(addr: u32, value: i32) {
@@ -202,13 +229,16 @@ pub unsafe fn write8_no_mmap_or_dirty_check(addr: u32, value: i32) {
 
 #[no_mangle]
 pub unsafe fn write16(addr: u32, value: i32) {
-    if in_mapped_range(addr) {
+    if mapped_width(addr, 2) {
         mmap_write16(addr, value & 0xFFFF);
-    }
-    else {
-        jit::jit_dirty_cache_small(addr, addr + 2);
-        write16_no_mmap_or_dirty_check(addr, value);
+    } else {
+        write16_ram(addr, value);
     };
+}
+#[inline]
+pub unsafe fn write16_ram(addr: u32, value: i32) {
+    jit::jit_dirty_cache_small(addr, addr + 2);
+    write16_no_mmap_or_dirty_check(addr, value);
 }
 pub unsafe fn write16_no_mmap_or_dirty_check(addr: u32, value: i32) {
     ptr::write_unaligned(mem8.offset(addr as isize) as *mut u16, value as u16)
@@ -216,13 +246,17 @@ pub unsafe fn write16_no_mmap_or_dirty_check(addr: u32, value: i32) {
 
 #[no_mangle]
 pub unsafe fn write32(addr: u32, value: i32) {
-    if in_mapped_range(addr) {
+    if mapped_width(addr, 4) {
         mmap_write32(addr, value);
+    } else {
+        write32_ram(addr, value);
     }
-    else {
-        jit::jit_dirty_cache_small(addr, addr + 4);
-        write32_no_mmap_or_dirty_check(addr, value);
-    }
+}
+
+#[inline]
+pub unsafe fn write32_ram(addr: u32, value: i32) {
+    jit::jit_dirty_cache_small(addr, addr + 4);
+    write32_no_mmap_or_dirty_check(addr, value);
 }
 
 pub unsafe fn write32_no_mmap_or_dirty_check(addr: u32, value: i32) {
@@ -294,59 +328,87 @@ pub unsafe fn memcpy_into_svga_lfb(src_addr: u32, dst_addr: u32, count: u32) {
 }
 
 pub unsafe fn mmap_write8(addr: u32, value: i32) {
+    if low_ram_hole(addr) {
+        return;
+    }
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         *vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) = value as u8
-    }
-    else {
+    } else {
         ext::mmap_write8(addr, value)
     }
 }
 pub unsafe fn mmap_write16(addr: u32, value: i32) {
+    if addr & 4095 > 4094 || touches_low_hole(addr, 2) {
+        write8(addr, value & 0xFF);
+        write8(addr.wrapping_add(1), value >> 8 & 0xFF);
+        return;
+    }
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         ptr::write_unaligned(
             vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *mut u16,
             value as u16,
         )
-    }
-    else {
+    } else {
         ext::mmap_write16(addr, value)
     }
 }
 pub unsafe fn mmap_write32(addr: u32, value: i32) {
+    if addr & 4095 > 4092 || touches_low_hole(addr, 4) {
+        for index in 0..4 {
+            write8(addr.wrapping_add(index), value >> (index * 8) & 0xFF);
+        }
+        return;
+    }
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         ptr::write_unaligned(
             vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *mut i32,
             value,
         )
-    }
-    else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
+    } else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
         apic::write32(addr - APIC_MEM_ADDRESS, value as u32);
         handle_irqs();
-    }
-    else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
+    } else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
         ioapic::write32(addr - IOAPIC_MEM_ADDRESS, value as u32);
         handle_irqs();
-    }
-    else {
+    } else {
         ext::mmap_write32(addr, value)
     }
 }
 pub unsafe fn mmap_write64(addr: u32, value: u64) {
+    if addr & 4095 > 4088 || touches_low_hole(addr, 8) {
+        for index in 0..8 {
+            write8(
+                addr.wrapping_add(index),
+                (value >> (index * 8)) as u8 as i32,
+            );
+        }
+        return;
+    }
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         ptr::write_unaligned(
             vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *mut u64,
             value,
         )
-    }
-    else {
+    } else {
         ext::mmap_write64(addr, value as i32, (value >> 32) as i32)
     }
 }
 pub unsafe fn mmap_write128(addr: u32, v0: u64, v1: u64) {
+    if addr & 4095 > 4080 || touches_low_hole(addr, 16) {
+        for (offset, value) in [(0, v0), (8, v1)] {
+            for index in 0..8 {
+                write8(
+                    addr.wrapping_add(offset + index),
+                    (value >> (index * 8)) as u8 as i32,
+                );
+            }
+        }
+        return;
+    }
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         ptr::write_unaligned(
@@ -357,8 +419,7 @@ pub unsafe fn mmap_write128(addr: u32, v0: u64, v1: u64) {
             vga_mem8.offset((addr - VGA_LFB_ADDRESS + 8) as isize) as *mut u64,
             v1,
         )
-    }
-    else {
+    } else {
         ext::mmap_write128(
             addr,
             v0 as i32,

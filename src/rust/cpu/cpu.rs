@@ -449,29 +449,35 @@ pub unsafe fn switch_cs_real_mode(selector: i32) {
     update_cs_size(false);
 }
 
-unsafe fn get_tss_ss_esp(dpl: u8) -> OrPageFault<(i32, i32)> {
-    Ok(if *tss_size_32 {
-        let tss_stack_offset = ((dpl << 3) + 4) as u32;
-        if tss_stack_offset + 7 > *segment_limits.offset(TR as isize) {
-            panic!("#TS handler");
-        }
-        let addr = translate_address_system_read(
-            *segment_offsets.offset(TR as isize) + tss_stack_offset as i32,
-        )?;
-        dbg_assert!(addr & 0xFFF <= 0x1000 - 6);
-        (memory::read16(addr + 4), memory::read32s(addr))
+// Descriptor/TSS reads are supervisor accesses and can straddle guest pages.
+unsafe fn read_system(addr: i32, size: u32) -> OrPageFault<u64> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::read_system(addr as u32 as u64, (size * 8) as u8).map_err(|fault| crate::x64::system::raise(fault));
     }
-    else {
-        let tss_stack_offset = ((dpl << 2) + 2) as u32;
-        if tss_stack_offset + 3 > *segment_limits.offset(TR as isize) {
-            panic!("#TS handler");
-        }
-        let addr = translate_address_system_read(
-            *segment_offsets.offset(TR as isize) + tss_stack_offset as i32,
-        )?;
-        dbg_assert!(addr & 0xFFF <= 0x1000 - 4);
-        (memory::read16(addr + 2), memory::read16(addr))
-    })
+    let first = translate_address_system_read(addr)?;
+    if (addr as u32 & 0xFFF) + size <= 4096 {
+        return Ok(match size { 8 => memory::read64s(first) as u64,
+            4 => memory::read32s(first) as u32 as u64,
+            2 => memory::read16(first) as u64, _ => unreachable!() });
+    }
+    let mut physical = [0u32; 8];
+    for i in 0..size { physical[i as usize] = translate_address_system_read(addr.wrapping_add(i as i32))?; }
+    let mut value = 0;
+    for i in 0..size { value |= (memory::read8(physical[i as usize]) as u64) << (i * 8); }
+    Ok(value)
+}
+
+unsafe fn get_tss_ss_esp(dpl: u8) -> OrPageFault<(i32, i32)> {
+    let offset = if *tss_size_32 { ((dpl as u32) << 3) + 4 } else { ((dpl as u32) << 2) + 2 };
+    let size = if *tss_size_32 { 4 } else { 2 };
+    if offset + size + 1 > *segment_limits.offset(TR as isize) {
+        trigger_ts(*sreg.offset(TR as isize) as i32 & !3);
+        return Err(());
+    }
+    let addr = (*segment_offsets.offset(TR as isize)).wrapping_add(offset as i32);
+    let esp = read_system(addr, size)? as i32;
+    let ss = read_system(addr.wrapping_add(size as i32), 2)? as i32;
+    Ok((ss, esp))
 }
 
 pub unsafe fn iret16() { iret(true); }
@@ -509,7 +515,8 @@ pub unsafe fn iret_checked(is_16: bool) -> bool {
 
     if !*protected_mode || (vm86_mode() && getiopl() == 3) {
         if new_eip as u32 & 0xFFFF0000 != 0 {
-            panic!("#GP handler");
+            trigger_gp(0);
+            return false;
         }
 
         switch_cs_real_mode(new_cs);
@@ -605,33 +612,20 @@ pub unsafe fn iret_checked(is_16: bool) -> bool {
     let cs_selector = SegmentSelector::of_u16(new_cs as u16);
     let cs_descriptor = match return_on_pagefault!(lookup_segment_selector(cs_selector), false) {
         Ok((desc, _)) => desc,
-        Err(SelectorNullOrInvalid::IsNull) => panic!("Unimplemented: CS selector is null"),
+        Err(SelectorNullOrInvalid::IsNull) => { trigger_gp(0); return false; },
         Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
-            panic!("Unimplemented: CS selector is invalid")
+            trigger_gp(new_cs & !3); return false;
         },
     };
 
-    if new_eip as u32 > cs_descriptor.effective_limit() {
-        dbg_log!(
-            "#gp iret: new_eip > cs_descriptor.effective_limit, new_eip={:x} cs_descriptor.effective_limit={:x}",
-            new_eip as u32,
-            cs_descriptor.effective_limit()
-        );
-        trigger_gp(new_cs & !3);
-        return false;
-    }
-
-    if !cs_descriptor.is_present() {
-        panic!("not present");
-    }
-    if !cs_descriptor.is_executable() {
-        panic!("not exec");
+    if cs_descriptor.is_system() || !cs_descriptor.is_executable() {
+        trigger_gp(new_cs & !3); return false;
     }
     if cs_selector.rpl() < *cpl {
-        panic!("rpl < cpl");
+        trigger_gp(new_cs & !3); return false;
     }
     if cs_descriptor.is_dc() && cs_descriptor.dpl() > cs_selector.rpl() {
-        panic!("conforming and dpl > rpl");
+        trigger_gp(new_cs & !3); return false;
     }
 
     if !cs_descriptor.is_dc() && cs_selector.rpl() != cs_descriptor.dpl() {
@@ -643,6 +637,9 @@ pub unsafe fn iret_checked(is_16: bool) -> bool {
         trigger_gp(new_cs & !3);
         return false;
     }
+
+    if !cs_descriptor.is_present() { trigger_np(new_cs & !3); return false; }
+    if new_eip as u32 > cs_descriptor.effective_limit() { trigger_gp(0); return false; }
 
     if cs_selector.rpl() > *cpl {
         // outer privilege return
@@ -791,6 +788,22 @@ pub unsafe fn call_interrupt_vector_checked(
     is_software_int: bool,
     error_code: Option<i32>,
 ) -> bool {
+    crate::cpu::exceptions::interrupt(interrupt_nr, is_software_int, error_code)
+}
+
+fn stack_range_valid(start: u32, size: u32, limit: u32, expand_down: bool, wide_stack: bool) -> bool {
+    let Some(last) = start.checked_add(size - 1) else { return false; };
+    if expand_down { start > limit && last <= if wide_stack { u32::MAX } else { 0xFFFF } }
+    else { last <= limit }
+}
+
+pub unsafe fn deliver_interrupt(interrupt_nr: i32, is_software_int: bool, error_code: Option<i32>) -> bool {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return match crate::x64::system::interrupt(interrupt_nr as u8, is_software_int, error_code.map(|c| c as u32)) {
+            Ok(()) => true,
+            Err(fault) => { crate::x64::system::raise(fault); false },
+        };
+    }
     let mut completed = true;
     if *protected_mode {
         if vm86_mode() && *cr.offset(4) & CR4_VME != 0 {
@@ -807,15 +820,12 @@ pub unsafe fn call_interrupt_vector_checked(
         if interrupt_nr << 3 | 7 > *idtr_size {
             dbg_log!("interrupt_nr={:x} idtr_size={:x}", interrupt_nr, *idtr_size);
             dbg_trace();
-            panic!("Unimplemented: #GP handler");
+            trigger_gp(interrupt_nr << 3 | 2);
+            return false;
         }
 
-        let descriptor_address = return_on_pagefault!(
-            translate_address_system_read(*idtr_offset + (interrupt_nr << 3)),
-            false
-        );
-
-        let descriptor = InterruptDescriptor::of_u64(memory::read64s(descriptor_address) as u64);
+        let descriptor = InterruptDescriptor::of_u64(return_on_pagefault!(
+            read_system((*idtr_offset).wrapping_add(interrupt_nr << 3), 8), false));
 
         let mut offset = descriptor.offset();
         let selector = descriptor.selector() as i32;
@@ -840,7 +850,8 @@ pub unsafe fn call_interrupt_vector_checked(
                 descriptor.raw
             );
             dbg_trace();
-            panic!("Unimplemented: #GP handler");
+            trigger_gp(interrupt_nr << 3 | 2);
+            return false;
         }
 
         if !descriptor.reserved_zeros_are_valid() {
@@ -850,7 +861,8 @@ pub unsafe fn call_interrupt_vector_checked(
                 descriptor.raw
             );
             dbg_trace();
-            panic!("Unimplemented: #GP handler");
+            trigger_gp(interrupt_nr << 3 | 2);
+            return false;
         }
 
         if !descriptor.is_present() {
@@ -869,7 +881,6 @@ pub unsafe fn call_interrupt_vector_checked(
                 dpl
             );
             dbg_trace();
-            dbg_assert!(offset == 0, "TODO: Check this (likely #GP)");
             return do_task_switch_checked(selector, error_code, TaskSwitchSource::CallOrInt);
         }
 
@@ -880,24 +891,28 @@ pub unsafe fn call_interrupt_vector_checked(
             Ok((desc, _)) => desc,
             Err(SelectorNullOrInvalid::IsNull) => {
                 dbg_log!("is null");
-                panic!("Unimplemented: #GP handler");
+                trigger_gp(selector & !3);
+                return false;
             },
             Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
                 dbg_log!("is invalid");
-                panic!("Unimplemented: #GP handler (error code)");
+                trigger_gp(selector & !3);
+                return false;
             },
         };
 
-        dbg_assert!(offset as u32 <= cs_segment_descriptor.effective_limit());
-
-        if !cs_segment_descriptor.is_executable() || cs_segment_descriptor.dpl() > *cpl {
+        if cs_segment_descriptor.is_system() || !cs_segment_descriptor.is_executable() || cs_segment_descriptor.dpl() > *cpl {
             dbg_log!("not exec");
-            panic!("Unimplemented: #GP handler");
+            trigger_gp(selector & !3);
+            return false;
         }
         if !cs_segment_descriptor.is_present() {
-            // kvm-unit-test
-            dbg_log!("not present");
-            trigger_np(interrupt_nr << 3 | 2);
+            trigger_np(selector & !3);
+            return false;
+        }
+
+        if offset as u32 > cs_segment_descriptor.effective_limit() {
+            trigger_gp(0);
             return false;
         }
 
@@ -908,7 +923,8 @@ pub unsafe fn call_interrupt_vector_checked(
             // interrupt from vm86 mode
 
             if old_flags & FLAG_VM != 0 && cs_segment_descriptor.dpl() != 0 {
-                panic!("Unimplemented: #GP handler for non-0 cs segment dpl when in vm86 mode");
+                trigger_gp(selector & !3);
+                return false;
             }
 
             let (new_ss, new_esp) =
@@ -921,28 +937,29 @@ pub unsafe fn call_interrupt_vector_checked(
                     Err(
                         SelectorNullOrInvalid::IsNull | SelectorNullOrInvalid::OutsideOfTableLimit,
                     ) => {
-                        panic!("Unimplemented: #TS handler");
+                        trigger_ts(new_ss & !3);
+                        return false;
                     },
                 };
 
-            if ss_segment_descriptor.is_dc() {
-                dbg_assert!(new_esp as u32 > ss_segment_descriptor.effective_limit());
+            if ss_segment_descriptor.is_system() || !ss_segment_descriptor.is_writable() {
+                trigger_ts(new_ss & !3);
+                return false;
             }
-            else {
-                dbg_assert!(new_esp as u32 - 1 <= ss_segment_descriptor.effective_limit());
-            }
-            dbg_assert!(!ss_segment_descriptor.is_system() && ss_segment_descriptor.is_writable());
 
             if ss_segment_selector.rpl() != cs_segment_descriptor.dpl() {
-                panic!("Unimplemented: #TS handler");
+                trigger_ts(new_ss & !3);
+                return false;
             }
             if ss_segment_descriptor.dpl() != cs_segment_descriptor.dpl()
                 || !ss_segment_descriptor.is_rw()
             {
-                panic!("Unimplemented: #TS handler");
+                trigger_ts(new_ss & !3);
+                return false;
             }
             if !ss_segment_descriptor.is_present() {
-                panic!("Unimplemented: #TS handler");
+                trigger_ss(new_ss & !3);
+                return false;
             }
 
             let old_esp = read_reg32(ESP);
@@ -953,6 +970,13 @@ pub unsafe fn call_interrupt_vector_checked(
             let bytes_per_arg = if descriptor.is_32() { 4 } else { 2 };
 
             let stack_space = bytes_per_arg * (5 + error_code_space + vm86_space);
+            let stack_offset = (new_esp as u32).wrapping_sub(stack_space as u32)
+                & if ss_segment_descriptor.is_32() { u32::MAX } else { 0xFFFF };
+            if !stack_range_valid(stack_offset, stack_space as u32,
+                ss_segment_descriptor.effective_limit(), ss_segment_descriptor.is_dc(), ss_segment_descriptor.is_32()) {
+                trigger_ss(new_ss & !3);
+                return false;
+            }
             let new_stack_pointer = ss_segment_descriptor.base()
                 + if ss_segment_descriptor.is_32() {
                     new_esp - stack_space
@@ -1024,7 +1048,12 @@ pub unsafe fn call_interrupt_vector_checked(
 
             let stack_space = bytes_per_arg * (3 + error_code_space);
 
-            // XXX: with current cpl or with cpl 0?
+            let stack_offset = (get_stack_pointer(-stack_space) as u32).wrapping_sub(*segment_offsets.offset(SS as isize) as u32);
+            if !stack_range_valid(stack_offset, stack_space as u32,
+                *segment_limits.offset(SS as isize), *segment_access_bytes.offset(SS as isize) & 4 != 0, *stack_size_32) {
+                trigger_ss(0);
+                return false;
+            }
             return_on_pagefault!(
                 writable_or_pagefault(get_stack_pointer(-stack_space), stack_space),
                 false
@@ -1033,7 +1062,8 @@ pub unsafe fn call_interrupt_vector_checked(
         // no exceptions below
         }
         else {
-            panic!("Unimplemented: #GP handler");
+            trigger_gp(selector & !3);
+            return false;
         }
 
         // XXX: #SS if stack would cross stack limit
@@ -1504,15 +1534,20 @@ pub unsafe fn far_jump_checked(eip: i32, selector: i32, is_call: bool, is_osize_
             }
         }
 
-        dbg_assert!((eip as u32) <= info.effective_limit(), "todo: #gp");
-
+        let long = crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 && info.flags() & 2 != 0;
+        if long && info.is_32() || !long && eip as u32 > info.effective_limit() {
+            trigger_gp(0);
+            return false;
+        }
+        *x64_cs_long = long as u8;
+        *x64_rip_hi = 0;
         update_cs_size(info.is_32());
 
         *segment_is_null.offset(CS as isize) = false;
         *segment_limits.offset(CS as isize) = info.effective_limit();
         *segment_access_bytes.offset(CS as isize) = info.access_byte();
 
-        *segment_offsets.offset(CS as isize) = info.base();
+        *segment_offsets.offset(CS as isize) = if long { 0 } else { info.base() };
         *sreg.offset(CS as isize) = selector as u16 & !3 | *cpl as u16;
 
         *instruction_pointer = get_seg_cs() + eip;
@@ -1564,7 +1599,6 @@ pub unsafe fn far_return_checked(
     };
 
     if info.is_system() {
-        dbg_assert!(false, "is system in far return");
         trigger_gp(selector & !3);
         return false;
     }
@@ -1597,6 +1631,13 @@ pub unsafe fn far_return_checked(
         dbg_log!("#NP for loading not-present in cs sel={:x}", selector);
         dbg_trace();
         trigger_np(selector & !3);
+        return false;
+    }
+
+    let long = crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0
+        && info.flags() & 2 != 0;
+    if long && info.is_32() || !long && eip as u32 > info.effective_limit() {
+        trigger_gp(0);
         return false;
     }
 
@@ -1669,13 +1710,15 @@ pub unsafe fn far_return_checked(
 
     //dbg_assert(*cpl == info.dpl);
 
+    *x64_cs_long = long as u8;
+    *x64_rip_hi = 0;
     update_cs_size(info.is_32());
 
     *segment_is_null.offset(CS as isize) = false;
     *segment_limits.offset(CS as isize) = info.effective_limit();
     *segment_access_bytes.offset(CS as isize) = info.access_byte();
 
-    *segment_offsets.offset(CS as isize) = info.base();
+    *segment_offsets.offset(CS as isize) = if long { 0 } else { info.base() };
     *sreg.offset(CS as isize) = selector as u16;
     dbg_assert!(selector & 3 == *cpl as i32);
 
@@ -2012,6 +2055,10 @@ pub unsafe fn translate_address(
     user: bool,
     side_effects: bool,
 ) -> OrPageFault<u32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::legacy_translate(address as u32,
+            if for_writing { crate::x64::paging::Access::Write } else { crate::x64::paging::Access::Read }, user, side_effects);
+    }
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     if entry
         & (TLB_VALID
@@ -2025,6 +2072,10 @@ pub unsafe fn translate_address(
 }
 
 pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPageFault<(u32, bool)> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::legacy_translate(address as u32, crate::x64::paging::Access::Write, *cpl == 3, true)
+            .map(|address| (address, false));
+    }
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     let user = *cpl == 3;
     if entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID {
@@ -2325,7 +2376,7 @@ pub unsafe fn trigger_pagefault(addr: i32, present: bool, write: bool, user: boo
     tlb_data[page as usize] = 0;
     let error_code = (user as i32) << 2 | (write as i32) << 1 | present as i32;
     *instruction_pointer = *previous_ip;
-    call_interrupt_vector(CPU_EXCEPTION_PF, false, Some(error_code));
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_PF, Some(error_code));
 }
 
 pub fn tlb_set_has_code(physical_page: Page, has_code: bool) {
@@ -2396,13 +2447,17 @@ pub fn check_tlb_invariants() {
 pub const DISABLE_EIP_TRANSLATION_OPTIMISATION: bool = false;
 
 pub unsafe fn read_imm8() -> OrPageFault<i32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        let value = crate::x64::memory::fetch(*instruction_pointer as u32 as u64).map_err(|fault| crate::x64::system::raise(fault))?;
+        *instruction_pointer = (*instruction_pointer).wrapping_add(1);
+        return Ok(value as i32);
+    }
     let eip = *instruction_pointer;
     if DISABLE_EIP_TRANSLATION_OPTIMISATION || 0 != eip & !0xFFF ^ *last_virt_eip {
         *eip_phys = (translate_address_read(eip)? ^ eip as u32) as i32;
         *last_virt_eip = eip & !0xFFF
     }
-    dbg_assert!(!memory::in_mapped_range((*eip_phys ^ eip) as u32));
-    let data8 = *memory::mem8.offset((*eip_phys ^ eip) as isize) as i32;
+    let data8 = memory::read8((*eip_phys ^ eip) as u32);
     *instruction_pointer = eip + 1;
     return Ok(data8);
 }
@@ -2410,6 +2465,7 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
 pub unsafe fn read_imm8s() -> OrPageFault<i32> { return Ok(read_imm8()? << 24 >> 24); }
 
 pub unsafe fn read_imm16() -> OrPageFault<i32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 { return Ok(read_imm8()? | read_imm8()? << 8); }
     // Two checks in one comparison:
     // 1. Did the high 20 bits of eip change
     // or 2. Are the low 12 bits of eip 0xFFF (and this read crosses a page boundary)
@@ -2426,6 +2482,7 @@ pub unsafe fn read_imm16() -> OrPageFault<i32> {
 }
 
 pub unsafe fn read_imm32s() -> OrPageFault<i32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 { return Ok(read_imm16()? | read_imm16()? << 16); }
     // Analogue to the above comment
     if DISABLE_EIP_TRANSLATION_OPTIMISATION
         || (*instruction_pointer ^ *last_virt_eip) as u32 > 0xFFC
@@ -2464,7 +2521,7 @@ pub unsafe fn lookup_segment_selector(
         )
     };
 
-    if selector.descriptor_offset() as u32 > table_limit {
+    if selector.descriptor_offset() as u32 + 7 > table_limit {
         dbg_log!(
             "segment outside of table limit: selector={:x} offset={:x} isgdt={} table_limit={:x}",
             selector.raw,
@@ -2477,9 +2534,7 @@ pub unsafe fn lookup_segment_selector(
 
     let descriptor_address = selector.descriptor_offset() as i32 + table_offset as i32;
 
-    let descriptor = SegmentDescriptor::of_u64(memory::read64s(translate_address_system_read(
-        descriptor_address,
-    )?) as u64);
+    let descriptor = SegmentDescriptor::of_u64(read_system(descriptor_address, 8)?);
 
     Ok(Ok((descriptor, descriptor_address)))
 }
@@ -2734,13 +2789,18 @@ pub unsafe fn get_seg(segment: i32) -> OrPageFault<i32> {
 }
 
 pub unsafe fn set_cr0(cr0: i32) {
+    if crate::x64::state::efer() & (crate::x64::state::EFER_LME | crate::x64::state::EFER_LMA) != 0 {
+        if let Err(fault) = crate::x64::system::write_cr(0, cr0 as u32 as u64) { crate::x64::system::raise(fault); }
+        return;
+    }
     let old_cr0 = *cr;
 
     if old_cr0 & CR0_AM == 0 && cr0 & CR0_AM != 0 {
         dbg_log!("Warning: Unimplemented: cr0 alignment mask");
     }
     if (cr0 & (CR0_PE | CR0_PG)) == CR0_PG {
-        panic!("cannot load PG without PE");
+        trigger_gp(0);
+        return;
     }
 
     *cr = cr0;
@@ -2750,7 +2810,7 @@ pub unsafe fn set_cr0(cr0: i32) {
         full_clear_tlb();
     }
 
-    if *cr.offset(4) & CR4_PAE != 0
+    if *cr.offset(4) & CR4_PAE != 0 && *cr & CR0_PG != 0
         && old_cr0 & (CR0_CD | CR0_NW | CR0_PG) != cr0 & (CR0_CD | CR0_NW | CR0_PG)
     {
         load_pdpte(*cr.offset(3))
@@ -2761,12 +2821,16 @@ pub unsafe fn set_cr0(cr0: i32) {
 }
 
 pub unsafe fn set_cr3(mut cr3: i32) {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Err(fault) = crate::x64::system::write_cr(3, cr3 as u32 as u64) { crate::x64::system::raise(fault); }
+        return;
+    }
     if false {
         dbg_log!("cr3 <- {:x}", cr3);
     }
     if *cr.offset(4) & CR4_PAE != 0 {
         cr3 &= !0b1111;
-        load_pdpte(cr3);
+        if *cr & CR0_PG != 0 { load_pdpte(cr3); }
     }
     else {
         cr3 &= !0b111111100111;
@@ -2986,8 +3050,14 @@ pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
 }
 
 pub unsafe fn cycle_internal() -> bool {
+    if crate::x64::state::mode().is_long() {
+        let attempt = crate::x64::cache::run(4096);
+        if attempt.retired == 0 { run_long_instruction(); }
+        return attempt.submitted;
+    }
     profiler::stat_increment(stat::CYCLE_INTERNAL);
-    let submitted = {
+    let wide = crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0;
+    let submitted = if wide { false } else {
         if crate::ir::runtime::diagnostics::enabled() {
             let _scope = crate::ir::runtime::diagnostics::Scope::new(
                 crate::ir::runtime::diagnostics::Stage::Scheduler,
@@ -3004,7 +3074,10 @@ pub unsafe fn cycle_internal() -> bool {
     if submitted {
         return true;
     }
-    if crate::ir::runtime::cache::execute() {
+    let native_before = *instruction_counter;
+    let interpreted_before = crate::cpu::execution::jit_dispatches();
+    if !wide && crate::ir::runtime::cache::execute() {
+        crate::cpu::execution::note_native_retired((*instruction_counter).wrapping_sub(native_before), interpreted_before);
         return false;
     }
     // The interpreter can call devices and mutate raw RAM.
@@ -3053,13 +3126,18 @@ pub unsafe fn cycle_internal() -> bool {
 }
 
 pub unsafe fn get_phys_eip() -> OrPageFault<u32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        let address = crate::x64::memory::translate(*instruction_pointer as u32 as u64, crate::x64::paging::Access::Execute, false, false)
+            .map_err(|fault| crate::x64::system::raise(fault))?;
+        let page = crate::x64::physical::ram_page(address & !4095).map_err(|_| crate::x64::system::raise(crate::x64::memory::Fault::gp()))?;
+        return Ok(page.backing | (address & 4095) as u32);
+    }
     let eip = *instruction_pointer;
     if 0 != eip & !0xFFF ^ *last_virt_eip {
         *eip_phys = (translate_address_read(eip)? ^ eip as u32) as i32;
         *last_virt_eip = eip & !0xFFF
     }
     let phys_addr = (*eip_phys ^ eip) as u32;
-    dbg_assert!(!memory::in_mapped_range(phys_addr));
     return Ok(phys_addr);
 }
 
@@ -3079,7 +3157,6 @@ unsafe fn jit_run_interpreted_diagnostic(phys_addr: u32) {
 
 unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
     profiler::stat_increment(stat::RUN_INTERPRETED);
-    dbg_assert!(!memory::in_mapped_range(phys_addr));
 
     jit_block_boundary = false;
     // IR hotness is collected at outer dispatch. A same-page interpreted loop
@@ -3092,14 +3169,19 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
     loop {
         i += 1;
         let start_eip = *instruction_pointer;
-        let opcode = *memory::mem8.offset(phys_addr as isize) as i32;
+        // A remapped low RAM page is an open bus, never the high RAM backing.
+        // Compatibility mode has already resolved a full physical RAM address.
+        let opcode = if memory::in_mapped_range(phys_addr)
+            && crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0 {
+            memory::read8(phys_addr)
+        } else { *memory::mem8.offset(phys_addr as isize) as i32 };
         *instruction_pointer += 1;
         dbg_assert!(*prefixes == 0);
         let tracked = crate::cpu::execution::is_deterministic();
-        if tracked { crate::cpu::execution::begin_instruction(); }
+        crate::cpu::execution::begin_instruction();
         run_instruction(opcode | (*is_32 as i32) << 8);
+        crate::cpu::execution::finish_instruction();
         if tracked {
-            crate::cpu::execution::finish_instruction();
             if *interrupt_shadow != 0 { *interrupt_shadow -= 1; }
             handle_irqs();
         }
@@ -3113,6 +3195,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
         // for that work too; at most that one instruction exceeds a slice.
         if (budget != u32::MAX && i + (*instruction_counter).wrapping_sub(before) >= budget)
             || jit_block_boundary
+            || crate::x64::state::mode().is_long()
             || Page::page_of(start_eip as u32) != Page::page_of(*instruction_pointer as u32)
                 // Limit the number of iterations, as jumps within the same page are not counted as
                 // block boundaries for the interpreter, but only on the next backwards jump
@@ -3131,6 +3214,26 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
     }
 
     *instruction_counter += i;
+}
+
+/// The wide interpreter is the authoritative fallback until wide native IR
+/// has passed its own admission/differential gates.
+unsafe fn run_long_instruction() {
+    let trap = *flags & FLAG_TRAP != 0;
+    let resume = *flags & FLAG_RF != 0;
+    crate::cpu::execution::begin_instruction();
+    let completed = match crate::x64::debug::begin().and_then(|()| crate::x64::execute::step()) {
+        Ok(()) => true,
+        Err(fault) => { crate::x64::system::raise(fault); false },
+    };
+    crate::cpu::execution::finish_instruction();
+    *instruction_counter = (*instruction_counter).wrapping_add(1);
+    if *interrupt_shadow != 0 { *interrupt_shadow -= 1; }
+    if completed {
+        if resume { *flags &= !FLAG_RF; }
+    }
+    if crate::x64::debug::finish(completed, trap) { crate::cpu::exceptions::trap(1); }
+    handle_irqs();
 }
 
 /// Shared compilation budget, replenished once per machine scheduling round.
@@ -3157,9 +3260,19 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
         // that dispatch as well, so a fault loop cannot monopolize the host.
         let count = *instruction_counter;
         *slice_budget = remaining;
-        if !crate::cpu::execution::is_deterministic() && crate::ir::runtime::schedule::enabled() {
+        if crate::x64::state::mode().is_long() {
+            let attempt = crate::x64::cache::run(remaining);
+            if attempt.retired == 0 { run_long_instruction(); }
+            remaining = remaining.saturating_sub(attempt.retired.max(1));
+            if attempt.submitted { break; }
+            continue;
+        }
+        if !crate::cpu::execution::is_deterministic() && crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0
+            && crate::ir::runtime::schedule::enabled() {
             if crate::ir::runtime::schedule::visit() { break; }
+            let interpreted_before = crate::cpu::execution::jit_dispatches();
             if crate::ir::runtime::cache::execute() {
+                crate::cpu::execution::note_native_retired((*instruction_counter).wrapping_sub(count), interpreted_before);
                 remaining = remaining.saturating_sub((*instruction_counter).wrapping_sub(count).max(1));
                 continue;
             }
@@ -3317,7 +3430,7 @@ pub unsafe fn trigger_de() {
             return;
         }
     }
-    call_interrupt_vector(CPU_EXCEPTION_DE, false, None);
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_DE, None);
 }
 
 #[inline(never)]
@@ -3331,7 +3444,7 @@ pub unsafe fn trigger_ud() {
             return;
         }
     }
-    call_interrupt_vector(CPU_EXCEPTION_UD, false, None);
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_UD, None);
 }
 
 #[inline(never)]
@@ -3345,7 +3458,7 @@ pub unsafe fn trigger_nm() {
             return;
         }
     }
-    call_interrupt_vector(CPU_EXCEPTION_NM, false, None);
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_NM, None);
 }
 
 #[inline(never)]
@@ -3358,7 +3471,7 @@ pub unsafe fn trigger_gp(code: i32) {
             return;
         }
     }
-    call_interrupt_vector(CPU_EXCEPTION_GP, false, Some(code));
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_GP, Some(code));
 }
 
 #[cold]
@@ -3424,10 +3537,16 @@ pub unsafe fn virt_boundary_write32(low: u32, high: u32, value: i32) {
 }
 
 pub unsafe fn safe_read8(addr: i32) -> OrPageFault<i32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::read(addr as u32 as u64, 8, false).map(|value| value as i32).map_err(|fault| crate::x64::system::raise(fault));
+    }
     Ok(memory::read8(translate_address_read(addr)?))
 }
 
 pub unsafe fn safe_read16(addr: i32) -> OrPageFault<i32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::read(addr as u32 as u64, 16, false).map(|value| value as i32).map_err(|fault| crate::x64::system::raise(fault));
+    }
     if addr & 0xFFF == 0xFFF {
         Ok(safe_read8(addr)? | safe_read8(addr + 1)? << 8)
     }
@@ -3437,6 +3556,9 @@ pub unsafe fn safe_read16(addr: i32) -> OrPageFault<i32> {
 }
 
 pub unsafe fn safe_read32s(addr: i32) -> OrPageFault<i32> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::read(addr as u32 as u64, 32, false).map(|value| value as i32).map_err(|fault| crate::x64::system::raise(fault));
+    }
     if addr & 0xFFF >= 0xFFD {
         Ok(safe_read16(addr)? | safe_read16(addr + 2)? << 16)
     }
@@ -3450,6 +3572,9 @@ pub unsafe fn safe_read_f32(addr: i32) -> OrPageFault<f32> {
 }
 
 pub unsafe fn safe_read64s(addr: i32) -> OrPageFault<u64> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::read(addr as u32 as u64, 64, false).map(|value| value as u64).map_err(|fault| crate::x64::system::raise(fault));
+    }
     if addr & 0xFFF > 0x1000 - 8 {
         Ok(safe_read32s(addr)? as u32 as u64 | (safe_read32s(addr + 4)? as u32 as u64) << 32)
     }
@@ -3459,6 +3584,9 @@ pub unsafe fn safe_read64s(addr: i32) -> OrPageFault<u64> {
 }
 
 pub unsafe fn safe_read128s(addr: i32) -> OrPageFault<reg128> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::read128(addr as u32 as u64, false).map(|value| reg128 { u64: [value as u64, (value >> 64) as u64] }).map_err(|fault| crate::x64::system::raise(fault));
+    }
     if addr & 0xFFF > 0x1000 - 16 {
         Ok(reg128 {
             u64: [safe_read64s(addr)?, safe_read64s(addr + 8)?],
@@ -3470,6 +3598,9 @@ pub unsafe fn safe_read128s(addr: i32) -> OrPageFault<reg128> {
 }
 
 pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::write(addr as u32 as u64, 8, value as u64, false).map_err(|fault| crate::x64::system::raise(fault));
+    }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
     if memory::in_mapped_range(phys_addr) {
         memory::mmap_write8(phys_addr, value);
@@ -3487,6 +3618,9 @@ pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
 }
 
 pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::write(addr as u32 as u64, 16, value as u64, false).map_err(|fault| crate::x64::system::raise(fault));
+    }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
     dbg_assert!(value >= 0 && value < 0x10000);
     if addr & 0xFFF == 0xFFF {
@@ -3508,6 +3642,9 @@ pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
 }
 
 pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::write(addr as u32 as u64, 32, value as u64, false).map_err(|fault| crate::x64::system::raise(fault));
+    }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
     if addr & 0xFFF > 0x1000 - 4 {
         virt_boundary_write32(
@@ -3532,6 +3669,9 @@ pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
 }
 
 pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::write(addr as u32 as u64, 64, value as u64, false).map_err(|fault| crate::x64::system::raise(fault));
+    }
     if addr & 0xFFF > 0x1000 - 8 {
         writable_or_pagefault(addr, 8)?;
         safe_write32(addr, value as i32).unwrap();
@@ -3556,6 +3696,9 @@ pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
 }
 
 pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        return crate::x64::memory::write128(addr as u32 as u64, value.u64[0] as u128 | (value.u64[1] as u128) << 64, false).map_err(|fault| crate::x64::system::raise(fault));
+    }
     if addr & 0xFFF > 0x1000 - 16 {
         writable_or_pagefault(addr, 16)?;
         safe_write64(addr, value.u64[0]).unwrap();
@@ -3579,8 +3722,20 @@ pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
     Ok(())
 }
 
+unsafe fn wide_read_write(addr: i32, width: u8, instruction: &dyn Fn(i32) -> i32) -> OrPageFault<()> {
+    let linear = addr as u32 as u64;
+    crate::x64::memory::probe_write(linear, width, false).map_err(|fault| crate::x64::system::raise(fault))?;
+    let value = crate::x64::memory::read(linear, width, false).map_err(|fault| crate::x64::system::raise(fault))?;
+    let result = instruction(value as i32);
+    crate::x64::memory::write(linear, width, result as u32 as u64, false).map_err(|fault| crate::x64::system::raise(fault))
+}
+
 #[inline(always)]
 pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        let _ = wide_read_write(addr, 8, instruction);
+        return;
+    }
     let (phys_addr, can_skip_dirty_page) =
         return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr));
     let x = memory::read8(phys_addr);
@@ -3609,6 +3764,7 @@ pub unsafe fn safe_read_write16_checked(
     addr: i32,
     instruction: &dyn Fn(i32) -> i32,
 ) -> OrPageFault<()> {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 { return wide_read_write(addr, 16, instruction); }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
     if phys_addr & 0xFFF == 0xFFF {
         let phys_addr_high = translate_address_write(addr + 1)?;
@@ -3637,6 +3793,10 @@ pub unsafe fn safe_read_write16_checked(
 
 #[inline(always)]
 pub unsafe fn safe_read_write32(addr: i32, instruction: &dyn Fn(i32) -> i32) {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        let _ = wide_read_write(addr, 32, instruction);
+        return;
+    }
     let (phys_addr, can_skip_dirty_page) =
         return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr));
     if phys_addr & 0xFFF >= 0xFFD {
@@ -3715,33 +3875,39 @@ pub unsafe fn write_mmx_reg64(r: i32, data: u64) {
     };
 }
 
-pub unsafe fn read_xmm_f32(r: i32) -> f32 { return (*reg_xmm.offset(r as isize)).f32[0]; }
+// XMM0..7 retain the legacy ABI; XMM8..15 use the per-core wide bank.
+#[inline]
+unsafe fn xmm_register_pointer(r: i32) -> *mut reg128 {
+    crate::x64::state::xmm_offset(r as usize) as *mut reg128
+}
 
-pub unsafe fn read_xmm32(r: i32) -> i32 { return (*reg_xmm.offset(r as isize)).u32[0] as i32; }
+pub unsafe fn read_xmm_f32(r: i32) -> f32 { return (*xmm_register_pointer(r)).f32[0]; }
 
-pub unsafe fn read_xmm64s(r: i32) -> u64 { (*reg_xmm.offset(r as isize)).u64[0] }
+pub unsafe fn read_xmm32(r: i32) -> i32 { return (*xmm_register_pointer(r)).u32[0] as i32; }
 
-pub unsafe fn read_xmm128s(r: i32) -> reg128 { return *reg_xmm.offset(r as isize); }
+pub unsafe fn read_xmm64s(r: i32) -> u64 { (*xmm_register_pointer(r)).u64[0] }
 
-pub unsafe fn write_xmm_f32(r: i32, data: f32) { (*reg_xmm.offset(r as isize)).f32[0] = data; }
+pub unsafe fn read_xmm128s(r: i32) -> reg128 { return *xmm_register_pointer(r); }
 
-pub unsafe fn write_xmm32(r: i32, data: i32) { (*reg_xmm.offset(r as isize)).i32[0] = data; }
+pub unsafe fn write_xmm_f32(r: i32, data: f32) { (*xmm_register_pointer(r)).f32[0] = data; }
 
-pub unsafe fn write_xmm64(r: i32, data: u64) { (*reg_xmm.offset(r as isize)).u64[0] = data }
-pub unsafe fn write_xmm_f64(r: i32, data: f64) { (*reg_xmm.offset(r as isize)).f64[0] = data }
+pub unsafe fn write_xmm32(r: i32, data: i32) { (*xmm_register_pointer(r)).i32[0] = data; }
+
+pub unsafe fn write_xmm64(r: i32, data: u64) { (*xmm_register_pointer(r)).u64[0] = data }
+pub unsafe fn write_xmm_f64(r: i32, data: f64) { (*xmm_register_pointer(r)).f64[0] = data }
 
 pub unsafe fn write_xmm128(r: i32, i0: i32, i1: i32, i2: i32, i3: i32) {
     let x = reg128 {
         u32: [i0 as u32, i1 as u32, i2 as u32, i3 as u32],
     };
-    *reg_xmm.offset(r as isize) = x;
+    *xmm_register_pointer(r) = x;
 }
 
 pub unsafe fn write_xmm128_2(r: i32, i0: u64, i1: u64) {
-    *reg_xmm.offset(r as isize) = reg128 { u64: [i0, i1] };
+    *xmm_register_pointer(r) = reg128 { u64: [i0, i1] };
 }
 
-pub unsafe fn write_xmm_reg128(r: i32, data: reg128) { *reg_xmm.offset(r as isize) = data; }
+pub unsafe fn write_xmm_reg128(r: i32, data: reg128) { *xmm_register_pointer(r) = data; }
 
 /// Set the fpu tag word to valid and the top-of-stack to 0 on mmx instructions
 #[no_mangle]
@@ -3969,6 +4135,13 @@ pub unsafe fn get_valid_global_tlb_entries_count() -> i32 {
     return result;
 }
 
+#[cold]
+pub unsafe fn trigger_ts(code: i32) {
+    crate::cpu::execution::mark_fault();
+    *instruction_pointer = *previous_ip;
+    crate::cpu::exceptions::fault(10, Some(code));
+}
+
 #[inline(never)]
 pub unsafe fn trigger_np(code: i32) {
     crate::cpu::execution::mark_fault();
@@ -3979,7 +4152,7 @@ pub unsafe fn trigger_np(code: i32) {
             return;
         }
     }
-    call_interrupt_vector(CPU_EXCEPTION_NP, false, Some(code));
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_NP, Some(code));
 }
 
 #[inline(never)]
@@ -3992,7 +4165,7 @@ pub unsafe fn trigger_ss(code: i32) {
             return;
         }
     }
-    call_interrupt_vector(CPU_EXCEPTION_SS, false, Some(code));
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_SS, Some(code));
 }
 
 #[no_mangle]
@@ -4000,12 +4173,18 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 
 #[no_mangle]
 pub unsafe fn handle_irqs() {
+    if crate::cpu::exceptions::delivering() { return; }
+    let core = apic::current_core() as u32;
+    let shutdown = crate::cpu::exceptions::exception_shutdown(core);
+    if shutdown == 2 { return; }
     // NMI: regardless of IF, not while an NMI handler runs (until IRET)
     if *acpi_enabled && !*nmi_blocked && apic::take_nmi() {
+        crate::cpu::exceptions::exception_restore(core, 0);
         *nmi_blocked = true;
         pic_call_irq(CPU_EXCEPTION_NMI as u8);
         return;
     }
+    if shutdown != 0 { return; }
     if *flags & FLAG_INTERRUPT != 0 && *interrupt_shadow == 0 {
         // the 8259 PIC is wired to the bootstrap processor (LINT0 of core 0)
         let pic_irq = apic::acknowledge_pic_irq();
@@ -4085,8 +4264,16 @@ pub fn io_port_write8(port: i32, value: i32) {
 pub fn io_port_write16(port: i32, value: i32) { unsafe { js::io_port_write16(port, value) } }
 pub fn io_port_write32(port: i32, value: i32) { unsafe { js::io_port_write32(port, value) } }
 
+/// Reset shared interrupt routing at a board reset, never on a per-core INIT.
+#[no_mangle]
+pub fn reset_interrupt_controllers() {
+    pic::reset();
+    ioapic::reset();
+}
+
 #[no_mangle]
 pub unsafe fn reset_cpu() {
+    crate::x64::state::reset_extension();
     crate::cpu::fpu::fpu_discard_cache();
     for i in 0..8 {
         *segment_is_null.offset(i) = false;

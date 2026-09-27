@@ -810,6 +810,15 @@ export class V86 {
      */
     save_state(): Promise<ArrayBuffer>;
 
+    /** Save a V7 snapshot, awaiting each bounded chunk before producing the next. */
+    save_state_stream(write: (chunk: Uint8Array) => void | Promise<void>): Promise<void>;
+
+    /** Restore a V7 snapshot. Failed restoration leaves the machine stopped. */
+    restore_state_stream(source: Blob | {
+        size: number;
+        read(offset: number, length: number): Uint8Array | Promise<Uint8Array>;
+    }): Promise<void>;
+
     /**
      * Get current instruction counter
      */
@@ -979,6 +988,9 @@ export class V86 {
      */
     /** CPU Worker mode returns a Promise with a copied buffer. */
     read_memory(offset: number, length: number): Uint8Array | Promise<Uint8Array>;
+
+    /** Read a 36-bit physical range in bounded chunks (default 1 MiB). */
+    read_memory_chunks(offset: number, length: number, chunk_size?: number): AsyncGenerator<Uint8Array, void, unknown>;
 
     /**
      * Writes data to memory at specified offset.

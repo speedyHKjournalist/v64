@@ -70,6 +70,13 @@ static IOAPIC: Mutex<Ioapic> = Mutex::new(Ioapic {
     irq_value: 0,
 });
 
+/// Board reset, unlike an INIT targeted at one processor.
+pub fn reset() {
+    *get_ioapic() = Ioapic { ioredtbl_config: [IOAPIC_CONFIG_MASKED; IOAPIC_IRQ_COUNT],
+        ioredtbl_destination: [0; IOAPIC_IRQ_COUNT], ioregsel: 0, ioapic_id: IOAPIC_ID,
+        irr: 0, irq_value: 0 };
+}
+
 fn get_ioapic() -> MutexGuard<'static, Ioapic> { IOAPIC.try_lock().unwrap() }
 
 #[no_mangle]

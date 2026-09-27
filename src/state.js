@@ -121,7 +121,7 @@ function restore_buffers(obj, buffers)
     dbg_assert(constructor, "Unkown type: " + type);
 
     if(obj["args"] !== undefined) {
-        return new constructor(obj["args"]);
+        return new constructor(restore_buffers(obj["args"], buffers));
     }
 
     const buffer = buffers[obj["buffer_id"]];
@@ -330,4 +330,262 @@ export function restore_state(cpu, state)
         state_object = restore_buffers(state_object, buffers);
         cpu.set_state(state_object);
     }
+}
+
+// V7 is a stream of a small manifest and independently checked records. RAM is
+// packed directly from backing pages into one reusable-size record, never into
+// the V6 packed_memory allocation. Guest physical addresses are only metadata.
+export const STATE_STREAM_CHUNK_SIZE = 1024 * 1024;
+const STREAM_VERSION = 7;
+const STREAM_HEADER_SIZE = 32;
+const STREAM_RECORD_SIZE = 20;
+const STREAM_RAM_CHUNK = STATE_STREAM_CHUNK_SIZE - 4096;
+const STREAM_INFO_LIMIT = 16 * 1024 * 1024;
+
+function stream_error(message)
+{
+    throw new StateLoadError("Invalid V7 snapshot: " + message);
+}
+
+const STREAM_CRC_TABLE = new Uint32Array(256);
+for(let i = 0; i < 256; i++)
+{
+    let value = i;
+    for(let bit = 0; bit < 8; bit++) value = value >>> 1 ^ (value & 1 ? 0xEDB88320 : 0);
+    STREAM_CRC_TABLE[i] = value;
+}
+function stream_crc(bytes)
+{
+    let crc = 0xFFFFFFFF;
+    for(let i = 0; i < bytes.length; i++) crc = crc >>> 8 ^ STREAM_CRC_TABLE[(crc ^ bytes[i]) & 255];
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function stream_record(kind, id, offset, data)
+{
+    const bytes = new Uint8Array(STREAM_RECORD_SIZE + data.length);
+    const words = new DataView(bytes.buffer);
+    words.setUint32(0, kind, true);
+    words.setUint32(4, id, true);
+    words.setUint32(8, offset, true);
+    words.setUint32(12, data.length, true);
+    bytes.set(data, 16);
+    words.setUint32(16 + data.length, stream_crc(bytes.subarray(0, 16 + data.length)), true);
+    return bytes;
+}
+
+// Pulling one chunk at a time also gives the Worker transport real backpressure.
+export function create_state_stream(cpu)
+{
+    const memory_size = cpu.memory_size[0] >>> 0;
+    if(memory_size > cpu.mem8.length || memory_size % 4096) stream_error("RAM size");
+    const bitmap = new Uint8Array(Math.ceil(memory_size / 4096 / 8));
+    let packed_size = 0;
+    for(let page = 0; page < memory_size / 4096; page++)
+    {
+        if(!cpu.is_memory_zeroed(page * 4096, 4096))
+        {
+            bitmap[page >> 3] |= 1 << (page & 7);
+            packed_size += 4096;
+        }
+    }
+    const state = cpu.get_state(true);
+    state[77] = null;
+    state[78] = bitmap;
+    const buffers = [];
+    const manifest = new TextEncoder().encode(JSON.stringify({
+        "state": save_object(state, buffers),
+        "buffers": buffers.map(buffer => buffer.length),
+    }));
+    if(manifest.length > STREAM_INFO_LIMIT) stream_error("manifest too large");
+    const header = new Uint8Array(STREAM_HEADER_SIZE);
+    const words = new DataView(header.buffer);
+    [STATE_MAGIC, STREAM_VERSION, STATE_STREAM_CHUNK_SIZE, manifest.length, buffers.length,
+        memory_size, packed_size, stream_crc(manifest)].forEach((value, index) => words.setUint32(index * 4, value, true));
+    let phase = 0, position = 0, buffer_id = 0, ram_page = 0;
+    return {
+        "next": () => {
+            if(phase === 0) { phase = 1; return header; }
+            if(phase === 1)
+            {
+                if(position < manifest.length)
+                {
+                    const part = manifest.slice(position, position + STATE_STREAM_CHUNK_SIZE);
+                    position += part.length;
+                    return part;
+                }
+                phase = 2;
+                position = 0;
+            }
+            if(phase === 2)
+            {
+                while(buffer_id < buffers.length)
+                {
+                    const buffer = buffers[buffer_id];
+                    if(position < buffer.length)
+                    {
+                        const part = stream_record(1, buffer_id, position,
+                            buffer.subarray(position, position + STATE_STREAM_CHUNK_SIZE - STREAM_RECORD_SIZE));
+                        position += part.length - STREAM_RECORD_SIZE;
+                        return part;
+                    }
+                    buffer_id++;
+                    position = 0;
+                }
+                phase = 3;
+                position = 0;
+            }
+            if(position === packed_size) return null;
+            const length = Math.min(STREAM_RAM_CHUNK, packed_size - position);
+            const data = new Uint8Array(length);
+            for(let offset = 0; offset < length; offset += 4096)
+            {
+                while(!(bitmap[ram_page >> 3] & 1 << (ram_page & 7))) ram_page++;
+                data.set(cpu.mem8.subarray(ram_page * 4096, (ram_page + 1) * 4096), offset);
+                ram_page++;
+            }
+            const result = stream_record(2, 0, position, data);
+            position += length;
+            return result;
+        },
+    };
+}
+
+export async function save_state_stream(cpu, write)
+{
+    if(typeof write !== "function") throw new TypeError("Snapshot writer must be a function");
+    const stream = create_state_stream(cpu);
+    for(let chunk; (chunk = stream["next"]()) !== null;) await write(chunk);
+}
+
+export function state_stream_source(source)
+{
+    if(typeof Blob !== "undefined" && source instanceof Blob)
+    {
+        return { "size": source.size,
+            "read": async (offset, length) => new Uint8Array(await source.slice(offset, offset + length).arrayBuffer()) };
+    }
+    if(!source || !Number.isSafeInteger(source["size"]) || source["size"] < STREAM_HEADER_SIZE ||
+        typeof source["read"] !== "function") throw new TypeError("Snapshot source requires size and read(offset, length)");
+    return source;
+}
+
+async function stream_read(source, offset, length)
+{
+    if(length > STATE_STREAM_CHUNK_SIZE || offset + length > source["size"]) stream_error("truncated record");
+    const bytes = await source["read"](offset, length);
+    if(!(bytes instanceof Uint8Array) || bytes.length !== length) stream_error("short read");
+    return bytes;
+}
+
+function validate_stream_tree(obj, buffers, depth = 0)
+{
+    if(depth > 256) stream_error("state nesting");
+    if(obj === null || typeof obj !== "object") return;
+    if(Array.isArray(obj))
+    {
+        for(const child of obj) validate_stream_tree(child, buffers, depth + 1);
+        return;
+    }
+    const type = obj["__state_type__"];
+    if(type === "Map" && Array.isArray(obj["args"]))
+    {
+        validate_stream_tree(obj["args"], buffers, depth + 1);
+        return;
+    }
+    const constructor = CONSTRUCTOR_TABLE[type], id = obj["buffer_id"];
+    if(!Object.prototype.hasOwnProperty.call(CONSTRUCTOR_TABLE, type) || type === "Map" ||
+        !Number.isInteger(id) || id < 0 || id >= buffers.length ||
+        buffers[id] % constructor.BYTES_PER_ELEMENT) stream_error("typed buffer reference");
+}
+
+// The source must remain immutable for both passes (Blob/File are convenient).
+// Pass 1 checks every byte before live RAM changes. Pass 2 writes directly into
+// existing backing RAM. A late I/O failure leaves the machine stopped; it cannot
+// promise rollback without retaining a second RAM image.
+export async function restore_state_stream(cpu, input)
+{
+    const source = state_stream_source(input);
+    const header = await stream_read(source, 0, STREAM_HEADER_SIZE);
+    const words = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    if(words.getUint32(0, true) !== (STATE_MAGIC >>> 0) || words.getUint32(4, true) !== STREAM_VERSION ||
+        words.getUint32(8, true) !== STATE_STREAM_CHUNK_SIZE) stream_error("header/version");
+    const info_size = words.getUint32(12, true), buffer_count = words.getUint32(16, true);
+    const memory_size = words.getUint32(20, true), packed_size = words.getUint32(24, true);
+    if(!info_size || info_size > STREAM_INFO_LIMIT || memory_size > cpu.mem8.length || memory_size % 4096 ||
+        packed_size > memory_size || packed_size % 4096) stream_error("manifest/RAM size");
+    const manifest = new Uint8Array(info_size);
+    for(let offset = 0; offset < info_size; offset += STATE_STREAM_CHUNK_SIZE)
+        manifest.set(await stream_read(source, STREAM_HEADER_SIZE + offset, Math.min(STATE_STREAM_CHUNK_SIZE, info_size - offset)), offset);
+    if(stream_crc(manifest) !== words.getUint32(28, true)) stream_error("manifest checksum");
+    let info;
+    try { info = JSON.parse(new TextDecoder("utf-8", { "fatal": true }).decode(manifest)); }
+    catch(_) { stream_error("manifest JSON"); }
+    const lengths = info["buffers"];
+    if(!Array.isArray(lengths) || lengths.length !== buffer_count || buffer_count > 65536 ||
+        lengths.some(length => !Number.isSafeInteger(length) || length < 0 || length > 0xFFFFFFFF)) stream_error("buffer lengths");
+    let total = STREAM_HEADER_SIZE + info_size;
+    for(const length of lengths) total += length + Math.ceil(length / (STATE_STREAM_CHUNK_SIZE - STREAM_RECORD_SIZE)) * STREAM_RECORD_SIZE;
+    total += packed_size + Math.ceil(packed_size / STREAM_RAM_CHUNK) * STREAM_RECORD_SIZE;
+    if(total !== source["size"]) stream_error("total length");
+    validate_stream_tree(info["state"], lengths);
+    const buffers = [];
+    let position = STREAM_HEADER_SIZE + info_size;
+    const read_record = async (kind, id, offset, length) => {
+        const bytes = await stream_read(source, position, STREAM_RECORD_SIZE + length);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if(view.getUint32(0, true) !== kind || view.getUint32(4, true) !== id ||
+            view.getUint32(8, true) !== offset || view.getUint32(12, true) !== length ||
+            view.getUint32(16 + length, true) !== stream_crc(bytes.subarray(0, 16 + length))) stream_error("record/checksum");
+        position += bytes.length;
+        return bytes;
+    };
+    for(let id = 0; id < lengths.length; id++)
+    {
+        const buffer = new Uint8Array(lengths[id]);
+        for(let offset = 0; offset < buffer.length;)
+        {
+            const length = Math.min(STATE_STREAM_CHUNK_SIZE - STREAM_RECORD_SIZE, buffer.length - offset);
+            const bytes = await read_record(1, id, offset, length);
+            buffer.set(bytes.subarray(16, 16 + length), offset);
+            offset += length;
+        }
+        buffers.push(buffer.buffer);
+    }
+    const state = restore_buffers(info["state"], buffers);
+    if(!Array.isArray(state) || state[0] !== memory_size || state[77] !== null ||
+        !(state[78] instanceof Uint8Array) || state[78].length !== Math.ceil(memory_size / 4096 / 8)) stream_error("RAM bitmap");
+    const bitmap = state[78];
+    let count = 0;
+    for(let page = 0; page < bitmap.length * 8; page++) if(bitmap[page >> 3] & 1 << (page & 7))
+    {
+        if(page >= memory_size / 4096) stream_error("bitmap beyond RAM");
+        count++;
+    }
+    if(count * 4096 !== packed_size) stream_error("bitmap count");
+    cpu.validate_state(state);
+    const ram_start = position, checksums = [];
+    for(let offset = 0; offset < packed_size; offset += STREAM_RAM_CHUNK)
+    {
+        const length = Math.min(STREAM_RAM_CHUNK, packed_size - offset);
+        const bytes = await read_record(2, 0, offset, length);
+        checksums.push(new DataView(bytes.buffer, bytes.byteOffset).getUint32(16 + length, true));
+    }
+    // No architectural or RAM mutation has occurred before this point.
+    cpu.zero_memory(0, memory_size);
+    position = ram_start;
+    let page = 0, record = 0;
+    for(let offset = 0; offset < packed_size; offset += STREAM_RAM_CHUNK)
+    {
+        const length = Math.min(STREAM_RAM_CHUNK, packed_size - offset);
+        const bytes = await read_record(2, 0, offset, length);
+        if(new DataView(bytes.buffer, bytes.byteOffset).getUint32(16 + length, true) !== checksums[record++]) stream_error("source changed between passes");
+        for(let part = 0; part < length; part += 4096)
+        {
+            while(!(bitmap[page >> 3] & 1 << (page & 7))) page++;
+            cpu.mem8.set(bytes.subarray(16 + part, 16 + part + 4096), page * 4096);
+            page++;
+        }
+    }
+    cpu.set_state(state, true);
 }
