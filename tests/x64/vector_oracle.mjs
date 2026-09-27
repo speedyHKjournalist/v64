@@ -76,6 +76,9 @@ const specification = new Map([
     ["invalid MXCSR high bits", {vector:13,mxcsr:0x1F80,unchanged:true}],
     ["FXSAVE64 high FIP and FDP", {vector:0,mxcsr:0x1F80,result:[0,0,0,0],zero_xmm9:true}],
     ["first SSE NaN payload wins", {vector:0,mxcsr:0x1F81,result:[0x7FC12345,0x7FC12345,0x7FC12345,0x7FC12345]}],
+    // SDM opcode map Table A-3 gives 66 0F 12 only an Mq source (memory);
+    // QEMU 10.2 executes the undefined register form as a low-qword move.
+    ["invalid SIMD form MOVLPD register", {vector:6,mxcsr:0x1F80,unchanged:true}],
 ]);
 const selected = process.env.X64_VECTOR_FILTER ? cases.filter(x=>x.name.includes(process.env.X64_VECTOR_FILTER)) : cases;
 assert.ok(selected.length);

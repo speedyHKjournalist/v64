@@ -1,5 +1,5 @@
 // NASM multiboot entry. The guest itself enters long mode and its high alias.
-export function longModeGuest(body, data = "")
+export function long_mode_guest(body, data = "")
 {
     return `bits 32
 org 0x100000

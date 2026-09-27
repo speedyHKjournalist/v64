@@ -79,7 +79,7 @@ pub unsafe fn translate_user(address: u64, access: Access, stack: bool, user: bo
     let c = Controls { cr3: state::read_cr(3), user,
         write_protect: state::read_cr(0) & 0x10000 != 0, nx_enable: state::efer() & state::EFER_NXE != 0 };
     let cache = &mut X64_TLBS[apic::current_core()];
-    if let Some(hit) = cache.lookup(LinearAddress(address), access, c) { return Ok(hit.physical.0); }
+    if let Some(physical) = cache.lookup_physical(LinearAddress(address), access, c) { return Ok(physical); }
     let result = paging::walk(&mut physical::PageTables, LinearAddress(address), access, c, WalkMode::Runtime)
         .map_err(|fault| match fault {
             paging::Fault::Page { address, error, .. } => Fault { vector: 14, error: Some(error), address: Some(address.0) },
@@ -90,61 +90,73 @@ pub unsafe fn translate_user(address: u64, access: Access, stack: bool, user: bo
     Ok(result.physical.0)
 }
 
-unsafe fn preflight(address: u64, size: usize, access: Access, stack: bool, supervisor: bool) -> Result<[u64; 16], Fault> {
-    assert!(matches!(size, 1 | 2 | 4 | 8 | 16));
-    let mut addresses = [0; 16];
-    let first = translate(address, access, stack, supervisor)?;
-    let mut base = first & !4095;
-    for (i, target) in addresses[..size].iter_mut().enumerate() {
-        let at = address.wrapping_add(i as u64);
-        if i != 0 && at & 4095 == 0 { base = translate(at, access, stack, supervisor)? & !4095; }
-        *target = base | (at & 4095);
-        physical::probe(*target, 1).map_err(|_| Fault::gp())?;
+/// Physical bytes of one linear access: `head` bytes from `first`, the rest
+/// from `second` when the access crosses a page.
+#[derive(Clone, Copy)]
+struct Span { first: u64, second: u64, head: usize, size: usize }
+impl Span {
+    fn byte(&self, i: usize) -> u64 {
+        if i < self.head { self.first + i as u64 } else { self.second + (i - self.head) as u64 }
     }
-    Ok(addresses)
+    fn contiguous(&self) -> bool {
+        self.head == self.size || self.second == self.first + self.head as u64
+    }
 }
-fn read_physical(addresses: &[u64]) -> Result<u128, Fault> {
-    let size = addresses.len();
+unsafe fn preflight(address: u64, size: usize, access: Access, stack: bool, supervisor: bool) -> Result<Span, Fault> {
+    assert!(matches!(size, 1 | 2 | 4 | 8 | 16));
+    let first = translate(address, access, stack, supervisor)?;
+    // Page order: the first page's bus check precedes the second page's walk.
+    let head = size.min(4096 - (address & 4095) as usize);
+    physical::probe(first, head).map_err(|_| Fault::gp())?;
+    let mut second = 0;
+    if head < size {
+        second = translate(address.wrapping_add(head as u64), access, stack, supervisor)?;
+        physical::probe(second, size - head).map_err(|_| Fault::gp())?;
+    }
+    Ok(Span { first, second, head, size })
+}
+fn read_physical(span: Span) -> Result<u128, Fault> {
     unsafe {
-        if addresses[size - 1] == addresses[0] + size as u64 - 1 {
-            return match size {
-                1 => physical::read8(addresses[0]).map(|v| v as u128),
-                2 => physical::read16(addresses[0]).map(|v| v as u128),
-                4 => physical::read32(addresses[0]).map(|v| v as u128),
-                8 => physical::read64(addresses[0]).map(|v| v as u128),
+        if span.contiguous() {
+            let at = span.first;
+            return match span.size {
+                1 => physical::read8(at).map(|v| v as u128),
+                2 => physical::read16(at).map(|v| v as u128),
+                4 => physical::read32(at).map(|v| v as u128),
+                8 => physical::read64(at).map(|v| v as u128),
                 16 => {
-                    let lo = physical::read64(addresses[0]).map_err(|_| Fault::gp())?;
-                    let hi = physical::read64(addresses[8]).map_err(|_| Fault::gp())?;
+                    let lo = physical::read64(at).map_err(|_| Fault::gp())?;
+                    let hi = physical::read64(at + 8).map_err(|_| Fault::gp())?;
                     return Ok(lo as u128 | (hi as u128) << 64);
                 },
                 _ => unreachable!(),
             }.map_err(|_| Fault::gp());
         }
         let mut value = 0;
-        for (i, &physical_address) in addresses.iter().enumerate() {
-            value |= (physical::read8(physical_address).map_err(|_| Fault::gp())? as u128) << (i * 8);
+        for i in 0..span.size {
+            value |= (physical::read8(span.byte(i)).map_err(|_| Fault::gp())? as u128) << (i * 8);
         }
         Ok(value)
     }
 }
-fn write_physical(addresses: &[u64], value: u128) -> Result<(), Fault> {
-    let size = addresses.len();
+fn write_physical(span: Span, value: u128) -> Result<(), Fault> {
     unsafe {
-        if addresses[size - 1] == addresses[0] + size as u64 - 1 {
-            return match size {
-                1 => physical::write8(addresses[0], value as u8),
-                2 => physical::write16(addresses[0], value as u16),
-                4 => physical::write32(addresses[0], value as u32),
-                8 => physical::write64(addresses[0], value as u64),
+        if span.contiguous() {
+            let at = span.first;
+            return match span.size {
+                1 => physical::write8(at, value as u8),
+                2 => physical::write16(at, value as u16),
+                4 => physical::write32(at, value as u32),
+                8 => physical::write64(at, value as u64),
                 16 => {
-                    physical::write64(addresses[0], value as u64).map_err(|_| Fault::gp())?;
-                    return physical::write64(addresses[8], (value >> 64) as u64).map_err(|_| Fault::gp());
+                    physical::write64(at, value as u64).map_err(|_| Fault::gp())?;
+                    return physical::write64(at + 8, (value >> 64) as u64).map_err(|_| Fault::gp());
                 },
                 _ => unreachable!(),
             }.map_err(|_| Fault::gp());
         }
-        for (i, &physical_address) in addresses.iter().enumerate() {
-            physical::write8(physical_address, (value >> (i * 8)) as u8).map_err(|_| Fault::gp())?;
+        for i in 0..span.size {
+            physical::write8(span.byte(i), (value >> (i * 8)) as u8).map_err(|_| Fault::gp())?;
         }
         Ok(())
     }
@@ -152,28 +164,24 @@ fn write_physical(addresses: &[u64], value: u128) -> Result<(), Fault> {
 pub unsafe fn read(address: u64, width: u8, stack: bool) -> Result<u64, Fault> {
     assert!(matches!(width, 8 | 16 | 32 | 64));
     let size = (width / 8) as usize;
-    let addresses = preflight(address, size, Access::Read, stack, false)?;
-    let value = read_physical(&addresses[..size])? as u64;
+    let value = read_physical(preflight(address, size, Access::Read, stack, false)?)? as u64;
     super::debug::data(address, size, false);
     Ok(value)
 }
 pub unsafe fn write(address: u64, width: u8, value: u64, stack: bool) -> Result<(), Fault> {
     assert!(matches!(width, 8 | 16 | 32 | 64));
     let size = (width / 8) as usize;
-    let addresses = preflight(address, size, Access::Write, stack, false)?;
-    write_physical(&addresses[..size], value as u128)?;
+    write_physical(preflight(address, size, Access::Write, stack, false)?, value as u128)?;
     super::debug::data(address, size, true);
     Ok(())
 }
 pub unsafe fn read128(address: u64, stack: bool) -> Result<u128, Fault> {
-    let addresses = preflight(address, 16, Access::Read, stack, false)?;
-    let value = read_physical(&addresses)?;
+    let value = read_physical(preflight(address, 16, Access::Read, stack, false)?)?;
     super::debug::data(address, 16, false);
     Ok(value)
 }
 pub unsafe fn write128(address: u64, value: u128, stack: bool) -> Result<(), Fault> {
-    let addresses = preflight(address, 16, Access::Write, stack, false)?;
-    write_physical(&addresses, value)?;
+    write_physical(preflight(address, 16, Access::Write, stack, false)?, value)?;
     super::debug::data(address, 16, true);
     Ok(())
 }
@@ -181,17 +189,31 @@ pub unsafe fn fetch(address: u64) -> Result<u8, Fault> {
     let address = translate(address, Access::Execute, false, false)?;
     physical::read8(address).map_err(|_| Fault::gp())
 }
+/// Instruction fetch within one decode: `page` remembers the last linear to
+/// physical code page, so each page is translated once per instruction.
+pub unsafe fn fetch_cached(address: u64, page: &mut Option<(u64, u64)>) -> Result<u8, Fault> {
+    let physical = match *page {
+        Some((linear, physical)) if linear == address >> 12 => physical | (address & 4095),
+        _ => {
+            let physical = translate(address, Access::Execute, false, false)?;
+            *page = Some((address >> 12, physical & !4095));
+            physical
+        },
+    };
+    if physical::plain_ram(physical, 1) {
+        return Ok(*crate::cpu::memory::mem8.add(physical as usize));
+    }
+    physical::read8(physical).map_err(|_| Fault::gp())
+}
 pub unsafe fn read_system(address: u64, width: u8) -> Result<u64, Fault> {
     assert!(matches!(width, 8 | 16 | 32 | 64));
     let size = (width / 8) as usize;
-    let addresses = preflight(address, size, Access::Read, false, true)?;
-    Ok(read_physical(&addresses[..size])? as u64)
+    Ok(read_physical(preflight(address, size, Access::Read, false, true)?)? as u64)
 }
 pub unsafe fn write_system(address: u64, width: u8, value: u64) -> Result<(), Fault> {
     assert!(matches!(width, 8 | 16 | 32 | 64));
     let size = (width / 8) as usize;
-    let addresses = preflight(address, size, Access::Write, true, true)?;
-    write_physical(&addresses[..size], value as u128)
+    write_physical(preflight(address, size, Access::Write, true, true)?, value as u128)
 }
 
 pub unsafe fn probe_write(address: u64, width: u8, stack: bool) -> Result<(), Fault> {

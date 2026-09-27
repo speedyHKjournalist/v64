@@ -20,3 +20,14 @@ X64_JIT=1 node tests/x64/integer_oracle.mjs
 尚未据此完成的门槛包括：guest memory 原生 guard/RMW/fault continuation、完整 shared HIR/MIR 状态图扩宽、宽 SIMD/FPU 编译、跨页块与高/低 RIP 别名/SMC/DMA/重映射/快照 stale artifact 矩阵，以及 OS/性能 gate。本文件明确记录已验证子集，不替代 X4 总体验收。
 
 原生 Jcc 覆盖全部16种条件的两种结果，依据QEMU实际客户机分支输出判定 taken/not-taken；native分支起点位于0xFFFF8000FFFFFFF0，taken目标越过低32位边界，同时核对 FLAGS/GPR 不变，避免仅验证低DWORD而漏掉 RIP 截断。
+
+## 2026-09-27 续：原生块缓存与真实 OS
+
+- 缓存由 1024 项线性表改为按 RIP 直接映射的 4096 槽，token 低位即槽号，入口查找、guard 与发布确认都是常数时间；被替换的槽使旧 token 失效，迟到的发布被拒绝；替换累计达到槽数时整体复位，限制宿主侧残留函数。
+- 入口不再在 `run` 中预先校验；字节/翻译校验只在原生序言调用的 `x64_native_guard` 中进行，guard 拒绝（返回 0 条退休）后才比较并淘汰过期项。guard 快照改为共享 `Arc<[u8]>`，不再每次复制源码字节；`ram_page` 对低 RAM 短路。
+- 冷代码：此前每个首次到达的 RIP 都立即编译并结束切片发布，每个冷块都是一次独立的宿主模块实例化。现需同一 RIP 到达 64 次才编译；未编译代码留在解释器。
+- 结果：同一内存/栈热循环 JIT 模式 6.1 → 10.8 MIPS，仍低于解释器（约 14.5 MIPS）。原因是结构性的：块只含寄存器指令，一遇到访存就结束；每次进入要经过 Rust→JS 映射→块模块→Rust guard→返回的多次宿主边界，guard 本身要做两次翻译和字节比较。块内不形成循环，热循环每次迭代都重新进入。
+
+真实 OS：`X64_JIT=1 node tests/x64/linux_boot.mjs`（原生块 + 解释器混合，1 核）结果见 [XC 记录](../XC/linux64-boot.zh-CN.md)。
+
+下一步（X4 主体，未开始）：沿用 32 位 IR 已有的同步发布与主模块函数表（`call_indirect` 进入，免去 JS 映射与异步实例化）；块内以 helper import 做访存（翻译 + 低 RAM 直接读写，失败或 MMIO 时在该指令前退出，由解释器精确交付故障；写入命中本块代码页时在该指令后退出）；块内回边形成循环并逐次检查预算与中断条件；再扩展到 CALL/RET/PUSH/POP 与链接。完成前不宣称 x64 JIT 加速。

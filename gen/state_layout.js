@@ -193,7 +193,9 @@ export const STATICS = {
     "x64/physical.rs": { PHYSICAL_BUS: "machine" },
     "x64/memory.rs": { X64_TLBS: "core" },
     "x64/cache.rs": { CACHE: "cache" },
+    "x64/execute.rs": { DECODE_CACHE: "cache" },
     "x64/debug.rs": { PENDING: "scratch" },
+    "x64/profile.rs": { PERIOD: "debug", COUNTDOWN: "debug", SAMPLES: "debug" },
     "x64/vector.rs": { softfloat_roundingMode: "scratch", softfloat_exceptionFlags: "scratch" },
 };
 

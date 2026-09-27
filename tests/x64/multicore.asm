@@ -6,6 +6,7 @@ org 0x100000
 %define HIGH 0xFFFF800000000000
 %define VIRTUAL HIGH+0x40055000
 %define ITERATIONS 512
+%define IDT 0x370000
 header:
 dd 0x1BADB002,0x10000,-(0x1BADB002+0x10000)
 dd header,header,end,end,start
@@ -73,6 +74,10 @@ lea edx,[ebx+0x6500]
 mov [eax+0x440000],edx
 lea edx,[ebx+0x7500]
 mov [eax+0x480000],edx
+; PDPT[3] -> uncached 2 MiB page for the local APIC at its identity address
+lea eax,[ebp+0x4003]
+mov [ebp+0x1018],eax
+mov dword [ebp+0x4000+0x1F7*8],0xFEE0009B
 inc ebx
 cmp ebx,4
 jb .prepare
@@ -265,9 +270,109 @@ mov r10d,ITERATIONS
 call contend
 mov dword [rbp+48],0xD064
 lock inc dword [rdi+24]
+; Long-mode IPI phase: directed fixed IPIs, NMIs and an all-excluding-self
+; broadcast reach APs halted with IF=1 through a 64-bit IDT.
+mov esi,LAPIC
+test r15d,r15d
+jnz .ap_ipi
+.wait_done:
+cmp dword [rdi+24],4
+jne .wait_done
+mov rax,ipi_handler
+mov rbx,IDT+0x41*16
+call set_gate
+mov rax,nmi_handler
+mov rbx,IDT+2*16
+call set_gate
+mov dword [rdi+40],1
+lidt [idtr]
+.wait_ready:
+cmp dword [rdi+44],3
+jne .wait_ready
+mov ebx,1
+.directed:
+mov eax,ebx
+shl eax,24
+mov [rsi+0x310],eax
+mov dword [rsi+0x300],0x4041
+mov eax,ebx
+shl eax,10
+.wait_fixed:
+cmp dword [RECORDS+rax+56],1
+jne .wait_fixed
+mov eax,ebx
+shl eax,24
+mov [rsi+0x310],eax
+mov dword [rsi+0x300],0x4400
+mov eax,ebx
+shl eax,10
+.wait_nmi:
+cmp dword [RECORDS+rax+60],1
+jne .wait_nmi
+inc ebx
+cmp ebx,4
+jb .directed
+mov dword [rsi+0x300],0xC4041
+mov ebx,1
+.wait_broadcast:
+mov eax,ebx
+shl eax,10
+cmp dword [RECORDS+rax+56],2
+jne .wait_broadcast
+inc ebx
+cmp ebx,4
+jb .wait_broadcast
+mov dword [rdi+36],1
+jmp .done
+.ap_ipi:
+cmp dword [rdi+40],1
+jne .ap_ipi
+lidt [idtr]
+mov dword [rsi+0xF0],0x1FF
+lock inc dword [rdi+44]
+sti
+.idle:
+hlt
+jmp .idle
 .done:
 hlt
 jmp .done
+set_gate:
+mov [rbx],ax
+mov word [rbx+2],0x18
+mov word [rbx+4],0x8E00
+shr rax,16
+mov [rbx+6],ax
+shr rax,16
+mov [rbx+8],eax
+mov dword [rbx+12],0
+ret
+ipi_handler:
+push rax
+push rsi
+mov esi,LAPIC
+mov eax,[rsi+0x20]
+shr eax,24
+shl eax,10
+lock inc dword [RECORDS+rax+56]
+mov dword [rsi+0xB0],0
+pop rsi
+pop rax
+iretq
+nmi_handler:
+push rax
+push rsi
+mov esi,LAPIC
+mov eax,[rsi+0x20]
+shr eax,24
+shl eax,10
+lock inc dword [RECORDS+rax+60]
+; the interrupted RIP must be inside the AP idle loop
+mov rsi,[rsp+16]
+mov [RECORDS+rax+64+128+128+64],rsi
+pop rsi
+pop rax
+iretq
 contend:
 .retry:
 mov rax,[rdi]
@@ -296,4 +401,6 @@ gdt:
 dq 0,0x00CF9A000000FFFF,0x00CF92000000FFFF,0x00AF9A000000FFFF
 gdtr: dw 31
 dd gdt
+idtr: dw 0x42*16-1
+dq IDT
 end:

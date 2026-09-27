@@ -109,9 +109,21 @@ impl Tlb {
     fn control(access: Access, c: Controls) -> u8 {
         access as u8 | (c.user as u8) << 2 | (c.write_protect as u8) << 3 | (c.nx_enable as u8) << 4
     }
-    fn slot(address: LinearAddress) -> usize { ((address.0 >> 12) ^ (address.0 >> 32)) as usize & 255 }
+    // Read, write and fetch translations of one page are separate entries;
+    // spread them so data and stack traffic do not evict each other.
+    fn slot(address: LinearAddress, access: u8) -> usize {
+        ((address.0 >> 12) ^ (address.0 >> 32) ^ ((access as u64 & 3) << 6)) as usize & 255
+    }
+    /// Hot-path hit: only the physical address, without copying witnesses.
+    #[inline(always)]
+    pub fn lookup_physical(&self, address: LinearAddress, access: Access, c: Controls) -> Option<u64> {
+        let entry = self.entries[Self::slot(address, access as u8)].as_ref()?;
+        if entry.epoch != self.epoch || entry.linear_page != address.0 >> 12 ||
+            entry.cr3 != c.cr3 || entry.control != Self::control(access, c) { return None; }
+        Some((entry.value.physical.0 & !4095) | (address.0 & 4095))
+    }
     pub fn lookup(&self, address: LinearAddress, access: Access, c: Controls) -> Option<Translation> {
-        let entry = self.entries[Self::slot(address)]?;
+        let entry = self.entries[Self::slot(address, access as u8)]?;
         if entry.epoch != self.epoch || entry.linear_page != address.0 >> 12 ||
             entry.cr3 != c.cr3 || entry.control != Self::control(access, c) { return None; }
         let mut value = entry.value;
@@ -119,7 +131,7 @@ impl Tlb {
         Some(value)
     }
     pub fn insert(&mut self, address: LinearAddress, access: Access, c: Controls, value: Translation) {
-        self.entries[Self::slot(address)] = Some(Cached { linear_page: address.0 >> 12,
+        self.entries[Self::slot(address, access as u8)] = Some(Cached { linear_page: address.0 >> 12,
             cr3: c.cr3, control: Self::control(access, c), epoch: self.epoch, value });
     }
     pub fn invalidate(&mut self, address: LinearAddress) {
@@ -180,7 +192,7 @@ impl Tlb {
                 return false;
             }
             let address = LinearAddress(linear_page << 12);
-            let slot = Self::slot(address);
+            let slot = Self::slot(address, control as u8);
             if candidate.entries[slot].is_some() { return false; }
             let mut witnesses = [PhysicalAddress(0); 4];
             for (index, witness) in witnesses.iter_mut().enumerate() {

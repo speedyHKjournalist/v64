@@ -9,8 +9,10 @@ fn overlaps(address: u64, size: usize, watched: u64, length: u64) -> bool {
 }
 pub unsafe fn begin() -> Result<(), Fault> {
     PENDING = 0;
-    if *gp::interrupt_shadow != 0 || state::read_flags64() & 0x10000 != 0 { return Ok(()); }
+    // RF is kept in the raw FLAGS word; only arithmetic flags are lazy.
+    if *gp::interrupt_shadow != 0 || *gp::flags & 0x10000 != 0 { return Ok(()); }
     let control = state::read_dr(7);
+    if control & 0xFF == 0 { return Ok(()); }
     let mut matched = 0;
     for index in 0..4 {
         if control >> (index * 2) & 3 != 0 && control >> (16 + index * 4) & 3 == 0

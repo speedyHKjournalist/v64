@@ -95,6 +95,18 @@ async function run(mode, seed, quantum)
         {
             view().setUint32(CONTROL + 20, 1, true); // documented guest release mailbox only
             await until("atomic contention completed", () => word(CONTROL + 24) === 4);
+            await until("long-mode fixed, NMI and broadcast IPIs", () => word(CONTROL + 36) === 1);
+            // Each core runs at its own alias HIGH + (id << 39).
+            const alias = id => 0xFFFF800000000000n + (BigInt(id) << 39n);
+            const idle = quad(RECORDS + 1024 + 384) - alias(1);
+            assert.ok(idle > 0x100000n && idle < 0x110000n, "NMI return RIP is in the guest image");
+            for(let id = 0; id < 4; id++)
+            {
+                const at = RECORDS + id * 1024;
+                assert.equal(word(at + 56), id ? 2 : 0, `core ${id}: directed + all-excluding-self fixed IPI`);
+                assert.equal(word(at + 60), id ? 1 : 0, `core ${id}: NMI IPI`);
+                if(id) assert.equal(quad(at + 384), alias(id) + idle, `core ${id}: NMI interrupted the halted idle loop`);
+            }
             assert.equal(quad(CONTROL), 8n * BigInt(ITERATIONS));
             assert.equal(quad(CONTROL + 8), BigInt.asUintN(64, ~quad(CONTROL)));
             for(let id = 0; id < 4; id++)
@@ -118,7 +130,7 @@ async function run(mode, seed, quantum)
         if(mode === "interpreter") assert.deepEqual(native, [0, 0, 0, 0]);
         else assert.ok(native.every(count => count > 1000), `${label}: every core actually executed native i64 code: ${native}`);
         const result = {mode, seed, quantum, rounds, native, snapshot_bytes: snapshot.byteLength};
-        console.log("PASS x64 four-core INIT/SIPI, state/TLB isolation, CX16, snapshot " + JSON.stringify(result));
+        console.log("PASS x64 four-core INIT/SIPI, state/TLB isolation, CX16, fixed/NMI/broadcast IPIs, snapshot " + JSON.stringify(result));
         return result;
     }
     catch(error)

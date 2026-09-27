@@ -33,6 +33,10 @@ struct ExecutionState {
     pending_work: u64,
     retired: u32,
     rep_elements: u32,
+    // The wide executor commits RIP only after its last access. A device
+    // callback inside that window must not deliver an IRQ; the dispatch
+    // loop polls again at the instruction boundary.
+    defer_irqs: bool,
 }
 
 impl ExecutionState {
@@ -45,6 +49,7 @@ impl ExecutionState {
             pending_work: 0,
             retired: 0,
             rep_elements: 0,
+            defer_irqs: false,
         }
     }
 
@@ -96,6 +101,14 @@ impl ExecutionState {
 
 #[allow(non_upper_case_globals)]
 static mut execution_state: ExecutionState = ExecutionState::new();
+
+/// Hold external interrupt delivery until the current wide instruction has
+/// committed or faulted.
+#[inline(always)]
+pub unsafe fn set_irq_deferral(enabled: bool) { execution_state.defer_irqs = enabled; }
+
+#[inline(always)]
+pub unsafe fn irqs_deferred() -> bool { execution_state.defer_irqs }
 
 /// This mode uses the bounded interpreter and never a JIT/IR dispatch path.
 #[no_mangle]

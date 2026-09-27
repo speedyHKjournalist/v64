@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import {assemble, reference, actual} from "./guest_runner.mjs";
-import {longModeGuest} from "./guest_builder.mjs";
-const source = longModeGuest(`
-mov ecx,10000
+import {long_mode_guest} from "./guest_builder.mjs";
+const source = long_mode_guest(`
+mov ecx,200000
 xor r8d,r8d
 xor r9d,r9d
 call hot_loop
@@ -11,7 +11,7 @@ mov [0x300008],r8
 mov [0x300010],r9
 ; Patch the immediate through the LOW alias of the currently cached high code.
 mov byte [hot_loop+3],7
-mov ecx,10000
+mov ecx,200000
 xor r8d,r8d
 xor r9d,r9d
 call hot_loop

@@ -168,6 +168,10 @@ pub unsafe fn execute(instruction: &Decoded) -> Result<bool, Fault> {
             far_return(instruction.operand_size, instruction.immediate.map_or(0, |value| value.value as u16))?;
             return Ok(true);
         },
+        0xFF if matches!(instruction.modrm.map(|m| m >> 3 & 7), Some(3 | 5)) => {
+            far_transfer(instruction, instruction.modrm.unwrap() >> 3 & 7 == 3)?;
+            return Ok(true);
+        },
         0x0F06 => {
             if *gp::cpl != 0 { return Err(Fault::gp()); }
             state::write_cr_raw(0, state::read_cr(0) & !8);
@@ -624,6 +628,103 @@ pub unsafe fn interrupt(vector: u8, software: bool, code: Option<u32>) -> Result
     state::write_gpr(4, rsp, 64);
     state::write_flags64(old_flags & !(0x100 | 0x4000 | 0x10000 | 0x20000) & if kind == 14 { !0x200 } else { u64::MAX });
     state::write_rip(target);
+    Ok(())
+}
+/// JMP/CALL m16:16/32/64 in 64-bit mode (SDM Vol.2A JMP/CALL, Vol.3A §5.8.3):
+/// a code segment at the current privilege, or a 64-bit call gate, which a
+/// CALL may use to reach a more privileged 64-bit code segment. Task gates
+/// and TSS selectors do not exist in IA-32e mode. Every access and check
+/// precedes the first architectural change.
+unsafe fn far_transfer(instruction: &Decoded, call: bool) -> Result<(), Fault> {
+    if instruction.address.is_none() { return Err(Fault::ud()); }
+    let width = instruction.operand_size;
+    let (pointer, stack_access) = super::execute::address(instruction);
+    let offset = memory::read(pointer, width, stack_access)?;
+    let selector = memory::read(pointer.wrapping_add((width / 8) as u64), 16, stack_access)? as u16;
+    let next = instruction.next.0;
+    let cpl = *gp::cpl;
+    let error = selector as u32 & !3;
+    let (target, at) = descriptor(selector)?;
+    if !target.is_system() {
+        let long = target.flags() & 2 != 0;
+        if !target.is_executable() || long && target.is_32() ||
+            if target.is_dc() { target.dpl() > cpl } else { (selector & 3) as u8 > cpl || target.dpl() != cpl } {
+            return Err(exception(13, error));
+        }
+        if !target.is_present() { return Err(exception(11, error)); }
+        if long && !state::canonical(offset, 48) || !long && offset > target.effective_limit() as u64 { return Err(Fault::gp()); }
+        if call {
+            let rsp = state::read_gpr(4);
+            let unit = (width / 8) as u64;
+            memory::probe_write(rsp.wrapping_sub(2 * unit), width, true)?;
+            memory::probe_write(rsp.wrapping_sub(unit), width, true)?;
+            memory::write(rsp.wrapping_sub(unit), width, *gp::sreg.add(1) as u64, true)?;
+            memory::write(rsp.wrapping_sub(2 * unit), width, next, true)?;
+            state::write_gpr(4, rsp.wrapping_sub(2 * unit), 64);
+        }
+        if !target.accessed() { memory::write_system(at.wrapping_add(5), 8, (target.access_byte() | 1) as u64)?; }
+        install_cs(selector, &target, cpl);
+        state::write_rip(offset);
+        return Ok(());
+    }
+    // A 64-bit call gate occupies 16 bytes; the upper type field must be 0.
+    let limit = if selector & 4 != 0 { *gp::segment_limits.add(7) } else { *gp::gdtr_size as u32 };
+    if target.system_type() != 12 || target.dpl() < cpl || target.dpl() < (selector & 3) as u8 ||
+        (selector as u32 & !7) + 15 > limit {
+        return Err(exception(13, error));
+    }
+    if !target.is_present() { return Err(exception(11, error)); }
+    let high = memory::read_system(at.wrapping_add(8), 64)?;
+    if high >> 40 & 0x1F != 0 { return Err(exception(13, error)); }
+    let code_selector = (target.raw >> 16) as u16;
+    let entry = target.raw & 0xFFFF | (target.raw >> 48) << 16 | (high & 0xFFFF_FFFF) << 32;
+    let code_error = code_selector as u32 & !3;
+    let (code, code_at) = descriptor(code_selector)?;
+    if code.is_system() || !code.is_executable() || code.flags() & 2 == 0 || code.is_32() ||
+        if call { code.dpl() > cpl } else if code.is_dc() { code.dpl() > cpl } else { code.dpl() != cpl } {
+        return Err(exception(13, code_error));
+    }
+    if !code.is_present() { return Err(exception(11, code_error)); }
+    if !state::canonical(entry, 48) { return Err(Fault::gp()); }
+    let new_cpl = if call && !code.is_dc() { code.dpl() } else { cpl };
+    let mut frame: [u64; 4] = [0; 4];
+    let mut count = 0;
+    let mut rsp = state::read_gpr(4);
+    if call {
+        if new_cpl < cpl {
+            // Inner privilege: RSPn from the 64-bit TSS; SS becomes a null
+            // selector with RPL = new CPL. Call gates do not align RSP.
+            let tss = 4 + new_cpl as u32 * 8;
+            if tss + 7 > *gp::segment_limits.add(6) { return Err(exception(10, *gp::sreg.add(6) as u32 & !3)); }
+            let inner = memory::read_system(state::read_segment_base(6).wrapping_add(tss as u64), 64)?;
+            if !state::canonical(inner, 48) { return Err(exception(12, 0)); }
+            frame = [*gp::sreg.add(2) as u64, rsp, *gp::sreg.add(1) as u64, next];
+            count = 4;
+            rsp = inner;
+        } else {
+            frame[..2].copy_from_slice(&[*gp::sreg.add(1) as u64, next]);
+            count = 2;
+        }
+        for i in 0..count {
+            if new_cpl < cpl { memory::probe_system_write(rsp.wrapping_sub((i + 1) as u64 * 8), 64)?; }
+            else { memory::probe_write(rsp.wrapping_sub((i + 1) as u64 * 8), 64, true)?; }
+        }
+    }
+    if !code.accessed() { memory::write_system(code_at.wrapping_add(5), 8, (code.access_byte() | 1) as u64)?; }
+    for value in &frame[..count] {
+        rsp = rsp.wrapping_sub(8);
+        if new_cpl < cpl { memory::write_system(rsp, 64, *value)?; } else { memory::write(rsp, 64, *value, true)?; }
+    }
+    if new_cpl < cpl {
+        *gp::sreg.add(2) = new_cpl as u16;
+        *gp::segment_is_null.add(2) = false;
+        *gp::segment_access_bytes.add(2) = 0x93 | new_cpl << 5;
+        *gp::segment_limits.add(2) = u32::MAX;
+        state::write_segment_base(2, 0);
+    }
+    state::write_gpr(4, rsp, 64);
+    install_cs(code_selector, &code, new_cpl);
+    state::write_rip(entry);
     Ok(())
 }
 pub unsafe fn far_return(width: u8, discard: u16) -> Result<(), Fault> {

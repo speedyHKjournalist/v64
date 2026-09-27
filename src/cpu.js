@@ -90,6 +90,8 @@ export function CPU(bus, wm, stop_idling)
     this.wasm_memory = memory;
 
     this.memory_size = view(Uint32Array, memory, STATE_OFFSETS.memory_size, 1);
+    // RAM below 4 GiB; less than memory_size when high_memory_size is set
+    this.low_memory_size = 0;
 
     this.mem8 = new Uint8Array(0);
     this.mem32s = new Int32Array(this.mem8.buffer);
@@ -1076,6 +1078,10 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.with_wide_state_buffer(state[97] ? state[97][1] : new Uint32Array(80), (pointer, count) => {
         if(!this.wm.exports["x64_phys_restore_windows"](pointer, count)) throw new Error("Cannot restore physical memory map");
     });
+    // configure_high_memory uses slot 0 for the relocated top of RAM
+    this.low_memory_size = this.wm.exports["x64_phys_get_window"](0, 4) === 1 &&
+        this.wm.exports["x64_phys_get_window"](0, 2) + this.wm.exports["x64_phys_get_window"](0, 3) === this.memory_size[0] ?
+        this.wm.exports["x64_phys_get_window"](0, 2) : this.memory_size[0];
 
     // Older single-core snapshots predate NMI state and APIC enable storage.
     this.apic_enabled[0] = state[94] ? state[94][0] : this.acpi_enabled[0];
@@ -1738,6 +1744,28 @@ CPU.prototype.reset_memory = function()
     this.mem8.fill(0);
 };
 
+/**
+ * Relocate the top `size` bytes of RAM to guest physical 4 GiB (X5). Low RAM
+ * then ends at `low_memory_size`; the backing bytes stay in the wasm32 heap.
+ * @param {number} size
+ * @param {number} low_minimum bytes that must remain below the relocated range
+ */
+CPU.prototype.configure_high_memory = function(size, low_minimum)
+{
+    this.low_memory_size = this.memory_size[0];
+    if(!size) return;
+    const low = this.memory_size[0] - size;
+    if(!Number.isSafeInteger(size) || size < 0 || size % (1 << 20) !== 0 || low < Math.max(32 << 20, low_minimum))
+    {
+        throw new Error("high_memory_size must be a multiple of 1 MiB that leaves at least 32 MiB (and the initrd) below 4 GiB");
+    }
+    if(!this.wm.exports["x64_phys_set_window"](0, 0, 1, low, size, 1))
+    {
+        throw new Error("Cannot map high_memory_size above 4 GiB");
+    }
+    this.low_memory_size = low;
+};
+
 CPU.prototype.create_memory = function(size, minimum_size)
 {
     if(size < minimum_size)
@@ -1998,6 +2026,7 @@ CPU.prototype.init = function(settings, device_bus)
     );
 
     this.platform = create_platform(settings, this.memory_size[0]);
+    this.configure_high_memory(settings.high_memory_size || 0, settings.initrd ? 64 * 1024 * 1024 + settings.initrd.byteLength : 0);
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
@@ -2420,9 +2449,10 @@ CPU.prototype.load_multiboot_option_rom = function(buffer, initrd, cmdline)
                 // does not exclude traditional bios exclusions
                 let start = 0;
                 let was_memory = false;
+                const ram = addr => addr < cpu.low_memory_size && cpu.memory_map_read8[addr >>> MMAP_BLOCK_BITS] === undefined;
                 for(let addr = 0; addr < MMAP_MAX; addr += MMAP_BLOCK_SIZE)
                 {
-                    if(was_memory && cpu.memory_map_read8[addr >>> MMAP_BLOCK_BITS] !== undefined)
+                    if(was_memory && !ram(addr))
                     {
                         cpu.write32(multiboot_data, 20); // size
                         cpu.write32(multiboot_data + 4, start); //addr (64-bit)
@@ -2434,13 +2464,24 @@ CPU.prototype.load_multiboot_option_rom = function(buffer, initrd, cmdline)
                         multiboot_mmap_count += 24;
                         was_memory = false;
                     }
-                    else if(!was_memory && cpu.memory_map_read8[addr >>> MMAP_BLOCK_BITS] === undefined)
+                    else if(!was_memory && ram(addr))
                     {
                         start = addr;
                         was_memory = true;
                     }
                 }
                 dbg_assert (!was_memory, "top of 4GB shouldn't have memory");
+                if(cpu.memory_size[0] > cpu.low_memory_size)
+                {
+                    cpu.write32(multiboot_data, 20);
+                    cpu.write32(multiboot_data + 4, 0); // addr = 4 GiB
+                    cpu.write32(multiboot_data + 8, 1);
+                    cpu.write32(multiboot_data + 12, cpu.memory_size[0] - cpu.low_memory_size);
+                    cpu.write32(multiboot_data + 16, 0);
+                    cpu.write32(multiboot_data + 20, 1);
+                    multiboot_data += 24;
+                    multiboot_mmap_count += 24;
+                }
                 cpu.write32(multiboot_info_addr + 44, multiboot_mmap_count);
             }
 
@@ -2693,10 +2734,12 @@ CPU.prototype.fill_cmos = function(rtc, settings)
     rtc.cmos_write(CMOS_MEM_BASE_LOW, 640 & 0xFF);
     rtc.cmos_write(CMOS_MEM_BASE_HIGH, 640 >> 8);
 
+    const low_memory = this.low_memory_size;
+    const high_memory = this.memory_size[0] - low_memory;
     var memory_above_1m = 0; // in k
-    if(this.memory_size[0] >= 1024 * 1024)
+    if(low_memory >= 1024 * 1024)
     {
-        memory_above_1m = (this.memory_size[0] - 1024 * 1024) >> 10;
+        memory_above_1m = (low_memory - 1024 * 1024) >> 10;
         memory_above_1m = Math.min(memory_above_1m, 0xFFFF);
     }
 
@@ -2706,17 +2749,17 @@ CPU.prototype.fill_cmos = function(rtc, settings)
     rtc.cmos_write(CMOS_MEM_EXTMEM_HIGH, memory_above_1m >> 8 & 0xFF);
 
     var memory_above_16m = 0; // in 64k blocks
-    if(this.memory_size[0] >= 16 * 1024 * 1024)
+    if(low_memory >= 16 * 1024 * 1024)
     {
-        memory_above_16m = (this.memory_size[0] - 16 * 1024 * 1024) >> 16;
+        memory_above_16m = (low_memory - 16 * 1024 * 1024) >> 16;
         memory_above_16m = Math.min(memory_above_16m, 0xFFFF);
     }
     rtc.cmos_write(CMOS_MEM_EXTMEM2_LOW, memory_above_16m & 0xFF);
     rtc.cmos_write(CMOS_MEM_EXTMEM2_HIGH, memory_above_16m >> 8 & 0xFF);
 
-    // memory above 4G (not supported by this emulator)
-    rtc.cmos_write(CMOS_MEM_HIGHMEM_LOW, 0);
-    rtc.cmos_write(CMOS_MEM_HIGHMEM_MID, 0);
+    // memory above 4G, in 64k blocks (high_memory_size relocates it there)
+    rtc.cmos_write(CMOS_MEM_HIGHMEM_LOW, high_memory >>> 16 & 0xFF);
+    rtc.cmos_write(CMOS_MEM_HIGHMEM_MID, high_memory >>> 24 & 0xFF);
     rtc.cmos_write(CMOS_MEM_HIGHMEM_HIGH, 0);
 
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);

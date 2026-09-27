@@ -386,6 +386,15 @@ export interface V86Options {
     memory_size?: number;
 
     /**
+     * Testing option: place this many bytes of memory_size at guest physical
+     * 4 GiB instead of below it (a multiple of 1 MiB). The relocated range is
+     * absent from the low address space; firmware reports it as RAM above
+     * 4 GiB. Total capacity is still limited to memory_size.
+     * @default 0
+     */
+    high_memory_size?: number;
+
+    /**
      * VGA memory size in bytes.
      * @example 8 * 1024 * 1024
      * @default 8 * 1024 * 1024

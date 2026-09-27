@@ -47,11 +47,43 @@ add("wide TLB retains translation until INVLPG", "mov qword [0x202060],0x208007\
 add("execution breakpoint faults before register commit", "lea rax,[rel .resume]\nmov [0x500010],rax\nxor eax,eax\nmov dr6,rax\nlea rax,[rel .watched]\nmov dr0,rax\nmov eax,1\nmov dr7,rax\nxor eax,eax\n.watched:\ninc eax\n.resume:\nxor edx,edx\nmov dr7,rdx\nmov rbx,dr6");
 add("high data write breakpoint traps after committed store", "xor eax,eax\nmov dr6,rax\nmov rdi,HIGH+0x500800\nmov dr0,rdi\nmov eax,0x90001\nmov dr7,rax\nmov r9,0x1122334455667788\nmov [rdi],r9\nxor eax,eax\nmov dr7,rax\nmov rax,[rdi]\nmov rbx,dr6");
 add("high data read breakpoint traps after register commit", "xor eax,eax\nmov dr6,rax\nmov rdi,HIGH+0x500800\nmov dr0,rdi\nmov eax,0xB0001\nmov dr7,rax\nmov rax,[rdi]\nxor edx,edx\nmov dr7,rdx\nmov rbx,dr6");
+// Far transfers in 64-bit mode (SDM Vol.2A JMP/CALL; Vol.3A §5.8.3.1).
+// The case fills the 64-bit call gate at GDT 0x48 (DPL 3) with its target.
+const gate = (target, selector = "0x18") => `lea rax,[rel ${target}]\nmov word [rel gdt+0x48],ax\nmov word [rel gdt+0x4A],${selector}\nmov word [rel gdt+0x4C],0xEC00\nshr rax,16\nmov word [rel gdt+0x4E],ax\nshr rax,16\nmov dword [rel gdt+0x50],eax\nmov dword [rel gdt+0x54],0`;
+add("far JMP m16:32 to compatibility code and RETF back", "jmp far dword [rel .ptr]\n.ptr: dd .compat\ndw 0x08\nbits 32\n.compat:\nmov eax,0x13572468\nmov ebx,cs\npush dword 0x18\npush dword .back64\nretf\nbits 64\n.back64:\nmov rdx,HIGH+.high\njmp rdx\n.high:\nxor edx,edx");
+add("far CALL m16:64 to 64-bit code and RETFQ", "call far qword [rel .ptr]\nmov rdx,rsp\njmp .done\n.target:\nmov rax,[rsp]\nmov rbx,[rsp+8]\nmov rcx,cs\no64 retf\n.ptr: dq .target\ndw 0x18\n.done:\nsub rdx,0x3F0000");
+add("far CALL m16:32 pushes 32-bit CS:EIP", "call far dword [rel .ptr]\n.ret32:\nmov rdx,HIGH+.high\njmp rdx\n.target:\nmov eax,[rsp]\nmov ebx,[rsp+4]\nlea rcx,[rsp+8]\nsub rcx,0x3F0000\nretf\n.ptr: dd .target\ndw 0x18\n.high:\nxor edx,edx");
+add("64-bit call gate from CPL3 to CPL0 switches to TSS RSP0", gate(".entry") + "\npush 0x23\npush 0x3D0000\npush 2\npush 0x33\nlea rax,[rel .user]\npush rax\niretq\n.user:\ncall far dword [rel .ptr]\n.ptr: dd 0\ndw 0x4B\n.entry:\nmov rax,[rsp+8]\nmov rbx,[rsp+24]\nmov rcx,[rsp+16]\nmov rdx,rsp\nmov rsi,ss\nshl rsi,32\nor rdx,rsi\nmov rsi,cs\nshl rsi,48\nor rdx,rsi\nmov rsp,0x3F0000\nmov esi,0x10\nmov ss,si");
+add("64-bit call gate at same privilege keeps the stack", gate(".entry") + "\ncall far dword [rel .ptr]\n.ptr: dd 0\ndw 0x48\n.entry:\nmov rax,[rsp+8]\nlea rbx,[rsp+16]\nsub rbx,0x3F0000\nmov rcx,cs\nmov rsp,0x3F0000");
+fault("far JMP to a TSS selector", "jmp far dword [rel .ptr]\n.ptr: dd 0\ndw 0x38", 13, 0x38);
+fault("far JMP to a data segment", "jmp far dword [rel .ptr]\n.ptr: dd 0\ndw 0x10", 13, 0x10);
+fault("far JMP null selector", "jmp far dword [rel .ptr]\n.ptr: dd 0\ndw 0", 13, 0);
+fault("far JMP register form", "db 0xFF,0xE8", 6);
+fault("far CALL noncanonical 64-bit offset", "call far qword [rel .ptr]\n.ptr: dq 0x800000000000\ndw 0x18", 13, 0);
+fault("far JMP to DPL3 code from CPL0", "jmp far dword [rel .ptr]\n.ptr: dd 0\ndw 0x30", 13, 0x30);
+fault("call gate to 32-bit code", gate(".entry", "0x08") + "\ncall far dword [rel .ptr]\n.ptr: dd 0\ndw 0x48\n.entry:\nnop", 13, 8);
+fault("call gate above the GDT limit", "call far dword [rel .ptr]\n.ptr: dd 0\ndw 0x58", 13, 0x58);
+
 // QEMU 10.2 does not implement these control-write faults (misc_helper.c).
 // Check them against explicit SDM outcomes in a separate v86 guest.
 const specification_cases = cases.splice(5, 5);
-for(const name of ["noncanonical stack operand", "reserved physical address bit in large leaf"])
+// QEMU 10.2's lcall helper lowers RSP by the pushed CS:RIP before raising
+// #GP for a noncanonical target; SDM Vol.3A §6.5 restores it for a fault.
+for(const name of ["noncanonical stack operand", "reserved physical address bit in large leaf", "far CALL noncanonical 64-bit offset"])
     specification_cases.push(...cases.splice(cases.findIndex(test => test.name === name), 1));
+// QEMU 10.2 TCG never reaches the result marker once a DR0 data watchpoint
+// hits a high linear address, so these use SDM Vol.3B §18.2.4/§18.3.1.2
+// outcomes: the access completes, then #DB traps with DR6.B0 set.
+const expectation_cases = [];
+for(const [name, rax, rbx] of [
+    ["high data write breakpoint traps after committed store", 0x1122334455667788n, 0xFFFF0FF1n],
+    ["high data read breakpoint traps after register commit", 0x1122334455667788n, 0xFFFF0FF1n],
+])
+{
+    const index = cases.findIndex(test => test.name === name);
+    assert.notEqual(index, -1, name);
+    expectation_cases.push({...cases.splice(index, 1)[0], rax, rbx});
+}
 function source_for(cases)
 {
 let body = "";
@@ -202,9 +234,10 @@ gdt:
 dq 0,0x00CF9A000000FFFF,0x00CF92000000FFFF,0x00AF9A000000FFFF
 dq 0x00CFF2000000FFFF,0x00CFFA000000FFFF,0x00AFFA000000FFFF
 dq 0x0000890000000067,0
-gdtr32: dw 71
+dq 0,0
+gdtr32: dw 87
 dd gdt
-gdtr64: dw 71
+gdtr64: dw 87
 dq HIGH+gdt
 idtr64: dw 4095
 dq HIGH+idt
@@ -239,6 +272,20 @@ if(!process.env.X64_ORACLE_ONLY)
         const at = 8 + n * 64;
         assert.equal(result.readBigUInt64LE(at + 32), result.readBigUInt64LE(at), test.name + " vector");
         assert.equal(result.readBigUInt64LE(at + 40), result.readBigUInt64LE(at + 8), test.name + " error code");
+        // The #GP frame sits directly below the untouched 0x3F0000 stack.
+        if(test.name === "far CALL noncanonical 64-bit offset")
+            assert.equal(result.readBigUInt64LE(at + 56), 0x3F0000n - 40n, test.name + " restores RSP");
     }
     console.log(`PASS: ${specification_cases.length} SDM control-write fault cases (QEMU reference unavailable)`);
+
+    const watch = assemble("system-data-breakpoints", source_for(expectation_cases));
+    const observed = await actual(watch, {length: 8 + expectation_cases.length * 64});
+    for(const [n, test] of expectation_cases.entries())
+    {
+        const at = 8 + n * 64;
+        assert.equal(observed.readBigUInt64LE(at), test.rax, test.name + " committed value");
+        assert.equal(observed.readBigUInt64LE(at + 8), test.rbx, test.name + " DR6");
+        assert.equal(observed.readBigUInt64LE(at + 32), 1n, test.name + " #DB vector");
+    }
+    console.log(`PASS: ${expectation_cases.length} SDM data-breakpoint cases (QEMU reference hangs)`);
 }

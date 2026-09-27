@@ -101,13 +101,13 @@ CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
-	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
+	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   v86gl_pci.js \
 	   bus.js log.js cpu.js \
 	   elf.js kernel.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
-	      network.js starter.js wasm_paths.js worker_bus.js cpu_worker.js dummy_screen.js ansi_screen.js \
+	      network.js starter.js wasm_paths.js worker_bus.js state_stream_transport.js cpu_worker.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
           print_stats.js filestorage.js modem.js graphics_performance.js performance_recorder.js
 
@@ -652,6 +652,46 @@ multicore-os-stress-tests-release: build/libv86.mjs build/v86.wasm images/linux4
 .PHONY: multicore-clock-tests multicore-clock-tests-release multicore-coherence-tests multicore-coherence-tests-release
 
 .PHONY: state-layout state-layout-check smp-tests multicore-boot-tests multicore-boot-tests-release
+
+# x86-64 (docs/acpi-x86-64-multicore-plan.zh-CN.md §6.3, X1-X5/XC). The oracle
+# targets need nasm and qemu-system-x86_64; linux targets download the pinned
+# Alpine ISO on first use and run for several minutes on the interpreter.
+x64-decode-tests: state-layout-check
+	cargo test x64::
+	CARGO_TARGET_DIR=build/x64-oracle-target cargo run --manifest-path tests/x64/oracle/Cargo.toml --release
+
+x64-system-tests: build/v86-debug.wasm
+	node tests/x64/system_oracle.mjs
+	node tests/x64/irq_boundary.mjs
+
+x64-differential-tests: build/v86-debug.wasm
+	node tests/x64/integer_oracle.mjs
+	node tests/x64/vector_oracle.mjs
+	node tests/x64/native_oracle.mjs
+	node tests/x64/cache_oracle.mjs
+
+highmem-tests: build/v86-debug.wasm
+	node tests/smp/physical_bus.mjs
+	node tests/smp/virtio_high_dma.mjs
+	node tests/smp/x64_snapshot.mjs
+	node tests/smp/legacy_low_hole.mjs
+	node tests/x64/high_memory.mjs
+
+x64-multicore-tests: build/v86-debug.wasm
+	node tests/x64/multicore.mjs
+
+x64-guest-tests: build/v86-debug.wasm
+	X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
+	X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+	X64_HIGH_MEMORY=134217728 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
+	X64_HIGH_MEMORY=134217728 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+
+x64-multicore-guest-tests: build/v86-debug.wasm
+	X64_CORES=4 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
+	X64_CORES=2 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+	X64_CORES=4 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+
+.PHONY: x64-decode-tests x64-system-tests x64-differential-tests highmem-tests x64-multicore-tests x64-guest-tests x64-multicore-guest-tests
 
 ir-decoder-tests: ir-generated-check
 	cargo test decode::tests -- --nocapture

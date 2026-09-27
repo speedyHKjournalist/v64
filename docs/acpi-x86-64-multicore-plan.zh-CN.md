@@ -1,6 +1,6 @@
 # v86：完整 ACPI、x86-64 与单路多核心实施计划
 
-> 状态（2026-09-27 更新）：C0/C1 的实现与主要门槛已通过；C2 每核指标及三后端 Linux 拓扑已通过，Windows SMP 仍待适配验证；C3 原子/内存序及 debug/release Linux OS 压力矩阵已通过，region 重启故障已修复；Windows SMP 及依赖 A3 的电源门槛仍未关闭。X1 状态/解码、X2 系统状态、X3 整数解释器、X4 原生寄存器块、X5 高地址 DMA/快照已推进并有局部门槛；x64 OS/XC 尚未验收。详见各阶段记录。
+> 状态（2026-09-27 更新）：C0/C1 的实现与主要门槛已通过；C2 每核指标及三后端 Linux 拓扑已通过，Windows SMP 仍待适配验证；C3 原子/内存序及 debug/release Linux OS 压力矩阵已通过，region 重启故障已修复；Windows SMP 及依赖 A3 的电源门槛仍未关闭。X1 状态/解码、X2 系统状态（含长模式远转移/调用门）、X3 整数/向量解释器、X4 原生寄存器块、X5 高地址 DMA/快照已推进并有局部门槛。**真实 x86_64 Linux（Alpine 3.24，Linux 6.18）已在 1 核解释器下启动到 root shell，64 位与 32 位兼容进程探针通过；RAM 位于 4 GiB 以上的配置同样通过**；多核 x64 与 JIT 模式的 OS 结果见 [XC 记录](validation/platform/XC/linux64-boot.zh-CN.md)。仍不向普通配置公布 LM。详见各阶段记录。
 > 基线：2026-09-27，`8af0560e`（PR #55 合并后，工作区干净）。原稿基线 `dfd8ac23 + 未提交修改` 已过时。
 > 本轮 review/推进的实际接手点为 `8edd6d69 + 未提交修改`；验证环境和 fixture 见 [C1 记录](validation/platform/C1/review-and-validation.zh-CN.md)。
 > §2 的事实均经源码审计，标注“探针”的条目另经客户机运行确认（buildroot Linux 6.8，`acpi: true`）。
@@ -193,11 +193,11 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 | C2 单路拓扑/轮转 | C1、A2 | 32 位 Linux 识别 1×N×1，各核执行任务（解释器） | L | — | **实现完成，Linux 已验收，Windows SMP 待验证** |
 | C3 跨核一致性/JIT | C2 | 原子、TLB shootdown、SMC、快照；Tier-0/区域后端在多核下通过 | XL | R-SMP32 | **进行中**（Linux 三后端负载/恢复/重启/S5 已通过，Windows SMP 与 A3 依赖未关闭） |
 | X1 64 位状态/解码 | P2a | 模式矩阵、REX/寄存器/地址尺寸单测通过 | L | — | **实施中**（宽状态 bank、33,088 个独立解码对照用例通过） |
-| X2 MMU/异常/系统状态 | X1 | 长模式切换、分页/NX/异常帧测试通过 | XL | — | **实施中**（四级页表、系统状态与 21 个真实 guest 系统用例） |
-| X3 64 位解释器闭环 | X2、A2 | 单核 x64 OS + 32 位进程，无 JIT 正确运行 | XL | — | **实施中**（1,540 个 QEMU 整数差分通过；SIMD/FPU 与 OS 待闭环） |
+| X2 MMU/异常/系统状态 | X1 | 长模式切换、分页/NX/异常帧测试通过 | XL | — | **实施中**（四级页表、系统状态；46 个 QEMU 差分 + 10 个 SDM 断言，含远 JMP/CALL 与 64 位调用门） |
+| X3 64 位解释器闭环 | X2、A2 | 单核 x64 OS + 32 位进程，无 JIT 正确运行 | XL | — | **OS 门槛已通过**（Alpine x86_64 1 核解释器登录；64/32 位探针；1,552 整数 + 958 向量 QEMU 差分）；Windows x64 无镜像未验收 |
 | X4 IR 各层 x64 | X3 | 解释器/Tier-0/区域管线差分和 OS 回归通过 | XL | — | **实施中**（原生 i64 寄存器块与完整地址缓存；完整 IR/OS 门槛未关闭） |
-| X5 36 位物理地址/设备 | X3；最终合并 X4 | 高位 MMIO、4 GiB 以上的 RAM 重映射（总量 ≤ wasm32 可用）、DMA 地址宽度、快照 | L | R-x64-UP | **实施中**（36 位物理总线、VirtIO/IDE/DMA 和整机快照通过局部验证；固件/OS 待后续） |
-| XC x64 × 多核集成 | X4、X5、C3 | C2/C3 的矩阵在 x64 OS 上通过 | L | R-x64-SMP | 待实施 |
+| X5 36 位物理地址/设备 | X3；最终合并 X4 | 高位 MMIO、4 GiB 以上的 RAM 重映射（总量 ≤ wasm32 可用）、DMA 地址宽度、快照 | L | R-x64-UP | **实施中**（36 位物理总线、VirtIO/IDE/DMA、整机快照；`high_memory_size` 经 SeaBIOS E820 交给 OS，Linux 在 4 GiB 以上分配并校验用户页） |
+| XC x64 × 多核集成 | X4、X5、C3 | C2/C3 的矩阵在 x64 OS 上通过 | L | R-x64-SMP | **实施中**（x64 Linux 在 2/4 核上线全部 AP；OS 探针结果见 XC 记录） |
 | A3 睡眠/休眠 | A2；S4 另需磁盘持久化策略；多核 S3 需 C3 | S4（OS 主导 soft-off + 恢复）与 S3 在单核/多核下闭环 | L | R-ACPI 完整 | 待实施 |
 | W0 显式上下文 ABI | XC | ctx_ptr ABI、静态状态逐项归属；单线程行为与性能不回退 | XL | — | 待实施 |
 | W1 宿主并行正确性 | W0、A3 | Worker/共享内存/同步内存模型通过验证 | XL | — | 待实施 |
@@ -466,12 +466,23 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 - X5 的真实高 RAM/MMIO、36 位 VirtIO、32 位 IDE/8237 边界和 balloon DMA 已加入测试；整机快照保留物理窗口与每核完整宽 TLB，坏输入在机器状态修改前拒绝。见 [物理总线](validation/platform/X5/physical-bus.zh-CN.md)、[宽 TLB 快照](validation/platform/X5/tlb-snapshot.zh-CN.md)。
 - 仍不公布 LM 能力，不表示 x64 OS、完整 Tier-0/region 或 XC 已通过。普通用户配置仍只需 `cpu_cores`，没有新增 `cpu_profile`/`cpu_execution` 选择。
 
+**本轮续（2026-09-27 晚）：真实 x86_64 Linux 与 XC**（基线 `018eabbc` + 未提交修改；详见 [XC 记录](validation/platform/XC/linux64-boot.zh-CN.md)）：
+
+- 修复宽解释器的中断交付时机：设备回调（IDE 数据口、8042、PIC 端口、LAPIC/IOAPIC MMIO）同步调用 `handle_irqs()`，在宽指令提交 RIP 之前交付 IRQ，随后被 `write_rip(next)` 覆盖，造成 ATAPI IDENTIFY 超时和 `rep insd` 处的 Oops。宽指令执行期间延迟外部中断，边界处统一交付；32 位路径不变。[`irq_boundary.mjs`](../tests/x64/irq_boundary.mjs) 的两个场景按 SDM 断言返回 RIP/RSP/IF，去掉修复的负向控制失败。
+- 宽解释器补上 `PAUSE` 让出（多核自旋不再占满 quantum）；实现 64 位模式间接远 JMP/CALL 与 64 位调用门（含 CPL3→CPL0 栈切换），系统差分增至 46 个 QEMU 用例，另有 SDM 断言覆盖 QEMU 的偏差（非规范远 CALL 目标、DR 数据断点、MOVLPD 寄存器形式）。
+- 吞吐：宽解释器 1.78 → 约 14 MIPS（物理总线低 RAM 短路、按页 preflight、取指页缓存、宽 TLB 按访问类型分槽、以字节校验的解码缓存与执行器归属缓存、免去不读 FLAGS 指令的惰性标志物化）；原生块缓存改为直接映射并加 64 次热度阈值。
+- Alpine 3.24 x86_64（Linux 6.18，官方 ISO 未修改）：1 核解释器启动到 root shell，64 位进程（`SYSCALL`）与 32 位兼容进程（vDSO `SYSENTER`）的无 libc 探针覆盖系统调用、`mmap`/`mprotect`+SIGSEGV、`fork`/`wait4`、逐核 `CLONE_THREAD`+`LOCK`、跨核 TLB shootdown、文件 I/O 与 `pagemap` 物理帧位置；同一探针先在 QEMU 上 1/2/4 核验证。
+- X5：新增测试配置 `high_memory_size`，把 RAM 顶部重映射到 4 GiB 并经 CMOS 0x5B–0x5D 交给 SeaBIOS；multiboot 图同步。Linux 1 核在 512 MiB 中 128 MiB 位于 4 GiB 以上时通过，两个探针进程的全部用户页位于 4 GiB 以上。
+- XC 观察：2/4 核 x64 Linux 上线全部 AP 并继续启动；Alpine 内核为 `CONFIG_HZ=1000`，客户机时间跟随宿主时间，每个忙碌 vCPU 每秒要处理 1000 次时钟中断，而 vCPU 轮转共享约 14 MIPS，因此多核启动慢数倍并出现 soft-lockup 警告（按指令采样的剖析显示时钟中断、调度统计占主导）。这是吞吐问题，需 X4 编译或 W 系列并行解决，不能靠放慢客户机时间掩盖。
+- 构建：`state_io.js`、`state_stream_transport.js` 已加入 Makefile 的 Closure 文件表（此前 `libv86.mjs`/`cpu-worker.js` 构建失败）；新增 §6.3 的 `x64-decode-tests`、`x64-system-tests`、`x64-differential-tests`、`highmem-tests`、`x64-multicore-tests`、`x64-guest-tests`、`x64-multicore-guest-tests`。
+- 仍阻塞：Windows XP SMP——现有镜像为 Standard PC HAL，改用 ACPI MP HAL 需要重新安装，而 XP 安装光盘需要产品密钥，本地无法完成；Windows x64 无镜像。
+
 ### XC：x64 × 多核集成
 
 **修改范围**：状态区布局（X1 扩宽后的 16×u64 GPR、16×XMM 等）、C1 的换入换出、每核 MSR（FS/GS/KERNEL_GS_BASE、STAR/LSTAR/SFMASK、TSC_AUX）、固件表中的 x2APIC 前置检查。
 
-- [ ] X1 扩宽后的状态区重新生成，换入换出覆盖新增字段；每核 MSR 与 SWAPGS 状态独立。
-- [ ] AP 从实模式经保护模式进入长模式的全过程在每核独立完成；长模式下的 IPI、TLB shootdown、NMI 按 C1/C3 的测试重跑。
+- [x] X1 扩宽后的状态区重新生成，换入换出覆盖新增字段；每核 MSR 与 SWAPGS 状态独立（`tests/x64/multicore.mjs` 四核状态/TLB 隔离、CX16、快照）。
+- [x] AP 从实模式经保护模式进入长模式的全过程在每核独立完成；长模式下的 IPI、TLB shootdown、NMI 按 C1/C3 的测试重跑。`tests/x64/multicore.mjs` 在三后端 × 2 种子 × 2 quantum 上新增长模式阶段：64 位 IDT、定向 fixed IPI、发给 HLT 中 AP 的 NMI（核对被中断的 RIP）、all-excluding-self 广播，快照恢复后重放结果一致；真实 Linux 2/4 核 AP 上线，OS 级 TLB shootdown 探针见 XC 记录。
 - [ ] Tier-0/区域后端在 x64 多核下的 SMC 与代码失效沿用 C3 的协议，并加入长模式地址的用例。
 
 **退出条件**：C2/C3 的 OS 与一致性矩阵在 x64 Linux（含 32 位兼容进程）上通过；Windows x64 目标在有镜像时进入验收。

@@ -104,7 +104,7 @@ pub struct Immediate {
     pub encoded_bytes: u8,
     pub sign_extended: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Decoded {
     pub encoding: &'static Encoding,
     pub opcode: u32,

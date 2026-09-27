@@ -284,13 +284,28 @@ pub unsafe fn windows() -> [Option<Window>; MAX_WINDOWS] {
 /// Validate a complete scalar/SIMD transaction without reading any MMIO byte
 /// or committing a RAM write. Adjacent, separately backed windows are valid.
 pub unsafe fn probe(address: u64, size: usize) -> Result<(), PhysicalError> {
+    if size != 0 && size <= 16 && plain_ram(address, size) {
+        return Ok(());
+    }
     (&*(&raw const PHYSICAL_BUS)).probe(address, size, *global_pointers::memory_size)
+}
+
+/// Below the first relocated RAM byte and outside the VGA hole, physical
+/// bytes are their own RAM backing: the window search cannot change the
+/// result, so hot accesses skip it. Anything else takes the full decode.
+#[inline(always)]
+pub unsafe fn plain_ram(address: u64, width: usize) -> bool {
+    let end = address.wrapping_add(width as u64);
+    end >= address && end <= memory::ram_fast_limit as u64 && (end <= 0xA0000 || address >= 0xC0000)
 }
 
 /// Resolve one physical byte to the legacy RAM/MMIO bus. This is address
 /// decoding, not truncation; callers accessing more than one byte must probe
 /// or resolve the complete range first.
 pub unsafe fn resolve_backing(address: u64) -> Result<u32, PhysicalError> {
+    if plain_ram(address, 1) {
+        return Ok(address as u32);
+    }
     (&*(&raw const PHYSICAL_BUS))
         .resolve(address, *global_pointers::memory_size)
         .map(|resolved| resolved.backing)
@@ -466,6 +481,9 @@ physical_exports!(x64_phys_read32, x64_phys_write32, read32, write32, u32);
 
 /// A page-bounded RAM witness, never an MMIO view or a raw host pointer.
 pub unsafe fn ram_page(address: u64) -> Result<RamPage, PhysicalError> {
+    if address & PAGE_MASK == 0 && plain_ram(address, 0x1000) {
+        return Ok(RamPage { guest: PhysicalAddress(address), backing: address as u32, generation: generation() });
+    }
     (&*(&raw const PHYSICAL_BUS)).ram_page(address, *global_pointers::memory_size)
 }
 
@@ -515,6 +533,9 @@ unsafe fn invalidate_mapping() {
 }
 
 unsafe fn read_allowed(address: u64, width: usize, allow_mmio: bool) -> Result<u64, PhysicalError> {
+    if plain_ram(address, width) {
+        return Ok(read_ram(address as u32, width));
+    }
     let bytes =
         (&*(&raw const PHYSICAL_BUS)).access(address, width, *global_pointers::memory_size)?;
     if !allow_mmio
@@ -527,16 +548,7 @@ unsafe fn read_allowed(address: u64, width: usize, allow_mmio: bool) -> Result<u
     if contiguous(&bytes[..width]) {
         let address = bytes[0].backing;
         if bytes[0].kind == WindowKind::Ram {
-            return Ok(match width {
-                1 => memory::read8_no_mmap_check(address) as u8 as u64,
-                2 => memory::read16_no_mmap_check(address) as u16 as u64,
-                4 => memory::read32_no_mmap_check(address) as u32 as u64,
-                8 => {
-                    memory::read32_no_mmap_check(address) as u32 as u64
-                        | (memory::read32_no_mmap_check(address + 4) as u32 as u64) << 32
-                },
-                _ => unreachable!(),
-            });
+            return Ok(read_ram(address, width));
         }
         return Ok(match width {
             1 => memory::read8(address) as u8 as u64,
@@ -558,22 +570,45 @@ unsafe fn read_allowed(address: u64, width: usize, allow_mmio: bool) -> Result<u
     Ok(value)
 }
 
+#[inline(always)]
+unsafe fn read_ram(address: u32, width: usize) -> u64 {
+    match width {
+        1 => memory::read8_no_mmap_check(address) as u8 as u64,
+        2 => memory::read16_no_mmap_check(address) as u16 as u64,
+        4 => memory::read32_no_mmap_check(address) as u32 as u64,
+        8 => {
+            memory::read32_no_mmap_check(address) as u32 as u64
+                | (memory::read32_no_mmap_check(address + 4) as u32 as u64) << 32
+        },
+        _ => unreachable!(),
+    }
+}
+
+#[inline(always)]
+unsafe fn write_ram(address: u32, width: usize, value: u64) {
+    match width {
+        1 => memory::write8_ram(address, value as u8 as i32),
+        2 => memory::write16_ram(address, value as u16 as i32),
+        4 => memory::write32_ram(address, value as i32),
+        8 => {
+            memory::write32_ram(address, value as i32);
+            memory::write32_ram(address + 4, (value >> 32) as i32);
+        },
+        _ => unreachable!(),
+    }
+}
+
 unsafe fn write(address: u64, width: usize, value: u64) -> Result<(), PhysicalError> {
+    if plain_ram(address, width) {
+        write_ram(address as u32, width, value);
+        return Ok(());
+    }
     let bytes =
         (&*(&raw const PHYSICAL_BUS)).access(address, width, *global_pointers::memory_size)?;
     if contiguous(&bytes[..width]) {
         let address = bytes[0].backing;
         if bytes[0].kind == WindowKind::Ram {
-            match width {
-                1 => memory::write8_ram(address, value as u8 as i32),
-                2 => memory::write16_ram(address, value as u16 as i32),
-                4 => memory::write32_ram(address, value as i32),
-                8 => {
-                    memory::write32_ram(address, value as i32);
-                    memory::write32_ram(address + 4, (value >> 32) as i32);
-                },
-                _ => unreachable!(),
-            }
+            write_ram(address, width, value);
             return Ok(());
         }
         match width {

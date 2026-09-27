@@ -3051,6 +3051,10 @@ pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
 
 pub unsafe fn cycle_internal() -> bool {
     if crate::x64::state::mode().is_long() {
+        if !crate::ir::runtime::schedule::enabled() {
+            run_long_instruction();
+            return false;
+        }
         let attempt = crate::x64::cache::run(4096);
         if attempt.retired == 0 { run_long_instruction(); }
         return attempt.submitted;
@@ -3222,7 +3226,10 @@ unsafe fn run_long_instruction() {
     let trap = *flags & FLAG_TRAP != 0;
     let resume = *flags & FLAG_RF != 0;
     crate::cpu::execution::begin_instruction();
-    let completed = match crate::x64::debug::begin().and_then(|()| crate::x64::execute::step()) {
+    crate::cpu::execution::set_irq_deferral(true);
+    let result = crate::x64::debug::begin().and_then(|()| crate::x64::execute::step());
+    crate::cpu::execution::set_irq_deferral(false);
+    let completed = match result {
         Ok(()) => true,
         Err(fault) => { crate::x64::system::raise(fault); false },
     };
@@ -3254,6 +3261,7 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
     jit_link_batch_start = before;
     jit_link_batch_limit = budget;
     jit_link_batch = true;
+    let native = crate::ir::runtime::schedule::enabled();
     while remaining != 0 && !*in_hlt && !core_yield {
         *previous_ip = *instruction_pointer;
         // A fault can change CS:EIP without retiring an instruction. Charge
@@ -3261,7 +3269,7 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
         let count = *instruction_counter;
         *slice_budget = remaining;
         if crate::x64::state::mode().is_long() {
-            let attempt = crate::x64::cache::run(remaining);
+            let attempt = if native { crate::x64::cache::run(remaining) } else { crate::x64::cache::Attempt { retired: 0, submitted: false } };
             if attempt.retired == 0 { run_long_instruction(); }
             remaining = remaining.saturating_sub(attempt.retired.max(1));
             if attempt.submitted { break; }
@@ -4173,7 +4181,7 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 
 #[no_mangle]
 pub unsafe fn handle_irqs() {
-    if crate::cpu::exceptions::delivering() { return; }
+    if crate::cpu::exceptions::delivering() || crate::cpu::execution::irqs_deferred() { return; }
     let core = apic::current_core() as u32;
     let shutdown = crate::cpu::exceptions::exception_shutdown(core);
     if shutdown == 2 { return; }

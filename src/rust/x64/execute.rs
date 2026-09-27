@@ -341,18 +341,87 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
 pub unsafe fn step() -> Result<(), Fault> {
     let start = state::GuestIp(state::read_rip());
     state::write_previous_rip(start.0);
-    let d = decode::decode_with(start, state::mode(), |offset| {
-        memory::fetch(start.0.wrapping_add(offset as u64))
+    super::profile::tick(start.0);
+    let mode = state::mode();
+    // The first byte's translation is the same fault point as a fresh decode.
+    let physical = memory::translate(start.0, super::paging::Access::Execute, false, false)?;
+    let slot = (start.0 ^ start.0 >> 10) as usize & (DECODE_CACHE_SIZE - 1);
+    if let Some(entry) = &(*(&raw const DECODE_CACHE))[slot] {
+        if entry.rip == start.0 && entry.physical == physical && entry.decoded.mode == mode
+            && code_unchanged(physical, &entry.decoded)
+        {
+            let d = entry.decoded;
+            let mut family = entry.family;
+            let result = dispatch(&d, &mut family);
+            if let Some(entry) = &mut (*(&raw mut DECODE_CACHE))[slot] {
+                if entry.rip == start.0 { entry.family = family; }
+            }
+            return result;
+        }
+    }
+    let mut page = Some((start.0 >> 12, physical & !4095));
+    let d = decode::decode_with(start, mode, |offset| {
+        memory::fetch_cached(start.0.wrapping_add(offset as u64), &mut page)
     })
     .map_err(|e| match e {
         DecodeError::Fetch { error, .. } => error,
         DecodeError::TooLong => Fault::gp(),
         _ => Fault::ud(),
     })?;
-    if super::system::execute(&d)? || super::vector::execute(&d)? {
-        return Ok(());
+    let mut family = UNKNOWN;
+    let result = dispatch(&d, &mut family);
+    if (physical & 4095) + d.length as u64 <= 4096 && super::physical::plain_ram(physical, d.length as usize) {
+        (*(&raw mut DECODE_CACHE))[slot] = Some(CachedDecode { rip: start.0, physical, decoded: d, family });
     }
-    execute(&d)
+    result
+}
+// The executor that owns a decoded instruction. system/vector decline an
+// instruction from its decoded fields alone, so the owner can be cached.
+const UNKNOWN: u8 = 0;
+const SYSTEM: u8 = 1;
+const VECTOR: u8 = 2;
+const INTEGER: u8 = 3;
+unsafe fn dispatch(d: &Decoded, family: &mut u8) -> Result<(), Fault> {
+    match *family {
+        SYSTEM => if super::system::execute(d)? { return Ok(()); },
+        VECTOR => if super::vector::execute(d)? { return Ok(()); },
+        INTEGER => return execute(d),
+        _ => {},
+    }
+    match super::system::execute(d) {
+        Ok(false) => {},
+        result => { *family = SYSTEM; return result.map(|_| ()); },
+    }
+    match super::vector::execute(d) {
+        Ok(false) => {},
+        result => { *family = VECTOR; return result.map(|_| ()); },
+    }
+    *family = INTEGER;
+    execute(d)
+}
+/// Decoded instructions keyed by full RIP, physical address and mode. Every
+/// hit revalidates the translation and the live code bytes, so a stale entry
+/// after SMC, DMA or remapping is only a miss.
+struct CachedDecode {
+    rip: u64,
+    physical: u64,
+    decoded: Decoded,
+    family: u8,
+}
+const DECODE_CACHE_SIZE: usize = 1024;
+static mut DECODE_CACHE: [Option<CachedDecode>; DECODE_CACHE_SIZE] = [const { None }; DECODE_CACHE_SIZE];
+unsafe fn code_unchanged(physical: u64, d: &Decoded) -> bool {
+    let length = d.length as usize;
+    super::physical::plain_ram(physical, length)
+        && std::slice::from_raw_parts(crate::cpu::memory::mem8.add(physical as usize), length) == &d.bytes[..length]
+}
+/// Opcodes whose `execute` arm neither reads nor merges the FLAGS value.
+fn flag_free(op: u32, group: u8) -> bool {
+    matches!(op, 0x88..=0x8B | 0x8D | 0xB0..=0xBF | 0xC6 | 0xC7 | 0xA0..=0xA3 | 0x63
+        | 0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF | 0x86 | 0x87 | 0x90..=0x97 | 0x50..=0x5F | 0x68 | 0x6A
+        | 0x8F | 0xC8 | 0xC9 | 0xE8 | 0xE9 | 0xEB | 0xC2 | 0xC3 | 0x98 | 0x99 | 0x0FC8..=0x0FCF
+        | 0x0F0D | 0x0F18 | 0x0F1E | 0x0F1F | 0x0FC3)
+        || op == 0xFF && matches!(group, 2 | 4 | 6)
 }
 pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
     if !d.mode.is_long() {
@@ -363,7 +432,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
     let rex = d.prefixes.rex.is_some();
     let group = d.modrm.map_or(0, |m| m >> 3 & 7);
     let imm = d.immediate.map_or(0, |i| i.value);
-    let flags = state::read_flags64();
+    // Materializing lazy FLAGS is skipped for arms that never read them.
+    let flags = if flag_free(op, group) { 0 } else { state::read_flags64() };
     let mut next = d.next.0;
     match op {
         // Cache hints never access the hinted data and do not raise a page
@@ -485,6 +555,11 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
         },
         0x90..=0x97 => {
             let r = d.opcode_register.unwrap();
+            // PAUSE (F3 90) is a spin-wait hint: as in the legacy interpreter,
+            // end this core's slice so the lock holder can run.
+            if r == 0 && d.prefixes.rep == Some(0xF3) && crate::cpu::apic::core_count() > 1 {
+                crate::cpu::cpu::core_yield = true;
+            }
             if r != 0 {
                 let a = register(0, w, rex);
                 let b = register(r, w, rex);

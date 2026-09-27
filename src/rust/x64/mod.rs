@@ -11,3 +11,4 @@ pub mod vector;
 pub mod compiler;
 pub mod cache;
 pub mod debug;
+pub mod profile;

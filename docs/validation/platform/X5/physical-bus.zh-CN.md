@@ -51,3 +51,11 @@ node tests/smp/virtio_high_dma.mjs
 | v86gl PCI (`src/v86gl_pci.js`) | 自有共享 arena 协议，目前显式拒绝非零高 DWORD | 通用 VirtIO ring 的高地址需兼容；低地址 DataView/arena 回调还需映射 generation 和低洞验证；不能因协议中高位被拒绝就声称支持 64 位 DMA |
 
 32 位 DMA 设备应保留真实地址上限，但仍要经过物理译码，避免重映射后的低洞继续访问原后备 RAM。不要将所有设备强制扩宽为 64 位，也不要忽略设备提供的高位。
+
+## 2026-09-27 续：固件/OS 可见的 4 GiB 以上 RAM
+
+新增测试配置 `high_memory_size`（字节，1 MiB 的倍数；`v86.d.ts` 标为 testing option）。初始化时把后备 RAM 顶部这一段经物理窗口 0 重映射到客户机物理 4 GiB，低地址 RAM 在 `memory_size - high_memory_size` 处结束，原低地址范围成为空洞；总容量不变，仍受 wasm32 限制，不涉及 X6。固件接口与 QEMU 相同：CMOS 0x30/0x31、0x34/0x35 只报告低 RAM，0x5B–0x5D 报告 4 GiB 以上的 64 KiB 块数，SeaBIOS 1.16.2 据此生成 `[4 GiB, 4 GiB + size)` 的 E820 RAM 项；`FW_CFG_RAM_SIZE` 仍为总量。multiboot 内存图排除低位空洞并追加 4 GiB 处的 RAM 项。快照恢复后从恢复的窗口 0 重新得出低 RAM 边界。低 RAM 必须至少 32 MiB 并容纳 initrd（固定装载于 64 MiB），否则启动前拒绝。
+
+[`tests/x64/high_memory.mjs`](../../../../tests/x64/high_memory.mjs)：64 MiB 中 16 MiB 上移，客户机自建页表映射 4 GiB，写入首尾与中间 qword、把一段代码复制到 4 GiB + 1 MiB 并在那里执行（返回值即自身 RIP `0x100100000`），宿主确认这些字节落在后备 RAM 的 [48 MiB, 64 MiB)；multiboot 图为 `[0,640K) [768K,48M) [4G,+16M)`，没有任何低 RAM 项覆盖空洞。
+
+真实 OS 由 `X64_HIGH_MEMORY=<字节> node tests/x64/linux_boot.mjs` 验证（512 MiB 中 128 MiB 上移）：要求 `/proc/iomem` 出现 `100000000-107ffffff : System RAM`，且 64 位与 32 位兼容探针各自 16 MiB 触碰页中有帧号 ≥ 4 GiB 的页（`/proc/self/pagemap`），内容逐页校验。独立 QEMU（`max-ram-below-4g`）同配置下两种进程的 4096 页全部位于 4 GiB 以上。v86 结果见 [XC 记录](../XC/linux64-boot.zh-CN.md)。
