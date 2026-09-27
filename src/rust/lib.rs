@@ -9,24 +9,19 @@ pub mod cpu;
 pub mod js_api;
 pub mod profiler;
 
-mod analysis;
-mod codegen;
 mod config;
-mod control_flow;
-mod cpu_context;
+#[allow(dead_code)]
+#[path = "ir/frontend/decode.rs"]
+pub(crate) mod decode;
+mod decode_rules;
 mod gen;
+mod ir;
 mod jit;
-mod jit_instructions;
 mod leb;
-mod modrm;
-mod opstats;
 mod page;
 mod prefix;
-mod regs;
 mod softfloat;
-mod x87_profiler;
-mod x87_codegen;
-mod simd_codegen;
 mod state_flags;
 mod wasmgen;
+mod x87_profiler;
 mod zstd;

@@ -1,18 +1,27 @@
 <!doctype html><meta charset="utf-8"><title>CPU Worker AudioWorklet</title><pre id="result">RUNNING</pre>
 <script type="module">
 import {V86} from "../../build/libv86.mjs";
+const params=new URLSearchParams(location.search);
+const irBackend=params.get("jit_backend")==="ir";
+const corePath=irBackend?"../../build/v86-ir-runtime.wasm":"../../build/v86.wasm";
+const jitOptions=irBackend?{jit_backend:"ir"}:{};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let vm;
 try {
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:"../../build/v86.wasm",
+    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:corePath,...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},memory_size:32<<20,
         disable_keyboard:true,disable_mouse:true,net_device:{type:"none"},autostart:false});
     await Promise.race([new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);}),sleep(10000).then(()=>{throw new Error("Audio initialization blocked on autoplay");})]);
+    if(irBackend) {
+        const info=await vm.get_jit_info();
+        if(info.backend!=="ir"||!info.ir_available||!info.ir.enabled)
+            throw new Error("IR backend policy did not reach AudioWorklet Worker");
+    }
     if(!vm.speaker_adapter.dac.node_processor) throw new Error("AudioWorklet missing");
     await vm.run();await sleep(50);
     const state=await vm.save_state();
     await vm.restore_state(state);
     await vm.stop();await vm.destroy();vm=null;
-    document.getElementById("result").textContent="PASS AudioWorklet direct port initializes without autoplay, saves and restores";
+    document.getElementById("result").textContent="PASS "+(irBackend?"IR ":"")+"AudioWorklet direct port initializes without autoplay, saves and restores";
 } catch(e) {if(vm) vm.worker_controller.close();document.getElementById("result").textContent="FAIL "+e.stack;}
 </script>

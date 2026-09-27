@@ -1,26 +1,33 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
+import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
+// mmx_fast_path.mjs [baseline.wasm] [candidate.wasm]: machine 0 is the
+// interpreter (or, with arguments, the baseline core); the candidate core runs
+// every case once per IR arm (Tier-0 and regions) and must match it.
 const paths = [process.argv[2] || "build/v86.wasm", process.argv[3] || "build/v86.wasm"];
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
 const DATA = 0x200000, OUT = 0x210000, CODE = 0x100000;
-const machines = [];
+const machines = [], labels = [];
 const interpreted_machines = new WeakSet();
 const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
 async function run(vm, address, warm = false) {
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
-    e.performance_recording_enable(1);
+    // Programs reuse CODE: start each warm run from an empty compiler state
+    // (Tier-0 needs 4x the heat to recompile a page after each rewrite).
+    if(warm) cpu.jit_clear_cache();
     vm.write_memory(new Uint8Array(4), 0x600);
     cpu.reg32[4] = 0x8000;
     cpu.instruction_pointer[0] = address; cpu.in_hlt[0] = 0;
+    const start = compiled_activations(e);
     vm.run();
     const end = performance.now() + 10000;
-    while(word(vm, 0x600) !== 0xCAFE || warm && !interpreted_machines.has(vm) && e.performance_recording_get(1) === 0) {
+    while(word(vm, 0x600) !== 0xCAFE || warm && !interpreted_machines.has(vm) && compiled_activations(e) === start) {
         assert(performance.now() < end, "MMX guest/JIT timeout"); await sleep(1);
     }
-    await vm.stop(); e.performance_recording_enable(0);
+    await vm.stop();
 }
 const data = new Uint8Array(8192), dv = new DataView(data.buffer);
 for(let i = 0; i < data.length; i += 8) {
@@ -39,13 +46,15 @@ function calculate(op, a, b) {
     return value;
 }
 try {
-    for(const wasm_path of paths) {
-        const interpreted = !process.argv[2] && machines.length === 0;
-        const vm = new V86({ wasm_path, disable_jit: interpreted, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
+    const interpreted = !process.argv[2];
+    for(const [label, wasm_path, options] of [
+        [interpreted ? "interpreter" : paths[0], paths[0], interpreted ? { disable_jit: true } : {}],
+        ...COMPILED_ARMS.map(arm => [arm.label, paths[1], arm.options])]) {
+        const vm = new V86({ wasm_path, ...options, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });
-        machines.push(vm);
-        if(interpreted) interpreted_machines.add(vm);
+        machines.push(vm); labels.push(label);
+        if(options.disable_jit) interpreted_machines.add(vm);
         await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
         vm.run();
         const end = performance.now() + 10000;
@@ -92,7 +101,8 @@ try {
                 assert.equal(view.getUint16(n * 128 + 20, true) & 0x3800, 0, "MMX resets TOP");
             }
         }
-        assert.deepEqual(results[1], results[0], "MMX results and complete FNSAVE state match baseline");
+        for(let i = 1; i < machines.length; i++)
+            assert.deepEqual(results[i], results[0], `${labels[i]}: MMX results and complete FNSAVE state match ${labels[0]}`);
         count += expected.length;
     }
     // Faulting instructions must preserve the destination, tag state and TOP.
@@ -131,14 +141,18 @@ try {
                 vm.v86.cpu.fpu_st.fill(0);
                 vm.write_memory(Uint8Array.from(u32(0x87654321)), 0x101FFC);
                 await run(vm, CODE);
+                // Raw F80 registers lag the x87 shadow cache (a dirty f64 is
+                // authoritative until a guest observer); synchronize to compare.
+                vm.v86.cpu.wm.exports.fpu_sync_all();
                 assert.equal(word(vm, OUT), fault_eip, `precise MMX fault #${vector}`);
-                assert.equal(vm.v86.cpu.fpu_stack_ptr[0], 7, `fault preserves TOP: ${paths[machines.indexOf(vm)]} op=${op.toString(16)} memory=${memory} #${vector}`);
+                assert.equal(vm.v86.cpu.fpu_stack_ptr[0], 7, `fault preserves TOP: ${labels[machines.indexOf(vm)]} op=${op.toString(16)} memory=${memory} #${vector}`);
                 assert.equal(vm.v86.cpu.fpu_stack_empty[0], 0x7F, "fault preserves tags");
                 snapshots.push(Array.from(vm.v86.cpu.fpu_st));
                 if(vector === 14 && (op === 0x7F || op === 0xE7)) assert.equal(word(vm, 0x101FFC), 0x87654321,
                     "cross-page store faults before writing the first page");
             }
-            assert.deepEqual(snapshots[1], snapshots[0], "fault leaves all FPU registers unchanged from baseline");
+            for(let i = 1; i < machines.length; i++) assert.deepEqual(snapshots[i], snapshots[0],
+                `${labels[i]}: fault leaves all FPU registers unchanged from ${labels[0]} (op=${op.toString(16)} memory=${memory} #${vector})`);
             faults++;
         }
     }
@@ -165,24 +179,27 @@ try {
             await run(vm, CODE, true);
             snapshots.push(Uint8Array.from(vm.read_memory(OUT, cases * 128)));
         }
-        assert.deepEqual(snapshots[1], snapshots[0], "x87 stack tags, status and data across every TOP, underflow and overflow");
+        for(let i = 1; i < machines.length; i++) assert.deepEqual(snapshots[i], snapshots[0],
+            `${labels[i]}: x87 stack tags, status and data across every TOP, underflow and overflow`);
         console.log(`PASS: ${cases} x87 stack boundary states and complete FNSAVE images`);
     }
     // Leave actual MMX state live, rather than the empty state after FNSAVE.
     const live = [0x0F, 0x6F, 0x05, ...u32(DATA), 0xC7, 0x05, ...u32(0x600), ...u32(0xCAFE)];
     live.push(0xE9, ...u32(-live.length - 5));
-    machines[1].write_memory(Uint8Array.from(live), CODE);
-    await run(machines[1], CODE, true);
-    // Save/restore after executing MMX must retain its shared x87 register state.
-    const vm = machines[1], state = await vm.save_state();
-    const before = Array.from(vm.v86.cpu.fpu_st);
-    assert.equal(vm.v86.cpu.fpu_stack_empty[0], 0);
-    assert.equal(vm.v86.cpu.fpu_stack_ptr[0], 0);
-    vm.v86.cpu.fpu_st.fill(0);
-    await vm.restore_state(state);
-    assert.deepEqual(Array.from(vm.v86.cpu.fpu_st), before);
-    assert.equal(vm.v86.cpu.fpu_stack_empty[0], 0);
-    assert.equal(vm.v86.cpu.fpu_stack_ptr[0], 0);
+    for(const vm of machines.slice(1)) {
+        vm.write_memory(Uint8Array.from(live), CODE);
+        await run(vm, CODE, true);
+        // Save/restore after executing MMX must retain its shared x87 register state.
+        const state = await vm.save_state();
+        const before = Array.from(vm.v86.cpu.fpu_st);
+        assert.equal(vm.v86.cpu.fpu_stack_empty[0], 0);
+        assert.equal(vm.v86.cpu.fpu_stack_ptr[0], 0);
+        vm.v86.cpu.fpu_st.fill(0);
+        await vm.restore_state(state);
+        assert.deepEqual(Array.from(vm.v86.cpu.fpu_st), before);
+        assert.equal(vm.v86.cpu.fpu_stack_empty[0], 0);
+        assert.equal(vm.v86.cpu.fpu_stack_ptr[0], 0);
+    }
     console.log(`PASS: ${faults} real guest #NM/#UD/#PF cases preserve MMX/x87 state and precise EIP`);
     console.log(`PASS: ${count} MMX register/memory cases, aliases, unaligned/page-crossing access, carry, TOP, full FNSAVE and save/restore`);
 } finally { for(const vm of machines) await vm.destroy(); }

@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
+import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
 
+// cpu_plan_sequences.mjs [baseline.wasm] [candidate.wasm]: machine 0 is the
+// interpreter (or, with arguments, the baseline core); the candidate core runs
+// every sequence once per IR arm (Tier-0 and regions) and must match it.
 const candidate = process.argv[3] || "build/v86.wasm";
 const baseline = process.argv[2] || candidate;
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
 const CODE = 0x100000, DATA = 0x200000, OUT = 0x210000;
-const machines = [];
+const machines = [], labels = [];
 const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
 const data = Uint8Array.from({ length: 8192 }, (_, i) => (i * 37 ^ i >> 3) & 255);
 const programs = [];
@@ -306,12 +310,13 @@ for(const taken of [false, true]) for(const offset of [1, 2, 3, 4]) {
         taken ? 0 : 0x90909090, name));
 }
 try {
-    for(const wasm_path of [baseline, candidate]) {
+    for(const [label, wasm_path, options] of [
+        [process.argv[2] ? baseline : "interpreter", baseline, process.argv[2] ? {} : { disable_jit: true }],
+        ...COMPILED_ARMS.map(arm => [arm.label, candidate, arm.options])]) {
         const vm = new V86({ wasm_path, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
-            disable_jit: machines.length === 0 && !process.argv[2] && !process.env.CACHE_CONTROL,
-            disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+            ...options, disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });
-        machines.push(vm);
+        machines.push(vm); labels.push(label);
         await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
         vm.run();
         const deadline = performance.now() + 10000;
@@ -320,36 +325,38 @@ try {
     }
     const selected = programs.filter(([name]) => !process.env.SEQUENCE_FILTER || (process.env.SEQUENCE_FILTER === "nonfloating" ? !name.startsWith("floating") : name.includes(process.env.SEQUENCE_FILTER)));
     for(const [name, body] of selected) {
-        const p = [...body, 0xC7, 0x05, ...u32(0x600), ...u32(0xCAFE)];
-        p.push(0xE9, ...u32(-p.length - 5));
+        // Loop until 0x604 is set, then halt at the end of an iteration: a VM
+        // stopped at an arbitrary point (Tier-0 and region boundaries differ
+        // from the loop head) can hold a partially rewritten OUT.
+        const p = [...body, 0xC7, 0x05, ...u32(0x600), ...u32(0xCAFE), 0x80, 0x3D, ...u32(0x604), 0, 0x75, 5];
+        p.push(0xE9, ...u32(-p.length - 5), 0xF4);
         const results = [];
-        for(const vm of machines) {
+        for(const [i, vm] of machines.entries()) {
+            const cpu = vm.v86.cpu, e = cpu.wm.exports;
+            // Programs reuse CODE: start each from an empty compiler state
+            // (Tier-0 needs 4x the heat to recompile a page after each rewrite).
+            cpu.jit_clear_cache();
             vm.write_memory(data, DATA);
             vm.write_memory(new Uint8Array(8192), OUT);
-            vm.write_memory(new Uint8Array(4), 0x600);
+            vm.write_memory(new Uint8Array(8), 0x600);
             vm.write_memory(Uint8Array.from(p), CODE);
-            const cpu = vm.v86.cpu, e = cpu.wm.exports;
-            for(const [index, option] of [[8, "JIT_TARGET_CACHE"], [10, "JIT_EXTENDED_FLAGS"],
-                [11, "JIT_STACK_CACHE"], [12, "JIT_LINEAR_REGIONS"]]) {
-                e.set_jit_config(index, Number(process.env[option] || 0));
-            }
-            // This regression must still exercise the experimental cache.
-            if(name.startsWith("overlapping indirect site")) e.set_jit_config(8, 1);
-            if(process.env.JIT_RMW_CACHE !== undefined) e.set_jit_config(9, Number(process.env.JIT_RMW_CACHE));
-            if(process.env.CACHE_CONTROL) e.set_jit_config(6, Number(vm !== machines[0]));
             cpu.instruction_pointer[0] = CODE; cpu.in_hlt[0] = 0;
-            e.performance_recording_enable(1);
+            const start = compiled_activations(e);
             vm.run();
             const deadline = performance.now() + 10000;
-            while(word(vm, 0x600) !== 0xCAFE || (vm !== machines[0] || process.argv[2] || process.env.CACHE_CONTROL) && e.performance_recording_get(1) === 0) {
-                assert(performance.now() < deadline, name); await sleep(1);
+            while(word(vm, 0x600) !== 0xCAFE || (i > 0 || process.argv[2]) && compiled_activations(e) === start) {
+                assert(performance.now() < deadline, `${labels[i]}: ${name}`); await sleep(1);
             }
-            await sleep(20); await vm.stop(); e.performance_recording_enable(0);
+            await sleep(20); await vm.stop();
+            vm.write_memory(Uint8Array.of(1), 0x604);
+            vm.run();
+            while(!cpu.in_hlt[0]) { assert(performance.now() < deadline, `${labels[i]}: ${name} halt`); await sleep(1); }
+            await vm.stop();
             const result=Uint8Array.from(vm.read_memory(OUT,8192));
             if(oracles.has(name)) oracles.get(name)(result);
             results.push(result);
         }
-        assert.deepEqual(results[1], results[0], name);
+        for(let i = 1; i < machines.length; i++) assert.deepEqual(results[i], results[0], `${labels[i]}: ${name}`);
     }
-    console.log(`PASS: ${selected.length} actual JIT sequences, aliases, MMX/x87 transitions and RAM boundaries`);
+    console.log(`PASS: ${selected.length} actual sequences on Tier-0 and regions, aliases, MMX/x87 transitions and RAM boundaries`);
 } finally { for(const vm of machines) await vm.destroy(); }

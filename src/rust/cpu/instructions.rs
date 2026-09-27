@@ -570,13 +570,13 @@ pub unsafe fn instr_65() { segment_prefix_op(GS); }
 
 pub unsafe fn instr_66() {
     // Operand-size override prefix
-    *prefixes |= prefix::PREFIX_MASK_OPSIZE;
+    *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0x66).unwrap();
     run_prefix_instruction();
     *prefixes = 0;
 }
 pub unsafe fn instr_67() {
     // Address-size override prefix
-    *prefixes |= prefix::PREFIX_MASK_ADDRSIZE;
+    *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0x67).unwrap();
     run_prefix_instruction();
     *prefixes = 0;
 }
@@ -1620,7 +1620,6 @@ pub unsafe fn instr_D6() {
 }
 pub unsafe fn instr_D7() {
     // xlat
-    dbg_assert!(!in_jit);
     if is_asize_32() {
         write_reg8(
             AL,
@@ -2155,14 +2154,14 @@ pub unsafe fn instr_F1() {
 pub unsafe fn instr_F2() {
     // repnz
     dbg_assert!(*prefixes & prefix::PREFIX_MASK_REP == 0);
-    *prefixes |= prefix::PREFIX_REPNZ;
+    *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0xF2).unwrap();
     run_prefix_instruction();
     *prefixes = 0;
 }
 pub unsafe fn instr_F3() {
     // repz
     dbg_assert!(*prefixes & prefix::PREFIX_MASK_REP == 0);
-    *prefixes |= prefix::PREFIX_REPZ;
+    *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0xF3).unwrap();
     run_prefix_instruction();
     *prefixes = 0;
 }

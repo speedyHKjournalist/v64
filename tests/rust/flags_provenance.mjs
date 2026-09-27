@@ -1,8 +1,10 @@
 // Compare flag-neutral instruction chains against the interpreter. Each
 // consumer gets a fresh producer, so all 16 conditions exercise provenance.
+// Both IR code generators (Tier-0 and regions) run every program.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
+import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
 
 const wasm_path = process.argv[2] || "build/v86.wasm";
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
@@ -60,7 +62,7 @@ let cases = 0, programs = 0;
 
 // Independent integer reference for CMP conditions, including signed overflow
 // and parity. This also checks the interpreter rather than trusting it alone.
-function cmpConditions(producer, a, b) {
+function cmp_conditions(producer, a, b) {
     if(!producer.startsWith("cmp")) return null;
     let width = 32;
     if(producer === "cmp32-zero") b = 0;
@@ -82,18 +84,22 @@ function cmpConditions(producer, a, b) {
         zf || sf !== of, !zf && sf === of].map(Number);
 }
 
-async function execute(vm, program, interpreted) {
+async function execute(vm, program, label) {
+    const interpreted = !label;
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    // Every program reuses CODE. Start each from an empty compiler state:
+    // Tier-0 needs 4x the heat to recompile a page after each rewrite.
+    cpu.jit_clear_cache();
     vm.write_memory(Uint8Array.from(program), CODE);
     vm.write_memory(new Uint8Array(4096), OUT);
     vm.write_memory(new Uint8Array(4), 0x600);
     cpu.instruction_pointer[0] = CODE;
     cpu.in_hlt[0] = 0;
-    e.performance_recording_enable(1);
+    const warm_start = compiled_activations(e);
     vm.run();
     const deadline = performance.now() + 10000;
-    while(word(vm, 0x600) < 2 || !interpreted && e.performance_recording_get(1) === 0) {
-        assert(performance.now() < deadline, "JIT warmup timeout");
+    while(word(vm, 0x600) < 2 || !interpreted && compiled_activations(e) === warm_start) {
+        assert(performance.now() < deadline, `${label || "interpreter"}: warmup timeout`);
         await sleep(1);
     }
     await vm.stop();
@@ -103,22 +109,21 @@ async function execute(vm, program, interpreted) {
         vm.write_memory(new Uint8Array(4096), OUT);
         vm.write_memory(new Uint8Array(4), 0x600);
         cpu.instruction_pointer[0] = CODE;
-        e.performance_recording_enable(1);
+        const replay_start = compiled_activations(e);
         vm.run();
         while(word(vm, 0x600) < 2) {
-            assert(performance.now() < deadline, "JIT replay timeout");
+            assert(performance.now() < deadline, `${label}: replay timeout`);
             await sleep(1);
         }
         await vm.stop();
-        assert(e.performance_recording_get(1) > 0, "replay must execute compiled code");
+        assert(compiled_activations(e) !== replay_start, `${label}: replay must execute compiled code`);
     }
-    e.performance_recording_enable(0);
     return Uint8Array.from(vm.read_memory(OUT, 4096));
 }
 
 try {
-    for(const disable_jit of [true, false]) {
-        const vm = new V86({ wasm_path, bios: { buffer: bios.slice(0) }, disable_jit,
+    for(const options of [{ disable_jit: true }, ...COMPILED_ARMS.map(arm => arm.options)]) {
+        const vm = new V86({ wasm_path, bios: { buffer: bios.slice(0) }, ...options,
             memory_size: 32 << 20, disable_keyboard: true, disable_mouse: true,
             disable_speaker: true, net_device: { type: "none" }, autostart: false });
         machines.push(vm);
@@ -130,7 +135,6 @@ try {
             await sleep(1);
         }
         await vm.stop();
-        vm.v86.cpu.wm.exports.set_jit_config(4, 1000);
     }
     for(const [producer, op] of producers) for(const [name, moves] of neutral) {
         if(process.env.FLAGS_FILTER && !`${producer}/${name}`.includes(process.env.FLAGS_FILTER)) continue;
@@ -156,21 +160,23 @@ try {
             p.push(0xFF, 0x05, ...u32(0x600));
             p.push(0xE9, ...u32(-p.length - 5));
             assert(p.length < 8192, "test must fit within two pages");
-            const reference = await execute(machines[0], p, true);
-            const actual = await execute(machines[1], p, false);
-            const mismatch = actual.findIndex((value, i) => value !== reference[i]);
-            assert.equal(mismatch, -1, `${producer}/${name}/${consumer} byte=${mismatch}: ` +
-                `JIT=${actual[mismatch]}, interpreter=${reference[mismatch]}`);
-            if(!name.endsWith("barrier")) for(const [index, [a, b]] of inputs.entries()) {
-                const expected = cmpConditions(producer, a, b);
-                if(expected) for(let cc = 0; cc < 16; cc++) {
-                    assert.equal(actual[(index * 16 + cc) * 8], expected[cc],
-                        `${producer}/${name}/${consumer} independent condition ${cc}, input ${index}`);
+            const reference = await execute(machines[0], p);
+            for(const [arm, { label }] of COMPILED_ARMS.entries()) {
+                const actual = await execute(machines[1 + arm], p, label);
+                const mismatch = actual.findIndex((value, i) => value !== reference[i]);
+                assert.equal(mismatch, -1, `${label}: ${producer}/${name}/${consumer} byte=${mismatch}: ` +
+                    `JIT=${actual[mismatch]}, interpreter=${reference[mismatch]}`);
+                if(!name.endsWith("barrier")) for(const [index, [a, b]] of inputs.entries()) {
+                    const expected = cmp_conditions(producer, a, b);
+                    if(expected) for(let cc = 0; cc < 16; cc++) {
+                        assert.equal(actual[(index * 16 + cc) * 8], expected[cc],
+                            `${label}: ${producer}/${name}/${consumer} independent condition ${cc}, input ${index}`);
+                    }
                 }
             }
             cases += inputs.length * 16;
             programs++;
         }
     }
-    console.log(`PASS: ${cases} flag/condition cases in ${programs} programs (interpreter vs warmed JIT)`);
+    console.log(`PASS: ${cases} flag/condition cases in ${programs} programs (interpreter vs warmed Tier-0 and regions)`);
 } finally { for(const vm of machines) await vm.destroy(); }

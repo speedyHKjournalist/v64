@@ -142,15 +142,15 @@ function gen_instruction_body(encodings, size)
 
         if(has_66.length) {
             const body = gen_instruction_body_after_prefix(has_66, size);
-            if_blocks.push({ condition: "prefixes_ & prefix::PREFIX_66 != 0", body, });
+            if_blocks.push({ condition: "selected_prefix == prefix::PREFIX_66", body, });
         }
         if(has_f2.length) {
             const body = gen_instruction_body_after_prefix(has_f2, size);
-            if_blocks.push({ condition: "prefixes_ & prefix::PREFIX_F2 != 0", body, });
+            if_blocks.push({ condition: "selected_prefix == prefix::PREFIX_F2", body, });
         }
         if(has_f3.length) {
             const body = gen_instruction_body_after_prefix(has_f3, size);
-            if_blocks.push({ condition: "prefixes_ & prefix::PREFIX_F3 != 0", body, });
+            if_blocks.push({ condition: "selected_prefix == prefix::PREFIX_F3", body, });
         }
 
         const check_prefixes = encoding.sse ? "(prefix::PREFIX_66 | prefix::PREFIX_F2 | prefix::PREFIX_F3)" : "(prefix::PREFIX_F2 | prefix::PREFIX_F3)";
@@ -165,6 +165,7 @@ function gen_instruction_body(encodings, size)
         return [].concat(
             "let prefixes_ = *prefixes;",
             code,
+            `let selected_prefix = crate::decode_rules::mandatory_prefix(prefixes_, ${[has_66.length && "prefix::PREFIX_66", has_f2.length && "prefix::PREFIX_F2", has_f3.length && "prefix::PREFIX_F3"].filter(Boolean).join(" | ")});`,
             {
                 type: "if-else",
                 if_blocks,

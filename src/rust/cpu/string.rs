@@ -22,91 +22,8 @@ use crate::cpu::memory;
 use crate::jit;
 use crate::page::Page;
 
-/// Execute a bounded batch of a recognized forward MOV/advance/DEC/JNZ loop.
-/// This helper never faults or calls devices: on any uncertain translation it
-/// returns zero without changing architectural state, leaving the original
-/// instructions to perform the access (and deliver an exact fault).
-#[no_mangle]
-pub unsafe fn jit_copy_loop(config: u32, budget: i32) -> u32 {
-    // Preserve constant register addressing for the previously optimized idioms.
-    const ORIGINAL: u32 = (6 << 8) | (7 << 11) | (1 << 14);
-    if config == ORIGINAL | 1 { return jit_copy_loop_registers(1, budget, ESI, EDI, ECX, EAX); }
-    if config == ORIGINAL | 4 { return jit_copy_loop_registers(4, budget, ESI, EDI, ECX, EAX); }
-    if config & 0x10 != 0 { return jit_rmw_loop(config, budget); }
-    jit_copy_loop_registers(config & 255, budget, (config >> 8 & 7) as i32,
-        (config >> 11 & 7) as i32, (config >> 14 & 7) as i32, (config >> 17 & 7) as i32)
-}
-
-#[inline(always)]
-unsafe fn jit_copy_loop_registers(size: u32, budget: i32, source_reg: i32,
-    dest_reg: i32, count_reg: i32, temp_reg: i32) -> u32 {
-    use crate::cpu::cpu::{tlb_data, TLB_VALID, TLB_GLOBAL, TLB_READONLY,
-        TLB_HAS_CODE, TLB_NO_USER, FLAG_TRAP};
-    use crate::cpu::global_pointers::cpl;
-    dbg_assert!(size == 1 || size == 4);
-    if budget < 0 || *flags & FLAG_TRAP != 0 { return 0; }
-    let src = read_reg32(source_reg) as u32;
-    let dst = read_reg32(dest_reg) as u32;
-    let count = (read_reg32(count_reg) as u32).min(128)
-        .min(1 + budget as u32 / 6)
-        .min((4096 - (src & 4095)) / size)
-        .min((4096 - (dst & 4095)) / size);
-    if count < 8 { return 0; }
-    let read_entry = tlb_data[(src >> 12) as usize];
-    let write_entry = tlb_data[(dst >> 12) as usize];
-    let write_mask = 0xFFF & !TLB_GLOBAL & !(if *cpl == 3 { 0 } else { TLB_NO_USER });
-    let read_mask = write_mask & !TLB_READONLY & !TLB_HAS_CODE;
-    if read_entry & read_mask != TLB_VALID || write_entry & write_mask != TLB_VALID { return 0; }
-    let phys_src = (((read_entry as u32 & !4095) ^ src) as u32).wrapping_sub(memory::mem8 as u32);
-    let phys_dst = (((write_entry as u32 & !4095) ^ dst) as u32).wrapping_sub(memory::mem8 as u32);
-    let bytes = count * size;
-    // Forward overlapping copies may consume their own writes. memmove has
-    // different semantics; defer such copies, including virtual aliases.
-    if phys_dst > phys_src && phys_dst - phys_src < bytes { return 0; }
-    let last = if size == 1 { memory::read8(phys_src + bytes - 1) as i32 }
-        else { memory::read32s(phys_src + bytes - 4) };
-    memory::memcpy_no_mmap_or_dirty_check(phys_src, phys_dst, bytes);
-    if size == 1 { write_reg8(temp_reg, last); } else { write_reg32(temp_reg, last); }
-    write_reg32(source_reg, src.wrapping_add(bytes) as i32);
-    write_reg32(dest_reg, dst.wrapping_add(bytes) as i32);
-    let remaining = (read_reg32(count_reg) as u32).wrapping_sub(count);
-    // INC in the byte loop preserves CF. The dword loop's final ADD EDI,4
-    // supplies CF; DEC ECX supplies the other arithmetic flags in both loops.
-    if size == 4 { crate::cpu::arith::add32(dst.wrapping_add(bytes - 4) as i32, 4); }
-    crate::cpu::arith::dec32(remaining.wrapping_add(1) as i32);
-    write_reg32(count_reg, remaining as i32);
-    count
-}
-
 // In-place ADD/XOR array loops. The final address ADD and counter DEC define
 // the architectural flags, so intermediate element flags need not be stored.
-unsafe fn jit_rmw_loop(config: u32, budget: i32) -> u32 {
-    use crate::cpu::cpu::{tlb_data, TLB_VALID, TLB_GLOBAL, TLB_NO_USER, FLAG_TRAP};
-    use crate::cpu::global_pointers::cpl;
-    if budget < 0 || *flags & FLAG_TRAP != 0 { return 0; }
-    let value = read_reg32((config >> 8 & 7) as i32);
-    let dest_reg = (config >> 11 & 7) as i32;
-    let count_reg = (config >> 14 & 7) as i32;
-    let dest = read_reg32(dest_reg) as u32;
-    let count = (read_reg32(count_reg) as u32).min(128)
-        .min(1 + budget as u32 / 4).min((4096 - (dest & 4095)) / 4);
-    if count < 8 { return 0; }
-    let entry = tlb_data[(dest >> 12) as usize];
-    let mask = 0xFFF & !TLB_GLOBAL & !(if *cpl == 3 { 0 } else { TLB_NO_USER });
-    if entry & mask != TLB_VALID { return 0; }
-    let physical = ((entry as u32 & !4095) ^ dest).wrapping_sub(memory::mem8 as u32);
-    for i in 0..count {
-        let old = memory::read32s(physical + i * 4);
-        let new = if config & 1 == 0 { old.wrapping_add(value) } else { old ^ value };
-        memory::write32_no_mmap_or_dirty_check(physical + i * 4, new);
-    }
-    let remaining = (read_reg32(count_reg) as u32).wrapping_sub(count);
-    crate::cpu::arith::add32(dest.wrapping_add(count * 4 - 4) as i32, 4);
-    crate::cpu::arith::dec32(remaining.wrapping_add(1) as i32);
-    write_reg32(dest_reg, dest.wrapping_add(count * 4) as i32);
-    write_reg32(count_reg, remaining as i32);
-    count
-}
 
 fn count_until_end_of_page(direction: i32, size: i32, addr: u32) -> u32 {
     (if direction == 1 {
@@ -140,8 +57,7 @@ enum Rep {
     NZ,
 }
 
-// We implement all string instructions here and rely on the inliner on doing its job of optimising
-// away anything known at compile time (check with `wasm-dis build/v86.wasm`)
+// Interpreter callers retain their unbounded/page-bounded execution policy.
 #[inline(always)]
 unsafe fn string_instruction(
     is_asize_32: bool,
@@ -150,6 +66,60 @@ unsafe fn string_instruction(
     size: Size,
     rep: Rep,
 ) {
+    let _ = string_instruction_bounded(is_asize_32, ds_or_prefix, instruction, size, rep, u32::MAX);
+}
+
+/// Explicit progress from one semantic batch, independent of the resulting EIP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StringOutcome {
+    Complete,
+    Repeat,
+    Fault,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StringExecution {
+    pub outcome: StringOutcome,
+    pub iterations: u32,
+}
+impl StringExecution {
+    fn new(outcome: StringOutcome, iterations: u32) -> Self {
+        Self {
+            outcome,
+            iterations,
+        }
+    }
+}
+
+// We implement all string instructions here and rely on the inliner on doing its job of optimising
+// away anything known at compile time (check with `wasm-dis build/v86.wasm`)
+#[inline(always)]
+unsafe fn string_instruction_bounded(
+    is_asize_32: bool,
+    ds_or_prefix: i32,
+    instruction: Instruction,
+    size: Size,
+    rep: Rep,
+    limit: u32,
+) -> StringExecution {
+    let mut iterations = 0;
+    let mut fault = false;
+    let mut repeat = false;
+    macro_rules! finish_on_fault {
+        ($value:expr) => {
+            return_on_pagefault!($value, StringExecution::new(StringOutcome::Fault, 0))
+        };
+    }
+    macro_rules! break_with_fault {
+        ($value:expr) => {
+            break_on_pagefault!({
+                let result = $value;
+                if result.is_err() {
+                    fault = true;
+                }
+                result
+            })
+        };
+    }
     let asize_mask = if is_asize_32 { -1 } else { 0xFFFF };
 
     let direction = if 0 != *flags & FLAG_DIRECTION { -1 } else { 1 };
@@ -158,19 +128,24 @@ unsafe fn string_instruction(
         Rep::Z | Rep::NZ => {
             let c = (read_reg32(ECX) & asize_mask) as u32;
             if c == 0 {
-                return;
+                return StringExecution::new(StringOutcome::Complete, 0);
             };
             c
         },
         Rep::None => 0,
     };
 
+    if limit == 0 {
+        *instruction_pointer = *previous_ip;
+        return StringExecution::new(StringOutcome::Repeat, 0);
+    }
+
     let es = match instruction {
         Instruction::Movs
         | Instruction::Cmps
         | Instruction::Stos
         | Instruction::Scas
-        | Instruction::Ins => return_on_pagefault!(get_seg(ES)),
+        | Instruction::Ins => finish_on_fault!(get_seg(ES)),
         _ => 0,
     };
     let ds = match instruction {
@@ -178,7 +153,7 @@ unsafe fn string_instruction(
         | Instruction::Cmps
         | Instruction::Lods
         | Instruction::Scas
-        | Instruction::Outs => return_on_pagefault!(get_seg(ds_or_prefix)),
+        | Instruction::Outs => finish_on_fault!(get_seg(ds_or_prefix)),
         _ => 0,
     };
 
@@ -219,7 +194,7 @@ unsafe fn string_instruction(
         Instruction::Ins | Instruction::Outs => {
             let port = read_reg16(DX);
             if !test_privileges_for_io(port, size_bytes) {
-                return;
+                return StringExecution::new(StringOutcome::Fault, 0);
             }
             port
         },
@@ -248,7 +223,7 @@ unsafe fn string_instruction(
         match instruction {
             Instruction::Movs => {
                 let (addr, skip) =
-                    return_on_pagefault!(translate_address_write_and_can_skip_dirty(es + dst));
+                    finish_on_fault!(translate_address_write_and_can_skip_dirty(es + dst));
                 movs_into_svga_lfb = memory::in_svga_lfb(addr);
                 rep_fast = rep_fast && (!memory::in_mapped_range(addr) || movs_into_svga_lfb);
                 phys_dst = addr;
@@ -256,13 +231,13 @@ unsafe fn string_instruction(
             },
             Instruction::Stos | Instruction::Ins => {
                 let (addr, skip) =
-                    return_on_pagefault!(translate_address_write_and_can_skip_dirty(es + dst));
+                    finish_on_fault!(translate_address_write_and_can_skip_dirty(es + dst));
                 rep_fast = rep_fast && !memory::in_mapped_range(addr);
                 phys_dst = addr;
                 skip_dirty_page = skip;
             },
             Instruction::Cmps | Instruction::Scas => {
-                let addr = return_on_pagefault!(translate_address_read(es + dst));
+                let addr = finish_on_fault!(translate_address_read(es + dst));
                 rep_fast = rep_fast && !memory::in_mapped_range(addr);
                 phys_dst = addr;
                 skip_dirty_page = true;
@@ -272,7 +247,7 @@ unsafe fn string_instruction(
 
         match instruction {
             Instruction::Movs | Instruction::Cmps | Instruction::Lods | Instruction::Outs => {
-                let addr = return_on_pagefault!(translate_address_read(ds + src));
+                let addr = finish_on_fault!(translate_address_read(ds + src));
                 rep_fast = rep_fast && !memory::in_mapped_range(addr);
                 phys_src = addr;
             },
@@ -280,7 +255,7 @@ unsafe fn string_instruction(
         };
 
         let count_until_end_of_page = u32::min(
-            count,
+            count.min(limit),
             match instruction {
                 Instruction::Movs | Instruction::Cmps => u32::min(
                     count_until_end_of_page(direction, size_bytes, phys_src),
@@ -393,9 +368,18 @@ unsafe fn string_instruction(
                             // Do not turn this into memmove: each element can
                             // depend on the one written immediately before it.
                             match size {
-                                Size::B => memory::write8_no_mmap_or_dirty_check(to, memory::read8_no_mmap_check(from)),
-                                Size::W => memory::write16_no_mmap_or_dirty_check(to, memory::read16_no_mmap_check(from)),
-                                Size::D => memory::write32_no_mmap_or_dirty_check(to, memory::read32_no_mmap_check(from)),
+                                Size::B => memory::write8_no_mmap_or_dirty_check(
+                                    to,
+                                    memory::read8_no_mmap_check(from),
+                                ),
+                                Size::W => memory::write16_no_mmap_or_dirty_check(
+                                    to,
+                                    memory::read16_no_mmap_check(from),
+                                ),
+                                Size::D => memory::write32_no_mmap_or_dirty_check(
+                                    to,
+                                    memory::read32_no_mmap_check(from),
+                                ),
                             }
                         }
                         i = count_until_end_of_page;
@@ -440,7 +424,10 @@ unsafe fn string_instruction(
                             phys_dst -= (count_until_end_of_page - 1) * size_bytes as u32;
                         }
                         memory::memset_pattern_no_mmap_or_dirty_check(
-                            phys_dst, src_val as u32, size_bytes as u32, count_until_end_of_page,
+                            phys_dst,
+                            src_val as u32,
+                            size_bytes as u32,
+                            count_until_end_of_page,
                         );
                         i = count_until_end_of_page;
                         break;
@@ -491,10 +478,12 @@ unsafe fn string_instruction(
 
         dbg_assert!(i <= count);
         count -= i;
+        iterations = i;
 
         if !rep_cmp_finished && count != 0 {
             // go back to the current instruction, since this loop just handles a single page
             *instruction_pointer = *previous_ip;
+            repeat = true;
         }
 
         src += i as i32 * increment;
@@ -506,13 +495,13 @@ unsafe fn string_instruction(
                 Instruction::Ins => {
                     // check fault *before* reading from port
                     // (technically not necessary according to Intel manuals)
-                    break_on_pagefault!(writable_or_pagefault(es + dst, size_bytes));
+                    break_with_fault!(writable_or_pagefault(es + dst, size_bytes));
                 },
                 _ => {},
             };
             let src_val = match instruction {
                 Instruction::Movs | Instruction::Cmps | Instruction::Lods | Instruction::Outs => {
-                    break_on_pagefault!(match size {
+                    break_with_fault!(match size {
                         Size::B => safe_read8(ds + src),
                         Size::W => safe_read16(ds + src),
                         Size::D => safe_read32s(ds + src),
@@ -530,9 +519,9 @@ unsafe fn string_instruction(
 
             match instruction {
                 Instruction::Cmps | Instruction::Scas => match size {
-                    Size::B => dst_val = break_on_pagefault!(safe_read8(es + dst)),
-                    Size::W => dst_val = break_on_pagefault!(safe_read16(es + dst)),
-                    Size::D => dst_val = break_on_pagefault!(safe_read32s(es + dst)),
+                    Size::B => dst_val = break_with_fault!(safe_read8(es + dst)),
+                    Size::W => dst_val = break_with_fault!(safe_read16(es + dst)),
+                    Size::D => dst_val = break_with_fault!(safe_read32s(es + dst)),
                 },
                 Instruction::Outs => match size {
                     Size::B => io_port_write8(port, src_val),
@@ -545,9 +534,9 @@ unsafe fn string_instruction(
                     Size::D => write_reg32(EAX, src_val),
                 },
                 Instruction::Movs | Instruction::Stos | Instruction::Ins => match size {
-                    Size::B => break_on_pagefault!(safe_write8(es + dst, src_val)),
-                    Size::W => break_on_pagefault!(safe_write16(es + dst, src_val)),
-                    Size::D => break_on_pagefault!(safe_write32(es + dst, src_val)),
+                    Size::B => break_with_fault!(safe_write8(es + dst, src_val)),
+                    Size::W => break_with_fault!(safe_write16(es + dst, src_val)),
+                    Size::D => break_with_fault!(safe_write32(es + dst, src_val)),
                 },
             };
 
@@ -567,6 +556,7 @@ unsafe fn string_instruction(
             };
 
             count -= 1;
+            iterations += 1;
 
             let finished = match rep {
                 Rep::Z | Rep::NZ => match (rep, instruction) {
@@ -580,6 +570,7 @@ unsafe fn string_instruction(
                         }
                         else if movs_reenter_fast_path {
                             *instruction_pointer = *previous_ip;
+                            repeat = true;
                             true
                         }
                         else {
@@ -600,6 +591,11 @@ unsafe fn string_instruction(
                     },
                     _ => {},
                 }
+                break;
+            }
+            if limit != u32::MAX && iterations == limit {
+                *instruction_pointer = *previous_ip;
+                repeat = true;
                 break;
             }
         }
@@ -625,7 +621,19 @@ unsafe fn string_instruction(
             set_reg_asize(is_asize_32, ECX, count as i32);
         },
         Rep::None => {},
-    }
+    };
+    StringExecution::new(
+        if fault {
+            StringOutcome::Fault
+        }
+        else if repeat {
+            StringOutcome::Repeat
+        }
+        else {
+            StringOutcome::Complete
+        },
+        iterations,
+    )
 }
 
 #[no_mangle]
@@ -813,4 +821,95 @@ pub unsafe fn insw_no_rep(is_asize_32: bool) {
 #[no_mangle]
 pub unsafe fn insd_no_rep(is_asize_32: bool) {
     string_instruction(is_asize_32, 0, Instruction::Ins, Size::D, Rep::None)
+}
+
+/// Execute one non-REP port string instruction with the interpreter's complete
+/// observation order, including permission MMIO and address16 register writes.
+/// The caller owns decoded PC preparation and instruction retirement.
+pub unsafe fn execute_io_once(
+    input: bool,
+    bytes: u32,
+    asize32: bool,
+    segment: i32,
+) -> StringExecution {
+    assert!(segment >= 0 && segment < 6);
+    let size = match bytes {
+        1 => Size::B,
+        2 => Size::W,
+        4 => Size::D,
+        _ => panic!("I/O width"),
+    };
+    string_instruction_bounded(
+        asize32,
+        if input { 0 } else { segment },
+        if input { Instruction::Ins } else { Instruction::Outs },
+        size,
+        Rep::None,
+        1,
+    )
+}
+
+/// Execute a recognized REP family with an explicit element budget. The caller
+/// owns decoded PC preparation and scheduling; this function does not count CPU
+/// instructions or deliver exceptions a second time.
+pub unsafe fn execute_rep(
+    kind: u32,
+    bytes: u32,
+    asize32: bool,
+    segment: i32,
+    repne: bool,
+    limit: u32,
+) -> StringExecution {
+    assert!(segment >= 0 && segment < 6);
+    let instruction = match kind {
+        0 => Instruction::Movs,
+        1 => Instruction::Cmps,
+        2 => Instruction::Stos,
+        3 => Instruction::Lods,
+        4 => Instruction::Scas,
+        5 => Instruction::Ins,
+        6 => Instruction::Outs,
+        _ => panic!("REP family"),
+    };
+    let size = match bytes {
+        1 => Size::B,
+        2 => Size::W,
+        4 => Size::D,
+        _ => panic!("REP width"),
+    };
+    let segment = if matches!(
+        instruction,
+        Instruction::Stos | Instruction::Scas | Instruction::Ins
+    ) {
+        0
+    }
+    else {
+        segment
+    };
+    let rep = if repne && matches!(instruction, Instruction::Cmps | Instruction::Scas) {
+        Rep::NZ
+    }
+    else {
+        Rep::Z
+    };
+    string_instruction_bounded(asize32, segment, instruction, size, rep, limit)
+}
+
+#[cfg(feature = "ir-test-hooks")]
+#[no_mangle]
+pub unsafe fn ir_test_rep_batch(
+    kind: u32,
+    bytes: u32,
+    asize32: bool,
+    segment: i32,
+    repne: bool,
+    limit: u32,
+) -> u64 {
+    let result = execute_rep(kind, bytes, asize32, segment, repne, limit);
+    let tag = match result.outcome {
+        StringOutcome::Complete => 0,
+        StringOutcome::Repeat => 1,
+        StringOutcome::Fault => 2,
+    };
+    ((result.iterations as u64) << 32) | tag
 }

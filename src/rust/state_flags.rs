@@ -4,9 +4,9 @@ pub struct CachedStateFlags(u8);
 
 impl CachedStateFlags {
     const MASK_IS_32: u8 = 1 << 0;
-    const MASK_SS32: u8 = 1 << 1;
+    pub const MASK_SS32: u8 = 1 << 1;
     const MASK_CPL3: u8 = 1 << 2;
-    const MASK_FLAT_SEGS: u8 = 1 << 3;
+    pub const MASK_FLAT_SEGS: u8 = 1 << 3;
 
     pub const EMPTY: CachedStateFlags = CachedStateFlags(0);
 

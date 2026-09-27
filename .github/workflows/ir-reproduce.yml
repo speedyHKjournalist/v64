@@ -1,0 +1,72 @@
+name: IR reproducibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['chat/ir-review-throughput-20260922']
+  pull_request:
+    branches: [ir]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-reproduce-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Preserve exact tracked source
+        run: |
+          mkdir -p build/reproduce
+          git rev-parse HEAD > build/reproduce/commit.txt
+          git archive --format=tar HEAD | gzip -n > build/reproduce/source.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-source-${{ github.sha }}
+          retention-days: 7
+          path: build/reproduce/
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+      - name: Build reproduction inputs
+        run: |
+          set -o pipefail
+          make build/v86-ir-runtime.wasm build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin 2>&1 | tee build/reproduce/build.log
+          {
+            git rev-parse HEAD
+            uname -a
+            node --version
+            rustc -Vv
+            cargo -V
+            nasm -v
+            lscpu
+            sha256sum build/v86-ir-*.wasm build/libv86.mjs build/jit-capacity.bin
+          } > build/reproduce/environment.txt
+      - name: Preserve executable reproduction inputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-runtime-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/reproduce/
+            build/v86-ir-runtime.wasm
+            build/v86-ir-test.wasm
+            build/v86-ir-test-release.wasm
+            build/libv86.mjs
+            build/jit-capacity.bin

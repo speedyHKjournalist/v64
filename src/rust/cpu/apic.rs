@@ -578,7 +578,7 @@ fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {
     }
 }
 
-fn highest_irr(apic: &mut Apic) -> Option<u8> {
+fn highest_irr(apic: &Apic) -> Option<u8> {
     let highest = register_get_highest_bit(&apic.irr);
     if let Some(x) = highest {
         dbg_assert!(x >= 0x10);
@@ -587,7 +587,7 @@ fn highest_irr(apic: &mut Apic) -> Option<u8> {
     highest
 }
 
-fn highest_isr(apic: &mut Apic) -> Option<u8> {
+fn highest_isr(apic: &Apic) -> Option<u8> {
     let highest = register_get_highest_bit(&apic.isr);
     if let Some(x) = highest {
         dbg_assert!(x >= 0x10);
@@ -596,9 +596,13 @@ fn highest_isr(apic: &mut Apic) -> Option<u8> {
     highest
 }
 
+/// Read-only; does not acknowledge or reprioritize an interrupt.
+pub fn has_pending_irq() -> bool { pending_irq(&get_apic()).is_some() }
 pub fn acknowledge_irq() -> Option<u8> { acknowledge_irq_internal(&mut get_apic()) }
 
-fn acknowledge_irq_internal(apic: &mut Apic) -> Option<u8> {
+// Share the exact priority policy with acknowledgement, without modifying IRR,
+// ISR or TPR. Continuation must not introduce a second interrupt policy.
+fn pending_irq(apic: &Apic) -> Option<u8> {
     let highest_irr = match highest_irr(apic) {
         None => return None,
         Some(x) => x,
@@ -624,6 +628,11 @@ fn acknowledge_irq_internal(apic: &mut Apic) -> Option<u8> {
         return None;
     }
 
+    Some(highest_irr)
+}
+
+fn acknowledge_irq_internal(apic: &mut Apic) -> Option<u8> {
+    let highest_irr = pending_irq(apic)?;
     register_clear_bit(&mut apic.irr, highest_irr);
     register_set_bit(&mut apic.isr, highest_irr);
 
@@ -655,4 +664,35 @@ fn register_get_highest_bit(v: &[u32; 8]) -> Option<u8> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+    #[test]
+    fn pending_query_is_pure_and_matches_acknowledgement() {
+        for vector in [0x20, 0x51, 0x7F, 0xE0] {
+            for service in [None, Some(0x30), Some(vector), Some(0xF0)] {
+                for tpr in [0, 0x50, 0x70, 0xF0] {
+                    // Apic contains only integer and floating-point fields.
+                    let mut apic: Apic = unsafe { std::mem::zeroed() };
+                    register_set_bit(&mut apic.irr, vector);
+                    if let Some(service) = service {
+                        register_set_bit(&mut apic.isr, service);
+                    }
+                    apic.tpr = tpr;
+                    let before = (apic.irr, apic.isr, apic.tpr);
+                    let pending = pending_irq(&apic);
+                    assert_eq!((apic.irr, apic.isr, apic.tpr), before);
+                    let expected =
+                        service.is_none_or(|s| s < vector) && (vector & 0xF0) > (tpr as u8 & 0xF0);
+                    assert_eq!(pending, expected.then_some(vector));
+                    assert_eq!(acknowledge_irq_internal(&mut apic), pending);
+                    if !expected {
+                        assert_eq!((apic.irr, apic.isr, apic.tpr), before);
+                    }
+                }
+            }
+        }
+    }
 }

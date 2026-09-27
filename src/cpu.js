@@ -11,7 +11,7 @@ import {
     FLAG_VM, FLAG_INTERRUPT, FLAG_CARRY, FLAG_ADJUST, FLAG_ZERO, FLAG_SIGN, FLAG_TRAP,
     FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_PARITY,
 } from "./const.js";
-import { h, view, pads, Bitmap, dump_file } from "./lib.js";
+import { h, view, Bitmap } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
 import { SB16 } from "./sb16.js";
@@ -59,14 +59,16 @@ import { BusConnector } from "./bus.js";
 // https://www-ssl.intel.com/content/www/us/en/processors/architectures-software-developer-manuals.html
 // http://ref.x86asm.net/geek32.html
 
-const DUMP_GENERATED_WASM = false;
-const DUMP_UNCOMPILED_ASSEMBLY = false;
 
 /** @constructor */
 export function CPU(bus, wm, stop_idling)
 {
     this.stop_idling = stop_idling;
     this.wm = wm;
+    this.jit_backend = "ir";
+    this.ir_region_budget = null;
+    this.ir_pass_names = ["prune", "merge", "phis", "copy", "fold", "flags", "helper_state", "gvn", "dce",
+        "licm", "mir_fold", "stack", "allocation", "state_elision", "ram_loop", "ram_forward", "ram_guard", "budget_batch", "sparse_polls"];
     this.wasm_patch();
     this.create_jit_imports();
 
@@ -222,12 +224,6 @@ export function CPU(bus, wm, stop_idling)
 
     this.set_tsc(0, 0);
 
-    if(DEBUG)
-    {
-        this.seen_code = {};
-        this.seen_code_uncompiled = {};
-    }
-
     //Object.seal(this);
 }
 
@@ -319,9 +315,8 @@ CPU.prototype.read_blob = function(offset, length)
     return this.mem8.subarray(offset, offset + length);
 };
 
-CPU.prototype.clear_opstats = function()
+CPU.prototype.clear_stats = function()
 {
-    new Uint8Array(this.wasm_memory.buffer, 0x8000, 0x20000).fill(0);
     this.wm.exports["profiler_init"]();
 };
 
@@ -341,6 +336,18 @@ CPU.prototype.create_jit_imports = function()
         }
 
         jit_imports[name] = this.wm.exports[name];
+    }
+
+    // With Wasm tail calls, IR Tier-0 page functions continue in the next
+    // page's function directly, through the shared function table.
+    const table = this.wm.wasm_table;
+    if(table && this.wm.exports["ir_t0_set_tail_calls"])
+    {
+        // (module (func (return_call 0)))
+        const probe = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 10, 6, 1, 4, 0, 18, 0, 11]);
+        const supported = WebAssembly.validate(probe);
+        if(supported) jit_imports["t"] = table;
+        this.wm.exports["ir_t0_set_tail_calls"](supported ? 1 : 0);
     }
 
     this.jit_imports = jit_imports;
@@ -365,8 +372,6 @@ CPU.prototype.wasm_patch = function()
     this.handle_irqs = get_import("handle_irqs");
 
     this.main_loop = get_import("main_loop");
-
-    this.set_jit_config = get_import("set_jit_config");
 
     this.read8 = get_import("read8");
     this.read16 = get_import("read16");
@@ -400,14 +405,8 @@ CPU.prototype.wasm_patch = function()
 
     this.apic_timer = get_import("apic_timer");
 
-    if(DEBUG)
-    {
-        this.jit_force_generate_unsafe = get_optional_import("jit_force_generate_unsafe");
-    }
-
     this.jit_clear_cache = get_import("jit_clear_cache_js");
     this.jit_dirty_cache = get_import("jit_dirty_cache");
-    this.codegen_finalize_finished = get_import("codegen_finalize_finished");
 
     this.allocate_memory = get_import("allocate_memory");
     this.zero_memory = get_import("zero_memory");
@@ -430,31 +429,10 @@ CPU.prototype.wasm_patch = function()
     this.zstd_read_free = get_import("zstd_read_free");
 };
 
-CPU.prototype.jit_force_generate = function(addr)
-{
-    if(!this.jit_force_generate_unsafe)
-    {
-        dbg_assert(false, "Not supported in this wasm build: jit_force_generate_unsafe");
-        return;
-    }
-
-    this.jit_force_generate_unsafe(addr);
-};
-
 CPU.prototype.jit_clear_func = function(index)
 {
     dbg_assert(index >= 0 && index < WASM_TABLE_SIZE);
     this.wm.wasm_table.set(index + WASM_TABLE_OFFSET, null);
-};
-
-CPU.prototype.jit_clear_all_funcs = function()
-{
-    const table = this.wm.wasm_table;
-
-    for(let i = 0; i < WASM_TABLE_SIZE; i++)
-    {
-        table.set(WASM_TABLE_OFFSET + i, null);
-    }
 };
 
 CPU.prototype.get_state = function()
@@ -996,22 +974,219 @@ CPU.prototype.create_memory = function(size, minimum_size)
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);
 };
 
+// Constructor policy only. IR is the only compiler.
+CPU.prototype.configure_jit_backend = function(settings)
+{
+    if(settings["jit_backend"] !== undefined && settings["jit_backend"] !== "ir")
+        throw new Error("jit_backend must be ir (the legacy backend was removed)");
+    const exports = this.wm.exports;
+    if(!exports["ir_auto_config"])
+        throw new Error("This core has no IR compiler; rebuild build/v86.wasm");
+    const requested = settings["ir_region_budget"];
+    const opt_level = settings["ir_opt_level"] === undefined ? 2 : settings["ir_opt_level"];
+    const disabled = settings["ir_passes_disabled"] === undefined ? [] : settings["ir_passes_disabled"];
+    const stats = settings["ir_stats"] === undefined ? "off" : settings["ir_stats"];
+    const verify = settings["ir_verify"] === undefined ? "debug" : settings["ir_verify"];
+    const dump = settings["ir_dump"] === undefined ? "off" : settings["ir_dump"];
+    const verify_modes = ["off", "debug", "every_pass"], dump_modes = ["off", "hir", "mir", "wasm", "all"];
+    if(!["off", "sampled", "debug"].includes(stats)) throw new Error("ir_stats must be off, sampled or debug");
+    if(!verify_modes.includes(verify)) throw new Error("ir_verify must be off, debug or every_pass");
+    if(!dump_modes.includes(dump)) throw new Error("ir_dump must be off, hir, mir, wasm or all");
+    const pass_names = this.ir_pass_names;
+    if(!Number.isInteger(opt_level) || opt_level < 0 || opt_level > 2)
+        throw new Error("ir_opt_level must be 0, 1 or 2");
+    if(!Array.isArray(disabled) || disabled.some(name => typeof name !== "string" || !pass_names.includes(name))
+        || new Set(disabled).size !== disabled.length)
+        throw new Error("ir_passes_disabled must contain unique known pass names");
+    const disabled_mask = disabled.reduce((mask, name) => mask | 1 << pass_names.indexOf(name), 0);
+    if(requested !== undefined && (!requested || typeof requested !== "object" || Array.isArray(requested)))
+        throw new Error("ir_region_budget must be an object");
+    const limits = {
+        "hot_threshold": [32, 1, 1000000], "promotion_threshold": [65536, 1, 1000000],
+        "max_source_bytes": [192, 15, 960], "execution_budget": [256, 1, 4096],
+        "rep_iterations": [64, 1, 4096],
+    };
+    const budget = {};
+    for(const key of Object.keys(requested || {}))
+        if(!Object.prototype.hasOwnProperty.call(limits, key)) throw new Error("Unknown ir_region_budget option: " + key);
+    for(const key of Object.keys(limits))
+    {
+        const [fallback, min, max] = limits[key];
+        const value = requested?.[key] === undefined ? fallback : requested[key];
+        if(!Number.isInteger(value) || value < min || value > max)
+            throw new Error("Invalid ir_region_budget." + key + ": expected integer " + min + ".." + max);
+        budget[key] = value;
+    }
+    const enabled = !settings.disable_jit;
+    if(settings["ir_stats"] !== undefined && !this.configure_ir_diagnostics(stats === "off" ? 0 : stats === "sampled" ? 128 : 1))
+        throw new Error("Cannot configure IR statistics on this core");
+    if(!exports["ir_auto_debug"] || !exports["ir_auto_debug"](verify_modes.indexOf(verify), dump_modes.indexOf(dump)))
+        throw new Error("IR debug policy requires a fresh compatible core");
+    if(!exports["ir_auto_optimizations"] || !exports["ir_auto_optimizations"](opt_level, disabled_mask))
+        throw new Error("IR optimization policy requires a fresh compatible core");
+    if(!exports["ir_auto_config"](enabled ? 1 : 0,
+        budget["hot_threshold"], budget["promotion_threshold"], budget["max_source_bytes"],
+        budget["execution_budget"], budget["rep_iterations"]))
+        throw new Error("Cannot configure IR while a CPU compilation or execution is active");
+    if(settings["ir_tier0"] !== undefined && typeof settings["ir_tier0"] !== "boolean")
+        throw new Error("ir_tier0 must be a boolean");
+    // Page-granular Tier-0 below the optimizing region tier (default on).
+    if(enabled && settings["ir_tier0"] !== false && !(exports["ir_auto_set_tier0"] && exports["ir_auto_set_tier0"](1)))
+        throw new Error("IR Tier-0 requires a compatible fresh core");
+    this.jit_backend = "ir";
+    this.ir_sync_publication = settings["ir_sync_publication"] === true;
+    this.ir_region_budget = budget;
+};
+
+CPU.prototype.configure_ir_diagnostics = function(period)
+{
+    if(!Number.isInteger(period) || period < 0 || period > 65536 || period && (period & (period - 1)))
+        throw new RangeError("IR diagnostic sample period must be 0 or a power of two up to 65536");
+    const configure = this.wm.exports["ir_diagnostic_config"];
+    if(!configure) throw new Error("Core has no IR diagnostics");
+    return !!configure(period);
+};
+
+CPU.prototype.get_ir_diagnostics = function()
+{
+    const get = this.wm.exports["ir_diagnostic_get"];
+    if(!get) return null;
+    const period = get(0, 0, 0);
+    const stages = ["dispatch", "scheduler", "admission", "fetch", "generated", "state_write", "state_reload",
+        "memory_slow", "helper", "interpreter", "compile", "byte_validation", "source_capture"];
+    const exits = ["unclassified", "normal", "budget", "epoch", "fault", "scalar_store", "code_store",
+        "rmw_commit", "vector_memory", "helper_control_or_fault", "helper_yield", "helper_invalidated", "entry_guard", "interrupt_shadow"];
+    const names = ["batches", "sampled_batches", "cpu_batch_ms", "sampled_batch_ms", "interpreter_steps",
+        "ir_activations", "ir_steps", "instrumentation_errors", "sampled_activations"];
+    const totals = Object.fromEntries(names.map((name, i) => [name, get(4, i, 0)]));
+    const timings = Object.fromEntries(stages.map((name, i) => [name, {
+        "sampled_ms": get(1, i, 0), "sampled_calls": get(1, i, 1),
+        "estimated_ms": get(1, i, 0) * period,
+    }]));
+    const reasons = Object.fromEntries(exits.map((name, i) => [name, {"count":get(2, i, 0), "guest_steps":get(2, i, 1)}]));
+    const admission = Object.fromEntries(["attempt", "busy", "missing", "context", "stale_before", "capture",
+        "fetch_fault", "lost_owner", "unavailable_after", "stale_after", "accepted"].map((name,i)=>[name,get(3,i,0)]));
+    const compile_phases = ["pipeline", "capture", "lift", "passes", "lower", "machine", "emit",
+        "hir_allocation", "lower_states", "lower_proofs", "lower_verify", "machine_fold", "machine_stack",
+        "machine_allocation", "machine_state", "machine_helper", "machine_liveness", "machine_loop_ram", "machine_forward", "machine_guards"];
+    const compile_row = (group, index) => ({"ms":get(group,index,0),"calls":get(group,index,1),
+        "max_ms":get(group,index,2),"max_pc":get(group,index,3),"max_tier":get(group,index,4)});
+    const compiler = Object.fromEntries(compile_phases.map((name,i)=>[name,compile_row(5,i)]));
+    const compiler_breakdown = [];
+    if(period && get(0,6,0)) for(let tier=0;tier<3;tier++) for(let kind=0;kind<4;kind++) for(let shape=0;shape<3;shape++)
+    {
+        const bucket=(tier*4+kind)*3+shape;
+        const phases=Object.fromEntries(compile_phases.map((name,i)=>[name,compile_row(14,bucket*20+i)])
+            .filter(([,row])=>row["calls"]));
+        if(Object.keys(phases).length) compiler_breakdown.push({"tier":tier,
+            "kind":["unknown","ordinary","shared","fused"][kind],
+            "shape":["unknown","single","multi"][shape],"phases":phases});
+    }
+    const interpreter_hotspots = [];
+    for(let i=0;i<256;i++) if(get(9,i,3)) interpreter_hotspots.push({
+        "pc":get(9,i,0),"cr3":get(9,i,1),"physical":get(9,i,2),"samples":get(9,i,3),"guest_steps":get(9,i,4),"inclusive_ms":get(9,i,5)});
+    const helper_exits = Object.fromEntries(["other","segment","port_read","port_write","rep","far_control","flags","descriptor","cpu_control","fp","halt","invalid"].map((name,i)=>[name,{"count":get(10,i,0),"guest_steps":get(10,i,1)}]));
+    const hotspots = [];
+    if(period) for(let i=0;i<512;i++) {
+        if(!get(7,i,3)) continue;
+        hotspots.push({"pc":get(7,i,0),"cr3":get(7,i,1),"reason":exits[get(7,i,2)],
+            "samples":get(7,i,3),"guest_steps":get(7,i,4),"inclusive_ms":get(7,i,5),
+            "tier":get(7,i,6),"fused":!!get(7,i,7)});
+    }
+    return {"schema":1, "enabled":!!period, "sample_period":period, "session":get(0,1,0),
+        "empty_scope_sampled_ms":get(0,4,0),"empty_scope_wall_ms":get(0,5,0),
+        "totals":totals,"timings":timings,"exits":reasons,"admission":admission,"compiler":compiler,"compiler_breakdown":compiler_breakdown,
+        "publication":{"wall_ms":get(6,0,0),"calls":get(6,1,0),"succeeded":get(6,2,0)},
+        "discovery_latency":Object.fromEntries(["tier1","tier2"].map((name,i)=>[name,{"ms":get(11,i,0),"count":get(11,i,1),"max_ms":get(11,i,2)}])),
+        "missing_entries":Object.fromEntries(["unseen","heating","ready","pending","failed"].map((name,i)=>[name,get(12,i,0)])),
+        "chain_stops":Object.fromEntries(["no_request","cpu_budget","halt","control_flags","target_miss","chain_limit"].map((name,i)=>[name,get(8,i,0)])),
+        "interpreter_hotspots":interpreter_hotspots,"helper_exits":helper_exits,
+        "control_exits":Object.fromEntries(["rdtsc","cpuid","read_cr","write_cr","clts","sti_check"].map((name,i)=>[name,{"count":get(13,i,0),"guest_steps":get(13,i,1)}])),
+        "hotspot_replacements":get(0,2,0),"hotspots":hotspots};
+};
+
+CPU.prototype.get_jit_info = function()
+{
+    const exports = this.wm.exports;
+    const available = !!exports["ir_auto_config"];
+    const ir = available ? {} : null;
+    if(ir)
+    {
+        const fields = ["visits", "linked_visits", "tier1_attempts", "tier2_attempts", "tier1_published",
+            "tier2_published", "compile_stops", "publication_failures", "suppressed", "hot_entries", "pending", "enabled"];
+        fields.forEach((name, index) => { ir[name] = exports["ir_auto_stat"](index) >>> 0; });
+        ["unsupported_stops", "budget_stops", "invalid_ir_stops", "budget_retries"].forEach((name, index) => {
+            ir[name] = exports["ir_auto_stat"](12 + index) >>> 0;
+        });
+        ir["batched_entries"] = exports["ir_auto_stat"](16) >>> 0;
+        ir["queued_entries"] = exports["ir_auto_stat"](17) >>> 0;
+        ir["hot_replacements"] = exports["ir_auto_stat"](22) >>> 0;
+        ir["probation_visits"] = exports["ir_auto_stat"](23) >>> 0;
+        ir["hot_filter"] = !!exports["ir_auto_stat"](24);
+        ["fusion_attempts", "fusion_budget_stops", "fusion_unsupported_stops", "fusion_invalid_stops"].forEach((name, index) => {
+            ir[name] = exports["ir_auto_stat"](18 + index) >>> 0;
+        });
+        ir["cache_entries"] = exports["ir_cache_stat"](0) >>> 0;
+        ir["cache_evictions"] = exports["ir_cache_stat"](27) >>> 0;
+        ir["cache_capacity"] = exports["ir_cache_capacity"] ? exports["ir_cache_capacity"]() >>> 0 : 32;
+        ir["cache_hits"] = exports["ir_cache_stat"](2) >>> 0;
+        ir["cache_cached_checks"] = exports["ir_cache_stat"](8) >>> 0;
+        ir["cache_capture_fallbacks"] = exports["ir_cache_stat"](9) >>> 0;
+        ir["cache_guest_steps"] = exports["ir_cache_stat"](10) >>> 0;
+        ir["cache_max_guest_steps"] = exports["ir_cache_stat"](11) >>> 0;
+        ir["cache_zero_step_exits"] = exports["ir_cache_stat"](12) >>> 0;
+        ir["structured_publications"] = exports["ir_cache_stat"](13) >>> 0;
+        ir["generic_publications"] = exports["ir_cache_stat"](14) >>> 0;
+        ir["structured_backedges"] = exports["ir_cache_stat"](15) >>> 0;
+        ir["generic_dispatch_edges"] = exports["ir_cache_stat"](16) >>> 0;
+        ir["structured_edges"] = exports["ir_cache_stat"](17) >>> 0;
+        ir["cache_fast_checks"] = exports["ir_cache_stat"](18) >>> 0;
+        ir["cache_full_checks"] = exports["ir_cache_stat"](19) >>> 0;
+        ir["cache_post_fetch_reuses"] = exports["ir_cache_stat"](20) >>> 0;
+        ir["cache_target_hits"] = exports["ir_cache_stat"](21) >>> 0;
+        ir["cache_negative_hits"] = exports["ir_cache_stat"](28) >>> 0;
+        ir["cache_successor_hits"] = exports["ir_cache_stat"](29) >>> 0;
+        ir["cache_fast_validation"] = !!exports["ir_cache_stat"](22);
+        ir["fused_publications"] = exports["ir_cache_stat"](23) >>> 0;
+        ir["fused_hits"] = exports["ir_cache_stat"](24) >>> 0;
+        ir["fused_guest_steps"] = exports["ir_cache_stat"](25) >>> 0;
+        ir["fusion_enabled"] = !!exports["ir_cache_stat"](26);
+        ir["tier0"] = exports["ir_t0_stat"] ? {
+            "enabled": !!exports["ir_t0_stat"](5),
+            "page_functions": exports["ir_t0_stat"](0) >>> 0,
+            "instructions": exports["ir_t0_stat"](1) >>> 0,
+            "wasm_bytes": exports["ir_t0_stat"](3) >>> 0,
+            "activations": exports["ir_t0_entries"]() >>> 0,
+            "chains": exports["ir_t0_chains"]() >>> 0,
+        } : null;
+        ir["diagnostics"] = this.get_ir_diagnostics();
+    }
+    return {
+        "backend": this.jit_backend,
+        "ir_available": available,
+        "ir_region_budget": this.ir_region_budget && { ...this.ir_region_budget },
+        "ir_stats": exports["ir_diagnostic_get"](0, 0, 0) === 0 ? "off" :
+            exports["ir_diagnostic_get"](0, 0, 0) === 1 ? "debug" : "sampled",
+        "ir_verify": ["off", "debug", "every_pass"][exports["ir_auto_optimization_stat"](2)],
+        "ir_dump": ["off", "hir", "mir", "wasm", "all"][exports["ir_auto_optimization_stat"](3)],
+        "ir_opt_level": exports["ir_auto_optimization_stat"](0),
+        "ir_passes_disabled": this.ir_pass_names.filter((_, index) => exports["ir_auto_optimization_stat"](1) & 1 << index),
+        "ir": ir,
+    };
+};
+
 /**
  * @param {BusConnector} device_bus
  */
 CPU.prototype.init = function(settings, device_bus)
 {
+    this.configure_jit_backend(settings);
     this.wm.exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     this.wm.exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
     this.create_memory(
         settings.memory_size || 64 * 1024 * 1024,
         settings.initrd ? 64 * 1024 * 1024 : 1024 * 1024,
     );
-
-    if(settings.disable_jit)
-    {
-        this.set_jit_config(0, 1);
-    }
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
@@ -1773,162 +1948,99 @@ CPU.prototype.load_bios = function()
         }.bind(this));
 };
 
-CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)
+// Experimental explicit compilation policy. Successful entries are selected by
+// the normal CPU dispatcher; publication remains asynchronous and owner-checked.
+CPU.prototype.ir_compile_cached = function(length, tier, optimize, cfg, budget, rep_budget)
 {
-    ptr >>>= 0;
-    len >>>= 0;
+    const wasm = this.wm, exports = wasm.exports, table = wasm.wasm_table;
+    if(!exports["ir_compile_live"] || !exports["ir_cache_reserve"]) return Promise.resolve(false);
+    const id = exports["ir_compile_live"](length, tier, optimize, cfg, budget, rep_budget);
+    if(!id) return Promise.resolve(false);
+    const code = new Uint8Array(exports["memory"].buffer,
+        exports["ir_live_info"](id, 0) >>> 0, exports["ir_live_info"](id, 1) >>> 0).slice();
+    const slot = exports["ir_cache_reserve"](id);
+    if(!slot) { exports["ir_live_release"](id); return Promise.resolve(false); }
+    return this.ir_publish_cached({ wasm, exports, table }, id, slot, code, false);
+};
 
-    dbg_assert(wasm_table_index >= 0 && wasm_table_index < WASM_TABLE_SIZE);
-
-    const code = new Uint8Array(this.wasm_memory.buffer, ptr, len);
-
-    if(DEBUG)
+// Every string and module is copied before returning to the event loop.
+CPU.prototype.get_ir_dumps = function(clear)
+{
+    const exports = this.wm.exports;
+    if(!exports["ir_dump_count"]) return [];
+    const records = [], decoder = new TextDecoder();
+    for(let index = 0; index < exports["ir_dump_count"](); index++)
     {
-        if(DUMP_GENERATED_WASM && !this.seen_code[start])
+        const field = n => exports["ir_dump_info"](index, n) >>> 0;
+        const copy = n => new Uint8Array(exports["memory"].buffer, field(n), field(n + 1)).slice();
+        records.push({"pc": field(0), "tier": field(1), "hir": decoder.decode(copy(2)),
+            "mir": decoder.decode(copy(4)), "wasm": copy(6), "truncated": field(8)});
+    }
+    if(clear) exports["ir_dump_clear"]();
+    return records;
+};
+
+CPU.prototype.ir_auto_publish = function(id, slot, ptr, len)
+{
+    const wasm = this.wm, exports = wasm.exports, table = wasm.wasm_table;
+    const code = new Uint8Array(exports["memory"].buffer, ptr >>> 0, len >>> 0).slice();
+    return this.ir_publish_cached({ wasm, exports, table }, id, slot, code, true);
+};
+
+CPU.prototype.ir_publish_cached = function(owner, id, slot, code, automatic)
+{
+    const { wasm, exports, table } = owner;
+    const current = () => this.wm === wasm && this.wm.exports === exports && this.wm.wasm_table === table;
+    const failed = () => {
+        if(current()) { exports["ir_cache_cancel"](id, slot); exports["ir_cache_collect"](); }
+        return false;
+    };
+    const install = instance => {
+        if(!current()) return false;
+        const f = instance.exports["f"];
+        if(typeof f !== "function") return failed();
+        if(!exports["ir_cache_validate"](id, slot)) return failed();
+        table.set(slot + WASM_TABLE_OFFSET, f);
+        if(!exports["ir_cache_finish"](id, slot)) return failed();
+        exports["ir_cache_collect"]();
+        return true;
+    };
+    const diagnostic = exports["ir_diagnostic_get"];
+    const diagnostic_session = diagnostic && diagnostic(0,0,0) ? diagnostic(0,1,0) : 0;
+    const diagnostic_start = diagnostic_session ? performance.now() : 0;
+    // Automatic publication is synchronous where the host allows it: the core
+    // is at a cold scheduling point with no Rust lock held, so validation,
+    // table installation and completion run before the guest continues. V8
+    // compiles functions lazily on first call, so this costs validation only.
+    // A host that refuses synchronous compilation (for example a browser main
+    // thread limit) permanently falls back to the asynchronous bridge.
+    if(automatic && this.ir_sync_publication && !diagnostic_session)
+    {
+        let instance = null, rejected = false;
+        try
         {
-            this.dump_wasm(code);
-
-            const DUMP_ASSEMBLY = false;
-
-            if(DUMP_ASSEMBLY)
-            {
-                let end = 0;
-
-                if((start ^ end) & ~0xFFF)
-                {
-                    dbg_log("truncated disassembly start=" + h(start >>> 0) + " end=" + h(end >>> 0));
-                    end = (start | 0xFFF) + 1; // until the end of the page
-                }
-
-                dbg_assert(end >= start);
-
-                const buffer = new Uint8Array(end - start);
-
-                for(let i = start; i < end; i++)
-                {
-                    buffer[i - start] = this.read8(i);
-                }
-
-                this.debug_dump_code(this.is_32[0] ? 1 : 0, buffer, start);
-            }
+            instance = new WebAssembly.Instance(new WebAssembly.Module(code), { "e": this.jit_imports });
         }
-
-        this.seen_code[start] = (this.seen_code[start] || 0) + 1;
-
-        if(this.test_hook_did_generate_wasm)
+        catch(error)
         {
-            this.test_hook_did_generate_wasm(code);
+            if(error instanceof WebAssembly.CompileError || error instanceof WebAssembly.LinkError) rejected = true;
+            else this.ir_sync_publication = false;
+        }
+        if(instance || rejected)
+        {
+            const success = instance ? install(instance) : failed();
+            if(current()) exports["ir_auto_complete"](id, success ? 1 : 0);
+            return Promise.resolve(success);
         }
     }
-
-    const SYNC_COMPILATION = false;
-
-    if(SYNC_COMPILATION)
-    {
-        const module = new WebAssembly.Module(code);
-        const result = new WebAssembly.Instance(module, { "e": this.jit_imports });
-        const f = result.exports["f"];
-
-        this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
-        this.codegen_finalize_finished(wasm_table_index, start, state_flags);
-
-        if(this.test_hook_did_finalize_wasm)
-        {
-            this.test_hook_did_finalize_wasm(code);
-        }
-
-        return;
-    }
-
-    const result = WebAssembly.instantiate(code, { "e": this.jit_imports }).then(result => {
-        const f = result.instance.exports["f"];
-
-        this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
-        this.codegen_finalize_finished(wasm_table_index, start, state_flags);
-
-        if(this.test_hook_did_finalize_wasm)
-        {
-            this.test_hook_did_finalize_wasm(code);
-        }
+    let task;
+    try { task = WebAssembly.instantiate(code, { "e": this.jit_imports }); }
+    catch(error) { task = Promise.reject(error); }
+    return task.then(result => install(result.instance)).catch(failed).then(success => {
+        if(diagnostic_session && current()) exports["ir_diagnostic_publication"](diagnostic_session, performance.now() - diagnostic_start, success ? 1 : 0);
+        if(automatic && current()) exports["ir_auto_complete"](id, success ? 1 : 0);
+        return success;
     });
-
-    if(DEBUG)
-    {
-        result.catch(e => {
-            console.log(e);
-            debugger;
-            throw e;
-        });
-    }
-};
-
-CPU.prototype.log_uncompiled_code = function(start, end)
-{
-    if(!DEBUG || !DUMP_UNCOMPILED_ASSEMBLY)
-    {
-        return;
-    }
-
-    if((this.seen_code_uncompiled[start] || 0) < 100)
-    {
-        this.seen_code_uncompiled[start] = (this.seen_code_uncompiled[start] || 0) + 1;
-
-        end += 8; // final jump is not included
-
-        if((start ^ end) & ~0xFFF)
-        {
-            dbg_log("truncated disassembly start=" + h(start >>> 0) + " end=" + h(end >>> 0));
-            end = (start | 0xFFF) + 1; // until the end of the page
-        }
-
-        if(end < start) end = start;
-
-        dbg_assert(end >= start);
-
-        const buffer = new Uint8Array(end - start);
-
-        for(let i = start; i < end; i++)
-        {
-            buffer[i - start] = this.read8(i);
-        }
-
-        dbg_log("Uncompiled code:");
-        this.debug_dump_code(this.is_32[0] ? 1 : 0, buffer, start);
-    }
-};
-
-CPU.prototype.dump_function_code = function(block_ptr, count)
-{
-    if(!DEBUG || !DUMP_GENERATED_WASM)
-    {
-        return;
-    }
-
-    const SIZEOF_BASIC_BLOCK_IN_DWORDS = 7;
-
-    const mem32 = new Int32Array(this.wasm_memory.buffer);
-
-    dbg_assert((block_ptr & 3) === 0);
-
-    const is_32 = this.is_32[0];
-
-    for(let i = 0; i < count; i++)
-    {
-        const struct_start = (block_ptr >> 2) + i * SIZEOF_BASIC_BLOCK_IN_DWORDS;
-        const start = mem32[struct_start + 0];
-        const end = mem32[struct_start + 1];
-        const is_entry_block = mem32[struct_start + 6] & 0xFF00;
-
-        const buffer = new Uint8Array(end - start);
-
-        for(let i = start; i < end; i++)
-        {
-            buffer[i - start] = this.read8(this.translate_address_system_read(i));
-        }
-
-        dbg_log("---" + (is_entry_block ? " entry" : ""));
-        this.debug_dump_code(is_32 ? 1 : 0, buffer, start);
-    }
 };
 
 CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
@@ -2476,101 +2588,4 @@ CPU.prototype.debug_interrupt = function(interrupt_nr)
     //    dbg_log("kolibri syscall");
     //    this.debug.dump_regs_short();
     //}
-};
-
-CPU.prototype.debug_dump_code = function(is_32, buffer, start)
-{
-    if(!DEBUG) return;
-
-    if(!this.capstone_decoder)
-    {
-        let cs = window.cs;
-
-        /* global require */
-        if(typeof require === "function")
-        {
-            cs = require("./capstone-x86.min.js");
-        }
-
-        if(cs === undefined)
-        {
-            dbg_log("Warning: Missing capstone library, disassembly not available");
-            return;
-        }
-
-        this.capstone_decoder = [
-            new cs.Capstone(cs.ARCH_X86, cs.MODE_16),
-            new cs.Capstone(cs.ARCH_X86, cs.MODE_32),
-        ];
-    }
-
-    if(buffer instanceof Array)
-    {
-        buffer = new Uint8Array(buffer);
-    }
-
-    try
-    {
-        const instructions = this.capstone_decoder[+is_32].disasm(buffer, start);
-
-        instructions.forEach(function (instr) {
-            dbg_log(h(instr.address >>> 0) + ": " +
-                pads(instr.bytes.map(x => h(x, 2).slice(-2)).join(" "), 20) + " " +
-                instr.mnemonic + " " + instr.op_str);
-        });
-        dbg_log("");
-    }
-    catch(e)
-    {
-        dbg_log("Could not disassemble: " + Array.from(buffer).map(x => h(x, 2)).join(" "));
-    }
-};
-
-CPU.prototype.dump_wasm = function(buffer)
-{
-    if(!DEBUG) return;
-
-    /* global require */
-    if(this.wabt === undefined)
-    {
-        if(typeof require === "function")
-        {
-            this.wabt = require("./libwabt.cjs");
-        }
-        else
-        {
-            this.wabt = new window.WabtModule;
-        }
-
-        if(this.wabt === undefined)
-        {
-            dbg_log("Warning: Missing libwabt, wasm dump not available");
-            return;
-        }
-    }
-
-    // Need to make a small copy otherwise libwabt goes nuts trying to copy
-    // the whole underlying buffer
-    buffer = buffer.slice();
-
-    try
-    {
-        var module = this.wabt.readWasm(buffer, { readDebugNames: false });
-        module.generateNames();
-        module.applyNames();
-        const result = module.toText({ foldExprs: true, inlineExport: true });
-        dbg_log(result);
-    }
-    catch(e)
-    {
-        dump_file(buffer, "failed.wasm");
-        console.log(e.toString());
-    }
-    finally
-    {
-        if(module)
-        {
-            module.destroy();
-        }
-    }
 };

@@ -3,6 +3,10 @@
 <script type="module">
 import { V86 } from "../../build/libv86.mjs";
 import { WorkerPerformanceRecorder } from "../../src/browser/cpu_worker.js";
+const params = new URLSearchParams(location.search);
+const irBackend = params.get("jit_backend") === "ir";
+const corePath = irBackend ? "../../build/v86-ir-runtime.wasm" : "../../build/v86.wasm";
+const jitOptions = irBackend ? { jit_backend: "ir" } : {};
 const checks = [];
 const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
 const sleep = ms => new Promise(r => setTimeout(r,ms));
@@ -24,11 +28,18 @@ try {
         };
     };
     vm = new V86({ cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
-        wasm_path: "../../build/v86.wasm", bios: { url: "../../build/cpu-worker-test.bin" },
+        wasm_path: corePath, ...jitOptions, bios: { url: "../../build/cpu-worker-test.bin" },
         memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
-        disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+        disable_keyboard: !irBackend, disable_mouse: !irBackend, disable_speaker: true,
         filesystem: {}, net_device: { type: "none" }, autostart: true, graphics_adapter: fakeGraphics });
     await Promise.race([new Promise((resolve,reject) => { vm.add_listener("emulator-loaded",resolve); vm.add_listener("emulator-error",reject); }), sleep(15000).then(()=>{throw new Error("startup timeout");})]);
+    const assertIRBackend = async label => {
+        if(!irBackend) return;
+        const info = await vm.get_jit_info();
+        check(info.backend === "ir" && info.ir_available && info.ir.enabled === 1,
+            label + " selects the IR backend");
+    };
+    await assertIRBackend("initial Worker");
     const word = async a => new DataView((await vm.read_memory(a,4)).buffer).getUint32(0,true);
     const wait = async test => { const end=performance.now()+10000; while(!await test()) { if(performance.now()>end) throw new Error("guest timeout"); await sleep(5); } };
     await wait(async()=>await word(0x500)===0xCAFE);
@@ -40,10 +51,59 @@ try {
     await vm.stop(); first=await word(0x504); await sleep(30);
     check(await word(0x504)===first,"stop is acknowledged at a CPU boundary");
     await vm.run();
-    async function program(bytes) {
+    async function launch(bytes) {
         await vm.write_memory(Uint8Array.from([...bytes,0xC3]),0x1200000);
         await vm.write_memory(Uint8Array.from(u32(0x1200000)),0x600);
+    }
+    async function program(bytes) {
+        await launch(bytes);
         await wait(async()=>await word(0x600)===0);
+    }
+    if(irBackend) {
+        const poll60=[0xE4,0x64,0xA8,0x01,0x74,0xFA];
+
+        // Keyboard: guest enables scanning, consumes the 0xFA ACK, then waits
+        // for KeyA make/break codes emitted by the real browser KeyboardAdapter.
+        await vm.write_memory(new Uint8Array(8),0x710);
+        await launch([
+            0xBA,0x60,0,0,0, 0xB0,0xF4,0xEE,
+            ...poll60,0xE4,0x60,0xA2,...u32(0x712),
+            0xB0,1,0xA2,...u32(0x714),
+            ...poll60,0xE4,0x60,0xA2,...u32(0x710),
+            ...poll60,0xE4,0x60,0xA2,...u32(0x711),
+        ]);
+        await wait(async()=>(await vm.read_memory(0x714,1))[0]===1);
+        const canvas=document.querySelector("#screen canvas");
+        canvas.dispatchEvent(new KeyboardEvent("keydown",{code:"KeyA",key:"a",bubbles:true}));
+        canvas.dispatchEvent(new KeyboardEvent("keyup",{code:"KeyA",key:"a",bubbles:true}));
+        await wait(async()=>await word(0x600)===0);
+        const keyboard=await vm.read_memory(0x710,3);
+        check(keyboard[0]===0x1E && keyboard[1]===0x9E && keyboard[2]===0xFA,
+            "DOM keyboard make/break crosses Worker into guest PS/2 while IR is selected");
+
+        // Mouse: guest enables the second PS/2 port and streaming. Waiting for
+        // mouse_adapter.enabled proves the Worker's mouse-enable device event
+        // reached the main-thread adapter before the DOM movement is injected.
+        await vm.write_memory(new Uint8Array(8),0x720);
+        await launch([
+            0xB0,0xA8,0xE6,0x64,
+            0xB0,0xD4,0xE6,0x64,0xB0,0xF4,0xE6,0x60,
+            ...poll60,0xE4,0x60,0xA2,...u32(0x723),
+            0xB0,1,0xA2,...u32(0x724),
+            ...poll60,0xE4,0x60,0xA2,...u32(0x720),
+            ...poll60,0xE4,0x60,0xA2,...u32(0x721),
+            ...poll60,0xE4,0x60,0xA2,...u32(0x722),
+        ]);
+        await wait(async()=>(await vm.read_memory(0x724,1))[0]===1);
+        await wait(()=>vm.mouse_adapter?.enabled===true);
+        const move=new MouseEvent("mousemove",{clientX:16,clientY:12,bubbles:true});
+        Object.defineProperty(move,"movementX",{value:6});
+        Object.defineProperty(move,"movementY",{value:-4});
+        canvas.dispatchEvent(move);
+        await wait(async()=>await word(0x600)===0);
+        const mouse=await vm.read_memory(0x720,5);
+        check(mouse[3]===0xFA && mouse[0]===0x08 && mouse[1]===6 && mouse[2]===4,
+            "DOM mouse movement crosses Worker into streamed guest PS/2 packet while IR is selected");
     }
     const floppy=new Uint8Array(1440*1024);floppy[0]=95;
     await vm.set_fda({buffer:floppy.buffer});
@@ -119,30 +179,34 @@ try {
     await vm.restore_state(saved);
     check((await vm.read_memory(0x101000,1))[0]===13,"good checkpoint recovers after a rejected restore");
     await vm.stop();
+    await assertIRBackend("post-device workload Worker");
     const state2=await vm.save_state();
     await vm.destroy();vm=null;
     // Boot directly from a saved state, including the graphics checkpoint.
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:"../../build/v86.wasm",
+    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:state2},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
     await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
+    await assertIRBackend("restored Worker");
     check(!vm.is_running(),"initial-state load preserves requested stopped mode");
     check((await vm.read_memory(0x101000,1))[0]===13,"initial state restores worker RAM");
     await vm.destroy();await vm.destroy();vm=null;
-    vm=new V86({wasm_path:"../../build/v86.wasm",bios:{url:"../../build/cpu-worker-test.bin"},
+    vm=new V86({wasm_path: corePath, ...jitOptions,bios:{url:"../../build/cpu-worker-test.bin"},
         memory_size:32<<20,screen:{container:document.getElementById("screen")},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
     await new Promise(r=>vm.add_listener("emulator-loaded",r));
+    await assertIRBackend("main-thread restore");
     await vm.restore_state(state2);
     check(vm.read_memory(0x101000,1)[0]===13,"main-thread mode loads a worker snapshot");
     const legacy=await vm.save_state();await vm.destroy();vm=null;
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:"../../build/v86.wasm",
+    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:legacy},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
     await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
+    await assertIRBackend("cross-mode Worker restore");
     check((await vm.read_memory(0x101000,1))[0]===13,"worker mode loads a main-thread snapshot");
     await vm.destroy();vm=null;
     document.getElementById("result").textContent="PASS\n"+checks.join("\n");

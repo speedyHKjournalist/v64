@@ -1,85 +1,10 @@
+// Keep in sync with print_stats.js.
 #[allow(non_camel_case_types)]
 pub enum stat {
-    COMPILE,
-    COMPILE_SKIPPED_NO_NEW_ENTRY_POINTS,
-    COMPILE_WRONG_ADDRESS_SPACE,
-    COMPILE_CUT_OFF_AT_END_OF_PAGE,
-    COMPILE_WITH_LOOP_SAFETY,
-    COMPILE_PAGE,
-    COMPILE_BASIC_BLOCK,
-    COMPILE_DUPLICATED_BASIC_BLOCK,
-    COMPILE_WASM_BLOCK,
-    COMPILE_WASM_LOOP,
-    COMPILE_DISPATCHER,
-    COMPILE_ENTRY_POINT,
-    COMPILE_WASM_TOTAL_BYTES,
-
     RUN_INTERPRETED,
-    RUN_INTERPRETED_NEW_PAGE,
-    RUN_INTERPRETED_PAGE_HAS_CODE,
-    RUN_INTERPRETED_PAGE_HAS_ENTRY_AFTER_PAGE_WALK,
-    RUN_INTERPRETED_NEAR_END_OF_PAGE,
-    RUN_INTERPRETED_DIFFERENT_STATE,
-    RUN_INTERPRETED_DIFFERENT_STATE_CPL3,
-    RUN_INTERPRETED_DIFFERENT_STATE_FLAT,
-    RUN_INTERPRETED_DIFFERENT_STATE_IS32,
-    RUN_INTERPRETED_DIFFERENT_STATE_SS32,
-    RUN_INTERPRETED_MISSED_COMPILED_ENTRY_RUN_INTERPRETED,
     RUN_INTERPRETED_STEPS,
 
-    RUN_FROM_CACHE,
-    RUN_FROM_CACHE_STEPS,
-
-    DIRECT_EXIT,
-    INDIRECT_JUMP,
-    INDIRECT_JUMP_NO_ENTRY,
-    NORMAL_PAGE_CHANGE,
-    NORMAL_FALLTHRU,
-    NORMAL_FALLTHRU_WITH_TARGET_BLOCK,
-    NORMAL_BRANCH,
-    NORMAL_BRANCH_WITH_TARGET_BLOCK,
-    CONDITIONAL_JUMP,
-    CONDITIONAL_JUMP_PAGE_CHANGE,
-    CONDITIONAL_JUMP_EXIT,
-    CONDITIONAL_JUMP_FALLTHRU,
-    CONDITIONAL_JUMP_FALLTHRU_WITH_TARGET_BLOCK,
-    CONDITIONAL_JUMP_BRANCH,
-    CONDITIONAL_JUMP_BRANCH_WITH_TARGET_BLOCK,
-    DISPATCHER_SMALL,
-    DISPATCHER_LARGE,
-    LOOP,
-
-    LOOP_SAFETY,
-
-    CONDITION_OPTIMISED,
-    CONDITION_UNOPTIMISED,
-    CONDITION_UNOPTIMISED_PF,
-    CONDITION_UNOPTIMISED_UNHANDLED_L,
-    CONDITION_UNOPTIMISED_UNHANDLED_LE,
-
-    FAILED_PAGE_CHANGE,
-
-    SAFE_READ_FAST,
-    SAFE_READ_SLOW_PAGE_CROSSED,
-    SAFE_READ_SLOW_NOT_VALID,
-    SAFE_READ_SLOW_NOT_USER,
-    SAFE_READ_SLOW_IN_MAPPED_RANGE,
-
-    SAFE_WRITE_FAST,
-    SAFE_WRITE_SLOW_PAGE_CROSSED,
-    SAFE_WRITE_SLOW_NOT_VALID,
-    SAFE_WRITE_SLOW_NOT_USER,
-    SAFE_WRITE_SLOW_IN_MAPPED_RANGE,
-    SAFE_WRITE_SLOW_READ_ONLY,
-    SAFE_WRITE_SLOW_HAS_CODE,
-
-    SAFE_READ_WRITE_FAST,
-    SAFE_READ_WRITE_SLOW_PAGE_CROSSED,
-    SAFE_READ_WRITE_SLOW_NOT_VALID,
-    SAFE_READ_WRITE_SLOW_NOT_USER,
-    SAFE_READ_WRITE_SLOW_IN_MAPPED_RANGE,
-    SAFE_READ_WRITE_SLOW_READ_ONLY,
-    SAFE_READ_WRITE_SLOW_HAS_CODE,
+    DIRTY_PAGE_DID_NOT_HAVE_CODE,
 
     PAGE_FAULT,
     TLB_MISS,
@@ -89,35 +14,10 @@ pub enum stat {
     DO_MANY_CYCLES,
     CYCLE_INTERNAL,
 
-    INVALIDATE_ALL_MODULES_NO_FREE_WASM_INDICES,
-    INVALIDATE_MODULE_WRITTEN_WHILE_COMPILED,
-    INVALIDATE_MODULE_UNUSED_AFTER_OVERWRITE,
-    INVALIDATE_MODULE_DIRTY_PAGE,
-
-    INVALIDATE_PAGE_HAD_CODE,
-    INVALIDATE_PAGE_HAD_ENTRY_POINTS,
-    DIRTY_PAGE_DID_NOT_HAVE_CODE,
-
-    RUN_FROM_CACHE_EXIT_SAME_PAGE,
-    RUN_FROM_CACHE_EXIT_NEAR_END_OF_PAGE,
-    RUN_FROM_CACHE_EXIT_DIFFERENT_PAGE,
-
     CLEAR_TLB,
     FULL_CLEAR_TLB,
     TLB_FULL,
     TLB_GLOBAL_FULL,
-
-    MODRM_SIMPLE_REG,
-    MODRM_SIMPLE_REG_WITH_OFFSET,
-    MODRM_SIMPLE_CONST_OFFSET,
-    MODRM_COMPLEX,
-
-    SEG_OFFSET_OPTIMISED,
-    SEG_OFFSET_NOT_OPTIMISED,
-    SEG_OFFSET_NOT_OPTIMISED_ES,
-    SEG_OFFSET_NOT_OPTIMISED_FS,
-    SEG_OFFSET_NOT_OPTIMISED_GS,
-    SEG_OFFSET_NOT_OPTIMISED_NOT_FLAT,
 }
 
 #[allow(non_upper_case_globals)]
@@ -157,6 +57,8 @@ pub fn profiler_is_enabled() -> bool { cfg!(feature = "profiler") }
 // Low-overhead, opt-in diagnostics: update at execution-chunk boundaries,
 // never emit per-instruction instrumentation into generated Wasm.
 static mut PERFORMANCE_RECORDING: bool = false;
+// 0: interpreted steps, 1: compiled steps; 2..4 are unused (legacy table
+// capacity events), kept so the export indices stay stable.
 static mut PERFORMANCE_COUNTERS: [u64; 5] = [0; 5];
 static mut PERFORMANCE_CODEGEN: [f64; 3] = [0.0; 3];
 // Indices 8..23. Legacy per-chunk times at 18/19 are unavailable in v4.
@@ -214,7 +116,11 @@ pub unsafe fn performance_recording_hotspot_count() -> u32 { PERFORMANCE_ROWS.le
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe fn performance_recording_hotspot_get(row: u32, field: u32) -> f64 {
-    PERFORMANCE_ROWS.get(row as usize).and_then(|row| row.get(field as usize)).copied().unwrap_or(0.0)
+    PERFORMANCE_ROWS
+        .get(row as usize)
+        .and_then(|row| row.get(field as usize))
+        .copied()
+        .unwrap_or(0.0)
 }
 
 #[inline]
@@ -223,7 +129,9 @@ pub fn performance_recording_enabled() -> bool { unsafe { PERFORMANCE_RECORDING 
 #[inline]
 pub fn performance_execution_add(index: usize, value: f64) {
     unsafe {
-        if PERFORMANCE_RECORDING { PERFORMANCE_EXECUTION[index] += value; }
+        if PERFORMANCE_RECORDING {
+            PERFORMANCE_EXECUTION[index] += value;
+        }
     }
 }
 
@@ -234,10 +142,13 @@ pub fn performance_timer_finish(start: Option<f64>, index: usize) {
         performance_execution_add(index + 2, 1.0);
         if index == 0 {
             unsafe {
-                PERFORMANCE_PREVIOUS_CHUNKS = (PERFORMANCE_BATCH_CHUNKS[0] + PERFORMANCE_BATCH_CHUNKS[1]).max(1);
+                PERFORMANCE_PREVIOUS_CHUNKS =
+                    (PERFORMANCE_BATCH_CHUNKS[0] + PERFORMANCE_BATCH_CHUNKS[1]).max(1);
                 PERFORMANCE_EXECUTION[8] += PERFORMANCE_BATCH_CHUNKS[0] as f64;
                 PERFORMANCE_EXECUTION[9] += PERFORMANCE_BATCH_CHUNKS[1] as f64;
-                if PERFORMANCE_COUNTDOWN != 0 { PERFORMANCE_EXECUTION[15] += 1.0; }
+                if PERFORMANCE_COUNTDOWN != 0 {
+                    PERFORMANCE_EXECUTION[15] += 1.0;
+                }
                 PERFORMANCE_COUNTDOWN = 0;
             }
         }
@@ -246,7 +157,9 @@ pub fn performance_timer_finish(start: Option<f64>, index: usize) {
 
 pub fn performance_main_loop_exit(delay: f64, halted: bool) -> f64 {
     performance_execution_add(if delay > 0.0 { 6 } else { 5 }, 1.0);
-    if halted { performance_execution_add(7, 1.0); }
+    if halted {
+        performance_execution_add(7, 1.0);
+    }
     delay
 }
 
@@ -283,21 +196,38 @@ pub fn performance_batch_start() -> Option<f64> {
 #[inline]
 pub fn performance_chunk_start(jit: bool, eip: u32, cr3: u32, cpl: u8) -> bool {
     unsafe {
-        if !PERFORMANCE_RECORDING { return false; }
+        if !PERFORMANCE_RECORDING {
+            return false;
+        }
         PERFORMANCE_BATCH_CHUNKS[if jit { 0 } else { 1 }] += 1;
-        if PERFORMANCE_COUNTDOWN == 0 { return false; }
+        if PERFORMANCE_COUNTDOWN == 0 {
+            return false;
+        }
         PERFORMANCE_COUNTDOWN -= 1;
-        if PERFORMANCE_COUNTDOWN != 0 { return false; }
-        PERFORMANCE_PENDING_ROW = [cr3 as f64, (eip & !0xFFF) as f64, cpl as f64,
-            jit as u8 as f64, 1.0, 0.0, 0.0, PERFORMANCE_SAMPLE_TIME,
-            PERFORMANCE_SAMPLE_TIME, eip as f64];
+        if PERFORMANCE_COUNTDOWN != 0 {
+            return false;
+        }
+        PERFORMANCE_PENDING_ROW = [
+            cr3 as f64,
+            (eip & !0xFFF) as f64,
+            cpl as f64,
+            jit as u8 as f64,
+            1.0,
+            0.0,
+            0.0,
+            PERFORMANCE_SAMPLE_TIME,
+            PERFORMANCE_SAMPLE_TIME,
+            eip as f64,
+        ];
         true
     }
 }
 
 #[inline]
 pub fn performance_chunk_finish(selected: bool, steps: u32) {
-    if selected { performance_store_sample(steps); }
+    if selected {
+        performance_store_sample(steps);
+    }
 }
 
 // Reservoir sampling bounds memory without permanently excluding later pages.
@@ -316,7 +246,9 @@ fn performance_store_sample(steps: u32) {
             PERFORMANCE_EXECUTION[14] += 1.0;
             let total = (PERFORMANCE_EXECUTION[12] + PERFORMANCE_EXECUTION[13]) as u32;
             let index = (performance_random() % total) as usize;
-            if index < 8192 { PERFORMANCE_ROWS[index] = row; }
+            if index < 8192 {
+                PERFORMANCE_ROWS[index] = row;
+            }
         }
     }
 }
@@ -332,9 +264,7 @@ pub fn performance_recording_add(index: usize, count: u64) {
 
 // Timing only runs during an explicit recording and surrounds synchronous
 // analysis/code generation, not the later asynchronous WebAssembly compilation.
-pub fn performance_codegen_start() -> Option<f64> {
-    performance_timer_start()
-}
+pub fn performance_codegen_start() -> Option<f64> { performance_timer_start() }
 
 #[inline]
 pub fn performance_timer_start() -> Option<f64> {

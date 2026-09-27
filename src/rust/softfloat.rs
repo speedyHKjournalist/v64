@@ -44,9 +44,19 @@ pub enum RoundingMode {
 // CPU.init selects the browser/API option; standalone arithmetic tests start
 // in compatible mode. Changing this helper policy does not invalidate JIT code.
 static mut X87_FAST_MATH: bool = false;
+// The CPU derives its generated-code x87 policy from this flag (see cpu::fpu).
+static mut X87_POLICY_OBSERVER: Option<unsafe fn()> = None;
 
 #[no_mangle]
-pub unsafe fn set_x87_fast_math(enabled: bool) { X87_FAST_MATH = enabled; }
+pub unsafe fn set_x87_fast_math(enabled: bool) {
+    X87_FAST_MATH = enabled;
+    if let Some(observer) = X87_POLICY_OBSERVER {
+        observer();
+    }
+}
+pub unsafe fn set_x87_policy_observer(observer: unsafe fn()) {
+    X87_POLICY_OBSERVER = Some(observer);
+}
 
 // State snapshots use SoftFloat's codes: precision 32/64/80 and rounding
 // nearest-even/toward-zero/down/up (0/1/2/3), not x87 control-word RC bits.
@@ -63,20 +73,14 @@ pub unsafe fn performance_recording_x87_state(index: u32) -> u32 {
 #[inline(always)]
 fn record_x87_arithmetic(op: usize, path: usize) {
     if crate::x87_profiler::enabled() {
-        unsafe { crate::x87_profiler::record(op, path, extF80_roundingPrecision, softfloat_roundingMode); }
+        unsafe {
+            crate::x87_profiler::record(op, path, extF80_roundingPrecision, softfloat_roundingMode);
+        }
     }
 }
 
 pub fn record_cached_arithmetic(op: usize) { record_x87_arithmetic(op, 2); }
 
-pub fn record_x87_jit_arithmetic(counts: u32) {
-    if crate::x87_profiler::enabled() {
-        for op in 0..4 {
-            unsafe { crate::x87_profiler::record_count(op, 2, extF80_roundingPrecision,
-                softfloat_roundingMode, ((counts >> (op * 8)) & 255) as u64); }
-        }
-    }
-}
 pub enum Precision {
     P80,
     P64,
@@ -134,11 +138,15 @@ impl F80 {
     pub fn of_i32(src: i32) -> F80 { Self::of_i64(src as i64) }
     #[inline]
     pub fn of_i64(src: i64) -> F80 {
-        if src == 0 { return Self::ZERO; }
+        if src == 0 {
+            return Self::ZERO;
+        }
         let magnitude = src.unsigned_abs();
         let shift = magnitude.leading_zeros();
-        F80 { mantissa: magnitude << shift,
-            sign_exponent: (if src < 0 { 0x8000 } else { 0 }) | (0x403E - shift as u16) }
+        F80 {
+            mantissa: magnitude << shift,
+            sign_exponent: (if src < 0 { 0x8000 } else { 0 }) | (0x403E - shift as u16),
+        }
     }
 
     #[inline]
@@ -150,14 +158,23 @@ impl F80 {
         // Widening finite binary32 is exact in F80, including subnormals.
         // Do not clear sticky flags here: the x87 wrapper owns that operation.
         if exponent != 0 && exponent != 0xFF {
-            return F80 { mantissa: ((fraction | 0x800000) as u64) << 40,
-                sign_exponent: sign | (exponent as u16 + 0x3F80) };
+            return F80 {
+                mantissa: ((fraction | 0x800000) as u64) << 40,
+                sign_exponent: sign | (exponent as u16 + 0x3F80),
+            };
         }
         if exponent == 0 {
-            if fraction == 0 { return F80 { mantissa: 0, sign_exponent: sign }; }
+            if fraction == 0 {
+                return F80 {
+                    mantissa: 0,
+                    sign_exponent: sign,
+                };
+            }
             let shift = fraction.leading_zeros() - 8;
-            return F80 { mantissa: ((fraction << shift) as u64) << 40,
-                sign_exponent: sign | (0x3F81 - shift as u16) };
+            return F80 {
+                mantissa: ((fraction << shift) as u64) << 40,
+                sign_exponent: sign | (0x3F81 - shift as u16),
+            };
         }
         // Preserve SoftFloat's signaling-NaN flags and payload conversion.
         let mut x = F80::ZERO;
@@ -171,14 +188,23 @@ impl F80 {
         let fraction = src & 0xFFFFFFFFFFFFF;
         let sign = ((src >> 48) & 0x8000) as u16;
         if exponent != 0 && exponent != 0x7FF {
-            return F80 { mantissa: (fraction | 0x10000000000000) << 11,
-                sign_exponent: sign | (exponent as u16 + 0x3C00) };
+            return F80 {
+                mantissa: (fraction | 0x10000000000000) << 11,
+                sign_exponent: sign | (exponent as u16 + 0x3C00),
+            };
         }
         if exponent == 0 {
-            if fraction == 0 { return F80 { mantissa: 0, sign_exponent: sign }; }
+            if fraction == 0 {
+                return F80 {
+                    mantissa: 0,
+                    sign_exponent: sign,
+                };
+            }
             let shift = fraction.leading_zeros() - 11;
-            return F80 { mantissa: fraction << (shift + 11),
-                sign_exponent: sign | (0x3C01 - shift as u16) };
+            return F80 {
+                mantissa: fraction << (shift + 11),
+                sign_exponent: sign | (0x3C01 - shift as u16),
+            };
         }
         let mut x = F80::ZERO;
         unsafe { f64_to_extF80M(src, &mut x) };
@@ -190,15 +216,16 @@ impl F80 {
     pub fn to_f32(&self) -> i32 {
         let exponent = self.sign_exponent & 0x7FFF;
         let sign = ((self.sign_exponent as u32) & 0x8000) << 16;
-        if exponent == 0 && self.mantissa == 0 { return sign as i32; }
+        if exponent == 0 && self.mantissa == 0 {
+            return sign as i32;
+        }
         // Common normal-to-normal conversion. Round the original 64-bit
         // significand once; a host f64 intermediate could double-round.
         if (0x3F81..=0x407E).contains(&exponent) && self.mantissa >> 63 != 0 {
             let mut significand = (self.mantissa >> 40) as u32;
             let remainder = self.mantissa & 0xFFFFFFFFFF;
             let increment = match unsafe { softfloat_roundingMode } {
-                0 => remainder > 0x8000000000 ||
-                    remainder == 0x8000000000 && significand & 1 != 0,
+                0 => remainder > 0x8000000000 || remainder == 0x8000000000 && significand & 1 != 0,
                 1 => false,
                 2 => sign != 0 && remainder != 0,
                 3 => sign == 0 && remainder != 0,
@@ -209,7 +236,11 @@ impl F80 {
             // a rounded significand carry. Overflow must use the reference.
             let magnitude = ((exponent as u32 - 0x3F81) << 23) + significand;
             if magnitude < 0x7F800000 {
-                if remainder != 0 { unsafe { softfloat_exceptionFlags |= 1; } }
+                if remainder != 0 {
+                    unsafe {
+                        softfloat_exceptionFlags |= 1;
+                    }
+                }
                 return (sign | magnitude) as i32;
             }
         }
@@ -220,7 +251,9 @@ impl F80 {
     pub fn to_f64(&self) -> u64 {
         let exponent = self.sign_exponent & 0x7FFF;
         let sign = ((self.sign_exponent as u64) & 0x8000) << 48;
-        if exponent == 0 && self.mantissa == 0 { return sign; }
+        if exponent == 0 && self.mantissa == 0 {
+            return sign;
+        }
         if (0x3C01..=0x43FE).contains(&exponent) && self.mantissa >> 63 != 0 {
             let mut significand = self.mantissa >> 11;
             let remainder = self.mantissa & 0x7FF;
@@ -240,7 +273,11 @@ impl F80 {
             significand += increment as u64;
             let magnitude = ((exponent as u64 - 0x3C01) << 52) + significand;
             if magnitude < 0x7FF0000000000000 {
-                if remainder != 0 { unsafe { softfloat_exceptionFlags |= 1; } }
+                if remainder != 0 {
+                    unsafe {
+                        softfloat_exceptionFlags |= 1;
+                    }
+                }
                 return sign | magnitude;
             }
         }
@@ -251,46 +288,85 @@ impl F80 {
     #[inline]
     fn normal_to_integer(&self, rounding: u8) -> Option<i64> {
         let exponent = self.sign_exponent & 0x7FFF;
-        if exponent == 0 && self.mantissa == 0 { return Some(0); }
-        if exponent == 0 || exponent >= 0x403F || self.mantissa >> 63 == 0 { return None; }
+        if exponent == 0 && self.mantissa == 0 {
+            return Some(0);
+        }
+        if exponent == 0 || exponent >= 0x403F || self.mantissa >> 63 == 0 {
+            return None;
+        }
         let power = exponent as i32 - 0x3FFF;
         let (mut magnitude, nonzero, above_half, tie) = if power >= 0 {
             let shift = 63 - power as u32;
-            if shift == 0 { (self.mantissa, false, false, false) }
+            if shift == 0 {
+                (self.mantissa, false, false, false)
+            }
             else {
                 let remainder = self.mantissa & ((1u64 << shift) - 1);
                 let half = 1u64 << (shift - 1);
-                (self.mantissa >> shift, remainder != 0, remainder > half, remainder == half)
+                (
+                    self.mantissa >> shift,
+                    remainder != 0,
+                    remainder > half,
+                    remainder == half,
+                )
             }
-        } else { (0, true, power == -1 && self.mantissa > 1 << 63,
-            power == -1 && self.mantissa == 1 << 63) };
+        }
+        else {
+            (
+                0,
+                true,
+                power == -1 && self.mantissa > 1 << 63,
+                power == -1 && self.mantissa == 1 << 63,
+            )
+        };
         let increment = match rounding {
             0 => above_half || tie && magnitude & 1 != 0,
-            1 => false, 2 => self.sign() && nonzero, 3 => !self.sign() && nonzero,
+            1 => false,
+            2 => self.sign() && nonzero,
+            3 => !self.sign() && nonzero,
             _ => return None,
         };
         magnitude = magnitude.checked_add(increment as u64)?;
         if self.sign() {
-            if magnitude > 1 << 63 { return None; }
+            if magnitude > 1 << 63 {
+                return None;
+            }
             Some((magnitude as i64).wrapping_neg())
-        } else { i64::try_from(magnitude).ok() }
+        }
+        else {
+            i64::try_from(magnitude).ok()
+        }
     }
     pub fn to_i32(&self) -> i32 {
         let rounding = unsafe { softfloat_roundingMode };
-        if let Some(value) = self.normal_to_integer(rounding).and_then(|x| i32::try_from(x).ok()) { return value; }
+        if let Some(value) = self
+            .normal_to_integer(rounding)
+            .and_then(|x| i32::try_from(x).ok())
+        {
+            return value;
+        }
         unsafe { extF80M_to_i32(self, rounding, false) }
     }
     pub fn to_i64(&self) -> i64 {
         let rounding = unsafe { softfloat_roundingMode };
-        if let Some(value) = self.normal_to_integer(rounding) { return value; }
+        if let Some(value) = self.normal_to_integer(rounding) {
+            return value;
+        }
         unsafe { extF80M_to_i64(self, rounding, false) }
     }
     pub fn truncate_to_i32(&self) -> i32 {
-        if let Some(value) = self.normal_to_integer(1).and_then(|x| i32::try_from(x).ok()) { return value; }
+        if let Some(value) = self
+            .normal_to_integer(1)
+            .and_then(|x| i32::try_from(x).ok())
+        {
+            return value;
+        }
         unsafe { extF80M_to_i32(self, 1, false) }
     }
     pub fn truncate_to_i64(&self) -> i64 {
-        if let Some(value) = self.normal_to_integer(1) { return value; }
+        if let Some(value) = self.normal_to_integer(1) {
+            return value;
+        }
         unsafe { extF80M_to_i64(self, 1, false) }
     }
 
@@ -301,7 +377,31 @@ impl F80 {
     pub fn atan2(self, other: F80) -> F80 { F80::of_f64x(self.to_f64x().atan2(other.to_f64x())) }
 
     pub fn log2(self) -> F80 { F80::of_f64x(self.to_f64x().log2()) }
-    pub fn ln(self) -> F80 { F80::of_f64x(self.to_f64x().ln()) }
+    pub fn ln(self) -> F80 {
+        // Transcendentals currently round through binary64. Keep that conversion
+        // (and its SoftFloat exception flags), but never pass a NaN to the host
+        // logarithm: Wasm arithmetic may change its sign/payload between tiers.
+        let bits = self.to_f64();
+        let magnitude = bits & 0x7FFFFFFFFFFFFFFF;
+        if magnitude > 0x7FF0000000000000 {
+            return F80::of_f64(bits);
+        }
+        if magnitude == 0 {
+            return F80::NEG_INFINITY;
+        }
+        if bits >> 63 != 0 {
+            // Same default indefinite encoding as the bundled SoftFloat. The
+            // old host logarithm did not set SoftFloat's invalid-operation flag.
+            return F80 {
+                mantissa: 0xC000000000000000,
+                sign_exponent: 0xFFFF,
+            };
+        }
+        if magnitude == 0x7FF0000000000000 {
+            return F80::POS_INFINITY;
+        }
+        F80::of_f64x(f64::from_bits(bits).ln())
+    }
 
     pub fn abs(self) -> F80 {
         F80 {
@@ -327,7 +427,11 @@ impl F80 {
     pub fn scale(self, exponent: F80) -> F80 {
         if let Some(shift) = exponent.normal_to_integer(1) {
             if (-1022..=1023).contains(&shift) {
-                return self * F80 { mantissa: 1 << 63, sign_exponent: (0x3FFF + shift) as u16 };
+                return self
+                    * F80 {
+                        mantissa: 1 << 63,
+                        sign_exponent: (0x3FFF + shift) as u16,
+                    };
             }
         }
         self * exponent.trunc().two_pow()
@@ -335,7 +439,9 @@ impl F80 {
 
     pub fn sqrt(self) -> F80 {
         if unsafe { extF80_roundingPrecision } != 80 {
-            if let Some(result) = self.native_sqrt() { return result; }
+            if let Some(result) = self.native_sqrt() {
+                return result;
+            }
         }
         let mut result = F80::ZERO;
         unsafe { extF80M_sqrt(&self, &mut result) };
@@ -376,11 +482,6 @@ impl F80 {
         // translate softfloat's flags to x87 status flags
         f >> 4 & 1 | f >> 1 & 4 | f << 3 & 16
     }
-    // JIT-generated ordered comparisons update the same sticky state as helpers.
-    pub(crate) fn exception_flags_address() -> u32 {
-        std::ptr::addr_of_mut!(softfloat_exceptionFlags) as u32
-    }
-
     pub fn clear_exception_flags() { unsafe { softfloat_exceptionFlags = 0 } }
 
     // These paths do integer significand arithmetic, not a conversion to f64.
@@ -411,7 +512,10 @@ impl F80 {
         if mantissa & discarded != 0 {
             return None;
         }
-        Some(F80 { mantissa, sign_exponent: sign | exponent as u16 })
+        Some(F80 {
+            mantissa,
+            sign_exponent: sign | exponent as u16,
+        })
     }
 
     #[inline(always)]
@@ -424,39 +528,53 @@ impl F80 {
         let exponent = self.normal_exponent()? + other.normal_exponent()? - 0x3FFF;
         let product = (self.mantissa >> 32) * (other.mantissa >> 32);
         let shift = product.leading_zeros(); // 0 or 1 for canonical normal inputs
-        F80::exact_normal(product << shift, exponent + 1 - shift as i32,
-            (self.sign_exponent ^ other.sign_exponent) & 0x8000)
+        F80::exact_normal(
+            product << shift,
+            exponent + 1 - shift as i32,
+            (self.sign_exponent ^ other.sign_exponent) & 0x8000,
+        )
     }
 
     #[inline(always)]
     fn exact_add(self, other: F80) -> Option<F80> {
         // A cheap rejection for extended-precision intermediates. Binary32
         // inputs (and other short significands) can be aligned exactly here.
-        if (self.mantissa | other.mantissa) & 0xFFFFFFFF != 0 { return None; }
+        if (self.mantissa | other.mantissa) & 0xFFFFFFFF != 0 {
+            return None;
+        }
         let ae = self.normal_exponent()?;
         let be = other.normal_exponent()?;
         let (big, small, exponent, distance) = if (ae, self.mantissa) >= (be, other.mantissa) {
             (self, other, ae, ae - be)
-        } else {
+        }
+        else {
             (other, self, be, be - ae)
         };
-        if distance > 32 { return None; }
+        if distance > 32 {
+            return None;
+        }
         // The low 32 bits are zero, so alignment loses no bits for this range.
         let aligned = small.mantissa >> distance;
         let sign = big.sign_exponent & 0x8000;
         if (big.sign_exponent ^ small.sign_exponent) & 0x8000 == 0 {
             let (sum, carry) = big.mantissa.overflowing_add(aligned);
             if carry {
-                if sum & 1 != 0 { return None; }
+                if sum & 1 != 0 {
+                    return None;
+                }
                 F80::exact_normal((sum >> 1) | (1 << 63), exponent + 1, sign)
-            } else {
+            }
+            else {
                 F80::exact_normal(sum, exponent, sign)
             }
-        } else {
+        }
+        else {
             let difference = big.mantissa - aligned;
             if difference == 0 {
-                return Some(F80 { mantissa: 0,
-                    sign_exponent: if unsafe { softfloat_roundingMode } == 2 { 0x8000 } else { 0 } });
+                return Some(F80 {
+                    mantissa: 0,
+                    sign_exponent: if unsafe { softfloat_roundingMode } == 2 { 0x8000 } else { 0 },
+                });
             }
             let shift = difference.leading_zeros();
             F80::exact_normal(difference << shift, exponent - shift as i32, sign)
@@ -472,7 +590,9 @@ impl F80 {
         // sign/exponent/significand, without normalizing even noncanonical
         // inputs. Preserve that behavior; special exponents still go through
         // SoftFloat for quiet/signaling NaN flags.
-        if ae == 0x7FFF || be == 0x7FFF { return None; }
+        if ae == 0x7FFF || be == 0x7FFF {
+            return None;
+        }
         if self.sign() != other.sign() {
             if (ae | be) == 0 && (self.mantissa | other.mantissa) == 0 {
                 return Some(Ordering::Equal);
@@ -489,22 +609,32 @@ impl F80 {
             return None;
         }
         let exponent = self.normal_exponent()? - other.normal_exponent()? + 0x3FFF;
-        F80::exact_normal(self.mantissa, exponent,
-            (self.sign_exponent ^ other.sign_exponent) & 0x8000)
+        F80::exact_normal(
+            self.mantissa,
+            exponent,
+            (self.sign_exponent ^ other.sign_exponent) & 0x8000,
+        )
     }
 
     #[inline(never)]
     fn native_sqrt(self) -> Option<F80> {
-        if self.sign() || unsafe { softfloat_roundingMode } != 0 { return None; }
+        if self.sign() || unsafe { softfloat_roundingMode } != 0 {
+            return None;
+        }
         let exponent = self.normal_exponent()? as u32;
         let result = match unsafe { extF80_roundingPrecision } {
             64 => {
-                if self.mantissa & 0x7FF != 0 || !(0x3C01..=0x43FE).contains(&exponent) { return None; }
-                let bits = ((exponent as u64 - 0x3C00) << 52) | ((self.mantissa >> 11) & 0xFFFFFFFFFFFFF);
+                if self.mantissa & 0x7FF != 0 || !(0x3C01..=0x43FE).contains(&exponent) {
+                    return None;
+                }
+                let bits =
+                    ((exponent as u64 - 0x3C00) << 52) | ((self.mantissa >> 11) & 0xFFFFFFFFFFFFF);
                 Self::of_f64(f64::from_bits(bits).sqrt().to_bits())
             },
             32 => {
-                if self.mantissa & 0xFFFFFFFFFF != 0 || !(0x3F81..=0x407E).contains(&exponent) { return None; }
+                if self.mantissa & 0xFFFFFFFFFF != 0 || !(0x3F81..=0x407E).contains(&exponent) {
+                    return None;
+                }
                 let bits = ((exponent - 0x3F80) << 23) | ((self.mantissa >> 40) as u32 & 0x7FFFFF);
                 Self::of_f32(f32::from_bits(bits).sqrt().to_bits() as i32)
             },
@@ -513,9 +643,12 @@ impl F80 {
         // An exact square root of a <=53-bit binary significand has <=27
         // significant bits. The existing exact integer multiplication can
         // therefore prove exactness without a rounded host multiplication.
-        if !result.exact_mul(result).is_some_and(|square|
-            square.mantissa == self.mantissa && square.sign_exponent == self.sign_exponent) {
-            unsafe { softfloat_exceptionFlags |= 1; }
+        if !result.exact_mul(result).is_some_and(|square| {
+            square.mantissa == self.mantissa && square.sign_exponent == self.sign_exponent
+        }) {
+            unsafe {
+                softfloat_exceptionFlags |= 1;
+            }
         }
         Some(result)
     }
@@ -525,44 +658,68 @@ impl F80 {
     // normal. Full extended precision and other rounding modes use SoftFloat.
     #[inline(never)]
     fn native_div(self, other: F80) -> Option<F80> {
-        if unsafe { softfloat_roundingMode } != 0 { return None; }
+        if unsafe { softfloat_roundingMode } != 0 {
+            return None;
+        }
         let ae = self.normal_exponent()? as u32;
         let be = other.normal_exponent()? as u32;
         let result = match unsafe { extF80_roundingPrecision } {
             64 => {
-                if (self.mantissa | other.mantissa) & 0x7FF != 0 ||
-                    !(0x3C01..=0x43FE).contains(&ae) || !(0x3C01..=0x43FE).contains(&be) { return None; }
-                let a = ((self.sign_exponent as u64 & 0x8000) << 48) |
-                    ((ae as u64 - 0x3C00) << 52) | ((self.mantissa >> 11) & 0xFFFFFFFFFFFFF);
-                let b = ((other.sign_exponent as u64 & 0x8000) << 48) |
-                    ((be as u64 - 0x3C00) << 52) | ((other.mantissa >> 11) & 0xFFFFFFFFFFFFF);
+                if (self.mantissa | other.mantissa) & 0x7FF != 0
+                    || !(0x3C01..=0x43FE).contains(&ae)
+                    || !(0x3C01..=0x43FE).contains(&be)
+                {
+                    return None;
+                }
+                let a = ((self.sign_exponent as u64 & 0x8000) << 48)
+                    | ((ae as u64 - 0x3C00) << 52)
+                    | ((self.mantissa >> 11) & 0xFFFFFFFFFFFFF);
+                let b = ((other.sign_exponent as u64 & 0x8000) << 48)
+                    | ((be as u64 - 0x3C00) << 52)
+                    | ((other.mantissa >> 11) & 0xFFFFFFFFFFFFF);
                 let bits = (f64::from_bits(a) / f64::from_bits(b)).to_bits();
                 let exponent = bits >> 52 & 0x7FF;
-                if exponent == 0 || exponent == 0x7FF { return None; }
+                if exponent == 0 || exponent == 0x7FF {
+                    return None;
+                }
                 Self::of_f64(bits)
             },
             32 => {
-                if (self.mantissa | other.mantissa) & 0xFFFFFFFFFF != 0 ||
-                    !(0x3F81..=0x407E).contains(&ae) || !(0x3F81..=0x407E).contains(&be) { return None; }
-                let a = ((self.sign_exponent as u32 & 0x8000) << 16) |
-                    ((ae - 0x3F80) << 23) | ((self.mantissa >> 40) as u32 & 0x7FFFFF);
-                let b = ((other.sign_exponent as u32 & 0x8000) << 16) |
-                    ((be - 0x3F80) << 23) | ((other.mantissa >> 40) as u32 & 0x7FFFFF);
+                if (self.mantissa | other.mantissa) & 0xFFFFFFFFFF != 0
+                    || !(0x3F81..=0x407E).contains(&ae)
+                    || !(0x3F81..=0x407E).contains(&be)
+                {
+                    return None;
+                }
+                let a = ((self.sign_exponent as u32 & 0x8000) << 16)
+                    | ((ae - 0x3F80) << 23)
+                    | ((self.mantissa >> 40) as u32 & 0x7FFFFF);
+                let b = ((other.sign_exponent as u32 & 0x8000) << 16)
+                    | ((be - 0x3F80) << 23)
+                    | ((other.mantissa >> 40) as u32 & 0x7FFFFF);
                 let bits = (f32::from_bits(a) / f32::from_bits(b)).to_bits();
                 let exponent = bits >> 23 & 0xFF;
-                if exponent == 0 || exponent == 0xFF { return None; }
+                if exponent == 0 || exponent == 0xFF {
+                    return None;
+                }
                 Self::of_f32(bits as i32)
             },
             _ => return None,
         };
         let odd_divisor = other.mantissa >> other.mantissa.trailing_zeros();
-        if self.mantissa % odd_divisor != 0 { unsafe { softfloat_exceptionFlags |= 1; } }
+        if self.mantissa % odd_divisor != 0 {
+            unsafe {
+                softfloat_exceptionFlags |= 1;
+            }
+        }
         Some(result)
     }
 
     #[inline]
     pub fn partial_cmp_quiet(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        if let Some(order) = self.finite_cmp(other) { return Some(order); }
+        if let Some(order) = self.finite_cmp(other) {
+            return Some(order);
+        }
         if unsafe { extF80M_lt_quiet(self, other) } {
             Some(std::cmp::Ordering::Less)
         }
@@ -684,7 +841,9 @@ impl PartialEq for F80 {
 impl PartialOrd for F80 {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        if let Some(order) = self.finite_cmp(other) { return Some(order); }
+        if let Some(order) = self.finite_cmp(other) {
+            return Some(order);
+        }
         if unsafe { extF80M_lt(self, other) } {
             Some(std::cmp::Ordering::Less)
         }

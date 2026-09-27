@@ -73,6 +73,16 @@ pub const tss_size_32: *mut bool = 1128 as *mut bool;
 pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
 
 pub const fpu_st: *mut F80 = 1152 as *mut F80;
+/// Address of cpu::tlb_data, written at startup. Generated IR code loads it
+/// from this fixed slot (below --global-base) instead of calling an import.
+pub const ir_tlb_base: *mut u32 = 2048 as *mut u32;
+/// f64 shadow of the physical x87 registers (cpu::fpu), with VALID/DIRTY
+/// masks, at fixed addresses so natively generated IR fixtures stay valid.
+pub const x87_shadow_values: *mut [u64; 8] = 1280 as *mut [u64; 8];
+pub const x87_shadow_valid: *mut u32 = 1344 as *mut u32;
+pub const x87_shadow_dirty: *mut u32 = 1348 as *mut u32;
+/// Nonzero while generated IR code may inline fast-math x87 on that cache.
+pub const x87_native_policy: *mut u8 = 1352 as *mut u8;
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);

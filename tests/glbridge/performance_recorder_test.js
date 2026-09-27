@@ -4,20 +4,26 @@ const assert = require("node:assert/strict");
     const { PerformanceRecorder } = await import("../../src/browser/performance_recorder.js");
     let time = 0, instructions = 0, counterEnabled = false;
     let counters = [0, 0, 0];
-    const reads = [];
+    const reads = [], publicationCalls = [];
+    let resolvePublish;
     const buffer = { get(offset, length, callback) {
         if (offset === 0) callback(new Uint8Array(length));
         else if (offset === 999) throw new Error("disk failed");
         else reads.push(() => callback(new Uint8Array(length)));
     } };
     const cpu = {
+        get_jit_info: () => ({ backend: "ir" }),
         devices: { ide: { primary: { master: { buffer } } } },
         wm: { exports: {
             performance_recording_enable(value) { counterEnabled = !!value; if (value) counters = [0, 0, 0]; },
             performance_recording_get(index) { return counters[index]; },
         }, wasm_table: { get() { return null; } } },
         main_loop() { time += 4; instructions = instructions + 100 >>> 0; counters[0] += 25; counters[1] += 75; return 0; },
-        codegen_finalize() {}, codegen_finalize_finished() {}, jit_clear_all_funcs() {}, jit_clear_func() {},
+        ir_publish_cached(owner, id, slot, code, automatic) {
+            publicationCalls.push([id, slot, code.length, automatic]);
+            return new Promise(resolve => { resolvePublish = resolve; });
+        },
+        jit_clear_func() {},
     };
     const runtime = { cpu, restore_state() {}, restart() {}, destroy() {} };
     const emulator = { v86: runtime, is_running: () => true, get_instruction_counter: () => instructions };
@@ -32,25 +38,42 @@ const assert = require("node:assert/strict");
     time = 15; reads.shift()();
     time = 20; reads.shift()();
     cpu.main_loop();
-    cpu.codegen_finalize(1, 4096, 0, 0, 200);
+    const published = cpu.ir_publish_cached({}, 1n, 1, new Uint8Array(200), true);
     time += 10;
-    cpu.codegen_finalize_finished(1, 4096, 0);
-    cpu.jit_clear_all_funcs();
-    counters[2]++;
+    resolvePublish(true);
+    assert.equal(await published, true, "the wrapper forwards the publication result");
     recorder.mark("scene_ready");
     const report = recorder.stop();
+    assert.equal(report.metadata.jit_backend, "ir", "report records the actual selected backend");
+    assert.equal(report.jit.start.backend, "ir");
+    assert.equal(report.jit.end.backend, "ir");
     assert.equal(report.disks[0].callback_latency_ms, 30, "overlapping read latencies are summed separately");
     assert.equal(report.samples.at(-1).disk_any_request_pending_ms, 20, "union of outstanding reads does not double count overlap");
     assert.equal(report.disks[0].synchronous_completions, 1);
     assert.equal(report.summary.main_loop_wall_ms, 4);
     assert.equal(report.summary.jit_compile_publish_latency_ms, 10);
-    assert.deepEqual(report.execution, { interpreted_steps: 25, jit_steps: 75, capacity_flushes: 1 });
+    assert.deepEqual(report.execution, { interpreted_steps: 25, jit_steps: 75 });
     assert.equal(cpu.main_loop, originalLoop);
     assert.equal(buffer.get, originalGet);
     assert.equal(counterEnabled, false);
     assert.equal(recorder.timer, null);
 
     recorder.start();
+    const late = cpu.ir_publish_cached({}, 2n, 1, new Uint8Array(100), true), resolveLate = resolvePublish;
+    const failed = cpu.ir_publish_cached({}, 3n, 2, new Uint8Array(100), false), resolveFailed = resolvePublish;
+    assert.equal(recorder.pending_jit.size, 2);
+    resolveFailed(false);
+    assert.equal(await failed, false);
+    assert.equal(recorder.pending_jit.size, 1, "a failed publication is no longer pending");
+    const second = recorder.stop();
+    assert.equal(second.summary.jit_requests, 2);
+    assert.equal(second.summary.jit_finished, 0, "a failed publication is not a finished one");
+    assert.deepEqual(publicationCalls.slice(-2), [[2n, 1, 100, true], [3n, 2, 100, false]], "the wrapper forwards the publication arguments");
+
+    recorder.start();
+    resolveLate(true);
+    assert.equal(await late, true);
+    assert.equal(recorder.stats.jit_finished, 0, "a completion from an earlier recording is not counted");
     const abort = new AbortController();
     buffer.get(512, 4096, () => {}, { signal: abort.signal });
     abort.abort();
@@ -94,13 +117,8 @@ const assert = require("node:assert/strict");
     time += 20;
     cpu.cr[3] = 0x2000;
     cpu.main_loop();
-    counters[3] = 1;
-    counters[4] = 16;
     const v2 = recorder.stop();
     assert.equal(v2.counter_version, 2);
-    assert.equal(v2.execution.capacity_flushes, 0);
-    assert.equal(v2.execution.capacity_eviction_batches, 1);
-    assert.equal(v2.execution.capacity_evicted_modules, 16);
     assert.equal(v2.execution.sync_codegen_ms, 2);
     assert.equal(v2.samples.at(-1).main_loop_without_codegen_ms, 6);
     assert.equal(v2.hotspots.length, 2, "same virtual page in two address spaces is kept separate");
@@ -172,7 +190,7 @@ const assert = require("node:assert/strict");
     let x87Enabled = false, x87Counts = new Map(), precision = 80, rounding = 0;
     cpu.wm.exports.performance_recording_x87_enable = value => {
         x87Enabled = !!value;
-        if(value) x87Counts = new Map();
+        if (value) x87Counts = new Map();
     };
     cpu.wm.exports.performance_recording_x87_get = (...key) => x87Counts.get(key.join(":")) || 0;
     cpu.wm.exports.performance_recording_x87_state = index => index ? rounding : precision;
@@ -248,5 +266,5 @@ const assert = require("node:assert/strict");
     assert.deepEqual(persistent.samples.at(-1).x87.jit_cache, persistent.x87.jit_cache);
     assert.equal(comparisons.x87.jit_cache.persistent_hits, undefined);
 
-    console.log("performance_recorder_test: recording lifecycle, legacy Wasm and x87 reports passed");
+    console.log("performance_recorder_test: recording lifecycle, older Wasm cores and x87 reports passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

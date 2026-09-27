@@ -85,8 +85,6 @@ pub unsafe fn test_no() -> bool { return !test_o(); }
 pub unsafe fn test_nb() -> bool { return !test_b(); }
 pub unsafe fn test_nz() -> bool { return !test_z(); }
 pub unsafe fn test_ns() -> bool { return !test_s(); }
-#[no_mangle]
-pub unsafe fn test_np() -> bool { return !test_p(); }
 pub unsafe fn test_nbe() -> bool { return !test_be(); }
 pub unsafe fn test_nl() -> bool { return !test_l(); }
 pub unsafe fn test_nle() -> bool { return !test_le(); }
@@ -366,10 +364,12 @@ pub unsafe fn setcc_mem(condition: bool, addr: i32) {
     return_on_pagefault!(safe_write8(addr, condition as i32));
 }
 
-pub unsafe fn fxsave(addr: i32) {
+pub unsafe fn fxsave(addr: i32) { fxsave_checked(addr); }
+
+pub unsafe fn fxsave_checked(addr: i32) -> bool {
     crate::cpu::fpu::fpu_sync_all();
     dbg_assert!(addr & 0xF == 0, "TODO: #gp");
-    return_on_pagefault!(writable_or_pagefault(addr, 288));
+    return_on_pagefault!(writable_or_pagefault(addr, 288), false);
 
     safe_write16(addr + 0, (*fpu_control_word).into()).unwrap();
     safe_write16(addr + 2, fpu_load_status_word().into()).unwrap();
@@ -394,17 +394,21 @@ pub unsafe fn fxsave(addr: i32) {
     for i in 0..8 {
         safe_write128(addr + 160 + (i << 4), *reg_xmm.offset(i as isize)).unwrap();
     }
+
+    true
 }
-pub unsafe fn fxrstor(addr: i32) {
+pub unsafe fn fxrstor(addr: i32) { fxrstor_checked(addr); }
+
+pub unsafe fn fxrstor_checked(addr: i32) -> bool {
     dbg_assert!(addr & 0xF == 0, "TODO: #gp");
-    return_on_pagefault!(readable_or_pagefault(addr, 288));
+    return_on_pagefault!(readable_or_pagefault(addr, 288), false);
 
     let new_mxcsr = safe_read32s(addr + 24).unwrap();
 
     if 0 != new_mxcsr & !MXCSR_MASK {
         dbg_log!("#gp Invalid mxcsr bits");
         trigger_gp(0);
-        return;
+        return false;
     }
 
     set_control_word(safe_read16(addr + 0).unwrap() as u16);
@@ -426,6 +430,8 @@ pub unsafe fn fxrstor(addr: i32) {
     for i in 0..8 {
         *reg_xmm.offset(i as isize) = safe_read128s(addr + 160 + (i << 4)).unwrap();
     }
+
+    true
 }
 
 pub unsafe fn xchg8(data: i32, r8: i32) -> i32 {

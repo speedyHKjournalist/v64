@@ -100,7 +100,7 @@ pub fn get_pic_addr_master() -> u32 { &raw mut get_pic().master as u32 }
 pub fn get_pic_addr_slave() -> u32 { &raw mut get_pic().slave as u32 }
 
 impl Pic0 {
-    fn get_irq(&mut self) -> Option<u8> {
+    fn get_irq(&self) -> Option<u8> {
         let enabled_irr = self.irr & self.irq_mask;
 
         if enabled_irr == 0 {
@@ -291,6 +291,12 @@ impl Pic {
 }
 
 // called by the cpu
+/// Read-only counterpart of acknowledgement. A cascade request also requires
+/// the cold path even if the slave is empty: acknowledgement mutates the master.
+pub fn has_pending_irq() -> bool {
+    let pic = get_pic();
+    pic.master.get_irq().is_some()
+}
 pub fn pic_acknowledge_irq() -> Option<u8> {
     let mut pic = get_pic();
     let irq = match pic.master.get_irq() {

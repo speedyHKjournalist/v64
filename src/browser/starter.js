@@ -1,3 +1,4 @@
+import { wasm_fallback_path } from "./wasm_paths.js";
 import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
 import { v86 } from "../main.js";
 import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
@@ -106,11 +107,8 @@ export function V86(options)
             dbg_trace(LOG_CPU);
         },
 
-        "codegen_finalize": (wasm_table_index, start, state_flags, ptr, len) => {
-            cpu.codegen_finalize(wasm_table_index, start, state_flags, ptr, len);
-        },
+        "ir_codegen_finalize": (id, slot, ptr, len) => { cpu.ir_auto_publish(id, slot, ptr, len); },
         "jit_clear_func": (wasm_table_index) => cpu.jit_clear_func(wasm_table_index),
-        "jit_clear_all_funcs": () => cpu.jit_clear_all_funcs(),
 
         "__indirect_function_table": wasm_table,
     };
@@ -130,7 +128,7 @@ export function V86(options)
                 if(options.wasm_path)
                 {
                     v86_bin = options.wasm_path;
-                    v86_bin_fallback = v86_bin.replace("v86.wasm", "v86-fallback.wasm");
+                    v86_bin_fallback = wasm_fallback_path(v86_bin);
                 }
                 else if(typeof window === "undefined" && typeof __dirname === "string")
                 {
@@ -142,6 +140,8 @@ export function V86(options)
                     v86_bin = "build/" + v86_bin;
                     v86_bin_fallback = "build/" + v86_bin_fallback;
                 }
+
+                v86_bin_fallback = options["wasm_fallback_path"] || v86_bin_fallback;
 
                 load_file(v86_bin, {
                     done: async bytes =>
@@ -180,7 +180,7 @@ export function V86(options)
         };
     }
 
-    wasm_fn({ "env": wasm_shared_funcs })
+    Promise.resolve().then(() => wasm_fn({ "env": wasm_shared_funcs }))
         .then((exports) => {
             if(this.destroyed) return;
             wasm_memory = exports.memory;
@@ -189,7 +189,9 @@ export function V86(options)
             const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
             cpu = emulator.cpu;
 
-            this.continue_init(emulator, options);
+            return this.continue_init(emulator, options);
+        }).catch(error => {
+            if(!this.destroyed) this.emulator_bus.send("emulator-error", error);
         });
 
     this.zstd_worker = null;
@@ -236,6 +238,15 @@ V86.prototype.continue_init = async function(emulator, options)
 
     settings.acpi = options.acpi;
     settings.disable_jit = options.disable_jit;
+    settings["jit_backend"] = options["jit_backend"];
+    settings["ir_region_budget"] = options["ir_region_budget"];
+    settings["ir_stats"] = options["ir_stats"];
+    settings["ir_verify"] = options["ir_verify"];
+    settings["ir_dump"] = options["ir_dump"];
+    settings["ir_sync_publication"] = options["ir_sync_publication"];
+    settings["ir_opt_level"] = options["ir_opt_level"];
+    settings["ir_passes_disabled"] = options["ir_passes_disabled"];
+    settings["ir_tier0"] = options["ir_tier0"];
     settings["x87_fast_math"] = options["x87_fast_math"];
     settings["x87_jit_cache"] = options["x87_jit_cache"];
     settings.load_devices = true;
@@ -568,12 +579,17 @@ V86.prototype.continue_init = async function(emulator, options)
 
     var starter = this;
     var total = files_to_load.length;
+    let resolve_initialized, reject_initialized;
+    const initialized = new Promise((resolve, reject) => {
+        resolve_initialized = resolve;
+        reject_initialized = reject;
+    });
 
     var cont = function(index)
     {
         if(index === total)
         {
-            setTimeout(done.bind(this), 0);
+            setTimeout(() => done.call(this).then(resolve_initialized, reject_initialized), 0);
             return;
         }
 
@@ -631,6 +647,7 @@ V86.prototype.continue_init = async function(emulator, options)
         }
     }.bind(this);
     cont(0);
+    return initialized;
 
     async function done()
     {
@@ -771,8 +788,7 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                         "io_port_write8", "io_port_write16", "io_port_write32",
                         "mmap_read8", "mmap_read32",
                         "mmap_write8", "mmap_write16", "mmap_write32", "mmap_write64", "mmap_write128",
-                        "codegen_finalize",
-                        "jit_clear_func", "jit_clear_all_funcs",
+                        "ir_codegen_finalize", "jit_clear_func",
                     ].map(f => [f, () => console.error("zstd worker unexpectedly called " + f)]));
 
                     env["__indirect_function_table"] = new WebAssembly.Table({ element: "anyfunc", initial: 1024 });
@@ -1715,6 +1731,33 @@ V86.prototype.get_instruction_stats = function()
     if(this.worker_controller) return this.worker_controller.rpc("get_instruction_stats");
     return print_stats.stats_to_string(this.v86.cpu);
 };
+
+/** Opt-in diagnostics; 0 disables, otherwise a power-of-two sampling period. Clears compiled caches. */
+V86.prototype.configure_ir_diagnostics = function(period)
+{
+    if(this.worker_controller) return this.worker_controller.rpc("configure_ir_diagnostics", [period]);
+    return this.v86.cpu.configure_ir_diagnostics(period);
+};
+// eslint-disable-next-line no-self-assign -- Keep the public name through Closure compilation.
+V86.prototype["configure_ir_diagnostics"] = V86.prototype.configure_ir_diagnostics;
+
+/** Return the last 16 compiler dumps as independent copies; optionally clear the ring. */
+V86.prototype.get_ir_dumps = function(clear = false)
+{
+    if(this.worker_controller) return this.worker_controller.rpc("get_ir_dumps", [!!clear]);
+    return this.v86.cpu.get_ir_dumps(!!clear);
+};
+// eslint-disable-next-line no-self-assign -- Keep the public name through Closure compilation.
+V86.prototype["get_ir_dumps"] = V86.prototype.get_ir_dumps;
+
+/** Returns a copied runtime snapshot; in CPU Worker mode returns a Promise. */
+V86.prototype.get_jit_info = function()
+{
+    if(this.worker_controller) return this.worker_controller.rpc("get_jit_info");
+    return this.v86.cpu.get_jit_info();
+};
+// eslint-disable-next-line no-self-assign -- Keep the public name through Closure compilation.
+V86.prototype["get_jit_info"] = V86.prototype.get_jit_info;
 
 /**
  * @ignore

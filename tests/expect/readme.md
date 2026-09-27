@@ -2,9 +2,11 @@ Expect tests
 ------------
 
 These so-called "expect tests" test the code generation, i.e. the translation
-of x86 assembly to Web Assembly. Use the following workflow:
+of x86 assembly to Web Assembly by the IR compiler: each program is compiled as
+one optimized Tier-2 region (`ir_compile_live`) and the disassembled module is
+compared with the .wast file. Use the following workflow:
 
-1. Hack on the code generator
+1. Hack on the IR compiler
 2. Run make `expect-tests`
 3. For each failing test:
     - Manually verify that the generated code changes are as expected by the diff

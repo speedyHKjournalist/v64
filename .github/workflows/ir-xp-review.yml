@@ -1,0 +1,100 @@
+name: IR XP paired review
+
+on:
+  workflow_dispatch:
+    inputs:
+      disk_url:
+        description: 'Authorized public HTTPS URL of a zstd-compressed XP disk; do not include private credentials'
+        required: true
+        type: string
+      disk_sha256:
+        description: 'SHA-256 of the uncompressed disk'
+        required: true
+        type: string
+      disk_size:
+        description: 'Exact uncompressed disk size in bytes'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-xp-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paired:
+    if: github.repository == 'speedyHKjournalist/v86'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DISK_URL: ${{ inputs.disk_url }}
+      DISK_SHA256: ${{ inputs.disk_sha256 }}
+      DISK_SIZE: ${{ inputs.disk_size }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Validate immutable image inputs
+        run: |
+          [[ "$DISK_URL" == https://* ]]
+          [[ "$DISK_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]
+          [[ "$DISK_SIZE" =~ ^[0-9]{1,11}$ ]]
+          test "$DISK_SIZE" -gt 0
+          test "$DISK_SIZE" -le 8589934592
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld zstd
+          mkdir -p build/xp-review
+      - name: Build both fixed inputs
+        run: |
+          set -o pipefail
+          git worktree add --detach /tmp/v86-ir-baseline 3da2deb731143203430f86c69f1c57ed550d71f5
+          make -C /tmp/v86-ir-baseline build/v86-ir-runtime.wasm 2>&1 | tee build/xp-review/baseline-build.log
+          make build/v86-ir-runtime.wasm build/libv86.mjs 2>&1 | tee build/xp-review/current-build.log
+          {
+            git rev-parse HEAD
+            node --version
+            rustc -Vv
+            uname -a
+            lscpu
+            sha256sum build/v86-ir-runtime.wasm /tmp/v86-ir-baseline/build/v86-ir-runtime.wasm build/libv86.mjs bios/seabios.bin bios/vgabios.bin
+          } > build/xp-review/environment.txt
+      - name: Fetch verified disk into ephemeral runner only
+        run: |
+          set -euo pipefail
+          # Guest disk contents are not uploaded. Use public URLs: workflow inputs may appear in Actions logs.
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 20 --max-time 360 --max-filesize 8589934592 "$DISK_URL" -o /tmp/xp-system.img.zst
+          zstd -d /tmp/xp-system.img.zst -o /tmp/xp-system.img
+          test "$(stat -c%s /tmp/xp-system.img)" = "$DISK_SIZE"
+          printf '%s  /tmp/xp-system.img\n' "$DISK_SHA256" | sha256sum -c -
+          { printf 'disk_size=%s\n' "$DISK_SIZE"; sha256sum /tmp/xp-system.img /tmp/xp-system.img.zst; } > build/xp-review/disk-manifest.txt
+      - name: Three sequential paired cold boots
+        env:
+          IR_COMPARE_RUNS: '3'
+          IR_BOOT_MS: '180000'
+          IR_BASELINE_WASM: /tmp/v86-ir-baseline/build/v86-ir-runtime.wasm
+        run: |
+          set -o pipefail
+          CPU=$(node -e 'const fs=require("fs");console.log(fs.readFileSync("/proc/self/status","utf8").match(/Cpus_allowed_list:\s*(\d+)/)[1])')
+          taskset -c "$CPU" node tests/ir/performance/xp_compare.mjs /tmp/xp-system.img build/xp-review/paired 2>&1 | tee build/xp-review/paired.log
+      - name: Preserve measurements only
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-xp-review-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: build/xp-review/
+      - name: Remove ephemeral guest images
+        if: always()
+        run: rm -f /tmp/xp-system.img /tmp/xp-system.img.zst

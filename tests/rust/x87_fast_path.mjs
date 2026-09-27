@@ -66,20 +66,20 @@ assert.deepEqual(jit, interpreted, "interpreter and actual JIT must match arithm
 if(process.argv[2]) {
     assert.deepEqual(jit, await run(process.argv[2], false), "before/after Wasm results must match");
 }
-const fastInterpreted = await run(candidate, true, true);
-const fastJit = await run(candidate, false, true);
-assert.deepEqual(fastJit, fastInterpreted, "fast f64 interpreter/JIT results and state restore agree");
-assert.notDeepEqual(fastJit, jit, "extended precision/rounding cases expose the intentional semantic difference");
+const fast_interpreted = await run(candidate, true, true);
+const fast_jit = await run(candidate, false, true);
+assert.deepEqual(fast_jit, fast_interpreted, "fast f64 interpreter/JIT results and state restore agree");
+assert.notDeepEqual(fast_jit, jit, "extended precision/rounding cases expose the intentional semantic difference");
 // Per control: nine pairs with four arithmetic results then two comparisons,
 // followed by load/store conversion tests. These remain byte-for-byte intact.
 const stride = 9 * 6 * 12 + 16 * 18 + 12 * 6;
 for(let mode = 0; mode < 12; mode++) {
     for(let pair = 0; pair < 9; pair++) {
         const offset = mode * stride + pair * 72 + 48;
-        assert.deepEqual(fastJit.slice(offset, offset + 24), jit.slice(offset, offset + 24),
+        assert.deepEqual(fast_jit.slice(offset, offset + 24), jit.slice(offset, offset + 24),
             "comparison semantics are unchanged");
     }
-    assert.deepEqual(fastJit.slice(mode * stride + 648, (mode + 1) * stride),
+    assert.deepEqual(fast_jit.slice(mode * stride + 648, (mode + 1) * stride),
         jit.slice(mode * stride + 648, (mode + 1) * stride), "load/store conversion semantics are unchanged");
 }
 console.log("PASS: compatible and fast-f64 x87, all 12 controls, interpreter/JIT and save/restore; comparisons and conversions unchanged" +

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
+import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
+// packed_simd.mjs [baseline.wasm] [candidate.wasm]: machine 0 is the
+// interpreter (or, with arguments, the baseline core); the candidate core runs
+// every case once per IR arm (Tier-0 and regions) and must match it.
 const candidate = process.argv[3] || "build/v86.wasm";
 const baseline = process.argv[2] || candidate;
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
@@ -8,14 +12,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
 const machines = [], DATA = 0x200000, OUT = 0x210000, CODE = 0x100000;
 const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
-const instantiate = WebAssembly.instantiate;
-let capture = false, modules = [];
-WebAssembly.instantiate = function(bytes, imports) {
-    if(capture && imports?.e && !(bytes instanceof WebAssembly.Module)) {
-        modules.push(WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map(x => x.name));
-    }
-    return instantiate.call(WebAssembly, bytes, imports);
-};
+const labels = [];
 const ops = [0xE4,0xE5,0xF4,0xF6,0xFC,0xFD,0xFE,0xD4,0xF8,0xF9,0xFA,0xFB,0xEC,0xED,0xDC,0xDD,
     0xE8,0xE9,0xD8,0xD9,0x64,0x65,0x66,0x74,0x75,0x76,0xDA,0xDE,0xEA,0xEE,
     0xE0,0xE3,0xD5,0xF5,0xDB,0xDF,0xEB,0xEF,0x60,0x61,0x62,0x68,0x69,0x6A,
@@ -66,11 +63,13 @@ for(const [prefix, op] of [[[],0x16],[[0xF2],0x12],[[0xF3],0x12],[[0xF3],0x16]])
 for(const prefix of [[0xF2], [0xF3]]) instructions.push({ mmx: prefix[0] === 0xF2, op: 0xD6,
     prefix, source_mmx: prefix[0] === 0xF3, register_only: true });
 try {
-    for(const [i, wasm_path] of [baseline, candidate].entries()) {
+    for(const [label, wasm_path, options] of [
+        [process.argv[2] ? baseline : "interpreter", baseline, process.argv[2] ? {} : { disable_jit: true }],
+        ...COMPILED_ARMS.map(arm => [arm.label, candidate, arm.options])]) {
         const vm = new V86({ wasm_path, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
-            disable_jit: i === 0 && !process.argv[2], disable_keyboard: true,
+            ...options, disable_keyboard: true,
             disable_mouse: true, disable_speaker: true, net_device: { type: "none" }, autostart: false });
-        machines.push(vm);
+        machines.push(vm); labels.push(label);
         await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
         vm.run();
         const end = performance.now() + 10000;
@@ -128,34 +127,33 @@ try {
         const results = [];
         for(const [i, vm] of machines.entries()) {
             const cpu = vm.v86.cpu, e = cpu.wm.exports;
+            // Programs reuse CODE: start each from an empty compiler state
+            // (Tier-0 needs 4x the heat to recompile a page after each rewrite).
+            cpu.jit_clear_cache();
             vm.write_memory(data, DATA); vm.write_memory(new Uint8Array(total * 32), OUT);
             vm.write_memory(Uint8Array.from(program), CODE); vm.write_memory(new Uint8Array(4), 0x600);
-            e.performance_recording_enable(1); cpu.reg32[4] = 0x8000;
+            cpu.reg32[4] = 0x8000;
             cpu.instruction_pointer[0] = CODE; cpu.in_hlt[0] = 0;
-            capture = i === 1; modules = [];
+            const start = compiled_activations(e);
             vm.run();
             const end = performance.now() + 10000;
-            while(word(vm, 0x600) !== 0xCAFE || (i === 1 || process.argv[2]) && e.performance_recording_get(1) === 0) {
-                assert(performance.now() < end, `SIMD timeout ${mmx}/${op.toString(16)}`); await sleep(1);
+            while(word(vm, 0x600) !== 0xCAFE || (i >= 1 || process.argv[2]) && compiled_activations(e) === start) {
+                assert(performance.now() < end, `${labels[i]}: SIMD timeout ${mmx}/${op.toString(16)}`); await sleep(1);
             }
-            // Allow every page of the program to reach/publish its JIT entry.
-            await sleep(20); await vm.stop(); capture = false; e.performance_recording_enable(0);
+            // Allow every page of the program to reach/publish its compiled code.
+            await sleep(20); await vm.stop();
             results.push(Uint8Array.from(vm.read_memory(OUT, total * 32)));
-            if(i === 1 && !candidate.includes("fallback")) {
-                assert(modules.length > 0, "captured actual generated modules");
-                const helper = `instr_${prefix.map(x => x.toString(16).toUpperCase()).join("")}0F${op.toString(16).toUpperCase()}${group ? "_" + group + "_reg" : ""}`;
-                if(!floating || op === 0xC2 || changes_flags) assert(!modules.flat().includes(helper), `optimized path still imports ${helper}`);
-            }
             for(let n = 0; !changes_flags && n < total; n++) assert.equal(results[i][n * 32 + 16] & 1, 1, "preserves CF");
         }
-        for(let n = 0; n < total; n++) assert.deepEqual(results[1].slice(n*32,n*32+width), results[0].slice(n*32,n*32+width),
-            `packed mismatch prefix=${prefix} mmx=${mmx} op=${op.toString(16)} case=${n}`);
-        if(changes_flags) for(let n = 0; n < total; n++) assert.deepEqual(
-            results[1].slice(n*32+16,n*32+20), results[0].slice(n*32+16,n*32+20), "COMI flags");
+        for(let i = 1; i < machines.length; i++) {
+            for(let n = 0; n < total; n++) assert.deepEqual(results[i].slice(n*32,n*32+width), results[0].slice(n*32,n*32+width),
+                `${labels[i]}: packed mismatch prefix=${prefix} mmx=${mmx} op=${op.toString(16)} case=${n}`);
+            if(changes_flags) for(let n = 0; n < total; n++) assert.deepEqual(
+                results[i].slice(n*32+16,n*32+20), results[0].slice(n*32+16,n*32+20), `${labels[i]}: COMI flags`);
+        }
         cases += total;
     }
-    console.log(`PASS: ${cases} MMX/SSE integer, floating, conversion and transfer cases; aliases, boundaries, memory and generated helper checks`);
+    console.log(`PASS: ${cases} MMX/SSE integer, floating, conversion and transfer cases; aliases, boundaries and memory, on Tier-0 and regions`);
 } finally {
-    WebAssembly.instantiate = instantiate;
     for(const vm of machines) await vm.destroy();
 }

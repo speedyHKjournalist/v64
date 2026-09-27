@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
-const baseline = process.argv[2] || "build/cpu-opt-baseline.wasm";
+// cpu_optimizations_benchmark.mjs [baseline.wasm candidate.wasm]: two cores in
+// their default IR configuration; without paths, the region tiers alone
+// against the default (Tier-0 on) on one core.
+const baseline = process.argv[2];
 const candidate = process.argv[3] || "build/v86.wasm";
+const arms = baseline ? [{ label: baseline, wasm: baseline, options: {} }, { label: candidate, wasm: candidate, options: {} }] :
+    [{ label: "regions", wasm: candidate, options: { ir_tier0: false } }, { label: "tier0", wasm: candidate, options: {} }];
 const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
@@ -10,8 +15,8 @@ const median = a => a.toSorted((x, y) => x - y)[a.length >> 1];
 const machines = [];
 const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
 try {
-    for(const wasm_path of [baseline, candidate]) {
-        const vm = new V86({ wasm_path, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
+    for(const { wasm, options } of arms) {
+        const vm = new V86({ wasm_path: wasm, ...options, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });
         machines.push(vm);
@@ -20,11 +25,6 @@ try {
         const end = performance.now() + 10000;
         while(word(vm, 0x500) !== 0xCAFE) { assert(performance.now() < end); await sleep(1); }
         await vm.stop();
-        if(machines.length === 1 && process.env.BASELINE_SIMD_CACHE !== undefined)
-            vm.v86.cpu.wm.exports.set_jit_config(6,Number(process.env.BASELINE_SIMD_CACHE));
-        if(machines.length === 2) for(const [index, name] of [[1, "JIT_PAGES"], [3, "JIT_BLOCKS"], [4, "JIT_THRESHOLD"], [5, "JIT_LINKS"], [6, "JIT_SIMD_CACHE"], [8, "JIT_TARGET_CACHE"], [9, "JIT_RMW_CACHE"], [10, "JIT_EXTENDED_FLAGS"], [11, "JIT_STACK_CACHE"], [12, "JIT_LINEAR_REGIONS"]]) {
-            if(process.env[name] !== undefined) vm.v86.cpu.wm.exports.set_jit_config(index, Number(process.env[name]));
-        }
     }
     const address = 0x100000;
     const kinds = ["stack-burst", "rmw-straight", "flags-mixed-read", "flags-linear-region", "sse-scalar-double", "bulk-add-array", "bulk-xor-array", "helper-mul16", "helper-xadd16", "sse-float-nan", "ram-relative-read-lea", "ram-relative-read-alu", "copy-byte-loop", "copy-dword-loop", "ram-relative-writes", "ram-write-pages", "fill-word-pattern", "fill-dword-pattern", "fill-dword-zero", "ram-relative-reads", "ram-relative-pages", "ram-pointer-chase", "flags-mov-setcc", "flags-lea-cmov", "flags-alias-setcc", "flags-mov-jcc", "sse3-duplicate-chain", "sse3-addsub", "sse-register-logic", "integer-flags", "indirect-call-ret", "short-cross-page",
@@ -188,10 +188,8 @@ try {
             if(round >= 2) times[index].push(iterations / elapsed);
         }
         const old_rate = median(times[0]), new_rate = median(times[1]);
-        console.log(JSON.stringify({ kind, baseline, candidate, baseline_iterations_per_ms: old_rate,
-            candidate_iterations_per_ms: new_rate, speedup: new_rate / old_rate, rounds: 7,
-            baseline_samples: times[0], candidate_samples: times[1],
-            baseline_simd_cache: process.env.BASELINE_SIMD_CACHE,
-            candidate_simd_cache: process.env.JIT_SIMD_CACHE }));
+        console.log(JSON.stringify({ kind, reference: arms[0].label, candidate: arms[1].label,
+            reference_iterations_per_ms: old_rate, candidate_iterations_per_ms: new_rate,
+            speedup: new_rate / old_rate, rounds: 7, reference_samples: times[0], candidate_samples: times[1] }));
     }
 } finally { for(const vm of machines) await vm.destroy(); }

@@ -38,6 +38,9 @@ const READY_MSG = "READY";
 const BSS = 0x100000;
 const STACK_TOP = 0x102000;
 
+// --force-jit: IR compiles at the first opportunity (Tier-0 pages after one
+// instruction, regions after one visit), so code that runs more than once
+// executes compiled.
 const FORCE_JIT = process.argv.includes("--force-jit");
 
 // alternative representation for infinity for json
@@ -265,36 +268,7 @@ else {
             process.exit(2);
         }, SINGLE_TEST_TIMEOUT);
 
-        if(FORCE_JIT)
-        {
-            let eip = cpu.instruction_pointer[0];
-
-            cpu.test_hook_did_finalize_wasm = function()
-            {
-                eip += 4096;
-                const last_word = cpu.mem32s[eip - 4 >> 2];
-
-                if(last_word === 0 || last_word === undefined)
-                {
-                    cpu.test_hook_did_finalize_wasm = null;
-
-                    // don't synchronously call into the emulator from this callback
-                    setTimeout(() => {
-                        emulator.run();
-                    }, 0);
-                }
-                else
-                {
-                    cpu.jit_force_generate(eip);
-                }
-            };
-
-            cpu.jit_force_generate(eip);
-        }
-        else
-        {
-            emulator.run();
-        }
+        emulator.run();
     }
 
     let loaded = false;
@@ -308,12 +282,14 @@ else {
         autostart: false,
         memory_size: 2 * 1024 * 1024,
         disable_jit: +process.env.DISABLE_JIT,
+        ...FORCE_JIT ? { ir_region_budget: { hot_threshold: 1, promotion_threshold: 1 } } : {},
         log_level: 0,
     });
 
     emulator.add_listener("emulator-loaded", function()
         {
             loaded = true;
+            if(FORCE_JIT) assert(emulator.v86.cpu.wm.exports.ir_auto_set_page_threshold(1));
 
             if(first_test)
             {

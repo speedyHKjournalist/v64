@@ -12,7 +12,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 
-const libwabt = wabt();
+const libwabt = await wabt();
 
 const TEST_NAME = process.env.TEST_NAME;
 
@@ -82,61 +82,71 @@ function run_test({ name, executable_file, expect_file, actual_file, actual_wasm
 
     const is_32 = asm.includes("BITS 32\n");
 
-    emulator.add_listener("emulator-loaded", function()
+    emulator.add_listener("emulator-loaded", async function()
         {
             const cpu = emulator.v86.cpu;
+            const exports = cpu.wm.exports;
 
-            const hook_not_called_timeout = setTimeout(() => {
-                throw new Error("Hook for code generation not called");
-            }, 1000);
+            const START_ADDRESS = 0x1000;
 
-            cpu.test_hook_did_generate_wasm = function(wasm)
+            cpu.is_32[0] = +is_32;
+            cpu.stack_size_32[0] = +is_32;
+            cpu.segment_offsets[1] = 0;
+            cpu.instruction_pointer[0] = START_ADDRESS;
+            cpu.mem8.set(executable, START_ADDRESS);
+            cpu.update_state_flags();
+
+            // One optimized Tier-2 region with structured control flow over the
+            // program (a region covers at most 1920 bytes), with the automatic
+            // policy's default budgets.
+            const id = exports["ir_compile_live"](Math.min(executable.length, 1920), 2, 1, 1, 256, 64);
+            if(!id)
             {
-                const wast = normalise_wast(disassemble_wasm(wasm));
+                console.error(`${name}.asm: IR compilation failed with error ${exports["ir_live_error"]()}`);
+                process.exit(1);
+            }
+            const wasm = new Uint8Array(exports["memory"].buffer,
+                exports["ir_live_info"](id, 0) >>> 0, exports["ir_live_info"](id, 1) >>> 0).slice();
+            exports["ir_live_release"](id);
+            await emulator.destroy();
 
-                clearTimeout(hook_not_called_timeout);
-                fs.writeFileSync(actual_file, wast);
-                fs.writeFileSync(actual_wasm, wasm);
+            const wast = normalise_wast(disassemble_wasm(wasm));
+            fs.writeFileSync(actual_file, wast);
+            fs.writeFileSync(actual_wasm, wasm);
 
-                cpu.test_hook_did_generate_wasm = function()
+            if(!fs.existsSync(expect_file))
+            {
+                // enhanced workflow: If file doesn't exist yet print full diff
+                var expect_file_for_diff = "/dev/null";
+            }
+            else
+            {
+                expect_file_for_diff = expect_file;
+            }
+
+            const result = spawnSync("git",
+                [].concat(
+                    "diff",
+                    GIT_DIFF_FLAGS,
+                    expect_file_for_diff,
+                    actual_file
+                ),
+                { encoding: "utf8" });
+
+            if(result.status)
+            {
+                console.log(result.stdout);
+                console.log(result.stderr);
+
+                if(process.argv.includes("--accept-all"))
                 {
-                    cpu.test_hook_did_generate_wasm = function() {};
-                    throw new Error("Hook for wasm generation called multiple times");
-                };
-
-                if(!fs.existsSync(expect_file))
-                {
-                    // enhanced workflow: If file doesn't exist yet print full diff
-                    var expect_file_for_diff = "/dev/null";
+                    console.log(`Running: cp ${actual_file} ${expect_file}`);
+                    fs.copyFileSync(actual_file, expect_file);
                 }
                 else
                 {
-                    expect_file_for_diff = expect_file;
-                }
-
-                const result = spawnSync("git",
-                    [].concat(
-                        "diff",
-                        GIT_DIFF_FLAGS,
-                        expect_file_for_diff,
-                        actual_file
-                    ),
-                    { encoding: "utf8" });
-
-                if(result.status)
-                {
-                    console.log(result.stdout);
-                    console.log(result.stderr);
-
-                    if(process.argv.includes("--accept-all"))
-                    {
-                        console.log(`Running: cp ${actual_file} ${expect_file}`);
-                        fs.copyFileSync(actual_file, expect_file);
-                    }
-                    else
-                    {
-                        const failure_message = `${name}.asm failed:
-The code generator produced different code. If you believe this change is intentional,
+                    const failure_message = `${name}.asm failed:
+The IR compiler produced different code. If you believe this change is intentional,
 verify the diff above and run the following command to accept the change:
 
     cp ${actual_file} ${expect_file}
@@ -146,32 +156,19 @@ When done, re-run this test to confirm that all expect-tests pass.
 Hint: Use tests/expect/run.js --accept-all to accept all changes (use git diff to verify).
 `;
 
-                        console.log(failure_message);
+                    console.log(failure_message);
 
-                        process.exit(1);
-                    }
+                    process.exit(1);
                 }
-                else
-                {
-                    console.log("%s ok", name);
-                    assert(!result.stdout);
-                    assert(!result.stderr);
-                }
-
-                onfinished();
-            };
-
-            if(is_32)
+            }
+            else
             {
-                cpu.is_32[0] = true;
-                cpu.stack_size_32[0] = true;
+                console.log("%s ok", name);
+                assert(!result.stdout);
+                assert(!result.stderr);
             }
 
-            const START_ADDRESS = 0x1000;
-
-            cpu.mem8.set(executable, START_ADDRESS);
-            cpu.update_state_flags();
-            cpu.jit_force_generate(START_ADDRESS);
+            onfinished();
         });
 }
 
@@ -183,7 +180,8 @@ function disassemble_wasm(wasm)
 
     try
     {
-        var module = libwabt.readWasm(wasm, { readDebugNames: false });
+        // IR modules use SIMD (SSE/MMX lanes) and multi-value blocks.
+        var module = libwabt.readWasm(wasm, { readDebugNames: false, simd: true, multi_value: true });
         module.generateNames();
         module.applyNames();
         return module.toText({ foldExprs: true, inlineExport: true });

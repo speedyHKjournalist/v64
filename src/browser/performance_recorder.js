@@ -41,6 +41,7 @@ export class PerformanceRecorder
         this.hotspots_dropped = 0;
         this.next_hotspot = 0;
         this.report = null;
+        this.jit_start = null;
         this.graphics = null;
         this.metadata["wasm_sha256"] = null;
         const source = emulator.wasm_source;
@@ -57,6 +58,8 @@ export class PerformanceRecorder
         if(this.active) throw new Error("Performance recording is already active");
         const cpu = this.emulator.v86.cpu;
         const exports = cpu.wm.exports;
+        this.jit_start = cpu.get_jit_info?.() || null;
+        this.metadata["jit_backend"] = this.jit_start?.["backend"] || "ir";
         this.active = true;
         this.started = this.now();
         this.cleanup = [];
@@ -79,7 +82,7 @@ export class PerformanceRecorder
             "main_loop_calls": 0, "main_loop_wall_ms": 0, "main_loop_max_ms": 0,
             "jit_requests": 0, "jit_finished": 0, "jit_wasm_bytes": 0,
             "jit_compile_publish_latency_ms": 0, "jit_compile_publish_max_ms": 0,
-            "jit_all_clear_calls": 0, "jit_single_clear_calls": 0,
+            "jit_single_clear_calls": 0,
         };
         const run = this.stats;
         const live = () => this.active && this.stats === run;
@@ -121,39 +124,31 @@ export class PerformanceRecorder
         cpu.main_loop = timed_loop;
         this.cleanup.push(() => { if(cpu.main_loop === timed_loop) cpu.main_loop = main_loop; });
 
-        const finalize = cpu.codegen_finalize;
-        const timed_finalize = (index, address, flags, ptr, bytes) => {
-            if(live())
-            {
-                run["jit_requests"]++;
-                run["jit_wasm_bytes"] += bytes;
-                this.pending_jit.set(index, { address, flags, bytes, start: this.now() });
-            }
-            return finalize.call(cpu, index, address, flags, ptr, bytes);
+        // IR modules are published through ir_publish_cached, which resolves
+        // to whether the module was installed. Each call has its own token, so
+        // a completion after stop/restart never reaches a later recording.
+        const publish = cpu.ir_publish_cached;
+        const timed_publish = (owner, id, slot, code, automatic) => {
+            if(!live()) return publish.call(cpu, owner, id, slot, code, automatic);
+            const token = {}, start = this.now(), bytes = code.length;
+            run["jit_requests"]++;
+            run["jit_wasm_bytes"] += bytes;
+            this.pending_jit.set(token, start);
+            return publish.call(cpu, owner, id, slot, code, automatic).then(success => {
+                if(this.pending_jit.delete(token) && success)
+                {
+                    const ms = this.now() - start;
+                    run["jit_finished"]++;
+                    run["jit_compile_publish_latency_ms"] += ms;
+                    run["jit_compile_publish_max_ms"] = Math.max(run["jit_compile_publish_max_ms"], ms);
+                    this.keep_slowest(this.slow_jit, { "start_ms": start - this.started,
+                        "duration_ms": ms, "slot": slot, "wasm_bytes": bytes });
+                }
+                return success;
+            });
         };
-        cpu.codegen_finalize = timed_finalize;
-        this.cleanup.push(() => { if(cpu.codegen_finalize === timed_finalize) cpu.codegen_finalize = finalize; });
-        const finished = cpu.codegen_finalize_finished;
-        const timed_finished = (index, address, flags) => {
-            const entry = live() && this.pending_jit.get(index);
-            if(entry && entry.address === address && entry.flags === flags)
-            {
-                const ms = this.now() - entry.start;
-                this.pending_jit.delete(index);
-                run["jit_finished"]++;
-                run["jit_compile_publish_latency_ms"] += ms;
-                run["jit_compile_publish_max_ms"] = Math.max(run["jit_compile_publish_max_ms"], ms);
-                this.keep_slowest(this.slow_jit, { "start_ms": entry.start - this.started,
-                    "duration_ms": ms, "physical_entry": address >>> 0, "wasm_bytes": entry.bytes });
-            }
-            return finished.call(cpu, index, address, flags);
-        };
-        cpu.codegen_finalize_finished = timed_finished;
-        this.cleanup.push(() => { if(cpu.codegen_finalize_finished === timed_finished) cpu.codegen_finalize_finished = finished; });
-        const clear_all = cpu.jit_clear_all_funcs;
-        const count_all = () => { if(live()) run["jit_all_clear_calls"]++; return clear_all.call(cpu); };
-        cpu.jit_clear_all_funcs = count_all;
-        this.cleanup.push(() => { if(cpu.jit_clear_all_funcs === count_all) cpu.jit_clear_all_funcs = clear_all; });
+        cpu.ir_publish_cached = timed_publish;
+        this.cleanup.push(() => { if(cpu.ir_publish_cached === timed_publish) cpu.ir_publish_cached = publish; });
         const clear_one = cpu.jit_clear_func;
         const count_one = index => { if(live()) run["jit_single_clear_calls"]++; return clear_one.call(cpu, index); };
         cpu.jit_clear_func = count_one;
@@ -284,11 +279,10 @@ export class PerformanceRecorder
     {
         if(!this.has_counters) return null;
         const get = this.emulator.v86.cpu.wm.exports["performance_recording_get"];
-        const result = { "interpreted_steps": get(0), "jit_steps": get(1), "capacity_flushes": get(2) };
+        // Counters 2..4 (legacy table capacity events) are no longer reported.
+        const result = { "interpreted_steps": get(0), "jit_steps": get(1) };
         if(this.counter_version >= 2)
         {
-            result["capacity_eviction_batches"] = get(3);
-            result["capacity_evicted_modules"] = get(4);
             result["sync_codegen_ms"] = get(5);
             result["sync_codegen_max_ms"] = get(6);
             result["sync_codegen_calls"] = get(7);
@@ -461,6 +455,7 @@ export class PerformanceRecorder
         this.cleanup = [];
         this.report = { "format": "v86-performance", "version": 6, "reason": reason,
             "recorded_at": new Date().toISOString(), "metadata": { ...this.metadata },
+            "jit": { "start": this.jit_start, "end": this.emulator.v86.cpu.get_jit_info?.() || null },
             "duration_ms": this.now() - this.started, "sample_interval_ms": 500,
             "counter_version": this.counter_version,
             "execution_chunk_sample_probability": this.counter_version === 3 ? 1 / 256 : null,
@@ -488,8 +483,6 @@ export class PerformanceRecorder
                 "synchronous_completions": "Callback happened before get returned; not an exact cache-hit counter.",
                 "latency_histogram": "Counts for [0,1), [1,2), [2,5), [5,10), [10,25), [25,50), [50,100), [100,infinity) ms.",
                 "jit_compile_publish_latency_ms": "Wasm bytes ready to compilation publication; includes async compile/instantiate and scheduling, excludes x86 analysis/code generation.",
-                "jit_all_clear_calls": "All host table clears, regardless of cause. capacity_flushes counts legacy full flushes caused by exhaustion; version 2 instead reports capacity_eviction_batches and capacity_evicted_modules.",
-                "capacity_eviction_batches": "Version 2 replaces full capacity flushes with batches of at most 16 oldest published modules, retaining the fixed table bound. Explicit state resets still clear caches.",
                 "sync_codegen_ms": "Synchronous x86 analysis, Wasm byte generation and associated bookkeeping/eviction, before handing bytes to JS for asynchronous compilation. Included in main_loop_wall_ms.",
                 "main_loop_without_codegen_ms": "Main-loop wall time minus synchronous code generation. Still includes device callbacks and other emulator work; not pure guest execution time.",
                 "execution_batch_ms": "Full do_many_cycles_native wall time, including dispatch, interpreted/JIT execution, synchronous instruction helpers/devices and code generation. Nested within main_loop_wall_ms; not additive with sync_codegen_ms or sampled execution times.",

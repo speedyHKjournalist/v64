@@ -1,3 +1,4 @@
+import { wasm_fallback_path } from "./wasm_paths.js";
 // Dedicated-worker entry. Never transfer the WebAssembly.Memory buffer.
 import { V86 } from "./starter.js";
 import { PerformanceRecorder } from "./performance_recorder.js";
@@ -122,7 +123,7 @@ export function start_cpu_worker()
             // otherwise leave startup pending indefinitely after a 404.
             options.wasm_fn = async env => {
                 const primary = options.wasm_path;
-                const fallback = primary.replace("v86.wasm", "v86-fallback.wasm");
+                const fallback = options["wasm_fallback_path"] || wasm_fallback_path(primary);
                 let last_error;
                 for(const url of new Set([primary, fallback]))
                 {
@@ -235,6 +236,9 @@ export function start_cpu_worker()
         "read_file": async name => (await emulator.read_file(name))?.slice(),
         "audio-info": () => ({ ...audio_stats, "direct": !!audio_port, "sample_rate": audio_rate }),
         "get_instruction_stats": () => emulator.get_instruction_stats(),
+        "get_ir_dumps": clear => emulator.get_ir_dumps(clear),
+        "get_jit_info": () => emulator.get_jit_info(),
+        "configure_ir_diagnostics": period => emulator.configure_ir_diagnostics(period),
         "record-start": metadata => {
             if(recorder?.active) throw new Error("Already recording");
             for(const key of Object.keys(audio_stats)) audio_stats[key] = 0;
