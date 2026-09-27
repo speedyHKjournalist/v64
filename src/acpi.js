@@ -9,7 +9,6 @@
 // Register semantics: ACPI 6.6, section 4.8 (fixed hardware registers)
 // https://uefi.org/specs/ACPI/6.6/04_ACPI_Hardware_Specification.html
 
-import { v86 } from "./main.js";
 import { LOG_ACPI } from "../src/const.js";
 import { h } from "./lib.js";
 import { dbg_log } from "./log.js";
@@ -95,7 +94,7 @@ export function ACPI(cpu, bus)
      * same time from the main loop. Tests may replace it.
      * @type {function():number}
      */
-    this.clock = () => v86.microtick();
+    this.clock = () => this.cpu.clock.now();
 
     const acpi = {
         pci_id: ACPI_PM_PCI_ID,

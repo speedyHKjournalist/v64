@@ -1,4 +1,3 @@
-import { v86 } from "./main.js";
 import { LOG_RTC } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
@@ -69,8 +68,8 @@ export function RTC(cpu)
     this.cmos_data = new Uint8Array(128);
 
     // used for cmos entries
-    this.rtc_time = Date.now();
-    this.last_update = this.rtc_time;
+    this.rtc_time = cpu.clock.wall_time();
+    this.last_update = cpu.clock.now();
 
     // used for periodic interrupt
     this.next_interrupt = 0;
@@ -106,6 +105,7 @@ export function RTC(cpu)
 
 RTC.prototype.get_state = function()
 {
+    this.update_time(this.cpu.clock.now());
     var state = [];
 
     state[0] = this.cmos_index;
@@ -123,6 +123,7 @@ RTC.prototype.get_state = function()
     state[12] = this.update_interrupt;
     state[13] = this.update_interrupt_time;
     state[14] = this.cmos_diag_status;
+    state[15] = 1; // deadlines and last_update use MachineClock, not host UTC
 
     return state;
 };
@@ -144,30 +145,46 @@ RTC.prototype.set_state = function(state)
     this.update_interrupt = state[12] || false;
     this.update_interrupt_time = state[13] || 0;
     this.cmos_diag_status = state[14] || 0;
+    if(state[15] === undefined)
+    {
+        // Legacy snapshots used host UTC for all RTC deadlines. Preserve the
+        // saved calendar and remaining durations without charging offline time.
+        const offset = this.cpu.clock.now() - this.last_update;
+        this.last_update += offset;
+        this.next_interrupt += offset;
+        if(this.next_interrupt_alarm) this.next_interrupt_alarm += offset;
+        if(this.update_interrupt) this.update_interrupt_time += offset;
+    }
+};
+
+RTC.prototype.update_time = function(time)
+{
+    this.rtc_time += time - this.last_update;
+    this.last_update = time;
 };
 
 RTC.prototype.timer = function(time, legacy_mode)
 {
-    time = Date.now(); // XXX
-    this.rtc_time += time - this.last_update;
-    this.last_update = time;
+    this.update_time(time);
 
-    if(this.periodic_interrupt && this.next_interrupt < time)
+    if(this.periodic_interrupt && this.next_interrupt <= time)
     {
         this.cpu.device_raise_irq(8);
         this.cmos_c |= 1 << 6 | 1 << 7;
 
+        // Coalesce missed edges and move strictly beyond this service point.
+        // At an exact deadline, ceil(0) would otherwise leave HLT stuck here.
         this.next_interrupt += this.periodic_interrupt_time *
-                Math.ceil((time - this.next_interrupt) / this.periodic_interrupt_time);
+                (Math.floor((time - this.next_interrupt) / this.periodic_interrupt_time) + 1);
     }
-    else if(this.next_interrupt_alarm && this.next_interrupt_alarm < time)
+    if(this.next_interrupt_alarm && this.next_interrupt_alarm <= time)
     {
         this.cpu.device_raise_irq(8);
         this.cmos_c |= 1 << 5 | 1 << 7;
 
         this.next_interrupt_alarm = 0;
     }
-    else if(this.update_interrupt && this.update_interrupt_time < time)
+    if(this.update_interrupt && this.update_interrupt_time <= time)
     {
         this.cpu.device_raise_irq(8);
         this.cmos_c |= 1 << 4 | 1 << 7;
@@ -257,6 +274,7 @@ RTC.prototype.decode_time = function(t)
 // currently testing)
 RTC.prototype.cmos_port_read = function()
 {
+    this.update_time(this.cpu.clock.now());
     var index = this.cmos_index;
 
     //this.cmos_index = 0xD;
@@ -287,7 +305,7 @@ RTC.prototype.cmos_port_read = function()
             return this.encode_time(new Date(this.rtc_time).getUTCFullYear() % 100);
 
         case CMOS_STATUS_A:
-            if(v86.microtick() % 1000 >= 999)
+            if(this.rtc_time % 1000 >= 999)
             {
                 // Set update-in-progress for one millisecond every second (we
                 // may not have precision higher than that in browser
@@ -335,6 +353,8 @@ RTC.prototype.cmos_port_read = function()
 
 RTC.prototype.cmos_port_write = function(data_byte)
 {
+    const time = this.cpu.clock.now();
+    this.update_time(time);
     switch(this.cmos_index)
     {
         case 0xA:
@@ -352,12 +372,12 @@ RTC.prototype.cmos_port_write = function(data_byte)
             }
             if(this.cmos_b & 0x40)
             {
-                this.next_interrupt = Date.now();
+                this.next_interrupt = time + this.periodic_interrupt_time;
             }
 
             if(this.cmos_b & 0x20)
             {
-                const now = new Date();
+                const now = new Date(this.rtc_time);
 
                 const seconds = this.decode_time(this.cmos_data[CMOS_RTC_SECONDS_ALARM]);
                 const minutes = this.decode_time(this.cmos_data[CMOS_RTC_MINUTES_ALARM]);
@@ -373,13 +393,13 @@ RTC.prototype.cmos_port_write = function(data_byte)
                         " hh:mm:ss=" + hours + ":" + minutes + ":" + seconds +
                         " ms_from_now=" + ms_from_now, LOG_RTC);
 
-                this.next_interrupt_alarm = +alarm_date;
+                this.next_interrupt_alarm = time + ms_from_now;
             }
 
             if(this.cmos_b & 0x10)
             {
                 dbg_log("update interrupt", LOG_RTC);
-                this.update_interrupt_time = Date.now();
+                this.update_interrupt_time = time + 1000;
             }
 
             dbg_log("cmos b=" + h(this.cmos_b, 2), LOG_RTC);

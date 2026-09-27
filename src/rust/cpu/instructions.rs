@@ -2187,7 +2187,7 @@ pub unsafe fn instr_F4() {
     // due it will immediately call call_interrupt_vector and continue
     // execution without an unnecessary cycle through do_run
     if *flags & FLAG_INTERRUPT != 0 {
-        if crate::cpu::apic::core_count() == 1 {
+        if crate::cpu::apic::core_count() == 1 && !crate::cpu::execution::is_deterministic() {
             js::run_hardware_timers(*acpi_enabled, js::microtick());
         }
         handle_irqs();
@@ -2363,6 +2363,9 @@ pub unsafe fn instr_FB() {
     let was_enabled = *flags & FLAG_INTERRUPT != 0;
     if !instr_FB_without_fault() {
         trigger_gp(0);
+    }
+    else if crate::cpu::execution::is_deterministic() {
+        if !was_enabled { *interrupt_shadow = 2; }
     }
     else if crate::cpu::apic::core_count() > 1 && was_enabled {
         // STI only creates an interrupt shadow on IF=0 -> 1. Recursing

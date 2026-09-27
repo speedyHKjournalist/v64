@@ -26,7 +26,8 @@ const IOAPIC_CONFIG_READONLY_MASK: u32 =
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
 const IOAPIC_DELIVERY_LOWEST_PRIORITY: u8 = 1;
 const IOAPIC_DELIVERY_NMI: u8 = 4;
-const _IOAPIC_DELIVERY_INIT: u8 = 5;
+const IOAPIC_DELIVERY_INIT: u8 = 5;
+const IOAPIC_DELIVERY_EXTINT: u8 = 7;
 
 const DELIVERY_MODES: [&str; 8] = [
     "Fixed (0)",
@@ -105,32 +106,40 @@ fn check_irq(ioapic: &mut Ioapic, irq: u8) {
         let is_level =
             config & IOAPIC_CONFIG_TRIGGER_MODE_LEVEL == IOAPIC_CONFIG_TRIGGER_MODE_LEVEL;
 
-        if config & IOAPIC_CONFIG_TRIGGER_MODE_LEVEL == 0 {
+        let tracks_eoi = is_level
+            && matches!(
+                delivery_mode,
+                IOAPIC_DELIVERY_FIXED | IOAPIC_DELIVERY_LOWEST_PRIORITY
+            );
+        if tracks_eoi && config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
+            return;
+        }
+        // 2 (SMI) is unsupported and 3/6 are reserved. Never panic or
+        // accidentally inject an ordinary fixed interrupt for these modes.
+        if !matches!(
+            delivery_mode,
+            IOAPIC_DELIVERY_FIXED
+                | IOAPIC_DELIVERY_LOWEST_PRIORITY
+                | IOAPIC_DELIVERY_NMI
+                | IOAPIC_DELIVERY_INIT
+                | IOAPIC_DELIVERY_EXTINT
+        ) {
+            return;
+        }
+        let accepted = apic::route(
+            vector,
+            delivery_mode,
+            is_level,
+            destination,
+            destination_mode,
+        );
+        if !is_level {
             ioapic.irr &= !mask;
         }
-        else {
+        // NMI/INIT/ExtINT do not use LAPIC ISR/EOI. Setting remote IRR
+        // for these would permanently suppress a level-triggered input.
+        if accepted && tracks_eoi {
             ioapic.ioredtbl_config[irq as usize] |= IOAPIC_CONFIG_REMOTE_IRR;
-
-            if config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
-                dbg_log!("No route: level interrupt and remote IRR still set");
-                return;
-            }
-        }
-
-        if delivery_mode == IOAPIC_DELIVERY_FIXED
-            || delivery_mode == IOAPIC_DELIVERY_LOWEST_PRIORITY
-            || delivery_mode == IOAPIC_DELIVERY_NMI
-        {
-            apic::route(
-                vector,
-                delivery_mode,
-                is_level,
-                destination,
-                destination_mode,
-            );
-        }
-        else {
-            dbg_assert!(false, "TODO");
         }
 
         ioapic.ioredtbl_config[irq as usize] &= !IOAPIC_CONFIG_DELIVS;
@@ -227,12 +236,12 @@ fn read32_internal(ioapic: &mut Ioapic, addr: u32) -> u32 {
                 }
             },
             reg => {
-                dbg_assert!(false, "IOAPIC register read outside of range {:x}", reg);
+                dbg_log!("IOAPIC register read outside of range {:x}", reg);
                 0
             },
         },
         _ => {
-            dbg_assert!(false, "Unaligned or oob IOAPIC memory read: {:x}", addr);
+            dbg_log!("Unaligned or oob IOAPIC memory read: {:x}", addr);
             0
         },
     }
@@ -249,7 +258,7 @@ fn write32_internal(ioapic: &mut Ioapic, addr: u32, value: u32) {
     //dbg_log!("IOAPIC write {:x} <- {:08x}", reg, value);
 
     match addr {
-        IOREGSEL => ioapic.ioregsel = value,
+        IOREGSEL => ioapic.ioregsel = value & 0xFF,
         IOWIN => match ioapic.ioregsel {
             0 => ioapic.ioapic_id = (value >> 24) & 0x0F,
             1 | 2 => {
@@ -267,6 +276,7 @@ fn write32_internal(ioapic: &mut Ioapic, addr: u32, value: u32) {
                         value >> 24
                     );
                     ioapic.ioredtbl_destination[irq as usize] = value & 0xFF000000;
+                    check_irq(ioapic, irq);
                 }
                 else {
                     let old_value = ioapic.ioredtbl_config[irq as usize] as u32;
@@ -294,21 +304,35 @@ fn write32_internal(ioapic: &mut Ioapic, addr: u32, value: u32) {
                 }
             },
             reg => {
-                dbg_assert!(
-                    false,
+                dbg_log!(
                     "IOAPIC register write outside of range {:x} <- {:x}",
                     reg,
                     value
-                )
+                );
             },
         },
         _ => {
-            dbg_assert!(
-                false,
+            dbg_log!(
                 "Unaligned or oob IOAPIC memory write: {:x} <- {:x}",
                 addr,
                 value
-            )
+            );
         },
+    }
+}
+
+/// The legacy PIC's INTR output is connected to IOAPIC input 0. Querying its
+/// ExtINT route is side-effect free, so IF=0/HLT cannot acknowledge the 8259.
+pub fn pic_destination() -> Option<(u8, u8)> {
+    let ioapic = get_ioapic();
+    let config = ioapic.ioredtbl_config[0];
+    if config & IOAPIC_CONFIG_MASKED == 0 && (config >> 8) & 7 == IOAPIC_DELIVERY_EXTINT as u32 {
+        Some((
+            (ioapic.ioredtbl_destination[0] >> 24) as u8,
+            ((config >> 11) & 1) as u8,
+        ))
+    }
+    else {
+        None
     }
 }

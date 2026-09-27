@@ -21,7 +21,7 @@ export function v86(bus, wasm)
     this.worker = null;
 
     /** @type {CPU} */
-    this.cpu = new CPU(bus, wasm, () => { this.idle && this.next_tick(0); });
+    this.cpu = new CPU(bus, wasm, () => { this.running && this.idle && this.next_tick(0); });
 
     this.bus = bus;
 
@@ -31,6 +31,7 @@ export function v86(bus, wasm)
 v86.prototype.run = function()
 {
     this.stopping = false;
+    this.cpu.clock.resume();
 
     if(this.cpu.devices?.acpi?.soft_off)
     {
@@ -51,6 +52,7 @@ v86.prototype.do_tick = function()
 {
     if(this.stopping || !this.running)
     {
+        this.cpu.clock.pause();
         this.stopping = this.running = false;
         this.bus.send("emulator-stopped");
         return;
@@ -95,6 +97,7 @@ v86.prototype.stop = function()
 
 v86.prototype.destroy = function()
 {
+    this.cpu.clock.pause();
     this.unregister_yield();
 };
 
@@ -106,6 +109,7 @@ v86.prototype.restart = function()
 v86.prototype.init = function(settings)
 {
     this.cpu.init(settings, this.bus);
+    this.cpu.clock.pause();
     this.bus.send("emulator-ready");
 };
 
@@ -242,14 +246,20 @@ else
 
 v86.prototype.save_state = function()
 {
-    // TODO: Should be implemented here, not on cpu
-    return save_state(this.cpu);
+    if(this.cpu.in_cpu) return Promise.resolve().then(() => this.save_state());
+    const paused = this.cpu.clock.paused;
+    this.cpu.clock.pause();
+    try { return save_state(this.cpu); }
+    finally { if(!paused) this.cpu.clock.resume(); }
 };
 
 v86.prototype.restore_state = function(state)
 {
-    // TODO: Should be implemented here, not on cpu
-    return restore_state(this.cpu, state);
+    if(this.cpu.in_cpu) return Promise.resolve().then(() => this.restore_state(state));
+    const paused = this.cpu.clock.paused;
+    this.cpu.clock.pause();
+    try { return restore_state(this.cpu, state); }
+    finally { if(!paused) this.cpu.clock.resume(); }
 };
 
 /* global require */

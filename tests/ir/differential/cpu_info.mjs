@@ -97,10 +97,17 @@ for(const release of [false,true]){
         }
         console.log(`PASS (${release?"release":"debug"}): ${unsupported} pinned unknown-MSR abort/no-op/zero-result cases`);
         let apic_invalid=0;
-        for(let i=0;i<cases.length;i++) if(cases[i][0].length===3&&cases[i][2]===0x30) for(const [a,d,acpi] of [[0xFEE00800,1,1],[0xFED00800,0,1],[0xFEE00C00,0,1],[0,0,1]]) for(const opt of [0,1]){
-            const actual=compare_abort(i,()=>reset(i,a,0x1B,d,acpi),opt);assert.equal(actual.apic,release?Number(!!(a&0x800)):1);apic_invalid++;
+        for(let i=0;i<cases.length;i++) if(cases[i][0].length===3&&cases[i][2]===0x30) for(const [a,d,acpi] of [[0xFEE00800,1,1],[0xFED00800,0,1],[0xFEE00C00,0,1],[0,0,1]]){
+            const actual=compare(i,()=>reset(i,a,0x1B,d,acpi),101);
+            assert.equal(actual.apic,1,"invalid APIC_BASE leaves hardware enable unchanged");
+            assert.equal(actual.ip,HANDLER,"invalid APIC_BASE delivers guest #GP in both builds");
+            assert.deepEqual(actual.regs.slice(0,3),[a,0x1B,d],"fault preserves WRMSR inputs");
+            const frame=new DataView(actual.frame.buffer,actual.frame.byteOffset,actual.frame.byteLength),sp=actual.regs[4]-(STACK-96);
+            assert.equal(frame.getUint32(sp,true),0,"#GP error code");
+            assert.equal(frame.getUint32(sp+4,true),PC+1,"fault retries WRMSR including prefixes");
+            apic_invalid++;
         }
-        console.log(`PASS (${release?"release":"debug"}): ${apic_invalid} pinned restricted-APIC debug-abort/release-state cases`);
+        console.log(`PASS (${release?"release":"debug"}): ${apic_invalid} restricted-APIC #GP/state-preservation cases in both IR variants`);
         // Give the stopped fixture two actual core contexts, then use the
         // real switch_core path between distinct bases. Run both instruction
         // modes through the interpreter and both directly invoked IR forms.

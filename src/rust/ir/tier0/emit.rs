@@ -842,7 +842,8 @@ impl Page {
     /// (at every loop head; `offset` is the block about to run).
     fn poll_check(&mut self) {
         self.w.get_local(&self.retired);
-        self.w.const_i32(crate::cpu::cpu::LOOP_COUNTER);
+        self.w.const_i32(gp::slice_budget as i32);
+        self.w.load_aligned_i32(0);
         self.w.geu_i32();
         self.w.hint(false);
         self.w.if_void();

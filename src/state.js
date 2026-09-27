@@ -199,12 +199,8 @@ export function save_state(cpu)
 /* @param {CPU} cpu */
 export function restore_state(cpu, state)
 {
-    // Reject before parsing or copying any buffers into the live machine.
-    if(cpu.cores.length > 1)
-    {
-        throw new StateLoadError("Restoring state into a machine with more than one core is not supported yet");
-    }
     state = new Uint8Array(state);
+    if(state.length < 4) throw new StateLoadError("Invalid snapshot length: " + state.length);
 
     function read_state_header(state, check_length)
     {

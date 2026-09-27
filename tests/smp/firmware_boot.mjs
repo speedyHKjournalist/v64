@@ -83,6 +83,7 @@ async function test(count)
         });
         clearTimeout(load_timeout);
         cpu = emulator.v86.cpu;
+        cpu.clock.resume(); // this fixture explicitly drives scheduling rounds
         assert.equal(cpu.cores.length, count);
         assert.ok(cpu.cores.slice(1).every(core => !core.running), "APs initially wait for guest startup");
         // Observe event consumption without changing the returned bits or

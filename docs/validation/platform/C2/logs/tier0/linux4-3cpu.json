@@ -1,0 +1,40 @@
+{
+  "count": 3,
+  "jit_mode": "tier0",
+  "rounds": 205627,
+  "boot_wall_ms": 10981,
+  "total_wall_ms": 12015,
+  "smbios": "not emitted",
+  "hits": {
+    "tier0": 1843884,
+    "region": 50727
+  },
+  "per_core_jit": [
+    {
+      "tier0": 828421,
+      "region": 49112
+    },
+    {
+      "tier0": 497743,
+      "region": 1553
+    },
+    {
+      "tier0": 517720,
+      "region": 62
+    }
+  ],
+  "workload_jit": [
+    {
+      "tier0": 54882,
+      "region": 67
+    },
+    {
+      "tier0": 74556,
+      "region": 1546
+    },
+    {
+      "tier0": 35353,
+      "region": 0
+    }
+  ]
+}

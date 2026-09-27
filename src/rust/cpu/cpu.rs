@@ -286,10 +286,6 @@ pub static mut cpuid_level: u32 = 0x16;
 
 pub static mut jit_block_boundary: bool = false;
 
-const TSC_ENABLE_IMPRECISE_BROWSER_WORKAROUND: bool = true;
-
-#[cfg(debug_assertions)]
-const TSC_VERBOSE_LOGGING: bool = false;
 #[cfg(debug_assertions)]
 pub static mut tsc_last_extra: u64 = 0;
 
@@ -311,6 +307,9 @@ pub static mut tsc_offset: u64 = 0;
 /// its slice so that another one can run, e.g. to release a spinlock the
 /// spinning core waits for (see CPU.prototype.run_cores)
 pub static mut core_yield: bool = false;
+
+#[no_mangle]
+pub unsafe fn request_core_yield() { core_yield = true; jit_block_boundary = true; }
 
 pub static mut tlb_data: [i32; 0x100000] = [0; 0x100000];
 
@@ -484,6 +483,7 @@ pub unsafe fn iret(is_16: bool) { iret_checked(is_16); }
 pub unsafe fn iret_checked(is_16: bool) -> bool {
     // IRET ends NMI blocking (also when it faults)
     *nmi_blocked = false;
+    *interrupt_shadow = 0;
     let mut completed = true;
     if vm86_mode() && getiopl() < 3 {
         // vm86 mode, iopl != 3
@@ -2306,6 +2306,7 @@ pub unsafe fn clear_tlb() {
 }
 
 pub unsafe fn trigger_pagefault(addr: i32, present: bool, write: bool, user: bool) {
+    crate::cpu::execution::mark_fault();
     if config::LOG_PAGE_FAULTS {
         dbg_log!(
             "page fault w={} u={} p={} eip={:x} cr2={:x}",
@@ -3094,7 +3095,14 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
         let opcode = *memory::mem8.offset(phys_addr as isize) as i32;
         *instruction_pointer += 1;
         dbg_assert!(*prefixes == 0);
+        let tracked = crate::cpu::execution::is_deterministic();
+        if tracked { crate::cpu::execution::begin_instruction(); }
         run_instruction(opcode | (*is_32 as i32) << 8);
+        if tracked {
+            crate::cpu::execution::finish_instruction();
+            if *interrupt_shadow != 0 { *interrupt_shadow -= 1; }
+            handle_irqs();
+        }
         dbg_assert!(*prefixes == 0);
 
         if ir_dispatch && (i >= 64 || (*instruction_pointer as u32) <= start_eip as u32) {
@@ -3125,6 +3133,10 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
     *instruction_counter += i;
 }
 
+/// Shared compilation budget, replenished once per machine scheduling round.
+#[no_mangle]
+pub fn begin_cpu_frame(now: f64) { crate::ir::runtime::schedule::begin_frame(now); }
+
 /// C1's cooperative interpreter slice. Device clocks are serviced once by
 /// the machine scheduler, outside this entry. Yield only after a complete
 /// instruction or the string engine's resumable REP element batch; a LOCK
@@ -3136,19 +3148,33 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
     handle_irqs();
     let before = *instruction_counter;
     let mut remaining = budget;
+    jit_link_batch_start = before;
+    jit_link_batch_limit = budget;
+    jit_link_batch = true;
     while remaining != 0 && !*in_hlt && !core_yield {
         *previous_ip = *instruction_pointer;
         // A fault can change CS:EIP without retiring an instruction. Charge
         // that dispatch as well, so a fault loop cannot monopolize the host.
         let count = *instruction_counter;
+        *slice_budget = remaining;
+        if !crate::cpu::execution::is_deterministic() && crate::ir::runtime::schedule::enabled() {
+            if crate::ir::runtime::schedule::visit() { break; }
+            if crate::ir::runtime::cache::execute() {
+                remaining = remaining.saturating_sub((*instruction_counter).wrapping_sub(count).max(1));
+                continue;
+            }
+        }
+        let entry = crate::ir::runtime::live::entry();
         if let Ok(phys_addr) = get_phys_eip() {
             jit_run_interpreted(phys_addr, remaining);
+            crate::ir::runtime::schedule::note_interpreted(entry, (*instruction_counter).wrapping_sub(count));
         }
         remaining = remaining.saturating_sub((*instruction_counter).wrapping_sub(count).max(1));
         if apic::has_core_events() {
             break;
         }
     }
+    jit_link_batch = false;
     core_yield = false;
     (*instruction_counter).wrapping_sub(before)
 }
@@ -3215,7 +3241,9 @@ pub unsafe fn main_loop() -> f64 {
         }
     }
 
+    let mut batches = 0;
     loop {
+        batches += 1;
         let performance_start = profiler::performance_batch_start();
         let publication_yield = do_many_cycles_native();
         profiler::performance_timer_finish(performance_start, 0);
@@ -3237,7 +3265,7 @@ pub unsafe fn main_loop() -> f64 {
         // Give the host a chance to install a newly submitted IR module. All
         // guest state is committed and the normal timer/IRQ work above is kept.
         // Only a new submission requests this; a held Promise cannot spin here.
-        if publication_yield || now - start > TIME_PER_FRAME {
+        if publication_yield || now - start > TIME_PER_FRAME || batches >= 16 {
             break;
         }
     }
@@ -3249,9 +3277,10 @@ pub unsafe fn main_loop() -> f64 {
 // budget, as the outer loop would.
 static mut jit_link_batch: bool = false;
 static mut jit_link_batch_start: u32 = 0;
+static mut jit_link_batch_limit: u32 = LOOP_COUNTER as u32;
 pub unsafe fn ir_link_budget_available() -> bool {
-    jit_link_batch
-        && (*instruction_counter).wrapping_sub(jit_link_batch_start) < LOOP_COUNTER as u32
+    jit_link_batch && !core_yield && !apic::has_core_events()
+        && (*instruction_counter).wrapping_sub(jit_link_batch_start) < jit_link_batch_limit
 }
 
 pub unsafe fn do_many_cycles_native() -> bool {
@@ -3261,6 +3290,8 @@ pub unsafe fn do_many_cycles_native() -> bool {
     crate::ir::runtime::entry::ir_admission_barrier();
     let initial_instruction_counter = *instruction_counter;
     jit_link_batch_start = initial_instruction_counter;
+    jit_link_batch_limit = LOOP_COUNTER as u32;
+    *slice_budget = LOOP_COUNTER as u32;
     jit_link_batch = true;
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
         && !*in_hlt
@@ -3278,6 +3309,7 @@ pub unsafe fn do_many_cycles_native() -> bool {
 
 #[cold]
 pub unsafe fn trigger_de() {
+    crate::cpu::execution::mark_fault();
     dbg_log!("#de");
     *instruction_pointer = *previous_ip;
     if DEBUG {
@@ -3290,6 +3322,7 @@ pub unsafe fn trigger_de() {
 
 #[inline(never)]
 pub unsafe fn trigger_ud() {
+    crate::cpu::execution::mark_fault();
     dbg_log!("#ud");
     dbg_trace();
     *instruction_pointer = *previous_ip;
@@ -3303,6 +3336,7 @@ pub unsafe fn trigger_ud() {
 
 #[inline(never)]
 pub unsafe fn trigger_nm() {
+    crate::cpu::execution::mark_fault();
     dbg_log!("#nm eip={:x}", *previous_ip);
     dbg_trace();
     *instruction_pointer = *previous_ip;
@@ -3316,6 +3350,7 @@ pub unsafe fn trigger_nm() {
 
 #[inline(never)]
 pub unsafe fn trigger_gp(code: i32) {
+    crate::cpu::execution::mark_fault();
     dbg_log!("#gp");
     *instruction_pointer = *previous_ip;
     if DEBUG {
@@ -3842,59 +3877,13 @@ pub unsafe fn decr_ecx_asize(is_asize_32: bool) -> i32 {
 #[no_mangle]
 pub unsafe fn set_tsc(low: u32, high: u32) {
     let new_value = low as u64 | (high as u64) << 32;
-    let current_value = read_tsc();
-    tsc_offset = current_value - new_value;
+    let current_value = (js::microtick() * TSC_RATE) as u64;
+    tsc_offset = current_value.wrapping_sub(new_value);
 }
 
 #[no_mangle]
 pub unsafe fn read_tsc() -> u64 {
-    let value = (js::microtick() * TSC_RATE) as u64 - tsc_offset;
-
-    if !TSC_ENABLE_IMPRECISE_BROWSER_WORKAROUND {
-        return value;
-    }
-
-    if value == tsc_last_value {
-        // If the browser returns the same value as last time, extrapolate based on the number of
-        // rdtsc calls between the last two changes
-        tsc_number_of_same_readings += 1;
-        let extra = (tsc_number_of_same_readings * tsc_resolution) / tsc_speed;
-        let extra = u64::min(extra, tsc_resolution - 1);
-        #[cfg(debug_assertions)]
-        {
-            tsc_last_extra = extra;
-        }
-        return value + extra;
-    }
-
-    #[cfg(debug_assertions)]
-    if tsc_last_extra != 0 {
-        if TSC_VERBOSE_LOGGING || tsc_last_extra >= tsc_resolution {
-            dbg_log!(
-                "rdtsc: jump from {}+{} to {} (diff {}, {}%)",
-                tsc_last_value as u64,
-                tsc_last_extra as u64,
-                value,
-                value - (tsc_last_value + tsc_last_extra),
-                (100 * tsc_last_extra) / tsc_resolution,
-            );
-            dbg_assert!(tsc_last_extra < tsc_resolution, "XXX: Overshot tsc");
-        }
-        tsc_last_extra = 0;
-    }
-
-    let d = value - tsc_last_value;
-    if d < tsc_resolution {
-        dbg_log!("rdtsc resolution: {}", d);
-    }
-    tsc_resolution = tsc_resolution.min(d);
-    tsc_last_value = value;
-    if tsc_number_of_same_readings != 0 {
-        tsc_speed = tsc_number_of_same_readings;
-        tsc_number_of_same_readings = 0;
-    }
-
-    value
+    ((js::microtick() * TSC_RATE) as u64).wrapping_sub(tsc_offset)
 }
 
 pub unsafe fn vm86_mode() -> bool { return *flags & FLAG_VM == FLAG_VM; }
@@ -3982,6 +3971,7 @@ pub unsafe fn get_valid_global_tlb_entries_count() -> i32 {
 
 #[inline(never)]
 pub unsafe fn trigger_np(code: i32) {
+    crate::cpu::execution::mark_fault();
     dbg_log!("#np");
     *instruction_pointer = *previous_ip;
     if DEBUG {
@@ -3994,6 +3984,7 @@ pub unsafe fn trigger_np(code: i32) {
 
 #[inline(never)]
 pub unsafe fn trigger_ss(code: i32) {
+    crate::cpu::execution::mark_fault();
     dbg_log!("#ss");
     *instruction_pointer = *previous_ip;
     if DEBUG {
@@ -4015,9 +4006,9 @@ pub unsafe fn handle_irqs() {
         pic_call_irq(CPU_EXCEPTION_NMI as u8);
         return;
     }
-    if *flags & FLAG_INTERRUPT != 0 {
+    if *flags & FLAG_INTERRUPT != 0 && *interrupt_shadow == 0 {
         // the 8259 PIC is wired to the bootstrap processor (LINT0 of core 0)
-        let pic_irq = if apic::current_core() == 0 { pic::pic_acknowledge_irq() } else { None };
+        let pic_irq = apic::acknowledge_pic_irq();
         if let Some(irq) = pic_irq {
             pic_call_irq(irq)
         }
@@ -4159,6 +4150,9 @@ pub unsafe fn reset_cpu() {
     *previous_ip = 0;
     *in_hlt = false;
     *nmi_blocked = false;
+    *interrupt_shadow = 0;
+    *slice_budget = LOOP_COUNTER as u32;
+    crate::cpu::execution::reset();
     // the local APIC (present with ACPI) is enabled at reset
     *apic_enabled = *acpi_enabled;
 

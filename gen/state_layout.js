@@ -53,13 +53,14 @@ export const STATE_FIELDS = [
     { name: "last_virt_eip", offset: 620, rust: "i32", size: 4, owner: "cache", note: "reset by full_clear_tlb" },
     { name: "eip_phys", offset: 624, rust: "i32", size: 4, owner: "cache", note: "valid while last_virt_eip is" },
     { name: "nmi_blocked", offset: 628, rust: "bool", size: 4, owner: "core", note: "an NMI handler runs; cleared by IRET" },
+    { name: "interrupt_shadow", offset: 632, rust: "u8", size: 4, owner: "core", note: "deterministic interpreter STI shadow" },
     { name: "sysenter_cs", offset: 636, rust: "i32", size: 4, owner: "core" },
     { name: "sysenter_esp", offset: 640, rust: "i32", size: 4, owner: "core" },
     { name: "sysenter_eip", offset: 644, rust: "i32", size: 4, owner: "core" },
     // Should be 0 at instruction boundaries, but the IR entry path tests it,
     // so it travels with the core
     { name: "prefixes", offset: 648, rust: "u8", size: 4, owner: "core" },
-    { name: "instruction_counter", offset: 664, rust: "u32", size: 4, owner: "machine", note: "monotonic count of retired instructions, used for slice budgets" },
+    { name: "instruction_counter", offset: 664, rust: "u32", size: 4, owner: "machine", note: "dispatch/JIT step counter for budgets; deterministic retirement is separate" },
     { name: "sreg", offset: 668, rust: "u16", count: 8, size: 16, owner: "core" },
     { name: "dreg", offset: 684, rust: "i32", count: 8, size: 32, owner: "core" },
     { name: "svga_dirty_bitmap_min_offset", offset: 716, rust: "u32", size: 4, owner: "machine",
@@ -94,6 +95,7 @@ export const STATE_FIELDS = [
     { name: "x87_shadow_dirty", offset: 1348, rust: "u32", size: 4, owner: "cache" },
     { name: "x87_native_policy", offset: 1352, rust: "u8", size: 1, owner: "machine",
         doc: ["Nonzero while generated IR code may inline fast-math x87 on that cache."] },
+    { name: "slice_budget", offset: 1356, rust: "u32", size: 4, owner: "machine", note: "maximum retired work in one generated activation" },
     { name: "ir_tlb_base", offset: 2048, rust: "u32", size: 4, owner: "machine",
         doc: ["Address of cpu::tlb_data, written at startup. Generated IR code loads it", "from this fixed slot (below --global-base) instead of calling an import."] },
 ];
@@ -102,17 +104,19 @@ export const STATE_FIELDS = [
 // listed here, so new state has to be classified when it is added.
 export const STATICS = {
     // one local APIC per core, indexed by core; the scheduler's current core and INIT/SIPI events
-    "cpu/apic.rs": { APICS: "core", CURRENT_CORE: "machine", CORE_COUNT: "machine", CORE_EVENTS: "machine", NMI_PENDING: "machine" },
+    "cpu/apic.rs": { APICS: "core", APIC_AUX: "core", CURRENT_CORE: "machine", CORE_COUNT: "machine", CORE_EVENTS: "machine", NMI_PENDING: "machine" },
     "cpu/cpu.rs": {
         INTERPRETED: "debug", INTERPRETED_OFFSETS: "debug", INTERPRETED_PAGES: "debug", INTERPRETED_WATCH: "debug",
         cpuid_level: "machine", debug_last_jump: "debug", jit_block_boundary: "scratch", core_yield: "scratch",
-        jit_link_batch: "scratch", jit_link_batch_start: "scratch",
-        // one TLB, flushed when the active core changes
+        jit_link_batch: "scratch", jit_link_batch_start: "scratch", jit_link_batch_limit: "scratch",
+        // active TLB working set; context.rs preserves each inactive core
         tlb_data: "cache", valid_tlb_entries: "cache", valid_tlb_entries_count: "cache",
-        // TSC offset and monotonicity guard: shared, cores see a synchronized TSC
+        // active TSC offset lives in context.rs across switches; old interpolation slots remain for test hooks
         tsc_last_extra: "machine", tsc_last_value: "machine", tsc_number_of_same_readings: "machine",
-        tsc_offset: "machine", tsc_resolution: "machine", tsc_speed: "machine",
+        tsc_offset: "core", tsc_resolution: "machine", tsc_speed: "machine",
     },
+    "cpu/context.rs": { CONTEXTS: "core" },
+    "cpu/execution.rs": { execution_state: "machine" },
     "cpu/fpu.rs": { X87_JIT_CACHE: "machine" },
     "cpu/ioapic.rs": { IOAPIC: "machine" },
     "cpu/memory.rs": { mem8: "machine", vga_mem8: "machine", vga_memory_size: "machine" },

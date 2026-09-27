@@ -1,0 +1,9 @@
+1 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+2 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+3 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+4 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+5 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+6 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+7 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+8 cores: CPUID profile, package/core shifts, cache domains, MADT/fw_cfg/CMOS agree
+CPUID maximum override: legacy single-core cap preserved; incompatible SMP cap rejected

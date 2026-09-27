@@ -54,7 +54,7 @@ pub unsafe fn ir_t0_step(expected_next: u32) -> i32 {
     *gp::instruction_pointer += 1;
     // The page function accounts for the retired instruction itself.
     cpu::run_instruction(opcode | (*gp::is_32 as i32) << 8);
-    if *gp::in_hlt || context() != before {
+    if *gp::in_hlt || cpu::core_yield || crate::cpu::apic::has_core_events() || context() != before {
         STEP_EXIT
     }
     else if *gp::instruction_pointer as u32 == expected_next {

@@ -29,6 +29,7 @@ pub const in_hlt: *mut bool = 616 as *mut bool;
 pub const last_virt_eip: *mut i32 = 620 as *mut i32;
 pub const eip_phys: *mut i32 = 624 as *mut i32;
 pub const nmi_blocked: *mut bool = 628 as *mut bool;
+pub const interrupt_shadow: *mut u8 = 632 as *mut u8;
 pub const sysenter_cs: *mut i32 = 636 as *mut i32;
 pub const sysenter_esp: *mut i32 = 640 as *mut i32;
 pub const sysenter_eip: *mut i32 = 644 as *mut i32;
@@ -68,6 +69,7 @@ pub const x87_shadow_valid: *mut u32 = 1344 as *mut u32;
 pub const x87_shadow_dirty: *mut u32 = 1348 as *mut u32;
 /// Nonzero while generated IR code may inline fast-math x87 on that cache.
 pub const x87_native_policy: *mut u8 = 1352 as *mut u8;
+pub const slice_budget: *mut u32 = 1356 as *mut u32;
 /// Address of cpu::tlb_data, written at startup. Generated IR code loads it
 /// from this fixed slot (below --global-base) instead of calling an import.
 pub const ir_tlb_base: *mut u32 = 2048 as *mut u32;

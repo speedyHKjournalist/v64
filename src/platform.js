@@ -78,6 +78,8 @@ const PARALLEL_PORTS = [
 /**
  * @typedef {{
  *     cores: number,
+ *     topology: {sockets: number, cores_per_socket: number, threads_per_core: number, logical_processors: number, package_shift: number},
+ *     cpuid_profile: string,
  *     apic_ids: !Array<number>,
  *     memory_size: number,
  *     pci_mmio_start: number,
@@ -114,6 +116,14 @@ export function create_platform(settings, memory_size)
 
     const platform = {
         cores,
+        topology: {
+            sockets: 1,
+            cores_per_socket: cores,
+            threads_per_core: 1,
+            logical_processors: cores,
+            package_shift: Math.ceil(Math.log2(cores)),
+        },
+        cpuid_profile: cores === 1 ? "legacy" : "smp32",
         apic_ids: Array.from({ length: cores }, (_, i) => i),
         memory_size,
         pci_mmio_start,

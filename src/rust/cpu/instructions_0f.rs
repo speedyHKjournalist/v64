@@ -1228,22 +1228,18 @@ pub unsafe fn wrmsr_checked() -> bool {
         IA32_FEAT_CTL => {}, // linux 5.x
         MSR_TEST_CTRL => {}, // linux 5.x
         IA32_APIC_BASE => {
-            dbg_assert!(
-                high == 0,
-                "Changing APIC address (high 32 bits) not supported"
-            );
             let address = low & !(IA32_APIC_BASE_BSP | IA32_APIC_BASE_EXTD | IA32_APIC_BASE_EN);
-            dbg_assert!(
-                (address == 0 && !*acpi_enabled) // windows me
-                || address == APIC_MEM_ADDRESS as i32,
-                "Changing APIC address not supported"
-            );
-            dbg_assert!(low & IA32_APIC_BASE_EXTD == 0, "x2apic not supported");
-            let enable = low & IA32_APIC_BASE_EN == IA32_APIC_BASE_EN;
+            if high != 0 || low & IA32_APIC_BASE_EXTD != 0
+                || !(address == APIC_MEM_ADDRESS as i32 || address == 0 && !*acpi_enabled) {
+                trigger_gp(0);
+                return false;
+            }
+            let enable = low & IA32_APIC_BASE_EN != 0;
             if *apic_enabled && !enable {
                 crate::cpu::apic::software_disable();
             }
-            *apic_enabled = enable
+            *apic_enabled = enable;
+            crate::cpu::apic::apic_set_hardware_enabled(crate::cpu::apic::current_core() as u32, enable);
         },
         IA32_TIME_STAMP_COUNTER => set_tsc(low as u32, high as u32),
         IA32_BIOS_UPDT_TRIG => {}, // windows xp
@@ -3449,6 +3445,10 @@ pub unsafe fn instr_0FA2() {
         dbg_log!("cpuid: eax={:08x}", read_reg32(EAX));
     }
 
+    let mut topology = [eax as u32, ebx as u32, ecx as u32, edx as u32];
+    crate::cpu::topology::apply(level, read_reg32(ECX) as u32, crate::cpu::apic::core_count() as u32,
+        crate::cpu::apic::current_core() as u32, &mut topology);
+    let [eax, ebx, ecx, edx] = topology.map(|x| x as i32);
     write_reg32(EAX, eax);
     write_reg32(ECX, ecx);
     write_reg32(EDX, edx);

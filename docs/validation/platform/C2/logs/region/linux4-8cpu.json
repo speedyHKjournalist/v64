@@ -1,0 +1,80 @@
+{
+  "count": 8,
+  "jit_mode": "region",
+  "rounds": 235506,
+  "boot_wall_ms": 58348,
+  "total_wall_ms": 78138,
+  "smbios": "not emitted",
+  "hits": {
+    "tier0": 0,
+    "region": 45724638
+  },
+  "per_core_jit": [
+    {
+      "tier0": 0,
+      "region": 15096957
+    },
+    {
+      "tier0": 0,
+      "region": 4828426
+    },
+    {
+      "tier0": 0,
+      "region": 4614300
+    },
+    {
+      "tier0": 0,
+      "region": 4169152
+    },
+    {
+      "tier0": 0,
+      "region": 3576345
+    },
+    {
+      "tier0": 0,
+      "region": 3657803
+    },
+    {
+      "tier0": 0,
+      "region": 5557147
+    },
+    {
+      "tier0": 0,
+      "region": 4224508
+    }
+  ],
+  "workload_jit": [
+    {
+      "tier0": 0,
+      "region": 936947
+    },
+    {
+      "tier0": 0,
+      "region": 508117
+    },
+    {
+      "tier0": 0,
+      "region": 282195
+    },
+    {
+      "tier0": 0,
+      "region": 234429
+    },
+    {
+      "tier0": 0,
+      "region": 296695
+    },
+    {
+      "tier0": 0,
+      "region": 440636
+    },
+    {
+      "tier0": 0,
+      "region": 563600
+    },
+    {
+      "tier0": 0,
+      "region": 1191556
+    }
+  ]
+}

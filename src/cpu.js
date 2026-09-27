@@ -14,6 +14,7 @@ import {
 import { h, view, Bitmap } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 import { v86 } from "./main.js";
+import { MachineClock } from "./machine_clock.js";
 
 import { SB16 } from "./sb16.js";
 import { ACPI, acpi_system_states_file } from "./acpi.js";
@@ -69,6 +70,13 @@ export function CPU(bus, wm, stop_idling)
 {
     this.stop_idling = stop_idling;
     this.wm = wm;
+    this.clock = new MachineClock({ now: v86.microtick });
+    this.execution_epoch = 0;
+    this.in_cpu = false;
+    this.reset_pending = false;
+    this.scheduler_quantum = 4096;
+    this.scheduler_seed = 0;
+    this.scheduler_round = 0;
     this.jit_backend = "ir";
     this.ir_region_budget = null;
     this.ir_pass_names = ["prune", "merge", "phis", "copy", "fold", "flags", "helper_state", "gvn", "dce",
@@ -405,8 +413,10 @@ CPU.prototype.wasm_patch = function()
 
     this.handle_irqs = get_import("handle_irqs");
 
-    this.main_loop = get_import("main_loop");
-    this.run_cpu_slice = get_import("run_cpu_slice");
+    const main_loop = get_import("main_loop");
+    const run_cpu_slice = get_import("run_cpu_slice");
+    this.main_loop = () => this.execute_cpu(() => main_loop());
+    this.run_cpu_slice = budget => this.execute_cpu(() => run_cpu_slice(budget));
 
     this.read8 = get_import("read8");
     this.read16 = get_import("read16");
@@ -482,11 +492,8 @@ CPU.prototype.jit_clear_func = function(index)
 
 CPU.prototype.get_state = function()
 {
-    if(this.cores.length > 1)
-    {
-        throw new Error("Saving the state of a machine with more than one core is not supported yet");
-    }
-
+    // Capture one machine time before collecting devices or per-core TSC offsets.
+    const clock_state = this.clock.get_state();
     this.wm.exports["fpu_sync_all"]?.();
     var state = [];
 
@@ -606,7 +613,82 @@ CPU.prototype.get_state = function()
         new Uint8Array(this.wasm_memory.buffer)[STATE_OFFSETS.nmi_blocked],
         +this.apic_core_nmi_pending(0), this.apic_peek_core_events(0)];
 
+    state[95] = clock_state;
+    state[96] = this.get_machine_core_state();
     return state;
+};
+
+/** All cores at a scheduler boundary; versioned independently of legacy single-core slots. */
+CPU.prototype.get_machine_core_state = function()
+{
+    const ex = this.wm.exports;
+    ex["context_capture"]();
+    const cores = this.cores.map((core, id) => {
+        const tlb = new Uint32Array(ex["context_tlb_len"](id) * 2);
+        for(let i = 0; i < tlb.length; i++) tlb[i] = ex["context_tlb_get"](id, i >> 1, i & 1);
+        return [core.running, id === this.active_core ? this.save_core_state() : core.saved,
+            new Uint8Array(this.wasm_memory.buffer, this.apic_addr(id), 184).slice(),
+            new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id), ex["apic_aux_size"]()).slice(),
+            this.apic_peek_core_events(id), !!this.apic_core_nmi_pending(id),
+            [ex["context_tsc_get"](id, false) >>> 0, ex["context_tsc_get"](id, true) >>> 0],
+            tlb, core.slices, core.steps];
+    });
+    return [1, this.cores.length, this.active_core, this.scheduler_quantum,
+        this.scheduler_seed, this.scheduler_round, cores];
+};
+
+CPU.prototype.validate_machine_core_state = function(state)
+{
+    if(!state)
+    {
+        if(this.cores.length !== 1) throw new Error("Snapshot topology mismatch: legacy snapshot has one core");
+        return;
+    }
+    const fail = () => { throw new Error("Invalid multicore snapshot or topology mismatch"); };
+    if(state[0] !== 1 || state[1] !== this.cores.length || !Array.isArray(state[6]) || state[6].length !== state[1] ||
+        !Number.isInteger(state[2]) || state[2] < 0 || state[2] >= state[1] ||
+        !Number.isInteger(state[3]) || state[3] < 1 || state[3] > 100000 ||
+        !Number.isSafeInteger(state[4]) || state[4] < 0 || state[4] > 0xFFFFFFFF ||
+        !Number.isSafeInteger(state[5]) || state[5] < 0) fail();
+    for(const core of state[6])
+    {
+        if(!Array.isArray(core) || typeof core[0] !== "boolean" || !Array.isArray(core[1]) ||
+            core[1].length !== CORE_STATE_RANGES.length || !(core[2] instanceof Uint8Array) || core[2].length !== 184 ||
+            !(core[3] instanceof Uint8Array) || core[3].length !== this.wm.exports["apic_aux_size"]() ||
+            !Array.isArray(core[6]) || core[6].length !== 2 ||
+            !(core[7] instanceof Uint32Array) || core[7].length % 2 || core[7].length > 20000) fail();
+        CORE_STATE_RANGES.forEach(([start, end], i) => {
+            if(!(core[1][i] instanceof Uint8Array) || core[1][i].length !== end - start) fail();
+        });
+        const pages = new Set();
+        for(let i = 0; i < core[7].length; i += 2)
+        {
+            if(core[7][i] >= 0x100000 || !(core[7][i + 1] & 1) || pages.has(core[7][i])) fail();
+            pages.add(core[7][i]);
+        }
+    }
+};
+
+CPU.prototype.set_machine_core_state = function(state)
+{
+    const ex = this.wm.exports;
+    ex["context_reset_all"]();
+    state[6].forEach((saved, id) => {
+        this.cores[id] = { running: saved[0], saved: saved[1].map(bytes => bytes.slice()), slices: saved[8], steps: saved[9] };
+        new Uint8Array(this.wasm_memory.buffer, this.apic_addr(id), 184).set(saved[2]);
+        new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id), ex["apic_aux_size"]()).set(saved[3]);
+        this.apic_restore_core_events(id, saved[4], saved[5]);
+        ex["context_tsc_set"](id, saved[6][0], saved[6][1]);
+        for(let i = 0; i < saved[7].length; i += 2) ex["context_tlb_push"](id, saved[7][i], saved[7][i + 1]);
+    });
+    this.active_core = state[2];
+    this.apic_set_current_core(this.active_core);
+    this.load_core_state(/** @type {!Array<!Uint8Array>} */ (this.cores[this.active_core].saved), true);
+    this.cores[this.active_core].saved = null;
+    ex["context_install"](this.active_core);
+    this.scheduler_quantum = state[3];
+    this.scheduler_seed = state[4];
+    this.scheduler_round = state[5];
 };
 
 CPU.prototype.get_state_pic = function()
@@ -663,10 +745,11 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.set_state = function(state)
 {
-    if(this.cores.length > 1)
-    {
-        throw new Error("Restoring state into a machine with more than one core is not supported yet");
-    }
+    this.validate_machine_core_state(state[96]);
+    if(state[95]) this.clock.set_state(state[95]);
+    this.wm.exports["take_clock_progress"]();
+    this.wm.exports["set_deterministic_execution"](this.clock.mode === "deterministic");
+    this.execution_epoch++;
     this.wm.exports["fpu_discard_cache"]?.();
     this.memory_size[0] = state[0];
 
@@ -818,6 +901,19 @@ CPU.prototype.set_state = function(state)
     this.apic_enabled[0] = state[94] ? state[94][0] : this.acpi_enabled[0];
     new Uint8Array(this.wasm_memory.buffer)[STATE_OFFSETS.nmi_blocked] = state[94]?.[1] || 0;
     this.apic_restore_core_events(0, state[94]?.[3] || 0, !!state[94]?.[2]);
+    this.wm.exports["apic_restore_legacy_aux"](0, !!this.apic_enabled[0]);
+    new Uint8Array(this.wasm_memory.buffer)[STATE_OFFSETS.interrupt_shadow] = 0;
+    if(state[96]) this.set_machine_core_state(state[96]);
+    if(!state[95])
+    {
+        // Legacy snapshots stored host-absolute deadlines without a shared
+        // clock anchor. Preserve counts/calendar and restart their phase at
+        // restore time, rather than waiting for the old host's uptime.
+        const now = this.clock.now();
+        this.devices.pit.counter_start_time.fill(now);
+        new Float64Array(this.wasm_memory.buffer, this.apic_addr(0) + 24, 1)[0] = now;
+        this.clock.wall_epoch_ms = this.devices.rtc.rtc_time - now;
+    }
 
     // Older state images don't record the sources; devices then lower their
     // lines unconditionally, as they used to. Done last: re-deriving the SCI
@@ -881,6 +977,7 @@ CPU.prototype.setup_cores = function()
 {
     const count = this.platform.cores;
     this.apic_set_core_count(count);
+    this.wm.exports["context_reset_all"]();
     this.core_reset_state = this.save_core_state();
     this.active_core = 0;
     // the BSP runs from reset; the APs wait for INIT and a start-up IPI
@@ -893,6 +990,9 @@ CPU.prototype.reset_cores = function()
 {
     this.switch_core(0);
     this.apic_set_core_count(this.cores.length);
+    this.wm.exports["context_reset_all"]();
+    this.execution_epoch++;
+    this.scheduler_round = 0;
     this.cores.forEach((core, i) => {
         core.running = i === 0;
         core.saved = i === 0 ? null : this.core_reset_state;
@@ -909,7 +1009,8 @@ CPU.prototype.switch_core = function(core)
         return;
     }
     this.cores[this.active_core].saved = this.save_core_state();
-    this.load_core_state(/** @type {!Array<!Uint8Array>} */ (this.cores[core].saved));
+    this.wm.exports["context_switch"](this.active_core, core);
+    this.load_core_state(/** @type {!Array<!Uint8Array>} */ (this.cores[core].saved), true);
     this.cores[core].saved = null;
     this.active_core = core;
     this.apic_set_current_core(core);
@@ -932,6 +1033,7 @@ CPU.prototype.take_core_events = function(core)
     {
         dbg_log("core " + core + ": INIT", LOG_CPU);
         this.apic_init_core(core);
+        this.wm.exports["context_reset"](core);
         if(core === this.active_core)
         {
             this.load_core_state(this.core_reset_state);
@@ -991,27 +1093,38 @@ CPU.prototype.core_runnable = function(core)
     const interrupts_enabled = (field(STATE_OFFSETS.flags, 4) & FLAG_INTERRUPT) !== 0;
     const nmi = this.apic_core_nmi_pending(core) && !field(STATE_OFFSETS.nmi_blocked, 1);
     // The BSP also accepts the legacy PIC, which is checked in run_cpu_slice.
-    return nmi || interrupts_enabled && (core === 0 || this.apic_core_interrupt_pending(core));
+    return nmi || interrupts_enabled && this.apic_core_interrupt_pending(core);
 };
 
 /**
- * Run each core for a bounded interpreter slice, round robin. The budget
- * counts interpreter dispatch steps; an incomplete REP yields after at most
- * 256 elements. This is not C0's committed-instruction virtual clock.
+ * Run each core for a bounded slice, rotating or seeded round robin. Dispatch
+ * budgets bound host work; deterministic time separately counts committed work.
  * @return {number} milliseconds until the machine needs to run again
  */
 CPU.prototype.run_cores = function()
 {
-    if(this.cores.length === 1)
+    if(this.cores.length === 1 && this.clock.mode !== "deterministic")
     {
         this.take_core_events(0);
         return this.main_loop();
     }
     // Always service the shared devices, even if every core is in CLI/HLT.
     // AP execution never advances the machine's timers a second time.
-    let next = this.run_hardware_timers(!!this.acpi_enabled[0], v86.microtick());
-    for(let core = 0; core < this.cores.length; core++)
+    const now = this.clock.now();
+    this.wm.exports["begin_cpu_frame"](now);
+    let next = this.run_hardware_timers(!!this.acpi_enabled[0], now);
+    let ran = false;
+    let start = this.scheduler_round++ % this.cores.length;
+    if(this.scheduler_seed)
     {
+        let seed = this.scheduler_seed | 0;
+        seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+        this.scheduler_seed = seed >>> 0;
+        start = this.scheduler_seed % this.cores.length;
+    }
+    for(let turn = 0; turn < this.cores.length; turn++)
+    {
+        const core = (start + turn) % this.cores.length;
         this.take_core_events(core);
         if(!this.core_runnable(core))
         {
@@ -1019,8 +1132,9 @@ CPU.prototype.run_cores = function()
         }
         this.switch_core(core);
         const state = this.cores[core];
-        state.steps += this.run_cpu_slice(4096);
+        state.steps += this.run_cpu_slice(this.scheduler_quantum);
         state.slices++;
+        ran = true;
         if(!this.in_hlt[0]) next = 0;
     }
     // An AP may have just interrupted a core whose turn was earlier in this
@@ -1028,6 +1142,15 @@ CPU.prototype.run_cores = function()
     if(this.cores.some((_, core) => this.apic_peek_core_events(core) ||
         this.core_runnable(core) && (this.apic_core_interrupt_pending(core) ||
             this.apic_core_nmi_pending(core)))) next = 0;
+    this.clock.now();
+    // The guest may have reprogrammed a timer before HLT. Recompute its
+    // deadline next round before sleeping or advancing deterministic time.
+    if(ran) next = 0;
+    if(this.clock.mode === "deterministic" && next > 0 && Number.isFinite(next))
+    {
+        this.clock.advance_to(Math.max(this.clock.now(), now + next));
+        return 0;
+    }
     return next;
 };
 
@@ -1035,7 +1158,7 @@ CPU.prototype.run_cores = function()
  * The per-core part of the CPU state (CORE_STATE_RANGES, from
  * gen/state_layout.js), for switching the active core. Only valid at a
  * main-loop safe point, when no generated code or helper is running.
- * Rust statics owned by a core (the local APIC) are not included yet.
+ * Local APIC, TSC and TLB state are saved separately by the machine scheduler.
  * @return {!Array<!Uint8Array>}
  */
 CPU.prototype.save_core_state = function()
@@ -1053,14 +1176,16 @@ CPU.prototype.save_core_state = function()
  * Compiled code stays valid: it reads the state at the fixed addresses and
  * re-checks the TLB and mode on entry.
  * @param {!Array<!Uint8Array>} saved
+ * @param {boolean=} preserve_tlb
  */
-CPU.prototype.load_core_state = function(saved)
+CPU.prototype.load_core_state = function(saved, preserve_tlb)
 {
     dbg_assert(saved.length === CORE_STATE_RANGES.length);
     this.wm.exports["fpu_discard_cache"]();
     const memory = new Uint8Array(this.wasm_memory.buffer);
     CORE_STATE_RANGES.forEach(([start], i) => memory.set(saved[i], start));
-    this.full_clear_tlb();
+    if(!preserve_tlb) this.full_clear_tlb();
+    this.wm.exports["ir_admission_barrier"]();
     this.update_state_flags();
 };
 
@@ -1107,6 +1232,8 @@ CPU.prototype.get_diagnostics = function()
             "state": !state.running ? "wait-for-sipi" : field(STATE_OFFSETS.in_hlt, 1) ? "halted" : "runnable",
             "slices": state.slices,
             "interpreter_steps": state.steps,
+            "ipi_sent": this.wm.exports["apic_core_ipi_sent"](core) >>> 0,
+            "ipi_received": this.wm.exports["apic_core_ipi_received"](core) >>> 0,
             "apic_id": lapic[0] >>> 24,
             "apic_irr": bits(lapic.subarray(16, 24)),
             "apic_isr": bits(lapic.subarray(24, 32)),
@@ -1122,6 +1249,8 @@ CPU.prototype.get_diagnostics = function()
     return {
         "active_core": this.active_core,
         "cores": cores,
+        "clock": Object.assign({ "mode": this.clock.mode, "now_ms": this.clock.now() }, this.clock.get_diagnostics()),
+        "scheduler": { "quantum": this.scheduler_quantum, "seed": this.scheduler_seed, "round": this.scheduler_round },
         "cpu": {
             "mode": mode,
             "paging": !!(cr0 & 1 << 31),
@@ -1289,10 +1418,35 @@ CPU.prototype.unpack_memory = function(bitmap, packed_memory)
     }
 };
 
+/** @param {function():number} run @return {number} */
+CPU.prototype.execute_cpu = function(run)
+{
+    this.in_cpu = true;
+    try { return run(); }
+    finally
+    {
+        this.in_cpu = false;
+        if(this.reset_pending)
+        {
+            this.reset_pending = false;
+            this.reboot_internal();
+        }
+    }
+};
+
 CPU.prototype.reboot_internal = function()
 {
+    // A guest CF9/8042 OUT finishes before architectural state is replaced.
+    if(this.in_cpu)
+    {
+        this.reset_pending = true;
+        this.wm.exports["request_core_yield"]();
+        return;
+    }
+    this.clock.now();
     this.reset_cores();
     this.reset_cpu();
+    this.wm.exports["context_reset_all"]();
 
     this.fw_value = [];
 
@@ -1609,11 +1763,25 @@ CPU.prototype.get_jit_info = function()
  */
 CPU.prototype.init = function(settings, device_bus)
 {
-    // With more than one core, PAUSE ends the slice of the spinning core; only
-    // the interpreter implements that yet, so multicore machines run without
-    // the JIT (docs/acpi-x86-64-multicore-plan.zh-CN.md, C1/C3)
     const multicore = (settings.cpu_cores || 1) > 1;
-    this.configure_jit_backend(multicore ? Object.assign({}, settings, { disable_jit: true }) : settings);
+    this.clock = new MachineClock(Object.assign({ now: v86.microtick }, settings.cpu_clock));
+    this.clock.set_instruction_source(() => this.wm.exports["take_clock_progress"]());
+    const deterministic = this.clock.mode === "deterministic";
+    this.wm.exports["set_deterministic_execution"](deterministic);
+    this.scheduler_quantum = settings.cpu_quantum === undefined ? 4096 : settings.cpu_quantum;
+    if(!Number.isInteger(this.scheduler_quantum) || this.scheduler_quantum < 1 || this.scheduler_quantum > 100000)
+    {
+        throw new Error("cpu_quantum must be an integer from 1 to 100000");
+    }
+    this.scheduler_seed = settings.cpu_schedule_seed >>> 0;
+    if(multicore && settings.cpuid_level !== undefined && settings.cpuid_level < 0x1F)
+    {
+        throw new Error("Multicore topology requires cpuid_level >= 0x1F");
+    }
+    // Deterministic time uses the interpreter's architectural commit ledger.
+    // Multicore JIT remains opt-in until the complete C3 stress matrix passes.
+    const interpreted = deterministic || multicore && !settings.experimental_smp_jit;
+    this.configure_jit_backend(interpreted ? Object.assign({}, settings, { disable_jit: true }) : settings);
     this.wm.exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     this.wm.exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
     this.create_memory(
@@ -2460,7 +2628,8 @@ CPU.prototype.ir_auto_publish = function(id, slot, ptr, len)
 CPU.prototype.ir_publish_cached = function(owner, id, slot, code, automatic)
 {
     const { wasm, exports, table } = owner;
-    const current = () => this.wm === wasm && this.wm.exports === exports && this.wm.wasm_table === table;
+    const epoch = this.execution_epoch;
+    const current = () => this.execution_epoch === epoch && this.wm === wasm && this.wm.exports === exports && this.wm.wasm_table === table;
     const failed = () => {
         if(current()) { exports["ir_cache_cancel"](id, slot); exports["ir_cache_collect"](); }
         return false;

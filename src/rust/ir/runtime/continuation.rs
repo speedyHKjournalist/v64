@@ -183,6 +183,9 @@ impl NotifiedObserver {
 /// in IRR; an observer which unmasks it is checked again after completion.
 pub(super) unsafe fn no_pending_irq() -> bool {
     !*gp::in_hlt
-        && !crate::cpu::pic::has_pending_irq()
+        && !crate::cpu::cpu::core_yield
+        && !crate::cpu::apic::has_core_events()
+        && !crate::cpu::apic::apic_core_nmi_pending(crate::cpu::apic::current_core() as u32)
+        && !crate::cpu::apic::routed_pic_pending(crate::cpu::apic::current_core() as u32)
         && (!*gp::acpi_enabled || !crate::cpu::apic::has_pending_irq())
 }

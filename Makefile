@@ -98,7 +98,7 @@ CARGO_FLAGS_SAFE=\
 
 CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
 
-CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
+CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
@@ -589,8 +589,7 @@ build/smp/firmware_boot.bin: tests/smp/firmware_boot.asm
 	mkdir -p build/smp
 	nasm -f bin -o $@ $<
 
-# C1 sub-gate: real INIT/SIPI guest startup and interrupt routing. Multicore
-# JIT, OS topology, and full-machine state await the C2/C3 gates.
+# C1 guest startup and interrupt routing; clock/topology/coherence gates below.
 multicore-boot-tests: build/smp/ap_startup.bin build/smp/firmware_boot.bin build/v86-debug.wasm state-layout-check
 	node tests/smp/apic_routing.mjs
 	node tests/smp/scheduler.mjs
@@ -602,6 +601,27 @@ multicore-boot-tests-release: build/smp/ap_startup.bin build/smp/firmware_boot.b
 	TEST_RELEASE_BUILD=1 node tests/smp/scheduler.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/ap_startup.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/firmware_boot.mjs
+
+# C0/C3 focused gates. OS tests are separate because they need Linux media.
+multicore-clock-tests: build/v86-debug.wasm
+	node tests/smp/clock.mjs
+	node tests/smp/clock_execution.mjs
+
+multicore-coherence-tests: build/v86-debug.wasm state-layout-check
+	node tests/smp/coherence.mjs
+	node tests/smp/lifecycle.mjs
+	node tests/smp/publication.mjs
+
+multicore-clock-tests-release: build/libv86.mjs build/v86.wasm
+	node tests/smp/clock.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/clock_execution.mjs
+
+multicore-coherence-tests-release: build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/coherence.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/lifecycle.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/publication.mjs
+
+.PHONY: multicore-clock-tests multicore-clock-tests-release multicore-coherence-tests multicore-coherence-tests-release
 
 .PHONY: state-layout state-layout-check smp-tests multicore-boot-tests multicore-boot-tests-release
 
@@ -1069,3 +1089,32 @@ build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/v86-ir-test-fallback
 .PHONY: ir-budget-batch-tests
 ir-budget-batch-tests:
 	sh tools/ir-budget-batch-tests.sh
+
+# C2: CPUID and firmware-input agreement, followed by real 32-bit Linux SMP.
+build/smp/affinity_probe: tests/smp/affinity_probe.asm
+	mkdir -p build/smp
+	nasm -f bin $< -o $@
+
+multicore-topology-tests: build/v86-debug.wasm state-layout-check
+	node tests/smp/topology.mjs
+
+multicore-topology-tests-release: build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/topology.mjs
+
+multicore-linux-tests: build/smp/affinity_probe build/v86-debug.wasm images/linux4.iso
+	node tests/smp/linux_topology.mjs
+
+multicore-linux-tests-release: build/smp/affinity_probe build/libv86.mjs build/v86.wasm images/linux4.iso
+	TEST_RELEASE_BUILD=1 node tests/smp/linux_topology.mjs
+
+.PHONY: multicore-topology-tests multicore-topology-tests-release multicore-linux-tests multicore-linux-tests-release
+
+multicore-linux-jit-tests: build/smp/affinity_probe build/v86-debug.wasm images/linux4.iso
+	SMP_JIT_MODE=tier0 node tests/smp/linux_topology.mjs
+	SMP_JIT_MODE=region node tests/smp/linux_topology.mjs
+
+multicore-linux-jit-tests-release: build/smp/affinity_probe build/libv86.mjs build/v86.wasm images/linux4.iso
+	TEST_RELEASE_BUILD=1 SMP_JIT_MODE=tier0 node tests/smp/linux_topology.mjs
+	TEST_RELEASE_BUILD=1 SMP_JIT_MODE=region node tests/smp/linux_topology.mjs
+
+.PHONY: multicore-linux-jit-tests multicore-linux-jit-tests-release

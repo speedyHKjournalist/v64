@@ -157,23 +157,27 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 ### 3.5 公开配置与快照
 
-建议新增配置（名称在 P0 固定，以下不是可直接使用的现有 API）：
+普通用户的 CPU 配置只需要设置核心数。`cpu_profile` 和 `cpu_execution` 不作为新增公开配置；原先列出的两项只是计划草案，尚未进入运行时 API，现在从公开接口设计中移除。
 
 ```javascript
 {
-    cpu_profile: "v86-x64-v1",
-    cpu_cores: 4,                    // 固定 1 socket，1 thread/core
-    cpu_execution: "cooperative",   // 之后增加 "parallel" / "auto"
-    acpi: true,
+    cpu_cores: 4,                    // 客户机可使用 4 个核心
+    acpi: true,                     // 当前多核实现所需的平台配置
     memory_size: 1024 * 1024 * 1024
 }
 ```
 
-沿用 `cpu_worker` 表示“VM 宿主放置方式”，不将其悄悄改为核心数。非法组合在启动前报错，例如多核却关闭必需的平台中断能力、未知 profile、超测试上限的核心数；`auto` 因环境限制回退时提供实际执行模式查询，显式 `parallel` 不静默变成串行。
+CPU 型号、执行策略和测试控制分别由内部管理：
 
-新快照保存 profile、拓扑、内存图/分块索引、所有 CPU 架构状态、LAPIC/IOAPIC、队列、时间和设备状态。暂停所有核并确认无活动 JIT/helper 帧后采集；恢复后丢弃 TLB/JIT/宿主句柄并重建。
+- **CPU 能力与兼容版本**：内部 profile 固定客户机可见的 CPUID、指令集、MSR 和固件契约，并作为快照兼容元数据保存。新机器使用经过验收的默认能力；恢复快照保留原能力契约，不因宿主变化、核心数变化或升级而悄悄暴露不同指令集。当前单核 legacy 与多核 smp32 的选择由实现负责，用户无需输入版本名。后续 x64 的默认开放仍须通过对应发布门槛。
+- **宿主执行策略**：由实现根据已发布能力、宿主支持和资源条件自动选择。当前仅实现有界轮转；W0–W2 并行后端通过验收后，才能纳入内部选择。缺少并行支持时仍向客户机提供请求的 N 个核心，以轮转方式运行，不减少核心数。用户无需选择 cooperative、parallel 或 auto。
+- **测试和诊断**：强制某个后端、固定 quantum/种子、确定性时钟等仅用于开发与可复现测试，不进入普通用户的必填配置或设置界面。测试显式要求并行时，环境不满足必须失败或按测试规则报告 SKIP，不能回退后把结果算作并行验收。实际后端和回退原因可从只读诊断中查询，普通界面使用容易理解的状态说明。
 
-升级 state version；为明确支持的旧 v6 单核快照提供到 legacy profile 的导入器，其他版本/不兼容拓扑在修改 VM 前拒绝。不能把旧 8×32 位数组直接解释为新 16×64 位状态，也不能把保存时的 4 核状态恢复到 2 核后丢掉 AP。
+沿用 `cpu_worker` 表示既有的 VM 宿主放置方式，不将其改为客户机核心数，也不要求用户为了使用多核而另外配置它。非法组合在启动前报错，例如当前多核却显式关闭必需的平台中断能力、超测试上限的核心数。是否将多核所需的平台能力默认启用，作为单独的兼容性变更评估，不因本节接口简化而改变现有运行行为。
+
+新快照保存内部 profile/能力版本、拓扑、内存图/分块索引、所有 CPU 架构状态、LAPIC/IOAPIC、队列、时间和设备状态。暂停所有核并确认无活动 JIT/helper 帧后采集；保留每核客户机 TLB 翻译语义，恢复时重建宿主指针、JIT 和宿主句柄。宿主执行策略不成为用户需要匹配的客户机配置，跨后端恢复必须先通过状态兼容验证。
+
+升级 state version；为明确支持的旧 v6 单核快照提供到内部 legacy profile 的导入器，其他版本/不兼容拓扑在修改 VM 前拒绝。不能把旧 8×32 位数组直接解释为新 16×64 位状态，也不能把保存时的 4 核状态恢复到 2 核后丢掉 AP。
 
 ## 4. 阶段与依赖
 
@@ -385,9 +389,9 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 **修改范围**：`src/main.js` 主循环、PIT/RTC/ACPI/LAPIC 定时器、TSC（`cpu.rs` 的 `read_tsc`/`tsc_offset`）、测试钩子。
 
-- [ ] Machine 级时钟：正常模式跟随宿主单调时间；测试模式按已提交指令数推进，可注入。所有设备与 TSC 从它读时间，不再各自调用 `microtick()`。
-- [ ] 规定暂停、后台节流、S3、快照恢复时的推进策略；宿主长暂停后的补发有上限并记录。
-- [ ] 时钟只推进一次/每 Machine：多核轮转时 AP 的执行不重复驱动设备计时。
+- [x] Machine 级时钟：正常模式跟随宿主单调时间；测试模式按已提交指令数推进，可注入。所有设备与 TSC 从它读时间，不再各自调用 `microtick()`。
+- [x] 规定暂停、后台节流、S3、快照恢复时的推进策略；宿主长暂停后的补发有上限并记录。
+- [x] 时钟只推进一次/每 Machine：多核轮转时 AP 的执行不重复驱动设备计时。
 
 **退出条件**：同一镜像、同一输入和种子在测试模式下两次运行得到相同的 IRQ 序列、PM timer 读数和串口输出；正常模式下单核启动时间与 P0 基线无显著差异。
 
@@ -397,18 +401,18 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 本阶段在 32 位下完成，不等待 x86-64。A2 已先落地，因此本次固件验收直接使用 v86 的 table-loader/MADT 路径。
 
-- [x] **最小解释器调度器**：JS `run_cores()` 在安全点选择核并调用 Rust `run_cpu_slice(budget)`，每轮每核预算 4096 个解释器 dispatch（STI 的一条 shadow 指令最多超额 1）；同页无 PAUSE 忙等也受预算限制，长 REP 每次最多 256 个元素后让出。切换不拆开 LOCK/隐式 XCHG 的指令体。所有核 HLT 时 Machine 仍服务定时器，AP 的 HLT 不重复服务设备。多核自动禁用 JIT。dispatch 计数包含 REP 续跑与异常分派，**不是** C0 已提交指令时钟。
+- [x] **最小解释器调度器**：JS `run_cores()` 在安全点选择核并调用 Rust `run_cpu_slice(budget)`，每轮每核预算 4096 个解释器 dispatch（STI 的一条 shadow 指令最多超额 1）；同页无 PAUSE 忙等也受预算限制，长 REP 每次最多 256 个元素后让出。切换不拆开 LOCK/隐式 XCHG 的指令体。所有核 HLT 时 Machine 仍服务定时器，AP 的 HLT 不重复服务设备。多核默认禁用 JIT，C3 提供显式实验选项。dispatch 计数包含 REP 续跑与异常分派，**不是** C0 已提交指令时钟。
 - [x] 按 §3.1 第一步实现状态块换入换出（范围来自 P2a），切换点只在主循环安全点；先以测试钩子验证两核交替执行无串扰，再接入调度器。
-- [ ] 每核独立 LAPIC/IRR/ISR/TMR/TPR/PPR/LVT/timer/APIC_BASE/MSR 状态（LAPIC 改为按核数组）；IOAPIC/PIC/外设属于 Machine。
-- [ ] 明确 BSP reset、AP wait-for-SIPI、INIT assert/deassert、SIPI vector 和重复 SIPI 的规则；AP 从正确实模式入口运行，不通过宿主直接跳进内核函数。
-- [ ] 实现 ICR destination/shorthand、physical/logical destination、fixed/lowest-priority/NMI/INIT/SIPI 和所需 ExtINT；不支持的保留编码遵循选定模型。
-- [ ] 实现 EOI、remote-IRR、电平重触发、mask/unmask、优先级和每核 LAPIC timer；设备 IRQ 通过路由选择目标，不无条件交给 BSP。
+- [x] 每核独立 LAPIC/IRR/ISR/TMR/TPR/PPR/LVT/timer/APIC_BASE/MSR 状态（LAPIC 改为按核数组）；IOAPIC/PIC/外设属于 Machine。
+- [x] 明确 BSP reset、AP wait-for-SIPI、INIT assert/deassert、SIPI vector 和重复 SIPI 的规则；AP 从正确实模式入口运行，不通过宿主直接跳进内核函数。
+- [x] 实现 ICR destination/shorthand、physical/logical destination、fixed/lowest-priority/NMI/INIT/SIPI 和所需 ExtINT；不支持的保留编码遵循选定模型。
+- [x] 实现 EOI、remote-IRR、电平重触发、mask/unmask、优先级和每核 LAPIC timer；设备 IRQ 通过路由选择目标，不无条件交给 BSP。
 - [x] 32 位最小 trampoline 逐核写签名、发送回执 IPI，验证定向、广播、all-excluding-self、HLT 后唤醒、AP 重初始化；覆盖同一切片中先后两个不同 SIPI vector，只采用第一个。
 - [x] 真正 SeaBIOS 启动：2/3/4/8 核通过 BIOS POST 后进入软盘引导扇区；fw_cfg 仍公布完整 expected CPU count，全部 AP 实际执行，内存中 MADT 核数/ID/校验和一致。
 
-**实施记录（2026-09-27，review 后推进）**：新增 `make multicore-boot-tests` / `multicore-boot-tests-release`，覆盖 APIC physical/flat/cluster 路由、INIT/SIPI 顺序、NMI latch、优先级、IOAPIC 电平重投递、精确忙等预算、REP 续跑、BSP CLI+HLT 时 AP timer 唤醒，以及真实客户机 trampoline/SeaBIOS。`apic.flat` 已从 8 PASS/3 FAIL/1 SKIP 提升为 11 PASS/0 FAIL/1 SKIP，纳入 `kvm-unit-test-apic`。
+**前一轮实施记录（2026-09-27，C1 子门槛）**：新增 `make multicore-boot-tests` / `multicore-boot-tests-release`，覆盖 APIC physical/flat/cluster 路由、INIT/SIPI 顺序、NMI latch、优先级、IOAPIC 电平重投递、精确忙等预算、REP 续跑、BSP CLI+HLT 时 AP timer 唤醒，以及真实客户机 trampoline/SeaBIOS。`apic.flat` 已从 8 PASS/3 FAIL/1 SKIP 提升为 11 PASS/0 FAIL/1 SKIP，纳入 `kvm-unit-test-apic`。
 
-本轮还修复 CF9 注册位置、PCI/ACPI 快照 PM 解码顺序、单核 NMI/APIC enable 快照缺失；多核 save/restore 明确拒绝，restore 在写入 RAM 前拒绝。布局增加 `nmi_blocked`，当前为 59 字段、1144 字节每核区域、136 个已分类 static。详见 [C1 验证与审查记录](validation/platform/C1/review-and-validation.zh-CN.md)。C0 尚未完成，此处只接受独立的 C1 子门槛；下一阶段先统一虚拟时间，再关闭 C1 的 ExtINT/APIC 禁用等语义缺口与 C2 的 CPUID/OS 拓扑验收。
+前一轮还修复 CF9 注册位置、PCI/ACPI 快照 PM 解码顺序、单核 NMI/APIC enable 快照缺失；多核 save/restore 明确拒绝，restore 在写入 RAM 前拒绝。布局增加 `nmi_blocked`，当前为 59 字段、1144 字节每核区域、136 个已分类 static。详见 [C1 验证与审查记录](validation/platform/C1/review-and-validation.zh-CN.md)。以上是前一轮状态；本次时钟、ExtINT/APIC enable、拓扑和多核快照进度以下方新记录为准。
 
 **退出条件**：2/4/8 核 trampoline 均由客户机启动；每核 ID/寄存器/栈独立；IPI 延迟受预算约束；固件启动不靠减少其 expected CPU count 逃避失败。
 
@@ -416,13 +420,13 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 **修改范围**：CPUID、平台描述、固件 MADT/SSDT/可选 SMBIOS、CMOS、main run loop、JIT budget。
 
-本阶段用 32 位 OS、`disable_jit:true` 验收；多核配置在 C3 通过前不允许启用 JIT。x64 OS 上的同一矩阵由 XC 负责。
+本阶段先用 32 位 OS、`disable_jit:true` 验收；C3 最小一致性门槛通过后，再用显式实验选项重跑两个 JIT 后端。多核默认保持解释器，完整 C3 门槛通过后再决定默认开放。x64 OS 上的同一矩阵由 XC 负责。
 
-- [ ] 全部来源使用同一 `Topology { sockets:1, cores:N, threads_per_core:1 }`。CPU/APIC ID 稳定映射到 core ID；BSP 标志唯一。
-- [ ] CPUID leaf 1 的 logical count/HTT、leaf 4 cache/core 信息、0xB/0x1F topology 与 profile 最大 leaf 一致；没有 SMT 不代表可以随意清除用于历史枚举的 HTT 位。逐个 subleaf 写预期输出测试。
-- [ ] SMT 层 count=1，core/package 层报告 N；package ID 始终为 0。3 核用合适 ID 位宽，不能用 N 直接当 shift。所有核的 CPUID 只在该不同处不同。
-- [ ] MADT 和 AML 各核对象 ID 与 CPUID 对齐；若生成 SMBIOS，Type 4 应反映一个处理器封装、N 核，不生成 N 个 socket。旧 MP table 只提供其能表达的信息，不能推翻 CPUID 拓扑。
-- [ ] 扩展 C1 的调度器，在预算/事件边界轮转，处理忙等、长 REP 和 HLT；定义 JIT 自循环/跨页链接的预算接口，C3 完成一致性后才开启。设备计时每台 Machine 推进一次，AP 运行不重复调用全局设备 timer。
+- [x] 全部来源使用同一 `Topology { sockets:1, cores:N, threads_per_core:1 }`。CPU/APIC ID 稳定映射到 core ID；BSP 标志唯一。
+- [x] CPUID leaf 1 的 logical count/HTT、leaf 4 cache/core 信息、0xB/0x1F topology 与 profile 最大 leaf 一致；没有 SMT 不代表可以随意清除用于历史枚举的 HTT 位。逐个 subleaf 写预期输出测试。
+- [x] SMT 层 count=1，core/package 层报告 N；package ID 始终为 0。3 核用合适 ID 位宽，不能用 N 直接当 shift。所有核的 CPUID 只在该不同处不同。
+- [x] MADT 和 AML 各核对象 ID 与 CPUID 对齐；若生成 SMBIOS，Type 4 应反映一个处理器封装、N 核，不生成 N 个 socket。旧 MP table 只提供其能表达的信息，不能推翻 CPUID 拓扑。
+- [x] 扩展 C1 的调度器，在预算/事件边界轮转，处理忙等、长 REP 和 HLT；定义 JIT 自循环/跨页链接的预算接口，C3 完成一致性后才开启。设备计时每台 Machine 推进一次，AP 运行不重复调用全局设备 timer。
 - [ ] 为所有核设置合理预算上限，并提供每核提交指令、运行时间、IPI 和 halt 计数诊断。
 
 **退出条件**：Linux `lscpu` 显示 `Socket(s)=1`、`Core(s) per socket=N`、`Thread(s) per core=1`；`/sys/devices/system/cpu/*/topology` 一致；Windows 拓扑 API/系统工具同样确认。核绑定程序在所有核执行并得到独立进度，不能只检查 `/proc/cpuinfo` 条目数。
@@ -433,13 +437,24 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 - [ ] 将 C1 的解释器原子事务保证推广到所有 JIT 路径：LOCK、隐式锁定 XCHG、CMPXCHG8B/16B 不可分割；跨页/未对齐/MMIO 的故障和部分提交按指令契约处理。不得仅把 LOCK 当可忽略前缀。
 - [ ] 明确 x86 内存顺序要求。轮转执行可采用更强的顺序作为正确性起点；IR 不能把跨核可能改变的 RAM load 在安全点前后永久复用，优化需要有效失效 guard。
-- [ ] TLB 每核独立：本核 INVLPG/CR3 操作按规范生效，其他核通过客户机 IPI shootdown 刷新。不要让“任一页表写自动 flush 所有核”掩盖 shootdown 缺陷。
-- [ ] 代码写入更新 Machine 级物理页 generation，通知所有相关 JIT。活动帧必须在保证的观察边界退出；待发布的旧快照编译结果被拒绝，table slot 只在安全回收后复用。
-- [ ] **先通过多核 JIT 最小安全门槛再运行 OS**：每核状态隔离、LOCK 事务、所有核代码页失效、load 优化边界和异步发布校验的微测试全绿；之后开启 C2 预留的 JIT 预算/链接路径，并重跑 C2 的完整 OS/拓扑矩阵。
-- [ ] 测试核 A 修改核 B 将执行的代码，按架构规定完成同步/序列化后 B 必须执行新代码；包含物理别名、DMA、自修改、恢复后异步编译回调，不要求未同步 SMC 有超出硬件的语义。
+- [x] TLB 每核独立：本核 INVLPG/CR3 操作按规范生效，其他核通过客户机 IPI shootdown 刷新。不要让“任一页表写自动 flush 所有核”掩盖 shootdown 缺陷。
+- [x] 代码写入更新 Machine 级物理页 generation，通知所有相关 JIT。活动帧必须在保证的观察边界退出；待发布的旧快照编译结果被拒绝，table slot 只在安全回收后复用。
+- [x] **先通过多核 JIT 最小安全门槛再运行 OS**：每核状态隔离、LOCK 事务、所有核代码页失效、load 优化边界和异步发布校验的微测试全绿；之后开启 C2 预留的 JIT 预算/链接路径，并重跑 C2 的完整 OS/拓扑矩阵。
+- [x] 测试核 A 修改核 B 将执行的代码，按架构规定完成同步/序列化后 B 必须执行新代码；包含物理别名、DMA、自修改、恢复后异步编译回调，不要求未同步 SMC 有超出硬件的语义。
 - [ ] stop/save/reset/S3/S5 协调全部核，清空或保留事件按类型区分。三重故障和 AP INIT 不混成同一个无条件全机重启操作，按平台策略测试。
 
 **退出条件**：锁保护计数器、无锁队列/发布、TLB shootdown、跨核 SMC、信号/线程迁移、磁盘/网络压力运行通过；保存于 pending IPI/REP/HLT 状态后恢复结果一致。至少 10 个固定调度种子、多档 quantum 均通过；执行后端覆盖解释器、Tier-0、区域管线。
+
+**本次实施记录（2026-09-27，C0–C3）**：
+
+- C0 已接入 `cpu_clock`（normal/deterministic）、全部 PIT/RTC/PM/LAPIC/TSC 时间读取及 pause/resume/save/restore 策略。确定性模式使用解释器提交账本，普通成功指令与已完成 REP 元素推进时钟，faulting dispatch 不退休；停止时冻结，长宿主间隔最多补入 1000ms 并计诊断。参见 [时钟及设备验证](validation/platform/C0/clock-and-devices.zh-CN.md)。正常单核已启动，但尚未建立同环境 P0 wall-time 对照，不能将“性能无显著差异”门槛写为通过。
+- C1 补齐 APIC_BASE/SVR、ExtINT 到 AP、ESR/保留编码、同 vector pending TMR、timer mask/phase，并保留 BSP virtual-wire 启动策略。硬件禁用 APIC 不再接收 APIC 消息；软件禁用不屏蔽 NMI/INIT/SIPI。参见 [中断语义补齐](validation/platform/C1/interrupt-completion.zh-CN.md)。
+- C2 的 1..8 CPUID/MADT/AML/fw_cfg/CMOS 一致性与真实 Linux 1/2/3/4/8 核单 package、逐核 affinity 计算均已通过；在一致性微测试门槛之后，interpreter/Tier-0/region 三后端的 15 个 OS 配置全部通过，JIT 模式同时检查每核绑定工作阶段真实 compiled activations。核数为 3 时使用 ceil(log2 N) 的 APIC ID 位宽。当前 BIOS 不生成 SMBIOS Type 4；没有 Windows 测试镜像。参见 [拓扑及 Linux 原始记录](validation/platform/C2/topology-and-linux.zh-CN.md)。调度提供 `cpu_quantum`、`cpu_schedule_seed`、每核 slices/dispatch steps/IPI；尚不把混合 dispatch/JIT step 统计当作完整的每核退休量和运行时间诊断。
+- C3 新增每核稀疏 TLB 保存/恢复，不因换核而刷新客户机映射；按机器代码页状态重新同步 TLB 的 code 标志。独立 TSC offset、LAPIC/AUX、NMI/ExtINT/INIT/SIPI、REP/HLT、机器时钟和调度顺序纳入全机快照，核数不匹配在修改 RAM/设备之前拒绝。旧单核快照仍接受，旧 host-absolute timer 的相位采用文档化 best-effort 重锚。
+- JIT 编译额度每个 Machine round 补一次；Tier-0 loop poll 和跨页链接受 slice budget 限制。`experimental_smp_jit:true` 显式开放实验执行，默认仍采用解释器。微测试在 interpreter/Tier-0/region 上覆盖 10 seeds、quantum 17/257/4096、4/8 核、LOCK/XCHG/CMPXCHG8B、共享 load、物理别名 SMC、DMA 写屏障、IPI shootdown 和异步发布。每个构建 101 场景；故意换核 flush 与移除 INVLPG 的负向控制都能失败。参见 [一致性微测试](validation/platform/C3/coherence.zh-CN.md) 和 [全机状态验证](validation/platform/C3/lifecycle.zh-CN.md)。
+- CF9/8042 客户机复位延迟到指令返回安全点执行；restore/reset 的 execution epoch 阻止旧异步编译回调安装或取消新一代 table slot。快照事务冻结统一时间，恢复后继续同一调度与 REP 结果。
+
+`make multicore-clock-tests`、`multicore-boot-tests`、`multicore-topology-tests`、`multicore-coherence-tests` 均有 `-release` 对应目标。真实 Linux 使用 `multicore-linux-tests`，JIT OS 模式见 C2 记录。完整 C3/R-SMP32 **仍未关闭**：跨页故障/MMIO 的原子部分提交、线程/信号迁移、真实磁盘/网卡长期压力，以及 S3（依赖 A3）尚需独立验收；CMPXCHG16B/x64 留给已列明的 x64/XC 范围。现有勾选表示对应实现及局部门槛，不替代各阶段尚未完成的退出条件。
 
 ### XC：x64 × 多核集成
 
@@ -487,7 +502,7 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 - [ ] 设备由一个协调器拥有。PIO/MMIO、DMA、IRQ、时钟和磁盘请求携带 vCPU ID/序号，通过有界队列同步/异步处理；不能在浏览器主线程阻塞等待，也不能形成“持全局锁等待设备，设备等待停核”的死锁。
 - [ ] 每 Worker 实例化自己的 Wasm.Table/函数引用和 JIT runtime。只共享可传递的代码/元数据；发布核对全机 generation、模式和 topology，不能把一个 Worker 的函数索引当作另一个 Worker 的有效入口。
 - [ ] SMC、reset、restore、S3、S5、debug pause 建立 stop-the-world rendezvous 与超时故障诊断；所有核确认退出活动帧后才能复用内存、回收代码和采集快照。
-- [ ] 检测 secure context、cross-origin isolation、shared Wasm memory/Atomics 支持；记录 COOP/COEP 对资源加载的要求。环境不满足时 `auto` 返回轮转模式并可查询原因。浏览器要求参考 [SharedArrayBuffer 文档](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer)。
+- [ ] 检测 secure context、cross-origin isolation、shared Wasm memory/Atomics 支持；记录 COOP/COEP 对资源加载的要求。普通启动由内部策略自动选择后端；环境不满足时保持请求的客户机核心数并回退到轮转模式，可从只读诊断查询原因。内部测试强制并行时不得自动回退。浏览器要求参考 [SharedArrayBuffer 文档](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer)。
 
 **退出条件**：C3/A3 的同一套验收在真实并发下通过；另加入 fence/store-buffering、原子对齐/跨边界、A/D race、丢唤醒、SMC 发布竞争、设备队列溢出、Worker 异常退出/取消等测试。长期压力期间无死锁、丢 IRQ、撕裂的受保证原子值或 host panic。没有证明的快路径继续走正确慢路径。
 
@@ -497,7 +512,7 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 - [ ] 记录宿主物理核心数、浏览器/Node、冷/热 JIT、wall time、guest work、编译时间、CPU/内存占用和同步等待比例；trace 证明至少两个核执行区间重叠。
 - [ ] 在预先固定且有至少 4 个可用宿主核心的 runner 上，以可并行 CPU workload 的 2/4 核吞吐显著高于单核为发布条件；P0 先约定噪声范围/阈值。不得要求所有负载随核心数线性加速，也不得无测量承诺加速倍数。
 - [ ] 若全局内存锁或协调器成为瓶颈，按测量优化而不是放松原子语义。可只对经过证明的地址/指令开放快路径。
-- [ ] API/类型/示例/UI/worker options/state version 更新一致；保留 legacy 默认和可观测回退。`acpi` 去 experimental 需 A3/R1 通过，新 x64/多核模式稳定需各自 gate 通过。
+- [ ] API/类型/示例/UI/worker options/state version 更新一致；普通 CPU 配置只暴露 `cpu_cores`，后端选择保持内部自动策略；保留 legacy 兼容和只读可观测回退。`acpi` 去 experimental 需 A3/R1 通过，新 x64/多核模式稳定需各自 gate 通过。
 
 **退出条件**：有可重跑正确性和性能报告；客户机拓扑、宿主执行模式、限制和已验证 OS 都能从文档与 API 明确得知。
 

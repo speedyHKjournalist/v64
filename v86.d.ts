@@ -574,14 +574,22 @@ export interface V86Options {
     acpi?: boolean;
 
     /**
-     * Number of cores of the single emulated processor (1 socket, 1 thread per
-     * core), 1 to 8. More than one requires acpi. The cores run one at a time
-     * (cooperative scheduling), not in parallel on host threads. Experimental:
-     * JIT is automatically disabled; saving or restoring state with multiple
-     * cores is not supported yet. Full OS topology validation is pending.
+     * Number of CPU cores available to the guest operating system, from 1 to 8.
+     * Execution is managed by the emulator; no additional CPU mode is required.
+     * Multiple cores currently require acpi: true. Snapshots require the same
+     * core count when restored. Multicore support is experimental.
      * @default 1
      */
     cpu_cores?: number;
+    /** Testing option. All device clocks and TSC share this domain; deterministic mode uses the interpreter. */
+    cpu_clock?: { mode?: "normal" | "deterministic"; instructions_per_ms?: number;
+        wall_epoch_ms?: number; max_host_delta_ms?: number };
+    /** Testing option: work budget for each CPU scheduling slice. */
+    cpu_quantum?: number;
+    /** Testing option: seed for reproducible CPU scheduling. */
+    cpu_schedule_seed?: number;
+    /** Testing option: opt into multicore JIT while the C3 stress matrix is being qualified. */
+    experimental_smp_jit?: boolean;
 
     /**
      * Log level (for debug builds)

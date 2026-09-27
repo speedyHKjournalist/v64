@@ -98,9 +98,11 @@ try
     assert.ok(cpu.run_cores() > 0, "a halted IF=0 core with a masked IPI must not busy-spin the host");
 
     const memory = cpu.mem8.slice(0, 0x6000);
-    await assert.rejects(emulator.restore_state(new ArrayBuffer(0)), /more than one core/);
+    await assert.rejects(emulator.restore_state(new ArrayBuffer(0)), /Invalid snapshot length/);
     assert.deepEqual(cpu.mem8.slice(0, 0x6000), memory, "rejected restore leaves RAM untouched");
-    await assert.rejects(emulator.save_state(), /more than one core/);
+    const saved = await emulator.save_state();
+    await emulator.restore_state(saved);
+    assert.deepEqual(cpu.mem8.slice(0, 0x6000), memory);
 }
 finally
 {
@@ -139,4 +141,4 @@ finally
 {
     await single.destroy();
 }
-console.log("SMP scheduler: exact busy-loop budget, bounded REP, halted-AP timer, snapshot guards and NMI state passed");
+console.log("SMP scheduler: exact busy-loop budget, bounded REP, halted-AP timer, snapshot restore and NMI state passed");

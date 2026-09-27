@@ -26,6 +26,7 @@ export const STATE_OFFSETS = {
     last_virt_eip: 620,
     eip_phys: 624,
     nmi_blocked: 628,
+    interrupt_shadow: 632,
     sysenter_cs: 636,
     sysenter_esp: 640,
     sysenter_eip: 644,
@@ -62,6 +63,7 @@ export const STATE_OFFSETS = {
     x87_shadow_valid: 1344,
     x87_shadow_dirty: 1348,
     x87_native_policy: 1352,
+    slice_budget: 1356,
     ir_tlb_base: 2048,
 };
 

@@ -74,7 +74,7 @@ export function V86(options)
         "run_hardware_timers": function(a, t) { return cpu.run_hardware_timers(a, t); },
         "cpu_event_halt": () => { this.emulator_bus.send("cpu-event-halt"); },
         "abort": function() { dbg_assert(false); },
-        "microtick": v86.microtick,
+        "microtick": () => cpu ? cpu.clock.now() : v86.microtick(),
         "get_rand_int": function() { return get_rand_int(); },
         "stop_idling": function() { return cpu.stop_idling(); },
 
@@ -238,6 +238,10 @@ V86.prototype.continue_init = async function(emulator, options)
 
     settings.acpi = options.acpi;
     settings.cpu_cores = options.cpu_cores;
+    settings.cpu_clock = options.cpu_clock;
+    settings.cpu_quantum = options.cpu_quantum;
+    settings.cpu_schedule_seed = options.cpu_schedule_seed;
+    settings.experimental_smp_jit = options.experimental_smp_jit;
     settings.disable_jit = options.disable_jit;
     settings["jit_backend"] = options["jit_backend"];
     settings["ir_region_budget"] = options["ir_region_budget"];
@@ -1027,7 +1031,7 @@ V86.prototype.restore_state = async function(state)
         try
         {
             await graphics["waitForIdle"](false, true);
-            this.v86.restore_state(state);
+            await this.v86.restore_state(state);
             await graphics["finishStateRestore"]();
         }
         catch(error)

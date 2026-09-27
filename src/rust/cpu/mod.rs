@@ -14,3 +14,6 @@ pub mod pic;
 pub mod sse_instr;
 pub mod string;
 pub mod vga;
+pub mod context;
+pub mod topology;
+pub mod execution;

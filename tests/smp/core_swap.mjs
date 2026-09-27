@@ -34,6 +34,7 @@ async function machine()
         log_level: 0,
     });
     await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
+    emulator.v86.cpu.clock.resume(); // explicit main_loop driver
     return emulator;
 }
 

@@ -1,0 +1,11 @@
+
+mount: mounting host9p on /mnt failed: Device or resource busy
+Files send via emulator appear in /mnt/
+~% sh /mnt/c2-topology.sh
+C2_KERNEL Linux (none) 4.16.13 #13 SMP Sat Jul 21 13:56:18 CST 2018 i686 GNU/Linux
+C2_ONLINE 0-1
+C2_TOPOLOGY id=0 package=0 core=0 threads=0 package_cpus=0
+C2_TOPOLOGY id=1 package=1 core=0 threads=1 package_cpus=1
+C2_PROGRESS id=0 cpu=0 iterations=100000
+C2_PROGRESS id=1 cpu=1 iterations=100000
+C2_DONE
