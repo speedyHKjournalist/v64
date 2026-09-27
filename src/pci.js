@@ -1,4 +1,5 @@
 import { LOG_PCI } from "./const.js";
+import { RESET_PORT } from "./platform.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
@@ -127,13 +128,6 @@ export function PCI(cpu)
         },
         function(out_byte)
         {
-            if((this.pci_addr[1] & 0x06) === 0x02 && (out_byte & 0x06) === 0x06)
-            {
-                dbg_log("CPU reboot via PCI");
-                cpu.reboot_internal();
-                return;
-            }
-
             this.pci_addr[1] = out_byte;
         },
         function(out_byte)
@@ -146,6 +140,26 @@ export function PCI(cpu)
             this.pci_query();
         }
     );
+
+    // PIIX reset control register (RCR): byte accesses to 0xCF9 only; word and
+    // dword accesses at 0xCF8 are the configuration address. A 0 -> 1
+    // transition of RST_CPU (bit 2) resets the machine (the FADT reset
+    // register writes 0x06; Linux' reboot=pci writes 0x02, then 0x06).
+    this.reset_control = 0;
+    cpu.io.register_read(RESET_PORT, this, function()
+    {
+        return this.reset_control;
+    });
+    cpu.io.register_write(RESET_PORT, this, function(value)
+    {
+        const rst_cpu_rising = ~this.reset_control & value & 0x04;
+        this.reset_control = value & 0x06;
+        if(rst_cpu_rising)
+        {
+            dbg_log("CPU reboot via PIIX reset control register");
+            cpu.reboot_internal();
+        }
+    });
 
 
     // Some experimental PCI devices taken from my PC:
@@ -208,6 +222,12 @@ export function PCI(cpu)
     //], 0x1e << 3);
 }
 
+/** Machine reset */
+PCI.prototype.reset = function()
+{
+    this.reset_control = 0;
+};
+
 PCI.prototype.get_state = function()
 {
     var state = [];
@@ -221,6 +241,7 @@ PCI.prototype.get_state = function()
     state[257] = this.pci_value;
     state[258] = this.pci_response;
     state[259] = this.pci_status;
+    state[260] = this.reset_control;
 
     return state;
 };
@@ -277,12 +298,14 @@ PCI.prototype.set_state = function(state)
         }
 
         this.device_spaces[i].set(space);
+        device.on_config_restore && device.on_config_restore();
     }
 
     this.pci_addr.set(state[256]);
     this.pci_value.set(state[257]);
     this.pci_response.set(state[258]);
     this.pci_status.set(state[259]);
+    this.reset_control = state[260] === undefined ? 0 : state[260];
 };
 
 PCI.prototype.pci_query = function()
@@ -359,6 +382,7 @@ PCI.prototype.pci_write8 = function(address, written)
             " value=" + h(written, 2), LOG_PCI);
 
     space[addr] = written;
+    device.on_config_write && device.on_config_write(addr);
 };
 
 PCI.prototype.pci_write16 = function(address, written)
@@ -390,6 +414,7 @@ PCI.prototype.pci_write16 = function(address, written)
             " value=" + h(written, 4), LOG_PCI);
 
     space[addr >>> 1] = written;
+    device.on_config_write && device.on_config_write(addr);
 };
 
 PCI.prototype.pci_write32 = function(address, written)
@@ -511,6 +536,7 @@ PCI.prototype.pci_write32 = function(address, written)
         dbg_log("PCI write dev=" + h(bdf >> 3, 2) + " (" + device.name + ") addr=" + h(addr, 4) +
                 " value=" + h(written >>> 0, 8), LOG_PCI);
         space[addr >>> 2] = written;
+        device.on_config_write && device.on_config_write(addr);
     }
 };
 

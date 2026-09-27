@@ -57,7 +57,7 @@ v86.prototype.do_tick = function()
     }
 
     this.idle = false;
-    const t = this.cpu.main_loop();
+    const t = this.cpu.run_cores();
 
     if(this.cpu.devices?.acpi?.soft_off)
     {

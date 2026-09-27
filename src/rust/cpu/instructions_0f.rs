@@ -1202,11 +1202,15 @@ pub unsafe fn instr_660F2F_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-pub unsafe fn instr_0F30() {
+pub unsafe fn instr_0F30() { wrmsr_checked(); }
+
+/// Whether WRMSR completed; fault delivery is owned by the CPU, while IR
+/// callers must not commit a faulting instruction.
+pub unsafe fn wrmsr_checked() -> bool {
     // wrmsr - write maschine specific register
     if 0 != *cpl {
         trigger_gp(0);
-        return;
+        return false;
     }
 
     let index = read_reg32(ECX);
@@ -1235,7 +1239,11 @@ pub unsafe fn instr_0F30() {
                 "Changing APIC address not supported"
             );
             dbg_assert!(low & IA32_APIC_BASE_EXTD == 0, "x2apic not supported");
-            *apic_enabled = low & IA32_APIC_BASE_EN == IA32_APIC_BASE_EN
+            let enable = low & IA32_APIC_BASE_EN == IA32_APIC_BASE_EN;
+            if *apic_enabled && !enable {
+                crate::cpu::apic::software_disable();
+            }
+            *apic_enabled = enable
         },
         IA32_TIME_STAMP_COUNTER => set_tsc(low as u32, high as u32),
         IA32_BIOS_UPDT_TRIG => {}, // windows xp
@@ -1247,9 +1255,18 @@ pub unsafe fn instr_0F30() {
             // Enable Misc. Processor Features
         },
         IA32_MCG_CAP => {}, // netbsd
-        IA32_KERNEL_GS_BASE => {
-            // Only used in 64 bit mode (by SWAPGS), but set by kvm-unit-test
-            dbg_log!("GS Base written");
+        IA32_FS_BASE | IA32_GS_BASE => {
+            // C1's compatibility MSRs expose the 32-bit hidden segment base
+            // used by kvm-unit-tests' per-CPU data. This is not the full
+            // long-mode MSR contract: reject unrepresentable values before
+            // changing state, identically in debug and release builds.
+            if high != 0 {
+                trigger_gp(0);
+                return false;
+            }
+            let segment = if index == IA32_FS_BASE { FS } else { GS };
+            *segment_offsets.offset(segment as isize) = low;
+            update_state_flags();
         },
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
@@ -1265,6 +1282,7 @@ pub unsafe fn instr_0F30() {
             dbg_assert!(false);
         },
     }
+    true
 }
 
 pub unsafe fn instr_0F31() {
@@ -1314,8 +1332,13 @@ pub unsafe fn instr_0F32() {
                 if *apic_enabled {
                     low |= IA32_APIC_BASE_EN
                 }
+                if crate::cpu::apic::current_core() == 0 {
+                    low |= IA32_APIC_BASE_BSP
+                }
             }
         },
+        IA32_FS_BASE => low = *segment_offsets.offset(FS as isize),
+        IA32_GS_BASE => low = *segment_offsets.offset(GS as isize),
         IA32_BIOS_SIGN_ID => {},
         MSR_PLATFORM_INFO => low = 1 << 8,
         MISC_FEATURE_ENABLES => {},
@@ -3306,7 +3329,9 @@ pub unsafe fn instr_0FA2() {
 
         1 => {
             eax = 3 | 7 << 4 | 6 << 8; // pentium3
-            ebx = 1 << 16 | 8 << 8; // cpu count, clflush size
+            // initial APIC ID of this core (topology fields: see C2 in
+            // docs/acpi-x86-64-multicore-plan.zh-CN.md), cpu count, clflush size
+            ebx = (crate::cpu::apic::current_core() as i32) << 24 | 1 << 16 | 8 << 8;
             ecx = 1 << 0 | 1 << 23 | 1 << 30; // sse3, popcnt, rdrand
             let vme = 0 << 1;
             if config::VMWARE_HYPERVISOR_PORT {
@@ -3317,9 +3342,8 @@ pub unsafe fn instr_0FA2() {
                     1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
                     1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
 
-            if *acpi_enabled
-            //&& this.apic_enabled[0])
-            {
+            // reflects IA32_APIC_BASE.EN, like the processor's APIC feature flag
+            if *acpi_enabled && *apic_enabled {
                 edx |= 1 << 9; // apic
             }
         },

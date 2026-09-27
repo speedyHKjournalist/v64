@@ -13,9 +13,13 @@ import {
 } from "./const.js";
 import { h, view, Bitmap } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
+import { v86 } from "./main.js";
 
 import { SB16 } from "./sb16.js";
 import { ACPI, acpi_system_states_file } from "./acpi.js";
+import { ACPI_LOADER_FILE, ACPI_RSDP_FILE, ACPI_TABLES_FILE, build_acpi_tables, locate_acpi_tables } from "./acpi_tables.js";
+import { ACPI_PM_BASE_DEFAULT, Platform, check_platform, create_platform } from "./platform.js";
+import { CORE_STATE_RANGES, STATE_OFFSETS } from "./state_layout.js";
 import { PIT } from "./pit.js";
 import { DMA } from "./dma.js";
 import { UART } from "./uart.js";
@@ -76,86 +80,86 @@ export function CPU(bus, wm, stop_idling)
 
     this.wasm_memory = memory;
 
-    this.memory_size = view(Uint32Array, memory, 812, 1);
+    this.memory_size = view(Uint32Array, memory, STATE_OFFSETS.memory_size, 1);
 
     this.mem8 = new Uint8Array(0);
     this.mem32s = new Int32Array(this.mem8.buffer);
 
-    this.segment_is_null = view(Uint8Array, memory, 724, 8);
-    this.segment_offsets = view(Int32Array, memory, 736, 8);
-    this.segment_limits = view(Uint32Array, memory, 768, 8);
-    this.segment_access_bytes = view(Uint8Array, memory, 512, 8);
+    this.segment_is_null = view(Uint8Array, memory, STATE_OFFSETS.segment_is_null, 8);
+    this.segment_offsets = view(Int32Array, memory, STATE_OFFSETS.segment_offsets, 8);
+    this.segment_limits = view(Uint32Array, memory, STATE_OFFSETS.segment_limits, 8);
+    this.segment_access_bytes = view(Uint8Array, memory, STATE_OFFSETS.segment_access_bytes, 8);
 
     /**
      * Wheter or not in protected mode
      */
-    this.protected_mode = view(Int32Array, memory, 800, 1);
+    this.protected_mode = view(Int32Array, memory, STATE_OFFSETS.protected_mode, 1);
 
-    this.idtr_size = view(Int32Array, memory, 564, 1);
-    this.idtr_offset = view(Int32Array, memory, 568, 1);
+    this.idtr_size = view(Int32Array, memory, STATE_OFFSETS.idtr_size, 1);
+    this.idtr_offset = view(Int32Array, memory, STATE_OFFSETS.idtr_offset, 1);
 
     /**
      * global descriptor table register
      */
-    this.gdtr_size = view(Int32Array, memory, 572, 1);
-    this.gdtr_offset = view(Int32Array, memory, 576, 1);
+    this.gdtr_size = view(Int32Array, memory, STATE_OFFSETS.gdtr_size, 1);
+    this.gdtr_offset = view(Int32Array, memory, STATE_OFFSETS.gdtr_offset, 1);
 
-    this.tss_size_32 = view(Int32Array, memory, 1128, 1);
+    this.tss_size_32 = view(Int32Array, memory, STATE_OFFSETS.tss_size_32, 1);
 
-    this.cr = view(Int32Array, memory, 580, 8);
+    this.cr = view(Int32Array, memory, STATE_OFFSETS.cr, 8);
 
     // current privilege level
-    this.cpl = view(Uint8Array, memory, 612, 1);
+    this.cpl = view(Uint8Array, memory, STATE_OFFSETS.cpl, 1);
 
     // current operand/address size
-    this.is_32 = view(Int32Array, memory, 804, 1);
+    this.is_32 = view(Int32Array, memory, STATE_OFFSETS.is_32, 1);
 
-    this.stack_size_32 = view(Int32Array, memory, 808, 1);
+    this.stack_size_32 = view(Int32Array, memory, STATE_OFFSETS.stack_size_32, 1);
 
     /**
      * Was the last instruction a hlt?
      */
-    this.in_hlt = view(Uint8Array, memory, 616, 1);
+    this.in_hlt = view(Uint8Array, memory, STATE_OFFSETS.in_hlt, 1);
 
-    this.last_virt_eip = view(Int32Array, memory, 620, 1);
-    this.eip_phys = view(Int32Array, memory, 624, 1);
+    this.last_virt_eip = view(Int32Array, memory, STATE_OFFSETS.last_virt_eip, 1);
+    this.eip_phys = view(Int32Array, memory, STATE_OFFSETS.eip_phys, 1);
 
 
-    this.sysenter_cs = view(Int32Array, memory, 636, 1);
+    this.sysenter_cs = view(Int32Array, memory, STATE_OFFSETS.sysenter_cs, 1);
 
-    this.sysenter_esp = view(Int32Array, memory, 640, 1);
+    this.sysenter_esp = view(Int32Array, memory, STATE_OFFSETS.sysenter_esp, 1);
 
-    this.sysenter_eip = view(Int32Array, memory, 644, 1);
+    this.sysenter_eip = view(Int32Array, memory, STATE_OFFSETS.sysenter_eip, 1);
 
-    this.prefixes = view(Int32Array, memory, 648, 1);
+    this.prefixes = view(Int32Array, memory, STATE_OFFSETS.prefixes, 1);
 
-    this.flags = view(Int32Array, memory, 120, 1);
+    this.flags = view(Int32Array, memory, STATE_OFFSETS.flags, 1);
 
     /**
      * bitmap of flags which are not updated in the flags variable
      * changed by arithmetic instructions, so only relevant to arithmetic flags
      */
-    this.flags_changed = view(Int32Array, memory, 100, 1);
+    this.flags_changed = view(Int32Array, memory, STATE_OFFSETS.flags_changed, 1);
 
     /**
      * enough infos about the last arithmetic operation to compute eflags
      */
-    this.last_op_size = view(Int32Array, memory, 96, 1);
-    this.last_op1 = view(Int32Array, memory, 104, 1);
-    this.last_result = view(Int32Array, memory, 112, 1);
+    this.last_op_size = view(Int32Array, memory, STATE_OFFSETS.last_op_size, 1);
+    this.last_op1 = view(Int32Array, memory, STATE_OFFSETS.last_op1, 1);
+    this.last_result = view(Int32Array, memory, STATE_OFFSETS.last_result, 1);
 
-    this.current_tsc = view(Uint32Array, memory, 960, 2); // 64 bit
+    this.current_tsc = view(Uint32Array, memory, STATE_OFFSETS.current_tsc, 2); // 64 bit
 
     /** @type {!Object} */
     this.devices = {};
 
-    this.instruction_pointer = view(Int32Array, memory, 556, 1);
-    this.previous_ip = view(Int32Array, memory, 560, 1);
+    this.instruction_pointer = view(Int32Array, memory, STATE_OFFSETS.instruction_pointer, 1);
+    this.previous_ip = view(Int32Array, memory, STATE_OFFSETS.previous_ip, 1);
 
     // configured by guest
-    this.apic_enabled = view(Uint8Array, memory, 548, 1);
+    this.apic_enabled = view(Uint8Array, memory, STATE_OFFSETS.apic_enabled, 1);
     // configured when the emulator starts (changes bios initialisation)
-    this.acpi_enabled = view(Uint8Array, memory, 552, 1);
+    this.acpi_enabled = view(Uint8Array, memory, STATE_OFFSETS.acpi_enabled, 1);
 
     // managed in io.js
     /** @const */ this.memory_map_read8 = [];
@@ -172,51 +176,71 @@ export function CPU(bus, wm, stop_idling)
         vga: null,
     };
 
-    this.instruction_counter = view(Uint32Array, memory, 664, 1);
+    this.instruction_counter = view(Uint32Array, memory, STATE_OFFSETS.instruction_counter, 1);
 
     // registers
-    this.reg32 = view(Int32Array, memory, 64, 8);
+    this.reg32 = view(Int32Array, memory, STATE_OFFSETS.reg32, 8);
 
-    this.fpu_st = view(Int32Array, memory, 1152, 4 * 8);
+    this.fpu_st = view(Int32Array, memory, STATE_OFFSETS.fpu_st, 4 * 8);
 
-    this.fpu_stack_empty = view(Uint8Array, memory, 816, 1);
+    this.fpu_stack_empty = view(Uint8Array, memory, STATE_OFFSETS.fpu_stack_empty, 1);
     this.fpu_stack_empty[0] = 0xFF;
-    this.fpu_stack_ptr = view(Uint8Array, memory, 1032, 1);
+    this.fpu_stack_ptr = view(Uint8Array, memory, STATE_OFFSETS.fpu_stack_ptr, 1);
     this.fpu_stack_ptr[0] = 0;
 
-    this.fpu_control_word = view(Uint16Array, memory, 1036, 1);
+    this.fpu_control_word = view(Uint16Array, memory, STATE_OFFSETS.fpu_control_word, 1);
     this.fpu_control_word[0] = 0x37F;
-    this.fpu_status_word = view(Uint16Array, memory, 1040, 1);
+    this.fpu_status_word = view(Uint16Array, memory, STATE_OFFSETS.fpu_status_word, 1);
     this.fpu_status_word[0] = 0;
-    this.fpu_ip = view(Int32Array, memory, 1048, 1);
+    this.fpu_ip = view(Int32Array, memory, STATE_OFFSETS.fpu_ip, 1);
     this.fpu_ip[0] = 0;
-    this.fpu_ip_selector = view(Int32Array, memory, 1052, 1);
+    this.fpu_ip_selector = view(Int32Array, memory, STATE_OFFSETS.fpu_ip_selector, 1);
     this.fpu_ip_selector[0] = 0;
-    this.fpu_opcode = view(Int32Array, memory, 1044, 1);
+    this.fpu_opcode = view(Int32Array, memory, STATE_OFFSETS.fpu_opcode, 1);
     this.fpu_opcode[0] = 0;
-    this.fpu_dp = view(Int32Array, memory, 1056, 1);
+    this.fpu_dp = view(Int32Array, memory, STATE_OFFSETS.fpu_dp, 1);
     this.fpu_dp[0] = 0;
-    this.fpu_dp_selector = view(Int32Array, memory, 1060, 1);
+    this.fpu_dp_selector = view(Int32Array, memory, STATE_OFFSETS.fpu_dp_selector, 1);
     this.fpu_dp_selector[0] = 0;
 
-    this.reg_xmm32s = view(Int32Array, memory, 832, 8 * 4);
+    this.reg_xmm32s = view(Int32Array, memory, STATE_OFFSETS.reg_xmm, 8 * 4);
 
-    this.mxcsr = view(Int32Array, memory, 824, 1);
+    this.mxcsr = view(Int32Array, memory, STATE_OFFSETS.mxcsr, 1);
 
     // segment registers, tr and ldtr
-    this.sreg = view(Uint16Array, memory, 668, 8);
+    this.sreg = view(Uint16Array, memory, STATE_OFFSETS.sreg, 8);
 
     // debug registers
-    this.dreg = view(Int32Array, memory, 684, 8);
+    this.dreg = view(Int32Array, memory, STATE_OFFSETS.dreg, 8);
 
-    this.reg_pdpte = view(Int32Array, memory, 968, 8);
+    this.reg_pdpte = view(Int32Array, memory, STATE_OFFSETS.reg_pdpte, 8);
 
-    this.svga_dirty_bitmap_min_offset = view(Uint32Array, memory, 716, 1);
-    this.svga_dirty_bitmap_max_offset = view(Uint32Array, memory, 720, 1);
+    this.svga_dirty_bitmap_min_offset = view(Uint32Array, memory, STATE_OFFSETS.svga_dirty_bitmap_min_offset, 1);
+    this.svga_dirty_bitmap_max_offset = view(Uint32Array, memory, STATE_OFFSETS.svga_dirty_bitmap_max_offset, 1);
 
     this.fw_value = [];
     this.fw_pointer = 0;
+    /**
+     * Files of the fw_cfg file directory (option ROMs, ACPI tables, ...).
+     * get_data, if present, produces the contents when the firmware selects
+     * the file; it must return as many bytes as data, which gives the size.
+     * @type {!Array<{name: string, data: !Uint8Array, get_data: (function():!Uint8Array|undefined)}>}
+     */
     this.option_roms = [];
+
+    /** @type {?Platform} description of the emulated platform */
+    this.platform = null;
+
+    /**
+     * The cores of the machine (setup_cores). One runs at a time: its state is
+     * in the fixed state block and `saved` is null; the others keep theirs in
+     * `saved`. `running` is false for an AP waiting for a start-up IPI.
+     * @type {!Array<{running: boolean, saved: ?Array<!Uint8Array>, slices: number, steps: number}>}
+     */
+    this.cores = [];
+    this.active_core = 0;
+    /** State of a core after reset_cpu, used for INIT @type {!Array<!Uint8Array>} */
+    this.core_reset_state = [];
 
     /** @type {?function()} */
     this.reload_direct_boot_kernel = null;
@@ -382,6 +406,7 @@ CPU.prototype.wasm_patch = function()
     this.handle_irqs = get_import("handle_irqs");
 
     this.main_loop = get_import("main_loop");
+    this.run_cpu_slice = get_import("run_cpu_slice");
 
     this.read8 = get_import("read8");
     this.read16 = get_import("read16");
@@ -403,6 +428,16 @@ CPU.prototype.wasm_patch = function()
 
     this.clear_tlb = get_import("clear_tlb");
     this.full_clear_tlb = get_import("full_clear_tlb");
+
+    this.apic_set_core_count = get_import("apic_set_core_count");
+    this.apic_set_current_core = get_import("apic_set_current_core");
+    this.apic_take_core_events = get_import("apic_take_core_events");
+    this.apic_peek_core_events = get_import("apic_peek_core_events");
+    this.apic_restore_core_events = get_import("apic_restore_core_events");
+    this.apic_init_core = get_import("apic_init_core");
+    this.apic_core_interrupt_pending = get_import("apic_core_interrupt_pending");
+    this.apic_addr = get_import("apic_addr");
+    this.apic_core_nmi_pending = get_import("apic_core_nmi_pending");
     this.update_state_flags = get_import("update_state_flags");
 
     this.set_tsc = get_import("set_tsc");
@@ -447,6 +482,11 @@ CPU.prototype.jit_clear_func = function(index)
 
 CPU.prototype.get_state = function()
 {
+    if(this.cores.length > 1)
+    {
+        throw new Error("Saving the state of a machine with more than one core is not supported yet");
+    }
+
     this.wm.exports["fpu_sync_all"]?.();
     var state = [];
 
@@ -562,6 +602,9 @@ CPU.prototype.get_state = function()
     state[91] = this.devices.parallel1;
     state[92] = this.devices.v86gl_pci;
     state[93] = this.shared_irq_sources.map(sources => Array.from(sources));
+    state[94] = [this.apic_enabled[0],
+        new Uint8Array(this.wasm_memory.buffer)[STATE_OFFSETS.nmi_blocked],
+        +this.apic_core_nmi_pending(0), this.apic_peek_core_events(0)];
 
     return state;
 };
@@ -620,6 +663,10 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.set_state = function(state)
 {
+    if(this.cores.length > 1)
+    {
+        throw new Error("Restoring state into a machine with more than one core is not supported yet");
+    }
     this.wm.exports["fpu_discard_cache"]?.();
     this.memory_size[0] = state[0];
 
@@ -767,6 +814,11 @@ CPU.prototype.set_state = function(state)
 
     this.jit_clear_cache();
 
+    // Older single-core snapshots predate NMI state and APIC enable storage.
+    this.apic_enabled[0] = state[94] ? state[94][0] : this.acpi_enabled[0];
+    new Uint8Array(this.wasm_memory.buffer)[STATE_OFFSETS.nmi_blocked] = state[94]?.[1] || 0;
+    this.apic_restore_core_events(0, state[94]?.[3] || 0, !!state[94]?.[2]);
+
     // Older state images don't record the sources; devices then lower their
     // lines unconditionally, as they used to. Done last: re-deriving the SCI
     // may deliver an interrupt, which needs the complete machine state.
@@ -813,6 +865,311 @@ CPU.prototype.set_state_pic = function(state)
     pic_slave[10] = state_slave[10]; // elcr
     pic_slave[11] = state_slave[11]; // irq_value (undefined in old state images)
     pic_slave[12] = state_slave[12]; // special_mask_mode (undefined in old state images)
+};
+
+// keep in sync with apic.rs
+const CORE_EVENT_INIT = 1;
+const CORE_EVENT_SIPI = 2;
+
+/**
+ * Cores of a single-socket machine (docs/acpi-x86-64-multicore-plan.zh-CN.md,
+ * C1). They run one at a time on this Wasm instance: the scheduler
+ * (run_cores) switches the active core at main-loop boundaries with
+ * save_core_state/load_core_state; each core has its own local APIC.
+ */
+CPU.prototype.setup_cores = function()
+{
+    const count = this.platform.cores;
+    this.apic_set_core_count(count);
+    this.core_reset_state = this.save_core_state();
+    this.active_core = 0;
+    // the BSP runs from reset; the APs wait for INIT and a start-up IPI
+    this.cores = Array.from({ length: count }, (_, i) => ({ running: i === 0, saved: i === 0 ? null : this.core_reset_state,
+        slices: 0, steps: 0 }));
+};
+
+/** Machine reset: the BSP becomes the active core and the APs wait for a start-up IPI again */
+CPU.prototype.reset_cores = function()
+{
+    this.switch_core(0);
+    this.apic_set_core_count(this.cores.length);
+    this.cores.forEach((core, i) => {
+        core.running = i === 0;
+        core.saved = i === 0 ? null : this.core_reset_state;
+        core.slices = 0;
+        core.steps = 0;
+    });
+};
+
+/** @param {number} core */
+CPU.prototype.switch_core = function(core)
+{
+    if(core === this.active_core)
+    {
+        return;
+    }
+    this.cores[this.active_core].saved = this.save_core_state();
+    this.load_core_state(/** @type {!Array<!Uint8Array>} */ (this.cores[core].saved));
+    this.cores[core].saved = null;
+    this.active_core = core;
+    this.apic_set_current_core(core);
+};
+
+/**
+ * INIT and start-up IPIs sent to a core since it was last scheduled
+ * @param {number} core
+ */
+CPU.prototype.take_core_events = function(core)
+{
+    const events = this.apic_take_core_events(core);
+    if(!events)
+    {
+        return;
+    }
+    const state = this.cores[core];
+
+    if(events & CORE_EVENT_INIT)
+    {
+        dbg_log("core " + core + ": INIT", LOG_CPU);
+        this.apic_init_core(core);
+        if(core === this.active_core)
+        {
+            this.load_core_state(this.core_reset_state);
+        }
+        else
+        {
+            state.saved = this.core_reset_state;
+        }
+        // an AP waits for a start-up IPI; the BSP restarts at the reset vector
+        state.running = core === 0;
+    }
+
+    if((events & CORE_EVENT_SIPI) && !state.running)
+    {
+        // real mode at vector * 0x1000
+        const vector = events >> 8 & 0xFF;
+        dbg_log("core " + core + ": start-up IPI, vector " + h(vector, 2), LOG_CPU);
+        this.switch_core(core);
+        this.sreg[REG_CS] = vector << 8;
+        this.segment_offsets[REG_CS] = vector << 12;
+        this.instruction_pointer[0] = vector << 12;
+        this.previous_ip[0] = vector << 12;
+        this.update_state_flags();
+        state.running = true;
+    }
+};
+
+/**
+ * Whether a core that is not the active one can make progress: it is not
+ * halted, or it is halted with interrupts enabled and one pending
+ * @param {number} core
+ */
+CPU.prototype.core_runnable = function(core)
+{
+    const state = this.cores[core];
+    if(!state.running)
+    {
+        return false;
+    }
+    // Read a field of the live or saved core without switching it in.
+    const field = (offset, size) => {
+        if(core === this.active_core)
+        {
+            const view = new DataView(this.wasm_memory.buffer, offset, size);
+            return size === 1 ? view.getUint8(0) : view.getInt32(0, true);
+        }
+        const index = CORE_STATE_RANGES.findIndex(([start, end]) => offset >= start && offset + size <= end);
+        dbg_assert(index !== -1);
+        const view = new DataView(state.saved[index].buffer, offset - CORE_STATE_RANGES[index][0], size);
+        return size === 1 ? view.getUint8(0) : view.getInt32(0, true);
+    };
+    const halted = field(STATE_OFFSETS.in_hlt, 1) !== 0;
+    if(!halted)
+    {
+        return true;
+    }
+    const interrupts_enabled = (field(STATE_OFFSETS.flags, 4) & FLAG_INTERRUPT) !== 0;
+    const nmi = this.apic_core_nmi_pending(core) && !field(STATE_OFFSETS.nmi_blocked, 1);
+    // The BSP also accepts the legacy PIC, which is checked in run_cpu_slice.
+    return nmi || interrupts_enabled && (core === 0 || this.apic_core_interrupt_pending(core));
+};
+
+/**
+ * Run each core for a bounded interpreter slice, round robin. The budget
+ * counts interpreter dispatch steps; an incomplete REP yields after at most
+ * 256 elements. This is not C0's committed-instruction virtual clock.
+ * @return {number} milliseconds until the machine needs to run again
+ */
+CPU.prototype.run_cores = function()
+{
+    if(this.cores.length === 1)
+    {
+        this.take_core_events(0);
+        return this.main_loop();
+    }
+    // Always service the shared devices, even if every core is in CLI/HLT.
+    // AP execution never advances the machine's timers a second time.
+    let next = this.run_hardware_timers(!!this.acpi_enabled[0], v86.microtick());
+    for(let core = 0; core < this.cores.length; core++)
+    {
+        this.take_core_events(core);
+        if(!this.core_runnable(core))
+        {
+            continue;
+        }
+        this.switch_core(core);
+        const state = this.cores[core];
+        state.steps += this.run_cpu_slice(4096);
+        state.slices++;
+        if(!this.in_hlt[0]) next = 0;
+    }
+    // An AP may have just interrupted a core whose turn was earlier in this
+    // round. Do not sleep until a device timer before scheduling that core.
+    if(this.cores.some((_, core) => this.apic_peek_core_events(core) ||
+        this.core_runnable(core) && (this.apic_core_interrupt_pending(core) ||
+            this.apic_core_nmi_pending(core)))) next = 0;
+    return next;
+};
+
+/**
+ * The per-core part of the CPU state (CORE_STATE_RANGES, from
+ * gen/state_layout.js), for switching the active core. Only valid at a
+ * main-loop safe point, when no generated code or helper is running.
+ * Rust statics owned by a core (the local APIC) are not included yet.
+ * @return {!Array<!Uint8Array>}
+ */
+CPU.prototype.save_core_state = function()
+{
+    // The x87 shadow cache is not core state: write it back into fpu_st
+    this.wm.exports["fpu_cache_barrier"]();
+    const memory = new Uint8Array(this.wasm_memory.buffer);
+    return CORE_STATE_RANGES.map(([start, end]) => memory.slice(start, end));
+};
+
+/**
+ * Make a core saved by save_core_state the active one. State derived from
+ * the previous core is dropped: the TLB (which also resets the EIP
+ * translation cache), the cached state flags and the x87 shadow cache.
+ * Compiled code stays valid: it reads the state at the fixed addresses and
+ * re-checks the TLB and mode on entry.
+ * @param {!Array<!Uint8Array>} saved
+ */
+CPU.prototype.load_core_state = function(saved)
+{
+    dbg_assert(saved.length === CORE_STATE_RANGES.length);
+    this.wm.exports["fpu_discard_cache"]();
+    const memory = new Uint8Array(this.wasm_memory.buffer);
+    CORE_STATE_RANGES.forEach(([start], i) => memory.set(saved[i], start));
+    this.full_clear_tlb();
+    this.update_state_flags();
+};
+
+/**
+ * A snapshot of the machine for diagnosing hangs and failed tests: CPU mode
+ * and registers, interrupt controllers, ACPI device and tables. Plain data
+ * (JSON-serializable); the format may grow (per-core entries with SMP).
+ * @return {!Object}
+ */
+CPU.prototype.get_diagnostics = function()
+{
+    const hex = x => "0x" + (x >>> 0).toString(16);
+    const eflags = this.get_eflags();
+    const cr0 = this.cr[0];
+    const cs_base = this.segment_offsets[1];
+    const mode = !this.protected_mode[0] ? "real" : eflags & 1 << 17 ? "vm86" : this.is_32[0] ? "protected32" : "protected16";
+
+    const apic = new Int32Array(this.wasm_memory.buffer, this.get_apic_addr(), 46);
+    const bits = words => {
+        const vectors = [];
+        for(let i = 0; i < 256; i++) if(words[i >> 5] >>> (i & 31) & 1) vectors.push(i);
+        return vectors;
+    };
+    const pic = new Uint8Array(this.wasm_memory.buffer, this.get_pic_addr_master(), 13);
+    const pic_slave = new Uint8Array(this.wasm_memory.buffer, this.get_pic_addr_slave(), 13);
+
+    const acpi = this.devices && this.devices.acpi;
+    const tables = this.acpi_enabled[0] ? locate_acpi_tables(this.mem8) : null;
+
+    // per core: the active one from the live state, the others from their saved state
+    const cores = this.cores.map((state, core) => {
+        const field = (offset, size) => {
+            if(core === this.active_core)
+            {
+                const view = new DataView(this.wasm_memory.buffer, offset, size);
+                return size === 1 ? view.getUint8(0) : view.getInt32(0, true);
+            }
+            const index = CORE_STATE_RANGES.findIndex(([start, end]) => offset >= start && offset + size <= end);
+            const view = new DataView(state.saved[index].buffer, offset - CORE_STATE_RANGES[index][0], size);
+            return size === 1 ? view.getUint8(0) : view.getInt32(0, true);
+        };
+        const lapic = new Int32Array(this.wasm_memory.buffer, this.apic_addr(core), 46);
+        return {
+            "state": !state.running ? "wait-for-sipi" : field(STATE_OFFSETS.in_hlt, 1) ? "halted" : "runnable",
+            "slices": state.slices,
+            "interpreter_steps": state.steps,
+            "apic_id": lapic[0] >>> 24,
+            "apic_irr": bits(lapic.subarray(16, 24)),
+            "apic_isr": bits(lapic.subarray(24, 32)),
+            "apic_tpr": lapic[13],
+            "halted": !!field(STATE_OFFSETS.in_hlt, 1),
+            "interrupts_enabled": !!(field(STATE_OFFSETS.flags, 4) & FLAG_INTERRUPT),
+            "linear_ip": hex(field(STATE_OFFSETS.instruction_pointer, 4)),
+            "cs": hex(field(STATE_OFFSETS.sreg + 2, 4) & 0xFFFF),
+            "cr0": hex(field(STATE_OFFSETS.cr, 4)),
+        };
+    });
+
+    return {
+        "active_core": this.active_core,
+        "cores": cores,
+        "cpu": {
+            "mode": mode,
+            "paging": !!(cr0 & 1 << 31),
+            "pae": !!(this.cr[4] & 1 << 5),
+            "cs": hex(this.sreg[1]),
+            "eip": hex(this.instruction_pointer[0] - cs_base),
+            "linear_ip": hex(this.instruction_pointer[0]),
+            "eflags": hex(eflags),
+            "cpl": this.cpl[0],
+            "cr0": hex(cr0),
+            "cr3": hex(this.cr[3]),
+            "cr4": hex(this.cr[4]),
+            "halted": !!this.in_hlt[0],
+        },
+        "apic": this.acpi_enabled[0] ? {
+            "id": apic[0] >>> 24,
+            "enabled": !!this.apic_enabled[0],
+            "software_enabled": !!(apic[40] & 0x100),
+            "tpr": apic[13],
+            "irr": bits(apic.subarray(16, 24)),
+            "isr": bits(apic.subarray(24, 32)),
+            "lvt_timer": hex(apic[8]),
+            "lvt_lint0": hex(apic[10]),
+            "lvt_lint1": hex(apic[11]),
+        } : null,
+        "pic": {
+            "master": { "irr": hex(pic[3]), "isr": hex(pic[2]), "enabled": hex(pic[0]), "elcr": hex(pic[10]) },
+            "slave": { "irr": hex(pic_slave[3]), "isr": hex(pic_slave[2]), "enabled": hex(pic_slave[0]), "elcr": hex(pic_slave[10]) },
+        },
+        "shared_irq_sources": Object.fromEntries(this.shared_irq_sources
+            .map((sources, irq) => [irq, Array.from(sources)]).filter(([, sources]) => sources.length)),
+        "acpi": acpi ? {
+            "pm_base": acpi.pm_base === -1 ? null : hex(acpi.pm_base),
+            "sci_enabled": !!(acpi.pm1_cnt & 1),
+            "sci_level": acpi.sci_level,
+            "pm1_sts": hex(acpi.pm1_sts),
+            "pm1_en": hex(acpi.pm1_en),
+            "gpe_sts": hex(acpi.gpe_sts),
+            "gpe_en": hex(acpi.gpe_en),
+            "soft_off": acpi.soft_off,
+        } : null,
+        "acpi_tables": tables && {
+            "rsdp": hex(tables.rsdp),
+            "revision": tables.revision,
+            "oem_id": tables.oem_id,
+            "tables": tables.tables.map(t => ({ "signature": t.signature, "address": hex(t.address), "length": t.length, "checksum_ok": t.checksum_ok })),
+        },
+    };
 };
 
 CPU.prototype.set_state_apic = function(state)
@@ -934,10 +1291,15 @@ CPU.prototype.unpack_memory = function(bitmap, packed_memory)
 
 CPU.prototype.reboot_internal = function()
 {
+    this.reset_cores();
     this.reset_cpu();
 
     this.fw_value = [];
 
+    if(this.devices.pci)
+    {
+        this.devices.pci.reset();
+    }
     if(this.devices.acpi)
     {
         this.devices.acpi.reset();
@@ -1247,7 +1609,11 @@ CPU.prototype.get_jit_info = function()
  */
 CPU.prototype.init = function(settings, device_bus)
 {
-    this.configure_jit_backend(settings);
+    // With more than one core, PAUSE ends the slice of the spinning core; only
+    // the interpreter implements that yet, so multicore machines run without
+    // the JIT (docs/acpi-x86-64-multicore-plan.zh-CN.md, C1/C3)
+    const multicore = (settings.cpu_cores || 1) > 1;
+    this.configure_jit_backend(multicore ? Object.assign({}, settings, { disable_jit: true }) : settings);
     this.wm.exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     this.wm.exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
     this.create_memory(
@@ -1255,11 +1621,14 @@ CPU.prototype.init = function(settings, device_bus)
         settings.initrd ? 64 * 1024 * 1024 : 1024 * 1024,
     );
 
+    this.platform = create_platform(settings, this.memory_size[0]);
+
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
     this.acpi_enabled[0] = +settings.acpi;
 
     this.reset_cpu();
+    this.setup_cores();
 
     var io = new IO(this);
     this.io = io;
@@ -1359,11 +1728,11 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value === FW_CFG_NB_CPUS)
         {
-            this.fw_value = i32(1);
+            this.fw_value = i32(this.platform.cores);
         }
         else if(value === FW_CFG_MAX_CPUS)
         {
-            this.fw_value = i32(1);
+            this.fw_value = i32(this.platform.cores);
         }
         else if(value === FW_CFG_BOOT_MENU)
         {
@@ -1406,8 +1775,9 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value >= FW_CFG_FILE_START && value - FW_CFG_FILE_START < this.option_roms.length)
         {
-            const i = value - FW_CFG_FILE_START;
-            this.fw_value = this.option_roms[i].data;
+            const file = this.option_roms[value - FW_CFG_FILE_START];
+            this.fw_value = file.get_data ? file.get_data() : file.data;
+            dbg_assert(this.fw_value.length === file.data.length, "fw_cfg file " + file.name + " changed size");
         }
         else
         {
@@ -1439,8 +1809,25 @@ CPU.prototype.init = function(settings, device_bus)
 
         if(this.acpi_enabled[0])
         {
-            this.devices.acpi = new ACPI(this, device_bus);
-            // Advertise only the sleep states that are implemented
+            const acpi = this.devices.acpi = new ACPI(this, device_bus);
+
+            // v86's own tables, installed by SeaBIOS's table loader. They are
+            // generated when SeaBIOS reads them, after it has programmed the PM
+            // base (0x600 when the loader is present); the sizes don't depend on it.
+            const platform = /** @type {Platform} */ (this.platform);
+            const build_tables = () => {
+                const pm_base = acpi.pm_base === -1 ? ACPI_PM_BASE_DEFAULT : acpi.pm_base;
+                check_platform(platform, pm_base);
+                return build_acpi_tables(platform, pm_base);
+            };
+            const tables = build_tables();
+            this.option_roms.push(
+                { name: ACPI_LOADER_FILE, data: tables.loader },
+                { name: ACPI_RSDP_FILE, data: tables.rsdp },
+                { name: ACPI_TABLES_FILE, data: tables.tables, get_data: () => build_tables().tables });
+
+            // Only read by SeaBIOS's fallback builder, if the loader fails:
+            // advertise only the sleep states that are implemented
             this.option_roms.push({ name: "etc/system-states", data: acpi_system_states_file() });
         }
 
@@ -1472,6 +1859,15 @@ CPU.prototype.init = function(settings, device_bus)
         if(settings.parallel1)
         {
             this.devices.parallel1 = new ParallelPort(this, 0x278, 5, 1, device_bus);
+        }
+
+        if(DEBUG)
+        {
+            // The platform description (and so the ACPI tables) lists these ports
+            for(const { port } of this.platform.uarts.concat(this.platform.parallel_ports))
+            {
+                dbg_assert(this.io.ports[port].device, "platform port " + h(port) + " has no device");
+            }
         }
 
         this.devices.fdc = new FloppyController(this, settings.fda, settings.fdb);
@@ -1949,7 +2345,7 @@ CPU.prototype.fill_cmos = function(rtc, settings)
 
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 
-    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, 0);
+    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, this.platform.cores - 1);
 
     // Used by bochs BIOS to skip the boot menu delay.
     if(settings.fastboot) rtc.cmos_write(0x3f, 0x01);

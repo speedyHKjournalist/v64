@@ -574,6 +574,16 @@ export interface V86Options {
     acpi?: boolean;
 
     /**
+     * Number of cores of the single emulated processor (1 socket, 1 thread per
+     * core), 1 to 8. More than one requires acpi. The cores run one at a time
+     * (cooperative scheduling), not in parallel on host threads. Experimental:
+     * JIT is automatically disabled; saving or restoring state with multiple
+     * cores is not supported yet. Full OS topology validation is pending.
+     * @default 1
+     */
+    cpu_cores?: number;
+
+    /**
      * Log level (for debug builds)
      * @default LogLevel.LOG_NONE
      */

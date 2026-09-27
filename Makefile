@@ -5,7 +5,7 @@ NASM_TEST_DIR=./tests/nasm
 INSTRUCTION_TABLES=src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
 
 # Only the dependencies common to the generators
-GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_ir_decoder.js gen/ir_semantics.js, $(wildcard gen/*.js))
+GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_ir_decoder.js gen/ir_semantics.js gen/state_layout.js, $(wildcard gen/*.js))
 INTERPRETER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_interpreter.js
 
 STRIP_DEBUG_FLAG=
@@ -100,7 +100,7 @@ CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature
 
 CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
-	   acpi.js iso9660.js \
+	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   v86gl_pci.js \
 	   bus.js log.js cpu.js \
@@ -341,17 +341,28 @@ qemutests-release: build/libv86.mjs build/v86.wasm
 	./tests/qemu/run-qemu.js > build/qemu-test-reference
 	diff build/qemu-test-result build/qemu-test-reference
 
+# kvm-unit-tests are built out of tree in build/kvm-unit-tests/<arch>/ (also on
+# macOS, see tests/kvm-unit-tests/build.sh)
+KVM_UNIT_TESTS=build/kvm-unit-tests/i386/x86
+
 kvm-unit-test: build/v86-debug.wasm
-	tests/kvm-unit-tests/build.sh
-	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
-	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
-	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+	tests/kvm-unit-tests/build.sh i386 x86/realmode.flat x86/taskswitch.flat x86/taskswitch2.flat
+	tests/kvm-unit-tests/run.mjs $(KVM_UNIT_TESTS)/taskswitch.flat
+	tests/kvm-unit-tests/run.mjs --expect-pass 11 $(KVM_UNIT_TESTS)/taskswitch2.flat
+	tests/kvm-unit-tests/run.mjs --expect-pass 127 $(KVM_UNIT_TESTS)/realmode.flat
 
 kvm-unit-test-release: build/libv86.mjs build/v86.wasm
-	tests/kvm-unit-tests/build.sh
-	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
-	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
-	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+	tests/kvm-unit-tests/build.sh i386 x86/realmode.flat x86/taskswitch.flat x86/taskswitch2.flat
+	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs $(KVM_UNIT_TESTS)/taskswitch.flat
+	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs --expect-pass 11 $(KVM_UNIT_TESTS)/taskswitch2.flat
+	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs --expect-pass 127 $(KVM_UNIT_TESTS)/realmode.flat
+
+# Interrupt controller tests (ACPI enables the APIC in v86).
+kvm-unit-test-apic: build/v86-debug.wasm
+	tests/kvm-unit-tests/build.sh i386 x86/ioapic.flat x86/smptest.flat x86/apic.flat
+	tests/kvm-unit-tests/run.mjs --acpi --expect-pass 19 $(KVM_UNIT_TESTS)/ioapic.flat
+	tests/kvm-unit-tests/run.mjs --acpi --expect-pass 1 $(KVM_UNIT_TESTS)/smptest.flat
+	tests/kvm-unit-tests/run.mjs --acpi --expect-pass 11 $(KVM_UNIT_TESTS)/apic.flat
 
 expect-tests: build/v86-debug.wasm build/libwabt.cjs
 	make -C tests/expect/tests
@@ -363,9 +374,14 @@ acpi-device-tests: build/v86-debug.wasm
 acpi-guest-tests: build/v86-debug.wasm
 	./tests/devices/acpi_guest.js
 	DISABLE_JIT=1 ./tests/devices/acpi_guest.js
+	GUEST=linux4 ./tests/devices/acpi_guest.js
 
-.PHONY: acpi-device-tests acpi-guest-tests acpi-tests
-acpi-tests: acpi-device-tests acpi-guest-tests
+# ACPICA's iasl/acpiexec are used when found on PATH or in IASL/ACPIEXEC
+acpi-table-tests:
+	./tests/devices/acpi_tables.js
+
+.PHONY: acpi-device-tests acpi-table-tests acpi-guest-tests acpi-tests
+acpi-tests: acpi-table-tests acpi-device-tests acpi-guest-tests
 
 devices-test: build/v86-debug.wasm
 	./tests/devices/virtio_9p.js
@@ -546,6 +562,48 @@ ir-generated:
 
 ir-generated-check:
 	node gen/generate_ir_decoder.js --check
+
+# CPU state layout: generated global_pointers.rs constants, src/state_layout.js,
+# and the owner of every Rust static (gen/state_layout.js)
+state-layout:
+	node gen/state_layout.js
+
+state-layout-check:
+	node gen/state_layout.js --check
+
+# Multicore building blocks (docs/acpi-x86-64-multicore-plan.zh-CN.md, P2a/C1)
+build/smp/core_swap.bin: tests/smp/core_swap.asm
+	mkdir -p build/smp
+	nasm -f bin -o $@ $<
+
+smp-tests: build/smp/core_swap.bin build/v86-debug.wasm
+	node gen/state_layout.js --check
+	./tests/smp/core_swap.mjs
+	DISABLE_JIT=1 ./tests/smp/core_swap.mjs
+
+build/smp/ap_startup.bin: tests/smp/ap_startup.asm
+	mkdir -p build/smp
+	nasm -f bin -o $@ $<
+
+build/smp/firmware_boot.bin: tests/smp/firmware_boot.asm
+	mkdir -p build/smp
+	nasm -f bin -o $@ $<
+
+# C1 sub-gate: real INIT/SIPI guest startup and interrupt routing. Multicore
+# JIT, OS topology, and full-machine state await the C2/C3 gates.
+multicore-boot-tests: build/smp/ap_startup.bin build/smp/firmware_boot.bin build/v86-debug.wasm state-layout-check
+	node tests/smp/apic_routing.mjs
+	node tests/smp/scheduler.mjs
+	node tests/smp/ap_startup.mjs
+	node tests/smp/firmware_boot.mjs
+
+multicore-boot-tests-release: build/smp/ap_startup.bin build/smp/firmware_boot.bin build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/apic_routing.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/scheduler.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/ap_startup.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/firmware_boot.mjs
+
+.PHONY: state-layout state-layout-check smp-tests multicore-boot-tests multicore-boot-tests-release
 
 ir-decoder-tests: ir-generated-check
 	cargo test decode::tests -- --nocapture

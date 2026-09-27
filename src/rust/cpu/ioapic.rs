@@ -25,7 +25,7 @@ const IOAPIC_CONFIG_READONLY_MASK: u32 =
 
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
 const IOAPIC_DELIVERY_LOWEST_PRIORITY: u8 = 1;
-const _IOAPIC_DELIVERY_NMI: u8 = 4;
+const IOAPIC_DELIVERY_NMI: u8 = 4;
 const _IOAPIC_DELIVERY_INIT: u8 = 5;
 
 const DELIVERY_MODES: [&str; 8] = [
@@ -74,23 +74,21 @@ fn get_ioapic() -> MutexGuard<'static, Ioapic> { IOAPIC.try_lock().unwrap() }
 #[no_mangle]
 pub fn get_ioapic_addr() -> u32 { &raw mut *get_ioapic() as u32 }
 
-pub fn remote_eoi(apic: &mut apic::Apic, vector: u8) {
-    remote_eoi_internal(&mut get_ioapic(), apic, vector);
-}
+pub fn remote_eoi(vector: u8) { remote_eoi_internal(&mut get_ioapic(), vector); }
 
-fn remote_eoi_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, vector: u8) {
+fn remote_eoi_internal(ioapic: &mut Ioapic, vector: u8) {
     for i in 0..IOAPIC_IRQ_COUNT as u8 {
         let config = ioapic.ioredtbl_config[i as usize];
 
         if (config & 0xFF) as u8 == vector && config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
             dbg_log!("Clear remote IRR for irq={:x}", i);
             ioapic.ioredtbl_config[i as usize] &= !IOAPIC_CONFIG_REMOTE_IRR;
-            check_irq(ioapic, apic, i);
+            check_irq(ioapic, i);
         }
     }
 }
 
-fn check_irq(ioapic: &mut Ioapic, apic: &mut apic::Apic, irq: u8) {
+fn check_irq(ioapic: &mut Ioapic, irq: u8) {
     let mask = 1 << irq;
 
     if ioapic.irr & mask == 0 {
@@ -121,9 +119,9 @@ fn check_irq(ioapic: &mut Ioapic, apic: &mut apic::Apic, irq: u8) {
 
         if delivery_mode == IOAPIC_DELIVERY_FIXED
             || delivery_mode == IOAPIC_DELIVERY_LOWEST_PRIORITY
+            || delivery_mode == IOAPIC_DELIVERY_NMI
         {
             apic::route(
-                apic,
                 vector,
                 delivery_mode,
                 is_level,
@@ -139,9 +137,9 @@ fn check_irq(ioapic: &mut Ioapic, apic: &mut apic::Apic, irq: u8) {
     }
 }
 
-pub fn set_irq(i: u8) { set_irq_internal(&mut get_ioapic(), &mut apic::get_apic(), i) }
+pub fn set_irq(i: u8) { set_irq_internal(&mut get_ioapic(), i) }
 
-fn set_irq_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, i: u8) {
+fn set_irq_internal(ioapic: &mut Ioapic, i: u8) {
     if i as usize >= IOAPIC_IRQ_COUNT {
         dbg_assert!(false, "Bad irq: {}", i);
         return;
@@ -166,7 +164,7 @@ fn set_irq_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, i: u8) {
 
         ioapic.irr |= mask;
 
-        check_irq(ioapic, apic, i);
+        check_irq(ioapic, i);
     }
 }
 
@@ -244,10 +242,10 @@ pub fn write32(addr: u32, value: u32) {
     if unsafe { !*acpi_enabled } {
         return;
     }
-    write32_internal(&mut get_ioapic(), &mut apic::get_apic(), addr, value)
+    write32_internal(&mut get_ioapic(), addr, value)
 }
 
-fn write32_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, addr: u32, value: u32) {
+fn write32_internal(ioapic: &mut Ioapic, addr: u32, value: u32) {
     //dbg_log!("IOAPIC write {:x} <- {:08x}", reg, value);
 
     match addr {
@@ -292,7 +290,7 @@ fn write32_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, addr: u32, value
                             disabled
                         );
 
-                    check_irq(ioapic, apic, irq);
+                    check_irq(ioapic, irq);
                 }
             },
             reg => {

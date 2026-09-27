@@ -1,11 +1,10 @@
 // ACPI fixed hardware of the PIIX4 power management function (PCI 00:07.0).
 //
-// Block addresses and sizes match the FADT that SeaBIOS 1.16.2 builds for this
-// device (src/fw/acpi.c, piix4_fadt_setup): PM1a event block at 0xB000
-// (4 bytes), PM1a control block at 0xB004 (2 bytes), 24-bit PM timer at 0xB008,
-// GPE0 block at 0xAFE0 (4 bytes, 16 GPEs), SCI on IRQ 9, SMI_CMD at 0xB2 with
-// ACPI_ENABLE = 0xF1 and ACPI_DISABLE = 0xF0. The FADT flags leave PWR_BUTTON
-// and FIX_RTC clear, so the power button and RTC status are fixed features.
+// The PM I/O block (PM1 event and control registers, PM timer) is decoded at
+// the base the firmware writes to PMBA (PCI config 0x40) once PMREGMISC
+// (0x80) enables it; with v86's own ACPI tables SeaBIOS uses 0x600. The GPE0
+// block is fixed at 0xAFE0 (as in QEMU), the SCI is IRQ 9, SMI_CMD is 0xB2
+// with ACPI_ENABLE = 0xF1 and ACPI_DISABLE = 0xF0 (src/platform.js).
 //
 // Register semantics: ACPI 6.6, section 4.8 (fixed hardware registers)
 // https://uefi.org/specs/ACPI/6.6/04_ACPI_Hardware_Specification.html
@@ -14,23 +13,21 @@ import { v86 } from "./main.js";
 import { LOG_ACPI } from "../src/const.js";
 import { h } from "./lib.js";
 import { dbg_log } from "./log.js";
+import {
+    ACPI_DISABLE, ACPI_ENABLE, ACPI_GPE0_BASE, ACPI_GPE0_LENGTH, ACPI_PM_LENGTH, ACPI_PM_PCI_ID,
+    ACPI_SCI_IRQ, ACPI_SLEEP_STATES, ACPI_SMI_CMD_PORT,
+} from "./platform.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
 import { BusConnector } from "./bus.js";
 
-export const ACPI_PM_BASE = 0xB000;
-const ACPI_PM_LENGTH = 0x40;
-export const ACPI_GPE0_BASE = 0xAFE0;
-const ACPI_GPE0_LENGTH = 4;
-export const ACPI_SMI_CMD_PORT = 0xB2;
-export const ACPI_SCI_IRQ = 9;
-
 /** Source id of the SCI on its (possibly shared) IRQ line; PCI functions use their pci_id */
 export const ACPI_SCI_SOURCE = 0x100;
 
-const ACPI_ENABLE = 0xF1;
-const ACPI_DISABLE = 0xF0;
+// PIIX4 PM function configuration registers
+const PCI_PMBA = 0x40; // PM base address, bits 15:6; bit 0 reads as 1 (I/O space)
+const PCI_PMREGMISC = 0x80; // bit 0: PM I/O space enable
 
 const PM_TIMER_TICKS_PER_MS = 3579545 / 1000;
 // TMR_STS is set whenever bit 23 of the 24-bit timer changes
@@ -63,21 +60,6 @@ const PM1_CNT_WRITABLE = BM_RLS | SLP_TYP;
 const PM_GLBCTL = 0x28;
 
 const STATE_FORMAT = 2;
-
-/**
- * Sleep states of this platform. The SLP_TYP values must match the \_Sx
- * packages of the firmware tables: SeaBIOS's SSDT (ssdt-misc.dsl) has
- * _S3_ = 1 and _S5_ = 0, while _S4_ gets its value from etc/system-states
- * (below). A state is only advertised to the guest when it is supported.
- */
-export const ACPI_SLEEP_STATES = [
-    // S3 (suspend to RAM): not implemented
-    { state: 3, slp_typ: 1, supported: false },
-    // S4 (OS-directed hibernation, a soft off for the hardware): not validated yet
-    { state: 4, slp_typ: 2, supported: false },
-    // S5 (soft off)
-    { state: 5, slp_typ: 0, supported: true },
-];
 
 /**
  * Contents of the fw_cfg file etc/system-states, read by SeaBIOS's ACPI
@@ -116,7 +98,7 @@ export function ACPI(cpu, bus)
     this.clock = () => v86.microtick();
 
     const acpi = {
-        pci_id: 0x07 << 3,
+        pci_id: ACPI_PM_PCI_ID,
         pci_space: [
             0x86, 0x80, 0x13, 0x71, 0x07, 0x00, 0x80, 0x02, 0x08, 0x00, 0x80, 0x06, 0x00, 0x00, 0x80, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -125,10 +107,21 @@ export function ACPI(cpu, bus)
         ],
         pci_bars: [],
         name: "acpi",
+        on_config_write: offset => {
+            if(offset >> 2 === PCI_PMBA >> 2 || offset >> 2 === PCI_PMREGMISC >> 2)
+            {
+                this.update_pm_decode();
+            }
+        },
+        on_config_restore: () => this.update_pm_decode(),
     };
 
     // 00:07.0 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 08)
-    cpu.devices.pci.register_device(acpi);
+    /** @const @type {!Int32Array} */
+    this.pci_config = cpu.devices.pci.register_device(acpi);
+
+    /** Base of the decoded PM I/O block, -1 while not decoded */
+    this.pm_base = -1;
 
     this.pm1_sts = 0;
     this.pm1_en = 0;
@@ -154,7 +147,7 @@ export function ACPI(cpu, bus)
     this.timer_period = 0;
 
     const io = cpu.io;
-    this.register_block(io, ACPI_PM_BASE, ACPI_PM_LENGTH, this.pm_read, this.pm_write);
+    this.reset_pm_config();
     this.register_block(io, ACPI_GPE0_BASE, ACPI_GPE0_LENGTH, this.gpe_read, this.gpe_write);
 
     io.register_read(ACPI_SMI_CMD_PORT, this,
@@ -188,6 +181,52 @@ ACPI.prototype.register_block = function(io, base, length, read, write)
             value => write.call(this, offset, 1, value),
             value => write.call(this, offset, 2, value),
             value => write.call(this, offset, 4, value));
+    }
+};
+
+/** PMBA and PMREGMISC after PCIRST#: PM I/O space disabled */
+ACPI.prototype.reset_pm_config = function()
+{
+    this.pci_config[PCI_PMBA >> 2] = 1;
+    this.pci_config[PCI_PMREGMISC >> 2] &= ~0xFF;
+    this.update_pm_decode();
+};
+
+/** Move the PM I/O block to the base in PMBA, or stop decoding it */
+ACPI.prototype.update_pm_decode = function()
+{
+    // bits 31:16 and 5:1 are reserved (zero), bit 0 is hardwired to 1
+    const pmba = this.pci_config[PCI_PMBA >> 2] & 0xFFC0;
+    this.pci_config[PCI_PMBA >> 2] = pmba | 1;
+
+    const enabled = (this.pci_config[PCI_PMREGMISC >> 2] & 1) !== 0;
+    const base = enabled && pmba !== 0 ? pmba : -1;
+
+    if(base === this.pm_base)
+    {
+        return;
+    }
+
+    const io = this.cpu.io;
+    if(this.pm_base !== -1)
+    {
+        io.unregister_range(this.pm_base, ACPI_PM_LENGTH, this);
+    }
+
+    dbg_log("ACPI PM block " + (base === -1 ? "disabled" : "at " + h(base, 4)), LOG_ACPI);
+    this.pm_base = base;
+
+    if(base !== -1)
+    {
+        for(let port = base; port < base + ACPI_PM_LENGTH; port++)
+        {
+            if(io.ports[port].device)
+            {
+                dbg_log("Warning: ACPI PM block at " + h(base, 4) + " overlaps " + io.ports[port].device.name, LOG_ACPI);
+                break;
+            }
+        }
+        this.register_block(io, base, ACPI_PM_LENGTH, this.pm_read, this.pm_write);
     }
 };
 
@@ -410,6 +449,7 @@ ACPI.prototype.reset = function()
     this.glbctl = 0;
     this.soft_off = 0;
     this.update_sci();
+    this.reset_pm_config();
 };
 
 /**
@@ -514,5 +554,7 @@ ACPI.prototype.set_state = function(state)
     {
         this.timer_period = Math.floor(ticks / PM_TIMER_STATUS_PERIOD);
     }
+    // PCI restores PMBA/PMREGMISC after this device, then on_config_restore
+    // rebuilds the PM I/O mapping from the restored configuration.
     // sci_level is re-derived by sync_sci once the interrupt controllers are restored
 };

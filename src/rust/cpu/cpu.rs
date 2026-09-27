@@ -226,7 +226,8 @@ pub const IA32_MISC_ENABLE: i32 = 0x1A0;
 pub const IA32_PAT: i32 = 0x277;
 pub const IA32_RTIT_CTL: i32 = 0x570;
 pub const MSR_PKG_C2_RESIDENCY: i32 = 0x60D;
-pub const IA32_KERNEL_GS_BASE: i32 = 0xC0000101u32 as i32;
+pub const IA32_FS_BASE: i32 = 0xC0000100u32 as i32;
+pub const IA32_GS_BASE: i32 = 0xC0000101u32 as i32;
 pub const MSR_AMD64_LS_CFG: i32 = 0xC0011020u32 as i32;
 pub const MSR_AMD64_DE_CFG: i32 = 0xC0011029u32 as i32;
 
@@ -305,6 +306,11 @@ pub static mut tsc_speed: u64 = 1;
 
 // used for restoring the state
 pub static mut tsc_offset: u64 = 0;
+
+/// Set by PAUSE when the machine has more than one core: the active core ends
+/// its slice so that another one can run, e.g. to release a spinlock the
+/// spinning core waits for (see CPU.prototype.run_cores)
+pub static mut core_yield: bool = false;
 
 pub static mut tlb_data: [i32; 0x100000] = [0; 0x100000];
 
@@ -476,6 +482,8 @@ pub unsafe fn iret(is_16: bool) { iret_checked(is_16); }
 
 /// Reports whether the semantic body completed; delivered faults remain CPU-owned.
 pub unsafe fn iret_checked(is_16: bool) -> bool {
+    // IRET ends NMI blocking (also when it faults)
+    *nmi_blocked = false;
     let mut completed = true;
     if vm86_mode() && getiopl() < 3 {
         // vm86 mode, iopl != 3
@@ -3014,7 +3022,7 @@ pub unsafe fn cycle_internal() -> bool {
         jit_run_interpreted_diagnostic(phys_addr);
     }
     else {
-        jit_run_interpreted(phys_addr);
+        jit_run_interpreted(phys_addr, u32::MAX);
     }
     if ir_heat {
         crate::ir::runtime::schedule::note_interpreted(
@@ -3062,13 +3070,13 @@ unsafe fn jit_run_interpreted_diagnostic(phys_addr: u32) {
     let scope = crate::ir::runtime::diagnostics::Scope::new(
         crate::ir::runtime::diagnostics::Stage::Interpreter,
     );
-    jit_run_interpreted(phys_addr);
+    jit_run_interpreted(phys_addr, u32::MAX);
     let count = (*instruction_counter).wrapping_sub(before);
     crate::ir::runtime::diagnostics::interpreter_steps(count);
     crate::ir::runtime::diagnostics::interpreter(pc, cr3, phys_addr, count, scope.finish());
 }
 
-unsafe fn jit_run_interpreted(mut phys_addr: u32) {
+unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
     profiler::stat_increment(stat::RUN_INTERPRETED);
     dbg_assert!(!memory::in_mapped_range(phys_addr));
 
@@ -3077,6 +3085,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
     // must expose its backedge before the 100,001-instruction limit, or an
     // already hot/published side entry can remain invisible to IR selection.
     let ir_dispatch = crate::ir::runtime::schedule::enabled();
+    let before = *instruction_counter;
     let mut i = 0;
 
     loop {
@@ -3092,7 +3101,10 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
             break;
         }
 
-        if jit_block_boundary
+        // STI may execute its one shadow instruction recursively. Account
+        // for that work too; at most that one instruction exceeds a slice.
+        if (budget != u32::MAX && i + (*instruction_counter).wrapping_sub(before) >= budget)
+            || jit_block_boundary
             || Page::page_of(start_eip as u32) != Page::page_of(*instruction_pointer as u32)
                 // Limit the number of iterations, as jumps within the same page are not counted as
                 // block boundaries for the interpreter, but only on the next backwards jump
@@ -3111,6 +3123,34 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
     }
 
     *instruction_counter += i;
+}
+
+/// C1's cooperative interpreter slice. Device clocks are serviced once by
+/// the machine scheduler, outside this entry. Yield only after a complete
+/// instruction or the string engine's resumable REP element batch; a LOCK
+/// transaction cannot be split by switching cores.
+#[no_mangle]
+pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
+    core_yield = false;
+    crate::ir::runtime::entry::ir_admission_barrier();
+    handle_irqs();
+    let before = *instruction_counter;
+    let mut remaining = budget;
+    while remaining != 0 && !*in_hlt && !core_yield {
+        *previous_ip = *instruction_pointer;
+        // A fault can change CS:EIP without retiring an instruction. Charge
+        // that dispatch as well, so a fault loop cannot monopolize the host.
+        let count = *instruction_counter;
+        if let Ok(phys_addr) = get_phys_eip() {
+            jit_run_interpreted(phys_addr, remaining);
+        }
+        remaining = remaining.saturating_sub((*instruction_counter).wrapping_sub(count).max(1));
+        if apic::has_core_events() {
+            break;
+        }
+    }
+    core_yield = false;
+    (*instruction_counter).wrapping_sub(before)
 }
 
 #[no_mangle]
@@ -3158,7 +3198,7 @@ pub unsafe fn main_loop() -> f64 {
 
     if *in_hlt {
         profiler::performance_execution_add(4, 1.0);
-        if *flags & FLAG_INTERRUPT != 0 {
+        if *flags & FLAG_INTERRUPT != 0 || *acpi_enabled && !*nmi_blocked && apic::nmi_pending() {
             let performance_start = profiler::performance_timer_start();
             let t = js::run_hardware_timers(*acpi_enabled, start);
             handle_irqs();
@@ -3188,6 +3228,10 @@ pub unsafe fn main_loop() -> f64 {
         if *in_hlt {
             let t = t - crate::ir::runtime::schedule::idle((t - 0.25).min(8.0));
             return profiler::performance_main_loop_exit(t.max(0.0), true);
+        }
+        if core_yield {
+            core_yield = false;
+            return profiler::performance_main_loop_exit(0.0, false);
         }
 
         // Give the host a chance to install a newly submitted IR module. All
@@ -3220,6 +3264,7 @@ pub unsafe fn do_many_cycles_native() -> bool {
     jit_link_batch = true;
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
         && !*in_hlt
+        && !core_yield
     {
         if cycle_internal() {
             publication_yield = true;
@@ -3964,8 +4009,16 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 
 #[no_mangle]
 pub unsafe fn handle_irqs() {
+    // NMI: regardless of IF, not while an NMI handler runs (until IRET)
+    if *acpi_enabled && !*nmi_blocked && apic::take_nmi() {
+        *nmi_blocked = true;
+        pic_call_irq(CPU_EXCEPTION_NMI as u8);
+        return;
+    }
     if *flags & FLAG_INTERRUPT != 0 {
-        if let Some(irq) = pic::pic_acknowledge_irq() {
+        // the 8259 PIC is wired to the bootstrap processor (LINT0 of core 0)
+        let pic_irq = if apic::current_core() == 0 { pic::pic_acknowledge_irq() } else { None };
+        if let Some(irq) = pic_irq {
             pic_call_irq(irq)
         }
         else if *acpi_enabled {
@@ -4105,6 +4158,9 @@ pub unsafe fn reset_cpu() {
     *instruction_counter = 0;
     *previous_ip = 0;
     *in_hlt = false;
+    *nmi_blocked = false;
+    // the local APIC (present with ACPI) is enabled at reset
+    *apic_enabled = *acpi_enabled;
 
     *sysenter_cs = 0;
     *sysenter_esp = 0;

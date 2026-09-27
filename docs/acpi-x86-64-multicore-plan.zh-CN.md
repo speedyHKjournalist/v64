@@ -1,7 +1,8 @@
 # v86：完整 ACPI、x86-64 与单路多核心实施计划
 
-> 状态：A1 已实施（见 §5 A1 的实施记录），其余阶段待实施。
+> 状态：A1、A2、P1、P2a（布局与归属、换核原型）已实施；C1 的解释器调度、AP 启动/路由与 SeaBIOS 子门槛已实施，完整 C1 仍待 C0 和其余中断语义验收（见 §5 与本轮验证报告）。
 > 基线：2026-09-27，`8af0560e`（PR #55 合并后，工作区干净）。原稿基线 `dfd8ac23 + 未提交修改` 已过时。
+> 本轮 review/推进的实际接手点为 `8edd6d69 + 未提交修改`；验证环境和 fixture 见 [C1 记录](validation/platform/C1/review-and-validation.zh-CN.md)。
 > §2 的事实均经源码审计，标注“探针”的条目另经客户机运行确认（buildroot Linux 6.8，`acpi: true`）。
 > 目标仓库是 `v86`，本文路径均相对此仓库。
 
@@ -20,7 +21,7 @@
 5. **ACPI 的现成缺陷前移到 A1。** 当前固件默认公布未实现的 S3（客户机进入后会永久等待 WAK_STS），S4 的 SLP_TYP 与 S5 相同；guest 写 S5 后 VM 继续运行；GPE 状态不是 W1C；SCI 每个定时器周期都被拉低。其中隐藏 S3/S4 只需提供 fw_cfg 文件 `etc/system-states`，不必等 A2 的表生成器。
 6. **虚拟时钟收窄。** A1 只需要可注入、单调、跨快照连续的 PM timer（与 TSC 的 `set_tsc` 恢复策略一致）。按指令推进的确定性机器时钟是多核可复现调度测试的前提，单列为 C0。
 7. **S3/S4 机制写实。** 在 PIIX4/SeaBIOS 模型中，OS 主导的 S4 对硬件只是一次带标记的 soft-off，工作主要在磁盘持久化和 OS 验证；S3 才需要保留 RAM、复位 CPU 后经 CMOS 关机状态 `0xFE` 走 SeaBIOS resume 路径跳到 FACS waking vector。
-8. 每阶段增加实施状态；A1 已按本版实施并通过 §5 A1 中列出的测试。
+8. 每阶段增加实施状态；A1、A2 已按本版实施并通过 §5 中列出的测试（Windows 目标因无镜像未验收）。
 
 ## 1. “完整支持”的验收边界
 
@@ -60,8 +61,11 @@ P0 固定镜像版本、内核配置、磁盘/固件 SHA-256、启动参数和�
 | 模块 | 当前证据 | 对实施的影响 |
 |---|---|---|
 | 开关 | [`v86.d.ts`](../v86.d.ts) 的 `acpi` 标注 experimental；`acpi_enabled` 同时门控 LAPIC/IOAPIC 的 MMIO、`handle_irqs` 的 APIC 路径和 `device_raise_irq` 的 IOAPIC 分支（`apic.rs`、`ioapic.rs`、`cpu.rs`） | `acpi:false` 意味着没有 LAPIC；多核必须拆开“平台有 APIC”和“公布 ACPI”两个开关，并保留旧配置兼容 |
-| 固件表来源 | 未提供 `etc/table-loader`，SeaBIOS 1.16.2 走 `acpi_setup()` 回退：RSDP v0 → 仅 RSDT（无 XSDT）、FADT rev1（无 RESET_REG/X_ 字段）、FACS、内置 DSDT、SSDT（`ssdt-misc` + 每 CPU Processor + PCI 热插拔）、MADT（按探测到的 CPU 生成） | 64 位 Windows 等需要 XSDT/FADT rev3+ 的目标必须换表路径（A2）；32 位 SMP 的 MADT 可暂用回退表（C1） |
-| FADT 契约（回退表） | SCI=9，SMI_CMD=0xB2，ACPI_ENABLE/DISABLE=0xF1/0xF0，PM1a_EVT=0xB000(4)，PM1a_CNT=0xB004(2)，PM_TMR=0xB008（24 位），GPE0=0xAFE0(4，16 个 GPE)；flags=WBINVD\|PROC_C1\|SLP_BUTTON\|RTC_S4\|USE_PLATFORM_CLOCK | PWR_BUTTON=0 即公布**固定电源按钮**；FIX_RTC=0 即公布 RTC_STS/RTC_EN；A1 必须实现这些位 |
+| 固件表来源（A2 之前） | 未提供 `etc/table-loader`，SeaBIOS 1.16.2 走 `acpi_setup()` 回退：RSDP v0 → 仅 RSDT（无 XSDT）、FADT rev1（无 RESET_REG/X_ 字段）、FACS、内置 DSDT、SSDT（`ssdt-misc` + 每 CPU Processor + PCI 热插拔）、MADT（按探测到的 CPU 生成） | 64 位 Windows 等需要 XSDT/FADT rev3+ 的目标必须换表路径（A2）；32 位 SMP 的 MADT 可暂用回退表（C1） |
+| FADT 契约（A2 之前的回退表） | SCI=9，SMI_CMD=0xB2，ACPI_ENABLE/DISABLE=0xF1/0xF0，PM1a_EVT=0xB000(4)，PM1a_CNT=0xB004(2)，PM_TMR=0xB008（24 位），GPE0=0xAFE0(4，16 个 GPE)；flags=WBINVD\|PROC_C1\|SLP_BUTTON\|RTC_S4\|USE_PLATFORM_CLOCK | PWR_BUTTON=0 即公布**固定电源按钮**；FIX_RTC=0 即公布 RTC_STS/RTC_EN；A1 必须实现这些位 |
+| SeaBIOS 与 table-loader | 存在 `etc/table-loader` 时 SeaBIOS 把 PM 基址从 0xB000 移到 **0x600**（`paravirt.c`），写入 PIIX4 PMBA，并用 0x608 的 PM timer 作自身计时；执行 loader 后解析 DSDT（`CONFIG_ACPI_PARSE`），找不到 `PNP0303` 就不初始化 PS/2 | A2 的 PM 块必须跟随 PMBA 解码，表按固件实际写入的基址生成；DSDT 必须含 SeaBIOS 能识别的键盘设备 |
+| 回退表与 v86 硬件不符之处 | 回退 DSDT 按 QEMU 布局写死 PM 在 00:01.3、VGA 在 00:02.0（v86 是 00:07.0、00:12.0）；COM2 的 `_STA` 读不存在的 00:01.3 得 0xFF，未配置 uart1 也报告 COM2 存在；链接设备 `_PRS` 含 IRQ 5，MADT 把 IRQ 5 设为电平，而 v86 的 SB16 在 IRQ 5 用边沿；含 PCI/CPU 热插拔和 16 个空 GPE 方法 | A2 的表只描述 v86 实际存在的设备和路由 |
+| 0xCF9 复位 | 原实现把 0xCF9 字节写与 0xCF8 双字配置地址的第 2 字节共用一个处理函数，并用“先 bit1 后 bit1+2”判断复位 | 单次写 0x06（FADT 复位寄存器）不复位；连续两次配置地址访问若第 2 字节恰为 0x02、0x06（function 2 后接 function 6）会误复位 |
 | 睡眠状态 | 回退 SSDT 从 fw_cfg `etc/system-states` 取值；v86 未提供时默认 `{128,0,0,129,128,128}`：`_S3_`=1，`_S4_`=0，`_S5_`=0（三者都在 SSDT 的 `ssdt-misc` 中，隐藏时首字符改为 X，即 `XS3_`/`XS4_`） | 原实现公布 S3 却未实现（客户机进入后永久等待 WAK_STS）；S4 与 S5 同值 |
 | ACPI 设备（原实现） | [`src/acpi.js`](../src/acpi.js) 硬编码 PM1 `0xB000..`、PM timer `0xB008`、GPE `0xAFE0..`；只注册部分访问宽度；PM1_CNT 写入仅保存值；GPE 是裸字节 | 探针：`poweroff` 后 PM1_CNT=`0x2000`（S5 请求）而 VM 继续运行；OS 向 GPE0_STS 写 1 清除后读回 `0xFF` |
 | SCI | 原 `timer()` 仅在 enable 时锁存 TMR_STS，否则每轮调用 `device_lower_irq(9)` | SCI 不是按 pending 条件保持的电平；也会清掉共用 IRQ9 的其他源 |
@@ -69,7 +73,7 @@ P0 固定镜像版本、内核配置、磁盘/固件 SHA-256、启动参数和�
 | SMM | SeaBIOS `CONFIG_USE_SMM` 的重定位写 0xB2 后轮询 0xB3，v86 的 0xB3 读固定返回 0，所以 SMI 处理程序从未运行；`GLBCTL`（0xB028）未实现 | SMI_CMD 的 ACPI_ENABLE/DISABLE 必须由设备直接处理，不能依赖 SMM |
 | 时间/恢复 | 所有设备计时都用 `v86.microtick()`；TSC 通过 `set_tsc` 在恢复后连续；原 PM timer 每次读取最多额外前进 1 ms，快照不保存相位 | A1 只需让 PM timer 与 TSC 同策略；确定性时钟属于 C0。SeaBIOS 用 PM timer 作自身计时源（`pmtimer_setup`），改动会影响 POST |
 | 固件构建 | [`bios/fetch-and-build-seabios.sh`](../bios/fetch-and-build-seabios.sh) 固定 `rel-1.16.2`；`git clone ... \|\| true` 会在已有目录上继续；config 打开 ACPI/DSDT/MPTABLE/S3_RESUME/SMM/TCGBIOS | 必须审计实际生成表和固件路径，config 开启不代表 emulator 已实现 |
-| 核数输入 | `src/cpu.js` 的 `FW_CFG_NB_CPUS/MAX_CPUS` 均为 1，`CMOS_BIOS_SMP_COUNT` 为 0 | fw_cfg、CMOS、MADT、CPUID 必须共用拓扑来源 |
+| 核数输入 | 原为 `src/cpu.js` 中写死的 `FW_CFG_NB_CPUS/MAX_CPUS`=1、`CMOS_BIOS_SMP_COUNT`=0；P1 起三者与 MADT 都取自 `platform.cores`（仍为 1） | CPUID 尚未接入，C2 完成 |
 | CPU 状态 | [`global_pointers.rs`](../src/rust/cpu/global_pointers.rs) 把架构状态放在固定地址 64..1353，`ir_tlb_base`（2048）已是生成代码读取 TLB 基址的间接槽；`src/cpu.js` 建立相同偏移的 TypedArray；GPR/XMM 仅 8 个；LAPIC/IOAPIC/PIC 是 `static Mutex`，TLB 是 4 MiB 的 `static mut tlb_data` | 轮转多核可整块换入换出状态区并按核切换 LAPIC/TLB（C1）；宿主并行才需要 ctx_ptr ABI（W0）；扩宽寄存器会改变布局（X1） |
 | 长模式 | [`cpu.rs`](../src/rust/cpu/cpu.rs)、[`instructions_0f.rs`](../src/rust/cpu/instructions_0f.rs)、[`paging.rs`](../src/rust/paging.rs) 仍围绕 32 位；PAE 不接受高物理位/NX 的关键路径 | 需状态机、指令语义、异常和 MMU 整体扩展 |
 | IR/JIT | [`ir-design.md`](ir-design.md) 与源码显示 **IR 是唯一 JIT**，Tier-0 默认启用；`GuestEip/LinearAddress/PhysicalAddress` 为 u32，StateMap 的 GPR 为 8 项 | Tier-0、区域后端及解释器全部要适配 |
@@ -177,11 +181,11 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 |---|---|---|---|---|---|
 | P0 基线和契约 | 无 | 可复建测试环境、profile、能力矩阵、基线报告 | M | — | 部分（本次记录基线） |
 | A1 ACPI fixed hardware | P0 | PM/SCI/GPE/SMI_CMD/按钮/S5 设备测试与 Linux 客户机测试通过；S3/S4 隐藏 | M | R-ACPI | **已实施** |
-| P1 平台描述/测试入口 | P0 | 共用平台描述、带超时和结构化结果的 runner、诊断导出 | L | — | 待实施 |
-| A2 固件表/路由闭环 | A1、P1 | table-loader 安装的表（含 XSDT、FADT rev3+ RESET_REG）、AML 与设备资源一致 | L | R-ACPI | 待实施 |
-| P2a 布局单一来源 | P0 | 生成的 offset/accessor、状态区归属表与断言；单核行为不变 | L | — | 待实施 |
+| P1 平台描述/测试入口 | P0 | 共用平台描述、带超时和结构化结果的 runner、诊断导出 | L | — | **已实施**（确定性时钟归 C0） |
+| A2 固件表/路由闭环 | A1、P1 | table-loader 安装的表（含 XSDT、FADT rev3+ RESET_REG）、AML 与设备资源一致 | L | R-ACPI | **已实施**（Windows 未验收） |
+| P2a 布局单一来源 | P0 | 生成的 offset/accessor、状态区归属表与断言；单核行为不变 | L | — | **已实施**（子任务 3、4 随 X1） |
 | C0 确定性机器时钟 | P1 | 可注入/可按指令推进的时钟；PIT/RTC/LAPIC/PM/TSC 同源；固定输入得到相同 IRQ 序列 | M | — | 待实施 |
-| C1 每核 LAPIC/AP 启动 | A1、P2a、C0 | 状态块换入换出、按核 LAPIC、INIT/SIPI/IPI；32 位 trampoline 与 SeaBIOS 在 2/4/8 核启动 | XL | — | 待实施 |
+| C1 每核 LAPIC/AP 启动 | A1、P2a、C0 | 状态块换入换出、按核 LAPIC、INIT/SIPI/IPI；32 位 trampoline 与 SeaBIOS 在 2/4/8 核启动 | XL | — | **部分实施**（解释器/AP 启动子门槛通过；C0、ExtINT 等未闭环） |
 | C2 单路拓扑/轮转 | C1、A2 | 32 位 Linux 识别 1×N×1，各核执行任务（解释器） | L | — | 待实施 |
 | C3 跨核一致性/JIT | C2 | 原子、TLB shootdown、SMC、快照；Tier-0/区域后端在多核下通过 | XL | R-SMP32 | 待实施 |
 | X1 64 位状态/解码 | P2a | 模式矩阵、REX/寄存器/地址尺寸单测通过 | L | — | 待实施 |
@@ -220,20 +224,22 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 **修改范围**：`src/cpu.js`、`src/main.js`、`src/acpi.js`、PIT/RTC 接口、`tests/kvm-unit-tests/run.mjs`、Makefile；建议新增 `src/platform.js`、测试时钟。
 
-- [ ] 从硬编码常量提取平台内存图、PM/SCI/GPE/PCI 资源，校验 I/O/MMIO 区间冲突；为未来 topology 保留唯一数据源，当前仍报告 1 核。
-- [ ] 设备读时间统一经可注入入口（A1 已为 ACPI 做到）；完整的确定性机器时钟见 C0。
-- [ ] runner 增加 ACPI、profile、cores、执行后端、ROM、超时参数；串口结构化 PASS/FAIL、预期用例数、非零失败退出码。没有运行到断言不能算通过。
-- [ ] i386/x86_64 fixture 分开构建目录，避免同一个 kvm-unit-tests 配置相互覆盖；未支持的用例保留有原因的 skip。
-- [ ] 新增物理内存导出/诊断接口，支持提取 RSDP/表、每核 RIP/CR3/APIC 状态和最后事件，方便处理启动超时。
+- [x] [`src/platform.js`](../src/platform.js)：PM/GPE/SMI_CMD/SCI、复位寄存器、LAPIC/IOAPIC、PCI 链接 IRQ、睡眠状态、UART/LPT、PCI 内存窗口与核数的唯一来源；`check_platform` 检查固定 I/O 区间（含固件写入的 PM 基址）无重叠；ACPI 表、fw_cfg 核数、CMOS SMP 计数都从它取值，debug 构建断言描述中的端口都有设备。设备实例化仍在 `cpu.js`（Closure ADVANCED 要求 `devices.uartN` 以固定属性名访问）。
+- [ ] （转 C0）设备读时间统一经可注入入口（A1 已为 ACPI 做到）；完整的确定性机器时钟见 C0。
+- [x] [`tests/kvm-unit-tests/run.mjs`](../tests/kvm-unit-tests/run.mjs)：`--acpi`、`--memory`、`--timeout`、`--expect-pass N`（exit 0 但 PASS 少于 N 算失败）、`--quiet`，执行后端与构建沿用 `DISABLE_JIT`/`TEST_RELEASE_BUILD`；退出码区分通过 0、失败 1、崩溃 2、超时 3、缺文件 4，最后一行 `RESULT ...` 可机读，超时时附诊断快照。`cores`/`profile` 在 C1/X1 实现时加入。
+- [x] [`tests/kvm-unit-tests/build.sh`](../tests/kvm-unit-tests/build.sh) 在 `build/kvm-unit-tests/<arch>/` 树外构建；macOS 上无需安装任何工具：clang 的 `<arch>-linux` 目标、Rust 自带的 `rust-lld`/`rust-objcopy`、带 ELF 符号索引的 GNU 格式 `ar`（`v86/ar.py`）、代替 libgcc 的 64 位除法（`v86/builtins.c`）。为 clang 对上游测试源码做了三处最小修改（两个定义全局汇编标号的函数加 `noinline`，两条歧义指令加后缀，一个 `"=rm"` 约束改 `"=r"`），`realmode.c` 用 `-m16` 构建。
+- [x] `CPU.get_diagnostics()`/`V86.get_diagnostics()`（Worker 模式经 RPC）：CPU 模式、CS:EIP、CR0/3/4、EFLAGS、HLT，LAPIC（ID、使能、TPR、IRR/ISR、LVT），PIC，共享 IRQ 源，ACPI 设备寄存器，以及按 OS 的方式从内存定位的 ACPI 表（`locate_acpi_tables`，含校验和）。物理内存读取沿用已有的 `read_memory`。每核条目随 C1 加入。
 
 **退出条件**：runner 能正确区分通过、失败、崩溃、超时和缺镜像；平台描述驱动的资源冲突检查通过。
+
+**实施记录（2026-09-27）**：`make kvm-unit-test`（realmode 127 PASS、taskswitch、taskswitch2 11 PASS）与新增的 `make kvm-unit-test-apic`（`--acpi`：ioapic 19 PASS、smptest 1 PASS）在 macOS 上用新构建方式通过；release 目标同样改用树外路径。`apic.flat` 基线为 8 PASS/3 FAIL/1 SKIP，3 个失败都是 `apic_disable`（经 IA32_APIC_BASE 关闭后 CPUID.1:EDX.APIC 不清零、重新开启后不报告已使能），归入 C1，暂不进门槛。强制超时时 runner 输出诊断快照并以 3 退出；ACPI 客户机测试在两种 Linux 上断言了诊断内容（保护模式+分页、PM 基址、SCI_EN、五张表及校验和、APIC ID）。
 
 ### A1：ACPI fixed hardware 与电源事件
 
 **修改范围**：`src/acpi.js`、I/O 注册、PCI PM 配置、VM 生命周期及公开 API。
 
 - [x] 用具名寄存器定义 PM1_STS/EN/CNT、PM_TMR、GPE_STS/EN。按支持位处理 W1C/只读/保留位，覆盖声明宽度内的 byte/word/dword 访问及组合访问。
-- [ ] →A2：PCI PM base（PMBA 0x40）、I/O decode enable（PMREGMISC 0x80）的读写与实际端口解码一致；固件改变基址时迁移映射并撤销旧映射。A1 仍固定解码 0xB000/0xAFE0，与 SeaBIOS 写入的值一致。
+- [x] （在 A2 完成）PCI PM base（PMBA 0x40）、I/O decode enable（PMREGMISC 0x80）的读写与实际端口解码一致；固件改变基址时迁移映射并撤销旧映射；PCIRST# 恢复默认（不解码）。
 - [x] fixed event 状态和 enable 分离；任何状态、enable、SCI_EN 更新后重新计算 SCI。SCI 由有效 pending 条件保持电平，直到所有源清除/屏蔽。
 - [x] 共享电平源：`CPU.set_shared_irq_level(irq, source, level)` 为 SCI 和每个 PCI INTx 保留独立 source ID，以 OR 聚合；PCI 记住自己拉高的线，客户机中途改 PIRQ 路由也降对的线；复位时像 PCIRST# 一样撤销全部源。独占线路的 ISA 设备仍直接调用 `device_raise_irq/device_lower_irq`。
 - [x] PM timer 固定 3,579,545 Hz、24 位；bit 23 翻转锁存 TMR_STS（与 TMR_EN 无关）；单调，不随读取前进；快照恢复后从保存值继续计数。暂停期间随宿主时间前进（与 TSC 相同，C0 再统一）。
@@ -254,25 +260,36 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 - `make acpi-device-tests`（`tests/devices/acpi_device.js`，16 项，不运行客户机，注入时钟直接访问端口）：上面的退出条件逐项对应一个用例；共享 IRQ9 用例同时检查从 PIC 的 IRR（ELCR 置为电平）。“EOI 后重触发”只验证到“剩余源保持 IRR”，未由运行中的 CPU 实际应答。debug 与 release（`TEST_RELEASE_BUILD=1`）构建均通过。用五个变异（SCI 非电平、PM1_STS 普通写、读取推进 timer、SCI_EN 可写、恢复不连续）确认用例会失败。
 - `make acpi-guest-tests`（`tests/devices/acpi_guest.js`，buildroot Linux 6.8）：在宿主侧从客户机内存解析 RSDP/RSDT/FADT/FACS/DSDT/SSDT/MADT（校验和、FADT 字段与仿真硬件一致、只公布 S5）；电源按钮恰好 1 个事件与 1 个 SCI；以 `acpi_pm` 为 clocksource 时客户机 3.03 s 对宿主 3.07 s；客户机 `reboot` 后重新启用 ACPI；`poweroff` → `acpi-power-off "S5"` → 模拟器停止 → `power_button()` 重新上电启动。`POWER_CYCLES=20` 连续 20 次关机/上电通过。
 - 回归：`tests/api/{clean-shutdown,state,reset,reboot,pic}.js`、`tests/devices/virtio_console.js`（`acpi: true`）通过；Closure 的 `build/libv86.mjs`（SIMPLE）与 `build/v86_all.js`（ADVANCED）0 error、0 warning。
-- 未覆盖：Windows ACPI HAL（本地无镜像）；IOAPIC 模式下的 SCI（该 Linux 使用 PIC 路由）；A2 的表生成、PMBA 解码、RESET_REG。
+- 未覆盖：Windows ACPI HAL（本地无镜像）。IOAPIC 模式下的 SCI、表生成、PMBA 解码、RESET_REG 已在 A2 覆盖。
 
 ### A2：固件表、AML 与中断路由
 
-**修改范围**：`bios/acpi/`、表生成工具、fw_cfg registry、SeaBIOS 构建脚本、`src/pci.js`、PIC/IOAPIC/LAPIC 单核路径。
+**修改范围**：[`src/acpi_tables.js`](../src/acpi_tables.js)（AML 编码器与表生成）、[`src/platform.js`](../src/platform.js)、fw_cfg 文件表、SeaBIOS 构建脚本、`src/pci.js`、`src/acpi.js`、`src/io.js`。
 
-- [ ] 固定工具链/SeaBIOS commit/config，产出 ROM hash；修正构建脚本对 clone/checkout 失败的处理，不使用未知本地源码继续构建。
-- [ ] 实现并测试 fw_cfg 文件目录与 `etc/table-loader` 相关加载数据；所有字段显式处理字节序、长度和 selector，不能依赖宿主 TypedArray 字节序或错误缓冲区长度。
-- [ ] 生成 RSDP、RSDT、XSDT、FADT、FACS、DSDT、必要 SSDT、MADT。对普通 SDT 和 RSDP分别检查校验和；FACS 单独验证签名/长度/对齐，不误套 SDT checksum 规则。
-- [ ] ASL 中设备 `_HID/_ADR/_UID/_STA/_CRS` 对应真实硬件；PCI `_PRT`/链接设备与实际 PIRQ 路由一致，`_PIC` 若存在必须影响正确的路由模型。
-- [ ] APIC 模式下 PIIX 的 PIRQA–D 到 IOAPIC 16–19 的直连未建模（A1 只保证 PIRQ 路由寄存器 bit 7 置位时不再误投到 ISA IRQ）；新表的 `_PRT` 与这里的实现必须一致。
-- [ ] MADT LAPIC/IOAPIC/GSI/override/NMI 与仿真一致；PIC 与 APIC 模式切换不重复投递中断；补齐 SCI 使用的 level-trigger/EOI/remote-IRR 语义。
-- [ ] 新表只公布平台描述中标为已实现的睡眠状态（A1 已通过 `etc/system-states` 在回退表上隐藏 S3/S4，A2 的表必须保持同一来源）；去掉未实现的 PCI/CPU 热插拔对象（回退 DSDT 的 `_E01`/`_E02` 访问 0xAE00/0xAF00 等未实现端口）。ACPI 模式切换、FACS global lock、FADT flags 均给出真实策略；不使用宿主 AML 解释器替代硬件。
-- [ ] 过渡路径（可选）：回退构建器会加载 fw_cfg 的 `acpi/*` 文件并可替换 DSDT（`fill_dsdt`），可先用它验证 v86 生成的 AML；但 FADT 仍是 rev1、只有 RSDT，不能作为 A2 的完成形态。
-- [ ] FADT rev3+ 公布 RESET_REG（0xCF9，值 0x06，已有实现）并置 RESET_REG_SUP；PM 基址跟随 PIIX4 PMBA（0x40）/PMREGMISC（0x80）解码，固件改基址时迁移端口。
-- [ ] ACPICA `iasl` 编译/反编译，使用 `acpiexec` 检查适合离线求值的控制方法；涉及硬件 OpRegion 的行为由设备测试及 guest 运行验证。
-- [ ] 在 guest 用 `acpidump` 保存表，核对固件分配的地址与 E820 reserved/ACPI reclaim/NVS，验证默认 ACPI 启动和 PCI 设备中断。
+- [x] SeaBIOS 构建脚本：固定 `rel-1.16.2`，已有目录不再 `|| true` 跳过；checkout 失败、tag 不符或工作区有改动时停止；输出 commit 与 ROM SHA-256。本次未重建 ROM（本机无 SeaBIOS 所需的 i386 工具链），当前 ROM：`seabios.bin` 73e3f359102e3a99…、`seabios-debug.bin` 24174391d6612384…、`vgabios.bin` a4bc0d80cc3ca028…。
+- [x] fw_cfg 文件目录加入 `etc/table-loader`、`etc/acpi/rsdp`、`etc/acpi/tables`。字段全部显式小端编码；文件内容在 SeaBIOS 读取时按 PMBA 当前值重新生成，大小不随基址变化（断言保证）。
+- [x] 生成 RSDP（rev 2）、RSDT、XSDT、FADT（rev 3，244 字节）、FACS、DSDT（rev 1，32 位整数）、MADT；不需要 SSDT。SDT 与 RSDP 的校验和由 loader 在指针修补之后计算；FACS 单独验证签名/长度/64 字节对齐。
+- [x] DSDT 只描述 v86 实际存在的硬件，对象路径沿用 SeaBIOS（`\_SB.PCI0`、`PCI0.ISA.KBD` 等）以减少已安装客户机的变动：PCI 根桥（只有 `_HID`；`_CRS` 含总线 0–FF、I/O 两段、VGA 窗口和 [RAM 顶端对齐 256 MiB, 0xFEBFFFFF] 内存窗口，覆盖 v86 不能迁移的 BAR）；RTC、KBD、MOU、FDC、PIC、PIT、DMA、扬声器、FPU、按配置生成的 COM/LPT；PNP0C02 主板资源（PM 块、GPE、SMI_CMD、fw_cfg、0x92）；LNKA–D（`_PRS` 为 10、11）；`_PRT` 按 `PCI.get_irq_line` 的同一交错规则生成 32 槽 × 4 引脚；每核一个 `Processor()`；只有 `\_S5`。没有热插拔、GPE 方法、`_PIC`（PCI INTx 在 PIC 与 APIC 模式下都用同一 ISA IRQ 号，路由模型相同）。
+- [ ] APIC 模式下 PIIX 的 PIRQA–D 到 IOAPIC 16–19 的直连仍未建模；表与实现一致地使用 ISA IRQ 10/11（A1 起 PIRQ 路由寄存器 bit 7 置位时不再误投）。
+- [x] MADT：每核 LAPIC、IOAPIC（ID 0，0xFEC00000，GSI 0）、SCI 与 IRQ 10/11 的电平/高有效覆盖、LINT1 NMI；IRQ 5 保持边沿给 SB16。Linux 4.16 以 IOAPIC 路由启动，电平 SCI 经 remote-IRR/EOI 正常（1 次电源按钮 = 1 个 SCI）。PIC↔APIC 切换时的重复投递没有专门测试。
+- [x] 睡眠状态、SMI_CMD、FADT flags：只公布平台描述中支持的状态；ACPI 模式经 SMI_CMD 切换；flags = WBINVD、PROC_C1、SLP_BUTTON（无睡眠按钮）、FIX_RTC（不实现 RTC_STS）、RESET_REG_SUP、USE_PLATFORM_CLOCK；PWR_BUTTON 与 TMR_VAL_EXT 为 0；C2/C3 延迟标为不支持。FACS 全局锁不被固件使用（无 SMM），保持 0。
+- [x] FADT RESET_REG = SystemIO 0xCF9、值 0x06。0xCF9 改为独立的 PIIX 复位控制寄存器：只接受字节访问，RST_CPU 0→1 时复位，复位清零寄存器；0xCF8 的双字配置地址写不再可能误复位。
+- [x] PM 块按 PMBA/PMREGMISC 解码，基址移动时注销旧端口（`IO.unregister_range`），与其他设备重叠时记录警告；恢复快照后按恢复的 PCI 配置重新解码（旧快照为 0xB000）。
+- [x] ACPICA 校验：`iasl -d` 反汇编全部表无错误，`iasl -oa` 把反汇编重新编译成**逐字节相同**的 AML；唯一保留的警告是 3168（为 Windows 2000/XP 使用 `Processor()`）。`acpiexec` 执行链接设备 `_STA/_CRS/_SRS/_DIS/_PRS`、`\_S5` 与 KBD `_HID`，结果与预期一致。
+- [x] 客户机侧：未使用 `acpidump`（buildroot 无此工具），改为宿主侧从客户机内存沿 RSDP→XSDT/RSDT 解析并与仿真硬件对照；Linux 报告的表地址位于 SeaBIOS 高区保留内存。
+- [x] 过渡路径不需要：table-loader 路径直接可用。`etc/system-states` 保留，只在 loader 失败而回退到 SeaBIOS 自带表时生效。
 
 **退出条件**：单核 Linux/i386 和 Windows ACPI HAL 目标无需 ACPI 禁用绕路；无未解释的 AML 错误/SCI storm；电源按钮→OS 关机→S5、ACPI reboot 各循环至少 20 次。此时只标记 `ACPI-core`，A3 未通过前不宣布电源管理全部完成。
+
+**实施记录（2026-09-27）**
+
+- `make acpi-table-tests`（`tests/devices/acpi_tables.js`，无客户机）：按 SeaBIOS `romfile_loader.c` 的语义在 JS 中执行 loader，对 256 MiB、32 MiB（全部串口/并口）、2 GiB 三种平台验证 RSDP/RSDT/XSDT/FADT/FACS/MADT/DSDT；表大小与 PM 基址无关；平台描述拒绝重叠 I/O；找到 `iasl`/`acpiexec`（PATH 或 `IASL`/`ACPIEXEC`）时做上面的 ACPICA 校验，找不到时明确输出 SKIP。ACPICA 20260408 在 macOS arm64 上需以 `LDFLAGS=-Wl,-no_fixup_chains` 链接。
+- `make acpi-device-tests`：18 项，新增 PMBA/PMREGMISC 解码与复位控制寄存器（含原实现会误复位的双字配置地址序列）。
+- `make acpi-guest-tests`：buildroot Linux 6.8（PIC 路由）、同一镜像 `DISABLE_JIT=1`、`GUEST=linux4`（Linux 4.16，IOAPIC 路由）三次运行。宿主侧确认表来自 v86（OEM `V86`）、FADT 字段与 PMBA=0x600 一致；dmesg 无 ACPI Error/Warning/AE_*（仅容忍旧内核对可选 `_OSC` 的 `AE_NOT_FOUND` 提示）；电源按钮 1 事件 1 SCI；`acpi_pm` 计时 3.04 s 对宿主 3.08 s；`reboot`（`reboot=acpi` 或新内核默认）只向 0xCF9 写一次 0x06 并完成重启；关机/上电循环。SeaBIOS debug ROM 日志确认 `Moving pm_base to 0x600`、`Using pmtimer, ioport 0x608`、DSDT 完整解析、`PS2 keyboard initialized`。
+- 与回退表 A/B 对比（同一 Linux 6.8）：`Processor Platform Limit event … not handled`、`unable to open an initial console` 两条提示在旧表下同样出现，不是新问题；PnP 设备数相同，旧表多出的一个 COM2 是上表所列的“幻影”串口。Linux 2.6.34（`linux.iso`，内核无 ACPI）照常启动。
+- 20 次循环：两种客户机各 `POWER_CYCLES=20` 次 `poweroff`→S5→`power_button()` 上电。ACPI reboot 每次运行 1 次，未做 20 次循环；buildroot 没有处理电源按钮的用户态程序，“按钮→OS 关机”无法在本地客户机上验证，改为验证事件与 SCI 各恰好一次。
+- 未验收：Windows ACPI HAL/Windows x64（无镜像）。
+
 
 ### P2a：布局单一来源与状态归属
 
@@ -280,12 +297,15 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 拆成四个顺序子任务，每个保持单核可运行：
 
-1. [ ] 建立布局描述和生成器，产出 Rust 常量、JS accessor 与 JIT 常量，先替换 magic number，不同时改语义；包括测试中硬编码的寄存器、计数器偏移。
-2. [ ] 状态归属表：`global_pointers.rs` 每个字段和 §2 列出的 Rust 静态变量（LAPIC、TLB、TSC 辅助量、x87 影子、JIT 状态等）标为“每核 / 每 Machine / 缓存（切换时丢弃）/ 只读”，生成器据此给出每核状态区的边界，并断言无字段遗漏。
-3. [ ] 引入 GuestIP/Linear/Physical/HostOffset 类型，低 RAM 与 MMIO 从同一物理总线入口分派；DMA、固件、调试读写不能绕过代码页失效接口。（X1 的前提）
-4. [ ] 提供新 snapshot schema、v6 导入器和版本校验；明确哪些是架构状态，哪些只是应丢弃的缓存。
+1. [x] [`gen/state_layout.js`](../gen/state_layout.js) 是 58 个字段（偏移、大小、Rust 类型、归属）的唯一来源，生成 `global_pointers.rs` 中 GENERATED 标记之间的常量与 [`src/state_layout.js`](../src/state_layout.js)；`cpu.js` 的 51 个视图改用 `STATE_OFFSETS`（替换脚本逐个断言原数字与布局相等）。生成的常量与原文件逐条相同，release `v86.wasm` 重建后逐字节相同。JIT 通过 Rust 常量取偏移，无需另生成。IR 差分测试中仍有硬编码偏移（如 `words[612>>2]`），布局不变时依然正确，X1 改布局时必须一并改写。
+2. [x] 归属分 core / cache / scratch / machine / debug 五类：固定区字段逐个标注并检查无重叠；`src/rust` 中全部 131 个 static 逐个登记，`make state-layout-check` 扫描源码，新增或删除 static 未登记即失败。结论：固定区每核部分为 9 段共 1136 字节（`CORE_STATE_RANGES`）；Rust 中真正每核的只有 `APIC`；TLB（`tlb_data` 等）、`last_virt_eip/eip_phys`、`state_flags`、x87 影子为 cache；`instruction_counter`、TSC 偏移、x87 策略、ACPI/内存大小/SVGA 为 machine；IR 的 `FAST/PAGE_FAST` 等查找缓存为 machine，因为每次命中都按当前 TLB 与 CPL 复核；`ACTIVE/T0_CONTROL/T0_CS/EXIT_KIND`、SoftFloat 全局等只在一次激活或一次运算内有效（scratch）。
+3. [ ] （随 X1）引入 GuestIP/Linear/Physical/HostOffset 类型，低 RAM 与 MMIO 从同一物理总线入口分派；DMA、固件、调试读写不能绕过代码页失效接口。
+4. [ ] （随 X1/C1）提供新 snapshot schema、v6 导入器和版本校验；架构状态与缓存的划分已由第 2 项给出。
+5. [x] 换核原语：`CPU.save_core_state()` 先写回 x87 影子再复制每核区间；`CPU.load_core_state()` 写入后丢弃派生状态（TLB、EIP 翻译缓存、`state_flags`、x87 影子）。已编译代码保留：它从固定地址读状态，入口处复核 TLB 与模式。
 
 **退出条件**：布局一致性检查通过；解释器、Tier-0、区域后端及至少两台独立 VM 回归；在测试钩子里创建两个上下文，用状态区换入换出交替执行，寄存器、FPU、TLB、异常、JIT 缓存无串扰。此阶段保持单核公开配置，不提前声称 SMP。原 P2 中的 ctx_ptr ABI 移到 W0。
+
+**实施记录（2026-09-27）**：`make smp-tests` = 布局检查 + [`tests/smp/core_swap.mjs`](../tests/smp/core_swap.mjs)（JIT 与 `DISABLE_JIT=1`，release 也已跑过）。夹具是 nasm 写的 multiboot 内核（[`tests/smp/core_swap.asm`](../tests/smp/core_swap.asm)）：两个上下文各建页目录，把同一虚拟页映射到不同物理页，开启分页、PSE 与 SSE，双精度 x87 控制字（使 x87 影子缓存在切片边界处于 dirty），循环中混合整数、x87、SSE 与经虚拟页的读写。两者在一台机器上每个主循环切片互换一次（JIT 166+167 片、331 次切换；解释器 84+84 片），最终结果、各自物理页和每核状态与“各自单独运行在新机器上且不经过换核原语”的参照逐字节相同。三种变异都会被检出：不刷 TLB（对照运行，出现跨上下文写入）、不写回 x87 影子（结果不同）、不重算 `state_flags`（直接检查，模拟 AP 实模式与 BSP 保护模式并存）。结论：固定地址的换核原语可保留已编译代码；这不代表多核 JIT 的安全门槛已经通过。C1/C2 多核继续关闭 JIT，C3 验收跨核 SMC、原子性和发布协议后再开放。
 
 ### X1：64 位状态与解码
 
@@ -375,16 +395,20 @@ RSDT/XSDT 为同一组表提供兼容入口；优先把固件表放在低 4 GiB 
 
 **修改范围**：`apic.rs`、`ioapic.rs`、`pic.rs`、CPU reset/HLT/interrupt、`src/main.js`/CPU slice 执行入口、Machine Scheduler/InterruptRouter、固件初始化。
 
-本阶段在 32 位下完成，使用 SeaBIOS 回退表（MADT/SSDT 按探测到的 CPU 生成），不等待 A2 的 table-loader。
+本阶段在 32 位下完成，不等待 x86-64。A2 已先落地，因此本次固件验收直接使用 v86 的 table-loader/MADT 路径。
 
-- [ ] **先落地最小解释器调度器**：`run_cpu_slice(core_id, budget)`、runnable/wait-for-SIPI/HLT 状态、轮转、统一 timer/event 服务。预算在完整指令或合法 REP 元素边界兑现，LOCK/隐式 XCHG 不可分割。C1 全程关闭 JIT；不能只创建 AP 状态而没有使 AP 获得执行时间的 runner。SeaBIOS 启动的忙等和 LOCK BTS 也在此 gate 内。
-- [ ] 按 §3.1 第一步实现状态块换入换出（范围来自 P2a），切换点只在主循环安全点；先以测试钩子验证两核交替执行无串扰，再接入调度器。
+- [x] **最小解释器调度器**：JS `run_cores()` 在安全点选择核并调用 Rust `run_cpu_slice(budget)`，每轮每核预算 4096 个解释器 dispatch（STI 的一条 shadow 指令最多超额 1）；同页无 PAUSE 忙等也受预算限制，长 REP 每次最多 256 个元素后让出。切换不拆开 LOCK/隐式 XCHG 的指令体。所有核 HLT 时 Machine 仍服务定时器，AP 的 HLT 不重复服务设备。多核自动禁用 JIT。dispatch 计数包含 REP 续跑与异常分派，**不是** C0 已提交指令时钟。
+- [x] 按 §3.1 第一步实现状态块换入换出（范围来自 P2a），切换点只在主循环安全点；先以测试钩子验证两核交替执行无串扰，再接入调度器。
 - [ ] 每核独立 LAPIC/IRR/ISR/TMR/TPR/PPR/LVT/timer/APIC_BASE/MSR 状态（LAPIC 改为按核数组）；IOAPIC/PIC/外设属于 Machine。
 - [ ] 明确 BSP reset、AP wait-for-SIPI、INIT assert/deassert、SIPI vector 和重复 SIPI 的规则；AP 从正确实模式入口运行，不通过宿主直接跳进内核函数。
 - [ ] 实现 ICR destination/shorthand、physical/logical destination、fixed/lowest-priority/NMI/INIT/SIPI 和所需 ExtINT；不支持的保留编码遵循选定模型。
 - [ ] 实现 EOI、remote-IRR、电平重触发、mask/unmask、优先级和每核 LAPIC timer；设备 IRQ 通过路由选择目标，不无条件交给 BSP。
-- [ ] 32 位最小 trampoline 逐核写签名、发送回执 IPI，验证定向、广播、all-excluding-self、HLT 后唤醒、AP 重初始化。
-- [ ] AP 能响应后才修改 fw_cfg 核数并运行真正 SeaBIOS 启动。其 [SMP 初始化](https://raw.githubusercontent.com/coreboot/seabios/rel-1.16.2/src/fw/smp.c) 会发送 INIT/SIPI 并等待核到达；单改数量可能使 BIOS 等待不结束。
+- [x] 32 位最小 trampoline 逐核写签名、发送回执 IPI，验证定向、广播、all-excluding-self、HLT 后唤醒、AP 重初始化；覆盖同一切片中先后两个不同 SIPI vector，只采用第一个。
+- [x] 真正 SeaBIOS 启动：2/3/4/8 核通过 BIOS POST 后进入软盘引导扇区；fw_cfg 仍公布完整 expected CPU count，全部 AP 实际执行，内存中 MADT 核数/ID/校验和一致。
+
+**实施记录（2026-09-27，review 后推进）**：新增 `make multicore-boot-tests` / `multicore-boot-tests-release`，覆盖 APIC physical/flat/cluster 路由、INIT/SIPI 顺序、NMI latch、优先级、IOAPIC 电平重投递、精确忙等预算、REP 续跑、BSP CLI+HLT 时 AP timer 唤醒，以及真实客户机 trampoline/SeaBIOS。`apic.flat` 已从 8 PASS/3 FAIL/1 SKIP 提升为 11 PASS/0 FAIL/1 SKIP，纳入 `kvm-unit-test-apic`。
+
+本轮还修复 CF9 注册位置、PCI/ACPI 快照 PM 解码顺序、单核 NMI/APIC enable 快照缺失；多核 save/restore 明确拒绝，restore 在写入 RAM 前拒绝。布局增加 `nmi_blocked`，当前为 59 字段、1144 字节每核区域、136 个已分类 static。详见 [C1 验证与审查记录](validation/platform/C1/review-and-validation.zh-CN.md)。C0 尚未完成，此处只接受独立的 C1 子门槛；下一阶段先统一虚拟时间，再关闭 C1 的 ExtINT/APIC 禁用等语义缺口与 C2 的 CPUID/OS 拓扑验收。
 
 **退出条件**：2/4/8 核 trampoline 均由客户机启动；每核 ID/寄存器/栈独立；IPI 延迟受预算约束；固件启动不靠减少其 expected CPU count 逃避失败。
 
@@ -517,20 +541,20 @@ make bench-quick
 
 ### 6.3 必须新增的验收入口
 
-除标注“已实现”的两项外，以下名称是**待实现 Makefile targets**，不能在实施报告中写成现有测试：
+除标注“已实现”的项目外，以下名称是**待实现 Makefile targets**，不能在实施报告中写成现有测试：
 
 | 建议目标 | 用途 | 首个责任阶段 |
 |---|---|---|
 | `platform-contract-tests` | 配置、布局、资源、CPUID/profile、固件一致性 | P0/P1/P2a |
 | `acpi-device-tests` | 注入时钟、PM/SCI/GPE、按钮/复位（**已实现**，`tests/devices/acpi_device.js`） | A1 |
-| `acpi-table-tests` | table-loader、RSDP/表校验、ASL、guest dump 对照 | A2 |
+| `acpi-table-tests` | table-loader、RSDP/表校验、ACPICA 反汇编/重编译/执行（**已实现**，`tests/devices/acpi_tables.js`） | A2 |
 | `acpi-guest-tests` | ACPI OS 启动、表校验、电源按钮、S5/上电循环（**已实现**，`tests/devices/acpi_guest.js`，含 `DISABLE_JIT=1`）；S3/S4 循环待 A3 | A1/A3 |
 | `x64-decode-tests` | REX/模式/取指边界/独立 decoder | X1 |
 | `x64-system-tests` | long mode、MMU、异常、MSR、CPL/IST | X2 |
 | `x64-differential-tests` | 指令参考结果、解释器与各 JIT 后端 | X3/X4 |
 | `x64-guest-tests` | BIOS x64 启动、64/32 位程序和系统调用 | X3/X4 |
 | `highmem-tests` | 高物理地址、4 GiB 以上重映射窗口、DMA、快照；容量属 X6 | X5/X6 |
-| `multicore-boot-tests` | INIT/SIPI、IPI、真实 AP、固件拓扑 | C1/C2 |
+| `multicore-boot-tests` | INIT/SIPI、IPI、真实 AP、固件核数（**已实现**；另有 `-release`，OS 拓扑待 C2） | C1/C2 |
 | `multicore-coherence-tests` | 原子、TLB shootdown、SMC、量子/种子 | C3 |
 | `multicore-state-tests` | 全核暂停/恢复/reset/睡眠、旧 state 导入 | C3/A3 |
 | `multicore-parallel-tests` | shared memory、内存序、rendezvous、Worker 生命周期 | W1 |

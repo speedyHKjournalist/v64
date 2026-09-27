@@ -93,6 +93,24 @@ IO.prototype.empty_port_write = function(x)
 
 
 /**
+ * Remove the handlers of a device from a range of ports (for devices whose
+ * decode can move, like the ACPI PM block)
+ * @param {number} port_addr
+ * @param {number} length
+ * @param {Object} device
+ */
+IO.prototype.unregister_range = function(port_addr, length, device)
+{
+    for(let port = port_addr; port < port_addr + length; port++)
+    {
+        if(this.ports[port].device === device)
+        {
+            this.ports[port] = this.create_empty_entry();
+        }
+    }
+};
+
+/**
  * @param {number} port_addr
  * @param {Object} device
  * @param {function(number):number=} r8

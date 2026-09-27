@@ -178,7 +178,8 @@ static inline void init_inregs(struct regs *regs)
 		inregs.esp = (unsigned long)&tmp_stack.top;
 }
 
-static void exec_in_big_real_mode(struct insn_desc *insn)
+/* noinline: the asm below defines global labels, which must exist once (clang inlines this) */
+static __attribute__((noinline)) void exec_in_big_real_mode(struct insn_desc *insn)
 {
 	unsigned long tmp;
 	static struct regs save;
@@ -1684,7 +1685,7 @@ static void test_perf_memory_load(void)
 {
 	u64 cyc, tmp;
 
-	MK_INSN_PERF(perf_memory_load, "cmp $0, (%edi)");
+	MK_INSN_PERF(perf_memory_load, "cmpl $0, (%edi)");
 
 	init_inregs(&(struct regs){ .edi = (u32)&tmp });
 
@@ -1709,7 +1710,7 @@ static void test_perf_memory_rmw(void)
 {
 	u64 cyc, tmp;
 
-	MK_INSN_PERF(perf_memory_rmw, "add $1, (%edi)");
+	MK_INSN_PERF(perf_memory_rmw, "addl $1, (%edi)");
 	init_inregs(&(struct regs){ .edi = (u32)&tmp });
 	cyc = cycles_in_big_real_mode(&insn_perf_memory_rmw);
 	print_serial_u32(cyc * 1000 >> PERF_COUNT_SHIFT);

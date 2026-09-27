@@ -13,17 +13,25 @@ process.on("unhandledRejection", exn => { throw exn; });
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 
-const PM1_STS = 0xB000;
-const PM1_EN = 0xB002;
-const PM1_CNT = 0xB004;
-const PM_TMR = 0xB008;
-const GLBCTL = 0xB028;
+// PM base as SeaBIOS programs it with v86's tables; the device decodes PMBA
+const PM_BASE = 0x600;
+const PM1_STS = PM_BASE + 0;
+const PM1_EN = PM_BASE + 2;
+const PM1_CNT = PM_BASE + 4;
+const PM_TMR = PM_BASE + 8;
+const GLBCTL = PM_BASE + 0x28;
 const GPE0_STS = 0xAFE0;
 const GPE0_EN = 0xAFE2;
 const SMI_CMD = 0xB2;
 const FW_CFG_SELECT = 0x510;
 const FW_CFG_DATA = 0x511;
 const FW_CFG_FILE_DIR = 0x19;
+const PCI_CONFIG_ADDRESS = 0xCF8;
+const PCI_CONFIG_DATA = 0xCFC;
+const RESET_CONTROL = 0xCF9;
+const ACPI_PCI_DEVICE = 7;
+const PCI_PMBA = 0x40;
+const PCI_PMREGMISC = 0x80;
 
 const TMR = 1 << 0;
 const PWRBTN = 1 << 8;
@@ -75,9 +83,34 @@ acpi.clock = () => now;
 const power_off_events = [];
 emulator.add_listener("acpi-power-off", state => power_off_events.push(state));
 
+const pci_address = (device, reg) => (0x80000000 | device << 11 | reg & 0xFC) | 0;
+function pci_write32(device, reg, value)
+{
+    io.port_write32(PCI_CONFIG_ADDRESS, pci_address(device, reg));
+    io.port_write32(PCI_CONFIG_DATA, value);
+}
+function pci_write8(device, reg, value)
+{
+    io.port_write32(PCI_CONFIG_ADDRESS, pci_address(device, reg));
+    io.port_write8(PCI_CONFIG_DATA + (reg & 3), value);
+}
+function pci_read32(device, reg)
+{
+    io.port_write32(PCI_CONFIG_ADDRESS, pci_address(device, reg));
+    return io.port_read32(PCI_CONFIG_DATA);
+}
+
+/** What SeaBIOS does in piix4_pm_config_setup */
+function program_pm_base(base)
+{
+    pci_write32(ACPI_PCI_DEVICE, PCI_PMBA, base | 1);
+    pci_write8(ACPI_PCI_DEVICE, PCI_PMREGMISC, 1);
+}
+
 function power_on()
 {
     acpi.reset();
+    program_pm_base(PM_BASE);
     for(const sources of cpu.shared_irq_sources)
     {
         sources.clear();
@@ -99,6 +132,43 @@ const ms_for_ticks = ticks => ticks / TICKS_PER_MS;
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
+
+// Run before any PCI configuration access: the reset register must already
+// exist when a new VM is created (including a VM that will restore a state).
+test("reset control is independent of PCI configuration address accesses", () => {
+    const reboot = cpu.reboot_internal;
+    let resets = 0;
+    cpu.reboot_internal = () => { resets++; };
+    try
+    {
+        assert.equal(io.port_read8(RESET_CONTROL), 0);
+        io.port_write8(RESET_CONTROL, 0x06);
+        assert.equal(resets, 1, "FADT reset works before any access to 0xCF8");
+
+        cpu.devices.pci.reset();
+        io.port_write8(RESET_CONTROL, 0x02);
+        for(const value of [0x0200, 0x0600])
+        {
+            io.port_write16(PCI_CONFIG_ADDRESS, value);
+            assert.equal(cpu.devices.pci.pci_addr32[0] & 0xFFFF, value);
+            io.port_write32(PCI_CONFIG_ADDRESS, pci_address(0, 0) | value);
+            assert.equal(cpu.devices.pci.pci_addr32[0], pci_address(0, 0) | value);
+            assert.equal(resets, 1, "word/dword config writes never reset the CPU");
+            assert.equal(io.port_read8(RESET_CONTROL), 0x02, "config writes preserve RCR");
+        }
+
+        io.port_write8(RESET_CONTROL, 0x06); // Linux reboot=pci
+        assert.equal(resets, 2);
+        io.port_write32(PCI_CONFIG_ADDRESS, pci_address(0, 0));
+        io.port_write8(RESET_CONTROL, 0x06);
+        assert.equal(resets, 2, "PCI config accesses do not clear the RST_CPU latch");
+    }
+    finally
+    {
+        cpu.devices.pci.reset();
+        cpu.reboot_internal = reboot;
+    }
+});
 
 test("an event is latched while disabled and raises the SCI once enabled", () => {
     power_on();
@@ -248,9 +318,9 @@ test("PM1 registers: write-one-to-clear, defined bits only, every access width",
     assert.equal(io.port_read16(PM1_CNT), SLP_TYP | BM_RLS | SCI_EN, "GBL_RLS/SLP_EN read as zero, reserved bits ignored");
     io.port_write16(PM1_CNT, SCI_EN);
 
-    assert.equal(io.port_read8(0xB006), 0);
-    assert.equal(io.port_read16(0xB00C), 0);
-    assert.equal(io.port_read32(0xB03C), 0);
+    assert.equal(io.port_read8(PM_BASE + 6), 0);
+    assert.equal(io.port_read16(PM_BASE + 0xC), 0);
+    assert.equal(io.port_read32(PM_BASE + 0x3C), 0);
 
     io.port_write32(GLBCTL, 0x12345678);
     assert.equal(io.port_read32(GLBCTL), 0x12345678);
@@ -407,13 +477,19 @@ test("snapshot: registers, timer phase and SCI survive save_state/restore_state"
     const registers = () => [PM1_STS, PM1_EN, PM1_CNT, GPE0_STS, GPE0_EN].map(port => io.port_read16(port));
     const before = registers();
 
+    io.port_write8(RESET_CONTROL, 0x02);
     const state = await emulator.save_state();
 
     power_on();
+    program_pm_base(0xB000);
+    cpu.devices.pci.reset();
     io.port_write16(PM1_EN, 0);
     now = 10000; // host time moved on while the image was stored
 
     await emulator.restore_state(state);
+    assert.equal(acpi.pm_base, PM_BASE, "PM decode follows the restored PCI configuration");
+    assert.equal(io.port_read32(0xB008), -1, "the pre-restore mapping is released");
+    assert.equal(io.port_read8(RESET_CONTROL), 0x02, "RCR survives restore");
     assert.deepEqual(registers(), before);
     assert.equal(io.port_read32(GLBCTL), 1);
     assert.equal(io.port_read32(PM_TMR), timer, "the timer continues from the saved value");
@@ -429,6 +505,22 @@ test("snapshot: registers, timer phase and SCI survive save_state/restore_state"
     io.port_write16(PM1_STS, PWRBTN);
     assert.ok(!slave_irr_has_irq9());
     pic_slave()[PIC_ELCR] &= ~(1 << (SCI_IRQ - 8));
+});
+
+test("snapshot restores both enabled and disabled PM I/O decode", async () => {
+    power_on();
+    io.port_write16(PM1_EN, PWRBTN);
+    const enabled_state = await emulator.save_state();
+    acpi.reset();
+    const disabled_state = await emulator.save_state();
+
+    await emulator.restore_state(enabled_state);
+    assert.equal(acpi.pm_base, PM_BASE);
+    assert.equal(io.port_read16(PM1_EN), PWRBTN, "restore enables a previously disabled PM block");
+
+    await emulator.restore_state(disabled_state);
+    assert.equal(acpi.pm_base, -1);
+    assert.equal(io.port_read16(PM1_EN), 0xFFFF, "restore disables a previously enabled PM block");
 });
 
 test("state images from before the rewrite are imported", () => {
@@ -456,6 +548,8 @@ test("reset returns to power-on values, releases the SCI and keeps the timer run
 
     acpi.reset();
     assert.equal(line[SCI_IRQ], false);
+    assert.equal(io.port_read16(PM1_STS), 0xFFFF, "PCIRST# disables the PM I/O space");
+    program_pm_base(PM_BASE);
     assert.deepEqual([PM1_STS, PM1_EN, PM1_CNT, GPE0_STS, GPE0_EN].map(port => io.port_read16(port)), [0, 0, 0, 0, 0]);
     assert.equal(io.port_read32(PM_TMR), timer);
 });
@@ -473,7 +567,31 @@ test("a machine reset deasserts every shared source (like PCIRST#)", () => {
     assert.equal(line[11], false);
     assert.equal(line[SCI_IRQ], false);
     assert.ok(cpu.shared_irq_sources.every(sources => sources.size === 0));
-    assert.equal(io.port_read16(PM1_CNT) & SCI_EN, 0, "legacy mode after reset");
+    assert.equal(acpi.pm1_cnt & SCI_EN, 0, "legacy mode after reset");
+    assert.equal(io.port_read16(PM1_CNT), 0xFFFF, "PM I/O space disabled until the firmware programs PMBA");
+});
+
+test("the PM block is decoded at PMBA once PMREGMISC enables it", () => {
+    power_on();
+    now = 1000;
+    const timer = io.port_read32(PM_TMR);
+    assert.equal(timer, 3579545);
+
+    program_pm_base(0xB000);
+    assert.equal(io.port_read32(0xB008), timer, "moved");
+    assert.equal(io.port_read32(PM_TMR), -1, "old base released");
+
+    pci_write8(ACPI_PCI_DEVICE, PCI_PMREGMISC, 0);
+    assert.equal(io.port_read32(0xB008), -1, "disabled");
+
+    pci_write32(ACPI_PCI_DEVICE, PCI_PMBA, 0xB0FF);
+    assert.equal(pci_read32(ACPI_PCI_DEVICE, PCI_PMBA), 0xB0C1, "reserved bits read as 0, bit 0 as 1");
+    pci_write8(ACPI_PCI_DEVICE, PCI_PMREGMISC, 1);
+    assert.equal(io.port_read32(0xB0C8), timer, "64-byte aligned base");
+
+    program_pm_base(PM_BASE);
+    assert.equal(io.port_read32(0xB0C8), -1);
+    assert.equal(io.port_read32(PM_TMR), timer);
 });
 
 let failed = 0;

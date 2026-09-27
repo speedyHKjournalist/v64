@@ -236,7 +236,8 @@ static void test_self_ipi(void)
 
 volatile int nmi_counter_private, nmi_counter, nmi_hlt_counter, sti_loop_active;
 
-void sti_nop(char *p)
+/* noinline: the asm defines the global label post_sti, which must exist once (clang inlines this) */
+__attribute__((noinline)) void sti_nop(char *p)
 {
     asm volatile (
 		  ".globl post_sti \n\t"

@@ -237,6 +237,7 @@ V86.prototype.continue_init = async function(emulator, options)
     }
 
     settings.acpi = options.acpi;
+    settings.cpu_cores = options.cpu_cores;
     settings.disable_jit = options.disable_jit;
     settings["jit_backend"] = options["jit_backend"];
     settings["ir_region_budget"] = options["ir_region_budget"];
@@ -938,6 +939,17 @@ V86.prototype.restart = async function()
         await this["graphics_adapter"]["reset"]();
         this.v86.restart();
     }, false);
+};
+
+/**
+ * Diagnostic snapshot of the machine (CPU mode and registers, interrupt
+ * controllers, ACPI device and tables) as plain data. For debugging and test
+ * reports; the format is not a stable API.
+ */
+V86.prototype.get_diagnostics = async function()
+{
+    if(this.worker_controller) return this.worker_controller.rpc("get_diagnostics");
+    return this.v86.cpu.get_diagnostics();
 };
 
 /**

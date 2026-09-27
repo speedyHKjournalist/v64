@@ -12,6 +12,12 @@ following list is roughtly sorted from most interesting/useful to least.
 - [api](api/): Tests for several API functions of v86.
 - [devices](devices/): Device tests.
 - [rust](rust/): Rust unit test helpers.
+- [smp](smp/): Cooperative multicore building blocks. `make smp-tests` checks
+  state switching against independent single-core runs. `make multicore-boot-tests`
+  checks bounded interpreter scheduling, APIC routing, guest INIT/SIPI trampolines
+  on 2/4/8 cores and real SeaBIOS POST/floppy boot on 2/3/4/8 cores. The
+  `multicore-boot-tests-release` target runs the same gate with release JS/Wasm.
+  Multicore JIT, OS topology and multicore snapshots remain separate plan gates.
 - [expect](expect/): Expect tests for the IR compiler's output. Contains a set
   of asm+wast files; each program is compiled as one Tier-2 region, which must
   match the wast file.

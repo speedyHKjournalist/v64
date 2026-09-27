@@ -970,7 +970,14 @@ pub unsafe fn instr32_8F_0_mem(modrm_byte: i32) {
 }
 pub unsafe fn instr32_8F_0_reg(r: i32) { write_reg32(r, return_on_pagefault!(pop32s())); }
 
-pub unsafe fn instr_90() {}
+pub unsafe fn instr_90() {
+    // PAUSE (F3 90): a spin-wait hint; with several cores, let another one run
+    if *prefixes & crate::prefix::PREFIX_F3 != 0 && crate::cpu::apic::core_count() > 1 {
+        crate::cpu::cpu::core_yield = true;
+        // leave the interpreter's same-page loop now, not after its iteration limit
+        crate::cpu::cpu::jit_block_boundary = true;
+    }
+}
 pub unsafe fn instr16_91() { xchg16r(CX); }
 pub unsafe fn instr32_91() { xchg32r(ECX); }
 pub unsafe fn instr16_92() { xchg16r(DX); }
@@ -2180,7 +2187,9 @@ pub unsafe fn instr_F4() {
     // due it will immediately call call_interrupt_vector and continue
     // execution without an unnecessary cycle through do_run
     if *flags & FLAG_INTERRUPT != 0 {
-        js::run_hardware_timers(*acpi_enabled, js::microtick());
+        if crate::cpu::apic::core_count() == 1 {
+            js::run_hardware_timers(*acpi_enabled, js::microtick());
+        }
         handle_irqs();
     }
     else {
@@ -2351,8 +2360,14 @@ pub unsafe fn instr_FB_without_fault() -> bool {
     };
 }
 pub unsafe fn instr_FB() {
+    let was_enabled = *flags & FLAG_INTERRUPT != 0;
     if !instr_FB_without_fault() {
         trigger_gp(0);
+    }
+    else if crate::cpu::apic::core_count() > 1 && was_enabled {
+        // STI only creates an interrupt shadow on IF=0 -> 1. Recursing
+        // through STI with IF already set lets a chain evade the SMP budget
+        // and exhaust the host stack. Keep the legacy single-core path.
     }
     else {
         *prefixes = 0;

@@ -1,7 +1,6 @@
 // See Intel's System Programming Guide
 
 use crate::cpu::{cpu::js, global_pointers::acpi_enabled, ioapic};
-use std::sync::{Mutex, MutexGuard};
 
 const APIC_LOG_VERBOSE: bool = false;
 
@@ -22,7 +21,7 @@ const DELIVERY_MODES: [&str; 8] = [
     "Reserved (3)",
     "NMI (4)",
     "INIT (5)",
-    "Reserved (6)",
+    "Start-up (6)",
     "ExtINT (7)",
 ];
 
@@ -33,6 +32,19 @@ const IOAPIC_CONFIG_MASKED: u32 = 0x10000;
 const IOAPIC_DELIVERY_INIT: u8 = 5;
 const IOAPIC_DELIVERY_NMI: u8 = 4;
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
+const DELIVERY_LOWEST_PRIORITY: u8 = 1;
+const DELIVERY_STARTUP: u8 = 6;
+const DELIVERY_EXTINT: u8 = 7;
+
+const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+
+/// Cores a machine can have; each has its own local APIC
+pub const MAX_CORES: usize = 8;
+
+/// Events for the core scheduler in JavaScript (CPU.prototype.run_cores),
+/// taken with apic_take_core_events: INIT and a start-up IPI (vector in bits 8..15)
+pub const CORE_EVENT_INIT: u32 = 1;
+pub const CORE_EVENT_SIPI: u32 = 2;
 
 // keep in sync with cpu.js
 #[allow(dead_code)]
@@ -77,7 +89,7 @@ pub struct Apic {
     lvt_thermal_sensor: u32,
 }
 
-static APIC: Mutex<Apic> = Mutex::new(Apic {
+const APIC_RESET: Apic = Apic {
     apic_id: 0,
     timer_divider: 0,
     timer_divider_shift: 1,
@@ -101,18 +113,118 @@ static APIC: Mutex<Apic> = Mutex::new(Apic {
     local_destination: 0,
     error: 0,
     read_error: 0,
-});
+};
 
-pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
+// One local APIC per core. Only one core runs at a time (cooperative
+// multicore: the active core's state is swapped in, see
+// CPU.prototype.save_core_state); CURRENT_CORE is the one whose APIC the
+// MMIO window, interrupt acceptance and CPUID see.
+static mut APICS: [Apic; MAX_CORES] = [APIC_RESET; MAX_CORES];
+static mut CURRENT_CORE: usize = 0;
+static mut CORE_COUNT: usize = 1;
+static mut CORE_EVENTS: [u32; MAX_CORES] = [0; MAX_CORES];
+/// NMIs latched for each core until it can take one (nmi_blocked)
+static mut NMI_PENDING: [bool; MAX_CORES] = [false; MAX_CORES];
+
+fn apic_of(core: usize) -> &'static mut Apic {
+    dbg_assert!(core < MAX_CORES);
+    unsafe { &mut *(&raw mut APICS).cast::<Apic>().add(core) }
+}
+
+pub fn get_apic() -> &'static mut Apic { apic_of(current_core()) }
+
+pub fn current_core() -> usize { unsafe { CURRENT_CORE } }
+pub fn core_count() -> usize { unsafe { CORE_COUNT } }
 
 #[no_mangle]
 pub fn get_apic_addr() -> u32 { &raw mut *get_apic() as u32 }
+
+/// Address of a core's local APIC (layout: see CPU.prototype.get_state_apic)
+#[no_mangle]
+pub fn apic_addr(core: u32) -> u32 { &raw mut *apic_of(core as usize) as u32 }
+
+/// Power-on state of all local APICs; core i gets APIC ID i
+#[no_mangle]
+pub unsafe fn apic_set_core_count(count: u32) {
+    dbg_assert!(count >= 1 && count as usize <= MAX_CORES);
+    CORE_COUNT = count as usize;
+    CURRENT_CORE = 0;
+    for core in 0..MAX_CORES {
+        *apic_of(core) = APIC_RESET;
+        apic_of(core).apic_id = (core as u32) << 24;
+        CORE_EVENTS[core] = 0;
+        NMI_PENDING[core] = false;
+    }
+}
+
+/// IA32_APIC_BASE.EN cleared: the local APIC returns to its power-on state,
+/// including the initial APIC ID (as KVM does when it is enabled again)
+pub unsafe fn software_disable() {
+    let core = current_core();
+    *apic_of(core) = APIC_RESET;
+    apic_of(core).apic_id = (core as u32) << 24;
+}
+
+/// Take a pending NMI of the active core
+pub unsafe fn take_nmi() -> bool {
+    let pending = NMI_PENDING[current_core()];
+    NMI_PENDING[current_core()] = false;
+    pending
+}
+
+pub unsafe fn nmi_pending() -> bool { NMI_PENDING[current_core()] }
+
+#[no_mangle]
+pub unsafe fn apic_core_nmi_pending(core: u32) -> bool { NMI_PENDING[core as usize] }
+
+#[no_mangle]
+pub unsafe fn apic_set_current_core(core: u32) {
+    dbg_assert!((core as usize) < CORE_COUNT);
+    CURRENT_CORE = core as usize;
+}
+
+/// INIT: the local APIC returns to its power-on state except for its ID
+#[no_mangle]
+pub unsafe fn apic_init_core(core: u32) {
+    let apic = apic_of(core as usize);
+    let apic_id = apic.apic_id;
+    *apic = APIC_RESET;
+    apic.apic_id = apic_id;
+}
+
+#[no_mangle]
+pub unsafe fn apic_take_core_events(core: u32) -> u32 {
+    let events = CORE_EVENTS[core as usize];
+    CORE_EVENTS[core as usize] = 0;
+    events
+}
+
+/// Snapshot the pending startup events without acknowledging them.
+#[no_mangle]
+pub unsafe fn apic_peek_core_events(core: u32) -> u32 { CORE_EVENTS[core as usize] }
+
+pub unsafe fn has_core_events() -> bool {
+    (0..core_count()).any(|core| CORE_EVENTS[core] != 0)
+}
+
+#[no_mangle]
+pub unsafe fn apic_restore_core_events(core: u32, events: u32, nmi: bool) {
+    dbg_assert!((core as usize) < CORE_COUNT);
+    CORE_EVENTS[core as usize] = events;
+    NMI_PENDING[core as usize] = nmi;
+}
+
+/// Whether a (halted) core has an interrupt it would accept
+#[no_mangle]
+pub unsafe fn apic_core_interrupt_pending(core: u32) -> bool {
+    pending_irq(apic_of(core as usize)).is_some()
+}
 
 pub fn read32(addr: u32) -> u32 {
     if unsafe { !*acpi_enabled } {
         return 0;
     }
-    read32_internal(&mut get_apic(), addr)
+    read32_internal(get_apic(), addr)
 }
 
 fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
@@ -134,6 +246,8 @@ fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
             }
             apic.tpr
         },
+
+        0xA0 => processor_priority(apic) as u32,
 
         0xB0 => {
             // write-only (written by DSL)
@@ -279,10 +393,35 @@ pub fn write32(addr: u32, value: u32) {
     if unsafe { !*acpi_enabled } {
         return;
     }
-    write32_internal(&mut get_apic(), addr, value)
+    // Routing may touch the sending APIC again. End its exclusive borrow
+    // before delivering an IPI or an IOAPIC EOI that can reassert the line.
+    match write32_internal(get_apic(), addr, value) {
+        Some(ApicAction::Eoi(vector)) => ioapic::remote_eoi(vector),
+        Some(ApicAction::Ipi { value, destination }) => {
+            let source = current_core();
+            let targets = match (value >> 18) & 3 {
+                0 => destination_cores(destination, ((value >> 11) & 1) as u8),
+                1 => vec![source],
+                2 => (0..core_count()).collect(),
+                _ => (0..core_count()).filter(|&c| c != source).collect(),
+            };
+            deliver_to_cores(
+                &targets,
+                value as u8,
+                ((value >> 8) & 7) as u8,
+                value & ioapic::IOAPIC_CONFIG_TRIGGER_MODE_LEVEL != 0,
+            );
+        },
+        None => {},
+    }
 }
 
-fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
+enum ApicAction {
+    Eoi(u8),
+    Ipi { value: u32, destination: u8 },
+}
+
+fn write32_internal(apic: &mut Apic, addr: u32, value: u32) -> Option<ApicAction> {
     match addr {
         0x20 => {
             dbg_log!("APIC write id: {:08x}", value >> 8);
@@ -308,8 +447,7 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 }
                 register_clear_bit(&mut apic.isr, highest_isr);
                 if register_get_bit(&apic.tmr, highest_isr) {
-                    // Send eoi to all IO APICs
-                    ioapic::remote_eoi(apic, highest_isr);
+                    return Some(ApicAction::Eoi(highest_isr));
                 }
             }
             else {
@@ -356,35 +494,15 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 ["no", "self", "all with self", "all without self"][destination_shorthand as usize]
             );
 
-            let mut value = value;
-            value &= !(1 << 12);
-            apic.icr0 = value;
+            // delivery is immediate: the status bit (12) always reads as idle
+            apic.icr0 = value & !(1 << 12);
 
-            if destination_shorthand == 0 {
-                // no shorthand
-                route(
-                    apic,
-                    vector,
-                    delivery_mode,
-                    is_level,
-                    destination,
-                    destination_mode,
-                );
+            let is_assert = value & ICR_LEVEL_ASSERT != 0;
+            if delivery_mode == IOAPIC_DELIVERY_INIT && is_level && !is_assert {
+                // INIT level de-assert only synchronizes arbitration IDs
+                return None;
             }
-            else if destination_shorthand == 1 {
-                // self
-                deliver(apic, vector, IOAPIC_DELIVERY_FIXED, is_level);
-            }
-            else if destination_shorthand == 2 {
-                // all including self
-                deliver(apic, vector, delivery_mode, is_level);
-            }
-            else if destination_shorthand == 3 {
-                // all but self
-            }
-            else {
-                dbg_assert!(false);
-            }
+            return Some(ApicAction::Ipi { value, destination });
         },
 
         0x310 => {
@@ -461,10 +579,18 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
             dbg_assert!(false);
         },
     }
+    None
 }
 
+/// Advance the timer of every core's local APIC
 #[no_mangle]
-pub fn apic_timer(now: f64) -> f64 { timer(&mut get_apic(), now) }
+pub fn apic_timer(now: f64) -> f64 {
+    let mut next = 100.0f64;
+    for core in 0..core_count() {
+        next = next.min(timer(apic_of(core), now));
+    }
+    next
+}
 
 fn timer(apic: &mut Apic, now: f64) -> f64 {
     if apic.timer_initial_count == 0 || apic.timer_current_count == 0 {
@@ -532,16 +658,72 @@ fn timer(apic: &mut Apic, now: f64) -> f64 {
     apic.timer_last_tick + time_per_interrupt - now
 }
 
-pub fn route(
-    apic: &mut Apic,
-    vector: u8,
-    mode: u8,
-    is_level: bool,
-    _destination: u8,
-    _destination_mode: u8,
-) {
-    // TODO
-    deliver(apic, vector, mode, is_level);
+/// Deliver an interrupt from the IO APIC (or an IPI) to the local APICs its
+/// destination selects
+pub fn route(vector: u8, mode: u8, is_level: bool, destination: u8, destination_mode: u8) {
+    deliver_to_cores(&destination_cores(destination, destination_mode), vector, mode, is_level);
+}
+
+/// Cores selected by a destination field: physical (APIC ID, 0xFF = all) or
+/// logical (flat or cluster model, per the core's DFR/LDR)
+fn destination_cores(destination: u8, destination_mode: u8) -> Vec<usize> {
+    (0..core_count())
+        .filter(|&core| {
+            let apic = apic_of(core);
+            if destination == 0xFF {
+                return true;
+            }
+            if destination_mode == 0 {
+                return (apic.apic_id >> 24) as u8 == destination;
+            }
+            let ldr = (apic.local_destination >> 24) as u8;
+            if apic.destination_format >> 28 == 0xF {
+                // flat model: 8 bits, one per APIC
+                ldr & destination != 0
+            }
+            else {
+                // cluster model: cluster in the upper nibble, members in the lower
+                ldr >> 4 == destination >> 4 && ldr & destination & 0xF != 0
+            }
+        })
+        .collect()
+}
+
+fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool) {
+    if mode == DELIVERY_LOWEST_PRIORITY {
+        // One target: the lowest processor-priority class (including an
+        // interrupt already in service), then the lowest APIC ID.
+        if let Some(&core) = cores.iter().min_by_key(|&&core| {
+            let apic = apic_of(core);
+            (processor_priority(apic) & 0xF0, apic.apic_id >> 24)
+        }) {
+            deliver(apic_of(core), vector, IOAPIC_DELIVERY_FIXED, is_level);
+        }
+        return;
+    }
+    for &core in cores {
+        match mode {
+            IOAPIC_DELIVERY_INIT => unsafe {
+                // INIT supersedes earlier startup/NMI requests. Clear here,
+                // at delivery, so an NMI sent after INIT is not lost when
+                // the scheduler subsequently applies the reset.
+                CORE_EVENTS[core] = CORE_EVENT_INIT;
+                NMI_PENDING[core] = false;
+            },
+            DELIVERY_STARTUP => unsafe {
+                // The first SIPI starts the AP; a second startup request
+                // before the scheduler runs must not replace its vector.
+                if CORE_EVENTS[core] & CORE_EVENT_SIPI == 0 {
+                    CORE_EVENTS[core] |= CORE_EVENT_SIPI | (vector as u32) << 8;
+                }
+            },
+            IOAPIC_DELIVERY_NMI => unsafe { NMI_PENDING[core] = true },
+            DELIVERY_EXTINT => {
+                dbg_log!("ExtINT IPI ignored");
+            },
+            _ => deliver(apic_of(core), vector, mode, is_level),
+        }
+    }
 }
 
 fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {
@@ -550,12 +732,12 @@ fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {
     }
 
     if mode == IOAPIC_DELIVERY_INIT {
-        // TODO
+        dbg_assert!(false, "INIT goes through deliver_to_cores");
         return;
     }
 
     if mode == IOAPIC_DELIVERY_NMI {
-        // TODO
+        dbg_assert!(false, "NMI goes through deliver_to_cores");
         return;
     }
 
@@ -596,9 +778,17 @@ fn highest_isr(apic: &Apic) -> Option<u8> {
     highest
 }
 
+/// PPR preserves the TPR subclass only when the task-priority class is at
+/// least the highest in-service interrupt's class (Intel SDM 11.8.3.1).
+fn processor_priority(apic: &Apic) -> u8 {
+    let task = apic.tpr as u8;
+    let service = highest_isr(apic).unwrap_or(0) & 0xF0;
+    if task & 0xF0 >= service { task } else { service }
+}
+
 /// Read-only; does not acknowledge or reprioritize an interrupt.
-pub fn has_pending_irq() -> bool { pending_irq(&get_apic()).is_some() }
-pub fn acknowledge_irq() -> Option<u8> { acknowledge_irq_internal(&mut get_apic()) }
+pub fn has_pending_irq() -> bool { pending_irq(get_apic()).is_some() }
+pub fn acknowledge_irq() -> Option<u8> { acknowledge_irq_internal(get_apic()) }
 
 // Share the exact priority policy with acknowledgement, without modifying IRR,
 // ISR or TPR. Continuation must not introduce a second interrupt policy.
@@ -608,20 +798,11 @@ fn pending_irq(apic: &Apic) -> Option<u8> {
         Some(x) => x,
     };
 
-    if let Some(highest_isr) = highest_isr(apic) {
-        if highest_isr >= highest_irr {
-            if APIC_LOG_VERBOSE {
-                dbg_log!("Higher isr, isr={:x} irr={:x}", highest_isr, highest_irr);
-            }
-            return None;
-        }
-    }
-
-    if highest_irr & 0xF0 <= apic.tpr as u8 & 0xF0 {
+    if highest_irr & 0xF0 <= processor_priority(apic) & 0xF0 {
         if APIC_LOG_VERBOSE {
             dbg_log!(
-                "Higher tpr, tpr={:x} irr={:x}",
-                apic.tpr & 0xF0,
+                "Higher ppr, ppr={:x} irr={:x}",
+                processor_priority(apic),
                 highest_irr
             );
         }
@@ -672,7 +853,7 @@ mod continuation_tests {
     #[test]
     fn pending_query_is_pure_and_matches_acknowledgement() {
         for vector in [0x20, 0x51, 0x7F, 0xE0] {
-            for service in [None, Some(0x30), Some(vector), Some(0xF0)] {
+            for service in [None, Some(0x30), Some(vector & 0xF0), Some(vector), Some(0xF0)] {
                 for tpr in [0, 0x50, 0x70, 0xF0] {
                     // Apic contains only integer and floating-point fields.
                     let mut apic: Apic = unsafe { std::mem::zeroed() };
@@ -684,8 +865,8 @@ mod continuation_tests {
                     let before = (apic.irr, apic.isr, apic.tpr);
                     let pending = pending_irq(&apic);
                     assert_eq!((apic.irr, apic.isr, apic.tpr), before);
-                    let expected =
-                        service.is_none_or(|s| s < vector) && (vector & 0xF0) > (tpr as u8 & 0xF0);
+                    let expected = service.is_none_or(|s| s & 0xF0 < vector & 0xF0)
+                        && (vector & 0xF0) > (tpr as u8 & 0xF0);
                     assert_eq!(pending, expected.then_some(vector));
                     assert_eq!(acknowledge_irq_internal(&mut apic), pending);
                     if !expected {
