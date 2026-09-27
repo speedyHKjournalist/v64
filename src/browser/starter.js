@@ -941,6 +941,32 @@ V86.prototype.restart = async function()
 };
 
 /**
+ * Press the ACPI power button. A running ACPI guest gets a power button event
+ * (usually starting an orderly shutdown). A machine that the guest has turned
+ * off (event "acpi-power-off") is powered on and started again.
+ * Resolves to false if the machine has no ACPI (option acpi).
+ */
+V86.prototype.power_button = async function()
+{
+    if(this.worker_controller) return this.worker_controller.serialize(() => this.worker_controller.rpc("power_button"));
+    const acpi = this.v86.cpu.devices.acpi;
+    if(!acpi)
+    {
+        return false;
+    }
+    if(acpi.soft_off)
+    {
+        await this.restart();
+        await this.run();
+    }
+    else
+    {
+        acpi.press_power_button();
+    }
+    return true;
+};
+
+/**
  * Add an event listener (the emulator is an event emitter).
  *
  * The callback function gets a single argument which depends on the event.

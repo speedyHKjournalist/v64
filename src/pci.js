@@ -29,6 +29,12 @@ export function PCI(cpu)
     this.device_spaces = [];
     this.devices = [];
 
+    /**
+     * The IRQ line each function has asserted, by pci_id
+     * @type {!Array<number|undefined>}
+     */
+    this.asserted_irq_lines = [];
+
     /** @const @type {CPU} */
     this.cpu = cpu;
 
@@ -595,7 +601,14 @@ PCI.prototype.set_io_bars = function(bar, from, to)
     }
 };
 
-PCI.prototype.raise_irq = function(pci_id)
+/**
+ * The IRQ line that the PIIX PIRQ routing registers (0x60..0x63 of the ISA
+ * bridge) currently assign to the interrupt pin of a function. Bit 7 set
+ * means the PIRQ is not routed to an ISA IRQ (e.g. after a link device's _DIS).
+ * @param {number} pci_id
+ * @return {number}
+ */
+PCI.prototype.get_irq_line = function(pci_id)
 {
     var space = this.device_spaces[pci_id];
     dbg_assert(space);
@@ -603,24 +616,51 @@ PCI.prototype.raise_irq = function(pci_id)
     var pin = (space[0x3C >>> 2] >> 8 & 0xFF) - 1;
     var device = (pci_id >> 3) - 1 & 0xFF;
     var parent_pin = pin + device & 3;
-    var irq = this.isa_bridge_space8[0x60 + parent_pin];
+    return this.isa_bridge_space8[0x60 + parent_pin];
+};
+
+PCI.prototype.raise_irq = function(pci_id)
+{
+    var irq = this.get_irq_line(pci_id);
+    var previous = this.asserted_irq_lines[pci_id];
+
+    if(irq & 0x80)
+    {
+        dbg_log("PCI irq of " + this.devices[pci_id].name + " not routed (PIRQ route " + h(irq) + ")", LOG_PCI);
+        irq = undefined;
+    }
+
+    if(previous !== undefined && previous !== irq)
+    {
+        // the guest rerouted the pin while it was asserted
+        this.cpu.set_shared_irq_level(previous, pci_id, false);
+    }
+    this.asserted_irq_lines[pci_id] = irq;
 
     //dbg_log("PCI raise irq " + h(irq) + " dev=" + h(device, 2) +
     //        " (" + this.devices[pci_id].name + ")", LOG_PCI);
-    this.cpu.device_raise_irq(irq);
+    if(irq !== undefined)
+    {
+        this.cpu.set_shared_irq_level(irq, pci_id, true);
+    }
 };
 
 PCI.prototype.lower_irq = function(pci_id)
 {
-    var space = this.device_spaces[pci_id];
-    dbg_assert(space);
-
-    var pin = space[0x3C >>> 2] >> 8 & 0xFF;
-    var device = pci_id >> 3 & 0xFF;
-    var parent_pin = pin + device - 2 & 3;
-    var irq = this.isa_bridge_space8[0x60 + parent_pin];
+    // Deassert the line that was asserted, even if the guest has changed the
+    // routing since. Without a record (e.g. after restoring a state image)
+    // fall back to the current routing.
+    var irq = this.asserted_irq_lines[pci_id];
+    if(irq === undefined)
+    {
+        irq = this.get_irq_line(pci_id);
+    }
+    this.asserted_irq_lines[pci_id] = undefined;
 
     //dbg_log("PCI lower irq " + h(irq) + " dev=" + h(device, 2) +
     //        " (" + this.devices[pci_id].name + ")", LOG_PCI);
-    this.cpu.device_lower_irq(irq);
+    if(!(irq & 0x80))
+    {
+        this.cpu.set_shared_irq_level(irq, pci_id, false);
+    }
 };

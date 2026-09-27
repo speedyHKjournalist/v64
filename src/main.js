@@ -32,6 +32,12 @@ v86.prototype.run = function()
 {
     this.stopping = false;
 
+    if(this.cpu.devices?.acpi?.soft_off)
+    {
+        // The guest turned the machine off (ACPI S5/S4): power it on again
+        this.cpu.reboot_internal();
+    }
+
     if(!this.running)
     {
         this.running = true;
@@ -52,6 +58,14 @@ v86.prototype.do_tick = function()
 
     this.idle = false;
     const t = this.cpu.main_loop();
+
+    if(this.cpu.devices?.acpi?.soft_off)
+    {
+        // The guest turned the machine off; stop at the end of this slice
+        this.stopping = true;
+        this.next_tick(0);
+        return;
+    }
 
     this.next_tick(t);
 };

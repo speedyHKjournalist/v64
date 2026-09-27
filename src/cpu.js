@@ -15,7 +15,7 @@ import { h, view, Bitmap } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
 import { SB16 } from "./sb16.js";
-import { ACPI } from "./acpi.js";
+import { ACPI, acpi_system_states_file } from "./acpi.js";
 import { PIT } from "./pit.js";
 import { DMA } from "./dma.js";
 import { UART } from "./uart.js";
@@ -217,6 +217,16 @@ export function CPU(bus, wm, stop_idling)
     this.fw_value = [];
     this.fw_pointer = 0;
     this.option_roms = [];
+
+    /** @type {?function()} */
+    this.reload_direct_boot_kernel = null;
+
+    /**
+     * Asserted level-triggered sources (ACPI SCI, PCI INTx) per IRQ line, see
+     * set_shared_irq_level
+     * @type {!Array<!Set<number>>}
+     */
+    this.shared_irq_sources = Array.from({ length: 24 }, () => new Set());
 
     this.io = undefined;
 
@@ -551,6 +561,7 @@ CPU.prototype.get_state = function()
     state[90] = this.devices.parallel0;
     state[91] = this.devices.parallel1;
     state[92] = this.devices.v86gl_pci;
+    state[93] = this.shared_irq_sources.map(sources => Array.from(sources));
 
     return state;
 };
@@ -755,6 +766,15 @@ CPU.prototype.set_state = function(state)
     this.full_clear_tlb();
 
     this.jit_clear_cache();
+
+    // Older state images don't record the sources; devices then lower their
+    // lines unconditionally, as they used to. Done last: re-deriving the SCI
+    // may deliver an interrupt, which needs the complete machine state.
+    this.shared_irq_sources.forEach((sources, irq) => {
+        sources.clear();
+        state[93]?.[irq]?.forEach(source => sources.add(source));
+    });
+    this.devices.acpi && this.devices.acpi.sync_sci();
 };
 
 CPU.prototype.set_state_pic = function(state)
@@ -918,6 +938,20 @@ CPU.prototype.reboot_internal = function()
 
     this.fw_value = [];
 
+    if(this.devices.acpi)
+    {
+        this.devices.acpi.reset();
+    }
+
+    // Like PCIRST#, a reset deasserts every level-triggered source
+    this.shared_irq_sources.forEach((sources, irq) => {
+        if(sources.size)
+        {
+            sources.clear();
+            this.device_lower_irq(irq);
+        }
+    });
+
     if(this.devices.virtio_9p)
     {
         this.devices.virtio_9p.reset();
@@ -940,6 +974,39 @@ CPU.prototype.reboot_internal = function()
     }
 
     this.load_bios();
+
+    if(this.reload_direct_boot_kernel)
+    {
+        this.reload_direct_boot_kernel();
+    }
+};
+
+/**
+ * Drive a level-triggered interrupt source that may share its line with
+ * others (ACPI SCI, PCI INTx). The line stays asserted until every source on
+ * it has deasserted. Devices that own their line exclusively keep calling
+ * device_raise_irq/device_lower_irq directly.
+ * @param {number} irq
+ * @param {number} source unique per device: pci_id for PCI functions
+ * @param {boolean} level
+ */
+CPU.prototype.set_shared_irq_level = function(irq, source, level)
+{
+    const sources = this.shared_irq_sources[irq];
+
+    if(level)
+    {
+        sources.add(source);
+        this.device_raise_irq(irq);
+    }
+    else
+    {
+        sources.delete(source);
+        if(sources.size === 0)
+        {
+            this.device_lower_irq(irq);
+        }
+    }
 };
 
 CPU.prototype.reset_memory = function()
@@ -1204,11 +1271,16 @@ CPU.prototype.init = function(settings, device_bus)
 
     if(settings.bzimage)
     {
-        const option_rom = load_kernel(this.mem8, settings.bzimage, settings.initrd, settings.cmdline || "");
+        const { bzimage, initrd } = settings;
+        const cmdline = settings.cmdline || "";
+        const option_rom = load_kernel(this.mem8, bzimage, initrd, cmdline);
 
         if(option_rom)
         {
             this.option_roms.push(option_rom);
+            // The running kernel reuses the memory it was loaded to, so every
+            // reset has to place it again (like QEMU's -kernel)
+            this.reload_direct_boot_kernel = () => load_kernel(this.mem8, bzimage, initrd, cmdline);
         }
     }
 
@@ -1367,7 +1439,9 @@ CPU.prototype.init = function(settings, device_bus)
 
         if(this.acpi_enabled[0])
         {
-            this.devices.acpi = new ACPI(this);
+            this.devices.acpi = new ACPI(this, device_bus);
+            // Advertise only the sleep states that are implemented
+            this.option_roms.push({ name: "etc/system-states", data: acpi_system_states_file() });
         }
 
         this.devices.rtc = new RTC(this);

@@ -189,6 +189,8 @@ export interface Event {
     "9p-read-end": [filename: string, byte_count: number];
     "9p-read-start": [filename: string];
     "9p-write-end": [filename: string, byte_count: number];
+    /** The guest turned the machine off through ACPI; the value is the sleeping state ("S5", or "S4" for hibernation). The emulator stops. */
+    "acpi-power-off": "S4" | "S5";
     "download-error": {
         file_index: number,
         file_count: number,
@@ -562,7 +564,11 @@ export interface V86Options {
     screen?: ScreenConfig;
 
     /**
-     * Enable ACPI (also enables APIC). Experimental and only partially implemented.
+     * Enable ACPI (also enables APIC). Experimental. Implemented: PM1 event,
+     * control and timer registers, GPE0, SCI, SMI_CMD ACPI enable/disable,
+     * the fixed power button (see power_button()) and soft off (S5), after
+     * which the emulator stops and emits "acpi-power-off". S3 and S4 are not
+     * advertised to the guest.
      * @default false
      */
     acpi?: boolean;
@@ -738,6 +744,13 @@ export class V86 {
      * Restart (force a reboot).
      */
     restart(): Promise<void>;
+
+    /**
+     * Press the ACPI power button. A running ACPI guest gets a power button
+     * event (usually starting an orderly shutdown); a machine the guest has
+     * turned off is powered on and started again. Resolves to false without ACPI.
+     */
+    power_button(): Promise<boolean>;
 
     /**
      * Add an event listener (the emulator is an event emitter).

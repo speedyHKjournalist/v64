@@ -222,6 +222,7 @@ export function start_cpu_worker()
             flush_screen(); stats();
         },
         "restart": async () => { await change_epoch(); await emulator.restart(); await audio_reset(); flush_screen(); stats(); },
+        "power_button": () => emulator.power_button(),
         "destroy": async () => { clearInterval(timer); await emulator.destroy(); audio_port?.close(); },
         "read_memory": (offset, length) => emulator.read_memory(offset, length).slice(),
         "write_memory": (bytes, offset) => emulator.write_memory(bytes, offset),

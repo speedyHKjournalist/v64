@@ -357,6 +357,16 @@ expect-tests: build/v86-debug.wasm build/libwabt.cjs
 	make -C tests/expect/tests
 	./tests/expect/run.js
 
+acpi-device-tests: build/v86-debug.wasm
+	./tests/devices/acpi_device.js
+
+acpi-guest-tests: build/v86-debug.wasm
+	./tests/devices/acpi_guest.js
+	DISABLE_JIT=1 ./tests/devices/acpi_guest.js
+
+.PHONY: acpi-device-tests acpi-guest-tests acpi-tests
+acpi-tests: acpi-device-tests acpi-guest-tests
+
 devices-test: build/v86-debug.wasm
 	./tests/devices/virtio_9p.js
 	./tests/devices/virtio_console.js
