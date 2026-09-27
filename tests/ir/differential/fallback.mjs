@@ -54,6 +54,5 @@ try {
     assert.deepEqual(Array.from(cpu.reg_xmm32s.slice(0,4),n=>n>>>0),[1,2,3,4].map(n=>n*iterations>>>0));
     const attempts=e.ir_auto_stat(2)+e.ir_auto_stat(3);vm.run();await sleep(30);await vm.stop();
     assert.equal(e.ir_auto_stat(2)+e.ir_auto_stat(3),attempts);
-    const info=await vm.get_jit_info();assert.equal(info.legacy_compile_requests,0);assert.equal(info.legacy_generation_enabled,false);
-    console.log("PASS: custom/Worker fallback paths, portable core loading, scalar IR publication, exact SIMD interpreter fallback, failed-compile suppression and zero legacy compilation");
+    console.log("PASS: custom/Worker fallback paths, portable core loading, scalar IR publication, exact SIMD interpreter fallback, and failed-compile suppression");
 } finally {WebAssembly.instantiate=instantiate;await vm.destroy();}

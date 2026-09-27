@@ -27,7 +27,7 @@ fn capacity_modules() {
             w.free_local(local);
         }
         save(&mut w, &format!("locals-{n}"));
-        w.reset();
+        let mut w = WasmBuilder::new();
         let mut i32s = Vec::new();
         let mut i64s = Vec::new();
         let mut f32s = Vec::new();
@@ -37,8 +37,7 @@ fn capacity_modules() {
             w.const_i32(i);
             i32s.push(w.set_new_local());
             w.const_i64(i as i64);
-            i64s.push(w.tee_new_local_i64());
-            w.drop_();
+            i64s.push(w.set_new_local_i64());
             w.const_i32(0);
             w.instruction_body.extend_from_slice(&[0x2A, 2, 0]);
             f32s.push(w.set_new_local_f32());
@@ -83,7 +82,7 @@ fn capacity_modules() {
         w.free_local_i64(local);
         assert_eq!(count, w.local_types.len());
         save(&mut w, &format!("groups-{n}"));
-        w.reset();
+        let mut w = WasmBuilder::new();
         for i in 0..n {
             let mut k = i;
             let types = [
@@ -105,10 +104,10 @@ fn capacity_modules() {
             assert_eq!(w.intern_signature(signature), i as u32);
         }
         for i in 0..n {
-            w.call_fn0(&format!("{}-{i}", "h".repeat(130)));
+            w.call_signature(&format!("{}-{i}", "h".repeat(130)), Signature::new(&[], &[]));
         }
         save(&mut w, &format!("imports-{n}"));
-        w.reset();
+        let mut w = WasmBuilder::new();
         let outer = w.block_void();
         for _ in 0..n {
             w.block_void();
@@ -139,11 +138,11 @@ fn fresh_zeroed_locals_do_not_reuse_runtime_values() {
     let old_v128_index = old.0;
     w.free_local_v128(old);
 
-    let length = w.instruction_body_length();
+    let length = w.body_len();
     let ints: Vec<_> = (0..256).map(|_| w.declare_zeroed_local()).collect();
     let wide = w.declare_zeroed_local_i64();
     let vector = w.declare_zeroed_local_v128();
-    assert_eq!(length, w.instruction_body_length(), "declarations emit no initialization");
+    assert_eq!(length, w.body_len(), "declarations emit no initialization");
     assert!(ints.iter().all(|local| local.0 != old_index));
     assert_ne!(wide.0, old_i64_index);
     assert_ne!(vector.0, old_v128_index);
@@ -171,8 +170,8 @@ fn fresh_zeroed_locals_do_not_reuse_runtime_values() {
 #[should_panic(expected = "signature mismatch")]
 fn incompatible_import_is_rejected() {
     let mut w = WasmBuilder::new();
-    w.call_fn0("helper");
-    w.call_fn1("helper");
+    w.call_signature("helper", Signature::new(&[], &[]));
+    w.call_signature("helper", Signature::new(&[WasmType::I32], &[]));
 }
 
 #[test]

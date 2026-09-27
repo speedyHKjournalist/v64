@@ -1,5 +1,9 @@
 # Experimental IR compiler: implemented design
 
+> Historical: since this was written the legacy Tier 1/Tier 2 compiler has been
+> removed and IR is the only compiler, present in every core build (there is no
+> `ir-experimental` feature any more). See [ir-backend.md](ir-backend.md).
+
 This describes the code in this change, **not completion of the full implementation plan**.
 The authoritative remaining scope is [v86-ir-implementation-plan.md](v86-ir-implementation-plan.md).
 

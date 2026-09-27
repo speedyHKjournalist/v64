@@ -3,7 +3,6 @@ use crate::cpu::{cpu, global_pointers as gp, misc_instr};
 use crate::ir::helper::Outcome;
 #[no_mangle]
 pub unsafe fn ir_flags_stack_check() -> u32 {
-    assert!(!cpu::in_jit);
     if *gp::flags & cpu::FLAG_VM != 0 && cpu::getiopl() < 3 {
         cpu::trigger_gp(0);
         Outcome::ControlTransferred as u32
@@ -14,7 +13,7 @@ pub unsafe fn ir_flags_stack_check() -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_pop_flags(value: u32, bytes: u32) -> u32 {
-    assert!(!cpu::in_jit && matches!(bytes, 2 | 4));
+    assert!(matches!(bytes, 2 | 4));
     let old_flags = *gp::flags;
     let value = if bytes == 2 { old_flags & !65535 | value as i32 & 65535 } else { value as i32 };
     misc_instr::adjust_stack_reg(bytes as i32);
@@ -27,7 +26,7 @@ pub unsafe fn ir_pop_flags(value: u32, bytes: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_pop_segment(value: u32, segment: u32, bytes: u32) -> u32 {
-    assert!(!cpu::in_jit && segment < 6 && segment != 1 && matches!(bytes, 2 | 4));
+    assert!(segment < 6 && segment != 1 && matches!(bytes, 2 | 4));
     if !cpu::switch_seg(segment as i32, (value & 65535) as i32) {
         return Outcome::ControlTransferred as u32;
     }
@@ -48,7 +47,7 @@ pub unsafe fn ir_load_segment(
     bytes: u32,
 ) -> u32 {
     assert!(
-        !cpu::in_jit && segment < 6 && segment != 1 && register < 8 && matches!(bytes, 0 | 2 | 4)
+        segment < 6 && segment != 1 && register < 8 && matches!(bytes, 0 | 2 | 4)
     );
     if !cpu::switch_seg(segment as i32, (selector & 65535) as i32) {
         return Outcome::ControlTransferred as u32;
@@ -67,7 +66,7 @@ pub unsafe fn ir_load_segment(
 /// Protected-mode descriptor walks keep the terminal, precise-state contract.
 #[no_mangle]
 pub unsafe fn ir_mov_segment_continue(selector: u32, segment: u32) -> u32 {
-    assert!(!cpu::in_jit && segment < 6 && segment != 1);
+    assert!(segment < 6 && segment != 1);
     if !*gp::protected_mode || cpu::vm86_mode() {
         assert!(cpu::switch_seg(segment as i32, (selector & 65535) as i32));
         Outcome::Normal as u32

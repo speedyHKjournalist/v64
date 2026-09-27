@@ -16,7 +16,7 @@ unsafe fn address(offset: u32, segment: u32) -> Result<i32, ()> {
 }
 #[no_mangle]
 pub unsafe fn ir_reserved_form(behavior: u32, sse: u32, offset: u32, segment: u32) -> u32 {
-    assert!(!cpu::in_jit && behavior <= 4 && sse <= 1);
+    assert!(behavior <= 4 && sse <= 1);
     if sse != 0 && !cpu::task_switch_test_mmx() {
         return finish(false);
     }
@@ -45,7 +45,6 @@ pub unsafe fn ir_reserved_form(behavior: u32, sse: u32, offset: u32, segment: u3
 }
 #[no_mangle]
 pub unsafe fn ir_fwait() -> u32 {
-    assert!(!cpu::in_jit);
     if *gp::cr & (cpu::CR0_MP | cpu::CR0_TS) == cpu::CR0_MP | cpu::CR0_TS {
         cpu::trigger_nm();
         return finish(false);
@@ -64,7 +63,7 @@ unsafe fn arpl_allowed() -> bool {
 }
 #[no_mangle]
 pub unsafe fn ir_arpl_reg(destination: u32, source: u32) -> u32 {
-    assert!(!cpu::in_jit && destination < 8 && source < 8);
+    assert!(destination < 8 && source < 8);
     if !arpl_allowed() {
         return finish(false);
     }
@@ -77,7 +76,7 @@ pub unsafe fn ir_arpl_reg(destination: u32, source: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_arpl_mem(offset: u32, segment: u32, source: u32) -> u32 {
-    assert!(!cpu::in_jit && source < 8);
+    assert!(source < 8);
     // Baseline ModRM resolves a segment before ARPL checks protected/vm86 mode.
     let Ok(addr) = address(offset, segment)
     else {
@@ -95,7 +94,7 @@ pub unsafe fn ir_arpl_mem(offset: u32, segment: u32, source: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_movnti(offset: u32, segment: u32, source: u32) -> u32 {
-    assert!(!cpu::in_jit && source < 8);
+    assert!(source < 8);
     let Ok(addr) = address(offset, segment)
     else {
         return finish(false);
@@ -104,7 +103,7 @@ pub unsafe fn ir_movnti(offset: u32, segment: u32, source: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_rdrand(destination: u32, width: u32) -> u32 {
-    assert!(!cpu::in_jit && destination < 8 && matches!(width, 16 | 32));
+    assert!(destination < 8 && matches!(width, 16 | 32));
     if width == 16 {
         instructions_0f::instr16_0FC7_6_reg(destination as i32);
     }

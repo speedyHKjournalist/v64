@@ -22,138 +22,8 @@ use crate::cpu::memory;
 use crate::jit;
 use crate::page::Page;
 
-/// Execute a bounded batch of a recognized forward MOV/advance/DEC/JNZ loop.
-/// This helper never faults or calls devices: on any uncertain translation it
-/// returns zero without changing architectural state, leaving the original
-/// instructions to perform the access (and deliver an exact fault).
-#[no_mangle]
-pub unsafe fn jit_copy_loop(config: u32, budget: i32) -> u32 {
-    // Preserve constant register addressing for the previously optimized idioms.
-    const ORIGINAL: u32 = (6 << 8) | (7 << 11) | (1 << 14);
-    if config == ORIGINAL | 1 {
-        return jit_copy_loop_registers(1, budget, ESI, EDI, ECX, EAX);
-    }
-    if config == ORIGINAL | 4 {
-        return jit_copy_loop_registers(4, budget, ESI, EDI, ECX, EAX);
-    }
-    if config & 0x10 != 0 {
-        return jit_rmw_loop(config, budget);
-    }
-    jit_copy_loop_registers(
-        config & 255,
-        budget,
-        (config >> 8 & 7) as i32,
-        (config >> 11 & 7) as i32,
-        (config >> 14 & 7) as i32,
-        (config >> 17 & 7) as i32,
-    )
-}
-
-#[inline(always)]
-unsafe fn jit_copy_loop_registers(
-    size: u32,
-    budget: i32,
-    source_reg: i32,
-    dest_reg: i32,
-    count_reg: i32,
-    temp_reg: i32,
-) -> u32 {
-    use crate::cpu::cpu::{
-        tlb_data, FLAG_TRAP, TLB_GLOBAL, TLB_HAS_CODE, TLB_NO_USER, TLB_READONLY, TLB_VALID,
-    };
-    use crate::cpu::global_pointers::cpl;
-    dbg_assert!(size == 1 || size == 4);
-    if budget < 0 || *flags & FLAG_TRAP != 0 {
-        return 0;
-    }
-    let src = read_reg32(source_reg) as u32;
-    let dst = read_reg32(dest_reg) as u32;
-    let count = (read_reg32(count_reg) as u32)
-        .min(128)
-        .min(1 + budget as u32 / 6)
-        .min((4096 - (src & 4095)) / size)
-        .min((4096 - (dst & 4095)) / size);
-    if count < 8 {
-        return 0;
-    }
-    let read_entry = tlb_data[(src >> 12) as usize];
-    let write_entry = tlb_data[(dst >> 12) as usize];
-    let write_mask = 0xFFF & !TLB_GLOBAL & !(if *cpl == 3 { 0 } else { TLB_NO_USER });
-    let read_mask = write_mask & !TLB_READONLY & !TLB_HAS_CODE;
-    if read_entry & read_mask != TLB_VALID || write_entry & write_mask != TLB_VALID {
-        return 0;
-    }
-    let phys_src = (((read_entry as u32 & !4095) ^ src) as u32).wrapping_sub(memory::mem8 as u32);
-    let phys_dst = (((write_entry as u32 & !4095) ^ dst) as u32).wrapping_sub(memory::mem8 as u32);
-    let bytes = count * size;
-    // Forward overlapping copies may consume their own writes. memmove has
-    // different semantics; defer such copies, including virtual aliases.
-    if phys_dst > phys_src && phys_dst - phys_src < bytes {
-        return 0;
-    }
-    let last = if size == 1 {
-        memory::read8(phys_src + bytes - 1) as i32
-    }
-    else {
-        memory::read32s(phys_src + bytes - 4)
-    };
-    memory::memcpy_no_mmap_or_dirty_check(phys_src, phys_dst, bytes);
-    if size == 1 {
-        write_reg8(temp_reg, last);
-    }
-    else {
-        write_reg32(temp_reg, last);
-    }
-    write_reg32(source_reg, src.wrapping_add(bytes) as i32);
-    write_reg32(dest_reg, dst.wrapping_add(bytes) as i32);
-    let remaining = (read_reg32(count_reg) as u32).wrapping_sub(count);
-    // INC in the byte loop preserves CF. The dword loop's final ADD EDI,4
-    // supplies CF; DEC ECX supplies the other arithmetic flags in both loops.
-    if size == 4 {
-        crate::cpu::arith::add32(dst.wrapping_add(bytes - 4) as i32, 4);
-    }
-    crate::cpu::arith::dec32(remaining.wrapping_add(1) as i32);
-    write_reg32(count_reg, remaining as i32);
-    count
-}
-
 // In-place ADD/XOR array loops. The final address ADD and counter DEC define
 // the architectural flags, so intermediate element flags need not be stored.
-unsafe fn jit_rmw_loop(config: u32, budget: i32) -> u32 {
-    use crate::cpu::cpu::{tlb_data, FLAG_TRAP, TLB_GLOBAL, TLB_NO_USER, TLB_VALID};
-    use crate::cpu::global_pointers::cpl;
-    if budget < 0 || *flags & FLAG_TRAP != 0 {
-        return 0;
-    }
-    let value = read_reg32((config >> 8 & 7) as i32);
-    let dest_reg = (config >> 11 & 7) as i32;
-    let count_reg = (config >> 14 & 7) as i32;
-    let dest = read_reg32(dest_reg) as u32;
-    let count = (read_reg32(count_reg) as u32)
-        .min(128)
-        .min(1 + budget as u32 / 4)
-        .min((4096 - (dest & 4095)) / 4);
-    if count < 8 {
-        return 0;
-    }
-    let entry = tlb_data[(dest >> 12) as usize];
-    let mask = 0xFFF & !TLB_GLOBAL & !(if *cpl == 3 { 0 } else { TLB_NO_USER });
-    if entry & mask != TLB_VALID {
-        return 0;
-    }
-    let physical = ((entry as u32 & !4095) ^ dest).wrapping_sub(memory::mem8 as u32);
-    for i in 0..count {
-        let old = memory::read32s(physical + i * 4);
-        let new = if config & 1 == 0 { old.wrapping_add(value) } else { old ^ value };
-        memory::write32_no_mmap_or_dirty_check(physical + i * 4, new);
-    }
-    let remaining = (read_reg32(count_reg) as u32).wrapping_sub(count);
-    crate::cpu::arith::add32(dest.wrapping_add(count * 4 - 4) as i32, 4);
-    crate::cpu::arith::dec32(remaining.wrapping_add(1) as i32);
-    write_reg32(dest_reg, dest.wrapping_add(count * 4) as i32);
-    write_reg32(count_reg, remaining as i32);
-    count
-}
 
 fn count_until_end_of_page(direction: i32, size: i32, addr: u32) -> u32 {
     (if direction == 1 {
@@ -187,7 +57,7 @@ enum Rep {
     NZ,
 }
 
-// Legacy callers retain their unbounded/page-bounded execution policy.
+// Interpreter callers retain their unbounded/page-bounded execution policy.
 #[inline(always)]
 unsafe fn string_instruction(
     is_asize_32: bool,
@@ -1035,7 +905,6 @@ pub unsafe fn ir_test_rep_batch(
     repne: bool,
     limit: u32,
 ) -> u64 {
-    assert!(!crate::cpu::cpu::in_jit);
     let result = execute_rep(kind, bytes, asize32, segment, repne, limit);
     let tag = match result.outcome {
         StringOutcome::Complete => 0,

@@ -1,4 +1,4 @@
-//! CPU-owned slow paths. The caller materializes state and is outside legacy in_jit.
+//! CPU-owned slow paths. The caller materializes state first.
 //! safe_* owns fault delivery; a fault return MUST exit without restoring old state.
 use crate::cpu::{cpu, global_pointers as gp};
 use crate::ir::helper::Outcome;
@@ -12,7 +12,7 @@ pub unsafe fn ir_tlb_base() -> u32 { core::ptr::addr_of!(cpu::tlb_data) as u32 }
 pub unsafe fn ir_memory_base() -> u32 { crate::cpu::memory::mem8 as u32 }
 #[no_mangle]
 pub unsafe fn ir_segment_address(offset: u32, segment: u32) -> u64 {
-    assert!(!cpu::in_jit && segment < 6);
+    assert!(segment < 6);
     match cpu::get_seg(segment as i32) {
         Ok(base) => offset.wrapping_add(base as u32) as u64,
         Err(()) => (Outcome::ControlTransferred as u64) << 32,
@@ -20,7 +20,6 @@ pub unsafe fn ir_segment_address(offset: u32, segment: u32) -> u64 {
 }
 #[no_mangle]
 pub unsafe fn ir_memory_read(address: u32, bytes: u32) -> u64 {
-    assert!(!cpu::in_jit);
     let result = match bytes {
         1 => cpu::safe_read8(address as i32),
         2 => cpu::safe_read16(address as i32),
@@ -34,7 +33,6 @@ pub unsafe fn ir_memory_read(address: u32, bytes: u32) -> u64 {
 }
 #[no_mangle]
 pub unsafe fn ir_memory_write(address: u32, value: u32, bytes: u32) -> u32 {
-    assert!(!cpu::in_jit);
     let result = match bytes {
         1 => cpu::safe_write8(address as i32, (value & 255) as i32),
         2 => cpu::safe_write16(address as i32, (value & 65535) as i32),
@@ -52,7 +50,6 @@ pub unsafe fn ir_memory_write(address: u32, value: u32, bytes: u32) -> u32 {
 /// materialization preserves raw FLAGS and lazy backing separately. Also an entry guard.
 #[no_mangle]
 pub unsafe fn ir_enter() {
-    assert!(!cpu::in_jit);
     super::rep::reset_result();
     // CPU's instruction_pointer is linear, whereas StateMap PCs are CS-relative.
     *gp::previous_ip = *gp::instruction_pointer;
@@ -79,20 +76,10 @@ pub unsafe fn ir_enter_page(cs_base: u32, default_32: u32) -> bool {
     ir_enter();
     true
 }
-#[cfg(feature = "ir-test-hooks")]
-#[no_mangle]
-pub unsafe fn ir_test_enter_checked_in_jit(linear: u32, cs_base: u32, mode: u32) -> bool {
-    let saved = cpu::in_jit;
-    cpu::in_jit = true;
-    let result = ir_enter_checked(linear, cs_base, mode);
-    cpu::in_jit = saved;
-    result
-}
 
 #[cfg(feature = "ir-test-hooks")]
 #[no_mangle]
 pub unsafe fn ir_test_step() {
-    assert!(!cpu::in_jit);
     *gp::previous_ip = *gp::instruction_pointer;
     *gp::prefixes = 0;
     if let Ok(opcode) = cpu::read_imm8() {
@@ -111,7 +98,7 @@ static mut RMW_VALUE: i32 = 0;
 #[no_mangle]
 pub unsafe fn ir_rmw_read(address: u32, bytes: u32) -> u64 {
     use crate::cpu::memory;
-    assert!(!cpu::in_jit && matches!(bytes, 1 | 2 | 4));
+    assert!(matches!(bytes, 1 | 2 | 4));
     let Ok(low) = cpu::translate_address_write(address as i32)
     else {
         return u64::MAX;
@@ -148,7 +135,7 @@ pub unsafe fn ir_rmw_value() -> i32 { RMW_VALUE }
 #[no_mangle]
 pub unsafe fn ir_rmw_write(ticket: u64, value: i32, bytes: u32) {
     use crate::cpu::memory;
-    assert!(!cpu::in_jit && matches!(bytes, 1 | 2 | 4));
+    assert!(matches!(bytes, 1 | 2 | 4));
     let low = ticket as u32;
     let tag = (ticket >> 32) as u32;
     assert!(tag & RMW_SLOW != 0);
@@ -172,7 +159,7 @@ pub unsafe fn ir_rmw_write(ticket: u64, value: i32, bytes: u32) {
 
 #[no_mangle]
 pub unsafe fn ir_pop_address(offset: u32, segment: u32, bytes: u32) -> u64 {
-    assert!(!cpu::in_jit && segment < 6 && matches!(bytes, 2 | 4));
+    assert!(segment < 6 && matches!(bytes, 2 | 4));
     // Caller materialized the temporary post-increment SP used by 8F /0 EA
     // resolution. The baseline unwinds this adjustment even after #GP delivery.
     match cpu::get_seg(segment as i32) {
@@ -188,7 +175,7 @@ pub unsafe fn ir_pop_address(offset: u32, segment: u32, bytes: u32) -> u64 {
 /// bits, but must never read a device before all pages have been checked.
 #[no_mangle]
 pub unsafe fn ir_memory_check(address: u32, bytes: u32, write: u32) -> u32 {
-    assert!(!cpu::in_jit && bytes > 0 && bytes < 4096 && write <= 1);
+    assert!(bytes > 0 && bytes < 4096 && write <= 1);
     let result = if write != 0 {
         cpu::writable_or_pagefault(address as i32, bytes as i32)
     }
@@ -205,7 +192,6 @@ pub unsafe fn ir_memory_check(address: u32, bytes: u32, write: u32) -> u32 {
 /// divide conditions; this adapter owns exactly one real CPU #DE delivery.
 #[no_mangle]
 pub unsafe fn ir_divide_fault() {
-    assert!(!cpu::in_jit);
     cpu::trigger_de();
 }
 
@@ -214,7 +200,7 @@ pub unsafe fn ir_divide_fault() {
 /// is intentionally retained; this form's complete oracle uses a release CPU.
 #[no_mangle]
 pub unsafe fn ir_memory_write_unmasked_word(address: u32, value: u32, bytes: u32) -> u32 {
-    assert!(!cpu::in_jit && bytes == 2);
+    assert!(bytes == 2);
     match cpu::safe_write16(address as i32, value as i32) {
         Ok(()) => Outcome::Invalidated as u32,
         Err(()) => Outcome::ControlTransferred as u32,
@@ -226,7 +212,6 @@ pub unsafe fn ir_memory_write_unmasked_word(address: u32, value: u32, bytes: u32
 /// mismatch; a later read/write fault retains the original unwrap-abort policy.
 #[no_mangle]
 pub unsafe fn ir_cmpxchg8b(address: u32) -> u32 {
-    assert!(!cpu::in_jit);
     if cpu::writable_or_pagefault(address as i32, 8).is_err() {
         return Outcome::ControlTransferred as u32;
     }

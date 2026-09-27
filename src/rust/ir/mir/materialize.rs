@@ -6,7 +6,7 @@ use crate::ir::{
     state::{ResumeKind, StateMap},
 };
 use crate::wasmgen::wasm_builder::WasmType;
-use crate::{cpu::global_pointers as gp, regs::CS};
+use crate::cpu::{cpu::CS, global_pointers as gp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Store {
@@ -56,7 +56,7 @@ fn write(address: Address, expression: Vec<Step>) -> Write {
 }
 fn cs_base() -> Step {
     let read = Reading::Memory {
-        address: Address::Absolute(gp::get_seg_offset(CS)),
+        address: Address::Absolute(gp::get_seg_offset(CS as u32)),
         load: Load::I32,
     };
     Step::Read {

@@ -11,7 +11,7 @@ import {
     FLAG_VM, FLAG_INTERRUPT, FLAG_CARRY, FLAG_ADJUST, FLAG_ZERO, FLAG_SIGN, FLAG_TRAP,
     FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_PARITY,
 } from "./const.js";
-import { h, view, pads, Bitmap, dump_file } from "./lib.js";
+import { h, view, Bitmap } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
 import { SB16 } from "./sb16.js";
@@ -59,8 +59,6 @@ import { BusConnector } from "./bus.js";
 // https://www-ssl.intel.com/content/www/us/en/processors/architectures-software-developer-manuals.html
 // http://ref.x86asm.net/geek32.html
 
-const DUMP_GENERATED_WASM = false;
-const DUMP_UNCOMPILED_ASSEMBLY = false;
 
 /** @constructor */
 export function CPU(bus, wm, stop_idling)
@@ -68,7 +66,6 @@ export function CPU(bus, wm, stop_idling)
     this.stop_idling = stop_idling;
     this.wm = wm;
     this.jit_backend = "ir";
-    this.legacy_compile_requests = 0;
     this.ir_region_budget = null;
     this.ir_pass_names = ["prune", "merge", "phis", "copy", "fold", "flags", "helper_state", "gvn", "dce",
         "licm", "mir_fold", "stack", "allocation", "state_elision", "ram_loop", "ram_forward", "ram_guard", "budget_batch", "sparse_polls"];
@@ -227,12 +224,6 @@ export function CPU(bus, wm, stop_idling)
 
     this.set_tsc(0, 0);
 
-    if(DEBUG)
-    {
-        this.seen_code = {};
-        this.seen_code_uncompiled = {};
-    }
-
     //Object.seal(this);
 }
 
@@ -324,9 +315,8 @@ CPU.prototype.read_blob = function(offset, length)
     return this.mem8.subarray(offset, offset + length);
 };
 
-CPU.prototype.clear_opstats = function()
+CPU.prototype.clear_stats = function()
 {
-    new Uint8Array(this.wasm_memory.buffer, 0x8000, 0x20000).fill(0);
     this.wm.exports["profiler_init"]();
 };
 
@@ -383,8 +373,6 @@ CPU.prototype.wasm_patch = function()
 
     this.main_loop = get_import("main_loop");
 
-    this.set_jit_config = get_import("set_jit_config");
-
     this.read8 = get_import("read8");
     this.read16 = get_import("read16");
     this.read32s = get_import("read32s");
@@ -417,16 +405,8 @@ CPU.prototype.wasm_patch = function()
 
     this.apic_timer = get_import("apic_timer");
 
-    if(DEBUG)
-    {
-        this.jit_force_generate_unsafe = get_optional_import("jit_force_generate_unsafe");
-    }
-
     this.jit_clear_cache = get_import("jit_clear_cache_js");
     this.jit_dirty_cache = get_import("jit_dirty_cache");
-    this.codegen_finalize_finished = get_import("codegen_finalize_finished");
-    this.codegen_finalize_validate = get_import("codegen_finalize_validate");
-    this.codegen_finalize_failed = get_import("codegen_finalize_failed");
 
     this.allocate_memory = get_import("allocate_memory");
     this.zero_memory = get_import("zero_memory");
@@ -449,31 +429,10 @@ CPU.prototype.wasm_patch = function()
     this.zstd_read_free = get_import("zstd_read_free");
 };
 
-CPU.prototype.jit_force_generate = function(addr)
-{
-    if(!this.jit_force_generate_unsafe)
-    {
-        dbg_assert(false, "Not supported in this wasm build: jit_force_generate_unsafe");
-        return;
-    }
-
-    this.jit_force_generate_unsafe(addr);
-};
-
 CPU.prototype.jit_clear_func = function(index)
 {
     dbg_assert(index >= 0 && index < WASM_TABLE_SIZE);
     this.wm.wasm_table.set(index + WASM_TABLE_OFFSET, null);
-};
-
-CPU.prototype.jit_clear_all_funcs = function()
-{
-    const table = this.wm.wasm_table;
-
-    for(let i = 0; i < WASM_TABLE_SIZE; i++)
-    {
-        table.set(WASM_TABLE_OFFSET + i, null);
-    }
 };
 
 CPU.prototype.get_state = function()
@@ -1015,15 +974,14 @@ CPU.prototype.create_memory = function(size, minimum_size)
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);
 };
 
-// Constructor policy only. IR is the only backend; the legacy code generator
-// is never enabled.
+// Constructor policy only. IR is the only compiler.
 CPU.prototype.configure_jit_backend = function(settings)
 {
     if(settings["jit_backend"] !== undefined && settings["jit_backend"] !== "ir")
         throw new Error("jit_backend must be ir (the legacy backend was removed)");
     const exports = this.wm.exports;
     if(!exports["ir_auto_config"])
-        throw new Error("This core was built without the IR backend (ir-experimental)");
+        throw new Error("This core has no IR compiler; rebuild build/v86.wasm");
     const requested = settings["ir_region_budget"];
     const opt_level = settings["ir_opt_level"] === undefined ? 2 : settings["ir_opt_level"];
     const disabled = settings["ir_passes_disabled"] === undefined ? [] : settings["ir_passes_disabled"];
@@ -1075,7 +1033,6 @@ CPU.prototype.configure_jit_backend = function(settings)
     // Page-granular Tier-0 below the optimizing region tier (default on).
     if(enabled && settings["ir_tier0"] !== false && !(exports["ir_auto_set_tier0"] && exports["ir_auto_set_tier0"](1)))
         throw new Error("IR Tier-0 requires a compatible fresh core");
-    this.set_jit_config(0, 1);
     this.jit_backend = "ir";
     this.ir_sync_publication = settings["ir_sync_publication"] === true;
     this.ir_region_budget = budget;
@@ -1096,10 +1053,10 @@ CPU.prototype.get_ir_diagnostics = function()
     if(!get) return null;
     const period = get(0, 0, 0);
     const stages = ["dispatch", "scheduler", "admission", "fetch", "generated", "state_write", "state_reload",
-        "memory_slow", "helper", "interpreter", "legacy", "compile", "byte_validation", "source_capture"];
+        "memory_slow", "helper", "interpreter", "compile", "byte_validation", "source_capture"];
     const exits = ["unclassified", "normal", "budget", "epoch", "fault", "scalar_store", "code_store",
         "rmw_commit", "vector_memory", "helper_control_or_fault", "helper_yield", "helper_invalidated", "entry_guard", "interrupt_shadow"];
-    const names = ["batches", "sampled_batches", "cpu_batch_ms", "sampled_batch_ms", "interpreter_steps", "legacy_steps",
+    const names = ["batches", "sampled_batches", "cpu_batch_ms", "sampled_batch_ms", "interpreter_steps",
         "ir_activations", "ir_steps", "instrumentation_errors", "sampled_activations"];
     const totals = Object.fromEntries(names.map((name, i) => [name, get(4, i, 0)]));
     const timings = Object.fromEntries(stages.map((name, i) => [name, {
@@ -1206,8 +1163,6 @@ CPU.prototype.get_jit_info = function()
     }
     return {
         "backend": this.jit_backend,
-        "legacy_generation_enabled": !exports["get_jit_config"](0),
-        "legacy_compile_requests": this.legacy_compile_requests,
         "ir_available": available,
         "ir_region_budget": this.ir_region_budget && { ...this.ir_region_budget },
         "ir_stats": exports["ir_diagnostic_get"](0, 0, 0) === 0 ? "off" :
@@ -2088,170 +2043,6 @@ CPU.prototype.ir_publish_cached = function(owner, id, slot, code, automatic)
     });
 };
 
-CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len, ticket_low, ticket_high)
-{
-    this.legacy_compile_requests++;
-    ptr >>>= 0;
-    len >>>= 0;
-
-    dbg_assert(wasm_table_index >= 0 && wasm_table_index < WASM_TABLE_SIZE);
-
-    // The builder and Wasm memory can change while the browser compiles asynchronously.
-    const code = new Uint8Array(this.wasm_memory.buffer, ptr, len).slice();
-
-    if(DEBUG)
-    {
-        if(DUMP_GENERATED_WASM && !this.seen_code[start])
-        {
-            this.dump_wasm(code);
-
-            const DUMP_ASSEMBLY = false;
-
-            if(DUMP_ASSEMBLY)
-            {
-                let end = 0;
-
-                if((start ^ end) & ~0xFFF)
-                {
-                    dbg_log("truncated disassembly start=" + h(start >>> 0) + " end=" + h(end >>> 0));
-                    end = (start | 0xFFF) + 1; // until the end of the page
-                }
-
-                dbg_assert(end >= start);
-
-                const buffer = new Uint8Array(end - start);
-
-                for(let i = start; i < end; i++)
-                {
-                    buffer[i - start] = this.read8(i);
-                }
-
-                this.debug_dump_code(this.is_32[0] ? 1 : 0, buffer, start);
-            }
-        }
-
-        this.seen_code[start] = (this.seen_code[start] || 0) + 1;
-
-        if(this.test_hook_did_generate_wasm)
-        {
-            this.test_hook_did_generate_wasm(code);
-        }
-    }
-
-    const wasm = this.wm, exports = wasm.exports, table = wasm.wasm_table;
-    const current = () => this.wm === wasm && this.wm.exports === exports && this.wm.wasm_table === table;
-    const publish = instance => {
-        if(!current()) return false;
-        const f = instance.exports["f"];
-        if(typeof f !== "function") throw new TypeError("JIT artifact missing function export f");
-        const valid = this.codegen_finalize_validate(wasm_table_index, start, state_flags, ticket_low, ticket_high);
-        if(valid)
-        {
-            this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
-        }
-        // Written reservations are retired here without ever installing their function.
-        // Mismatched/duplicate callbacks cannot consume a newer task's reservation.
-        this.codegen_finalize_finished(wasm_table_index, start, state_flags, ticket_low, ticket_high);
-        return !!valid;
-    };
-    const failed = error => {
-        if(!current()) return false;
-        this.codegen_finalize_failed(wasm_table_index, start, state_flags, ticket_low, ticket_high);
-        if(this.test_hook_did_fail_wasm) this.test_hook_did_fail_wasm(code, error);
-        if(DEBUG) dbg_log("Wasm JIT compilation/publication failed: " + error, LOG_CPU);
-        return false;
-    };
-    const finished = valid => {
-        if(current() && this.test_hook_did_finalize_wasm) this.test_hook_did_finalize_wasm(code);
-        return valid;
-    };
-    const SYNC_COMPILATION = false;
-    let task;
-    try {
-        task = SYNC_COMPILATION ? Promise.resolve({ instance:
-            new WebAssembly.Instance(new WebAssembly.Module(code), { "e": this.jit_imports }) }) :
-            WebAssembly.instantiate(code, { "e": this.jit_imports });
-    }
-    // The generating Rust frame still holds the JIT lock. Even a synchronous
-    // browser failure must retire its reservation only after that frame returns.
-    catch(error) { task = Promise.reject(error); }
-    return task.then(result => {
-        let valid;
-        try { valid = publish(result.instance); }
-        catch(error) { return failed(error); }
-        return finished(valid);
-    }, failed);
-};
-
-CPU.prototype.log_uncompiled_code = function(start, end)
-{
-    if(!DEBUG || !DUMP_UNCOMPILED_ASSEMBLY)
-    {
-        return;
-    }
-
-    if((this.seen_code_uncompiled[start] || 0) < 100)
-    {
-        this.seen_code_uncompiled[start] = (this.seen_code_uncompiled[start] || 0) + 1;
-
-        end += 8; // final jump is not included
-
-        if((start ^ end) & ~0xFFF)
-        {
-            dbg_log("truncated disassembly start=" + h(start >>> 0) + " end=" + h(end >>> 0));
-            end = (start | 0xFFF) + 1; // until the end of the page
-        }
-
-        if(end < start) end = start;
-
-        dbg_assert(end >= start);
-
-        const buffer = new Uint8Array(end - start);
-
-        for(let i = start; i < end; i++)
-        {
-            buffer[i - start] = this.read8(i);
-        }
-
-        dbg_log("Uncompiled code:");
-        this.debug_dump_code(this.is_32[0] ? 1 : 0, buffer, start);
-    }
-};
-
-CPU.prototype.dump_function_code = function(block_ptr, count)
-{
-    if(!DEBUG || !DUMP_GENERATED_WASM)
-    {
-        return;
-    }
-
-    const SIZEOF_BASIC_BLOCK_IN_DWORDS = 7;
-
-    const mem32 = new Int32Array(this.wasm_memory.buffer);
-
-    dbg_assert((block_ptr & 3) === 0);
-
-    const is_32 = this.is_32[0];
-
-    for(let i = 0; i < count; i++)
-    {
-        const struct_start = (block_ptr >> 2) + i * SIZEOF_BASIC_BLOCK_IN_DWORDS;
-        const start = mem32[struct_start + 0];
-        const end = mem32[struct_start + 1];
-        const is_entry_block = mem32[struct_start + 6] & 0xFF00;
-
-        const buffer = new Uint8Array(end - start);
-
-        for(let i = start; i < end; i++)
-        {
-            buffer[i - start] = this.read8(this.translate_address_system_read(i));
-        }
-
-        dbg_log("---" + (is_entry_block ? " entry" : ""));
-        this.debug_dump_code(is_32 ? 1 : 0, buffer, start);
-    }
-};
-
 CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
 {
     const pit_time = this.devices.pit.timer(now, false);
@@ -2797,101 +2588,4 @@ CPU.prototype.debug_interrupt = function(interrupt_nr)
     //    dbg_log("kolibri syscall");
     //    this.debug.dump_regs_short();
     //}
-};
-
-CPU.prototype.debug_dump_code = function(is_32, buffer, start)
-{
-    if(!DEBUG) return;
-
-    if(!this.capstone_decoder)
-    {
-        let cs = window.cs;
-
-        /* global require */
-        if(typeof require === "function")
-        {
-            cs = require("./capstone-x86.min.js");
-        }
-
-        if(cs === undefined)
-        {
-            dbg_log("Warning: Missing capstone library, disassembly not available");
-            return;
-        }
-
-        this.capstone_decoder = [
-            new cs.Capstone(cs.ARCH_X86, cs.MODE_16),
-            new cs.Capstone(cs.ARCH_X86, cs.MODE_32),
-        ];
-    }
-
-    if(buffer instanceof Array)
-    {
-        buffer = new Uint8Array(buffer);
-    }
-
-    try
-    {
-        const instructions = this.capstone_decoder[+is_32].disasm(buffer, start);
-
-        instructions.forEach(function (instr) {
-            dbg_log(h(instr.address >>> 0) + ": " +
-                pads(instr.bytes.map(x => h(x, 2).slice(-2)).join(" "), 20) + " " +
-                instr.mnemonic + " " + instr.op_str);
-        });
-        dbg_log("");
-    }
-    catch(e)
-    {
-        dbg_log("Could not disassemble: " + Array.from(buffer).map(x => h(x, 2)).join(" "));
-    }
-};
-
-CPU.prototype.dump_wasm = function(buffer)
-{
-    if(!DEBUG) return;
-
-    /* global require */
-    if(this.wabt === undefined)
-    {
-        if(typeof require === "function")
-        {
-            this.wabt = require("./libwabt.cjs");
-        }
-        else
-        {
-            this.wabt = new window.WabtModule;
-        }
-
-        if(this.wabt === undefined)
-        {
-            dbg_log("Warning: Missing libwabt, wasm dump not available");
-            return;
-        }
-    }
-
-    // Need to make a small copy otherwise libwabt goes nuts trying to copy
-    // the whole underlying buffer
-    buffer = buffer.slice();
-
-    try
-    {
-        var module = this.wabt.readWasm(buffer, { readDebugNames: false });
-        module.generateNames();
-        module.applyNames();
-        const result = module.toText({ foldExprs: true, inlineExport: true });
-        dbg_log(result);
-    }
-    catch(e)
-    {
-        dump_file(buffer, "failed.wasm");
-        console.log(e.toString());
-    }
-    finally
-    {
-        if(module)
-        {
-            module.destroy();
-        }
-    }
 };

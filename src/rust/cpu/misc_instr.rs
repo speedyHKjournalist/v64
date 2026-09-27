@@ -85,8 +85,6 @@ pub unsafe fn test_no() -> bool { return !test_o(); }
 pub unsafe fn test_nb() -> bool { return !test_b(); }
 pub unsafe fn test_nz() -> bool { return !test_z(); }
 pub unsafe fn test_ns() -> bool { return !test_s(); }
-#[no_mangle]
-pub unsafe fn test_np() -> bool { return !test_p(); }
 pub unsafe fn test_nbe() -> bool { return !test_be(); }
 pub unsafe fn test_nl() -> bool { return !test_l(); }
 pub unsafe fn test_nle() -> bool { return !test_le(); }

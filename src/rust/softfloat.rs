@@ -81,21 +81,6 @@ fn record_x87_arithmetic(op: usize, path: usize) {
 
 pub fn record_cached_arithmetic(op: usize) { record_x87_arithmetic(op, 2); }
 
-pub fn record_x87_jit_arithmetic(counts: u32) {
-    if crate::x87_profiler::enabled() {
-        for op in 0..4 {
-            unsafe {
-                crate::x87_profiler::record_count(
-                    op,
-                    2,
-                    extF80_roundingPrecision,
-                    softfloat_roundingMode,
-                    ((counts >> (op * 8)) & 255) as u64,
-                );
-            }
-        }
-    }
-}
 pub enum Precision {
     P80,
     P64,
@@ -497,11 +482,6 @@ impl F80 {
         // translate softfloat's flags to x87 status flags
         f >> 4 & 1 | f >> 1 & 4 | f << 3 & 16
     }
-    // JIT-generated ordered comparisons update the same sticky state as helpers.
-    pub(crate) fn exception_flags_address() -> u32 {
-        std::ptr::addr_of_mut!(softfloat_exceptionFlags) as u32
-    }
-
     pub fn clear_exception_flags() { unsafe { softfloat_exceptionFlags = 0 } }
 
     // These paths do integer significand arithmetic, not a conversion to f64.

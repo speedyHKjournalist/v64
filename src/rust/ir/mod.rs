@@ -1,4 +1,5 @@
-//! Experimental IR components. Production still uses the legacy backend until coverage gates pass.
+//! The IR compiler (frontend, MIR, Wasm backend, Tier-0) and its runtime; the
+//! only compiler of the core. See docs/ir-backend.md.
 #![allow(dead_code)]
 pub mod analysis;
 pub mod backend;

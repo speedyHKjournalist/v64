@@ -2,15 +2,11 @@ CLOSURE_DIR=closure-compiler
 CLOSURE=$(CLOSURE_DIR)/compiler.jar
 NASM_TEST_DIR=./tests/nasm
 
-INSTRUCTION_TABLES=src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
-		   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
-		   src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs \
+INSTRUCTION_TABLES=src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
 
-# Only the dependencies common to both generate_{jit,interpreter}.js
-GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js gen/generate_ir_decoder.js gen/ir_semantics.js, $(wildcard gen/*.js))
-JIT_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_jit.js
+# Only the dependencies common to the generators
+GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_ir_decoder.js gen/ir_semantics.js, $(wildcard gen/*.js))
 INTERPRETER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_interpreter.js
-ANALYZER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_analyzer.js
 
 STRIP_DEBUG_FLAG=
 ifeq ($(STRIP_DEBUG),true)
@@ -116,9 +112,7 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
           print_stats.js filestorage.js modem.js graphics_performance.js performance_recorder.js
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
-	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
-	   src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
-	   src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
 
 CORE_FILES:=$(addprefix src/,$(CORE_FILES))
 LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
@@ -216,20 +210,10 @@ build/libv86-debug.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--emit_use_strict=false
 	ls -lh build/libv86-debug.mjs
 
-src/rust/gen/jit.rs: $(JIT_DEPENDENCIES)
-	./gen/generate_jit.js --output-dir build/ --table jit
-src/rust/gen/jit0f.rs: $(JIT_DEPENDENCIES)
-	./gen/generate_jit.js --output-dir build/ --table jit0f
-
 src/rust/gen/interpreter.rs: $(INTERPRETER_DEPENDENCIES)
 	./gen/generate_interpreter.js --output-dir build/ --table interpreter
 src/rust/gen/interpreter0f.rs: $(INTERPRETER_DEPENDENCIES)
 	./gen/generate_interpreter.js --output-dir build/ --table interpreter0f
-
-src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
-	./gen/generate_analyzer.js --output-dir build/ --table analyzer
-src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
-	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
 
 build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
@@ -442,10 +426,6 @@ cpu-optimization-benchmark: build/jit-capacity.bin build/v86.wasm build/libv86.m
 build/jit-capacity.bin: tests/rust/jit_capacity.asm
 	nasm -f bin $< -o $@
 
-build/v86-jit-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
-	cargo rustc --features jit-invariants $(CARGO_FLAGS)
-	cp build/wasm32-unknown-unknown/debug/v86.wasm $@
-
 build/performance-recording-test: tests/rust/performance_recording.rs src/rust/profiler.rs
 	rustc --edition=2021 --test -O $< -o $@
 
@@ -519,10 +499,10 @@ packed-simd-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
 	node tests/rust/packed_simd.mjs
 
 .PHONY: sse3-tests
-sse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-fallback.wasm build/v86-jit-test.wasm
+sse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-fallback.wasm build/v86-debug.wasm
 	node tests/rust/sse3.mjs
 	node tests/rust/sse3.mjs build/v86-fallback.wasm
-	node tests/rust/sse3.mjs build/v86-jit-test.wasm
+	node tests/rust/sse3.mjs build/v86-debug.wasm
 
 # Keep the worker's public option/event wire names stable across bundles.
 build/cpu-worker.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
@@ -594,10 +574,10 @@ build/v86-ir-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo
 	cargo rustc --features ir-test-hooks $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/debug/v86.wasm $@
 
-.PHONY: ir-analyzer-tests
-ir-analyzer-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs
+.PHONY: ir-decode-snapshot-tests
+ir-decode-snapshot-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs
 	cargo test decode::tests::catalogue_lengths_and_all_modrm_sib_forms
-	node tests/ir/decode/legacy.mjs
+	node tests/ir/decode/snapshot.mjs
 
 .PHONY: ir-memory-tests
 ir-memory-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
@@ -679,10 +659,6 @@ ir09-completion-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mj
 	env RUSTFLAGS="-D warnings" cargo test ir::runtime::region::tests -- --nocapture
 	env RUSTFLAGS="-D warnings" cargo test ir::cfg_frontend_tests -- --nocapture
 	node tests/ir/differential/cfg.mjs
-	@if grep -R -n -E 'jit_instructions|crate::codegen|crate::control_flow|jit_instruction\(' src/rust/ir; then \
-		echo "IR-09 backend must not embed the legacy emitter/control-flow implementation"; \
-		exit 1; \
-	fi
 
 .PHONY: ir-system-stack-tests
 ir-system-stack-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
@@ -835,10 +811,6 @@ ir-simd-masked-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-tes
 	cargo test ir::simd_masked_tests
 	node tests/ir/differential/simd_masked.mjs
 
-build/v86-publication-test-release.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
-	cargo rustc --release --features jit-invariants $(CARGO_FLAGS)
-	cp build/wasm32-unknown-unknown/release/v86.wasm $@
-
 .PHONY: ir-entry-tests
 ir-entry-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::entry_tests
@@ -854,11 +826,10 @@ ir-live-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-relea
 	node tests/ir/differential/live.mjs build/v86-ir-test-release.wasm
 	node tests/ir/differential/live_runtime.mjs
 
-# Experimental compiler/runtime exports, without differential test hooks.
-# IR entries participate in CPU dispatch; the automatic IR policy is opt-in.
-build/v86-ir-runtime.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
-	cargo rustc --release --features ir-experimental $(CARGO_FLAGS)
-	cp build/wasm32-unknown-unknown/release/v86.wasm $@
+# The release core without differential test hooks: the same as build/v86.wasm,
+# under the path the IR tests use.
+build/v86-ir-runtime.wasm: build/v86.wasm
+	cp build/v86.wasm $@
 
 .PHONY: ir-cache-tests
 ir-cache-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cache-test-release.wasm build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin
@@ -938,9 +909,9 @@ ir13-budget-matrix: build/v86-ir-runtime.wasm build/libv86.mjs build/cpu-worker-
 	cat build/ir13-performance-smoke.json
 
 .PHONY: jit-disabled-tests
-jit-disabled-tests: build/v86-jit-test.wasm build/v86-publication-test-release.wasm build/libv86.mjs build/cpu-worker-test.bin
-	node tests/rust/jit_disabled_promotion.mjs build/v86-jit-test.wasm
-	node tests/rust/jit_disabled_promotion.mjs build/v86-publication-test-release.wasm
+jit-disabled-tests: build/v86-debug.wasm build/v86.wasm build/libv86.mjs build/cpu-worker-test.bin
+	node tests/rust/jit_disabled_promotion.mjs build/v86-debug.wasm
+	node tests/rust/jit_disabled_promotion.mjs build/v86.wasm
 
 .PHONY: ir-mir-owned-tests
 ir-mir-owned-tests:
@@ -948,11 +919,11 @@ ir-mir-owned-tests:
 	node tests/ir/wasm/owned.mjs
 
 build/v86-ir-cache-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
-	cargo rustc --features ir-test-hooks,jit-invariants $(CARGO_FLAGS)
+	cargo rustc --features ir-test-hooks $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/debug/v86.wasm $@
 
 build/v86-ir-cache-test-release.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
-	cargo rustc --release --features ir-test-hooks,jit-invariants $(CARGO_FLAGS)
+	cargo rustc --release --features ir-test-hooks $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v86.wasm $@
 
 .PHONY: ir-forwarding-tests
@@ -988,7 +959,7 @@ ir-helper-reload-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-t
 # Portable IR core: scalar regions compile, vector regions explicitly fall back
 # to the interpreter and participate in normal failed-compilation suppression.
 build/v86-ir-runtime-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
-	cargo rustc --release --features ir-experimental $(CARGO_FLAGS_SAFE) -C target-feature=-simd128
+	cargo rustc --release $(CARGO_FLAGS_SAFE) -C target-feature=-simd128
 	cp build/wasm32-unknown-unknown/release/v86.wasm $@
 
 build/v86-ir-test-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
@@ -996,7 +967,7 @@ build/v86-ir-test-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddecli
 	cp build/wasm32-unknown-unknown/debug/v86.wasm $@
 
 .PHONY: ir-decode-contract-tests ir-system-mode-tests ir-portable-tests ir-helper-audit
-ir-decode-contract-tests: ir-analyzer-tests build/v86-ir-test-release.wasm build/jit-capacity.bin
+ir-decode-contract-tests: ir-decode-snapshot-tests build/v86-ir-test-release.wasm build/jit-capacity.bin
 	cargo test invalid_form_fixtures
 	node tests/ir/decode/staged.mjs
 	node tests/ir/decode/staged.mjs build/v86-ir-test-release.wasm

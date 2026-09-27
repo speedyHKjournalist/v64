@@ -37,7 +37,6 @@ export async function backend_scenarios(V86, options, log = console.log)
     const assert_ir = async () => {
         const i = await info();
         check(i.backend === "ir" && i.ir_available && i.ir.enabled === 1, "IR backend is active");
-        check(!i.legacy_generation_enabled && i.legacy_compile_requests === 0, "IR mode generated no legacy code");
         check(JSON.stringify(i.ir_region_budget) === JSON.stringify(budget), "all region limits reached CPU");
         return i;
     };
@@ -135,7 +134,7 @@ export async function backend_scenarios(V86, options, log = console.log)
             await until(async () => (await info()).ir.tier2_published > before_policy.ir.tier2_published, "configured optimizer publishes Tier 2");
             await vm.stop();
             const compiled = await info(), phases = compiled.ir.diagnostics.compiler;
-            check(phases.lower.calls > 0 && compiled.ir.cache_hits > 0 && !compiled.legacy_compile_requests, "configured pipeline executed IR");
+            check(phases.lower.calls > 0 && compiled.ir.cache_hits > 0, "configured pipeline executed IR");
             for(const phase of ["machine_fold", "machine_allocation", "machine_forward"])
                 check(phases[phase].calls === 0, "disabled optimization was not invoked: " + phase);
             if(level === 2) check(phases.machine_stack.calls > 0, "independent enabled pass still runs");
@@ -148,8 +147,7 @@ export async function backend_scenarios(V86, options, log = console.log)
         await create({ jit_backend: "ir", ir_region_budget: budget, disable_jit: true });
         await boot(); await vm.stop();
         const disabled = await info();
-        check(!disabled.legacy_generation_enabled && !disabled.ir.enabled && !disabled.ir.tier1_attempts && !disabled.legacy_compile_requests,
-            "disable_jit disables both generators");
+        check(!disabled.ir.enabled && !disabled.ir.tier1_attempts, "disable_jit disables IR compilation");
         await destroy();
         await create({ ir_tier0: undefined }); await boot();
         await vm.write_memory(Uint8Array.of(0x40, 0xEB, 0xFD), 0x1200000);
@@ -158,7 +156,6 @@ export async function backend_scenarios(V86, options, log = console.log)
         await vm.stop();
         const defaults = await info();
         check(defaults.backend === "ir" && defaults.ir.enabled && defaults.ir.tier0.enabled, "default is IR with Tier-0");
-        check(!defaults.legacy_generation_enabled && defaults.legacy_compile_requests === 0, "default generates no legacy code");
         await destroy();
         log("PASS: explicit disable_jit and the default IR + Tier-0 backend");
 

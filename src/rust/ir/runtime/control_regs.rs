@@ -4,7 +4,6 @@ use crate::ir::helper::Outcome;
 const INVALID_CR4_BITS: u32 =
     (1 << 11) | (1 << 12) | (1 << 15) | (1 << 16) | (1 << 19) | 0xFFC00000;
 unsafe fn permission(r: u32, index: u32) -> bool {
-    assert!(!cpu::in_jit);
     assert!(r < 8 && index < 8);
     if *gp::cpl != 0 {
         cpu::trigger_gp(0);

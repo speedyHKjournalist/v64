@@ -2,7 +2,7 @@
 //!
 //! Register-only D8-DF forms have no guest-memory access. The helper first
 //! applies the architectural CR0.EM/TS guard, then synchronizes/discards the
-//! legacy f64 x87 cache so the canonical F80 CPU state is authoritative. It
+//! f64 x87 shadow cache so the canonical F80 CPU state is authoritative. It
 //! dispatches the same instruction bodies as the interpreter. Invalid nested
 //! encodings are rejected before calling those bodies so a delivered #UD can
 //! never be followed by an instruction commit.
@@ -131,7 +131,6 @@ unsafe fn register_semantics(opcode: u32, group: u32, r: u32) {
 
 #[no_mangle]
 pub unsafe fn ir_x87_reg_continue(opcode: u32, group: u32, r: u32, operand_size: u32) -> u32 {
-    assert!(!cpu::in_jit);
     assert!((0xD8..=0xDF).contains(&opcode));
     assert!(group < 8 && r < 8 && matches!(operand_size, 16 | 32));
 
@@ -140,7 +139,7 @@ pub unsafe fn ir_x87_reg_continue(opcode: u32, group: u32, r: u32, operand_size:
         return Outcome::ControlTransferred as u32;
     }
 
-    // The legacy JIT may have left exact-enough f64 shadow values live. IR x87
+    // Compiled code may have left exact-enough f64 shadow values live. IR x87
     // always executes against canonical F80 state; synchronize only after the
     // task-switch guard so a faulting instruction does not observe/mutate FPU
     // state before #NM.
@@ -189,8 +188,7 @@ pub unsafe fn ir_test_x87_seed() {
 #[no_mangle]
 pub unsafe fn ir_x87_mem(opcode: u32, group: u32, offset: u32, segment: u32, width: u32) -> u32 {
     assert!(
-        !cpu::in_jit
-            && (0xD8..=0xDF).contains(&opcode)
+        (0xD8..=0xDF).contains(&opcode)
             && group < 8
             && segment < 6
             && matches!(width, 16 | 32)

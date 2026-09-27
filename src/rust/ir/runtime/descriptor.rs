@@ -2,7 +2,7 @@
 use crate::cpu::{cpu, global_pointers as gp, instructions_0f};
 use crate::ir::helper::Outcome;
 unsafe fn valid(width: u32) {
-    assert!(!cpu::in_jit && matches!(width, 16 | 32));
+    assert!(matches!(width, 16 | 32));
 }
 unsafe fn commit() -> u32 {
     *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);

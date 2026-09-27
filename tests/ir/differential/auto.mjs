@@ -43,13 +43,12 @@ try {
     }
     e.performance_recording_enable(0);
     console.log(`PASS: ${wasm}: automatic Tier 1 compilation, safe optimized promotion and actual CPU execution with exact loop counts, recording off/on`);
-    await prepare();const legacy_publisher=cpu.codegen_finalize;let legacy_calls=0;
-    cpu.codegen_finalize=function(...args){legacy_calls++;return legacy_publisher.apply(this,args);};
+    await prepare();
     try {
         const independent=stats(),independent_hits=e.ir_cache_stat(2);configure();vm.run();await until(()=>e.ir_auto_stat(5)>independent[5]&&e.ir_cache_stat(2)>independent_hits,"IR compilation");await vm.stop();
-        assert.equal(legacy_calls,0);const n=new Uint32Array(e.memory.buffer)[664>>2];assert.equal(n,(cpu.reg32[0]*2-(cpu.instruction_pointer[0]===PC+1?1:0))>>>0);
-    } finally {await vm.stop();cpu.codegen_finalize=legacy_publisher;}
-    console.log(`PASS: ${wasm}: automatic IR compilation/promotion executes with zero calls to the legacy publisher`);
+        const n=new Uint32Array(e.memory.buffer)[664>>2];assert.equal(n,(cpu.reg32[0]*2-(cpu.instruction_pointer[0]===PC+1?1:0))>>>0);
+    } finally {await vm.stop();}
+    console.log(`PASS: ${wasm}: automatic IR compilation from an empty cache preserves exact retirement`);
     await prepare();cpu.is_32[0]=0;cpu.segment_offsets[1]=PC-0x1000;cpu.reg32[0]=0x76540000;e.update_state_flags();let mode_before=stats();configure();vm.run();
     await until(()=>e.ir_auto_stat(5)>mode_before[5],"16-bit automatic promotion");await vm.stop();
     const mode_count=new Uint32Array(e.memory.buffer)[664>>2];assert([PC,PC+1].includes(cpu.instruction_pointer[0]));

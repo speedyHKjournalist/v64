@@ -520,7 +520,6 @@ fn immutable_compile_requests_and_stale_publication_checks() {
         ..snapshot
     };
     assert!(compile_region(&request, &bad, &config).is_err());
-    assert!(Backend::parse("typo").is_err());
 }
 
 #[test]

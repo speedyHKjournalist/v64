@@ -48,7 +48,7 @@ struct Page {
     attempts: u8,
     /// Code-page writes since the page was first compiled. Pages that mix
     /// code with frequently written data need exponentially more heat before
-    /// each recompilation (the legacy JIT restarts its large page threshold).
+    /// each recompilation (the removed legacy JIT restarted its large page threshold).
     invalidations: u8,
     failed: bool,
     queued: bool,

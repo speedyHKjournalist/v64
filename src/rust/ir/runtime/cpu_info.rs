@@ -6,7 +6,6 @@ unsafe fn commit() -> u32 {
     Outcome::Invalidated as u32
 }
 unsafe fn ring0() -> bool {
-    assert!(!cpu::in_jit);
     if *gp::cpl != 0 {
         cpu::trigger_gp(0);
         false
@@ -17,9 +16,8 @@ unsafe fn ring0() -> bool {
 }
 #[no_mangle]
 pub unsafe fn ir_cpuid() -> u32 {
-    assert!(!cpu::in_jit);
     // The pinned debug body logs most leaves through the host. Revoke before
-    // observing it, even for callers using the legacy terminal adapter.
+    // observing it, even for callers using the terminal (CpuExit) adapter.
     #[cfg(debug_assertions)]
     if !matches!(*gp::reg32 as u32, 0 | 2 | 0x80000000) {
         super::entry::ir_admission_barrier();
@@ -31,7 +29,6 @@ pub unsafe fn ir_cpuid() -> u32 {
 /// debug observer path owns completed post-state and never returns to SSA.
 #[no_mangle]
 pub unsafe fn ir_cpuid_continue() -> u32 {
-    assert!(!cpu::in_jit);
     #[cfg(debug_assertions)]
     if !matches!(*gp::reg32 as u32, 0 | 2 | 0x80000000) {
         return ir_cpuid();
@@ -41,7 +38,6 @@ pub unsafe fn ir_cpuid_continue() -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_rdtsc() -> u32 {
-    assert!(!cpu::in_jit);
     if *gp::cpl != 0 && *gp::cr.offset(4) & cpu::CR4_TSD != 0 {
         cpu::trigger_gp(0);
         return Outcome::ControlTransferred as u32;
@@ -52,7 +48,6 @@ pub unsafe fn ir_rdtsc() -> u32 {
 /// Only an unchanged active code/context certificate authorizes SSA resumption.
 #[no_mangle]
 pub unsafe fn ir_rdtsc_continue() -> u32 {
-    assert!(!cpu::in_jit);
     if *gp::cpl != 0 && *gp::cr.offset(4) & cpu::CR4_TSD != 0 {
         cpu::trigger_gp(0);
         return Outcome::ControlTransferred as u32;
@@ -60,7 +55,6 @@ pub unsafe fn ir_rdtsc_continue() -> u32 {
     // Under the notified contract the only host import of a release RDTSC is
     // the monotonic clock: it cannot write guest RAM, CPU state or IRQ lines.
     // Strict mode, debug logging and timing diagnostics keep the full observer.
-    #[cfg(feature = "ir-experimental")]
     if !cfg!(debug_assertions)
         && !super::cache::strict_validation()
         && !super::diagnostics::enabled()

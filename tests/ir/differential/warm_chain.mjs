@@ -132,7 +132,7 @@ try {
             if(kind === "diagnostics") {
                 const d = vm.get_jit_info().ir.diagnostics;
                 assert.equal(Object.values(d.exits).reduce((n, x) => n + x.count, 0), d.totals.ir_activations);
-                assert.equal(d.totals.ir_steps + d.totals.interpreter_steps + d.totals.legacy_steps, run_count);
+                assert.equal(d.totals.ir_steps + d.totals.interpreter_steps, run_count);
                 assert.equal(d.totals.instrumentation_errors, 0);
             }
             if(["between_batches", "replacement"].includes(kind)) {

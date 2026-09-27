@@ -62,15 +62,11 @@ pub fn ir_admission_barrier() {
 pub fn ir_admission_epoch_address() -> u32 { core::ptr::addr_of!(CONTINUATION_EPOCH) as u32 }
 /// Advances on every known code write and admission barrier.
 pub(crate) fn continuation_epoch() -> u64 { unsafe { CONTINUATION_EPOCH } }
-#[cfg(feature = "ir-experimental")]
 pub(super) fn admission_epoch() -> u64 { unsafe { ADMISSION_EPOCH } }
-#[cfg(feature = "ir-experimental")]
 pub(super) fn link_requested() -> bool {
     unsafe { matches!(EXIT_KIND, ExitKind::Normal | ExitKind::Observer) }
 }
-#[cfg(feature = "ir-experimental")]
 pub(super) fn profile_link_requested() -> bool { unsafe { EXIT_KIND == ExitKind::Normal } }
-#[cfg(feature = "ir-experimental")]
 pub(super) fn poll_exit() -> bool { unsafe { EXIT_KIND == ExitKind::Poll } }
 #[no_mangle]
 pub unsafe fn ir_request_link() { EXIT_KIND = ExitKind::Normal; }
@@ -83,7 +79,6 @@ pub unsafe fn ir_request_observer_link() { EXIT_KIND = ExitKind::Observer; }
 /// batch/IRQ limits. Earlier barriers remain authoritative; no epoch is refreshed.
 #[no_mangle]
 pub unsafe fn ir_request_poll_exit() { EXIT_KIND = ExitKind::Poll; }
-#[cfg(feature = "ir-experimental")]
 pub unsafe fn take_link_request() -> bool {
     let requested = matches!(EXIT_KIND, ExitKind::Normal | ExitKind::Observer);
     EXIT_KIND = ExitKind::None;
@@ -100,20 +95,9 @@ pub unsafe fn ir_entry_matches(linear: u32, cs_base: u32, default_32: u32) -> bo
 // can inline this exact predicate instead of crossing a second Wasm call.
 #[inline(always)]
 pub(super) unsafe fn matches_current(linear: u32, cs_base: u32, default_32: u32) -> bool {
-    !cpu::in_jit
-        && *gp::prefixes == 0
+    *gp::prefixes == 0
         && !*gp::in_hlt
         && *gp::instruction_pointer as u32 == linear
         && cpu::get_seg_cs() as u32 == cs_base
         && u32::from(*gp::is_32) == default_32
-}
-
-#[cfg(feature = "ir-test-hooks")]
-#[no_mangle]
-pub unsafe fn ir_test_entry_in_jit(linear: u32, cs_base: u32, mode: u32) -> bool {
-    let saved = cpu::in_jit;
-    cpu::in_jit = true;
-    let result = ir_entry_matches(linear, cs_base, mode);
-    cpu::in_jit = saved;
-    result
 }

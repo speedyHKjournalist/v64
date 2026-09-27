@@ -20,7 +20,7 @@ pub unsafe fn ir_sse_fp_reg_continue(
     destination: i32,
     immediate: i32,
 ) -> u32 {
-    assert!(!cpu::in_jit && (0..8).contains(&source) && (0..8).contains(&destination));
+    assert!((0..8).contains(&source) && (0..8).contains(&destination));
     // The debug OSFXSR warning calls the host before the task guard succeeds.
     // Its callback can replace code or CPU state, so successful semantics must
     // return committed CPU-owned post-state rather than retain selective SSA.
@@ -476,7 +476,7 @@ pub unsafe fn ir_sse_fp_mem_continue(
     destination: i32,
     immediate: i32,
 ) -> u32 {
-    assert!(!cpu::in_jit && segment < 6 && (0..8).contains(&destination));
+    assert!(segment < 6 && (0..8).contains(&destination));
     let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
     if observes {
         super::entry::ir_admission_barrier();

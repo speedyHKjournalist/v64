@@ -39,7 +39,7 @@ try {
   const d=report(),tot=d.totals;
   assert.equal(Object.values(d.exits).reduce((n,r)=>n+r.count,0),tot.ir_activations);
   assert.equal(Object.values(d.exits).reduce((n,r)=>n+r.guest_steps,0),tot.ir_steps);
-  assert.equal(tot.ir_steps+tot.interpreter_steps+tot.legacy_steps,words()[664>>2]);
+  assert.equal(tot.ir_steps+tot.interpreter_steps,words()[664>>2]);
   assert.equal(d.admission.accepted,tot.ir_activations);assert.equal(tot.instrumentation_errors,0);
   assert.equal(Object.values(d.missing_entries).reduce((a,b)=>a+b,0),d.admission.missing);
   const sum=Object.values(d.timings).reduce((n,r)=>n+r.sampled_ms,0);

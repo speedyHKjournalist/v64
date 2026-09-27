@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an isolated CPU whose legacy strings use the pinned pre-refactor body."""
+"""Build an isolated CPU whose interpreter strings use the pinned pre-refactor body."""
 import hashlib
 import json
 from pathlib import Path
@@ -15,7 +15,7 @@ start = old.index("// We implement all string instructions here")
 end = old.index("\n#[no_mangle]\npub unsafe fn movsb_rep", start)
 body = old[start:end].replace("unsafe fn string_instruction(", "unsafe fn string_instruction_reference(", 1)
 current = (ROOT / SOURCE).read_text()
-start = current.index("// Legacy callers retain their unbounded/page-bounded execution policy.")
+start = current.index("// Interpreter callers retain their unbounded/page-bounded execution policy.")
 end = current.index("/// Explicit progress", start)
 wrapper = """#[inline(always)]
 unsafe fn string_instruction(is_asize_32: bool, ds_or_prefix: i32, instruction: Instruction, size: Size, rep: Rep) {

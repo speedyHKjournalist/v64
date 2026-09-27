@@ -147,7 +147,6 @@ fn ea_and_wrapping() {
 #[test]
 fn catalogue_lengths_and_all_modrm_sib_forms() {
     let mut count = 0;
-    let mut oracle_records = Vec::new();
     for encoding in encodings() {
         for mode32 in [false, true] {
             for m in 0..if encoding.fetch_modrm { 256 } else { 1 } {
@@ -237,10 +236,6 @@ fn catalogue_lengths_and_all_modrm_sib_forms() {
                             decode(&sample[..cut], GuestEip(0), LinearAddress(0), mode32).is_err()
                         );
                     }
-                    oracle_records.push(mode32 as u8);
-                    oracle_records.push(sample.len() as u8);
-                    oracle_records.extend_from_slice(&sample);
-                    oracle_records.resize(oracle_records.len() + 15 - sample.len(), 0);
                     count += 1;
                 }
             }
@@ -284,18 +279,13 @@ fn catalogue_lengths_and_all_modrm_sib_forms() {
                         }
                     }
                     sample.resize(15, 0x25);
-                    if let Ok(decoded) = decode(&sample, GuestEip(0), LinearAddress(0), mode32) {
-                        oracle_records.push(mode32 as u8);
-                        oracle_records.push(decoded.length);
-                        oracle_records.extend_from_slice(&decoded.bytes);
+                    if decode(&sample, GuestEip(0), LinearAddress(0), mode32).is_ok() {
                         count += 1;
                     }
                 }
             }
         }
     }
-    std::fs::create_dir_all("build/ir-decode").unwrap();
-    std::fs::write("build/ir-decode/legacy-forms.bin", oracle_records).unwrap();
     assert!(count > 1_000_000);
     println!("Checked {count} encoding/ModRM/SIB forms and all truncated prefixes");
 }

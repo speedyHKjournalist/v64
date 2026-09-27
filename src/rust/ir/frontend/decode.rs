@@ -35,7 +35,7 @@ pub struct Encoding {
     pub group: i8,
     pub immediate: ImmediateKind,
     pub extra_bytes: u8,
-    // Legacy dispatch fetches ModRM before selecting the mandatory-prefix form.
+    // Interpreter dispatch fetches ModRM before selecting the mandatory-prefix form.
     pub fetch_modrm: bool,
     pub group_ud: bool,
     pub task_switch_test: bool,

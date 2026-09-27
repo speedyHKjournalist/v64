@@ -36,12 +36,11 @@ jobs:
       - name: Generated dispatch tables and decoder
         run: |
           mkdir -p build
-          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
           make ir-generated-check
-      - name: Warning-free production and experimental Rust
+      - name: Warning-free Rust
         run: |
           RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown
-          RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown --features ir-experimental
       - name: IR-08 x87 register differential
         run: |
           set -o pipefail

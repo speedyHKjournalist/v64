@@ -24,7 +24,6 @@ unsafe fn write(port: u32, bytes: u32, value: u32) {
         _ => unreachable!(),
     }
 }
-#[cfg(feature = "ir-experimental")]
 unsafe fn write_accumulator(bytes: u32, value: i32) {
     match bytes {
         1 => cpu::write_reg8(0, value),
@@ -35,7 +34,6 @@ unsafe fn write_accumulator(bytes: u32, value: i32) {
 }
 #[no_mangle]
 pub unsafe fn ir_io_check(port: u32, bytes: u32) -> u32 {
-    assert!(!cpu::in_jit);
     valid(port, bytes);
     if cpu::test_privileges_for_io(port as i32, bytes as i32) {
         Outcome::Normal as u32
@@ -74,7 +72,6 @@ pub unsafe fn ir_out(port: u32, bytes: u32, _value: u32) -> u32 {
 pub unsafe fn ir_in_continue(port: u32, bytes: u32) -> u32 {
     // Permission checks may read a TSS/I/O bitmap through MMIO. Include those
     // observers in the certificate, not only the eventual port callback.
-    #[cfg(feature = "ir-experimental")]
     if super::continuation::NotifiedObserver::enabled() {
         let observer = super::continuation::NotifiedObserver::capture();
         if ir_io_check(port, bytes) != 0 {
@@ -98,7 +95,6 @@ pub unsafe fn ir_in_continue(port: u32, bytes: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_out_continue(port: u32, bytes: u32, _value: u32) -> u32 {
-    #[cfg(feature = "ir-experimental")]
     if super::continuation::NotifiedObserver::enabled() {
         let observer = super::continuation::NotifiedObserver::capture();
         if ir_io_check(port, bytes) != 0 {
@@ -119,7 +115,7 @@ pub unsafe fn ir_out_continue(port: u32, bytes: u32, _value: u32) -> u32 {
 /// SSA state, and a completed device operation is never replayed.
 unsafe fn io_once(input: bool, bytes: u32, asize32: u32, segment: u32) -> u32 {
     use crate::cpu::string::{execute_io_once, StringOutcome};
-    assert!(!cpu::in_jit && asize32 <= 1 && segment < 6);
+    assert!(asize32 <= 1 && segment < 6);
     let result = execute_io_once(input, bytes, asize32 != 0, segment as i32);
     match result.outcome {
         StringOutcome::Complete => {
@@ -141,7 +137,6 @@ pub unsafe fn ir_outs_once(bytes: u32, asize32: u32, segment: u32) -> u32 {
 /// Frontend has already checked permission before its ordered source GuestLoad.
 #[no_mangle]
 pub unsafe fn ir_outs(port: u32, bytes: u32, value: u32, next_si: u32) -> u32 {
-    assert!(!cpu::in_jit);
     valid(port, bytes);
     write(port, bytes, value);
     cpu::write_reg32(6, next_si as i32);

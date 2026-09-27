@@ -122,7 +122,6 @@ pub fn note_compiled(instructions: usize, templated: usize, bytes: usize, pages:
 /// Compile statistic `field` (see COMPILED); field 5: whether Tier-0 is on.
 #[no_mangle]
 pub unsafe fn ir_t0_stat(field: u32) -> u32 {
-    #[cfg(feature = "ir-experimental")]
     if field == 5 {
         return super::schedule::tier0() as u32;
     }
@@ -134,7 +133,7 @@ pub unsafe fn ir_t0_stat(field: u32) -> u32 {
 /// any side effect (no A/D bits, TLB fill or fault delivery).
 unsafe fn probe(address: u32, bytes: u32, write: bool) -> bool {
     let user = *gp::cpl == 3;
-    let translates = |a: u32| cpu::translate_address(a as i32, write, user, false, false).is_ok();
+    let translates = |a: u32| cpu::translate_address(a as i32, write, user, false).is_ok();
     translates(address) && ((address & 0xFFF) + bytes <= 0x1000 || translates((address | 0xFFF) + 1))
 }
 /// Tier-0 read outside the TLB fast path (TLB miss, MMIO, page crossing):
@@ -172,11 +171,11 @@ pub unsafe fn ir_t0_write_slow(address: u32, value: u32, bytes: u32) -> u32 {
     let user = *gp::cpl == 3;
     let last = address.wrapping_add(bytes - 1);
     for a in [address, last] {
-        let Ok(physical) = cpu::translate_address(a as i32, true, user, false, false)
+        let Ok(physical) = cpu::translate_address(a as i32, true, user, false)
         else {
             return 1;
         };
-        if crate::jit::ir_page_has_code(crate::page::Page::page_of(physical)) {
+        if crate::jit::jit_page_has_code(crate::page::Page::page_of(physical)) {
             return 1;
         }
     }

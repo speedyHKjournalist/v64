@@ -106,7 +106,6 @@ impl ScalarObserver {
         }))
     }
     pub(super) unsafe fn finish(self) -> u32 {
-        #[cfg(feature = "ir-experimental")]
         let current = self.0.is_some_and(|snapshot| {
             no_pending_irq()
                 && snapshot.context.epoch != u64::MAX
@@ -117,11 +116,6 @@ impl ScalarObserver {
                 )
                 && super::cache::observer_continuation()
         });
-        #[cfg(not(feature = "ir-experimental"))]
-        let current = {
-            let _ = self;
-            false
-        };
         if current {
             Outcome::Normal as u32
         }
@@ -139,7 +133,6 @@ impl ScalarObserver {
 /// (DMA through write_blob, jit_dirty_cache) or reset advances the live
 /// continuation epoch, which retires any dependent owner. Strict validation,
 /// diagnostics and debug builds keep the complete ScalarObserver certificate.
-#[cfg(feature = "ir-experimental")]
 pub(super) struct NotifiedObserver {
     quiet: bool,
     epoch: u64,
@@ -148,7 +141,6 @@ pub(super) struct NotifiedObserver {
     count: u32,
     cr0: i32,
 }
-#[cfg(feature = "ir-experimental")]
 impl NotifiedObserver {
     #[inline(always)]
     pub(super) unsafe fn enabled() -> bool {

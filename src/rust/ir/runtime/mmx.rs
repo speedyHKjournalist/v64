@@ -11,7 +11,7 @@ unsafe fn finish(success: bool) -> u32 {
     }
 }
 unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
-    assert!(!cpu::in_jit && (0..8).contains(&source) && (0..8).contains(&destination));
+    assert!((0..8).contains(&source) && (0..8).contains(&destination));
     // The baseline debug guard logs through a host import when OSFXSR is off.
     // That observer may change code, context or XMMs. Revoke certificates before
     // it runs and retain CPU-owned post-state via a terminal success below.
@@ -226,7 +226,7 @@ pub unsafe fn ir_mmx_mem(
     destination: i32,
     immediate: i32,
 ) -> u32 {
-    assert!(!cpu::in_jit && segment < 6 && (0..8).contains(&destination));
+    assert!(segment < 6 && (0..8).contains(&destination));
     if !cpu::task_switch_test_mmx() {
         return finish(false);
     }
@@ -234,7 +234,7 @@ pub unsafe fn ir_mmx_mem(
 }
 #[no_mangle]
 pub unsafe fn ir_mmx_mask(offset: u32, segment: u32, mask: i32, source: i32) -> u32 {
-    assert!(!cpu::in_jit && segment < 6 && (0..8).contains(&mask) && (0..8).contains(&source));
+    assert!(segment < 6 && (0..8).contains(&mask) && (0..8).contains(&source));
     if !cpu::task_switch_test_mmx() {
         return finish(false);
     }

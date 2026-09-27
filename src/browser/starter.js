@@ -107,12 +107,8 @@ export function V86(options)
             dbg_trace(LOG_CPU);
         },
 
-        "codegen_finalize": (wasm_table_index, start, state_flags, ptr, len, ticket_low, ticket_high) => {
-            cpu.codegen_finalize(wasm_table_index, start, state_flags, ptr, len, ticket_low, ticket_high);
-        },
         "ir_codegen_finalize": (id, slot, ptr, len) => { cpu.ir_auto_publish(id, slot, ptr, len); },
         "jit_clear_func": (wasm_table_index) => cpu.jit_clear_func(wasm_table_index),
-        "jit_clear_all_funcs": () => cpu.jit_clear_all_funcs(),
 
         "__indirect_function_table": wasm_table,
     };
@@ -792,8 +788,7 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                         "io_port_write8", "io_port_write16", "io_port_write32",
                         "mmap_read8", "mmap_read32",
                         "mmap_write8", "mmap_write16", "mmap_write32", "mmap_write64", "mmap_write128",
-                        "codegen_finalize", "ir_codegen_finalize",
-                        "jit_clear_func", "jit_clear_all_funcs",
+                        "ir_codegen_finalize", "jit_clear_func",
                     ].map(f => [f, () => console.error("zstd worker unexpectedly called " + f)]));
 
                     env["__indirect_function_table"] = new WebAssembly.Table({ element: "anyfunc", initial: 1024 });

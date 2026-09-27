@@ -2,8 +2,7 @@
 //!
 //! Reducible single-entry SCCs become nested Loop/Block structures. Multi-entry
 //! regions and irreducible SCCs are rejected so wasm.rs can use its correctness
-//! dispatcher fallback. This module never emits Wasm and never calls legacy JIT
-//! control-flow code.
+//! dispatcher fallback. This module never emits Wasm.
 use crate::ir::{
     ids::BlockId,
     mir::control::{ControlFlow, Terminator},

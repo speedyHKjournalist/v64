@@ -906,7 +906,7 @@ pub unsafe fn instr_660F29_reg(r1: i32, r2: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F2A(source: u64, r: i32) {
     // cvtpi2ps xmm, mm/m64
     // Note: Casts here can fail
@@ -921,7 +921,7 @@ pub unsafe fn instr_0F2A_mem(addr: i32, r: i32) {
     instr_0F2A(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F2A(source: u64, r: i32) {
     // cvtpi2pd xmm, xmm/m64
     // These casts can't fail
@@ -940,7 +940,7 @@ pub unsafe fn instr_660F2A_mem(addr: i32, r: i32) {
     instr_660F2A(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F2A(source: i32, r: i32) {
     // cvtsi2sd xmm, r32/m32
     // This cast can't fail
@@ -951,7 +951,7 @@ pub unsafe fn instr_F20F2A_mem(addr: i32, r: i32) {
     instr_F20F2A(return_on_pagefault!(safe_read32s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F2A(source: i32, r: i32) {
     // cvtsi2ss xmm, r/m32
     // Note: This cast can fail
@@ -978,7 +978,7 @@ pub unsafe fn instr_660F2B_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F2C(source: u64, r: i32) {
     // cvttps2pi mm, xmm/m64
     let low = f32::from_bits(source as u32);
@@ -998,7 +998,7 @@ pub unsafe fn instr_0F2C_mem(addr: i32, r: i32) {
 pub unsafe fn instr_0F2C_reg(r1: i32, r2: i32) { instr_0F2C(read_xmm64s(r1), r2); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F2C(source: reg128, r: i32) {
     // cvttpd2pi mm, xmm/m128
     write_mmx_reg64(
@@ -1015,7 +1015,7 @@ pub unsafe fn instr_660F2C_mem(addr: i32, r: i32) {
 #[no_mangle]
 pub unsafe fn instr_660F2C_reg(r1: i32, r2: i32) { instr_660F2C(read_xmm128s(r1), r2); }
 
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F2C(source: u64, r: i32) {
     // cvttsd2si r32, xmm/m64
     let source = f64::from_bits(source);
@@ -1028,7 +1028,7 @@ pub unsafe fn instr_F20F2C_mem(addr: i32, r: i32) {
     instr_F20F2C(return_on_pagefault!(safe_read64s(addr)), r);
 }
 
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F2C(source: f32, r: i32) {
     // cvttss2si
     write_reg32(r, sse_convert_with_truncation_f32_to_i32(source));
@@ -1041,7 +1041,7 @@ pub unsafe fn instr_F30F2C_mem(addr: i32, r: i32) {
 pub unsafe fn instr_F30F2C_reg(r1: i32, r2: i32) { instr_F30F2C(read_xmm_f32(r1), r2); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F2D(source: u64, r: i32) {
     // cvtps2pi mm, xmm/m64
     let source: [f32; 2] = std::mem::transmute(source);
@@ -1060,7 +1060,7 @@ pub unsafe fn instr_0F2D_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F2D(source: reg128, r: i32) {
     // cvtpd2pi mm, xmm/m128
     let result = [
@@ -1076,7 +1076,7 @@ pub unsafe fn instr_660F2D_reg(r1: i32, r2: i32) { instr_660F2D(read_xmm128s(r1)
 pub unsafe fn instr_660F2D_mem(addr: i32, r: i32) {
     instr_660F2D(return_on_pagefault!(safe_read128s(addr)), r);
 }
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F2D(source: u64, r: i32) {
     // cvtsd2si r32, xmm/m64
     write_reg32(r, sse_convert_f64_to_i32(f64::from_bits(source)));
@@ -1085,7 +1085,7 @@ pub unsafe fn instr_F20F2D_reg(r1: i32, r2: i32) { instr_F20F2D(read_xmm64s(r1),
 pub unsafe fn instr_F20F2D_mem(addr: i32, r: i32) {
     instr_F20F2D(return_on_pagefault!(safe_read64s(addr)), r);
 }
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F2D(source: f32, r: i32) {
     // cvtss2si r32, xmm1/m32
     write_reg32(r, sse_convert_f32_to_i32(source));
@@ -1096,7 +1096,7 @@ pub unsafe fn instr_F30F2D_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F2E(source: f32, r: i32) {
     // ucomiss xmm1, xmm2/m32
     let destination = read_xmm_f32(r);
@@ -1122,7 +1122,7 @@ pub unsafe fn instr_0F2E_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F2E(source: u64, r: i32) {
     // ucomisd xmm1, xmm2/m64
     let destination = f64::from_bits(read_xmm64s(r));
@@ -1149,7 +1149,7 @@ pub unsafe fn instr_660F2E_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F2F(source: f32, r: i32) {
     // comiss xmm1, xmm2/m32
     let destination = read_xmm_f32(r);
@@ -1175,7 +1175,7 @@ pub unsafe fn instr_0F2F_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F2F(source: u64, r: i32) {
     // comisd xmm1, xmm2/m64
     let destination = f64::from_bits(read_xmm64s(r));
@@ -1585,7 +1585,7 @@ pub unsafe fn instr_660F50_reg(r1: i32, r2: i32) {
 pub unsafe fn instr_660F50_mem(_addr: i32, _r1: i32) { trigger_ud(); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F51(source: reg128, r: i32) {
     // sqrtps xmm, xmm/mem128
     // XXX: Should round according to round control
@@ -1604,7 +1604,7 @@ pub unsafe fn instr_0F51_mem(addr: i32, r: i32) {
     instr_0F51(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F51(source: reg128, r: i32) {
     // sqrtpd xmm, xmm/mem128
     // XXX: Should round according to round control
@@ -1618,7 +1618,7 @@ pub unsafe fn instr_660F51_mem(addr: i32, r: i32) {
     instr_660F51(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F51(source: u64, r: i32) {
     // sqrtsd xmm, xmm/mem64
     // XXX: Should round according to round control
@@ -1629,7 +1629,7 @@ pub unsafe fn instr_F20F51_mem(addr: i32, r: i32) {
     instr_F20F51(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F51(source: f32, r: i32) {
     // sqrtss xmm, xmm/mem32
     // XXX: Should round according to round control
@@ -1641,7 +1641,7 @@ pub unsafe fn instr_F30F51_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F52(source: reg128, r: i32) {
     // rcpps xmm1, xmm2/m128
     let result = reg128 {
@@ -1659,7 +1659,7 @@ pub unsafe fn instr_0F52_mem(addr: i32, r: i32) {
     instr_0F52(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F52(source: f32, r: i32) {
     // rsqrtss xmm1, xmm2/m32
     write_xmm_f32(r, 1.0 / source.sqrt());
@@ -1670,7 +1670,7 @@ pub unsafe fn instr_F30F52_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F53(source: reg128, r: i32) {
     // rcpps xmm, xmm/m128
     let result = reg128 {
@@ -1688,7 +1688,7 @@ pub unsafe fn instr_0F53_mem(addr: i32, r: i32) {
     instr_0F53(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F53(source: f32, r: i32) {
     // rcpss xmm, xmm/m32
     write_xmm_f32(r, 1.0 / source);
@@ -1780,7 +1780,7 @@ pub unsafe fn instr_660F57_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F58(source: reg128, r: i32) {
     // addps xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -1799,7 +1799,7 @@ pub unsafe fn instr_0F58_mem(addr: i32, r: i32) {
     instr_0F58(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F58(source: reg128, r: i32) {
     // addpd xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -1816,7 +1816,7 @@ pub unsafe fn instr_660F58_mem(addr: i32, r: i32) {
     instr_660F58(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F58(source: u64, r: i32) {
     // addsd xmm, xmm/mem64
     let destination = read_xmm64s(r);
@@ -1827,7 +1827,7 @@ pub unsafe fn instr_F20F58_mem(addr: i32, r: i32) {
     instr_F20F58(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F58(source: f32, r: i32) {
     // addss xmm, xmm/mem32
     let destination = read_xmm_f32(r);
@@ -1840,7 +1840,7 @@ pub unsafe fn instr_F30F58_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F59(source: reg128, r: i32) {
     // mulps xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -1859,7 +1859,7 @@ pub unsafe fn instr_0F59_mem(addr: i32, r: i32) {
     instr_0F59(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F59(source: reg128, r: i32) {
     // mulpd xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -1876,7 +1876,7 @@ pub unsafe fn instr_660F59_mem(addr: i32, r: i32) {
     instr_660F59(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F59(source: u64, r: i32) {
     // mulsd xmm, xmm/mem64
     let destination = read_xmm64s(r);
@@ -1887,7 +1887,7 @@ pub unsafe fn instr_F20F59_mem(addr: i32, r: i32) {
     instr_F20F59(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F59(source: f32, r: i32) {
     // mulss xmm, xmm/mem32
     let destination = read_xmm_f32(r);
@@ -1900,7 +1900,7 @@ pub unsafe fn instr_F30F59_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F5A(source: u64, r: i32) {
     // cvtps2pd xmm1, xmm2/m64
     let source: [f32; 2] = std::mem::transmute(source);
@@ -1914,7 +1914,7 @@ pub unsafe fn instr_0F5A_mem(addr: i32, r: i32) {
     instr_0F5A(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F5A(source: reg128, r: i32) {
     // cvtpd2ps xmm1, xmm2/m128
     let result = reg128 {
@@ -1928,7 +1928,7 @@ pub unsafe fn instr_660F5A_mem(addr: i32, r: i32) {
     instr_660F5A(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F5A(source: u64, r: i32) {
     // cvtsd2ss xmm1, xmm2/m64
     // XXX: This conversions is lossy and should round according to the round control
@@ -1939,7 +1939,7 @@ pub unsafe fn instr_F20F5A_mem(addr: i32, r: i32) {
     instr_F20F5A(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F5A(source: f32, r: i32) {
     // cvtss2sd xmm1, xmm2/m32
     write_xmm_f64(r, source as f64);
@@ -1950,7 +1950,7 @@ pub unsafe fn instr_F30F5A_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F5B(source: reg128, r: i32) {
     // cvtdq2ps xmm1, xmm2/m128
     // XXX: Should round according to round control
@@ -1970,7 +1970,7 @@ pub unsafe fn instr_0F5B_mem(addr: i32, r: i32) {
     instr_0F5B(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F5B(source: reg128, r: i32) {
     // cvtps2dq xmm1, xmm2/m128
     let result = reg128 {
@@ -1989,7 +1989,7 @@ pub unsafe fn instr_660F5B_mem(addr: i32, r: i32) {
     instr_660F5B(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F5B(source: reg128, r: i32) {
     // cvttps2dq xmm1, xmm2/m128
     let result = reg128 {
@@ -2008,7 +2008,7 @@ pub unsafe fn instr_F30F5B_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F5C(source: reg128, r: i32) {
     // subps xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2027,7 +2027,7 @@ pub unsafe fn instr_0F5C_mem(addr: i32, r: i32) {
     instr_0F5C(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F5C(source: reg128, r: i32) {
     // subpd xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2044,7 +2044,7 @@ pub unsafe fn instr_660F5C_mem(addr: i32, r: i32) {
     instr_660F5C(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F5C(source: u64, r: i32) {
     // subsd xmm, xmm/mem64
     let destination = read_xmm64s(r);
@@ -2055,7 +2055,7 @@ pub unsafe fn instr_F20F5C_mem(addr: i32, r: i32) {
     instr_F20F5C(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F5C(source: f32, r: i32) {
     // subss xmm, xmm/mem32
     let destination = read_xmm_f32(r);
@@ -2067,7 +2067,7 @@ pub unsafe fn instr_F30F5C_mem(addr: i32, r: i32) {
     instr_F30F5C(return_on_pagefault!(safe_read_f32(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F5D(source: reg128, r: i32) {
     // minps xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2086,7 +2086,7 @@ pub unsafe fn instr_0F5D_mem(addr: i32, r: i32) {
     instr_0F5D(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F5D(source: reg128, r: i32) {
     // minpd xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2103,7 +2103,7 @@ pub unsafe fn instr_660F5D_mem(addr: i32, r: i32) {
     instr_660F5D(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F5D(source: u64, r: i32) {
     // minsd xmm, xmm/mem64
     let destination = read_xmm64s(r);
@@ -2117,7 +2117,7 @@ pub unsafe fn instr_F20F5D_mem(addr: i32, r: i32) {
     instr_F20F5D(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F5D(source: f32, r: i32) {
     // minss xmm, xmm/mem32
     let destination = read_xmm_f32(r);
@@ -2129,7 +2129,7 @@ pub unsafe fn instr_F30F5D_mem(addr: i32, r: i32) {
     instr_F30F5D(return_on_pagefault!(safe_read_f32(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F5E(source: reg128, r: i32) {
     // divps xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2148,7 +2148,7 @@ pub unsafe fn instr_0F5E_mem(addr: i32, r: i32) {
     instr_0F5E(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F5E(source: reg128, r: i32) {
     // divpd xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2165,7 +2165,7 @@ pub unsafe fn instr_660F5E_mem(addr: i32, r: i32) {
     instr_660F5E(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F5E(source: u64, r: i32) {
     // divsd xmm, xmm/mem64
     let destination = read_xmm64s(r);
@@ -2176,7 +2176,7 @@ pub unsafe fn instr_F20F5E_mem(addr: i32, r: i32) {
     instr_F20F5E(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F5E(source: f32, r: i32) {
     // divss xmm, xmm/mem32
     let destination = read_xmm_f32(r);
@@ -2188,7 +2188,7 @@ pub unsafe fn instr_F30F5E_mem(addr: i32, r: i32) {
     instr_F30F5E(return_on_pagefault!(safe_read_f32(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0F5F(source: reg128, r: i32) {
     // maxps xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2207,7 +2207,7 @@ pub unsafe fn instr_0F5F_mem(addr: i32, r: i32) {
     instr_0F5F(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F5F(source: reg128, r: i32) {
     // maxpd xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -2224,7 +2224,7 @@ pub unsafe fn instr_660F5F_mem(addr: i32, r: i32) {
     instr_660F5F(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F5F(source: u64, r: i32) {
     // maxsd xmm, xmm/mem64
     let destination = read_xmm64s(r);
@@ -2238,7 +2238,7 @@ pub unsafe fn instr_F20F5F_mem(addr: i32, r: i32) {
     instr_F20F5F(return_on_pagefault!(safe_read64s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30F5F(source: f32, r: i32) {
     // maxss xmm, xmm/mem32
     let destination = read_xmm_f32(r);
@@ -3044,7 +3044,7 @@ pub unsafe fn instr_0F7C() { unimplemented_sse(); }
 pub unsafe fn instr_0F7D() { unimplemented_sse(); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F7C(source: reg128, r: i32) {
     // haddpd xmm1, xmm2/m128
     let destination = read_xmm128s(r);
@@ -3063,7 +3063,7 @@ pub unsafe fn instr_660F7C_mem(addr: i32, r: i32) {
     instr_660F7C(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F7C(source: reg128, r: i32) {
     // haddps xmm, xmm/mem128
     let destination = read_xmm128s(r);
@@ -3085,7 +3085,7 @@ pub unsafe fn instr_F20F7C_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660F7D(source: reg128, r: i32) {
     // hsubpd xmm1, xmm2/m128
     let destination = read_xmm128s(r);
@@ -3105,7 +3105,7 @@ pub unsafe fn instr_660F7D_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20F7D(source: reg128, r: i32) {
     // hsubps xmm1, xmm2/m128
     let destination = read_xmm128s(r);
@@ -3158,11 +3158,6 @@ pub unsafe fn instr_F30F7E_reg(r1: i32, r2: i32) {
     write_xmm128_2(r2, read_xmm64s(r1), 0);
 }
 
-#[no_mangle]
-pub unsafe fn instr_0F7F(r: i32) -> u64 {
-    // movq mm/m64, mm
-    read_mmx64s(r)
-}
 pub unsafe fn instr_0F7F_mem(addr: i32, r: i32) {
     // movq mm/m64, mm
     mov_r_m64(addr, r);
@@ -3828,7 +3823,7 @@ pub unsafe fn instr32_0FC1_mem(addr: i32, r: i32) { safe_read_write32(addr, &|x|
 pub unsafe fn instr32_0FC1_reg(r1: i32, r: i32) { write_reg32(r1, xadd32(read_reg32(r1), r)); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_0FC2(source: reg128, r: i32, imm8: i32) {
     // cmpps xmm, xmm/m128
     let destination = read_xmm128s(r);
@@ -3848,7 +3843,7 @@ pub unsafe fn instr_0FC2_mem(addr: i32, r: i32, imm: i32) {
     instr_0FC2(return_on_pagefault!(safe_read128s(addr)), r, imm);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660FC2(source: reg128, r: i32, imm8: i32) {
     // cmppd xmm, xmm/m128
     let destination = read_xmm128s(r);
@@ -3867,7 +3862,7 @@ pub unsafe fn instr_660FC2_mem(addr: i32, r: i32, imm: i32) {
     instr_660FC2(return_on_pagefault!(safe_read128s(addr)), r, imm);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20FC2(source: u64, r: i32, imm8: i32) {
     // cmpsd xmm, xmm/m64
     let destination = read_xmm64s(r);
@@ -3888,7 +3883,7 @@ pub unsafe fn instr_F20FC2_mem(addr: i32, r: i32, imm: i32) {
     instr_F20FC2(return_on_pagefault!(safe_read64s(addr)), r, imm);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30FC2(source: i32, r: i32, imm8: i32) {
     // cmpss xmm, xmm/m32
     let destination = read_xmm_f32(r);
@@ -4057,7 +4052,7 @@ pub unsafe fn instr_0FCF() { bswap(EDI); }
 pub unsafe fn instr_0FD0() { trigger_ud(); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660FD0(source: reg128, r: i32) {
     // addsubpd: subtract even lanes, add odd lanes.
     let destination = read_xmm128s(r);
@@ -4080,7 +4075,7 @@ pub unsafe fn instr_660FD0_mem(addr: i32, r: i32) {
     instr_660FD0(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20FD0(source: reg128, r: i32) {
     // addsubps: subtract even lanes, add odd lanes.
     let destination = read_xmm128s(r);
@@ -4668,7 +4663,7 @@ pub unsafe fn instr_0FE6_mem(_addr: i32, _r: i32) { trigger_ud(); }
 pub unsafe fn instr_0FE6_reg(_r1: i32, _r2: i32) { trigger_ud(); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_660FE6(source: reg128, r: i32) {
     // cvttpd2dq xmm1, xmm2/m128
     let result = reg128 {
@@ -4687,7 +4682,7 @@ pub unsafe fn instr_660FE6_mem(addr: i32, r: i32) {
 pub unsafe fn instr_660FE6_reg(r1: i32, r2: i32) { instr_660FE6(read_xmm128s(r1), r2); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F20FE6(source: reg128, r: i32) {
     // cvtpd2dq xmm1, xmm2/m128
     let result = reg128 {
@@ -4707,7 +4702,7 @@ pub unsafe fn instr_F20FE6_mem(addr: i32, r: i32) {
 pub unsafe fn instr_F20FE6_reg(r1: i32, r2: i32) { instr_F20FE6(read_xmm128s(r1), r2); }
 
 #[no_mangle]
-#[cfg_attr(feature = "ir-experimental", inline(never))]
+#[inline(never)]
 pub unsafe fn instr_F30FE6(source: u64, r: i32) {
     // cvtdq2pd xmm1, xmm2/m64
     let result = reg128 {

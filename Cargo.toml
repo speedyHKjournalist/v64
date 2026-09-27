@@ -5,13 +5,10 @@ publish = false
 edition = "2021"
 
 [features]
-default = ["ir-experimental"]
+default = []
 profiler = []
-jit-invariants = []
-# The IR compiler. On by default: it is the only JIT backend the JS side enables.
-ir-experimental = []
 # Exports differential oracles only in the dedicated test Wasm artifact.
-ir-test-hooks = ["ir-experimental"]
+ir-test-hooks = []
 
 [lib]
 crate-type = ["cdylib"]

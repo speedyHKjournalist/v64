@@ -18,20 +18,6 @@ use crate::ir::{
     passes::{licm, run, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Backend {
-    Legacy,
-    Ir,
-}
-impl Backend {
-    pub fn parse(value: &str) -> Result<Self, &'static str> {
-        match value {
-            "legacy" => Ok(Self::Legacy),
-            "ir" => Ok(Self::Ir),
-            _ => Err("unknown backend"),
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tier {
     One,
     Two,
@@ -249,7 +235,7 @@ fn linear_candidate(request: &CompileRequest, bytes: &[u8]) -> bool {
         else {
             return false;
         };
-        // The legacy analyzer marks ordinary memory operands as Boundary.
+        // The shared decoder marks ordinary memory operands as Boundary.
         // As in region selection, only an actual encoding block boundary
         // terminates fallthrough; mode-changing instructions stay on CFG.
         if !matches!(instruction.flow, Flow::Next | Flow::Boundary)

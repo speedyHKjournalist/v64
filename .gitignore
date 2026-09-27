@@ -21,10 +21,6 @@ Cargo.lock
 build-head
 src/rust/gen/interpreter.rs
 src/rust/gen/interpreter0f.rs
-src/rust/gen/analyzer.rs
-src/rust/gen/analyzer0f.rs
-src/rust/gen/jit.rs
-src/rust/gen/jit0f.rs
 bios/seabios
 bench-results
 .devcontainer/devcontainer-lock.json

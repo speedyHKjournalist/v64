@@ -13,18 +13,17 @@ try {
     vm.run();const deadline=performance.now()+10000;
     while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();await sleep(20);cpu.jit_clear_cache();
     const DATA=0x110000,STACK=0x90000,HANDLER=0x180000;
-    let calls=[],jit_context=false;
+    let calls=[];
     const instances=modules.map(module=>{
         const imports={...e,m:e.memory};
         for(const {name,kind} of WebAssembly.Module.imports(module)) if(kind==="function"){
             assert.equal(typeof e[name],"function",name);
-            imports[name]=(...args)=>{calls.push(name);return name==="ir_enter_checked"&&jit_context?e.ir_test_enter_checked_in_jit(...args):e[name](...args);};
+            imports[name]=(...args)=>{calls.push(name);return e[name](...args);};
         }
         return new WebAssembly.Instance(module,{e:imports});
     });
     function reset(c,absent=false){
         const [kind,mode,pc,linear]=c;
-        jit_context=false;
         cpu.segment_offsets.fill(0,0,6);cpu.segment_offsets[1]=(linear-pc)>>>0;
         cpu.segment_is_null.fill(0,0,6);cpu.segment_limits.fill(0xFFFFFFFF,0,6);cpu.sreg.set([16,8,16,16,16,16]);
         cpu.segment_access_bytes.set([0x93,0x9B,0x93,0x93,0x93,0x93]);
@@ -55,7 +54,7 @@ try {
     let rejected=0,executed=0,faults=0;
     for(let i=0;i<cases.length;i++){
         const c=cases[i], f=instances[i].exports.f;
-        for(const mismatch of ["linear","cs","mode","alias","prefix","halt","in-jit","index","negative-index","high-index"]){
+        for(const mismatch of ["linear","cs","mode","alias","prefix","halt","index","negative-index","high-index"]){
             reset(c,c[0]===1||c[0]===2);let entry=0;
             if(mismatch==="linear")cpu.instruction_pointer[0]+=16;
             if(mismatch==="cs")cpu.segment_offsets[1]+=4096;
@@ -63,7 +62,6 @@ try {
             if(mismatch==="alias"){const linear=c[3]===0x100000?0x800000:0x100000;cpu.instruction_pointer[0]=linear;cpu.segment_offsets[1]=(linear-c[2])>>>0;}
             if(mismatch==="prefix")raw[648]=1;
             if(mismatch==="halt")cpu.in_hlt[0]=1;
-            if(mismatch==="in-jit")jit_context=true;
             if(mismatch==="index")entry=1;
             if(mismatch==="negative-index")entry=-1;
             if(mismatch==="high-index")entry=65536;
@@ -86,7 +84,7 @@ try {
             reset(c,true);for(let n=0;n<=retired;n++)e.ir_test_step();assert.deepEqual(fault,{...state(),previous:words[560>>2]},`matching entry ${i}: fault ownership`);faults++;
         }
     }
-    console.log(`PASS: ${wasm}: ${rejected} CPU entry rejections without guest/REP/helper effects, ${executed} actual CPU comparisons, ${faults} precise page faults; physical aliases, CS wrap, width, active prefixes, JIT frames, HLT and entry-index boundaries`);
+    console.log(`PASS: ${wasm}: ${rejected} CPU entry rejections without guest/REP/helper effects, ${executed} actual CPU comparisons, ${faults} precise page faults; physical aliases, CS wrap, width, active prefixes, HLT and entry-index boundaries`);
     let active_counts;
     cpu.io.register_write(0x501,null,()=>{
         assert.equal(raw[648],0);assert.equal(cpu.in_hlt[0],0);
@@ -96,15 +94,15 @@ try {
     for(const recording of [0,1]){
         reset([0,true,0x100000,0x100000,false,false,[0x90]]);cpu.jit_clear_cache();
         // OUT/LOOP run long enough to become hot and run through compiled IR
-        // (Tier-0 page functions or regions). IR frames never set the JIT-frame
-        // marker, so every callback sees an otherwise matching key as admissible.
+        // (Tier-0 page functions or regions). Every callback must see committed
+        // state: no prefix, not halted, and an admissible entry key.
         vm.write_memory(Uint8Array.from([0xBA,1,5,0,0,0xB9,0x40,0x0D,3,0,0xEE,0xE2,0xFD,0xF4]),0x100000);
         const compiled_before=(e.ir_t0_entries()+e.ir_cache_stat(2))>>>0;
         e.performance_recording_enable(recording);active_counts=[0,0];vm.run();const until=performance.now()+10000;
         while(!cpu.in_hlt[0]){assert(performance.now()<until,"IR callback loop timed out");await sleep(5);} await vm.stop();
         e.performance_recording_enable(0);
         assert.equal(active_counts[0]+active_counts[1],200000);
-        assert.equal(active_counts[0],0,"no compiled IR path leaves the JIT-frame marker set");
+        assert.equal(active_counts[0],0,"I/O callbacks from compiled IR see admissible entry keys");
         assert(((e.ir_t0_entries()+e.ir_cache_stat(2))>>>0)!==compiled_before,"the OUT loop ran through compiled IR");
         cpu.in_hlt[0]=0;assert.equal(e.ir_entry_matches(cpu.instruction_pointer[0],cpu.segment_offsets[1],cpu.is_32[0]),1,"entry key is admissible after the loop");
     }

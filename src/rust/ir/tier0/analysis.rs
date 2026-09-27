@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 pub const PAGE: usize = 4096;
 /// Bounded work per page, and a function size V8's optimizing tier handles
-/// comfortably (the legacy JIT caps a module at about 250 extra blocks).
+/// comfortably (the removed legacy JIT capped a module at about 250 extra blocks).
 const MAX_BLOCKS: usize = 512;
 const MAX_INSTRUCTIONS: usize = 2048;
 

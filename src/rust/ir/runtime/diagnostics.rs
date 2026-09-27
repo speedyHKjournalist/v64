@@ -1,7 +1,7 @@
 //! Opt-in IR diagnostics. Random whole-batch sampling preserves cold chaining.
 //! All stage times are exclusive; publication latency is a separate wall measure.
 #![allow(static_mut_refs)]
-#[cfg(any(target_arch = "wasm32", feature = "ir-experimental"))]
+#[cfg(target_arch = "wasm32")]
 use crate::cpu::cpu;
 use crate::cpu::global_pointers as gp;
 #[derive(Clone, Copy)]
@@ -17,12 +17,11 @@ pub enum Stage {
     MemorySlow,
     Helper,
     Interpreter,
-    Legacy,
     Compile,
     ByteValidation,
     SourceCapture,
 }
-pub const STAGES: usize = 14;
+pub const STAGES: usize = 13;
 #[derive(Clone, Copy)]
 #[repr(u32)]
 pub enum Exit {
@@ -84,8 +83,8 @@ static mut REASONS: [[u64; 2]; EXITS] = [[0; 2]; EXITS];
 static mut CHAIN: [u64; 6] = [0; 6];
 static mut ADMISSION: [u64; ADMISSIONS] = [0; ADMISSIONS];
 // batches, sampled batches, total batch ms, sampled batch ms, interpreter steps,
-// legacy steps, IR activations, IR steps, instrumentation errors, sample activations.
-static mut TOTALS: [f64; 10] = [0.0; 10];
+// IR activations, IR steps, instrumentation errors, sample activations.
+static mut TOTALS: [f64; 9] = [0.0; 9];
 // Overall synchronous compile and phase wall times: capture, lift, passes, lower,
 // machine optimization, emit. Not additive with sampled CPU attribution.
 const COMPILE_PHASES: usize = 20;
@@ -146,7 +145,6 @@ pub fn helper_category(name: &str) -> u32 {
         _ => 0,
     }
 }
-#[cfg(feature = "ir-experimental")]
 pub fn interpreter(pc: u32, cr3: u32, physical: u32, steps: u32, duration: Option<f64>) {
     let Some(ms) = duration
     else {
@@ -202,13 +200,11 @@ pub fn missing(reason: usize) {
 #[no_mangle]
 pub fn ir_diagnostic_address() -> u32 { core::ptr::addr_of!(CELLS) as u32 }
 /// A new session clears compiled artifacts so off mode emits no diagnostic code.
-#[cfg(feature = "ir-experimental")]
 #[no_mangle]
 pub unsafe fn ir_diagnostic_config(period: u32) -> bool {
     if period > 65536
         || (period != 0 && !period.is_power_of_two())
         || IN_BATCH
-        || cpu::in_jit
         || super::cache::busy()
         || !crate::jit::ir_cache_quiescent()
         || SESSION == u32::MAX
@@ -248,7 +244,7 @@ pub unsafe fn ir_diagnostic_config(period: u32) -> bool {
     REASONS = [[0; 2]; EXITS];
     ADMISSION = [0; ADMISSIONS];
     CHAIN = [0; 6];
-    TOTALS = [0.0; 10];
+    TOTALS = [0.0; 9];
     COMPILER = [[0.0; 5]; COMPILE_PHASES];
     COMPILER_BUCKETS = [[[0.0; 5]; COMPILE_PHASES]; 36];
     INTERPRETER_HOT = [[0.0; 6]; 256];
@@ -341,10 +337,10 @@ pub fn admission(reason: Admission) {
     }
 }
 #[inline]
-pub fn steps(legacy: bool, count: u32) {
+pub fn interpreter_steps(count: u32) {
     unsafe {
         if enabled() {
-            TOTALS[if legacy { 5 } else { 4 }] += count as f64;
+            TOTALS[4] += count as f64;
         }
     }
 }
@@ -358,7 +354,7 @@ pub fn chain(reason: usize) {
 pub fn batch_start() -> Option<f64> {
     unsafe {
         if IN_BATCH {
-            TOTALS[8] += 1.0;
+            TOTALS[7] += 1.0;
             return None;
         }
     }
@@ -393,7 +389,7 @@ pub fn batch_end(start: Option<f64>) {
                 TIMES[CURRENT] += (t - CLOCK).max(0.0);
                 TOTALS[3] += (t - start).max(0.0);
                 if DEPTH != 0 {
-                    TOTALS[8] += 1.0;
+                    TOTALS[7] += 1.0;
                     DEPTH = 0;
                 }
             }
@@ -408,7 +404,7 @@ fn enter(stage: usize) -> Option<f64> {
             return None;
         }
         if stage >= STAGES || DEPTH == STACK.len() {
-            TOTALS[8] += 1.0;
+            TOTALS[7] += 1.0;
             return None;
         }
         let t = now();
@@ -427,7 +423,7 @@ fn leave() -> f64 {
         TIMES[CURRENT] += (t - CLOCK).max(0.0);
         CLOCK = t;
         if DEPTH == 0 {
-            TOTALS[8] += 1.0;
+            TOTALS[7] += 1.0;
         }
         else {
             DEPTH -= 1;
@@ -539,10 +535,10 @@ pub unsafe fn activation_end(
     }
     REASONS[reason][0] += 1;
     REASONS[reason][1] += count as u64;
-    TOTALS[6] += 1.0;
-    TOTALS[7] += count as f64;
+    TOTALS[5] += 1.0;
+    TOTALS[6] += count as f64;
     if let Some(ms) = duration {
-        TOTALS[9] += 1.0;
+        TOTALS[8] += 1.0;
         let slot = ((pc >> 1) ^ (pc >> 12) ^ (cr3 >> 12) ^ (reason as u32 * 31)) as usize & 511;
         let row = &mut HOT[slot];
         if row[3] != 0.0

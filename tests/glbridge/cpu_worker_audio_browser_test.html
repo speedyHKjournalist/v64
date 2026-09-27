@@ -14,7 +14,7 @@ try {
     await Promise.race([new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);}),sleep(10000).then(()=>{throw new Error("Audio initialization blocked on autoplay");})]);
     if(irBackend) {
         const info=await vm.get_jit_info();
-        if(info.backend!=="ir"||!info.ir_available||!info.ir.enabled||info.legacy_generation_enabled||info.legacy_compile_requests!==0)
+        if(info.backend!=="ir"||!info.ir_available||!info.ir.enabled)
             throw new Error("IR backend policy did not reach AudioWorklet Worker");
     }
     if(!vm.speaker_adapter.dac.node_processor) throw new Error("AudioWorklet missing");

@@ -23,12 +23,9 @@ const FPU_EX_P: u16 = 1 << 5; // precision
 const FPU_EX_SF: u16 = 1 << 6;
 
 static mut X87_JIT_CACHE: bool = true;
-// Scratch is live only inside one synchronous, register-only JIT region.
-// No guest memory access, callbacks, interrupts or exits occur in that region.
-static mut X87_JIT_VALUES: [u64; 8] = [0; 8];
 // Physical stack slots survive regions, branches and JIT module returns.
 // VALID identifies exact f64 mirrors; DIRTY identifies authoritative f64 values
-// that must be materialized before any legacy F80/MMX/state observer.
+// that must be materialized before any F80/MMX/state observer.
 const X87_VALUES: *mut [u64; 8] = x87_shadow_values;
 const X87_VALID: *mut u32 = x87_shadow_valid;
 const X87_DIRTY: *mut u32 = x87_shadow_dirty;
@@ -113,7 +110,7 @@ pub unsafe fn fpu_mirror_exact_slots() {
 pub unsafe fn get_x87_jit_cache() -> bool { X87_JIT_CACHE }
 
 // A host-side f64 helper shares exactly the same physical cache as emitted
-// Wasm. Legacy observers materialize only the slots they actually read.
+// Wasm. F80 observers materialize only the slots they actually read.
 unsafe fn cached_value(r: u32) -> Option<f64> {
     if !X87_JIT_CACHE || crate::softfloat::performance_recording_x87_state(2) == 0 {
         return None;
@@ -197,99 +194,6 @@ pub unsafe fn fpu_store_m64_bits() -> u64 {
     f80_to_f64(fpu_get_st0())
 }
 
-#[no_mangle]
-pub unsafe fn fpu_jit_cache_begin(full: u32, empty: u32) -> u32 {
-    let top = *fpu_stack_ptr as u32;
-    let tags = *fpu_stack_empty as u32;
-    let relative_empty = ((tags >> top) | (tags << (8 - top))) & 255;
-    let mut valid = X87_JIT_CACHE
-        && crate::softfloat::performance_recording_x87_state(2) != 0
-        && relative_empty & full == 0
-        && relative_empty & empty == empty;
-    if valid {
-        for r in 0..8 {
-            if full & (1 << r) == 0 {
-                continue;
-            }
-            if *X87_VALID & (1 << ((top + r) & 7)) != 0 {
-                continue;
-            }
-            let value = *fpu_st.add(((top + r) & 7) as usize);
-            let exponent = value.sign_exponent & 0x7FFF;
-            // Exact normal binary64 inputs and signed zero require no rounding
-            // or flag updates. Wide, special and subnormal inputs use helpers.
-            if !((exponent == 0 && value.mantissa == 0)
-                || ((0x3C01..=0x43FE).contains(&exponent)
-                    && value.mantissa >> 63 == 1
-                    && value.mantissa & 0x7FF == 0))
-            {
-                valid = false;
-                break;
-            }
-        }
-    }
-    if !valid {
-        crate::x87_profiler::cache_add(1, 1);
-        return 0;
-    }
-    for r in 0..8 {
-        X87_JIT_VALUES[r] = if full & (1 << r) != 0 {
-            let slot = (top as usize + r) & 7;
-            if *X87_VALID & (1 << slot) != 0 {
-                crate::x87_profiler::cache_add(8, 1);
-            }
-            else {
-                (*X87_VALUES)[slot] = (*fpu_st.add(slot)).to_f64();
-                *X87_VALID |= 1 << slot;
-                crate::x87_profiler::cache_add(3, 1);
-            }
-            (*X87_VALUES)[slot]
-        }
-        else {
-            0
-        };
-    }
-    crate::x87_profiler::cache_add(0, 1);
-    std::ptr::addr_of_mut!(X87_JIT_VALUES) as u32
-}
-
-#[no_mangle]
-pub unsafe fn fpu_jit_cache_commit(dirty: u32, metadata: u32, counts: u32) {
-    let comparisons = (dirty >> 8) & 63;
-    let dirty = dirty & 255;
-    let top = *fpu_stack_ptr as u32;
-    // FADD/FDIV helpers clear sticky SoftFloat flags. Guarded inputs and all
-    // f64 intermediates convert exactly, so these regions add no such flags.
-    if comparisons == 0 && counts & 0xFF0000FF != 0 {
-        F80::clear_exception_flags();
-    }
-    for r in 0..8 {
-        if dirty & (1 << r) != 0 {
-            let slot = ((top + r) & 7) as usize;
-            (*X87_VALUES)[slot] = X87_JIT_VALUES[r as usize];
-            *X87_VALID |= 1 << slot;
-            *X87_DIRTY |= 1 << slot;
-        }
-    }
-    let empty = (metadata >> 4) & 255;
-    let full = (metadata >> 12) & 255;
-    let rotate = |mask: u32| ((mask << top) | (mask >> (8 - top))) as u8;
-    *fpu_stack_empty = (*fpu_stack_empty | rotate(empty)) & !rotate(full);
-    *fpu_stack_ptr = ((top + (metadata & 7)) & 7) as u8;
-    if metadata & 8 != 0 {
-        *fpu_status_word &= !FPU_C1;
-    }
-    crate::softfloat::record_x87_jit_arithmetic(counts);
-    crate::x87_profiler::cache_add(6, comparisons as u64);
-    crate::x87_profiler::cache_add(7, (comparisons != 0) as u64);
-    crate::x87_profiler::cache_add(
-        2,
-        (0..4).map(|op| ((counts >> (op * 8)) & 255) as u64).sum(),
-    );
-    crate::x87_profiler::cache_add(9, dirty.count_ones() as u64);
-    crate::x87_profiler::cache_add(5, ((metadata >> 20) & 255) as u64);
-}
-
 pub fn fpu_write_st(index: i32, value: F80) {
     dbg_assert!(index >= 0 && index < 8);
     unsafe {
@@ -331,9 +235,6 @@ pub unsafe fn fpu_sti_empty(mut i: i32) -> bool {
     return 0 != *fpu_stack_empty >> i & 1;
 }
 
-#[no_mangle]
-pub unsafe fn fpu_get_sti_jit(dst: *mut F80, i: i32) { *dst = fpu_get_sti(i); }
-
 pub unsafe fn fpu_get_sti(mut i: i32) -> F80 {
     dbg_assert!(i >= 0 && i < 8);
     i = i + *fpu_stack_ptr as i32 & 7;
@@ -356,26 +257,15 @@ pub unsafe fn fpu_get_sti_f64(mut i: i32) -> f64 {
     f64::from_bits((*fpu_st.offset(i as isize)).to_f64())
 }
 
-#[no_mangle]
-pub unsafe fn f32_to_f80_jit(dst: *mut F80, v: i32) { *dst = f32_to_f80(v) }
 pub unsafe fn f32_to_f80(v: i32) -> F80 {
     F80::clear_exception_flags();
     let x = F80::of_f32(v);
     *fpu_status_word |= F80::get_exception_flags() as u16;
     x
 }
-#[no_mangle]
-pub unsafe fn f64_to_f80_jit(dst: *mut F80, v: u64) { *dst = f64_to_f80(v) }
 pub unsafe fn f64_to_f80(v: u64) -> F80 {
     F80::clear_exception_flags();
     let x = F80::of_f64(v);
-    *fpu_status_word |= F80::get_exception_flags() as u16;
-    x
-}
-#[no_mangle]
-pub unsafe fn f80_to_f32(v: F80) -> i32 {
-    F80::clear_exception_flags();
-    let x = v.to_f32();
     *fpu_status_word |= F80::get_exception_flags() as u16;
     x
 }
@@ -387,11 +277,7 @@ pub unsafe fn f80_to_f64(v: F80) -> u64 {
     x
 }
 
-#[no_mangle]
-pub unsafe fn i32_to_f80_jit(dst: *mut F80, v: i32) { *dst = i32_to_f80(v) }
 pub unsafe fn i32_to_f80(v: i32) -> F80 { F80::of_i32(v) }
-#[no_mangle]
-pub unsafe fn i64_to_f80_jit(dst: *mut F80, v: i64) { *dst = i64_to_f80(v) }
 pub unsafe fn i64_to_f80(v: i64) -> F80 { F80::of_i64(v) }
 
 pub unsafe fn fpu_load_i16(addr: i32) -> OrPageFault<F80> {
@@ -759,8 +645,6 @@ pub unsafe fn fpu_fldm64(addr: i32) {
     fpu_push_m64_bits(return_on_pagefault!(safe_read64s(addr)));
 }
 pub unsafe fn fpu_fldm80(addr: i32) { fpu_push(return_on_pagefault!(fpu_load_m80(addr))); }
-#[no_mangle]
-pub unsafe fn fpu_fldm80_without_fault(addr: i32) { fpu_push(fpu_load_m80(addr).unwrap()); }
 
 #[no_mangle]
 pub unsafe fn fpu_fmul(target_index: i32, val: F80) {

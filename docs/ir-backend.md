@@ -1,15 +1,15 @@
 # IR backend
 
-IR is the only JIT backend. Every V86 instance compiles with automatic IR
-compilation plus the page-granular Tier-0; the legacy code generator is never
-enabled (its Rust code is still linked into the core but unreachable from JS).
+IR is the only JIT. Every V86 instance compiles with automatic IR compilation
+plus the page-granular Tier-0; the legacy code generator (analysis, codegen and
+the generated jit/analyzer tables) has been removed from the core.
 Unsupported instructions continue through the existing interpreter.
 `jit_backend` accepts only `"ir"` (or omission); `"legacy"` is rejected with
 `emulator-error`.
 
-The `ir-experimental` cargo feature is on by default, so `build/v86.wasm`,
-`build/v86-debug.wasm` and `build/v86-ir-runtime.wasm` all contain IR (the
-release and IR runtime cores are identical). `make run` builds
+Every core build contains IR (there is no feature flag);
+`build/v86-ir-runtime.wasm` is a copy of `build/v86.wasm` kept for the IR tests'
+paths. `make run` builds
 `build/v86.wasm`; the stock `index.html` loads it (the debug page loads
 `build/v86-debug.wasm`) with Tier-0, `x87_fast_math` and `x87_jit_cache` on and
 the CPU Worker checkbox checked. None of these need URL parameters any more;
@@ -71,11 +71,9 @@ The existing low-level IR test/explicit compilation interfaces are separate;
 changing them can override the constructor's automatic policy.
 
 `get_jit_info()` returns a copy immediately for a main-thread CPU and a Promise
-for a CPU Worker. It reports the selected backend, actual legacy generation
-switch, IR availability/enabled state, effective budgets, legacy publication
-requests, automatic compilation/promotion counters and IR cache entries/hits.
-Legacy requests count calls into the JS publication bridge, including failures;
-they are not a timing metric. IR counters wrap at 2^32 and continue across cache
+for a CPU Worker. It reports the backend (`"ir"`), IR availability/enabled
+state, effective budgets, automatic compilation/promotion counters and IR cache
+entries/hits. IR counters wrap at 2^32 and continue across cache
 clear/reset/restore. No guest RAM, mutable CPU state, or Wasm table is exposed by
 the Worker RPC. Performance recordings include the actual selected backend as
 `metadata.jit_backend`, alongside the existing core SHA-256 when available.

@@ -12,7 +12,7 @@ use super::{
     region,
 };
 use crate::{
-    cpu::{cpu, global_pointers as gp},
+    cpu::global_pointers as gp,
     ir::backend::wasm::StateLayout,
     jit,
 };
@@ -452,7 +452,7 @@ pub unsafe fn ir_auto_set_tier0(enabled: u32) -> bool {
     s.pages.set_tier0(TIER0);
     true
 }
-unsafe fn cold() -> bool { !cpu::in_jit && !cache::busy() && jit::ir_cache_quiescent() }
+unsafe fn cold() -> bool { !cache::busy() && jit::ir_cache_quiescent() }
 /// Grow the Wasm heap once for the compiler's working set: every later
 /// memory.grow of the (multi-GiB) guest memory makes the host re-account it as
 /// external memory and collect, so many small grows cost far more than one.
@@ -765,7 +765,6 @@ pub(super) fn diagnose_missing(entry: CpuEntryKey) {
     };
     super::diagnostics::missing(reason);
 }
-pub unsafe fn note_legacy_link() { note_cached(live::entry(), true, true); }
 /// Tier-aware reachable-CFG source selection. Direct targets outside the
 /// bounded immutable window remain explicit exits in the shared frontend.
 unsafe fn source(entry: CpuEntryKey, window: u32, tier: u32) -> Option<ImmutableCodeSnapshot> {

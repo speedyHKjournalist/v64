@@ -74,7 +74,6 @@ pub unsafe fn entry() -> CpuEntryKey {
     }
 }
 /// Shares the non-wrapping instance identity allocator with explicit compilation.
-#[cfg(feature = "ir-experimental")]
 pub(super) fn publication_key() -> Option<PublicationKey> {
     let mut state = LIVE.try_lock().unwrap();
     if state.exhausted || state.serial == u64::MAX {
@@ -88,7 +87,6 @@ pub(super) fn publication_key() -> Option<PublicationKey> {
         slot_generation: 0,
     })
 }
-#[cfg(feature = "ir-experimental")]
 #[inline(always)]
 pub(super) fn generation_current(key: PublicationKey) -> bool {
     let state = LIVE.try_lock().unwrap();
@@ -106,7 +104,6 @@ pub unsafe fn ir_compile_live(
     budget: u32,
     rep_budget: u32,
 ) -> u64 {
-    #[cfg(feature = "ir-experimental")]
     if super::cache::busy() {
         let mut state = LIVE.try_lock().unwrap();
         state.job = None;
@@ -257,7 +254,7 @@ pub fn ir_live_mapping(id: u64, index: u32, physical: u32) -> u32 {
     }
 }
 /// Uses job-local write versions AND exact code/mapping re-observation. The latter
-/// covers writes that did not pass through legacy code-page notifications.
+/// covers writes that did not pass through the code-page notifications (jit_dirty_page).
 #[no_mangle]
 pub unsafe fn ir_live_validate(id: u64) -> bool {
     let state = LIVE.try_lock().unwrap();
@@ -300,7 +297,6 @@ pub fn ir_live_release(id: u64) -> bool {
     true
 }
 
-#[cfg(feature = "ir-experimental")]
 pub(super) unsafe fn take_for_cache(id: u64) -> Option<Job> {
     if !ir_live_validate(id) {
         return None;

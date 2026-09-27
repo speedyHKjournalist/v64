@@ -1,8 +1,8 @@
 # Transactional asynchronous JIT publication foundation
 
-> Historical: this describes the legacy JIT's publication bridge. IR is now the
-> only backend, so legacy modules are never generated, and `jit-publication-tests`
-> and `jit-capacity-tests` were removed. IR publication, failure handling and
+> Historical: this describes the legacy JIT's publication bridge, which has been
+> removed from the core together with the legacy code generator (IR is the only
+> compiler), as were `jit-publication-tests` and `jit-capacity-tests`. IR publication, failure handling and
 > table capacity are covered by `make ir-cache-tests`
 > (`tests/ir/differential/cache.mjs`) and `make ir-auto-tests`.
 

@@ -29,18 +29,12 @@ pub mod x87;
 
 pub mod tier0;
 
-#[cfg(feature = "ir-experimental")]
 pub mod cache;
-#[cfg(any(feature = "ir-experimental", test))]
 mod hot_index;
-#[cfg(any(feature = "ir-experimental", test))]
 mod peers;
-#[cfg(feature = "ir-experimental")]
 mod pages;
-#[cfg(any(feature = "ir-experimental", test))]
 mod promotion;
 pub mod live;
-#[cfg(feature = "ir-experimental")]
 pub mod schedule;
 pub mod snapshot;
 

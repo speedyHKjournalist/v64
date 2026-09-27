@@ -21,7 +21,7 @@ use crate::{
 use std::{collections::BTreeMap, sync::Mutex};
 type EntryIndexKey = (u32, u32, bool);
 // A missing entry is not an execution certificate: it only says to use the
-// ordinary interpreter/legacy path. Keep a bounded set of exact keys outside
+// ordinary interpreter path. Keep a bounded set of exact keys outside
 // admission so multi-block interpreted loops do not repeatedly lock, collect
 // and probe the same absent headers. Collisions only replace an absence hint.
 // This CPU owns non-shared Wasm memory; no reference to
@@ -35,7 +35,7 @@ static mut MISSING_HINT_HITS: u32 = 0;
 // Single-CPU, quiescent-only A/B policy. Poll exits do not grant chaining.
 static mut POLL_REUSE_ENABLED: bool = true;
 static mut MERGED_VALIDATION_ENABLED: bool = true;
-// Code-validity contract. Notified (the default) is the legacy JIT contract:
+// Code-validity contract. Notified (the default) is the page-notification contract:
 // every guest store into a registered code page takes the slow path and calls
 // jit_dirty_page, and every host RAM writer (write_blob, DMA, zero_memory, the
 // graphics reply ring) calls jit_dirty_cache. dirty_page retires each dependent
@@ -567,7 +567,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     promotion_stats: [0; 4],
     // At the default heat threshold an XP boot keeps ~1000 regions hot; 256
     // resident owners evict and recompile them. 768 leaves 131 of the 899
-    // shared table slots unused by the (disabled) legacy generator.
+    // table slots unused.
     capacity: 768,
     evictions: 0,
     published: BTreeMap::new(),
@@ -873,7 +873,6 @@ static mut COLLECTION_PENDING: bool = false;
 /// among themselves (ir_t0_chain). False: take the complete path.
 unsafe fn t0_execute() -> bool {
     if strict_validation()
-        || cpu::in_jit
         || COLLECTION_PENDING
         || *gp::prefixes != 0
         || *gp::in_hlt
@@ -1153,7 +1152,7 @@ pub fn dirty_page(page: u32) {
         unsafe { COLLECTION_PENDING = true };
     }
 }
-unsafe fn cold() -> bool { !cpu::in_jit && !busy() && jit::ir_cache_quiescent() }
+unsafe fn cold() -> bool { !busy() && jit::ir_cache_quiescent() }
 /// Diagnostic A/B switch; disabling restores full pre/post-fetch validation.
 #[no_mangle]
 pub unsafe fn ir_cache_set_fast_validation(enabled: u32) -> bool {
@@ -2203,7 +2202,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
     // dependency query with our own short-lived cache inspection and makes the
     // diagnostic/link API spuriously miss. All mutation/publication still uses
     // the normal quiescent protocols.
-    if cpu::in_jit || busy() {
+    if busy() {
         return None;
     }
     let entry = live::entry();
@@ -2269,7 +2268,7 @@ pub unsafe fn ir_cache_link_target() -> u64 {
     ((id as u32 as u64) << 32) | slot as u64
 }
 
-/// Called by the ordinary CPU dispatcher, before legacy cache lookup.
+/// Called by the CPU loop before it interprets.
 /// No request means no IR entry; compilation policy/tier promotion remain separate.
 pub unsafe fn execute() -> bool {
     if diag::enabled() {
@@ -2278,7 +2277,7 @@ pub unsafe fn execute() -> bool {
     if super::schedule::tier0() && t0_execute() {
         return true;
     }
-    if !strict_validation() && !cpu::in_jit {
+    if !strict_validation() {
         match fast_probe() {
             Probe::Absent => {
                 super::entry::take_link_request();
@@ -2369,7 +2368,7 @@ unsafe fn execute_mode<const PROFILE: bool>() -> bool {
 /// recording imports are observers and keep the complete path.
 #[inline(always)]
 unsafe fn fast_execute(mut witness: FastEntry) -> bool {
-    if strict_validation() || cpu::in_jit || profiler::performance_recording_enabled() {
+    if strict_validation() || profiler::performance_recording_enabled() {
         return false;
     }
     if !jit::ir_cache_quiescent() {
@@ -2877,7 +2876,6 @@ unsafe fn warm_handoff(cache: &mut Cache, previous: Owner) -> Option<Activation>
         || !cache.fast_validation
         || cache.needs_collection
         || active().is_some()
-        || cpu::in_jit
     {
         return None;
     }

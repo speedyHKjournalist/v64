@@ -2,7 +2,7 @@
 use crate::cpu::{cpu, global_pointers as gp, misc_instr};
 use crate::ir::helper::Outcome;
 unsafe fn address(offset: u32, segment: u32, sse: bool) -> Result<i32, ()> {
-    assert!(!cpu::in_jit && segment < 6);
+    assert!(segment < 6);
     if !(if sse { cpu::task_switch_test_mmx() } else { cpu::task_switch_test() }) {
         return Err(());
     }

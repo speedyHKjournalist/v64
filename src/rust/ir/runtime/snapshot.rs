@@ -386,6 +386,32 @@ pub unsafe fn capture_page_list(pages: &[u32]) -> Result<ImmutableCodeSnapshot, 
     Ok(snapshot)
 }
 
+/// Test hook (tests/ir/decode/snapshot.mjs): bytes captured at `linear`, or
+/// 0 where capture declines (MMIO, unallocated RAM).
+#[cfg(feature = "ir-test-hooks")]
+#[no_mangle]
+pub unsafe fn ir_test_snapshot_length(linear: u32, length: u32) -> u32 {
+    capture(linear, length as usize).map_or(0, |snapshot| snapshot.bytes.len() as u32)
+}
+/// Test hook: decode the instruction at `linear` from its page's capture_page
+/// snapshot. 1 decoded, 2 incomplete (it continues on the next page), 3 other
+/// stop, 0 no capture.
+#[cfg(feature = "ir-test-hooks")]
+#[no_mangle]
+pub unsafe fn ir_test_snapshot_decode(linear: u32) -> u32 {
+    use crate::ir::frontend::decode::{decode, DecodeStop, GuestEip};
+    let Ok(snapshot) = capture_page(linear)
+    else {
+        return 0;
+    };
+    let bytes = &snapshot.bytes[(linear & 4095) as usize..];
+    match decode(bytes, GuestEip(linear), LinearAddress(linear), true) {
+        Ok(_) => 1,
+        Err(DecodeStop::Incomplete { .. }) => 2,
+        Err(_) => 3,
+    }
+}
+
 #[cfg(test)]
 #[path = "../../../../tests/ir/semantics/overlap_validation.rs"]
 mod overlap_tests;

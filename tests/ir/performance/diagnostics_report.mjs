@@ -29,7 +29,7 @@ for(const file of process.argv.slice(2)) {
         cpu_batch_ms:t.cpu_batch_ms,sampled_batches:t.sampled_batches,batches:t.batches,
         sampling_time_estimate_ratio:estimate_ratio,
         empty_scope_sampled_us:d.empty_scope_sampled_ms*1000,empty_scope_wall_us:d.empty_scope_wall_ms*1000,
-        ir_step_share:t.ir_steps/(t.ir_steps+t.interpreter_steps+t.legacy_steps)||0,
+        ir_step_share:t.ir_steps/(t.ir_steps+t.interpreter_steps)||0,
         instructions_per_activation:t.ir_steps/t.ir_activations||0,
         stages,exits,admission:d.admission,chain_stops:d.chain_stops,compiler:d.compiler,compiler_breakdown:d.compiler_breakdown,publication:d.publication,
         helper_exits:d.helper_exits,

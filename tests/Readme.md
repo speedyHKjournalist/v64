@@ -12,9 +12,9 @@ following list is roughtly sorted from most interesting/useful to least.
 - [api](api/): Tests for several API functions of v86.
 - [devices](devices/): Device tests.
 - [rust](rust/): Rust unit test helpers.
-- [expect](expect/): Expect tests for the jit output. Contains a set of
-  asm+wasm files, where the jit is expected to produce the wasm file given the
-  asm file.
+- [expect](expect/): Expect tests for the IR compiler's output. Contains a set
+  of asm+wast files; each program is compiled as one Tier-2 region, which must
+  match the wast file.
 
 The following environmental variables are respected by most tests if applicable:
 
@@ -24,13 +24,13 @@ The following environmental variables are respected by most tests if applicable:
   to the number of cores in your system or less.
 - `TEST_NAME="…"`: Run only the specified test (only expect, full, nasm)
 
-Experimental IR compiler tests are available through `make ir-tests`. They use a
-standalone compiler entry and do not switch the production CPU backend. See
+IR compiler tests are available through `make ir-tests`. See
 [IR validation](../docs/ir-validation.md) and [implementation status](../docs/ir-progress.md).
 
-`make ir-analyzer-tests` additionally builds a test-only Wasm CPU and compares
-shared production analysis with the original generated analyzer over the complete
-catalogue and prefix/addressing corpus. It does not execute test guest opcodes.
+`make ir-decode-snapshot-tests` checks the shared decoder over the complete
+catalogue and prefix/addressing corpus, and the boundaries of IR code capture
+(MMIO, unallocated RAM, an instruction continuing past a captured page) in a
+test-only Wasm CPU.
 
 `make ir-memory-tests` generates CPU-ABI IR fixtures and compares native RAM,
 MMU faults, MMIO callbacks and self-modifying aliases against exact interpreter
@@ -249,14 +249,6 @@ comparisons, 19,968 optimized/unoptimized budget exits and sixteen constant
 branches that skip absent-page reads. CPU reads, siblings and independent entries
 have negative reuse tests. See [the dataflow contract](../docs/ir-dataflow.md).
 
-`make jit-publication-tests` exercises the actual asynchronous Rust/JS installation
-bridge in debug and release with 159 controlled instantiations each: stale tickets,
-same-slot reuse, code writes, cache/restore cancellation, browser/table/export
-errors, bounded retry suppression and u64 ticket boundaries. The test-only serial
-setter is restricted to `jit-invariants`. Run `make jit-capacity-tests` for the
-899-slot pressure/alias/SMC matrix. Rebuild JS and CPU Wasm together for this bridge
-ABI. See [the publication contract](../docs/ir-publication.md).
-
 `make ir-entry-tests` validates compile-request CPU entry specialization in debug
 and release: 176 modules, 1,760 no-effect rejections per CPU build, 176 admitted
 interpreter comparisons and 32 precise page faults. It covers logical/linear/width
@@ -271,33 +263,30 @@ artifacts there. This target does not select IR in the normal CPU scheduler.
 See [the live compiler contract](../docs/ir-live-compile.md) for the experimental ABI.
 
 `make ir-cache-tests` publishes live IR results into the shared table pool and runs
-them through normal CPU dispatch. Debug/release variants enable JIT invariants;
-an experimental-only release also runs without test hooks. Tests include precise
+them through normal CPU dispatch, in debug and release test-hook builds and in
+the normal release core. Tests include precise
 fetch/data faults, source/PTE aliases, active SMC and I/O reset, pending/stale/failed
-publication, deferred collection and zero-budget REP recovery. Each invariants
-build also publishes/evicts 900 legacy modules beside 32 retained IR entries.
-See [the cache contract](../docs/ir-cache.md); the default compilation policy remains legacy.
+publication, deferred collection and zero-budget REP recovery.
+See [the cache contract](../docs/ir-cache.md).
 
 `make ir-auto-tests` enables the experimental automatic policy and checks actual
 Tier 1 publication, optimized promotion, 16/32-bit execution and exact loop counts,
 failed-input suppression and changed-code retry, failed upgrades retaining Tier 1,
 pending/reset/restore lifetimes, premature completion rejection and bounded cache
-eviction. The invariants builds also verify recording-off legacy linked heat and
-cold publication. See [automatic IR scheduling](../docs/ir-auto.md); the policy is
-disabled by default and is not full-ISA or OS/performance acceptance.
+eviction. See [automatic IR scheduling](../docs/ir-auto.md).
 
 `make ir-backend-integration-tests` selects IR through the public V86 constructor,
 checks all region limits and copied statistics, and exercises Tier 1/2 execution,
-SMC, x87 interpreter fallback, reset/restore, both cross-backend snapshot directions
-and initialization errors on debug and pure experimental release cores. IR mode
-must issue zero legacy compilation requests. `make ir-backend-browser-tests` runs
+SMC, x87 interpreter fallback, reset/restore, snapshot restore and initialization
+errors on debug and release cores. `make ir-backend-browser-tests` runs
 the same scenarios in Chromium's main thread and a real dedicated CPU Worker.
 It requires localhost serving and an installed Chromium; the runner uses an isolated
 profile. See [the public backend contract](../docs/ir-backend.md).
 
-`make jit-disabled-tests` checks that disabling generation suppresses promotion of
-an already published legacy Tier 1 module across 128 CPU frames, and that the same
-entry promotes after generation is re-enabled, in debug and release builds.
+`make jit-disabled-tests` checks that disabling IR scheduling suppresses promotion
+of a published Tier 1 region across 128 CPU frames while it keeps executing, and
+that the same entry promotes after scheduling is re-enabled, in debug and release
+builds.
 
 `make ir-mir-owned-tests` checks the HIR-to-owned-MIR construction boundary,
 corrupt machine types/local ownership, emission after HIR destruction, the

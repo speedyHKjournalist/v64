@@ -18,7 +18,7 @@ pub enum Outcome {
 }
 #[derive(Clone, Debug)]
 pub enum HelperAbi {
-    /// Metadata alone does not authorize calling a legacy helper.
+    /// Metadata alone does not authorize calling an interpreter helper.
     Unadapted,
     /// Outcome-only CPU ABI. On Normal, new SSA results reload GPRs, concrete
     /// and lazy FLAGS backing, then XMMs for vector adapters. Audited scalar

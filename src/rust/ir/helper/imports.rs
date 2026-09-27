@@ -45,7 +45,7 @@ imports! {
     "ir_diagnostic_address": [] -> [I32], Pure, "address of CPU-local diagnostic sampling flag and exit reason; no guest state";
     "ir_diagnostic_begin": [I32] -> [], Entry, "sampled exclusive timing scope; no guest state or admission epoch changes";
     "ir_diagnostic_end": [] -> [], Entry, "close sampled timing scope; no guest state or admission epoch changes";
-    "ir_enter": [] -> [], Entry, "writes previous_ip and REP result; requires !in_jit";
+    "ir_enter": [] -> [], Entry, "writes previous_ip and REP result";
     "ir_enter_checked": [I32,I32,I32] -> [I32], Entry, "exact context guard then entry initialization; false preserves all CPU/REP state; no source/mapping authority";
     "ir_enter_page": [I32,I32] -> [I32], Entry, "context guard except the PC (checked inline against every page entry) then entry initialization; false preserves all CPU/REP state";
     "ir_request_link": [] -> [], Entry, "sets cold continuation request; no guest state change or dispatch";
@@ -56,7 +56,7 @@ imports! {
     "ir_sti_no_pending_irq": [] -> [I32], Pure, "read-only conservative PIC/APIC pending check; no CPU state observation, acknowledge or callback";
     "ir_sti_finish": [I32] -> [], InterruptFinish, "IRQ delivery owns CPU state; terminal shadow unwind";
     "ir_sti_finish_link": [I32] -> [], InterruptFinish, "completed shadow unwinds IRQs, revokes admission and requests a cold successor only if control context survives";
-    "ir_entry_matches": [I32,I32,I32] -> [I32], Pure, "reads prefixes, mode, CS, IP, halt and in_jit; no writes";
+    "ir_entry_matches": [I32,I32,I32] -> [I32], Pure, "reads prefixes, mode, CS, IP and halt; no writes";
     "ir_tlb_base": [] -> [I32], Pure, "TLB array address";
     "ir_memory_base": [] -> [I32], Pure, "RAM base address";
     "get_eflags": [] -> [I32], Pure, "reads concrete and lazy flag backing; no writes";

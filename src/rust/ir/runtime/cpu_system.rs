@@ -12,7 +12,6 @@ unsafe fn gp_fault() -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_cli() -> u32 {
-    assert!(!cpu::in_jit);
     // Reuse the CPU's explicit success predicate (including its VME/PVI policy).
     if !instructions::instr_FA_without_fault() {
         return gp_fault();
@@ -21,7 +20,6 @@ pub unsafe fn ir_cli() -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_clts() -> u32 {
-    assert!(!cpu::in_jit);
     if *gp::cpl != 0 {
         return gp_fault();
     }
@@ -30,7 +28,6 @@ pub unsafe fn ir_clts() -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_wbinvd() -> u32 {
-    assert!(!cpu::in_jit);
     if *gp::cpl != 0 {
         return gp_fault();
     }
@@ -39,7 +36,6 @@ pub unsafe fn ir_wbinvd() -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_sysenter() -> u32 {
-    assert!(!cpu::in_jit);
     // The audited body has no guest-fault path after this guard. It owns CS/SS,
     // mode/CPL, flags, ESP/EIP and fetch-context invalidation on success.
     if !*gp::protected_mode || *gp::sysenter_cs & 0xFFFC == 0 {
@@ -50,7 +46,6 @@ pub unsafe fn ir_sysenter() -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_sysexit() -> u32 {
-    assert!(!cpu::in_jit);
     if !*gp::protected_mode || *gp::cpl != 0 || *gp::sysenter_cs & 0xFFFC == 0 {
         return gp_fault();
     }
@@ -60,7 +55,6 @@ pub unsafe fn ir_sysexit() -> u32 {
 
 #[no_mangle]
 pub unsafe fn ir_hlt() -> u32 {
-    assert!(!cpu::in_jit);
     if *gp::cpl != 0 {
         return gp_fault();
     }
@@ -73,7 +67,6 @@ pub unsafe fn ir_hlt() -> u32 {
 /// Only check privilege here. HIR changes IF after Normal, retaining its SSA flags.
 #[no_mangle]
 pub unsafe fn ir_sti_check() -> u32 {
-    assert!(!cpu::in_jit);
     if !*gp::protected_mode
         || if cpu::vm86_mode() { cpu::getiopl() == 3 } else { cpu::getiopl() >= *gp::cpl as i32 }
     {
@@ -87,7 +80,7 @@ pub unsafe fn ir_sti_check() -> u32 {
 /// when that instruction delivers a guest fault. Nested STIs unwind in order.
 #[no_mangle]
 pub unsafe fn ir_sti_finish(depth: u32) {
-    assert!(!cpu::in_jit && depth <= 128);
+    assert!(depth <= 128);
     for _ in 0..depth {
         cpu::handle_irqs();
     }
@@ -115,7 +108,6 @@ pub unsafe fn ir_sti_finish_link(depth: u32) {
 /// The emitter may discard a completed shadow scope only when this is true.
 #[no_mangle]
 pub unsafe fn ir_sti_no_pending_irq() -> bool {
-    assert!(!cpu::in_jit);
     super::continuation::no_pending_irq()
 }
 /// Slow completed-shadow path. Its AfterInstruction snapshot has already
@@ -130,7 +122,7 @@ pub unsafe fn ir_sti_finish_continue(depth: u32) -> u32 {
 /// Missing group selectors have no guards or EA (the interpreter rejects sooner).
 #[no_mangle]
 pub unsafe fn ir_invalid_form(guard: u32, offset: u32, segment: u32) -> u32 {
-    assert!(!cpu::in_jit && guard <= 2 && (segment < 6 || segment == u32::MAX));
+    assert!(guard <= 2 && (segment < 6 || segment == u32::MAX));
     if guard == 1 && !cpu::task_switch_test() || guard == 2 && !cpu::task_switch_test_mmx() {
         return Outcome::ControlTransferred as u32;
     }

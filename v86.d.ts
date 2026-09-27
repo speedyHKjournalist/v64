@@ -1010,9 +1010,7 @@ export class V86 {
 }
 
 export interface V86JitInfo {
-    backend: "legacy" | "ir";
-    legacy_generation_enabled: boolean;
-    legacy_compile_requests: number;
+    backend: "ir";
     ir_available: boolean;
     ir_region_budget: Required<NonNullable<V86Options["ir_region_budget"]>> | null;
     ir_stats: NonNullable<V86Options["ir_stats"]> | null;

@@ -2,7 +2,7 @@
 use crate::cpu::{cpu, global_pointers as gp};
 use crate::ir::helper::Outcome;
 unsafe fn allowed(width: u32, load: bool) -> bool {
-    assert!(!cpu::in_jit && matches!(width, 16 | 32));
+    assert!(matches!(width, 16 | 32));
     if !*gp::protected_mode || cpu::vm86_mode() {
         cpu::trigger_ud();
         false

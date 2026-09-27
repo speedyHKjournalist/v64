@@ -34,7 +34,6 @@ impl Policy {
 /// Instruction caps of automatically selected regions (startup policy).
 pub(super) static mut TIER1_INSTRUCTIONS: usize = 32;
 pub(super) static mut TIER2_INSTRUCTIONS: usize = 96;
-#[cfg(feature = "ir-experimental")]
 #[no_mangle]
 pub unsafe fn ir_auto_set_region_instructions(tier1: u32, tier2: u32) -> bool {
     if !(8..=120).contains(&tier1) || !(8..=120).contains(&tier2) {
@@ -91,7 +90,7 @@ pub fn reachable_length(
         }
         max_end = max_end.max(end);
         match instruction.flow {
-            // Legacy analysis uses Boundary for several ordinary basic-block
+            // The shared decoder uses Boundary for several ordinary basic-block
             // ends (notably memory forms). The IR frontend owns the semantic
             // stop decision, so keep the fallthrough available unless the
             // shared decoder already identifies a baseline #UD form.
@@ -225,7 +224,7 @@ mod tests {
     #[test]
     fn boundary_memory_form_keeps_candidate_fallthrough() {
         // MOV EAX,[ESI]; INC EAX. The shared decoder marks the memory form as a
-        // legacy block boundary, but the IR CFG frontend can decide whether its
+        // block boundary, but the IR CFG frontend can decide whether its
         // precise memory contract permits continuation.
         let bytes = [0x8B, 0x06, 0x40];
         assert_eq!(

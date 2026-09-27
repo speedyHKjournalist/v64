@@ -2552,7 +2552,7 @@ async function start_emulation(profile, query_args)
 
                     panel.textContent = emulator.get_instruction_stats();
 
-                    CLEAR_STATS && emulator.v86.cpu.clear_opstats();
+                    CLEAR_STATS && emulator.v86.cpu.clear_stats();
                 }, CLEAR_STATS ? 5000 : 1000);
         }
 

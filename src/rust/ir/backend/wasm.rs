@@ -2065,7 +2065,7 @@ impl Emitter<'_> {
 pub fn emit(mir: &MirRegion, layout: StateLayout, budget: u32) -> Result<Artifact, CompileError> {
     emit_inner(mir, layout, budget, false, None, &[], false, &[], false)
 }
-/// Cold CPU entry, outside the legacy JIT frame. Uses actual CPU globals and MMU.
+/// Cold CPU entry. Uses actual CPU globals and MMU.
 pub fn emit_cpu(mir: &MirRegion, budget: u32) -> Result<Artifact, CompileError> {
     emit_cpu_inner(mir, budget, None, &[], false, &[], false)
 }

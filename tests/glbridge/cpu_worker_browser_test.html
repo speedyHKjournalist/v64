@@ -38,8 +38,6 @@ try {
         const info = await vm.get_jit_info();
         check(info.backend === "ir" && info.ir_available && info.ir.enabled === 1,
             label + " selects the IR backend");
-        check(!info.legacy_generation_enabled && info.legacy_compile_requests === 0,
-            label + " performs no legacy JIT generation");
     };
     await assertIRBackend("initial Worker");
     const word = async a => new DataView((await vm.read_memory(a,4)).buffer).getUint32(0,true);

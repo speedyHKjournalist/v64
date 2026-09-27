@@ -1620,7 +1620,6 @@ pub unsafe fn instr_D6() {
 }
 pub unsafe fn instr_D7() {
     // xlat
-    dbg_assert!(!in_jit);
     if is_asize_32() {
         write_reg8(
             AL,

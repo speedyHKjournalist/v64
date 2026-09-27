@@ -111,8 +111,6 @@ async function sample_ir(execution_budget, round)
         const boot_ms = await boot(vm);
         const before = await vm.get_jit_info();
         assert.equal(before.backend, "ir");
-        assert.equal(before.legacy_generation_enabled, false);
-        assert.equal(before.legacy_compile_requests, 0);
         assert.equal(before.ir_region_budget.execution_budget, execution_budget);
 
         await vm.write_memory(Uint8Array.of(0x40, 0xEB, 0xFD), loop_pc);
@@ -150,8 +148,6 @@ async function sample_ir(execution_budget, round)
         const after = await vm.get_jit_info();
 
         assert.equal(after.backend, "ir");
-        assert.equal(after.legacy_generation_enabled, false);
-        assert.equal(after.legacy_compile_requests, 0);
         assert.equal(target_after.present, 1, "target Tier 2 record survives warm window");
         assert.equal(target_after.tier, 2, "target record remains Tier 2");
         assert.equal(report.metadata.jit_backend, "ir");

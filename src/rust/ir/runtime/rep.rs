@@ -1,6 +1,6 @@
 //! Cold CPU REP batches. Runtime-only work metadata is consumed before reentry.
 use crate::cpu::{
-    cpu, global_pointers as gp,
+    global_pointers as gp,
     string::{execute_rep, StringOutcome},
 };
 use crate::ir::helper::Outcome;
@@ -10,7 +10,7 @@ pub(super) unsafe fn reset_result() { LAST_RESULT = 0; }
 #[no_mangle]
 pub unsafe fn ir_rep_result() -> u64 { LAST_RESULT }
 unsafe fn batch(kind: u32, bytes: u32, asize32: u32, segment: u32, repne: u32, limit: u32) -> u32 {
-    assert!(!cpu::in_jit && asize32 <= 1 && repne <= 1 && segment < 6 && limit <= 4096);
+    assert!(asize32 <= 1 && repne <= 1 && segment < 6 && limit <= 4096);
     LAST_RESULT = 0;
     let result = execute_rep(kind, bytes, asize32 != 0, segment as i32, repne != 0, limit);
     let outcome = match result.outcome {
