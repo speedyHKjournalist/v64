@@ -928,7 +928,7 @@ unsafe fn t0_execute() -> bool {
             if !super::entry::link_requested() || !t0_linkable() {
                 break;
             }
-            note_link(from, linear);
+            sample_link(from, linear);
             let Some(slot) = page_chain_slot(linear, T0_CS, *gp::is_32)
             else {
                 break;
@@ -978,7 +978,25 @@ static mut PAGE_OUT: [[PageOut; 2]; PAGE_OUT_SETS] = [[PageOut::new(!0); 2]; PAG
 unsafe fn page_out_set(page: u32) -> &'static mut [PageOut; 2] {
     &mut *core::ptr::addr_of_mut!(PAGE_OUT[page.wrapping_mul(0x9E3779B1) as usize >> 21 & PAGE_OUT_SETS - 1])
 }
-const T0_RANGE_LINKS: u32 = 100_000;
+/// Links counted per decision, in sampled links (see sample_link): 100K links.
+const T0_RANGE_LINKS: u32 = 100_000 >> LINK_SAMPLE_SHIFT;
+/// note_link sees a random 1 in 2^LINK_SAMPLE_SHIFT links: its table does not
+/// fit in cache, and updating it on every one of ~10M links/s (3DMark06) cost
+/// about 2% of all time. Random, not every n-th: a loop alternating between
+/// two pages must not be seen in one direction only.
+const LINK_SAMPLE_SHIFT: u32 = 3;
+static mut LINK_RANDOM: u32 = 0x2545F491;
+#[inline(always)]
+unsafe fn sample_link(from: u32, to: u32) {
+    let mut x = LINK_RANDOM;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    LINK_RANDOM = x;
+    if x >> (32 - LINK_SAMPLE_SHIFT) == 0 {
+        note_link(from, to);
+    }
+}
 /// Where the page's function goes on to in at least half its links (of
 /// enough of them to tell): a chain of pages, each jumping to the next,
 /// joins a cluster in one recompilation instead of one per page.
@@ -1992,15 +2010,17 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         return false;
     }
     let entries = cache.records[index].entries.clone();
+    // A page function has up to 256 entries: look them up, not scan them.
+    let keys: std::collections::HashSet<EntryIndexKey> = entries.iter().map(|e| index_key(*e)).collect();
     let mut superseded = false;
     for (i, record) in cache.records.iter_mut().enumerate() {
         if i != index && record.phase == Phase::Published {
             let before = record.entries.len();
-            record.entries.retain(|entry| !entries.contains(entry));
+            record.entries.retain(|entry| !keys.contains(&index_key(*entry)));
             superseded |= record.entries.len() != before;
             record
                 .promotion
-                .retain(|alias| !entries.contains(&alias.entry));
+                .retain(|alias| !keys.contains(&index_key(alias.entry)));
             if record.entries.is_empty() {
                 record.phase = Phase::Retired;
             }

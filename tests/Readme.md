@@ -5,7 +5,7 @@ following list is roughtly sorted from most interesting/useful to least.
   on the host.
 - [qemu](qemu/): Based on tests from qemu. Builds a Linux binary, which tests
   many CPU features, which are then compared to a run on qemu.
-- [kvm-unit-test](kvm-unit-test/): Based on tests from the KVM project, tests
+- [kvm-unit-test](kvm-unit-tests/): Based on tests from the KVM project, tests
   various CPU features.
 - [full](full/): Starts several OSes and checks if they boot correctly.
 - [jit-paging](jit-paging/): Tests jit and paging interaction.
@@ -25,7 +25,7 @@ The following environmental variables are respected by most tests if applicable:
 - `TEST_NAME="…"`: Run only the specified test (only expect, full, nasm)
 
 IR compiler tests are available through `make ir-tests`. See
-[IR validation](../docs/ir-validation.md) and [implementation status](../docs/ir-progress.md).
+[IR design and architecture](../docs/ir-design.md).
 
 `make ir-decode-snapshot-tests` checks the shared decoder over the complete
 catalogue and prefix/addressing corpus, and the boundaries of IR code capture
@@ -34,53 +34,50 @@ test-only Wasm CPU.
 
 `make ir-memory-tests` generates CPU-ABI IR fixtures and compares native RAM,
 MMU faults, MMIO callbacks and self-modifying aliases against exact interpreter
-steps in the dedicated experimental CPU Wasm build. See `docs/ir-memory.md`.
+steps in the dedicated experimental CPU Wasm build.
 
 `make ir-stack-tests` compares PUSH/POP, PUSHA/POPA and LEAVE IR against exact interpreter steps across
 operand/stack widths, SP wrapping, real ring0/ring3 faults and MMIO observers,
 including whole-range preflight, skipped SP slots and mid-instruction remapping.
-The precise scope and fixed-baseline differences are in `docs/ir-stack.md`.
 
 `make ir-control-tests` checks near CALL/RET/JMP, dynamic EIP StateMaps, overlapping
 return/target memory, real transfer/target-fetch faults, and MMIO callback state.
-See `docs/ir-control.md` for the precise scope and remaining control-flow work.
 
 
 `make ir-shift-tests` compares group-2 shifts/rotates and SHLD/SHRD with a bit-serial
 reference model and exact CPU interpreter steps, including all CL values, count-zero
-memory faults/MMIO, and FLAGS provenance across IR exits. See `docs/ir-shifts.md`.
+memory faults/MMIO, and FLAGS provenance across IR exits.
 
 
 `make ir-multiply-tests` validates native MUL/IMUL/DIV/IDIV against BigInt and CPU
 execution, including #DE, memory-fault precedence, TSS privilege transitions,
-i64 phi copies and mixed-width helper ABI. See `docs/ir-multiply.md`.
+i64 phi copies and mixed-width helper ABI.
 
 
 `make ir-bit-tests` validates BT/BTS/BTR/BTC, BSF/BSR, POPCNT and BSWAP, including
 signed bit-string addressing, byte MMIO/RMW, exhaustive 16-bit scans/counts and
-typed I32/I64 count folding. See `docs/ir-bits.md`.
+typed I32/I64 count folding.
 
 `make ir-exchange-tests` validates XCHG/XADD/CMPXCHG aliases, flags, failed-compare
 writes, real faults and MMIO, plus audited LOCK arithmetic/bit families and the
-nonshared synchronous CPU ABI. See `docs/ir-exchange.md`.
+nonshared synchronous CPU ABI.
 
 `make ir-enter-tests` uses a dedicated release CPU oracle for ENTER's full nesting
 sequence, precise partial progress, alias/MMIO paths and pinned post-fault host
-aborts. Expected caught baseline panics appear in its log. See `docs/ir-enter.md`.
+aborts. Expected caught baseline panics appear in its log.
 
 `make ir-misc-tests` validates scalar conversions, SAHF/LAHF, SALC/CLD/STD, BCD
 adjustments, moffs and XLAT against independent references and CPU steps, with
-exhaustive input matrices and real memory/#DE faults. See `docs/ir-misc.md` for
-the explicitly limited DAA/DAS undefined-OF comparison policy.
+exhaustive input matrices and real memory/#DE faults. CPU differential comparisons
+mask only undefined OF for DAA/DAS; the independent oracle checks input-OF preservation.
 
 `make ir-loop-tests` validates LOOP/LOOPcc and JCXZ/JECXZ through real CPU and
 standalone Wasm execution, independent counter/target references, exhaustive CX
-inputs and post-commit target #PF frames. See `docs/ir-loops.md`.
+inputs and post-commit target #PF frames.
 
 `make ir-system-stack-tests` checks FLAGS/segment stacks in protected, real and
 VM86 modes, native/MMIO operand paths, selector and descriptor exceptions, and
 immediate POPF IRQ delivery. It also validates terminal CPU helper outcomes.
-See `docs/ir-system-stack.md` for the explicit counter/state ownership contract.
 
 `make ir-segment-tests` checks segment MOV and LES/LDS/LSS/LFS/LGS, including
 precise operand/descriptor fault ordering, linear pointer tails and VM86.
@@ -143,137 +140,125 @@ cold completion exits, reentry and vector edge-copy cycles.
 lane model. It covers native RAM, saturation/overflow/alias boundaries, EM/TS
 priority, page/segment faults, MMIO destination mutations and remapping, and
 vector SSA chains across cold completion exits and separately compiled reentry.
-See [the packed integer contract](../docs/ir-simd-integer.md).
 
 
 The packed suite now also checks packing/unpacking and variable shifts (33,120
 fixture pairs), including full-u64 counts and exact 8/16-byte fault extents.
 `make ir-simd-immediate-tests` checks 14,720 immediate-shift fixture pairs,
 covering all imm8 values, all XMM destinations at boundary counts, zero-count
-EM/TS guards and pre-immediate exception observer PCs. See
-[the packing/shift contract](../docs/ir-simd-permute.md).
+EM/TS guards and pre-immediate exception observer PCs.
 
 
 `make ir-simd-shuffle-tests` checks PSHUFD/LW/HW and SHUFPS/PD using 29,400 fixture
 pairs, every imm8 with self/distinct/memory sources, all XMM aliases at representative
 controls, exact payloads, complete source-read faults, MMIO destination changes,
-and mixed-shuffle SSA chains across cold completion and reentry. See
-[the shuffle contract](../docs/ir-simd-shuffle.md).
+and mixed-shuffle SSA chains across cold completion and reentry.
 
 The task-register reference test artifact exports `__stack_pointer` only for
 isolating expected terminal host traps. The harness checks normal stack balance
 and restores the pre-call host stack after a caught RuntimeError; it retains all
 guest-state, callback and partial-fault comparisons. This avoids cumulative stack
-exhaustion when compiler-generated frames change. See
-[the task-register test contract](../docs/ir-task-regs.md).
+exhaustion when compiler-generated frames change.
 
 
 `make ir-simd-transfer-tests` checks XMM half transfers, MOVD/MOVQ and duplicate
 lanes using 5,664 fixture pairs. It verifies exact access widths, GPR SSA bridges,
 zero-filled high bits, preserved target halves after MMIO callbacks, high-qword
-store capture, faults and mixed-transfer reentry. See
-[the transfer contract](../docs/ir-simd-transfer.md).
+store capture, faults and mixed-transfer reentry.
 
 `make ir-simd-lane-tests` checks XMM sign masks, word insertion/extraction,
 non-temporal stores and LDDQU with independent scalar models and debug/release
 CPU comparisons. It exhausts byte/dword/qword sign masks and word immediates,
 checks exact two-byte reads, MMIO mutations, faults and native/cold chain reentry.
-See [the lane contract](../docs/ir-simd-lane.md).
 
 `make ir-simd-masked-tests` checks MASKMOVDQU through independent byte-selection
 models and debug/release CPU execution. It exhausts all masks and verifies
 whole-range zero-mask preflight, precise MMIO writes, page-table callback sampling,
 partial faults, DI addressing and dirty-XMM completion/reentry.
-See [the masked-store contract](../docs/ir-simd-masked.md).
 
 `make ir-tests` also checks explicit MIR memory plans: guard widths/permissions,
 CPU adapter signatures and completion policies, ENTER partial accesses, stale
 plans and memory/helper import conflicts. Existing CPU and independent-reference
-memory/SIMD suites execute the planned paths. See [the MIR memory contract](../docs/ir-mir-memory.md).
+memory/SIMD suites execute the planned paths.
 
 `make ir-tests` checks lowered MIR effect plans for address adapters, access/SSE
 guards and RMW observation/commit phases. It rejects stale plans, unsafe changes,
-CPU import shadowing and effect/helper signature conflicts. See
-[the effect-plan contract](../docs/ir-mir-effects.md).
+CPU import shadowing and effect/helper signature conflicts.
 
 `make ir-tests` checks MIR division/CMPXCHG8B plans, including guest quotient
 bounds, host-trap protection, implicit CPU slots, full write guards, ZF/count
 updates and altered-plan rejection. Existing multiply/divide and CMPXCHG8B
-execution suites exercise the migrated paths. See [the arithmetic-plan contract](../docs/ir-mir-arithmetic.md).
+execution suites exercise the migrated paths.
 
 `make ir-tests` checks generic MIR helper call-site plans: CPU/standalone state
 observations, typed multi-result staging, caller fault delivery, terminal CPU/REP
 outcomes, stale helper tables and orphan arena records. Existing helper/I/O/REP
-execution suites exercise these planned calls. See [the call-site contract](../docs/ir-mir-calls.md).
+execution suites exercise these planned calls.
 
 `make ir-tests` checks the lowered MIR dispatcher CFG and typed parallel-copy
 scheduler. A symbolic oracle covers 150,207 source mappings; 648 actual Wasm
 executions cover critical-edge copies, fanout, aliasing and budget recovery.
-Existing i32/i64/v128 loop/edge fixtures use the same schedules. See
-[the lowered-control contract](../docs/ir-mir-control.md).
+Existing i32/i64/v128 loop/edge fixtures use the same schedules.
 
 `make ir-tests` checks selected MIR scalar/value programs and packed kernels,
 including machine-stack typing and corrupted-plan rejection. The independent
 BigInt oracle executes 17,280 scalar boundary cases; all 57 packed kernels are
 selected for register and memory operands. Existing SIMD execution suites use
-the same kernel plans. See [the value-program contract](../docs/ir-mir-values.md).
+the same kernel plans.
 
 `make ir-tests` checks MIR state materialization order, count phases and typed
 write expressions. Forty-eight modules provide 3,456 CPU/standalone observation
 executions across PC modes, raw/lazy ZF, GPR/XMM writes, wrapping and reentry.
 RMW checks preserve post-ALU values with pre-write counts; malformed state plans
-are rejected. See [the state-plan contract](../docs/ir-mir-state.md).
+are rejected.
 
 `make ir-tests` now executes CPU loops with SSA count bases, including before/after
 helper observations, caller faults, helper-owned exits and budget reentry. The
 independent model checks 7,786 executions, 17,604 observations and 106 bounded
-reentries. Static/mixed-count CPU loops remain rejected. See
-[the dynamic-count contract](../docs/ir-dynamic-count.md).
+reentries. Static/mixed-count CPU loops remain rejected.
 
 `make ir-cfg-tests` compiles reachable x86 bytecode loops and diamonds at eight
 budgets, with optimized/unoptimized GPR/FLAGS/XMM state propagation. It checks
 35,328 real CPU comparisons, independent self-loop counts and sixteen precise
 second-iteration scalar/vector page faults. Overlap/truncation, graph budgets and
-immutable dependency checks are included. See [the CFG frontend contract](../docs/ir-cfg-frontend.md).
+immutable dependency checks are included.
 
 `make ir-tests` checks bounded straight-block merging and explicit MIR budget
 polls, including preserved recovery points and malformed poll plans. The CFG
 execution suite now also compares 17,664 optimized/unoptimized exits for exact
 budget/count/previous-IP equivalence. The merge pass can be disabled independently
-through `PassConfig.merge`. See [the merge contract](../docs/ir-cfg-merge.md).
+through `PassConfig.merge`.
 
 `make ir-tests` also checks dominator GVN, constant branch selection and
 unreachable-arena compaction. A 3,072-case independent Wasm oracle covers i32/i64
 arithmetic, diamonds and exact budgets. The expanded CFG suite checks 39,936 CPU
 comparisons, 19,968 optimized/unoptimized budget exits and sixteen constant
 branches that skip absent-page reads. CPU reads, siblings and independent entries
-have negative reuse tests. See [the dataflow contract](../docs/ir-dataflow.md).
+have negative reuse tests.
 
 `make ir-entry-tests` validates compile-request CPU entry specialization in debug
 and release: 176 modules, 1,760 no-effect rejections per CPU build, 176 admitted
 interpreter comparisons and 32 precise page faults. It covers logical/linear/width
 keys, physical aliases, entry-index bounds and rejection before REP metadata or
-state/helper effects. See [the CPU entry contract](../docs/ir-entry.md).
+state/helper effects.
 
 `make ir-live-tests` compiles IR inside the actual experimental CPU Wasm: 44
 interpreter comparisons, eight data page faults, 19 read-only paging/capture cases
 per debug/release build, and artifact lifecycle tests. It also builds
 `build/v86-ir-runtime.wasm` without test hooks and executes live-compiled CFG/store
 artifacts there. This target does not select IR in the normal CPU scheduler.
-See [the live compiler contract](../docs/ir-live-compile.md) for the experimental ABI.
 
 `make ir-cache-tests` publishes live IR results into the shared table pool and runs
 them through normal CPU dispatch, in debug and release test-hook builds and in
 the normal release core. Tests include precise
 fetch/data faults, source/PTE aliases, active SMC and I/O reset, pending/stale/failed
 publication, deferred collection and zero-budget REP recovery.
-See [the cache contract](../docs/ir-cache.md).
 
 `make ir-auto-tests` enables the experimental automatic policy and checks actual
 Tier 1 publication, optimized promotion, 16/32-bit execution and exact loop counts,
 failed-input suppression and changed-code retry, failed upgrades retaining Tier 1,
 pending/reset/restore lifetimes, premature completion rejection and bounded cache
-eviction. See [automatic IR scheduling](../docs/ir-auto.md).
+eviction.
 
 `make ir-backend-integration-tests` selects IR through the public V86 constructor,
 checks all region limits and copied statistics, and exercises Tier 1/2 execution,
@@ -281,7 +266,7 @@ SMC, x87 interpreter fallback, reset/restore, snapshot restore and initializatio
 errors on debug and release cores. `make ir-backend-browser-tests` runs
 the same scenarios in Chromium's main thread and a real dedicated CPU Worker.
 It requires localhost serving and an installed Chromium; the runner uses an isolated
-profile. See [the public backend contract](../docs/ir-backend.md).
+profile.
 
 `make jit-disabled-tests` checks that disabling IR scheduling suppresses promotion
 of a published Tier 1 region across 128 CPU frames while it keeps executing, and
@@ -294,5 +279,3 @@ transactional MIR literal pass and optimized compile-request integration. It als
 checks that the actual work-budget failure leaves earlier queued rewrites intact.
 An independent BigInt oracle executes 12,768 literal Wasm results and 36 real
 narrow-register MIR rewrites; `make ir-tests` includes these execution fixtures.
-See [owned MIR](../docs/ir-mir-owned.md) for the immutable-plan contract and limits
-on supported post-lowering transformations.

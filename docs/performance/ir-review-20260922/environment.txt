@@ -1,9 +1,0 @@
-Tue Sep 22 13:14:07 UTC 2026
-Linux localhost 6.18.44 #1 SMP Sat Sep 12 15:35:21 UTC 2026 x86_64 GNU/Linux
-model name	: AMD EPYC 9V74 80-Core Processor
-Pinned CPU: 0
-v24.17.0
-rustc 1.98.1 (48a229cea 2026-09-01)
-78ae1ed8a4b9dd38c8e02f96884b54656527199b70cfd4ea63a0914f66709874  build/v86-ir-runtime.wasm
-fd97bf6491b15933532f172144d2b72b2bbcea19bda94f5e095cb6ba9bd34367  build/libv86.mjs
-5624ff5fe1ffb3dff0a05a48dab38fd832c5cea009046ceaddcf9e017a946329  /mnt/data/validation/baseline-e4622847.wasm

@@ -2921,6 +2921,61 @@ pub unsafe fn run_instruction(opcode: i32) { gen::interpreter::run(opcode as u32
 pub unsafe fn run_instruction0f_16(opcode: i32) { gen::interpreter0f::run(opcode as u32) }
 pub unsafe fn run_instruction0f_32(opcode: i32) { gen::interpreter0f::run(opcode as u32 | 0x100) }
 
+/// Instructions run by the interpreter loop (not Tier-0 steps), in total and
+/// by linear page in a small direct-mapped table: where compiled code is
+/// missing (diagnostics; see ir_interpreted_stat).
+static mut INTERPRETED: u32 = 0;
+static mut INTERPRETED_PAGES: [(u32, u32); 1024] = [(0, 0); 1024];
+/// Interpreted instructions of one chosen page by 16-byte chunk of the EIP
+/// the interpreter started at (ir_interpreted_stat fields 4 and 5).
+static mut INTERPRETED_WATCH: u32 = u32::MAX;
+static mut INTERPRETED_OFFSETS: [u32; 256] = [0; 256];
+#[inline(always)]
+unsafe fn note_interpreted_page(eip: u32, steps: u32) {
+    INTERPRETED = INTERPRETED.wrapping_add(steps);
+    let page = eip >> 12;
+    if page == INTERPRETED_WATCH {
+        INTERPRETED_OFFSETS[(eip as usize & 4095) >> 4] += steps;
+    }
+    let slot = &mut INTERPRETED_PAGES[(page.wrapping_mul(0x9E3779B1) >> 22) as usize];
+    if slot.0 != page {
+        if slot.1 > steps {
+            slot.1 -= steps;
+            return;
+        }
+        *slot = (page, 0);
+    }
+    slot.1 = slot.1.wrapping_add(steps);
+}
+/// field 0: total interpreted instructions; 1/2: page and count of table
+/// slot `index`; 3: reset; 4: watch page `index` (a page number); 5: its
+/// interpreted instructions started in 16-byte chunk `index`.
+#[no_mangle]
+pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
+    match field {
+        0 => INTERPRETED,
+        1 | 2 if index < 1024 => {
+            let slot = INTERPRETED_PAGES[index as usize];
+            if field == 1 { slot.0 } else { slot.1 }
+        },
+        3 => {
+            INTERPRETED = 0;
+            INTERPRETED_PAGES = [(0, 0); 1024];
+            0
+        },
+        4 => {
+            INTERPRETED_WATCH = index;
+            INTERPRETED_OFFSETS = [0; 256];
+            0
+        },
+        5 if index < 256 => {
+            let offsets = INTERPRETED_OFFSETS;
+            offsets[index as usize]
+        },
+        _ => 0,
+    }
+}
+
 pub unsafe fn cycle_internal() -> bool {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
     let submitted = {
@@ -2967,6 +3022,7 @@ pub unsafe fn cycle_internal() -> bool {
             (*instruction_counter).wrapping_sub(initial_instruction_counter),
         );
     }
+    note_interpreted_page(initial_eip as u32, (*instruction_counter).wrapping_sub(initial_instruction_counter));
     profiler::performance_chunk_finish(
         performance_sample,
         (*instruction_counter).wrapping_sub(initial_instruction_counter),

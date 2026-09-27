@@ -1,5 +1,5 @@
 //! Tier-0: cheap page-granular compilation below the optimizing region tier.
-//! See docs/ir-page-tier-design.md. A page function serves every observed
+//! See docs/ir-design.md. A page function serves every observed
 //! entry of one code page and dispatches between its basic blocks without
 //! returning to the CPU loop.
 pub mod analysis;

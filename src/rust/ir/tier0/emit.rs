@@ -72,7 +72,7 @@ enum Shift {
     Arithmetic,
 }
 /// Names of Form kinds, by Form::kind (tests/ir/performance/xp_boot.mjs).
-pub const FORM_NAMES: &[&str] = &["Alu", "Test", "MovToRm", "MovToReg", "Lea", "MovExtend", "IncDec", "NegNot", "Shift", "ShiftHelper", "Carry", "DoubleShift", "BitScan", "BitTest", "MulWide", "Div", "Xadd", "Cmpxchg", "Moffs", "X87", "Fnstsw", "X87Flags", "Fcmov", "Simd", "Imul", "Push", "Pop", "Xchg", "Cdq", "Cwde", "Nop", "Leave", "Setcc", "Cmov", "Jmp", "Jcc", "Call", "Ret", "JmpIndirect", "CallIndirect"];
+pub const FORM_NAMES: &[&str] = &["Alu", "Test", "MovToRm", "MovToReg", "Lea", "MovExtend", "IncDec", "NegNot", "Shift", "ShiftHelper", "Carry", "DoubleShift", "BitScan", "BitTest", "MulWide", "Div", "Xadd", "Cmpxchg", "Moffs", "X87", "Fnstsw", "X87Flags", "Fcmov", "Simd", "Imul", "Push", "Pop", "Xchg", "Cdq", "Cwde", "Nop", "Leave", "Setcc", "Cmov", "Jmp", "Jcc", "Call", "Ret", "JmpIndirect", "CallIndirect", "Lahf"];
 /// Shift/rotate count operand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Count {
@@ -138,6 +138,8 @@ enum Form {
     Ret { pop: u16 },
     JmpIndirect,
     CallIndirect,
+    /// LAHF: AH = SF:ZF:0:AF:0:PF:1:CF of the materialized FLAGS.
+    Lahf,
 }
 impl Form {
     /// Index of the form kind (statistics; see FORM_NAMES).
@@ -184,6 +186,7 @@ impl Form {
             Form::Ret { .. } => 37,
             Form::JmpIndirect { .. } => 38,
             Form::CallIndirect { .. } => 39,
+            Form::Lahf => 40,
         }
     }
     /// Whether the template can retry() (else no retry tail is emitted).
@@ -217,6 +220,7 @@ impl Form {
                     | Form::Cmov { .. }
                     | Form::Jmp { .. }
                     | Form::Jcc { .. }
+                    | Form::Lahf
             )
     }
     /// Whether the template reads or writes the CPU's x87 state other than
@@ -248,7 +252,7 @@ impl Form {
             // Helpers over the lazy state, and dynamic counts (no FLAGS
             // change for a zero count).
             Form::ShiftHelper { .. } | Form::DoubleShift { .. } => true,
-            Form::X87Flags { .. } | Form::Simd(simd::Simd::CompareFlags { .. }) => true,
+            Form::X87Flags { .. } | Form::Simd(simd::Simd::CompareFlags { .. }) | Form::Lahf => true,
             _ => false,
         }
     }
@@ -461,6 +465,7 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
         0x99 if v == 32 => Form::Cdq,
         0x98 if v == 32 => Form::Cwde,
         0x90 => Form::Nop,
+        0x9F => Form::Lahf,
         0xC9 if v == 32 => Form::Leave,
         0x0F90..=0x0F9F => Form::Setcc { cc: (op & 15) as u8 },
         0x0F40..=0x0F4F if v == 32 => Form::Cmov { cc: (op & 15) as u8, reg },
@@ -2428,6 +2433,15 @@ impl Page {
                 self.condition(cc);
                 self.w.const_i32(r as i32);
                 self.w.call_signature("fpu_fcmovcc", Signature::new(&[WasmType::I32; 2], &[]));
+            },
+            Form::Lahf => {
+                // The lazy FLAGS are in memory (touches_flags_memory).
+                self.w.call_signature("get_eflags", Signature::new(&[], &[WasmType::I32]));
+                self.w.const_i32(0xD5);
+                self.w.and_i32();
+                self.w.const_i32(2);
+                self.w.or_i32();
+                self.write_reg(4, 8);
             },
             Form::Fnstsw => {
                 self.x87_guard();

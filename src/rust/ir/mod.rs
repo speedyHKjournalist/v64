@@ -1,5 +1,5 @@
 //! The IR compiler (frontend, MIR, Wasm backend, Tier-0) and its runtime; the
-//! only compiler of the core. See docs/ir-backend.md.
+//! only compiler of the core. See docs/ir-design.md.
 #![allow(dead_code)]
 pub mod analysis;
 pub mod backend;

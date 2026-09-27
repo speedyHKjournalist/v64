@@ -1,9 +1,9 @@
-// Counts of the IR lowering path per decoder form (docs/ir-coverage.json).
+// Counts of the IR lowering path per decoder form (src/rust/ir/frontend/ir-coverage.json).
 // --require-complete: every valid form has an attributed lowering path.
 import assert from "node:assert/strict";
 import fs from "node:fs";
-const catalogue = JSON.parse(fs.readFileSync("docs/ir-coverage.json"));
-assert.equal(catalogue.schema, 2, "regenerate docs/ir-coverage.json (gen/generate_ir_decoder.js)");
+const catalogue = JSON.parse(fs.readFileSync("src/rust/ir/frontend/ir-coverage.json"));
+assert.equal(catalogue.schema, 2, "regenerate src/rust/ir/frontend/ir-coverage.json (gen/generate_ir_decoder.js)");
 assert.equal(new Set(catalogue.forms.map(f => f.key)).size, catalogue.forms.length, "duplicate coverage key");
 for(const form of catalogue.forms) {
     assert(form.lowering === "Pending" || form.tests.length > 0, `missing suite attribution: ${form.key}`);

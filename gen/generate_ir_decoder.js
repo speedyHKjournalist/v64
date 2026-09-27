@@ -57,7 +57,7 @@ const coverage = {schema: 2, source: "gen/x86_table.js", encodings: rows.length,
     note: "lowering is the IR compiler's path for each form (Pending: none attributed). Encoding forms are not a claim of semantic coverage. Prefix repetitions, mode guards and nested x87 subforms require additional tests."};
 const coverage_text = JSON.stringify({...coverage, forms: undefined}, null, 2).slice(0, -2) +
     ',\n  "forms": [\n' + forms.map(f => "    " + JSON.stringify(f)).join(",\n") + "\n  ]\n}\n";
-const outputs = [["src/rust/ir/frontend/encodings.rs", rust], ["docs/ir-coverage.json", coverage_text]];
+const outputs = [["src/rust/ir/frontend/encodings.rs", rust], ["src/rust/ir/frontend/ir-coverage.json", coverage_text]];
 for(const [path, content] of outputs) {
     if(process.argv.includes("--check")) assert.equal(fs.readFileSync(path, "utf8"), content, `${path} is stale`);
     else fs.writeFileSync(path, content);

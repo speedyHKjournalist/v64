@@ -6,6 +6,7 @@
 //   node tests/ir/performance/game_state.mjs --state kartrider.bin \
 //       --hda windowsxp.img [--hdb game.img] [--wasm core.wasm] [--tier0 0|1]
 //       [--seconds 60] [--profile-from 30 --profile-out game.cpuprofile]
+//       [--sync-publication 0|1]
 //
 // Memory and VRAM sizes come from the state. Graphics: an infinitely fast
 // null renderer (batches acknowledged; D9WG queries, readbacks and the
@@ -131,6 +132,7 @@ const vm = new V86({
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: new SyncDisk(hda), ...(hdb ? { hdb: new SyncDisk(hdb) } : {}),
     x87_fast_math: true, x87_jit_cache: true,
+    ir_sync_publication: option("sync-publication", "0") === "1",
     v86gl_pci: { maxBatchBytes: 16 * 1024 * 1024, onSubmit },
     filesystem: {},
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
@@ -182,7 +184,8 @@ await vm.stop();
 clearInterval(speaker);
 if(profiling) fs.writeFileSync(profile_out, JSON.stringify((await post("Profiler.stop")).profile));
 const mean = key => steady.reduce((t, l) => t + l[key], 0) / Math.max(1, steady.length);
+const t0 = ["functions", "instructions", "templated", "bytes", "pages"].map((name, i) => [name, e.ir_t0_stat?.(i) >>> 0]);
 console.log(JSON.stringify({ event: "summary", seconds, second_half: { mips: +mean("mips").toFixed(1), fps: +mean("fps").toFixed(1), draws: Math.round(mean("draws")) },
-    frame_ms: Object.fromEntries([...intervals].sort((a, b) => b[1] - a[1]).slice(0, 8)) }));
+    frame_ms: Object.fromEntries([...intervals].sort((a, b) => b[1] - a[1]).slice(0, 8)), tier0: Object.fromEntries(t0) }));
 await vm.destroy();
 process.exit(0);
