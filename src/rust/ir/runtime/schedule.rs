@@ -1093,7 +1093,7 @@ unsafe fn compile_selected(
             else {
                 Default::default()
             })
-            .disable(disabled)
+            .disable(disabled | crate::ir::passes::PassConfig::shared_memory_disabled())
         },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,
@@ -1321,7 +1321,7 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
             else {
                 Default::default()
             })
-            .disable(disabled)
+            .disable(disabled | crate::ir::passes::PassConfig::shared_memory_disabled())
         },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,

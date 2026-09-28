@@ -183,6 +183,8 @@ RTC.prototype.timer = function(time, legacy_mode)
         this.cmos_c |= 1 << 5 | 1 << 7;
 
         this.next_interrupt_alarm = 0;
+        // ACPI RTC_STS: the alarm is also the RTC wake event (from S3)
+        this.cpu.devices.acpi?.rtc_alarm();
     }
     if(this.update_interrupt && this.update_interrupt_time <= time)
     {
@@ -417,6 +419,12 @@ RTC.prototype.cmos_port_write = function(data_byte)
 
         default:
             dbg_log("cmos write index " + h(this.cmos_index) + ": " + h(data_byte), LOG_RTC);
+            // General purpose CMOS RAM (e.g. 0x0F, the shutdown status that
+            // SeaBIOS clears after an S3 resume) keeps what is written
+            if(this.cmos_index >= CMOS_DIAG_STATUS + 1 && this.cmos_index < 0x80)
+            {
+                this.cmos_data[this.cmos_index] = data_byte;
+            }
     }
 
     this.update_interrupt = (this.cmos_b & 0x10) === 0x10 && (this.cmos_a & 0xF) > 0;

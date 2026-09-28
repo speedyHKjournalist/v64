@@ -58,7 +58,11 @@ const PM1_CNT_WRITABLE = BM_RLS | SLP_TYP;
 // PIIX4 GLBCTL: SeaBIOS sets SMI_EN in it. Without SMM it is plain storage.
 const PM_GLBCTL = 0x28;
 
-const STATE_FORMAT = 2;
+const STATE_FORMAT = 3;
+
+// CMOS shutdown status byte: 0xFE tells SeaBIOS to resume from S3
+const CMOS_SHUTDOWN_STATUS = 0x0F;
+const CMOS_SHUTDOWN_S3_RESUME = 0xFE;
 
 /**
  * Contents of the fw_cfg file etc/system-states, read by SeaBIOS's ACPI
@@ -135,6 +139,9 @@ export function ACPI(cpu, bus)
      * guest used to turn it off
      */
     this.soft_off = 0;
+
+    /** 3 while the machine is suspended to RAM (S3), otherwise 0 */
+    this.sleeping = 0;
 
     /** Level this device currently drives on the SCI line */
     this.sci_level = false;
@@ -405,6 +412,10 @@ ACPI.prototype.enter_sleep_state = function(slp_typ)
         // at the next power-on
         this.power_off(sleep_state.state);
     }
+    else if(sleep_state && sleep_state.state === 3 && sleep_state.supported)
+    {
+        this.suspend();
+    }
     else
     {
         // Sleeping states that are not implemented: behave as if a wake event
@@ -427,11 +438,73 @@ ACPI.prototype.power_off = function(sleep_state)
 };
 
 /**
+ * S3: every core stops at the end of its current instruction and RAM is
+ * kept. The device timers keep running, so an RTC alarm can wake the
+ * machine; so can the power button.
+ */
+ACPI.prototype.suspend = function()
+{
+    if(this.sleeping || this.soft_off)
+    {
+        return;
+    }
+    dbg_log("ACPI: suspend to RAM (S3)", LOG_ACPI);
+    this.sleeping = 3;
+    this.cpu.devices.rtc.cmos_write(CMOS_SHUTDOWN_STATUS, CMOS_SHUTDOWN_S3_RESUME);
+    this.cpu.enter_sleep();
+    this.bus.send("acpi-sleep", "S3");
+};
+
+/**
+ * Leave S3 because of a wake event (fixed event status bits, e.g. PWRBTN or
+ * RTC). The CPUs and devices are reset without reloading the BIOS, so
+ * SeaBIOS sees that POST already ran and resumes through the FACS waking
+ * vector. WAK_STS and the cause are set after the reset.
+ * @param {number} status
+ * @return {boolean}
+ */
+ACPI.prototype.wake = function(status)
+{
+    if(this.sleeping !== 3)
+    {
+        return false;
+    }
+    dbg_log("ACPI: wake from S3, status " + h(status), LOG_ACPI);
+    this.sleeping = 0;
+    this.cpu.resume_from_sleep();
+    this.pm1_sts |= WAK | status;
+    this.update_sci();
+    this.bus.send("acpi-wake", status & PWRBTN ? "power-button" : status & RTC ? "rtc" : "other");
+    return true;
+};
+
+/** The RTC alarm fired: RTC_STS, and a wake from S3 if RTC_EN is set */
+ACPI.prototype.rtc_alarm = function()
+{
+    if(this.sleeping)
+    {
+        if(this.pm1_en & RTC)
+        {
+            this.wake(RTC);
+        }
+        return;
+    }
+    this.pm1_sts |= RTC;
+    this.update_sci();
+};
+
+/**
  * Press the power button of a running machine. The guest sees a fixed
  * power button event; with SCI_EN clear (no ACPI OS) nothing happens.
+ * A suspended (S3) machine wakes up.
  */
 ACPI.prototype.press_power_button = function()
 {
+    if(this.sleeping)
+    {
+        this.wake(PWRBTN);
+        return;
+    }
     this.pm1_sts |= PWRBTN;
     this.update_sci();
 };
@@ -447,6 +520,7 @@ ACPI.prototype.reset = function()
     this.smi_cmd = 0;
     this.glbctl = 0;
     this.soft_off = 0;
+    this.sleeping = 0;
     this.update_sci();
     this.reset_pm_config();
 };
@@ -513,6 +587,7 @@ ACPI.prototype.get_state = function()
     state[7] = this.smi_cmd;
     state[8] = this.glbctl;
     state[9] = this.soft_off;
+    state[10] = this.sleeping;
     return state;
 };
 
@@ -535,6 +610,7 @@ ACPI.prototype.set_state = function(state)
         this.smi_cmd = 0;
         this.glbctl = 0;
         this.soft_off = 0;
+        this.sleeping = 0;
     }
     else
     {
@@ -545,6 +621,8 @@ ACPI.prototype.set_state = function(state)
         this.smi_cmd = state[7];
         this.glbctl = state[8];
         this.soft_off = state[9];
+        // (format 3) suspended to RAM
+        this.sleeping = state[4] >= 3 ? state[10] : 0;
     }
 
     this.timer_offset = ticks - Math.floor(this.clock() * PM_TIMER_TICKS_PER_MS);

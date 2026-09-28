@@ -51,10 +51,13 @@ export const PCI_LINK_IRQS = [10, 11];
  * tables advertise a state only when it is supported.
  */
 export const ACPI_SLEEP_STATES = [
-    // S3 (suspend to RAM): not implemented
-    { state: 3, slp_typ: 1, supported: false },
-    // S4 (OS-directed hibernation, a soft off for the hardware): not validated yet
-    { state: 4, slp_typ: 2, supported: false },
+    // S3 (suspend to RAM): cores stop, RAM and the BIOS shadow are kept; a
+    // wake event resets CPUs and devices and SeaBIOS jumps to the FACS
+    // waking vector
+    { state: 3, slp_typ: 1, supported: true },
+    // S4 (OS-directed hibernation): a soft off for the hardware; the guest
+    // restores itself from disk at the next power-on
+    { state: 4, slp_typ: 2, supported: true },
     // S5 (soft off)
     { state: 5, slp_typ: 0, supported: true },
 ];

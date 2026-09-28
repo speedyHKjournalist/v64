@@ -10,9 +10,16 @@ import {setImmediate as set_immediate} from "node:timers";
 import {fileURLToPath} from "node:url";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const directory = root + "build/x64-linux/";
-const name = "alpine-virt-3.24.0-x86_64.iso";
+// X64_LINUX_FLAVOR: "virt" (default, the virt kernel) or "lts" (the standard
+// ISO's lts kernel, which also has hibernation, for A3's S4 cycles)
+const flavor = process.env.X64_LINUX_FLAVOR || "virt";
+const {name, digest} = {
+    virt: {name: "alpine-virt-3.24.0-x86_64.iso", digest: "6cd1a38ae05cf96a5d0cbb2ddd6c630834babfeca1ecc5d1f05ec0b06b886102"},
+    lts: {name: "alpine-standard-3.24.0-x86_64.iso", digest: "9f8bf67c1604381bf056f907d77adaf301fad9cc7b9e1fb73660c1b66f3ebd9f"},
+}[flavor];
+assert.ok(name, "X64_LINUX_FLAVOR is virt or lts");
+const kernel_file = `boot/vmlinuz-${flavor}`, initrd_file = `boot/initramfs-${flavor}`;
 const source = "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/" + name;
-const digest = "6cd1a38ae05cf96a5d0cbb2ddd6c630834babfeca1ecc5d1f05ec0b06b886102";
 const hash = bytes => create_hash("sha256").update(bytes).digest("hex");
 fs.mkdirSync(directory, {recursive: true});
 if(!fs.existsSync(directory + name))
@@ -24,7 +31,7 @@ if(!fs.existsSync(directory + name))
     fs.writeFileSync(directory + name, bytes);
 }
 assert.equal(hash(fs.readFileSync(directory + name)), digest, "official pinned Alpine ISO SHA-256");
-for(const file of ["boot/vmlinuz-virt", "boot/initramfs-virt"])
+for(const file of [kernel_file, initrd_file])
 {
     if(fs.existsSync(directory + file)) continue;
     const unpack = spawnSync("bsdtar", ["-xf", directory + name, "-C", directory, file], {encoding: "utf8"});
@@ -34,7 +41,7 @@ for(const file of ["boot/vmlinuz-virt", "boot/initramfs-virt"])
 // delivered as a ustar image on the IDE disk and unpacked by the guest shell.
 // Concurrent configurations get separate probe builds and result files.
 const cores = Number(process.env.X64_CORES || 1);
-const tag = `${+process.env.X64_LINUX_QEMU ? "qemu" : +process.env.X64_JIT ? "native" : "interpreter"}-${cores}c${process.env.X64_HIGH_MEMORY ? "-high" : ""}`;
+const tag = `${+process.env.X64_LINUX_QEMU ? "qemu" : +process.env.X64_JIT ? "native" : "interpreter"}-${cores}c${process.env.X64_HIGH_MEMORY ? "-high" : ""}${flavor === "virt" ? "" : "-" + flavor}`;
 const probe_directory = directory + `probe-${tag}/`;
 fs.mkdirSync(probe_directory, {recursive: true});
 function run(program, args)
@@ -66,9 +73,15 @@ const guest_command = net => (net ? "modprobe virtio_net 2>/dev/null; ifconfig e
 // X5: relocate this many bytes of RAM to guest physical 4 GiB (v86) or give
 // QEMU the same split, so the kernel and probes must use RAM above 4 GiB.
 const high_memory = Number(process.env.X64_HIGH_MEMORY || 0);
-const cmdline = process.env.X64_LINUX_CMDLINE || "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage";
-const manifest = {source, iso_sha256: digest, kernel_sha256: hash(fs.readFileSync(directory + "boot/vmlinuz-virt")),
-    initrd_sha256: hash(fs.readFileSync(directory + "boot/initramfs-virt")), cmdline,
+// A3: X64_LINUX_SLEEP=<cycles> suspends to RAM and hibernates to /dev/sdb
+// (a blank disk) that many times each; Alpine's initramfs restores through resume=.
+const sleep_cycles = Number(process.env.X64_LINUX_SLEEP || 0);
+const cmdline = process.env.X64_LINUX_CMDLINE || "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage" +
+    // (Alpine's live initramfs handles resume= before it loads disk drivers
+    // for the root file system: load the IDE driver first, or /dev/sdb is missing)
+    (sleep_cycles ? ",ata_piix resume=/dev/sdb" : "");
+const manifest = {source, iso_sha256: digest, kernel_sha256: hash(fs.readFileSync(directory + kernel_file)),
+    initrd_sha256: hash(fs.readFileSync(directory + initrd_file)), cmdline,
     probe_tar_sha256: hash(probe_disk), probe64_sha256: hash(fs.readFileSync(probe_directory + "linux_probe64")),
     probe32_sha256: hash(fs.readFileSync(probe_directory + "linux_probe32"))};
 fs.writeFileSync(directory + `image-${tag}.json`, JSON.stringify(manifest, null, 2) + "\n");
@@ -96,7 +109,7 @@ if(+process.env.X64_LINUX_QEMU)
 {
     const child = spawn("qemu-system-x86_64", ["-machine", `pc,accel=tcg${high_memory ? `,max-ram-below-4g=${(512 << 20) - high_memory}` : ""}`, "-cpu", "qemu64,phys-bits=36,-pdpe1gb", "-m", "512M",
         "-display", "none", "-monitor", "none", "-serial", "stdio", "-no-reboot", "-no-shutdown",
-        "-kernel", directory + "boot/vmlinuz-virt", "-initrd", directory + "boot/initramfs-virt", "-cdrom", directory + name, "-append", cmdline,
+        "-kernel", directory + kernel_file, "-initrd", directory + initrd_file, "-cdrom", directory + name, "-append", cmdline,
         "-drive", `file=${probe_directory}probe.tar,format=raw,if=ide,index=0,snapshot=on`,
         "-smp", `${Number(process.env.X64_CORES || 1)},sockets=1,cores=${Number(process.env.X64_CORES || 1)},threads=1`,
         ...(process.env.X64_QEMU_TRACE ? ["-d", "in_asm", "-D", directory + "qemu-instructions.log"] : [])],
@@ -138,8 +151,9 @@ const jit = !!+process.env.X64_JIT;
 const emulator = new V86({
     wasm_path: process.env.WASM_PATH,
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
-    bzimage: {url: directory + "boot/vmlinuz-virt"}, initrd: {url: directory + "boot/initramfs-virt"},
+    bzimage: {url: directory + kernel_file}, initrd: {url: directory + initrd_file},
     cdrom: {url: directory + name}, hda: {buffer: probe_disk.buffer.slice(probe_disk.byteOffset, probe_disk.byteOffset + probe_disk.length)},
+    ...(sleep_cycles ? {hdb: {buffer: new ArrayBuffer(256 << 20)}} : {}),
     cmdline, memory_size: 512 << 20, high_memory_size: high_memory, cpu_cores: cores, acpi: true, autostart: false,
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0, net_device: {type: "virtio"},
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
@@ -302,6 +316,89 @@ try
     {
         assert.deepEqual(snapshots_taken, snapshot_markers, "snapshots taken during every probe phase");
         console.log("X64_LINUX_SNAPSHOT_PASS " + JSON.stringify(snapshot_bytes));
+    }
+    if(sleep_cycles)
+    {
+        const next = (name, limit_ms = 120000) => new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(`sleep: no ${name} event; acpi ` +
+                JSON.stringify(cpu.get_diagnostics().acpi) + "\n" + serial.slice(-3000))), limit_ms);
+            emulator.add_listener(name, function listener(value) {
+                clearTimeout(timer);
+                emulator.remove_listener(name, listener);
+                resolve(value);
+            });
+        });
+        const wait_serial = async (pattern, from, what, limit_ms = 300000) => {
+            const limit = performance.now() + limit_ms;
+            while(!pattern.test(serial.slice(from)))
+            {
+                if(execution_error) throw execution_error;
+                if(performance.now() > limit) throw new Error("sleep: " + what + "\n" + serial.slice(-2000));
+                await delay(10);
+            }
+            return serial.slice(from);
+        };
+        const run = async (command, marker) => {
+            const from = serial.length;
+            emulator.serial0_send(command + "; echo " + marker + "_$((6*7))\n");
+            return wait_serial(new RegExp(marker + "_42\\r?\\n"), from, command);
+        };
+        const value = (text, key) => +(text.match(new RegExp(key + "=(\\d+)")) || [])[1];
+        const states = await run("echo STATE=$(cat /sys/power/state)", "STATES");
+        // (the serial console echoes the command line too: take the output line)
+        const state_line = [...states.matchAll(/STATE=([^$\r\n][^\r\n]*)/g)].at(-1)[1];
+        console.log("X64_LINUX_SLEEP_STATES " + state_line);
+        assert.match(state_line, /\bmem\b/, "the kernel can suspend to RAM");
+        // Alpine's virt kernel has no CONFIG_HIBERNATION; the lts kernel does
+        const can_hibernate = /\bdisk\b/.test(state_line);
+        assert.ok(can_hibernate || flavor === "virt", "the lts kernel can hibernate");
+        await run("dd if=/dev/urandom of=/tmp/s3.bin bs=1024 count=4096 2>/dev/null; md5sum /tmp/s3.bin > /tmp/s3.md5", "PATTERN");
+        const online = cores === 1 ? "0" : "0-" + (cores - 1);
+        for(let cycle = 1; cycle <= sleep_cycles; cycle++)
+        {
+            const by_rtc = cycle % 2 === 1;
+            const slept = next("acpi-sleep"), woke = next("acpi-wake");
+            const from = serial.length;
+            // (the kernel log is cleared each cycle: over many cycles its ring buffer wraps)
+            emulator.serial0_send("dmesg -c >/dev/null; " + (by_rtc ? "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +3 > /sys/class/rtc/rtc0/wakealarm; " : "") +
+                "echo mem > /sys/power/state; echo RESUMED_$((" + cycle + "*7))\n");
+            assert.equal(await slept, "S3");
+            if(!by_rtc) { await delay(500); await emulator.power_button(); }
+            assert.equal(await woke, by_rtc ? "rtc" : "power-button");
+            await wait_serial(new RegExp("RESUMED_" + cycle * 7 + "\\r?\\n"), from, "resume " + cycle);
+            const check = await run("md5sum -c /tmp/s3.md5 >/dev/null && echo INTACT=1; echo WAKES=$(dmesg | grep -c 'Waking up from system sleep state S3'); echo ONLINE=$(cat /sys/devices/system/cpu/online)", "CHECK");
+            assert.equal(value(check, "INTACT"), 1, "RAM survives S3");
+            assert.equal(value(check, "WAKES"), 1, "woke from S3");
+            assert.match(check, new RegExp("ONLINE=" + online + "\\r?\\n"), "every CPU is back online");
+            console.log(`X64_LINUX_S3 cycle ${cycle}: ${by_rtc ? "RTC alarm" : "power button"}, RAM intact, CPUs ${online}`);
+        }
+        if(can_hibernate)
+        {
+            const swap = await run("mkswap /dev/sdb >/dev/null && swapon /dev/sdb && echo platform > /sys/power/disk && echo 1 > /sys/power/pm_debug_messages && echo SWAP_OK=1", "SWAP");
+            assert.equal(value(swap, "SWAP_OK"), 1, "swap and platform hibernation");
+        }
+        else console.log("X64_LINUX_S4 skipped: this kernel has no hibernation (" + state_line + ")");
+        for(let cycle = 1; can_hibernate && cycle <= sleep_cycles; cycle++)
+        {
+            const marker = 5000 + cycle;
+            await run(`echo ${marker} > /tmp/s4-marker; dmesg -c >/dev/null`, "MARK");
+            const off = next("acpi-power-off");
+            const from = serial.length;
+            emulator.serial0_send("echo disk > /sys/power/state; echo THAWED=$(cat /tmp/s4-marker)\n");
+            assert.equal(await off, "S4");
+            await delay(200);
+            await emulator.power_button();
+            const thawed = await wait_serial(/THAWED=\d+\r?\n/, from, "restore " + cycle, 600000);
+            assert.equal(value(thawed, "THAWED"), marker, "the shell continues in the restored kernel");
+            // (Linux 6 logs the restore itself only with pm_debug_messages during
+            // suspend to RAM; the S4 wake-up of the restored kernel is always logged)
+            const check = await run("echo RESTORED=$(dmesg | grep -c 'Waking up from system sleep state S4'); echo ONLINE=$(cat /sys/devices/system/cpu/online); md5sum -c /tmp/s3.md5 >/dev/null && echo INTACT=1", "CHECK");
+            assert.equal(value(check, "RESTORED"), 1, "restored from the swap image");
+            assert.equal(value(check, "INTACT"), 1, "tmpfs contents came back from disk");
+            assert.match(check, new RegExp("ONLINE=" + online + "\\r?\\n"), "every CPU is back online");
+            console.log(`X64_LINUX_S4 cycle ${cycle}: hibernated, powered on, restored (marker ${marker}), CPUs ${online}`);
+        }
+        console.log("X64_LINUX_SLEEP_PASS");
     }
     if(+process.env.X64_LINUX_LIFECYCLE)
     {

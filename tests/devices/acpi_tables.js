@@ -204,8 +204,17 @@ for(const [label, settings, memory] of PLATFORMS)
 
         const dsdt = Buffer.from(tables["DSDT"].data);
         assert.equal(tables["DSDT"].revision, 1, "32-bit AML integers");
-        assert.ok(dsdt.includes("_S5_"));
-        assert.ok(!dsdt.includes("_S3_") && !dsdt.includes("_S4_"), "S3/S4 not advertised");
+        // Name (_Sx_, Package (4) {SLP_TYP, SLP_TYP, 0, 0}): S3 = 1, S4 = 2, S5 = 0
+        for(const [state, slp_typ] of [["_S3_", 1], ["_S4_", 2], ["_S5_", 0]])
+        {
+            const at = dsdt.indexOf(state);
+            // NameOp, RootChar ("\\_Sx_")
+            assert.ok(at > 1 && dsdt[at - 2] === 0x08 && dsdt[at - 1] === 0x5C, state + " advertised");
+            assert.equal(dsdt[at + 4], 0x12, state + " is a package");
+            const element = dsdt.subarray(at + 7, at + 9);
+            const value = element[0] === 0x0A ? element[1] : element[0] === 0x01 ? 1 : element[0] === 0x00 ? 0 : -1;
+            assert.equal(value, slp_typ, state + " SLP_TYP");
+        }
         assert.ok(dsdt.includes(Buffer.from([0x0C, 0x41, 0xD0, 0x03, 0x03])), "PNP0303 (SeaBIOS checks for it)");
         const com_ports = (dsdt.toString("latin1").match(/COM\d/g) || []).length;
         assert.equal(com_ports, platform.uarts.length, "one COM device per emulated UART");
@@ -296,7 +305,7 @@ else
 
 if(ACPIEXEC)
 {
-    test("acpiexec runs the interrupt link methods and _S5", () => {
+    test("acpiexec runs the interrupt link methods and the sleeping state packages", () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "v86-acpi-"));
         write_installed_tables(dir);
         const commands = [
@@ -307,6 +316,8 @@ if(ACPIEXEC)
             "evaluate \\_SB.LNKA._DIS",
             "evaluate \\_SB.LNKA._STA",
             "evaluate \\_SB.LNKA._PRS",
+            "evaluate \\_S3",
+            "evaluate \\_S4",
             "evaluate \\_S5",
             "evaluate \\_SB.PCI0.ISA.KBD._HID",
         ].join("; ");
@@ -331,6 +342,8 @@ if(ACPIEXEC)
             "",
             "[Integer] = 0000000000000009",
             "[Buffer] Length 0F =     0000: 89 0A 00 09 02 0A 00 00 00 0B 00 00 00 79 00     // .............y.",
+            "[Integer] = 0000000000000001 | [Integer] = 0000000000000001 | [Integer] = 0000000000000000 | [Integer] = 0000000000000000",
+            "[Integer] = 0000000000000002 | [Integer] = 0000000000000002 | [Integer] = 0000000000000000 | [Integer] = 0000000000000000",
             "[Integer] = 0000000000000000 | [Integer] = 0000000000000000 | [Integer] = 0000000000000000 | [Integer] = 0000000000000000",
             "[Integer] = 000000000303D041",
         ]);

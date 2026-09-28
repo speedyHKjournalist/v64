@@ -243,6 +243,12 @@ impl PhysicalBus {
 // Machine-owned mapping state; no CPU register or TLB state lives here.
 static mut PHYSICAL_BUS: PhysicalBus = PhysicalBus::new();
 
+/// A worker instance (crate::parallel) maps the machine's windows. They
+/// change only while every worker is stopped, which copies them again.
+pub unsafe fn copy_from_machine() {
+    PHYSICAL_BUS = *crate::parallel::machine(&raw mut PHYSICAL_BUS);
+}
+
 fn checked_range(address: u64, length: u64) -> Result<(), PhysicalError> {
     if length == 0
         || address >= PHYSICAL_LIMIT
@@ -309,6 +315,16 @@ pub unsafe fn resolve_backing(address: u64) -> Result<u32, PhysicalError> {
     (&*(&raw const PHYSICAL_BUS))
         .resolve(address, *global_pointers::memory_size)
         .map(|resolved| resolved.backing)
+}
+
+/// The backing address of `size` bytes of RAM at `address` that are
+/// contiguous in the backing store, or None (MMIO, holes, split windows)
+pub unsafe fn ram_backing(address: u64, size: usize) -> Option<u32> {
+    if plain_ram(address, size) {
+        return Some(address as u32);
+    }
+    let bytes = (&*(&raw const PHYSICAL_BUS)).access(address, size, *global_pointers::memory_size).ok()?;
+    (contiguous(&bytes[..size]) && bytes[..size].iter().all(|byte| byte.kind == WindowKind::Ram)).then_some(bytes[0].backing)
 }
 
 /// Called only above the legacy RAM fast limit. A high RAM window removes
@@ -576,10 +592,8 @@ unsafe fn read_ram(address: u32, width: usize) -> u64 {
         1 => memory::read8_no_mmap_check(address) as u8 as u64,
         2 => memory::read16_no_mmap_check(address) as u16 as u64,
         4 => memory::read32_no_mmap_check(address) as u32 as u64,
-        8 => {
-            memory::read32_no_mmap_check(address) as u32 as u64
-                | (memory::read32_no_mmap_check(address + 4) as u32 as u64) << 32
-        },
+        // (one access: aligned 8-byte loads are single-copy atomic on x86)
+        8 => memory::read64_no_mmap_check(address),
         _ => unreachable!(),
     }
 }
@@ -603,11 +617,23 @@ unsafe fn write_ram(address: u32, width: usize, value: u64) {
         2 => memory::write16_ram(address, value as u16 as i32),
         4 => memory::write32_ram(address, value as i32),
         8 => {
-            memory::write32_ram(address, value as i32);
-            memory::write32_ram(address + 4, (value >> 32) as i32);
+            crate::jit::jit_dirty_cache_small(address, address + 8);
+            memory::write64_no_mmap_or_dirty_check(address, value);
         },
         _ => unreachable!(),
     }
+}
+
+/// Set accessed/dirty bits of a long-mode paging entry with a locked OR
+/// (another core may change the entry concurrently); `bits` within 0x60
+unsafe fn set_entry_bits(address: u64, bits: u64) -> Result<(), PhysicalError> {
+    if plain_ram(address, 8) && address & 7 == 0 {
+        crate::jit::jit_dirty_cache_small(address as u32, address as u32 + 8);
+        crate::parallel::or64(memory::mem8.add(address as usize), bits);
+        return Ok(());
+    }
+    let value = read_allowed(address, 8, true)?;
+    write(address, 8, value | bits)
 }
 
 unsafe fn write(address: u64, width: usize, value: u64) -> Result<(), PhysicalError> {
@@ -695,8 +721,9 @@ impl crate::x64::paging::PageTableMemory for PageTables {
             .ok()
         }
     }
+    /// The walker only sets A (0x20) and D (0x40)
     fn write_entry(&mut self, address: PhysicalAddress, value: u64) -> bool {
-        unsafe { write64(address.0, value).is_ok() }
+        unsafe { set_entry_bits(address.0, value & 0x60).is_ok() }
     }
 }
 

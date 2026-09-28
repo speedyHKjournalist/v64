@@ -18,6 +18,7 @@ const modes = process.env.SMP_MODES?.split(",") || ["interpreter", "tier0", "reg
 const seeds = process.env.SMP_SEEDS?.split(",").map(Number) || Array.from({ length: 10 }, (_, i) => i + 1);
 const quantums = process.env.SMP_QUANTUMS?.split(",").map(Number) || [257, 4096];
 const cores = +(process.env.CPU_CORES || 4);
+const parallel = +process.env.PARALLEL;
 const rounds = +(process.env.SMP_ROUNDS || 256);
 const timeout_ms = +(process.env.SMP_TIMEOUT_MS || 180000);
 const log_dir = process.env.C3_LOG_DIR;
@@ -49,11 +50,14 @@ const media = { javascript_entry: digest(fs.readFileSync(module_url)), wasm: dig
 for(const mode of modes)
 {
     const disk = new Uint8Array(4 << 20);
-    const emulator = new V86({ wasm_fn: async imports => (await WebAssembly.instantiate(wasm_module, imports)).exports,
+    // PARALLEL=1: the application processors run in vCPU workers (W1)
+    const emulator = new V86({ ...(parallel ? { wasm_path: path.join(root, "build/v86-parallel.wasm"), parallel: true } :
+        { wasm_fn: async imports => (await WebAssembly.instantiate(wasm_module, imports)).exports }),
         bios: { url: path.join(root, "bios/seabios.bin") }, vga_bios: { url: path.join(root, "bios/vgabios.bin") },
         cdrom: { url: path.join(root, "images/linux4.iso") }, hda: { buffer: disk.buffer },
         memory_size: 128 << 20, cpu_cores: cores, acpi: true, cpu_schedule_seed: seeds[0],
         disable_jit: mode === "interpreter", experimental_smp_jit: mode !== "interpreter", ir_tier0: mode === "tier0",
+        ...(mode === "region" ? { ir_page_mode: false } : {}),
         ir_sync_publication: true, ir_region_budget: { hot_threshold: 8, promotion_threshold: 128 },
         filesystem: {}, net_device: { type: "ne2k" }, autostart: false, log_level: 0 });
     let serial = "", phase = "load", cpu, packets = 0, received = 0, poweroffs = 0, disk_reads = 0, disk_writes = 0;
@@ -101,6 +105,7 @@ for(const mode of modes)
         const round_started_ms = performance.now();
         cpu.scheduler_seed = seed;
         cpu.scheduler_quantum = quantum;
+        if(parallel) for(let core = 1; core < cores; core++) per_core_jit[core] = cpu.parallel.core_counters(core).jit;
         const begin = serial.length, net_before = packets, reads_before = disk_reads, writes_before = disk_writes, jit_before = per_core_jit.slice();
         emulator.serial0_send(`/tmp/c3-stress ${cores} ${seed} ${rounds}\n`);
         await until(`seed=${seed} quantum=${quantum} active`, () => serial.slice(begin).includes(`C3_ACTIVE seed=${seed}\r\n`));
@@ -134,6 +139,7 @@ for(const mode of modes)
             await emulator.stop();
             assert.deepEqual(summary(serial.slice(replay_begin), seed), first, "restored OS processes preserve publication/migration/disk/network work");
         }
+        if(parallel) for(let core = 1; core < cores; core++) per_core_jit[core] = cpu.parallel.core_counters(core).jit;
         const jit = per_core_jit.map((value, i) => value - jit_before[i]);
         if(mode === "interpreter") assert.ok(jit.every(value => value === 0));
         else assert.ok(jit.every(value => value > 0), "each core executes compiled code during workload");
@@ -156,6 +162,9 @@ for(const mode of modes)
         const run_slice = cpu.run_cpu_slice.bind(cpu);
         const jit_count = () => mode === "interpreter" ? (e.ir_t0_entries() >>> 0) + (e.ir_cache_stat(2) >>> 0) : mode === "tier0" ? e.ir_t0_entries() >>> 0 : e.ir_cache_stat(2) >>> 0;
         cpu.run_cpu_slice = budget => { const id = cpu.active_core, before = jit_count(); const r = run_slice(budget); per_core_jit[id] += (jit_count() - before) >>> 0; return r; };
+        // (with vCPU workers the machine's own core runs through main_loop)
+        const main_loop = cpu.main_loop.bind(cpu);
+        cpu.main_loop = () => { const before = jit_count(); const r = main_loop(); per_core_jit[0] += (jit_count() - before) >>> 0; return r; };
         const cached = boot_cache && path.join(boot_cache, `linux4-${mode}-${cores}.bin`);
         if(cached && fs.existsSync(cached)) await emulator.restore_state(Uint8Array.from(fs.readFileSync(cached)).buffer);
         else

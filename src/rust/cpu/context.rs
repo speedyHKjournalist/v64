@@ -20,7 +20,8 @@ unsafe fn capture(core: usize) {
         let entry = cpu::tlb_data[page as usize] as u32;
         if entry != 0 {
             let physical = ((entry & !0xFFF) ^ (page << 12)).wrapping_sub(memory::mem8 as u32);
-            context.tlb.push((page, physical | (entry & 0xFFF)));
+            // (TLB_HAS_CODE is derived from the code caches: install recomputes it)
+            context.tlb.push((page, physical | (entry as u32 & 0xFFF & !(TLB_HAS_CODE as u32))));
             // Deduplicate the valid list (INVLPG can leave an old index).
             cpu::tlb_data[page as usize] = 0;
         }
@@ -37,7 +38,7 @@ unsafe fn install(core: usize) {
     for &(page, portable) in &CONTEXTS[core].tlb {
         let physical = portable & !0xFFF;
         let mut info = portable & 0xFFF & !(TLB_HAS_CODE as u32);
-        if !memory::in_mapped_range(physical) && crate::jit::jit_page_has_code(Page::page_of(physical)) {
+        if !memory::in_mapped_range(physical) && crate::jit::page_needs_notification(Page::page_of(physical)) {
             info |= TLB_HAS_CODE as u32;
         }
         cpu::tlb_data[page as usize] = ((physical.wrapping_add(memory::mem8 as u32) ^ (page << 12)) | info) as i32;

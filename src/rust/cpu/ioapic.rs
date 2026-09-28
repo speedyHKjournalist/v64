@@ -1,6 +1,7 @@
 // http://download.intel.com/design/chipsets/datashts/29056601.pdf
 
 use crate::cpu::{apic, global_pointers::acpi_enabled};
+#[cfg(not(feature = "parallel"))]
 use std::sync::{Mutex, MutexGuard};
 
 const IOAPIC_LOG_VERBOSE: bool = false;
@@ -61,23 +62,52 @@ struct Ioapic {
     irq_value: u32,
 }
 
-static IOAPIC: Mutex<Ioapic> = Mutex::new(Ioapic {
+const IOAPIC_RESET: Ioapic = Ioapic {
     ioredtbl_config: [IOAPIC_CONFIG_MASKED; IOAPIC_IRQ_COUNT],
     ioredtbl_destination: [0; IOAPIC_IRQ_COUNT],
     ioregsel: 0,
     ioapic_id: IOAPIC_ID,
     irr: 0,
     irq_value: 0,
-});
+};
+
+#[cfg(not(feature = "parallel"))]
+static IOAPIC: Mutex<Ioapic> = Mutex::new(IOAPIC_RESET);
+
+// With cores in workers, every core programs and EOIs the machine instance's
+// IOAPIC while the devices raise its inputs: a spin lock guards it.
+#[cfg(feature = "parallel")]
+static mut IOAPIC: Ioapic = IOAPIC_RESET;
+#[cfg(feature = "parallel")]
+static mut IOAPIC_LOCK: crate::parallel::SpinLock = crate::parallel::SpinLock::new();
+#[cfg(feature = "parallel")]
+struct IoapicGuard;
+#[cfg(feature = "parallel")]
+impl std::ops::Deref for IoapicGuard {
+    type Target = Ioapic;
+    fn deref(&self) -> &Ioapic { unsafe { &*crate::parallel::machine(&raw mut IOAPIC) } }
+}
+#[cfg(feature = "parallel")]
+impl std::ops::DerefMut for IoapicGuard {
+    fn deref_mut(&mut self) -> &mut Ioapic { unsafe { &mut *crate::parallel::machine(&raw mut IOAPIC) } }
+}
+#[cfg(feature = "parallel")]
+impl Drop for IoapicGuard {
+    fn drop(&mut self) { unsafe { (*crate::parallel::machine(&raw mut IOAPIC_LOCK)).unlock() } }
+}
 
 /// Board reset, unlike an INIT targeted at one processor.
 pub fn reset() {
-    *get_ioapic() = Ioapic { ioredtbl_config: [IOAPIC_CONFIG_MASKED; IOAPIC_IRQ_COUNT],
-        ioredtbl_destination: [0; IOAPIC_IRQ_COUNT], ioregsel: 0, ioapic_id: IOAPIC_ID,
-        irr: 0, irq_value: 0 };
+    *get_ioapic() = IOAPIC_RESET;
 }
 
+#[cfg(not(feature = "parallel"))]
 fn get_ioapic() -> MutexGuard<'static, Ioapic> { IOAPIC.try_lock().unwrap() }
+#[cfg(feature = "parallel")]
+fn get_ioapic() -> IoapicGuard {
+    unsafe { (*crate::parallel::machine(&raw mut IOAPIC_LOCK)).lock() };
+    IoapicGuard
+}
 
 #[no_mangle]
 pub fn get_ioapic_addr() -> u32 { &raw mut *get_ioapic() as u32 }

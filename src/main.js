@@ -53,6 +53,8 @@ v86.prototype.do_tick = function()
 {
     if(this.stopping || !this.running)
     {
+        // (the cores in vCPU workers stop too; run_cores lets them go on)
+        this.cpu.parallel?.request_stop();
         this.cpu.clock.pause();
         this.stopping = this.running = false;
         this.bus.send("emulator-stopped");
@@ -99,14 +101,16 @@ v86.prototype.stop = function()
 
 v86.prototype.destroy = function()
 {
+    this.cpu.parallel?.destroy();
     this.cpu.clock.pause();
     this.unregister_yield();
 };
 
-v86.prototype.restart = function()
+/** @param {string=} reason "power-on" after the guest turned the machine off */
+v86.prototype.restart = function(reason)
 {
     if(this.state_busy) throw new Error("Snapshot transaction is in progress");
-    this.cpu.reboot_internal("restart");
+    this.cpu.reboot_internal(reason === "power-on" ? "power-on" : "restart");
 };
 
 v86.prototype.init = function(settings)
@@ -291,18 +295,40 @@ v86.prototype.state_transaction = function(operation, resume_on_error)
     return next;
 };
 
+/**
+ * With cores in vCPU workers, a snapshot waits until each of them is parked
+ * at a safe point; run() lets them continue (src/parallel/machine.js).
+ */
+v86.prototype.parallel_save = async function(save)
+{
+    await this.cpu.parallel.park();
+    this.cpu.parallel_capture();
+    return save();
+};
+
+v86.prototype.parallel_restore = async function(restore)
+{
+    await this.cpu.parallel.park();
+    const result = await restore();
+    this.cpu.parallel_install();
+    return result;
+};
+
 v86.prototype.save_state_stream = function(write)
 {
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_save(() => save_state_stream(this.cpu, write)), true);
     return this.state_transaction(() => save_state_stream(this.cpu, write), true);
 };
 
 v86.prototype.restore_state_stream = function(source)
 {
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_restore(() => restore_state_stream(this.cpu, source)), false);
     return this.state_transaction(() => restore_state_stream(this.cpu, source), false);
 };
 
 v86.prototype.save_state = function()
 {
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_save(() => save_state(this.cpu)), true);
     if(this.state_busy) return this.state_transaction(() => save_state(this.cpu), true);
     if(this.cpu.in_cpu) return Promise.resolve().then(() => this.save_state());
     const paused = this.cpu.clock.paused;
@@ -313,6 +339,7 @@ v86.prototype.save_state = function()
 
 v86.prototype.restore_state = function(state)
 {
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_restore(() => restore_state(this.cpu, state)), false);
     if(this.state_busy) return this.state_transaction(() => restore_state(this.cpu, state), false);
     if(this.cpu.in_cpu) return Promise.resolve().then(() => this.restore_state(state));
     const paused = this.cpu.clock.paused;

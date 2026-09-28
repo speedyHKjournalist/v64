@@ -459,6 +459,15 @@ const SYSTEM: u8 = 1;
 const VECTOR: u8 = 2;
 const INTEGER: u8 = 3;
 unsafe fn dispatch(d: &Decoded, family: &mut u8) -> Result<(), Fault> {
+    // LOCK, and XCHG with memory (implicitly locked), with other cores in workers
+    if crate::parallel::active() && d.rm_register.is_none() && d.modrm.is_some()
+        && (d.prefixes.lock || matches!(d.base_opcode(), 0x86 | 0x87))
+    {
+        return memory::run_locked(|| dispatch_unlocked(d, family));
+    }
+    dispatch_unlocked(d, family)
+}
+unsafe fn dispatch_unlocked(d: &Decoded, family: &mut u8) -> Result<(), Fault> {
     match *family {
         SYSTEM => if super::system::execute(d)? { return Ok(()); },
         VECTOR => if super::vector::execute(d)? { return Ok(()); },

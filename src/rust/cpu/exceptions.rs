@@ -52,7 +52,7 @@ pub unsafe fn fault(vector: i32, code: Option<i32>) {
     let action = escalation(old.unwrap_or(Class::Benign), class(vector));
     if action == Action::Shutdown {
         let core = apic::current_core();
-        SHUTDOWN[core] = if *nmi_blocked { 2 } else { 1 };
+        (*crate::parallel::machine(&raw mut SHUTDOWN))[core] = if *nmi_blocked { 2 } else { 1 };
         if core == 0 { BSP_RESET = true; }
         *in_hlt = true;
         cpu::request_core_yield();
@@ -65,11 +65,11 @@ pub unsafe fn fault(vector: i32, code: Option<i32>) {
     DELIVERING = old;
 }
 #[no_mangle]
-pub unsafe fn exception_shutdown(core: u32) -> u32 { assert!(core < 8); SHUTDOWN[core as usize] as u32 }
+pub unsafe fn exception_shutdown(core: u32) -> u32 { assert!(core < 8); (*crate::parallel::machine(&raw mut SHUTDOWN))[core as usize] as u32 }
 #[no_mangle]
 pub unsafe fn exception_restore(core: u32, state: u32) {
     assert!(core < 8 && state <= 2);
-    SHUTDOWN[core as usize] = state as u8;
+    (*crate::parallel::machine(&raw mut SHUTDOWN))[core as usize] = state as u8;
 }
 pub unsafe fn init(core: u32) -> bool {
     if exception_shutdown(core) == 2 { return false; }
@@ -77,7 +77,7 @@ pub unsafe fn init(core: u32) -> bool {
     true
 }
 pub unsafe fn reset() {
-    SHUTDOWN = [0; 8];
+    *crate::parallel::machine(&raw mut SHUTDOWN) = [0; 8];
     DELIVERING = None;
     EXTERNAL = false;
     BSP_RESET = false;

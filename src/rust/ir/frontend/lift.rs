@@ -118,6 +118,15 @@ fn lift_inner(
         if i.prefixes.lock && !super::exchange::lock_supported(&i) {
             return Err(CompileError::Unsupported("LOCK or invalid operand"));
         }
+        // With cores in workers, a locked read-modify-write (LOCK, XCHG with
+        // memory) commits with a compare-exchange in the interpreter's
+        // helpers; the IR's load and later store would not be atomic.
+        if crate::parallel::active()
+            && i.ea.is_some()
+            && (i.prefixes.lock || matches!(i.encoding.opcode, 0x86 | 0x87))
+        {
+            return Err(CompileError::Unsupported("locked read-modify-write with cores in workers"));
+        }
         if i.baseline_ud {
             if !cpu || offset != bytes.len() {
                 return Err(CompileError::Unsupported(

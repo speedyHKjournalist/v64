@@ -48,7 +48,7 @@ async function run(mode, seed, quantum)
             if(cpu.active_core === id)
             {
                 const data = new DataView(cpu.wasm_memory.buffer);
-                return size === 1 ? data.getUint8(offset) : data.getUint32(offset, true);
+                return size === 1 ? data.getUint8(cpu.state_base + offset) : data.getUint32(cpu.state_base + offset, true);
             }
             const index = CORE_STATE_RANGES.findIndex(([start, end]) => offset >= start && offset + size <= end);
             assert.ok(index >= 0);

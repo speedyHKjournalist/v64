@@ -11,7 +11,7 @@
 use super::Page;
 use crate::cpu::{cpu::CR0_EM, cpu::CR0_TS, cpu::FLAGS_ALL, fpu, global_pointers as gp};
 use crate::ir::frontend::decode::DecodedInstruction;
-use crate::wasmgen::wasm_builder::{Signature, WasmLocalV128, WasmType};
+use crate::wasmgen::wasm_builder::{Signature, WasmBuilder, WasmLocalV128, WasmType};
 
 #[derive(Clone, Copy)]
 pub(super) enum Packed {
@@ -389,6 +389,34 @@ impl Page {
         self.tlb_miss(bytes as u32, false);
         self.retry_if();
         self.host_address();
+        if WasmBuilder::ATOMIC_GUEST_MEMORY {
+            // (cores in workers: ordered scalar halves, zero-extended)
+            match bytes {
+                16 => {
+                    let scratch = self.w.set_new_local();
+                    self.w.get_local(&scratch);
+                    self.w.guest_load_v128(&scratch);
+                    self.w.free_local(scratch);
+                },
+                8 => {
+                    self.w.guest_load_i64(0);
+                    let scalar = self.w.set_new_local_i64();
+                    self.w.simd_zero();
+                    self.w.get_local_i64(&scalar);
+                    self.w.simd_lane(0x1E, 0);
+                    self.w.free_local_i64(scalar);
+                },
+                _ => {
+                    self.w.guest_load_i32(0);
+                    let scalar = self.w.set_new_local();
+                    self.w.simd_zero();
+                    self.w.get_local(&scalar);
+                    self.w.simd_lane(0x1C, 0);
+                    self.w.free_local(scalar);
+                },
+            }
+            return;
+        }
         self.w.simd_memory(
             match bytes {
                 16 => 0x00,
@@ -404,16 +432,22 @@ impl Page {
         self.tlb_miss(bytes as u32, true);
         self.retry_if();
         self.host_address();
+        if WasmBuilder::ATOMIC_GUEST_MEMORY && bytes == 16 {
+            let address = self.w.set_new_local();
+            self.w.guest_store_v128(&address, value);
+            self.w.free_local(address);
+            return;
+        }
         self.w.get_local_v128(value);
         match bytes {
             16 => self.w.simd_memory(0x0B, 0),
             8 => {
                 self.w.simd_lane(0x1D, 0);
-                self.w.store_unaligned_i64(0);
+                self.w.guest_store_i64(0);
             },
             _ => {
                 self.w.simd_lane(0x1B, 0);
-                self.w.store_unaligned_i32(0);
+                self.w.guest_store_i32(0);
             },
         }
     }

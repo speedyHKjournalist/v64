@@ -306,6 +306,11 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
         return None;
     }
     let op = i.encoding.opcode;
+    // With cores in workers a locked read-modify-write needs one atomic
+    // commit (the interpreter's compare-exchange helpers)
+    if crate::parallel::active() && i.ea.is_some() && (p.lock || matches!(op, 0x86 | 0x87)) {
+        return None;
+    }
     let modrm = i.modrm.unwrap_or(0);
     let reg = modrm >> 3 & 7;
     let v = i.operand_size;
@@ -1014,6 +1019,13 @@ impl Page {
             self.w.const_i32(0x1000 - bytes as i32);
             self.w.gtu_i32();
             self.w.or_i32();
+            if WasmBuilder::ATOMIC_GUEST_MEMORY {
+                // atomic accesses need natural alignment (16 bytes: 8-byte halves)
+                self.w.get_local(&self.addr);
+                self.w.const_i32(bytes.min(8) as i32 - 1);
+                self.w.and_i32();
+                self.w.or_i32();
+            }
         }
     }
     fn host_address(&mut self) {
@@ -1045,9 +1057,9 @@ impl Page {
         self.w.else_();
         self.host_address();
         match size {
-            8 => self.w.load_u8(0),
-            16 => self.w.load_unaligned_u16(0),
-            _ => self.w.load_unaligned_i32(0),
+            8 => self.w.guest_load_u8(0),
+            16 => self.w.guest_load_u16(0),
+            _ => self.w.guest_load_i32(0),
         }
         self.w.block_end();
     }
@@ -1067,9 +1079,9 @@ impl Page {
         self.host_address();
         self.w.get_local(value);
         match size {
-            8 => self.w.store_u8(0),
-            16 => self.w.store_unaligned_u16(0),
-            _ => self.w.store_unaligned_i32(0),
+            8 => self.w.guest_store_u8(0),
+            16 => self.w.guest_store_u16(0),
+            _ => self.w.guest_store_i32(0),
         }
         self.w.block_end();
     }
@@ -2412,13 +2424,13 @@ impl Page {
                     self.host_address();
                     self.w.get_local(&low);
                     match bytes {
-                        2 => self.w.store_unaligned_u16(0),
-                        4 => self.w.store_unaligned_i32(0),
+                        2 => self.w.guest_store_u16(0),
+                        4 => self.w.guest_store_i32(0),
                         _ => {
-                            self.w.store_unaligned_i32(0);
+                            self.w.guest_store_i32(0);
                             self.host_address();
                             self.w.get_local(&high);
-                            self.w.store_unaligned_i32(4);
+                            self.w.guest_store_i32(4);
                         },
                     }
                 }

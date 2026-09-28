@@ -98,6 +98,12 @@ CARGO_FLAGS_SAFE=\
 
 CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
 
+# Host-parallel build (W0/W1): atomics in v86's own code (the prebuilt std stays
+# single-threaded, each vCPU worker has a private relocated copy of it), the
+# memory imported and later marked shared by tools/parallel_wasm.mjs
+CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
+		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296"
+
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
@@ -229,6 +235,16 @@ build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.t
 	cargo rustc $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-debug.wasm
 	BLOCK_SIZE=K ls -l build/v86-debug.wasm
+
+build/v86-parallel.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml tools/parallel_wasm.mjs
+	mkdir -p build/
+	CARGO_TARGET_DIR=build/parallel cargo rustc --release --features parallel $(CARGO_FLAGS_PARALLEL)
+	./tools/parallel_wasm.mjs build/parallel/wasm32-unknown-unknown/release/v86.wasm build/v86-parallel.wasm
+
+build/v86-parallel-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml tools/parallel_wasm.mjs
+	mkdir -p build/
+	CARGO_TARGET_DIR=build/parallel cargo rustc --features parallel $(CARGO_FLAGS_PARALLEL)
+	./tools/parallel_wasm.mjs build/parallel/wasm32-unknown-unknown/debug/v86.wasm build/v86-parallel-debug.wasm
 
 build/v86-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
@@ -669,6 +685,7 @@ x64-system-tests: build/v86-debug.wasm
 	node tests/x64/triple_fault.mjs
 	node tests/x64/direct_loader.mjs
 	node tests/x64/profile_options.mjs
+	node tests/x64/task_faults.mjs
 
 x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/integer_oracle.mjs

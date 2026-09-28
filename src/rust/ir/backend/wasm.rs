@@ -813,6 +813,15 @@ impl Emitter<'_> {
         self.w.const_i32(guard.page_offset_limit);
         self.w.ltu_i32();
         self.w.and_i32();
+        if WasmBuilder::ATOMIC_GUEST_MEMORY && guard.bytes > 1 {
+            // atomic accesses (cores in workers) need natural alignment,
+            // at most 8 bytes: 16-byte vectors are two 8-byte halves
+            self.get(address);
+            self.w.const_i32(guard.bytes.min(8) as i32 - 1);
+            self.w.and_i32();
+            self.w.eqz_i32();
+            self.w.and_i32();
+        }
         entry
     }
     fn finish_ram_store(&mut self, commit: StateId, pointer: &WasmLocal, fallback: DiagnosticExit) {
@@ -862,7 +871,7 @@ impl Emitter<'_> {
         self.w.xor_i32();
         let pointer = self.w.set_new_local();
         self.w.get_local(&pointer);
-        self.w.load_unaligned_i64(0);
+        self.w.guest_load_i64(0);
         let value = self.w.set_new_local_i64();
         self.w.get_local_i64(&value);
         self.cpu_register_pair(&plan.expected); // EDX:EAX, read after the memory-read point.
@@ -872,7 +881,7 @@ impl Emitter<'_> {
         self.w.if_void();
         self.w.get_local(&pointer);
         self.cpu_register_pair(&plan.replacement); // ECX:EBX
-        self.w.store_unaligned_i64(0);
+        self.w.guest_store_i64(0);
         self.w.else_();
         self.w.const_i32(plan.expected.low as i32);
         self.w.get_local_i64(&value);
@@ -1142,9 +1151,9 @@ impl Emitter<'_> {
                     self.w.free_local(pointer);
                 }
                 match bytes {
-                    1 => self.w.load_u8(0),
-                    2 => self.w.load_unaligned_u16(0),
-                    4 => self.w.load_unaligned_i32(0),
+                    1 => self.w.guest_load_u8(0),
+                    2 => self.w.guest_load_u16(0),
+                    4 => self.w.guest_load_i32(0),
                     _ => unreachable!(),
                 }
                 if let Some(cache) = cache {
@@ -1164,9 +1173,10 @@ impl Emitter<'_> {
                 });
                 self.get(*value);
                 match bytes {
-                    1 => self.w.store_u8(0),
-                    2 => self.w.store_aligned_u16(0),
-                    4 => self.w.store_unaligned_i32(0),
+                    1 => self.w.guest_store_u8(0),
+                    2 if !WasmBuilder::ATOMIC_GUEST_MEMORY => self.w.store_aligned_u16(0),
+                    2 => self.w.guest_store_u16(0),
+                    4 => self.w.guest_store_i32(0),
                     _ => unreachable!(),
                 }
                 if let Some(cache) = cache {
@@ -1202,10 +1212,16 @@ impl Emitter<'_> {
                         self.w.get_local(&pointer);
                         self.get(*value);
                         self.w.simd_lane(0x16, lane);
-                        self.w.store_u8(lane as u32);
+                        self.w.guest_store_u8(lane as u32);
                         self.w.block_end();
                     }
                     self.w.free_local(mask);
+                }
+                else if bytes == 16 && WasmBuilder::ATOMIC_GUEST_MEMORY {
+                    self.get(*value);
+                    let vector = self.w.set_new_local_v128();
+                    self.w.guest_store_v128(&pointer, &vector);
+                    self.w.free_local_v128(vector);
                 }
                 else {
                     self.w.get_local(&pointer);
@@ -1213,11 +1229,11 @@ impl Emitter<'_> {
                     match bytes {
                         4 => {
                             self.w.simd_lane(0x1B, 0);
-                            self.w.store_unaligned_i32(0);
+                            self.w.guest_store_i32(0);
                         },
                         8 => {
                             self.w.simd_lane(0x1D, *lane);
-                            self.w.store_unaligned_i64(0);
+                            self.w.guest_store_i64(0);
                         },
                         16 => self.w.simd_memory(0x0B, 0),
                         _ => unreachable!(),
@@ -1228,7 +1244,7 @@ impl Emitter<'_> {
             },
             NativeMemory::VectorLoad { result, combine } => {
                 if let VectorCombine::ReplaceWord { old, lane } = combine {
-                    self.w.load_unaligned_u16(0);
+                    self.w.guest_load_u16(0);
                     let word = self.w.set_new_local();
                     self.get(*old);
                     self.w.get_local(&word);
@@ -1237,15 +1253,45 @@ impl Emitter<'_> {
                     self.w.free_local(word);
                 }
                 else {
-                    self.w.simd_memory(
+                    if WasmBuilder::ATOMIC_GUEST_MEMORY {
+                        // (cores in workers: ordered scalar halves, zero-extended)
                         match bytes {
-                            4 => 0x5C,
-                            8 => 0x5D,
-                            16 => 0,
+                            4 => {
+                                self.w.guest_load_i32(0);
+                                let scalar = self.w.set_new_local();
+                                self.w.simd_zero();
+                                self.w.get_local(&scalar);
+                                self.w.simd_lane(0x1C, 0); // i32x4.replace_lane
+                                self.w.free_local(scalar);
+                            },
+                            8 => {
+                                self.w.guest_load_i64(0);
+                                let scalar = self.w.set_new_local_i64();
+                                self.w.simd_zero();
+                                self.w.get_local_i64(&scalar);
+                                self.w.simd_lane(0x1E, 0); // i64x2.replace_lane
+                                self.w.free_local_i64(scalar);
+                            },
+                            16 => {
+                                let scratch = self.w.set_new_local();
+                                self.w.get_local(&scratch);
+                                self.w.guest_load_v128(&scratch);
+                                self.w.free_local(scratch);
+                            },
                             _ => unreachable!(),
-                        },
-                        0,
-                    );
+                        }
+                    }
+                    else {
+                        self.w.simd_memory(
+                            match bytes {
+                                4 => 0x5C,
+                                8 => 0x5D,
+                                16 => 0,
+                                _ => unreachable!(),
+                            },
+                            0,
+                        );
+                    }
                     match combine {
                         VectorCombine::None => (),
                         VectorCombine::Shuffle { old, .. } | VectorCombine::Binary { old, .. } => {
@@ -1473,9 +1519,10 @@ impl Emitter<'_> {
                 self.w.get_local(&pointer);
                 self.get(*value);
                 match bytes {
-                    1 => self.w.store_u8(0),
-                    2 => self.w.store_aligned_u16(0),
-                    4 => self.w.store_unaligned_i32(0),
+                    1 => self.w.guest_store_u8(0),
+                    2 if !WasmBuilder::ATOMIC_GUEST_MEMORY => self.w.store_aligned_u16(0),
+                    2 => self.w.guest_store_u16(0),
+                    4 => self.w.guest_store_i32(0),
                     _ => unreachable!(),
                 }
                 self.finish_ram_store(*commit, &pointer, DiagnosticExit::ScalarStore);
@@ -2272,7 +2319,9 @@ fn emit_inner_with_batches(
         layout.flag_operand,
     ]
     .iter()
-    .any(|a| a % 4 != 0 || *a > 64 * 65536 - 32)
+    // (the parallel build's state block is a static above that minimum; its
+    // relocated instances are always part of the imported memory)
+    .any(|a| a % 4 != 0 || *a > 64 * 65536 - 32 && !WasmBuilder::ATOMIC_GUEST_MEMORY)
     {
         return Err(CompileError::Unsupported(
             "state layout outside imported memory minimum",

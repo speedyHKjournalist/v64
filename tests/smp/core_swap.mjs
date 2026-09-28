@@ -81,7 +81,7 @@ function core_state(cpu)
 {
     cpu.wm.exports["fpu_cache_barrier"]();
     const memory = new Uint8Array(cpu.wasm_memory.buffer);
-    return CORE_STATE_RANGES.map(([start, end]) => Buffer.from(memory.slice(start, end)).toString("hex")).join("");
+    return CORE_STATE_RANGES.map(([start, end]) => Buffer.from(memory.slice(cpu.state_base + start, cpu.state_base + end)).toString("hex")).join("");
 }
 
 function outcome_of(cpu, id, state)
@@ -108,7 +108,7 @@ const mode = +process.env.DISABLE_JIT ? "interpreter" : "JIT";
     c.stack_size_32[0] = 0;
     c.update_state_flags();
     const b = c.save_core_state();
-    const state_flags = () => new Uint8Array(c.wasm_memory.buffer)[STATE_OFFSETS.state_flags];
+    const state_flags = () => new Uint8Array(c.wasm_memory.buffer)[c.state_base + STATE_OFFSETS.state_flags];
     c.load_core_state(a);
     const flags_a = state_flags();
     c.load_core_state(b);

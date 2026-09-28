@@ -17,6 +17,77 @@ impl Fault {
     pub fn de() -> Self { Self { vector: 0, error: None, address: None } }
 }
 static mut X64_TLBS: [Tlb; 8] = [const { Tlb::new() }; 8];
+
+/// A locked instruction in progress while cores run in workers
+/// (crate::parallel): its first memory read is the read-modify-write operand,
+/// read from RAM, and the write to the same bytes commits with a
+/// compare-exchange. If another core changed the operand in between, the
+/// instruction runs again from its saved registers.
+#[derive(Clone, Copy)]
+struct LockedOperand { address: u64, size: usize, backing: u32, old: u128 }
+struct Locked { operand: Option<LockedOperand>, conflict: bool }
+static mut LOCKED: Option<Locked> = None;
+
+pub unsafe fn run_locked(mut instruction: impl FnMut() -> Result<(), Fault>) -> Result<(), Fault> {
+    #[cfg(feature = "parallel")]
+    {
+        let saved = crate::parallel::Registers::save();
+        loop {
+            LOCKED = Some(Locked { operand: None, conflict: false });
+            let result = instruction();
+            let conflict = (*(&raw mut LOCKED)).take().is_some_and(|locked| locked.conflict);
+            if !conflict || result.is_err() {
+                return result;
+            }
+            saved.restore();
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    instruction()
+}
+
+/// The operand read of a locked instruction, if it is in RAM
+unsafe fn locked_read(address: u64, size: usize, stack: bool) -> Result<Option<u128>, Fault> {
+    let Some(locked) = &mut *(&raw mut LOCKED) else { return Ok(None) };
+    if locked.operand.is_some() {
+        return Ok(None);
+    }
+    // (a locked operand is checked for writing before it is read)
+    let span = preflight(address, size, Access::Write, stack, false)?;
+    let Some(backing) = (if span.contiguous() { physical::ram_backing(span.first, size) } else { None }) else {
+        return Ok(None);
+    };
+    let old = match size {
+        1 => crate::cpu::memory::read8_no_mmap_check(backing) as u8 as u128,
+        2 => crate::cpu::memory::read16_no_mmap_check(backing) as u16 as u128,
+        4 => crate::cpu::memory::read32_no_mmap_check(backing) as u32 as u128,
+        8 => crate::cpu::memory::read64_no_mmap_check(backing) as u128,
+        _ => {
+            crate::cpu::memory::read64_no_mmap_check(backing) as u128
+                | (crate::cpu::memory::read64_no_mmap_check(backing + 8) as u128) << 64
+        },
+    };
+    locked.operand = Some(LockedOperand { address, size, backing, old });
+    Ok(Some(old))
+}
+
+/// The operand write of a locked instruction: true if it was the operand
+unsafe fn locked_write(address: u64, size: usize, value: u128) -> bool {
+    let Some(locked) = &mut *(&raw mut LOCKED) else { return false };
+    let Some(operand) = locked.operand else { return false };
+    if operand.address != address || operand.size != size {
+        return false;
+    }
+    crate::jit::jit_dirty_cache_small(operand.backing, operand.backing + size as u32);
+    let at = crate::cpu::memory::mem8.add(operand.backing as usize);
+    let committed = if size == 16 {
+        crate::parallel::compare_exchange128(at, operand.old, value)
+    } else {
+        crate::parallel::compare_exchange(at, size as u32, operand.old as u64, value as u64)
+    };
+    locked.conflict |= !committed;
+    true
+}
 // Compiled-code access cache entries derive from these TLBs: retire them too.
 pub unsafe fn invalidate_all_tlbs() { for core in 0..8 { X64_TLBS[core].clear(); } super::jac::flush_all(); }
 pub unsafe fn invalidate_core(core: usize) { X64_TLBS[core].clear(); super::jac::flush(core); }
@@ -176,6 +247,9 @@ fn write_physical(span: Span, value: u128) -> Result<(), Fault> {
 pub unsafe fn read(address: u64, width: u8, stack: bool) -> Result<u64, Fault> {
     assert!(matches!(width, 8 | 16 | 32 | 64));
     let size = (width / 8) as usize;
+    if let Some(value) = locked_read(address, size, stack)? {
+        return Ok(value as u64);
+    }
     let value = read_physical(preflight(address, size, Access::Read, stack, false)?)? as u64;
     super::debug::data(address, size, false);
     Ok(value)
@@ -183,16 +257,25 @@ pub unsafe fn read(address: u64, width: u8, stack: bool) -> Result<u64, Fault> {
 pub unsafe fn write(address: u64, width: u8, value: u64, stack: bool) -> Result<(), Fault> {
     assert!(matches!(width, 8 | 16 | 32 | 64));
     let size = (width / 8) as usize;
+    if locked_write(address, size, value as u128) {
+        return Ok(());
+    }
     write_physical(preflight(address, size, Access::Write, stack, false)?, value as u128)?;
     super::debug::data(address, size, true);
     Ok(())
 }
 pub unsafe fn read128(address: u64, stack: bool) -> Result<u128, Fault> {
+    if let Some(value) = locked_read(address, 16, stack)? {
+        return Ok(value);
+    }
     let value = read_physical(preflight(address, 16, Access::Read, stack, false)?)?;
     super::debug::data(address, 16, false);
     Ok(value)
 }
 pub unsafe fn write128(address: u64, value: u128, stack: bool) -> Result<(), Fault> {
+    if locked_write(address, 16, value) {
+        return Ok(());
+    }
     write_physical(preflight(address, 16, Access::Write, stack, false)?, value)?;
     super::debug::data(address, 16, true);
     Ok(())

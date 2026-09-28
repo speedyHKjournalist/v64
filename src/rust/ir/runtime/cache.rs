@@ -1927,6 +1927,24 @@ pub(super) fn tier(entry: super::entry::CpuEntryKey) -> u32 {
         )
         .unwrap_or(0)
 }
+/// With cores in workers, the pages this code was compiled from must be
+/// published to every other core first (crate::parallel::code): wait a
+/// little for their acknowledgements, else the publication fails and the
+/// code is compiled again later, when they have.
+fn job_published(job: &Job) -> bool {
+    let pages = || job.artifact.dependencies.iter().map(|d| Page::page_of(d.page.0));
+    if jit::pages_published(pages()) {
+        return true;
+    }
+    let deadline = unsafe { crate::cpu::cpu::js::microtick() } + 0.5;
+    while unsafe { crate::cpu::cpu::js::microtick() } < deadline {
+        if jit::pages_published(pages()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pending/validated results have not completed the publication transaction.
 pub(super) fn completion_state(id: u64) -> u32 {
     match CACHE
@@ -1959,7 +1977,8 @@ pub unsafe fn ir_cache_validate(id: u64, slot: u32) -> bool {
             .promotion_parent
             .is_none_or(|ticket| promotion_index(&cache, ticket).is_some());
         let r = &mut cache.records[index];
-        if r.phase == Phase::Pending && parent_current && unchanged_full(&r.job) {
+        // (other cores' translations mark the pages before the bytes are checked)
+        if r.phase == Phase::Pending && parent_current && job_published(&r.job) && unchanged_full(&r.job) {
             r.phase = Phase::Validated;
             true
         }

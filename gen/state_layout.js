@@ -144,9 +144,12 @@ export const STATE_FIELDS = [
 // listed here, so new state has to be classified when it is added.
 export const STATICS = {
     // one local APIC per core, indexed by core; the scheduler's current core and INIT/SIPI events
+    // the state block of this instance in the parallel build (W0): each relocated instance has its own
+    "cpu/global_pointers.rs": { STATE_BLOCK: "core" },
     "cpu/apic.rs": { APICS: "core", APIC_AUX: "core", CURRENT_CORE: "machine", CORE_COUNT: "machine", CORE_EVENTS: "machine", NMI_PENDING: "machine" },
     "cpu/cpu.rs": {
         INTERPRETED: "debug", INTERPRETED_OFFSETS: "debug", INTERPRETED_PAGES: "debug", INTERPRETED_WATCH: "debug",
+        INSTRUCTION_TRACE: "debug", INSTRUCTION_TRACE_NEXT: "debug", INSTRUCTION_TRACE_ENABLED: "debug",
         cpuid_level: "machine", debug_last_jump: "debug", jit_block_boundary: "scratch", core_yield: "scratch",
         jit_link_batch: "scratch", jit_link_batch_start: "scratch", jit_link_batch_limit: "scratch",
         // active TLB working set; context.rs preserves each inactive core
@@ -273,13 +276,13 @@ function rust_consts()
     for(const f of [...STATE_FIELDS].sort((a, b) => a.offset - b.offset))
     {
         const type = f.rust;
-        for(const line of f.doc || []) lines.push("/// " + line);
+        for(const line of f.doc || []) lines.push("// " + line);
         for(const [alias, alias_type] of f.aliases || [])
         {
-            lines.push(`pub const ${alias}: *mut ${alias_type} = ${f.offset} as *mut ${alias_type};`);
+            lines.push(`state!(${alias}: ${alias_type} = ${f.offset});`);
         }
         const comment = f.comment ? " // " + f.comment : "";
-        lines.push(`pub const ${f.name}: *mut ${type} = ${f.offset} as *mut ${type};${comment}`);
+        lines.push(`state!(${f.name}: ${type} = ${f.offset});${comment}`);
     }
     return lines.join("\n") + "\n";
 }

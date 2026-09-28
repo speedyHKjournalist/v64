@@ -4,7 +4,13 @@
 //   buildroot (default): buildroot-bzimage68.bin, Linux 6.8, PIC interrupt routing
 //   linux4: linux4.iso, Linux 4.16, IOAPIC interrupt routing (uses the MADT)
 // - the tables SeaBIOS installed from v86's table loader match the emulated
-//   hardware and advertise S5 but not S3/S4; the guest reports no ACPI errors
+//   hardware and advertise S3, S4 and S5; the guest reports no ACPI errors
+// - S3 (A3), if the kernel supports it (linux4): suspend to RAM, woken
+//   alternately by an RTC alarm and by the power button (S3_CYCLES); RAM
+//   contents and the shell survive, the kernel reports the wake from S3
+// - S4 (A3), if supported: hibernate to a swap disk, ACPI S4 soft off, power
+//   on with RAM cleared, the booted kernel restores the image from the disk
+//   (as an initramfs does, through /sys/power/resume) (S4_CYCLES)
 // - the fixed power button reaches the guest as one event, without an SCI storm
 // - the PM timer keeps time as the guest's clocksource
 // - "reboot" (reboot=acpi) goes through the FADT reset register and the guest
@@ -13,6 +19,7 @@
 // - power_button() powers the machine on again (repeated POWER_CYCLES times)
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import url from "node:url";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
@@ -21,7 +28,42 @@ process.on("unhandledRejection", exn => { throw exn; });
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const SHOW_LOGS = +process.env.SHOW_LOGS;
 const POWER_CYCLES = +process.env.POWER_CYCLES || 2;
+const S3_CYCLES = process.env.S3_CYCLES === undefined ? 4 : +process.env.S3_CYCLES;
+const S4_CYCLES = process.env.S4_CYCLES === undefined ? 2 : +process.env.S4_CYCLES;
+const CPU_CORES = +process.env.CPU_CORES || 1;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+
+/**
+ * A file from an ISO9660 image (plain names, without version or Rock Ridge)
+ * @param {string} path
+ * @param {!Array<string>} names
+ * @return {!ArrayBuffer}
+ */
+function iso_file(path, names)
+{
+    const iso = fs.readFileSync(path);
+    let extent = iso.readUInt32LE(16 * 2048 + 156 + 2), size = iso.readUInt32LE(16 * 2048 + 156 + 10);
+    for(const name of names)
+    {
+        let found = false;
+        for(let at = extent * 2048; at < extent * 2048 + size;)
+        {
+            const length = iso[at];
+            if(!length) { at = (Math.floor(at / 2048) + 1) * 2048; continue; }
+            const entry = iso.toString("latin1", at + 33, at + 33 + iso[at + 32]).replace(/;\d+$/, "").replace(/\.$/, "");
+            if(entry === name)
+            {
+                extent = iso.readUInt32LE(at + 2);
+                size = iso.readUInt32LE(at + 10);
+                found = true;
+                break;
+            }
+            at += length;
+        }
+        assert.ok(found, name + " in " + path);
+    }
+    return iso.buffer.slice(iso.byteOffset + extent * 2048, iso.byteOffset + extent * 2048 + size);
+}
 
 const GUEST = process.env.GUEST || "buildroot";
 const GUESTS = {
@@ -30,8 +72,18 @@ const GUESTS = {
         bzimage: { url: __dirname + "/../../images/buildroot-bzimage68.bin" },
         cmdline: "console=ttyS0 audit=0 reboot=acpi",
     },
+    // The CD's own kernel, booted directly: its isolinux line is
+    // "root=/dev/sr0". nokaslr: 32-bit hibernation restores into a kernel at
+    // the same address (with KASLR the resuming kernel may lie elsewhere).
+    // resume=: the kernel restores a hibernation image from the swap disk.
+    // (Kernel messages stay on the VGA console: the image starts a shell on
+    // the console and one on ttyS0.)
     "linux4": {
         cdrom: { url: __dirname + "/../../images/linux4.iso" },
+        bzimage: { buffer: iso_file(__dirname + "/../../images/linux4.iso", ["BOOT", "BZIMAGE"]) },
+        cmdline: "root=/dev/sr0 nokaslr resume=/dev/sda",
+        // blank disk: swap space for hibernation
+        hda: { buffer: new ArrayBuffer(96 * 1024 * 1024) },
     },
 };
 assert.ok(GUESTS[GUEST], "unknown GUEST " + GUEST);
@@ -42,15 +94,19 @@ const emulator = new V86({
     autostart: true,
     memory_size: 256 * 1024 * 1024,
     acpi: true,
+    cpu_cores: CPU_CORES,
+    experimental_smp_jit: CPU_CORES > 1 && !+process.env.DISABLE_JIT,
     disable_jit: +process.env.DISABLE_JIT,
     log_level: 0,
     ...GUESTS[GUEST],
+    // W1: application processors in vCPU workers
+    ...(+process.env.PARALLEL ? { parallel: true, wasm_path: __dirname + "/../../build/v86-parallel.wasm" } : {}),
 });
 
 const overall_timeout = setTimeout(() => {
     console.log("\nTimeout. Serial output since the last command:\n" + serial);
     process.exit(1);
-}, (120 + POWER_CYCLES * 60) * 1000);
+}, (120 + POWER_CYCLES * 60 + S3_CYCLES * 60 + S4_CYCLES * 180) * 1000);
 
 let serial = "";
 let waiter = null;
@@ -189,9 +245,10 @@ function check_tables()
     assert.ok(flags & 1 << 10, "RESET_REG_SUP");
     assert.deepEqual([mem[facp + 116], u64(facp + 120), mem[facp + 128]], [1, 0xCF9, 0x06], "RESET_REG");
 
-    // Sleep states: only S5
-    assert.ok(contains(tables["DSDT"], "_S5_"), "_S5_ advertised");
-    assert.ok(!contains(tables["DSDT"], "_S3_") && !contains(tables["DSDT"], "_S4_"), "S3/S4 not advertised");
+    // Sleep states: S3 (SLP_TYP 1), S4 (2), S5 (0)
+    for(const state of ["_S3_", "_S4_", "_S5_"]) assert.ok(contains(tables["DSDT"], state), state + " advertised");
+    // no S4BIOS: the OS hibernates itself
+    assert.equal(u32(facs + 16) & 1, 0, "FACS S4BIOS_F clear");
 
     assert.ok(tables["APIC"], "MADT");
 
@@ -233,7 +290,8 @@ log("tables: " + check_tables().join(" "));
     assert.equal(d.acpi_tables.oem_id, "V86   ");
     assert.deepEqual(d.acpi_tables.tables.map(t => t.signature).sort(), ["APIC", "DSDT", "FACP", "FACS", "XSDT"]);
     assert.ok(d.acpi_tables.tables.every(t => t.checksum_ok));
-    assert.equal(d.apic.id, 0);
+    // (the local APIC of the core that ran last)
+    assert.equal(d.apic.id, d.active_core ?? 0);
 }
 
 // Older kernels report that the PCI root bridge has no _OSC; it is optional
@@ -244,7 +302,10 @@ assert.equal(value_of(acpi_problems, "PROBLEMS"), 0, "ACPI errors in dmesg: " + 
 
 const dmesg = await command("dmesg | grep -E 'ACPI: (Interpreter enabled|(PM: )?\\(supports)|Power Button|Using (PIC|IOAPIC) for interrupt routing'");
 assert.match(dmesg, /ACPI: Interpreter enabled/);
-assert.match(dmesg, /ACPI: (PM: )?\(supports S0 S5\)/);
+const sleep_states = await command("cat /sys/power/state 2>/dev/null; echo STATES_END");
+const can_suspend = /\bmem\b/.test(sleep_states), can_hibernate = /\bdisk\b/.test(sleep_states);
+// a kernel without CONFIG_SUSPEND/HIBERNATION lists only what it can use
+assert.match(dmesg, can_suspend ? /ACPI: (PM: )?\(supports S0 S3 S4 S5\)/ : /ACPI: (PM: )?\(supports S0 (S3 )?(S4 )?S5\)/);
 assert.match(dmesg, /Power Button \[PWRF\]/);
 log("guest ACPI: " + dmesg.trim().split("\n").filter(line => line.includes("ACPI")).join(" | "));
 
@@ -279,6 +340,89 @@ const guest_seconds = (value_of(uptime, "U1") - value_of(uptime, "U0")) / 100;
 const host_seconds = (Date.now() - host_start) / 1000;
 log(`acpi_pm clocksource: guest ${guest_seconds.toFixed(2)}s over host ${host_seconds.toFixed(2)}s`);
 assert.ok(guest_seconds >= 2.9 && guest_seconds <= host_seconds + 0.1, "guest time follows the PM timer");
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// S3: suspend to RAM. A tmpfs file (RAM only) must survive; the wake cause
+// alternates between the RTC alarm (RTC_EN wake) and the power button.
+if(can_suspend && S3_CYCLES)
+{
+    await command("dd if=/dev/urandom of=/tmp/s3.bin bs=1024 count=2048 2>/dev/null; md5sum /tmp/s3.bin > /tmp/s3.md5");
+    for(let cycle = 1; cycle <= S3_CYCLES; cycle++)
+    {
+        const by_rtc = cycle % 2 === 1;
+        const before = await command("set -- $(cat /proc/uptime); echo UP=${1%.*}; echo RTC=$(date +%s)");
+        const slept = next_event("acpi-sleep", 60000);
+        const woke = next_event("acpi-wake", 120000);
+        // (the kernel log is cleared each cycle: over many cycles its ring buffer wraps)
+        const alarm = "dmesg -c >/dev/null; " + (by_rtc ? "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +3 > /sys/class/rtc/rtc0/wakealarm; " : "");
+        serial = "";
+        // (the marker is computed, so the echoed command line cannot match it)
+        emulator.serial0_send(alarm + "echo mem > /sys/power/state; echo RESUMED_$((" + cycle + "*7))\n");
+        assert.equal(await slept, "S3");
+        assert.equal(emulator.v86.cpu.devices.acpi.sleeping, 3, "cores stopped in S3");
+        if(!by_rtc)
+        {
+            await delay(1000);
+            if(cycle === 2)
+            {
+                // a snapshot of the sleeping machine wakes after restore
+                const state = await emulator.save_state();
+                await emulator.restore_state(state);
+                assert.equal(emulator.v86.cpu.devices.acpi.sleeping, 3, "restored asleep");
+            }
+            assert.equal(await emulator.power_button(), true);
+        }
+        assert.equal(await woke, by_rtc ? "rtc" : "power-button");
+        await wait_serial(new RegExp("RESUMED_" + cycle * 7 + "\r?\n[\\s\\S]*~% $"), "resume " + cycle, 60000).catch(error => {
+            const d = emulator.v86.cpu.get_diagnostics();
+            console.log(JSON.stringify({ cpu: d.cpu, cores: d.cores, parallel: d.parallel, acpi: d.acpi }, null, 1));
+            console.log("serial: " + JSON.stringify(serial.slice(-1500)));
+            throw error;
+        });
+        const check = await command("md5sum -c /tmp/s3.md5 >/dev/null && echo RAM_INTACT=1; " +
+            "echo WAKES=$(dmesg | grep -c -E '(ACPI: )?(PM: )?Waking up from system sleep state S3')");
+        assert.equal(value_of(check, "RAM_INTACT"), 1, "tmpfs contents survive S3");
+        assert.equal(value_of(check, "WAKES"), 1, "the kernel woke from S3");
+        const after = await command("set -- $(cat /proc/uptime); echo UP=${1%.*}; echo RTC=$(date +%s)");
+        assert.ok(value_of(after, "UP") >= value_of(before, "UP"), "uptime does not go backwards across S3");
+        assert.ok(value_of(after, "RTC") >= value_of(before, "RTC"), "wall clock does not go backwards across S3");
+        log(`S3 cycle ${cycle}: woken by ${by_rtc ? "the RTC alarm" : "the power button"}, RAM intact`);
+    }
+}
+
+// S4: the guest hibernates to the swap disk and enters ACPI S4 (soft off).
+// Power-on clears RAM and boots from the CD again; handing the image to the
+// new kernel (/sys/power/resume, as an initramfs does) restores the old one.
+if(can_hibernate && S4_CYCLES)
+{
+    const swap = await command("mkswap /dev/sda >/dev/null && swapon /dev/sda && echo SWAP=1");
+    assert.equal(value_of(swap, "SWAP"), 1, "swap on the blank disk");
+    for(let cycle = 1; cycle <= S4_CYCLES; cycle++)
+    {
+        const marker = 1000 + cycle;
+        await command(`echo ${marker} > /tmp/s4-marker; echo platform > /sys/power/disk; echo 1 > /sys/power/pm_debug_messages; dmesg -c >/dev/null`);
+        const off = next_event("acpi-power-off", 180000);
+        const stopped = next_event("emulator-stopped", 180000);
+        serial = "";
+        emulator.serial0_send(`echo disk > /sys/power/state; echo THAWED_${cycle}=$(cat /tmp/s4-marker)\n`);
+        assert.equal(await off, "S4");
+        await stopped;
+        log(`S4 cycle ${cycle}: hibernated, soft off (S4)`);
+        // power-on clears RAM (a sentinel far above what firmware touches)
+        const SENTINEL = 200 * 1024 * 1024;
+        emulator.v86.cpu.mem8.set([0x5A, 0xA5, 0x5A, 0xA5], SENTINEL);
+        serial = "";
+        assert.equal(await emulator.power_button(), true);
+        assert.deepEqual([...emulator.v86.cpu.mem8.subarray(SENTINEL, SENTINEL + 4)], [0, 0, 0, 0], "RAM cleared at power-on");
+        // the new kernel finds the image through resume= and restores it
+        const thawed = await wait_serial(new RegExp(`THAWED_${cycle}=\\d+\\r?\\n[\\s\\S]*~% $`), "restore " + cycle, 180000);
+        assert.equal(value_of(thawed, `THAWED_${cycle}`), marker, "the shell continues in the restored kernel");
+        const restored = await command("echo RESTORED=$(dmesg | grep -c 'Image restored successfully')");
+        assert.equal(value_of(restored, "RESTORED"), 1, "the kernel restored the image from swap");
+        log(`S4 cycle ${cycle}: powered on, image restored from disk, marker ${marker} back`);
+    }
+}
 
 // Watch the PIIX reset control register: reboot=acpi writes the FADT reset value there
 const reset_writes = [];

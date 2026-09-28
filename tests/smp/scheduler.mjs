@@ -115,15 +115,15 @@ try
     const cpu = single.v86.cpu;
     const bytes = new Uint8Array(cpu.wasm_memory.buffer);
     cpu.apic_enabled[0] = 0;
-    bytes[STATE_OFFSETS.nmi_blocked] = 1;
+    bytes[cpu.state_base + STATE_OFFSETS.nmi_blocked] = 1;
     cpu.apic_restore_core_events(0, 1, true);
     const saved = await single.save_state();
     cpu.apic_enabled[0] = 1;
-    bytes[STATE_OFFSETS.nmi_blocked] = 0;
+    bytes[cpu.state_base + STATE_OFFSETS.nmi_blocked] = 0;
     cpu.apic_restore_core_events(0, 0, false);
     await single.restore_state(saved);
     assert.equal(cpu.apic_enabled[0], 0);
-    assert.equal(bytes[STATE_OFFSETS.nmi_blocked], 1);
+    assert.equal(bytes[cpu.state_base + STATE_OFFSETS.nmi_blocked], 1);
     assert.equal(cpu.apic_core_nmi_pending(0), 1);
     assert.equal(cpu.apic_peek_core_events(0), 1);
 
@@ -133,7 +133,7 @@ try
     cpu.set_state = state => { state.length = 94; set_state(state); };
     await single.restore_state(saved);
     assert.equal(cpu.apic_enabled[0], 1);
-    assert.equal(bytes[STATE_OFFSETS.nmi_blocked], 0);
+    assert.equal(bytes[cpu.state_base + STATE_OFFSETS.nmi_blocked], 0);
     assert.equal(cpu.apic_core_nmi_pending(0), 0);
     assert.equal(cpu.apic_peek_core_events(0), 0);
 }

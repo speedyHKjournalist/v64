@@ -214,8 +214,18 @@ impl WasmBuilder {
         }
         name(&mut body, "e");
         name(&mut body, "m");
-        body.extend_from_slice(&[op::EXT_MEMORY, 0]);
-        write_leb_u32(&mut body, 64);
+        #[cfg(not(feature = "parallel"))]
+        {
+            body.extend_from_slice(&[op::EXT_MEMORY, 0]);
+            write_leb_u32(&mut body, 64);
+        }
+        #[cfg(feature = "parallel")]
+        {
+            // shared, minimum 64 pages, maximum 4 GiB (the imported memory of tools/parallel_wasm.js)
+            body.extend_from_slice(&[op::EXT_MEMORY, 3]);
+            write_leb_u32(&mut body, 64);
+            write_leb_u32(&mut body, 65536);
+        }
         if self.table_import {
             name(&mut body, "e");
             name(&mut body, "t");
@@ -855,6 +865,123 @@ impl WasmBuilder {
         self.instruction_body.push(opcode);
         self.instruction_body.push(align);
         write_leb_u32(&mut self.instruction_body, byte_offset);
+    }
+}
+
+/// Guest RAM accesses of generated code. In the parallel build (cores in
+/// workers, crate::parallel) they are sequentially consistent atomics, which
+/// keep x86's load/store order on weakly ordered hosts; the address must then
+/// be naturally aligned (the RAM guards check it and take the slow path
+/// otherwise). In the normal build they are the plain unaligned accesses.
+impl WasmBuilder {
+    pub const ATOMIC_GUEST_MEMORY: bool = cfg!(feature = "parallel");
+
+    fn atomic_op(&mut self, opcode: u8, align: u8, byte_offset: u32) {
+        self.instruction_body.push(0xFE);
+        self.instruction_body.push(opcode);
+        self.instruction_body.push(align);
+        write_leb_u32(&mut self.instruction_body, byte_offset);
+    }
+    /// A full barrier (MFENCE and the like); nothing in the normal build
+    pub fn guest_fence(&mut self) {
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.instruction_body.extend_from_slice(&[0xFE, 0x03, 0x00]);
+        }
+    }
+    pub fn guest_load_u8(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x12, 0, byte_offset) } else { self.load_u8(byte_offset) }
+    }
+    pub fn guest_load_u16(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x13, 1, byte_offset) } else { self.load_unaligned_u16(byte_offset) }
+    }
+    pub fn guest_load_i32(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x10, 2, byte_offset) } else { self.load_unaligned_i32(byte_offset) }
+    }
+    pub fn guest_load_i64(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x11, 3, byte_offset) } else { self.load_unaligned_i64(byte_offset) }
+    }
+    /// i64 loads of 8/16/32 zero-extended bits (the x64 page tier)
+    pub fn guest_load_i64_bits(&mut self, bits: u32, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY {
+            match bits {
+                8 => self.atomic_op(0x14, 0, byte_offset),
+                16 => self.atomic_op(0x15, 1, byte_offset),
+                32 => self.atomic_op(0x16, 2, byte_offset),
+                _ => self.atomic_op(0x11, 3, byte_offset),
+            }
+        }
+        else {
+            match bits {
+                8 => self.memory_op(op::OP_I64LOAD8U, op::MEM_NO_ALIGN, byte_offset),
+                16 => self.memory_op(op::OP_I64LOAD16U, op::MEM_NO_ALIGN, byte_offset),
+                32 => self.memory_op(op::OP_I64LOAD32U, op::MEM_NO_ALIGN, byte_offset),
+                _ => self.memory_op(op::OP_I64LOAD, op::MEM_NO_ALIGN, byte_offset),
+            }
+        }
+    }
+    pub fn guest_store_u8(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x19, 0, byte_offset) } else { self.store_u8(byte_offset) }
+    }
+    pub fn guest_store_u16(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x1A, 1, byte_offset) } else { self.store_unaligned_u16(byte_offset) }
+    }
+    pub fn guest_store_i32(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x17, 2, byte_offset) } else { self.store_unaligned_i32(byte_offset) }
+    }
+    pub fn guest_store_i64(&mut self, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x18, 3, byte_offset) } else { self.store_unaligned_i64(byte_offset) }
+    }
+    /// i64 stores of the low 8/16/32/64 bits (the x64 page tier)
+    pub fn guest_store_i64_bits(&mut self, bits: u32, byte_offset: u32) {
+        if Self::ATOMIC_GUEST_MEMORY {
+            match bits {
+                8 => self.atomic_op(0x1B, 0, byte_offset),
+                16 => self.atomic_op(0x1C, 1, byte_offset),
+                32 => self.atomic_op(0x1D, 2, byte_offset),
+                _ => self.atomic_op(0x18, 3, byte_offset),
+            }
+        }
+        else {
+            match bits {
+                8 => self.memory_op(op::OP_I64STORE8, op::MEM_NO_ALIGN, byte_offset),
+                16 => self.memory_op(op::OP_I64STORE16, op::MEM_NO_ALIGN, byte_offset),
+                32 => self.memory_op(op::OP_I64STORE32, op::MEM_NO_ALIGN, byte_offset),
+                _ => self.memory_op(op::OP_I64STORE, op::MEM_NO_ALIGN, byte_offset),
+            }
+        }
+    }
+    /// A v128 guest load: two ordered 8-byte halves in the parallel build
+    /// (address 8-aligned), one v128.load otherwise. [address] -> v128
+    pub fn guest_load_v128(&mut self, scratch: &WasmLocal) {
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.tee_local(scratch);
+            self.guest_load_i64(0);
+            self.simd(0x12); // i64x2.splat
+            self.get_local(scratch);
+            self.guest_load_i64(8);
+            self.simd_lane(0x1E, 1); // i64x2.replace_lane
+        }
+        else {
+            self.simd_memory(0x00, 0);
+        }
+    }
+    /// A v128 guest store. [address, value] ->
+    pub fn guest_store_v128(&mut self, address: &WasmLocal, value: &WasmLocalV128) {
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.get_local(address);
+            self.get_local_v128(value);
+            self.simd_lane(0x1D, 0); // i64x2.extract_lane
+            self.guest_store_i64(0);
+            self.get_local(address);
+            self.get_local_v128(value);
+            self.simd_lane(0x1D, 1);
+            self.guest_store_i64(8);
+        }
+        else {
+            self.get_local(address);
+            self.get_local_v128(value);
+            self.simd_memory(0x0B, 0);
+        }
     }
 }
 

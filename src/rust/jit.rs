@@ -104,8 +104,18 @@ fn check_jit_state_invariants(ctx: &JitState) {
     dbg_assert!(free.len() + ctx.ir_slots.len() == (WASM_TABLE_SIZE - 1) as usize);
 }
 
-/// Register a write in this page: retire all IR code compiled from it.
+/// Register a write in this page: retire all IR code compiled from it, here
+/// and (crate::parallel::code) in other cores' workers.
 fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
+    unsafe { crate::parallel::code::written(page.to_u32()) };
+    retire_page_ctx(ctx, page);
+}
+
+/// Another core wrote the page (crate::parallel::code::poll): retire this
+/// instance's code from it
+pub fn jit_retire_page(page: Page) { retire_page_ctx(&mut get_jit_state(), page) }
+
+fn retire_page_ctx(ctx: &mut JitState, page: Page) {
     crate::ir::runtime::live::dirty_page(page.to_address());
     crate::ir::runtime::cache::dirty_page(page.to_address());
     crate::ir::runtime::schedule::dirty_page(page.to_address());
@@ -181,6 +191,7 @@ fn jit_clear_cache(ctx: &mut JitState) {
     }
     ctx.ir_page_counts.clear();
     unsafe { (*(&raw mut WATCHED)).clear() };
+    unsafe { crate::parallel::code::release_all() };
     for page in pages_with_code {
         cpu::tlb_set_has_code(page, false);
     }
@@ -188,6 +199,13 @@ fn jit_clear_cache(ctx: &mut JitState) {
 
 /// Whether IR code (a published artifact's source) lies on the page.
 pub fn jit_page_has_code(page: Page) -> bool { ir_page_watched(&get_jit_state(), page) }
+
+/// Whether stores to the page must take the slow path: this instance or,
+/// with cores in workers, another core compiled code from it. Used for new
+/// translations (TLB fills, write translation caches).
+pub fn page_needs_notification(page: Page) -> bool {
+    jit_page_has_code(page) || unsafe { crate::parallel::code::others_own(page.to_u32()) }
+}
 
 fn ir_page_watched(ctx: &JitState, page: Page) -> bool {
     ctx.ir_page_counts
@@ -199,8 +217,15 @@ fn ir_page_count(counts: &mut Vec<u16>, page: Page, delta: i32) {
     if counts.len() <= index {
         counts.resize(index + 1, 0);
     }
+    let before = counts[index] != 0;
     counts[index] = (counts[index] as i32 + delta).max(0) as u16;
-    set_watched(index, counts[index] != 0);
+    let after = counts[index] != 0;
+    set_watched(index, after);
+    if before != after {
+        unsafe {
+            if after { crate::parallel::code::claim(index as u32) } else { crate::parallel::code::release(index as u32) }
+        }
+    }
 }
 
 /// Lock-free mirror of `ir_page_counts != 0`, one bit per page, for writers
@@ -218,10 +243,20 @@ fn set_watched(page: usize, watched: bool) {
         if watched { bits[page / 64] |= 1 << (page % 64) } else { bits[page / 64] &= !(1 << (page % 64)) }
     }
 }
-/// Whether IR or x64 page-tier code was compiled from this backing page.
+/// Whether IR or x64 page-tier code was compiled from this backing page, by
+/// this instance or (with cores in workers) another: writes must notify.
 #[inline(always)]
 pub fn page_watched(page: u32) -> bool {
-    unsafe { (&*(&raw const WATCHED)).get(page as usize / 64).is_some_and(|w| w >> (page % 64) & 1 != 0) }
+    unsafe {
+        (&*(&raw const WATCHED)).get(page as usize / 64).is_some_and(|w| w >> (page % 64) & 1 != 0)
+            || crate::parallel::code::others_own(page)
+    }
+}
+
+/// Whether every page this code depends on is published to the other cores
+/// (crate::parallel::code), so that it may be installed
+pub fn pages_published(pages: impl Iterator<Item = Page>) -> bool {
+    unsafe { crate::parallel::code::published(pages.map(|page| page.to_u32())) }
 }
 
 pub fn ir_cache_quiescent() -> bool { JIT_STATE.try_lock().is_ok() }

@@ -1,5 +1,6 @@
 import { state_stream_client } from "./state_stream_transport.js";
 import { wasm_fallback_path } from "./wasm_paths.js";
+import { instantiate_v86 } from "../parallel/relocate.js";
 // Dedicated-worker entry. Never transfer the WebAssembly.Memory buffer.
 import { V86 } from "./starter.js";
 import { PerformanceRecorder } from "./performance_recorder.js";
@@ -133,7 +134,7 @@ export function start_cpu_worker()
                         const response = await fetch(url);
                         if(!response.ok) throw new Error("CPU core fetch failed: HTTP " + response.status);
                         const bytes = await response.arrayBuffer();
-                        const result = await WebAssembly.instantiate(bytes, env);
+                        const result = await instantiate_v86(bytes, env);
                         emulator.wasm_source = bytes;
                         return result.instance.exports;
                     }
@@ -241,8 +242,9 @@ export function start_cpu_worker()
             }
             finally { stream["close"](); }
         },
-        "restart": async () => { await change_epoch(); await emulator.restart(); await audio_reset(); flush_screen(); stats(); },
+        "restart": async reason => { await change_epoch(); await emulator.restart(reason); await audio_reset(); flush_screen(); stats(); },
         "power_button": () => emulator.power_button(),
+        "power_state": () => emulator.power_state(),
         "get_diagnostics": () => emulator.get_diagnostics(),
         "destroy": async () => { clearInterval(timer); await emulator.destroy(); audio_port?.close(); },
         "read_memory": (offset, length) => emulator.read_memory(offset, length).slice(),

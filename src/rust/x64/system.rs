@@ -806,6 +806,7 @@ pub unsafe fn far_return(width: u8, discard: u16) -> Result<(), Fault> {
 
 /// IRETQ, or IRETD/IRETW (the same five slots, 4 or 2 bytes each).
 pub unsafe fn iret(width: u8) -> Result<(), Fault> {
+    crate::parallel::code::poll();
     if state::read_flags64() & 0x4000 != 0 { return Err(Fault::gp()); }
     let rsp = state::read_gpr(4);
     let slot = (width / 8) as u64;

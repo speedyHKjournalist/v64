@@ -1,4 +1,5 @@
 import { wasm_fallback_path } from "./wasm_paths.js";
+import { instantiate_v86, memory_import } from "../parallel/relocate.js";
 import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
 import { v86 } from "../main.js";
 import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
@@ -67,6 +68,11 @@ export function V86(options)
     var cpu;
     var wasm_memory;
 
+    // Host-parallel execution of the application processors (W1): an
+    // internal option until the backend passes its gates; `true` forces it
+    // (and fails where it cannot run), otherwise the cores run cooperatively.
+    this.parallel_requested = options["parallel"] === true && (options.cpu_cores || 1) > 1;
+
     const wasm_table = new WebAssembly.Table({ element: "anyfunc", initial: WASM_TABLE_SIZE + WASM_TABLE_OFFSET });
 
     const wasm_shared_funcs = {
@@ -112,6 +118,8 @@ export function V86(options)
         },
 
         "ir_codegen_finalize": (id, slot, ptr, len) => { cpu.ir_auto_publish(id, slot, ptr, len); },
+        // v86-parallel.wasm: wake a vCPU waiting on a word of the shared memory
+        "parallel_notify": address => { Atomics.notify(new Int32Array(wasm_memory.buffer), address >>> 2); },
         "jit_clear_func": (wasm_table_index) => cpu.jit_clear_func(wasm_table_index),
 
         "__indirect_function_table": wasm_table,
@@ -127,11 +135,16 @@ export function V86(options)
 
             return new Promise(resolve => {
                 let v86_bin = DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                // cores in vCPU workers need the relocatable build (src/parallel)
+                if(this.parallel_requested) v86_bin = "v86-parallel.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
-                if(options.wasm_path)
+                // (tests: V86_WASM selects another build, e.g. build/v86-parallel.wasm)
+                const wasm_path = options.wasm_path ||
+                    typeof process !== "undefined" && process.env && process.env["V86_WASM"];
+                if(wasm_path)
                 {
-                    v86_bin = options.wasm_path;
+                    v86_bin = wasm_path;
                     v86_bin_fallback = wasm_fallback_path(v86_bin);
                 }
                 else if(typeof window === "undefined" && typeof __dirname === "string")
@@ -152,7 +165,7 @@ export function V86(options)
                     {
                         try
                         {
-                            const { instance } = await WebAssembly.instantiate(bytes, env);
+                            const { instance } = await instantiate_v86(bytes, env);
                             this.wasm_source = bytes;
                             resolve(instance.exports);
                         }
@@ -160,7 +173,7 @@ export function V86(options)
                         {
                             load_file(v86_bin_fallback, {
                                     done: async bytes => {
-                                        const { instance } = await WebAssembly.instantiate(bytes, env);
+                                        const { instance } = await instantiate_v86(bytes, env);
                                         this.wasm_source = bytes;
                                         resolve(instance.exports);
                                     },
@@ -242,6 +255,7 @@ V86.prototype.continue_init = async function(emulator, options)
 
     settings.acpi = options.acpi;
     settings.cpu_cores = options.cpu_cores;
+    settings.parallel = this.parallel_requested;
     settings.cpu_clock = options.cpu_clock;
     settings.cpu_quantum = options.cpu_quantum;
     settings.cpu_schedule_seed = options.cpu_schedule_seed;
@@ -257,6 +271,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings["ir_opt_level"] = options["ir_opt_level"];
     settings["ir_passes_disabled"] = options["ir_passes_disabled"];
     settings["ir_tier0"] = options["ir_tier0"];
+    settings["ir_page_mode"] = options["ir_page_mode"];
     settings["x87_fast_math"] = options["x87_fast_math"];
     settings["x87_jit_cache"] = options["x87_jit_cache"];
     settings.load_devices = true;
@@ -719,6 +734,27 @@ V86.prototype.continue_init = async function(emulator, options)
         if(this.destroyed) return;
         this.v86.init(settings);
 
+        if(this.parallel_requested)
+        {
+            // application processors in vCPU workers (src/parallel/machine.js)
+            const bytes = this.wasm_source && new Uint8Array(this.wasm_source);
+            if(!bytes || !memory_import(bytes)?.shared)
+            {
+                throw new Error("parallel: the CPU core is not v86-parallel.wasm");
+            }
+            const worker_settings = {};
+            for(const key of ["disable_jit", "jit_backend", "ir_region_budget", "ir_opt_level", "ir_passes_disabled",
+                "ir_tier0", "ir_page_mode", "ir_verify", "experimental_x64", "x87_fast_math", "x87_jit_cache", "cpuid_level", "cpu_quantum"])
+            {
+                if(settings[key] !== undefined) worker_settings[key] = settings[key];
+            }
+            // (the same compiler policy as the machine's core, see CPU.prototype.init)
+            worker_settings["disable_jit"] = !!settings.disable_jit || !settings.experimental_smp_jit;
+            await this.v86.cpu.start_parallel({ bytes, settings: worker_settings,
+                worker_url: options["vcpu_worker_url"] || new URL("../parallel/vcpu_worker_entry.js", import.meta.url) });
+            if(this.destroyed) return;
+        }
+
         if(this["graphics_adapter"])
         {
             const graphics = this["graphics_adapter"];
@@ -915,6 +951,14 @@ V86.prototype.stop = async function()
         this.add_listener("emulator-stopped", listener);
         this.v86.stop();
     });
+    // cores in vCPU workers stop at their next safe point: wait for it, so
+    // that the stopped machine's state is the one its cores are in
+    const cpu = this.v86.cpu;
+    if(cpu.parallel && !this.v86.running)
+    {
+        await cpu.parallel.park();
+        if(!this.v86.running) cpu.parallel_capture();
+    }
 };
 
 /**
@@ -942,13 +986,13 @@ V86.prototype.destroy = async function()
 /**
  * Restart (force a reboot).
  */
-V86.prototype.restart = async function()
+V86.prototype.restart = async function(reason)
 {
-    if(this.worker_controller) return this.worker_controller.state("restart");
-    if(!this["graphics_adapter"]) return this.v86.restart();
+    if(this.worker_controller) return this.worker_controller.state("restart", reason);
+    if(!this["graphics_adapter"]) return this.v86.restart(reason);
     return this.with_graphics_state(async () => {
         await this["graphics_adapter"]["reset"]();
-        this.v86.restart();
+        this.v86.restart(reason);
     }, false);
 };
 
@@ -969,6 +1013,19 @@ V86.prototype.get_diagnostics = async function()
  * off (event "acpi-power-off") is powered on and started again.
  * Resolves to false if the machine has no ACPI (option acpi).
  */
+/**
+ * The ACPI power state: "S0", "S3" (suspended to RAM), "S4" (hibernated and
+ * off) or "S5" (soft off).
+ * @return {Promise<string>}
+ */
+V86.prototype.power_state = async function()
+{
+    if(this.worker_controller) return this.worker_controller.rpc("power_state");
+    const acpi = this.v86.cpu.devices.acpi;
+    if(!acpi) return "S0";
+    return acpi.sleeping ? "S3" : acpi.soft_off ? "S" + acpi.soft_off : "S0";
+};
+
 V86.prototype.power_button = async function()
 {
     if(this.worker_controller) return this.worker_controller.serialize(() => this.worker_controller.rpc("power_button"));
@@ -979,7 +1036,8 @@ V86.prototype.power_button = async function()
     }
     if(acpi.soft_off)
     {
-        await this.restart();
+        // power-on after S4/S5: RAM does not keep its contents
+        await this.restart("power-on");
         await this.run();
     }
     else

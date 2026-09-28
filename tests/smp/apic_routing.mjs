@@ -107,7 +107,7 @@ for(const count of [2, 4, 8])
         assert.equal(cpu.apic_core_nmi_pending(1), 0, "INIT clears an older NMI");
         assert.equal(cpu.apic_take_core_events(1), INIT);
         send(0, 4 << 8);
-        assert.equal(new Uint8Array(cpu.wasm_memory.buffer)[STATE_OFFSETS.nmi_blocked], 1,
+        assert.equal(new Uint8Array(cpu.wasm_memory.buffer)[cpu.state_base + STATE_OFFSETS.nmi_blocked], 1,
             "physical self NMI is delivered immediately despite IF being clear");
 
         // First SIPI wins; a later INIT supersedes a pending startup.

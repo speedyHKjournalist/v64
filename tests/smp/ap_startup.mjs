@@ -64,7 +64,7 @@ async function test(count)
         if(id === cpu.active_core)
         {
             const view = new DataView(cpu.wasm_memory.buffer);
-            return size === 1 ? view.getUint8(offset) : view.getUint32(offset, true);
+            return size === 1 ? view.getUint8(cpu.state_base + offset) : view.getUint32(cpu.state_base + offset, true);
         }
         const index = CORE_STATE_RANGES.findIndex(([start, end]) => start <= offset && offset + size <= end);
         assert.notEqual(index, -1, `core field ${offset} is saved`);

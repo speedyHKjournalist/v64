@@ -44,6 +44,9 @@ struct Function {
     phase: Phase,
     served: [u64; 64],
     last_used: u64,
+    /// the source page's bytes (hash) when compiled: with cores in workers,
+    /// checked again after the page is published (crate::parallel::code)
+    source: u64,
 }
 fn bit(set: &[u64; 64], offset: u16) -> bool { set[offset as usize / 64] >> (offset % 64) & 1 != 0 }
 struct PageState {
@@ -359,12 +362,13 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
     let index = match r.functions.iter().position(|f| reusable(f, &r.releases)) {
         Some(i) => i,
         None => {
-            r.functions.push(Function { page, id: 0, slot: 0, phase: Phase::Dead, served: [0; 64], last_used: 0 });
+            r.functions.push(Function { page, id: 0, slot: 0, phase: Phase::Dead, served: [0; 64], last_used: 0, source: 0 });
             r.functions.len() - 1
         },
     };
     r.clock += 1;
-    r.functions[index] = Function { page, id, slot, phase: Phase::Pending, served: code.served, last_used: r.clock };
+    r.functions[index] = Function { page, id, slot, phase: Phase::Pending, served: code.served, last_used: r.clock,
+        source: source_hash(&bytes) };
     r.by_page.insert(page, index);
     FAST[fast_slot(page)] = (page, index as u32 + 1);
     r.stats[COMPILED] += 1;
@@ -398,7 +402,31 @@ fn retire(r: &mut Runtime, index: usize) {
 #[no_mangle]
 pub fn x64_page_install(id: u64, slot: u32) -> bool {
     let r = rt();
-    r.functions.iter().any(|f| f.id == id && f.slot == slot && f.phase == Phase::Pending)
+    let Some(f) = r.functions.iter().find(|f| f.id == id && f.slot == slot && f.phase == Phase::Pending) else { return false };
+    if !crate::parallel::active() {
+        return true;
+    }
+    // other cores mark the page first, then its bytes are checked once more
+    let (page, source) = (f.page, f.source);
+    let backing = match r.by_page.get(&page) { Some(_) => page, None => return false };
+    let published = || crate::jit::pages_published(std::iter::once(Page::page_of(backing << 12)));
+    let deadline = unsafe { crate::cpu::cpu::js::microtick() } + 0.5;
+    while !published() {
+        if unsafe { crate::cpu::cpu::js::microtick() } > deadline {
+            return false;
+        }
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(crate::cpu::memory::mem8.add((backing << 12) as usize), 4096) };
+    source_hash(bytes) == source
+}
+
+/// FNV-1a over a code page
+fn source_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xCBF29CE484222325u64;
+    for &byte in bytes {
+        hash = (hash ^ byte as u64).wrapping_mul(0x100000001B3);
+    }
+    hash
 }
 #[no_mangle]
 pub fn x64_page_ready(id: u64, slot: u32) -> bool {
@@ -485,6 +513,11 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         ACCESS_REFUSED[0] += 1;
         return 0;
     }
+    // generated accesses are atomic with cores in workers: aligned only
+    if crate::wasmgen::wasm_builder::WasmBuilder::ATOMIC_GUEST_MEMORY && address & (size.min(8) - 1) != 0 {
+        ACCESS_REFUSED[0] += 1;
+        return 0;
+    }
     let access = if write { paging::Access::Write } else { paging::Access::Read };
     let Ok(physical) = memory::translate(address, access, false, false)
     else {
@@ -496,7 +529,7 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         ACCESS_REFUSED[2] += 1;
         return 0;
     };
-    if write && crate::jit::jit_page_has_code(Page::page_of(backing)) {
+    if write && crate::jit::page_needs_notification(Page::page_of(backing)) {
         ACCESS_REFUSED[3] += 1;
         return 0;
     }

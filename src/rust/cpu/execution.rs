@@ -30,7 +30,7 @@ static mut PENDING_RETIRED: u64 = 0;
 static mut PENDING_REP_ELEMENTS: u64 = 0;
 pub unsafe fn flush_core_statistics() {
     if PENDING_RETIRED | PENDING_REP_ELEMENTS != 0 {
-        let stats = &mut CORE_STATISTICS[apic::current_core()];
+        let stats = &mut (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()];
         stats.retired += PENDING_RETIRED;
         stats.rep_elements += PENDING_REP_ELEMENTS;
         PENDING_RETIRED = 0;
@@ -155,7 +155,7 @@ pub unsafe fn finish_instruction() -> u32 {
 /// Mark synchronous faults only; traps and asynchronous IRQs are not faults.
 #[inline(always)]
 pub unsafe fn mark_fault() {
-    CORE_STATISTICS[apic::current_core()].faults += 1;
+    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].faults += 1;
     (&mut *(&raw mut execution_state)).mark_fault()
 }
 
@@ -179,8 +179,8 @@ pub unsafe fn begin_shadow_instruction() {
     }
 }
 
-pub unsafe fn note_halt() { CORE_STATISTICS[apic::current_core()].halts += 1; }
-pub unsafe fn note_jit_rep(elements: u32) { CORE_STATISTICS[apic::current_core()].rep_elements += elements as u64; }
+pub unsafe fn note_halt() { (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].halts += 1; }
+pub unsafe fn note_jit_rep(elements: u32) { (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].rep_elements += elements as u64; }
 pub unsafe fn jit_dispatches() -> u32 { JIT_ACCOUNTED_DISPATCHES }
 pub unsafe fn note_jit_interpreted(dispatches: u32) {
     JIT_ACCOUNTED_DISPATCHES = JIT_ACCOUNTED_DISPATCHES.wrapping_add(dispatches);
@@ -188,19 +188,19 @@ pub unsafe fn note_jit_interpreted(dispatches: u32) {
 pub unsafe fn note_native_retired(steps: u32, accounted_before: u32) {
     let interpreted = JIT_ACCOUNTED_DISPATCHES.wrapping_sub(accounted_before);
     dbg_assert!(steps >= interpreted, "JIT dispatch ledger exceeds generated step count");
-    CORE_STATISTICS[apic::current_core()].retired += steps.saturating_sub(interpreted) as u64;
+    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].retired += steps.saturating_sub(interpreted) as u64;
 }
 #[no_mangle]
 pub unsafe fn core_statistics_reset() {
     PENDING_RETIRED = 0;
     PENDING_REP_ELEMENTS = 0;
-    CORE_STATISTICS = [CoreStatistics::default(); 8];
+    *crate::parallel::machine(&raw mut CORE_STATISTICS) = [CoreStatistics::default(); 8];
 }
 #[no_mangle]
 pub unsafe fn core_statistics_addr(core: u32) -> u32 {
     assert!(core < 8);
     flush_core_statistics();
-    &raw const CORE_STATISTICS[core as usize] as u32
+    crate::parallel::machine(&raw mut CORE_STATISTICS).cast::<CoreStatistics>().add(core as usize) as u32
 }
 #[no_mangle]
 pub fn core_statistics_size() -> u32 { std::mem::size_of::<CoreStatistics>() as u32 }
@@ -208,14 +208,14 @@ pub fn core_statistics_size() -> u32 { std::mem::size_of::<CoreStatistics>() as 
 pub unsafe fn core_statistics_get(core: u32, field: u32) -> f64 {
     assert!(core < 8);
     flush_core_statistics();
-    let stats = CORE_STATISTICS[core as usize];
+    let stats = (*crate::parallel::machine(&raw mut CORE_STATISTICS))[core as usize];
     match field { 0 => stats.retired as f64, 1 => stats.rep_elements as f64,
         2 => stats.faults as f64, 3 => stats.halts as f64, 4 => stats.runtime_ms, _ => 0.0 }
 }
 #[no_mangle]
 pub unsafe fn core_statistics_runtime(core: u32, elapsed_ms: f64) {
     assert!(core < 8 && elapsed_ms.is_finite() && elapsed_ms >= 0.0);
-    CORE_STATISTICS[core as usize].runtime_ms += elapsed_ms;
+    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[core as usize].runtime_ms += elapsed_ms;
 }
 
 /// Used after reset/restore, with the previous pending delta already consumed.

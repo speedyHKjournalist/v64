@@ -28,8 +28,8 @@ for(const count of [1, 2, 3, 4, 8])
             cpu.cr[2] = 0xABCD000 + core;
             cpu.cores[core].running = core % 2 === 0;
             cpu.in_hlt[0] = core % 3 === 0 ? 1 : 0;
-            bytes[STATE_OFFSETS.nmi_blocked] = core % 2;
-            bytes[STATE_OFFSETS.interrupt_shadow] = core % 2;
+            bytes[cpu.state_base + STATE_OFFSETS.nmi_blocked] = core % 2;
+            bytes[cpu.state_base + STATE_OFFSETS.interrupt_shadow] = core % 2;
             cpu.set_tsc(5555 + core, 0);
             cpu.set_tsc(1000 + core, 0);
             cpu.apic_restore_core_events(core, core % 2 ? 1 : 0, core % 3 === 0);

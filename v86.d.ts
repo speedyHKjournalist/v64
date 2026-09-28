@@ -191,6 +191,8 @@ export interface Event {
     "9p-write-end": [filename: string, byte_count: number];
     /** The guest turned the machine off through ACPI; the value is the sleeping state ("S5", or "S4" for hibernation). The emulator stops. */
     "acpi-power-off": "S4" | "S5";
+    "acpi-sleep": "S3";
+    "acpi-wake": "power-button" | "rtc" | "other";
     "download-error": {
         file_index: number,
         file_count: number,
@@ -576,9 +578,12 @@ export interface V86Options {
     /**
      * Enable ACPI (also enables APIC). Experimental. Implemented: PM1 event,
      * control and timer registers, GPE0, SCI, SMI_CMD ACPI enable/disable,
-     * the fixed power button (see power_button()) and soft off (S5), after
-     * which the emulator stops and emits "acpi-power-off". S3 and S4 are not
-     * advertised to the guest.
+     * the fixed power button (see power_button()) and the sleeping states:
+     * S3 (suspend to RAM: the cores stop, "acpi-sleep" is emitted; the power
+     * button or an RTC alarm with RTC_EN wakes the machine through the
+     * firmware's resume path, "acpi-wake"), S4 (the guest hibernates to its
+     * disk and turns the machine off) and S5 (soft off); after S4/S5 the
+     * emulator stops and emits "acpi-power-off". See power_state().
      * @default false
      */
     acpi?: boolean;
@@ -783,9 +788,17 @@ export class V86 {
     /**
      * Press the ACPI power button. A running ACPI guest gets a power button
      * event (usually starting an orderly shutdown); a machine the guest has
-     * turned off is powered on and started again. Resolves to false without ACPI.
+     * turned off (S4/S5) is powered on and started again, with RAM cleared;
+     * a suspended machine (S3) wakes up. Resolves to false without ACPI.
      */
     power_button(): Promise<boolean>;
+
+    /**
+     * The ACPI power state: "S0" (running, or no ACPI), "S3" (suspended to
+     * RAM: events "acpi-sleep"/"acpi-wake"), "S4" (the guest hibernated to
+     * its disk and turned the machine off) or "S5" (soft off).
+     */
+    power_state(): Promise<"S0" | "S3" | "S4" | "S5">;
 
     /**
      * Add an event listener (the emulator is an event emitter).

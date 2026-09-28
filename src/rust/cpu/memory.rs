@@ -21,6 +21,7 @@ use crate::cpu::ioapic;
 use crate::cpu::vga;
 use crate::jit;
 use crate::page::Page;
+use crate::parallel;
 
 use std::alloc;
 use std::ptr;
@@ -131,8 +132,10 @@ fn read8_mapped(addr: u32) -> i32 {
         }
     }
 }
+// RAM accesses go through crate::parallel: ordered atomics when cores run in
+// workers, plain accesses in the normal build.
 pub fn read8_no_mmap_check(addr: u32) -> i32 {
-    unsafe { *mem8.offset(addr as isize) as i32 }
+    unsafe { parallel::load8(mem8.offset(addr as isize)) as i32 }
 }
 
 #[export_name = "read16"]
@@ -155,7 +158,7 @@ fn read16_mapped(addr: u32) -> i32 {
     }
 }
 pub fn read16_no_mmap_check(addr: u32) -> i32 {
-    unsafe { ptr::read_unaligned(mem8.offset(addr as isize) as *const u16) as i32 }
+    unsafe { parallel::load16(mem8.offset(addr as isize)) as i32 }
 }
 
 #[export_name = "read32s"]
@@ -186,7 +189,7 @@ fn read32s_mapped(addr: u32) -> i32 {
     }
 }
 pub fn read32_no_mmap_check(addr: u32) -> i32 {
-    unsafe { ptr::read_unaligned(mem8.offset(addr as isize) as *const i32) }
+    unsafe { parallel::load32(mem8.offset(addr as isize)) as i32 }
 }
 
 pub unsafe fn read64s(addr: u32) -> i64 {
@@ -199,7 +202,7 @@ pub unsafe fn read64s(addr: u32) -> i64 {
             read32s(addr) as u32 as i64 | (read32s(addr.wrapping_add(4)) as i64) << 32
         }
     } else {
-        ptr::read_unaligned(mem8.offset(addr as isize) as *const i64)
+        parallel::load64(mem8.offset(addr as isize)) as i64
     }
 }
 
@@ -218,7 +221,8 @@ pub unsafe fn read128(addr: u32) -> reg128 {
             }
         }
     } else {
-        ptr::read_unaligned(mem8.offset(addr as isize) as *const reg128)
+        let [low, high] = parallel::load128(mem8.offset(addr as isize));
+        reg128 { u64: [low, high] }
     }
 }
 
@@ -238,8 +242,22 @@ pub unsafe fn write8_ram(addr: u32, value: i32) {
 }
 
 pub unsafe fn write8_no_mmap_or_dirty_check(addr: u32, value: i32) {
-    *mem8.offset(addr as isize) = value as u8
+    parallel::store8(mem8.offset(addr as isize), value as u8)
 }
+
+/// Set accessed/dirty bits in the low byte of a page table entry: a locked
+/// OR, as the processor does it, so that another core's concurrent update of
+/// the entry is not overwritten
+pub unsafe fn set_page_entry_bits(addr: u32, bits: u8) {
+    if in_mapped_range(addr) {
+        mmap_write8(addr, read8(addr) | bits as i32);
+        return;
+    }
+    jit::jit_dirty_page(Page::page_of(addr));
+    parallel::or8(mem8.offset(addr as isize), bits);
+}
+
+pub fn read64_no_mmap_check(addr: u32) -> u64 { unsafe { parallel::load64(mem8.offset(addr as isize)) } }
 
 #[no_mangle]
 pub unsafe fn write16(addr: u32, value: i32) {
@@ -255,7 +273,7 @@ pub unsafe fn write16_ram(addr: u32, value: i32) {
     write16_no_mmap_or_dirty_check(addr, value);
 }
 pub unsafe fn write16_no_mmap_or_dirty_check(addr: u32, value: i32) {
-    ptr::write_unaligned(mem8.offset(addr as isize) as *mut u16, value as u16)
+    parallel::store16(mem8.offset(addr as isize), value as u16)
 }
 
 #[no_mangle]
@@ -274,19 +292,30 @@ pub unsafe fn write32_ram(addr: u32, value: i32) {
 }
 
 pub unsafe fn write32_no_mmap_or_dirty_check(addr: u32, value: i32) {
-    ptr::write_unaligned(mem8.offset(addr as isize) as *mut i32, value)
+    parallel::store32(mem8.offset(addr as isize), value as u32)
 }
 
 pub unsafe fn write64_no_mmap_or_dirty_check(addr: u32, value: u64) {
-    ptr::write_unaligned(mem8.offset(addr as isize) as *mut u64, value)
+    parallel::store64(mem8.offset(addr as isize), value)
 }
 
 pub unsafe fn write128_no_mmap_or_dirty_check(addr: u32, value: reg128) {
-    ptr::write_unaligned(mem8.offset(addr as isize) as *mut reg128, value)
+    parallel::store128(mem8.offset(addr as isize), value.u64)
 }
 
+/// Replace the naturally aligned RAM value `expected` by `value` if another
+/// core has not changed it in between (the commit of a locked
+/// read-modify-write). Always succeeds when no other core runs concurrently.
+pub unsafe fn compare_exchange_no_mmap_or_dirty_check(addr: u32, bytes: u32, expected: u64, value: u64) -> bool {
+    parallel::compare_exchange(mem8.offset(addr as isize), bytes, expected, value)
+}
+
+// Bulk copies and fills: x86 string stores are not ordered among themselves,
+// but with respect to the surrounding instructions (fences in parallel builds)
 pub unsafe fn memset_no_mmap_or_dirty_check(addr: u32, value: u8, count: u32) {
+    parallel::full_fence();
     ptr::write_bytes(mem8.offset(addr as isize), value, count as usize);
+    parallel::full_fence();
 }
 
 /// The caller has checked the entire, page-bounded writable RAM range and
@@ -296,6 +325,7 @@ pub unsafe fn memset_pattern_no_mmap_or_dirty_check(addr: u32, value: u32, size:
     dbg_assert!(size == 2 || size == 4);
     let pattern = if size == 2 { (value & 0xFFFF) * 0x10001 } else { value };
     let bytes = count * size;
+    parallel::full_fence();
     if pattern == (pattern & 255) * 0x01010101 {
         memset_no_mmap_or_dirty_check(addr, pattern as u8, bytes);
         return;
@@ -317,16 +347,19 @@ pub unsafe fn memset_pattern_no_mmap_or_dirty_check(addr: u32, value: u32, size:
     if offset < bytes {
         write16_no_mmap_or_dirty_check(addr + offset, pattern as i32);
     }
+    parallel::full_fence();
 }
 
 pub unsafe fn memcpy_no_mmap_or_dirty_check(src_addr: u32, dst_addr: u32, count: u32) {
     dbg_assert!(src_addr < *memory_size);
     dbg_assert!(dst_addr < *memory_size);
+    parallel::full_fence();
     ptr::copy(
         mem8.offset(src_addr as isize),
         mem8.offset(dst_addr as isize),
         count as usize,
-    )
+    );
+    parallel::full_fence();
 }
 
 pub unsafe fn memcpy_into_svga_lfb(src_addr: u32, dst_addr: u32, count: u32) {

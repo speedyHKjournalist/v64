@@ -82,6 +82,9 @@ acpi.clock = () => now;
 
 const power_off_events = [];
 emulator.add_listener("acpi-power-off", state => power_off_events.push(state));
+const sleep_events = [];
+emulator.add_listener("acpi-sleep", state => sleep_events.push("sleep " + state));
+emulator.add_listener("acpi-wake", cause => sleep_events.push("wake " + cause));
 
 const pci_address = (device, reg) => (0x80000000 | device << 11 | reg & 0xFC) | 0;
 function pci_write32(device, reg, value)
@@ -410,8 +413,9 @@ test("SLP_EN: S5 and S4 turn the machine off, unsupported types wake up at once"
     power_on();
     power_off_events.length = 0;
 
-    io.port_write16(PM1_CNT, 1 << 10 | SLP_EN); // S3 in SeaBIOS's tables, not implemented
+    io.port_write16(PM1_CNT, 5 << 10 | SLP_EN); // a type no sleep state uses
     assert.equal(acpi.soft_off, 0);
+    assert.equal(acpi.sleeping, 0);
     assert.equal(io.port_read16(PM1_STS) & WAK, WAK);
     assert.equal(io.port_read16(PM1_CNT) & SLP_EN, 0, "SLP_EN reads as zero");
     io.port_write16(PM1_STS, WAK);
@@ -433,10 +437,92 @@ test("SLP_EN: S5 and S4 turn the machine off, unsupported types wake up at once"
     assert.equal(acpi.soft_off, 0);
 });
 
-test("fw_cfg etc/system-states advertises S5 only", () => {
+const RTC_EVENT = 1 << 10;
+const CMOS_SHUTDOWN_STATUS = 0x0F;
+
+test("S3: cores stop, RAM and the BIOS shadow stay, the power button wakes through the resume path", () => {
+    power_on();
+    sleep_events.length = 0;
+    const ram = 0x300000, shadow = 0xFFF00;
+    cpu.mem8[ram] = 0x5A;
+    const bios_byte = cpu.mem8[shadow];
+    cpu.mem8[shadow] = bios_byte ^ 0xFF; // like SeaBIOS's "POST ran" flag in its RAM copy
+
+    io.port_write16(PM1_CNT, SCI_EN | 1 << 10 | SLP_EN); // S3 (SLP_TYP 1)
+    assert.equal(acpi.sleeping, 3);
+    assert.equal(acpi.soft_off, 0, "not a power-off");
+    assert.equal(cpu.devices.rtc.cmos_read(CMOS_SHUTDOWN_STATUS), 0xFE, "SeaBIOS will resume through the FACS waking vector");
+    assert.deepEqual(sleep_events, ["sleep S3"]);
+    assert.equal(cpu.run_cores() > 0, true, "while asleep only device timers run");
+
+    // a second SLP_EN is ignored while asleep
+    io.port_write16(PM1_CNT, 1 << 10 | SLP_EN);
+    assert.deepEqual(sleep_events, ["sleep S3"]);
+
+    acpi.press_power_button();
+    assert.equal(acpi.sleeping, 0);
+    assert.deepEqual(sleep_events, ["sleep S3", "wake power-button"]);
+    assert.equal(acpi.pm1_sts & (WAK | PWRBTN), WAK | PWRBTN, "WAK_STS and the cause");
+    assert.equal(acpi.pm1_cnt & SCI_EN, 0, "the hardware reset clears SCI_EN (the OS sets it again)");
+    assert.equal(cpu.mem8[ram], 0x5A, "RAM kept");
+    assert.equal(cpu.mem8[shadow], bios_byte ^ 0xFF, "the BIOS is not reloaded on wake");
+    assert.equal(cpu.instruction_pointer[0] >>> 0, 0xFFFF0, "the CPU starts at the reset vector");
+    cpu.mem8[shadow] = bios_byte;
+});
+
+test("S3: the RTC alarm wakes only with RTC_EN; RTC_STS names the cause", () => {
+    power_on();
+    enable_acpi_mode();
+    sleep_events.length = 0;
+    io.port_write16(PM1_CNT, SCI_EN | 1 << 10 | SLP_EN);
+    assert.equal(acpi.sleeping, 3);
+    acpi.rtc_alarm(); // RTC_EN clear
+    assert.equal(acpi.sleeping, 3, "no wake without RTC_EN");
+    acpi.press_power_button();
+    assert.equal(acpi.sleeping, 0);
+
+    power_on();
+    enable_acpi_mode();
+    sleep_events.length = 0;
+    io.port_write16(PM1_EN, RTC_EVENT);
+    io.port_write16(PM1_CNT, SCI_EN | 1 << 10 | SLP_EN);
+    assert.equal(acpi.sleeping, 3);
+    acpi.rtc_alarm();
+    assert.equal(acpi.sleeping, 0);
+    assert.deepEqual(sleep_events, ["sleep S3", "wake rtc"]);
+    assert.equal(acpi.pm1_sts & (WAK | RTC_EVENT | PWRBTN), WAK | RTC_EVENT);
+
+    // while running, the alarm latches RTC_STS (an SCI when enabled)
+    power_on();
+    enable_acpi_mode();
+    io.port_write16(PM1_EN, RTC_EVENT);
+    acpi.rtc_alarm();
+    assert.equal(io.port_read16(PM1_STS) & RTC_EVENT, RTC_EVENT);
+    assert.equal(line[SCI_IRQ], true);
+});
+
+test("S3 survives a snapshot: the restored machine is asleep and wakes", () => {
+    power_on();
+    io.port_write16(PM1_CNT, SCI_EN | 1 << 10 | SLP_EN);
+    const state = acpi.get_state();
+    acpi.press_power_button();
+    assert.equal(acpi.sleeping, 0);
+    acpi.set_state(state);
+    assert.equal(acpi.sleeping, 3, "format 3 keeps the sleeping state");
+    acpi.press_power_button();
+    assert.equal(acpi.sleeping, 0);
+
+    // a format 2 image (before S3) is awake
+    const old = state.slice(0, 10);
+    old[4] = 2;
+    acpi.set_state(old);
+    assert.equal(acpi.sleeping, 0);
+});
+
+test("fw_cfg etc/system-states advertises S3, S4 and S5", () => {
     const file = cpu.option_roms.find(f => f.name === "etc/system-states");
     assert.ok(file);
-    assert.deepEqual(Array.from(file.data), [0x80, 0, 0, 0x01, 0x02, 0x80]);
+    assert.deepEqual(Array.from(file.data), [0x80, 0, 0, 0x81, 0x82, 0x80]);
 
     // Read it through the fw_cfg ports, as SeaBIOS does
     const read_bytes = n => Array.from({ length: n }, () => io.port_read8(FW_CFG_DATA));
@@ -460,7 +546,7 @@ test("fw_cfg etc/system-states advertises S5 only", () => {
     assert.ok(select >= 0, "listed in the file directory");
 
     io.port_write16(FW_CFG_SELECT, select);
-    assert.deepEqual(read_bytes(6), [0x80, 0, 0, 0x01, 0x02, 0x80]);
+    assert.deepEqual(read_bytes(6), [0x80, 0, 0, 0x81, 0x82, 0x80]);
 });
 
 test("snapshot: registers, timer phase and SCI survive save_state/restore_state", async () => {

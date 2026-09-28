@@ -1,5 +1,6 @@
 // See Intel's System Programming Guide
 
+use crate::parallel;
 use crate::cpu::{cpu::js, global_pointers::acpi_enabled, ioapic, pic};
 
 const APIC_LOG_VERBOSE: bool = false;
@@ -128,7 +129,28 @@ static mut CURRENT_CORE: usize = 0;
 static mut CORE_COUNT: usize = 1;
 static mut CORE_EVENTS: [u32; MAX_CORES] = [0; MAX_CORES];
 /// NMIs latched for each core until it can take one (nmi_blocked)
-static mut NMI_PENDING: [bool; MAX_CORES] = [false; MAX_CORES];
+static mut NMI_PENDING: [u32; MAX_CORES] = [0; MAX_CORES];
+
+// With cores in workers (crate::parallel), the APICs, their latches and the
+// core count are the machine instance's, reached through parallel::machine;
+// CURRENT_CORE stays the core of this instance. Other cores' latches and
+// request registers (IRR, pending trigger modes, ESR) change with atomic
+// word operations; the rest of an APIC belongs to its own core.
+fn core_events(core: usize) -> *mut u32 {
+    dbg_assert!(core < MAX_CORES);
+    unsafe { parallel::machine(&raw mut CORE_EVENTS).cast::<u32>().add(core) }
+}
+fn nmi_latch(core: usize) -> *mut u32 {
+    dbg_assert!(core < MAX_CORES);
+    unsafe { parallel::machine(&raw mut NMI_PENDING).cast::<u32>().add(core) }
+}
+/// A worker's instance runs this core
+pub unsafe fn attach_worker(core: u32) {
+    dbg_assert!((core as usize) < core_count());
+    CURRENT_CORE = core as usize;
+}
+/// Whether an event for `core` must wake it in another worker
+fn remote(core: usize) -> bool { parallel::active() && core != current_core() }
 
 // Keep the legacy 184-byte LAPIC image stable. These additional architectural
 // latches are snapshotted separately; they are not scheduler/JIT cache state.
@@ -153,7 +175,7 @@ static mut APIC_AUX: [ApicAux; MAX_CORES] = [APIC_AUX_RESET; MAX_CORES];
 
 fn aux_of(core: usize) -> &'static mut ApicAux {
     dbg_assert!(core < MAX_CORES);
-    unsafe { &mut *(&raw mut APIC_AUX).cast::<ApicAux>().add(core) }
+    unsafe { &mut *parallel::machine(&raw mut APIC_AUX).cast::<ApicAux>().add(core) }
 }
 
 #[no_mangle]
@@ -187,12 +209,12 @@ pub fn apic_set_hardware_enabled(core: u32, enabled: bool) {
 pub fn apic_core_extint_pending(core: u32) -> bool { aux_of(core as usize).extint_pending != 0 }
 #[no_mangle]
 pub fn apic_restore_extint(core: u32, pending: bool) {
-    aux_of(core as usize).extint_pending = pending as u32;
+    unsafe { parallel::word_store(&raw mut aux_of(core as usize).extint_pending, pending as u32) };
 }
 
 fn apic_of(core: usize) -> &'static mut Apic {
     dbg_assert!(core < MAX_CORES);
-    unsafe { &mut *(&raw mut APICS).cast::<Apic>().add(core) }
+    unsafe { &mut *parallel::machine(&raw mut APICS).cast::<Apic>().add(core) }
 }
 
 pub fn get_apic() -> &'static mut Apic { apic_of(current_core()) }
@@ -201,7 +223,7 @@ pub fn current_core() -> usize {
     unsafe { CURRENT_CORE }
 }
 pub fn core_count() -> usize {
-    unsafe { CORE_COUNT }
+    unsafe { *parallel::machine(&raw mut CORE_COUNT) }
 }
 
 #[no_mangle]
@@ -216,7 +238,7 @@ pub fn apic_addr(core: u32) -> u32 { &raw mut *apic_of(core as usize) as u32 }
 pub unsafe fn apic_set_core_count(count: u32) {
     dbg_assert!(count >= 1 && count as usize <= MAX_CORES);
     crate::cpu::execution::flush_core_statistics();
-    CORE_COUNT = count as usize;
+    *parallel::machine(&raw mut CORE_COUNT) = count as usize;
     CURRENT_CORE = 0;
     for core in 0..MAX_CORES {
         *apic_of(core) = APIC_RESET;
@@ -227,8 +249,8 @@ pub unsafe fn apic_set_core_count(count: u32) {
             // the 8259 output through LINT0 until firmware programs/masks it.
             apic_of(core).lvt_int0 = (DELIVERY_EXTINT as u32) << 8;
         }
-        CORE_EVENTS[core] = 0;
-        NMI_PENDING[core] = false;
+        *core_events(core) = 0;
+        *nmi_latch(core) = 0;
     }
 }
 
@@ -240,25 +262,23 @@ pub unsafe fn software_disable() {
     apic_of(core).apic_id = (core as u32) << 24;
     *aux_of(core) = APIC_AUX_RESET;
     aux_of(core).hardware_enabled = 0;
-    NMI_PENDING[core] = false;
-    CORE_EVENTS[core] = 0;
+    parallel::word_store(nmi_latch(core), 0);
+    parallel::word_store(core_events(core), 0);
 }
 
 /// Take a pending NMI of the active core
 pub unsafe fn take_nmi() -> bool {
-    let pending = NMI_PENDING[current_core()];
-    NMI_PENDING[current_core()] = false;
-    pending
+    parallel::word_load(nmi_latch(current_core())) != 0 && parallel::word_swap(nmi_latch(current_core()), 0) != 0
 }
 
-pub unsafe fn nmi_pending() -> bool { NMI_PENDING[current_core()] }
+pub unsafe fn nmi_pending() -> bool { parallel::word_load(nmi_latch(current_core())) != 0 }
 
 #[no_mangle]
-pub unsafe fn apic_core_nmi_pending(core: u32) -> bool { NMI_PENDING[core as usize] }
+pub unsafe fn apic_core_nmi_pending(core: u32) -> bool { parallel::word_load(nmi_latch(core as usize)) != 0 }
 
 #[no_mangle]
 pub unsafe fn apic_set_current_core(core: u32) {
-    dbg_assert!((core as usize) < CORE_COUNT);
+    dbg_assert!((core as usize) < core_count());
     crate::cpu::execution::flush_core_statistics();
     CURRENT_CORE = core as usize;
 }
@@ -272,28 +292,38 @@ pub unsafe fn apic_init_core(core: u32) {
     apic.apic_id = apic_id;
     let aux = aux_of(core as usize);
     aux.hardware_enabled = 1;
-    aux.extint_pending = 0;
-    aux.pending_tmr = [0; 8];
+    parallel::word_store(&raw mut aux.extint_pending, 0);
+    for word in 0..8 {
+        parallel::word_store(&raw mut aux.pending_tmr[word], 0);
+    }
 }
 
 #[no_mangle]
 pub unsafe fn apic_take_core_events(core: u32) -> u32 {
-    let events = CORE_EVENTS[core as usize];
-    CORE_EVENTS[core as usize] = 0;
-    events
+    if parallel::word_load(core_events(core as usize)) == 0 {
+        return 0;
+    }
+    parallel::word_swap(core_events(core as usize), 0)
 }
 
 /// Snapshot the pending startup events without acknowledging them.
 #[no_mangle]
-pub unsafe fn apic_peek_core_events(core: u32) -> u32 { CORE_EVENTS[core as usize] }
+pub unsafe fn apic_peek_core_events(core: u32) -> u32 { parallel::word_load(core_events(core as usize)) }
 
-pub unsafe fn has_core_events() -> bool { (0..core_count()).any(|core| CORE_EVENTS[core] != 0) }
+/// INIT or start-up IPIs are waiting: for any core in a cooperative machine
+/// (the scheduler takes them); with workers, for this instance's core
+pub unsafe fn has_core_events() -> bool {
+    if parallel::active() {
+        return parallel::word_load(core_events(current_core())) != 0;
+    }
+    (0..core_count()).any(|core| *core_events(core) != 0)
+}
 
 #[no_mangle]
 pub unsafe fn apic_restore_core_events(core: u32, events: u32, nmi: bool) {
-    dbg_assert!((core as usize) < CORE_COUNT);
-    CORE_EVENTS[core as usize] = events;
-    NMI_PENDING[core as usize] = nmi;
+    dbg_assert!((core as usize) < core_count());
+    parallel::word_store(core_events(core as usize), events);
+    parallel::word_store(nmi_latch(core as usize), nmi as u32);
 }
 
 /// Whether a (halted) core has an interrupt it would accept
@@ -676,9 +706,14 @@ fn masked_lvt(apic: &Apic, value: u32) -> u32 {
     value | if apic.spurious_vector & APIC_SOFTWARE_ENABLE == 0 { IOAPIC_CONFIG_MASKED } else { 0 }
 }
 
-/// Advance the timer of every core's local APIC
+/// Advance the timer of every core's local APIC (with cores in workers, of
+/// this instance's core: each worker runs its own)
 #[no_mangle]
 pub fn apic_timer(now: f64) -> f64 {
+    if parallel::active() {
+        let core = current_core();
+        return timer(apic_of(core), aux_of(core), now);
+    }
     let mut next = 100.0f64;
     for core in 0..core_count() {
         next = next.min(timer(apic_of(core), aux_of(core), now));
@@ -726,7 +761,7 @@ fn timer(apic: &mut Apic, aux: &mut ApicAux, now: f64) -> f64 {
             apic.timer_current_count = 0;
         }
         if apic.lvt_timer & IOAPIC_CONFIG_MASKED == 0 {
-            deliver(apic, aux, apic.lvt_timer as u8, false);
+            deliver(apic, aux, apic.lvt_timer as u8, false, false);
         }
     }
     if apic.timer_current_count == 0 {
@@ -794,9 +829,12 @@ fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ip
                 (processor_priority(apic) & 0xF0, apic.apic_id >> 24)
             })
         {
-            let accepted = deliver(apic_of(core), aux_of(core), vector, is_level);
+            let accepted = deliver(apic_of(core), aux_of(core), vector, is_level, remote(core));
             if accepted && is_ipi {
-                aux_of(core).ipi_received = aux_of(core).ipi_received.wrapping_add(1);
+                count_ipi(core);
+            }
+            if accepted {
+                unsafe { parallel::kick(core) };
             }
             return accepted;
         }
@@ -809,40 +847,37 @@ fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ip
         }
         let accepted_here = match mode {
             IOAPIC_DELIVERY_INIT => unsafe {
-                CORE_EVENTS[core] = CORE_EVENT_INIT;
-                NMI_PENDING[core] = false;
-                aux_of(core).extint_pending = 0;
+                parallel::word_store(core_events(core), CORE_EVENT_INIT);
+                parallel::word_store(nmi_latch(core), 0);
+                parallel::word_store(&raw mut aux_of(core).extint_pending, 0);
                 true
             },
             DELIVERY_STARTUP => unsafe {
                 // The BSP never waits for SIPI; AP scheduler state ignores
                 // subsequent SIPIs after the first has started execution.
-                if core != 0 && CORE_EVENTS[core] & CORE_EVENT_SIPI == 0 {
-                    CORE_EVENTS[core] |= CORE_EVENT_SIPI | (vector as u32) << 8;
-                    true
-                }
-                else {
-                    false
-                }
+                core != 0 && sipi_latch(core, vector)
             },
             IOAPIC_DELIVERY_NMI => unsafe {
-                NMI_PENDING[core] = true;
+                parallel::word_store(nmi_latch(core), 1);
                 true
             },
             DELIVERY_EXTINT => {
                 if fixed_enabled(apic_of(core), aux_of(core)) {
-                    aux_of(core).extint_pending = 1;
+                    unsafe { parallel::word_store(&raw mut aux_of(core).extint_pending, 1) };
                     true
                 }
                 else {
                     false
                 }
             },
-            IOAPIC_DELIVERY_FIXED => deliver(apic_of(core), aux_of(core), vector, is_level),
+            IOAPIC_DELIVERY_FIXED => deliver(apic_of(core), aux_of(core), vector, is_level, remote(core)),
             _ => false, // reserved and unsupported SMI: never reinterpret as fixed
         };
         if accepted_here && is_ipi {
-            aux_of(core).ipi_received = aux_of(core).ipi_received.wrapping_add(1);
+            count_ipi(core);
+        }
+        if accepted_here {
+            unsafe { parallel::kick(core) };
         }
         accepted |= accepted_here;
         if accepted_here && mode == DELIVERY_EXTINT {
@@ -853,25 +888,43 @@ fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ip
     accepted
 }
 
-fn deliver(apic: &mut Apic, aux: &mut ApicAux, vector: u8, is_level: bool) -> bool {
+/// Only this core's first start-up IPI after INIT counts
+unsafe fn sipi_latch(core: usize, vector: u8) -> bool {
+    let events = core_events(core);
+    loop {
+        let current = parallel::word_load(events);
+        if current & CORE_EVENT_SIPI != 0 {
+            return false;
+        }
+        let value = current | CORE_EVENT_SIPI | (vector as u32) << 8;
+        if parallel::compare_exchange(events.cast(), 4, current as u64, value as u64) {
+            return true;
+        }
+    }
+}
+
+fn count_ipi(core: usize) {
+    let aux = aux_of(core);
+    aux.ipi_received = aux.ipi_received.wrapping_add(1);
+}
+
+/// Accept a fixed interrupt into IRR. For a core running in another worker
+/// (`remote`), only the request words change, atomically: its TMR takes the
+/// queued trigger mode when that core acknowledges the vector.
+fn deliver(apic: &mut Apic, aux: &mut ApicAux, vector: u8, is_level: bool, remote: bool) -> bool {
     if !fixed_enabled(apic, aux) {
         return false;
     }
     if vector < 0x10 {
-        apic.error |= ESR_RECEIVE_ILLEGAL_VECTOR;
+        unsafe { parallel::word_or(&raw mut apic.error, ESR_RECEIVE_ILLEGAL_VECTOR) };
         return false;
     }
     if register_get_bit(&apic.irr, vector) {
         return true;
     }
-    register_set_bit(&mut apic.irr, vector);
-    if is_level {
-        register_set_bit(&mut aux.pending_tmr, vector);
-    }
-    else {
-        register_clear_bit(&mut aux.pending_tmr, vector);
-    }
-    if !register_get_bit(&apic.isr, vector) {
+    register_update(&raw mut aux.pending_tmr, vector, is_level);
+    register_update(&raw mut apic.irr, vector, true);
+    if !remote && !register_get_bit(&apic.isr, vector) {
         if is_level {
             register_set_bit(&mut apic.tmr, vector);
         }
@@ -921,7 +974,7 @@ pub fn acknowledge_pic_irq() -> Option<u8> {
     // Only one CPU can acknowledge the shared PIC output. Retire broadcast
     // latches together, so a stale target cannot steal the next device IRQ.
     for core in 0..core_count() {
-        aux_of(core).extint_pending = 0;
+        unsafe { parallel::word_store(&raw mut aux_of(core).extint_pending, 0) };
     }
     vector
 }
@@ -988,7 +1041,7 @@ fn pending_irq(apic: &Apic, aux: &ApicAux) -> Option<u8> {
 
 fn acknowledge_irq_internal(apic: &mut Apic, aux: &mut ApicAux) -> Option<u8> {
     let highest_irr = pending_irq(apic, aux)?;
-    register_clear_bit(&mut apic.irr, highest_irr);
+    register_update(&raw mut apic.irr, highest_irr, false);
     register_set_bit(&mut apic.isr, highest_irr);
     if register_get_bit(&aux.pending_tmr, highest_irr) {
         register_set_bit(&mut apic.tmr, highest_irr);
@@ -996,7 +1049,7 @@ fn acknowledge_irq_internal(apic: &mut Apic, aux: &mut ApicAux) -> Option<u8> {
     else {
         register_clear_bit(&mut apic.tmr, highest_irr);
     }
-    register_clear_bit(&mut aux.pending_tmr, highest_irr);
+    register_update(&raw mut aux.pending_tmr, highest_irr, false);
 
     if APIC_LOG_VERBOSE {
         dbg_log!("Calling vector {:x}", highest_irr);
@@ -1013,6 +1066,19 @@ fn register_get_bit(v: &[u32; 8], bit: u8) -> bool { v[(bit >> 5) as usize] & 1 
 fn register_set_bit(v: &mut [u32; 8], bit: u8) { v[(bit >> 5) as usize] |= 1 << (bit & 31); }
 
 fn register_clear_bit(v: &mut [u32; 8], bit: u8) { v[(bit >> 5) as usize] &= !(1 << (bit & 31)); }
+
+/// Set or clear a bit of a register other cores change as well (IRR, pending TMR)
+fn register_update(v: *mut [u32; 8], bit: u8, set: bool) {
+    unsafe {
+        let word = v.cast::<u32>().add((bit >> 5) as usize);
+        if set {
+            parallel::word_or(word, 1 << (bit & 31));
+        }
+        else {
+            parallel::word_and(word, !(1 << (bit & 31)));
+        }
+    }
+}
 
 fn register_get_highest_bit(v: &[u32; 8]) -> Option<u8> {
     dbg_assert!(v.as_ptr().addr() & std::mem::align_of::<u64>() - 1 == 0);

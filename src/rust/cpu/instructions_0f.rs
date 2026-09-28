@@ -3494,6 +3494,8 @@ mod x64_cpuid_tests {
 
 #[no_mangle]
 pub unsafe fn instr_0FA2() {
+    // serializing: other cores' writes to code are seen from here on
+    crate::parallel::code::poll();
     // cpuid
     // TODO: Fill in with less bogus values
 
@@ -4206,6 +4208,10 @@ pub unsafe fn instr32_0FC7_1_reg(_r: i32) { trigger_ud(); }
 pub unsafe fn instr16_0FC7_1_mem(addr: i32) {
     // cmpxchg8b
     return_on_pagefault!(writable_or_pagefault(addr, 8));
+    if crate::parallel::active() {
+        cmpxchg8b_locked(addr);
+        return;
+    }
     let m64 = safe_read64s(addr).unwrap();
     let m64_low = m64 as i32;
     let m64_high = (m64 >> 32) as i32;
@@ -4230,6 +4236,69 @@ pub unsafe fn instr16_0FC7_1_mem(addr: i32) {
     *flags_changed &= !FLAG_ZERO;
 }
 pub unsafe fn instr32_0FC7_1_mem(addr: i32) { instr16_0FC7_1_mem(addr) }
+
+/// CMPXCHG8B with other cores running in workers: one 8-byte compare-exchange
+/// of RAM, including the write-back of the unchanged value on a mismatch
+#[cold]
+unsafe fn cmpxchg8b_locked(addr: i32) {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // (compatibility mode: x64::memory commits the locked operand)
+        let _ = crate::x64::memory::run_locked(|| {
+            let linear = addr as u32 as u64;
+            let m64 = crate::x64::memory::read(linear, 64, false)?;
+            let equal = m64 == read_reg32(EAX) as u32 as u64 | (read_reg32(EDX) as u32 as u64) << 32;
+            let value = if equal { read_reg32(EBX) as u32 as u64 | (read_reg32(ECX) as u32 as u64) << 32 } else { m64 };
+            crate::x64::memory::write(linear, 64, value, false)?;
+            cmpxchg8b_result(equal, m64);
+            Ok(())
+        })
+        .map_err(|fault| crate::x64::system::raise(fault));
+        return;
+    }
+    if addr as u32 & 0xFFF > 0xFF8 {
+        // split across pages: (not) atomic like the other split locked operations
+        crate::parallel::split_lock().lock();
+        let m64 = safe_read64s(addr).unwrap();
+        let equal = m64 == read_reg32(EAX) as u32 as u64 | (read_reg32(EDX) as u32 as u64) << 32;
+        let value = if equal { read_reg32(EBX) as u32 as u64 | (read_reg32(ECX) as u32 as u64) << 32 } else { m64 };
+        safe_write64(addr, value).unwrap();
+        crate::parallel::split_lock().unlock();
+        cmpxchg8b_result(equal, m64);
+        return;
+    }
+    let (phys, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr).unwrap();
+    if crate::cpu::memory::in_mapped_range(phys) {
+        let m64 = crate::cpu::memory::read64s(phys) as u64;
+        let equal = m64 == read_reg32(EAX) as u32 as u64 | (read_reg32(EDX) as u32 as u64) << 32;
+        let value = if equal { read_reg32(EBX) as u32 as u64 | (read_reg32(ECX) as u32 as u64) << 32 } else { m64 };
+        crate::cpu::memory::mmap_write64(phys, value);
+        cmpxchg8b_result(equal, m64);
+        return;
+    }
+    if !can_skip_dirty_page {
+        crate::jit::jit_dirty_page(crate::page::Page::page_of(phys));
+    }
+    loop {
+        let m64 = crate::cpu::memory::read64_no_mmap_check(phys);
+        let equal = m64 == read_reg32(EAX) as u32 as u64 | (read_reg32(EDX) as u32 as u64) << 32;
+        let value = if equal { read_reg32(EBX) as u32 as u64 | (read_reg32(ECX) as u32 as u64) << 32 } else { m64 };
+        if crate::cpu::memory::compare_exchange_no_mmap_or_dirty_check(phys, 8, m64, value) {
+            cmpxchg8b_result(equal, m64);
+            return;
+        }
+    }
+}
+unsafe fn cmpxchg8b_result(equal: bool, m64: u64) {
+    if equal {
+        *flags |= FLAG_ZERO;
+    }
+    else {
+        *flags &= !FLAG_ZERO;
+        write_reg32(EAX, m64 as i32);
+        write_reg32(EDX, (m64 >> 32) as i32);
+    }
+    *flags_changed &= !FLAG_ZERO;
+}
 
 #[no_mangle]
 pub unsafe fn instr16_0FC7_6_reg(r: i32) {

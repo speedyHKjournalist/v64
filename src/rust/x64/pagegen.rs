@@ -215,6 +215,11 @@ fn classify(d: &Decoded) -> Op {
     if d.prefixes.lock && !lock_ok {
         return Op::Step;
     }
+    // With cores in workers, a locked read-modify-write commits atomically in
+    // the interpreter (x64::memory::run_locked); XCHG with memory is locked
+    if crate::parallel::active() && memory && (d.prefixes.lock || matches!(op, 0x86 | 0x87)) {
+        return Op::Step;
+    }
     let result = (|| -> Option<Op> {
         Some(match op {
             0x00..=0x3D if op & 7 <= 5 => {
@@ -1179,6 +1184,15 @@ impl Emitter {
         self.c32((4096 - size) as i32);
         self.b.leu_i32();
         self.b.and_i32();
+        if WasmBuilder::ATOMIC_GUEST_MEMORY && size > 1 {
+            // atomic accesses (cores in workers) need natural alignment; the
+            // slow path refuses unaligned ones (x64_page_access)
+            self.gi(OFF);
+            self.c32(size.min(8) as i32 - 1);
+            self.b.and_i32();
+            self.b.eqz_i32();
+            self.b.and_i32();
+        }
         self.b.hint(true);
         self.b.if_i32();
         self.gi(ENT);
@@ -1197,24 +1211,8 @@ impl Emitter {
         self.gi(HH);
         self.b.block_end();
     }
-    fn load(&mut self, width: u8) {
-        let opcode = match width {
-            8 => op::OP_I64LOAD8U,
-            16 => op::OP_I64LOAD16U,
-            32 => op::OP_I64LOAD32U,
-            _ => op::OP_I64LOAD,
-        };
-        self.b.memory_op(opcode, op::MEM_NO_ALIGN, 0);
-    }
-    fn store(&mut self, width: u8) {
-        let opcode = match width {
-            8 => op::OP_I64STORE8,
-            16 => op::OP_I64STORE16,
-            32 => op::OP_I64STORE32,
-            _ => op::OP_I64STORE,
-        };
-        self.b.memory_op(opcode, op::MEM_NO_ALIGN, 0);
-    }
+    fn load(&mut self, width: u8) { self.b.guest_load_i64_bits(width as u32, 0); }
+    fn store(&mut self, width: u8) { self.b.guest_store_i64_bits(width as u32, 0); }
     /// Push the (zero-extended) value of a source operand.
     fn read(&mut self, o: Opnd, width: u8, inst: &Inst) {
         match o {
@@ -2453,8 +2451,7 @@ impl Emitter {
                         for half in 0..(bits as u32).div_ceil(64) {
                             self.gi(HOST);
                             self.xmm_load(s, half * 8, bits.min(64));
-                            let opcode = if bits == 32 { op::OP_I64STORE32 } else { op::OP_I64STORE };
-                            self.b.memory_op(opcode, op::MEM_NO_ALIGN, half * 8);
+                            self.b.guest_store_i64_bits(if bits == 32 { 32 } else { 64 }, half * 8);
                         }
                     },
                     (Xmm::Mem(_), Xmm::Mem(_)) => unreachable!(),
@@ -2475,7 +2472,7 @@ impl Emitter {
                         Xmm::Reg(s) => self.xmm_load(s, half * 8, 64),
                         Xmm::Mem(_) => {
                             self.gi(HOST);
-                            self.b.memory_op(op::OP_I64LOAD, op::MEM_NO_ALIGN, half * 8);
+                            self.b.guest_load_i64_bits(64, half * 8);
                         },
                     }
                     match code {
@@ -2655,8 +2652,7 @@ impl Emitter {
         self.b.store_aligned_i64(0);
     }
     fn load_bits(&mut self, bits: u8, offset: u32) {
-        let opcode = if bits == 32 { op::OP_I64LOAD32U } else { op::OP_I64LOAD };
-        self.b.memory_op(opcode, op::MEM_NO_ALIGN, offset);
+        self.b.guest_load_i64_bits(if bits == 32 { 32 } else { 64 }, offset);
     }
     /// HOST = host address of the `bits` memory operand, retried when an
     /// aligned form is misaligned (#GP) or the access cache refuses it.
@@ -3113,6 +3109,9 @@ impl Emitter {
             self.b.ltu_i32();
             self.b.and_i32();
             self.step_if(start);
+            // (a string operation's elements are not ordered among themselves,
+            // but with respect to the other instructions: fenced with workers)
+            self.b.guest_fence();
             self.gi(HOST);
             self.gi(SRC);
             self.gi(COND);
@@ -3120,12 +3119,14 @@ impl Emitter {
             self.b.op(10);
             self.b.op(0);
             self.b.op(0);
+            self.b.guest_fence();
         }
         else {
             self.g(7);
             self.s(ADDR);
             self.host_or(1, true, start, self.f().step);
             self.si(HOST);
+            self.b.guest_fence();
             self.gi(HOST);
             self.g(0);
             self.b.wrap_i64_to_i32();
@@ -3133,6 +3134,7 @@ impl Emitter {
             self.b.op(0xFC);
             self.b.op(11);
             self.b.op(0);
+            self.b.guest_fence();
         }
         self.gi(COND);
         self.b.extend_unsigned_i32_to_i64();
@@ -3169,7 +3171,7 @@ impl Emitter {
         self.s(TA);
         if wide {
             self.gi(HOST);
-            self.b.memory_op(op::OP_I64LOAD, op::MEM_NO_ALIGN, 8);
+            self.b.guest_load_i64_bits(64, 8);
             self.s(TB);
             self.g(TA);
             self.g(0);
@@ -3190,7 +3192,7 @@ impl Emitter {
             self.g(TB);
             self.gi(COND);
             self.b.select();
-            self.b.memory_op(op::OP_I64STORE, op::MEM_NO_ALIGN, 8);
+            self.b.guest_store_i64_bits(64, 8);
             self.gi(COND);
             self.b.eqz_i32();
             self.b.if_void();
