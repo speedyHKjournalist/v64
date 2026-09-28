@@ -12,6 +12,9 @@ const ON_LOCALHOST = !location.hostname.endsWith("copy.sh");
 
 const DEFAULT_NETWORKING_PROXIES = ["wss://relay.widgetry.org/", "ws://localhost:8080/"];
 const DEFAULT_MEMORY_SIZE = 128;
+// Guest RAM is limited to just under 2 GiB (wasm32); v86 reduces larger sizes
+const MAX_MEMORY_SIZE = 2048;
+const DEFAULT_CPU_CORES = 1;
 const DEFAULT_VGA_MEMORY_SIZE = 8;
 const DEFAULT_BOOT_ORDER = 0;
 const DEFAULT_MTU = 1500;
@@ -1793,6 +1796,8 @@ function onload()
     }
 
     if(query_args.has("m")) $("memory_size").value = query_args.get("m");
+    if(query_args.has("cores")) $("cpu_cores").value = query_args.get("cores");
+    if(query_args.has("x64")) $("x64").checked = bool_arg(query_args.get("x64"));
     if(query_args.has("vram")) $("vga_memory_size").value = query_args.get("vram");
     if(query_args.has("relay_url")) $("relay_url").value = query_args.get("relay_url");
     if(query_args.has("mute")) $("disable_audio").checked = bool_arg(query_args.get("mute"));
@@ -2269,7 +2274,17 @@ async function start_emulation(profile, query_args)
             const m = parseInt(query_args.get("m"), 10);
             if(m > 0)
             {
-                settings.memory_size = Math.max(16, m) * 1024 * 1024;
+                settings.memory_size = Math.min(Math.max(16, m), MAX_MEMORY_SIZE) * 1024 * 1024;
+            }
+
+            const cores = parseInt(query_args.get("cores"), 10);
+            if(cores > 0)
+            {
+                settings.cpu_cores = cores;
+            }
+            if(query_args.has("x64"))
+            {
+                settings.experimental_x64 = bool_arg(query_args.get("x64"));
             }
 
             const vram = parseInt(query_args.get("vram"), 10);
@@ -2397,7 +2412,8 @@ async function start_emulation(profile, query_args)
 
         const MB = 1024 * 1024;
 
-        const memory_size = parseInt($("memory_size").value, 10) || DEFAULT_MEMORY_SIZE;
+        const memory_size = Math.min(parseInt($("memory_size").value, 10) || DEFAULT_MEMORY_SIZE, MAX_MEMORY_SIZE);
+        $("memory_size").value = String(memory_size);
         if(!settings.memory_size || memory_size !== DEFAULT_MEMORY_SIZE)
         {
             settings.memory_size = memory_size * MB;
@@ -2418,11 +2434,30 @@ async function start_emulation(profile, query_args)
         }
         if(settings.boot_order !== DEFAULT_BOOT_ORDER) new_query_args.set("boot_order", settings.boot_order.toString(16));
 
+        const cpu_cores = parseInt($("cpu_cores").value, 10) || DEFAULT_CPU_CORES;
+        if(!settings.cpu_cores)
+        {
+            settings.cpu_cores = cpu_cores;
+        }
+        if(settings.cpu_cores !== DEFAULT_CPU_CORES) new_query_args.set("cores", String(settings.cpu_cores));
+
+        if(settings.experimental_x64 === undefined)
+        {
+            settings.experimental_x64 = $("x64").checked;
+        }
+        if(settings.experimental_x64) new_query_args.set("x64", "1");
+
+        // multiple cores are described to the guest through ACPI (MADT)
+        if(settings.cpu_cores > 1 && !settings.acpi)
+        {
+            settings.acpi = true;
+            $("acpi").checked = true;
+        }
         if(settings.acpi === undefined)
         {
             settings.acpi = $("acpi").checked;
-            if(settings.acpi) new_query_args.set("acpi", "1");
         }
+        if(settings.acpi) new_query_args.set("acpi", "1");
 
         const BIOSPATH = "bios/";
 
@@ -2516,7 +2551,11 @@ async function start_emulation(profile, query_args)
 
         cmdline: settings.cmdline,
         bzimage_initrd_from_filesystem: settings.bzimage_initrd_from_filesystem,
-        acpi: settings.acpi,
+        acpi: settings.acpi || settings.cpu_cores > 1,
+        cpu_cores: settings.cpu_cores,
+        experimental_x64: settings.experimental_x64,
+        // without it, more than one core runs in the interpreter
+        experimental_smp_jit: settings.cpu_cores > 1 && !settings.disable_jit,
         disable_jit: settings.disable_jit,
         "x87_fast_math": settings["x87_fast_math"],
         "x87_jit_cache": settings["x87_jit_cache"],

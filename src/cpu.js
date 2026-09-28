@@ -1873,15 +1873,23 @@ CPU.prototype.create_memory = function(size, minimum_size)
     {
         throw new Error("memory_size must be a non-negative number of bytes, got " + size);
     }
+    // The size is kept in 32 bits and RAM lives in wasm32 memory: at most
+    // 2 GiB - 128 KiB. (A multiple of 4 GiB used to wrap to 0 bytes here.)
+    const max_size = Math.pow(2, 31) - MMAP_BLOCK_SIZE;
     if(size < minimum_size)
     {
         size = minimum_size;
         dbg_log("Rounding memory size up to " + size, LOG_CPU);
     }
-    else if((size | 0) < 0)
+    else if(size > max_size)
     {
-        size = Math.pow(2, 31) - MMAP_BLOCK_SIZE;
-        dbg_log("Rounding memory size down to " + size, LOG_CPU);
+        // (2 GiB itself only loses the last 128 KiB: not worth a warning)
+        if(size > Math.pow(2, 31))
+        {
+            console.warn("memory_size of " + Math.round(size / (1 << 20)) + " MB exceeds the maximum; using " +
+                (max_size / (1 << 20)) + " MB");
+        }
+        size = max_size;
     }
 
     size = ((size - 1) | (MMAP_BLOCK_SIZE - 1)) + 1 | 0;
@@ -2123,6 +2131,9 @@ CPU.prototype.init = function(settings, device_bus)
     // Multicore JIT remains opt-in until the complete C3 stress matrix passes.
     const interpreted = deterministic || multicore && !settings.experimental_smp_jit;
     this.configure_jit_backend(interpreted ? Object.assign({}, settings, { disable_jit: true }) : settings);
+    // The x86-64 CPU profile (CPUID long mode, NX, SYSCALL, CX16, ...) is
+    // opt-in while x64 support is experimental
+    this.wm.exports["set_x64_test_capabilities"](!!settings.experimental_x64);
     this.wm.exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     this.wm.exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
     this.create_memory(

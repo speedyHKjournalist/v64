@@ -668,6 +668,7 @@ x64-system-tests: build/v86-debug.wasm
 	node tests/x64/irq_boundary.mjs
 	node tests/x64/triple_fault.mjs
 	node tests/x64/direct_loader.mjs
+	node tests/x64/profile_options.mjs
 
 x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/integer_oracle.mjs

@@ -379,7 +379,8 @@ export interface V86Options {
     wasm_fallback_path?: string;
 
     /**
-     * The memory size in bytes, should be a power of 2.
+     * The memory size in bytes, should be a power of 2. At most 2 GiB - 128 KiB
+     * (wasm32); larger values are reduced to that with a console warning.
      * @example 16 * 1024 * 1024
      * @default 64 * 1024 * 1024
      */
@@ -599,6 +600,13 @@ export interface V86Options {
     cpu_schedule_seed?: number;
     /** Testing option: opt into multicore JIT while the C3 stress matrix is being qualified. */
     experimental_smp_jit?: boolean;
+    /**
+     * Experimental: present an x86-64 CPU (CPUID long mode, NX, SYSCALL,
+     * CMPXCHG16B, ...), needed by 64-bit operating systems such as Windows
+     * 8.1 x64 or x86_64 Linux.
+     * @default false
+     */
+    experimental_x64?: boolean;
 
     /**
      * Log level (for debug builds)

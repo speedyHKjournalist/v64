@@ -87,7 +87,8 @@ export async function reference(directory, {address = 0x300000, magic = 0xC064C0
         await request("human-monitor-command", {"command-line": `pmemsave ${address} ${length} "${directory}qemu.bin"`});
         await request("quit");
     }
-    finally { child.kill(); }
+    // (SIGTERM is only a shutdown request, which -no-shutdown turns into a pause)
+    finally { child.kill("SIGKILL"); }
     return fs.readFileSync(directory + "qemu.bin");
 }
 export async function actual(directory, {address = 0x300000, magic = 0xC064C064, length, timeout = 30000, setup, inspect, options = {}})
