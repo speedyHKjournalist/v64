@@ -1,5 +1,6 @@
 import { wasm_fallback_path } from "./wasm_paths.js";
 import { instantiate_v86, memory_import } from "../parallel/relocate.js";
+import { default_worker_url } from "../parallel/machine.js";
 import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
 import { v86 } from "../main.js";
 import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
@@ -751,7 +752,7 @@ V86.prototype.continue_init = async function(emulator, options)
             // (the same compiler policy as the machine's core, see CPU.prototype.init)
             worker_settings["disable_jit"] = !!settings.disable_jit || !settings.experimental_smp_jit;
             await this.v86.cpu.start_parallel({ bytes, settings: worker_settings,
-                worker_url: options["vcpu_worker_url"] || new URL("../parallel/vcpu_worker_entry.js", import.meta.url) });
+                worker_url: options["vcpu_worker_url"] || await default_worker_url() });
             if(this.destroyed) return;
         }
 
@@ -985,6 +986,7 @@ V86.prototype.destroy = async function()
 
 /**
  * Restart (force a reboot).
+ * @param {string=} reason "power-on" after the guest turned the machine off
  */
 V86.prototype.restart = async function(reason)
 {

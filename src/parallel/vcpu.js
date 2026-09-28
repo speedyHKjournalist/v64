@@ -105,8 +105,7 @@ export async function run_vcpu(init, post)
         "parallel_notify": address => { Atomics.notify(new Int32Array(memory.buffer), address >>> 2); },
     };
 
-    const module = await WebAssembly.compile(relocate(new Uint8Array(init.bytes), init.base));
-    const instance = await WebAssembly.instantiate(module, { "env": env });
+    const { instance } = await WebAssembly.instantiate(relocate(new Uint8Array(init.bytes), init.base), { "env": env });
     exports = instance.exports;
     exports["rust_init"]();
     exports["parallel_attach"](init.base, core);
@@ -118,14 +117,14 @@ export async function run_vcpu(init, post)
     cpu.configure_jit_backend(settings);
     // no event loop in this worker: install generated code synchronously
     cpu.ir_sync_publication = true;
-    cpu.publish_wide_native = function(token, pointer, length)
+    cpu.publish_wide_native = (token, pointer, length) =>
     {
         const bytes = new Uint8Array(memory.buffer, pointer, length).slice();
         try
         {
             const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes),
                 { "e": { "m": memory, "x64_native_guard": exports["x64_native_guard"] } });
-            if(exports["x64_native_ready"](token, true)) this.wide_native_functions.set(token, instance.exports["f"]);
+            if(exports["x64_native_ready"](token, true)) cpu.wide_native_functions.set(token, instance.exports["f"]);
         }
         catch(e)
         {
@@ -316,12 +315,16 @@ export function start_vcpu_worker()
     };
     if(node)
     {
-        import("node:worker_threads").then(({ parentPort }) => {
+        import("node:" + "worker_threads").then(({ parentPort }) => {
             parentPort.once("message", init => start(init, message => parentPort.postMessage(message)));
         });
     }
     else
     {
-        globalThis.onmessage = e => { globalThis.onmessage = null; start(e.data, message => globalThis.postMessage(message)); };
+        const first = e => {
+            globalThis.removeEventListener("message", first);
+            start(e.data, message => globalThis.postMessage(message));
+        };
+        globalThis.addEventListener("message", first);
     }
 }

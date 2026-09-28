@@ -90,29 +90,28 @@ export function relocations(bytes)
     const at = { pos: section.content };
     const version = read_uleb(bytes, at);
     if(version !== 1) throw new Error("v86-parallel.wasm: relocation table version " + version);
-    const result = {};
-    for(const kind of ["uleb5", "sleb5", "u32"])
-    {
-        const list = [];
+    const list = () => {
+        const positions = [];
         let position = 0;
         for(let count = read_uleb(bytes, at); count--;)
         {
             position += read_uleb(bytes, at);
-            list.push(position);
+            positions.push(position);
         }
-        result[kind] = list;
-    }
+        return positions;
+    };
+    const uleb5 = list(), sleb5 = list(), u32 = list();
     dbg_assert(at.pos === section.end);
-    return result;
+    return { uleb5, sleb5, u32 };
 }
 
 /**
  * A copy of the module whose static data, stack and CPU state are at `base`
  * instead of 0. The memory at [base, base + __heap_base) must be reserved for
  * the instance and zeroed: only non-zero data segments are written.
- * @param {Uint8Array} bytes
+ * @param {!Uint8Array} bytes
  * @param {number} base a multiple of 64 KiB
- * @return {Uint8Array}
+ * @return {!Uint8Array}
  */
 export function relocate(bytes, base)
 {
@@ -212,9 +211,9 @@ export function image_size(bytes)
 /**
  * Another instance of v86-parallel.wasm in `memory`, in freshly grown (so
  * zeroed) pages that nothing else uses
- * @param {Uint8Array} bytes
+ * @param {!Uint8Array} bytes
  * @param {!Object} imports with an "env" object
- * @param {WebAssembly.Memory} memory the shared memory of the instance at base 0
+ * @param {!WebAssembly.Memory} memory the shared memory of the instance at base 0
  * @return {Promise<{instance: WebAssembly.Instance, base: number}>}
  */
 export async function instantiate_relocated(bytes, imports, memory)
@@ -222,7 +221,6 @@ export async function instantiate_relocated(bytes, imports, memory)
     const pages = Math.ceil(image_size(bytes) / PAGE_SIZE);
     const base = memory.grow(pages) * PAGE_SIZE;
     imports["env"]["memory"] = memory;
-    const module = await WebAssembly.compile(relocate(bytes, base));
-    const instance = await WebAssembly.instantiate(module, imports);
+    const { instance } = await WebAssembly.instantiate(relocate(bytes, base), imports);
     return { instance, base };
 }

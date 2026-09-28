@@ -14,6 +14,8 @@ import { CORE_STATE_RANGES } from "../state_layout.js";
 import { image_size, PAGE_SIZE } from "./relocate.js";
 import * as C from "./control.js";
 
+/* global __dirname, V86_BUNDLE */
+
 const NODE = typeof process !== "undefined" && process.versions && process.versions.node;
 
 export class ParallelMachine
@@ -279,13 +281,31 @@ export class ParallelMachine
     }
 }
 
+/**
+ * The script of the vCPU workers when the embedder doesn't pass one
+ * (`vcpu_worker_url`): build/vcpu-worker.js for the bundles (next to
+ * libv86.js in Node, like v86.wasm), the ES module entry for the source tree
+ * @return {Promise<string|URL>}
+ */
+export async function default_worker_url()
+{
+    if(typeof V86_BUNDLE !== "undefined")
+    {
+        return NODE && typeof __dirname === "string" ? __dirname + "/vcpu-worker.js" : "build/vcpu-worker.js";
+    }
+    return (await import("./" + "entry_url.js"))["VCPU_WORKER_ENTRY"];
+}
+
 async function create_worker(url, name)
 {
     if(NODE)
     {
-        const { Worker } = await import("node:worker_threads");
-        const worker = new Worker(url instanceof URL ? url : new URL(url), { "name": name });
-        worker.unref();
+        const { Worker } = await import("node:" + "worker_threads");
+        // (a relative path is relative to the working directory, like v86.wasm)
+        const target = url instanceof URL || /^[a-z]+:/i.test(url) ? new URL(url) :
+            /^\.{0,2}[\\/]/.test(url) ? url : "./" + url;
+        const worker = new Worker(target, { "name": name });
+        worker["unref"]();
         return {
             post: message => worker.postMessage(message),
             on_message: f => worker.on("message", f),

@@ -110,7 +110,8 @@ CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.j
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   v86gl_pci.js \
 	   bus.js log.js cpu.js \
-	   elf.js kernel.js
+	   elf.js kernel.js \
+	   parallel/relocate.js parallel/control.js parallel/machine.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js wasm_paths.js worker_bus.js state_stream_transport.js cpu_worker.js dummy_screen.js ansi_screen.js \
@@ -124,7 +125,7 @@ CORE_FILES:=$(addprefix src/,$(CORE_FILES))
 LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
 BROWSER_FILES:=$(addprefix src/browser/,$(BROWSER_FILES))
 
-build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/v86_all.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	-ls -lh build/v86_all.js
 	java -jar $(CLOSURE) \
@@ -139,7 +140,7 @@ build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js src/browser/main.js
 	ls -lh build/v86_all.js
 
-build/v86_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/v86_all_debug.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/v86_all_debug.js\
@@ -152,7 +153,7 @@ build/v86_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js $(BROWSER_FILES)\
 		--js src/browser/main.js
 
-build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	-ls -lh build/libv86.js
 	java -jar $(CLOSURE) \
@@ -167,7 +168,7 @@ build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(LIB_FILES)
 	ls -lh build/libv86.js
 
-build/libv86.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	-ls -lh build/libv86.js
 	java -jar $(CLOSURE) \
@@ -184,7 +185,7 @@ build/libv86.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--emit_use_strict=false
 	ls -lh build/libv86.mjs
 
-build/libv86-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86-debug.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86-debug.js\
@@ -199,7 +200,7 @@ build/libv86-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(LIB_FILES)
 	ls -lh build/libv86-debug.js
 
-build/libv86-debug.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86-debug.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86-debug.mjs\
@@ -548,12 +549,24 @@ sse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-fal
 	node tests/rust/sse3.mjs build/v86-debug.wasm
 
 # Keep the worker's public option/event wire names stable across bundles.
-build/cpu-worker.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/cpu-worker.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
 		--compilation_level SIMPLE --jscomp_off=missingProperties \
 		--js $(CORE_FILES) --js $(LIB_FILES) --js $(BROWSER_FILES) \
 		--js src/browser/cpu_worker_runtime.js --js src/browser/cpu_worker_entry.js
+
+# The vCPU workers of the host-parallel build (src/parallel/vcpu.js), paired
+# with v86-parallel.wasm: `parallel: true` loads both next to the bundles
+build/vcpu-worker.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
+	mkdir -p build
+	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
+		--compilation_level SIMPLE --jscomp_off=missingProperties \
+		--js $(CORE_FILES) --js $(LIB_FILES) --js $(BROWSER_FILES) \
+		--js src/parallel/vcpu.js --js src/parallel/vcpu_worker_entry.js
+
+.PHONY: parallel
+parallel: build/v86-parallel.wasm build/vcpu-worker.js
 
 build/cpu-worker-test.bin: tests/rust/cpu_worker.asm
 	nasm -f bin $< -o $@
