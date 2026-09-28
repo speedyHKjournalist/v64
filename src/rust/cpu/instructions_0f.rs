@@ -1232,13 +1232,32 @@ pub unsafe fn wrmsr_checked() -> bool {
         dbg_log!("wrmsr ecx={:x} data={:x}:{:x}", index, high, low);
     }
 
-    if (0xC0000080..=0xC0000084).contains(&(index as u32)) ||
-        crate::x64::state::efer() & crate::x64::state::EFER_LME != 0 {
+    let x64 = crate::x64::state::efer() & crate::x64::state::EFER_LME != 0;
+    if (0xC0000080..=0xC0000084).contains(&(index as u32)) || x64 {
         match crate::x64::system::write_msr(index as u32, low as u32 as u64 | (high as u32 as u64) << 32) {
             Ok(true) => return true,
             Err(fault) => { crate::x64::system::raise(fault); return false; },
             Ok(false) => {},
         }
+    }
+    match write_msr_table(index, low, high) {
+        Ok(true) => true,
+        Ok(false) if !x64 => {
+            dbg_log!("Unknown msr: {:x}", index);
+            dbg_assert!(false);
+            true
+        },
+        Ok(false) | Err(()) => {
+            trigger_gp(0);
+            false
+        },
+    }
+}
+
+/// See read_msr_table. Ok(false): no such MSR; Err: the value faults (#GP).
+pub unsafe fn write_msr_table(index: i32, low: i32, high: i32) -> Result<bool, ()> {
+    if let Some(result) = write_model_msr(index as u32, low as u32 as u64 | (high as u32 as u64) << 32) {
+        return result.map(|()| true);
     }
     match index {
         IA32_SYSENTER_CS => *sysenter_cs = low & 0xFFFF,
@@ -1250,8 +1269,7 @@ pub unsafe fn wrmsr_checked() -> bool {
             let address = low & !(IA32_APIC_BASE_BSP | IA32_APIC_BASE_EXTD | IA32_APIC_BASE_EN);
             if high != 0 || low & IA32_APIC_BASE_EXTD != 0
                 || !(address == APIC_MEM_ADDRESS as i32 || address == 0 && !*acpi_enabled) {
-                trigger_gp(0);
-                return false;
+                return Err(());
             }
             let enable = low & IA32_APIC_BASE_EN != 0;
             if *apic_enabled && !enable {
@@ -1269,15 +1287,13 @@ pub unsafe fn wrmsr_checked() -> bool {
         IA32_MISC_ENABLE => {
             // Enable Misc. Processor Features
         },
-        IA32_MCG_CAP => {}, // netbsd
         IA32_FS_BASE | IA32_GS_BASE => {
             // C1's compatibility MSRs expose the 32-bit hidden segment base
             // used by kvm-unit-tests' per-CPU data. This is not the full
             // long-mode MSR contract: reject unrepresentable values before
             // changing state, identically in debug and release builds.
             if high != 0 {
-                trigger_gp(0);
-                return false;
+                return Err(());
             }
             let segment = if index == IA32_FS_BASE { FS } else { GS };
             *segment_offsets.offset(segment as isize) = low;
@@ -1285,19 +1301,15 @@ pub unsafe fn wrmsr_checked() -> bool {
         },
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
-        IA32_PAT => {},
         IA32_SPEC_CTRL => {},      // linux 5.19
         IA32_TSX_CTRL => {},       // linux 5.19
         MSR_TSX_FORCE_ABORT => {}, // linux 5.19
         IA32_MCU_OPT_CTRL => {},   // linux 5.19
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
-        _ => {
-            dbg_log!("Unknown msr: {:x}", index);
-            dbg_assert!(false);
-        },
+        _ => return Ok(false),
     }
-    true
+    Ok(true)
 }
 
 pub unsafe fn instr_0F31() {
@@ -1326,17 +1338,98 @@ pub unsafe fn instr_0F32() {
     let index = read_reg32(ECX);
     dbg_log!("rdmsr ecx={:x}", index);
 
-    let mut low = 0;
-    let mut high = 0;
-
-    if (0xC0000080..=0xC0000084).contains(&(index as u32)) ||
-        crate::x64::state::efer() & crate::x64::state::EFER_LME != 0 {
+    let x64 = crate::x64::state::efer() & crate::x64::state::EFER_LME != 0;
+    if (0xC0000080..=0xC0000084).contains(&(index as u32)) || x64 {
         match crate::x64::system::read_msr(index as u32) {
             Ok(Some(value)) => { write_reg32(EAX, value as i32); write_reg32(EDX, (value >> 32) as i32); return; },
             Err(fault) => { crate::x64::system::raise(fault); return; },
             Ok(None) => {},
         }
     }
+    let (low, high) = match read_msr_table(index) {
+        Some(value) => value,
+        // IA-32e guests probe optional MSRs and expect #GP for absent ones
+        None if x64 => { trigger_gp(0); return; },
+        None => {
+            dbg_log!("Unknown msr: {:x}", index);
+            dbg_assert!(false);
+            (0, 0)
+        },
+    };
+
+    write_reg32(EAX, low);
+    write_reg32(EDX, high);
+}
+
+// Memory-type range registers, the page attribute table and machine-check
+// banks (SDM Vol.3A, "Memory Cache Control" and "Machine-Check
+// Architecture"). Memory types have no effect on
+// emulation: the registers keep what the guest programs and reject reserved
+// encodings. All are per core; reset disables them, INIT leaves them alone.
+const MTRR_FIXED: [u32; 11] = [0x250, 0x258, 0x259, 0x268, 0x269, 0x26A, 0x26B, 0x26C, 0x26D, 0x26E, 0x26F];
+/// Eight variable ranges, fixed ranges and write combining
+const MTRRCAP: u64 = 8 | 1 << 8 | 1 << 10;
+const MC_BANKS: u32 = 4;
+/// Bank count and IA32_MCG_CTL present
+const MCG_CAP: u64 = MC_BANKS as u64 | 1 << 8;
+/// Physical address bits of the profile (CPUID 0x80000008)
+const PHYSICAL_MASK: u64 = (1 << 36) - 1;
+fn memory_type(value: u64) -> bool { matches!(value, 0 | 1 | 4 | 5 | 6) }
+
+unsafe fn read_model_msr(index: u32) -> Option<u64> {
+    Some(match index {
+        0xFE => MTRRCAP,
+        0x2FF => *x64_mtrr_def_type,
+        0x200..=0x20F => *x64_mtrr_var.add((index - 0x200) as usize),
+        0x277 => *x64_pat,
+        0x179 => MCG_CAP,
+        0x17A => *x64_mcg_status,
+        0x17B => *x64_mcg_ctl,
+        _ if (0x400..0x400 + 4 * MC_BANKS).contains(&index) => *x64_mc_banks.add((index - 0x400) as usize),
+        _ => *x64_mtrr_fixed.add(MTRR_FIXED.iter().position(|&msr| msr == index)?),
+    })
+}
+/// None: not one of these MSRs; Some(Err): the value is reserved (#GP).
+unsafe fn write_model_msr(index: u32, value: u64) -> Option<Result<(), ()>> {
+    let fixed = MTRR_FIXED.iter().position(|&msr| msr == index);
+    let bank = (0x400..0x400 + 4 * MC_BANKS).contains(&index);
+    let valid = match index {
+        0xFE | 0x179 => false, // read-only
+        0x2FF => value & !0xCFF == 0 && memory_type(value & 0xFF),
+        // PHYSBASEn: type and base; PHYSMASKn: valid bit and mask
+        0x200..=0x20F if index & 1 == 0 => value & !(PHYSICAL_MASK & !0xFFF | 0xFF) == 0 && memory_type(value & 0xFF),
+        0x200..=0x20F => value & !(PHYSICAL_MASK & !0xFFF | 0x800) == 0,
+        0x277 => value.to_le_bytes().iter().all(|&t| memory_type(t as u64) || t == 7),
+        0x17A => value & !7 == 0,
+        0x17B => true,
+        // IA32_MCi_CTL takes any enable mask; status, address and misc only clear
+        _ if bank => index & 3 == 0 || value == 0,
+        _ if fixed.is_some() => value.to_le_bytes().iter().all(|&t| memory_type(t as u64)),
+        _ => return None,
+    };
+    if !valid {
+        return Some(Err(()));
+    }
+    match index {
+        0x2FF => *x64_mtrr_def_type = value,
+        0x200..=0x20F => *x64_mtrr_var.add((index - 0x200) as usize) = value,
+        0x277 => *x64_pat = value,
+        0x17A => *x64_mcg_status = value,
+        0x17B => *x64_mcg_ctl = value,
+        _ if bank => *x64_mc_banks.add((index - 0x400) as usize) = value,
+        _ => *x64_mtrr_fixed.add(fixed.unwrap()) = value,
+    }
+    Some(Ok(()))
+}
+
+/// The model's MSRs outside the IA-32e set that x64::system owns, shared by
+/// every mode. None: this model has no such MSR.
+pub unsafe fn read_msr_table(index: i32) -> Option<(i32, i32)> {
+    if let Some(value) = read_model_msr(index as u32) {
+        return Some((value as i32, (value >> 32) as i32));
+    }
+    let mut low = 0;
+    let mut high = 0;
     match index {
         IA32_SYSENTER_CS => low = *sysenter_cs,
         IA32_SYSENTER_EIP => low = *sysenter_eip,
@@ -1371,10 +1464,8 @@ pub unsafe fn instr_0F32() {
         },
         IA32_RTIT_CTL => {}, // linux4
         MSR_SMI_COUNT => {},
-        IA32_MCG_CAP => {},                        // netbsd
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
-        IA32_PAT => {},
         MSR_PKG_C2_RESIDENCY => {},
         IA32_SPEC_CTRL => {},      // linux 5.19
         IA32_TSX_CTRL => {},       // linux 5.19
@@ -1382,14 +1473,9 @@ pub unsafe fn instr_0F32() {
         IA32_MCU_OPT_CTRL => {},   // linux 5.19
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
-        _ => {
-            dbg_log!("Unknown msr: {:x}", index);
-            dbg_assert!(false);
-        },
+        _ => return None,
     }
-
-    write_reg32(EAX, low);
-    write_reg32(EDX, high);
+    Some((low, high))
 }
 #[no_mangle]
 pub unsafe fn instr_0F33() {
@@ -3365,6 +3451,9 @@ fn apply_x64_test_capabilities(enabled: bool, leaf: u32, registers: &mut [u32; 4
         1 => {
             registers[2] |= 1 << 13; // CMPXCHG16B
             registers[3] |= 1 << 19; // CLFLUSH (implemented; line size in EBX[15:8])
+            // DE (CR4.DE, I/O breakpoints), MCE, MTRR, MCA, PAT: required by
+            // Windows 8.1 x64 (UNSUPPORTED_PROCESSOR otherwise)
+            registers[3] |= 1 << 2 | 1 << 7 | 1 << 12 | 1 << 14 | 1 << 16;
         },
         7 => if unsafe { X64_ARCH_CAPABILITIES } { registers[3] |= 1 << 29 }, // IA32_ARCH_CAPABILITIES
         0x8000_0000 => registers[0] = 0x8000_0008,
@@ -3390,7 +3479,7 @@ mod x64_cpuid_tests {
             assert_eq!(result, original);
         }
         for (leaf, expected) in [
-            (1, [0, 0, 1 << 13, 1 << 19]),
+            (1, [0, 0, 1 << 13, 1 << 19 | 1 << 2 | 1 << 7 | 1 << 12 | 1 << 14 | 1 << 16]),
             (7, [0, 0, 0, 1 << 29]),
             (0x8000_0000, [0x8000_0008, 0, 0, 0]),
             (0x8000_0001, [0, 0, 1, (1 << 11) | (1 << 20) | (1 << 27) | (1 << 29)]),

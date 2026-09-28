@@ -48,7 +48,7 @@ node tests/smp/virtio_high_dma.mjs
 | VirtIO balloon free-page hint | descriptor 地址继承 VirtIO 64 位 | 已使用完整地址分块物理清零，真实高地址测试通过 |
 | 8237 DMA (`src/dma.js`) | 保留通道地址寄存器限制 | 已接物理总线，保留 32 位上限；低洞/异步重映射拒绝测试通过 |
 | IDE bus-master PRDT (`src/ide.js`) | 32 位 PRDT 和 buffer 地址 | 全 PRDT 先验证再传输，失败触发设备错误；ATA/ATAPI 和边界测试通过 |
-| v86gl PCI (`src/v86gl_pci.js`) | 自有共享 arena 协议，目前显式拒绝非零高 DWORD | 通用 VirtIO ring 的高地址需兼容；低地址 DataView/arena 回调还需映射 generation 和低洞验证；不能因协议中高位被拒绝就声称支持 64 位 DMA |
+| v86gl PCI (`src/v86gl_pci.js`) | 64 位 descriptor/arena 地址，经 36 位物理总线（2026-09-28） | 已完成，见文末 |
 
 32 位 DMA 设备应保留真实地址上限，但仍要经过物理译码，避免重映射后的低洞继续访问原后备 RAM。不要将所有设备强制扩宽为 64 位，也不要忽略设备提供的高位。
 
@@ -71,4 +71,25 @@ node tests/smp/virtio_high_dma.mjs
 
 真实 OS：`X64_JIT=1 X64_HIGH_MEMORY=$((128<<20)) node tests/x64/linux_boot.mjs` 在页层下同样通过（64/32 位探针各 4096 页落在 4 GiB 以上），见 [XC 记录](../XC/linux64-boot.zh-CN.md)。
 
-仍未完成：v86gl PCI 的高地址协议（见上表）；快照仍是单个 ArrayBuffer（4 核 Linux 约 220 MB），未分块。
+仍未完成：~~v86gl PCI 的高地址协议~~、~~快照分块~~（均于 2026-09-28 完成，见下）。
+
+## 2026-09-28 续二：v86gl 高地址、IDE 48 位寻址
+
+**v86gl PCI**。此前协议只收低 DWORD，arena/描述符读写直接用后备 RAM 的 DataView（等于把客户机物理地址当作后备偏移）。现改为：
+
+- 描述符、请求、arena 地址都是 64 位客户机物理地址；`valid_range` 要求范围是 36 位总线上的普通 RAM（`x64_phys_kind` 逐页为 RAM；不是 VGA/ROM 窗口、MMIO，也不是 RAM 上移到 4 GiB 以上后留下的低地址空洞），并由 `validate_physical_range` 检查 36 位上限；
+- 读取经 `read_blob_physical`，回复与写回经 `write_blob_physical`（继承代码页失效通知）；arena 在后备中物理连续时（`x64_phys_resolve` 逐页核对）才零拷贝使用后备视图，否则逐段经总线复制。
+
+[`tests/glbridge/virtio_v86gl_high_test.js`](../../../../tests/glbridge/virtio_v86gl_high_test.js)（`make test-glbridge` 自动收集）：64 MiB 中 16 MiB 上移到 4 GiB；arena 放在 4 GiB 处被接受，提交与写回经物理总线完成；落在低地址空洞（48 MiB）的 arena 被拒绝。原有 `virtio_v86gl_test.js` 同样通过。
+
+**IDE 48 位寻址**（按 [ATA-6] 审计大小/偏移计算中的有符号位运算，Windows 镜像为 50 GB，已超出 2^31 与 2^32 字节）：
+
+- `get_lba48` 原先丢弃 LBA 的 32–47 位（源码注释承认），超过 2^32 扇区（2 TiB）的盘会读错位置；现按 HOB 字节算术合成 48 位 LBA；字节偏移 `lba * sector_size` 本来就是浮点乘法，不受影响。
+- 设备控制寄存器的 HOB 位（bit 7）原先不影响寄存器读取，READ NATIVE MAX ADDRESS EXT 的 24–47 位客户机无法读到；现在 HOB=1 时 Sector Count/LBA Low/Mid/High 读出先前写入的高字节，该命令也填入 24–47 位。
+- IDENTIFY 字 60–61（28 位命令可寻址总数）原先是扇区数低 32 位，现在上限为 0x0FFFFFFF；字 100–103 原先只填 100–101，现在填满 48 位。
+- 扇区数/柱面数的整数判断改用 `Number.isInteger`（原 `x | 0` 在 2^31 扇区以上会误报）。
+
+[`tests/devices/ide_large_disk.js`](../../../../tests/devices/ide_large_disk.js)（`make devices-test`）用一个不分配内存、读出内容即自身字节偏移的 3 TiB（0x1_8000_0000 扇区）盘，直接访问端口：IDENTIFY 字 60–61 与 100–103、HOB 读出的 NATIVE MAX、以及 LBA 0x1_2345_6789、0xFFFF_FFFF、0x1_0000_0000、最后一个扇区的 READ SECTORS EXT 都落在正确字节偏移。修正前的 release 构建在第一个断言处失败（字 60–61 为 0x8000_0000）。50 GB 的 Windows 镜像（1.02 亿扇区）不触及这些边界，修正前后均可正常读取。
+
+
+**分块快照**。V7 快照流（`save_state_stream`/`restore_state_stream`，Worker 传输同样有背压）此前只有单元测试（`tests/smp/state_stream.mjs`，未接入 Makefile），真实 OS 快照仍用 V6 单缓冲。现把该单元测试加入 `make multicore-coherence-tests`（及 `-release`），并让 `linux_boot.mjs` 的 `X64_LINUX_SNAPSHOT` 各轮交替使用 V7（写入文件、从文件读回，写/读都按 ≤1 MiB 的块）与 V6。2 核页层 x86_64 Linux 在探针运行中完成两次 V7 与一次 V6 快照往返后全部通过，见 [XC 记录](../XC/linux64-boot.zh-CN.md)。V6 `save_state()` 仍保留（兼容旧快照），它会构造整份缓冲。

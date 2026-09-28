@@ -23,6 +23,20 @@ static mut CORE_STATISTICS: [CoreStatistics; 8] = [CoreStatistics {
 // fault. Remove those dispatch counts before adding the native JIT delta;
 // the interpreter ledger already accounts their actual retirement.
 static mut JIT_ACCOUNTED_DISPATCHES: u32 = 0;
+// Retired instructions and REP elements of the current core not yet added to
+// CORE_STATISTICS: two plain adds per instruction instead of an indexed
+// update. Flushed on core switch and before any read or reset.
+static mut PENDING_RETIRED: u64 = 0;
+static mut PENDING_REP_ELEMENTS: u64 = 0;
+pub unsafe fn flush_core_statistics() {
+    if PENDING_RETIRED | PENDING_REP_ELEMENTS != 0 {
+        let stats = &mut CORE_STATISTICS[apic::current_core()];
+        stats.retired += PENDING_RETIRED;
+        stats.rep_elements += PENDING_REP_ELEMENTS;
+        PENDING_RETIRED = 0;
+        PENDING_REP_ELEMENTS = 0;
+    }
+}
 
 
 struct ExecutionState {
@@ -132,9 +146,8 @@ pub unsafe fn begin_instruction() {
 #[inline(always)]
 pub unsafe fn finish_instruction() -> u32 {
     let work = (&mut *(&raw mut execution_state)).finish();
-    let stats = &mut CORE_STATISTICS[apic::current_core()];
-    stats.retired += execution_state.retired as u64;
-    stats.rep_elements += execution_state.rep_elements as u64;
+    PENDING_RETIRED += execution_state.retired as u64;
+    PENDING_REP_ELEMENTS += execution_state.rep_elements as u64;
     if !execution_state.deterministic { execution_state.pending_work = 0; }
     work
 }
@@ -178,10 +191,15 @@ pub unsafe fn note_native_retired(steps: u32, accounted_before: u32) {
     CORE_STATISTICS[apic::current_core()].retired += steps.saturating_sub(interpreted) as u64;
 }
 #[no_mangle]
-pub unsafe fn core_statistics_reset() { CORE_STATISTICS = [CoreStatistics::default(); 8]; }
+pub unsafe fn core_statistics_reset() {
+    PENDING_RETIRED = 0;
+    PENDING_REP_ELEMENTS = 0;
+    CORE_STATISTICS = [CoreStatistics::default(); 8];
+}
 #[no_mangle]
 pub unsafe fn core_statistics_addr(core: u32) -> u32 {
     assert!(core < 8);
+    flush_core_statistics();
     &raw const CORE_STATISTICS[core as usize] as u32
 }
 #[no_mangle]
@@ -189,6 +207,7 @@ pub fn core_statistics_size() -> u32 { std::mem::size_of::<CoreStatistics>() as 
 #[no_mangle]
 pub unsafe fn core_statistics_get(core: u32, field: u32) -> f64 {
     assert!(core < 8);
+    flush_core_statistics();
     let stats = CORE_STATISTICS[core as usize];
     match field { 0 => stats.retired as f64, 1 => stats.rep_elements as f64,
         2 => stats.faults as f64, 3 => stats.halts as f64, 4 => stats.runtime_ms, _ => 0.0 }

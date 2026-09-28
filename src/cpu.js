@@ -31,7 +31,7 @@ import { VirtioConsole } from "./virtio_console.js";
 import { PCI } from "./pci.js";
 import { PS2 } from "./ps2.js";
 import { VMwareMouse } from "./vmware.js";
-import { read_elf } from "./elf.js";
+import { read_elf, elf_unsupported_reason } from "./elf.js";
 
 import { FloppyController } from "./floppy.js";
 import { IDEController } from "./ide.js";
@@ -797,6 +797,10 @@ CPU.prototype.validate_physical_state = function(state)
         throw new Error("Invalid physical memory map in snapshot");
 };
 
+// [offset, size] of core state that survives INIT
+const INIT_PRESERVED = [[STATE_OFFSETS.x64_pat, 8],
+    [STATE_OFFSETS.x64_mtrr_def_type, STATE_OFFSETS.x64_mc_banks + 128 - STATE_OFFSETS.x64_mtrr_def_type]];
+
 // Version 1 predates the x64 extension banks. Keep exact byte ranges for import.
 const CORE_STATE_RANGES_V1 = [[64, 108], [112, 552], [556, 620], [628, 652], [668, 716],
     [724, 812], [816, 960], [968, 1132], [1152, 1280]];
@@ -829,13 +833,16 @@ CPU.prototype.validate_machine_core_state = function(state)
         return;
     }
     const fail = () => { throw new Error("Invalid multicore snapshot or topology mismatch"); };
-    const ranges = state[0] === 1 ? CORE_STATE_RANGES_V1 : CORE_STATE_RANGES;
+    // Version 2 lists its ranges; a snapshot from before a range was added
+    // restores that range to its reset value (set_machine_core_state)
+    if(state[0] === 2 && !(Array.isArray(state[7]) && state[7].every(range => Array.isArray(range) &&
+        CORE_STATE_RANGES.some(([start, end]) => range[0] === start && range[1] === end)))) fail();
+    const ranges = state[0] === 1 ? CORE_STATE_RANGES_V1 : state[7];
     if(state[0] !== 1 && state[0] !== 2 || state[1] !== this.cores.length || !Array.isArray(state[6]) || state[6].length !== state[1] ||
         !Number.isInteger(state[2]) || state[2] < 0 || state[2] >= state[1] ||
         !Number.isInteger(state[3]) || state[3] < 1 || state[3] > 100000 ||
         !Number.isSafeInteger(state[4]) || state[4] < 0 || state[4] > 0xFFFFFFFF ||
         !Number.isSafeInteger(state[5]) || state[5] < 0) fail();
-    if(state[0] === 2 && JSON.stringify(state[7]) !== JSON.stringify(CORE_STATE_RANGES)) fail();
     for(const core of state[6])
     {
         if(!Array.isArray(core) || typeof core[0] !== "boolean" || !Array.isArray(core[1]) ||
@@ -865,7 +872,7 @@ CPU.prototype.set_machine_core_state = function(state)
     ex["context_reset_all"]();
     ex["core_statistics_reset"]();
     state[6].forEach((saved, id) => {
-        const ranges = state[0] === 1 ? CORE_STATE_RANGES_V1 : CORE_STATE_RANGES;
+        const ranges = state[0] === 1 ? CORE_STATE_RANGES_V1 : state[7];
         const fixed = CORE_STATE_RANGES.map(([start, end]) => {
             const index = ranges.findIndex(range => range[0] === start && range[1] === end);
             if(index !== -1) return saved[1][index].slice();
@@ -1278,13 +1285,24 @@ CPU.prototype.take_core_events = function(core)
         dbg_log("core " + core + ": INIT", LOG_CPU);
         this.apic_init_core(core);
         this.wm.exports["context_reset"](core);
+        // INIT leaves the PAT, the MTRRs and the machine-check banks alone
+        // (SDM Vol.3A, "Processor States Following Power-up, Reset, or INIT");
+        // everything else takes its reset value
+        const next = this.core_reset_state.map(bytes => bytes.slice());
+        const current = core === this.active_core ? this.save_core_state() : state.saved;
+        if(current) for(const [offset, size] of INIT_PRESERVED)
+        {
+            const index = CORE_STATE_RANGES.findIndex(([start, end]) => offset >= start && offset + size <= end);
+            const at = offset - CORE_STATE_RANGES[index][0];
+            next[index].set(current[index].subarray(at, at + size), at);
+        }
         if(core === this.active_core)
         {
-            this.load_core_state(this.core_reset_state);
+            this.load_core_state(next);
         }
         else
         {
-            state.saved = this.core_reset_state;
+            state.saved = next;
         }
         // an AP waits for a start-up IPI; the BSP restarts at the reset vector
         state.running = core === 0;
@@ -1683,7 +1701,11 @@ CPU.prototype.execute_cpu = function(run)
     {
         this.in_cpu = false;
         this.wm.exports["core_statistics_runtime"](core, Math.max(0, v86.microtick() - start));
-        if(this.wm.exports["exception_take_bsp_reset"]()) this.reset_pending = true;
+        if(this.wm.exports["exception_take_bsp_reset"]())
+        {
+            this.reset_pending = true;
+            this.note_reset("triple-fault");
+        }
         if(this.reset_pending)
         {
             this.reset_pending = false;
@@ -1692,8 +1714,41 @@ CPU.prototype.execute_cpu = function(run)
     }
 };
 
-CPU.prototype.reboot_internal = function()
+/**
+ * Diagnostics only: why and where the last board reset was requested.
+ * @param {string} reason
+ */
+CPU.prototype.note_reset = function(reason)
 {
+    const d = this.get_diagnostics().cpu;
+    const high = new Uint32Array(this.wasm_memory.buffer, 1584, 1)[0];
+    this.last_reset = {
+        "reason": reason, "count": (this.last_reset ? this.last_reset["count"] : 0) + 1,
+        "rip": "0x" + (BigInt(high) << 32n | BigInt(this.instruction_pointer[0] >>> 0)).toString(16),
+        "mode": d["mode"], "cs": d["cs"], "cpl": d["cpl"], "cr3": d["cr3"], "cr2": "0x" + (this.cr[2] >>> 0).toString(16),
+        "active_core": this.active_core,
+    };
+    const words = new Uint32Array(this.wasm_memory.buffer, 1592, 2);
+    const base = (high, low) => "0x" + (BigInt(high >>> 0) << 32n | BigInt(low >>> 0)).toString(16);
+    this.last_reset["gdtr"] = [base(words[1], this.gdtr_offset[0]), this.gdtr_size[0]];
+    this.last_reset["idtr"] = [base(words[0], this.idtr_offset[0]), this.idtr_size[0]];
+    const log = this.wm.exports["x64_fault_log"];
+    if(log)
+    {
+        const hex = (index, field) => "0x" + (BigInt(log(index, field, true) >>> 0) << 32n | BigInt(log(index, field, false) >>> 0)).toString(16);
+        this.last_reset["x64_faults"] = [];
+        for(let i = 0; i < 6; i++)
+        {
+            if(!log(i, 2, true) && !log(i, 2, false)) break;
+            this.last_reset["x64_faults"].push({ "vector": log(i, 0, false), "error": hex(i, 1), "rip": hex(i, 2), "address": hex(i, 3), "rsp": hex(i, 4), "cs": hex(i, 5) });
+        }
+    }
+};
+
+/** @param {string=} reason */
+CPU.prototype.reboot_internal = function(reason)
+{
+    if(reason) this.note_reset(reason);
     // A guest CF9/8042 OUT finishes before architectural state is replaced.
     if(this.in_cpu)
     {
@@ -1813,6 +1868,11 @@ CPU.prototype.configure_high_memory = function(size, low_minimum)
 
 CPU.prototype.create_memory = function(size, minimum_size)
 {
+    // e.g. `2048 << 20` is negative: reject it instead of silently using the minimum
+    if(!(size >= 0))
+    {
+        throw new Error("memory_size must be a non-negative number of bytes, got " + size);
+    }
     if(size < minimum_size)
     {
         size = minimum_size;
@@ -2458,6 +2518,21 @@ CPU.prototype.load_multiboot_option_rom = function(buffer, initrd, cmdline)
         // bit 0 : load modules on page boundaries (may as well, if we load modules)
         // bit 1 : provide a memory map (which we always will)
         dbg_assert((flags & ~MULTIBOOT_HEADER_ADDRESS & ~3) === 0, "TODO");
+
+        // The image is loaded later (from the option ROM); reject what cannot
+        // be loaded now, with an error the embedder sees
+        if(!(flags & MULTIBOOT_HEADER_ADDRESS))
+        {
+            if(buf32[0] !== ELF_MAGIC)
+            {
+                throw new Error("Multiboot image has neither an address header nor an ELF header");
+            }
+            const reason = elf_unsupported_reason(buffer);
+            if(reason)
+            {
+                throw new Error("Unsupported multiboot ELF image: " + reason);
+            }
+        }
 
         // do this in a io register hook, so it can happen after BIOS does its work
         var cpu = this;

@@ -263,6 +263,8 @@ pub unsafe fn write_flags64(value: u64) {
 pub unsafe fn reset_extension() {
     core::ptr::write_bytes(gp::x64_gpr_hi as *mut u8, 0, 1788 - 1360);
     *gp::x64_pat = 0x0007_0406_0007_0406;
+    // MTRRs disabled, machine-check banks clear (an INIT keeps them: cpu.js)
+    core::ptr::write_bytes(gp::x64_mtrr_def_type as *mut u8, 0, 2424 - 2056);
 }
 
 #[cfg(test)]

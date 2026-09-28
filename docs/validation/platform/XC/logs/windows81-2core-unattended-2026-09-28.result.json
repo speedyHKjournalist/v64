@@ -1,0 +1,398 @@
+{
+ "image": {
+  "path": "/Users/renruisi/Desktop/Code/retro-gaming-site/windows8/windows8.img",
+  "size": 52428800000,
+  "mtime_ms": 1790574587947.441
+ },
+ "cores": 2,
+ "jit": true,
+ "memory_mb": 2048,
+ "modes": [
+  {
+   "s": 0,
+   "size": [
+    80,
+    256,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 3,
+   "size": [
+    1024,
+    768,
+    24
+   ]
+  },
+  {
+   "s": 121,
+   "size": [
+    320,
+    406,
+    8
+   ]
+  },
+  {
+   "s": 121,
+   "size": [
+    1024,
+    768,
+    32
+   ]
+  },
+  {
+   "s": 399,
+   "size": [
+    320,
+    406,
+    8
+   ]
+  },
+  {
+   "s": 399,
+   "size": [
+    1024,
+    768,
+    32
+   ]
+  }
+ ],
+ "events": [
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    256,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    16,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "mode",
+   "size": [
+    80,
+    25,
+    0
+   ]
+  },
+  {
+   "s": 0,
+   "kind": "text",
+   "text": "SeaBIOS (version rel-1.16.2-0-gea1b7a0)\nBooting from Hard Disk..."
+  },
+  {
+   "s": 3,
+   "kind": "mode",
+   "size": [
+    1024,
+    768,
+    24
+   ]
+  },
+  {
+   "s": 29,
+   "kind": "kernel-base",
+   "base": "0xfffff80070810000"
+  },
+  {
+   "s": 121,
+   "kind": "mode",
+   "size": [
+    320,
+    406,
+    8
+   ]
+  },
+  {
+   "s": 121,
+   "kind": "mode",
+   "size": [
+    1024,
+    768,
+    32
+   ]
+  },
+  {
+   "s": 399,
+   "kind": "mode",
+   "size": [
+    320,
+    406,
+    8
+   ]
+  },
+  {
+   "s": 399,
+   "kind": "mode",
+   "size": [
+    1024,
+    768,
+    32
+   ]
+  },
+  {
+   "s": 641,
+   "kind": "sign-in"
+  },
+  {
+   "s": 824,
+   "kind": "sign-in"
+  },
+  {
+   "s": 1240,
+   "kind": "sign-in-no-password-box"
+  },
+  {
+   "s": 1419,
+   "kind": "run",
+   "line": "cmd /c for %d in (d e f g h) do @if exist %d:\\probe64.exe %d:\\probe64.exe"
+  },
+  {
+   "s": 1557,
+   "kind": "run-dialog-missing"
+  },
+  {
+   "s": 1578,
+   "kind": "run",
+   "line": "cmd /c for %d in (d e f g h) do @if exist %d:\\probe64.exe %d:\\probe64.exe"
+  },
+  {
+   "s": 2491,
+   "kind": "run-dialog-missing"
+  },
+  {
+   "s": 3374,
+   "kind": "run",
+   "line": "cmd /c for %d in (d e f g h) do @if exist %d:\\probe64.exe %d:\\probe64.exe"
+  },
+  {
+   "s": 3514,
+   "kind": "run-dialog-missing"
+  },
+  {
+   "s": 3535,
+   "kind": "run",
+   "line": "cmd /c for %d in (d e f g h) do @if exist %d:\\probe64.exe %d:\\probe64.exe"
+  },
+  {
+   "s": 3645,
+   "kind": "probe",
+   "arch": 64,
+   "result": {
+    "processors": 2,
+    "packages": 1,
+    "cores": 2,
+    "smt_cores": 0,
+    "progress": 128,
+    "failures": 0,
+    "apic_ids": "3",
+    "high_block": "7ff66f1b0000",
+    "text": "X64_WIN_BEGIN arch=64 processors=2 architecture=9\r\nX64_WIN_DONE arch=64 processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3 high_block=7ff66f1b0000 checks=64,64\r\n"
+   }
+  },
+  {
+   "s": 3648,
+   "kind": "run",
+   "line": "cmd /c for %d in (d e f g h) do @if exist %d:\\probe32.exe %d:\\probe32.exe"
+  },
+  {
+   "s": 3713,
+   "kind": "probe",
+   "arch": 32,
+   "result": {
+    "processors": 2,
+    "packages": 1,
+    "cores": 2,
+    "smt_cores": 0,
+    "progress": 128,
+    "failures": 0,
+    "apic_ids": "3",
+    "high_block": "0",
+    "text": "X64_WIN_BEGIN arch=32 processors=2 architecture=9\r\nX64_WIN_DONE arch=32 processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3 high_block=0 checks=64,64\r\n"
+   }
+  }
+ ],
+ "results": {
+  "32": {
+   "processors": 2,
+   "packages": 1,
+   "cores": 2,
+   "smt_cores": 0,
+   "progress": 128,
+   "failures": 0,
+   "apic_ids": "3",
+   "high_block": "0",
+   "text": "X64_WIN_BEGIN arch=32 processors=2 architecture=9\r\nX64_WIN_DONE arch=32 processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3 high_block=0 checks=64,64\r\n"
+  },
+  "64": {
+   "processors": 2,
+   "packages": 1,
+   "cores": 2,
+   "smt_cores": 0,
+   "progress": 128,
+   "failures": 0,
+   "apic_ids": "3",
+   "high_block": "7ff66f1b0000",
+   "text": "X64_WIN_BEGIN arch=64 processors=2 architecture=9\r\nX64_WIN_DONE arch=64 processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3 high_block=7ff66f1b0000 checks=64,64\r\n"
+  }
+ },
+ "passed": true,
+ "final": {
+  "page_tier": {
+   "compiled": 47405,
+   "native": 36000192461,
+   "retries": 37435312,
+   "unknown": 27360,
+   "steps": 409090073,
+   "invalidated": 800
+  },
+  "cores": [
+   {
+    "state": "runnable",
+    "ip": "0x70858c6a",
+    "cs": "0x10",
+    "retired": 20748120593,
+    "halted": false
+   },
+   {
+    "state": "runnable",
+    "ip": "0x709604c0",
+    "cs": "0x10",
+    "retired": 17516017369,
+    "halted": false
+   }
+  ],
+  "mode": "protected16",
+  "overlay_sectors": 93991
+ },
+ "text_screen": "",
+ "wall_s": 3713
+}

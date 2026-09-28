@@ -211,7 +211,7 @@ unsafe fn page_chain_slot(linear: u32, cs_base: u32, default_32: bool) -> Option
     if (*w.blocks)[offset as usize >> 6] >> (offset & 63) & 1 == 0 {
         return None;
     }
-    let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let mask = cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let cached = cpu::tlb_data[page as usize];
     if cached & mask != cpu::TLB_VALID
         || ((cached as u32 & !4095) ^ (linear & !4095)).wrapping_sub(crate::cpu::memory::mem8 as u32) != w.physical
@@ -244,7 +244,7 @@ unsafe fn page_probe(linear: u32, cs_base: u32, default_32: bool) -> Option<Fast
     if (*w.blocks)[offset as usize >> 6] >> (offset & 63) & 1 == 0 {
         return None;
     }
-    let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let mask = cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let cached = cpu::tlb_data[page as usize];
     let base = crate::cpu::memory::mem8 as u32;
     if cached & mask != cpu::TLB_VALID
@@ -412,7 +412,7 @@ unsafe fn fast_probe() -> Probe {
             Probe::Unknown
         };
     }
-    let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let mask = cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let base = crate::cpu::memory::mem8 as u32;
     for &(linear, physical) in &e.maps[..e.map_count as usize] {
         let cached = cpu::tlb_data[(linear >> 12) as usize];

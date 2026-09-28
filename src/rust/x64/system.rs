@@ -91,10 +91,6 @@ pub unsafe fn write_msr(index: u32, value: u64) -> Result<bool, Fault> {
             if value >> 32 != 0 { return Err(Fault::gp()); }
             *gp::x64_tsc_aux = value as u32;
         },
-        0x277 => {
-            if value.to_le_bytes().iter().any(|byte| !matches!(byte, 0 | 1 | 4 | 5 | 6 | 7)) { return Err(Fault::gp()); }
-            *gp::x64_pat = value;
-        },
         0xC0000100..=0xC0000102 => {
             if !state::canonical(value, 48) { return Err(Fault::gp()); }
             if index == 0xC0000102 { *gp::x64_kernel_gs_base = value; }
@@ -128,7 +124,6 @@ pub unsafe fn read_msr(index: u32) -> Result<Option<u64>, Fault> {
         0xC0000100 => state::read_segment_base(4), 0xC0000101 => state::read_segment_base(5),
         0xC0000102 => *gp::x64_kernel_gs_base,
         0xC0000103 => *gp::x64_tsc_aux as u64,
-        0x277 => *gp::x64_pat,
         0x174 => *gp::sysenter_cs as u32 as u64,
         0x175 => *gp::sysenter_esp as u32 as u64 | (*gp::x64_sysenter_esp_hi as u64) << 32,
         0x176 => *gp::sysenter_eip as u32 as u64 | (*gp::x64_sysenter_eip_hi as u64) << 32,
@@ -231,10 +226,19 @@ pub unsafe fn execute(instruction: &Decoded) -> Result<bool, Fault> {
         0x0F30 => {
             let index = state::read_gpr(1) as u32;
             let value = state::read_gpr(0) as u32 as u64 | (state::read_gpr(2) as u32 as u64) << 32;
-            if !write_msr(index, value)? { return Err(Fault::gp()); }
+            // then the model's other MSRs (e.g. IA32_PLATFORM_ID, MISC_ENABLE)
+            if !write_msr(index, value)?
+                && crate::cpu::instructions_0f::write_msr_table(index as i32, value as i32, (value >> 32) as i32) != Ok(true) {
+                return Err(Fault::gp());
+            }
         },
         0x0F32 => {
-            let value = read_msr(state::read_gpr(1) as u32)?.ok_or(Fault::gp())?;
+            let index = state::read_gpr(1) as u32;
+            let value = match read_msr(index)? {
+                Some(value) => value,
+                None => crate::cpu::instructions_0f::read_msr_table(index as i32)
+                    .map(|(low, high)| low as u32 as u64 | (high as u32 as u64) << 32).ok_or(Fault::gp())?,
+            };
             state::write_gpr(0, value, 32); state::write_gpr(2, value >> 32, 32);
         },
         0x0F31 => {
@@ -622,6 +626,12 @@ pub unsafe fn interrupt(vector: u8, software: bool, code: Option<u32>) -> Result
     if !cs.is_present() { return Err(exception(11, selector as u32 & !3)); }
     let target = low & 65535 | (low >> 48) << 16 | (high & 0xFFFF_FFFF) << 32;
     if !state::canonical(target, 48) { return Err(Fault::gp()); }
+    // (exceptions only: Windows also sends itself APC interrupts at vector 0x1F)
+    if USER_TRACE_ENABLED && !software && matches!(vector, 0..=8 | 10..=14 | 16..=21) && *gp::cpl == 3 && (*gp::x64_cs_long == 0 || vector != 14) {
+        USER_TRACE[USER_TRACE_NEXT % USER_TRACE_LEN] = [vector as u64, code.map_or(u64::MAX, |c| c as u64), state::read_rip(),
+            if vector == 14 { state::read_cr(2) } else { u64::MAX }, state::read_gpr(4), *gp::sreg.add(1) as u64, state::read_cr(3)];
+        USER_TRACE_NEXT += 1;
+    }
     let old_rsp = state::read_gpr(4);
     let old_ss = *gp::sreg.add(2);
     let old_cs = *gp::sreg.add(1);
@@ -845,7 +855,43 @@ pub unsafe fn iret(width: u8) -> Result<(), Fault> {
     state::write_rip(ip);
     Ok(())
 }
+/// Diagnostics: the last faults raised in IA-32e mode, most recent at
+/// FAULT_NEXT - 1: vector, error code (or u64::MAX), faulting RIP, fault
+/// address (or u64::MAX), RSP, CS.
+const FAULT_LOG_LEN: usize = 16;
+static mut FAULT_LOG: [[u64; 6]; FAULT_LOG_LEN] = [[0; 6]; FAULT_LOG_LEN];
+static mut FAULT_NEXT: usize = 0;
+/// `index` 0 is the most recent fault; `field` as in FAULT_LOG, halves by `high`.
+#[no_mangle]
+pub unsafe fn x64_fault_log(index: u32, field: u32, high: bool) -> u32 {
+    if index as usize >= FAULT_LOG_LEN || index as usize >= FAULT_NEXT || field >= 6 { return 0; }
+    let value = FAULT_LOG[(FAULT_NEXT - 1 - index as usize) % FAULT_LOG_LEN][field as usize];
+    (if high { value >> 32 } else { value }) as u32
+}
+/// Diagnostics: exceptions taken from CPL 3, as delivered (compatibility
+/// mode: every vector; 64-bit mode: all but #PF), in FAULT_LOG's layout with
+/// CR2 as the address, plus CR3. Off unless enabled; enabling clears it.
+const USER_TRACE_LEN: usize = 1024;
+static mut USER_TRACE: [[u64; 7]; USER_TRACE_LEN] = [[0; 7]; USER_TRACE_LEN];
+static mut USER_TRACE_NEXT: usize = 0;
+static mut USER_TRACE_ENABLED: bool = false;
+#[no_mangle]
+pub unsafe fn x64_user_trace_enable(enabled: bool) { USER_TRACE_ENABLED = enabled; USER_TRACE_NEXT = 0; }
+#[no_mangle]
+pub unsafe fn x64_user_trace_count() -> u32 { USER_TRACE_NEXT as u32 }
+/// `index` 0 is the oldest entry still held.
+#[no_mangle]
+pub unsafe fn x64_user_trace(index: u32, field: u32, high: bool) -> u32 {
+    let first = USER_TRACE_NEXT.saturating_sub(USER_TRACE_LEN);
+    let at = first + index as usize;
+    if at >= USER_TRACE_NEXT || field >= 7 { return 0; }
+    let value = USER_TRACE[at % USER_TRACE_LEN][field as usize];
+    (if high { value >> 32 } else { value }) as u32
+}
 pub unsafe fn raise(fault: Fault) {
+    FAULT_LOG[FAULT_NEXT % FAULT_LOG_LEN] = [fault.vector as u64, fault.error.map_or(u64::MAX, |e| e as u64),
+        state::read_previous_rip(), fault.address.unwrap_or(u64::MAX), state::read_gpr(4), *gp::sreg.add(1) as u64];
+    FAULT_NEXT += 1;
     crate::cpu::execution::mark_fault();
     state::write_rip(state::read_previous_rip());
     if fault.vector != 1 { state::write_flags64(state::read_flags64() | 0x10000); }

@@ -68,6 +68,12 @@ enum Opnd {
 impl Opnd {
     fn reg(self) -> Option<Reg> { if let Opnd::Reg(r) = self { Some(r) } else { None } }
 }
+/// An XMM register (0..15) or a memory operand of an SSE instruction.
+#[derive(Clone, Copy, Debug)]
+enum Xmm {
+    Reg(u8),
+    Mem(AddressExpr),
+}
 #[derive(Clone, Copy, Debug)]
 enum Op {
     /// ADD OR ADC SBB AND SUB XOR CMP (x86 /digit order)
@@ -130,6 +136,19 @@ enum Op {
     DoubleShift { left: bool, width: u8, dst: Opnd, src: Reg, count: u8 },
     /// CMPXCHG16B (wide) / CMPXCHG8B
     CompareExchange { wide: bool, address: AddressExpr },
+    /// SSE moves of the low `bits` (32, 64 or 128). Register destinations
+    /// keep their other bits unless `zero` (always for 32/64-bit loads);
+    /// `aligned` memory operands must be 16-byte aligned (else #GP, retried).
+    Vmove { bits: u8, dst: Xmm, src: Xmm, aligned: bool, zero: bool },
+    /// 128-bit AND ANDN OR XOR (PS/PD/integer forms); memory is aligned.
+    Vlogic { code: u8, dst: u8, src: Xmm },
+    /// MOVD/MOVQ xmm, r/m32/64 (upper bits cleared)
+    MovdIn { width: u8, dst: u8, src: Opnd },
+    /// MOVD/MOVQ r/m32/64, xmm
+    MovdOut { width: u8, dst: Opnd, src: u8 },
+    /// MOV r64, CR8 / MOV CR8, r64 (the local APIC's TPR)
+    Cr8 { write: bool, reg: Reg },
+    Rdtscp,
     /// Interpreted in place by x64_page_step.
     Step,
 }
@@ -175,7 +194,9 @@ fn classify(d: &Decoded) -> Op {
     // REP/REPNE are ignored by these forms in the interpreter (or select
     // their catalog entry); anything else with REP is a step.
     let rep_ok = matches!(op, 0xC2 | 0xC3 | 0xE8 | 0xE9 | 0xEB | 0x70..=0x7F | 0x0F80..=0x0F8F | 0x0FB8 | 0x0FBC | 0x0FBD | 0x0F1E | 0xA4 | 0xA5 | 0xAA | 0xAB)
-        || op == 0xFF && matches!(group, 2 | 4);
+        || op == 0xFF && matches!(group, 2 | 4)
+        // F3/F2 that select an SSE instruction are not repeat prefixes
+        || matches!(d.opcode >> 16, 0xF2 | 0xF3);
     if d.prefixes.rep.is_some() && !rep_ok {
         return Op::Step;
     }
@@ -262,8 +283,8 @@ fn classify(d: &Decoded) -> Op {
                     0xD0 | 0xD1 => Some(1),
                     _ => None,
                 };
-                // Rotates through carry, and CL rotates or narrow CL shifts, step.
-                if matches!(group, 2 | 3) || count.is_none() && (group < 4 || width < 32) {
+                // Rotates through carry, and narrow CL shifts or rotates, step.
+                if matches!(group, 2 | 3) || count.is_none() && width < 32 {
                     return None;
                 }
                 Op::Shift { code: group, width, dst: rm(width)?, count }
@@ -330,10 +351,80 @@ fn classify(d: &Decoded) -> Op {
             0x8C if group < 6 => Op::MovSreg { segment: group, width: if memory { 16 } else { w }, dst: rm(w)? },
             0x0FA4 | 0x0FAC if w >= 32 => Op::DoubleShift { left: op == 0x0FA4, width: w, dst: rm(w)?, src: reg(d.reg?, w), count: imm? as u8 },
             0x0FC7 if group == 1 && memory => Op::CompareExchange { wide: w == 128, address: d.address? },
+            // MOV AL/rAX, moffs and back: an absolute address (FS/GS base added)
+            0xA0..=0xA3 => {
+                let width = if op & 1 == 0 { 8 } else { w };
+                let address = AddressExpr { base: AddressBase::None, index: None, scale: 1, displacement: imm? as i64,
+                    address_size: d.address_size, segment: d.prefixes.segment.unwrap_or(3) };
+                let accumulator = Opnd::Reg(Reg { index: 0, high: false });
+                if op & 2 == 0 { Op::Mov { width, dst: accumulator, src: Opnd::Mem(address) } }
+                else { Op::Mov { width, dst: Opnd::Mem(address), src: accumulator } }
+            },
+            // MOVNTI: an ordinary store here
+            0x0FC3 if memory && w >= 32 => Op::Mov { width: w, dst: rm(w)?, src: Opnd::Reg(reg(d.reg?, w)) },
+            // LFENCE MFENCE SFENCE: one core runs at a time, in program order
+            0x0FAE if d.opcode == 0x0FAE && d.rm_register.is_some() && group >= 5 => Op::Nop,
+            0x0F01 if d.modrm == Some(0xF9) => Op::Rdtscp,
+            0x0F20 | 0x0F22 if d.reg == Some(8) && d.rm_register.is_some() => Op::Cr8 { write: op == 0x0F22, reg: reg(d.rm_register?, 64) },
+            _ if d.opcode >> 8 & 0xFF == 0x0F || d.opcode >> 16 == 0x0F => return sse(d),
             _ => return None,
         })
     })();
     result.unwrap_or(Op::Step)
+}
+
+/// SSE data movement and bitwise templates (x64::vector semantics).
+fn sse(d: &Decoded) -> Option<Op> {
+    let xmm_rm = || -> Option<Xmm> {
+        match d.rm_register {
+            Some(r) => Some(Xmm::Reg(r)),
+            None => d.address.map(Xmm::Mem),
+        }
+    };
+    let register = d.reg?;
+    let memory = d.rm_register.is_none();
+    let full = |aligned: bool, store: bool| -> Option<Op> {
+        Some(if store {
+            Op::Vmove { bits: 128, dst: xmm_rm()?, src: Xmm::Reg(register), aligned, zero: false }
+        } else {
+            Op::Vmove { bits: 128, dst: Xmm::Reg(register), src: xmm_rm()?, aligned, zero: false }
+        })
+    };
+    Some(match d.opcode {
+        // MOVUPS MOVUPD MOVDQU / MOVAPS MOVAPD MOVDQA
+        0x0F10 | 0x660F10 | 0xF30F6F => full(false, false)?,
+        0x0F11 | 0x660F11 | 0xF30F7F => full(false, true)?,
+        0x0F28 | 0x660F28 | 0x660F6F => full(true, false)?,
+        0x0F29 | 0x660F29 | 0x660F7F => full(true, true)?,
+        // MOVNTPS MOVNTPD MOVNTDQ (memory only)
+        0x0F2B | 0x660F2B | 0x660FE7 if memory => full(true, true)?,
+        // MOVSS MOVSD
+        0xF30F10 | 0xF20F10 => {
+            let bits = if d.opcode == 0xF30F10 { 32 } else { 64 };
+            Op::Vmove { bits, dst: Xmm::Reg(register), src: xmm_rm()?, aligned: false, zero: memory }
+        },
+        0xF30F11 | 0xF20F11 => {
+            let bits = if d.opcode == 0xF30F11 { 32 } else { 64 };
+            Op::Vmove { bits, dst: xmm_rm()?, src: Xmm::Reg(register), aligned: false, zero: false }
+        },
+        // MOVQ xmm, xmm/m64 and MOVQ xmm/m64, xmm: a register destination's upper half is cleared
+        0xF30F7E => Op::Vmove { bits: 64, dst: Xmm::Reg(register), src: xmm_rm()?, aligned: false, zero: true },
+        0x660FD6 => Op::Vmove { bits: 64, dst: xmm_rm()?, src: Xmm::Reg(register), aligned: false, zero: true },
+        0x660F6E | 0x660F7E => {
+            let width = if d.prefixes.w() { 64 } else { 32 };
+            let rm = match d.rm_register {
+                Some(r) => Opnd::Reg(Reg { index: r, high: false }),
+                None => Opnd::Mem(d.address?),
+            };
+            if d.opcode == 0x660F6E { Op::MovdIn { width, dst: register, src: rm } } else { Op::MovdOut { width, dst: rm, src: register } }
+        },
+        // AND ANDN OR XOR
+        0x0F54 | 0x660F54 | 0x660FDB => Op::Vlogic { code: 0, dst: register, src: xmm_rm()? },
+        0x0F55 | 0x660F55 | 0x660FDF => Op::Vlogic { code: 1, dst: register, src: xmm_rm()? },
+        0x0F56 | 0x660F56 | 0x660FEB => Op::Vlogic { code: 2, dst: register, src: xmm_rm()? },
+        0x0F57 | 0x660F57 | 0x660FEF => Op::Vlogic { code: 3, dst: register, src: xmm_rm()? },
+        _ => return None,
+    })
 }
 
 fn cond_reads(cc: u8) -> u32 {
@@ -365,7 +456,8 @@ fn effects(op: &Op) -> (u32, u32) {
                 (0, if code >= 4 { CF | PF | ZF | SF | of } else { CF | of })
             }
         },
-        // A zero CL count leaves every flag unchanged.
+        // A zero CL count leaves every flag unchanged; rotates only set CF/OF.
+        Op::Shift { code: 0 | 1, count: None, .. } => (CF | OF, CF | OF),
         Op::Shift { count: None, .. } => (CF | PF | ZF | SF | OF, CF | PF | ZF | SF | OF),
         Op::Imul { .. } | Op::MulWide { .. } => (0, CF | OF),
         Op::Bt { .. } => (0, CF),
@@ -2328,6 +2420,157 @@ impl Emitter {
                 }
             },
             Op::CompareExchange { wide, address } => self.compare_exchange(inst, wide, &address),
+            Op::Vmove { bits, dst, src, aligned, zero } => {
+                self.sse_check(start);
+                match (dst, src) {
+                    (Xmm::Reg(d), Xmm::Reg(s)) => {
+                        self.xmm_load(s, 0, bits.min(64));
+                        self.xmm_store(d, 0, bits.min(64), !zero && bits == 32);
+                        if bits == 128 {
+                            self.xmm_load(s, 8, 64);
+                            self.xmm_store(d, 8, 64, false);
+                        }
+                        else if zero {
+                            self.clear_upper(d, bits);
+                        }
+                    },
+                    (Xmm::Reg(d), Xmm::Mem(a)) => {
+                        self.vector_address(&a, bits, aligned, false, inst);
+                        for half in 0..(bits as u32).div_ceil(64) {
+                            self.gi(HOST);
+                            self.load_bits(bits.min(64), half * 8);
+                            self.s(TA);
+                            self.c32(Self::xmm(d) as i32 + half as i32 * 8);
+                            self.g(TA);
+                            if bits == 32 { self.b.memory_op(op::OP_I64STORE32, op::MEM_ALIGN32, 0); } else { self.b.store_aligned_i64(0); }
+                        }
+                        if bits < 128 {
+                            self.clear_upper(d, bits);
+                        }
+                    },
+                    (Xmm::Mem(a), Xmm::Reg(s)) => {
+                        self.vector_address(&a, bits, aligned, true, inst);
+                        for half in 0..(bits as u32).div_ceil(64) {
+                            self.gi(HOST);
+                            self.xmm_load(s, half * 8, bits.min(64));
+                            let opcode = if bits == 32 { op::OP_I64STORE32 } else { op::OP_I64STORE };
+                            self.b.memory_op(opcode, op::MEM_NO_ALIGN, half * 8);
+                        }
+                    },
+                    (Xmm::Mem(_), Xmm::Mem(_)) => unreachable!(),
+                }
+            },
+            Op::Vlogic { code, dst, src } => {
+                self.sse_check(start);
+                if let Xmm::Mem(a) = src {
+                    self.vector_address(&a, 128, true, false, inst);
+                }
+                for half in 0..2u32 {
+                    self.xmm_load(dst, half * 8, 64);
+                    if code == 1 {
+                        self.c64(u64::MAX);
+                        self.b.xor_i64();
+                    }
+                    match src {
+                        Xmm::Reg(s) => self.xmm_load(s, half * 8, 64),
+                        Xmm::Mem(_) => {
+                            self.gi(HOST);
+                            self.b.memory_op(op::OP_I64LOAD, op::MEM_NO_ALIGN, half * 8);
+                        },
+                    }
+                    match code {
+                        0 | 1 => self.b.and_i64(),
+                        2 => self.b.or_i64(),
+                        _ => self.b.xor_i64(),
+                    }
+                    self.s(TA);
+                    self.c32(Self::xmm(dst) as i32 + half as i32 * 8);
+                    self.g(TA);
+                    self.b.store_aligned_i64(0);
+                }
+            },
+            Op::MovdIn { width, dst, src } => {
+                self.sse_check(start);
+                self.read(src, width, inst);
+                self.s(TA);
+                self.c32(Self::xmm(dst) as i32);
+                self.g(TA);
+                self.b.store_aligned_i64(0);
+                self.clear_upper(dst, 64);
+            },
+            Op::MovdOut { width, dst, src } => {
+                self.sse_check(start);
+                match dst {
+                    Opnd::Reg(r) => {
+                        self.xmm_load(src, 0, width);
+                        self.set_reg(r, width);
+                    },
+                    Opnd::Mem(a) => {
+                        self.prepare_store(&a, width, inst);
+                        self.gi(HOST);
+                        self.xmm_load(src, 0, width);
+                        self.store(width);
+                    },
+                    Opnd::Imm(_) => unreachable!(),
+                }
+            },
+            Op::Cr8 { write, reg } => {
+                // CPL > 0 is #GP (retried)
+                self.c32(gp::cpl as i32);
+                self.b.load_u8(0);
+                self.b.if_void();
+                self.leave_to(self.f().retry, start);
+                self.b.block_end();
+                if write {
+                    self.get_reg(reg, 64);
+                    self.b.call_signature("x64_page_set_cr8", Signature::new(&[WasmType::I64], &[WasmType::I32]));
+                    self.ti(ST);
+                    self.c32(1);
+                    self.b.eq_i32();
+                    self.b.if_void();
+                    self.leave_to(self.f().retry, start);
+                    self.b.block_end();
+                    // an interrupt the lower priority unmasks is taken after this instruction
+                    self.gi(ST);
+                    self.c32(2);
+                    self.b.eq_i32();
+                    self.b.if_void();
+                    self.retired();
+                    self.leave_to(self.f().exit, next);
+                    self.b.block_end();
+                }
+                else {
+                    self.b.call_signature("x64_page_cr8", Signature::new(&[], &[WasmType::I64]));
+                    self.set_reg(reg, 64);
+                }
+            },
+            Op::Rdtscp => {
+                // #GP at CPL > 0 with CR4.TSD, as RDTSC
+                self.c32(gp::cpl as i32);
+                self.b.load_u8(0);
+                self.c32(0);
+                self.b.ne_i32();
+                self.b.load_fixed_i32(gp::cr as u32 + 16);
+                self.c32(2);
+                self.b.shr_u_i32();
+                self.c32(1);
+                self.b.and_i32();
+                self.b.and_i32();
+                self.b.if_void();
+                self.leave_to(self.f().retry, start);
+                self.b.block_end();
+                self.b.call_signature("x64_page_rdtsc", Signature::new(&[], &[WasmType::I64]));
+                self.s(TV);
+                self.g(TV);
+                self.set_reg(RAX, 32);
+                self.g(TV);
+                self.c64(32);
+                self.b.shr_u_i64();
+                self.set_reg(RDX, 32);
+                self.b.load_fixed_i32(gp::x64_tsc_aux as u32);
+                self.b.extend_unsigned_i32_to_i64();
+                self.set_reg(Reg { index: 1, high: false }, 32);
+            },
             Op::Lahf => {
                 self.materialize_if(inst.flags_read);
                 self.gi(FL);
@@ -2355,6 +2598,82 @@ impl Emitter {
         if !matches!(inst.op, Op::Call { .. } | Op::CallIndirect { .. } | Op::Ret { .. } | Op::JmpIndirect { .. } | Op::Jmp { .. } | Op::Jcc { .. } | Op::Sti) {
             self.retired();
         }
+    }
+
+    // SSE ---------------------------------------------------------------
+
+    /// Address of XMM register `n` (the legacy bank for 0..7)
+    fn xmm(n: u8) -> u32 {
+        if n < 8 { gp::reg_xmm as u32 + n as u32 * 16 } else { gp::x64_xmm_ext as u32 + (n as u32 - 8) * 16 }
+    }
+    /// Retry unless SSE may execute: CR0.EM and CR0.TS clear, CR4.OSFXSR set
+    /// (the interpreter raises #UD or #NM).
+    fn sse_check(&mut self, start: u64) {
+        self.b.load_fixed_i32(gp::cr as u32);
+        self.c32(0xC);
+        self.b.and_i32();
+        self.b.load_fixed_i32(gp::cr as u32 + 16);
+        self.c32(0x200);
+        self.b.and_i32();
+        self.b.eqz_i32();
+        self.b.or_i32();
+        self.b.if_void();
+        self.leave_to(self.f().retry, start);
+        self.b.block_end();
+    }
+    /// Push the low `bits` (32 or 64) at byte `offset` of XMM register `n`.
+    fn xmm_load(&mut self, n: u8, offset: u32, bits: u8) {
+        self.c32((Self::xmm(n) + offset) as i32);
+        if bits == 32 { self.b.memory_op(op::OP_I64LOAD32U, op::MEM_ALIGN32, 0); } else { self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0); }
+    }
+    /// Store the value on the stack into XMM register `n` at byte `offset`;
+    /// a 32-bit store keeps the rest of the qword when `merge`.
+    fn xmm_store(&mut self, n: u8, offset: u32, bits: u8, merge: bool) {
+        self.s(TA);
+        self.c32((Self::xmm(n) + offset) as i32);
+        self.g(TA);
+        if bits == 32 && merge {
+            self.b.memory_op(op::OP_I64STORE32, op::MEM_ALIGN32, 0);
+        }
+        else {
+            if bits == 32 {
+                self.c64(0xFFFF_FFFF);
+                self.b.and_i64();
+            }
+            self.b.store_aligned_i64(0);
+        }
+    }
+    /// Zero XMM register `n` above its low `bits` (32 or 64).
+    fn clear_upper(&mut self, n: u8, bits: u8) {
+        if bits == 32 {
+            self.c32(Self::xmm(n) as i32 + 4);
+            self.c32(0);
+            self.b.store_aligned_i32(0);
+        }
+        self.c32(Self::xmm(n) as i32 + 8);
+        self.c64(0);
+        self.b.store_aligned_i64(0);
+    }
+    fn load_bits(&mut self, bits: u8, offset: u32) {
+        let opcode = if bits == 32 { op::OP_I64LOAD32U } else { op::OP_I64LOAD };
+        self.b.memory_op(opcode, op::MEM_NO_ALIGN, offset);
+    }
+    /// HOST = host address of the `bits` memory operand, retried when an
+    /// aligned form is misaligned (#GP) or the access cache refuses it.
+    fn vector_address(&mut self, a: &AddressExpr, bits: u8, aligned: bool, write: bool, inst: &Inst) {
+        self.address(a, inst.d.next.0, true);
+        self.s(ADDR);
+        if aligned {
+            self.g(ADDR);
+            self.b.wrap_i64_to_i32();
+            self.c32(15);
+            self.b.and_i32();
+            self.b.if_void();
+            self.leave_to(self.f().retry, inst.d.start.0);
+            self.b.block_end();
+        }
+        self.host(bits as u32 / 8, write, inst.d.start.0);
+        self.si(HOST);
     }
 
     fn shift_immediate(&mut self, inst: &Inst, code: u8, width: u8, dst: Opnd, count: u8, need: u32) {
@@ -2472,6 +2791,20 @@ impl Emitter {
         self.b.and_i64();
         self.s(TC);
         match code {
+            // ROL ROR: the masked count is below the width
+            0 | 1 if width == 64 => {
+                self.g(TA);
+                self.g(TC);
+                self.b.op(if code == 0 { op::OP_I64ROTL } else { op::OP_I64ROTR });
+            },
+            0 | 1 => {
+                self.g(TA);
+                self.b.wrap_i64_to_i32();
+                self.g(TC);
+                self.b.wrap_i64_to_i32();
+                if code == 0 { self.b.rotl_i32() } else { self.b.rotr_i32() }
+                self.b.extend_unsigned_i32_to_i64();
+            },
             4 | 6 => {
                 self.g(TA);
                 self.g(TC);
@@ -2494,6 +2827,34 @@ impl Emitter {
         self.s(TR);
         self.write_dst(dst, width, TR);
         if need == 0 {
+            return;
+        }
+        if code <= 1 {
+            // A nonzero count sets CF from the result, OF only for a count of 1.
+            self.g(TC);
+            self.b.op(op::OP_I64EQZ);
+            self.b.eqz_i32();
+            self.b.if_void();
+            if need & CF != 0 {
+                self.flags_begin(CF);
+                self.bit_of(TR, if code == 0 { 0 } else { width - 1 }, 0);
+                self.flags_end(false);
+            }
+            if need & OF != 0 {
+                self.g(TC);
+                self.c64(1);
+                self.b.eq_i64();
+                self.b.if_void();
+                self.flags_begin(OF);
+                self.bit_of(TR, width - 1, 0);
+                self.bit_of(TR, if code == 0 { 0 } else { width - 2 }, 0);
+                self.b.xor_i32();
+                self.c32(11);
+                self.b.shl_i32();
+                self.flags_end(false);
+                self.b.block_end();
+            }
+            self.b.block_end();
             return;
         }
         // A zero count leaves all flags unchanged.

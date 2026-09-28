@@ -94,6 +94,12 @@ export const STATE_OFFSETS = {
     x64_jac_epoch: 1800,
     x64_page_linear: 1808,
     ir_tlb_base: 2048,
+    x64_mtrr_def_type: 2056,
+    x64_mtrr_fixed: 2064,
+    x64_mtrr_var: 2152,
+    x64_mcg_status: 2280,
+    x64_mcg_ctl: 2288,
+    x64_mc_banks: 2296,
 };
 
 /**
@@ -112,4 +118,5 @@ export const CORE_STATE_RANGES = [
     [1152, 1280],
     [1360, 1748],
     [1752, 1788],
+    [2056, 2424],
 ];

@@ -444,7 +444,7 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
             dbg_log(this.current_interface.name + ": read Sector Count register: " +
                 h(this.current_interface.sector_count_reg & 0xFF), LOG_DISK);
         }
-        return this.current_interface.sector_count_reg & 0xFF;
+        return this.read_hob_register(this.current_interface.sector_count_reg);
     });
 
     cpu.io.register_read(this.command_base | ATA_REG_LBA_LOW, this, function()
@@ -454,7 +454,7 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
             dbg_log(this.current_interface.name + ": read LBA Low register: " +
                 h(this.current_interface.lba_low_reg & 0xFF), LOG_DISK);
         }
-        return this.current_interface.lba_low_reg & 0xFF;
+        return this.read_hob_register(this.current_interface.lba_low_reg);
     });
 
     cpu.io.register_read(this.command_base | ATA_REG_LBA_MID, this, function()
@@ -464,7 +464,7 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
             dbg_log(this.current_interface.name + ": read LBA Mid register: " +
                 h(this.current_interface.lba_mid_reg & 0xFF), LOG_DISK);
         }
-        return this.current_interface.lba_mid_reg & 0xFF;
+        return this.read_hob_register(this.current_interface.lba_mid_reg);
     });
 
     cpu.io.register_read(this.command_base | ATA_REG_LBA_HIGH, this, function()
@@ -474,7 +474,7 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
             dbg_log(this.current_interface.name + ": read LBA High register: " +
                 h(this.current_interface.lba_high_reg & 0xFF), LOG_DISK);
         }
-        return this.current_interface.lba_high_reg & 0xFF;
+        return this.read_hob_register(this.current_interface.lba_high_reg);
     });
 
     cpu.io.register_read(this.command_base | ATA_REG_DEVICE, this, function()
@@ -642,6 +642,13 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
 IDEChannel.prototype.read_status = function()
 {
     return this.current_interface.drive_connected ? this.current_interface.status_reg : 0;
+};
+
+// Device Control HOB (48-bit feature set): reads return the previously
+// written (high order) byte of Sector Count and LBA Low/Mid/High
+IDEChannel.prototype.read_hob_register = function(value)
+{
+    return (this.device_control_reg & ATA_CR_HOB ? value >> 8 : value) & 0xFF;
 };
 
 IDEChannel.prototype.write_control = function(data)
@@ -1070,7 +1077,7 @@ IDEInterface.prototype.set_disk_buffer = function(buffer)
     }
     this.sector_count = this.buffer.byteLength / this.sector_size;
 
-    if(this.sector_count !== (this.sector_count | 0))
+    if(!Number.isInteger(this.sector_count))
     {
         dbg_log(this.name + ": warning: disk size not aligned with sector size", LOG_DISK);
         this.sector_count = Math.ceil(this.sector_count);
@@ -1083,7 +1090,7 @@ IDEInterface.prototype.set_disk_buffer = function(buffer)
         this.sectors_per_track = 2048;
         this.cylinder_count = this.sector_count / this.head_count / this.sectors_per_track;
 
-        if(this.cylinder_count !== (this.cylinder_count | 0))
+        if(!Number.isInteger(this.cylinder_count))
         {
             dbg_log(this.name + ": warning: rounding up cylinder count, choose different head number", LOG_DISK);
             this.cylinder_count = Math.floor(this.cylinder_count);
@@ -1255,10 +1262,11 @@ IDEInterface.prototype.ata_command = function(cmd)
 
         case ATA_CMD_READ_NATIVE_MAX_ADDRESS_EXT:
             var last_sector = this.sector_count - 1;
-            this.lba_low_reg = last_sector & 0xFF;
-            this.lba_mid_reg = last_sector >> 8 & 0xFF;
-            this.lba_high_reg = last_sector >> 16 & 0xFF;
-            this.lba_low_reg |= last_sector >> 24 << 8 & 0xFF00;
+            // 48 bits: the previous (HOB) byte of each register holds bits 24-47
+            var last_high = Math.floor(last_sector / 0x1000000);
+            this.lba_low_reg = last_sector & 0xFF | (last_high & 0xFF) << 8;
+            this.lba_mid_reg = last_sector >> 8 & 0xFF | (last_high >> 8 & 0xFF) << 8;
+            this.lba_high_reg = last_sector >> 16 & 0xFF | (last_high >> 16 & 0xFF) << 8;
             this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
             this.push_irq();
             break;
@@ -1461,7 +1469,9 @@ IDEInterface.prototype.ata_command = function(cmd)
             break;
 
         default:
-            dbg_assert(false, `${this.name}: error: unimplemented ATA command ${h(cmd)}: ABORT [${this.capture_regs()}]`, LOG_DISK);
+            // Unsupported commands abort (ATA8-ACS); guests probe optional
+            // ones, e.g. Windows 8 sends READ LOG EXT (2Fh)
+            dbg_log(`${this.name}: unimplemented ATA command ${h(cmd)}: ABORT [${this.capture_regs()}]`, LOG_DISK);
             this.ata_abort_command();
             break;
     }
@@ -1772,7 +1782,8 @@ IDEInterface.prototype.atapi_handle = function()
             break;
 
         default:
-            dbg_assert(false, `${this.name}: error: unimplemented ATAPI command ${h(this.data[0])}`, LOG_DISK);
+            // Answered with ILLEGAL REQUEST, which guests use to probe features
+            dbg_log(`${this.name}: unimplemented ATAPI command ${h(this.data[0])}`, LOG_DISK);
             this.atapi_check_condition_response(ATAPI_SK_ILLEGAL_REQUEST, ATAPI_ASC_INV_FIELD_IN_CMD_PACKET);
             break;
     }
@@ -2514,11 +2525,13 @@ IDEInterface.prototype.get_lba28 = function()
 
 IDEInterface.prototype.get_lba48 = function()
 {
-    // Note: Bits over 32 missing
-    return (this.lba_low_reg & 0xFF |
+    // Bits 24-47 are the previous (HOB) bytes of the three LBA registers;
+    // bits 32-47 are added arithmetically (the result exceeds 32 bits).
+    const low = (this.lba_low_reg & 0xFF |
             this.lba_mid_reg << 8 & 0xFF00 |
             this.lba_high_reg << 16 & 0xFF0000 |
             (this.lba_low_reg >> 8) << 24 & 0xFF000000) >>> 0;
+    return low + ((this.lba_mid_reg >> 8 & 0xFF) | (this.lba_high_reg >> 8 & 0xFF) << 8) * 0x100000000;
 };
 
 IDEInterface.prototype.get_lba = function(is_lba48)
@@ -2589,6 +2602,9 @@ IDEInterface.prototype.create_identify_packet = function()
     const multiword_dma_mode = this.current_command === ATA_CMD_PACKET ? 0 : 0x0407;
     // Major version number: bits 3/4/5/6 indicate support for ATA/ATAPI-3/4/5/6 (bits 0/1/2 are obsolete in [ATA-6])
     const major_version = 0x0000;   // device does not report version
+    // capacity above the 28-bit limit is only reachable with 48-bit commands
+    const lba28_count = Math.min(this.sector_count, 0x0FFFFFFF);
+    const sector_count_high = Math.floor(this.sector_count / 0x100000000);
     // supported ATA:   NOP, FLUSH CACHE, FLUSH CACHE EXT, 48-bit addr
     // supported ATAPI: NOP, DEVICE RESET, PACKET and FLUSH CACHE
     const feat_82 = this.is_atapi ? 1 << 14 | 1 << 9 | 1 << 5 : 1 << 14;
@@ -2656,9 +2672,10 @@ IDEInterface.prototype.create_identify_packet = function()
         this.sector_count >> 16 & 0xFF, this.sector_count >> 24 & 0xFF,
         // 59:  Multiple sector setting
         0, 0,
-        // 60-61: Total number of user addressable sectors (LBA mode only)
-        this.sector_count & 0xFF, this.sector_count >> 8 & 0xFF,
-        this.sector_count >> 16 & 0xFF, this.sector_count >> 24 & 0xFF,
+        // 60-61: Total number of user addressable sectors (LBA mode only),
+        // at most 0x0FFFFFFF (28-bit commands)
+        lba28_count & 0xFF, lba28_count >> 8 & 0xFF,
+        lba28_count >> 16 & 0xFF, lba28_count >> 24 & 0xFF,
         // 62: Single word DMA transfer mode
         0, 0,
         // 63: Multiword DMA transfer mode (DMA supported mode, DMA selected mode)
@@ -2708,9 +2725,10 @@ IDEInterface.prototype.create_identify_packet = function()
         // 95-99: reserved
         0, 0, 0, 0,  0, 0, 0, 0,
         0, 0,
-        // 100-101: Maximum user LBA for 48-bit Address feature set.
+        // 100-103: Maximum user LBA for 48-bit Address feature set.
         this.sector_count & 0xFF, this.sector_count >> 8 & 0xFF,
         this.sector_count >> 16 & 0xFF, this.sector_count >> 24 & 0xFF,
+        sector_count_high & 0xFF, sector_count_high >> 8 & 0xFF, 0, 0,
     ]);
 
     // 10-19 serial number

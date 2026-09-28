@@ -157,7 +157,7 @@ export function PCI(cpu)
         if(rst_cpu_rising)
         {
             dbg_log("CPU reboot via PIIX reset control register");
-            cpu.reboot_internal();
+            cpu.reboot_internal("cf9");
         }
     });
 

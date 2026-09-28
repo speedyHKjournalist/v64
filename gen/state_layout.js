@@ -130,6 +130,14 @@ export const STATE_FIELDS = [
     { name: "x64_page_linear", offset: 1808, rust: "u64", size: 8, owner: "scratch", note: "linear address of the page a page function runs at" },
     { name: "ir_tlb_base", offset: 2048, rust: "u32", size: 4, owner: "machine",
         doc: ["Address of cpu::tlb_data, written at startup. Generated IR code loads it", "from this fixed slot (below --global-base) instead of calling an import."] },
+    // Memory-type and machine-check MSRs (x64 profile; see instructions_0f.rs
+    // read_msr_table). Disabled/zero after reset, unchanged by INIT.
+    { name: "x64_mtrr_def_type", offset: 2056, rust: "u64", size: 8, owner: "core", note: "IA32_MTRR_DEF_TYPE" },
+    { name: "x64_mtrr_fixed", offset: 2064, rust: "u64", count: 11, size: 88, owner: "core", note: "FIX64K_00000, FIX16K_80000/A0000, FIX4K_C0000..F8000" },
+    { name: "x64_mtrr_var", offset: 2152, rust: "u64", count: 16, size: 128, owner: "core", note: "IA32_MTRR_PHYSBASE0/PHYSMASK0 .. 7, in MSR order" },
+    { name: "x64_mcg_status", offset: 2280, rust: "u64", size: 8, owner: "core" },
+    { name: "x64_mcg_ctl", offset: 2288, rust: "u64", size: 8, owner: "core" },
+    { name: "x64_mc_banks", offset: 2296, rust: "u64", count: 16, size: 128, owner: "core", note: "IA32_MCi_CTL/STATUS/ADDR/MISC for 4 banks" },
 ];
 
 // Every static in src/rust, by file. The check fails on a static that is not
@@ -146,10 +154,13 @@ export const STATICS = {
         // active TSC offset lives in context.rs across switches; old interpolation slots remain for test hooks
         tsc_last_extra: "machine", tsc_last_value: "machine", tsc_number_of_same_readings: "machine",
         tsc_offset: "core", tsc_resolution: "machine", tsc_speed: "machine",
+        X64_COMPAT_JIT: "machine",
     },
     "cpu/exceptions.rs": { DELIVERING: "scratch", EXTERNAL: "scratch", SHUTDOWN: "core", BSP_RESET: "machine" },
     "cpu/context.rs": { CONTEXTS: "core" },
-    "cpu/execution.rs": { execution_state: "machine", CORE_STATISTICS: "core", JIT_ACCOUNTED_DISPATCHES: "scratch" },
+    "cpu/execution.rs": { execution_state: "machine", CORE_STATISTICS: "core", JIT_ACCOUNTED_DISPATCHES: "scratch",
+        // flushed into CORE_STATISTICS before every read, reset and core switch
+        PENDING_RETIRED: "scratch", PENDING_REP_ELEMENTS: "scratch" },
     "cpu/fpu.rs": { X87_JIT_CACHE: "machine" },
     "cpu/ioapic.rs": { IOAPIC: "machine" },
     "cpu/instructions_0f.rs": { X64_TEST_CAPABILITIES: "machine", X64_ARCH_CAPABILITIES: "machine" },
@@ -207,6 +218,7 @@ export const STATICS = {
     "x64/jac.rs": { JAC: "cache" },
     "x64/execute.rs": { DECODE_CACHE: "cache" },
     "x64/debug.rs": { PENDING: "scratch" },
+    "x64/system.rs": { FAULT_LOG: "debug", FAULT_NEXT: "debug", USER_TRACE: "debug", USER_TRACE_NEXT: "debug", USER_TRACE_ENABLED: "debug" },
     "x64/profile.rs": { PERIOD: "debug", COUNTDOWN: "debug", SAMPLES: "debug" },
     "x64/vector.rs": { softfloat_roundingMode: "scratch", softfloat_exceptionFlags: "scratch" },
 };

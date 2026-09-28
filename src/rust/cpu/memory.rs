@@ -107,9 +107,17 @@ pub fn in_svga_lfb(addr: u32) -> bool {
     addr >= VGA_LFB_ADDRESS && addr <= unsafe { VGA_LFB_ADDRESS + (vga_memory_size - 1) }
 }
 
-#[no_mangle]
+// The RAM path of the reads is always inlined; mapped ranges (VGA, MMIO,
+// the low hole left by RAM relocated above 4 GiB) are handled out of line.
+#[export_name = "read8"]
+pub fn read8_export(addr: u32) -> i32 { read8(addr) }
+#[inline(always)]
 pub fn read8(addr: u32) -> i32 {
-    if in_mapped_range(addr) {
+    if in_mapped_range(addr) { read8_mapped(addr) } else { read8_no_mmap_check(addr) }
+}
+#[inline(never)]
+fn read8_mapped(addr: u32) -> i32 {
+    {
         if low_ram_hole(addr) {
             0xFF
         } else if in_svga_lfb(addr) {
@@ -121,17 +129,21 @@ pub fn read8(addr: u32) -> i32 {
         } else {
             unsafe { ext::mmap_read8(addr) }
         }
-    } else {
-        read8_no_mmap_check(addr)
     }
 }
 pub fn read8_no_mmap_check(addr: u32) -> i32 {
     unsafe { *mem8.offset(addr as isize) as i32 }
 }
 
-#[no_mangle]
+#[export_name = "read16"]
+pub fn read16_export(addr: u32) -> i32 { read16(addr) }
+#[inline(always)]
 pub fn read16(addr: u32) -> i32 {
-    if mapped_width(addr, 2) {
+    if mapped_width(addr, 2) { read16_mapped(addr) } else { read16_no_mmap_check(addr) }
+}
+#[inline(never)]
+fn read16_mapped(addr: u32) -> i32 {
+    {
         if in_svga_lfb(addr) {
             unsafe {
                 ptr::read_unaligned(vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *const u16)
@@ -140,17 +152,21 @@ pub fn read16(addr: u32) -> i32 {
         } else {
             read8(addr) | read8(addr.wrapping_add(1)) << 8
         }
-    } else {
-        read16_no_mmap_check(addr)
     }
 }
 pub fn read16_no_mmap_check(addr: u32) -> i32 {
     unsafe { ptr::read_unaligned(mem8.offset(addr as isize) as *const u16) as i32 }
 }
 
-#[no_mangle]
+#[export_name = "read32s"]
+pub fn read32s_export(addr: u32) -> i32 { read32s(addr) }
+#[inline(always)]
 pub fn read32s(addr: u32) -> i32 {
-    if mapped_width(addr, 4) {
+    if mapped_width(addr, 4) { read32s_mapped(addr) } else { read32_no_mmap_check(addr) }
+}
+#[inline(never)]
+fn read32s_mapped(addr: u32) -> i32 {
+    {
         if addr & 4095 > 4092 || touches_low_hole(addr, 4) {
             read8(addr)
                 | read8(addr.wrapping_add(1)) << 8
@@ -167,8 +183,6 @@ pub fn read32s(addr: u32) -> i32 {
         } else {
             unsafe { ext::mmap_read32(addr) }
         }
-    } else {
-        read32_no_mmap_check(addr)
     }
 }
 pub fn read32_no_mmap_check(addr: u32) -> i32 {

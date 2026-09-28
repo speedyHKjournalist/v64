@@ -58,6 +58,41 @@ const mem = w => {
         default: return `${SIZE[w]} [r14+${disp - 64}+64]`;
     }
 };
+const XMM = Array.from({length: 16}, (_, i) => `xmm${i}`);
+// SSE memory operand: aligned forms get 16-byte aligned addresses (no r13
+// index); unaligned ones sometimes cross into the second page.
+const vmem = (bytes, aligned) => {
+    let disp = int(0, 8190 - bytes);
+    if(aligned) disp &= ~15;
+    else if(random() < 0.1) disp = 4096 - int(1, bytes - 1);
+    switch(int(0, aligned ? 2 : 3))
+    {
+        case 0: return `[r14+${disp}]`;
+        case 1: return `[fs:${disp}]`;
+        case 2: return `[rel data+${disp}]`;
+        default: return `[r14+r13*${pick([1, 2, 4, 8])}+${Math.min(disp, 8190 - 255 * 8 - bytes)}]`;
+    }
+};
+function sse_instruction()
+{
+    const a = pick(XMM), b = pick(XMM);
+    return pick([
+        `movdqu ${a}, ${vmem(16, false)}`, `movdqu ${vmem(16, false)}, ${a}`, `movups ${a}, ${vmem(16, false)}`, `movups ${vmem(16, false)}, ${a}`,
+        `movupd ${a}, ${b}`, `movdqu ${a}, ${b}`, `movdqa ${a}, ${vmem(16, true)}`, `movdqa ${vmem(16, true)}, ${a}`,
+        `movaps ${a}, ${b}`, `movaps ${a}, ${vmem(16, true)}`, `movapd ${vmem(16, true)}, ${a}`, `movntdq ${vmem(16, true)}, ${a}`,
+        `movntps ${vmem(16, true)}, ${a}`, `movntpd ${vmem(16, true)}, ${a}`,
+        `movss ${a}, ${b}`, `movss ${a}, ${vmem(4, false)}`, `movss ${vmem(4, false)}, ${a}`,
+        `movsd ${a}, ${b}`, `movsd ${a}, ${vmem(8, false)}`, `movsd ${vmem(8, false)}, ${a}`,
+        `movq ${a}, ${b}`, `movq ${a}, ${vmem(8, false)}`, `movq ${vmem(8, false)}, ${a}`,
+        `movd ${a}, ${low_reg(32)}`, `movq ${a}, ${low_reg(64)}`, `movd ${low_reg(32)}, ${a}`, `movq ${low_reg(64)}, ${a}`,
+        `movd ${a}, ${vmem(4, false)}`, `movd ${vmem(4, false)}, ${a}`,
+        `${pick(["pxor", "por", "pand", "pandn", "xorps", "orps", "andps", "andnps", "xorpd", "orpd", "andpd", "andnpd"])} ${a}, ${random() < 0.5 ? b : vmem(16, true)}`,
+        (width => `movnti ${mem(width)}, ${low_reg(width)}`)(pick([32, 64])),
+        pick(["sfence", "lfence", "mfence"]),
+        `mov ${low_reg(64)}, cr8`, `mov r11, ${low_reg(64)}\nand r11d, 15\nmov cr8, r11`,
+        "rdtscp\nxor eax, eax\nxor edx, edx",
+    ]);
+}
 const imm = w => {
     const v = [0, 1, -1, 0x7F, 0x80, 0x7FFF, 0x8000, 0x7FFFFFFF, -0x80000000, int(-1000, 1000), int(0, 0xFFFFFFFF) | 0][int(0, 10)];
     if(w === 8) return v & 0xFF;
@@ -73,8 +108,15 @@ function instruction(state)
     const w = pick(WIDTHS);
     const alu = pick(ALU);
     const w16 = pick([16, 32, 64]);
-    switch(int(0, 51))
+    switch(int(0, 57))
     {
+        case 56: case 57: {
+            // MOV AL/AX/EAX/RAX with a 64-bit absolute address (moffs)
+            const acc = pick(["al", "ax", "eax", "rax"]), disp = int(0, 8190 - 8) & ~(random() < 0.7 ? 7 : 0);
+            const where = random() < 0.5 ? `[abs qword ${0x500000 + disp}]` : `[fs:abs qword ${disp}]`;
+            return random() < 0.5 ? `mov ${acc}, ${where}` : `mov ${where}, ${acc}`;
+        }
+        case 52: case 53: case 54: case 55: return sse_instruction();
         case 40: { const wide = random() < 0.5; const d = wide ? "r11" : "r11d";
             return `mov r11d, ${int(3, 0x7FFFFFF0) | 3}\n${pick([`xor edx, edx\ndiv ${d}`, `${wide ? "cqo" : "cdq"}\nidiv ${d}`, `mov edx, 1\ndiv ${d}`, (at => `or ${SIZE[wide ? 64 : 32]} [r14+${at}], 3\nxor edx, edx\ndiv ${SIZE[wide ? 64 : 32]} [r14+${at}]`)(int(0, 8000) & ~7)])}`; }
         case 50: case 51: case 41: { const op = pick(["movsb", "movsw", "movsd", "movsq", "stosb", "stosw", "stosd", "stosq"]);
@@ -138,7 +180,8 @@ function instruction_simple()
 const cases = Number(process.env.PAGE_FUZZ_CASES || 12);
 const guests = Number(process.env.PAGE_FUZZ_GUESTS || 4);
 const ITERATIONS = Number(process.env.PAGE_FUZZ_ITERATIONS || 300);
-const RESULT = 0x300000, RECORD = 0x2100, MAGIC = 0xC064C064;
+// GPRs and RFLAGS, the two data pages, XMM0..15
+const RESULT = 0x300000, RECORD = 0x2200, MAGIC = 0xC064C064;
 let failures = 0, native_total = 0;
 for(let guest = 0; guest < guests; guest++)
 {
@@ -165,7 +208,8 @@ wrmsr
         for(let i = 0; i < count; i++) lines.push(instruction(state));
         // Cold access caches each iteration: generated slow paths run too.
         if(random() < 0.5) lines.splice(int(0, lines.length), 0, "mov r11, cr3\nmov cr3, r11");
-        let init = GPR64.map(r => `mov ${r}, ${hex(int(0, 0xFFFFFFFF) * 0x100000000 + int(0, 0xFFFFFFFF))}`).join("\n");
+        let init = GPR64.map(r => `mov ${r}, ${hex(int(0, 0xFFFFFFFF) * 0x100000000 + int(0, 0xFFFFFFFF))}`).join("\n") + "\n" +
+            XMM.map((x, i) => `movq ${x}, ${GPR64[i % 12]}\nmovq xmm15, ${GPR64[(i * 5 + 3) % 12]}\npunpcklqdq ${x}, xmm15`).join("\n");
         if(process.env.PAGE_FUZZ_BODY)
         {
             // {init: string, lines: [string]} (see PAGE_FUZZ_SAVE)
@@ -198,6 +242,7 @@ mov rsi, 0x500000
 lea rdi, [r15+256]
 mov ecx, 8192
 rep movsb
+${XMM.map((x, i) => `movdqu [r15+${8448 + i * 16}], ${x}`).join("\n")}
 ; reset the data pages for the next case
 mov rdi, 0x500000
 mov ecx, 8192
@@ -259,7 +304,9 @@ data: times 8192 db 0
             const names = [...GPR64, "r13", "r14", "r15", "flags"];
             const diffs = [];
             for(let i = 0; i < 16; i++) if(a.readBigUInt64LE(i * 8) !== b.readBigUInt64LE(i * 8)) diffs.push(`${names[i]}: interpreter ${a.readBigUInt64LE(i * 8).toString(16)} page ${b.readBigUInt64LE(i * 8).toString(16)}`);
-            for(let i = 256; i < RECORD; i++) if(a[i] !== b[i]) { diffs.push(`data+${i - 256}: ${a[i].toString(16)} vs ${b[i].toString(16)}`); if(diffs.length > 24) break; }
+            for(let i = 256; i < 8448; i++) if(a[i] !== b[i]) { diffs.push(`data+${i - 256}: ${a[i].toString(16)} vs ${b[i].toString(16)}`); if(diffs.length > 24) break; }
+            for(let i = 0; i < 16; i++) if(!a.subarray(8448 + i * 16, 8464 + i * 16).equals(b.subarray(8448 + i * 16, 8464 + i * 16)))
+                diffs.push(`xmm${i}: interpreter ${a.subarray(8448 + i * 16, 8464 + i * 16).toString("hex")} page ${b.subarray(8448 + i * 16, 8464 + i * 16).toString("hex")}`);
             console.log(`FAIL guest ${guest} (seed ${first_seed}) case ${c}:\n  ` + diffs.join("\n  "));
         }
     }

@@ -37,7 +37,7 @@ v86.prototype.run = function()
     if(this.cpu.devices?.acpi?.soft_off)
     {
         // The guest turned the machine off (ACPI S5/S4): power it on again
-        this.cpu.reboot_internal();
+        this.cpu.reboot_internal("power-on");
     }
 
     if(!this.running)
@@ -106,7 +106,7 @@ v86.prototype.destroy = function()
 v86.prototype.restart = function()
 {
     if(this.state_busy) throw new Error("Snapshot transaction is in progress");
-    this.cpu.reboot_internal();
+    this.cpu.reboot_internal("restart");
 };
 
 v86.prototype.init = function(settings)

@@ -215,6 +215,7 @@ pub fn apic_addr(core: u32) -> u32 { &raw mut *apic_of(core as usize) as u32 }
 #[no_mangle]
 pub unsafe fn apic_set_core_count(count: u32) {
     dbg_assert!(count >= 1 && count as usize <= MAX_CORES);
+    crate::cpu::execution::flush_core_statistics();
     CORE_COUNT = count as usize;
     CURRENT_CORE = 0;
     for core in 0..MAX_CORES {
@@ -258,6 +259,7 @@ pub unsafe fn apic_core_nmi_pending(core: u32) -> bool { NMI_PENDING[core as usi
 #[no_mangle]
 pub unsafe fn apic_set_current_core(core: u32) {
     dbg_assert!((core as usize) < CORE_COUNT);
+    crate::cpu::execution::flush_core_statistics();
     CURRENT_CORE = core as usize;
 }
 

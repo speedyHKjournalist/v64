@@ -34,7 +34,6 @@ export function V86GLPCI(cpu, bus, options)
     this.lastFrameId = 0;
     this.lastBytes = 0;
     this.submitCount = 0;
-    this.memoryView = null;
     const port = options["port"] || 0xF100;
     if(port < 0 || port > 0xFC00 || (port & 0xFF))
         throw new Error("v86gl virtio port must be 256-byte aligned and fit four I/O BARs");
@@ -86,11 +85,38 @@ V86GLPCI.prototype.reset = function()
     this.lastFrameId = this.lastBytes = this.submitCount = 0;
 };
 
+/**
+ * Plain RAM on the (36-bit) physical bus: never a device window, the legacy
+ * VGA/ROM range or the low hole that RAM relocated above 4 GiB leaves.
+ */
 V86GLPCI.prototype.valid_range = function(address, bytes)
 {
-    const end = address + bytes;
-    return address > 0 && bytes > 0 && end <= this.cpu.memory_size[0] &&
-        (end <= 0xA0000 || address >= 0x100000);
+    if(!Number.isSafeInteger(address) || !Number.isSafeInteger(bytes) || address <= 0 || bytes <= 0 ||
+        !(address + bytes <= 0xA0000 || address >= 0x100000)) return false;
+    try { this.cpu.validate_physical_range(address, bytes); }
+    catch(e) { return false; }
+    const kind = this.cpu.wm.exports["x64_phys_kind"];
+    for(let at = address - address % 4096; at < address + bytes; at += 4096)
+        if(kind(at >>> 0, Math.floor(at / 0x100000000)) !== 1) return false;
+    return true;
+};
+
+/** The backing offset of a physically contiguous RAM range, else -1. */
+V86GLPCI.prototype.contiguous_backing = function(address, bytes)
+{
+    const resolve = this.cpu.wm.exports["x64_phys_resolve"];
+    const first = resolve(address >>> 0, Math.floor(address / 0x100000000));
+    if(first < 0) return -1;
+    for(let at = address - address % 4096 + 4096; at < address + bytes; at += 4096)
+        if(resolve(at >>> 0, Math.floor(at / 0x100000000)) !== first + (at - address)) return -1;
+    return first;
+};
+
+/** A DataView of `bytes` guest-physical bytes (read through the bus). */
+V86GLPCI.prototype.read_view = function(address, bytes)
+{
+    const data = this.cpu.read_blob_physical(address, bytes);
+    return new DataView(data.buffer, data.byteOffset, data.byteLength);
 };
 
 V86GLPCI.prototype.notify = function(queue_id)
@@ -114,11 +140,6 @@ V86GLPCI.prototype.notify = function(queue_id)
         virtio.needs_reset();
         return;
     }
-    const ram = this.cpu.mem8;
-    if(!this.memoryView || this.memoryView.buffer !== ram.buffer ||
-        this.memoryView.byteOffset !== ram.byteOffset || this.memoryView.byteLength !== ram.byteLength)
-        this.memoryView = new DataView(ram.buffer, ram.byteOffset, ram.byteLength);
-    const memory = this.memoryView;
     let pending = queue.count_requests();
     while(pending--)
     {
@@ -127,21 +148,21 @@ V86GLPCI.prototype.notify = function(queue_id)
         if(this.can_accept && !this.can_accept()) break;
         const head = queue.avail_get_entry(queue.avail_last_idx);
         if(head >= queue.size) { queue.flush_replies(); virtio.needs_reset(); return; }
-        const read = queue.desc_addr + head * 16;
-        const next = memory.getUint16(read + 14, true);
-        if(memory.getUint16(read + 12, true) !== 1 || next >= queue.size || next === head)
+        // Descriptors carry 64-bit addresses (the bus has 36 bits)
+        const read = this.read_view(queue.desc_addr + head * 16, 16);
+        const next = read.getUint16(14, true);
+        if(read.getUint16(12, true) !== 1 || next >= queue.size || next === head)
         {
             queue.flush_replies();
             virtio.needs_reset();
             return;
         }
-        const write = queue.desc_addr + next * 16;
-        const request = memory.getUint32(read, true);
-        const reply = memory.getUint32(write, true);
-        if(memory.getUint16(write + 12, true) !== 2 ||
-            memory.getUint32(read + 4, true) || memory.getUint32(write + 4, true) ||
-            memory.getUint32(read + 8, true) !== REQUEST_BYTES ||
-            memory.getUint32(write + 8, true) !== RESPONSE_BYTES ||
+        const write = this.read_view(queue.desc_addr + next * 16, 16);
+        const request = read.getUint32(0, true) + read.getUint32(4, true) * 0x100000000;
+        const reply = write.getUint32(0, true) + write.getUint32(4, true) * 0x100000000;
+        if(write.getUint16(12, true) !== 2 ||
+            read.getUint32(8, true) !== REQUEST_BYTES ||
+            write.getUint32(8, true) !== RESPONSE_BYTES ||
             !this.valid_range(request, REQUEST_BYTES) || !this.valid_range(reply, RESPONSE_BYTES))
         {
             queue.flush_replies();
@@ -152,13 +173,8 @@ V86GLPCI.prototype.notify = function(queue_id)
         let result = INVALID;
         try { result = this.handle_request(request); }
         catch(error) { console.error("[virtio-v86gl] request failed", error); }
-        // Match CPU.write_blob's invalidation contract without a temporary
-        // reply buffer or four separate guest-memory helper calls.
-        this.cpu.jit_dirty_cache(reply, reply + RESPONSE_BYTES);
-        memory.setUint32(reply, result, true);
-        memory.setUint32(reply + 4, this.lastFrameId, true);
-        memory.setUint32(reply + 8, this.lastBytes, true);
-        memory.setUint32(reply + 12, this.submitCount, true);
+        // through the bus, which invalidates compiled code like CPU.write_blob
+        this.cpu.write_blob_physical(new Uint8Array(new Uint32Array([result, this.lastFrameId, this.lastBytes, this.submitCount]).buffer), reply);
         queue.push_reply_id(head, RESPONSE_BYTES);
     }
     queue.flush_replies();
@@ -166,19 +182,21 @@ V86GLPCI.prototype.notify = function(queue_id)
 
 V86GLPCI.prototype.handle_request = function(request)
 {
-    const memory = this.memoryView;
-    const op = memory.getUint32(request, true);
-    const address = memory.getUint32(request + 4, true);
-    const high = memory.getUint32(request + 8, true);
-    const length = memory.getUint32(request + 12, true);
-    const flags = memory.getUint32(request + 16, true);
-    if(memory.getUint32(request + 20, true)) return INVALID;
+    const memory = this.read_view(request, REQUEST_BYTES);
+    const op = memory.getUint32(0, true);
+    const address = memory.getUint32(4, true);
+    const high = memory.getUint32(8, true);
+    const length = memory.getUint32(12, true);
+    const flags = memory.getUint32(16, true);
+    if(memory.getUint32(20, true)) return INVALID;
     if(op === REGISTER_ARENA)
     {
-        if(this.arenaBytes || high || flags || length !== ARENA_BYTES ||
-            !this.valid_range(address, length)) return INVALID;
+        // a 64-bit guest-physical address: RAM anywhere on the 36-bit bus
+        const arena = address + high * 0x100000000;
+        if(this.arenaBytes || flags || length !== ARENA_BYTES ||
+            !this.valid_range(arena, length)) return INVALID;
         ++this.arenaGeneration;
-        this.arenaAddress = address;
+        this.arenaAddress = arena;
         this.arenaBytes = length;
         return OK;
     }
@@ -193,7 +211,10 @@ V86GLPCI.prototype.handle_request = function(request)
     if(!this.arenaBytes) return NO_ARENA;
     if(length < HEADER_BYTES || length > this.arenaBytes || length > this.maxBatchBytes)
         return INVALID;
-    const raw = this.cpu.read_blob(this.arenaAddress, length);
+    // Zero-copy while the batch is one contiguous RAM backing range (checked
+    // per submission: the physical map may have changed since registration)
+    const backing = this.contiguous_backing(this.arenaAddress, length);
+    const raw = backing >= 0 ? this.cpu.mem8.subarray(backing, backing + length) : this.cpu.read_blob_physical(this.arenaAddress, length);
     const header = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
     const command_bytes = header.getUint32(20, true);
     // VGL2 reserved words belong to the existing graphics protocol, not to
@@ -222,7 +243,7 @@ V86GLPCI.prototype.handle_request = function(request)
             if(!memory_valid()) return;
             if(!Number.isInteger(offset) || offset < 0 || offset + bytes.length > arena_bytes)
                 throw new RangeError("v86gl write outside registered arena");
-            this.cpu.write_blob(bytes, address_base + offset);
+            this.cpu.write_blob_physical(bytes, address_base + offset);
         },
     };
     if(this.onSubmit) this.onSubmit(event);

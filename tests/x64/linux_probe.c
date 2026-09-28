@@ -7,14 +7,17 @@
  * (how many frames lie above 4 GiB, from /proc/self/pagemap). A second line
  * (X64_PROBE_XC) covers the multicore matrix: /sys topology, thread
  * migration, signals to threads on other CPUs, cross-modifying code
- * executed on another CPU, and an O_DIRECT read of the disk. No libc. */
+ * executed on another CPU, and an O_DIRECT read of the disk. With the
+ * argument "net", raw Ethernet frames (EtherType 88B5) go out through eth0 (virtio-net)
+ * and must come back unchanged from the host's echo (X64_PROBE_NET). No libc. */
 #if defined(__x86_64__)
 typedef long word;
 enum { SYS_read = 0, SYS_write = 1, SYS_open = 2, SYS_close = 3, SYS_lseek = 8, SYS_mmap = 9,
     SYS_mprotect = 10, SYS_rt_sigaction = 13, SYS_pipe = 22, SYS_sched_yield = 24, SYS_getpid = 39,
     SYS_clone = 56, SYS_fork = 57, SYS_exit = 60, SYS_wait4 = 61, SYS_uname = 63, SYS_unlink = 87,
     SYS_sched_setaffinity = 203, SYS_sched_getaffinity = 204, SYS_exit_group = 231, SYS_getcpu = 309,
-    SYS_gettid = 186, SYS_tgkill = 234 };
+    SYS_gettid = 186, SYS_tgkill = 234, SYS_ioctl = 16, SYS_socket = 41, SYS_sendto = 44, SYS_recvfrom = 45,
+    SYS_bind = 49, SYS_setsockopt = 54 };
 #define ARCH "64"
 #define SIGINFO_ADDR 16
 static word sc(word n, word a, word b, word c, word d, word e, word f)
@@ -47,7 +50,8 @@ enum { SYS_exit = 1, SYS_fork = 2, SYS_read = 3, SYS_write = 4, SYS_open = 5, SY
     SYS_unlink = 10, SYS_lseek = 19, SYS_getpid = 20, SYS_pipe = 42, SYS_old_mmap = 90, SYS_wait4 = 114,
     SYS_clone = 120, SYS_uname = 122, SYS_mprotect = 125, SYS_sched_yield = 158, SYS_rt_sigaction = 174,
     SYS_sched_setaffinity = 241, SYS_sched_getaffinity = 242, SYS_exit_group = 252, SYS_getcpu = 318,
-    SYS_gettid = 224, SYS_tgkill = 270 };
+    SYS_gettid = 224, SYS_tgkill = 270, SYS_ioctl = 54, SYS_socket = 359, SYS_bind = 361, SYS_setsockopt = 366,
+    SYS_sendto = 369, SYS_recvfrom = 371 };
 #define ARCH "32"
 #define SIGINFO_ADDR 12
 static word sc(word n, word a, word b, word c, word d, word e, word f)
@@ -262,6 +266,41 @@ static void matrix(void)
     out(" signals="); number(signals); out(" smc_rounds="); number(SMC_ROUNDS); out(" direct_io=1\n");
 }
 
+/* AF_PACKET socket on eth0: send frames, receive the host's echoes */
+#define NET_FRAMES 16
+static void network(void)
+{
+    struct { unsigned short family, protocol; int ifindex; unsigned short hatype; unsigned char pkttype, halen, addr[8]; } address = {0};
+    word fd = check(sc(SYS_socket, 17 /* AF_PACKET */, 3 /* SOCK_RAW */, 0xB588 /* htons(0x88B5) */, 0, 0, 0), "packet socket");
+    char request[40] = {'e', 't', 'h', '0', 0};
+    check(S(SYS_ioctl, fd, 0x8933 /* SIOCGIFINDEX */, request), "eth0 index");
+    address.family = 17; address.protocol = 0xB588; address.ifindex = *(int *)(request + 16); address.halen = 6;
+    for(int i = 0; i < 6; i++) address.addr[i] = 255;
+    check(sc(SYS_bind, fd, (word)&address, sizeof(address), 0, 0, 0), "bind packet socket");
+    struct { long seconds, microseconds; } timeout = {10, 0};
+    check(sc(SYS_setsockopt, fd, 1 /* SOL_SOCKET */, 20 /* SO_RCVTIMEO */, (word)&timeout, sizeof(timeout), 0), "receive timeout");
+    for(unsigned round = 0; round < NET_FRAMES; round++)
+    {
+        unsigned char frame[96] = {0}, received[160];
+        for(int i = 0; i < 6; i++) frame[i] = 255;
+        frame[6] = 2; frame[11] = 1; frame[12] = 0x88; frame[13] = 0xB5;
+        for(unsigned i = 14; i < sizeof(frame); i++) frame[i] = (unsigned char)(i * 7 + round * 13 + ARCH[0]);
+        /* bound socket: no destination (the i386 wrapper passes five arguments) */
+        if(check(sc(SYS_sendto, fd, (word)frame, sizeof(frame), 0, 0, 0), "send frame") != sizeof(frame)) die("short frame");
+        for(;;)
+        {
+            word n = sc(SYS_recvfrom, fd, (word)received, sizeof(received), 0, 0, 0);
+            if(n == -4) continue; /* EINTR */
+            if(check(n, "receive frame") < (word)sizeof(frame)) die("short echo");
+            if(received[11] != 2) continue; /* our own transmitted frame */
+            for(unsigned i = 14; i < sizeof(frame); i++) if(received[i] != frame[i]) die("echo payload");
+            break;
+        }
+    }
+    S(SYS_close, fd, 0, 0);
+    out("X64_PROBE_NET arch=" ARCH " frames="); number(NET_FRAMES); out("\n");
+}
+
 /* The auxiliary vector follows argv and envp on the initial stack. */
 static word auxv(word *stack, word type)
 {
@@ -381,6 +420,7 @@ void entry(word *stack)
     out(" cpu_checks="); for(unsigned id = 0; id < cpus; id++) { if(id) out(","); number(bound[id] - 1); }
     out(" fault=page child=7 tlb_stale="); number(stale); out(" entry="); out(entry_path); out(" high_pages="); number(high_pages); out("\n");
     matrix();
+    if(stack[0] >= 2 && same((const char *)stack[2], "net")) network();
     S(SYS_exit_group, 0, 0, 0);
     for(;;);
 }

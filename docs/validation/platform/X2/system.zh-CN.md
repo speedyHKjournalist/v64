@@ -40,4 +40,16 @@ QEMU 差分用例由 46 个增至 **61 个**，SDM 断言由 7 个增至 **14 �
 
 `X64_JIT=1`（长模式代码由 X4 页层执行）以及再加 `X64_IR_TIER0=0` 时，全部用例同样通过（`make x64-page-tier-tests`）。
 
-仍未覆盖：长模式三重故障（QEMU 在 `-no-reboot` 下直接退出，无法作参考）、完整权限矩阵、SMM、VMX。
+仍未覆盖：完整权限矩阵、SMM、VMX。（长模式三重故障见下一节。）
+
+## 2026-09-28 续二：高于 4 GiB 的 GDT、SYSEXIT、APIC_BASE、三重故障
+
+QEMU 差分用例现为 **66 个**，SDM 断言仍为 14 个（11 + 3）。
+
+- **兼容模式的描述符表查找使用 64 位 GDTR/LDTR 基址（实际缺陷，Windows x64 WOW64 暴露）。** 兼容模式代码由 legacy 解释器执行，其 `lookup_segment_selector` 只取 GDTR 低 32 位，再以 32 位线性地址读取描述符。Windows 的 GDT 在 `0xFFFFF80x_xxxxxxxx`，WOW64 每次系统调用都经 `jmp 0x33:…`（远 JMP 回 64 位模式），读到截断地址上的内容，所有 32 位进程在初始化阶段即以 0xC0000005 退出（`SysWOW64\cmd.exe` 同样）。已有兼容模式用例没有发现，是因为用例的 GDT 高别名 `HIGH+gdt` 的低 32 位恰好等于其物理恒等映射。修正：IA-32e 模式下表基址取 64 位值，描述符经 x64 系统读取；访问位/忙位的回写改用同一 64 位地址（`write_descriptor_access_byte`）；兼容模式加载数据段时基址零扩展写入（清高 32 位）。新用例“compatibility-mode descriptor loads from a GDT above 4 GiB”把 GDT 复制到物理 0x800000，经 PML4[257] 映射到 `0xFFFF808000000000`（其低 32 位落在线性 0），在兼容模式执行 MOV DS、LAR、LSL 和远 JMP 回 64 位；修正前 v86 在此用例中陷入故障循环（超时），修正后与 QEMU 一致。LAR 结果的 19:16 位 SDM 未定义（QEMU 清零、v86 返回界限高位），用例对其屏蔽。
+- **兼容模式 I/O 权限检查**：legacy 路径的 `test_privileges_for_io` 同样按 32 位 TR 基址读 TSS 的 I/O 位图；IA-32e 模式下改为调用 x64 的 `check_io_access`（64 位 TSS 基址）。
+- **SYSEXIT**：32 位形式以 CS=SYSENTER_CS+16|3、SS=+24|3 进入 CPL3 兼容模式（EIP=EDX、ESP=ECX），REX.W 形式以 CS=+32|3、SS=+40|3 进入 64 位模式（RIP=RDX、RSP=RCX）；两次都经 SYSENTER 返回内核，再以远返回装入真实内核 CS。选择子取 SYSENTER_CS=0x10，得到 Windows 惯用的 0x23/0x2B 与 0x33/0x3B。
+- **IA32_APIC_BASE（长模式）**：读得 `0xFEE00900`（BSP|EN|基址），原值写回无副作用；清 EN 后 CPUID.1:EDX.APIC 为 0，重新置 EN 后恢复为 1；第 40 位（超出 36 位 MAXPHYADDR）写入 #GP(0)。均与 QEMU 一致。32 位模式下的 APIC_BASE 行为由 C1 的 kvm-unit-tests `apic.flat` 覆盖。
+- **长模式三重故障**：`tests/x64/triple_fault.mjs`（`make x64-system-tests`），QEMU 在 `-no-reboot` 下直接退出无法作参考，按 SDM Vol.3A §6.15 断言：64 位代码装入界限为 0 的 IDT 后执行 `ud2`，#UD 交付失败成 #GP，再成 #DF，#DF 交付失败进入 shutdown；BSP 上主板在下一个安全点复位整机：执行纪元加一、实模式、线性 IP=0xFFFF0、RIP 高位 0、EFER=0、CR0.PG/PE 与 CR4 清零、R9 高位清零、shutdown 状态解除，复位原因记为 `triple-fault`。解释器与页层均通过。
+
+`X64_JIT=1` 与 `X64_JIT=1 X64_IR_TIER0=0` 下 66 个用例同样通过（兼容模式代码经 IR/Tier-0 编译时同样走修正后的查找）。

@@ -6,6 +6,7 @@ import fs from "node:fs";
 import {spawn, spawnSync} from "node:child_process";
 import {createHash as create_hash} from "node:crypto";
 import {setTimeout as delay} from "node:timers/promises";
+import {setImmediate as set_immediate} from "node:timers";
 import {fileURLToPath} from "node:url";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const directory = root + "build/x64-linux/";
@@ -57,7 +58,11 @@ for(const [bits, target, flags, emulation] of [
 run("bsdtar", ["--format", "ustar", "--no-xattrs", "--no-mac-metadata", "--uid", "0", "--gid", "0",
     "-cf", probe_directory + "probe.tar", "-C", probe_directory, "linux_probe64", "linux_probe32"]);
 const probe_disk = fs.readFileSync(probe_directory + "probe.tar");
-const guest_command = "tar -xf /dev/sda -C /tmp && /tmp/linux_probe64 && /tmp/linux_probe32; uname -m; cat /sys/devices/system/cpu/online; grep 'System RAM' /proc/iomem; echo X64_LINUX_BOOT_OK\n";
+// v86 runs also bring up virtio-net (Alpine virt has no NE2K driver) and echo
+// raw frames on the host (X64_PROBE_NET); the QEMU reference skips that round.
+const guest_command = net => (net ? "modprobe virtio_net 2>/dev/null; ifconfig eth0 up && " : "") +
+    `tar -xf /dev/sda -C /tmp && /tmp/linux_probe64 ${net ? "net" : ""} && /tmp/linux_probe32 ${net ? "net" : ""}; ` +
+    "uname -m; cat /sys/devices/system/cpu/online; grep 'System RAM' /proc/iomem; echo X64_LINUX_BOOT_OK\n";
 // X5: relocate this many bytes of RAM to guest physical 4 GiB (v86) or give
 // QEMU the same split, so the kernel and probes must use RAM above 4 GiB.
 const high_memory = Number(process.env.X64_HIGH_MEMORY || 0);
@@ -68,7 +73,7 @@ const manifest = {source, iso_sha256: digest, kernel_sha256: hash(fs.readFileSyn
     probe32_sha256: hash(fs.readFileSync(probe_directory + "linux_probe32"))};
 fs.writeFileSync(directory + `image-${tag}.json`, JSON.stringify(manifest, null, 2) + "\n");
 if(+process.env.X64_LINUX_PREPARE_ONLY) process.exit(0);
-function check_probes(text)
+function check_probes(text, net)
 {
     for(const bits of [64, 32])
     {
@@ -84,6 +89,7 @@ function check_probes(text)
         const placed = +text.match(new RegExp(`X64_PROBE_OK arch=${bits} [^\\r\\n]* high_pages=(\\d+)`))[1];
         if(high_memory) assert.ok(placed > 0, `${bits}-bit process received frames above 4 GiB`);
         else assert.equal(placed, 0, `${bits}-bit process: no RAM above 4 GiB exists`);
+        if(net) assert.match(text, new RegExp(`X64_PROBE_NET arch=${bits} frames=16`), `${bits}-bit raw frames through eth0 (virtio-net) and back`);
     }
 }
 if(+process.env.X64_LINUX_QEMU)
@@ -107,7 +113,7 @@ if(+process.env.X64_LINUX_QEMU)
                 transcript += bytes;
                 if(+process.env.SHOW_LOGS) process.stdout.write(bytes);
                 if(transcript.includes("localhost login:") && !logged_in) { child.stdin.write("root\n"); logged_in = true; }
-                if(transcript.includes("localhost:~#") && !command) { child.stdin.write(guest_command); command = true; }
+                if(transcript.includes("localhost:~#") && !command) { child.stdin.write(guest_command(false)); command = true; }
                 if(/\r?\nX64_LINUX_BOOT_OK\r?\n/.test(transcript)) resolve();
                 if(transcript.includes("Kernel panic")) reject(new Error("QEMU kernel panic"));
             };
@@ -115,7 +121,7 @@ if(+process.env.X64_LINUX_QEMU)
             child.stderr.on("data", output);
         });
         assert.match(transcript, /\r?\nx86_64\r?\n/);
-        check_probes(transcript);
+        check_probes(transcript, false);
         if(high_memory) assert.match(transcript, /\n\s*100000000-[0-9a-f]+ : System RAM/, "kernel owns RAM above 4 GiB");
         console.log("X64_LINUX_QEMU_PASS");
     }
@@ -135,10 +141,19 @@ const emulator = new V86({
     bzimage: {url: directory + "boot/vmlinuz-virt"}, initrd: {url: directory + "boot/initramfs-virt"},
     cdrom: {url: directory + name}, hda: {buffer: probe_disk.buffer.slice(probe_disk.byteOffset, probe_disk.byteOffset + probe_disk.length)},
     cmdline, memory_size: 512 << 20, high_memory_size: high_memory, cpu_cores: cores, acpi: true, autostart: false,
-    disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0,
+    disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0, net_device: {type: "virtio"},
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
 });
 let serial = "";
+// Raw frames of EtherType 88B5 come back with source 02:00:00:00:00:02
+let echoed = 0;
+emulator.bus.register("net0-send", packet => {
+    if(packet.length < 14 || packet[12] !== 0x88 || packet[13] !== 0xB5 || packet[11] !== 1) return;
+    const reply = Uint8Array.from(packet);
+    reply.set([2, 0, 0, 0, 0, 2], 6);
+    echoed++;
+    set_immediate(() => emulator.bus.send("net0-receive", reply));
+});
 let cpu;
 let snapshot;
 let rounds = 0;
@@ -202,6 +217,8 @@ try
     // runs its speculation mitigations (PTI, VERW, ITS thunks).
     if(process.env.X64_ARCH_CAPABILITIES === "0") cpu.wm.exports.set_x64_arch_capabilities(0);
     if(process.env.X64_STEP_PROFILE) cpu.wm.exports.x64_page_profile(1);
+    // compiled 32-bit code in compatibility mode (the probe's i386 process)
+    if(process.env.X64_COMPAT_JIT) cpu.wm.exports.x64_set_compat_jit(process.env.X64_COMPAT_JIT !== "0");
     const run_cores = cpu.run_cores.bind(cpu);
     cpu.run_cores = () => {
         rounds++;
@@ -223,20 +240,46 @@ try
         }
         if(/localhost:~#/.test(serial) && !booted)
         {
-            emulator.serial0_send(guest_command);
+            emulator.serial0_send(guest_command(true));
             booted = true;
         }
         // X64_LINUX_SNAPSHOT=1: save and restore the whole machine while the
         // probes run (threads on every CPU, pending IPIs, page functions).
+        // Rounds alternate between the chunked V7 stream, written to and read
+        // back from a file (no whole-snapshot buffer on either side), and the
+        // single-buffer V6 format.
         for(const marker of snapshot_markers)
         {
             if(+process.env.X64_LINUX_SNAPSHOT && booted && !snapshots_taken.includes(marker) && serial.includes(marker))
             {
                 snapshots_taken.push(marker);
                 emulator.stop();
-                const state = await emulator.save_state();
-                await emulator.restore_state(state);
-                snapshot_bytes.push(state.byteLength);
+                if(snapshots_taken.length % 2)
+                {
+                    const file = await fs.promises.open(directory + `snapshot-${tag}.v7`, "w+");
+                    let bytes = 0, largest = 0, chunks = 0;
+                    try
+                    {
+                        await emulator.save_state_stream(async chunk => {
+                            await file.write(chunk, 0, chunk.length, bytes);
+                            bytes += chunk.length; chunks++; largest = Math.max(largest, chunk.length);
+                        });
+                        await emulator.restore_state_stream({size: bytes, read: async (offset, length) => {
+                            const data = new Uint8Array(length);
+                            const read = (await file.read(data, 0, length, offset))["bytesRead"];
+                            return read === length ? data : data.subarray(0, read);
+                        }});
+                    }
+                    finally { await file.close(); fs.rmSync(directory + `snapshot-${tag}.v7`, {force: true}); }
+                    assert.ok(largest <= 1 << 20, "V7 chunks are at most 1 MiB");
+                    snapshot_bytes.push({format: "V7 stream", bytes, chunks, largest_chunk: largest});
+                }
+                else
+                {
+                    const state = await emulator.save_state();
+                    await emulator.restore_state(state);
+                    snapshot_bytes.push({format: "V6 buffer", bytes: state.byteLength});
+                }
                 emulator.run();
             }
         }
@@ -252,7 +295,8 @@ try
     snapshot = inspect();
     assert.ok(booted && /\r?\nX64_LINUX_BOOT_OK\r?\n/.test(serial), "real x64 Linux login shell and command deadline");
     assert.match(serial, /\r?\nx86_64\r?\n/, "uname confirms actual x86_64 userspace");
-    check_probes(serial);
+    check_probes(serial, true);
+    assert.equal(echoed, 32, "the host echoed every probe frame");
     if(high_memory) assert.match(serial, new RegExp(`\\n\\s*100000000-${(0x100000000 + high_memory - 1).toString(16)} : System RAM`), "kernel owns the relocated RAM above 4 GiB");
     if(+process.env.X64_LINUX_SNAPSHOT)
     {

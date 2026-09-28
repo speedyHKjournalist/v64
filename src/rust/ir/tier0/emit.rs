@@ -15,7 +15,7 @@
 //! interpreter's exact behavior.
 use super::analysis::{self, Instruction, PagePlan, Unit};
 use crate::cpu::cpu::{
-    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_ZERO, TLB_GLOBAL, TLB_HAS_CODE,
+    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_ZERO, TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA,
     TLB_NO_USER, TLB_READONLY, TLB_VALID,
 };
 use crate::cpu::global_pointers as gp;
@@ -614,9 +614,9 @@ fn mask(size: u8) -> i32 {
 }
 fn sign(size: u8) -> i32 { 1i32 << (size - 1) }
 fn tlb_read_mask(user: bool) -> i32 {
-    0xFFF & !TLB_READONLY & !TLB_GLOBAL & !TLB_HAS_CODE & if user { !0 } else { !TLB_NO_USER }
+    0xFFF & !TLB_READONLY & !TLB_GLOBAL & !TLB_HAS_CODE & !TLB_IA32E_DATA & if user { !0 } else { !TLB_NO_USER }
 }
-fn tlb_write_mask(user: bool) -> i32 { 0xFFF & !TLB_GLOBAL & if user { !0 } else { !TLB_NO_USER } }
+fn tlb_write_mask(user: bool) -> i32 { 0xFFF & !TLB_GLOBAL & !TLB_IA32E_DATA & if user { !0 } else { !TLB_NO_USER } }
 
 impl Page {
     fn store_fixed(&mut self, address: u32, value: &WasmLocal) {

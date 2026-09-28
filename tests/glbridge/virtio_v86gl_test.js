@@ -58,7 +58,7 @@ const path = require("node:path");
         }
         setup();
         assert.equal(request(2,0,32),2,"submit without registered arena fails");
-        assert.equal(request(1,arena,16*1024*1024,0,1),1,"64-bit addresses rejected");
+        assert.equal(request(1,arena,16*1024*1024,0,1),1,"64-bit address without RAM rejected");
         assert.equal(request(1,0x2000000,16*1024*1024),1,"out-of-RAM arena rejected");
         assert.equal(request(1,arena,16*1024*1024),0);
         assert.equal(request(1,arena,16*1024*1024),1,"registration cannot replace live arena");
@@ -172,8 +172,7 @@ const path = require("node:path");
         io.port_write16(notify,0);
         assert.ok(io.port_read8(common+20)&64,"direct replies must target RAM, not VGA MMIO");
         setup();
-        device.memoryView=new DataView(new ArrayBuffer(8));
-        assert.equal(request(1,arena,16*1024*1024),0,"refresh stale cached RAM view");
+        assert.equal(request(1,arena,16*1024*1024),0,"register again after a reset");
         console.log("virtio_v86gl_test: PCI capabilities, negotiation, real virtqueue, validation, lifetime, reset, wrap and BAR relocation passed");
     } finally { await emulator.destroy(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

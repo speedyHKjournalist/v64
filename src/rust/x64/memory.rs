@@ -86,7 +86,10 @@ pub unsafe fn translate_user(address: u64, access: Access, stack: bool, user: bo
     let c = Controls { cr3: state::read_cr(3), user,
         write_protect: state::read_cr(0) & 0x10000 != 0, nx_enable: state::efer() & state::EFER_NXE != 0 };
     let cache = &mut X64_TLBS[apic::current_core()];
-    if let Some(physical) = cache.lookup_physical(LinearAddress(address), access, c) { return Ok(physical); }
+    if let Some(physical) = cache.lookup_physical(LinearAddress(address), access, c) {
+        if *gp::x64_cs_long == 0 && crate::cpu::cpu::compat_jit() { crate::cpu::cpu::fill_ia32e_tlb(address as u32, physical, access, user); }
+        return Ok(physical);
+    }
     let result = paging::walk(&mut physical::PageTables, LinearAddress(address), access, c, WalkMode::Runtime)
         .map_err(|fault| match fault {
             paging::Fault::Page { address, error, .. } => Fault { vector: 14, error: Some(error), address: Some(address.0) },
@@ -94,6 +97,8 @@ pub unsafe fn translate_user(address: u64, access: Access, stack: bool, user: bo
             paging::Fault::Unavailable(_) => Fault::gp(),
         })?;
     cache.insert(LinearAddress(address), access, c, result);
+    // compatibility mode: 32-bit linear addresses, served to compiled code too
+    if *gp::x64_cs_long == 0 && crate::cpu::cpu::compat_jit() { crate::cpu::cpu::fill_ia32e_tlb(address as u32, result.physical.0, access, user); }
     Ok(result.physical.0)
 }
 

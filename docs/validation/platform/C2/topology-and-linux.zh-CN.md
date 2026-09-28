@@ -98,3 +98,7 @@ SMP_JIT_MODE=region C2_LOG_DIR=docs/validation/platform/C2/logs/region node test
 | 8 | 2626613 | 45724638 | 8633 / 234429 |
 
 原始串口与逐核 JSON 分别在 [Tier-0 日志目录](logs/tier0/) 与 [region 日志目录](logs/region/)；完整汇总：[Tier-0](logs/tier0/matrix.txt)、[region](logs/region/matrix.txt)。三个执行模式合计完成 15 个真实 Linux 配置，使用前述同一个固定 debug Wasm。编译模式沿用正式 runner 与相同客户机工作负载；未将微测试通过当作 OS 成功的替代证据。
+
+## 2026-09-28 续：Windows（x64）拓扑
+
+Windows XP 原盘为单处理器 HAL，不能证明 SMP（见 C3 的 XP 记录）。用户提供的 Windows 8.1 Pro x64 镜像在 v86 中以 ACPI + 1/2/4 核启动到桌面（下述为 2 核；4 核同样通过，APIC ID 0–3、计数 256/256）：64 位探针经 `GetLogicalProcessorInformation` 得到 1 个 package、2 个 core、每 core 1 个逻辑处理器、无 SMT 标志；每个处理器一个线程，64 轮 `SetThreadAffinityMask` 轮换，每个处理器只观察到一个且互不相同的 APIC ID（0 与 1），`InterlockedIncrement` 共享计数 128/128，0 失败；32 位（WOW64）探针结果相同。即 C2 的“1 socket × N cores × 1 thread，各核实际执行”在 Windows 上也成立（页层 JIT；解释器下的 Windows 运行过慢，未做）。证据与 1/4 核结果见 [XC 记录](../XC/linux64-boot.zh-CN.md)。32 位 Windows 的 SMP 仍无可用镜像。

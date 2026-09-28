@@ -9,6 +9,8 @@
 //   the interpreter, which delivers the fault);
 // - one backing page run through two linear aliases (position-independent
 //   functions);
+// - LOCKed read-modify-writes crossing into a not-present page after they
+//   were compiled: #PF at the second page with no partial commit (C3);
 // - self-modifying code: a loop patching an immediate of a function in
 //   another compiled page, and an instruction later in its own page.
 import assert from "node:assert/strict";
@@ -16,7 +18,8 @@ import {assemble, reference, actual} from "./guest_runner.mjs";
 
 const RESULT = 0x300000;
 const scenarios = [];
-const add = (name, code) => scenarios.push({name, code});
+// `expected`: fields asserted from the SDM where QEMU TCG differs
+const add = (name, code, expected = {}) => scenarios.push({name, code, expected});
 
 add("user loop and supervisor fault", `
 mov ecx, 0xC0000081
@@ -130,6 +133,63 @@ jnz .nloop
 mov qword [0x500010], 0
 mov r8, rsp`);
 
+// C3 atomicity in compiled code: LOCKed read-modify-writes (and implicitly
+// locked XCHG) warmed on a page-crossing operand, then aimed across into a
+// not-present page: #PF at the second page, nothing written to the first.
+add("LOCK operations crossing into a not-present page", `
+mov rdi, 0x204000
+mov eax, 0xE00007
+mov ecx, 512
+.ptl:
+mov [rdi], rax
+add eax, 0x1000
+add rdi, 8
+loop .ptl
+mov qword [0x204008], 0
+mov qword [0x202000+7*8], 0x204007
+mov rax, cr3
+mov cr3, rax
+mov word [0xE00FFE], 0x3344
+lea rax, [rel .lafter]
+mov [0x500010], rax
+mov ecx, 20000
+xor r8, r8
+xor r9, r9
+xor edx, edx
+.lloop:
+mov rsi, 0xE02FFE
+test ecx, 7
+jnz .lmapped
+mov rsi, 0xE00FFE
+.lmapped:
+mov eax, ecx
+lock xadd [rsi], eax
+add r8, rax
+lock add dword [rsi], ecx
+xchg [rsi], edx
+lock or dword [rsi], 0x100
+lock btc dword [rsi], 3
+mov eax, [rsi]
+lea ebx, [rax+rcx]
+lock cmpxchg [rsi], ebx
+add r8, rax
+jmp .lnext
+.lafter:
+inc r9
+.lnext:
+dec ecx
+jnz .lloop
+mov qword [0x500010], 0
+movzx r10d, word [0xE00FFE]
+mov r11d, [0xE02FFE]
+mov qword [0x202000+7*8], 0xE00087
+mov rax, cr3
+mov cr3, rax`,
+// A read-modify-write checks its operand for writing (W=1 in the #PF error
+// code, as on Intel); QEMU 10.2 falls back to a plain load for a
+// page-crossing atomic and reports a read (0).
+{5: 2n});
+
 add("patching a compiled function in another page", `
 mov ecx, 30000
 xor r10, r10
@@ -207,7 +267,10 @@ mov r8, rax`);
 // recompilations).
 const body = scenarios.map((s, n) => `
 align 4096
-; ${s.name}
+; ${s.name} (the fault record starts clear)
+mov qword [0x500020], 0
+mov qword [0x500028], 0
+mov qword [0x500030], 0
 ${s.code}
 mov rdi, ${RESULT + 8 + n * 64}
 mov [rdi], r8
@@ -385,7 +448,8 @@ const compare = (result, label) => {
     for(const [n, s] of scenarios.entries()) for(let field = 0; field < 7; field++)
     {
         const at = 8 + n * 64 + field * 8;
-        assert.equal(result.readBigUInt64LE(at).toString(16), oracle.readBigUInt64LE(at).toString(16),
+        const expected = s.expected[field] ?? oracle.readBigUInt64LE(at);
+        assert.equal(result.readBigUInt64LE(at).toString(16), expected.toString(16),
             `${label}: ${s.name}, ${["r8", "r9", "r10", "r11", "vector", "error", "cr2"][field]}`);
     }
 };

@@ -91,6 +91,7 @@ X64_LINUX_QEMU=1 node tests/x64/linux_boot.mjs   # 独立参考
 | 1 核，页层，`ir_tier0:false`（`X64_IR_TIER0=0`） | **通过** | 1 min 08 s | [串口](logs/alpine-1core-page-tier-ir-tier0-false-2026-09-28.serial)、[result](logs/alpine-1core-page-tier-ir-tier0-false-2026-09-28.result.json) |
 | 1 核，页层，512 MiB 中 128 MiB 位于 4 GiB 以上 | **通过**：`/proc/iomem` 含 `100000000-107ffffff : System RAM`，64/32 位探针各 4096 页位于 4 GiB 以上 | 1 min 31 s | [串口](logs/alpine-1core-page-tier-high-memory-2026-09-28.serial)、[result](logs/alpine-1core-page-tier-high-memory-2026-09-28.result.json) |
 | 2 核，解释器 | **通过**：全部 64/32 位探针与 XC 矩阵；2 次 soft lockup 告警（HZ=1000 下的吞吐问题） | 73 min 52 s | [串口](logs/alpine-2core-interpreter-xc-2026-09-28.serial)、[result](logs/alpine-2core-interpreter-xc-2026-09-28.result.json) |
+| 4 核，解释器 | **通过**：全部 64/32 位探针与 XC 矩阵（迁移 96 次、信号 64 次）；16 次 soft lockup 告警（同上） | 134 min 49 s | [串口](logs/alpine-4core-interpreter-xc-2026-09-28.serial)、[result](logs/alpine-4core-interpreter-xc-2026-09-28.result.json) |
 | 2 核 / 4 核，解释器（2026-09-27，XC 矩阵加入前的探针） | 通过（登录、64/32 位探针、TLB shootdown）；分别出现 3 / 8 次 soft lockup 告警 | 约 85 / 140 min | [2 核](logs/alpine-2core-interpreter-probes-2026-09-27.serial)、[4 核](logs/alpine-4core-interpreter-probes-2026-09-27.serial) |
 
 页层运行中 4 核的统计（`page_tier`）：约 4,060 次编译、2,290 次重编译、766 次因代码写入退役、0 次编译失败、0 次淘汰，74.8 亿条指令在页函数中退休，另 1,770 万次解释步、309 万次 RETRY。
@@ -104,7 +105,58 @@ X64_LINUX_QEMU=1 node tests/x64/linux_boot.mjs   # 独立参考
 | --- | --- | --- |
 | 1 核，解释器 | 生命周期通过（探针与 XC 矩阵 → reboot → 第二次登录 → S5），共 29 min | [串口](logs/alpine-1core-interpreter-lifecycle-2026-09-28.serial)、[result](logs/alpine-1core-interpreter-lifecycle-2026-09-28.result.json) |
 | 1 核，页层 | 快照与生命周期通过 | [串口](logs/alpine-1core-page-tier-lifecycle-2026-09-28.serial) |
+| 2 核，页层，V7 分块快照（2026-09-28） | 通过：第 1、3 次快照用 V7 流写入文件再从文件恢复（215,105,678 字节/311 块、226,073,909 字节/322 块，最大块 1 MiB，双方都不构造整份快照缓冲），第 2 次用 V6 单缓冲（226,024,060 字节）；恢复后 64/32 位探针、XC 矩阵与网络收发全部通过 | [串口](logs/alpine-2core-page-tier-v7-snapshot-2026-09-28.serial)、[result](logs/alpine-2core-page-tier-v7-snapshot-2026-09-28.result.json) |
 | 4 核，页层，连续 4 次 | 4/4 通过（快照 3 次/轮 + reboot 后 0-3 全部在线 + S5） | [run 1](logs/alpine-4core-page-tier-snapshot-lifecycle-run1-2026-09-28.result.json)、[run 2](logs/alpine-4core-page-tier-snapshot-lifecycle-run2-2026-09-28.result.json)、[run 3](logs/alpine-4core-page-tier-snapshot-lifecycle-run3-2026-09-28.result.json)、[run 4](logs/alpine-4core-page-tier-snapshot-lifecycle-run4-2026-09-28.result.json)（[串口](logs/alpine-4core-page-tier-snapshot-lifecycle-run4-2026-09-28.serial)） |
 
-此前一次 4 核运行在 `reboot: Power down` 之后没有产生 S5（各核停在空闲、0% CPU），此后 6 次 4 核运行（单独复跑 1 次仅生命周期、1 次快照 + 生命周期，加上表 4 次）均未复现，原因未定位。`linux_boot.mjs` 在 120 s 内未见 S5 时把全部核的诊断写入 `build/x64-linux/poweroff-<tag>.json`，复现时可直接分析；在找到原因前，该项视为间歇性风险而非已解决。
+此前一次 4 核运行在 `reboot: Power down` 之后没有产生 S5（各核停在空闲、0% CPU），此后 6 次 4 核运行（单独复跑 1 次仅生命周期、1 次快照 + 生命周期，加上表 4 次）均未复现，原因未定位。2026-09-28 晚在主机高负载（两个 Windows 运行、另两个 Linux 运行同时进行，负载约 12/10 核）下又连续跑 6 次 4 核页层生命周期（含网络轮），6/6 到达 S5（[汇总](logs/alpine-4core-page-tier-lifecycle-loop-2026-09-28.txt)、[第 6 次串口](logs/alpine-4core-page-tier-lifecycle-loop-run6-2026-09-28.serial)），累计 12 次无复现。`linux_boot.mjs` 在 120 s 内未见 S5 时把全部核的诊断写入 `build/x64-linux/poweroff-<tag>.json`，复现时可直接分析；在找到原因前，该项视为间歇性风险而非已解决。
 
+
+### 网络 I/O（2026-09-28）
+
+Alpine virt 内核没有 NE2K 驱动，v86 运行改为 `net_device: {type: "virtio"}`；QEMU 参考不含这一轮。客户机 `modprobe virtio_net; ifconfig eth0 up` 后，64 位与 32 位兼容探针各自经 `AF_PACKET`/`SOCK_RAW`（EtherType 0x88B5，`SIOCGIFINDEX` 取 eth0）发送 16 个 96 字节帧；宿主在 `net0-send` 上把同类帧的源 MAC 改为 `02:00:00:00:00:02` 后经 `net0-receive` 送回，探针跳过自己发出的帧、逐字节比较回显负载（`SO_RCVTIMEO` 10 s）。门槛：两个探针都输出 `X64_PROBE_NET arch=<64|32> frames=16`，宿主计数 32 个回显。覆盖 virtio 队列（64 位描述符地址）、设备中断、socket 系统调用在 64 位和 i386 兼容 ABI 下的参数传递（i386 的 `sendto` 包装只传 5 个参数，故对已 bind 的 socket 不带目的地址）。
+
+| 配置 | 结果 | 证据 |
+| --- | --- | --- |
+| 1 核，页层 | **通过**：64/32 位各 16 帧，宿主回显 32 个 | [串口](logs/alpine-1core-page-tier-network-2026-09-28.serial)、[result](logs/alpine-1core-page-tier-network-2026-09-28.result.json) |
+| 1 核，解释器（`disable_jit: true`） | **通过**：同上，另含全部 64/32 位探针与 XC 矩阵 | [串口](logs/alpine-1core-interpreter-network-2026-09-28.serial)、[result](logs/alpine-1core-interpreter-network-2026-09-28.result.json) |
+| 2 核 / 4 核，页层 | **通过**（V7 快照运行与 4 核生命周期循环都带这一轮） | 见上文快照与生命周期表 |
+
+此后所有 v86 Linux 运行（包括下文的 4 核生命周期循环）都带这一轮。只验证了原始以太网帧的收发，没有 IP/TCP 协议栈或宿主网络后端（`fetch`/`wisp`）上的 x64 用例。
+
+## 2026-09-28 续：Windows 8.1 x64
+
+用户提供的 Windows 8.1 Pro x64（Build 9600）已安装磁盘镜像（`retro-gaming-site/windows8/windows8.img`，50 GB，raw）。镜像只读打开（`tests/smp/disk_fixture.mjs` 的 `ReadOnlyOverlayDisk`，客户机写入只进 RAM 覆盖层）；每次运行结束断言镜像 mtime 不变。
+
+### 测试程序
+
+[`tests/x64/windows_boot.mjs`](../../../../tests/x64/windows_boot.mjs)：SeaBIOS → bootmgr → winload → ntoskrnl，ACPI、2048 MiB RAM、`cpu_cores` 1/2/4、X4 页层（`X64_JIT=0` 为解释器）、NE2K。第二块盘是测试生成的 FAT16 工具盘，内含 [`windows_probe.c`](../../../../tests/x64/windows_probe.c) 的两个构建：`PROBE64.EXE`（x86_64 原生）与 `PROBE32.EXE`（i686，在 WOW64 下即兼容模式代码）。无 CRT，用 mingw-w64 编译。探针检查：
+
+- `GetLogicalProcessorInformation`：`RelationProcessorPackage` 恰 1 个，`RelationProcessorCore` 数等于 N，每个核心的掩码只含一个逻辑处理器、无 SMT 标志；
+- 每个逻辑处理器一个线程，64 轮 `SetThreadAffinityMask` 轮换到各处理器，每轮在目标处理器上读 CPUID 的 APIC ID（前后两次必须相同）、做一段可校验的计算、`InterlockedIncrement` 共享计数；每个处理器只能看到一个 APIC ID 且互不相同；共享计数必须等于 64N；
+- x64：`VirtualAlloc(MEM_TOP_DOWN)` 的 1 MiB 必须位于 4 GiB 以上并读写正确。
+
+结果写回工具盘（`RESULT64.TXT`/`RESULT32.TXT`），宿主直接解析 FAT16 读取。登录由宿主键盘完成：等密码框（1024×768 下按像素识别）出现后输入测试账户密码；看到任务栏开始按钮后经 Win+R 运行探针，等屏幕变化（对话框出现）后才输入命令。
+
+### 启动过程中修正的问题
+
+| 现象 | 原因 | 修正 |
+| --- | --- | --- |
+| 内存只剩 1 MiB，bootmgr 报“image is corrupt” | 测试写成 `2048 << 20`，int32 溢出为负 | 测试改用乘法；v86 对负的 `memory_size` 直接抛错 |
+| 64 位内核早期三重故障 | 内核 RDMSR 0x17（IA32_PLATFORM_ID）#GP | 长模式 RDMSR/WRMSR 未知编号回落到共享 MSR 表 |
+| 蓝屏 0x5D UNSUPPORTED_PROCESSOR | Windows x64 要求 CPUID.1:EDX 含 DE/MCE/MTRR/MCA/PAT 等（掩码 0x0789F3FD） | x64 profile 公布这些位，并实现 MTRRcap/DEF_TYPE/定长与可变 MTRR、MCG_CAP/STATUS/CTL 与 4 组 MCi、PAT 复位值；INIT 保留 PAT/MTRR/MCA |
+| debug 断言：ATA 命令 0x2F | 未实现的 ATA/ATAPI 命令走断言 | 改为 abort / ILLEGAL REQUEST 并记日志 |
+| 所有 32 位进程以 0xC0000005 退出（含 `SysWOW64\cmd.exe`） | 兼容模式下描述符表查找截断 64 位 GDTR 基址（见 X2 记录） | 使用 64 位基址；新增 QEMU 差分用例 |
+
+### 结果（debug Wasm，页层；主机同时运行其他测试，负载约 12/10 核）
+
+| 配置 | 结果 | 墙钟 | 证据 |
+| --- | --- | --- | --- |
+| 1 核 | **通过**：64 位 `processors=1 packages=1 cores=1 smt_cores=0 progress=64 failures=0 apic_ids=1`，`high_block=0x7ff7254e0000`；32 位（WOW64）同样通过 | 41 min 32 s | [log](logs/windows81-1core-page-tier-2026-09-28.log)、[result](logs/windows81-1core-page-tier-2026-09-28.result.json)、[用户态异常 trace](logs/windows81-1core-page-tier-2026-09-28.user-trace.log) |
+| 2 核 | **通过**：64 位 `processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3`（APIC ID 0 与 1），`high_block=0x7ff61ead0000`；32 位（WOW64）同样 `processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3` | 35 min 44 s（约 18 min 到锁屏；随后两次登录因按键时序丢失，测试程序已改为等待密码框/对话框） | [log](logs/windows81-2core-page-tier-2026-09-28.log)、[result](logs/windows81-2core-page-tier-2026-09-28.result.json)、[用户态异常 trace](logs/windows81-2core-page-tier-2026-09-28.user-trace.log)、[桌面截图](logs/windows81-2core-page-tier-2026-09-28-final.png) |
+| 4 核 | **通过**：64 位 `processors=4 packages=1 cores=4 smt_cores=0 progress=256 failures=0 apic_ids=f`（APIC ID 0–3），`high_block=0x7ff75bc10000`；32 位（WOW64）同样 `processors=4 … progress=256 failures=0 apic_ids=f` | 43 min 41 s | [log](logs/windows81-4core-page-tier-2026-09-28.log)、[result](logs/windows81-4core-page-tier-2026-09-28.result.json)、[用户态异常 trace](logs/windows81-4core-page-tier-2026-09-28.user-trace.log) |
+
+三次运行里测试程序的键盘时序都丢过输入（登录与 Win+R 的命令在窗口获得焦点前输入）。2 核的登录与 probe64、1 核与 4 核的 probe32 是在运行中由我经 `command.txt` 在对话框出现后补输入的；探针本身的执行与结果判定不受影响。之后测试程序改为：按像素识别密码框、任务栏开始按钮和有焦点的“运行”对话框（1024×768 下本镜像的固定位置），出现后才输入，否则 20 s 后重试。改进后的测试程序完整无人值守跑了一轮 2 核（全程没有任何 `command.txt` 输入）：约 11 min 到登录，桌面任务栏尚未加载时 Win+R 打不开对话框，测试程序记下 `run-dialog-missing` 并 20 s 后重试，随后 probe64 与 probe32 均通过（`processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3`，`high_block=0x7ff66f1b0000`）。墙钟 61 min 53 s 中约 33 min 是宿主（电池供电的笔记本）睡眠，`pmset` 日志记录 19:49–20:06 的睡眠/唤醒，期间模拟器与测试程序一起停住，醒来后继续完成。见 [log](logs/windows81-2core-unattended-2026-09-28.log)、[result](logs/windows81-2core-unattended-2026-09-28.result.json)。
+
+三次运行都打开了用户态异常 trace（`WIN_USER_TRACE=1`，记录 CPL3 的架构异常：兼容模式全部、64 位模式除 #PF 外）：兼容模式只有 #PF（2 核：读 123、取指 66、写保护/写时复制 50、写不存在 13；1 核与 4 核分别 1,638 与 1,639 次，同样全为 #PF），没有 #GP/#UD；64 位用户态没有异常（该构建的 trace 还记下 14 条向量 0x1F，是 Windows 的 APC 自发中断而非异常，之后的构建已排除）。修正前 32 位进程在启动阶段即以 0xC0000005 退出；根因由 X2 的“GDT 位于 4 GiB 以上”差分用例复现，修正前的 Windows 运行未打开 trace，没有直接记录故障指令。
+
+性能（1 核，修正前一次完整运行的剖析）：约 33 MIPS；页函数内剩余解释步见 X4 记录。

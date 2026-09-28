@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { setImmediate } from "node:timers";
-import { createHash } from "node:crypto";
+import { setImmediate as set_immediate } from "node:timers";
+import { createHash as create_hash } from "node:crypto";
 import { MessageChannel } from "node:worker_threads";
 import { begin_state_io } from "../../src/state_io.js";
 import { state_stream_client, state_stream_server } from "../../src/browser/state_stream_transport.js";
@@ -43,7 +43,7 @@ try
             emulator.bus.send("stream-test-input", 1);
             assert.equal(input_received, 0, "external input held until the transaction completes");
         }
-        await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => set_immediate(resolve));
         const result = await file.write(bytes, 0, bytes.length, position);
         assert.equal(result.bytesWritten, bytes.length);
         position += bytes.length;
@@ -74,7 +74,7 @@ try
     cpu.switch_core(1); assert.equal(cpu.reg32[0], 0x9876); cpu.switch_core(0);
     console.log(`PASS V7 file roundtrip: ${position} bytes, ${writes} writes/${reads} reads, max chunk ${maximum}, two cores/high RAM/DMA drain/backpressure`);
 
-    const hash_ram = () => createHash("sha256").update(cpu.mem8.subarray(0)).digest("hex");
+    const hash_ram = () => create_hash("sha256").update(cpu.mem8.subarray(0)).digest("hex");
     const epoch = cpu.execution_epoch, untouched = hash_ram();
     const last = new Uint8Array(1); await file.read(last, 0, 1, position - 5);
     await file.write(Uint8Array.of(last[0] ^ 1), 0, 1, position - 5);
@@ -107,7 +107,7 @@ try
     const save_server = state_stream_server(save_channel.port1, "save", async bytes => {
         transport_max = Math.max(transport_max, bytes.length);
         transport_position += bytes.length;
-        await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => set_immediate(resolve));
     });
     const save_client = state_stream_client(save_channel.port2);
     try { await emulator.save_state_stream(save_client.write); }

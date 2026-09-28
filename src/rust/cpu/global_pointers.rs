@@ -102,6 +102,12 @@ pub const x64_page_linear: *mut u64 = 1808 as *mut u64;
 /// Address of cpu::tlb_data, written at startup. Generated IR code loads it
 /// from this fixed slot (below --global-base) instead of calling an import.
 pub const ir_tlb_base: *mut u32 = 2048 as *mut u32;
+pub const x64_mtrr_def_type: *mut u64 = 2056 as *mut u64;
+pub const x64_mtrr_fixed: *mut u64 = 2064 as *mut u64;
+pub const x64_mtrr_var: *mut u64 = 2152 as *mut u64;
+pub const x64_mcg_status: *mut u64 = 2280 as *mut u64;
+pub const x64_mcg_ctl: *mut u64 = 2288 as *mut u64;
+pub const x64_mc_banks: *mut u64 = 2296 as *mut u64;
 // END GENERATED
 
 pub fn get_reg32_offset(r: u32) -> u32 {

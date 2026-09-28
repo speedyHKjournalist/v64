@@ -91,6 +91,10 @@ add("SYSRET to compatibility mode and SYSENTER back", "mov ecx,0xC0000081\nxor e
 // Intel SYSRET checks RCX before leaving ring 0 (SDM Vol.2B SYSRET): #GP(0)
 // with CPL, CS and RSP unchanged.
 fault("SYSRETQ to a noncanonical RIP", "mov ecx,0xC0000081\nxor eax,eax\nmov edx,0x00200018\nwrmsr\nmov r11,2\nmov rcx,0x0000800000000000\no64 sysret", 13);
+// Hot 32-bit code in compatibility mode (compiled by v86's IR): loads,
+// stores, CALL/RET, a code patch after compilation, then a call into a page
+// that the loop only used as data and that is NX: #PF (P|I/D) at its address.
+add("compatibility-mode hot loop, code patch and NX", "mov rax,[0x202018]\nbts rax,63\nmov [0x202018],rax\nmov rax,cr3\nmov cr3,rax\nmov eax,.fault_resume\nmov [0x500010],rax\npush 8\nmov eax,.compat\npush rax\no64 retf\nbits 32\n.compat:\nmov ecx,40000\nxor eax,eax\nxor edx,edx\n.loop:\nmov ebx,ecx\nand ebx,1023\nadd eax,[0x600000+ebx*4]\nmov [0x600000+ebx*4],eax\nxor edx,eax\nrol edx,3\ncall .helper\ndec ecx\njnz .loop\nmov [0x601000],eax\nmov [0x601004],edx\nmov dword [.helper+2],0x22222222\nmov ecx,20000\n.loop2:\ncall .helper\ndec ecx\njnz .loop2\nmov [0x601008],edx\nmov byte [0x600800],0xC3\ncall 0x600800\njmp .fault_resume\n.helper:\nadd edx,0x11111111\nret\n.fault_resume:\nadd esp,4\njmp 0x18:.long\nbits 64\n.long:\nmov rax,HIGH+.high\njmp rax\n.high:\nmov rax,[0x202018]\nbtr rax,63\nmov [0x202018],rax\nmov rax,cr3\nmov cr3,rax\nmov eax,[0x601000]\nmov ebx,[0x601004]\nmov ecx,[0x601008]\nxor edx,edx");
 // The APIC page: PDPT[3] -> PD at 0x209000, 2 MiB UC page at 0xFEE00000
 // (a register source: a qword store sign-extends imm32).
 const map_apic = "mov qword [0x201018],0x209003\nmov eax,0xFEE0009B\nmov [0x209000+503*8],rax\nmov rax,cr3\nmov cr3,rax\nmov esi,0xFEE00000\n";
@@ -130,6 +134,22 @@ for(const [name, rax, rbx] of [
     assert.notEqual(index, -1, name);
     expectation_cases.push({...cases.splice(index, 1)[0], rax, rbx});
 }
+// Compatibility-mode descriptor loads use the full 64-bit GDTR base. Windows
+// keeps its GDT above 4 GiB; here a copy at physical 0x800000 is aliased at
+// 0xFFFF808000000000 (PML4[257]), whose low 32 bits reach linear 0 instead.
+// MOV DS, LAR, LSL and a far JMP back to 64-bit mode all read it (LAR bits
+// 19:16 are undefined; QEMU clears them).
+add("compatibility-mode descriptor loads from a GDT above 4 GiB", "mov qword [0x200808],0x20A003\nmov qword [0x20A000],0x20B003\nmov qword [0x20B000],0x800083\nmov rax,cr3\nmov cr3,rax\nlea rsi,[rel gdt]\nmov edi,0x800000\nmov ecx,11\nrep movsq\nmov word [0x501100],87\nmov rax,0xFFFF808000000000\nmov [0x501102],rax\nlgdt [0x501100]\npush 8\nmov eax,.compat\npush rax\no64 retf\nbits 32\n.compat:\nmov eax,0x10\nmov ds,ax\nmov ecx,0x18\nlar ebx,eax\nand ebx,0xF0FF00\nlsl edx,eax\njmp 0x18:.long\nbits 64\n.long:\nmov rsi,HIGH+.high\njmp rsi\n.high:\nlgdt [rel gdtr64]\nmov qword [0x200808],0\nmov rsi,cr3\nmov cr3,rsi\nmov esi,ds\nshl rsi,32\nor rax,rsi");
+// SYSEXIT (SDM Vol.2B): the 32-bit form enters compatibility mode with
+// CS = SYSENTER_CS+16, SS = +24; REX.W enters 64-bit mode with CS = +32,
+// SS = +40 (RPL 3, no descriptor reads), RIP = RDX, RSP = RCX. Each returns
+// with SYSENTER, after which a far return restores a real kernel CS.
+add("SYSEXIT to compatibility and 64-bit mode", "mov ecx,0x174\nmov eax,0x10\nxor edx,edx\nwrmsr\nmov ecx,0x175\nmov eax,0x3F0000\nwrmsr\nmov ecx,0x176\nlea rax,[rel .entry1]\nmov rdx,rax\nshr rdx,32\nwrmsr\nxor ebp,ebp\nmov edx,.compat\nmov ecx,0x3D0000\nsysexit\nbits 32\n.compat:\nmov ebx,ss\nshl ebx,16\nmov bx,cs\nmov ebp,esp\nsysenter\nbits 64\n.entry1:\npush 0x18\nlea rax,[rel .k1]\npush rax\no64 retf\n.k1:\nmov esi,0x10\nmov ss,si\nmov ecx,0x176\nlea rax,[rel .entry2]\nmov rdx,rax\nshr rdx,32\nwrmsr\nlea rdx,[rel .user64]\nmov rcx,0x3D0000\no64 sysexit\n.user64:\nmov r8d,ss\nshl r8d,16\nmov r8w,cs\nmov r10,rsp\nsysenter\n.entry2:\npush 0x18\nlea rax,[rel .k2]\npush rax\no64 retf\n.k2:\nmov esi,0x10\nmov ss,si\nmov eax,ebx\nmov rbx,r8\nmov rcx,r10\nmov rdx,rbp");
+// IA32_APIC_BASE in long mode (SDM Vol.3A §10.4.4): BSP|EN|base, written
+// back unchanged, cleared EN hides CPUID.1:EDX.APIC, set again restores it;
+// bit 40 is above MAXPHYADDR (36).
+add("IA32_APIC_BASE disable and re-enable", "mov ecx,0x1B\nrdmsr\nmov r8d,eax\nmov r9d,edx\nwrmsr\nbtr eax,11\nwrmsr\nmov eax,1\ncpuid\nmov r10d,edx\nmov ecx,0x1B\nmov eax,r8d\nmov edx,r9d\nwrmsr\nrdmsr\nmov r11d,eax\nmov eax,1\ncpuid\nmov eax,r8d\nmov ebx,r11d\nmov ecx,r10d\nshr ecx,9\nand ecx,1\nshr edx,9\nand edx,1");
+fault("IA32_APIC_BASE reserved bit", "mov ecx,0x1B\nrdmsr\nbts edx,8\nwrmsr", 13);
 function source_for(cases)
 {
 let body = "";

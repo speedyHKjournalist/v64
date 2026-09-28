@@ -622,6 +622,20 @@ pub fn x64_page_flags(record: u32, a: u64, b: u64, flags: u32) -> u32 {
 #[no_mangle]
 pub unsafe fn x64_page_rdtsc() -> u64 { cpu::read_tsc() }
 
+/// MOV r64, CR8 for generated code (CPL 0 is checked inline).
+#[no_mangle]
+pub unsafe fn x64_page_cr8() -> u64 { state::read_cr(8) }
+/// MOV CR8, r64 for generated code: 0 continue, 1 retry (reserved bits are
+/// #GP), 2 leave after the instruction (an interrupt the new task priority
+/// admits is taken at the next boundary).
+#[no_mangle]
+pub unsafe fn x64_page_set_cr8(value: u64) -> i32 {
+    if super::system::write_cr(8, value).is_err() {
+        return 1;
+    }
+    if *gp::flags & cpu::FLAG_INTERRUPT != 0 && apic::has_pending_irq() { 2 } else { 0 }
+}
+
 /// Whether the signed 64x64 product of IMUL overflows 64 bits.
 #[no_mangle]
 pub fn x64_page_imul_overflow(a: u64, b: u64) -> bool { (a as i64).checked_mul(b as i64).is_none() }

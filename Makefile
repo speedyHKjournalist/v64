@@ -391,6 +391,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/fetch_network_post.js
 	./tests/devices/wisp_network.js
 	./tests/devices/virtio_balloon.js
+	./tests/devices/ide_large_disk.js
 
 rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
@@ -612,6 +613,7 @@ multicore-coherence-tests: build/v86-debug.wasm state-layout-check
 	node tests/smp/lifecycle.mjs
 	node tests/smp/exception_lifecycle.mjs
 	node tests/smp/publication.mjs
+	node tests/smp/state_stream.mjs
 
 multicore-clock-tests-release: build/libv86.mjs build/v86.wasm
 	node tests/smp/clock.mjs
@@ -622,6 +624,7 @@ multicore-coherence-tests-release: build/libv86.mjs build/v86.wasm state-layout-
 	TEST_RELEASE_BUILD=1 node tests/smp/lifecycle.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/exception_lifecycle.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/publication.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/state_stream.mjs
 
 multicore-atomic-tests: build/v86-debug.wasm state-layout-check
 	node tests/smp/atomic_boundaries.mjs
@@ -663,6 +666,8 @@ x64-decode-tests: state-layout-check
 x64-system-tests: build/v86-debug.wasm
 	node tests/x64/system_oracle.mjs
 	node tests/x64/irq_boundary.mjs
+	node tests/x64/triple_fault.mjs
+	node tests/x64/direct_loader.mjs
 
 x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/integer_oracle.mjs
@@ -678,6 +683,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	X64_JIT=1 node tests/x64/system_oracle.mjs
 	X64_JIT=1 X64_IR_TIER0=0 node tests/x64/system_oracle.mjs
 	node tests/x64/page_system.mjs
+	node tests/x64/compat_jit.mjs
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=3 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs

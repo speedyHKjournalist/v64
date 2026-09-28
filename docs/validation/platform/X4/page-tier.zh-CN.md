@@ -26,7 +26,7 @@
 - **REP MOVS/STOS**：前向、每个操作数都在一页内、均为 RAM（宽 STOS 需存 0）时用 `memory.copy`/`memory.fill` 一次完成，重叠的前向 MOVS 保留逐元素语义；其他情况就地解释步（解释器每步最多处理一页 RAM 数据）。
 - **容量**：最多 1500 个活动函数（Wasm 表 2400 项，与 32 位 IR 共享），超出时淘汰最久未用者；每页最多重编译 12 次（反复自修改的页随后留在解释器）。
 
-长模式代码在 `ir_tier0` 为真或为假时都使用本层（32 位代码仍按该选项走 Tier-0 或区域管线）；x64 的区域（Tier-1/2）优化管线尚未实现，兼容模式代码目前仍由解释器执行。
+长模式代码在 `ir_tier0` 为真或为假时都使用本层（32 位代码仍按该选项走 Tier-0 或区域管线）；x64 的区域（Tier-1/2）优化管线尚未实现。兼容模式代码自 2026-09-28 起由 32 位 IR 编译（见文末）。
 
 ## 正确性证据
 
@@ -74,6 +74,27 @@ Alpine 3.24 x86_64（Linux 6.18，官方 ISO）登录并通过全部 64/32 位�
 
 ## 尚未完成
 
-- x64 区域（Tier-1/2）优化管线；本层在 `ir_tier0:false` 下同样用于长模式。
-- 兼容模式（LMA=1、32 位 CS）代码的编译：需要 32 位 IR 快照读取改用 x64 四级页表规则，目前解释执行。
-- SSE/x87 模板、页函数之间的直接链接、跨页指令的本地执行。
+- x64 区域（Tier-1/2）优化管线；本层在 `ir_tier0:false` 下同样用于长模式。决定：第一版不做。区域管线的 HIR/MIR、StateMap、phi/CSE/LICM/RAM forwarding 都按 32 位寄存器与 EFLAGS 建模，扩宽的证明与测试工作量与本层相当，而本层已让 1/2/4 核 Linux 在约 1–2 min 内启动；瓶颈（见下文 Windows 剖析）在仍走解释步的指令类别，而不是缺少跨块优化。计划与状态矩阵据此把 X4 的“区域后端”列为未实施，不以本层冒充。
+- x87、标量 SSE 浮点（COMISS/ADDSS 等，需 SoftFloat helper 调用）模板；页函数之间的直接链接、跨页指令的本地执行。
+
+## 2026-09-28 续：兼容模式编译、SSE 模板
+
+### 兼容模式（LMA=1、CS.L=0）代码由 32 位 IR 编译
+
+WOW64 与 i386 兼容进程的代码此前全部解释执行。现在 `X64_COMPAT_JIT`（默认开，`x64_set_compat_jit` 可关）下兼容模式代码进入 32 位 IR/Tier-0：
+
+- **翻译**：兼容模式的数据访问经 x64 四级页表翻译（`x64::memory::translate_user`），翻译结果同时填入 legacy 32 位 TLB（`fill_ia32e_tlb`），使编译代码的内联 TLB 检查直接命中。这样填入的数据项带 `TLB_IA32E_DATA`：Tier-0 生成的读写掩码忽略该位（可命中），IR 取指/快照/代码缓存路径的掩码包含该位（不命中），代码页总是经 x64 翻译以执行权限（含 NX）重新确认（`snapshot.rs` 的 LMA 分支用 `snapshot_translation(Execute)`）。
+- **失效**：x64 的 INVLPG、CR3/CR4 写入同样清 legacy TLB；去掉 x64 INVLPG 对 legacy TLB 的失效会让下面的测试失败（已做变异确认）。
+- **测试**：`tests/x64/compat_jit.mjs`（`make x64-page-tier-tests`）在 4 级分页 + NX 下两次运行同一热点兼容模式例程（20 万次循环：装载/存储、PUSH/CALL/RET、编译后改写被 CALL 的例程），两次之间由 64 位代码改写 PTE 并 INVLPG，把数据页重映射到另一物理页；解释器、页层（兼容模式解释执行）、页层 + 兼容模式编译三者结果逐字节相同，且断言 Tier-0 确实激活并运行了页函数。`system_oracle.mjs` 中“compatibility-mode hot loop, code patch and NX”在 `X64_JIT=1` 下同样经过编译路径（包括对 NX 数据页的 CALL 产生 #PF(P|I/D)）。
+- **Windows**：兼容模式的描述符表查找原先截断 64 位 GDTR 基址（X2 记录 2026-09-28 续二），与编译无关，但只在 Windows WOW64 下暴露；修正后 32 位进程在两种设置下都能运行（见 XC 记录）。
+
+### SSE 模板与其他模板
+
+- **SSE 数据移动与逻辑**：MOVDQU/MOVDQA/MOVAPS/MOVUPS/MOVNTDQ/MOVSS/MOVSD（寄存器与内存，含零扩展规则）、MOVQ/MOVD（XMM↔GPR/内存）、PAND/PANDN/POR/PXOR/ANDPS/ORPS/XORPS 等按位运算。模板在进入时按解释器顺序检查 CR0.EM/TS 与 CR4.OSFXSR（不满足则 RETRY，由解释器交付 #UD/#NM），对齐形式遇未对齐地址 RETRY（解释器交付 #GP）。F2/F3 作为强制前缀的 SSE 编码不再被当作 REP 前缀拒绝。
+- **其他**：MOVNTI、LFENCE/MFENCE/SFENCE（单线程协作模型下为空操作）、MOV CR8（读自 APIC TPR；写入后若 IF=1 且有可交付中断则退出）、RDTSCP、MOV moffs（A0–A3，含段前缀）、ROL/ROR 按 CL 计数（CF/OF 按计数为 0/1/其他分情况）。
+- **测试**：`page_fuzz.mjs` 为每个用例设定 XMM0–15 初值，随机生成上述 SSE 指令（含 CR8、RDTSCP）与 moffs 形式，比较 GPR、标志、内存与全部 XMM；三个种子各 48 个程序与解释器一致。`vector_oracle.mjs` 在 `X64_JIT=tier0` 下 958 个 QEMU 向量用例通过。
+
+### Windows 8.1 x64 上的剖析
+
+`WIN_STEP_PROFILE=1` 按操作码统计页函数内的解释步。Windows 桌面阶段（1 核）剩余解释步主要是：COMISS/UCOMISS（0F 2F/2E）、标量 SSE 浮点（F3 0F 58/59/5C、0F 5A）、MMX/SSE 整数打包运算（0F FD/F9/D5/60/62/68/6C/71–73 等，桌面合成与图像代码）、0F AE 组（LDMXCSR/STMXCSR/FXSAVE）、SYSCALL/SYSRET、窄位移。这些是下一批模板的候选；目前 Windows 1 核约 33 MIPS。
+
