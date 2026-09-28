@@ -4,13 +4,17 @@
  * a SIGSEGV round trip, fork/pipe/wait4, CLONE_THREAD threads bound to every
  * online CPU with LOCKed counters, a cross-CPU TLB shootdown after MAP_FIXED,
  * tmpfs file I/O, and the physical placement of 16 MiB of touched pages
- * (how many frames lie above 4 GiB, from /proc/self/pagemap). No libc. */
+ * (how many frames lie above 4 GiB, from /proc/self/pagemap). A second line
+ * (X64_PROBE_XC) covers the multicore matrix: /sys topology, thread
+ * migration, signals to threads on other CPUs, cross-modifying code
+ * executed on another CPU, and an O_DIRECT read of the disk. No libc. */
 #if defined(__x86_64__)
 typedef long word;
 enum { SYS_read = 0, SYS_write = 1, SYS_open = 2, SYS_close = 3, SYS_lseek = 8, SYS_mmap = 9,
     SYS_mprotect = 10, SYS_rt_sigaction = 13, SYS_pipe = 22, SYS_sched_yield = 24, SYS_getpid = 39,
     SYS_clone = 56, SYS_fork = 57, SYS_exit = 60, SYS_wait4 = 61, SYS_uname = 63, SYS_unlink = 87,
-    SYS_sched_setaffinity = 203, SYS_sched_getaffinity = 204, SYS_exit_group = 231, SYS_getcpu = 309 };
+    SYS_sched_setaffinity = 203, SYS_sched_getaffinity = 204, SYS_exit_group = 231, SYS_getcpu = 309,
+    SYS_gettid = 186, SYS_tgkill = 234 };
 #define ARCH "64"
 #define SIGINFO_ADDR 16
 static word sc(word n, word a, word b, word c, word d, word e, word f)
@@ -42,7 +46,8 @@ typedef int word;
 enum { SYS_exit = 1, SYS_fork = 2, SYS_read = 3, SYS_write = 4, SYS_open = 5, SYS_close = 6,
     SYS_unlink = 10, SYS_lseek = 19, SYS_getpid = 20, SYS_pipe = 42, SYS_old_mmap = 90, SYS_wait4 = 114,
     SYS_clone = 120, SYS_uname = 122, SYS_mprotect = 125, SYS_sched_yield = 158, SYS_rt_sigaction = 174,
-    SYS_sched_setaffinity = 241, SYS_sched_getaffinity = 242, SYS_exit_group = 252, SYS_getcpu = 318 };
+    SYS_sched_setaffinity = 241, SYS_sched_getaffinity = 242, SYS_exit_group = 252, SYS_getcpu = 318,
+    SYS_gettid = 224, SYS_tgkill = 270 };
 #define ARCH "32"
 #define SIGINFO_ADDR 12
 static word sc(word n, word a, word b, word c, word d, word e, word f)
@@ -123,6 +128,138 @@ static void worker(word id)
     if(*watched != 2) __asm__ volatile("lock addl $1,%0" : "+m"(stale) :: "memory", "cc");
     (void)seen;
     __asm__ volatile("lock addl $1,%0" : "+m"(finished) :: "memory", "cc");
+}
+
+/* Multicore matrix (X64_PROBE_XC). */
+#define MIGRATIONS 24
+#define SIGNALS 16
+#define SMC_ROUNDS 64
+static volatile word tids[THREADS];
+static volatile unsigned signalled[THREADS], moved[THREADS], xc_done, xc_ready;
+static volatile unsigned smc_sequence, smc_ack, smc_bad;
+/* not the first phase's stacks: an exiting thread still returns through its own */
+static char xc_stacks[THREADS][16384] __attribute__((aligned(16)));
+static unsigned char *smc_code;
+static void rt_signal(int sig, void *info, void *context)
+{
+    (void)sig; (void)info; (void)context;
+    word tid = S(SYS_gettid, 0, 0, 0);
+    for(unsigned id = 0; id < THREADS; id++)
+        if(tids[id] == tid) __asm__ volatile("lock addl $1,%0" : "+m"(signalled[id]) :: "memory", "cc");
+}
+static void set_cpu(unsigned cpu)
+{
+    unsigned long mask = 1ul << cpu;
+    check(S(SYS_sched_setaffinity, 0, sizeof(mask), &mask), "affinity");
+}
+static void xc_worker(word id)
+{
+    tids[id] = S(SYS_gettid, 0, 0, 0);
+    /* migration: every step lands on the requested CPU */
+    for(unsigned k = 0; k < MIGRATIONS; k++)
+    {
+        unsigned target = (id + k) % cpus, cpu = ~0u;
+        set_cpu(target);
+        check(S(SYS_getcpu, &cpu, 0, 0), "getcpu");
+        if(cpu != target) die("migration");
+        __asm__ volatile("lock addl $1,%0" : "+m"(moved[id]) :: "memory", "cc");
+    }
+    set_cpu(id % cpus);
+    __asm__ volatile("lock addl $1,%0" : "+m"(xc_ready) :: "memory", "cc");
+    /* signals from the main thread on another CPU */
+    while(signalled[id] < SIGNALS) S(SYS_sched_yield, 0, 0, 0);
+    /* the last worker executes code that the main thread rewrites */
+    if(id == cpus - 1)
+    {
+        for(unsigned round = 1; round <= SMC_ROUNDS; round++)
+        {
+            while(smc_sequence != round) S(SYS_sched_yield, 0, 0, 0);
+            /* serializing instruction before executing the modified code */
+            unsigned a = 0, b, c = 0, d;
+            __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d) :: "memory");
+            unsigned value = ((unsigned (*)(void))smc_code)();
+            if(value != round * 3 + 1) __asm__ volatile("lock addl $1,%0" : "+m"(smc_bad) :: "memory", "cc");
+            smc_ack = round;
+        }
+    }
+    __asm__ volatile("lock addl $1,%0" : "+m"(xc_done) :: "memory", "cc");
+}
+static word read_file(const char *path, char *buffer, word size)
+{
+    word fd = check(S(SYS_open, path, 0, 0), path);
+    word n = check(S(SYS_read, fd, buffer, size - 1), path);
+    S(SYS_close, fd, 0, 0);
+    buffer[n] = 0;
+    return n;
+}
+static unsigned parse(const char *s) { unsigned n = 0; while(*s >= '0' && *s <= '9') n = n * 10 + (unsigned)(*s++ - '0'); return n; }
+static void matrix(void)
+{
+    /* topology: one package, a distinct core per CPU, no sibling threads */
+    char path[64], text[64];
+    unsigned cores_seen = 0;
+    for(unsigned cpu = 0; cpu < cpus; cpu++)
+    {
+        const char *parts[3] = {"physical_package_id", "core_id", "thread_siblings_list"};
+        unsigned values[3];
+        for(int k = 0; k < 3; k++)
+        {
+            const char *prefix = "/sys/devices/system/cpu/cpu";
+            int n = 0;
+            for(const char *q = prefix; *q; q++) path[n++] = *q;
+            char digits[8]; int d = 0; unsigned v = cpu; do { digits[d++] = '0' + v % 10; v /= 10; } while(v);
+            while(d) path[n++] = digits[--d];
+            for(const char *q = "/topology/"; *q; q++) path[n++] = *q;
+            for(const char *q = parts[k]; *q; q++) path[n++] = *q;
+            path[n] = 0;
+            read_file(path, text, sizeof(text));
+            values[k] = parse(text);
+        }
+        if(values[0] != 0) die("package id");
+        if(values[2] != cpu) die("thread siblings");
+        if(cores_seen >> values[1] & 1) die("core id");
+        cores_seen |= 1u << values[1];
+    }
+    /* O_DIRECT from the IDE disk (the probe tarball: ustar magic) */
+    static char direct[8192] __attribute__((aligned(4096)));
+    word disk = check(S(SYS_open, "/dev/sda", 040000, 0), "open O_DIRECT");
+    if(check(S(SYS_read, disk, direct, 4096), "direct read") != 4096) die("direct read length");
+    S(SYS_close, disk, 0, 0);
+    if(!(direct[257] == 'u' && direct[258] == 's' && direct[259] == 't' && direct[260] == 'a' && direct[261] == 'r')) die("direct read contents");
+
+    /* mov eax, imm32; mov ecx, 100; 1: dec ecx; jnz 1b; ret (hot enough for a JIT) */
+    smc_code = (unsigned char *)mapping(4096, 7);
+    if((unsigned long)smc_code >= (unsigned long)-4096) die("mmap exec");
+    static const unsigned char body[] = {0xB8, 0, 0, 0, 0, 0xB9, 100, 0, 0, 0, 0xFF, 0xC9, 0x75, 0xFC, 0xC3};
+    memcpy(smc_code, body, sizeof(body));
+    struct { void *handler; unsigned long flags; void *restorer; unsigned long mask[2]; } action =
+        {(void *)rt_signal, 0x04000004, (void *)signal_return, {0, 0}};
+    /* a real-time signal: repeated sends queue instead of coalescing */
+    check(sc(SYS_rt_sigaction, 40, (word)&action, 0, 8, 0, 0), "sigaction rt");
+    set_cpu(0);
+    for(unsigned id = 0; id < cpus; id++)
+        check(spawn(xc_worker, id, xc_stacks[id] + sizeof(xc_stacks[id]), 0x00050F00), "clone xc");
+    while(xc_ready != cpus) S(SYS_sched_yield, 0, 0, 0);
+    word tgid = S(SYS_getpid, 0, 0, 0);
+    for(unsigned n = 0; n < SIGNALS; n++)
+        for(unsigned id = 0; id < cpus; id++)
+            check(sc(SYS_tgkill, tgid, tids[id], 40, 0, 0, 0), "tgkill");
+    for(unsigned round = 1; round <= SMC_ROUNDS; round++)
+    {
+        unsigned value = round * 3 + 1;
+        memcpy(smc_code + 1, &value, 4);
+        __asm__ volatile("" ::: "memory");
+        smc_sequence = round;
+        while(smc_ack != round) S(SYS_sched_yield, 0, 0, 0);
+    }
+    while(xc_done != cpus) S(SYS_sched_yield, 0, 0, 0);
+    unsigned migrated = 0, signals = 0;
+    for(unsigned id = 0; id < cpus; id++) { migrated += moved[id]; signals += signalled[id]; }
+    if(migrated != cpus * MIGRATIONS) die("migration count");
+    if(signals != cpus * SIGNALS) die("signal count");
+    if(smc_bad) die("cross-modified code");
+    out("X64_PROBE_XC arch=" ARCH " packages=1 cores="); number(cpus); out(" threads_per_core=1 migrations="); number(migrated);
+    out(" signals="); number(signals); out(" smc_rounds="); number(SMC_ROUNDS); out(" direct_io=1\n");
 }
 
 /* The auxiliary vector follows argv and envp on the initial stack. */
@@ -243,6 +380,7 @@ void entry(word *stack)
     out(" threads="); number(cpus); out(" counter="); number(counter);
     out(" cpu_checks="); for(unsigned id = 0; id < cpus; id++) { if(id) out(","); number(bound[id] - 1); }
     out(" fault=page child=7 tlb_stale="); number(stale); out(" entry="); out(entry_path); out(" high_pages="); number(high_pages); out("\n");
+    matrix();
     S(SYS_exit_group, 0, 0, 0);
     for(;;);
 }

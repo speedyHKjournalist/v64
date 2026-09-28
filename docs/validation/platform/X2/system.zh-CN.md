@@ -21,3 +21,23 @@
 编写用例时注意：NASM 在 64 位代码中 `jmp far [mem]` 默认生成 REX.W（m16:64），需用 `jmp far dword`/`qword` 显式指定。
 
 仍需完成：完整权限/跨页异常优先级矩阵、调试异常的剩余组合。长模式真实 OS 与兼容进程已在 XC 记录中通过（1 核解释器）。CPUID 仍只在内部 qualification 开关下公开 LM 能力。
+
+## 2026-09-28 续：异常优先级、#DF 与离开长模式
+
+QEMU 差分用例由 46 个增至 **61 个**，SDM 断言由 7 个增至 **14 个**（11 个控制写入/模式/SYSRET、3 个数据断点）。新增用例：
+
+- 离开长模式：经兼容模式代码清 CR0.PG、清 EFER.LME，回到 32 位保护模式后重新开启分页和 LME 并回到 64 位高 RIP（完整往返）。
+- 异常优先级：MOVAPS 未对齐 #GP 先于缺页；CR4.OSFXSR=0 时 SSE 指令 #UD 先于 CR0.TS 的 #NM；OSFXSR=1 + TS 为 #NM；x87 在 TS 下 #NM，WAIT 仅在 CR0.MP 时 #NM；跨页读在第二页产生 #PF 且 CR2 为第二页；PUSH 跨入不存在页时 RSP 不变；取指跨入不存在页的 #PF。
+- 调试：代码断点先于取指缺页（SDM Vol.3A 表 6-2 优先级 7 在 8 之前）；MOV SS 使单步陷阱延迟一条指令；产生故障的指令不触发单步陷阱；单步与数据断点在同一个 #DB 中同时报告 BS 与 B0（SDM 断言，QEMU 在高线性地址的数据观察点上不再到达结果标记）。
+- #DF：交付 #PF 时再次缺页（栈不存在）成为 #DF，经 IST1 切栈交付，错误码 0。
+- NMI 阻塞：经 ICR 向自身发 NMI；处理程序内再发一次，第二个 NMI 在处理程序中保持挂起，IRETQ 后才交付（共 2 次、处理程序内观察到 1 次）。
+- CR8：`MOV CR8` 写入后 APIC TPR 为 CR8<<4；经 MMIO 写 TPR=0x3F 后读 CR8 得 3。另以 SDM 断言：CR8 保留位（bit 4 及以上）写入 #GP（QEMU 10.2 不检查）。
+- SYSRET 返回兼容模式：不带 REX.W 的 SYSRET 以 CS=STAR[63:48]|3、SS=+8 进入 CPL3 兼容模式，EIP 取 ECX（RCX 高位垃圾被忽略），RFLAGS 取自 R11；兼容模式下 0x40 是 INC EAX（64 位下是 REX 前缀），再经 SYSENTER 回到 64 位内核。
+- SYSRETQ 到非规范 RIP：Intel 在离开 ring 0 前 #GP(0)，CS 与 RSP 不变（SDM 断言；QEMU 10.2 按 AMD 行为先返回 CPL3 再在 RSP0 栈上交付 #GP）。
+- 兼容模式 SYSCALL：Intel 下 CS.L=0 时 #UD（SDM 断言；QEMU 10.2 TCG 只检查 EFER.LMA，会从 CSTAR 进入）。此用例在 debug 构建中暴露宿主 panic：兼容模式代码由 legacy 解释器执行，其 0F05/0F07 走“未定义指令”路径并触发 debug 断言；现在两者在非 64 位模式下直接 #UD（这是 Intel 的架构结果，不是缺失的指令）。
+
+实际修正：读 CR8 原先返回上次写入 CR8 的副本，经 APIC MMIO 改写的 TPR 不可见；现从 APIC TPR[7:4] 读取（SDM Vol.3A §10.8.6.1）。代码断点匹配前不应先翻译取指地址（旧实现让取指 #PF 抢在代码断点之前）；MOV CR 对不存在的控制寄存器先 #UD 再检查 CPL；IRETD/IRETW 按操作数宽度弹出帧；INT1（F1）；LSS/LFS/LGS；0F00/0F01 中未定义的寄存器形式 #UD。
+
+`X64_JIT=1`（长模式代码由 X4 页层执行）以及再加 `X64_IR_TIER0=0` 时，全部用例同样通过（`make x64-page-tier-tests`）。
+
+仍未覆盖：长模式三重故障（QEMU 在 `-no-reboot` 下直接退出，无法作参考）、完整权限矩阵、SMM、VMX。

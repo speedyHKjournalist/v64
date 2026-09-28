@@ -451,6 +451,50 @@ CPU.prototype.publish_wide_native = function(token, pointer, length)
     });
 };
 
+// x64 page functions (src/rust/x64/pages.rs). Installed synchronously when
+// the host allows it: the core is at a scheduling point with no Rust lock
+// held, so the function is callable before the guest continues.
+CPU.prototype.x64_page_publish = function(id, slot, pointer, length)
+{
+    const wasm = this.wm, exports = wasm.exports, table = wasm.wasm_table;
+    const epoch = this.execution_epoch;
+    const code = new Uint8Array(exports["memory"].buffer, pointer >>> 0, length >>> 0).slice();
+    const current = () => this.execution_epoch === epoch && this.wm === wasm;
+    const install = instance => {
+        if(!current()) return;
+        const f = instance.exports["f"];
+        if(typeof f !== "function" || !exports["x64_page_install"](id, slot))
+        {
+            exports["x64_page_cancel"](id, slot);
+            return;
+        }
+        table.set(slot + WASM_TABLE_OFFSET, f);
+        exports["x64_page_ready"](id, slot);
+    };
+    if(this.ir_sync_publication)
+    {
+        try
+        {
+            install(new WebAssembly.Instance(new WebAssembly.Module(code), { "e": this.jit_imports }));
+            return;
+        }
+        catch(error)
+        {
+            if(error instanceof WebAssembly.CompileError || error instanceof WebAssembly.LinkError)
+            {
+                dbg_log("x64 page function rejected: " + error, LOG_CPU);
+                if(current()) exports["x64_page_cancel"](id, slot);
+                return;
+            }
+            this.ir_sync_publication = false;
+        }
+    }
+    WebAssembly.instantiate(code, { "e": this.jit_imports }).then(result => install(result.instance), error => {
+        dbg_log("x64 page function rejected: " + error, LOG_CPU);
+        if(current()) exports["x64_page_cancel"](id, slot);
+    });
+};
+
 CPU.prototype.create_jit_imports = function()
 {
     // Set this.jit_imports as generated WASM modules will expect
@@ -716,7 +760,8 @@ CPU.prototype.get_state = function(skip_memory = false)
 CPU.prototype.with_wide_state_buffer = function(words, operation)
 {
     const ex = this.wm.exports;
-    const pointer = ex["v86_malloc"](Math.max(4, words.byteLength));
+    // Above 2 GiB (large guest RAM), the i32 result reads as negative.
+    const pointer = ex["v86_malloc"](Math.max(4, words.byteLength)) >>> 0;
     try
     {
         new Uint32Array(this.wasm_memory.buffer, pointer, words.length).set(words);

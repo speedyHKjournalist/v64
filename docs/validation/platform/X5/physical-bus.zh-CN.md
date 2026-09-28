@@ -59,3 +59,16 @@ node tests/smp/virtio_high_dma.mjs
 [`tests/x64/high_memory.mjs`](../../../../tests/x64/high_memory.mjs)：64 MiB 中 16 MiB 上移，客户机自建页表映射 4 GiB，写入首尾与中间 qword、把一段代码复制到 4 GiB + 1 MiB 并在那里执行（返回值即自身 RIP `0x100100000`），宿主确认这些字节落在后备 RAM 的 [48 MiB, 64 MiB)；multiboot 图为 `[0,640K) [768K,48M) [4G,+16M)`，没有任何低 RAM 项覆盖空洞。
 
 真实 OS 由 `X64_HIGH_MEMORY=<字节> node tests/x64/linux_boot.mjs` 验证（512 MiB 中 128 MiB 上移）：要求 `/proc/iomem` 出现 `100000000-107ffffff : System RAM`，且 64 位与 32 位兼容探针各自 16 MiB 触碰页中有帧号 ≥ 4 GiB 的页（`/proc/self/pagemap`），内容逐页校验。独立 QEMU（`max-ram-below-4g`）同配置下两种进程的 4096 页全部位于 4 GiB 以上。v86 结果见 [XC 记录](../XC/linux64-boot.zh-CN.md)。
+
+## 2026-09-28 续：4 GiB 以上的页表、热代码与 SMC
+
+[`high_memory.mjs`](../../../../tests/x64/high_memory.mjs) 新增第二阶段，并在解释器与 X4 页层（`disable_jit: false`）下各跑一遍，两次结果逐字节一致：
+
+- 把 PML4/PDPT/PD 复制到 4 GiB + 2 MiB 并改写其中的链接，`MOV CR3` 指向 `0x100200000`（CR3 与全部页表都在重映射的高 RAM 中）；
+- 一个热函数复制到 4 GiB + 1 MiB 并调用 4000 次（页层把它编译成页函数，统计要求 >30,000 条原生退休），随后经 4 GiB 映射改写该函数的立即数，再调用一次必须得到新结果，且页函数被这次写入退役。
+
+此阶段在页层下暴露一个缺陷：`jac::ram_backing` 用“低地址总线是否映射”判断后备页，把重映射到 4 GiB 以上 RAM 的后备（在低总线上是空洞）当成不可直接访问，结果高 RAM 上的代码从不编译、页函数对高 RAM 的访问全走慢路径。现只排除 VGA 窗口（0xA0000–0xC0000）的后备，其余一律以 `physical::ram_page` 的结果为准。
+
+真实 OS：`X64_JIT=1 X64_HIGH_MEMORY=$((128<<20)) node tests/x64/linux_boot.mjs` 在页层下同样通过（64/32 位探针各 4096 页落在 4 GiB 以上），见 [XC 记录](../XC/linux64-boot.zh-CN.md)。
+
+仍未完成：v86gl PCI 的高地址协议（见上表）；快照仍是单个 ArrayBuffer（4 核 Linux 约 220 MB），未分块。

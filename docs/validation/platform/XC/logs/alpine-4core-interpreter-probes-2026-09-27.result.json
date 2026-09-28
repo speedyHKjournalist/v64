@@ -1,0 +1,229 @@
+{
+  "source": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-virt-3.24.0-x86_64.iso",
+  "iso_sha256": "6cd1a38ae05cf96a5d0cbb2ddd6c630834babfeca1ecc5d1f05ec0b06b886102",
+  "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+  "initrd_sha256": "e7f4d0ab8a434f70317392610303c2dfac59bd66c4452a8b80024d83beac3802",
+  "cmdline": "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage",
+  "probe_tar_sha256": "2bf2072c9a17a10d9e6ef024551b8e62e576139ca7e555105020fcc98066e109",
+  "probe64_sha256": "34ca92140ccd1dadf1f3b0eed7257950d2ec17e710f3bb2e3a3942add26aa2d4",
+  "probe32_sha256": "abb4a87fce1db0435d6ad186e7121962923db29d7bd813c9a9c776dcd3051063",
+  "passed": true,
+  "snapshot": {
+    "rounds": 4187249,
+    "rip": "ffffffff81a05cea",
+    "previous_rip": "ffffffff81a05ce6",
+    "physical_ip": 27286762,
+    "instruction_bytes": "41564531f641554531ed41544989f455",
+    "gpr": [
+      "ffffffff81a05ce0",
+      "0",
+      "0",
+      "ffff888004ed3d00",
+      "ffffc90000140a68",
+      "ffff8880038e1cd4",
+      "ffff8880055a5ee0",
+      "ffff8880055a5ef4",
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "4",
+      "0",
+      "ffff8880038e1c00"
+    ],
+    "efer": "d01",
+    "cs_long": 1,
+    "serial_bytes": 38964,
+    "diagnostics": {
+      "active_core": 3,
+      "cores": [
+        {
+          "state": "runnable",
+          "slices": 3944868,
+          "interpreter_steps": 14660022365,
+          "retired_instructions": 14438516340,
+          "rep_elements": 227390836,
+          "faults": 18722,
+          "halt_count": 309278,
+          "runtime_ms": 2180958.577850335,
+          "ipi_sent": 237727,
+          "ipi_received": 356425,
+          "apic_id": 0,
+          "apic_irr": [],
+          "apic_isr": [],
+          "apic_tpr": 16,
+          "halted": false,
+          "interrupts_enabled": false,
+          "linear_ip": "0x813c88b6",
+          "cs": "0x10",
+          "cr0": "0x80050033"
+        },
+        {
+          "state": "runnable",
+          "slices": 3576074,
+          "interpreter_steps": 13248073202,
+          "retired_instructions": 13018505289,
+          "rep_elements": 234590483,
+          "faults": 22107,
+          "halt_count": 275955,
+          "runtime_ms": 2019177.743988705,
+          "ipi_sent": 249794,
+          "ipi_received": 295866,
+          "apic_id": 1,
+          "apic_irr": [],
+          "apic_isr": [],
+          "apic_tpr": 16,
+          "halted": false,
+          "interrupts_enabled": true,
+          "linear_ip": "0x813aa3ff",
+          "cs": "0x10",
+          "cr0": "0x80050033"
+        },
+        {
+          "state": "runnable",
+          "slices": 3505998,
+          "interpreter_steps": 13096736724,
+          "retired_instructions": 12823781054,
+          "rep_elements": 277524421,
+          "faults": 27905,
+          "halt_count": 236275,
+          "runtime_ms": 1977482.7209092344,
+          "ipi_sent": 296115,
+          "ipi_received": 240215,
+          "apic_id": 2,
+          "apic_irr": [],
+          "apic_isr": [],
+          "apic_tpr": 16,
+          "halted": false,
+          "interrupts_enabled": false,
+          "linear_ip": "0x8133c83b",
+          "cs": "0x10",
+          "cr0": "0x80050033"
+        },
+        {
+          "state": "runnable",
+          "slices": 3461202,
+          "interpreter_steps": 12968176047,
+          "retired_instructions": 12685113476,
+          "rep_elements": 287353259,
+          "faults": 30320,
+          "halt_count": 219182,
+          "runtime_ms": 1956378.9939186494,
+          "ipi_sent": 317884,
+          "ipi_received": 214866,
+          "apic_id": 3,
+          "apic_irr": [],
+          "apic_isr": [],
+          "apic_tpr": 16,
+          "halted": false,
+          "interrupts_enabled": false,
+          "linear_ip": "0x81a05cea",
+          "cs": "0x10",
+          "cr0": "0x80050033"
+        }
+      ],
+      "clock": {
+        "mode": "normal",
+        "now_ms": 8364158.556791999,
+        "host_pause_count": 0,
+        "discarded_host_ms": 0,
+        "host_backwards_count": 0,
+        "committed_instructions": 0,
+        "idle_ms": 0
+      },
+      "scheduler": {
+        "quantum": 4096,
+        "seed": 0,
+        "round": 4187249
+      },
+      "cpu": {
+        "mode": "protected16",
+        "paging": true,
+        "pae": true,
+        "cs": "0x10",
+        "eip": "0x81a05cea",
+        "linear_ip": "0x81a05cea",
+        "eflags": "0x46",
+        "cpl": 0,
+        "cr0": "0x80050033",
+        "cr3": "0x2a36000",
+        "cr4": "0x6b0",
+        "halted": false
+      },
+      "apic": {
+        "id": 3,
+        "enabled": true,
+        "software_enabled": true,
+        "tpr": 16,
+        "irr": [],
+        "isr": [],
+        "lvt_timer": "0xec",
+        "lvt_lint0": "0x10700",
+        "lvt_lint1": "0x10400"
+      },
+      "pic": {
+        "master": {
+          "irr": "0x53",
+          "isr": "0x0",
+          "enabled": "0x0",
+          "elcr": "0x0"
+        },
+        "slave": {
+          "irr": "0xd0",
+          "isr": "0x0",
+          "enabled": "0x0",
+          "elcr": "0xc"
+        }
+      },
+      "shared_irq_sources": {},
+      "acpi": {
+        "pm_base": "0x600",
+        "sci_enabled": true,
+        "sci_level": false,
+        "pm1_sts": "0x1",
+        "pm1_en": "0x120",
+        "gpe_sts": "0x0",
+        "gpe_en": "0x0",
+        "soft_off": 0
+      },
+      "acpi_tables": {
+        "rsdp": "0xf8bc0",
+        "revision": 2,
+        "oem_id": "V86   ",
+        "tables": [
+          {
+            "signature": "XSDT",
+            "address": "0x1fffffbc",
+            "length": 52,
+            "checksum_ok": true
+          },
+          {
+            "signature": "FACP",
+            "address": "0x1ffffe20",
+            "length": 244,
+            "checksum_ok": true
+          },
+          {
+            "signature": "FACS",
+            "address": "0x1ffff100",
+            "length": 64,
+            "checksum_ok": true
+          },
+          {
+            "signature": "DSDT",
+            "address": "0x1ffff140",
+            "length": 3296,
+            "checksum_ok": true
+          },
+          {
+            "signature": "APIC",
+            "address": "0x1fffff14",
+            "length": 124,
+            "checksum_ok": true
+          }
+        ]
+      }
+    }
+  }
+}

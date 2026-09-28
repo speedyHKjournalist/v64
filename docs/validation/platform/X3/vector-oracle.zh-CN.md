@@ -28,3 +28,5 @@ TEST_RELEASE_BUILD=1 node tests/x64/vector_oracle.mjs
 独立差分实际发现并修正了 denormal 与 NaN/invalid 的优先级、float→integer 的 denormal 标志、CVTPI2PS 高 64 位保留、x87 精度标志丢失及 legacy fast-math 绕过异常的问题。x87 超越函数仍复用已有实现；该 corpus 不宣称已穷举全部超越函数输入或全部平台微架构的近似倒数结果。
 
 2026-09-27 的 19:59 debug 构建上，解释器、Tier0 和 region 各通过全部 949 cases；两种 JIT 模式分别记录 1,440,442 与 1,440,462 次 native retirement。每个后端包含 944 组独立 QEMU 逐字段比较和上述 5 组架构断言。1,000,000 轮混合预热保证异步编译已实际发布，避免短热循环在繁忙主机上结束过早。日志保留在本目录 `logs/vector-*-2026-09-27.txt`。这次记录为 debug 验证，release 需配对统一构建另行复验。
+
+2026-09-28：corpus 现为 958 个用例（952 组 QEMU 逐字段比较 + 6 组 SDM 断言）。`X64_JIT` 下的混合热循环现在由 X4 页层执行（原生寄存器块已退出主循环），SIMD 指令在页函数内就地步进解释器；本轮 `X64_JIT=tier0` 记录 4,000,835 次原生退休。SIMD 仍未编译成 Wasm 算术。

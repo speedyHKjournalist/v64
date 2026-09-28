@@ -265,6 +265,11 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
     let source =
         src.wrapping_add(if seg >= 4 { state::read_segment_base(seg as usize) } else { 0 });
     let f = state::read_flags64();
+    if repeat && matches!(op, 0xA4 | 0xA5 | 0xAA | 0xAB) && state::read_dr(7) & 255 == 0 {
+        if let Some(continuing) = bulk_string(op, w, aw, count, src, dst, source.wrapping_sub(src), f & 0x400 != 0)? {
+            return Ok(continuing);
+        }
+    }
     let mut nf = f;
     match op {
         0x6C..=0x6F => {
@@ -334,6 +339,78 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
         return Ok(continuing);
     }
     Ok(false)
+}
+/// Elements of one REP MOVS/STOS step over RAM (about one page of data).
+const BULK_BYTES: u64 = 4096;
+/// REP MOVS/STOS over RAM pages without data breakpoints: each chunk is the
+/// whole elements inside the current source and destination pages, copied
+/// in element order (so overlapping MOVS keeps its element semantics), and
+/// RCX/RSI/RDI then advance as if the elements ran one by one. None when the
+/// first element needs the element path (a fault, device memory, an element
+/// crossing a page); a later chunk that cannot proceed just ends this step.
+unsafe fn bulk_string(op: u32, w: u8, aw: u8, count: u64, src: u64, dst: u64, source_base: u64, down: bool) -> Result<Option<bool>, Fault> {
+    let size = (w / 8) as u64;
+    let movs = op <= 0xA5;
+    let value = state::read_gpr(0);
+    let (mut src, mut dst, mut remaining, mut done) = (src, dst, count, 0u64);
+    while remaining != 0 && done * size < BULK_BYTES {
+        // Whole elements in the current page, in the direction of travel.
+        let room = |address: u64| {
+            let offset = address & 4095;
+            if offset + size > 4096 { 0 } else if down { offset / size + 1 } else { (4096 - offset) / size }
+        };
+        let source = src.wrapping_add(source_base);
+        let mut n = room(dst).min(remaining).min((BULK_BYTES / size).max(1) - done.min((BULK_BYTES / size).max(1) - 1));
+        if movs {
+            n = n.min(room(source));
+        }
+        let mapped = |address: u64, access| -> Option<u32> {
+            let physical = memory::translate(address, access, false, false).ok()?;
+            super::jac::ram_backing(physical).map(|page| page + (address & 4095) as u32)
+        };
+        let target = if n == 0 { None } else { mapped(dst, super::paging::Access::Write) };
+        let from = if movs && target.is_some() { mapped(source, super::paging::Access::Read) } else { Some(0) };
+        let (Some(target), Some(from)) = (target, from)
+        else {
+            if done == 0 {
+                return Ok(None);
+            }
+            break;
+        };
+        let mem8 = crate::cpu::memory::mem8;
+        for i in 0..n {
+            let step = if down { (i * size).wrapping_neg() } else { i * size };
+            let t = mem8.add(target.wrapping_add(step as u32) as usize);
+            if movs {
+                std::ptr::copy(mem8.add(from.wrapping_add(step as u32) as usize), t, size as usize);
+            } else {
+                std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), t, size as usize);
+            }
+        }
+        let (low, high) = if down { (target + size as u32 - (n * size) as u32, target + size as u32) } else { (target, target + (n * size) as u32) };
+        if crate::jit::page_watched(low >> 12) || crate::jit::page_watched((high - 1) >> 12) {
+            crate::jit::jit_dirty_cache(low, high);
+        }
+        let delta = if down { (n * size).wrapping_neg() } else { n * size };
+        src = src.wrapping_add(delta) & mask(aw);
+        dst = dst.wrapping_add(delta) & mask(aw);
+        remaining -= n;
+        done += n;
+        if movs {
+            state::write_gpr(6, src, aw);
+        }
+        state::write_gpr(7, dst, aw);
+        state::write_gpr(1, remaining, aw);
+    }
+    crate::cpu::execution::record_string(crate::cpu::string::StringExecution {
+        iterations: done as u32,
+        outcome: if remaining != 0 {
+            crate::cpu::string::StringOutcome::Repeat
+        } else {
+            crate::cpu::string::StringOutcome::Complete
+        },
+    });
+    Ok(Some(remaining != 0))
 }
 /// Execute one architectural instruction or restartable REP element. The
 /// caller delivers faults and accounts the retirement; this function never
@@ -420,7 +497,7 @@ fn flag_free(op: u32, group: u8) -> bool {
     matches!(op, 0x88..=0x8B | 0x8D | 0xB0..=0xBF | 0xC6 | 0xC7 | 0xA0..=0xA3 | 0x63
         | 0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF | 0x86 | 0x87 | 0x90..=0x97 | 0x50..=0x5F | 0x68 | 0x6A
         | 0x8F | 0xC8 | 0xC9 | 0xE8 | 0xE9 | 0xEB | 0xC2 | 0xC3 | 0x98 | 0x99 | 0x0FC8..=0x0FCF
-        | 0x0F0D | 0x0F18 | 0x0F1E | 0x0F1F | 0x0FC3)
+        | 0x0F0D | 0x0F18..=0x0F1F | 0x0FC3)
         || op == 0xFF && matches!(group, 2 | 4 | 6)
 }
 pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
@@ -706,7 +783,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let width = if op == 0xF6 { 8 } else { w };
             let a = rm(d, width, matches!(group, 2 | 3))?;
             match group {
-                0 => state::write_flags64(alu(4, a, imm, width, flags).1),
+                // F6/F7 /1 is an alias of TEST
+                0 | 1 => state::write_flags64(alu(4, a, imm, width, flags).1),
                 2 => put_rm(d, width, !a)?,
                 3 => {
                     let (r, f) = alu(5, 0, a, width, flags);
@@ -830,6 +908,10 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             state::write_flags64(f);
         },
         0x0FC7 if group == 6 => {
+            // RDRAND is NFx: an F2/F3 prefix is #UD
+            if d.prefixes.rep.is_some() {
+                return Err(Fault::ud());
+            }
             let r = d.rm_register.ok_or(Fault::ud())?;
             let low = crate::cpu::cpu::js::get_rand_int() as u32 as u64;
             let value = if w == 64 {
@@ -989,7 +1071,17 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                 | (state::read_high_byte(0) as u64) & (SF | ZF | AF | PF | CF),
         ),
         0x9F => state::write_high_byte(0, (flags as u8 & 0xD5) | 2),
-        0x0F1E | 0x0F1F => {},
+        // hint space 0F19-0F1F: reserved NOPs without the matching extension
+        0x0F19..=0x0F1F => {},
+        0xD7 => {
+            // XLAT: AL = [seg:rBX + AL]
+            let seg = d.prefixes.segment.unwrap_or(3);
+            let offset = state::read_gpr(3).wrapping_add(state::read_gpr(0) & 0xFF) & mask(d.address_size);
+            let base = if seg >= 4 { state::read_segment_base(seg as usize) } else { 0 };
+            let v = memory::read(offset.wrapping_add(base), 8, seg == 2)?;
+            set_register(0, v, 8, false);
+        },
+        0x0FB9 | 0x0FFF => return Err(Fault::ud()),
         _ => return Err(Fault::ud()),
     }
     state::write_rip(next);

@@ -847,6 +847,15 @@ impl WasmBuilder {
 
     pub fn unreachable(&mut self) { self.instruction_body.push(op::OP_UNREACHABLE) }
 
+    /// An instruction without immediates (x64 page tier: i64 compares,
+    /// rotates, extensions). The caller keeps the operand stack typed.
+    pub fn op(&mut self, opcode: u8) { self.instruction_body.push(opcode); }
+    /// A load or store with an explicit alignment hint and offset immediate.
+    pub fn memory_op(&mut self, opcode: u8, align: u8, byte_offset: u32) {
+        self.instruction_body.push(opcode);
+        self.instruction_body.push(align);
+        write_leb_u32(&mut self.instruction_body, byte_offset);
+    }
 }
 
 /// Scalar floating-point forms used by the experimental IR backend's x87 path.

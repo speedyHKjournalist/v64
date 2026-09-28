@@ -227,8 +227,8 @@ if(!process.env.X64_ORACLE_ONLY)
         inspect: emulator => {
             if(process.env.X64_JIT)
             {
-                const retired = emulator.v86.cpu.wm.exports.x64_native_stat(1);
-                assert.ok(retired > 1000,`mixed vector/native loop executed compiled instructions: retired=${retired}, compiled=${emulator.v86.cpu.wm.exports.x64_native_stat(0)}`);
+                const retired = emulator.v86.cpu.wm.exports.x64_page_stat(1);
+                assert.ok(retired > 1000,`mixed vector/native loop executed compiled instructions: retired=${retired}, compiled=${emulator.v86.cpu.wm.exports.x64_page_stat(0)}`);
                 console.log(`native retirement=${retired} backend=${process.env.X64_JIT}`);
             }
         }});

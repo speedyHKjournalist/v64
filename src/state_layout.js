@@ -89,6 +89,10 @@ export const STATE_OFFSETS = {
     x64_fpu_dp_hi: 1772,
     x64_pat: 1776,
     x64_tsc_aux: 1784,
+    x64_page_exit: 1792,
+    x64_jac_base: 1796,
+    x64_jac_epoch: 1800,
+    x64_page_linear: 1808,
     ir_tlb_base: 2048,
 };
 

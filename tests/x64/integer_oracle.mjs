@@ -122,6 +122,9 @@ for(const width of ["r8w", "r8d", "r8"])
 add("db 0xF3,0x0F,0x1E,0xFA"); // ENDBR64 is NOP when CET is absent.
 add("db 0xF3,0x0F,0x1E,0xFB"); // ENDBR32 is also NOP in this profile.
 const RESULT=0x300000,RECORD=72,MAGIC=0xC064C064;
+// With a JIT, every case runs again after its pages are hot, so the last
+// passes execute compiled code (cases are idempotent).
+const REPEAT=Number(process.env.X64_REPEAT||10);
 let body="";
 for(let n=0;n<tests.length;n++)
 {
@@ -172,8 +175,9 @@ long_mode:
 mov rax, 0xFFFF800000000000+high_mode
 jmp rax
 high_mode:
-${process.env.X64_JIT ? "mov r12, 1000000\n.warm: add r8, r9\ndec r12\njnz .warm\n" : ""}
+${process.env.X64_JIT ? `mov r12, 1000000\n.warm: add r8, r9\ndec r12\njnz .warm\nmov dword [0x2FFFF0], ${REPEAT}\ncase_repeat:\n` : ""}
 ${body}
+${process.env.X64_JIT ? "dec dword [0x2FFFF0]\njnz case_repeat\n" : ""}
 mov dword [${RESULT}], ${MAGIC}
 hlt
 jmp $
@@ -221,9 +225,10 @@ try
     }
     if(process.env.X64_JIT)
     {
-        const count=cpu.wm.exports.x64_native_stat(1);
-        assert.ok(count>0,`wide native blocks actually retired instructions; compiled=${cpu.wm.exports.x64_native_stat(0)}, rejected=${cpu.wm.exports.x64_native_stat(2)}, entries=${cpu.wm.exports.x64_native_stat(3)}`);
-        console.log(`native wide retirement=${count}, published=${cpu.wm.exports.x64_native_stat(0)}`);
+        const stat=n=>cpu.wm.exports.x64_page_stat(n);
+        const count=stat(1);
+        assert.ok(count>tests.length*4,`page functions actually retired instructions; compiled=${stat(0)}, retries=${stat(2)}, steps=${stat(4)}`);
+        console.log(`page tier: retired=${count} compiled=${stat(0)} retries=${stat(2)} unknown=${stat(3)} steps=${stat(4)} templated=${stat(10)}/${stat(9)}`);
     }
     console.log(`PASS: v86 agrees with independent QEMU on ${tests.length} integer guest cases`);
 }

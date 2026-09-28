@@ -416,7 +416,11 @@ pub unsafe fn instr32_0F03_reg(r1: i32, r: i32) {
 #[no_mangle]
 pub unsafe fn instr_0F04() { undefined_instruction(); }
 #[no_mangle]
-pub unsafe fn instr_0F05() { undefined_instruction(); }
+pub unsafe fn instr_0F05() {
+    // SYSCALL outside 64-bit mode (legacy or compatibility): #UD on Intel,
+    // an architectural outcome rather than a missing instruction
+    trigger_ud();
+}
 #[no_mangle]
 pub unsafe fn instr_0F06() {
     // clts
@@ -432,7 +436,10 @@ pub unsafe fn instr_0F06() {
     };
 }
 #[no_mangle]
-pub unsafe fn instr_0F07() { undefined_instruction(); }
+pub unsafe fn instr_0F07() {
+    // SYSRET outside 64-bit mode: #UD on Intel (see instr_0F05)
+    trigger_ud();
+}
 #[no_mangle]
 pub unsafe fn instr_0F08() {
     // invd
@@ -3331,20 +3338,39 @@ pub unsafe fn instr32_0FA1() {
 // legacy profile until the independent X1–X5/XC acceptance gates pass. A test
 // must opt in on each newly created machine; this is never a user config knob.
 static mut X64_TEST_CAPABILITIES: bool = false;
+/// IA32_ARCH_CAPABILITIES in the x64 profile (on by default there).
+static mut X64_ARCH_CAPABILITIES: bool = true;
 
 #[no_mangle]
 pub unsafe fn set_x64_test_capabilities(enabled: bool) { X64_TEST_CAPABILITIES = enabled; }
+#[no_mangle]
+pub unsafe fn set_x64_arch_capabilities(enabled: bool) { X64_ARCH_CAPABILITIES = enabled; }
+
+/// The emulated core executes nothing speculatively, so it reports itself
+/// unaffected: RDCL_NO, SKIP_L1DFL_VMENTRY, SSB_NO, MDS_NO, PSCHANGE_MC_NO,
+/// TAA_NO, SBDR_SSDP_NO, FBSDP_NO, PSDP_NO, BHI_NO, PBRSB_NO, GDS_NO,
+/// RFDS_NO and ITS_NO. (Guests then skip PTI, VERW buffer clearing and ITS
+/// thunks.)
+pub const ARCH_CAPABILITIES: u64 = 1 | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 | 1 << 8 | 1 << 13 | 1 << 14 | 1 << 15
+    | 1 << 20 | 1 << 24 | 1 << 26 | 1 << 27 | 1 << 62;
+pub unsafe fn arch_capabilities() -> Option<u64> {
+    (X64_TEST_CAPABILITIES && X64_ARCH_CAPABILITIES).then_some(ARCH_CAPABILITIES)
+}
 
 fn apply_x64_test_capabilities(enabled: bool, leaf: u32, registers: &mut [u32; 4]) {
     if !enabled {
         return;
     }
     match leaf {
-        1 => registers[2] |= 1 << 13, // CMPXCHG16B
+        1 => {
+            registers[2] |= 1 << 13; // CMPXCHG16B
+            registers[3] |= 1 << 19; // CLFLUSH (implemented; line size in EBX[15:8])
+        },
+        7 => if unsafe { X64_ARCH_CAPABILITIES } { registers[3] |= 1 << 29 }, // IA32_ARCH_CAPABILITIES
         0x8000_0000 => registers[0] = 0x8000_0008,
         0x8000_0001 => {
             registers[2] |= 1; // LAHF/SAHF in long mode
-            registers[3] |= (1 << 11) | (1 << 20) | (1 << 29); // SYSCALL, NX, LM
+            registers[3] |= (1 << 11) | (1 << 20) | (1 << 27) | (1 << 29); // SYSCALL, NX, RDTSCP, LM
         },
         0x8000_0008 => registers[0] = 36 | 48 << 8, // physical / linear address bits
         _ => {},
@@ -3364,10 +3390,10 @@ mod x64_cpuid_tests {
             assert_eq!(result, original);
         }
         for (leaf, expected) in [
-            (1, [0, 0, 1 << 13, 0]),
-            (7, [0; 4]),
+            (1, [0, 0, 1 << 13, 1 << 19]),
+            (7, [0, 0, 0, 1 << 29]),
             (0x8000_0000, [0x8000_0008, 0, 0, 0]),
-            (0x8000_0001, [0, 0, 1, (1 << 11) | (1 << 20) | (1 << 29)]),
+            (0x8000_0001, [0, 0, 1, (1 << 11) | (1 << 20) | (1 << 27) | (1 << 29)]),
             (0x8000_0008, [36 | 48 << 8, 0, 0, 0]),
         ] {
             let mut result = [0; 4];

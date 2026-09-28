@@ -1,0 +1,233 @@
+{
+ "rounds": 1417300,
+ "rip": "ffffffff81e1160d",
+ "previous_rip": "ffffffff81e11863",
+ "physical_ip": 31528461,
+ "instruction_bytes": "84c00f84b8000000488d72ff2c010f84",
+ "gpr": [
+  "4",
+  "ffff888005fbc6c0",
+  "7f5db2c50000",
+  "ffffc90000f1bc98",
+  "ffffc90000f1bc40",
+  "7000",
+  "7f5db2c50fff",
+  "ffff888005d69f08",
+  "0",
+  "ffff888005d69fa0",
+  "10000",
+  "ffff888005d69f0c",
+  "ffff888005d69f80",
+  "1ffff11000bad3e1",
+  "ffff888005d69f0c",
+  "ffff888005d69f00"
+ ],
+ "efer": "d01",
+ "cs_long": 1,
+ "serial_bytes": 30577,
+ "page_tier": {
+  "compiled": 5193,
+  "native": 7758224952,
+  "retries": 3367706,
+  "unknown": 6636,
+  "steps": 18275250,
+  "invalidated": 761,
+  "entries": 117048,
+  "failed": 0,
+  "recompiled": 2466,
+  "instructions": 2070673,
+  "templated": 2056366,
+  "evicted": 0,
+  "live": 413
+ },
+ "diagnostics": {
+  "active_core": 2,
+  "cores": [
+   {
+    "state": "halted",
+    "slices": 553863,
+    "interpreter_steps": 2231991488,
+    "retired_instructions": 2231938359,
+    "rep_elements": 21530351,
+    "faults": 20969,
+    "halt_count": 29759,
+    "runtime_ms": 27782.938044999613,
+    "ipi_sent": 9076,
+    "ipi_received": 21463,
+    "apic_id": 0,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": true,
+    "interrupts_enabled": true,
+    "linear_ip": "0x81e3726f",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   },
+   {
+    "state": "halted",
+    "slices": 444155,
+    "interpreter_steps": 1788805605,
+    "retired_instructions": 1785640091,
+    "rep_elements": 13229272,
+    "faults": 22135,
+    "halt_count": 18723,
+    "runtime_ms": 27482.43779899103,
+    "ipi_sent": 9943,
+    "ipi_received": 10715,
+    "apic_id": 1,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": true,
+    "interrupts_enabled": true,
+    "linear_ip": "0x81e3726f",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   },
+   {
+    "state": "runnable",
+    "slices": 498334,
+    "interpreter_steps": 2048274233,
+    "retired_instructions": 2048242571,
+    "rep_elements": 22959760,
+    "faults": 27404,
+    "halt_count": 16490,
+    "runtime_ms": 26419.446209990394,
+    "ipi_sent": 11051,
+    "ipi_received": 8015,
+    "apic_id": 2,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": false,
+    "interrupts_enabled": true,
+    "linear_ip": "0x81e1160d",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   },
+   {
+    "state": "halted",
+    "slices": 470331,
+    "interpreter_steps": 1890449404,
+    "retired_instructions": 1890419394,
+    "rep_elements": 9689325,
+    "faults": 28486,
+    "halt_count": 15858,
+    "runtime_ms": 30469.752424996015,
+    "ipi_sent": 14784,
+    "ipi_received": 6119,
+    "apic_id": 3,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": true,
+    "interrupts_enabled": true,
+    "linear_ip": "0x81e3726f",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   }
+  ],
+  "clock": {
+   "mode": "normal",
+   "now_ms": 171249.61474900003,
+   "host_pause_count": 0,
+   "discarded_host_ms": 0,
+   "host_backwards_count": 0,
+   "committed_instructions": 0,
+   "idle_ms": 0
+  },
+  "scheduler": {
+   "quantum": 4096,
+   "seed": 0,
+   "round": 1417300
+  },
+  "cpu": {
+   "mode": "protected16",
+   "paging": true,
+   "pae": true,
+   "cs": "0x10",
+   "eip": "0x81e1160d",
+   "linear_ip": "0x81e1160d",
+   "eflags": "0x286",
+   "cpl": 0,
+   "cr0": "0x80050033",
+   "cr3": "0x61bf000",
+   "cr4": "0x6b0",
+   "halted": false
+  },
+  "apic": {
+   "id": 2,
+   "enabled": true,
+   "software_enabled": true,
+   "tpr": 16,
+   "irr": [],
+   "isr": [],
+   "lvt_timer": "0xec",
+   "lvt_lint0": "0x10700",
+   "lvt_lint1": "0x10400"
+  },
+  "pic": {
+   "master": {
+    "irr": "0x53",
+    "isr": "0x0",
+    "enabled": "0x0",
+    "elcr": "0x0"
+   },
+   "slave": {
+    "irr": "0xd0",
+    "isr": "0x0",
+    "enabled": "0x0",
+    "elcr": "0xc"
+   }
+  },
+  "shared_irq_sources": {},
+  "acpi": {
+   "pm_base": "0x600",
+   "sci_enabled": true,
+   "sci_level": false,
+   "pm1_sts": "0x1",
+   "pm1_en": "0x120",
+   "gpe_sts": "0x0",
+   "gpe_en": "0x0",
+   "soft_off": 0
+  },
+  "acpi_tables": {
+   "rsdp": "0xf8bc0",
+   "revision": 2,
+   "oem_id": "V86   ",
+   "tables": [
+    {
+     "signature": "XSDT",
+     "address": "0x1fffffbc",
+     "length": 52,
+     "checksum_ok": true
+    },
+    {
+     "signature": "FACP",
+     "address": "0x1ffffe20",
+     "length": 244,
+     "checksum_ok": true
+    },
+    {
+     "signature": "FACS",
+     "address": "0x1ffff100",
+     "length": 64,
+     "checksum_ok": true
+    },
+    {
+     "signature": "DSDT",
+     "address": "0x1ffff140",
+     "length": 3296,
+     "checksum_ok": true
+    },
+    {
+     "signature": "APIC",
+     "address": "0x1fffff14",
+     "length": 124,
+     "checksum_ok": true
+    }
+   ]
+  }
+ }
+}

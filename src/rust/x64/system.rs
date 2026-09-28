@@ -136,6 +136,7 @@ pub unsafe fn read_msr(index: u32) -> Result<Option<u64>, Fault> {
         0x10 => cpu::read_tsc(),
         0x1B => 0xFEE00000 | if *gp::apic_enabled { 0x800 } else { 0 } |
             if crate::cpu::apic::current_core() == 0 { 0x100 } else { 0 },
+        0x10A => match crate::cpu::instructions_0f::arch_capabilities() { Some(value) => value, None => return Ok(None) },
         _ => return Ok(None),
     }))
 }
@@ -189,7 +190,23 @@ pub unsafe fn execute(instruction: &Decoded) -> Result<bool, Fault> {
             crate::cpu::exceptions::interrupt(vector, true, None);
             return Ok(true);
         },
-        0xCF if instruction.operand_size == 64 => { iret()?; return Ok(true); },
+        0xCF => { iret(instruction.operand_size)?; return Ok(true); },
+        0xF1 => {
+            // INT1 (ICEBP): #DB as a trap, without the gate DPL check
+            state::write_rip(instruction.next.0);
+            crate::cpu::exceptions::interrupt(1, false, None);
+            return Ok(true);
+        },
+        0x0FB2 | 0x0FB4 | 0x0FB5 => {
+            // LSS/LFS/LGS m16:16/32/64
+            let width = instruction.operand_size;
+            let (addr, stack) = operand_address(instruction)?;
+            let offset = memory::read(addr, width, stack)?;
+            let selector = memory::read(addr.wrapping_add((width / 8) as u64), 16, stack)? as u16;
+            let segment = match op { 0x0FB2 => 2, 0x0FB4 => 4, _ => 5 };
+            load_segment(segment, selector)?;
+            state::write_gpr(instruction.reg.ok_or(Fault::ud())? as usize, offset, width);
+        },
         0xE4..=0xE7 | 0xEC..=0xEF => port_instruction(instruction)?,
         0xF4 => {
             if *gp::cpl != 0 { return Err(Fault::gp()); }
@@ -203,10 +220,11 @@ pub unsafe fn execute(instruction: &Decoded) -> Result<bool, Fault> {
             else { *gp::flags |= cpu::FLAG_INTERRUPT; *gp::interrupt_shadow = 2; }
         },
         0x0F20 | 0x0F22 => {
-            if *gp::cpl != 0 { return Err(Fault::gp()); }
+            // an undefined control register is #UD before the privilege #GP
             let control = instruction.reg.ok_or(Fault::ud())? as usize;
             let register = instruction.rm_register.ok_or(Fault::ud())? as usize;
             if !matches!(control, 0 | 2 | 3 | 4 | 8) { return Err(Fault::ud()); }
+            if *gp::cpl != 0 { return Err(Fault::gp()); }
             if op == 0x0F22 { write_cr(control, state::read_gpr(register))?; }
             else { state::write_gpr(register, state::read_cr(control), 64); }
         },
@@ -443,6 +461,13 @@ unsafe fn descriptor_instruction(d: &Decoded) -> Result<(), Fault> {
 
 unsafe fn table_instruction(d: &Decoded) -> Result<(), Fault> {
     let modrm = d.modrm.ok_or(Fault::ud())?;
+    // Register forms outside SMSW/LMSW/SWAPGS/RDTSCP belong to extensions
+    // this profile lacks (VMX, SVM, MONITOR, XSAVE, SMAP, ...): #UD before
+    // any privilege check. So is /5 on memory (RSTORSSP).
+    let group = modrm >> 3 & 7;
+    if modrm >= 0xC0 && !matches!(group, 4 | 6) && !matches!(modrm, 0xF8 | 0xF9) || modrm < 0xC0 && group == 5 {
+        return Err(Fault::ud());
+    }
     if modrm == 0xF8 {
         if *gp::cpl != 0 { return Err(Fault::gp()); }
         let old = state::read_segment_base(5);
@@ -769,16 +794,19 @@ pub unsafe fn far_return(width: u8, discard: u16) -> Result<(), Fault> {
     Ok(())
 }
 
-pub unsafe fn iret() -> Result<(), Fault> {
-    *gp::nmi_blocked = false;
-    *gp::interrupt_shadow = 0;
+/// IRETQ, or IRETD/IRETW (the same five slots, 4 or 2 bytes each).
+pub unsafe fn iret(width: u8) -> Result<(), Fault> {
     if state::read_flags64() & 0x4000 != 0 { return Err(Fault::gp()); }
     let rsp = state::read_gpr(4);
-    let ip = memory::read(rsp, 64, true)?;
-    let selector = memory::read(rsp.wrapping_add(8), 64, true)? as u16;
-    let flags = memory::read(rsp.wrapping_add(16), 64, true)?;
-    let new_rsp = memory::read(rsp.wrapping_add(24), 64, true)?;
-    let ss_selector = memory::read(rsp.wrapping_add(32), 64, true)? as u16;
+    let slot = (width / 8) as u64;
+    let ip = memory::read(rsp, width, true)?;
+    let selector = memory::read(rsp.wrapping_add(slot), width, true)? as u16;
+    let mut flags = memory::read(rsp.wrapping_add(2 * slot), width, true)?;
+    if width == 16 { flags = flags & 0xFFFF | state::read_flags64() & !0xFFFF; }
+    let new_rsp = memory::read(rsp.wrapping_add(3 * slot), width, true)?;
+    let ss_selector = memory::read(rsp.wrapping_add(4 * slot), width, true)? as u16;
+    *gp::nmi_blocked = false;
+    *gp::interrupt_shadow = 0;
     let (cs, _) = descriptor(selector)?;
     let new_cpl = (selector & 3) as u8;
     if cs.is_system() || !cs.is_executable() || new_cpl < *gp::cpl ||

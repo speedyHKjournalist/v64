@@ -15,9 +15,18 @@ export function assemble(name, source)
     assert.ok(fs.statSync(directory + "guest.bin").size < 0xF0000, "guest overlaps page tables");
     return directory;
 }
+// A test interrupted by a signal skips `finally`; QEMU would outlive it.
+const references = new Set();
+process.on("exit", () => { for(const child of references) child.kill("SIGKILL"); });
+for(const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]])
+{
+    process.once(signal, () => process.exit(code));
+}
 export async function reference(directory, {address = 0x300000, magic = 0xC064C064, length, timeout = 20000})
 {
     const child = spawn("qemu-system-x86_64", ["-machine", "pc,accel=tcg", "-cpu", "max,vendor=GenuineIntel,phys-bits=36,-la57,-pdpe1gb", "-m", "32M", "-display", "none", "-serial", "none", "-monitor", "none", "-qmp", "stdio", "-no-reboot", "-no-shutdown", "-kernel", directory + "guest.bin", ...(process.env.X64_QEMU_TRACE ? ["-d", "int", "-D", directory + "qemu.log"] : [])], {stdio: ["pipe", "pipe", "pipe"]});
+    references.add(child);
+    child.on("exit", () => references.delete(child));
     let input = "", error = "", id = 0;
     const pending = new Map();
     child.stderr.on("data", data => error += data);
@@ -84,8 +93,12 @@ export async function reference(directory, {address = 0x300000, magic = 0xC064C0
 export async function actual(directory, {address = 0x300000, magic = 0xC064C064, length, timeout = 30000, setup, inspect, options = {}})
 {
     const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+    // X64_JIT=1 runs every oracle guest with the JIT (the x64 page tier for
+    // long-mode code), X64_IR_TIER0=0 additionally with ir_tier0: false.
+    const jit = process.env.X64_JIT ? {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true,
+        ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {})} : {};
     const emulator = new V86({multiboot: {url: directory + "guest.bin"}, memory_size: 32 << 20, acpi: true,
-        cpu_cores: Number(process.env.X64_CORES || 1), disable_jit: true, autostart: false, log_level: 0, ...options});
+        cpu_cores: Number(process.env.X64_CORES || 1), disable_jit: true, autostart: false, log_level: 0, ...jit, ...options});
     try
     {
         await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));

@@ -1,6 +1,6 @@
 # v86：完整 ACPI、x86-64 与单路多核心实施计划
 
-> 状态（2026-09-27 更新）：C0/C1 的实现与主要门槛已通过；C2 每核指标及三后端 Linux 拓扑已通过，Windows SMP 仍待适配验证；C3 原子/内存序及 debug/release Linux OS 压力矩阵已通过，region 重启故障已修复；Windows SMP 及依赖 A3 的电源门槛仍未关闭。X1 状态/解码、X2 系统状态（含长模式远转移/调用门）、X3 整数/向量解释器、X4 原生寄存器块、X5 高地址 DMA/快照已推进并有局部门槛。**真实 x86_64 Linux（Alpine 3.24，Linux 6.18）已在 1 核解释器下启动到 root shell，64 位与 32 位兼容进程探针通过；RAM 位于 4 GiB 以上的配置同样通过**；多核 x64 与 JIT 模式的 OS 结果见 [XC 记录](validation/platform/XC/linux64-boot.zh-CN.md)。仍不向普通配置公布 LM。详见各阶段记录。
+> 状态（2026-09-28 更新）：C0/C1 的实现与主要门槛已通过；C2 每核指标及三后端 Linux 拓扑已通过，Windows SMP 仍待适配验证；C3 原子/内存序及 debug/release Linux OS 压力矩阵已通过，region 重启故障已修复；Windows SMP 及依赖 A3 的电源门槛仍未关闭。X1 解码已对整个长模式 opcode map 做独立对照；X2 系统用例 61 个 QEMU 差分 + 14 个 SDM 断言（本轮修正 CR8 读取未反映 APIC TPR、兼容模式 SYSCALL 在 debug 构建中 panic）；X3 的 opcode 执行矩阵（349,888 个编码）0 不一致；**X4 新增 x64 页层（每 4 KiB 长模式代码页一个 Wasm 函数），Alpine x86_64 1/2/4 核启动由解释器的约 16/85/140 min 降到约 1.3/1.9/2.1 min**；X5 高 RAM 上的代码/页表/SMC 在两种执行模式下通过。**XC：真实 x86_64 Linux（Alpine 3.24，Linux 6.18）在 1/2/4 核页层与 1/2 核解释器下通过 64/32 位探针和 XC 矩阵（拓扑、迁移、跨核信号、跨核 SMC、O_DIRECT），页层下并通过探针运行中的整机快照（4 核连续 4 轮）；1 核解释器与 1/4 核页层通过 reboot/poweroff(S5) 生命周期**，见 [XC 记录](validation/platform/XC/linux64-boot.zh-CN.md)。x64 区域（Tier-1/2）管线、兼容模式代码编译、网络 I/O、Windows x64 仍未完成；仍不向普通配置公布 LM。详见各阶段记录。
 > 基线：2026-09-27，`8af0560e`（PR #55 合并后，工作区干净）。原稿基线 `dfd8ac23 + 未提交修改` 已过时。
 > 本轮 review/推进的实际接手点为 `8edd6d69 + 未提交修改`；验证环境和 fixture 见 [C1 记录](validation/platform/C1/review-and-validation.zh-CN.md)。
 > §2 的事实均经源码审计，标注“探针”的条目另经客户机运行确认（buildroot Linux 6.8，`acpi: true`）。
@@ -192,12 +192,12 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 | C1 每核 LAPIC/AP 启动 | A1、P2a、C0 | 状态块换入换出、按核 LAPIC、INIT/SIPI/IPI；32 位 trampoline 与 SeaBIOS 在 2/4/8 核启动 | XL | — | **已实施**（含 ExtINT/APIC enable/NMI/EOI，2/3/4/8 核固件门槛） |
 | C2 单路拓扑/轮转 | C1、A2 | 32 位 Linux 识别 1×N×1，各核执行任务（解释器） | L | — | **实现完成，Linux 已验收，Windows SMP 待验证** |
 | C3 跨核一致性/JIT | C2 | 原子、TLB shootdown、SMC、快照；Tier-0/区域后端在多核下通过 | XL | R-SMP32 | **进行中**（Linux 三后端负载/恢复/重启/S5 已通过，Windows SMP 与 A3 依赖未关闭） |
-| X1 64 位状态/解码 | P2a | 模式矩阵、REX/寄存器/地址尺寸单测通过 | L | — | **实施中**（宽状态 bank、33,088 个独立解码对照用例通过） |
-| X2 MMU/异常/系统状态 | X1 | 长模式切换、分页/NX/异常帧测试通过 | XL | — | **实施中**（四级页表、系统状态；46 个 QEMU 差分 + 10 个 SDM 断言，含远 JMP/CALL 与 64 位调用门） |
-| X3 64 位解释器闭环 | X2、A2 | 单核 x64 OS + 32 位进程，无 JIT 正确运行 | XL | — | **OS 门槛已通过**（Alpine x86_64 1 核解释器登录；64/32 位探针；1,552 整数 + 958 向量 QEMU 差分）；Windows x64 无镜像未验收 |
-| X4 IR 各层 x64 | X3 | 解释器/Tier-0/区域管线差分和 OS 回归通过 | XL | — | **实施中**（原生 i64 寄存器块与完整地址缓存；完整 IR/OS 门槛未关闭） |
-| X5 36 位物理地址/设备 | X3；最终合并 X4 | 高位 MMIO、4 GiB 以上的 RAM 重映射（总量 ≤ wasm32 可用）、DMA 地址宽度、快照 | L | R-x64-UP | **实施中**（36 位物理总线、VirtIO/IDE/DMA、整机快照；`high_memory_size` 经 SeaBIOS E820 交给 OS，Linux 在 4 GiB 以上分配并校验用户页） |
-| XC x64 × 多核集成 | X4、X5、C3 | C2/C3 的矩阵在 x64 OS 上通过 | L | R-x64-SMP | **实施中**（x64 Linux 在 2/4 核上线全部 AP；OS 探针结果见 XC 记录） |
+| X1 64 位状态/解码 | P2a | 模式矩阵、REX/寄存器/地址尺寸单测通过 | L | — | **已通过**（宽状态 bank；33,088 个地址形式 + 349,888 行整个长模式 opcode map 与 iced-x86 独立对照一致） |
+| X2 MMU/异常/系统状态 | X1 | 长模式切换、分页/NX/异常帧测试通过 | XL | — | **主要门槛已通过**（61 个 QEMU 差分 + 14 个 SDM 断言：离开/重进长模式、异常优先级、#DF 经 IST、NMI 阻塞、CR8/TPR、调试异常组合；长模式三重故障用例待补） |
+| X3 64 位解释器闭环 | X2、A2 | 单核 x64 OS + 32 位进程，无 JIT 正确运行 | XL | — | **OS 门槛已通过**（Alpine x86_64 1 核解释器：64/32 位探针、XC 矩阵、reboot 与 poweroff 到 S5；1,552 整数 + 958 向量用例（QEMU 差分为主，少数 SDM 断言）；opcode 执行矩阵 0 不一致）；网络 I/O 未测，Windows x64 无镜像未验收 |
+| X4 IR 各层 x64 | X3 | 解释器/Tier-0/区域管线差分和 OS 回归通过 | XL | — | **Tier-0 级已通过**（x64 页层：差分模糊、系统/SMC/别名场景、1/2/4 核 Linux；32 位 IR suite 无回归）；x64 区域管线与兼容模式编译未实施 |
+| X5 36 位物理地址/设备 | X3；最终合并 X4 | 高位 MMIO、4 GiB 以上的 RAM 重映射（总量 ≤ wasm32 可用）、DMA 地址宽度、快照 | L | R-x64-UP | **主要门槛已通过**（36 位物理总线、VirtIO/IDE/DMA、整机快照；`high_memory_size` 经 SeaBIOS E820 交给 OS；4 GiB 以上的代码/页表/SMC 在解释器与页层下通过）；v86gl 高地址未完成 |
+| XC x64 × 多核集成 | X4、X5、C3 | C2/C3 的矩阵在 x64 OS 上通过 | L | R-x64-SMP | **Linux 矩阵已通过**（1/2/4 核页层与 1/2 核解释器：拓扑、迁移、跨核信号/SMC、TLB shootdown、O_DIRECT；页层下另有整机快照与 reboot/S5）；Windows x64 无镜像 |
 | A3 睡眠/休眠 | A2；S4 另需磁盘持久化策略；多核 S3 需 C3 | S4（OS 主导 soft-off + 恢复）与 S3 在单核/多核下闭环 | L | R-ACPI 完整 | 待实施 |
 | W0 显式上下文 ABI | XC | ctx_ptr ABI、静态状态逐项归属；单线程行为与性能不回退 | XL | — | 待实施 |
 | W1 宿主并行正确性 | W0、A3 | Worker/共享内存/同步内存模型通过验证 | XL | — | 待实施 |
@@ -315,11 +315,11 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **修改范围**：CPU 寄存器/模式、`gen/x86_table.js`、解释器生成器、共享 decode/modrm/prefix、IR 前端类型和覆盖目录。
 
-- [ ] 增加 16×u64 GPR、16×XMM、RIP、64 位 FS/GS base、GDTR/IDTR base、CR/DR/MSR；x87 指针及 FXSAVE 格式同步审计。
-- [ ] 建立明确 `Real/VM86/Protected16/Protected32/Compatibility16/Compatibility32/Long64` 模式；将 operand/address/stack size 与 CPL、EFER、CS.L/CS.D 分开。
-- [ ] 实现 REX 顺序规则和 8 位寄存器选择、R8–R15、RIP-relative、SIB、moffs64、imm64/imm32 sign-extend、默认操作数尺寸及 0x66/0x67；保留 15-byte 指令限制。
-- [ ] 在 64-bit 子模式中，写 EAX 清零 RAX 高位，写 AX/AL 保留其他位；legacy/compat 模式及切换时的上半部行为另按规范测试，不能无条件复用清高位 accessor。REX 与 AH/BH/CH/DH 的规则覆盖到所有指令族。长模式无效编码精确 #UD，不能误执行 legacy opcode。
-- [ ] 多页取指失败与错误优先级测试；编译解码和运行时解码使用同一模式规则，编译不能触发 MMIO/guest 异常。
+- [x] 增加 16×u64 GPR、16×XMM、RIP、64 位 FS/GS base、GDTR/IDTR base、CR/DR/MSR；x87 指针及 FXSAVE 格式同步审计。
+- [x] 建立明确 `Real/VM86/Protected16/Protected32/Compatibility16/Compatibility32/Long64` 模式；将 operand/address/stack size 与 CPL、EFER、CS.L/CS.D 分开。
+- [x] 实现 REX 顺序规则和 8 位寄存器选择、R8–R15、RIP-relative、SIB、moffs64、imm64/imm32 sign-extend、默认操作数尺寸及 0x66/0x67；保留 15-byte 指令限制。
+- [x] 在 64-bit 子模式中，写 EAX 清零 RAX 高位，写 AX/AL 保留其他位；legacy/compat 模式及切换时的上半部行为另按规范测试，不能无条件复用清高位 accessor。REX 与 AH/BH/CH/DH 的规则覆盖到所有指令族。长模式无效编码精确 #UD，不能误执行 legacy opcode。（2026-09-28：长模式无效编码由 X3 opcode 执行矩阵在 349,888 个编码上验证。）
+- [x] 多页取指失败与错误优先级测试；编译解码和运行时解码使用同一模式规则，编译不能触发 MMIO/guest 异常。（X4 页层用同一 `decode_with` 解码后备页字节，不经 MMIO、不交付异常。）
 
 **退出条件**：模式×前缀×地址形式 corpus 和独立 decoder 交叉检查；含全 1、高 32 位非零、canonical 边界的操作数不被截断。此时还不能将 LM 位公布给普通 OS。
 
@@ -327,14 +327,14 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **修改范围**：`paging.rs`、`cpu/memory.rs`、系统/控制寄存器指令、描述符/异常交付、`ir/runtime/snapshot.rs`。
 
-- [ ] 先实现微内核需要的最小 64 位解释器切片：寄存器/内存 MOV、基础算术、跳转、栈和控制寄存器操作，并配独立参考测试。X2 的系统验收依赖这个切片；X3 再补齐全部指令，不能等待 X3 完成后才具备运行 X2 fixture 的能力。
-- [ ] 实现 EFER.LME/LMA/NXE/SCE、CR0.PE/PG、CR4.PAE、CR3、CS.L/CS.D 的合法迁移和 #GP；退出长模式、compat 模式和 legacy 模式均有往返测试。
-- [ ] 实现四级 walker、4 KiB/2 MiB 页，明确拒绝未公布的页尺寸；累积 R/W、U/S、NX、A/D、CR0.WP 和 reserved-bit 检查。PAE/NX/物理高位共用一致规则。
-- [ ] 替换 32 位线性页直接索引 TLB：使用有界 tag/set 或稀疏缓存，tag 含完整线性页、访问权限和地址空间 epoch；禁止按 48 位页号分配全量数组。
-- [ ] canonical 检查、CR2、PF error code（包括 instruction fetch/NX）、页表项高位、跨页读写/栈/取指的异常和部分提交语义分别测试。#SS/#GP/#PF 的区分按实际操作规范处理。
-- [ ] 长模式 IDT gate、64 位 TSS/RSPn/IST、IRETQ、特权级转换、NMI 阻塞/解阻塞、double fault/triple fault；不能沿用 32 位 task switch 作为 long-mode 中断机制。
-- [ ] CR8/TPR、FS/GS/KERNEL_GS_BASE、STAR/LSTAR/SFMASK、APIC_BASE、TSC/MSR 策略同步实现；CSTAR 的读写/保留行为按选定 Intel profile 冻结，不套用 AMD 的 compat SYSCALL 入口。未知或保留位写入按选定 profile 故障，debug/release 行为一致。
-- [ ] 运行时 walker 和编译代码快照共享无副作用的页表判定规则；编译快照不设置 A/D 位、不代替执行交付异常，并保留完整高物理页依赖。
+- [x] 先实现微内核需要的最小 64 位解释器切片：寄存器/内存 MOV、基础算术、跳转、栈和控制寄存器操作，并配独立参考测试。X2 的系统验收依赖这个切片；X3 再补齐全部指令，不能等待 X3 完成后才具备运行 X2 fixture 的能力。
+- [x] 实现 EFER.LME/LMA/NXE/SCE、CR0.PE/PG、CR4.PAE、CR3、CS.L/CS.D 的合法迁移和 #GP；退出长模式、compat 模式和 legacy 模式均有往返测试。（2026-09-28：新增离开长模式再重进的 QEMU 往返用例。）
+- [x] 实现四级 walker、4 KiB/2 MiB 页，明确拒绝未公布的页尺寸；累积 R/W、U/S、NX、A/D、CR0.WP 和 reserved-bit 检查。PAE/NX/物理高位共用一致规则。
+- [x] 替换 32 位线性页直接索引 TLB：使用有界 tag/set 或稀疏缓存，tag 含完整线性页、访问权限和地址空间 epoch；禁止按 48 位页号分配全量数组。
+- [x] canonical 检查、CR2、PF error code（包括 instruction fetch/NX）、页表项高位、跨页读写/栈/取指的异常和部分提交语义分别测试。#SS/#GP/#PF 的区分按实际操作规范处理。（2026-09-28：跨页读、PUSH 跨入不存在页、取指跨页、MOVAPS #GP 先于 #PF 等优先级用例。）
+- [ ] 长模式 IDT gate、64 位 TSS/RSPn/IST、IRETQ、特权级转换、NMI 阻塞/解阻塞、double fault/triple fault；不能沿用 32 位 task switch 作为 long-mode 中断机制。（进展：IST、IRETQ、调用门特权转换、#PF 交付中缺页→#DF 经 IST、NMI 在处理程序中阻塞并由 IRETQ 解阻塞均有 QEMU 用例；长模式三重故障用例待补。）
+- [ ] CR8/TPR、FS/GS/KERNEL_GS_BASE、STAR/LSTAR/SFMASK、APIC_BASE、TSC/MSR 策略同步实现；CSTAR 的读写/保留行为按选定 Intel profile 冻结，不套用 AMD 的 compat SYSCALL 入口。未知或保留位写入按选定 profile 故障，debug/release 行为一致。（进展：FS/GS/KERNEL_GS_BASE、SWAPGS、STAR/LSTAR/SFMASK、TSC_AUX、PAT、IA32_ARCH_CAPABILITIES 已实现并测试；CR8↔APIC TPR 别名有 QEMU 用例、保留位 #GP 有 SDM 断言；APIC_BASE 与 debug/release 一致性未单独验证。）
+- [x] 运行时 walker 和编译代码快照共享无副作用的页表判定规则；编译快照不设置 A/D 位、不代替执行交付异常，并保留完整高物理页依赖。（X4 页层不快照页表：编译只读后备物理页字节，所有访存在运行时经 x64 TLB/JAC 翻译，失败时 RETRY 由解释器交付异常。）
 
 **退出条件**：独立微内核能够进入/退出 long mode，触发并验证页故障/IST/NMI/CPL 转换，QEMU 对比的故障 RIP/向量/错误码/CR2/可见写入一致。x86 语义按 [Intel SDM](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) 对应指令及系统章节逐项建立测试依据。
 
@@ -342,12 +342,12 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **修改范围**：整数/分支/栈/string/bit/muldiv/atomic、FPU/SIMD、系统指令、CPUID、加载器与调试输出。
 
-- [ ] 按覆盖矩阵补齐 profile 的所有长模式有效编码：64 位 FLAGS、shift/rotate、128 位乘除中间值、near/far 控制流、64 位栈、REP、LOCK、CMPXCHG16B 等。
-- [ ] 实现 SYSCALL/SYSRET/SWAPGS，处理 non-canonical 目标、flags mask、用户/内核 GS、compat 返回；Intel profile 下 compat 中执行 SYSCALL 应 #UD，SYSRET 从 long64 返回 compat 的路径单独测试。旧 SYSENTER/SYSEXIT 及 INT 路径在新模式中的行为明确且有测试。
-- [ ] XMM8–15、FXSAVE64/FXRSTOR64、MXCSR、对齐异常、x87/SSE 异常屏蔽语义可保存恢复。审计遗留 #DB/#TF/FPU 异常缺口；凡新 profile 依赖或公开的语义都必须补齐，不能用 `Readme` 的旧缺陷条目豁免。
-- [ ] CPUID 0x80000000/01/08、地址位数、LM/NX/SYSCALL/CX16/LAHF 等与实现一致；调试/反汇编/trace 使用完整 RIP，unsupported MSR 不以 host panic 代替 guest fault。
+- [x] 按覆盖矩阵补齐 profile 的所有长模式有效编码：64 位 FLAGS、shift/rotate、128 位乘除中间值、near/far 控制流、64 位栈、REP、LOCK、CMPXCHG16B 等。（2026-09-28：[opcode 执行矩阵](validation/platform/X3/opcode-matrix.zh-CN.md) 349,888 个编码在 CPL3 下与 iced-x86 + CPUID profile 0 不一致。）
+- [ ] 实现 SYSCALL/SYSRET/SWAPGS，处理 non-canonical 目标、flags mask、用户/内核 GS、compat 返回；Intel profile 下 compat 中执行 SYSCALL 应 #UD，SYSRET 从 long64 返回 compat 的路径单独测试。旧 SYSENTER/SYSEXIT 及 INT 路径在新模式中的行为明确且有测试。（进展：SYSCALL/SYSRETQ 往返、SWAPGS、非规范 LSTAR、兼容模式 SYSCALL #UD（SDM 断言）、SYSRET 返回 CPL3 兼容模式再经 SYSENTER 回内核、SYSRETQ 非规范 RCX 在 ring 0 #GP(0)（SDM 断言）均已测；SYSEXIT 的专门用例待补。）
+- [x] XMM8–15、FXSAVE64/FXRSTOR64、MXCSR、对齐异常、x87/SSE 异常屏蔽语义可保存恢复。审计遗留 #DB/#TF/FPU 异常缺口；凡新 profile 依赖或公开的语义都必须补齐，不能用 `Readme` 的旧缺陷条目豁免。
+- [x] CPUID 0x80000000/01/08、地址位数、LM/NX/SYSCALL/CX16/LAHF 等与实现一致；调试/反汇编/trace 使用完整 RIP，unsupported MSR 不以 host panic 代替 guest fault。（profile 另公布 RDTSCP、CLFLUSH 与 IA32_ARCH_CAPABILITIES。）
 - [ ] 优先走 BIOS 磁盘/ISO 引导，不要求 direct bzimage/ELF loader 先支持 x64；旧 direct loader 明确拒绝不支持的输入。后续若公布 x64 direct boot，另加协议测试。
-- [ ] 在 `disable_jit: true` 下运行 x64 Linux：启动到自动测试脚本，运行 64 位程序、32 位兼容程序、系统调用、线程、mmap/mprotect、signals、文件/网络 I/O、重启/关机。兼容程序镜像必须包含对应内核选项和用户库。
+- [ ] 在 `disable_jit: true` 下运行 x64 Linux：启动到自动测试脚本，运行 64 位程序、32 位兼容程序、系统调用、线程、mmap/mprotect、signals、文件/网络 I/O、重启/关机。兼容程序镜像必须包含对应内核选项和用户库。（进展：1 核解释器下启动、64/32 位程序、SYSCALL/vDSO、线程、mmap/mprotect、实时信号、fork/pipe、tmpfs 与 O_DIRECT 文件 I/O、XC 矩阵、reboot 与 poweroff(S5) 均通过；网络 I/O 未测。）
 
 **退出条件**：目标 profile 的解释器矩阵无未说明缺口，单核 Linux/x64 测试完成；独立 Windows x64 目标进入安装/运行验收。仅进入 shell 不能替代指令矩阵。
 
@@ -355,23 +355,25 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **修改范围**：`ir/{hir,state,types,lowering,mir}.rs`、frontend/backend、tier0、helper registry、runtime 的 entry/cache/pages/snapshot/continuation 等。
 
-- [ ] GPR16、XMM16、RIP64、FLAGS64 所需语义贯通 HIR、MIR、StateMap、materialization、helper ABI、Wasm locals；寄存器别名和 fault exit 高位全部保留。
-- [ ] 先允许新指令用正确解释器 helper 执行，未支持的编译路径显式拒绝；再实现 Tier-0 原生模板及区域 lowering。helper 回退属于可接受执行路径，但每种编码必须有明确归属。
-- [ ] mode key 不再只有 `default_32`：包含所有影响解码/执行的模式，或由 guard/epoch 显式保护；缓存入口、page key、物理 witness、RIP/线性地址不得用低 32 位碰撞。
-- [ ] 更新 i64 FLAGS 折叠、移位边界、有符号/无符号比较、扩展/截断、phi copies、CSE/LICM/RAM forwarding 的证明；i64 DIV 的 Wasm trap 不能泄漏为 guest #DE 之外的 host 崩溃。
-- [ ] 准入、链接、批量实例化、热度、SMC、restore、reset 和异步编译取消全部带新 ABI/模式/页 generation；旧模式产物不能在切换长模式后误进入。
-- [ ] 同一 fixture 运行解释器、Tier-0、区域 Tier-1/2：比较提交点的完整架构状态、内存副作用、异常和 MMIO 顺序；再与独立参考核对。
+- [ ] GPR16、XMM16、RIP64、FLAGS64 所需语义贯通 HIR、MIR、StateMap、materialization、helper ABI、Wasm locals；寄存器别名和 fault exit 高位全部保留。（进展：X4 页层是独立的 Tier-0 级编译器，不经 HIR/MIR：16 个 GPR 为 i64 局部变量，EFLAGS 惰性记录，所有出口写回完整 64 位状态；IR/区域管线未扩宽。）
+- [x] 先允许新指令用正确解释器 helper 执行，未支持的编译路径显式拒绝；再实现 Tier-0 原生模板及区域 lowering。helper 回退属于可接受执行路径，但每种编码必须有明确归属。（页层：非模板指令“就地步进”解释器，未能本地完成的访问 RETRY。）
+- [x] mode key 不再只有 `default_32`：包含所有影响解码/执行的模式，或由 guard/epoch 显式保护；缓存入口、page key、物理 witness、RIP/线性地址不得用低 32 位碰撞。（页层函数按后备物理页索引、与位置无关；入口检查 CPL/CS/模式/CR/EFER/IF/TF/DR7/访问缓存 epoch。）
+- [ ] 更新 i64 FLAGS 折叠、移位边界、有符号/无符号比较、扩展/截断、phi copies、CSE/LICM/RAM forwarding 的证明；i64 DIV 的 Wasm trap 不能泄漏为 guest #DE 之外的 host 崩溃。（进展：页层的 i64 标志、移位与比较由随机差分覆盖，DIV/IDIV 在除数为 0、宽被除数或 MIN/−1 时 RETRY 由解释器交付 #DE，不会产生 Wasm trap；区域管线的 phi/CSE/LICM/RAM forwarding 尚无 x64 版本。）
+- [x] 准入、链接、批量实例化、热度、SMC、restore、reset 和异步编译取消全部带新 ABI/模式/页 generation；旧模式产物不能在切换长模式后误进入。（页层：准入、热度、SMC 退役、restore/reset 清空、异步发布取消均按后备页与执行上下文校验；页函数之间没有链接，也不批量实例化。）
+- [ ] 同一 fixture 运行解释器、Tier-0、区域 Tier-1/2：比较提交点的完整架构状态、内存副作用、异常和 MMIO 顺序；再与独立参考核对。（进展：解释器、页层与 QEMU 三方比较已通过（整数、向量、系统、页层场景与差分模糊）；x64 区域管线未实施。）
 
 **退出条件**：x64 高地址及兼容模式切换差分通过；32 位原有 IR suite 无新增回归；真实 OS 分别在默认 Tier-0 与 `ir_tier0:false` 下通过。不得只运行区域后端就宣布默认 JIT 支持 x64。
+
+**实施记录（2026-09-28）**：新增 x64 页层（[`pagegen.rs`](../src/rust/x64/pagegen.rs)、[`pages.rs`](../src/rust/x64/pages.rs)、[`jac.rs`](../src/rust/x64/jac.rs)），取代原生寄存器块成为长模式代码的编译路径：每个 4 KiB 长模式代码页一个与位置无关的 Wasm 函数，`br_table` 分派，GPR 在 i64 局部变量中，EFLAGS 惰性记录，内联访问缓存，非模板指令就地步进解释器，不能本地完成的访问 RETRY。证据：整数/向量/系统 oracle 在页层下通过，`page_fuzz.mjs` 与解释器逐字节差分（最终构建 30 个种子 × 48 个程序），`page_system.mjs` 8 个 QEMU 场景（CPL3、#PF/WP/NX、跨页与同页 SMC、线性别名、STI 影子），`make ir-tests ir-tier0-tests api-tests` 无回归；Alpine x86_64 1/2/4 核启动 1:16/1:52/2:08（解释器约 16/85/140 min）。`ir_tier0:false` 时长模式同样走页层；x64 区域管线与兼容模式（LMA=1、32 位 CS）代码编译未实施，因此 X4 只关闭 Tier-0 级门槛。详见 [X4 页层记录](validation/platform/X4/page-tier.zh-CN.md)。
 
 ### X5：36 位物理地址与设备地址宽度
 
 **修改范围**：GuestPhysicalMemory、TLB/JIT 快路径、fw_cfg/E820、DMA/IDE/virtio/PCI/调试 API、快照分块。
 
-- [ ] 将容量、物理地址、后备块偏移分开。实现低 RAM、PCI hole、4 GiB 以上 RAM 的明确布局；把总容量和 fw_cfg/E820 高位写正确。
-- [ ] RAM 重映射后，不存在的物理页、跨窗口操作有一致行为；低 RAM 快路径必须检查映射 generation，不能缓存过期宿主 view。
+- [x] 将容量、物理地址、后备块偏移分开。实现低 RAM、PCI hole、4 GiB 以上 RAM 的明确布局；把总容量和 fw_cfg/E820 高位写正确。
+- [x] RAM 重映射后，不存在的物理页、跨窗口操作有一致行为；低 RAM 快路径必须检查映射 generation，不能缓存过期宿主 view。
 - [ ] 逐项审计设备地址宽度：32 位 DMA 设备保留其真实限制，64 位 virtio descriptor 地址必须正确处理高位；不能把设备全部强制扩为 64 位，亦不能忽略高位。
-- [ ] RAM 的 CPU/DMA/debug/import 写入走相同代码页失效通知。高 RAM 的页表、代码、数据、MMIO、跨 4 GiB 边界各有 fixture。
+- [x] RAM 的 CPU/DMA/debug/import 写入走相同代码页失效通知。高 RAM 的页表、代码、数据、MMIO、跨 4 GiB 边界各有 fixture。（2026-09-28：`high_memory.mjs` 第二阶段把 CR3 与页表放在 4 GiB 以上，热代码在那里被页层编译后再改写，两种执行模式结果一致。）
 - [ ] 快照、读取内存 API 和镜像导出支持分块，不构造单个超大 JS TypedArray/JSON 数组；所有大小计算审计 signed bitwise 操作。
 
 **退出条件**：小内存 fixture 验证 >4 GiB 物理地址（高位 MMIO、重映射到 4 GiB 以上的 RAM 窗口、跨 4 GiB 边界），由 guest 写入校验、执行高地址代码、做 I/O 和快照恢复；配置总量超过 wasm32 可用范围时在启动前明确拒绝。
@@ -483,9 +485,11 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 - [x] X1 扩宽后的状态区重新生成，换入换出覆盖新增字段；每核 MSR 与 SWAPGS 状态独立（`tests/x64/multicore.mjs` 四核状态/TLB 隔离、CX16、快照）。
 - [x] AP 从实模式经保护模式进入长模式的全过程在每核独立完成；长模式下的 IPI、TLB shootdown、NMI 按 C1/C3 的测试重跑。`tests/x64/multicore.mjs` 在三后端 × 2 种子 × 2 quantum 上新增长模式阶段：64 位 IDT、定向 fixed IPI、发给 HLT 中 AP 的 NMI（核对被中断的 RIP）、all-excluding-self 广播，快照恢复后重放结果一致；真实 Linux 2/4 核 AP 上线，OS 级 TLB shootdown 探针见 XC 记录。
-- [ ] Tier-0/区域后端在 x64 多核下的 SMC 与代码失效沿用 C3 的协议，并加入长模式地址的用例。
+- [x] Tier-0/区域后端在 x64 多核下的 SMC 与代码失效沿用 C3 的协议，并加入长模式地址的用例。（页层：代码页写入经 `jit_dirty_page` 退役函数、所有核的写访问缓存失效；Linux 4 核 XC 矩阵的跨核 SMC 64 轮与 `page_system.mjs` 的 SMC/别名场景通过；x64 区域管线未实施。）
 
 **退出条件**：C2/C3 的 OS 与一致性矩阵在 x64 Linux（含 32 位兼容进程）上通过；Windows x64 目标在有镜像时进入验收。
+
+**实施记录（2026-09-28）**：`linux_probe.c` 新增 XC 矩阵（/sys 拓扑、每线程 24 次迁移、跨核实时信号、跨核 SMC 64 轮、O_DIRECT），64 位与 32 位兼容进程各一遍，先在 QEMU 1/2/4 核上作为参考通过。v86：1/2 核解释器、1/2/4 核页层全部通过（4 核解释器约 140 min，只跑过 XC 矩阵加入前的探针）；4 核页层在探针运行中三次整机快照/恢复后继续通过，随后 reboot 到第二次登录（全部核在线）并 poweroff 进入 ACPI S5。多核下曾出现 poweroff 后未到 S5 的一次挂起，连续复跑的结果见 [XC 记录](validation/platform/XC/linux64-boot.zh-CN.md)。
 
 ### A3：S3、S4 和 ACPI 最终闭环
 

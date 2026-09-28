@@ -95,6 +95,10 @@ pub const x64_fpu_ip_hi: *mut u32 = 1768 as *mut u32;
 pub const x64_fpu_dp_hi: *mut u32 = 1772 as *mut u32;
 pub const x64_pat: *mut u64 = 1776 as *mut u64;
 pub const x64_tsc_aux: *mut u32 = 1784 as *mut u32;
+pub const x64_page_exit: *mut u32 = 1792 as *mut u32;
+pub const x64_jac_base: *mut u32 = 1796 as *mut u32;
+pub const x64_jac_epoch: *mut u64 = 1800 as *mut u64;
+pub const x64_page_linear: *mut u64 = 1808 as *mut u64;
 /// Address of cpu::tlb_data, written at startup. Generated IR code loads it
 /// from this fixed slot (below --global-base) instead of calling an import.
 pub const ir_tlb_base: *mut u32 = 2048 as *mut u32;

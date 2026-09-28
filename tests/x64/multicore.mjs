@@ -35,9 +35,9 @@ async function run(mode, seed, quantum)
         const slice = cpu.run_cpu_slice.bind(cpu);
         cpu.run_cpu_slice = (...args) => {
             const core = cpu.active_core;
-            const before = ex.x64_native_stat(1);
+            const before = ex.x64_page_stat(1);
             const result = slice(...args);
-            native[core] += ex.x64_native_stat(1) - before;
+            native[core] += ex.x64_page_stat(1) - before;
             return result;
         };
         const view = () => new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset, cpu.mem8.length);

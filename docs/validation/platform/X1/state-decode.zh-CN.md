@@ -23,3 +23,21 @@ node gen/state_layout.js --check
 范围限制：当前独立 corpus 广泛覆盖 MOV 地址形式，其他 opcode 的 mode/立即数规则由定向单测验证；它不是整个 opcode 集的独立语义 oracle。X3/X4/X5/XC 分别需要执行、编译、平台与 OS 门槛，不能因本记录而勾选。
 
 架构依据：[Intel SDM Volume 1](https://cdrdv2-public.intel.com/874241/253665-090-sdm-vol-1.pdf) 的 64 位寄存器与零扩展规则，以及 [Volume 2A](https://cdrdv2-public.intel.com/858446/253666-088-sdm-vol-2a.pdf) 的 REX、地址与各指令编码。独立实现：[iced-x86 1.21.0](https://github.com/icedland/iced/releases/tag/v1.21.0)。
+
+## 2026-09-28 续：整个长模式 opcode map 的独立对照
+
+上文 MOV corpus 只覆盖地址形式。现在 `cargo test x64::decode::tests::opcode_map_corpus` 生成整个长模式 opcode 空间：一字节表（除前缀与 0F）、0F、0F38、0F3A 各 256 项 × 11 组前缀（无、66、F2、F3、REX.W、66+REX.W、67、F3+REX.W、REX.B、REX.R、LOCK）× ModRM.reg 0–7 × 4 种 r/m（寄存器、SIB [rsp]、RIP+disp32、SIB+disp8），共 **349,888 行**，写入 `build/x64-decode/opcodes.json`。独立 oracle（`tests/x64/oracle`，iced-x86 1.21.0）逐行比较“是否有效”和指令长度，有效性按 v86 x64 qualification profile 公布的 CPUID 特性过滤（`advertised()`：FPU、MMX、SSE–SSE3、CX8/CX16、CMOV、POPCNT、RDRAND、SYSCALL、RDTSCP、CLFSH、CET_IBT 的 ENDBR 等）。
+
+```sh
+cargo test x64::decode::tests::opcode_map_corpus
+CARGO_TARGET_DIR=build/x64-oracle-target cargo run --manifest-path tests/x64/oracle/Cargo.toml --release
+```
+
+结果：123,947 行在 iced-x86 与该 profile 下有效，v86 解码器对每一行给出相同的有效性和长度；另有 173,771 行是未定义或未公布的 opcode，共享解码器照常给出长度，交由执行器报告 #UD（这一点由 X3 的 opcode 执行矩阵在 CPL3 下逐行验证）。oracle 同时写出 `build/x64-decode/expected.json` 供 X3 矩阵使用。
+
+该对照发现并修正的解码缺陷：
+
+- 0F0D、0F1A、0F1B（hint NOP 空间）、0FB9（UD1）、0FFF（UD0）缺少 ModRM，长度少算。
+- 带不匹配强制前缀的 SSE 表项（0F10–17、0F28–2F、0F50–7F、0FC2–C6、0FD0–FE、0FAE 中未定义的 66/F2/F3 组合）必须是 #UD，而旧 catalog 按无前缀形式执行；现由 `mandatory_prefix_map` 统一判定。
+
+范围：本对照验证解码层面的有效性与长度，不验证语义；语义由 X3 的 QEMU 差分与执行矩阵负责。VEX/EVEX（C4/C5/62）编码在本 profile 中不公布 AVX，均按 #UD 对照。

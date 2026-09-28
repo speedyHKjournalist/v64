@@ -34,10 +34,10 @@ for(const backend of ["tier0", "region"])
     const result = await actual(dir, {...config, options: {disable_jit: false, experimental_smp_jit: true,
         ir_tier0: backend === "tier0", ir_sync_publication: true}, inspect: emulator => {
         const ex = emulator.v86.cpu.wm.exports;
-        retired = ex.x64_native_stat(1); rejected = ex.x64_native_stat(2);
+        retired = ex.x64_page_stat(1); rejected = ex.x64_page_stat(5);
         assert.ok(retired > 1000, "runtime executed actual native instructions");
-        assert.ok(rejected > 0, "low alias SMC rejected an old high RIP entry");
+        assert.ok(rejected > 0, "a write through the low alias retired the page function of the high RIP");
     }});
     assert.deepEqual(result, oracle, backend + " native result agrees with QEMU after SMC");
-    console.log(`PASS ${backend}: ${retired} native retirements, ${rejected} stale entries rejected`);
+    console.log(`PASS ${backend}: ${retired} native retirements, ${rejected} page functions invalidated`);
 }

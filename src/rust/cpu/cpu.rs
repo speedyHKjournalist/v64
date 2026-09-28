@@ -3055,7 +3055,7 @@ pub unsafe fn cycle_internal() -> bool {
             run_long_instruction();
             return false;
         }
-        let attempt = crate::x64::cache::run(4096);
+        let attempt = crate::x64::pages::run(4096);
         if attempt.retired == 0 { run_long_instruction(); }
         return attempt.submitted;
     }
@@ -3222,7 +3222,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
 
 /// The wide interpreter is the authoritative fallback until wide native IR
 /// has passed its own admission/differential gates.
-unsafe fn run_long_instruction() {
+pub unsafe fn run_long_instruction() {
     let trap = *flags & FLAG_TRAP != 0;
     let resume = *flags & FLAG_RF != 0;
     crate::cpu::execution::begin_instruction();
@@ -3269,7 +3269,7 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
         let count = *instruction_counter;
         *slice_budget = remaining;
         if crate::x64::state::mode().is_long() {
-            let attempt = if native { crate::x64::cache::run(remaining) } else { crate::x64::cache::Attempt { retired: 0, submitted: false } };
+            let attempt = if native { crate::x64::pages::run(remaining) } else { crate::x64::pages::Attempt { retired: 0, submitted: false } };
             if attempt.retired == 0 { run_long_instruction(); }
             remaining = remaining.saturating_sub(attempt.retired.max(1));
             if attempt.submitted { break; }

@@ -122,6 +122,12 @@ export const STATE_FIELDS = [
     { name: "x64_fpu_dp_hi", offset: 1772, rust: "u32", size: 4, owner: "core" },
     { name: "x64_pat", offset: 1776, rust: "u64", size: 8, owner: "core" },
     { name: "x64_tsc_aux", offset: 1784, rust: "u32", size: 4, owner: "core" },
+    // x64 page functions (src/rust/x64/pages.rs): written by the runtime
+    // immediately before an activation and read by generated code.
+    { name: "x64_page_exit", offset: 1792, rust: "u32", size: 4, owner: "scratch", note: "why the last page function returned" },
+    { name: "x64_jac_base", offset: 1796, rust: "u32", size: 4, owner: "scratch", note: "access cache read table of the active core and CPL" },
+    { name: "x64_jac_epoch", offset: 1800, rust: "u64", size: 8, owner: "scratch", note: "tag bits of the active core's access cache epoch" },
+    { name: "x64_page_linear", offset: 1808, rust: "u64", size: 8, owner: "scratch", note: "linear address of the page a page function runs at" },
     { name: "ir_tlb_base", offset: 2048, rust: "u32", size: 4, owner: "machine",
         doc: ["Address of cpu::tlb_data, written at startup. Generated IR code loads it", "from this fixed slot (below --global-base) instead of calling an import."] },
 ];
@@ -146,7 +152,7 @@ export const STATICS = {
     "cpu/execution.rs": { execution_state: "machine", CORE_STATISTICS: "core", JIT_ACCOUNTED_DISPATCHES: "scratch" },
     "cpu/fpu.rs": { X87_JIT_CACHE: "machine" },
     "cpu/ioapic.rs": { IOAPIC: "machine" },
-    "cpu/instructions_0f.rs": { X64_TEST_CAPABILITIES: "machine" },
+    "cpu/instructions_0f.rs": { X64_TEST_CAPABILITIES: "machine", X64_ARCH_CAPABILITIES: "machine" },
     "cpu/memory.rs": { mem8: "machine", vga_mem8: "machine", vga_memory_size: "machine", ram_fast_limit: "machine" },
     "cpu/pic.rs": { PIC: "machine" },
     "cpu/vga.rs": { dest_buffer: "machine", dirty_bitmap: "machine" },
@@ -178,7 +184,7 @@ export const STATICS = {
         PAGE_HEAT: "machine", SCHEDULER: "machine", T0_RANGES: "machine", TIER0: "machine", RESERVED: "machine",
     },
     "ir/runtime/tier0.rs": { COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine" },
-    "jit.rs": { JIT_STATE: "machine" },
+    "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
     "profiler.rs": Object.fromEntries([
         "PERFORMANCE_BATCH_CHUNKS", "PERFORMANCE_CODEGEN", "PERFORMANCE_COUNTDOWN", "PERFORMANCE_COUNTERS", "PERFORMANCE_EXECUTION",
         "PERFORMANCE_NEXT_SAMPLE", "PERFORMANCE_PENDING_ROW", "PERFORMANCE_PREVIOUS_CHUNKS", "PERFORMANCE_RANDOM",
@@ -193,6 +199,12 @@ export const STATICS = {
     "x64/physical.rs": { PHYSICAL_BUS: "machine" },
     "x64/memory.rs": { X64_TLBS: "core" },
     "x64/cache.rs": { CACHE: "cache" },
+    // page functions and their bookkeeping; entries re-check the live translation
+    "x64/pages.rs": { RUNTIME: "machine", FAST: "machine", ACTIVE: "scratch", CODE_WRITES: "machine", STEPS: "debug", ACCESS_REFUSED: "debug", STEP_PROFILE: "debug",
+        // per core, tagged with that core's access cache epoch
+        CODE_TLB: "cache" },
+    // derived from each core's x64 TLB (flushed with it)
+    "x64/jac.rs": { JAC: "cache" },
     "x64/execute.rs": { DECODE_CACHE: "cache" },
     "x64/debug.rs": { PENDING: "scratch" },
     "x64/profile.rs": { PERIOD: "debug", COUNTDOWN: "debug", SAMPLES: "debug" },

@@ -64,12 +64,56 @@ fault("far JMP to DPL3 code from CPL0", "jmp far dword [rel .ptr]\n.ptr: dd 0\nd
 fault("call gate to 32-bit code", gate(".entry", "0x08") + "\ncall far dword [rel .ptr]\n.ptr: dd 0\ndw 0x48\n.entry:\nnop", 13, 8);
 fault("call gate above the GDT limit", "call far dword [rel .ptr]\n.ptr: dd 0\ndw 0x58", 13, 0x58);
 
+// Leaving long mode (SDM Vol.3A §10.8.5): compatibility code, paging off
+// (LMA clears), LME off, legacy protected mode, and back.
+add("leave long mode through compatibility code and re-enter", "push 8\nmov eax,.compat\npush rax\no64 retf\nbits 32\n.compat:\nmov eax,cr0\nand eax,0x7FFFFFFF\nmov cr0,eax\nmov ecx,0xC0000080\nrdmsr\nand eax,~0x100\nwrmsr\nrdmsr\nmov esi,eax\nmov edi,0x13579BDF\nor eax,0x100\nwrmsr\nmov eax,cr0\nor eax,0x80000000\nmov cr0,eax\njmp 0x18:.long_again\nbits 64\n.long_again:\nmov rax,HIGH+.high\njmp rax\n.high:\nmov ecx,0xC0000080\nrdmsr\nmov rbx,rsi\nmov rcx,rdi\nmov edx,eax\nxor eax,eax");
+// Priority among simultaneous exceptions (SDM Vol.3A §6.9, instruction tables).
+add("MOVAPS alignment #GP precedes the page fault", "lea rax,[rel .resume]\nmov [0x500010],rax\nmov rdx,cr4\nbts rdx,9\nmov cr4,rdx\nmov rax,0x40000008\nmovaps xmm0,[rax]\n.resume:\nmov rdx,cr4\nbtr rdx,9\nmov cr4,rdx\nxor edx,edx");
+add("SSE without OSFXSR is #UD even with CR0.TS", "lea rax,[rel .resume]\nmov [0x500010],rax\nmov rdx,cr0\nbts rdx,3\nmov cr0,rdx\nmovaps xmm0,xmm1\n.resume:\nmov rdx,cr0\nbtr rdx,3\nmov cr0,rdx\nxor edx,edx");
+add("SSE with OSFXSR and CR0.TS is #NM", "lea rax,[rel .resume]\nmov [0x500010],rax\nmov rdx,cr4\nbts rdx,9\nmov cr4,rdx\nmov rdx,cr0\nbts rdx,3\nmov cr0,rdx\nmovaps xmm0,xmm1\n.resume:\nmov rdx,cr0\nbtr rdx,3\nmov cr0,rdx\nmov rdx,cr4\nbtr rdx,9\nmov cr4,rdx\nxor edx,edx");
+add("x87 with CR0.TS is #NM; WAIT only with CR0.MP", "lea rax,[rel .first]\nmov [0x500010],rax\nmov rdx,cr0\nbts rdx,3\nmov cr0,rdx\nfwait\ninc ecx\nfld1\n.first:\nmov rbx,[0x500020]\nlea rax,[rel .second]\nmov [0x500010],rax\nmov rdx,cr0\nbts rdx,1\nmov cr0,rdx\nfwait\ninc ecx\n.second:\nmov rdx,cr0\nand edx,~0xA\nmov cr0,rdx\nfninit\nxor edx,edx");
+add("cross-page read faults at the second page", "lea rax,[rel .resume]\nmov [0x500010],rax\nmov rax,0x3FFFFFFC\nmov rbx,[rax]\n.resume:\nxor eax,eax");
+const small_pages = "mov qword [0x202060],0x208007\nmov qword [0x208000],0x1800007\nmov qword [0x208008],0\nmov eax,0x1800000\ninvlpg [rax]\nadd eax,0x1000\ninvlpg [rax]\n";
+add("PUSH crossing into a not-present page leaves RSP", "lea rax,[rel .resume]\nmov [0x500010],rax\nmov byte [rel idt+14*16+4],1\n" + small_pages + "mov rcx,rsp\nmov rsp,0x1801004\nmov rax,0x1122334455667788\npush rax\n.resume:\nmov rdx,rsp\nmov rsp,rcx\nmov byte [rel idt+14*16+4],0\nxor eax,eax\nxor ecx,ecx");
+add("instruction fetch crossing into a not-present page", "lea rax,[rel .resume]\nmov [0x500010],rax\n" + small_pages + "mov dword [0x1800FFE],0x223344B8\nmov eax,0x55\nmov rcx,0x1800FFE\njmp rcx\n.resume:\nxor ecx,ecx");
+add("code breakpoint precedes the fetch page fault", "lea rax,[rel .resume]\nmov [0x500010],rax\nxor eax,eax\nmov dr6,rax\nmov rax,0x40000000\nmov dr0,rax\nmov eax,1\nmov dr7,rax\nmov rax,0x40000000\njmp rax\n.resume:\nxor edx,edx\nmov dr7,rdx\nmov rbx,dr6\nmov dr6,rdx\nxor eax,eax");
+add("single step and a data breakpoint report in one #DB", "lea rax,[rel .resume]\nmov [0x500010],rax\nxor eax,eax\nmov dr6,rax\nmov eax,0x500800\nmov dr0,rax\nmov eax,0x10001\nmov dr7,rax\npush qword 0x102\npopfq\nmov byte [0x500800],1\ninc ecx\n.resume:\nxor edx,edx\nmov dr7,rdx\nmov rbx,dr6\nmov dr6,rdx\nxor eax,eax");
+add("MOV SS delays the single-step trap by one instruction", "lea rax,[rel .resume]\nmov [0x500010],rax\nxor eax,eax\nmov dr6,rax\nmov eax,0x10\npush qword 0x102\npopfq\nmov ss,ax\ninc ecx\ninc edx\n.resume:\nmov rbx,dr6\nxor eax,eax\nmov dr6,rax");
+add("single step does not trap a faulting instruction", "lea rax,[rel .resume]\nmov [0x500010],rax\nxor eax,eax\nmov dr6,rax\npush qword 0x102\npopfq\nmov rbx,[0x40000000]\n.resume:\nmov rbx,dr6\nxor eax,eax\nmov dr6,rax");
+// A #PF while pushing the frame of a #PF escalates to #DF (SDM Vol.3A
+// §6.15, Table 6-5), delivered on IST1; the saved RIP/RSP of #DF are
+// undefined, so only vector, error code and CR2 are compared.
+// SYSRET without REX.W (SDM Vol.2B SYSRET): CS = STAR[63:48]|3 as 32-bit
+// code, SS = +8, EIP = ECX (high RCX ignored), RFLAGS from R11. In
+// compatibility mode 0x40 is INC EAX (in 64-bit mode a REX prefix); SYSENTER
+// returns to the kernel.
+add("SYSRET to compatibility mode and SYSENTER back", "mov ecx,0xC0000081\nxor eax,eax\nmov edx,0x00200018\nwrmsr\nmov ecx,0x174\nmov eax,0x18\nxor edx,edx\nwrmsr\nmov ecx,0x175\nmov eax,0x3F0000\nwrmsr\nmov ecx,0x176\nlea rax,[rel .entry64]\nmov rdx,rax\nshr rdx,32\nwrmsr\nmov r11,0x43\nmov eax,.compat\nmov rcx,0x5A5A5A5A00000000\nor rcx,rax\nsysret\nbits 32\n.compat:\nlahf\nmov ecx,eax\nmov ebx,cs\nmov edx,ss\nmov eax,0x13572467\ninc eax\nsysenter\nbits 64\n.entry64:\nmov esi,0x10\nmov ss,si\nmovzx ecx,ch");
+// Intel SYSRET checks RCX before leaving ring 0 (SDM Vol.2B SYSRET): #GP(0)
+// with CPL, CS and RSP unchanged.
+fault("SYSRETQ to a noncanonical RIP", "mov ecx,0xC0000081\nxor eax,eax\nmov edx,0x00200018\nwrmsr\nmov r11,2\nmov rcx,0x0000800000000000\no64 sysret", 13);
+// The APIC page: PDPT[3] -> PD at 0x209000, 2 MiB UC page at 0xFEE00000
+// (a register source: a qword store sign-extends imm32).
+const map_apic = "mov qword [0x201018],0x209003\nmov eax,0xFEE0009B\nmov [0x209000+503*8],rax\nmov rax,cr3\nmov cr3,rax\nmov esi,0xFEE00000\n";
+const unmap_apic = "mov qword [0x201018],0\nmov rax,cr3\nmov cr3,rax\n";
+// NMI blocking (SDM Vol.3A §6.7.1): a self-NMI through the ICR enters
+// handler_2, which sends a second one; it stays pending until IRETQ.
+add("second NMI is held until IRETQ", map_apic + "mov dword [rsi+0x310],0\nmov dword [rsi+0x300],0x4400\nmov r8d,1000000\n.wait:\ncmp ebx,2\nje .done\ndec r8d\njnz .wait\n.done:\nxor edx,edx\ntest r8d,r8d\nsetnz dl\n" + unmap_apic + "xor eax,eax");
+// CR8 is TPR[7:4] of the local APIC (SDM Vol.3A §10.8.6.1).
+add("CR8 aliases the local APIC TPR", map_apic + "add esi,0x80\nmov eax,5\nmov cr8,rax\nmov ebx,[rsi]\nmov dword [rsi],0x3F\nmov rcx,cr8\nxor eax,eax\nmov cr8,rax\nmov edx,[rsi]\n" + unmap_apic + "xor eax,eax");
+fault("CR8 reserved bits", "mov eax,16\nmov cr8,rax", 13);
+// SYSCALL outside 64-bit mode is #UD on Intel (SDM Vol.2B SYSCALL: CS.L = 0).
+// The #UD handler returns to .back, still in compatibility mode.
+add("SYSCALL in compatibility mode is #UD", "mov eax,.back\nmov [0x500010],rax\npush 8\nmov eax,.compat\npush rax\no64 retf\nbits 32\n.compat:\nsyscall\n.back:\njmp 0x18:.long\nbits 64\n.long:\nmov rax,HIGH+.high\njmp rax\n.high:\nmov eax,6\nxor ebx,ebx");
+add("page fault while delivering a page fault is a double fault on IST", "lea rax,[rel .resume]\nmov [0x500010],rax\nmov rcx,rsp\nmov rsp,0x40001000\nmov rbx,[0x40000100]\n.resume:\nmov rsp,rcx\nxor eax,eax\nxor ecx,ecx\nxor edx,edx\nmov qword [0x500038],0");
 // QEMU 10.2 does not implement these control-write faults (misc_helper.c).
 // Check them against explicit SDM outcomes in a separate v86 guest.
 const specification_cases = cases.splice(5, 5);
 // QEMU 10.2's lcall helper lowers RSP by the pushed CS:RIP before raising
 // #GP for a noncanonical target; SDM Vol.3A §6.5 restores it for a fault.
-for(const name of ["noncanonical stack operand", "reserved physical address bit in large leaf", "far CALL noncanonical 64-bit offset"])
+// QEMU 10.2 helper_write_crN passes any CR8 value to the TPR (SDM: #GP).
+// QEMU 10.2 TCG accepts SYSCALL whenever EFER.LMA is set, compatibility mode included.
+// QEMU 10.2 SYSRETQ to a noncanonical RIP faults at CPL3 like AMD, not #GP(0) in ring 0.
+for(const name of ["noncanonical stack operand", "reserved physical address bit in large leaf", "far CALL noncanonical 64-bit offset", "CR8 reserved bits", "SYSCALL in compatibility mode is #UD", "SYSRETQ to a noncanonical RIP"])
     specification_cases.push(...cases.splice(cases.findIndex(test => test.name === name), 1));
 // QEMU 10.2 TCG never reaches the result marker once a DR0 data watchpoint
 // hits a high linear address, so these use SDM Vol.3B §18.2.4/§18.3.1.2
@@ -78,6 +122,8 @@ const expectation_cases = [];
 for(const [name, rax, rbx] of [
     ["high data write breakpoint traps after committed store", 0x1122334455667788n, 0xFFFF0FF1n],
     ["high data read breakpoint traps after register commit", 0x1122334455667788n, 0xFFFF0FF1n],
+    // SDM Vol.3B §18.2.3: one #DB after the store reports both BS and B0.
+    ["single step and a data breakpoint report in one #DB", 0n, 0xFFFF4FF1n],
 ])
 {
     const index = cases.findIndex(test => test.name === name);
@@ -180,7 +226,10 @@ mov byte [rdi+4],%2
 %endmacro
 GATE 0,0
 GATE 1,0
+GATE 2,0
 GATE 6,0
+GATE 7,0
+GATE 8,1
 GATE 12,0
 GATE 13,0
 GATE 14,0
@@ -201,11 +250,25 @@ jmp common_handler
 HANDLER 0,0
 HANDLER 1,0
 HANDLER 6,0
+HANDLER 7,0
+HANDLER 8,1
 HANDLER 12,1
 HANDLER 13,1
 HANDLER 14,1
 HANDLER 64,0
 HANDLER 65,0
+handler_2:
+inc ebx
+cmp ebx,1
+jne .out
+mov dword [rsi+0x300],0x4400
+mov r9d,20000
+.hold:
+dec r9d
+jnz .hold
+mov ecx,ebx
+.out:
+iretq
 common_handler:
 push rax
 mov rax,[rsp+8]
@@ -276,7 +339,7 @@ if(!process.env.X64_ORACLE_ONLY)
         if(test.name === "far CALL noncanonical 64-bit offset")
             assert.equal(result.readBigUInt64LE(at + 56), 0x3F0000n - 40n, test.name + " restores RSP");
     }
-    console.log(`PASS: ${specification_cases.length} SDM control-write fault cases (QEMU reference unavailable)`);
+    console.log(`PASS: ${specification_cases.length} SDM fault cases (QEMU reference differs or is unavailable)`);
 
     const watch = assemble("system-data-breakpoints", source_for(expectation_cases));
     const observed = await actual(watch, {length: 8 + expectation_cases.length * 64});

@@ -10,5 +10,8 @@ pub mod execute;
 pub mod vector;
 pub mod compiler;
 pub mod cache;
+pub mod jac;
+pub mod pagegen;
+pub mod pages;
 pub mod debug;
 pub mod profile;

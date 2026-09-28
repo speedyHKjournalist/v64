@@ -19,8 +19,8 @@ pub unsafe fn begin() -> Result<(), Fault> {
             && state::read_dr(index) == state::read_rip() { matched |= 1 << index; }
     }
     if matched != 0 {
-        // Translation faults precede an execution breakpoint on that address.
-        super::memory::fetch(state::read_rip())?;
+        // A code breakpoint fault precedes faults from fetching the
+        // instruction (SDM Vol.3A §6.9, Table 6-2: priority 7 before 8).
         state::write_dr(6, state::read_dr(6) | matched);
         state::write_dr(7, control & !0x2000);
         state::write_flags64(state::read_flags64() | 0x10000);

@@ -670,6 +670,23 @@ x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/native_oracle.mjs
 	node tests/x64/cache_oracle.mjs
 
+# The x64 page tier (x64::pagegen/pages, X4): QEMU and interpreter references,
+# and random programs compared with the interpreter.
+x64-page-tier-tests: build/v86-debug.wasm
+	X64_JIT=1 node tests/x64/integer_oracle.mjs
+	X64_JIT=tier0 node tests/x64/vector_oracle.mjs
+	X64_JIT=1 node tests/x64/system_oracle.mjs
+	X64_JIT=1 X64_IR_TIER0=0 node tests/x64/system_oracle.mjs
+	node tests/x64/page_system.mjs
+	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
+	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
+	PAGE_FUZZ_SEED=3 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
+
+# Every long-mode encoding of the opcode map executed at CPL3 (X3); needs the
+# expectations written by x64-decode-tests.
+x64-opcode-matrix-tests: build/v86-debug.wasm x64-decode-tests
+	node tests/x64/opcode_matrix.mjs
+
 highmem-tests: build/v86-debug.wasm
 	node tests/smp/physical_bus.mjs
 	node tests/smp/virtio_high_dma.mjs
@@ -683,15 +700,21 @@ x64-multicore-tests: build/v86-debug.wasm
 x64-guest-tests: build/v86-debug.wasm
 	X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
 	X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+	X64_JIT=1 X64_LINUX_SNAPSHOT=1 X64_LINUX_LIFECYCLE=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
 	X64_HIGH_MEMORY=134217728 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
-	X64_HIGH_MEMORY=134217728 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+	X64_HIGH_MEMORY=134217728 X64_JIT=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
 
 x64-multicore-guest-tests: build/v86-debug.wasm
 	X64_CORES=4 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
-	X64_CORES=2 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
-	X64_CORES=4 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+	X64_CORES=2 X64_JIT=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	X64_CORES=4 X64_JIT=1 X64_LINUX_SNAPSHOT=1 X64_LINUX_LIFECYCLE=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
 
-.PHONY: x64-decode-tests x64-system-tests x64-differential-tests highmem-tests x64-multicore-tests x64-guest-tests x64-multicore-guest-tests
+# The same Linux configurations on the interpreter alone (hours for 2+ cores).
+x64-guest-interpreter-tests: build/v86-debug.wasm
+	X64_CORES=2 X64_LINUX_TIMEOUT=7200000 node tests/x64/linux_boot.mjs
+	X64_CORES=4 X64_LINUX_TIMEOUT=14400000 node tests/x64/linux_boot.mjs
+
+.PHONY: x64-decode-tests x64-system-tests x64-differential-tests x64-page-tier-tests x64-opcode-matrix-tests highmem-tests x64-multicore-tests x64-guest-tests x64-multicore-guest-tests x64-guest-interpreter-tests
 
 ir-decoder-tests: ir-generated-check
 	cargo test decode::tests -- --nocapture

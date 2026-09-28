@@ -17,9 +17,14 @@ impl Fault {
     pub fn de() -> Self { Self { vector: 0, error: None, address: None } }
 }
 static mut X64_TLBS: [Tlb; 8] = [const { Tlb::new() }; 8];
-pub unsafe fn invalidate_all_tlbs() { for core in 0..8 { X64_TLBS[core].clear(); } }
-pub unsafe fn invalidate_core(core: usize) { X64_TLBS[core].clear(); }
-pub unsafe fn invlpg(address: u64) { X64_TLBS[apic::current_core()].invalidate(LinearAddress(address)); }
+// Compiled-code access cache entries derive from these TLBs: retire them too.
+pub unsafe fn invalidate_all_tlbs() { for core in 0..8 { X64_TLBS[core].clear(); } super::jac::flush_all(); }
+pub unsafe fn invalidate_core(core: usize) { X64_TLBS[core].clear(); super::jac::flush(core); }
+pub unsafe fn invlpg(address: u64) {
+    let core = apic::current_core();
+    X64_TLBS[core].invalidate(LinearAddress(address));
+    super::jac::flush(core);
+}
 
 /// Compilation observes the same stale translations as execution, but never
 /// fills a cache, updates A/D, reads an MMIO page table, or delivers a fault.
@@ -66,7 +71,9 @@ pub unsafe extern "C" fn x64_tlb_snapshot_validate(data: u32, count: u32) -> boo
 #[no_mangle]
 pub unsafe extern "C" fn x64_tlb_snapshot_restore(core: u32, data: u32, count: u32) -> bool {
     if core >= 8 { return false; }
-    snapshot_records(data, count).is_some_and(|records| X64_TLBS[core as usize].restore_snapshot(records))
+    let restored = snapshot_records(data, count).is_some_and(|records| X64_TLBS[core as usize].restore_snapshot(records));
+    if restored { super::jac::flush(core as usize); }
+    restored
 }
 
 pub unsafe fn translate(address: u64, access: Access, stack: bool, supervisor: bool) -> Result<u64, Fault> {

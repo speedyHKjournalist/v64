@@ -205,7 +205,8 @@ pub unsafe fn write_previous_rip(value: u64) {
 pub unsafe fn read_cr(r: usize) -> u64 {
     assert!(r <= 8);
     if r == 8 {
-        *gp::x64_cr8
+        // CR8 is TPR[7:4] of the local APIC, also written through its MMIO.
+        (crate::cpu::apic::read32(0x80) >> 4 & 15) as u64
     } else {
         read_pair(gp::cr.add(r), gp::x64_cr_hi.add(r))
     }

@@ -1570,10 +1570,8 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
     }
     let group = d.modrm.unwrap() >> 3 & 7;
     if d.rm_register.is_some() {
-        if matches!(d.modrm.unwrap(), 0xE8 | 0xF0 | 0xF8) {
-            return Ok(true);
-        }
-        return Ok(false);
+        // LFENCE, MFENCE, SFENCE ignore the r/m field
+        return Ok(group >= 5);
     }
     if group == 7 {
         let (a, s) = address(d);

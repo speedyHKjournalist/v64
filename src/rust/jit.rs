@@ -34,7 +34,7 @@ pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
 }
 
 // needs to be synced to const.js
-pub const WASM_TABLE_SIZE: u32 = 900;
+pub const WASM_TABLE_SIZE: u32 = 2400;
 
 static JIT_STATE: Mutex<MaybeUninit<JitState>> = Mutex::new(MaybeUninit::uninit());
 fn get_jit_state() -> JitStateRef { JitStateRef(JIT_STATE.try_lock().unwrap()) }
@@ -113,6 +113,7 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         profiler::stat_increment(stat::DIRTY_PAGE_DID_NOT_HAVE_CODE);
         return;
     }
+    crate::x64::pages::dirty_page(page.to_u32());
     let mut unwatched = HashSet::new();
     let JitState {
         ir_slots,
@@ -170,6 +171,7 @@ pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
     unsafe { crate::x64::cache::x64_native_reset(); }
+    crate::x64::pages::reset();
     crate::ir::runtime::live::invalidate();
     crate::ir::runtime::cache::invalidate();
     crate::ir::runtime::schedule::invalidate();
@@ -178,6 +180,7 @@ fn jit_clear_cache(ctx: &mut JitState) {
         pages_with_code.extend(pages.drain());
     }
     ctx.ir_page_counts.clear();
+    unsafe { (*(&raw mut WATCHED)).clear() };
     for page in pages_with_code {
         cpu::tlb_set_has_code(page, false);
     }
@@ -197,6 +200,28 @@ fn ir_page_count(counts: &mut Vec<u16>, page: Page, delta: i32) {
         counts.resize(index + 1, 0);
     }
     counts[index] = (counts[index] as i32 + delta).max(0) as u16;
+    set_watched(index, counts[index] != 0);
+}
+
+/// Lock-free mirror of `ir_page_counts != 0`, one bit per page, for writers
+/// that must only notify pages holding compiled code (x64::physical).
+static mut WATCHED: Vec<u64> = Vec::new();
+fn set_watched(page: usize, watched: bool) {
+    unsafe {
+        let bits = &mut *(&raw mut WATCHED);
+        if bits.len() <= page / 64 {
+            if !watched {
+                return;
+            }
+            bits.resize(page / 64 + 1, 0);
+        }
+        if watched { bits[page / 64] |= 1 << (page % 64) } else { bits[page / 64] &= !(1 << (page % 64)) }
+    }
+}
+/// Whether IR or x64 page-tier code was compiled from this backing page.
+#[inline(always)]
+pub fn page_watched(page: u32) -> bool {
+    unsafe { (&*(&raw const WATCHED)).get(page as usize / 64).is_some_and(|w| w >> (page % 64) & 1 != 0) }
 }
 
 pub fn ir_cache_quiescent() -> bool { JIT_STATE.try_lock().is_ok() }
@@ -209,6 +234,9 @@ pub fn ir_reserve_slot(id: u64, pages: HashSet<Page>) -> Option<u32> {
     }
     ctx.ir_slots.insert(index, (id, pages.clone()));
     cpu::tlb_set_has_code_multiple(&pages, true);
+    // x64 page functions store through cached write translations of pages
+    // without code; this page may be one of them.
+    unsafe { crate::x64::jac::flush_all() };
     check_jit_state_invariants(&ctx);
     Some(index.to_u16() as u32)
 }

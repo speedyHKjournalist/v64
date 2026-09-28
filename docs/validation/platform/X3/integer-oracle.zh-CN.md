@@ -32,3 +32,5 @@ TEST_RELEASE_BUILD=1 node tests/x64/integer_oracle.mjs
 后续普通编译器/启动路径指令补充：MOVNTI 32/64、PREFETCHT0/T1/T2/NTA/W 对 noncanonical 地址的无 fault hint，以真实 guest 加入同一独立 QEMU 对照。debug 19:51 产物上全部 **1547** 个 case 通过。PREFETCHW 的共享旧 catalog 未标记 ModRM，因此 wide decoder 显式消费完整 ModRM/SIB/位移，并有独立长度测试；不会把后续位移误执行为 opcode。
 
 在 debug 19:56 产物上进一步加入 RDRAND16/32/64 的 FLAGS/宽度执行，以及无 CET 时 ENDBR32/64 的 NOP 语义，全部 **1552** 个真实 guest case 通过；随机数值不与独立随机源比较，读取后用不修改 FLAGS 的 MOV 清除目标，仅比较架构 FLAGS 和未受影响状态。
+
+2026-09-28：`X64_JIT=1` 时整组 1552 个用例重复执行 `X64_REPEAT`（默认 10）遍，后续各遍由 X4 页层的页函数执行（本轮 317 万条原生退休、63 次编译、6,427 次解释步），结果仍与 QEMU 逐字段一致。REP MOVS/STOS 改为按页批量执行后（见 [opcode 矩阵记录](opcode-matrix.zh-CN.md)），全部 REP 用例在两种模式下通过。

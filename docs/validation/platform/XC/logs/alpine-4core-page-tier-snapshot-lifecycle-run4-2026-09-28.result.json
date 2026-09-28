@@ -1,0 +1,233 @@
+{
+ "rounds": 1363548,
+ "rip": "ffffffff815e34f0",
+ "previous_rip": "ffffffff815e2440",
+ "physical_ip": 22951152,
+ "instruction_bytes": "554989ca31c0b9080000004889e54157",
+ "gpr": [
+  "ffff88801e52fde0",
+  "ffff888003954330",
+  "ffff888003954330",
+  "ffff88800557b180",
+  "ffffc9000011ce48",
+  "ffffc9000011ce98",
+  "ffffea00000e5500",
+  "ffff888003843c00",
+  "1",
+  "ffffffff8175fc9a",
+  "ffff888003954330",
+  "ffff888003843c00",
+  "ffffea00000e5500",
+  "ffffc9000011cef8",
+  "0",
+  "0"
+ ],
+ "efer": "d01",
+ "cs_long": 1,
+ "serial_bytes": 30580,
+ "page_tier": {
+  "compiled": 5160,
+  "native": 7442758444,
+  "retries": 3020027,
+  "unknown": 6560,
+  "steps": 17601627,
+  "invalidated": 750,
+  "entries": 117016,
+  "failed": 0,
+  "recompiled": 2449,
+  "instructions": 2057681,
+  "templated": 2043507,
+  "evicted": 0,
+  "live": 411
+ },
+ "diagnostics": {
+  "active_core": 2,
+  "cores": [
+   {
+    "state": "halted",
+    "slices": 554242,
+    "interpreter_steps": 2253493438,
+    "retired_instructions": 2253453354,
+    "rep_elements": 23313476,
+    "faults": 22816,
+    "halt_count": 20241,
+    "runtime_ms": 24206.738034000424,
+    "ipi_sent": 7216,
+    "ipi_received": 12310,
+    "apic_id": 0,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": true,
+    "interrupts_enabled": true,
+    "linear_ip": "0x81e3726f",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   },
+   {
+    "state": "halted",
+    "slices": 442351,
+    "interpreter_steps": 1793945270,
+    "retired_instructions": 1793898985,
+    "rep_elements": 11078462,
+    "faults": 23353,
+    "halt_count": 16747,
+    "runtime_ms": 21131.540685005722,
+    "ipi_sent": 8157,
+    "ipi_received": 8260,
+    "apic_id": 1,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": true,
+    "interrupts_enabled": true,
+    "linear_ip": "0x81e3726f",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   },
+   {
+    "state": "runnable",
+    "slices": 494669,
+    "interpreter_steps": 2030100148,
+    "retired_instructions": 2026923805,
+    "rep_elements": 27911310,
+    "faults": 31408,
+    "halt_count": 13946,
+    "runtime_ms": 24958.893521001057,
+    "ipi_sent": 8475,
+    "ipi_received": 5417,
+    "apic_id": 2,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": false,
+    "interrupts_enabled": true,
+    "linear_ip": "0x815e34f0",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   },
+   {
+    "state": "runnable",
+    "slices": 389521,
+    "interpreter_steps": 1563342179,
+    "retired_instructions": 1563317132,
+    "rep_elements": 5551918,
+    "faults": 21579,
+    "halt_count": 16088,
+    "runtime_ms": 21855.371787001463,
+    "ipi_sent": 7082,
+    "ipi_received": 6347,
+    "apic_id": 3,
+    "apic_irr": [],
+    "apic_isr": [],
+    "apic_tpr": 16,
+    "halted": false,
+    "interrupts_enabled": true,
+    "linear_ip": "0x813aa4aa",
+    "cs": "0x10",
+    "cr0": "0x80050033"
+   }
+  ],
+  "clock": {
+   "mode": "normal",
+   "now_ms": 130713.66504200002,
+   "host_pause_count": 0,
+   "discarded_host_ms": 0,
+   "host_backwards_count": 0,
+   "committed_instructions": 0,
+   "idle_ms": 0
+  },
+  "scheduler": {
+   "quantum": 4096,
+   "seed": 0,
+   "round": 1363548
+  },
+  "cpu": {
+   "mode": "protected16",
+   "paging": true,
+   "pae": true,
+   "cs": "0x10",
+   "eip": "0x815e34f0",
+   "linear_ip": "0x815e34f0",
+   "eflags": "0x287",
+   "cpl": 0,
+   "cr0": "0x80050033",
+   "cr3": "0x2a36000",
+   "cr4": "0x6b0",
+   "halted": false
+  },
+  "apic": {
+   "id": 2,
+   "enabled": true,
+   "software_enabled": true,
+   "tpr": 16,
+   "irr": [],
+   "isr": [],
+   "lvt_timer": "0xec",
+   "lvt_lint0": "0x10700",
+   "lvt_lint1": "0x10400"
+  },
+  "pic": {
+   "master": {
+    "irr": "0x53",
+    "isr": "0x0",
+    "enabled": "0x0",
+    "elcr": "0x0"
+   },
+   "slave": {
+    "irr": "0xd0",
+    "isr": "0x0",
+    "enabled": "0x0",
+    "elcr": "0xc"
+   }
+  },
+  "shared_irq_sources": {},
+  "acpi": {
+   "pm_base": "0x600",
+   "sci_enabled": true,
+   "sci_level": false,
+   "pm1_sts": "0x1",
+   "pm1_en": "0x120",
+   "gpe_sts": "0x0",
+   "gpe_en": "0x0",
+   "soft_off": 0
+  },
+  "acpi_tables": {
+   "rsdp": "0xf8bc0",
+   "revision": 2,
+   "oem_id": "V86   ",
+   "tables": [
+    {
+     "signature": "XSDT",
+     "address": "0x1fffffbc",
+     "length": 52,
+     "checksum_ok": true
+    },
+    {
+     "signature": "FACP",
+     "address": "0x1ffffe20",
+     "length": 244,
+     "checksum_ok": true
+    },
+    {
+     "signature": "FACS",
+     "address": "0x1ffff100",
+     "length": 64,
+     "checksum_ok": true
+    },
+    {
+     "signature": "DSDT",
+     "address": "0x1ffff140",
+     "length": 3296,
+     "checksum_ok": true
+    },
+    {
+     "signature": "APIC",
+     "address": "0x1fffff14",
+     "length": 124,
+     "checksum_ok": true
+    }
+   ]
+  }
+ }
+}

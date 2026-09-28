@@ -211,6 +211,10 @@ fn invalid_long_opcode(opcode: u32) -> bool {
             | 0x0F26
     )
 }
+/// 0F opcodes whose 66/F2/F3 prefix is part of the opcode.
+fn mandatory_prefix_map(opcode: u32) -> bool {
+    matches!(opcode, 0x0F10..=0x0F17 | 0x0F28..=0x0F2F | 0x0F50..=0x0F7F | 0x0FC2..=0x0FC6 | 0x0FD0..=0x0FFE | 0x0FAE)
+}
 fn operand_size(mode: ExecutionMode, prefixes: PrefixState, opcode: u32, modrm: Option<u8>) -> u8 {
     if !mode.is_long() {
         return if prefixes.operand { 48 - mode.operand_default() } else { mode.operand_default() };
@@ -374,9 +378,22 @@ where
             break;
         }
     }
+    // SSE/MMX maps: the mandatory prefix selects the instruction, and a
+    // 66/F2/F3 prefix without an entry of its own is #UD, never the
+    // unprefixed form (SDM Vol.2A §2.1.1, instruction tables).
+    if mode.is_long() && first == 0x0F && mandatory_prefix_map(base_opcode) {
+        let keyed = opcode != base_opcode;
+        let rep_selected = keyed && prefixes.rep.is_some_and(|p| opcode == (p as u32) << shift | base_opcode);
+        if prefixes.rep.is_some() && !rep_selected || prefixes.operand && !keyed {
+            return Err(DecodeError::InvalidOpcode);
+        }
+    }
     let rows = candidates(opcode);
     let first_row = rows.first().ok_or(DecodeError::UnknownOpcode(opcode))?;
-    let hint_0f0d = mode.is_long() && base_opcode == 0x0F0D;
+    // ModRM-taking forms the shared catalog lists without one: the 0F0D
+    // prefetch hint, the reserved-NOP hints 0F1A/0F1B (MPX space, NOPs
+    // without MPX) and UD1/UD0 (whose length bounds the #UD encoding).
+    let hint_0f0d = mode.is_long() && matches!(base_opcode, 0x0F0D | 0x0F1A | 0x0F1B | 0x0FB9 | 0x0FFF);
     let modrm = if first_row.fetch_modrm || hint_0f0d { Some(c.byte()?) } else { None };
     let row = rows
         .iter()
@@ -723,6 +740,44 @@ mod tests {
         }
         std::fs::write(root.join("corpus.json"), format!("[{}]", rows.join(","))).unwrap();
         assert!(rows.len() > 30_000);
+    }
+    /// Every one-byte, 0F, 0F38 and 0F3A opcode in long mode under common
+    /// prefixes and ModRM forms, for tests/x64/oracle (iced-x86 validity,
+    /// length and ModRM fields, gated by the advertised CPUID profile).
+    #[test]
+    fn opcode_map_corpus() {
+        let root = std::path::Path::new("build/x64-decode");
+        std::fs::create_dir_all(root).unwrap();
+        let prefix_byte = |b: u8| matches!(b, 0x26 | 0x2E | 0x36 | 0x3E | 0x40..=0x4F | 0x64..=0x67 | 0xF0 | 0xF2 | 0xF3);
+        let mut maps: Vec<Vec<u8>> = (0..=255u8).filter(|&b| !prefix_byte(b) && b != 0x0F).map(|b| vec![b]).collect();
+        maps.extend((0..=255u8).filter(|&b| b != 0x38 && b != 0x3A).map(|b| vec![0x0F, b]));
+        maps.extend((0..=255u8).map(|b| vec![0x0F, 0x38, b]));
+        maps.extend((0..=255u8).map(|b| vec![0x0F, 0x3A, b]));
+        let prefixes: [&[u8]; 11] = [&[], &[0x66], &[0xF2], &[0xF3], &[0x48], &[0x66, 0x48], &[0x67], &[0xF3, 0x48], &[0x41], &[0x44], &[0xF0]];
+        let mut rows = Vec::new();
+        for opcode in &maps {
+            for prefix in prefixes {
+                for reg in 0..8u8 {
+                    // register form, [rsp] via SIB, RIP+disp32, [rsp+disp8] via SIB
+                    for modrm in [0xC0 | reg << 3 | 1, reg << 3 | 4, reg << 3 | 5, 0x44 | reg << 3] {
+                        let mut bytes = prefix.to_vec();
+                        bytes.extend(opcode);
+                        bytes.push(modrm);
+                        if modrm & 0xC7 == 0x04 || modrm & 0xC7 == 0x44 {
+                            bytes.push(0x24);
+                        }
+                        bytes.resize(bytes.len() + 12, 0x11);
+                        let (ok, length, width, r, rm) = match decode(&bytes, GuestIp(0xFFFF_8000_0000_1000), ExecutionMode::Long64) {
+                            Ok(d) => (1, d.length as i32, d.operand_size as i32, d.reg.map_or(-1, |r| r as i32), d.rm_register.map_or(-1, |r| r as i32)),
+                            Err(_) => (0, 0, 0, -1, -1),
+                        };
+                        rows.push(format!("[{:?},{},{},{},{},{}]", bytes, ok, length, width, r, rm));
+                    }
+                }
+            }
+        }
+        std::fs::write(root.join("opcodes.json"), format!("[{}]", rows.join(","))).unwrap();
+        assert!(rows.len() > 100_000);
     }
     #[test]
     fn rex_modrm_sib_product() {

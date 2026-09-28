@@ -586,6 +586,18 @@ unsafe fn read_ram(address: u32, width: usize) -> u64 {
 
 #[inline(always)]
 unsafe fn write_ram(address: u32, width: usize, value: u64) {
+    // Long-mode writes only notify pages with compiled code: the 32-bit IR
+    // cannot run meanwhile and validates its snapshots' bytes on publication.
+    let last = address.wrapping_add(width as u32 - 1);
+    if !crate::jit::page_watched(address >> 12) && !crate::jit::page_watched(last >> 12) {
+        match width {
+            1 => memory::write8_no_mmap_or_dirty_check(address, value as u8 as i32),
+            2 => memory::write16_no_mmap_or_dirty_check(address, value as u16 as i32),
+            4 => memory::write32_no_mmap_or_dirty_check(address, value as i32),
+            _ => memory::write64_no_mmap_or_dirty_check(address, value),
+        }
+        return;
+    }
     match width {
         1 => memory::write8_ram(address, value as u8 as i32),
         2 => memory::write16_ram(address, value as u16 as i32),
