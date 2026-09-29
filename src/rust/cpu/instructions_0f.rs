@@ -789,10 +789,12 @@ pub unsafe fn instr_0F21(r: i32, mut dreg_index: i32) {
     }
 }
 #[no_mangle]
-pub unsafe fn instr_0F22(r: i32, creg: i32) {
+pub unsafe fn instr_0F22(r: i32, creg: i32) { mov_to_cr(r, creg); }
+/// false: a fault was delivered (the IR commits the instruction otherwise)
+pub unsafe fn mov_to_cr(r: i32, creg: i32) -> bool {
     if 0 != *cpl {
         trigger_gp(0);
-        return;
+        return false;
     }
 
     let data = read_reg32(r);
@@ -802,19 +804,21 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
             if false {
                 dbg_log!("cr0 <- {:x}", data);
             }
-            set_cr0(data);
+            set_cr0(data)
         },
         2 => {
             dbg_log!("cr2 <- {:x}", data);
-            *cr.offset(2) = data
+            *cr.offset(2) = data;
+            true
         },
         3 => set_cr3(data),
         4 => {
             if crate::x64::state::efer() & crate::x64::state::EFER_LME != 0 {
                 if let Err(fault) = crate::x64::system::write_cr(4, data as u32 as u64) {
                     crate::x64::system::raise(fault);
+                    return false;
                 }
-                return;
+                return true;
             }
             dbg_log!("cr4 <- {:x}", data);
             if 0 != data as u32
@@ -822,7 +826,7 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
             {
                 dbg_log!("trigger_gp: Invalid cr4 bit");
                 trigger_gp(0);
-                return;
+                false
             }
             else {
                 if 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_PAE) {
@@ -835,11 +839,13 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
                     load_pdpte(*cr.offset(3));
                 }
                 *cr.offset(4) = data;
+                true
             }
         },
         _ => {
             dbg_log!("{}", creg);
             undefined_instruction();
+            false
         },
     }
 }

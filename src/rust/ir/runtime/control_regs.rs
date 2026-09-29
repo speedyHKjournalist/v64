@@ -1,8 +1,6 @@
 //! Audited CR/DR bodies retain mode, translation and debug assertion policy.
 use crate::cpu::{cpu, global_pointers as gp, instructions_0f};
 use crate::ir::helper::Outcome;
-const INVALID_CR4_BITS: u32 =
-    (1 << 11) | (1 << 12) | (1 << 15) | (1 << 16) | (1 << 19) | 0xFFC00000;
 unsafe fn permission(r: u32, index: u32) -> bool {
     assert!(r < 8 && index < 8);
     if *gp::cpl != 0 {
@@ -54,13 +52,13 @@ pub unsafe fn ir_write_cr(r: u32, index: u32) -> u32 {
     if !permission(r, index) {
         return Outcome::ControlTransferred as u32;
     }
-    // Exactly the audited body's delivered-fault guards. CR0/CR3/PDPTE debug
-    // assertions can still trap, including partially updated CPU state, before
-    // finish is reached. Never infer a fault from a possibly unchanged EIP.
-    let fault = !matches!(index, 0 | 2 | 3 | 4)
-        || index == 4 && (*gp::reg32.add(r as usize) as u32 & INVALID_CR4_BITS) != 0;
-    instructions_0f::instr_0F22(r as i32, index as i32);
-    finish(fault)
+    // The body reports its delivered faults (#GP from reserved CR4 bits, PG
+    // without PE and the long-mode checks; #UD from invalid indices).
+    // CR0/CR3/PDPTE debug assertions can still trap, including partially
+    // updated CPU state, before finish is reached. Never infer a fault from a
+    // possibly unchanged EIP.
+    let delivered = !instructions_0f::mov_to_cr(r as i32, index as i32);
+    finish(delivered)
 }
 unsafe fn debug_alias_fault(index: u32) -> bool {
     matches!(index, 4 | 5) && *gp::cr.add(4) & cpu::CR4_DE != 0

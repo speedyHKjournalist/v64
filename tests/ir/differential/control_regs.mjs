@@ -106,28 +106,33 @@ for(const release of [false,true]){
         const observe=(kind,a,n)=>events.push({kind,a,n,regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0,cr:Array.from(cpu.cr,x=>x>>>0),pdpte:Array.from(pdpte)});
         install_mappings=()=>cpu.io.mmap_register(0xA0000,0x20000,a=>{observe("read8",a);return mem[0x50000+(a&4095)];},(a,n)=>{observe("write8",a,n);mem[0x50000+(a&4095)]=n;},a=>{observe("read32",a);return get32(0x50000+(a&4095))|0;},(a,n)=>{observe("write32",a,n);set32(0x50000+(a&4095),n);});
         install_mappings();
+        // PDPTEs load only when PAE paging is in use after the write (SDM
+        // 4.4.1): MOV to CR0 turns PG on, MOV to CR3/CR4 runs with PG already on
+        // and fetches through the old PDPTE 0, an identity map of the low 2 MiB.
+        const old_pdpte=[0x24001n,0x222n,0x333n,0x444n];
+        function pae_paging(){set32(0x24000,0x25003);set32(0x24004,0);for(let p=0;p<512;p++){set32(0x25000+p*8,p<<12|3);set32(0x25004+p*8,0);}pdpte.set(old_pdpte);cpu.cr[4]=0x20;}
         let pae=0;
         for(const mode of [false,true]) for(const index of [0,3,4]) for(const device of [false,true]) for(const bad_slot of [-1,0,1,2,3]){
-            const i=find(0x22,index,mode),address=device?0xA0000:0x50000,value=index===3?address|15:index===0?(cr0&~0x80000000)^0x40000000:0x30;
-            const configure=()=>{reset(i,value);e.ir_test_set_cr0(cr0&~0x80000000);cpu.cr[4]=0x20;cpu.cr[3]=index===3?cr3:address;for(let slot=0;slot<4;slot++){set32(0x50000+slot*8,0x20001+slot*4096|0xE00);set32(0x50004+slot*8,slot===bad_slot?1:0);}e.full_clear_tlb();events=[];};
-            const abort=bad_slot>=0&&!release,actual=await compare(i,configure,abort?101:102,abort);for(let slot=0;slot<4;slot++)assert.equal(actual.pdpte[slot],abort&&slot>=bad_slot?BigInt((slot+1)*0x111):BigInt(0x20001+slot*4096)|(slot===bad_slot?1n<<32n:0n));
+            const i=find(0x22,index,mode),address=device?0xA0000:0x50000,value=index===3?address|15:index===0?cr0:0x30;
+            const configure=()=>{reset(i,value);if(index===0)e.ir_test_set_cr0(cr0&~0x80000000);pae_paging();cpu.cr[3]=index===3?cr3:address;for(let slot=0;slot<4;slot++){set32(0x50000+slot*8,0x20001+slot*4096|0xE00);set32(0x50004+slot*8,slot===bad_slot?1:0);}e.full_clear_tlb();events=[];};
+            const abort=bad_slot>=0&&!release,actual=await compare(i,configure,abort?101:102,abort);for(let slot=0;slot<4;slot++)assert.equal(actual.pdpte[slot],abort&&slot>=bad_slot?old_pdpte[slot]:BigInt(0x20001+slot*4096)|(slot===bad_slot?1n<<32n:0n));
             if(device){assert.equal(events.length,(abort?bad_slot+1:4)*2);assert(events.every(x=>x.kind==="read32"));} else assert.equal(events.length,0);pae++;
         }
         console.log(`PASS (${release?"release":"debug"}): ${pae} RAM/MMIO PDPTE reloads and partial debug-abort state across CR0/CR3/CR4`);
         let pdpt_bits=0;
         for(const mode of [false,true]) for(const device of [false,true]) for(const bit of [1,2,3,4,5,6,7,8,9,10,11,12]) for(const present of [false,true]){
             const i=find(0x22,3,mode),address=device?0xA0000:0x50000,bad_low=0x22000|(present?1:0)|1<<bit,abort=!release&&([3,4].includes(bit)||present&&[1,2,5,6,7,8].includes(bit));
-            const configure=()=>{reset(i,address);e.ir_test_set_cr0(cr0&~0x80000000);cpu.cr[4]=0x20;for(let slot=0;slot<4;slot++){set32(0x50000+slot*8,slot===2?bad_low:0x20001+slot*4096);set32(0x50004+slot*8,0);}e.full_clear_tlb();events=[];};
+            const configure=()=>{reset(i,address);pae_paging();for(let slot=0;slot<4;slot++){set32(0x50000+slot*8,slot===2?bad_low:0x20001+slot*4096);set32(0x50004+slot*8,0);}e.full_clear_tlb();events=[];};
             const actual=await compare(i,configure,abort?101:102,abort);assert.equal(actual.pdpte[2],abort?0x333n:BigInt(bad_low&~0xE00));assert.equal(actual.pdpte[3],abort?0x444n:0x23001n);assert.equal(events.length,device?(abort?6:8):0);pdpt_bits++;
         }
         console.log(`PASS (${release?"release":"debug"}): ${pdpt_bits} present/absent PDPTE reserved, ignored and address-bit cases`);
 
         let pinned=0;
         for(const mode of [false,true]){
-            const i=find(0x22,0,mode);await compare(i,()=>reset(i,0x80000000),101,true);pinned++;
+            const i=find(0x22,0,mode),actual=await compare(i,()=>reset(i,0x80000000),101);assert.equal(actual.ip,GP);assert.equal(actual.cr[0],(cr0|0x10000)>>>0);pinned++;
             for(const low of [0,1,7,8,16,24,32,0xFFF]){const i=find(0x22,3,mode),abort=!release&&(low&24)!==0,actual=await compare(i,()=>reset(i,0x14000|low),abort?101:102,abort);assert.equal(actual.cr[3],abort?cr3:(0x14000|low)&~0xFE7);pinned++;}
         }
-        console.log(`PASS (${release?"release":"debug"}): ${pinned} CR0 PG-without-PE and non-PAE CR3 low-bit policies`);
+        console.log(`PASS (${release?"release":"debug"}): ${pinned} CR0 PG-without-PE #GP and non-PAE CR3 low-bit policies`);
         let fetch_fault=0;
         for(const mode of [false,true]) for(const opt of [0,1]){
             const i=find(0x22,3,mode),configure=()=>{reset(i,0x14000);mem.copyWithin(0x15000,0x13000,0x14000);set32(0x14000,0x15007);set32(0x15000+8*4,0);e.full_clear_tlb();};

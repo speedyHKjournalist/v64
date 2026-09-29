@@ -3055,13 +3055,15 @@ pub unsafe fn get_seg(segment: i32) -> OrPageFault<i32> {
     return Ok(*segment_offsets.offset(segment as isize));
 }
 
-pub unsafe fn set_cr0(cr0: i32) {
+/// false: a fault was delivered
+pub unsafe fn set_cr0(cr0: i32) -> bool {
     if crate::x64::state::efer() & (crate::x64::state::EFER_LME | crate::x64::state::EFER_LMA) != 0
     {
         if let Err(fault) = crate::x64::system::write_cr(0, cr0 as u32 as u64) {
             crate::x64::system::raise(fault);
+            return false;
         }
-        return;
+        return true;
     }
     let old_cr0 = *cr;
 
@@ -3070,7 +3072,7 @@ pub unsafe fn set_cr0(cr0: i32) {
     }
     if (cr0 & (CR0_PE | CR0_PG)) == CR0_PG {
         trigger_gp(0);
-        return;
+        return false;
     }
 
     *cr = cr0;
@@ -3089,14 +3091,17 @@ pub unsafe fn set_cr0(cr0: i32) {
 
     *protected_mode = (*cr & CR0_PE) == CR0_PE;
     *segment_access_bytes.offset(CS as isize) = 0x80 | 0x10 | 0x08 | 0x02; // P dpl0 S E RW
+    true
 }
 
-pub unsafe fn set_cr3(mut cr3: i32) {
+/// false: a fault was delivered
+pub unsafe fn set_cr3(mut cr3: i32) -> bool {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
         if let Err(fault) = crate::x64::system::write_cr(3, cr3 as u32 as u64) {
             crate::x64::system::raise(fault);
+            return false;
         }
-        return;
+        return true;
     }
     if false {
         dbg_log!("cr3 <- {:x}", cr3);
@@ -3113,6 +3118,7 @@ pub unsafe fn set_cr3(mut cr3: i32) {
     }
     *cr.offset(3) = cr3;
     clear_tlb();
+    true
 }
 
 pub unsafe fn load_pdpte(cr3: i32) {
