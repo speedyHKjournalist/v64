@@ -81,7 +81,7 @@ export function V86(options)
     {
         const reason = (options.cpu_cores || 1) <= 1 ? "one core" :
             options.cpu_clock && options.cpu_clock["mode"] === "deterministic" ? "deterministic clock" :
-            parallel_unsupported_reason();
+            parallel_unsupported_reason(options.cpu_cores);
         if(!reason || this.parallel_forced) this.parallel_requested = true;
         this.parallel_fallback = reason;
     }
@@ -180,6 +180,13 @@ export function V86(options)
                 }
 
                 v86_bin_fallback = options["wasm_fallback_path"] || v86_bin_fallback;
+                // an explicit wasm_path is the cooperative build: with cores in
+                // workers, parallel_wasm_path replaces it ("auto" falls back to it)
+                if(this.parallel_requested && options["parallel_wasm_path"])
+                {
+                    if(!this.parallel_forced) v86_bin_fallback = v86_bin;
+                    v86_bin = options["parallel_wasm_path"];
+                }
 
                 load_file(v86_bin, {
                     // ("auto": v86-parallel.wasm is not there)

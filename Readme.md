@@ -127,10 +127,18 @@ for a full setup on Debian or
 [WSL](https://docs.microsoft.com/en-us/windows/wsl/install).
 
 - Run `make` to build the debug build (at `debug.html`).
-- Run `make all` to build the optimized build (at `index.html`).
+- Run `make all` to build the optimized build (at `index.html`). It includes
+  `build/v86-parallel.wasm` and `build/vcpu-worker.js`, with which `index.html`
+  runs a guest with more than one CPU core in host threads (one per core). That
+  needs a cross-origin isolated page: serve it with the headers
+  `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`. Without them, or with the
+  "Run cores in parallel" option off (`?parallel=0`), the cores take turns on one
+  thread as before; the runtime infos say which.
 - ROM and disk images are loaded via XHR, so if you want to try out `index.html`
   locally, make sure to serve it from a local webserver. You can use `make run`
-  to serve the files using Python's http module.
+  to serve the files using Python's http module (it sends the COOP/COEP headers
+  mentioned above).
 - If you only want to embed v86 in a webpage you can use `libv86.js`. For usage,
   check out the [examples](examples/). You can download it from the [release section](https://github.com/copy/v86/releases).
 - For bundler-based setups (Vite/React/Next/Webpack), there is also an official npm package:

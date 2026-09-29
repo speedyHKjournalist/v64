@@ -21,6 +21,10 @@ export function encode_worker_options(o)
         "graphics_available": !!o["graphics_adapter"],
         "wasm_path": new URL(o.wasm_path || "build/v86.wasm", location.href).href,
         "wasm_fallback_path": o["wasm_fallback_path"] && new URL(o["wasm_fallback_path"], location.href).href,
+        // (cores in vCPU workers, which this worker starts: absolute URLs)
+        "parallel": o["parallel"],
+        "parallel_wasm_path": o["parallel_wasm_path"] && new URL(o["parallel_wasm_path"], location.href).href,
+        "vcpu_worker_url": o["vcpu_worker_url"] && new URL(o["vcpu_worker_url"], location.href).href,
         "memory_size": o.memory_size, "vga_memory_size": o.vga_memory_size,
         "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,
         "cpu_clock": o.cpu_clock, "cpu_quantum": o.cpu_quantum, "cpu_schedule_seed": o.cpu_schedule_seed,

@@ -126,8 +126,12 @@ export function start_cpu_worker()
             options.wasm_fn = async env => {
                 const primary = options.wasm_path;
                 const fallback = options["wasm_fallback_path"] || wasm_fallback_path(primary);
+                // (cores in vCPU workers: the relocatable build; "auto" falls
+                // back to the cooperative one, and the emulator says why)
+                const parallel = emulator && emulator.parallel_requested && options["parallel_wasm_path"];
+                const urls = parallel ? [parallel].concat(emulator.parallel_forced ? [] : [primary, fallback]) : [primary, fallback];
                 let last_error;
-                for(const url of new Set([primary, fallback]))
+                for(const url of new Set(urls))
                 {
                     try
                     {

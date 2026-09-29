@@ -29,6 +29,7 @@ W1 让客户机的应用处理器（AP）在各自的 Worker 线程里真正并�
 | Worker 的 PM timer 与 0x80 往返机器线程 | I/O 负载 2 核比 1 核慢 80 倍 | Worker 本地计算（见上） |
 | 失败的 Worker 可能持有 IOAPIC 锁 | 机器线程在锁上永远自旋 | 锁记录持有者，失败时释放 |
 | 不同宽度的锁操作作用于同一字节时不互斥（2026-09-29） | 非对齐/跨边界的锁操作与 CMPXCHG16B 在 split lock 下“读—比较—写”，而对齐的锁操作只做一次 CAS、不看 split lock：前者读后、写前被后者提交的更新丢失。新 litmus 项（跨 dword 边界的 `LOCK ADD dword` 与其中对齐的 `LOCK ADD word` 并发）在 2 核并行下 16000 次丢 25 次 | 无单一宿主原子指令可覆盖的锁操作改为“独占”执行，对齐 CAS 以“共享”方式提交（机器内存中一个计数字，最高位为独占标志），二者不再交错；CMPXCHG16B 在独占下以两次 8 字节 CAS 提交，其间对任一半的普通写入使其失败并重做而不是被覆盖；Worker 故障时一并清除独占标志。修正后 litmus 2/4/8 核 × 解释器/JIT 全部精确 |
+| 图形模式下 `ImageData` 拒绝共享内存（2026-09-29） | VGA 把 wasm 内存中的像素缓冲区直接包成 `ImageData`；并行构建的内存是 SharedArrayBuffer，进入图形模式即报 “The provided Uint8ClampedArray value must not be shared”（index.html 启动 Windows 时发现；此前的浏览器测试只用文本模式） | 内存共享时 `ImageData` 使用自己的缓冲区，每次刷新前复制脏行（`VGAScreen.create_image_data`/`sync_image_data`）；新增 `tests/parallel/browser_graphics.html`（VBE 640×480×32，源码树与 bundle），去掉修正后该测试失败 |
 | 代码发布等待以机器时钟计时（2026-09-29） | `wait_published` 的 0.5 ms 上限用 `microtick`（机器时钟），机器暂停（stop、快照）时它不走；此时完成的异步 IR 安装若遇到“页已不再声明但仍有 owner”（`published` 恒为假），主线程永久自旋：90 min soak 在启动后几轮卡死（客户机指令计数不变，各 Worker 停泊，主线程停在 `ir_cache_validate`；经检查器附加确认） | 等待另以检查次数（2^14 次）封顶 |
 
 ## 验证结果（2026-09-29，Apple M1 Pro 8P+2E，Node 25.6.0）
@@ -55,9 +56,9 @@ W1 让客户机的应用处理器（AP）在各自的 Worker 线程里真正并�
 | --- | --- | --- |
 | 1 | 修正混合宽度锁操作之前 | 约 8 min 到登录界面、登录成功；约 13 min 时内核在 `lock bts qword [rsi], 0`（rsi = 0x50，空指针加偏移）处写缺页，随后经 0xCF9 自动重启（蓝屏后重启）；第二次启动后 64 位与 WOW64 探针均通过（`processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3`）。**记为未通过**：出现了轮转模式下多次运行从未出现的内核崩溃。[log](logs/windows81-2core-parallel-run1-2026-09-29.log)、[result](logs/windows81-2core-parallel-run1-2026-09-29.result.json) |
 | 2 | 修正之后 | 无结论：运行到 12 min 时宿主（电池供电的笔记本）合盖睡眠约 1 h（`pmset` 日志 12:03–13:03），醒来后剩余时间不足以完成登录 |
-| 3 | 修正之后 | （运行中，完成后补记） |
+| 3 | 修正之后 | **通过**：执行模式 `parallel`（AP 在 Worker 中，Worker 共执行 38.6 亿步），无复位；约 16 min 到登录（宿主同时运行 4 核 soak 与 poweroff 循环，负载约 40–60/10 核），64 位与 WOW64 探针均 `processors=2 packages=1 cores=2 smt_cores=0 progress=128 failures=0 apic_ids=3`，`high_block=0x7ff780ad0000`；墙钟 32 min；镜像 mtime 未变。[log](logs/windows81-2core-parallel-run3-2026-09-29.log)、[result](logs/windows81-2core-parallel-run3-2026-09-29.result.json) |
 
-崩溃处的 `lock bts` 是 Windows 推锁（push lock）的典型获取序列，被访问对象的指针为空，符合“并发更新丢失”的表现。同期发现并修正的 CMPXCHG16B 原子性缺陷（见上表：旧实现下 CMPXCHG16B 与同一 qword 上的 8 字节锁操作互相覆盖，litmus 中 2 核丢 58/16000）与此一致——Windows x64 的互锁单链表（SList）等结构使用 CMPXCHG16B——但单次崩溃不足以证明因果，需以修正后的多次运行确认。
+崩溃处的 `lock bts` 是 Windows 推锁（push lock）的典型获取序列，被访问对象的指针为空，符合“并发更新丢失”的表现。同期发现并修正的 CMPXCHG16B 原子性缺陷（见上表：旧实现下 CMPXCHG16B 与同一 qword 上的 8 字节锁操作互相覆盖，litmus 中 2 核丢 58/16000）与此一致——Windows x64 的互锁单链表（SList）等结构使用 CMPXCHG16B——但单次崩溃不足以证明因果：修正后完整通过的只有 1 次，4 核与更多次数的运行尚未进行。
 
 ## 长期 soak
 
@@ -69,7 +70,7 @@ W1 让客户机的应用处理器（AP）在各自的 Worker 线程里真正并�
 
 - LOCK 读改写与 XCHG-mem 在 Worker 中由解释器执行（正确，但锁密集负载扩展性差，见 W2）。
 - 扩展 RAM（X6）在 Worker 活动时只走慢路径（编译代码的访问缓存不缓存其帧）。
-- `cpu_worker`（整个 emulator 在一个 Worker 里）与并行模式的组合未测试。
+- `cpu_worker`（整个 emulator 在一个 Worker 里）与并行模式的组合：headless Chrome 中 index.html 以 linux4 2 核验证可用（vCPU Worker 由 CPU Worker 创建，需在 Worker 中转发 `parallel`、`parallel_wasm_path` 与 `vcpu_worker_url`）；Claude 应用内置浏览器面板不允许 Worker 内以 URL 再创建 Worker，该环境中不可用。
 - 并行模式与确定性时钟互斥（`cpu_clock: {mode: "deterministic"}` 时 `"auto"` 回退）。
 
 ## 复现

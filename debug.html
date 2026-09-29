@@ -155,6 +155,15 @@
             </tr>
 
             <tr>
+                <td><label for="parallel">Run cores in parallel</label></td>
+                <td>
+                    <input id="parallel" type="checkbox" checked><br>
+                    <small>With more than one core, each core runs in its own host thread. Needs a cross-origin isolated page
+                    (COOP/COEP headers) and at least as many host CPU threads as cores; otherwise the cores take turns on one thread</small>
+                </td>
+            </tr>
+
+            <tr>
                 <td><label for="x64">x86-64 CPU (experimental)</label></td>
                 <td>
                     <input id="x64" type="checkbox"><br>
@@ -326,6 +335,7 @@
     Running: <span id="running_time">0s</span> <br>
     Speed: <span id="speed">0</span> mIPS<br>
     Avg speed: <span id="avg_speed">0</span> mIPS<br>
+    Cores: <span id="info_execution"></span><br>
     <br>
     <div id="info_storage" style="display: none">
         <b>IDE device<span id="ide_type"></span></b><br>

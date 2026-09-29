@@ -16,7 +16,9 @@ endif
 WASM_OPT ?= false
 
 default: build/v86-debug.wasm
-all: build/cpu-worker.js build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm glbridge
+# (v86-parallel.wasm and vcpu-worker.js: index.html runs more than one core in
+# host threads with them where the page allows it; see `make parallel`)
+all: build/cpu-worker.js build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm build/v86-parallel.wasm build/vcpu-worker.js glbridge
 all-debug: build/cpu-worker.js build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm glbridge
 browser: build/cpu-worker.js build/v86_all.js
 

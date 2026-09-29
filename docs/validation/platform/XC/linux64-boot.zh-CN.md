@@ -110,6 +110,15 @@ X64_LINUX_QEMU=1 node tests/x64/linux_boot.mjs   # 独立参考
 
 此前一次 4 核运行在 `reboot: Power down` 之后没有产生 S5（各核停在空闲、0% CPU），此后 6 次 4 核运行（单独复跑 1 次仅生命周期、1 次快照 + 生命周期，加上表 4 次）均未复现，原因未定位。2026-09-28 晚在主机高负载（两个 Windows 运行、另两个 Linux 运行同时进行，负载约 12/10 核）下又连续跑 6 次 4 核页层生命周期（含网络轮），6/6 到达 S5（[汇总](logs/alpine-4core-page-tier-lifecycle-loop-2026-09-28.txt)、[第 6 次串口](logs/alpine-4core-page-tier-lifecycle-loop-run6-2026-09-28.serial)），累计 12 次无复现。`linux_boot.mjs` 在 120 s 内未见 S5 时把全部核的诊断写入 `build/x64-linux/poweroff-<tag>.json`，复现时可直接分析；在找到原因前，该项视为间歇性风险而非已解决。
 
+**2026-09-29 复查**：[`tests/x64/poweroff_loop.mjs`](../../../../tests/x64/poweroff_loop.mjs) 反复“启动 → 登录 → 核对 4 核在线 → poweroff”，120 s 内无 S5 时记录每核的调度视图（是否可运行、HLT、中断阴影、IF、是否有可交付中断、退休指令数，2 s 前后各一次）与串口中断状态（UART 的 IER/IIR/MCR、IOAPIC 第 4 路），再继续等待最多 15 min 以区分“慢”与“挂起”。宿主负载高时（同时运行 Windows 并行与 4 核 soak，负载 40–60/10 核）多次出现 120 s 内无 S5：
+
+- 停留位置都在 OpenRC 关机脚本中间（“Unmounting /media/cdrom”“Stopping busybox mdev”“Terminating remaining processes”之后），不是内核关机阶段；
+- 各核 2 s 内都有退休指令、IPI 正常交付（一次采样时某核 IRR 有 0xFB/0xFD，随后即被调度交付），没有“带着可交付中断停在 HLT”的核；中断阴影均为 0；
+- 串口此时已被客户机正常关闭（killprocs 结束 getty 后 IER=0、MCR=0，IOAPIC 第 4 路屏蔽），排除了串口中断丢失；
+- 加入延长等待后，同样的情况在 215 s 时到达 S5（该轮启动加关机共 852 s，指令速率约为空载时的 1/4）。
+
+结论：今天的这些“挂起”是重负载下关机脚本超过 120 s 窗口，而非模拟器死锁。早先那次“所有核空闲、0% CPU”的挂起（宿主空载时）与此不同，仍未复现、原因未定。
+
 
 ### 网络 I/O（2026-09-28）
 

@@ -52,6 +52,8 @@ Apple M1 Pro（8 个性能核 + 2 个能效核，10 个逻辑核），16 GiB，m
 
 ## 对外能力说明（W2 最后一项）
 
-- 公开配置仍只有 `cpu_cores`；宿主并行是内部选项 `parallel`（`"auto"` 使用并在条件不满足时以轮转运行并在 `get_diagnostics().execution` 给出原因，`true` 仅供测试），**默认仍为轮转执行**：Windows 在宿主并行下的完整验收与更多浏览器的记录完成前，不改变默认。
-- 使用宿主并行需要：`make parallel`（`v86-parallel.wasm` 与 `vcpu-worker.js`）、浏览器中页面为 cross-origin isolated（COOP `same-origin` + COEP `require-corp`/`credentialless`）。
-- 限制：锁密集负载不扩展；扩展 RAM（X6）在并行模式下只走慢路径；与确定性时钟互斥。
+- 库的公开配置仍只有 `cpu_cores`；宿主并行是内部选项 `parallel`（`"auto"` 在条件满足时使用 Worker，否则以轮转运行并在 `get_diagnostics().execution` 给出原因；`true` 仅供测试）。库的默认仍为轮转执行。
+- **index.html（2026-09-29 起）**：客户机核数为 1 时加载 `v86.wasm`，与以前相同；核数大于 1 时传 `parallel: "auto"`，页面满足条件时加载 `v86-parallel.wasm` 并让每个核在一个宿主线程中运行，否则回到 `v86.wasm` 轮转。运行信息的 “Cores” 一行显示实际模式与回退原因。可用 “Run cores in parallel” 复选框或 URL 参数 `parallel=0` 关闭。整个模拟器在 CPU Worker 中运行（默认）时，vCPU Worker 由 CPU Worker 创建。`make all` 同时构建 `v86-parallel.wasm` 与 `vcpu-worker.js`（`make parallel` 仍可单独构建）。
+- `"auto"` 的条件：浏览器中页面为 cross-origin isolated（COOP `same-origin` + COEP `require-corp`/`credentialless`）、SharedArrayBuffer 与共享 `WebAssembly.Memory` 可用、可创建 Worker、宿主线程数（`navigator.hardwareConcurrency`）不少于客户机核数、非确定性时钟。
+- 验证（headless Chrome，linux4）：2 核 + COOP/COEP → 并行（CPU Worker 开与关两种）；未隔离 → 轮转，原因 “not cross-origin isolated”；`parallel=0` 与 1 核 → 加载 `v86.wasm`。Claude 应用内置的浏览器面板中，Worker 内部无法再以 URL 创建 Worker（请求不发出），在那里并行模式会失败——这是该浏览器的限制，Chrome 中正常。
+- 限制：锁密集负载不扩展（8 核锁竞争时并行比轮转慢）；扩展 RAM（X6）在并行模式下只走慢路径；与确定性时钟互斥；并行构建只有 release 版（debug.html 在多核时同样加载 `v86-parallel.wasm`，找不到时回退）。

@@ -1797,6 +1797,7 @@ function onload()
 
     if(query_args.has("m")) $("memory_size").value = query_args.get("m");
     if(query_args.has("cores")) $("cpu_cores").value = query_args.get("cores");
+    if(query_args.has("parallel")) $("parallel").checked = bool_arg(query_args.get("parallel"));
     if(query_args.has("x64")) $("x64").checked = bool_arg(query_args.get("x64"));
     if(query_args.has("vram")) $("vga_memory_size").value = query_args.get("vram");
     if(query_args.has("relay_url")) $("relay_url").value = query_args.get("relay_url");
@@ -2282,6 +2283,10 @@ async function start_emulation(profile, query_args)
             {
                 settings.cpu_cores = cores;
             }
+            if(query_args.has("parallel"))
+            {
+                settings.parallel = bool_arg(query_args.get("parallel"));
+            }
             if(query_args.has("x64"))
             {
                 settings.experimental_x64 = bool_arg(query_args.get("x64"));
@@ -2440,6 +2445,13 @@ async function start_emulation(profile, query_args)
             settings.cpu_cores = cpu_cores;
         }
         if(settings.cpu_cores !== DEFAULT_CPU_CORES) new_query_args.set("cores", String(settings.cpu_cores));
+        // with more than one core: cores in host threads where the page allows
+        // it (src/parallel), else they take turns on one thread
+        if(settings.parallel === undefined)
+        {
+            settings.parallel = $("parallel").checked;
+        }
+        if(settings.cpu_cores > 1 && !settings.parallel) new_query_args.set("parallel", "0");
 
         if(settings.experimental_x64 === undefined)
         {
@@ -2514,6 +2526,13 @@ async function start_emulation(profile, query_args)
             (cpu_args.get("ir_passes_disabled") ? cpu_args.get("ir_passes_disabled").split(",") : []) : undefined,
         "ir_tier0": settings["ir_tier0"],
         wasm_path: "build/" + (DEBUG ? "v86-debug.wasm" : "v86.wasm") + query_append(),
+        // more than one core: each in a host thread (v86-parallel.wasm) where the
+        // page is cross-origin isolated and the host has the threads; otherwise
+        // the build above with the cores taking turns (see the runtime infos)
+        "parallel": settings.cpu_cores > 1 && settings.parallel ? "auto" : false,
+        "parallel_wasm_path": "build/v86-parallel.wasm" + query_append(),
+        // (the source tree's module entry, unless the bundled CPU worker starts them)
+        "vcpu_worker_url": DEBUG && !cpu_worker ? undefined : "build/vcpu-worker.js" + query_append(),
         "graphics_adapter": graphics_proxy ? window["installV86GLGraphicsAdapter"] : undefined,
         "graphics_options": {
             "onError": error => {
@@ -2633,6 +2652,16 @@ async function start_emulation(profile, query_args)
         {
             $("change_cdrom_image").style.display = "none";
         }
+        // how the cores run: in host threads, or taking turns (and why)
+        const cores = settings.cpu_cores || DEFAULT_CPU_CORES;
+        Promise.resolve(emulator.get_diagnostics()).then(diagnostics => {
+            const execution = diagnostics && diagnostics["execution"];
+            const fallback = execution && execution["fallback"];
+            $("info_execution").textContent = cores === 1 ? "1 core" :
+                execution && execution["mode"] === "parallel" ? cores + " cores, each in a host thread" :
+                cores + " cores taking turns on one thread" +
+                    (fallback && fallback !== "not requested" ? " (parallel unavailable: " + fallback + ")" : "");
+        }).catch(() => {});
     });
 
     emulator.add_listener("emulator-error", function(error)

@@ -320,18 +320,21 @@ export class ParallelMachine
 
 /**
  * Why this host cannot run vCPU workers ("" if it can): shared memory and
- * Atomics, workers, and in browsers cross-origin isolation (the page needs
- * the COOP "same-origin" and COEP "require-corp" or "credentialless" headers)
+ * Atomics, workers, in browsers cross-origin isolation (the page needs the
+ * COOP "same-origin" and COEP "require-corp" or "credentialless" headers),
+ * and a host thread for each core (with fewer, the threads would take turns
+ * on the host's CPUs, which the cooperative mode does at less cost)
+ * @param {number=} cores
  * @return {string}
  */
-export function parallel_unsupported_reason()
+export function parallel_unsupported_reason(cores)
 {
+    const threads = typeof navigator !== "undefined" && navigator["hardwareConcurrency"] || 0;
+    if(cores && threads && threads < cores) return "only " + threads + " host threads";
+    // (a browser hides SharedArrayBuffer from pages that are not isolated)
+    if(!NODE && globalThis["crossOriginIsolated"] !== true) return "not cross-origin isolated";
     if(typeof SharedArrayBuffer !== "function" || typeof Atomics !== "object") return "no SharedArrayBuffer";
-    if(!NODE)
-    {
-        if(typeof Worker !== "function") return "no Worker";
-        if(globalThis["crossOriginIsolated"] !== true) return "not cross-origin isolated";
-    }
+    if(!NODE && typeof Worker !== "function") return "no Worker";
     try
     {
         new WebAssembly.Memory({ "initial": 1, "maximum": 1, "shared": true });

@@ -3,7 +3,9 @@
 // Chrome loads tests/parallel/browser_test.html from a local server. With
 // COOP/COEP headers the page is cross-origin isolated and the cores run in
 // vCPU module workers (source tree and bundles); without them "auto" keeps
-// the cores cooperative and says why. BROWSER_CHROME selects the browser.
+// the cores cooperative and says why. tests/parallel/browser_graphics.html
+// then shows a graphical screen with cores in workers (the VGA pixel buffer is
+// in shared memory, which ImageData refuses). BROWSER_CHROME selects the browser.
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,10 +15,13 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const chrome = process.env.BROWSER_CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const assembled = spawnSync("nasm", ["-f", "bin", "-o", root + "build/parallel-litmus.bin", root + "tests/parallel/litmus.asm"], { encoding: "utf8" });
-if(assembled.status !== 0) throw new Error(assembled.stderr);
+for(const name of ["litmus", "graphics"])
+{
+    const assembled = spawnSync("nasm", ["-f", "bin", "-o", root + `build/parallel-${name}.bin`, root + `tests/parallel/${name}.asm`], { encoding: "utf8" });
+    if(assembled.status !== 0) throw new Error(assembled.stderr);
+}
 
-function run(query, isolated)
+function run(query, isolated, page = "browser_test.html")
 {
     return new Promise((resolve, reject) => {
         const profile = fs.mkdtempSync(path.join(os.tmpdir(), "v86-parallel-"));
@@ -60,7 +65,7 @@ function run(query, isolated)
             (text.startsWith("PASS") ? resolve : reject)(text);
         };
         server.listen(0, "127.0.0.1", () => {
-            const url = `http://127.0.0.1:${server.address().port}/tests/parallel/browser_test.html?${query}`;
+            const url = `http://127.0.0.1:${server.address().port}/tests/parallel/${page}?${query}`;
             browser = spawn(chrome, ["--headless=new", "--no-first-run", "--no-default-browser-check",
                 "--disable-background-networking", `--user-data-dir=${profile}`, url], { stdio: "ignore" });
             browser.on("error", error => finish("FAIL " + error));
@@ -69,10 +74,12 @@ function run(query, isolated)
     });
 }
 
-for(const [query, isolated] of [["expect=parallel", true], ["expect=parallel&build=bundle", true],
-    ["expect=cooperative&cores=2&rounds=1000", false]])
+for(const [query, isolated, page] of [["expect=parallel", true], ["expect=parallel&build=bundle", true],
+    ["expect=cooperative&cores=2&rounds=1000", false],
+    // a graphical screen: the VGA pixel buffer is in shared memory then
+    ["", true, "browser_graphics.html"], ["build=bundle", true, "browser_graphics.html"]])
 {
-    const result = await run(query, isolated);
-    console.log(`${query}${isolated ? " (COOP/COEP)" : " (not isolated)"}: ${result.split("\n")[0]}`);
+    const result = await run(query, isolated, page);
+    console.log(`${page || "browser_test.html"}?${query}${isolated ? " (COOP/COEP)" : " (not isolated)"}: ${result.split("\n")[0]}`);
 }
 console.log("parallel browser tests passed");

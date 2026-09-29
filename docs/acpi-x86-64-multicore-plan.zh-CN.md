@@ -554,7 +554,7 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **退出条件**：有可重跑正确性和性能报告；客户机拓扑、宿主执行模式、限制和已验证 OS 都能从文档与 API 明确得知。
 
-**实施记录（2026-09-29）**：[`tests/parallel/bench.mjs`](../tests/parallel/bench.mjs)（`make multicore-parallel-bench`）以固定总工作量、按块领取、逐轮校验和运行 compute/lock/memory/io 四类负载。Apple M1 Pro（8P+2E）上并行 4 核相对 1 核：compute 1.59×、memory 2.52×、io 1.99×，同核数下比轮转快 6–70 倍；`cpu/wall` 证明多线程同时执行；锁竞争负载不扩展（LOCK/XCHG-mem 在 Worker 中由解释器执行），8 核受能效核与并发负载限制。测量中发现并修正的瓶颈：状态块地址编码、PAUSE/有界 REP 让出、PM timer 往返、代码发布计量。API：公开配置仍只有 `cpu_cores`，`parallel` 为内部选项（`"auto"` 可回退并给出原因），默认仍为轮转；`v86.d.ts` 新增实验选项 `extended_memory_size`。见 [W2 记录](validation/platform/W2/performance.zh-CN.md)。未勾选项：公开 API/UI 的默认切换，待 Windows 宿主并行与更多浏览器记录完成后再定。
+**实施记录（2026-09-29）**：[`tests/parallel/bench.mjs`](../tests/parallel/bench.mjs)（`make multicore-parallel-bench`）以固定总工作量、按块领取、逐轮校验和运行 compute/lock/memory/io 四类负载。Apple M1 Pro（8P+2E）上并行 4 核相对 1 核：compute 1.59×、memory 2.52×、io 1.99×，同核数下比轮转快 6–70 倍；`cpu/wall` 证明多线程同时执行；锁竞争负载不扩展（LOCK/XCHG-mem 在 Worker 中由解释器执行），8 核受能效核与并发负载限制。测量中发现并修正的瓶颈：状态块地址编码、PAUSE/有界 REP 让出、PM timer 往返、代码发布计量。API：公开配置仍只有 `cpu_cores`，`parallel` 为内部选项（`"auto"` 可回退并给出原因），默认仍为轮转；`v86.d.ts` 新增实验选项 `extended_memory_size`。见 [W2 记录](validation/platform/W2/performance.zh-CN.md)。未勾选项：公开 API/UI 的默认切换，待 Windows 宿主并行与更多浏览器记录完成后再定。2026-09-29 追加：index.html 在客户机核数大于 1 时以 `parallel: "auto"` 启动（1 核仍用 `v86.wasm`；页面未隔离、宿主线程不足或关闭 “Run cores in parallel” 时回到轮转，运行信息显示模式与原因），CPU Worker 中同样可用；`make all` 同时构建 `v86-parallel.wasm` 与 `vcpu-worker.js`。库 API 的默认仍为轮转，`parallel` 仍不写入 `v86.d.ts`。
 
 ## 6. 测试矩阵、命令与发布门槛
 

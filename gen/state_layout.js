@@ -165,7 +165,8 @@ export const STATICS = {
         // flushed into CORE_STATISTICS before every read, reset and core switch
         PENDING_RETIRED: "scratch", PENDING_REP_ELEMENTS: "scratch" },
     "cpu/fpu.rs": { X87_JIT_CACHE: "machine" },
-    "cpu/ioapic.rs": { IOAPIC: "machine" },
+    // (IOAPIC_LOCK guards it while cores run in workers; UNUSED stands in for it in the normal build)
+    "cpu/ioapic.rs": { IOAPIC: "machine", IOAPIC_LOCK: "machine", UNUSED: "machine" },
     "cpu/instructions_0f.rs": { X64_TEST_CAPABILITIES: "machine", X64_ARCH_CAPABILITIES: "machine" },
     "cpu/memory.rs": { mem8: "machine", vga_mem8: "machine", vga_memory_size: "machine", ram_fast_limit: "machine" },
     "cpu/pic.rs": { PIC: "machine" },
@@ -199,6 +200,18 @@ export const STATICS = {
     },
     "ir/runtime/tier0.rs": { COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine" },
     "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
+    // the parallel runtime (W0/W1): where this instance's statics are and whether
+    // cores run in workers, then machine-wide words reached through machine():
+    // wake-ups, yield flags, the locks of locked operations and the code
+    // publication/invalidation rings; per instance: its ring positions and the
+    // pages it claimed
+    "parallel.rs": {
+        INSTANCE_BASE: "machine", ACTIVE: "machine", CORE_WAKE: "machine", CORE_YIELD: "machine",
+        LOCKED_OPERATIONS: "machine", SPLIT_LOCK: "machine",
+        OWNERS: "machine", OWNER_PAGES: "machine", PUBLISH_NEXT: "machine", PUBLISHED: "machine",
+        INVALIDATE_NEXT: "machine", INVALIDATED: "machine", ACKED: "machine", IDLE: "machine",
+        REFUSED: "debug", PUBLISH_SEEN: "cache", INVALIDATE_SEEN: "cache", CLAIMED: "cache",
+    },
     "profiler.rs": Object.fromEntries([
         "PERFORMANCE_BATCH_CHUNKS", "PERFORMANCE_CODEGEN", "PERFORMANCE_COUNTDOWN", "PERFORMANCE_COUNTERS", "PERFORMANCE_EXECUTION",
         "PERFORMANCE_NEXT_SAMPLE", "PERFORMANCE_PENDING_ROW", "PERFORMANCE_PREVIOUS_CHUNKS", "PERFORMANCE_RANDOM",
@@ -211,7 +224,12 @@ export const STATICS = {
     },
     "x87_profiler.rs": { CACHE: "debug", COUNTS: "debug", ENABLED: "debug" },
     "x64/physical.rs": { PHYSICAL_BUS: "machine" },
-    "x64/memory.rs": { X64_TLBS: "core" },
+    // (LOCKED: the locked instruction in progress, within one instruction)
+    "x64/memory.rs": { X64_TLBS: "core", LOCKED: "scratch" },
+    // extended RAM (X6): the frame pool and its lock; access caches holding frames
+    // are released at the next safe point; aperture slots are remapped on demand
+    "x64/extended.rs": { EXTENDED: "machine", LOCK: "machine", DEPTH: "scratch", RELEASE_PENDING: "cache",
+        LEGACY_TLB_CACHED: "cache", SLOT_PAGE: "cache", NEXT: "cache" },
     "x64/cache.rs": { CACHE: "cache" },
     // page functions and their bookkeeping; entries re-check the live translation
     "x64/pages.rs": { RUNTIME: "machine", FAST: "machine", ACTIVE: "scratch", CODE_WRITES: "machine", STEPS: "debug", ACCESS_REFUSED: "debug", STEP_PROFILE: "debug",

@@ -24,7 +24,7 @@
 | x64 页层 SSE：移动、逻辑、ADD/SUB/MUL/DIV（PS/PD/SS/SD） | 随 x64 | 是 | — | 模板（FP 在 MXCSR 默认且 PE 已置位、操作数/结果正常时原生，否则解释器） | `x64-page-tier-tests`（`sse_fp_template.mjs`） | 通过；其余 SSE 算术逐条解释 |
 | 1 socket × N cores × 1 thread，N = 1..8 | `cpu_cores`（实验） | 是 | `experimental_smp_jit` 下是 | 是 | `multicore-boot-tests`、`multicore-topology-tests`、`multicore-linux-tests` | 通过（Linux i386/x86_64、Windows 8.1 x64 拓扑） |
 | 核间一致性（原子、TLB shootdown、SMC、快照/复位） | 随 `cpu_cores` | 是 | 是 | 是 | `multicore-coherence-tests`、`multicore-atomic-tests`、`multicore-memory-order-tests`、`multicore-state-tests`、`multicore-os-stress-tests` | 通过 |
-| 宿主并行（vCPU Worker） | 内部（`parallel`） | 是 | 是 | 是 | `multicore-parallel-tests(-release)`、`multicore-parallel-browser-tests`、[W1](W1/parallel-correctness.zh-CN.md) | 正确性通过（含不同宽度与 16 字节锁操作的互斥、长模式 CMPXCHG16B litmus、S3 加压 soak）；LOCK 与 XCHG-mem 由解释器执行；默认仍为轮转 |
+| 宿主并行（vCPU Worker） | 库：内部选项 `parallel`；index.html：多核时自动（需 COOP/COEP，可关闭） | 是 | 是 | 是 | `multicore-parallel-tests(-release)`、`multicore-parallel-browser-tests`、[W1](W1/parallel-correctness.zh-CN.md) | 正确性通过（含不同宽度与 16 字节锁操作的互斥、长模式 CMPXCHG16B litmus、S3 加压 soak）；LOCK 与 XCHG-mem 由解释器执行；默认仍为轮转 |
 
 ## 内存
 
