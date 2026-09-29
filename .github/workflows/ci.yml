@@ -60,22 +60,16 @@ jobs:
       - name: rustfmt check
         run: make rustfmt
 
+      # build.sh builds out of tree (build/kvm-unit-tests/); cache that, keyed
+      # on the sources, so a cache never restores stale sources or binaries
       - name: Fetch kvm-unit-test cache
         uses: actions/cache@v5
-        id: cache-kvm-unit-test
         with:
-          path: tests/kvm-unit-tests/
-          key: ${{ runner.os }}-kvm-unit-test
+          path: build/kvm-unit-tests/
+          key: ${{ runner.os }}-kvm-unit-test-${{ hashFiles('tests/kvm-unit-tests/**') }}
 
-      - name: Build kvm-unit-test
-        if: steps.cache-kvm-unit-test.outputs.cache-hit != 'true'
-        run: tests/kvm-unit-tests/build.sh
-
-      - name: Run kvm-unit-test
-        run: |
-          tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
-          tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
-          tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+      - name: Build and run kvm-unit-test
+        run: make kvm-unit-test
 
       - name: Fetch namsmtests cache
         uses: actions/cache@v5
