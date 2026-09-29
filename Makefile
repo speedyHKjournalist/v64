@@ -104,9 +104,11 @@ CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature
 # single-threaded, each vCPU worker has a private relocated copy of it), the
 # memory imported and later marked shared by tools/parallel_wasm.mjs. Linked
 # at 32 KiB (the later --global-base wins): below it are the CPU state blocks
-# of the machine and of up to 7 vCPU workers (src/parallel/relocate.js)
+# of the machine and of up to 7 vCPU workers (src/parallel/relocate.js).
+# __heap_base and __data_end are exported explicitly: the relocation needs
+# them, and newer Rust toolchains no longer export them by default
 CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
-		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296 --global-base=32768"
+		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296 --global-base=32768 --export=__heap_base --export=__data_end"
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
