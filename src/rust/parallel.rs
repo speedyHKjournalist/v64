@@ -1,4 +1,4 @@
-//! Host-parallel execution (docs/acpi-x86-64-multicore-plan.zh-CN.md, W0/W1).
+//! Host-parallel execution (docs/multicore.md).
 //!
 //! build/v86-parallel.wasm runs one instance per vCPU in one shared memory
 //! (src/parallel/relocate.js). The machine instance, at base 0, runs the
@@ -681,7 +681,7 @@ pub unsafe fn word_swap(p: *mut u32, value: u32) -> u32 {
     }
 }
 
-/// Coherence of compiled code between cores in workers (W1). Each worker
+/// Coherence of compiled code between cores in workers. Each worker
 /// compiles from guest RAM on its own; a store by any core to a page another
 /// core compiled from must retire that code.
 ///

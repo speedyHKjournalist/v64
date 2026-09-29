@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Turns the parallel Rust build (linked with --import-memory --emit-relocs)
-// into build/v86-parallel.wasm (docs/acpi-x86-64-multicore-plan.zh-CN.md, W0):
+// into build/v86-parallel.wasm (docs/multicore.md):
 //
 // - the imported memory becomes shared, with a maximum of 4 GiB;
 // - every place that holds an address of the module's static data (code

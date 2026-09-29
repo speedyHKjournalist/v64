@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Execution-level long-mode opcode matrix (X3). Every row of the opcode-map
+// Execution-level long-mode opcode matrix. Every row of the opcode-map
 // corpus (x64::decode::tests::opcode_map_corpus, expectations written by
 // tests/x64/oracle from iced-x86 gated by the advertised CPUID profile) runs
 // once at CPL3 in a sandbox: code slots are user read-only pages, data and

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// W2 throughput (docs/acpi-x86-64-multicore-plan.zh-CN.md): the same total
+// Multicore throughput (docs/multicore.md): the same total
 // guest work (tests/parallel/bench.asm) on 1/2/4/8 cores, cooperative and in
 // vCPU workers. Every round's checksum is checked against a reference
 // computed here, so a configuration cannot finish early by doing less work.

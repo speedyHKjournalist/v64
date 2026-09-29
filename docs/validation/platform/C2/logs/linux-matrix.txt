@@ -1,5 +1,0 @@
-2 CPUs: Linux 4.16 SMP online, one package/2 cores, per-core affinity progress passed (211404 rounds; SMBIOS not emitted)
-3 CPUs: Linux 4.16 SMP online, one package/3 cores, per-core affinity progress passed (212860 rounds; SMBIOS not emitted)
-4 CPUs: Linux 4.16 SMP online, one package/4 cores, per-core affinity progress passed (217311 rounds; SMBIOS not emitted)
-8 CPUs: Linux 4.16 SMP online, one package/8 cores, per-core affinity progress passed (254402 rounds; SMBIOS not emitted)
-1 CPUs: Linux 4.16 SMP online, one package/1 cores, per-core affinity progress passed (5115 rounds; SMBIOS not emitted)

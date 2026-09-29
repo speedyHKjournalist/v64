@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// C1 scheduling boundaries and the single-core snapshot compatibility path.
+// Cooperative scheduling boundaries and the single-core snapshot compatibility path.
 // Architectural AP startup is covered separately by ap_startup.asm.
 import assert from "node:assert/strict";
 import { STATE_OFFSETS } from "../../src/state_layout.js";

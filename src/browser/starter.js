@@ -69,7 +69,7 @@ export function V86(options)
     var cpu;
     var wasm_memory;
 
-    // Host-parallel execution of the application processors (W1), an
+    // Host-parallel execution of the application processors (docs/multicore.md), an
     // internal option: `true` forces it (tests: it fails where it cannot
     // run), "auto" uses it where the host can and otherwise keeps the
     // requested cores cooperative; get_diagnostics() reports the choice.
@@ -133,7 +133,7 @@ export function V86(options)
         "ir_codegen_finalize": (id, slot, ptr, len) => { cpu.ir_auto_publish(id, slot, ptr, len); },
         // v86-parallel.wasm: wake a vCPU waiting on a word of the shared memory
         "parallel_notify": address => { Atomics.notify(new Int32Array(wasm_memory.buffer), address >>> 2); },
-        // extended RAM pages (X6, src/extended_memory.js)
+        // extended RAM pages (src/extended_memory.js)
         "extended_load": (page, pointer) => { cpu.extended_store.load(page, wasm_memory, pointer); },
         "extended_store": (page, pointer) => { cpu.extended_store.store(page, wasm_memory, pointer); },
         "jit_clear_func": (wasm_table_index) => cpu.jit_clear_func(wasm_table_index),

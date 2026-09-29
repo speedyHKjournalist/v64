@@ -1,4 +1,4 @@
-//! Native wide register blocks. This is an explicitly bounded X4 subset:
+//! Native wide register blocks. This is an explicitly bounded subset:
 //! unsupported/faultable guest instructions stop capture before that opcode.
 //! Arithmetic and flags are Wasm i64/i32 operations, never interpreter calls.
 use super::{

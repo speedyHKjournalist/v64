@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// C0 integration tests: real interpreter/Wasm dispatch and real device ports.
+// Machine clock integration tests: real interpreter/Wasm dispatch and real device ports.
 import assert from "node:assert/strict";
 
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
@@ -344,7 +344,7 @@ await test("legacy UTC RTC and host-monotonic timer snapshots rebase without hos
         const destination_time = cpu.clock.now();
         const set_state = cpu.set_state.bind(cpu);
         cpu.set_state = state => {
-            // Emulate the pre-C0 positional format, not merely a modern state
+            // Emulate the positional format from before the machine clock, not merely a modern state
             // with optional slots removed: RTC deadlines were host UTC and
             // PIT/LAPIC anchors were unrelated host performance.now values.
             const epoch = state[47][2] - state[47][3];

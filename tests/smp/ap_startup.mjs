@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// C1 acceptance: real guest INIT/SIPI through the low-memory trampoline,
+// AP startup: real guest INIT/SIPI through the low-memory trampoline,
 // independent AP registers/stacks, physical/shorthand IPIs and HLT wakeup.
 // The host supplies only mailbox commands; it never loads an AP context or
 // changes an AP's CS, IP, registers, interrupt state or runnable state.

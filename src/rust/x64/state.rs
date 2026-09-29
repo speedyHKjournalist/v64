@@ -259,7 +259,8 @@ pub unsafe fn write_flags64(value: u64) {
     *gp::flags_changed = 0;
 }
 /// Used on machine reset/INIT and importing pre-wide snapshots. Ordinary mode
-/// changes preserve banks; X2 owns transition validation and mode side effects.
+/// changes preserve banks; x64::system owns transition validation and mode
+/// side effects.
 pub unsafe fn reset_extension() {
     core::ptr::write_bytes(gp::x64_gpr_hi as *mut u8, 0, 1788 - 1360);
     *gp::x64_pat = 0x0007_0406_0007_0406;

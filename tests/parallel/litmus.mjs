@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// W1 litmus tests (tests/parallel/litmus.asm) on cooperative cores (the
+// Litmus tests (tests/parallel/litmus.asm) on cooperative cores (the
 // reference) and on cores in vCPU workers that run at the same time:
 // atomic counters and spin locks (also locked operations of different widths
 // on the same bytes), message passing, store buffering with

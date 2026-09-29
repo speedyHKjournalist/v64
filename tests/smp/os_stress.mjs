@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Real Linux C3 stress: fork/shared publication, signal delivery, migration,
+// Real Linux cross-core stress: fork/shared publication, signal delivery, migration,
 // IDE sectors and NE2K frames while the whole machine is stopped and restored.
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -50,7 +50,7 @@ const media = { javascript_entry: digest(fs.readFileSync(module_url)), wasm: dig
 for(const mode of modes)
 {
     const disk = new Uint8Array(4 << 20);
-    // PARALLEL=1: the application processors run in vCPU workers (W1)
+    // PARALLEL=1: the application processors run in vCPU workers
     const emulator = new V86({ ...(parallel ? { wasm_path: path.join(root, "build/v86-parallel.wasm"), parallel: true } :
         { wasm_fn: async imports => (await WebAssembly.instantiate(wasm_module, imports)).exports }),
         bios: { url: path.join(root, "bios/seabios.bin") }, vga_bios: { url: path.join(root, "bios/vgabios.bin") },

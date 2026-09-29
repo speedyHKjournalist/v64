@@ -1,4 +1,4 @@
-// Host-parallel machine (docs/acpi-x86-64-multicore-plan.zh-CN.md, W1): the
+// Host-parallel machine (docs/multicore.md): the
 // bootstrap processor and every device run on this thread, in the machine
 // instance of v86-parallel.wasm (base 0); each application processor runs in
 // a vCPU worker (src/parallel/vcpu.js) with its own relocated instance in the

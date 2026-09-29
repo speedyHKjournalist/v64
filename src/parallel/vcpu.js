@@ -1,4 +1,4 @@
-// A vCPU worker (docs/acpi-x86-64-multicore-plan.zh-CN.md, W1): one
+// A vCPU worker (docs/multicore.md): one
 // application processor of a machine whose bootstrap processor and devices
 // run on another thread (src/parallel/machine.js).
 //

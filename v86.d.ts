@@ -618,7 +618,7 @@ export interface V86Options {
     cpu_quantum?: number;
     /** Testing option: seed for reproducible CPU scheduling. */
     cpu_schedule_seed?: number;
-    /** Testing option: opt into multicore JIT while the C3 stress matrix is being qualified. */
+    /** Testing option: opt into multicore JIT while the cross-core stress matrix is being qualified. */
     experimental_smp_jit?: boolean;
     /**
      * Experimental: present an x86-64 CPU (CPUID long mode, NX, SYSCALL,

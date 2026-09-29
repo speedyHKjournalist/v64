@@ -1,7 +1,7 @@
 // Description of the emulated PC platform: the single source for the ACPI
 // tables (src/acpi_tables.js), the fw_cfg and CMOS inputs of the firmware,
 // and the fixed resources of the devices that implement them.
-// See docs/acpi-x86-64-multicore-plan.zh-CN.md (P1, A2).
+// See docs/acpi.md.
 
 import { dbg_assert } from "./log.js";
 import { h } from "./lib.js";

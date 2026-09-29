@@ -1,3 +1,0 @@
-PASS full-machine snapshot preserves high RAM/window and two independent wide TLB records
-PASS invalid physical/wide-TLB snapshot rejected before any live architectural state changes
-PASS legacy missing physical/wide-TLB extensions clear destination mappings and cached translations

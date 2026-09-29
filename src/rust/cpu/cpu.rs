@@ -3436,7 +3436,7 @@ pub unsafe fn run_long_instruction() {
 #[no_mangle]
 pub fn begin_cpu_frame(now: f64) { crate::ir::runtime::schedule::begin_frame(now); }
 
-/// C1's cooperative interpreter slice. Device clocks are serviced once by
+/// The cooperative scheduler's interpreter slice. Device clocks are serviced once by
 /// the machine scheduler, outside this entry. Yield only after a complete
 /// instruction or the string engine's resumable REP element batch; a LOCK
 /// transaction cannot be split by switching cores.

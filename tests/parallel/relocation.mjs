@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// W0 (docs/acpi-x86-64-multicore-plan.zh-CN.md): the same Wasm module runs on
+// Relocated instances (docs/multicore.md): the same Wasm module runs on
 // two independent state bases without crosstalk. Two machines share one
 // memory: A is v86-parallel.wasm at base 0, B a relocated instance of it
 // (src/parallel/relocate.js) with its own statics, stack, CPU state block,
@@ -86,4 +86,4 @@ console.log(`snapshot of B (${(state.byteLength / 2 ** 20).toFixed(1)} MiB) rest
 await a.destroy();
 await b.destroy();
 clearTimeout(timeout);
-console.log("W0 relocation test passed");
+console.log("relocation test passed");

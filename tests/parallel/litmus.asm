@@ -1,5 +1,5 @@
 ; Memory-model and atomicity litmus tests for cores that really run at the
-; same time (docs/acpi-x86-64-multicore-plan.zh-CN.md, W1). The same kernel
+; same time (docs/multicore.md). The same kernel
 ; runs on cooperative cores as a reference. The BSP starts the APs with
 ; INIT/SIPI; then every core runs the phases below, separated by barriers:
 ;

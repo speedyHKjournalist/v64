@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// W1 lifecycle of vCPU workers (docs/acpi-x86-64-multicore-plan.zh-CN.md):
+// Lifecycle of vCPU workers (docs/multicore.md):
 // stop-the-world while every core runs the litmus kernel
 // (tests/parallel/litmus.asm), snapshots taken mid-run and restored into
 // another machine, destroy while running, a failing worker (an exception, a

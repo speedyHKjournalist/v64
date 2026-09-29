@@ -10,7 +10,7 @@
 // - one backing page run through two linear aliases (position-independent
 //   functions);
 // - LOCKed read-modify-writes crossing into a not-present page after they
-//   were compiled: #PF at the second page with no partial commit (C3);
+//   were compiled: #PF at the second page with no partial commit;
 // - self-modifying code: a loop patching an immediate of a function in
 //   another compiled page, and an instruction later in its own page.
 import assert from "node:assert/strict";
@@ -133,7 +133,7 @@ jnz .nloop
 mov qword [0x500010], 0
 mov r8, rsp`);
 
-// C3 atomicity in compiled code: LOCKed read-modify-writes (and implicitly
+// Cross-core atomicity in compiled code: LOCKed read-modify-writes (and implicitly
 // locked XCHG) warmed on a page-crossing operand, then aimed across into a
 // not-present page: #PF at the second page, nothing written to the first.
 add("LOCK operations crossing into a not-present page", `

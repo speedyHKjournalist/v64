@@ -2,7 +2,7 @@
 // Repeated boot -> poweroff -> S5 -> power-on of x86_64 Linux (Alpine virt,
 // as tests/x64/linux_boot.mjs prepares it) on several cores, to catch the
 // intermittent poweroff that once ended with every core idle and no ACPI S5
-// (docs/validation/platform/XC/linux64-boot.zh-CN.md). A cycle without S5
+// (docs/x86-64.md, known limits). A cycle without S5
 // within 120 s of "poweroff" writes build/x64-linux/poweroff-loop-<cycle>-late.json
 // (diagnostics, serial tail) and waits POWEROFF_LATE_S (900) more seconds: a
 // late S5 is counted as slow, none at all fails with the scheduler's view of
@@ -34,11 +34,21 @@ let serial = "";
 emulator.add_listener("serial0-output-byte", byte => { serial += String.fromCharCode(byte); if(serial.length > 1 << 20) serial = serial.slice(-(1 << 19)); });
 await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
 const cpu = emulator.v86.cpu;
+// every byte of the serial console, for a failure report (a panic reboots: panic=-1)
+let serial_log = "";
+emulator.add_listener("serial0-output-byte", byte => { serial_log += String.fromCharCode(byte); });
+let cycle_now = 0;
 const wait_for = async (pattern, from, what, ms) => {
     const limit = performance.now() + ms;
     while(!pattern.test(serial.slice(from)))
     {
-        if(performance.now() > limit) throw new Error(`${what}: timed out; serial tail ${JSON.stringify(serial.slice(-2000))}`);
+        if(performance.now() > limit)
+        {
+            fs.writeFileSync(directory + `poweroff-loop-${cycle_now}-error.json`, JSON.stringify({ what,
+                diagnostics: cpu.get_diagnostics(), last_reset: cpu.last_reset || null }, null, 1));
+            fs.writeFileSync(directory + `poweroff-loop-${cycle_now}-error.serial`, serial_log);
+            throw new Error(`${what}: timed out (serial in poweroff-loop-${cycle_now}-error.serial); tail ${JSON.stringify(serial.slice(-2000))}`);
+        }
         await delay(20);
     }
 };
@@ -46,6 +56,7 @@ const started = performance.now();
 const late = [];
 for(let cycle = 1; cycle <= cycles; cycle++)
 {
+    cycle_now = cycle;
     let mark = serial.length;
     const t0 = performance.now();
     emulator.run();

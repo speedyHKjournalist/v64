@@ -1,6 +1,0 @@
-
-mount: mounting host9p on /mnt failed: No such file or directory
-Files send via emulator appear in /mnt/
-~% dd if=/dev/zero bs=1024 count=16384 2>/dev/null | md5sum
-2c7ab85a893283e98c931e9511add182  -
-~% 

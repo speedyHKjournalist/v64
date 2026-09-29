@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// W1 in a browser (docs/acpi-x86-64-multicore-plan.zh-CN.md): headless
+// vCPU workers in a browser (docs/multicore.md): headless
 // Chrome loads tests/parallel/browser_test.html from a local server. With
 // COOP/COEP headers the page is cross-origin isolated and the cores run in
 // vCPU module workers (source tree and bundles); without them "auto" keeps

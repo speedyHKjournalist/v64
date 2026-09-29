@@ -389,7 +389,7 @@ export function create_state_stream(cpu)
             packed_size += 4096;
         }
     }
-    // extended RAM (X6): the pages that are not zero, after the RAM records
+    // extended RAM: the pages that are not zero, after the RAM records
     const extended = cpu.extended_store;
     let extended_bitmap = null, extended_packed = 0;
     if(extended)

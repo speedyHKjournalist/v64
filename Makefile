@@ -100,7 +100,7 @@ CARGO_FLAGS_SAFE=\
 
 CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
 
-# Host-parallel build (W0/W1): atomics in v86's own code (the prebuilt std stays
+# Host-parallel build (docs/multicore.md): atomics in v86's own code (the prebuilt std stays
 # single-threaded, each vCPU worker has a private relocated copy of it), the
 # memory imported and later marked shared by tools/parallel_wasm.mjs. Linked
 # at 32 KiB (the later --global-base wins): below it are the CPU state blocks
@@ -391,6 +391,7 @@ expect-tests: build/v86-debug.wasm build/libwabt.cjs
 
 acpi-device-tests: build/v86-debug.wasm
 	./tests/devices/acpi_device.js
+	./tests/devices/device_io_reset.mjs
 
 acpi-guest-tests: build/v86-debug.wasm
 	./tests/devices/acpi_guest.js
@@ -605,7 +606,7 @@ state-layout:
 state-layout-check:
 	node gen/state_layout.js --check
 
-# Multicore building blocks (docs/acpi-x86-64-multicore-plan.zh-CN.md, P2a/C1)
+# Multicore building blocks (docs/multicore.md): state layout and core switching
 build/smp/core_swap.bin: tests/smp/core_swap.asm
 	mkdir -p build/smp
 	nasm -f bin -o $@ $<
@@ -623,7 +624,7 @@ build/smp/firmware_boot.bin: tests/smp/firmware_boot.asm
 	mkdir -p build/smp
 	nasm -f bin -o $@ $<
 
-# C1 guest startup and interrupt routing; clock/topology/coherence gates below.
+# AP startup and interrupt routing; clock/topology/coherence gates below.
 multicore-boot-tests: build/smp/ap_startup.bin build/smp/firmware_boot.bin build/v86-debug.wasm state-layout-check
 	node tests/smp/apic_routing.mjs
 	node tests/smp/scheduler.mjs
@@ -636,7 +637,7 @@ multicore-boot-tests-release: build/smp/ap_startup.bin build/smp/firmware_boot.b
 	TEST_RELEASE_BUILD=1 node tests/smp/ap_startup.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/firmware_boot.mjs
 
-# C0/C3 focused gates. OS tests are separate because they need Linux media.
+# Machine clock and cross-core coherence gates. OS tests are separate because they need Linux media.
 multicore-clock-tests: build/v86-debug.wasm
 	node tests/smp/clock.mjs
 	node tests/smp/clock_execution.mjs
@@ -687,9 +688,9 @@ multicore-os-stress-tests-release: build/libv86.mjs build/v86.wasm images/linux4
 
 .PHONY: multicore-clock-tests multicore-clock-tests-release multicore-coherence-tests multicore-coherence-tests-release
 
-# W0/W1 (docs/acpi-x86-64-multicore-plan.zh-CN.md): the relocatable build under
+# Cores in vCPU workers (docs/multicore.md): the relocatable build under
 # the cooperative suites, relocated instances in one memory, then cores in vCPU
-# workers: litmus/IPI wake-ups, lifecycle and failures, Linux boot, the C3 OS
+# workers: litmus/IPI wake-ups, lifecycle and failures, Linux boot, the OS
 # stress matrix and ACPI S3/S4 cycles
 PARALLEL_ABI_SUITES=tests/smp/ap_startup.mjs tests/smp/core_swap.mjs tests/smp/apic_routing.mjs tests/smp/lifecycle.mjs \
 	tests/smp/scheduler.mjs tests/smp/coherence.mjs tests/smp/atomic_boundaries.mjs tests/smp/memory_order.mjs \
@@ -715,13 +716,13 @@ multicore-parallel-tests-release: build/v86-parallel.wasm build/vcpu-worker.js b
 multicore-parallel-browser-tests: build/v86-parallel.wasm build/vcpu-worker.js build/libv86.mjs
 	node tests/parallel/browser.mjs
 
-# W2: fixed guest work on 1/2/4/8 cores, cooperative and in vCPU workers
+# Throughput: fixed guest work on 1/2/4/8 cores, cooperative and in vCPU workers
 multicore-parallel-bench: build/v86.wasm build/v86-parallel.wasm
 	BENCH_REPORT=build/parallel-bench.json node tests/parallel/bench.mjs
 
 .PHONY: multicore-parallel-tests multicore-parallel-tests-release multicore-parallel-browser-tests multicore-parallel-bench
 
-# A3: S3 and OS-directed S4 cycles on 32-bit Linux (1 and 2 cores, JIT and
+# ACPI sleep states: S3 and OS-directed S4 cycles on 32-bit Linux (1 and 2 cores, JIT and
 # interpreter) and on x86_64 Linux (Alpine's lts kernel has hibernation)
 acpi-sleep-tests: build/v86-debug.wasm images/linux4.iso
 	GUEST=linux4 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
@@ -731,13 +732,14 @@ acpi-sleep-tests: build/v86-debug.wasm images/linux4.iso
 
 # Platform contract: generated state layout, CPU profile options, topology,
 # firmware tables (the ACPICA part needs iasl/acpiexec)
-platform-contract-tests: build/v86-debug.wasm
+platform-contract-tests: build/v86-debug.wasm build/libv86.mjs build/v86.wasm
 	node gen/state_layout.js --check
+	node tools/cpu_contract.mjs --check
 	node tests/x64/profile_options.mjs
 	node tests/smp/topology.mjs
 	node tests/devices/acpi_tables.js
 
-# C3/A3: whole-machine state of several cores (snapshots, streams, reset,
+# Whole-machine state of several cores (snapshots, streams, reset,
 # exceptions) and sleep states with 4 cores
 multicore-state-tests: build/v86-debug.wasm images/linux4.iso
 	node tests/smp/lifecycle.mjs
@@ -746,7 +748,7 @@ multicore-state-tests: build/v86-debug.wasm images/linux4.iso
 	node tests/smp/x64_snapshot.mjs
 	GUEST=linux4 CPU_CORES=4 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
 
-# X6: RAM beyond the wasm32 backing store
+# Extended RAM: guest RAM beyond the wasm32 backing store
 extended-memory-tests: build/v86-debug.wasm
 	node tests/x64/extended_memory.mjs
 	X64_CORES=2 node tests/x64/extended_memory.mjs
@@ -754,8 +756,8 @@ extended-memory-tests: build/v86-debug.wasm
 x64-extended-guest-tests: build/libv86.mjs build/v86.wasm
 	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_EXTENDED_MEMORY=6442450944 X64_LINUX_MEMTEST=5120 X64_LINUX_TIMEOUT=10800000 node tests/x64/linux_boot.mjs
 
-# R1: every level's acceptance targets, with a report in build/release-gate/
-# (GATE_ARGS: --levels R-base,R-ACPI,R-SMP32,R-x64-UP,R-x64-SMP,R-parallel,X6 --quick --keep-going)
+# Release gate: every level's acceptance targets, with a report in build/release-gate/
+# (GATE_ARGS: --levels R-base,R-ACPI,R-SMP32,R-x64-UP,R-x64-SMP,R-parallel,R-extended-memory --quick --keep-going)
 platform-release-gate:
 	node tools/release_gate.mjs $(GATE_ARGS)
 
@@ -763,7 +765,7 @@ platform-release-gate:
 
 .PHONY: state-layout state-layout-check smp-tests multicore-boot-tests multicore-boot-tests-release
 
-# x86-64 (docs/acpi-x86-64-multicore-plan.zh-CN.md §6.3, X1-X5/XC). The oracle
+# x86-64 (docs/x86-64.md). The oracle
 # targets need nasm and qemu-system-x86_64; linux targets download the pinned
 # Alpine ISO on first use and run for several minutes on the interpreter.
 x64-decode-tests: state-layout-check
@@ -784,7 +786,7 @@ x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/native_oracle.mjs
 	node tests/x64/cache_oracle.mjs
 
-# The x64 page tier (x64::pagegen/pages, X4): QEMU and interpreter references,
+# The x64 page tier (x64::pagegen/pages): QEMU and interpreter references,
 # and random programs compared with the interpreter.
 x64-page-tier-tests: build/v86-debug.wasm
 	X64_JIT=1 node tests/x64/integer_oracle.mjs
@@ -799,7 +801,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	for seed in 1 2 3; do SSE_FP_SEED=$$seed node tests/x64/sse_fp_template.mjs || exit 1; done
 	SSE_FP_ORDINARY=1 node tests/x64/sse_fp_template.mjs
 
-# Every long-mode encoding of the opcode map executed at CPL3 (X3); needs the
+# Every long-mode encoding of the opcode map executed at CPL3; needs the
 # expectations written by x64-decode-tests.
 x64-opcode-matrix-tests: build/v86-debug.wasm x64-decode-tests
 	node tests/x64/opcode_matrix.mjs
@@ -1298,7 +1300,7 @@ build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/v86-ir-test-fallback
 ir-budget-batch-tests:
 	sh tools/ir-budget-batch-tests.sh
 
-# C2: CPUID and firmware-input agreement, followed by real 32-bit Linux SMP.
+# Topology: CPUID and firmware-input agreement, followed by real 32-bit Linux SMP.
 build/smp/affinity_probe: tests/smp/affinity_probe.asm
 	mkdir -p build/smp
 	nasm -f bin $< -o $@

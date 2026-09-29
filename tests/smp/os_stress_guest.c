@@ -1,4 +1,4 @@
-/* Freestanding i386 Linux C3 workload. Build with os_stress.mjs.
+/* Freestanding i386 Linux cross-core stress workload. Build with os_stress.mjs.
  * MAP_SHARED publication is deliberately ordinary x86 loads/stores; only the
  * shared progress increment is LOCKed. Nothing edits the emulator's CPU state. */
 typedef unsigned int u32;

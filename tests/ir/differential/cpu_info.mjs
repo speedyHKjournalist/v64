@@ -38,7 +38,7 @@ for(const release of [false,true]){
         }
         for(let i=0;i<cases.length;i++) if(cases[i][2]===0x30) for(const acpi of [0,1]) for(const value of [0xFEE00000,0xFEE00800,...(!acpi?[0]:[])]){const actual=compare(i,()=>reset(i,value,0x1B,0,acpi));assert.equal(actual.apic,Number(!!(value&0x800)));msr++;}
         console.log(`PASS (${release?"release":"debug"}): ${msr} recognized MSR state/no-op/APIC comparisons`);
-        // C1 exposes 32-bit FS/GS hidden bases through these compatibility
+        // v86 exposes 32-bit FS/GS hidden bases through these compatibility
         // MSRs. It rejects high bits before modifying the base; this is not
         // yet the full Intel 64 canonical-address MSR contract.
         let segment_msr=0;

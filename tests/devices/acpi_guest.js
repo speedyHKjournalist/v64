@@ -5,10 +5,10 @@
 //   linux4: linux4.iso, Linux 4.16, IOAPIC interrupt routing (uses the MADT)
 // - the tables SeaBIOS installed from v86's table loader match the emulated
 //   hardware and advertise S3, S4 and S5; the guest reports no ACPI errors
-// - S3 (A3), if the kernel supports it (linux4): suspend to RAM, woken
+// - S3, if the kernel supports it (linux4): suspend to RAM, woken
 //   alternately by an RTC alarm and by the power button (S3_CYCLES); RAM
 //   contents and the shell survive, the kernel reports the wake from S3
-// - S4 (A3), if supported: hibernate to a swap disk, ACPI S4 soft off, power
+// - S4, if supported: hibernate to a swap disk, ACPI S4 soft off, power
 //   on with RAM cleared, the booted kernel restores the image from the disk
 //   (as an initramfs does, through /sys/power/resume) (S4_CYCLES)
 // - the fixed power button reaches the guest as one event, without an SCI storm
@@ -99,7 +99,7 @@ const emulator = new V86({
     disable_jit: +process.env.DISABLE_JIT,
     log_level: 0,
     ...GUESTS[GUEST],
-    // W1: application processors in vCPU workers
+    // PARALLEL=1: application processors in vCPU workers
     ...(+process.env.PARALLEL ? { parallel: true, wasm_path: __dirname + "/../../build/v86-parallel.wasm" } : {}),
 });
 

@@ -6,7 +6,7 @@ use crate::state_flags::CachedStateFlags;
 
 /// The CPU state of this instance. The default build keeps it at fixed
 /// addresses below --global-base (4096), which generated code reads directly.
-/// The parallel build (docs/acpi-x86-64-multicore-plan.zh-CN.md, W0) places
+/// The parallel build (docs/multicore.md) places
 /// it in a static instead: every vCPU worker relocates its own copy of the
 /// module into the shared memory, and with it this block; generated code of a
 /// worker embeds that worker's addresses. Offsets are the same in both.

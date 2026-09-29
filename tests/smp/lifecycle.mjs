@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// C3 machine snapshots must preserve every core, including stopped APs and
+// Machine snapshots must preserve every core, including stopped APs and
 // cached translations. Topology mismatches are rejected before any mutation.
 import assert from "node:assert/strict";
 import { STATE_OFFSETS } from "../../src/state_layout.js";

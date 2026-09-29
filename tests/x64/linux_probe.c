@@ -311,7 +311,7 @@ static word auxv(word *stack, word type)
 }
 
 #if defined(__x86_64__)
-/* "memtest <MiB> <first extended PFN>" (X6): map that much anonymous memory
+/* "memtest <MiB> <first extended PFN>" (extended RAM): map that much anonymous memory
  * in 64 MiB pieces, write two words into every page (one of them derived
  * from its address), check them all, and count through /proc/self/pagemap
  * the pages the kernel placed at or above the given frame (extended RAM). */

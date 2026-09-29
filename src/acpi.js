@@ -447,7 +447,18 @@ ACPI.prototype.power_off = function(sleep_state)
 
     dbg_log("ACPI: soft off (S" + sleep_state + ")", LOG_ACPI);
     this.soft_off = sleep_state;
-    this.bus.send("acpi-power-off", "S" + sleep_state);
+    // The disks are complete when the host hears of it: writes still in flight
+    // (only with an embedder's asynchronous disk buffer) land first
+    const cpu = this.cpu, bus = this.bus, deadline = Date.now() + 30000;
+    const announce = () => {
+        if(cpu["snapshot_io_pending"] && Date.now() < deadline)
+        {
+            setTimeout(announce, 1);
+            return;
+        }
+        bus.send("acpi-power-off", "S" + sleep_state);
+    };
+    announce();
 };
 
 /**

@@ -1,5 +1,5 @@
 // The control block shared by the machine and its vCPU workers
-// (docs/acpi-x86-64-multicore-plan.zh-CN.md, W1): an Int32Array over a
+// (docs/multicore.md): an Int32Array over a
 // SharedArrayBuffer of its own. Guest RAM and CPU state live in the Wasm
 // memory; this block only carries the host protocol:
 //

@@ -27,6 +27,9 @@ export function DMA(cpu)
 
     this.lsb_msb_flipflop = 0;
 
+    /** @type {number} machine resets so far: a transfer completing after one is dropped */
+    this.epoch = 0;
+
     var io = cpu.io;
 
     io.register_write(0x00, this, this.port_addr_write.bind(this, 0));
@@ -304,8 +307,11 @@ DMA.prototype.do_read = function(buffer, start, len, channel, fn)
         }
         this.channel_addr[channel] += read_count;
 
-        track_state_io(cpu, done => buffer.get(start, read_count, done), function(data)
+        const epoch = this.epoch;
+        track_state_io(cpu, done => buffer.get(start, read_count, done), data =>
         {
+            // (a machine reset in between: the transfer belongs to the machine before it)
+            if(epoch !== this.epoch) return;
             try
             {
                 cpu.write_blob_physical(data, addr);
@@ -379,9 +385,11 @@ DMA.prototype.do_write = function(buffer, start, len, channel, fn)
             this.channel_count[channel] = this.channel_count_init[channel];
         }
 
+        const epoch = this.epoch;
         track_state_io(this.cpu, done => buffer.set(start, data, done),
                 () =>
                 {
+                    if(epoch !== this.epoch) return;
                     if(want_more && autoinit)
                     {
                         dbg_log("DMA continuing from start", LOG_DMA);
@@ -394,6 +402,16 @@ DMA.prototype.do_write = function(buffer, start, len, channel, fn)
                 }
             );
     }
+};
+
+/**
+ * Machine reset or power-on: transfers still in flight belong to the machine
+ * before it and complete without effect (the controller's registers are
+ * programmed again by the firmware)
+ */
+DMA.prototype.cancel_transfers = function()
+{
+    this.epoch++;
 };
 
 DMA.prototype.address_get_8bit = function(channel)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// C2 OS acceptance: unmodified 32-bit Linux 4.16 SMP from images/linux4.iso.
+// Topology OS acceptance: unmodified 32-bit Linux 4.16 SMP from images/linux4.iso.
 // Firmware starts APs, Linux brings them online, sysfs reports one package,
 // and concurrent ELF32 processes bind to every CPU and complete real work.
 // No host writes to CPU contexts or firmware counts occur in this test.

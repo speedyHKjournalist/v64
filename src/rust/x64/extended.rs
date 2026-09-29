@@ -1,5 +1,5 @@
-//! Guest RAM beyond the wasm32 backing store (X6 of
-//! docs/acpi-x86-64-multicore-plan.zh-CN.md): "extended RAM" at guest
+//! Guest RAM beyond the wasm32 backing store
+//! (docs/x86-64.md): "extended RAM" at guest
 //! physical [base, base + pages * 4 KiB), above the RAM windows of
 //! crate::x64::physical. Its pages live in a host store (JavaScript
 //! ArrayBuffers, shared with vCPU workers: `js::extended_load` and

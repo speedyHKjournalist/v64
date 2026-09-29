@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// R1 release gate (docs/acpi-x86-64-multicore-plan.zh-CN.md §6.4): runs the
-// acceptance targets of each release level, records per target the command,
+// Release gate (the release levels of docs/acpi.md, docs/x86-64.md and
+// docs/multicore.md): runs the acceptance targets of each release level,
+// records per target the command,
 // exit status, duration and log tail, together with the commit, the
 // uncommitted changes, the toolchain and the host, and writes
 // build/release-gate/<time>/report.{json,md} plus one log per target.
@@ -44,7 +45,7 @@ const LEVELS = {
         ["multicore-parallel-tests", true], ["multicore-parallel-tests-release", true], ["multicore-parallel-browser-tests"],
         ["multicore-parallel-bench", true],
     ],
-    "X6": [
+    "R-extended-memory": [
         ["extended-memory-tests"], ["x64-extended-guest-tests", true],
     ],
 };

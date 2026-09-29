@@ -1,4 +1,4 @@
-; Fixed-work throughput kernel for W2 (docs/acpi-x86-64-multicore-plan.zh-CN.md):
+; Fixed-work throughput kernel (docs/multicore.md):
 ; the same total work, split over 1..N cores, cooperative or in vCPU workers.
 ; The BSP starts the APs with INIT/SIPI; then rounds repeat: every core waits
 ; until the host raises GO above the rounds done, processes items and adds

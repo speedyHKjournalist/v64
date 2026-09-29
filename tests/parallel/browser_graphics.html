@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>v86 graphics with vCPU workers</title>
-<!-- W1 (docs/acpi-x86-64-multicore-plan.zh-CN.md): a graphical screen while
+<!-- vCPU workers (docs/multicore.md): a graphical screen while
      the cores run in vCPU workers, whose wasm memory is shared memory, which
      ImageData refuses (src/vga.js keeps a copy then). tests/parallel/graphics.asm
      draws red above row 240 and green below; the canvas must show both.

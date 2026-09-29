@@ -1,4 +1,4 @@
-// The host store of extended RAM (X6 of docs/acpi-x86-64-multicore-plan.zh-CN.md):
+// The host store of extended RAM (docs/x86-64.md):
 // guest RAM beyond the wasm32 backing store, at guest physical 4 GiB plus
 // high_memory_size. The CPU caches its pages in frames of the wasm heap
 // (src/rust/x64/extended.rs) and copies a page in or out through the

@@ -361,6 +361,17 @@ export function IDEController(cpu, bus, ide_config)
     Object.seal(this);
 }
 
+/**
+ * Machine reset or power-on (PCIRST#): both channels return to their power-on
+ * state and I/O still in flight is dropped (its completion must not reach the
+ * machine that starts now)
+ */
+IDEController.prototype.reset = function()
+{
+    this.primary && this.primary.hardware_reset();
+    this.secondary && this.secondary.hardware_reset();
+};
+
 IDEController.prototype.get_state = function()
 {
     const state = [];
@@ -668,6 +679,18 @@ IDEChannel.prototype.write_control = function(data)
     this.device_control_reg = data;
 };
 
+IDEChannel.prototype.hardware_reset = function()
+{
+    this.cpu.device_lower_irq(this.irq);
+    this.master.device_reset();
+    this.slave.device_reset();
+    this.current_interface = this.master;
+    this.device_control_reg = ATA_CR_NIEN;
+    this.prdt_addr = 0;
+    this.dma_status = 0;
+    this.dma_command = 0;
+};
+
 IDEChannel.prototype.dma_read_addr = function()
 {
     if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
@@ -926,6 +949,8 @@ function IDEInterface(channel, interface_nr, buffer, is_cd)
     this.last_io_id = 0;
     this.in_progress_io_ids = new Map();
     this.cancelled_io_ids = new Set();
+    /** @type {number} device resets so far: a write completing after one is dropped */
+    this.reset_epoch = 0;
 
     // ATAPI-only
     /** @type {number} */
@@ -1166,6 +1191,8 @@ IDEInterface.prototype.device_reset = function()
         this.lba_high_reg = 0;
     }
     this.cancel_io_operations();
+    // (completions of writes started before are dropped)
+    this.reset_epoch++;
 };
 
 IDEInterface.prototype.push_irq = function()
@@ -2485,8 +2512,10 @@ IDEInterface.prototype.do_ata_write_sectors_dma = function()
         return;
     }
 
+    const epoch = this.reset_epoch;
     track_state_io(this.cpu, done => this.buffer.set(start, buffer, done), () =>
     {
+        if(epoch !== this.reset_epoch) return;
         if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
         {
             dbg_log(this.name + ": DMA write completed", LOG_DISK);

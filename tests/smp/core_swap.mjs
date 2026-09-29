@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Two CPU contexts on one machine, switched at main-loop boundaries with
-// CPU.save_core_state/load_core_state: the mechanism C1's cooperative
+// CPU.save_core_state/load_core_state: the mechanism cooperative
 // multicore is built on. Each context must end exactly as when it runs alone,
 // with the JIT (default) and the interpreter (DISABLE_JIT=1).
 //

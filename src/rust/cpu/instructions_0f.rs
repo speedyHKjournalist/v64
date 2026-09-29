@@ -1288,7 +1288,7 @@ pub unsafe fn write_msr_table(index: i32, low: i32, high: i32) -> Result<bool, (
             // Enable Misc. Processor Features
         },
         IA32_FS_BASE | IA32_GS_BASE => {
-            // C1's compatibility MSRs expose the 32-bit hidden segment base
+            // These compatibility MSRs expose the 32-bit hidden segment base
             // used by kvm-unit-tests' per-CPU data. This is not the full
             // long-mode MSR contract: reject unrepresentable values before
             // changing state, identically in debug and release builds.
@@ -3377,7 +3377,7 @@ pub unsafe fn instr32_0FA1() {
     };
 }
 // Internal OS qualification switch. The supported public CPU remains the
-// legacy profile until the independent X1–X5/XC acceptance gates pass. A test
+// legacy profile until the independent x86-64 acceptance gates pass. A test
 // must opt in on each newly created machine; this is never a user config knob.
 static mut X64_TEST_CAPABILITIES: bool = false;
 /// IA32_ARCH_CAPABILITIES in the x64 profile (on by default there).
@@ -3482,8 +3482,8 @@ pub unsafe fn instr_0FA2() {
 
         1 => {
             eax = 3 | 7 << 4 | 6 << 8; // pentium3
-            // initial APIC ID of this core (topology fields: see C2 in
-            // docs/acpi-x86-64-multicore-plan.zh-CN.md), cpu count, clflush size
+            // initial APIC ID of this core (topology fields: see
+            // docs/multicore.md), cpu count, clflush size
             ebx = (crate::cpu::apic::current_core() as i32) << 24 | 1 << 16 | 8 << 8;
             ecx = 1 << 0 | 1 << 23 | 1 << 30; // sse3, popcnt, rdrand
             let vme = 0 << 1;

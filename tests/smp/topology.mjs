@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// C2 CPUID and firmware-input contract. These are instruction-level checks;
+// Topology: CPUID and firmware-input contract. These are instruction-level checks;
 // architectural AP startup and real firmware boot have separate guest gates.
 import assert from "node:assert/strict";
 import { build_acpi_tables } from "../../src/acpi_tables.js";

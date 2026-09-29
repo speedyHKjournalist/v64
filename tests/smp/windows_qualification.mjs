@@ -42,7 +42,7 @@ function version_strings(bytes)
 for(const bytes of [hal, kernel, original_hal, original_kernel]) assert.ok(version_strings(bytes).some(value => value.includes("5.1.2600.5512")), "matching XP SP3 binaries");
 const probe_path = path.join(output_dir, "C3PROBE.EXE");
 command(process.env.MINGW_CC || "i686-w64-mingw32-gcc", ["-Os", "-nostdlib", "-fno-builtin", "-fno-stack-protector", "-Wl,--entry,_entry@0", "-Wl,--subsystem,console", "-o", probe_path, path.join(root, "tests/smp/windows_probe.c"), "-lkernel32"]);
-const boot = "[boot loader]\r\ntimeout=0\r\ndefault=multi(0)disk(0)rdisk(0)partition(1)\\WINDOWS\r\n[operating systems]\r\nmulti(0)disk(0)rdisk(0)partition(1)\\WINDOWS=\"C3 XP ACPI SMP RAM overlay\" /HAL=HALSMP.DLL /KERNEL=NTSMP.EXE /noexecute=AlwaysOff /fastdetect /sos /bootlog\r\n";
+const boot = "[boot loader]\r\ntimeout=0\r\ndefault=multi(0)disk(0)rdisk(0)partition(1)\\WINDOWS\r\n[operating systems]\r\nmulti(0)disk(0)rdisk(0)partition(1)\\WINDOWS=\"XP ACPI SMP RAM overlay\" /HAL=HALSMP.DLL /KERNEL=NTSMP.EXE /noexecute=AlwaysOff /fastdetect /sos /bootlog\r\n";
 const setup = `@echo off\r
 copy /y "%~dp0HALMP.DLL" "%SystemRoot%\\System32\\HALSMP.DLL"\r
 if errorlevel 1 goto fail\r

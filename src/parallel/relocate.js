@@ -1,5 +1,5 @@
-// Loading build/v86-parallel.wasm (docs/acpi-x86-64-multicore-plan.zh-CN.md,
-// W0): one shared memory holds several instances of the module, each with its
+// Loading build/v86-parallel.wasm (docs/multicore.md):
+// one shared memory holds several instances of the module, each with its
 // own static data, stack and CPU state block at a different base address.
 // tools/parallel_wasm.mjs lists every field that holds an address of the
 // module's static data; relocate() adds the base to them, except for

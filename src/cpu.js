@@ -804,7 +804,7 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[95] = clock_state;
     state[96] = this.get_machine_core_state();
     state[97] = [1, this.get_physical_windows()];
-    // extended RAM pages (X6; its contents are records of the snapshot stream)
+    // extended RAM pages (its contents are records of the snapshot stream)
     state[98] = this.extended_pages;
     return state;
 };
@@ -1272,8 +1272,8 @@ const CORE_EVENT_INIT = 1;
 const CORE_EVENT_SIPI = 2;
 
 /**
- * Cores of a single-socket machine (docs/acpi-x86-64-multicore-plan.zh-CN.md,
- * C1). They run one at a time on this Wasm instance: the scheduler
+ * Cores of a single-socket machine (docs/multicore.md).
+ * They run one at a time on this Wasm instance: the scheduler
  * (run_cores) switches the active core at main-loop boundaries with
  * save_core_state/load_core_state; each core has its own local APIC.
  */
@@ -1979,6 +1979,16 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
         }
     });
 
+    // (disk I/O still in flight must not reach the machine that starts now)
+    if(this.devices.ide)
+    {
+        this.devices.ide.reset();
+    }
+    if(this.devices.dma)
+    {
+        this.devices.dma.cancel_transfers();
+    }
+
     if(this.devices.virtio_9p)
     {
         this.devices.virtio_9p.reset();
@@ -2058,7 +2068,7 @@ CPU.prototype.reset_memory = function()
 };
 
 /**
- * Relocate the top `size` bytes of RAM to guest physical 4 GiB (X5). Low RAM
+ * Relocate the top `size` bytes of RAM to guest physical 4 GiB. Low RAM
  * then ends at `low_memory_size`; the backing bytes stay in the wasm32 heap.
  * @param {number} size
  * @param {number} low_minimum bytes that must remain below the relocated range
@@ -2080,7 +2090,7 @@ CPU.prototype.configure_high_memory = function(size, low_minimum)
 };
 
 /**
- * RAM beyond the wasm32 backing store (X6): `size` bytes at guest physical
+ * RAM beyond the wasm32 backing store (extended RAM): `size` bytes at guest physical
  * 4 GiB + high_memory_size, kept in an ExtendedStore (src/extended_memory.js)
  * and cached in `cache_size` bytes of frames (src/rust/x64/extended.rs).
  * Only a long-mode guest can address it.
@@ -2398,7 +2408,7 @@ CPU.prototype.init = function(settings, device_bus)
         throw new Error("Multicore topology requires cpuid_level >= 0x1F");
     }
     // Deterministic time uses the interpreter's architectural commit ledger.
-    // Multicore JIT remains opt-in until the complete C3 stress matrix passes.
+    // Multicore JIT remains opt-in until the complete cross-core stress matrix passes.
     if(settings.parallel && deterministic) throw new Error("parallel: deterministic time needs cooperative cores");
     const interpreted = deterministic || multicore && !settings.experimental_smp_jit;
     this.configure_jit_backend(interpreted ? Object.assign({}, settings, { disable_jit: true }) : settings);

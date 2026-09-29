@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Windows x64 qualification on a user-supplied disk (X3/XC, C2 topology).
+// Windows x64 qualification on a user-supplied disk (64-bit and WOW64 probes, topology).
 // The image is opened read-only; every guest write stays in a RAM overlay.
 // A FAT16 tools disk carries PROBE64.EXE (native) and PROBE32.EXE (WOW64,
 // compatibility mode); after sign-in they run through Win+R and write their
@@ -51,7 +51,7 @@ const vm = new V86({
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true,
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
-    // WIN_PARALLEL=1: the application processors run in vCPU workers (W1)
+    // WIN_PARALLEL=1: the application processors run in vCPU workers
     ...(+process.env.WIN_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),
 });
 

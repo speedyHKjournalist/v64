@@ -11,7 +11,7 @@ import {fileURLToPath} from "node:url";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const directory = root + "build/x64-linux/";
 // X64_LINUX_FLAVOR: "virt" (default, the virt kernel) or "lts" (the standard
-// ISO's lts kernel, which also has hibernation, for A3's S4 cycles)
+// ISO's lts kernel, which also has hibernation, for the S4 cycles)
 const flavor = process.env.X64_LINUX_FLAVOR || "virt";
 const {name, digest} = {
     virt: {name: "alpine-virt-3.24.0-x86_64.iso", digest: "6cd1a38ae05cf96a5d0cbb2ddd6c630834babfeca1ecc5d1f05ec0b06b886102"},
@@ -67,7 +67,7 @@ run("bsdtar", ["--format", "ustar", "--no-xattrs", "--no-mac-metadata", "--uid",
 const probe_disk = fs.readFileSync(probe_directory + "probe.tar");
 // v86 runs also bring up virtio-net (Alpine virt has no NE2K driver) and echo
 // raw frames on the host (X64_PROBE_NET); the QEMU reference skips that round.
-// X6: X64_EXTENDED_MEMORY=<bytes> of extended RAM after the relocated RAM;
+// Extended RAM: X64_EXTENDED_MEMORY=<bytes> of extended RAM after the relocated RAM;
 // X64_LINUX_MEMTEST=<MiB>: the probe maps, writes and checks that much and
 // counts its pages in extended RAM (they must be there); X64_EXTENDED_CACHE=<bytes>
 // of frames that hold it (default 512 MiB)
@@ -79,10 +79,10 @@ const guest_command = net => (net ? "modprobe virtio_net 2>/dev/null; ifconfig e
     (memtest_mib ? `grep MemTotal /proc/meminfo; /tmp/linux_probe64 memtest ${memtest_mib} ${extended_first_pfn()}; ` : "") +
     "uname -m; cat /sys/devices/system/cpu/online; grep 'System RAM' /proc/iomem; echo X64_LINUX_BOOT_OK\n";
 function extended_first_pfn() { return (2 ** 32 + Number(process.env.X64_HIGH_MEMORY || 0)) / 4096; }
-// X5: relocate this many bytes of RAM to guest physical 4 GiB (v86) or give
+// High memory: relocate this many bytes of RAM to guest physical 4 GiB (v86) or give
 // QEMU the same split, so the kernel and probes must use RAM above 4 GiB.
 const high_memory = Number(process.env.X64_HIGH_MEMORY || 0);
-// A3: X64_LINUX_SLEEP=<cycles> suspends to RAM and hibernates to /dev/sdb
+// Sleep states: X64_LINUX_SLEEP=<cycles> suspends to RAM and hibernates to /dev/sdb
 // (a blank disk) that many times each; Alpine's initramfs restores through resume=.
 const sleep_cycles = Number(process.env.X64_LINUX_SLEEP || 0);
 const cmdline = process.env.X64_LINUX_CMDLINE || "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage" +
@@ -168,7 +168,7 @@ const emulator = new V86({
     ...(extended_cache ? {extended_memory_cache: extended_cache} : {}),
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0, net_device: {type: "virtio"},
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
-    // X64_PARALLEL=1: the application processors run in vCPU workers (W1)
+    // X64_PARALLEL=1: the application processors run in vCPU workers
     ...(+process.env.X64_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),
 });
 let serial = "";

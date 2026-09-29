@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// W1/C3 soak (docs/acpi-x86-64-multicore-plan.zh-CN.md): linux4 on cores in
+// Parallel soak test (docs/multicore.md): linux4 on cores in
 // vCPU workers for SOAK_MINUTES. Each iteration starts a workload on every
 // core (arithmetic whose results are checked, a pipe and a tmpfs file with
 // checksums), and while it runs pauses and resumes the machine and takes and

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// W1: Linux on a machine whose application processors run in vCPU workers
+// Linux on a machine whose application processors run in vCPU workers
 // (src/parallel), interpreted. The kernel brings every core online and runs
 // work on all of them; the diagnostics show that each worker executed
 // instructions and served I/O through the machine thread.

@@ -8,7 +8,7 @@
 // Regenerate with `node gen/state_layout.js`; `--check` fails if either file is
 // stale, a field overlaps another, or a Rust static is missing from STATICS.
 //
-// Owners (docs/acpi-x86-64-multicore-plan.zh-CN.md, P2a and C1):
+// Owners (docs/multicore.md):
 //   core     architectural state of one core: copied when the active core
 //            changes and saved in snapshots
 //   cache    derived from core state; dropped or recomputed when the active
@@ -144,7 +144,7 @@ export const STATE_FIELDS = [
 // listed here, so new state has to be classified when it is added.
 export const STATICS = {
     // one local APIC per core, indexed by core; the scheduler's current core and INIT/SIPI events
-    // the state block of this instance in the parallel build (W0): each relocated instance has its own
+    // the state block of this instance in the parallel build: each relocated instance has its own
     "cpu/global_pointers.rs": { STATE_BLOCK: "core" },
     "cpu/apic.rs": { APICS: "core", APIC_AUX: "core", CURRENT_CORE: "machine", CORE_COUNT: "machine", CORE_EVENTS: "machine", NMI_PENDING: "machine" },
     "cpu/cpu.rs": {
@@ -200,7 +200,7 @@ export const STATICS = {
     },
     "ir/runtime/tier0.rs": { COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine" },
     "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
-    // the parallel runtime (W0/W1): where this instance's statics are and whether
+    // the parallel runtime: where this instance's statics are and whether
     // cores run in workers, then machine-wide words reached through machine():
     // wake-ups, yield flags, the locks of locked operations and the code
     // publication/invalidation rings; per instance: its ring positions and the
@@ -226,7 +226,7 @@ export const STATICS = {
     "x64/physical.rs": { PHYSICAL_BUS: "machine" },
     // (LOCKED: the locked instruction in progress, within one instruction)
     "x64/memory.rs": { X64_TLBS: "core", LOCKED: "scratch" },
-    // extended RAM (X6): the frame pool and its lock; access caches holding frames
+    // extended RAM: the frame pool and its lock; access caches holding frames
     // are released at the next safe point; aperture slots are remapped on demand
     "x64/extended.rs": { EXTENDED: "machine", LOCK: "machine", DEPTH: "scratch", RELEASE_PENDING: "cache",
         LEGACY_TLB_CACHED: "cache", SLOT_PAGE: "cache", NEXT: "cache" },

@@ -76,7 +76,7 @@ pub struct AddressExpr {
     pub segment: u8,
 }
 impl AddressExpr {
-    /// Segmentation/canonical/page permission checks belong to X2. In long
+    /// Segmentation/canonical/page permission checks happen at the access. In long
     /// mode only FS/GS have a nonzero effective base; address32 wraps first.
     pub fn offset(self, registers: &[u64; 16], next_rip: GuestIp) -> u64 {
         let base = match self.base {

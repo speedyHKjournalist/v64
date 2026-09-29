@@ -1,5 +1,0 @@
-interpreter: extended RAM 6 GiB, frames 1024; hits 8373457, loads 213546, write-backs 106497, evictions 212522, aperture 26, releases 1, bounces 0
-page tier: extended RAM 6 GiB, frames 1024; hits 842, loads 213546, write-backs 106511, evictions 212522, aperture 26, releases 296, bounces 0
-snapshot stream: 424.4 MiB restored into another machine
-X64_EXTENDED_MEMORY_PASS
-exit 0

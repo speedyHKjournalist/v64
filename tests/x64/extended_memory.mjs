@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// X6 (docs/acpi-x86-64-multicore-plan.zh-CN.md): guest RAM beyond the wasm32
+// Extended RAM (docs/x86-64.md): guest RAM beyond the wasm32
 // backing store. 64 MiB of RAM, 16 MiB of it relocated to 4 GiB, and
 // EXTENDED_GIB (default 6) GiB of extended RAM after it, cached in a pool of
 // only 4 MiB of frames, so that nearly every access pages. A long-mode guest
