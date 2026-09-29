@@ -46,9 +46,7 @@ pub unsafe fn ir_load_segment(
     value: u32,
     bytes: u32,
 ) -> u32 {
-    assert!(
-        segment < 6 && segment != 1 && register < 8 && matches!(bytes, 0 | 2 | 4)
-    );
+    assert!(segment < 6 && segment != 1 && register < 8 && matches!(bytes, 0 | 2 | 4));
     if !cpu::switch_seg(segment as i32, (selector & 65535) as i32) {
         return Outcome::ControlTransferred as u32;
     }

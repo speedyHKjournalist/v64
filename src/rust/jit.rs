@@ -180,7 +180,9 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
 pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
-    unsafe { crate::x64::cache::x64_native_reset(); }
+    unsafe {
+        crate::x64::cache::x64_native_reset();
+    }
     crate::x64::pages::reset();
     crate::ir::runtime::live::invalidate();
     crate::ir::runtime::cache::invalidate();
@@ -223,7 +225,12 @@ fn ir_page_count(counts: &mut Vec<u16>, page: Page, delta: i32) {
     set_watched(index, after);
     if before != after {
         unsafe {
-            if after { crate::parallel::code::claim(index as u32) } else { crate::parallel::code::release(index as u32) }
+            if after {
+                crate::parallel::code::claim(index as u32)
+            }
+            else {
+                crate::parallel::code::release(index as u32)
+            }
         }
     }
 }
@@ -240,7 +247,12 @@ fn set_watched(page: usize, watched: bool) {
             }
             bits.resize(page / 64 + 1, 0);
         }
-        if watched { bits[page / 64] |= 1 << (page % 64) } else { bits[page / 64] &= !(1 << (page % 64)) }
+        if watched {
+            bits[page / 64] |= 1 << (page % 64)
+        }
+        else {
+            bits[page / 64] &= !(1 << (page % 64))
+        }
     }
 }
 /// Whether IR or x64 page-tier code was compiled from this backing page, by
@@ -248,7 +260,9 @@ fn set_watched(page: usize, watched: bool) {
 #[inline(always)]
 pub fn page_watched(page: u32) -> bool {
     unsafe {
-        (&*(&raw const WATCHED)).get(page as usize / 64).is_some_and(|w| w >> (page % 64) & 1 != 0)
+        (&*(&raw const WATCHED))
+            .get(page as usize / 64)
+            .is_some_and(|w| w >> (page % 64) & 1 != 0)
             || crate::parallel::code::others_own(page)
     }
 }

@@ -42,13 +42,18 @@ pub fn apply_prefix(flags: u8, byte: u8) -> Option<u8> {
 /// interpreter dispatch and side-effect-free JIT decoding use this list so a
 /// register form or a read-only operand cannot silently become an unlocked op.
 pub fn lock_allowed(opcode: u32, modrm: Option<u8>) -> bool {
-    let Some(modrm) = modrm else { return false; };
-    if modrm >= 0xC0 { return false; }
+    let Some(modrm) = modrm
+    else {
+        return false;
+    };
+    if modrm >= 0xC0 {
+        return false;
+    }
     let group = modrm >> 3 & 7;
     match opcode {
-        0x00 | 0x01 | 0x08 | 0x09 | 0x10 | 0x11 | 0x18 | 0x19 |
-        0x20 | 0x21 | 0x28 | 0x29 | 0x30 | 0x31 | 0x86 | 0x87 |
-        0x0FAB | 0x0FB0 | 0x0FB1 | 0x0FB3 | 0x0FBB | 0x0FC0 | 0x0FC1 => true,
+        0x00 | 0x01 | 0x08 | 0x09 | 0x10 | 0x11 | 0x18 | 0x19 | 0x20 | 0x21 | 0x28 | 0x29
+        | 0x30 | 0x31 | 0x86 | 0x87 | 0x0FAB | 0x0FB0 | 0x0FB1 | 0x0FB3 | 0x0FBB | 0x0FC0
+        | 0x0FC1 => true,
         0x80..=0x83 => group != 7,
         0xF6 | 0xF7 => group == 2 || group == 3,
         0xFE | 0xFF => group <= 1,

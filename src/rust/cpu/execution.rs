@@ -4,8 +4,8 @@
 //! The cooperative scheduler switches cores only outside begin/finish. This
 //! state is therefore Machine-owned transient execution state, not vCPU state.
 
-use crate::cpu::string::{StringExecution, StringOutcome};
 use crate::cpu::apic;
+use crate::cpu::string::{StringExecution, StringOutcome};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -17,7 +17,11 @@ struct CoreStatistics {
     runtime_ms: f64,
 }
 static mut CORE_STATISTICS: [CoreStatistics; 8] = [CoreStatistics {
-    retired: 0, rep_elements: 0, faults: 0, halts: 0, runtime_ms: 0.0,
+    retired: 0,
+    rep_elements: 0,
+    faults: 0,
+    halts: 0,
+    runtime_ms: 0.0,
 }; 8];
 // Tier-0 fallback dispatches are counted by generated code even when they
 // fault. Remove those dispatch counts before adding the native JIT delta;
@@ -30,14 +34,14 @@ static mut PENDING_RETIRED: u64 = 0;
 static mut PENDING_REP_ELEMENTS: u64 = 0;
 pub unsafe fn flush_core_statistics() {
     if PENDING_RETIRED | PENDING_REP_ELEMENTS != 0 {
-        let stats = &mut (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()];
+        let stats =
+            &mut (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()];
         stats.retired += PENDING_RETIRED;
         stats.rep_elements += PENDING_REP_ELEMENTS;
         PENDING_RETIRED = 0;
         PENDING_REP_ELEMENTS = 0;
     }
 }
-
 
 struct ExecutionState {
     deterministic: bool,
@@ -96,7 +100,11 @@ impl ExecutionState {
             Some(result) => (result.outcome == StringOutcome::Complete && !self.faulted) as u32,
             None => (!self.faulted) as u32,
         };
-        self.retired = (!self.faulted && self.string_result.is_none_or(|r| r.outcome == StringOutcome::Complete)) as u32;
+        self.retired = (!self.faulted
+            && self
+                .string_result
+                .is_none_or(|r| r.outcome == StringOutcome::Complete))
+            as u32;
         self.rep_elements = self.string_result.map_or(0, |r| r.iterations);
         self.active = false;
         self.pending_work += work as u64;
@@ -132,15 +140,11 @@ pub unsafe fn set_deterministic_execution(enabled: bool) {
 }
 
 #[inline(always)]
-pub unsafe fn is_deterministic() -> bool {
-    execution_state.deterministic
-}
+pub unsafe fn is_deterministic() -> bool { execution_state.deterministic }
 
 /// Begin at outer dispatch; prefix recursion stays in this instruction.
 #[inline(always)]
-pub unsafe fn begin_instruction() {
-    (&mut *(&raw mut execution_state)).begin()
-}
+pub unsafe fn begin_instruction() { (&mut *(&raw mut execution_state)).begin() }
 
 /// Return successful work from this dispatch, also queued for the JS clock.
 #[inline(always)]
@@ -148,7 +152,9 @@ pub unsafe fn finish_instruction() -> u32 {
     let work = (&mut *(&raw mut execution_state)).finish();
     PENDING_RETIRED += execution_state.retired as u64;
     PENDING_REP_ELEMENTS += execution_state.rep_elements as u64;
-    if !execution_state.deterministic { execution_state.pending_work = 0; }
+    if !execution_state.deterministic {
+        execution_state.pending_work = 0;
+    }
     work
 }
 
@@ -167,9 +173,7 @@ pub unsafe fn record_string(result: StringExecution) {
 
 /// Consume accumulated progress without retiring the currently executing PIO.
 #[no_mangle]
-pub unsafe fn take_clock_progress() -> f64 {
-    (&mut *(&raw mut execution_state)).take_progress()
-}
+pub unsafe fn take_clock_progress() -> f64 { (&mut *(&raw mut execution_state)).take_progress() }
 
 /// STI has retired before its recursively interpreted shadow instruction.
 pub unsafe fn begin_shadow_instruction() {
@@ -179,16 +183,25 @@ pub unsafe fn begin_shadow_instruction() {
     }
 }
 
-pub unsafe fn note_halt() { (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].halts += 1; }
-pub unsafe fn note_jit_rep(elements: u32) { (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].rep_elements += elements as u64; }
+pub unsafe fn note_halt() {
+    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].halts += 1;
+}
+pub unsafe fn note_jit_rep(elements: u32) {
+    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].rep_elements +=
+        elements as u64;
+}
 pub unsafe fn jit_dispatches() -> u32 { JIT_ACCOUNTED_DISPATCHES }
 pub unsafe fn note_jit_interpreted(dispatches: u32) {
     JIT_ACCOUNTED_DISPATCHES = JIT_ACCOUNTED_DISPATCHES.wrapping_add(dispatches);
 }
 pub unsafe fn note_native_retired(steps: u32, accounted_before: u32) {
     let interpreted = JIT_ACCOUNTED_DISPATCHES.wrapping_sub(accounted_before);
-    dbg_assert!(steps >= interpreted, "JIT dispatch ledger exceeds generated step count");
-    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].retired += steps.saturating_sub(interpreted) as u64;
+    dbg_assert!(
+        steps >= interpreted,
+        "JIT dispatch ledger exceeds generated step count"
+    );
+    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].retired +=
+        steps.saturating_sub(interpreted) as u64;
 }
 #[no_mangle]
 pub unsafe fn core_statistics_reset() {
@@ -200,7 +213,9 @@ pub unsafe fn core_statistics_reset() {
 pub unsafe fn core_statistics_addr(core: u32) -> u32 {
     assert!(core < 8);
     flush_core_statistics();
-    crate::parallel::machine(&raw mut CORE_STATISTICS).cast::<CoreStatistics>().add(core as usize) as u32
+    crate::parallel::machine(&raw mut CORE_STATISTICS)
+        .cast::<CoreStatistics>()
+        .add(core as usize) as u32
 }
 #[no_mangle]
 pub fn core_statistics_size() -> u32 { std::mem::size_of::<CoreStatistics>() as u32 }
@@ -209,8 +224,14 @@ pub unsafe fn core_statistics_get(core: u32, field: u32) -> f64 {
     assert!(core < 8);
     flush_core_statistics();
     let stats = (*crate::parallel::machine(&raw mut CORE_STATISTICS))[core as usize];
-    match field { 0 => stats.retired as f64, 1 => stats.rep_elements as f64,
-        2 => stats.faults as f64, 3 => stats.halts as f64, 4 => stats.runtime_ms, _ => 0.0 }
+    match field {
+        0 => stats.retired as f64,
+        1 => stats.rep_elements as f64,
+        2 => stats.faults as f64,
+        3 => stats.halts as f64,
+        4 => stats.runtime_ms,
+        _ => 0.0,
+    }
 }
 #[no_mangle]
 pub unsafe fn core_statistics_runtime(core: u32, elapsed_ms: f64) {

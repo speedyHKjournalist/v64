@@ -136,7 +136,10 @@ fn page_slot(page: u32, cs_base: u32, default_32: bool) -> usize {
 }
 fn page_fill(cache: &Cache, index: usize) {
     let record = &cache.records[index];
-    let (Some(blocks), Some(_)) = (&record.job.artifact.page_blocks, record.job.artifact.source_origin)
+    let (Some(blocks), Some(_)) = (
+        &record.job.artifact.page_blocks,
+        record.job.artifact.source_origin,
+    )
     else {
         return;
     };
@@ -194,7 +197,9 @@ unsafe fn refill_page_witnesses() {
     };
     PAGE_REFILL = false;
     for index in 0..cache.records.len() {
-        if cache.records[index].phase == Phase::Published && cache.records[index].job.artifact.page_blocks.is_some() {
+        if cache.records[index].phase == Phase::Published
+            && cache.records[index].job.artifact.page_blocks.is_some()
+        {
             page_fill(&cache, index);
         }
     }
@@ -204,17 +209,21 @@ unsafe fn refill_page_witnesses() {
 unsafe fn page_chain_slot(linear: u32, cs_base: u32, default_32: bool) -> Option<u32> {
     let page = linear >> 12;
     let w = &PAGE_FAST[page_slot(page, cs_base, default_32)];
-    if w.stamp != FAST_STAMP || w.page != page || w.cs_base != cs_base || w.default_32 != default_32 {
+    if w.stamp != FAST_STAMP || w.page != page || w.cs_base != cs_base || w.default_32 != default_32
+    {
         return None;
     }
     let offset = linear & 4095;
     if (*w.blocks)[offset as usize >> 6] >> (offset & 63) & 1 == 0 {
         return None;
     }
-    let mask = cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let mask =
+        cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let cached = cpu::tlb_data[page as usize];
     if cached & mask != cpu::TLB_VALID
-        || ((cached as u32 & !4095) ^ (linear & !4095)).wrapping_sub(crate::cpu::memory::mem8 as u32) != w.physical
+        || ((cached as u32 & !4095) ^ (linear & !4095))
+            .wrapping_sub(crate::cpu::memory::mem8 as u32)
+            != w.physical
     {
         return None;
     }
@@ -237,14 +246,16 @@ unsafe fn page_witness_matches(linear: u32, cs_base: u32, default_32: bool) -> b
 unsafe fn page_probe(linear: u32, cs_base: u32, default_32: bool) -> Option<FastEntry> {
     let page = linear >> 12;
     let w = PAGE_FAST[page_slot(page, cs_base, default_32)];
-    if w.stamp != FAST_STAMP || w.page != page || w.cs_base != cs_base || w.default_32 != default_32 {
+    if w.stamp != FAST_STAMP || w.page != page || w.cs_base != cs_base || w.default_32 != default_32
+    {
         return None;
     }
     let offset = linear & 4095;
     if (*w.blocks)[offset as usize >> 6] >> (offset & 63) & 1 == 0 {
         return None;
     }
-    let mask = cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let mask =
+        cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let cached = cpu::tlb_data[page as usize];
     let base = crate::cpu::memory::mem8 as u32;
     if cached & mask != cpu::TLB_VALID
@@ -403,7 +414,10 @@ unsafe fn fast_probe() -> Probe {
         if let Some(page) = page_probe(linear, cs_base, default_32) {
             return Probe::Hit(page);
         }
-        return if e.negative && e.stamp == NEG_STAMP && e.linear == linear && e.cs_base == cs_base
+        return if e.negative
+            && e.stamp == NEG_STAMP
+            && e.linear == linear
+            && e.cs_base == cs_base
             && e.default_32 == default_32
         {
             Probe::Absent
@@ -412,7 +426,8 @@ unsafe fn fast_probe() -> Probe {
             Probe::Unknown
         };
     }
-    let mask = cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let mask =
+        cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let base = crate::cpu::memory::mem8 as u32;
     for &(linear, physical) in &e.maps[..e.map_count as usize] {
         let cached = cpu::tlb_data[(linear >> 12) as usize];
@@ -425,7 +440,9 @@ unsafe fn fast_probe() -> Probe {
     Probe::Hit(e)
 }
 #[inline(always)]
-fn missing_hint_slot(entry: super::entry::CpuEntryKey) -> usize { entry_hint_slot(index_key(entry)) }
+fn missing_hint_slot(entry: super::entry::CpuEntryKey) -> usize {
+    entry_hint_slot(index_key(entry))
+}
 fn index_key(entry: super::entry::CpuEntryKey) -> EntryIndexKey {
     (entry.linear.0, entry.pc.0, entry.default_32)
 }
@@ -674,10 +691,19 @@ pub(super) fn next_promotion(limit: usize) -> Option<Ticket> {
     for _ in 0..limit {
         let saved = cache.promotion_cursor;
         let position = {
-            let Cache { records, promotion_cursor, .. } = &mut *cache;
+            let Cache {
+                records,
+                promotion_cursor,
+                ..
+            } = &mut *cache;
             promotion_cursor.next(records.len(), |index| {
                 let record = &records[index];
-                if record.phase == Phase::Published { record.promotion.len() } else { 0 }
+                if record.phase == Phase::Published {
+                    record.promotion.len()
+                }
+                else {
+                    0
+                }
             })
         };
         let Some((record, alias)) = position
@@ -797,7 +823,14 @@ pub fn ir_cache_replay_info(id: u64, group: u32, index: u32, field: u32) -> u32 
         }),
         4 => source((index >> 16) as usize)
             .and_then(|(_, s)| s.mappings.get((index & 65535) as usize))
-            .map_or(0, |m| if field == 0 { m.linear.0 } else { m.physical.0 }),
+            .map_or(0, |m| {
+                if field == 0 {
+                    m.linear.0
+                }
+                else {
+                    m.physical.0
+                }
+            }),
         _ => 0,
     }
 }
@@ -970,13 +1003,21 @@ struct PageOut {
     targets: [(u32, u32, u32, u32); 4],
 }
 impl PageOut {
-    const fn new(page: u32) -> PageOut { PageOut { page, total: 0, targets: [(!0, 0, 0, 0); 4] } }
+    const fn new(page: u32) -> PageOut {
+        PageOut {
+            page,
+            total: 0,
+            targets: [(!0, 0, 0, 0); 4],
+        }
+    }
 }
 const PAGE_OUT_SETS: usize = 2048;
 static mut PAGE_OUT: [[PageOut; 2]; PAGE_OUT_SETS] = [[PageOut::new(!0); 2]; PAGE_OUT_SETS];
 #[inline(always)]
 unsafe fn page_out_set(page: u32) -> &'static mut [PageOut; 2] {
-    &mut *core::ptr::addr_of_mut!(PAGE_OUT[page.wrapping_mul(0x9E3779B1) as usize >> 21 & PAGE_OUT_SETS - 1])
+    &mut *core::ptr::addr_of_mut!(
+        PAGE_OUT[page.wrapping_mul(0x9E3779B1) as usize >> 21 & PAGE_OUT_SETS - 1]
+    )
 }
 /// Links counted per decision, in sampled links (see sample_link): 100K links.
 const T0_RANGE_LINKS: u32 = 100_000 >> LINK_SAMPLE_SHIFT;
@@ -1017,8 +1058,12 @@ unsafe fn link_is_return(to: u32) -> bool {
     if !*gp::stack_size_32 {
         return false;
     }
-    let slot = (cpu::get_seg_ss() as u32).wrapping_add(*gp::reg32.add(cpu::ESP as usize) as u32).wrapping_sub(4);
-    let mask = cpu::TLB_VALID | cpu::TLB_IN_MAPPED_RANGE | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let slot = (cpu::get_seg_ss() as u32)
+        .wrapping_add(*gp::reg32.add(cpu::ESP as usize) as u32)
+        .wrapping_sub(4);
+    let mask = cpu::TLB_VALID
+        | cpu::TLB_IN_MAPPED_RANGE
+        | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let entry = cpu::tlb_data[(slot >> 12) as usize];
     if entry & mask != cpu::TLB_VALID || slot & 4095 > 4092 {
         return false;
@@ -1075,7 +1120,8 @@ unsafe fn note_link(from: u32, to: u32) {
         super::schedule::want_partner(a << 12, to, T0_CS, *gp::is_32);
         let mut page = b;
         for _ in 0..crate::ir::tier0::MAX_PAGES - 2 {
-            let Some(next) = dominant_successor(page).filter(|&next| next >> 12 != a && next >> 12 != page)
+            let Some(next) =
+                dominant_successor(page).filter(|&next| next >> 12 != a && next >> 12 != page)
             else {
                 break;
             };
@@ -1144,7 +1190,7 @@ pub fn invalidate() {
     }
     clear_missing_hint();
     cache.needs_collection = true;
-        unsafe { COLLECTION_PENDING = true };
+    unsafe { COLLECTION_PENDING = true };
 }
 pub fn dirty_page(page: u32) {
     super::entry::code_write_barrier();
@@ -1348,12 +1394,12 @@ pub(super) unsafe fn observer_continuation() -> bool {
     cache.observer_checks = cache.observer_checks.wrapping_add(1);
     let active = active();
     let valid = active.is_some_and(|owner| {
-            cache.records.get(owner.index).is_some_and(|record| {
-                record.job.artifact.key.job == owner.id
-                    && record.phase == Phase::Published
-                    && cached_current(record) == CachedMatch::Match
-            })
-        });
+        cache.records.get(owner.index).is_some_and(|record| {
+            record.job.artifact.key.job == owner.id
+                && record.phase == Phase::Published
+                && cached_current(record) == CachedMatch::Match
+        })
+    });
     if valid {
         // The observer just performed the same full source/mapping validation
         // used by cold admission. Reuse that certificate until the next host,
@@ -1379,15 +1425,17 @@ unsafe fn mappings_current(job: &Job) -> bool {
     true
 }
 unsafe fn source_current(linear: u32, source: &super::compile::ImmutableCodeSnapshot) -> bool {
-    let current = if source.bytes.len() > 4096 && linear & 4095 == 0 && source.bytes.len() % 4096 == 0 {
-        // A multi-page Tier-0 source: its pages need not be consecutive.
-        let pages: Vec<u32> = source.mappings.iter().map(|m| m.linear.0).collect();
-        super::snapshot::capture_page_list(&pages)
-    }
-    else {
-        capture(linear, source.bytes.len())
-    };
-    current.is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
+    let current =
+        if source.bytes.len() > 4096 && linear & 4095 == 0 && source.bytes.len() % 4096 == 0 {
+            // A multi-page Tier-0 source: its pages need not be consecutive.
+            let pages: Vec<u32> = source.mappings.iter().map(|m| m.linear.0).collect();
+            super::snapshot::capture_page_list(&pages)
+        }
+        else {
+            capture(linear, source.bytes.len())
+        };
+    current
+        .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
 }
 unsafe fn unchanged_full(job: &Job) -> bool {
     if !live::generation_current(job.artifact.key) {
@@ -1890,7 +1938,7 @@ pub(super) unsafe fn make_room(entry: super::entry::CpuEntryKey) -> bool {
             cache.evictions = cache.evictions.wrapping_add(1);
             clear_missing_hint();
             cache.needs_collection = true;
-        unsafe { COLLECTION_PENDING = true };
+            unsafe { COLLECTION_PENDING = true };
             Some(entries)
         }
         else {
@@ -1915,16 +1963,14 @@ pub(super) fn tier(entry: super::entry::CpuEntryKey) -> u32 {
         .get(&index_key(entry))
         .map(|&index| &cache.records[index])
         .filter(|r| r.phase == Phase::Published)
-        .map(
-            |r| {
-                if r.job.artifact.tier == super::compile::Tier::One {
-                    1
-                }
-                else {
-                    2
-                }
-            },
-        )
+        .map(|r| {
+            if r.job.artifact.tier == super::compile::Tier::One {
+                1
+            }
+            else {
+                2
+            }
+        })
         .unwrap_or(0)
 }
 /// With cores in workers, the pages this code was compiled from must be
@@ -1932,7 +1978,13 @@ pub(super) fn tier(entry: super::entry::CpuEntryKey) -> u32 {
 /// little for their acknowledgements, else the publication fails and the
 /// code is compiled again later, when they have.
 fn job_published(job: &Job) -> bool {
-    jit::wait_pages_published(job.artifact.dependencies.iter().map(|d| Page::page_of(d.page.0)), 0.5)
+    jit::wait_pages_published(
+        job.artifact
+            .dependencies
+            .iter()
+            .map(|d| Page::page_of(d.page.0)),
+        0.5,
+    )
 }
 
 /// Pending/validated results have not completed the publication transaction.
@@ -1968,7 +2020,11 @@ pub unsafe fn ir_cache_validate(id: u64, slot: u32) -> bool {
             .is_none_or(|ticket| promotion_index(&cache, ticket).is_some());
         let r = &mut cache.records[index];
         // (other cores' translations mark the pages before the bytes are checked)
-        if r.phase == Phase::Pending && parent_current && job_published(&r.job) && unchanged_full(&r.job) {
+        if r.phase == Phase::Pending
+            && parent_current
+            && job_published(&r.job)
+            && unchanged_full(&r.job)
+        {
             r.phase = Phase::Validated;
             true
         }
@@ -2000,7 +2056,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         .records
         .iter()
         .position(|r| r.job.artifact.key.job == id && r.slot == slot)
-  else {
+    else {
         return false;
     };
     if cache.records[index].phase != Phase::Validated {
@@ -2020,12 +2076,15 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     }
     let entries = cache.records[index].entries.clone();
     // A page function has up to 256 entries: look them up, not scan them.
-    let keys: std::collections::HashSet<EntryIndexKey> = entries.iter().map(|e| index_key(*e)).collect();
+    let keys: std::collections::HashSet<EntryIndexKey> =
+        entries.iter().map(|e| index_key(*e)).collect();
     let mut superseded = false;
     for (i, record) in cache.records.iter_mut().enumerate() {
         if i != index && record.phase == Phase::Published {
             let before = record.entries.len();
-            record.entries.retain(|entry| !keys.contains(&index_key(*entry)));
+            record
+                .entries
+                .retain(|entry| !keys.contains(&index_key(*entry)));
             superseded |= record.entries.len() != before;
             record
                 .promotion
@@ -2087,13 +2146,13 @@ pub unsafe fn ir_cache_cancel(id: u64, slot: u32) -> bool {
         .records
         .iter_mut()
         .find(|r| r.job.artifact.key.job == id && r.slot == slot && r.phase != Phase::Retired)
-  else {
+    else {
         return false;
     };
     r.phase = Phase::Retired;
     clear_missing_hint();
     cache.needs_collection = true;
-        unsafe { COLLECTION_PENDING = true };
+    unsafe { COLLECTION_PENDING = true };
     cache.failed = cache.failed.wrapping_add(1);
     true
 }
@@ -2259,14 +2318,18 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
     };
     let _ = canonical;
     let valid = live::generation_current(key)
-        && source.0.is_some_and(|linear| source_current(linear, &source.1))
-        && peers.iter().all(|s| source_current(s.entry.linear.0, &s.source));
+        && source
+            .0
+            .is_some_and(|linear| source_current(linear, &source.1))
+        && peers
+            .iter()
+            .all(|s| source_current(s.entry.linear.0, &s.source));
     let mut cache = CACHE.try_lock().unwrap();
     let Some(index) = cache
         .records
         .iter()
         .position(|r| r.job.artifact.key.job == id && r.phase == Phase::Published)
-  else {
+    else {
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     };
@@ -2508,10 +2571,9 @@ unsafe fn fast_run(witness: FastEntry, linked: bool) -> bool {
     if steps == 0 {
         cache.zero_step_exits = cache.zero_step_exits.wrapping_add(1);
     }
-    let fused = cache
-        .records
-        .get(index)
-        .is_some_and(|r| r.job.artifact.key.job == witness.id && !r.job.artifact.fused_sources.is_empty());
+    let fused = cache.records.get(index).is_some_and(|r| {
+        r.job.artifact.key.job == witness.id && !r.job.artifact.fused_sources.is_empty()
+    });
     let mut needs_heat = false;
     if fused {
         cache.fused_hits = cache.fused_hits.wrapping_add(1);
@@ -2628,8 +2690,8 @@ fn activate<const PROFILE: bool>(
     // Tier-1 regions and pages are promoted from record.hits; only a Tier-2
     // fusion candidate's primary entry still earns scheduler heat.
     let needs_heat = !tier_one
-            && record.fusion_candidate
-            && record.job.artifact.entry == EntryContract::Cpu(entry);
+        && record.fusion_candidate
+        && record.job.artifact.entry == EntryContract::Cpu(entry);
     let slot = record.slot;
     if !PROFILE {
         fast_fill(cache, index, entry);
@@ -2741,7 +2803,7 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
                 cache.records[index].phase = Phase::Retired;
                 clear_missing_hint();
                 cache.needs_collection = true;
-        unsafe { COLLECTION_PENDING = true };
+                unsafe { COLLECTION_PENDING = true };
             }
             else {
                 let warm =
@@ -2854,7 +2916,7 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
                             cache.records[index].phase = Phase::Retired;
                             clear_missing_hint();
                             cache.needs_collection = true;
-        unsafe { COLLECTION_PENDING = true };
+                            unsafe { COLLECTION_PENDING = true };
                             false
                         },
                     }
@@ -3086,7 +3148,7 @@ unsafe fn run_activation<const PROFILE: bool>(
             }
             clear_missing_hint();
             cache.needs_collection = true;
-        unsafe { COLLECTION_PENDING = true };
+            unsafe { COLLECTION_PENDING = true };
         }
         // A normal completed edge may reuse an admission certificate. Timing
         // imports are observable, so diagnostics/recording retain full admission.

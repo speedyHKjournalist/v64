@@ -111,7 +111,10 @@ fn lift_continuing(
                     let word = b.node(Op::Extend { signed: false }, vec![word], Type::I32);
                     (word, b.constant(0, Type::I32))
                 },
-                4 => (memory_read(b, address, 32, state, false).0, b.constant(0, Type::I32)),
+                4 => (
+                    memory_read(b, address, 32, state, false).0,
+                    b.constant(0, Type::I32),
+                ),
                 8 => {
                     let low = memory_read(b, address, 32, state, false).0;
                     let upper = high(b);

@@ -37,7 +37,9 @@ pub(super) fn verify_owned(data: &MirData) -> Result<(), CompileError> {
     }
     if data.cpu_liveness.enabled {
         if data.cpu_liveness.demanded.len() != data.value_types.len() {
-            return Err(CompileError::InvalidIr("invalid CPU value demand length".into()));
+            return Err(CompileError::InvalidIr(
+                "invalid CPU value demand length".into(),
+            ));
         }
         // A bounded-demand fallback keeps every instruction/value and generic
         // edge schedule. It needs no failed analysis to be repeated by verify.
@@ -53,7 +55,10 @@ pub(super) fn verify_owned(data: &MirData) -> Result<(), CompileError> {
             .iter()
             .zip(&data.cpu_liveness.live)
             .any(|(&need, &live)| need && !live)
-            || required.values.iter().zip(&data.cpu_liveness.demanded)
+            || required
+                .values
+                .iter()
+                .zip(&data.cpu_liveness.demanded)
                 .any(|(&need, &live)| need && !live)
         {
             return Err(CompileError::InvalidIr(
@@ -61,15 +66,23 @@ pub(super) fn verify_owned(data: &MirData) -> Result<(), CompileError> {
             ));
         }
         if let Some(control) = &data.cpu_liveness.control {
-            if *control != super::allocation::cpu_copy_control(
-                data, &data.cpu_liveness.demanded, DEFAULT_WORK_LIMIT,
-            )? {
-                return Err(CompileError::InvalidIr("invalid CPU edge-copy schedule".into()));
+            if *control
+                != super::allocation::cpu_copy_control(
+                    data,
+                    &data.cpu_liveness.demanded,
+                    DEFAULT_WORK_LIMIT,
+                )?
+            {
+                return Err(CompileError::InvalidIr(
+                    "invalid CPU edge-copy schedule".into(),
+                ));
             }
         }
     }
     else if !data.cpu_liveness.demanded.is_empty() || data.cpu_liveness.control.is_some() {
-        return Err(CompileError::InvalidIr("disabled CPU demand has edge facts".into()));
+        return Err(CompileError::InvalidIr(
+            "disabled CPU demand has edge facts".into(),
+        ));
     }
     Ok(())
 }
@@ -79,14 +92,19 @@ pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, Com
     }
     let (live, demanded, control) = match super::allocation::cpu_demand(data, work_limit) {
         Ok(demand) => {
-            let control = match super::allocation::cpu_copy_control(data, &demand.values, work_limit) {
-                Ok(control) => Some(control),
-                Err(CompileError::Budget(_)) => None,
-                Err(error) => return Err(error),
-            };
+            let control =
+                match super::allocation::cpu_copy_control(data, &demand.values, work_limit) {
+                    Ok(control) => Some(control),
+                    Err(CompileError::Budget(_)) => None,
+                    Err(error) => return Err(error),
+                };
             (demand.instructions, demand.values, control)
         },
-        Err(CompileError::Budget(_)) => (vec![true; data.values.len()], vec![true; data.value_types.len()], None),
+        Err(CompileError::Budget(_)) => (
+            vec![true; data.values.len()],
+            vec![true; data.value_types.len()],
+            None,
+        ),
         Err(error) => return Err(error),
     };
     let count = live
@@ -103,9 +121,16 @@ pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, Com
     Ok(count)
 }
 pub(super) fn invalidate_control(data: &mut MirData) { data.cpu_liveness.control = None; }
-pub(super) fn terminator(data: &MirData, id: crate::ir::ids::BlockId) -> &super::control::Terminator {
-    data.cpu_liveness.control.as_ref()
-        .map_or(&data.control.blocks[id.index()].terminator, |blocks| &blocks[id.index()])
+pub(super) fn terminator(
+    data: &MirData,
+    id: crate::ir::ids::BlockId,
+) -> &super::control::Terminator {
+    data.cpu_liveness
+        .control
+        .as_ref()
+        .map_or(&data.control.blocks[id.index()].terminator, |blocks| {
+            &blocks[id.index()]
+        })
 }
 pub(super) fn instruction_live(data: &MirData, id: InstId) -> bool {
     !data.cpu_liveness.enabled
@@ -154,22 +179,53 @@ mod tests {
         ] {
             let hir = region(bytes);
             let mut mir = lower(&hir).unwrap();
-            mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT).unwrap();
+            mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT)
+                .unwrap();
             mir.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
             mir.verify().unwrap();
             let wasm = emit_cpu(&mir, 32).unwrap().bytes;
-            let imports = |name: &str| wasm.windows(name.len()).any(|bytes| bytes == name.as_bytes());
-            assert!(!imports("get_eflags"), "full FLAGS read must not remain: {bytes:02X?}");
-            for name in ["ir_read_cf", "ir_read_pf", "ir_read_af", "ir_read_zf", "ir_read_sf", "ir_read_of"] {
-                assert_eq!(imports(name), expected.contains(&name), "{bytes:02X?}: {name}");
+            let imports = |name: &str| {
+                wasm.windows(name.len())
+                    .any(|bytes| bytes == name.as_bytes())
+            };
+            assert!(
+                !imports("get_eflags"),
+                "full FLAGS read must not remain: {bytes:02X?}"
+            );
+            for name in [
+                "ir_read_cf",
+                "ir_read_pf",
+                "ir_read_af",
+                "ir_read_zf",
+                "ir_read_sf",
+                "ir_read_of",
+            ] {
+                assert_eq!(
+                    imports(name),
+                    expected.contains(&name),
+                    "{bytes:02X?}: {name}"
+                );
             }
         }
     }
 
-    fn phi_cycle() -> (crate::ir::mir::MirRegion, [crate::ir::ids::ValueId; 3], [usize; 3]) {
-        use crate::ir::{frontend::integer::IntegerBuilder, hir::{Edge, Terminator}, state::{ResumeKind, StateMap}, types::Type};
+    fn phi_cycle() -> (
+        crate::ir::mir::MirRegion,
+        [crate::ir::ids::ValueId; 3],
+        [usize; 3],
+    ) {
+        use crate::ir::{
+            frontend::integer::IntegerBuilder,
+            hir::{Edge, Terminator},
+            state::{ResumeKind, StateMap},
+            types::Type,
+        };
         let mut builder = IntegerBuilder::new();
-        let source = [builder.constant(11, Type::I32), builder.constant(22, Type::I32), builder.constant(33, Type::I32)];
+        let source = [
+            builder.constant(11, Type::I32),
+            builder.constant(22, Type::I32),
+            builder.constant(33, Type::I32),
+        ];
         let target = builder.region.block(false);
         let params = std::array::from_fn(|_| builder.region.param(target, Type::I32));
         let effect = builder.region.param(target, Type::Effect);
@@ -177,18 +233,30 @@ mod tests {
         gpr[0] = params[0];
         gpr[1] = params[1];
         let before = builder.region.state(StateMap {
-            instruction_pc: GuestEip(0x1000), next_pc: GuestEip(0x1001), next_value: None,
-            resume: ResumeKind::BeforeInstruction, gpr, flags: builder.flags,
-            xmm: vec![], x87: vec![], committed_instructions: 0, count_base: None, rep_progress: None,
+            instruction_pc: GuestEip(0x1000),
+            next_pc: GuestEip(0x1001),
+            next_value: None,
+            resume: ResumeKind::BeforeInstruction,
+            gpr,
+            flags: builder.flags,
+            xmm: vec![],
+            x87: vec![],
+            committed_instructions: 0,
+            count_base: None,
+            rep_progress: None,
         });
         builder.region.blocks[target.index()].entry_state = Some(before);
         let mut after = builder.region.states[before.index()].clone();
         after.resume = ResumeKind::AfterInstruction;
         after.committed_instructions = 1;
         let after = builder.region.state(after);
-        builder.region.terminate(builder.block, Terminator::Branch(Edge {
-            target, args: source.into_iter().chain([builder.effect]).collect(),
-        }));
+        builder.region.terminate(
+            builder.block,
+            Terminator::Branch(Edge {
+                target,
+                args: source.into_iter().chain([builder.effect]).collect(),
+            }),
+        );
         builder.region.terminate(target, Terminator::Exit(after));
         let _ = effect;
         let mut mir = lower(&builder.region).unwrap();
@@ -207,23 +275,39 @@ mod tests {
         let (mut mir, params, slots) = phi_cycle();
         let standalone = emit(&mir, layout(), 32).unwrap().bytes;
         let original = mir.control.blocks[0].terminator.edges()[0].clone();
-        assert!(original.copies.iter().any(|copy| matches!(copy, Copy::Save { .. })));
+        assert!(original
+            .copies
+            .iter()
+            .any(|copy| matches!(copy, Copy::Save { .. })));
         mir.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
         assert!(mir.cpu_liveness.demanded[params[0].index()]);
         assert!(mir.cpu_liveness.demanded[params[1].index()]);
         assert!(!mir.cpu_liveness.demanded[params[2].index()]);
         let planned = mir.cpu_terminator(crate::ir::ids::BlockId(0)).edges()[0].clone();
-        assert!(planned.scratch.is_empty(), "removing a dead destination breaks the cycle");
+        assert!(
+            planned.scratch.is_empty(),
+            "removing a dead destination breaks the cycle"
+        );
         assert_eq!(planned.copies.len(), 2);
         let evaluate = |edge: &super::super::control::Edge| {
-            let mut locals: Vec<_> = (0..mir.allocation.local_types.len()).map(|n| n as u64 + 100).collect();
+            let mut locals: Vec<_> = (0..mir.allocation.local_types.len())
+                .map(|n| n as u64 + 100)
+                .collect();
             let mut scratch = vec![0; edge.scratch.len()];
             for copy in &edge.copies {
                 match *copy {
-                    Copy::Save { local, scratch: slot } => scratch[slot] = locals[local],
-                    Copy::Move { source, destination } => locals[destination] = match source {
-                        Source::Local(slot) => locals[slot],
-                        Source::Scratch(slot) => scratch[slot],
+                    Copy::Save {
+                        local,
+                        scratch: slot,
+                    } => scratch[slot] = locals[local],
+                    Copy::Move {
+                        source,
+                        destination,
+                    } => {
+                        locals[destination] = match source {
+                            Source::Local(slot) => locals[slot],
+                            Source::Scratch(slot) => scratch[slot],
+                        }
                     },
                 }
             }
@@ -241,8 +325,11 @@ mod tests {
         mir.data.cpu_liveness.demanded[params[0].index()] = false;
         assert!(mir.verify().is_err());
         mir.data.cpu_liveness = saved.clone();
-        let super::super::control::Terminator::Jump(edge) = &mut mir.data.cpu_liveness.control.as_mut().unwrap()[0]
-        else { panic!("entry jump") };
+        let super::super::control::Terminator::Jump(edge) =
+            &mut mir.data.cpu_liveness.control.as_mut().unwrap()[0]
+        else {
+            panic!("entry jump")
+        };
         edge.copies.clear();
         assert!(mir.verify().is_err());
         mir.data.cpu_liveness = saved.clone();
@@ -251,11 +338,17 @@ mod tests {
         assert_eq!(mir.elide_dead_cpu_values(mir.values.len()).unwrap(), 0);
         assert!(mir.cpu_liveness.live.iter().all(|&live| live));
         assert!(mir.cpu_liveness.control.is_none());
-        assert_eq!(mir.cpu_terminator(crate::ir::ids::BlockId(0)).edges()[0], &original);
+        assert_eq!(
+            mir.cpu_terminator(crate::ir::ids::BlockId(0)).edges()[0],
+            &original
+        );
         mir.verify().unwrap();
         mir.data.cpu_liveness = saved;
         mir.allocate_machine_locals(4_000_000).unwrap();
-        assert!(mir.cpu_liveness.control.is_none(), "new colors discard old copy schedules");
+        assert!(
+            mir.cpu_liveness.control.is_none(),
+            "new colors discard old copy schedules"
+        );
         mir.verify().unwrap();
     }
 
@@ -342,7 +435,10 @@ mod tests {
             optimized_cpu.bytes.len() < baseline_cpu.bytes.len(),
             "CPU liveness should remove emitted value programs"
         );
-        assert!(optimized_cpu.locals < baseline_cpu.locals, "dead values and phi copies need no declared local");
+        assert!(
+            optimized_cpu.locals < baseline_cpu.locals,
+            "dead values and phi copies need no declared local"
+        );
         assert_eq!(
             optimized_standalone, baseline_standalone,
             "CPU-only liveness must not alter standalone emission"

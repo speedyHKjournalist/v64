@@ -810,13 +810,23 @@ impl WasmBuilder {
 
     /// Hint the next instruction (an if or br_if) as likely or unlikely
     /// taken (Wasm branch hinting; engines without it ignore the section).
-    pub fn hint(&mut self, likely: bool) { self.branch_hints.push((self.instruction_body.len(), likely)); }
+    pub fn hint(&mut self, likely: bool) {
+        self.branch_hints
+            .push((self.instruction_body.len(), likely));
+    }
     /// Name the module function (shown by profilers).
-    pub fn set_function_name(&mut self, function_name: String) { self.function_name = Some(function_name); }
+    pub fn set_function_name(&mut self, function_name: String) {
+        self.function_name = Some(function_name);
+    }
     /// The module function returns an i32 (every return leaves one).
     pub fn set_entry_result(&mut self) { self.entry_result = true; }
     fn entry_signature(&self) -> Signature {
-        if self.entry_result { FunctionType::FN1_RET.signature() } else { FunctionType::FN1.signature() }
+        if self.entry_result {
+            FunctionType::FN1_RET.signature()
+        }
+        else {
+            FunctionType::FN1.signature()
+        }
     }
     /// Tail call (Wasm tail-call proposal) of the table entry on the stack,
     /// with the module entry signature; the table is the host's ("e", "t").
@@ -896,16 +906,36 @@ impl WasmBuilder {
         }
     }
     pub fn guest_load_u8(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x12, 0, byte_offset) } else { self.load_u8(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x12, 0, byte_offset)
+        }
+        else {
+            self.load_u8(byte_offset)
+        }
     }
     pub fn guest_load_u16(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x13, 1, byte_offset) } else { self.load_unaligned_u16(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x13, 1, byte_offset)
+        }
+        else {
+            self.load_unaligned_u16(byte_offset)
+        }
     }
     pub fn guest_load_i32(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x10, 2, byte_offset) } else { self.load_unaligned_i32(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x10, 2, byte_offset)
+        }
+        else {
+            self.load_unaligned_i32(byte_offset)
+        }
     }
     pub fn guest_load_i64(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x11, 3, byte_offset) } else { self.load_unaligned_i64(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x11, 3, byte_offset)
+        }
+        else {
+            self.load_unaligned_i64(byte_offset)
+        }
     }
     /// i64 loads of 8/16/32 zero-extended bits (the x64 page tier)
     pub fn guest_load_i64_bits(&mut self, bits: u32, byte_offset: u32) {
@@ -927,16 +957,36 @@ impl WasmBuilder {
         }
     }
     pub fn guest_store_u8(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x19, 0, byte_offset) } else { self.store_u8(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x19, 0, byte_offset)
+        }
+        else {
+            self.store_u8(byte_offset)
+        }
     }
     pub fn guest_store_u16(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x1A, 1, byte_offset) } else { self.store_unaligned_u16(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x1A, 1, byte_offset)
+        }
+        else {
+            self.store_unaligned_u16(byte_offset)
+        }
     }
     pub fn guest_store_i32(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x17, 2, byte_offset) } else { self.store_unaligned_i32(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x17, 2, byte_offset)
+        }
+        else {
+            self.store_unaligned_i32(byte_offset)
+        }
     }
     pub fn guest_store_i64(&mut self, byte_offset: u32) {
-        if Self::ATOMIC_GUEST_MEMORY { self.atomic_op(0x18, 3, byte_offset) } else { self.store_unaligned_i64(byte_offset) }
+        if Self::ATOMIC_GUEST_MEMORY {
+            self.atomic_op(0x18, 3, byte_offset)
+        }
+        else {
+            self.store_unaligned_i64(byte_offset)
+        }
     }
     /// i64 stores of the low 8/16/32/64 bits (the x64 page tier)
     pub fn guest_store_i64_bits(&mut self, bits: u32, byte_offset: u32) {

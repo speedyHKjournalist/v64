@@ -1,10 +1,15 @@
 //! State kept outside the fixed register block. Switching cores preserves
 //! translations: only the guest's CR3/INVLPG/shootdown changes their lifetime.
-use crate::cpu::{apic, cpu, global_pointers::*, memory};
 use crate::cpu::cpu::TLB_HAS_CODE;
+use crate::cpu::{apic, cpu, global_pointers::*, memory};
 use crate::page::Page;
 
-static mut CONTEXTS: [Context; 8] = [const { Context { tlb: Vec::new(), tsc_offset: 0 } }; 8];
+static mut CONTEXTS: [Context; 8] = [const {
+    Context {
+        tlb: Vec::new(),
+        tsc_offset: 0,
+    }
+}; 8];
 struct Context {
     // Portable guest physical address + flags, never a host RAM pointer.
     tlb: Vec<(u32, u32)>,
@@ -21,7 +26,10 @@ unsafe fn capture(core: usize) {
         if entry != 0 {
             let physical = ((entry & !0xFFF) ^ (page << 12)).wrapping_sub(memory::mem8 as u32);
             // (TLB_HAS_CODE is derived from the code caches: install recomputes it)
-            context.tlb.push((page, physical | (entry as u32 & 0xFFF & !(TLB_HAS_CODE as u32))));
+            context.tlb.push((
+                page,
+                physical | (entry as u32 & 0xFFF & !(TLB_HAS_CODE as u32)),
+            ));
             // Deduplicate the valid list (INVLPG can leave an old index).
             cpu::tlb_data[page as usize] = 0;
         }
@@ -38,10 +46,13 @@ unsafe fn install(core: usize) {
     for &(page, portable) in &CONTEXTS[core].tlb {
         let physical = portable & !0xFFF;
         let mut info = portable & 0xFFF & !(TLB_HAS_CODE as u32);
-        if !memory::in_mapped_range(physical) && crate::jit::page_needs_notification(Page::page_of(physical)) {
+        if !memory::in_mapped_range(physical)
+            && crate::jit::page_needs_notification(Page::page_of(physical))
+        {
             info |= TLB_HAS_CODE as u32;
         }
-        cpu::tlb_data[page as usize] = ((physical.wrapping_add(memory::mem8 as u32) ^ (page << 12)) | info) as i32;
+        cpu::tlb_data[page as usize] =
+            ((physical.wrapping_add(memory::mem8 as u32) ^ (page << 12)) | info) as i32;
         cpu::valid_tlb_entries[cpu::valid_tlb_entries_count as usize] = page as i32;
         cpu::valid_tlb_entries_count += 1;
     }
@@ -67,7 +78,10 @@ pub unsafe fn context_reset(core: u32) {
 pub unsafe fn context_reset_all() {
     crate::cpu::exceptions::reset();
     let offset = (cpu::js::microtick() * cpu::TSC_RATE) as u64;
-    for core in 0..8 { context_reset(core); CONTEXTS[core as usize].tsc_offset = offset; }
+    for core in 0..8 {
+        context_reset(core);
+        CONTEXTS[core as usize].tsc_offset = offset;
+    }
     cpu::tsc_offset = offset;
 }
 #[no_mangle]
@@ -77,14 +91,25 @@ pub unsafe fn context_capture() {
     install(core);
 }
 #[no_mangle]
-pub unsafe fn context_install(core: u32) { assert!(core < 8); install(core as usize); }
+pub unsafe fn context_install(core: u32) {
+    assert!(core < 8);
+    install(core as usize);
+}
 #[no_mangle]
-pub unsafe fn context_tlb_len(core: u32) -> u32 { assert!(core < 8); CONTEXTS[core as usize].tlb.len() as u32 }
+pub unsafe fn context_tlb_len(core: u32) -> u32 {
+    assert!(core < 8);
+    CONTEXTS[core as usize].tlb.len() as u32
+}
 #[no_mangle]
 pub unsafe fn context_tlb_get(core: u32, index: u32, field: u32) -> u32 {
     assert!(core < 8);
     let (page, entry) = CONTEXTS[core as usize].tlb[index as usize];
-    if field == 0 { page } else { entry }
+    if field == 0 {
+        page
+    }
+    else {
+        entry
+    }
 }
 #[no_mangle]
 pub unsafe fn context_tlb_push(core: u32, page: u32, entry: u32) {
@@ -112,6 +137,8 @@ pub unsafe fn invalidate_all_tlbs() {
 /// Only the 32-bit TLBs of every core (host addresses of RAM and of
 /// extended RAM frames); the x64 TLBs keep their physical translations
 pub unsafe fn invalidate_legacy_tlbs() {
-    for core in 0..8 { CONTEXTS[core].tlb.clear(); }
+    for core in 0..8 {
+        CONTEXTS[core].tlb.clear();
+    }
     cpu::full_clear_tlb();
 }

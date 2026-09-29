@@ -57,7 +57,15 @@ struct PageState {
     compiles: u32,
 }
 impl Default for PageState {
-    fn default() -> Self { Self { heat: 0, entries: [0; 64], entry_count: 0, misses: 0, compiles: 0 } }
+    fn default() -> Self {
+        Self {
+            heat: 0,
+            entries: [0; 64],
+            entry_count: 0,
+            misses: 0,
+            compiles: 0,
+        }
+    }
 }
 /// Multiplicative hashing for page numbers.
 #[derive(Default)]
@@ -69,7 +77,9 @@ impl std::hash::Hasher for PageHasher {
             self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         }
     }
-    fn write_u32(&mut self, value: u32) { self.0 = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15); }
+    fn write_u32(&mut self, value: u32) {
+        self.0 = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 type PageMap<V> = HashMap<u32, V, std::hash::BuildHasherDefault<PageHasher>>;
 struct Runtime {
@@ -133,15 +143,25 @@ pub struct Attempt {
     pub retired: u32,
     pub submitted: bool,
 }
-fn miss() -> Attempt { Attempt { retired: 0, submitted: false } }
+fn miss() -> Attempt {
+    Attempt {
+        retired: 0,
+        submitted: false,
+    }
+}
 
 /// Native execution is exact only without instruction-level observers.
 /// Deliverable interrupts were taken by handle_irqs before this point; any
 /// that become pending meanwhile wait at most one activation budget (steps
 /// that make one deliverable end the activation).
 pub unsafe fn allowed() -> bool {
-    if *gp::in_hlt || *gp::interrupt_shadow != 0 || *gp::flags as u64 & (0x100 | 0x10000) != 0
-        || state::read_dr(7) & 255 != 0 || execution::is_deterministic() || !state::mode().is_long() {
+    if *gp::in_hlt
+        || *gp::interrupt_shadow != 0
+        || *gp::flags as u64 & (0x100 | 0x10000) != 0
+        || state::read_dr(7) & 255 != 0
+        || execution::is_deterministic()
+        || !state::mode().is_long()
+    {
         return false;
     }
     crate::ir::runtime::schedule::enabled() && !apic::has_core_events() && !apic::nmi_pending()
@@ -217,7 +237,11 @@ pub unsafe fn run(budget: u32) -> Attempt {
         found
     };
     match index {
-        Some(i) if r.functions[i].page == page && r.functions[i].phase == Phase::Ready && bit(&r.functions[i].served, offset) => {
+        Some(i)
+            if r.functions[i].page == page
+                && r.functions[i].phase == Phase::Ready
+                && bit(&r.functions[i].served, offset) =>
+        {
             r.clock += 1;
             r.functions[i].last_used = r.clock;
             let slot = r.functions[i].slot;
@@ -286,7 +310,10 @@ unsafe fn execute(slot: u32, budget: u32, rip: u64) -> Attempt {
         state::write_flags64(flags);
     }
     ACTIVE = true;
-    let native = call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, budget.min(u16::MAX as u32) as u16) as u32;
+    let native = call_indirect1_ret(
+        (slot + cpu::WASM_TABLE_OFFSET) as i32,
+        budget.min(u16::MAX as u32) as u16,
+    ) as u32;
     ACTIVE = false;
     *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(native);
     execution::note_native_retired(native, execution::jit_dispatches());
@@ -313,11 +340,16 @@ unsafe fn execute(slot: u32, budget: u32, rip: u64) -> Attempt {
         _ => {},
     }
     cpu::handle_irqs();
-    Attempt { retired: (*gp::instruction_counter).wrapping_sub(before), submitted: false }
+    Attempt {
+        retired: (*gp::instruction_counter).wrapping_sub(before),
+        submitted: false,
+    }
 }
 
 unsafe fn page_of_rip() -> Option<u32> {
-    let physical = memory::snapshot_translation(state::read_rip(), paging::Access::Execute)?.physical.0;
+    let physical = memory::snapshot_translation(state::read_rip(), paging::Access::Execute)?
+        .physical
+        .0;
     Some(code_backing(physical)? >> 12)
 }
 
@@ -327,7 +359,8 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
     state.compiles += 1;
     let recompile = state.compiles > 1;
     let entries: Vec<u16> = (0..4096u16).filter(|&o| bit(&state.entries, o)).collect();
-    let bytes = std::slice::from_raw_parts(crate::cpu::memory::mem8.add(backing as usize), 4096).to_vec();
+    let bytes =
+        std::slice::from_raw_parts(crate::cpu::memory::mem8.add(backing as usize), 4096).to_vec();
     let Some(code) = pagegen::compile(&bytes, &entries)
     else {
         rt().stats[FAILED] += 1;
@@ -338,9 +371,20 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
         r.stats[RECOMPILED] += 1;
     }
     // Room in the table: retire the least recently used function.
-    let live = r.functions.iter().filter(|f| f.phase != Phase::Dead).count();
+    let live = r
+        .functions
+        .iter()
+        .filter(|f| f.phase != Phase::Dead)
+        .count();
     if live >= MAX_FUNCTIONS {
-        if let Some(i) = r.functions.iter().enumerate().filter(|(_, f)| f.phase == Phase::Ready).min_by_key(|(_, f)| f.last_used).map(|(i, _)| i) {
+        if let Some(i) = r
+            .functions
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.phase == Phase::Ready)
+            .min_by_key(|(_, f)| f.last_used)
+            .map(|(i, _)| i)
+        {
             retire(r, i);
             r.stats[EVICTED] += 1;
         }
@@ -358,25 +402,50 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
     if let Some(&old) = r.by_page.get(&page) {
         retire(r, old);
     }
-    let reusable = |f: &Function, releases: &Vec<(u32, u64)>| f.phase == Phase::Dead && !releases.iter().any(|&(s, i)| s == f.slot && i == f.id);
+    let reusable = |f: &Function, releases: &Vec<(u32, u64)>| {
+        f.phase == Phase::Dead && !releases.iter().any(|&(s, i)| s == f.slot && i == f.id)
+    };
     let index = match r.functions.iter().position(|f| reusable(f, &r.releases)) {
         Some(i) => i,
         None => {
-            r.functions.push(Function { page, id: 0, slot: 0, phase: Phase::Dead, served: [0; 64], last_used: 0, source: 0 });
+            r.functions.push(Function {
+                page,
+                id: 0,
+                slot: 0,
+                phase: Phase::Dead,
+                served: [0; 64],
+                last_used: 0,
+                source: 0,
+            });
             r.functions.len() - 1
         },
     };
     r.clock += 1;
-    r.functions[index] = Function { page, id, slot, phase: Phase::Pending, served: code.served, last_used: r.clock,
-        source: source_hash(&bytes) };
+    r.functions[index] = Function {
+        page,
+        id,
+        slot,
+        phase: Phase::Pending,
+        served: code.served,
+        last_used: r.clock,
+        source: source_hash(&bytes),
+    };
     r.by_page.insert(page, index);
     FAST[fast_slot(page)] = (page, index as u32 + 1);
     r.stats[COMPILED] += 1;
     r.stats[INSTRUCTIONS] += code.instructions as u64;
     r.stats[TEMPLATED] += code.templated as u64;
     // The host installs it synchronously when it can (x64_page_install).
-    js::x64_page_publish(id, slot, code.bytes.as_ptr() as u32, code.bytes.len() as u32);
-    Attempt { retired: 0, submitted: false }
+    js::x64_page_publish(
+        id,
+        slot,
+        code.bytes.as_ptr() as u32,
+        code.bytes.len() as u32,
+    );
+    Attempt {
+        retired: 0,
+        submitted: false,
+    }
 }
 
 fn retire(r: &mut Runtime, index: usize) {
@@ -402,17 +471,28 @@ fn retire(r: &mut Runtime, index: usize) {
 #[no_mangle]
 pub fn x64_page_install(id: u64, slot: u32) -> bool {
     let r = rt();
-    let Some(f) = r.functions.iter().find(|f| f.id == id && f.slot == slot && f.phase == Phase::Pending) else { return false };
+    let Some(f) = r
+        .functions
+        .iter()
+        .find(|f| f.id == id && f.slot == slot && f.phase == Phase::Pending)
+    else {
+        return false;
+    };
     if !crate::parallel::active() {
         return true;
     }
     // other cores mark the page first, then its bytes are checked once more
     let (page, source) = (f.page, f.source);
-    let backing = match r.by_page.get(&page) { Some(_) => page, None => return false };
+    let backing = match r.by_page.get(&page) {
+        Some(_) => page,
+        None => return false,
+    };
     if !crate::jit::wait_pages_published(std::iter::once(Page::page_of(backing << 12)), 0.5) {
         return false;
     }
-    let bytes = unsafe { std::slice::from_raw_parts(crate::cpu::memory::mem8.add((backing << 12) as usize), 4096) };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(crate::cpu::memory::mem8.add((backing << 12) as usize), 4096)
+    };
     source_hash(bytes) == source
 }
 
@@ -427,7 +507,11 @@ fn source_hash(bytes: &[u8]) -> u64 {
 #[no_mangle]
 pub fn x64_page_ready(id: u64, slot: u32) -> bool {
     let r = rt();
-    match r.functions.iter_mut().find(|f| f.id == id && f.slot == slot && f.phase == Phase::Pending) {
+    match r
+        .functions
+        .iter_mut()
+        .find(|f| f.id == id && f.slot == slot && f.phase == Phase::Pending)
+    {
         Some(f) => {
             f.phase = Phase::Ready;
             true
@@ -438,7 +522,11 @@ pub fn x64_page_ready(id: u64, slot: u32) -> bool {
 #[no_mangle]
 pub fn x64_page_cancel(id: u64, slot: u32) {
     let r = rt();
-    if let Some(i) = r.functions.iter().position(|f| f.id == id && f.slot == slot && f.phase != Phase::Dead) {
+    if let Some(i) = r
+        .functions
+        .iter()
+        .position(|f| f.id == id && f.slot == slot && f.phase != Phase::Dead)
+    {
         retire(r, i);
         r.stats[FAILED] += 1;
     }
@@ -488,7 +576,11 @@ pub fn x64_page_stat(field: u32) -> f64 {
     let r = rt();
     match field as usize {
         4 => unsafe { STEPS as f64 },
-        12 => r.functions.iter().filter(|f| f.phase == Phase::Ready).count() as f64,
+        12 => r
+            .functions
+            .iter()
+            .filter(|f| f.phase == Phase::Ready)
+            .count() as f64,
         f if f < 12 => r.stats[f] as f64,
         _ => 0.0,
     }
@@ -510,7 +602,9 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         return 0;
     }
     // generated accesses are atomic with cores in workers: aligned only
-    if crate::wasmgen::wasm_builder::WasmBuilder::ATOMIC_GUEST_MEMORY && address & (size.min(8) - 1) != 0 {
+    if crate::wasmgen::wasm_builder::WasmBuilder::ATOMIC_GUEST_MEMORY
+        && address & (size.min(8) - 1) != 0
+    {
         ACCESS_REFUSED[0] += 1;
         return 0;
     }
@@ -536,7 +630,9 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         return 0;
     }
     jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing);
-    (crate::cpu::memory::mem8 as u32).wrapping_add(backing).wrapping_add((address & 4095) as u32)
+    (crate::cpu::memory::mem8 as u32)
+        .wrapping_add(backing)
+        .wrapping_add((address & 4095) as u32)
 }
 
 #[derive(PartialEq)]
@@ -584,24 +680,43 @@ pub unsafe fn x64_page_profile(enabled: bool) { STEP_PROFILE = enabled.then(|| v
 #[no_mangle]
 pub unsafe fn x64_page_profile_get(key: u32) -> f64 {
     if key >= 0x40000 {
-        return (*(&raw const ACCESS_REFUSED)).get(key as usize - 0x40000).copied().unwrap_or(0) as f64;
+        return (*(&raw const ACCESS_REFUSED))
+            .get(key as usize - 0x40000)
+            .copied()
+            .unwrap_or(0) as f64;
     }
-    (*(&raw const STEP_PROFILE)).as_ref().map_or(0.0, |p| p.get(key as usize).copied().unwrap_or(0) as f64)
+    (*(&raw const STEP_PROFILE))
+        .as_ref()
+        .map_or(0.0, |p| p.get(key as usize).copied().unwrap_or(0) as f64)
 }
 unsafe fn profile_step() { profile_instruction(0); }
 unsafe fn profile_instruction(base: usize) {
-    let Some(profile) = (*(&raw mut STEP_PROFILE)).as_mut() else { return; };
+    let Some(profile) = (*(&raw mut STEP_PROFILE)).as_mut()
+    else {
+        return;
+    };
     let rip = state::read_rip();
     let mut bytes = [0u8; 15];
     for (i, b) in bytes.iter_mut().enumerate() {
-        let Some(t) = memory::snapshot_translation(rip.wrapping_add(i as u64), paging::Access::Execute) else { return; };
-        let Ok(page) = physical::ram_page(t.physical.0 & !4095) else { return; };
+        let Some(t) =
+            memory::snapshot_translation(rip.wrapping_add(i as u64), paging::Access::Execute)
+        else {
+            return;
+        };
+        let Ok(page) = physical::ram_page(t.physical.0 & !4095)
+        else {
+            return;
+        };
         *b = *crate::cpu::memory::mem8.add((page.backing + (t.physical.0 & 4095) as u32) as usize);
     }
     let mut at = 0;
     let mut rep = 0;
-    while at < 14 && matches!(bytes[at], 0x26 | 0x2E | 0x36 | 0x3E | 0x40..=0x4F | 0x64..=0x67 | 0xF0 | 0xF2 | 0xF3) {
-        if matches!(bytes[at], 0xF2 | 0xF3) { rep = 0x10000; }
+    while at < 14
+        && matches!(bytes[at], 0x26 | 0x2E | 0x36 | 0x3E | 0x40..=0x4F | 0x64..=0x67 | 0xF0 | 0xF2 | 0xF3)
+    {
+        if matches!(bytes[at], 0xF2 | 0xF3) {
+            rep = 0x10000;
+        }
         at += 1;
     }
     let key = match (bytes[at], bytes[at + 1]) {
@@ -630,7 +745,8 @@ pub unsafe fn x64_page_step() -> i32 {
         || apic::has_core_events()
         || CODE_WRITES != writes
         || context() != before
-        || *gp::flags & 0x200 != 0 && (apic::has_pending_irq() || apic::routed_pic_pending(apic::current_core() as u32))
+        || *gp::flags & 0x200 != 0
+            && (apic::has_pending_irq() || apic::routed_pic_pending(apic::current_core() as u32))
         || apic::nmi_pending()
     {
         pagegen::STEP_EXIT
@@ -668,7 +784,12 @@ pub unsafe fn x64_page_set_cr8(value: u64) -> i32 {
     if super::system::write_cr(8, value).is_err() {
         return 1;
     }
-    if *gp::flags & cpu::FLAG_INTERRUPT != 0 && apic::has_pending_irq() { 2 } else { 0 }
+    if *gp::flags & cpu::FLAG_INTERRUPT != 0 && apic::has_pending_irq() {
+        2
+    }
+    else {
+        0
+    }
 }
 
 /// Whether the signed 64x64 product of IMUL overflows 64 bits.

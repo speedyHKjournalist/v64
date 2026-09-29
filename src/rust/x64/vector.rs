@@ -54,12 +54,8 @@ unsafe fn guard(sse: bool) -> Result<(), Fault> {
     }
     Ok(())
 }
-unsafe fn xmm(r: u8) -> u128 {
-    std::mem::transmute(state::read_xmm(r as usize))
-}
-unsafe fn put_xmm(r: u8, v: u128) {
-    state::write_xmm(r as usize, std::mem::transmute(v));
-}
+unsafe fn xmm(r: u8) -> u128 { std::mem::transmute(state::read_xmm(r as usize)) }
+unsafe fn put_xmm(r: u8, v: u128) { state::write_xmm(r as usize, std::mem::transmute(v)); }
 fn alignment(a: u64, stack: bool, align: u64) -> Result<(), Fault> {
     if !state::canonical(a, 48) {
         return Err(Fault {
@@ -83,7 +79,8 @@ unsafe fn source(d: &Decoded, width: u8, aligned: bool, mmx: bool) -> Result<u12
     }
     if width == 128 {
         memory::read128(a, stack)
-    } else {
+    }
+    else {
         memory::read(a, width, stack).map(|v| v as u128)
     }
 }
@@ -97,7 +94,8 @@ unsafe fn store(
     if let Some(r) = d.rm_register {
         if mmx {
             cpu::write_mmx_reg64((r & 7) as i32, value as u64);
-        } else {
+        }
+        else {
             put_xmm(r, value);
         }
         return Ok(());
@@ -108,14 +106,16 @@ unsafe fn store(
     }
     if width == 128 {
         memory::write128(a, value, stack)
-    } else {
+    }
+    else {
         memory::write(a, width, value as u64, stack)
     }
 }
 unsafe fn gpr_source(d: &Decoded, width: u8) -> Result<u64, Fault> {
     if let Some(r) = d.rm_register {
         Ok(state::read_gpr(r as usize))
-    } else {
+    }
+    else {
         let (a, s) = address(d);
         memory::read(a, width, s)
     }
@@ -124,7 +124,8 @@ unsafe fn gpr_store(d: &Decoded, width: u8, v: u64) -> Result<(), Fault> {
     if let Some(r) = d.rm_register {
         state::write_gpr(r as usize, v, width);
         Ok(())
-    } else {
+    }
+    else {
         let (a, s) = address(d);
         memory::write(a, width, v, s)
     }
@@ -132,7 +133,8 @@ unsafe fn gpr_store(d: &Decoded, width: u8, v: u64) -> Result<(), Fault> {
 fn nan(v: u64, double: bool) -> bool {
     if double {
         v & 0x7FFF_FFFF_FFFF_FFFF > 0x7FF0_0000_0000_0000
-    } else {
+    }
+    else {
         v as u32 & 0x7FFF_FFFF > 0x7F80_0000
     }
 }
@@ -142,14 +144,16 @@ fn snan(v: u64, double: bool) -> bool {
 fn denormal(v: u64, double: bool) -> bool {
     if double {
         v & 0x7FF0_0000_0000_0000 == 0 && v & 0x000F_FFFF_FFFF_FFFF != 0
-    } else {
+    }
+    else {
         v & 0x7F80_0000 == 0 && v & 0x007F_FFFF != 0
     }
 }
 fn sign_mask(double: bool) -> u64 {
     if double {
         1 << 63
-    } else {
+    }
+    else {
         1 << 31
     }
 }
@@ -185,7 +189,8 @@ impl Fp {
         if self.mxcsr & 0x8000 != 0 && denormal(v, double) {
             self.extra |= 0x30;
             v & sign_mask(double)
-        } else {
+        }
+        else {
             v
         }
     }
@@ -205,24 +210,29 @@ impl Fp {
             if nan(a, double) || nan(b, double) {
                 self.extra |= 1;
                 b
-            } else {
+            }
+            else {
                 let less = if double {
                     f64::from_bits(a) < f64::from_bits(b)
-                } else {
+                }
+                else {
                     f32::from_bits(a as u32) < f32::from_bits(b as u32)
                 };
                 let greater = if double {
                     f64::from_bits(a) > f64::from_bits(b)
-                } else {
+                }
+                else {
                     f32::from_bits(a as u32) > f32::from_bits(b as u32)
                 };
                 if if op == 0x5D { less } else { greater } {
                     a
-                } else {
+                }
+                else {
                     b
                 }
             }
-        } else if double {
+        }
+        else if double {
             match op {
                 0x58 => f64_add(a, b),
                 0x59 => f64_mul(a, b),
@@ -231,7 +241,8 @@ impl Fp {
                 0x51 => f64_sqrt(b),
                 _ => unreachable!(),
             }
-        } else {
+        }
+        else {
             let (a, b) = (a as u32, b as u32);
             (match op {
                 0x58 => f32_add(a, b),
@@ -258,12 +269,14 @@ impl Fp {
         }
         let (eq, lt) = if unordered {
             (false, false)
-        } else if double {
+        }
+        else if double {
             (
                 f64::from_bits(a) == f64::from_bits(b),
                 f64::from_bits(a) < f64::from_bits(b),
             )
-        } else {
+        }
+        else {
             (
                 f32::from_bits(a as u32) == f32::from_bits(b as u32),
                 f32::from_bits(a as u32) < f32::from_bits(b as u32),
@@ -294,7 +307,8 @@ impl Fp {
         *gp::mxcsr |= flags as i32;
         if flags & !(self.mxcsr >> 7) & 63 != 0 {
             Err(fault(if state::read_cr(4) & 0x400 != 0 { 19 } else { 6 }))
-        } else {
+        }
+        else {
             Ok(())
         }
     }
@@ -336,15 +350,19 @@ unsafe fn arithmetic(d: &Decoded) -> Result<bool, Fault> {
         let lt = if !unordered { fp.compare(a, b, double, 1) } else { false };
         let flags = if unordered {
             0x45
-        } else if lt {
+        }
+        else if lt {
             1
-        } else if if op == 0x2F {
+        }
+        else if if op == 0x2F {
             lane(dst, 0) == lane(src, 0) || fp.compare(a, b, double, 0)
-        } else {
+        }
+        else {
             eq
         } {
             0x40
-        } else {
+        }
+        else {
             0
         };
         fp.finish()?;
@@ -362,20 +380,24 @@ unsafe fn arithmetic(d: &Decoded) -> Result<bool, Fault> {
             ) {
                 if double {
                     u64::MAX
-                } else {
+                }
+                else {
                     u32::MAX as u64
                 }
-            } else {
+            }
+            else {
                 0
             }
-        } else if op == 0xD0 {
+        }
+        else if op == 0xD0 {
             fp.binary(
                 if i % 2 == 0 { 0x5C } else { 0x58 },
                 lane(dst, i),
                 lane(src, i),
                 double,
             )
-        } else if matches!(op, 0x7C | 0x7D) {
+        }
+        else if matches!(op, 0x7C | 0x7D) {
             let half = lanes as usize / 2;
             let input = if i < half { dst } else { src };
             let base = (i % half) * 2;
@@ -385,7 +407,8 @@ unsafe fn arithmetic(d: &Decoded) -> Result<bool, Fault> {
                 lane(input, base + 1),
                 double,
             )
-        } else {
+        }
+        else {
             fp.binary(op, lane(dst, i), lane(src, i), double)
         };
         let shift = i * width as usize;
@@ -435,17 +458,21 @@ unsafe fn conversion(d: &Decoded) -> Result<bool, Fault> {
     let size = if scalar {
         if p == 0xF2 {
             64
-        } else {
+        }
+        else {
             32
         }
-    } else if matches!(op, 0x0F2A | 0x660F2A | 0x0F2C | 0x0F2D | 0x0F5A | 0xF30FE6) {
+    }
+    else if matches!(op, 0x0F2A | 0x660F2A | 0x0F2C | 0x0F2D | 0x0F5A | 0xF30FE6) {
         64
-    } else {
+    }
+    else {
         128
     };
     let src = if low == 0x2A && scalar {
         gpr_source(d, if wide { 64 } else { 32 })? as u128
-    } else {
+    }
+    else {
         source(d, size, size == 128, low == 0x2A)?
     };
     let mut fp = Fp::new();
@@ -477,13 +504,16 @@ unsafe fn conversion(d: &Decoded) -> Result<bool, Fault> {
             let v = if scalar && wide {
                 if double {
                     f64_to_i64(value, rounding, true)
-                } else {
+                }
+                else {
                     f32_to_i64(value as u32, rounding, true)
                 }
-            } else {
+            }
+            else {
                 (if double {
                     f64_to_i32(value, rounding, true)
-                } else {
+                }
+                else {
                     f32_to_i32(value as u32, rounding, true)
                 }) as i64
             };
@@ -493,7 +523,8 @@ unsafe fn conversion(d: &Decoded) -> Result<bool, Fault> {
         fp.finish()?;
         if scalar {
             state::write_gpr(r as usize, result as u64, if wide { 64 } else { 32 });
-        } else {
+        }
+        else {
             cpu::write_mmx_reg64((r & 7) as i32, result as u64);
             cpu::transition_fpu_to_mmx();
         }
@@ -510,7 +541,8 @@ unsafe fn conversion(d: &Decoded) -> Result<bool, Fault> {
             let mask = if from_double { u32::MAX as u128 } else { u64::MAX as u128 };
             result = result & !(mask << (i * to_width)) | (v as u128) << (i * to_width);
         }
-    } else {
+    }
+    else {
         let to_float = op == 0x0F5B || op == 0xF30FE6;
         let double = low == 0xE6;
         let count = if double { 2 } else { 4 };
@@ -520,13 +552,15 @@ unsafe fn conversion(d: &Decoded) -> Result<bool, Fault> {
                 let n = (src >> (i * 32)) as i32;
                 let v = if double { i32_to_f64(n) } else { i32_to_f32(n) as u64 };
                 result |= (fp.output(v, double) as u128) << (i * width);
-            } else {
+            }
+            else {
                 let n = fp.input((src >> (i * width)) as u64, double);
                 let rounding =
                     if matches!(op, 0xF30F5B | 0x660FE6) { 1 } else { softfloat_roundingMode };
                 let v = if double {
                     f64_to_i32(n, rounding, true)
-                } else {
+                }
+                else {
                     f32_to_i32(n as u32, rounding, true)
                 };
                 result |= (v as u32 as u128) << (i * 32);
@@ -1249,7 +1283,8 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
             let v = xmm(r) & mask;
             if let Some(dst) = d.rm_register {
                 put_xmm(dst, xmm(dst) & !mask | v);
-            } else {
+            }
+            else {
                 store(d, width, v, false, false)?;
             }
         },
@@ -1258,7 +1293,8 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
             let src = source(d, 64, false, false)?;
             let value = if op == 0x0F12 && d.rm_register.is_some() {
                 src >> 64
-            } else {
+            }
+            else {
                 src & u64::MAX as u128
             };
             let old = xmm(r);
@@ -1266,9 +1302,11 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
                 r,
                 if op == 0xF20F12 {
                     value | value << 64
-                } else if b == 0x16 {
+                }
+                else if b == 0x16 {
                     old & u64::MAX as u128 | value << 64
-                } else {
+                }
+                else {
                     old & !(u64::MAX as u128) | value
                 },
             );
@@ -1312,7 +1350,8 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
                 & if d.prefixes.w() { u64::MAX } else { u32::MAX as u64 };
             if p == 0x66 {
                 put_xmm(r, v as u128);
-            } else {
+            }
+            else {
                 cpu::write_mmx_reg64((r & 7) as i32, v);
                 cpu::transition_fpu_to_mmx();
             }
@@ -1368,9 +1407,11 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
             let v = source(d, if mmx { 64 } else { 128 }, false, mmx)?;
             let width = if b == 0xD7 {
                 8
-            } else if p == 0x66 {
+            }
+            else if p == 0x66 {
                 64
-            } else {
+            }
+            else {
                 32
             };
             let n = if mmx { 64 } else { 128 } / width;
@@ -1393,7 +1434,8 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
             if mmx {
                 cpu::write_mmx_reg64((r & 7) as i32, out as u64);
                 cpu::transition_fpu_to_mmx();
-            } else {
+            }
+            else {
                 put_xmm(r, out);
             }
         },
@@ -1446,18 +1488,23 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
                 let a = f32::from_bits(v);
                 let bits = if nan(v as u64, false) {
                     v | 0x400000
-                } else if v & 0x7F80_0000 == 0 {
+                }
+                else if v & 0x7F80_0000 == 0 {
                     sign | 0x7F800000
-                } else if b == 0x52 && sign != 0 {
+                }
+                else if b == 0x52 && sign != 0 {
                     0xFFC00000
-                } else if v & 0x7FFF_FFFF == 0x7F800000 {
+                }
+                else if v & 0x7FFF_FFFF == 0x7F800000 {
                     sign
-                } else {
+                }
+                else {
                     let n = if b == 0x52 { 1.0 / a.sqrt() } else { 1.0 / a };
                     let bits = n.to_bits();
                     if denormal(bits as u64, false) {
                         bits & 0x8000_0000
-                    } else {
+                    }
+                    else {
                         bits
                     }
                 };
@@ -1486,12 +1533,15 @@ unsafe fn immediate_shift(d: &Decoded) -> Result<bool, Fault> {
     if op == 0x73 && matches!(group, 3 | 7) && !mmx {
         value = if n >= 16 {
             0
-        } else if group == 3 {
+        }
+        else if group == 3 {
             value >> (n * 8)
-        } else {
+        }
+        else {
             value << (n * 8)
         };
-    } else {
+    }
+    else {
         let width = match op {
             0x71 => 16,
             0x72 => 32,
@@ -1506,14 +1556,16 @@ unsafe fn immediate_shift(d: &Decoded) -> Result<bool, Fault> {
                 2 => {
                     if n >= width {
                         0
-                    } else {
+                    }
+                    else {
                         lane >> n
                     }
                 },
                 6 => {
                     if n >= width {
                         0
-                    } else {
+                    }
+                    else {
                         lane << n
                     }
                 },
@@ -1530,7 +1582,8 @@ unsafe fn immediate_shift(d: &Decoded) -> Result<bool, Fault> {
     if mmx {
         cpu::write_mmx_reg64((r & 7) as i32, value as u64);
         cpu::transition_fpu_to_mmx();
-    } else {
+    }
+    else {
         put_xmm(r, value);
     }
     Ok(true)
@@ -1555,15 +1608,9 @@ unsafe fn bytes_write(a: u64, data: &[u8], stack: bool) -> Result<(), Fault> {
     }
     Ok(())
 }
-fn u16_at(v: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(v[at..at + 2].try_into().unwrap())
-}
-fn u32_at(v: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(v[at..at + 4].try_into().unwrap())
-}
-fn u64_at(v: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(v[at..at + 8].try_into().unwrap())
-}
+fn u16_at(v: &[u8], at: usize) -> u16 { u16::from_le_bytes(v[at..at + 2].try_into().unwrap()) }
+fn u32_at(v: &[u8], at: usize) -> u32 { u32::from_le_bytes(v[at..at + 4].try_into().unwrap()) }
+fn u64_at(v: &[u8], at: usize) -> u64 { u64::from_le_bytes(v[at..at + 8].try_into().unwrap()) }
 unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
     if d.base_opcode() != 0x0FAE {
         return Ok(false);
@@ -1593,7 +1640,8 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
                 return Err(Fault::gp());
             }
             *gp::mxcsr = v as i32;
-        } else {
+        }
+        else {
             memory::write(a, 32, *gp::mxcsr as u32 as u64, s)?;
         }
         return Ok(true);
@@ -1611,7 +1659,8 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
         if d.prefixes.w() {
             out[12..16].copy_from_slice(&(*gp::x64_fpu_ip_hi).to_le_bytes());
             out[20..24].copy_from_slice(&(*gp::x64_fpu_dp_hi).to_le_bytes());
-        } else {
+        }
+        else {
             out[12..14].copy_from_slice(&(*gp::fpu_ip_selector as u16).to_le_bytes());
             out[20..22].copy_from_slice(&(*gp::fpu_dp_selector as u16).to_le_bytes());
         }
@@ -1628,7 +1677,8 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
             out[40 + i * 16..42 + i * 16].copy_from_slice(&value.sign_exponent.to_le_bytes());
         }
         bytes_write(a, &out, s)?;
-    } else {
+    }
+    else {
         let data = bytes_read(a, 512, s)?;
         let mxcsr = u32_at(&data, 24);
         if state::read_cr(4) & 0x200 != 0 && mxcsr & !(cpu::MXCSR_MASK as u32) != 0 {
@@ -1697,7 +1747,8 @@ unsafe fn x87_environment(d: &Decoded, restore: bool, registers: bool) -> Result
                 );
             }
         }
-    } else {
+    }
+    else {
         let mut v = vec![0xFF; size];
         let step = if short { 2 } else { 4 };
         v[0..2].copy_from_slice(&(*gp::fpu_control_word).to_le_bytes());
@@ -1708,7 +1759,8 @@ unsafe fn x87_environment(d: &Decoded, restore: bool, registers: bool) -> Result
             v[8..10].copy_from_slice(&(*gp::fpu_ip_selector as u16).to_le_bytes());
             v[10..12].copy_from_slice(&(*gp::fpu_dp as u16).to_le_bytes());
             v[12..14].copy_from_slice(&(*gp::fpu_dp_selector as u16).to_le_bytes());
-        } else {
+        }
+        else {
             v[12..16].copy_from_slice(&(*gp::fpu_ip as u32).to_le_bytes());
             v[16..18].copy_from_slice(&(*gp::fpu_ip_selector as u16).to_le_bytes());
             v[18..20].copy_from_slice(&(*gp::fpu_opcode as u16).to_le_bytes());
@@ -1726,7 +1778,8 @@ unsafe fn x87_environment(d: &Decoded, restore: bool, registers: bool) -> Result
         bytes_write(a, &v, s)?;
         if registers {
             fpu::fpu_finit();
-        } else {
+        }
+        else {
             fpu::set_control_word(*gp::fpu_control_word | 63);
         }
     }
@@ -1767,9 +1820,7 @@ unsafe fn x87_exception_flags() -> u16 {
     let f = softfloat_exceptionFlags as u16;
     (f >> 4 & 1) | (f >> 1 & 4) | (f << 1 & 8) | (f << 3 & 16) | (f << 5 & 32)
 }
-unsafe fn x87_pending() -> bool {
-    *gp::fpu_status_word & !*gp::fpu_control_word & 63 != 0
-}
+unsafe fn x87_pending() -> bool { *gp::fpu_status_word & !*gp::fpu_control_word & 63 != 0 }
 unsafe fn x87_memory(d: &Decoded, group: u8) -> Result<(), Fault> {
     let op = d.base_opcode() as u8;
     let (a, s) = address(d);
@@ -1826,7 +1877,8 @@ unsafe fn x87_memory(d: &Decoded, group: u8) -> Result<(), Fault> {
                 mantissa: u64_at(&v, 0),
                 sign_exponent: u16_at(&v, 8),
             }
-        } else if op == 0xDF && group == 4 {
+        }
+        else if op == 0xDF && group == 4 {
             let v = bytes_read(a, 10, s)?;
             let mut n = 0i64;
             for i in (0..9).rev() {
@@ -1836,7 +1888,8 @@ unsafe fn x87_memory(d: &Decoded, group: u8) -> Result<(), Fault> {
                 n = -n;
             }
             F80::of_i64(n)
-        } else {
+        }
+        else {
             let width = match (op, group) {
                 (0xD9, _) | (0xDB, _) => 32,
                 (0xDD, _) | (0xDF, 5) => 64,
@@ -1870,20 +1923,25 @@ unsafe fn x87_memory(d: &Decoded, group: u8) -> Result<(), Fault> {
     F80::clear_exception_flags();
     let raw = if op == 0xD9 {
         extF80M_to_f32(&v) as u32 as u64
-    } else if op == 0xDD && group != 1 {
+    }
+    else if op == 0xDD && group != 1 {
         extF80M_to_f64(&v)
-    } else if width == 80 {
+    }
+    else if width == 80 {
         0
-    } else {
+    }
+    else {
         let rounding = if group == 1 { 1 } else { softfloat_roundingMode };
         if width == 64 {
             extF80M_to_i64(&v, rounding, true) as u64
-        } else {
+        }
+        else {
             let integer = extF80M_to_i32(&v, rounding, true);
             if width == 16 && (integer < i16::MIN as i32 || integer > i16::MAX as i32) {
                 softfloat_exceptionFlags |= 16;
                 0x8000
-            } else {
+            }
+            else {
                 integer as u32 as u64
             }
         }
@@ -1900,7 +1958,8 @@ unsafe fn x87_memory(d: &Decoded, group: u8) -> Result<(), Fault> {
                 data[7] = 0xC0;
                 data[8] = 0xFF;
                 data[9] = 0xFF;
-            } else {
+            }
+            else {
                 for byte in &mut data[..9] {
                     *byte = (n % 10) as u8;
                     n /= 10;
@@ -1909,14 +1968,16 @@ unsafe fn x87_memory(d: &Decoded, group: u8) -> Result<(), Fault> {
                 }
                 data[9] = if integer < 0 { 128 } else { 0 };
             }
-        } else {
+        }
+        else {
             data[..8].copy_from_slice(&v.mantissa.to_le_bytes());
             data[8..].copy_from_slice(&v.sign_exponent.to_le_bytes());
         }
         if !x87_pending() {
             bytes_write(a, &data, s)?;
         }
-    } else if !x87_pending() {
+    }
+    else if !x87_pending() {
         memory::write(a, width, raw, s)?;
     }
     if !x87_pending() && (group == 1 || group == 3 || width == 80 || op == 0xDF && group == 7) {
@@ -1960,7 +2021,8 @@ unsafe fn x87(d: &Decoded) -> Result<bool, Fault> {
     let old_regs = std::ptr::read(gp::fpu_st as *const [F80; 8]);
     if d.address.is_some() {
         x87_memory(d, group)?;
-    } else {
+    }
+    else {
         let valid = match op {
             0xD9 => match group {
                 2 => r == 0,
@@ -2098,7 +2160,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
     {
         state::write_rip(d.next.0);
         Ok(true)
-    } else {
+    }
+    else {
         Ok(false)
     }
 }

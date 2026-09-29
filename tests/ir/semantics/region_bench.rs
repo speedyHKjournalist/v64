@@ -10,7 +10,9 @@ use crate::ir::{
 use std::time::Instant;
 
 fn hex(s: &str) -> Vec<u8> {
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+        .collect()
 }
 
 #[test]
@@ -27,7 +29,9 @@ fn region_bench() {
     let mut errors = std::collections::BTreeMap::<String, usize>::new();
     let started = Instant::now();
     for _ in 0..repeat {
-        let only: Option<usize> = std::env::var("IR_REGION_ONLY").ok().map(|v| v.parse().unwrap());
+        let only: Option<usize> = std::env::var("IR_REGION_ONLY")
+            .ok()
+            .map(|v| v.parse().unwrap());
         for (line_index, line) in text.lines().enumerate() {
             if only.is_some_and(|k| k != line_index) {
                 continue;
@@ -51,7 +55,10 @@ fn region_bench() {
                     physical,
                 });
                 if !dependencies.iter().any(|d| d.page == physical) {
-                    dependencies.push(CodeDependency { page: physical, version: 1 });
+                    dependencies.push(CodeDependency {
+                        page: physical,
+                        version: 1,
+                    });
                 }
             }
             let snapshot = ImmutableCodeSnapshot {
@@ -89,7 +96,10 @@ fn region_bench() {
             };
             let dump = std::env::var("IR_REGION_DUMP").ok();
             let result = if f[2] != "-" {
-                let mut entries = vec![CpuEntryRequest { offset: 0, key: request.key }];
+                let mut entries = vec![CpuEntryRequest {
+                    offset: 0,
+                    key: request.key,
+                }];
                 for offset in f[2].split(',') {
                     job += 1;
                     entries.push(CpuEntryRequest {

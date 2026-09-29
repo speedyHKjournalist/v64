@@ -101,7 +101,9 @@ impl std::ops::Deref for IoapicGuard {
 }
 #[cfg(feature = "parallel")]
 impl std::ops::DerefMut for IoapicGuard {
-    fn deref_mut(&mut self) -> &mut Ioapic { unsafe { &mut *crate::parallel::machine(&raw mut IOAPIC) } }
+    fn deref_mut(&mut self) -> &mut Ioapic {
+        unsafe { &mut *crate::parallel::machine(&raw mut IOAPIC) }
+    }
 }
 #[cfg(feature = "parallel")]
 impl Drop for IoapicGuard {
@@ -109,9 +111,7 @@ impl Drop for IoapicGuard {
 }
 
 /// Board reset, unlike an INIT targeted at one processor.
-pub fn reset() {
-    *get_ioapic() = IOAPIC_RESET;
-}
+pub fn reset() { *get_ioapic() = IOAPIC_RESET; }
 
 #[cfg(not(feature = "parallel"))]
 fn get_ioapic() -> MutexGuard<'static, Ioapic> { IOAPIC.try_lock().unwrap() }

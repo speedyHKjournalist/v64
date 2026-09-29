@@ -30,41 +30,100 @@ pub(super) enum Packed {
 #[derive(Clone, Copy)]
 pub(super) enum Simd {
     /// MOVUPS/MOVAPS/MOVUPD/MOVAPD/MOVDQA/MOVDQU xmm, xmm/m128.
-    Load128 { reg: u8 },
+    Load128 {
+        reg: u8,
+    },
     /// The same, xmm/m128, xmm.
-    Store128 { reg: u8 },
+    Store128 {
+        reg: u8,
+    },
     /// MOVSS/MOVSD xmm, xmm/m: registers merge the low lane, memory zero-extends.
-    LoadScalar { reg: u8, bytes: u8 },
+    LoadScalar {
+        reg: u8,
+        bytes: u8,
+    },
     /// MOVSS/MOVSD xmm/m, xmm.
-    StoreScalar { reg: u8, bytes: u8 },
+    StoreScalar {
+        reg: u8,
+        bytes: u8,
+    },
     /// MOVQ xmm, xmm/m64 (upper quadword cleared).
-    LoadQuad { reg: u8 },
+    LoadQuad {
+        reg: u8,
+    },
     /// MOVQ xmm/m64, xmm (a register destination's upper quadword cleared).
-    StoreQuad { reg: u8 },
+    StoreQuad {
+        reg: u8,
+    },
     /// MOVQ mm, mm/m64.
-    MmxLoad { reg: u8 },
+    MmxLoad {
+        reg: u8,
+    },
     /// MOVQ mm/m64, mm.
-    MmxStore { reg: u8 },
+    MmxStore {
+        reg: u8,
+    },
     /// MOVD mm/xmm, r/m32.
-    MovdIn { reg: u8, mmx: bool },
+    MovdIn {
+        reg: u8,
+        mmx: bool,
+    },
     /// MOVD r/m32, mm/xmm.
-    MovdOut { reg: u8, mmx: bool },
+    MovdOut {
+        reg: u8,
+        mmx: bool,
+    },
     /// reg = op(reg, source).
-    Packed { op: Packed, reg: u8, mmx: bool, source: u8 },
+    Packed {
+        op: Packed,
+        reg: u8,
+        mmx: bool,
+        source: u8,
+    },
     /// PSRLx/PSRAx/PSLLx/PSRLDQ/PSLLDQ reg, imm8 (`kind` is the ModRM reg).
-    ShiftImmediate { reg: u8, mmx: bool, bits: u8, kind: u8, count: u8 },
+    ShiftImmediate {
+        reg: u8,
+        mmx: bool,
+        bits: u8,
+        kind: u8,
+        count: u8,
+    },
     /// ADD/SUB/MUL/DIV/MIN/MAX/SQRT/RSQRT/RCP PS/PD/SS/SD.
-    Float { opcode: u8, reg: u8, double: bool, scalar: bool },
+    Float {
+        opcode: u8,
+        reg: u8,
+        double: bool,
+        scalar: bool,
+    },
     /// Float conversions: (Wasm opcode, source bytes, result bytes).
-    Convert { opcode: u32, reg: u8, source: u8, result: u8 },
+    Convert {
+        opcode: u32,
+        reg: u8,
+        source: u8,
+        result: u8,
+    },
     /// CVT(T)PS2DQ/CVT(T)PD2DQ.
-    ConvertInteger { reg: u8, double: bool, truncate: bool },
+    ConvertInteger {
+        reg: u8,
+        double: bool,
+        truncate: bool,
+    },
     /// CVTSI2SS/CVTSI2SD xmm, r/m32.
-    ToScalar { reg: u8, double: bool },
+    ToScalar {
+        reg: u8,
+        double: bool,
+    },
     /// CVT(T)SS2SI/CVT(T)SD2SI r32, xmm/m.
-    ToInteger { reg: u8, double: bool, truncate: bool },
+    ToInteger {
+        reg: u8,
+        double: bool,
+        truncate: bool,
+    },
     /// UCOMISS/COMISS/UCOMISD/COMISD.
-    CompareFlags { reg: u8, double: bool },
+    CompareFlags {
+        reg: u8,
+        double: bool,
+    },
     Emms,
 }
 
@@ -189,14 +248,26 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
     Some(match op {
         0x0F10 | 0x0F28 | 0x660F10 | 0x660F28 | 0x660F6F | 0xF30F6F => Simd::Load128 { reg },
         0x0F11 | 0x0F29 | 0x660F11 | 0x660F29 | 0x660F7F | 0xF30F7F => Simd::Store128 { reg },
-        0xF30F10 | 0xF20F10 => Simd::LoadScalar { reg, bytes: if prefix == 0xF3 { 4 } else { 8 } },
-        0xF30F11 | 0xF20F11 => Simd::StoreScalar { reg, bytes: if prefix == 0xF3 { 4 } else { 8 } },
+        0xF30F10 | 0xF20F10 => Simd::LoadScalar {
+            reg,
+            bytes: if prefix == 0xF3 { 4 } else { 8 },
+        },
+        0xF30F11 | 0xF20F11 => Simd::StoreScalar {
+            reg,
+            bytes: if prefix == 0xF3 { 4 } else { 8 },
+        },
         0xF30F7E => Simd::LoadQuad { reg },
         0x660FD6 => Simd::StoreQuad { reg },
         0x0F6F => Simd::MmxLoad { reg },
         0x0F7F => Simd::MmxStore { reg },
-        0x0F6E | 0x660F6E => Simd::MovdIn { reg, mmx: prefix == 0 },
-        0x0F7E | 0x660F7E => Simd::MovdOut { reg, mmx: prefix == 0 },
+        0x0F6E | 0x660F6E => Simd::MovdIn {
+            reg,
+            mmx: prefix == 0,
+        },
+        0x0F7E | 0x660F7E => Simd::MovdOut {
+            reg,
+            mmx: prefix == 0,
+        },
         0x0F71 | 0x0F72 | 0x0F73 | 0x660F71 | 0x660F72 | 0x660F73 if !memory => {
             let kind = reg;
             let bytes = matches!(kind, 3 | 7);
@@ -214,33 +285,70 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
             }
         },
         0x0F51 | 0x0F52 | 0x0F53 | 0x0F58 | 0x0F59 | 0x0F5C | 0x0F5D | 0x0F5E | 0x0F5F
-        | 0x660F51 | 0x660F58 | 0x660F59 | 0x660F5C | 0x660F5D | 0x660F5E | 0x660F5F
-        | 0xF20F51 | 0xF20F58 | 0xF20F59 | 0xF20F5C | 0xF20F5D | 0xF20F5E | 0xF20F5F
-        | 0xF30F51 | 0xF30F52 | 0xF30F53 | 0xF30F58 | 0xF30F59 | 0xF30F5C | 0xF30F5D
-        | 0xF30F5E | 0xF30F5F => Simd::Float {
-            opcode: code,
-            reg,
-            double: matches!(prefix, 0x66 | 0xF2),
-            scalar: matches!(prefix, 0xF2 | 0xF3),
+        | 0x660F51 | 0x660F58 | 0x660F59 | 0x660F5C | 0x660F5D | 0x660F5E | 0x660F5F | 0xF20F51
+        | 0xF20F58 | 0xF20F59 | 0xF20F5C | 0xF20F5D | 0xF20F5E | 0xF20F5F | 0xF30F51 | 0xF30F52
+        | 0xF30F53 | 0xF30F58 | 0xF30F59 | 0xF30F5C | 0xF30F5D | 0xF30F5E | 0xF30F5F => {
+            Simd::Float {
+                opcode: code,
+                reg,
+                double: matches!(prefix, 0x66 | 0xF2),
+                scalar: matches!(prefix, 0xF2 | 0xF3),
+            }
         },
-        0x0F5A => Simd::Convert { opcode: 0x5F, reg, source: 8, result: 16 },
-        0x660F5A => Simd::Convert { opcode: 0x5E, reg, source: 16, result: 16 },
-        0xF20F5A => Simd::Convert { opcode: 0x5E, reg, source: 8, result: 4 },
-        0xF30F5A => Simd::Convert { opcode: 0x5F, reg, source: 4, result: 8 },
-        0x0F5B => Simd::Convert { opcode: 0xFA, reg, source: 16, result: 16 },
-        0xF30FE6 => Simd::Convert { opcode: 0xFE, reg, source: 8, result: 16 },
+        0x0F5A => Simd::Convert {
+            opcode: 0x5F,
+            reg,
+            source: 8,
+            result: 16,
+        },
+        0x660F5A => Simd::Convert {
+            opcode: 0x5E,
+            reg,
+            source: 16,
+            result: 16,
+        },
+        0xF20F5A => Simd::Convert {
+            opcode: 0x5E,
+            reg,
+            source: 8,
+            result: 4,
+        },
+        0xF30F5A => Simd::Convert {
+            opcode: 0x5F,
+            reg,
+            source: 4,
+            result: 8,
+        },
+        0x0F5B => Simd::Convert {
+            opcode: 0xFA,
+            reg,
+            source: 16,
+            result: 16,
+        },
+        0xF30FE6 => Simd::Convert {
+            opcode: 0xFE,
+            reg,
+            source: 8,
+            result: 16,
+        },
         0x660F5B | 0xF30F5B | 0x660FE6 | 0xF20FE6 => Simd::ConvertInteger {
             reg,
             double: code == 0xE6,
             truncate: matches!(op, 0xF30F5B | 0x660FE6),
         },
-        0xF20F2A | 0xF30F2A => Simd::ToScalar { reg, double: prefix == 0xF2 },
+        0xF20F2A | 0xF30F2A => Simd::ToScalar {
+            reg,
+            double: prefix == 0xF2,
+        },
         0xF20F2C | 0xF30F2C | 0xF20F2D | 0xF30F2D => Simd::ToInteger {
             reg,
             double: prefix == 0xF2,
             truncate: code == 0x2C,
         },
-        0x0F2E | 0x0F2F | 0x660F2E | 0x660F2F => Simd::CompareFlags { reg, double: prefix == 0x66 },
+        0x0F2E | 0x0F2F | 0x660F2E | 0x660F2F => Simd::CompareFlags {
+            reg,
+            double: prefix == 0x66,
+        },
         0x0F70 | 0x660F70 | 0xF20F70 | 0xF30F70 | 0x0FC6 | 0x660FC6 => {
             // Packed pushes (destination, source): one-operand shuffles
             // select from the source only.
@@ -257,20 +365,60 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
                 source: source_bytes(op),
             }
         },
-        0x0F14 => Simd::Packed { op: Packed::Unpack(4, false), reg, mmx: false, source: 8 },
-        0x0F15 => Simd::Packed { op: Packed::Unpack(4, true), reg, mmx: false, source: 16 },
-        0x660F14 => Simd::Packed { op: Packed::Unpack(8, false), reg, mmx: false, source: 8 },
-        0x660F15 => Simd::Packed { op: Packed::Unpack(8, true), reg, mmx: false, source: 16 },
+        0x0F14 => Simd::Packed {
+            op: Packed::Unpack(4, false),
+            reg,
+            mmx: false,
+            source: 8,
+        },
+        0x0F15 => Simd::Packed {
+            op: Packed::Unpack(4, true),
+            reg,
+            mmx: false,
+            source: 16,
+        },
+        0x660F14 => Simd::Packed {
+            op: Packed::Unpack(8, false),
+            reg,
+            mmx: false,
+            source: 8,
+        },
+        0x660F15 => Simd::Packed {
+            op: Packed::Unpack(8, true),
+            reg,
+            mmx: false,
+            source: 16,
+        },
         0x0F16 => Simd::Packed {
             op: Packed::Shuffle([0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]),
             reg,
             mmx: false,
             source: 8,
         },
-        0x0F54 | 0x660F54 => Simd::Packed { op: Packed::Binary(0x4E), reg, mmx: false, source: 16 },
-        0x0F55 | 0x660F55 => Simd::Packed { op: Packed::AndNot, reg, mmx: false, source: 16 },
-        0x0F56 | 0x660F56 => Simd::Packed { op: Packed::Binary(0x50), reg, mmx: false, source: 16 },
-        0x0F57 | 0x660F57 => Simd::Packed { op: Packed::Binary(0x51), reg, mmx: false, source: 16 },
+        0x0F54 | 0x660F54 => Simd::Packed {
+            op: Packed::Binary(0x4E),
+            reg,
+            mmx: false,
+            source: 16,
+        },
+        0x0F55 | 0x660F55 => Simd::Packed {
+            op: Packed::AndNot,
+            reg,
+            mmx: false,
+            source: 16,
+        },
+        0x0F56 | 0x660F56 => Simd::Packed {
+            op: Packed::Binary(0x50),
+            reg,
+            mmx: false,
+            source: 16,
+        },
+        0x0F57 | 0x660F57 => Simd::Packed {
+            op: Packed::Binary(0x51),
+            reg,
+            mmx: false,
+            source: 16,
+        },
         _ if prefix == 0 || prefix == 0x66 => Simd::Packed {
             op: packed(code, prefix == 0)?,
             reg,
@@ -348,7 +496,8 @@ impl Page {
         self.w.hint(false);
         self.w.if_void();
         self.w.const_i32(r as i32);
-        self.w.call_signature("fpu_sync_slot", Signature::new(&[WasmType::I32], &[]));
+        self.w
+            .call_signature("fpu_sync_slot", Signature::new(&[WasmType::I32], &[]));
         self.w.block_end();
         self.w.const_i32(gp::get_reg_mmx_offset(r as u32) as i32);
         self.w.simd_memory(0x5D, 0);
@@ -634,7 +783,12 @@ impl Page {
                 self.w.const_i32(0xFF);
                 self.w.store_u8(0);
             },
-            Simd::Packed { op, reg, mmx, source } => {
+            Simd::Packed {
+                op,
+                reg,
+                mmx,
+                source,
+            } => {
                 self.simd_source(i, mmx, source);
                 let src = self.w.set_new_local_v128();
                 if mmx {
@@ -651,7 +805,13 @@ impl Page {
                     self.w.free_local_v128(v);
                 }
             },
-            Simd::ShiftImmediate { reg, mmx, bits, kind, count } => {
+            Simd::ShiftImmediate {
+                reg,
+                mmx,
+                bits,
+                kind,
+                count,
+            } => {
                 if mmx {
                     self.load_mmx(reg);
                 }
@@ -665,7 +825,12 @@ impl Page {
                     self.w.simd_zero();
                     let mut lanes = [16; 16];
                     for (k, lane) in lanes.iter_mut().enumerate() {
-                        let index = if kind == 3 { k as i32 + count as i32 } else { k as i32 - count as i32 };
+                        let index = if kind == 3 {
+                            k as i32 + count as i32
+                        }
+                        else {
+                            k as i32 - count as i32
+                        };
                         if (0..16).contains(&index) {
                             *lane = index as u8;
                         }
@@ -683,19 +848,34 @@ impl Page {
                         32 => 0xAB,
                         _ => 0xCB,
                     };
-                    self.w.simd(base + match kind {
-                        6 => 0,
-                        4 => 1,
-                        _ => 2,
-                    });
+                    self.w.simd(
+                        base + match kind {
+                            6 => 0,
+                            4 => 1,
+                            _ => 2,
+                        },
+                    );
                 }
                 let result = self.w.set_new_local_v128();
                 self.simd_result(reg, mmx, &result);
                 self.w.free_local_v128(dst);
                 self.w.free_local_v128(result);
             },
-            Simd::Float { opcode, reg, double, scalar } => {
-                let bytes = if !scalar { 16 } else if double { 8 } else { 4 };
+            Simd::Float {
+                opcode,
+                reg,
+                double,
+                scalar,
+            } => {
+                let bytes = if !scalar {
+                    16
+                }
+                else if double {
+                    8
+                }
+                else {
+                    4
+                };
                 // Scalar forms compute (and NaN-check) only the low lane.
                 self.scalar_source(i, bytes);
                 let src = self.w.set_new_local_v128();
@@ -723,18 +903,21 @@ impl Page {
                         self.w.get_local_v128(&src);
                         self.w.get_local_v128(&dst);
                         self.w.get_local_v128(&src);
-                        self.w.simd(if double { 0x49 } else { 0x43 } + (opcode == 0x5F) as u32);
+                        self.w
+                            .simd(if double { 0x49 } else { 0x43 } + (opcode == 0x5F) as u32);
                         self.w.simd(0x52);
                     },
                     _ => {
                         self.w.get_local_v128(&dst);
                         self.w.get_local_v128(&src);
-                        self.w.simd(base + match opcode {
-                            0x58 => 0,
-                            0x5C => 1,
-                            0x59 => 2,
-                            _ => 3,
-                        });
+                        self.w.simd(
+                            base + match opcode {
+                                0x58 => 0,
+                                0x5C => 1,
+                                0x59 => 2,
+                                _ => 3,
+                            },
+                        );
                     },
                 }
                 let result = self.w.set_new_local_v128();
@@ -744,7 +927,12 @@ impl Page {
                     self.w.free_local_v128(v);
                 }
             },
-            Simd::Convert { opcode, reg, source, result } => {
+            Simd::Convert {
+                opcode,
+                reg,
+                source,
+                result,
+            } => {
                 self.simd_source(i, false, source);
                 self.w.simd(opcode);
                 let v = self.w.set_new_local_v128();
@@ -753,7 +941,11 @@ impl Page {
                 self.store_xmm_low(reg, &v, result);
                 self.w.free_local_v128(v);
             },
-            Simd::ConvertInteger { reg, double, truncate } => {
+            Simd::ConvertInteger {
+                reg,
+                double,
+                truncate,
+            } => {
                 self.simd_source(i, false, 16);
                 self.convert_integer(double, truncate);
                 let v = self.w.set_new_local_v128();
@@ -774,7 +966,11 @@ impl Page {
                 self.store_xmm_low(reg, &v, if double { 8 } else { 4 });
                 self.w.free_local_v128(v);
             },
-            Simd::ToInteger { reg, double, truncate } => {
+            Simd::ToInteger {
+                reg,
+                double,
+                truncate,
+            } => {
                 self.scalar_source(i, if double { 8 } else { 4 });
                 if double {
                     self.w.simd_lane(0x21, 0); // f64x2.extract_lane
@@ -939,7 +1135,9 @@ impl Page {
                         w.simd(opcode);
                         if bytes == 8 {
                             w.simd_zero();
-                            w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
+                            w.simd_shuffle([
+                                0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23,
+                            ]);
                         }
                     },
                     Packed::Unpack(width, high) => {
@@ -948,8 +1146,10 @@ impl Page {
                         for k in 0..bytes {
                             let element = k / (width * 2);
                             let side = k / width % 2;
-                            lanes[k as usize] =
-                                (if high { half } else { 0 }) + element * width + k % width + side * 16;
+                            lanes[k as usize] = (if high { half } else { 0 })
+                                + element * width
+                                + k % width
+                                + side * 16;
                         }
                         w.simd_shuffle(lanes);
                     },
@@ -1001,9 +1201,10 @@ impl Page {
             w.const_i32(3);
             w.and_i32();
             let mode = w.set_new_local();
-            for (k, op) in (if double { [0x94, 0x75, 0x74, 0x7A] } else { [0x6A, 0x68, 0x67, 0x69] })
-                .iter()
-                .enumerate()
+            for (k, op) in
+                (if double { [0x94, 0x75, 0x74, 0x7A] } else { [0x6A, 0x68, 0x67, 0x69] })
+                    .iter()
+                    .enumerate()
             {
                 if k < 3 {
                     w.get_local(&mode);

@@ -1,13 +1,6 @@
 //! Continuing scalar port I/O and CPU-owned single-iteration INS/OUTS.
-use super::{
-    adapters::call,
-    decode::DecodedInstruction,
-    integer::IntegerBuilder,
-    lift::snapshot,
-};
-use crate::ir::{
-    hir::Op, lowering::CompileError, state::ResumeKind, types::Type,
-};
+use super::{adapters::call, decode::DecodedInstruction, integer::IntegerBuilder, lift::snapshot};
+use crate::ir::{hir::Op, lowering::CompileError, state::ResumeKind, types::Type};
 pub fn supports(i: &DecodedInstruction) -> bool {
     matches!(i.encoding.opcode,0xE4..=0xE7|0xEC..=0xEF|0x6C..=0x6F)
 }

@@ -29,7 +29,11 @@ pub struct Block {
 }
 impl Block {
     /// Offset after the last instruction: the static fallthrough.
-    pub fn end(&self) -> usize { self.instructions.last().map_or(self.start as usize, Instruction::end) }
+    pub fn end(&self) -> usize {
+        self.instructions
+            .last()
+            .map_or(self.start as usize, Instruction::end)
+    }
 }
 /// The guest pages of a page function in address order: slot k covers the
 /// function offsets [k * PAGE, (k + 1) * PAGE) of linear page `pages[k]`.
@@ -46,7 +50,9 @@ impl Slots {
         Slots { pages, cs_base }
     }
     pub fn span(&self) -> usize { self.pages.len() * PAGE }
-    pub fn linear(&self, offset: usize) -> u32 { self.pages[offset / PAGE].wrapping_add((offset % PAGE) as u32) }
+    pub fn linear(&self, offset: usize) -> u32 {
+        self.pages[offset / PAGE].wrapping_add((offset % PAGE) as u32)
+    }
     pub fn offset(&self, linear: u32) -> Option<usize> {
         let k = self.pages.iter().position(|&page| page == linear & !4095)?;
         Some(k * PAGE + (linear & 4095) as usize)
@@ -93,7 +99,12 @@ pub struct PagePlan {
 fn successors(i: &DecodedInstruction, offset: usize, slots: &Slots) -> Vec<u32> {
     let end = slots.linear(offset).wrapping_add(i.length as u32);
     let mut out = vec![];
-    if let Flow::Relative { displacement, conditional, call } = i.flow {
+    if let Flow::Relative {
+        displacement,
+        conditional,
+        call,
+    } = i.flow
+    {
         let target = i.next_pc.0.wrapping_add(displacement as u32);
         let target = if i.operand_size == 16 { target & 0xFFFF } else { target };
         out.push(target.wrapping_add(slots.cs_base));
@@ -113,9 +124,16 @@ fn block_targets(plan: &PagePlan, b: &Block, only_ends: bool) -> Vec<usize> {
     }
     let mut targets = successors(&last.decoded, last.offset as usize, &plan.slots);
     if matches!(last.decoded.flow, Flow::Next | Flow::Boundary) {
-        targets.push(plan.slots.linear(last.offset as usize).wrapping_add(last.decoded.length as u32));
+        targets.push(
+            plan.slots
+                .linear(last.offset as usize)
+                .wrapping_add(last.decoded.length as u32),
+        );
     }
-    targets.into_iter().filter_map(|t| plan.slots.offset(t)).collect()
+    targets
+        .into_iter()
+        .filter_map(|t| plan.slots.offset(t))
+        .collect()
 }
 /// Control transfers, boundary encodings, and instructions without a
 /// template: those run in the interpreter and continue by dispatch.
@@ -159,7 +177,9 @@ pub fn analyze(
     let mut leaders = 0;
     let next = |pending: &mut BTreeSet<usize>| {
         let preferred = pending.range(prefer.clone()).next().copied();
-        preferred.map(|at| pending.take(&at).unwrap()).or_else(|| pending.pop_first())
+        preferred
+            .map(|at| pending.take(&at).unwrap())
+            .or_else(|| pending.pop_first())
     };
     while let Some(start) = next(&mut pending) {
         if leader[start] || leaders == MAX_BLOCKS || total >= MAX_INSTRUCTIONS {
@@ -234,7 +254,10 @@ pub fn analyze(
         while let Some(decoded) = decode_at(at) {
             let length = decoded.length as usize;
             let last = ends_block(&decoded);
-            instructions.push(Instruction { offset: at as u16, decoded });
+            instructions.push(Instruction {
+                offset: at as u16,
+                decoded,
+            });
             at += length;
             // A run cut by the instruction budget continues by dispatch.
             if last || at >= run_end || leader[at] || !decoded_at[at] {
@@ -242,19 +265,34 @@ pub fn analyze(
             }
         }
         block_at[start] = Some(blocks.len() as u32);
-        blocks.push(Block { start: start as u16, instructions });
+        blocks.push(Block {
+            start: start as u16,
+            instructions,
+        });
     }
     let mut return_site = vec![false; blocks.len()];
     for b in &blocks {
         let last = b.instructions.last().unwrap();
         let call = matches!(last.decoded.flow, Flow::Relative { call: true, .. })
-            || last.decoded.encoding.opcode == 0xFF && last.decoded.modrm.is_some_and(|m| m >> 3 & 7 == 2);
-        let after = slots.offset(slots.linear(last.offset as usize).wrapping_add(last.decoded.length as u32));
+            || last.decoded.encoding.opcode == 0xFF
+                && last.decoded.modrm.is_some_and(|m| m >> 3 & 7 == 2);
+        let after = slots.offset(
+            slots
+                .linear(last.offset as usize)
+                .wrapping_add(last.decoded.length as u32),
+        );
         if let Some(Some(k)) = after.filter(|_| call).map(|at| block_at[at]) {
             return_site[k as usize] = true;
         }
     }
-    PagePlan { slots, blocks, block_at, return_site, external, jumps }
+    PagePlan {
+        slots,
+        blocks,
+        block_at,
+        return_site,
+        external,
+        jumps,
+    }
 }
 
 /// Which of `entries` (offsets, in priority order) a recompilation must seed:
@@ -320,7 +358,12 @@ impl Unit {
 fn block_successors(plan: &PagePlan) -> Vec<Vec<u32>> {
     plan.blocks
         .iter()
-        .map(|b| block_targets(plan, b, false).into_iter().filter_map(|at| plan.block_at[at]).collect())
+        .map(|b| {
+            block_targets(plan, b, false)
+                .into_iter()
+                .filter_map(|at| plan.block_at[at])
+                .collect()
+        })
         .collect()
 }
 
@@ -371,13 +414,19 @@ fn flatten(units: &mut Vec<Unit>, wide: &dyn Fn(&Unit) -> bool) {
     for unit in std::mem::take(units) {
         let flat = matches!(unit, Unit::Loop { .. }) && wide(&unit);
         match unit {
-            Unit::Loop { header, units: mut inner } => {
+            Unit::Loop {
+                header,
+                units: mut inner,
+            } => {
                 flatten(&mut inner, wide);
                 if flat {
                     out.extend(inner);
                 }
                 else {
-                    out.push(Unit::Loop { header, units: inner });
+                    out.push(Unit::Loop {
+                        header,
+                        units: inner,
+                    });
                 }
             },
             unit => out.push(unit),
@@ -463,7 +512,10 @@ fn units(members: &[u32], successors: &[Vec<u32>], header: Option<u32>) -> Vec<U
                 Unit::Block(k)
             }
             else {
-                Unit::Loop { header: k, units: units(&component, successors, Some(k)) }
+                Unit::Loop {
+                    header: k,
+                    units: units(&component, successors, Some(k)),
+                }
             }
         })
         .collect();

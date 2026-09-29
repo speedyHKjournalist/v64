@@ -94,7 +94,8 @@ pub enum CompileError {
 fn mask(w: u8) -> u64 {
     if w == 64 {
         u64::MAX
-    } else {
+    }
+    else {
         (1u64 << w) - 1
     }
 }
@@ -112,7 +113,8 @@ fn register(encoded: u8, width: u8, d: &Decoded) -> Register {
                 width,
             },
         }
-    } else {
+    }
+    else {
         Register {
             index: encoded,
             shift: 0,
@@ -137,9 +139,11 @@ fn operation(d: &Decoded) -> Option<Operation> {
             let form = op & 7;
             let (lhs, rhs, target) = if form <= 1 {
                 (rm(width)?, value(d.reg?, width), d.rm_register?)
-            } else if form <= 3 {
+            }
+            else if form <= 3 {
                 (value(d.reg?, width), rm(width)?, d.reg?)
-            } else {
+            }
+            else {
                 (value(0, width), immediate()?, 0)
             };
             Operation::Alu {
@@ -165,7 +169,8 @@ fn operation(d: &Decoded) -> Option<Operation> {
             let width = if op & 1 == 0 { 8 } else { w };
             let (lhs, rhs) = if op < 0xA0 {
                 (rm(width)?, value(d.reg?, width))
-            } else {
+            }
+            else {
                 (value(0, width), immediate()?)
             };
             Operation::Alu {
@@ -183,7 +188,8 @@ fn operation(d: &Decoded) -> Option<Operation> {
                     target: reg(d.rm_register?, width),
                     source: value(d.reg?, width),
                 }
-            } else {
+            }
+            else {
                 Operation::Move {
                     target: reg(d.reg?, width),
                     source: rm(width)?,
@@ -212,7 +218,8 @@ fn operation(d: &Decoded) -> Option<Operation> {
             let r = d.opcode_register?;
             if r == 0 {
                 Operation::Nop
-            } else {
+            }
+            else {
                 Operation::Exchange(reg(0, w), reg(r, w))
             }
         },
@@ -274,10 +281,12 @@ pub fn plan(bytes: &[u8], start: GuestIp, max_instructions: usize) -> Result<Pla
             &bytes[offset..],
             GuestIp(start.0.wrapping_add(offset as u64)),
             ExecutionMode::Long64,
-        ) else {
+        )
+        else {
             break;
         };
-        let Some(operation) = operation(&d) else {
+        let Some(operation) = operation(&d)
+        else {
             break;
         };
         let terminal = matches!(operation, Operation::Jump { .. });
@@ -331,11 +340,13 @@ impl Emitter {
     fn target(&mut self, target: Register) {
         if target.width == 64 {
             self.w.get_local_i64(&self.r);
-        } else if target.width == 32 {
+        }
+        else if target.width == 32 {
             self.w.get_local_i64(&self.r);
             self.w.const_i64(0xFFFF_FFFF);
             self.w.and_i64();
-        } else {
+        }
+        else {
             self.w.get_local_i64(&self.gpr[target.index as usize]);
             self.w
                 .const_i64(!(mask(target.width) << target.shift) as i64);
@@ -398,7 +409,8 @@ impl Emitter {
             self.w.extend_unsigned_i32_to_i64();
             if code == 2 {
                 self.w.add_i64();
-            } else {
+            }
+            else {
                 self.w.sub_i64();
             }
         }
@@ -434,7 +446,8 @@ impl Emitter {
                 self.w.get_local_i64(&self.r);
                 self.w.get_local_i64(&self.a);
                 self.w.ltu_i64();
-            } else {
+            }
+            else {
                 self.w.get_local_i64(&self.a);
                 self.w.get_local_i64(&self.b);
                 self.w.ltu_i64();
@@ -548,14 +561,16 @@ impl Emitter {
                 self.w.const_i64(count as i64);
                 if code == 0 {
                     self.w.shl_i64();
-                } else {
+                }
+                else {
                     self.w.shr_u_i64();
                 }
                 self.w.get_local_i64(&self.a);
                 self.w.const_i64((width - count) as i64);
                 if code == 0 {
                     self.w.shr_u_i64();
-                } else {
+                }
+                else {
                     self.w.shl_i64();
                 }
                 self.w.or_i64();
@@ -565,7 +580,8 @@ impl Emitter {
                 self.w.const_i64(count as i64);
                 if code == 2 {
                     self.w.shl_i64();
-                } else {
+                }
+                else {
                     self.w.shr_u_i64();
                 }
                 self.w.get_local(&self.flags);
@@ -574,7 +590,8 @@ impl Emitter {
                 self.w.extend_unsigned_i32_to_i64();
                 self.w.const_i64(if code == 2 {
                     (count - 1) as i64
-                } else {
+                }
+                else {
                     (width - count) as i64
                 });
                 self.w.shl_i64();
@@ -584,7 +601,8 @@ impl Emitter {
                     self.w.const_i64((width + 1 - count) as i64);
                     if code == 2 {
                         self.w.shr_u_i64();
-                    } else {
+                    }
+                    else {
                         self.w.shl_i64();
                     }
                     self.w.or_i64();
@@ -593,12 +611,14 @@ impl Emitter {
             4 | 5 | 6 => {
                 if count >= width {
                     self.w.const_i64(0);
-                } else {
+                }
+                else {
                     self.w.get_local_i64(&self.a);
                     self.w.const_i64(count as i64);
                     if code == 5 {
                         self.w.shr_u_i64();
-                    } else {
+                    }
+                    else {
                         self.w.shl_i64();
                     }
                 }
@@ -628,7 +648,8 @@ impl Emitter {
         }
         if code >= 4 && code != 7 && count > width {
             self.w.const_i32(0);
-        } else {
+        }
+        else {
             self.w
                 .get_local_i64(if code <= 1 { &self.r } else { &self.a });
             let shift = match code {
@@ -639,7 +660,8 @@ impl Emitter {
                 7 => {
                     if count >= width {
                         width - 1
-                    } else {
+                    }
+                    else {
                         count - 1
                     }
                 },
@@ -945,7 +967,8 @@ pub fn compile(
                 e.w.if_void();
                 e.rip(target);
                 e.w.block_end();
-            } else {
+            }
+            else {
                 e.rip(target);
             }
         }
@@ -1120,8 +1143,11 @@ mod tests {
             );
             let branch = compile(
                 &[0x0F, 0x80 | cc as u8, 0, 1, 0, 0],
-                GuestIp(0xFFFF8000FFFFFFF0), 7, 1,
-            ).unwrap();
+                GuestIp(0xFFFF8000FFFFFFF0),
+                7,
+                1,
+            )
+            .unwrap();
             std::fs::write(root.join(format!("branch-{cc}.wasm")), branch.bytes).unwrap();
         }
         std::fs::write(root.join("extra.json"), format!("[{}]", extra.join(","))).unwrap();

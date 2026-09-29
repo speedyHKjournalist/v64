@@ -34,8 +34,17 @@ struct Core {
     /// Never 0, so zeroed entries never match.
     epoch: u64,
 }
-const EMPTY: Entry = Entry { tag: 0, host: 0, _pad: 0 };
-static mut JAC: [Core; 8] = [const { Core { tables: [[EMPTY; ENTRIES]; 4], epoch: 1 } }; 8];
+const EMPTY: Entry = Entry {
+    tag: 0,
+    host: 0,
+    _pad: 0,
+};
+static mut JAC: [Core; 8] = [const {
+    Core {
+        tables: [[EMPTY; ENTRIES]; 4],
+        epoch: 1,
+    }
+}; 8];
 
 /// Read table base of `core` for the given privilege (host address).
 pub unsafe fn base(core: usize, user: bool) -> u32 {
@@ -103,7 +112,10 @@ mod tests {
                 flush(3);
             }
             assert_ne!(JAC[3].epoch, 0);
-            assert_eq!(JAC[3].tables[3][page as usize & (ENTRIES - 1)].tag & !(!0 << EPOCH_SHIFT), 0);
+            assert_eq!(
+                JAC[3].tables[3][page as usize & (ENTRIES - 1)].tag & !(!0 << EPOCH_SHIFT),
+                0
+            );
         }
     }
 }

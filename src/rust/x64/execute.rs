@@ -16,13 +16,12 @@ const ARITH: u64 = CF | PF | AF | ZF | SF | OF;
 fn mask(w: u8) -> u64 {
     if w == 64 {
         u64::MAX
-    } else {
+    }
+    else {
         (1u64 << w) - 1
     }
 }
-fn signed(v: u64, w: u8) -> i128 {
-    ((v << (64 - w)) as i64 >> (64 - w)) as i128
-}
+fn signed(v: u64, w: u8) -> i128 { ((v << (64 - w)) as i64 >> (64 - w)) as i128 }
 fn szp(v: u64, w: u8) -> u64 {
     let v = v & mask(w);
     (if v == 0 { ZF } else { 0 })
@@ -91,7 +90,8 @@ pub fn shift(op: u8, a: u64, count: u8, w: u8, flags: u64) -> (u64, u64) {
         2 | 3 => {
             if w < 32 {
                 raw % (w + 1)
-            } else {
+            }
+            else {
                 raw
             }
         },
@@ -122,7 +122,8 @@ pub fn shift(op: u8, a: u64, count: u8, w: u8, flags: u64) -> (u64, u64) {
             let m = (1u128 << total) - 1;
             let r = if op == 2 {
                 (ext << count | ext >> (total - count)) & m
-            } else {
+            }
+            else {
                 (ext >> count | ext << (total - count)) & m
             };
             (r as u64 & mask(w), r >> w != 0)
@@ -176,7 +177,8 @@ unsafe fn register(r: u8, w: u8, rex: bool) -> u64 {
             ByteRegister::Low(r) => state::read_gpr(r as usize) & 255,
             ByteRegister::HighLegacy(r) => state::read_high_byte(r as usize) as u64,
         }
-    } else {
+    }
+    else {
         state::read_gpr(r as usize) & mask(w)
     }
 }
@@ -186,13 +188,12 @@ unsafe fn set_register(r: u8, v: u64, w: u8, rex: bool) {
             ByteRegister::Low(r) => state::write_gpr(r as usize, v, w),
             ByteRegister::HighLegacy(r) => state::write_high_byte(r as usize, v as u8),
         }
-    } else {
+    }
+    else {
         state::write_gpr(r as usize, v, w)
     }
 }
-pub unsafe fn address(d: &Decoded) -> (u64, bool) {
-    address_rsp(d, None)
-}
+pub unsafe fn address(d: &Decoded) -> (u64, bool) { address_rsp(d, None) }
 unsafe fn address_rsp(d: &Decoded, rsp: Option<u64>) -> (u64, bool) {
     let a = d.address.unwrap();
     let mut regs = [0; 16];
@@ -209,7 +210,8 @@ unsafe fn address_rsp(d: &Decoded, rsp: Option<u64>) -> (u64, bool) {
 unsafe fn rm(d: &Decoded, w: u8, writing: bool) -> Result<u64, Fault> {
     if let Some(r) = d.rm_register {
         Ok(register(r, w, d.prefixes.rex.is_some()))
-    } else {
+    }
+    else {
         let (a, s) = address(d);
         if writing {
             memory::probe_write(a, w, s)?;
@@ -221,7 +223,8 @@ unsafe fn put_rm(d: &Decoded, w: u8, value: u64) -> Result<(), Fault> {
     if let Some(r) = d.rm_register {
         set_register(r, value, w, d.prefixes.rex.is_some());
         Ok(())
-    } else {
+    }
+    else {
         let (a, s) = address(d);
         memory::write(a, w, value, s)
     }
@@ -232,13 +235,12 @@ unsafe fn push(v: u64, w: u8) -> Result<(), Fault> {
     state::write_gpr(4, rsp, 64);
     Ok(())
 }
-unsafe fn peek(w: u8) -> Result<u64, Fault> {
-    memory::read(state::read_gpr(4), w, true)
-}
+unsafe fn peek(w: u8) -> Result<u64, Fault> { memory::read(state::read_gpr(4), w, true) }
 fn branch(target: u64) -> Result<u64, Fault> {
     if state::canonical(target, 48) {
         Ok(target)
-    } else {
+    }
+    else {
         Err(Fault::gp())
     }
 }
@@ -258,7 +260,15 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
         });
         return Ok(false);
     }
-    let w = if op & 1 == 0 { 8 } else if op <= 0x6F { d.operand_size.min(32) } else { d.operand_size };
+    let w = if op & 1 == 0 {
+        8
+    }
+    else if op <= 0x6F {
+        d.operand_size.min(32)
+    }
+    else {
+        d.operand_size
+    };
     let src = state::read_gpr(6) & mask(aw);
     let dst = state::read_gpr(7) & mask(aw);
     let seg = d.prefixes.segment.unwrap_or(3);
@@ -266,7 +276,16 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
         src.wrapping_add(if seg >= 4 { state::read_segment_base(seg as usize) } else { 0 });
     let f = state::read_flags64();
     if repeat && matches!(op, 0xA4 | 0xA5 | 0xAA | 0xAB) && state::read_dr(7) & 255 == 0 {
-        if let Some(continuing) = bulk_string(op, w, aw, count, src, dst, source.wrapping_sub(src), f & 0x400 != 0)? {
+        if let Some(continuing) = bulk_string(
+            op,
+            w,
+            aw,
+            count,
+            src,
+            dst,
+            source.wrapping_sub(src),
+            f & 0x400 != 0,
+        )? {
             return Ok(continuing);
         }
     }
@@ -285,7 +304,8 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
                     _ => crate::cpu::cpu::io_port_read32(port as i32),
                 };
                 memory::write(dst, w, value as u32 as u64, false)?;
-            } else {
+            }
+            else {
                 let value = memory::read(source, w, false)? as i32;
                 match w {
                     8 => crate::cpu::cpu::io_port_write8(port as i32, value & 255),
@@ -332,7 +352,8 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
             iterations: 1,
             outcome: if continuing {
                 crate::cpu::string::StringOutcome::Repeat
-            } else {
+            }
+            else {
                 crate::cpu::string::StringOutcome::Complete
             },
         });
@@ -348,7 +369,16 @@ const BULK_BYTES: u64 = 4096;
 /// RCX/RSI/RDI then advance as if the elements ran one by one. None when the
 /// first element needs the element path (a fault, device memory, an element
 /// crossing a page); a later chunk that cannot proceed just ends this step.
-unsafe fn bulk_string(op: u32, w: u8, aw: u8, count: u64, src: u64, dst: u64, source_base: u64, down: bool) -> Result<Option<bool>, Fault> {
+unsafe fn bulk_string(
+    op: u32,
+    w: u8,
+    aw: u8,
+    count: u64,
+    src: u64,
+    dst: u64,
+    source_base: u64,
+    down: bool,
+) -> Result<Option<bool>, Fault> {
     let size = (w / 8) as u64;
     let movs = op <= 0xA5;
     let value = state::read_gpr(0);
@@ -357,10 +387,20 @@ unsafe fn bulk_string(op: u32, w: u8, aw: u8, count: u64, src: u64, dst: u64, so
         // Whole elements in the current page, in the direction of travel.
         let room = |address: u64| {
             let offset = address & 4095;
-            if offset + size > 4096 { 0 } else if down { offset / size + 1 } else { (4096 - offset) / size }
+            if offset + size > 4096 {
+                0
+            }
+            else if down {
+                offset / size + 1
+            }
+            else {
+                (4096 - offset) / size
+            }
         };
         let source = src.wrapping_add(source_base);
-        let mut n = room(dst).min(remaining).min((BULK_BYTES / size).max(1) - done.min((BULK_BYTES / size).max(1) - 1));
+        let mut n = room(dst)
+            .min(remaining)
+            .min((BULK_BYTES / size).max(1) - done.min((BULK_BYTES / size).max(1) - 1));
         if movs {
             n = n.min(room(source));
         }
@@ -372,12 +412,20 @@ unsafe fn bulk_string(op: u32, w: u8, aw: u8, count: u64, src: u64, dst: u64, so
             let physical = memory::translate(address, access, false, false).ok()?;
             match super::jac::ram_backing(physical) {
                 Some(page) => Some((mem8.wrapping_add(page + (address & 4095) as u32), true)),
-                None => super::extended::cache_frame(physical & !4095, access == super::paging::Access::Write)
-                    .map(|frame| (frame + (address & 4095) as u32, false)),
+                None => super::extended::cache_frame(
+                    physical & !4095,
+                    access == super::paging::Access::Write,
+                )
+                .map(|frame| (frame + (address & 4095) as u32, false)),
             }
         };
         let target = if n == 0 { None } else { mapped(dst, super::paging::Access::Write) };
-        let from = if movs && target.is_some() { mapped(source, super::paging::Access::Read) } else { Some((0, false)) };
+        let from = if movs && target.is_some() {
+            mapped(source, super::paging::Access::Read)
+        }
+        else {
+            Some((0, false))
+        };
         let (Some((target, target_ram)), Some((from, _))) = (target, from)
         else {
             if done == 0 {
@@ -389,14 +437,27 @@ unsafe fn bulk_string(op: u32, w: u8, aw: u8, count: u64, src: u64, dst: u64, so
             let step = if down { (i * size).wrapping_neg() } else { i * size };
             let t = target.wrapping_add(step as u32) as usize as *mut u8;
             if movs {
-                std::ptr::copy(from.wrapping_add(step as u32) as usize as *const u8, t, size as usize);
-            } else {
+                std::ptr::copy(
+                    from.wrapping_add(step as u32) as usize as *const u8,
+                    t,
+                    size as usize,
+                );
+            }
+            else {
                 std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), t, size as usize);
             }
         }
         if target_ram {
             let target = target.wrapping_sub(mem8);
-            let (low, high) = if down { (target + size as u32 - (n * size) as u32, target + size as u32) } else { (target, target + (n * size) as u32) };
+            let (low, high) = if down {
+                (
+                    target + size as u32 - (n * size) as u32,
+                    target + size as u32,
+                )
+            }
+            else {
+                (target, target + (n * size) as u32)
+            };
             if crate::jit::page_watched(low >> 12) || crate::jit::page_watched((high - 1) >> 12) {
                 crate::jit::jit_dirty_cache(low, high);
             }
@@ -416,7 +477,8 @@ unsafe fn bulk_string(op: u32, w: u8, aw: u8, count: u64, src: u64, dst: u64, so
         iterations: done as u32,
         outcome: if remaining != 0 {
             crate::cpu::string::StringOutcome::Repeat
-        } else {
+        }
+        else {
             crate::cpu::string::StringOutcome::Complete
         },
     });
@@ -434,14 +496,18 @@ pub unsafe fn step() -> Result<(), Fault> {
     let physical = memory::translate(start.0, super::paging::Access::Execute, false, false)?;
     let slot = (start.0 ^ start.0 >> 10) as usize & (DECODE_CACHE_SIZE - 1);
     if let Some(entry) = &(*(&raw const DECODE_CACHE))[slot] {
-        if entry.rip == start.0 && entry.physical == physical && entry.decoded.mode == mode
+        if entry.rip == start.0
+            && entry.physical == physical
+            && entry.decoded.mode == mode
             && code_unchanged(physical, &entry.decoded)
         {
             let d = entry.decoded;
             let mut family = entry.family;
             let result = dispatch(&d, &mut family);
             if let Some(entry) = &mut (*(&raw mut DECODE_CACHE))[slot] {
-                if entry.rip == start.0 { entry.family = family; }
+                if entry.rip == start.0 {
+                    entry.family = family;
+                }
             }
             return result;
         }
@@ -457,8 +523,15 @@ pub unsafe fn step() -> Result<(), Fault> {
     })?;
     let mut family = UNKNOWN;
     let result = dispatch(&d, &mut family);
-    if (physical & 4095) + d.length as u64 <= 4096 && super::physical::plain_ram(physical, d.length as usize) {
-        (*(&raw mut DECODE_CACHE))[slot] = Some(CachedDecode { rip: start.0, physical, decoded: d, family });
+    if (physical & 4095) + d.length as u64 <= 4096
+        && super::physical::plain_ram(physical, d.length as usize)
+    {
+        (*(&raw mut DECODE_CACHE))[slot] = Some(CachedDecode {
+            rip: start.0,
+            physical,
+            decoded: d,
+            family,
+        });
     }
     result
 }
@@ -470,7 +543,9 @@ const VECTOR: u8 = 2;
 const INTEGER: u8 = 3;
 unsafe fn dispatch(d: &Decoded, family: &mut u8) -> Result<(), Fault> {
     // LOCK, and XCHG with memory (implicitly locked), with other cores in workers
-    if crate::parallel::active() && d.rm_register.is_none() && d.modrm.is_some()
+    if crate::parallel::active()
+        && d.rm_register.is_none()
+        && d.modrm.is_some()
         && (d.prefixes.lock || matches!(d.base_opcode(), 0x86 | 0x87))
     {
         return memory::run_locked(|| dispatch_unlocked(d, family));
@@ -479,18 +554,32 @@ unsafe fn dispatch(d: &Decoded, family: &mut u8) -> Result<(), Fault> {
 }
 unsafe fn dispatch_unlocked(d: &Decoded, family: &mut u8) -> Result<(), Fault> {
     match *family {
-        SYSTEM => if super::system::execute(d)? { return Ok(()); },
-        VECTOR => if super::vector::execute(d)? { return Ok(()); },
+        SYSTEM => {
+            if super::system::execute(d)? {
+                return Ok(());
+            }
+        },
+        VECTOR => {
+            if super::vector::execute(d)? {
+                return Ok(());
+            }
+        },
         INTEGER => return execute(d),
         _ => {},
     }
     match super::system::execute(d) {
         Ok(false) => {},
-        result => { *family = SYSTEM; return result.map(|_| ()); },
+        result => {
+            *family = SYSTEM;
+            return result.map(|_| ());
+        },
     }
     match super::vector::execute(d) {
         Ok(false) => {},
-        result => { *family = VECTOR; return result.map(|_| ()); },
+        result => {
+            *family = VECTOR;
+            return result.map(|_| ());
+        },
     }
     *family = INTEGER;
     execute(d)
@@ -505,11 +594,13 @@ struct CachedDecode {
     family: u8,
 }
 const DECODE_CACHE_SIZE: usize = 1024;
-static mut DECODE_CACHE: [Option<CachedDecode>; DECODE_CACHE_SIZE] = [const { None }; DECODE_CACHE_SIZE];
+static mut DECODE_CACHE: [Option<CachedDecode>; DECODE_CACHE_SIZE] =
+    [const { None }; DECODE_CACHE_SIZE];
 unsafe fn code_unchanged(physical: u64, d: &Decoded) -> bool {
     let length = d.length as usize;
     super::physical::plain_ram(physical, length)
-        && std::slice::from_raw_parts(crate::cpu::memory::mem8.add(physical as usize), length) == &d.bytes[..length]
+        && std::slice::from_raw_parts(crate::cpu::memory::mem8.add(physical as usize), length)
+            == &d.bytes[..length]
 }
 /// Opcodes whose `execute` arm neither reads nor merges the FLAGS value.
 fn flag_free(op: u32, group: u8) -> bool {
@@ -551,16 +642,19 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                     rm(d, width, aluop != 7)?,
                     register(d.reg.unwrap(), width, rex),
                 )
-            } else if form <= 3 {
+            }
+            else if form <= 3 {
                 (register(d.reg.unwrap(), width, rex), rm(d, width, false)?)
-            } else {
+            }
+            else {
                 (register(0, width, rex), imm)
             };
             let (r, f) = alu(aluop, a, b, width, flags);
             if aluop != 7 {
                 if form <= 1 {
                     put_rm(d, width, r)?;
-                } else {
+                }
+                else {
                     set_register(if form <= 3 { d.reg.unwrap() } else { 0 }, r, width, rex);
                 }
             }
@@ -579,7 +673,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let width = if op & 1 == 0 { 8 } else { w };
             let (a, b) = if op < 0xA0 {
                 (rm(d, width, false)?, register(d.reg.unwrap(), width, rex))
-            } else {
+            }
+            else {
                 (register(0, width, rex), imm)
             };
             state::write_flags64(alu(4, a, b, width, flags).1);
@@ -588,7 +683,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let width = if op & 1 == 0 { 8 } else { w };
             if op & 2 == 0 {
                 put_rm(d, width, register(d.reg.unwrap(), width, rex))?;
-            } else {
+            }
+            else {
                 let v = rm(d, width, false)?;
                 set_register(d.reg.unwrap(), v, width, rex);
             }
@@ -623,7 +719,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             if op & 2 == 0 {
                 let v = memory::read(a, width, false)?;
                 set_register(0, v, width, rex);
-            } else {
+            }
+            else {
                 memory::write(a, width, register(0, width, rex), false)?;
             }
         },
@@ -676,7 +773,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             if let Some(r) = d.rm_register {
                 state::write_gpr(4, rsp, 64);
                 set_register(r, v, w, rex);
-            } else {
+            }
+            else {
                 let (a, s) = address_rsp(d, Some(rsp));
                 memory::write(a, w, v, s)?;
                 state::write_gpr(4, rsp, 64);
@@ -759,7 +857,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let v = rm(d, w, false)?;
             if condition(op as u8 & 15, flags) {
                 set_register(d.reg.unwrap(), v, w, rex);
-            } else if w == 32 {
+            }
+            else if w == 32 {
                 // A false 32-bit CMOV still clears the destination's upper
                 // half; the source remains faultable regardless of condition.
                 let old = register(d.reg.unwrap(), w, rex);
@@ -771,9 +870,11 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let width = if op & 1 == 0 { 8 } else { w };
             let count = if op <= 0xC1 {
                 imm as u8
-            } else if op <= 0xD1 {
+            }
+            else if op <= 0xD1 {
                 1
-            } else {
+            }
+            else {
                 state::read_gpr(1) as u8
             };
             let a = rm(d, width, true)?;
@@ -814,19 +915,22 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                     let lhs = register(0, width, rex);
                     let full = if group == 4 {
                         lhs as u128 * a as u128
-                    } else {
+                    }
+                    else {
                         (signed(lhs, width) * signed(a, width)) as u128
                     };
                     let lo = full as u64 & mask(width);
                     let hi = (full >> width) as u64 & mask(width);
                     let overflow = if group == 4 {
                         hi != 0
-                    } else {
+                    }
+                    else {
                         signed(lo, width) != (signed(lhs, width) * signed(a, width))
                     };
                     if width == 8 {
                         state::write_gpr(0, full as u64, 16);
-                    } else {
+                    }
+                    else {
                         state::write_gpr(0, lo, width);
                         state::write_gpr(2, hi, width);
                     }
@@ -838,12 +942,14 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                     }
                     let full = if width == 8 {
                         state::read_gpr(0) & 65535
-                    } else {
+                    }
+                    else {
                         register(0, width, rex) | 0
                     };
                     let dividend = if width == 8 {
                         full as u128
-                    } else {
+                    }
+                    else {
                         full as u128 | ((register(2, width, rex) as u128) << width)
                     };
                     let (q, r) = if group == 6 {
@@ -852,11 +958,13 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                             return Err(Fault::de());
                         }
                         (q as u64, (dividend % (a as u128)) as u64)
-                    } else {
+                    }
+                    else {
                         let bits = width as u32 * 2;
                         let dividend = if bits == 128 {
                             dividend as i128
-                        } else {
+                        }
+                        else {
                             ((dividend << (128 - bits)) as i128) >> (128 - bits)
                         };
                         let divisor = signed(a, width);
@@ -868,7 +976,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                     };
                     if width == 8 {
                         state::write_gpr(0, (q & 255) | ((r & 255) << 8), 16);
-                    } else {
+                    }
+                    else {
                         state::write_gpr(0, q, width);
                         state::write_gpr(2, r, width);
                     }
@@ -935,7 +1044,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let low = crate::cpu::cpu::js::get_rand_int() as u32 as u64;
             let value = if w == 64 {
                 low | (crate::cpu::cpu::js::get_rand_int() as u32 as u64) << 32
-            } else {
+            }
+            else {
                 low
             };
             set_register(r, value, w, rex);
@@ -953,7 +1063,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                 let equal = old == expected;
                 let value = if equal {
                     state::read_gpr(3) as u128 | ((state::read_gpr(1) as u128) << 64)
-                } else {
+                }
+                else {
                     old
                 };
                 memory::write128(a, value, s)?;
@@ -962,7 +1073,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                     state::write_gpr(2, (old >> 64) as u64, 64);
                 }
                 state::write_flags64(flags & !ZF | if equal { ZF } else { 0 });
-            } else {
+            }
+            else {
                 memory::probe_write(a, 64, s)?;
                 let old = memory::read(a, 64, s)?;
                 let expected =
@@ -970,7 +1082,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                 let equal = old == expected;
                 let value = if equal {
                     state::read_gpr(3) as u32 as u64 | ((state::read_gpr(1) as u32 as u64) << 32)
-                } else {
+                }
+                else {
                     old
                 };
                 memory::write(a, 64, value, s)?;
@@ -988,11 +1101,13 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let mut memory_address = None;
             let old = if d.rm_register.is_some() {
                 rm(d, w, action != 0)?
-            } else {
+            }
+            else {
                 let (a, stack) = address(d);
                 let displacement = if op == 0x0FBA {
                     0
-                } else {
+                }
+                else {
                     (signed(index, w) >> (w.trailing_zeros())) * (w as i128 / 8)
                 };
                 let a = a.wrapping_add(displacement as u64);
@@ -1012,7 +1127,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             if action != 0 {
                 if let Some((a, stack)) = memory_address {
                     memory::write(a, w, value, stack)?;
-                } else {
+                }
+                else {
                     put_rm(d, w, value)?;
                 }
             }
@@ -1022,7 +1138,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let v = rm(d, w, false)?;
             if v == 0 {
                 state::write_flags64(flags | ZF);
-            } else {
+            }
+            else {
                 let value = if op == 0x0FBC { v.trailing_zeros() } else { 63 - v.leading_zeros() };
                 set_register(d.reg.unwrap(), value as u64, w, rex);
                 state::write_flags64(flags & !ZF);
@@ -1043,17 +1160,21 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                 let left = op & 8 == 0;
                 let r = if count == 0 {
                     b
-                } else if left {
+                }
+                else if left {
                     (a << count) | (b >> (w - count))
-                } else {
+                }
+                else {
                     (a >> count) | (b << (w - count))
                 };
                 let r = r & mask(w);
                 let cf = if count == 0 {
                     a & 1 != 0
-                } else if left {
+                }
+                else if left {
                     a >> (w - count) & 1 != 0
-                } else {
+                }
+                else {
                     a >> (count - 1) & 1 != 0
                 };
                 let mut f = flags & !(CF | SF | ZF | PF) | szp(r, w) | if cf { CF } else { 0 };
@@ -1062,7 +1183,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
                 }
                 put_rm(d, w, r)?;
                 state::write_flags64(f);
-            } else {
+            }
+            else {
                 put_rm(d, w, a)?;
             }
         },
@@ -1095,7 +1217,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
         0xD7 => {
             // XLAT: AL = [seg:rBX + AL]
             let seg = d.prefixes.segment.unwrap_or(3);
-            let offset = state::read_gpr(3).wrapping_add(state::read_gpr(0) & 0xFF) & mask(d.address_size);
+            let offset =
+                state::read_gpr(3).wrapping_add(state::read_gpr(0) & 0xFF) & mask(d.address_size);
             let base = if seg >= 4 { state::read_segment_base(seg as usize) } else { 0 };
             let v = memory::read(offset.wrapping_add(base), 8, seg == 2)?;
             set_register(0, v, 8, false);
@@ -1134,12 +1257,14 @@ mod tests {
                         let c = if op == 2 || op == 3 { carry as i32 } else { 0 };
                         let exact = if op == 0 || op == 2 {
                             a as i32 + b as i32 + c
-                        } else {
+                        }
+                        else {
                             a as i32 - b as i32 - c
                         };
                         let signed_exact = if op == 0 || op == 2 {
                             a as i8 as i32 + b as i8 as i32 + c
-                        } else {
+                        }
+                        else {
                             a as i8 as i32 - b as i8 as i32 - c
                         };
                         assert_eq!(r, exact as u8 as u64);

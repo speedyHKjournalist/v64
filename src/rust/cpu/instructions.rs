@@ -2362,7 +2362,9 @@ pub unsafe fn instr_FB() {
         trigger_gp(0);
     }
     else if crate::cpu::execution::is_deterministic() {
-        if !was_enabled { *interrupt_shadow = 2; }
+        if !was_enabled {
+            *interrupt_shadow = 2;
+        }
     }
     else if crate::cpu::apic::core_count() > 1 && was_enabled {
         // STI only creates an interrupt shadow on IF=0 -> 1. Recursing

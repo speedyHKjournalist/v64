@@ -58,8 +58,13 @@ pub unsafe fn ir_t0_step(expected_next: u32) -> i32 {
     crate::cpu::execution::begin_instruction();
     cpu::run_instruction(opcode | (*gp::is_32 as i32) << 8);
     crate::cpu::execution::finish_instruction();
-    crate::cpu::execution::note_jit_interpreted((*gp::instruction_counter).wrapping_sub(counter_before).wrapping_add(1));
-    if *gp::in_hlt || cpu::core_yield || crate::cpu::apic::has_core_events() || context() != before {
+    crate::cpu::execution::note_jit_interpreted(
+        (*gp::instruction_counter)
+            .wrapping_sub(counter_before)
+            .wrapping_add(1),
+    );
+    if *gp::in_hlt || cpu::core_yield || crate::cpu::apic::has_core_events() || context() != before
+    {
         STEP_EXIT
     }
     else if *gp::instruction_pointer as u32 == expected_next {
@@ -139,7 +144,8 @@ pub unsafe fn ir_t0_stat(field: u32) -> u32 {
 unsafe fn probe(address: u32, bytes: u32, write: bool) -> bool {
     let user = *gp::cpl == 3;
     let translates = |a: u32| cpu::translate_address(a as i32, write, user, false).is_ok();
-    translates(address) && ((address & 0xFFF) + bytes <= 0x1000 || translates((address | 0xFFF) + 1))
+    translates(address)
+        && ((address & 0xFFF) + bytes <= 0x1000 || translates((address | 0xFFF) + 1))
 }
 /// Tier-0 read outside the TLB fast path (TLB miss, MMIO, page crossing):
 /// `1 << 32` if the access would fault (nothing happened; the page function

@@ -130,7 +130,8 @@ mod hir_tests {
                         rounds,
                         ..PassConfig::default()
                     },
-                ).is_err());
+                )
+                .is_err());
                 assert_eq!(crate::ir::dump::text(&broken), before);
             }
         }
@@ -156,7 +157,8 @@ mod hir_tests {
                         },
                         ..PassConfig::default()
                     },
-                ).unwrap();
+                )
+                .unwrap();
                 let observed = (
                     crate::ir::dump::text(&hir),
                     emit_cpu(&lower(&hir).unwrap(), 32).unwrap().bytes,

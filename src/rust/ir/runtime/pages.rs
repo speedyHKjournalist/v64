@@ -292,7 +292,8 @@ impl Pages {
                         self.declined_entries += 1;
                     }
                 }
-                page.entries.retain(|(e, _)| !served.contains(e) && !page.declined.contains(e));
+                page.entries
+                    .retain(|(e, _)| !served.contains(e) && !page.declined.contains(e));
             },
             None => {
                 self.failures = self.failures.wrapping_add(1);
@@ -327,7 +328,9 @@ impl Pages {
         }
         true
     }
-    pub fn range(&self, key: PageKey) -> bool { self.index.get(&key).is_some_and(|&i| self.pages[i].range) }
+    pub fn range(&self, key: PageKey) -> bool {
+        self.index.get(&key).is_some_and(|&i| self.pages[i].range)
+    }
     /// Recompile a compiled page with `partner` (the page of the linear
     /// address `target`) in its function.
     pub fn want_partner(&mut self, key: PageKey, target: u32) -> bool {
@@ -337,8 +340,11 @@ impl Pages {
         };
         let page = &mut self.pages[i];
         let partner = target & !4095;
-        if page.failed || page.physical.is_none() || page.attempts >= MAX_ATTEMPTS
-            || page.partners.len() >= MAX_PARTNERS || page.partners.iter().any(|&(p, _)| p == partner)
+        if page.failed
+            || page.physical.is_none()
+            || page.attempts >= MAX_ATTEMPTS
+            || page.partners.len() >= MAX_PARTNERS
+            || page.partners.iter().any(|&(p, _)| p == partner)
         {
             return false;
         }
@@ -362,16 +368,28 @@ impl Pages {
             .iter()
             .map(|&(partner, target)| {
                 let mut entries = vec![target];
-                if let Some(&j) = self.index.get(&PageKey { base: partner, ..key }) {
+                if let Some(&j) = self.index.get(&PageKey {
+                    base: partner,
+                    ..key
+                }) {
                     let other = &self.pages[j];
-                    entries.extend(other.seeds.iter().chain(&other.served).map(|e| e.linear.0).take(64));
+                    entries.extend(
+                        other
+                            .seeds
+                            .iter()
+                            .chain(&other.served)
+                            .map(|e| e.linear.0)
+                            .take(64),
+                    );
                 }
                 (partner, entries)
             })
             .collect()
     }
     pub fn range_only(&self, key: PageKey) -> bool {
-        self.index.get(&key).is_some_and(|&i| self.pages[i].range_only)
+        self.index
+            .get(&key)
+            .is_some_and(|&i| self.pages[i].range_only)
     }
     /// The published function was retired or evicted: its entries need heat.
     pub fn unserve(&mut self, entries: &[CpuEntryKey]) {
@@ -389,7 +407,8 @@ impl Pages {
     pub fn known_code(&self, key: PageKey) -> bool {
         self.index.get(&key).is_some_and(|&i| {
             let page = &self.pages[i];
-            page.invalidations == 0 && (page.visits > 0 || !page.entries.is_empty() || page.physical.is_some())
+            page.invalidations == 0
+                && (page.visits > 0 || !page.entries.is_empty() || page.physical.is_some())
         })
     }
     pub fn dirty(&mut self, physical: u32) {

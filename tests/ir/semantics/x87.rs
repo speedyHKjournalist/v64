@@ -62,7 +62,11 @@ fn x87_register_fixtures() {
 
                     let mut region =
                         lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), true).unwrap();
-                    assert_register_lowering(&region, opcode as u8, 0xC0 | (group << 3) as u8 | r as u8);
+                    assert_register_lowering(
+                        &region,
+                        opcode as u8,
+                        0xC0 | (group << 3) as u8 | r as u8,
+                    );
 
                     for opt in 0..2 {
                         if opt != 0 {
@@ -101,9 +105,13 @@ fn x87_register_continuation_contract() {
         let region = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).unwrap();
         assert_register_lowering(&region, opcode, 0xC0);
         // Stack-only forms have no helper call at all; test the CPU-state forms.
-        let region =
-            lift_cpu(&[if opcode == 0xDF { 0xDF } else { 0xDB }, 0xF1], GuestEip(0), LinearAddress(0), true)
-                .unwrap();
+        let region = lift_cpu(
+            &[if opcode == 0xDF { 0xDF } else { 0xDB }, 0xF1],
+            GuestEip(0),
+            LinearAddress(0),
+            true,
+        )
+        .unwrap();
         assert_eq!(region.helpers.len(), 1);
         assert_eq!(region.helpers[0].name, "ir_x87_reg_continue");
         assert!(matches!(region.helpers[0].abi, HelperAbi::CpuReload));
@@ -143,16 +151,49 @@ fn x87_register_continuation_contract() {
     assert!(load.helpers.is_empty());
     let ops: Vec<_> = load.instructions.iter().map(|i| i.op.clone()).collect();
     let check = ops.iter().position(|op| *op == Op::FpuCheck).unwrap();
-    let read = ops.iter().position(|op| matches!(op, Op::GuestLoad { bytes: 4 })).unwrap();
-    let x87 = ops.iter().position(|op| matches!(op, Op::X87 { opcode: 0xD9, modrm: 0 })).unwrap();
+    let read = ops
+        .iter()
+        .position(|op| matches!(op, Op::GuestLoad { bytes: 4 }))
+        .unwrap();
+    let x87 = ops
+        .iter()
+        .position(|op| {
+            matches!(
+                op,
+                Op::X87 {
+                    opcode: 0xD9,
+                    modrm: 0
+                }
+            )
+        })
+        .unwrap();
     assert!(check < read && read < x87);
     let store = lift_cpu(&[0xDD, 0x18, 0x90], GuestEip(0), LinearAddress(0), true).unwrap();
     let ops: Vec<_> = store.instructions.iter().map(|i| i.op.clone()).collect();
-    let preflight =
-        ops.iter().position(|op| matches!(op, Op::GuestCheck { bytes: 8, write: true })).unwrap();
-    let x87 = ops.iter().position(|op| matches!(op, Op::X87 { .. })).unwrap();
-    let partial = ops.iter().position(|op| matches!(op, Op::PartialStore { bytes: 4 })).unwrap();
-    let commit = ops.iter().position(|op| matches!(op, Op::GuestStore { bytes: 4 })).unwrap();
+    let preflight = ops
+        .iter()
+        .position(|op| {
+            matches!(
+                op,
+                Op::GuestCheck {
+                    bytes: 8,
+                    write: true
+                }
+            )
+        })
+        .unwrap();
+    let x87 = ops
+        .iter()
+        .position(|op| matches!(op, Op::X87 { .. }))
+        .unwrap();
+    let partial = ops
+        .iter()
+        .position(|op| matches!(op, Op::PartialStore { bytes: 4 }))
+        .unwrap();
+    let commit = ops
+        .iter()
+        .position(|op| matches!(op, Op::GuestStore { bytes: 4 }))
+        .unwrap();
     assert!(preflight < x87 && x87 < partial && partial < commit);
 }
 
@@ -162,7 +203,10 @@ fn assert_register_lowering(region: &crate::ir::hir::Region, opcode: u8, modrm: 
     if crate::ir::x87::io(opcode, modrm).is_some() {
         assert!(region.helpers.is_empty());
         assert!(region.instructions.iter().any(|i| i.op == Op::FpuCheck));
-        assert!(region.instructions.iter().any(|i| i.op == Op::X87 { opcode, modrm }));
+        assert!(region
+            .instructions
+            .iter()
+            .any(|i| i.op == Op::X87 { opcode, modrm }));
     }
     else {
         assert_eq!(region.helpers.len(), 1);

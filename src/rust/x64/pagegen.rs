@@ -24,7 +24,9 @@ use super::decode::{self, AddressBase, AddressExpr, ByteRegister, Decoded};
 use super::jac;
 use super::state::{gpr_high_offset, gpr_low_offset, ExecutionMode, GuestIp};
 use crate::cpu::global_pointers as gp;
-use crate::wasmgen::wasm_builder::{Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmType};
+use crate::wasmgen::wasm_builder::{
+    Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmType,
+};
 use crate::wasmgen::wasm_opcodes as op;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -51,7 +53,14 @@ const SF: u32 = 0x80;
 const OF: u32 = 0x800;
 const ARITH: u32 = CF | PF | AF | ZF | SF | OF;
 
-fn mask(w: u8) -> u64 { if w == 64 { u64::MAX } else { (1u64 << w) - 1 } }
+fn mask(w: u8) -> u64 {
+    if w == 64 {
+        u64::MAX
+    }
+    else {
+        (1u64 << w) - 1
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Reg {
@@ -66,7 +75,14 @@ enum Opnd {
     Imm(u64),
 }
 impl Opnd {
-    fn reg(self) -> Option<Reg> { if let Opnd::Reg(r) = self { Some(r) } else { None } }
+    fn reg(self) -> Option<Reg> {
+        if let Opnd::Reg(r) = self {
+            Some(r)
+        }
+        else {
+            None
+        }
+    }
 }
 /// An XMM register (0..15) or a memory operand of an SSE instruction.
 #[derive(Clone, Copy, Debug)]
@@ -77,44 +93,151 @@ enum Xmm {
 #[derive(Clone, Copy, Debug)]
 enum Op {
     /// ADD OR ADC SBB AND SUB XOR CMP (x86 /digit order)
-    Alu { code: u8, width: u8, dst: Opnd, src: Opnd },
-    Test { width: u8, a: Opnd, b: Opnd },
-    Mov { width: u8, dst: Opnd, src: Opnd },
-    Extend { width: u8, from: u8, signed: bool, dst: Reg, src: Opnd },
-    Lea { width: u8, dst: Reg, address: AddressExpr },
-    IncDec { dec: bool, width: u8, dst: Opnd },
-    Neg { width: u8, dst: Opnd },
-    Not { width: u8, dst: Opnd },
+    Alu {
+        code: u8,
+        width: u8,
+        dst: Opnd,
+        src: Opnd,
+    },
+    Test {
+        width: u8,
+        a: Opnd,
+        b: Opnd,
+    },
+    Mov {
+        width: u8,
+        dst: Opnd,
+        src: Opnd,
+    },
+    Extend {
+        width: u8,
+        from: u8,
+        signed: bool,
+        dst: Reg,
+        src: Opnd,
+    },
+    Lea {
+        width: u8,
+        dst: Reg,
+        address: AddressExpr,
+    },
+    IncDec {
+        dec: bool,
+        width: u8,
+        dst: Opnd,
+    },
+    Neg {
+        width: u8,
+        dst: Opnd,
+    },
+    Not {
+        width: u8,
+        dst: Opnd,
+    },
     /// ROL ROR - - SHL SHR SAL SAR; `count` None is CL.
-    Shift { code: u8, width: u8, dst: Opnd, count: Option<u8> },
-    Imul { width: u8, dst: Reg, a: Opnd, b: Opnd },
-    MulWide { signed: bool, width: u8, src: Opnd },
-    Push { src: Opnd },
-    Pop { dst: Reg },
+    Shift {
+        code: u8,
+        width: u8,
+        dst: Opnd,
+        count: Option<u8>,
+    },
+    Imul {
+        width: u8,
+        dst: Reg,
+        a: Opnd,
+        b: Opnd,
+    },
+    MulWide {
+        signed: bool,
+        width: u8,
+        src: Opnd,
+    },
+    Push {
+        src: Opnd,
+    },
+    Pop {
+        dst: Reg,
+    },
     Pushf,
     Leave,
-    Call { target: u64 },
-    CallIndirect { src: Opnd },
-    Ret { pop: u16 },
-    Jmp { target: u64 },
-    JmpIndirect { src: Opnd },
-    Jcc { cc: u8, target: u64 },
-    Cmov { cc: u8, width: u8, dst: Reg, src: Opnd },
-    Setcc { cc: u8, dst: Opnd },
-    Xchg { width: u8, a: Opnd, b: Reg },
-    Xadd { width: u8, dst: Opnd, src: Reg },
-    Cmpxchg { width: u8, dst: Opnd, src: Reg },
+    Call {
+        target: u64,
+    },
+    CallIndirect {
+        src: Opnd,
+    },
+    Ret {
+        pop: u16,
+    },
+    Jmp {
+        target: u64,
+    },
+    JmpIndirect {
+        src: Opnd,
+    },
+    Jcc {
+        cc: u8,
+        target: u64,
+    },
+    Cmov {
+        cc: u8,
+        width: u8,
+        dst: Reg,
+        src: Opnd,
+    },
+    Setcc {
+        cc: u8,
+        dst: Opnd,
+    },
+    Xchg {
+        width: u8,
+        a: Opnd,
+        b: Reg,
+    },
+    Xadd {
+        width: u8,
+        dst: Opnd,
+        src: Reg,
+    },
+    Cmpxchg {
+        width: u8,
+        dst: Opnd,
+        src: Reg,
+    },
     /// CBW/CWDE/CDQE
-    SignAcc { width: u8 },
+    SignAcc {
+        width: u8,
+    },
     /// CWD/CDQ/CQO
-    SignDx { width: u8 },
+    SignDx {
+        width: u8,
+    },
     /// BT BTS BTR BTC
-    Bt { action: u8, width: u8, dst: Opnd, index: Opnd },
-    BitScan { reverse: bool, width: u8, dst: Reg, src: Opnd },
-    Popcnt { width: u8, dst: Reg, src: Opnd },
-    Bswap { width: u8, reg: u8 },
+    Bt {
+        action: u8,
+        width: u8,
+        dst: Opnd,
+        index: Opnd,
+    },
+    BitScan {
+        reverse: bool,
+        width: u8,
+        dst: Reg,
+        src: Opnd,
+    },
+    Popcnt {
+        width: u8,
+        dst: Reg,
+        src: Opnd,
+    },
+    Bswap {
+        width: u8,
+        reg: u8,
+    },
     /// CMC CLC STC CLD STD by opcode
-    Flag { opcode: u8 },
+    Flag {
+        opcode: u8,
+    },
     Lahf,
     Sahf,
     Nop,
@@ -126,32 +249,82 @@ enum Op {
     Rdtsc,
     /// DIV/IDIV r/m32/64 whose quotient fits (else retried: #DE or a wide
     /// dividend).
-    Div { signed: bool, width: u8, src: Opnd },
+    Div {
+        signed: bool,
+        width: u8,
+        src: Opnd,
+    },
     /// MOVS/STOS with 64-bit addresses and no FS/GS source; with REP only
     /// inside one page per operand, forward, RAX 0 for wide STOS.
-    Movs { width: u8, rep: bool },
-    Stos { width: u8, rep: bool },
-    MovSreg { segment: u8, width: u8, dst: Opnd },
+    Movs {
+        width: u8,
+        rep: bool,
+    },
+    Stos {
+        width: u8,
+        rep: bool,
+    },
+    MovSreg {
+        segment: u8,
+        width: u8,
+        dst: Opnd,
+    },
     /// SHLD/SHRD r/m32/64, r, imm8
-    DoubleShift { left: bool, width: u8, dst: Opnd, src: Reg, count: u8 },
+    DoubleShift {
+        left: bool,
+        width: u8,
+        dst: Opnd,
+        src: Reg,
+        count: u8,
+    },
     /// CMPXCHG16B (wide) / CMPXCHG8B
-    CompareExchange { wide: bool, address: AddressExpr },
+    CompareExchange {
+        wide: bool,
+        address: AddressExpr,
+    },
     /// SSE moves of the low `bits` (32, 64 or 128). Register destinations
     /// keep their other bits unless `zero` (always for 32/64-bit loads);
     /// `aligned` memory operands must be 16-byte aligned (else #GP, retried).
-    Vmove { bits: u8, dst: Xmm, src: Xmm, aligned: bool, zero: bool },
+    Vmove {
+        bits: u8,
+        dst: Xmm,
+        src: Xmm,
+        aligned: bool,
+        zero: bool,
+    },
     /// 128-bit AND ANDN OR XOR (PS/PD/integer forms); memory is aligned.
-    Vlogic { code: u8, dst: u8, src: Xmm },
+    Vlogic {
+        code: u8,
+        dst: u8,
+        src: Xmm,
+    },
     /// ADD MUL SUB DIV (`code` 0x58 0x59 0x5C 0x5E) of single or double
     /// precision lanes: packed (memory aligned) or scalar (the low lane;
     /// the others keep their bits). See Emitter::vfp for when it runs natively.
-    Vfp { code: u8, double: bool, packed: bool, dst: u8, src: Xmm },
+    Vfp {
+        code: u8,
+        double: bool,
+        packed: bool,
+        dst: u8,
+        src: Xmm,
+    },
     /// MOVD/MOVQ xmm, r/m32/64 (upper bits cleared)
-    MovdIn { width: u8, dst: u8, src: Opnd },
+    MovdIn {
+        width: u8,
+        dst: u8,
+        src: Opnd,
+    },
     /// MOVD/MOVQ r/m32/64, xmm
-    MovdOut { width: u8, dst: Opnd, src: u8 },
+    MovdOut {
+        width: u8,
+        dst: Opnd,
+        src: u8,
+    },
     /// MOV r64, CR8 / MOV CR8, r64 (the local APIC's TPR)
-    Cr8 { write: bool, reg: Reg },
+    Cr8 {
+        write: bool,
+        reg: Reg,
+    },
     Rdtscp,
     /// Interpreted in place by x64_page_step.
     Step,
@@ -163,8 +336,12 @@ fn register(encoded: u8, width: u8, rex: bool) -> Reg {
             ByteRegister::Low(index) => Reg { index, high: false },
             ByteRegister::HighLegacy(index) => Reg { index, high: true },
         }
-    } else {
-        Reg { index: encoded, high: false }
+    }
+    else {
+        Reg {
+            index: encoded,
+            high: false,
+        }
     }
 }
 
@@ -172,7 +349,8 @@ fn register(encoded: u8, width: u8, rex: bool) -> Reg {
 /// compile). Whether it is canonical depends on where the page runs.
 fn relative(d: &Decoded) -> Option<u64> {
     let i = d.immediate?;
-    let displacement = if i.encoded_bytes == 1 { i.value as i8 as i64 } else { i.value as i32 as i64 };
+    let displacement =
+        if i.encoded_bytes == 1 { i.value as i8 as i64 } else { i.value as i32 as i64 };
     Some(d.next.0.wrapping_add(displacement as u64))
 }
 
@@ -230,58 +408,140 @@ fn classify(d: &Decoded) -> Op {
                 let code = (op >> 3) as u8;
                 let width = if op & 1 == 0 { 8 } else { w };
                 match op & 7 {
-                    0 | 1 => Op::Alu { code, width, dst: rm(width)?, src: Opnd::Reg(reg(d.reg?, width)) },
-                    2 | 3 => Op::Alu { code, width, dst: Opnd::Reg(reg(d.reg?, width)), src: rm(width)? },
-                    _ => Op::Alu { code, width, dst: Opnd::Reg(reg(0, width)), src: Opnd::Imm(imm? & mask(width)) },
+                    0 | 1 => Op::Alu {
+                        code,
+                        width,
+                        dst: rm(width)?,
+                        src: Opnd::Reg(reg(d.reg?, width)),
+                    },
+                    2 | 3 => Op::Alu {
+                        code,
+                        width,
+                        dst: Opnd::Reg(reg(d.reg?, width)),
+                        src: rm(width)?,
+                    },
+                    _ => Op::Alu {
+                        code,
+                        width,
+                        dst: Opnd::Reg(reg(0, width)),
+                        src: Opnd::Imm(imm? & mask(width)),
+                    },
                 }
             },
             0x80 | 0x81 | 0x83 => {
                 let width = if op == 0x80 { 8 } else { w };
-                Op::Alu { code: group, width, dst: rm(width)?, src: Opnd::Imm(imm? & mask(width)) }
+                Op::Alu {
+                    code: group,
+                    width,
+                    dst: rm(width)?,
+                    src: Opnd::Imm(imm? & mask(width)),
+                }
             },
             0x84 | 0x85 => {
                 let width = if op == 0x84 { 8 } else { w };
-                Op::Test { width, a: rm(width)?, b: Opnd::Reg(reg(d.reg?, width)) }
+                Op::Test {
+                    width,
+                    a: rm(width)?,
+                    b: Opnd::Reg(reg(d.reg?, width)),
+                }
             },
             0xA8 | 0xA9 => {
                 let width = if op == 0xA8 { 8 } else { w };
-                Op::Test { width, a: Opnd::Reg(reg(0, width)), b: Opnd::Imm(imm? & mask(width)) }
+                Op::Test {
+                    width,
+                    a: Opnd::Reg(reg(0, width)),
+                    b: Opnd::Imm(imm? & mask(width)),
+                }
             },
             0x88..=0x8B => {
                 let width = if op & 1 == 0 { 8 } else { w };
                 if op & 2 == 0 {
-                    Op::Mov { width, dst: rm(width)?, src: Opnd::Reg(reg(d.reg?, width)) }
+                    Op::Mov {
+                        width,
+                        dst: rm(width)?,
+                        src: Opnd::Reg(reg(d.reg?, width)),
+                    }
                 }
                 else {
-                    Op::Mov { width, dst: Opnd::Reg(reg(d.reg?, width)), src: rm(width)? }
+                    Op::Mov {
+                        width,
+                        dst: Opnd::Reg(reg(d.reg?, width)),
+                        src: rm(width)?,
+                    }
                 }
             },
             0xB0..=0xBF => {
                 let width = if op < 0xB8 { 8 } else { w };
-                Op::Mov { width, dst: Opnd::Reg(reg(d.opcode_register?, width)), src: Opnd::Imm(imm? & mask(width)) }
+                Op::Mov {
+                    width,
+                    dst: Opnd::Reg(reg(d.opcode_register?, width)),
+                    src: Opnd::Imm(imm? & mask(width)),
+                }
             },
             0xC6 | 0xC7 if group == 0 => {
                 let width = if op == 0xC6 { 8 } else { w };
-                Op::Mov { width, dst: rm(width)?, src: Opnd::Imm(imm? & mask(width)) }
+                Op::Mov {
+                    width,
+                    dst: rm(width)?,
+                    src: Opnd::Imm(imm? & mask(width)),
+                }
             },
-            0x8D => Op::Lea { width: w, dst: reg(d.reg?, w), address: d.address? },
-            0x63 => Op::Extend { width: w, from: if w == 16 { 16 } else { 32 }, signed: true, dst: reg(d.reg?, w), src: rm(if w == 16 { 16 } else { 32 })? },
+            0x8D => Op::Lea {
+                width: w,
+                dst: reg(d.reg?, w),
+                address: d.address?,
+            },
+            0x63 => Op::Extend {
+                width: w,
+                from: if w == 16 { 16 } else { 32 },
+                signed: true,
+                dst: reg(d.reg?, w),
+                src: rm(if w == 16 { 16 } else { 32 })?,
+            },
             0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF => {
                 let from = if op & 1 == 0 { 8 } else { 16 };
-                Op::Extend { width: w, from, signed: op & 8 != 0, dst: reg(d.reg?, w), src: rm(from)? }
+                Op::Extend {
+                    width: w,
+                    from,
+                    signed: op & 8 != 0,
+                    dst: reg(d.reg?, w),
+                    src: rm(from)?,
+                }
             },
             0xFE | 0xFF if group <= 1 => {
                 let width = if op == 0xFE { 8 } else { w };
-                Op::IncDec { dec: group == 1, width, dst: rm(width)? }
+                Op::IncDec {
+                    dec: group == 1,
+                    width,
+                    dst: rm(width)?,
+                }
             },
             0xF6 | 0xF7 => {
                 let width = if op == 0xF6 { 8 } else { w };
                 match group {
-                    0 | 1 => Op::Test { width, a: rm(width)?, b: Opnd::Imm(imm? & mask(width)) },
-                    2 => Op::Not { width, dst: rm(width)? },
-                    3 => Op::Neg { width, dst: rm(width)? },
-                    4 | 5 if width >= 32 => Op::MulWide { signed: group == 5, width, src: rm(width)? },
-                    6 | 7 if width >= 32 => Op::Div { signed: group == 7, width, src: rm(width)? },
+                    0 | 1 => Op::Test {
+                        width,
+                        a: rm(width)?,
+                        b: Opnd::Imm(imm? & mask(width)),
+                    },
+                    2 => Op::Not {
+                        width,
+                        dst: rm(width)?,
+                    },
+                    3 => Op::Neg {
+                        width,
+                        dst: rm(width)?,
+                    },
+                    4 | 5 if width >= 32 => Op::MulWide {
+                        signed: group == 5,
+                        width,
+                        src: rm(width)?,
+                    },
+                    6 | 7 if width >= 32 => Op::Div {
+                        signed: group == 7,
+                        width,
+                        src: rm(width)?,
+                    },
                     _ => return None,
                 }
             },
@@ -296,28 +556,68 @@ fn classify(d: &Decoded) -> Op {
                 if matches!(group, 2 | 3) || count.is_none() && width < 32 {
                     return None;
                 }
-                Op::Shift { code: group, width, dst: rm(width)?, count }
+                Op::Shift {
+                    code: group,
+                    width,
+                    dst: rm(width)?,
+                    count,
+                }
             },
-            0x0FAF => Op::Imul { width: w, dst: reg(d.reg?, w), a: rm(w)?, b: Opnd::Reg(reg(d.reg?, w)) },
-            0x69 | 0x6B => Op::Imul { width: w, dst: reg(d.reg?, w), a: rm(w)?, b: Opnd::Imm(imm? & mask(w)) },
-            0x50..=0x57 if w == 64 => Op::Push { src: Opnd::Reg(reg(d.opcode_register?, 64)) },
-            0x58..=0x5F if w == 64 => Op::Pop { dst: reg(d.opcode_register?, 64) },
-            0x68 | 0x6A if w == 64 => Op::Push { src: Opnd::Imm(imm?) },
+            0x0FAF => Op::Imul {
+                width: w,
+                dst: reg(d.reg?, w),
+                a: rm(w)?,
+                b: Opnd::Reg(reg(d.reg?, w)),
+            },
+            0x69 | 0x6B => Op::Imul {
+                width: w,
+                dst: reg(d.reg?, w),
+                a: rm(w)?,
+                b: Opnd::Imm(imm? & mask(w)),
+            },
+            0x50..=0x57 if w == 64 => Op::Push {
+                src: Opnd::Reg(reg(d.opcode_register?, 64)),
+            },
+            0x58..=0x5F if w == 64 => Op::Pop {
+                dst: reg(d.opcode_register?, 64),
+            },
+            0x68 | 0x6A if w == 64 => Op::Push {
+                src: Opnd::Imm(imm?),
+            },
             0xFF if group == 6 && w == 64 => Op::Push { src: rm(64)? },
             0x9C if w == 64 => Op::Pushf,
             0xC9 if w == 64 => Op::Leave,
-            0xE8 => Op::Call { target: relative(d)? },
+            0xE8 => Op::Call {
+                target: relative(d)?,
+            },
             0xFF if group == 2 => Op::CallIndirect { src: rm(64)? },
             0xFF if group == 4 => Op::JmpIndirect { src: rm(64)? },
             0xC3 => Op::Ret { pop: 0 },
             0xC2 => Op::Ret { pop: imm? as u16 },
-            0xE9 | 0xEB => Op::Jmp { target: relative(d)? },
-            0x70..=0x7F | 0x0F80..=0x0F8F => Op::Jcc { cc: op as u8 & 15, target: relative(d)? },
-            0x0F40..=0x0F4F => Op::Cmov { cc: op as u8 & 15, width: w, dst: reg(d.reg?, w), src: rm(w)? },
-            0x0F90..=0x0F9F => Op::Setcc { cc: op as u8 & 15, dst: rm(8)? },
+            0xE9 | 0xEB => Op::Jmp {
+                target: relative(d)?,
+            },
+            0x70..=0x7F | 0x0F80..=0x0F8F => Op::Jcc {
+                cc: op as u8 & 15,
+                target: relative(d)?,
+            },
+            0x0F40..=0x0F4F => Op::Cmov {
+                cc: op as u8 & 15,
+                width: w,
+                dst: reg(d.reg?, w),
+                src: rm(w)?,
+            },
+            0x0F90..=0x0F9F => Op::Setcc {
+                cc: op as u8 & 15,
+                dst: rm(8)?,
+            },
             0x86 | 0x87 => {
                 let width = if op == 0x86 { 8 } else { w };
-                Op::Xchg { width, a: rm(width)?, b: reg(d.reg?, width) }
+                Op::Xchg {
+                    width,
+                    a: rm(width)?,
+                    b: reg(d.reg?, width),
+                }
             },
             0x90 if d.opcode_register? & 7 == 0 && d.opcode_register? < 8 => {
                 // PAUSE yields the core in the interpreter
@@ -326,24 +626,56 @@ fn classify(d: &Decoded) -> Op {
                 }
                 Op::Nop
             },
-            0x90..=0x97 => Op::Xchg { width: w, a: Opnd::Reg(reg(0, w)), b: reg(d.opcode_register?, w) },
+            0x90..=0x97 => Op::Xchg {
+                width: w,
+                a: Opnd::Reg(reg(0, w)),
+                b: reg(d.opcode_register?, w),
+            },
             0x0FC0 | 0x0FC1 => {
                 let width = if op == 0x0FC0 { 8 } else { w };
-                Op::Xadd { width, dst: rm(width)?, src: reg(d.reg?, width) }
+                Op::Xadd {
+                    width,
+                    dst: rm(width)?,
+                    src: reg(d.reg?, width),
+                }
             },
             0x0FB0 | 0x0FB1 => {
                 let width = if op == 0x0FB0 { 8 } else { w };
-                Op::Cmpxchg { width, dst: rm(width)?, src: reg(d.reg?, width) }
+                Op::Cmpxchg {
+                    width,
+                    dst: rm(width)?,
+                    src: reg(d.reg?, width),
+                }
             },
             0x98 => Op::SignAcc { width: w },
             0x99 => Op::SignDx { width: w },
-            0x0FA3 | 0x0FAB | 0x0FB3 | 0x0FBB => {
-                Op::Bt { action: ((op >> 3) & 3) as u8, width: w, dst: rm(w)?, index: Opnd::Reg(reg(d.reg?, w)) }
+            0x0FA3 | 0x0FAB | 0x0FB3 | 0x0FBB => Op::Bt {
+                action: ((op >> 3) & 3) as u8,
+                width: w,
+                dst: rm(w)?,
+                index: Opnd::Reg(reg(d.reg?, w)),
             },
-            0x0FBA if group >= 4 => Op::Bt { action: group - 4, width: w, dst: rm(w)?, index: Opnd::Imm(imm?) },
-            0x0FBC | 0x0FBD => Op::BitScan { reverse: op == 0x0FBD, width: w, dst: reg(d.reg?, w), src: rm(w)? },
-            0x0FB8 if d.opcode == 0xF30FB8 => Op::Popcnt { width: w, dst: reg(d.reg?, w), src: rm(w)? },
-            0x0FC8..=0x0FCF if w != 16 => Op::Bswap { width: w, reg: (op as u8 & 7) | d.prefixes.b() },
+            0x0FBA if group >= 4 => Op::Bt {
+                action: group - 4,
+                width: w,
+                dst: rm(w)?,
+                index: Opnd::Imm(imm?),
+            },
+            0x0FBC | 0x0FBD => Op::BitScan {
+                reverse: op == 0x0FBD,
+                width: w,
+                dst: reg(d.reg?, w),
+                src: rm(w)?,
+            },
+            0x0FB8 if d.opcode == 0xF30FB8 => Op::Popcnt {
+                width: w,
+                dst: reg(d.reg?, w),
+                src: rm(w)?,
+            },
+            0x0FC8..=0x0FCF if w != 16 => Op::Bswap {
+                width: w,
+                reg: (op as u8 & 7) | d.prefixes.b(),
+            },
             0xF5 | 0xF8 | 0xF9 | 0xFC | 0xFD => Op::Flag { opcode: op as u8 },
             0x9E => Op::Sahf,
             0x9F => Op::Lahf,
@@ -352,29 +684,78 @@ fn classify(d: &Decoded) -> Op {
             0xFB => Op::Sti,
             0x0F01 if d.modrm == Some(0xF8) => Op::Swapgs,
             0x0F31 => Op::Rdtsc,
-            0xA4 | 0xA5 | 0xAA | 0xAB if d.address_size == 64 && !(op <= 0xA5 && matches!(d.prefixes.segment, Some(4 | 5))) => {
+            0xA4 | 0xA5 | 0xAA | 0xAB
+                if d.address_size == 64
+                    && !(op <= 0xA5 && matches!(d.prefixes.segment, Some(4 | 5))) =>
+            {
                 let width = if op & 1 == 0 { 8 } else { w };
                 let rep = d.prefixes.rep.is_some();
-                if op <= 0xA5 { Op::Movs { width, rep } } else { Op::Stos { width, rep } }
+                if op <= 0xA5 {
+                    Op::Movs { width, rep }
+                }
+                else {
+                    Op::Stos { width, rep }
+                }
             },
-            0x8C if group < 6 => Op::MovSreg { segment: group, width: if memory { 16 } else { w }, dst: rm(w)? },
-            0x0FA4 | 0x0FAC if w >= 32 => Op::DoubleShift { left: op == 0x0FA4, width: w, dst: rm(w)?, src: reg(d.reg?, w), count: imm? as u8 },
-            0x0FC7 if group == 1 && memory => Op::CompareExchange { wide: w == 128, address: d.address? },
+            0x8C if group < 6 => Op::MovSreg {
+                segment: group,
+                width: if memory { 16 } else { w },
+                dst: rm(w)?,
+            },
+            0x0FA4 | 0x0FAC if w >= 32 => Op::DoubleShift {
+                left: op == 0x0FA4,
+                width: w,
+                dst: rm(w)?,
+                src: reg(d.reg?, w),
+                count: imm? as u8,
+            },
+            0x0FC7 if group == 1 && memory => Op::CompareExchange {
+                wide: w == 128,
+                address: d.address?,
+            },
             // MOV AL/rAX, moffs and back: an absolute address (FS/GS base added)
             0xA0..=0xA3 => {
                 let width = if op & 1 == 0 { 8 } else { w };
-                let address = AddressExpr { base: AddressBase::None, index: None, scale: 1, displacement: imm? as i64,
-                    address_size: d.address_size, segment: d.prefixes.segment.unwrap_or(3) };
-                let accumulator = Opnd::Reg(Reg { index: 0, high: false });
-                if op & 2 == 0 { Op::Mov { width, dst: accumulator, src: Opnd::Mem(address) } }
-                else { Op::Mov { width, dst: Opnd::Mem(address), src: accumulator } }
+                let address = AddressExpr {
+                    base: AddressBase::None,
+                    index: None,
+                    scale: 1,
+                    displacement: imm? as i64,
+                    address_size: d.address_size,
+                    segment: d.prefixes.segment.unwrap_or(3),
+                };
+                let accumulator = Opnd::Reg(Reg {
+                    index: 0,
+                    high: false,
+                });
+                if op & 2 == 0 {
+                    Op::Mov {
+                        width,
+                        dst: accumulator,
+                        src: Opnd::Mem(address),
+                    }
+                }
+                else {
+                    Op::Mov {
+                        width,
+                        dst: Opnd::Mem(address),
+                        src: accumulator,
+                    }
+                }
             },
             // MOVNTI: an ordinary store here
-            0x0FC3 if memory && w >= 32 => Op::Mov { width: w, dst: rm(w)?, src: Opnd::Reg(reg(d.reg?, w)) },
+            0x0FC3 if memory && w >= 32 => Op::Mov {
+                width: w,
+                dst: rm(w)?,
+                src: Opnd::Reg(reg(d.reg?, w)),
+            },
             // LFENCE MFENCE SFENCE: one core runs at a time, in program order
             0x0FAE if d.opcode == 0x0FAE && d.rm_register.is_some() && group >= 5 => Op::Nop,
             0x0F01 if d.modrm == Some(0xF9) => Op::Rdtscp,
-            0x0F20 | 0x0F22 if d.reg == Some(8) && d.rm_register.is_some() => Op::Cr8 { write: op == 0x0F22, reg: reg(d.rm_register?, 64) },
+            0x0F20 | 0x0F22 if d.reg == Some(8) && d.rm_register.is_some() => Op::Cr8 {
+                write: op == 0x0F22,
+                reg: reg(d.rm_register?, 64),
+            },
             _ if d.opcode >> 8 & 0xFF == 0x0F || d.opcode >> 16 == 0x0F => return sse(d),
             _ => return None,
         })
@@ -394,9 +775,22 @@ fn sse(d: &Decoded) -> Option<Op> {
     let memory = d.rm_register.is_none();
     let full = |aligned: bool, store: bool| -> Option<Op> {
         Some(if store {
-            Op::Vmove { bits: 128, dst: xmm_rm()?, src: Xmm::Reg(register), aligned, zero: false }
-        } else {
-            Op::Vmove { bits: 128, dst: Xmm::Reg(register), src: xmm_rm()?, aligned, zero: false }
+            Op::Vmove {
+                bits: 128,
+                dst: xmm_rm()?,
+                src: Xmm::Reg(register),
+                aligned,
+                zero: false,
+            }
+        }
+        else {
+            Op::Vmove {
+                bits: 128,
+                dst: Xmm::Reg(register),
+                src: xmm_rm()?,
+                aligned,
+                zero: false,
+            }
         })
     };
     Some(match d.opcode {
@@ -410,34 +804,95 @@ fn sse(d: &Decoded) -> Option<Op> {
         // MOVSS MOVSD
         0xF30F10 | 0xF20F10 => {
             let bits = if d.opcode == 0xF30F10 { 32 } else { 64 };
-            Op::Vmove { bits, dst: Xmm::Reg(register), src: xmm_rm()?, aligned: false, zero: memory }
+            Op::Vmove {
+                bits,
+                dst: Xmm::Reg(register),
+                src: xmm_rm()?,
+                aligned: false,
+                zero: memory,
+            }
         },
         0xF30F11 | 0xF20F11 => {
             let bits = if d.opcode == 0xF30F11 { 32 } else { 64 };
-            Op::Vmove { bits, dst: xmm_rm()?, src: Xmm::Reg(register), aligned: false, zero: false }
+            Op::Vmove {
+                bits,
+                dst: xmm_rm()?,
+                src: Xmm::Reg(register),
+                aligned: false,
+                zero: false,
+            }
         },
         // MOVQ xmm, xmm/m64 and MOVQ xmm/m64, xmm: a register destination's upper half is cleared
-        0xF30F7E => Op::Vmove { bits: 64, dst: Xmm::Reg(register), src: xmm_rm()?, aligned: false, zero: true },
-        0x660FD6 => Op::Vmove { bits: 64, dst: xmm_rm()?, src: Xmm::Reg(register), aligned: false, zero: true },
+        0xF30F7E => Op::Vmove {
+            bits: 64,
+            dst: Xmm::Reg(register),
+            src: xmm_rm()?,
+            aligned: false,
+            zero: true,
+        },
+        0x660FD6 => Op::Vmove {
+            bits: 64,
+            dst: xmm_rm()?,
+            src: Xmm::Reg(register),
+            aligned: false,
+            zero: true,
+        },
         0x660F6E | 0x660F7E => {
             let width = if d.prefixes.w() { 64 } else { 32 };
             let rm = match d.rm_register {
-                Some(r) => Opnd::Reg(Reg { index: r, high: false }),
+                Some(r) => Opnd::Reg(Reg {
+                    index: r,
+                    high: false,
+                }),
                 None => Opnd::Mem(d.address?),
             };
-            if d.opcode == 0x660F6E { Op::MovdIn { width, dst: register, src: rm } } else { Op::MovdOut { width, dst: rm, src: register } }
+            if d.opcode == 0x660F6E {
+                Op::MovdIn {
+                    width,
+                    dst: register,
+                    src: rm,
+                }
+            }
+            else {
+                Op::MovdOut {
+                    width,
+                    dst: rm,
+                    src: register,
+                }
+            }
         },
         // AND ANDN OR XOR
-        0x0F54 | 0x660F54 | 0x660FDB => Op::Vlogic { code: 0, dst: register, src: xmm_rm()? },
-        0x0F55 | 0x660F55 | 0x660FDF => Op::Vlogic { code: 1, dst: register, src: xmm_rm()? },
-        0x0F56 | 0x660F56 | 0x660FEB => Op::Vlogic { code: 2, dst: register, src: xmm_rm()? },
-        0x0F57 | 0x660F57 | 0x660FEF => Op::Vlogic { code: 3, dst: register, src: xmm_rm()? },
+        0x0F54 | 0x660F54 | 0x660FDB => Op::Vlogic {
+            code: 0,
+            dst: register,
+            src: xmm_rm()?,
+        },
+        0x0F55 | 0x660F55 | 0x660FDF => Op::Vlogic {
+            code: 1,
+            dst: register,
+            src: xmm_rm()?,
+        },
+        0x0F56 | 0x660F56 | 0x660FEB => Op::Vlogic {
+            code: 2,
+            dst: register,
+            src: xmm_rm()?,
+        },
+        0x0F57 | 0x660F57 | 0x660FEF => Op::Vlogic {
+            code: 3,
+            dst: register,
+            src: xmm_rm()?,
+        },
         // ADDPS/PD/SS/SD MULx SUBx DIVx
-        0x0F58 | 0x0F59 | 0x0F5C | 0x0F5E | 0x660F58 | 0x660F59 | 0x660F5C | 0x660F5E | 0xF30F58 | 0xF30F59 | 0xF30F5C
-        | 0xF30F5E | 0xF20F58 | 0xF20F59 | 0xF20F5C | 0xF20F5E => {
+        0x0F58 | 0x0F59 | 0x0F5C | 0x0F5E | 0x660F58 | 0x660F59 | 0x660F5C | 0x660F5E
+        | 0xF30F58 | 0xF30F59 | 0xF30F5C | 0xF30F5E | 0xF20F58 | 0xF20F59 | 0xF20F5C | 0xF20F5E => {
             let prefix = d.opcode >> 16;
-            Op::Vfp { code: d.opcode as u8, double: prefix == 0x66 || prefix == 0xF2, packed: prefix == 0 || prefix == 0x66,
-                dst: register, src: xmm_rm()? }
+            Op::Vfp {
+                code: d.opcode as u8,
+                double: prefix == 0x66 || prefix == 0xF2,
+                packed: prefix == 0 || prefix == 0x66,
+                dst: register,
+                src: xmm_rm()?,
+            }
         },
         _ => return None,
     })
@@ -460,9 +915,19 @@ fn shift_count(width: u8, count: u8) -> u8 { count & if width == 64 { 63 } else 
 fn effects(op: &Op) -> (u32, u32) {
     match *op {
         Op::Alu { code: 2 | 3, .. } => (CF, ARITH),
-        Op::Alu { .. } | Op::Test { .. } | Op::Neg { .. } | Op::Xadd { .. } | Op::Cmpxchg { .. } | Op::Popcnt { .. } => (0, ARITH),
+        Op::Alu { .. }
+        | Op::Test { .. }
+        | Op::Neg { .. }
+        | Op::Xadd { .. }
+        | Op::Cmpxchg { .. }
+        | Op::Popcnt { .. } => (0, ARITH),
         Op::IncDec { .. } => (0, ARITH & !CF),
-        Op::Shift { code, width, count: Some(count), .. } => {
+        Op::Shift {
+            code,
+            width,
+            count: Some(count),
+            ..
+        } => {
             let raw = shift_count(width, count);
             if raw == 0 {
                 (0, 0)
@@ -473,7 +938,11 @@ fn effects(op: &Op) -> (u32, u32) {
             }
         },
         // A zero CL count leaves every flag unchanged; rotates only set CF/OF.
-        Op::Shift { code: 0 | 1, count: None, .. } => (CF | OF, CF | OF),
+        Op::Shift {
+            code: 0 | 1,
+            count: None,
+            ..
+        } => (CF | OF, CF | OF),
         Op::Shift { count: None, .. } => (CF | PF | ZF | SF | OF, CF | PF | ZF | SF | OF),
         Op::Imul { .. } | Op::MulWide { .. } => (0, CF | OF),
         Op::Bt { .. } => (0, CF),
@@ -481,11 +950,16 @@ fn effects(op: &Op) -> (u32, u32) {
         Op::Jcc { cc, .. } | Op::Cmov { cc, .. } | Op::Setcc { cc, .. } => (cond_reads(cc), 0),
         Op::Pushf => (ARITH, 0),
         Op::Flag { opcode: 0xF5 } => (CF, CF),
-        Op::Flag { opcode: 0xF8 | 0xF9 } => (0, CF),
+        Op::Flag {
+            opcode: 0xF8 | 0xF9,
+        } => (0, CF),
         Op::Lahf => (SF | ZF | AF | PF | CF, 0),
         Op::DoubleShift { width, count, .. } => {
             let count = shift_count(width, count);
-            (0, if count == 0 { 0 } else { CF | PF | ZF | SF | if count == 1 { OF } else { 0 } })
+            (
+                0,
+                if count == 0 { 0 } else { CF | PF | ZF | SF | if count == 1 { OF } else { 0 } },
+            )
         },
         Op::CompareExchange { .. } => (0, ZF),
         Op::Sahf => (0, SF | ZF | AF | PF | CF),
@@ -506,9 +980,20 @@ enum Known {
 }
 fn producer(op: &Op) -> Option<Known> {
     match *op {
-        Op::Alu { code: 5 | 7, width, .. } | Op::Neg { width, .. } | Op::Cmpxchg { width, .. } => Some(Known::Sub(width)),
-        Op::Alu { code: 1 | 4 | 6, width, .. } | Op::Test { width, .. } => Some(Known::Logic(width)),
-        Op::Alu { code: 0, width, .. } | Op::Xadd { width, .. } | Op::IncDec { width, .. } => Some(Known::Result(width)),
+        Op::Alu {
+            code: 5 | 7, width, ..
+        }
+        | Op::Neg { width, .. }
+        | Op::Cmpxchg { width, .. } => Some(Known::Sub(width)),
+        Op::Alu {
+            code: 1 | 4 | 6,
+            width,
+            ..
+        }
+        | Op::Test { width, .. } => Some(Known::Logic(width)),
+        Op::Alu { code: 0, width, .. } | Op::Xadd { width, .. } | Op::IncDec { width, .. } => {
+            Some(Known::Result(width))
+        },
         _ => None,
     }
 }
@@ -575,10 +1060,11 @@ impl Decoder<'_> {
     fn at(&mut self, offset: u16) -> Option<(Decoded, Op)> {
         let (bytes, page) = (self.bytes, self.page);
         *self.cache.entry(offset).or_insert_with(|| {
-            let d = decode::decode_with(GuestIp(page + offset as u64), ExecutionMode::Long64, |i| {
-                bytes.get(offset as usize + i as usize).copied().ok_or(())
-            })
-            .ok()?;
+            let d =
+                decode::decode_with(GuestIp(page + offset as u64), ExecutionMode::Long64, |i| {
+                    bytes.get(offset as usize + i as usize).copied().ok_or(())
+                })
+                .ok()?;
             Some((d, classify(&d)))
         })
     }
@@ -593,7 +1079,11 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
     if bytes.len() != PAGE || entries.is_empty() {
         return None;
     }
-    let mut decoder = Decoder { bytes, page, cache: HashMap::new() };
+    let mut decoder = Decoder {
+        bytes,
+        page,
+        cache: HashMap::new(),
+    };
     // Discover block starts: entries, in-page branch targets, return
     // addresses, and the instruction after every step (steps continue by
     // dispatch). Each REP string instruction starts its own block so a
@@ -702,10 +1192,24 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
             let next = o + d.length as u16;
             let (reads, writes) = effects(&op);
             let liveness = if matches!(op, Op::Step) { 0 } else { reads };
-            insts.push(Inst { d, op, flags_read: reads, reads: liveness, writes, live_out: ARITH, fused: None, keep: false });
+            insts.push(Inst {
+                d,
+                op,
+                flags_read: reads,
+                reads: liveness,
+                writes,
+                live_out: ARITH,
+                fused: None,
+                keep: false,
+            });
             match op {
                 Op::Jcc { .. } | Op::Step => break End::Next(next),
-                Op::Jmp { .. } | Op::Call { .. } | Op::CallIndirect { .. } | Op::Ret { .. } | Op::JmpIndirect { .. } | Op::Sti => break End::Stop,
+                Op::Jmp { .. }
+                | Op::Call { .. }
+                | Op::CallIndirect { .. }
+                | Op::Ret { .. }
+                | Op::JmpIndirect { .. }
+                | Op::Sti => break End::Stop,
                 _ => {},
             }
             o = next;
@@ -715,9 +1219,18 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
             End::Next(o) if (o as usize) < PAGE && !starts.contains(&o) => End::Retry(o),
             end => end,
         };
-        blocks.push(Block { start, insts, end, live_in: ARITH });
+        blocks.push(Block {
+            start,
+            insts,
+            end,
+            live_in: ARITH,
+        });
     }
-    let index: BTreeMap<u16, usize> = blocks.iter().enumerate().map(|(i, b)| (b.start, i)).collect();
+    let index: BTreeMap<u16, usize> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.start, i))
+        .collect();
     // Fusion (per block, forward): a condition consumer reads the operands
     // of the last flags producer when no other flags writer intervenes.
     for block in &mut blocks {
@@ -747,14 +1260,19 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
         // Only a performance estimate: anything reading a flag the lazy
         // record still holds materializes it (exits, steps, other code).
         let live = |o: u16| if (o as usize) < PAGE { blocks[index[&o]].live_in } else { 0 };
-        let target = |t: u64| in_page(page, t).and_then(|o| index.get(&o)).map_or(0, |&i| blocks[i].live_in);
+        let target = |t: u64| {
+            in_page(page, t)
+                .and_then(|o| index.get(&o))
+                .map_or(0, |&i| blocks[i].live_in)
+        };
         let last = block.insts.last().map(|i| i.op);
         match (block.end, last) {
             (End::Retry(_), _) => 0,
             (End::Next(_), Some(Op::Step)) => 0,
             (End::Next(o), Some(Op::Jcc { target: t, .. })) => live(o) | target(t),
             (End::Next(o), _) => live(o),
-            (End::Stop, Some(Op::Jmp { target: t })) | (End::Stop, Some(Op::Call { target: t })) => target(t),
+            (End::Stop, Some(Op::Jmp { target: t }))
+            | (End::Stop, Some(Op::Call { target: t })) => target(t),
             (End::Stop, _) => 0,
         }
     };
@@ -781,11 +1299,20 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
         served[s as usize / 64] |= 1 << (s % 64);
     }
     let instructions = blocks.iter().map(|b| b.insts.len()).sum();
-    let templated = blocks.iter().flat_map(|b| &b.insts).filter(|i| !matches!(i.op, Op::Step)).count();
+    let templated = blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| !matches!(i.op, Op::Step))
+        .count();
     let bytes = Emitter::emit(&blocks, &index);
-    Some(Compiled { bytes, served, instructions, templated, blocks: blocks.len() })
+    Some(Compiled {
+        bytes,
+        served,
+        instructions,
+        templated,
+        blocks: blocks.len(),
+    })
 }
-
 
 // i64 locals (0..16 are the GPRs)
 const RIP: usize = 16;
@@ -826,9 +1353,18 @@ const CI: usize = 11;
 /// REP MOVS source host address (host() clobbers HH)
 const SRC: usize = 12;
 const LOCALS32: usize = 13;
-const RAX: Reg = Reg { index: 0, high: false };
-const RDX: Reg = Reg { index: 2, high: false };
-const AH: Reg = Reg { index: 0, high: true };
+const RAX: Reg = Reg {
+    index: 0,
+    high: false,
+};
+const RDX: Reg = Reg {
+    index: 2,
+    high: false,
+};
+const AH: Reg = Reg {
+    index: 0,
+    high: true,
+};
 
 #[derive(Clone, Copy)]
 struct Frame {
@@ -853,15 +1389,30 @@ impl Emitter {
         b.set_entry_result();
         b.set_function_name("x64_page".into());
         let budget = b.arg_local_initial_state.unsafe_clone();
-        let v = (0..LOCALS64).map(|_| b.declare_zeroed_local_i64()).collect();
+        let v = (0..LOCALS64)
+            .map(|_| b.declare_zeroed_local_i64())
+            .collect();
         let w = (0..LOCALS32).map(|_| b.declare_zeroed_local()).collect();
-        let mut e = Emitter { b, v, w, budget, frame: None, labels: Vec::new(), current: 0 };
+        let mut e = Emitter {
+            b,
+            v,
+            w,
+            budget,
+            frame: None,
+            labels: Vec::new(),
+            current: 0,
+        };
         e.prologue();
         let exit = e.b.block_void();
         let retry = e.b.block_void();
         let dispatch = e.b.loop_void();
         let step = e.b.block_void();
-        e.frame = Some(Frame { exit, retry, step, dispatch });
+        e.frame = Some(Frame {
+            exit,
+            retry,
+            step,
+            dispatch,
+        });
         // Budget (native instructions and steps), then the page.
         e.gi(N);
         e.gi(K);
@@ -885,7 +1436,9 @@ impl Emitter {
         e.b.wrap_i64_to_i32();
         e.c32(4095);
         e.b.and_i32();
-        let targets: Vec<Label> = (0..PAGE as u16).map(|o| index.get(&o).map_or(bad, |&i| e.labels[i])).collect();
+        let targets: Vec<Label> = (0..PAGE as u16)
+            .map(|o| index.get(&o).map_or(bad, |&i| e.labels[i]))
+            .collect();
         e.b.brtable(bad, &mut targets.iter());
         e.b.block_end();
         e.set_exit(EXIT_UNKNOWN);
@@ -906,7 +1459,13 @@ impl Emitter {
         e.materialize_if(ARITH);
         e.writeback();
         e.gi(N);
-        let Emitter { mut b, v, w, budget, .. } = e;
+        let Emitter {
+            mut b,
+            v,
+            w,
+            budget,
+            ..
+        } = e;
         for l in v {
             b.free_local_i64(l);
         }
@@ -997,7 +1556,8 @@ impl Emitter {
         self.c32(1);
         self.b.add_i32();
         self.si(K);
-        self.b.call_signature("x64_page_step", Signature::new(&[], &[WasmType::I32]));
+        self.b
+            .call_signature("x64_page_step", Signature::new(&[], &[WasmType::I32]));
         self.si(ST);
         self.gi(ST);
         self.b.if_void();
@@ -1059,7 +1619,9 @@ impl Emitter {
             End::Stop => {},
             End::Retry(o) => self.leave_to(self.f().retry, o as u64),
             End::Next(o) => {
-                if !block.insts.last().is_some_and(|i| matches!(i.op, Op::Step)) && index.get(&o) != Some(&(self.current + 1)) {
+                if !block.insts.last().is_some_and(|i| matches!(i.op, Op::Step))
+                    && index.get(&o) != Some(&(self.current + 1))
+                {
                     self.goto(o as u64, index);
                 }
             },
@@ -1159,14 +1721,19 @@ impl Emitter {
         }
         if segment && a.segment >= 4 {
             let s = a.segment as u32;
-            self.load_pair(gp::segment_offsets as u32 + s * 4, gp::x64_segment_base_hi as u32 + s * 4);
+            self.load_pair(
+                gp::segment_offsets as u32 + s * 4,
+                gp::x64_segment_base_hi as u32 + s * 4,
+            );
             self.b.add_i64();
         }
     }
     /// Host address (i32) of a `size`-byte access at the linear address in
     /// ADDR: an access cache hit, else x64_page_access, else a retry of the
     /// instruction at `start`.
-    fn host(&mut self, size: u32, write: bool, start: u64) { self.host_or(size, write, start, self.f().retry) }
+    fn host(&mut self, size: u32, write: bool, start: u64) {
+        self.host_or(size, write, start, self.f().retry)
+    }
     /// host(), leaving for `fallback` (retry, or step) when refused.
     fn host_or(&mut self, size: u32, write: bool, start: u64, fallback: Label) {
         let table = if write { jac::WRITE_OFFSET } else { 0 };
@@ -1216,7 +1783,10 @@ impl Emitter {
         self.b.else_();
         self.g(ADDR);
         self.c32(size as i32 | (write as i32) << 8);
-        self.b.call_signature("x64_page_access", Signature::new(&[WasmType::I64, WasmType::I32], &[WasmType::I32]));
+        self.b.call_signature(
+            "x64_page_access",
+            Signature::new(&[WasmType::I64, WasmType::I32], &[WasmType::I32]),
+        );
         self.ti(HH);
         self.b.eqz_i32();
         self.b.if_void();
@@ -1501,7 +2071,13 @@ impl Emitter {
         self.g(FA);
         self.g(FB);
         self.gi(FL);
-        self.b.call_signature("x64_page_flags", Signature::new(&[WasmType::I32, WasmType::I64, WasmType::I64, WasmType::I32], &[WasmType::I32]));
+        self.b.call_signature(
+            "x64_page_flags",
+            Signature::new(
+                &[WasmType::I32, WasmType::I64, WasmType::I64, WasmType::I32],
+                &[WasmType::I32],
+            ),
+        );
         self.si(FL);
         self.c32(0);
         self.si(FK);
@@ -1637,19 +2213,36 @@ impl Emitter {
                 },
                 Opnd::Imm(_) => unreachable!(),
             },
-            Op::Extend { width, from, signed, dst, src } => {
+            Op::Extend {
+                width,
+                from,
+                signed,
+                dst,
+                src,
+            } => {
                 self.read(src, from, inst);
                 if signed {
                     self.sext(from);
                 }
                 self.set_reg(dst, width);
             },
-            Op::Lea { width, dst, address } => {
+            Op::Lea {
+                width,
+                dst,
+                address,
+            } => {
                 self.address(&address, next, false);
                 self.set_reg(dst, width);
             },
-            Op::Alu { code, width, dst, src } => {
-                if matches!(code, 5 | 6) && matches!((dst, src), (Opnd::Reg(a), Opnd::Reg(b)) if a == b) {
+            Op::Alu {
+                code,
+                width,
+                dst,
+                src,
+            } => {
+                if matches!(code, 5 | 6)
+                    && matches!((dst, src), (Opnd::Reg(a), Opnd::Reg(b)) if a == b)
+                {
                     // SUB/XOR of a register with itself
                     self.c64(0);
                     self.set_reg(dst.reg().unwrap(), width);
@@ -1764,11 +2357,21 @@ impl Emitter {
                 self.s(TR);
                 self.write_dst(dst, width, TR);
             },
-            Op::Shift { code, width, dst, count: Some(count) } => {
+            Op::Shift {
+                code,
+                width,
+                dst,
+                count: Some(count),
+            } => {
                 self.shift_immediate(inst, code, width, dst, count, inst.writes);
                 self.written(inst.writes);
             },
-            Op::Shift { code, width, dst, count: None } => {
+            Op::Shift {
+                code,
+                width,
+                dst,
+                count: None,
+            } => {
                 // a zero count keeps every flag
                 self.materialize_if(inst.flags_read);
                 self.shift_cl(inst, code, width, dst, inst.writes);
@@ -1804,7 +2407,10 @@ impl Emitter {
                     if width == 64 {
                         self.g(TA);
                         self.g(TB);
-                        self.b.call_signature("x64_page_imul_overflow", Signature::new(&[WasmType::I64, WasmType::I64], &[WasmType::I32]));
+                        self.b.call_signature(
+                            "x64_page_imul_overflow",
+                            Signature::new(&[WasmType::I64, WasmType::I64], &[WasmType::I32]),
+                        );
                     }
                     else {
                         self.g(TR);
@@ -1833,7 +2439,13 @@ impl Emitter {
                     self.g(TA);
                     self.g(TB);
                     self.c32(signed as i32);
-                    self.b.call_signature("x64_page_mul_high", Signature::new(&[WasmType::I64, WasmType::I64, WasmType::I32], &[WasmType::I64]));
+                    self.b.call_signature(
+                        "x64_page_mul_high",
+                        Signature::new(
+                            &[WasmType::I64, WasmType::I64, WasmType::I32],
+                            &[WasmType::I64],
+                        ),
+                    );
                     self.s(TV);
                 }
                 else {
@@ -2003,7 +2615,12 @@ impl Emitter {
                 self.b.block_end();
                 self.retired();
             },
-            Op::Cmov { cc, width, dst, src } => {
+            Op::Cmov {
+                cc,
+                width,
+                dst,
+                src,
+            } => {
                 self.materialize_if(inst.flags_read);
                 self.read(src, width, inst);
                 self.s(TV);
@@ -2021,20 +2638,20 @@ impl Emitter {
             Op::Setcc { cc, dst } => {
                 self.materialize_if(inst.flags_read);
                 match dst {
-                Opnd::Reg(r) => {
-                    self.condition(cc, inst.fused);
-                    self.b.extend_unsigned_i32_to_i64();
-                    self.set_reg(r, 8);
-                },
-                Opnd::Mem(a) => {
-                    self.prepare_store(&a, 8, inst);
-                    self.gi(HOST);
-                    self.condition(cc, inst.fused);
-                    self.b.extend_unsigned_i32_to_i64();
-                    self.store(8);
-                },
-                Opnd::Imm(_) => unreachable!(),
-            }
+                    Opnd::Reg(r) => {
+                        self.condition(cc, inst.fused);
+                        self.b.extend_unsigned_i32_to_i64();
+                        self.set_reg(r, 8);
+                    },
+                    Opnd::Mem(a) => {
+                        self.prepare_store(&a, 8, inst);
+                        self.gi(HOST);
+                        self.condition(cc, inst.fused);
+                        self.b.extend_unsigned_i32_to_i64();
+                        self.store(8);
+                    },
+                    Opnd::Imm(_) => unreachable!(),
+                }
             },
             Op::Xchg { width, a, b } => {
                 self.read_dst(a, width, true, inst);
@@ -2121,7 +2738,12 @@ impl Emitter {
                 self.b.sub_i64();
                 self.set_reg(RDX, width);
             },
-            Op::Bt { action, width, dst, index: bit } => {
+            Op::Bt {
+                action,
+                width,
+                dst,
+                index: bit,
+            } => {
                 let log = width.trailing_zeros() as u64;
                 match dst {
                     Opnd::Reg(r) => {
@@ -2184,7 +2806,12 @@ impl Emitter {
                 self.flags_end(false);
                 self.written(CF);
             },
-            Op::BitScan { reverse, width, dst, src } => {
+            Op::BitScan {
+                reverse,
+                width,
+                dst,
+                src,
+            } => {
                 self.read(src, width, inst);
                 self.s(TA);
                 self.is_zero(TA);
@@ -2340,7 +2967,10 @@ impl Emitter {
                 self.b.if_void();
                 self.leave_to(self.f().retry, start);
                 self.b.block_end();
-                let (low, high) = (gp::segment_offsets as u32 + 20, gp::x64_segment_base_hi as u32 + 20);
+                let (low, high) = (
+                    gp::segment_offsets as u32 + 20,
+                    gp::x64_segment_base_hi as u32 + 20,
+                );
                 self.load_pair(low, high);
                 self.s(TV);
                 self.c32(gp::x64_kernel_gs_base as i32);
@@ -2366,7 +2996,8 @@ impl Emitter {
                 self.b.if_void();
                 self.leave_to(self.f().retry, start);
                 self.b.block_end();
-                self.b.call_signature("x64_page_rdtsc", Signature::new(&[], &[WasmType::I64]));
+                self.b
+                    .call_signature("x64_page_rdtsc", Signature::new(&[], &[WasmType::I64]));
                 self.s(TV);
                 self.g(TV);
                 self.set_reg(RAX, 32);
@@ -2376,23 +3007,33 @@ impl Emitter {
                 self.set_reg(RDX, 32);
             },
             Op::Div { signed, width, src } => self.divide(inst, signed, width, src),
-            Op::Movs { width, rep } | Op::Stos { width, rep } => self.string(inst, matches!(inst.op, Op::Movs { .. }), width, rep),
-            Op::MovSreg { segment, width, dst } => {
-                match dst {
-                    Opnd::Mem(a) => {
-                        self.prepare_store(&a, 16, inst);
-                        self.gi(HOST);
-                        self.load_selector(segment);
-                        self.store(16);
-                    },
-                    Opnd::Reg(r) => {
-                        self.load_selector(segment);
-                        self.set_reg(r, width);
-                    },
-                    Opnd::Imm(_) => unreachable!(),
-                }
+            Op::Movs { width, rep } | Op::Stos { width, rep } => {
+                self.string(inst, matches!(inst.op, Op::Movs { .. }), width, rep)
             },
-            Op::DoubleShift { left, width, dst, src, count } => {
+            Op::MovSreg {
+                segment,
+                width,
+                dst,
+            } => match dst {
+                Opnd::Mem(a) => {
+                    self.prepare_store(&a, 16, inst);
+                    self.gi(HOST);
+                    self.load_selector(segment);
+                    self.store(16);
+                },
+                Opnd::Reg(r) => {
+                    self.load_selector(segment);
+                    self.set_reg(r, width);
+                },
+                Opnd::Imm(_) => unreachable!(),
+            },
+            Op::DoubleShift {
+                left,
+                width,
+                dst,
+                src,
+                count,
+            } => {
                 let count = shift_count(width, count) as u64;
                 let w = width as u64;
                 self.read_dst(dst, width, true, inst);
@@ -2405,10 +3046,20 @@ impl Emitter {
                     self.s(TB);
                     self.g(TA);
                     self.c64(if left { count } else { count });
-                    if left { self.b.shl_i64() } else { self.b.shr_u_i64() }
+                    if left {
+                        self.b.shl_i64()
+                    }
+                    else {
+                        self.b.shr_u_i64()
+                    }
                     self.g(TB);
                     self.c64(w - count);
-                    if left { self.b.shr_u_i64() } else { self.b.shl_i64() }
+                    if left {
+                        self.b.shr_u_i64()
+                    }
+                    else {
+                        self.b.shl_i64()
+                    }
                     self.b.or_i64();
                     self.mask_to(width);
                     self.s(TR);
@@ -2416,7 +3067,11 @@ impl Emitter {
                     let writes = inst.writes;
                     self.flags_begin(writes);
                     let mut first = true;
-                    self.bit_of(TA, if left { (w - count) as u8 } else { (count - 1) as u8 }, 0);
+                    self.bit_of(
+                        TA,
+                        if left { (w - count) as u8 } else { (count - 1) as u8 },
+                        0,
+                    );
                     self.join(&mut first);
                     self.szp(TR, writes, width, &mut first);
                     if count == 1 {
@@ -2432,7 +3087,13 @@ impl Emitter {
                 }
             },
             Op::CompareExchange { wide, address } => self.compare_exchange(inst, wide, &address),
-            Op::Vmove { bits, dst, src, aligned, zero } => {
+            Op::Vmove {
+                bits,
+                dst,
+                src,
+                aligned,
+                zero,
+            } => {
                 self.sse_check(start);
                 match (dst, src) {
                     (Xmm::Reg(d), Xmm::Reg(s)) => {
@@ -2454,7 +3115,12 @@ impl Emitter {
                             self.s(TA);
                             self.c32(Self::xmm(d) as i32 + half as i32 * 8);
                             self.g(TA);
-                            if bits == 32 { self.b.memory_op(op::OP_I64STORE32, op::MEM_ALIGN32, 0); } else { self.b.store_aligned_i64(0); }
+                            if bits == 32 {
+                                self.b.memory_op(op::OP_I64STORE32, op::MEM_ALIGN32, 0);
+                            }
+                            else {
+                                self.b.store_aligned_i64(0);
+                            }
                         }
                         if bits < 128 {
                             self.clear_upper(d, bits);
@@ -2465,7 +3131,8 @@ impl Emitter {
                         for half in 0..(bits as u32).div_ceil(64) {
                             self.gi(HOST);
                             self.xmm_load(s, half * 8, bits.min(64));
-                            self.b.guest_store_i64_bits(if bits == 32 { 32 } else { 64 }, half * 8);
+                            self.b
+                                .guest_store_i64_bits(if bits == 32 { 32 } else { 64 }, half * 8);
                         }
                     },
                     (Xmm::Mem(_), Xmm::Mem(_)) => unreachable!(),
@@ -2500,7 +3167,13 @@ impl Emitter {
                     self.b.store_aligned_i64(0);
                 }
             },
-            Op::Vfp { code, double, packed, dst, src } => self.vfp(inst, start, code, double, packed, dst, src),
+            Op::Vfp {
+                code,
+                double,
+                packed,
+                dst,
+                src,
+            } => self.vfp(inst, start, code, double, packed, dst, src),
             Op::MovdIn { width, dst, src } => {
                 self.sse_check(start);
                 self.read(src, width, inst);
@@ -2535,7 +3208,10 @@ impl Emitter {
                 self.b.block_end();
                 if write {
                     self.get_reg(reg, 64);
-                    self.b.call_signature("x64_page_set_cr8", Signature::new(&[WasmType::I64], &[WasmType::I32]));
+                    self.b.call_signature(
+                        "x64_page_set_cr8",
+                        Signature::new(&[WasmType::I64], &[WasmType::I32]),
+                    );
                     self.ti(ST);
                     self.c32(1);
                     self.b.eq_i32();
@@ -2552,7 +3228,8 @@ impl Emitter {
                     self.b.block_end();
                 }
                 else {
-                    self.b.call_signature("x64_page_cr8", Signature::new(&[], &[WasmType::I64]));
+                    self.b
+                        .call_signature("x64_page_cr8", Signature::new(&[], &[WasmType::I64]));
                     self.set_reg(reg, 64);
                 }
             },
@@ -2571,7 +3248,8 @@ impl Emitter {
                 self.b.if_void();
                 self.leave_to(self.f().retry, start);
                 self.b.block_end();
-                self.b.call_signature("x64_page_rdtsc", Signature::new(&[], &[WasmType::I64]));
+                self.b
+                    .call_signature("x64_page_rdtsc", Signature::new(&[], &[WasmType::I64]));
                 self.s(TV);
                 self.g(TV);
                 self.set_reg(RAX, 32);
@@ -2581,7 +3259,13 @@ impl Emitter {
                 self.set_reg(RDX, 32);
                 self.b.load_fixed_i32(gp::x64_tsc_aux as u32);
                 self.b.extend_unsigned_i32_to_i64();
-                self.set_reg(Reg { index: 1, high: false }, 32);
+                self.set_reg(
+                    Reg {
+                        index: 1,
+                        high: false,
+                    },
+                    32,
+                );
             },
             Op::Lahf => {
                 self.materialize_if(inst.flags_read);
@@ -2607,7 +3291,16 @@ impl Emitter {
             },
         }
         // Control transfers counted themselves before leaving.
-        if !matches!(inst.op, Op::Call { .. } | Op::CallIndirect { .. } | Op::Ret { .. } | Op::JmpIndirect { .. } | Op::Jmp { .. } | Op::Jcc { .. } | Op::Sti) {
+        if !matches!(
+            inst.op,
+            Op::Call { .. }
+                | Op::CallIndirect { .. }
+                | Op::Ret { .. }
+                | Op::JmpIndirect { .. }
+                | Op::Jmp { .. }
+                | Op::Jcc { .. }
+                | Op::Sti
+        ) {
             self.retired();
         }
     }
@@ -2616,7 +3309,12 @@ impl Emitter {
 
     /// Address of XMM register `n` (the legacy bank for 0..7)
     fn xmm(n: u8) -> u32 {
-        if n < 8 { gp::reg_xmm as u32 + n as u32 * 16 } else { gp::x64_xmm_ext as u32 + (n as u32 - 8) * 16 }
+        if n < 8 {
+            gp::reg_xmm as u32 + n as u32 * 16
+        }
+        else {
+            gp::x64_xmm_ext as u32 + (n as u32 - 8) * 16
+        }
     }
     /// Retry unless SSE may execute: CR0.EM and CR0.TS clear, CR4.OSFXSR set
     /// (the interpreter raises #UD or #NM).
@@ -2641,7 +3339,16 @@ impl Emitter {
     /// normal above the smallest binade (no underflow, whichever way
     /// tininess is detected) or an exact zero. Otherwise the instruction is
     /// retried in the interpreter; no lane is written before all passed.
-    fn vfp(&mut self, inst: &Inst, start: u64, code: u8, double: bool, packed: bool, dst: u8, src: Xmm) {
+    fn vfp(
+        &mut self,
+        inst: &Inst,
+        start: u64,
+        code: u8,
+        double: bool,
+        packed: bool,
+        dst: u8,
+        src: Xmm,
+    ) {
         self.sse_check(start);
         self.b.load_fixed_i32(gp::mxcsr as u32);
         self.c32(0xFFE0);
@@ -2651,7 +3358,15 @@ impl Emitter {
         self.b.if_void();
         self.leave_to(self.f().retry, start);
         self.b.block_end();
-        let bits = if packed { 128 } else if double { 64 } else { 32 };
+        let bits = if packed {
+            128
+        }
+        else if double {
+            64
+        }
+        else {
+            32
+        };
         if let Xmm::Mem(a) = src {
             self.vector_address(&a, bits, packed, false, inst);
         }
@@ -2718,7 +3433,8 @@ impl Emitter {
     /// One lane of vfp: operand bit patterns in TA and TB (zero-extended in
     /// single precision), the result's into TR; refusals or'ed into COND
     fn fp_lane(&mut self, code: u8, double: bool) {
-        let (shift, max, magnitude) = if double { (52, 0x7FF, 0x7FFF_FFFF_FFFF_FFFF) } else { (23, 0xFF, 0x7FFF_FFFF) };
+        let (shift, max, magnitude) =
+            if double { (52, 0x7FF, 0x7FFF_FFFF_FFFF_FFFF) } else { (23, 0xFF, 0x7FFF_FFFF) };
         let zero = |e: &mut Self, x: usize| {
             e.g(x);
             e.c64(magnitude);
@@ -2762,7 +3478,12 @@ impl Emitter {
                 self.b.reinterpret_i32_as_f32();
             }
         }
-        let operation = match code { 0x58 => 0, 0x5C => 1, 0x59 => 2, _ => 3 };
+        let operation = match code {
+            0x58 => 0,
+            0x5C => 1,
+            0x59 => 2,
+            _ => 3,
+        };
         if double {
             self.b.arithmetic_f64(operation);
             self.b.reinterpret_f64_as_i64();
@@ -2814,7 +3535,12 @@ impl Emitter {
     /// Push the low `bits` (32 or 64) at byte `offset` of XMM register `n`.
     fn xmm_load(&mut self, n: u8, offset: u32, bits: u8) {
         self.c32((Self::xmm(n) + offset) as i32);
-        if bits == 32 { self.b.memory_op(op::OP_I64LOAD32U, op::MEM_ALIGN32, 0); } else { self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0); }
+        if bits == 32 {
+            self.b.memory_op(op::OP_I64LOAD32U, op::MEM_ALIGN32, 0);
+        }
+        else {
+            self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
+        }
     }
     /// Store the value on the stack into XMM register `n` at byte `offset`;
     /// a 32-bit store keeps the rest of the qword when `merge`.
@@ -2845,11 +3571,19 @@ impl Emitter {
         self.b.store_aligned_i64(0);
     }
     fn load_bits(&mut self, bits: u8, offset: u32) {
-        self.b.guest_load_i64_bits(if bits == 32 { 32 } else { 64 }, offset);
+        self.b
+            .guest_load_i64_bits(if bits == 32 { 32 } else { 64 }, offset);
     }
     /// HOST = host address of the `bits` memory operand, retried when an
     /// aligned form is misaligned (#GP) or the access cache refuses it.
-    fn vector_address(&mut self, a: &AddressExpr, bits: u8, aligned: bool, write: bool, inst: &Inst) {
+    fn vector_address(
+        &mut self,
+        a: &AddressExpr,
+        bits: u8,
+        aligned: bool,
+        write: bool,
+        inst: &Inst,
+    ) {
         self.address(a, inst.d.next.0, true);
         self.s(ADDR);
         if aligned {
@@ -2865,7 +3599,15 @@ impl Emitter {
         self.si(HOST);
     }
 
-    fn shift_immediate(&mut self, inst: &Inst, code: u8, width: u8, dst: Opnd, count: u8, need: u32) {
+    fn shift_immediate(
+        &mut self,
+        inst: &Inst,
+        code: u8,
+        width: u8,
+        dst: Opnd,
+        count: u8,
+        need: u32,
+    ) {
         let raw = shift_count(width, count);
         let w = width as u64;
         self.read_dst(dst, width, true, inst);
@@ -2908,10 +3650,12 @@ impl Emitter {
                 else if width == 64 {
                     self.g(TA);
                     self.c64(rotate);
-                    self.b.op(if code == 0 { op::OP_I64ROTL } else { op::OP_I64ROTR });
+                    self.b
+                        .op(if code == 0 { op::OP_I64ROTL } else { op::OP_I64ROTR });
                 }
                 else {
-                    let (left, right) = if code == 0 { (rotate, w - rotate) } else { (w - rotate, rotate) };
+                    let (left, right) =
+                        if code == 0 { (rotate, w - rotate) } else { (w - rotate, rotate) };
                     self.g(TA);
                     self.c64(left);
                     self.b.shl_i64();
@@ -2984,14 +3728,20 @@ impl Emitter {
             0 | 1 if width == 64 => {
                 self.g(TA);
                 self.g(TC);
-                self.b.op(if code == 0 { op::OP_I64ROTL } else { op::OP_I64ROTR });
+                self.b
+                    .op(if code == 0 { op::OP_I64ROTL } else { op::OP_I64ROTR });
             },
             0 | 1 => {
                 self.g(TA);
                 self.b.wrap_i64_to_i32();
                 self.g(TC);
                 self.b.wrap_i64_to_i32();
-                if code == 0 { self.b.rotl_i32() } else { self.b.rotr_i32() }
+                if code == 0 {
+                    self.b.rotl_i32()
+                }
+                else {
+                    self.b.rotr_i32()
+                }
                 self.b.extend_unsigned_i32_to_i64();
             },
             4 | 6 => {
@@ -3175,7 +3925,8 @@ impl Emitter {
         }
         self.g(TA);
         self.g(TB);
-        self.b.op(if signed { op::OP_I64DIVS } else { op::OP_I64DIVU });
+        self.b
+            .op(if signed { op::OP_I64DIVS } else { op::OP_I64DIVU });
         self.s(TR);
         if width == 32 {
             // the quotient must fit
@@ -3192,7 +3943,8 @@ impl Emitter {
         }
         self.g(TA);
         self.g(TB);
-        self.b.op(if signed { op::OP_I64REMS } else { op::OP_I64REMU });
+        self.b
+            .op(if signed { op::OP_I64REMS } else { op::OP_I64REMU });
         self.s(TV);
         self.g(TR);
         self.set_reg(RAX, width);
@@ -3271,7 +4023,9 @@ impl Emitter {
         self.b.mul_i64();
         self.b.wrap_i64_to_i32();
         self.si(COND);
-        for (register, _) in if movs { [(6, false), (7, true)].as_slice() } else { [(7, true)].as_slice() } {
+        for (register, _) in
+            if movs { [(6, false), (7, true)].as_slice() } else { [(7, true)].as_slice() }
+        {
             self.g(*register);
             self.b.wrap_i64_to_i32();
             self.c32(4095);

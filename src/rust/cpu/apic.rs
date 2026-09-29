@@ -1,7 +1,7 @@
 // See Intel's System Programming Guide
 
-use crate::parallel;
 use crate::cpu::{cpu::js, global_pointers::acpi_enabled, ioapic, pic};
+use crate::parallel;
 
 const APIC_LOG_VERBOSE: bool = false;
 
@@ -138,11 +138,19 @@ static mut NMI_PENDING: [u32; MAX_CORES] = [0; MAX_CORES];
 // word operations; the rest of an APIC belongs to its own core.
 fn core_events(core: usize) -> *mut u32 {
     dbg_assert!(core < MAX_CORES);
-    unsafe { parallel::machine(&raw mut CORE_EVENTS).cast::<u32>().add(core) }
+    unsafe {
+        parallel::machine(&raw mut CORE_EVENTS)
+            .cast::<u32>()
+            .add(core)
+    }
 }
 fn nmi_latch(core: usize) -> *mut u32 {
     dbg_assert!(core < MAX_CORES);
-    unsafe { parallel::machine(&raw mut NMI_PENDING).cast::<u32>().add(core) }
+    unsafe {
+        parallel::machine(&raw mut NMI_PENDING)
+            .cast::<u32>()
+            .add(core)
+    }
 }
 /// A worker's instance runs this core
 pub unsafe fn attach_worker(core: u32) {
@@ -175,7 +183,11 @@ static mut APIC_AUX: [ApicAux; MAX_CORES] = [APIC_AUX_RESET; MAX_CORES];
 
 fn aux_of(core: usize) -> &'static mut ApicAux {
     dbg_assert!(core < MAX_CORES);
-    unsafe { &mut *parallel::machine(&raw mut APIC_AUX).cast::<ApicAux>().add(core) }
+    unsafe {
+        &mut *parallel::machine(&raw mut APIC_AUX)
+            .cast::<ApicAux>()
+            .add(core)
+    }
 }
 
 #[no_mangle]
@@ -209,7 +221,12 @@ pub fn apic_set_hardware_enabled(core: u32, enabled: bool) {
 pub fn apic_core_extint_pending(core: u32) -> bool { aux_of(core as usize).extint_pending != 0 }
 #[no_mangle]
 pub fn apic_restore_extint(core: u32, pending: bool) {
-    unsafe { parallel::word_store(&raw mut aux_of(core as usize).extint_pending, pending as u32) };
+    unsafe {
+        parallel::word_store(
+            &raw mut aux_of(core as usize).extint_pending,
+            pending as u32,
+        )
+    };
 }
 
 fn apic_of(core: usize) -> &'static mut Apic {
@@ -219,12 +236,8 @@ fn apic_of(core: usize) -> &'static mut Apic {
 
 pub fn get_apic() -> &'static mut Apic { apic_of(current_core()) }
 
-pub fn current_core() -> usize {
-    unsafe { CURRENT_CORE }
-}
-pub fn core_count() -> usize {
-    unsafe { *parallel::machine(&raw mut CORE_COUNT) }
-}
+pub fn current_core() -> usize { unsafe { CURRENT_CORE } }
+pub fn core_count() -> usize { unsafe { *parallel::machine(&raw mut CORE_COUNT) } }
 
 #[no_mangle]
 pub fn get_apic_addr() -> u32 { &raw mut *get_apic() as u32 }
@@ -268,13 +281,16 @@ pub unsafe fn software_disable() {
 
 /// Take a pending NMI of the active core
 pub unsafe fn take_nmi() -> bool {
-    parallel::word_load(nmi_latch(current_core())) != 0 && parallel::word_swap(nmi_latch(current_core()), 0) != 0
+    parallel::word_load(nmi_latch(current_core())) != 0
+        && parallel::word_swap(nmi_latch(current_core()), 0) != 0
 }
 
 pub unsafe fn nmi_pending() -> bool { parallel::word_load(nmi_latch(current_core())) != 0 }
 
 #[no_mangle]
-pub unsafe fn apic_core_nmi_pending(core: u32) -> bool { parallel::word_load(nmi_latch(core as usize)) != 0 }
+pub unsafe fn apic_core_nmi_pending(core: u32) -> bool {
+    parallel::word_load(nmi_latch(core as usize)) != 0
+}
 
 #[no_mangle]
 pub unsafe fn apic_set_current_core(core: u32) {
@@ -308,7 +324,9 @@ pub unsafe fn apic_take_core_events(core: u32) -> u32 {
 
 /// Snapshot the pending startup events without acknowledging them.
 #[no_mangle]
-pub unsafe fn apic_peek_core_events(core: u32) -> u32 { parallel::word_load(core_events(core as usize)) }
+pub unsafe fn apic_peek_core_events(core: u32) -> u32 {
+    parallel::word_load(core_events(core as usize))
+}
 
 /// INIT or start-up IPIs are waiting: for any core in a cooperative machine
 /// (the scheduler takes them); with workers, for this instance's core
@@ -870,7 +888,9 @@ fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ip
                     false
                 }
             },
-            IOAPIC_DELIVERY_FIXED => deliver(apic_of(core), aux_of(core), vector, is_level, remote(core)),
+            IOAPIC_DELIVERY_FIXED => {
+                deliver(apic_of(core), aux_of(core), vector, is_level, remote(core))
+            },
             _ => false, // reserved and unsupported SMI: never reinterpret as fixed
         };
         if accepted_here && is_ipi {

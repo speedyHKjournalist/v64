@@ -2,10 +2,10 @@ pub mod compile;
 pub mod diagnostics;
 pub mod entry;
 pub mod far_control;
+mod flags;
 pub mod memory;
 pub mod region;
 pub mod system;
-mod flags;
 
 pub mod io;
 
@@ -31,10 +31,10 @@ pub mod tier0;
 
 pub mod cache;
 mod hot_index;
-mod peers;
-mod pages;
-mod promotion;
 pub mod live;
+mod pages;
+mod peers;
+mod promotion;
 pub mod schedule;
 pub mod snapshot;
 

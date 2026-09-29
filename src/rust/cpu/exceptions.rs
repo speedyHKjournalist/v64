@@ -4,18 +4,31 @@
 use crate::cpu::{apic, cpu, global_pointers::*};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Class { Benign, Contributory, Page, Double }
+enum Class {
+    Benign,
+    Contributory,
+    Page,
+    Double,
+}
 fn class(vector: i32) -> Class {
-    match vector { 0 | 10..=13 => Class::Contributory, 14 => Class::Page,
-        8 => Class::Double, _ => Class::Benign }
+    match vector {
+        0 | 10..=13 => Class::Contributory,
+        14 => Class::Page,
+        8 => Class::Double,
+        _ => Class::Benign,
+    }
 }
 #[derive(PartialEq, Debug)]
-enum Action { Deliver, Double, Shutdown }
+enum Action {
+    Deliver,
+    Double,
+    Shutdown,
+}
 fn escalation(first: Class, second: Class) -> Action {
     match (first, second) {
         (Class::Double, Class::Contributory | Class::Page) => Action::Shutdown,
-        (Class::Contributory, Class::Contributory) |
-        (Class::Page, Class::Contributory | Class::Page) => Action::Double,
+        (Class::Contributory, Class::Contributory)
+        | (Class::Page, Class::Contributory | Class::Page) => Action::Double,
         _ => Action::Deliver,
     }
 }
@@ -53,7 +66,9 @@ pub unsafe fn fault(vector: i32, code: Option<i32>) {
     if action == Action::Shutdown {
         let core = apic::current_core();
         (*crate::parallel::machine(&raw mut SHUTDOWN))[core] = if *nmi_blocked { 2 } else { 1 };
-        if core == 0 { BSP_RESET = true; }
+        if core == 0 {
+            BSP_RESET = true;
+        }
         *in_hlt = true;
         cpu::request_core_yield();
         return;
@@ -65,14 +80,19 @@ pub unsafe fn fault(vector: i32, code: Option<i32>) {
     DELIVERING = old;
 }
 #[no_mangle]
-pub unsafe fn exception_shutdown(core: u32) -> u32 { assert!(core < 8); (*crate::parallel::machine(&raw mut SHUTDOWN))[core as usize] as u32 }
+pub unsafe fn exception_shutdown(core: u32) -> u32 {
+    assert!(core < 8);
+    (*crate::parallel::machine(&raw mut SHUTDOWN))[core as usize] as u32
+}
 #[no_mangle]
 pub unsafe fn exception_restore(core: u32, state: u32) {
     assert!(core < 8 && state <= 2);
     (*crate::parallel::machine(&raw mut SHUTDOWN))[core as usize] = state as u8;
 }
 pub unsafe fn init(core: u32) -> bool {
-    if exception_shutdown(core) == 2 { return false; }
+    if exception_shutdown(core) == 2 {
+        return false;
+    }
     exception_restore(core, 0);
     true
 }
@@ -94,11 +114,14 @@ mod tests {
     use super::*;
     #[test]
     fn intel_delivery_escalation_matrix() {
-        use Class::*;
         use Action::{Deliver, Shutdown};
-        for (first, expected) in [(Benign, [Deliver, Deliver, Deliver]),
-            (Contributory, [Deliver, Action::Double, Deliver]), (Page, [Deliver, Action::Double, Action::Double]),
-            (Class::Double, [Deliver, Shutdown, Shutdown])] {
+        use Class::*;
+        for (first, expected) in [
+            (Benign, [Deliver, Deliver, Deliver]),
+            (Contributory, [Deliver, Action::Double, Deliver]),
+            (Page, [Deliver, Action::Double, Action::Double]),
+            (Class::Double, [Deliver, Shutdown, Shutdown]),
+        ] {
             for (second, expected) in [Benign, Contributory, Page].into_iter().zip(expected) {
                 assert_eq!(escalation(first, second), expected);
             }

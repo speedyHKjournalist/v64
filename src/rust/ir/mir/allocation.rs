@@ -186,7 +186,9 @@ fn reallocate_with<S: LiveValues>(
     let empty = S::new(data.value_types.len());
     spend(
         &mut left,
-        empty.scan_words().saturating_mul(2 * graph.blocks.len() + 1),
+        empty
+            .scan_words()
+            .saturating_mul(2 * graph.blocks.len() + 1),
     )?;
     let mut inputs = vec![empty; graph.blocks.len()];
     let mut outputs = inputs.clone();
@@ -209,13 +211,12 @@ fn reallocate_with<S: LiveValues>(
                 // removed by the edge; the resulting live set can be tiny.
                 spend(
                     &mut left,
-                    incoming.len()
+                    incoming
+                        .len()
                         .saturating_mul(target.params.len().saturating_add(1))
                         .saturating_add(incoming.scan_words()),
                 )?;
-                live.extend(
-                    incoming.values().filter(|v| !target.params.contains(v)),
-                );
+                live.extend(incoming.values().filter(|v| !target.params.contains(v)));
             }
             spend(&mut left, live.len() + 1)?;
             outputs[n] = live.clone();
@@ -760,7 +761,10 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
                 spend(
                     &mut left,
                     inputs[e.target.index()].len().saturating_mul(
-                        graph.blocks[e.target.index()].params.len().saturating_add(1),
+                        graph.blocks[e.target.index()]
+                            .params
+                            .len()
+                            .saturating_add(1),
                     ),
                 )?;
                 live.extend(
@@ -1155,7 +1159,10 @@ pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<CpuDemand,
             }
         }
     }
-    Ok(CpuDemand { instructions: live, values: seen })
+    Ok(CpuDemand {
+        instructions: live,
+        values: seen,
+    })
 }
 
 /// Rebuild simultaneous CPU edge assignments from SSA pairs. Filtering the
@@ -1189,15 +1196,21 @@ pub(super) fn cpu_copy_control(
         spend(&mut left, pairs.len().saturating_mul(pairs.len() + 1))?;
         control::schedule(edge.target, &pairs, &data.allocation.local_types)
     };
-    graph.blocks.iter().map(|block| Ok(match &block.terminator {
-        Terminator::Exit(state) => control::Terminator::Exit(*state),
-        Terminator::Jump(next) => control::Terminator::Jump(edge(next)?),
-        Terminator::Branch(condition, taken, not_taken) => control::Terminator::Branch {
-            condition: local(*condition)?,
-            taken: edge(taken)?,
-            not_taken: edge(not_taken)?,
-        },
-    })).collect()
+    graph
+        .blocks
+        .iter()
+        .map(|block| {
+            Ok(match &block.terminator {
+                Terminator::Exit(state) => control::Terminator::Exit(*state),
+                Terminator::Jump(next) => control::Terminator::Jump(edge(next)?),
+                Terminator::Branch(condition, taken, not_taken) => control::Terminator::Branch {
+                    condition: local(*condition)?,
+                    taken: edge(taken)?,
+                    not_taken: edge(not_taken)?,
+                },
+            })
+        })
+        .collect()
 }
 
 /// Region-wide CPU backing knowledge: "backing address A currently holds SSA
@@ -1231,7 +1244,10 @@ pub(super) fn backing_sync(
     };
     let graph = &data.allocation_graph;
     let mut left = work_limit;
-    spend(&mut left, data.states.len() + data.values.len() + graph.blocks.len())?;
+    spend(
+        &mut left,
+        data.states.len() + data.values.len() + graph.blocks.len(),
+    )?;
     let written = |id: StateId, address: Address| -> Option<(Store, Option<ValueId>)> {
         data.states[id.index()]
             .cpu
@@ -1251,14 +1267,20 @@ pub(super) fn backing_sync(
     };
     // A materialization that might execute leaves a fact only when it would
     // rewrite the same value with the same width.
-    let materialize = |id: StateId, known: &mut Facts, left: &mut usize| -> Result<(), CompileError> {
-        spend(left, known.len().saturating_mul(data.states[id.index()].cpu.writes.len() + 1))?;
-        known.retain(|&(address, store, v)| match written(id, address) {
-            None => true,
-            Some((s, value)) => s == store && value == Some(v),
-        });
-        Ok(())
-    };
+    let materialize =
+        |id: StateId, known: &mut Facts, left: &mut usize| -> Result<(), CompileError> {
+            spend(
+                left,
+                known
+                    .len()
+                    .saturating_mul(data.states[id.index()].cpu.writes.len() + 1),
+            )?;
+            known.retain(|&(address, store, v)| match written(id, address) {
+                None => true,
+                Some((s, value)) => s == store && value == Some(v),
+            });
+            Ok(())
+        };
     let remember = |reading: &Reading, v, known: &mut Facts| {
         if let Reading::Memory { address, load } = reading {
             let store = match load {
@@ -1274,72 +1296,73 @@ pub(super) fn backing_sync(
         }
     };
     // One block's transfer. `observe` sees the facts at each recovery use.
-    let transfer = |block: &Block,
-                    known: &mut Facts,
-                    left: &mut usize,
-                    observe: &mut dyn FnMut(StateId, &Facts, &mut usize) -> Result<(), CompileError>|
-     -> Result<(), CompileError> {
-        if let Some(s) = block.recovery_id {
-            observe(s, known, left)?;
-            materialize(s, known, left)?;
-        }
-        for &id in &block.instructions {
-            spend(left, 1)?;
-            if data.stack_elided[id.index()] {
-                continue;
-            }
-            let inst = &graph.instructions[id.index()];
-            // Caller-owned fault delivery can restore the same state after the
-            // callee has changed backing. That restoration must retain all writes.
-            if data.calls[id.index()]
-                .as_ref()
-                .is_some_and(|c| c.delivery.is_some())
-            {
-                known.clear();
-            }
-            for s in [inst.before, inst.after].into_iter().flatten() {
+    let transfer =
+        |block: &Block,
+         known: &mut Facts,
+         left: &mut usize,
+         observe: &mut dyn FnMut(StateId, &Facts, &mut usize) -> Result<(), CompileError>|
+         -> Result<(), CompileError> {
+            if let Some(s) = block.recovery_id {
                 observe(s, known, left)?;
                 materialize(s, known, left)?;
             }
-            if let Some(value) = &data.values[id.index()] {
-                if let [Step::Read { cpu, .. }] = &value.steps[..] {
-                    remember(cpu, value.result, known);
+            for &id in &block.instructions {
+                spend(left, 1)?;
+                if data.stack_elided[id.index()] {
+                    continue;
                 }
-            }
-            // Segment/memory/SSE checks, RMW commits and division write CPU
-            // backing only on a fault path, which never continues here; their
-            // slow-path recovery writes were applied above. CMPXCHG8B updates
-            // EAX/EDX/FLAGS backing on its normal path.
-            if data.effects[id.index()].as_ref().is_some_and(|plan| {
-                !matches!(
-                    plan,
-                    super::effect::EffectPlan::Address { .. }
-                        | super::effect::EffectPlan::Check { .. }
-                        | super::effect::EffectPlan::RmwCommit { .. }
-                        | super::effect::EffectPlan::X87 { .. }
-                        | super::effect::EffectPlan::Arithmetic(
-                            super::arithmetic::ArithmeticPlan::Division(_)
-                        )
-                )
-            }) {
-                known.clear();
-            }
-            if let Some(call) = &data.calls[id.index()] {
-                known.clear();
-                // A native FP branch can assign SSA without writing CPU memory.
-                // Its helper-only sibling cannot authorize a joint certificate.
-                if call.native_fp.is_none() && call.normal.is_some() {
-                    for (v, reading) in &call.reload {
-                        remember(reading, *v, known);
+                let inst = &graph.instructions[id.index()];
+                // Caller-owned fault delivery can restore the same state after the
+                // callee has changed backing. That restoration must retain all writes.
+                if data.calls[id.index()]
+                    .as_ref()
+                    .is_some_and(|c| c.delivery.is_some())
+                {
+                    known.clear();
+                }
+                for s in [inst.before, inst.after].into_iter().flatten() {
+                    observe(s, known, left)?;
+                    materialize(s, known, left)?;
+                }
+                if let Some(value) = &data.values[id.index()] {
+                    if let [Step::Read { cpu, .. }] = &value.steps[..] {
+                        remember(cpu, value.result, known);
+                    }
+                }
+                // Segment/memory/SSE checks, RMW commits and division write CPU
+                // backing only on a fault path, which never continues here; their
+                // slow-path recovery writes were applied above. CMPXCHG8B updates
+                // EAX/EDX/FLAGS backing on its normal path.
+                if data.effects[id.index()].as_ref().is_some_and(|plan| {
+                    !matches!(
+                        plan,
+                        super::effect::EffectPlan::Address { .. }
+                            | super::effect::EffectPlan::Check { .. }
+                            | super::effect::EffectPlan::RmwCommit { .. }
+                            | super::effect::EffectPlan::X87 { .. }
+                            | super::effect::EffectPlan::Arithmetic(
+                                super::arithmetic::ArithmeticPlan::Division(_)
+                            )
+                    )
+                }) {
+                    known.clear();
+                }
+                if let Some(call) = &data.calls[id.index()] {
+                    known.clear();
+                    // A native FP branch can assign SSA without writing CPU memory.
+                    // Its helper-only sibling cannot authorize a joint certificate.
+                    if call.native_fp.is_none() && call.normal.is_some() {
+                        for (v, reading) in &call.reload {
+                            remember(reading, *v, known);
+                        }
                     }
                 }
             }
-        }
-        if let Terminator::Exit(s) = block.terminator {
-            observe(s, known, left)?;
-        }
-        Ok(())
-    };
+            if let Terminator::Exit(s) = block.terminator {
+                observe(s, known, left)?;
+            }
+            Ok(())
+        };
     let successors = |block: &Block| -> Vec<BlockId> {
         match &block.terminator {
             Terminator::Exit(_) => vec![],
@@ -1361,7 +1384,9 @@ pub(super) fn backing_sync(
     while let Some(b) = work.pop() {
         queued[b] = false;
         let mut known = entry[b].clone().unwrap_or_default();
-        transfer(&graph.blocks[b], &mut known, &mut left, &mut |_, _, _| Ok(()))?;
+        transfer(&graph.blocks[b], &mut known, &mut left, &mut |_, _, _| {
+            Ok(())
+        })?;
         for next in successors(&graph.blocks[b]) {
             let t = next.index();
             spend(&mut left, known.len() + 1)?;

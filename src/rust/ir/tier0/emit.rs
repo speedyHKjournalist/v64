@@ -15,13 +15,13 @@
 //! interpreter's exact behavior.
 use super::analysis::{self, Instruction, PagePlan, Unit};
 use crate::cpu::cpu::{
-    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_ZERO, TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA,
-    TLB_NO_USER, TLB_READONLY, TLB_VALID,
+    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_ZERO, TLB_GLOBAL,
+    TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY, TLB_VALID,
 };
 use crate::cpu::global_pointers as gp;
+use crate::ir::backend::wasm::x87::{x87_native, X87Cache, X87Words};
 use crate::ir::frontend::decode::{DecodedInstruction, EffectiveAddress, Flow};
 use crate::ir::helper::imports::signature;
-use crate::ir::backend::wasm::x87::{x87_native, X87Cache, X87Words};
 use crate::ir::x87::Io;
 
 #[path = "simd.rs"]
@@ -30,10 +30,12 @@ mod simd;
 mod x87run;
 /// Register-only x87 runs (A/B switch).
 const X87_RUNS: bool = true;
-use crate::ir::runtime::tier0::{t0_link, Link};
 use crate::ir::runtime::entry::{exit_kind_address, CpuEntryKey, ExitKind};
+use crate::ir::runtime::tier0::{t0_link, Link};
 use crate::state_flags::CachedStateFlags;
-use crate::wasmgen::wasm_builder::{Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType};
+use crate::wasmgen::wasm_builder::{
+    Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType,
+};
 
 /// ir_t0_step results (see runtime::tier0).
 const STEP_EXIT: i32 = 2;
@@ -72,7 +74,49 @@ enum Shift {
     Arithmetic,
 }
 /// Names of Form kinds, by Form::kind (tests/ir/performance/xp_boot.mjs).
-pub const FORM_NAMES: &[&str] = &["Alu", "Test", "MovToRm", "MovToReg", "Lea", "MovExtend", "IncDec", "NegNot", "Shift", "ShiftHelper", "Carry", "DoubleShift", "BitScan", "BitTest", "MulWide", "Div", "Xadd", "Cmpxchg", "Moffs", "X87", "Fnstsw", "X87Flags", "Fcmov", "Simd", "Imul", "Push", "Pop", "Xchg", "Cdq", "Cwde", "Nop", "Leave", "Setcc", "Cmov", "Jmp", "Jcc", "Call", "Ret", "JmpIndirect", "CallIndirect", "Lahf"];
+pub const FORM_NAMES: &[&str] = &[
+    "Alu",
+    "Test",
+    "MovToRm",
+    "MovToReg",
+    "Lea",
+    "MovExtend",
+    "IncDec",
+    "NegNot",
+    "Shift",
+    "ShiftHelper",
+    "Carry",
+    "DoubleShift",
+    "BitScan",
+    "BitTest",
+    "MulWide",
+    "Div",
+    "Xadd",
+    "Cmpxchg",
+    "Moffs",
+    "X87",
+    "Fnstsw",
+    "X87Flags",
+    "Fcmov",
+    "Simd",
+    "Imul",
+    "Push",
+    "Pop",
+    "Xchg",
+    "Cdq",
+    "Cwde",
+    "Nop",
+    "Leave",
+    "Setcc",
+    "Cmov",
+    "Jmp",
+    "Jcc",
+    "Call",
+    "Ret",
+    "JmpIndirect",
+    "CallIndirect",
+    "Lahf",
+];
 /// Shift/rotate count operand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Count {
@@ -83,59 +127,161 @@ enum Count {
 #[derive(Clone, Copy)]
 enum Form {
     /// ADD/OR/AND/SUB/XOR/CMP: rm (or reg) op src.
-    Alu { op: u8, size: u8, to_rm: bool, reg: u8, src: Src },
-    Test { size: u8, src: Src },
-    MovToRm { size: u8, src: Src },
-    MovToReg { size: u8, reg: u8, src: Src },
-    Lea { size: u8, reg: u8 },
-    MovExtend { reg: u8, from: u8, signed: bool },
-    IncDec { dec: bool, size: u8, reg: Option<u8> },
-    NegNot { neg: bool, size: u8 },
-    Shift { kind: Shift, count: u8 },
+    Alu {
+        op: u8,
+        size: u8,
+        to_rm: bool,
+        reg: u8,
+        src: Src,
+    },
+    Test {
+        size: u8,
+        src: Src,
+    },
+    MovToRm {
+        size: u8,
+        src: Src,
+    },
+    MovToReg {
+        size: u8,
+        reg: u8,
+        src: Src,
+    },
+    Lea {
+        size: u8,
+        reg: u8,
+    },
+    MovExtend {
+        reg: u8,
+        from: u8,
+        signed: bool,
+    },
+    IncDec {
+        dec: bool,
+        size: u8,
+        reg: Option<u8>,
+    },
+    NegNot {
+        neg: bool,
+        size: u8,
+    },
+    Shift {
+        kind: Shift,
+        count: u8,
+    },
     /// rm = helper(rm, count & 31): rotates and the remaining shifts, which
     /// update the lazy FLAGS in memory like the interpreter.
-    ShiftHelper { name: &'static str, size: u8, count: Count },
+    ShiftHelper {
+        name: &'static str,
+        size: u8,
+        count: Count,
+    },
     /// ADC/SBB through cpu::arith (CF input from the lazy FLAGS).
-    Carry { sub: bool, size: u8, to_rm: bool, reg: u8, src: Src },
+    Carry {
+        sub: bool,
+        size: u8,
+        to_rm: bool,
+        reg: u8,
+        src: Src,
+    },
     /// SHLD/SHRD: rm = helper(rm, reg, count & 31).
-    DoubleShift { left: bool, size: u8, reg: u8, count: Count },
+    DoubleShift {
+        left: bool,
+        size: u8,
+        reg: u8,
+        count: Count,
+    },
     /// BSF/BSR: reg = helper(reg, rm).
-    BitScan { reverse: bool, reg: u8 },
+    BitScan {
+        reverse: bool,
+        reg: u8,
+    },
     /// BT/BTS/BTR/BTC on a register operand.
-    BitTest { op: u8, offset: Src },
+    BitTest {
+        op: u8,
+        offset: Src,
+    },
     /// One-operand MUL/IMUL: EDX:EAX = EAX * rm.
-    MulWide { signed: bool },
+    MulWide {
+        signed: bool,
+    },
     /// DIV/IDIV: EAX, EDX = EDX:EAX / rm (retry on #DE).
-    Div { signed: bool },
-    Xadd { size: u8, reg: u8 },
-    Cmpxchg { size: u8, reg: u8 },
+    Div {
+        signed: bool,
+    },
+    Xadd {
+        size: u8,
+        reg: u8,
+    },
+    Cmpxchg {
+        size: u8,
+        reg: u8,
+    },
     /// MOV between AL/eAX and a direct memory offset.
-    Moffs { size: u8, store: bool, ea: EffectiveAddress },
+    Moffs {
+        size: u8,
+        store: bool,
+        ea: EffectiveAddress,
+    },
     /// A continuing x87 form (ir::x87::io): operand transfer here, FPU state
     /// through runtime::x87::ir_t0_x87.
-    X87 { opcode: u8, modrm: u8, io: Io },
+    X87 {
+        opcode: u8,
+        modrm: u8,
+        io: Io,
+    },
     /// FNSTSW AX.
     Fnstsw,
     /// FUCOMI/FCOMI(P) ST, ST(r) through cpu::fpu (writes FLAGS).
-    X87Flags { name: &'static str, r: u8 },
+    X87Flags {
+        name: &'static str,
+        r: u8,
+    },
     /// FCMOVcc ST, ST(r).
-    Fcmov { cc: u8, r: u8 },
+    Fcmov {
+        cc: u8,
+        r: u8,
+    },
     /// MMX/SSE/SSE2 (see simd).
     Simd(simd::Simd),
-    Imul { reg: u8, immediate: Option<u32> },
-    Push { src: Src },
-    Pop { reg: u8 },
-    Xchg { a: u8, b: u8 },
+    Imul {
+        reg: u8,
+        immediate: Option<u32>,
+    },
+    Push {
+        src: Src,
+    },
+    Pop {
+        reg: u8,
+    },
+    Xchg {
+        a: u8,
+        b: u8,
+    },
     Cdq,
     Cwde,
     Nop,
     Leave,
-    Setcc { cc: u8 },
-    Cmov { cc: u8, reg: u8 },
-    Jmp { target: u32 },
-    Jcc { cc: u8, target: u32 },
-    Call { target: u32 },
-    Ret { pop: u16 },
+    Setcc {
+        cc: u8,
+    },
+    Cmov {
+        cc: u8,
+        reg: u8,
+    },
+    Jmp {
+        target: u32,
+    },
+    Jcc {
+        cc: u8,
+        target: u32,
+    },
+    Call {
+        target: u32,
+    },
+    Ret {
+        pop: u16,
+    },
     JmpIndirect,
     CallIndirect,
     /// LAHF: AH = SF:ZF:0:AF:0:PF:1:CF of the materialized FLAGS.
@@ -247,12 +393,22 @@ impl Form {
     /// effects pending (see PendingFlags) or read the pending state.
     fn touches_flags_memory(self) -> bool {
         match self {
-            Form::ShiftHelper { name: "rol32" | "ror32", size: 32, count: Count::Imm(_) } => false,
-            Form::DoubleShift { size: 32, count: Count::Imm(_), .. } => false,
+            Form::ShiftHelper {
+                name: "rol32" | "ror32",
+                size: 32,
+                count: Count::Imm(_),
+            } => false,
+            Form::DoubleShift {
+                size: 32,
+                count: Count::Imm(_),
+                ..
+            } => false,
             // Helpers over the lazy state, and dynamic counts (no FLAGS
             // change for a zero count).
             Form::ShiftHelper { .. } | Form::DoubleShift { .. } => true,
-            Form::X87Flags { .. } | Form::Simd(simd::Simd::CompareFlags { .. }) | Form::Lahf => true,
+            Form::X87Flags { .. } | Form::Simd(simd::Simd::CompareFlags { .. }) | Form::Lahf => {
+                true
+            },
             _ => false,
         }
     }
@@ -320,9 +476,27 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
             let alu = (op >> 3) as u8;
             let size = if op & 1 == 0 { 8 } else { v };
             match op & 7 {
-                0 | 1 => Form::Alu { op: alu, size, to_rm: true, reg: 0, src: Src::Reg(reg) },
-                2 | 3 => Form::Alu { op: alu, size, to_rm: false, reg, src: Src::Rm },
-                _ => Form::Alu { op: alu, size, to_rm: false, reg: 0, src: Src::Imm(imm?) },
+                0 | 1 => Form::Alu {
+                    op: alu,
+                    size,
+                    to_rm: true,
+                    reg: 0,
+                    src: Src::Reg(reg),
+                },
+                2 | 3 => Form::Alu {
+                    op: alu,
+                    size,
+                    to_rm: false,
+                    reg,
+                    src: Src::Rm,
+                },
+                _ => Form::Alu {
+                    op: alu,
+                    size,
+                    to_rm: false,
+                    reg: 0,
+                    src: Src::Imm(imm?),
+                },
             }
         },
         0x80 | 0x81 | 0x83 if !matches!(reg, 2 | 3) => Form::Alu {
@@ -332,7 +506,10 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
             reg: 0,
             src: Src::Imm(imm?),
         },
-        0x84 | 0x85 => Form::Test { size: if op == 0x84 { 8 } else { v }, src: Src::Reg(reg) },
+        0x84 | 0x85 => Form::Test {
+            size: if op == 0x84 { 8 } else { v },
+            src: Src::Reg(reg),
+        },
         0xA8 | 0xA9 => Form::Alu {
             op: 8,
             size: if op == 0xA8 { 8 } else { v },
@@ -340,21 +517,53 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
             reg: 0,
             src: Src::Imm(imm?),
         },
-        0xF6 | 0xF7 if reg == 0 => Form::Test { size: if op == 0xF6 { 8 } else { v }, src: Src::Imm(imm?) },
-        0xF6 | 0xF7 if matches!(reg, 2 | 3) => Form::NegNot { neg: reg == 3, size: if op == 0xF6 { 8 } else { v } },
-        0x88 | 0x89 => Form::MovToRm { size: if op == 0x88 { 8 } else { v }, src: Src::Reg(reg) },
-        0x8A | 0x8B => Form::MovToReg { size: if op == 0x8A { 8 } else { v }, reg, src: Src::Rm },
-        0xB0..=0xB7 => Form::MovToReg { size: 8, reg: (op & 7) as u8, src: Src::Imm(imm?) },
-        0xB8..=0xBF => Form::MovToReg { size: v, reg: (op & 7) as u8, src: Src::Imm(imm?) },
-        0xC6 | 0xC7 if reg == 0 => Form::MovToRm { size: if op == 0xC6 { 8 } else { v }, src: Src::Imm(imm?) },
+        0xF6 | 0xF7 if reg == 0 => Form::Test {
+            size: if op == 0xF6 { 8 } else { v },
+            src: Src::Imm(imm?),
+        },
+        0xF6 | 0xF7 if matches!(reg, 2 | 3) => Form::NegNot {
+            neg: reg == 3,
+            size: if op == 0xF6 { 8 } else { v },
+        },
+        0x88 | 0x89 => Form::MovToRm {
+            size: if op == 0x88 { 8 } else { v },
+            src: Src::Reg(reg),
+        },
+        0x8A | 0x8B => Form::MovToReg {
+            size: if op == 0x8A { 8 } else { v },
+            reg,
+            src: Src::Rm,
+        },
+        0xB0..=0xB7 => Form::MovToReg {
+            size: 8,
+            reg: (op & 7) as u8,
+            src: Src::Imm(imm?),
+        },
+        0xB8..=0xBF => Form::MovToReg {
+            size: v,
+            reg: (op & 7) as u8,
+            src: Src::Imm(imm?),
+        },
+        0xC6 | 0xC7 if reg == 0 => Form::MovToRm {
+            size: if op == 0xC6 { 8 } else { v },
+            src: Src::Imm(imm?),
+        },
         0x8D if i.ea.is_some() => Form::Lea { size: v, reg },
         0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF if v == 32 => Form::MovExtend {
             reg,
             from: if op & 1 == 0 { 8 } else { 16 },
             signed: op >= 0x0FBE,
         },
-        0x40..=0x4F => Form::IncDec { dec: op >= 0x48, size: v, reg: Some((op & 7) as u8) },
-        0xFE | 0xFF if reg <= 1 => Form::IncDec { dec: reg == 1, size: if op == 0xFE { 8 } else { v }, reg: None },
+        0x40..=0x4F => Form::IncDec {
+            dec: op >= 0x48,
+            size: v,
+            reg: Some((op & 7) as u8),
+        },
+        0xFE | 0xFF if reg <= 1 => Form::IncDec {
+            dec: reg == 1,
+            size: if op == 0xFE { 8 } else { v },
+            reg: None,
+        },
         0xC1 | 0xD1 if v == 32 && matches!(reg, 4 | 5 | 7) => Form::Shift {
             kind: match reg {
                 4 => Shift::Left,
@@ -399,9 +608,27 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
             let size = if op & 1 == 0 { 8 } else { v };
             let sub = op >= 0x18;
             match op & 7 {
-                0 | 1 => Form::Carry { sub, size, to_rm: true, reg: 0, src: Src::Reg(reg) },
-                2 | 3 => Form::Carry { sub, size, to_rm: false, reg, src: Src::Rm },
-                _ => Form::Carry { sub, size, to_rm: false, reg: 0, src: Src::Imm(imm?) },
+                0 | 1 => Form::Carry {
+                    sub,
+                    size,
+                    to_rm: true,
+                    reg: 0,
+                    src: Src::Reg(reg),
+                },
+                2 | 3 => Form::Carry {
+                    sub,
+                    size,
+                    to_rm: false,
+                    reg,
+                    src: Src::Rm,
+                },
+                _ => Form::Carry {
+                    sub,
+                    size,
+                    to_rm: false,
+                    reg: 0,
+                    src: Src::Imm(imm?),
+                },
             }
         },
         0x80 | 0x81 | 0x83 => Form::Carry {
@@ -417,16 +644,28 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
             reg,
             count: if op & 1 == 0 { Count::Imm((imm? & 31) as u8) } else { Count::Cl },
         },
-        0x0FBC | 0x0FBD if v == 32 => Form::BitScan { reverse: op == 0x0FBD, reg },
+        0x0FBC | 0x0FBD if v == 32 => Form::BitScan {
+            reverse: op == 0x0FBD,
+            reg,
+        },
         0x0FA3 | 0x0FAB | 0x0FB3 | 0x0FBB if v == 32 && i.ea.is_none() => Form::BitTest {
             op: ((op >> 3) & 3) as u8,
             offset: Src::Reg(reg),
         },
-        0x0FBA if v == 32 && reg >= 4 && i.ea.is_none() => Form::BitTest { op: reg - 4, offset: Src::Imm(imm?) },
+        0x0FBA if v == 32 && reg >= 4 && i.ea.is_none() => Form::BitTest {
+            op: reg - 4,
+            offset: Src::Imm(imm?),
+        },
         0xF7 if v == 32 && matches!(reg, 4 | 5) => Form::MulWide { signed: reg == 5 },
         0xF7 if v == 32 && matches!(reg, 6 | 7) => Form::Div { signed: reg == 7 },
-        0x0FC0 | 0x0FC1 => Form::Xadd { size: if op == 0x0FC0 { 8 } else { v }, reg },
-        0x0FB0 | 0x0FB1 => Form::Cmpxchg { size: if op == 0x0FB0 { 8 } else { v }, reg },
+        0x0FC0 | 0x0FC1 => Form::Xadd {
+            size: if op == 0x0FC0 { 8 } else { v },
+            reg,
+        },
+        0x0FB0 | 0x0FB1 => Form::Cmpxchg {
+            size: if op == 0x0FB0 { 8 } else { v },
+            reg,
+        },
         0xA0..=0xA3 => Form::Moffs {
             size: if op & 1 == 0 { 8 } else { v },
             store: op >= 0xA2,
@@ -441,8 +680,14 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
         },
         0xD8..=0xDF => match crate::ir::x87::io(op as u8, modrm) {
             // 8-byte operands are read as two words at ea and ea + 4.
-            Some(Io::Load { bytes: 8 } | Io::Store { bytes: 8 }) if i.address_size == 16 => return None,
-            Some(io) => Form::X87 { opcode: op as u8, modrm, io },
+            Some(Io::Load { bytes: 8 } | Io::Store { bytes: 8 }) if i.address_size == 16 => {
+                return None
+            },
+            Some(io) => Form::X87 {
+                opcode: op as u8,
+                modrm,
+                io,
+            },
             None if op == 0xDF && modrm == 0xE0 => Form::Fnstsw,
             // FUCOMI(P)/FCOMI(P) write ZF/PF/CF; FCMOVcc reads FLAGS.
             None if modrm >= 0xC0 && matches!((op, reg), (0xDB | 0xDF, 5 | 6)) => Form::X87Flags {
@@ -460,24 +705,54 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
             },
             None => return None,
         },
-        0x0FAF if v == 32 => Form::Imul { reg, immediate: None },
-        0x69 | 0x6B if v == 32 => Form::Imul { reg, immediate: Some(imm?) },
-        0x50..=0x57 if v == 32 => Form::Push { src: Src::Reg((op & 7) as u8) },
-        0x68 | 0x6A if v == 32 => Form::Push { src: Src::Imm(imm?) },
+        0x0FAF if v == 32 => Form::Imul {
+            reg,
+            immediate: None,
+        },
+        0x69 | 0x6B if v == 32 => Form::Imul {
+            reg,
+            immediate: Some(imm?),
+        },
+        0x50..=0x57 if v == 32 => Form::Push {
+            src: Src::Reg((op & 7) as u8),
+        },
+        0x68 | 0x6A if v == 32 => Form::Push {
+            src: Src::Imm(imm?),
+        },
         0xFF if reg == 6 && v == 32 => Form::Push { src: Src::Rm },
-        0x58..=0x5F if v == 32 => Form::Pop { reg: (op & 7) as u8 },
-        0x91..=0x97 if v == 32 => Form::Xchg { a: 0, b: (op & 7) as u8 },
-        0x87 if v == 32 && i.ea.is_none() => Form::Xchg { a: reg, b: modrm & 7 },
+        0x58..=0x5F if v == 32 => Form::Pop {
+            reg: (op & 7) as u8,
+        },
+        0x91..=0x97 if v == 32 => Form::Xchg {
+            a: 0,
+            b: (op & 7) as u8,
+        },
+        0x87 if v == 32 && i.ea.is_none() => Form::Xchg {
+            a: reg,
+            b: modrm & 7,
+        },
         0x99 if v == 32 => Form::Cdq,
         0x98 if v == 32 => Form::Cwde,
         0x90 => Form::Nop,
         0x9F => Form::Lahf,
         0xC9 if v == 32 => Form::Leave,
-        0x0F90..=0x0F9F => Form::Setcc { cc: (op & 15) as u8 },
-        0x0F40..=0x0F4F if v == 32 => Form::Cmov { cc: (op & 15) as u8, reg },
-        0xEB | 0xE9 => Form::Jmp { target: relative_target(i)? },
-        0x70..=0x7F | 0x0F80..=0x0F8F => Form::Jcc { cc: (op & 15) as u8, target: relative_target(i)? },
-        0xE8 => Form::Call { target: relative_target(i)? },
+        0x0F90..=0x0F9F => Form::Setcc {
+            cc: (op & 15) as u8,
+        },
+        0x0F40..=0x0F4F if v == 32 => Form::Cmov {
+            cc: (op & 15) as u8,
+            reg,
+        },
+        0xEB | 0xE9 => Form::Jmp {
+            target: relative_target(i)?,
+        },
+        0x70..=0x7F | 0x0F80..=0x0F8F => Form::Jcc {
+            cc: (op & 15) as u8,
+            target: relative_target(i)?,
+        },
+        0xE8 => Form::Call {
+            target: relative_target(i)?,
+        },
         0xC3 if v == 32 => Form::Ret { pop: 0 },
         0xC2 if v == 32 => Form::Ret { pop: imm? as u16 },
         0xFF if reg == 4 && v == 32 => Form::JmpIndirect,
@@ -619,9 +894,16 @@ fn mask(size: u8) -> i32 {
 }
 fn sign(size: u8) -> i32 { 1i32 << (size - 1) }
 fn tlb_read_mask(user: bool) -> i32 {
-    0xFFF & !TLB_READONLY & !TLB_GLOBAL & !TLB_HAS_CODE & !TLB_IA32E_DATA & if user { !0 } else { !TLB_NO_USER }
+    0xFFF
+        & !TLB_READONLY
+        & !TLB_GLOBAL
+        & !TLB_HAS_CODE
+        & !TLB_IA32E_DATA
+        & if user { !0 } else { !TLB_NO_USER }
 }
-fn tlb_write_mask(user: bool) -> i32 { 0xFFF & !TLB_GLOBAL & !TLB_IA32E_DATA & if user { !0 } else { !TLB_NO_USER } }
+fn tlb_write_mask(user: bool) -> i32 {
+    0xFFF & !TLB_GLOBAL & !TLB_IA32E_DATA & if user { !0 } else { !TLB_NO_USER }
+}
 
 impl Page {
     fn store_fixed(&mut self, address: u32, value: &WasmLocal) {
@@ -660,7 +942,8 @@ impl Page {
                 self.w.store_u8(0);
             },
             None => {
-                let name = if kind == ExitKind::Poll { "ir_request_poll_exit" } else { "ir_request_link" };
+                let name =
+                    if kind == ExitKind::Poll { "ir_request_poll_exit" } else { "ir_request_link" };
                 self.w.call_signature(name, signature(name));
             },
         }
@@ -816,7 +1099,13 @@ impl Page {
     /// offset <- the function offset of the linear address on the stack
     /// (outside: >= span, and far_eip <- it in a function of several runs).
     fn set_offset_from_linear(&mut self) {
-        offset_from_linear(&mut self.w, &self.runs, self.page_linear, self.span, [&self.offset, &self.far_eip, &self.eip]);
+        offset_from_linear(
+            &mut self.w,
+            &self.runs,
+            self.page_linear,
+            self.span,
+            [&self.offset, &self.far_eip, &self.eip],
+        );
     }
     /// Push the linear address the function leaves for: that of `offset`,
     /// or far_eip for a target outside a function of several runs.
@@ -876,7 +1165,14 @@ impl Page {
         self.w.add_i32();
         self.set_offset_from_linear();
         self.check_offset_page();
-        let label = if nearby { self.levels.last().map_or(self.dispatch, |level| level.repeat) } else { self.dispatch };
+        let label = if nearby {
+            self.levels
+                .last()
+                .map_or(self.dispatch, |level| level.repeat)
+        }
+        else {
+            self.dispatch
+        };
         self.w.br(label);
     }
 
@@ -993,7 +1289,8 @@ impl Page {
         self.w.set_local(&self.addr);
     }
     fn segment_check(&mut self, segment: u8) {
-        self.w.load_fixed_u8(gp::get_segment_is_null_offset(segment as u32));
+        self.w
+            .load_fixed_u8(gp::get_segment_is_null_offset(segment as u32));
         self.retry_if();
     }
     /// Push nonzero unless one ordinary RAM page grants the access at addr
@@ -1008,7 +1305,8 @@ impl Page {
         self.w.add_i32();
         self.w.load_aligned_i32(0);
         self.w.tee_local(&self.host);
-        self.w.get_local(if write { &self.write_mask } else { &self.read_mask });
+        self.w
+            .get_local(if write { &self.write_mask } else { &self.read_mask });
         self.w.and_i32();
         self.w.const_i32(TLB_VALID);
         self.w.ne_i32();
@@ -1045,7 +1343,8 @@ impl Page {
         self.w.get_local(&self.addr);
         self.w.const_i32(bytes as i32);
         self.w.const_i32(write as i32);
-        self.w.call_signature("ir_t0_read_slow", signature("ir_t0_read_slow"));
+        self.w
+            .call_signature("ir_t0_read_slow", signature("ir_t0_read_slow"));
         self.w.set_local_i64(&self.wide);
         self.w.get_local_i64(&self.wide);
         self.w.const_i64(32);
@@ -1073,7 +1372,8 @@ impl Page {
         self.w.get_local(&self.addr);
         self.w.get_local(value);
         self.w.const_i32(bytes as i32);
-        self.w.call_signature("ir_t0_write_slow", signature("ir_t0_write_slow"));
+        self.w
+            .call_signature("ir_t0_write_slow", signature("ir_t0_write_slow"));
         self.retry_if();
         self.w.else_();
         self.host_address();
@@ -1199,10 +1499,20 @@ impl Page {
         }
     }
     fn push_op1(&mut self) {
-        if self.flags.op1 { self.w.get_local(&self.p_op1) } else { self.w.load_fixed_i32(gp::last_op1 as u32) }
+        if self.flags.op1 {
+            self.w.get_local(&self.p_op1)
+        }
+        else {
+            self.w.load_fixed_i32(gp::last_op1 as u32)
+        }
     }
     fn push_result(&mut self) {
-        if self.flags.result { self.w.get_local(&self.p_result) } else { self.w.load_fixed_i32(gp::last_result as u32) }
+        if self.flags.result {
+            self.w.get_local(&self.p_result)
+        }
+        else {
+            self.w.load_fixed_i32(gp::last_result as u32)
+        }
     }
     /// FLAGS bit `flag` (not lazily computed) as 0/1: pending or in memory.
     fn word_bit(&mut self, flag: i32) {
@@ -1285,7 +1595,12 @@ impl Page {
         ] {
             self.w.const_i32(address as i32);
             self.w.get_local(local);
-            if byte { self.w.store_u8(0) } else { self.w.store_aligned_i32(0) }
+            if byte {
+                self.w.store_u8(0)
+            }
+            else {
+                self.w.store_aligned_i32(0)
+            }
         }
         self.w.const_i32(0);
         self.w.set_local(&self.x87_is_open);
@@ -1328,7 +1643,8 @@ impl Page {
     /// last_op_size and flags_changed (adjacent) in one store.
     fn store_size_changed(&mut self, size: i32, changed: i32) {
         self.w.const_i32(gp::last_op_size as i32);
-        self.w.const_i64((changed as u32 as i64) << 32 | size as u32 as i64);
+        self.w
+            .const_i64((changed as u32 as i64) << 32 | size as u32 as i64);
         self.w.store_aligned_i64(0);
     }
     /// cpu::misc_instr::getcf over the lazy state (pending or in memory).
@@ -1389,7 +1705,11 @@ impl Page {
     }
     /// Push the (non-negated) condition cc & !1 from fa/fb/fr, if known.
     fn known_condition(&mut self, base: u8) -> bool {
-        let (fa, fb, fr) = (self.fa.unsafe_clone(), self.fb.unsafe_clone(), self.fr.unsafe_clone());
+        let (fa, fb, fr) = (
+            self.fa.unsafe_clone(),
+            self.fb.unsafe_clone(),
+            self.fr.unsafe_clone(),
+        );
         let zero = |p: &mut Page| {
             p.w.get_local(&fr);
             p.w.eqz_i32();
@@ -1412,14 +1732,24 @@ impl Page {
                 2 | 6 => {
                     self.w.get_local(&fa);
                     self.w.get_local(&fb);
-                    if base == 2 { self.w.ltu_i32() } else { self.w.leu_i32() }
+                    if base == 2 {
+                        self.w.ltu_i32()
+                    }
+                    else {
+                        self.w.leu_i32()
+                    }
                 },
                 4 => zero(self),
                 8 => self.bit(&fr, s),
                 12 | 14 => {
                     self.signed(&fa, s);
                     self.signed(&fb, s);
-                    if base == 12 { self.w.lt_i32() } else { self.w.le_i32() }
+                    if base == 12 {
+                        self.w.lt_i32()
+                    }
+                    else {
+                        self.w.le_i32()
+                    }
                 },
                 _ => unreachable!(),
             },
@@ -1447,7 +1777,12 @@ impl Page {
             (Known::Inc(s) | Known::Dec(s), _) => match base {
                 0 => {
                     self.w.get_local(&fr);
-                    let overflow = if matches!(self.known, Known::Inc(_)) { sign(s) } else { sign(s).wrapping_sub(1) & mask(s) };
+                    let overflow = if matches!(self.known, Known::Inc(_)) {
+                        sign(s)
+                    }
+                    else {
+                        sign(s).wrapping_sub(1) & mask(s)
+                    };
                     self.w.const_i32(overflow);
                     self.w.eq_i32();
                 },
@@ -1462,7 +1797,8 @@ impl Page {
     /// runs them then.
     fn x87_guard(&mut self) {
         self.w.load_fixed_i32(gp::cr as u32);
-        self.w.const_i32(crate::cpu::cpu::CR0_EM | crate::cpu::cpu::CR0_TS);
+        self.w
+            .const_i32(crate::cpu::cpu::CR0_EM | crate::cpu::cpu::CR0_TS);
         self.w.and_i32();
         self.retry_if();
     }
@@ -1641,9 +1977,19 @@ impl Page {
     /// Emit the fast path of `form`; guard failures branch to `slow`.
     fn template(&mut self, form: Form, i: &DecodedInstruction) {
         let value = self.value.unsafe_clone();
-        let (fa, fb, fr) = (self.fa.unsafe_clone(), self.fb.unsafe_clone(), self.fr.unsafe_clone());
+        let (fa, fb, fr) = (
+            self.fa.unsafe_clone(),
+            self.fb.unsafe_clone(),
+            self.fr.unsafe_clone(),
+        );
         match form {
-            Form::Alu { op, size, to_rm, reg, src } => {
+            Form::Alu {
+                op,
+                size,
+                to_rm,
+                reg,
+                src,
+            } => {
                 // op 8: TEST AL/eAX, imm (no write).
                 let compare = matches!(op, 7 | 8);
                 if to_rm {
@@ -1743,7 +2089,12 @@ impl Page {
                 self.w.set_local(&value);
                 self.w.get_local(&fa);
                 self.w.const_i32(1);
-                if dec { self.w.sub_i32() } else { self.w.add_i32() }
+                if dec {
+                    self.w.sub_i32()
+                }
+                else {
+                    self.w.add_i32()
+                }
                 self.w.const_i32(mask(size));
                 self.w.and_i32();
                 self.w.set_local(&fr);
@@ -1806,7 +2157,12 @@ impl Page {
                     Shift::Left => 32 - count as i32,
                     _ => count as i32 - 1,
                 });
-                if kind == Shift::Left { self.w.shr_s_i32() } else { self.w.shr_u_i32() }
+                if kind == Shift::Left {
+                    self.w.shr_s_i32()
+                }
+                else {
+                    self.w.shr_u_i32()
+                }
                 self.w.const_i32(1);
                 self.w.and_i32();
                 self.w.set_local(&value);
@@ -1839,7 +2195,11 @@ impl Page {
                 self.pend_size_changed(32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
                 self.known = Known::None;
             },
-            Form::ShiftHelper { name: name @ ("rol32" | "ror32"), size: 32, count } => {
+            Form::ShiftHelper {
+                name: name @ ("rol32" | "ror32"),
+                size: 32,
+                count,
+            } => {
                 // As cpu::arith::rol32/ror32: a zero count changes nothing.
                 let left = name == "rol32";
                 self.read_rm(i, 32, true);
@@ -1848,7 +2208,12 @@ impl Page {
                 self.w.set_local(&fb);
                 self.w.get_local(&fa);
                 self.w.get_local(&fb);
-                if left { self.w.rotl_i32() } else { self.w.rotr_i32() }
+                if left {
+                    self.w.rotl_i32()
+                }
+                else {
+                    self.w.rotr_i32()
+                }
                 self.w.set_local(&fr);
                 self.write_rm(i, 32, &fr);
                 if count != Count::Imm(0) {
@@ -1909,12 +2274,19 @@ impl Page {
                 self.w.set_local(&fa);
                 self.w.get_local(&fa);
                 self.count(count);
-                self.w.call_signature(name, Signature::new(&[WasmType::I32; 2], &[WasmType::I32]));
+                self.w
+                    .call_signature(name, Signature::new(&[WasmType::I32; 2], &[WasmType::I32]));
                 self.w.set_local(&fr);
                 self.write_rm(i, size, &fr);
                 self.known = Known::None;
             },
-            Form::Carry { sub, size, to_rm, reg, src } => {
+            Form::Carry {
+                sub,
+                size,
+                to_rm,
+                reg,
+                src,
+            } => {
                 // As cpu::arith::adc/sbb. CF first: it may come from fa/fb.
                 if !self.known_condition(2) {
                     self.lazy_carry();
@@ -1931,9 +2303,19 @@ impl Page {
                 self.w.set_local(&fb);
                 self.w.get_local(&fa);
                 self.w.get_local(&fb);
-                if sub { self.w.sub_i32() } else { self.w.add_i32() }
+                if sub {
+                    self.w.sub_i32()
+                }
+                else {
+                    self.w.add_i32()
+                }
                 self.w.get_local(&value);
-                if sub { self.w.sub_i32() } else { self.w.add_i32() }
+                if sub {
+                    self.w.sub_i32()
+                }
+                else {
+                    self.w.add_i32()
+                }
                 if size != 32 {
                     self.w.const_i32(mask(size));
                     self.w.and_i32();
@@ -1991,11 +2373,17 @@ impl Page {
                 self.pend_result(&fr);
                 self.pend_size_changed(
                     size,
-                    FLAGS_ALL & !FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW | if sub { FLAG_SUB } else { 0 },
+                    FLAGS_ALL & !FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW
+                        | if sub { FLAG_SUB } else { 0 },
                 );
                 self.known = Known::None;
             },
-            Form::DoubleShift { left, size: 32, reg, count } => {
+            Form::DoubleShift {
+                left,
+                size: 32,
+                reg,
+                count,
+            } => {
                 // As cpu::arith::shld32/shrd32: a zero count changes nothing.
                 self.read_rm(i, 32, true);
                 self.w.set_local(&fa);
@@ -2011,12 +2399,22 @@ impl Page {
                 if count != Count::Imm(0) {
                     self.w.get_local(&fa);
                     self.w.get_local(&value);
-                    if left { self.w.shl_i32() } else { self.w.shr_u_i32() }
+                    if left {
+                        self.w.shl_i32()
+                    }
+                    else {
+                        self.w.shr_u_i32()
+                    }
                     self.w.get_local(&fb);
                     self.w.const_i32(32);
                     self.w.get_local(&value);
                     self.w.sub_i32();
-                    if left { self.w.shr_u_i32() } else { self.w.shl_i32() }
+                    if left {
+                        self.w.shr_u_i32()
+                    }
+                    else {
+                        self.w.shl_i32()
+                    }
                     self.w.or_i32();
                 }
                 if dynamic {
@@ -2038,7 +2436,10 @@ impl Page {
                         self.w.if_void();
                         self.store_fixed(gp::last_result as u32, &fr);
                         self.store_fixed_const(gp::last_op_size as u32, 31);
-                        self.store_fixed_const(gp::flags_changed as u32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
+                        self.store_fixed_const(
+                            gp::flags_changed as u32,
+                            FLAGS_ALL & !1 & !FLAG_OVERFLOW,
+                        );
                         self.w.const_i32(gp::flags as i32);
                         self.w.load_fixed_i32(gp::flags as u32);
                         self.w.const_i32(!1 & !FLAG_OVERFLOW);
@@ -2099,7 +2500,12 @@ impl Page {
                 }
                 self.known = Known::None;
             },
-            Form::DoubleShift { left, size, reg, count } => {
+            Form::DoubleShift {
+                left,
+                size,
+                reg,
+                count,
+            } => {
                 self.read_rm(i, size, true);
                 self.w.set_local(&fa);
                 self.w.get_local(&fa);
@@ -2111,7 +2517,8 @@ impl Page {
                     (false, 16) => "shrd16",
                     (false, _) => "shrd32",
                 };
-                self.w.call_signature(name, Signature::new(&[WasmType::I32; 3], &[WasmType::I32]));
+                self.w
+                    .call_signature(name, Signature::new(&[WasmType::I32; 3], &[WasmType::I32]));
                 self.w.set_local(&fr);
                 self.write_rm(i, size, &fr);
                 self.known = Known::None;
@@ -2188,9 +2595,19 @@ impl Page {
             Form::MulWide { signed } => {
                 // As cpu::arith::mul32/imul32.
                 self.read_rm(i, 32, false);
-                if signed { self.w.extend_signed_i32_to_i64() } else { self.w.extend_unsigned_i32_to_i64() }
+                if signed {
+                    self.w.extend_signed_i32_to_i64()
+                }
+                else {
+                    self.w.extend_unsigned_i32_to_i64()
+                }
                 self.w.get_local(&self.gpr[0]);
-                if signed { self.w.extend_signed_i32_to_i64() } else { self.w.extend_unsigned_i32_to_i64() }
+                if signed {
+                    self.w.extend_signed_i32_to_i64()
+                }
+                else {
+                    self.w.extend_unsigned_i32_to_i64()
+                }
                 self.w.mul_i64();
                 self.w.set_local_i64(&self.wide);
                 self.w.get_local_i64(&self.wide);
@@ -2397,7 +2814,11 @@ impl Page {
                     self.w.hint(false);
                     self.w.br_if(slow);
                     let cache = Some(self.x87.unsafe_clone());
-                    let mut words = X87Locals { w: &mut self.w, words: [&low, &high], cache };
+                    let mut words = X87Locals {
+                        w: &mut self.w,
+                        words: [&low, &high],
+                        cache,
+                    };
                     x87_native(&mut words, native, slow);
                     self.w.br(done);
                     self.w.block_end();
@@ -2439,18 +2860,21 @@ impl Page {
             Form::X87Flags { name, r } => {
                 self.x87_guard();
                 self.w.const_i32(r as i32);
-                self.w.call_signature(name, Signature::new(&[WasmType::I32], &[]));
+                self.w
+                    .call_signature(name, Signature::new(&[WasmType::I32], &[]));
                 self.known = Known::None;
             },
             Form::Fcmov { cc, r } => {
                 self.x87_guard();
                 self.condition(cc);
                 self.w.const_i32(r as i32);
-                self.w.call_signature("fpu_fcmovcc", Signature::new(&[WasmType::I32; 2], &[]));
+                self.w
+                    .call_signature("fpu_fcmovcc", Signature::new(&[WasmType::I32; 2], &[]));
             },
             Form::Lahf => {
                 // The lazy FLAGS are in memory (touches_flags_memory).
-                self.w.call_signature("get_eflags", Signature::new(&[], &[WasmType::I32]));
+                self.w
+                    .call_signature("get_eflags", Signature::new(&[], &[WasmType::I32]));
                 self.w.const_i32(0xD5);
                 self.w.and_i32();
                 self.w.const_i32(2);
@@ -2459,7 +2883,10 @@ impl Page {
             },
             Form::Fnstsw => {
                 self.x87_guard();
-                self.w.call_signature("fpu_load_status_word", Signature::new(&[], &[WasmType::I32]));
+                self.w.call_signature(
+                    "fpu_load_status_word",
+                    Signature::new(&[], &[WasmType::I32]),
+                );
                 self.write_reg(0, 16);
             },
             Form::Imul { reg, immediate } => {
@@ -2671,7 +3098,13 @@ impl Page {
 
 /// offset <- the function offset of the linear address on the stack (see
 /// Page::set_offset_from_linear); locals are offset, far_eip, a scratch.
-fn offset_from_linear(w: &mut WasmBuilder, runs: &[(u32, usize, usize)], page_linear: u32, span: u32, [offset, far_eip, scratch]: [&WasmLocal; 3]) {
+fn offset_from_linear(
+    w: &mut WasmBuilder,
+    runs: &[(u32, usize, usize)],
+    page_linear: u32,
+    span: u32,
+    [offset, far_eip, scratch]: [&WasmLocal; 3],
+) {
     if runs.len() == 1 {
         w.const_i32(page_linear as i32);
         w.sub_i32();
@@ -2738,14 +3171,23 @@ fn emit_units(
         p.w.br_if(labels[0]);
         // Return sites (reached by dynamic dispatch from RET) skip the
         // table: every unit's label encloses this dispatch.
-        for &k in members.iter().filter(|&&k| k != h && plan.return_site[k as usize]).take(4) {
+        for &k in members
+            .iter()
+            .filter(|&&k| k != h && plan.return_site[k as usize])
+            .take(4)
+        {
             p.w.get_local(&p.offset);
             p.w.const_i32(p.starts[k as usize] as i32);
             p.w.eq_i32();
             p.w.br_if(labels[unit_of[k as usize] as usize]);
         }
     }
-    let low = if header.is_some() { members.iter().map(|&k| p.starts[k as usize]).min().unwrap() as usize } else { 0 };
+    let low = if header.is_some() {
+        members.iter().map(|&k| p.starts[k as usize]).min().unwrap() as usize
+    }
+    else {
+        0
+    };
     let high = members.iter().map(|&k| p.starts[k as usize]).max().unwrap() as usize;
     let table: Vec<Label> = (low..=high)
         .map(|at| match plan.block_at[at] {
@@ -2759,7 +3201,13 @@ fn emit_units(
         p.w.sub_i32();
     }
     p.w.brtable(miss, &mut table.iter());
-    p.levels.push(Level { repeat, unit_of, labels: labels.clone(), emitted: vec![false; units.len()], single });
+    p.levels.push(Level {
+        repeat,
+        unit_of,
+        labels: labels.clone(),
+        emitted: vec![false; units.len()],
+        single,
+    });
     for (u, unit) in units.iter().enumerate() {
         p.w.block_end();
         p.levels.last_mut().unwrap().emitted[u] = true;
@@ -2813,13 +3261,26 @@ fn emit_units(
                 if !ended {
                     p.flush();
                     let last = block.instructions.last().unwrap();
-                    p.goto_linear(p.slots.linear(last.offset as usize).wrapping_add(last.decoded.length as u32));
+                    p.goto_linear(
+                        p.slots
+                            .linear(last.offset as usize)
+                            .wrapping_add(last.decoded.length as u32),
+                    );
                 }
             },
             Unit::Loop { header, units } => {
                 let inner = p.w.loop_void();
                 p.poll_check();
-                emit_units(p, plan, units, Some(*header), inner, repeat, templated, instructions);
+                emit_units(
+                    p,
+                    plan,
+                    units,
+                    Some(*header),
+                    inner,
+                    repeat,
+                    templated,
+                    instructions,
+                );
                 p.w.block_end();
             },
         }
@@ -2869,7 +3330,10 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         w.hint(false);
         w.if_void();
         w.const_i32(-1);
-        w.call_signature("ir_t0_step", Signature::new(&[WasmType::I32], &[WasmType::I32]));
+        w.call_signature(
+            "ir_t0_step",
+            Signature::new(&[WasmType::I32], &[WasmType::I32]),
+        );
         w.drop_();
         w.const_i32(gp::instruction_counter as i32);
         w.load_fixed_i32(gp::instruction_counter as u32);
@@ -2988,7 +3452,16 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
     let mut templated = 0;
     let mut instructions = 0;
     let units = analysis::layout(plan);
-    emit_units(&mut p, plan, &units, None, dispatch, miss, &mut templated, &mut instructions);
+    emit_units(
+        &mut p,
+        plan,
+        &units,
+        None,
+        dispatch,
+        miss,
+        &mut templated,
+        &mut instructions,
+    );
     p.xmm_reset();
     p.w.block_end(); // miss: not a block start in this page
     p.w.br(exit_link);
@@ -3001,7 +3474,10 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
     p.w.store_aligned_i32(0);
     // No "next" continuation: every outcome but an exit dispatches on EIP.
     p.w.const_i32(-1);
-    p.w.call_signature("ir_t0_step", Signature::new(&[WasmType::I32], &[WasmType::I32]));
+    p.w.call_signature(
+        "ir_t0_step",
+        Signature::new(&[WasmType::I32], &[WasmType::I32]),
+    );
     p.add_count(1);
     p.w.const_i32(STEP_EXIT);
     p.w.eq_i32();
@@ -3053,12 +3529,69 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
             p.w.patch_nop(start, end);
         }
     }
-    let Page { mut w, gpr, tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, wide, quotient, retired, committed, p_op1, p_result, p_word, x87, x87_is_open, far_eip, eip, .. } = p;
-    for local in gpr.into_iter().chain([tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, retired, committed, p_op1, p_result, p_word, x87.top, x87.tags, x87.valid, x87.dirty, x87_is_open, far_eip, eip]) {
+    let Page {
+        mut w,
+        gpr,
+        tlb,
+        read_mask,
+        write_mask,
+        offset,
+        result,
+        fa,
+        fb,
+        fr,
+        addr,
+        host,
+        value,
+        tmp,
+        wide,
+        quotient,
+        retired,
+        committed,
+        p_op1,
+        p_result,
+        p_word,
+        x87,
+        x87_is_open,
+        far_eip,
+        eip,
+        ..
+    } = p;
+    for local in gpr.into_iter().chain([
+        tlb,
+        read_mask,
+        write_mask,
+        offset,
+        result,
+        fa,
+        fb,
+        fr,
+        addr,
+        host,
+        value,
+        tmp,
+        retired,
+        committed,
+        p_op1,
+        p_result,
+        p_word,
+        x87.top,
+        x87.tags,
+        x87.valid,
+        x87.dirty,
+        x87_is_open,
+        far_eip,
+        eip,
+    ]) {
         w.free_local(local);
     }
     w.free_local_i64(wide);
     w.free_local_i64(quotient);
     w.finish();
-    Emitted { bytes: w.output().to_vec(), locals: w.declared_local_count(), templated, instructions }
+    Emitted {
+        bytes: w.output().to_vec(),
+        locals: w.declared_local_count(),
+        templated,
+        instructions,
+    }
 }

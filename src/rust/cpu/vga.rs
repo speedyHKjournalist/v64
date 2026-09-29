@@ -24,7 +24,10 @@ pub unsafe fn mark_dirty(addr: u32) {
     // (the machine's bitmap: cores in workers write the frame buffer directly)
     let bitmap = &mut *crate::parallel::machine(&raw mut dirty_bitmap);
     dbg_assert!(((page >> 6) as usize) < bitmap.len());
-    crate::parallel::or64(bitmap.as_mut_ptr().add((page >> 6) as usize).cast(), 1 << (page & 63))
+    crate::parallel::or64(
+        bitmap.as_mut_ptr().add((page >> 6) as usize).cast(),
+        1 << (page & 63),
+    )
 }
 
 #[no_mangle]

@@ -188,7 +188,12 @@ unsafe fn resident(e: &mut Extended, page: u32, write: bool) -> Option<u32> {
 
 /// Run `access` on the bytes of `page`: in its frame, or, when no frame is
 /// reusable, in the bounce frame (written back at once after a write)
-unsafe fn with_page<T>(e: &mut Extended, page: u32, write: bool, access: impl FnOnce(*mut u8) -> T) -> T {
+unsafe fn with_page<T>(
+    e: &mut Extended,
+    page: u32,
+    write: bool,
+    access: impl FnOnce(*mut u8) -> T,
+) -> T {
     if let Some(frame) = resident(e, page, write) {
         return access(e.pool.add(frame as usize * PAGE as usize));
     }
@@ -390,7 +395,9 @@ pub mod aperture {
     pub unsafe fn map(address: u64) -> u32 {
         let core = crate::cpu::apic::current_core();
         let page = address & !(PAGE - 1);
-        let slots = machine(&raw mut SLOT_PAGE).cast::<u64>().add(core * SLOTS_PER_CORE as usize);
+        let slots = machine(&raw mut SLOT_PAGE)
+            .cast::<u64>()
+            .add(core * SLOTS_PER_CORE as usize);
         let mut slot = SLOTS_PER_CORE;
         for i in 0..SLOTS_PER_CORE {
             if *slots.add(i as usize) == page {
@@ -426,14 +433,22 @@ pub mod aperture {
     }
 
     /// An aperture byte (for the mapped path of crate::cpu::memory)
-    pub unsafe fn read8(address: u32) -> Option<u8> { guest(address).map(|at| super::read(at, 1) as u8) }
+    pub unsafe fn read8(address: u32) -> Option<u8> {
+        guest(address).map(|at| super::read(at, 1) as u8)
+    }
     pub unsafe fn write8(address: u32, value: u8) -> bool {
-        guest(address).map(|at| super::write(at, 1, value as u64)).is_some()
+        guest(address)
+            .map(|at| super::write(at, 1, value as u64))
+            .is_some()
     }
     /// An aligned dword within one aperture page
-    pub unsafe fn read32(address: u32) -> Option<u32> { guest(address).map(|at| super::read(at, 4) as u32) }
+    pub unsafe fn read32(address: u32) -> Option<u32> {
+        guest(address).map(|at| super::read(at, 4) as u32)
+    }
     pub unsafe fn write32(address: u32, value: u32) -> bool {
-        guest(address).map(|at| super::write(at, 4, value as u64)).is_some()
+        guest(address)
+            .map(|at| super::write(at, 4, value as u64))
+            .is_some()
     }
 }
 
@@ -450,7 +465,9 @@ pub unsafe fn x64_ext_configure(base_low: u32, base_high: u32, pages: u32, frame
         return pages == 0 && e.pages == 0;
     }
     // (and the bounce frame)
-    let layout = std::alloc::Layout::from_size_align((frames as usize + 1) * PAGE as usize, PAGE as usize).unwrap();
+    let layout =
+        std::alloc::Layout::from_size_align((frames as usize + 1) * PAGE as usize, PAGE as usize)
+            .unwrap();
     let pool = std::alloc::alloc(layout);
     if pool.is_null() {
         return false;

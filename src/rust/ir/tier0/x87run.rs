@@ -121,7 +121,12 @@ impl Plan {
                     next.write(0, value);
                     next.pushed = true;
                 },
-                Native::Arithmetic { op, source: Source::Register(r), target, pops } => {
+                Native::Arithmetic {
+                    op,
+                    source: Source::Register(r),
+                    target,
+                    pops,
+                } => {
                     let x = next.read(0)?;
                     let y = next.read(r)?;
                     next.steps.push(Step::Arithmetic(op, x, y));
@@ -178,7 +183,8 @@ impl Page {
         let c = self.x87.unsafe_clone();
         // #NM/#UD and the native policy: the per-form path decides.
         self.w.load_fixed_i32(gp::cr as u32);
-        self.w.const_i32(crate::cpu::cpu::CR0_EM | crate::cpu::cpu::CR0_TS);
+        self.w
+            .const_i32(crate::cpu::cpu::CR0_EM | crate::cpu::cpu::CR0_TS);
         self.w.and_i32();
         self.w.hint(false);
         self.w.br_if(slow);
@@ -243,7 +249,10 @@ impl Page {
             }
         }
         let mut results: Vec<WasmLocalF64> = vec![];
-        let push = |p: &mut Page, v: Value, results: &[WasmLocalF64], entry: &[Option<WasmLocalF64>; 8]| match v {
+        let push = |p: &mut Page,
+                    v: Value,
+                    results: &[WasmLocalF64],
+                    entry: &[Option<WasmLocalF64>; 8]| match v {
             Value::Entry(k) => p.w.get_local_f64(entry[k as usize].as_ref().unwrap()),
             Value::Constant(one) => p.w.const_f64(if one { 1.0 } else { 0.0 }),
             Value::Step(n) => p.w.get_local_f64(&results[n]),
@@ -287,7 +296,9 @@ impl Page {
         for k in 0..8 {
             match plan.tags[k] {
                 // Pushed/copied slots were set full; read slots stay full.
-                Tag::Full if plan.written & 1 << k != 0 || plan.need_empty & 1 << k != 0 => full |= 1 << k,
+                Tag::Full if plan.written & 1 << k != 0 || plan.need_empty & 1 << k != 0 => {
+                    full |= 1 << k
+                },
                 Tag::Empty => empty |= 1 << k,
                 _ => {},
             }

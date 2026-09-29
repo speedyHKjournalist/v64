@@ -21,7 +21,12 @@ macro_rules! state {
         #[cfg(not(feature = "parallel"))]
         pub const $name: *mut $type = $offset as *mut $type;
         #[cfg(feature = "parallel")]
-        pub const $name: *mut $type = unsafe { (&raw mut STATE_BLOCK).cast::<u8>().add($offset).cast::<$type>() };
+        pub const $name: *mut $type = unsafe {
+            (&raw mut STATE_BLOCK)
+                .cast::<u8>()
+                .add($offset)
+                .cast::<$type>()
+        };
     };
 }
 

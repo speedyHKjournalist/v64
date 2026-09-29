@@ -10,8 +10,8 @@ use crate::ir::{
         decode::{decode, Flow, GuestEip, LinearAddress, PhysicalAddress},
         lift::{lift, lift_cpu_with_rep_budget},
         region::{
-            lift_cpu_cfg, lift_cpu_cfg_entries, lift_cpu_cfg_page, lift_cpu_cfg_sources,
-            CfgLimits, CfgSource, PredictedEdge,
+            lift_cpu_cfg, lift_cpu_cfg_entries, lift_cpu_cfg_page, lift_cpu_cfg_sources, CfgLimits,
+            CfgSource, PredictedEdge,
         },
     },
     lowering::{lower_limited, CompileError},
@@ -542,19 +542,18 @@ fn compile_lifted(
         if cpu {
             if config.passes.enabled(13) {
                 let _clock = CompileScope::new(14);
-                passes.state_writes_elided =
-                    if !config.passes.state_sync {
-                        // Entry-equivalence only: lowering already proves
-                        // unchanged entry backing without a dataflow pass.
-                        mir.elide_entry_cpu_state_writes(
-                            crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
-                        )?
-                    }
-                    else {
-                        mir.elide_redundant_cpu_state_writes(
-                            crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
-                        )?
-                    };
+                passes.state_writes_elided = if !config.passes.state_sync {
+                    // Entry-equivalence only: lowering already proves
+                    // unchanged entry backing without a dataflow pass.
+                    mir.elide_entry_cpu_state_writes(
+                        crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+                    )?
+                }
+                else {
+                    mir.elide_redundant_cpu_state_writes(
+                        crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+                    )?
+                };
                 config.passes.debug.check(&mir, false)?;
             }
             if request.tier == Tier::Two && config.passes.helper_state {
@@ -843,11 +842,9 @@ pub fn compile_cpu_page(
     if snapshot.mappings.len() != pages
         || snapshot.dependencies.is_empty()
         || snapshot.dependencies.len() > pages
-        || snapshot
-            .mappings
-            .iter()
-            .enumerate()
-            .any(|(i, m)| m.linear.0 != base.0.wrapping_add(i as u32 * 4096) || m.physical.0 & 4095 != 0)
+        || snapshot.mappings.iter().enumerate().any(|(i, m)| {
+            m.linear.0 != base.0.wrapping_add(i as u32 * 4096) || m.physical.0 & 4095 != 0
+        })
         || snapshot
             .dependencies
             .iter()

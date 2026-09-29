@@ -191,9 +191,7 @@ pub unsafe fn ir_memory_check(address: u32, bytes: u32, write: u32) -> u32 {
 /// No arithmetic or register write occurs in this adapter. HIR guards own the
 /// divide conditions; this adapter owns exactly one real CPU #DE delivery.
 #[no_mangle]
-pub unsafe fn ir_divide_fault() {
-    cpu::trigger_de();
-}
+pub unsafe fn ir_divide_fault() { cpu::trigger_de(); }
 
 /// Compatibility for the pinned ENTER16 frame push. RAM truncates to a word,
 /// but safe_write16 passes the full value to same-page MMIO. Its debug assertion

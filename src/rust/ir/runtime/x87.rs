@@ -126,7 +126,6 @@ unsafe fn register_semantics(opcode: u32, group: u32, r: u32) {
         (0xDF, 6) => instructions::instr_DF_6_reg(r),
         _ => unreachable!("validated x87 register dispatch"),
     }
-
 }
 
 #[no_mangle]
@@ -188,10 +187,7 @@ pub unsafe fn ir_test_x87_seed() {
 #[no_mangle]
 pub unsafe fn ir_x87_mem(opcode: u32, group: u32, offset: u32, segment: u32, width: u32) -> u32 {
     assert!(
-        (0xD8..=0xDF).contains(&opcode)
-            && group < 8
-            && segment < 6
-            && matches!(width, 16 | 32)
+        (0xD8..=0xDF).contains(&opcode) && group < 8 && segment < 6 && matches!(width, 16 | 32)
     );
     if !cpu::task_switch_test() {
         return Outcome::ControlTransferred as u32;
@@ -491,15 +487,23 @@ unsafe fn x87_semantics(opcode: u8, modrm: u8, io: crate::ir::x87::Io, low: u32,
                 },
                 (0xDB, _) => {
                     let value = fpu_get_st0();
-                    (if group == 1 { fpu_truncate_to_i32(value) } else { fpu_convert_to_i32(value) })
-                        as u32 as u64
+                    (if group == 1 {
+                        fpu_truncate_to_i32(value)
+                    }
+                    else {
+                        fpu_convert_to_i32(value)
+                    }) as u32 as u64
                 },
                 (0xDD, 1) => fpu_truncate_to_i64(fpu_get_st0()) as u64,
                 (0xDF, 7) => fpu_convert_to_i64(fpu_get_st0()) as u64,
                 (0xDF, _) => {
                     let value = fpu_get_st0();
-                    (if group == 1 { fpu_truncate_to_i16(value) } else { fpu_convert_to_i16(value) })
-                        as u16 as u64
+                    (if group == 1 {
+                        fpu_truncate_to_i16(value)
+                    }
+                    else {
+                        fpu_convert_to_i16(value)
+                    }) as u16 as u64
                 },
                 _ => unreachable!(),
             };

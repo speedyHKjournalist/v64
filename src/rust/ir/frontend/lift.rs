@@ -125,7 +125,9 @@ fn lift_inner(
             && i.ea.is_some()
             && (i.prefixes.lock || matches!(i.encoding.opcode, 0x86 | 0x87))
         {
-            return Err(CompileError::Unsupported("locked read-modify-write with cores in workers"));
+            return Err(CompileError::Unsupported(
+                "locked read-modify-write with cores in workers",
+            ));
         }
         if i.baseline_ud {
             if !cpu || offset != bytes.len() {

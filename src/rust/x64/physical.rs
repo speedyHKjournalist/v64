@@ -104,7 +104,12 @@ impl PhysicalBus {
             return Err(PhysicalError::InvalidWindow);
         }
         if let Some((start, end)) = unsafe { super::extended::range() } {
-            if overlaps(window.guest_base.0, window.guest_base.0 + window.length as u64, start, end) {
+            if overlaps(
+                window.guest_base.0,
+                window.guest_base.0 + window.length as u64,
+                start,
+                end,
+            ) {
                 return Err(PhysicalError::Overlap);
             }
         }
@@ -112,7 +117,8 @@ impl PhysicalBus {
             if index == slot {
                 continue;
             }
-            let Some(other) = other else {
+            let Some(other) = other
+            else {
                 continue;
             };
             if overlaps(
@@ -180,7 +186,8 @@ impl PhysicalBus {
                 backing: address as u32,
                 kind: if address >= ram_size as u64 || (0xA0000..0xC0000).contains(&address) {
                     WindowKind::Mmio
-                } else {
+                }
+                else {
                     WindowKind::Ram
                 },
             });
@@ -196,7 +203,10 @@ impl PhysicalBus {
             }
         }
         if unsafe { super::extended::contains(address) } {
-            return Ok(Resolved { backing: 0, kind: WindowKind::Extended });
+            return Ok(Resolved {
+                backing: 0,
+                kind: WindowKind::Extended,
+            });
         }
         Err(PhysicalError::Unmapped)
     }
@@ -274,7 +284,8 @@ fn checked_range(address: u64, length: u64) -> Result<(), PhysicalError> {
             .is_none_or(|last| last >= PHYSICAL_LIMIT)
     {
         Err(PhysicalError::AddressWidth)
-    } else {
+    }
+    else {
         Ok(())
     }
 }
@@ -295,15 +306,11 @@ fn contiguous(bytes: &[Resolved]) -> bool {
 }
 
 /// Mapping generation must accompany any cached RAM view/translation.
-pub unsafe fn generation() -> u64 {
-    PHYSICAL_BUS.generation
-}
+pub unsafe fn generation() -> u64 { PHYSICAL_BUS.generation }
 
 /// Portable configuration for snapshots; restoring it uses `restore_windows`
 /// so old generation values cannot accidentally revalidate stale code/views.
-pub unsafe fn windows() -> [Option<Window>; MAX_WINDOWS] {
-    PHYSICAL_BUS.windows
-}
+pub unsafe fn windows() -> [Option<Window>; MAX_WINDOWS] { PHYSICAL_BUS.windows }
 
 /// Validate a complete scalar/SIMD transaction without reading any MMIO byte
 /// or committing a RAM write. Adjacent, separately backed windows are valid.
@@ -344,18 +351,28 @@ pub unsafe fn ram_backing(address: u64, size: usize) -> Option<u32> {
     if plain_ram(address, size) {
         return Some(address as u32);
     }
-    let bytes = (&*(&raw const PHYSICAL_BUS)).access(address, size, *global_pointers::memory_size).ok()?;
-    (contiguous(&bytes[..size]) && bytes[..size].iter().all(|byte| byte.kind == WindowKind::Ram)).then_some(bytes[0].backing)
+    let bytes = (&*(&raw const PHYSICAL_BUS))
+        .access(address, size, *global_pointers::memory_size)
+        .ok()?;
+    (contiguous(&bytes[..size])
+        && bytes[..size]
+            .iter()
+            .all(|byte| byte.kind == WindowKind::Ram))
+    .then_some(bytes[0].backing)
 }
 
 /// Called only above the legacy RAM fast limit. A high RAM window removes
 /// this range from the low guest bus while keeping its host backing alive.
 pub unsafe fn is_low_ram_hole(address: u32) -> bool {
-    (&*(&raw const PHYSICAL_BUS)).windows.iter().flatten().any(|window| {
-        window.kind == WindowKind::Ram
-            && address >= window.backing
-            && (address as u64) < window.backing as u64 + window.length as u64
-    })
+    (&*(&raw const PHYSICAL_BUS))
+        .windows
+        .iter()
+        .flatten()
+        .any(|window| {
+            window.kind == WindowKind::Ram
+                && address >= window.backing
+                && (address as u64) < window.backing as u64 + window.length as u64
+        })
 }
 
 #[no_mangle]
@@ -421,7 +438,8 @@ pub unsafe extern "C" fn x64_phys_get_window(slot: u32, field: u32) -> f64 {
     if slot as usize >= MAX_WINDOWS || field > 4 {
         return -1.0;
     }
-    let Some(window) = PHYSICAL_BUS.windows[slot as usize] else {
+    let Some(window) = PHYSICAL_BUS.windows[slot as usize]
+    else {
         return 0.0;
     };
     match field {
@@ -432,7 +450,8 @@ pub unsafe extern "C" fn x64_phys_get_window(slot: u32, field: u32) -> f64 {
         4 => {
             if window.kind == WindowKind::Ram {
                 1.0
-            } else {
+            }
+            else {
                 2.0
             }
         },
@@ -444,7 +463,8 @@ pub unsafe extern "C" fn x64_phys_get_window(slot: u32, field: u32) -> f64 {
 pub unsafe extern "C" fn x64_phys_generation(high: bool) -> u32 {
     if high {
         (generation() >> 32) as u32
-    } else {
+    }
+    else {
         generation() as u32
     }
 }
@@ -523,7 +543,11 @@ physical_exports!(x64_phys_read32, x64_phys_write32, read32, write32, u32);
 /// A page-bounded RAM witness, never an MMIO view or a raw host pointer.
 pub unsafe fn ram_page(address: u64) -> Result<RamPage, PhysicalError> {
     if address & PAGE_MASK == 0 && plain_ram(address, 0x1000) {
-        return Ok(RamPage { guest: PhysicalAddress(address), backing: address as u32, generation: generation() });
+        return Ok(RamPage {
+            guest: PhysicalAddress(address),
+            backing: address as u32,
+            generation: generation(),
+        });
     }
     // (extended RAM is never plain RAM: no window search needed to say so)
     if super::extended::contains(address) {
@@ -594,7 +618,11 @@ unsafe fn read_allowed(address: u64, width: usize, allow_mmio: bool) -> Result<u
     {
         return Err(PhysicalError::SideEffecting);
     }
-    if bytes[..width].iter().all(|byte| byte.kind == WindowKind::Extended) && same_page(address, width) {
+    if bytes[..width]
+        .iter()
+        .all(|byte| byte.kind == WindowKind::Extended)
+        && same_page(address, width)
+    {
         return Ok(super::extended::read(address, width));
     }
     if contiguous(&bytes[..width]) {
@@ -689,7 +717,11 @@ unsafe fn write(address: u64, width: usize, value: u64) -> Result<(), PhysicalEr
     }
     let bytes =
         (&*(&raw const PHYSICAL_BUS)).access(address, width, *global_pointers::memory_size)?;
-    if bytes[..width].iter().all(|byte| byte.kind == WindowKind::Extended) && same_page(address, width) {
+    if bytes[..width]
+        .iter()
+        .all(|byte| byte.kind == WindowKind::Extended)
+        && same_page(address, width)
+    {
         super::extended::write(address, width, value);
         return Ok(());
     }
@@ -712,13 +744,16 @@ unsafe fn write(address: u64, width: usize, value: u64) -> Result<(), PhysicalEr
             },
             _ => unreachable!(),
         }
-    } else {
+    }
+    else {
         for (offset, byte) in bytes.iter().enumerate().take(width) {
             let part = (value >> (offset * 8)) as u8 as i32;
             match byte.kind {
                 WindowKind::Ram => memory::write8_ram(byte.backing, part),
                 WindowKind::Mmio => memory::write8(byte.backing, part),
-                WindowKind::Extended => super::extended::write(address + offset as u64, 1, part as u64),
+                WindowKind::Extended => {
+                    super::extended::write(address + offset as u64, 1, part as u64)
+                },
             }
         }
     }
@@ -734,14 +769,10 @@ pub unsafe fn read16(address: u64) -> Result<u16, PhysicalError> {
 pub unsafe fn read32(address: u64) -> Result<u32, PhysicalError> {
     read_allowed(address, 4, true).map(|v| v as u32)
 }
-pub unsafe fn read64(address: u64) -> Result<u64, PhysicalError> {
-    read_allowed(address, 8, true)
-}
+pub unsafe fn read64(address: u64) -> Result<u64, PhysicalError> { read_allowed(address, 8, true) }
 /// Compiler inspection rejects an access touching any device byte before
 /// invoking the backing bus; it neither updates A/D nor delivers a fault.
-pub unsafe fn peek64(address: u64) -> Result<u64, PhysicalError> {
-    read_allowed(address, 8, false)
-}
+pub unsafe fn peek64(address: u64) -> Result<u64, PhysicalError> { read_allowed(address, 8, false) }
 pub unsafe fn write8(address: u64, value: u8) -> Result<(), PhysicalError> {
     write(address, 1, value as u64)
 }

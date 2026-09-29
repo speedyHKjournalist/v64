@@ -12,7 +12,9 @@ use crate::ir::{
 use std::time::Instant;
 
 fn hex(s: &str) -> Vec<u8> {
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+        .collect()
 }
 fn field<'a>(line: &'a str, key: &str) -> &'a str {
     let at = line.find(&format!("\"{}\":", key)).unwrap() + key.len() + 3;
@@ -46,7 +48,8 @@ fn page_bench() {
     let mut totals = [0f64; 5];
     let (mut ok, mut failed) = (0, 0);
     let mut errors = std::collections::BTreeMap::<String, usize>::new();
-    let (mut instructions, mut blocks, mut bytes_out, mut entries_in, mut entries_served) = (0, 0, 0, 0, 0);
+    let (mut instructions, mut blocks, mut bytes_out, mut entries_in, mut entries_served) =
+        (0, 0, 0, 0, 0);
     let mut worst = vec![];
     for line in text.lines().filter(|l| l.starts_with('{')) {
         let linear: u32 = field(line, "linear").parse().unwrap();
@@ -57,7 +60,13 @@ fn page_bench() {
         let entries: Vec<GuestEip> = field(line, "entries")
             .split(',')
             .filter(|s| !s.is_empty())
-            .map(|s| GuestEip(linear.wrapping_add(s.parse::<u32>().unwrap()).wrapping_sub(cs_base)))
+            .map(|s| {
+                GuestEip(
+                    linear
+                        .wrapping_add(s.parse::<u32>().unwrap())
+                        .wrapping_sub(cs_base),
+                )
+            })
             .take(max_entries)
             .collect();
         entries_in += entries.len();
@@ -74,7 +83,8 @@ fn page_bench() {
         };
         let started = Instant::now();
         let result = (|| -> Result<(usize, usize, usize, usize), CompileError> {
-            let (mut region, served) = lift_cpu_cfg_page(source, &entries, default_32, 64, CfgLimits::PAGE)?;
+            let (mut region, served) =
+                lift_cpu_cfg_page(source, &entries, default_32, 64, CfgLimits::PAGE)?;
             if std::env::var("IR_PAGE_DEBUG").is_ok() {
                 let mut preds = vec![0; region.blocks.len()];
                 for b in &region.blocks {
@@ -84,9 +94,23 @@ fn page_bench() {
                 }
                 for (i, b) in region.blocks.iter().enumerate() {
                     if b.entry_state.is_none() && preds[i] > 1 {
-                        let ops: Vec<_> = b.instructions.iter().take(4).map(|id| format!("{:?}", region.instructions[id.index()].op)).collect();
-                        let pcs: Vec<_> = b.instructions.iter().filter_map(|id| region.instructions[id.index()].state).take(1).map(|s| region.states[s.index()].instruction_pc.0).collect();
-                        println!("join-without-recovery page={:#x} block={} preds={} pcs={:x?} ops={:?}", linear, i, preds[i], pcs, ops);
+                        let ops: Vec<_> = b
+                            .instructions
+                            .iter()
+                            .take(4)
+                            .map(|id| format!("{:?}", region.instructions[id.index()].op))
+                            .collect();
+                        let pcs: Vec<_> = b
+                            .instructions
+                            .iter()
+                            .filter_map(|id| region.instructions[id.index()].state)
+                            .take(1)
+                            .map(|s| region.states[s.index()].instruction_pc.0)
+                            .collect();
+                        println!(
+                            "join-without-recovery page={:#x} block={} preds={} pcs={:x?} ops={:?}",
+                            linear, i, preds[i], pcs, ops
+                        );
                     }
                 }
             }
@@ -96,7 +120,8 @@ fn page_bench() {
             let config = if tier2 { PassConfig::default() } else { PassConfig::tier1() };
             run(&mut region, config).map_err(CompileError::InvalidIr)?;
             if tier2 {
-                licm::run(&mut region, licm::DEFAULT_WORK_LIMIT).map_err(CompileError::InvalidIr)?;
+                licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
+                    .map_err(CompileError::InvalidIr)?;
             }
             crate::ir::passes::strip_polls(&mut region);
             lap(1, &mut clock);
@@ -108,9 +133,20 @@ fn page_bench() {
                     }
                 }
                 for (i, b) in region.blocks.iter().enumerate() {
-                    if b.entry_state.is_none() && !region.entries.contains(&crate::ir::ids::BlockId(i as u32)) {
-                        let ops: Vec<_> = b.instructions.iter().take(3).map(|id| format!("{:?}", region.instructions[id.index()].op)).collect();
-                        let term = match b.terminator.as_ref().unwrap() { crate::ir::hir::Terminator::Branch(_) => "br", crate::ir::hir::Terminator::CondBranch{..} => "cond", crate::ir::hir::Terminator::Exit(_) => "exit" };
+                    if b.entry_state.is_none()
+                        && !region.entries.contains(&crate::ir::ids::BlockId(i as u32))
+                    {
+                        let ops: Vec<_> = b
+                            .instructions
+                            .iter()
+                            .take(3)
+                            .map(|id| format!("{:?}", region.instructions[id.index()].op))
+                            .collect();
+                        let term = match b.terminator.as_ref().unwrap() {
+                            crate::ir::hir::Terminator::Branch(_) => "br",
+                            crate::ir::hir::Terminator::CondBranch { .. } => "cond",
+                            crate::ir::hir::Terminator::Exit(_) => "exit",
+                        };
                         println!("norecovery page={:#x} block={} preds={:?} params={} insts={} term={} ops={:?}", linear, i, preds[i], b.params.len(), b.instructions.len(), term, ops);
                     }
                 }
@@ -130,7 +166,12 @@ fn page_bench() {
             if let Ok(dump) = std::env::var("IR_PAGE_DUMP") {
                 if u32::from_str_radix(&dump, 16).unwrap() == linear {
                     std::fs::write("/tmp/page.wasm", &artifact.bytes).unwrap();
-                    println!("dumped {:#x}: {} bytes, {} locals", linear, artifact.bytes.len(), artifact.locals);
+                    println!(
+                        "dumped {:#x}: {} bytes, {} locals",
+                        linear,
+                        artifact.bytes.len(),
+                        artifact.locals
+                    );
                 }
             }
             lap(4, &mut clock);
@@ -170,6 +211,9 @@ fn page_bench() {
         println!("  error {} x{}", e, n);
     }
     for w in worst.iter().take(8) {
-        println!("  slow {:.1}ms linear={:#x} insts={} blocks={} entries={}", w.0, w.1, w.2, w.3, w.4);
+        println!(
+            "  slow {:.1}ms linear={:#x} insts={} blocks={} entries={}",
+            w.0, w.1, w.2, w.3, w.4
+        );
     }
 }

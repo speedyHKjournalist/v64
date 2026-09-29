@@ -423,7 +423,10 @@ mod tests {
     fn sse_nan_results_follow_x86() {
         let (qnan, snan) = (f32::from_bits(0x7FC0_1234), f32::from_bits(0xFF80_0001));
         // an invalid operation gives the QNaN floating-point indefinite
-        assert_eq!(sse_nan_f32(f32::INFINITY - f32::INFINITY, 1.0, 2.0).to_bits(), 0xFFC0_0000);
+        assert_eq!(
+            sse_nan_f32(f32::INFINITY - f32::INFINITY, 1.0, 2.0).to_bits(),
+            0xFFC0_0000
+        );
         assert_eq!(sse_sqrt_f32(-4.0).to_bits(), 0xFFC0_0000);
         assert_eq!(sse_sqrt_f64(-4.0).to_bits(), 0xFFF8_0000_0000_0000);
         assert_eq!(sse_sqrt_f32(-0.0).to_bits(), 0x8000_0000);
@@ -432,10 +435,20 @@ mod tests {
         assert_eq!(sse_nan_f32(snan + qnan, snan, qnan).to_bits(), 0xFFC0_0001);
         assert_eq!(sse_nan_f32(1.0 + qnan, 1.0, qnan).to_bits(), 0x7FC0_1234);
         assert_eq!(sse_sqrt_f32(snan).to_bits(), 0xFFC0_0001);
-        assert_eq!(sse_nan_f64(f64::NAN, 1.0, f64::from_bits(0x7FF0_0000_0000_0005)).to_bits(), 0x7FF8_0000_0000_0005);
+        assert_eq!(
+            sse_nan_f64(f64::NAN, 1.0, f64::from_bits(0x7FF0_0000_0000_0005)).to_bits(),
+            0x7FF8_0000_0000_0005
+        );
         // ordinary results are untouched
         assert_eq!(sse_nan_f32(1.5 + 2.0, 1.5, 2.0), 3.5);
-        let (a, b) = (reg128 { f32: [1.0, -1.0, f32::INFINITY, 0.0] }, reg128 { f32: [2.0, 0.0, f32::NEG_INFINITY, 0.0] });
+        let (a, b) = (
+            reg128 {
+                f32: [1.0, -1.0, f32::INFINITY, 0.0],
+            },
+            reg128 {
+                f32: [2.0, 0.0, f32::NEG_INFINITY, 0.0],
+            },
+        );
         let sum = unsafe { sse_ps(a, b, |x, y| x + y).u32 };
         assert_eq!(sum, [3.0f32.to_bits(), (-1.0f32).to_bits(), 0xFFC0_0000, 0]);
         let quotient = unsafe { sse_ps(a, b, |x, y| x / y).u32 };

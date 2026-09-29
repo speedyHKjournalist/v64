@@ -70,7 +70,8 @@ fn required_epoch_polls(mir: &MirRegion) -> Vec<bool> {
                 required[i] = observed;
                 observed = false;
             }
-            else if mir.memory[i].is_some() || mir.effects[i].is_some() || mir.calls[i].is_some() {
+            else if mir.memory[i].is_some() || mir.effects[i].is_some() || mir.calls[i].is_some()
+            {
                 observed = true;
             }
             else {
@@ -94,8 +95,13 @@ fn required_epoch_polls(mir: &MirRegion) -> Vec<bool> {
 /// decoding operands. Constant non-SSE invalid/reserved forms do not observe
 /// this warning; unknown hand-built arguments conservatively retain the guard.
 fn debug_sse_call(mir: &MirRegion, plan: &CallPlan) -> bool {
-    let name = mir.helpers[plan.helper.index()].as_ref().unwrap().name.as_str();
-    if name.starts_with("ir_sse_fp_") || name.starts_with("ir_mmx_")
+    let name = mir.helpers[plan.helper.index()]
+        .as_ref()
+        .unwrap()
+        .name
+        .as_str();
+    if name.starts_with("ir_sse_fp_")
+        || name.starts_with("ir_mmx_")
         || matches!(name, "ir_ldmxcsr" | "ir_stmxcsr")
     {
         return true;
@@ -105,7 +111,10 @@ fn debug_sse_call(mir: &MirRegion, plan: &CallPlan) -> bool {
         "ir_reserved_form" => 1,
         _ => return false,
     };
-    mir.values.iter().flatten().find(|value| value.result == plan.args[argument])
+    mir.values
+        .iter()
+        .flatten()
+        .find(|value| value.result == plan.args[argument])
         .and_then(|value| match value.steps.as_slice() {
             [Step::I32(n)] => Some(if argument == 0 { *n == 2 } else { *n != 0 }),
             _ => None,
@@ -542,7 +551,11 @@ impl Emitter<'_> {
         for &inst in &block.instructions {
             if let Some(poll) = &self.mir.control.polls[inst.index()] {
                 if !pure {
-                    self.check_poll(Some(poll.recovery), None, self.instruction_epoch_check(inst));
+                    self.check_poll(
+                        Some(poll.recovery),
+                        None,
+                        self.instruction_epoch_check(inst),
+                    );
                 }
             }
             else {
@@ -2360,7 +2373,9 @@ fn emit_inner_with_batches(
     let mut e = Emitter {
         w: WasmBuilder::new(),
         mir,
-        locals: (0..mir.allocation.local_types.len()).map(|_| None).collect(),
+        locals: (0..mir.allocation.local_types.len())
+            .map(|_| None)
+            .collect(),
         layout,
         cpu,
         linkable_entry: entry.is_some(),
@@ -2381,9 +2396,14 @@ fn emit_inner_with_batches(
             Vec::new()
         },
         diagnostic: None,
-        debug_sse_observer: cfg!(debug_assertions) && cpu
+        debug_sse_observer: cfg!(debug_assertions)
+            && cpu
             && (mir.effects.iter().flatten().any(debug_sse_effect)
-                || mir.calls.iter().flatten().any(|plan| debug_sse_call(mir, plan))),
+                || mir
+                    .calls
+                    .iter()
+                    .flatten()
+                    .any(|plan| debug_sse_call(mir, plan))),
         batch_polls,
         budget_batch_blocks: 0,
     };
@@ -2473,29 +2493,29 @@ fn emit_inner_with_batches(
             e.w.block_end();
         }
         else {
-        e.w.const_i32(entry.linear.0 as i32);
-        e.w.const_i32(entry.cs_base() as i32);
-        e.w.const_i32(i32::from(entry.default_32));
-        // Single-entry modules need only one opaque Wasm-to-Wasm import for
-        // context validation plus REP/previous-IP initialization. Rejections
-        // must remain effect-free; shared aliases retain their separate guard.
-        let guard = if aliases.is_empty() { "ir_enter_checked" } else { "ir_entry_matches" };
-        e.w.call_signature(guard, crate::ir::helper::imports::signature(guard));
-        for alias in aliases {
-            e.w.const_i32(alias.linear.0 as i32);
-            e.w.const_i32(alias.cs_base() as i32);
-            e.w.const_i32(i32::from(alias.default_32));
-            e.w.call_signature(
-                "ir_entry_matches",
-                crate::ir::helper::imports::signature("ir_entry_matches"),
-            );
-            e.w.or_i32();
-        }
-        e.w.eqz_i32();
-        e.w.if_void();
-        e.diagnostic_exit(DiagnosticExit::EntryGuard);
-        e.return_to_cpu();
-        e.w.block_end();
+            e.w.const_i32(entry.linear.0 as i32);
+            e.w.const_i32(entry.cs_base() as i32);
+            e.w.const_i32(i32::from(entry.default_32));
+            // Single-entry modules need only one opaque Wasm-to-Wasm import for
+            // context validation plus REP/previous-IP initialization. Rejections
+            // must remain effect-free; shared aliases retain their separate guard.
+            let guard = if aliases.is_empty() { "ir_enter_checked" } else { "ir_entry_matches" };
+            e.w.call_signature(guard, crate::ir::helper::imports::signature(guard));
+            for alias in aliases {
+                e.w.const_i32(alias.linear.0 as i32);
+                e.w.const_i32(alias.cs_base() as i32);
+                e.w.const_i32(i32::from(alias.default_32));
+                e.w.call_signature(
+                    "ir_entry_matches",
+                    crate::ir::helper::imports::signature("ir_entry_matches"),
+                );
+                e.w.or_i32();
+            }
+            e.w.eqz_i32();
+            e.w.if_void();
+            e.diagnostic_exit(DiagnosticExit::EntryGuard);
+            e.return_to_cpu();
+            e.w.block_end();
         }
     }
     if cpu {
@@ -2720,7 +2740,16 @@ fn emit_inner_with_batches(
         // Roll back at most once; no half-built artifact can be published.
         if e.budget_batch_blocks != 0 {
             return emit_inner_with_batches(
-                mir, layout, budget, cpu, entry, code_pages, fused, aliases, page, false,
+                mir,
+                layout,
+                budget,
+                cpu,
+                entry,
+                code_pages,
+                fused,
+                aliases,
+                page,
+                false,
                 elide_epoch_polls,
             );
         }

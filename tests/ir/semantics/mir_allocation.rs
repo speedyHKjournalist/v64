@@ -35,9 +35,8 @@ fn dense_machine_allocation_preserves_colors_and_generated_code() {
                     bytes[3] = 4;
                 }
             }
-            let original =
-                lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x201000), mode, 8)
-                    .unwrap_or_else(|e| panic!("mode={mode}, bytes={bytes:x?}: {e:?}"));
+            let original = lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x201000), mode, 8)
+                .unwrap_or_else(|e| panic!("mode={mode}, bytes={bytes:x?}: {e:?}"));
             for optimized in [false, true] {
                 let mut hir = original.clone();
                 if optimized {
@@ -51,8 +50,8 @@ fn dense_machine_allocation_preserves_colors_and_generated_code() {
                     }
                     let initial_allocation = mir.allocation.clone();
                     let initial_control = mir.control.clone();
-                    let reference = reallocate_with::<BTreeSet<ValueId>>(&mut mir.data, 4_000_000)
-                        .unwrap();
+                    let reference =
+                        reallocate_with::<BTreeSet<ValueId>>(&mut mir.data, 4_000_000).unwrap();
                     mir.verify().unwrap();
                     let reference_allocation = mir.allocation.clone();
                     let reference_control = mir.control.clone();
@@ -92,31 +91,54 @@ fn wide_phi_forwarding(parameters: usize) -> crate::ir::mir::MirRegion {
     let middle_effect = b.region.param(middle, Type::Effect);
     let exit_effect = b.region.param(exit, Type::Effect);
     let middle_values: Vec<_> = (0..parameters)
-        .map(|_| b.region.param(middle, Type::I32)).collect();
+        .map(|_| b.region.param(middle, Type::I32))
+        .collect();
     let middle_state = b.region.state(StateMap {
-        instruction_pc: GuestEip(0x1000), next_pc: GuestEip(0x1001),
-        next_value: None, resume: ResumeKind::BeforeInstruction,
-        gpr: std::array::from_fn(|n| middle_values[n]), flags: b.flags.clone(),
-        xmm: vec![], x87: vec![], committed_instructions: 0,
-        count_base: None, rep_progress: None,
+        instruction_pc: GuestEip(0x1000),
+        next_pc: GuestEip(0x1001),
+        next_value: None,
+        resume: ResumeKind::BeforeInstruction,
+        gpr: std::array::from_fn(|n| middle_values[n]),
+        flags: b.flags.clone(),
+        xmm: vec![],
+        x87: vec![],
+        committed_instructions: 0,
+        count_base: None,
+        rep_progress: None,
     });
     let exit_values: Vec<_> = (0..parameters)
-        .map(|_| b.region.param(exit, Type::I32)).collect();
-    b.region.terminate(b.block, Terminator::Branch(Edge {
-        target: middle,
-        args: std::iter::once(b.effect)
-            .chain((0..parameters).map(|n| b.gpr[n % 8])).collect(),
-    }));
-    b.region.terminate(middle, Terminator::Branch(Edge {
-        target: exit,
-        args: std::iter::once(middle_effect).chain(middle_values).collect(),
-    }));
+        .map(|_| b.region.param(exit, Type::I32))
+        .collect();
+    b.region.terminate(
+        b.block,
+        Terminator::Branch(Edge {
+            target: middle,
+            args: std::iter::once(b.effect)
+                .chain((0..parameters).map(|n| b.gpr[n % 8]))
+                .collect(),
+        }),
+    );
+    b.region.terminate(
+        middle,
+        Terminator::Branch(Edge {
+            target: exit,
+            args: std::iter::once(middle_effect)
+                .chain(middle_values)
+                .collect(),
+        }),
+    );
     let state = b.region.state(StateMap {
-        instruction_pc: GuestEip(0x1000), next_pc: GuestEip(0x1001),
-        next_value: None, resume: ResumeKind::AfterInstruction,
-        gpr: std::array::from_fn(|n| exit_values[n]), flags: b.flags,
-        xmm: vec![], x87: vec![], committed_instructions: 1,
-        count_base: None, rep_progress: None,
+        instruction_pc: GuestEip(0x1000),
+        next_pc: GuestEip(0x1001),
+        next_value: None,
+        resume: ResumeKind::AfterInstruction,
+        gpr: std::array::from_fn(|n| exit_values[n]),
+        flags: b.flags,
+        xmm: vec![],
+        x87: vec![],
+        committed_instructions: 1,
+        count_base: None,
+        rep_progress: None,
     });
     b.region.terminate(exit, Terminator::Exit(state));
     // Every non-cold guest block owns a budget recovery map (the lowered CFG
@@ -135,8 +157,10 @@ fn machine_verifier_bounds_wide_phi_edge_searches() {
     // Almost every live value is filtered out at the incoming edge, but finding
     // each parameter in its Vec still performs a quadratic membership search.
     let mir = wide_phi_forwarding(128);
-    assert!(matches!(verify(&mir, 12_000), Err(CompileError::Budget(_))),
-        "small survivor sets must not hide wide-phi edge work");
+    assert!(
+        matches!(verify(&mir, 12_000), Err(CompileError::Budget(_))),
+        "small survivor sets must not hide wide-phi edge work"
+    );
     verify(&mir, 4_000_000).unwrap();
 }
 
@@ -163,7 +187,10 @@ fn machine_edge_work_budget_failure_preserves_executable_allocation() {
     }
     mir.data.allocation = allocation.clone();
     mir.data.control = control.clone();
-    assert!(matches!(mir.allocate_machine_locals(low), Err(CompileError::Budget(_))));
+    assert!(matches!(
+        mir.allocate_machine_locals(low),
+        Err(CompileError::Budget(_))
+    ));
     assert_eq!(mir.allocation, allocation);
     assert_eq!(mir.control, control);
     mir.verify().unwrap();

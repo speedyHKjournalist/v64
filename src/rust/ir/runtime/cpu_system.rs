@@ -107,9 +107,7 @@ pub unsafe fn ir_sti_finish_link(depth: u32) {
 /// No acknowledge, host callback, FLAGS change, or CPU state materialization.
 /// The emitter may discard a completed shadow scope only when this is true.
 #[no_mangle]
-pub unsafe fn ir_sti_no_pending_irq() -> bool {
-    super::continuation::no_pending_irq()
-}
+pub unsafe fn ir_sti_no_pending_irq() -> bool { super::continuation::no_pending_irq() }
 /// Slow completed-shadow path. Its AfterInstruction snapshot has already
 /// retired STI and its shadow. IRQ delivery owns post-state; never resume SSA.
 #[no_mangle]

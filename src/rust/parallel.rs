@@ -125,7 +125,8 @@ pub unsafe fn parallel_set_active(active: bool) {
     ACTIVE = active;
     if active {
         let yield_flags = machine(&raw mut CORE_YIELD).cast::<u32>();
-        *yield_flags.add(crate::cpu::apic::current_core()) = &raw mut crate::cpu::cpu::core_yield as u32;
+        *yield_flags.add(crate::cpu::apic::current_core()) =
+            &raw mut crate::cpu::cpu::core_yield as u32;
         if !is_worker() {
             code::allocate(*crate::cpu::global_pointers::memory_size / 4096);
         }
@@ -206,7 +207,10 @@ impl SpinLock {
         {
             let word = unsafe { &*(&raw const self.0 as *const AtomicU32) };
             let owner = crate::cpu::apic::current_core() as u32 + 1;
-            while word.compare_exchange_weak(0, owner, SeqCst, SeqCst).is_err() {
+            while word
+                .compare_exchange_weak(0, owner, SeqCst, SeqCst)
+                .is_err()
+            {
                 std::hint::spin_loop();
             }
         }
@@ -378,9 +382,7 @@ pub unsafe fn load64(p: *const u8) -> u64 {
 }
 /// 16 bytes: two ordered 8-byte halves (SSE accesses are not atomic as a whole)
 #[inline(always)]
-pub unsafe fn load128(p: *const u8) -> [u64; 2] {
-    [load64(p), load64(p.add(8))]
-}
+pub unsafe fn load128(p: *const u8) -> [u64; 2] { [load64(p), load64(p.add(8))] }
 
 #[inline(always)]
 pub unsafe fn store8(p: *mut u8, value: u8) {
@@ -482,10 +484,17 @@ pub unsafe fn compare_exchange128(p: *mut u8, expected: u128, value: u128) -> bo
         }
         let low = &*(p as *const AtomicU64);
         let high = &*(p.add(8) as *const AtomicU64);
-        if high.load(SeqCst) != old_high || low.compare_exchange(old_low, new_low, SeqCst, SeqCst).is_err() {
+        if high.load(SeqCst) != old_high
+            || low
+                .compare_exchange(old_low, new_low, SeqCst, SeqCst)
+                .is_err()
+        {
             return false;
         }
-        if high.compare_exchange(old_high, new_high, SeqCst, SeqCst).is_err() {
+        if high
+            .compare_exchange(old_high, new_high, SeqCst, SeqCst)
+            .is_err()
+        {
             // (if a plain store replaced the low half meanwhile, it stays)
             let _ = low.compare_exchange(new_low, old_low, SeqCst, SeqCst);
             return false;
@@ -513,7 +522,11 @@ fn shared<T>(commit: impl FnOnce() -> T) -> T {
     let word = locked_operations();
     loop {
         let current = word.load(SeqCst);
-        if current & EXCLUSIVE == 0 && word.compare_exchange_weak(current, current + 1, SeqCst, SeqCst).is_ok() {
+        if current & EXCLUSIVE == 0
+            && word
+                .compare_exchange_weak(current, current + 1, SeqCst, SeqCst)
+                .is_ok()
+        {
             break;
         }
         std::hint::spin_loop();
@@ -547,10 +560,18 @@ pub unsafe fn compare_exchange(p: *mut u8, bytes: u32, expected: u64, value: u64
         let aligned = p as usize & (bytes as usize - 1) == 0;
         if aligned {
             return shared(|| match bytes {
-                1 => (*(p as *const AtomicU8)).compare_exchange(expected as u8, value as u8, SeqCst, SeqCst).is_ok(),
-                2 => (*(p as *const AtomicU16)).compare_exchange(expected as u16, value as u16, SeqCst, SeqCst).is_ok(),
-                4 => (*(p as *const AtomicU32)).compare_exchange(expected as u32, value as u32, SeqCst, SeqCst).is_ok(),
-                _ => (*(p as *const AtomicU64)).compare_exchange(expected, value, SeqCst, SeqCst).is_ok(),
+                1 => (*(p as *const AtomicU8))
+                    .compare_exchange(expected as u8, value as u8, SeqCst, SeqCst)
+                    .is_ok(),
+                2 => (*(p as *const AtomicU16))
+                    .compare_exchange(expected as u16, value as u16, SeqCst, SeqCst)
+                    .is_ok(),
+                4 => (*(p as *const AtomicU32))
+                    .compare_exchange(expected as u32, value as u32, SeqCst, SeqCst)
+                    .is_ok(),
+                _ => (*(p as *const AtomicU64))
+                    .compare_exchange(expected, value, SeqCst, SeqCst)
+                    .is_ok(),
             });
         }
         exclusive(|| {
@@ -747,7 +768,11 @@ pub mod code {
     pub unsafe fn parallel_code_reset() { reset() }
     unsafe fn reset() {
         if !(*machine(&raw mut OWNERS)).is_null() {
-            ptr::write_bytes(*machine(&raw mut OWNERS), 0, *machine(&raw mut OWNER_PAGES) as usize);
+            ptr::write_bytes(
+                *machine(&raw mut OWNERS),
+                0,
+                *machine(&raw mut OWNER_PAGES) as usize,
+            );
         }
     }
 
@@ -789,7 +814,12 @@ pub mod code {
             return;
         }
         or8(at, 1 << me());
-        let seq = append(machine(&raw mut PUBLISH_NEXT), machine(&raw mut PUBLISHED).cast(), PUBLISH_RING, page);
+        let seq = append(
+            machine(&raw mut PUBLISH_NEXT),
+            machine(&raw mut PUBLISHED).cast(),
+            PUBLISH_RING,
+            page,
+        );
         let claimed = &mut *(&raw mut CLAIMED);
         if claimed.len() <= page as usize {
             claimed.resize(page as usize + 1, 0);
@@ -829,7 +859,12 @@ pub mod code {
         if others == 0 {
             return;
         }
-        append(machine(&raw mut INVALIDATE_NEXT), machine(&raw mut INVALIDATED).cast(), INVALIDATE_RING, page);
+        append(
+            machine(&raw mut INVALIDATE_NEXT),
+            machine(&raw mut INVALIDATED).cast(),
+            INVALIDATE_RING,
+            page,
+        );
         for core in 0..MAX_CORES {
             if others & 1 << core != 0 {
                 kick(core);
@@ -944,8 +979,13 @@ pub mod code {
         }
         // publications: mark this core's translations of the pages
         let mut pages = Vec::new();
-        let overflow = drain(machine(&raw mut PUBLISH_NEXT), machine(&raw mut PUBLISHED).cast(), PUBLISH_RING,
-            &raw mut PUBLISH_SEEN, &mut pages);
+        let overflow = drain(
+            machine(&raw mut PUBLISH_NEXT),
+            machine(&raw mut PUBLISHED).cast(),
+            PUBLISH_RING,
+            &raw mut PUBLISH_SEEN,
+            &mut pages,
+        );
         if overflow || pages.len() > 32 {
             crate::cpu::cpu::full_clear_tlb();
         }
@@ -957,11 +997,19 @@ pub mod code {
         if overflow || !pages.is_empty() {
             crate::x64::jac::flush_all();
         }
-        word_store(machine(&raw mut ACKED).cast::<u32>().add(me()), PUBLISH_SEEN);
+        word_store(
+            machine(&raw mut ACKED).cast::<u32>().add(me()),
+            PUBLISH_SEEN,
+        );
         // invalidations: retire this core's code from the pages
         pages.clear();
-        let overflow = drain(machine(&raw mut INVALIDATE_NEXT), machine(&raw mut INVALIDATED).cast(), INVALIDATE_RING,
-            &raw mut INVALIDATE_SEEN, &mut pages);
+        let overflow = drain(
+            machine(&raw mut INVALIDATE_NEXT),
+            machine(&raw mut INVALIDATED).cast(),
+            INVALIDATE_RING,
+            &raw mut INVALIDATE_SEEN,
+            &mut pages,
+        );
         if overflow {
             crate::jit::jit_clear_cache_js();
         }
@@ -973,13 +1021,21 @@ pub mod code {
     }
 
     unsafe fn append(next: *mut u32, ring: *mut u64, size: usize, page: u32) -> u32 {
-        let seq = (*(next as *const AtomicU32)).fetch_add(1, SeqCst).wrapping_add(1);
+        let seq = (*(next as *const AtomicU32))
+            .fetch_add(1, SeqCst)
+            .wrapping_add(1);
         let slot = ring.add(seq as usize % size);
         (*(slot as *const AtomicU64)).store((seq as u64) << 32 | page as u64, SeqCst);
         seq
     }
     /// The entries after `*seen`; true if some were overwritten before they were read
-    unsafe fn drain(next: *mut u32, ring: *mut u64, size: usize, seen: *mut u32, out: &mut Vec<u32>) -> bool {
+    unsafe fn drain(
+        next: *mut u32,
+        ring: *mut u64,
+        size: usize,
+        seen: *mut u32,
+        out: &mut Vec<u32>,
+    ) -> bool {
         let current = (*(next as *const AtomicU32)).load(SeqCst);
         let first = *seen;
         *seen = current;

@@ -14,18 +14,10 @@ pub struct PrefixState {
     pub rex: Option<u8>,
 }
 impl PrefixState {
-    pub fn w(self) -> bool {
-        self.rex.is_some_and(|r| r & 8 != 0)
-    }
-    pub fn r(self) -> u8 {
-        self.rex.map_or(0, |r| (r >> 2 & 1) << 3)
-    }
-    pub fn x(self) -> u8 {
-        self.rex.map_or(0, |r| (r >> 1 & 1) << 3)
-    }
-    pub fn b(self) -> u8 {
-        self.rex.map_or(0, |r| (r & 1) << 3)
-    }
+    pub fn w(self) -> bool { self.rex.is_some_and(|r| r & 8 != 0) }
+    pub fn r(self) -> u8 { self.rex.map_or(0, |r| (r >> 2 & 1) << 3) }
+    pub fn x(self) -> u8 { self.rex.map_or(0, |r| (r >> 1 & 1) << 3) }
+    pub fn b(self) -> u8 { self.rex.map_or(0, |r| (r & 1) << 3) }
     /// Returns true only if byte is a prefix in the current execution mode.
     pub fn consume(&mut self, byte: u8, mode: ExecutionMode) -> bool {
         if mode.is_long() && (0x40..=0x4F).contains(&byte) {
@@ -56,7 +48,8 @@ pub fn byte_register(encoded: u8, rex_present: bool) -> ByteRegister {
     assert!(encoded < 16 && (rex_present || encoded < 8));
     if !rex_present && (4..8).contains(&encoded) {
         ByteRegister::HighLegacy(encoded - 4)
-    } else {
+    }
+    else {
         ByteRegister::Low(encoded)
     }
 }
@@ -131,7 +124,8 @@ impl Decoded {
     pub fn base_opcode(&self) -> u32 {
         if self.opcode & 0xFF00 == 0x0F00 {
             self.opcode & 0xFFFF
-        } else {
+        }
+        else {
             self.opcode & 0xFF
         }
     }
@@ -253,7 +247,8 @@ fn operand_size(mode: ExecutionMode, prefixes: PrefixState, opcode: u32, modrm: 
     ) || opcode == 0xFF && group == 6
     {
         64
-    } else {
+    }
+    else {
         32
     }
 }
@@ -302,18 +297,22 @@ where
         if md == 0 && raw_base == 5 {
             base = AddressBase::None;
             disp32 = true;
-        } else {
+        }
+        else {
             base = AddressBase::Register(raw_base | p.b());
         }
-    } else if md == 0 && rm == 5 {
+    }
+    else if md == 0 && rm == 5 {
         base = if mode.is_long() { AddressBase::NextRip } else { AddressBase::None };
         disp32 = true;
     }
     let displacement = if md == 1 {
         c.signed(1)?
-    } else if disp32 {
+    }
+    else if disp32 {
         c.signed(4)?
-    } else {
+    }
+    else {
         0
     };
     let segment = p
@@ -383,7 +382,10 @@ where
     // unprefixed form (SDM Vol.2A §2.1.1, instruction tables).
     if mode.is_long() && first == 0x0F && mandatory_prefix_map(base_opcode) {
         let keyed = opcode != base_opcode;
-        let rep_selected = keyed && prefixes.rep.is_some_and(|p| opcode == (p as u32) << shift | base_opcode);
+        let rep_selected = keyed
+            && prefixes
+                .rep
+                .is_some_and(|p| opcode == (p as u32) << shift | base_opcode);
         if prefixes.rep.is_some() && !rep_selected || prefixes.operand && !keyed {
             return Err(DecodeError::InvalidOpcode);
         }
@@ -393,7 +395,8 @@ where
     // ModRM-taking forms the shared catalog lists without one: the 0F0D
     // prefetch hint, the reserved-NOP hints 0F1A/0F1B (MPX space, NOPs
     // without MPX) and UD1/UD0 (whose length bounds the #UD encoding).
-    let hint_0f0d = mode.is_long() && matches!(base_opcode, 0x0F0D | 0x0F1A | 0x0F1B | 0x0FB9 | 0x0FFF);
+    let hint_0f0d =
+        mode.is_long() && matches!(base_opcode, 0x0F0D | 0x0F1A | 0x0F1B | 0x0FB9 | 0x0FFF);
     let modrm = if first_row.fetch_modrm || hint_0f0d { Some(c.byte()?) } else { None };
     let row = rows
         .iter()
@@ -415,10 +418,12 @@ where
     let address_size = if prefixes.address {
         if mode.is_long() {
             32
-        } else {
+        }
+        else {
             48 - mode.address_default()
         }
-    } else {
+    }
+    else {
         mode.address_default()
     };
     let address = if memory {
@@ -429,7 +434,8 @@ where
             prefixes,
             mode,
         )?)
-    } else {
+    }
+    else {
         None
     };
     let (encoded_bytes, sign_extended) = match row.immediate {
@@ -441,18 +447,22 @@ where
         ImmediateKind::Operand => {
             if mode.is_long() && matches!(base_opcode, 0xE8 | 0xE9 | 0x0F80..=0x0F8F) {
                 (4, true)
-            } else if operand_size == 64 && (0xB8..=0xBF).contains(&base_opcode) {
+            }
+            else if operand_size == 64 && (0xB8..=0xBF).contains(&base_opcode) {
                 (8, false)
-            } else if operand_size == 64 {
+            }
+            else if operand_size == 64 {
                 (4, true)
-            } else {
+            }
+            else {
                 (operand_size / 8, false)
             }
         },
     };
     let immediate = if encoded_bytes == 0 {
         None
-    } else {
+    }
+    else {
         let value = c.integer(encoded_bytes)?;
         let signed = sign_extended
             || mode.is_long()
@@ -461,7 +471,8 @@ where
                     || (0x70..=0x7F).contains(&base_opcode));
         let value = if signed && encoded_bytes < 8 {
             (((value << (64 - encoded_bytes * 8)) as i64) >> (64 - encoded_bytes * 8)) as u64
-        } else {
+        }
+        else {
             value
         };
         Some(Immediate {
@@ -475,9 +486,11 @@ where
     let next_value = start.0.wrapping_add(c.length as u64);
     let next = GuestIp(if mode.is_long() {
         next_value
-    } else if mode.operand_default() == 16 {
+    }
+    else if mode.operand_default() == 16 {
         next_value as u16 as u64
-    } else {
+    }
+    else {
         next_value as u32 as u64
     });
     Ok(Decoded {
@@ -497,7 +510,8 @@ where
             .map(|m| (m & 7) | prefixes.b()),
         opcode_register: if matches!(base_opcode,0x50..=0x5F|0x90..=0x97|0xB0..=0xBF) {
             Some((base_opcode as u8 & 7) | prefixes.b())
-        } else {
+        }
+        else {
             None
         },
         address,
@@ -631,7 +645,8 @@ mod tests {
             seen.push(offset);
             if offset == 0 {
                 Ok(0x48)
-            } else {
+            }
+            else {
                 Err(14)
             }
         });
@@ -715,7 +730,8 @@ mod tests {
                         for modrm in 0..=255u8 {
                             let sibs: &[u8] = if modrm & 7 == 4 && modrm < 0xC0 {
                                 &[0, 0x24, 0x25, 0xA5, 0xFC, 0xFF]
-                            } else {
+                            }
+                            else {
                                 &[0]
                             };
                             for &sib in sibs {
@@ -749,17 +765,41 @@ mod tests {
         let root = std::path::Path::new("build/x64-decode");
         std::fs::create_dir_all(root).unwrap();
         let prefix_byte = |b: u8| matches!(b, 0x26 | 0x2E | 0x36 | 0x3E | 0x40..=0x4F | 0x64..=0x67 | 0xF0 | 0xF2 | 0xF3);
-        let mut maps: Vec<Vec<u8>> = (0..=255u8).filter(|&b| !prefix_byte(b) && b != 0x0F).map(|b| vec![b]).collect();
-        maps.extend((0..=255u8).filter(|&b| b != 0x38 && b != 0x3A).map(|b| vec![0x0F, b]));
+        let mut maps: Vec<Vec<u8>> = (0..=255u8)
+            .filter(|&b| !prefix_byte(b) && b != 0x0F)
+            .map(|b| vec![b])
+            .collect();
+        maps.extend(
+            (0..=255u8)
+                .filter(|&b| b != 0x38 && b != 0x3A)
+                .map(|b| vec![0x0F, b]),
+        );
         maps.extend((0..=255u8).map(|b| vec![0x0F, 0x38, b]));
         maps.extend((0..=255u8).map(|b| vec![0x0F, 0x3A, b]));
-        let prefixes: [&[u8]; 11] = [&[], &[0x66], &[0xF2], &[0xF3], &[0x48], &[0x66, 0x48], &[0x67], &[0xF3, 0x48], &[0x41], &[0x44], &[0xF0]];
+        let prefixes: [&[u8]; 11] = [
+            &[],
+            &[0x66],
+            &[0xF2],
+            &[0xF3],
+            &[0x48],
+            &[0x66, 0x48],
+            &[0x67],
+            &[0xF3, 0x48],
+            &[0x41],
+            &[0x44],
+            &[0xF0],
+        ];
         let mut rows = Vec::new();
         for opcode in &maps {
             for prefix in prefixes {
                 for reg in 0..8u8 {
                     // register form, [rsp] via SIB, RIP+disp32, [rsp+disp8] via SIB
-                    for modrm in [0xC0 | reg << 3 | 1, reg << 3 | 4, reg << 3 | 5, 0x44 | reg << 3] {
+                    for modrm in [
+                        0xC0 | reg << 3 | 1,
+                        reg << 3 | 4,
+                        reg << 3 | 5,
+                        0x44 | reg << 3,
+                    ] {
                         let mut bytes = prefix.to_vec();
                         bytes.extend(opcode);
                         bytes.push(modrm);
@@ -767,11 +807,24 @@ mod tests {
                             bytes.push(0x24);
                         }
                         bytes.resize(bytes.len() + 12, 0x11);
-                        let (ok, length, width, r, rm) = match decode(&bytes, GuestIp(0xFFFF_8000_0000_1000), ExecutionMode::Long64) {
-                            Ok(d) => (1, d.length as i32, d.operand_size as i32, d.reg.map_or(-1, |r| r as i32), d.rm_register.map_or(-1, |r| r as i32)),
+                        let (ok, length, width, r, rm) = match decode(
+                            &bytes,
+                            GuestIp(0xFFFF_8000_0000_1000),
+                            ExecutionMode::Long64,
+                        ) {
+                            Ok(d) => (
+                                1,
+                                d.length as i32,
+                                d.operand_size as i32,
+                                d.reg.map_or(-1, |r| r as i32),
+                                d.rm_register.map_or(-1, |r| r as i32),
+                            ),
                             Err(_) => (0, 0, 0, -1, -1),
                         };
-                        rows.push(format!("[{:?},{},{},{},{},{}]", bytes, ok, length, width, r, rm));
+                        rows.push(format!(
+                            "[{:?},{},{},{},{},{}]",
+                            bytes, ok, length, width, r, rm
+                        ));
                     }
                 }
             }
@@ -803,7 +856,8 @@ mod tests {
                         if md == 3 {
                             assert_eq!(i.rm_register, Some(rm | ((rex & 1) << 3)));
                             assert!(i.address.is_none());
-                        } else {
+                        }
+                        else {
                             assert!(i.address.is_some());
                         }
                     }

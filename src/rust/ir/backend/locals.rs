@@ -152,9 +152,7 @@ impl LiveValues for LiveBits {
             len: 0,
         }
     }
-    fn len(&self) -> usize {
-        self.len
-    }
+    fn len(&self) -> usize { self.len }
     fn values(&self) -> impl Iterator<Item = ValueId> + Clone {
         LiveBitIter {
             words: &self.words,
@@ -196,27 +194,13 @@ impl LiveValues for LiveBits {
 // including loops, phi edges, cold StateMaps and deterministic slot assignment.
 #[cfg(test)]
 impl LiveValues for BTreeSet<ValueId> {
-    fn new(_: usize) -> Self {
-        Self::new()
-    }
-    fn len(&self) -> usize {
-        self.len()
-    }
-    fn values(&self) -> impl Iterator<Item = ValueId> + Clone {
-        self.iter().copied()
-    }
-    fn insert(&mut self, value: ValueId) {
-        self.insert(value);
-    }
-    fn remove(&mut self, value: &ValueId) {
-        self.remove(value);
-    }
-    fn contains(&self, value: &ValueId) -> bool {
-        self.contains(value)
-    }
-    fn retain(&mut self, keep: impl FnMut(&ValueId) -> bool) {
-        self.retain(keep);
-    }
+    fn new(_: usize) -> Self { Self::new() }
+    fn len(&self) -> usize { self.len() }
+    fn values(&self) -> impl Iterator<Item = ValueId> + Clone { self.iter().copied() }
+    fn insert(&mut self, value: ValueId) { self.insert(value); }
+    fn remove(&mut self, value: &ValueId) { self.remove(value); }
+    fn contains(&self, value: &ValueId) -> bool { self.contains(value) }
+    fn retain(&mut self, keep: impl FnMut(&ValueId) -> bool) { self.retain(keep); }
 }
 fn state_uses(region: &Region, state: Option<StateId>, live: &mut impl Extend<ValueId>) {
     if let Some(id) = state {
@@ -601,7 +585,8 @@ fn allocate_linear(region: &Region, mut remaining: usize) -> Result<Allocation, 
             }
         }
     }
-    let Terminator::Exit(state) = block.terminator.as_ref().unwrap() else {
+    let Terminator::Exit(state) = block.terminator.as_ref().unwrap()
+    else {
         unreachable!()
     };
     for value in region.states[state.index()].values() {
@@ -693,7 +678,8 @@ mod tests {
             if step % 3 == 0 {
                 bits.remove(&value);
                 tree.remove(&value);
-            } else {
+            }
+            else {
                 bits.insert(value);
                 tree.insert(value);
             }
@@ -726,7 +712,9 @@ mod tests {
             for mode in [false, true] {
                 // These encodings use [ESI], while 16-bit ModRM 06 consumes a
                 // displacement and would make the deliberately short loop invalid.
-                if !mode && matches!(index, 1 | 6) { continue; }
+                if !mode && matches!(index, 1 | 6) {
+                    continue;
+                }
                 let original =
                     lift_cpu_cfg(bytes, GuestEip(0x1000), LinearAddress(0x201000), mode, 8)
                         .unwrap();
@@ -740,10 +728,14 @@ mod tests {
                         crate::ir::passes::run(&mut region, pass).unwrap();
                     }
                     let dense = allocate_graph_with::<LiveBits>(&region, 4_000_000);
-                    let reference = allocate_graph_rows::<BTreeSet<ValueId>, false>(&region, 4_000_000);
+                    let reference =
+                        allocate_graph_rows::<BTreeSet<ValueId>, false>(&region, 4_000_000);
                     let symmetric = allocate_graph_rows::<LiveBits, false>(&region, 4_000_000);
                     assert_eq!(dense, reference, "mode={mode}, bytes={bytes:x?}");
-                    assert_eq!(dense, symmetric, "triangular/symmetric: mode={mode}, bytes={bytes:x?}");
+                    assert_eq!(
+                        dense, symmetric,
+                        "triangular/symmetric: mode={mode}, bytes={bytes:x?}"
+                    );
                     assert_eq!(
                         allocate_graph_with::<LiveBits>(&region, 1),
                         allocate_graph_with::<BTreeSet<ValueId>>(&region, 1)
@@ -775,7 +767,8 @@ mod tests {
                     for _ in 0..20 {
                         let result = if which == 0 {
                             allocate_graph_rows::<LiveBits, false>(&region, 4_000_000)
-                        } else {
+                        }
+                        else {
                             allocate_graph_with::<LiveBits>(&region, 4_000_000)
                         };
                         std::hint::black_box(result.unwrap());
@@ -855,7 +848,8 @@ mod tests {
                     for _ in 0..40 {
                         let allocation = if index == 0 {
                             allocate_graph(&region, 4_000_000)
-                        } else {
+                        }
+                        else {
                             allocate_linear(&region, 4_000_000)
                         }
                         .unwrap();
@@ -876,19 +870,37 @@ mod tests {
         let n = 16_384;
         let mut triangular = Interference::new(n);
         let mut symmetric = InterferenceRows::<false>::new(n);
-        let types: Vec<_> = (0..n).map(|i| if i % 3 == 0 { Type::I64 } else { Type::I32 }).collect();
+        let types: Vec<_> = (0..n)
+            .map(|i| {
+                if i % 3 == 0 {
+                    Type::I64
+                }
+                else {
+                    Type::I32
+                }
+            })
+            .collect();
         let cases: &[&[u32]] = &[
             &[0, 1, 63, 64, 65, 4095, 4096, 8192, 16383],
-            &[0, 1, 64, 4095, 8192], &[1, 63, 65, 4096, 16383], &[],
-            &[1, 4095, 4096], &[0, 1, 63, 64, 65, 4095, 4096, 8192, 16383],
+            &[0, 1, 64, 4095, 8192],
+            &[1, 63, 65, 4096, 16383],
+            &[],
+            &[1, 4095, 4096],
+            &[0, 1, 63, 64, 65, 4095, 4096, 8192, 16383],
         ];
         for case in cases.iter().cycle().take(48) {
             let live: BTreeSet<_> = case.iter().copied().map(ValueId).collect();
             triangular.connect(&live, |v| types[v.index()]);
             symmetric.connect(&live, |v| types[v.index()]);
-            let mut allocation = Allocation { value_local: vec![None; n], local_types: types.clone() };
+            let mut allocation = Allocation {
+                value_local: vec![None; n],
+                local_types: types.clone(),
+            };
             for &value in cases[0] {
-                assert_eq!(triangular.occupied(value as usize, &allocation), symmetric.occupied(value as usize, &allocation));
+                assert_eq!(
+                    triangular.occupied(value as usize, &allocation),
+                    symmetric.occupied(value as usize, &allocation)
+                );
                 allocation.value_local[value as usize] = Some(value as usize);
             }
         }
@@ -906,7 +918,14 @@ mod tests {
         let mut graph = Interference::new(n);
         let mut reference = vec![BTreeSet::new(); n];
         let types: Vec<_> = (0..n)
-            .map(|i| if i % 3 == 0 { Type::I64 } else { Type::I32 })
+            .map(|i| {
+                if i % 3 == 0 {
+                    Type::I64
+                }
+                else {
+                    Type::I32
+                }
+            })
             .collect();
         let mut rng = 17u32;
         let mut live = BTreeSet::new();
@@ -920,7 +939,8 @@ mod tests {
             }
             if step % 3 == 0 {
                 live.remove(&value);
-            } else {
+            }
+            else {
                 live.insert(value);
             }
             graph.connect(&live, |v| types[v.index()]);
@@ -945,8 +965,14 @@ mod tests {
                     "{i}/{j}"
                 );
                 let (row, bit) = (i.max(j), i.min(j));
-                let edge = graph.rows[row].get(bit / 64).is_some_and(|word| word & (1u64 << (bit % 64)) != 0);
-                assert_eq!(edge, reference[i].contains(&ValueId(j as u32)), "undirected edge {i}/{j}");
+                let edge = graph.rows[row]
+                    .get(bit / 64)
+                    .is_some_and(|word| word & (1u64 << (bit % 64)) != 0);
+                assert_eq!(
+                    edge,
+                    reference[i].contains(&ValueId(j as u32)),
+                    "undirected edge {i}/{j}"
+                );
             }
             allocation.value_local[i] = Some(i);
         }

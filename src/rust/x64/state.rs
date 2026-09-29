@@ -29,23 +29,23 @@ pub enum ExecutionMode {
     Long64,
 }
 impl ExecutionMode {
-    pub fn is_long(self) -> bool {
-        self == Self::Long64
-    }
+    pub fn is_long(self) -> bool { self == Self::Long64 }
     pub fn operand_default(self) -> u8 {
         if matches!(
             self,
             Self::Protected32 | Self::Compatibility32 | Self::Long64
         ) {
             32
-        } else {
+        }
+        else {
             16
         }
     }
     pub fn address_default(self) -> u8 {
         if self.is_long() {
             64
-        } else {
+        }
+        else {
             self.operand_default()
         }
     }
@@ -60,19 +60,25 @@ pub fn derive_mode(
 ) -> ExecutionMode {
     if !pe {
         ExecutionMode::Real
-    } else if lma {
+    }
+    else if lma {
         if cs_long {
             ExecutionMode::Long64
-        } else if cs_default32 {
+        }
+        else if cs_default32 {
             ExecutionMode::Compatibility32
-        } else {
+        }
+        else {
             ExecutionMode::Compatibility16
         }
-    } else if vm {
+    }
+    else if vm {
         ExecutionMode::Vm86
-    } else if cs_default32 {
+    }
+    else if cs_default32 {
         ExecutionMode::Protected32
-    } else {
+    }
+    else {
         ExecutionMode::Protected16
     }
 }
@@ -105,18 +111,15 @@ pub unsafe fn mode() -> ExecutionMode {
         *gp::is_32,
     )
 }
-pub unsafe fn efer() -> u64 {
-    *gp::x64_efer
-}
-pub unsafe fn set_efer_raw(value: u64) {
-    *gp::x64_efer = value;
-}
+pub unsafe fn efer() -> u64 { *gp::x64_efer }
+pub unsafe fn set_efer_raw(value: u64) { *gp::x64_efer = value; }
 #[inline]
 pub fn gpr_low_offset(r: usize) -> u32 {
     assert!(r < 16);
     if r < 8 {
         gp::reg32 as u32 + r as u32 * 4
-    } else {
+    }
+    else {
         gp::x64_gpr_ext_lo as u32 + (r as u32 - 8) * 4
     }
 }
@@ -147,13 +150,12 @@ pub fn xmm_offset(r: usize) -> u32 {
     assert!(r < 16);
     if r < 8 {
         gp::reg_xmm as u32 + r as u32 * 16
-    } else {
+    }
+    else {
         gp::x64_xmm_ext as u32 + (r as u32 - 8) * 16
     }
 }
-pub unsafe fn read_xmm(r: usize) -> cpu::reg128 {
-    *(xmm_offset(r) as *const cpu::reg128)
-}
+pub unsafe fn read_xmm(r: usize) -> cpu::reg128 { *(xmm_offset(r) as *const cpu::reg128) }
 pub unsafe fn write_xmm(r: usize, value: cpu::reg128) {
     *(xmm_offset(r) as *mut cpu::reg128) = value;
 }
@@ -168,14 +170,16 @@ unsafe fn write_pair(lo: *mut i32, hi: *mut u32, value: u64) {
 pub unsafe fn read_rip() -> u64 {
     if mode().is_long() {
         read_pair(gp::instruction_pointer, gp::x64_rip_hi)
-    } else {
+    }
+    else {
         cpu::get_real_eip() as u32 as u64
     }
 }
 pub unsafe fn write_rip(value: u64) {
     if mode().is_long() {
         write_pair(gp::instruction_pointer, gp::x64_rip_hi, value);
-    } else {
+    }
+    else {
         let value = if *gp::is_32 { value as u32 } else { value as u16 as u32 };
         *gp::instruction_pointer = cpu::get_seg_cs().wrapping_add(value as i32);
         *gp::x64_rip_hi = 0;
@@ -185,11 +189,13 @@ pub unsafe fn write_rip(value: u64) {
 pub unsafe fn read_previous_rip() -> u64 {
     if mode().is_long() {
         read_pair(gp::previous_ip, gp::x64_previous_ip_hi)
-    } else {
+    }
+    else {
         let offset = (*gp::previous_ip).wrapping_sub(cpu::get_seg_cs()) as u32;
         if *gp::is_32 {
             offset as u64
-        } else {
+        }
+        else {
             offset as u16 as u64
         }
     }
@@ -197,7 +203,8 @@ pub unsafe fn read_previous_rip() -> u64 {
 pub unsafe fn write_previous_rip(value: u64) {
     if mode().is_long() {
         write_pair(gp::previous_ip, gp::x64_previous_ip_hi, value);
-    } else {
+    }
+    else {
         *gp::previous_ip = cpu::get_seg_cs().wrapping_add(value as i32);
         *gp::x64_previous_ip_hi = 0;
     }
@@ -207,7 +214,8 @@ pub unsafe fn read_cr(r: usize) -> u64 {
     if r == 8 {
         // CR8 is TPR[7:4] of the local APIC, also written through its MMIO.
         (crate::cpu::apic::read32(0x80) >> 4 & 15) as u64
-    } else {
+    }
+    else {
         read_pair(gp::cr.add(r), gp::x64_cr_hi.add(r))
     }
 }
@@ -215,7 +223,8 @@ pub unsafe fn write_cr_raw(r: usize, value: u64) {
     assert!(r <= 8);
     if r == 8 {
         *gp::x64_cr8 = value;
-    } else {
+    }
+    else {
         write_pair(gp::cr.add(r), gp::x64_cr_hi.add(r), value);
     }
 }
@@ -239,21 +248,15 @@ pub unsafe fn write_segment_base(r: usize, value: u64) {
         value,
     );
 }
-pub unsafe fn read_gdtr_base() -> u64 {
-    read_pair(gp::gdtr_offset, gp::x64_gdtr_base_hi)
-}
+pub unsafe fn read_gdtr_base() -> u64 { read_pair(gp::gdtr_offset, gp::x64_gdtr_base_hi) }
 pub unsafe fn write_gdtr_base(value: u64) {
     write_pair(gp::gdtr_offset, gp::x64_gdtr_base_hi, value);
 }
-pub unsafe fn read_idtr_base() -> u64 {
-    read_pair(gp::idtr_offset, gp::x64_idtr_base_hi)
-}
+pub unsafe fn read_idtr_base() -> u64 { read_pair(gp::idtr_offset, gp::x64_idtr_base_hi) }
 pub unsafe fn write_idtr_base(value: u64) {
     write_pair(gp::idtr_offset, gp::x64_idtr_base_hi, value);
 }
-pub unsafe fn read_flags64() -> u64 {
-    cpu::get_eflags() as u32 as u64
-}
+pub unsafe fn read_flags64() -> u64 { cpu::get_eflags() as u32 as u64 }
 pub unsafe fn write_flags64(value: u64) {
     *gp::flags = value as i32 & cpu::FLAGS_MASK | cpu::FLAGS_DEFAULT;
     *gp::flags_changed = 0;

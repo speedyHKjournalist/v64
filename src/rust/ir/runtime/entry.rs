@@ -34,7 +34,12 @@ static mut EXIT_KIND: ExitKind = ExitKind::None;
 /// ir_request_link/ir_request_poll_exit: only code generated in the running
 /// Wasm instance (natively generated fixtures must call the imports).
 pub fn exit_kind_address() -> Option<u32> {
-    if cfg!(target_arch = "wasm32") { Some(std::ptr::addr_of!(EXIT_KIND) as u32) } else { None }
+    if cfg!(target_arch = "wasm32") {
+        Some(std::ptr::addr_of!(EXIT_KIND) as u32)
+    }
+    else {
+        None
+    }
 }
 // A byte-validation certificate is valid only in a synchronous CPU interval
 // without unobserved host writes. No certificate survives a new CPU batch,
