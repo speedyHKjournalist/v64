@@ -67,9 +67,18 @@ run("bsdtar", ["--format", "ustar", "--no-xattrs", "--no-mac-metadata", "--uid",
 const probe_disk = fs.readFileSync(probe_directory + "probe.tar");
 // v86 runs also bring up virtio-net (Alpine virt has no NE2K driver) and echo
 // raw frames on the host (X64_PROBE_NET); the QEMU reference skips that round.
+// X6: X64_EXTENDED_MEMORY=<bytes> of extended RAM after the relocated RAM;
+// X64_LINUX_MEMTEST=<MiB>: the probe maps, writes and checks that much and
+// counts its pages in extended RAM (they must be there); X64_EXTENDED_CACHE=<bytes>
+// of frames that hold it (default 512 MiB)
+const extended_memory = Number(process.env.X64_EXTENDED_MEMORY || 0);
+const extended_cache = Number(process.env.X64_EXTENDED_CACHE || 0);
+const memtest_mib = Number(process.env.X64_LINUX_MEMTEST || 0);
 const guest_command = net => (net ? "modprobe virtio_net 2>/dev/null; ifconfig eth0 up && " : "") +
     `tar -xf /dev/sda -C /tmp && /tmp/linux_probe64 ${net ? "net" : ""} && /tmp/linux_probe32 ${net ? "net" : ""}; ` +
+    (memtest_mib ? `grep MemTotal /proc/meminfo; /tmp/linux_probe64 memtest ${memtest_mib} ${extended_first_pfn()}; ` : "") +
     "uname -m; cat /sys/devices/system/cpu/online; grep 'System RAM' /proc/iomem; echo X64_LINUX_BOOT_OK\n";
+function extended_first_pfn() { return (2 ** 32 + Number(process.env.X64_HIGH_MEMORY || 0)) / 4096; }
 // X5: relocate this many bytes of RAM to guest physical 4 GiB (v86) or give
 // QEMU the same split, so the kernel and probes must use RAM above 4 GiB.
 const high_memory = Number(process.env.X64_HIGH_MEMORY || 0);
@@ -100,7 +109,7 @@ function check_probes(text, net)
         assert.ok(matrix, `${bits}-bit multicore matrix: ${text.match(new RegExp(`X64_PROBE_FAIL arch=${bits}[^\\r\\n]*`))?.[0] || "missing"}`);
         assert.deepEqual(matrix.slice(1).map(Number), [cores, cores * 24, cores * 16], `${bits}-bit topology, migrations and signals`);
         const placed = +text.match(new RegExp(`X64_PROBE_OK arch=${bits} [^\\r\\n]* high_pages=(\\d+)`))[1];
-        if(high_memory) assert.ok(placed > 0, `${bits}-bit process received frames above 4 GiB`);
+        if(high_memory || extended_memory) assert.ok(placed > 0, `${bits}-bit process received frames above 4 GiB`);
         else assert.equal(placed, 0, `${bits}-bit process: no RAM above 4 GiB exists`);
         if(net) assert.match(text, new RegExp(`X64_PROBE_NET arch=${bits} frames=16`), `${bits}-bit raw frames through eth0 (virtio-net) and back`);
     }
@@ -155,8 +164,12 @@ const emulator = new V86({
     cdrom: {url: directory + name}, hda: {buffer: probe_disk.buffer.slice(probe_disk.byteOffset, probe_disk.byteOffset + probe_disk.length)},
     ...(sleep_cycles ? {hdb: {buffer: new ArrayBuffer(256 << 20)}} : {}),
     cmdline, memory_size: 512 << 20, high_memory_size: high_memory, cpu_cores: cores, acpi: true, autostart: false,
+    ...(extended_memory ? {extended_memory_size: extended_memory} : {}),
+    ...(extended_cache ? {extended_memory_cache: extended_cache} : {}),
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0, net_device: {type: "virtio"},
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
+    // X64_PARALLEL=1: the application processors run in vCPU workers (W1)
+    ...(+process.env.X64_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),
 });
 let serial = "";
 // Raw frames of EtherType 88B5 come back with source 02:00:00:00:00:02
@@ -215,6 +228,7 @@ function inspect()
         physical_ip: at, instruction_bytes: at === null ? null : Buffer.from(cpu.mem8.subarray(at, at + 16)).toString("hex"),
         gpr: Array.from({length: 16}, (_, i) => ((BigInt(view.getUint32(1360 + i * 4, true)) << 32n) | BigInt(view.getUint32(i < 8 ? 64 + i * 4 : 1424 + (i - 8) * 4, true))).toString(16)),
         efer: u64(1696), cs_long: view.getUint8(1744), serial_bytes: serial.length,
+        extended: cpu.extended_pages ? Array.from({length: 14}, (_, i) => cpu.wm.exports.x64_ext_stat(i)) : undefined,
         page_tier: cpu.wm.exports.x64_page_stat ? Object.fromEntries(["compiled", "native", "retries", "unknown", "steps", "invalidated", "entries", "failed", "recompiled", "instructions", "templated", "evicted", "live"].map((name, i) => [name, cpu.wm.exports.x64_page_stat(i)])) : null,
         diagnostics: cpu.get_diagnostics()};
 }
@@ -311,7 +325,19 @@ try
     assert.match(serial, /\r?\nx86_64\r?\n/, "uname confirms actual x86_64 userspace");
     check_probes(serial, true);
     assert.equal(echoed, 32, "the host echoed every probe frame");
-    if(high_memory) assert.match(serial, new RegExp(`\\n\\s*100000000-${(0x100000000 + high_memory - 1).toString(16)} : System RAM`), "kernel owns the relocated RAM above 4 GiB");
+    if(high_memory || extended_memory)
+    {
+        assert.match(serial, new RegExp(`\\n\\s*100000000-${(0x100000000 + high_memory + extended_memory - 1).toString(16)} : System RAM`),
+            "kernel owns the relocated and extended RAM above 4 GiB");
+    }
+    if(memtest_mib)
+    {
+        const line = serial.match(/X64_MEMTEST mib=(\d+) pages=(\d+) errors=(\d+) extended_pages=(\d+)/);
+        assert.ok(line, "memtest result: " + (serial.match(/X64_PROBE_FAIL[^\r\n]*/)?.[0] || "missing"));
+        assert.equal(+line[3], 0, "memtest contents");
+        if(extended_memory) assert.ok(+line[4] > +line[2] / 4, `memtest pages in extended RAM: ${line[0]}`);
+        console.log("X64_LINUX_MEMTEST " + line[0] + " " + (serial.match(/MemTotal:\s*\d+ kB/)?.[0] || ""));
+    }
     if(+process.env.X64_LINUX_SNAPSHOT)
     {
         assert.deepEqual(snapshots_taken, snapshot_markers, "snapshots taken during every probe phase");

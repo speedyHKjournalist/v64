@@ -254,9 +254,10 @@ pub fn page_watched(page: u32) -> bool {
 }
 
 /// Whether every page this code depends on is published to the other cores
-/// (crate::parallel::code), so that it may be installed
-pub fn pages_published(pages: impl Iterator<Item = Page>) -> bool {
-    unsafe { crate::parallel::code::published(pages.map(|page| page.to_u32())) }
+/// (crate::parallel::code), so that it may be installed, waiting up to `ms`
+/// for their acknowledgements
+pub fn wait_pages_published(pages: impl Iterator<Item = Page> + Clone, ms: f64) -> bool {
+    unsafe { crate::parallel::code::wait_published(pages.map(|page| page.to_u32()), ms) }
 }
 
 pub fn ir_cache_quiescent() -> bool { JIT_STATE.try_lock().is_ok() }

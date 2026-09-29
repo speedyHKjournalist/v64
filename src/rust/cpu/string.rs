@@ -71,8 +71,7 @@ unsafe fn string_instruction(
     let result = string_instruction_bounded(is_asize_32, ds_or_prefix, instruction, size, rep, limit);
     if !matches!(rep, Rep::None) { crate::cpu::execution::record_string(result); }
     if multicore && result.outcome == StringOutcome::Repeat {
-        crate::cpu::cpu::core_yield = true;
-        crate::cpu::cpu::jit_block_boundary = true;
+        crate::cpu::cpu::yield_to_other_cores();
     }
 }
 

@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>v86 vCPU workers in a browser</title>
+<!-- W1 (docs/acpi-x86-64-multicore-plan.zh-CN.md): the litmus kernel on
+     cores in vCPU module workers. ?expect=parallel (the server sends
+     COOP/COEP) or ?expect=cooperative (it does not: "auto" falls back);
+     ?build=bundle loads build/libv86.mjs, which starts build/vcpu-worker.js. -->
+<pre id="log"></pre>
+<div id="result"></div>
+<script type="module">
+const params = new URLSearchParams(location.search);
+const expect = params.get("expect") || "parallel";
+const cores = +(params.get("cores") || 4), rounds = +(params.get("rounds") || 5000);
+const log = text => { document.getElementById("log").textContent += text + "\n"; };
+const done = text => { document.getElementById("result").textContent = text; };
+try
+{
+    const { V86 } = await import(params.get("build") === "bundle" ? "../../build/libv86.mjs" : "../../src/main.js");
+    log(`crossOriginIsolated=${globalThis.crossOriginIsolated}, SharedArrayBuffer=${typeof SharedArrayBuffer}`);
+    const emulator = new V86({
+        multiboot: { url: "../../build/parallel-litmus.bin" }, memory_size: 32 << 20, acpi: true, cpu_cores: cores,
+        experimental_smp_jit: true, ir_sync_publication: true, autostart: false, log_level: 0,
+        parallel: "auto", wasm_path: "../../build/v86-parallel.wasm",
+        // (the bundles' default is build/vcpu-worker.js relative to the page)
+        ...(params.get("build") === "bundle" ? { vcpu_worker_url: "../../build/vcpu-worker.js" } : {}),
+    });
+    await new Promise((resolve, reject) => {
+        emulator.add_listener("emulator-loaded", resolve);
+        emulator.add_listener("emulator-error", reject);
+    });
+    const cpu = emulator.v86.cpu;
+    const execution = cpu.get_diagnostics().execution;
+    log("execution " + JSON.stringify(execution));
+    if(execution.mode !== expect) throw new Error(`expected ${expect}, got ${JSON.stringify(execution)}`);
+    const CONTROL = 0x380000;
+    const view = () => new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset);
+    view().setUint32(CONTROL, cores, true);
+    view().setUint32(CONTROL + 4, rounds, true);
+    const t0 = performance.now();
+    emulator.run();
+    while(view().getUint32(CONTROL + 128, true) !== cores)
+    {
+        if(performance.now() - t0 > 120000) throw new Error("litmus not finished: " + JSON.stringify(cpu.get_diagnostics().parallel));
+        await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const u32 = offset => view().getUint32(CONTROL + offset, true);
+    const expected = cores * rounds;
+    const counters = [16, 20, 24, 28, 32, 40].map(u32);
+    if(counters.join() !== [expected, 2 * expected, expected, expected, expected, expected].join()) throw new Error("counters " + counters);
+    for(let phase = 1; phase < 5; phase++) if(u32(64 + 4 * phase)) throw new Error("phase " + phase + " violations: " + u32(64 + 4 * phase));
+    for(let core = 0; core < cores; core++) if(u32(0x180 + 4 * core) !== rounds) throw new Error("IPIs of core " + core);
+    const workers = cpu.get_diagnostics().parallel?.cores.map(c => c.steps) || [];
+    await emulator.destroy();
+    done(`PASS ${expect} ${cores} cores, ${rounds} rounds in ${((performance.now() - t0) / 1000).toFixed(1)}s` +
+        (workers.length ? `, worker steps ${workers.join("/")}` : `, fallback: ${execution.fallback}`));
+}
+catch(error)
+{
+    log(String(error && error.stack || error));
+    done("FAIL " + error);
+}
+</script>

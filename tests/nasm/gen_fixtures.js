@@ -124,7 +124,28 @@ function on_proc_close(code, n)
     }
 }
 
-for(let i = 0; i < nr_of_cpus; i++)
+// Without gdb (or NASM_ORACLE=qemu): the reference state comes from QEMU
+// (qemu_oracle.js), for hosts that cannot run the i386 binaries natively.
+const use_qemu = process.env.NASM_ORACLE === "qemu" ||
+    process.env.NASM_ORACLE !== "gdb" && spawnSync("gdb", ["--version"]).status !== 0;
+if(use_qemu)
+{
+    const { qemu_fixture } = await import("./qemu_oracle.js");
+    let next = 0, done = 0;
+    const worker = async () => {
+        while(next < test_files.length)
+        {
+            const test = test_files[next++];
+            const test_path = path.join(BUILD_DIR, test);
+            fs.writeFileSync(test_path + ".fixture", await qemu_fixture(test_path + ".img"));
+            if(++done % 200 === 0) console.log(`[+] ${done} of ${test_files.length} fixtures (QEMU)`);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(os.cpus().length, MAX_PARALLEL_PROCS, test_files.length)) }, worker));
+    console.log(`[+] ${done} fixtures from QEMU`);
+}
+
+for(let i = 0; !use_qemu && i < nr_of_cpus; i++)
 {
     const gdb_args = GDB_DEFAULT_ARGS.concat(test_arg_formatter(workloads[i]));
 

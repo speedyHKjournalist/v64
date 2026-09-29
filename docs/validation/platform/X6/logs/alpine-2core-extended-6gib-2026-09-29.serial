@@ -1,0 +1,412 @@
+[    0.000000] Linux version 6.18.35-0-virt (buildozer@build-3-24-x86_64) (cc (Alpine 15.2.0) 15.2.0, GNU ld (GNU Binutils) 2.45.1) #1-Alpine SMP PREEMPT_DYNAMIC 2026-06-09 12:34:47
+[    0.000000] Command line: console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage
+[    0.000000] BIOS-provided physical RAM map:
+[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000009fbff] usable
+[    0.000000] BIOS-e820: [mem 0x000000000009fc00-0x000000000009ffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000000f0000-0x00000000000fffff] reserved
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x000000001effffff] usable
+[    0.000000] BIOS-e820: [mem 0x000000001f000000-0x000000001fffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000fffc0000-0x00000000ffffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x0000000100000000-0x000000027fffffff] usable
+[    0.000000] NX (Execute Disable) protection: active
+[    0.000000] APIC: Static calls initialized
+[    0.000000] DMI not present or invalid.
+[    0.000000] vmware: hypercall mode: 0x00
+[    0.000000] Hypervisor detected: VMware
+[    0.000000] vmware: Failed to get TSC freq from the hypervisor
+[    0.000000] tsc: Detected 1000.000 MHz processor
+[    0.045543] last_pfn = 0x280000 max_arch_pfn = 0x400000000
+[    0.048986] MTRR map: 4 entries (3 fixed + 1 variable; max 19), built from 8 variable MTRRs
+[    0.049142] x86/PAT: PAT not supported by the CPU.
+[    0.049256] x86/PAT: Configuration [0-7]: WB  WT  UC- UC  WB  WT  UC- UC  
+[    0.049651] last_pfn = 0x1f000 max_arch_pfn = 0x400000000
+[    0.224495] found SMP MP-table at [mem 0x000f8bf0-0x000f8bff]
+[    0.262208] RAMDISK: [mem 0x04000000-0x0495ffff]
+[    0.262344] ACPI: Early table checksum verification disabled
+[    0.262499] ACPI: RSDP 0x00000000000F8BC0 000024 (v02 V86   )
+[    0.262830] ACPI: XSDT 0x000000001FFFFFAE 000034 (v01 V86    V86XSDT  00000001 V86  00000001)
+[    0.263319] ACPI: FACP 0x000000001FFFFE22 0000F4 (v03 V86    V86FACP  00000001 V86  00000001)
+[    0.264943] ACPI: DSDT 0x000000001FFFF140 000CE2 (v01 V86    V86DSDT  00000001 V86  00000001)
+[    0.265321] ACPI: FACS 0x000000001FFFF100 000040
+[    0.265586] ACPI: FACS 0x000000001FFFF100 000040
+[    0.265892] ACPI: APIC 0x000000001FFFFF16 00006C (v01 V86    V86APIC  00000001 V86  00000001)
+[    0.266148] ACPI: Reserving FACP table memory at [mem 0x1ffffe22-0x1fffff15]
+[    0.266266] ACPI: Reserving DSDT table memory at [mem 0x1ffff140-0x1ffffe21]
+[    0.266347] ACPI: Reserving FACS table memory at [mem 0x1ffff100-0x1ffff13f]
+[    0.266422] ACPI: Reserving FACS table memory at [mem 0x1ffff100-0x1ffff13f]
+[    0.266485] ACPI: Reserving APIC table memory at [mem 0x1fffff16-0x1fffff81]
+[    0.274312] No NUMA configuration found
+[    0.274440] Faking a node at [mem 0x0000000000000000-0x000000027fffffff]
+[    0.278261] NODE_DATA(0) allocated [mem 0x27fffbd40-0x27fffffff]
+[    0.303157] Zone ranges:
+[    0.303398]   DMA      [mem 0x0000000000001000-0x0000000000ffffff]
+[    0.303671]   DMA32    [mem 0x0000000001000000-0x00000000ffffffff]
+[    0.303919]   Normal   [mem 0x0000000100000000-0x000000027fffffff]
+[    0.304157] Movable zone start for each node
+[    0.304413] Early memory node ranges
+[    0.305262]   node   0: [mem 0x0000000000001000-0x000000000009efff]
+[    0.305363]   node   0: [mem 0x0000000000100000-0x000000001effffff]
+[    0.305483]   node   0: [mem 0x0000000100000000-0x000000027fffffff]
+[    0.308359] Initmem setup node 0 [mem 0x0000000000001000-0x000000027fffffff]
+[    0.311782] On node 0, zone DMA: 1 pages in unavailable ranges
+[    0.323114] On node 0, zone DMA: 97 pages in unavailable ranges
+[    4.403916] On node 0, zone Normal: 4096 pages in unavailable ranges
+[    4.408244] ACPI: PM-Timer IO Port: 0x608
+[    4.414605] ACPI: LAPIC_NMI (acpi_id[0xff] dfl dfl lint[0x1])
+[    4.415730] IOAPIC[0]: apic_id 0, version 17, address 0xfec00000, GSI 0-23
+[    4.418543] ACPI: INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)
+[    4.419088] ACPI: INT_SRC_OVR (bus 0 bus_irq 10 global_irq 10 high level)
+[    4.419233] ACPI: INT_SRC_OVR (bus 0 bus_irq 11 global_irq 11 high level)
+[    4.429155] ACPI: Using ACPI (MADT) for SMP configuration information
+[    4.435093] CPU topo: Max. logical packages:   1
+[    4.435307] CPU topo: Max. logical dies:       1
+[    4.435346] CPU topo: Max. dies per package:   1
+[    4.437808] CPU topo: Max. threads per core:   1
+[    4.438008] CPU topo: Num. cores per package:     2
+[    4.438180] CPU topo: Num. threads per package:   2
+[    4.438260] CPU topo: Allowing 2 present CPUs plus 0 hotplug CPUs
+[    4.444021] [mem 0x20000000-0xfffbffff] available for PCI devices
+[    4.444583] Booting paravirtualized kernel on VMware hypervisor
+[    4.445358] clocksource: refined-jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1910969940391419 ns
+[    4.626638] setup_percpu: NR_CPUS:256 nr_cpumask_bits:2 nr_cpu_ids:2 nr_node_ids:1
+[    4.631391] percpu: Embedded 55 pages/cpu s185752 r8192 d31336 u1048576
+[    4.635743] Kernel command line: console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage
+[    4.709241] Unknown kernel command line parameters "nokaslr earlyprintk=serial,ttyS0,115200 modules=loop,squashfs,sd-mod,usb-storage", will be passed to user space.
+[    4.728263] random: crng init done
+[    4.730300] printk: log buffer data + meta data: 131072 + 458752 = 589824 bytes
+[    4.848732] Dentry cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
+[    4.860448] Inode-cache hash table entries: 524288 (order: 10, 4194304 bytes, linear)
+[    4.883656] software IO TLB: area num 2.
+[    5.279958] Fallback order for Node 0: 0 
+[    5.280185] Built 1 zonelists, mobility grouping on.  Total pages: 1699742
+[    5.280248] Policy zone: Normal
+[    5.309915] mem auto-init: stack:all(zero), heap alloc:on, heap free:off
+[    6.227948] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=2, Nodes=1
+[    6.509043] Dynamic Preempt: none
+[    6.564278] rcu: Preemptible hierarchical RCU implementation.
+[    6.564984] rcu: 	RCU restricting CPUs from NR_CPUS=256 to nr_cpu_ids=2.
+[    6.565573] 	Trampoline variant of Tasks RCU enabled.
+[    6.567266] 	Tracing variant of Tasks RCU enabled.
+[    6.567451] rcu: RCU calculated value of scheduler-enlistment delay is 100 jiffies.
+[    6.567552] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=2
+[    6.572305] RCU Tasks: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    6.575745] RCU Tasks Trace: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    8.093169] NR_IRQS: 16640, nr_irqs: 440, preallocated irqs: 16
+[    8.135683] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    8.212113] kfence: initialized - using 2097152 bytes for 255 objects at 0x(____ptrval____)-0x(____ptrval____)
+[    8.241498] Console: colour VGA+ 80x25
+[    8.243281] printk: legacy console [ttyS0] enabled
+[    8.400025] ACPI: Core revision 20250807
+[    8.429644] APIC: Switch to symmetric I/O mode setup
+[    8.474330] ..TIMER: vector=0x30 apic1=0 pin1=0 apic2=-1 pin2=-1
+[    8.481790] clocksource: tsc-early: mask: 0xffffffffffffffff max_cycles: 0x1cd42e4dffb, max_idle_ns: 881590591483 ns
+[    8.497106] Calibrating delay loop (skipped), value calculated using timer frequency.. 2000.00 BogoMIPS (lpj=1000000)
+[    8.515106] Last level iTLB entries: 4KB 64, 2MB 64, 4MB 64
+[    8.522008] Last level dTLB entries: 4KB 64, 2MB 0, 4MB 64, 1GB 0
+[    8.531106] mitigations: Enabled attack vectors: user_kernel, user_user, guest_host, guest_guest, SMT mitigations: auto
+[    8.542106] Spectre V2 : Mitigation: Retpolines
+[    8.550106] Spectre V1 : Mitigation: usercopy/swapgs barriers and __user pointer sanitization
+[    8.553220] Spectre V2 : Spectre v2 / SpectreRSB: Filling RSB on context switch and VMEXIT
+[    8.557106] x86/fpu: x87 FPU will use FXSAVE
+[   11.521286] Freeing SMP alternatives memory: 40K
+[   11.524768] pid_max: default: 32768 minimum: 301
+[   11.552217] LSM: initializing lsm=lockdown,capability,landlock,yama
+[   11.577453] landlock: Up and running.
+[   11.578622] Yama: becoming mindful.
+[   11.587907] Mount-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[   11.590257] Mountpoint-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[   11.692106] smpboot: CPU0: Intel 06/07 (family: 0x6, model: 0x7, stepping: 0x3)
+[   11.861710] Performance Events: PMU not available due to virtualization, using software events only.
+[   11.868011] signal: max sigframe size: 1440
+[   11.886711] rcu: Hierarchical SRCU implementation.
+[   11.887251] rcu: 	Max phase no-delay instances is 400.
+[   11.917293] Timer migration: 1 hierarchy levels; 8 children per group; 1 crossnode level
+[   11.992736] NMI watchdog: Perf NMI watchdog permanently disabled
+[   12.016328] smp: Bringing up secondary CPUs ...
+[   12.075404] smpboot: x86: Booting SMP configuration:
+[   12.077681] .... node  #0, CPUs:      #1
+[   12.110690] smp: Brought up 1 node, 2 CPUs
+[   12.113288] smpboot: Total of 2 processors activated (4000.00 BogoMIPS)
+[   12.151254] Memory: 6559188K/6798968K available (14650K kernel code, 2032K rwdata, 9844K rodata, 2996K init, 1168K bss, 235056K reserved, 0K cma-reserved)
+[   12.243390] devtmpfs: initialized
+[   12.270087] x86/mm: Memory block size: 128MB
+[   12.670327] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275000 ns
+[   12.672618] posixtimers hash table entries: 1024 (order: 2, 16384 bytes, linear)
+[   12.675254] futex hash table entries: 512 (32768 bytes on 1 NUMA nodes, total 32 KiB, linear).
+[   12.848352] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[   12.871106] audit: initializing netlink subsys (disabled)
+[   12.882541] audit: type=2000 audit(1790650944.401:1): state=initialized audit_enabled=0 res=1
+[   12.900249] thermal_sys: Registered thermal governor 'step_wise'
+[   12.903460] cpuidle: using governor ladder
+[   12.909245] cpuidle: using governor menu
+[   12.917036] acpiphp: ACPI Hot Plug PCI Controller Driver version: 0.5
+[   12.927096] PCI: Using configuration type 1 for base access
+[   12.948509] kprobes: kprobe jump-optimization is enabled. All kprobes are optimized if possible.
+[   12.976278] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[   12.978281] HugeTLB: 28 KiB vmemmap can be freed for a 2.00 MiB page
+[   13.051106] ACPI: Added _OSI(Module Device)
+[   13.054278] ACPI: Added _OSI(Processor Device)
+[   13.056304] ACPI: Added _OSI(Processor Aggregator Device)
+[   13.168446] ACPI: 1 ACPI AML tables successfully acquired and loaded
+[   13.274970] ACPI: Interpreter enabled
+[   13.277106] ACPI: PM: (supports S0 S3 S5)
+[   13.277426] ACPI: Using IOAPIC for interrupt routing
+[   13.279706] PCI: Using host bridge windows from ACPI; if necessary, use "pci=nocrs" and report a bug
+[   13.280106] PCI: Using E820 reservations for host bridge windows
+[   13.610106] ACPI: PCI Root Bridge [PCI0] (domain 0000 [bus 00-ff])
+[   13.610974] acpi PNP0A03:00: _OSC: OS supports [ASPM ClockPM Segments MSI HPX-Type3]
+[   13.611659] acpi PNP0A03:00: _OSC: not requesting OS control; OS requires [ExtendedConfig ASPM ClockPM MSI]
+[   13.614797] acpi PNP0A03:00: fail to add MMCONFIG information, can't access extended configuration space under this bridge
+[   13.629106] PCI host bridge to bus 0000:00
+[   13.629701] pci_bus 0000:00: root bus resource [io  0x0000-0x0cf7 window]
+[   13.630543] pci_bus 0000:00: root bus resource [io  0x0d00-0xffff window]
+[   13.633379] pci_bus 0000:00: root bus resource [mem 0x000a0000-0x000bffff window]
+[   13.634338] pci_bus 0000:00: root bus resource [mem 0x20000000-0xfebfffff window]
+[   13.635479] pci_bus 0000:00: root bus resource [bus 00-ff]
+[   13.637106] pci 0000:00:00.0: [8086:1237] type 00 class 0x060000 conventional PCI endpoint
+[   13.652106] pci 0000:00:01.0: [8086:7000] type 00 class 0x060100 conventional PCI endpoint
+[   13.673940] pci 0000:00:07.0: [8086:7113] type 00 class 0x068000 conventional PCI endpoint
+[   13.676454] pci 0000:00:07.0: quirk: [io  0x0600-0x063f] claimed by PIIX4 ACPI
+[   13.679764] pci 0000:00:07.0: quirk: [io  0x0700-0x070f] claimed by PIIX4 SMB
+[   13.684404] pci 0000:00:0a.0: [1af4:1041] type 00 class 0x000200 conventional PCI endpoint
+[   13.685514] pci 0000:00:0a.0: BAR 0 [io  0xc000-0xc03f]
+[   13.686312] pci 0000:00:0a.0: BAR 1 [io  0xc040-0xc04f]
+[   13.686723] pci 0000:00:0a.0: BAR 2 [io  0xc050-0xc05f]
+[   13.687489] pci 0000:00:0a.0: BAR 3 [io  0xc060-0xc06f]
+[   13.694022] pci 0000:00:12.0: [1234:1111] type 00 class 0x030000 conventional PCI endpoint
+[   13.696502] pci 0000:00:12.0: BAR 0 [mem 0xe0000000-0xe07fffff pref]
+[   13.697581] pci 0000:00:12.0: ROM [mem 0xfeb00000-0xfeb0ffff pref]
+[   13.698643] pci 0000:00:12.0: Video device with shadowed ROM at [mem 0x000c0000-0x000dffff]
+[   13.703502] pci 0000:00:1e.0: [8086:7010] type 00 class 0x010180 conventional PCI endpoint
+[   13.704727] pci 0000:00:1e.0: BAR 0 [io  0xc080-0xc087]
+[   13.705695] pci 0000:00:1e.0: BAR 2 [io  0xc088-0xc08f]
+[   13.707106] pci 0000:00:1e.0: BAR 4 [io  0xc070-0xc07f]
+[   13.710163] pci 0000:00:1e.0: BAR 0 [io  0x01f0-0x01f7]: legacy IDE quirk
+[   13.710578] pci 0000:00:1e.0: BAR 1 [io  0x03f6]: legacy IDE quirk
+[   13.711208] pci 0000:00:1e.0: BAR 2 [io  0x0170-0x0177]: legacy IDE quirk
+[   13.711541] pci 0000:00:1e.0: BAR 3 [io  0x0376]: legacy IDE quirk
+[   13.736962] ACPI: PCI: Interrupt link LNKA configured for IRQ 10
+[   13.743828] ACPI: PCI: Interrupt link LNKB configured for IRQ 10
+[   13.750980] ACPI: PCI: Interrupt link LNKC configured for IRQ 11
+[   13.756417] ACPI: PCI: Interrupt link LNKD configured for IRQ 11
+[   13.773420] iommu: Default domain type: Translated
+[   13.774736] iommu: DMA domain TLB invalidation policy: lazy mode
+[   13.804823] SCSI subsystem initialized
+[   13.814857] pps_core: LinuxPPS API ver. 1 registered
+[   13.816223] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[   13.816837] PTP clock support registered
+[   13.857448] PCI: Using ACPI for IRQ routing
+[   13.872027] clocksource: Switched to clocksource tsc-early
+[   13.904265] hrtimer: interrupt took 4737792 ns
+[   13.945946] VFS: Disk quotas dquot_6.6.0
+[   13.947976] VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+[   13.978138] pnp: PnP ACPI init
+[   14.033163] system 00:06: [io  0x0600-0x063f] has been reserved
+[   14.034176] system 00:06: [io  0xafe0-0xafe3] has been reserved
+[   14.035632] system 00:06: [io  0x0510-0x0511] has been reserved
+[   14.046545] pnp: PnP ACPI: found 7 devices
+[   14.741212] clocksource: acpi_pm: mask: 0xffffff max_cycles: 0xffffff, max_idle_ns: 2085701024 ns
+[   14.748578] NET: Registered PF_INET protocol family
+[   14.752057] IP idents hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+[   19.375208] tcp_listen_portaddr_hash hash table entries: 4096 (order: 4, 65536 bytes, linear)
+[   19.390895] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[   19.404020] TCP established hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[   19.462984] TCP bind hash table entries: 65536 (order: 9, 2097152 bytes, linear)
+[   19.613789] TCP: Hash tables configured (established 65536 bind 65536)
+[   19.646033] MPTCP token hash table entries: 8192 (order: 6, 196608 bytes, linear)
+[   19.666225] UDP hash table entries: 4096 (order: 6, 262144 bytes, linear)
+[   19.710028] UDP-Lite hash table entries: 4096 (order: 6, 262144 bytes, linear)
+[   19.735562] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[   19.741107] NET: Registered PF_XDP protocol family
+[   19.770841] pci_bus 0000:00: resource 4 [io  0x0000-0x0cf7 window]
+[   19.773729] pci_bus 0000:00: resource 5 [io  0x0d00-0xffff window]
+[   19.777449] pci_bus 0000:00: resource 6 [mem 0x000a0000-0x000bffff window]
+[   19.783060] pci_bus 0000:00: resource 7 [mem 0x20000000-0xfebfffff window]
+[   19.816358] pci 0000:00:01.0: PIIX3: Enabling Passive Release
+[   19.823366] pci 0000:00:00.0: Limiting direct PCI/PCI transfers
+[   19.832935] PCI: CLS 0 bytes, default 64
+[   19.847170] PCI-DMA: Using software bounce buffering for IO (SWIOTLB)
+[   19.854794] software IO TLB: mapped [mem 0x000000001b000000-0x000000001f000000] (64MB)
+[   19.862594] clocksource: tsc: mask: 0xffffffffffffffff max_cycles: 0x1cd42e4dffb, max_idle_ns: 881590591483 ns
+[   19.951495] clocksource: Switched to clocksource tsc
+[   19.984734] Unpacking initramfs...
+[   20.096020] Initialise system trusted keyrings
+[   20.280563] workingset: timestamp_bits=40 max_order=21 bucket_order=0
+[   20.334936] Key type asymmetric registered
+[   20.337119] Asymmetric key parser 'x509' registered
+[   20.348108] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 247)
+[   20.604289] io scheduler mq-deadline registered
+[   20.605512] io scheduler kyber registered
+[   20.611090] io scheduler bfq registered
+[   21.282768] ERST DBG: ERST support is disabled.
+[   21.349268] ACPI: \_SB_.LNKB: Enabled at IRQ 10
+[   21.619056] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
+[   21.641983] 00:04: ttyS0 at I/O 0x3f8 (irq = 4, base_baud = 115200) is a 16550A
+[   22.853317] VMware PVSCSI driver - version 1.0.7.0-k
+[   23.167942] scsi host0: ata_piix
+[   23.216984] scsi host1: ata_piix
+[   23.256121] ata1: PATA max MWDMA2 cmd 0x1f0 ctl 0x3f6 bmdma 0xc070 irq 14 lpm-pol 0
+[   23.267770] ata2: PATA max MWDMA2 cmd 0x170 ctl 0x376 bmdma 0xc078 irq 15 lpm-pol 0
+[   23.296720] hv_vmbus: registering driver hv_netvsc
+[   23.379797] i8042: PNP: PS/2 Controller [PNP0303:KBD,PNP0f13:MOU] at 0x60,0x64 irq 1,12
+[   23.474195] serio: i8042 KBD port at 0x60,0x64 irq 1
+[   23.489914] serio: i8042 AUX port at 0x60,0x64 irq 12
+[   23.503832] hv_vmbus: registering driver hyperv_keyboard
+[   23.601901] input: AT Translated Set 2 keyboard as /devices/platform/i8042/serio0/input/input0
+[   23.754867] ata1.00: ATA-0: v86 ATA HD, 1.00, max MWDMA2
+[   23.757059] ata1.00: 91 sectors, multi 0: LBA48 
+[   23.782503] rtc_cmos 00:00: registered as rtc0
+[   23.800026] rtc_cmos 00:00: setting system clock to 2026-09-29T03:02:38 UTC (1790650958)
+[   23.828404] rtc_cmos 00:00: alarms up to one day, y3k, 114 bytes nvram
+[   23.840834] intel_pstate: CPU model not supported
+[   23.915921] scsi 0:0:0:0: Direct-Access     ATA      v86 ATA HD       n/a  PQ: 0 ANSI: 5
+[   23.928551] gre: GRE over IPv4 demultiplexer driver
+[   23.950809] NET: Registered PF_INET6 protocol family
+[   24.011136] ata2.00: ATAPI: v86 ATAPI CD-ROM, 1.00, max MWDMA2
+[   24.142130] Segment Routing with IPv6
+[   24.143752] In-situ OAM (IOAM) with IPv6
+[   24.165706] Key type dns_resolver registered
+[   24.171636] IPI shorthand broadcast: enabled
+[   24.691819] sched_clock: Marking stable (24349382166, 342031084)->(27053698833, -2362285583)
+[   24.697043] scsi 1:0:0:0: CD-ROM            SONY     CD-ROM CDU-1000  1.1a PQ: 0 ANSI: 1 CCS
+[   25.002728] registered taskstats version 1
+[   25.034077] Loading compiled-in X.509 certificates
+[   37.261511] Freeing initrd memory: 9600K
+[   39.282332] Loaded X.509 cert 'alpinelinux.org: Alpine Linux kernel key: d76a695f66ad9cd28f5c22a8508f36e91f521f7a'
+[   39.424684] Demotion targets for Node 0: null
+[   39.432336] Key type .fscrypt registered
+[   39.432578] Key type fscrypt-provisioning registered
+[   39.612983] Freeing unused kernel image (initmem) memory: 2996K
+[   39.615358] Write protecting the kernel read-only data: 26624k
+[   39.629596] Freeing unused kernel image (text/rodata gap) memory: 1732K
+[   39.632166] Freeing unused kernel image (rodata/data gap) memory: 396K
+[   39.632526] rodata_test: all tests were successful
+[   39.635859] Run /init as init process
+[   48.328950] Alpine Init 3.14.0-r0
+Alpine Init 3.14.0-r0
+[   48.551143] Loading boot drivers...
+ * Loading boot drivers: [   50.063156] loop: module loaded
+[   50.339659] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[   50.549632] sd 0:0:0:0: [sda] 91 512-byte logical blocks: (46.6 kB/45.5 KiB)
+[   50.561498] sd 0:0:0:0: [sda] Write Protect is off
+[   50.571367] sd 0:0:0:0: [sda] Write cache: disabled, read cache: enabled, doesn't support DPO or FUA
+[   50.583645] sd 0:0:0:0: [sda] Preferred minimum I/O size 512 bytes
+[   50.728078] sd 0:0:0:0: [sda] Attached SCSI disk
+[   51.683614] ACPI: bus type USB registered
+[   51.693893] usbcore: registered new interface driver usbfs
+[   51.699283] usbcore: registered new interface driver hub
+[   51.706601] usbcore: registered new device driver usb
+[   52.162397] usbcore: registered new interface driver usb-storage
+[   52.313053] Loading boot drivers: ok.
+ok.
+[   52.980785] Mounting boot media...
+ * Mounting boot media: [   67.958225] sr 1:0:0:0: [sr0] scsi-1 drive
+[   68.006720] cdrom: Uniform CD-ROM driver Revision: 3.20
+[  160.506408] block sr0: the capability attribute has been deprecated.
+[  182.077624] Mounting boot media: ok.
+ok.
+[  192.538441] Installing packages to root filesystem...
+ * Installing packages to root filesystem: ( 1/28) Installing alpine-baselayout-data (3.7.2-r1)
+7  0%                                             8[0K( 2/28) Installing musl (1.2.6-r2)
+7  0%                                             8[0K7  1%                                             8[0K7  3% #                                           8[0K7  5% ##                                          8[0K7  7% ###                                         8[0K( 3/28) Installing busybox (1.37.0-r31)
+7  7% ###                                         8[0K7  8% ###                                         8[0K7 10% ####                                        8[0K7 12% #####                                       8[0K7 15% ######                                      8[0K7 16% #######                                     8[0K  Executing busybox-1.37.0-r31.post-install
+7 16% #######                                     8[0K( 4/28) Installing busybox-binsh (1.37.0-r31)
+7 16% #######                                     8[0K7 17% #######                                     8[0K( 5/28) Installing alpine-baselayout (3.7.2-r1)
+7 17% #######                                     8[0K7 18% ########                                    8[0K  Executing alpine-baselayout-3.7.2-r1.pre-install
+7 18% ########                                    8[0K7 19% ########                                    8[0K  Executing alpine-baselayout-3.7.2-r1.post-install
+7 19% ########                                    8[0K( 6/28) Installing bridge (1.5-r5)
+7 19% ########                                    8[0K7 20% ########                                    8[0K( 7/28) Installing ifupdown-ng (0.13.0-r0)
+7 20% ########                                    8[0K7 21% #########                                   8[0K7 22% #########                                   8[0K( 8/28) Installing openrc-user (0.63.1-r0)
+7 22% #########                                   8[0K7 23% ##########                                  8[0K( 9/28) Installing libcap2 (2.78-r0)
+7 23% ##########                                  8[0K7 24% ##########                                  8[0K(10/28) Installing openrc (0.63.1-r0)
+7 24% ##########                                  8[0K7 25% ###########                                 8[0K7 27% ############                                8[0K7 29% ############                                8[0K  Executing openrc-0.63.1-r0.post-install
+7 29% ############                                8[0K(11/28) Installing alpine-conf (3.22.0-r0)
+7 29% ############                                8[0K7 30% #############                               8[0K7 31% #############                               8[0K(12/28) Installing alpine-keys (2.6-r0)
+7 31% #############                               8[0K7 32% ##############                              8[0K(13/28) Installing alpine-release (3.24.0-r0)
+7 32% ##############                              8[0K7 33% ##############                              8[0K(14/28) Installing libcrypto3 (3.5.6-r0)
+7 33% ##############                              8[0K7 34% ###############                             8[0K7 36% ################                            8[0K7 38% #################                           8[0K7 40% ##################                          8[0K7 43% ##################                          8[0K7 45% ###################                         8[0K7 47% ####################                        8[0K7 49% #####################                       8[0K7 51% ######################                      8[0K7 53% #######################                     8[0K7 55% ########################                    8[0K7 57% #########################                   8[0K7 59% ##########################                  8[0K7 61% ###########################                 8[0K7 63% ############################                8[0K7 65% ############################                8[0K7 66% #############################               8[0K(15/28) Installing libssl3 (3.5.6-r0)
+7 66% #############################               8[0K7 67% #############################               8[0K7 69% ##############################              8[0K7 71% ###############################             8[0K7 73% ################################            8[0K(16/28) Installing ssl_client (1.37.0-r31)
+7 73% ################################            8[0K7 74% ################################            8[0K(17/28) Installing zlib (1.3.2-r0)
+7 74% ################################            8[0K7 75% #################################           8[0K7 76% #################################           8[0K(18/28) Installing libapk (3.0.6-r0)
+7 76% #################################           8[0K7 77% #################################           8[0K7 79% ##################################          8[0K(19/28) Installing ca-certificates-bundle (20260413-r0)
+7 79% ##################################          8[0K7 80% ###################################         8[0K7 82% ####################################        8[0K(20/28) Installing apk-tools (3.0.6-r0)
+7 82% ####################################        8[0K7 83% ####################################        8[0K7 84% #####################################       8[0K(21/28) Installing mdev-conf (4.10-r0)
+7 84% #####################################       8[0K7 85% #####################################       8[0K(22/28) Installing busybox-mdev-openrc (1.37.0-r31)
+7 85% #####################################       8[0K7 86% ######################################      8[0K(23/28) Installing busybox-openrc (1.37.0-r31)
+7 86% ######################################      8[0K7 87% ######################################      8[0K(24/28) Installing busybox-suid (1.37.0-r31)
+7 87% ######################################      8[0K7 88% ######################################      8[0K7 88% #######################################     8[0K(25/28) Installing scanelf (1.3.9-r1)
+7 88% #######################################     8[0K7 89% #######################################     8[0K7 90% #######################################     8[0K(26/28) Installing musl-utils (1.2.6-r2)
+7 90% #######################################     8[0K7 91% ########################################    8[0K(27/28) Installing alpine-base (3.24.0-r0)
+7 91% ########################################    8[0K7 92% ########################################    8[0K(28/28) Installing openssl (3.5.6-r0)
+7 92% ########################################    8[0K7 93% #########################################   8[0K7 95% ##########################################  8[0K7 97% ##########################################  8[0K7 98% ########################################### 8[0K7100% ############################################8[0KExecuting busybox-1.37.0-r31.trigger
+OK: 10.5 MiB in 28 packages
+[  416.924243] Installing packages to root filesystem: ok.
+ok.
+
+
+   OpenRC 0.63.1 is starting up Linux 6.18.35-0-virt (x86_64)
+
+ * /proc is already mounted
+ * Mounting /run ... [ ok ]
+ * /run/openrc: creating directory
+ * /run/lock: creating directory
+ * /run/lock: correcting owner
+ * Caching service dependencies ... [ ok ]
+ * Remounting devtmpfs on /dev ... [ ok ]
+ * Mounting /dev/mqueue ... [ ok ]
+ * Mounting modloop  ... * Verifying modloop
+ [ ok ]
+ * Mounting security filesystem ... [ ok ]
+ * Mounting debug filesystem ... [ ok ]
+ * Mounting trace filesystem ... [ ok ]
+ * Mounting persistent storage (pstore) filesystem ... [ ok ]
+ * Mounting bpf filesystem ... [ ok ]
+ * Starting busybox mdev ... [ ok ]
+ * Scanning hardware for mdev ... [ ok ]
+ * Loading hardware drivers ... [ ok ]
+ * Loading modules ... [ ok ]
+ * Setting system clock using the hardware clock [UTC] ... [ ok ]
+ * Checking local filesystems  ... [ ok ]
+ * Remounting filesystems ... [ ok ]
+ * Mounting local filesystems ... [ ok ]
+ * Configuring kernel parameters ... [ ok ]
+ * Creating user login records ... [ ok ]
+ * Cleaning /tmp directory ... [ ok ]
+ * Setting hostname to localhost from /etc/hostname ... [ ok ]
+ * Starting busybox syslog ... [ ok ]
+ * Starting firstboot ... [ ok ]
+
+Welcome to Alpine Linux 3.24
+Kernel 6.18.35-0-virt on x86_64 (/dev/ttyS0)
+
+localhost login: root
+Welcome to Alpine!
+
+The Alpine Wiki contains a large amount of how-to guides and general
+information about administrating Alpine systems.
+See <https://wiki.alpinelinux.org/>.
+
+You can setup the system with the command: setup-alpine
+
+You may change this message by editing /etc/motd.
+
+localhost:~# [6nmodprobe virtio_net 2>/dev/null; ifconfig eth0 up && tar -xf /dev/s
+da -C /tmp && /tmp/linux_probe64 net && /tmp/linux_probe32 net; grep MemTotal /p
+roc/meminfo; /tmp/linux_probe64 memtest 5120 1048576; uname -m; cat /sys/devices
+/system/cpu/online; grep 'System RAM' /proc/iomem; echo X64_LINUX_BOOT_OK
+X64_PROBE_START arch=64
+X64_PROBE_OK arch=64 cpus=2 threads=2 counter=40000 cpu_checks=0,1 fault=page child=7 tlb_stale=0 entry=syscall high_pages=4096
+X64_PROBE_XC arch=64 packages=1 cores=2 threads_per_core=1 migrations=48 signals=32 smc_rounds=64 direct_io=1
+X64_PROBE_NET arch=64 frames=16
+X64_PROBE_START arch=32
+X64_PROBE_OK arch=32 cpus=2 threads=2 counter=40000 cpu_checks=0,1 fault=page child=7 tlb_stale=0 entry=vdso high_pages=4096
+X64_PROBE_XC arch=32 packages=1 cores=2 threads_per_core=1 migrations=48 signals=32 smc_rounds=64 direct_io=1
+X64_PROBE_NET arch=32 frames=16
+MemTotal:        6578636 kB
+X64_MEMTEST mib=5120 pages=1310720 errors=0 extended_pages=1310720
+x86_64
+0-1
+00001000-0009fbff : System RAM
+00100000-1effffff : System RAM
+100000000-27fffffff : System RAM
+X64_LINUX_BOOT_OK

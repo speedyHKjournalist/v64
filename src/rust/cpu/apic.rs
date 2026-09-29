@@ -1141,10 +1141,10 @@ mod continuation_tests {
     #[test]
     fn disabled_apic_holds_pending_but_rejects_new_fixed_interrupts() {
         let (mut apic, mut aux) = enabled_apic();
-        assert!(deliver(&mut apic, &mut aux, 0x51, false));
+        assert!(deliver(&mut apic, &mut aux, 0x51, false, false));
         apic.spurious_vector &= !APIC_SOFTWARE_ENABLE;
         assert_eq!(pending_irq(&apic, &aux), None);
-        assert!(!deliver(&mut apic, &mut aux, 0x61, false));
+        assert!(!deliver(&mut apic, &mut aux, 0x61, false, false));
         assert!(register_get_bit(&apic.irr, 0x51));
         assert!(!register_get_bit(&apic.irr, 0x61));
         apic.spurious_vector |= APIC_SOFTWARE_ENABLE;
@@ -1158,21 +1158,21 @@ mod continuation_tests {
     fn illegal_vectors_set_esr_and_ff_is_a_legal_interrupt_vector() {
         let (mut apic, mut aux) = enabled_apic();
         for vector in 0..16 {
-            assert!(!deliver(&mut apic, &mut aux, vector, false));
+            assert!(!deliver(&mut apic, &mut aux, vector, false, false));
         }
         assert_eq!(apic.error, ESR_RECEIVE_ILLEGAL_VECTOR);
         assert_eq!(apic.irr, [0; 8]);
-        assert!(deliver(&mut apic, &mut aux, 0xFF, false));
+        assert!(deliver(&mut apic, &mut aux, 0xFF, false, false));
         assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), Some(0xFF));
     }
 
     #[test]
     fn queued_edge_does_not_destroy_in_service_level_trigger_mode() {
         let (mut apic, mut aux) = enabled_apic();
-        assert!(deliver(&mut apic, &mut aux, 0x51, true));
+        assert!(deliver(&mut apic, &mut aux, 0x51, true, false));
         assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), Some(0x51));
         assert!(register_get_bit(&apic.tmr, 0x51));
-        assert!(deliver(&mut apic, &mut aux, 0x51, false));
+        assert!(deliver(&mut apic, &mut aux, 0x51, false, false));
         assert!(
             register_get_bit(&apic.tmr, 0x51),
             "EOI still requires broadcast"

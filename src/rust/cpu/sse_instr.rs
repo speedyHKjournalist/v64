@@ -304,6 +304,61 @@ pub unsafe fn sse_convert_with_truncation_f32_to_i32(x: f32) -> i32 {
         return -0x80000000;
     };
 }
+// NaN results of SSE arithmetic as x86 produces them, whatever the host's
+// rules (Wasm leaves NaN sign and payload to the host: arm64 gives its default
+// NaN 0x7FC00000): the first source operand if it is a NaN, else the second,
+// quieted; the QNaN floating-point indefinite for an invalid operation
+// (Intel SDM Vol. 1, 4.8.3.5 and Table 4-7).
+#[inline]
+pub fn sse_nan_f32(result: f32, first: f32, second: f32) -> f32 {
+    if !result.is_nan() {
+        result
+    }
+    else if first.is_nan() {
+        f32::from_bits(first.to_bits() | 0x40_0000)
+    }
+    else if second.is_nan() {
+        f32::from_bits(second.to_bits() | 0x40_0000)
+    }
+    else {
+        f32::from_bits(0xFFC0_0000)
+    }
+}
+#[inline]
+pub fn sse_nan_f64(result: f64, first: f64, second: f64) -> f64 {
+    if !result.is_nan() {
+        result
+    }
+    else if first.is_nan() {
+        f64::from_bits(first.to_bits() | 0x8_0000_0000_0000)
+    }
+    else if second.is_nan() {
+        f64::from_bits(second.to_bits() | 0x8_0000_0000_0000)
+    }
+    else {
+        f64::from_bits(0xFFF8_0000_0000_0000)
+    }
+}
+/// `op` on each lane of `destination` and `source`, with x86 NaN results
+#[inline]
+pub unsafe fn sse_ps(destination: reg128, source: reg128, op: impl Fn(f32, f32) -> f32) -> reg128 {
+    let (a, b) = (destination.f32, source.f32);
+    reg128 {
+        f32: [0, 1, 2, 3].map(|i| sse_nan_f32(op(a[i], b[i]), a[i], b[i])),
+    }
+}
+#[inline]
+pub unsafe fn sse_pd(destination: reg128, source: reg128, op: impl Fn(f64, f64) -> f64) -> reg128 {
+    let (a, b) = (destination.f64, source.f64);
+    reg128 {
+        f64: [0, 1].map(|i| sse_nan_f64(op(a[i], b[i]), a[i], b[i])),
+    }
+}
+#[inline]
+pub fn sse_sqrt_f32(x: f32) -> f32 { sse_nan_f32(x.sqrt(), x, x) }
+#[inline]
+pub fn sse_sqrt_f64(x: f64) -> f64 { sse_nan_f64(x.sqrt(), x, x) }
+
 #[no_mangle]
 pub unsafe fn sse_convert_f32_to_i32(x: f32) -> i32 {
     let x = sse_integer_round(x as f64);
@@ -358,4 +413,32 @@ pub unsafe fn sse_integer_round(f: f64) -> f64 {
     else {
         return f.ceil();
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_nan_results_follow_x86() {
+        let (qnan, snan) = (f32::from_bits(0x7FC0_1234), f32::from_bits(0xFF80_0001));
+        // an invalid operation gives the QNaN floating-point indefinite
+        assert_eq!(sse_nan_f32(f32::INFINITY - f32::INFINITY, 1.0, 2.0).to_bits(), 0xFFC0_0000);
+        assert_eq!(sse_sqrt_f32(-4.0).to_bits(), 0xFFC0_0000);
+        assert_eq!(sse_sqrt_f64(-4.0).to_bits(), 0xFFF8_0000_0000_0000);
+        assert_eq!(sse_sqrt_f32(-0.0).to_bits(), 0x8000_0000);
+        // the first NaN operand, quieted
+        assert_eq!(sse_nan_f32(qnan + snan, qnan, snan).to_bits(), 0x7FC0_1234);
+        assert_eq!(sse_nan_f32(snan + qnan, snan, qnan).to_bits(), 0xFFC0_0001);
+        assert_eq!(sse_nan_f32(1.0 + qnan, 1.0, qnan).to_bits(), 0x7FC0_1234);
+        assert_eq!(sse_sqrt_f32(snan).to_bits(), 0xFFC0_0001);
+        assert_eq!(sse_nan_f64(f64::NAN, 1.0, f64::from_bits(0x7FF0_0000_0000_0005)).to_bits(), 0x7FF8_0000_0000_0005);
+        // ordinary results are untouched
+        assert_eq!(sse_nan_f32(1.5 + 2.0, 1.5, 2.0), 3.5);
+        let (a, b) = (reg128 { f32: [1.0, -1.0, f32::INFINITY, 0.0] }, reg128 { f32: [2.0, 0.0, f32::NEG_INFINITY, 0.0] });
+        let sum = unsafe { sse_ps(a, b, |x, y| x + y).u32 };
+        assert_eq!(sum, [3.0f32.to_bits(), (-1.0f32).to_bits(), 0xFFC0_0000, 0]);
+        let quotient = unsafe { sse_ps(a, b, |x, y| x / y).u32 };
+        assert_eq!(quotient[3], 0xFFC0_0000); // 0 / 0
+    }
 }

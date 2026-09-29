@@ -2,11 +2,18 @@
 // W0): one shared memory holds several instances of the module, each with its
 // own static data, stack and CPU state block at a different base address.
 // tools/parallel_wasm.mjs lists every field that holds an address of the
-// module's static data; relocate() adds the base to them.
+// module's static data; relocate() adds the base to them, except for
+// addresses inside the CPU state block, which it moves to the instance's
+// state slot at slot * STATE_SLOT_SIZE, below the module's static data: the
+// generated code then addresses registers with small constants (which arm64
+// hosts encode in the load or store instruction). Slot 0 is the machine
+// instance's, so its state block is where v86.wasm has it.
 
 import { dbg_assert } from "../log.js";
 
 export const PAGE_SIZE = 65536;
+export const STATE_SLOTS = 8;
+export const STATE_SLOT_SIZE = 4096;
 
 function read_uleb(bytes, at)
 {
@@ -79,9 +86,9 @@ export function memory_import(bytes)
 }
 
 /**
- * Positions of the relocated fields
+ * Positions of the relocated fields and where the linker put the state block
  * @param {Uint8Array} bytes
- * @return {{uleb5: !Array<number>, sleb5: !Array<number>, u32: !Array<number>}}
+ * @return {{uleb5: !Array<number>, sleb5: !Array<number>, u32: !Array<number>, state_address: number, state_size: number}}
  */
 export function relocations(bytes)
 {
@@ -89,7 +96,7 @@ export function relocations(bytes)
     if(!section) throw new Error("v86-parallel.wasm: no relocation table (not built by tools/parallel_wasm.mjs)");
     const at = { pos: section.content };
     const version = read_uleb(bytes, at);
-    if(version !== 1) throw new Error("v86-parallel.wasm: relocation table version " + version);
+    if(version !== 2) throw new Error("v86-parallel.wasm: relocation table version " + version + " (rebuild it)");
     const list = () => {
         const positions = [];
         let position = 0;
@@ -101,23 +108,30 @@ export function relocations(bytes)
         return positions;
     };
     const uleb5 = list(), sleb5 = list(), u32 = list();
-    dbg_assert(at.pos === section.end);
-    return { uleb5, sleb5, u32 };
+    const state_address = read_uleb(bytes, at), state_size = read_uleb(bytes, at);
+    dbg_assert(at.pos === section.end && state_size === STATE_SLOT_SIZE);
+    return { uleb5, sleb5, u32, state_address, state_size };
 }
 
 /**
- * A copy of the module whose static data, stack and CPU state are at `base`
- * instead of 0. The memory at [base, base + __heap_base) must be reserved for
- * the instance and zeroed: only non-zero data segments are written.
+ * A copy of the module whose static data and stack are at `base` instead of
+ * 0 and whose CPU state block is in state slot `slot`. The memory at [base,
+ * base + __heap_base) and the slot must be reserved for the instance and
+ * zeroed: only non-zero data segments are written.
  * @param {!Uint8Array} bytes
  * @param {number} base a multiple of 64 KiB
+ * @param {number} slot 0 for the machine instance, else its vCPU's core number
  * @return {!Uint8Array}
  */
-export function relocate(bytes, base)
+export function relocate(bytes, base, slot)
 {
     dbg_assert(base % PAGE_SIZE === 0 && base >= 0 && base < 2 ** 32);
-    if(base === 0) return bytes;
+    dbg_assert(slot >= 0 && slot < STATE_SLOTS);
     const table = relocations(bytes);
+    const state_start = table.state_address, state_end = table.state_address + table.state_size;
+    // the new value of a field that holds the (unsigned) address `value`
+    const map = value => value >= state_start && value < state_end ?
+        slot * STATE_SLOT_SIZE + value - state_start : value + base;
     const out = new Uint8Array(bytes);
     const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
 
@@ -136,19 +150,19 @@ export function relocate(bytes, base)
     for(const at of table.uleb5)
     {
         // load/store offsets and unsigned immediates: must stay below 4 GiB
-        const value = read5(at) + base;
+        const value = map(read5(at));
         if(value >= 2 ** 32) throw new Error("relocated offset beyond 4 GiB");
         write5(at, value);
     }
     for(const at of table.sleb5)
     {
         // i32.const: a signed 32-bit value in 5 bytes (bits 32..34 are sign extension)
-        const value = (read5(at) + base) % 2 ** 32 | 0;
+        const value = map(read5(at) % 2 ** 32) % 2 ** 32 | 0;
         write5(at, (value >>> 0) + (value < 0 ? 0x700000000 : 0));
     }
     for(const at of table.u32)
     {
-        view.setUint32(at, view.getUint32(at, true) + base >>> 0, true);
+        view.setUint32(at, map(view.getUint32(at, true)) >>> 0, true);
     }
     return out;
 }
@@ -161,10 +175,13 @@ export function relocate(bytes, base)
  */
 export function instantiate_v86(bytes, imports)
 {
-    const memory = memory_import(new Uint8Array(bytes instanceof ArrayBuffer ? bytes : bytes.buffer, bytes.byteOffset || 0, bytes.byteLength));
+    const view = new Uint8Array(bytes instanceof ArrayBuffer ? bytes : bytes.buffer, bytes.byteOffset || 0, bytes.byteLength);
+    const memory = memory_import(view);
     if(memory)
     {
         imports["env"]["memory"] = new WebAssembly.Memory({ "initial": memory.initial, "maximum": memory.maximum, "shared": true });
+        // (the machine instance: base 0, state slot 0)
+        return WebAssembly.instantiate(relocate(view, 0, 0), imports);
     }
     return WebAssembly.instantiate(bytes, imports);
 }
@@ -214,13 +231,14 @@ export function image_size(bytes)
  * @param {!Uint8Array} bytes
  * @param {!Object} imports with an "env" object
  * @param {!WebAssembly.Memory} memory the shared memory of the instance at base 0
+ * @param {number} slot its state slot (1..STATE_SLOTS-1, unused by other instances)
  * @return {Promise<{instance: WebAssembly.Instance, base: number}>}
  */
-export async function instantiate_relocated(bytes, imports, memory)
+export async function instantiate_relocated(bytes, imports, memory, slot)
 {
     const pages = Math.ceil(image_size(bytes) / PAGE_SIZE);
     const base = memory.grow(pages) * PAGE_SIZE;
     imports["env"]["memory"] = memory;
-    const { instance } = await WebAssembly.instantiate(relocate(bytes, base), imports);
+    const { instance } = await WebAssembly.instantiate(relocate(bytes, base, slot), imports);
     return { instance, base };
 }

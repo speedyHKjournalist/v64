@@ -10,6 +10,12 @@
 //   section "v86.relocs". src/parallel/relocate.js adds a base address to
 //   them, which gives each vCPU worker its own copy of the Rust statics, stack
 //   and CPU state block inside the one shared memory;
+// - the address and size of the CPU state block (the STATE_BLOCK static of
+//   cpu/global_pointers.rs) go into the same section: relocate.js moves
+//   every address inside it to a low fixed slot per instance instead (the
+//   module is linked above them), so that the generated code reaches the
+//   registers with small constant addresses, which hosts like arm64 encode
+//   in the load or store itself;
 // - the linker's relocation and linking sections are dropped.
 //
 // Usage: tools/parallel_wasm.mjs input.wasm output.wasm
@@ -24,6 +30,8 @@ const MEMORY_64 = new Set([14, 15, 16, 17, 25]);
 const PIC_OR_TLS = new Set([11, 21, 23]);
 
 const SECTION_IMPORT = 2, SECTION_GLOBAL = 6, SECTION_EXPORT = 7, SECTION_CODE = 10, SECTION_DATA = 11;
+// (src/parallel/relocate.js) the state block of instance slot k is at k * STATE_SLOT_SIZE
+const STATE_SLOTS = 8, STATE_SLOT_SIZE = 4096;
 
 class Reader
 {
@@ -101,6 +109,56 @@ export function convert(input)
         relocs.set(target, (relocs.get(target) || []).concat(list));
     }
     const index_of = id => sections.findIndex(s => s.id === id);
+
+    // the state block: a data symbol of the linking section's symbol table
+    // (segment index and offset) and the linked address of its segment
+    const state_block = (() => {
+        const linking = sections.find(s => s.name === "linking");
+        assert.ok(linking, "no linking section: link with --emit-relocs");
+        const r = new Reader(bytes, linking.start);
+        r.name();
+        assert.equal(r.uleb(), 2, "linking section version");
+        let symbol = null;
+        while(r.pos < linking.end)
+        {
+            const type = r.u8(), size = r.uleb(), end = r.pos + size;
+            if(type === 8) // WASM_SYMBOL_TABLE
+            {
+                for(let n = r.uleb(); n--;)
+                {
+                    const kind = r.u8(), flags = r.uleb();
+                    const undefined_symbol = flags & 0x10, explicit_name = flags & 0x40;
+                    if(kind === 1) // data
+                    {
+                        const name = r.name();
+                        if(undefined_symbol) continue;
+                        const segment = r.uleb(), offset = r.uleb(), length = r.uleb();
+                        if(/STATE_BLOCK/.test(name)) { assert.ok(!symbol, "two STATE_BLOCK symbols"); symbol = { segment, offset, length }; }
+                    }
+                    else if(kind === 3) r.uleb(); // section
+                    else { r.uleb(); if(!undefined_symbol || explicit_name) r.name(); }
+                }
+            }
+            r.pos = end;
+        }
+        assert.ok(symbol, "no STATE_BLOCK symbol (build with --features parallel)");
+        const data = sections[index_of(SECTION_DATA)];
+        const d = new Reader(bytes, data.start);
+        const count = d.uleb();
+        assert.ok(symbol.segment < count);
+        for(let i = 0; i < count; i++)
+        {
+            assert.equal(d.uleb(), 0);
+            assert.equal(d.u8(), 0x41);
+            const offset = d.sleb();
+            assert.equal(d.u8(), 0x0B);
+            const length = d.uleb();
+            if(i === symbol.segment) return { address: offset + symbol.offset, size: symbol.length };
+            d.pos += length;
+        }
+    })();
+    assert.equal(state_block.size, STATE_SLOT_SIZE, "STATE_BLOCK size");
+    assert.ok(state_block.address >= STATE_SLOTS * STATE_SLOT_SIZE, "the module must be linked above the state slots (--global-base)");
     const code_index = index_of(SECTION_CODE), data_index = index_of(SECTION_DATA);
     assert.ok(relocs.has(code_index), "no reloc.CODE: link with --emit-relocs");
     for(const target of relocs.keys())
@@ -251,8 +309,9 @@ export function convert(input)
     assert.ok(found_memory, "link with --import-memory");
     assert.deepEqual(globals_relocated.sort(), ["__data_end", "__heap_base", "__stack_pointer"]);
 
-    // custom section "v86.relocs": for each kind, count and delta-coded positions
-    const table = [...uleb(1)];
+    // custom section "v86.relocs" (version 2): for each kind, count and
+    // delta-coded positions; then the state block's linked address and size
+    const table = [...uleb(2)];
     for(const kind of ["uleb5", "sleb5", "u32"])
     {
         const list = sites[kind].sort((a, b) => a - b);
@@ -260,6 +319,7 @@ export function convert(input)
         let last = 0;
         for(const pos of list) { table.push(...uleb(pos - last)); last = pos; }
     }
+    table.push(...uleb(state_block.address), ...uleb(state_block.size));
     const name = Buffer.from("v86.relocs");
     const custom = [...uleb(name.length), ...name, ...table];
     emit([0, ...uleb(custom.length)]);
@@ -267,15 +327,16 @@ export function convert(input)
     const result = new Uint8Array(out_length);
     let at = 0;
     for(const chunk of out) { result.set(chunk, at); at += chunk.length; }
-    return { bytes: result, sites };
+    return { bytes: result, sites, state_block };
 }
 
 if(process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()))
 {
     const [input, output] = process.argv.slice(2);
     assert.ok(input && output, "usage: tools/parallel_wasm.mjs input.wasm output.wasm");
-    const { bytes, sites } = convert(fs.readFileSync(input));
+    const { bytes, sites, state_block } = convert(fs.readFileSync(input));
     new WebAssembly.Module(bytes);
     fs.writeFileSync(output, bytes);
-    console.log(`${output}: ${bytes.length} bytes; relocated fields: ${sites.uleb5.length} offsets, ${sites.sleb5.length} constants, ${sites.u32.length} data pointers`);
+    console.log(`${output}: ${bytes.length} bytes; relocated fields: ${sites.uleb5.length} offsets, ${sites.sleb5.length} constants, ` +
+        `${sites.u32.length} data pointers; state block at ${state_block.address.toString(16)}`);
 }

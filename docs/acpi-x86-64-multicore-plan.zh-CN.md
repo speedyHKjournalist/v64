@@ -1,6 +1,7 @@
 # v86：完整 ACPI、x86-64 与单路多核心实施计划
 
-> 状态（2026-09-28 晚更新）：C0/C1 的实现与门槛已通过（C0 性能复测：x64 工作使 32 位启动回退到 1.148，定位并修正解释器取指/内存热路径后为 1.095，通过 10% 门槛，见 [C0 记录](validation/platform/C0/normal-up-final.zh-CN.md)）；C2 每核指标、三后端 Linux 拓扑与 **Windows 8.1 x64 1/2/4 核拓扑/逐核执行**已通过；C3 原子/内存序、debug/release Linux OS 压力矩阵已通过，S3（依赖 A3）与长期 soak 未关闭。X1 解码已对整个长模式 opcode map 做独立对照；X2 系统用例 66 个 QEMU 差分 + 14 个 SDM 断言 + 长模式三重故障，release 构建配对通过；X3 的 opcode 执行矩阵（349,888 个编码）0 不一致，direct loader 明确拒绝 64 位输入；**X4 x64 页层（每 4 KiB 长模式代码页一个 Wasm 函数，含 SSE 模板）使 Alpine x86_64 1/2/4 核启动由解释器的约 16/85/140 min 降到约 1.3/1.9/2.1 min，兼容模式代码经 32 位 IR 编译；x64 区域管线第一版不实施**；X5 高 RAM 上的代码/页表/SMC、v86gl 高地址、IDE 48 位寻址与分块快照流通过。**XC：真实 x86_64 Linux（Alpine 3.24，Linux 6.18）在 1/2/4 核页层与 1/2/4 核解释器下通过 64/32 位探针与 XC 矩阵，virtio-net 收发在 1 核解释器与 1/2/4 核页层下通过，页层下另通过整机快照（含 V7 分块流）与 reboot/poweroff(S5)；Windows 8.1 Pro x64（用户镜像，只读）在 v86 中启动到桌面，1/2/4 核下 64 位与 WOW64 探针均通过**（修正了兼容模式下截断 64 位 GDTR 基址的缺陷），见 [XC 记录](validation/platform/XC/linux64-boot.zh-CN.md)。仍不向普通配置公布 LM。详见各阶段记录。
+> 状态（2026-09-29 更新）：**A3 通过**（S3 挂起到内存与 OS 主导的 S4 在 32 位 Linux 1/2/4 核 JIT、1/2 核解释器、宿主并行 4 核，以及 x86_64 Linux 1/2 核各 20+20 次循环）；**W0 通过**（每实例重定位 + 低地址状态槽位的并行构建，轮转套件 11/11 在其上通过，默认构建不变）；**W1 通过**（AP 在 vCPU Worker 中与 BSP 真并发，解释器/Tier-0/区域 IR/x64 页层都可在 Worker 中运行；litmus、生命周期与故障注入、C3 OS 压力 30/30、A3、x86_64 Alpine 2/4 核、无头 Chrome）；**W2 取得性能证据**（4 核 compute/memory/io 为 1 核的 1.6–2.5 倍，默认仍为轮转）；**X6 已实施**（扩展 RAM：宿主存储 + 帧缓存，6 GiB fixture 通过）；**R1 入口**（`make platform-release-gate`、[能力矩阵](validation/platform/capability-matrix.zh-CN.md)）；x64 页层新增 SSE ADD/SUB/MUL/DIV 模板；nasm 测试可在无 gdb 的宿主上以 QEMU 生成参考。未关闭：Windows 的 S3/S4 与宿主并行验收、DOS/Win9x 回归（无镜像）、4 核 poweroff 间歇问题的根因。
+> 此前（2026-09-28 晚）：C0/C1 的实现与门槛已通过（C0 性能复测：x64 工作使 32 位启动回退到 1.148，定位并修正解释器取指/内存热路径后为 1.095，通过 10% 门槛，见 [C0 记录](validation/platform/C0/normal-up-final.zh-CN.md)）；C2 每核指标、三后端 Linux 拓扑与 **Windows 8.1 x64 1/2/4 核拓扑/逐核执行**已通过；C3 原子/内存序、debug/release Linux OS 压力矩阵已通过，S3（依赖 A3）与长期 soak 未关闭。X1 解码已对整个长模式 opcode map 做独立对照；X2 系统用例 66 个 QEMU 差分 + 14 个 SDM 断言 + 长模式三重故障，release 构建配对通过；X3 的 opcode 执行矩阵（349,888 个编码）0 不一致，direct loader 明确拒绝 64 位输入；**X4 x64 页层（每 4 KiB 长模式代码页一个 Wasm 函数，含 SSE 模板）使 Alpine x86_64 1/2/4 核启动由解释器的约 16/85/140 min 降到约 1.3/1.9/2.1 min，兼容模式代码经 32 位 IR 编译；x64 区域管线第一版不实施**；X5 高 RAM 上的代码/页表/SMC、v86gl 高地址、IDE 48 位寻址与分块快照流通过。**XC：真实 x86_64 Linux（Alpine 3.24，Linux 6.18）在 1/2/4 核页层与 1/2/4 核解释器下通过 64/32 位探针与 XC 矩阵，virtio-net 收发在 1 核解释器与 1/2/4 核页层下通过，页层下另通过整机快照（含 V7 分块流）与 reboot/poweroff(S5)；Windows 8.1 Pro x64（用户镜像，只读）在 v86 中启动到桌面，1/2/4 核下 64 位与 WOW64 探针均通过**（修正了兼容模式下截断 64 位 GDTR 基址的缺陷），见 [XC 记录](validation/platform/XC/linux64-boot.zh-CN.md)。仍不向普通配置公布 LM。详见各阶段记录。
 > 基线：2026-09-27，`8af0560e`（PR #55 合并后，工作区干净）。原稿基线 `dfd8ac23 + 未提交修改` 已过时。
 > 本轮 review/推进的实际接手点为 `8edd6d69 + 未提交修改`；验证环境和 fixture 见 [C1 记录](validation/platform/C1/review-and-validation.zh-CN.md)。
 > §2 的事实均经源码审计，标注“探针”的条目另经客户机运行确认（buildroot Linux 6.8，`acpi: true`）。
@@ -198,12 +199,12 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 | X4 IR 各层 x64 | X3 | 解释器/Tier-0/区域管线差分和 OS 回归通过 | XL | — | **Tier-0 级已通过**（x64 页层 + SSE 模板：差分模糊、系统/SMC/别名场景、1/2/4 核 Linux、Windows；兼容模式代码经 32 位 IR 编译；32 位 IR suite 无回归）；x64 区域管线第一版不实施（理由见 X4 实施记录） |
 | X5 36 位物理地址/设备 | X3；最终合并 X4 | 高位 MMIO、4 GiB 以上的 RAM 重映射（总量 ≤ wasm32 可用）、DMA 地址宽度、快照 | L | R-x64-UP | **主要门槛已通过**（36 位物理总线、VirtIO/IDE/DMA/v86gl、整机快照（V7 分块流）；`high_memory_size` 经 SeaBIOS E820 交给 OS；4 GiB 以上的代码/页表/SMC 在解释器与页层下通过；IDE 48 位寻址修正） |
 | XC x64 × 多核集成 | X4、X5、C3 | C2/C3 的矩阵在 x64 OS 上通过 | L | R-x64-SMP | **Linux 矩阵已通过**（1/2/4 核页层与 1/2/4 核解释器：拓扑、迁移、跨核信号/SMC、TLB shootdown、O_DIRECT；网络在 1 核解释器与各核数页层；页层下另有整机快照与 reboot/S5）；**Windows 8.1 x64 1/2/4 核通过**（拓扑 API、逐核亲和、APIC ID、4 GiB 以上分配、WOW64） |
-| A3 睡眠/休眠 | A2；S4 另需磁盘持久化策略；多核 S3 需 C3 | S4（OS 主导 soft-off + 恢复）与 S3 在单核/多核下闭环 | L | R-ACPI 完整 | 待实施 |
-| W0 显式上下文 ABI | XC | ctx_ptr ABI、静态状态逐项归属；单线程行为与性能不回退 | XL | — | 待实施 |
-| W1 宿主并行正确性 | W0、A3 | Worker/共享内存/同步内存模型通过验证 | XL | — | 待实施 |
-| W2 并行性能/发布 | W1 | 真实并发和吞吐证据，兼容回退可用 | L | R-parallel | 待实施 |
-| X6 超过 4 GiB 的 RAM 容量（可选） | X5 | Memory64/多 memory 后备、6–8 GiB 配置 | XL | — | 可选 |
-| R1 总体验收 | 除 X6 外全部 | 各发布级的清单全绿 | L | 全部 | 待实施 |
+| A3 睡眠/休眠 | A2；S4 另需磁盘持久化策略；多核 S3 需 C3 | S4（OS 主导 soft-off + 恢复）与 S3 在单核/多核下闭环 | L | R-ACPI 完整 | **已通过**（32 位 Linux 1/2/4 核 JIT、1/2 核解释器、宿主并行 4 核，x86_64 Linux 1/2 核页层：各 20 次 S3 + 20 次 S4；`_S3`/`_S4` 经 ACPICA 验证；见 [A3 记录](validation/platform/A3/sleep-hibernate.zh-CN.md)） |
+| W0 显式上下文 ABI | XC | ctx_ptr ABI、静态状态逐项归属；单线程行为与性能不回退 | XL | — | **已通过**（以“每实例重定位 + 低地址状态槽位”代替 ctx_ptr 参数：同一模块两个状态基址交替运行无串扰，C1–C3/XC 轮转套件 11/11 在并行构建上通过，默认构建不变；见 [W0 记录](validation/platform/W0/context-abi.zh-CN.md)） |
+| W1 宿主并行正确性 | W0、A3 | Worker/共享内存/同步内存模型通过验证 | XL | — | **已通过**（vCPU Worker 真并发，解释器与三种 JIT 层；litmus/IPI 唤醒、生命周期与故障、C3 OS 压力 30/30、A3 20+20 次、x86_64 Linux 2/4 核、Chrome 下 module Worker；见 [W1 记录](validation/platform/W1/parallel-correctness.zh-CN.md)） |
+| W2 并行性能/发布 | W1 | 真实并发和吞吐证据，兼容回退可用 | L | R-parallel | **性能证据已取得**（固定工作量 1/2/4/8 核：计算/内存/I/O 4 核 1.8–2.6 倍于 1 核；锁竞争负载不扩展；`"auto"` 策略与回退；默认仍为轮转，见 [W2 记录](validation/platform/W2/performance.zh-CN.md)） |
+| X6 超过 4 GiB 的 RAM 容量（可选） | X5 | Memory64/多 memory 后备、6–8 GiB 配置 | XL | — | **已实施**（驻留帧缓存方案，`extended_memory_size`；6 GiB fixture 在 4 MiB 帧池下通过，含快照；Linux 结果见 [X6 记录](validation/platform/X6/extended-memory.zh-CN.md)） |
+| R1 总体验收 | 除 X6 外全部 | 各发布级的清单全绿 | L | 全部 | **入口已实现**（`make platform-release-gate` 按发布级运行并出报告；[能力矩阵](validation/platform/capability-matrix.zh-CN.md)）；清单状态见 §6.4 |
 
 规模表示相对复杂度，不是工期承诺。X2–X4、C1、C3、W0、W1 需要多个子阶段；先完成一个状态块切换切片和一个长模式微内核切片，再依据实测吞吐估算排期。不能以 agent 并发数线性折算交付时间。
 
@@ -384,10 +385,12 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **修改范围**：GuestPhysicalMemory 后备（Memory64 或多 memory）、JIT 访存快/慢路径、快照分块、配置校验。
 
-- [ ] 评估 Memory64 与多 memory 在目标浏览器/Node 的可用性和性能；记录结论后再选方案。
-- [ ] 高 RAM 访问走新后备，低 RAM 快路径不退化；跨块访问、懒分配、宿主内存不足有一致行为。
+- [x] 评估 Memory64 与多 memory：两者都要求重写整个以单一 wasm32 memory 宿主指针为前提的 CPU 核心（Rust 目标、全部 helper、TLB、JIT），Memory64 的浏览器支持也不一致；改用“驻留帧缓存”：扩展 RAM 的页存于宿主 ArrayBuffer（可与 Worker 共享），CPU 在 wasm 堆的帧池中缓存 4 KiB 页，物理总线把该范围解码为新的 `Extended` 类型。
+- [x] 扩展 RAM 访问走新后备，低 RAM 与 X5 高 RAM 的快路径不变；跨页访问逐页解析；存储按 1 GiB 分块懒分配，“touched” 位图限定上电清零与快照；宿主无法分配时在启动前报错。
 
 **退出条件**：资源足够的 runner 上实际配置 6–8 GiB，由 guest 跨低/高 RAM 写入校验、执行高地址代码、做 I/O 和快照恢复。受限浏览器明确拒绝超资源配置，不把不能分配解释为架构不支持。
+
+**实施记录（2026-09-29）**：公开实验选项 `extended_memory_size`（与 `extended_memory_cache`），位于 `4 GiB + high_memory_size` 之后，CMOS/E820/multiboot 报告连续的高位 RAM。解释器 helper 每次访问查帧，可随时换出；x64 页层的访问缓存与兼容模式的 32 位 TLB 在轮转模式下可把扩展页映射到其帧（CACHED，执行中不换出，超过一半或无帧可换时在分发循环的安全点统一失效；2026-09-29 发现多核轮转的 `run_cpu_slice` 循环缺少这个安全点，6.5 GiB Alpine 在帧池占满后每次访问都走 bounce 帧而近乎停滞，已补上并以 2 核 fixture 回归）；扩展页从不作为代码编译；兼容模式经 32 位总线孔径访问；LOCK 读改写持有扩展 RAM 锁到指令结束；V7 快照流以 kind 3 记录携带扩展页。合成 fixture（6 GiB 扩展 RAM、4 MiB 帧池）覆盖全区抽样写读、密集模式、字符串复制、代码执行、页表与 A/D、兼容模式、DMA 与快照恢复，解释器与页层逐字节一致。真实 OS 的 6.5 GiB 运行见 [X6 记录](validation/platform/X6/extended-memory.zh-CN.md)。
 
 ### C0：确定性机器时钟
 
@@ -499,24 +502,28 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 **修改范围**：机器电源状态机、RTC/wake source、设备 quiesce/resume、FACS/AML、磁盘持久化、快照协调。
 
-- [ ] S4 先行：在 PIIX4/SeaBIOS 模型中，OS 写入休眠映像后以 `_S4` 的 SLP_TYP 进入 soft-off（A1 已把该值当作带 `S4` 标记的关机处理），下次冷启动由 OS 自行恢复。emulator 侧工作是：关机后磁盘内容保留（含浏览器内存盘与 async/分块盘的写回策略）、冷启动路径正确、公开状态查询；验证后再在平台描述中公布 `_S4`。
-- [ ] S3 按真实固件/OS 唤醒流程实现：进入时停所有核、保留 RAM；唤醒时 CPU 复位，SeaBIOS（`CONFIG_S3_RESUME`）读到 CMOS 0x0F=0xFE 后跳 FACS waking vector；设置 WAK_STS；保存/重建各类设备状态，BSP 恢复与 AP 再启动；分别验证 32 位和 64 位 OS 的实际唤醒入口形式。
-- [ ] 全核停机屏障、RTC/电源按钮等公开 wake source、wake enable、WAK_STS 与 pending SCI 一致；S3 不使用“对所有核设置 HLT”代替。
-- [ ] OS 主导 S4 完成 guest hibernate→磁盘写入/flush→power off→冷启动→OS 从磁盘恢复。不要用宿主 save_state/restore_state 模拟 S4；不支持 S4BIOS 就不公布对应能力。
-- [ ] PM timer/TSC/RTC 在运行、暂停、S3、S4、snapshot restore 时采用 P1 已定义的策略；设备恢复不重复 IRQ、不丢完成事件、不触发时间回退。
-- [ ] S3/S4 未通过时表中保持隐藏；通过后从同一 profile 打开，重跑 ACPI table/AML 验证，不仅修改 UI 标签。
+- [x] S4 先行：在 PIIX4/SeaBIOS 模型中，OS 写入休眠映像后以 `_S4` 的 SLP_TYP 进入 soft-off（A1 已把该值当作带 `S4` 标记的关机处理），下次冷启动由 OS 自行恢复。emulator 侧工作是：关机后磁盘内容保留（含浏览器内存盘与 async/分块盘的写回策略）、冷启动路径正确、公开状态查询；验证后再在平台描述中公布 `_S4`。
+- [x] S3 按真实固件/OS 唤醒流程实现：进入时停所有核、保留 RAM；唤醒时 CPU 复位，SeaBIOS（`CONFIG_S3_RESUME`）读到 CMOS 0x0F=0xFE 后跳 FACS waking vector；设置 WAK_STS；保存/重建各类设备状态，BSP 恢复与 AP 再启动；分别验证 32 位和 64 位 OS 的实际唤醒入口形式。
+- [x] 全核停机屏障、RTC/电源按钮等公开 wake source、wake enable、WAK_STS 与 pending SCI 一致；S3 不使用“对所有核设置 HLT”代替。
+- [x] OS 主导 S4 完成 guest hibernate→磁盘写入/flush→power off→冷启动→OS 从磁盘恢复。不要用宿主 save_state/restore_state 模拟 S4；不支持 S4BIOS 就不公布对应能力。
+- [x] PM timer/TSC/RTC 在运行、暂停、S3、S4、snapshot restore 时采用 P1 已定义的策略；设备恢复不重复 IRQ、不丢完成事件、不触发时间回退。
+- [x] S3/S4 未通过时表中保持隐藏；通过后从同一 profile 打开，重跑 ACPI table/AML 验证，不仅修改 UI 标签。
 
 **退出条件**：单核和多核、32/64 位目标 OS 的 S3 和 S4 各至少 20 次循环；恢复后用户程序内存校验、所有核在线、磁盘/网络/时钟/关机正确。此阶段通过后才具备本计划的完整 ACPI 电源契约。
+
+**实施记录（2026-09-28/29）**：S3 置 CMOS 0x0F=0xFE 后停止所有核（轮转模式不再调度；宿主并行时 stop-the-world），设备定时器继续运行；电源按钮或 RTC 闹钟唤醒经 `reboot_internal("s3-wake", keep_memory)` 复位 CPU/设备、保留 RAM，SeaBIOS 走 resume 路径到 FACS waking vector，WAK_STS 与唤醒原因随后置位；公开事件 `acpi-sleep`/`acpi-wake` 与 `power_state()`。S4 是带 S4 标记的 soft-off，上电按冷启动清零 RAM（含 X6 扩展 RAM），由客户机 `resume=` 恢复；未公布 S4BIOS。`etc/system-states` 由平台描述生成，ACPICA 执行 `\_S3/\_S4/\_S5` 得到 `{1,1,0,0}`/`{2,2,0,0}`/`{0,0,0,0}`。验收：32 位 Linux 4.16（1/2/4 核 JIT、1/2 核解释器、宿主并行 4 核）与 x86_64 Alpine 3.24 lts 内核（1/2 核页层）各 20 次 S3（RTC 与电源按钮交替，RAM 校验、墙钟不倒退、所有核在线）+ 20 次 S4（marker 与 tmpfs 内容恢复、`Waking up from system sleep state S4` 恰一次）。发现并修正：内存 `BTS/BTR/BTC` 非原子导致多核 S3 在 SeaBIOS SMP 锁挂起。Windows 的 S3/S4 未验收（镜像只读）。见 [A3 记录](validation/platform/A3/sleep-hibernate.zh-CN.md)。
 
 ### W0：显式上下文 ABI（宿主并行的前提）
 
 **修改范围**：`global_pointers.rs` 的使用者、`cpu.rs`、`js_api.rs`、`wasm_builder.rs`、IR runtime/Tier-0/backend、helper import 签名、`call_indirect` 签名。
 
-- [ ] 按 §3.1 第二步，把 CPU 状态访问从固定地址迁到 `ctx_ptr + field_offset`；生成代码、import、`call_indirect` 签名同步更新。
-- [ ] P2a 归属表中所有“每核”静态变量迁入上下文；“每 Machine”的进入共享区并定义并发访问规则（W1 细化）。
-- [ ] 单线程下的性能门槛：固定工作量基准（`make bench-quick`、XP 启动）相对 W0 前退化不超过 P0 约定阈值；超出时先剖析。
+- [x] ~~按 §3.1 第二步，把 CPU 状态访问从固定地址迁到 `ctx_ptr + field_offset`~~：改为每实例重定位（`tools/parallel_wasm.mjs` 列出所有静态地址字段，`src/parallel/relocate.js` 按实例基址改写），CPU 状态块放在低地址槽位（`slot × 4096`），生成代码、import 与 `call_indirect` 签名都不变（理由与 arm64 实测见 W0 记录）。
+- [x] 每核状态随实例私有（静态、栈、堆、TLB、JIT）；每 Machine 的状态（本地 APIC、IOAPIC、INIT/SIPI/NMI 锁存、物理总线、代码页归属、扩展 RAM）只经 `crate::parallel::machine`/`machine_state` 访问，并发规则见 W1。
+- [x] 单线程性能：默认构建 `v86.wasm` 不含 W0 改动（`cfg(feature = "parallel")`）；并行构建 1 核轮转的计算负载与默认构建持平（低地址槽位之前慢 1.4 倍，已剖析修正），内存负载因原子访存慢 15%。
 
 **退出条件**：C1–C3、XC 的全部测试在新 ABI 上通过；同一 Wasm 模块可以在两个独立状态基址上交替运行而无串扰。
+
+**实施记录（2026-09-28/29）**：`make build/v86-parallel.wasm`（稳定版 Rust，仅 v86 crate 开启 `+atomics`，`--import-memory --emit-relocs --global-base=32768`）。退出条件由 `tests/parallel/relocation.mjs`（同一 shared memory 两台机器交替运行 linux4 负载、快照互不干扰）与 C1–C3/XC 轮转套件 11/11 在并行构建上通过来满足。见 [W0 记录](validation/platform/W0/context-abi.zh-CN.md)。
 
 ### W1：宿主 Worker 并行的正确性
 
@@ -524,26 +531,30 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 这是独立的大阶段，不能以在 C2 上加 `SharedArrayBuffer` 视为完成。Wasm 的共享 memory 与原子操作有单独约束，需按照 [WebAssembly threads 设计](https://github.com/WebAssembly/threads/blob/main/proposals/threads/Overview.md) 实现和测试。
 
-- [ ] 先完成无 JIT 的 2 核原型：每 Worker 私有栈/allocator/runtime/SoftFloat 状态，共享客户机 RAM 与消息队列；禁止把完整 Rust 单核 memory 实例化 N 次后无差别共享其 heap/global。
-- [ ] 定义共享内存访问 ABI。首版可用更强的顺序一致 atomics 保证标量访问；未对齐、跨页、16 字节 CAS、SIMD、MMIO 等采用受协调的慢路径。普通访问同样必须参与相关排他协议，单独锁住 LOCK 指令而其他核裸读写不能提供原子性。
-- [ ] 审计 Rust 对共享 RAM 的所有访问，不能在别的 Worker 并发修改时通过普通引用/切片制造数据竞争；Wasm/JS 原子 helper、宿主消息边界和安全封装必须明确。guest 页表 A/D 更新也要并发安全。
-- [ ] 原型通过后逐类开放 JIT 内存快路径，每次通过内存序 litmus、随机调度和独立结果验证；审计 LICM/CSE/forwarding 对并发观察的假设，不能照搬单核的 RAM 不变证明。
-- [ ] 设备由一个协调器拥有。PIO/MMIO、DMA、IRQ、时钟和磁盘请求携带 vCPU ID/序号，通过有界队列同步/异步处理；不能在浏览器主线程阻塞等待，也不能形成“持全局锁等待设备，设备等待停核”的死锁。
-- [ ] 每 Worker 实例化自己的 Wasm.Table/函数引用和 JIT runtime。只共享可传递的代码/元数据；发布核对全机 generation、模式和 topology，不能把一个 Worker 的函数索引当作另一个 Worker 的有效入口。
-- [ ] SMC、reset、restore、S3、S5、debug pause 建立 stop-the-world rendezvous 与超时故障诊断；所有核确认退出活动帧后才能复用内存、回收代码和采集快照。
-- [ ] 检测 secure context、cross-origin isolation、shared Wasm memory/Atomics 支持；记录 COOP/COEP 对资源加载的要求。普通启动由内部策略自动选择后端；环境不满足时保持请求的客户机核心数并回退到轮转模式，可从只读诊断查询原因。内部测试强制并行时不得自动回退。浏览器要求参考 [SharedArrayBuffer 文档](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer)。
+- [x] 先完成无 JIT 的 2 核原型：每 Worker 私有栈/allocator/runtime/SoftFloat 状态，共享客户机 RAM 与消息队列；禁止把完整 Rust 单核 memory 实例化 N 次后无差别共享其 heap/global。
+- [x] 定义共享内存访问 ABI。首版可用更强的顺序一致 atomics 保证标量访问；未对齐、跨页、16 字节 CAS、SIMD、MMIO 等采用受协调的慢路径。普通访问同样必须参与相关排他协议，单独锁住 LOCK 指令而其他核裸读写不能提供原子性。
+- [x] 审计 Rust 对共享 RAM 的所有访问，不能在别的 Worker 并发修改时通过普通引用/切片制造数据竞争；Wasm/JS 原子 helper、宿主消息边界和安全封装必须明确。guest 页表 A/D 更新也要并发安全。
+- [x] 原型通过后逐类开放 JIT 内存快路径，每次通过内存序 litmus、随机调度和独立结果验证；审计 LICM/CSE/forwarding 对并发观察的假设，不能照搬单核的 RAM 不变证明。
+- [x] 设备由一个协调器拥有。PIO/MMIO、DMA、IRQ、时钟和磁盘请求携带 vCPU ID/序号，通过有界队列同步/异步处理；不能在浏览器主线程阻塞等待，也不能形成“持全局锁等待设备，设备等待停核”的死锁。
+- [x] 每 Worker 实例化自己的 Wasm.Table/函数引用和 JIT runtime。只共享可传递的代码/元数据；发布核对全机 generation、模式和 topology，不能把一个 Worker 的函数索引当作另一个 Worker 的有效入口。
+- [x] SMC、reset、restore、S3、S5、debug pause 建立 stop-the-world rendezvous 与超时故障诊断；所有核确认退出活动帧后才能复用内存、回收代码和采集快照。
+- [x] 检测 secure context、cross-origin isolation、shared Wasm memory/Atomics 支持；记录 COOP/COEP 对资源加载的要求。普通启动由内部策略自动选择后端；环境不满足时保持请求的客户机核心数并回退到轮转模式，可从只读诊断查询原因。内部测试强制并行时不得自动回退。浏览器要求参考 [SharedArrayBuffer 文档](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer)。
 
 **退出条件**：C3/A3 的同一套验收在真实并发下通过；另加入 fence/store-buffering、原子对齐/跨边界、A/D race、丢唤醒、SMC 发布竞争、设备队列溢出、Worker 异常退出/取消等测试。长期压力期间无死锁、丢 IRQ、撕裂的受保证原子值或 host panic。没有证明的快路径继续走正确慢路径。
 
+**实施记录（2026-09-28/29）**：机器线程运行 BSP 与所有设备，AP 各在一个 vCPU Worker（`src/parallel/{machine,vcpu,control}.js`）。客户机 RAM 访问在并行构建中为顺序一致原子操作（非对齐加 fence），LOCK 读改写以 CAS 提交、冲突时从保存的寄存器重做，跨页锁与 CMPXCHG16B 用 split lock，页表 A/D 原子 OR；JIT 三层使用原子访存模板并检查对齐，LOCK/XCHG-mem 交给解释器，`ram_loop` 在 Worker 活动时禁用。跨核代码一致性：每页 OWNERS 位、发布环（安装前等待确认并复核源字节）与失效环，`poll` 在每次分发、CPUID、IRET、中断交付时执行。设备 I/O 经控制块转发到机器线程；PM timer 与端口 0x80 在 Worker 本地处理。stop-the-world 纪元协议覆盖暂停、快照、复位、S3、上电、销毁；Worker 故障释放其持有的锁并以 `emulator-error` 停机。`parallel: "auto"` 检测 SharedArrayBuffer/Atomics、shared WebAssembly.Memory、Worker、`crossOriginIsolated` 与 `v86-parallel.wasm`，不满足时保持核数以轮转运行并在诊断中给出原因；`true` 为测试用强制模式。发现并修正 10 个问题（原子性、代码发布计量、PAUSE/有界 REP 让出、CPU profile 同步、arm64 状态地址编码等）。验收：litmus（原子计数、消息传递、store buffering、跨核 SMC、IPI 唤醒环、并发 A/D）2/4/8 核 × 解释器/JIT；生命周期与三类故障注入；C3 OS 压力 4 核三后端 × 10 种子；A3 4 核 20+20；x86_64 Alpine 2/4 核；无头 Chrome（COOP/COEP）源码与 bundle。默认执行模式仍为轮转；Windows 在宿主并行下的运行结果见 W1 记录。2026-09-29 追加：litmus 增加“不同宽度的锁操作作用于同一字节”（跨 dword 边界的 LOCK ADD 与其中对齐的 LOCK ADD word）与长模式 CMPXCHG16B 对同一 qword 的 LOCK ADD 两项，发现旧实现会丢更新（2 核下分别丢 25/16000 与 58/16000），改为“无单一宿主原子覆盖的锁操作独占执行、对齐 CAS 共享提交、CMPXCHG16B 以两次 8 字节 CAS 提交”后 2/4/8 核精确；发现代码发布等待以机器时钟计时、机器暂停时可能永久自旋（soak 中卡死），改为另以检查次数封顶；S3 加压 soak（20 min、101 次 S3）通过。见 [W1 记录](validation/platform/W1/parallel-correctness.zh-CN.md)。
+
 ### W2：性能与对外能力说明
 
-- [ ] 以固定 guest 总工作量比较 1/2/4/8 核的 cooperative/parallel，覆盖计算、锁竞争、内存、I/O 四类；检查结果校验和，避免将增加工作量或不同算法当加速。
-- [ ] 记录宿主物理核心数、浏览器/Node、冷/热 JIT、wall time、guest work、编译时间、CPU/内存占用和同步等待比例；trace 证明至少两个核执行区间重叠。
-- [ ] 在预先固定且有至少 4 个可用宿主核心的 runner 上，以可并行 CPU workload 的 2/4 核吞吐显著高于单核为发布条件；P0 先约定噪声范围/阈值。不得要求所有负载随核心数线性加速，也不得无测量承诺加速倍数。
-- [ ] 若全局内存锁或协调器成为瓶颈，按测量优化而不是放松原子语义。可只对经过证明的地址/指令开放快路径。
+- [x] 以固定 guest 总工作量比较 1/2/4/8 核的 cooperative/parallel，覆盖计算、锁竞争、内存、I/O 四类；检查结果校验和，避免将增加工作量或不同算法当加速。
+- [x] 记录宿主物理核心数、浏览器/Node、冷/热 JIT、wall time、guest work、编译时间、CPU/内存占用和同步等待比例；trace 证明至少两个核执行区间重叠。
+- [x] 在预先固定且有至少 4 个可用宿主核心的 runner 上，以可并行 CPU workload 的 2/4 核吞吐显著高于单核为发布条件；P0 先约定噪声范围/阈值。不得要求所有负载随核心数线性加速，也不得无测量承诺加速倍数。
+- [x] 若全局内存锁或协调器成为瓶颈，按测量优化而不是放松原子语义。可只对经过证明的地址/指令开放快路径。
 - [ ] API/类型/示例/UI/worker options/state version 更新一致；普通 CPU 配置只暴露 `cpu_cores`，后端选择保持内部自动策略；保留 legacy 兼容和只读可观测回退。`acpi` 去 experimental 需 A3/R1 通过，新 x64/多核模式稳定需各自 gate 通过。
 
 **退出条件**：有可重跑正确性和性能报告；客户机拓扑、宿主执行模式、限制和已验证 OS 都能从文档与 API 明确得知。
+
+**实施记录（2026-09-29）**：[`tests/parallel/bench.mjs`](../tests/parallel/bench.mjs)（`make multicore-parallel-bench`）以固定总工作量、按块领取、逐轮校验和运行 compute/lock/memory/io 四类负载。Apple M1 Pro（8P+2E）上并行 4 核相对 1 核：compute 1.59×、memory 2.52×、io 1.99×，同核数下比轮转快 6–70 倍；`cpu/wall` 证明多线程同时执行；锁竞争负载不扩展（LOCK/XCHG-mem 在 Worker 中由解释器执行），8 核受能效核与并发负载限制。测量中发现并修正的瓶颈：状态块地址编码、PAUSE/有界 REP 让出、PM timer 往返、代码发布计量。API：公开配置仍只有 `cpu_cores`，`parallel` 为内部选项（`"auto"` 可回退并给出原因），默认仍为轮转；`v86.d.ts` 新增实验选项 `extended_memory_size`。见 [W2 记录](validation/platform/W2/performance.zh-CN.md)。未勾选项：公开 API/UI 的默认切换，待 Windows 宿主并行与更多浏览器记录完成后再定。
 
 ## 6. 测试矩阵、命令与发布门槛
 
@@ -564,7 +575,7 @@ CPU 型号、执行策略和测试控制分别由内部管理：
 
 ### 6.2 当前仓库已有命令
 
-以下入口经 Makefile 静态核实，**本文未运行它们**。在 `v86/` 根目录执行；需按 `Readme.md` 安装 wasm32 Rust、匹配的 clang、Node、Java/Closure 等。nasm/gdb/32 位 libc/QEMU 相关测试宜在固定 Linux 容器运行；当前 macOS 宿主不能默认视为具备全部依赖。
+以下入口经 Makefile 静态核实，**本文未运行它们**。在 `v86/` 根目录执行；需按 `Readme.md` 安装 wasm32 Rust、匹配的 clang、Node、Java/Closure 等。nasm/gdb/32 位 libc/QEMU 相关测试宜在固定 Linux 容器运行；当前 macOS 宿主不能默认视为具备全部依赖。（2026-09-29 补充：`nasmtests`/`nasmtests-force-jit` 在没有 gdb 的宿主上改用 QEMU 生成参考，已在 macOS arm64 上运行并全部通过，见 [R1 nasm 记录](validation/platform/R1/nasm-qemu-reference.zh-CN.md)。）
 
 ```sh
 # 构建与 CPU/IR 常规检查
@@ -589,34 +600,34 @@ make bench-quick
 
 | 建议目标 | 用途 | 首个责任阶段 |
 |---|---|---|
-| `platform-contract-tests` | 配置、布局、资源、CPUID/profile、固件一致性 | P0/P1/P2a |
+| `platform-contract-tests` | 配置、布局、资源、CPUID/profile、固件一致性（**已实现**：状态布局检查、profile 选项、拓扑、ACPI 表） | P0/P1/P2a |
 | `acpi-device-tests` | 注入时钟、PM/SCI/GPE、按钮/复位（**已实现**，`tests/devices/acpi_device.js`） | A1 |
 | `acpi-table-tests` | table-loader、RSDP/表校验、ACPICA 反汇编/重编译/执行（**已实现**，`tests/devices/acpi_tables.js`） | A2 |
-| `acpi-guest-tests` | ACPI OS 启动、表校验、电源按钮、S5/上电循环（**已实现**，`tests/devices/acpi_guest.js`，含 `DISABLE_JIT=1`）；S3/S4 循环待 A3 | A1/A3 |
-| `x64-decode-tests` | REX/模式/取指边界/独立 decoder | X1 |
-| `x64-system-tests` | long mode、MMU、异常、MSR、CPL/IST | X2 |
-| `x64-differential-tests` | 指令参考结果、解释器与各 JIT 后端 | X3/X4 |
-| `x64-guest-tests` | BIOS x64 启动、64/32 位程序和系统调用 | X3/X4 |
-| `highmem-tests` | 高物理地址、4 GiB 以上重映射窗口、DMA、快照；容量属 X6 | X5/X6 |
+| `acpi-guest-tests` | ACPI OS 启动、表校验、电源按钮、S5/上电循环（**已实现**，`tests/devices/acpi_guest.js`，含 `DISABLE_JIT=1`）；S3/S4 循环见 `acpi-sleep-tests`（**已实现**：32 位 1/2 核与解释器、x86_64 lts 内核） | A1/A3 |
+| `x64-decode-tests` | REX/模式/取指边界/独立 decoder（**已实现**） | X1 |
+| `x64-system-tests` | long mode、MMU、异常、MSR、CPL/IST（**已实现**） | X2 |
+| `x64-differential-tests` | 指令参考结果、解释器与各 JIT 后端（**已实现**；页层另有 `x64-page-tier-tests`，含 SSE 浮点模板差分） | X3/X4 |
+| `x64-guest-tests` | BIOS x64 启动、64/32 位程序和系统调用（**已实现**；多核见 `x64-multicore-guest-tests`） | X3/X4 |
+| `highmem-tests` | 高物理地址、4 GiB 以上重映射窗口、DMA、快照（**已实现**）；容量见 `extended-memory-tests`（1 核与 2 核轮转）与 `x64-extended-guest-tests`（**已实现**） | X5/X6 |
 | `multicore-boot-tests` | INIT/SIPI、IPI、真实 AP、固件核数（**已实现**；另有 `-release`，OS 拓扑待 C2） | C1/C2 |
-| `multicore-coherence-tests` | 原子、TLB shootdown、SMC、量子/种子 | C3 |
-| `multicore-state-tests` | 全核暂停/恢复/reset/睡眠、旧 state 导入 | C3/A3 |
-| `multicore-parallel-tests` | shared memory、内存序、rendezvous、Worker 生命周期 | W1 |
-| `platform-release-gate` | 聚合矩阵/基线差异/性能与兼容报告 | R1 |
+| `multicore-coherence-tests` | 原子、TLB shootdown、SMC、量子/种子（**已实现**） | C3 |
+| `multicore-state-tests` | 全核暂停/恢复/reset/睡眠、旧 state 导入（**已实现**） | C3/A3 |
+| `multicore-parallel-tests` | shared memory、内存序、rendezvous、Worker 生命周期（**已实现**；另有 `-release`、`multicore-parallel-browser-tests`、`multicore-parallel-bench`） | W1/W2 |
+| `platform-release-gate` | 聚合矩阵/基线差异/性能与兼容报告（**已实现**：`tools/release_gate.mjs`，按发布级运行并写 `build/release-gate/<时间>/report.{md,json}`；`R-base` 级含 `nasmtests(-force-jit)`） | R1 |
 
 复用现有 `tests/kvm-unit-tests/x86/{apic,ioapic,smptest,pae,syscall,msr}.c` 时，应先审计该旧版测试的断言、构建模式和平台假设；按 profile 选择或移植最小用例。QEMU TCG 是交叉参考，不把其所有实现细节视为规范；不同 CPU vendor 的特定行为要与选定 profile 对齐。
 
 ### 6.4 R1 发布验收清单
 
-- [ ] 所有公开 feature 在能力矩阵中有实现路径、规范依据和通过的测试，无“暂时返回成功”占位。
-- [ ] ACPI 固件/硬件/OS 三层闭环；无要求用户关闭 ACPI 的新 profile 安装流程。
-- [ ] x64 OS、compat 用户态、异常、高地址（36 位物理地址）、所有默认执行路径闭环；超过 4 GiB 的容量仅在选定 X6 时验收。
-- [ ] OS 确认 **一个封装、N 个物理核心、每核一个线程**；每核确实执行任务，核间同步正确。
-- [ ] cooperative 和 parallel 的能力分别验收；后者有真实并发和可重复性能证据。
-- [ ] S3/S4、快照、复位、设备 I/O 在多核 x64 下通过；旧快照兼容范围明确。
-- [ ] DOS/Windows 9x/现有 Windows NT 系列/32 位 Linux 的关键回归与基线对比，无未解释的新增失败。
-- [ ] 单核性能回归超过 P0 固定阈值时有剖析和处理；建议以固定工作量中位数退化 >10% 触发调查，正确性错误为零容忍。
-- [ ] 测试报告含工具链、ROM/镜像 hash、命令、种子、日志、耗时和 skips；缺环境/镜像的项目标记未验收，不能勾选完成。
+- [x] 所有公开 feature 在能力矩阵中有实现路径、规范依据和通过的测试，无“暂时返回成功”占位（[能力矩阵](validation/platform/capability-matrix.zh-CN.md)；未实现的能力不在表中公布）。
+- [x] ACPI 固件/硬件/OS 三层闭环；无要求用户关闭 ACPI 的新 profile 安装流程（A1–A3；Linux i386/x86_64 与 Windows 8.1 x64 均以 ACPI 启动；Windows 的 S3/S4 未验收）。
+- [x] x64 OS、compat 用户态、异常、高地址（36 位物理地址）、所有默认执行路径闭环；超过 4 GiB 的容量已选定 X6 并以扩展 RAM 实施（X1–X6、XC）。
+- [x] OS 确认 **一个封装、N 个物理核心、每核一个线程**；每核确实执行任务，核间同步正确（C2、XC：Linux 与 Windows 8.1 x64）。
+- [x] cooperative 和 parallel 的能力分别验收；后者有真实并发和可重复性能证据（C3/XC；W1、W2）。
+- [x] S3/S4、快照、复位、设备 I/O 在多核 x64 下通过（Alpine x86_64 2 核 20+20 次；XC 快照/reboot/S5/网络）；旧快照兼容范围：V6/V7 格式不变，扩展 RAM 只进 V7 流，状态字段 98/99 新增且可缺省。
+- [ ] DOS/Windows 9x/现有 Windows NT 系列/32 位 Linux 的关键回归与基线对比，无未解释的新增失败（`make platform-release-gate` 汇总各级入口；32 位指令级回归 `nasmtests`/`nasmtests-force-jit` 15629/15629 通过，参考来自 QEMU 并有逐条说明的偏差表；DOS/Win9x 镜像回归需在有镜像的 runner 上运行，本机未验收）。
+- [x] 单核性能回归超过 P0 固定阈值时有剖析和处理（C0 复测 1.095；W0 的并行构建在 arm64 上的 1.4 倍退化经剖析以低地址状态槽位消除；默认构建不含 W0/W1 的原子路径）。
+- [x] 测试报告含工具链、ROM/镜像 hash、命令、种子、日志、耗时和 skips；缺环境/镜像的项目标记未验收（`tools/release_gate.mjs` 记录 commit、未提交文件、工具链、宿主与每个入口的结果和日志；各阶段记录给出镜像 SHA-256 与命令）。
 
 ## 7. 多 agent 的实施规则与交接格式
 

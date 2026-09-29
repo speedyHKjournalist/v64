@@ -6,7 +6,7 @@
 // results next to themselves.
 //
 // Env: WIN_IMAGE, WIN_CORES (1), WIN_MEMORY_MB (2048), X64_JIT (1),
-// X64_IR_TIER0, WIN_USER_PASSWORD (the image's test account password),
+// X64_IR_TIER0, WIN_PARALLEL, WIN_USER_PASSWORD (the image's test account password),
 // WIN_TIMEOUT_MS, WIN_OUT (output directory). While it runs, a line written to
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
@@ -51,12 +51,14 @@ const vm = new V86({
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true,
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
+    // WIN_PARALLEL=1: the application processors run in vCPU workers (W1)
+    ...(+process.env.WIN_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),
 });
 
 const started = performance.now();
 const elapsed = () => Math.round((performance.now() - started) / 1000);
 const report = {image: {path: image_path, size: source_stat.size, mtime_ms: source_stat.mtimeMs}, cores, jit,
-    memory_mb, modes: [], events: [], results: {}};
+    parallel: !!+process.env.WIN_PARALLEL, memory_mb, modes: [], events: [], results: {}};
 const event = (kind, detail = {}) => { const e = {s: elapsed(), kind, ...detail}; report.events.push(e); console.log("X64_WIN_EVENT " + JSON.stringify(e)); };
 let cpu, graphics_since = 0, last_mode = null, execution_error;
 vm.add_listener("screen-set-size", size => {
@@ -217,7 +219,8 @@ function stats()
     const tier = ex.x64_page_stat ? Object.fromEntries(["compiled", "native", "retries", "unknown", "steps", "invalidated"].map((name, i) => [name, ex.x64_page_stat(i)])) : null;
     const d = cpu.get_diagnostics();
     return {page_tier: tier, cores: d.cores.map(core => ({state: core.state, ip: core.linear_ip, cs: core.cs, retired: core.retired_instructions, halted: core.halted})),
-        mode: d.cpu.mode, overlay_sectors: source.overlay.size};
+        mode: d.cpu.mode, overlay_sectors: source.overlay.size, execution: d.execution,
+        workers: d.parallel ? d.parallel.cores.map(core => ({steps: core.steps})) : undefined};
 }
 // Read-only 4-level walk (no A/D updates), for diagnostics only.
 function physical(cr3, address)
@@ -463,7 +466,8 @@ finally
     const final_stat = fs.statSync(image_path);
     assert.equal(final_stat.mtimeMs, source_stat.mtimeMs, "the source image was never written");
     report.wall_s = elapsed();
-    fs.writeFileSync(path.join(out, `result-${jit ? "page" : "interpreter"}-${cores}c.json`), JSON.stringify(report, null, 1));
+    fs.writeFileSync(path.join(out, `result-${jit ? "page" : "interpreter"}-${cores}c${report.parallel ? "-parallel" : ""}.json`),
+        JSON.stringify(report, null, 1));
     fs.writeFileSync(path.join(out, "tools-final.img"), tools.bytes);
     await vm.destroy();
     source.close();

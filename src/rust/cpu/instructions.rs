@@ -973,9 +973,8 @@ pub unsafe fn instr32_8F_0_reg(r: i32) { write_reg32(r, return_on_pagefault!(pop
 pub unsafe fn instr_90() {
     // PAUSE (F3 90): a spin-wait hint; with several cores, let another one run
     if *prefixes & crate::prefix::PREFIX_F3 != 0 && crate::cpu::apic::core_count() > 1 {
-        crate::cpu::cpu::core_yield = true;
-        // leave the interpreter's same-page loop now, not after its iteration limit
-        crate::cpu::cpu::jit_block_boundary = true;
+        // (and leave the interpreter's same-page loop now, not after its iteration limit)
+        crate::cpu::cpu::yield_to_other_cores();
     }
 }
 pub unsafe fn instr16_91() { xchg16r(CX); }

@@ -4,6 +4,7 @@ pub mod state;
 pub mod decode;
 pub mod paging;
 pub mod physical;
+pub mod extended;
 pub mod memory;
 pub mod system;
 pub mod execute;

@@ -310,8 +310,66 @@ static word auxv(word *stack, word type)
     return 0;
 }
 
+#if defined(__x86_64__)
+/* "memtest <MiB> <first extended PFN>" (X6): map that much anonymous memory
+ * in 64 MiB pieces, write two words into every page (one of them derived
+ * from its address), check them all, and count through /proc/self/pagemap
+ * the pages the kernel placed at or above the given frame (extended RAM). */
+static void memtest(const char *size, const char *first)
+{
+    unsigned long mib = 0, extended = 0;
+    for(const char *c = size; *c; c++) mib = mib * 10 + (unsigned long)(*c - '0');
+    for(const char *c = first; *c; c++) extended = extended * 10 + (unsigned long)(*c - '0');
+    enum { PIECE = 64 << 20 };
+    static unsigned char *pieces[4096];
+    unsigned long count = mib / 64, errors = 0, above = 0, pages = 0;
+    if(count > 4096) die("memtest size");
+    for(unsigned long p = 0; p < count; p++)
+    {
+        pieces[p] = (unsigned char *)mapping(PIECE, 3);
+        if((unsigned long)pieces[p] >= (unsigned long)-4096) die("memtest mmap");
+        for(unsigned long offset = 0; offset < PIECE; offset += 4096)
+        {
+            word *w = (word *)(pieces[p] + offset);
+            w[0] = (word)(pieces[p] + offset) ^ 0x5A5A5A5A5A5A5A5A;
+            w[511] = (word)(p * PIECE + offset);
+        }
+    }
+    static unsigned long long frames[512];
+    word map = check(S(SYS_open, "/proc/self/pagemap", 0, 0), "open pagemap");
+    for(unsigned long p = 0; p < count; p++)
+    {
+        for(unsigned long offset = 0; offset < PIECE; offset += 4096)
+        {
+            word *w = (word *)(pieces[p] + offset);
+            if(w[0] != ((word)(pieces[p] + offset) ^ 0x5A5A5A5A5A5A5A5A) || w[511] != (word)(p * PIECE + offset)) errors++;
+        }
+        for(unsigned long first_page = 0; first_page < PIECE / 4096; first_page += 512)
+        {
+            check(S(SYS_lseek, map, ((unsigned long)pieces[p] / 4096 + first_page) * 8, 0), "pagemap seek");
+            for(word done = 0, n; done < (word)sizeof(frames); done += n)
+                if((n = check(S(SYS_read, map, (char *)frames + done, sizeof(frames) - done), "pagemap read")) == 0) die("pagemap eof");
+            for(int i = 0; i < 512; i++)
+            {
+                if(!(frames[i] >> 63)) die("memtest page not present");
+                if((frames[i] & ((1ull << 55) - 1)) >= extended) above++;
+                pages++;
+            }
+        }
+    }
+    S(SYS_close, map, 0, 0);
+    out("X64_MEMTEST mib="); number(mib); out(" pages="); number(pages); out(" errors="); number(errors);
+    out(" extended_pages="); number(above); out("\n");
+    if(errors) die("memtest contents");
+    S(SYS_exit_group, 0, 0, 0);
+}
+#endif
+
 void entry(word *stack)
 {
+#if defined(__x86_64__)
+    if(stack[0] >= 4 && same((const char *)stack[2], "memtest")) memtest((const char *)stack[3], (const char *)stack[4]);
+#endif
     out("X64_PROBE_START arch=" ARCH "\n");
     const char *entry_path = "syscall";
 #if !defined(__x86_64__)

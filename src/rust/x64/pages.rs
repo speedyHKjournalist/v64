@@ -409,12 +409,8 @@ pub fn x64_page_install(id: u64, slot: u32) -> bool {
     // other cores mark the page first, then its bytes are checked once more
     let (page, source) = (f.page, f.source);
     let backing = match r.by_page.get(&page) { Some(_) => page, None => return false };
-    let published = || crate::jit::pages_published(std::iter::once(Page::page_of(backing << 12)));
-    let deadline = unsafe { crate::cpu::cpu::js::microtick() } + 0.5;
-    while !published() {
-        if unsafe { crate::cpu::cpu::js::microtick() } > deadline {
-            return false;
-        }
+    if !crate::jit::wait_pages_published(std::iter::once(Page::page_of(backing << 12)), 0.5) {
+        return false;
     }
     let bytes = unsafe { std::slice::from_raw_parts(crate::cpu::memory::mem8.add((backing << 12) as usize), 4096) };
     source_hash(bytes) == source
@@ -526,6 +522,12 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
     };
     let Some(backing) = jac::ram_backing(physical)
     else {
+        // extended RAM (never code): its frame, while cores share this thread
+        if let Some(host) = super::extended::cache_frame(physical, write) {
+            let backing = host.wrapping_sub(crate::cpu::memory::mem8 as u32);
+            jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing);
+            return host.wrapping_add((address & 4095) as u32);
+        }
         ACCESS_REFUSED[2] += 1;
         return 0;
     };

@@ -1,0 +1,70 @@
+[6.9s] booted
+[6.9s] tables: APIC DSDT FACP
+[7.7s] guest ACPI: [    1.143566] ACPI: Interpreter enabled | [    1.145121] ACPI: (supports S0 S3 S4 S5) | [    1.145138] ACPI: Using IOAPIC for interrupt routing | [    2.917999] ACPI: Power Button [PWRF]
+[8.9s] power button: 1 event(s), 1 SCI(s)
+[12.2s] acpi_pm clocksource: guest 3.09s over host 3.15s
+[16.9s] S3 cycle 1: woken by the RTC alarm, RAM intact
+[19.4s] S3 cycle 2: woken by the power button, RAM intact
+[23.0s] S3 cycle 3: woken by the RTC alarm, RAM intact
+[25.5s] S3 cycle 4: woken by the power button, RAM intact
+[29.0s] S3 cycle 5: woken by the RTC alarm, RAM intact
+[31.5s] S3 cycle 6: woken by the power button, RAM intact
+[35.0s] S3 cycle 7: woken by the RTC alarm, RAM intact
+[37.5s] S3 cycle 8: woken by the power button, RAM intact
+[41.0s] S3 cycle 9: woken by the RTC alarm, RAM intact
+[43.5s] S3 cycle 10: woken by the power button, RAM intact
+[47.1s] S3 cycle 11: woken by the RTC alarm, RAM intact
+[49.5s] S3 cycle 12: woken by the power button, RAM intact
+[53.1s] S3 cycle 13: woken by the RTC alarm, RAM intact
+[55.5s] S3 cycle 14: woken by the power button, RAM intact
+[59.0s] S3 cycle 15: woken by the RTC alarm, RAM intact
+[61.4s] S3 cycle 16: woken by the power button, RAM intact
+[65.0s] S3 cycle 17: woken by the RTC alarm, RAM intact
+[67.5s] S3 cycle 18: woken by the power button, RAM intact
+[71.0s] S3 cycle 19: woken by the RTC alarm, RAM intact
+[73.4s] S3 cycle 20: woken by the power button, RAM intact
+[81.8s] S4 cycle 1: hibernated, soft off (S4)
+[94.4s] S4 cycle 1: powered on, image restored from disk, marker 1001 back
+[104.3s] S4 cycle 2: hibernated, soft off (S4)
+[115.8s] S4 cycle 2: powered on, image restored from disk, marker 1002 back
+[125.6s] S4 cycle 3: hibernated, soft off (S4)
+[137.1s] S4 cycle 3: powered on, image restored from disk, marker 1003 back
+[146.2s] S4 cycle 4: hibernated, soft off (S4)
+[157.6s] S4 cycle 4: powered on, image restored from disk, marker 1004 back
+[167.4s] S4 cycle 5: hibernated, soft off (S4)
+[179.1s] S4 cycle 5: powered on, image restored from disk, marker 1005 back
+[188.0s] S4 cycle 6: hibernated, soft off (S4)
+[199.6s] S4 cycle 6: powered on, image restored from disk, marker 1006 back
+[208.5s] S4 cycle 7: hibernated, soft off (S4)
+[219.8s] S4 cycle 7: powered on, image restored from disk, marker 1007 back
+[229.6s] S4 cycle 8: hibernated, soft off (S4)
+[240.9s] S4 cycle 8: powered on, image restored from disk, marker 1008 back
+[250.9s] S4 cycle 9: hibernated, soft off (S4)
+[262.4s] S4 cycle 9: powered on, image restored from disk, marker 1009 back
+[271.4s] S4 cycle 10: hibernated, soft off (S4)
+[285.7s] S4 cycle 10: powered on, image restored from disk, marker 1010 back
+[295.5s] S4 cycle 11: hibernated, soft off (S4)
+[309.8s] S4 cycle 11: powered on, image restored from disk, marker 1011 back
+[321.0s] S4 cycle 12: hibernated, soft off (S4)
+[333.3s] S4 cycle 12: powered on, image restored from disk, marker 1012 back
+[343.4s] S4 cycle 13: hibernated, soft off (S4)
+[355.5s] S4 cycle 13: powered on, image restored from disk, marker 1013 back
+[365.9s] S4 cycle 14: hibernated, soft off (S4)
+[378.0s] S4 cycle 14: powered on, image restored from disk, marker 1014 back
+[386.4s] S4 cycle 15: hibernated, soft off (S4)
+[398.0s] S4 cycle 15: powered on, image restored from disk, marker 1015 back
+[407.2s] S4 cycle 16: hibernated, soft off (S4)
+[420.9s] S4 cycle 16: powered on, image restored from disk, marker 1016 back
+[432.0s] S4 cycle 17: hibernated, soft off (S4)
+[445.9s] S4 cycle 17: powered on, image restored from disk, marker 1017 back
+[457.1s] S4 cycle 18: hibernated, soft off (S4)
+[468.9s] S4 cycle 18: powered on, image restored from disk, marker 1018 back
+[479.4s] S4 cycle 19: hibernated, soft off (S4)
+[492.3s] S4 cycle 19: powered on, image restored from disk, marker 1019 back
+[503.6s] S4 cycle 20: hibernated, soft off (S4)
+[516.3s] S4 cycle 20: powered on, image restored from disk, marker 1020 back
+[526.8s] rebooted through the ACPI reset register, ACPI enabled again
+[529.0s] power cycle 1: S5, emulator stopped
+[538.3s] power cycle 1: powered on and booted again
+[540.6s] power cycle 2: S5, emulator stopped
+ACPI guest test passed

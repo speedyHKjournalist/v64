@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // W1 litmus tests (tests/parallel/litmus.asm) on cooperative cores (the
 // reference) and on cores in vCPU workers that run at the same time:
-// atomic counters and spin locks, message passing, store buffering with
-// MFENCE, cross-modifying code and concurrent accessed/dirty updates.
+// atomic counters and spin locks (also locked operations of different widths
+// on the same bytes), message passing, store buffering with
+// MFENCE, cross-modifying code, IPI wake-ups of halted cores and concurrent
+// accessed/dirty updates; then (LITMUS_LONG_MODE, default 1) every core
+// enters 64-bit mode for LOCK CMPXCHG16B against LOCK ADD on the same qword.
 //
 // LITMUS_MODES: comma-separated from cooperative, cooperative-jit, parallel,
 // parallel-jit (default: all but parallel-jit); LITMUS_CORES (default 2,4);
@@ -22,7 +25,9 @@ const CONTROL = 0x380000;
 const modes = (process.env.LITMUS_MODES || "cooperative,cooperative-jit,parallel").split(",");
 const core_counts = (process.env.LITMUS_CORES || "2,4").split(",").map(Number);
 const rounds = +process.env.LITMUS_ROUNDS || 2000;
+const long_mode = process.env.LITMUS_LONG_MODE !== "0";
 const PHASES = ["", "message passing", "store buffering", "cross-modifying code", "accessed/dirty bits"];
+const IPI_COUNT = 0x180;
 
 async function run(mode, cores)
 {
@@ -30,7 +35,7 @@ async function run(mode, cores)
     const jit = mode.endsWith("-jit");
     const emulator = new V86({
         multiboot: { url: kernel }, memory_size: 32 << 20, acpi: true, cpu_cores: cores,
-        disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true,
+        disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, experimental_x64: long_mode,
         ...(parallel ? { parallel: true, wasm_path: PARALLEL_WASM } : {}),
         autostart: false, log_level: 0,
     });
@@ -39,6 +44,7 @@ async function run(mode, cores)
     const view = () => new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset);
     view().setUint32(CONTROL, cores, true);
     view().setUint32(CONTROL + 4, rounds, true);
+    view().setUint32(CONTROL + 0x340, long_mode ? 1 : 0, true);
     const t0 = performance.now();
     emulator.run();
     const deadline = t0 + 300000;
@@ -56,13 +62,17 @@ async function run(mode, cores)
     const u32 = offset => view().getUint32(CONTROL + offset, true);
     const expected = cores * rounds;
     const counters = { inc: u32(16), xadd: u32(20), cmpxchg: u32(24), xchg_lock: u32(28), bts_lock: u32(32),
-        cmpxchg8b: u32(40) + u32(44) * 2 ** 32 };
+        cmpxchg8b: u32(40) + u32(44) * 2 ** 32, mixed_widths: u32(0x302),
+        ...(long_mode ? { cmpxchg16b_low: u32(0x320) + u32(0x324) * 2 ** 32, cmpxchg16b_high: u32(0x328) + u32(0x32C) * 2 ** 32 } : {}) };
     const errors = PHASES.map((_, i) => u32(64 + 4 * i));
+    const ipis = Array.from({ length: cores }, (_, core) => u32(IPI_COUNT + 4 * core));
     const steps = cpu.get_diagnostics().parallel?.cores.map(c => c.steps + (jit ? " (" + c.jit + " compiled entries)" : ""));
     await emulator.destroy();
     assert.deepEqual(counters, { inc: expected, xadd: 2 * expected, cmpxchg: expected, xchg_lock: expected,
-        bts_lock: expected, cmpxchg8b: expected }, `${mode} ${cores} cores: atomic counters`);
+        bts_lock: expected, cmpxchg8b: expected, mixed_widths: 2 * expected,
+        ...(long_mode ? { cmpxchg16b_low: 2 * expected, cmpxchg16b_high: expected } : {}) }, `${mode} ${cores} cores: atomic counters`);
     errors.forEach((count, i) => i && assert.equal(count, 0, `${mode} ${cores} cores: ${PHASES[i]}: ${count} violations`));
+    assert.deepEqual(ipis, Array(cores).fill(rounds), `${mode} ${cores} cores: IPIs received per core`);
     console.log(`${mode} ${cores} cores: ${rounds} rounds passed in ${(ms / 1000).toFixed(1)}s` +
         (steps ? `, worker steps ${steps.join("/")}` : ""));
 }

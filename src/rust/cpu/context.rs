@@ -107,6 +107,11 @@ pub unsafe fn context_tsc_set(core: u32, low: u32, high: u32) {
 /// A physical mapping change invalidates address translations, not vCPU state.
 pub unsafe fn invalidate_all_tlbs() {
     crate::x64::memory::invalidate_all_tlbs();
+    invalidate_legacy_tlbs();
+}
+/// Only the 32-bit TLBs of every core (host addresses of RAM and of
+/// extended RAM frames); the x64 TLBs keep their physical translations
+pub unsafe fn invalidate_legacy_tlbs() {
     for core in 0..8 { CONTEXTS[core].tlb.clear(); }
     cpu::full_clear_tlb();
 }

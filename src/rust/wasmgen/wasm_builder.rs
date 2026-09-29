@@ -730,9 +730,16 @@ impl WasmBuilder {
     pub fn reinterpret_i32_as_f32(&mut self) {
         self.instruction_body.push(op::OP_F32REINTERPRETI32);
     }
-    //pub fn reinterpret_f32_as_i32(&mut self) {
-    //    self.instruction_body.push(op::OP_I32REINTERPRETF32);
-    //}
+    /// 0 add, 1 sub, 2 mul, 3 div (as arithmetic_f64)
+    pub fn arithmetic_f32(&mut self, operation: u8) {
+        self.instruction_body.push(match operation {
+            0 => op::OP_F32ADD,
+            1 => op::OP_F32SUB,
+            2 => op::OP_F32MUL,
+            3 => op::OP_F32DIV,
+            _ => unreachable!(),
+        });
+    }
     pub fn reinterpret_i64_as_f64(&mut self) {
         self.instruction_body.push(op::OP_F64REINTERPRETI64);
     }

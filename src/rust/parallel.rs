@@ -48,6 +48,21 @@ pub fn machine<T>(p: *mut T) -> *mut T {
     }
 }
 
+/// The machine instance's copy of a field of this instance's CPU state block
+/// (cpu::global_pointers): the state blocks are in slots below the static
+/// data, one per core (src/parallel/relocate.js), the machine's in slot 0
+#[inline(always)]
+pub fn machine_state<T>(p: *mut T) -> *mut T {
+    #[cfg(feature = "parallel")]
+    {
+        (p as u32).wrapping_sub(crate::cpu::global_pointers::state_base()) as *mut T
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        p
+    }
+}
+
 /// Whether other cores may run concurrently in other workers
 #[inline(always)]
 pub fn active() -> bool {
@@ -132,9 +147,9 @@ pub unsafe fn parallel_attach(base: u32, core: u32) {
     memory::ram_fast_limit = *machine(&raw mut memory::ram_fast_limit);
     memory::vga_mem8 = *machine(&raw mut memory::vga_mem8);
     memory::vga_memory_size = *machine(&raw mut memory::vga_memory_size);
-    *gp::memory_size = *machine(gp::memory_size);
-    *gp::acpi_enabled = *machine(gp::acpi_enabled);
-    *gp::x87_native_policy = *machine(gp::x87_native_policy);
+    *gp::memory_size = *machine_state(gp::memory_size);
+    *gp::acpi_enabled = *machine_state(gp::acpi_enabled);
+    *gp::x87_native_policy = *machine_state(gp::x87_native_policy);
     cpu::copy_machine_configuration();
     crate::x64::physical::copy_from_machine();
     crate::cpu::apic::attach_worker(core);
@@ -167,17 +182,20 @@ pub unsafe fn parallel_sync() {
     }
 }
 
-/// Machine configuration that may change while the cores run (ACPI enable):
-/// copied into a worker at the start of each of its slices
+/// Machine configuration that may change while the cores run (ACPI enable,
+/// the CPU profile): copied into a worker at the start of each of its slices
 pub unsafe fn sync_worker_configuration() {
     if is_worker() {
         use crate::cpu::global_pointers as gp;
-        *gp::acpi_enabled = *machine(gp::acpi_enabled);
+        *gp::acpi_enabled = *machine_state(gp::acpi_enabled);
+        crate::cpu::cpu::copy_machine_configuration();
     }
 }
 
 /// A lock in machine memory. Critical sections are short (one IOAPIC or
-/// local APIC operation) and never wait for another core.
+/// local APIC operation) and never wait for another core. The word holds the
+/// owner's core number + 1: when a worker fails, parallel_fail releases the
+/// locks its core held, so the other cores do not spin forever.
 #[repr(transparent)]
 pub struct SpinLock(u32);
 impl SpinLock {
@@ -187,7 +205,8 @@ impl SpinLock {
         #[cfg(feature = "parallel")]
         {
             let word = unsafe { &*(&raw const self.0 as *const AtomicU32) };
-            while word.compare_exchange_weak(0, 1, SeqCst, SeqCst).is_err() {
+            let owner = crate::cpu::apic::current_core() as u32 + 1;
+            while word.compare_exchange_weak(0, owner, SeqCst, SeqCst).is_err() {
                 std::hint::spin_loop();
             }
         }
@@ -200,6 +219,72 @@ impl SpinLock {
             word.store(0, SeqCst);
         }
     }
+    /// Whether `core` holds the lock
+    pub fn held_by(&self, core: usize) -> bool {
+        #[cfg(feature = "parallel")]
+        {
+            let word = unsafe { &*(&raw const self.0 as *const AtomicU32) };
+            word.load(SeqCst) == core as u32 + 1
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = core;
+            false
+        }
+    }
+    /// Release the lock if `core` holds it
+    pub fn release_held_by(&self, core: usize) {
+        #[cfg(feature = "parallel")]
+        {
+            let word = unsafe { &*(&raw const self.0 as *const AtomicU32) };
+            let _ = word.compare_exchange(core as u32 + 1, 0, SeqCst, SeqCst);
+        }
+        #[cfg(not(feature = "parallel"))]
+        let _ = core;
+    }
+}
+
+/// This instance's core failed: its worker caught an error (a trap or an
+/// exception of the JS side) and stops. Release the machine's locks the core
+/// held and count it as idle, so that the other cores neither spin on its
+/// locks nor wait for it to acknowledge code publications. The machine then
+/// stops (src/parallel/machine.js).
+#[no_mangle]
+pub unsafe fn parallel_fail() { release_core(crate::cpu::apic::current_core()) }
+
+/// The machine found a core's worker failed or gone (the same as
+/// parallel_fail, in case the worker could not run it)
+#[no_mangle]
+pub unsafe fn parallel_core_failed(core: u32) {
+    assert!((core as usize) < MAX_CORES);
+    release_core(core as usize)
+}
+
+unsafe fn release_core(core: usize) {
+    if !active() {
+        return;
+    }
+    #[cfg(feature = "parallel")]
+    if split_lock().held_by(core) {
+        // (an exclusive locked operation of this core stopped halfway)
+        locked_operations().fetch_and(!EXCLUSIVE, SeqCst);
+    }
+    split_lock().release_held_by(core);
+    crate::cpu::ioapic::lock().release_held_by(core);
+    crate::x64::extended::release_held_by(core);
+    code::set_idle(core, true);
+}
+
+/// Test hook (tests/parallel/lifecycle.mjs): trap inside the critical
+/// sections, as a failing core could
+#[no_mangle]
+pub unsafe fn parallel_test_fault() {
+    split_lock().lock();
+    crate::cpu::ioapic::lock().lock();
+    #[cfg(target_arch = "wasm32")]
+    std::arch::wasm32::unreachable();
+    #[cfg(not(target_arch = "wasm32"))]
+    unreachable!("parallel_test_fault");
 }
 
 /// Registers and lazy flags an instruction may change before it commits a
@@ -370,23 +455,89 @@ pub fn full_fence() {
     fence(SeqCst);
 }
 
-/// CMPXCHG16B: no 16-byte atomic exists; locked against the other locked
-/// operations that no single atomic covers
+/// CMPXCHG16B: no 16-byte atomic exists. It runs exclusively (no other
+/// locked operation commits meanwhile) and commits each half with a
+/// compare-exchange, so that a plain store to either half in between makes
+/// it fail (and the instruction run again) instead of being lost.
 pub unsafe fn compare_exchange128(p: *mut u8, expected: u128, value: u128) -> bool {
-    split_lock().lock();
-    full_fence();
-    let current = ptr::read_unaligned(p as *const u128);
-    let equal = current == expected;
-    if equal {
-        ptr::write_unaligned(p as *mut u128, value);
+    #[cfg(not(feature = "parallel"))]
+    {
+        let equal = ptr::read_unaligned(p as *const u128) == expected;
+        if equal {
+            ptr::write_unaligned(p as *mut u128, value);
+        }
+        equal
     }
-    full_fence();
+    #[cfg(feature = "parallel")]
+    exclusive(|| {
+        let (old_low, old_high) = (expected as u64, (expected >> 64) as u64);
+        let (new_low, new_high) = (value as u64, (value >> 64) as u64);
+        if p as usize & 7 != 0 {
+            // (not for CMPXCHG16B, which requires 16-byte alignment)
+            let equal = ptr::read_unaligned(p as *const u128) == expected;
+            if equal {
+                ptr::write_unaligned(p as *mut u128, value);
+            }
+            return equal;
+        }
+        let low = &*(p as *const AtomicU64);
+        let high = &*(p.add(8) as *const AtomicU64);
+        if high.load(SeqCst) != old_high || low.compare_exchange(old_low, new_low, SeqCst, SeqCst).is_err() {
+            return false;
+        }
+        if high.compare_exchange(old_high, new_high, SeqCst, SeqCst).is_err() {
+            // (if a plain store replaced the low half meanwhile, it stays)
+            let _ = low.compare_exchange(new_low, old_low, SeqCst, SeqCst);
+            return false;
+        }
+        true
+    })
+}
+
+/// Locked operations that no single host atomic covers (unaligned, split,
+/// 16 bytes) run exclusively; the aligned ones commit with one atomic
+/// compare-exchange while holding a share, so that neither interleaves with
+/// the other on the same bytes. Bit 31: an exclusive operation holds it (or
+/// waits for the shares to drain); below: aligned operations committing.
+#[cfg(feature = "parallel")]
+static mut LOCKED_OPERATIONS: u32 = 0;
+#[cfg(feature = "parallel")]
+const EXCLUSIVE: u32 = 1 << 31;
+#[cfg(feature = "parallel")]
+fn locked_operations() -> &'static AtomicU32 {
+    unsafe { &*(machine(&raw mut LOCKED_OPERATIONS) as *const AtomicU32) }
+}
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn shared<T>(commit: impl FnOnce() -> T) -> T {
+    let word = locked_operations();
+    loop {
+        let current = word.load(SeqCst);
+        if current & EXCLUSIVE == 0 && word.compare_exchange_weak(current, current + 1, SeqCst, SeqCst).is_ok() {
+            break;
+        }
+        std::hint::spin_loop();
+    }
+    let result = commit();
+    word.fetch_sub(1, SeqCst);
+    result
+}
+#[cfg(feature = "parallel")]
+fn exclusive<T>(operation: impl FnOnce() -> T) -> T {
+    split_lock().lock();
+    let word = locked_operations();
+    word.fetch_or(EXCLUSIVE, SeqCst);
+    while word.load(SeqCst) & !EXCLUSIVE != 0 {
+        std::hint::spin_loop();
+    }
+    let result = operation();
+    word.fetch_and(!EXCLUSIVE, SeqCst);
     split_lock().unlock();
-    equal
+    result
 }
 
 /// Replace `expected` by `value` at `p` if it is still there. Unaligned or
-/// split operands fall back to a machine-wide lock: atomic with respect to
+/// split operands run exclusively (see `exclusive`): atomic with respect to
 /// other locked operations, not to plain stores (a bus lock has no equivalent
 /// here). Always succeeds in the normal build.
 #[inline(always)]
@@ -395,29 +546,29 @@ pub unsafe fn compare_exchange(p: *mut u8, bytes: u32, expected: u64, value: u64
     {
         let aligned = p as usize & (bytes as usize - 1) == 0;
         if aligned {
-            return match bytes {
+            return shared(|| match bytes {
                 1 => (*(p as *const AtomicU8)).compare_exchange(expected as u8, value as u8, SeqCst, SeqCst).is_ok(),
                 2 => (*(p as *const AtomicU16)).compare_exchange(expected as u16, value as u16, SeqCst, SeqCst).is_ok(),
                 4 => (*(p as *const AtomicU32)).compare_exchange(expected as u32, value as u32, SeqCst, SeqCst).is_ok(),
                 _ => (*(p as *const AtomicU64)).compare_exchange(expected, value, SeqCst, SeqCst).is_ok(),
+            });
+        }
+        exclusive(|| {
+            let current = match bytes {
+                2 => ptr::read_unaligned(p as *const u16) as u64,
+                4 => ptr::read_unaligned(p as *const u32) as u64,
+                _ => ptr::read_unaligned(p as *const u64),
             };
-        }
-        split_lock().lock();
-        let current = match bytes {
-            2 => ptr::read_unaligned(p as *const u16) as u64,
-            4 => ptr::read_unaligned(p as *const u32) as u64,
-            _ => ptr::read_unaligned(p as *const u64),
-        };
-        let equal = current == expected;
-        if equal {
-            match bytes {
-                2 => ptr::write_unaligned(p as *mut u16, value as u16),
-                4 => ptr::write_unaligned(p as *mut u32, value as u32),
-                _ => ptr::write_unaligned(p as *mut u64, value),
+            let equal = current == expected;
+            if equal {
+                match bytes {
+                    2 => ptr::write_unaligned(p as *mut u16, value as u16),
+                    4 => ptr::write_unaligned(p as *mut u32, value as u32),
+                    _ => ptr::write_unaligned(p as *mut u64, value),
+                }
             }
-        }
-        split_lock().unlock();
-        equal
+            equal
+        })
     }
     #[cfg(not(feature = "parallel"))]
     {
@@ -568,7 +719,7 @@ pub mod code {
     static mut ACKED: [u32; MAX_CORES] = [0; MAX_CORES];
     static mut IDLE: [u32; MAX_CORES] = [0; MAX_CORES];
     // this instance
-    static mut UNPUBLISHED: u32 = 0; // installations refused: not yet published
+    static mut REFUSED: u32 = 0; // installations given up: other cores had not acknowledged in time
     static mut PUBLISH_SEEN: u32 = 0;
     static mut INVALIDATE_SEEN: u32 = 0;
     static mut CLAIMED: Vec<u32> = Vec::new(); // publication sequence per page, 0: none
@@ -704,7 +855,6 @@ pub mod code {
                 // not claimed (no RAM page, or claimed and released again): no code may depend on it
                 _ => {
                     if !owner(page).is_null() {
-                        UNPUBLISHED = UNPUBLISHED.wrapping_add(1 << 16);
                         return false;
                     }
                 },
@@ -723,19 +873,42 @@ pub mod code {
                 continue;
             }
             if (word_load(acked.add(core)).wrapping_sub(needed) as i32) < 0 {
-                UNPUBLISHED = UNPUBLISHED.wrapping_add(1);
                 return false;
             }
         }
         true
     }
 
-    /// Diagnostics: 0 installations refused for pages other cores had not
-    /// acknowledged yet, 1 publications, 2 invalidations posted by all cores
+    /// Wait up to `ms` for `published`; count a refusal when it stays false.
+    /// The machine clock stands still while the machine is paused, and an
+    /// asynchronous installation can complete then (with the other cores
+    /// parked), so the wait is bounded by a number of checks as well.
+    pub unsafe fn wait_published(pages: impl Iterator<Item = u32> + Clone, ms: f64) -> bool {
+        if published(pages.clone()) {
+            return true;
+        }
+        let deadline = crate::cpu::cpu::js::microtick() + ms;
+        for _ in 0..MAX_PUBLICATION_CHECKS {
+            if published(pages.clone()) {
+                return true;
+            }
+            if crate::cpu::cpu::js::microtick() >= deadline {
+                break;
+            }
+        }
+        REFUSED = REFUSED.wrapping_add(1);
+        false
+    }
+    /// (a few milliseconds of checks at most)
+    const MAX_PUBLICATION_CHECKS: u32 = 1 << 14;
+
+    /// Diagnostics: 0 installations this core gave up because other cores
+    /// had not acknowledged its pages in time, 1 publications, 2
+    /// invalidations posted by all cores
     #[no_mangle]
     pub unsafe fn parallel_code_stat(kind: u32) -> u32 {
         match kind {
-            0 => UNPUBLISHED,
+            0 => REFUSED,
             1 => *machine(&raw mut PUBLISH_NEXT),
             _ => *machine(&raw mut INVALIDATE_NEXT),
         }
@@ -748,10 +921,13 @@ pub mod code {
         if !active() {
             return;
         }
-        word_store(machine(&raw mut IDLE).cast::<u32>().add(me()), idle as u32);
+        set_idle(me(), idle);
         if !idle {
             poll();
         }
+    }
+    pub unsafe fn set_idle(core: usize, idle: bool) {
+        word_store(machine(&raw mut IDLE).cast::<u32>().add(core), idle as u32);
     }
 
     /// Take other cores' publications and invalidations: at safe points

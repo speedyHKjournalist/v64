@@ -4,19 +4,28 @@
 ; INIT/SIPI; then every core runs the phases below, separated by barriers:
 ;
 ; 1. counters: LOCK INC, LOCK XADD, LOCK CMPXCHG loops, CMPXCHG8B loops, and
-;    plain increments inside XCHG and LOCK BTS/BTR spin locks: exact totals
+;    plain increments inside XCHG and LOCK BTS/BTR spin locks: exact totals;
+;    and mixed widths on the same bytes: a LOCK ADD of a dword that crosses
+;    a dword boundary (not one aligned atomic access) and a LOCK ADD of the
+;    aligned word inside it
 ; 2. message passing around a ring of cores: plain stores and loads, the
 ;    payload is always observed with (after) its flag (TSO order)
 ; 3. store buffering with MFENCE between each pair of cores: never both
 ;    loads old
 ; 4. cross-modifying code: core 0 rewrites a function core 1 then calls
 ;    after a serializing CPUID; core 1 always sees the new code
-; 5. paging: all cores enable paging with shared page tables and touch
+; 5. wake-ups: a fixed IPI travels around the ring of cores ROUNDS times;
+;    each core waits for it in STI; HLT (a lost wake-up hangs the ring)
+; 6. paging: all cores enable paging with shared page tables and touch
 ;    their own pages, whose entries share page-table cache lines: every
 ;    entry ends up with exactly the right accessed/dirty bits
+; 7. long mode (when CONTROL + 0x340 is set): every core enters 64-bit mode
+;    and increments a 16-byte counter with LOCK CMPXCHG16B (both halves)
+;    and its low qword with LOCK ADD: low = 2 * total, high = total
 ;
 ; Results (host reads them): CONTROL + 0 cores (input), +4 rounds (input),
-; +16.. counters, +64.. errors per phase, +128 finished cores.
+; +16.. counters, +64.. errors per phase, +128 finished cores, +0x180..
+; IPIs received per core.
 
 bits 32
 org 0x100000
@@ -39,6 +48,11 @@ ERRORS equ CONTROL + 64         ; per phase
 FINISHED equ CONTROL + 128
 SPIN_XCHG equ CONTROL + 0x200
 SPIN_BTS equ CONTROL + 0x240
+C_MIXED equ CONTROL + 0x302     ; dword at an offset of 2: its low word is also added to
+C_WIDE equ CONTROL + 0x320      ; 16 bytes, 16-aligned
+LONG_MODE equ CONTROL + 0x340   ; input: run phase 7
+LONG_TABLES equ CONTROL + 0x344 ; core 0 built the 4-level tables
+LM_PML4 equ 0x3A8000            ; then PDPT, PD: 32 MiB identity mapped
 RECORDS equ CONTROL + 0x400     ; 64 bytes per core: +0 barrier sense
 MP_DATA equ CONTROL + 0x1000    ; per core: data, flag, ack on separate lines
 SB_X equ CONTROL + 0x2000       ; per pair, separate lines
@@ -47,6 +61,9 @@ SB_RESULTS equ CONTROL + 0x3000 ; per pair and round: two bytes
 SMC_FLAG equ CONTROL + 0x100
 SMC_ACK equ CONTROL + 0x140
 SMC_CODE equ 0x3B0000
+IPI_COUNT equ CONTROL + 0x180   ; per core
+IPI_VECTOR equ 0x40
+IDT equ 0x390000
 PAGE_DIRECTORY equ 0x3A0000
 PAGE_TABLES equ 0x3A1000        ; 4 tables: 16 MiB identity mapped
 TOUCHED equ 0xC00000            ; per core 16 pages written, 16 pages read
@@ -129,8 +146,12 @@ all_cores:
     call barrier
     call phase_smc
     call barrier
+    call phase_ipi
+    call barrier
     call phase_paging
     call barrier
+    cmp dword [LONG_MODE], 0
+    jne phase_long_mode
     lock inc dword [FINISHED]
 .halt:
     cli
@@ -216,6 +237,9 @@ phase_counters:
     jnz .retry64
     pop ecx
     pop ebx
+    ; mixed widths (totals stay below 2^16: no carry into the upper word)
+    lock add dword [C_MIXED], 1
+    lock add word [C_MIXED], 1
     dec ecx
     jnz .loop
     ret
@@ -381,6 +405,84 @@ phase_smc:
 .done:
     ret
 
+; core k waits for its r-th IPI, then sends one to core (k + 1) % cores;
+; core 0 starts each round
+phase_ipi:
+    test ebx, ebx
+    jnz .idt_built
+    ; every vector ignores, IPI_VECTOR counts
+    mov edi, IDT
+    xor ecx, ecx
+.gate:
+    mov eax, ignore_interrupt
+    cmp ecx, IPI_VECTOR
+    jne .write_gate
+    mov eax, ipi_interrupt
+.write_gate:
+    mov edx, eax
+    and eax, 0xFFFF
+    or eax, 8 << 16
+    and edx, 0xFFFF0000
+    or edx, 0x8E00                  ; present 32-bit interrupt gate
+    mov [edi + ecx * 8], eax
+    mov [edi + ecx * 8 + 4], edx
+    inc ecx
+    cmp ecx, 256
+    jb .gate
+.idt_built:
+    call barrier
+    lidt [idtr]
+    mov dword [LAPIC + 0xF0], 0x1FF ; software-enable this core's APIC
+    mov dword [LAPIC + 0x80], 0     ; TPR
+    call barrier
+    mov ecx, 1
+.round:
+    test ebx, ebx
+    jnz .wait
+    call send_ipi
+.wait:
+    cli
+    mov eax, [IPI_COUNT + ebx * 4]
+    cmp eax, ecx
+    jae .received
+    sti
+    hlt
+    jmp .wait
+.received:
+    test ebx, ebx
+    jz .next                        ; back at core 0: the round is complete
+    call send_ipi
+.next:
+    inc ecx
+    cmp ecx, [ROUNDS]
+    jbe .round
+    ret
+
+send_ipi:
+    push eax
+    lea eax, [ebx + 1]
+    cmp eax, [CORES]
+    jb .target
+    xor eax, eax
+.target:
+    shl eax, 24
+    mov [LAPIC + 0x310], eax
+    mov dword [LAPIC + 0x300], 0x4000 | IPI_VECTOR ; fixed, physical, assert
+    pop eax
+    ret
+
+ipi_interrupt:
+    push eax
+    mov eax, [LAPIC + 0x20]
+    shr eax, 24
+    lock inc dword [IPI_COUNT + eax * 4]
+    mov dword [LAPIC + 0xB0], 0     ; EOI
+    pop eax
+    iretd
+
+ignore_interrupt:
+    iretd
+
 ; identity-map 16 MiB with 4 KiB pages (core 0 builds the tables)
 phase_paging:
     test ebx, ebx
@@ -474,13 +576,78 @@ phase_paging:
 .paging_done:
     ret
 
+; (does not return: the core finishes in 64-bit mode)
+phase_long_mode:
+    mov eax, cr0
+    and eax, 0x7FFFFFFF             ; paging off to set EFER.LME
+    mov cr0, eax
+    test ebx, ebx
+    jnz .wait_tables
+    mov edi, LM_PML4
+    xor eax, eax
+    mov ecx, 3 * 1024
+    rep stosd
+    mov dword [LM_PML4], LM_PML4 + 0x1000 + 3
+    mov dword [LM_PML4 + 0x1000], LM_PML4 + 0x2000 + 3
+    mov edi, LM_PML4 + 0x2000
+    mov eax, 0x83                   ; 2 MiB pages
+    mov ecx, 16
+.pde:
+    mov [edi], eax
+    add eax, 0x200000
+    add edi, 8
+    loop .pde
+    mov dword [LONG_TABLES], 1
+.wait_tables:
+    pause
+    cmp dword [LONG_TABLES], 1
+    jne .wait_tables
+    mov eax, cr4
+    or eax, 0x20                    ; PAE
+    mov cr4, eax
+    mov eax, LM_PML4
+    mov cr3, eax
+    mov ecx, 0xC0000080
+    rdmsr
+    or eax, 0x100                   ; LME
+    wrmsr
+    mov eax, cr0
+    or eax, 0x80000000
+    mov cr0, eax
+    jmp 24:long_mode_entry
+
+bits 64
+long_mode_entry:
+    mov r8d, [ROUNDS]
+.loop:
+    mov rax, [C_WIDE]
+    mov rdx, [C_WIDE + 8]
+.retry:
+    lea rbx, [rax + 1]
+    lea rcx, [rdx + 1]
+    lock cmpxchg16b [C_WIDE]
+    jnz .retry                      ; (RDX:RAX now holds the current value)
+    lock add qword [C_WIDE], 1
+    dec r8d
+    jnz .loop
+    lock inc dword [FINISHED]
+.halt:
+    cli
+    hlt
+    jmp .halt
+bits 32
+
 align 8
 gdt:
     dq 0
     dq 0x00CF9A000000FFFF
     dq 0x00CF92000000FFFF
+    dq 0x00AF9A000000FFFF           ; 64-bit code
 gdt_end:
 gdtr:
     dw gdt_end - gdt - 1
     dd gdt
+idtr:
+    dw 256 * 8 - 1
+    dd IDT
 end:

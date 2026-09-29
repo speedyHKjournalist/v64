@@ -389,20 +389,39 @@ export function create_state_stream(cpu)
             packed_size += 4096;
         }
     }
+    // extended RAM (X6): the pages that are not zero, after the RAM records
+    const extended = cpu.extended_store;
+    let extended_bitmap = null, extended_packed = 0;
+    if(extended)
+    {
+        cpu.wm.exports["x64_ext_flush"]();
+        extended_bitmap = new Uint8Array(Math.ceil(extended.pages / 8));
+        for(let page = 0; page < extended.pages; page++)
+        {
+            if(!extended.is_zero(page))
+            {
+                extended_bitmap[page >> 3] |= 1 << (page & 7);
+                extended_packed++;
+            }
+        }
+    }
     const state = cpu.get_state(true);
     state[77] = null;
     state[78] = bitmap;
+    state[99] = extended_bitmap;
     const buffers = [];
     const manifest = new TextEncoder().encode(JSON.stringify({
         "state": save_object(state, buffers),
         "buffers": buffers.map(buffer => buffer.length),
+        "extended_pages": extended_packed,
     }));
     if(manifest.length > STREAM_INFO_LIMIT) stream_error("manifest too large");
     const header = new Uint8Array(STREAM_HEADER_SIZE);
     const words = new DataView(header.buffer);
     [STATE_MAGIC, STREAM_VERSION, STATE_STREAM_CHUNK_SIZE, manifest.length, buffers.length,
         memory_size, packed_size, stream_crc(manifest)].forEach((value, index) => words.setUint32(index * 4, value, true));
-    let phase = 0, position = 0, buffer_id = 0, ram_page = 0;
+    let phase = 0, position = 0, buffer_id = 0, ram_page = 0, extended_page = 0;
+    const extended_size = extended_packed * 4096;
     return {
         "next": () => {
             if(phase === 0) { phase = 1; return header; }
@@ -435,16 +454,37 @@ export function create_state_stream(cpu)
                 phase = 3;
                 position = 0;
             }
-            if(position === packed_size) return null;
-            const length = Math.min(STREAM_RAM_CHUNK, packed_size - position);
+            if(phase === 3)
+            {
+                if(position < packed_size)
+                {
+                    const length = Math.min(STREAM_RAM_CHUNK, packed_size - position);
+                    const data = new Uint8Array(length);
+                    for(let offset = 0; offset < length; offset += 4096)
+                    {
+                        while(!(bitmap[ram_page >> 3] & 1 << (ram_page & 7))) ram_page++;
+                        data.set(cpu.mem8.subarray(ram_page * 4096, (ram_page + 1) * 4096), offset);
+                        ram_page++;
+                    }
+                    const result = stream_record(2, 0, position, data);
+                    position += length;
+                    return result;
+                }
+                phase = 4;
+                position = 0;
+            }
+            // extended RAM: records of kind 3; id and offset are the high and
+            // low 32 bits of the position in its packed pages
+            if(position === extended_size) return null;
+            const length = Math.min(STREAM_RAM_CHUNK, extended_size - position);
             const data = new Uint8Array(length);
             for(let offset = 0; offset < length; offset += 4096)
             {
-                while(!(bitmap[ram_page >> 3] & 1 << (ram_page & 7))) ram_page++;
-                data.set(cpu.mem8.subarray(ram_page * 4096, (ram_page + 1) * 4096), offset);
-                ram_page++;
+                while(!(extended_bitmap[extended_page >> 3] & 1 << (extended_page & 7))) extended_page++;
+                data.set(extended.page(extended_page), offset);
+                extended_page++;
             }
-            const result = stream_record(2, 0, position, data);
+            const result = stream_record(3, Math.floor(position / 0x100000000), position >>> 0, data);
             position += length;
             return result;
         },
@@ -527,6 +567,10 @@ export async function restore_state_stream(cpu, input)
     let total = STREAM_HEADER_SIZE + info_size;
     for(const length of lengths) total += length + Math.ceil(length / (STATE_STREAM_CHUNK_SIZE - STREAM_RECORD_SIZE)) * STREAM_RECORD_SIZE;
     total += packed_size + Math.ceil(packed_size / STREAM_RAM_CHUNK) * STREAM_RECORD_SIZE;
+    const extended_packed = info["extended_pages"] === undefined ? 0 : info["extended_pages"];
+    if(!Number.isSafeInteger(extended_packed) || extended_packed < 0 || extended_packed > cpu.extended_pages) stream_error("extended RAM size");
+    const extended_size = extended_packed * 4096;
+    total += extended_size + Math.ceil(extended_size / STREAM_RAM_CHUNK) * STREAM_RECORD_SIZE;
     if(total !== source["size"]) stream_error("total length");
     validate_stream_tree(info["state"], lengths);
     const buffers = [];
@@ -563,12 +607,30 @@ export async function restore_state_stream(cpu, input)
         count++;
     }
     if(count * 4096 !== packed_size) stream_error("bitmap count");
+    const extended_bitmap = state[99] || null;
+    if(extended_packed || extended_bitmap)
+    {
+        if(!(extended_bitmap instanceof Uint8Array) || extended_bitmap.length !== Math.ceil(cpu.extended_pages / 8)) stream_error("extended RAM bitmap");
+        let pages = 0;
+        for(let page = 0; page < extended_bitmap.length * 8; page++) if(extended_bitmap[page >> 3] & 1 << (page & 7))
+        {
+            if(page >= cpu.extended_pages) stream_error("extended bitmap beyond RAM");
+            pages++;
+        }
+        if(pages !== extended_packed) stream_error("extended bitmap count");
+    }
     cpu.validate_state(state);
     const ram_start = position, checksums = [];
     for(let offset = 0; offset < packed_size; offset += STREAM_RAM_CHUNK)
     {
         const length = Math.min(STREAM_RAM_CHUNK, packed_size - offset);
         const bytes = await read_record(2, 0, offset, length);
+        checksums.push(new DataView(bytes.buffer, bytes.byteOffset).getUint32(16 + length, true));
+    }
+    for(let offset = 0; offset < extended_size; offset += STREAM_RAM_CHUNK)
+    {
+        const length = Math.min(STREAM_RAM_CHUNK, extended_size - offset);
+        const bytes = await read_record(3, Math.floor(offset / 0x100000000), offset >>> 0, length);
         checksums.push(new DataView(bytes.buffer, bytes.byteOffset).getUint32(16 + length, true));
     }
     // No architectural or RAM mutation has occurred before this point.
@@ -585,6 +647,20 @@ export async function restore_state_stream(cpu, input)
             while(!(bitmap[page >> 3] & 1 << (page & 7))) page++;
             cpu.mem8.set(bytes.subarray(16 + part, 16 + part + 4096), page * 4096);
             page++;
+        }
+    }
+    cpu.clear_extended_memory();
+    let extended_page = 0;
+    for(let offset = 0; offset < extended_size; offset += STREAM_RAM_CHUNK)
+    {
+        const length = Math.min(STREAM_RAM_CHUNK, extended_size - offset);
+        const bytes = await read_record(3, Math.floor(offset / 0x100000000), offset >>> 0, length);
+        if(new DataView(bytes.buffer, bytes.byteOffset).getUint32(16 + length, true) !== checksums[record++]) stream_error("source changed between passes");
+        for(let part = 0; part < length; part += 4096)
+        {
+            while(!(extended_bitmap[extended_page >> 3] & 1 << (extended_page & 7))) extended_page++;
+            cpu.extended_store.write(extended_page, bytes.subarray(16 + part, 16 + part + 4096));
+            extended_page++;
         }
     }
     cpu.set_state(state, true);

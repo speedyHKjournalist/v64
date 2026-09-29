@@ -324,13 +324,29 @@ pub unsafe fn x64_set_compat_jit(enabled: bool) { X64_COMPAT_JIT = enabled; }
 #[no_mangle]
 pub unsafe fn request_core_yield() { core_yield = true; jit_block_boundary = true; }
 
-/// A worker instance takes the machine instance's CPU configuration
-/// (crate::parallel::parallel_attach); JavaScript applies the rest of the
-/// settings to it the same way as to the machine instance
+/// A spin-wait hint (PAUSE) or a bounded REP step with several cores: when
+/// they share this thread (cooperative scheduling), let another one run. A
+/// core with a thread of its own (crate::parallel) only leaves the current
+/// compiled block: ending its slice would not let anyone else run sooner,
+/// and on the machine's thread it would return to the event loop each time.
+pub unsafe fn yield_to_other_cores() {
+    if !crate::parallel::active() {
+        core_yield = true;
+    }
+    jit_block_boundary = true;
+}
+
+/// A worker instance takes the machine instance's CPU profile (CPUID level
+/// and features) and compiler policy: when it attaches and at the start of
+/// each slice (crate::parallel::sync_worker_configuration), so that every
+/// core reports the same CPU even when the embedder changes the profile after
+/// the workers started. JavaScript applies the other settings to it the same
+/// way as to the machine instance.
 pub unsafe fn copy_machine_configuration() {
     use crate::parallel::machine;
     cpuid_level = *machine(&raw mut cpuid_level);
     X64_COMPAT_JIT = *machine(&raw mut X64_COMPAT_JIT);
+    crate::cpu::instructions_0f::copy_cpu_profile();
 }
 
 pub static mut tlb_data: [i32; 0x100000] = [0; 0x100000];
@@ -2322,7 +2338,19 @@ pub unsafe fn do_page_walk(
 /// also clears this TLB.
 pub unsafe fn fill_ia32e_tlb(address: u32, physical: u64, access: crate::x64::paging::Access, user: bool) {
     use crate::x64::paging::Access;
-    let Some(backing) = crate::x64::jac::ram_backing(physical) else { return };
+    // (extended RAM: its frame while cores share this thread; never code, so
+    // no code-write notification; see crate::x64::extended::cache_frame)
+    let (backing, extended) = match crate::x64::jac::ram_backing(physical) {
+        Some(backing) => (backing, false),
+        None if access == Access::Execute => return,
+        None => match crate::x64::extended::cache_frame(physical & !4095, access == Access::Write) {
+            Some(host) => {
+                crate::x64::extended::note_legacy_tlb();
+                (host.wrapping_sub(memory::mem8 as u32), true)
+            },
+            None => return,
+        },
+    };
     let page = address >> 12;
     if tlb_data[page as usize] == 0 {
         if valid_tlb_entries_count == VALID_TLB_ENTRY_MAX {
@@ -2338,7 +2366,7 @@ pub unsafe fn fill_ia32e_tlb(address: u32, physical: u64, access: crate::x64::pa
         | if access == Access::Write { 0 } else { TLB_READONLY }
         | if user { 0 } else { TLB_NO_USER }
         | if access == Access::Execute { 0 } else { TLB_IA32E_DATA }
-        | if jit::page_needs_notification(Page::page_of(backing)) { TLB_HAS_CODE } else { 0 };
+        | if !extended && jit::page_needs_notification(Page::page_of(backing)) { TLB_HAS_CODE } else { 0 };
     tlb_data[page as usize] = backing.wrapping_add(memory::mem8 as u32) as i32 ^ (page << 12) as i32 | info;
 }
 
@@ -3218,8 +3246,13 @@ pub unsafe fn cycle_internal() -> bool {
 unsafe fn ia32e_phys_eip() -> OrPageFault<u32> {
     let address = crate::x64::memory::translate(*instruction_pointer as u32 as u64, crate::x64::paging::Access::Execute, false, false)
         .map_err(|fault| crate::x64::system::raise(fault))?;
-    let page = crate::x64::physical::ram_page(address & !4095).map_err(|_| crate::x64::system::raise(crate::x64::memory::Fault::gp()))?;
-    Ok(page.backing | (address & 4095) as u32)
+    match crate::x64::physical::ram_page(address & !4095) {
+        Ok(page) => Ok(page.backing | (address & 4095) as u32),
+        // code in extended RAM runs from its aperture address (interpreted:
+        // nothing compiles from the mapped range)
+        Err(_) if crate::x64::extended::contains(address) => Ok(crate::x64::extended::aperture::map(address)),
+        Err(_) => Err(crate::x64::system::raise(crate::x64::memory::Fault::gp())),
+    }
 }
 #[cold]
 #[inline(never)]
@@ -3327,9 +3360,11 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
         i += 1;
         let start_eip = *instruction_pointer;
         // A remapped low RAM page is an open bus, never the high RAM backing.
-        // Compatibility mode has already resolved a full physical RAM address.
+        // Compatibility mode has already resolved a full physical RAM
+        // address, or one of the extended RAM aperture.
         let opcode = if memory::in_mapped_range(phys_addr)
-            && crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0 {
+            && (crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0
+                || crate::x64::extended::aperture::contains(phys_addr)) {
             memory::read8(phys_addr)
         } else { *memory::mem8.offset(phys_addr as isize) as i32 };
         *instruction_pointer += 1;
@@ -3418,6 +3453,9 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
     jit_link_batch = true;
     let native = crate::ir::runtime::schedule::enabled();
     while remaining != 0 && !*in_hlt && !core_yield {
+        // (as in do_many_cycles_native: extended RAM frames held by access
+        // caches are released between entries)
+        crate::x64::extended::safe_point();
         *previous_ip = *instruction_pointer;
         // A fault can change CS:EIP without retiring an instruction. Charge
         // that dispatch as well, so a fault loop cannot monopolize the host.
@@ -3576,6 +3614,12 @@ pub unsafe fn do_many_cycles_native() -> bool {
         && !*in_hlt
         && !core_yield
     {
+        // With cores in workers: acknowledge other cores' code publications
+        // and take their code writes between entries, so that a core
+        // installing code rarely waits for this one (crate::parallel::code;
+        // two loads when nothing is new, nothing in the normal build)
+        crate::parallel::code::poll();
+        crate::x64::extended::safe_point();
         if cycle_internal() {
             publication_yield = true;
             break;

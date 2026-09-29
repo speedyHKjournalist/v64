@@ -581,7 +581,18 @@ if(typeof XMLHttpRequest === "undefined" ||
                 encoding: options.as_json ? "utf-8" : null,
             };
 
-            const data = await fs["readFile"](filename, o);
+            let data;
+            try
+            {
+                data = await fs["readFile"](filename, o);
+            }
+            catch(e)
+            {
+                // (options.error: the caller handles a missing file)
+                if(!options.error) throw e;
+                options.error(e);
+                return;
+            }
             const result = options.as_json ? JSON.parse(data) : new Uint8Array(data).buffer;
 
             options.done(result);
@@ -670,6 +681,10 @@ else
                     if(http.status >= 500 && http.status < 600)
                     {
                         retry();
+                    }
+                    else if(options.error)
+                    {
+                        options.error(http.status);
                     }
                 }
                 else if(http.response)

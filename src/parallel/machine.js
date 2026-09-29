@@ -32,14 +32,22 @@ export class ParallelMachine
         this.bytes = options.bytes;
         this.settings = options.settings;
         this.worker_url = options.worker_url;
-        this.control = new SharedArrayBuffer(C.CONTROL_WORDS * 4 + 8);
+        this.control = new SharedArrayBuffer(C.CONTROL_BYTES);
         this.ctrl = new Int32Array(this.control);
-        this.clock_offset = new Float64Array(this.control, C.CONTROL_WORDS * 4, 1);
+        this.clock_offset = new Float64Array(this.control, C.CONTROL_WORDS * 4 + 8 * C.SLOT_CLOCK_OFFSET, 1);
+        this.ctrl[C.PM_BASE] = -1;
+        // the workers read the PM timer themselves (src/acpi.js)
+        cpu.devices.acpi?.share_timer(this.ctrl.subarray(C.PM_BASE, C.PM_BASE + 1),
+            new Float64Array(this.control, C.CONTROL_WORDS * 4 + 8 * C.SLOT_PM_TIMER_OFFSET, 1),
+            new BigInt64Array(this.control, C.CONTROL_WORDS * 4 + 8 * C.SLOT_PM_TIMER_LAST, 1));
         this.workers = [];
         this.epoch = 0;
         this.stopping_epoch = 0;
         this.command = C.COMMAND_NONE;
         this.failure = null;
+        this.failed_core = 0;
+        /** @type {?{reason: (string|undefined), keep_memory: (boolean|undefined)}} a reset waiting for the workers to park */
+        this.pending_reset = null;
         this.destroyed = false;
         this.served = 0;
         this.sync_clock();
@@ -64,19 +72,21 @@ export class ParallelMachine
             const worker = await create_worker(this.worker_url, "v86 vCPU " + core);
             this.workers[core] = worker;
             ready.push(new Promise((resolve, reject) => {
+                const fail = error => {
+                    this.fail(core, error);
+                    reject(this.failure);
+                };
                 worker.on_message(message => {
                     if(message["type"] === "ready") resolve();
-                    else if(message["type"] === "error")
-                    {
-                        this.failure = new Error("vCPU " + core + " failed: " + message["message"]);
-                        reject(this.failure);
-                        this.cpu.stop_idling();
-                    }
+                    else if(message["type"] === "error") fail(new Error("vCPU " + core + " failed: " + message["message"]));
                 });
-                worker.on_error(error => {
-                    this.failure = error;
-                    reject(error);
-                    this.cpu.stop_idling();
+                worker.on_error(error => fail(error));
+                // (Node: a worker that ends without an error message, e.g. process.exit)
+                worker.on_exit(code => {
+                    if(!this.destroyed && Atomics.load(this.ctrl, C.core_word(core, C.STATUS)) !== C.STATUS_EXITED)
+                    {
+                        fail(new Error("vCPU " + core + " worker exited (code " + code + ")"));
+                    }
                 });
             }));
             worker.post({
@@ -84,6 +94,7 @@ export class ParallelMachine
                 "base": base, "core": core, "cores": this.cores,
                 "mem8": this.cpu.mem8.byteOffset, "memory_size": this.cpu.memory_size[0],
                 "settings": this.settings, "log": false,
+                "extended": this.cpu.extended_store ? this.cpu.extended_store.transfer() : null,
             });
         }
         await Promise.all(ready);
@@ -146,16 +157,38 @@ export class ParallelMachine
         return count;
     }
 
+    /**
+     * A vCPU failed: the machine cannot go on (its state is lost). Release
+     * what the core held, stop the other workers; the machine's loop reports
+     * the error ("emulator-error") and stops.
+     */
+    fail(core, error)
+    {
+        if(this.failure || this.destroyed) return;
+        this.failure = error;
+        this.failed_core = core;
+        dbg_log("parallel machine: " + error, LOG_CPU);
+        Atomics.store(this.ctrl, C.core_word(core, C.STATUS), C.STATUS_FAILED);
+        this.exports["parallel_core_failed"](core);
+        this.request_stop();
+        this.cpu.stop_idling();
+    }
+
+    /** @return {Error|null} the failure of a vCPU, if one failed */
     check_failure()
     {
-        if(this.failure) throw this.failure;
-        for(let core = 1; core < this.cores; core++)
+        if(!this.failure)
         {
-            if(Atomics.load(this.ctrl, C.core_word(core, C.ERROR)))
+            for(let core = 1; core < this.cores; core++)
             {
-                throw new Error("vCPU " + core + " failed");
+                if(Atomics.load(this.ctrl, C.core_word(core, C.ERROR)))
+                {
+                    // (its error message follows by postMessage)
+                    this.fail(core, new Error("vCPU " + core + " failed"));
+                }
             }
         }
+        return this.failure;
     }
 
     /** Whether a stop is in effect (requested and not resumed) */
@@ -189,12 +222,13 @@ export class ParallelMachine
     /** Stop every worker at a safe point, serving their I/O until they get there */
     async park()
     {
+        if(this.check_failure()) throw this.failure;
         this.request_stop();
         const deadline = Date.now() + 30000;
         while(!this.all_parked())
         {
             this.service();
-            this.check_failure();
+            if(this.check_failure()) throw this.failure;
             if(Date.now() > deadline) throw new Error("vCPU workers did not stop: " + JSON.stringify(this.status()));
             await new Promise(resolve => setTimeout(resolve, 0));
         }
@@ -249,7 +283,7 @@ export class ParallelMachine
     {
         const at = w => this.ctrl[C.core_word(core, w)] >>> 0;
         return { slices: at(C.SLICES), steps: at(C.STEPS), waits: at(C.WAITS), io: at(C.IO_COUNT), jit: at(C.JIT_ENTRIES),
-            unpublished: at(C.UNPUBLISHED) };
+            refused: at(C.REFUSED) };
     }
 
     status()
@@ -262,7 +296,8 @@ export class ParallelMachine
             cores.push(Object.assign({ "core": core, "status": names[at(C.STATUS)], "ack": at(C.ACK),
                 "io_state": at(C.IO_STATE) }, this.core_counters(core)));
         }
-        return { "epoch": this.epoch, "resume": this.ctrl[C.RESUME], "served": this.served, "cores": cores };
+        return { "epoch": this.epoch, "resume": this.ctrl[C.RESUME], "served": this.served, "cores": cores,
+            "failure": this.failure ? String(this.failure.message || this.failure) : null };
     }
 
     destroy()
@@ -278,7 +313,34 @@ export class ParallelMachine
             this.workers[core]?.terminate();
         }
         this.exports["parallel_set_active"](false);
+        const acpi = this.cpu.devices.acpi;
+        if(acpi) acpi.shared_base = acpi.shared_offset = acpi.shared_last = null;
     }
+}
+
+/**
+ * Why this host cannot run vCPU workers ("" if it can): shared memory and
+ * Atomics, workers, and in browsers cross-origin isolation (the page needs
+ * the COOP "same-origin" and COEP "require-corp" or "credentialless" headers)
+ * @return {string}
+ */
+export function parallel_unsupported_reason()
+{
+    if(typeof SharedArrayBuffer !== "function" || typeof Atomics !== "object") return "no SharedArrayBuffer";
+    if(!NODE)
+    {
+        if(typeof Worker !== "function") return "no Worker";
+        if(globalThis["crossOriginIsolated"] !== true) return "not cross-origin isolated";
+    }
+    try
+    {
+        new WebAssembly.Memory({ "initial": 1, "maximum": 1, "shared": true });
+    }
+    catch(e)
+    {
+        return "no shared WebAssembly.Memory";
+    }
+    return "";
 }
 
 /**
@@ -310,6 +372,7 @@ async function create_worker(url, name)
             post: message => worker.postMessage(message),
             on_message: f => worker.on("message", f),
             on_error: f => worker.on("error", f),
+            on_exit: f => worker.on("exit", f),
             terminate: () => worker.terminate(),
         };
     }
@@ -317,7 +380,8 @@ async function create_worker(url, name)
     return {
         post: message => worker.postMessage(message),
         on_message: f => { worker.onmessage = e => f(e.data); },
-        on_error: f => { worker.onerror = e => f(e.error || new Error(e.message)); },
+        on_error: f => { worker.onerror = e => { e.preventDefault(); f(e.error || new Error(e.message)); }; },
+        on_exit: () => {},
         terminate: () => worker.terminate(),
     };
 }

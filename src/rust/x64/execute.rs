@@ -364,32 +364,42 @@ unsafe fn bulk_string(op: u32, w: u8, aw: u8, count: u64, src: u64, dst: u64, so
         if movs {
             n = n.min(room(source));
         }
-        let mapped = |address: u64, access| -> Option<u32> {
+        // Host addresses: RAM through its backing, extended RAM through its
+        // frame (which stays until the dispatch loop's next safe point,
+        // crate::x64::extended::cache_frame). The flag: RAM (code may watch it).
+        let mem8 = crate::cpu::memory::mem8 as u32;
+        let mapped = |address: u64, access| -> Option<(u32, bool)> {
             let physical = memory::translate(address, access, false, false).ok()?;
-            super::jac::ram_backing(physical).map(|page| page + (address & 4095) as u32)
+            match super::jac::ram_backing(physical) {
+                Some(page) => Some((mem8.wrapping_add(page + (address & 4095) as u32), true)),
+                None => super::extended::cache_frame(physical & !4095, access == super::paging::Access::Write)
+                    .map(|frame| (frame + (address & 4095) as u32, false)),
+            }
         };
         let target = if n == 0 { None } else { mapped(dst, super::paging::Access::Write) };
-        let from = if movs && target.is_some() { mapped(source, super::paging::Access::Read) } else { Some(0) };
-        let (Some(target), Some(from)) = (target, from)
+        let from = if movs && target.is_some() { mapped(source, super::paging::Access::Read) } else { Some((0, false)) };
+        let (Some((target, target_ram)), Some((from, _))) = (target, from)
         else {
             if done == 0 {
                 return Ok(None);
             }
             break;
         };
-        let mem8 = crate::cpu::memory::mem8;
         for i in 0..n {
             let step = if down { (i * size).wrapping_neg() } else { i * size };
-            let t = mem8.add(target.wrapping_add(step as u32) as usize);
+            let t = target.wrapping_add(step as u32) as usize as *mut u8;
             if movs {
-                std::ptr::copy(mem8.add(from.wrapping_add(step as u32) as usize), t, size as usize);
+                std::ptr::copy(from.wrapping_add(step as u32) as usize as *const u8, t, size as usize);
             } else {
                 std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), t, size as usize);
             }
         }
-        let (low, high) = if down { (target + size as u32 - (n * size) as u32, target + size as u32) } else { (target, target + (n * size) as u32) };
-        if crate::jit::page_watched(low >> 12) || crate::jit::page_watched((high - 1) >> 12) {
-            crate::jit::jit_dirty_cache(low, high);
+        if target_ram {
+            let target = target.wrapping_sub(mem8);
+            let (low, high) = if down { (target + size as u32 - (n * size) as u32, target + size as u32) } else { (target, target + (n * size) as u32) };
+            if crate::jit::page_watched(low >> 12) || crate::jit::page_watched((high - 1) >> 12) {
+                crate::jit::jit_dirty_cache(low, high);
+            }
         }
         let delta = if down { (n * size).wrapping_neg() } else { n * size };
         src = src.wrapping_add(delta) & mask(aw);
@@ -644,7 +654,7 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             // PAUSE (F3 90) is a spin-wait hint: as in the legacy interpreter,
             // end this core's slice so the lock holder can run.
             if r == 0 && d.prefixes.rep == Some(0xF3) && crate::cpu::apic::core_count() > 1 {
-                crate::cpu::cpu::core_yield = true;
+                crate::cpu::cpu::yield_to_other_cores();
             }
             if r != 0 {
                 let a = register(0, w, rex);

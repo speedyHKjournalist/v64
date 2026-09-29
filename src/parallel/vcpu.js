@@ -16,6 +16,8 @@ import { WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { view } from "../lib.js";
 import { CORE_STATE_RANGES, STATE_OFFSETS } from "../state_layout.js";
 import { relocate } from "./relocate.js";
+import { PM_TIMER_TICKS_PER_MS, pm_timer_shared_max } from "../acpi.js";
+import { ExtendedStore } from "../extended_memory.js";
 import * as C from "./control.js";
 
 const CORE_EVENT_INIT = 1;
@@ -26,17 +28,21 @@ const INIT_PRESERVED = [[STATE_OFFSETS.x64_pat, 8],
 /**
  * @param {Object} init from ParallelMachine.start
  * @param {function(Object)} post message to the machine
+ * @param {{exports: Object}} handle receives the instance's exports (for the failure path)
  */
-export async function run_vcpu(init, post)
+export async function run_vcpu(init, post, handle)
 {
     const core = init.core;
     const memory = init.memory;
     const ctrl = new Int32Array(init.control);
-    const clock_offset = new Float64Array(init.control, C.CONTROL_WORDS * 4, 1);
+    const clock_offset = new Float64Array(init.control, C.CONTROL_WORDS * 4 + 8 * C.SLOT_CLOCK_OFFSET, 1);
+    const pm_timer_offset = new Float64Array(init.control, C.CONTROL_WORDS * 4 + 8 * C.SLOT_PM_TIMER_OFFSET, 1);
+    const pm_timer_last = new BigInt64Array(init.control, C.CONTROL_WORDS * 4 + 8 * C.SLOT_PM_TIMER_LAST, 1);
     const word = w => C.core_word(core, w);
     const table = new WebAssembly.Table({ "element": "anyfunc", "initial": WASM_TABLE_SIZE + WASM_TABLE_OFFSET });
 
     let cpu = null, exports = null;
+    const extended = init.extended ? new ExtendedStore(init.extended["pages"], init.extended["chunks"], init.extended["touched"]) : null;
     const host_now = () => performance.timeOrigin + performance.now();
     const now = () => host_now() - clock_offset[0];
 
@@ -64,6 +70,20 @@ export async function run_vcpu(init, post)
         return result;
     }
 
+    // Ports this worker serves itself: the ACPI PM timer (the same ticks the
+    // machine's device computes from the shared clock, see
+    // ACPI.prototype.share_timer) and the POST port 0x80, which ignores writes
+    function read32(port)
+    {
+        const pm_base = ctrl[C.PM_BASE];
+        if(pm_base >= 0 && port === pm_base + 8)
+        {
+            const ticks = Math.floor(cpu.clock.now() * PM_TIMER_TICKS_PER_MS) + pm_timer_offset[0];
+            return pm_timer_shared_max(pm_timer_last, ticks) & 0xFFFFFF;
+        }
+        return request(C.OP_IN32, port);
+    }
+
     const env = {
         "memory": memory,
         "__indirect_function_table": table,
@@ -80,8 +100,8 @@ export async function run_vcpu(init, post)
         "x64_page_publish": (id, slot, pointer, length) => cpu.x64_page_publish(id, slot, pointer, length),
         "io_port_read8": port => request(C.OP_IN8, port),
         "io_port_read16": port => request(C.OP_IN16, port),
-        "io_port_read32": port => request(C.OP_IN32, port),
-        "io_port_write8": (port, value) => { request(C.OP_OUT8, port, value); },
+        "io_port_read32": read32,
+        "io_port_write8": (port, value) => { if(port !== 0x80) request(C.OP_OUT8, port, value); },
         "io_port_write16": (port, value) => { request(C.OP_OUT16, port, value); },
         "io_port_write32": (port, value) => { request(C.OP_OUT32, port, value); },
         "mmap_read8": addr => request(C.OP_MMIO_READ8, addr),
@@ -103,10 +123,13 @@ export async function run_vcpu(init, post)
         "ir_codegen_finalize": (id, slot, pointer, length) => { cpu.ir_auto_publish(id, slot, pointer, length); },
         "jit_clear_func": index => cpu.jit_clear_func(index),
         "parallel_notify": address => { Atomics.notify(new Int32Array(memory.buffer), address >>> 2); },
+        // the machine's extended RAM store (src/extended_memory.js)
+        "extended_load": (page, pointer) => { extended.load(page, memory, pointer); },
+        "extended_store": (page, pointer) => { extended.store(page, memory, pointer); },
     };
 
-    const { instance } = await WebAssembly.instantiate(relocate(new Uint8Array(init.bytes), init.base), { "env": env });
-    exports = instance.exports;
+    const { instance } = await WebAssembly.instantiate(relocate(new Uint8Array(init.bytes), init.base, core), { "env": env });
+    exports = handle.exports = instance.exports;
     exports["rust_init"]();
     exports["parallel_attach"](init.base, core);
 
@@ -131,10 +154,10 @@ export async function run_vcpu(init, post)
             exports["x64_native_ready"](token, false);
         }
     };
-    exports["set_x64_test_capabilities"](!!settings.experimental_x64);
+    // (the CPU profile, CPUID level and x64 capabilities, is the machine's:
+    // crate::cpu::cpu::copy_machine_configuration)
     exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
-    if(settings.cpuid_level) cpu.set_cpuid_level(settings.cpuid_level);
     cpu.mem8 = view(Uint8Array, memory, init.mem8, init.memory_size);
     cpu.mem32s = view(Uint32Array, memory, init.mem8, init.memory_size >> 2);
     exports["parallel_set_active"](true);
@@ -236,6 +259,9 @@ export async function run_vcpu(init, post)
     const wake = new Int32Array(memory.buffer);
     const wake_index = exports["parallel_wake_addr"](core) >>> 2;
     const quantum = settings.cpu_quantum || 20000;
+    // test hook (tests/parallel/lifecycle.mjs): this core fails after some slices
+    const fault = settings["parallel_fault"];
+    const faulty = fault && fault["core"] === core;
     let acked = Atomics.load(ctrl, C.STOP);
     let steps = 0;
     let jit_entries = 0, last_entries = 0;
@@ -270,12 +296,19 @@ export async function run_vcpu(init, post)
         steps = steps + retired | 0;
         ctrl[word(C.STEPS)] = steps;
         ctrl[word(C.SLICES)]++;
-        // (cumulative: a reset or restore clears the caches' own counters)
-        const entries = exports["ir_t0_entries"]() + exports["ir_cache_stat"](2) >>> 0;
+        // (cumulative: a reset or restore clears the caches' own counters;
+        // Tier-0, the IR cache and x64 page functions)
+        const entries = exports["ir_t0_entries"]() + exports["ir_cache_stat"](2) + exports["x64_page_stat"](6) >>> 0;
         jit_entries += entries >= last_entries ? entries - last_entries : entries;
         last_entries = entries;
         ctrl[word(C.JIT_ENTRIES)] = jit_entries;
-        ctrl[word(C.UNPUBLISHED)] = exports["parallel_code_stat"](0);
+        ctrl[word(C.REFUSED)] = exports["parallel_code_stat"](0);
+        if(faulty && ctrl[word(C.SLICES)] >= fault["after_slices"])
+        {
+            if(fault["kind"] === "trap") exports["parallel_test_fault"]();
+            if(fault["kind"] === "exit") typeof process !== "undefined" ? process.exit(3) : globalThis.close();
+            throw new Error("injected fault");
+        }
         if(cpu.in_hlt[0])
         {
             exports["handle_irqs"]();
@@ -299,17 +332,21 @@ export function start_vcpu_worker()
 {
     const node = typeof process !== "undefined" && process.versions && process.versions.node;
     const start = async (init, post) => {
+        const handle = { exports: null };
         try
         {
-            await run_vcpu(init, post);
+            await run_vcpu(init, post, handle);
         }
         catch(error)
         {
+            // release the machine's locks this core held before anyone waits for it
+            try { handle.exports?.["parallel_fail"](); } catch(e) { /* the instance may be unusable */ }
             const ctrl = new Int32Array(init.control);
             Atomics.store(ctrl, C.core_word(init.core, C.ERROR), 1);
             Atomics.store(ctrl, C.core_word(init.core, C.STATUS), C.STATUS_FAILED);
             Atomics.add(ctrl, C.DOORBELL, 1);
             Atomics.notify(ctrl, C.DOORBELL);
+            try { handle.exports?.["parallel_kick"](0); } catch(e) { /* the instance may be unusable */ }
             post({ "type": "error", "core": init.core, "message": String(error && error.stack || error) });
         }
     };

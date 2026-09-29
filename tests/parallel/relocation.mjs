@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { PARALLEL_WASM, Shell, linux4_options, value_of } from "./guest.mjs";
-import { instantiate_relocated, memory_import, relocations } from "../../src/parallel/relocate.js";
+import { instantiate_relocated, memory_import, relocations, STATE_SLOT_SIZE } from "../../src/parallel/relocate.js";
 
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 
@@ -30,7 +30,7 @@ let base_b = 0;
 const b = new V86({
     ...linux4_options(), memory_size: 96 << 20,
     wasm_fn: async env => {
-        const { instance, base } = await instantiate_relocated(bytes, env, memory);
+        const { instance, base } = await instantiate_relocated(bytes, env, memory, 1);
         base_b = base;
         return instance.exports;
     },
@@ -38,7 +38,8 @@ const b = new V86({
 await new Promise(resolve => b.add_listener("emulator-loaded", resolve));
 const cpu_a = a.v86.cpu, cpu_b = b.v86.cpu;
 assert.equal(cpu_b.wasm_memory, memory, "one memory");
-assert.ok(base_b > 0 && cpu_b.state_base === cpu_a.state_base + base_b, "B's state block is relocated by its base");
+assert.ok(base_b > 0 && cpu_a.state_base === 0 && cpu_b.state_base === STATE_SLOT_SIZE,
+    "the state blocks are in slots 0 (A, where v86.wasm has it) and 1 (B)");
 assert.notEqual(cpu_a.mem8.byteOffset, cpu_b.mem8.byteOffset);
 assert.ok(cpu_b.mem8.byteOffset + cpu_b.mem8.length <= cpu_a.mem8.byteOffset ||
     cpu_a.mem8.byteOffset + cpu_a.mem8.length <= cpu_b.mem8.byteOffset, "guest RAM of A and B does not overlap");

@@ -22,6 +22,7 @@ import { ACPI_LOADER_FILE, ACPI_RSDP_FILE, ACPI_TABLES_FILE, build_acpi_tables, 
 import { ACPI_PM_BASE_DEFAULT, Platform, check_platform, create_platform } from "./platform.js";
 import { CORE_STATE_RANGES, STATE_OFFSETS } from "./state_layout.js";
 import { ParallelMachine } from "./parallel/machine.js";
+import { ExtendedStore } from "./extended_memory.js";
 import { COMMAND_RELOAD, COMMAND_RESET } from "./parallel/control.js";
 import { PIT } from "./pit.js";
 import { DMA } from "./dma.js";
@@ -95,6 +96,17 @@ export function CPU(bus, wm, stop_idling)
     // v86.wasm; the state block of this instance in v86-parallel.wasm, where
     // each vCPU worker has its own (src/parallel/relocate.js)
     const state_base = this.state_base = this.wm.exports["state_base"] ? this.wm.exports["state_base"]() : 0;
+
+    /** @type {ParallelMachine} application processors in vCPU workers (start_parallel) */
+    this.parallel = null;
+    /** why the cores run cooperatively although parallel execution was requested ("" if not) */
+    this.parallel_fallback = "";
+
+    // extended RAM (configure_extended_memory)
+    this.extended_pages = 0;
+    this.extended_base = 0;
+    /** @type {ExtendedStore} */
+    this.extended_store = null;
 
     this.memory_size = view(Uint32Array, memory, state_base + STATE_OFFSETS.memory_size, 1);
     // RAM below 4 GiB; less than memory_size when high_memory_size is set
@@ -413,9 +425,13 @@ CPU.prototype.read_blob_physical = function(address, length)
     {
         const at = address + done;
         const count = Math.min(length - done, 4096 - at % 4096);
-        const backing = this.wm.exports["x64_phys_resolve"](at >>> 0, Math.floor(at / 0x100000000));
-        if(this.wm.exports["x64_phys_kind"](at >>> 0, Math.floor(at / 0x100000000)) === 1)
+        const kind = this.wm.exports["x64_phys_kind"](at >>> 0, Math.floor(at / 0x100000000));
+        if(kind === 1)
+        {
+            const backing = this.wm.exports["x64_phys_resolve"](at >>> 0, Math.floor(at / 0x100000000));
             result.set(this.mem8.subarray(backing, backing + count), done);
+        }
+        else if(kind === 3) result.set(this.extended_page_bytes(at, count, false), done);
         else for(let i = 0; i < count; i++) result[done + i] = this.read8_physical(at + i);
         done += count;
     }
@@ -428,15 +444,38 @@ CPU.prototype.write_blob_physical = function(blob, address)
     {
         const at = address + done;
         const count = Math.min(blob.length - done, 4096 - at % 4096);
-        const backing = this.wm.exports["x64_phys_resolve"](at >>> 0, Math.floor(at / 0x100000000));
-        if(this.wm.exports["x64_phys_kind"](at >>> 0, Math.floor(at / 0x100000000)) === 1)
+        const kind = this.wm.exports["x64_phys_kind"](at >>> 0, Math.floor(at / 0x100000000));
+        if(kind === 1)
         {
+            const backing = this.wm.exports["x64_phys_resolve"](at >>> 0, Math.floor(at / 0x100000000));
             this.jit_dirty_cache(backing, backing + count);
             this.mem8.set(blob.slice(done, done + count), backing);
         }
+        else if(kind === 3) this.extended_page_bytes(at, count, blob.subarray(done, done + count));
         else for(let i = 0; i < count; i++) this.write8_physical(at + i, blob[done + i]);
         done += count;
     }
+};
+
+/**
+ * Copy bytes of one extended RAM page (DMA, debugging): its frame is pinned
+ * meanwhile (src/rust/x64/extended.rs)
+ * @param {number} address guest physical, in extended RAM
+ * @param {number} count bytes within the page
+ * @param {Uint8Array|boolean} write the bytes to write, or false to read
+ * @return {!Uint8Array} the bytes read
+ */
+CPU.prototype.extended_page_bytes = function(address, count, write)
+{
+    const page = Math.floor((address - this.extended_base) / 4096);
+    const frame = this.wm.exports["x64_ext_pin"](page, !!write);
+    dbg_assert(frame !== 0 && address % 4096 + count <= 4096);
+    const bytes = new Uint8Array(this.wasm_memory.buffer, frame + address % 4096, count);
+    let result = bytes;
+    if(write) bytes.set(/** @type {!Uint8Array} */ (write));
+    else result = bytes.slice();
+    this.wm.exports["x64_ext_unpin"](page);
+    return result;
 };
 
 CPU.prototype.clear_stats = function()
@@ -731,6 +770,11 @@ CPU.prototype.get_state = function(skip_memory = false)
     if(skip_memory) { state[77] = null; state[78] = null; }
     else
     {
+        // (a single-buffer snapshot does not hold extended RAM: the stream does)
+        if(this.extended_store && this.extended_store.touched.some(byte => byte !== 0))
+        {
+            throw new Error("A snapshot of extended RAM needs save_state_stream");
+        }
         const { packed_memory, bitmap } = this.pack_memory();
         state[77] = packed_memory;
         state[78] = new Uint8Array(bitmap.get_buffer());
@@ -760,6 +804,8 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[95] = clock_state;
     state[96] = this.get_machine_core_state();
     state[97] = [1, this.get_physical_windows()];
+    // extended RAM pages (X6; its contents are records of the snapshot stream)
+    state[98] = this.extended_pages;
     return state;
 };
 
@@ -977,6 +1023,8 @@ CPU.prototype.validate_state = function(state)
         throw new Error("Snapshot RAM size differs from its physical memory map");
     if(!Number.isSafeInteger(state[0]) || state[0] <= 0 || state[0] > this.mem8.length || state[0] % 4096)
         throw new Error("Invalid snapshot RAM size");
+    if((state[98] || 0) !== this.extended_pages)
+        throw new Error("Snapshot extended RAM size differs from this machine's");
 };
 
 CPU.prototype.set_state = function(state, skip_memory = false)
@@ -1127,6 +1175,7 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     {
         const bitmap = new Bitmap(state[78].buffer);
         this.unpack_memory(bitmap, state[77]);
+        this.clear_extended_memory();
     }
 
     this.update_state_flags();
@@ -1463,7 +1512,8 @@ CPU.prototype.start_parallel = async function(options)
 CPU.prototype.run_parallel = function()
 {
     const machine = this.parallel;
-    machine.check_failure();
+    // (a failed vCPU stops the machine: see v86.prototype.do_tick)
+    if(machine.check_failure()) return 0;
     machine.service();
     if(machine.pending_reset)
     {
@@ -1631,6 +1681,8 @@ CPU.prototype.get_diagnostics = function()
         "active_core": this.active_core,
         "cores": cores,
         "parallel": this.parallel ? this.parallel.status() : null,
+        // how the cores run: "parallel" (vCPU workers) or "cooperative", and why not parallel
+        "execution": { "mode": this.parallel ? "parallel" : "cooperative", "fallback": this.parallel_fallback || null },
         "clock": Object.assign({ "mode": this.clock.mode, "now_ms": this.clock.now() }, this.clock.get_diagnostics()),
         "scheduler": { "quantum": this.scheduler_quantum, "seed": this.scheduler_seed, "round": this.scheduler_round },
         "cpu": {
@@ -1959,6 +2011,7 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
         // resuming from S4 has to restore itself from disk. (A raw fill does
         // not reach the JIT's write notification: drop all compiled code.)
         this.zero_memory(0, this.memory_size[0]);
+        this.clear_extended_memory();
         this.jit_clear_cache();
         this.full_clear_tlb();
     }
@@ -2024,6 +2077,60 @@ CPU.prototype.configure_high_memory = function(size, low_minimum)
         throw new Error("Cannot map high_memory_size above 4 GiB");
     }
     this.low_memory_size = low;
+};
+
+/**
+ * RAM beyond the wasm32 backing store (X6): `size` bytes at guest physical
+ * 4 GiB + high_memory_size, kept in an ExtendedStore (src/extended_memory.js)
+ * and cached in `cache_size` bytes of frames (src/rust/x64/extended.rs).
+ * Only a long-mode guest can address it.
+ * @param {number} size
+ * @param {number=} cache_size
+ */
+CPU.prototype.configure_extended_memory = function(size, cache_size)
+{
+    this.extended_pages = 0;
+    this.extended_base = 0;
+    this.extended_store = null;
+    if(!size) return;
+    if(!Number.isSafeInteger(size) || size < 0 || size % (2 << 20))
+    {
+        throw new Error("extended_memory_size must be a multiple of 2 MiB");
+    }
+    const base = 0x100000000 + (this.memory_size[0] - this.low_memory_size);
+    if(base + size > 0x1000000000)
+    {
+        throw new Error("extended_memory_size: guest RAM would exceed the 36-bit physical address space");
+    }
+    const cache = Math.min(size, cache_size || 512 << 20);
+    if(!Number.isSafeInteger(cache) || cache < 1 << 20 || cache % 4096)
+    {
+        throw new Error("extended_memory_cache must be a multiple of 4 KiB and at least 1 MiB");
+    }
+    let store;
+    try
+    {
+        store = new ExtendedStore(size / 4096);
+    }
+    catch(e)
+    {
+        throw new Error("extended_memory_size: the host cannot allocate " + size + " bytes (" + e.message + ")");
+    }
+    if(!this.wm.exports["x64_ext_configure"](base >>> 0, Math.floor(base / 0x100000000), size / 4096, cache / 4096))
+    {
+        throw new Error("extended_memory_size: cannot allocate the frame cache");
+    }
+    this.extended_store = store;
+    this.extended_pages = size / 4096;
+    this.extended_base = base;
+};
+
+/** Extended RAM reads as zero again (power-on); every core is stopped */
+CPU.prototype.clear_extended_memory = function()
+{
+    if(!this.extended_store) return;
+    this.wm.exports["x64_ext_discard"]();
+    this.extended_store.clear();
 };
 
 CPU.prototype.create_memory = function(size, minimum_size)
@@ -2307,6 +2414,7 @@ CPU.prototype.init = function(settings, device_bus)
 
     this.platform = create_platform(settings, this.memory_size[0]);
     this.configure_high_memory(settings.high_memory_size || 0, settings.initrd ? 64 * 1024 * 1024 + settings.initrd.byteLength : 0);
+    this.configure_extended_memory(settings.extended_memory_size || 0, settings.extended_memory_cache);
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
@@ -2766,13 +2874,15 @@ CPU.prototype.load_multiboot_option_rom = function(buffer, initrd, cmdline)
                     }
                 }
                 dbg_assert (!was_memory, "top of 4GB shouldn't have memory");
-                if(cpu.memory_size[0] > cpu.low_memory_size)
+                // relocated and extended RAM
+                const high = cpu.memory_size[0] - cpu.low_memory_size + cpu.extended_pages * 4096;
+                if(high)
                 {
                     cpu.write32(multiboot_data, 20);
                     cpu.write32(multiboot_data + 4, 0); // addr = 4 GiB
                     cpu.write32(multiboot_data + 8, 1);
-                    cpu.write32(multiboot_data + 12, cpu.memory_size[0] - cpu.low_memory_size);
-                    cpu.write32(multiboot_data + 16, 0);
+                    cpu.write32(multiboot_data + 12, high >>> 0);
+                    cpu.write32(multiboot_data + 16, Math.floor(high / 0x100000000));
                     cpu.write32(multiboot_data + 20, 1);
                     multiboot_data += 24;
                     multiboot_mmap_count += 24;
@@ -3030,7 +3140,8 @@ CPU.prototype.fill_cmos = function(rtc, settings)
     rtc.cmos_write(CMOS_MEM_BASE_HIGH, 640 >> 8);
 
     const low_memory = this.low_memory_size;
-    const high_memory = this.memory_size[0] - low_memory;
+    // (above 4 GiB: relocated RAM, then extended RAM)
+    const high_memory = this.memory_size[0] - low_memory + this.extended_pages * 4096;
     var memory_above_1m = 0; // in k
     if(low_memory >= 1024 * 1024)
     {
@@ -3053,9 +3164,9 @@ CPU.prototype.fill_cmos = function(rtc, settings)
     rtc.cmos_write(CMOS_MEM_EXTMEM2_HIGH, memory_above_16m >> 8 & 0xFF);
 
     // memory above 4G, in 64k blocks (high_memory_size relocates it there)
-    rtc.cmos_write(CMOS_MEM_HIGHMEM_LOW, high_memory >>> 16 & 0xFF);
-    rtc.cmos_write(CMOS_MEM_HIGHMEM_MID, high_memory >>> 24 & 0xFF);
-    rtc.cmos_write(CMOS_MEM_HIGHMEM_HIGH, 0);
+    rtc.cmos_write(CMOS_MEM_HIGHMEM_LOW, Math.floor(high_memory / 0x10000) & 0xFF);
+    rtc.cmos_write(CMOS_MEM_HIGHMEM_MID, Math.floor(high_memory / 0x1000000) & 0xFF);
+    rtc.cmos_write(CMOS_MEM_HIGHMEM_HIGH, Math.floor(high_memory / 0x100000000) & 0xFF);
 
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 

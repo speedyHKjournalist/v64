@@ -25,7 +25,9 @@ static mut X64_TLBS: [Tlb; 8] = [const { Tlb::new() }; 8];
 /// instruction runs again from its saved registers.
 #[derive(Clone, Copy)]
 struct LockedOperand { address: u64, size: usize, backing: u32, old: u128 }
-struct Locked { operand: Option<LockedOperand>, conflict: bool }
+/// (`extended`: the operand is in extended RAM, whose lock the instruction
+/// holds until it ends, crate::x64::extended)
+struct Locked { operand: Option<LockedOperand>, conflict: bool, extended: bool }
 static mut LOCKED: Option<Locked> = None;
 
 pub unsafe fn run_locked(mut instruction: impl FnMut() -> Result<(), Fault>) -> Result<(), Fault> {
@@ -33,9 +35,13 @@ pub unsafe fn run_locked(mut instruction: impl FnMut() -> Result<(), Fault>) -> 
     {
         let saved = crate::parallel::Registers::save();
         loop {
-            LOCKED = Some(Locked { operand: None, conflict: false });
+            LOCKED = Some(Locked { operand: None, conflict: false, extended: false });
             let result = instruction();
-            let conflict = (*(&raw mut LOCKED)).take().is_some_and(|locked| locked.conflict);
+            let locked = (*(&raw mut LOCKED)).take();
+            if locked.as_ref().is_some_and(|locked| locked.extended) {
+                super::extended::unlock();
+            }
+            let conflict = locked.is_some_and(|locked| locked.conflict);
             if !conflict || result.is_err() {
                 return result;
             }
@@ -55,6 +61,11 @@ unsafe fn locked_read(address: u64, size: usize, stack: bool) -> Result<Option<u
     // (a locked operand is checked for writing before it is read)
     let span = preflight(address, size, Access::Write, stack, false)?;
     let Some(backing) = (if span.contiguous() { physical::ram_backing(span.first, size) } else { None }) else {
+        // in extended RAM, the instruction is atomic under that module's lock
+        if !locked.extended && super::extended::contains(span.first) {
+            super::extended::begin_locked_operand();
+            locked.extended = true;
+        }
         return Ok(None);
     };
     let old = match size {

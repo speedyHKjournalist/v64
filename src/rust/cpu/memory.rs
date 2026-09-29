@@ -101,7 +101,20 @@ fn mapped_width(addr: u32, bytes: u32) -> bool {
 #[inline]
 fn touches_low_hole(addr: u32, bytes: u32) -> bool {
     low_ram_hole(addr) || low_ram_hole(addr.wrapping_add(bytes - 1))
+        // (and the extended RAM aperture: accessed byte by byte, or by aligned dwords)
+        || aperture::contains(addr) || aperture::contains(addr.wrapping_add(bytes - 1))
 }
+
+use crate::x64::extended::aperture;
+// Extended RAM through the aperture (crate::x64::extended), in long mode only;
+// elsewhere the range reads as open bus
+fn aperture_read8(addr: u32) -> i32 {
+    unsafe { if long_mode() { aperture::read8(addr).map_or(0xFF, |v| v as i32) } else { 0xFF } }
+}
+fn aperture_write8(addr: u32, value: i32) {
+    unsafe { if long_mode() { aperture::write8(addr, value as u8); } }
+}
+unsafe fn long_mode() -> bool { crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 }
 
 pub const VGA_LFB_ADDRESS: u32 = 0xE0000000;
 pub fn in_svga_lfb(addr: u32) -> bool {
@@ -121,6 +134,8 @@ fn read8_mapped(addr: u32) -> i32 {
     {
         if low_ram_hole(addr) {
             0xFF
+        } else if aperture::contains(addr) {
+            aperture_read8(addr)
         } else if in_svga_lfb(addr) {
             unsafe { *vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as i32 }
         } else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
@@ -170,6 +185,9 @@ pub fn read32s(addr: u32) -> i32 {
 #[inline(never)]
 fn read32s_mapped(addr: u32) -> i32 {
     {
+        if aperture::contains(addr) && addr & 3 == 0 && unsafe { long_mode() } {
+            return unsafe { aperture::read32(addr) }.map_or(-1, |v| v as i32);
+        }
         if addr & 4095 > 4092 || touches_low_hole(addr, 4) {
             read8(addr)
                 | read8(addr.wrapping_add(1)) << 8
@@ -378,6 +396,10 @@ pub unsafe fn mmap_write8(addr: u32, value: i32) {
     if low_ram_hole(addr) {
         return;
     }
+    if aperture::contains(addr) {
+        aperture_write8(addr, value);
+        return;
+    }
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         *vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) = value as u8
@@ -402,6 +424,10 @@ pub unsafe fn mmap_write16(addr: u32, value: i32) {
     }
 }
 pub unsafe fn mmap_write32(addr: u32, value: i32) {
+    if aperture::contains(addr) && addr & 3 == 0 && long_mode() {
+        aperture::write32(addr, value as u32);
+        return;
+    }
     if addr & 4095 > 4092 || touches_low_hole(addr, 4) {
         for index in 0..4 {
             write8(addr.wrapping_add(index), value >> (index * 8) & 0xFF);

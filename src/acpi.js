@@ -28,7 +28,7 @@ export const ACPI_SCI_SOURCE = 0x100;
 const PCI_PMBA = 0x40; // PM base address, bits 15:6; bit 0 reads as 1 (I/O space)
 const PCI_PMREGMISC = 0x80; // bit 0: PM I/O space enable
 
-const PM_TIMER_TICKS_PER_MS = 3579545 / 1000;
+export const PM_TIMER_TICKS_PER_MS = 3579545 / 1000;
 // TMR_STS is set whenever bit 23 of the 24-bit timer changes
 const PM_TIMER_STATUS_PERIOD = 1 << 23;
 
@@ -152,6 +152,18 @@ export function ACPI(cpu, bus)
     this.timer_offset = -Math.floor(this.clock() * PM_TIMER_TICKS_PER_MS);
     this.timer_period = 0;
 
+    /**
+     * Where vCPU workers read the PM timer themselves (src/parallel):
+     * the PM base, the timer offset and the timer's maximum so far, shared
+     * by every thread (share_timer)
+     * @type {Int32Array}
+     */
+    this.shared_base = null;
+    /** @type {Float64Array} */
+    this.shared_offset = null;
+    /** @type {BigInt64Array} */
+    this.shared_last = null;
+
     const io = cpu.io;
     this.reset_pm_config();
     this.register_block(io, ACPI_GPE0_BASE, ACPI_GPE0_LENGTH, this.gpe_read, this.gpe_write);
@@ -221,6 +233,7 @@ ACPI.prototype.update_pm_decode = function()
 
     dbg_log("ACPI PM block " + (base === -1 ? "disabled" : "at " + h(base, 4)), LOG_ACPI);
     this.pm_base = base;
+    this.publish_timer();
 
     if(base !== -1)
     {
@@ -535,13 +548,62 @@ ACPI.prototype.timer_ticks = function(now)
 {
     const ticks = Math.floor(now * PM_TIMER_TICKS_PER_MS) + this.timer_offset;
 
-    if(ticks > this.timer_last)
+    if(this.shared_last)
+    {
+        // vCPU workers read the timer too: one maximum for every thread
+        this.timer_last = pm_timer_shared_max(this.shared_last, ticks);
+    }
+    else if(ticks > this.timer_last)
     {
         this.timer_last = ticks;
     }
 
     return this.timer_last;
 };
+
+/**
+ * Let vCPU workers read the PM timer (port PM base + 8, 32 bits) without
+ * asking this thread: where the block is, the timer offset and a maximum
+ * all threads share (src/parallel/vcpu.js computes the same ticks from the
+ * shared machine clock). Status bits and every other register stay here.
+ * @param {!Int32Array} base one word: the PM base, or -1
+ * @param {!Float64Array} offset one number: timer_offset
+ * @param {!BigInt64Array} last one number: the largest value read
+ */
+ACPI.prototype.share_timer = function(base, offset, last)
+{
+    this.shared_base = base;
+    this.shared_offset = offset;
+    this.shared_last = last;
+    Atomics.store(last, 0, /** @type {?} */ (BigInt(this.timer_last)));
+    this.publish_timer();
+};
+
+ACPI.prototype.publish_timer = function()
+{
+    if(!this.shared_base) return;
+    this.shared_offset[0] = this.timer_offset;
+    Atomics.store(this.shared_base, 0, this.pm_base);
+};
+
+/**
+ * Raise the shared maximum to `ticks` unless it is larger already
+ * @param {!BigInt64Array} last
+ * @param {number} ticks
+ * @return {number} the maximum
+ */
+export function pm_timer_shared_max(last, ticks)
+{
+    const value = BigInt(ticks);
+    let seen = Atomics.load(last, 0);
+    while(value > seen)
+    {
+        const previous = Atomics.compareExchange(last, 0, seen, /** @type {?} */ (value));
+        if(previous === seen) return ticks;
+        seen = previous;
+    }
+    return Number(seen);
+}
 
 ACPI.prototype.update_timer_status = function(ticks)
 {
@@ -627,6 +689,8 @@ ACPI.prototype.set_state = function(state)
 
     this.timer_offset = ticks - Math.floor(this.clock() * PM_TIMER_TICKS_PER_MS);
     this.timer_last = ticks;
+    if(this.shared_last) Atomics.store(this.shared_last, 0, /** @type {?} */ (BigInt(ticks)));
+    this.publish_timer();
     if(state[4] === undefined)
     {
         this.timer_period = Math.floor(ticks / PM_TIMER_STATUS_PERIOD);

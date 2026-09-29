@@ -1932,17 +1932,7 @@ pub(super) fn tier(entry: super::entry::CpuEntryKey) -> u32 {
 /// little for their acknowledgements, else the publication fails and the
 /// code is compiled again later, when they have.
 fn job_published(job: &Job) -> bool {
-    let pages = || job.artifact.dependencies.iter().map(|d| Page::page_of(d.page.0));
-    if jit::pages_published(pages()) {
-        return true;
-    }
-    let deadline = unsafe { crate::cpu::cpu::js::microtick() } + 0.5;
-    while unsafe { crate::cpu::cpu::js::microtick() } < deadline {
-        if jit::pages_published(pages()) {
-            return true;
-        }
-    }
-    false
+    jit::wait_pages_published(job.artifact.dependencies.iter().map(|d| Page::page_of(d.page.0)), 0.5)
 }
 
 /// Pending/validated results have not completed the publication transaction.

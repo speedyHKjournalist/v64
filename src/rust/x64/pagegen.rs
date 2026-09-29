@@ -142,6 +142,10 @@ enum Op {
     Vmove { bits: u8, dst: Xmm, src: Xmm, aligned: bool, zero: bool },
     /// 128-bit AND ANDN OR XOR (PS/PD/integer forms); memory is aligned.
     Vlogic { code: u8, dst: u8, src: Xmm },
+    /// ADD MUL SUB DIV (`code` 0x58 0x59 0x5C 0x5E) of single or double
+    /// precision lanes: packed (memory aligned) or scalar (the low lane;
+    /// the others keep their bits). See Emitter::vfp for when it runs natively.
+    Vfp { code: u8, double: bool, packed: bool, dst: u8, src: Xmm },
     /// MOVD/MOVQ xmm, r/m32/64 (upper bits cleared)
     MovdIn { width: u8, dst: u8, src: Opnd },
     /// MOVD/MOVQ r/m32/64, xmm
@@ -428,6 +432,13 @@ fn sse(d: &Decoded) -> Option<Op> {
         0x0F55 | 0x660F55 | 0x660FDF => Op::Vlogic { code: 1, dst: register, src: xmm_rm()? },
         0x0F56 | 0x660F56 | 0x660FEB => Op::Vlogic { code: 2, dst: register, src: xmm_rm()? },
         0x0F57 | 0x660F57 | 0x660FEF => Op::Vlogic { code: 3, dst: register, src: xmm_rm()? },
+        // ADDPS/PD/SS/SD MULx SUBx DIVx
+        0x0F58 | 0x0F59 | 0x0F5C | 0x0F5E | 0x660F58 | 0x660F59 | 0x660F5C | 0x660F5E | 0xF30F58 | 0xF30F59 | 0xF30F5C
+        | 0xF30F5E | 0xF20F58 | 0xF20F59 | 0xF20F5C | 0xF20F5E => {
+            let prefix = d.opcode >> 16;
+            Op::Vfp { code: d.opcode as u8, double: prefix == 0x66 || prefix == 0xF2, packed: prefix == 0 || prefix == 0x66,
+                dst: register, src: xmm_rm()? }
+        },
         _ => return None,
     })
 }
@@ -793,7 +804,10 @@ const TC: usize = 27;
 const TX: usize = 28;
 /// linear address of the page
 const BASE: usize = 29;
-const LOCALS64: usize = 30;
+/// results of the two halves of an SSE floating point operation (vfp)
+const FP0: usize = 30;
+const FP1: usize = 31;
+const LOCALS64: usize = 32;
 // i32 locals
 const FL: usize = 0;
 const N: usize = 1;
@@ -2486,6 +2500,7 @@ impl Emitter {
                     self.b.store_aligned_i64(0);
                 }
             },
+            Op::Vfp { code, double, packed, dst, src } => self.vfp(inst, start, code, double, packed, dst, src),
             Op::MovdIn { width, dst, src } => {
                 self.sse_check(start);
                 self.read(src, width, inst);
@@ -2618,6 +2633,184 @@ impl Emitter {
         self.leave_to(self.f().retry, start);
         self.b.block_end();
     }
+    /// SSE ADD/MUL/SUB/DIV natively when the result is exactly what the
+    /// interpreter (SoftFloat, crate::x64::vector) produces without changing
+    /// MXCSR: round to nearest, every exception masked, no FTZ/DAZ, and PE
+    /// already set (so an inexact result changes nothing); operands finite
+    /// and normal or zero; a divisor that is not zero; and a result that is
+    /// normal above the smallest binade (no underflow, whichever way
+    /// tininess is detected) or an exact zero. Otherwise the instruction is
+    /// retried in the interpreter; no lane is written before all passed.
+    fn vfp(&mut self, inst: &Inst, start: u64, code: u8, double: bool, packed: bool, dst: u8, src: Xmm) {
+        self.sse_check(start);
+        self.b.load_fixed_i32(gp::mxcsr as u32);
+        self.c32(0xFFE0);
+        self.b.and_i32();
+        self.c32(0x1FA0);
+        self.b.ne_i32();
+        self.b.if_void();
+        self.leave_to(self.f().retry, start);
+        self.b.block_end();
+        let bits = if packed { 128 } else if double { 64 } else { 32 };
+        if let Xmm::Mem(a) = src {
+            self.vector_address(&a, bits, packed, false, inst);
+        }
+        self.c32(0);
+        self.si(COND);
+        for half in 0..if packed { 2 } else { 1 } {
+            self.xmm_load(dst, half * 8, 64);
+            self.s(TV);
+            match src {
+                Xmm::Reg(s) => self.xmm_load(s, half * 8, 64),
+                Xmm::Mem(_) => {
+                    self.gi(HOST);
+                    self.load_bits(bits.min(64), half * 8);
+                },
+            }
+            self.s(TC);
+            let out = if half == 0 { FP0 } else { FP1 };
+            if double {
+                self.g(TV);
+                self.s(TA);
+                self.g(TC);
+                self.s(TB);
+                self.fp_lane(code, true);
+                self.g(TR);
+                self.s(out);
+                continue;
+            }
+            for lane in 0..if packed { 2 } else { 1 } {
+                for (from, to) in [(TV, TA), (TC, TB)] {
+                    self.g(from);
+                    if lane == 1 {
+                        self.c64(32);
+                        self.b.shr_u_i64();
+                    }
+                    self.c64(0xFFFF_FFFF);
+                    self.b.and_i64();
+                    self.s(to);
+                }
+                self.fp_lane(code, false);
+                if lane == 0 {
+                    self.g(TR);
+                }
+                else {
+                    self.g(out);
+                    self.g(TR);
+                    self.c64(32);
+                    self.b.shl_i64();
+                    self.b.or_i64();
+                }
+                self.s(out);
+            }
+        }
+        self.gi(COND);
+        self.b.if_void();
+        self.leave_to(self.f().retry, start);
+        self.b.block_end();
+        self.g(FP0);
+        self.xmm_store(dst, 0, if packed || double { 64 } else { 32 }, true);
+        if packed {
+            self.g(FP1);
+            self.xmm_store(dst, 8, 64, false);
+        }
+    }
+    /// One lane of vfp: operand bit patterns in TA and TB (zero-extended in
+    /// single precision), the result's into TR; refusals or'ed into COND
+    fn fp_lane(&mut self, code: u8, double: bool) {
+        let (shift, max, magnitude) = if double { (52, 0x7FF, 0x7FFF_FFFF_FFFF_FFFF) } else { (23, 0xFF, 0x7FFF_FFFF) };
+        let zero = |e: &mut Self, x: usize| {
+            e.g(x);
+            e.c64(magnitude);
+            e.b.and_i64();
+            e.b.op(op::OP_I64EQZ);
+        };
+        let exponent = |e: &mut Self, x: usize| {
+            e.g(x);
+            e.c64(shift);
+            e.b.shr_u_i64();
+            e.c64(max);
+            e.b.and_i64();
+            e.s(TX);
+        };
+        // operands: no NaN or infinity (exponent all ones), no denormal
+        for x in [TA, TB] {
+            exponent(self, x);
+            self.g(TX);
+            self.c64(max);
+            self.b.eq_i64();
+            self.g(TX);
+            self.b.op(op::OP_I64EQZ);
+            zero(self, x);
+            self.b.eqz_i32();
+            self.b.and_i32();
+            self.b.or_i32();
+            self.fp_refuse();
+        }
+        if code == 0x5E {
+            // a zero divisor: #Z, or #I for 0/0
+            zero(self, TB);
+            self.fp_refuse();
+        }
+        for x in [TA, TB] {
+            self.g(x);
+            if double {
+                self.b.reinterpret_i64_as_f64();
+            }
+            else {
+                self.b.wrap_i64_to_i32();
+                self.b.reinterpret_i32_as_f32();
+            }
+        }
+        let operation = match code { 0x58 => 0, 0x5C => 1, 0x59 => 2, _ => 3 };
+        if double {
+            self.b.arithmetic_f64(operation);
+            self.b.reinterpret_f64_as_i64();
+        }
+        else {
+            self.b.arithmetic_f32(operation);
+            self.b.reinterpret_f32_as_i32();
+            self.b.extend_unsigned_i32_to_i64();
+        }
+        self.s(TR);
+        // the result: its exponent 0 or 1 (possible underflow) or all ones
+        // (overflow) is refused, unless it is an exact zero
+        exponent(self, TR);
+        self.g(TX);
+        self.c64(!1);
+        self.b.and_i64();
+        self.b.op(op::OP_I64EQZ);
+        self.g(TX);
+        self.c64(max);
+        self.b.eq_i64();
+        self.b.or_i32();
+        zero(self, TR);
+        match code {
+            // a zero sum or difference of finite normal operands is exact
+            0x58 | 0x5C => {},
+            // a zero product is exact only with a zero factor
+            0x59 => {
+                zero(self, TA);
+                zero(self, TB);
+                self.b.or_i32();
+                self.b.and_i32();
+            },
+            // a zero quotient only with a zero dividend
+            _ => {
+                zero(self, TA);
+                self.b.and_i32();
+            },
+        }
+        self.b.eqz_i32();
+        self.b.and_i32();
+        self.fp_refuse();
+    }
+    fn fp_refuse(&mut self) {
+        self.gi(COND);
+        self.b.or_i32();
+        self.si(COND);
+    }
+
     /// Push the low `bits` (32 or 64) at byte `offset` of XMM register `n`.
     fn xmm_load(&mut self, n: u8, offset: u32, bits: u8) {
         self.c32((Self::xmm(n) + offset) as i32);

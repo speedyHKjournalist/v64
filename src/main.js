@@ -31,6 +31,7 @@ export function v86(bus, wasm)
 v86.prototype.run = function()
 {
     if(this.state_busy) { this.state_busy.resume = true; return; }
+    if(this.cpu.parallel?.failure) return;   // a vCPU failed: the machine cannot go on
     this.stopping = false;
     this.cpu.clock.resume();
 
@@ -63,6 +64,17 @@ v86.prototype.do_tick = function()
 
     this.idle = false;
     const t = this.cpu.run_cores();
+
+    const failure = this.cpu.parallel?.failure;
+    if(failure)
+    {
+        // a vCPU worker failed (src/parallel/machine.js)
+        this.cpu.clock.pause();
+        this.stopping = this.running = false;
+        this.bus.send("emulator-stopped");
+        this.bus.send("emulator-error", failure);
+        return;
+    }
 
     if(this.cpu.devices?.acpi?.soft_off)
     {

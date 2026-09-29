@@ -398,6 +398,21 @@ export interface V86Options {
     high_memory_size?: number;
 
     /**
+     * Experimental: guest RAM beyond memory_size (a multiple of 2 MiB), at
+     * guest physical 4 GiB + high_memory_size, so that the total can exceed
+     * what fits in the emulator's 32-bit WebAssembly memory. Its pages are
+     * kept in host ArrayBuffers and cached in extended_memory_cache bytes of
+     * the WebAssembly heap: slower than memory_size, and code in it is
+     * interpreted. Only a 64-bit guest (experimental_x64) can address it.
+     * Snapshots of it need save_state_stream. Fails at startup when the host
+     * cannot allocate it.
+     * @default 0
+     */
+    extended_memory_size?: number;
+    /** Testing option: bytes of the WebAssembly heap that cache extended RAM (default 512 MiB). */
+    extended_memory_cache?: number;
+
+    /**
      * VGA memory size in bytes.
      * @example 8 * 1024 * 1024
      * @default 8 * 1024 * 1024

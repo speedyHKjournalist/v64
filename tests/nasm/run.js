@@ -54,6 +54,91 @@ const FPU_TAG_ALL_INVALID = 0xAAAA;
 const FPU_STATUS_MASK = 0xFFFF & ~(1 << 9 | 1 << 5 | 1 << 3 | 1 << 1); // bits that are not correctly implemented by v86
 const FP_COMPARISON_SIGNIFICANT_DIGITS = 7;
 
+const CF = 1, PF = 1 << 2, AF = 1 << 4, ZF = 1 << 6, SF = 1 << 7, OF = 1 << 11;
+const FPU_IE = 1, FPU_SF = 1 << 6, FPU_C0 = 1 << 8, FPU_C1 = 1 << 9, FPU_C3 = 1 << 14;
+
+// Where QEMU TCG differs from hardware. Used only for fixtures from
+// qemu_oracle.js (hosts without gdb, "Reference: QEMU" in the fixture): a
+// difference a rule covers is not a failure, and the summary counts each
+// rule's uses. `tests` limits a rule to test names, `when` to the state seen,
+// `covers` says which differences it explains.
+const flags_only = mask => f => f.name === "eflags" && ((f.actual ^ f.expected) & ~mask) === 0;
+const QEMU_DEVIATIONS = [
+    {
+        // v86 saw an x87 stack under- or overflow (FSW.SF): hardware returns the
+        // indefinite NaN, sets IE/SF and makes compares unordered; QEMU does not
+        // look at the tag word and computes with the stale register contents
+        name: "x87 stack fault (QEMU ignores empty registers)",
+        when: seen => (seen.fpu_status & FPU_SF) !== 0,
+        covers: f => /^st\d$|^fpu status word$/.test(f.name),
+    },
+    {
+        // and the ZF/PF/CF of FCOMI/FUCOMI(P) that come from such a compare
+        name: "x87 stack fault in FCOMI/FUCOMI",
+        tests: /^gen_d[bf]_[56]_/,
+        when: seen => (seen.fpu_status & FPU_SF) !== 0,
+        covers: flags_only(ZF | PF | CF | OF | SF | AF),
+    },
+    {
+        // SDM: FCOMI/FUCOMI(P) clear OF, SF and AF; QEMU leaves them
+        name: "FCOMI/FUCOMI clear OF, SF, AF",
+        tests: /^gen_d[bf]_[56]_/,
+        covers: f => flags_only(OF | SF | AF)(f) && (f.actual & (OF | SF | AF)) === 0,
+    },
+    {
+        // SDM: OF, SF, AF and PF are undefined after BT/BTS/BTR/BTC
+        name: "BT/BTS/BTR/BTC undefined flags",
+        tests: /^gen_0f(a3|ab|b3|bb|ba_[4-7])_/,
+        covers: flags_only(OF | SF | AF | PF),
+    },
+    {
+        // SDM: MOVLPD, MOVHPD, MOVNTQ and MOVNTDQ have memory forms only
+        // (register forms raise #UD); QEMU executes the register forms
+        name: "#UD for register forms of MOVLPD/MOVHPD/MOVNTQ/MOVNTDQ",
+        tests: /^gen_(660f12|660f16|0fe7|660fe7)_/,
+        when: (seen, fixture) => seen.exception === "UD" && !fixture.exception,
+        covers: () => true,
+    },
+    {
+        // hardware (the gdb fixtures these tests were written against) executes
+        // CMPXCHG8B with an operand-size prefix and F6/F7 /1 (TEST); QEMU raises #UD
+        name: "66 CMPXCHG8B and F6/F7 /1 execute",
+        tests: /^gen_(0fc7_1|f6_1|f7_1)_/,
+        when: (seen, fixture) => !seen.exception && fixture.exception === "UD",
+        covers: () => true,
+    },
+    {
+        // the reserved upper words of the 32-bit FSAVE/FSTENV image: 0xFFFF on
+        // hardware (and v86), 0 from QEMU
+        name: "FSAVE/FSTENV reserved words",
+        tests: /fsave|fstenv/,
+        covers: f => f.name.startsWith("mem[") && f.actual >>> 16 === 0xFFFF && f.expected >>> 16 === 0 &&
+            ((f.actual ^ f.expected) & 0xFFFF) === 0,
+    },
+    {
+        // SDM: FYL2XP1 outside |x| < 1 - sqrt(2)/2 has an undefined result, no
+        // exception; QEMU sets IE
+        name: "FYL2XP1 outside its domain",
+        tests: /^fyl2xp1$/,
+        covers: f => f.name === "fpu status word" && (f.actual ^ f.expected) === FPU_IE,
+    },
+    {
+        // FPREM/FPREM1 of 0 by 0 (invalid): QEMU clears C3/C1/C0, Bochs and v86
+        // keep the codes of the previous FPREM; the SDM does not say and there
+        // is no hardware reference yet
+        name: "FPREM condition codes after an invalid operation (unverified)",
+        tests: /^fprem1?$/,
+        covers: f => f.name === "fpu status word" && ((f.actual ^ f.expected) & ~(FPU_C0 | FPU_C1 | FPU_C3)) === 0,
+    },
+];
+
+/** The rule that explains a difference, if any */
+function qemu_deviation(test_name, failure, seen, fixture)
+{
+    return QEMU_DEVIATIONS.find(rule =>
+        (!rule.tests || rule.tests.test(test_name)) && (!rule.when || rule.when(seen, fixture)) && rule.covers(failure));
+}
+
 function float_equal(x, y)
 {
     assert(typeof x === "number");
@@ -134,6 +219,7 @@ if(cluster.isMaster)
         return {
             array: array,
             exception,
+            qemu: fixture_text.startsWith("Reference: QEMU"),
         };
     }
 
@@ -193,6 +279,7 @@ if(cluster.isMaster)
     let current_test = 0;
 
     let failed_tests = [];
+    const qemu_deviations = {};
     let finished_workers = 0;
 
     for(let i = 0; i < nr_of_cpus; i++)
@@ -201,7 +288,12 @@ if(cluster.isMaster)
 
         worker.on("message", function(message) {
             if(message !== DONE_MSG && message !== READY_MSG) {
-                failed_tests.push(message);
+                for(const name of message.deviations || [])
+                {
+                    qemu_deviations[name] = qemu_deviations[name] || new Set();
+                    qemu_deviations[name].add(message.img_name);
+                }
+                if(message.failures.length) failed_tests.push(message);
             }
             send_work_to_worker(this);
         });
@@ -226,6 +318,16 @@ if(cluster.isMaster)
             tests.length - failed_tests.length,
             tests.length
         );
+        const qemu_fixtures = tests.filter(t => t.fixture.qemu).length;
+        if(qemu_fixtures)
+        {
+            console.log("[~] %d fixture(s) from QEMU; known QEMU deviations (tests/nasm/run.js QEMU_DEVIATIONS):", qemu_fixtures);
+            for(const rule of QEMU_DEVIATIONS)
+            {
+                const seen = qemu_deviations[rule.name];
+                if(seen) console.log("    %s: %d test(s), e.g. %s", rule.name, seen.size, [...seen].slice(0, 3).join(" "));
+            }
+        }
         if(failed_tests.length > 0) {
             console.log("[-] Failed %d test(s).", failed_tests.length);
             failed_tests.forEach(function(test_failure) {
@@ -282,6 +384,8 @@ else {
         autostart: false,
         memory_size: 2 * 1024 * 1024,
         disable_jit: +process.env.DISABLE_JIT,
+        // the references are hardware results: exact x87 arithmetic and flags
+        x87_fast_math: false,
         ...FORCE_JIT ? { ir_region_budget: { hot_threshold: 1, promotion_threshold: 1 } } : {},
         log_level: 0,
     });
@@ -485,6 +589,18 @@ else {
             });
         }
 
+        const deviations = new Set();
+        if(current_test.fixture.qemu)
+        {
+            const seen = { exception: seen_exception, fpu_status: cpu.fpu_load_status_word() };
+            const test_name = current_test.img_name.replace(/\.img$/, "");
+            individual_failures = individual_failures.filter(failure => {
+                const rule = qemu_deviation(test_name, failure, seen, current_test.fixture);
+                if(rule) deviations.add(rule.name);
+                return !rule;
+            });
+        }
+
         individual_failures = individual_failures.map(({ name, actual, expected }) => {
             return {
                 name,
@@ -495,9 +611,10 @@ else {
 
         recorded_exceptions = [];
 
-        if(individual_failures.length > 0) {
+        if(individual_failures.length > 0 || deviations.size) {
             process.send({
                 failures: individual_failures,
+                deviations: [...deviations],
                 img_name: current_test.img_name
             });
         }

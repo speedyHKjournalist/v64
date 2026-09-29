@@ -1,0 +1,24 @@
+booted with 4 cores in 6 s
+0.9 min: {"iterations":5,"stops":15,"snapshots":5,"sleeps":5,"aborted_suspends":0} uptime 51s worker steps 686769944/784338010/628130968
+1.9 min: {"iterations":10,"stops":30,"snapshots":10,"sleeps":10,"aborted_suspends":0} uptime 109s worker steps 1396835123/1446204302/1300209140
+2.9 min: {"iterations":15,"stops":45,"snapshots":15,"sleeps":15,"aborted_suspends":0} uptime 169s worker steps 2106765623/2171587668/2006296179
+3.9 min: {"iterations":20,"stops":60,"snapshots":20,"sleeps":20,"aborted_suspends":0} uptime 233s worker steps 2897862084/2872932578/2716920827
+4.9 min: {"iterations":25,"stops":75,"snapshots":25,"sleeps":25,"aborted_suspends":0} uptime 288s worker steps 3525979107/3644964959/3412646373
+6.0 min: {"iterations":30,"stops":90,"snapshots":30,"sleeps":30,"aborted_suspends":0} uptime 358s worker steps 4222204694/112158541/4181889213
+7.1 min: {"iterations":35,"stops":105,"snapshots":35,"sleeps":35,"aborted_suspends":0} uptime 422s worker steps 593829283/839205812/619858728
+8.1 min: {"iterations":40,"stops":120,"snapshots":40,"sleeps":40,"aborted_suspends":0} uptime 482s worker steps 1325934595/1522371347/1279886127
+9.0 min: {"iterations":45,"stops":135,"snapshots":45,"sleeps":45,"aborted_suspends":0} uptime 536s worker steps 2079656392/2209543009/2043002772
+10.0 min: {"iterations":50,"stops":150,"snapshots":50,"sleeps":50,"aborted_suspends":0} uptime 594s worker steps 2701393272/2956226835/2764038257
+11.1 min: {"iterations":55,"stops":165,"snapshots":55,"sleeps":55,"aborted_suspends":0} uptime 659s worker steps 3428410188/3896420294/3446901997
+12.0 min: {"iterations":60,"stops":180,"snapshots":60,"sleeps":60,"aborted_suspends":0} uptime 715s worker steps 4128508615/379445485/4182728228
+13.1 min: {"iterations":65,"stops":195,"snapshots":65,"sleeps":65,"aborted_suspends":0} uptime 777s worker steps 414926270/1144207905/602868148
+14.1 min: {"iterations":70,"stops":210,"snapshots":70,"sleeps":70,"aborted_suspends":0} uptime 840s worker steps 1138737269/1938778237/1388646364
+15.0 min: {"iterations":75,"stops":225,"snapshots":75,"sleeps":75,"aborted_suspends":0} uptime 894s worker steps 1906616769/2643507670/2111246911
+15.9 min: {"iterations":80,"stops":240,"snapshots":80,"sleeps":80,"aborted_suspends":0} uptime 946s worker steps 2580549506/3378584865/2832672843
+16.8 min: {"iterations":85,"stops":255,"snapshots":85,"sleeps":85,"aborted_suspends":0} uptime 997s worker steps 3335780460/4067061772/3585365686
+17.7 min: {"iterations":90,"stops":270,"snapshots":90,"sleeps":90,"aborted_suspends":0} uptime 1055s worker steps 4049609395/466177510/24400594
+18.7 min: {"iterations":95,"stops":285,"snapshots":95,"sleeps":95,"aborted_suspends":0} uptime 1114s worker steps 539727718/1197821293/764432458
+19.9 min: {"iterations":100,"stops":300,"snapshots":100,"sleeps":100,"aborted_suspends":0} uptime 1183s worker steps 1270234266/2016582106/1439498547
+20.2 min: {"iterations":101,"stops":303,"snapshots":101,"sleeps":101,"aborted_suspends":0} uptime 1198s worker steps 1379926488/2189636578/1583542776
+SOAK_PASS 20 min {"iterations":101,"stops":303,"snapshots":101,"sleeps":101,"aborted_suspends":0}
+exit 0

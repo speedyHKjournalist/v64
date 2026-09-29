@@ -82,6 +82,18 @@ static mut IOAPIC: Ioapic = IOAPIC_RESET;
 static mut IOAPIC_LOCK: crate::parallel::SpinLock = crate::parallel::SpinLock::new();
 #[cfg(feature = "parallel")]
 struct IoapicGuard;
+/// The lock guarding the machine's IOAPIC (see crate::parallel::parallel_fail)
+pub fn lock() -> &'static crate::parallel::SpinLock {
+    #[cfg(feature = "parallel")]
+    {
+        unsafe { &*crate::parallel::machine(&raw mut IOAPIC_LOCK) }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        static UNUSED: crate::parallel::SpinLock = crate::parallel::SpinLock::new();
+        &UNUSED
+    }
+}
 #[cfg(feature = "parallel")]
 impl std::ops::Deref for IoapicGuard {
     type Target = Ioapic;

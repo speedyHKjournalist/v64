@@ -100,9 +100,11 @@ CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature
 
 # Host-parallel build (W0/W1): atomics in v86's own code (the prebuilt std stays
 # single-threaded, each vCPU worker has a private relocated copy of it), the
-# memory imported and later marked shared by tools/parallel_wasm.mjs
+# memory imported and later marked shared by tools/parallel_wasm.mjs. Linked
+# at 32 KiB (the later --global-base wins): below it are the CPU state blocks
+# of the machine and of up to 7 vCPU workers (src/parallel/relocate.js)
 CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
-		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296"
+		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296 --global-base=32768"
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
@@ -110,7 +112,7 @@ CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.j
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   v86gl_pci.js \
 	   bus.js log.js cpu.js \
-	   elf.js kernel.js \
+	   elf.js kernel.js extended_memory.js \
 	   parallel/relocate.js parallel/control.js parallel/machine.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
@@ -683,6 +685,80 @@ multicore-os-stress-tests-release: build/libv86.mjs build/v86.wasm images/linux4
 
 .PHONY: multicore-clock-tests multicore-clock-tests-release multicore-coherence-tests multicore-coherence-tests-release
 
+# W0/W1 (docs/acpi-x86-64-multicore-plan.zh-CN.md): the relocatable build under
+# the cooperative suites, relocated instances in one memory, then cores in vCPU
+# workers: litmus/IPI wake-ups, lifecycle and failures, Linux boot, the C3 OS
+# stress matrix and ACPI S3/S4 cycles
+PARALLEL_ABI_SUITES=tests/smp/ap_startup.mjs tests/smp/core_swap.mjs tests/smp/apic_routing.mjs tests/smp/lifecycle.mjs \
+	tests/smp/scheduler.mjs tests/smp/coherence.mjs tests/smp/atomic_boundaries.mjs tests/smp/memory_order.mjs \
+	tests/smp/exception_lifecycle.mjs tests/smp/topology.mjs tests/x64/multicore.mjs
+multicore-parallel-tests: build/v86-parallel.wasm build/smp/core_swap.bin build/smp/ap_startup.bin images/linux4.iso
+	node tests/parallel/relocation.mjs
+	for t in $(PARALLEL_ABI_SUITES); do V86_WASM=build/v86-parallel.wasm node $$t || exit 1; done
+	LITMUS_MODES=cooperative,cooperative-jit,parallel,parallel-jit LITMUS_CORES=2,4,8 LITMUS_ROUNDS=20000 node tests/parallel/litmus.mjs
+	node tests/parallel/lifecycle.mjs
+	DISABLE_JIT=1 node tests/parallel/lifecycle.mjs
+	CPU_CORES=2 node tests/parallel/linux_boot.mjs
+	CPU_CORES=4 node tests/parallel/linux_boot.mjs
+	PARALLEL=1 SMP_SEEDS=1,2,3 SMP_QUANTUMS=4096 CPU_CORES=4 node tests/smp/os_stress.mjs
+	PARALLEL=1 GUEST=linux4 CPU_CORES=4 S3_CYCLES=4 S4_CYCLES=2 node tests/devices/acpi_guest.js
+
+# the bundles: libv86.mjs starts build/vcpu-worker.js
+multicore-parallel-tests-release: build/v86-parallel.wasm build/vcpu-worker.js build/libv86.mjs images/linux4.iso
+	TEST_RELEASE_BUILD=1 LITMUS_MODES=parallel,parallel-jit LITMUS_CORES=2,4,8 node tests/parallel/litmus.mjs
+	TEST_RELEASE_BUILD=1 node tests/parallel/lifecycle.mjs
+	TEST_RELEASE_BUILD=1 CPU_CORES=4 node tests/parallel/linux_boot.mjs
+
+# headless Chrome: vCPU module workers with COOP/COEP, the "auto" fallback without
+multicore-parallel-browser-tests: build/v86-parallel.wasm build/vcpu-worker.js build/libv86.mjs
+	node tests/parallel/browser.mjs
+
+# W2: fixed guest work on 1/2/4/8 cores, cooperative and in vCPU workers
+multicore-parallel-bench: build/v86.wasm build/v86-parallel.wasm
+	BENCH_REPORT=build/parallel-bench.json node tests/parallel/bench.mjs
+
+.PHONY: multicore-parallel-tests multicore-parallel-tests-release multicore-parallel-browser-tests multicore-parallel-bench
+
+# A3: S3 and OS-directed S4 cycles on 32-bit Linux (1 and 2 cores, JIT and
+# interpreter) and on x86_64 Linux (Alpine's lts kernel has hibernation)
+acpi-sleep-tests: build/v86-debug.wasm images/linux4.iso
+	GUEST=linux4 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
+	GUEST=linux4 CPU_CORES=2 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
+	GUEST=linux4 DISABLE_JIT=1 S3_CYCLES=2 S4_CYCLES=1 ./tests/devices/acpi_guest.js
+	X64_LINUX_FLAVOR=lts X64_JIT=1 X64_CORES=2 X64_LINUX_SLEEP=3 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+
+# Platform contract: generated state layout, CPU profile options, topology,
+# firmware tables (the ACPICA part needs iasl/acpiexec)
+platform-contract-tests: build/v86-debug.wasm
+	node gen/state_layout.js --check
+	node tests/x64/profile_options.mjs
+	node tests/smp/topology.mjs
+	node tests/devices/acpi_tables.js
+
+# C3/A3: whole-machine state of several cores (snapshots, streams, reset,
+# exceptions) and sleep states with 4 cores
+multicore-state-tests: build/v86-debug.wasm images/linux4.iso
+	node tests/smp/lifecycle.mjs
+	node tests/smp/exception_lifecycle.mjs
+	node tests/smp/state_stream.mjs
+	node tests/smp/x64_snapshot.mjs
+	GUEST=linux4 CPU_CORES=4 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
+
+# X6: RAM beyond the wasm32 backing store
+extended-memory-tests: build/v86-debug.wasm
+	node tests/x64/extended_memory.mjs
+	X64_CORES=2 node tests/x64/extended_memory.mjs
+
+x64-extended-guest-tests: build/libv86.mjs build/v86.wasm
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_EXTENDED_MEMORY=6442450944 X64_LINUX_MEMTEST=5120 X64_LINUX_TIMEOUT=10800000 node tests/x64/linux_boot.mjs
+
+# R1: every level's acceptance targets, with a report in build/release-gate/
+# (GATE_ARGS: --levels R-base,R-ACPI,R-SMP32,R-x64-UP,R-x64-SMP,R-parallel,X6 --quick --keep-going)
+platform-release-gate:
+	node tools/release_gate.mjs $(GATE_ARGS)
+
+.PHONY: acpi-sleep-tests platform-contract-tests multicore-state-tests extended-memory-tests x64-extended-guest-tests platform-release-gate
+
 .PHONY: state-layout state-layout-check smp-tests multicore-boot-tests multicore-boot-tests-release
 
 # x86-64 (docs/acpi-x86-64-multicore-plan.zh-CN.md §6.3, X1-X5/XC). The oracle
@@ -718,6 +794,8 @@ x64-page-tier-tests: build/v86-debug.wasm
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=3 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
+	for seed in 1 2 3; do SSE_FP_SEED=$$seed node tests/x64/sse_fp_template.mjs || exit 1; done
+	SSE_FP_ORDINARY=1 node tests/x64/sse_fp_template.mjs
 
 # Every long-mode encoding of the opcode map executed at CPL3 (X3); needs the
 # expectations written by x64-decode-tests.
