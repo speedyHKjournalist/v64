@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {runSseFixture} from "./debug_sse_fixture.mjs";
+import {run_sse_fixture} from "./debug_sse_fixture.mjs";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const cases=JSON.parse(fs.readFileSync("build/ir-simd-moves/cases.json"));
@@ -35,7 +35,7 @@ for(const release of [false,true]){
     const caught=f=>{try {f();return false;} catch(error){assert(error instanceof WebAssembly.RuntimeError);return true;}};
     function compare(i,configure,{fault=false,abort=false,check}={}){
         configure();e.ir_test_step();const before=visible(),data=Array.from({length:4},(_,l)=>get32(target+l*4));assert.equal(caught(()=>e.ir_test_step()),abort);const expected=state(),observed=events.slice();check?.(before,data,expected);
-        const counts=[];for(const opt of [0,1]){configure();assert.equal(caught(()=>runSseFixture(instances[i][opt],cpu,e,state,{fault,abort,nextPc:cpu.instruction_pointer[0]+cases[i][0].length})),abort);assert.equal(words[664>>2],fault||abort?101:102);assert.deepEqual(state(),expected,`SSE move ${i}/${opt}`);assert.deepEqual(events,observed,`events ${i}/${opt}`);counts.push([slow,guards]);} return {expected,observed,counts};
+        const counts=[];for(const opt of [0,1]){configure();assert.equal(caught(()=>run_sse_fixture(instances[i][opt],cpu,e,state,{fault,abort,next_pc:cpu.instruction_pointer[0]+cases[i][0].length})),abort);assert.equal(words[664>>2],fault||abort?101:102);assert.deepEqual(state(),expected,`SSE move ${i}/${opt}`);assert.deepEqual(events,observed,`events ${i}/${opt}`);counts.push([slow,guards]);} return {expected,observed,counts};
     }
     let ordinary=0,native=0;
     for(let i=0;i<cases.length;i++) for(const hot of cases[i][7]<8?[false]:[false,true]){

@@ -13,7 +13,7 @@ const until = async (test, label) => {
     const end = performance.now() + 15000;
     while(!test()) { assert(performance.now() < end, label); await sleep(1); }
 };
-const iterations = 256, initialCount = 0xFFFFFF00, alternate = 0x300000;
+const iterations = 256, initial_count = 0xFFFFFF00, alternate = 0x300000;
 try {
     await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
@@ -26,7 +26,7 @@ try {
     vm.run(); await until(() => memory().getUint16(0x500, true) === 0xCAFE, "BIOS");
     await vm.stop();
     assert.equal(e.ir_cache_set_merged_validation(2), 0, "reject invalid policy");
-    let comparisons = 0, observerChecks = 0, savedBytes = 0;
+    let comparisons = 0, observer_checks = 0, saved_bytes = 0;
     for(const PC of [0x100000, 0x100FE0]) {
         const peer = PC + 32;
         const reset = (limit = iterations) => {
@@ -35,7 +35,7 @@ try {
             cpu.segment_offsets.fill(0, 0, 6); cpu.segment_is_null.fill(0, 0, 6);
             cpu.reg32.set([0, PC, peer, 0, 0x90000, 0, 0, limit]);
             cpu.instruction_pointer[0] = PC; cpu.reg_xmm32s.fill(0);
-            words()[664 >> 2] = initialCount; e.update_state_flags();
+            words()[664 >> 2] = initial_count; e.update_state_flags();
         };
         for(const kind of ["ordinary", "raw_head", "raw_peer_tail", "notified_tail", "mapping", "cold_tail"]) {
             const states = [];
@@ -67,9 +67,9 @@ try {
                 await vm.stop();
                 assert.equal(e.ir_auto_config(0, 2, 4, 192, 256, 64), 1);
                 const owners = [PC, peer].filter(at => e.ir_cache_entry_stat(at, 0, 1, 14) > 0);
-                assert(owners.length > 0); savedBytes += e.ir_cache_entry_stat(owners[0], 0, 1, 14);
-                const originalPage = peer & ~4095;
-                vm.write_memory(cpu.mem8.slice(originalPage, originalPage + 4096), alternate);
+                assert(owners.length > 0); saved_bytes += e.ir_cache_entry_stat(owners[0], 0, 1, 14);
+                const original_page = peer & ~4095;
+                vm.write_memory(cpu.mem8.slice(original_page, original_page + 4096), alternate);
                 if(kind === "cold_tail") cpu.mem8[PC + 200] ^= 1;
                 let calls = 0, mutations = 0;
                 cpu.io.register_read(0x93, null, () => {
@@ -92,8 +92,8 @@ try {
                 const checks = e.ir_cache_stat(32), rejects = e.ir_cache_stat(33);
                 const deadline = performance.now() + 15000;
                 while(!cpu.in_hlt[0]) { assert(performance.now() < deadline, "fixed guest work"); e.main_loop(); }
-                observerChecks += (e.ir_cache_stat(32) - checks) >>> 0;
-                assert.equal(vm.get_instruction_counter() >>> 0, (initialCount + iterations * 7 - 2) >>> 0, "wrapped retirement");
+                observer_checks += (e.ir_cache_stat(32) - checks) >>> 0;
+                assert.equal(vm.get_instruction_counter() >>> 0, (initial_count + iterations * 7 - 2) >>> 0, "wrapped retirement");
                 assert.equal(cpu.reg32[3], iterations);
                 assert.equal(cpu.reg32[5], kind === "raw_head" ? 32 - iterations : iterations);
                 assert.equal(cpu.instruction_pointer[0], PC + 9);
@@ -115,6 +115,6 @@ try {
             comparisons++;
         }
     }
-    assert(observerChecks > 0); assert(savedBytes > 0);
-    console.log(`PASS: ${wasm}: ${comparisons} paired overlap validations, ${observerChecks} observer checks; ordinary/cross-page capture, exact wrapped retirement, raw/notified tail SMC, raw instruction mutation, remapping and cold admission`);
+    assert(observer_checks > 0); assert(saved_bytes > 0);
+    console.log(`PASS: ${wasm}: ${comparisons} paired overlap validations, ${observer_checks} observer checks; ordinary/cross-page capture, exact wrapped retirement, raw/notified tail SMC, raw instruction mutation, remapping and cold admission`);
 } finally { await vm.destroy(); }

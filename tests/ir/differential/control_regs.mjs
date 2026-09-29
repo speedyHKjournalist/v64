@@ -54,13 +54,13 @@ for(const release of [false,true]){
             configure();assert.equal(caught(()=>instance(i,0).exports.f(0)),abort,`CR/DR initial trap case=${i} decoded=${cases[i]} eax=${cpu.reg32[0]} ${last_trap}`);
             assert.equal(words[664>>2],count);
             const observed_after=after?.(),actual=state(),observed=events.slice();
-            if(abort)await recreate();
+            if(abort) await recreate();
             configure();e.ir_test_step();assert.equal(caught(()=>e.ir_test_step()),abort);
             assert.deepEqual(after?.(),observed_after);assert.deepEqual(actual,state(),`CR/DR ${i}/${release}`);assert.deepEqual(observed,events);
-            if(abort)await recreate();
+            if(abort) await recreate();
             configure();assert.equal(caught(()=>instance(i,1).exports.f(0)),abort);assert.equal(words[664>>2],count);
             assert.deepEqual(after?.(),observed_after);assert.deepEqual(state(),actual);assert.deepEqual(events,observed);
-            if(abort)await recreate();
+            if(abort) await recreate();
             return actual;
         }
         const valid_cr=n=>[0,2,3,4].includes(n),write_value=(index,pattern)=>index===0?cr0|0x10000:index===2?pattern:index===3?cr3:cr4;

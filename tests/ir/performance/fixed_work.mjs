@@ -80,7 +80,7 @@ for(const work of workloads) for(let round=0;round<repetitions;round++) for(cons
     // Stable operands: 1.0/0.5/0.25 f32 vectors and f64 values near 1.
     const d=data();[1,0.5,0.25].forEach((v,i)=>{d.setFloat32(DATA+4*i,v,true);d.setFloat32(DATA+0x40+4*i,2-v,true);});
     d.setFloat64(DATA+0x10,1.25,true);d.setFloat64(DATA+0x18,0.75,true);d.setFloat64(DATA+0x50,0.5,true);d.setFloat64(DATA+0x58,1.5,true);
-   }new Uint32Array(e.memory.buffer)[664>>2]=0;e.update_state_flags();
+   } new Uint32Array(e.memory.buffer)[664>>2]=0;e.update_state_flags();
   };
   const run=async n=>{prepare(n);const start=performance.now();vm.run();const until=start+30000;
    while(!cpu.in_hlt[0]){assert(performance.now()<until,`${work.name}/${label} timeout`);await sleep(1);}

@@ -7,13 +7,13 @@ const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFile
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
-    let logObserver=null;
-    const wasmPath=(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm";
+    let log_observer=null;
+    const wasm_path=(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
         wasm_fn:async imports=>{
             const original=imports.env.log_from_wasm;
-            imports.env.log_from_wasm=(...args)=>logObserver?logObserver():original(...args);
-            return (await WebAssembly.instantiate(fs.readFileSync(wasmPath),imports)).instance.exports;
+            imports.env.log_from_wasm=(...args)=>log_observer?log_observer():original(...args);
+            return (await WebAssembly.instantiate(fs.readFileSync(wasm_path),imports)).instance.exports;
         },
         memory_size:32<<20,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
@@ -287,10 +287,10 @@ for(const release of [false,true]){
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} SSE FP arithmetic/conversion/NaN/rounding, dirty XMM, MMIO, page/alignment faults and #NM/#UD priority cases`);
 
         if(!release) {
-            const observerCases=JSON.parse(fs.readFileSync("build/ir-sse-fp-observer/cases.json"));
+            const observer_cases=JSON.parse(fs.readFileSync("build/ir-sse-fp-observer/cases.json"));
             let observers=0;
-            for(let i=0;i<observerCases.length;i++) {
-                const [name,bytes,mode,opt,after]=observerCases[i];
+            for(let i=0;i<observer_cases.length;i++) {
+                const [name,bytes,mode,opt,after]=observer_cases[i];
                 const module=new WebAssembly.Module(fs.readFileSync(`build/ir-sse-fp-observer/${i}.wasm`));
                 let links=0;
                 for(const path of ["entry","dynamic","direct"]) for(const mutation of ["none","code","context","xmm","counter","all"]) {
@@ -306,11 +306,11 @@ for(const release of [false,true]){
                     const configure=()=>{
                         reset(0);mem.set(bytes,PC);cpu.is_32[0]=+mode;cpu.reg32[7]=DATA;
                         cpu.cr[4]&=~512;e.update_state_flags();calls=0;links=0;
-                        logObserver=()=>{
+                        log_observer=()=>{
                             // The prelude's interpreter-only debug warning has
                             // no callback side effects. Inspect the target SSE
                             // observer, including its fully committed prefix.
-                            if(cpu.instruction_pointer[0]!==PC+after)return;
+                            if(cpu.instruction_pointer[0]!==PC+after) return;
                             calls++;
                             assert.equal(cpu.reg_xmm32s[8],0,"unrelated dirty XMM must reach the observer");
                             assert.equal(linear32[664>>2],102,"observer sees the exact retired prefix");
@@ -327,18 +327,18 @@ for(const release of [false,true]){
                     configure();e.ir_test_step();linear32[664>>2]++;
                     e.ir_test_step();linear32[664>>2]++;
                     e.ir_test_step();
-                    const expected=state(),expectedCount=(linear32[664>>2]+1)>>>0;
+                    const expected=state(),expected_retired=(linear32[664>>2]+1)>>>0;
                     assert.equal(calls,1,"baseline target observer executes once");
                     configure();
-                    const epochAddress=e.ir_admission_epoch_address();
-                    const epoch=new DataView(e.memory.buffer).getBigUint64(epochAddress,true);
+                    const epoch_address=e.ir_admission_epoch_address();
+                    const epoch=new DataView(e.memory.buffer).getBigUint64(epoch_address,true);
                     if(path==="entry") {
                         const before=state();
                         instance.exports.f(0);
                         assert.equal(calls,0,"entry deferral cannot run an observer");
                         assert.equal(linear32[664>>2],100,"entry deferral retires no work");
                         assert.deepEqual(state(),before,"entry deferral has no CPU side effects");
-                        assert.equal(new DataView(e.memory.buffer).getBigUint64(epochAddress,true),epoch);
+                        assert.equal(new DataView(e.memory.buffer).getBigUint64(epoch_address,true),epoch);
                         e.ir_test_step();linear32[664>>2]++;
                         e.ir_test_step();linear32[664>>2]++;
                     }
@@ -348,7 +348,7 @@ for(const release of [false,true]){
                         assert.equal(calls,0,"dynamic deferral cannot run an observer");
                         assert.equal(cpu.instruction_pointer[0],PC+1,"dynamic deferral stops at the prelude's first SSE opcode");
                         assert.equal(linear32[664>>2],101,"dynamic deferral retires only the integer prefix");
-                        assert(new DataView(e.memory.buffer).getBigUint64(epochAddress,true)>epoch);
+                        assert(new DataView(e.memory.buffer).getBigUint64(epoch_address,true)>epoch);
                         e.ir_test_step();linear32[664>>2]++;
                     }
                     else {
@@ -369,11 +369,11 @@ for(const release of [false,true]){
                     }
                     assert.equal(calls,1,`${name}/${mode}/${opt}/${path}/${mutation}: target observer runs once`);
                     assert.equal(links,0,"observing SSE success cannot request normal chaining");
-                    assert.equal(linear32[664>>2],expectedCount,"completed prefix retires once, including callback count wrap");
+                    assert.equal(linear32[664>>2],expected_retired,"completed prefix retires once, including callback count wrap");
                     assert.equal(cpu.instruction_pointer[0],PC+after,"observer prevents stale suffix execution");
                     assert.equal(cpu.segment_offsets[3],["context","all"].includes(mutation)?16:0);
                     assert.deepEqual(state(),expected,`${name}/${mode}/${opt}/${path}/${mutation}: CPU-owned post-state`);
-                    logObserver=null;observers++;
+                    log_observer=null;observers++;
                 }
             }
             console.log(`PASS (debug): ${observers} SSE OSFXSR entry/dynamic deferrals and direct helper observers, native/selective/full/memory, dirty XMM/GPR/context/code and exact counter wrap`);

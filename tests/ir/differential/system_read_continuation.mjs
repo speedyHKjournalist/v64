@@ -10,13 +10,13 @@ const modules = cases.map((_, i) => [0, 1].map(opt => [1, 2, 3, 4].map(budget =>
     new WebAssembly.Module(fs.readFileSync(`${directory}/${i}-${opt}-${budget}.wasm`)))));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const PC = 0x8000, STACK = 0x90000, GP = 0x180000, UD = 0x180100;
-const abiOnly = process.env.IR_SYSTEM_READ_ABI_ONLY === "1";
+const abi_only = process.env.IR_SYSTEM_READ_ABI_ONLY === "1";
 
 for(const release of [false, true]) {
     let observer;
     const path = (process.argv[2] || "build/v86-ir-test") + (release ? "-release" : "") + ".wasm";
     const core = new WebAssembly.Module(fs.readFileSync(path));
-    const createVm = () => new V86({
+    const create_vm = () => new V86({
         wasm_fn: async imports => {
             const original = imports.env.log_from_wasm;
             imports.env.log_from_wasm = (...args) => observer ? observer(...args) : original(...args);
@@ -27,7 +27,7 @@ for(const release of [false, true]) {
         disable_keyboard: true, disable_mouse: true, disable_speaker: true,
         net_device: {type: "none"}, autostart: false,
     });
-    let vm = createVm();
+    let vm = create_vm();
     try {
         let cpu, e, mem, words, raw, dr, view;
         const set32 = (address, value) => view.setUint32(address, value, true);
@@ -50,7 +50,7 @@ for(const release of [false, true]) {
             await vm.stop();
         }
         // Never reuse a Rust instance after its deliberate debug panic trap.
-        async function recreate() { observer = undefined; await vm.destroy(); vm = createVm(); await boot(); }
+        async function recreate() { observer = undefined; await vm.destroy(); vm = create_vm(); await boot(); }
         await boot();
         const cr0 = cpu.cr[0], cr3 = cpu.cr[3], cr4 = cpu.cr[4];
         function desc(n, base, access) {
@@ -99,7 +99,7 @@ for(const release of [false, true]) {
             catch(error) { if(!(error instanceof WebAssembly.RuntimeError)) throw error; return true; }
         };
         let comparisons = 0;
-        for(let i = 0; !abiOnly && i < cases.length; i++) {
+        for(let i = 0; !abi_only && i < cases.length; i++) {
             const [, , op, index] = cases[i];
             const configurations = op === 0xA2
                 ? [0, 1, 2, 4, 7, 0x16, 0x80000000, 0xFFFFFFFF].map(leaf => ({leaf, subleaf: 2}))
@@ -112,13 +112,13 @@ for(const release of [false, true]) {
                     const terminal = !release && op === 0xA2 && ![0, 2, 0x80000000].includes(config.leaf);
                     const steps = Math.min(budget, fault || terminal ? 2 : 4);
                     reset(i, {...config, start});
-                    let referenceAbort = false;
+                    let reference_abort = false;
                     for(let n = 0; n < steps; n++) {
-                        referenceAbort = caught(() => e.ir_test_step());
-                        if(referenceAbort || fault && n === 1) break;
+                        reference_abort = caught(() => e.ir_test_step());
+                        if(reference_abort || fault && n === 1) break;
                         words[664 >> 2]++;
                     }
-                    assert.equal(referenceAbort, abort);
+                    assert.equal(reference_abort, abort);
                     const expected = state();
                     if(abort) await recreate();
                     for(const opt of [0, 1]) {
@@ -132,7 +132,7 @@ for(const release of [false, true]) {
             }
         }
         let observers = 0;
-        if(!release && !abiOnly) for(let i = 0; i < cases.length; i++) if(cases[i][2] === 0xA2) {
+        if(!release && !abi_only) for(let i = 0; i < cases.length; i++) if(cases[i][2] === 0xA2) {
             for(const leaf of [1, 4, 0xFFFFFFFF]) for(const mutation of ["registers", "code", "context", "count"]) {
                 let logs, events;
                 const configure = () => {
@@ -157,18 +157,18 @@ for(const release of [false, true]) {
                     };
                 };
                 configure(); e.ir_test_step(); words[664 >> 2]++; e.ir_test_step(); words[664 >> 2]++;
-                const expected = state(), expectedEvents = events.slice(), expectedLogs = leaf === 0xFFFFFFFF ? 2 : 1;
-                assert.equal(logs, expectedLogs);
+                const expected = state(), expected_events = events.slice(), expected_logs = leaf === 0xFFFFFFFF ? 2 : 1;
+                assert.equal(logs, expected_logs);
                 for(const opt of [0, 1]) {
                     configure(); instance(i, opt, 4).exports.f(0);
-                    assert.equal(logs, expectedLogs); assert.deepEqual(events, expectedEvents);
+                    assert.equal(logs, expected_logs); assert.deepEqual(events, expected_events);
                     assert.deepEqual(state(), expected, `CPUID observer ${i}/${opt}/${leaf}/${mutation}`);
                     observers++;
                 }
                 observer = undefined;
             }
         }
-        let abiComparisons = 0;
+        let abi_comparisons = 0;
         for(const kind of ["cr", "dr"]) for(let index = 0; index < 8; index++) {
             // Debug invalid-CR panics already have fresh-instance comparisons
             // above; this ABI matrix checks ordinary and guest-fault outcomes.
@@ -179,32 +179,32 @@ for(const release of [false, true]) {
                     reset(i, {cpl, de, start: 0xFFFFFFFF});
                     words[560 >> 2] = PC; cpu.instruction_pointer[0] = PC + cases[i][5];
                 };
-                configure(); const terminalOutcome = e[`ir_read_${kind}`](0, index), terminal = state();
-                configure(); const continuingOutcome = e[`ir_read_${kind}_continue`](0, index), continuing = state();
-                if(terminalOutcome === 4) {
-                    assert.equal(continuingOutcome, 0); assert.equal(terminal.count, 0);
+                configure(); const terminal_outcome = e[`ir_read_${kind}`](0, index), terminal = state();
+                configure(); const continuing_outcome = e[`ir_read_${kind}_continue`](0, index), continuing = state();
+                if(terminal_outcome === 4) {
+                    assert.equal(continuing_outcome, 0); assert.equal(terminal.count, 0);
                     assert.equal(continuing.count, 0xFFFFFFFF);
                     continuing.count = terminal.count;
                 }
                 else {
-                    assert.equal(terminalOutcome, 2); assert.equal(continuingOutcome, 2);
+                    assert.equal(terminal_outcome, 2); assert.equal(continuing_outcome, 2);
                     assert.equal(continuing.count, 0xFFFFFFFF, "a delivered fault must not retire");
                 }
                 assert.deepEqual(continuing, terminal, `direct ${kind}/${index}/${cpl}/${de}`);
-                abiComparisons++;
+                abi_comparisons++;
             }
         }
         for(const leaf of [0, 1, 2, 4, 7, 0x80000000, 0xFFFFFFFF]) {
             const i = cases.findIndex(c => c[1] && c[2] === 0xA2);
             reset(i, {leaf, start: 0xFFFFFFFF}); assert.equal(e.ir_cpuid(), 4); const terminal = state();
             reset(i, {leaf, start: 0xFFFFFFFF}); const outcome = e.ir_cpuid_continue(), continuing = state();
-            const canContinue = release || [0, 2, 0x80000000].includes(leaf);
-            assert.equal(outcome, canContinue ? 0 : 4);
-            assert.equal(terminal.count, 0); assert.equal(continuing.count, canContinue ? 0xFFFFFFFF : 0);
+            const can_continue = release || [0, 2, 0x80000000].includes(leaf);
+            assert.equal(outcome, can_continue ? 0 : 4);
+            assert.equal(terminal.count, 0); assert.equal(continuing.count, can_continue ? 0xFFFFFFFF : 0);
             continuing.count = terminal.count; assert.deepEqual(continuing, terminal);
-            abiComparisons++;
+            abi_comparisons++;
         }
-        console.log(`PASS (${release ? "release" : "debug"}): ${comparisons} system read continuation/fault/budget/counter-wrap comparisons, ${observers} CPUID observer comparisons, ${abiComparisons} terminal/continuing ABI comparisons`);
+        console.log(`PASS (${release ? "release" : "debug"}): ${comparisons} system read continuation/fault/budget/counter-wrap comparisons, ${observers} CPUID observer comparisons, ${abi_comparisons} terminal/continuing ABI comparisons`);
     }
     finally { observer = undefined; await vm.destroy(); }
 }

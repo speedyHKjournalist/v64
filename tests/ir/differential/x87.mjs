@@ -4,8 +4,8 @@ import {V86} from "../../../build/libv86.mjs";
 
 const cases=JSON.parse(fs.readFileSync("build/ir-x87/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-x87/${i}-${opt}.wasm`))));
-const continuationCases=JSON.parse(fs.readFileSync("build/ir-x87-continuation/cases.json"));
-const continuationModules=continuationCases.map((_,i)=>new WebAssembly.Module(fs.readFileSync(`build/ir-x87-continuation/${i}.wasm`)));
+const continuation_cases=JSON.parse(fs.readFileSync("build/ir-x87-continuation/cases.json"));
+const continuation_modules=continuation_cases.map((_,i)=>new WebAssembly.Module(fs.readFileSync(`build/ir-x87-continuation/${i}.wasm`)));
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
@@ -37,7 +37,7 @@ for(const release of [false,true]){
         const cr0=cpu.cr[0],cr4=cpu.cr[4];
         const imports={...e,m:e.memory};
         const instances=modules.map(pair=>pair.map(module=>new WebAssembly.Instance(module,{e:imports})));
-        const continuationInstances=continuationModules.map(module=>new WebAssembly.Instance(module,{e:imports}));
+        const continuation_instances=continuation_modules.map(module=>new WebAssembly.Instance(module,{e:imports}));
 
         function desc(n,base,access){
             set32(0x3000+n*8,(base<<16)|0xFFFF);
@@ -204,8 +204,8 @@ for(const release of [false,true]){
 
         let continuations=0;
         const variants=new Map();
-        for(let i=0;i<continuationCases.length;i++) {
-            const [name,bytes,mode,cfg,opt,budget]=continuationCases[i];
+        for(let i=0;i<continuation_cases.length;i++) {
+            const [name,bytes,mode,cfg,opt,budget]=continuation_cases[i];
             for(const task of [0,4,8,12]) for(const initial of [100,0xFFFFFFFC])
             for(const flags of [2,0x8D7]) for(const sample of [0,5,9]) {
                 const configure=()=>{
@@ -218,7 +218,7 @@ for(const release of [false,true]){
                     e.update_state_flags();
                 };
                 configure();
-                continuationInstances[i].exports.f(0);
+                continuation_instances[i].exports.f(0);
                 const actual=state(),retired=(linear32[664>>2]-initial)>>>0;
                 assert(retired<=budget,`x87 continuation exceeds budget ${i}`);
                 assert(retired<=12,"loop must terminate");
@@ -229,9 +229,9 @@ for(const release of [false,true]){
                 // Poll recovery may legally place previous_ip at the next
                 // instruction; every architectural field and raw FP payload
                 // must still match the interpreter's exact retired prefix.
-                const {previous:actualPrevious,...actualState}=actual;
-                const {previous:expectedPrevious,...expectedState}=expected;
-                assert(Number.isInteger(actualPrevious)&&Number.isInteger(expectedPrevious));
+                const {previous:actual_previous,...actualState}=actual;
+                const {previous:expected_previous,...expectedState}=expected;
+                assert(Number.isInteger(actual_previous)&&Number.isInteger(expected_previous));
                 assert.deepEqual(actualState,expectedState,`x87 continuation ${i}/${name}/${mode}/${cfg}/${opt}/${budget}/${task}/${initial}/${flags}/${sample}`);
                 const key=[name,mode,cfg,budget,task,initial,flags,sample].join("/");
                 if(opt)assert.deepEqual({actual,retired},variants.get(key),`x87 continuation optimization ${key}`);

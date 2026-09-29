@@ -115,7 +115,7 @@ try {
     prepare(PC + 1, 1); await finish();
     prepare(PC, 16); await finish();
     assert.equal(stat(PC, 11), 2); assert.deepEqual(owner(PC), owner(PC + 1));
-    const sharedOwner = owner(PC);
+    const shared_owner = owner(PC);
     config(1, 1000000, 4); assert.equal(stat(PC, 15), 0); assert.equal(stat(PC + 1, 15), 0);
     for(const offset of [0, 0, 0, 1]) {
         const before = stat(PC + offset, 15);
@@ -129,15 +129,15 @@ try {
     assert.equal(stat(PC, 15, 1), 0, "wrong CS is not the same alias");
     assert.equal(stat(PC, 15, 0, 0), 0, "wrong decode mode is not the same alias");
     await compile(PC + 1, 3, 2);
-    assert.deepEqual(owner(PC), sharedOwner); assert.notDeepEqual(owner(PC + 1), sharedOwner);
+    assert.deepEqual(owner(PC), shared_owner); assert.notDeepEqual(owner(PC + 1), shared_owner);
     assert.equal(stat(PC, 11), 1); assert.equal(stat(PC, 15), 3, "partial supersession retains the other alias's heat");
     assert.equal(stat(PC + 1, 15), 0, "replacement owner does not inherit alias heat");
     config(1); assert.equal(stat(PC, 15), 0); assert.equal(stat(PC, 16), 0);
-    assert.deepEqual(owner(PC), sharedOwner, "configuration reset preserves executable owners");
+    assert.deepEqual(owner(PC), shared_owner, "configuration reset preserves executable owners");
     vm.write_memory(Uint8Array.of(shared[0]), PC);
     assert.equal(stat(PC, 0), 0); assert.equal(stat(PC + 1, 0), 0, "same-byte SMC retires all dependent owners");
     config(0); prepare(); await compile(PC, shared.length);
-    assert.notDeepEqual(owner(PC), sharedOwner); assert.equal(stat(PC, 15), 0);
+    assert.notDeepEqual(owner(PC), shared_owner); assert.equal(stat(PC, 15), 0);
     cpu.jit_clear_cache(); e.ir_cache_collect();
     assert.equal(e.ir_cache_stat(41), 1); assert.equal(stat(PC, 15), 0); assert.equal(stat(PC, 0), 0);
     console.log(`PASS: ${wasm}: per-alias heat, full key/owner identity, partial supersession, configuration reset, SMC and cache reset`);
@@ -145,47 +145,47 @@ try {
     // The Tier-1 owner covers only INC. A failed Tier-2 source additionally
     // covers the tail: retries must compare that capture, not the Tier-1 byte.
     const body = Uint8Array.of(0x43, ...Array(32).fill(0x90), 0x49, 0x75, 0xDC, 0xF4);
-    const seedPrefix = async (iterations = 256) => {
+    const seed_prefix = async (iterations = 256) => {
         clear(1); prepare(PC, iterations); vm.write_memory(body, PC);
         await compile(PC, 1); prepare(PC, 2); config(1, 1000000, 2);
         // Earn heat in one finite frame, then test selection in the next frame.
-        await finish(); finalBody(2); prepare(PC, iterations);
+        await finish(); final_body(2); prepare(PC, iterations);
     };
-    const finalBody = iterations => {
+    const final_body = iterations => {
         assert.equal(count(), (INITIAL + iterations * 35 + 1) >>> 0);
         assert.equal(cpu.reg32[1], 0); assert.equal(cpu.instruction_pointer[0], PC + body.length);
     };
-    await seedPrefix(); const failedOwner = owner(PC);
+    await seed_prefix(); const failed_owner = owner(PC);
     let rejected = 0;
     WebAssembly.instantiate = (bytes, imports) => imports.e
         ? (rejected++, Promise.reject(new WebAssembly.CompileError("controlled resident promotion failure")))
         : instantiate(bytes, imports);
-    await finish(); finalBody(256);
+    await finish(); final_body(256);
     assert.equal(rejected, 1); assert.equal(stat(PC, 5), 1); assert.equal(stat(PC, 16), 1);
-    assert.deepEqual(owner(PC), failedOwner);
+    assert.deepEqual(owner(PC), failed_owner);
     const suppressed = e.ir_cache_stat(45);
-    prepare(PC, 256); await finish(); finalBody(256);
+    prepare(PC, 256); await finish(); final_body(256);
     assert.equal(rejected, 1, "same failed Tier-2 source cannot repeatedly compile");
     assert(e.ir_cache_stat(45) > suppressed);
     cpu.mem8[PC + 16] = 0xF8; // CLC outside the single-byte Tier-1 snapshot.
-    prepare(PC, 256); await finish(); finalBody(256);
+    prepare(PC, 256); await finish(); final_body(256);
     assert.equal(rejected, 2, "raw tail change retries the failed Tier-2 capture exactly once");
-    assert.deepEqual(owner(PC), failedOwner, "Tier-1 prefix remains valid across raw tail changes");
-    prepare(PC, 128); await finish(); finalBody(128);
+    assert.deepEqual(owner(PC), failed_owner, "Tier-1 prefix remains valid across raw tail changes");
+    prepare(PC, 128); await finish(); final_body(128);
     assert.equal(rejected, 2); assert.equal(stat(PC, 16), 1);
     WebAssembly.instantiate = instantiate;
     config(1); assert.equal(stat(PC, 16), 0); assert.equal(stat(PC, 15), 0);
     console.log(`PASS: ${wasm}: rejected upgrade preserves Tier 1, full captured-source retry suppression and raw-tail retry`);
 
     for(const kind of ["cancel", "reset", "supersede", "raw-change"]) {
-        await seedPrefix(); let held;
-        const originalOwner = owner(PC);
+        await seed_prefix(); let held;
+        const original_owner = owner(PC);
         WebAssembly.instantiate = (bytes, imports) => imports.e
             ? new Promise((resolve, reject) => { assert(!held); held = {bytes, imports, resolve, reject}; })
             : instantiate(bytes, imports);
         e.main_loop(); assert(held, `${kind}: hold resident Tier-2 installation`);
-        assert.equal(stat(PC, 5), 1); assert.deepEqual(owner(PC), originalOwner);
-        const before = state(), completedIncrements = cpu.reg32[3];
+        assert.equal(stat(PC, 5), 1); assert.deepEqual(owner(PC), original_owner);
+        const before = state(), completed_increments = cpu.reg32[3];
         if(kind === "cancel") config(0);
         if(kind === "reset") { config(0); cpu.jit_clear_cache(); e.ir_cache_collect(); }
         if(kind === "raw-change") cpu.mem8[PC] = 0x4B;
@@ -193,7 +193,7 @@ try {
         let replacement;
         if(kind === "supersede") {
             const ip = cpu.instruction_pointer[0]; await compile(PC, 1);
-            replacement = owner(PC); assert.notDeepEqual(replacement, originalOwner);
+            replacement = owner(PC); assert.notDeepEqual(replacement, original_owner);
             cpu.instruction_pointer[0] = ip;
         }
         held.resolve(await instantiate(held.bytes, held.imports));
@@ -204,8 +204,8 @@ try {
             assert.deepEqual(owner(PC), replacement); assert.equal(stat(PC, 16), 0,
                 "stale completion cannot poison a replacement owner's retry state");
         }
-        config(0); await finish(); finalBody(256);
-        assert.equal(cpu.reg32[3], kind === "raw-change" ? 2 * completedIncrements - 256 : 256);
+        config(0); await finish(); final_body(256);
+        assert.equal(cpu.reg32[3], kind === "raw-change" ? 2 * completed_increments - 256 : 256);
     }
     console.log(`PASS: ${wasm}: pending promotion cancellation, reset, owner supersession and raw SMC; exact retirement before/after asynchronous completion`);
 } finally {
