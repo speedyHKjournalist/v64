@@ -39,6 +39,8 @@ then
     clang -target "$target" -ffreestanding -fno-pic -O2 $flags -c "$src/v86/builtins.c" -o builtins.o
     python3 "$src/v86/ar.py" rcs libbuiltins.a builtins.o
     tools=(CC="$cc $flags" OBJCOPY="$rust_bin/rust-objcopy" AR="python3 $src/v86/ar.py" libgcc="$out/libbuiltins.a")
+    # the object directories (lib/x86, ...): only `make all` creates them
+    make "${tools[@]}" directories
     # realmode.c relies on gcc's `asm(".code16gcc")`; clang needs -m16 for
     # 16-bit code, so that object is built first with bits=16
     for test in "$@"
@@ -51,5 +53,8 @@ then
     make "${tools[@]}" "$@"
 else
     [ -f config.mak ] || "$src/configure" --arch="$arch"
+    # the object directories (lib/x86, ...): only `make all` creates them, and
+    # gcc does not create the directory of a dependency file (-MF)
+    make CC="gcc $flags" directories
     make CC="gcc $flags" "$@"
 fi
