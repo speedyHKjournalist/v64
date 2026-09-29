@@ -25,10 +25,45 @@ use super::jac;
 use super::state::{gpr_high_offset, gpr_low_offset, ExecutionMode, GuestIp};
 use crate::cpu::global_pointers as gp;
 use crate::wasmgen::wasm_builder::{
-    Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmType,
+    Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType,
 };
 use crate::wasmgen::wasm_opcodes as op;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// x64_pagegen_size_stats: Wasm bytes emitted per template kind (count,
+/// bytes), for code size work
+static mut SIZE_STATS: Option<HashMap<String, (u64, u64)>> = None;
+fn size_note(name: String, bytes: usize) {
+    unsafe {
+        if let Some(stats) = (*(&raw mut SIZE_STATS)).as_mut() {
+            let entry = stats.entry(name).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += bytes as u64;
+        }
+    }
+}
+#[no_mangle]
+pub fn x64_pagegen_size_stats(enabled: bool) { unsafe { SIZE_STATS = enabled.then(HashMap::new) }; }
+#[no_mangle]
+pub fn x64_pagegen_size_dump() {
+    unsafe {
+        if let Some(stats) = (*(&raw const SIZE_STATS)).as_ref() {
+            let mut rows: Vec<_> = stats.iter().collect();
+            rows.sort_by_key(|(_, &(_, bytes))| std::cmp::Reverse(bytes));
+            let total: u64 = rows.iter().map(|(_, &(_, b))| b).sum();
+            for (name, &(count, bytes)) in rows.iter().take(40) {
+                console_log!(
+                    "X64_PAGEGEN_SIZE {} count {} bytes {} ({:.1}%) avg {:.1}",
+                    name,
+                    count,
+                    bytes,
+                    100.0 * bytes as f64 / total as f64,
+                    bytes as f64 / count as f64
+                );
+            }
+        }
+    }
+}
 
 /// Why a page function returned (gp::x64_page_exit).
 pub const EXIT_NORMAL: u32 = 0;
@@ -320,6 +355,43 @@ enum Op {
         dst: Opnd,
         src: u8,
     },
+    /// SSE2 packed integer, shuffle and unpack forms with Wasm SIMD (the
+    /// semantics of cpu::sse_instr, as ir::tier0::simd): dst = op(dst, src).
+    /// Memory sources are 128 bits and must be aligned (else #GP, retried).
+    Vpacked {
+        op: Packed,
+        dst: u8,
+        src: Xmm,
+    },
+    /// PSRLW/D/Q PSRAW/D PSLLW/D/Q xmm, imm8 (`kind` is the ModRM reg), and
+    /// PSRLDQ/PSLLDQ (`bits` 128)
+    VshiftImm {
+        dst: u8,
+        bits: u8,
+        kind: u8,
+        count: u8,
+    },
+    /// COMISS UCOMISS COMISD UCOMISD: natively when neither operand is a NaN
+    /// or a denormal, which leaves MXCSR unchanged; else retried.
+    Vcompare {
+        double: bool,
+        dst: u8,
+        src: Xmm,
+    },
+    /// INVLPG m (CPL 0; see pages::x64_page_invlpg)
+    Invlpg {
+        address: AddressExpr,
+    },
+    /// LDMXCSR (`load`) / STMXCSR m32
+    Mxcsr {
+        load: bool,
+        address: AddressExpr,
+    },
+    /// MOV r64, CR0/CR2/CR3/CR4 (CPL 0)
+    ReadCr {
+        control: u8,
+        reg: Reg,
+    },
     /// MOV r64, CR8 / MOV CR8, r64 (the local APIC's TPR)
     Cr8 {
         write: bool,
@@ -328,6 +400,97 @@ enum Op {
     Rdtscp,
     /// Interpreted in place by x64_page_step.
     Step,
+}
+
+/// Packed operations of Op::Vpacked (Wasm SIMD opcodes).
+#[derive(Clone, Copy, Debug)]
+enum Packed {
+    Shuffle([u8; 16]),
+    Binary(u32),
+    /// element bytes, high halves
+    Unpack(u8, bool),
+    Pack(u32),
+    /// Shift by the source's low quadword: (opcode, lane bits, arithmetic).
+    Shift(u32, u32, bool),
+    MulHigh(bool),
+    MulDwords,
+    Sad,
+}
+/// 66 0F `code` packed integer forms.
+fn packed_op(code: u8) -> Option<Packed> {
+    Some(match code {
+        0xFC => Packed::Binary(0x6E),
+        0xFD => Packed::Binary(0x8E),
+        0xFE => Packed::Binary(0xAE),
+        0xD4 => Packed::Binary(0xCE),
+        0xF8 => Packed::Binary(0x71),
+        0xF9 => Packed::Binary(0x91),
+        0xFA => Packed::Binary(0xB1),
+        0xFB => Packed::Binary(0xD1),
+        0xEC => Packed::Binary(0x6F),
+        0xED => Packed::Binary(0x8F),
+        0xDC => Packed::Binary(0x70),
+        0xDD => Packed::Binary(0x90),
+        0xE8 => Packed::Binary(0x72),
+        0xE9 => Packed::Binary(0x92),
+        0xD8 => Packed::Binary(0x73),
+        0xD9 => Packed::Binary(0x93),
+        0x64 => Packed::Binary(0x27),
+        0x65 => Packed::Binary(0x31),
+        0x66 => Packed::Binary(0x3B),
+        0x74 => Packed::Binary(0x23),
+        0x75 => Packed::Binary(0x2D),
+        0x76 => Packed::Binary(0x37),
+        0xDA => Packed::Binary(0x77),
+        0xDE => Packed::Binary(0x79),
+        0xEA => Packed::Binary(0x96),
+        0xEE => Packed::Binary(0x98),
+        0xE0 => Packed::Binary(0x7B),
+        0xE3 => Packed::Binary(0x9B),
+        0xE4 => Packed::MulHigh(false),
+        0xE5 => Packed::MulHigh(true),
+        0xF4 => Packed::MulDwords,
+        0xF6 => Packed::Sad,
+        0xD5 => Packed::Binary(0x95),
+        0xF5 => Packed::Binary(0xBA),
+        0x60 => Packed::Unpack(1, false),
+        0x61 => Packed::Unpack(2, false),
+        0x62 => Packed::Unpack(4, false),
+        0x68 => Packed::Unpack(1, true),
+        0x69 => Packed::Unpack(2, true),
+        0x6A => Packed::Unpack(4, true),
+        0x6C => Packed::Unpack(8, false),
+        0x6D => Packed::Unpack(8, true),
+        0x63 => Packed::Pack(0x65),
+        0x67 => Packed::Pack(0x66),
+        0x6B => Packed::Pack(0x85),
+        0xD1 => Packed::Shift(0x8D, 16, false),
+        0xD2 => Packed::Shift(0xAD, 32, false),
+        0xD3 => Packed::Shift(0xCD, 64, false),
+        0xE1 => Packed::Shift(0x8C, 16, true),
+        0xE2 => Packed::Shift(0xAC, 32, true),
+        0xF1 => Packed::Shift(0x8B, 16, false),
+        0xF2 => Packed::Shift(0xAB, 32, false),
+        0xF3 => Packed::Shift(0xCB, 64, false),
+        _ => return None,
+    })
+}
+/// Lanes of PSHUFD/PSHUFLW/PSHUFHW/SHUFPS/SHUFPD over (destination, source)
+/// for i8x16.shuffle.
+fn shuffle_lanes(op: u32, imm: u32) -> [u8; 16] {
+    let mut lanes = [0; 16];
+    for i in 0..16u32 {
+        lanes[i as usize] = match op {
+            0x660F70 => 16 + ((imm >> (2 * (i / 4)) & 3) * 4 + i % 4),
+            0xF20F70 if i < 8 => 16 + ((imm >> (2 * (i / 2)) & 3) * 2 + i % 2),
+            0xF30F70 if i >= 8 => 16 + (8 + (imm >> (2 * ((i - 8) / 2)) & 3) * 2 + i % 2),
+            0xF20F70 | 0xF30F70 => 16 + i,
+            0x0FC6 => (imm >> (2 * (i / 4)) & 3) * 4 + i % 4 + if i >= 8 { 16 } else { 0 },
+            0x660FC6 => (imm >> (i / 8) & 1) * 8 + i % 8 + if i >= 8 { 16 } else { 0 },
+            _ => unreachable!(),
+        } as u8;
+    }
+    lanes
 }
 
 fn register(encoded: u8, width: u8, rex: bool) -> Reg {
@@ -683,6 +846,7 @@ fn classify(d: &Decoded) -> Op {
             0xFA => Op::Cli,
             0xFB => Op::Sti,
             0x0F01 if d.modrm == Some(0xF8) => Op::Swapgs,
+            0x0F01 if group == 7 && memory => Op::Invlpg { address: d.address? },
             0x0F31 => Op::Rdtsc,
             0xA4 | 0xA5 | 0xAA | 0xAB
                 if d.address_size == 64
@@ -751,7 +915,15 @@ fn classify(d: &Decoded) -> Op {
             },
             // LFENCE MFENCE SFENCE: one core runs at a time, in program order
             0x0FAE if d.opcode == 0x0FAE && d.rm_register.is_some() && group >= 5 => Op::Nop,
+            0x0FAE if d.opcode == 0x0FAE && memory && matches!(group, 2 | 3) => Op::Mxcsr {
+                load: group == 2,
+                address: d.address?,
+            },
             0x0F01 if d.modrm == Some(0xF9) => Op::Rdtscp,
+            0x0F20 if matches!(d.reg, Some(0 | 2 | 3 | 4)) && d.rm_register.is_some() => Op::ReadCr {
+                control: d.reg?,
+                reg: reg(d.rm_register?, 64),
+            },
             0x0F20 | 0x0F22 if d.reg == Some(8) && d.rm_register.is_some() => Op::Cr8 {
                 write: op == 0x0F22,
                 reg: reg(d.rm_register?, 64),
@@ -894,6 +1066,37 @@ fn sse(d: &Decoded) -> Option<Op> {
                 src: xmm_rm()?,
             }
         },
+        0x0F2E | 0x0F2F | 0x660F2E | 0x660F2F => Op::Vcompare {
+            double: d.opcode >> 16 == 0x66,
+            dst: register,
+            src: xmm_rm()?,
+        },
+        // (the forms below emit Wasm SIMD: not in the build for engines without it)
+        _ if !cfg!(target_feature = "simd128") => return None,
+        0x660F70 | 0xF20F70 | 0xF30F70 | 0x0FC6 | 0x660FC6 => Op::Vpacked {
+            op: Packed::Shuffle(shuffle_lanes(d.opcode, d.immediate?.value as u32 & 0xFF)),
+            dst: register,
+            src: xmm_rm()?,
+        },
+        0x660F71 | 0x660F72 | 0x660F73 if !memory => {
+            let kind = d.modrm? >> 3 & 7;
+            let code = d.opcode as u8;
+            let bytes = matches!(kind, 3 | 7) && code == 0x73;
+            if !(matches!(kind, 2 | 4 | 6) && !(code == 0x73 && kind == 4) || bytes) {
+                return None;
+            }
+            Op::VshiftImm {
+                dst: d.rm_register?,
+                bits: if bytes { 128 } else { 16 << (code - 0x71) },
+                kind,
+                count: d.immediate?.value.min(255) as u8,
+            }
+        },
+        op if op >> 8 == 0x660F => Op::Vpacked {
+            op: packed_op(op as u8)?,
+            dst: register,
+            src: xmm_rm()?,
+        },
         _ => return None,
     })
 }
@@ -963,6 +1166,7 @@ fn effects(op: &Op) -> (u32, u32) {
         },
         Op::CompareExchange { .. } => (0, ZF),
         Op::Sahf => (0, SF | ZF | AF | PF | CF),
+        Op::Vcompare { .. } => (0, ARITH),
         Op::Step => (ARITH, ARITH),
         _ => (0, 0),
     }
@@ -1027,6 +1231,9 @@ enum End {
     Stop,
     /// Interpret the instruction at this offset (undecodable here).
     Retry(u16),
+    /// Step the instruction at this offset in place: it continues into the
+    /// next page (or does not decode), so the interpreter fetches it.
+    StepAt(u16),
 }
 struct Block {
     start: u16,
@@ -1051,10 +1258,23 @@ pub struct Compiled {
     pub blocks: usize,
 }
 
+/// Multiplicative hashing of page offsets (the default SipHash showed in
+/// compile profiles).
+#[derive(Default)]
+struct OffsetHasher(u64);
+impl std::hash::Hasher for OffsetHasher {
+    fn finish(&self) -> u64 { self.0 }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u16(&mut self, value: u16) { self.0 = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15); }
+}
 struct Decoder<'a> {
     bytes: &'a [u8],
     page: u64,
-    cache: HashMap<u16, Option<(Decoded, Op)>>,
+    cache: HashMap<u16, Option<(Decoded, Op)>, std::hash::BuildHasherDefault<OffsetHasher>>,
 }
 impl Decoder<'_> {
     fn at(&mut self, offset: u16) -> Option<(Decoded, Op)> {
@@ -1074,7 +1294,9 @@ impl Decoder<'_> {
 /// the block starts `entries`. The function is position independent: it runs
 /// wherever the page is mapped (gp::x64_page_linear), so every mapping of the
 /// same backing page shares it. Addresses below are relative to the page.
-pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
+/// `chaining`: leaving the page, tail-call the function serving the new page
+/// when the chaining table (pages::CHAIN) has it.
+pub fn compile(bytes: &[u8], entries: &[u16], chaining: bool, name: String) -> Option<Compiled> {
     let page = 0;
     if bytes.len() != PAGE || entries.is_empty() {
         return None;
@@ -1082,7 +1304,7 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
     let mut decoder = Decoder {
         bytes,
         page,
-        cache: HashMap::new(),
+        cache: HashMap::default(),
     };
     // Discover block starts: entries, in-page branch targets, return
     // addresses, and the instruction after every step (steps continue by
@@ -1187,7 +1409,7 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
             total += 1;
             let Some((d, op)) = decoder.at(o)
             else {
-                break End::Retry(o);
+                break End::StepAt(o);
             };
             let next = o + d.length as u16;
             let (reads, writes) = effects(&op);
@@ -1267,7 +1489,7 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
         };
         let last = block.insts.last().map(|i| i.op);
         match (block.end, last) {
-            (End::Retry(_), _) => 0,
+            (End::Retry(_) | End::StepAt(_), _) => 0,
             (End::Next(_), Some(Op::Step)) => 0,
             (End::Next(o), Some(Op::Jcc { target: t, .. })) => live(o) | target(t),
             (End::Next(o), _) => live(o),
@@ -1304,7 +1526,7 @@ pub fn compile(bytes: &[u8], entries: &[u16]) -> Option<Compiled> {
         .flat_map(|b| &b.insts)
         .filter(|i| !matches!(i.op, Op::Step))
         .count();
-    let bytes = Emitter::emit(&blocks, &index);
+    let bytes = Emitter::emit(&blocks, &index, chaining, name);
     Some(Compiled {
         bytes,
         served,
@@ -1369,6 +1591,8 @@ const AH: Reg = Reg {
 #[derive(Clone, Copy)]
 struct Frame {
     exit: Label,
+    /// RIP left the page (normal exit): chain or return
+    leave: Label,
     retry: Label,
     step: Label,
     dispatch: Label,
@@ -1381,13 +1605,33 @@ struct Emitter {
     frame: Option<Frame>,
     labels: Vec<Label>,
     current: usize,
+    /// the module's access-cache lookup function (see access_function)
+    access: Option<u32>,
 }
+/// Dispatch through a table of 16-byte buckets and compares instead of a
+/// page-sized table (x64_page_set_bucket_dispatch).
+static mut BUCKET_DISPATCH: bool = true;
+const DISPATCH_SHIFT: u32 = 4;
+#[no_mangle]
+pub fn x64_page_set_bucket_dispatch(enabled: bool) { unsafe { BUCKET_DISPATCH = enabled } }
+/// Native instructions are counted once per block at its entry instead of
+/// after each instruction (smaller code; N is then an upper bound when a
+/// block is left early). x64_page_set_block_count.
+static mut BLOCK_COUNT: bool = true;
+#[no_mangle]
+pub fn x64_page_set_block_count(enabled: bool) { unsafe { BLOCK_COUNT = enabled } }
+/// Memory accesses call one small lookup function per module instead of
+/// inlining the access cache lookup at each (page functions shrink by a
+/// third; engines compile them that much faster). x64_page_set_outline.
+static mut OUTLINE_ACCESS: bool = true;
+#[no_mangle]
+pub fn x64_page_set_outline(enabled: bool) { unsafe { OUTLINE_ACCESS = enabled } }
 
 impl Emitter {
-    fn emit(blocks: &[Block], index: &BTreeMap<u16, usize>) -> Vec<u8> {
+    fn emit(blocks: &[Block], index: &BTreeMap<u16, usize>, chaining: bool, name: String) -> Vec<u8> {
         let mut b = WasmBuilder::new();
         b.set_entry_result();
-        b.set_function_name("x64_page".into());
+        b.set_function_name(name);
         let budget = b.arg_local_initial_state.unsafe_clone();
         let v = (0..LOCALS64)
             .map(|_| b.declare_zeroed_local_i64())
@@ -1401,14 +1645,19 @@ impl Emitter {
             frame: None,
             labels: Vec::new(),
             current: 0,
+            access: None,
         };
+        let mark = e.b.body_len();
         e.prologue();
+        size_note("[prologue]".into(), e.b.body_len() - mark);
         let exit = e.b.block_void();
+        let leave = e.b.block_void();
         let retry = e.b.block_void();
         let dispatch = e.b.loop_void();
         let step = e.b.block_void();
         e.frame = Some(Frame {
             exit,
+            leave,
             retry,
             step,
             dispatch,
@@ -1425,22 +1674,70 @@ impl Emitter {
         e.b.sub_i64();
         e.c64(4096);
         e.b.op(op::OP_I64GEU);
-        e.b.br_if(exit);
+        e.b.br_if(leave);
         for _ in blocks {
             let label = e.b.block_void();
             e.labels.push(label);
         }
         e.labels.reverse();
         let bad = e.b.block_void();
-        e.g(RIP);
-        e.b.wrap_i64_to_i32();
-        e.c32(4095);
-        e.b.and_i32();
-        let targets: Vec<Label> = (0..PAGE as u16)
-            .map(|o| index.get(&o).map_or(bad, |&i| e.labels[i]))
-            .collect();
-        e.b.brtable(bad, &mut targets.iter());
+        let mark = e.b.body_len();
+        let offset = |e: &mut Emitter| {
+            e.g(RIP);
+            e.b.wrap_i64_to_i32();
+            e.c32(4095);
+            e.b.and_i32();
+        };
+        if unsafe { BUCKET_DISPATCH } {
+            // Two levels: a table over 16-byte buckets of the page, then the
+            // block starts in the bucket (a page-sized table is most of a
+            // small function and slow to compile)
+            let mut buckets: BTreeMap<u16, Vec<(u16, usize)>> = BTreeMap::new();
+            for (&o, &i) in index {
+                buckets.entry(o >> DISPATCH_SHIFT).or_default().push((o, i));
+            }
+            let order: Vec<u16> = buckets.keys().copied().collect();
+            let mut bucket_labels: HashMap<u16, Label> = HashMap::new();
+            for &b in order.iter().rev() {
+                bucket_labels.insert(b, e.b.block_void());
+            }
+            offset(&mut e);
+            e.ti(OFF);
+            e.c32(DISPATCH_SHIFT as i32);
+            e.b.shr_u_i32();
+            let targets: Vec<Label> = (0..(PAGE >> DISPATCH_SHIFT) as u16)
+                .map(|b| bucket_labels.get(&b).copied().unwrap_or(bad))
+                .collect();
+            e.b.brtable(bad, &mut targets.iter());
+            for b in order {
+                e.b.block_end();
+                for &(o, i) in &buckets[&b] {
+                    e.gi(OFF);
+                    e.c32(o as i32);
+                    e.b.eq_i32();
+                    e.b.br_if(e.labels[i]);
+                }
+                e.b.br(bad);
+            }
+        }
+        else {
+            offset(&mut e);
+            let targets: Vec<Label> = (0..PAGE as u16)
+                .map(|o| index.get(&o).map_or(bad, |&i| e.labels[i]))
+                .collect();
+            e.b.brtable(bad, &mut targets.iter());
+        }
+        size_note("[dispatch br_table]".into(), e.b.body_len() - mark);
         e.b.block_end();
+        // Not a block start: step it in place, unless the page is due for a
+        // recompile (pages::x64_page_unserved)
+        e.g(RIP);
+        e.b.call_signature(
+            "x64_page_unserved",
+            Signature::new(&[WasmType::I64], &[WasmType::I32]),
+        );
+        e.b.eqz_i32();
+        e.b.br_if(step);
         e.set_exit(EXIT_UNKNOWN);
         e.b.br(exit);
         for (i, block) in blocks.iter().enumerate() {
@@ -1448,6 +1745,7 @@ impl Emitter {
             e.current = i;
             e.block(block, index);
         }
+        let mark = e.b.body_len();
         e.b.unreachable();
         e.b.block_end(); // step
         e.step_code();
@@ -1455,10 +1753,16 @@ impl Emitter {
         e.b.unreachable();
         e.b.block_end(); // retry
         e.set_exit(EXIT_RETRY);
+        e.b.br(exit);
+        e.b.block_end(); // leave
+        if chaining {
+            e.chain();
+        }
         e.b.block_end(); // exit
         e.materialize_if(ARITH);
         e.writeback();
         e.gi(N);
+        size_note("[step, retry, chain, exit]".into(), e.b.body_len() - mark);
         let Emitter {
             mut b,
             v,
@@ -1530,6 +1834,15 @@ impl Emitter {
         self.c32(gp::x64_page_linear as i32);
         self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
         self.s(BASE);
+        // a chaining predecessor passes its lazy EFLAGS record on (see chain)
+        self.b.load_fixed_i32(gp::x64_page_lazy_kind as u32);
+        self.si(FK);
+        self.c32(gp::x64_page_lazy_a as i32);
+        self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
+        self.s(FA);
+        self.c32(gp::x64_page_lazy_b as i32);
+        self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
+        self.s(FB);
     }
     /// Memory becomes authoritative: GPRs, materialized EFLAGS and RIP.
     fn writeback(&mut self) {
@@ -1571,7 +1884,12 @@ impl Emitter {
         self.s(RIP);
         self.b.br(self.f().dispatch);
     }
+    /// Count one native instruction, unless blocks count theirs at entry
+    /// (BLOCK_COUNT).
     fn retired(&mut self) {
+        if unsafe { BLOCK_COUNT } {
+            return;
+        }
         self.gi(N);
         self.c32(1);
         self.b.add_i32();
@@ -1596,8 +1914,91 @@ impl Emitter {
         match in_page(0, target).and_then(|o| index.get(&o)) {
             Some(&i) if i > self.current => self.b.br(self.labels[i]),
             Some(_) => self.leave_to(self.f().dispatch, target),
-            None => self.leave_to(self.f().exit, target),
+            None => self.leave_to(self.f().leave, target),
         }
+    }
+    /// RIP left the page: with budget left and a chaining entry for the new
+    /// linear page (pages::CHAIN, tagged with the access cache epoch), write
+    /// the state back and tail-call that page's function, which counts on
+    /// from the instructions retired so far (gp::x64_page_chain). Else
+    /// return to the dispatch loop.
+    fn chain(&mut self) {
+        self.gi(N);
+        self.gi(K);
+        self.b.add_i32();
+        self.b.get_local(&self.budget);
+        self.b.ltu_i32();
+        if cfg!(feature = "parallel") {
+            // (cores in workers: not while code publications or invalidations
+            // of other cores wait for this one, see parallel::code::poll)
+            let [publish, publish_seen, invalidate, invalidate_seen] =
+                unsafe { crate::parallel::code::pending_addresses() };
+            for (next, seen) in [(publish, publish_seen), (invalidate, invalidate_seen)] {
+                self.c32(next as i32);
+                self.b.guest_load_i32(0);
+                self.c32(seen as i32);
+                self.b.load_aligned_i32(0);
+                self.b.eq_i32();
+                self.b.and_i32();
+            }
+        }
+        self.b.if_void();
+        self.g(RIP);
+        self.c64(12);
+        self.b.shr_u_i64();
+        self.s(TAG);
+        self.g(TAG);
+        self.b.wrap_i64_to_i32();
+        self.c32(super::pages::CHAIN_ENTRIES as i32 - 1);
+        self.b.and_i32();
+        self.c32(4);
+        self.b.shl_i32();
+        self.b.load_fixed_i32(gp::x64_code_base as u32);
+        self.b.add_i32();
+        self.si(ENT);
+        self.gi(ENT);
+        self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
+        self.g(TAG);
+        self.g(EP);
+        self.b.or_i64();
+        self.b.eq_i64();
+        self.b.if_void();
+        // the state goes to memory, EFLAGS with the lazy record unevaluated:
+        // the next function continues with it (its prologue)
+        self.writeback();
+        self.c32(gp::x64_page_lazy_kind as i32);
+        self.gi(FK);
+        self.b.store_aligned_i32(0);
+        self.c32(gp::x64_page_lazy_a as i32);
+        self.g(FA);
+        self.b.store_aligned_i64(0);
+        self.c32(gp::x64_page_lazy_b as i32);
+        self.g(FB);
+        self.b.store_aligned_i64(0);
+        self.c32(gp::x64_page_linear as i32);
+        self.g(RIP);
+        self.c64(!4095);
+        self.b.and_i64();
+        self.b.store_aligned_i64(0);
+        self.c32(gp::x64_page_chain as i32);
+        self.b.load_fixed_i32(gp::x64_page_chain as u32);
+        self.gi(N);
+        self.b.add_i32();
+        self.b.store_aligned_i32(0);
+        self.b.get_local(&self.budget);
+        self.gi(N);
+        self.b.sub_i32();
+        self.gi(K);
+        self.b.sub_i32();
+        self.gi(ENT);
+        self.b.load_aligned_i32(8);
+        self.b.return_call_indirect_fn1();
+        self.b.block_end();
+        self.b.block_end();
+        self.materialize_if(ARITH);
+        self.writeback();
+        self.gi(N);
+        self.b.return_();
     }
     /// Retry the branch at `start` unless its target outside the page is
     /// canonical where the page runs (a noncanonical target is #GP at the
@@ -1612,12 +2013,24 @@ impl Emitter {
     /// Continue at the address in RIP (checked by dispatch).
     fn dispatch(&mut self) { self.b.br(self.f().dispatch); }
     fn block(&mut self, block: &Block, index: &BTreeMap<u16, usize>) {
+        if unsafe { BLOCK_COUNT } {
+            // (a block left early, by a retry or a step, counts the rest of
+            // its instructions too: N bounds activations and feeds statistics)
+            let native = block.insts.iter().filter(|i| !matches!(i.op, Op::Step)).count();
+            if native != 0 {
+                self.gi(N);
+                self.c32(native as i32);
+                self.b.add_i32();
+                self.si(N);
+            }
+        }
         for inst in &block.insts {
             self.instruction(inst, index);
         }
         match block.end {
             End::Stop => {},
             End::Retry(o) => self.leave_to(self.f().retry, o as u64),
+            End::StepAt(o) => self.leave_to(self.f().step, o as u64),
             End::Next(o) => {
                 if !block.insts.last().is_some_and(|i| matches!(i.op, Op::Step))
                     && index.get(&o) != Some(&(self.current + 1))
@@ -1735,7 +2148,94 @@ impl Emitter {
         self.host_or(size, write, start, self.f().retry)
     }
     /// host(), leaving for `fallback` (retry, or step) when refused.
+    /// The module's internal function (addr: i64, kind: i32) -> i32: the
+    /// host address for a `kind & 255`-byte access (bit 8: write) at linear
+    /// addr from the access cache (x64::jac), else x64_page_access; 0 when
+    /// refused. The same lookup host_or otherwise inlines.
+    fn access_function(&mut self) -> u32 {
+        if let Some(f) = self.access {
+            return f;
+        }
+        use crate::leb::{write_leb_i32, write_leb_u32};
+        debug_assert!(jac::WRITE_OFFSET == 1 << 15 && jac::ENTRY_BYTES == 16);
+        let slow = self.b.import_index(
+            "x64_page_access",
+            Signature::new(&[WasmType::I64, WasmType::I32], &[WasmType::I32]),
+        );
+        let mut c: Vec<u8> = vec![2, 1, op::TYPE_I64, 2, op::TYPE_I32];
+        let i32c = |c: &mut Vec<u8>, v: i32| {
+            c.push(op::OP_I32CONST);
+            write_leb_i32(c, v);
+        };
+        // tag = addr >> 12 | epoch bits (local 2)
+        c.extend_from_slice(&[op::OP_GETLOCAL, 0, op::OP_I64CONST, 12, op::OP_I64SHRU]);
+        i32c(&mut c, gp::x64_jac_epoch as i32);
+        c.extend_from_slice(&[op::OP_I64LOAD, 3, 0, op::OP_I64OR, op::OP_TEELOCAL, 2]);
+        // entry = table base + (tag & (ENTRIES - 1)) * 16 (+ write tables) (local 3)
+        c.push(op::OP_I32WRAPI64);
+        i32c(&mut c, jac::ENTRIES as i32 - 1);
+        c.push(op::OP_I32AND);
+        i32c(&mut c, 4);
+        c.push(op::OP_I32SHL);
+        i32c(&mut c, gp::x64_jac_base as i32);
+        c.extend_from_slice(&[op::OP_I32LOAD, 2, 0, op::OP_I32ADD, op::OP_GETLOCAL, 1]);
+        i32c(&mut c, 8);
+        c.push(op::OP_I32SHRU);
+        i32c(&mut c, 1);
+        c.push(op::OP_I32AND);
+        i32c(&mut c, 15);
+        c.extend_from_slice(&[op::OP_I32SHL, op::OP_I32ADD, op::OP_SETLOCAL, 3]);
+        // offset in the page (local 4)
+        c.extend_from_slice(&[op::OP_GETLOCAL, 0, op::OP_I32WRAPI64]);
+        i32c(&mut c, 4095);
+        c.extend_from_slice(&[op::OP_I32AND, op::OP_SETLOCAL, 4]);
+        // hit: tag matches and the access stays in the page
+        c.extend_from_slice(&[op::OP_GETLOCAL, 3, op::OP_I64LOAD, 3, 0, op::OP_GETLOCAL, 2, op::OP_I64EQ]);
+        c.extend_from_slice(&[op::OP_GETLOCAL, 4]);
+        i32c(&mut c, 4096);
+        c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+        i32c(&mut c, 255);
+        c.extend_from_slice(&[op::OP_I32AND, op::OP_I32SUB, op::OP_I32LEU, op::OP_I32AND]);
+        if WasmBuilder::ATOMIC_GUEST_MEMORY {
+            // (cores in workers: natural alignment, min(size, 8))
+            c.extend_from_slice(&[op::OP_GETLOCAL, 4, op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 255);
+            c.push(op::OP_I32AND);
+            i32c(&mut c, 8);
+            c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 255);
+            c.push(op::OP_I32AND);
+            i32c(&mut c, 8);
+            c.extend_from_slice(&[op::OP_I32LTU, op::OP_SELECT]);
+            i32c(&mut c, 1);
+            c.extend_from_slice(&[op::OP_I32SUB, op::OP_I32AND, op::OP_I32EQZ, op::OP_I32AND]);
+        }
+        c.extend_from_slice(&[op::OP_IF, op::TYPE_I32]);
+        c.extend_from_slice(&[op::OP_GETLOCAL, 3, op::OP_I32LOAD, 2, 8, op::OP_GETLOCAL, 4, op::OP_I32ADD]);
+        c.extend_from_slice(&[op::OP_ELSE, op::OP_GETLOCAL, 0, op::OP_GETLOCAL, 1, op::OP_CALL]);
+        write_leb_u32(&mut c, slow);
+        c.extend_from_slice(&[op::OP_END, op::OP_END]);
+        let f = self.b.add_internal_function(
+            Signature::new(&[WasmType::I64, WasmType::I32], &[WasmType::I32]),
+            c,
+        );
+        self.access = Some(f);
+        f
+    }
     fn host_or(&mut self, size: u32, write: bool, start: u64, fallback: Label) {
+        if unsafe { OUTLINE_ACCESS } {
+            let f = self.access_function();
+            self.g(ADDR);
+            self.c32(size as i32 | (write as i32) << 8);
+            self.b.call_internal(f);
+            self.ti(HH);
+            self.b.eqz_i32();
+            self.b.if_void();
+            self.leave_to(fallback, start);
+            self.b.block_end();
+            self.gi(HH);
+            return;
+        }
         let table = if write { jac::WRITE_OFFSET } else { 0 };
         self.g(ADDR);
         self.c64(12);
@@ -2191,6 +2691,16 @@ impl Emitter {
 
 impl Emitter {
     fn instruction(&mut self, inst: &Inst, index: &BTreeMap<u16, usize>) {
+        if unsafe { (*(&raw const SIZE_STATS)).is_none() } {
+            return self.instruction_inner(inst, index);
+        }
+        let before = self.b.body_len();
+        self.instruction_inner(inst, index);
+        let name = format!("{:?}", inst.op);
+        let name = name.split([' ', '{', '(']).next().unwrap_or("?").to_string();
+        size_note(name, self.b.body_len() - before);
+    }
+    fn instruction_inner(&mut self, inst: &Inst, index: &BTreeMap<u16, usize>) {
         let start = inst.d.start.0;
         let next = inst.d.next.0;
         let need = inst.writes & inst.live_out;
@@ -3174,6 +3684,110 @@ impl Emitter {
                 dst,
                 src,
             } => self.vfp(inst, start, code, double, packed, dst, src),
+            Op::Vpacked { op, dst, src } => {
+                self.sse_check(start);
+                self.vector_source(src, inst);
+                let source = self.b.set_new_local_v128();
+                self.c32(Self::xmm(dst) as i32);
+                self.b.simd_memory(0x00, 0);
+                let destination = self.b.set_new_local_v128();
+                self.c32(Self::xmm(dst) as i32);
+                self.packed(op, &destination, &source);
+                self.b.simd_memory(0x0B, 0);
+                self.b.free_local_v128(source);
+                self.b.free_local_v128(destination);
+            },
+            Op::VshiftImm {
+                dst,
+                bits,
+                kind,
+                count,
+            } => {
+                self.sse_check(start);
+                self.c32(Self::xmm(dst) as i32);
+                self.c32(Self::xmm(dst) as i32);
+                self.b.simd_memory(0x00, 0);
+                let count = count as u32;
+                if bits == 128 {
+                    self.b.simd_zero();
+                    let mut lanes = [16; 16];
+                    for (k, lane) in lanes.iter_mut().enumerate() {
+                        let index =
+                            if kind == 3 { k as i32 + count as i32 } else { k as i32 - count as i32 };
+                        if (0..16).contains(&index) {
+                            *lane = index as u8;
+                        }
+                    }
+                    self.b.simd_shuffle(lanes);
+                }
+                else if count >= bits as u32 && kind != 4 {
+                    self.b.drop_();
+                    self.b.simd_zero();
+                }
+                else {
+                    self.c32(count.min(bits as u32 - 1) as i32);
+                    let base = match bits {
+                        16 => 0x8B,
+                        32 => 0xAB,
+                        _ => 0xCB,
+                    };
+                    self.b.simd(
+                        base + match kind {
+                            6 => 0,
+                            4 => 1,
+                            _ => 2,
+                        },
+                    );
+                }
+                self.b.simd_memory(0x0B, 0);
+            },
+            Op::Vcompare { double, dst, src } => self.vcompare(inst, start, double, dst, src),
+            Op::Invlpg { address } => {
+                // CPL > 0 is #GP (retried)
+                self.c32(gp::cpl as i32);
+                self.b.load_u8(0);
+                self.b.if_void();
+                self.leave_to(self.f().retry, start);
+                self.b.block_end();
+                self.address(&address, next, true);
+                self.b.call_signature(
+                    "x64_page_invlpg",
+                    Signature::new(&[WasmType::I64], &[WasmType::I32]),
+                );
+                self.b.if_void();
+                self.retired();
+                self.leave_to(self.f().exit, next);
+                self.b.block_end();
+            },
+            Op::Mxcsr { load, address } => {
+                self.sse_check(start);
+                if load {
+                    self.address(&address, next, true);
+                    self.s(ADDR);
+                    self.host(4, false, start);
+                    self.load(32);
+                    self.b.wrap_i64_to_i32();
+                    self.si(ST);
+                    // reserved bits: #GP in the interpreter
+                    self.gi(ST);
+                    self.c32(!crate::cpu::cpu::MXCSR_MASK);
+                    self.b.and_i32();
+                    self.b.if_void();
+                    self.leave_to(self.f().retry, start);
+                    self.b.block_end();
+                    self.c32(gp::mxcsr as i32);
+                    self.gi(ST);
+                    self.b.store_aligned_i32(0);
+                }
+                else {
+                    self.address(&address, next, true);
+                    self.s(ADDR);
+                    self.host(4, true, start);
+                    self.b.load_fixed_i32(gp::mxcsr as u32);
+                    self.b.extend_unsigned_i32_to_i64();
+                    self.store(32);
+                }
+            },
             Op::MovdIn { width, dst, src } => {
                 self.sse_check(start);
                 self.read(src, width, inst);
@@ -3198,6 +3812,19 @@ impl Emitter {
                     },
                     Opnd::Imm(_) => unreachable!(),
                 }
+            },
+            Op::ReadCr { control, reg } => {
+                // CPL > 0 is #GP (retried)
+                self.c32(gp::cpl as i32);
+                self.b.load_u8(0);
+                self.b.if_void();
+                self.leave_to(self.f().retry, start);
+                self.b.block_end();
+                self.load_pair(
+                    gp::cr as u32 + 4 * control as u32,
+                    gp::x64_cr_hi as u32 + 4 * control as u32,
+                );
+                self.set_reg(reg, 64);
             },
             Op::Cr8 { write, reg } => {
                 // CPL > 0 is #GP (retried)
@@ -3333,8 +3960,9 @@ impl Emitter {
     }
     /// SSE ADD/MUL/SUB/DIV natively when the result is exactly what the
     /// interpreter (SoftFloat, crate::x64::vector) produces without changing
-    /// MXCSR: round to nearest, every exception masked, no FTZ/DAZ, and PE
-    /// already set (so an inexact result changes nothing); operands finite
+    /// MXCSR: round to nearest, every exception masked, and PE already set
+    /// (FTZ and DAZ may be set: they affect none of the operands and results
+    /// admitted here) (so an inexact result changes nothing); operands finite
     /// and normal or zero; a divisor that is not zero; and a result that is
     /// normal above the smallest binade (no underflow, whichever way
     /// tininess is detected) or an exact zero. Otherwise the instruction is
@@ -3350,8 +3978,9 @@ impl Emitter {
         src: Xmm,
     ) {
         self.sse_check(start);
+        // (DAZ and FTZ change nothing for the operands and results below)
         self.b.load_fixed_i32(gp::mxcsr as u32);
-        self.c32(0xFFE0);
+        self.c32(0x7FA0);
         self.b.and_i32();
         self.c32(0x1FA0);
         self.b.ne_i32();
@@ -3569,6 +4198,183 @@ impl Emitter {
         self.c32(Self::xmm(n) as i32 + 8);
         self.c64(0);
         self.b.store_aligned_i64(0);
+    }
+    /// Push the 128-bit source of a packed form: an XMM register, or aligned
+    /// memory (misaligned: #GP, retried).
+    fn vector_source(&mut self, src: Xmm, inst: &Inst) {
+        match src {
+            Xmm::Reg(s) => {
+                self.c32(Self::xmm(s) as i32);
+                self.b.simd_memory(0x00, 0);
+            },
+            Xmm::Mem(a) => {
+                self.vector_address(&a, 128, true, false, inst);
+                self.gi(HOST);
+                let scratch = self.b.set_new_local();
+                self.b.get_local(&scratch);
+                self.b.guest_load_v128(&scratch);
+                self.b.free_local(scratch);
+            },
+        }
+    }
+    /// Push op(dst, src) (ir::tier0::simd::Page::packed on XMM registers).
+    fn packed(&mut self, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128) {
+        let w = &mut self.b;
+        match op {
+            Packed::MulHigh(signed) => {
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                w.simd(if signed { 0xBC } else { 0xBE });
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                w.simd(if signed { 0xBD } else { 0xBF });
+                w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
+            },
+            Packed::MulDwords => {
+                for v in [dst, src] {
+                    w.get_local_v128(v);
+                    w.simd_zero();
+                    w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
+                }
+                w.simd(0xDE);
+            },
+            Packed::Sad => {
+                // |dst - src| per byte, summed per quadword.
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                w.simd(0x79);
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                w.simd(0x77);
+                w.simd(0x71);
+                w.simd(0x7D);
+                w.simd(0x7F);
+                let sums = w.set_new_local_v128();
+                w.get_local_v128(&sums);
+                w.get_local_v128(&sums);
+                w.get_local_v128(&sums);
+                w.simd_shuffle([4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
+                w.simd(0xAE);
+                w.simd_zero();
+                w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
+                w.free_local_v128(sums);
+            },
+            Packed::Shift(opcode, bits, arithmetic) => {
+                w.get_local_v128(src);
+                w.simd_lane(0x1D, 0);
+                let count = w.set_new_local_i64();
+                w.get_local_i64(&count);
+                w.const_i64((bits - 1) as i64);
+                w.gtu_i64();
+                w.if_v128();
+                if arithmetic {
+                    w.get_local_v128(dst);
+                    w.const_i32((bits - 1) as i32);
+                    w.simd(opcode);
+                }
+                else {
+                    w.simd_zero();
+                }
+                w.else_();
+                w.get_local_v128(dst);
+                w.get_local_i64(&count);
+                w.wrap_i64_to_i32();
+                w.simd(opcode);
+                w.block_end();
+                w.free_local_i64(count);
+            },
+            _ => {
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                match op {
+                    Packed::Shuffle(lanes) => w.simd_shuffle(lanes),
+                    Packed::Binary(opcode) => w.simd(opcode),
+                    Packed::Pack(opcode) => w.simd(opcode),
+                    Packed::Unpack(width, high) => {
+                        let mut lanes = [0; 16];
+                        for k in 0..16u8 {
+                            let element = k / (width * 2);
+                            let side = k / width % 2;
+                            lanes[k as usize] = (if high { 8 } else { 0 })
+                                + element * width
+                                + k % width
+                                + side * 16;
+                        }
+                        w.simd_shuffle(lanes);
+                    },
+                    _ => unreachable!(),
+                }
+            },
+        }
+    }
+    /// COMISS/UCOMISS/COMISD/UCOMISD. With no NaN or denormal operand the
+    /// interpreter changes no MXCSR bit and sets ZF (equal) or CF (less),
+    /// clearing the other arithmetic flags; anything else is retried.
+    fn vcompare(&mut self, inst: &Inst, start: u64, double: bool, dst: u8, src: Xmm) {
+        self.sse_check(start);
+        let bits = if double { 64 } else { 32 };
+        match src {
+            Xmm::Reg(s) => self.xmm_load(s, 0, bits),
+            Xmm::Mem(a) => {
+                self.vector_address(&a, bits, false, false, inst);
+                self.gi(HOST);
+                self.load_bits(bits, 0);
+            },
+        }
+        self.s(TB);
+        self.xmm_load(dst, 0, bits);
+        self.s(TA);
+        // exponent all zeros or all ones with a nonzero fraction
+        let (fraction, exponent_shift, exponent_max) =
+            if double { ((1u64 << 52) - 1, 52, 0x7FF) } else { ((1u64 << 23) - 1, 23, 0xFF) };
+        for v in [TA, TB] {
+            self.g(v);
+            self.c64(fraction);
+            self.b.and_i64();
+            self.c64(0);
+            self.b.ne_i64();
+            self.g(v);
+            self.c64(exponent_shift);
+            self.b.shr_u_i64();
+            self.c64(exponent_max);
+            self.b.and_i64();
+            self.s(TX);
+            self.g(TX);
+            self.b.op(op::OP_I64EQZ);
+            self.g(TX);
+            self.c64(exponent_max);
+            self.b.eq_i64();
+            self.b.or_i32();
+            self.b.and_i32();
+            self.b.if_void();
+            self.leave_to(self.f().retry, start);
+            self.b.block_end();
+        }
+        // FL = FL & ~arithmetic | ZF (a == b) | CF (a < b)
+        self.gi(FL);
+        self.c32(!ARITH as i32);
+        self.b.and_i32();
+        for (compare, flag) in [(op::OP_F64EQ, ZF), (op::OP_F64LT, CF)] {
+            for v in [TA, TB] {
+                self.g(v);
+                if double {
+                    self.b.op(op::OP_F64REINTERPRETI64);
+                }
+                else {
+                    self.b.wrap_i64_to_i32();
+                    self.b.op(op::OP_F32REINTERPRETI32);
+                    self.b.op(op::OP_F64PROMOTEF32);
+                }
+            }
+            self.b.op(compare);
+            if flag != 1 {
+                self.c32(flag.trailing_zeros() as i32);
+                self.b.shl_i32();
+            }
+            self.b.or_i32();
+        }
+        self.si(FL);
+        self.written(ARITH);
     }
     fn load_bits(&mut self, bits: u8, offset: u32) {
         self.b

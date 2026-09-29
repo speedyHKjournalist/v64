@@ -143,7 +143,19 @@ pub fn walk<M: PageTableMemory>(
 /// guest linear page number, and no low-32-bit address aliases.
 pub struct Tlb {
     entries: [Option<Cached>; TLB_CAPACITY],
+    /// entries of non-global translations (tagged with CR3 as well)
     epoch: u64,
+    /// entries of global translations: MOV CR3 keeps them (clear_nonglobal)
+    global_epoch: u64,
+    /// 2 MiB linear regions (hashed) that may hold entries of large pages
+    /// since the last clear; bit 0 of the last word: some entry is a 1 GiB
+    /// page. Invalidating a page elsewhere only checks its own slots.
+    large: [u64; TLB_LARGE_WORDS],
+}
+const TLB_LARGE_WORDS: usize = 16;
+fn tlb_region_bit(address: u64) -> (usize, u64) {
+    let region = (address >> 21) as usize & (TLB_LARGE_WORDS * 64 - 1);
+    (region / 64, 1 << (region % 64))
 }
 #[derive(Clone, Copy)]
 struct Cached {
@@ -159,8 +171,22 @@ impl Default for Tlb {
 impl Tlb {
     pub const fn new() -> Self {
         Self {
-            entries: [None; 256],
+            entries: [None; TLB_CAPACITY],
             epoch: 1,
+            global_epoch: 1,
+            large: [0; TLB_LARGE_WORDS],
+        }
+    }
+    /// A global entry matches under any CR3 until a full clear; the G bit is
+    /// honored only with CR4.PGE, but without it every CR3 write clears
+    /// everything (system::write_cr), so the raw bit is enough here.
+    #[inline(always)]
+    fn current(&self, entry: &Cached, cr3: u64) -> bool {
+        if entry.value.global {
+            entry.epoch == self.global_epoch
+        }
+        else {
+            entry.epoch == self.epoch && entry.cr3 == cr3
         }
     }
     fn control(access: Access, c: Controls) -> u8 {
@@ -180,9 +206,8 @@ impl Tlb {
         c: Controls,
     ) -> Option<u64> {
         let entry = self.entries[Self::slot(address, access as u8)].as_ref()?;
-        if entry.epoch != self.epoch
+        if !self.current(entry, c.cr3)
             || entry.linear_page != address.0 >> 12
-            || entry.cr3 != c.cr3
             || entry.control != Self::control(access, c)
         {
             return None;
@@ -196,9 +221,8 @@ impl Tlb {
         c: Controls,
     ) -> Option<Translation> {
         let entry = self.entries[Self::slot(address, access as u8)]?;
-        if entry.epoch != self.epoch
+        if !self.current(&entry, c.cr3)
             || entry.linear_page != address.0 >> 12
-            || entry.cr3 != c.cr3
             || entry.control != Self::control(access, c)
         {
             return None;
@@ -214,15 +238,34 @@ impl Tlb {
         c: Controls,
         value: Translation,
     ) {
+        if value.page_shift > 12 {
+            let (word, bit) = if value.page_shift > 21 { (TLB_LARGE_WORDS - 1, 1) } else { tlb_region_bit(address.0) };
+            self.large[word] |= bit;
+            // (a 1 GiB page makes every invalidation a full scan)
+            if value.page_shift > 21 {
+                self.large = [u64::MAX; TLB_LARGE_WORDS];
+            }
+        }
         self.entries[Self::slot(address, access as u8)] = Some(Cached {
             linear_page: address.0 >> 12,
             cr3: c.cr3,
             control: Self::control(access, c),
-            epoch: self.epoch,
+            epoch: if value.global { self.global_epoch } else { self.epoch },
             value,
         });
     }
     pub fn invalidate(&mut self, address: LinearAddress) {
+        let (word, bit) = tlb_region_bit(address.0);
+        if self.large[word] & bit == 0 {
+            // only 4 KiB entries can map this page: they are in its own slots
+            for access in [Access::Read, Access::Write, Access::Execute] {
+                let slot = &mut self.entries[Self::slot(address, access as u8)];
+                if slot.is_some_and(|entry| entry.linear_page == address.0 >> 12) {
+                    *slot = None;
+                }
+            }
+            return;
+        }
         for slot in &mut self.entries {
             if slot.is_some_and(|entry| {
                 (entry.linear_page << 12) >> entry.value.page_shift
@@ -233,9 +276,20 @@ impl Tlb {
         }
     }
     pub fn clear(&mut self) {
+        self.large = [0; TLB_LARGE_WORDS];
+        self.epoch = self.epoch.wrapping_add(1);
+        self.global_epoch = self.global_epoch.wrapping_add(1);
+        if self.epoch == 0 || self.global_epoch == 0 {
+            self.entries = [None; TLB_CAPACITY];
+            self.epoch = 1;
+            self.global_epoch = 1;
+        }
+    }
+    /// MOV CR3 (CR4.PGE set, no PCID): the non-global entries go.
+    pub fn clear_nonglobal(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
         if self.epoch == 0 {
-            self.entries = [None; 256];
+            self.clear();
         }
     }
 
@@ -248,7 +302,7 @@ impl Tlb {
             .entries
             .iter()
             .flatten()
-            .filter(|entry| entry.epoch == self.epoch)
+            .filter(|entry| entry.epoch == if entry.value.global { self.global_epoch } else { self.epoch })
         {
             let value = entry.value;
             records.extend_from_slice(&[
@@ -342,11 +396,15 @@ impl Tlb {
             {
                 return false;
             }
+            if page_shift == 21 {
+                let (word, bit) = tlb_region_bit(address.0);
+                candidate.large[word] |= bit;
+            }
             candidate.entries[slot] = Some(Cached {
                 linear_page,
                 cr3,
                 control: control as u8,
-                epoch: candidate.epoch,
+                epoch: if value.global { candidate.global_epoch } else { candidate.epoch },
                 value,
             });
         }

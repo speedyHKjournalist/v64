@@ -60,7 +60,8 @@ still sees stale translations, just as on hardware.
 **The scheduler bounds every slice.** JS `run_cores()` chooses the next core and
 calls Rust `run_cpu_slice(budget)`:
 
-- A slice lasts at most `cpu_quantum` dispatches (4096 by default).
+- A slice lasts at most `cpu_quantum` dispatches (32768 by default with the
+  JIT, 4096 interpreted or with the deterministic clock).
   `cpu_schedule_seed` fixes the order of cores, so a run can be reproduced.
 - PAUSE ends the slice, so a core that spins on a lock gives the others a turn.
 - A long REP instruction yields every 256 elements.

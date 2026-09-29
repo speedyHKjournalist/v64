@@ -7,7 +7,13 @@
 //
 // Env: WIN_IMAGE, WIN_CORES (1), WIN_MEMORY_MB (2048), X64_JIT (1),
 // X64_IR_TIER0, WIN_PARALLEL, WIN_USER_PASSWORD (the image's test account password),
-// WIN_TIMEOUT_MS, WIN_OUT (output directory). While it runs, a line written to
+// WIN_TIMEOUT_MS, WIN_OUT (output directory), WIN_STOP_AT_DESKTOP=1 (stop once
+// the desktop shows after sign-in; for boot timing), WIN_CPU_PROFILE=<seconds>
+// (host CPU profiles, one <out>/prof-<end>s.cpuprofile per window),
+// WIN_OVERLAY_SAVE=<file> (after the desktop: a full shutdown, then the disk
+// overlay, i.e. every sector the guest wrote, is saved), WIN_OVERLAY_LOAD=<file>
+// (boot with such an overlay: the state after Windows installed the drivers
+// for this machine; the image itself is never written). While it runs, a line written to
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
 // "trace on|off" (WIN_USER_TRACE=1 enables it from the start).
@@ -42,6 +48,27 @@ const probe64 = build("x86_64-w64-mingw32-gcc", "entry", path.join(out, "PROBE64
 const probe32 = build("i686-w64-mingw32-gcc", "_entry@0", path.join(out, "PROBE32.EXE"));
 const tools = new MemoryDisk(make_fat16({"PROBE64.EXE": probe64, "PROBE32.EXE": probe32}));
 const source = new ReadOnlyOverlayDisk(image_path);
+// Overlay file: "V86OVL1\0", image size (u64), sector count (u32), the
+// sector numbers (u32 each), then their contents
+if(process.env.WIN_OVERLAY_LOAD)
+{
+    const file = fs.readFileSync(process.env.WIN_OVERLAY_LOAD);
+    assert.equal(file.toString("latin1", 0, 8), "V86OVL1\0", "overlay file");
+    assert.equal(Number(file.readBigUInt64LE(8)), source.byteLength, "overlay of this image");
+    const count = file.readUInt32LE(16);
+    const sectors = new Uint32Array(file.buffer.slice(file.byteOffset + 20, file.byteOffset + 20 + count * 4));
+    const bytes = new Uint8Array(file.buffer, file.byteOffset + 20 + count * 4, count * 512);
+    source.set_state([1, source.byteLength, sectors, bytes]);
+}
+function save_overlay(filename)
+{
+    const [, size, sectors, bytes] = source.get_state();
+    const header = Buffer.alloc(20);
+    header.write("V86OVL1\0", 0, "latin1");
+    header.writeBigUInt64LE(BigInt(size), 8);
+    header.writeUInt32LE(sectors.length, 16);
+    fs.writeFileSync(filename, Buffer.concat([header, Buffer.from(sectors.buffer, sectors.byteOffset, sectors.byteLength), Buffer.from(bytes)]));
+}
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const vm = new V86({
@@ -49,14 +76,38 @@ const vm = new V86({
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
     hda: source, hdb: tools, memory_size: memory_mb * 1048576, vga_memory_size: 16 << 20,
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
-    disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true,
+    // WIN_QUANTUM: instructions per core slice when cores take turns
+    ...(process.env.WIN_QUANTUM ? {cpu_quantum: +process.env.WIN_QUANTUM} : {}),
+    // WIN_ASYNC_PUBLICATION=1: compile generated modules asynchronously, as
+    // the browser does by default
+    disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: !+process.env.WIN_ASYNC_PUBLICATION,
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
     // WIN_PARALLEL=1: the application processors run in vCPU workers
     ...(+process.env.WIN_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),
 });
 
+// Rolling host profiles of this process (node:inspector), so that each boot
+// phase can be read separately
+let profiler = null;
+if(+process.env.WIN_CPU_PROFILE)
+{
+    const inspector = await import("node:inspector/promises");
+    profiler = new inspector.Session();
+    profiler.connect();
+    await profiler.post("Profiler.enable");
+    await profiler.post("Profiler.setSamplingInterval", {interval: 2000});
+    await profiler.post("Profiler.start");
+}
+async function profile_window()
+{
+    const {profile} = await profiler.post("Profiler.stop");
+    fs.writeFileSync(path.join(out, `prof-${String(elapsed()).padStart(4, "0")}s.cpuprofile`), JSON.stringify(profile));
+    await profiler.post("Profiler.start");
+}
 const started = performance.now();
 const elapsed = () => Math.round((performance.now() - started) / 1000);
+let powered_off = null;
+vm.add_listener("acpi-power-off", state => { powered_off = state; });
 const report = {image: {path: image_path, size: source_stat.size, mtime_ms: source_stat.mtimeMs}, cores, jit,
     parallel: !!+process.env.WIN_PARALLEL, memory_mb, modes: [], events: [], results: {}};
 const event = (kind, detail = {}) => { const e = {s: elapsed(), kind, ...detail}; report.events.push(e); console.log("X64_WIN_EVENT " + JSON.stringify(e)); };
@@ -91,10 +142,20 @@ const enter = () => press([28, 156]);
 // The sign-in screen of this image at 1024x768: the password box is a white
 // field right of the user tile. Keys pressed before it appears are lost
 // (the lock screen fades out slowly on an emulated core).
+// vga.svga_memory is a lib.js view (a Proxy that builds a typed array on
+// every element access): read the frame buffer through one plain array
+const svga_bytes = () => new Uint8Array(cpu.wasm_memory.buffer, cpu.devices.vga.svga_memory.byteOffset, cpu.devices.vga.vga_memory_size);
+let pixel_memory = null, pixel_memory_at = -1;
 function pixel(x, y)
 {
     const vga = cpu.devices.vga, bytes_per = vga.svga_bpp / 8;
-    const at = (vga.svga_offset + y * vga.svga_width + x) * bytes_per, m = vga.svga_memory;
+    // (one array per polling round: the wasm memory may grow in between)
+    if(pixel_memory_at !== Math.floor(performance.now() / 50) || pixel_memory.buffer !== cpu.wasm_memory.buffer)
+    {
+        pixel_memory = svga_bytes();
+        pixel_memory_at = Math.floor(performance.now() / 50);
+    }
+    const at = (vga.svga_offset + y * vga.svga_width + x) * bytes_per, m = pixel_memory;
     return bytes_per === 2 ? [(m[at + 1] >> 3) << 3, (m[at] >> 5 | (m[at + 1] & 7) << 3) << 2, (m[at] & 31) << 3] : [m[at + 2], m[at + 1], m[at]];
 }
 function password_box_visible()
@@ -126,11 +187,12 @@ async function sign_in()
     for(let i = 0; i < 12 && !password_box_visible() && !desktop_visible(); i++)
     {
         await press([57, 185]);
-        await delay(10000);
+        for(const limit = performance.now() + 10000; performance.now() < limit && !password_box_visible() && !desktop_visible();) await delay(250);
     }
     // never type the password blind (it could reach the desktop); the caller
     // retries while the session is not up
     if(!password_box_visible()) { event("sign-in-no-password-box"); return; }
+    event("password-box");
     for(let i = 0; i < 4; i++) await press([14, 142]);
     await type(password);
     await enter();
@@ -151,9 +213,12 @@ function run_dialog_ready()
 async function run_command(line)
 {
     event("run", {line});
+    const asked = performance.now();
     await press([0xE0, 0x5B, 0x13, 0x93, 0xE0, 0xDB]); // Win+R
-    for(const limit = performance.now() + 60000; performance.now() < limit && !run_dialog_ready();) await delay(1000);
+    for(const limit = performance.now() + 60000; performance.now() < limit && !run_dialog_ready();) await delay(100);
     if(!run_dialog_ready()) { event("run-dialog-missing"); return false; }
+    // responsiveness: Win+R until the dialog is up with its input focused
+    event("run-dialog", {ms: Math.round(performance.now() - asked)});
     await delay(1000);
     // the previous command is preselected; typing replaces it
     await type(line);
@@ -175,7 +240,7 @@ function screenshot(force)
 {
     const vga = cpu.devices.vga, width = vga.svga_width, height = vga.svga_height;
     if(!vga.svga_enabled || !width || !height || ![32, 24, 16].includes(vga.svga_bpp)) return null;
-    const bytes_per = vga.svga_bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = vga.svga_memory;
+    const bytes_per = vga.svga_bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = svga_bytes();
     for(let y = 0; y < height; y++) for(let x = 0; x < width; x++)
     {
         const from = (vga.svga_offset + y * width + x) * bytes_per, to = y * stride + 1 + x * 3;
@@ -216,7 +281,9 @@ function screenshot(force)
 function stats()
 {
     const ex = cpu.wm.exports;
-    const tier = ex.x64_page_stat ? Object.fromEntries(["compiled", "native", "retries", "unknown", "steps", "invalidated"].map((name, i) => [name, ex.x64_page_stat(i)])) : null;
+    const tier = ex.x64_page_stat ? Object.fromEntries([["compiled", 0], ["native", 1], ["retries", 2], ["unknown", 3], ["steps", 4], ["invalidated", 5],
+        ["failed", 7], ["recompiled", 8], ["evicted", 11], ["live", 12], ["activations", 13], ["invlpg", 14], ["cr_writes", 15], ["access_misses", 16], ["lfb_fills", 17], ["cr3_keep_global", 18], ["jac_large_flush", 19], ["unaligned_reads", 25], ["distinct", 21], ["ms_in_calls", 20], ["ms_in_execute", 22], ["ms_first_calls", 23], ["bytes_compiled", 24]]
+        .map(([name, i]) => [name, ex.x64_page_stat(i)])) : null;
     const d = cpu.get_diagnostics();
     return {page_tier: tier, cores: d.cores.map(core => ({state: core.state, ip: core.linear_ip, cs: core.cs, retired: core.retired_instructions, halted: core.halted})),
         mode: d.cpu.mode, overlay_sectors: source.overlay.size, execution: d.execution,
@@ -296,6 +363,27 @@ try
     if(process.env.WIN_X64_PROFILE !== "0") cpu.wm.exports.set_x64_test_capabilities(1);
     if(process.env.WIN_PAGE_TIER === "0") cpu.wm.exports.x64_page_set_enabled(0);
     if(process.env.WIN_STEP_PROFILE) cpu.wm.exports.x64_page_profile(1);
+    if(process.env.WIN_RECOMPILE_MISSES) cpu.wm.exports.x64_page_set_recompile_misses(+process.env.WIN_RECOMPILE_MISSES);
+    // WIN_OUTLINE=0: inline the access cache lookup at every access
+    if(process.env.WIN_OUTLINE === "0") cpu.wm.exports.x64_page_set_outline(0);
+    // WIN_SIZE_STATS=1: Wasm bytes per template kind, printed at the end
+    if(process.env.WIN_SIZE_STATS) cpu.wm.exports.x64_pagegen_size_stats(1);
+    // WIN_PAGE_TIMING=1: time spent inside page function calls (stats)
+    if(process.env.WIN_PAGE_TIMING) cpu.wm.exports.x64_page_timing(1);
+    // WIN_DUMP_MODULES=<n>: save every 64th published page function module
+    // (up to n) to <out>/modules/ for offline size analysis
+    if(+process.env.WIN_DUMP_MODULES)
+    {
+        fs.mkdirSync(path.join(out, "modules"), {recursive: true});
+        const publish = cpu.x64_page_publish.bind(cpu);
+        let published = 0, dumped = 0;
+        cpu.x64_page_publish = (id, slot, pointer, length) => {
+            if(published++ % 64 === 0 && dumped < +process.env.WIN_DUMP_MODULES)
+                fs.writeFileSync(path.join(out, "modules", `m${String(dumped++).padStart(4, "0")}.wasm`),
+                    new Uint8Array(cpu.wasm_memory.buffer, pointer >>> 0, length >>> 0));
+            return publish(id, slot, pointer, length);
+        };
+    }
     if(process.env.X64_COMPAT_JIT) cpu.wm.exports.x64_set_compat_jit(process.env.X64_COMPAT_JIT !== "0");
     if(process.env.WIN_USER_TRACE) cpu.wm.exports.x64_user_trace_enable(1);
     // The reset is noted before any state is replaced: record the code at
@@ -337,7 +425,9 @@ try
     cpu.run_cores = () => { try { return run_cores(); } catch(error) { execution_error = error; vm.stop(); return 100; } };
     vm.run();
     const deadline = performance.now() + +(process.env.WIN_TIMEOUT_MS || 3600000);
+    let next_profile = performance.now() + 1000 * +(process.env.WIN_CPU_PROFILE || 0);
     let next_report = 0, next_samples = performance.now() + 60000, next_shot = 0, resets = 0, signed_in = false, probe_sent = 0, text_seen = "";
+    let shutdown_at = 0, shutdown_sent = false, shutdown_deadline = 0;
     while(performance.now() < deadline)
     {
         await delay(200);
@@ -363,6 +453,11 @@ try
             }
         }
         poll_user_trace();
+        if(profiler && performance.now() >= next_profile)
+        {
+            next_profile = performance.now() + 1000 * +process.env.WIN_CPU_PROFILE;
+            await profile_window();
+        }
         const text = text_screen();
         if(text && text !== text_seen) { text_seen = text; event("text", {text}); }
         if(performance.now() >= next_shot)
@@ -391,6 +486,12 @@ try
                 for(let key = 0; key < 0x20000; key++) { const n = get(key); if(n) rows.push([n, key]); }
                 rows.sort((a, b) => b[0] - a[0]);
                 console.log("X64_WIN_STEPS " + rows.slice(0, 40).map(([n, key]) => `${name(key)}:${n}`).join(" "));
+                // retried instructions by opcode, and why accesses were refused
+                const retries = [];
+                for(let key = 0; key < 0x20000; key++) { const n = get(0x20000 + key); if(n) retries.push([n, key]); }
+                retries.sort((a, b) => b[0] - a[0]);
+                console.log("X64_WIN_RETRIES " + retries.slice(0, 30).map(([n, key]) => `${name(key)}:${n}`).join(" ") +
+                    " refused(cross,fault,device,code)=" + [0, 1, 2, 3].map(i => get(0x40000 + i)).join(","));
             }
         }
         if(performance.now() >= next_report)
@@ -402,7 +503,7 @@ try
         // almost entirely black; the lock screen is a full-screen picture,
         // shown first as a plain colour while it loads (keys pressed then
         // are lost). Sign in once a many-coloured screen has been stable.
-        if(!signed_in && last_mode && last_mode[0] >= 800 && dark_fraction < 0.6 && colors >= 12 && performance.now() - last_change > 10000 && !process.env.WIN_MANUAL)
+        if(!signed_in && last_mode && last_mode[0] >= 800 && dark_fraction < 0.6 && colors >= 12 && performance.now() - last_change > 3000 && !process.env.WIN_MANUAL)
         {
             await sign_in();
             signed_in = true;
@@ -417,7 +518,7 @@ try
                 if(password_box_visible() || performance.now() - last_sign_in > 180000) await sign_in();
                 probe_sent = performance.now() + 20000;
             }
-            else
+            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP)
             {
                 const arch = report.results[64] ? 32 : 64;
                 const started = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\probe${arch}.exe %d:\\probe${arch}.exe`);
@@ -438,8 +539,44 @@ try
             }
         }
         if(report.results[64] && report.results[32]) break;
+        if(signed_in && !report.desktop_s && desktop_visible())
+        {
+            report.desktop_s = elapsed();
+            event("desktop");
+            if(process.env.WIN_OVERLAY_SAVE) shutdown_at = performance.now() + 30000;
+            else if(process.env.WIN_DESKTOP_TEST)
+            {
+                // desktop responsiveness: open programs one after another
+                // (Win+R latency each time), screenshots after each
+                await delay(15000);
+                for(const program of ["notepad", "calc", "control", "explorer", "notepad"])
+                {
+                    await run_command(program);
+                    await delay(12000);
+                    screenshot(true);
+                }
+                break;
+            }
+            else if(process.env.WIN_STOP_AT_DESKTOP) break;
+        }
+        // WIN_OVERLAY_SAVE: after the desktop has settled, a full (not
+        // hybrid) shutdown; the overlay is saved once the guest is off
+        if(shutdown_at && performance.now() >= shutdown_at && !shutdown_sent)
+        {
+            shutdown_sent = await run_command(process.env.WIN_SHUTDOWN_COMMAND || "shutdown /s /t 0");
+            if(!shutdown_sent) shutdown_at = performance.now() + 20000;
+            else shutdown_deadline = performance.now() + 900000;
+        }
+        if(shutdown_sent && powered_off)
+        {
+            event("power-off", {state: powered_off});
+            save_overlay(process.env.WIN_OVERLAY_SAVE);
+            event("overlay-saved", {sectors: source.overlay.size});
+            break;
+        }
+        assert.ok(!shutdown_deadline || performance.now() < shutdown_deadline, "the guest powered off");
     }
-    for(const arch of [64, 32])
+    for(const arch of process.env.WIN_STOP_AT_DESKTOP ? [] : [64, 32])
     {
         const r = report.results[arch];
         assert.ok(r, `probe ${arch} completed`);
@@ -449,6 +586,7 @@ try
         assert.equal(r.progress, cores * 64);
         if(arch === 64) assert.ok(BigInt("0x" + r.high_block) >> 32n > 0n, "x64 top-down allocation above 4 GiB");
     }
+    if(process.env.WIN_STOP_AT_DESKTOP) assert.ok(report.desktop_s, "desktop reached");
     report.passed = true;
     console.log("X64_WIN_PASS " + JSON.stringify(report.results));
 }
@@ -461,6 +599,8 @@ catch(error)
 }
 finally
 {
+    if(profiler) await profile_window();
+    if(cpu && process.env.WIN_SIZE_STATS) cpu.wm.exports.x64_pagegen_size_dump();
     if(cpu) { report.final = stats(); screenshot(true); report.text_screen = text_screen(); }
     await vm.stop();
     const final_stat = fs.statSync(image_path);

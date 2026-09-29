@@ -130,7 +130,7 @@ export const FW_CFG_SIGNATURE_QEMU = 0x554D4551;
 
 
 // See same constant in jit.rs
-export const WASM_TABLE_SIZE = 2400;
+export const WASM_TABLE_SIZE = 12000;
 
 export const WASM_TABLE_OFFSET = 1024;
 

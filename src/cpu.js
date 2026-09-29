@@ -569,6 +569,9 @@ CPU.prototype.create_jit_imports = function()
         const supported = WebAssembly.validate(probe);
         if(supported) jit_imports["t"] = table;
         this.wm.exports["ir_t0_set_tail_calls"](supported ? 1 : 0);
+        // x64 page functions continue in the next page's function too
+        // (x64::pages CHAIN)
+        this.wm.exports["x64_page_set_chaining"]?.(supported ? 1 : 0);
     }
 
     this.jit_imports = jit_imports;
@@ -2397,7 +2400,10 @@ CPU.prototype.init = function(settings, device_bus)
     this.clock.set_instruction_source(() => this.wm.exports["take_clock_progress"]());
     const deterministic = this.clock.mode === "deterministic";
     this.wm.exports["set_deterministic_execution"](deterministic);
-    this.scheduler_quantum = settings.cpu_quantum === undefined ? 4096 : settings.cpu_quantum;
+    // Compiled code retires a slice in microseconds: switching cores (their
+    // state is copied) would dominate a short one
+    const default_quantum = settings.disable_jit || deterministic ? 4096 : 32768;
+    this.scheduler_quantum = settings.cpu_quantum === undefined ? default_quantum : settings.cpu_quantum;
     if(!Number.isInteger(this.scheduler_quantum) || this.scheduler_quantum < 1 || this.scheduler_quantum > 100000)
     {
         throw new Error("cpu_quantum must be an integer from 1 to 100000");

@@ -23,12 +23,15 @@ extern "C" {
 
 /// Interpreted instructions on a page before it is compiled.
 const HOT: u32 = 2000;
-/// Unserved entries reached through a published function before recompiling.
-const RECOMPILE_MISSES: u32 = 64;
+/// Unserved entries reached through a published function before recompiling
+/// (x64_page_set_recompile_misses).
+static mut RECOMPILE_MISSES: u32 = 64;
+#[no_mangle]
+pub unsafe fn x64_page_set_recompile_misses(misses: u32) { RECOMPILE_MISSES = misses.max(1); }
 const MAX_RECOMPILES: u32 = 12;
-pub const MAX_FUNCTIONS: usize = 1500;
-const MAX_TRACKED_PAGES: usize = 16384;
-const FAST_SLOTS: usize = 4096;
+pub const MAX_FUNCTIONS: usize = 9000;
+const MAX_TRACKED_PAGES: usize = 65536;
+const FAST_SLOTS: usize = 16384;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Phase {
@@ -52,6 +55,8 @@ fn bit(set: &[u64; 64], offset: u16) -> bool { set[offset as usize / 64] >> (off
 struct PageState {
     heat: u32,
     entries: [u64; 64],
+    /// unserved entries seen once (see note_unserved)
+    seen: [u64; 64],
     entry_count: u32,
     misses: u32,
     compiles: u32,
@@ -61,6 +66,7 @@ impl Default for PageState {
         Self {
             heat: 0,
             entries: [0; 64],
+            seen: [0; 64],
             entry_count: 0,
             misses: 0,
             compiles: 0,
@@ -113,6 +119,40 @@ const INSTRUCTIONS: usize = 9;
 const TEMPLATED: usize = 10;
 const EVICTED: usize = 11;
 
+/// Event counters for profiling (x64_page_stat 13..19, 25): activations of
+/// page functions, INVLPG, control register writes, access cache misses
+/// (x64_page_access calls), access cache fills of the VGA frame buffer, MOV
+/// CR3 keeping global translations, INVLPG flushing a large-page region,
+/// unaligned reads served from BOUNCE.
+pub static mut COUNTERS: [u64; 8] = [0; 8];
+pub const COUNT_ACTIVATIONS: usize = 0;
+pub const COUNT_INVLPG: usize = 1;
+pub const COUNT_CR_WRITES: usize = 2;
+pub const COUNT_ACCESS_MISSES: usize = 3;
+pub const COUNT_LFB_FILLS: usize = 4;
+pub const COUNT_CR3_KEEP_GLOBAL: usize = 5;
+pub const COUNT_JAC_LARGE_FLUSH: usize = 6;
+/// (cores in workers) unaligned reads served from BOUNCE
+pub const COUNT_UNALIGNED_READS: usize = 7;
+#[repr(C, align(16))]
+struct Bounce([u8; 16]);
+static mut BOUNCE: Bounce = Bounce([0; 16]);
+/// x64_page_timing: milliseconds inside page function calls and in execute
+/// as a whole (x64_page_stat 20 and 22; 23: first calls, 24: bytes compiled)
+static mut TIMING: bool = false;
+#[no_mangle]
+pub unsafe fn x64_page_timing(enabled: bool) { TIMING = enabled; }
+mod time {
+    #[link(wasm_import_module = "env")]
+    extern "C" {
+        pub fn microtick() -> f64;
+    }
+}
+static mut TIME_IN_CALLS: f64 = 0.0;
+static mut TIME_IN_EXECUTE: f64 = 0.0;
+/// first calls with budget 0 (the engine compiles the function lazily)
+static mut TIME_FIRST_CALLS: f64 = 0.0;
+static mut BYTES_COMPILED: u64 = 0;
 /// A generated function is running.
 static mut ACTIVE: bool = false;
 /// Code-page invalidations; a step that changes it ends the activation.
@@ -169,18 +209,121 @@ pub unsafe fn allowed() -> bool {
 
 /// Per core: the last code page translation (access cache epoch | user,
 /// linear page, backing). An x64 TLB invalidation changes the epoch.
-static mut CODE_TLB: [(u64, u64, u32); 8] = [(0, 0, 0); 8];
-unsafe fn code_page(rip: u64) -> Option<u32> {
+static mut CODE_TLB: [(u64, u64, u32, bool); 8] = [(0, 0, 0, false); 8];
+
+/// Chaining (pagegen::Emitter::chain): a page function leaving its page
+/// looks the new linear page up here and tail-calls the function serving it,
+/// without returning to the dispatch loop. Per core and CPL, direct mapped by
+/// linear page: tag = page | access cache epoch (so every x64 TLB flush
+/// retires the entries; INVLPG retires its page's), and the Wasm table index
+/// of a published function whose backing page the linear page executed from
+/// when the entry was filled. Retiring a function clears its entries.
+pub const CHAIN_ENTRIES: usize = 1024;
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct ChainEntry {
+    tag: u64,
+    table_index: u32,
+    /// the code page's translation is global (kept by MOV CR3)
+    global: u32,
+}
+#[repr(C, align(16))]
+struct ChainTables([[ChainEntry; CHAIN_ENTRIES]; 2]);
+const NO_CHAIN: ChainEntry = ChainEntry {
+    tag: 0,
+    table_index: 0,
+    global: 0,
+};
+static mut CHAIN: [ChainTables; 8] = [const { ChainTables([[NO_CHAIN; CHAIN_ENTRIES]; 2]) }; 8];
+/// Whether generated code may tail-call through the host's function table
+/// (x64_page_set_chaining: the engine supports Wasm tail calls).
+static mut CHAINING: bool = false;
+#[no_mangle]
+pub unsafe fn x64_page_set_chaining(enabled: bool) {
+    CHAINING = enabled;
+    // functions compiled either way stay valid: a function without chaining
+    // code only returns
+    clear_chains();
+}
+/// Page functions compiled from now on chain (see CHAINING). With cores in
+/// workers each instance chains through its own table and chaining table,
+/// and leaves for crate::parallel::code::poll when other cores published or
+/// invalidated code (pagegen::Emitter::chain).
+pub unsafe fn chaining() -> bool { CHAINING }
+unsafe fn chain_base(core: usize, user: bool) -> u32 {
+    std::ptr::addr_of!(CHAIN[core].0[user as usize]) as u32
+}
+unsafe fn chain_fill(core: usize, user: bool, rip: u64, slot: u32, global: bool) {
+    let page = rip >> 12;
+    CHAIN[core].0[user as usize][page as usize & (CHAIN_ENTRIES - 1)] = ChainEntry {
+        tag: page | jac::epoch_bits(core),
+        table_index: slot + cpu::WASM_TABLE_OFFSET,
+        global: global as u32,
+    };
+}
+/// MOV CR3 (see memory::invalidate_core_nonglobal): code translations of
+/// non-global pages go.
+pub unsafe fn forget_nonglobal_code(core: usize) {
+    CODE_TLB[core] = (0, 0, 0, false);
+    for table in CHAIN[core].0.iter_mut() {
+        for entry in table.iter_mut() {
+            if entry.global == 0 {
+                entry.tag = 0;
+            }
+        }
+    }
+}
+fn clear_chains() {
+    unsafe {
+        for core in (*(&raw mut CHAIN)).iter_mut() {
+            for table in core.0.iter_mut() {
+                for entry in table.iter_mut() {
+                    entry.tag = 0;
+                }
+            }
+        }
+    }
+}
+/// A function is retired: no chaining to its slot any more.
+unsafe fn unchain_slot(slot: u32) {
+    let index = slot + cpu::WASM_TABLE_OFFSET;
+    for core in 0..apic::core_count().clamp(1, 8) {
+        for table in CHAIN[core].0.iter_mut() {
+            for entry in table.iter_mut() {
+                if entry.table_index == index {
+                    entry.tag = 0;
+                }
+            }
+        }
+    }
+}
+/// The backing page of the code page at `rip`, and whether its translation
+/// is global.
+unsafe fn code_page(rip: u64) -> Option<(u32, bool)> {
     let core = apic::current_core();
     let tag = jac::epoch_bits(core) | (*gp::cpl == 3) as u64;
-    let (cached_tag, linear, backing) = CODE_TLB[core];
+    let (cached_tag, linear, backing, global) = CODE_TLB[core];
     if cached_tag == tag && linear == rip >> 12 {
-        return Some(backing);
+        return Some((backing, global));
     }
-    let physical = memory::translate(rip, paging::Access::Execute, false, false).ok()?;
+    let (physical, _, global) = memory::translate_page_execute(rip).ok()?;
     let backing = code_backing(physical)?;
-    CODE_TLB[core] = (tag, rip >> 12, backing);
-    Some(backing)
+    CODE_TLB[core] = (tag, rip >> 12, backing, global);
+    Some((backing, global))
+}
+
+/// INVLPG `address` on `core`: the cached code translation may be of that
+/// page, and so may its chaining entries (a flush of the whole access cache
+/// retired the others by epoch).
+pub unsafe fn forget_code_page(core: usize, address: u64) {
+    CODE_TLB[core] = (0, 0, 0, false);
+    let page = address >> 12;
+    for table in CHAIN[core].0.iter_mut() {
+        let entry = &mut table[page as usize & (CHAIN_ENTRIES - 1)];
+        if entry.tag & !(!0 << jac::EPOCH_SHIFT) == page {
+            entry.tag = 0;
+        }
+    }
 }
 
 /// RAM backing page of the code page at physical `address`.
@@ -208,7 +351,7 @@ pub unsafe fn run(budget: u32) -> Attempt {
         return miss();
     }
     let rip = state::read_rip();
-    let Some(backing) = code_page(rip)
+    let Some((backing, global)) = code_page(rip)
     else {
         return miss();
     };
@@ -245,19 +388,29 @@ pub unsafe fn run(budget: u32) -> Attempt {
             r.clock += 1;
             r.functions[i].last_used = r.clock;
             let slot = r.functions[i].slot;
+            if CHAINING {
+                chain_fill(apic::current_core(), *gp::cpl == 3, rip, slot, global);
+            }
             execute(slot, budget, rip)
         },
         Some(i) if r.functions[i].page == page && r.functions[i].phase != Phase::Dead => {
-            if r.functions[i].phase == Phase::Ready && far {
+            if r.functions[i].phase == Phase::Ready {
                 // An entry the function does not serve: recompile once
-                // enough such entries accumulate.
-                note_entry(r, page, offset);
+                // enough repeated such entries accumulate (note_unserved)
                 let state = r.pages.entry(page).or_default();
-                state.misses += 1;
                 if state.misses >= RECOMPILE_MISSES && state.compiles < MAX_RECOMPILES {
                     state.misses = 0;
                     return compile(page, backing);
                 }
+                // Meanwhile the function steps from here to its next block
+                // start (pagegen: unserved dispatch) and notes the entry.
+                r.clock += 1;
+                r.functions[i].last_used = r.clock;
+                let slot = r.functions[i].slot;
+                if CHAINING {
+                    chain_fill(apic::current_core(), *gp::cpl == 3, rip, slot, global);
+                }
+                return execute(slot, budget, rip);
             }
             miss()
         },
@@ -280,6 +433,46 @@ pub unsafe fn run(budget: u32) -> Attempt {
     }
 }
 
+/// A published function was entered at `offset`, which it does not serve.
+/// Interrupted code resumes at arbitrary instructions, mostly once each; an
+/// offset counts as an entry (and towards a recompile) from its second
+/// sighting. True when the page is due for a recompile.
+fn note_unserved(r: &mut Runtime, page: u32, offset: u16) -> bool {
+    let state = r.pages.entry(page).or_default();
+    let (word, mask) = (offset as usize / 64, 1u64 << (offset % 64));
+    if state.entries[word] & mask != 0 {
+        state.misses += 1;
+    }
+    else if state.seen[word] & mask != 0 {
+        state.entries[word] |= mask;
+        state.entry_count += 1;
+        state.misses += 1;
+        r.stats[ENTRIES] += 1;
+    }
+    else {
+        state.seen[word] |= mask;
+    }
+    state.misses >= unsafe { RECOMPILE_MISSES } && state.compiles < MAX_RECOMPILES
+}
+static mut LAST_UNSERVED: u64 = 0;
+/// Generated code reached an offset its function does not serve (dispatch
+/// after a transfer or a step): 1 to leave (EXIT_UNKNOWN: the page is due for
+/// a recompile), 0 to step the instruction there in place. Only the first of
+/// consecutive stepped instructions is noted.
+#[no_mangle]
+pub unsafe fn x64_page_unserved(rip: u64) -> i32 {
+    let far = !(LAST_UNSERVED < rip && rip - LAST_UNSERVED <= 15);
+    LAST_UNSERVED = rip;
+    if !far {
+        return 0;
+    }
+    let Some((backing, _)) = code_page(rip)
+    else {
+        return 1;
+    };
+    note_unserved(rt(), backing >> 12, (rip & 4095) as u16) as i32
+}
+
 fn note_entry(r: &mut Runtime, page: u32, offset: u16) {
     if r.pages.len() >= MAX_TRACKED_PAGES && !r.pages.contains_key(&page) {
         // Forget cold pages; published functions keep their own entries.
@@ -298,23 +491,42 @@ fn note_entry(r: &mut Runtime, page: u32, offset: u16) {
 }
 
 unsafe fn execute(slot: u32, budget: u32, rip: u64) -> Attempt {
+    if TIMING {
+        let t0 = time::microtick();
+        let attempt = execute_inner(slot, budget, rip);
+        TIME_IN_EXECUTE += time::microtick() - t0;
+        return attempt;
+    }
+    execute_inner(slot, budget, rip)
+}
+unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     let before = *gp::instruction_counter;
     let core = apic::current_core();
     *gp::x64_jac_base = jac::base(core, *gp::cpl == 3);
     *gp::x64_jac_epoch = jac::epoch_bits(core);
     *gp::x64_page_linear = rip & !4095;
     *gp::x64_page_exit = pagegen::EXIT_NORMAL;
+    *gp::x64_code_base = chain_base(core, *gp::cpl == 3);
+    *gp::x64_page_chain = 0;
+    *gp::x64_page_lazy_kind = 0;
     // Generated code keeps EFLAGS materialized.
     if *gp::flags_changed != 0 {
         let flags = state::read_flags64();
         state::write_flags64(flags);
     }
     ACTIVE = true;
+    COUNTERS[COUNT_ACTIVATIONS] += 1;
+    let t_call = if TIMING { time::microtick() } else { 0.0 };
     let native = call_indirect1_ret(
         (slot + cpu::WASM_TABLE_OFFSET) as i32,
         budget.min(u16::MAX as u32) as u16,
     ) as u32;
+    if TIMING {
+        TIME_IN_CALLS += time::microtick() - t_call;
+    }
     ACTIVE = false;
+    // (functions this activation tail-called from)
+    let native = native.wrapping_add(*gp::x64_page_chain);
     *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(native);
     execution::note_native_retired(native, execution::jit_dispatches());
     let exit = *gp::x64_page_exit;
@@ -325,16 +537,9 @@ unsafe fn execute(slot: u32, budget: u32, rip: u64) -> Attempt {
         pagegen::EXIT_RETRY => {
             r.stats[RETRIES] += 1;
             profile_instruction(0x20000);
-            // Native code resumes after the interpreted instruction.
-            let before = page_of_rip();
+            // (native code resumes after the interpreted instruction: an
+            // unserved entry, noted when the function steps there)
             cpu::run_long_instruction();
-            if let (Some(page), Some(after)) = (before, page_of_rip()) {
-                if page == after {
-                    let r = rt();
-                    note_entry(r, after, (state::read_rip() & 4095) as u16);
-                    r.pages.entry(after).or_default().misses += 1;
-                }
-            }
         },
         pagegen::EXIT_UNKNOWN => r.stats[UNKNOWN] += 1,
         _ => {},
@@ -346,22 +551,26 @@ unsafe fn execute(slot: u32, budget: u32, rip: u64) -> Attempt {
     }
 }
 
-unsafe fn page_of_rip() -> Option<u32> {
-    let physical = memory::snapshot_translation(state::read_rip(), paging::Access::Execute)?
-        .physical
-        .0;
-    Some(code_backing(physical)? >> 12)
-}
 
 unsafe fn compile(page: u32, backing: u32) -> Attempt {
     let r = rt();
     let state = r.pages.entry(page).or_default();
     state.compiles += 1;
     let recompile = state.compiles > 1;
-    let entries: Vec<u16> = (0..4096u16).filter(|&o| bit(&state.entries, o)).collect();
+    let mut entries: Vec<u16> = (0..4096u16).filter(|&o| bit(&state.entries, o)).collect();
     let bytes =
         std::slice::from_raw_parts(crate::cpu::memory::mem8.add(backing as usize), 4096).to_vec();
-    let Some(code) = pagegen::compile(&bytes, &entries)
+    // Likely function starts: 16-byte aligned after INT3 padding (MSVC x64
+    // code). Serving them from the first compile avoids most recompiles for
+    // entries that other pages call later.
+    for o in (16..4096u16).step_by(16) {
+        if bytes[o as usize - 1] == 0xCC && bytes[o as usize] != 0xCC && !bit(&state.entries, o) {
+            entries.push(o);
+        }
+    }
+    // (named after the linear page it was compiled for: host profiles)
+    let name = format!("x64_page_{:x}", state::read_rip() & !4095);
+    let Some(code) = pagegen::compile(&bytes, &entries, chaining(), name)
     else {
         rt().stats[FAILED] += 1;
         return miss();
@@ -433,6 +642,7 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
     r.by_page.insert(page, index);
     FAST[fast_slot(page)] = (page, index as u32 + 1);
     r.stats[COMPILED] += 1;
+    unsafe { BYTES_COMPILED += code.bytes.len() as u64 };
     r.stats[INSTRUCTIONS] += code.instructions as u64;
     r.stats[TEMPLATED] += code.templated as u64;
     // The host installs it synchronously when it can (x64_page_install).
@@ -448,13 +658,18 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
     }
 }
 
-fn retire(r: &mut Runtime, index: usize) {
+fn retire(r: &mut Runtime, index: usize) { retire_with(r, index, true) }
+/// `unchain`: clear the chaining entries of the function (reset clears all).
+fn retire_with(r: &mut Runtime, index: usize, unchain: bool) {
     let f = &mut r.functions[index];
     if f.phase == Phase::Dead {
         return;
     }
     f.phase = Phase::Dead;
     let (page, slot, id) = (f.page, f.slot, f.id);
+    if unchain {
+        unsafe { unchain_slot(slot) };
+    }
     if r.by_page.get(&page) == Some(&index) {
         r.by_page.remove(&page);
     }
@@ -514,10 +729,37 @@ pub fn x64_page_ready(id: u64, slot: u32) -> bool {
     {
         Some(f) => {
             f.phase = Phase::Ready;
+            if unsafe { TIMING } {
+                let slot = f.slot;
+                unsafe { time_first_call(slot) };
+            }
             true
         },
         None => false,
     }
+}
+/// (x64_page_timing) Call a new function once with budget 0: it returns at
+/// its first budget check, having written back the unchanged state, and the
+/// time is the engine's lazy compilation.
+unsafe fn time_first_call(slot: u32) {
+    if ACTIVE {
+        return;
+    }
+    if *gp::flags_changed != 0 {
+        let flags = state::read_flags64();
+        state::write_flags64(flags);
+    }
+    *gp::x64_page_lazy_kind = 0;
+    *gp::x64_page_linear = state::read_rip() & !4095;
+    let core = apic::current_core();
+    *gp::x64_jac_base = jac::base(core, *gp::cpl == 3);
+    *gp::x64_jac_epoch = jac::epoch_bits(core);
+    let t0 = time::microtick();
+    ACTIVE = true;
+    call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    ACTIVE = false;
+    TIME_FIRST_CALLS += time::microtick() - t0;
+    *gp::x64_page_exit = pagegen::EXIT_NORMAL;
 }
 #[no_mangle]
 pub fn x64_page_cancel(id: u64, slot: u32) {
@@ -554,8 +796,9 @@ pub fn dirty_page(page: u32) {
 /// Retire everything (jit_clear_cache: reset, restore, mapping changes).
 pub fn reset() {
     let r = rt();
+    clear_chains();
     for i in 0..r.functions.len() {
-        retire(r, i);
+        retire_with(r, i, false);
     }
     r.pages.clear();
     r.last_rip = 0;
@@ -582,6 +825,14 @@ pub fn x64_page_stat(field: u32) -> f64 {
             .filter(|f| f.phase == Phase::Ready)
             .count() as f64,
         f if f < 12 => r.stats[f] as f64,
+        f @ 13..=19 => unsafe { COUNTERS[f as usize - 13] as f64 },
+        20 => unsafe { TIME_IN_CALLS },
+        22 => unsafe { TIME_IN_EXECUTE },
+        23 => unsafe { TIME_FIRST_CALLS },
+        25 => unsafe { COUNTERS[COUNT_UNALIGNED_READS] as f64 },
+        24 => unsafe { BYTES_COMPILED as f64 },
+        // pages compiled at least once (while tracked)
+        21 => r.pages.values().filter(|state| state.compiles != 0).count() as f64,
         _ => 0.0,
     }
 }
@@ -595,21 +846,37 @@ pub fn x64_page_stat(field: u32) -> f64 {
 /// the A/D updates of a successful translation.
 #[no_mangle]
 pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
+    COUNTERS[COUNT_ACCESS_MISSES] += 1;
     let size = (kind & 0xFF) as u64;
     let write = kind & 0x100 != 0;
     if (address & 4095) + size > 4096 {
         ACCESS_REFUSED[0] += 1;
         return 0;
     }
-    // generated accesses are atomic with cores in workers: aligned only
+    // generated accesses are atomic with cores in workers: aligned only. An
+    // unaligned read of RAM is served from a copy (a racing write may or may
+    // not be in it, as for a split access); an unaligned write is retried.
     if crate::wasmgen::wasm_builder::WasmBuilder::ATOMIC_GUEST_MEMORY
         && address & (size.min(8) - 1) != 0
     {
+        if !write {
+            if let Ok((physical, _, _)) = memory::translate_page(address, paging::Access::Read) {
+                if let Some(backing) = jac::ram_backing(physical) {
+                    let bounce = &raw mut BOUNCE as *mut u8;
+                    let from = crate::cpu::memory::mem8.add((backing + (address & 4095) as u32) as usize);
+                    for i in 0..size as usize {
+                        *bounce.add(i) = crate::parallel::load8(from.add(i));
+                    }
+                    COUNTERS[COUNT_UNALIGNED_READS] += 1;
+                    return bounce as u32;
+                }
+            }
+        }
         ACCESS_REFUSED[0] += 1;
         return 0;
     }
     let access = if write { paging::Access::Write } else { paging::Access::Read };
-    let Ok(physical) = memory::translate(address, access, false, false)
+    let Ok((physical, large, global)) = memory::translate_page(address, access)
     else {
         ACCESS_REFUSED[1] += 1;
         return 0;
@@ -619,8 +886,16 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         // extended RAM (never code): its frame, while cores share this thread
         if let Some(host) = super::extended::cache_frame(physical, write) {
             let backing = host.wrapping_sub(crate::cpu::memory::mem8 as u32);
-            jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing);
+            jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing, large, global);
             return host.wrapping_add((address & 4095) as u32);
+        }
+        // the VGA frame buffer: plain memory with dirty tracking
+        if let Some(backing) = jac::frame_buffer_backing(physical, write) {
+            COUNTERS[COUNT_LFB_FILLS] += 1;
+            jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing, large, global);
+            return (crate::cpu::memory::mem8 as u32)
+                .wrapping_add(backing)
+                .wrapping_add((address & 4095) as u32);
         }
         ACCESS_REFUSED[2] += 1;
         return 0;
@@ -629,7 +904,7 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         ACCESS_REFUSED[3] += 1;
         return 0;
     }
-    jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing);
+    jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing, large, global);
     (crate::cpu::memory::mem8 as u32)
         .wrapping_add(backing)
         .wrapping_add((address & 4095) as u32)
@@ -767,6 +1042,23 @@ pub fn x64_page_flags(record: u32, a: u64, b: u64, flags: u32) -> u32 {
     let pending = record & 0x8D5;
     let (_, computed) = super::execute::alu(code, a, b, width, carry);
     flags & !pending | computed as u32 & pending
+}
+
+/// INVLPG for generated code (CPL 0 is checked inline). True when the
+/// function must leave after it: the access cache was flushed (its epoch
+/// changed), or the invalidated page may be the running code page (or in its
+/// 2 MiB region).
+#[no_mangle]
+pub unsafe fn x64_page_invlpg(address: u64) -> bool {
+    // Intel defines a noncanonical INVLPG operand as a no-op.
+    if !state::canonical(address, 48) {
+        return false;
+    }
+    let core = apic::current_core();
+    let before = jac::epoch_bits(core);
+    memory::invlpg(address);
+    cpu::invlpg(address as i32);
+    jac::epoch_bits(core) != before || address >> 21 == *gp::x64_page_linear >> 21
 }
 
 /// RDTSC for generated code (the privilege check is inline).
