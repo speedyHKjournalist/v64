@@ -1,5 +1,5 @@
 import { CPU } from "./cpu.js";
-import { save_state, restore_state } from "./state.js";
+import { save_state, restore_state, save_state_stream, restore_state_stream } from "./state.js";
 export { V86 } from "./browser/starter.js";
 
 /**
@@ -21,7 +21,7 @@ export function v86(bus, wasm)
     this.worker = null;
 
     /** @type {CPU} */
-    this.cpu = new CPU(bus, wasm, () => { this.idle && this.next_tick(0); });
+    this.cpu = new CPU(bus, wasm, () => { this.running && this.idle && this.next_tick(0); });
 
     this.bus = bus;
 
@@ -30,7 +30,16 @@ export function v86(bus, wasm)
 
 v86.prototype.run = function()
 {
+    if(this.state_busy) { this.state_busy.resume = true; return; }
+    if(this.cpu.parallel?.failure) return;   // a vCPU failed: the machine cannot go on
     this.stopping = false;
+    this.cpu.clock.resume();
+
+    if(this.cpu.devices?.acpi?.soft_off)
+    {
+        // The guest turned the machine off (ACPI S5/S4): power it on again
+        this.cpu.reboot_internal("power-on");
+    }
 
     if(!this.running)
     {
@@ -45,13 +54,35 @@ v86.prototype.do_tick = function()
 {
     if(this.stopping || !this.running)
     {
+        // (the cores in vCPU workers stop too; run_cores lets them go on)
+        this.cpu.parallel?.request_stop();
+        this.cpu.clock.pause();
         this.stopping = this.running = false;
         this.bus.send("emulator-stopped");
         return;
     }
 
     this.idle = false;
-    const t = this.cpu.main_loop();
+    const t = this.cpu.run_cores();
+
+    const failure = this.cpu.parallel?.failure;
+    if(failure)
+    {
+        // a vCPU worker failed (src/parallel/machine.js)
+        this.cpu.clock.pause();
+        this.stopping = this.running = false;
+        this.bus.send("emulator-stopped");
+        this.bus.send("emulator-error", failure);
+        return;
+    }
+
+    if(this.cpu.devices?.acpi?.soft_off)
+    {
+        // The guest turned the machine off; stop at the end of this slice
+        this.stopping = true;
+        this.next_tick(0);
+        return;
+    }
 
     this.next_tick(t);
 };
@@ -73,6 +104,7 @@ v86.prototype.yield_callback = function(tick)
 
 v86.prototype.stop = function()
 {
+    if(this.state_busy) { this.state_busy.resume = false; return; }
     if(this.running)
     {
         this.stopping = true;
@@ -81,17 +113,22 @@ v86.prototype.stop = function()
 
 v86.prototype.destroy = function()
 {
+    this.cpu.parallel?.destroy();
+    this.cpu.clock.pause();
     this.unregister_yield();
 };
 
-v86.prototype.restart = function()
+/** @param {string=} reason "power-on" after the guest turned the machine off */
+v86.prototype.restart = function(reason)
 {
-    this.cpu.reboot_internal();
+    if(this.state_busy) throw new Error("Snapshot transaction is in progress");
+    this.cpu.reboot_internal(reason === "power-on" ? "power-on" : "restart");
 };
 
 v86.prototype.init = function(settings)
 {
     this.cpu.init(settings, this.bus);
+    this.cpu.clock.pause();
     this.bus.send("emulator-ready");
 };
 
@@ -226,16 +263,101 @@ else
     v86.prototype.unregister_yield = function() {};
 }
 
+// Async snapshots keep the scheduler stopped for the entire writer/read cycle,
+// including backpressure. External input cannot start new DMA while draining.
+v86.prototype.state_transaction = function(operation, resume_on_error)
+{
+    const previous = this.state_operation || Promise.resolve();
+    const next = previous.then(async () => {
+        const transaction = { resume: this.running && !this.stopping };
+        this.state_busy = transaction;
+        ++this.tick_counter;
+        this.running = this.stopping = false;
+        this.idle = true;
+        this.cpu.clock.pause();
+        this.bus.send("emulator-stopped");
+        const input = this.bus.pair, pending = [];
+        const send = input && input.send;
+        if(input) input.send = (...args) => { pending.push(args); };
+        let success = false;
+        try
+        {
+            const deadline = Date.now() + 30000;
+            while(this.cpu["snapshot_io_pending"])
+            {
+                if(Date.now() >= deadline) throw new Error("Snapshot timed out waiting for device I/O");
+                await new Promise(resolve => setTimeout(resolve, 1));
+            }
+            const result = await operation();
+            success = true;
+            return result;
+        }
+        finally
+        {
+            this.state_busy = null;
+            if(input)
+            {
+                input.send = send;
+                for(const args of pending) send.apply(input, args);
+            }
+            if(transaction.resume && (success || resume_on_error)) this.run();
+        }
+    });
+    this.state_operation = next.then(() => {}, () => {});
+    return next;
+};
+
+/**
+ * With cores in vCPU workers, a snapshot waits until each of them is parked
+ * at a safe point; run() lets them continue (src/parallel/machine.js).
+ */
+v86.prototype.parallel_save = async function(save)
+{
+    await this.cpu.parallel.park();
+    this.cpu.parallel_capture();
+    return save();
+};
+
+v86.prototype.parallel_restore = async function(restore)
+{
+    await this.cpu.parallel.park();
+    const result = await restore();
+    this.cpu.parallel_install();
+    return result;
+};
+
+v86.prototype.save_state_stream = function(write)
+{
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_save(() => save_state_stream(this.cpu, write)), true);
+    return this.state_transaction(() => save_state_stream(this.cpu, write), true);
+};
+
+v86.prototype.restore_state_stream = function(source)
+{
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_restore(() => restore_state_stream(this.cpu, source)), false);
+    return this.state_transaction(() => restore_state_stream(this.cpu, source), false);
+};
+
 v86.prototype.save_state = function()
 {
-    // TODO: Should be implemented here, not on cpu
-    return save_state(this.cpu);
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_save(() => save_state(this.cpu)), true);
+    if(this.state_busy) return this.state_transaction(() => save_state(this.cpu), true);
+    if(this.cpu.in_cpu) return Promise.resolve().then(() => this.save_state());
+    const paused = this.cpu.clock.paused;
+    this.cpu.clock.pause();
+    try { return save_state(this.cpu); }
+    finally { if(!paused) this.cpu.clock.resume(); }
 };
 
 v86.prototype.restore_state = function(state)
 {
-    // TODO: Should be implemented here, not on cpu
-    return restore_state(this.cpu, state);
+    if(this.cpu.parallel) return this.state_transaction(() => this.parallel_restore(() => restore_state(this.cpu, state)), false);
+    if(this.state_busy) return this.state_transaction(() => restore_state(this.cpu, state), false);
+    if(this.cpu.in_cpu) return Promise.resolve().then(() => this.restore_state(state));
+    const paused = this.cpu.clock.paused;
+    this.cpu.clock.pause();
+    try { return restore_state(this.cpu, state); }
+    finally { if(!paused) this.cpu.clock.resume(); }
 };
 
 /* global require */

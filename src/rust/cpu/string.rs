@@ -57,7 +57,7 @@ enum Rep {
     NZ,
 }
 
-// Interpreter callers retain their unbounded/page-bounded execution policy.
+// Single-core interpreter callers retain their original page-bounded policy.
 #[inline(always)]
 unsafe fn string_instruction(
     is_asize_32: bool,
@@ -66,7 +66,16 @@ unsafe fn string_instruction(
     size: Size,
     rep: Rep,
 ) {
-    let _ = string_instruction_bounded(is_asize_32, ds_or_prefix, instruction, size, rep, u32::MAX);
+    let multicore = crate::cpu::apic::core_count() > 1;
+    let limit = if multicore { 256 } else { u32::MAX };
+    let result =
+        string_instruction_bounded(is_asize_32, ds_or_prefix, instruction, size, rep, limit);
+    if !matches!(rep, Rep::None) {
+        crate::cpu::execution::record_string(result);
+    }
+    if multicore && result.outcome == StringOutcome::Repeat {
+        crate::cpu::cpu::yield_to_other_cores();
+    }
 }
 
 /// Explicit progress from one semantic batch, independent of the resulting EIP.
@@ -205,6 +214,7 @@ unsafe fn string_instruction_bounded(
 
     // unaligned movs is properly handled in the fast path
     let mut rep_fast = (instruction == Instruction::Movs || is_aligned)
+        && crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0
         && is_asize_32 // 16-bit address wraparound
         && match rep {
             Rep::NZ | Rep::Z => true,

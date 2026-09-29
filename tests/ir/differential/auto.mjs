@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
+import {WASM_TABLE_SIZE} from "../../../src/const.js";
 const wasm=process.argv[2]||"build/v86-ir-cache-test.wasm",PC=0x100000;
+// Every table slot but 0 is free once IR and x64 page functions are released.
+const POOL=WASM_TABLE_SIZE-1;
 // disable_jit: IR starts idle (no scheduler, no Tier-0); each case enables it.
 const vm=new V86({wasm_path:wasm,disable_jit:true,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),u32=n=>[n&255,n>>>8&255,n>>>16&255,n>>>24];
@@ -198,9 +201,10 @@ try {
     assert(e.ir_cache_entry_stat(PC,0,1,9)>=2,"entry region contains multiple directly structured edges");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,8),0,"reachable reducible region avoids generic dispatcher edges");
     console.log(`PASS: ${wasm}: Tier-aware region formation follows a forward jump over dead bytes and publishes the hot reducible loop entry`);
-    // The baseline tolerates LOCK NOP, while IR rejects this illegal prefix pair.
-    // This exercises failure suppression after coarse opcode coverage is complete.
-    await prepare([0xF0,0x90,0xEB,0xFC]);before=stats();configure();vm.run();
+    // The legacy 82 /0 alias is valid in 32-bit mode, but its LOCK form remains
+    // a region compile stop. Illegal LOCK NOP now correctly delivers #UD.
+    // Exercise failure suppression without depending on that old CPU bug.
+    await prepare([0xF0,0x82,0x05,...u32(0x80000),1,0xEB,0xF6]);before=stats();configure();vm.run();
     await until(()=>e.ir_auto_stat(6)>before[6]&&e.ir_auto_stat(8)>before[8],"compile-stop suppression");await sleep(80);
     const attempts=e.ir_auto_stat(2)+e.ir_auto_stat(3);await sleep(100);assert.equal(e.ir_auto_stat(2)+e.ir_auto_stat(3),attempts);
     vm.write_memory(Uint8Array.of(0x40,0xEB,0xFD),PC);await until(()=>e.ir_auto_stat(4)>before[4],"recompile changed code");await vm.stop();
@@ -286,7 +290,7 @@ try {
     await sleep(40);await until(()=>e.ir_auto_stat(10)===0,"capacity publications settle");
     const stationary=e.ir_auto_stat(2);await sleep(80);assert.equal(e.ir_auto_stat(2),stationary,"evicted inactive entries do not recompile from historical heat");
     await vm.stop();configure(0);assert.equal(e.ir_cache_stat(0),capacity);cpu.instruction_pointer[0]=PC;cpu.in_hlt[0]=0;let hits=e.ir_cache_stat(2);vm.run();await until(()=>cpu.in_hlt[0],"retained explicit entry");await vm.stop();assert.equal(e.ir_cache_stat(2)-hits,1);
-    assert(e.ir_auto_stat(9)<=128);cpu.jit_clear_cache();e.ir_cache_collect();assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
+    assert(e.ir_auto_stat(9)<=128);cpu.jit_clear_cache();e.ir_cache_collect();assert.equal(e.jit_get_wasm_table_index_free_list_count(),POOL);
     assert(e.ir_auto_stat(27)>0,"exhausted frame credit takes the idle negative hint");
     assert(e.ir_auto_stat(28)>0,"work-bearing visits still reach cold publication checks");
     console.log(`PASS: ${wasm}: ${capacity+8} automatically compiled entries use bounded eviction while preserving an explicit entry; premature completion and cold publication guards (${cold_publications} publications)`);

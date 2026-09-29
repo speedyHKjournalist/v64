@@ -189,6 +189,10 @@ export interface Event {
     "9p-read-end": [filename: string, byte_count: number];
     "9p-read-start": [filename: string];
     "9p-write-end": [filename: string, byte_count: number];
+    /** The guest turned the machine off through ACPI; the value is the sleeping state ("S5", or "S4" for hibernation). The emulator stops. */
+    "acpi-power-off": "S4" | "S5";
+    "acpi-sleep": "S3";
+    "acpi-wake": "power-button" | "rtc" | "other";
     "download-error": {
         file_index: number,
         file_count: number,
@@ -377,11 +381,36 @@ export interface V86Options {
     wasm_fallback_path?: string;
 
     /**
-     * The memory size in bytes, should be a power of 2.
+     * The memory size in bytes, should be a power of 2. At most 2 GiB - 128 KiB
+     * (wasm32); larger values are reduced to that with a console warning.
      * @example 16 * 1024 * 1024
      * @default 64 * 1024 * 1024
      */
     memory_size?: number;
+
+    /**
+     * Testing option: place this many bytes of memory_size at guest physical
+     * 4 GiB instead of below it (a multiple of 1 MiB). The relocated range is
+     * absent from the low address space; firmware reports it as RAM above
+     * 4 GiB. Total capacity is still limited to memory_size.
+     * @default 0
+     */
+    high_memory_size?: number;
+
+    /**
+     * Experimental: guest RAM beyond memory_size (a multiple of 2 MiB), at
+     * guest physical 4 GiB + high_memory_size, so that the total can exceed
+     * what fits in the emulator's 32-bit WebAssembly memory. Its pages are
+     * kept in host ArrayBuffers and cached in extended_memory_cache bytes of
+     * the WebAssembly heap: slower than memory_size, and code in it is
+     * interpreted. Only a 64-bit guest (experimental_x64) can address it.
+     * Snapshots of it need save_state_stream. Fails at startup when the host
+     * cannot allocate it.
+     * @default 0
+     */
+    extended_memory_size?: number;
+    /** Testing option: bytes of the WebAssembly heap that cache extended RAM (default 512 MiB). */
+    extended_memory_cache?: number;
 
     /**
      * VGA memory size in bytes.
@@ -562,10 +591,42 @@ export interface V86Options {
     screen?: ScreenConfig;
 
     /**
-     * Enable ACPI (also enables APIC). Experimental and only partially implemented.
+     * Enable ACPI (also enables APIC). Experimental. Implemented: PM1 event,
+     * control and timer registers, GPE0, SCI, SMI_CMD ACPI enable/disable,
+     * the fixed power button (see power_button()) and the sleeping states:
+     * S3 (suspend to RAM: the cores stop, "acpi-sleep" is emitted; the power
+     * button or an RTC alarm with RTC_EN wakes the machine through the
+     * firmware's resume path, "acpi-wake"), S4 (the guest hibernates to its
+     * disk and turns the machine off) and S5 (soft off); after S4/S5 the
+     * emulator stops and emits "acpi-power-off". See power_state().
      * @default false
      */
     acpi?: boolean;
+
+    /**
+     * Number of CPU cores available to the guest operating system, from 1 to 8.
+     * Execution is managed by the emulator; no additional CPU mode is required.
+     * Multiple cores currently require acpi: true. Snapshots require the same
+     * core count when restored. Multicore support is experimental.
+     * @default 1
+     */
+    cpu_cores?: number;
+    /** Testing option. All device clocks and TSC share this domain; deterministic mode uses the interpreter. */
+    cpu_clock?: { mode?: "normal" | "deterministic"; instructions_per_ms?: number;
+        wall_epoch_ms?: number; max_host_delta_ms?: number };
+    /** Testing option: work budget for each CPU scheduling slice. */
+    cpu_quantum?: number;
+    /** Testing option: seed for reproducible CPU scheduling. */
+    cpu_schedule_seed?: number;
+    /** Testing option: opt into multicore JIT while the cross-core stress matrix is being qualified. */
+    experimental_smp_jit?: boolean;
+    /**
+     * Experimental: present an x86-64 CPU (CPUID long mode, NX, SYSCALL,
+     * CMPXCHG16B, ...), needed by 64-bit operating systems such as Windows
+     * 8.1 x64 or x86_64 Linux.
+     * @default false
+     */
+    experimental_x64?: boolean;
 
     /**
      * Log level (for debug builds)
@@ -740,6 +801,21 @@ export class V86 {
     restart(): Promise<void>;
 
     /**
+     * Press the ACPI power button. A running ACPI guest gets a power button
+     * event (usually starting an orderly shutdown); a machine the guest has
+     * turned off (S4/S5) is powered on and started again, with RAM cleared;
+     * a suspended machine (S3) wakes up. Resolves to false without ACPI.
+     */
+    power_button(): Promise<boolean>;
+
+    /**
+     * The ACPI power state: "S0" (running, or no ACPI), "S3" (suspended to
+     * RAM: events "acpi-sleep"/"acpi-wake"), "S4" (the guest hibernated to
+     * its disk and turned the machine off) or "S5" (soft off).
+     */
+    power_state(): Promise<"S0" | "S3" | "S4" | "S5">;
+
+    /**
      * Add an event listener (the emulator is an event emitter).
      *
      * The callback function gets a single argument which depends on the event.
@@ -778,6 +854,15 @@ export class V86 {
      * Asynchronously save the current state of the emulator.
      */
     save_state(): Promise<ArrayBuffer>;
+
+    /** Save a V7 snapshot, awaiting each bounded chunk before producing the next. */
+    save_state_stream(write: (chunk: Uint8Array) => void | Promise<void>): Promise<void>;
+
+    /** Restore a V7 snapshot. Failed restoration leaves the machine stopped. */
+    restore_state_stream(source: Blob | {
+        size: number;
+        read(offset: number, length: number): Uint8Array | Promise<Uint8Array>;
+    }): Promise<void>;
 
     /**
      * Get current instruction counter
@@ -948,6 +1033,9 @@ export class V86 {
      */
     /** CPU Worker mode returns a Promise with a copied buffer. */
     read_memory(offset: number, length: number): Uint8Array | Promise<Uint8Array>;
+
+    /** Read a 36-bit physical range in bounded chunks (default 1 MiB). */
+    read_memory_chunks(offset: number, length: number, chunk_size?: number): AsyncGenerator<Uint8Array, void, unknown>;
 
     /**
      * Writes data to memory at specified offset.

@@ -5,7 +5,7 @@ NASM_TEST_DIR=./tests/nasm
 INSTRUCTION_TABLES=src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
 
 # Only the dependencies common to the generators
-GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_ir_decoder.js gen/ir_semantics.js, $(wildcard gen/*.js))
+GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_ir_decoder.js gen/ir_semantics.js gen/state_layout.js, $(wildcard gen/*.js))
 INTERPRETER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_interpreter.js
 
 STRIP_DEBUG_FLAG=
@@ -16,7 +16,9 @@ endif
 WASM_OPT ?= false
 
 default: build/v86-debug.wasm
-all: build/cpu-worker.js build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm glbridge
+# (v86-parallel.wasm and vcpu-worker.js: index.html runs more than one core in
+# host threads with them where the page allows it; see `make parallel`)
+all: build/cpu-worker.js build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm build/v86-parallel.wasm build/vcpu-worker.js glbridge
 all-debug: build/cpu-worker.js build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm glbridge
 browser: build/cpu-worker.js build/v86_all.js
 
@@ -98,16 +100,27 @@ CARGO_FLAGS_SAFE=\
 
 CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
 
-CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
+# Host-parallel build (docs/multicore.md): atomics in v86's own code (the prebuilt std stays
+# single-threaded, each vCPU worker has a private relocated copy of it), the
+# memory imported and later marked shared by tools/parallel_wasm.mjs. Linked
+# at 32 KiB (the later --global-base wins): below it are the CPU state blocks
+# of the machine and of up to 7 vCPU workers (src/parallel/relocate.js).
+# __heap_base and __data_end are exported explicitly: the relocation needs
+# them, and newer Rust toolchains no longer export them by default
+CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
+		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296 --global-base=32768 --export=__heap_base --export=__data_end"
+
+CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
-	   acpi.js iso9660.js \
-	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
+	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
+	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   v86gl_pci.js \
 	   bus.js log.js cpu.js \
-	   elf.js kernel.js
+	   elf.js kernel.js extended_memory.js \
+	   parallel/relocate.js parallel/control.js parallel/machine.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
-	      network.js starter.js wasm_paths.js worker_bus.js cpu_worker.js dummy_screen.js ansi_screen.js \
+	      network.js starter.js wasm_paths.js worker_bus.js state_stream_transport.js cpu_worker.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
           print_stats.js filestorage.js modem.js graphics_performance.js performance_recorder.js
 
@@ -118,7 +131,7 @@ CORE_FILES:=$(addprefix src/,$(CORE_FILES))
 LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
 BROWSER_FILES:=$(addprefix src/browser/,$(BROWSER_FILES))
 
-build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/v86_all.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	-ls -lh build/v86_all.js
 	java -jar $(CLOSURE) \
@@ -133,7 +146,7 @@ build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js src/browser/main.js
 	ls -lh build/v86_all.js
 
-build/v86_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/v86_all_debug.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/v86_all_debug.js\
@@ -146,7 +159,7 @@ build/v86_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js $(BROWSER_FILES)\
 		--js src/browser/main.js
 
-build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	-ls -lh build/libv86.js
 	java -jar $(CLOSURE) \
@@ -161,7 +174,7 @@ build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(LIB_FILES)
 	ls -lh build/libv86.js
 
-build/libv86.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	-ls -lh build/libv86.js
 	java -jar $(CLOSURE) \
@@ -178,7 +191,7 @@ build/libv86.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--emit_use_strict=false
 	ls -lh build/libv86.mjs
 
-build/libv86-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86-debug.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86-debug.js\
@@ -193,7 +206,7 @@ build/libv86-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(LIB_FILES)
 	ls -lh build/libv86-debug.js
 
-build/libv86-debug.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv86-debug.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86-debug.mjs\
@@ -229,6 +242,16 @@ build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.t
 	cargo rustc $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-debug.wasm
 	BLOCK_SIZE=K ls -l build/v86-debug.wasm
+
+build/v86-parallel.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml tools/parallel_wasm.mjs
+	mkdir -p build/
+	CARGO_TARGET_DIR=build/parallel cargo rustc --release --features parallel $(CARGO_FLAGS_PARALLEL)
+	./tools/parallel_wasm.mjs build/parallel/wasm32-unknown-unknown/release/v86.wasm build/v86-parallel.wasm
+
+build/v86-parallel-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml tools/parallel_wasm.mjs
+	mkdir -p build/
+	CARGO_TARGET_DIR=build/parallel cargo rustc --features parallel $(CARGO_FLAGS_PARALLEL)
+	./tools/parallel_wasm.mjs build/parallel/wasm32-unknown-unknown/debug/v86.wasm build/v86-parallel-debug.wasm
 
 build/v86-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
@@ -341,21 +364,48 @@ qemutests-release: build/libv86.mjs build/v86.wasm
 	./tests/qemu/run-qemu.js > build/qemu-test-reference
 	diff build/qemu-test-result build/qemu-test-reference
 
+# kvm-unit-tests are built out of tree in build/kvm-unit-tests/<arch>/ (also on
+# macOS, see tests/kvm-unit-tests/build.sh)
+KVM_UNIT_TESTS=build/kvm-unit-tests/i386/x86
+
 kvm-unit-test: build/v86-debug.wasm
-	tests/kvm-unit-tests/build.sh
-	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
-	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
-	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+	tests/kvm-unit-tests/build.sh i386 x86/realmode.flat x86/taskswitch.flat x86/taskswitch2.flat
+	tests/kvm-unit-tests/run.mjs $(KVM_UNIT_TESTS)/taskswitch.flat
+	tests/kvm-unit-tests/run.mjs --expect-pass 11 $(KVM_UNIT_TESTS)/taskswitch2.flat
+	tests/kvm-unit-tests/run.mjs --expect-pass 127 $(KVM_UNIT_TESTS)/realmode.flat
 
 kvm-unit-test-release: build/libv86.mjs build/v86.wasm
-	tests/kvm-unit-tests/build.sh
-	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
-	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
-	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+	tests/kvm-unit-tests/build.sh i386 x86/realmode.flat x86/taskswitch.flat x86/taskswitch2.flat
+	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs $(KVM_UNIT_TESTS)/taskswitch.flat
+	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs --expect-pass 11 $(KVM_UNIT_TESTS)/taskswitch2.flat
+	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs --expect-pass 127 $(KVM_UNIT_TESTS)/realmode.flat
+
+# Interrupt controller tests (ACPI enables the APIC in v86).
+kvm-unit-test-apic: build/v86-debug.wasm
+	tests/kvm-unit-tests/build.sh i386 x86/ioapic.flat x86/smptest.flat x86/apic.flat
+	tests/kvm-unit-tests/run.mjs --acpi --expect-pass 19 $(KVM_UNIT_TESTS)/ioapic.flat
+	tests/kvm-unit-tests/run.mjs --acpi --expect-pass 1 $(KVM_UNIT_TESTS)/smptest.flat
+	tests/kvm-unit-tests/run.mjs --acpi --expect-pass 11 $(KVM_UNIT_TESTS)/apic.flat
 
 expect-tests: build/v86-debug.wasm build/libwabt.cjs
 	make -C tests/expect/tests
 	./tests/expect/run.js
+
+acpi-device-tests: build/v86-debug.wasm
+	./tests/devices/acpi_device.js
+	./tests/devices/device_io_reset.mjs
+
+acpi-guest-tests: build/v86-debug.wasm
+	./tests/devices/acpi_guest.js
+	DISABLE_JIT=1 ./tests/devices/acpi_guest.js
+	GUEST=linux4 ./tests/devices/acpi_guest.js
+
+# ACPICA's iasl/acpiexec are used when found on PATH or in IASL/ACPIEXEC
+acpi-table-tests:
+	./tests/devices/acpi_tables.js
+
+.PHONY: acpi-device-tests acpi-table-tests acpi-guest-tests acpi-tests
+acpi-tests: acpi-table-tests acpi-device-tests acpi-guest-tests
 
 devices-test: build/v86-debug.wasm
 	./tests/devices/virtio_9p.js
@@ -365,6 +415,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/fetch_network_post.js
 	./tests/devices/wisp_network.js
 	./tests/devices/virtio_balloon.js
+	./tests/devices/ide_large_disk.js
 
 rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
@@ -505,12 +556,24 @@ sse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-fal
 	node tests/rust/sse3.mjs build/v86-debug.wasm
 
 # Keep the worker's public option/event wire names stable across bundles.
-build/cpu-worker.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/cpu-worker.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
 		--compilation_level SIMPLE --jscomp_off=missingProperties \
 		--js $(CORE_FILES) --js $(LIB_FILES) --js $(BROWSER_FILES) \
 		--js src/browser/cpu_worker_runtime.js --js src/browser/cpu_worker_entry.js
+
+# The vCPU workers of the host-parallel build (src/parallel/vcpu.js), paired
+# with v86-parallel.wasm: `parallel: true` loads both next to the bundles
+build/vcpu-worker.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
+	mkdir -p build
+	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
+		--compilation_level SIMPLE --jscomp_off=missingProperties \
+		--js $(CORE_FILES) --js $(LIB_FILES) --js $(BROWSER_FILES) \
+		--js src/parallel/vcpu.js --js src/parallel/vcpu_worker_entry.js
+
+.PHONY: parallel
+parallel: build/v86-parallel.wasm build/vcpu-worker.js
 
 build/cpu-worker-test.bin: tests/rust/cpu_worker.asm
 	nasm -f bin $< -o $@
@@ -536,6 +599,243 @@ ir-generated:
 
 ir-generated-check:
 	node gen/generate_ir_decoder.js --check
+
+# CPU state layout: generated global_pointers.rs constants, src/state_layout.js,
+# and the owner of every Rust static (gen/state_layout.js)
+state-layout:
+	node gen/state_layout.js
+
+state-layout-check:
+	node gen/state_layout.js --check
+
+# Multicore building blocks (docs/multicore.md): state layout and core switching
+build/smp/core_swap.bin: tests/smp/core_swap.asm
+	mkdir -p build/smp
+	nasm -f bin -o $@ $<
+
+smp-tests: build/smp/core_swap.bin build/v86-debug.wasm
+	node gen/state_layout.js --check
+	./tests/smp/core_swap.mjs
+	DISABLE_JIT=1 ./tests/smp/core_swap.mjs
+
+build/smp/ap_startup.bin: tests/smp/ap_startup.asm
+	mkdir -p build/smp
+	nasm -f bin -o $@ $<
+
+build/smp/firmware_boot.bin: tests/smp/firmware_boot.asm
+	mkdir -p build/smp
+	nasm -f bin -o $@ $<
+
+# AP startup and interrupt routing; clock/topology/coherence gates below.
+multicore-boot-tests: build/smp/ap_startup.bin build/smp/firmware_boot.bin build/v86-debug.wasm state-layout-check
+	node tests/smp/apic_routing.mjs
+	node tests/smp/scheduler.mjs
+	node tests/smp/ap_startup.mjs
+	node tests/smp/firmware_boot.mjs
+
+multicore-boot-tests-release: build/smp/ap_startup.bin build/smp/firmware_boot.bin build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/apic_routing.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/scheduler.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/ap_startup.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/firmware_boot.mjs
+
+# Machine clock and cross-core coherence gates. OS tests are separate because they need Linux media.
+multicore-clock-tests: build/v86-debug.wasm
+	node tests/smp/clock.mjs
+	node tests/smp/clock_execution.mjs
+
+multicore-coherence-tests: build/v86-debug.wasm state-layout-check
+	node tests/smp/coherence.mjs
+	node tests/smp/lifecycle.mjs
+	node tests/smp/exception_lifecycle.mjs
+	node tests/smp/publication.mjs
+	node tests/smp/state_stream.mjs
+
+multicore-clock-tests-release: build/libv86.mjs build/v86.wasm
+	node tests/smp/clock.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/clock_execution.mjs
+
+multicore-coherence-tests-release: build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/coherence.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/lifecycle.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/exception_lifecycle.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/publication.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/state_stream.mjs
+
+multicore-atomic-tests: build/v86-debug.wasm state-layout-check
+	node tests/smp/atomic_boundaries.mjs
+
+multicore-atomic-tests-release: build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/atomic_boundaries.mjs
+
+multicore-memory-order-tests: build/v86-debug.wasm
+	node tests/smp/memory_order.mjs
+
+multicore-memory-order-tests-release: build/libv86.mjs build/v86.wasm
+	TEST_RELEASE_BUILD=1 node tests/smp/memory_order.mjs
+
+multicore-statistics-tests: build/v86-debug.wasm
+	node tests/smp/core_statistics.mjs
+
+multicore-statistics-tests-release: build/libv86.mjs build/v86.wasm
+	TEST_RELEASE_BUILD=1 node tests/smp/core_statistics.mjs
+
+multicore-os-stress-tests: build/v86-debug.wasm images/linux4.iso
+	node tests/smp/os_stress.mjs
+
+multicore-os-stress-tests-release: build/libv86.mjs build/v86.wasm images/linux4.iso
+	TEST_RELEASE_BUILD=1 node tests/smp/os_stress.mjs
+
+.PHONY: multicore-atomic-tests multicore-atomic-tests-release multicore-memory-order-tests multicore-memory-order-tests-release multicore-statistics-tests multicore-statistics-tests-release multicore-os-stress-tests multicore-os-stress-tests-release
+
+.PHONY: multicore-clock-tests multicore-clock-tests-release multicore-coherence-tests multicore-coherence-tests-release
+
+# Cores in vCPU workers (docs/multicore.md): the relocatable build under
+# the cooperative suites, relocated instances in one memory, then cores in vCPU
+# workers: litmus/IPI wake-ups, lifecycle and failures, Linux boot, the OS
+# stress matrix and ACPI S3/S4 cycles
+PARALLEL_ABI_SUITES=tests/smp/ap_startup.mjs tests/smp/core_swap.mjs tests/smp/apic_routing.mjs tests/smp/lifecycle.mjs \
+	tests/smp/scheduler.mjs tests/smp/coherence.mjs tests/smp/atomic_boundaries.mjs tests/smp/memory_order.mjs \
+	tests/smp/exception_lifecycle.mjs tests/smp/topology.mjs tests/x64/multicore.mjs
+multicore-parallel-tests: build/v86-parallel.wasm build/smp/core_swap.bin build/smp/ap_startup.bin images/linux4.iso
+	node tests/parallel/relocation.mjs
+	for t in $(PARALLEL_ABI_SUITES); do V86_WASM=build/v86-parallel.wasm node $$t || exit 1; done
+	LITMUS_MODES=cooperative,cooperative-jit,parallel,parallel-jit LITMUS_CORES=2,4,8 LITMUS_ROUNDS=20000 node tests/parallel/litmus.mjs
+	node tests/parallel/lifecycle.mjs
+	DISABLE_JIT=1 node tests/parallel/lifecycle.mjs
+	CPU_CORES=2 node tests/parallel/linux_boot.mjs
+	CPU_CORES=4 node tests/parallel/linux_boot.mjs
+	PARALLEL=1 SMP_SEEDS=1,2,3 SMP_QUANTUMS=4096 CPU_CORES=4 node tests/smp/os_stress.mjs
+	PARALLEL=1 GUEST=linux4 CPU_CORES=4 S3_CYCLES=4 S4_CYCLES=2 node tests/devices/acpi_guest.js
+
+# the bundles: libv86.mjs starts build/vcpu-worker.js
+multicore-parallel-tests-release: build/v86-parallel.wasm build/vcpu-worker.js build/libv86.mjs images/linux4.iso
+	TEST_RELEASE_BUILD=1 LITMUS_MODES=parallel,parallel-jit LITMUS_CORES=2,4,8 node tests/parallel/litmus.mjs
+	TEST_RELEASE_BUILD=1 node tests/parallel/lifecycle.mjs
+	TEST_RELEASE_BUILD=1 CPU_CORES=4 node tests/parallel/linux_boot.mjs
+
+# headless Chrome: vCPU module workers with COOP/COEP, the "auto" fallback without
+multicore-parallel-browser-tests: build/v86-parallel.wasm build/vcpu-worker.js build/libv86.mjs
+	node tests/parallel/browser.mjs
+
+# Throughput: fixed guest work on 1/2/4/8 cores, cooperative and in vCPU workers
+multicore-parallel-bench: build/v86.wasm build/v86-parallel.wasm
+	BENCH_REPORT=build/parallel-bench.json node tests/parallel/bench.mjs
+
+.PHONY: multicore-parallel-tests multicore-parallel-tests-release multicore-parallel-browser-tests multicore-parallel-bench
+
+# ACPI sleep states: S3 and OS-directed S4 cycles on 32-bit Linux (1 and 2 cores, JIT and
+# interpreter) and on x86_64 Linux (Alpine's lts kernel has hibernation)
+acpi-sleep-tests: build/v86-debug.wasm images/linux4.iso
+	GUEST=linux4 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
+	GUEST=linux4 CPU_CORES=2 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
+	GUEST=linux4 DISABLE_JIT=1 S3_CYCLES=2 S4_CYCLES=1 ./tests/devices/acpi_guest.js
+	X64_LINUX_FLAVOR=lts X64_JIT=1 X64_CORES=2 X64_LINUX_SLEEP=3 X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+
+# Platform contract: generated state layout, CPU profile options, topology,
+# firmware tables (the ACPICA part needs iasl/acpiexec)
+platform-contract-tests: build/v86-debug.wasm build/libv86.mjs build/v86.wasm
+	node gen/state_layout.js --check
+	node tools/cpu_contract.mjs --check
+	node tests/x64/profile_options.mjs
+	node tests/smp/topology.mjs
+	node tests/devices/acpi_tables.js
+
+# Whole-machine state of several cores (snapshots, streams, reset,
+# exceptions) and sleep states with 4 cores
+multicore-state-tests: build/v86-debug.wasm images/linux4.iso
+	node tests/smp/lifecycle.mjs
+	node tests/smp/exception_lifecycle.mjs
+	node tests/smp/state_stream.mjs
+	node tests/smp/x64_snapshot.mjs
+	GUEST=linux4 CPU_CORES=4 S3_CYCLES=4 S4_CYCLES=2 ./tests/devices/acpi_guest.js
+
+# Extended RAM: guest RAM beyond the wasm32 backing store
+extended-memory-tests: build/v86-debug.wasm
+	node tests/x64/extended_memory.mjs
+	X64_CORES=2 node tests/x64/extended_memory.mjs
+
+x64-extended-guest-tests: build/libv86.mjs build/v86.wasm
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_EXTENDED_MEMORY=6442450944 X64_LINUX_MEMTEST=5120 X64_LINUX_TIMEOUT=10800000 node tests/x64/linux_boot.mjs
+
+# Release gate: every level's acceptance targets, with a report in build/release-gate/
+# (GATE_ARGS: --levels R-base,R-ACPI,R-SMP32,R-x64-UP,R-x64-SMP,R-parallel,R-extended-memory --quick --keep-going)
+platform-release-gate:
+	node tools/release_gate.mjs $(GATE_ARGS)
+
+.PHONY: acpi-sleep-tests platform-contract-tests multicore-state-tests extended-memory-tests x64-extended-guest-tests platform-release-gate
+
+.PHONY: state-layout state-layout-check smp-tests multicore-boot-tests multicore-boot-tests-release
+
+# x86-64 (docs/x86-64.md). The oracle
+# targets need nasm and qemu-system-x86_64; linux targets download the pinned
+# Alpine ISO on first use and run for several minutes on the interpreter.
+x64-decode-tests: state-layout-check
+	cargo test x64::
+	CARGO_TARGET_DIR=build/x64-oracle-target cargo run --manifest-path tests/x64/oracle/Cargo.toml --release
+
+x64-system-tests: build/v86-debug.wasm
+	node tests/x64/system_oracle.mjs
+	node tests/x64/irq_boundary.mjs
+	node tests/x64/triple_fault.mjs
+	node tests/x64/direct_loader.mjs
+	node tests/x64/profile_options.mjs
+	node tests/x64/task_faults.mjs
+
+x64-differential-tests: build/v86-debug.wasm
+	node tests/x64/integer_oracle.mjs
+	node tests/x64/vector_oracle.mjs
+	node tests/x64/native_oracle.mjs
+	node tests/x64/cache_oracle.mjs
+
+# The x64 page tier (x64::pagegen/pages): QEMU and interpreter references,
+# and random programs compared with the interpreter.
+x64-page-tier-tests: build/v86-debug.wasm
+	X64_JIT=1 node tests/x64/integer_oracle.mjs
+	X64_JIT=tier0 node tests/x64/vector_oracle.mjs
+	X64_JIT=1 node tests/x64/system_oracle.mjs
+	X64_JIT=1 X64_IR_TIER0=0 node tests/x64/system_oracle.mjs
+	node tests/x64/page_system.mjs
+	node tests/x64/compat_jit.mjs
+	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
+	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
+	PAGE_FUZZ_SEED=3 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
+	for seed in 1 2 3; do SSE_FP_SEED=$$seed node tests/x64/sse_fp_template.mjs || exit 1; done
+	SSE_FP_ORDINARY=1 node tests/x64/sse_fp_template.mjs
+
+# Every long-mode encoding of the opcode map executed at CPL3; needs the
+# expectations written by x64-decode-tests.
+x64-opcode-matrix-tests: build/v86-debug.wasm x64-decode-tests
+	node tests/x64/opcode_matrix.mjs
+
+highmem-tests: build/v86-debug.wasm
+	node tests/smp/physical_bus.mjs
+	node tests/smp/virtio_high_dma.mjs
+	node tests/smp/x64_snapshot.mjs
+	node tests/smp/legacy_low_hole.mjs
+	node tests/x64/high_memory.mjs
+
+x64-multicore-tests: build/v86-debug.wasm
+	node tests/x64/multicore.mjs
+
+x64-guest-tests: build/v86-debug.wasm
+	X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
+	X64_LINUX_TIMEOUT=3600000 node tests/x64/linux_boot.mjs
+	X64_JIT=1 X64_LINUX_SNAPSHOT=1 X64_LINUX_LIFECYCLE=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	X64_HIGH_MEMORY=134217728 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
+	X64_HIGH_MEMORY=134217728 X64_JIT=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+
+x64-multicore-guest-tests: build/v86-debug.wasm
+	X64_CORES=4 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
+	X64_CORES=2 X64_JIT=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	X64_CORES=4 X64_JIT=1 X64_LINUX_SNAPSHOT=1 X64_LINUX_LIFECYCLE=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+
+# The same Linux configurations on the interpreter alone (hours for 2+ cores).
+x64-guest-interpreter-tests: build/v86-debug.wasm
+	X64_CORES=2 X64_LINUX_TIMEOUT=7200000 node tests/x64/linux_boot.mjs
+	X64_CORES=4 X64_LINUX_TIMEOUT=14400000 node tests/x64/linux_boot.mjs
+
+.PHONY: x64-decode-tests x64-system-tests x64-differential-tests x64-page-tier-tests x64-opcode-matrix-tests highmem-tests x64-multicore-tests x64-guest-tests x64-multicore-guest-tests x64-guest-interpreter-tests
 
 ir-decoder-tests: ir-generated-check
 	cargo test decode::tests -- --nocapture
@@ -1001,3 +1301,32 @@ build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/v86-ir-test-fallback
 .PHONY: ir-budget-batch-tests
 ir-budget-batch-tests:
 	sh tools/ir-budget-batch-tests.sh
+
+# Topology: CPUID and firmware-input agreement, followed by real 32-bit Linux SMP.
+build/smp/affinity_probe: tests/smp/affinity_probe.asm
+	mkdir -p build/smp
+	nasm -f bin $< -o $@
+
+multicore-topology-tests: build/v86-debug.wasm state-layout-check
+	node tests/smp/topology.mjs
+
+multicore-topology-tests-release: build/libv86.mjs build/v86.wasm state-layout-check
+	TEST_RELEASE_BUILD=1 node tests/smp/topology.mjs
+
+multicore-linux-tests: build/smp/affinity_probe build/v86-debug.wasm images/linux4.iso
+	node tests/smp/linux_topology.mjs
+
+multicore-linux-tests-release: build/smp/affinity_probe build/libv86.mjs build/v86.wasm images/linux4.iso
+	TEST_RELEASE_BUILD=1 node tests/smp/linux_topology.mjs
+
+.PHONY: multicore-topology-tests multicore-topology-tests-release multicore-linux-tests multicore-linux-tests-release
+
+multicore-linux-jit-tests: build/smp/affinity_probe build/v86-debug.wasm images/linux4.iso
+	SMP_JIT_MODE=tier0 node tests/smp/linux_topology.mjs
+	SMP_JIT_MODE=region node tests/smp/linux_topology.mjs
+
+multicore-linux-jit-tests-release: build/smp/affinity_probe build/libv86.mjs build/v86.wasm images/linux4.iso
+	TEST_RELEASE_BUILD=1 SMP_JIT_MODE=tier0 node tests/smp/linux_topology.mjs
+	TEST_RELEASE_BUILD=1 SMP_JIT_MODE=region node tests/smp/linux_topology.mjs
+
+.PHONY: multicore-linux-jit-tests multicore-linux-jit-tests-release

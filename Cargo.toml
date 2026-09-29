@@ -9,6 +9,9 @@ default = []
 profiler = []
 # Exports differential oracles only in the dedicated test Wasm artifact.
 ir-test-hooks = []
+# Host-parallel build (docs/multicore.md): the CPU state block is a static so that each
+# vCPU worker's relocated instance has its own; guest RAM is shared.
+parallel = []
 
 [lib]
 crate-type = ["cdylib"]

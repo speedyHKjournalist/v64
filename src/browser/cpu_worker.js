@@ -1,3 +1,4 @@
+import { state_stream_server } from "./state_stream_transport.js";
 // Browser-side ownership boundary. Guest RAM and synchronous devices live only
 // in the worker; this side owns DOM adapters and asynchronous GPU execution.
 import { GraphicsPerformance } from "./graphics_performance.js";
@@ -20,8 +21,15 @@ export function encode_worker_options(o)
         "graphics_available": !!o["graphics_adapter"],
         "wasm_path": new URL(o.wasm_path || "build/v86.wasm", location.href).href,
         "wasm_fallback_path": o["wasm_fallback_path"] && new URL(o["wasm_fallback_path"], location.href).href,
+        // (cores in vCPU workers, which this worker starts: absolute URLs)
+        "parallel": o["parallel"],
+        "parallel_wasm_path": o["parallel_wasm_path"] && new URL(o["parallel_wasm_path"], location.href).href,
+        "vcpu_worker_url": o["vcpu_worker_url"] && new URL(o["vcpu_worker_url"], location.href).href,
         "memory_size": o.memory_size, "vga_memory_size": o.vga_memory_size,
-        "boot_order": o.boot_order, "acpi": o.acpi, "disable_jit": o.disable_jit,
+        "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,
+        "cpu_clock": o.cpu_clock, "cpu_quantum": o.cpu_quantum, "cpu_schedule_seed": o.cpu_schedule_seed,
+        "experimental_smp_jit": o.experimental_smp_jit, "disable_jit": o.disable_jit,
+        "experimental_x64": o.experimental_x64,
         "jit_backend": o["jit_backend"], "ir_region_budget": o["ir_region_budget"],
         "ir_stats": o["ir_stats"],
         "ir_verify": o["ir_verify"], "ir_dump": o["ir_dump"],
@@ -315,6 +323,45 @@ export class CPUWorkerController
                 g?.["releaseCheckpoint"]();
                 this.restore_checkpoint = null;
                 if(running && !this.emulator.destroyed && (ok || kind === "save")) await this.rpc("run");
+            }
+        });
+    }
+
+    state_stream(kind, value)
+    {
+        return this.serialize(async () => {
+            const running = this.emulator.is_running();
+            await this.stop();
+            const graphics = this.emulator["graphics_adapter"];
+            const channel = new globalThis.MessageChannel();
+            const server = state_stream_server(channel.port1, kind, value);
+            let success = false;
+            try
+            {
+                if(kind === "save")
+                {
+                    await graphics?.["prepareSaveState"]();
+                    const checkpoint = graphics ? graphics["serializeCheckpoint"]() : null;
+                    await this.rpc("save-stream", [checkpoint, channel.port2], [channel.port2]);
+                }
+                else
+                {
+                    this.restore_checkpoint = null;
+                    graphics?.["beginStateRestore"]();
+                    await graphics?.["waitForIdle"](false, true);
+                    await this.rpc("restore-stream", [server["size"], channel.port2], [channel.port2]);
+                    graphics?.["onPCIStateRestored"](this.restore_checkpoint);
+                    await graphics?.["finishStateRestore"]();
+                }
+                success = true;
+            }
+            catch(error) { graphics?.["cancelStateRestore"](); throw error; }
+            finally
+            {
+                server["close"]();
+                graphics?.["releaseCheckpoint"]();
+                this.restore_checkpoint = null;
+                if(running && !this.emulator.destroyed && (success || kind === "save")) await this.rpc("run");
             }
         });
     }

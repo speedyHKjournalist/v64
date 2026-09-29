@@ -31,13 +31,37 @@ for(const release of [false,true]){
         }
         console.log(`PASS (${release?"release":"debug"}): ${cpuid} CPUID leaf/subleaf/ACPI comparisons in both IR variants`);
         let msr=0;
-        const reads=[0x10,0x17,0x1B,0x33,0x34,0x3A,0x48,0x8B,0xC1,0xC2,0xCE,0x10F,0x122,0x123,0x140,0x174,0x175,0x176,0x179,0x186,0x187,0x1A0,0x277,0x570,0x60D,0xC0011020,0xC0011029];
-        const writes=[0x10,0x33,0x3A,0x48,0x79,0x8B,0xC1,0xC2,0x10F,0x122,0x123,0x140,0x174,0x175,0x176,0x179,0x186,0x187,0x1A0,0x277,0xC0000101,0xC0011020,0xC0011029];
+        const reads=[0x10,0x17,0x1B,0x33,0x34,0x3A,0x48,0x8B,0xC1,0xC2,0xCE,0x10F,0x122,0x123,0x140,0x174,0x175,0x176,0x179,0x186,0x187,0x1A0,0x277,0x570,0x60D,0xC0000100,0xC0000101,0xC0011020,0xC0011029];
+        const writes=[0x10,0x33,0x3A,0x48,0x79,0x8B,0xC1,0xC2,0x10F,0x122,0x123,0x140,0x174,0x175,0x176,0x179,0x186,0x187,0x1A0,0x277,0xC0011020,0xC0011029];
         for(let i=0;i<cases.length;i++) if([0x30,0x32].includes(cases[i][2])) for(const index of cases[i][2]===0x30?writes:reads) for(const acpi of [0,1]) for(const value of [0,0x89ABCDEF]){
             const actual=compare(i,()=>reset(i,value,index,value,acpi));if(cases[i][2]===0x30&&index===0x174)assert.equal(actual.sysenter[0],value&65535);msr++;
         }
         for(let i=0;i<cases.length;i++) if(cases[i][2]===0x30) for(const acpi of [0,1]) for(const value of [0xFEE00000,0xFEE00800,...(!acpi?[0]:[])]){const actual=compare(i,()=>reset(i,value,0x1B,0,acpi));assert.equal(actual.apic,Number(!!(value&0x800)));msr++;}
         console.log(`PASS (${release?"release":"debug"}): ${msr} recognized MSR state/no-op/APIC comparisons`);
+        // v86 exposes 32-bit FS/GS hidden bases through these compatibility
+        // MSRs. It rejects high bits before modifying the base; this is not
+        // yet the full Intel 64 canonical-address MSR contract.
+        let segment_msr=0;
+        const segment_msrs=[[0xC0000100,4],[0xC0000101,5]];
+        for(let i=0;i<cases.length;i++) if([0x30,0x32].includes(cases[i][2])) for(const [index,segment] of segment_msrs) for(const value of [0,0x89ABCDEF,0xFFFFFFFF]){
+            const write=cases[i][2]===0x30;
+            const actual=compare(i,()=>{reset(i,value,index,write?0:0xAABBCCDD);cpu.segment_offsets[4]=0x12345678;cpu.segment_offsets[5]=0x76543210;if(!write)cpu.segment_offsets[segment]=value;});
+            assert.equal(actual.base[segment],value);
+            assert.equal(actual.base[segment===4?5:4],segment===4?0x76543210:0x12345678);
+            if(!write)assert.deepEqual([actual.regs[0],actual.regs[2]],[value,0]);
+            segment_msr++;
+        }
+        for(let i=0;i<cases.length;i++) if(cases[i][2]===0x30) for(const [index] of segment_msrs) for(const high of [1,0x80000000,0xFFFFFFFF]) for(const low of [0,0x89ABCDEF]){
+            const actual=compare(i,()=>{reset(i,low,index,high);cpu.segment_offsets[4]=0x12345678;cpu.segment_offsets[5]=0x76543210;},101);
+            assert.equal(actual.ip,HANDLER,"unrepresentable FS/GS base delivers guest #GP");
+            assert.deepEqual(actual.base.slice(4,6),[0x12345678,0x76543210],"fault preserves both bases");
+            assert.deepEqual(actual.regs.slice(0,3),[low,index,high],"fault does not truncate its input");
+            const frame=new DataView(actual.frame.buffer,actual.frame.byteOffset,actual.frame.byteLength),sp=actual.regs[4]-(STACK-96);
+            assert.equal(frame.getUint32(sp,true),0,"#GP error code");
+            assert.equal(frame.getUint32(sp+4,true),PC+1,"fault frame retries WRMSR including its prefixes");
+            segment_msr++;
+        }
+        console.log(`PASS (${release?"release":"debug"}): ${segment_msr} FS/GS base read/write and high-bit #GP cases`);
         let tsc=0;
         for(let i=0;i<cases.length;i++) if(cases[i][2]===0x31) for(const warm of [0,1,2,5]) for(const tick of [1000.25,1000.250001,1000.251,2000]){
             const actual=compare(i,()=>{reset(i,0xAAAAAAAA,0,0xBBBBBBBB,0,warm);clock=tick;});if(!warm)assert.equal((BigInt(actual.regs[2])<<32n)|BigInt(actual.regs[0]),BigInt(Math.trunc(tick*1000000)));tsc++;
@@ -73,9 +97,38 @@ for(const release of [false,true]){
         }
         console.log(`PASS (${release?"release":"debug"}): ${unsupported} pinned unknown-MSR abort/no-op/zero-result cases`);
         let apic_invalid=0;
-        for(let i=0;i<cases.length;i++) if(cases[i][0].length===3&&cases[i][2]===0x30) for(const [a,d,acpi] of [[0xFEE00800,1,1],[0xFED00800,0,1],[0xFEE00C00,0,1],[0,0,1]]) for(const opt of [0,1]){
-            const actual=compare_abort(i,()=>reset(i,a,0x1B,d,acpi),opt);assert.equal(actual.apic,release?Number(!!(a&0x800)):1);apic_invalid++;
+        for(let i=0;i<cases.length;i++) if(cases[i][0].length===3&&cases[i][2]===0x30) for(const [a,d,acpi] of [[0xFEE00800,1,1],[0xFED00800,0,1],[0xFEE00C00,0,1],[0,0,1]]){
+            const actual=compare(i,()=>reset(i,a,0x1B,d,acpi),101);
+            assert.equal(actual.apic,1,"invalid APIC_BASE leaves hardware enable unchanged");
+            assert.equal(actual.ip,HANDLER,"invalid APIC_BASE delivers guest #GP in both builds");
+            assert.deepEqual(actual.regs.slice(0,3),[a,0x1B,d],"fault preserves WRMSR inputs");
+            const frame=new DataView(actual.frame.buffer,actual.frame.byteOffset,actual.frame.byteLength),sp=actual.regs[4]-(STACK-96);
+            assert.equal(frame.getUint32(sp,true),0,"#GP error code");
+            assert.equal(frame.getUint32(sp+4,true),PC+1,"fault retries WRMSR including prefixes");
+            apic_invalid++;
         }
-        console.log(`PASS (${release?"release":"debug"}): ${apic_invalid} pinned restricted-APIC debug-abort/release-state cases`);
+        console.log(`PASS (${release?"release":"debug"}): ${apic_invalid} restricted-APIC #GP/state-preservation cases in both IR variants`);
+        // Give the stopped fixture two actual core contexts, then use the
+        // real switch_core path between distinct bases. Run both instruction
+        // modes through the interpreter and both directly invoked IR forms.
+        let segment_contexts=0;
+        for(const mode of [false,true]) for(const opt of [-1,0,1]){
+            const index=op=>cases.findIndex(c=>c[1]===mode&&c[2]===op&&c[0].length===3);
+            const wr=index(0x30),rd=index(0x32);
+            reset(wr);cpu.platform.cores=2;cpu.setup_cores();
+            const execute=(i,msr,low=0)=>{mem.set(cases[i][0],PC);cpu.instruction_pointer[0]=PC;cpu.reg32[0]=low;cpu.reg32[1]=msr;cpu.reg32[2]=0;if(opt<0){e.ir_test_step();e.ir_test_step();} else instances[i][opt].exports.f(0);};
+            const values=[[0x12345000,0xFEDC0000],[0x87654000,0xFFFFFF00]];
+            for(const core of [0,1]){
+                cpu.switch_core(core);
+                for(const [n,[msr,segment]] of segment_msrs.entries()){execute(wr,msr,values[core][n]);assert.equal(cpu.segment_offsets[segment]>>>0,values[core][n]);}
+            }
+            for(const core of [1,0,1,0]){
+                cpu.switch_core(core);
+                assert.deepEqual(Array.from(cpu.segment_offsets.slice(4,6),x=>x>>>0),values[core]);
+                for(const [n,[msr]] of segment_msrs.entries()){execute(rd,msr);assert.deepEqual([cpu.reg32[0]>>>0,cpu.reg32[2]>>>0],[values[core][n],0]);segment_contexts++;}
+            }
+            cpu.switch_core(0);cpu.platform.cores=1;cpu.setup_cores();
+        }
+        console.log(`PASS (${release?"release":"debug"}): ${segment_contexts} FS/GS MSR reads after actual core switches`);
     } finally {clock=undefined;await vm.destroy();}
 }

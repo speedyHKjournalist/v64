@@ -1,4 +1,6 @@
+import { state_stream_client } from "./state_stream_transport.js";
 import { wasm_fallback_path } from "./wasm_paths.js";
+import { instantiate_v86 } from "../parallel/relocate.js";
 // Dedicated-worker entry. Never transfer the WebAssembly.Memory buffer.
 import { V86 } from "./starter.js";
 import { PerformanceRecorder } from "./performance_recorder.js";
@@ -124,15 +126,19 @@ export function start_cpu_worker()
             options.wasm_fn = async env => {
                 const primary = options.wasm_path;
                 const fallback = options["wasm_fallback_path"] || wasm_fallback_path(primary);
+                // (cores in vCPU workers: the relocatable build; "auto" falls
+                // back to the cooperative one, and the emulator says why)
+                const parallel = emulator && emulator.parallel_requested && options["parallel_wasm_path"];
+                const urls = parallel ? [parallel].concat(emulator.parallel_forced ? [] : [primary, fallback]) : [primary, fallback];
                 let last_error;
-                for(const url of new Set([primary, fallback]))
+                for(const url of new Set(urls))
                 {
                     try
                     {
                         const response = await fetch(url);
                         if(!response.ok) throw new Error("CPU core fetch failed: HTTP " + response.status);
                         const bytes = await response.arrayBuffer();
-                        const result = await WebAssembly.instantiate(bytes, env);
+                        const result = await instantiate_v86(bytes, env);
                         emulator.wasm_source = bytes;
                         return result.instance.exports;
                     }
@@ -221,7 +227,29 @@ export function start_cpu_worker()
             await audio_reset();
             flush_screen(); stats();
         },
-        "restart": async () => { await change_epoch(); await emulator.restart(); await audio_reset(); flush_screen(); stats(); },
+        "save-stream": async (value, port) => {
+            if(emulator.is_running() || inflight.size) throw new Error("Save requires a drained, stopped CPU");
+            const stream = state_stream_client(port);
+            checkpoint = value;
+            try { await emulator.save_state_stream(stream["write"]); }
+            finally { checkpoint = null; stream["close"](); }
+        },
+        "restore-stream": async (size, port) => {
+            if(emulator.is_running() || inflight.size) throw new Error("Restore requires a drained, stopped CPU");
+            const stream = state_stream_client(port);
+            try
+            {
+                await change_epoch();
+                await emulator.restore_state_stream({ "size": size, "read": stream["read"] });
+                await audio_reset();
+                flush_screen(); stats();
+            }
+            finally { stream["close"](); }
+        },
+        "restart": async reason => { await change_epoch(); await emulator.restart(reason); await audio_reset(); flush_screen(); stats(); },
+        "power_button": () => emulator.power_button(),
+        "power_state": () => emulator.power_state(),
+        "get_diagnostics": () => emulator.get_diagnostics(),
         "destroy": async () => { clearInterval(timer); await emulator.destroy(); audio_port?.close(); },
         "read_memory": (offset, length) => emulator.read_memory(offset, length).slice(),
         "write_memory": (bytes, offset) => emulator.write_memory(bytes, offset),

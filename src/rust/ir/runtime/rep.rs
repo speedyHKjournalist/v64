@@ -13,6 +13,7 @@ unsafe fn batch(kind: u32, bytes: u32, asize32: u32, segment: u32, repne: u32, l
     assert!(asize32 <= 1 && repne <= 1 && segment < 6 && limit <= 4096);
     LAST_RESULT = 0;
     let result = execute_rep(kind, bytes, asize32 != 0, segment as i32, repne != 0, limit);
+    crate::cpu::execution::note_jit_rep(result.iterations);
     let outcome = match result.outcome {
         StringOutcome::Complete => {
             *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);

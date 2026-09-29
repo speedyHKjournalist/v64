@@ -549,55 +549,55 @@ VirtIO.prototype.create_common_capability = function(options)
             {
                 bytes: 4,
                 name: "queue_desc (low dword)",
-                read: () => this.queue_selected ? this.queue_selected.desc_addr : 0,
+                read: () => this.queue_selected ? this.queue_selected.address_words[0] : 0,
                 write: data =>
                 {
-                    if(this.queue_selected) this.queue_selected.desc_addr = data;
+                    if(this.queue_selected) this.queue_selected.set_address_word(0, data);
                 },
             },
             {
                 bytes: 4,
                 name: "queue_desc (high dword)",
-                read: () => 0,
+                read: () => this.queue_selected ? this.queue_selected.address_words[1] : 0,
                 write: data =>
                 {
-                    if(data !== 0) dbg_log("Warning: High dword of 64 bit queue_desc ignored:" + data, LOG_VIRTIO);
+                    if(this.queue_selected) this.queue_selected.set_address_word(1, data);
                 },
             },
             {
                 bytes: 4,
                 name: "queue_avail (low dword)",
-                read: () => this.queue_selected ? this.queue_selected.avail_addr : 0,
+                read: () => this.queue_selected ? this.queue_selected.address_words[2] : 0,
                 write: data =>
                 {
-                    if(this.queue_selected) this.queue_selected.avail_addr = data;
+                    if(this.queue_selected) this.queue_selected.set_address_word(2, data);
                 },
             },
             {
                 bytes: 4,
                 name: "queue_avail (high dword)",
-                read: () => 0,
+                read: () => this.queue_selected ? this.queue_selected.address_words[3] : 0,
                 write: data =>
                 {
-                    if(data !== 0) dbg_log("Warning: High dword of 64 bit queue_avail ignored:" + data, LOG_VIRTIO);
+                    if(this.queue_selected) this.queue_selected.set_address_word(3, data);
                 },
             },
             {
                 bytes: 4,
                 name: "queue_used (low dword)",
-                read: () => this.queue_selected ? this.queue_selected.used_addr : 0,
+                read: () => this.queue_selected ? this.queue_selected.address_words[4] : 0,
                 write: data =>
                 {
-                    if(this.queue_selected) this.queue_selected.used_addr = data;
+                    if(this.queue_selected) this.queue_selected.set_address_word(4, data);
                 },
             },
             {
                 bytes: 4,
                 name: "queue_used (high dword)",
-                read: () => 0,
+                read: () => this.queue_selected ? this.queue_selected.address_words[5] : 0,
                 write: data =>
                 {
-                    if(data !== 0) dbg_log("Warning: High dword of 64 bit queue_used ignored:" + data, LOG_VIRTIO);
+                    if(this.queue_selected) this.queue_selected.set_address_word(5, data);
                 },
             },
         ],
@@ -628,12 +628,25 @@ VirtIO.prototype.create_notification_capability = function(options)
 
     for(const [i, handler] of options.handlers.entries())
     {
+        const notify_handler = /** @type {function(number)} */ (handler);
         notify_struct.push(
         {
             bytes: 2,
             name: "notify" + i,
             read: () => 0xFFFF,
-            write: handler || (data => {}),
+            write: data =>
+            {
+                if(!notify_handler || this.device_status & VIRTIO_STATUS_DEVICE_NEEDS_RESET) return;
+                try
+                {
+                    notify_handler(data);
+                }
+                catch(error)
+                {
+                    if(!(error instanceof RangeError)) throw error;
+                    this.needs_reset();
+                }
+            },
         });
     }
 
@@ -1063,6 +1076,7 @@ function VirtQueue(cpu, virtio, options)
     this.enabled = false;
     this.notify_offset = options.notify_offset;
 
+    this.address_words = new Uint32Array(6);
     this.desc_addr = 0;
 
     this.avail_addr = 0;
@@ -1088,6 +1102,7 @@ VirtQueue.prototype.get_state = function()
     state[7] = this.used_addr;
     state[8] = this.num_staged_replies;
     state[9] = 1;
+    state[10] = this.address_words;
 
     return state;
 };
@@ -1098,12 +1113,15 @@ VirtQueue.prototype.set_state = function(state)
     this.size_supported = state[1];
     this.enabled = state[2];
     this.notify_offset = state[3];
-    this.desc_addr = state[4];
-    this.avail_addr = state[5];
+    this.desc_addr = state[10] ? state[4] : state[4] >>> 0;
+    this.avail_addr = state[10] ? state[5] : state[5] >>> 0;
     this.avail_last_idx = state[6];
-    this.used_addr = state[7];
+    this.used_addr = state[10] ? state[7] : state[7] >>> 0;
     this.num_staged_replies = state[8];
 
+    this.address_words = state[10] || new Uint32Array([
+        this.desc_addr, 0, this.avail_addr, 0, this.used_addr, 0,
+    ]);
     this.mask = this.size - 1;
     this.fix_wrapping = state[9] !== 1;
 };
@@ -1111,6 +1129,7 @@ VirtQueue.prototype.set_state = function(state)
 VirtQueue.prototype.reset = function()
 {
     this.enabled = false;
+    this.address_words.fill(0);
     this.desc_addr = 0;
     this.avail_addr = 0;
     this.avail_last_idx = 0;
@@ -1119,15 +1138,41 @@ VirtQueue.prototype.reset = function()
     this.set_size(this.size_supported);
 };
 
+// Retain raw DWORDs even for unsupported 64-bit values, so register readback
+// and snapshots never round an invalid address into a usable low address.
+VirtQueue.prototype.set_address_word = function(index, value)
+{
+    if(this.enabled) return;
+    this.address_words[index] = value;
+    this.desc_addr = this.address_words[0] + this.address_words[1] * 0x100000000;
+    this.avail_addr = this.address_words[2] + this.address_words[3] * 0x100000000;
+    this.used_addr = this.address_words[4] + this.address_words[5] * 0x100000000;
+};
+
 VirtQueue.prototype.is_configured = function()
 {
-    return this.desc_addr && this.avail_addr && this.used_addr;
+    return this.size > 0 && this.desc_addr > 0 && this.avail_addr > 0 && this.used_addr > 0;
 };
 
 VirtQueue.prototype.enable = function()
 {
     dbg_assert(this.is_configured(), "VirtQueue must be configured before enabled");
-    this.enabled = true;
+    try
+    {
+        if((this.desc_addr % 16) || (this.avail_addr % 2) || (this.used_addr % 4))
+        {
+            throw new RangeError("Unaligned VirtIO queue");
+        }
+        this.cpu.validate_physical_range(this.desc_addr, this.size * VIRTQ_DESC_ENTRYSIZE);
+        this.cpu.validate_physical_range(this.avail_addr, VIRTQ_AVAIL_BASESIZE + this.size * VIRTQ_AVAIL_ENTRYSIZE);
+        this.cpu.validate_physical_range(this.used_addr, VIRTQ_USED_BASESIZE + this.size * VIRTQ_USED_ENTRYSIZE);
+        this.enabled = true;
+    }
+    catch(error)
+    {
+        if(!(error instanceof RangeError)) throw error;
+        this.virtio.needs_reset();
+    }
 };
 
 VirtQueue.prototype.set_size = function(size)
@@ -1156,8 +1201,17 @@ VirtQueue.prototype.count_requests = function()
  */
 VirtQueue.prototype.has_request = function()
 {
-    dbg_assert(this.avail_addr, "VirtQueue addresses must be configured before use");
-    return this.count_requests() !== 0;
+    if(!this.enabled || this.virtio.device_status & VIRTIO_STATUS_DEVICE_NEEDS_RESET) return false;
+    try
+    {
+        return this.count_requests() !== 0;
+    }
+    catch(error)
+    {
+        if(!(error instanceof RangeError)) throw error;
+        this.virtio.needs_reset();
+        return false;
+    }
 };
 
 /**
@@ -1187,6 +1241,7 @@ VirtQueue.prototype.pop_request = function()
  */
 VirtQueue.prototype.push_reply = function(bufchain)
 {
+    if(!bufchain.valid) return;
     this.push_reply_id(bufchain.head_idx, bufchain.length_written);
 };
 
@@ -1281,12 +1336,15 @@ VirtQueue.prototype.notify_me_after = function(num_skipped_requests)
  */
 VirtQueue.prototype.get_descriptor = function(table_address, i)
 {
+    const addr_low = this.cpu.read32_physical(table_address + i * VIRTQ_DESC_ENTRYSIZE);
+    const addr_high = this.cpu.read32_physical(table_address + i * VIRTQ_DESC_ENTRYSIZE + 4);
     return {
-        addr_low: this.cpu.read32s(table_address + i * VIRTQ_DESC_ENTRYSIZE),
-        addr_high: this.cpu.read32s(table_address + i * VIRTQ_DESC_ENTRYSIZE + 4),
-        len: this.cpu.read32s(table_address + i * VIRTQ_DESC_ENTRYSIZE + 8),
-        flags: this.cpu.read16(table_address + i * VIRTQ_DESC_ENTRYSIZE + 12),
-        next: this.cpu.read16(table_address + i * VIRTQ_DESC_ENTRYSIZE + 14),
+        addr_low,
+        addr_high,
+        address: addr_low + addr_high * 0x100000000,
+        len: this.cpu.read32_physical(table_address + i * VIRTQ_DESC_ENTRYSIZE + 8),
+        flags: this.cpu.read16_physical(table_address + i * VIRTQ_DESC_ENTRYSIZE + 12),
+        next: this.cpu.read16_physical(table_address + i * VIRTQ_DESC_ENTRYSIZE + 14),
     };
 };
 
@@ -1294,55 +1352,55 @@ VirtQueue.prototype.get_descriptor = function(table_address, i)
 
 VirtQueue.prototype.avail_get_flags = function()
 {
-    return this.cpu.read16(this.avail_addr);
+    return this.cpu.read16_physical(this.avail_addr);
 };
 
 VirtQueue.prototype.avail_get_idx = function()
 {
-    return this.cpu.read16(this.avail_addr + 2);
+    return this.cpu.read16_physical(this.avail_addr + 2);
 };
 
 VirtQueue.prototype.avail_get_entry = function(i)
 {
-    return this.cpu.read16(this.avail_addr + 4 + VIRTQ_AVAIL_ENTRYSIZE * (i & this.mask));
+    return this.cpu.read16_physical(this.avail_addr + 4 + VIRTQ_AVAIL_ENTRYSIZE * (i & this.mask));
 };
 
 VirtQueue.prototype.avail_get_used_event = function()
 {
-    return this.cpu.read16(this.avail_addr + 4 + VIRTQ_AVAIL_ENTRYSIZE * this.size);
+    return this.cpu.read16_physical(this.avail_addr + 4 + VIRTQ_AVAIL_ENTRYSIZE * this.size);
 };
 
 // Used ring fields
 
 VirtQueue.prototype.used_get_flags = function()
 {
-    return this.cpu.read16(this.used_addr);
+    return this.cpu.read16_physical(this.used_addr);
 };
 
 VirtQueue.prototype.used_set_flags = function(value)
 {
-    this.cpu.write16(this.used_addr, value);
+    this.cpu.write16_physical(this.used_addr, value);
 };
 
 VirtQueue.prototype.used_get_idx = function()
 {
-    return this.cpu.read16(this.used_addr + 2);
+    return this.cpu.read16_physical(this.used_addr + 2);
 };
 
 VirtQueue.prototype.used_set_idx = function(value)
 {
-    this.cpu.write16(this.used_addr + 2, value);
+    this.cpu.write16_physical(this.used_addr + 2, value);
 };
 
 VirtQueue.prototype.used_set_entry = function(i, desc_idx, length_written)
 {
-    this.cpu.write32(this.used_addr + 4 + VIRTQ_USED_ENTRYSIZE * i, desc_idx);
-    this.cpu.write32(this.used_addr + 8 + VIRTQ_USED_ENTRYSIZE * i, length_written);
+    this.cpu.write32_physical(this.used_addr + 4 + VIRTQ_USED_ENTRYSIZE * i, desc_idx);
+    this.cpu.write32_physical(this.used_addr + 8 + VIRTQ_USED_ENTRYSIZE * i, length_written);
 };
 
 VirtQueue.prototype.used_set_avail_event = function(value)
 {
-    this.cpu.write16(this.used_addr + 4 + VIRTQ_USED_ENTRYSIZE * this.size, value);
+    this.cpu.write16_physical(this.used_addr + 4 + VIRTQ_USED_ENTRYSIZE * this.size, value);
 };
 
 /**
@@ -1374,32 +1432,58 @@ function VirtQueueBufferChain(virtqueue, head_idx)
     this.write_buffer_offset = 0;
     this.length_written = 0;
     this.length_writable = 0;
+    this.valid = false;
 
+    try
+    {
+        this.collect_buffers(virtqueue);
+        this.valid = true;
+    }
+    catch(error)
+    {
+        if(!(error instanceof RangeError)) throw error;
+        this.read_buffers.length = 0;
+        this.write_buffers.length = 0;
+        this.length_readable = this.length_writable = 0;
+        this.virtio.needs_reset();
+    }
+}
+
+VirtQueueBufferChain.prototype.collect_buffers = function(virtqueue)
+{
     // Traverse chain to discover buffers.
     // - There shouldn't be an excessive amount of descriptor elements.
     let table_address = virtqueue.desc_addr;
-    let desc_idx = head_idx;
+    let desc_idx = this.head_idx;
     let chain_length = 0;
     let chain_max = virtqueue.size;
     let writable_region = false;
+    let indirect = false;
     const has_indirect_feature = this.virtio.is_feature_negotiated(VIRTIO_F_RING_INDIRECT_DESC);
     dbg_log("<<< Descriptor chain start", LOG_VIRTIO);
     do
     {
+        if(desc_idx >= chain_max || ++chain_length > chain_max)
+        {
+            throw new RangeError("Invalid VirtIO descriptor chain");
+        }
         const desc = virtqueue.get_descriptor(table_address, desc_idx);
+        this.cpu.validate_physical_range(desc.address, desc.len);
 
         dbg_log("descriptor: idx=" + desc_idx + " addr=" + h(desc.addr_high, 8) + ":" + h(desc.addr_low, 8) +
             " len=" + h(desc.len, 8) + " flags=" + h(desc.flags, 4) + " next=" + h(desc.next, 4), LOG_VIRTIO);
 
-        if(has_indirect_feature && (desc.flags & VIRTQ_DESC_F_INDIRECT))
+        if(desc.flags & VIRTQ_DESC_F_INDIRECT)
         {
-            if(DEBUG && (desc.flags & VIRTQ_DESC_F_NEXT))
+            if(!has_indirect_feature || indirect || desc.flags & VIRTQ_DESC_F_NEXT ||
+                desc.len === 0 || desc.len % VIRTQ_DESC_ENTRYSIZE || desc.len / VIRTQ_DESC_ENTRYSIZE > 65536)
             {
-                dbg_log("Driver bug: has set VIRTQ_DESC_F_NEXT flag in an indirect table descriptor", LOG_VIRTIO);
+                throw new RangeError("Invalid VirtIO indirect descriptor");
             }
 
             // Carry on using indirect table, starting at first entry.
-            table_address = desc.addr_low;
+            indirect = true;
+            table_address = desc.address;
             desc_idx = 0;
             chain_length = 0;
             chain_max = desc.len / VIRTQ_DESC_ENTRYSIZE;
@@ -1417,18 +1501,10 @@ function VirtQueueBufferChain(virtqueue, head_idx)
         {
             if(writable_region)
             {
-                dbg_log("Driver bug: readonly buffer after writeonly buffer within chain", LOG_VIRTIO);
-                break;
+                throw new RangeError("VirtIO readable buffer follows writable buffer");
             }
             this.read_buffers.push(desc);
             this.length_readable += desc.len;
-        }
-
-        chain_length++;
-        if(chain_length > chain_max)
-        {
-            dbg_log("Driver bug: descriptor chain cycle detected", LOG_VIRTIO);
-            break;
         }
 
         if(desc.flags & VIRTQ_DESC_F_NEXT)
@@ -1442,7 +1518,7 @@ function VirtQueueBufferChain(virtqueue, head_idx)
     }
     while(true);
     dbg_log("Descriptor chain end >>>", LOG_VIRTIO);
-}
+};
 
 /**
  * Reads the next blob of memory represented by the buffer chain into dest_buffer.
@@ -1463,7 +1539,7 @@ VirtQueueBufferChain.prototype.get_next_blob = function(dest_buffer)
         }
 
         const buf = this.read_buffers[this.read_buffer_idx];
-        const read_address = buf.addr_low + this.read_buffer_offset;
+        const read_address = buf.address + this.read_buffer_offset;
         let read_length = buf.len - this.read_buffer_offset;
 
         if(read_length > remaining)
@@ -1477,7 +1553,7 @@ VirtQueueBufferChain.prototype.get_next_blob = function(dest_buffer)
             this.read_buffer_offset = 0;
         }
 
-        dest_buffer.set(this.cpu.read_blob(read_address, read_length), dest_offset);
+        dest_buffer.set(this.cpu.read_blob_physical(read_address, read_length), dest_offset);
 
         dest_offset += read_length;
         remaining -= read_length;
@@ -1505,7 +1581,7 @@ VirtQueueBufferChain.prototype.set_next_blob = function(src_buffer)
         }
 
         const buf = this.write_buffers[this.write_buffer_idx];
-        const write_address = buf.addr_low + this.write_buffer_offset;
+        const write_address = buf.address + this.write_buffer_offset;
         let write_length = buf.len - this.write_buffer_offset;
 
         if(write_length > remaining)
@@ -1520,7 +1596,7 @@ VirtQueueBufferChain.prototype.set_next_blob = function(src_buffer)
         }
 
         const src_end = src_offset + write_length;
-        this.cpu.write_blob(src_buffer.subarray(src_offset, src_end), write_address);
+        this.cpu.write_blob_physical(src_buffer.subarray(src_offset, src_end), write_address);
 
         src_offset += write_length;
         remaining -= write_length;

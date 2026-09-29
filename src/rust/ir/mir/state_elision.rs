@@ -250,7 +250,10 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             .map(|id| &region.instructions[id.index()])
             .any(|inst| {
                 (inst.state.is_some() || inst.commit.is_some())
-                    && !matches!(inst.op, Op::PollBudget | Op::SseCheck | Op::FpuCheck | Op::X87 { .. })
+                    && !matches!(
+                        inst.op,
+                        Op::PollBudget | Op::SseCheck | Op::FpuCheck | Op::X87 { .. }
+                    )
                     && !transparent_helper(region, inst)
             })
     {
@@ -514,15 +517,22 @@ mod tests {
             matches!(seed.region.instructions[id.index()].op, Op::ReadFlag(_))
         }));
         let mut mir = optimized(&[0xFD, 0x40, 0x74, 0x02, 0xFC, 0x49, 0x90]);
-        mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT).unwrap();
+        mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT)
+            .unwrap();
         mir.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
         mir.verify().unwrap();
 
         let mut invalid = lift_cpu_cfg(&[0x90], GuestEip(0), LinearAddress(0), true, 8).unwrap();
-        invalid.instructions.iter_mut()
+        invalid
+            .instructions
+            .iter_mut()
             .find(|instruction| matches!(instruction.op, Op::ReadFlag(_)))
-            .unwrap().op = Op::ReadFlag(10);
-        assert!(verify(&invalid).is_err(), "system bit cannot use arithmetic getter");
+            .unwrap()
+            .op = Op::ReadFlag(10);
+        assert!(
+            verify(&invalid).is_err(),
+            "system bit cannot use arithmetic getter"
+        );
     }
 
     #[test]
@@ -535,16 +545,30 @@ mod tests {
             panic!("linear exit");
         };
         let system = hir.states[state.index()].flags.system;
-        let zero_cf = hir.append(block, Op::Extract { lsb: 0 }, vec![system], &[Type::I1], None)[0];
+        let zero_cf = hir.append(
+            block,
+            Op::Extract { lsb: 0 },
+            vec![system],
+            &[Type::I1],
+            None,
+        )[0];
         let invalid = hir.append(block, Op::Const(0), vec![], &[Type::I1], None)[0];
         hir.states[state.index()].flags.arithmetic[0] = zero_cf;
         hir.states[state.index()].flags.backing_valid = Some(invalid);
         hir.terminate(block, Terminator::Exit(state));
         let mut mir = lower(&hir).unwrap();
-        mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT).unwrap();
-        let flag_write = mir.states[state.index()].cpu.writes.iter()
-            .position(|write| write.address == Address::Flags).unwrap();
-        assert!(!elided(&mir, state, flag_write), "masked CF zero differs from incoming CF");
+        mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT)
+            .unwrap();
+        let flag_write = mir.states[state.index()]
+            .cpu
+            .writes
+            .iter()
+            .position(|write| write.address == Address::Flags)
+            .unwrap();
+        assert!(
+            !elided(&mir, state, flag_write),
+            "masked CF zero differs from incoming CF"
+        );
         mir.verify().unwrap();
     }
 

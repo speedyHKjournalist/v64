@@ -1,6 +1,5 @@
 use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
-use crate::cpu::memory;
 use crate::cpu::misc_instr::{getaf, getcf, getzf};
 
 fn int_log2(x: i32) -> i32 { 31 - x.leading_zeros() as i32 }
@@ -1024,29 +1023,24 @@ pub unsafe fn bt_mem(virt_addr: i32, mut bit_offset: i32) {
     *flags = *flags & !1 | bit_base >> bit_offset & 1;
     *flags_changed &= !1;
 }
-pub unsafe fn btc_mem(virt_addr: i32, mut bit_offset: i32) {
-    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
-    let bit_base = memory::read8(phys_addr);
-    bit_offset &= 7;
-    *flags = *flags & !1 | bit_base >> bit_offset & 1;
-    *flags_changed &= !1;
-    memory::write8(phys_addr, bit_base ^ 1 << bit_offset);
+// The byte holding the bit is read and written back as one locked
+// read-modify-write (LOCK BTS is a common spinlock acquire)
+pub unsafe fn btc_mem(virt_addr: i32, bit_offset: i32) {
+    bit_rmw(virt_addr, bit_offset, &|bit_base, bit| bit_base ^ bit)
 }
-pub unsafe fn btr_mem(virt_addr: i32, mut bit_offset: i32) {
-    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
-    let bit_base = memory::read8(phys_addr);
-    bit_offset &= 7;
-    *flags = *flags & !1 | bit_base >> bit_offset & 1;
-    *flags_changed &= !1;
-    memory::write8(phys_addr, bit_base & !(1 << bit_offset));
+pub unsafe fn btr_mem(virt_addr: i32, bit_offset: i32) {
+    bit_rmw(virt_addr, bit_offset, &|bit_base, bit| bit_base & !bit)
 }
-pub unsafe fn bts_mem(virt_addr: i32, mut bit_offset: i32) {
-    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
-    let bit_base = memory::read8(phys_addr);
-    bit_offset &= 7;
-    *flags = *flags & !1 | bit_base >> bit_offset & 1;
-    *flags_changed &= !1;
-    memory::write8(phys_addr, bit_base | 1 << bit_offset);
+pub unsafe fn bts_mem(virt_addr: i32, bit_offset: i32) {
+    bit_rmw(virt_addr, bit_offset, &|bit_base, bit| bit_base | bit)
+}
+unsafe fn bit_rmw(virt_addr: i32, bit_offset: i32, operation: &dyn Fn(i32, i32) -> i32) {
+    let shift = bit_offset & 7;
+    safe_read_write8(virt_addr + (bit_offset >> 3), &|bit_base| {
+        *flags = *flags & !1 | bit_base >> shift & 1;
+        *flags_changed &= !1;
+        operation(bit_base, 1 << shift)
+    });
 }
 
 #[no_mangle]

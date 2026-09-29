@@ -33,7 +33,10 @@ pub fn range(
     if primary.bytes.len() != analysis::PAGE {
         return (base, 1);
     }
-    let offsets: Vec<usize> = entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect();
+    let offsets: Vec<usize> = entries
+        .iter()
+        .map(|e| (e.linear.0 & 4095) as usize)
+        .collect();
     let slots = analysis::Slots::new(vec![base], origin.cpu_entry().cs_base());
     let plan = analysis::analyze(&primary.bytes, slots, origin.default_32, &offsets, 0..4096);
     let into = |page: u32| plan.jumps.iter().any(|&t| t & !4095 == page);
@@ -45,32 +48,55 @@ pub fn range(
 
 /// Whether code of `entries` (in the first of the two pages of `snapshot`)
 /// runs on through the second page into the page after it.
-pub fn continues(origin: &CompileRequest, snapshot: &ImmutableCodeSnapshot, entries: &[CpuEntryKey]) -> bool {
+pub fn continues(
+    origin: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryKey],
+) -> bool {
     let base = origin.linear.0 & !4095;
     if snapshot.bytes.len() != 2 * analysis::PAGE || snapshot.mappings[0].linear.0 != base {
         return false;
     }
-    let offsets: Vec<usize> = entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect();
-    let slots = analysis::Slots::new(vec![base, base.wrapping_add(4096)], origin.cpu_entry().cs_base());
+    let offsets: Vec<usize> = entries
+        .iter()
+        .map(|e| (e.linear.0 & 4095) as usize)
+        .collect();
+    let slots = analysis::Slots::new(
+        vec![base, base.wrapping_add(4096)],
+        origin.cpu_entry().cs_base(),
+    );
     let plan = analysis::analyze(&snapshot.bytes, slots, origin.default_32, &offsets, 0..4096);
-    plan.jumps.iter().any(|&t| t & !4095 == base.wrapping_add(8192))
+    plan.jumps
+        .iter()
+        .any(|&t| t & !4095 == base.wrapping_add(8192))
 }
 
 /// Whether code from `entries` (linear addresses; those in the page of the
 /// one-page `snapshot` count) runs on into the next page: a cluster function
 /// taking the page as a partner then takes that one too, as a range would.
-pub fn runs_on(snapshot: &ImmutableCodeSnapshot, cs_base: u32, default_32: bool, entries: &[u32]) -> bool {
+pub fn runs_on(
+    snapshot: &ImmutableCodeSnapshot,
+    cs_base: u32,
+    default_32: bool,
+    entries: &[u32],
+) -> bool {
     let Some(base) = snapshot.mappings.first().map(|m| m.linear.0)
     else {
         return false;
     };
-    let offsets: Vec<usize> = entries.iter().filter(|&&e| e & !4095 == base).map(|&e| (e & 4095) as usize).collect();
+    let offsets: Vec<usize> = entries
+        .iter()
+        .filter(|&&e| e & !4095 == base)
+        .map(|&e| (e & 4095) as usize)
+        .collect();
     if snapshot.bytes.len() != analysis::PAGE || offsets.is_empty() {
         return false;
     }
     let slots = analysis::Slots::new(vec![base], cs_base);
     let plan = analysis::analyze(&snapshot.bytes, slots, default_32, &offsets, 0..4096);
-    plan.jumps.iter().any(|&t| t & !4095 == base.wrapping_add(4096))
+    plan.jumps
+        .iter()
+        .any(|&t| t & !4095 == base.wrapping_add(4096))
 }
 
 /// Compile a page function for `entries` (primary first, all in one page)
@@ -93,16 +119,22 @@ pub fn compile_page(
     };
     let primary = origin.linear.0 & !4095;
     let cs_base = origin.cpu_entry().cs_base();
-    let slots = analysis::Slots::new(snapshot.mappings.iter().map(|m| m.linear.0).collect(), cs_base);
+    let slots = analysis::Slots::new(
+        snapshot.mappings.iter().map(|m| m.linear.0).collect(),
+        cs_base,
+    );
     if !(1..=MAX_PAGES).contains(&pages)
         || snapshot.bytes.len() != pages * analysis::PAGE
         || slots.pages.len() != pages
         || snapshot.mappings.iter().enumerate().any(|(k, m)| {
-            m.linear.0 != slots.pages[k] || !snapshot.dependencies.iter().any(|d| d.page == m.physical)
+            m.linear.0 != slots.pages[k]
+                || !snapshot.dependencies.iter().any(|d| d.page == m.physical)
         })
         || slots.offset(primary).is_none()
     {
-        return Err(CompileError::InvalidIr("invalid tier-0 page snapshot".into()));
+        return Err(CompileError::InvalidIr(
+            "invalid tier-0 page snapshot".into(),
+        ));
     }
     let base = first;
     if entries.is_empty()
@@ -113,7 +145,9 @@ pub fn compile_page(
                 || e.default_32 != origin.default_32
         })
     {
-        return Err(CompileError::InvalidIr("invalid tier-0 page entries".into()));
+        return Err(CompileError::InvalidIr(
+            "invalid tier-0 page entries".into(),
+        ));
     }
     let offset_of = |e: &CpuEntryKey| slots.offset(e.linear.0).unwrap();
     let mut offsets: Vec<usize> = entries.iter().map(offset_of).collect();
@@ -125,32 +159,66 @@ pub fn compile_page(
             &snapshot.bytes[own..][..analysis::PAGE],
             analysis::Slots::new(vec![primary], cs_base),
             origin.default_32,
-            &entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect::<Vec<_>>(),
+            &entries
+                .iter()
+                .map(|e| (e.linear.0 & 4095) as usize)
+                .collect::<Vec<_>>(),
             0..analysis::PAGE,
         );
-        offsets.extend(alone.external.iter().chain(extra).filter_map(|&t| slots.offset(t)));
+        offsets.extend(
+            alone
+                .external
+                .iter()
+                .chain(extra)
+                .filter_map(|&t| slots.offset(t)),
+        );
     }
-    let plan = analysis::analyze(&snapshot.bytes, slots.clone(), origin.default_32, &offsets, own..own + analysis::PAGE);
-    let served: Vec<CpuEntryKey> =
-        entries.iter().copied().filter(|e| plan.block_at[offset_of(e)].is_some()).collect();
+    let plan = analysis::analyze(
+        &snapshot.bytes,
+        slots.clone(),
+        origin.default_32,
+        &offsets,
+        own..own + analysis::PAGE,
+    );
+    let served: Vec<CpuEntryKey> = entries
+        .iter()
+        .copied()
+        .filter(|e| plan.block_at[offset_of(e)].is_some())
+        .collect();
     if served.is_empty() {
         return Err(CompileError::Unsupported("no decodable tier-0 entry"));
     }
     let seeded = analysis::seeds(&plan, &served.iter().map(offset_of).collect::<Vec<_>>());
-    let page_seeds = served.iter().zip(seeded).filter(|(_, seed)| *seed).map(|(e, _)| *e).collect();
+    let page_seeds = served
+        .iter()
+        .zip(seeded)
+        .filter(|(_, seed)| *seed)
+        .map(|(e, _)| *e)
+        .collect();
     // Specialize for the current state when it is flat 32-bit code of this
     // page's mode; the page function checks it on entry.
     let state = unsafe { *crate::cpu::global_pointers::state_flags };
-    let flat = state.has_flat_segmentation() && state.ssize_32() && state.is_32() == origin.default_32;
+    let flat =
+        state.has_flat_segmentation() && state.ssize_32() && state.is_32() == origin.default_32;
     let mem8 = unsafe { crate::cpu::memory::mem8 as u32 };
-    let hosts: Vec<u32> = snapshot.mappings.iter().map(|m| mem8.wrapping_add(m.physical.0)).collect();
+    let hosts: Vec<u32> = snapshot
+        .mappings
+        .iter()
+        .map(|m| mem8.wrapping_add(m.physical.0))
+        .collect();
     let code = emit::emit_page(&plan, &served, flat, &hosts);
-    super::runtime::tier0::note_compiled(code.instructions, code.templated, code.bytes.len(), pages);
+    super::runtime::tier0::note_compiled(
+        code.instructions,
+        code.templated,
+        code.bytes.len(),
+        pages,
+    );
     let page_blocks = (0..pages)
         .map(|page| {
             std::array::from_fn(|word| {
                 (0..64).fold(0u64, |bits, bit| {
-                    bits | (plan.block_at[page * analysis::PAGE + word * 64 + bit].is_some() as u64) << bit
+                    bits | (plan.block_at[page * analysis::PAGE + word * 64 + bit].is_some() as u64)
+                        << bit
                 })
             })
         })

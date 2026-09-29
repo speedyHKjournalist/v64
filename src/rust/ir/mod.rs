@@ -13,12 +13,6 @@ mod copy_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/core.rs"]
 mod core_tests;
-#[cfg(test)]
-#[path = "../../../tests/ir/semantics/page_bench.rs"]
-mod page_bench_tests;
-#[cfg(test)]
-#[path = "../../../tests/ir/semantics/region_bench.rs"]
-mod region_bench_tests;
 pub mod dump;
 pub mod effects;
 #[cfg(test)]
@@ -36,7 +30,13 @@ pub mod lowering;
 #[path = "../../../tests/ir/semantics/memory.rs"]
 mod memory_tests;
 pub mod mir;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/page_bench.rs"]
+mod page_bench_tests;
 pub mod passes;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/region_bench.rs"]
+mod region_bench_tests;
 pub mod runtime;
 pub mod simd;
 #[cfg(test)]
@@ -46,8 +46,8 @@ pub mod state;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/store_continuation.rs"]
 mod store_continuation_tests;
-pub mod types;
 pub mod tier0;
+pub mod types;
 pub mod verify;
 pub mod x87;
 

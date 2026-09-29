@@ -4,85 +4,146 @@ use crate::cpu::cpu::reg128;
 use crate::softfloat::F80;
 use crate::state_flags::CachedStateFlags;
 
-pub const reg8: *mut u8 = 64 as *mut u8;
-pub const reg16: *mut u16 = 64 as *mut u16;
-pub const reg32: *mut i32 = 64 as *mut i32;
+/// The CPU state of this instance. The default build keeps it at fixed
+/// addresses below --global-base (4096), which generated code reads directly.
+/// The parallel build (docs/multicore.md) places
+/// it in a static instead: every vCPU worker relocates its own copy of the
+/// module into the shared memory, and with it this block; generated code of a
+/// worker embeds that worker's addresses. Offsets are the same in both.
+#[cfg(feature = "parallel")]
+#[repr(C, align(64))]
+pub struct StateBlock(pub [u8; 4096]);
+#[cfg(feature = "parallel")]
+pub static mut STATE_BLOCK: StateBlock = StateBlock([0; 4096]);
 
-pub const last_op_size: *mut i32 = 96 as *mut i32;
-pub const flags_changed: *mut i32 = 100 as *mut i32;
-pub const last_op1: *mut i32 = 104 as *mut i32;
-pub const state_flags: *mut CachedStateFlags = 108 as *mut CachedStateFlags;
-pub const last_result: *mut i32 = 112 as *mut i32;
-pub const flags: *mut i32 = 120 as *mut i32;
+macro_rules! state {
+    ($name:ident: $type:ty = $offset:literal) => {
+        #[cfg(not(feature = "parallel"))]
+        pub const $name: *mut $type = $offset as *mut $type;
+        #[cfg(feature = "parallel")]
+        pub const $name: *mut $type = unsafe {
+            (&raw mut STATE_BLOCK)
+                .cast::<u8>()
+                .add($offset)
+                .cast::<$type>()
+        };
+    };
+}
 
-pub const segment_access_bytes: *mut u8 = 512 as *mut u8; // TODO: reorder below segment_limits
+/// Address of offset 0 of the state layout (src/state_layout.js)
+#[no_mangle]
+pub fn state_base() -> u32 {
+    #[cfg(feature = "parallel")]
+    return (&raw mut STATE_BLOCK) as u32;
+    #[cfg(not(feature = "parallel"))]
+    return 0;
+}
 
-pub const apic_enabled: *mut bool = 548 as *mut bool;
-pub const acpi_enabled: *mut bool = 552 as *mut bool;
-
-pub const instruction_pointer: *mut i32 = 556 as *mut i32;
-pub const previous_ip: *mut i32 = 560 as *mut i32;
-pub const idtr_size: *mut i32 = 564 as *mut i32;
-pub const idtr_offset: *mut i32 = 568 as *mut i32;
-pub const gdtr_size: *mut i32 = 572 as *mut i32;
-pub const gdtr_offset: *mut i32 = 576 as *mut i32;
-pub const cr: *mut i32 = 580 as *mut i32;
-pub const cpl: *mut u8 = 612 as *mut u8;
-pub const in_hlt: *mut bool = 616 as *mut bool;
-pub const last_virt_eip: *mut i32 = 620 as *mut i32;
-pub const eip_phys: *mut i32 = 624 as *mut i32;
-
-pub const sysenter_cs: *mut i32 = 636 as *mut i32;
-pub const sysenter_esp: *mut i32 = 640 as *mut i32;
-pub const sysenter_eip: *mut i32 = 644 as *mut i32;
-pub const prefixes: *mut u8 = 648 as *mut u8;
-pub const instruction_counter: *mut u32 = 664 as *mut u32;
-pub const sreg: *mut u16 = 668 as *mut u16;
-pub const dreg: *mut i32 = 684 as *mut i32;
-
-// filled in by svga_fill_pixel_buffer, read by javacsript for optimised putImageData calls
-pub const svga_dirty_bitmap_min_offset: *mut u32 = 716 as *mut u32;
-pub const svga_dirty_bitmap_max_offset: *mut u32 = 720 as *mut u32;
-
-pub const segment_is_null: *mut bool = 724 as *mut bool;
-pub const segment_offsets: *mut i32 = 736 as *mut i32;
-pub const segment_limits: *mut u32 = 768 as *mut u32;
-
-pub const protected_mode: *mut bool = 800 as *mut bool;
-pub const is_32: *mut bool = 804 as *mut bool;
-pub const stack_size_32: *mut bool = 808 as *mut bool;
-pub const memory_size: *mut u32 = 812 as *mut u32;
-pub const fpu_stack_empty: *mut u8 = 816 as *mut u8;
-pub const mxcsr: *mut i32 = 824 as *mut i32;
-
-pub const reg_xmm: *mut reg128 = 832 as *mut reg128;
-pub const current_tsc: *mut u64 = 960 as *mut u64;
-
-pub const reg_pdpte: *mut u64 = 968 as *mut u64; // 4 64-bit entries
-
-pub const fpu_stack_ptr: *mut u8 = 1032 as *mut u8;
-pub const fpu_control_word: *mut u16 = 1036 as *mut u16;
-pub const fpu_status_word: *mut u16 = 1040 as *mut u16;
-pub const fpu_opcode: *mut i32 = 1044 as *mut i32;
-pub const fpu_ip: *mut i32 = 1048 as *mut i32;
-pub const fpu_ip_selector: *mut i32 = 1052 as *mut i32;
-pub const fpu_dp: *mut i32 = 1056 as *mut i32;
-pub const fpu_dp_selector: *mut i32 = 1060 as *mut i32;
-pub const tss_size_32: *mut bool = 1128 as *mut bool;
-
-pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
-
-pub const fpu_st: *mut F80 = 1152 as *mut F80;
-/// Address of cpu::tlb_data, written at startup. Generated IR code loads it
-/// from this fixed slot (below --global-base) instead of calling an import.
-pub const ir_tlb_base: *mut u32 = 2048 as *mut u32;
-/// f64 shadow of the physical x87 registers (cpu::fpu), with VALID/DIRTY
-/// masks, at fixed addresses so natively generated IR fixtures stay valid.
-pub const x87_shadow_values: *mut [u64; 8] = 1280 as *mut [u64; 8];
-pub const x87_shadow_valid: *mut u32 = 1344 as *mut u32;
-pub const x87_shadow_dirty: *mut u32 = 1348 as *mut u32;
-/// Nonzero while generated IR code may inline fast-math x87 on that cache.
-pub const x87_native_policy: *mut u8 = 1352 as *mut u8;
+// BEGIN GENERATED by gen/state_layout.js (edit the layout there)
+state!(reg8: u8 = 64);
+state!(reg16: u16 = 64);
+state!(reg32: i32 = 64);
+state!(last_op_size: i32 = 96);
+state!(flags_changed: i32 = 100);
+state!(last_op1: i32 = 104);
+state!(state_flags: CachedStateFlags = 108);
+state!(last_result: i32 = 112);
+state!(flags: i32 = 120);
+state!(segment_access_bytes: u8 = 512); // TODO: reorder below segment_limits
+state!(apic_enabled: bool = 548);
+state!(acpi_enabled: bool = 552);
+state!(instruction_pointer: i32 = 556);
+state!(previous_ip: i32 = 560);
+state!(idtr_size: i32 = 564);
+state!(idtr_offset: i32 = 568);
+state!(gdtr_size: i32 = 572);
+state!(gdtr_offset: i32 = 576);
+state!(cr: i32 = 580);
+state!(cpl: u8 = 612);
+state!(in_hlt: bool = 616);
+state!(last_virt_eip: i32 = 620);
+state!(eip_phys: i32 = 624);
+state!(nmi_blocked: bool = 628);
+state!(interrupt_shadow: u8 = 632);
+state!(sysenter_cs: i32 = 636);
+state!(sysenter_esp: i32 = 640);
+state!(sysenter_eip: i32 = 644);
+state!(prefixes: u8 = 648);
+state!(instruction_counter: u32 = 664);
+state!(sreg: u16 = 668);
+state!(dreg: i32 = 684);
+state!(svga_dirty_bitmap_min_offset: u32 = 716); // filled in by svga_fill_pixel_buffer, read by javacsript for optimised putImageData calls
+state!(svga_dirty_bitmap_max_offset: u32 = 720);
+state!(segment_is_null: bool = 724);
+state!(segment_offsets: i32 = 736);
+state!(segment_limits: u32 = 768);
+state!(protected_mode: bool = 800);
+state!(is_32: bool = 804);
+state!(stack_size_32: bool = 808);
+state!(memory_size: u32 = 812);
+state!(fpu_stack_empty: u8 = 816);
+state!(mxcsr: i32 = 824);
+state!(reg_xmm: reg128 = 832);
+state!(current_tsc: u64 = 960);
+state!(reg_pdpte: u64 = 968); // 4 64-bit entries
+state!(fpu_stack_ptr: u8 = 1032);
+state!(fpu_control_word: u16 = 1036);
+state!(fpu_status_word: u16 = 1040);
+state!(fpu_opcode: i32 = 1044);
+state!(fpu_ip: i32 = 1048);
+state!(fpu_ip_selector: i32 = 1052);
+state!(fpu_dp: i32 = 1056);
+state!(fpu_dp_selector: i32 = 1060);
+state!(tss_size_32: bool = 1128);
+state!(sse_scratch_register: reg128 = 1136);
+state!(fpu_st: F80 = 1152);
+// f64 shadow of the physical x87 registers (cpu::fpu), with VALID/DIRTY
+// masks, at fixed addresses so natively generated IR fixtures stay valid.
+state!(x87_shadow_values: [u64; 8] = 1280);
+state!(x87_shadow_valid: u32 = 1344);
+state!(x87_shadow_dirty: u32 = 1348);
+// Nonzero while generated IR code may inline fast-math x87 on that cache.
+state!(x87_native_policy: u8 = 1352);
+state!(slice_budget: u32 = 1356);
+state!(x64_gpr_hi: u32 = 1360);
+state!(x64_gpr_ext_lo: u32 = 1424);
+state!(x64_xmm_ext: reg128 = 1456);
+state!(x64_rip_hi: u32 = 1584);
+state!(x64_previous_ip_hi: u32 = 1588);
+state!(x64_idtr_base_hi: u32 = 1592);
+state!(x64_gdtr_base_hi: u32 = 1596);
+state!(x64_cr_hi: u32 = 1600);
+state!(x64_dr_hi: u32 = 1632);
+state!(x64_segment_base_hi: u32 = 1664);
+state!(x64_efer: u64 = 1696);
+state!(x64_kernel_gs_base: u64 = 1704);
+state!(x64_star: u64 = 1712);
+state!(x64_lstar: u64 = 1720);
+state!(x64_cstar: u64 = 1728);
+state!(x64_sfmask: u64 = 1736);
+state!(x64_cs_long: u8 = 1744);
+state!(x64_rex: u8 = 1748);
+state!(x64_cr8: u64 = 1752);
+state!(x64_sysenter_esp_hi: u32 = 1760);
+state!(x64_sysenter_eip_hi: u32 = 1764);
+state!(x64_fpu_ip_hi: u32 = 1768);
+state!(x64_fpu_dp_hi: u32 = 1772);
+state!(x64_pat: u64 = 1776);
+state!(x64_tsc_aux: u32 = 1784);
+state!(x64_page_exit: u32 = 1792);
+state!(x64_jac_base: u32 = 1796);
+state!(x64_jac_epoch: u64 = 1800);
+state!(x64_page_linear: u64 = 1808);
+// Address of cpu::tlb_data, written at startup. Generated IR code loads it
+// from this fixed slot (below --global-base) instead of calling an import.
+state!(ir_tlb_base: u32 = 2048);
+state!(x64_mtrr_def_type: u64 = 2056);
+state!(x64_mtrr_fixed: u64 = 2064);
+state!(x64_mtrr_var: u64 = 2152);
+state!(x64_mcg_status: u64 = 2280);
+state!(x64_mcg_ctl: u64 = 2288);
+state!(x64_mc_banks: u64 = 2296);
+// END GENERATED
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);

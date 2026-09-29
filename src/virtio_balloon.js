@@ -127,11 +127,13 @@ export function VirtioBalloon(cpu, bus)
                         }
                         if(bufchain.length_writable > 0) {
                             // console.log("Free pages hinted", bufchain.read_buffers, bufchain.write_buffers);
-                            let zeros = new Uint8Array(0);
                             for(let i = 0; i < bufchain.write_buffers.length; ++i) {
                                 let b = bufchain.write_buffers[i];
+                                const zeros = new Uint8Array(Math.min(b.len, 65536));
+                                for(let done = 0; done < b.len; done += zeros.length) {
+                                    this.virtio.cpu.write_blob_physical(zeros.subarray(0, Math.min(zeros.length, b.len - done)), b.address + done);
+                                }
                                 this.zeroed += b.len;
-                                this.virtio.cpu.zero_memory(b.addr_low, b.len);
                             }
                         }
                         this.virtio.queues[queue_id].push_reply(bufchain);

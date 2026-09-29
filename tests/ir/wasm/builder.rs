@@ -104,7 +104,10 @@ fn capacity_modules() {
             assert_eq!(w.intern_signature(signature), i as u32);
         }
         for i in 0..n {
-            w.call_signature(&format!("{}-{i}", "h".repeat(130)), Signature::new(&[], &[]));
+            w.call_signature(
+                &format!("{}-{i}", "h".repeat(130)),
+                Signature::new(&[], &[]),
+            );
         }
         save(&mut w, &format!("imports-{n}"));
         let mut w = WasmBuilder::new();

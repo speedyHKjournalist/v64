@@ -252,7 +252,12 @@ pub(crate) fn back_edge_targets(
 }
 fn loop_headers(entries: &[BlockId], blocks: &[Block]) -> Vec<bool> {
     back_edge_targets(entries, blocks.len(), |b| {
-        blocks[b].terminator.edges().iter().map(|e| e.target.index()).collect()
+        blocks[b]
+            .terminator
+            .edges()
+            .iter()
+            .map(|e| e.target.index())
+            .collect()
     })
 }
 pub fn lower_with(
@@ -354,7 +359,13 @@ pub fn lower_with(
         (
             longest_guest_paths(n, &headers, |b| hir_successors(region, b), weight)
                 .ok_or_else(invalid)?,
-            entry_frontier(&region.entries, n, &headers, |b| hir_successors(region, b), weight),
+            entry_frontier(
+                &region.entries,
+                n,
+                &headers,
+                |b| hir_successors(region, b),
+                weight,
+            ),
         )
     }
     else {

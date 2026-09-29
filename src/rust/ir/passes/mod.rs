@@ -53,6 +53,20 @@ impl PassConfig {
     /// Bit 18: loop-header budget polls in non-fused regions (sparse_polls).
     pub const SPARSE_POLLS: u32 = 18;
     pub const MASK: u32 = (1 << 19) - 1;
+    /// Bit 14: loop-invariant RAM load caching (ram_loop).
+    pub const RAM_LOOP: u32 = 14;
+    /// Passes that assume no other core writes guest RAM meanwhile: with cores
+    /// in workers (crate::parallel), a load cached across loop iterations
+    /// would never see another core's store (a spin loop would not end).
+    /// Intra-block forwarding stays: it only merges accesses of one instant.
+    pub fn shared_memory_disabled() -> u32 {
+        if crate::parallel::active() {
+            1 << Self::RAM_LOOP
+        }
+        else {
+            0
+        }
+    }
     pub fn enabled(&self, bit: u32) -> bool { self.disabled & (1 << bit) == 0 }
     pub fn disable(mut self, mask: u32) -> Self {
         self.disabled |= mask;
@@ -497,7 +511,14 @@ fn trivial_phis(region: &mut Region, stats: &mut PassStats) {
     let n = region.blocks.len();
     let mut incoming: Vec<Vec<(usize, usize)>> = vec![vec![]; n];
     for (a, block) in region.blocks.iter().enumerate() {
-        for (k, edge) in block.terminator.as_ref().unwrap().edges().into_iter().enumerate() {
+        for (k, edge) in block
+            .terminator
+            .as_ref()
+            .unwrap()
+            .edges()
+            .into_iter()
+            .enumerate()
+        {
             incoming[edge.target.index()].push((a, k));
         }
     }
@@ -524,7 +545,11 @@ fn trivial_phis(region: &mut Region, stats: &mut PassStats) {
         }
         value
     };
-    let mut removed: Vec<Vec<bool>> = region.blocks.iter().map(|b| vec![false; b.params.len()]).collect();
+    let mut removed: Vec<Vec<bool>> = region
+        .blocks
+        .iter()
+        .map(|b| vec![false; b.params.len()])
+        .collect();
     let mut count = 0;
     loop {
         let mut changed = false;
@@ -601,7 +626,8 @@ fn trivial_phis(region: &mut Region, stats: &mut PassStats) {
             !drop[i - 1]
         });
         for (i, &v) in region.blocks[b].params.iter().enumerate() {
-            region.values[v.index()].definition = Definition::Parameter(BlockId(b as u32), i as u32);
+            region.values[v.index()].definition =
+                Definition::Parameter(BlockId(b as u32), i as u32);
         }
     }
     stats.phis += count;

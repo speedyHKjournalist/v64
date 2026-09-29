@@ -7,14 +7,14 @@ const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFile
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
-    let logObserver=null;
-    const wasmPath=process.argv[2]?.endsWith(".wasm")?process.argv[2]
+    let log_observer=null;
+    const wasm_path=process.argv[2]?.endsWith(".wasm")?process.argv[2]
         :(process.argv[2]||"build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
         wasm_fn:async imports=>{
             const original=imports.env.log_from_wasm;
-            imports.env.log_from_wasm=(...args)=>logObserver?logObserver(...args):original(...args);
-            return (await WebAssembly.instantiate(fs.readFileSync(wasmPath),imports)).instance.exports;
+            imports.env.log_from_wasm=(...args)=>log_observer?log_observer(...args):original(...args);
+            return (await WebAssembly.instantiate(fs.readFileSync(wasm_path),imports)).instance.exports;
         },
         memory_size:32<<20,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
@@ -186,15 +186,15 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
             let observers=0;
             for(let i=0;i<cases.length;i++) {
                 const [bytes,,group,dirty]=cases[i];
-                if(group!==2)continue;
+                if(group!==2) continue;
                 for(const wrap of [false,true]) {
                     const prefix=dirty?2:1,start=0xFFFFFFFE,retired=(start+prefix)>>>0;
                     let calls=0;
                     const configure=()=>{
-                        logObserver=null;reset(i,{badMxcsr:true});linear32[664>>2]=start;calls=0;
-                        logObserver=(pointer,length)=>{
+                        log_observer=null;reset(i,{badMxcsr:true});linear32[664>>2]=start;calls=0;
+                        log_observer=(pointer,length)=>{
                             const message=new TextDecoder().decode(new Uint8Array(e.memory.buffer,pointer,length));
-                            if(!message.startsWith("Invalid mxcsr bits:"))return;
+                            if(!message.startsWith("Invalid mxcsr bits:")) return;
                             calls++;
                             assert.equal(cpu.instruction_pointer[0],PC+bytes.length,"invalid MXCSR observes the decoded next PC");
                             assert.equal(cpu.reg32[6],0x10203041,"the preceding integer instruction is materialized");
@@ -212,22 +212,22 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
                     for(let n=0;n<prefix;n++){e.ir_test_step();linear32[664>>2]++;}
                     e.ir_test_step();
                     assert.equal(calls,1,"baseline invalid-MXCSR logger runs exactly once");
-                    const expected=state(),expectedCount=wrap?0xFFFFFFFF:retired;
-                    assert.equal(expected.ip,GP);assert.equal(linear32[664>>2],expectedCount);
+                    const expected=state(),expected_retired=wrap?0xFFFFFFFF:retired;
+                    assert.equal(expected.ip,GP);assert.equal(linear32[664>>2],expected_retired);
                     for(const opt of [0,1]) {
                         configure();instances[i][opt].exports.f(0);
                         assert.equal(calls,1,"IR invalid-MXCSR logger must match the interpreter");
-                        assert.equal(linear32[664>>2],expectedCount,"#GP must not retire or overwrite callback accounting");
+                        assert.equal(linear32[664>>2],expected_retired,"#GP must not retire or overwrite callback accounting");
                         assert.deepEqual(state(),expected,`invalid MXCSR observer ${i}/${opt}/${wrap}`);
                         observers++;
                     }
-                    logObserver=null;
+                    log_observer=null;
                 }
             }
             console.log(`PASS (debug): ${observers} invalid-MXCSR logger callbacks preserve dirty GPR/XMM/FLAGS, fault state and exact counter wrap`);
         }
     } finally {
-        logObserver=null;
+        log_observer=null;
         await vm.destroy();
     }
 }

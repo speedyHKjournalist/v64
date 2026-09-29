@@ -57,7 +57,11 @@ impl Cursor {
             alias: 0,
         }
     }
-    pub fn next(&mut self, records: usize, aliases: impl FnOnce(usize) -> usize) -> Option<(usize, usize)> {
+    pub fn next(
+        &mut self,
+        records: usize,
+        aliases: impl FnOnce(usize) -> usize,
+    ) -> Option<(usize, usize)> {
         if records == 0 {
             return None;
         }
@@ -144,7 +148,16 @@ mod tests {
     }
     #[test]
     fn bounded_scan_keeps_ready_entries_beyond_the_hot_ring() {
-        let counts: Vec<_> = (0..160).map(|i| if i == 10 { 4 } else { 1 }).collect();
+        let counts: Vec<_> = (0..160)
+            .map(|i| {
+                if i == 10 {
+                    4
+                }
+                else {
+                    1
+                }
+            })
+            .collect();
         let mut cursor = Cursor::new();
         let mut seen = std::collections::BTreeSet::new();
         for _frame in 0..2 {

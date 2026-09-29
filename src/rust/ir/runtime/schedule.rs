@@ -11,11 +11,7 @@ use super::{
     promotion::{Attempt, Ticket},
     region,
 };
-use crate::{
-    cpu::global_pointers as gp,
-    ir::backend::wasm::StateLayout,
-    jit,
-};
+use crate::{cpu::global_pointers as gp, ir::backend::wasm::StateLayout, jit};
 use std::{collections::VecDeque, sync::Mutex};
 // Larger heat sets remain an explicit experiment: they retain more recurrent
 // PCs but regressed XP by increasing compilation/cache pressure.
@@ -194,7 +190,10 @@ pub fn enabled() -> bool { SCHEDULER.try_lock().unwrap().config.enabled }
 /// additional cache locks. Reset/configuration preserve the chosen policy.
 pub(super) fn set_resident_promotion(enabled: bool) -> bool {
     let mut s = SCHEDULER.try_lock().unwrap();
-    if s.config.enabled || !s.hot.is_empty() || s.pending.is_some() || !s.ready.is_empty()
+    if s.config.enabled
+        || !s.hot.is_empty()
+        || s.pending.is_some()
+        || !s.ready.is_empty()
         || !cache::set_resident_promotion(enabled)
     {
         return false;
@@ -385,12 +384,23 @@ static mut T0_RANGES: bool = false;
 /// Frequent links from the page function of the page at `base` to the
 /// page of `target` (not a neighbor): recompile it with that page.
 pub(super) fn want_partner(base: u32, target: u32, cs_base: u32, default_32: bool) {
-    SCHEDULER.try_lock().unwrap().pages.want_partner(PageKey { base, cs_base, default_32 }, target);
+    SCHEDULER.try_lock().unwrap().pages.want_partner(
+        PageKey {
+            base,
+            cs_base,
+            default_32,
+        },
+        target,
+    );
 }
 /// Frequent links from the page function of the page at `base` to a
 /// neighbor page: recompile it with its neighbors (see tier0::range).
 pub(super) fn want_range(base: u32, cs_base: u32, default_32: bool) {
-    SCHEDULER.try_lock().unwrap().pages.want_range(PageKey { base, cs_base, default_32 });
+    SCHEDULER.try_lock().unwrap().pages.want_range(PageKey {
+        base,
+        cs_base,
+        default_32,
+    });
 }
 #[no_mangle]
 pub unsafe fn ir_t0_set_ranges(enabled: u32) -> bool {
@@ -408,8 +418,13 @@ struct PageHeat {
     count: u8,
 }
 const PAGE_HEAT_SLOTS: usize = 256;
-static mut PAGE_HEAT: [PageHeat; PAGE_HEAT_SLOTS] =
-    [PageHeat { page: 0, cs_base: 0, steps: 0, entries: [0; 8], count: 0 }; PAGE_HEAT_SLOTS];
+static mut PAGE_HEAT: [PageHeat; PAGE_HEAT_SLOTS] = [PageHeat {
+    page: 0,
+    cs_base: 0,
+    steps: 0,
+    entries: [0; 8],
+    count: 0,
+}; PAGE_HEAT_SLOTS];
 /// Give a batch's heat to its page (split over the batch's entries).
 /// Returns whether the page may still use region compilation.
 unsafe fn flush_page_heat(batch: &PageHeat) -> bool {
@@ -430,7 +445,8 @@ unsafe fn flush_page_heat(batch: &PageHeat) -> bool {
             default_32: true,
         };
         // The batch's heat, split evenly (the remainder to the first).
-        let share = batch.steps / count as u32 + if k == 0 { batch.steps % count as u32 } else { 0 };
+        let share =
+            batch.steps / count as u32 + if k == 0 { batch.steps % count as u32 } else { 0 };
         region |= s.pages.visit_weighted(key, threshold, share.max(1));
     }
     region
@@ -650,7 +666,12 @@ struct HeatSlot {
     heat: u32,
 }
 const HEAT_SLOTS: usize = 1 << 14;
-const EMPTY_HEAT: HeatSlot = HeatSlot { linear: 0, pc: 0, default_32: false, heat: 0 };
+const EMPTY_HEAT: HeatSlot = HeatSlot {
+    linear: 0,
+    pc: 0,
+    default_32: false,
+    heat: 0,
+};
 static mut HEAT: [HeatSlot; HEAT_SLOTS] = [EMPTY_HEAT; HEAT_SLOTS];
 // Instruction-weighted threshold; zero keeps exact per-visit ring heat for
 // small (test and explicitly tuned) visit thresholds.
@@ -698,7 +719,13 @@ pub unsafe fn note_interpreted(entry: CpuEntryKey, steps: u32) {
                 let evicted = *slot;
                 flush_page_heat(&evicted);
             }
-            *slot = PageHeat { page, cs_base: entry.cs_base(), steps: 0, entries: [0; 8], count: 0 };
+            *slot = PageHeat {
+                page,
+                cs_base: entry.cs_base(),
+                steps: 0,
+                entries: [0; 8],
+                count: 0,
+            };
         }
         slot.steps = slot.steps.saturating_add(steps.max(1));
         if !slot.entries[..slot.count as usize].contains(&entry.linear.0) && slot.count < 8 {
@@ -721,7 +748,8 @@ pub unsafe fn note_interpreted(entry: CpuEntryKey, steps: u32) {
     }
     let steps = steps.max(1);
     let slot = &mut HEAT[heat_slot(entry)];
-    if slot.linear == entry.linear.0 && slot.pc == entry.pc.0 && slot.default_32 == entry.default_32 {
+    if slot.linear == entry.linear.0 && slot.pc == entry.pc.0 && slot.default_32 == entry.default_32
+    {
         slot.heat = slot.heat.saturating_add(steps);
     }
     else if slot.heat <= steps {
@@ -844,9 +872,8 @@ pub unsafe fn visit() -> bool {
                 Some((key, entries)) => Some((key, entries, 1)),
                 // Tier-0 pages are not recompiled whole by the optimizing tier.
                 None if TIER0 => None,
-                None => cache::next_page_promotion(promote).map(|entries| {
-                    (PageKey::of(entries[0]), entries, 2)
-                }),
+                None => cache::next_page_promotion(promote)
+                    .map(|entries| (PageKey::of(entries[0]), entries, 2)),
             }
         }
         else {
@@ -1027,12 +1054,8 @@ unsafe fn compile_selected(
     // must retain the old heat and aggregate suffix-byte budget for fallback.
     // Tier 2 keeps its original hot-peer policy.
     let peers = {
-        let tier_one = if tier == 2 {
-            cache::tier_one_peers(entry, snapshot.bytes.len())
-        }
-        else {
-            vec![]
-        };
+        let tier_one =
+            if tier == 2 { cache::tier_one_peers(entry, snapshot.bytes.len()) } else { vec![] };
         let s = SCHEDULER.try_lock().unwrap();
         let mut candidates: Vec<_> = s
             .hot
@@ -1093,7 +1116,7 @@ unsafe fn compile_selected(
             else {
                 Default::default()
             })
-            .disable(disabled)
+            .disable(disabled | crate::ir::passes::PassConfig::shared_memory_disabled())
         },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,
@@ -1221,9 +1244,7 @@ unsafe fn compile_selected(
 }
 /// A host that published synchronously already completed the transaction;
 /// only a still-pending asynchronous installation needs the CPU to yield.
-fn yields(submitted: bool) -> bool {
-    submitted && SCHEDULER.try_lock().unwrap().pending.is_some()
-}
+fn yields(submitted: bool) -> bool { submitted && SCHEDULER.try_lock().unwrap().pending.is_some() }
 /// Compile one whole code page with its observed entries and submit it.
 unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bool {
     let (config, opt_level, disabled, debug) = {
@@ -1262,7 +1283,13 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     // into, where its links to them are frequent (or all, T0_RANGES).
     // ... and pages it often calls or returns to (a cluster function), with
     // their entries as block starts.
-    let known = |base| SCHEDULER.try_lock().unwrap().pages.known_code(PageKey { base, ..key });
+    let known = |base| {
+        SCHEDULER
+            .try_lock()
+            .unwrap()
+            .pages
+            .known_code(PageKey { base, ..key })
+    };
     let mut list = vec![key.base];
     let mut extra = vec![];
     if TIER0 && tier == 1 {
@@ -1283,15 +1310,24 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
         }
         let partners = SCHEDULER.try_lock().unwrap().pages.partners(key);
         for (partner, partner_entries) in partners {
-            if list.len() < crate::ir::tier0::MAX_PAGES && !list.contains(&partner) && known(partner) {
+            if list.len() < crate::ir::tier0::MAX_PAGES
+                && !list.contains(&partner)
+                && known(partner)
+            {
                 list.push(partner);
                 // A partner whose code runs on into the next page brings it
                 // (else the function would leave there at once).
                 let next = partner.wrapping_add(4096);
-                if list.len() < crate::ir::tier0::MAX_PAGES && !list.contains(&next) && known(next) {
+                if list.len() < crate::ir::tier0::MAX_PAGES && !list.contains(&next) && known(next)
+                {
                     let _clock = CompileScope::new(1);
                     if let Ok(one) = super::snapshot::capture_pages(partner, 1) {
-                        if crate::ir::tier0::runs_on(&one, key.cs_base, key.default_32, &partner_entries) {
+                        if crate::ir::tier0::runs_on(
+                            &one,
+                            key.cs_base,
+                            key.default_32,
+                            &partner_entries,
+                        ) {
                             list.push(next);
                         }
                     }
@@ -1321,7 +1357,7 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
             else {
                 Default::default()
             })
-            .disable(disabled)
+            .disable(disabled | crate::ir::passes::PassConfig::shared_memory_disabled())
         },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,
@@ -1370,7 +1406,12 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     let served: Vec<CpuEntryKey> = artifact.cpu_entries().collect();
     {
         let mut s = SCHEDULER.try_lock().unwrap();
-        s.pages.compiled(key, &entries, Some((&served, physical)), &artifact.page_seeds);
+        s.pages.compiled(
+            key,
+            &entries,
+            Some((&served, physical)),
+            &artifact.page_seeds,
+        );
         if tier == 2 {
             s.page_tier2 = s.page_tier2.wrapping_add(1);
         }

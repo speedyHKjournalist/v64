@@ -833,7 +833,7 @@ PS2.prototype.port64_write = function(write_byte)
         break;
     case 0xFE:
         dbg_log("CPU reboot via PS2");
-        this.cpu.reboot_internal();
+        this.cpu.reboot_internal("8042");
         break;
     default:
         dbg_log("port 64: Unimplemented command byte: " + h(write_byte), LOG_PS2);

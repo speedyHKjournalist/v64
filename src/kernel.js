@@ -64,8 +64,7 @@ export function load_kernel(mem8, bzimage, initrd, cmdline)
     const checksum1 = bzimage16[LINUX_BOOT_HDR_BOOT_FLAG >> 1];
     if(checksum1 !== LINUX_BOOT_HDR_CHECKSUM1)
     {
-        dbg_log("Bad checksum1: " + h(checksum1));
-        return;
+        throw new Error("bzimage: no Linux boot sector signature (" + h(checksum1) + ")");
     }
 
     // Not aligned, so split into two 16-bit reads
@@ -74,15 +73,20 @@ export function load_kernel(mem8, bzimage, initrd, cmdline)
         bzimage16[LINUX_BOOT_HDR_HEADER + 2 >> 1] << 16;
     if(checksum2 !== LINUX_BOOT_HDR_CHECKSUM2)
     {
-        dbg_log("Bad checksum2: " + h(checksum2));
-        return;
+        throw new Error("bzimage: no Linux boot protocol header (" + h(checksum2) + ")");
     }
 
     const protocol = bzimage16[LINUX_BOOT_HDR_VERSION >> 1];
-    dbg_assert(protocol >= 0x202); // older not supported by us
+    if(protocol < 0x202)
+    {
+        throw new Error("bzimage: Linux boot protocol " + h(protocol) + " is older than 2.02 (not supported)");
+    }
 
     const flags = bzimage8[LINUX_BOOT_HDR_LOADFLAGS];
-    dbg_assert(flags & LINUX_BOOT_HDR_LOADFLAGS_LOADED_HIGH); // low kernels not supported by us
+    if(!(flags & LINUX_BOOT_HDR_LOADFLAGS_LOADED_HIGH))
+    {
+        throw new Error("bzimage: zImage kernels loaded low are not supported");
+    }
 
     // we don't relocate the kernel, so we don't care much about most of these
 

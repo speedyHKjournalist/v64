@@ -240,7 +240,12 @@ pub unsafe fn ir_sse_fp_reg_continue(
         },
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
-    if observes { terminal(Outcome::Normal as u32) } else { finish(true) }
+    if observes {
+        terminal(Outcome::Normal as u32)
+    }
+    else {
+        finish(true)
+    }
 }
 unsafe fn memory(
     op: u32,

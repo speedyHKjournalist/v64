@@ -62,13 +62,13 @@ try {
     for(const scenario of ["observe","clear_task","diagnostics","ordinary"]
         .filter(mode=>!process.env.IR_DEBUG_MODES||process.env.IR_DEBUG_MODES.split(",").includes(mode))) {
         const guarded=!name.endsWith("_control"),shadow=name.startsWith("sti_");
-        if((!guarded||release)&&scenario==="clear_task")continue;
+        if((!guarded||release)&&scenario==="clear_task") continue;
         const diagnostics=Number(scenario==="diagnostics");
         const observes=!release&&guarded&&["observe","clear_task"].includes(scenario);
         const deferred=!release&&guarded&&scenario!=="ordinary";
         const code=[...(shadow?[0xFB]:[]),...instruction,0x40,0xF4];
-        const instructionPc=PC+Number(shadow),operandOffset=instruction[0]===0x66?4:3;
-        const logPc=instructionPc+operandOffset;
+        const instruction_pc=PC+Number(shadow),operand_offset=instruction[0]===0x66?4:3;
+        const log_pc=instruction_pc+operand_offset;
         const results=[];
         for(const cached of [false,true]) {
             observer=null;
@@ -115,16 +115,16 @@ try {
             let calls=0;
             observer=(pointer,length)=>{
                 const message=new TextDecoder().decode(new Uint8Array(e.memory.buffer,pointer,length));
-                if(!message.includes("task switch test with cr4.osfxsr=0"))return;
-                if(cpu.instruction_pointer[0]!==logPc)return;
+                if(!message.includes("task switch test with cr4.osfxsr=0")) return;
+                if(cpu.instruction_pointer[0]!==log_pc) return;
                 calls++;
                 // These bytes have not yet been decoded by the interpreter.
-                if(name.includes("immediate"))cpu.mem8[instructionPc+operandOffset]=2;
+                if(name.includes("immediate"))cpu.mem8[instruction_pc+operand_offset]=2;
                 if(name.endsWith("_mem")||["ldmxcsr","stmxcsr"].includes(name))
-                    cpu.mem8.set(little(DATA+16),instructionPc+operandOffset);
+                    cpu.mem8.set(little(DATA+16),instruction_pc+operand_offset);
                 if(scenario==="clear_task")cpu.cr[0]&=~12;
                 cpu.reg_xmm32s[8]=0x13579BDF;cpu.reg32[3]=0x12345678;
-                cpu.mem8[instructionPc+instruction.length]=0x48;
+                cpu.mem8[instruction_pc+instruction.length]=0x48;
             };
             vm.run();deadline=performance.now()+5000;
             while(!cpu.in_hlt[0]){assert(performance.now()<deadline,"debug deferral must reach interpreter/HALT");await sleep(1);}

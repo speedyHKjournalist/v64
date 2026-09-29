@@ -101,7 +101,7 @@ try {
                         :stage==="memory"?address>=0xA0000&&address<0xA1000
                         :stage==="header"?address>=0xA1000&&address<0xA2000
                         :address>=0xA2000&&address<0xA3000;
-                    if(!selected||mutations)return;
+                    if(!selected||mutations) return;
                     mutations++;
                     cpu.reg32[0]=0x11223344;cpu.reg32[1]=0xDEADBEEF|0;
                     cpu.reg32[2]=0xCAFEBEEF|0;cpu.reg32[3]=0x76543210;

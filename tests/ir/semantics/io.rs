@@ -123,12 +123,21 @@ fn io_contract_boundaries() {
         })
         .collect::<Vec<_>>();
     assert_eq!(ordered, vec!["ir_outs_once"]);
-    assert!(matches!(r.helpers[0].abi, crate::ir::helper::HelperAbi::CpuExit));
+    assert!(matches!(
+        r.helpers[0].abi,
+        crate::ir::helper::HelperAbi::CpuExit
+    ));
     for op in 0x6C..=0x6F {
         let r = lift_cpu(&[0x67, op], GuestEip(0), LinearAddress(0), true).unwrap();
         assert_eq!(r.helpers.len(), 1);
-        assert_eq!(r.helpers[0].name, if op & 2 == 0 { "ir_ins_once" } else { "ir_outs_once" });
-        assert!(matches!(r.helpers[0].abi, crate::ir::helper::HelperAbi::CpuExit));
+        assert_eq!(
+            r.helpers[0].name,
+            if op & 2 == 0 { "ir_ins_once" } else { "ir_outs_once" }
+        );
+        assert!(matches!(
+            r.helpers[0].abi,
+            crate::ir::helper::HelperAbi::CpuExit
+        ));
         assert!(r.helpers[0].results.is_empty());
         lower(&r).unwrap().verify().unwrap();
     }

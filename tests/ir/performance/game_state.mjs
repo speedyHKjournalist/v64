@@ -78,7 +78,7 @@ const intervals = new Map();
 let last_present = 0, measuring = false;
 const queries = new Map();
 let heartbeat = 0;
-function onSubmit(event) {
+function on_submit(event) {
     event.handled = true;
     const b = event.bytes;
     g.batches++; g.bytes += b.byteLength;
@@ -133,7 +133,7 @@ const vm = new V86({
     hda: new SyncDisk(hda), ...(hdb ? { hdb: new SyncDisk(hdb) } : {}),
     x87_fast_math: true, x87_jit_cache: true,
     ir_sync_publication: option("sync-publication", "0") === "1",
-    v86gl_pci: { maxBatchBytes: 16 * 1024 * 1024, onSubmit },
+    v86gl_pci: { maxBatchBytes: 16 * 1024 * 1024, onSubmit: on_submit },
     filesystem: {},
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
     net_device: { type: "ne2k" }, autostart: false,

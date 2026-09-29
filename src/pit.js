@@ -1,4 +1,3 @@
-import { v86 } from "./main.js";
 import { LOG_PIT } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_log } from "./log.js";
@@ -41,7 +40,7 @@ export function PIT(cpu, bus)
 
     cpu.io.register_read(0x61, this, function()
     {
-        var now = v86.microtick();
+        var now = this.cpu.clock.now();
 
         var ref_toggle = (now * (1000 * 1000 / 15000)) & 1;
         var counter2_out = this.did_rollover(2, now);
@@ -113,8 +112,12 @@ PIT.prototype.timer = function(now, no_irq)
     {
         if(this.counter_enabled[0] && this.did_rollover(0, now))
         {
-            this.counter_start_value[0] = this.get_counter_value(0, now);
-            this.counter_start_time[0] = now;
+            const deadline = this.counter_start_time[0] + this.counter_start_value[0] / OSCILLATOR_FREQ;
+            const period = this.counter_reload[0] / OSCILLATOR_FREQ;
+            // Coalesce missed periods, retaining the original phase. Rearming
+            // at 'now' would discard the fractional PIT tick on every service.
+            this.counter_start_time[0] = deadline + Math.floor((now - deadline) / period) * period;
+            this.counter_start_value[0] = this.counter_reload[0];
 
             dbg_log("pit interrupt. new value: " + this.counter_start_value[0], LOG_PIT);
 
@@ -138,10 +141,8 @@ PIT.prototype.timer = function(now, no_irq)
 
         if(this.counter_enabled[0])
         {
-            const diff = now - this.counter_start_time[0];
-            const diff_in_ticks = Math.floor(diff * OSCILLATOR_FREQ);
-            const ticks_missing = this.counter_start_value[0] - diff_in_ticks; // XXX: to simplify
-            time_to_next_interrupt = ticks_missing / OSCILLATOR_FREQ;
+            time_to_next_interrupt = Math.max(0,
+                this.counter_start_time[0] + this.counter_start_value[0] / OSCILLATOR_FREQ - now);
         }
     }
 
@@ -155,26 +156,15 @@ PIT.prototype.get_counter_value = function(i, now)
         return 0;
     }
 
-    var diff = now - this.counter_start_time[i];
-    var diff_in_ticks = Math.floor(diff * OSCILLATOR_FREQ);
-
-    var value = this.counter_start_value[i] - diff_in_ticks;
-
-    dbg_log("diff=" + diff + " dticks=" + diff_in_ticks + " value=" + value + " reload=" + this.counter_reload[i], LOG_PIT);
-
-    var reload = this.counter_reload[i];
-
-    if(value >= reload)
+    const deadline = this.counter_start_time[i] + this.counter_start_value[i] / OSCILLATOR_FREQ;
+    if(now >= deadline)
     {
-        dbg_log("Warning: Counter" + i + " value " + value  + " is larger than reload " + reload, LOG_PIT);
-        value %= reload;
+        const reload = this.counter_reload[i];
+        return this.counter_mode[i] === 0 ? 0 :
+            reload - Math.floor((now - deadline) * OSCILLATOR_FREQ) % reload;
     }
-    else if(value < 0)
-    {
-        value = value % reload + reload;
-    }
-
-    return value;
+    const elapsed = Math.floor((now - this.counter_start_time[i]) * OSCILLATOR_FREQ);
+    return Math.max(1, this.counter_start_value[i] - elapsed);
 };
 
 PIT.prototype.did_rollover = function(i, now)
@@ -187,10 +177,9 @@ PIT.prototype.did_rollover = function(i, now)
         dbg_log("Warning: PIT timer difference is negative, resetting (timer " + i + ")");
         return true;
     }
-    var diff_in_ticks = Math.floor(diff * OSCILLATOR_FREQ);
-    //dbg_log(i + ": diff=" + diff + " start_time=" + this.counter_start_time[i] + " diff_in_ticks=" + diff_in_ticks + " (" + diff * OSCILLATOR_FREQ + ") start_value=" + this.counter_start_value[i] + " did_rollover=" + (this.counter_start_value[i] < diff_in_ticks), LOG_PIT);
-
-    return this.counter_start_value[i] < diff_in_ticks;
+    // Compare the same absolute deadline returned by timer(). Multiplying the
+    // rounded floating-point delta back into ticks can miss an exact deadline.
+    return now >= this.counter_start_time[i] + this.counter_start_value[i] / OSCILLATOR_FREQ;
 };
 
 PIT.prototype.counter_read = function(i)
@@ -219,7 +208,7 @@ PIT.prototype.counter_read = function(i)
             this.counter_next_low[i] ^= 1;
         }
 
-        var value = this.get_counter_value(i, v86.microtick());
+        var value = this.get_counter_value(i, this.cpu.clock.now());
 
         if(next_low)
         {
@@ -256,7 +245,7 @@ PIT.prototype.counter_write = function(i, value)
 
         this.counter_enabled[i] = true;
 
-        this.counter_start_time[i] = v86.microtick();
+        this.counter_start_time[i] = this.cpu.clock.now();
 
         dbg_log("counter" + i + " reload=" + h(this.counter_reload[i]) +
                 " tick=" + (this.counter_reload[i] || 0x10000) / OSCILLATOR_FREQ + "ms", LOG_PIT);
@@ -290,7 +279,7 @@ PIT.prototype.port43_write = function(reg_byte)
     {
         // latch
         this.counter_latch[i] = 2;
-        var value = this.get_counter_value(i, v86.microtick());
+        var value = this.get_counter_value(i, this.cpu.clock.now());
         dbg_log("latch: " + value, LOG_PIT);
         this.counter_latch_value[i] = value ? value - 1 : 0;
 

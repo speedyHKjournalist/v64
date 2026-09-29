@@ -1,4 +1,5 @@
 import { LOG_PCI } from "./const.js";
+import { RESET_PORT } from "./platform.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
@@ -28,6 +29,12 @@ export function PCI(cpu)
 
     this.device_spaces = [];
     this.devices = [];
+
+    /**
+     * The IRQ line each function has asserted, by pci_id
+     * @type {!Array<number|undefined>}
+     */
+    this.asserted_irq_lines = [];
 
     /** @const @type {CPU} */
     this.cpu = cpu;
@@ -121,13 +128,6 @@ export function PCI(cpu)
         },
         function(out_byte)
         {
-            if((this.pci_addr[1] & 0x06) === 0x02 && (out_byte & 0x06) === 0x06)
-            {
-                dbg_log("CPU reboot via PCI");
-                cpu.reboot_internal();
-                return;
-            }
-
             this.pci_addr[1] = out_byte;
         },
         function(out_byte)
@@ -140,6 +140,26 @@ export function PCI(cpu)
             this.pci_query();
         }
     );
+
+    // PIIX reset control register (RCR): byte accesses to 0xCF9 only; word and
+    // dword accesses at 0xCF8 are the configuration address. A 0 -> 1
+    // transition of RST_CPU (bit 2) resets the machine (the FADT reset
+    // register writes 0x06; Linux' reboot=pci writes 0x02, then 0x06).
+    this.reset_control = 0;
+    cpu.io.register_read(RESET_PORT, this, function()
+    {
+        return this.reset_control;
+    });
+    cpu.io.register_write(RESET_PORT, this, function(value)
+    {
+        const rst_cpu_rising = ~this.reset_control & value & 0x04;
+        this.reset_control = value & 0x06;
+        if(rst_cpu_rising)
+        {
+            dbg_log("CPU reboot via PIIX reset control register");
+            cpu.reboot_internal("cf9");
+        }
+    });
 
 
     // Some experimental PCI devices taken from my PC:
@@ -202,6 +222,12 @@ export function PCI(cpu)
     //], 0x1e << 3);
 }
 
+/** Machine reset */
+PCI.prototype.reset = function()
+{
+    this.reset_control = 0;
+};
+
 PCI.prototype.get_state = function()
 {
     var state = [];
@@ -215,6 +241,7 @@ PCI.prototype.get_state = function()
     state[257] = this.pci_value;
     state[258] = this.pci_response;
     state[259] = this.pci_status;
+    state[260] = this.reset_control;
 
     return state;
 };
@@ -271,12 +298,14 @@ PCI.prototype.set_state = function(state)
         }
 
         this.device_spaces[i].set(space);
+        device.on_config_restore && device.on_config_restore();
     }
 
     this.pci_addr.set(state[256]);
     this.pci_value.set(state[257]);
     this.pci_response.set(state[258]);
     this.pci_status.set(state[259]);
+    this.reset_control = state[260] === undefined ? 0 : state[260];
 };
 
 PCI.prototype.pci_query = function()
@@ -353,6 +382,7 @@ PCI.prototype.pci_write8 = function(address, written)
             " value=" + h(written, 2), LOG_PCI);
 
     space[addr] = written;
+    device.on_config_write && device.on_config_write(addr);
 };
 
 PCI.prototype.pci_write16 = function(address, written)
@@ -384,6 +414,7 @@ PCI.prototype.pci_write16 = function(address, written)
             " value=" + h(written, 4), LOG_PCI);
 
     space[addr >>> 1] = written;
+    device.on_config_write && device.on_config_write(addr);
 };
 
 PCI.prototype.pci_write32 = function(address, written)
@@ -505,6 +536,7 @@ PCI.prototype.pci_write32 = function(address, written)
         dbg_log("PCI write dev=" + h(bdf >> 3, 2) + " (" + device.name + ") addr=" + h(addr, 4) +
                 " value=" + h(written >>> 0, 8), LOG_PCI);
         space[addr >>> 2] = written;
+        device.on_config_write && device.on_config_write(addr);
     }
 };
 
@@ -595,7 +627,14 @@ PCI.prototype.set_io_bars = function(bar, from, to)
     }
 };
 
-PCI.prototype.raise_irq = function(pci_id)
+/**
+ * The IRQ line that the PIIX PIRQ routing registers (0x60..0x63 of the ISA
+ * bridge) currently assign to the interrupt pin of a function. Bit 7 set
+ * means the PIRQ is not routed to an ISA IRQ (e.g. after a link device's _DIS).
+ * @param {number} pci_id
+ * @return {number}
+ */
+PCI.prototype.get_irq_line = function(pci_id)
 {
     var space = this.device_spaces[pci_id];
     dbg_assert(space);
@@ -603,24 +642,51 @@ PCI.prototype.raise_irq = function(pci_id)
     var pin = (space[0x3C >>> 2] >> 8 & 0xFF) - 1;
     var device = (pci_id >> 3) - 1 & 0xFF;
     var parent_pin = pin + device & 3;
-    var irq = this.isa_bridge_space8[0x60 + parent_pin];
+    return this.isa_bridge_space8[0x60 + parent_pin];
+};
+
+PCI.prototype.raise_irq = function(pci_id)
+{
+    var irq = this.get_irq_line(pci_id);
+    var previous = this.asserted_irq_lines[pci_id];
+
+    if(irq & 0x80)
+    {
+        dbg_log("PCI irq of " + this.devices[pci_id].name + " not routed (PIRQ route " + h(irq) + ")", LOG_PCI);
+        irq = undefined;
+    }
+
+    if(previous !== undefined && previous !== irq)
+    {
+        // the guest rerouted the pin while it was asserted
+        this.cpu.set_shared_irq_level(previous, pci_id, false);
+    }
+    this.asserted_irq_lines[pci_id] = irq;
 
     //dbg_log("PCI raise irq " + h(irq) + " dev=" + h(device, 2) +
     //        " (" + this.devices[pci_id].name + ")", LOG_PCI);
-    this.cpu.device_raise_irq(irq);
+    if(irq !== undefined)
+    {
+        this.cpu.set_shared_irq_level(irq, pci_id, true);
+    }
 };
 
 PCI.prototype.lower_irq = function(pci_id)
 {
-    var space = this.device_spaces[pci_id];
-    dbg_assert(space);
-
-    var pin = space[0x3C >>> 2] >> 8 & 0xFF;
-    var device = pci_id >> 3 & 0xFF;
-    var parent_pin = pin + device - 2 & 3;
-    var irq = this.isa_bridge_space8[0x60 + parent_pin];
+    // Deassert the line that was asserted, even if the guest has changed the
+    // routing since. Without a record (e.g. after restoring a state image)
+    // fall back to the current routing.
+    var irq = this.asserted_irq_lines[pci_id];
+    if(irq === undefined)
+    {
+        irq = this.get_irq_line(pci_id);
+    }
+    this.asserted_irq_lines[pci_id] = undefined;
 
     //dbg_log("PCI lower irq " + h(irq) + " dev=" + h(device, 2) +
     //        " (" + this.devices[pci_id].name + ")", LOG_PCI);
-    this.cpu.device_lower_irq(irq);
+    if(!(irq & 0x80))
+    {
+        this.cpu.set_shared_irq_level(irq, pci_id, false);
+    }
 };

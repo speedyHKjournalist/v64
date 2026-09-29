@@ -106,15 +106,15 @@ function x87_run() {
     for(let k = 0; k < 2 + (random() & 1); k++) { out.push(0xDD, 0x43, d()); depth++; }
     for(let k = 0; k < 4 + random() % 8; k++) {
         const r = random() % depth, op = random() % 11;
-        if(op == 0 && depth < 7) { out.push(0xD9, 0xC0 + r); depth++; }                       // FLD ST(r)
-        else if(op == 1 && depth < 7) { out.push(0xD9, random() & 1 ? 0xE8 : 0xEE); depth++; } // FLD1/FLDZ
-        else if(op == 2) out.push(0xD9, 0xC8 + r);                                              // FXCH
-        else if(op == 3) out.push(0xD8, 0xC0 + 8 * pick([0, 1, 4, 5, 6, 7]) + r);               // Fop ST0, ST(r)
-        else if(op == 4) out.push(0xDC, 0xC0 + 8 * pick([0, 1, 4, 5, 6, 7]) + r);               // Fop ST(r), ST0
-        else if(op == 5 && depth >= 2) { out.push(0xDE, 0xC0 + 8 * pick([0, 1, 4, 5, 6, 7]) + Math.max(1, r)); depth--; } // FopP
-        else if(op == 6) out.push(0xD9, random() & 1 ? 0xE0 : 0xE1);                           // FCHS/FABS
-        else if(op == 7) out.push(0xDD, 0xD0 + r);                                              // FST ST(r)
-        else if(op == 8 && depth >= 2) { out.push(0xDD, 0xD8 + Math.max(1, r)); depth--; }      // FSTP ST(r)
+        if(op === 0 && depth < 7) { out.push(0xD9, 0xC0 + r); depth++; }                       // FLD ST(r)
+        else if(op === 1 && depth < 7) { out.push(0xD9, random() & 1 ? 0xE8 : 0xEE); depth++; } // FLD1/FLDZ
+        else if(op === 2) out.push(0xD9, 0xC8 + r);                                              // FXCH
+        else if(op === 3) out.push(0xD8, 0xC0 + 8 * pick([0, 1, 4, 5, 6, 7]) + r);               // Fop ST0, ST(r)
+        else if(op === 4) out.push(0xDC, 0xC0 + 8 * pick([0, 1, 4, 5, 6, 7]) + r);               // Fop ST(r), ST0
+        else if(op === 5 && depth >= 2) { out.push(0xDE, 0xC0 + 8 * pick([0, 1, 4, 5, 6, 7]) + Math.max(1, r)); depth--; } // FopP
+        else if(op === 6) out.push(0xD9, random() & 1 ? 0xE0 : 0xE1);                           // FCHS/FABS
+        else if(op === 7) out.push(0xDD, 0xD0 + r);                                              // FST ST(r)
+        else if(op === 8 && depth >= 2) { out.push(0xDD, 0xD8 + Math.max(1, r)); depth--; }      // FSTP ST(r)
     }
     while(depth--) out.push(0xDD, 0x5B, d());                                                   // FSTP m64
     return out;
@@ -139,9 +139,9 @@ function program() {
     const mix = random() % 5;
     for(let k = 0; k < 40; k++) {
         const vector = only ? only.startsWith("s") : !(mix && random() % 5);
-        const float = only ? only === "x" : random() % 7 == 0;
+        const float = only ? only === "x" : random() % 7 === 0;
         // Single-kind programs still interleave PUSHFD/LAHF to expose FLAGS.
-        body.push(...(only && k % 4 == 3 ? [0x9C, 0x8F, 0x43, disp()] : float ? x87() : vector ? simd() : instruction()));
+        body.push(...(only && k % 4 === 3 ? [0x9C, 0x8F, 0x43, disp()] : float ? x87() : vector ? simd() : instruction()));
     }
     // DEC DWORD [ebx + 124]; JNZ top; HLT
     const tail = [0xFF, 0x4B, 124];
@@ -229,7 +229,7 @@ for(let c = 0; c < cases; c++) {
     const expected = await run(reference, code, init, c, split), actual = await run(tier0, code, init, c, split);
     for(const key of Object.keys(expected)) {
         try { assert.deepEqual(actual[key], expected[key]); }
-        catch {
+        catch{
             failures++;
             console.log(`case ${c}: ${key} differs\n  code ${Buffer.from(code).toString("hex")}\n  expected ${JSON.stringify(expected[key])}\n  actual   ${JSON.stringify(actual[key])}`);
             break;

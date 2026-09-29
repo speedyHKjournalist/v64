@@ -133,7 +133,12 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
                         &[WasmType::I32, WasmType::I32, WasmType::I32, WasmType::I32],
                         &[WasmType::I64],
                     ),
-                    args: vec![I32(opcode as i32), I32(modrm as i32), operand(0), operand(1)],
+                    args: vec![
+                        I32(opcode as i32),
+                        I32(modrm as i32),
+                        operand(0),
+                        operand(1),
+                    ],
                 },
             }
         },

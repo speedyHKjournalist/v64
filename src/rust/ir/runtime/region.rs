@@ -312,7 +312,10 @@ mod tests {
             GuestEip(0x1000),
             LinearAddress(0x2000),
             default_32,
-            Policy { max_bytes: bytes.len(), max_instructions: 32 },
+            Policy {
+                max_bytes: bytes.len(),
+                max_instructions: 32,
+            },
         )
     }
 

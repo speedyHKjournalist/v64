@@ -6,12 +6,28 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import util from "node:util";
 import url from "node:url";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 
 import encodings from "../../gen/x86_table.js";
 import Rand from "./rand.js";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
+
+// GNU ld where it links i386 ELF; otherwise (macOS) Rust's own rust-lld
+// (LD_LLD selects another lld)
+const LINKER = (() => {
+    const gnu = spawnSync("ld", ["-V"], { encoding: "utf8" });
+    if(gnu.status === 0 && gnu.stdout.includes("elf_i386")) return ["ld"];
+    // (lld's image starts at 4 MiB unless told otherwise; one page below the
+    // .multiboot section, its header stays in the file's first 8 KiB as the
+    // multiboot loaders require)
+    // (and the entry is .text's start, where GNU ld also puts it: `_start` is not global)
+    const lld_args = ["-flavor", "gnu", "--image-base=0x1F000", "-z", "max-page-size=4096", "-e", "0x80000"];
+    if(process.env.LD_LLD) return [process.env.LD_LLD, ...lld_args];
+    const target = spawnSync("rustc", ["-vV"], { encoding: "utf8" }).stdout.match(/host: (.+)/)[1];
+    const sysroot = spawnSync("rustc", ["--print", "sysroot"], { encoding: "utf8" }).stdout.trim();
+    return [path.join(sysroot, "lib/rustlib", target, "bin/rust-lld"), ...lld_args];
+})();
 
 // number of tests per instruction
 const NUMBER_TESTS = 5;
@@ -128,8 +144,9 @@ async function make_test(test)
 
     LOG_VERBOSE && console.log("nasm", ["-w+error", "-felf32", "-o", tmp_file, asm_file].join(" "));
     await exec_file("nasm", ["-w+error", "-felf32", "-o", tmp_file, asm_file], options);
-    LOG_VERBOSE && console.log("ld", ["-g", tmp_file, "-m", "elf_i386", "--section-start=.bss=0x100000", "--section-start=.text=0x80000", "--section-start=.multiboot=0x20000", "-o", img_file].join(" "));
-    await exec_file("ld", ["-g", tmp_file, "-m", "elf_i386", "--section-start=.bss=0x100000", "--section-start=.text=0x80000", "--section-start=.multiboot=0x20000", "-o", img_file], options);
+    const ld_args = ["-g", tmp_file, "-m", "elf_i386", "--section-start=.bss=0x100000", "--section-start=.text=0x80000", "--section-start=.multiboot=0x20000", "-o", img_file];
+    LOG_VERBOSE && console.log(LINKER.join(" "), ld_args.join(" "));
+    await exec_file(LINKER[0], LINKER.slice(1).concat(ld_args), options);
     await fse.unlink(tmp_file);
 
     console.log(test.name || test.file);

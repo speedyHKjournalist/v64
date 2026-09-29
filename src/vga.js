@@ -373,6 +373,8 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.diff_plot_max = 0;
 
     this.image_data = null;
+    /** @type {Uint8ClampedArray} the pixel buffer when image_data is a copy of it */
+    this.image_data_source = null;
 
     this.vga_memory = new Uint8Array(4 * VGA_BANK_SIZE);
     this.plane0 = new Uint8Array(this.vga_memory.buffer, 0 * VGA_BANK_SIZE, VGA_BANK_SIZE);
@@ -1177,7 +1179,7 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
             const offset = this.cpu.svga_allocate_dest_buffer(size) >>> 0;
 
             this.dest_buffet_offset = offset;
-            this.image_data = new ImageData(new Uint8ClampedArray(this.cpu.wasm_memory.buffer, offset, 4 * size), virtual_width, virtual_height);
+            this.create_image_data();
 
             this.cpu.svga_mark_dirty();
         }
@@ -1189,6 +1191,35 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
         this.screen.set_size_graphical(width, height, virtual_width, virtual_height);
         this.bus.send("screen-set-size", [width, height, bpp]);
     }
+};
+
+/**
+ * The ImageData the screen draws from: a view of the pixel buffer in wasm
+ * memory, or, when that memory is shared (cores in host threads,
+ * src/parallel), a copy that sync_image_data refreshes before each update
+ * (ImageData refuses shared memory)
+ */
+VGAScreen.prototype.create_image_data = function()
+{
+    const pixels = new Uint8ClampedArray(this.cpu.wasm_memory.buffer, this.dest_buffet_offset,
+        4 * this.virtual_width * this.virtual_height);
+    this.image_data_source = typeof SharedArrayBuffer !== "undefined" && pixels.buffer instanceof SharedArrayBuffer ? pixels : null;
+    this.image_data = new ImageData(this.image_data_source ? new Uint8ClampedArray(pixels.length) : pixels,
+        this.virtual_width, this.virtual_height);
+};
+
+/**
+ * Copy pixels [first, end) of the buffer in shared wasm memory into the ImageData
+ * @param {number} first
+ * @param {number} end
+ */
+VGAScreen.prototype.sync_image_data = function(first, end)
+{
+    const source = this.image_data_source;
+    if(!source) return;
+    first = Math.max(0, first) * 4;
+    end = Math.min(source.length, end * 4);
+    if(first < end) this.image_data.data.set(source.subarray(first, end), first);
 };
 
 VGAScreen.prototype.update_vga_size = function()
@@ -2504,6 +2535,7 @@ VGAScreen.prototype.vga_redraw = function()
             buffer[pixel_addr] = color & 0xFF00 | color << 16 | color >> 16 | 0xFF000000;
         }
     }
+    this.sync_image_data(start, end + 1);
 };
 
 VGAScreen.prototype.screen_fill_buffer = function()
@@ -2520,8 +2552,7 @@ VGAScreen.prototype.screen_fill_buffer = function()
     if(this.image_data.data.byteLength === 0)
     {
         // wasm memory resized
-        const buffer = new Uint8ClampedArray(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, 4 * this.virtual_width * this.virtual_height);
-        this.image_data = new ImageData(buffer, this.virtual_width, this.virtual_height);
+        this.create_image_data();
         this.update_layers();
     }
 
@@ -2559,6 +2590,7 @@ VGAScreen.prototype.screen_fill_buffer = function()
             min_y = Math.max(min_y, 0);
             max_y = Math.min(max_y, this.svga_height);
 
+            this.sync_image_data(min_y * this.virtual_width, max_y * this.virtual_width);
             this.screen.update_buffer([{
                 image_data: this.image_data,
                 screen_x: 0, screen_y: min_y,

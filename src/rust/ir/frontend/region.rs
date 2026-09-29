@@ -221,10 +221,12 @@ fn return_site(
     .then_some(state.next_pc.0 as usize)
 }
 fn exit_states(ir: &Region) -> impl Iterator<Item = &StateMap> {
-    ir.blocks.iter().filter_map(move |block| match block.terminator {
-        Some(Terminator::Exit(state)) => Some(&ir.states[state.index()]),
-        _ => None,
-    })
+    ir.blocks
+        .iter()
+        .filter_map(move |block| match block.terminator {
+            Some(Terminator::Exit(state)) => Some(&ir.states[state.index()]),
+            _ => None,
+        })
 }
 fn invalid(message: &'static str) -> CompileError { CompileError::Unsupported(message) }
 
@@ -316,7 +318,15 @@ pub fn lift_cpu_cfg_page(
     rep_budget: u32,
     limits: CfgLimits,
 ) -> Result<(Region, Vec<GuestEip>), CompileError> {
-    lift_cfg_graph(&[source], &[], entries, default_32, rep_budget, true, limits)
+    lift_cfg_graph(
+        &[source],
+        &[],
+        entries,
+        default_32,
+        rep_budget,
+        true,
+        limits,
+    )
 }
 /// One SSA graph with a shared cold prologue and exact-PC dispatch. External
 /// entries remain CFG leaders, even when a fallthrough predecessor exists.
@@ -364,8 +374,15 @@ fn lift_cpu_cfg_sources_inner(
     compact: bool,
     limits: CfgLimits,
 ) -> Result<Region, CompileError> {
-    let (region, served) =
-        lift_cfg_graph(sources, predictions, entries, default_32, rep_budget, compact, limits)?;
+    let (region, served) = lift_cfg_graph(
+        sources,
+        predictions,
+        entries,
+        default_32,
+        rep_budget,
+        compact,
+        limits,
+    )?;
     debug_assert_eq!(served, entries);
     Ok(region)
 }
@@ -512,7 +529,14 @@ fn lift_cfg_graph(
         });
         if !stop {
             for state in exit_states(&ir) {
-                pending.extend(exit_targets(&ir, state, sources, predictions, default_32, &[]));
+                pending.extend(exit_targets(
+                    &ir,
+                    state,
+                    sources,
+                    predictions,
+                    default_32,
+                    &[],
+                ));
                 // A return site is reached by the callee's RET, not by an edge
                 // of the CALL itself; discover it so the RET can be guarded to it.
                 pending.extend(return_site(&ir, state, sources, default_32));
@@ -575,9 +599,16 @@ fn lift_cfg_graph(
         }
         for state in exit_states(&fragment.ir) {
             work.extend(
-                exit_targets(&fragment.ir, state, sources, predictions, default_32, &return_sites)
-                    .into_iter()
-                    .filter(|next| fragments.contains_key(next)),
+                exit_targets(
+                    &fragment.ir,
+                    state,
+                    sources,
+                    predictions,
+                    default_32,
+                    &return_sites,
+                )
+                .into_iter()
+                .filter(|next| fragments.contains_key(next)),
             );
         }
     }
@@ -1202,7 +1233,10 @@ mod formation_tests {
         let entry_pcs: Vec<u32> = region
             .blocks
             .iter()
-            .filter_map(|b| b.entry_state.map(|s| region.states[s.index()].instruction_pc.0))
+            .filter_map(|b| {
+                b.entry_state
+                    .map(|s| region.states[s.index()].instruction_pc.0)
+            })
             .collect();
         // Callee and return site are graph blocks, not exits to the dispatcher.
         assert!(entry_pcs.contains(&0x1009), "{entry_pcs:x?}");

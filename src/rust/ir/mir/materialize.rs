@@ -1,12 +1,12 @@
 //! Ordered state writes and count phases selected before Wasm emission.
 use super::value::{self, Address, Load, Reading, Scalar, Step};
+use crate::cpu::{cpu::CS, global_pointers as gp};
 use crate::ir::{
     hir::{Definition, Op, Region},
     lowering::CompileError,
     state::{ResumeKind, StateMap},
 };
 use crate::wasmgen::wasm_builder::WasmType;
-use crate::cpu::{cpu::CS, global_pointers as gp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Store {
@@ -426,7 +426,11 @@ pub fn lower(region: &Region, state: &StateMap) -> StatePlan {
 /// Every StateMap of one region, sharing one backing-validity analysis.
 pub fn lower_all(region: &Region) -> Vec<StatePlan> {
     let mut facts = BackingFacts::new(region);
-    region.states.iter().map(|state| lower_with(&mut facts, state)).collect()
+    region
+        .states
+        .iter()
+        .map(|state| lower_with(&mut facts, state))
+        .collect()
 }
 fn lower_with(facts: &mut BackingFacts, state: &StateMap) -> StatePlan {
     let lazy_flags = exact_lazy_backing(facts, state);

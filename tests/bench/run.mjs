@@ -226,7 +226,7 @@ for(const arm of arms) {
     };
 }
 let revision = null;
-try { revision = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim() + (execSync("git status --porcelain", { encoding: "utf8" }).trim() ? "+dirty" : ""); } catch {}
+try { revision = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim() + (execSync("git status --porcelain", { encoding: "utf8" }).trim() ? "+dirty" : ""); } catch{}
 const report = {
     suite: "v86-cpu", version: 1, date: new Date().toISOString(), revision, arms,
     settings: { runs, cold_runs, scale, ir_setup },

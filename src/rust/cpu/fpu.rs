@@ -80,9 +80,7 @@ unsafe fn refresh_x87_native_policy() {
 }
 /// Addresses of the shadow values ([u64; 8]), VALID and DIRTY masks, for
 /// generated code that reads/writes the cache exactly like `write_cached`.
-pub fn x87_cache_addresses() -> [u32; 3] {
-    [X87_VALUES as u32, X87_VALID as u32, X87_DIRTY as u32]
-}
+pub fn x87_cache_addresses() -> [u32; 3] { [X87_VALUES as u32, X87_VALID as u32, X87_DIRTY as u32] }
 /// Mirror every full slot whose F80 is exactly a binary64 into the cache, as
 /// `cached_value` would on first use. F80 stays authoritative (not DIRTY).
 pub unsafe fn fpu_mirror_exact_slots() {

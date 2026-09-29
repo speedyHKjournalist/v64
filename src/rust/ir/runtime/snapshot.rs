@@ -31,8 +31,21 @@ unsafe fn table(address: u32, pae: bool) -> Result<u32, CaptureError> {
 pub unsafe fn translate(linear: u32) -> Result<u32, CaptureError> {
     let user = *gp::cpl == 3;
     let cached = cpu::tlb_data[(linear >> 12) as usize];
-    if cached & (cpu::TLB_VALID | if user { cpu::TLB_NO_USER } else { 0 }) == cpu::TLB_VALID {
+    if cached & (cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if user { cpu::TLB_NO_USER } else { 0 })
+        == cpu::TLB_VALID
+    {
         return Ok(((cached as u32 & !4095) ^ linear).wrapping_sub(memory::mem8 as u32));
+    }
+    // Compatibility mode: 4-level paging with NX, read without side effects
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        let translation = crate::x64::memory::snapshot_translation(
+            linear as u64,
+            crate::x64::paging::Access::Execute,
+        )
+        .ok_or(CaptureError::Unreadable)?;
+        return crate::x64::jac::ram_backing(translation.physical.0)
+            .map(|backing| backing | linear & 4095)
+            .ok_or(CaptureError::NonRam);
     }
     let cr0 = *gp::cr;
     if cr0 & cpu::CR0_PG == 0 {
@@ -86,7 +99,8 @@ pub unsafe fn mapping_cached(mapping: &CodeMapping) -> bool {
 }
 #[inline(always)]
 unsafe fn mapping_list_cached(mappings: &[CodeMapping]) -> bool {
-    let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let mask =
+        cpu::TLB_VALID | cpu::TLB_IA32E_DATA | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     mappings.iter().all(|mapping| {
         let cached = cpu::tlb_data[(mapping.linear.0 >> 12) as usize];
         cached & mask == cpu::TLB_VALID
@@ -200,9 +214,7 @@ impl MergedValidation {
         })
     }
     #[inline(always)]
-    pub(super) unsafe fn mappings_cached(&self) -> bool {
-        mapping_list_cached(&self.mappings)
-    }
+    pub(super) unsafe fn mappings_cached(&self) -> bool { mapping_list_cached(&self.mappings) }
     pub(super) unsafe fn matches(&self) -> bool {
         self.mappings_cached()
             && self.spans.iter().all(|span| {
@@ -347,7 +359,10 @@ pub unsafe fn capture_page(linear: u32) -> Result<ImmutableCodeSnapshot, Capture
 
 /// `pages` (at most three) consecutive whole pages from the page of
 /// `linear`: a Tier-0 page function covering a page and its neighbors.
-pub unsafe fn capture_pages(linear: u32, pages: u32) -> Result<ImmutableCodeSnapshot, CaptureError> {
+pub unsafe fn capture_pages(
+    linear: u32,
+    pages: u32,
+) -> Result<ImmutableCodeSnapshot, CaptureError> {
     if !(1..=3).contains(&pages) {
         return Err(CaptureError::Size);
     }
@@ -358,7 +373,11 @@ pub unsafe fn capture_pages(linear: u32, pages: u32) -> Result<ImmutableCodeSnap
         snapshot.bytes.extend_from_slice(&next.bytes);
         snapshot.mappings.extend(next.mappings);
         for dependency in next.dependencies {
-            if !snapshot.dependencies.iter().any(|d| d.page == dependency.page) {
+            if !snapshot
+                .dependencies
+                .iter()
+                .any(|d| d.page == dependency.page)
+            {
                 snapshot.dependencies.push(dependency);
             }
         }
@@ -372,13 +391,21 @@ pub unsafe fn capture_page_list(pages: &[u32]) -> Result<ImmutableCodeSnapshot, 
     let mut sorted: Vec<u32> = pages.iter().map(|&page| page & !4095).collect();
     sorted.sort_unstable();
     sorted.dedup();
-    let mut snapshot = ImmutableCodeSnapshot { bytes: vec![], dependencies: vec![], mappings: vec![] };
+    let mut snapshot = ImmutableCodeSnapshot {
+        bytes: vec![],
+        dependencies: vec![],
+        mappings: vec![],
+    };
     for page in sorted {
         let next = capture(page, 4096)?;
         snapshot.bytes.extend_from_slice(&next.bytes);
         snapshot.mappings.extend(next.mappings);
         for dependency in next.dependencies {
-            if !snapshot.dependencies.iter().any(|d| d.page == dependency.page) {
+            if !snapshot
+                .dependencies
+                .iter()
+                .any(|d| d.page == dependency.page)
+            {
                 snapshot.dependencies.push(dependency);
             }
         }

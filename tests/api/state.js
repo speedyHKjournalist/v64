@@ -65,6 +65,7 @@ async function run_test(name, config, done)
     await sleep(2000);
 
     console.log("Saving: %s", name);
+    const before_save = await emulator.get_diagnostics();
     const state = await emulator.save_state();
 
     await sleep(1000);
@@ -72,16 +73,23 @@ async function run_test(name, config, done)
     console.log("Restoring: %s", name);
     await emulator.restore_state(state);
 
-    await emulator.wait_until_vga_screen_contains("~% ");
+    const booted = await emulator.wait_until_vga_screen_contains("~% ", { timeout_msec: 120000 });
+    if(!booted)
+    {
+        console.error("Timed out after restoring: " + name);
+        console.error(JSON.stringify({ before_save, after_restore: await emulator.get_diagnostics() }));
+        console.error(emulator.screen_adapter.get_text_screen());
+        emulator.destroy();
+        throw new Error("Guest did not boot after restoring " + name);
+    }
     await sleep(1000);
 
     emulator.keyboard_send_text("echo -n test; echo passed\n");
-    await sleep(1000);
-
-    const lines = emulator.screen_adapter.get_text_screen();
-    if(!lines.some(line => line.startsWith("testpassed")))
+    const responded = await emulator.wait_until_vga_screen_contains("testpassed", { timeout_msec: 10000 });
+    if(!responded)
     {
         console.warn("Failed: " + name);
+        const lines = emulator.screen_adapter.get_text_screen();
         console.warn(lines.map(line => line.replace(/\x00/g, " ")));
         process.exit(1);
     }

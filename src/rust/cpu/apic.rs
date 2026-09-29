@@ -1,7 +1,7 @@
 // See Intel's System Programming Guide
 
-use crate::cpu::{cpu::js, global_pointers::acpi_enabled, ioapic};
-use std::sync::{Mutex, MutexGuard};
+use crate::cpu::{cpu::js, global_pointers::acpi_enabled, ioapic, pic};
+use crate::parallel;
 
 const APIC_LOG_VERBOSE: bool = false;
 
@@ -22,7 +22,7 @@ const DELIVERY_MODES: [&str; 8] = [
     "Reserved (3)",
     "NMI (4)",
     "INIT (5)",
-    "Reserved (6)",
+    "Start-up (6)",
     "ExtINT (7)",
 ];
 
@@ -33,6 +33,23 @@ const IOAPIC_CONFIG_MASKED: u32 = 0x10000;
 const IOAPIC_DELIVERY_INIT: u8 = 5;
 const IOAPIC_DELIVERY_NMI: u8 = 4;
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
+const DELIVERY_LOWEST_PRIORITY: u8 = 1;
+const DELIVERY_STARTUP: u8 = 6;
+const DELIVERY_EXTINT: u8 = 7;
+
+const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+const APIC_SOFTWARE_ENABLE: u32 = 1 << 8;
+const ESR_SEND_ILLEGAL_VECTOR: u32 = 1 << 5;
+const ESR_RECEIVE_ILLEGAL_VECTOR: u32 = 1 << 6;
+const ESR_ILLEGAL_REGISTER: u32 = 1 << 7;
+
+/// Cores a machine can have; each has its own local APIC
+pub const MAX_CORES: usize = 8;
+
+/// Events for the core scheduler in JavaScript (CPU.prototype.run_cores),
+/// taken with apic_take_core_events: INIT and a start-up IPI (vector in bits 8..15)
+pub const CORE_EVENT_INIT: u32 = 1;
+pub const CORE_EVENT_SIPI: u32 = 2;
 
 // keep in sync with cpu.js
 #[allow(dead_code)]
@@ -77,7 +94,7 @@ pub struct Apic {
     lvt_thermal_sensor: u32,
 }
 
-static APIC: Mutex<Apic> = Mutex::new(Apic {
+const APIC_RESET: Apic = Apic {
     apic_id: 0,
     timer_divider: 0,
     timer_divider_shift: 1,
@@ -96,23 +113,252 @@ static APIC: Mutex<Apic> = Mutex::new(Apic {
     irr: [0; 8],
     isr: [0; 8],
     tmr: [0; 8],
-    spurious_vector: 0xFE,
+    spurious_vector: 0xFF,
     destination_format: !0,
     local_destination: 0,
     error: 0,
     read_error: 0,
-});
+};
 
-pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
+// One local APIC per core. Only one core runs at a time (cooperative
+// multicore: the active core's state is swapped in, see
+// CPU.prototype.save_core_state); CURRENT_CORE is the one whose APIC the
+// MMIO window, interrupt acceptance and CPUID see.
+static mut APICS: [Apic; MAX_CORES] = [APIC_RESET; MAX_CORES];
+static mut CURRENT_CORE: usize = 0;
+static mut CORE_COUNT: usize = 1;
+static mut CORE_EVENTS: [u32; MAX_CORES] = [0; MAX_CORES];
+/// NMIs latched for each core until it can take one (nmi_blocked)
+static mut NMI_PENDING: [u32; MAX_CORES] = [0; MAX_CORES];
+
+// With cores in workers (crate::parallel), the APICs, their latches and the
+// core count are the machine instance's, reached through parallel::machine;
+// CURRENT_CORE stays the core of this instance. Other cores' latches and
+// request registers (IRR, pending trigger modes, ESR) change with atomic
+// word operations; the rest of an APIC belongs to its own core.
+fn core_events(core: usize) -> *mut u32 {
+    dbg_assert!(core < MAX_CORES);
+    unsafe {
+        parallel::machine(&raw mut CORE_EVENTS)
+            .cast::<u32>()
+            .add(core)
+    }
+}
+fn nmi_latch(core: usize) -> *mut u32 {
+    dbg_assert!(core < MAX_CORES);
+    unsafe {
+        parallel::machine(&raw mut NMI_PENDING)
+            .cast::<u32>()
+            .add(core)
+    }
+}
+/// A worker's instance runs this core
+pub unsafe fn attach_worker(core: u32) {
+    dbg_assert!((core as usize) < core_count());
+    CURRENT_CORE = core as usize;
+}
+/// Whether an event for `core` must wake it in another worker
+fn remote(core: usize) -> bool { parallel::active() && core != current_core() }
+
+// Keep the legacy 184-byte LAPIC image stable. These additional architectural
+// latches are snapshotted separately; they are not scheduler/JIT cache state.
+#[repr(C)]
+struct ApicAux {
+    hardware_enabled: u32,
+    extint_pending: u32,
+    // An interrupt may be queued while its vector is still in service. Its
+    // trigger mode must not overwrite the mode needed by the current EOI.
+    pending_tmr: [u32; 8],
+    ipi_sent: u32,
+    ipi_received: u32,
+}
+const APIC_AUX_RESET: ApicAux = ApicAux {
+    hardware_enabled: 1,
+    extint_pending: 0,
+    pending_tmr: [0; 8],
+    ipi_sent: 0,
+    ipi_received: 0,
+};
+static mut APIC_AUX: [ApicAux; MAX_CORES] = [APIC_AUX_RESET; MAX_CORES];
+
+fn aux_of(core: usize) -> &'static mut ApicAux {
+    dbg_assert!(core < MAX_CORES);
+    unsafe {
+        &mut *parallel::machine(&raw mut APIC_AUX)
+            .cast::<ApicAux>()
+            .add(core)
+    }
+}
+
+#[no_mangle]
+pub fn apic_aux_addr(core: u32) -> u32 { &raw mut *aux_of(core as usize) as u32 }
+#[no_mangle]
+pub fn apic_aux_size() -> u32 { std::mem::size_of::<ApicAux>() as u32 }
+/// Version-6 images contain only the original LAPIC registers. Reconstruct
+/// queued trigger modes before the first acknowledge, including level IRQs.
+#[no_mangle]
+pub fn apic_restore_legacy_aux(core: u32, enabled: bool) {
+    let apic = apic_of(core as usize);
+    let aux = aux_of(core as usize);
+    *aux = APIC_AUX_RESET;
+    aux.hardware_enabled = enabled as u32;
+    for i in 0..8 {
+        aux.pending_tmr[i] = apic.irr[i] & apic.tmr[i];
+    }
+}
+
+#[no_mangle]
+pub fn apic_core_ipi_sent(core: u32) -> u32 { aux_of(core as usize).ipi_sent }
+#[no_mangle]
+pub fn apic_core_ipi_received(core: u32) -> u32 { aux_of(core as usize).ipi_received }
+#[no_mangle]
+pub fn apic_core_hardware_enabled(core: u32) -> bool { aux_of(core as usize).hardware_enabled != 0 }
+#[no_mangle]
+pub fn apic_set_hardware_enabled(core: u32, enabled: bool) {
+    aux_of(core as usize).hardware_enabled = enabled as u32;
+}
+#[no_mangle]
+pub fn apic_core_extint_pending(core: u32) -> bool { aux_of(core as usize).extint_pending != 0 }
+#[no_mangle]
+pub fn apic_restore_extint(core: u32, pending: bool) {
+    unsafe {
+        parallel::word_store(
+            &raw mut aux_of(core as usize).extint_pending,
+            pending as u32,
+        )
+    };
+}
+
+fn apic_of(core: usize) -> &'static mut Apic {
+    dbg_assert!(core < MAX_CORES);
+    unsafe { &mut *parallel::machine(&raw mut APICS).cast::<Apic>().add(core) }
+}
+
+pub fn get_apic() -> &'static mut Apic { apic_of(current_core()) }
+
+pub fn current_core() -> usize { unsafe { CURRENT_CORE } }
+pub fn core_count() -> usize { unsafe { *parallel::machine(&raw mut CORE_COUNT) } }
 
 #[no_mangle]
 pub fn get_apic_addr() -> u32 { &raw mut *get_apic() as u32 }
+
+/// Address of a core's local APIC (layout: see CPU.prototype.get_state_apic)
+#[no_mangle]
+pub fn apic_addr(core: u32) -> u32 { &raw mut *apic_of(core as usize) as u32 }
+
+/// Power-on state of all local APICs; core i gets APIC ID i
+#[no_mangle]
+pub unsafe fn apic_set_core_count(count: u32) {
+    dbg_assert!(count >= 1 && count as usize <= MAX_CORES);
+    crate::cpu::execution::flush_core_statistics();
+    *parallel::machine(&raw mut CORE_COUNT) = count as usize;
+    CURRENT_CORE = 0;
+    for core in 0..MAX_CORES {
+        *apic_of(core) = APIC_RESET;
+        apic_of(core).apic_id = (core as u32) << 24;
+        *aux_of(core) = APIC_AUX_RESET;
+        if core == 0 {
+            // Platform virtual-wire power-on compatibility: the BSP receives
+            // the 8259 output through LINT0 until firmware programs/masks it.
+            apic_of(core).lvt_int0 = (DELIVERY_EXTINT as u32) << 8;
+        }
+        *core_events(core) = 0;
+        *nmi_latch(core) = 0;
+    }
+}
+
+/// IA32_APIC_BASE.EN cleared: the local APIC returns to its power-on state,
+/// including the initial APIC ID (as KVM does when it is enabled again)
+pub unsafe fn software_disable() {
+    let core = current_core();
+    *apic_of(core) = APIC_RESET;
+    apic_of(core).apic_id = (core as u32) << 24;
+    *aux_of(core) = APIC_AUX_RESET;
+    aux_of(core).hardware_enabled = 0;
+    parallel::word_store(nmi_latch(core), 0);
+    parallel::word_store(core_events(core), 0);
+}
+
+/// Take a pending NMI of the active core
+pub unsafe fn take_nmi() -> bool {
+    parallel::word_load(nmi_latch(current_core())) != 0
+        && parallel::word_swap(nmi_latch(current_core()), 0) != 0
+}
+
+pub unsafe fn nmi_pending() -> bool { parallel::word_load(nmi_latch(current_core())) != 0 }
+
+#[no_mangle]
+pub unsafe fn apic_core_nmi_pending(core: u32) -> bool {
+    parallel::word_load(nmi_latch(core as usize)) != 0
+}
+
+#[no_mangle]
+pub unsafe fn apic_set_current_core(core: u32) {
+    dbg_assert!((core as usize) < core_count());
+    crate::cpu::execution::flush_core_statistics();
+    CURRENT_CORE = core as usize;
+}
+
+/// INIT: the local APIC returns to its power-on state except for its ID
+#[no_mangle]
+pub unsafe fn apic_init_core(core: u32) {
+    let apic = apic_of(core as usize);
+    let apic_id = apic.apic_id;
+    *apic = APIC_RESET;
+    apic.apic_id = apic_id;
+    let aux = aux_of(core as usize);
+    aux.hardware_enabled = 1;
+    parallel::word_store(&raw mut aux.extint_pending, 0);
+    for word in 0..8 {
+        parallel::word_store(&raw mut aux.pending_tmr[word], 0);
+    }
+}
+
+#[no_mangle]
+pub unsafe fn apic_take_core_events(core: u32) -> u32 {
+    if parallel::word_load(core_events(core as usize)) == 0 {
+        return 0;
+    }
+    parallel::word_swap(core_events(core as usize), 0)
+}
+
+/// Snapshot the pending startup events without acknowledging them.
+#[no_mangle]
+pub unsafe fn apic_peek_core_events(core: u32) -> u32 {
+    parallel::word_load(core_events(core as usize))
+}
+
+/// INIT or start-up IPIs are waiting: for any core in a cooperative machine
+/// (the scheduler takes them); with workers, for this instance's core
+pub unsafe fn has_core_events() -> bool {
+    if parallel::active() {
+        return parallel::word_load(core_events(current_core())) != 0;
+    }
+    (0..core_count()).any(|core| *core_events(core) != 0)
+}
+
+#[no_mangle]
+pub unsafe fn apic_restore_core_events(core: u32, events: u32, nmi: bool) {
+    dbg_assert!((core as usize) < core_count());
+    parallel::word_store(core_events(core as usize), events);
+    parallel::word_store(nmi_latch(core as usize), nmi as u32);
+}
+
+/// Whether a (halted) core has an interrupt it would accept
+#[no_mangle]
+pub unsafe fn apic_core_interrupt_pending(core: u32) -> bool {
+    let core = core as usize;
+    pending_irq(apic_of(core), aux_of(core)).is_some() || routed_pic_pending(core as u32)
+}
 
 pub fn read32(addr: u32) -> u32 {
     if unsafe { !*acpi_enabled } {
         return 0;
     }
-    read32_internal(&mut get_apic(), addr)
+    if !apic_core_hardware_enabled(current_core() as u32) {
+        return !0;
+    }
+    read32_internal(get_apic(), addr)
 }
 
 fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
@@ -134,6 +380,8 @@ fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
             }
             apic.tpr
         },
+
+        0xA0 => processor_priority(apic) as u32,
 
         0xB0 => {
             // write-only (written by DSL)
@@ -233,43 +481,11 @@ fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
             apic.timer_initial_count
         },
 
-        0x390 => {
-            let now = unsafe { js::microtick() };
-            if apic.timer_last_tick > now {
-                // should only happen after restore_state
-                dbg_log!("warning: APIC last_tick is in the future, resetting");
-                apic.timer_last_tick = now;
-            }
-            let diff = now - apic.timer_last_tick;
-            let diff_in_ticks = diff * APIC_TIMER_FREQ / (1 << apic.timer_divider_shift) as f64;
-            dbg_assert!(diff_in_ticks >= 0.0);
-            let diff_in_ticks = diff_in_ticks as u64;
-            let result = if diff_in_ticks < apic.timer_initial_count as u64 {
-                apic.timer_initial_count - diff_in_ticks as u32
-            }
-            else {
-                let mode = apic.lvt_timer & APIC_TIMER_MODE_MASK;
-                if mode == APIC_TIMER_MODE_PERIODIC {
-                    apic.timer_initial_count
-                        - (diff_in_ticks % (apic.timer_initial_count as u64 + 1)) as u32
-                }
-                else if mode == APIC_TIMER_MODE_ONE_SHOT {
-                    0
-                }
-                else {
-                    dbg_assert!(false, "apic unimplemented timer mode: {:x}", mode);
-                    0
-                }
-            };
-            if APIC_LOG_VERBOSE {
-                dbg_log!("read timer current count: {}", result);
-            }
-            result
-        },
+        0x390 => timer_current_count(apic, unsafe { js::microtick() }),
 
         _ => {
             dbg_log!("APIC read {:x}", addr);
-            dbg_assert!(false);
+            apic.error |= ESR_ILLEGAL_REGISTER;
             0
         },
     }
@@ -279,14 +495,49 @@ pub fn write32(addr: u32, value: u32) {
     if unsafe { !*acpi_enabled } {
         return;
     }
-    write32_internal(&mut get_apic(), addr, value)
+    // Routing may touch the sending APIC again. End its exclusive borrow
+    // before delivering an IPI or an IOAPIC EOI that can reassert the line.
+    if !apic_core_hardware_enabled(current_core() as u32) {
+        return;
+    }
+    match write32_internal(get_apic(), aux_of(current_core()), addr, value) {
+        Some(ApicAction::Eoi(vector)) => ioapic::remote_eoi(vector),
+        Some(ApicAction::Ipi { value, destination }) => {
+            let source = current_core();
+            aux_of(source).ipi_sent = aux_of(source).ipi_sent.wrapping_add(1);
+            let targets = match (value >> 18) & 3 {
+                0 => destination_cores(destination, ((value >> 11) & 1) as u8),
+                1 => vec![source],
+                2 => (0..core_count()).collect(),
+                _ => (0..core_count()).filter(|&c| c != source).collect(),
+            };
+            deliver_to_cores(
+                &targets,
+                value as u8,
+                ((value >> 8) & 7) as u8,
+                false, // integrated xAPIC IPIs are edge-triggered (except INIT deassert)
+                true,
+            );
+        },
+        None => {},
+    }
 }
 
-fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
+enum ApicAction {
+    Eoi(u8),
+    Ipi { value: u32, destination: u8 },
+}
+
+fn write32_internal(
+    apic: &mut Apic,
+    aux: &mut ApicAux,
+    addr: u32,
+    value: u32,
+) -> Option<ApicAction> {
     match addr {
         0x20 => {
             dbg_log!("APIC write id: {:08x}", value >> 8);
-            apic.apic_id = value;
+            apic.apic_id = value & 0xFF000000;
         },
 
         0x30 => {
@@ -307,9 +558,10 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                     dbg_log!("eoi: {:08x} for vector {:x}", value, highest_isr);
                 }
                 register_clear_bit(&mut apic.isr, highest_isr);
+                // TMR records the last accepted trigger mode; EOI clears
+                // ISR, not TMR. The next acknowledge installs queued mode.
                 if register_get_bit(&apic.tmr, highest_isr) {
-                    // Send eoi to all IO APICs
-                    ioapic::remote_eoi(apic, highest_isr);
+                    return Some(ApicAction::Eoi(highest_isr));
                 }
             }
             else {
@@ -324,12 +576,21 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
 
         0xE0 => {
             dbg_log!("Set destination format: {:08x}", value);
-            apic.destination_format = value | 0xFFFFFF;
+            apic.destination_format = value | 0x0FFFFFFF;
         },
 
         0xF0 => {
             dbg_log!("Set spurious vector: {:08x}", value);
-            apic.spurious_vector = value;
+            // Directed EOI suppression is not advertised by our version.
+            apic.spurious_vector = value & 0x3FF;
+            if value & APIC_SOFTWARE_ENABLE == 0 {
+                apic.lvt_timer |= IOAPIC_CONFIG_MASKED;
+                apic.lvt_thermal_sensor |= IOAPIC_CONFIG_MASKED;
+                apic.lvt_perf_counter |= IOAPIC_CONFIG_MASKED;
+                apic.lvt_int0 |= IOAPIC_CONFIG_MASKED;
+                apic.lvt_int1 |= IOAPIC_CONFIG_MASKED;
+                apic.lvt_error |= IOAPIC_CONFIG_MASKED;
+            }
         },
 
         0x280 => {
@@ -356,35 +617,28 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 ["no", "self", "all with self", "all without self"][destination_shorthand as usize]
             );
 
-            let mut value = value;
-            value &= !(1 << 12);
-            apic.icr0 = value;
+            // delivery is immediate: the status bit (12) always reads as idle
+            apic.icr0 = value & !(1 << 12);
 
-            if destination_shorthand == 0 {
-                // no shorthand
-                route(
-                    apic,
-                    vector,
-                    delivery_mode,
-                    is_level,
-                    destination,
-                    destination_mode,
-                );
+            // ExtINT is not a legal ICR delivery mode; SMI is unsupported by
+            // this platform. Reserved encodings must never become fixed IRQs.
+            if matches!(delivery_mode, 2 | 3 | DELIVERY_EXTINT) {
+                return None;
             }
-            else if destination_shorthand == 1 {
-                // self
-                deliver(apic, vector, IOAPIC_DELIVERY_FIXED, is_level);
+            if matches!(
+                delivery_mode,
+                IOAPIC_DELIVERY_FIXED | DELIVERY_LOWEST_PRIORITY
+            ) && vector < 0x10
+            {
+                apic.error |= ESR_SEND_ILLEGAL_VECTOR;
+                return None;
             }
-            else if destination_shorthand == 2 {
-                // all including self
-                deliver(apic, vector, delivery_mode, is_level);
+            let is_assert = value & ICR_LEVEL_ASSERT != 0;
+            if delivery_mode == IOAPIC_DELIVERY_INIT && is_level && !is_assert {
+                // INIT level de-assert only synchronizes arbitration IDs
+                return None;
             }
-            else if destination_shorthand == 3 {
-                // all but self
-            }
-            else {
-                dbg_assert!(false);
-            }
+            return Some(ApicAction::Ipi { value, destination });
         },
 
         0x310 => {
@@ -396,33 +650,35 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
             if APIC_LOG_VERBOSE {
                 dbg_log!("timer lvt: {:08x}", value);
             }
-            // TODO: check if unmasking and if this should trigger an interrupt immediately
-            apic.lvt_timer = value;
+            // Expire under the previous mask/mode before changing it: an
+            // elapsed masked one-shot must not be resurrected by unmasking.
+            timer(apic, aux, unsafe { js::microtick() });
+            apic.lvt_timer = masked_lvt(apic, value & 0x700FF);
         },
 
         0x330 => {
             dbg_log!("lvt thermal sensor: {:08x}", value);
-            apic.lvt_thermal_sensor = value;
+            apic.lvt_thermal_sensor = masked_lvt(apic, value);
         },
 
         0x340 => {
             dbg_log!("lvt perf counter: {:08x}", value);
-            apic.lvt_perf_counter = value;
+            apic.lvt_perf_counter = masked_lvt(apic, value);
         },
 
         0x350 => {
             dbg_log!("lvt int0: {:08x}", value);
-            apic.lvt_int0 = value;
+            apic.lvt_int0 = masked_lvt(apic, value);
         },
 
         0x360 => {
             dbg_log!("lvt int1: {:08x}", value);
-            apic.lvt_int1 = value;
+            apic.lvt_int1 = masked_lvt(apic, value);
         },
 
         0x370 => {
             dbg_log!("lvt error: {:08x}", value);
-            apic.lvt_error = value;
+            apic.lvt_error = masked_lvt(apic, value);
         },
 
         0x3E0 => {
@@ -453,136 +709,300 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
 
         0x390 => {
             dbg_log!("write timer current: {:08x}", value);
-            dbg_assert!(false, "read-only register");
+            // Writes to the read-only current count are ignored.
         },
 
         _ => {
             dbg_log!("APIC write32 {:x} <- {:08x}", addr, value);
-            dbg_assert!(false);
+            apic.error |= ESR_ILLEGAL_REGISTER;
         },
     }
+    None
 }
 
-#[no_mangle]
-pub fn apic_timer(now: f64) -> f64 { timer(&mut get_apic(), now) }
+fn masked_lvt(apic: &Apic, value: u32) -> u32 {
+    value | if apic.spurious_vector & APIC_SOFTWARE_ENABLE == 0 { IOAPIC_CONFIG_MASKED } else { 0 }
+}
 
-fn timer(apic: &mut Apic, now: f64) -> f64 {
+/// Advance the timer of every core's local APIC (with cores in workers, of
+/// this instance's core: each worker runs its own)
+#[no_mangle]
+pub fn apic_timer(now: f64) -> f64 {
+    if parallel::active() {
+        let core = current_core();
+        return timer(apic_of(core), aux_of(core), now);
+    }
+    let mut next = 100.0f64;
+    for core in 0..core_count() {
+        next = next.min(timer(apic_of(core), aux_of(core), now));
+    }
+    next
+}
+
+fn timer_current_count(apic: &Apic, now: f64) -> u32 {
     if apic.timer_initial_count == 0 || apic.timer_current_count == 0 {
+        return 0;
+    }
+    let ticks = ((now - apic.timer_last_tick).max(0.0) * APIC_TIMER_FREQ
+        / (1 << apic.timer_divider_shift) as f64) as u64;
+    match apic.lvt_timer & APIC_TIMER_MODE_MASK {
+        APIC_TIMER_MODE_PERIODIC => {
+            apic.timer_initial_count - (ticks % apic.timer_initial_count as u64) as u32
+        },
+        APIC_TIMER_MODE_ONE_SHOT => apic
+            .timer_initial_count
+            .saturating_sub(ticks.min(u32::MAX as u64) as u32),
+        _ => 0, // TSC deadline is not advertised; reserved modes do not run.
+    }
+}
+
+fn timer(apic: &mut Apic, aux: &mut ApicAux, now: f64) -> f64 {
+    if aux.hardware_enabled == 0 || apic.timer_initial_count == 0 || apic.timer_current_count == 0 {
         return 100.0;
     }
-
+    let mode = apic.lvt_timer & APIC_TIMER_MODE_MASK;
+    if mode != APIC_TIMER_MODE_PERIODIC && mode != APIC_TIMER_MODE_ONE_SHOT {
+        return 100.0;
+    }
     if apic.timer_last_tick > now {
-        // should only happen after restore_state
-        dbg_log!("warning: APIC last_tick is in the future, resetting");
         apic.timer_last_tick = now;
     }
-
-    let diff = now - apic.timer_last_tick;
-    let diff_in_ticks = diff * APIC_TIMER_FREQ / (1 << apic.timer_divider_shift) as f64;
-    dbg_assert!(diff_in_ticks >= 0.0);
-    let diff_in_ticks = diff_in_ticks as u64;
-
-    let time_per_interrupt =
+    let period =
         apic.timer_initial_count as f64 * (1 << apic.timer_divider_shift) as f64 / APIC_TIMER_FREQ;
-
-    if diff_in_ticks >= apic.timer_initial_count as u64 {
-        let mode = apic.lvt_timer & APIC_TIMER_MODE_MASK;
+    let elapsed = now - apic.timer_last_tick;
+    if elapsed >= period {
         if mode == APIC_TIMER_MODE_PERIODIC {
-            if APIC_LOG_VERBOSE {
-                dbg_log!("APIC timer periodic interrupt");
-            }
-
-            if diff_in_ticks >= 2 * apic.timer_initial_count as u64 {
-                dbg_log!(
-                    "warning: APIC skipping {} interrupts initial={} ticks={} last_tick={:.1}ms now={:.1}ms d={:.1}ms",
-                    diff_in_ticks / apic.timer_initial_count as u64 - 1,
-                    apic.timer_initial_count,
-                    diff_in_ticks,
-                    apic.timer_last_tick,
-                    now,
-                    diff,
-                );
-                apic.timer_last_tick = now;
-            }
-            else {
-                apic.timer_last_tick += time_per_interrupt;
-                dbg_assert!(apic.timer_last_tick <= now);
-            }
-        }
-        else if mode == APIC_TIMER_MODE_ONE_SHOT {
-            if APIC_LOG_VERBOSE {
-                dbg_log!("APIC timer one shot end");
-            }
-            apic.timer_current_count = 0;
+            // Coalesce overdue expirations, preserving the timer's phase.
+            apic.timer_last_tick += (elapsed / period).floor() * period;
         }
         else {
-            dbg_assert!(false, "apic unimplemented timer mode: {:x}", mode);
+            apic.timer_current_count = 0;
         }
-
         if apic.lvt_timer & IOAPIC_CONFIG_MASKED == 0 {
-            deliver(
-                apic,
-                (apic.lvt_timer & 0xFF) as u8,
-                IOAPIC_DELIVERY_FIXED,
-                false,
-            );
+            deliver(apic, aux, apic.lvt_timer as u8, false, false);
         }
     }
-
-    apic.timer_last_tick + time_per_interrupt - now
-}
-
-pub fn route(
-    apic: &mut Apic,
-    vector: u8,
-    mode: u8,
-    is_level: bool,
-    _destination: u8,
-    _destination_mode: u8,
-) {
-    // TODO
-    deliver(apic, vector, mode, is_level);
-}
-
-fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {
-    if APIC_LOG_VERBOSE {
-        dbg_log!("Deliver {:02x} mode={} level={}", vector, mode, is_level);
-    }
-
-    if mode == IOAPIC_DELIVERY_INIT {
-        // TODO
-        return;
-    }
-
-    if mode == IOAPIC_DELIVERY_NMI {
-        // TODO
-        return;
-    }
-
-    if vector < 0x10 || vector == 0xFF {
-        dbg_assert!(false, "TODO: Invalid vector: {:x}", vector);
-    }
-
-    if register_get_bit(&apic.irr, vector) {
-        dbg_log!("Not delivered: irr already set, vector={:02x}", vector);
-        return;
-    }
-
-    register_set_bit(&mut apic.irr, vector);
-
-    if is_level {
-        register_set_bit(&mut apic.tmr, vector);
+    if apic.timer_current_count == 0 {
+        100.0
     }
     else {
-        register_clear_bit(&mut apic.tmr, vector);
+        (apic.timer_last_tick + period - now).max(0.0)
     }
+}
+
+/// Deliver an interrupt from the IO APIC (or an IPI) to the local APICs its
+/// destination selects
+pub fn route(vector: u8, mode: u8, is_level: bool, destination: u8, destination_mode: u8) -> bool {
+    deliver_to_cores(
+        &destination_cores(destination, destination_mode),
+        vector,
+        mode,
+        is_level,
+        false,
+    )
+}
+
+/// Cores selected by a destination field: physical (APIC ID, 0xFF = all) or
+/// logical (flat or cluster model, per the core's DFR/LDR)
+fn destination_cores(destination: u8, destination_mode: u8) -> Vec<usize> {
+    (0..core_count())
+        .filter(|&core| {
+            let apic = apic_of(core);
+            if destination == 0xFF && destination_mode == 0 {
+                return true;
+            }
+            if destination_mode == 0 {
+                return (apic.apic_id >> 24) as u8 == destination;
+            }
+            let ldr = (apic.local_destination >> 24) as u8;
+            if apic.destination_format >> 28 == 0xF {
+                // flat model: 8 bits, one per APIC
+                ldr & destination != 0
+            }
+            else if apic.destination_format >> 28 == 0 {
+                // Cluster 0xF broadcasts to all clusters, while low bits
+                // still select members. Other DFR encodings are reserved.
+                (destination >> 4 == 0xF || ldr >> 4 == destination >> 4)
+                    && ldr & destination & 0xF != 0
+            }
+            else {
+                false
+            }
+        })
+        .collect()
+}
+
+fn fixed_enabled(apic: &Apic, aux: &ApicAux) -> bool {
+    aux.hardware_enabled != 0 && apic.spurious_vector & APIC_SOFTWARE_ENABLE != 0
+}
+
+fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ipi: bool) -> bool {
+    if mode == DELIVERY_LOWEST_PRIORITY {
+        // A disabled recipient does not participate in arbitration.
+        if let Some(&core) = cores
+            .iter()
+            .filter(|&&core| fixed_enabled(apic_of(core), aux_of(core)))
+            .min_by_key(|&&core| {
+                let apic = apic_of(core);
+                (processor_priority(apic) & 0xF0, apic.apic_id >> 24)
+            })
+        {
+            let accepted = deliver(apic_of(core), aux_of(core), vector, is_level, remote(core));
+            if accepted && is_ipi {
+                count_ipi(core);
+            }
+            if accepted {
+                unsafe { parallel::kick(core) };
+            }
+            return accepted;
+        }
+        return false;
+    }
+    let mut accepted = false;
+    for &core in cores {
+        if aux_of(core).hardware_enabled == 0 {
+            continue;
+        }
+        let accepted_here = match mode {
+            IOAPIC_DELIVERY_INIT => unsafe {
+                parallel::word_store(core_events(core), CORE_EVENT_INIT);
+                parallel::word_store(nmi_latch(core), 0);
+                parallel::word_store(&raw mut aux_of(core).extint_pending, 0);
+                true
+            },
+            DELIVERY_STARTUP => unsafe {
+                // The BSP never waits for SIPI; AP scheduler state ignores
+                // subsequent SIPIs after the first has started execution.
+                core != 0 && sipi_latch(core, vector)
+            },
+            IOAPIC_DELIVERY_NMI => unsafe {
+                parallel::word_store(nmi_latch(core), 1);
+                true
+            },
+            DELIVERY_EXTINT => {
+                if fixed_enabled(apic_of(core), aux_of(core)) {
+                    unsafe { parallel::word_store(&raw mut aux_of(core).extint_pending, 1) };
+                    true
+                }
+                else {
+                    false
+                }
+            },
+            IOAPIC_DELIVERY_FIXED => {
+                deliver(apic_of(core), aux_of(core), vector, is_level, remote(core))
+            },
+            _ => false, // reserved and unsupported SMI: never reinterpret as fixed
+        };
+        if accepted_here && is_ipi {
+            count_ipi(core);
+        }
+        if accepted_here {
+            unsafe { parallel::kick(core) };
+        }
+        accepted |= accepted_here;
+        if accepted_here && mode == DELIVERY_EXTINT {
+            // ExtINT represents one shared 8259 acknowledge cycle.
+            break;
+        }
+    }
+    accepted
+}
+
+/// Only this core's first start-up IPI after INIT counts
+unsafe fn sipi_latch(core: usize, vector: u8) -> bool {
+    let events = core_events(core);
+    loop {
+        let current = parallel::word_load(events);
+        if current & CORE_EVENT_SIPI != 0 {
+            return false;
+        }
+        let value = current | CORE_EVENT_SIPI | (vector as u32) << 8;
+        if parallel::compare_exchange(events.cast(), 4, current as u64, value as u64) {
+            return true;
+        }
+    }
+}
+
+fn count_ipi(core: usize) {
+    let aux = aux_of(core);
+    aux.ipi_received = aux.ipi_received.wrapping_add(1);
+}
+
+/// Accept a fixed interrupt into IRR. For a core running in another worker
+/// (`remote`), only the request words change, atomically: its TMR takes the
+/// queued trigger mode when that core acknowledges the vector.
+fn deliver(apic: &mut Apic, aux: &mut ApicAux, vector: u8, is_level: bool, remote: bool) -> bool {
+    if !fixed_enabled(apic, aux) {
+        return false;
+    }
+    if vector < 0x10 {
+        unsafe { parallel::word_or(&raw mut apic.error, ESR_RECEIVE_ILLEGAL_VECTOR) };
+        return false;
+    }
+    if register_get_bit(&apic.irr, vector) {
+        return true;
+    }
+    register_update(&raw mut aux.pending_tmr, vector, is_level);
+    register_update(&raw mut apic.irr, vector, true);
+    if !remote && !register_get_bit(&apic.isr, vector) {
+        if is_level {
+            register_set_bit(&mut apic.tmr, vector);
+        }
+        else {
+            register_clear_bit(&mut apic.tmr, vector);
+        }
+    }
+    true
+}
+
+/// The platform wires the PIC output to BSP LINT0 and IOAPIC input 0.
+/// An IOAPIC ExtINT RTE routes that same output to its selected processor.
+/// An explicit ExtINT message is also latched until the recipient accepts it.
+#[no_mangle]
+pub fn routed_pic_pending(core: u32) -> bool {
+    if !pic::has_pending_irq() {
+        return false;
+    }
+    let core = core as usize;
+    if unsafe { !*acpi_enabled } || aux_of(core).hardware_enabled == 0 {
+        return core == 0;
+    }
+    let apic = apic_of(core);
+    if aux_of(core).extint_pending != 0 && fixed_enabled(apic, aux_of(core)) {
+        return true;
+    }
+    if core == 0
+        && apic.lvt_int0 & IOAPIC_CONFIG_MASKED == 0
+        && (apic.lvt_int0 >> 8) & 7 == DELIVERY_EXTINT as u32
+    {
+        return true;
+    }
+    if let Some((destination, mode)) = ioapic::pic_destination() {
+        return destination_cores(destination, mode)
+            .into_iter()
+            .find(|&target| fixed_enabled(apic_of(target), aux_of(target)))
+            == Some(core);
+    }
+    false
+}
+
+pub fn acknowledge_pic_irq() -> Option<u8> {
+    if !routed_pic_pending(current_core() as u32) {
+        return None;
+    }
+    let vector = pic::pic_acknowledge_irq();
+    // Only one CPU can acknowledge the shared PIC output. Retire broadcast
+    // latches together, so a stale target cannot steal the next device IRQ.
+    for core in 0..core_count() {
+        unsafe { parallel::word_store(&raw mut aux_of(core).extint_pending, 0) };
+    }
+    vector
 }
 
 fn highest_irr(apic: &Apic) -> Option<u8> {
     let highest = register_get_highest_bit(&apic.irr);
     if let Some(x) = highest {
         dbg_assert!(x >= 0x10);
-        dbg_assert!(x != 0xFF);
     }
     highest
 }
@@ -591,37 +1011,45 @@ fn highest_isr(apic: &Apic) -> Option<u8> {
     let highest = register_get_highest_bit(&apic.isr);
     if let Some(x) = highest {
         dbg_assert!(x >= 0x10);
-        dbg_assert!(x != 0xFF);
     }
     highest
 }
 
+/// PPR preserves the TPR subclass only when the task-priority class is at
+/// least the highest in-service interrupt's class (Intel SDM 11.8.3.1).
+fn processor_priority(apic: &Apic) -> u8 {
+    let task = apic.tpr as u8;
+    let service = highest_isr(apic).unwrap_or(0) & 0xF0;
+    if task & 0xF0 >= service {
+        task
+    }
+    else {
+        service
+    }
+}
+
 /// Read-only; does not acknowledge or reprioritize an interrupt.
-pub fn has_pending_irq() -> bool { pending_irq(&get_apic()).is_some() }
-pub fn acknowledge_irq() -> Option<u8> { acknowledge_irq_internal(&mut get_apic()) }
+pub fn has_pending_irq() -> bool { pending_irq(get_apic(), aux_of(current_core())).is_some() }
+pub fn acknowledge_irq() -> Option<u8> {
+    acknowledge_irq_internal(get_apic(), aux_of(current_core()))
+}
 
 // Share the exact priority policy with acknowledgement, without modifying IRR,
 // ISR or TPR. Continuation must not introduce a second interrupt policy.
-fn pending_irq(apic: &Apic) -> Option<u8> {
+fn pending_irq(apic: &Apic, aux: &ApicAux) -> Option<u8> {
+    if !fixed_enabled(apic, aux) {
+        return None;
+    }
     let highest_irr = match highest_irr(apic) {
         None => return None,
         Some(x) => x,
     };
 
-    if let Some(highest_isr) = highest_isr(apic) {
-        if highest_isr >= highest_irr {
-            if APIC_LOG_VERBOSE {
-                dbg_log!("Higher isr, isr={:x} irr={:x}", highest_isr, highest_irr);
-            }
-            return None;
-        }
-    }
-
-    if highest_irr & 0xF0 <= apic.tpr as u8 & 0xF0 {
+    if highest_irr & 0xF0 <= processor_priority(apic) & 0xF0 {
         if APIC_LOG_VERBOSE {
             dbg_log!(
-                "Higher tpr, tpr={:x} irr={:x}",
-                apic.tpr & 0xF0,
+                "Higher ppr, ppr={:x} irr={:x}",
+                processor_priority(apic),
                 highest_irr
             );
         }
@@ -631,16 +1059,23 @@ fn pending_irq(apic: &Apic) -> Option<u8> {
     Some(highest_irr)
 }
 
-fn acknowledge_irq_internal(apic: &mut Apic) -> Option<u8> {
-    let highest_irr = pending_irq(apic)?;
-    register_clear_bit(&mut apic.irr, highest_irr);
+fn acknowledge_irq_internal(apic: &mut Apic, aux: &mut ApicAux) -> Option<u8> {
+    let highest_irr = pending_irq(apic, aux)?;
+    register_update(&raw mut apic.irr, highest_irr, false);
     register_set_bit(&mut apic.isr, highest_irr);
+    if register_get_bit(&aux.pending_tmr, highest_irr) {
+        register_set_bit(&mut apic.tmr, highest_irr);
+    }
+    else {
+        register_clear_bit(&mut apic.tmr, highest_irr);
+    }
+    register_update(&raw mut aux.pending_tmr, highest_irr, false);
 
     if APIC_LOG_VERBOSE {
         dbg_log!("Calling vector {:x}", highest_irr);
     }
 
-    dbg_assert!(acknowledge_irq_internal(apic).is_none());
+    dbg_assert!(pending_irq(apic, aux).is_none());
 
     Some(highest_irr)
 }
@@ -651,6 +1086,19 @@ fn register_get_bit(v: &[u32; 8], bit: u8) -> bool { v[(bit >> 5) as usize] & 1 
 fn register_set_bit(v: &mut [u32; 8], bit: u8) { v[(bit >> 5) as usize] |= 1 << (bit & 31); }
 
 fn register_clear_bit(v: &mut [u32; 8], bit: u8) { v[(bit >> 5) as usize] &= !(1 << (bit & 31)); }
+
+/// Set or clear a bit of a register other cores change as well (IRR, pending TMR)
+fn register_update(v: *mut [u32; 8], bit: u8, set: bool) {
+    unsafe {
+        let word = v.cast::<u32>().add((bit >> 5) as usize);
+        if set {
+            parallel::word_or(word, 1 << (bit & 31));
+        }
+        else {
+            parallel::word_and(word, !(1 << (bit & 31)));
+        }
+    }
+}
 
 fn register_get_highest_bit(v: &[u32; 8]) -> Option<u8> {
     dbg_assert!(v.as_ptr().addr() & std::mem::align_of::<u64>() - 1 == 0);
@@ -672,27 +1120,133 @@ mod continuation_tests {
     #[test]
     fn pending_query_is_pure_and_matches_acknowledgement() {
         for vector in [0x20, 0x51, 0x7F, 0xE0] {
-            for service in [None, Some(0x30), Some(vector), Some(0xF0)] {
+            for service in [
+                None,
+                Some(0x30),
+                Some(vector & 0xF0),
+                Some(vector),
+                Some(0xF0),
+            ] {
                 for tpr in [0, 0x50, 0x70, 0xF0] {
                     // Apic contains only integer and floating-point fields.
-                    let mut apic: Apic = unsafe { std::mem::zeroed() };
+                    let mut apic = APIC_RESET;
+                    let mut aux = APIC_AUX_RESET;
+                    apic.spurious_vector |= APIC_SOFTWARE_ENABLE;
                     register_set_bit(&mut apic.irr, vector);
                     if let Some(service) = service {
                         register_set_bit(&mut apic.isr, service);
                     }
                     apic.tpr = tpr;
                     let before = (apic.irr, apic.isr, apic.tpr);
-                    let pending = pending_irq(&apic);
+                    let pending = pending_irq(&apic, &aux);
                     assert_eq!((apic.irr, apic.isr, apic.tpr), before);
-                    let expected =
-                        service.is_none_or(|s| s < vector) && (vector & 0xF0) > (tpr as u8 & 0xF0);
+                    let expected = service.is_none_or(|s| s & 0xF0 < vector & 0xF0)
+                        && (vector & 0xF0) > (tpr as u8 & 0xF0);
                     assert_eq!(pending, expected.then_some(vector));
-                    assert_eq!(acknowledge_irq_internal(&mut apic), pending);
+                    assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), pending);
                     if !expected {
                         assert_eq!((apic.irr, apic.isr, apic.tpr), before);
                     }
                 }
             }
         }
+    }
+
+    fn enabled_apic() -> (Apic, ApicAux) {
+        let mut apic = APIC_RESET;
+        apic.spurious_vector |= APIC_SOFTWARE_ENABLE;
+        (apic, APIC_AUX_RESET)
+    }
+
+    #[test]
+    fn disabled_apic_holds_pending_but_rejects_new_fixed_interrupts() {
+        let (mut apic, mut aux) = enabled_apic();
+        assert!(deliver(&mut apic, &mut aux, 0x51, false, false));
+        apic.spurious_vector &= !APIC_SOFTWARE_ENABLE;
+        assert_eq!(pending_irq(&apic, &aux), None);
+        assert!(!deliver(&mut apic, &mut aux, 0x61, false, false));
+        assert!(register_get_bit(&apic.irr, 0x51));
+        assert!(!register_get_bit(&apic.irr, 0x61));
+        apic.spurious_vector |= APIC_SOFTWARE_ENABLE;
+        aux.hardware_enabled = 0;
+        assert_eq!(pending_irq(&apic, &aux), None);
+        aux.hardware_enabled = 1;
+        assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), Some(0x51));
+    }
+
+    #[test]
+    fn illegal_vectors_set_esr_and_ff_is_a_legal_interrupt_vector() {
+        let (mut apic, mut aux) = enabled_apic();
+        for vector in 0..16 {
+            assert!(!deliver(&mut apic, &mut aux, vector, false, false));
+        }
+        assert_eq!(apic.error, ESR_RECEIVE_ILLEGAL_VECTOR);
+        assert_eq!(apic.irr, [0; 8]);
+        assert!(deliver(&mut apic, &mut aux, 0xFF, false, false));
+        assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), Some(0xFF));
+    }
+
+    #[test]
+    fn queued_edge_does_not_destroy_in_service_level_trigger_mode() {
+        let (mut apic, mut aux) = enabled_apic();
+        assert!(deliver(&mut apic, &mut aux, 0x51, true, false));
+        assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), Some(0x51));
+        assert!(register_get_bit(&apic.tmr, 0x51));
+        assert!(deliver(&mut apic, &mut aux, 0x51, false, false));
+        assert!(
+            register_get_bit(&apic.tmr, 0x51),
+            "EOI still requires broadcast"
+        );
+        register_clear_bit(&mut apic.isr, 0x51);
+        assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), Some(0x51));
+        assert!(
+            !register_get_bit(&apic.tmr, 0x51),
+            "queued edge does not require broadcast"
+        );
+    }
+
+    #[test]
+    fn periodic_timer_coalesces_expiry_without_losing_phase() {
+        let (mut apic, mut aux) = enabled_apic();
+        apic.lvt_timer = APIC_TIMER_MODE_PERIODIC | 0x60;
+        apic.timer_divider_shift = 0;
+        apic.timer_initial_count = 1_000_000;
+        apic.timer_current_count = apic.timer_initial_count;
+        assert_eq!(timer(&mut apic, &mut aux, 3.25), 0.75);
+        assert_eq!(apic.timer_last_tick, 3.0);
+        assert_eq!(timer_current_count(&apic, 3.25), 750_000);
+        assert_eq!(acknowledge_irq_internal(&mut apic, &mut aux), Some(0x60));
+        assert_eq!(timer(&mut apic, &mut aux, 3.5), 0.5);
+        assert!(!register_get_bit(&apic.irr, 0x60));
+        assert_eq!(timer(&mut apic, &mut aux, 4.0), 1.0);
+        assert!(register_get_bit(&apic.irr, 0x60));
+    }
+
+    #[test]
+    fn masked_one_shot_expires_without_being_replayed_on_unmask() {
+        let (mut apic, mut aux) = enabled_apic();
+        apic.lvt_timer = IOAPIC_CONFIG_MASKED | 0x60;
+        apic.timer_divider_shift = 0;
+        apic.timer_initial_count = 1_000_000;
+        apic.timer_current_count = apic.timer_initial_count;
+        assert_eq!(timer(&mut apic, &mut aux, 2.0), 100.0);
+        assert_eq!(apic.timer_current_count, 0);
+        assert_eq!(timer_current_count(&apic, 2.0), 0);
+        apic.lvt_timer &= !IOAPIC_CONFIG_MASKED;
+        assert_eq!(timer(&mut apic, &mut aux, 3.0), 100.0);
+        assert_eq!(apic.irr, [0; 8]);
+    }
+
+    #[test]
+    fn reserved_timer_modes_remain_stopped() {
+        let (mut apic, mut aux) = enabled_apic();
+        apic.timer_initial_count = 1;
+        apic.timer_current_count = 1;
+        for mode in [2, 3] {
+            apic.lvt_timer = mode << 17 | 0x60;
+            assert_eq!(timer(&mut apic, &mut aux, 10.0), 100.0);
+            assert_eq!(timer_current_count(&apic, 10.0), 0);
+        }
+        assert_eq!(apic.irr, [0; 8]);
     }
 }

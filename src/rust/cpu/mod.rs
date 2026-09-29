@@ -1,7 +1,10 @@
 pub mod apic;
 pub mod arith;
 pub mod call_indirect;
+pub mod context;
 pub mod cpu;
+pub mod exceptions;
+pub mod execution;
 pub mod fpu;
 pub mod global_pointers;
 pub mod instructions;
@@ -13,4 +16,5 @@ pub mod modrm;
 pub mod pic;
 pub mod sse_instr;
 pub mod string;
+pub mod topology;
 pub mod vga;

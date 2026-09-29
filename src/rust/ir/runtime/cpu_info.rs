@@ -86,7 +86,9 @@ pub unsafe fn ir_wrmsr() -> u32 {
         return Outcome::ControlTransferred as u32;
     }
     // APIC restrictions and unknown-index debug assertions remain CPU-owned.
-    instructions_0f::instr_0F30();
+    if !instructions_0f::wrmsr_checked() {
+        return Outcome::ControlTransferred as u32;
+    }
     commit()
 }
 #[cfg(feature = "ir-test-hooks")]

@@ -1,0 +1,8 @@
+[package]
+name = "v86-x64-decode-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[dependencies]
+iced-x86 = { version = "=1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
+serde_json = "1"

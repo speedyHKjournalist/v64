@@ -617,7 +617,11 @@ fn cpu_prologue_imports_only_pointer_bases_used_by_machine_plans() {
         for optimize in [false, true] {
             let artifact = compile_cpu_region(&req, &input, &config(optimize)).unwrap();
             let contains = |pattern: &[u8]| {
-                artifact.code.bytes.windows(pattern.len()).any(|w| w == pattern)
+                artifact
+                    .code
+                    .bytes
+                    .windows(pattern.len())
+                    .any(|w| w == pattern)
             };
             // The TLB base is a load of the fixed CPU slot, not an import.
             let slot = crate::cpu::global_pointers::ir_tlb_base as u32;

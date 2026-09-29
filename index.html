@@ -238,6 +238,39 @@
                 <td><label for="memory_size">Memory size</label></td>
                 <td>
                     <input id="memory_size" type="number" value="128" min="16" max="2048" step="16"> MB<br>
+                    <small>At most 2048 MB (larger values are reduced)</small>
+                </td>
+            </tr>
+
+            <tr>
+                <td><label for="cpu_cores">CPU cores</label></td>
+                <td>
+                    <select id="cpu_cores">
+                        <option value="1" selected>1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                        <option value="6">6</option>
+                        <option value="8">8</option>
+                    </select><br>
+                    <small>More than one core is experimental and turns on ACPI</small>
+                </td>
+            </tr>
+
+            <tr>
+                <td><label for="parallel">Run cores in parallel</label></td>
+                <td>
+                    <input id="parallel" type="checkbox" checked><br>
+                    <small>With more than one core, each core runs in its own host thread. Needs a cross-origin isolated page
+                    (COOP/COEP headers) and at least as many host CPU threads as cores; otherwise the cores take turns on one thread</small>
+                </td>
+            </tr>
+
+            <tr>
+                <td><label for="x64">x86-64 CPU (experimental)</label></td>
+                <td>
+                    <input id="x64" type="checkbox"><br>
+                    <small>Needed for 64-bit operating systems (e.g. Windows 8.1 x64)</small>
                 </td>
             </tr>
 
@@ -399,6 +432,7 @@
     Running: <span id="running_time">0s</span> <br>
     Speed: <span id="speed">0</span> mIPS<br>
     Avg speed: <span id="avg_speed">0</span> mIPS<br>
+    Cores: <span id="info_execution"></span><br>
     <br>
     <div id="info_storage" style="display: none">
         <b>IDE device<span id="ide_type"></span></b><br>

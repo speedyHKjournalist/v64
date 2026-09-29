@@ -103,10 +103,7 @@ fn sse_fp_fixtures() {
 
 #[test]
 fn sse_fp_debug_observer_fixtures() {
-    use crate::ir::{
-        backend::wasm::emit_cpu_entry,
-        runtime::entry::CpuEntryKey,
-    };
+    use crate::ir::{backend::wasm::emit_cpu_entry, runtime::entry::CpuEntryKey};
     let dir = "build/ir-sse-fp-observer";
     std::fs::create_dir_all(dir).unwrap();
     let mut cases = Vec::new();
@@ -126,9 +123,8 @@ fn sse_fp_debug_observer_fixtures() {
             let after = bytes.len();
             bytes.extend_from_slice(&[0x40, 0x66, 0x0F, 0xEB, 0xDA]);
             for opt in [false, true] {
-                let mut region = lift_cpu(
-                    &bytes, GuestEip(0x8000), LinearAddress(0x8000), mode,
-                ).unwrap();
+                let mut region =
+                    lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode).unwrap();
                 if opt {
                     run(&mut region, PassConfig::default()).unwrap();
                 }
@@ -138,30 +134,44 @@ fn sse_fp_debug_observer_fixtures() {
                     mir.allocate_machine_locals(4_000_000).unwrap();
                     mir.elide_redundant_cpu_state_writes(
                         crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
-                    ).unwrap();
+                    )
+                    .unwrap();
                     mir.elide_helper_state_observations(
                         crate::ir::mir::helper_state::DEFAULT_WORK_LIMIT,
-                    ).unwrap();
-                    mir.elide_dead_cpu_values(
-                        crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT,
-                    ).unwrap();
+                    )
+                    .unwrap();
+                    mir.elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)
+                        .unwrap();
                 }
                 let call = mir.calls.iter().flatten().next().unwrap();
                 assert_eq!(call.native_fp.is_some(), name == "native");
-                assert_eq!(call.xmm_observation.is_some(), matches!(name, "native" | "selective"));
+                assert_eq!(
+                    call.xmm_observation.is_some(),
+                    matches!(name, "native" | "selective")
+                );
                 std::fs::write(
                     format!("{dir}/{}.wasm", cases.len()),
                     emit_cpu_entry(
-                        &mir, 100,
+                        &mir,
+                        100,
                         CpuEntryKey {
-                            pc: GuestEip(0x8000), linear: LinearAddress(0x8000), default_32: mode,
+                            pc: GuestEip(0x8000),
+                            linear: LinearAddress(0x8000),
+                            default_32: mode,
                         },
                         &[0x8000],
-                    ).unwrap().bytes,
-                ).unwrap();
+                    )
+                    .unwrap()
+                    .bytes,
+                )
+                .unwrap();
                 cases.push(format!("[\"{name}\",{bytes:?},{mode},{opt},{after}]"));
             }
         }
     }
-    std::fs::write(format!("{dir}/cases.json"), format!("[{}]", cases.join(","))).unwrap();
+    std::fs::write(
+        format!("{dir}/cases.json"),
+        format!("[{}]", cases.join(",")),
+    )
+    .unwrap();
 }

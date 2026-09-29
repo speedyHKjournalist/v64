@@ -2,7 +2,9 @@
 # Development server for `make run`: `python3 -m http.server`, except that every
 # response says Cache-Control: no-cache. The page loads build/cpu-worker.js and
 # build/v86.wasm under a fixed ?<version> query, so without this a browser can
-# keep running a stale bundle or core after a rebuild.
+# keep running a stale bundle or core after a rebuild. The page is also
+# cross-origin isolated (COOP/COEP), which the cores in host threads need
+# (index.html with more than one CPU core, src/parallel).
 import contextlib
 import http.server
 import socket
@@ -12,6 +14,8 @@ import sys
 class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         super().end_headers()
 
 

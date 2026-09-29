@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
+import {WASM_TABLE_SIZE} from "../../../src/const.js";
 const wasm=process.argv[2]||"build/v86-ir-cache-test.wasm";
 let clock_mutation=null;
 const vm=new V86({wasm_fn:async imports=>{
@@ -10,6 +11,8 @@ const vm=new V86({wasm_fn:async imports=>{
 },memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),u32=n=>[n&255,n>>>8&255,n>>>16&255,n>>>24];
 const PC=0x100000, DATA=0x200000, OFFSET=1024;
+// Every table slot but 0 is free once IR and x64 page functions are released.
+const POOL=WASM_TABLE_SIZE-1;
 try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));const cpu=vm.v86.cpu,e=cpu.wm.exports,table=cpu.wm.wasm_table;
     // These cases exercise the strict (byte-validating) admission contract and
@@ -365,8 +368,8 @@ try {
     for(let i=0;i<capacity;i++){const address=PC+i*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),address);cpu.instruction_pointer[0]=address;assert(await request(1));}
     assert.equal(e.ir_cache_stat(0),capacity);assert.equal(e.jit_get_wasm_table_index_free_list_count(),free-capacity);
     cpu.instruction_pointer[0]=PC+capacity*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),PC+capacity*4096);assert.equal(await request(1),false);
-    clear();assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
-    console.log(`PASS: ${wasm}: ${capacity} IR entries share the bounded 899-slot pool, capacity rejection and complete reclamation`);
+    clear();assert.equal(e.jit_get_wasm_table_index_free_list_count(),POOL);
+    console.log(`PASS: ${wasm}: ${capacity} IR entries share the bounded ${POOL}-slot pool, capacity rejection and complete reclamation`);
     // Browser failures and out-of-order completion use the production JS bridge.
     const original=WebAssembly.instantiate;
     try {
@@ -376,7 +379,7 @@ try {
             const old_set=table.set;
             if(kind==="table")table.set=(index,f)=>{if(f!==null) throw new TypeError("controlled table failure");return old_set.call(table,index,f);};
             try {assert.equal(await request(1),false);} finally {table.set=old_set;}
-            e.ir_cache_collect();assert.equal(e.ir_cache_stat(1),0);assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
+            e.ir_cache_collect();assert.equal(e.ir_cache_stat(1),0);assert.equal(e.jit_get_wasm_table_index_free_list_count(),POOL);
         }
         prepare([0x40,0xF4]);const queued=[];WebAssembly.instantiate=(code,imports)=>new Promise((resolve,reject)=>queued.push({code,imports,resolve,reject}));
         const old=request(1);assert.equal(queued.length,1);clear();const replacement=request(1);assert.equal(queued.length,2);
@@ -390,7 +393,7 @@ try {
                 if(changed==="wasm")cpu.wm={...owner};else if(changed==="exports")owner.exports={...owner_exports};else owner.wasm_table={};
                 job.resolve(result);assert.equal(await pending,false);assert.equal(e.ir_cache_stat(0),0);
             } finally {cpu.wm=owner;owner.exports=owner_exports;owner.wasm_table=owner_table;}
-            clear();assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
+            clear();assert.equal(e.jit_get_wasm_table_index_free_list_count(),POOL);
         }
     } finally {WebAssembly.instantiate=original;}
     console.log(`PASS: ${wasm}: synchronous/asynchronous browser failures, missing exports, table failure, changed VM/export/table identities and late completion through the actual publication bridge`);

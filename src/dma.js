@@ -1,3 +1,4 @@
+import { track_state_io } from "./state_io.js";
 import { LOG_DMA } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_log } from "./log.js";
@@ -25,6 +26,9 @@ export function DMA(cpu)
     this.unmask_listeners = [];
 
     this.lsb_msb_flipflop = 0;
+
+    /** @type {number} machine resets so far: a transfer completing after one is dropped */
+    this.epoch = 0;
 
     var io = cpu.io;
 
@@ -290,11 +294,34 @@ DMA.prototype.do_read = function(buffer, start, len, channel, fn)
     else
     {
         var cpu = this.cpu;
+        try
+        {
+            if(addr + read_count > 0x100000000) throw new RangeError("DMA exceeds 32-bit address width");
+            cpu.validate_physical_range(addr, read_count);
+        }
+        catch(error)
+        {
+            if(!(error instanceof RangeError)) throw error;
+            fn(true);
+            return;
+        }
         this.channel_addr[channel] += read_count;
 
-        buffer.get(start, read_count, function(data)
+        const epoch = this.epoch;
+        track_state_io(cpu, done => buffer.get(start, read_count, done), data =>
         {
-            cpu.write_blob(data, addr);
+            // (a machine reset in between: the transfer belongs to the machine before it)
+            if(epoch !== this.epoch) return;
+            try
+            {
+                cpu.write_blob_physical(data, addr);
+            }
+            catch(error)
+            {
+                if(!(error instanceof RangeError)) throw error;
+                fn(true);
+                return;
+            }
             fn(false);
         });
     }
@@ -335,6 +362,18 @@ DMA.prototype.do_write = function(buffer, start, len, channel, fn)
     }
     else
     {
+        let data;
+        try
+        {
+            if(addr + read_bytes > 0x100000000) throw new RangeError("DMA exceeds 32-bit address width");
+            data = this.cpu.read_blob_physical(addr, read_bytes);
+        }
+        catch(error)
+        {
+            if(!(error instanceof RangeError)) throw error;
+            fn(true);
+            return;
+        }
         this.channel_addr[channel] += read_count;
         this.channel_count[channel] -= read_count;
         // when complete, counter should underflow to 0xFFFF
@@ -346,10 +385,11 @@ DMA.prototype.do_write = function(buffer, start, len, channel, fn)
             this.channel_count[channel] = this.channel_count_init[channel];
         }
 
-        buffer.set(start,
-                this.cpu.mem8.subarray(addr, addr + read_bytes),
+        const epoch = this.epoch;
+        track_state_io(this.cpu, done => buffer.set(start, data, done),
                 () =>
                 {
+                    if(epoch !== this.epoch) return;
                     if(want_more && autoinit)
                     {
                         dbg_log("DMA continuing from start", LOG_DMA);
@@ -362,6 +402,16 @@ DMA.prototype.do_write = function(buffer, start, len, channel, fn)
                 }
             );
     }
+};
+
+/**
+ * Machine reset or power-on: transfers still in flight belong to the machine
+ * before it and complete without effect (the controller's registers are
+ * programmed again by the firmware)
+ */
+DMA.prototype.cancel_transfers = function()
+{
+    this.epoch++;
 };
 
 DMA.prototype.address_get_8bit = function(channel)
@@ -378,7 +428,7 @@ DMA.prototype.address_get_8bit = function(channel)
     addr |= this.channel_page[channel] << 16;
     addr |= this.channel_pagehi[channel] << 24;
 
-    return addr;
+    return addr >>> 0;
 };
 
 DMA.prototype.count_get_8bit = function(channel)

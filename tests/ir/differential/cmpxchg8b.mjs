@@ -80,20 +80,19 @@ for(const release of [false,true]){
         let devices=0,mutations=0,remaps=0,traps=0,signed_reads=0;
         for(const [c,i] of selected){
             for(const match of [0,1,2]) for(const lazy of [false,true]) for(const raw_zero_local of [0,64]){
-                const {observed}=compare(i,()=>device(i,{match,lazy,rawZero: raw_zero_local}));const writes=observed.filter(x=>x.kind.startsWith("w"));assert.equal(writes.length,match?0:2,JSON.stringify({i,match,lazy,rawZero: raw_zero_local,observed}));
+                const {observed}=compare(i,()=>device(i,{match,lazy,rawZero: raw_zero_local}));const writes=observed.filter(x=>x.kind.startsWith("w"));assert.equal(writes.length,2,JSON.stringify({i,match,lazy,rawZero: raw_zero_local,observed}));
                 if(!match){const first_read=observed.find(x=>x.kind.startsWith("r"));const seen=first_read.state.zeroLazy?first_read.state.flags&64:64;assert(writes.every(x=>(x.state.flags&64)===seen&&x.state.rawZero===64));}devices++;
             }
-            // Pinned memory::read64s sign-extends its low MMIO dword; the
-            // cross-page safe_read64s path instead zero-extends each dword.
+            // Both same-page and cross-page MMIO reads preserve each dword;
+            // low bit 31 must never sign-extend into the high dword.
             for(const offset of [0x40,0xFF8,0xFFC,0xFFF]){
                 const {expected,observed}=compare(i,()=>device(i,{input:0x89ABCDEF,offset}));
-                const cross=(offset&4095)>4088;
-                assert.equal(!!(expected.flags&64),cross);
-                assert.equal(expected.regs[2],cross?0x76543210:0xFFFFFFFF);
-                assert.equal(observed.some(x=>x.kind.startsWith("w")),cross);signed_reads++;
+                assert.equal(!!(expected.flags&64),true);
+                assert.equal(expected.regs[2],0x76543210);
+                assert.equal(observed.some(x=>x.kind.startsWith("w")),true);signed_reads++;
             }
             const signed_match=compare(i,()=>{device(i,{input:0x89ABCDEF});cpu.reg32[2]=-1;});
-            assert(signed_match.expected.flags&64);assert.equal(signed_match.observed.filter(x=>x.kind.startsWith("w")).length,2);signed_reads++;
+            assert.equal(signed_match.expected.flags&64,0);assert.equal(signed_match.expected.regs[2],0x76543210);assert.equal(signed_match.observed.filter(x=>x.kind.startsWith("w")).length,2);signed_reads++;
             for(const offset of [0x40,0xFFC]){
                 compare(i,()=>{device(i,{offset,match:1});on_event=kind=>{if(kind.startsWith("r")){cpu.reg32[0]=get32(target);cpu.reg32[2]=get32(target+4);cpu.reg32[3]=0xAABBCCDD;cpu.reg32[1]=0x11223344;}};});assert.equal(get32(target),0xAABBCCDD);assert.equal(get32(target+4),0x11223344);mutations++;
                 compare(i,()=>{device(i,{offset});on_event=(kind)=>{if(kind.startsWith("w")){cpu.reg32[3]=0x10203040;cpu.reg32[1]=0x50607080;}};});assert.equal(get32(target+4),0x76543210);mutations++;
@@ -106,6 +105,6 @@ for(const release of [false,true]){
                 const read=compare(i,()=>{device(i,{offset:0xFFC,cpl:3,lazy});on_event=kind=>{if(kind.startsWith("r")){set32(0x13000+0x311*4,0);e.full_clear_tlb();}};},{abort:true});assert.equal(read.expected.ip,PF);traps++;
             }
         }
-        console.log(`PASS (${release?"release":"debug"}): ${devices} MMIO/lazy-ZF sequences, ${mutations} callback register changes, ${remaps} write remaps, ${traps} late fault/abort sequences, ${signed_reads} pinned signed-low reads`);
+        console.log(`PASS (${release?"release":"debug"}): ${devices} MMIO/lazy-ZF sequences, ${mutations} callback register changes, ${remaps} write remaps, ${traps} late fault/abort sequences, ${signed_reads} unsigned low-dword MMIO reads`);
     } finally {await vm.destroy();}
 }

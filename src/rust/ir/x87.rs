@@ -127,13 +127,27 @@ pub enum Native {
         pops: u8,
     },
     /// C0/C3 from ST(0) ? source (C1/C2 cleared), then `pops`.
-    Compare { source: Source, pops: u8 },
+    Compare {
+        source: Source,
+        pops: u8,
+    },
     Exchange(u8),
     /// FST(P) ST(r).
-    Copy { r: u8, pops: u8 },
-    Unary { negate: bool },
-    Free { r: u8, pops: u8 },
-    Store { to: Stored, pops: u8 },
+    Copy {
+        r: u8,
+        pops: u8,
+    },
+    Unary {
+        negate: bool,
+    },
+    Free {
+        r: u8,
+        pops: u8,
+    },
+    Store {
+        to: Stored,
+        pops: u8,
+    },
     StoreControl,
     StoreStatus,
 }

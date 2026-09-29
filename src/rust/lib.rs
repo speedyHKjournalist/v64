@@ -5,8 +5,10 @@ mod dbg;
 mod paging;
 
 pub mod cpu;
+pub mod x64;
 
 pub mod js_api;
+pub mod parallel;
 pub mod profiler;
 
 mod config;

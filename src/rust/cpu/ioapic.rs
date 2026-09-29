@@ -1,6 +1,7 @@
 // http://download.intel.com/design/chipsets/datashts/29056601.pdf
 
 use crate::cpu::{apic, global_pointers::acpi_enabled};
+#[cfg(not(feature = "parallel"))]
 use std::sync::{Mutex, MutexGuard};
 
 const IOAPIC_LOG_VERBOSE: bool = false;
@@ -25,8 +26,9 @@ const IOAPIC_CONFIG_READONLY_MASK: u32 =
 
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
 const IOAPIC_DELIVERY_LOWEST_PRIORITY: u8 = 1;
-const _IOAPIC_DELIVERY_NMI: u8 = 4;
-const _IOAPIC_DELIVERY_INIT: u8 = 5;
+const IOAPIC_DELIVERY_NMI: u8 = 4;
+const IOAPIC_DELIVERY_INIT: u8 = 5;
+const IOAPIC_DELIVERY_EXTINT: u8 = 7;
 
 const DELIVERY_MODES: [&str; 8] = [
     "Fixed (0)",
@@ -60,37 +62,83 @@ struct Ioapic {
     irq_value: u32,
 }
 
-static IOAPIC: Mutex<Ioapic> = Mutex::new(Ioapic {
+const IOAPIC_RESET: Ioapic = Ioapic {
     ioredtbl_config: [IOAPIC_CONFIG_MASKED; IOAPIC_IRQ_COUNT],
     ioredtbl_destination: [0; IOAPIC_IRQ_COUNT],
     ioregsel: 0,
     ioapic_id: IOAPIC_ID,
     irr: 0,
     irq_value: 0,
-});
+};
 
+#[cfg(not(feature = "parallel"))]
+static IOAPIC: Mutex<Ioapic> = Mutex::new(IOAPIC_RESET);
+
+// With cores in workers, every core programs and EOIs the machine instance's
+// IOAPIC while the devices raise its inputs: a spin lock guards it.
+#[cfg(feature = "parallel")]
+static mut IOAPIC: Ioapic = IOAPIC_RESET;
+#[cfg(feature = "parallel")]
+static mut IOAPIC_LOCK: crate::parallel::SpinLock = crate::parallel::SpinLock::new();
+#[cfg(feature = "parallel")]
+struct IoapicGuard;
+/// The lock guarding the machine's IOAPIC (see crate::parallel::parallel_fail)
+pub fn lock() -> &'static crate::parallel::SpinLock {
+    #[cfg(feature = "parallel")]
+    {
+        unsafe { &*crate::parallel::machine(&raw mut IOAPIC_LOCK) }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        static UNUSED: crate::parallel::SpinLock = crate::parallel::SpinLock::new();
+        &UNUSED
+    }
+}
+#[cfg(feature = "parallel")]
+impl std::ops::Deref for IoapicGuard {
+    type Target = Ioapic;
+    fn deref(&self) -> &Ioapic { unsafe { &*crate::parallel::machine(&raw mut IOAPIC) } }
+}
+#[cfg(feature = "parallel")]
+impl std::ops::DerefMut for IoapicGuard {
+    fn deref_mut(&mut self) -> &mut Ioapic {
+        unsafe { &mut *crate::parallel::machine(&raw mut IOAPIC) }
+    }
+}
+#[cfg(feature = "parallel")]
+impl Drop for IoapicGuard {
+    fn drop(&mut self) { unsafe { (*crate::parallel::machine(&raw mut IOAPIC_LOCK)).unlock() } }
+}
+
+/// Board reset, unlike an INIT targeted at one processor.
+pub fn reset() { *get_ioapic() = IOAPIC_RESET; }
+
+#[cfg(not(feature = "parallel"))]
 fn get_ioapic() -> MutexGuard<'static, Ioapic> { IOAPIC.try_lock().unwrap() }
+#[cfg(feature = "parallel")]
+fn get_ioapic() -> IoapicGuard {
+    unsafe { (*crate::parallel::machine(&raw mut IOAPIC_LOCK)).lock() };
+    IoapicGuard
+}
 
 #[no_mangle]
 pub fn get_ioapic_addr() -> u32 { &raw mut *get_ioapic() as u32 }
 
-pub fn remote_eoi(apic: &mut apic::Apic, vector: u8) {
-    remote_eoi_internal(&mut get_ioapic(), apic, vector);
-}
+pub fn remote_eoi(vector: u8) { remote_eoi_internal(&mut get_ioapic(), vector); }
 
-fn remote_eoi_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, vector: u8) {
+fn remote_eoi_internal(ioapic: &mut Ioapic, vector: u8) {
     for i in 0..IOAPIC_IRQ_COUNT as u8 {
         let config = ioapic.ioredtbl_config[i as usize];
 
         if (config & 0xFF) as u8 == vector && config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
             dbg_log!("Clear remote IRR for irq={:x}", i);
             ioapic.ioredtbl_config[i as usize] &= !IOAPIC_CONFIG_REMOTE_IRR;
-            check_irq(ioapic, apic, i);
+            check_irq(ioapic, i);
         }
     }
 }
 
-fn check_irq(ioapic: &mut Ioapic, apic: &mut apic::Apic, irq: u8) {
+fn check_irq(ioapic: &mut Ioapic, irq: u8) {
     let mask = 1 << irq;
 
     if ioapic.irr & mask == 0 {
@@ -107,41 +155,49 @@ fn check_irq(ioapic: &mut Ioapic, apic: &mut apic::Apic, irq: u8) {
         let is_level =
             config & IOAPIC_CONFIG_TRIGGER_MODE_LEVEL == IOAPIC_CONFIG_TRIGGER_MODE_LEVEL;
 
-        if config & IOAPIC_CONFIG_TRIGGER_MODE_LEVEL == 0 {
+        let tracks_eoi = is_level
+            && matches!(
+                delivery_mode,
+                IOAPIC_DELIVERY_FIXED | IOAPIC_DELIVERY_LOWEST_PRIORITY
+            );
+        if tracks_eoi && config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
+            return;
+        }
+        // 2 (SMI) is unsupported and 3/6 are reserved. Never panic or
+        // accidentally inject an ordinary fixed interrupt for these modes.
+        if !matches!(
+            delivery_mode,
+            IOAPIC_DELIVERY_FIXED
+                | IOAPIC_DELIVERY_LOWEST_PRIORITY
+                | IOAPIC_DELIVERY_NMI
+                | IOAPIC_DELIVERY_INIT
+                | IOAPIC_DELIVERY_EXTINT
+        ) {
+            return;
+        }
+        let accepted = apic::route(
+            vector,
+            delivery_mode,
+            is_level,
+            destination,
+            destination_mode,
+        );
+        if !is_level {
             ioapic.irr &= !mask;
         }
-        else {
+        // NMI/INIT/ExtINT do not use LAPIC ISR/EOI. Setting remote IRR
+        // for these would permanently suppress a level-triggered input.
+        if accepted && tracks_eoi {
             ioapic.ioredtbl_config[irq as usize] |= IOAPIC_CONFIG_REMOTE_IRR;
-
-            if config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
-                dbg_log!("No route: level interrupt and remote IRR still set");
-                return;
-            }
-        }
-
-        if delivery_mode == IOAPIC_DELIVERY_FIXED
-            || delivery_mode == IOAPIC_DELIVERY_LOWEST_PRIORITY
-        {
-            apic::route(
-                apic,
-                vector,
-                delivery_mode,
-                is_level,
-                destination,
-                destination_mode,
-            );
-        }
-        else {
-            dbg_assert!(false, "TODO");
         }
 
         ioapic.ioredtbl_config[irq as usize] &= !IOAPIC_CONFIG_DELIVS;
     }
 }
 
-pub fn set_irq(i: u8) { set_irq_internal(&mut get_ioapic(), &mut apic::get_apic(), i) }
+pub fn set_irq(i: u8) { set_irq_internal(&mut get_ioapic(), i) }
 
-fn set_irq_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, i: u8) {
+fn set_irq_internal(ioapic: &mut Ioapic, i: u8) {
     if i as usize >= IOAPIC_IRQ_COUNT {
         dbg_assert!(false, "Bad irq: {}", i);
         return;
@@ -166,7 +222,7 @@ fn set_irq_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, i: u8) {
 
         ioapic.irr |= mask;
 
-        check_irq(ioapic, apic, i);
+        check_irq(ioapic, i);
     }
 }
 
@@ -229,12 +285,12 @@ fn read32_internal(ioapic: &mut Ioapic, addr: u32) -> u32 {
                 }
             },
             reg => {
-                dbg_assert!(false, "IOAPIC register read outside of range {:x}", reg);
+                dbg_log!("IOAPIC register read outside of range {:x}", reg);
                 0
             },
         },
         _ => {
-            dbg_assert!(false, "Unaligned or oob IOAPIC memory read: {:x}", addr);
+            dbg_log!("Unaligned or oob IOAPIC memory read: {:x}", addr);
             0
         },
     }
@@ -244,14 +300,14 @@ pub fn write32(addr: u32, value: u32) {
     if unsafe { !*acpi_enabled } {
         return;
     }
-    write32_internal(&mut get_ioapic(), &mut apic::get_apic(), addr, value)
+    write32_internal(&mut get_ioapic(), addr, value)
 }
 
-fn write32_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, addr: u32, value: u32) {
+fn write32_internal(ioapic: &mut Ioapic, addr: u32, value: u32) {
     //dbg_log!("IOAPIC write {:x} <- {:08x}", reg, value);
 
     match addr {
-        IOREGSEL => ioapic.ioregsel = value,
+        IOREGSEL => ioapic.ioregsel = value & 0xFF,
         IOWIN => match ioapic.ioregsel {
             0 => ioapic.ioapic_id = (value >> 24) & 0x0F,
             1 | 2 => {
@@ -269,6 +325,7 @@ fn write32_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, addr: u32, value
                         value >> 24
                     );
                     ioapic.ioredtbl_destination[irq as usize] = value & 0xFF000000;
+                    check_irq(ioapic, irq);
                 }
                 else {
                     let old_value = ioapic.ioredtbl_config[irq as usize] as u32;
@@ -292,25 +349,39 @@ fn write32_internal(ioapic: &mut Ioapic, apic: &mut apic::Apic, addr: u32, value
                             disabled
                         );
 
-                    check_irq(ioapic, apic, irq);
+                    check_irq(ioapic, irq);
                 }
             },
             reg => {
-                dbg_assert!(
-                    false,
+                dbg_log!(
                     "IOAPIC register write outside of range {:x} <- {:x}",
                     reg,
                     value
-                )
+                );
             },
         },
         _ => {
-            dbg_assert!(
-                false,
+            dbg_log!(
                 "Unaligned or oob IOAPIC memory write: {:x} <- {:x}",
                 addr,
                 value
-            )
+            );
         },
+    }
+}
+
+/// The legacy PIC's INTR output is connected to IOAPIC input 0. Querying its
+/// ExtINT route is side-effect free, so IF=0/HLT cannot acknowledge the 8259.
+pub fn pic_destination() -> Option<(u8, u8)> {
+    let ioapic = get_ioapic();
+    let config = ioapic.ioredtbl_config[0];
+    if config & IOAPIC_CONFIG_MASKED == 0 && (config >> 8) & 7 == IOAPIC_DELIVERY_EXTINT as u32 {
+        Some((
+            (ioapic.ioredtbl_destination[0] >> 24) as u8,
+            ((config >> 11) & 1) as u8,
+        ))
+    }
+    else {
+        None
     }
 }

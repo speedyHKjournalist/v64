@@ -94,6 +94,31 @@ function create_struct(struct)
     });
 }
 
+/**
+ * Why a direct-boot ELF image cannot be loaded (only 32-bit little-endian
+ * i386 executables can), or null.
+ * @param {ArrayBuffer} buffer
+ */
+export function elf_unsupported_reason(buffer)
+{
+    if(buffer.byteLength < 52) return "truncated header";
+    const view = new DataView(buffer);
+    if(view.getUint32(0, true) !== ELF_MAGIC) return "bad magic";
+    // 1, 2 in EI_CLASS: 32 or 64 bit
+    if(view.getUint8(4) === 2) return "64-bit ELF (x86-64 kernels boot from a BIOS disk or ISO, or through a 32-bit multiboot entry)";
+    if(view.getUint8(4) !== 1) return "unknown ELF class";
+    if(view.getUint8(5) !== 1) return "big endian";
+    if(view.getUint8(6) !== 1 || view.getUint32(20, true) !== 1) return "bad version";
+    // 1, 2, 3, 4 specify whether the object is relocatable, executable,
+    // shared, or core, respectively.
+    if(view.getUint16(16, true) !== 2) return "not an executable";
+    // EM_386
+    if(view.getUint16(18, true) !== 3) return "not an i386 image (machine " + view.getUint16(18, true) + ")";
+    if(view.getUint16(40, true) !== 52 || view.getUint16(42, true) !== 32 ||
+        view.getUint16(46, true) !== 40 && view.getUint16(48, true) !== 0) return "bad header sizes";
+    return null;
+}
+
 /** @param {ArrayBuffer} buffer */
 export function read_elf(buffer)
 {
@@ -110,21 +135,8 @@ export function read_elf(buffer)
         }
     }
 
-    console.assert(header.magic === ELF_MAGIC, "Bad magic");
-    console.assert(header.class === 1, "Unimplemented: 64 bit elf");
-    console.assert(header.data === 1, "Unimplemented: big endian");
-    console.assert(header.version0 === 1, "Bad version0");
-
-    // 1, 2, 3, 4 specify whether the object is relocatable, executable,
-    // shared, or core, respectively.
-    console.assert(header.type === 2, "Unimplemented type");
-
-    console.assert(header.version1 === 1, "Bad version1");
-
-    // these are different in 64 bit
-    console.assert(header.ehsize === 52, "Bad header size");
-    console.assert(header.phentsize === 32, "Bad program header size");
-    console.assert(header.shentsize === 40, "Bad section header size");
+    const reason = elf_unsupported_reason(buffer);
+    if(reason) throw new Error("Unsupported ELF image: " + reason);
 
     const [program_headers, ph_offset] = read_structs(
         view_slice(view, header.phoff, header.phentsize * header.phnum),

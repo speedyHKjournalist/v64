@@ -191,9 +191,7 @@ pub unsafe fn ir_memory_check(address: u32, bytes: u32, write: u32) -> u32 {
 /// No arithmetic or register write occurs in this adapter. HIR guards own the
 /// divide conditions; this adapter owns exactly one real CPU #DE delivery.
 #[no_mangle]
-pub unsafe fn ir_divide_fault() {
-    cpu::trigger_de();
-}
+pub unsafe fn ir_divide_fault() { cpu::trigger_de(); }
 
 /// Compatibility for the pinned ENTER16 frame push. RAM truncates to a word,
 /// but safe_write16 passes the full value to same-page MMIO. Its debug assertion
@@ -208,8 +206,9 @@ pub unsafe fn ir_memory_write_unmasked_word(address: u32, value: u32, bytes: u32
 }
 
 /// Eight-byte conditional exchange with the interpreter's preflight/read/write
-/// stages. Reads compare/replacement registers after device reads. No write on
-/// mismatch; a later read/write fault retains the original unwrap-abort policy.
+/// stages. Reads compare/replacement registers after device reads. A mismatch
+/// still writes the old operand back, as required by the architectural bus
+/// contract; permission checks precede every device side effect.
 #[no_mangle]
 pub unsafe fn ir_cmpxchg8b(address: u32) -> u32 {
     if cpu::writable_or_pagefault(address as i32, 8).is_err() {
@@ -225,6 +224,7 @@ pub unsafe fn ir_cmpxchg8b(address: u32) -> u32 {
     }
     else {
         *gp::flags &= !cpu::FLAG_ZERO;
+        cpu::safe_write64(address as i32, value).unwrap();
         cpu::write_reg32(0, value as i32);
         cpu::write_reg32(2, (value >> 32) as i32);
     }
