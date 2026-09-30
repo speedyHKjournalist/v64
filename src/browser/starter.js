@@ -118,10 +118,6 @@ export function V86(options)
 
     if(options["cpu_worker"] && typeof Worker !== "undefined")
     {
-        if(this.device_plugins.length)
-        {
-            throw new Error("graphics_proxy cannot be combined with cpu_worker yet");
-        }
         this.worker_controller = new CPUWorkerController(this, options);
         this.continue_init(null, options).catch(error => this.worker_controller.fail(error));
         return;
@@ -477,7 +473,10 @@ V86.prototype.continue_init = async function(emulator, options)
     const plugin_devices = [];
     for(const plugin of this.device_plugins)
     {
-        const channel = create_local_channel();
+        // With a CPU worker the device is made there, from the plugin's worker_script
+        const channel = this.worker_controller ?
+            { device: null, host: this.worker_controller.device_channel(plugin["name"]) } :
+            create_local_channel();
         let screen = null;
         if(plugin["wants_screen"])
         {
@@ -496,7 +495,7 @@ V86.prototype.continue_init = async function(emulator, options)
         }
         try
         {
-            plugin_devices.push(plugin["create_device"](channel.device));
+            if(!this.worker_controller) plugin_devices.push(plugin["create_device"](channel.device));
             this.plugins_ready.push(Promise.resolve(
                 plugin["start"]({ "emulator": this, "screen": screen, "channel": channel.host })));
         }

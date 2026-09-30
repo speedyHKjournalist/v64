@@ -1,8 +1,8 @@
 # Graphics proxy as a plugin: implementation plan
 
-Branch `v86gl`. Status (2026-09-30): Phases 1 and 2 implemented; Phase 3
-(CPU worker) next. Performance measurements (Phase 0 bench, 3DMark06) are
-deferred until a 3DMark06 state is available. See "Deviations" at the end.
+Branch `v86gl`. Status (2026-09-30): Phases 1 to 3 implemented; Phase 4
+(retro-gaming-site) next. Performance measurements (Phase 0 bench, 3DMark06)
+are deferred until a 3DMark06 state is available. See "Deviations" at the end.
 
 ## Why
 
@@ -444,6 +444,15 @@ Where the implementation differs from the plan above:
   `has_request` checks the rings and `pop_request` checks every buffer.
   Anything else, such as a reply buffer in VGA memory, makes the driver reset
   the device, as `v86gl_pci.js` did.
+- **`busy` and `idle` for draining the worker.** Before a save or restore the
+  CPU worker controller waits, until nothing changes, for every plugin's
+  `idle()` on the page and for the devices' `busy()` counts to reach 0 in the
+  worker. `busy` is an optional descriptor hook of the generic layer. Host
+  states cross the thread boundary as arguments and results of the
+  save/restore RPCs; the `init` RPC returns those of `initial_state`.
+- **Renderer errors across the worker no longer kill the emulator.** Before,
+  they failed the whole CPU worker. Now the plugin reports them (`onError`)
+  and tells the device that nothing renders, as it does on the main thread.
 - **Port reads are normalized.** Configuration-space reads are made int32, or
   masked to the field's width, so descriptors return plain numbers.
 

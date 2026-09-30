@@ -13,7 +13,7 @@ try {
         wasm_path: "../../build/v86.wasm", bios: { url: "../../build/cpu-worker-test.bin" },
         memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
         disable_keyboard: true, disable_mouse: true, disable_speaker: true,
-        net_device: { type: "none" }, autostart: true, graphics_adapter: globalThis.installV86GLGraphicsAdapter });
+        net_device: { type: "none" }, autostart: true, graphics_proxy: true });
     await Promise.race([new Promise((resolve,reject) => { vm.add_listener("emulator-loaded",resolve); vm.add_listener("emulator-error",reject); }), sleep(15000).then(()=>{throw new Error("startup timeout");})]);
     const word = async a => new DataView((await vm.read_memory(a,4)).buffer).getUint32(0,true);
     const wait = async test => { const end=performance.now()+10000; while(!await test()) { if(performance.now()>end) throw new Error("guest timeout"); await sleep(5); } };
@@ -86,7 +86,7 @@ try {
     await vm.write_memory(wrapped,0x100020);
     await request(2,0,32+wrapped.length);
     await vm.stop();
-    const bridge=vm.graphics_adapter;
+    const bridge=vm.graphics_proxy.bridge;
     check(!bridge.failed && !bridge.d3d9Executor.failed,"real WebGPU D3D9 worker batch executes");
     const color=async()=>{
         await bridge.waitForIdle(false);

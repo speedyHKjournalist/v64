@@ -234,6 +234,10 @@
             notify() {
                 processQueue();
             },
+            // Batches the renderer has not acknowledged yet
+            busy() {
+                return inflight.size;
+            },
             reset() {
                 releaseArena();
                 lastFrameId = lastBytes = submitCount = 0;

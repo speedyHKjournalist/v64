@@ -160,6 +160,40 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     await plugin.destroy();
     assert.deepEqual(toDevice.at(-1), { type: "available", value: false });
 
+    // Across threads: one batch at a time, acknowledged when the renderer is done
+    const r = fixture();
+    const toRemote = [];
+    let fromRemote = null;
+    const remote = V86GraphicsProxy({ glExecutor: r.options.glExecutor, d3d8Executor: r.options.d3d8Executor,
+        d3d9Executor: r.options.d3d9Executor });
+    await remote.start({ emulator: r.emulator, channel: { remote: true, post: (m, transfer) => toRemote.push([m, transfer]),
+        listen: handler => { fromRemote = handler; } }, screen: { canvas: r.screen, set_backend() {}, fallback() {}, is_graphical: () => true } });
+    const order = [];
+    let finish;
+    remote.bridge.pushPCIBatch = event => { order.push("push " + event.frameId); remote.lastEvent = event; };
+    remote.bridge.waitForSubmittedBatches = () => new Promise(resolve => { finish = resolve; });
+    const batch = (id, frameId) => fromRemote({ type: "batch", id, generation: 1, frameId, flags: 0, commandCount: 1,
+        descAddr: 0, descLen: 33, batchAddr: 32, responseBase: 0, submitCount: id, bytes: new Uint8Array([id]) });
+    batch(1, 10);
+    batch(2, 11);
+    assert.deepEqual(remote.stats, { graphics_batches: 2, graphics_bytes: 2, graphics_pending: 2, graphics_peak_pending: 2 });
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(order, ["push 10"], "the second batch waits for the first");
+    const buffer = new Uint8Array([9, 9]);
+    remote.lastEvent.writeGuestMemory(8, buffer);
+    const [write, transfer] = toRemote.at(-1);
+    assert.notEqual(write.bytes.buffer, buffer.buffer, "a readback crosses the thread as a copy");
+    assert.deepEqual(transfer, [write.bytes.buffer]);
+    finish();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(toRemote.some(([m]) => m.type === "done" && m.id === 1));
+    assert.deepEqual(order, ["push 10", "push 11"]);
+    finish();
+    await remote.idle();
+    assert.ok(toRemote.some(([m]) => m.type === "done" && m.id === 2));
+    assert.equal(remote.stats.graphics_pending, 0);
+    await remote.destroy();
+
     // Without WebGPU the device hears that nothing renders
     const q = fixture({ webgpu: false });
     const toFailedDevice = [];

@@ -280,7 +280,7 @@ function check_descriptor(descriptor, names)
     }
 
     if(typeof descriptor["notify"] !== "function") fail("notify must be a function");
-    for(const hook of ["init", "reset", "get_state", "set_state", "upgrade_state"])
+    for(const hook of ["init", "reset", "busy", "get_state", "set_state", "upgrade_state"])
     {
         if(descriptor[hook] !== undefined && typeof descriptor[hook] !== "function")
         {
@@ -598,6 +598,16 @@ VirtioDevice.prototype.write_memory = function(bytes, address)
             " (" + bytes.length + " bytes) is not guest RAM");
     }
     this.cpu.write_blob_physical(bytes, address);
+};
+
+/**
+ * What the device still waits for from its host side (its optional busy hook):
+ * a snapshot needs none
+ */
+VirtioDevice.prototype.busy = function()
+{
+    const busy = this.descriptor["busy"];
+    return busy ? busy() : 0;
 };
 
 /**

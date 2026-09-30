@@ -1,5 +1,6 @@
 <!doctype html><meta charset="utf-8"><title>CPU Worker integration</title>
 <div id="screen"><div></div><canvas></canvas></div><pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
 <script type="module">
 import { V86 } from "../../build/libv86.mjs";
 import { WorkerPerformanceRecorder } from "../../src/browser/cpu_worker.js";
@@ -14,24 +15,30 @@ const u32 = n => [n&255,n>>>8&255,n>>>16&255,n>>>24&255];
 let vm;
 try {
     let pending = Promise.resolve(), lastEvent, batches = 0, delay = 0, restored;
-    const fakeGraphics = emulator => {
-        emulator.add_listener("v86gl-pci-frame", e => {
-            lastEvent = e; e.handled = true; ++batches;
-            const n = batches;
-            pending = pending.then(async () => { await sleep(delay); e.writeGuestMemory(4096, Uint8Array.of(n)); });
-        });
-        return { ready: Promise.resolve(), waitForSubmittedBatches: () => pending,
+    // The real graphics proxy (device, channel, worker relay) with a slow fake
+    // renderer: each batch answers with a delayed readback of its number
+    const fakeBridge = (emulator, options) => {
+        options.screenBackend.fallback(); // it does not draw the screen
+        return { ready: Promise.resolve(), failed: null,
+            pushPCIBatch(e) {
+                lastEvent = e; ++batches;
+                const n = batches;
+                pending = pending.then(async () => { await sleep(delay); e.writeGuestMemory(4096, Uint8Array.of(n)); });
+            },
+            waitForSubmittedBatches: () => pending,
             waitForIdle: () => pending, prepareSaveState: () => pending,
             serializeCheckpoint: () => Uint8Array.of(1,2,3,4), releaseCheckpoint() {},
             beginStateRestore() {}, onPCIStateRestored: data => { restored = data; },
             finishStateRestore() {}, cancelStateRestore() {}, screenChanged() {}, destroy() {}, reset() {},
+            makeScreenshot: () => null,
         };
     };
+    const fakeGraphics = { createBridge: fakeBridge };
     vm = new V86({ cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
         wasm_path: corePath, ...jitOptions, bios: { url: "../../build/cpu-worker-test.bin" },
         memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
         disable_keyboard: !irBackend, disable_mouse: !irBackend, disable_speaker: true,
-        filesystem: {}, net_device: { type: "none" }, autostart: true, graphics_adapter: fakeGraphics });
+        filesystem: {}, net_device: { type: "none" }, autostart: true, graphics_proxy: fakeGraphics });
     await Promise.race([new Promise((resolve,reject) => { vm.add_listener("emulator-loaded",resolve); vm.add_listener("emulator-error",reject); }), sleep(15000).then(()=>{throw new Error("startup timeout");})]);
     const assertIRBackend = async label => {
         if(!irBackend) return;
@@ -152,7 +159,7 @@ try {
     await program(burst);
     const saved = await vm.save_state(); // Must wait for delayed GPU write.
     check((await vm.read_memory(0x101000,1))[0]===13,"save drains GPU readback into worker-owned RAM");
-    check(vm.worker_controller.stats.graphics_peak_pending<=8 && vm.worker_controller.stats.graphics_peak_pending>1,"graphics backpressure bounds outstanding batches without loss");
+    check(vm.graphics_proxy.stats.graphics_peak_pending<=8 && vm.graphics_proxy.stats.graphics_peak_pending>1,"graphics backpressure bounds outstanding batches without loss");
     const oldWrite=lastEvent.writeGuestMemory, oldEpoch=vm.worker_controller.epoch;
     await vm.write_memory(Uint8Array.of(99),0x101000);
     await vm.restore_state(saved);
@@ -186,7 +193,7 @@ try {
     vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:state2},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
-        filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
+        filesystem:{},net_device:{type:"none"},graphics_proxy:fakeGraphics,autostart:false});
     await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
     await assertIRBackend("restored Worker");
     check(!vm.is_running(),"initial-state load preserves requested stopped mode");
@@ -195,7 +202,7 @@ try {
     vm=new V86({wasm_path: corePath, ...jitOptions,bios:{url:"../../build/cpu-worker-test.bin"},
         memory_size:32<<20,screen:{container:document.getElementById("screen")},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
-        filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
+        filesystem:{},net_device:{type:"none"},graphics_proxy:fakeGraphics,autostart:false});
     await new Promise(r=>vm.add_listener("emulator-loaded",r));
     await assertIRBackend("main-thread restore");
     await vm.restore_state(state2);
@@ -204,7 +211,7 @@ try {
     vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:legacy},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
-        filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
+        filesystem:{},net_device:{type:"none"},graphics_proxy:fakeGraphics,autostart:false});
     await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
     await assertIRBackend("cross-mode Worker restore");
     check((await vm.read_memory(0x101000,1))[0]===13,"worker mode loads a main-thread snapshot");

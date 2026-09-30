@@ -32,6 +32,12 @@ new V86({
 
 In `index.html` or `debug.html`, enable **Enable graphics proxy (WebGPU)**.
 
+With `cpu_worker: true` the device runs in the CPU worker, which loads it from
+`v86gl-device.js` beside `libv86-webgpu.js` (`make glbridge` builds both;
+deploy them together, or pass `graphics_proxy: { workerScript }`). Across the
+worker boundary at most 8 batches (32 MiB) are in flight; the guest waits for
+the renderer beyond that.
+
 ## 2. Get the driver and DLLs
 
 Sources and binaries are in

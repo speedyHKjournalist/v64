@@ -772,6 +772,8 @@ export interface VirtioDeviceDescriptor {
     notify(queue: number): void;
     /** The driver reset the device, or the machine reset. */
     reset?(): void;
+    /** Work the device still waits for from elsewhere (0 when none); saving waits for 0. */
+    busy?(): number;
     /** Synchronous. Numbers, strings, arrays and typed arrays only (no plain objects). */
     get_state?(): unknown;
     set_state?(state: unknown): void;

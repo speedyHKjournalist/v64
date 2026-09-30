@@ -24,6 +24,18 @@
         }
     }
 
+    // Where this bundle was loaded from: a CPU worker loads the device from
+    // beside it (build/glbridge/v86gl-device.js, the same revision)
+    const bundleScript = typeof document !== "undefined" && document.currentScript ?
+        document.currentScript.src : null;
+
+    function defaultWorkerScript() {
+        if (!bundleScript) return undefined;
+        const url = new URL("v86gl-device.js", bundleScript);
+        url.search = new URL(bundleScript).search;
+        return url.href;
+    }
+
     function reportUnavailable(options, error) {
         if (typeof options.onError === "function") options.onError(error);
         else console.error("[v86gl] graphics unavailable; VGA remains active", error);
@@ -178,6 +190,8 @@
      */
     function V86GraphicsProxy(options) {
         options = { ...(options || {}) };
+        // (tests replace the WebGPU renderer)
+        const createBridge = options.createBridge || createGraphicsBridge;
         const createDevice = global.V86VirtioDeviceFactories && global.V86VirtioDeviceFactories.v86gl;
         if (typeof createDevice !== "function")
             throw new Error("graphics_proxy: v86gl_device.js is missing; load the whole libv86-webgpu.js");
@@ -187,6 +201,9 @@
         // Bumped whenever the guest's timeline is replaced: readbacks of
         // batches from before are dropped
         let epoch = 0;
+        // Across threads batches are handled one at a time
+        let work = Promise.resolve();
+        const stats = { graphics_batches: 0, graphics_bytes: 0, graphics_pending: 0, graphics_peak_pending: 0 };
 
         const setAvailable = value => {
             if (!channel || available === value) return;
@@ -197,7 +214,7 @@
         const onBatch = message => {
             const batchEpoch = epoch;
             const generation = message.generation;
-            bridge.pushPCIBatch({
+            const event = {
                 frameId: message.frameId,
                 flags: message.flags,
                 commandCount: message.commandCount,
@@ -215,8 +232,28 @@
                     channel.post({ type: "write", generation, offset, bytes: data },
                         channel.remote ? [data.buffer] : undefined);
                 },
+            };
+            if (!channel.remote) {
+                bridge.pushPCIBatch(event);
+                channel.post({ type: "done", id: message.id });
+                return;
+            }
+            // Acknowledged once the renderer is done with it, readbacks
+            // included: the device holds the guest back while the renderer is behind
+            ++stats.graphics_batches;
+            stats.graphics_bytes += message.bytes.byteLength;
+            stats.graphics_peak_pending = Math.max(stats.graphics_peak_pending, ++stats.graphics_pending);
+            work = work.then(async () => {
+                if (batchEpoch !== epoch) return;
+                bridge.pushPCIBatch(event);
+                await bridge.waitForSubmittedBatches();
+            }).catch(error => {
+                reportUnavailable(options, error);
+                setAvailable(false);
+            }).then(() => {
+                --stats.graphics_pending;
+                if (batchEpoch === epoch) channel.post({ type: "done", id: message.id });
             });
-            channel.post({ type: "done", id: message.id });
         };
 
         const plugin = {
@@ -225,7 +262,11 @@
             wants_screen: true,
             // For diagnostics (graphics_performance.js, performance_recorder.js)
             bridge: null,
+            // Batches across the CPU worker boundary
+            stats,
             create_device: deviceChannel => createDevice(deviceChannel),
+            // The same device in a CPU worker (it defines V86VirtioDeviceFactories.v86gl)
+            worker_script: options.workerScript || defaultWorkerScript(),
             /*
              * context.screen: { canvas, set_backend, fallback, is_graphical };
              * context.channel: this side's end. Returns when the renderer is up
@@ -234,7 +275,7 @@
             start(context) {
                 const screen = context.screen;
                 channel = context.channel;
-                bridge = plugin.bridge = createGraphicsBridge(context.emulator, {
+                bridge = plugin.bridge = createBridge(context.emulator, {
                     ...options,
                     screenCanvas: screen.canvas,
                     screenBackend: { set: screen.set_backend, fallback: screen.fallback },
@@ -248,6 +289,10 @@
             },
             screen_changed() {
                 bridge.screenChanged();
+            },
+            // Settles when every batch received so far is acknowledged
+            idle() {
+                return work;
             },
             async prepare_save() {
                 await bridge.prepareSaveState();

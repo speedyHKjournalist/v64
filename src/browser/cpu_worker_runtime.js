@@ -8,12 +8,9 @@ import { DisplaySinkRecorder } from "../display.js";
 
 export function start_cpu_worker()
 {
-    let emulator, epoch = 1, next_batch = 0, recorder, checkpoint = null;
+    let emulator, epoch = 1, recorder;
     let screen_commands = [], screen_scheduled = false, frame_layers = [];
     let timer, command_chain = Promise.resolve();
-    const inflight = new Map();
-    const MAX_BATCHES = 8, MAX_BYTES = 32 * 1024 * 1024;
-    let inflight_bytes = 0;
     let audio_port = null, audio_reset_done = null, audio_enabled = false, audio_rate = 22050;
     let audio_sequence = 0;
     const audio_stats = { "pcm_buffers": 0, "pcm_samples": 0, "pump_requests": 0 };
@@ -57,36 +54,34 @@ export function start_cpu_worker()
         const cpu = emulator.v86.cpu;
         send("stats", { "value": { "instructions": emulator.get_instruction_counter(),
             "memory_size": cpu.memory_size[0], "cdrom": !!cpu.devices.cdrom,
-            "cdrom_present": !!cpu.devices.cdrom?.has_disk(),
-            "inflight_batches": inflight.size, "inflight_bytes": inflight_bytes } });
+            "cdrom_present": !!cpu.devices.cdrom?.has_disk() } });
     };
-    const graphics = event => {
-        const bytes = event["bytes"].slice();
-        const id = ++next_batch;
-        inflight.set(id, { write: event["writeGuestMemory"], valid: event["isMemoryValid"], bytes: bytes.byteLength });
-        inflight_bytes += bytes.byteLength;
-        event["handled"] = true;
-        const value = {};
-        for(const key of ["frameId", "flags", "commandCount", "descAddr", "descLen", "batchAddr", "responseBase", "submitCount"])
-            value[key] = event[key];
-        value["bytes"] = bytes;
-        send("graphics", { "id": id, "value": value }, [bytes.buffer]);
+    // The devices of device plugins (docs/graphics-proxy-plugin-plan.md): each
+    // talks to its host side on the page over these messages
+    const device_handlers = new Map();
+    const device_channel = name => ({
+        "remote": true,
+        "post": (message, transfer) => send("device", { "name": name, "message": message }, transfer || []),
+        "listen": handler => { device_handlers.set(name, handler); },
+    });
+    const virtio_devices = () => emulator?.v86?.cpu?.devices?.virtio_devices || [];
+    // What the devices still wait for from the page; a snapshot needs none
+    const busy = () => virtio_devices().reduce((n, device) => n + device.busy(), 0);
+    // Host states travel in the snapshot with their devices
+    const set_host_states = states => {
+        for(const device of virtio_devices()) device.host_state = states ? states[device.name] : undefined;
     };
-    const setup_cpu = () => {
-        const pci = emulator.v86.cpu.devices.v86gl_pci;
-        if(pci)
+    const take_host_states = () => {
+        const states = {};
+        for(const device of virtio_devices())
         {
-            pci.can_accept = () => inflight.size < MAX_BATCHES && inflight_bytes <= MAX_BYTES - pci.maxBatchBytes;
-            pci.graphics_state_handlers = {
-                save: () => checkpoint,
-                restore: value => send("checkpoint", { "value": value }),
-            };
+            if(device.restored_host_state !== undefined) states[device.name] = device.restored_host_state;
+            device.restored_host_state = undefined;
         }
+        return states;
     };
     const change_epoch = async () => {
         ++epoch;
-        inflight.clear();
-        inflight_bytes = 0;
         screen_commands = [];
         send("epoch");
         await audio_reset();
@@ -134,12 +129,22 @@ export function start_cpu_worker()
             };
             // No network or DOM adapters here. Those connect through the bus.
             options.modem = undefined;
+            const plugins = options["device_plugins"] || [];
+            for(const plugin of plugins) globalThis.importScripts(plugin["script"]);
+            options["virtio_devices"] = plugins.map(plugin => {
+                const factories = globalThis["V86VirtioDeviceFactories"];
+                const create = factories && factories[plugin["name"]];
+                if(typeof create !== "function")
+                {
+                    throw new Error("CPU Worker: " + plugin["script"] + " defines no device " + plugin["name"]);
+                }
+                return create(device_channel(plugin["name"]));
+            });
             options["worker_bus_setup"] = instance => {
                 emulator = instance;
                 const original = instance.emulator_bus.send.bind(instance.emulator_bus);
                 instance.emulator_bus.send = (name, value, transfer) => {
-                    if(name === "v86gl-pci-frame") { if(options["graphics_available"]) graphics(value); return; }
-                    if(name === "emulator-ready") { setup_cpu(); stats(); }
+                    if(name === "emulator-ready") stats();
                     original(name, value, undefined);
                     if(name === "dac-send-data") { ++audio_stats["pcm_buffers"]; audio_stats["pcm_samples"] += value[0].length; }
                     if(name === "dac-tell-sampling-rate") audio_rate = value;
@@ -177,6 +182,8 @@ export function start_cpu_worker()
             flush_screen();
             stats();
             timer = setInterval(stats, 250);
+            // from initial_state
+            return take_host_states();
         },
         "audio-attach": async port => {
             audio_port = port;
@@ -199,29 +206,30 @@ export function start_cpu_worker()
         },
         "run": () => emulator.run(),
         "stop": async () => { await emulator.stop(); flush_screen(); stats(); },
-        "barrier": () => inflight.size,
-        "save": async value => {
-            if(emulator.is_running() || inflight.size) throw new Error("Save requires a drained, stopped CPU");
-            checkpoint = value;
+        "barrier": () => busy(),
+        "save": async host_states => {
+            if(emulator.is_running() || busy()) throw new Error("Save requires a drained, stopped CPU");
+            set_host_states(host_states);
             try { return await emulator.save_state(); }
-            finally { checkpoint = null; }
+            finally { set_host_states(null); }
         },
         "restore": async state => {
-            if(emulator.is_running() || inflight.size) throw new Error("Restore requires a drained, stopped CPU");
+            if(emulator.is_running() || busy()) throw new Error("Restore requires a drained, stopped CPU");
             await change_epoch();
             await emulator.restore_state(state);
             await audio_reset();
             flush_screen(); stats();
+            return take_host_states();
         },
-        "save-stream": async (value, port) => {
-            if(emulator.is_running() || inflight.size) throw new Error("Save requires a drained, stopped CPU");
+        "save-stream": async (host_states, port) => {
+            if(emulator.is_running() || busy()) throw new Error("Save requires a drained, stopped CPU");
             const stream = state_stream_client(port);
-            checkpoint = value;
+            set_host_states(host_states);
             try { await emulator.save_state_stream(stream["write"]); }
-            finally { checkpoint = null; stream["close"](); }
+            finally { set_host_states(null); stream["close"](); }
         },
         "restore-stream": async (size, port) => {
-            if(emulator.is_running() || inflight.size) throw new Error("Restore requires a drained, stopped CPU");
+            if(emulator.is_running() || busy()) throw new Error("Restore requires a drained, stopped CPU");
             const stream = state_stream_client(port);
             try
             {
@@ -229,6 +237,7 @@ export function start_cpu_worker()
                 await emulator.restore_state_stream({ "size": size, "read": stream["read"] });
                 await audio_reset();
                 flush_screen(); stats();
+                return take_host_states();
             }
             finally { stream["close"](); }
         },
@@ -295,17 +304,9 @@ export function start_cpu_worker()
                     send("frame", { "layers": frame_layers }, frame_layers.map(l => l["pixels"].buffer));
                     frame_layers = [];
                     break;
-                case "gpu-write": {
-                    const b = inflight.get(m["id"]);
-                    if(b?.valid()) b.write(m["offset"], m["bytes"]);
-                    break;
-                }
-                case "gpu-done": {
-                    const b = inflight.get(m["id"]);
-                    if(!b) break;
-                    inflight_bytes -= b.bytes;
-                    inflight.delete(m["id"]);
-                    emulator.v86.cpu.devices.v86gl_pci?.notify(0);
+                case "device": {
+                    const handler = device_handlers.get(m["name"]);
+                    if(handler) handler(m["message"]);
                     break;
                 }
             }
