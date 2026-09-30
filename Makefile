@@ -490,6 +490,7 @@ api-tests: build/v86-debug.wasm
 	./tests/api/clean-shutdown.js
 	./tests/api/destroy-during-init.js
 	./tests/api/state.js
+	./tests/api/sb16-state.js
 	./tests/api/reset.js
 	./tests/api/floppy.js
 	./tests/api/parallel.js
