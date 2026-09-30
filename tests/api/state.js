@@ -98,7 +98,28 @@ async function run_test(name, config, done)
     emulator.destroy();
 }
 
+// Before the BIOS has enumerated PCI (there is none here), the IDE controller
+// of a machine without a primary drive reports I/O BARs for the holes in its
+// pci_bars
+async function run_test_before_pci_enumeration()
+{
+    const emulator = new V86({
+        bios: { buffer: new Uint8Array(0x10000).fill(0xF4).buffer },
+        memory_size: 16 * 1024 * 1024,
+        autostart: false,
+        log_level: 0,
+    });
+    await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
+
+    console.log("Saving and restoring: before PCI enumeration");
+    await emulator.restore_state(await emulator.save_state());
+
+    console.log("Done: before PCI enumeration");
+    emulator.destroy();
+}
+
 (async function() {
+    await run_test_before_pci_enumeration();
     await run_test("async cdrom", config_async_cdrom);
     await run_test("sync cdrom", config_sync_cdrom);
     await run_test("filesystem", config_filesystem);
