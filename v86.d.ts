@@ -368,6 +368,13 @@ export interface V86Options {
     }) => V86GraphicsAdapter;
     graphics_options?: V86GraphicsOptions;
     /**
+     * Custom virtio devices. v86 provides the PCI function, the virtqueues,
+     * the interrupt and the transport's part of a snapshot; the descriptor
+     * implements the device. Descriptors run on the CPU's thread, so they
+     * cannot be combined with cpu_worker.
+     */
+    virtio_devices?: VirtioDeviceDescriptor[];
+    /**
      * Reference to the v86 wasm exported function.
      */
     wasm_fn?: (options: WebAssembly.Imports) => Promise<WebAssembly.Exports>;
@@ -738,6 +745,71 @@ export interface V86Options {
      * @default false
      */
     parallel1?: boolean;
+}
+
+/** A custom virtio device (see V86Options.virtio_devices). */
+export interface VirtioDeviceDescriptor {
+    /** Unique among the devices; the key of the device's part of a snapshot. */
+    name: string;
+    /** PCI device ID; the vendor is always 0x1AF4. */
+    device_id: number;
+    subsystem_device_id?: number;
+    /** PCI slot (1-31). A stable slot keeps the guest's device instance. Default: the first free slot from 0x10. */
+    pci_slot?: number;
+    /** Base of four 256-byte I/O windows (256-byte aligned). Default: allocated from 0xE000. */
+    io_base?: number;
+    /** Device feature bits; VIRTIO_F_VERSION_1 (32) is added. */
+    features?: number[];
+    /** Queue sizes (powers of two). */
+    queues: { size: number }[];
+    /** Device-specific configuration space, at most 256 bytes. */
+    config?: { bytes: 1 | 2 | 4; name?: string; read(): number; write?(value: number): void }[];
+    /** Called once with the handle, after the PCI function exists. */
+    init?(device: VirtioDeviceHandle): void;
+    /** The driver notified a queue. Only called after DRIVER_OK. */
+    notify(queue: number): void;
+    /** The driver reset the device, or the machine reset. */
+    reset?(): void;
+    /** Synchronous. Numbers, strings, arrays and typed arrays only (no plain objects). */
+    get_state?(): unknown;
+    set_state?(state: unknown): void;
+    /**
+     * Recognize state[92] of a snapshot from before custom devices; return
+     * [transport state, device state, host state], or null.
+     */
+    upgrade_state?(slot: unknown): [unknown, unknown, unknown] | null;
+}
+
+/** A request popped from a virtqueue. */
+export interface VirtioRequest {
+    /** Bytes the driver wrote for the device. */
+    readable: number;
+    /** Bytes the device may write back. */
+    writable: number;
+    read(): Uint8Array;
+    /** Returns the number of bytes written. */
+    write(bytes: Uint8Array): number;
+    /** Hand the request back (staged until flush). No effect after a reset or restore. */
+    complete(): void;
+}
+
+/** What a VirtioDeviceDescriptor gets from v86. */
+export interface VirtioDeviceHandle {
+    name: string;
+    /** DRIVER_OK is set and neither side failed. */
+    is_ready(): boolean;
+    has_request(queue: number): boolean;
+    pop_request(queue: number): VirtioRequest | null;
+    /** Publish completed requests and raise the interrupt. */
+    flush(queue: number): void;
+    /** Guest RAM, not a device window, a hole or the legacy VGA/ROM range. */
+    is_ram(address: number, length: number): boolean;
+    /** A view when one contiguous backing holds the range, a copy otherwise. Throws a RangeError for non-RAM. */
+    read_memory(address: number, length: number): Uint8Array;
+    write_memory(bytes: Uint8Array, address: number): void;
+    is_feature_negotiated(bit: number): boolean;
+    needs_reset(): void;
+    config_changed(): void;
 }
 
 /** Optional browser graphics bundle's lifecycle interface. */

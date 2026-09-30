@@ -18,6 +18,7 @@ export function encode_worker_options(o)
     const file = encode_worker_file;
     const fs = o.filesystem;
     if(o.wasm_fn || fs?.handle9p) throw new Error("CPU Worker cannot transfer wasm_fn or handle9p callbacks");
+    if(o["virtio_devices"]?.length) throw new Error("CPU Worker cannot transfer virtio_devices; their descriptors run on the CPU's thread");
     return {
         "graphics_available": !!o["graphics_adapter"],
         "wasm_path": new URL(o.wasm_path || "build/v86.wasm", location.href).href,

@@ -334,6 +334,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.virtio_console = !!options.virtio_console;
     settings.v86gl_pci = options.v86gl_pci || (options["graphics_adapter"] ?
         { maxBatchBytes: 16 * 1024 * 1024 } : undefined);
+    settings.virtio_devices = options["virtio_devices"];
 
     const relay_url = options.network_relay_url || options.net_device && options.net_device.relay_url;
     if(relay_url)
