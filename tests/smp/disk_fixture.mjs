@@ -54,12 +54,35 @@ export class ReadOnlyOverlayDisk
         sectors.forEach((sector, i) => bytes.set(this.overlay.get(sector), i * 512));
         return [1, this.byteLength, Uint32Array.from(sectors), bytes];
     }
+    // Also takes the written-block cache of the browser's lazily loaded disks
+    // (AsyncXHRBuffer and friends in src/buffer.js: [[[block, 256 bytes], ...]]),
+    // so snapshots saved by a website restore here. Checked by hand: a failing
+    // node:assert comparison renders the whole value into a line diff whose cost
+    // is quadratic, and node is SIGKILLed with no output long before it throws.
     set_state(state)
     {
-        assert.equal(state[0], 1); assert.equal(state[1], this.byteLength);
-        assert.equal(state[2].length * 512, state[3].length);
-        this.overlay.clear();
-        state[2].forEach((sector, i) => this.overlay.set(sector, state[3].slice(i * 512, (i + 1) * 512)));
+        const fail = what => { throw new Error(`Snapshot state of disk (${this.byteLength} bytes) ${what}`); };
+        if(!Array.isArray(state)) fail("is not an array");
+        if(state[0] === 1)
+        {
+            if(state[1] !== this.byteLength) fail(`is for a disk of ${state[1]} bytes`);
+            if(!(state[2] instanceof Uint32Array) || !(state[3] instanceof Uint8Array) ||
+                state[2].length * 512 !== state[3].length) fail("has an invalid sector overlay");
+            this.overlay.clear();
+            state[2].forEach((sector, i) => this.overlay.set(sector, state[3].slice(i * 512, (i + 1) * 512)));
+        }
+        else if(state.length === 1 && Array.isArray(state[0]))
+        {
+            for(const entry of state[0])
+            {
+                if(!Array.isArray(entry) || !Number.isSafeInteger(entry[0]) || entry[0] < 0 ||
+                    (entry[0] + 1) * 256 > this.byteLength ||
+                    !(entry[1] instanceof Uint8Array) || entry[1].length !== 256) fail("has an invalid block cache entry");
+            }
+            this.overlay.clear();
+            for(const [block, bytes] of state[0]) this.set(block * 256, bytes);
+        }
+        else fail("has an unknown format (only an overlay or a browser block cache restore here)");
     }
     close() { fs.closeSync(this.fd); }
 }
@@ -74,7 +97,13 @@ export class MemoryDisk
     set(start, bytes, done) { this.bytes.set(bytes, start); done?.(); }
     get_buffer(done) { done(this.bytes.slice().buffer); }
     get_state() { return [this.byteLength, this.bytes]; }
-    set_state(state) { assert.equal(state[0], this.byteLength); this.bytes = state[1].slice(); }
+    set_state(state)
+    {
+        // (not assert.equal: see ReadOnlyOverlayDisk.set_state)
+        if(state[0] !== this.byteLength || !(state[1] instanceof Uint8Array) || state[1].length !== this.byteLength)
+            throw new Error(`Snapshot state does not fit this ${this.byteLength}-byte memory disk`);
+        this.bytes = state[1].slice();
+    }
 }
 
 // One MBR FAT16 partition, 16 MiB disk, 2 KiB clusters, 8.3 root files.

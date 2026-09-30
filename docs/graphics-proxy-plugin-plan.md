@@ -1,7 +1,9 @@
 # Graphics proxy as a plugin: implementation plan
 
-Branch `v86gl`. Status (2026-09-30): Phases 1 to 3 implemented; Phase 4
-(retro-gaming-site) next. Performance measurements (Phase 0 bench, 3DMark06)
+Branch `v86gl`. Status (2026-09-30): Phases 1 to 3 implemented. Phase 4
+(retro-gaming-site) waits until the site moves to a current build: the new
+graphics bundle needs the new libv86.js, and the site still ships the build
+of 2026-09-05/06. Phase 5 (upstream) is being prepared. Performance measurements (Phase 0 bench, 3DMark06)
 are deferred until a 3DMark06 state is available. See "Deviations" at the end.
 
 ## Why
