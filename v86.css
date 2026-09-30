@@ -192,22 +192,6 @@ input[type=number] {
 #terminal {
     max-width: 1024px;
 }
-.blink {
-    animation: blink 0.6s step-start infinite;
-}
-@keyframes blink {
-    50% {
-        color: transparent;
-    }
-}
-.blinking-cursor {
-    animation: blinking-cursor 0.6s step-start infinite;
-}
-@keyframes blinking-cursor {
-    50% {
-        background-color: transparent;
-    }
-}
 
 .gui_icon {
 	height: 1em;

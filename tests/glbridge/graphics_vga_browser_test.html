@@ -4,23 +4,25 @@
 <style>
     #screen { width: 800px; height: 600px; border: 5px solid black; padding: 12px;
         display: flex; align-items: center; justify-content: center; transform: scale(.75); transform-origin: top left; }
-    #screen canvas:not([data-v86-graphics]) { width: 640px !important; height: 480px !important; }
-    #screen.small canvas:not([data-v86-graphics]) { width: 320px !important; height: 240px !important; }
-    #screen.full canvas:not([data-v86-graphics]) { width: 800px !important; height: 600px !important; }
 </style>
-<div id="screen"><div></div><canvas data-v86-graphics style="display:none"></canvas><canvas id="vga"></canvas></div>
+<div id="screen"><div></div><canvas id="vga"></canvas></div>
 <pre id="result">RUNNING</pre>
 <script src="../../build/libv86.js"></script>
 <script src="../../build/glbridge/libv86-webgpu.js"></script>
 <script src="gl_stream_builder.js"></script>
 <script>
+// The graphics adapter end to end: the guest's VGA desktop and a GL window
+// in the one screen canvas (docs/display-design.md), frames
+// through the v86gl virtqueue, save/restore, restart and old snapshots.
 (async () => {
     const checks = [];
-    const check = (value, label) => { if (!value) throw new Error(label); checks.push(label); };
-    const near = (a, b, label) => check(Math.abs(a - b) < 1, label + ` (${a} vs ${b})`);
+    const check = (value, label) => {
+        if (!value) throw new Error(label);
+        checks.push(label);
+        document.getElementById("result").textContent = "RUNNING\n" + checks.join("\n");
+    };
     const container = document.getElementById("screen");
     const vga = document.getElementById("vga");
-    const earlyOverlay = container.querySelector("[data-v86-graphics]");
     const { GLStream, GL } = GLTestStream;
     const create = (initial_state, graphics = true) => new V86({
         wasm_path: "../../build/v86.wasm", memory_size: 32 * 1024 * 1024,
@@ -28,31 +30,35 @@
         screen_container: container, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" },
         graphics_adapter: graphics ? installV86GLGraphicsAdapter : undefined,
-        graphics_options: { graphicsCanvas: earlyOverlay },
         initial_state, autostart: false,
     });
     const loaded = emulator => new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
     let emulator = create();
     await loaded(emulator);
     const bridge = emulator.graphics_adapter;
+    const compositor = bridge.compositor;
+    const layers = () => compositor.layers;
     check(!bridge.failed, "graphics initialization succeeded");
-    check(bridge.screenCanvas === vga && vga.getContext("2d"), "VGA skips an earlier tagged overlay and keeps its 2D context");
-    check(bridge.canvas === earlyOverlay && earlyOverlay.getContext("webgpu"), "WebGPU uses the independent overlay");
-    check(bridge.glExecutor.device === bridge.d3d9Executor.device &&
-        bridge.d3d8Executor.device === bridge.d3d9Executor.device, "all executors share one GPUDevice");
-    check(bridge.canvas.style.display === "none", "text-mode boot has no graphics overlay");
+    check(compositor.canvas === vga && container.querySelectorAll("canvas").length === 1,
+        "the compositor owns the one screen canvas");
+    check(bridge.glExecutor.device === compositor.device && bridge.d3d9Executor.device === compositor.device &&
+        bridge.d3d8Executor.device === compositor.device, "all executors share the compositor's GPUDevice");
+    check(layers().every(layer => !layer.visible), "text-mode boot shows no window layer");
     const gpu = bridge.glExecutor.device;
     const errors = [];
     gpu.addEventListener("uncapturederror", event => errors.push(event.error.message));
     gpu.pushErrorScope("validation");
     const screen = emulator.screen_adapter;
-    screen.set_mode(true);
-    screen.set_size_graphical(640, 480, 640, 480);
-    const ctx = vga.getContext("2d");
-    ctx.fillStyle = "blue";
-    ctx.fillRect(0, 0, 640, 480);
-    // Exercise the same modern virtio queue ABI as v86gl.sys before rendering.
     const cpu = emulator.v86.cpu, io = cpu.io;
+    // The guest desktop: 640x480x32 through the Bochs VBE LFB, all blue
+    const dispi = (index, value) => { io.port_write16(0x1ce, index); io.port_write16(0x1cf, value); };
+    dispi(4, 0); dispi(1, 640); dispi(2, 480); dispi(3, 32); dispi(4, 0x41);
+    const vga_device = cpu.devices.vga;
+    new Uint32Array(vga_device.svga_memory.buffer, vga_device.svga_memory.byteOffset, 640 * 480).fill(0x000000ff);
+    cpu.mmio_ram_mark_dirty(vga_device.lfb_region);
+    cpu.devices.display.request_frame(true);
+    check(vga.width === 640 && vga.height === 480, "the canvas is the guest's mode");
+    // Exercise the same modern virtio queue ABI as v86gl.sys before rendering.
     const ram = cpu.read_blob(0, 32 * 1024 * 1024);
     const memory = new DataView(ram.buffer, ram.byteOffset, ram.byteLength);
     const table = 0x10000, avail = table + 128, used = table + 160;
@@ -91,17 +97,12 @@
     };
     draw();
     check(cpu.devices.v86gl_pci.submitCount === 1, "virtqueue submitted a real WebGPU frame");
-    const aligned = () => {
-        const base = vga.getBoundingClientRect(), overlay = bridge.canvas.getBoundingClientRect();
-        near(overlay.left, base.left + base.width * 100 / 640, "overlay X follows VGA through borders and ancestor scale");
-        near(overlay.top, base.top + base.height * 80 / 480, "overlay Y follows VGA");
-        near(overlay.width, base.width * 200 / 640, "overlay width follows VGA");
-        near(overlay.height, base.height * 120 / 480, "overlay height follows VGA");
-    };
-    aligned();
-    check(bridge.canvas.style.pointerEvents === "none", "overlay passes input through");
+    const gl = bridge.glCanvas.layer;
+    const placed = () => [gl.x, gl.y, gl.width, gl.height, gl.visible].join();
+    check(placed() === "100,80,200,120,true", "the GL window is a layer where the guest put it: " + placed());
+    await bridge.glExecutor.work;
     const screenshot = emulator.screen_make_screenshot();
-    await screenshot.decode();
+    if (!screenshot.complete) await new Promise((resolve, reject) => { screenshot.onload = resolve; screenshot.onerror = reject; });
     const capture = document.createElement("canvas");
     capture.width = 640; capture.height = 480;
     const captureContext = capture.getContext("2d");
@@ -109,14 +110,8 @@
     const pixel = (x, y) => Array.from(captureContext.getImageData(x, y, 1, 1).data);
     check(pixel(20, 20).join() === "0,0,255,255", "screenshot retains VGA outside the game window");
     check(pixel(150, 100).join() === "255,0,0,255", "screenshot composites WebGPU over VGA");
-    const tick = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    container.className = "small";
-    await tick(); aligned();
-    container.className = "full";
-    document.dispatchEvent(new Event("fullscreenchange"));
-    await tick(); aligned();
     emulator.screen_set_scale(2, 2);
-    aligned();
+    check(placed() === "100,80,200,120,true", "scaling the canvas cannot misalign a layer: it is in guest pixels");
     check(!!bridge.d3d9Executor.shaderWorker, "bundled D3D9 worker starts");
     const tokens = new Uint32Array([0xfffe0101, 1, 0xc00f0000, 0x90e40000, 0xffff]);
     const translated = await bridge.d3d9Executor.compileShaderInWorker(tokens);
@@ -128,16 +123,17 @@
     await emulator.restore_state(state);
     check(bridge.glJournalBytes === journalBytes && !bridge.restoringState, "restore awaits the graphics checkpoint");
     screen.set_mode(false);
-    check(bridge.canvas.style.display === "none", "text-mode transition hides stale game pixels");
+    check(layers().every(layer => !layer.visible), "text-mode transition hides stale game pixels");
     screen.set_mode(true);
-    check(bridge.canvas.style.display === "none", "VGA resumes before the next game Present");
+    check(layers().every(layer => !layer.visible), "the desktop resumes before the next game Present");
     draw();
-    bridge.hideOverlayCanvas();
-    check(bridge.canvas.style.display === "none" && vga.style.display === "block", "game exit exposes VGA");
+    check(gl.visible, "the next Present shows the window again");
+    bridge.hideLayers();
+    check(layers().every(layer => !layer.visible), "game exit exposes the desktop");
     const validation = await gpu.popErrorScope();
     check(!validation && !errors.length, "no WebGPU validation errors: " + (validation && validation.message || errors.join(";")));
     await emulator.destroy();
-    check(container.querySelectorAll("canvas").length === 2 && bridge.destroyed, "destroy preserves caller-owned canvases and stops graphics");
+    check(container.querySelectorAll("canvas").length === 1 && bridge.destroyed, "destroy preserves the caller-owned canvas and stops graphics");
     emulator = create({ buffer: state });
     await loaded(emulator);
     check(emulator.graphics_adapter.glJournalBytes === journalBytes && !emulator.graphics_adapter.restoringState,
@@ -150,6 +146,8 @@
     await loaded(emulator);
     check(!emulator.graphics_adapter && !emulator.v86.cpu.devices.v86gl_pci,
         "VGA-only instances do not create graphics hardware or a GPU adapter");
+    check(container.querySelectorAll("canvas").length === 1 && container.querySelector("canvas").getContext("2d"),
+        "the next emulator in the container draws in 2D although WebGPU had its canvas");
     const vgaOnlyState = await emulator.save_state();
     await emulator.restore_state(vgaOnlyState);
     await emulator.destroy();

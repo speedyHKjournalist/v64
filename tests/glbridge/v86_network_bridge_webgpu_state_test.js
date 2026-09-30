@@ -4,6 +4,7 @@
 const assert = require("node:assert/strict");
 const { GLStream, GL } = require("./gl_stream_builder.js");
 require("../../src/browser/glbridge/v86_network_bridge.js");
+const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 
 function recordOpcodes(bytes) {
     const result = [];
@@ -33,14 +34,6 @@ function recordOpcodes(bytes) {
         v86: { cpu: { devices: { v86gl_pci: pci } } },
         add_listener(name, callback) { listeners[name] = callback; },
     };
-    const style = { setProperty(name, value) { this[name] = value; } };
-    const screen = { width: 64, height: 64,
-        getBoundingClientRect() { return { left: 0, top: 0, width: 64, height: 64 }; } };
-    const canvas = { width: 64, height: 64, style,
-        parentElement: {
-            getElementsByTagName() { return [screen, canvas]; },
-            getBoundingClientRect() { return { left: 0, top: 0, width: 64, height: 64 }; },
-        } };
     const calls = [];
     const executor = {
         submit(bytes, metadata) {
@@ -49,7 +42,8 @@ function recordOpcodes(bytes) {
         onSwapBuffers() { calls.push(["swap"]); },
         resetForReplay() { calls.push(["reset"]); },
     };
-    const bridge = globalThis.installV86GLNetworkBridge(emulator, canvas, {
+    const bridge = globalThis.installV86GLNetworkBridge(emulator, null, {
+        compositor: new V86WebGPUCompositor({ width: 64, height: 64 }),
         glExecutor: executor,
     });
 

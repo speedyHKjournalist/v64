@@ -111,7 +111,7 @@ CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
 		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296 --global-base=32768 --export=__heap_base --export=__data_end"
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
-	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
+	   dma.js pit.js display.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   v86gl_pci.js \
@@ -408,6 +408,8 @@ acpi-table-tests:
 acpi-tests: acpi-table-tests acpi-device-tests acpi-guest-tests
 
 devices-test: build/v86-debug.wasm
+	./tests/devices/display.js
+	./tests/devices/mmio_ram.js
 	./tests/devices/virtio_9p.js
 	./tests/devices/virtio_console.js
 	./tests/devices/fetch_network.js
@@ -585,6 +587,15 @@ cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_gpu_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_audio_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_ui_browser_test.html
+
+# One canvas for text, graphics and composited D3D/GL windows (docs/display-design.md)
+.PHONY: display-browser-tests
+display-browser-tests: build/cpu-worker.js build/libv86.mjs build/libv86.js build/v86.wasm build/v86-debug.wasm glbridge
+	node tests/glbridge/gl_multipass_browser_runner.js display_canvas_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js "display_canvas_browser_test.html?worker=1"
+	node tests/glbridge/gl_multipass_browser_runner.js display_text_glyphs_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js display_compositor_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js graphics_vga_browser_test.html
 
 # A browser/library rebuild must ship the matching wire-protocol implementation.
 build/v86_all.js build/v86_all_debug.js build/libv86.js build/libv86.mjs build/libv86-debug.js build/libv86-debug.mjs: | build/cpu-worker.js
@@ -796,6 +807,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	X64_JIT=1 node tests/x64/system_oracle.mjs
 	X64_JIT=1 X64_IR_TIER0=0 node tests/x64/system_oracle.mjs
 	node tests/x64/page_system.mjs
+	node tests/x64/frame_buffer.mjs
 	node tests/x64/compat_jit.mjs
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs

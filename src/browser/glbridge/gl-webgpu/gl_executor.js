@@ -49,6 +49,13 @@
     const GL = constants.GL;
     const GLFN = constants.GLFN;
     const CTRL = constants.CTRL;
+    // V86GL_CTRL_WINDOW_STATE flags: D9WGWindowState's (d3d9_protocol.h)
+    const WINDOW_IS_WINDOW = 1 << 0;
+    const WINDOW_VISIBLE = 1 << 1;
+    const WINDOW_ICONIC = 1 << 2;
+    const WINDOW_OCCLUDED = 1 << 6;
+    const WINDOW_REGION = 1 << 7;
+    const WINDOW_REGION_MAX_RECTS = 32;
     const SIGNATURES = wire.SIGNATURES;
 
     const EXECUTOR_REVISION = 1;
@@ -1950,8 +1957,62 @@
                 }
                 this.resizeSurface(width, height);
             }
-            this.surface = { hwnd, x, y, width, height, visible: true };
+            // (whether other windows cover it stands until the next report)
+            this.surface = { ...this.surface, hwnd, x, y, width, height, visible: true };
             this.notifySurface("current");
+        }
+
+        /*
+         * V86GL_CTRL_WINDOW_STATE (opengl32_proxy.c): the drawing window as
+         * the guest's window manager sees it, sent whenever that changes --
+         * WinEvent hooks, not SwapBuffers, so a game that stops drawing while
+         * another window covers it is still heard from.
+         *
+         *   u32 hwnd, u32 flags, i32 x, i32 y (the client area on the guest's
+         *   screen), u32 width, u32 height (the client area), then with
+         *   WINDOW_REGION: u32 count, count x (i32 left, top, right, bottom)
+         *   in client coordinates -- the parts that show.
+         *
+         * The flags are D9WGWindowState's. A hidden or minimised window takes
+         * the picture down; one covered entirely (Warcraft III's cinematic
+         * popup) or in part keeps it, shown only where the window shows.
+         */
+        windowState(view, offset, size) {
+            if (size < 24) {
+                this.refuse("window-state", "payload too short", { size });
+                return;
+            }
+            const hwnd = view.getUint32(offset, true);
+            const flags = view.getUint32(offset + 4, true);
+            const x = view.getInt32(offset + 8, true), y = view.getInt32(offset + 12, true);
+            const width = view.getUint32(offset + 16, true), height = view.getUint32(offset + 20, true);
+            const shown = (flags & WINDOW_IS_WINDOW) !== 0 && (flags & WINDOW_VISIBLE) !== 0 &&
+                (flags & WINDOW_ICONIC) === 0;
+            let visibleRegion = null;
+            if ((flags & WINDOW_REGION) && size >= 28 && width && height) {
+                const count = view.getUint32(offset + 24, true);
+                if (count <= WINDOW_REGION_MAX_RECTS && size >= 28 + count * 16) {
+                    const rects = [];
+                    for (let i = 0; i < count; ++i) {
+                        const at = offset + 28 + i * 16;
+                        const r = { left: view.getInt32(at, true), top: view.getInt32(at + 4, true),
+                            right: view.getInt32(at + 8, true), bottom: view.getInt32(at + 12, true) };
+                        if (r.right > r.left && r.bottom > r.top) rects.push(r);
+                    }
+                    visibleRegion = { rects, baseWidth: width, baseHeight: height, originX: x, originY: y };
+                }
+            }
+            this.windowStateReports = (this.windowStateReports || 0) + 1;
+            if (!shown) {
+                this.surface = { ...this.surface, visible: false };
+                this.notifySurface("hide");
+                return;
+            }
+            // (shown again: on screen with the next SwapBuffers)
+            this.surface = { ...this.surface, hwnd,
+                ...(width && height ? { x, y, width, height } : {}), visible: true,
+                occluded: (flags & WINDOW_OCCLUDED) !== 0, visibleRegion };
+            this.notifySurface("window-state");
         }
 
         releaseCurrent() {
@@ -2185,6 +2246,8 @@
             if (fn === CTRL.RELEASE_CURRENT) return this.releaseCurrent();
             if (fn === CTRL.DESTROY_CONTEXT)
                 return this.destroyContext(bytes.subarray(offset, offset + size));
+            if (fn === CTRL.WINDOW_STATE)
+                return this.windowState(view, offset, size);
 
             const handler = this.handlers[fn];
             if (!handler) {

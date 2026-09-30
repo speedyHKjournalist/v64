@@ -1,134 +1,158 @@
 import { dbg_assert } from "../log.js";
 import { get_charmap } from "../lib.js";
 
+// For Types Only
+import { DisplaySink } from "../display.js";
+
+const CHARACTER_INDEX = 0;
+const FLAGS_INDEX = 1;
+const BG_COLOR_INDEX = 2;
+const FG_COLOR_INDEX = 3;
+const TEXT_BUF_COMPONENT_SIZE = 4;
+
 /**
- * @constructor
- * @param {Object=} options
+ * Shows nothing and remembers the text screen. Used where there is no screen
+ * (node), and the base of presenters that only need the text.
+ * @implements {DisplaySink}
  */
-export function DummyScreenAdapter(options)
+export class DummyScreenAdapter
 {
-    var
-        graphic_image_data,
-
-        /** @type {number} */
-        cursor_row = 0,
-
-        /** @type {number} */
-        cursor_col = 0,
-
-        graphical_mode_width = 0,
-        graphical_mode_height = 0,
-
-        // are we in graphical mode now?
-        is_graphical = false,
-
-        // Index 0: ASCII code
-        // Index 1: Blinking
-        // Index 2: Background color
-        // Index 3: Foreground color
-        text_mode_data,
-
-        // number of columns
-        text_mode_width = 0,
-
-        // number of rows
-        text_mode_height = 0,
-
-        // 8-bit-text to Unicode character map
-        charmap = get_charmap(options?.encoding);
-
-    this.put_char = function(row, col, chr, blinking, bg_color, fg_color)
+    /** @param {Object=} options */
+    constructor(options)
     {
-        dbg_assert(row >= 0 && row < text_mode_height);
-        dbg_assert(col >= 0 && col < text_mode_width);
-        text_mode_data[row * text_mode_width + col] = chr;
-    };
+        /** 8-bit text to Unicode */
+        this.charmap = get_charmap(options?.encoding);
 
-    this.destroy = function() {};
-    this.pause = function() {};
-    this.continue = function() {};
+        /** @type {!Int32Array} character, flags, background, foreground per cell */
+        this.text = new Int32Array(0);
+        this.text_width = 0;
+        this.text_height = 0;
 
-    this.clear_text_state = function()
+        this.cursor_row = 0;
+        this.cursor_col = 0;
+
+        this.graphical = false;
+        this.graphical_width = 0;
+        this.graphical_height = 0;
+
+        this.set_size_text(80, 25);
+    }
+
+    /** @override */
+    put_char(row, col, chr, flags, bg_color, fg_color)
     {
-        text_mode_width = null;
-        text_mode_height = null;
-    };
+        dbg_assert(row >= 0 && row < this.text_height);
+        dbg_assert(col >= 0 && col < this.text_width);
+        dbg_assert(chr >= 0 && chr < 0x100);
 
-    this.set_mode = function(graphical)
-    {
-        is_graphical = graphical;
-    };
+        const p = TEXT_BUF_COMPONENT_SIZE * (row * this.text_width + col);
+        this.text[p + CHARACTER_INDEX] = chr;
+        this.text[p + FLAGS_INDEX] = flags;
+        this.text[p + BG_COLOR_INDEX] = bg_color;
+        this.text[p + FG_COLOR_INDEX] = fg_color;
+    }
 
-    this.set_font_bitmap = function(height, width_9px, width_dbl, copy_8th_col, bitmap, bitmap_changed)
-    {
-    };
+    /** @override */
+    destroy() {}
 
-    this.set_font_page = function(page_a, page_b)
-    {
-    };
+    /** @override */
+    pause() {}
 
-    this.clear_screen = function()
-    {
-    };
+    /** @override */
+    continue() {}
 
-    /**
-     * @param {number} cols
-     * @param {number} rows
-     */
-    this.set_size_text = function(cols, rows)
+    /** @override */
+    clear_text_state()
     {
-        if(cols === text_mode_width && rows === text_mode_height)
+        this.text_width = 0;
+        this.text_height = 0;
+    }
+
+    /** @override */
+    set_mode(graphical)
+    {
+        this.graphical = graphical;
+    }
+
+    /** @override */
+    set_font_bitmap(height, width_9px, width_dbl, copy_8th_col, bitmap, bitmap_changed) {}
+
+    /** @override */
+    set_font_page(page_a, page_b) {}
+
+    /** @override */
+    clear_screen() {}
+
+    /** @override */
+    set_size_text(cols, rows)
+    {
+        if(cols === this.text_width && rows === this.text_height)
         {
             return;
         }
 
-        text_mode_data = new Uint8Array(cols * rows);
-        text_mode_width = cols;
-        text_mode_height = rows;
-    };
+        this.text = new Int32Array(cols * rows * TEXT_BUF_COMPONENT_SIZE);
+        this.text_width = cols;
+        this.text_height = rows;
+    }
 
-    this.set_size_graphical = function(width, height)
+    /** @override */
+    set_size_graphical(width, height, buffer_width, buffer_height)
     {
-        graphical_mode_width = width;
-        graphical_mode_height = height;
-    };
+        this.graphical_width = width;
+        this.graphical_height = height;
+    }
 
-    this.set_scale = function(s_x, s_y)
+    /** @override */
+    set_scale(s_x, s_y) {}
+
+    /** @override */
+    update_cursor_scanline(start, end, enabled) {}
+
+    /** @override */
+    update_cursor(row, col)
     {
-    };
+        this.cursor_row = row;
+        this.cursor_col = col;
+    }
 
-    this.update_cursor_scanline = function(start, end, max)
+    /** @override */
+    update_buffer(layers) {}
+
+    /** @override */
+    get_text_screen()
     {
-    };
+        const screen = [];
 
-    this.update_cursor = function(row, col)
-    {
-        cursor_row = row;
-        cursor_col = col;
-    };
-
-    this.update_buffer = function(layers)
-    {
-    };
-
-    this.get_text_screen = function()
-    {
-        var screen = [];
-
-        for(var i = 0; i < text_mode_height; i++)
+        for(let i = 0; i < this.text_height; i++)
         {
             screen.push(this.get_text_row(i));
         }
 
         return screen;
-    };
+    }
 
-    this.get_text_row = function(y)
+    /** @override */
+    get_text_row(y)
     {
-        const begin = y * text_mode_width;
-        const end = begin + text_mode_width;
-        return Array.from(text_mode_data.subarray(begin, end), chr => charmap[chr]).join("");
-    };
+        let row = "";
+        for(let col = 0; col < this.text_width; col++)
+        {
+            row += this.charmap[this.get_cell(y, col, CHARACTER_INDEX)];
+        }
+        return row;
+    }
 
-    this.set_size_text(80, 25);
+    /**
+     * @param {number} row
+     * @param {number} col
+     * @param {number} component CHARACTER_INDEX .. FG_COLOR_INDEX
+     * @return {number}
+     */
+    get_cell(row, col, component)
+    {
+        return this.text[TEXT_BUF_COMPONENT_SIZE * (row * this.text_width + col) + component];
+    }
 }
+
+export { CHARACTER_INDEX as DUMMY_SCREEN_CHARACTER, BG_COLOR_INDEX as DUMMY_SCREEN_BG_COLOR, FG_COLOR_INDEX as DUMMY_SCREEN_FG_COLOR };

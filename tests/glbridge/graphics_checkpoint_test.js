@@ -7,6 +7,7 @@ const d8 = require("./d3d8_webgpu_executor_test.js");
 const d9 = require("./d3d9_webgpu_executor_test.js");
 const dd = require("./ddraw_webgpu_executor_test.js");
 require("../../src/browser/glbridge/v86_network_bridge.js");
+const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 
 function envelope(opcode, payload) {
     const bytes = new Uint8Array(8 + payload.byteLength);
@@ -27,13 +28,10 @@ async function fixture() {
     const direct9 = d9.makeExecutor();
     direct9.fake.device.queue.onSubmittedWorkDone = () => Promise.resolve();
     const bridge = global.installV86GLNetworkBridge(null, null, {
+        compositor: new V86WebGPUCompositor({ width: 64, height: 64 }),
         managedState: true, glExecutor: gl,
         d3d8Executor: direct8, d3d9Executor: direct9.executor,
     });
-    // Separate canvases are irrelevant to state reconstruction; avoid the
-    // router's shared-D3D presentation diagnostic in these headless fixtures.
-    bridge.d3d8Canvas = { style: {}, width: 64, height: 64 };
-    bridge.d3d9Canvas = { style: {}, width: 64, height: 64 };
     let writes = 0;
     const send = (bytes, flags = 0) => bridge.pushPCIBatch({ bytes, flags,
         descAddr: 0x100000, batchAddr: 0x100020, responseBase: 0xc00000 - 32,

@@ -254,20 +254,20 @@ export class ParallelMachine
     /** The saved state of a parked core, in the layout of CPU.prototype.save_core_state */
     read_core(core)
     {
-        const base = this.ctrl[C.core_word(core, C.STATE_BASE)];
+        const base = this.ctrl[C.core_word(core, C.STATE_BASE)] >>> 0;
         const memory = new Uint8Array(this.cpu.wasm_memory.buffer);
         return CORE_STATE_RANGES.map(([start, end]) => memory.slice(base + start, base + end));
     }
 
     write_core(core, saved)
     {
-        const base = this.ctrl[C.core_word(core, C.STATE_BASE)];
+        const base = this.ctrl[C.core_word(core, C.STATE_BASE)] >>> 0;
         const memory = new Uint8Array(this.cpu.wasm_memory.buffer);
         CORE_STATE_RANGES.forEach(([start], i) => memory.set(saved[i], base + start));
     }
 
     /** Address of offset 0 of a worker core's state block (live, racy while it runs) */
-    state_base(core) { return this.ctrl[C.core_word(core, C.STATE_BASE)]; }
+    state_base(core) { return this.ctrl[C.core_word(core, C.STATE_BASE)] >>> 0; }
     core_running(core) { return Atomics.load(this.ctrl, C.core_word(core, C.RUNNING)) !== 0; }
     set_core_running(core, running) { Atomics.store(this.ctrl, C.core_word(core, C.RUNNING), running ? 1 : 0); }
     core_tsc_offset(core)

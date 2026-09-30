@@ -95,6 +95,38 @@ test("a context is created on demand and keeps GL's defaults", () => {
         "the default front material ambient is 0.2, 0.2, 0.2, 1");
 });
 
+// opengl32_proxy.c reports the drawing window from WinEvent hooks: covered by
+// other windows entirely (Warcraft III's cinematic popup under -opengl) or in
+// part, hidden or minimised
+test("window-state records describe the drawing window", () => {
+    const surfaces = [];
+    const { executor } = newExecutor({ onSurface: (surface, reason) => surfaces.push({ ...surface, reason }) });
+    run(executor, new GLStream().makeCurrent(7, 40, 30, 200, 100));
+    const IS_WINDOW = 1, VISIBLE = 2, ICONIC = 4, OCCLUDED = 64;
+    run(executor, new GLStream().windowState(7, IS_WINDOW | VISIBLE | OCCLUDED, 40, 30, 200, 100));
+    let last = surfaces[surfaces.length - 1];
+    assert.strictEqual(last.reason, "window-state");
+    assert.strictEqual(last.occluded, true);
+    assert.strictEqual(last.visible, true, "covered, not hidden");
+    run(executor, new GLStream().windowState(7, IS_WINDOW | VISIBLE, 50, 60, 200, 100,
+        [[0, 0, 200, 40], [0, 40, 80, 100]]));
+    last = surfaces[surfaces.length - 1];
+    assert.strictEqual(last.occluded, false);
+    assert.deepStrictEqual([last.x, last.y], [50, 60], "the window moved");
+    assert.deepStrictEqual(last.visibleRegion, {
+        rects: [{ left: 0, top: 0, right: 200, bottom: 40 }, { left: 0, top: 40, right: 80, bottom: 100 }],
+        baseWidth: 200, baseHeight: 100, originX: 50, originY: 60 });
+    run(executor, new GLStream().makeCurrent(7, 50, 60, 200, 100));
+    assert.ok(executor.surface.visibleRegion, "making the context current again keeps the region");
+    run(executor, new GLStream().windowState(7, IS_WINDOW | VISIBLE | ICONIC, 50, 60, 200, 100));
+    last = surfaces[surfaces.length - 1];
+    assert.strictEqual(last.reason, "hide");
+    assert.strictEqual(last.visible, false, "a minimised window takes the picture down");
+    run(executor, new GLStream().windowState(7, IS_WINDOW | VISIBLE, 50, 60, 200, 100));
+    assert.strictEqual(surfaces[surfaces.length - 1].visibleRegion, null);
+    assert.strictEqual(surfaces[surfaces.length - 1].visible, true, "restored");
+});
+
 test("WGL context ids separate state while share-group ids share objects", () => {
     const { executor } = newExecutor();
     run(executor, new GLStream().makeCurrent(77, 0, 0, 64, 64, 1, 11)

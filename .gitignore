@@ -24,3 +24,4 @@ src/rust/gen/interpreter0f.rs
 bios/seabios
 bench-results
 .devcontainer/devcontainer-lock.json
+.claude/

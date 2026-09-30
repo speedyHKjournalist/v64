@@ -110,9 +110,10 @@ pub unsafe fn invlpg(core: usize, address: u64) {
 /// The RAM backing page `backing` gained compiled code: page functions must
 /// no longer store to it directly (on any core of this instance).
 pub unsafe fn retire_writes_to(backing: u32) {
-    let host = (memory::mem8 as u32).wrapping_add(backing);
-    retire_writes(|entry| entry.host == host);
+    retire_writes_to_host((memory::mem8 as u32).wrapping_add(backing));
 }
+/// The same for a page at host address `host` (an extended RAM frame)
+pub unsafe fn retire_writes_to_host(host: u32) { retire_writes(|entry| entry.host == host); }
 unsafe fn retire_writes(retire: impl Fn(&Entry) -> bool) {
     for core in 0..crate::cpu::apic::core_count().clamp(1, 8) {
         let c = &mut JAC[core];
@@ -125,17 +126,15 @@ unsafe fn retire_writes(retire: impl Fn(&Entry) -> bool) {
         }
     }
 }
-/// Write entries of the VGA frame buffer mark their page dirty when they are
-/// filled. Once the screen has been drawn (the dirty bitmap is cleared), the
-/// next write must mark it again.
+/// Write entries of device memory (a frame buffer) mark their page dirty
+/// when they are filled. Once the device has taken its written pages, the
+/// next write must mark them again.
 pub unsafe fn retire_frame_buffer_writes() {
     if !FRAME_BUFFER_WRITES {
         return;
     }
     FRAME_BUFFER_WRITES = false;
-    let low = memory::vga_mem8 as u32;
-    let high = low.wrapping_add(memory::vga_memory_size);
-    retire_writes(|entry| entry.host >= low && entry.host < high);
+    retire_writes(|entry| crate::cpu::mmio_ram::backs(entry.host));
 }
 pub unsafe fn flush_all() {
     for core in 0..8 {
@@ -168,30 +167,31 @@ pub unsafe fn fill(
     };
 }
 
-/// The backing (relative to mem8) of the VGA linear frame buffer page at
-/// physical `address`, which page functions may access directly: it is plain
-/// memory in the wasm heap. A write translation marks the page dirty now
-/// (retire_frame_buffer_writes undoes it after the next screen update). Not
-/// with cores in workers, whose caches the screen update cannot reach.
+/// The backing (relative to mem8) of the device memory page (a frame buffer,
+/// crate::cpu::mmio_ram) at physical `address`, which page functions may
+/// access directly: it is plain memory in the wasm heap. A write translation
+/// marks the page dirty now (retire_frame_buffer_writes undoes it after the
+/// device took the page). Not with cores in workers, whose caches the device
+/// cannot reach.
 pub unsafe fn frame_buffer_backing(address: u64, write: bool) -> Option<u32> {
     let page = address & !4095;
-    let base = memory::VGA_LFB_ADDRESS as u64;
     // (with cores in workers, only the machine instance: it draws the screen)
-    if crate::parallel::active() && !crate::parallel::machine_instance()
-        || page < base
-        || page + 4096 > base + memory::vga_memory_size as u64
-    {
+    if crate::parallel::active() && !crate::parallel::machine_instance() || page >= 1 << 32 {
         return None;
     }
     // decoded by the legacy bus: no relocated RAM or aperture there
     if physical::resolve_backing(page).ok()? != page as u32 {
         return None;
     }
-    if write {
-        crate::cpu::vga::mark_dirty(page as u32);
+    let host = if write {
+        let host = crate::cpu::mmio_ram::write_host(page as u32, 4096)?;
         FRAME_BUFFER_WRITES = true;
+        host
     }
-    Some((memory::vga_mem8 as u32).wrapping_add((page - base) as u32).wrapping_sub(memory::mem8 as u32))
+    else {
+        crate::cpu::mmio_ram::read_host(page as u32, 4096)?
+    };
+    Some((host as u32).wrapping_sub(memory::mem8 as u32))
 }
 
 /// The backing page of a guest physical page that page functions may access

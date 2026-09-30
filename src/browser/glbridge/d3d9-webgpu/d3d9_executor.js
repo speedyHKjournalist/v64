@@ -189,6 +189,14 @@
     const D9WG_WINDOW_FOREGROUND = 1 << 3;
     const D9WG_WINDOW_FULLSCREEN = 1 << 4;
     const D9WG_WINDOW_NO_SURFACE = 1 << 5;
+    // Other windows cover all of it (d3d9_protocol.h): hidden as far as the
+    // picture goes, though the window is up
+    const D9WG_WINDOW_OCCLUDED = 1 << 6;
+    // Other windows cover part of it: the parts that show follow the record
+    // (D9WGWindowRegion in d3d9_protocol.h)
+    const D9WG_WINDOW_REGION = 1 << 7;
+    const D9WG_WINDOW_STATE_BYTES = 40;
+    const D9WG_WINDOW_REGION_MAX_RECTS = 32;
     const OP_SET_VERTEX_SHADER = 0x211;
     const OP_SET_PIXEL_SHADER = 0x212;
     const OP_SET_VERTEX_SHADER_CONSTANT_F = 0x213;
@@ -788,6 +796,36 @@
     const FLOAT_BITS_BUFFER = new ArrayBuffer(4);
     const FLOAT_BITS_U32 = new Uint32Array(FLOAT_BITS_BUFFER);
     const FLOAT_BITS_F32 = new Float32Array(FLOAT_BITS_BUFFER);
+
+    /*
+     * The D9WGWindowRegion after a WINDOW_STATE record: the parts of the
+     * client area other guest windows leave showing, as client-area pixels of
+     * a client area baseWidth x baseHeight whose top-left corner is at
+     * (originX, originY) on the guest's screen. Null when it does not fit the
+     * record or says nothing usable.
+     */
+    function readVisibleRegion(view, offset, bytes, baseWidth, baseHeight, originX, originY) {
+        if (bytes < 4 || !baseWidth || !baseHeight) return null;
+        const count = view.getUint32(offset, true);
+        if (count > D9WG_WINDOW_REGION_MAX_RECTS || bytes < 4 + count * 16) return null;
+        const rects = [];
+        for (let i = 0; i < count; ++i) {
+            const at = offset + 4 + i * 16;
+            const left = view.getInt32(at, true), top = view.getInt32(at + 4, true);
+            const right = view.getInt32(at + 8, true), bottom = view.getInt32(at + 12, true);
+            if (right > left && bottom > top) rects.push({ left, top, right, bottom });
+        }
+        return { rects, baseWidth, baseHeight, originX, originY };
+    }
+
+    function sameVisibleRegion(a, b) {
+        if (a === b) return true;
+        if (!a || !b || a.rects.length !== b.rects.length || a.baseWidth !== b.baseWidth ||
+                a.baseHeight !== b.baseHeight || a.originX !== b.originX || a.originY !== b.originY)
+            return false;
+        return a.rects.every((r, i) => r.left === b.rects[i].left && r.top === b.rects[i].top &&
+            r.right === b.rects[i].right && r.bottom === b.rects[i].bottom);
+    }
 
     function alignUp(value, alignment) {
         return (value + alignment - 1) & ~(alignment - 1);
@@ -3219,7 +3257,8 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 deviceLosses: 0, deviceRecoveries: 0,
                 guestFeatureBits: 0, guestShaderModel2: false,
                 guestShaderModel3: false,
-                windowStateChanges: 0, windowNotForegroundReports: 0,
+                windowStateChanges: 0, windowNotForegroundReports: 0, windowOccludedReports: 0,
+                windowRegionReports: 0,
                 cursorUploads: 0, cursorDraws: 0,
                 texturesRejected: 0,
                 srgbTextureSamples: 0, srgbViewsCreated: 0,
@@ -9283,6 +9322,12 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // fullscreen GetClientRect artefact onPresent() already guards
         // against -- letting either through makes the canvas flicker between
         // the real size and nothing.
+        //
+        // Covered windows are not hidden ones. Other windows lying over all
+        // or part of the device window (occluded, visibleRegion) is state the
+        // surface keeps until the next report changes it -- a Present in
+        // between does not uncover anything -- and the embedder shows the
+        // picture only where the guest's screen shows the window.
         applyWindowStateGeometry(deviceHandle, report) {
             if (!deviceHandle) return;
             const state = this.devices.get(deviceHandle);
@@ -9320,16 +9365,20 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 ++this.stats.emptySurfaceReports;
                 return;
             }
+            const occluded = !!report.occluded;
+            const visibleRegion = report.visibleRegion || null;
             const changed = state.surface.hwnd !== report.hwnd ||
                 state.surface.x !== report.windowX ||
                 state.surface.y !== report.windowY ||
                 state.surface.width !== width ||
                 state.surface.height !== height ||
-                state.surface.visible === false;
+                state.surface.visible === false ||
+                !!state.surface.occluded !== occluded ||
+                !sameVisibleRegion(state.surface.visibleRegion || null, visibleRegion);
             if (!changed) return;
             state.surface = { ...state.surface, hwnd: report.hwnd,
                 x: report.windowX, y: report.windowY, width, height,
-                visible: true, noSurface: false };
+                visible: true, noSurface: false, occluded, visibleRegion };
             ++this.stats.surfaceChanges;
             this.notifySurface(state, "window-state");
         }
@@ -9345,7 +9394,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // the overlay follow its window, and there is no further Present to
         // carry the geometry. d3d8_proxy.c sends this record on move/size/show
         // for exactly that reason.
-        onWindowState(bytes, view, offset) {
+        onWindowState(bytes, view, offset, length) {
             const flags = view.getUint32(offset + 12, true);
             const deviceHandle = view.getUint32(offset, true);
             const state = {
@@ -9365,7 +9414,15 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 // "I have nothing to show", which is not the same claim as
                 // "my window is gone": the window may be up and taking input.
                 noSurface: (flags & D9WG_WINDOW_NO_SURFACE) !== 0,
+                occluded: (flags & D9WG_WINDOW_OCCLUDED) !== 0,
+                visibleRegion: null,
             };
+            if (flags & D9WG_WINDOW_REGION) {
+                state.visibleRegion = readVisibleRegion(view, offset + D9WG_WINDOW_STATE_BYTES,
+                    (length === undefined ? D9WG_WINDOW_STATE_BYTES : length) - D9WG_WINDOW_STATE_BYTES,
+                    state.clientWidth, state.clientHeight, state.windowX, state.windowY);
+                if (state.visibleRegion) ++this.stats.windowRegionReports;
+            }
             this.windowState = state;
             ++this.stats.windowStateChanges;
             this.applyWindowStateGeometry(deviceHandle, state);
@@ -9374,6 +9431,12 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // problems: they would report broken input for a title that is
             // simply done drawing.
             if (state.noSurface) return;
+            // Covered by another of the guest's windows, which then rightly
+            // has the foreground and the input: not a window problem either
+            if (state.occluded) {
+                ++this.stats.windowOccludedReports;
+                return;
+            }
             if (!state.foreground) {
                 ++this.stats.windowNotForegroundReports;
                 // The guest re-takes the foreground for a fullscreen device

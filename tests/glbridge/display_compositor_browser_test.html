@@ -1,0 +1,201 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>One canvas: the guest desktop and a D3D9 window composited</title>
+<div id="screen"><div></div><canvas></canvas></div>
+<pre id="result">RUNNING</pre>
+<script src="../../build/libv86.js"></script>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script>
+// docs/display-design.md. The guest shows mode 13h
+// filled with red (the scanout); a D3D9 device clears green and presents in a
+// 64x48 window at (100, 60) of the guest desktop (a window layer). Both end up
+// in the one canvas, the layer where the guest put its window, and clipping
+// and hiding the window reveal the desktop again.
+//
+//   mov ax, 0x13 / int 0x10 / es = 0xa000 / rep stosb 64000 x colour 4
+//   serial 'R' / hlt
+const PROGRAM = [0xb8,0x13,0x0,0xcd,0x10,0x68,0x0,0xa0,0x7,0x31,0xff,0xb0,0x4,0xb9,0x0,0xfa,0xf3,0xaa,0xba,0xf8,0x3,0xb0,0x52,0xee,0xf4,0xeb,0xfd];
+
+(async () => {
+    const checks = [];
+    const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let emulator;
+    try {
+        const floppy = new Uint8Array(1474560);
+        floppy.set(PROGRAM);
+        floppy[510] = 0x55;
+        floppy[511] = 0xAA;
+        const container = document.getElementById("screen");
+        emulator = new V86({
+            wasm_path: "../../build/v86.wasm", memory_size: 32 * 1024 * 1024,
+            bios: { url: "../../bios/seabios.bin" },
+            vga_bios: { url: "../../bios/vgabios.bin" },
+            fda: { buffer: floppy.buffer }, boot_order: 0x321,
+            screen: { container },
+            disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+            net_device: { type: "none" }, autostart: true,
+            graphics_adapter: installV86GLGraphicsAdapter,
+        });
+        const booted = new Promise(resolve => emulator.add_listener("serial0-output-byte", byte => byte === 0x52 && resolve()));
+        await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
+        const bridge = emulator.graphics_adapter;
+        await bridge.ready;
+        check(!bridge.failed, "graphics initializes");
+        const compositor = bridge.compositor;
+        const canvas = container.querySelector("canvas");
+        check(container.querySelectorAll("canvas").length === 1, "one canvas in the container");
+        check(compositor && compositor.attached && compositor.canvas === canvas, "the compositor owns the screen canvas");
+        check(bridge.d3d9Executor.device === compositor.device && bridge.glExecutor.device === compositor.device,
+            "executors and compositor share one GPUDevice");
+        await booted;
+
+        const shot = async () => {
+            const image = emulator.screen_make_screenshot();
+            await image.decode();
+            const capture = document.createElement("canvas");
+            capture.width = image.width;
+            capture.height = image.height;
+            const context = capture.getContext("2d");
+            context.drawImage(image, 0, 0);
+            return (x, y) => [...context.getImageData(x, y, 1, 1).data.slice(0, 3)];
+        };
+        const near = (pixel, rgb) => pixel.every((v, i) => Math.abs(v - rgb[i]) < 8);
+        const RED = [168, 0, 0], GREEN = [0, 255, 0];
+        let pixel;
+        for(let i = 0; i < 100; i++)
+        {
+            await sleep(50);
+            pixel = await shot();
+            if(canvas.width === 320 && near(pixel(20, 20), RED)) break;
+        }
+        check(canvas.width === 320 && canvas.height === 200 && near(pixel(20, 20), RED), "the guest's mode 13h is the scanout: " + pixel(20, 20));
+
+        // The v86gl virtio transport, as v86gl.sys programs it
+        const cpu = emulator.v86.cpu, io = cpu.io;
+        const ram = cpu.read_blob(0, 32 * 1024 * 1024);
+        const memory = new DataView(ram.buffer, ram.byteOffset, ram.byteLength);
+        const table = 0x10000, avail = table + 128, used = table + 160;
+        const request = table + 256, reply = table + 288, arena = 0x100000;
+        const write = (address, bytes) => { emulator.write_memory(bytes, address); };
+        // SeaBIOS has assigned the device's I/O BARs: common config, then notification
+        const pci = reg => { io.port_write32(0xcf8, 0x80000000 | 0x13 << 11 | reg); return io.port_read32(0xcfc); };
+        const common = pci(0x10) & ~3, notification = pci(0x14) & ~3;
+        const w8 = (off, value) => io.port_write8(common + off, value);
+        const w16 = (off, value) => io.port_write16(common + off, value);
+        const w32 = (off, value) => io.port_write32(common + off, value);
+        w8(20, 0); w8(20, 3);
+        w32(8, 0); w32(12, 1); w32(8, 1); w32(12, 1); w8(20, 11);
+        w16(22, 0); w16(24, 8);
+        w32(32, table); w32(36, 0); w32(40, avail); w32(44, 0);
+        w32(48, used); w32(52, 0);
+        const words = values => { const b = new Uint8Array(values.length * 4), v = new DataView(b.buffer); values.forEach((x, i) => v.setUint32(i * 4, x >>> 0, true)); return b; };
+        const descriptors = new Uint8Array(32), dv = new DataView(descriptors.buffer);
+        dv.setUint32(0, request, true); dv.setUint32(8, 24, true); dv.setUint16(12, 1, true); dv.setUint16(14, 1, true);
+        dv.setUint32(16, reply, true); dv.setUint32(24, 16, true); dv.setUint16(28, 2, true);
+        write(table, descriptors);
+        write(avail, Uint8Array.of(1, 0));
+        w16(28, 1); w8(20, 15);
+        let idx = 0;
+        const submit = (opcode, address, length, flags) => {
+            write(request, words([opcode, address, 0, length, flags, 0]));
+            write(reply, words([0xffffffff]));
+            write(avail + 4 + (idx & 7) * 2, Uint8Array.of(0, 0));
+            ++idx;
+            write(avail + 2, Uint8Array.of(idx & 255, idx >> 8));
+            io.port_write16(notification, 0);
+            const answer = cpu.read_blob(reply, 4);
+            const result = new DataView(answer.buffer, answer.byteOffset, 4).getUint32(0, true);
+            if(result !== 0) throw new Error("virtio request failed: " + result);
+        };
+        submit(1, arena, 16 * 1024 * 1024, 0);
+
+        const session = [0xd0090001, 0x20260930];
+        const d3d9 = async (commands, present) => {
+            const sizes = commands.map(([, values]) => (16 + values.length * 4 + 7) & ~7);
+            const batchBytes = 32 + sizes.reduce((a, b) => a + b, 0);
+            const wrapped = new Uint8Array(8 + batchBytes);
+            const view = new DataView(wrapped.buffer);
+            view.setUint16(0, 0xffe1, true); view.setUint16(2, 0xffff, true);
+            view.setUint32(4, batchBytes, true);
+            view.setUint32(8, 0x47573944, true);
+            view.setUint16(12, 1, true); view.setUint16(14, 3, true);
+            [1, present ? 1 : 0, commands.length, batchBytes - 32, ...session].forEach((v, i) => view.setUint32(16 + i * 4, v, true));
+            let cursor = 40;
+            commands.forEach(([op, values], i) => {
+                view.setUint16(cursor, op, true); view.setUint32(cursor + 4, sizes[i], true);
+                view.setUint32(cursor + 8, i + 1, true);
+                values.forEach((v, j) => view.setUint32(cursor + 16 + j * 4, v >>> 0, true));
+                cursor += sizes[i];
+            });
+            write(arena, words([0x324c4756, 1, 0, 1, 1, wrapped.length, 0x47573944, 0]));
+            write(arena + 32, wrapped);
+            submit(2, 0, 32 + wrapped.length, 0);
+            await bridge.d3d9Executor.idle();
+            check(!bridge.d3d9Executor.failed, "D3D9 batch executes");
+        };
+        // HELLO, CREATE_DEVICE (64x48 back buffer), CLEAR green, PRESENT at (100, 60)
+        await d3d9([
+            [1, [32, 0, ...session]],
+            [2, [1, 0x1234, 0, 0, 64, 48, 22, 1, 0x20, 1, 75, 0, 0]],
+            [5, [1, 1, 0xff00ff00, 0x3f800000, 0, 0]],
+            [4, [1, 0x1234, 100, 60, 64, 48]],
+        ], true);
+        const layer = bridge.d3d9Canvas.layer;
+        check(bridge.activeOwner === "d3d9" && layer.visible, "the D3D9 window is a visible layer");
+        check(layer.x === 100 && layer.y === 60 && layer.width === 64 && layer.height === 48,
+            `placed where the guest put the window (${layer.x},${layer.y} ${layer.width}x${layer.height})`);
+
+        pixel = await shot();
+        check(near(pixel(132, 84), GREEN), "inside the window: the D3D9 frame " + pixel(132, 84));
+        check(near(pixel(20, 20), RED) && near(pixel(99, 84), RED) && near(pixel(164, 84), RED) && near(pixel(132, 108), RED),
+            "around the window: the guest desktop");
+
+        layer.setClip({ left: 0, top: 0, right: 0.5, bottom: 1 });
+        pixel = await shot();
+        check(near(pixel(110, 84), GREEN) && near(pixel(150, 84), RED), "a clipped window shows only its visible part");
+        layer.setClip(null);
+
+        // Visible, but covered by another window (Warcraft III's cinematic popup):
+        // IS_WINDOW | VISIBLE | OCCLUDED
+        await d3d9([[0x21D, [1, 0x1234, 0, 1 | 2 | 64, 100, 60, 64, 48, 64, 48]]], false);
+        pixel = await shot();
+        check(!layer.visible && near(pixel(132, 84), RED), "a covered window reveals what covers it: " + pixel(132, 84));
+        check(bridge.d3d9Executor.stats.windowOccludedReports === 1, "an occluded window is not reported as a window problem");
+        await d3d9([[4, [1, 0x1234, 100, 60, 64, 48]]], true);
+        pixel = await shot();
+        check(!layer.visible && near(pixel(132, 84), RED), "presenting behind the popup does not uncover it: " + pixel(132, 84));
+        await d3d9([[0x21D, [1, 0x1234, 0, 1 | 2, 100, 60, 64, 48, 64, 48]]], false);
+        pixel = await shot();
+        check(layer.visible && near(pixel(132, 84), GREEN), "the popup closes: the window shows again: " + pixel(132, 84));
+
+        // A message box over the window's right half and bottom-left corner:
+        // IS_WINDOW | VISIBLE | REGION, the parts that show in client pixels
+        await d3d9([[0x21D, [1, 0x1234, 0, 1 | 2 | 128, 100, 60, 64, 48, 64, 48,
+            2, 0, 0, 32, 24, 0, 24, 16, 48]]], false);
+        pixel = await shot();
+        check(near(pixel(110, 70), GREEN) && near(pixel(105, 100), GREEN),
+            "the parts other windows leave showing are drawn: " + pixel(110, 70) + " " + pixel(105, 100));
+        check(near(pixel(150, 70), RED) && near(pixel(125, 100), RED),
+            "what covers the rest shows through: " + pixel(150, 70) + " " + pixel(125, 100));
+        check(bridge.d3d9Executor.stats.windowRegionReports === 1, "one region report");
+        await d3d9([[4, [1, 0x1234, 100, 60, 64, 48]]], true);
+        pixel = await shot();
+        check(near(pixel(110, 70), GREEN) && near(pixel(150, 70), RED), "the region holds across Presents");
+        await d3d9([[0x21D, [1, 0x1234, 0, 1 | 2, 100, 60, 64, 48, 64, 48]]], false);
+        pixel = await shot();
+        check(near(pixel(150, 70), GREEN) && near(pixel(125, 100), GREEN), "the box closes: all of it shows");
+
+        // The guest reports the window hidden
+        await d3d9([[0x21D, [1, 0x1234, 0, 1, 100, 60, 64, 48, 64, 48]]], false);
+        pixel = await shot();
+        check(!layer.visible && near(pixel(132, 84), RED), "a hidden window reveals the desktop: " + pixel(132, 84));
+
+        await emulator.destroy();
+        document.getElementById("result").textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        if(emulator) await emulator.destroy().catch(() => {});
+        document.getElementById("result").textContent = "FAIL\n" + (error.stack || error) + "\n" + checks.join("\n");
+    }
+})();
+</script>

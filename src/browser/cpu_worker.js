@@ -2,6 +2,7 @@ import { state_stream_server } from "./state_stream_transport.js";
 // Browser-side ownership boundary. Guest RAM and synchronous devices live only
 // in the worker; this side owns DOM adapters and asynchronous GPU execution.
 import { GraphicsPerformance } from "./graphics_performance.js";
+import { DISPLAY_SINK_REPLAY } from "../display.js";
 
 export function encode_worker_file(f)
 {
@@ -26,6 +27,8 @@ export function encode_worker_options(o)
         "parallel_wasm_path": o["parallel_wasm_path"] && new URL(o["parallel_wasm_path"], location.href).href,
         "vcpu_worker_url": o["vcpu_worker_url"] && new URL(o["vcpu_worker_url"], location.href).href,
         "memory_size": o.memory_size, "vga_memory_size": o.vga_memory_size,
+        "extended_memory_size": o.extended_memory_size, "extended_memory_cache": o.extended_memory_cache,
+        "high_memory_size": o.high_memory_size,
         "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,
         "cpu_clock": o.cpu_clock, "cpu_quantum": o.cpu_quantum, "cpu_schedule_seed": o.cpu_schedule_seed,
         "experimental_smp_jit": o.experimental_smp_jit, "disable_jit": o.disable_jit,
@@ -80,6 +83,7 @@ export class CPUWorkerController
         this.operations = this.startup;
         this.instructions = 0;
         this.frame_pending = false;
+        this.full_frame_wanted = false;
         this.input_queue = [];
         this.ready = false;
         this.screen_queue = [];
@@ -213,28 +217,22 @@ export class CPUWorkerController
     flush_screen()
     {
         const s = this.emulator.screen_adapter;
-        const methods = {
-            "set_mode": (...a) => s.set_mode(...a), "set_size_text": (...a) => s.set_size_text(...a),
-            "set_size_graphical": (...a) => s.set_size_graphical(...a), "put_char": (...a) => s.put_char(...a),
-            "update_cursor": (...a) => s.update_cursor(...a),
-            "update_cursor_scanline": (...a) => s.update_cursor_scanline(...a),
-            "clear_screen": () => s.clear_screen(), "clear_text_state": () => s.clear_text_state(),
-            "set_font_bitmap": (...a) => s.set_font_bitmap(...a), "set_font_page": (...a) => s.set_font_page(...a),
-        };
-        for(const [name, args] of this.screen_queue.splice(0)) methods[name](...args);
+        for(const [name, args] of this.screen_queue.splice(0)) DISPLAY_SINK_REPLAY[name](s, args);
     }
 
-    request_frame()
+    request_frame(full)
     {
+        if(full) this.full_frame_wanted = true;
         if(!this.ready || this.frame_pending || this.closed || this.failed) return;
         this.frame_pending = true;
-        this.post({ "type": "frame", "epoch": this.epoch });
+        this.post({ "type": "frame", "epoch": this.epoch, "full": !!this.full_frame_wanted });
+        this.full_frame_wanted = false;
     }
 
     draw_frame(layers)
     {
         this.emulator.screen_adapter.update_buffer(layers.map(l => ({
-            image_data: new ImageData(l["pixels"], l["width"], l["height"]),
+            pixels: { data: l["pixels"], width: l["width"], height: l["height"] },
             screen_x: l["x"], screen_y: l["y"], buffer_x: 0, buffer_y: 0,
             buffer_width: l["width"], buffer_height: l["height"],
         })));

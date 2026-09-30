@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text mode pixels match the guest's font</title>
+<div id="screen"><div></div><canvas></canvas></div>
+<pre id="result">RUNNING</pre>
+<script type="module">
+// Text mode is drawn on the canvas with the guest's own VGA font. Boot FreeDOS
+// (scrolling text from the BIOS and the kernel), then check every pixel of
+// every cell against the glyph in plane 2 and the attribute's colours.
+import { V86 } from "../../src/main.js";
+
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let emulator;
+
+try
+{
+    const container = document.getElementById("screen");
+    emulator = new V86({
+        wasm_path: "../../build/v86-debug.wasm",
+        bios: { url: "../../bios/seabios.bin" },
+        vga_bios: { url: "../../bios/vgabios.bin" },
+        fda: { url: "../../images/freedos722.img" },
+        memory_size: 32 * 1024 * 1024,
+        screen_container: container,
+        disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+        net_device: { type: "none" },
+        autostart: true,
+        log_level: 0,
+    });
+    await new Promise(resolve => emulator.add_listener("emulator-ready", resolve));
+    check(await emulator.wait_until_vga_screen_contains("A:\\>", { timeout_msec: 60000 }), "FreeDOS reaches its prompt");
+    // FreeDOS idles at its prompt; let the presenter draw the final screen.
+    // (Not emulator.stop(): a stopped emulator pauses its presenter.)
+    await sleep(1000);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const vga = emulator.v86.cpu.devices.vga;
+    const canvas = container.querySelector("canvas");
+    const cols = vga.max_cols, rows = vga.max_rows;
+    const height = (vga.max_scan_line & 0x1F) + 1;
+    const width = 9;
+    check(canvas.width === cols * width && canvas.height === rows * height,
+        `canvas is ${cols}x${rows} cells of ${width}x${height} (${canvas.width}x${canvas.height})`);
+
+    const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    const rgb = color => [color >> 16 & 0xFF, color >> 8 & 0xFF, color & 0xFF];
+    const palette = i => rgb(vga.vga256_palette[vga.dac_mask & vga.dac_map[i]]);
+    const cursor_row = vga.cursor_address / cols | 0, cursor_col = vga.cursor_address % cols;
+    let wrong_cells = [];
+    for(let row = 0; row < rows; row++)
+    {
+        for(let col = 0; col < cols; col++)
+        {
+            if(row === cursor_row && col === cursor_col) continue;
+            const addr = (vga.start_address << 1) + (row * cols + col) * 2;
+            const chr = vga.vga_memory[addr], attr = vga.vga_memory[addr | 1];
+            const fg = palette(attr & 0xF), bg = palette(attr >> 4 & 0x7);
+            let bad = 0;
+            for(let y = 0; y < height; y++)
+            {
+                const bits = vga.plane2[chr * 32 + y];
+                for(let x = 0; x < width; x++)
+                {
+                    const on = x < 8 ? bits & (0x80 >> x) : chr >= 0xC0 && chr <= 0xDF && (vga.attribute_mode & 4) && (bits & 1);
+                    const want = on ? fg : bg;
+                    const p = ((row * height + y) * canvas.width + col * width + x) * 4;
+                    if(Math.abs(pixels[p] - want[0]) > 2 || Math.abs(pixels[p + 1] - want[1]) > 2 || Math.abs(pixels[p + 2] - want[2]) > 2) bad++;
+                }
+            }
+            if(bad) wrong_cells.push(`${row},${col} '${String.fromCharCode(chr)}' ${bad}px`);
+        }
+    }
+    check(wrong_cells.length === 0, `every cell matches its glyph and colours (${wrong_cells.length} wrong: ${wrong_cells.slice(0, 8).join("; ")})`);
+
+    document.getElementById("result").textContent = "PASS\n" + checks.join("\n");
+}
+catch(error)
+{
+    document.getElementById("result").textContent = "FAIL\n" + (error && error.stack || error) + "\n" + checks.join("\n");
+}
+finally
+{
+    if(emulator) emulator.destroy();
+}
+</script>

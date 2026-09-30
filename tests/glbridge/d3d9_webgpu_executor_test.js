@@ -2935,6 +2935,77 @@ await test("window state moves the overlay for a title that stops presenting",
         "a minimised window hides the overlay");
 });
 
+// Other guest windows over the device window (Warcraft III's cinematic popup,
+// a message box) are state the surface keeps until the guest reports again: a
+// Present meanwhile does not uncover anything.
+await test("window state reports covered windows and the parts that show", async () => {
+    const surfaces = [];
+    const { executor } = makeExecutor({
+        onSurface: (surface, reason) => surfaces.push({ ...surface, reason }) });
+    const windowState = (flags, rects) => {
+        const payload = Buffer.alloc(40 + (rects ? 4 + rects.length * 16 : 0));
+        payload.writeUInt32LE(DEVICE, 0);
+        payload.writeUInt32LE(0xa0180, 4);
+        payload.writeUInt32LE(0xa0180, 8);
+        payload.writeUInt32LE(flags | (rects ? 1 << 7 : 0), 12);
+        payload.writeInt32LE(10, 16);        // client origin
+        payload.writeInt32LE(20, 20);
+        payload.writeUInt32LE(648, 24);      // window, frame included
+        payload.writeUInt32LE(507, 28);
+        payload.writeUInt32LE(640, 32);      // client
+        payload.writeUInt32LE(480, 36);
+        if (rects) {
+            payload.writeUInt32LE(rects.length, 40);
+            rects.forEach((r, i) => r.forEach((v, j) => payload.writeInt32LE(v, 44 + i * 16 + j * 4)));
+        }
+        return payload;
+    };
+    const last = () => surfaces[surfaces.length - 1];
+    await executor.submit(buildBatch([
+        command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
+        command(OP.PRESENT, u32(DEVICE, 0xa0180, 10, 20, 640, 480)),
+    ], { present: true }));
+    await executor.idle();
+
+    // IS_WINDOW | VISIBLE | FOREGROUND | OCCLUDED
+    await executor.submit(buildBatch([command(0x21D, windowState(1 | 2 | 8 | 64))]));
+    await executor.idle();
+    assert.equal(last().visible, true, "a covered window is still up");
+    assert.equal(last().occluded, true);
+    await executor.submit(buildBatch([
+        command(OP.PRESENT, u32(DEVICE, 0xa0180, 10, 20, 640, 480)),
+    ], { present: true }));
+    await executor.idle();
+    assert.equal(executor.devices.get(DEVICE).surface.occluded, true,
+        "presenting behind the popup does not uncover the window");
+
+    // A message box over the middle: the bands around it show
+    const bands = [[0, 0, 640, 200], [0, 200, 220, 280], [420, 200, 640, 280], [0, 280, 640, 480]];
+    await executor.submit(buildBatch([command(0x21D, windowState(1 | 2 | 8, bands))]));
+    await executor.idle();
+    assert.equal(last().occluded, false);
+    assert.deepEqual(last().visibleRegion, {
+        rects: bands.map(([left, top, right, bottom]) => ({ left, top, right, bottom })),
+        baseWidth: 640, baseHeight: 480, originX: 10, originY: 20 });
+    assert.equal(executor.stats.windowRegionReports, 1);
+    const changes = executor.stats.surfaceChanges;
+    await executor.submit(buildBatch([command(0x21D, windowState(1 | 2 | 8, bands))]));
+    await executor.idle();
+    assert.equal(executor.stats.surfaceChanges, changes, "the same region again changes nothing");
+
+    // The box closes
+    await executor.submit(buildBatch([command(0x21D, windowState(1 | 2 | 8))]));
+    await executor.idle();
+    assert.equal(last().visibleRegion, null, "all of the window shows again");
+    assert.equal(last().occluded, false);
+
+    // A region that does not fit the record is ignored rather than misread
+    const truncated = windowState(1 | 2 | 8, bands).subarray(0, 60);
+    await executor.submit(buildBatch([command(0x21D, truncated)]));
+    await executor.idle();
+    assert.equal(executor.devices.get(DEVICE).surface.visibleRegion, null);
+});
+
 await test("window state reports a game whose window cannot receive input", async () => {
     const { executor } = makeExecutor();
     const windowState = (flags) => {

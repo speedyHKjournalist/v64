@@ -1,0 +1,118 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>One canvas for text and graphics</title>
+<div id="screen"><div></div><canvas></canvas></div>
+<pre id="result">RUNNING</pre>
+<script type="module">
+// Text and graphics modes share one canvas (docs/display-design.md).
+// A boot sector switches text -> 13h -> text -> 13h, signalling each
+// phase on COM1 and waiting for a byte before the next one:
+//
+//   mode 3, print "PHASE ONE TEXT"     -> '1'
+//   mode 13h, fill with colour 4 (red) -> '2'
+//   mode 3, print "PHASE THREE TEXT"   -> '3'
+//   mode 13h, fill with colour 2 (green) -> '4'
+//
+// Returning to a mode of the same size as before is the interesting part: the
+// canvas has to be resized and repainted although the device's size did not change.
+import { V86 } from "../../build/libv86.mjs";
+
+const PROGRAM = [0x31,0xc0,0x8e,0xd8,0x8e,0xc0,0x8e,0xd0,0xbc,0x0,0x7c,0xfb,0xb8,0x3,0x0,0xcd,0x10,0xbe,0x7c,0x7c,0xe8,0x36,0x0,0xb0,0x31,0xe8,0x4f,0x0,0xb8,0x13,0x0,0xcd,0x10,0xb0,0x4,0xe8,0x36,0x0,0xb0,0x32,0xe8,0x40,0x0,0xb8,0x3,0x0,0xcd,0x10,0xbe,0x8b,0x7c,0xe8,0x17,0x0,0xb0,0x33,0xe8,0x30,0x0,0xb8,0x13,0x0,0xcd,0x10,0xb0,0x2,0xe8,0x17,0x0,0xb0,0x34,0xe8,0x21,0x0,0xf4,0xeb,0xfd,0xac,0x84,0xc0,0x74,0x9,0xb4,0xe,0xbb,0xf,0x0,0xcd,0x10,0xeb,0xf2,0xc3,0x6,0xbb,0x0,0xa0,0x8e,0xc3,0x31,0xff,0xb9,0x0,0xfa,0xf3,0xaa,0x7,0xc3,0xba,0xf8,0x3,0xee,0xba,0xfd,0x3,0xec,0xa8,0x1,0x74,0xf8,0xba,0xf8,0x3,0xec,0xc3,0x50,0x48,0x41,0x53,0x45,0x20,0x4f,0x4e,0x45,0x20,0x54,0x45,0x58,0x54,0x0,0x50,0x48,0x41,0x53,0x45,0x20,0x54,0x48,0x52,0x45,0x45,0x20,0x54,0x45,0x58,0x54];
+
+const worker = new URLSearchParams(location.search).get("worker") === "1";
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let emulator;
+let state = () => "";
+
+async function until(predicate, message, timeout = 20000)
+{
+    const end = performance.now() + timeout;
+    while(!(await predicate()))
+    {
+        if(performance.now() > end) throw new Error("timed out: " + message + " " + state());
+        await sleep(50);
+    }
+}
+
+try
+{
+    const floppy = new Uint8Array(1474560);
+    floppy.set(PROGRAM);
+    floppy[510] = 0x55;
+    floppy[511] = 0xAA;
+    const container = document.getElementById("screen");
+    emulator = new V86({
+        wasm_path: "../../build/v86.wasm",
+        bios: { url: "../../bios/seabios.bin" },
+        vga_bios: { url: "../../bios/vgabios.bin" },
+        fda: { buffer: floppy.buffer },
+        boot_order: 0x321,
+        memory_size: 32 * 1024 * 1024,
+        screen_container: container,
+        disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+        net_device: { type: "none" },
+        autostart: true,
+        ...(worker ? { cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js" } : {}),
+    });
+    let phase = "";
+    emulator.add_listener("serial0-output-byte", byte => { phase = String.fromCharCode(byte); });
+    const next = async expected => {
+        await until(() => phase === expected, "phase " + expected, 60000);
+    };
+
+    const canvas = container.querySelector("canvas");
+    const ctx = canvas.getContext("2d");
+    const pixel = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3)).join();
+    // VGA palette colours 4 and 2: 6-bit DAC values 0x2A, shown as 168
+    const is = (x, y, r, g, b) => {
+        const p = ctx.getImageData(x, y, 1, 1).data;
+        return Math.abs(p[0] - r) < 8 && Math.abs(p[1] - g) < 8 && Math.abs(p[2] - b) < 8;
+    };
+    const lit = () => {
+        const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        let n = 0;
+        for(let i = 0; i < data.length; i += 4) if(data[i] > 128 && data[i + 1] > 128 && data[i + 2] > 128) n++;
+        return n;
+    };
+    state = () => `(canvas ${canvas.width}x${canvas.height} display=${canvas.style.display}, centre ${pixel(canvas.width >> 1, canvas.height >> 1)}, phase ${phase})`;
+    const shot_size = async () => {
+        const image = emulator.screen_make_screenshot();
+        await image.decode();
+        return image.width + "x" + image.height;
+    };
+
+    await next("1");
+    check(container.querySelectorAll("canvas").length === 1, "one canvas in the container");
+    await until(() => canvas.width === 720 && canvas.height === 400 && lit() > 200, "text on the canvas");
+    check(canvas.style.display !== "none", "text mode is drawn on the visible canvas (720x400)");
+    check(await shot_size() === "720x400", "text-mode screenshot comes from the canvas");
+    emulator.serial0_send("x");
+
+    await next("2");
+    await until(() => canvas.width === 320 && canvas.height === 200 && is(160, 100, 168, 0, 0), "13h, red");
+    check(true, "mode 13h: 320x200 and red");
+    emulator.serial0_send("x");
+
+    await next("3");
+    await until(() => canvas.width === 720 && canvas.height === 400 && lit() > 200, "text again");
+    check(is(360, 300, 0, 0, 0), "back to text: 720x400, no leftover graphics");
+    emulator.serial0_send("x");
+
+    await next("4");
+    await until(() => canvas.width === 320 && canvas.height === 200 && is(160, 100, 0, 168, 0), "13h again, green");
+    check(true, "back to 13h at the same size: resized and repainted (green)");
+    check(await shot_size() === "320x200", "graphics screenshot comes from the canvas");
+
+    document.getElementById("result").textContent = "PASS " + (worker ? "(worker)" : "(main thread)") + "\n" + checks.join("\n");
+}
+catch(error)
+{
+    document.getElementById("result").textContent = "FAIL\n" + (error && error.stack || error) + "\n" + checks.join("\n");
+}
+finally
+{
+    if(emulator) emulator.destroy();
+}
+</script>

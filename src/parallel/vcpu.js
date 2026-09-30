@@ -112,11 +112,11 @@ export async function run_vcpu(init, post, handle)
         "mmap_write64": (addr, v0, v1) => { request(C.OP_MMIO_WRITE64, addr, v0, v1); },
         "mmap_write128": (addr, v0, v1, v2, v3) => { request(C.OP_MMIO_WRITE128, addr, v0, v1, v2, v3); },
         "log_from_wasm": (offset, length) => {
-            const bytes = new Uint8Array(memory.buffer, offset, length).slice();
+            const bytes = new Uint8Array(memory.buffer, offset >>> 0, length >>> 0).slice();
             if(init.log) console.log("[vCPU " + core + "] " + new TextDecoder().decode(bytes));
         },
         "console_log_from_wasm": (offset, length) => {
-            const bytes = new Uint8Array(memory.buffer, offset, length).slice();
+            const bytes = new Uint8Array(memory.buffer, offset >>> 0, length >>> 0).slice();
             console.error("[vCPU " + core + "] " + new TextDecoder().decode(bytes));
         },
         "dbg_trace_from_wasm": () => {},
@@ -142,7 +142,7 @@ export async function run_vcpu(init, post, handle)
     cpu.ir_sync_publication = true;
     cpu.publish_wide_native = (token, pointer, length) =>
     {
-        const bytes = new Uint8Array(memory.buffer, pointer, length).slice();
+        const bytes = new Uint8Array(memory.buffer, pointer >>> 0, length >>> 0).slice();
         try
         {
             const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes),

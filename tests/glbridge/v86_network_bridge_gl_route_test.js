@@ -12,23 +12,12 @@
 const assert = require("node:assert/strict");
 
 require("../../src/browser/glbridge/v86_network_bridge.js");
+const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 
 const { GLStream, GL } = require("./gl_stream_builder.js");
 
 const listeners = Object.create(null);
-const style = () => ({ setProperty(name, value) { this[name] = value; } });
-const screenCanvas = {
-    width: 1024, height: 768,
-    getBoundingClientRect() { return { left: 0, top: 0, width: 1024, height: 768 }; },
-};
-const d3dCanvas = { width: 1, height: 1, style: style() };
-const canvas = {
-    width: 64, height: 64, style: style(),
-    parentElement: {
-        getElementsByTagName() { return [screenCanvas, canvas, d3dCanvas]; },
-        getBoundingClientRect() { return { left: 0, top: 0, width: 1024, height: 768 }; },
-    },
-};
+const compositor = new V86WebGPUCompositor({ width: 1024, height: 768 });
 
 const glBatches = [];
 const d3d9Batches = [];
@@ -39,12 +28,12 @@ const guestMemory = new Uint8Array(1 << 16);
 const bridge = globalThis.installV86GLNetworkBridge({
     add_listener(name, callback) { listeners[name] = callback; },
     write_memory(blob, address) { guestMemory.set(blob, address); },
-}, canvas, {
-    d3dCanvas,
-    glCanvas: d3dCanvas,
+}, null, {
+    compositor,
     installGLWebGPUExecutor(installedCanvas, options) {
-        assert.equal(installedCanvas, d3dCanvas,
-            "OpenGL shares the D3D canvas rather than keeping its own");
+        assert.equal(installedCanvas.layer.name, "gl", "OpenGL draws into its own window layer");
+        assert.equal(options.host, installedCanvas.layer.host,
+            "through a host that shares the compositor's device");
         glOptions = options;
         return {
             submit(bytes, metadata) {
@@ -103,6 +92,28 @@ listeners["v86gl-pci-frame"]({
 });
 assert.equal(d3d9Batches.length, 1, "the D3D9 envelope is not swallowed by GL");
 assert.equal(glBatches.length, 2, "and it did not also reach the GL executor");
+
+/* ---- window-state reports place the GL layer without claiming the screen ---- */
+
+const glLayer = bridge.glCanvas.layer;
+bridge.hideLayers();
+glOptions.onSurface({ hwnd: 7, x: 40, y: 30, width: 200, height: 100, visible: true,
+    occluded: false, visibleRegion: null }, "window-state");
+assert.notEqual(bridge.activeOwner, "gl", "a window-state report alone does not put OpenGL on screen");
+bridge.showOwner("gl");
+glOptions.onSurface({ hwnd: 7, x: 40, y: 30, width: 200, height: 100, visible: true,
+    occluded: true, visibleRegion: null }, "window-state");
+assert.equal(glLayer.visible, false, "covered by another window: not drawn");
+assert.equal(bridge.activeOwner, "gl");
+glOptions.onSurface({ hwnd: 7, x: 40, y: 30, width: 200, height: 100, visible: true, occluded: false,
+    visibleRegion: { rects: [{ left: 0, top: 50, right: 200, bottom: 100 }], baseWidth: 200, baseHeight: 100,
+        originX: 40, originY: 30 } }, "window-state");
+assert.equal(glLayer.visible, true);
+assert.deepEqual([glLayer.x, glLayer.y, glLayer.width, glLayer.height], [40, 30, 200, 100]);
+assert.deepEqual(glLayer.visibleRegion, [{ left: 0, top: 0.5, right: 1, bottom: 1 }], "only the part that shows");
+glOptions.onSurface({ hwnd: 7, visible: false }, "hide");
+assert.equal(glLayer.visible, false, "a hidden window takes the picture down");
+assert.equal(bridge.activeOwner, null);
 
 assert.equal("glBackend" in bridge, false,
     "the removed GL4ES fallback cannot be selected at runtime");

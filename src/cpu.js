@@ -40,6 +40,7 @@ import { FloppyController } from "./floppy.js";
 import { IDEController } from "./ide.js";
 import { VirtioNet } from "./virtio_net.js";
 import { VGAScreen } from "./vga.js";
+import { DisplayHub } from "./display.js";
 import { VirtioBalloon } from "./virtio_balloon.js";
 import { V86GLPCI } from "./v86gl_pci.js";
 import { Virtio9p, Virtio9pHandler, Virtio9pProxy } from "../lib/9p.js";
@@ -95,7 +96,8 @@ export function CPU(bus, wm, stop_idling)
     // Address of offset 0 of the state layout (src/state_layout.js): 0 in
     // v86.wasm; the state block of this instance in v86-parallel.wasm, where
     // each vCPU worker has its own (src/parallel/relocate.js)
-    const state_base = this.state_base = this.wm.exports["state_base"] ? this.wm.exports["state_base"]() : 0;
+    // (an i32: a vCPU's instance may lie above 2 GiB when guest RAM is large)
+    const state_base = this.state_base = this.wm.exports["state_base"] ? this.wm.exports["state_base"]() >>> 0 : 0;
 
     /** @type {ParallelMachine} application processors in vCPU workers (start_parallel) */
     this.parallel = null;
@@ -468,7 +470,8 @@ CPU.prototype.write_blob_physical = function(blob, address)
 CPU.prototype.extended_page_bytes = function(address, count, write)
 {
     const page = Math.floor((address - this.extended_base) / 4096);
-    const frame = this.wm.exports["x64_ext_pin"](page, !!write);
+    // (an i32: the frame pool may lie above 2 GiB)
+    const frame = this.wm.exports["x64_ext_pin"](page, !!write) >>> 0;
     dbg_assert(frame !== 0 && address % 4096 + count <= 4096);
     const bytes = new Uint8Array(this.wasm_memory.buffer, frame + address % 4096, count);
     let result = bytes;
@@ -486,7 +489,7 @@ CPU.prototype.clear_stats = function()
 CPU.prototype.publish_wide_native = function(token, pointer, length)
 {
     const epoch = this.execution_epoch;
-    const bytes = new Uint8Array(this.wasm_memory.buffer, pointer, length).slice();
+    const bytes = new Uint8Array(this.wasm_memory.buffer, pointer >>> 0, length >>> 0).slice();
     const exports = this.wm.exports;
     WebAssembly.instantiate(bytes, { "e": { "m": this.wasm_memory,
         "x64_native_guard": exports["x64_native_guard"] } }).then(result => {
@@ -587,6 +590,13 @@ CPU.prototype.wasm_patch = function()
         console.assert(f, "Missing import: " + name);
         return f;
     };
+    // An address in the wasm memory, returned as an i32: above 2 GiB (a vCPU's
+    // instance when guest RAM is large) it would read as negative
+    const get_address_import = name =>
+    {
+        const f = get_import(name);
+        return (...args) => f(...args) >>> 0;
+    };
 
     this.reset_cpu = get_import("reset_cpu");
 
@@ -628,7 +638,7 @@ CPU.prototype.wasm_patch = function()
     this.apic_restore_core_events = get_import("apic_restore_core_events");
     this.apic_init_core = get_import("apic_init_core");
     this.apic_core_interrupt_pending = get_import("apic_core_interrupt_pending");
-    this.apic_addr = get_import("apic_addr");
+    this.apic_addr = get_address_import("apic_addr");
     this.apic_core_nmi_pending = get_import("apic_core_nmi_pending");
     this.update_state_flags = get_import("update_state_flags");
 
@@ -649,15 +659,21 @@ CPU.prototype.wasm_patch = function()
     this.zero_memory = get_import("zero_memory");
     this.is_memory_zeroed = get_import("is_memory_zeroed");
 
-    this.svga_allocate_memory = get_import("svga_allocate_memory");
-    this.svga_allocate_dest_buffer = get_import("svga_allocate_dest_buffer");
-    this.svga_fill_pixel_buffer = get_import("svga_fill_pixel_buffer");
-    this.svga_mark_dirty = get_import("svga_mark_dirty");
+    // Device memory behind PCI memory BARs (src/rust/cpu/mmio_ram.rs)
+    this.mmio_ram_allocate = get_import("mmio_ram_allocate");
+    this.mmio_ram_backing = get_import("mmio_ram_backing");
+    this.mmio_ram_map = get_import("mmio_ram_map");
+    this.mmio_ram_unmap = get_import("mmio_ram_unmap");
+    this.mmio_ram_read8 = get_import("mmio_ram_read8");
+    this.mmio_ram_write8 = get_import("mmio_ram_write8");
+    this.mmio_ram_mark_dirty = get_import("mmio_ram_mark_dirty");
+    this.mmio_ram_allocate_pixels = get_import("mmio_ram_allocate_pixels");
+    this.mmio_ram_fill_pixels = get_import("mmio_ram_fill_pixels");
 
-    this.get_pic_addr_master = get_import("get_pic_addr_master");
-    this.get_pic_addr_slave = get_import("get_pic_addr_slave");
-    this.get_apic_addr = get_import("get_apic_addr");
-    this.get_ioapic_addr = get_import("get_ioapic_addr");
+    this.get_pic_addr_master = get_address_import("get_pic_addr_master");
+    this.get_pic_addr_slave = get_address_import("get_pic_addr_slave");
+    this.get_apic_addr = get_address_import("get_apic_addr");
+    this.get_ioapic_addr = get_address_import("get_ioapic_addr");
 
     this.zstd_create_ctx = get_import("zstd_create_ctx");
     this.zstd_get_src_ptr = get_import("zstd_get_src_ptr");
@@ -871,11 +887,11 @@ CPU.prototype.get_machine_core_state = function()
         for(let i = 0; i < tlb.length; i++) tlb[i] = ex["context_tlb_get"](id, i >> 1, i & 1);
         return [core.running, id === this.active_core ? this.save_core_state() : core.saved,
             new Uint8Array(this.wasm_memory.buffer, this.apic_addr(id), 184).slice(),
-            new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id), ex["apic_aux_size"]()).slice(),
+            new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id) >>> 0, ex["apic_aux_size"]()).slice(),
             this.apic_peek_core_events(id), !!this.apic_core_nmi_pending(id),
             [ex["context_tsc_get"](id, false) >>> 0, ex["context_tsc_get"](id, true) >>> 0],
             tlb, core.slices, core.steps,
-            new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id), ex["core_statistics_size"]()).slice(), ex["exception_shutdown"](id), this.get_wide_tlb(id)];
+            new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id) >>> 0, ex["core_statistics_size"]()).slice(), ex["exception_shutdown"](id), this.get_wide_tlb(id)];
     });
     return [2, this.cores.length, this.active_core, this.scheduler_quantum,
         this.scheduler_seed, this.scheduler_round, cores, CORE_STATE_RANGES.map(range => range.slice())];
@@ -943,11 +959,11 @@ CPU.prototype.set_machine_core_state = function(state)
         });
         this.cores[id] = { running: saved[0], saved: fixed, slices: saved[8], steps: saved[9] };
         new Uint8Array(this.wasm_memory.buffer, this.apic_addr(id), 184).set(saved[2]);
-        new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id), ex["apic_aux_size"]()).set(saved[3]);
+        new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id) >>> 0, ex["apic_aux_size"]()).set(saved[3]);
         this.apic_restore_core_events(id, saved[4], saved[5]);
         ex["exception_restore"](id, saved[11] || 0);
         ex["context_tsc_set"](id, saved[6][0], saved[6][1]);
-        if(saved[10]) new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id), ex["core_statistics_size"]()).set(saved[10]);
+        if(saved[10]) new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id) >>> 0, ex["core_statistics_size"]()).set(saved[10]);
         for(let i = 0; i < saved[7].length; i += 2) ex["context_tlb_push"](id, saved[7][i], saved[7][i + 1]);
         if(saved[12]) this.with_wide_state_buffer(saved[12], (pointer, count) => {
             if(!ex["x64_tlb_snapshot_restore"](id, pointer, count)) throw new Error("Cannot restore wide TLB");
@@ -2645,7 +2661,8 @@ CPU.prototype.init = function(settings, device_bus)
 
         this.devices.dma = new DMA(this);
 
-        this.devices.vga = new VGAScreen(this, device_bus, settings.screen, settings.vga_memory_size || 8 * 1024 * 1024);
+        this.devices.display = new DisplayHub(device_bus, settings.screen);
+        this.devices.vga = new VGAScreen(this, device_bus, this.devices.display, settings.vga_memory_size || 8 * 1024 * 1024);
 
         this.devices.ps2 = new PS2(this, device_bus);
         this.devices.vmware = new VMwareMouse(this, device_bus);
@@ -3359,6 +3376,7 @@ CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
 {
     const pit_time = this.devices.pit.timer(now, false);
     const rtc_time = this.devices.rtc.timer(now, false);
+    const display_time = this.devices.display.timer(now);
 
     let acpi_time = 100;
     let apic_time = 100;
@@ -3368,7 +3386,7 @@ CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
         apic_time = this.apic_timer(now);
     }
 
-    return Math.min(pit_time, rtc_time, acpi_time, apic_time);
+    return Math.min(pit_time, rtc_time, display_time, acpi_time, apic_time);
 };
 
 CPU.prototype.debug_init = function()

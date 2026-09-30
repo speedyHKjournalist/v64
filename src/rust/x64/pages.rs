@@ -6,7 +6,9 @@
 //! backing page. Entry translates RIP for execution first, so a function only
 //! runs while its page maps to the bytes it was compiled from; writes to the
 //! backing page (CPU, DMA, host) retire it through jit::jit_dirty_page.
-use super::{jac, memory, pagegen, paging, physical, state};
+//! Code in extended RAM has keys from extended::CODE_KEY_BASE on (the
+//! extended page, whichever frame holds it); extended.rs watches its writes.
+use super::{extended, jac, memory, pagegen, paging, physical, state};
 use crate::cpu::{apic, cpu, execution, global_pointers as gp};
 use crate::page::Page;
 use std::collections::{HashMap, HashSet};
@@ -40,7 +42,8 @@ enum Phase {
     Dead,
 }
 struct Function {
-    /// backing page number (a function serves every mapping of the page)
+    /// backing page number (a function serves every mapping of the page),
+    /// or an extended page's key (see code_key)
     page: u32,
     id: u64,
     slot: u32,
@@ -208,7 +211,7 @@ pub unsafe fn allowed() -> bool {
 }
 
 /// Per core: the last code page translation (access cache epoch | user,
-/// linear page, backing). An x64 TLB invalidation changes the epoch.
+/// linear page, key). An x64 TLB invalidation changes the epoch.
 static mut CODE_TLB: [(u64, u64, u32, bool); 8] = [(0, 0, 0, false); 8];
 
 /// Chaining (pagegen::Emitter::chain): a page function leaving its page
@@ -297,19 +300,19 @@ unsafe fn unchain_slot(slot: u32) {
         }
     }
 }
-/// The backing page of the code page at `rip`, and whether its translation
-/// is global.
+/// The key of the code page at `rip` (see code_key), and whether its
+/// translation is global.
 unsafe fn code_page(rip: u64) -> Option<(u32, bool)> {
     let core = apic::current_core();
     let tag = jac::epoch_bits(core) | (*gp::cpl == 3) as u64;
-    let (cached_tag, linear, backing, global) = CODE_TLB[core];
+    let (cached_tag, linear, page, global) = CODE_TLB[core];
     if cached_tag == tag && linear == rip >> 12 {
-        return Some((backing, global));
+        return Some((page, global));
     }
     let (physical, _, global) = memory::translate_page_execute(rip).ok()?;
-    let backing = code_backing(physical)?;
-    CODE_TLB[core] = (tag, rip >> 12, backing, global);
-    Some((backing, global))
+    let page = code_key(physical)?;
+    CODE_TLB[core] = (tag, rip >> 12, page, global);
+    Some((page, global))
 }
 
 /// INVLPG `address` on `core`: the cached code translation may be of that
@@ -326,13 +329,18 @@ pub unsafe fn forget_code_page(core: usize, address: u64) {
     }
 }
 
-/// RAM backing page of the code page at physical `address`.
-unsafe fn code_backing(address: u64) -> Option<u32> {
+/// The key of the code page at physical `address`: its RAM backing page
+/// number, or (above every such number) its extended page's key.
+unsafe fn code_key(address: u64) -> Option<u32> {
     if physical::plain_ram(address & !4095, 4096) {
-        return Some((address & !4095) as u32);
+        return Some((address >> 12) as u32);
     }
-    jac::ram_backing(address)
+    match jac::ram_backing(address) {
+        Some(backing) => Some(backing >> 12),
+        None => extended::code_key(address),
+    }
 }
+fn is_extended(page: u32) -> bool { page >= extended::CODE_KEY_BASE }
 
 unsafe fn release_dead(r: &mut Runtime) {
     if ACTIVE {
@@ -351,11 +359,10 @@ pub unsafe fn run(budget: u32) -> Attempt {
         return miss();
     }
     let rip = state::read_rip();
-    let Some((backing, global)) = code_page(rip)
+    let Some((page, global)) = code_page(rip)
     else {
         return miss();
     };
-    let page = backing >> 12;
     let offset = (rip & 4095) as u16;
     let r = rt();
     if !r.enabled {
@@ -400,7 +407,7 @@ pub unsafe fn run(budget: u32) -> Attempt {
                 let state = r.pages.entry(page).or_default();
                 if state.misses >= RECOMPILE_MISSES && state.compiles < MAX_RECOMPILES {
                     state.misses = 0;
-                    return compile(page, backing);
+                    return compile(page);
                 }
                 // Meanwhile the function steps from here to its next block
                 // start (pagegen: unserved dispatch) and notes the entry.
@@ -426,7 +433,7 @@ pub unsafe fn run(budget: u32) -> Attempt {
                     state.entries[offset as usize / 64] |= 1 << (offset % 64);
                     state.entry_count = 1;
                 }
-                return compile(page, backing);
+                return compile(page);
             }
             miss()
         },
@@ -466,11 +473,11 @@ pub unsafe fn x64_page_unserved(rip: u64) -> i32 {
     if !far {
         return 0;
     }
-    let Some((backing, _)) = code_page(rip)
+    let Some((page, _)) = code_page(rip)
     else {
         return 1;
     };
-    note_unserved(rt(), backing >> 12, (rip & 4095) as u16) as i32
+    note_unserved(rt(), page, (rip & 4095) as u16) as i32
 }
 
 fn note_entry(r: &mut Runtime, page: u32, offset: u16) {
@@ -552,14 +559,19 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
 }
 
 
-unsafe fn compile(page: u32, backing: u32) -> Attempt {
+unsafe fn compile(page: u32) -> Attempt {
     let r = rt();
     let state = r.pages.entry(page).or_default();
     state.compiles += 1;
     let recompile = state.compiles > 1;
     let mut entries: Vec<u16> = (0..4096u16).filter(|&o| bit(&state.entries, o)).collect();
-    let bytes =
-        std::slice::from_raw_parts(crate::cpu::memory::mem8.add(backing as usize), 4096).to_vec();
+    let bytes = if is_extended(page) {
+        extended::copy_page(page - extended::CODE_KEY_BASE)
+    }
+    else {
+        std::slice::from_raw_parts(crate::cpu::memory::mem8.add((page << 12) as usize), 4096)
+            .to_vec()
+    };
     // Likely function starts: 16-byte aligned after INT3 padding (MSVC x64
     // code). Serving them from the first compile avoids most recompiles for
     // entries that other pages call later.
@@ -601,8 +613,15 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
     release_dead(r);
     let id = r.next_id;
     r.next_id += 1;
-    // Watching the page retires cached write translations to it (jac).
-    let Some(slot) = crate::jit::ir_reserve_slot(id, HashSet::from([Page::page_of(backing)]))
+    // Watching the page retires cached write translations to it (jac). An
+    // extended page is watched by extended.rs, once its old function is gone.
+    let watched = if is_extended(page) {
+        HashSet::new()
+    }
+    else {
+        HashSet::from([Page::page_of(page << 12)])
+    };
+    let Some(slot) = crate::jit::ir_reserve_slot(id, watched)
     else {
         rt().stats[FAILED] += 1;
         return miss();
@@ -610,6 +629,9 @@ unsafe fn compile(page: u32, backing: u32) -> Attempt {
     let r = rt();
     if let Some(&old) = r.by_page.get(&page) {
         retire(r, old);
+    }
+    if is_extended(page) {
+        extended::watch_code(page - extended::CODE_KEY_BASE);
     }
     let reusable = |f: &Function, releases: &Vec<(u32, u64)>| {
         f.phase == Phase::Dead && !releases.iter().any(|&(s, i)| s == f.slot && i == f.id)
@@ -672,6 +694,9 @@ fn retire_with(r: &mut Runtime, index: usize, unchain: bool) {
     }
     if r.by_page.get(&page) == Some(&index) {
         r.by_page.remove(&page);
+        if is_extended(page) {
+            unsafe { extended::unwatch_code(page - extended::CODE_KEY_BASE) };
+        }
     }
     unsafe {
         if FAST[fast_slot(page)].0 == page {
@@ -699,8 +724,9 @@ pub fn x64_page_install(id: u64, slot: u32) -> bool {
     // other cores mark the page first, then its bytes are checked once more
     let (page, source) = (f.page, f.source);
     let backing = match r.by_page.get(&page) {
-        Some(_) => page,
-        None => return false,
+        // (extended pages are not compiled then: retire_extended)
+        Some(_) if !is_extended(page) => page,
+        _ => return false,
     };
     if !crate::jit::wait_pages_published(std::iter::once(Page::page_of(backing << 12)), 0.5) {
         return false;
@@ -775,7 +801,8 @@ pub fn x64_page_cancel(id: u64, slot: u32) {
     unsafe { release_dead(r) };
 }
 
-/// A write to a watched backing page (see jit::jit_dirty_page).
+/// A write to a watched backing page (see jit::jit_dirty_page), or to an
+/// extended page with code (key from extended::CODE_KEY_BASE on).
 pub fn dirty_page(page: u32) {
     let r = rt();
     let Some(&index) = r.by_page.get(&page)
@@ -791,6 +818,20 @@ pub fn dirty_page(page: u32) {
         r.stats[INVALIDATED] += 1;
     }
     // Slots are released at the next entry, outside the JIT state lock.
+}
+
+/// Cores start to run in workers (crate::parallel): writes to extended RAM
+/// are no longer tracked for code, so its page functions go.
+pub fn retire_extended() {
+    let r = rt();
+    unsafe {
+        CODE_TLB = [(0, 0, 0, false); 8];
+    }
+    for i in 0..r.functions.len() {
+        if is_extended(r.functions[i].page) {
+            retire(r, i);
+        }
+    }
 }
 
 /// Retire everything (jit_clear_cache: reset, restore, mapping changes).
@@ -883,7 +924,8 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
     };
     let Some(backing) = jac::ram_backing(physical)
     else {
-        // extended RAM (never code): its frame, while cores share this thread
+        // extended RAM: its frame, while cores share this thread (never a
+        // write entry for a page with a page function: extended::cache_frame)
         if let Some(host) = super::extended::cache_frame(physical, write) {
             let backing = host.wrapping_sub(crate::cpu::memory::mem8 as u32);
             jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing, large, global);

@@ -108,6 +108,24 @@ class GLStream {
         return this.record(constants.CTRL.MAKE_CURRENT, payload);
     }
 
+    // V86GL_CTRL_WINDOW_STATE: flags as D9WGWindowState's; `rects` (client
+    // coordinates, [left, top, right, bottom]) sets the region flag
+    windowState(hwnd, flags, x, y, width, height, rects) {
+        const payload = new Uint8Array(24 + (rects ? 4 + rects.length * 16 : 0));
+        const view = new DataView(payload.buffer);
+        view.setUint32(0, hwnd, true);
+        view.setUint32(4, (flags | (rects ? 1 << 7 : 0)) >>> 0, true);
+        view.setInt32(8, x, true);
+        view.setInt32(12, y, true);
+        view.setUint32(16, width, true);
+        view.setUint32(20, height, true);
+        if (rects) {
+            view.setUint32(24, rects.length, true);
+            rects.forEach((rect, i) => rect.forEach((v, j) => view.setInt32(28 + i * 16 + j * 4, v, true)));
+        }
+        return this.record(constants.CTRL.WINDOW_STATE, payload);
+    }
+
     names(opcode, list) {
         const payload = new Uint8Array(4 + list.length * 4);
         const view = new DataView(payload.buffer);
