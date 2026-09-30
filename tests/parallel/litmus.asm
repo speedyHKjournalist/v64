@@ -237,7 +237,8 @@ phase_counters:
     jnz .retry64
     pop ecx
     pop ebx
-    ; mixed widths (totals stay below 2^16: no carry into the upper word)
+    ; mixed widths: both add to the low word, which wraps for large totals;
+    ; only the dword add carries into the upper word (litmus.mjs bounds it)
     lock add dword [C_MIXED], 1
     lock add word [C_MIXED], 1
     dec ecx

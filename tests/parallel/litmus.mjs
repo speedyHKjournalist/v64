@@ -60,17 +60,26 @@ async function run(mode, cores)
     }
     const ms = performance.now() - t0;
     const u32 = offset => view().getUint32(CONTROL + offset, true);
+    const u16 = offset => view().getUint16(CONTROL + offset, true);
     const expected = cores * rounds;
+    // mixed widths: every dword and word add increments the low word, which
+    // wraps once 2 * expected reaches 2^16; the upper word only takes the
+    // carries of the wraps a dword add made (a word add drops its carry), so
+    // it is at most the number of wraps
+    const mixed_carries = u16(0x304);
+    const mixed_wraps = Math.floor(2 * expected / 0x10000);
     const counters = { inc: u32(16), xadd: u32(20), cmpxchg: u32(24), xchg_lock: u32(28), bts_lock: u32(32),
-        cmpxchg8b: u32(40) + u32(44) * 2 ** 32, mixed_widths: u32(0x302),
+        cmpxchg8b: u32(40) + u32(44) * 2 ** 32, mixed_widths: u16(0x302),
         ...(long_mode ? { cmpxchg16b_low: u32(0x320) + u32(0x324) * 2 ** 32, cmpxchg16b_high: u32(0x328) + u32(0x32C) * 2 ** 32 } : {}) };
     const errors = PHASES.map((_, i) => u32(64 + 4 * i));
     const ipis = Array.from({ length: cores }, (_, core) => u32(IPI_COUNT + 4 * core));
     const steps = cpu.get_diagnostics().parallel?.cores.map(c => c.steps + (jit ? " (" + c.jit + " compiled entries)" : ""));
     await emulator.destroy();
     assert.deepEqual(counters, { inc: expected, xadd: 2 * expected, cmpxchg: expected, xchg_lock: expected,
-        bts_lock: expected, cmpxchg8b: expected, mixed_widths: 2 * expected,
+        bts_lock: expected, cmpxchg8b: expected, mixed_widths: 2 * expected % 0x10000,
         ...(long_mode ? { cmpxchg16b_low: 2 * expected, cmpxchg16b_high: expected } : {}) }, `${mode} ${cores} cores: atomic counters`);
+    assert.ok(mixed_carries <= mixed_wraps,
+        `${mode} ${cores} cores: mixed widths: ${mixed_carries} carries into the upper word, but the low word wrapped ${mixed_wraps} times`);
     errors.forEach((count, i) => i && assert.equal(count, 0, `${mode} ${cores} cores: ${PHASES[i]}: ${count} violations`));
     assert.deepEqual(ipis, Array(cores).fill(rounds), `${mode} ${cores} cores: IPIs received per core`);
     console.log(`${mode} ${cores} cores: ${rounds} rounds passed in ${(ms / 1000).toFixed(1)}s` +
