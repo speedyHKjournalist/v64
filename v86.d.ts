@@ -357,16 +357,25 @@ export interface V86Options {
     cpu_worker?: boolean;
     /** Worker bundle URL, relative to the page. Default: build/cpu-worker.js. */
     cpu_worker_url?: string;
-    /** Optional custom virtio graphics device (historical option name); requires the virtio v86gl.sys driver. Automatically enabled by graphics_adapter. */
-    v86gl_pci?: boolean | { port?: number; maxBatchBytes?: number };
-    /** Factory exported as installV86GLGraphicsAdapter by build/glbridge/libv86-webgpu.js. */
-    graphics_adapter?: (emulator: V86, options: V86GraphicsOptions & {
-        container: HTMLElement;
-        screenCanvas: HTMLCanvasElement;
-        isGraphical: () => boolean;
-        managedState: boolean;
-    }) => V86GraphicsAdapter;
-    graphics_options?: V86GraphicsOptions;
+    /**
+     * The display hardware the guest sees.
+     * @default "bochs_vga"
+     */
+    graphics_adapter?: "bochs_vga";
+    /**
+     * Forward the guest's Direct3D/DirectDraw/OpenGL calls to WebGPU. Needs
+     * build/glbridge/libv86-webgpu.js loaded before the emulator is created,
+     * a browser screen container, and the v86gl driver and proxy DLLs in the
+     * guest (docs/glbridge.md). Works with any graphics_adapter.
+     */
+    graphics_proxy?: boolean | V86GraphicsProxyOptions;
+    /**
+     * Custom virtio devices. v86 provides the PCI function, the virtqueues,
+     * the interrupt and the transport's part of a snapshot; the descriptor
+     * implements the device. Descriptors run on the CPU's thread, so they
+     * cannot be combined with cpu_worker.
+     */
+    virtio_devices?: VirtioDeviceDescriptor[];
     /**
      * Reference to the v86 wasm exported function.
      */
@@ -740,30 +749,76 @@ export interface V86Options {
     parallel1?: boolean;
 }
 
-/** Optional browser graphics bundle's lifecycle interface. */
-export interface V86GraphicsAdapter {
-    ready: Promise<void>;
-    failed?: Error | null;
-    canvas: HTMLCanvasElement;
-    screenChanged(): void;
-    serializeCheckpoint(): Uint8Array;
-    releaseCheckpoint?(): void;
-    onPCIStateRestored(checkpoint?: Uint8Array): void;
-    prepareSaveState(): Promise<{ entries: number; bytes: number }>;
-    waitForIdle(flush?: boolean, allowFailure?: boolean): Promise<void>;
-    /** Worker batch completion, including asynchronous readbacks. */
-    waitForSubmittedBatches(): Promise<void>;
-    beginStateRestore(): void;
-    finishStateRestore(): Promise<{ hasGLState: boolean }>;
-    cancelStateRestore(): void;
-    hideOverlayCanvas(includeSwapChains?: boolean): void;
-    makeScreenshot(): HTMLImageElement | null;
-    reset(): Promise<void>;
-    destroy(): Promise<void>;
+/** A custom virtio device (see V86Options.virtio_devices). */
+export interface VirtioDeviceDescriptor {
+    /** Unique among the devices; the key of the device's part of a snapshot. */
+    name: string;
+    /** PCI device ID; the vendor is always 0x1AF4. */
+    device_id: number;
+    subsystem_device_id?: number;
+    /** PCI slot (1-31). A stable slot keeps the guest's device instance. Default: the first free slot from 0x10. */
+    pci_slot?: number;
+    /** Base of four 256-byte I/O windows (256-byte aligned). Default: allocated from 0xE000. */
+    io_base?: number;
+    /** Device feature bits; VIRTIO_F_VERSION_1 (32) is added. */
+    features?: number[];
+    /** Queue sizes (powers of two). */
+    queues: { size: number }[];
+    /** Device-specific configuration space, at most 256 bytes. */
+    config?: { bytes: 1 | 2 | 4; name?: string; read(): number; write?(value: number): void }[];
+    /** Called once with the handle, after the PCI function exists. */
+    init?(device: VirtioDeviceHandle): void;
+    /** The driver notified a queue. Only called after DRIVER_OK. */
+    notify(queue: number): void;
+    /** The driver reset the device, or the machine reset. */
+    reset?(): void;
+    /** Work the device still waits for from elsewhere (0 when none); saving waits for 0. */
+    busy?(): number;
+    /** Synchronous. Numbers, strings, arrays and typed arrays only (no plain objects). */
+    get_state?(): unknown;
+    set_state?(state: unknown): void;
+    /**
+     * Recognize state[92] of a snapshot from before custom devices; return
+     * [transport state, device state, host state], or null.
+     */
+    upgrade_state?(slot: unknown): [unknown, unknown, unknown] | null;
 }
 
-export interface V86GraphicsOptions {
-    graphicsCanvas?: HTMLCanvasElement;
+/** A request popped from a virtqueue. */
+export interface VirtioRequest {
+    /** Bytes the driver wrote for the device. */
+    readable: number;
+    /** Bytes the device may write back. */
+    writable: number;
+    read(): Uint8Array;
+    /** Returns the number of bytes written. */
+    write(bytes: Uint8Array): number;
+    /** Hand the request back (staged until flush). No effect after a reset or restore. */
+    complete(): void;
+}
+
+/** What a VirtioDeviceDescriptor gets from v86. */
+export interface VirtioDeviceHandle {
+    name: string;
+    /** DRIVER_OK is set and neither side failed. */
+    is_ready(): boolean;
+    has_request(queue: number): boolean;
+    pop_request(queue: number): VirtioRequest | null;
+    /** Publish completed requests and raise the interrupt. */
+    flush(queue: number): void;
+    /** Guest RAM, not a device window, a hole or the legacy VGA/ROM range. */
+    is_ram(address: number, length: number): boolean;
+    /** A view when one contiguous backing holds the range, a copy otherwise. Throws a RangeError for non-RAM. */
+    read_memory(address: number, length: number): Uint8Array;
+    write_memory(bytes: Uint8Array, address: number): void;
+    is_feature_negotiated(bit: number): boolean;
+    needs_reset(): void;
+    config_changed(): void;
+}
+
+/** Options of graphics_proxy. */
+export interface V86GraphicsProxyOptions {
+    /** WebGPU could not start; the screen stays on its 2D canvas. */
     onError?: (error: Error) => void;
     /** Compressed RAM cache budget (default 64 MiB); excess pages use IndexedDB. */
     graphicsJournalMemoryBytes?: number;
@@ -778,7 +833,8 @@ export interface V86GraphicsOptions {
 
 export class V86 {
     constructor(options: V86Options);
-    graphics_adapter?: V86GraphicsAdapter;
+    /** The graphics proxy's plugin, when graphics_proxy is set (for diagnostics). */
+    graphics_proxy?: object | null;
 
     /**
      * Start emulation. Do nothing if emulator is running already. Can be asynchronous.

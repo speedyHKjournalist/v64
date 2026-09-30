@@ -155,7 +155,7 @@ export class GraphicsPerformance
     discover()
     {
         if(!this.active) return;
-        const bridge = this.emulator["graphics_adapter"];
+        const bridge = this.emulator["graphics_proxy"]?.["bridge"];
         if(!bridge) return;
         this.data["available"] = true;
         if(!this.seen.has(bridge))

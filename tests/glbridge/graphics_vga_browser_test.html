@@ -29,13 +29,13 @@
         bios: { buffer: new Uint8Array(65536).fill(0xf4).buffer },
         screen_container: container, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" },
-        graphics_adapter: graphics ? installV86GLGraphicsAdapter : undefined,
+        graphics_proxy: graphics,
         initial_state, autostart: false,
     });
     const loaded = emulator => new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
     let emulator = create();
     await loaded(emulator);
-    const bridge = emulator.graphics_adapter;
+    const bridge = emulator.graphics_proxy.bridge;
     const compositor = bridge.compositor;
     const layers = () => compositor.layers;
     check(!bridge.failed, "graphics initialization succeeded");
@@ -96,7 +96,7 @@
         submit(2, 0, 32 + commands.length, 1);
     };
     draw();
-    check(cpu.devices.v86gl_pci.submitCount === 1, "virtqueue submitted a real WebGPU frame");
+    check(cpu.devices.virtio_devices.find(device => device.name === "v86gl").descriptor.get_state()[5] === 1, "virtqueue submitted a real WebGPU frame");
     const gl = bridge.glCanvas.layer;
     const placed = () => [gl.x, gl.y, gl.width, gl.height, gl.visible].join();
     check(placed() === "100,80,200,120,true", "the GL window is a layer where the guest put it: " + placed());
@@ -136,15 +136,15 @@
     check(container.querySelectorAll("canvas").length === 1 && bridge.destroyed, "destroy preserves the caller-owned canvas and stops graphics");
     emulator = create({ buffer: state });
     await loaded(emulator);
-    check(emulator.graphics_adapter.glJournalBytes === journalBytes && !emulator.graphics_adapter.restoringState,
+    check(emulator.graphics_proxy.bridge.glJournalBytes === journalBytes && !emulator.graphics_proxy.bridge.restoringState,
         "initial_state restores graphics before emulator-loaded");
     await emulator.restart();
-    check(emulator.graphics_adapter.glJournalBytes === 0 && emulator.graphics_adapter.activeOwner === null,
+    check(emulator.graphics_proxy.bridge.glJournalBytes === 0 && emulator.graphics_proxy.bridge.activeOwner === null,
         "restart clears graphics resources and returns to VGA");
     await emulator.destroy();
     emulator = create(undefined, false);
     await loaded(emulator);
-    check(!emulator.graphics_adapter && !emulator.v86.cpu.devices.v86gl_pci,
+    check(!emulator.graphics_proxy && !emulator.v86.cpu.devices.virtio_devices,
         "VGA-only instances do not create graphics hardware or a GPU adapter");
     check(container.querySelectorAll("canvas").length === 1 && container.querySelector("canvas").getContext("2d"),
         "the next emulator in the container draws in 2D although WebGPU had its canvas");
@@ -153,7 +153,7 @@
     await emulator.destroy();
     emulator = create({ buffer: vgaOnlyState });
     await loaded(emulator);
-    check(emulator.graphics_adapter.glJournalBytes === 0 && !emulator.graphics_adapter.restoringState,
+    check(emulator.graphics_proxy.bridge.glJournalBytes === 0 && !emulator.graphics_proxy.bridge.restoringState,
         "old snapshots without the graphics PCI device load with an empty graphics checkpoint");
     await emulator.destroy();
     return { status: "PASS", checks };

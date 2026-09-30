@@ -35,8 +35,7 @@
             screen_container: document.getElementById("screen"),
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false,
-            graphics_adapter: installV86GLGraphicsAdapter,
-            graphics_options: { graphicsJournalMemoryBytes: 1, hostOptions: { gpu }, gl: { hostOptions: { gpu } } },
+            graphics_proxy: { graphicsJournalMemoryBytes: 1, hostOptions: { gpu }, gl: { hostOptions: { gpu } } },
             initial_state: state ? { buffer: state } : undefined });
         await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
         emulator.v86.cpu.devices.vga.graphical_mode = true;
@@ -66,11 +65,11 @@
         }
         return bytes;
     };
-    const send = (emulator, bytes, flags = 0) => emulator.graphics_adapter.pushPCIBatch({
+    const send = (emulator, bytes, flags = 0) => emulator.graphics_proxy.bridge.pushPCIBatch({
         bytes, flags, batchAddr: 0x100020, descAddr: 0x100000,
         writeGuestMemory() { throw new Error("unexpected DMA write in pixel fixture"); } });
     // D3D9 heartbeat writes are normal live traffic, but replay has no guest writer.
-    const sendD3D = (emulator, bytes) => emulator.graphics_adapter.pushPCIBatch({ bytes,
+    const sendD3D = (emulator, bytes) => emulator.graphics_proxy.bridge.pushPCIBatch({ bytes,
         writeGuestMemory() {}, batchAddr: 0x100020, descAddr: 0x100000 });
     const createDevice = [2, [2, 0x1234, 0, 0, 64, 64, 22, 1, 0x20, 0, 75, 0, 0]];
     const color = (value) => [5, [2, 1, value, 0x3f800000, 0, 0]];
@@ -89,11 +88,11 @@
             0, 0, 64, 64, 0xff00ff00, 0, 0, 0]] ]));
     emulator.write_memory(new Uint8Array([42]), 0x80000);
     const saved = await emulator.save_state();
-    const journal = emulator.graphics_adapter.graphicsJournal;
+    const journal = emulator.graphics_proxy.bridge.graphicsJournal;
     check(!!journal.compressor.worker, "journal compression runs in a dedicated worker");
     check(mainCompressions === 0, "saving does not compress on the emulation thread");
     check(journal.residentBytes <= 1 && journal.pages.some(page => page.key), "compressed pages spill to IndexedDB");
-    check(!emulator.graphics_adapter.preparedCheckpoint, "save releases its temporary compressed checkpoint");
+    check(!emulator.graphics_proxy.bridge.preparedCheckpoint, "save releases its temporary compressed checkpoint");
     const pixel = async (device, texture) => {
         const buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
         const encoder = device.createCommandEncoder();
@@ -106,7 +105,7 @@
         return rgba.join();
     };
     const verify = async label => {
-        const bridge = emulator.graphics_adapter, device = bridge.glExecutor.device;
+        const bridge = emulator.graphics_proxy.bridge, device = bridge.glExecutor.device;
         check(await pixel(device, bridge.glExecutor.backBuffer) === "255,255,255,255", label + " GL rendered pixels");
         check(await pixel(device, bridge.d3d8Executor.devices.get(2).backBuffer) === "0,0,255,255", label + " D3D8 unfinished back buffer");
         const sessions = bridge.d3d9Executor.sessionStates;
@@ -117,7 +116,7 @@
     await verify("before save");
     // This tick used to expire the D3D8 canvas attachment mid-frame.
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const bridge = emulator.graphics_adapter;
+    const bridge = emulator.graphics_proxy.bridge;
     const execute = bridge.executePCIBatch.bind(bridge);
     let replayFrames = 0;
     bridge.executePCIBatch = async (event, bytes) => {

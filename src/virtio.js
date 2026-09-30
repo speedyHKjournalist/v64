@@ -26,10 +26,10 @@ const VIRTIO_PCI_CAP_PCI_CFG = 5;
 
 const VIRTIO_STATUS_ACKNOWLEDGE = 1;
 const VIRTIO_STATUS_DRIVER = 2;
-const VIRTIO_STATUS_DRIVER_OK = 4;
+export const VIRTIO_STATUS_DRIVER_OK = 4;
 const VIRTIO_STATUS_FEATURES_OK = 8;
-const VIRTIO_STATUS_DEVICE_NEEDS_RESET = 64;
-const VIRTIO_STATUS_FAILED = 128;
+export const VIRTIO_STATUS_DEVICE_NEEDS_RESET = 64;
+export const VIRTIO_STATUS_FAILED = 128;
 
 // ISR bits (isr_status values).
 
@@ -1242,25 +1242,14 @@ VirtQueue.prototype.pop_request = function()
 VirtQueue.prototype.push_reply = function(bufchain)
 {
     if(!bufchain.valid) return;
-    this.push_reply_id(bufchain.head_idx, bufchain.length_written);
-};
-
-/**
- * Complete an already validated fixed-layout request without allocating a
- * generic buffer-chain object. Uses the same used-ring and interrupt path.
- * @param {number} head_idx
- * @param {number} length_written
- */
-VirtQueue.prototype.push_reply_id = function(head_idx, length_written)
-{
     dbg_assert(this.used_addr, "VirtQueue addresses must be configured before use");
     dbg_assert(this.num_staged_replies < this.size, "VirtQueue replies must not exceed queue size");
 
     const used_idx = this.used_get_idx() + this.num_staged_replies & this.mask;
     dbg_log("Push reply: used_idx=" + used_idx +
-        " desc_idx=" + head_idx, LOG_VIRTIO);
+        " desc_idx=" + bufchain.head_idx, LOG_VIRTIO);
 
-    this.used_set_entry(used_idx, head_idx, length_written);
+    this.used_set_entry(used_idx, bufchain.head_idx, bufchain.length_written);
     this.num_staged_replies++;
 };
 

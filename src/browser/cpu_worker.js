@@ -13,13 +13,21 @@ export function encode_worker_file(f)
         "fixed_chunk_size": f.fixed_chunk_size, "use_parts": f.use_parts };
 }
 
-export function encode_worker_options(o)
+/**
+ * @param {!Object} o
+ * @param {!Array<!Object>=} plugins device plugins: the worker loads their devices' scripts
+ */
+export function encode_worker_options(o, plugins = [])
 {
     const file = encode_worker_file;
     const fs = o.filesystem;
     if(o.wasm_fn || fs?.handle9p) throw new Error("CPU Worker cannot transfer wasm_fn or handle9p callbacks");
+    if(o["virtio_devices"]?.length) throw new Error("CPU Worker cannot transfer virtio_devices; their descriptors run on the CPU's thread");
     return {
-        "graphics_available": !!o["graphics_adapter"],
+        "device_plugins": plugins.map(plugin => {
+            if(!plugin["worker_script"]) throw new Error("CPU Worker: " + plugin["name"] + " has no worker_script for its device");
+            return { "name": plugin["name"], "script": new URL(plugin["worker_script"], location.href).href };
+        }),
         "wasm_path": new URL(o.wasm_path || "build/v86.wasm", location.href).href,
         "wasm_fallback_path": o["wasm_fallback_path"] && new URL(o["wasm_fallback_path"], location.href).href,
         // (cores in vCPU workers, which this worker starts: absolute URLs)
@@ -47,7 +55,6 @@ export function encode_worker_options(o)
         "preserve_mac_from_state_image": o.preserve_mac_from_state_image,
         "mac_address_translation": o.mac_address_translation,
         "net_device": { "type": o.net_device?.type || "ne2k" },
-        "v86gl_pci": o.v86gl_pci || (o["graphics_adapter"] ? { "maxBatchBytes": 16 * 1024 * 1024 } : undefined),
         "bios": file(o.bios), "vga_bios": file(o.vga_bios), "hda": file(o.hda), "hdb": file(o.hdb),
         "fda": file(o.fda), "fdb": file(o.fdb), "cdrom": file(o.cdrom),
         "multiboot": file(o.multiboot), "bzimage": file(o.bzimage), "initrd": file(o.initrd),
@@ -72,7 +79,6 @@ export class CPUWorkerController
         this.epoch = 1;
         this.failed = null;
         this.closed = false;
-        this.graphics_work = Promise.resolve();
         this.startup_resolve = null;
         this.startup_reject = null;
         this.startup = new Promise((resolve, reject) => {
@@ -88,11 +94,14 @@ export class CPUWorkerController
         this.ready = false;
         this.screen_queue = [];
         this.device_info = {};
-        this.restore_checkpoint = null;
         this.recording_report = null;
         this.direct_audio = false;
-        this.stats = { "mode": "worker", "graphics_batches": 0, "graphics_bytes": 0,
-            "graphics_pending": 0, "graphics_peak_pending": 0 };
+        this.stats = { "mode": "worker" };
+        // Device plugins: the host side here, the device in the worker
+        this.device_handlers = new Map();
+        // (sent before the worker has made the devices)
+        this.device_queue = [];
+        this.devices_ready = false;
         const url = options["cpu_worker_url"] || "build/cpu-worker.js";
         this.worker = new Worker(url, { "name": "v86 CPU" });
         this.worker.onmessage = e => this.receive(e.data);
@@ -106,6 +115,23 @@ export class CPUWorkerController
     }
 
     post(message, transfer = []) { this.worker.postMessage(message, transfer); }
+
+    /**
+     * The host side's end of the channel to a plugin's device in the worker
+     * @param {string} name
+     */
+    device_channel(name)
+    {
+        return {
+            "remote": true,
+            "post": (message, transfer) => {
+                if(this.closed || this.failed) return;
+                if(!this.devices_ready) this.device_queue.push([name, message, transfer]);
+                else this.post({ "type": "device", "epoch": this.epoch, "name": name, "message": message }, transfer || []);
+            },
+            "listen": handler => { this.device_handlers.set(name, handler); },
+        };
+    }
 
     rpc(method, args = [], transfer = [])
     {
@@ -135,16 +161,21 @@ export class CPUWorkerController
 
     async start()
     {
-        await this.emulator["graphics_adapter"]?.["ready"];
-        await this.rpc("init", [encode_worker_options(this.options)]);
-        if(this.restore_checkpoint)
+        const plugins = this.emulator.device_plugins;
+        await Promise.all(this.emulator.plugins_ready);
+        const host_states = await this.rpc("init", [encode_worker_options(this.options, plugins)]);
+        this.devices_ready = true;
+        for(const [name, message, transfer] of this.device_queue.splice(0))
         {
-            const g = this.emulator["graphics_adapter"];
-            if(!g) throw new Error("Snapshot contains graphics state but no graphics adapter is configured");
-            g["beginStateRestore"]();
-            g["onPCIStateRestored"](this.restore_checkpoint);
-            await g["finishStateRestore"]();
-            this.restore_checkpoint = null;
+            this.post({ "type": "device", "epoch": this.epoch, "name": name, "message": message }, transfer || []);
+        }
+        // initial_state
+        for(const plugin of plugins)
+        {
+            const host_state = host_states[plugin["name"]];
+            if(host_state === undefined) continue;
+            plugin["before_restore"] && await plugin["before_restore"]();
+            plugin["after_restore"] && await plugin["after_restore"](host_state);
         }
         const dac = this.emulator.speaker_adapter?.dac;
         if(dac?.connect_cpu_worker)
@@ -206,10 +237,11 @@ export class CPUWorkerController
                 this.instructions = m["value"]["instructions"];
                 this.device_info = m["value"];
                 break;
-            case "graphics": this.graphics(m); break;
-            case "checkpoint":
-                this.restore_checkpoint = m["value"];
+            case "device": {
+                const handler = this.device_handlers.get(m["name"]);
+                if(handler) handler(m["message"]);
                 break;
+            }
             case "recording": this.recording_report?.(m["value"]); break;
         }
     }
@@ -238,34 +270,6 @@ export class CPUWorkerController
         })));
     }
 
-    graphics(m)
-    {
-        const epoch = this.epoch;
-        const event = m["value"];
-        const bridge = this.emulator["graphics_adapter"];
-        ++this.stats["graphics_batches"];
-        this.stats["graphics_bytes"] += event["bytes"].byteLength;
-        ++this.stats["graphics_pending"];
-        this.stats["graphics_peak_pending"] = Math.max(this.stats["graphics_peak_pending"], this.stats["graphics_pending"]);
-        event["isMemoryValid"] = () => epoch === this.epoch && !this.closed && !this.failed;
-        event["writeGuestMemory"] = (offset, bytes) => {
-            if(!event["isMemoryValid"]()) return;
-            const copy = new Uint8Array(bytes).slice();
-            this.post({ "type": "gpu-write", "epoch": epoch, "id": m["id"], "offset": offset, "bytes": copy }, [copy.buffer]);
-        };
-        const work = this.graphics_work.then(async () => {
-            if(epoch !== this.epoch) return;
-            if(!bridge) throw new Error("CPU Worker graphics batch has no renderer");
-            this.emulator.emulator_bus.send("v86gl-pci-frame", event);
-            await bridge["waitForSubmittedBatches"]();
-        });
-        this.graphics_work = work.then(() => {
-            --this.stats["graphics_pending"];
-            this.post({ "type": "gpu-done", "epoch": epoch, "id": m["id"] });
-        }, error => { this.fail(error); throw error; });
-        this.graphics_work.catch(() => {});
-    }
-
     serialize(operation)
     {
         const next = this.operations.catch(() => {}).then(operation);
@@ -277,13 +281,56 @@ export class CPUWorkerController
     {
         await this.rpc("stop");
         // Acknowledging a batch can release another pending virtqueue request.
-        // Drain to a fixed point, not just the promise observed at stop time.
+        // Drain to a fixed point, not just the work observed at stop time.
         let pending;
         do {
-            await this.graphics_work;
+            await Promise.all(this.emulator.device_plugins.map(plugin => plugin["idle"] && plugin["idle"]()));
             pending = await this.rpc("barrier");
         } while(pending);
         await this.emulator.speaker_adapter?.pause();
+    }
+
+    /** @return {!Promise<!Object>} each plugin's host state, by name */
+    async prepare_plugins_save()
+    {
+        const host_states = {};
+        for(const plugin of this.emulator.device_plugins)
+        {
+            if(plugin["prepare_save"]) host_states[plugin["name"]] = await plugin["prepare_save"]();
+        }
+        return host_states;
+    }
+
+    release_plugins_save()
+    {
+        for(const plugin of this.emulator.device_plugins)
+        {
+            plugin["release_save"] && plugin["release_save"]();
+        }
+    }
+
+    async before_plugins_restore()
+    {
+        for(const plugin of this.emulator.device_plugins)
+        {
+            plugin["before_restore"] && await plugin["before_restore"]();
+        }
+    }
+
+    async after_plugins_restore(host_states)
+    {
+        for(const plugin of this.emulator.device_plugins)
+        {
+            plugin["after_restore"] && await plugin["after_restore"](host_states[plugin["name"]]);
+        }
+    }
+
+    cancel_plugins_restore()
+    {
+        for(const plugin of this.emulator.device_plugins)
+        {
+            plugin["cancel_restore"] && plugin["cancel_restore"]();
+        }
     }
 
     state(kind, state = null)
@@ -291,35 +338,37 @@ export class CPUWorkerController
         return this.serialize(async () => {
             const running = this.emulator.is_running();
             await this.stop();
-            const g = this.emulator["graphics_adapter"];
             let ok = false;
             try
             {
                 if(kind === "save")
                 {
-                    await g?.["prepareSaveState"]();
-                    const checkpoint = g ? g["serializeCheckpoint"]() : null;
-                    const result = await this.rpc("save", [checkpoint]);
+                    const result = await this.rpc("save", [await this.prepare_plugins_save()]);
                     ok = true;
                     return result;
                 }
-                this.restore_checkpoint = null;
-                g?.["beginStateRestore"]();
-                await g?.["waitForIdle"](false, true);
-                await this.rpc(kind, state ? [state] : []);
-                if(kind === "restore")
+                if(kind === "restart")
                 {
-                    g?.["onPCIStateRestored"](this.restore_checkpoint);
-                    await g?.["finishStateRestore"]();
+                    await this.rpc("restart", state ? [state] : []);
+                    for(const plugin of this.emulator.device_plugins)
+                    {
+                        plugin["reset"] && await plugin["reset"]();
+                    }
+                    ok = true;
+                    return;
                 }
-                else await g?.["reset"]();
+                await this.before_plugins_restore();
+                await this.after_plugins_restore(await this.rpc(kind, state ? [state] : []));
                 ok = true;
             }
-            catch(error) { g?.["cancelStateRestore"](); throw error; }
+            catch(error)
+            {
+                if(kind !== "save") this.cancel_plugins_restore();
+                throw error;
+            }
             finally
             {
-                g?.["releaseCheckpoint"]();
-                this.restore_checkpoint = null;
+                if(kind === "save") this.release_plugins_save();
                 if(running && !this.emulator.destroyed && (ok || kind === "save")) await this.rpc("run");
             }
         });
@@ -330,7 +379,6 @@ export class CPUWorkerController
         return this.serialize(async () => {
             const running = this.emulator.is_running();
             await this.stop();
-            const graphics = this.emulator["graphics_adapter"];
             const channel = new globalThis.MessageChannel();
             const server = state_stream_server(channel.port1, kind, value);
             let success = false;
@@ -338,27 +386,25 @@ export class CPUWorkerController
             {
                 if(kind === "save")
                 {
-                    await graphics?.["prepareSaveState"]();
-                    const checkpoint = graphics ? graphics["serializeCheckpoint"]() : null;
-                    await this.rpc("save-stream", [checkpoint, channel.port2], [channel.port2]);
+                    await this.rpc("save-stream", [await this.prepare_plugins_save(), channel.port2], [channel.port2]);
                 }
                 else
                 {
-                    this.restore_checkpoint = null;
-                    graphics?.["beginStateRestore"]();
-                    await graphics?.["waitForIdle"](false, true);
-                    await this.rpc("restore-stream", [server["size"], channel.port2], [channel.port2]);
-                    graphics?.["onPCIStateRestored"](this.restore_checkpoint);
-                    await graphics?.["finishStateRestore"]();
+                    await this.before_plugins_restore();
+                    await this.after_plugins_restore(
+                        await this.rpc("restore-stream", [server["size"], channel.port2], [channel.port2]));
                 }
                 success = true;
             }
-            catch(error) { graphics?.["cancelStateRestore"](); throw error; }
+            catch(error)
+            {
+                if(kind !== "save") this.cancel_plugins_restore();
+                throw error;
+            }
             finally
             {
                 server["close"]();
-                graphics?.["releaseCheckpoint"]();
-                this.restore_checkpoint = null;
+                if(kind === "save") this.release_plugins_save();
                 if(running && !this.emulator.destroyed && (success || kind === "save")) await this.rpc("run");
             }
         });
@@ -414,7 +460,8 @@ export class WorkerPerformanceRecorder
     {
         if(!this.active) return;
         report["graphics"] = this.graphics.stop();
-        report["worker_transport"] = { ...this.emulator.worker_controller.stats };
+        report["worker_transport"] = { ...this.emulator.worker_controller.stats,
+            ...(this.emulator["graphics_proxy"] ? this.emulator["graphics_proxy"]["stats"] : {}) };
         report["metadata"]["cpu_thread"] = "dedicated-worker";
         this.report = report;
         this.active = false;

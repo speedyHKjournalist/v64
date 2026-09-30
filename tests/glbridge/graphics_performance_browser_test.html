@@ -23,7 +23,7 @@ import { GraphicsPerformance } from "../../src/browser/graphics_performance.js";
             pass.end(); device.queue.submit([encoder.finish()]);
             if(present) { this.stats.presents++; this.options.onPresent?.({ sessionKey: "game" }); }
         } };
-    const emulator = { graphics_adapter: { d3d8Executor: executor, graphicsJournal: journal, pushPCIBatch() {} } };
+    const emulator = { graphics_proxy: { bridge: { d3d8Executor: executor, graphicsJournal: journal, pushPCIBatch() {} } } };
     const originalSubmit = device.queue.submit, originalAppend = journal.append;
     const recording = new GraphicsPerformance(emulator);
     const payload = new Uint8Array(4096).fill(7);

@@ -1,27 +1,29 @@
 // Run manually; this microbenchmark is not an FPS or CI timing assertion.
+// For an A/B run, run it at another commit (a git worktree) with the same node.
 "use strict";
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const { createV86GLDevice } = require("../../src/browser/glbridge/v86gl_device.js");
 (async () => {
     global.DEBUG = false;
     const { V86 } = await import("../../src/browser/starter.js");
-    // Optional path to an earlier virtio-v86gl module for an A/B run.
-    const baseline = process.env.V86GL_BENCH_DEVICE;
-    const Override = baseline ? (await import(require("node:url").pathToFileURL(path.resolve(baseline)).href)).V86GLPCI : null;
+    // A renderer that takes every batch at once
+    let toDevice = null;
+    const descriptor = createV86GLDevice({ remote: false, listen: handler => { toDevice = handler; },
+        post: message => toDevice({ type: "done", id: message.id }) });
+    toDevice({ type: "available", value: true });
     const emulator = new V86({
         wasm_path: path.join(__dirname,"../../build/v86.wasm"),
         memory_size: 32 * 1024 * 1024,
         bios: { buffer: new Uint8Array(65536).fill(0xf4).buffer },
         disable_keyboard: true, disable_mouse: true, disable_speaker: true,
         net_device: { type: "none" }, autostart: false,
-        v86gl_pci: Override ? undefined : { maxBatchBytes: 16 * 1024 * 1024 },
+        virtio_devices: [descriptor],
     });
     await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
     try {
         const cpu = emulator.v86.cpu, io = cpu.io;
-        const device = Override ? new Override(cpu, emulator.emulator_bus,
-            { maxBatchBytes: 16 * 1024 * 1024, onSubmit: event => { event.handled = true; } }) : cpu.devices.v86gl_pci;
-        const pci = device.virtio;
+        const pci = cpu.devices.virtio_devices[0].virtio;
         assert.equal(pci.pci_space[0] | pci.pci_space[1] << 8, 0x1af4);
         assert.equal(pci.pci_space[2] | pci.pci_space[3] << 8, 0x107f);
         assert.ok(!pci.pci_bars.some(bar => bar && bar.fixed), "BARs can relocate");
@@ -66,7 +68,6 @@ const path = require("node:path");
         assert.equal(request(1,arena,16*1024*1024),0);
         [0x324c4756,1,0,42,1,4,0,0].forEach((v,i)=>mem.setUint32(arena+i*4,v,true));
         mem.setUint16(arena+32,0xfff1,true); mem.setUint16(arena+34,0,true);
-        emulator.add_listener("v86gl-pci-frame",event=>{event.handled=true;});
         mem.setUint32(req,2,true); mem.setUint32(req+4,0,true); mem.setUint32(req+12,36,true);
         function run(count) {
             const start=process.hrtime.bigint();
@@ -83,6 +84,6 @@ const path = require("node:path");
         const iterations = Number(process.env.BENCH_ITERATIONS || 100000);
         assert.ok(Number.isInteger(iterations) && iterations > 0);
         const samples=Array.from({length:9},()=>run(iterations)).sort((a,b)=>a-b);
-        console.log(JSON.stringify({scope:"Host virtio submission only; no guest execution or GPU rendering",node:process.version,device:baseline||"current",iterations,ns_per_submit_median:samples[4],samples},null,2));
+        console.log(JSON.stringify({scope:"Host virtio submission only; no guest execution or GPU rendering",node:process.version,iterations,ns_per_submit_median:samples[4],samples},null,2));
     } finally { await emulator.destroy(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});

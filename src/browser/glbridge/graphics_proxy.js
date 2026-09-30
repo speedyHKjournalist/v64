@@ -1,4 +1,8 @@
-// Optional browser adapter. Load after v86_network_bridge.js and the executors.
+// The graphics proxy as one of v86's device plugins (the graphics_proxy
+// option, docs/graphics-proxy-plugin-plan.md). Its virtio device
+// (v86gl_device.js) runs next to the CPU; this side renders, and the two talk
+// over a channel. Load after v86gl_device.js, v86_network_bridge.js and the
+// executors.
 (function(global) {
     "use strict";
 
@@ -20,6 +24,18 @@
         }
     }
 
+    // Where this bundle was loaded from: a CPU worker loads the device from
+    // beside it (build/glbridge/v86gl-device.js, the same revision)
+    const bundleScript = typeof document !== "undefined" && document.currentScript ?
+        document.currentScript.src : null;
+
+    function defaultWorkerScript() {
+        if (!bundleScript) return undefined;
+        const url = new URL("v86gl-device.js", bundleScript);
+        url.search = new URL(bundleScript).search;
+        return url.href;
+    }
+
     function reportUnavailable(options, error) {
         if (typeof options.onError === "function") options.onError(error);
         else console.error("[v86gl] graphics unavailable; VGA remains active", error);
@@ -34,7 +50,7 @@
      * ({ set, fallback }) hands the screen's drawing to the compositor, or back
      * to the 2D canvas if WebGPU cannot start.
      */
-    function installV86GLGraphicsAdapter(emulator, options) {
+    function createGraphicsBridge(emulator, options) {
         options = options || {};
         const screen = options.screenCanvas;
         const backend = options.screenBackend;
@@ -148,8 +164,6 @@
             bridge.destroyed = true;
             ++bridge.memoryGeneration;
             bridge.hideLayers(true);
-            emulator.remove_listener("v86gl-pci-frame", bridge.frameListener);
-            emulator.remove_listener("emulator-loaded", bridge.loadedListener);
             cleanup = (async () => {
                 await bridge.pendingRestore.catch(() => {});
                 await disposeExecutors();
@@ -159,12 +173,6 @@
                 bridge.preparedCheckpoint = null;
                 bridge.graphicsJournalBytes = 0;
                 bridge.legacyCheckpoint = new Uint8Array(0);
-                const pci = bridge.pciStateDevice;
-                if (pci && pci.__v86glStateBridge === bridge) {
-                    pci.get_state = bridge.originalGetState;
-                    pci.set_state = bridge.originalSetState;
-                    delete pci.__v86glStateBridge;
-                }
                 // The compositor keeps drawing the screen for as long as it exists
             })();
             return cleanup;
@@ -174,7 +182,155 @@
         return bridge;
     }
 
-    global.installV86GLGraphicsAdapter = installV86GLGraphicsAdapter;
+    /*
+     * What graphics_proxy: true (or an options object) makes: the device for
+     * v86's virtio_devices, and the hooks v86 calls around saves, restores,
+     * resets, screen changes and screenshots. The renderer starts in start(),
+     * when v86 hands over the screen and this side's end of the channel.
+     */
+    function V86GraphicsProxy(options) {
+        options = { ...(options || {}) };
+        // (tests replace the WebGPU renderer)
+        const createBridge = options.createBridge || createGraphicsBridge;
+        const createDevice = global.V86VirtioDeviceFactories && global.V86VirtioDeviceFactories.v86gl;
+        if (typeof createDevice !== "function")
+            throw new Error("graphics_proxy: v86gl_device.js is missing; load the whole libv86-webgpu.js");
+        let bridge = null;
+        let channel = null;
+        let available = false;
+        // Bumped whenever the guest's timeline is replaced: readbacks of
+        // batches from before are dropped
+        let epoch = 0;
+        // Across threads batches are handled one at a time
+        let work = Promise.resolve();
+        const stats = { graphics_batches: 0, graphics_bytes: 0, graphics_pending: 0, graphics_peak_pending: 0 };
+
+        const setAvailable = value => {
+            if (!channel || available === value) return;
+            available = value;
+            channel.post({ type: "available", value });
+        };
+
+        const onBatch = message => {
+            const batchEpoch = epoch;
+            const generation = message.generation;
+            const event = {
+                frameId: message.frameId,
+                flags: message.flags,
+                commandCount: message.commandCount,
+                bytes: message.bytes,
+                descAddr: message.descAddr,
+                descLen: message.descLen,
+                batchAddr: message.batchAddr,
+                responseBase: message.responseBase,
+                submitCount: message.submitCount,
+                handled: false,
+                isMemoryValid: () => batchEpoch === epoch && !bridge.destroyed,
+                writeGuestMemory: (offset, bytes) => {
+                    if (batchEpoch !== epoch) return;
+                    const data = channel.remote ? new Uint8Array(bytes).slice() : bytes;
+                    channel.post({ type: "write", generation, offset, bytes: data },
+                        channel.remote ? [data.buffer] : undefined);
+                },
+            };
+            if (!channel.remote) {
+                bridge.pushPCIBatch(event);
+                channel.post({ type: "done", id: message.id });
+                return;
+            }
+            // Acknowledged once the renderer is done with it, readbacks
+            // included: the device holds the guest back while the renderer is behind
+            ++stats.graphics_batches;
+            stats.graphics_bytes += message.bytes.byteLength;
+            stats.graphics_peak_pending = Math.max(stats.graphics_peak_pending, ++stats.graphics_pending);
+            work = work.then(async () => {
+                if (batchEpoch !== epoch) return;
+                bridge.pushPCIBatch(event);
+                await bridge.waitForSubmittedBatches();
+            }).catch(error => {
+                reportUnavailable(options, error);
+                setAvailable(false);
+            }).then(() => {
+                --stats.graphics_pending;
+                if (batchEpoch === epoch) channel.post({ type: "done", id: message.id });
+            });
+        };
+
+        const plugin = {
+            name: "v86gl",
+            // The compositor draws the whole screen (docs/display-design.md)
+            wants_screen: true,
+            // For diagnostics (graphics_performance.js, performance_recorder.js)
+            bridge: null,
+            // Batches across the CPU worker boundary
+            stats,
+            create_device: deviceChannel => createDevice(deviceChannel),
+            // The same device in a CPU worker (it defines V86VirtioDeviceFactories.v86gl)
+            worker_script: options.workerScript || defaultWorkerScript(),
+            /*
+             * context.screen: { canvas, set_backend, fallback, is_graphical };
+             * context.channel: this side's end. Returns when the renderer is up
+             * (or has failed and handed the screen back).
+             */
+            start(context) {
+                const screen = context.screen;
+                channel = context.channel;
+                bridge = plugin.bridge = createBridge(context.emulator, {
+                    ...options,
+                    screenCanvas: screen.canvas,
+                    screenBackend: { set: screen.set_backend, fallback: screen.fallback },
+                    isGraphical: screen.is_graphical,
+                });
+                channel.listen(message => {
+                    if (message.type === "batch") onBatch(message);
+                });
+                setAvailable(true);
+                return bridge.ready.then(() => setAvailable(!bridge.failed));
+            },
+            screen_changed() {
+                bridge.screenChanged();
+            },
+            // Settles when every batch received so far is acknowledged
+            idle() {
+                return work;
+            },
+            async prepare_save() {
+                await bridge.prepareSaveState();
+                return bridge.serializeCheckpoint();
+            },
+            release_save() {
+                bridge.releaseCheckpoint();
+            },
+            async before_restore() {
+                ++epoch;
+                bridge.beginStateRestore();
+                await bridge.waitForIdle(false, true);
+            },
+            async after_restore(checkpoint) {
+                bridge.onPCIStateRestored(checkpoint);
+                await bridge.finishStateRestore();
+            },
+            cancel_restore() {
+                bridge.cancelStateRestore();
+            },
+            async reset() {
+                ++epoch;
+                await bridge.reset();
+                setAvailable(!bridge.failed);
+            },
+            async destroy() {
+                if (!bridge) return;
+                setAvailable(false);
+                await bridge.destroy();
+            },
+            screenshot() {
+                return bridge ? bridge.makeScreenshot() : null;
+            },
+        };
+        return plugin;
+    }
+
+    global.V86GraphicsProxy = V86GraphicsProxy;
     if (typeof module !== "undefined" && module.exports)
-        module.exports = { installV86GLGraphicsAdapter };
+        module.exports = { V86GraphicsProxy, createGraphicsBridge };
 })(typeof globalThis !== "undefined" ? globalThis : this);

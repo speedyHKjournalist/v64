@@ -15,7 +15,9 @@
 // the guest's audio path runs as in the browser. Disk writes stay in RAM.
 import fs from "node:fs";
 import inspector from "node:inspector";
+import { createRequire as create_require } from "node:module";
 import { V86 } from "../../../build/libv86.mjs";
+const { createV86GLDevice: create_v86gl_device } = create_require(import.meta.url)("../../../src/browser/glbridge/v86gl_device.js");
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => { const i = args.indexOf("--" + name); return i < 0 ? fallback : args[i + 1]; };
@@ -78,6 +80,20 @@ const intervals = new Map();
 let last_present = 0, measuring = false;
 const queries = new Map();
 let heartbeat = 0;
+// The v86gl device with the null renderer on the other end of its channel
+function null_renderer_device() {
+    let to_device = null;
+    const descriptor = create_v86gl_device({ remote: false,
+        listen: handler => { to_device = handler; },
+        post: message => {
+            on_submit({ ...message, writeGuestMemory: (offset, bytes) =>
+                to_device({ type: "write", generation: message.generation, offset, bytes }) });
+            to_device({ type: "done", id: message.id });
+        } });
+    to_device({ type: "available", value: true });
+    return descriptor;
+}
+
 function on_submit(event) {
     event.handled = true;
     const b = event.bytes;
@@ -133,7 +149,7 @@ const vm = new V86({
     hda: new SyncDisk(hda), ...(hdb ? { hdb: new SyncDisk(hdb) } : {}),
     x87_fast_math: true, x87_jit_cache: true,
     ir_sync_publication: option("sync-publication", "0") === "1",
-    v86gl_pci: { maxBatchBytes: 16 * 1024 * 1024, onSubmit: on_submit },
+    virtio_devices: [null_renderer_device()],
     filesystem: {},
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
     net_device: { type: "ne2k" }, autostart: false,

@@ -412,7 +412,7 @@ export class PerformanceRecorder
         let slots = 0;
         const table = cpu.wm.wasm_table;
         for(let i = 0; i < WASM_TABLE_SIZE; i++) if(table.get(i + WASM_TABLE_OFFSET)) slots++;
-        const journal = this.emulator["graphics_adapter"]?.["graphicsJournal"];
+        const journal = this.emulator["graphics_proxy"]?.["bridge"]?.["graphicsJournal"];
         const execution = this.counters();
         this.samples.push({ "elapsed_ms": now - this.started, "running": this.emulator.is_running(),
             "instruction_steps": this.total_instructions, ...this.stats, "execution": execution,

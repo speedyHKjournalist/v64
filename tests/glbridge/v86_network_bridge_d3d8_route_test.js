@@ -40,7 +40,7 @@ envelope.writeUInt16LE(0xFFFF, 2);
 envelope.writeUInt32LE(d8wg.length, 4);
 d8wg.copy(envelope, 8);
 
-listeners["v86gl-pci-frame"]({
+bridge.pushPCIBatch({
     bytes: envelope,
     frameId: 1,
     submitCount: 7,
