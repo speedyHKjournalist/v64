@@ -65,7 +65,8 @@ const errors = [];
 emulator.add_listener("emulator-error", error => errors.push(String(error)));
 const t_load = performance.now();
 await Promise.race([new Promise(resolve => emulator.add_listener("emulator-loaded", resolve)),
-    delay(300000).then(() => { throw new Error("load timeout"); })]);
+    // (unref'd: this timer must not keep node alive after the run)
+    delay(300000, undefined, { ref: false }).then(() => { throw new Error("load timeout"); })]);
 const load_s = (performance.now() - t_load) / 1000;
 const cpu = emulator.v86.cpu, vga = cpu.devices.vga;
 
