@@ -1,6 +1,8 @@
 # Graphics proxy as a plugin: implementation plan
 
-Branch `v86gl`. Status (2026-09-30): plan only, nothing implemented yet.
+Branch `v86gl`. Status (2026-09-30): Phases 1 and 2 implemented; Phase 3
+(CPU worker) next. Performance measurements (Phase 0 bench, 3DMark06) are
+deferred until a 3DMark06 state is available. See "Deviations" at the end.
 
 ## Why
 
@@ -417,3 +419,31 @@ branch into master before Phase 3 is done.
 - **Slot and port collisions.** The descriptor fixes 0x13 and 0xF100. A future
   built-in device on either one now fails loudly at startup instead of
   silently replacing v86gl.
+
+## Deviations
+
+Where the implementation differs from the plan above:
+
+- **No backpressure on one thread.** On the same thread the device does not
+  hold batches back (the plan had main-thread mode take the worker's limits),
+  so main-thread mode keeps its behavior from before. The limits (8 batches,
+  32 MiB in flight) apply only to a `remote` channel.
+- **The renderer tells the device whether it is there.** A fourth channel
+  message, `available { value }`, goes from the host to the device. It keeps
+  the guest-visible `NO_RENDERER` reply that the old bus event gave when no
+  renderer handled a batch, for example when WebGPU fails to start.
+- **Readbacks carry the arena generation**, not a batch id. They stay valid
+  after `done`, as they were on the main thread before, and are dropped once
+  the guest re-registers or resets its arena.
+- **`start(context)` instead of `attach_screen(screen)`.** The plugin's
+  renderer needs the screen canvas when it is created, so `start` receives the
+  emulator, the screen (only when the plugin sets `wants_screen`) and the
+  channel together, and returns the `ready` promise. `screen_changed` is a
+  separate hook.
+- **DMA goes to guest RAM only.** This is a rule of the generic layer:
+  `has_request` checks the rings and `pop_request` checks every buffer.
+  Anything else, such as a reply buffer in VGA memory, makes the driver reset
+  the device, as `v86gl_pci.js` did.
+- **Port reads are normalized.** Configuration-space reads are made int32, or
+  masked to the field's width, so descriptors return plain numbers.
+

@@ -2156,7 +2156,7 @@ async function load_graphics_proxy()
     {
         throw new Error("WebGPU is unavailable. Use a WebGPU-capable browser over HTTPS or localhost.");
     }
-    if(typeof window["installV86GLGraphicsAdapter"] === "function") return;
+    if(typeof window["V86GraphicsProxy"] === "function") return;
 
     // Fetch the current revision so the bundle and shader workers use matching assets.
     const response = await fetch("build/glbridge/manifest.json", { cache: "no-store" });
@@ -2172,7 +2172,7 @@ async function load_graphics_proxy()
         };
         document.head.appendChild(script);
     });
-    if(typeof window["installV86GLGraphicsAdapter"] !== "function")
+    if(typeof window["V86GraphicsProxy"] !== "function")
     {
         throw new Error("Graphics bundle did not initialize. Check the browser console and rebuild with make glbridge.");
     }
@@ -2609,8 +2609,7 @@ async function start_emulation(profile, query_args)
         "parallel_wasm_path": "build/v86-parallel.wasm" + query_append(),
         // (the source tree's module entry, unless the bundled CPU worker starts them)
         "vcpu_worker_url": DEBUG && !cpu_worker ? undefined : "build/vcpu-worker.js" + query_append(),
-        "graphics_adapter": graphics_proxy ? window["installV86GLGraphicsAdapter"] : undefined,
-        "graphics_options": {
+        "graphics_proxy": graphics_proxy && {
             "onError": error => {
                 console.error("Graphics proxy initialization failed", error);
                 set_graphics_proxy_status("Graphics proxy failed; VGA remains available: " + error.message);

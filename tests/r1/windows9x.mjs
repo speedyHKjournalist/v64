@@ -37,6 +37,11 @@ fs.mkdirSync(out, { recursive: true });
 const V86 = build === "site" ? create_require(import.meta.url)(site + "libv86.js").V86 :
     (await import(root + "build/libv86.mjs")).V86;
 const wasm_path = build === "site" ? site + "v86.wasm" : root + "build/v86.wasm";
+// The guest's v86gl driver finds its device; no renderer answers (the site's
+// older libv86.js has the device built in)
+const { createV86GLDevice: create_v86gl_device } = create_require(import.meta.url)(root + "src/browser/glbridge/v86gl_device.js");
+const v86gl = build === "site" ? { v86gl_pci: { port: 0xF100, maxBatchBytes: 16 * 1024 * 1024 } } :
+    { virtio_devices: [create_v86gl_device({ remote: false, post() {}, listen() {} })] };
 const bios_dir = build === "site" ? site + "bios/" : root + "bios/";
 
 const system_disk = site + "windows98/windows98multidisk/windows98hdd_C_512MB.img";
@@ -52,7 +57,7 @@ const emulator = new V86({
     memory_size: 256 << 20, vga_memory_size: 16 << 20, acpi: false, boot_order: 0x213,
     hda: disks.hda, ...(disks.hdb ? { hdb: disks.hdb } : {}),
     net_device: { type: "ne2k" }, preserve_mac_from_state_image: false, mac_address_translation: true,
-    v86gl_pci: { port: 0xF100, maxBatchBytes: 16 * 1024 * 1024 },
+    ...v86gl,
     ...(state_file ? { initial_state: { buffer: fs.readFileSync(state_file).buffer } } : {}),
     autostart: false, log_level: 0,
 });

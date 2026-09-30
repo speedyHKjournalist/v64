@@ -445,7 +445,16 @@ VirtioDevice.prototype.get_queue = function(queue_id)
 VirtioDevice.prototype.has_request = function(queue_id)
 {
     const queue = this.get_queue(queue_id);
-    return this.is_ready() && queue.is_configured() && queue.has_request();
+    if(!this.is_ready() || !queue.is_configured()) return false;
+    // The rings, like every buffer, are DMA: guest RAM, never a device's window
+    if(!this.is_ram(queue.desc_addr, queue.size * 16) ||
+        !this.is_ram(queue.avail_addr, 6 + queue.size * 2) ||
+        !this.is_ram(queue.used_addr, 6 + queue.size * 8))
+    {
+        this.virtio.needs_reset();
+        return false;
+    }
+    return queue.has_request();
 };
 
 /**
@@ -469,6 +478,14 @@ VirtioDevice.prototype.pop_request = function(queue_id)
         return null;
     }
     if(!chain.valid) return null;
+    for(const buffer of chain.read_buffers.concat(chain.write_buffers))
+    {
+        if(buffer.len && !this.is_ram(buffer.address, buffer.len))
+        {
+            this.virtio.needs_reset();
+            return null;
+        }
+    }
 
     const generation = this.generation;
     let completed = false;

@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import assert from "node:assert/strict";
+import { createRequire as create_require } from "node:module";
 import { V86 } from "../../../build/libv86.mjs";
+// The guest's v86gl driver finds its device; no renderer answers
+const { createV86GLDevice: create_v86gl_device } = create_require(import.meta.url)("../../../src/browser/glbridge/v86gl_device.js");
 
 // Headless CPU/disk diagnostic. Disk writes stay in AsyncXHRBuffer's RAM overlay.
 // Run one process per core so 2 GiB guest memories do not overlap.
@@ -65,7 +68,7 @@ const vm = new V86({
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: process.env.IR_SYNC_DISK === "1" ? new SyncDisk(disk) : { url: disk, size: fs.statSync(disk).size, async: true },
     x87_fast_math: true, x87_jit_cache: true,
-    v86gl_pci: { maxBatchBytes: 16 * 1024 * 1024 },
+    virtio_devices: [create_v86gl_device({ remote: false, post() {}, listen() {} })],
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
     net_device: { type: "ne2k" }, autostart: false,
 });

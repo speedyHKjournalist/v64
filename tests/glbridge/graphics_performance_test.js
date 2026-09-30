@@ -20,7 +20,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
         finishFrame(present) { this.device.queue.submit([]); if (present) this.options.onPresent({ sessionKey: "a" }); } };
     const second = { device: { queue }, stats: {}, options: {} };
     const bridge = { d3d9Executor: executor, d3d8Executor: second, pushPCIBatch() {} };
-    const emulator = { graphics_adapter: bridge };
+    const emulator = { graphics_proxy: { bridge } };
     const originals = { submit: queue.submit, execute: executor.executeBatch, present: executor.options.onPresent };
     const recording = new GraphicsPerformance(emulator, { now: () => now, host, cpu_time: () => cpu });
     const promise = executor.submit(new Uint8Array(1), {});
@@ -75,7 +75,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
     native.beat = () => { now += 1; };
     native.saveActiveSessionState = () => { now += 2; };
     native.commandSerial = 0;
-    const diagnostic = new GraphicsPerformance({ graphics_adapter: { d3d9Executor: native } }, { now: () => now, host: {} });
+    const diagnostic = new GraphicsPerformance({ graphics_proxy: { bridge: { d3d9Executor: native } } }, { now: () => now, host: {} });
     const bytes = new Uint8Array(48), view = new DataView(bytes.buffer);
     view.setUint32(0, 0x47573944, true); view.setUint16(4, 1, true); view.setUint16(6, 3, true);
     view.setUint32(12, 1, true); view.setUint32(16, 1, true); view.setUint32(20, 16, true);
@@ -100,7 +100,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
         assert.equal(measure, true);
         const job = deferred(); compression.push(job); return job.promise;
     };
-    const trace = new GraphicsPerformance({ graphics_adapter: { graphicsJournal: journal } }, { now: () => now, host: {} });
+    const trace = new GraphicsPerformance({ graphics_proxy: { bridge: { graphicsJournal: journal } } }, { now: () => now, host: {} });
     const payload = new Uint8Array(32);
     journal.append({}, payload); journal.append({}, payload);
     now = 10; await Promise.resolve();

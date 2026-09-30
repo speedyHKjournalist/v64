@@ -1,14 +1,16 @@
 "use strict";
-// The browser adapter (graphics_adapter.js): one screen canvas, owned by the
-// WebGPU compositor, with each API's output a window layer placed in guest
-// desktop pixels. WebGPU failing hands the screen back to the 2D canvas.
+// The graphics proxy's host side (graphics_proxy.js): one screen canvas, owned
+// by the WebGPU compositor, with each API's output a window layer placed in
+// guest desktop pixels; WebGPU failing hands the screen back to the 2D canvas.
+// As a device plugin it takes batches from its device over a channel, answers
+// readbacks through it, and tells the device whether a renderer is there.
 const assert = require("node:assert/strict");
 require("../../src/browser/glbridge/v86_network_bridge.js");
 require("../../src/browser/glbridge/webgpu_compositor.js");
-const { installV86GLGraphicsAdapter } = require("../../src/browser/glbridge/graphics_adapter.js");
+require("../../src/browser/glbridge/v86gl_device.js");
+const { V86GraphicsProxy, createGraphicsBridge } = require("../../src/browser/glbridge/graphics_proxy.js");
 
 function fixture({ webgpu = true } = {}) {
-    const listeners = new Map();
     const screen = { width: 640, height: 480, toDataURL: () => "data:image/png;base64,",
         ownerDocument: { defaultView: { Image: class { } } } };
     let graphical = true, terminated = 0;
@@ -29,16 +31,13 @@ function fixture({ webgpu = true } = {}) {
         reset(canvas) { resets.push(canvas); current = null; },
     };
     const executor = () => ({ initialize() { return Promise.resolve(); }, work: Promise.resolve() });
-    const emulator = {
-        add_listener(name, fn) { listeners.set(name, fn); },
-        remove_listener(name, fn) { assert.equal(listeners.get(name), fn); listeners.delete(name); },
-    };
-    const options = { screenCanvas: screen, managedState: true,
+    const emulator = {};
+    const options = { screenCanvas: screen,
         screenBackend: { set: value => backend.push(["set", value]), fallback: () => backend.push(["fallback"]) },
         onError: error => errors.push(error),
         isGraphical: () => graphical, glExecutor: executor(), d3d8Executor: executor(), d3d9Executor: executor() };
     options.d3d9Executor.shaderWorker = { terminate() { terminated++; } };
-    return { emulator, options, screen, listeners, hosts, resets, backend, errors,
+    return { emulator, options, screen, hosts, resets, backend, errors,
         setGraphical(value) { graphical = value; }, terminated: () => terminated };
 }
 
@@ -46,9 +45,9 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
 
 (async () => {
     const f = fixture();
-    assert.throws(() => installV86GLGraphicsAdapter(f.emulator, { ...f.options, screenBackend: undefined }),
+    assert.throws(() => createGraphicsBridge(f.emulator, { ...f.options, screenBackend: undefined }),
         /screen canvas/, "the adapter draws through the emulator's screen, nothing else");
-    const bridge = installV86GLGraphicsAdapter(f.emulator, f.options);
+    const bridge = createGraphicsBridge(f.emulator, f.options);
     const compositor = bridge.compositor;
     assert.equal(compositor.canvas, f.screen, "the compositor owns the screen canvas");
     assert.equal(compositor.host, f.hosts[0], "executors created before WebGPU is up already share its host");
@@ -103,14 +102,13 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     const promise = bridge.destroy();
     assert.equal(bridge.destroy(), promise, "destroy is idempotent");
     await promise;
-    assert.equal(f.listeners.size, 0);
     assert.ok(compositor.attached, "the compositor keeps drawing the screen");
     bridge.showOwner("gl");
     assert.equal(gl.visible, false, "late callbacks cannot resurrect a destroyed window");
 
     // Without WebGPU, the screen goes back to its 2D canvas
     const g = fixture({ webgpu: false });
-    const failed = installV86GLGraphicsAdapter(g.emulator, g.options);
+    const failed = createGraphicsBridge(g.emulator, g.options);
     await failed.ready;
     assert.deepEqual(g.backend, [["fallback"]]);
     assert.equal(g.errors.length, 1);
@@ -118,5 +116,59 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     assert.equal(failed.makeScreenshot(), null, "no composed screenshot without WebGPU");
     await failed.destroy();
 
-    console.log("graphics_adapter_test: ok");
+    // The plugin: its device on one end of a channel, the renderer on the other
+    const p = fixture();
+    const toDevice = [];
+    let toHost = null;
+    const channel = { remote: false, post: message => toDevice.push(message), listen: handler => { toHost = handler; } };
+    const plugin = V86GraphicsProxy({ onError: p.options.onError, glExecutor: p.options.glExecutor,
+        d3d8Executor: p.options.d3d8Executor, d3d9Executor: p.options.d3d9Executor });
+    assert.equal(plugin.name, "v86gl");
+    assert.ok(plugin.wants_screen);
+    assert.equal(typeof plugin.create_device({ remote: false, post() {}, listen() {} }).notify, "function",
+        "the device comes from v86gl_device.js");
+    const started = plugin.start({ emulator: p.emulator, channel, screen: {
+        canvas: p.screen, set_backend: value => p.backend.push(["set", value]),
+        fallback: () => p.backend.push(["fallback"]), is_graphical: () => true } });
+    assert.deepEqual(toDevice, [{ type: "available", value: true }], "batches are taken while WebGPU starts");
+    await started;
+    assert.equal(toDevice.length, 1, "and still once it is up");
+    assert.equal(p.backend[0][0], "set");
+    const pushed = [];
+    plugin.bridge.pushPCIBatch = event => pushed.push(event);
+    const bytes = new Uint8Array([1, 2, 3]);
+    toHost({ type: "batch", id: 7, generation: 3, frameId: 9, flags: 1, commandCount: 1, descAddr: 0x1000,
+        descLen: 35, batchAddr: 0x1020, responseBase: 0, submitCount: 1, bytes });
+    assert.equal(pushed.length, 1);
+    assert.equal(pushed[0].bytes, bytes, "on one thread the batch is not copied");
+    assert.equal(pushed[0].frameId, 9);
+    assert.deepEqual(toDevice.at(-1), { type: "done", id: 7 }, "on one thread done follows at once");
+    pushed[0].writeGuestMemory(0x40, new Uint8Array([5]));
+    assert.deepEqual(toDevice.at(-1), { type: "write", generation: 3, offset: 0x40, bytes: new Uint8Array([5]) },
+        "a readback goes to the arena generation of its batch");
+    assert.ok(pushed[0].isMemoryValid());
+    plugin.bridge.beginStateRestore = () => {};
+    plugin.bridge.waitForIdle = async () => {};
+    await plugin.before_restore();
+    const sent = toDevice.length;
+    pushed[0].writeGuestMemory(0x40, new Uint8Array([6]));
+    assert.equal(toDevice.length, sent, "readbacks from before a restore are dropped");
+    assert.ok(!pushed[0].isMemoryValid());
+    plugin.bridge.prepareSaveState = async () => {};
+    plugin.bridge.serializeCheckpoint = () => bytes;
+    assert.equal(await plugin.prepare_save(), bytes, "the checkpoint is the device's host state");
+    await plugin.destroy();
+    assert.deepEqual(toDevice.at(-1), { type: "available", value: false });
+
+    // Without WebGPU the device hears that nothing renders
+    const q = fixture({ webgpu: false });
+    const toFailedDevice = [];
+    const failedPlugin = V86GraphicsProxy({ onError: q.options.onError, glExecutor: q.options.glExecutor,
+        d3d8Executor: q.options.d3d8Executor, d3d9Executor: q.options.d3d9Executor });
+    await failedPlugin.start({ emulator: q.emulator, channel: { remote: false, post: m => toFailedDevice.push(m), listen() {} },
+        screen: { canvas: q.screen, set_backend() {}, fallback() {}, is_graphical: () => true } });
+    assert.deepEqual(toFailedDevice.map(m => m.value), [true, false]);
+    await failedPlugin.destroy();
+
+    console.log("graphics_proxy_test: ok");
 })().catch(error => { console.error(error); process.exitCode = 1; });

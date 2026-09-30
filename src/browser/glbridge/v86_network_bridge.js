@@ -13,7 +13,6 @@
     const CTRL_D3D8_BATCH = 0xFFE0;
     const CTRL_D3D9_BATCH = 0xFFE1;
     const EXTENDED_RECORD_SIZE = 0xFFFF;
-    const PCI_STATE_GRAPHICS_INDEX = 8;
     const CHECKPOINT_MAGIC = 0x32534756; // "VGS2"
     const CHECKPOINT_VERSION = 2;
     const JOURNAL_ENTRY_BYTES = 32;
@@ -91,19 +90,11 @@
             this.restoreHadCheckpoint = false;
             this.pendingRestore = Promise.resolve();
             this.pendingBatches = [];
-            this.pciStateDevice = null;
 
+            // Batches arrive through graphics_proxy.js
             this.installGLExecutor();
             this.installD3D8Executor();
             this.installD3D9Executor();
-
-            if (emulator && typeof emulator.add_listener === "function") {
-                this.frameListener = event => this.pushPCIBatch(event);
-                this.loadedListener = () => this.attachPCIStateHooks();
-                emulator.add_listener("v86gl-pci-frame", this.frameListener);
-                emulator.add_listener("emulator-loaded", this.loadedListener);
-            }
-            this.attachPCIStateHooks();
         }
 
         /* The host an executor draws through when its canvas is a compositor layer */
@@ -555,44 +546,9 @@
             }
         }
 
-        getPCIDevice() {
-            const runtime = this.emulator && this.emulator.v86;
-            const cpu = runtime && runtime.cpu;
-            return cpu && cpu.devices && cpu.devices.v86gl_pci || null;
-        }
-
-        attachPCIStateHooks() {
-            if (this.options.managedState) return true;
-            const device = this.getPCIDevice();
-            if (!device) return false;
-            if (this.pciStateDevice === device) return true;
-            if (device.__v86glStateBridge && device.__v86glStateBridge !== this)
-                return false;
-            if (typeof device.get_state !== "function" ||
-                    typeof device.set_state !== "function") return false;
-            const bridge = this;
-            const originalGetState = device.get_state;
-            const originalSetState = device.set_state;
-            this.originalGetState = originalGetState;
-            this.originalSetState = originalSetState;
-            device.get_state = function() {
-                const state = originalGetState.call(this);
-                state[PCI_STATE_GRAPHICS_INDEX] = bridge.serializeCheckpoint();
-                return state;
-            };
-            device.set_state = function(state) {
-                originalSetState.call(this, state);
-                bridge.onPCIStateRestored(state &&
-                    state[PCI_STATE_GRAPHICS_INDEX]);
-            };
-            device.__v86glStateBridge = this;
-            this.pciStateDevice = device;
-            return true;
-        }
-
+        // The checkpoint travels in the snapshot as the device's host state
+        // (graphics_proxy.js prepare_save/after_restore)
         async prepareSaveState() {
-            if (!this.attachPCIStateHooks())
-                throw new Error("v86gl PCI device is not ready for save state");
             await this.waitForIdle(true);
             // Flushes can split an unfinished frame/query. Replay that boundary
             // too, including when this checkpoint later becomes a parent save.
@@ -602,8 +558,6 @@
         }
 
         beginStateRestore() {
-            if (!this.attachPCIStateHooks())
-                throw new Error("v86gl PCI device is not ready for state restore");
             this.restorePrepared = true;
             this.restoreSeen = false;
             this.restoreHadCheckpoint = false;

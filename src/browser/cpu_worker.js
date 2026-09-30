@@ -48,7 +48,6 @@ export function encode_worker_options(o)
         "preserve_mac_from_state_image": o.preserve_mac_from_state_image,
         "mac_address_translation": o.mac_address_translation,
         "net_device": { "type": o.net_device?.type || "ne2k" },
-        "v86gl_pci": o.v86gl_pci || (o["graphics_adapter"] ? { "maxBatchBytes": 16 * 1024 * 1024 } : undefined),
         "bios": file(o.bios), "vga_bios": file(o.vga_bios), "hda": file(o.hda), "hdb": file(o.hdb),
         "fda": file(o.fda), "fdb": file(o.fdb), "cdrom": file(o.cdrom),
         "multiboot": file(o.multiboot), "bzimage": file(o.bzimage), "initrd": file(o.initrd),

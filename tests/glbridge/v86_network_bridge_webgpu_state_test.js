@@ -25,15 +25,6 @@ function recordOpcodes(bytes) {
 }
 
 (async () => {
-    const listeners = Object.create(null);
-    const pci = {
-        get_state() { return new Array(9).fill(null); },
-        set_state() {},
-    };
-    const emulator = {
-        v86: { cpu: { devices: { v86gl_pci: pci } } },
-        add_listener(name, callback) { listeners[name] = callback; },
-    };
     const calls = [];
     const executor = {
         submit(bytes, metadata) {
@@ -42,7 +33,7 @@ function recordOpcodes(bytes) {
         onSwapBuffers() { calls.push(["swap"]); },
         resetForReplay() { calls.push(["reset"]); },
     };
-    const bridge = globalThis.installV86GLNetworkBridge(emulator, null, {
+    const bridge = globalThis.installV86GLNetworkBridge(null, null, {
         compositor: new V86WebGPUCompositor({ width: 64, height: 64 }),
         glExecutor: executor,
     });
@@ -51,13 +42,13 @@ function recordOpcodes(bytes) {
         .call("CLEAR_COLOR", 0.25, 0.5, 0.75, 1)
         .call("CLEAR", GL.COLOR_BUFFER_BIT);
     authored.queryError();
-    listeners["v86gl-pci-frame"]({ bytes: authored.bytes(), frameId: 1,
+    bridge.pushPCIBatch({ bytes: authored.bytes(), frameId: 1,
         submitCount: 1, commandCount: 4, flags: 1 });
 
     const summary = await bridge.prepareSaveState();
     assert.ok(summary.entries >= 2);
-    const savedPCI = pci.get_state();
-    const checkpoint = savedPCI[8];
+    // What graphics_proxy.js stores as the device's host state
+    const checkpoint = bridge.serializeCheckpoint();
     assert.ok(checkpoint instanceof Uint8Array);
     const parsed = bridge.parseCheckpoint(checkpoint);
     const { GraphicsJournal } = require("../../src/browser/glbridge/graphics_journal.js");
@@ -66,9 +57,9 @@ function recordOpcodes(bytes) {
         "query commands replay locally without writing restored guest RAM");
 
     bridge.beginStateRestore();
-    pci.set_state(savedPCI);
+    bridge.onPCIStateRestored(checkpoint);
     const queued = new GLStream().makeCurrent(2, 0, 0, 32, 32).bytes();
-    listeners["v86gl-pci-frame"]({ bytes: queued, frameId: 2,
+    bridge.pushPCIBatch({ bytes: queued, frameId: 2,
         submitCount: 2, commandCount: 1, flags: 0 });
     await bridge.finishStateRestore();
 

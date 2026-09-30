@@ -137,7 +137,7 @@ const w16 = (offset, value) => io.port_write16(common + offset, value);
 const w32 = (offset, value) => io.port_write32(common + offset, value);
 let avail_idx = 0;
 
-function setup_queue(status)
+function setup_queue(status, desc_address = table)
 {
     w8(20, 0);
     w8(20, 3);
@@ -150,7 +150,7 @@ function setup_queue(status)
     assert.equal(io.port_read8(common + 20), 11, "FEATURES_OK accepted");
     w16(22, 0);
     assert.equal(io.port_read16(common + 24), QUEUE_SIZE);
-    w32(32, table); w32(36, 0);
+    w32(32, desc_address); w32(36, 0);
     w32(40, avail); w32(44, 0);
     w32(48, used); w32(52, 0);
     for(let i = 0; i < 512; i++) mem.setUint8(table + i, 0);
@@ -159,13 +159,13 @@ function setup_queue(status)
     avail_idx = 0;
 }
 
-function submit(bytes)
+function submit(bytes, reply_address = reply)
 {
     // descriptor 0: the request (readable), descriptor 1: the reply (writable)
     ram.set(bytes, data);
     mem.setUint32(table, data, true); mem.setUint32(table + 8, bytes.length, true);
     mem.setUint16(table + 12, 1, true); mem.setUint16(table + 14, 1, true);
-    mem.setUint32(table + 16, reply, true); mem.setUint32(table + 24, 64, true);
+    mem.setUint32(table + 16, reply_address, true); mem.setUint32(table + 24, 64, true);
     mem.setUint16(table + 28, 2, true);
     mem.setUint16(avail + 4 + (avail_idx % QUEUE_SIZE) * 2, 0, true);
     avail_idx = avail_idx + 1 & 0xFFFF;
@@ -217,6 +217,16 @@ assert.equal(used_idx(), 1, "guest RAM and the ring restored together");
 avail_idx = mem.getUint16(avail + 2, true);
 submit(new TextEncoder().encode("xy"));
 assert.equal(used_idx(), 2, "the restored queue keeps working");
+
+// Buffers and rings are DMA: guest RAM only
+setup_queue(15);
+submit(new Uint8Array([1]), 0xB8000);
+assert.equal(used_idx(), 0, "a reply buffer in VGA memory is not written");
+assert.ok(io.port_read8(common + 20) & 64, "and the driver is told to reset");
+setup_queue(15, 0xA0000);
+mem.setUint16(avail + 2, 1, true);
+io.port_write16(notify, 0);
+assert.ok(io.port_read8(common + 20) & 64, "a ring outside RAM asks for a reset");
 
 // Machine reset
 log.length = 0;

@@ -5,8 +5,9 @@ Display devices (`src/vga.js`, later virtio-gpu) and presenters
 interface. The whole screen is one canvas: the guest desktop (VGA text and
 graphics, SVGA) is the scanout at the bottom, and the D3D/GL output of v86gl is
 composited on top of it as window layers placed in guest desktop coordinates.
-The v86gl rendering protocols (D9WG/GLWG/VGL2) and `src/v86gl_pci.js` are not
-part of this structure: `v86gl_pci` only transports commands. It has no frame
+The v86gl rendering protocols (D9WG/GLWG/VGL2) and the v86gl device
+(`src/browser/glbridge/v86gl_device.js`) are not part of this structure: the
+device only transports commands. It has no frame
 buffer and no display mode, so it is not a display device.
 
 ## Architecture
@@ -24,7 +25,7 @@ buffer and no display mode, so it is not a display device.
             │                                     │ arena + SUBMIT
 === CPU thread / worker ================================================
             ▼                                     ▼
-   VGAScreen | virtio-gpu  [2]                v86gl_pci  (transport only)
+   VGAScreen | virtio-gpu  [2]                v86gl device  (transport only)
             │ DisplaySource                       │
             ▼                                     │
    DisplayHub  [3]                                │

@@ -29,6 +29,56 @@ import { SyncBuffer, buffer_from_object } from "../buffer.js";
 import { FS } from "../../lib/filesystem.js";
 
 /**
+ * graphics_adapter selects the display hardware the guest sees; graphics_proxy
+ * adds the D3D/DDraw/GL proxy of libv86-webgpu.js, which the page loads first,
+ * as xterm.js for a serial terminal (docs/graphics-proxy-plugin-plan.md)
+ * @return {Object} the proxy's device plugin, or null
+ */
+function create_graphics_proxy(options)
+{
+    const adapter = options["graphics_adapter"];
+    if(typeof adapter === "function")
+    {
+        throw new Error("graphics_adapter now selects the display hardware; use graphics_proxy: true instead of installV86GLGraphicsAdapter");
+    }
+    if(adapter !== undefined && adapter !== "bochs_vga")
+    {
+        throw new Error("Unknown graphics_adapter \"" + adapter + "\"; supported: bochs_vga");
+    }
+    if(options["v86gl_pci"] !== undefined)
+    {
+        throw new Error("v86gl_pci was removed; use graphics_proxy: true");
+    }
+    if(options["graphics_options"] !== undefined)
+    {
+        throw new Error("graphics_options was removed; pass them as graphics_proxy: { ... }");
+    }
+    const proxy = options["graphics_proxy"];
+    if(!proxy) return null;
+    const factory = globalThis["V86GraphicsProxy"];
+    if(typeof factory !== "function")
+    {
+        throw new Error("graphics_proxy requires libv86-webgpu.js to be loaded before new V86()");
+    }
+    return factory(proxy === true ? {} : proxy);
+}
+
+/**
+ * The ends of a channel between a plugin's device and its host side on one
+ * thread: a message arrives before post returns, and may hold views of guest RAM
+ */
+function create_local_channel()
+{
+    const handlers = [null, null];
+    const end = (self, other) => ({
+        "remote": false,
+        "post": (message, transfer) => { handlers[other] && handlers[other](message); },
+        "listen": handler => { handlers[self] = handler; },
+    });
+    return { device: end(0, 1), host: end(1, 0) };
+}
+
+/**
  * Constructor for emulator instances.
  *
  * For API usage, see v86.d.ts in the root of this repository.
@@ -59,8 +109,19 @@ export function V86(options)
     this.bus = bus[0];
     this.emulator_bus = bus[1];
     if(options["worker_bus_setup"]) options["worker_bus_setup"](this);
+
+    // Device plugins: a virtio device next to the CPU and a host side here,
+    // talking over a channel (docs/graphics-proxy-plugin-plan.md)
+    this["graphics_proxy"] = create_graphics_proxy(options);
+    this.device_plugins = this["graphics_proxy"] ? [this["graphics_proxy"]] : [];
+    this.plugins_ready = [];
+
     if(options["cpu_worker"] && typeof Worker !== "undefined")
     {
+        if(this.device_plugins.length)
+        {
+            throw new Error("graphics_proxy cannot be combined with cpu_worker yet");
+        }
         this.worker_controller = new CPUWorkerController(this, options);
         this.continue_init(null, options).catch(error => this.worker_controller.fail(error));
         return;
@@ -332,9 +393,6 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.cpuid_level = options.cpuid_level;
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
-    settings.v86gl_pci = options.v86gl_pci || (options["graphics_adapter"] ?
-        { maxBatchBytes: 16 * 1024 * 1024 } : undefined);
-    settings.virtio_devices = options["virtio_devices"];
 
     const relay_url = options.network_relay_url || options.net_device && options.net_device.relay_url;
     if(relay_url)
@@ -398,8 +456,9 @@ V86.prototype.continue_init = async function(emulator, options)
     }
     else if(screen_options.container)
     {
-        // With a graphics adapter, its compositor owns the canvas: the screen waits for it
-        screen_options.deferred_backend = !!options["graphics_adapter"];
+        // A plugin that draws the screen (graphics_proxy's compositor) owns the canvas:
+        // the screen waits for it
+        screen_options.deferred_backend = this.device_plugins.some(plugin => plugin["wants_screen"]);
         this.screen_adapter = new ScreenAdapter(screen_options, full => this.worker_controller ? this.worker_controller.request_frame(full) :
             this.v86.cpu.devices.display && this.v86.cpu.devices.display.request_frame(full));
     }
@@ -414,42 +473,50 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.screen = this.screen_adapter;
     settings.screen_options = screen_options;
 
-    // The optional graphics bundle supplies a factory. Keep its public
-    // interface quoted: v86_all uses Closure ADVANCED, the bundle does not.
-    if(options["graphics_adapter"])
+    // Plugins are not compiled with v86: every name they see is quoted
+    const plugin_devices = [];
+    for(const plugin of this.device_plugins)
     {
-        if(!this.screen_adapter.get_graphics_canvas)
-            throw new Error("graphics_adapter requires a browser screen container");
-        const screen = this.screen_adapter;
+        const channel = create_local_channel();
+        let screen = null;
+        if(plugin["wants_screen"])
+        {
+            const screen_adapter = this.screen_adapter;
+            if(!screen_adapter.claim_canvas)
+            {
+                throw new Error(plugin["name"] + " needs a browser screen container");
+            }
+            screen = {
+                "canvas": screen_adapter.claim_canvas("webgpu"),
+                // Once its renderer is up, or back to the 2D canvas if it cannot start
+                "set_backend": backend => screen_adapter.set_backend(backend),
+                "fallback": () => screen_adapter.use_canvas2d(),
+                "is_graphical": () => screen_adapter.is_graphical(),
+            };
+        }
         try
         {
-            this["graphics_adapter"] = options["graphics_adapter"](this, {
-                ...options["graphics_options"],
-                "container": screen_options.container,
-                "screenCanvas": screen.claim_canvas("webgpu"),
-                "isGraphical": () => screen.is_graphical(),
-                "managedState": true,
-                // The compositor takes over drawing the screen once WebGPU is up,
-                // or hands it back to the 2D canvas if it cannot start
-                "screenBackend": {
-                    "set": backend => screen.set_backend(backend),
-                    "fallback": () => screen.use_canvas2d(),
-                },
-            });
+            plugin_devices.push(plugin["create_device"](channel.device));
+            this.plugins_ready.push(Promise.resolve(
+                plugin["start"]({ "emulator": this, "screen": screen, "channel": channel.host })));
         }
         catch(error)
         {
-            screen.use_canvas2d();
+            if(screen) this.screen_adapter.use_canvas2d();
             throw error;
         }
-        // An adapter without a compositor (a test double) leaves the screen to its 2D canvas
-        if(!(this["graphics_adapter"] && this["graphics_adapter"]["compositor"]))
-        {
-            screen.use_canvas2d();
-        }
-        this.screen_adapter.on_geometry_change = () =>
-            this["graphics_adapter"]["screenChanged"]();
     }
+    if(this.device_plugins.some(plugin => plugin["screen_changed"]))
+    {
+        this.screen_adapter.on_geometry_change = () => {
+            for(const plugin of this.device_plugins)
+            {
+                plugin["screen_changed"] && plugin["screen_changed"]();
+            }
+        };
+    }
+    settings.virtio_devices = plugin_devices.length ?
+        (options["virtio_devices"] || []).concat(plugin_devices) : options["virtio_devices"];
 
     settings.serial_console = options.serial_console || { type: "none" };
 
@@ -822,15 +889,7 @@ V86.prototype.continue_init = async function(emulator, options)
             if(this.destroyed) return;
         }
 
-        if(this["graphics_adapter"])
-        {
-            const graphics = this["graphics_adapter"];
-            this.v86.cpu.devices.v86gl_pci.graphics_state_handlers = {
-                save: () => graphics["serializeCheckpoint"](),
-                restore: checkpoint => graphics["onPCIStateRestored"](checkpoint),
-            };
-            await graphics["ready"];
-        }
+        await Promise.all(this.plugins_ready);
         if(this.destroyed) return;
 
         this.modem && this.modem.initialize();
@@ -1038,9 +1097,12 @@ V86.prototype.destroy = async function()
     this.destroyed = true;
     if(this.worker_controller) await this.worker_controller.destroy();
     else await this.stop();
-    if(this.graphics_state_operation) await this.graphics_state_operation;
+    if(this.device_state_operation) await this.device_state_operation;
 
-    if(this["graphics_adapter"]) await this["graphics_adapter"]["destroy"]();
+    for(const plugin of this.device_plugins)
+    {
+        plugin["destroy"] && await plugin["destroy"]();
+    }
     this.v86 && this.v86.destroy();
     this.keyboard_adapter && this.keyboard_adapter.destroy();
     this.network_adapter && this.network_adapter.destroy();
@@ -1059,9 +1121,12 @@ V86.prototype.destroy = async function()
 V86.prototype.restart = async function(reason)
 {
     if(this.worker_controller) return this.worker_controller.state("restart", reason);
-    if(!this["graphics_adapter"]) return this.v86.restart(reason);
-    return this.with_graphics_state(async () => {
-        await this["graphics_adapter"]["reset"]();
+    if(!this.device_plugins.length) return this.v86.restart(reason);
+    return this.with_device_state(async () => {
+        for(const plugin of this.device_plugins)
+        {
+            plugin["reset"] && await plugin["reset"]();
+        }
         this.v86.restart(reason);
     }, false);
 };
@@ -1159,22 +1224,8 @@ V86.prototype.restore_state = async function(state)
 {
     if(this.worker_controller) return this.worker_controller.state("restore", state);
     dbg_assert(arguments.length === 1);
-    const graphics = this["graphics_adapter"];
-    if(!graphics) return this.v86.restore_state(state);
-    return this.with_graphics_state(async () => {
-        graphics["beginStateRestore"]();
-        try
-        {
-            await graphics["waitForIdle"](false, true);
-            await this.v86.restore_state(state);
-            await graphics["finishStateRestore"]();
-        }
-        catch(error)
-        {
-            graphics["cancelStateRestore"]();
-            throw error;
-        }
-    }, false);
+    if(!this.device_plugins.length) return this.v86.restore_state(state);
+    return this.with_device_state(() => this.restore_with_plugins(() => this.v86.restore_state(state)), false);
 };
 
 /**
@@ -1186,19 +1237,8 @@ V86.prototype.save_state = async function()
 {
     if(this.worker_controller) return this.worker_controller.state("save");
     dbg_assert(arguments.length === 0);
-    if(!this["graphics_adapter"]) return this.v86.save_state();
-    return this.with_graphics_state(async () => {
-        const graphics = this["graphics_adapter"];
-        try
-        {
-            await graphics["prepareSaveState"]();
-            return this.v86.save_state();
-        }
-        finally
-        {
-            if(graphics["releaseCheckpoint"]) graphics["releaseCheckpoint"]();
-        }
-    }, true);
+    if(!this.device_plugins.length) return this.v86.save_state();
+    return this.with_device_state(() => this.save_with_plugins(() => this.v86.save_state()), true);
 };
 
 /**
@@ -1210,19 +1250,8 @@ V86.prototype.save_state_stream = async function(write)
 {
     if(typeof write !== "function") throw new TypeError("Snapshot writer must be a function");
     if(this.worker_controller) return this.worker_controller.state_stream("save", write);
-    if(!this["graphics_adapter"]) return this.v86.save_state_stream(write);
-    return this.with_graphics_state(async () => {
-        const graphics = this["graphics_adapter"];
-        try
-        {
-            await graphics["prepareSaveState"]();
-            await this.v86.save_state_stream(write);
-        }
-        finally
-        {
-            if(graphics["releaseCheckpoint"]) graphics["releaseCheckpoint"]();
-        }
-    }, true);
+    if(!this.device_plugins.length) return this.v86.save_state_stream(write);
+    return this.with_device_state(() => this.save_with_plugins(() => this.v86.save_state_stream(write)), true);
 };
 
 /**
@@ -1234,30 +1263,79 @@ V86.prototype.save_state_stream = async function(write)
 V86.prototype.restore_state_stream = async function(source)
 {
     if(this.worker_controller) return this.worker_controller.state_stream("restore", source);
-    const graphics = this["graphics_adapter"];
-    if(!graphics) return this.v86.restore_state_stream(source);
-    return this.with_graphics_state(async () => {
-        graphics["beginStateRestore"]();
-        try
-        {
-            await graphics["waitForIdle"](false, true);
-            await this.v86.restore_state_stream(source);
-            await graphics["finishStateRestore"]();
-        }
-        catch(error)
-        {
-            graphics["cancelStateRestore"]();
-            throw error;
-        }
-    }, false);
+    if(!this.device_plugins.length) return this.v86.restore_state_stream(source);
+    return this.with_device_state(() => this.restore_with_plugins(() => this.v86.restore_state_stream(source)), false);
 };
 
-// Serialize saves/restores and pause the CPU while graphics jobs can still
-// write guest RAM. A failed restore leaves the CPU stopped; a failed save
-// resumes the untouched guest.
-V86.prototype.with_graphics_state = function(operation, resume_on_error)
+/**
+ * The CPU side of a device plugin
+ * @param {!Object} plugin
+ */
+V86.prototype.plugin_device = function(plugin)
 {
-    const previous = this.graphics_state_operation || Promise.resolve();
+    return this.v86.cpu.devices.virtio_devices.find(device => device.name === plugin["name"]);
+};
+
+/**
+ * Each plugin's host state goes into the snapshot with its device
+ * @param {function():!Promise<*>} save
+ */
+V86.prototype.save_with_plugins = async function(save)
+{
+    try
+    {
+        for(const plugin of this.device_plugins)
+        {
+            this.plugin_device(plugin).host_state = plugin["prepare_save"] ? await plugin["prepare_save"]() : undefined;
+        }
+        return await save();
+    }
+    finally
+    {
+        for(const plugin of this.device_plugins)
+        {
+            this.plugin_device(plugin).host_state = undefined;
+            plugin["release_save"] && plugin["release_save"]();
+        }
+    }
+};
+
+/**
+ * @param {function():!Promise<*>} restore
+ */
+V86.prototype.restore_with_plugins = async function(restore)
+{
+    try
+    {
+        for(const plugin of this.device_plugins)
+        {
+            plugin["before_restore"] && await plugin["before_restore"]();
+        }
+        await restore();
+        for(const plugin of this.device_plugins)
+        {
+            const device = this.plugin_device(plugin);
+            const host_state = device.restored_host_state;
+            device.restored_host_state = undefined;
+            plugin["after_restore"] && await plugin["after_restore"](host_state);
+        }
+    }
+    catch(error)
+    {
+        for(const plugin of this.device_plugins)
+        {
+            plugin["cancel_restore"] && plugin["cancel_restore"]();
+        }
+        throw error;
+    }
+};
+
+// Serialize saves/restores and pause the CPU while plugins can still write
+// guest RAM. A failed restore leaves the CPU stopped; a failed save resumes
+// the untouched guest.
+V86.prototype.with_device_state = function(operation, resume_on_error)
+{
+    const previous = this.device_state_operation || Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
         if(this.destroyed) throw new Error("Emulator has been destroyed");
         const was_running = this.is_running();
@@ -1276,7 +1354,7 @@ V86.prototype.with_graphics_state = function(operation, resume_on_error)
         }
     });
     // Keep only a completion barrier, not the potentially large saved buffer.
-    this.graphics_state_operation = next.then(() => {}, () => {});
+    this.device_state_operation = next.then(() => {}, () => {});
     return next;
 };
 
@@ -1492,9 +1570,9 @@ V86.prototype.keyboard_send_text = async function(string, delay)
  */
 V86.prototype.screen_make_screenshot = function()
 {
-    if(this["graphics_adapter"])
+    for(const plugin of this.device_plugins)
     {
-        const image = this["graphics_adapter"]["makeScreenshot"]();
+        const image = plugin["screenshot"] && plugin["screenshot"]();
         if(image) return image;
     }
     if(this.screen_adapter)

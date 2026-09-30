@@ -42,7 +42,6 @@ import { VirtioNet } from "./virtio_net.js";
 import { VGAScreen } from "./vga.js";
 import { DisplayHub } from "./display.js";
 import { VirtioBalloon } from "./virtio_balloon.js";
-import { V86GLPCI } from "./v86gl_pci.js";
 import { create_virtio_devices, get_virtio_devices_state, resolve_virtio_devices_state, set_virtio_devices_state } from "./virtio_devices.js";
 import { Virtio9p, Virtio9pHandler, Virtio9pProxy } from "../lib/9p.js";
 
@@ -815,7 +814,7 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[89] = this.devices.vmware;
     state[90] = this.devices.parallel0;
     state[91] = this.devices.parallel1;
-    state[92] = this.devices.v86gl_pci || get_virtio_devices_state(this.devices.virtio_devices);
+    state[92] = get_virtio_devices_state(this.devices.virtio_devices);
     state[93] = this.shared_irq_sources.map(sources => Array.from(sources));
     state[94] = [this.apic_enabled[0],
         new Uint8Array(this.wasm_memory.buffer)[this.state_base + STATE_OFFSETS.nmi_blocked],
@@ -1036,7 +1035,7 @@ CPU.prototype.validate_state = function(state)
 {
     this.validate_machine_core_state(state[96]);
     this.validate_physical_state(state[97]);
-    if(!this.devices.v86gl_pci) resolve_virtio_devices_state(this.devices.virtio_devices, state[92]);
+    resolve_virtio_devices_state(this.devices.virtio_devices, state[92]);
     // A remapped snapshot must retain the RAM/MMIO split used when validating
     // its windows. Reject this before changing clocks, RAM, or CPU state.
     if(state[97] && state[0] !== this.memory_size[0] &&
@@ -1168,15 +1167,8 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.devices.vmware && state[89] && this.devices.vmware.set_state(state[89]);
     this.devices.parallel0 && state[90] && this.devices.parallel0.set_state(state[90]);
     this.devices.parallel1 && state[91] && this.devices.parallel1.set_state(state[91]);
-    if(this.devices.v86gl_pci)
-    {
-        state[92] && this.devices.v86gl_pci.set_state(state[92]);
-    }
-    else
-    {
-        set_virtio_devices_state(this.devices.virtio_devices,
-            resolve_virtio_devices_state(this.devices.virtio_devices, state[92]));
-    }
+    set_virtio_devices_state(this.devices.virtio_devices,
+        resolve_virtio_devices_state(this.devices.virtio_devices, state[92]));
 
     this.fw_value = state[62];
 
@@ -2034,10 +2026,6 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
     {
         this.devices.ps2.reset();
     }
-    if(this.devices.v86gl_pci)
-    {
-        this.devices.v86gl_pci.reset();
-    }
     for(const device of this.devices.virtio_devices || [])
     {
         device.reset();
@@ -2640,12 +2628,6 @@ CPU.prototype.init = function(settings, device_bus)
     {
         this.devices.pci = new PCI(this);
 
-        if(settings.v86gl_pci)
-        {
-            const v86gl_pci_options = typeof settings.v86gl_pci === "object" ? settings.v86gl_pci : {};
-            this.devices.v86gl_pci = new V86GLPCI(this, device_bus, v86gl_pci_options);
-        }
-
         if(this.acpi_enabled[0])
         {
             const acpi = this.devices.acpi = new ACPI(this, device_bus);
@@ -2762,10 +2744,6 @@ CPU.prototype.init = function(settings, device_bus)
         // Last, so that they get a slot and ports that nothing else uses
         if(settings.virtio_devices)
         {
-            if(this.devices.v86gl_pci)
-            {
-                throw new Error("virtio_devices cannot be combined with v86gl_pci yet");
-            }
             this.devices.virtio_devices = create_virtio_devices(this, settings.virtio_devices);
         }
     }

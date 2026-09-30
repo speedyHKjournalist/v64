@@ -17,10 +17,10 @@
             screen: { container: document.getElementById("screen") },
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false,
-            graphics_adapter: installV86GLGraphicsAdapter,
+            graphics_proxy: true,
         });
         await new Promise(resolve => emulator.add_listener("emulator-loaded",resolve));
-        const bridge = emulator.graphics_adapter;
+        const bridge = emulator.graphics_proxy.bridge;
         check(!bridge.failed, "graphics initializes");
         emulator.screen_adapter.set_mode(true);
         emulator.screen_adapter.set_size_graphical(64,64,64,64);
@@ -83,7 +83,7 @@
         [0x324c4756,1,0,1,1,wrapped.length,0x47573944,0].forEach((v,i)=>memory.setUint32(arena+i*4,v,true));
         ram.set(wrapped,arena+32);
         submit(2,0,32+wrapped.length,0);
-        check(cpu.devices.v86gl_pci.submitCount===1,"virtqueue accepts shipping D9WG reserved0 marker");
+        check(cpu.devices.virtio_devices.find(device => device.name === "v86gl").descriptor.get_state()[5]===1,"virtqueue accepts shipping D9WG reserved0 marker");
         await bridge.d3d9Executor.idle();
         check(!bridge.d3d9Executor.failed,"D3D9 batch executes");
         check(bridge.activeOwner==="d3d9","D3D9 Present shows its window layer");

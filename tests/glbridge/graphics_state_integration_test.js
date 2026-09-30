@@ -2,45 +2,45 @@
 const assert = require("node:assert/strict");
 (async () => {
     global.DEBUG = false;
-    const { V86GLPCI } = await import("../../src/v86gl_pci.js");
     const { PCI } = await import("../../src/pci.js");
     const { V86 } = await import("../../src/browser/starter.js");
+    // A device plugin's host state travels in the snapshot with its device
+    // (docs/graphics-proxy-plugin-plan.md): V86 asks the plugin before saving
+    // and hands the state back after restoring
     const checkpoint = new Uint8Array([1, 2, 3]);
-    const pci = Object.create(V86GLPCI.prototype);
-    pci.cpu = { memory_size: [32 * 1024 * 1024] };
-    pci.virtio = { set_state() {} };
-    pci.arenaGeneration = 0;
-    const old = [0x56514731, [], 0, 0, 2, 16, 3, 0, undefined];
-    pci.set_state(old);
-    assert.deepEqual(pci.get_state().slice(2), old.slice(2), "virtio device restores transport counters");
     const calls = [];
-    const graphics = {
-        prepareSaveState() { calls.push("prepare"); },
-        async waitForIdle() {},
-        beginStateRestore() { calls.push("begin"); },
-        onPCIStateRestored(value) { calls.push(value); },
-        async finishStateRestore() { await Promise.resolve(); calls.push("finish"); },
-        cancelStateRestore() { calls.push("cancel"); },
+    const device = { name: "v86gl", host_state: undefined, restored_host_state: undefined };
+    const plugin = {
+        name: "v86gl",
+        async prepare_save() { calls.push("prepare"); return checkpoint; },
+        release_save() { calls.push("release"); },
+        async before_restore() { calls.push("begin"); },
+        async after_restore(value) { calls.push(value); await Promise.resolve(); calls.push("finish"); },
+        cancel_restore() { calls.push("cancel"); },
     };
-    pci.graphics_state_handlers = {
-        save() { return checkpoint; },
-        restore(value) { graphics.onPCIStateRestored(value); },
+    const lifecycle = {
+        plugin_device: V86.prototype.plugin_device,
+        save_with_plugins: V86.prototype.save_with_plugins,
+        restore_with_plugins: V86.prototype.restore_with_plugins,
+        with_device_state: V86.prototype.with_device_state,
     };
-    const emulator = { graphics_adapter: graphics,
-        with_graphics_state: V86.prototype.with_graphics_state,
+    const emulator = { ...lifecycle, device_plugins: [plugin],
         is_running() { return false; }, async stop() {},
         v86: {
-        save_state() { calls.push("save"); return pci.get_state(); },
-        restore_state(state) { calls.push("restore"); pci.set_state(state); },
-    } };
+            cpu: { devices: { virtio_devices: [device] } },
+            save_state() { calls.push("save"); return [device.host_state]; },
+            restore_state(state) { calls.push("restore"); device.restored_host_state = state[0]; },
+        } };
     const saved = await V86.prototype.save_state.call(emulator);
-    assert.deepEqual(calls, ["prepare", "save"]);
-    assert.equal(saved[8], checkpoint);
+    assert.deepEqual(calls, ["prepare", "save", "release"]);
+    assert.equal(saved[0], checkpoint);
+    assert.equal(device.host_state, undefined, "the host state is only there while saving");
     calls.length = 0;
     await V86.prototype.restore_state.call(emulator, saved);
     assert.deepEqual(calls, ["begin", "restore", checkpoint, "finish"]);
+    assert.equal(device.restored_host_state, undefined);
     calls.length = 0;
-    await V86.prototype.restore_state.call(emulator, old);
+    await V86.prototype.restore_state.call(emulator, [undefined]);
     assert.deepEqual(calls, ["begin", "restore", undefined, "finish"], "snapshots without graphics data clear replay state");
     emulator.v86.restore_state = () => { throw new Error("bad state"); };
     calls.length = 0;
@@ -52,22 +52,23 @@ const assert = require("node:assert/strict");
     let release;
     const gate = new Promise(resolve => { release = resolve; });
     const live = {
+        ...lifecycle,
         running: true, value: 0,
-        with_graphics_state: V86.prototype.with_graphics_state,
         is_running() { return this.running; },
         async stop() { this.running = false; sequence.push("stop"); },
         run() { this.running = true; sequence.push("run"); },
-        graphics_adapter: {
-            async prepareSaveState() {
+        device_plugins: [{
+            name: "v86gl",
+            async prepare_save() {
                 sequence.push("prepare");
                 assert.equal(live.running, false);
                 await gate;
                 live.value = 42; // an accepted GPU readback completes here
             },
-            beginStateRestore() {}, async waitForIdle() {},
-            async finishStateRestore() {}, cancelStateRestore() {},
-        },
+            async before_restore() {}, async after_restore() {}, cancel_restore() {},
+        }],
         v86: {
+            cpu: { devices: { virtio_devices: [{ name: "v86gl" }] } },
             save_state() { sequence.push("save"); return live.value; },
             restore_state() { throw new Error("invalid checkpoint"); },
         },

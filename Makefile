@@ -114,7 +114,7 @@ CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.j
 	   dma.js pit.js display.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
-	   v86gl_pci.js virtio_devices.js \
+	   virtio_devices.js \
 	   bus.js log.js cpu.js \
 	   elf.js kernel.js extended_memory.js \
 	   parallel/relocate.js parallel/control.js parallel/machine.js

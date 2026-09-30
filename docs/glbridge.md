@@ -1,12 +1,36 @@
 # Graphics proxy quick start
 
-## 1. What is `v86gl_pci.js`?
+## 1. What is the graphics proxy?
 
-[`src/v86gl_pci.js`](../src/v86gl_pci.js) implements a custom virtio PCI device
-in v86. It receives graphics commands from the Windows guest driver and passes
-them to the browser graphics renderer, which uses WebGPU.
+A custom virtio device (`v86gl`) receives the graphics commands of the Windows
+guest's driver and passes them to a renderer in the browser, which uses WebGPU.
+Neither is part of v86 itself: both are in the graphics bundle
+`build/glbridge/libv86-webgpu.js` (`make glbridge`), and v86 hosts the device
+through its `virtio_devices` API
+(see [graphics-proxy-plugin-plan.md](graphics-proxy-plugin-plan.md)).
 
-Enable **Enable graphics proxy (WebGPU)** in `index.html` or `debug.html`.
+- [`src/browser/glbridge/v86gl_device.js`](../src/browser/glbridge/v86gl_device.js):
+  the device, next to the CPU (the page, or the CPU worker)
+- [`src/browser/glbridge/graphics_proxy.js`](../src/browser/glbridge/graphics_proxy.js):
+  the renderer's side, with the hooks v86 calls around saves and restores
+
+Load the bundle after `libv86.js` and turn the proxy on:
+
+```html
+<script src="libv86.js"></script>
+<script src="libv86-webgpu.js"></script>
+```
+
+```js
+new V86({
+    screen_container: document.getElementById("screen_container"),
+    graphics_adapter: "bochs_vga",   // the display hardware; the default
+    graphics_proxy: true,            // or options, e.g. { onError }
+    // ...
+});
+```
+
+In `index.html` or `debug.html`, enable **Enable graphics proxy (WebGPU)**.
 
 ## 2. Get the driver and DLLs
 
@@ -72,7 +96,8 @@ The following games and applications have been tested with the graphics proxy:
 ## 7. Save and restore graphics state
 
 Use `await emulator.save_state()` and `await emulator.restore_state(state)`.
-The graphics adapter pauses a running guest while saving or restoring, waits
+The graphics checkpoint is stored in the snapshot as the `v86gl` device's
+host state. The emulator pauses a running guest while saving or restoring, waits
 for accepted GPU work and readbacks, and resumes it after success. Saves and
 restores on the same instance are serialized. A failed restore leaves the guest
 stopped. `initial_state` also restores graphics before `emulator-loaded`.
@@ -95,7 +120,7 @@ batch. In browsers, completed page buffers are transferred to a dedicated
 `graphics_journal_worker.js` worker for compression, keeping that work off the
 emulation thread. Deploy this file beside `libv86-webgpu.js`; `make glbridge`
 generates both. Environments without workers use local compression. There is no 512 MiB raw
-history cutoff. `graphics_options.graphicsJournalMemoryBytes` sets the compressed
+history cutoff. `graphics_proxy: { graphicsJournalMemoryBytes }` sets the compressed
 RAM cache budget (default 64 MiB); older `maxGraphicsJournalBytes` and
 `maxGLJournalBytes` options are aliases for this budget. Excess pages are stored
 temporarily in IndexedDB and deleted when the emulator resets or is destroyed.
@@ -109,6 +134,9 @@ needs memory for the complete output, and the emulator's overall state format
 uses signed 32-bit offsets. History size and restore time grow with the recorded
 workload. This remains a replay checkpoint, rather than a compact snapshot of
 only live resources, and GPU results need the same supported features.
+
+Snapshots from before `virtio_devices` (the device state of `v86gl_pci.js` in
+`state[92]`) still restore: the device recognizes and converts them.
 
 Version 2 checkpoints remain readable. A running session that already exceeded
 the old history cutoff must be restarted with the new code: commands discarded

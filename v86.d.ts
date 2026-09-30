@@ -357,16 +357,18 @@ export interface V86Options {
     cpu_worker?: boolean;
     /** Worker bundle URL, relative to the page. Default: build/cpu-worker.js. */
     cpu_worker_url?: string;
-    /** Optional custom virtio graphics device (historical option name); requires the virtio v86gl.sys driver. Automatically enabled by graphics_adapter. */
-    v86gl_pci?: boolean | { port?: number; maxBatchBytes?: number };
-    /** Factory exported as installV86GLGraphicsAdapter by build/glbridge/libv86-webgpu.js. */
-    graphics_adapter?: (emulator: V86, options: V86GraphicsOptions & {
-        container: HTMLElement;
-        screenCanvas: HTMLCanvasElement;
-        isGraphical: () => boolean;
-        managedState: boolean;
-    }) => V86GraphicsAdapter;
-    graphics_options?: V86GraphicsOptions;
+    /**
+     * The display hardware the guest sees.
+     * @default "bochs_vga"
+     */
+    graphics_adapter?: "bochs_vga";
+    /**
+     * Forward the guest's Direct3D/DirectDraw/OpenGL calls to WebGPU. Needs
+     * build/glbridge/libv86-webgpu.js loaded before the emulator is created,
+     * a browser screen container, and the v86gl driver and proxy DLLs in the
+     * guest (docs/glbridge.md). Works with any graphics_adapter.
+     */
+    graphics_proxy?: boolean | V86GraphicsProxyOptions;
     /**
      * Custom virtio devices. v86 provides the PCI function, the virtqueues,
      * the interrupt and the transport's part of a snapshot; the descriptor
@@ -812,30 +814,9 @@ export interface VirtioDeviceHandle {
     config_changed(): void;
 }
 
-/** Optional browser graphics bundle's lifecycle interface. */
-export interface V86GraphicsAdapter {
-    ready: Promise<void>;
-    failed?: Error | null;
-    canvas: HTMLCanvasElement;
-    screenChanged(): void;
-    serializeCheckpoint(): Uint8Array;
-    releaseCheckpoint?(): void;
-    onPCIStateRestored(checkpoint?: Uint8Array): void;
-    prepareSaveState(): Promise<{ entries: number; bytes: number }>;
-    waitForIdle(flush?: boolean, allowFailure?: boolean): Promise<void>;
-    /** Worker batch completion, including asynchronous readbacks. */
-    waitForSubmittedBatches(): Promise<void>;
-    beginStateRestore(): void;
-    finishStateRestore(): Promise<{ hasGLState: boolean }>;
-    cancelStateRestore(): void;
-    hideOverlayCanvas(includeSwapChains?: boolean): void;
-    makeScreenshot(): HTMLImageElement | null;
-    reset(): Promise<void>;
-    destroy(): Promise<void>;
-}
-
-export interface V86GraphicsOptions {
-    graphicsCanvas?: HTMLCanvasElement;
+/** Options of graphics_proxy. */
+export interface V86GraphicsProxyOptions {
+    /** WebGPU could not start; the screen stays on its 2D canvas. */
     onError?: (error: Error) => void;
     /** Compressed RAM cache budget (default 64 MiB); excess pages use IndexedDB. */
     graphicsJournalMemoryBytes?: number;
@@ -850,7 +831,8 @@ export interface V86GraphicsOptions {
 
 export class V86 {
     constructor(options: V86Options);
-    graphics_adapter?: V86GraphicsAdapter;
+    /** The graphics proxy's plugin, when graphics_proxy is set (for diagnostics). */
+    graphics_proxy?: object | null;
 
     /**
      * Start emulation. Do nothing if emulator is running already. Can be asynchronous.

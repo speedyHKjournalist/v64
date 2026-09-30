@@ -6,7 +6,7 @@
 // always framed itself -- must reach gl_executor.js directly,
 // and the D3D8/D3D9 envelopes must keep reaching their own executors untouched.
 // The reason to test the negative is that all three arrive through one
-// v86gl-pci-frame listener, so a routing mistake sends a D3D batch into the GL
+// pushPCIBatch, so a routing mistake sends a D3D batch into the GL
 // decoder and produces a wall of "no handler" rather than anything legible.
 
 const assert = require("node:assert/strict");
@@ -63,7 +63,7 @@ const stream = new GLStream()
     .call("CLEAR", GL.COLOR_BUFFER_BIT);
 const glBytes = stream.bytes();
 
-listeners["v86gl-pci-frame"]({
+bridge.pushPCIBatch({
     bytes: glBytes, frameId: 1, submitCount: 1, commandCount: 3, flags: 0,
     batchAddr: 0x1000,
 });
@@ -73,7 +73,7 @@ assert.equal(glBatches[0].metadata.batchAddress, 0x1000,
     "the batch's guest address travels with it, for the readback write-back");
 assert.equal(presented, 0, "no present flag, no present");
 
-listeners["v86gl-pci-frame"]({
+bridge.pushPCIBatch({
     bytes: glBytes, frameId: 2, submitCount: 2, commandCount: 3, flags: 1,
     batchAddr: 0x1000,
 });
@@ -86,7 +86,7 @@ const d3d9Batch = Buffer.alloc(8 + 16);
 d3d9Batch.writeUInt16LE(0xFFE1, 0);          // V86GL_CTRL_D3D9_BATCH
 d3d9Batch.writeUInt16LE(0xFFFF, 2);          // extended record
 d3d9Batch.writeUInt32LE(16, 4);              // payload bytes
-listeners["v86gl-pci-frame"]({
+bridge.pushPCIBatch({
     bytes: new Uint8Array(d3d9Batch), frameId: 3, submitCount: 3,
     commandCount: 1, flags: 0, descAddr: 0x2000,
 });
