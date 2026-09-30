@@ -17,7 +17,10 @@ pub unsafe fn svga_allocate_dest_buffer(size: u32) -> u32 {
     dest_buffer.as_mut_ptr() as u32
 }
 
-pub unsafe fn set_dirty_bitmap_size(size: u32) { dirty_bitmap.resize(size as usize, 0); }
+pub unsafe fn set_dirty_bitmap_size(size: u32) {
+    dirty_bitmap.resize(size as usize, 0);
+    crate::x64::jac::retire_frame_buffer_writes();
+}
 
 pub unsafe fn mark_dirty(addr: u32) {
     let page = (addr - memory::VGA_LFB_ADDRESS) >> 12;
@@ -177,4 +180,7 @@ pub unsafe fn svga_fill_pixel_buffer(bpp: u32, svga_dest_offset: u32) {
     for v in dirty_bitmap.iter_mut() {
         *v = 0
     }
+    // x64 page functions write the frame buffer directly once a write
+    // translation marked its page dirty
+    crate::x64::jac::retire_frame_buffer_writes();
 }

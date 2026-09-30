@@ -802,6 +802,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	PAGE_FUZZ_SEED=3 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	for seed in 1 2 3; do SSE_FP_SEED=$$seed node tests/x64/sse_fp_template.mjs || exit 1; done
 	SSE_FP_ORDINARY=1 node tests/x64/sse_fp_template.mjs
+	for seed in 1 2 3; do SSE_INT_SEED=$$seed node tests/x64/sse_int_template.mjs || exit 1; done
 
 # Every long-mode encoding of the opcode map executed at CPL3; needs the
 # expectations written by x64-decode-tests.

@@ -94,6 +94,8 @@ pub unsafe fn write_cr(index: usize, value: u64) -> Result<(), Fault> {
         crate::cpu::apic::write32(0x80, (value << 4) as u32);
         return Ok(());
     }
+    crate::x64::pages::COUNTERS[crate::x64::pages::COUNT_CR_WRITES] += 1;
+    let old = controls();
     let mut c = controls();
     c.write_cr(index, value)?;
     state::write_cr_raw(0, c.cr0);
@@ -101,8 +103,22 @@ pub unsafe fn write_cr(index: usize, value: u64) -> Result<(), Fault> {
     state::write_cr_raw(4, c.cr4);
     state::set_efer_raw(c.efer);
     *gp::protected_mode = c.cr0 & PE != 0;
-    cpu::full_clear_tlb();
-    memory::invalidate_core(crate::cpu::apic::current_core());
+    // MOV CR3 with CR4.PGE (and no PCID) keeps global translations
+    if index == 3
+        && c.cr0 == old.cr0
+        && c.cr4 == old.cr4
+        && c.efer == old.efer
+        && c.cr4 & 0x80 != 0
+        && c.cr4 & 0x20000 == 0
+    {
+        crate::x64::pages::COUNTERS[crate::x64::pages::COUNT_CR3_KEEP_GLOBAL] += 1;
+        cpu::clear_tlb();
+        memory::invalidate_core_nonglobal(crate::cpu::apic::current_core());
+    }
+    else {
+        cpu::full_clear_tlb();
+        memory::invalidate_core(crate::cpu::apic::current_core());
+    }
     crate::ir::runtime::entry::ir_admission_barrier();
     Ok(())
 }

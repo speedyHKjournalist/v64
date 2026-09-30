@@ -233,6 +233,183 @@ jnz .aloop
 mov r8, [rel alias_data]
 mov r9, [alias_data]`);
 
+// INVLPG after switching a 4 KiB PTE between two backing pages: data reads
+// must come from the new page, and code that remaps its own page must fetch
+// the instruction after INVLPG from the new page (targeted invalidation of
+// the access cache and of the cached code translation)
+add("INVLPG remaps a code and data page", `
+mov rdi, 0x340000
+mov eax, 0xE00003
+mov ecx, 512
+.ptfill:
+mov [rdi], rax
+add rax, 0x1000
+add rdi, 8
+dec ecx
+jnz .ptfill
+mov qword [0x202000+7*8], 0x340003
+mov rax, cr3
+mov cr3, rax
+; both pages: mov [0x340000], rdx / invlpg [0xE00000] / mov eax, <1 or 2> / ret
+mov rax, 0x0034000025148948
+mov [0xE01000], rax
+mov [0xE02000], rax
+mov rax, 0x00E00000253C010F
+mov [0xE01008], rax
+mov [0xE02008], rax
+mov rax, 0x0000C300000001B8
+mov [0xE01010], rax
+mov rax, 0x0000C300000002B8
+mov [0xE02010], rax
+mov qword [0xE01800], 11
+mov qword [0xE02800], 22
+mov ecx, 20000
+xor r10, r10
+xor r11, r11
+.rloop:
+mov eax, ecx
+and eax, 1
+shl eax, 12
+add eax, 0xE01003
+mov [0x340000], rax
+invlpg [0xE00000]
+lea r11, [r11 + r11*2]
+add r11, [0xE00800]
+xor eax, 0x3000
+mov rdx, rax
+mov rax, 0xE00000
+call rax
+lea r10, [r10 + r10*2]
+add r10, rax
+dec ecx
+jnz .rloop
+mov r8, r10
+mov r9, r11`);
+
+// MOV CR3 with CR4.PGE: a non-global PTE switched between two backing
+// pages must take effect after the CR3 reload, for data and for code; a
+// global page (unchanged) stays usable. Uses the page table of the INVLPG
+// scenario (0xE00000..0xFFFFFF in 4 KiB pages).
+add("CR3 reload keeps global pages, drops the others", `
+mov rax, cr4
+or rax, 0x80
+mov cr4, rax
+mov rax, 0x0000C300000003B8
+mov [0xE03000], rax
+mov rax, 0x0000C300000004B8
+mov [0xE04000], rax
+mov qword [0xE03800], 33
+mov qword [0xE04800], 44
+mov qword [0xE05800], 55
+mov qword [0x340000 + 0x10*8], 0xE05103
+mov ecx, 20000
+xor r10, r10
+xor r11, r11
+.cr3loop:
+mov eax, ecx
+and eax, 1
+shl eax, 12
+add eax, 0xE03003
+mov [0x340000], rax
+mov rax, cr3
+mov cr3, rax
+lea r11, [r11 + r11*2]
+add r11, [0xE00800]
+add r11, [0xE10800]
+mov rax, 0xE00000
+call rax
+lea r10, [r10 + r10*2]
+add r10, rax
+dec ecx
+jnz .cr3loop
+mov rax, cr4
+and rax, ~0x80
+mov cr4, rax
+mov r8, r10
+mov r9, r11`);
+
+// A loop whose body straddles a page boundary: MOV r64, imm64 is split
+// across the two pages (stepped in place), and the loop branch returns to
+// the first page
+add("instruction across a page boundary in a loop", `
+mov ecx, 30000
+xor r10, r10
+jmp .straddle
+align 4096
+times 4096 - 8 db 0xCC
+.straddle:
+add r10, rcx
+mov rax, 0x1122334455667788
+xor r10, rax
+rol r10, 7
+dec ecx
+jnz .straddle
+mov r8, r10`);
+
+// EFLAGS produced lazily on one page and read on the next (the record is
+// passed along when page functions chain): CMP, then ADD + INC (INC keeps
+// CF), consumed by SETcc, ADC and a conditional branch
+add("lazy flags across a page transition", `
+mov ecx, 20000
+xor r10, r10
+xor r11, r11
+.flagloop:
+mov eax, ecx
+imul eax, eax, 0x9E3779B1
+cmp eax, 0x80000000
+jmp .flagpage1
+.flagback:
+dec ecx
+jnz .flagloop
+mov r8, r10
+mov r9, r11
+jmp .flagdone
+align 4096
+.flagpage1:
+setb dl
+seto bl
+movzx edx, dl
+movzx ebx, bl
+lea r10, [r10 + rdx*2]
+add r10, rbx
+mov rax, rcx
+shl rax, 40
+add rax, r11
+inc r11
+jmp .flagpage2
+align 4096
+.flagpage2:
+adc r10, 3
+sets dl
+movzx edx, dl
+add r11, rdx
+jo .flagover
+jmp .flagback
+.flagover:
+add r10, 1000
+jmp .flagback
+.flagdone:`);
+
+add("control register reads in a loop", `
+mov ecx, 20000
+xor r10, r10
+xor r11, r11
+.crloop:
+mov rax, cr0
+and eax, 0x80010001
+add r10, rax
+mov rbx, cr3
+add r10, rbx
+mov rdx, cr4
+and edx, 0x20
+add r11, rdx
+mov r8, cr2
+xor r11, r8
+dec ecx
+jnz .crloop
+mov r8, r10
+mov r9, r11`);
+
 add("STI shadow before a pending self-IPI", `
 mov al, 0xFF
 out 0x21, al

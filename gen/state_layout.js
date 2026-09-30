@@ -128,6 +128,11 @@ export const STATE_FIELDS = [
     { name: "x64_jac_base", offset: 1796, rust: "u32", size: 4, owner: "scratch", note: "access cache read table of the active core and CPL" },
     { name: "x64_jac_epoch", offset: 1800, rust: "u64", size: 8, owner: "scratch", note: "tag bits of the active core's access cache epoch" },
     { name: "x64_page_linear", offset: 1808, rust: "u64", size: 8, owner: "scratch", note: "linear address of the page a page function runs at" },
+    { name: "x64_page_chain", offset: 1816, rust: "u32", size: 4, owner: "scratch", note: "native instructions of the page functions an activation tail-called from" },
+    { name: "x64_code_base", offset: 1820, rust: "u32", size: 4, owner: "scratch", note: "chaining table of the active core and CPL (x64::pages)" },
+    { name: "x64_page_lazy_kind", offset: 1824, rust: "u32", size: 4, owner: "scratch", note: "lazy EFLAGS record a page function tail-called with (0: flags are materialized)" },
+    { name: "x64_page_lazy_a", offset: 1832, rust: "u64", size: 8, owner: "scratch", note: "its first operand" },
+    { name: "x64_page_lazy_b", offset: 1840, rust: "u64", size: 8, owner: "scratch", note: "its second operand" },
     { name: "ir_tlb_base", offset: 2048, rust: "u32", size: 4, owner: "machine",
         doc: ["Address of cpu::tlb_data, written at startup. Generated IR code loads it", "from this fixed slot (below --global-base) instead of calling an import."] },
     // Memory-type and machine-check MSRs (x64 profile; see instructions_0f.rs
@@ -234,10 +239,13 @@ export const STATICS = {
     // page functions and their bookkeeping; entries re-check the live translation
     "x64/pages.rs": { RUNTIME: "machine", FAST: "machine", ACTIVE: "scratch", CODE_WRITES: "machine", STEPS: "debug", ACCESS_REFUSED: "debug", STEP_PROFILE: "debug",
         // per core, tagged with that core's access cache epoch
-        CODE_TLB: "cache" },
-    // derived from each core's x64 TLB (flushed with it)
-    "x64/jac.rs": { JAC: "cache" },
+        CODE_TLB: "cache", CHAIN: "cache",
+        COUNTERS: "debug", CHAINING: "machine", LAST_UNSERVED: "cache", BOUNCE: "scratch", RECOMPILE_MISSES: "machine", TIMING: "debug", TIME_IN_CALLS: "debug", TIME_IN_EXECUTE: "debug", TIME_FIRST_CALLS: "debug", BYTES_COMPILED: "debug" },
+    // derived from each core's x64 TLB (flushed with it); FRAME_BUFFER_WRITES:
+    // some entry maps the VGA frame buffer
+    "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache" },
     "x64/execute.rs": { DECODE_CACHE: "cache" },
+    "x64/pagegen.rs": { SIZE_STATS: "debug", OUTLINE_ACCESS: "machine", BLOCK_COUNT: "machine", BUCKET_DISPATCH: "machine" },
     "x64/debug.rs": { PENDING: "scratch" },
     "x64/system.rs": { FAULT_LOG: "debug", FAULT_NEXT: "debug", USER_TRACE: "debug", USER_TRACE_NEXT: "debug", USER_TRACE_ENABLED: "debug" },
     "x64/profile.rs": { PERIOD: "debug", COUNTDOWN: "debug", SAMPLES: "debug" },

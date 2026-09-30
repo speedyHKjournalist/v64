@@ -34,7 +34,7 @@ pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
 }
 
 // needs to be synced to const.js
-pub const WASM_TABLE_SIZE: u32 = 2400;
+pub const WASM_TABLE_SIZE: u32 = 12000;
 
 static JIT_STATE: Mutex<MaybeUninit<JitState>> = Mutex::new(MaybeUninit::uninit());
 fn get_jit_state() -> JitStateRef { JitStateRef(JIT_STATE.try_lock().unwrap()) }
@@ -285,8 +285,10 @@ pub fn ir_reserve_slot(id: u64, pages: HashSet<Page>) -> Option<u32> {
     ctx.ir_slots.insert(index, (id, pages.clone()));
     cpu::tlb_set_has_code_multiple(&pages, true);
     // x64 page functions store through cached write translations of pages
-    // without code; this page may be one of them.
-    unsafe { crate::x64::jac::flush_all() };
+    // without code; these pages may be among them.
+    for page in &pages {
+        unsafe { crate::x64::jac::retire_writes_to(page.to_address()) };
+    }
     check_jit_state_invariants(&ctx);
     Some(index.to_u16() as u32)
 }

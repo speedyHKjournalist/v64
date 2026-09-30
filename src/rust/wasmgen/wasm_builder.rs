@@ -2,6 +2,23 @@ use crate::leb::{write_leb_i32, write_leb_i64, write_leb_u32};
 use crate::wasmgen::wasm_opcodes as op;
 use std::collections::HashMap;
 
+/// Multiplicative hashing for the builder's small keys (labels, signatures,
+/// import names): SipHash showed in JIT compile profiles.
+#[derive(Default)]
+pub struct FastHasher(u64);
+impl std::hash::Hasher for FastHasher {
+    fn finish(&self) -> u64 { self.0 }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517C_C1B7_2722_0A95);
+        }
+    }
+    fn write_u32(&mut self, v: u32) { self.write_u64(v as u64) }
+    fn write_u64(&mut self, v: u64) { self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517C_C1B7_2722_0A95); }
+    fn write_usize(&mut self, v: usize) { self.write_u64(v as u64) }
+}
+type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;
+
 // Wasm indices and vector/section lengths are unsigned 32-bit LEBs.
 fn wasm_len(n: usize) -> u32 { u32::try_from(n).expect("Wasm length exceeds u32") }
 fn section(output: &mut Vec<u8>, kind: u8, contents: &[u8]) {
@@ -62,13 +79,13 @@ pub struct WasmBuilder {
     output: Vec<u8>,
     instruction_body: Vec<u8>,
     signatures: Vec<Signature>,
-    signature_indices: HashMap<Signature, u32>,
+    signature_indices: FastMap<Signature, u32>,
     imports: Vec<(String, u32)>,
-    import_indices: HashMap<String, u32>,
+    import_indices: FastMap<String, u32>,
     finished: bool,
     next_label: Label,
     label_stack: Vec<Label>,
-    label_to_depth: HashMap<Label, usize>,
+    label_to_depth: FastMap<Label, usize>,
     free_locals_i32: Vec<WasmLocal>,
     free_locals_i64: Vec<WasmLocalI64>,
     free_locals_f32: Vec<WasmLocalF32>,
@@ -86,6 +103,12 @@ pub struct WasmBuilder {
     branch_hints: Vec<(usize, bool)>,
     /// The module function's name in the "name" section (profiles).
     function_name: Option<String>,
+    /// Functions defined after the entry function: type index and body
+    /// (locals declaration, code, END), called with call_internal.
+    internal_functions: Vec<(u32, Vec<u8>)>,
+    /// Positions of the 5-byte targets of calls to internal functions, and
+    /// which one (patched in finish, once the import count is final)
+    internal_calls: Vec<(usize, u32)>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -121,13 +144,13 @@ impl WasmBuilder {
             output: Vec::with_capacity(256),
             instruction_body: Vec::with_capacity(256),
             signatures: Vec::new(),
-            signature_indices: HashMap::new(),
+            signature_indices: FastMap::default(),
             imports: Vec::new(),
-            import_indices: HashMap::new(),
+            import_indices: FastMap::default(),
             finished: false,
             next_label: Label::ZERO,
             label_stack: Vec::new(),
-            label_to_depth: HashMap::new(),
+            label_to_depth: FastMap::default(),
             free_locals_i32: Vec::new(),
             free_locals_i64: Vec::new(),
             free_locals_f32: Vec::new(),
@@ -140,6 +163,8 @@ impl WasmBuilder {
             entry_result: false,
             branch_hints: Vec::new(),
             function_name: None,
+            internal_functions: Vec::new(),
+            internal_calls: Vec::new(),
         }
     }
 
@@ -168,6 +193,24 @@ impl WasmBuilder {
         self.imports.push((fn_name.to_owned(), ty));
         self.import_indices.insert(fn_name.to_owned(), index);
         index
+    }
+
+    /// The function index of an import (imports only grow, so it is final).
+    pub fn import_index(&mut self, fn_name: &str, signature: Signature) -> u32 {
+        self.get_fn_idx_signature(fn_name, signature)
+    }
+    /// Define a function after the entry function (`body`: locals
+    /// declaration, code and END); returns its number for call_internal.
+    pub fn add_internal_function(&mut self, signature: Signature, body: Vec<u8>) -> u32 {
+        let ty = self.intern_signature(signature);
+        self.internal_functions.push((ty, body));
+        wasm_len(self.internal_functions.len() - 1)
+    }
+    /// Call internal function `number` (its index is patched in finish).
+    pub fn call_internal(&mut self, number: u32) {
+        self.instruction_body.push(op::OP_CALL);
+        self.internal_calls.push((self.instruction_body.len(), number));
+        self.instruction_body.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0]);
     }
 
     /// Vector signatures are for Wasm-to-Wasm calls; JS helpers need a scratch-memory ABI.
@@ -234,9 +277,21 @@ impl WasmBuilder {
         }
         section(&mut self.output, op::SC_IMPORT, &body);
         body.clear();
-        body.push(1);
+        write_leb_u32(&mut body, wasm_len(1 + self.internal_functions.len()));
         write_leb_u32(&mut body, entry_type);
+        for (ty, _) in &self.internal_functions {
+            write_leb_u32(&mut body, *ty);
+        }
         section(&mut self.output, op::SC_FUNCTION, &body);
+        // internal function k is function imports + 1 + k: 5-byte LEB targets
+        let first_internal = wasm_len(self.imports.len() + 1);
+        for &(at, number) in &self.internal_calls {
+            let index = first_internal + number;
+            for i in 0..5 {
+                self.instruction_body[at + i] =
+                    (index >> (7 * i) & 0x7F) as u8 | if i < 4 { 0x80 } else { 0 };
+            }
+        }
         body.clear();
         body.push(1);
         name(&mut body, "f");
@@ -275,9 +330,14 @@ impl WasmBuilder {
         }
         body.extend_from_slice(&self.instruction_body);
         body.push(op::OP_END);
-        let mut code = vec![1];
+        let mut code = Vec::new();
+        write_leb_u32(&mut code, wasm_len(1 + self.internal_functions.len()));
         write_leb_u32(&mut code, wasm_len(body.len()));
         code.extend_from_slice(&body);
+        for (_, internal) in &self.internal_functions {
+            write_leb_u32(&mut code, wasm_len(internal.len()));
+            code.extend_from_slice(internal);
+        }
         section(&mut self.output, op::SC_CODE, &code);
         if let Some(function_name) = &self.function_name {
             let mut names = Vec::new();

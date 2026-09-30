@@ -158,10 +158,19 @@ pub unsafe fn invalidate_core(core: usize) {
     X64_TLBS[core].clear();
     super::jac::flush(core);
 }
+/// MOV CR3 with CR4.PGE: translations of global pages survive (in the TLB,
+/// the access cache and the chaining table).
+pub unsafe fn invalidate_core_nonglobal(core: usize) {
+    X64_TLBS[core].clear_nonglobal();
+    super::jac::flush_nonglobal(core);
+    super::pages::forget_nonglobal_code(core);
+}
 pub unsafe fn invlpg(address: u64) {
+    super::pages::COUNTERS[super::pages::COUNT_INVLPG] += 1;
     let core = apic::current_core();
     X64_TLBS[core].invalidate(LinearAddress(address));
-    super::jac::flush(core);
+    super::jac::invlpg(core, address);
+    super::pages::forget_code_page(core, address);
 }
 
 /// Compilation observes the same stale translations as execution, but never
@@ -249,6 +258,25 @@ pub unsafe extern "C" fn x64_tlb_snapshot_restore(core: u32, data: u32, count: u
     restored
 }
 
+/// A data translation for the access cache (x64::jac): the physical address,
+/// and whether it comes from a large page (conservatively true if the TLB
+/// did not keep the entry).
+/// translate_page for instruction fetch
+pub unsafe fn translate_page_execute(address: u64) -> Result<(u64, bool, bool), Fault> {
+    translate_page(address, Access::Execute)
+}
+/// Also whether it is global (else conservatively false): kept by MOV CR3.
+pub unsafe fn translate_page(address: u64, access: Access) -> Result<(u64, bool, bool), Fault> {
+    let physical = translate(address, access, false, false)?;
+    let c = Controls {
+        cr3: state::read_cr(3),
+        user: *gp::cpl == 3,
+        write_protect: state::read_cr(0) & 0x10000 != 0,
+        nx_enable: state::efer() & state::EFER_NXE != 0,
+    };
+    let t = X64_TLBS[apic::current_core()].lookup(LinearAddress(address), access, c);
+    Ok((physical, t.map_or(true, |t| t.page_shift > 12), t.is_some_and(|t| t.global)))
+}
 pub unsafe fn translate(
     address: u64,
     access: Access,

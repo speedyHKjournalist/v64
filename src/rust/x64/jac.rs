@@ -25,26 +25,40 @@ const EPOCH_LIMIT: u64 = 1 << (64 - EPOCH_SHIFT);
 struct Entry {
     tag: u64,
     host: u32,
-    _pad: u32,
+    /// GLOBAL: from a global translation (kept by MOV CR3)
+    flags: u32,
 }
+const GLOBAL: u32 = 1;
 #[repr(C, align(16))]
 struct Core {
     /// read supervisor, read user, write supervisor, write user
     tables: [[Entry; ENTRIES]; 4],
     /// Never 0, so zeroed entries never match.
     epoch: u64,
+    /// 2 MiB linear regions (hashed to 1024 bits) with entries that came
+    /// from a large page since the last flush: INVLPG in such a region
+    /// flushes the core, anywhere else it retires one page's entries.
+    large: [u64; LARGE_WORDS],
 }
+const LARGE_WORDS: usize = 16;
 const EMPTY: Entry = Entry {
     tag: 0,
     host: 0,
-    _pad: 0,
+    flags: 0,
 };
 static mut JAC: [Core; 8] = [const {
     Core {
         tables: [[EMPTY; ENTRIES]; 4],
         epoch: 1,
+        large: [0; LARGE_WORDS],
     }
 }; 8];
+/// Some write entry maps the VGA frame buffer (see retire_frame_buffer_writes).
+static mut FRAME_BUFFER_WRITES: bool = false;
+fn region_bit(address: u64) -> (usize, u64) {
+    let region = (address >> 21) as usize & (LARGE_WORDS * 64 - 1);
+    (region / 64, 1 << (region % 64))
+}
 
 /// Read table base of `core` for the given privilege (host address).
 pub unsafe fn base(core: usize, user: bool) -> u32 {
@@ -56,10 +70,72 @@ pub unsafe fn epoch_bits(core: usize) -> u64 { JAC[core].epoch << EPOCH_SHIFT }
 pub unsafe fn flush(core: usize) {
     let c = &mut JAC[core];
     c.epoch += 1;
+    c.large = [0; LARGE_WORDS];
     if c.epoch == EPOCH_LIMIT {
         c.tables = [[EMPTY; ENTRIES]; 4];
         c.epoch = 1;
     }
+}
+/// MOV CR3 on `core`: only the entries of global translations stay.
+pub unsafe fn flush_nonglobal(core: usize) {
+    let c = &mut JAC[core];
+    for table in c.tables.iter_mut() {
+        for entry in table.iter_mut() {
+            if entry.flags & GLOBAL == 0 {
+                entry.tag = 0;
+            }
+        }
+    }
+}
+/// INVLPG `address` on `core`: its x64 TLB entries were invalidated. Entries
+/// of 4 KiB translations live only in the page's own slot of each table; an
+/// entry from a large page could be in any slot of the large page's range.
+pub unsafe fn invlpg(core: usize, address: u64) {
+    let c = &mut JAC[core];
+    let (word, bit) = region_bit(address);
+    if c.large[word] & bit != 0 {
+        super::pages::COUNTERS[super::pages::COUNT_JAC_LARGE_FLUSH] += 1;
+        flush(core);
+        return;
+    }
+    let page = address >> 12;
+    let tag = page | c.epoch << EPOCH_SHIFT;
+    for table in c.tables.iter_mut() {
+        let entry = &mut table[page as usize & (ENTRIES - 1)];
+        if entry.tag == tag {
+            entry.tag = 0;
+        }
+    }
+}
+/// The RAM backing page `backing` gained compiled code: page functions must
+/// no longer store to it directly (on any core of this instance).
+pub unsafe fn retire_writes_to(backing: u32) {
+    let host = (memory::mem8 as u32).wrapping_add(backing);
+    retire_writes(|entry| entry.host == host);
+}
+unsafe fn retire_writes(retire: impl Fn(&Entry) -> bool) {
+    for core in 0..crate::cpu::apic::core_count().clamp(1, 8) {
+        let c = &mut JAC[core];
+        for table in c.tables[2..].iter_mut() {
+            for entry in table.iter_mut() {
+                if entry.tag != 0 && retire(entry) {
+                    entry.tag = 0;
+                }
+            }
+        }
+    }
+}
+/// Write entries of the VGA frame buffer mark their page dirty when they are
+/// filled. Once the screen has been drawn (the dirty bitmap is cleared), the
+/// next write must mark it again.
+pub unsafe fn retire_frame_buffer_writes() {
+    if !FRAME_BUFFER_WRITES {
+        return;
+    }
+    FRAME_BUFFER_WRITES = false;
+    let low = memory::vga_mem8 as u32;
+    let high = low.wrapping_add(memory::vga_memory_size);
+    retire_writes(|entry| entry.host >= low && entry.host < high);
 }
 pub unsafe fn flush_all() {
     for core in 0..8 {
@@ -68,15 +144,54 @@ pub unsafe fn flush_all() {
 }
 
 /// Record that the linear page of `address` translates to the RAM backing
-/// page `backing` (page aligned) for this access kind and privilege.
-pub unsafe fn fill(core: usize, user: bool, write: bool, address: u64, backing: u32) {
+/// page `backing` (page aligned) for this access kind and privilege; `large`:
+/// the translation is part of a 2 MiB or 1 GiB page.
+pub unsafe fn fill(
+    core: usize,
+    user: bool,
+    write: bool,
+    address: u64,
+    backing: u32,
+    large: bool,
+    global: bool,
+) {
     let page = address >> 12;
     let c = &mut JAC[core];
+    if large {
+        let (word, bit) = region_bit(address);
+        c.large[word] |= bit;
+    }
     c.tables[write as usize * 2 + user as usize][page as usize & (ENTRIES - 1)] = Entry {
         tag: page | c.epoch << EPOCH_SHIFT,
         host: (memory::mem8 as u32).wrapping_add(backing),
-        _pad: 0,
+        flags: if global { GLOBAL } else { 0 },
     };
+}
+
+/// The backing (relative to mem8) of the VGA linear frame buffer page at
+/// physical `address`, which page functions may access directly: it is plain
+/// memory in the wasm heap. A write translation marks the page dirty now
+/// (retire_frame_buffer_writes undoes it after the next screen update). Not
+/// with cores in workers, whose caches the screen update cannot reach.
+pub unsafe fn frame_buffer_backing(address: u64, write: bool) -> Option<u32> {
+    let page = address & !4095;
+    let base = memory::VGA_LFB_ADDRESS as u64;
+    // (with cores in workers, only the machine instance: it draws the screen)
+    if crate::parallel::active() && !crate::parallel::machine_instance()
+        || page < base
+        || page + 4096 > base + memory::vga_memory_size as u64
+    {
+        return None;
+    }
+    // decoded by the legacy bus: no relocated RAM or aperture there
+    if physical::resolve_backing(page).ok()? != page as u32 {
+        return None;
+    }
+    if write {
+        crate::cpu::vga::mark_dirty(page as u32);
+        FRAME_BUFFER_WRITES = true;
+    }
+    Some((memory::vga_mem8 as u32).wrapping_add((page - base) as u32).wrapping_sub(memory::mem8 as u32))
 }
 
 /// The backing page of a guest physical page that page functions may access
@@ -99,7 +214,7 @@ mod tests {
         unsafe {
             let before = epoch_bits(3);
             assert_ne!(before, 0);
-            fill(3, true, true, 0xFFFF_8000_1234_5678, 0x5000);
+            fill(3, true, true, 0xFFFF_8000_1234_5678, 0x5000, false, false);
             let page = 0xFFFF_8000_1234_5678u64 >> 12;
             let e = JAC[3].tables[3][page as usize & (ENTRIES - 1)];
             assert_eq!(e.tag, page | before);

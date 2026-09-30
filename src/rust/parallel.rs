@@ -35,6 +35,18 @@ static mut INSTANCE_BASE: u32 = 0;
 /// Set while the machine runs cores in workers: in every instance
 static mut ACTIVE: bool = false;
 
+/// Whether this is the machine instance (the BSP and the devices)
+pub fn machine_instance() -> bool {
+    #[cfg(feature = "parallel")]
+    {
+        unsafe { INSTANCE_BASE == 0 }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        true
+    }
+}
+
 /// The machine instance's copy of a static of this instance
 #[inline(always)]
 pub fn machine<T>(p: *mut T) -> *mut T {
@@ -746,6 +758,18 @@ pub mod code {
     static mut CLAIMED: Vec<u32> = Vec::new(); // publication sequence per page, 0: none
 
     unsafe fn me() -> usize { crate::cpu::apic::current_core() }
+    /// For generated code that leaves for poll() when other cores published
+    /// or invalidated code (x64 page functions chaining): the machine's
+    /// PUBLISH_NEXT, this instance's PUBLISH_SEEN, the machine's
+    /// INVALIDATE_NEXT and this instance's INVALIDATE_SEEN
+    pub unsafe fn pending_addresses() -> [u32; 4] {
+        [
+            machine(&raw mut PUBLISH_NEXT) as u32,
+            &raw mut PUBLISH_SEEN as u32,
+            machine(&raw mut INVALIDATE_NEXT) as u32,
+            &raw mut INVALIDATE_SEEN as u32,
+        ]
+    }
     unsafe fn owner(page: u32) -> *mut u8 {
         let owners = *machine(&raw mut OWNERS);
         if owners.is_null() || page >= *machine(&raw mut OWNER_PAGES) {
