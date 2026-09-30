@@ -418,6 +418,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/wisp_network.js
 	./tests/devices/virtio_balloon.js
 	./tests/devices/virtio_devices.js
+	./tests/devices/virtio_rng.js
 	./tests/devices/ide_large_disk.js
 
 rust-test: $(RUST_FILES)
