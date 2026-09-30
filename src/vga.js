@@ -1,13 +1,13 @@
 import { LOG_VGA, FLAG_VM } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
+import { DISPLAY_FLAG_BLINKING, DISPLAY_FLAG_FONT_PAGE_B } from "./display.js";
+import { round_up_to_next_power_of_2, view } from "./lib.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
-import { ScreenAdapter } from "./browser/screen.js";
 import { BusConnector } from "./bus.js";
-import { DummyScreenAdapter } from "./browser/dummy_screen.js";
-import { round_up_to_next_power_of_2, view } from "./lib.js";
+import { DisplayHub, DisplaySource } from "./display.js";
 
 // Always 64k
 const VGA_BANK_SIZE = 64 * 1024;
@@ -16,7 +16,7 @@ const MAX_XRES = 2560;
 const MAX_YRES = 1600;
 const MAX_BPP = 32;
 
-//const VGA_LFB_ADDRESS = 0xFE000000; // set by seabios
+// Where the linear frame buffer starts out; the guest may move it (BAR0)
 const VGA_LFB_ADDRESS = 0xE0000000;
 
 /**
@@ -54,12 +54,13 @@ const VGA_HOST_MEMORY_SPACE_SIZE = Uint32Array.from([
 
 /**
  * @constructor
+ * @implements {DisplaySource}
  * @param {CPU} cpu
  * @param {BusConnector} bus
- * @param {ScreenAdapter|DummyScreenAdapter} screen
+ * @param {DisplayHub} display
  * @param {number} vga_memory_size
  */
-export function VGAScreen(cpu, bus, screen, vga_memory_size)
+export function VGAScreen(cpu, bus, display, vga_memory_size)
 {
     this.cpu = cpu;
 
@@ -67,7 +68,7 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.bus = bus;
 
     /** @const */
-    this.screen = screen;
+    this.display = display;
 
     this.vga_memory_size = vga_memory_size;
 
@@ -118,8 +119,8 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
 
     /**
      * The rectangular fragments of the image buffer, and their destination
-     * locations, to be drawn every screen_fill_buffer during VGA modes.
-     * @type {Array<Object<string, number>>}
+     * locations, to be drawn every render during VGA modes.
+     * @type {!Array<!Object>}
      */
     this.layers = [];
 
@@ -174,6 +175,10 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
 
     /** @type {boolean} */
     this.graphical_mode = false;
+
+    // Whether the sink has this graphics mode's size: showing text in between
+    // may have taken its canvas, and then it is sent again
+    this.size_reported = false;
 
     /*
      * VGA palette containing 256 colors for video mode 13, svga 8bpp, etc.
@@ -243,6 +248,8 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.pci_bars = [
         {
             size: this.vga_memory_size,
+            // the linear frame buffer follows BAR0 (see PCI.prototype.pci_write32)
+            on_move: base => this.move_lfb(base),
         },
     ];
 
@@ -299,7 +306,12 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.max_scan_line = 0;
 
     this.miscellaneous_output_register = 0xff;
+
+    // Bit 0 of input status register 1 (0x3DA), which toggles on every read
     this.port_3DA_value = 0xFF;
+
+    // A vertical retrace has started that no 0x3DA read has seen yet
+    this.retrace_pending = false;
 
     this.font_page_ab_enabled = false;
 
@@ -364,17 +376,26 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     io.register_read(0x1CF, this, undefined, this.port1CF_read);
 
 
-    const vga_offset = cpu.svga_allocate_memory(this.vga_memory_size) >>> 0;
+    // The frame buffer is device memory in the Rust core, which the guest
+    // reaches at memory speed through the LFB, wherever BAR0 puts it
+    this.lfb_region = cpu.mmio_ram_allocate(this.vga_memory_size);
+    dbg_assert(this.lfb_region >= 0, "no device memory for the VGA frame buffer");
+    const vga_offset = cpu.mmio_ram_backing(this.lfb_region) >>> 0;
     this.svga_memory = view(Uint8Array, cpu.wasm_memory, vga_offset, this.vga_memory_size);
+    this.lfb_address = 0;
+    this.move_lfb(VGA_LFB_ADDRESS);
 
     this.diff_addr_min = this.vga_memory_size;
     this.diff_addr_max = 0;
     this.diff_plot_min = this.vga_memory_size;
     this.diff_plot_max = 0;
 
-    this.image_data = null;
-    /** @type {Uint8ClampedArray} the pixel buffer when image_data is a copy of it */
-    this.image_data_source = null;
+    /**
+     * The RGBA picture in wasm memory, as { data, width, height }
+     * @type {Object}
+     */
+    this.pixels = null;
+    this.dest_buffer_offset = 0;
 
     this.vga_memory = new Uint8Array(4 * VGA_BANK_SIZE);
     this.plane0 = new Uint8Array(this.vga_memory.buffer, 0 * VGA_BANK_SIZE, VGA_BANK_SIZE);
@@ -389,6 +410,7 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     );
 
     cpu.devices.pci.register_device(this);
+    display.add_source(this);
 }
 
 VGAScreen.prototype.get_state = function()
@@ -532,7 +554,7 @@ VGAScreen.prototype.set_state = function(state)
     this.character_map_select = state[63] === undefined ? 0 : state[63];
     this.font_page_ab_enabled = state[64] === undefined ? 0 : state[64];
 
-    this.screen.set_mode(this.graphical_mode);
+    this.set_graphical_mode(this.graphical_mode);
 
     // Ensure set_size_graphical/set_size_graphical_text will update
     this.screen_width = 0;
@@ -554,7 +576,7 @@ VGAScreen.prototype.set_state = function(state)
     }
     else
     {
-        this.screen.clear_text_state();
+        this.display.clear_text_state();
         this.set_font_bitmap(true);
         this.set_size_text(this.max_cols, this.max_rows);
         this.set_font_page();
@@ -564,12 +586,23 @@ VGAScreen.prototype.set_state = function(state)
     this.complete_redraw();
 };
 
+/**
+ * Decode the linear frame buffer at `base`, where the guest put BAR0 (the
+ * core leaves it unmapped over RAM or below 1 MiB: a cleared BAR)
+ * @param {number} base
+ */
+VGAScreen.prototype.move_lfb = function(base)
+{
+    this.lfb_address = base >>> 0;
+    this.cpu.mmio_ram_map(this.lfb_region, this.lfb_address);
+};
+
 VGAScreen.prototype.vga_memory_read = function(addr)
 {
     if(this.svga_enabled)
     {
         // vbe banked mode (accessing svga memory through the regular vga memory range)
-        return this.cpu.read8((addr - 0xA0000 | this.svga_bank_offset) + VGA_LFB_ADDRESS | 0);
+        return this.cpu.mmio_ram_read8(this.lfb_region, (addr - 0xA0000 | this.svga_bank_offset) >>> 0);
     }
 
     var memory_space_select = this.miscellaneous_graphics_register >> 2 & 0x3;
@@ -643,7 +676,7 @@ VGAScreen.prototype.vga_memory_write = function(addr, value)
     if(this.svga_enabled)
     {
         // vbe banked mode (accessing svga memory through the regular vga memory range)
-        this.cpu.write8((addr - 0xA0000 | this.svga_bank_offset) + VGA_LFB_ADDRESS | 0, value);
+        this.cpu.mmio_ram_write8(this.lfb_region, (addr - 0xA0000 | this.svga_bank_offset) >>> 0, value);
         return;
     }
 
@@ -847,8 +880,8 @@ VGAScreen.prototype.text_mode_redraw = function()
     const blink_enabled = this.attribute_mode & 1 << 3;
     const fg_color_mask = this.font_page_ab_enabled ? 7 : 0xF;
     const bg_color_mask = blink_enabled ? 7 : 0xF;
-    const FLAG_BLINKING = this.screen.FLAG_BLINKING;
-    const FLAG_FONT_PAGE_B = this.screen.FLAG_FONT_PAGE_B;
+    const FLAG_BLINKING = DISPLAY_FLAG_BLINKING;
+    const FLAG_FONT_PAGE_B = DISPLAY_FLAG_FONT_PAGE_B;
 
     let addr = this.start_address << 1;
 
@@ -867,9 +900,7 @@ VGAScreen.prototype.text_mode_redraw = function()
             const font_page_b = this.font_page_ab_enabled && !(color & 1 << 3);
             const flags = (blinking ? FLAG_BLINKING : 0) | (font_page_b ? FLAG_FONT_PAGE_B : 0);
 
-            this.bus.send("screen-put-char", [row, col, chr]);
-
-            this.screen.put_char(row, col, chr, flags,
+            this.display.put_char(row, col, chr, flags,
                 this.vga256_palette[this.dac_mask & this.dac_map[color >> 4 & bg_color_mask]],
                 this.vga256_palette[this.dac_mask & this.dac_map[color & fg_color_mask]]);
 
@@ -925,13 +956,11 @@ VGAScreen.prototype.vga_memory_write_text_mode = function(addr, value)
     const blink_enabled = this.attribute_mode & 1 << 3;
     const blinking = blink_enabled && (color & 1 << 7);
     const font_page_b = this.font_page_ab_enabled && !(color & 1 << 3);
-    const flags = (blinking ? this.screen.FLAG_BLINKING : 0) | (font_page_b ? this.screen.FLAG_FONT_PAGE_B : 0);
+    const flags = (blinking ? DISPLAY_FLAG_BLINKING : 0) | (font_page_b ? DISPLAY_FLAG_FONT_PAGE_B : 0);
     const fg_color_mask = this.font_page_ab_enabled ? 7 : 0xF;
     const bg_color_mask = blink_enabled ? 7 : 0xF;
 
-    this.bus.send("screen-put-char", [row, col, chr]);
-
-    this.screen.put_char(row, col, chr, flags,
+    this.display.put_char(row, col, chr, flags,
         this.vga256_palette[this.dac_mask & this.dac_map[color >> 4 & bg_color_mask]],
         this.vga256_palette[this.dac_mask & this.dac_map[color & fg_color_mask]]);
 };
@@ -956,7 +985,7 @@ VGAScreen.prototype.update_cursor = function()
     dbg_assert(row >= 0 && col >= 0);
 
     // NOTE: is allowed to be out of bounds
-    this.screen.update_cursor(row, col);
+    this.display.update_cursor(row, col);
 };
 
 VGAScreen.prototype.complete_redraw = function()
@@ -967,7 +996,7 @@ VGAScreen.prototype.complete_redraw = function()
     {
         if(this.svga_enabled)
         {
-            this.cpu.svga_mark_dirty();
+            this.cpu.mmio_ram_mark_dirty(this.lfb_region);
         }
         else
         {
@@ -1149,8 +1178,7 @@ VGAScreen.prototype.set_size_text = function(cols_count, rows_count)
     this.max_cols = cols_count;
     this.max_rows = rows_count;
 
-    this.screen.set_size_text(cols_count, rows_count);
-    this.bus.send("screen-set-size", [cols_count, rows_count, 0]);
+    this.display.set_size_text(cols_count, rows_count);
 };
 
 VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, virtual_height, bpp)
@@ -1173,53 +1201,47 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
         this.virtual_width = virtual_width;
         this.virtual_height = virtual_height;
 
-        if(typeof ImageData !== "undefined")
-        {
-            const size = virtual_width * virtual_height;
-            const offset = this.cpu.svga_allocate_dest_buffer(size) >>> 0;
+        const size = virtual_width * virtual_height;
+        this.dest_buffer_offset = this.cpu.mmio_ram_allocate_pixels(this.lfb_region, size) >>> 0;
+        this.create_pixel_view();
+        this.cpu.mmio_ram_mark_dirty(this.lfb_region);
+    }
 
-            this.dest_buffet_offset = offset;
-            this.create_image_data();
-
-            this.cpu.svga_mark_dirty();
-        }
-        else
-        {
-            // TODO: nodejs
-        }
-
-        this.screen.set_size_graphical(width, height, virtual_width, virtual_height);
-        this.bus.send("screen-set-size", [width, height, bpp]);
+    if(needs_update || !this.size_reported)
+    {
+        this.size_reported = true;
+        this.display.set_size_graphical(width, height, virtual_width, virtual_height, bpp);
     }
 };
 
 /**
- * The ImageData the screen draws from: a view of the pixel buffer in wasm
- * memory, or, when that memory is shared (cores in host threads,
- * src/parallel), a copy that sync_image_data refreshes before each update
- * (ImageData refuses shared memory)
+ * Text or graphics, as far as the sink is concerned. After text, a graphics
+ * mode owes the sink its size and all of its pixels again: showing the text
+ * may have taken the canvas.
+ * @param {boolean} graphical
  */
-VGAScreen.prototype.create_image_data = function()
+VGAScreen.prototype.set_graphical_mode = function(graphical)
 {
-    const pixels = new Uint8ClampedArray(this.cpu.wasm_memory.buffer, this.dest_buffet_offset,
-        4 * this.virtual_width * this.virtual_height);
-    this.image_data_source = typeof SharedArrayBuffer !== "undefined" && pixels.buffer instanceof SharedArrayBuffer ? pixels : null;
-    this.image_data = new ImageData(this.image_data_source ? new Uint8ClampedArray(pixels.length) : pixels,
-        this.virtual_width, this.virtual_height);
+    this.graphical_mode = graphical;
+    if(!graphical)
+    {
+        this.size_reported = false;
+    }
+    this.display.set_mode(graphical);
 };
 
 /**
- * Copy pixels [first, end) of the buffer in shared wasm memory into the ImageData
- * @param {number} first
- * @param {number} end
+ * The picture the sink draws from: a view of the RGBA buffer in wasm memory
+ * (possibly shared memory, which the sink has to copy out of)
  */
-VGAScreen.prototype.sync_image_data = function(first, end)
+VGAScreen.prototype.create_pixel_view = function()
 {
-    const source = this.image_data_source;
-    if(!source) return;
-    first = Math.max(0, first) * 4;
-    end = Math.min(source.length, end * 4);
-    if(first < end) this.image_data.data.set(source.subarray(first, end), first);
+    this.pixels = {
+        data: new Uint8ClampedArray(this.cpu.wasm_memory.buffer, this.dest_buffer_offset,
+            4 * this.virtual_width * this.virtual_height),
+        width: this.virtual_width,
+        height: this.virtual_height,
+    };
 };
 
 VGAScreen.prototype.update_vga_size = function()
@@ -1280,7 +1302,7 @@ VGAScreen.prototype.update_vga_size = function()
 
         this.set_size_graphical(screen_width, screen_height, virtual_width, virtual_height, bpp);
 
-        this.update_vertical_retrace();
+        this.latch_start_address();
         this.update_layers();
     }
     else
@@ -1326,7 +1348,7 @@ VGAScreen.prototype.update_layers = function()
         // See http://www.phatcode.net/res/224/files/html/ch29/29-05.html#Heading6
         // and http://www.osdever.net/FreeVGA/vga/seqreg.htm#01
         this.layers = [];
-        this.screen.clear_screen();
+        this.display.clear_screen();
         return;
     }
 
@@ -1354,7 +1376,7 @@ VGAScreen.prototype.update_layers = function()
     for(var x = -start_buffer_col, y = 0; x < this.screen_width; x += this.virtual_width, y++)
     {
         this.layers.push({
-            image_data: this.image_data,
+            pixels: this.pixels,
             screen_x: x,
             screen_y: 0,
             buffer_x: 0,
@@ -1374,7 +1396,7 @@ VGAScreen.prototype.update_layers = function()
     for(var x = -start_split_col, y = 0; x < this.screen_width; x += this.virtual_width, y++)
     {
         this.layers.push({
-            image_data: this.image_data,
+            pixels: this.pixels,
             screen_x: x,
             screen_y: split_screen_row,
             buffer_x: 0,
@@ -1385,15 +1407,77 @@ VGAScreen.prototype.update_layers = function()
     }
 };
 
-VGAScreen.prototype.update_vertical_retrace = function()
+/**
+ * The start address takes effect at the next vertical retrace (page flipping)
+ */
+VGAScreen.prototype.latch_start_address = function()
 {
-    // Emulate behaviour during VSync/VRetrace
-    this.port_3DA_value |= 0x8;
     if(this.start_address_latched !== this.start_address)
     {
         this.start_address_latched = this.start_address;
         this.update_layers();
     }
+};
+
+/** @override */
+VGAScreen.prototype.invalidate = function()
+{
+    this.complete_redraw();
+};
+
+/** @override */
+VGAScreen.prototype.on_vblank = function()
+{
+    this.retrace_pending = true;
+    this.latch_start_address();
+};
+
+/**
+ * The refresh period the CRTC is programmed for: the dot clock (misc output
+ * bits 2-3, halved by clocking mode bit 3) over horizontal total times
+ * character width times vertical total. 70 Hz for 400-line modes, 60 Hz for
+ * 480-line ones.
+ * @override
+ */
+VGAScreen.prototype.vblank_period = function()
+{
+    if(this.svga_enabled)
+    {
+        return 1000 / 60;
+    }
+    const clock = (this.miscellaneous_output_register >> 2 & 3) === 1 ? 28.322e6 : 25.175e6;
+    const dot_clock = this.clocking_mode & 0x08 ? clock / 2 : clock;
+    const char_width = this.clocking_mode & 0x01 ? 8 : 9;
+    const hz = dot_clock / ((this.crtc[0] + 5) * char_width * this.vertical_total());
+    // not programmed yet
+    return hz >= 40 && hz <= 120 ? 1000 / hz : 1000 / 70;
+};
+
+/**
+ * @return {number} scanlines per frame
+ */
+VGAScreen.prototype.vertical_total = function()
+{
+    const overflow = this.crtc[7];
+    return (this.crtc[6] | (overflow & 0x01) << 8 | (overflow & 0x20) << 4) + 2;
+};
+
+/**
+ * How long bit 3 of 0x3DA reads as set after a retrace starts: vertical
+ * retrace start to end, 2 scanlines in the standard modes
+ * @return {number} milliseconds
+ */
+VGAScreen.prototype.retrace_duration = function()
+{
+    const period = this.vblank_period();
+    if(this.svga_enabled)
+    {
+        return period * 2 / 449;
+    }
+    const overflow = this.crtc[7];
+    const start = this.crtc[0x10] | (overflow & 0x04) << 6 | (overflow & 0x80) << 2;
+    const lines = (this.crtc[0x11] - start) & 0xF || 16;
+    return period * lines / this.vertical_total();
 };
 
 VGAScreen.prototype.update_cursor_scanline = function()
@@ -1403,7 +1487,7 @@ VGAScreen.prototype.update_cursor_scanline = function()
     const start = Math.min(max, this.cursor_scanline_start & 0x1F);
     const end = Math.min(max, this.cursor_scanline_end & 0x1F);
     const visible = !disabled && start < end;
-    this.screen.update_cursor_scanline(start, end, visible);
+    this.display.update_cursor_scanline(start, end, visible);
 };
 
 /**
@@ -1457,11 +1541,11 @@ VGAScreen.prototype.port3C0_write = function(value)
                         this.svga_bank_offset = 0;
                     }
 
+                    const was_graphical = this.graphical_mode;
                     const is_graphical = (value & 0x1) !== 0;
                     if(!this.svga_enabled && this.graphical_mode !== is_graphical)
                     {
-                        this.graphical_mode = is_graphical;
-                        this.screen.set_mode(this.graphical_mode);
+                        this.set_graphical_mode(is_graphical);
                     }
 
                     if((previous_mode ^ value) & 0x40)
@@ -1475,7 +1559,8 @@ VGAScreen.prototype.port3C0_write = function(value)
                     // Data stored in image buffer are invalidated
                     this.complete_redraw();
 
-                    this.set_font_bitmap(false);
+                    // Graphics modes draw into plane 2, where the font lives
+                    this.set_font_bitmap(was_graphical && !this.graphical_mode);
                 }
                 break;
             case 0x12:
@@ -1900,6 +1985,8 @@ VGAScreen.prototype.port3D5_write = function(value)
             break;
         case 0x7:
             dbg_log("3D5 / overflow register write: " + h(value), LOG_VGA);
+            // bits 0, 2, 5 and 7 are vertical total and retrace start bits 8 and 9 (vblank_period)
+            this.crtc[7] = value;
             var previous_vertical_display_enable_end = this.vertical_display_enable_end;
             this.vertical_display_enable_end &= 0xFF;
             this.vertical_display_enable_end |= (value << 3 & 0x200) | (value << 7 & 0x100);
@@ -2087,7 +2174,8 @@ VGAScreen.prototype.port3D5_read = function()
             return (this.vertical_display_enable_end >> 7 & 0x2) |
                 (this.vertical_blank_start >> 5 & 0x8) |
                 (this.line_compare >> 4 & 0x10) |
-                (this.vertical_display_enable_end >> 3 & 0x40);
+                (this.vertical_display_enable_end >> 3 & 0x40) |
+                (this.crtc[7] & 0xA5);
         case 0x8:
             return this.preset_row_scan;
         case 0x9:
@@ -2134,29 +2222,27 @@ VGAScreen.prototype.port3D5_read16 = function()
     return this.port3D5_read();
 };
 
+/**
+ * Input status register 1. Bit 3 is the vertical retrace, timed on the machine
+ * clock from the CRTC registers, and it reads as set at least once after each
+ * retrace starts, however coarse the clock. Bit 0 (display disabled) toggles
+ * on every read: a stand-in for the horizontal retrace, and set throughout the
+ * vertical one.
+ */
 VGAScreen.prototype.port3DA_read = function()
 {
     dbg_log("3DA read - status 1 and clear attr index", LOG_VGA);
 
-    var value = this.port_3DA_value;
+    const in_retrace = this.display.time_since_vblank(this.cpu.clock.now()) < this.retrace_duration();
 
-    // Status register, bit 3 set by update_vertical_retrace
-    // during screen-fill-buffer
-    if(!this.graphical_mode)
+    this.port_3DA_value = (this.port_3DA_value ^ 1) & 1;
+    let value = this.port_3DA_value;
+    if(in_retrace || this.retrace_pending)
     {
-        // But screen-fill-buffer may not get triggered in text mode
-        // so toggle it manually here
-        if(this.port_3DA_value & 1)
-        {
-            this.port_3DA_value ^= 8;
-        }
-        this.port_3DA_value ^= 1;
+        value |= 0x09;
     }
-    else
-    {
-        this.port_3DA_value ^= 1;
-        this.port_3DA_value &= 1;
-    }
+    this.retrace_pending = false;
+
     this.attribute_controller_index = -1;
     return value;
 };
@@ -2288,18 +2374,21 @@ VGAScreen.prototype.port1CF_write = function(value)
             this.svga_offset_y = 0;
         }
 
-        this.graphical_mode = true;
-        this.screen.set_mode(this.graphical_mode);
+        const was_graphical = this.graphical_mode;
+        this.set_graphical_mode(true);
         this.set_size_graphical(this.svga_width, this.svga_height, this.svga_width, this.svga_height, this.svga_bpp);
+        if(!was_graphical)
+        {
+            this.complete_redraw();
+        }
     }
 
     if(was_enabled && !this.svga_enabled)
     {
         const is_graphical = (this.attribute_mode & 0x1) !== 0;
-        this.graphical_mode = is_graphical;
-        this.screen.set_mode(is_graphical);
+        this.set_graphical_mode(is_graphical);
         this.update_vga_size();
-        this.set_font_bitmap(false);
+        this.set_font_bitmap(!is_graphical);
         this.complete_redraw();
     }
 
@@ -2495,7 +2584,7 @@ VGAScreen.prototype.vga_redraw = function()
 {
     var start = this.diff_addr_min;
     var end = Math.min(this.diff_addr_max, VGA_PIXEL_BUFFER_SIZE - 1);
-    const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, this.virtual_width * this.virtual_height);
+    const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffer_offset, this.virtual_width * this.virtual_height);
 
     var mask = 0xFF;
     var colorset = 0x00;
@@ -2535,24 +2624,20 @@ VGAScreen.prototype.vga_redraw = function()
             buffer[pixel_addr] = color & 0xFF00 | color << 16 | color >> 16 | 0xFF000000;
         }
     }
-    this.sync_image_data(start, end + 1);
 };
 
-VGAScreen.prototype.screen_fill_buffer = function()
+/** @override */
+VGAScreen.prototype.render = function()
 {
-    if(!this.graphical_mode)
+    if(!this.graphical_mode || !this.pixels)
     {
-        // text mode
-        // Update retrace behaviour anyway - programs waiting for signal before
-        // changing to graphical mode
-        this.update_vertical_retrace();
         return;
     }
 
-    if(this.image_data.data.byteLength === 0)
+    if(this.pixels.data.byteLength === 0)
     {
         // wasm memory resized
-        this.create_image_data();
+        this.create_pixel_view();
         this.update_layers();
     }
 
@@ -2564,7 +2649,7 @@ VGAScreen.prototype.screen_fill_buffer = function()
         if(this.svga_bpp === 8)
         {
             // XXX: Slow, should be ported to rust, but it doesn't have access to vga256_palette
-            const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, this.screen_width * this.screen_height);
+            const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffer_offset, this.screen_width * this.screen_height);
             const svga_memory = new Uint8Array(this.cpu.wasm_memory.buffer, this.svga_memory.byteOffset, this.vga_memory_size);
             // svga_offset selects the visible part of svga_memory, used for page flipping (e.g. Master of Orion 2)
             const base = this.svga_offset;
@@ -2578,7 +2663,7 @@ VGAScreen.prototype.screen_fill_buffer = function()
         }
         else
         {
-            this.cpu.svga_fill_pixel_buffer(this.svga_bpp, this.svga_offset);
+            this.cpu.mmio_ram_fill_pixels(this.lfb_region, this.svga_bpp, this.svga_offset);
 
             const bytes_per_pixel = this.svga_bpp === 15 ? 2 : this.svga_bpp / 8;
             min_y = (((this.cpu.svga_dirty_bitmap_min_offset[0] / bytes_per_pixel | 0) - this.svga_offset) / this.svga_width | 0);
@@ -2590,9 +2675,8 @@ VGAScreen.prototype.screen_fill_buffer = function()
             min_y = Math.max(min_y, 0);
             max_y = Math.min(max_y, this.svga_height);
 
-            this.sync_image_data(min_y * this.virtual_width, max_y * this.virtual_width);
-            this.screen.update_buffer([{
-                image_data: this.image_data,
+            this.display.update_buffer([{
+                pixels: this.pixels,
                 screen_x: 0, screen_y: min_y,
                 buffer_x: 0, buffer_y: min_y,
                 buffer_width: this.svga_width,
@@ -2604,11 +2688,10 @@ VGAScreen.prototype.screen_fill_buffer = function()
     {
         this.vga_replot();
         this.vga_redraw();
-        this.screen.update_buffer(this.layers);
+        this.display.update_buffer(this.layers);
     }
 
     this.reset_diffs();
-    this.update_vertical_retrace();
 };
 
 VGAScreen.prototype.set_font_bitmap = function(font_plane_dirty)
@@ -2619,7 +2702,7 @@ VGAScreen.prototype.set_font_bitmap = function(font_plane_dirty)
         const width_dbl = !!(this.clocking_mode & 0x08);
         const width_9px = !width_dbl && !(this.clocking_mode & 0x01);
         const copy_8th_col = !!(this.attribute_mode & 0x04);
-        this.screen.set_font_bitmap(
+        this.display.set_font_bitmap(
             height + 1,         // int height, font height 1..32px
             width_9px,          // bool width_9px, True: font width 9px, else 8px
             width_dbl,          // bool width_dbl, True: font width 16px (overrides width_9px)
@@ -2639,6 +2722,6 @@ VGAScreen.prototype.set_font_page = function()
     const vga_index_a = ((this.character_map_select & 0b1100) >> 2) | ((this.character_map_select & 0b100000) >> 3);
     const vga_index_b = (this.character_map_select & 0b11) | ((this.character_map_select & 0b10000) >> 2);
     this.font_page_ab_enabled = vga_index_a !== vga_index_b;
-    this.screen.set_font_page(linear_index_map[vga_index_a], linear_index_map[vga_index_b]);
+    this.display.set_font_page(linear_index_map[vga_index_a], linear_index_map[vga_index_b]);
     this.complete_redraw();
 };

@@ -3,28 +3,12 @@
 const assert = require("node:assert/strict");
 
 require("../../src/browser/glbridge/v86_network_bridge.js");
+const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 
 const listeners = Object.create(null);
 const routed = [];
 let d3d9Options;
-const style = () => ({
-    setProperty(name, value) { this[name] = value; },
-});
-const screenCanvas = {
-    width: 1024,
-    height: 768,
-    getBoundingClientRect() { return { left: 0, top: 0, width: 1024, height: 768 }; },
-};
-const d3d9Canvas = { width: 1, height: 1, style: style() };
-const canvas = {
-    width: 64,
-    height: 64,
-    style: style(),
-    parentElement: {
-        getElementsByTagName() { return [screenCanvas, canvas, d3d9Canvas]; },
-        getBoundingClientRect() { return { left: 0, top: 0, width: 1024, height: 768 }; },
-    },
-};
+const compositor = new V86WebGPUCompositor({ width: 1024, height: 768 });
 /*
  * write_memory is modelled on v86's real one rather than just recording its
  * arguments, because the bug this guards against is invisible to a recorder:
@@ -39,17 +23,21 @@ const guestMemory = new Uint8Array(4096);
 const bridge = globalThis.installV86GLNetworkBridge({
     add_listener(name, callback) { listeners[name] = callback; },
     write_memory(blob, address) { guestMemory.set(blob, address); },
-}, canvas, {
+}, null, {
+    compositor,
     glExecutor: { submit() {}, onSwapBuffers() {} },
-    d3d9Canvas,
     installD3D9WebGPUExecutor(installedCanvas, options) {
-        assert.equal(installedCanvas, d3d9Canvas);
+        assert.equal(installedCanvas.layer.name, "d3d9", "D3D9 draws into its own window layer");
+        assert.equal(options.host, installedCanvas.layer.host);
         d3d9Options = options;
         return {
             submit(bytes, metadata) { routed.push({ bytes: Buffer.from(bytes), metadata }); },
         };
     },
 });
+
+const d3d9Layer = bridge.d3d9Canvas.layer, glLayer = bridge.glCanvas.layer;
+const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visible];
 
 bridge.lastPresentedFrameId = 999;
 const d9wg = Buffer.alloc(32);
@@ -95,103 +83,106 @@ d3d9Options.onSurface({ hwnd: 0x1234, x: 10, y: 20, width: 640,
     height: 480, displayWidth: 640, displayHeight: 480, visible: true }, "create");
 d3d9Options.onPresent({ hwnd: 0x1234, x: 10, y: 20, width: 640,
     height: 480, displayWidth: 640, displayHeight: 480, visible: true }, {});
-assert.equal(d3d9Canvas.style.display, "block");
-assert.equal(d3d9Canvas.style.visibility, "visible");
-assert.equal(canvas.style.display, "none");
+assert.deepEqual(placed(d3d9Layer), [10, 20, 640, 480, true]);
+assert.equal(glLayer.visible, false);
 
 // A DDSCL_NORMAL primary is the whole desktop even when the application that
-// presents it is a small splash HWND. The dirty rectangle clips the overlay;
+// presents it is a small splash HWND. The dirty rectangle clips the layer;
 // the HWND must not resize and stretch the desktop texture into 420x170.
 d3d9Options.onPresent({ hwnd: 0x1234, x: 302, y: 299, width: 420,
     height: 170, displayWidth: 1024, displayHeight: 768,
     ddDesktopPrimary: true, visible: true,
     clipRect: { left: 302, top: 299, right: 722, bottom: 469,
         baseWidth: 1024, baseHeight: 768 } }, {});
-assert.equal(d3d9Canvas.style.left, "0px");
-assert.equal(d3d9Canvas.style.top, "0px");
-assert.equal(d3d9Canvas.style.width, "1024px");
-assert.equal(d3d9Canvas.style.height, "768px");
-assert.notEqual(d3d9Canvas.style["clip-path"], "none",
-    "the desktop canvas must expose only the splash dirty rectangle");
+assert.deepEqual(placed(d3d9Layer), [0, 0, 1024, 768, true]);
+assert.deepEqual(d3d9Layer.clip, { left: 302 / 1024, top: 299 / 768, right: 722 / 1024, bottom: 469 / 768 },
+    "the desktop layer must expose only the splash dirty rectangle");
 
 d3d9Options.onSurface({ hwnd: 0x1234, x: 30, y: 40, width: 640,
     height: 480, displayWidth: 800, displayHeight: 600,
     ddDesktopPrimary: false, clipRect: null, visible: true }, "move");
-assert.equal(d3d9Canvas.style.left, "30px");
-assert.equal(d3d9Canvas.style.top, "40px");
-assert.equal(d3d9Canvas.style.width, "800px");
-assert.equal(d3d9Canvas.style.height, "600px");
+assert.deepEqual(placed(d3d9Layer).slice(0, 4), [30, 40, 800, 600]);
 
 d3d9Options.onSurface({ hwnd: 0x1234, x: 0, y: 0, width: 640,
     height: 480, displayWidth: 800, displayHeight: 600, visible: false }, "hide");
-assert.equal(d3d9Canvas.style.display, "none");
-assert.equal(d3d9Canvas.style.visibility, "hidden");
+assert.equal(d3d9Layer.visible, false);
 d3d9Options.onPresent({ sessionKey: "new-session", hwnd: 0x1234,
     x: 30, y: 40, width: 640, height: 480, displayWidth: 800,
     displayHeight: 600, visible: true }, {});
-assert.equal(d3d9Canvas.style.display, "block");
+assert.deepEqual(placed(d3d9Layer), [30, 40, 800, 600, true]);
 
-const ownerLeft = d3d9Canvas.style.left;
-const ownerTop = d3d9Canvas.style.top;
 d3d9Options.onSurface({ sessionKey: "pending-session", hwnd: 0x5678,
     x: 500, y: 600, width: 320, height: 200, visible: true }, "create");
-assert.equal(d3d9Canvas.style.display, "block",
-    "a helper session's CreateDevice must not hide the presenting owner");
-assert.equal(d3d9Canvas.style.left, ownerLeft,
-    "a helper session must not move the presenting owner's canvas");
-assert.equal(d3d9Canvas.style.top, ownerTop);
+assert.deepEqual(placed(d3d9Layer), [30, 40, 800, 600, true],
+    "a helper session's CreateDevice must not hide or move the presenting owner");
 d3d9Options.onDestroy({ sessionKey: "pending-session", hwnd: 0x5678,
     x: 500, y: 600, width: 320, height: 200, visible: false }, "session-end");
-assert.equal(d3d9Canvas.style.display, "block",
+assert.equal(d3d9Layer.visible, true,
     "tearing down a non-owner session must leave the owner visible");
 
 d3d9Options.onDestroy({ sessionKey: "old-session", hwnd: 0x1234,
     x: 30, y: 40, width: 640, height: 480, displayWidth: 800,
     displayHeight: 600, visible: true }, "device");
-assert.equal(d3d9Canvas.style.display, "block",
+assert.equal(d3d9Layer.visible, true,
     "late teardown from an old process session must not hide the new owner");
 d3d9Options.onDestroy({ sessionKey: "new-session", hwnd: 0x1234,
     x: 30, y: 40, width: 640, height: 480, displayWidth: 800,
     displayHeight: 600, visible: true }, "device");
-assert.equal(d3d9Canvas.style.display, "none");
-assert.equal(d3d9Canvas.style.visibility, "hidden");
+assert.equal(d3d9Layer.visible, false);
 
 d3d9Options.onSurface({ sessionKey: "next-session", hwnd: 0x9999,
     x: 5, y: 6, width: 320, height: 200, visible: true }, "create");
-assert.equal(d3d9Canvas.style.display, "none",
+assert.equal(d3d9Layer.visible, false,
     "a new session stays hidden until its own first Present");
 d3d9Options.onPresent({ sessionKey: "next-session", hwnd: 0x9999,
-    x: 5, y: 6, width: 320, height: 200, visible: true }, {});
-assert.equal(d3d9Canvas.style.display, "block");
+    x: 5, y: 6, width: 320, height: 200, displayWidth: 320, displayHeight: 200, visible: true }, {});
+assert.deepEqual(placed(d3d9Layer), [5, 6, 320, 200, true]);
 
-bridge.showOverlayCanvas();
-assert.equal(d3d9Canvas.style.display, "none");
-assert.equal(canvas.style.display, "block");
+// Covered by other guest windows: hidden, whatever is presented meanwhile,
+// until the guest says it is uncovered
+const next = { sessionKey: "next-session", hwnd: 0x9999, x: 5, y: 6, width: 320, height: 200,
+    displayWidth: 320, displayHeight: 200, visible: true };
+d3d9Options.onSurface({ ...next, occluded: true, visibleRegion: null }, "window-state");
+assert.equal(d3d9Layer.visible, false, "a covered window's picture is not drawn");
+assert.equal(bridge.activeOwner, "d3d9", "it is still the one on screen");
+d3d9Options.onPresent({ ...next }, {});
+assert.equal(d3d9Layer.visible, false, "a Present behind the popup does not uncover it");
+// A message box over the right half: only the left half shows
+d3d9Options.onSurface({ ...next, occluded: false, visibleRegion: { rects: [{ left: 0, top: 0, right: 160, bottom: 200 }],
+    baseWidth: 320, baseHeight: 200, originX: 5, originY: 6 } }, "window-state");
+assert.equal(d3d9Layer.visible, true, "uncovered: shown again right away");
+assert.deepEqual(d3d9Layer.visibleRegion, [{ left: 0, top: 0, right: 0.5, bottom: 1 }]);
+d3d9Options.onPresent({ ...next }, {});
+assert.deepEqual(d3d9Layer.visibleRegion, [{ left: 0, top: 0, right: 0.5, bottom: 1 }],
+    "the region holds across Presents");
+d3d9Options.onSurface({ ...next, visibleRegion: null }, "window-state");
+assert.equal(d3d9Layer.visibleRegion, null, "all of it shows once the box closes");
 
-// The production page installs both executors on one overlay so it can accept
-// either API. Executor/context existence alone must not be diagnosed as a
-// conflict; only valid traffic from both APIs makes the shared canvas unsafe.
-const sharedCanvas = {};
-bridge.d3d8Canvas = sharedCanvas;
-bridge.d3d9Canvas = sharedCanvas;
-bridge.d3d8Executor = { context: {}, getStats() { return { batches: 0 }; } };
-bridge.d3d9Executor = { context: {}, getStats() { return { batches: 0 }; } };
-const conflictErrors = [];
-const originalConsoleError = console.error;
-console.error = (...args) => conflictErrors.push(args);
-try {
-    bridge.warnOnSharedD3DCanvasConflict("d3d9");
-    bridge.warnOnSharedD3DCanvasConflict("d3d9");
-    assert.equal(conflictErrors.length, 0,
-        "one active API must stay quiet even when both executors are installed");
-    bridge.warnOnSharedD3DCanvasConflict("d3d8");
-    assert.equal(conflictErrors.length, 1,
-        "traffic from both APIs must report the real shared-canvas conflict");
-    bridge.warnOnSharedD3DCanvasConflict("d3d9");
-    assert.equal(conflictErrors.length, 1, "the conflict is reported only once");
-} finally {
-    console.error = originalConsoleError;
-}
+// A DirectDraw desktop primary is the whole desktop: the region is placed
+// where the presenting window's client area is on it
+d3d9Options.onPresent({ ...next, x: 302, y: 299, width: 420, height: 170, displayWidth: 1024,
+    displayHeight: 768, ddDesktopPrimary: true,
+    visibleRegion: { rects: [{ left: 0, top: 0, right: 210, bottom: 170 }],
+        baseWidth: 420, baseHeight: 170, originX: 302, originY: 299 } }, {});
+assert.deepEqual(placed(d3d9Layer), [0, 0, 1024, 768, true]);
+assert.deepEqual(d3d9Layer.visibleRegion, [{ left: 302 / 1024, top: 299 / 768, right: 512 / 1024, bottom: 469 / 768 }]);
+d3d9Options.onPresent({ ...next, ddDesktopPrimary: false, clipRect: null, visibleRegion: null }, {});
+
+bridge.showOwner("gl");
+assert.equal(d3d9Layer.visible, false);
+assert.equal(glLayer.visible, true);
+
+// Additional swap chains are layers of their own, placed like the owner's
+const swapChainCanvas = d3d9Options.createSwapChainCanvas({ swapChain: 7, width: 100, height: 80 });
+assert.equal(swapChainCanvas.layer.name, "d3d9 swap chain 7");
+bridge.placeD3D9SwapChain({ swapChain: 7, x: 10, y: 20, width: 100, height: 80, visible: true });
+assert.deepEqual(placed(swapChainCanvas.layer), [10, 20, 100, 80, true]);
+bridge.hideLayers();
+assert.equal(swapChainCanvas.layer.visible, true, "hiding the primary window keeps other swap chains");
+bridge.hideLayers(true);
+assert.equal(swapChainCanvas.layer.visible, false);
+bridge.removeD3D9SwapChain(7);
+assert.ok(!compositor.layers.includes(swapChainCanvas.layer), "a destroyed swap chain's layer goes");
 
 const beforeReset = guestMemory.slice();
 ++bridge.memoryGeneration;

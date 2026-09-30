@@ -7,7 +7,9 @@
 // it, copies with string instructions, runs code there, runs with its page
 // tables there (their accessed/dirty bits too), runs 32-bit compatibility-
 // mode code there (the 32-bit bus aperture) and reads a block the host wrote
-// by DMA. The host checks the bytes, then a snapshot stream restores them
+// by DMA. A hot loop there is compiled by the page tier, then rewritten
+// from low code, after its frame was evicted (REP MOVSB), and by itself;
+// each run must see the new bytes. The host checks the bytes, then a snapshot stream restores them
 // into a second machine. Interpreter and page tier must agree; the page
 // tier's access caches must release their frames (X64_CORES=2 runs the
 // machine through the multi-core slice loop, whose safe points do that too).
@@ -23,6 +25,9 @@ const EXT = 4 * GiB + high;                  // first extended byte
 const KEY = 0x5A5A5A5A12345678n;
 const DENSE = EXT + GiB, DENSE_BYTES = 32 * MiB;
 const DMA = EXT + 2 * GiB + MiB + 0x4000;   // (between the 64 KiB samples)
+const HOT = EXT + 3 * GiB + 0x200000;       // the hot loop's page
+const EVICT = EXT + 3 * GiB + 16 * MiB;     // 16 MiB touched to evict every frame
+const HOT_ITERATIONS = 3000;
 assert.ok(EXTENDED >= 6 * GiB, "the fixture's addresses need at least 6 GiB");
 
 const hex = n => "0x" + n.toString(16);
@@ -199,6 +204,43 @@ mov rdx, 0x0101010101010101
 add rax, rdx
 add rdi, 8
 loop .dma_fill
+
+; 7. a hot loop in extended RAM (compiled by the page tier), rewritten
+lea rsi, [rel hot_code]
+mov rdi, ${hex(HOT)}
+mov ecx, hot_code_end - hot_code
+rep movsb
+mov rbx, ${hex(HOT)}
+xor edi, edi
+call rbx
+mov [0x300050], rax
+; its immediate, from low code
+mov dword [rbx + hot_imm - 4 - hot_code], 0x01020304
+xor edi, edi
+call rbx
+mov [0x300058], rax
+; every frame evicted: the compiled loop stays valid
+mov rdi, ${hex(EVICT + 0x800)}
+mov ecx, 16 * 256
+.evict:
+mov [rdi], rcx
+add rdi, 4096
+loop .evict
+xor edi, edi
+call rbx
+mov [0x300060], rax
+; with REP MOVSB into the page (not resident), then the loop rewrites
+; itself: the ADD after its store must see the new immediate
+lea rsi, [rel hot_patch]
+lea rdi, [rbx + hot_imm - 4 - hot_code]
+mov ecx, 4
+rep movsb
+mov edi, 0x55
+call rbx
+mov [0x300068], rax
+mov edi, 0x66
+call rbx
+mov [0x300070], rax
 `;
 const data = `
 ext_code:
@@ -206,6 +248,24 @@ lea rax, [rel ext_code]
 add rax, 7
 ret
 ext_code_end:
+hot_code:
+xor eax, eax
+mov ecx, ${HOT_ITERATIONS}
+hot_loop:
+add rax, strict dword 0x11111111
+hot_imm:
+dec ecx
+jnz hot_loop
+test edi, edi
+jz hot_done
+mov [rel hot_site + 2], edi
+hot_site:
+add rax, strict dword 0
+hot_done:
+ret
+hot_code_end:
+hot_patch:
+dd 0x0A0B0C0D
 bits 32
 compat_code:
 mov dword [0x40180000], 0x11111111
@@ -263,7 +323,7 @@ for(const jit of [false, true])
 {
     let stats;
     const result = await actual(directory, {
-        length: 0x50, timeout: 600000,
+        length: 0x78, timeout: 600000,
         options: { ...options, disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true },
         setup: emulator => { emulator.v86.cpu.write_blob_physical(dma_block, DMA); },
         inspect: async emulator => {
@@ -271,7 +331,7 @@ for(const jit of [false, true])
             check_host_view(cpu, jit ? "page tier" : "interpreter");
             const low = cpu.mem8.subarray(0x380000, 0x380000 + 8192);
             for(let i = 0; i < 8192; i += 8) assert.equal(u64_at(low, i), dense_expected((8 * MiB + i) / 8), "REP MOVSQ out of extended RAM");
-            stats = Array.from({ length: 14 }, (_, i) => cpu.wm.exports.x64_ext_stat(i));
+            stats = Array.from({ length: 16 }, (_, i) => cpu.wm.exports.x64_ext_stat(i));
             if(jit)
             {
                 const chunks = [];
@@ -294,6 +354,15 @@ for(const jit of [false, true])
     assert.equal(result.readUInt32LE(0x40), 0x33333333, "compatibility-mode code in extended RAM");
     assert.equal(result.readUInt32LE(0x44), 5, "LOCK ADD in compatibility mode");
     assert.equal(u64(0x48), dma_sum, "the host's DMA block");
+    const hot = (imm, site) => BigInt.asUintN(64, BigInt(HOT_ITERATIONS) * imm + site);
+    assert.equal(u64(0x50), hot(0x11111111n, 0n), "hot loop in extended RAM");
+    assert.equal(u64(0x58), hot(0x01020304n, 0n), "hot loop rewritten from low code");
+    assert.equal(u64(0x60), hot(0x01020304n, 0n), "hot loop after its frame was evicted");
+    assert.equal(u64(0x68), hot(0x0A0B0C0Dn, 0x55n), "hot loop rewritten by REP MOVSB and by itself");
+    assert.equal(u64(0x70), hot(0x0A0B0C0Dn, 0x66n), "hot loop rewriting itself again");
+    // (each rewrite found the page compiled: the loop runs 9000 instructions)
+    if(jit) assert.ok(stats[15] >= 4, "page-tier code in extended RAM retired by writes: " + stats);
+    else assert.equal(stats[15], 0, "no page-tier code without the JIT");
     assert.ok(stats[3] > 10000, "the frame pool was reused: " + stats);
     // (frames held by access caches are released at safe points, so that
     // eviction goes on and almost no access needs the bounce frame)
@@ -302,7 +371,7 @@ for(const jit of [false, true])
     results.push(result);
     console.log(`${jit ? "page tier" : "interpreter"}: extended RAM ${EXTENDED / GiB} GiB, frames ${stats[7]}; ` +
         `hits ${stats[0]}, loads ${stats[1]}, write-backs ${stats[2]}, evictions ${stats[3]}, aperture ${stats[4]}, ` +
-        `releases ${stats[8]}, bounces ${stats[9]}`);
+        `releases ${stats[8]}, bounces ${stats[9]}, code retired by writes ${stats[15]}`);
 }
 assert.deepEqual(results[1], results[0], "page tier and interpreter agree");
 

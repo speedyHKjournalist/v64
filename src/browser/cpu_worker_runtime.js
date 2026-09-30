@@ -4,6 +4,7 @@ import { instantiate_v86 } from "../parallel/relocate.js";
 // Dedicated-worker entry. Never transfer the WebAssembly.Memory buffer.
 import { V86 } from "./starter.js";
 import { PerformanceRecorder } from "./performance_recorder.js";
+import { DisplaySinkRecorder } from "../display.js";
 
 export function start_cpu_worker()
 {
@@ -34,38 +35,23 @@ export function start_cpu_worker()
         screen_commands = [];
     };
     const screen_call = (name, args) => {
-        // Font maps may alias guest memory; snapshot before the CPU continues.
-        screen_commands.push([name, args.map(a => ArrayBuffer.isView(a) ? a.slice() : a)]);
+        screen_commands.push([name, args]);
         if(!screen_scheduled) { screen_scheduled = true; globalThis.queueMicrotask(flush_screen); }
     };
-    const screen = {
-        FLAG_BLINKING: 1, FLAG_FONT_PAGE_B: 2,
-        pause() {}, continue() {}, destroy() {},
-        set_mode: (...a) => screen_call("set_mode", a),
-        set_size_text: (...a) => screen_call("set_size_text", a),
-        set_size_graphical: (...a) => screen_call("set_size_graphical", a),
-        put_char: (...a) => screen_call("put_char", a),
-        clear_screen: (...a) => screen_call("clear_screen", a),
-        clear_text_state: (...a) => screen_call("clear_text_state", a),
-        update_cursor: (...a) => screen_call("update_cursor", a),
-        update_cursor_scanline: (...a) => screen_call("update_cursor_scanline", a),
-        set_font_bitmap: (...a) => screen_call("set_font_bitmap", a),
-        set_font_page: (...a) => screen_call("set_font_page", a),
-        update_buffer(layers) {
-            for(const l of layers)
+    const screen = new DisplaySinkRecorder(screen_call, layers => {
+        for(const l of layers)
+        {
+            const w = l.buffer_width, h = l.buffer_height;
+            if(!w || !h) continue;
+            const pixels = new Uint8ClampedArray(w * h * 4);
+            for(let y = 0; y < h; y++)
             {
-                const w = l.buffer_width, h = l.buffer_height;
-                if(!w || !h) continue;
-                const pixels = new Uint8ClampedArray(w * h * 4);
-                for(let y = 0; y < h; y++)
-                {
-                    const offset = ((l.buffer_y + y) * l.image_data.width + l.buffer_x) * 4;
-                    pixels.set(l.image_data.data.subarray(offset, offset + w * 4), y * w * 4);
-                }
-                frame_layers.push({ "pixels": pixels, "width": w, "height": h, "x": l.screen_x, "y": l.screen_y });
+                const offset = ((l.buffer_y + y) * l.pixels.width + l.buffer_x) * 4;
+                pixels.set(l.pixels.data.subarray(offset, offset + w * 4), y * w * 4);
             }
-        },
-    };
+            frame_layers.push({ "pixels": pixels, "width": w, "height": h, "x": l.screen_x, "y": l.screen_y });
+        }
+    });
     const stats = () => {
         if(!emulator?.v86?.cpu) return;
         const cpu = emulator.v86.cpu;
@@ -305,7 +291,7 @@ export function start_cpu_worker()
                     break;
                 case "frame":
                     frame_layers = [];
-                    emulator.v86.cpu.devices.vga?.screen_fill_buffer();
+                    emulator.v86.cpu.devices.display?.request_frame(!!m["full"]);
                     send("frame", { "layers": frame_layers }, frame_layers.map(l => l["pixels"].buffer));
                     frame_layers = [];
                     break;

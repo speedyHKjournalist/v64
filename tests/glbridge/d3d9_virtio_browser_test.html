@@ -86,7 +86,7 @@
         check(cpu.devices.v86gl_pci.submitCount===1,"virtqueue accepts shipping D9WG reserved0 marker");
         await bridge.d3d9Executor.idle();
         check(!bridge.d3d9Executor.failed,"D3D9 batch executes");
-        check(bridge.activeOwner==="d3d9","D3D9 Present displays its overlay");
+        check(bridge.activeOwner==="d3d9","D3D9 Present shows its window layer");
         const shot = emulator.screen_make_screenshot();
         await shot.decode();
         const capture = document.createElement("canvas");

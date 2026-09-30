@@ -225,7 +225,7 @@ unsafe fn string_instruction_bounded(
     let mut phys_src = 0;
     let mut skip_dirty_page = false;
 
-    let mut movs_into_svga_lfb = false;
+    let mut movs_into_mmio_ram = false;
     let mut movs_reenter_fast_path = false;
     let mut movs_overlap = false;
 
@@ -234,8 +234,8 @@ unsafe fn string_instruction_bounded(
             Instruction::Movs => {
                 let (addr, skip) =
                     finish_on_fault!(translate_address_write_and_can_skip_dirty(es + dst));
-                movs_into_svga_lfb = memory::in_svga_lfb(addr);
-                rep_fast = rep_fast && (!memory::in_mapped_range(addr) || movs_into_svga_lfb);
+                movs_into_mmio_ram = crate::cpu::mmio_ram::contains(addr);
+                rep_fast = rep_fast && (!memory::in_mapped_range(addr) || movs_into_mmio_ram);
                 phys_dst = addr;
                 skip_dirty_page = skip;
             },
@@ -298,7 +298,7 @@ unsafe fn string_instruction_bounded(
                 // LZ backreferences must observe earlier stores. Ordinary RAM
                 // can still use the page-bounded translation once, followed by
                 // ordered element copies. SVGA retains its original path.
-                movs_overlap = overlap_interferes && !movs_into_svga_lfb;
+                movs_overlap = overlap_interferes && !movs_into_mmio_ram;
                 rep_fast = rep_fast && (!overlap_interferes || movs_overlap);
 
                 // In case the following page-boundary check fails, re-enter instruction after
@@ -399,8 +399,8 @@ unsafe fn string_instruction_bounded(
                         phys_src -= (count_until_end_of_page - 1) * size_bytes as u32;
                         phys_dst -= (count_until_end_of_page - 1) * size_bytes as u32;
                     }
-                    if movs_into_svga_lfb {
-                        memory::memcpy_into_svga_lfb(
+                    if movs_into_mmio_ram {
+                        memory::memcpy_into_mmio_ram(
                             phys_src,
                             phys_dst,
                             count_until_end_of_page * size_bytes as u32,

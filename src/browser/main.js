@@ -12,8 +12,12 @@ const ON_LOCALHOST = !location.hostname.endsWith("copy.sh");
 
 const DEFAULT_NETWORKING_PROXIES = ["wss://relay.widgetry.org/", "ws://localhost:8080/"];
 const DEFAULT_MEMORY_SIZE = 128;
-// Guest RAM is limited to just under 2 GiB (wasm32); v86 reduces larger sizes
-const MAX_MEMORY_SIZE = 2048;
+// Guest RAM up to 2048 MB lives in the WebAssembly heap (just under 2 GiB:
+// wasm32). The rest is extended RAM at 4 GiB and above, host-backed and usable
+// by 64-bit guests only (docs/x86-64.md); the 36-bit physical address space
+// ends at 64 GiB.
+const MAX_HEAP_MEMORY_SIZE = 2048;
+const MAX_MEMORY_SIZE = MAX_HEAP_MEMORY_SIZE + 60 * 1024;
 const DEFAULT_CPU_CORES = 1;
 const DEFAULT_VGA_MEMORY_SIZE = 8;
 const DEFAULT_BOOT_ORDER = 0;
@@ -120,6 +124,71 @@ function show_progress(e)
 function $(id)
 {
     return document.getElementById(id);
+}
+
+/**
+ * Save a V7 snapshot, which never exists in one buffer: straight into a file
+ * where the browser lets the page write one, else collected into a Blob
+ * @param {V86} emulator
+ * @param {string} name
+ */
+async function save_state_stream_to_file(emulator, name)
+{
+    if(typeof window["showSaveFilePicker"] === "function")
+    {
+        let handle;
+        try
+        {
+            handle = await window["showSaveFilePicker"]({ "suggestedName": name });
+        }
+        catch(e)
+        {
+            if(e.name === "AbortError") return;
+            throw e;
+        }
+        const writable = await handle["createWritable"]();
+        try
+        {
+            await emulator.save_state_stream(chunk => writable["write"](chunk.slice()));
+            await writable["close"]();
+        }
+        catch(e)
+        {
+            await writable["abort"]().catch(() => {});
+            throw e;
+        }
+        return;
+    }
+    const parts = [];
+    await emulator.save_state_stream(chunk => { parts.push(chunk.slice()); });
+    dump_file(parts, name);
+}
+
+/**
+ * A guest RAM size in MB that can be configured: extended RAM comes in 2 MB pages
+ * @param {number} total
+ * @return {number}
+ */
+function clamp_memory_size(total)
+{
+    total = Math.min(Math.max(16, total), MAX_MEMORY_SIZE);
+    if(total > MAX_HEAP_MEMORY_SIZE)
+    {
+        total = MAX_HEAP_MEMORY_SIZE + Math.ceil((total - MAX_HEAP_MEMORY_SIZE) / 2) * 2;
+    }
+    return total;
+}
+
+/**
+ * `total` MB of guest RAM: the WebAssembly heap first, then extended RAM
+ * @param {Object} settings
+ * @param {number} total
+ */
+function set_memory_size(settings, total)
+{
+    const MB = 1024 * 1024;
+    settings.memory_size = Math.min(total, MAX_HEAP_MEMORY_SIZE) * MB;
+    settings.extended_memory_size = Math.max(0, total - MAX_HEAP_MEMORY_SIZE) * MB;
 }
 
 // These values were previously stored in localStorage
@@ -2275,7 +2344,7 @@ async function start_emulation(profile, query_args)
             const m = parseInt(query_args.get("m"), 10);
             if(m > 0)
             {
-                settings.memory_size = Math.min(Math.max(16, m), MAX_MEMORY_SIZE) * 1024 * 1024;
+                set_memory_size(settings, clamp_memory_size(m));
             }
 
             const cores = parseInt(query_args.get("cores"), 10);
@@ -2417,11 +2486,11 @@ async function start_emulation(profile, query_args)
 
         const MB = 1024 * 1024;
 
-        const memory_size = Math.min(parseInt($("memory_size").value, 10) || DEFAULT_MEMORY_SIZE, MAX_MEMORY_SIZE);
+        const memory_size = clamp_memory_size(parseInt($("memory_size").value, 10) || DEFAULT_MEMORY_SIZE);
         $("memory_size").value = String(memory_size);
         if(!settings.memory_size || memory_size !== DEFAULT_MEMORY_SIZE)
         {
-            settings.memory_size = memory_size * MB;
+            set_memory_size(settings, memory_size);
         }
         if(memory_size !== DEFAULT_MEMORY_SIZE) new_query_args.set("m", String(memory_size));
 
@@ -2456,6 +2525,13 @@ async function start_emulation(profile, query_args)
         if(settings.experimental_x64 === undefined)
         {
             settings.experimental_x64 = $("x64").checked;
+        }
+        // only a 64-bit CPU reaches extended RAM
+        if(settings.extended_memory_size && !settings.experimental_x64)
+        {
+            console.log("More than " + MAX_HEAP_MEMORY_SIZE + " MB of memory: turning on the x86-64 CPU");
+            settings.experimental_x64 = true;
+            $("x64").checked = true;
         }
         if(settings.experimental_x64) new_query_args.set("x64", "1");
 
@@ -2542,7 +2618,6 @@ async function start_emulation(profile, query_args)
         },
         screen: {
             container: $("screen_container"),
-            use_graphical_text: false,
         },
         net_device: {
             type: settings.net_device_type || DEFAULT_NIC_TYPE,
@@ -2554,6 +2629,7 @@ async function start_emulation(profile, query_args)
         autostart: true,
 
         memory_size: settings.memory_size,
+        extended_memory_size: settings.extended_memory_size || undefined,
         vga_memory_size: settings.vga_memory_size,
         boot_order: settings.boot_order,
 
@@ -2704,6 +2780,7 @@ function init_ui(profile, settings, emulator)
                 "user_agent": navigator.userAgent,
                 "version": $("version").textContent,
                 "memory_size": settings.memory_size,
+                "extended_memory_size": settings.extended_memory_size || 0,
                 "vga_memory_size": settings.vga_memory_size,
                 "graphics_revision": globalThis["V86GL_BUILD_REVISION"] || null,
             },
@@ -3372,8 +3449,16 @@ function init_ui(profile, settings, emulator)
         button.textContent = "Saving...";
         try
         {
-            const result = await emulator.save_state();
-            dump_file(result, "v86state.bin");
+            if(settings.extended_memory_size)
+            {
+                // one buffer cannot hold extended RAM: a V7 stream
+                await save_state_stream_to_file(emulator, "v86state.bin");
+            }
+            else
+            {
+                const result = await emulator.save_state();
+                dump_file(result, "v86state.bin");
+            }
         }
         catch(error)
         {
@@ -3406,7 +3491,11 @@ function init_ui(profile, settings, emulator)
         button.textContent = "Loading...";
         try
         {
-            const state = await new Promise((resolve, reject) => {
+            // V7 streams (large machines) are read from the file as needed
+            const header = new DataView(await file.slice(0, 8).arrayBuffer());
+            const stream = header.byteLength === 8 && header.getUint32(0, true) === 0x86768676 &&
+                header.getUint32(4, true) === 7;
+            const state = stream ? null : await new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = () => resolve(reader.result);
                 reader.onerror = () => reject(reader.error);
@@ -3415,7 +3504,8 @@ function init_ui(profile, settings, emulator)
             });
             const was_running = emulator.is_running();
             if(was_running) await emulator.stop();
-            await emulator.restore_state(state);
+            if(stream) await emulator.restore_state_stream(file);
+            else await emulator.restore_state(state);
             if(was_running) emulator.run();
         }
         catch(err)

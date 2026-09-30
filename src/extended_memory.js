@@ -65,14 +65,15 @@ export class ExtendedStore
     /** extended_load: a page into a frame at `pointer` of the wasm memory */
     load(page, memory, pointer)
     {
-        new Uint8Array(memory.buffer, pointer, EXTENDED_PAGE_SIZE).set(this.page(page));
+        // (a wasm i32: the frames may lie above 2 GiB)
+        new Uint8Array(memory.buffer, pointer >>> 0, EXTENDED_PAGE_SIZE).set(this.page(page));
     }
 
     /** extended_store: a frame back into the store */
     store(page, memory, pointer)
     {
         this.touch(page);
-        this.page(page).set(new Uint8Array(memory.buffer, pointer, EXTENDED_PAGE_SIZE));
+        this.page(page).set(new Uint8Array(memory.buffer, pointer >>> 0, EXTENDED_PAGE_SIZE));
     }
 
     /** Write a page (snapshot restore) */

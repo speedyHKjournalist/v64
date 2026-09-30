@@ -141,6 +141,8 @@ pub unsafe fn parallel_set_active(active: bool) {
             &raw mut crate::cpu::cpu::core_yield as u32;
         if !is_worker() {
             code::allocate(*crate::cpu::global_pointers::memory_size / 4096);
+            // (writes of other cores to extended RAM do not retire code)
+            crate::x64::pages::retire_extended();
         }
     }
 }
@@ -158,8 +160,6 @@ pub unsafe fn parallel_attach(base: u32, core: u32) {
     use crate::cpu::{cpu, global_pointers as gp, memory};
     memory::mem8 = *machine(&raw mut memory::mem8);
     memory::ram_fast_limit = *machine(&raw mut memory::ram_fast_limit);
-    memory::vga_mem8 = *machine(&raw mut memory::vga_mem8);
-    memory::vga_memory_size = *machine(&raw mut memory::vga_memory_size);
     *gp::memory_size = *machine_state(gp::memory_size);
     *gp::acpi_enabled = *machine_state(gp::acpi_enabled);
     *gp::x87_native_policy = *machine_state(gp::x87_native_policy);

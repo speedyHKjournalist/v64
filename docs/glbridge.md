@@ -118,10 +118,35 @@ Version 1 checkpoints can restore only their original OpenGL/D3D8 payloads.
 They never stored D3D9/DirectDraw resources or GL query lifetimes, so missing
 state in those old files cannot be recovered retroactively.
 
+## Display
+
+The guest desktop and the graphics proxy share one canvas. A WebGPU compositor
+(`src/browser/glbridge/webgpu_compositor.js`) takes over the screen canvas:
+the VGA/SVGA picture is one texture, and each OpenGL, Direct3D 8 and Direct3D 9
+output (and each extra D3D9 swap chain) is a window layer placed where the
+guest reports its window, clipped to its visible part. A window that is
+hidden, minimised, or entirely covered by other windows (`D9WG_WINDOW_OCCLUDED`)
+is not drawn, so a video or dialog the game shows in another window is visible;
+one covered in part -- a message box, the Alt+Tab switcher -- is drawn only
+where it shows (`D9WG_WINDOW_REGION`). Every proxy reports this (OpenGL through
+the `WINDOW_STATE` control record), from WinEvent hooks rather than only on
+Present, and being covered holds across Presents until the guest reports the
+window uncovered.
+If WebGPU cannot start, the screen falls back to a 2D canvas without the proxy.
+Screenshots (`screen_make_screenshot`) read the composed picture. There is no
+separate overlay canvas any more; see `docs/display-design.md`.
+
+A canvas keeps the first kind of context it hands out. When the screen canvas
+already went to the other kind -- an earlier emulator in the same container
+drew on it in 2D or WebGPU, or WebGPU took it and then failed to start -- the
+screen replaces it with a fresh copy (same attributes, same place). Listeners
+the page attached to the old element do not move with it.
+
 Regression checks:
 
 ```sh
 make test-glbridge
+make display-browser-tests
 node tests/glbridge/gl_multipass_browser_runner.js graphics_checkpoint_browser_test.html
 node tests/glbridge/gl_multipass_browser_runner.js graphics_vga_browser_test.html
 node tests/glbridge/gl_multipass_browser_runner.js graphics_journal_perf_test.html

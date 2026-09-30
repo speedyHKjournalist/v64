@@ -72,6 +72,9 @@ const probe_disk = fs.readFileSync(probe_directory + "probe.tar");
 // counts its pages in extended RAM (they must be there); X64_EXTENDED_CACHE=<bytes>
 // of frames that hold it (default 512 MiB)
 const extended_memory = Number(process.env.X64_EXTENDED_MEMORY || 0);
+// X64_MEMORY=<MiB> of RAM in the WebAssembly heap (default 512; index.html
+// puts 2048 there before it adds extended RAM)
+const memory_mib = Number(process.env.X64_MEMORY || 512);
 const extended_cache = Number(process.env.X64_EXTENDED_CACHE || 0);
 const memtest_mib = Number(process.env.X64_LINUX_MEMTEST || 0);
 const guest_command = net => (net ? "modprobe virtio_net 2>/dev/null; ifconfig eth0 up && " : "") +
@@ -163,7 +166,7 @@ const emulator = new V86({
     bzimage: {url: directory + kernel_file}, initrd: {url: directory + initrd_file},
     cdrom: {url: directory + name}, hda: {buffer: probe_disk.buffer.slice(probe_disk.byteOffset, probe_disk.byteOffset + probe_disk.length)},
     ...(sleep_cycles ? {hdb: {buffer: new ArrayBuffer(256 << 20)}} : {}),
-    cmdline, memory_size: 512 << 20, high_memory_size: high_memory, cpu_cores: cores, acpi: true, autostart: false,
+    cmdline, memory_size: memory_mib * (1 << 20), high_memory_size: high_memory, cpu_cores: cores, acpi: true, autostart: false,
     ...(extended_memory ? {extended_memory_size: extended_memory} : {}),
     ...(extended_cache ? {extended_memory_cache: extended_cache} : {}),
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0, net_device: {type: "virtio"},

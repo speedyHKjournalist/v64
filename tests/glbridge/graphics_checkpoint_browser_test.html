@@ -15,6 +15,8 @@
         constructor(format) { super(format); ++mainCompressions; }
     };
     const check = (ok, text) => { if (!ok) throw new Error(text); checks.push(text); };
+    // A compositor window layer, or an overlay canvas
+    const shown = canvas => canvas.layer ? canvas.layer.visible : getComputedStyle(canvas).display !== "none";
     const gpu = {
         getPreferredCanvasFormat: () => navigator.gpu.getPreferredCanvasFormat(),
         async requestAdapter(options) {
@@ -34,7 +36,7 @@
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false,
             graphics_adapter: installV86GLGraphicsAdapter,
-            graphics_options: { graphicsJournalMemoryBytes: 1, gl: { hostOptions: { gpu } } },
+            graphics_options: { graphicsJournalMemoryBytes: 1, hostOptions: { gpu }, gl: { hostOptions: { gpu } } },
             initial_state: state ? { buffer: state } : undefined });
         await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
         emulator.v86.cpu.devices.vga.graphical_mode = true;
@@ -125,13 +127,13 @@
             await new Promise(requestAnimationFrame);
             const canvases = new Set([bridge.glCanvas, bridge.d3d8Canvas, bridge.d3d9Canvas,
                 ...bridge.d3d9SwapChainCanvases.values()]);
-            check([...canvases].every(canvas => getComputedStyle(canvas).display === "none"),
+            check([...canvases].every(canvas => !shown(canvas)),
                 "historical GPU frame stays invisible across browser paint " + (++replayFrames));
         }
     };
     await emulator.restore_state(saved);
     check(replayFrames >= 4, "visibility checked while replaying all four APIs");
-    check(bridge.activeOwner && getComputedStyle(bridge.ownerCanvas(bridge.activeOwner)).display !== "none",
+    check(bridge.activeOwner && shown(bridge.ownerCanvas(bridge.activeOwner)),
         "only the final restored graphics surface becomes visible");
     check(!journal.compressor.worker, "restore terminates the discarded journal worker");
     await verify("same instance restore");

@@ -7,7 +7,7 @@
 //! frames in the wasm heap.
 //!
 //! The bus reports the range as neither RAM nor MMIO (`WindowKind::Extended`):
-//! TLBs and code compilation never treat it as RAM, and the interpreter's
+//! TLBs never treat it as RAM, and the interpreter's
 //! accesses come here, so a frame can be written back and reused at any of
 //! them. One exception makes extended RAM fast enough for an OS to keep its
 //! own data there: the access cache of compiled page functions
@@ -19,6 +19,13 @@
 //! stores through it bypass this module. (Host copies outside the CPU pin
 //! their frame, `x64_ext_pin`; with no reusable frame left, an access goes
 //! through a separate bounce frame.)
+//!
+//! Page functions (crate::x64::pages) are compiled from extended pages too,
+//! with cores on one thread only. Such a function is keyed by the page, not
+//! its frame, so it survives the frame's eviction. The page is marked in
+//! `code`; every write reaches it through `resident` (the interpreter, DMA,
+//! the bounce frame), which retires the function, and the access cache gets
+//! no write entry for it (`cache_frame`).
 //! Compatibility-mode helpers, which work with 32-bit bus addresses, reach
 //! extended pages through a small aperture in that bus (`aperture`).
 //!
@@ -73,7 +80,9 @@ pub struct Extended {
     cached: u32,
     /// one more frame, for an access when no frame is reusable
     bounce: *mut u8,
-    pub stats: [u64; 8],
+    /// pages with page-tier code, one bit each (see `note_write`)
+    code: Vec<u64>,
+    pub stats: [u64; 9],
 }
 const STAT_HITS: usize = 0;
 const STAT_LOADS: usize = 1;
@@ -83,6 +92,7 @@ const STAT_APERTURE: usize = 4;
 const STAT_LOCKED: usize = 5;
 const STAT_RELEASES: usize = 6;
 const STAT_BOUNCES: usize = 7;
+const STAT_CODE_WRITES: usize = 8;
 
 static mut EXTENDED: Extended = Extended {
     base: 0,
@@ -99,7 +109,8 @@ static mut EXTENDED: Extended = Extended {
     unused_from: 0,
     cached: 0,
     bounce: ptr::null_mut(),
-    stats: [0; 8],
+    code: Vec::new(),
+    stats: [0; 9],
 };
 /// Too many frames are CACHED, or none was reusable: retire the access
 /// caches at the next safe point
@@ -167,8 +178,11 @@ pub unsafe fn range() -> Option<(u64, u64)> {
 
 /// The resident frame of `page` (loading it, and writing back and reusing
 /// another frame when the pool is full), or None if no frame is reusable.
-/// Under the lock.
+/// Under the lock. Every write to extended RAM comes here first.
 unsafe fn resident(e: &mut Extended, page: u32, write: bool) -> Option<u32> {
+    if write {
+        note_write(e, page);
+    }
     let mut frame = e.page_frame[page as usize];
     if frame == NONE {
         frame = victim(e)?;
@@ -253,13 +267,19 @@ unsafe fn victim(e: &mut Extended) -> Option<u32> {
 /// The host address of the frame of the extended page at `address` for the
 /// access cache of compiled page functions (crate::x64::pages), or None:
 /// with cores in workers (their access caches cannot be retired at one
-/// safe point), or when no frame is reusable before the next safe point
+/// safe point), when no frame is reusable before the next safe point, or
+/// for a write to a page with page-tier code (the interpreter's write
+/// retires that code)
 pub unsafe fn cache_frame(address: u64, write: bool) -> Option<u32> {
     if crate::parallel::active() || !contains(address) {
         return None;
     }
     let e = ext();
-    let frame = resident(e, ((address - e.base) / PAGE) as u32, write)?;
+    let page = ((address - e.base) / PAGE) as u32;
+    if write && has_code(e, page) {
+        return None;
+    }
+    let frame = resident(e, page, write)?;
     let state = &mut e.frame_state[frame as usize];
     if *state & CACHED == 0 {
         *state |= CACHED;
@@ -274,6 +294,61 @@ pub unsafe fn cache_frame(address: u64, write: bool) -> Option<u32> {
         *state |= DIRTY;
     }
     Some(e.pool.add(frame as usize * PAGE as usize) as u32)
+}
+
+/// Page functions of extended pages have keys from here on
+/// (crate::x64::pages): above every RAM backing page number
+pub const CODE_KEY_BASE: u32 = 1 << 20;
+
+/// The page-tier key of the extended page at `address`, or None: not
+/// extended RAM, or cores run in workers (their writes are not tracked in
+/// `code`; see crate::x64::pages::retire_extended)
+pub unsafe fn code_key(address: u64) -> Option<u32> {
+    if crate::parallel::active() || !contains(address) {
+        return None;
+    }
+    Some(CODE_KEY_BASE + ((address - ext().base) / PAGE) as u32)
+}
+
+/// The bytes of extended page `page`, to compile from
+pub unsafe fn copy_page(page: u32) -> Vec<u8> {
+    let _guard = Guard::new();
+    with_page(ext(), page, false, |frame| {
+        std::slice::from_raw_parts(frame, PAGE as usize).to_vec()
+    })
+}
+
+fn has_code(e: &Extended, page: u32) -> bool { e.code[page as usize / 64] >> (page % 64) & 1 != 0 }
+
+/// A page function was compiled from `page`: its next write retires it.
+/// Stores through write entries of the access caches (and of the 32-bit
+/// TLBs of compatibility mode) would not come here: retire those.
+pub unsafe fn watch_code(page: u32) {
+    let e = ext();
+    e.code[page as usize / 64] |= 1 << (page % 64);
+    let frame = e.page_frame[page as usize];
+    // (only a CACHED frame can be in an access cache or a 32-bit TLB)
+    if frame != NONE && e.frame_state[frame as usize] & CACHED != 0 {
+        super::jac::retire_writes_to_host(e.pool.add(frame as usize * PAGE as usize) as u32);
+        if LEGACY_TLB_CACHED {
+            LEGACY_TLB_CACHED = false;
+            crate::cpu::context::invalidate_legacy_tlbs();
+        }
+    }
+}
+/// The page function of `page` was retired
+pub unsafe fn unwatch_code(page: u32) {
+    let e = ext();
+    e.code[page as usize / 64] &= !(1 << (page % 64));
+}
+/// `page` is about to be written: retire the page function compiled from it
+#[inline]
+unsafe fn note_write(e: &mut Extended, page: u32) {
+    if has_code(e, page) {
+        e.code[page as usize / 64] &= !(1 << (page % 64));
+        e.stats[STAT_CODE_WRITES] += 1;
+        super::pages::dirty_page(CODE_KEY_BASE + page);
+    }
 }
 
 /// A safe point of the dispatch loop: no compiled code is active
@@ -486,6 +561,7 @@ pub unsafe fn x64_ext_configure(base_low: u32, base_high: u32, pages: u32, frame
     e.unused_from = 0;
     e.cached = 0;
     e.bounce = pool.add(frames as usize * PAGE as usize);
+    e.code = vec![0; (pages as usize).div_ceil(64)];
     true
 }
 
@@ -520,6 +596,8 @@ pub unsafe fn x64_ext_discard() {
     for page in e.page_frame.iter_mut() {
         *page = NONE;
     }
+    // (the page functions go too: jit_clear_cache follows)
+    e.code.fill(0);
     e.head = 0;
     e.queued = 0;
     e.unused_from = 0;
@@ -558,7 +636,8 @@ pub unsafe fn x64_ext_unpin(page: u32) {
 /// 0 hits, 1 loads, 2 write-backs, 3 evictions, 4 aperture mappings,
 /// 5 locked instructions; 6 pages, 7 frames; 8 releases of cached frames,
 /// 9 accesses through the bounce frame; now: 10 queued frames, 11 frames
-/// counted as cached, 12 frames marked CACHED, 13 pinned frames
+/// counted as cached, 12 frames marked CACHED, 13 pinned frames; 14 pages
+/// with page-tier code now, 15 page-tier code retired by writes
 #[no_mangle]
 pub unsafe fn x64_ext_stat(field: u32) -> f64 {
     let e = ext();
@@ -573,6 +652,8 @@ pub unsafe fn x64_ext_stat(field: u32) -> f64 {
         11 => e.cached as f64,
         12 => frames().filter(|&f| e.frame_state[f] & CACHED != 0).count() as f64,
         13 => frames().filter(|&f| e.frame_pins[f] != 0).count() as f64,
+        14 => e.code.iter().map(|word| word.count_ones()).sum::<u32>() as f64,
+        15 => e.stats[STAT_CODE_WRITES] as f64,
         _ => -1.0,
     }
 }

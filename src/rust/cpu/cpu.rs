@@ -2452,8 +2452,9 @@ pub unsafe fn fill_ia32e_tlb(
     user: bool,
 ) {
     use crate::x64::paging::Access;
-    // (extended RAM: its frame while cores share this thread; never code, so
-    // no code-write notification; see crate::x64::extended::cache_frame)
+    // (extended RAM: its frame while cores share this thread; never 32-bit
+    // code, and never a write entry for a page with page-tier code, so no
+    // code-write notification; see crate::x64::extended::cache_frame)
     let (backing, extended) = match crate::x64::jac::ram_backing(physical) {
         Some(backing) => (backing, false),
         None if access == Access::Execute => return,

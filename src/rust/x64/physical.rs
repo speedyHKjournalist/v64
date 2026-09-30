@@ -315,7 +315,12 @@ pub unsafe fn windows() -> [Option<Window>; MAX_WINDOWS] { PHYSICAL_BUS.windows 
 /// Validate a complete scalar/SIMD transaction without reading any MMIO byte
 /// or committing a RAM write. Adjacent, separately backed windows are valid.
 pub unsafe fn probe(address: u64, size: usize) -> Result<(), PhysicalError> {
-    if size != 0 && size <= 16 && plain_ram(address, size) {
+    // (extended RAM does not overlap any window: see PhysicalBus::validate)
+    if size != 0
+        && size <= 16
+        && (plain_ram(address, size)
+            || super::extended::contains(address) && same_page(address, size))
+    {
         return Ok(());
     }
     (&*(&raw const PHYSICAL_BUS)).probe(address, size, *global_pointers::memory_size)

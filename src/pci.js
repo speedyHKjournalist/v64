@@ -291,9 +291,14 @@ PCI.prototype.set_state = function(state)
                 var to = value & ~1 & 0xFFFF;
                 this.set_io_bars(bar, from, to);
             }
-            else
+            else if(bar.on_move)
             {
-                // memory, cannot be changed
+                // memory: where the snapshot's guest had put it (a snapshot
+                // taken mid-sizing holds the size mask, which is not a place)
+                if((value | 0xF | bar.size - 1) !== -1)
+                {
+                    this.move_memory_bar(bar, value & ~0xF);
+                }
             }
         }
 
@@ -453,7 +458,8 @@ PCI.prototype.pci_write32 = function(address, written)
 
                 if(type === 0)
                 {
-                    space[space_addr] = written;
+                    // the type and prefetchable bits are read-only and stay
+                    space[space_addr] = written | bar.original_bar & 0xF;
                 }
             }
             else
@@ -463,14 +469,24 @@ PCI.prototype.pci_write32 = function(address, written)
                     // memory
                     var original_bar = bar.original_bar;
 
-                    if((written & ~0xF) !== (original_bar & ~0xF))
+                    if(bar.on_move)
                     {
-                        // seabios
-                        dbg_log("Warning: Changing memory bar not supported, ignored", LOG_PCI);
+                        // The device decodes its memory where the guest puts it:
+                        // SeaBIOS assigns every BAR, and an OS may reassign them
+                        const base = written & ~(bar.size - 1) & ~0xF;
+                        space[space_addr] = base | original_bar & 0xF;
+                        this.move_memory_bar(bar, base);
                     }
+                    else
+                    {
+                        if((written & ~0xF) !== (original_bar & ~0xF))
+                        {
+                            dbg_log("Warning: Changing memory bar not supported, ignored", LOG_PCI);
+                        }
 
-                    // changing isn't supported yet, reset to default
-                    space[space_addr] = original_bar;
+                        // this device cannot move, keep the default
+                        space[space_addr] = original_bar;
+                    }
                 }
             }
 
@@ -583,7 +599,8 @@ PCI.prototype.register_device = function(device)
 
         if(type === 0)
         {
-            // memory, not needed currently
+            // memory: the device decodes it itself (bar.on_move)
+            bar.base = (bar_base & ~0xF) >>> 0;
         }
         else
         {
@@ -598,6 +615,21 @@ PCI.prototype.register_device = function(device)
     }
 
     return space;
+};
+
+/**
+ * @param {Object} bar
+ * @param {number} base
+ */
+PCI.prototype.move_memory_bar = function(bar, base)
+{
+    base >>>= 0;
+    if(bar.base !== base)
+    {
+        dbg_log("memory bar moved from " + h(bar.base >>> 0, 8) + " to " + h(base, 8) + " size=" + h(bar.size), LOG_PCI);
+        bar.base = base;
+        bar.on_move(base);
+    }
 };
 
 PCI.prototype.set_io_bars = function(bar, from, to)

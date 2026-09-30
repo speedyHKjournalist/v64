@@ -397,8 +397,10 @@ V86.prototype.continue_init = async function(emulator, options)
     }
     else if(screen_options.container)
     {
-        this.screen_adapter = new ScreenAdapter(screen_options, () => this.worker_controller ? this.worker_controller.request_frame() :
-            this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer());
+        // With a graphics adapter, its compositor owns the canvas: the screen waits for it
+        screen_options.deferred_backend = !!options["graphics_adapter"];
+        this.screen_adapter = new ScreenAdapter(screen_options, full => this.worker_controller ? this.worker_controller.request_frame(full) :
+            this.v86.cpu.devices.display && this.v86.cpu.devices.display.request_frame(full));
     }
     else if(screen_options.ansi)
     {
@@ -417,13 +419,33 @@ V86.prototype.continue_init = async function(emulator, options)
     {
         if(!this.screen_adapter.get_graphics_canvas)
             throw new Error("graphics_adapter requires a browser screen container");
-        this["graphics_adapter"] = options["graphics_adapter"](this, {
-            ...options["graphics_options"],
-            "container": screen_options.container,
-            "screenCanvas": this.screen_adapter.get_graphics_canvas(),
-            "isGraphical": () => this.screen_adapter.is_graphical(),
-            "managedState": true,
-        });
+        const screen = this.screen_adapter;
+        try
+        {
+            this["graphics_adapter"] = options["graphics_adapter"](this, {
+                ...options["graphics_options"],
+                "container": screen_options.container,
+                "screenCanvas": screen.claim_canvas("webgpu"),
+                "isGraphical": () => screen.is_graphical(),
+                "managedState": true,
+                // The compositor takes over drawing the screen once WebGPU is up,
+                // or hands it back to the 2D canvas if it cannot start
+                "screenBackend": {
+                    "set": backend => screen.set_backend(backend),
+                    "fallback": () => screen.use_canvas2d(),
+                },
+            });
+        }
+        catch(error)
+        {
+            screen.use_canvas2d();
+            throw error;
+        }
+        // An adapter without a compositor (a test double) leaves the screen to its 2D canvas
+        if(!(this["graphics_adapter"] && this["graphics_adapter"]["compositor"]))
+        {
+            screen.use_canvas2d();
+        }
         this.screen_adapter.on_geometry_change = () =>
             this["graphics_adapter"]["screenChanged"]();
     }

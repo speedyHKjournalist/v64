@@ -233,6 +233,10 @@
         MAKE_CURRENT: 0xFFF0,
         RELEASE_CURRENT: 0xFFF1,
         DESTROY_CONTEXT: 0xFFF2,
+        // What the guest's window manager says about the drawing window: shown,
+        // minimised, covered by other windows entirely or in part (the parts
+        // that show follow). See windowState() in gl_executor.js.
+        WINDOW_STATE: 0xFFF3,
     };
 
     const GL = {

@@ -3,41 +3,29 @@
 const assert = require("node:assert/strict");
 
 require("../../src/browser/glbridge/v86_network_bridge.js");
+const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 
 const listeners = Object.create(null);
 const routed = [];
 let d3d8Options;
-const style = () => ({
-    setProperty(name, value) { this[name] = value; },
-});
-const screenCanvas = {
-    width: 1024,
-    height: 768,
-    getBoundingClientRect() { return { left: 0, top: 0, width: 1024, height: 768 }; },
-};
-const d3d8Canvas = { width: 1, height: 1, style: style() };
-const canvas = {
-    width: 64,
-    height: 64,
-    style: style(),
-    parentElement: {
-        getElementsByTagName() { return [screenCanvas, canvas, d3d8Canvas]; },
-        getBoundingClientRect() { return { left: 0, top: 0, width: 1024, height: 768 }; },
-    },
-};
+const compositor = new V86WebGPUCompositor({ width: 1024, height: 768 });
 const bridge = globalThis.installV86GLNetworkBridge({
     add_listener(name, callback) { listeners[name] = callback; },
-}, canvas, {
+}, null, {
+    compositor,
     glExecutor: { submit() {}, onSwapBuffers() {} },
-    d3d8Canvas,
     installD3D8WebGPUExecutor(installedCanvas, options) {
-        assert.equal(installedCanvas, d3d8Canvas);
+        assert.equal(installedCanvas, bridge_d3d8Canvas());
+        assert.equal(options.host, installedCanvas.layer.host, "the executor draws through its layer's host");
         d3d8Options = options;
         return {
             submit(bytes, metadata) { routed.push({ bytes: Buffer.from(bytes), metadata }); },
         };
     },
 });
+function bridge_d3d8Canvas() { return compositor.layers.find(layer => layer.name === "d3d8").canvas; }
+const d3d8Layer = bridge.d3d8Canvas.layer, glLayer = bridge.glCanvas.layer;
+const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visible];
 
 bridge.lastPresentedFrameId = 999;
 const d8wg = Buffer.alloc(32);
@@ -73,39 +61,38 @@ d3d8Options.onSurface({ hwnd: 0x1234, x: 10, y: 20, width: 640,
     height: 480, displayWidth: 640, displayHeight: 480, visible: true }, "create");
 d3d8Options.onPresent({ hwnd: 0x1234, x: 10, y: 20, width: 640,
     height: 480, displayWidth: 640, displayHeight: 480, visible: true }, {});
-assert.equal(d3d8Canvas.style.display, "block");
-assert.equal(d3d8Canvas.style.visibility, "visible");
-assert.equal(canvas.style.display, "none");
+assert.deepEqual(placed(d3d8Layer), [10, 20, 640, 480, true], "a presented window is a visible layer where the guest has it");
+assert.equal(glLayer.visible, false);
 
 d3d8Options.onSurface({ hwnd: 0x1234, x: 30, y: 40, width: 640,
     height: 480, displayWidth: 800, displayHeight: 600, visible: true }, "move");
-assert.equal(d3d8Canvas.style.left, "30px");
-assert.equal(d3d8Canvas.style.top, "40px");
-assert.equal(d3d8Canvas.style.width, "800px");
-assert.equal(d3d8Canvas.style.height, "600px");
+assert.deepEqual(placed(d3d8Layer).slice(0, 4), [30, 40, 800, 600], "the layer follows the window");
+d3d8Options.onPresent({ hwnd: 0x1234, x: 524, y: 40, width: 640,
+    height: 480, displayWidth: 800, displayHeight: 600, visible: true }, {});
+assert.deepEqual(placed(d3d8Layer), [524, 40, 800, 600, true]);
+assert.deepEqual(d3d8Layer.clip, { left: 0, top: 0, right: 500 / 800, bottom: 1 },
+    "the part of the window past the desktop's edge is clipped");
 
 d3d8Options.onSurface({ hwnd: 0x1234, x: 0, y: 0, width: 640,
     height: 480, displayWidth: 800, displayHeight: 600, visible: false }, "hide");
-assert.equal(d3d8Canvas.style.display, "none");
-assert.equal(d3d8Canvas.style.visibility, "hidden");
+assert.equal(d3d8Layer.visible, false, "a hidden window hides its layer");
 d3d8Options.onPresent({ sessionKey: "new-session", hwnd: 0x1234,
     x: 30, y: 40, width: 640, height: 480, displayWidth: 800,
     displayHeight: 600, visible: true }, {});
-assert.equal(d3d8Canvas.style.display, "block");
+assert.equal(d3d8Layer.visible, true);
 
 d3d8Options.onDestroy({ sessionKey: "old-session", hwnd: 0x1234,
     x: 30, y: 40, width: 640, height: 480, displayWidth: 800,
     displayHeight: 600, visible: true }, "device");
-assert.equal(d3d8Canvas.style.display, "block",
+assert.equal(d3d8Layer.visible, true,
     "late teardown from an old process session must not hide the new owner");
 d3d8Options.onDestroy({ sessionKey: "new-session", hwnd: 0x1234,
     x: 30, y: 40, width: 640, height: 480, displayWidth: 800,
     displayHeight: 600, visible: true }, "device");
-assert.equal(d3d8Canvas.style.display, "none");
-assert.equal(d3d8Canvas.style.visibility, "hidden");
+assert.equal(d3d8Layer.visible, false);
 
-bridge.showOverlayCanvas();
-assert.equal(d3d8Canvas.style.display, "none");
-assert.equal(canvas.style.display, "block");
+bridge.showOwner("gl");
+assert.equal(d3d8Layer.visible, false);
+assert.equal(glLayer.visible, true, "one API's window at a time");
 
 console.log("v86_network_bridge_d3d8_route_test: ok");
