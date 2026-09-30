@@ -452,6 +452,7 @@ V86.prototype.continue_init = async function(emulator, options)
     }
     else if(screen_options.container)
     {
+        this.screen_container = screen_options.container;
         // A plugin that draws the screen (graphics_proxy's compositor) owns the canvas:
         // the screen waits for it
         screen_options.deferred_backend = this.device_plugins.some(plugin => plugin["wants_screen"]);
@@ -1605,7 +1606,8 @@ V86.prototype.screen_go_fullscreen = function()
         return;
     }
 
-    var elem = this.screen_adapter.get_graphics_canvas &&
+    // The configured container, whatever its id
+    var elem = this.screen_container || this.screen_adapter.get_graphics_canvas &&
         this.screen_adapter.get_graphics_canvas().parentElement;
 
     if(!elem)
