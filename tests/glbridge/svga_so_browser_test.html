@@ -1,0 +1,180 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VMware SVGA II DX: stream output and DrawAuto</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// Stream output through GX: a triangle's vertices, as the vertex shader made
+// them, written into a buffer by GX's ordered compute pass; read back; then
+// drawn again from that buffer with DrawAuto, which takes its vertex count
+// from the filled size GX keeps on the GPU. Then the same with a geometry
+// shader that makes a quad of a point: two triangles captured.
+import * as C from "../../src/graphics_adapters/vmware_svga/svga_constants.js";
+import { SVGA3D } from "../../src/graphics_adapters/vmware_svga/svga3d.js";
+import { ScreenObjects } from "../../src/graphics_adapters/vmware_svga/svga_screens.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+// a VGPU10 assembler: just what these shaders need
+const OPERAND = { TEMP: 0, INPUT: 1, OUTPUT: 2, IMMEDIATE32: 4, CONSTANT_BUFFER: 8 };
+const operand = (type, indices, mask) => [(2 | (mask === undefined ? 15 : mask) << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const swizzled = (type, indices) => [(2 | 1 << 2 | 0xE4 << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const ins = (op, ...operands) => { const body = operands.flat(); return [(op | (1 + body.length) << 24) >>> 0, ...body]; };
+const insc = (op, controls, ...operands) => { const body = operands.flat(); return [(op | controls << 11 | (1 + body.length) << 24) >>> 0, ...body]; };
+const program = (type, ...code) => { const body = code.flat(); return new Uint32Array([type << 16 | 4 << 4, 2 + body.length, ...body]); };
+const DCL_INPUT = 95, DCL_OUTPUT = 101, DCL_OUTPUT_SIV = 103, DCL_CONSTANT_BUFFER = 89, MOV = 54, RET = 62;
+const ADD = 0, UTOF = 86, MUL = 56, EMIT = 19;
+const DCL_GS_INPUT_PRIMITIVE = 93, DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY = 92, DCL_MAX_OUTPUT_VERTEX_COUNT = 94;
+const INPUT_PRIMITIVEID = 11;
+const imm = (...values) => [(2 | OPERAND.IMMEDIATE32 << 12) >>> 0, ...values.map(f32)];
+const selected = (type, indices, lane) => [(2 | 2 << 2 | lane << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+// VS: the position from the input layout, as it is
+const VS = program(1,
+    ins(DCL_INPUT, operand(OPERAND.INPUT, [0])),
+    ins(DCL_OUTPUT_SIV, operand(OPERAND.OUTPUT, [0]), 1),
+    ins(MOV, operand(OPERAND.OUTPUT, [0]), swizzled(OPERAND.INPUT, [0])),
+    ins(RET));
+// VS2: the position moved right by 1
+const VS2 = program(1,
+    ins(DCL_INPUT, operand(OPERAND.INPUT, [0])),
+    ins(DCL_OUTPUT_SIV, operand(OPERAND.OUTPUT, [0]), 1),
+    ins(ADD, operand(OPERAND.OUTPUT, [0]), swizzled(OPERAND.INPUT, [0]), imm(1, 0, 0, 0)),
+    ins(RET));
+// GS: a point into a quad of half size 0.25
+const corner = (dx, dy) => [ins(ADD, operand(OPERAND.OUTPUT, [0]), swizzled(OPERAND.INPUT, [0, 0]), imm(dx, dy, 0, 0)), ins(EMIT)];
+const GS = program(2,
+    insc(DCL_GS_INPUT_PRIMITIVE, 1),
+    insc(DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, 5),
+    ins(DCL_MAX_OUTPUT_VERTEX_COUNT, 4),
+    ins(DCL_INPUT, operand(OPERAND.INPUT, [1, 0])),
+    ins(DCL_OUTPUT_SIV, operand(OPERAND.OUTPUT, [0]), 1),
+    ...corner(-0.25, -0.25), ...corner(-0.25, 0.25), ...corner(0.25, -0.25), ...corner(0.25, 0.25),
+    ins(RET));
+// PS: white
+const PS = program(0,
+    ins(DCL_OUTPUT, operand(OPERAND.OUTPUT, [0])),
+    ins(MOV, operand(OPERAND.OUTPUT, [0]), imm(1, 1, 1, 1)),
+    ins(RET));
+
+(async () => {
+    try {
+        // MOBs: plain arrays
+        const mobs = new Map();
+        const mob_table = {
+            read: (id, offset, length) => { const m = mobs.get(id); return m && offset + length <= m.length ? m.slice(offset, offset + length) : null; },
+            write: (id, offset, bytes) => { const m = mobs.get(id); if(!m || offset + bytes.length > m.length) return false; m.set(bytes, offset); return true; },
+            size: id => mobs.has(id) ? mobs.get(id).length : -1,
+        };
+        const screens = new ScreenObjects({ read: () => null, write: () => false });
+        const device = { caps: C.SVGA_CAP_3D | C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_DX, level: "dx10",
+            gmrs: { read: () => null, write: () => false }, mobs: mob_table, otables: null, screens,
+            set_irq: () => {}, svga_active: () => false };
+
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        globalThis.svgaRenderer = renderer;
+        globalThis.svgaWarnings = [];
+        for(const method of ["warn", "error"])
+        {
+            const original = console[method];
+            console[method] = (...args) => { globalThis.svgaWarnings.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); original.apply(console, args); };
+        }
+        const svga3d = new SVGA3D(device, end(0, 1));
+        const run = (id, ...body) => svga3d.command(id, Int32Array.from(body, v => v | 0));
+        const finished = () => new Promise(resolve => svga3d.after_work(resolve));
+
+        // MOB 1: the 64x64 target; 2: the triangle's vertices; 3: the stream
+        // output buffer; 4: the shaders
+        const RT = 10, VB = 11, SOB = 12;
+        mobs.set(1, new Uint8Array(64 * 64 * 4));
+        const triangle = [-1, -1, 0, 1, -1, 0, 0, 1, 0, -1, 0, 1];
+        mobs.set(2, new Uint8Array(new Float32Array(triangle).buffer));
+        mobs.set(3, new Uint8Array(256));
+        const shaders = new Uint8Array(8192);
+        [VS, VS2, GS, PS].forEach((code, i) => shaders.set(new Uint8Array(code.buffer), 1024 * i));
+        mobs.set(4, shaders);
+        const BIND_RT = C.SVGA3D_SURFACE_BIND_RENDER_TARGET | C.SVGA3D_SURFACE_BIND_SHADER_RESOURCE;
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, RT, BIND_RT, C.SVGA3D_B8G8R8A8_UNORM, 1, 0, 0, 64, 64, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, VB, C.SVGA3D_SURFACE_BIND_VERTEX_BUFFER, C.SVGA3D_BUFFER, 1, 0, 0, 48, 1, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, SOB, C.SVGA3D_SURFACE_BIND_STREAM_OUTPUT | C.SVGA3D_SURFACE_BIND_VERTEX_BUFFER,
+            C.SVGA3D_BUFFER, 1, 0, 0, 256, 1, 1, 1, 0);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, RT, 1);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, VB, 2);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, SOB, 3);
+
+        const CID = 1;
+        run(C.SVGA_3D_CMD_DX_DEFINE_CONTEXT, CID);
+        svga3d.dx_context = CID;
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 0, RT, C.SVGA3D_B8G8R8A8_UNORM, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_DEFINE_ELEMENTLAYOUT, 0, 0, 0, C.SVGA3D_R32G32B32A32_FLOAT, 0, 0, 0);
+        [[1, C.SVGA3D_SHADERTYPE_VS, VS], [2, C.SVGA3D_SHADERTYPE_VS, VS2], [3, C.SVGA3D_SHADERTYPE_GS, GS], [4, C.SVGA3D_SHADERTYPE_PS, PS]]
+            .forEach(([id, type, code], i) => {
+                run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, id, type, code.byteLength);
+                run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, id, 4, 1024 * i);
+            });
+        // the declaration: register 0 (the position), all of it, into buffer 0, 16 bytes a vertex
+        const decls = new Array(64 * 4).fill(0);
+        decls.splice(0, 4, 0, 0, 0xF, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_STREAMOUTPUT, 0, 1, ...decls, 16, 0, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 1, C.SVGA3D_SHADERTYPE_VS);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 4, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_SET_INPUT_LAYOUT, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS, 0, VB, 16, 0);
+        run(C.SVGA_3D_CMD_DX_SET_TOPOLOGY, C.SVGA3D_PRIMITIVE_TRIANGLELIST);
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0xFFFFFFFF, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(0), f32(0), f32(64), f32(64), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, 0, f32(0), f32(0), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_SET_STREAMOUTPUT, 0);
+        run(C.SVGA_3D_CMD_DX_SET_SOTARGETS, 0, SOB, 0, 256);
+        run(C.SVGA_3D_CMD_DX_DRAW, 3, 0);
+        // no more stream output; the captured triangle drawn again, moved right
+        run(C.SVGA_3D_CMD_DX_SET_SOTARGETS, 0, 0xFFFFFFFF, 0, 0);
+        run(C.SVGA_3D_CMD_DX_SET_STREAMOUTPUT, 0xFFFFFFFF);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 2, C.SVGA3D_SHADERTYPE_VS);
+        run(C.SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS, 0, SOB, 16, 0);
+        run(C.SVGA_3D_CMD_DX_DRAW_AUTO);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, RT, 0);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, SOB, 0);
+        await finished();
+        const gx = renderer.gx;
+        check(gx && gx.stats.streamOutputs === 1, "one stream output pass (" + JSON.stringify(gx && gx.stats) + ")");
+        const captured = Array.from(new Float32Array(mobs.get(3).buffer, 0, 12));
+        check(captured.join() === triangle.join(), "the buffer has the triangle's three positions: " + captured);
+        const target = mobs.get(1);
+        const pixel = (x, y) => Array.from(target.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4));
+        // the triangle covers the lower left; moved right by 1 (32 pixels), the lower middle
+        check(pixel(10, 56).join() === "255,255,255,255", "the first draw (" + pixel(10, 56) + ")");
+        check(pixel(42, 56).join() === "255,255,255,255", "DrawAuto drew the captured triangle, moved right (" + pixel(42, 56) + ")");
+        check(pixel(60, 10).join() === "0,0,0,255", "and nothing else (" + pixel(60, 10) + ")");
+
+        // with a geometry shader: a point's quad, two triangles, appended after the first
+        mobs.set(2, new Uint8Array(new Float32Array([0, 0, 0, 1, ...new Array(8).fill(0)]).buffer));
+        run(C.SVGA_3D_CMD_UPDATE_GB_SURFACE, VB);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 1, C.SVGA3D_SHADERTYPE_VS);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 3, C.SVGA3D_SHADERTYPE_GS);
+        run(C.SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS, 0, VB, 16, 0);
+        run(C.SVGA_3D_CMD_DX_SET_TOPOLOGY, C.SVGA3D_PRIMITIVE_POINTLIST);
+        run(C.SVGA_3D_CMD_DX_SET_STREAMOUTPUT, 0);
+        run(C.SVGA_3D_CMD_DX_SET_SOTARGETS, 0, SOB, 0xFFFFFFFF, 256);
+        run(C.SVGA_3D_CMD_DX_DRAW, 1, 0);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, SOB, 0);
+        await finished();
+        const all = Array.from(new Float32Array(mobs.get(3).buffer, 0, 36));
+        // (strip triangle 1 is (v2, v1, v3): odd triangles swap their first two, D3D's and GL's order)
+        const quad = [[-0.25, -0.25], [-0.25, 0.25], [0.25, -0.25], [0.25, -0.25], [-0.25, 0.25], [0.25, 0.25]];
+        check(all.slice(0, 12).join() === triangle.join(), "appended: the first triangle stays");
+        check(quad.every(([x, y], i) => all[12 + 4 * i] === x && all[13 + 4 * i] === y && all[15 + 4 * i] === 1),
+            "after it the quad's two triangles, strip winding kept: " + all.slice(12).join());
+
+        const warnings = globalThis.svgaWarnings.filter(w => /\[gx\]|WGSL|WebGPU/.test(w));
+        check(!warnings.length, "no GX warnings: " + warnings.join(" / "));
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error.stack || error) + "\n" + checks.join("\n") + "\nwarnings: " + (globalThis.svgaWarnings || []).join("\n");
+    }
+})();
+</script>

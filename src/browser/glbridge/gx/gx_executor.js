@@ -90,6 +90,10 @@
     // the input primitives of a geometry shader, by SVGA3dPrimitiveType: the
     // topology code wgsl_emitter.js assembles them by, and how many a draw of
     // n vertices has
+    /** An SVGA3dStreamOutputDeclarationEntry at words[at]: outputSlot, registerIndex, registerMask, stream */
+    function soEntry(words, at) {
+        return { slot: words[at] & 3, reg: words[at + 1], mask: words[at + 2] & 0xF, stream: words[at + 3] };
+    }
     const GS_ASSEMBLY = {
         1: { code: 4, prims: n => Math.floor(n / 3) }, 2: { code: 1, prims: n => n }, 3: { code: 2, prims: n => n >> 1 },
         4: { code: 3, prims: n => n - 1 }, 5: { code: 5, prims: n => n - 2 }, 7: { code: 10, prims: n => n >> 2 },
@@ -335,6 +339,8 @@
         }
 
         releaseSurface(s) {
+            if (s.soFilled) s.soFilled.destroy();
+            s.soFilled = null;
             if (s.buffer) s.buffer.destroy();
             if (s.texture) s.texture.destroy();
             s.buffer = s.texture = null;
@@ -723,12 +729,27 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 case DX.DEFINE_SAMPLER_STATE: c.samplers.set(p[0], { words: Array.from(p.subarray(1, 11)), sampler: null }); return;
                 case DX.DEFINE_SHADER: c.shaders.set(p[0], { type: p[1], program: null, generation: 0, id: ++this.stats.shaders }); return;
                 case DX.DEFINE_QUERY: c.queries.set(p[0], { type: p[1], indices: [] }); return;
-                case DX.DEFINE_STREAMOUTPUT:
-                case DX.DEFINE_STREAMOUTPUT_WITH_MOB:
-                case DX.BIND_STREAMOUTPUT:
-                case DX.DESTROY_STREAMOUTPUT:
-                case DX.SET_STREAMOUTPUT:
+                case DX.DEFINE_STREAMOUTPUT: {
+                    // soid, entries, 64 SVGA3dStreamOutputDeclarationEntry, 4 strides, the rasterized stream
+                    const entries = [];
+                    for (let i = 0; i < Math.min(p[1], 64); i++) entries.push(soEntry(p, 2 + 4 * i));
+                    c.streamOutputs.set(p[0], { entries, strides: Array.from(p.subarray(258, 262)), rasterized: p[262] | 0 });
                     return;
+                }
+                case DX.DEFINE_STREAMOUTPUT_WITH_MOB:
+                    // soid, entries, strides used, 4 strides, the rasterized stream; the entries come with BIND
+                    c.streamOutputs.set(p[0], { entries: [], count: p[1], strides: Array.from(p.subarray(3, 7)), rasterized: p[7] | 0 });
+                    return;
+                case DX.BIND_STREAMOUTPUT: {
+                    // soid, mob, offset, size, then the entries (svga3d_dx.js reads them from the MOB)
+                    const so = c.streamOutputs.get(p[0]);
+                    if (!so) return;
+                    so.entries = [];
+                    for (let at = 4; at + 4 <= p.length && so.entries.length < (so.count || 64); at += 4) so.entries.push(soEntry(p, at));
+                    return;
+                }
+                case DX.DESTROY_STREAMOUTPUT: c.streamOutputs.delete(p[0]); return;
+                case DX.SET_STREAMOUTPUT: st.soid = p[0]; return;
                 case DX.DESTROY_RENDERTARGET_VIEW: c.rtvs.delete(p[0]); return;
                 case DX.DESTROY_DEPTHSTENCIL_VIEW: c.dsvs.delete(p[0]); return;
                 case DX.DESTROY_SHADERRESOURCE_VIEW: c.srvs.delete(p[0]); return;
@@ -809,8 +830,13 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     return;
                 case DX.SET_PREDICATION: st.predication = [p[0], p[1]]; return;
                 case DX.SET_SOTARGETS:
-                    if (Array.from(p.subarray(1)).some((v, i) => i % 3 === 0 && v !== INVALID && v !== 0)) {
-                        this.warn("so", "stream output is not supported yet");
+                    // (pad), then sid, offset, size each; an offset of ~0 appends to what the buffer has
+                    st.soTargets = [];
+                    for (let at = 1; at + 3 <= p.length && st.soTargets.length < 4; at += 3) {
+                        const target = { sid: p[at], offset: p[at + 1], size: p[at + 2] };
+                        st.soTargets.push(target);
+                        const S = target.sid !== INVALID ? this.surfaces.get(target.sid) : null;
+                        if (S && S.buffer && target.offset !== INVALID) this.device.queue.writeBuffer(this.soFilled(S), 0, Uint32Array.of(target.offset));
                     }
                     return;
                 case DX.SET_UA_VIEWS:
@@ -834,7 +860,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 case DX.DRAW_INDEXED_INSTANCED_INDIRECT:
                     return this.draw(c, { indexed: id === DX.DRAW_INDEXED_INSTANCED_INDIRECT, indirect: { sid: p[0], offset: p[1] } });
                 case DX.DRAW_AUTO:
-                    return this.warn("drawauto", "DrawAuto (stream output) is not supported yet");
+                    return this.drawAuto(c);
                 case DX.DISPATCH:
                 case DX.DISPATCH_INDIRECT:
                     return this.warn("dispatch", "compute is not supported yet");
@@ -1147,11 +1173,17 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const gs = c.stages[SHADER_GS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_GS].shader) : null;
             const topology = TOPOLOGY[st.topology];
             if (!topology) return this.warn("topology" + st.topology, "topology " + st.topology + " is not supported");
+            const so = this.streamOutput(c);
             const a = this.attachments(c);
-            if (!a) return;
+            if (!a && !so) return;
             const input = this.inputLayout(c);
             // a geometry shader: the vertex and geometry shaders run as compute
-            if (gs && gs.program) return this.drawGeometry(c, call, vs, gs, ps, a, input);
+            if (gs && gs.program) return this.drawGeometry(c, call, vs, gs, ps, a, input, so);
+            // stream output of the vertex shader's primitives
+            if (so) {
+                this.streamVertices(c, call, vs, input, so);
+                if (!a || so.noRaster) return;
+            }
             const { colors, targets, width, height, samples, DS, dsView, depthFormat } = a;
             const { vertexInputs, buffers, slots } = input;
 
@@ -1199,13 +1231,14 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             });
             this.stats.draws++;
             if (call.indirect) {
-                const S = this.surfaces.get(call.indirect.sid);
-                if (!S || !S.buffer) return;
+                const S = call.indirect.buffer ? null : this.surfaces.get(call.indirect.sid);
+                const buffer = call.indirect.buffer || (S && S.buffer);
+                if (!buffer) return;
                 if (call.indexed) {
                     if (!this.setIndexBuffer(pass, st)) return;
-                    pass.drawIndexedIndirect(S.buffer, call.indirect.offset);
+                    pass.drawIndexedIndirect(buffer, call.indirect.offset);
                 } else {
-                    pass.drawIndirect(S.buffer, call.indirect.offset);
+                    pass.drawIndirect(buffer, call.indirect.offset);
                 }
                 return;
             }
@@ -1246,7 +1279,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         // on what it stored, and what that emitted is drawn by a vertex
         // shader reading it (wgsl_emitter.js, "vertex-compute" and "geometry")
 
-        drawGeometry(c, call, vs, gs, ps, a, input) {
+        drawGeometry(c, call, vs, gs, ps, a, input, so) {
             const st = c.state;
             if (call.indirect) return this.warn("gs-indirect", "indirect draws with a geometry shader are not supported");
             const count = call.count, instances = call.instances;
@@ -1301,8 +1334,197 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             compute.end();
             this.stats.geometryDraws = (this.stats.geometryDraws || 0) + 1;
 
-            // what it emitted
-            this.drawRecords(c, a, ps, gs, gsModule, gsOut, g.topology, slots);
+            // what it emitted: into the stream output buffers, and drawn
+            if (so) this.writeStreamOutput(c, so, gsOut, gsRecord, { geometry: true, units: invocations * g.maxPrims, perPrim: g.perPrim });
+            if (a && !(so && so.noRaster)) this.drawRecords(c, a, ps, gs, gsModule, gsOut, g.topology, slots);
+        }
+
+        // ------------------------------------------------------------------
+        // Stream output: what a draw's last vertex stage made, primitive by
+        // primitive in order, written into the target buffers by a compute
+        // shader made for the declaration; each buffer's filled size stays on
+        // the GPU (DrawAuto draws that many vertices)
+
+        /** The stream output of a draw, if one is bound: { decl, targets, noRaster } */
+        streamOutput(c) {
+            const st = c.state;
+            if (st.soid === INVALID) return null;
+            const decl = c.streamOutputs.get(st.soid);
+            if (!decl || !decl.entries.length) return null;
+            const targets = st.soTargets.map(t => {
+                const S = t && t.sid !== INVALID ? this.surfaces.get(t.sid) : null;
+                return S && S.buffer ? { ...t, S } : null;
+            });
+            if (!targets.some(t => t)) return null;
+            return { decl, targets, noRaster: (decl.rasterized | 0) === -1 };
+        }
+
+        /** A buffer's stream output filled size (bytes), on the GPU */
+        soFilled(S) {
+            if (!S.soFilled) {
+                S.soFilled = this.device.createBuffer({ size: 16, usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC | BUFFER_USAGE.COPY_DST });
+            }
+            return S.soFilled;
+        }
+
+        /** Stream output without a geometry shader: the vertex shader's primitives */
+        streamVertices(c, call, vs, input, so) {
+            const st = c.state;
+            const assembly = GS_ASSEMBLY[st.topology];
+            const perPrim = { 1: 1, 2: 2, 3: 2, 4: 3, 5: 3 }[assembly ? assembly.code : 0];
+            if (call.indirect || !perPrim) return this.warn("so-topology", "stream output of this draw (indirect, or adjacency) is not supported");
+            const prims = assembly.prims(call.count);
+            if (prims <= 0 || !call.instances) return;
+            let vsModule;
+            try {
+                vsModule = this.module(vs, { group: 0, mode: "vertex-compute", fetch: input.fetch });
+            } catch (error) {
+                return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
+            }
+            const record = Math.max(1, vsModule.result.record);
+            const vsOut = this.storageBuffer(call.count * call.instances * record * 16);
+            const vsPipe = this.computePipeline(c, SHADER_VS, vsModule);
+            if (!vsPipe) return;
+            const ib = this.surfaces.get(st.ib.sid);
+            const group = this.bindGroup(c, SHADER_VS, vsModule, vsPipe.layout, call, null, {
+                "fetch": this.uniform(this.fetchParameters(st, call, input)),
+                "index": { buffer: call.indexed && ib && ib.buffer ? ib.buffer : this.dummyBuffer },
+                "vertex-buffer": slot => {
+                    const vb = st.vbs[slot];
+                    const S = vb && this.surfaces.get(vb.sid);
+                    return { buffer: S && S.buffer ? S.buffer : this.dummyBuffer };
+                },
+                "stage-out": { buffer: vsOut },
+            });
+            if (!group) return;
+            this.endPass();
+            const compute = this.encoder().beginComputePass();
+            compute.setPipeline(vsPipe.pipeline);
+            compute.setBindGroup(0, group);
+            this.dispatch(compute, call.count * call.instances);
+            compute.end();
+            this.writeStreamOutput(c, so, vsOut, record, { geometry: false, units: prims * call.instances, perPrim,
+                prims, count: call.count, code: assembly.code });
+        }
+
+        /**
+         * Write records into the stream output targets, in order
+         * @param shape { geometry, units, perPrim } and without a geometry
+         *     shader { prims, count, code }: the vertex records' topology
+         */
+        writeStreamOutput(c, so, src, record, shape) {
+            const decl = so.decl;
+            // where each entry's components go in a vertex of its buffer
+            const writes = [], strides = [0, 0, 0, 0], running = [0, 0, 0, 0];
+            for (const e of decl.entries) {
+                if (e.stream !== 0) continue;
+                for (let lane = 0; lane < 4; lane++) {
+                    if (!(e.mask >> lane & 1)) continue;
+                    // (a register past the record: a gap)
+                    if (e.reg < (shape.geometry ? record - 1 : record)) writes.push({ slot: e.slot, offset: running[e.slot], reg: e.reg, lane });
+                    running[e.slot] += 4;
+                }
+            }
+            for (let slot = 0; slot < 4; slot++) strides[slot] = decl.strides[slot] || running[slot];
+            const used = [0, 1, 2, 3].filter(slot => so.targets[slot] && strides[slot] && (running[slot] || writes.some(w => w.slot === slot)));
+            if (!used.length) return;
+            const key = "so:" + JSON.stringify({ writes, strides, used, record, g: shape.geometry, p: shape.perPrim });
+            let pipe = this.pipelines.get(key);
+            if (!pipe) {
+                const P = shape.perPrim, lanes = "xyzw";
+                const lines = [];
+                lines.push("struct SOParams { units: u32, prims: u32, count: u32, topology: u32, sizes: vec4<u32> }");
+                lines.push("@group(0) @binding(0) var<storage, read> src: array<vec4<u32>>;");
+                lines.push("@group(0) @binding(1) var<uniform> P: SOParams;");
+                lines.push("@group(0) @binding(2) var<storage, read_write> filled: array<u32>;");
+                for (const slot of used) lines.push(`@group(0) @binding(${3 + slot}) var<storage, read_write> so${slot}: array<u32>;`);
+                lines.push("fn gx_vertex(prim: u32, n: u32) -> u32 {\n    switch (P.topology) {\n" +
+                    "        case 1u: { return prim; }\n        case 2u: { return prim * 2u + n; }\n        case 3u: { return prim + n; }\n" +
+                    "        case 4u: { return prim * 3u + n; }\n" +
+                    "        case 5u: { if ((prim & 1u) == 1u && n < 2u) { return prim + 1u - n; } return prim + n; }\n" +
+                    "        default: { return prim + n; }\n    }\n}");
+                lines.push("@compute @workgroup_size(1) fn main() {");
+                for (const slot of used) lines.push(`    var c${slot} = filled[${slot}u];`);
+                lines.push("    for (var u = 0u; u < P.units; u++) {");
+                if (shape.geometry) {
+                    lines.push(`        let first = u * ${P}u;`);
+                    lines.push(`        if (src[first * ${record}u + ${record - 1}u].x == 0u) { continue; }`);
+                } else {
+                    lines.push("        let instance = u / P.prims;\n        let prim = u % P.prims;");
+                }
+                // the whole primitive fits, or the stream output stops
+                lines.push("        if (" + used.map(slot => `c${slot} + ${P * strides[slot]}u > P.sizes[${slot}]`).join(" || ") + ") { break; }");
+                lines.push(`        for (var n = 0u; n < ${P}u; n++) {`);
+                lines.push(shape.geometry ? `            let at = (first + n) * ${record}u;` :
+                    `            let at = (instance * P.count + gx_vertex(prim, n)) * ${record}u;`);
+                for (const w of writes) lines.push(`            so${w.slot}[(c${w.slot} + ${w.offset}u) >> 2u] = src[at + ${w.reg}u].${lanes[w.lane]};`);
+                for (const slot of used) lines.push(`            c${slot} += ${strides[slot]}u;`);
+                lines.push("        }\n    }");
+                for (const slot of used) lines.push(`    filled[${slot}u] = c${slot};`);
+                lines.push("}");
+                try {
+                    const module = this.device.createShaderModule({ code: lines.join("\n") });
+                    pipe = this.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
+                } catch (error) {
+                    return this.warn("so:" + error.message, "the stream output shader failed: " + error.message);
+                }
+                this.pipelines.set(key, pipe);
+            }
+            const sizes = [0, 0, 0, 0];
+            for (const slot of used) sizes[slot] = so.targets[slot].S.shadow.length;
+            const params = new Uint32Array([shape.units, shape.prims || 1, shape.count || 0, shape.code || 0, ...sizes]);
+            const filled = this.storageBuffer(16);
+            this.endPass();
+            const encoder = this.encoder();
+            for (const slot of used) encoder.copyBufferToBuffer(this.soFilled(so.targets[slot].S), 0, filled, slot * 4, 4);
+            const entries = [{ binding: 0, resource: { buffer: src } }, { binding: 1, resource: this.uniform(params) },
+                { binding: 2, resource: { buffer: filled } }];
+            for (const slot of used) entries.push({ binding: 3 + slot, resource: { buffer: so.targets[slot].S.buffer } });
+            let group;
+            try {
+                group = this.device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries });
+            } catch (error) {
+                return this.warn("so-group:" + error.message, "the stream output bind group failed: " + error.message);
+            }
+            const compute = encoder.beginComputePass();
+            compute.setPipeline(pipe);
+            compute.setBindGroup(0, group);
+            compute.dispatchWorkgroups(1);
+            compute.end();
+            for (const slot of used) encoder.copyBufferToBuffer(filled, slot * 4, this.soFilled(so.targets[slot].S), 0, 4);
+            this.stats.streamOutputs = (this.stats.streamOutputs || 0) + 1;
+        }
+
+        /** DrawAuto: as many vertices as stream output put in vertex buffer 0 */
+        drawAuto(c) {
+            const st = c.state;
+            const vb = st.vbs[0];
+            const S = vb && this.surfaces.get(vb.sid);
+            if (!S || !S.buffer || !vb.stride) return;
+            let pipe = this.pipelines.get("drawauto");
+            if (!pipe) {
+                const code = "@group(0) @binding(0) var<storage, read> filled: array<u32>;\n" +
+                    "@group(0) @binding(1) var<storage, read_write> args: array<u32>;\n" +
+                    "@group(0) @binding(2) var<uniform> vb: vec4<u32>;\n" +
+                    "@compute @workgroup_size(1) fn main() {\n" +
+                    "    args[0] = select(0u, (filled[0] - vb.x) / vb.y, filled[0] > vb.x);\n" +
+                    "    args[1] = 1u; args[2] = 0u; args[3] = 0u;\n}";
+                pipe = this.device.createComputePipeline({ layout: "auto",
+                    compute: { module: this.device.createShaderModule({ code }), entryPoint: "main" } });
+                this.pipelines.set("drawauto", pipe);
+            }
+            const args = this.device.createBuffer({ size: 16, usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.INDIRECT });
+            this.transient.push(args);
+            const group = this.device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+                { binding: 0, resource: { buffer: this.soFilled(S) } }, { binding: 1, resource: { buffer: args } },
+                { binding: 2, resource: this.uniform(Uint32Array.of(vb.offset >>> 0, vb.stride, 0, 0)) }] });
+            this.endPass();
+            const compute = this.encoder().beginComputePass();
+            compute.setPipeline(pipe);
+            compute.setBindGroup(0, group);
+            compute.dispatchWorkgroups(1);
+            compute.end();
+            this.draw(c, { count: 0, first: 0, instances: 1, firstInstance: 0, indirect: { buffer: args, offset: 0 } });
         }
 
         /** A draw of records a compute stage wrote: position and varyings as the pixel shader reads them */
@@ -1402,7 +1624,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 
         /** A storage buffer for this encoder's work */
         storageBuffer(size) {
-            const buffer = this.device.createBuffer({ size: align(Math.max(16, size), 16), usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC });
+            const buffer = this.device.createBuffer({ size: align(Math.max(16, size), 16), usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC | BUFFER_USAGE.COPY_DST });
             this.transient.push(buffer);
             return buffer;
         }
@@ -1812,6 +2034,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             this.rtvs = new Map(); this.dsvs = new Map(); this.srvs = new Map(); this.uavs = new Map();
             this.layouts = new Map(); this.blends = new Map(); this.depths = new Map(); this.rasters = new Map();
             this.samplers = new Map(); this.shaders = new Map(); this.queries = new Map();
+            /** stream output declarations: { entries: [{ slot, reg, mask, stream }], strides, rasterized } */
+            this.streamOutputs = new Map();
             this.stages = {};
             for (let type = SHADER_VS; type <= SHADER_CS; type++) {
                 this.stages[type] = { shader: INVALID, cbs: new Array(16).fill(null), srvs: new Array(128).fill(INVALID),
@@ -1821,6 +2045,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 layout: INVALID, vbs: new Array(32).fill(null), ib: { sid: INVALID, format: SVGA3D_R16_UINT, offset: 0 },
                 topology: 1, rtvs: [], dsv: INVALID, blend: INVALID, blendFactor: [0, 0, 0, 0], sampleMask: INVALID,
                 depth: INVALID, stencilRef: 0, raster: INVALID, viewports: [], scissors: [], predication: [INVALID, 0],
+                soid: INVALID, soTargets: [],
             };
         }
 
@@ -1833,7 +2058,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const maps = { [COTABLE.RTVIEW]: this.rtvs, [COTABLE.DSVIEW]: this.dsvs, [COTABLE.SRVIEW]: this.srvs,
                 [COTABLE.ELEMENTLAYOUT]: this.layouts, [COTABLE.BLENDSTATE]: this.blends, [COTABLE.DEPTHSTENCIL]: this.depths,
                 [COTABLE.RASTERIZERSTATE]: this.rasters, [COTABLE.SAMPLER]: this.samplers, [COTABLE.DXQUERY]: this.queries,
-                [COTABLE.DXSHADER]: this.shaders, [COTABLE.UAVIEW]: this.uavs };
+                [COTABLE.DXSHADER]: this.shaders, [COTABLE.UAVIEW]: this.uavs, [COTABLE.STREAMOUTPUT]: this.streamOutputs };
             if (maps[type]) maps[type].clear();
         }
     }
