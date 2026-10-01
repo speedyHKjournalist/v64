@@ -56,14 +56,27 @@ function create_graphics_proxy(options)
     return factory(proxy === true ? {} : proxy);
 }
 
+/** The name of the channel between the display adapter's device and its renderer, with a CPU worker */
+export const ADAPTER_RENDERER_CHANNEL = "graphics_adapter_renderer";
+
 /**
  * The 3D renderer of the display adapter, on this page: vmware_svga's
  * (V86SVGARenderer of libv86-webgpu.js), when the page has loaded it and
- * WebGPU has an adapter. The device then declares 3D (level vgpu9).
- * @return {!Promise<Object>} the device's end of the channel, or null
+ * WebGPU has an adapter. The device then declares 3D.
+ *
+ * With a CPU worker the device is in the worker and the renderer stays here:
+ * `host` is this page's end of their channel (CPUWorkerController's
+ * device_channel), and the worker gives the device the other end. In the
+ * worker, `options` brings that end (graphics_adapter_renderer_channel).
+ * @param {Object=} options
+ * @param {Object=} host
+ * @return {!Promise<Object>} the device's end of the channel (`host`
+ *     itself if it was given), or null
  */
-V86.prototype.create_adapter_renderer = async function()
+V86.prototype.create_adapter_renderer = async function(options, host)
 {
+    const remote = options && options["graphics_adapter_renderer_channel"];
+    if(remote) return remote;
     const create = globalThis["V86SVGARenderer"];
     const gpu = typeof navigator !== "undefined" && navigator["gpu"];
     if(this.graphics_adapter !== "vmware_svga" || typeof create !== "function" || !gpu) return null;
@@ -77,6 +90,11 @@ V86.prototype.create_adapter_renderer = async function()
         dbg_log("WebGPU: " + e, LOG_VGA);
     }
     if(!adapter || this.destroyed) return null;
+    if(host)
+    {
+        this.adapter_renderer = create(host, {});
+        return host;
+    }
     const channel = create_local_channel();
     this.adapter_renderer = create(channel.host, {});
     return channel.device;
@@ -597,6 +615,9 @@ V86.prototype.continue_init = async function(emulator, options)
         this.serial_adapter?.show?.();
         this.virtio_console_adapter?.show?.();
         this.modem?.initialize();
+        // the display adapter's renderer stays on this page (WebGPU is here)
+        this.worker_controller.adapter_renderer = !!await this.create_adapter_renderer(undefined,
+            this.worker_controller.device_channel(ADAPTER_RENDERER_CHANNEL));
         await this.worker_controller.start();
         return;
     }
@@ -606,7 +627,7 @@ V86.prototype.continue_init = async function(emulator, options)
     const graphics_adapter = this.graphics_adapter === "none" ? Promise.resolve(undefined) :
         load_graphics_adapter(this.graphics_adapter, options["graphics_adapter_path"]);
     graphics_adapter.catch(() => {});
-    const adapter_renderer = this.create_adapter_renderer();
+    const adapter_renderer = this.create_adapter_renderer(options);
 
     // ugly, but required for closure compiler compilation
     function put_on_settings(name, buffer)

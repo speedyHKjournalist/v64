@@ -140,6 +140,8 @@ export function start_cpu_worker()
                 }
                 return create(device_channel(plugin["name"]));
             });
+            // the display adapter's 3D renderer, on the page
+            if(options["graphics_adapter_renderer"]) options["graphics_adapter_renderer_channel"] = device_channel("graphics_adapter_renderer");
             options["worker_bus_setup"] = instance => {
                 emulator = instance;
                 const original = instance.emulator_bus.send.bind(instance.emulator_bus);

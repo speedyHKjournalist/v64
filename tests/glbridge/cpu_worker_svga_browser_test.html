@@ -1,0 +1,104 @@
+<!doctype html><meta charset="utf-8"><title>CPU Worker: VMware SVGA II 3D</title>
+<div id="screen"><div></div><canvas></canvas></div><pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// With a CPU worker the VMware SVGA II device runs in the worker and its 3D
+// renderer (V86SVGARenderer, WebGPU) on this page: their messages cross the
+// worker boundary. The guest finds the card on PCI, defines a GMR in its RAM
+// by registers, and submits a command buffer that defines a surface and a
+// context, clears the surface, and DMAs it into the GMR; the renderer's
+// readback has to land in guest RAM before the buffer completes.
+import { V86 } from "../../build/libv86.mjs";
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+let vm;
+try {
+    vm = new V86({ graphics_adapter: "vmware_svga", graphics_adapter_path: "../../build/v86-vmware-svga.js",
+        cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
+        wasm_path: "../../build/v86.wasm", bios: { url: "../../build/cpu-worker-test.bin" },
+        memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
+        disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+        net_device: { type: "none" }, autostart: true });
+    await Promise.race([new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); }),
+        sleep(20000).then(() => { throw new Error("startup timeout"); })]);
+    const word = async a => new DataView((await vm.read_memory(a, 4)).buffer).getUint32(0, true);
+    const wait = async (test, what) => { const end = performance.now() + 15000; while(!await test()) { if(performance.now() > end) throw new Error("timeout: " + what); await sleep(5); } };
+    await wait(async () => await word(0x500) === 0xCAFE, "the test BIOS");
+    check(!vm.v86, "no CPU or guest RAM on this page");
+    check(vm.adapter_renderer, "the SVGA renderer is on this page");
+
+    async function program(bytes) {
+        await vm.write_memory(Uint8Array.from([...bytes, 0xC3]), 0x1200000);
+        await vm.write_memory(Uint8Array.from(u32(0x1200000)), 0x600);
+        await wait(async () => await word(0x600) === 0, "a guest program");
+    }
+    // pciscan: finds 15AD:0405, enables it, its I/O base into [0x700]
+    await program([0x31,0xc9,0x89,0xc8,0xc1,0xe0,0x0b,0x0d,0x00,0x00,0x00,0x80,0xba,0xf8,0x0c,0x00,0x00,0xef,0xba,0xfc,0x0c,
+        0x00,0x00,0xed,0x3d,0xad,0x15,0x05,0x04,0x74,0x11,0x41,0x83,0xf9,0x20,0x72,0xdd,0xc7,0x05,0x00,0x07,0x00,0x00,0xff,0xff,
+        0xff,0xff,0xc3,0x89,0xc8,0xc1,0xe0,0x0b,0x0d,0x04,0x00,0x00,0x80,0xba,0xf8,0x0c,0x00,0x00,0xef,0xba,0xfc,0x0c,0x00,0x00,
+        0xed,0x83,0xc8,0x07,0xef,0x89,0xc8,0xc1,0xe0,0x0b,0x0d,0x10,0x00,0x00,0x80,0xba,0xf8,0x0c,0x00,0x00,0xef,0xba,0xfc,0x0c,
+        0x00,0x00,0xed,0x83,0xe0,0xfc,0xa3,0x00,0x07,0x00,0x00]);
+    const io = await word(0x700);
+    check(io !== 0xFFFFFFFF && io > 0, "the SVGA card is on PCI, I/O at 0x" + io.toString(16));
+    // SVGA registers: index port io+0, value port io+1
+    const out32 = (port, value) => [0xBA, ...u32(port), 0xB8, ...u32(value), 0xEF];
+    const in32 = port => [0xBA, ...u32(port), 0xED];
+    const reg = (index, value) => [...out32(io, index), ...out32(io + 1, value)];
+    // the device's capabilities into [0x704]: 3D needs the renderer
+    await program([...out32(io, 0x11 /* SVGA_REG_CAPABILITIES */), ...in32(io + 1), 0xA3, ...u32(0x704)]);
+    const caps = await word(0x704);
+    check(caps & 0x4000 /* SVGA_CAP_3D */, "the device offers 3D, its renderer found (caps 0x" + caps.toString(16) + ")");
+
+    // GMR 1: one page at 0x301000, by its descriptor at 0x300000
+    await vm.write_memory(Uint8Array.from([0x301, 1, 0, 0].flatMap(u32)), 0x300000);
+    await vm.write_memory(new Uint8Array(4096).fill(0xEE), 0x301000);
+    // the commands: a 16x16 surface, a context, a clear, the surface into the GMR
+    const command = (id, ...body) => [id, body.length * 4, ...body];
+    const commands = [
+        ...command(0x410 /* SURFACE_DEFINE */, 1, 0x40, 1 /* X8R8G8B8 */, 1, 0, 0, 0, 0, 0, 16, 16, 1),
+        ...command(0x415 /* CONTEXT_DEFINE */, 1),
+        ...command(0x41A /* SETRENDERTARGET */, 1, 2 /* COLOR0 */, 1, 0, 0),
+        ...command(0x421 /* CLEAR */, 1, 1 /* COLOR */, 0xFF336699, f32(1), 0, 0, 0, 16, 16),
+        ...command(0x414 /* SURFACE_DMA */, 1, 0, 64, 1, 0, 0, 2 /* READ_HOST_VRAM */, 0, 0, 0, 16, 16, 1, 0, 0, 0),
+    ];
+    // an SVGACBHeader at 0x200000, its commands at 0x200040
+    const header = [0, 0, 0, 0, 0 /* flags */, commands.length * 4, 0x200040, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    await vm.write_memory(Uint8Array.from(header.flatMap(u32)), 0x200000);
+    await vm.write_memory(Uint8Array.from(commands.flatMap(u32)), 0x200040);
+    await program([...reg(0 /* ID */, 0x90000002), ...reg(0x29 /* GMR_ID */, 1), ...reg(0x2A /* GMR_DESCRIPTOR */, 0x300),
+        ...reg(0x31 /* COMMAND_HIGH */, 0), ...reg(0x30 /* COMMAND_LOW */, 0x200000)]);
+    await wait(async () => await word(0x200000) !== 0, "the command buffer's status");
+    check(await word(0x200000) === 1, "the command buffer completed (status " + await word(0x200000) + ")");
+    const pixels = await vm.read_memory(0x301000, 16 * 16 * 4);
+    const pixel = i => Array.from(pixels.subarray(i * 4, i * 4 + 3)).join();
+    check(pixel(0) === "153,102,51" && pixel(255) === "153,102,51",
+        "the renderer's clear, read back into guest RAM through the worker: " + pixel(0) + " / " + pixel(255));
+    const stats = vm.adapter_renderer.executor.stats;
+    check(stats.batches >= 1 && !stats.commandsFailed, "the renderer on this page ran the batches (" + stats.batches + ")");
+
+    // A snapshot carries the surface's contents (read back from the renderer
+    // on this page) and the restored device puts them on the GPU again: the
+    // same DMA after a restore reads the same pixels
+    const saved = await vm.save_state();
+    await vm.restore_state(saved);
+    await wait(async () => await word(0x500) === 0xCAFE, "the test BIOS after the restore");
+    await vm.write_memory(new Uint8Array(4096).fill(0xEE), 0x301000);
+    const again = command(0x414 /* SURFACE_DMA */, 1, 0, 64, 1, 0, 0, 2, 0, 0, 0, 16, 16, 1, 0, 0, 0);
+    await vm.write_memory(Uint8Array.from([0, 0, 0, 0, 0, again.length * 4, 0x200040, 0, 0, 0, 0, 0, 0, 0, 0, 0].flatMap(u32)), 0x200000);
+    await vm.write_memory(Uint8Array.from(again.flatMap(u32)), 0x200040);
+    await program([...reg(0x31, 0), ...reg(0x30, 0x200000)]);
+    await wait(async () => await word(0x200000) !== 0, "the command buffer's status after the restore");
+    const restored = await vm.read_memory(0x301000, 16 * 16 * 4);
+    check(Array.from(restored.subarray(0, 3)).join() === "153,102,51" && Array.from(restored.subarray(1020, 1023)).join() === "153,102,51",
+        "after a save and restore the surface still has the clear: " + Array.from(restored.subarray(0, 3)).join());
+
+    await vm.destroy(); vm = null;
+    document.getElementById("result").textContent = "PASS\n" + checks.join("\n");
+} catch(error) {
+    if(vm) await vm.destroy().catch(() => {});
+    document.getElementById("result").textContent = "FAIL\n" + error.stack + "\n" + checks.join("\n");
+}
+</script>

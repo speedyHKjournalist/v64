@@ -627,6 +627,7 @@ cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs
 	node tests/glbridge/cpu_worker_screen_test.mjs
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_gpu_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_svga_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_audio_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_ui_browser_test.html
 
