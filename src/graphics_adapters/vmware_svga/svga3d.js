@@ -181,6 +181,10 @@ export function SVGA3D(device, renderer)
     /** @type {!Map<number, function(Uint8Array, number)>} request id -> answer */
     this.requests = new Map();
     this.warned = new Set();
+    /** @type {?function(number, !Int32Array)} sees each command (for test harnesses) */
+    this.command_log = null;
+    /** @type {!Array<string>} the first warnings, for test harnesses */
+    this.warnings = [];
     /** @type {!Object<number, number>} how often each command came (for the harnesses) */
     this.counts = {};
     /** guest-backed objects (level gb9 and up) */
@@ -244,6 +248,7 @@ SVGA3D.prototype.warn_once = function(key, text)
 {
     if(this.warned.has(key)) return;
     this.warned.add(key);
+    if(this.warnings.length < 100) this.warnings.push(text);
     dbg_log("svga3d: " + text, LOG_VGA);
 };
 
@@ -402,6 +407,7 @@ SVGA3D.prototype.command = function(id, p)
 {
     const f = new Float32Array(p.buffer, p.byteOffset, p.length);
     this.counts[id] = (this.counts[id] || 0) + 1;
+    if(this.command_log) this.command_log(id, p);
     if(this.dx && this.dx.command(id, p, this.dx_context))
     {
         this.flush_big();
@@ -1460,7 +1466,9 @@ SVGA3D.prototype.set_texture_states = function(p, f)
             case C.SVGA3D_TS_BIND_TEXTURE:
             {
                 const surface = value === INVALID ? null : this.surfaces.get(value);
-                w.begin(OP.SET_TEXTURE).u32(device).u32(sampler).u32(surface && this.d9(surface) || 0).u32(0);
+                // (first: making its D9WG texture writes commands of its own)
+                const handle = surface && this.d9(surface) || 0;
+                w.begin(OP.SET_TEXTURE).u32(device).u32(sampler).u32(handle).u32(0);
                 break;
             }
             case C.SVGA3D_TS_COLOROP: stage_state(stage, D3DTSS.COLOROP, TEXTURE_OPS[value] || 1); break;

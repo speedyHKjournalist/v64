@@ -18,12 +18,18 @@
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
 // "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
-// <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>".
+// <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>",
+// "launch <command line>" (run by the launcher with cmd /c, see WIN_LAUNCHER),
+// "svgalog on|off" (the SVGA3D commands other than DX and the frequent GB
+// ones, with their first words, as "svga3d-command" events), "svgashaders"
+// (the GB shaders' bytecode, as "svga3d-shader" events).
 // WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; vmware_svga, whose
 // level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
 // a headless Chrome, and the level vgpu9);
 // WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install; WIN_HDB=<image>: a
 // second disk in place of the tools disk, read-only like the first.
+// WIN_LAUNCHER=<guest path of LAUNCH.EXE>: started from the Run dialog once
+// the desktop shows; then "launch" runs programs as the user without typing.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -190,7 +196,13 @@ let powered_off = null;
 vm.add_listener("acpi-power-off", state => { powered_off = state; });
 // the guest drivers' logs through the VMware backdoor (vm3d's release log)
 vm.add_listener("vmware-log", text => event("guest-log", {text: String(text).slice(0, 400)}));
-vm.add_listener("vmware-rpci", text => event("rpci", {text: String(text).slice(0, 200)}));
+vm.add_listener("vmware-rpci", text => {
+    // (the launcher asks once a second)
+    if(String(text) !== "info-get guestinfo.v86.run") event("rpci", {text: String(text).slice(0, 200)});
+});
+// the launcher (tools/windows/launch.c) in the user's session, once it said so
+let launcher_ready = false, launch_serial = 0;
+vm.add_listener("vmware-log", text => { if(String(text) === "launch: ready") launcher_ready = true; });
 const backdoor_seen = new Set();
 vm.add_listener("vmware-backdoor-unknown", command => { if(!backdoor_seen.has(command)) { backdoor_seen.add(command); event("backdoor-unknown", {command}); } });
 const report = {image: {path: image_path, size: source_stat.size, mtime_ms: source_stat.mtimeMs}, cores, jit,
@@ -384,7 +396,7 @@ function observe_svga()
         svga3d_next = performance.now() + 30000;
         const counts = JSON.stringify(svga.svga3d.counts);
         const activity = counts + JSON.stringify(svga.stats);
-        if(activity !== svga3d_seen) { svga3d_seen = activity; event("svga3d", {counts: svga.svga3d.counts, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size, device: svga.stats}); }
+        if(activity !== svga3d_seen) { svga3d_seen = activity; event("svga3d", {counts: svga.svga3d.counts, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size, device: svga.stats, warnings: svga.svga3d.warnings}); }
     }
 }
 let svga3d_next = 0, svga3d_seen = "";
@@ -649,6 +661,30 @@ try
         else if(verb === "shot") screenshot(true);
         else if(verb === "rips") next_samples = 0;
         else if(verb === "trace") { cpu.wm.exports.x64_user_trace_enable(argument !== "off"); trace_seen = 0; }
+        else if(verb === "launch")
+        {
+            if(!launcher_ready) event("launcher-missing");
+            cpu.devices.vmware.guestinfo.set("v86.run", ++launch_serial + " " + argument);
+        }
+        else if(verb === "svgashaders")
+        {
+            // the legacy (GB) shaders' bytecode, as "svga3d-shader" events
+            const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+            for(const [shid, sh] of svga && svga.svga3d ? svga.svga3d.gb_shaders : [])
+            {
+                const code = sh.code ? new Uint32Array(sh.code.buffer, sh.code.byteOffset, sh.code.byteLength >> 2) : [];
+                event("svga3d-shader", {shid, type: sh.type, code: Array.from(code, v => (v >>> 0).toString(16)).join(" ")});
+            }
+        }
+        else if(verb === "svgalog")
+        {
+            const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+            const quiet = new Set([1094, 1098, 1119, 1126, 1127, 1135]);
+            if(svga && svga.svga3d) svga.svga3d.command_log = argument === "off" ? null : (id, p) => {
+                if(id >= 1143 && id < 1300 || quiet.has(id)) return;
+                event("svga3d-command", {id, n: p.length, body: Array.from(p.subarray(0, 24), v => (v >>> 0).toString(16)).join(" ")});
+            };
+        }
         else if(verb === "wait")
         {
             // (the main loop is not running: keep watching the screen, and
@@ -791,6 +827,12 @@ try
         {
             report.desktop_s = elapsed();
             event("desktop");
+            for(let attempt = 0; process.env.WIN_LAUNCHER && !launcher_ready && attempt < 4; attempt++)
+            {
+                await run_command(process.env.WIN_LAUNCHER);
+                for(const limit = performance.now() + 60000; performance.now() < limit && !launcher_ready;) await delay(500);
+                event(launcher_ready ? "launcher" : "launcher-retry");
+            }
             // WIN_SETUP: commands separated by ";;" once the desktop shows
             // (e.g. "runadmin E:\\INSTVM3D.CMD;;wait 300;;shot"), before
             // WIN_OVERLAY_SAVE shuts down and keeps what they did
