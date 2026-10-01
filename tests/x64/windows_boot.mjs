@@ -30,6 +30,8 @@
 // second disk in place of the tools disk, read-only like the first.
 // WIN_LAUNCHER=<guest path of LAUNCH.EXE>: started from the Run dialog once
 // the desktop shows; then "launch" runs programs as the user without typing.
+// WIN_NO_PROBE=1: no qualification probe (its Run dialog takes the focus from
+// full-screen programs), and no signing in again unless a password box shows.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -799,10 +801,12 @@ try
             {
                 // lock screen (sign-in lost, or locked after idling with the
                 // display off), password box, or still signing in
-                if(password_box_visible() || performance.now() - last_sign_in > 180000) await sign_in();
+                // (WIN_NO_PROBE: a full-screen program hides the desktop for
+                // long; only a password box means the session is locked)
+                if(password_box_visible() || !process.env.WIN_NO_PROBE && performance.now() - last_sign_in > 180000) await sign_in();
                 probe_sent = performance.now() + 20000;
             }
-            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP && !process.env.WIN_IDLE)
+            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP && !process.env.WIN_IDLE && !process.env.WIN_NO_PROBE)
             {
                 const arch = report.results[64] ? 32 : 64;
                 const started = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\probe${arch}.exe %d:\\probe${arch}.exe`);
