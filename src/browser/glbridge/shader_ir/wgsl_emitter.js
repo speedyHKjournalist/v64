@@ -1,0 +1,1332 @@
+// The shader IR (dxbc_frontend.js) as WGSL (plan 4.6).
+//
+// The register files are arrays of raw 32-bit lanes (vec4<u32>): DXBC
+// registers have no type, each instruction says how it reads them, so every
+// read is a bitcast to the instruction's type and every write a bitcast
+// back. Temps, inputs and outputs are private arrays, so relative indexing
+// and subroutines (label/call) need nothing special; the entry point copies
+// the stage's inputs in, calls shader_main() and copies the outputs out.
+//
+// The interfaces depend on the pipeline, not only on the shader, and the
+// caller says how (options):
+//   vertexInputs: register -> "f32" | "i32" | "u32", from the input
+//       layout's formats (WebGPU types vertex attributes)
+//   varyings: register -> { type: "f32" | "u32", interpolation, sampling },
+//       from the pixel shader's declarations, for the vertex shader's
+//       outputs (WebGPU wants both stages to agree)
+//   targets: render target -> "f32" | "i32" | "u32" (absent: no target)
+//   dualSource: the blend state reads the second color (SRC1_*)
+//   group: the bind group of this stage
+//
+// Bindings in the group: constant buffer n at n (0-14), the draw
+// parameters at 15, sampler n at 16 + n, resource n at 32 + n, UAV n at
+// 160 + n. emit() returns them, for the bind group layout.
+(function(global) {
+    "use strict";
+
+    const F = (typeof require === "function" && typeof module === "object") ?
+        require("./dxbc_frontend.js") : global.V86DXBCFrontend;
+    const { OP, OPERAND, NAME, INTERPOLATION, DIM, RETURN, PROGRAM, VMWARE_OP } = F;
+
+    class ShaderTranslateError extends Error {}
+
+    const BINDING = { CB: 0, DRAW: 15, SAMPLER: 16, RESOURCE: 32, UAV: 160 };
+    const LANES = "xyzw";
+    const ALL = 0xF;
+
+    function u32(value) {
+        return (value >>> 0) + "u";
+    }
+
+    /**
+     * @param program decoded by dxbc_frontend.decode
+     * @param options see above
+     * @return { code, bindings: [{ binding, type, ... }], usesDraw, inputs, outputs, warnings }
+     */
+    function emit(program, options) {
+        options = options || {};
+        const e = new Emitter(program, options);
+        return e.run();
+    }
+
+    class Emitter {
+        constructor(program, options) {
+            this.p = program;
+            this.o = options;
+            this.stage = program.type;
+            this.group = options.group || 0;
+            this.lines = [];
+            this.indent = 1;
+            this.helpers = new Set();
+            this.warnings = [];
+            this.usesDraw = false;
+            // resources used for comparison: they are depth textures
+            this.compared = new Set();
+            this.gathered = new Set();
+            this.temps = Math.max(1, program.temps);
+            this.inputCount = 1;
+            this.outputCount = 1;
+            this.switches = [];
+            this.needDepth = false;
+            this.needMask = false;
+        }
+
+        warn(text) {
+            if (!this.warnings.includes(text)) this.warnings.push(text);
+        }
+
+        line(text) {
+            this.lines.push("    ".repeat(this.indent) + text);
+        }
+
+        run() {
+            const p = this.p;
+            if (this.stage !== PROGRAM.VS && this.stage !== PROGRAM.PS && this.stage !== PROGRAM.CS) {
+                throw new ShaderTranslateError(p.stage + " shaders are emulated elsewhere");
+            }
+            for (const input of p.inputs) if (input.type === OPERAND.INPUT) this.inputCount = Math.max(this.inputCount, inputRegister(input) + 1);
+            for (const output of p.outputs) if (output.type === OPERAND.OUTPUT) this.outputCount = Math.max(this.outputCount, output.index + 1);
+            this.scanUsage();
+
+            // the body first: it says which helpers are needed
+            const [main, labels] = this.split();
+            const functions = [];
+            for (const [label, code] of labels) {
+                this.lines = [];
+                this.indent = 1;
+                this.body(code);
+                functions.push("fn label" + label + "() {\n" + this.lines.join("\n") + "\n}\n");
+            }
+            this.lines = [];
+            this.indent = 1;
+            this.body(main);
+            const mainBody = this.lines.join("\n");
+
+            // the entry point before the declarations: it says whether the draw parameters are read
+            const entry = this.entryPoint();
+            const out = [];
+            out.push("diagnostic(off, derivative_uniformity);");
+            if (this.stage === PROGRAM.PS && this.o.dualSource) out.push("enable dual_source_blending;");
+            out.push("");
+            out.push(...this.declarations());
+            out.push(...this.helperCode());
+            out.push(...functions);
+            out.push("fn shader_main() {\n" + mainBody + "\n}\n");
+            out.push(entry);
+            return {
+                code: out.join("\n"),
+                bindings: this.bindings,
+                usesDraw: this.usesDraw,
+                warnings: this.warnings,
+                stage: p.stage,
+            };
+        }
+
+        /** Which resources are compared or gathered: their WGSL types depend on it */
+        scanUsage() {
+            for (const ins of this.p.code) {
+                switch (ins.op) {
+                    case OP.SAMPLE_C: case OP.SAMPLE_C_LZ: case OP.GATHER4_C: case OP.GATHER4_PO_C: {
+                        const r = ins.op === OP.GATHER4_PO_C ? ins.src[2] : ins.src[1];
+                        if (r) this.compared.add(r.indices[0].imm);
+                        break;
+                    }
+                }
+            }
+        }
+
+        /** The main program and the subroutines (label n ... ret) after it */
+        split() {
+            const code = this.p.code;
+            const first = code.findIndex(i => i.op === OP.LABEL);
+            if (first < 0) return [code, []];
+            const labels = [];
+            let at = first;
+            while (at < code.length) {
+                const label = code[at].src[0].indices[0].imm;
+                let end = at + 1;
+                while (end < code.length && code[end].op !== OP.LABEL) end++;
+                labels.push([label, code.slice(at + 1, end)]);
+                at = end;
+            }
+            return [code.slice(0, first), labels];
+        }
+
+        // ---------------------------------------------------------------
+        // Declarations
+
+        declarations() {
+            const p = this.p, g = this.group, out = [];
+            this.bindings = [];
+            for (const [slot, cb] of p.cbuffers) {
+                const size = Math.max(1, Math.min(cb.size, 4096));
+                out.push(`@group(${g}) @binding(${BINDING.CB + slot}) var<uniform> cb${slot}: array<vec4<u32>, ${size}>;`);
+                this.bindings.push({ binding: BINDING.CB + slot, type: "uniform", slot, size: size * 16 });
+            }
+            if (this.usesDraw) {
+                out.push("struct GXDraw { base_vertex: u32, base_instance: u32, pad0: u32, pad1: u32 }");
+                out.push(`@group(${g}) @binding(${BINDING.DRAW}) var<uniform> gx_draw: GXDraw;`);
+                this.bindings.push({ binding: BINDING.DRAW, type: "draw" });
+            }
+            for (const [slot, s] of p.samplers) {
+                const comparison = s.mode === 1;
+                out.push(`@group(${g}) @binding(${BINDING.SAMPLER + slot}) var s${slot}: ${comparison ? "sampler_comparison" : "sampler"};`);
+                this.bindings.push({ binding: BINDING.SAMPLER + slot, type: comparison ? "comparison" : "sampler", slot });
+            }
+            for (const [slot, r] of p.resources) {
+                const type = this.resourceType(slot, r);
+                out.push(`@group(${g}) @binding(${BINDING.RESOURCE + slot}) var t${slot}: ${type.wgsl};`);
+                this.bindings.push({ binding: BINDING.RESOURCE + slot, slot, ...type.binding });
+            }
+            for (const [slot, u] of p.uavs) {
+                if (u.kind === "typed") {
+                    this.warn("typed UAVs are not supported yet");
+                    continue;
+                }
+                out.push(`@group(${g}) @binding(${BINDING.UAV + slot}) var<storage, read_write> u${slot}: array<atomic<u32>>;`);
+                this.bindings.push({ binding: BINDING.UAV + slot, slot, type: "storage", stride: u.stride || 0 });
+            }
+            for (const [slot, t] of p.tgsm) {
+                out.push(`var<workgroup> g${slot}: array<atomic<u32>, ${Math.max(1, Math.ceil(t.bytes / 4))}>;`);
+            }
+            if (p.icb) {
+                const n = p.icb.length >> 2;
+                const items = [];
+                for (let i = 0; i < n; i++) items.push(`vec4<u32>(${[0, 1, 2, 3].map(c => u32(p.icb[4 * i + c])).join(", ")})`);
+                out.push(`var<private> icb: array<vec4<u32>, ${Math.max(1, n)}> = array<vec4<u32>, ${Math.max(1, n)}>(${items.join(", ") || "vec4<u32>()"});`);
+            }
+            out.push(`var<private> r: array<vec4<u32>, ${this.temps}>;`);
+            for (const [index, x] of p.indexable) out.push(`var<private> x${index}: array<vec4<u32>, ${Math.max(1, x.size)}>;`);
+            out.push(`var<private> v: array<vec4<u32>, ${this.inputCount}>;`);
+            out.push(`var<private> o: array<vec4<u32>, ${this.outputCount}>;`);
+            if (this.stage === PROGRAM.PS) {
+                out.push("var<private> odepth: u32;");
+                out.push("var<private> omask: u32 = 0xFFFFFFFFu;");
+                out.push("var<private> prim_id: u32;");
+            }
+            if (this.stage === PROGRAM.CS) {
+                out.push("var<private> cs_thread: vec3<u32>;");
+                out.push("var<private> cs_group: vec3<u32>;");
+                out.push("var<private> cs_local: vec3<u32>;");
+                out.push("var<private> cs_flat: u32;");
+            }
+            out.push("");
+            return out;
+        }
+
+        /** The WGSL type of a resource, and its binding */
+        resourceType(slot, r) {
+            if (r.kind === "raw" || r.kind === "structured") {
+                return { wgsl: "array<u32>", binding: { type: "read-storage", kind: r.kind, stride: r.stride || 0 } };
+            }
+            const ret = r.returnTypes ? r.returnTypes[0] : RETURN.FLOAT;
+            const scalar = ret === RETURN.SINT ? "i32" : ret === RETURN.UINT ? "u32" : "f32";
+            const sampleType = ret === RETURN.SINT ? "sint" : ret === RETURN.UINT ? "uint" : "float";
+            const depth = this.compared.has(slot);
+            if (depth && scalar !== "f32") this.warn("comparison on an integer texture");
+            let wgsl, dimension, multisampled = false;
+            switch (r.dimension) {
+                case DIM.BUFFER:
+                    // typed buffers: elements of 32-bit lanes; the format is applied when read
+                    return { wgsl: "array<u32>", binding: { type: "read-storage", kind: "typed", returnType: ret } };
+                case DIM.TEXTURE1D:
+                case DIM.TEXTURE2D:
+                    // (1D textures are 2D ones of one row: WebGPU's 1D ones have no mips)
+                    wgsl = depth ? "texture_depth_2d" : `texture_2d<${scalar}>`; dimension = "2d"; break;
+                case DIM.TEXTURE1DARRAY:
+                case DIM.TEXTURE2DARRAY:
+                    wgsl = depth ? "texture_depth_2d_array" : `texture_2d_array<${scalar}>`; dimension = "2d-array"; break;
+                case DIM.TEXTURE2DMS:
+                    wgsl = depth ? "texture_depth_multisampled_2d" : `texture_multisampled_2d<${scalar}>`;
+                    dimension = "2d"; multisampled = true; break;
+                case DIM.TEXTURE2DMSARRAY:
+                    this.warn("multisampled 2D array textures are read as their first layer");
+                    wgsl = `texture_multisampled_2d<${scalar}>`; dimension = "2d"; multisampled = true; break;
+                case DIM.TEXTURE3D:
+                    wgsl = `texture_3d<${scalar}>`; dimension = "3d"; break;
+                case DIM.TEXTURECUBE:
+                    wgsl = depth ? "texture_depth_cube" : `texture_cube<${scalar}>`; dimension = "cube"; break;
+                case DIM.TEXTURECUBEARRAY:
+                    wgsl = depth ? "texture_depth_cube_array" : `texture_cube_array<${scalar}>`; dimension = "cube-array"; break;
+                default:
+                    throw new ShaderTranslateError("resource dimension " + r.dimension);
+            }
+            return { wgsl, binding: { type: "texture", dimension, sampleType: depth ? "depth" : sampleType, multisampled,
+                one: r.dimension === DIM.TEXTURE1D || r.dimension === DIM.TEXTURE1DARRAY } };
+        }
+
+        // ---------------------------------------------------------------
+        // Entry points
+
+        entryPoint() {
+            switch (this.stage) {
+                case PROGRAM.VS: return this.vertexEntry();
+                case PROGRAM.PS: return this.fragmentEntry();
+                case PROGRAM.CS: return this.computeEntry();
+            }
+            return "";
+        }
+
+        vertexEntry() {
+            const p = this.p, o = this.o;
+            const inputs = [], loads = [];
+            let needVertex = false, needInstance = false;
+            for (const input of p.inputs) {
+                if (input.type !== OPERAND.INPUT) continue;
+                const reg = inputRegister(input);
+                if (input.name === NAME.VERTEX_ID) {
+                    needVertex = true;
+                    this.usesDraw = true;
+                    loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(vid - gx_draw.base_vertex)", input.mask)};`);
+                } else if (input.name === NAME.INSTANCE_ID) {
+                    needInstance = true;
+                    this.usesDraw = true;
+                    loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(iid - gx_draw.base_instance)", input.mask)};`);
+                } else {
+                    const type = (o.vertexInputs && o.vertexInputs[reg]) || null;
+                    if (!type) {
+                        // not in the input layout: D3D reads zeros
+                        continue;
+                    }
+                    if (inputs.some(i => i.reg === reg)) continue;
+                    inputs.push({ reg, type });
+                    loads.push(`v[${reg}] = bitcast<vec4<u32>>(input.a${reg});`);
+                }
+            }
+            const fields = inputs.map(i => `    @location(${i.reg}) a${i.reg}: vec4<${i.type}>,`);
+            if (needVertex) fields.push("    @builtin(vertex_index) vid: u32,");
+            if (needInstance) fields.push("    @builtin(instance_index) iid: u32,");
+            const outFields = [], stores = [];
+            let position = null;
+            for (const output of p.outputs) {
+                if (output.type !== OPERAND.OUTPUT) continue;
+                if (output.name === NAME.POSITION) position = output.index;
+            }
+            outFields.push("    @builtin(position) position: vec4<f32>,");
+            stores.push(position === null ? "out.position = vec4<f32>(0.0, 0.0, 0.0, 1.0);" :
+                `out.position = bitcast<vec4<f32>>(o[${position}]);`);
+            // the varyings the pixel shader reads, as it declares them
+            const varyings = o.varyings || defaultVaryings(p);
+            for (const reg of Object.keys(varyings).map(Number).sort((a, b) => a - b)) {
+                const vary = varyings[reg];
+                const type = vary.type === "u32" ? "u32" : "f32";
+                outFields.push(`    ${interpolationAttribute(vary, type)}@location(${reg}) o${reg}: vec4<${type}>,`);
+                const value = reg < this.outputCount && reg !== position ? `o[${reg}]` : "vec4<u32>()";
+                stores.push(type === "u32" ? `out.o${reg} = ${value};` : `out.o${reg} = bitcast<vec4<f32>>(${value});`);
+            }
+            const struct_in = fields.length ? `struct VSIn {\n${fields.join("\n")}\n}\n` : "";
+            return struct_in +
+                `struct VSOut {\n${outFields.join("\n")}\n}\n` +
+                `@vertex fn main(${fields.length ? "input: VSIn" : ""}) -> VSOut {\n` +
+                (needVertex ? "    let vid = input.vid;\n" : "") + (needInstance ? "    let iid = input.iid;\n" : "") +
+                loads.map(l => "    " + l).join("\n") + "\n" +
+                "    shader_main();\n    var out: VSOut;\n" +
+                stores.map(s => "    " + s).join("\n") + "\n    return out;\n}\n";
+        }
+
+        fragmentEntry() {
+            const p = this.p, o = this.o;
+            const fields = [], loads = [];
+            const seen = new Set();
+            for (const input of p.inputs) {
+                const reg = inputRegister(input);
+                if (input.type === OPERAND.INPUT_PRIMITIVEID) continue;
+                if (input.type === OPERAND.INPUT_COVERAGE_MASK) {
+                    fields.push("    @builtin(sample_mask) coverage: u32,");
+                    continue;
+                }
+                if (input.type !== OPERAND.INPUT) continue;
+                switch (input.name) {
+                    case NAME.POSITION:
+                        fields.push("    @builtin(position) position: vec4<f32>,");
+                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "bitcast<vec4<u32>>(input.position)", input.mask)};`);
+                        continue;
+                    case NAME.IS_FRONT_FACE:
+                        fields.push("    @builtin(front_facing) front: bool,");
+                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(select(0u, 0xFFFFFFFFu, input.front))", input.mask)};`);
+                        continue;
+                    case NAME.SAMPLE_INDEX:
+                        fields.push("    @builtin(sample_index) sample: u32,");
+                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(input.sample)", input.mask)};`);
+                        continue;
+                    case NAME.PRIMITIVE_ID:
+                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(0u)", input.mask)};`);
+                        continue;
+                    case NAME.CLIP_DISTANCE:
+                    case NAME.CULL_DISTANCE:
+                    case NAME.RENDER_TARGET_ARRAY_INDEX:
+                    case NAME.VIEWPORT_ARRAY_INDEX:
+                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(0u)", input.mask)};`);
+                        continue;
+                }
+                if (seen.has(reg)) continue;
+                seen.add(reg);
+                const vary = varyingOf(input);
+                const type = vary.type;
+                fields.push(`    ${interpolationAttribute(vary, type)}@location(${reg}) i${reg}: vec4<${type}>,`);
+                loads.push(type === "u32" ? `v[${reg}] = input.i${reg};` : `v[${reg}] = bitcast<vec4<u32>>(input.i${reg});`);
+            }
+            const outFields = [], stores = [];
+            const targets = o.targets || { 0: "f32" };
+            for (const index of Object.keys(targets).map(Number).sort((a, b) => a - b)) {
+                const type = targets[index];
+                if (!type) continue;
+                const value = index < this.outputCount ? `o[${index}]` : "vec4<u32>()";
+                if (o.dualSource && index === 0) {
+                    outFields.push(`    @location(0) @blend_src(0) c0: vec4<${type}>,`);
+                    outFields.push(`    @location(0) @blend_src(1) c1: vec4<${type}>,`);
+                    stores.push(`out.c0 = ${fromBits(value, type)};`);
+                    stores.push(`out.c1 = ${fromBits(this.outputCount > 1 ? "o[1]" : "vec4<u32>()", type)};`);
+                    break;
+                }
+                outFields.push(`    @location(${index}) c${index}: vec4<${type}>,`);
+                stores.push(`out.c${index} = ${fromBits(value, type)};`);
+            }
+            for (const output of p.outputs) {
+                if (output.type === OPERAND.OUTPUT_DEPTH || output.type === OPERAND.OUTPUT_DEPTH_GREATER_EQUAL ||
+                    output.type === OPERAND.OUTPUT_DEPTH_LESS_EQUAL) {
+                    outFields.push("    @builtin(frag_depth) depth: f32,");
+                    stores.push("out.depth = bitcast<f32>(odepth);");
+                }
+                if (output.type === OPERAND.OUTPUT_COVERAGE_MASK) {
+                    outFields.push("    @builtin(sample_mask) mask: u32,");
+                    stores.push("out.mask = omask;");
+                }
+            }
+            const struct_in = fields.length ? `struct PSIn {\n${fields.join("\n")}\n}\n` : "";
+            const struct_out = outFields.length ? `struct PSOut {\n${outFields.join("\n")}\n}\n` : "";
+            return struct_in + struct_out +
+                `@fragment fn main(${fields.length ? "input: PSIn" : ""})${outFields.length ? " -> PSOut" : ""} {\n` +
+                loads.map(l => "    " + l).join("\n") + "\n" +
+                "    shader_main();\n" +
+                (outFields.length ? "    var out: PSOut;\n" + stores.map(s => "    " + s).join("\n") + "\n    return out;\n" : "") +
+                "}\n";
+        }
+
+        computeEntry() {
+            const [x, y, z] = this.p.threadGroup;
+            return `@compute @workgroup_size(${x}, ${y}, ${z}) fn main(@builtin(global_invocation_id) gid: vec3<u32>, ` +
+                `@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, ` +
+                `@builtin(local_invocation_index) lindex: u32) {\n` +
+                "    cs_thread = gid;\n    cs_group = wid;\n    cs_local = lid;\n    cs_flat = lindex;\n" +
+                "    shader_main();\n}\n";
+        }
+
+        // ---------------------------------------------------------------
+        // Operands
+
+        /** An index (immediate, plus maybe a register's component) as a u32 expression */
+        index(index) {
+            if (!index.rel) return u32(index.imm);
+            const rel = this.read(index.rel, "u") + ".x";
+            return index.imm ? `(${u32(index.imm)} + ${rel})` : rel;
+        }
+
+        /** The register an operand names, as an lvalue/rvalue of vec4<u32> */
+        reg(op) {
+            const i = op.indices;
+            switch (op.type) {
+                case OPERAND.TEMP: return `r[${this.index(i[0])}]`;
+                case OPERAND.INPUT:
+                    // (GS inputs are [vertex][register]: GS is emulated elsewhere)
+                    return `v[${this.index(i[i.length - 1])}]`;
+                case OPERAND.OUTPUT: return `o[${this.index(i[0])}]`;
+                case OPERAND.INDEXABLE_TEMP: return `x${i[0].imm}[${this.index(i[1])}]`;
+                case OPERAND.CONSTANT_BUFFER: {
+                    const slot = i[0].imm;
+                    if (!this.p.cbuffers.has(slot)) {
+                        this.p.cbuffers.set(slot, { size: 4096, dynamic: true });
+                    }
+                    return `cb${slot}[${this.index(i[1])}]`;
+                }
+                case OPERAND.IMMEDIATE_CONSTANT_BUFFER:
+                    if (!this.p.icb) this.p.icb = new Uint32Array(4);
+                    return `icb[${this.index(i[0])}]`;
+                case OPERAND.INPUT_PRIMITIVEID: return "vec4<u32>(prim_id)";
+                case OPERAND.OUTPUT_DEPTH:
+                case OPERAND.OUTPUT_DEPTH_GREATER_EQUAL:
+                case OPERAND.OUTPUT_DEPTH_LESS_EQUAL:
+                    this.needDepth = true;
+                    return "odepth";
+                case OPERAND.OUTPUT_COVERAGE_MASK: return "omask";
+                case OPERAND.INPUT_COVERAGE_MASK: return "vec4<u32>(0xFFFFFFFFu)";
+                case OPERAND.INPUT_THREAD_ID: return "vec4<u32>(cs_thread, 0u)";
+                case OPERAND.INPUT_THREAD_GROUP_ID: return "vec4<u32>(cs_group, 0u)";
+                case OPERAND.INPUT_THREAD_ID_IN_GROUP: return "vec4<u32>(cs_local, 0u)";
+                case OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED: return "vec4<u32>(cs_flat)";
+                case OPERAND.CYCLE_COUNTER: return "vec4<u32>(0u)";
+            }
+            throw new ShaderTranslateError("operand type " + op.type + " is not supported");
+        }
+
+        /**
+         * A source operand as vec4 of a type: "u" (raw), "f", "i"; with its
+         * swizzle and modifier
+         */
+        read(op, kind) {
+            let value;
+            if (op.type === OPERAND.IMMEDIATE32) {
+                const v = op.imm.length === 4 ? op.imm : [op.imm[0], op.imm[0], op.imm[0], op.imm[0]];
+                value = `vec4<u32>(${v.map(u32).join(", ")})`;
+            } else if (op.type === OPERAND.IMMEDIATE64) {
+                this.warn("double precision is not supported");
+                value = "vec4<u32>()";
+            } else {
+                value = this.reg(op);
+                // scalars (odepth, omask) are vectors when read
+                if (value === "odepth" || value === "omask") value = `vec4<u32>(${value})`;
+                const s = op.swizzle;
+                if (op.ncomp === 4 || op.ncomp === 1) {
+                    if (!(s[0] === 0 && s[1] === 1 && s[2] === 2 && s[3] === 3)) {
+                        value += "." + s.map(c => LANES[c]).join("");
+                    }
+                }
+            }
+            if (kind === "u") return value;
+            const typed = kind === "f" ? `bitcast<vec4<f32>>(${value})` : `bitcast<vec4<i32>>(${value})`;
+            switch (op.modifier) {
+                case 1: return `(-${typed})`;
+                case 2: return `abs(${typed})`;
+                case 3: return `(-abs(${typed}))`;
+            }
+            return typed;
+        }
+
+        f(ins, i) { return this.read(ins.src[i], "f"); }
+        i(ins, i) { return this.read(ins.src[i], "i"); }
+        u(ins, i) { return this.read(ins.src[i], "u"); }
+
+        /** The component of a select-1 or scalar source, of a type */
+        scalar(ins, i, kind) {
+            return this.read(ins.src[i], kind) + ".x";
+        }
+
+        /**
+         * Write a vec4 value of a type ("f", "i", "u") to a destination,
+         * through its write mask; float results may be saturated
+         */
+        write(ins, value, kind, d = 0) {
+            const dst = ins.dst[d];
+            if (!dst || dst.type === OPERAND.NULL) return;
+            if (kind === "f" && ins.saturate) value = `clamp(${value}, vec4<f32>(0.0), vec4<f32>(1.0))`;
+            const bits = kind === "u" ? value : `bitcast<vec4<u32>>(${value})`;
+            const target = this.reg(dst);
+            if (target === "odepth" || target === "omask") {
+                const lane = LANES[Math.max(0, [1, 2, 4, 8].indexOf(dst.mask & -dst.mask))] || "x";
+                this.line(`${target} = (${bits}).${lane};`);
+                return;
+            }
+            const mask = dst.mode === "mask" ? dst.mask : ALL;
+            if (mask === ALL) {
+                this.line(`${target} = ${bits};`);
+                return;
+            }
+            const lanes = [0, 1, 2, 3].filter(c => mask >> c & 1);
+            if (lanes.length === 1) {
+                this.line(`${target}.${LANES[lanes[0]]} = (${bits}).${LANES[lanes[0]]};`);
+                return;
+            }
+            this.line("{");
+            this.indent++;
+            this.line(`let t = ${bits};`);
+            for (const c of lanes) this.line(`${target}.${LANES[c]} = t.${LANES[c]};`);
+            this.indent--;
+            this.line("}");
+        }
+
+        /** A condition on the first component of a source (if, breakc, ...) */
+        test(ins, i = 0) {
+            return `${this.u(ins, i)}.x ${ins.test ? "!=" : "=="} 0u`;
+        }
+
+        // ---------------------------------------------------------------
+        // Instructions
+
+        body(code) {
+            for (const ins of code) this.instruction(ins);
+            // a switch still open (malformed) is closed
+            while (this.switches.length) this.endSwitch();
+        }
+
+        instruction(ins) {
+            const f = (i) => this.f(ins, i), I = (i) => this.i(ins, i), U = (i) => this.u(ins, i);
+            const wf = v => this.write(ins, v, "f"), wi = v => this.write(ins, v, "i"), wu = v => this.write(ins, v, "u");
+            const mask = v => `select(vec4<u32>(0u), vec4<u32>(0xFFFFFFFFu), ${v})`;
+            const shift = i => `(${U(i)} & vec4<u32>(31u))`;
+            switch (ins.op) {
+                // float arithmetic
+                case OP.ADD: return wf(`${f(0)} + ${f(1)}`);
+                case OP.MUL: return wf(`${f(0)} * ${f(1)}`);
+                case OP.MAD: return wf(`fma(${f(0)}, ${f(1)}, ${f(2)})`);
+                case OP.DIV: return wf(`${f(0)} / ${f(1)}`);
+                case OP.MIN: return wf(`min(${f(0)}, ${f(1)})`);
+                case OP.MAX: return wf(`max(${f(0)}, ${f(1)})`);
+                case OP.SQRT: return wf(`sqrt(${f(0)})`);
+                case OP.RSQ: return wf(`inverseSqrt(${f(0)})`);
+                case OP.RCP: return wf(`vec4<f32>(1.0) / ${f(0)}`);
+                case OP.EXP: return wf(`exp2(${f(0)})`);
+                case OP.LOG: return wf(`log2(${f(0)})`);
+                case OP.FRC: return wf(`fract(${f(0)})`);
+                case OP.ROUND_NE: return wf(`round(${f(0)})`);
+                case OP.ROUND_NI: return wf(`floor(${f(0)})`);
+                case OP.ROUND_PI: return wf(`ceil(${f(0)})`);
+                case OP.ROUND_Z: return wf(`trunc(${f(0)})`);
+                case OP.DP2: return wf(`vec4<f32>(dot(${f(0)}.xy, ${f(1)}.xy))`);
+                case OP.DP3: return wf(`vec4<f32>(dot(${f(0)}.xyz, ${f(1)}.xyz))`);
+                case OP.DP4: return wf(`vec4<f32>(dot(${f(0)}, ${f(1)}))`);
+                case OP.SINCOS:
+                    if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) this.write(ins, `sin(${f(0)})`, "f", 0);
+                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) this.write(ins, `cos(${f(0)})`, "f", 1);
+                    return;
+                case OP.EQ: return wu(mask(`${f(0)} == ${f(1)}`));
+                case OP.NE: return wu(mask(`${f(0)} != ${f(1)}`));
+                case OP.LT: return wu(mask(`${f(0)} < ${f(1)}`));
+                case OP.GE: return wu(mask(`${f(0)} >= ${f(1)}`));
+                case OP.MOV:
+                    if (ins.saturate || ins.src[0].modifier) return wf(f(0));
+                    return wu(U(0));
+                case OP.MOVC: {
+                    if (ins.saturate) return wf(`select(${f(2)}, ${f(1)}, ${U(0)} != vec4<u32>(0u))`);
+                    return wu(`select(${U(2)}, ${U(1)}, ${U(0)} != vec4<u32>(0u))`);
+                }
+                case OP.SWAPC: {
+                    const c = `${U(0)} != vec4<u32>(0u)`;
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let a = ${U(1)};`);
+                    this.line(`let b = ${U(2)};`);
+                    this.line(`let c = ${c};`);
+                    this.write(ins, "select(a, b, c)", "u", 0);
+                    this.write(ins, "select(b, a, c)", "u", 1);
+                    this.indent--;
+                    this.line("}");
+                    return;
+                }
+
+                // conversions
+                case OP.ITOF: return wf(`vec4<f32>(${I(0)})`);
+                case OP.UTOF: return wf(`vec4<f32>(${U(0)})`);
+                case OP.FTOI: return wi(`vec4<i32>(${f(0)})`);
+                case OP.FTOU: return wu(`vec4<u32>(${f(0)})`);
+                case OP.F32TOF16:
+                    this.helpers.add("f32tof16");
+                    return wu(`gx_f32tof16(${f(0)})`);
+                case OP.F16TOF32:
+                    this.helpers.add("f16tof32");
+                    return wf(`gx_f16tof32(${U(0)})`);
+
+                // bits and integers
+                case OP.AND: return wu(`${U(0)} & ${U(1)}`);
+                case OP.OR: return wu(`${U(0)} | ${U(1)}`);
+                case OP.XOR: return wu(`${U(0)} ^ ${U(1)}`);
+                case OP.NOT: return wu(`~${U(0)}`);
+                case OP.ISHL: return wu(`${U(0)} << ${shift(1)}`);
+                case OP.ISHR: return wi(`${I(0)} >> ${shift(1)}`);
+                case OP.USHR: return wu(`${U(0)} >> ${shift(1)}`);
+                case OP.IADD: return wi(`${I(0)} + ${I(1)}`);
+                case OP.INEG: return wi(`-${I(0)}`);
+                case OP.IMAD: return wi(`${I(0)} * ${I(1)} + ${I(2)}`);
+                case OP.UMAD: return wu(`${U(0)} * ${U(1)} + ${U(2)}`);
+                case OP.IMUL:
+                case OP.UMUL: {
+                    const signed = ins.op === OP.IMUL;
+                    this.helpers.add(signed ? "imul_hi" : "umul_hi");
+                    if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) {
+                        this.write(ins, signed ? `gx_imul_hi(${I(0)}, ${I(1)})` : `gx_umul_hi(${U(0)}, ${U(1)})`, signed ? "i" : "u", 0);
+                    }
+                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) {
+                        this.write(ins, signed ? `${I(0)} * ${I(1)}` : `${U(0)} * ${U(1)}`, signed ? "i" : "u", 1);
+                    }
+                    return;
+                }
+                case OP.UDIV: {
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let a = ${U(0)};`);
+                    this.line(`let b = ${U(1)};`);
+                    this.line("let zero = b == vec4<u32>(0u);");
+                    this.line("let safe = select(b, vec4<u32>(1u), zero);");
+                    if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) this.write(ins, "select(a / safe, vec4<u32>(0xFFFFFFFFu), zero)", "u", 0);
+                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) this.write(ins, "select(a % safe, vec4<u32>(0xFFFFFFFFu), zero)", "u", 1);
+                    this.indent--;
+                    this.line("}");
+                    return;
+                }
+                case OP.IMIN: return wi(`min(${I(0)}, ${I(1)})`);
+                case OP.IMAX: return wi(`max(${I(0)}, ${I(1)})`);
+                case OP.UMIN: return wu(`min(${U(0)}, ${U(1)})`);
+                case OP.UMAX: return wu(`max(${U(0)}, ${U(1)})`);
+                case OP.IEQ: return wu(mask(`${I(0)} == ${I(1)}`));
+                case OP.INE: return wu(mask(`${I(0)} != ${I(1)}`));
+                case OP.ILT: return wu(mask(`${I(0)} < ${I(1)}`));
+                case OP.IGE: return wu(mask(`${I(0)} >= ${I(1)}`));
+                case OP.ULT: return wu(mask(`${U(0)} < ${U(1)}`));
+                case OP.UGE: return wu(mask(`${U(0)} >= ${U(1)}`));
+                case OP.COUNTBITS: return wu(`countOneBits(${U(0)})`);
+                case OP.FIRSTBIT_LO: return wu(`firstTrailingBit(${U(0)})`);
+                case OP.FIRSTBIT_HI: {
+                    // counted from the top, ~0 if there is none
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let b = firstLeadingBit(${U(0)});`);
+                    this.write(ins, "select(vec4<u32>(31u) - b, vec4<u32>(0xFFFFFFFFu), b == vec4<u32>(0xFFFFFFFFu))", "u");
+                    this.indent--;
+                    this.line("}");
+                    return;
+                }
+                case OP.FIRSTBIT_SHI: {
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let b = bitcast<vec4<u32>>(firstLeadingBit(${I(0)}));`);
+                    this.write(ins, "select(vec4<u32>(31u) - b, vec4<u32>(0xFFFFFFFFu), b == vec4<u32>(0xFFFFFFFFu))", "u");
+                    this.indent--;
+                    this.line("}");
+                    return;
+                }
+                case OP.UBFE:
+                case OP.IBFE: {
+                    // width, offset, value: per component
+                    const signed = ins.op === OP.IBFE;
+                    this.helpers.add(signed ? "ibfe" : "ubfe");
+                    return signed ? wi(`gx_ibfe(${U(0)}, ${U(1)}, ${I(2)})`) : wu(`gx_ubfe(${U(0)}, ${U(1)}, ${U(2)})`);
+                }
+                case OP.BFI:
+                    this.helpers.add("bfi");
+                    return wu(`gx_bfi(${U(0)}, ${U(1)}, ${U(2)}, ${U(3)})`);
+                case OP.BFREV: return wu(`reverseBits(${U(0)})`);
+                case OP.UADDC:
+                case OP.USUBB: {
+                    const add = ins.op === OP.UADDC;
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let a = ${U(0)};`);
+                    this.line(`let b = ${U(1)};`);
+                    this.line(`let s = ${add ? "a + b" : "a - b"};`);
+                    if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) this.write(ins, "s", "u", 0);
+                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) {
+                        this.write(ins, add ? "select(vec4<u32>(0u), vec4<u32>(1u), s < a)" : "select(vec4<u32>(0u), vec4<u32>(1u), a < b)", "u", 1);
+                    }
+                    this.indent--;
+                    this.line("}");
+                    return;
+                }
+                case OP.VMWARE:
+                    if (ins.vmware === VMWARE_OP.IDIV) {
+                        // signed quotient and remainder, by zero ~0
+                        this.line("{");
+                        this.indent++;
+                        this.line(`let a = ${I(0)};`);
+                        this.line(`let b = ${I(1)};`);
+                        this.line("let zero = b == vec4<i32>(0);");
+                        this.line("let safe = select(b, vec4<i32>(1), zero);");
+                        if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) this.write(ins, "select(a / safe, vec4<i32>(-1), zero)", "i", 0);
+                        if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) this.write(ins, "select(a % safe, vec4<i32>(-1), zero)", "i", 1);
+                        this.indent--;
+                        this.line("}");
+                        return;
+                    }
+                    this.warn("VMware opcode " + ins.vmware + " (double precision)");
+                    return;
+
+                // derivatives
+                case OP.DERIV_RTX:
+                case OP.DERIV_RTX_COARSE:
+                case OP.DERIV_RTX_FINE:
+                case OP.DERIV_RTY:
+                case OP.DERIV_RTY_COARSE:
+                case OP.DERIV_RTY_FINE: {
+                    if (this.stage !== PROGRAM.PS) return wf("vec4<f32>(0.0)");
+                    const name = {
+                        [OP.DERIV_RTX]: "dpdx", [OP.DERIV_RTX_COARSE]: "dpdxCoarse", [OP.DERIV_RTX_FINE]: "dpdxFine",
+                        [OP.DERIV_RTY]: "dpdy", [OP.DERIV_RTY_COARSE]: "dpdyCoarse", [OP.DERIV_RTY_FINE]: "dpdyFine",
+                    }[ins.op];
+                    return wf(`${name}(${f(0)})`);
+                }
+
+                // control flow
+                case OP.IF:
+                    this.line(`if (${this.test(ins)}) {`);
+                    this.indent++;
+                    return;
+                case OP.ELSE:
+                    this.indent--;
+                    this.line("} else {");
+                    this.indent++;
+                    return;
+                case OP.ENDIF:
+                case OP.ENDLOOP:
+                    this.indent--;
+                    this.line("}");
+                    return;
+                case OP.LOOP:
+                    this.line("loop {");
+                    this.indent++;
+                    return;
+                case OP.BREAK:
+                    this.line("break;");
+                    return;
+                case OP.BREAKC:
+                    this.line(`if (${this.test(ins)}) { break; }`);
+                    return;
+                case OP.CONTINUE:
+                    this.line("continue;");
+                    return;
+                case OP.CONTINUEC:
+                    this.line(`if (${this.test(ins)}) { continue; }`);
+                    return;
+                case OP.RET:
+                    this.line("return;");
+                    return;
+                case OP.RETC:
+                    this.line(`if (${this.test(ins)}) { return; }`);
+                    return;
+                case OP.DISCARD:
+                    if (this.stage === PROGRAM.PS) this.line(`if (${this.test(ins)}) { discard; }`);
+                    return;
+                case OP.CALL:
+                    this.line(`label${ins.src[0].indices[0].imm}();`);
+                    return;
+                case OP.CALLC:
+                    this.line(`if (${this.test(ins)}) { label${ins.src[1].indices[0].imm}(); }`);
+                    return;
+                case OP.SWITCH:
+                    this.line(`switch (${this.read(ins.src[0], "i")}.x) {`);
+                    this.indent++;
+                    this.switches.push({ labels: [], open: false, hasDefault: false });
+                    return;
+                case OP.CASE:
+                case OP.DEFAULT: {
+                    const s = this.switches[this.switches.length - 1];
+                    if (!s) throw new ShaderTranslateError(ins.name + " outside of a switch");
+                    if (s.open) {
+                        // the case before falls into this one: D3D compilers end cases with break
+                        this.indent--;
+                        this.line("}");
+                        s.open = false;
+                    }
+                    if (ins.op === OP.CASE) {
+                        s.labels.push(String(ins.src[0].imm[0] | 0) + "i");
+                    } else {
+                        s.labels.push("default");
+                        s.hasDefault = true;
+                    }
+                    return;
+                }
+                case OP.ENDSWITCH:
+                    this.endSwitch();
+                    return;
+                case OP.NOP:
+                case OP.LABEL:
+                case OP.HS_DECLS:
+                    return;
+
+                // textures
+                case OP.SAMPLE:
+                case OP.SAMPLE_B:
+                case OP.SAMPLE_L:
+                case OP.SAMPLE_D:
+                case OP.SAMPLE_C:
+                case OP.SAMPLE_C_LZ:
+                    return this.sample(ins);
+                case OP.GATHER4:
+                case OP.GATHER4_C:
+                case OP.GATHER4_PO:
+                case OP.GATHER4_PO_C:
+                    return this.gather(ins);
+                case OP.LD:
+                case OP.LD_MS:
+                    return this.load(ins);
+                case OP.RESINFO:
+                    return this.resinfo(ins);
+                case OP.SAMPLE_INFO: {
+                    const r = ins.src[0];
+                    if (r.type === OPERAND.RASTERIZER) return wu("vec4<u32>(1u)");
+                    const t = `t${r.indices[0].imm}`;
+                    return (ins.controls & 1) ? wu(`vec4<u32>(textureNumSamples(${t}))`) : wf(`vec4<f32>(f32(textureNumSamples(${t})))`);
+                }
+                case OP.SAMPLE_POS:
+                    this.helpers.add("sample_pos");
+                    return wf(`gx_sample_pos(${this.u(ins, 1)}.x)`);
+                case OP.LOD:
+                    this.warn("lod is approximated by 0");
+                    return wf("vec4<f32>(0.0)");
+                case OP.BUFINFO: {
+                    const r = ins.src[0];
+                    if (r.type === OPERAND.RESOURCE) return wu(`vec4<u32>(arrayLength(&t${r.indices[0].imm}))`);
+                    return wu(`vec4<u32>(arrayLength(&u${r.indices[0].imm}))`);
+                }
+                case OP.LD_RAW:
+                    return this.loadRaw(ins, false);
+                case OP.LD_STRUCTURED:
+                    return this.loadRaw(ins, true);
+                case OP.STORE_RAW:
+                    return this.storeRaw(ins, false);
+                case OP.STORE_STRUCTURED:
+                    return this.storeRaw(ins, true);
+                case OP.SYNC:
+                    if (ins.controls & 1) this.line("workgroupBarrier();");
+                    else if (ins.controls & 0xC) this.line("storageBarrier();");
+                    return;
+                case OP.EMIT:
+                case OP.CUT:
+                case OP.EMITTHENCUT:
+                case OP.EMIT_STREAM:
+                case OP.CUT_STREAM:
+                case OP.EMITTHENCUT_STREAM:
+                    throw new ShaderTranslateError("geometry shader instruction " + ins.name);
+            }
+            if (ins.op >= OP.ATOMIC_AND && ins.op <= OP.IMM_ATOMIC_UMIN) return this.atomic(ins);
+            throw new ShaderTranslateError("instruction " + ins.name + " is not supported");
+        }
+
+        endSwitch() {
+            const s = this.switches.pop();
+            if (s.open) {
+                this.indent--;
+                this.line("}");
+            }
+            if (s.labels.length) {
+                // labels with no code (at the end)
+                this.line(s.labels.length === 1 && s.labels[0] === "default" ? "default: {}" : `case ${s.labels.join(", ")}: {}`);
+                if (s.labels.includes("default")) s.hasDefault = true;
+            }
+            if (!s.hasDefault) this.line("default: {}");
+            this.indent--;
+            this.line("}");
+        }
+
+        /** Code inside a switch opens the case its labels name */
+        openCase() {
+            const s = this.switches[this.switches.length - 1];
+            if (!s || s.open) return;
+            if (!s.labels.length) return;
+            this.line(`case ${s.labels.join(", ")}: {`);
+            if (s.labels.includes("default")) s.hasDefault = true;
+            s.labels = [];
+            s.open = true;
+            this.indent++;
+        }
+
+        // ---------------------------------------------------------------
+        // Texture instructions
+
+        /** The coordinates a dimension takes, from a float address: [coords, array index or null] */
+        coordinates(dimension, address) {
+            switch (dimension) {
+                case DIM.TEXTURE1D: return [`vec2<f32>(${address}.x, 0.5)`, null];
+                case DIM.TEXTURE1DARRAY: return [`vec2<f32>(${address}.x, 0.5)`, `i32(round(${address}.y))`];
+                case DIM.TEXTURE2D:
+                case DIM.TEXTURE2DMS: return [`${address}.xy`, null];
+                case DIM.TEXTURE2DARRAY:
+                case DIM.TEXTURE2DMSARRAY: return [`${address}.xy`, `i32(round(${address}.z))`];
+                case DIM.TEXTURE3D:
+                case DIM.TEXTURECUBE: return [`${address}.xyz`, null];
+                case DIM.TEXTURECUBEARRAY: return [`${address}.xyz`, `i32(round(${address}.w))`];
+            }
+            throw new ShaderTranslateError("sampling a resource of dimension " + dimension);
+        }
+
+        offset(ins, dimension) {
+            const o = ins.offsets;
+            if (!o || (!o[0] && !o[1] && !o[2])) return null;
+            if (dimension === DIM.TEXTURECUBE || dimension === DIM.TEXTURECUBEARRAY) return null;
+            if (dimension === DIM.TEXTURE3D) return `vec3<i32>(${o[0]}, ${o[1]}, ${o[2]})`;
+            if (dimension === DIM.TEXTURE1D || dimension === DIM.TEXTURE1DARRAY) return `vec2<i32>(${o[0]}, 0)`;
+            return `vec2<i32>(${o[0]}, ${o[1]})`;
+        }
+
+        resource(operand) {
+            const slot = operand.indices[0].imm;
+            const r = this.p.resources.get(slot);
+            if (!r) throw new ShaderTranslateError("resource t" + slot + " is not declared");
+            return { slot, r, name: "t" + slot };
+        }
+
+        /** The result of a texture instruction (a vec4 of the resource's type) through the resource's swizzle */
+        swizzled(value, operand) {
+            const s = operand.swizzle;
+            if (s[0] === 0 && s[1] === 1 && s[2] === 2 && s[3] === 3) return value;
+            return `(${value}).${s.map(c => LANES[c]).join("")}`;
+        }
+
+        resultKind(r) {
+            const ret = r.returnTypes ? r.returnTypes[0] : RETURN.FLOAT;
+            return ret === RETURN.SINT ? "i" : ret === RETURN.UINT ? "u" : "f";
+        }
+
+        sample(ins) {
+            const t = this.resource(ins.src[1]);
+            const sampler = `s${ins.src[2].indices[0].imm}`;
+            const dimension = t.r.dimension;
+            const [coords, layer] = this.coordinates(dimension, this.f(ins, 0));
+            const offset = this.offset(ins, dimension);
+            const args = [t.name, sampler, coords];
+            if (layer) args.push(layer);
+            const fragment = this.stage === PROGRAM.PS;
+            const depth = this.compared.has(t.slot);
+            let call;
+            switch (ins.op) {
+                case OP.SAMPLE:
+                    call = fragment ? `textureSample(${args.join(", ")}${offset ? ", " + offset : ""})` :
+                        `textureSampleLevel(${args.join(", ")}, ${depth ? "0" : "0.0"}${offset ? ", " + offset : ""})`;
+                    break;
+                case OP.SAMPLE_B:
+                    call = fragment ? `textureSampleBias(${args.join(", ")}, ${this.scalar(ins, 3, "f")}${offset ? ", " + offset : ""})` :
+                        `textureSampleLevel(${args.join(", ")}, 0.0${offset ? ", " + offset : ""})`;
+                    break;
+                case OP.SAMPLE_L:
+                    call = depth ? `textureSampleLevel(${args.join(", ")}, i32(${this.scalar(ins, 3, "f")})${offset ? ", " + offset : ""})` :
+                        `textureSampleLevel(${args.join(", ")}, ${this.scalar(ins, 3, "f")}${offset ? ", " + offset : ""})`;
+                    break;
+                case OP.SAMPLE_D: {
+                    const width = dimension === DIM.TEXTURE3D || dimension === DIM.TEXTURECUBE || dimension === DIM.TEXTURECUBEARRAY ? "xyz" :
+                        dimension === DIM.TEXTURE1D || dimension === DIM.TEXTURE1DARRAY ? null : "xy";
+                    const grad = i => width ? `${this.f(ins, i)}.${width}` : `vec2<f32>(${this.f(ins, i)}.x, 0.0)`;
+                    call = `textureSampleGrad(${args.join(", ")}, ${grad(3)}, ${grad(4)}${offset ? ", " + offset : ""})`;
+                    break;
+                }
+                case OP.SAMPLE_C:
+                case OP.SAMPLE_C_LZ: {
+                    const reference = this.scalar(ins, 3, "f");
+                    const level = ins.op === OP.SAMPLE_C_LZ || !fragment;
+                    call = `vec4<f32>(${level ? "textureSampleCompareLevel" : "textureSampleCompare"}(${args.join(", ")}, ${reference}${offset ? ", " + offset : ""}))`;
+                    return this.write(ins, this.swizzled(call, ins.src[1]), "f");
+                }
+            }
+            if (depth) call = `vec4<f32>(${call})`;
+            this.write(ins, this.swizzled(call, ins.src[1]), "f");
+        }
+
+        gather(ins) {
+            const po = ins.op === OP.GATHER4_PO || ins.op === OP.GATHER4_PO_C;
+            const compare = ins.op === OP.GATHER4_C || ins.op === OP.GATHER4_PO_C;
+            const tOperand = ins.src[po ? 2 : 1], sOperand = ins.src[po ? 3 : 2];
+            const t = this.resource(tOperand);
+            const sampler = `s${sOperand.indices[0].imm}`;
+            const dimension = t.r.dimension;
+            let address = this.f(ins, 0);
+            const [coords0, layer] = this.coordinates(dimension, address);
+            let coords = coords0;
+            let offset = this.offset(ins, dimension);
+            if (po) {
+                // programmable offsets: WGSL wants constants, so the
+                // coordinates move by the offset in texels instead
+                coords = `(${coords0} + vec2<f32>(${this.i(ins, 1)}.xy) / vec2<f32>(textureDimensions(${t.name})))`;
+                offset = null;
+            }
+            const component = sOperand.swizzle[0];
+            const args = [t.name, sampler, coords];
+            if (layer) args.push(layer);
+            let call;
+            if (compare) {
+                call = `textureGatherCompare(${args.join(", ")}, ${this.scalar(ins, po ? 4 : 3, "f")}${offset ? ", " + offset : ""})`;
+            } else if (this.compared.has(t.slot)) {
+                call = `textureGather(${args.join(", ")}${offset ? ", " + offset : ""})`;
+            } else {
+                call = `textureGather(${component}, ${args.join(", ")}${offset ? ", " + offset : ""})`;
+            }
+            this.write(ins, this.swizzled(call, tOperand), compare ? "f" : this.resultKind(t.r));
+        }
+
+        load(ins) {
+            const ms = ins.op === OP.LD_MS;
+            const tOperand = ins.src[1];
+            if (tOperand.type === OPERAND.UAV) return this.warn("typed UAV loads are not supported yet");
+            const t = this.resource(tOperand);
+            const dimension = t.r.dimension;
+            const a = this.i(ins, 0);
+            const o = ins.offsets || [0, 0, 0];
+            const off2 = o[0] || o[1] ? ` + vec2<i32>(${o[0]}, ${o[1]})` : "";
+            const kind = this.compared.has(t.slot) ? "f" : this.resultKind(t.r);
+            let call;
+            switch (dimension) {
+                case DIM.BUFFER:
+                    return this.loadTypedBuffer(ins, t);
+                case DIM.TEXTURE1D:
+                    call = `textureLoad(${t.name}, vec2<i32>(${a}.x + ${o[0]}, 0), ${a}.w)`; break;
+                case DIM.TEXTURE1DARRAY:
+                    call = `textureLoad(${t.name}, vec2<i32>(${a}.x + ${o[0]}, 0), ${a}.y, ${a}.w)`; break;
+                case DIM.TEXTURE2D:
+                    call = `textureLoad(${t.name}, ${a}.xy${off2}, ${a}.w)`; break;
+                case DIM.TEXTURE2DARRAY:
+                    call = `textureLoad(${t.name}, ${a}.xy${off2}, ${a}.z, ${a}.w)`; break;
+                case DIM.TEXTURE3D:
+                    call = `textureLoad(${t.name}, ${a}.xyz${o[0] || o[1] || o[2] ? ` + vec3<i32>(${o[0]}, ${o[1]}, ${o[2]})` : ""}, ${a}.w)`; break;
+                case DIM.TEXTURE2DMS:
+                case DIM.TEXTURE2DMSARRAY:
+                    call = `textureLoad(${t.name}, ${a}.xy${off2}, ${ms ? this.scalar(ins, 2, "i") : "0"})`; break;
+                default:
+                    throw new ShaderTranslateError("ld from a resource of dimension " + dimension);
+            }
+            if (this.compared.has(t.slot)) call = `vec4<f32>(${call})`;
+            this.write(ins, this.swizzled(call, tOperand), kind);
+        }
+
+        loadTypedBuffer(ins, t) {
+            // the buffer's elements are 32-bit lanes; four per element is the
+            // common case (R32G32B32A32); narrower formats are taken as one lane
+            this.warn("typed buffer loads assume 32-bit lanes");
+            const index = `u32(${this.i(ins, 0)}.x)`;
+            const value = `vec4<u32>(${t.name}[${index} * 4u], ${t.name}[${index} * 4u + 1u], ${t.name}[${index} * 4u + 2u], ${t.name}[${index} * 4u + 3u])`;
+            this.write(ins, this.swizzled(value, ins.src[1]), "u");
+        }
+
+        resinfo(ins) {
+            const t = this.resource(ins.src[1]);
+            const dimension = t.r.dimension;
+            const mip = `u32(${this.i(ins, 0)}.x)`;
+            const type = ins.controls & 3;
+            let dims;
+            const levels = dimension === DIM.TEXTURE2DMS || dimension === DIM.TEXTURE2DMSARRAY ? "1u" : `textureNumLevels(${t.name})`;
+            const level = dimension === DIM.TEXTURE2DMS || dimension === DIM.TEXTURE2DMSARRAY ? "" : `, ${mip}`;
+            switch (dimension) {
+                case DIM.TEXTURE1D: dims = `vec4<u32>(textureDimensions(${t.name}${level}).x, 0u, 0u, ${levels})`; break;
+                case DIM.TEXTURE1DARRAY: dims = `vec4<u32>(textureDimensions(${t.name}${level}).x, textureNumLayers(${t.name}), 0u, ${levels})`; break;
+                case DIM.TEXTURE2D:
+                case DIM.TEXTURE2DMS:
+                case DIM.TEXTURECUBE: dims = `vec4<u32>(textureDimensions(${t.name}${level}), 0u, ${levels})`; break;
+                case DIM.TEXTURE2DARRAY:
+                case DIM.TEXTURECUBEARRAY: dims = `vec4<u32>(textureDimensions(${t.name}${level}), textureNumLayers(${t.name}), ${levels})`; break;
+                case DIM.TEXTURE2DMSARRAY: dims = `vec4<u32>(textureDimensions(${t.name}), 1u, 1u)`; break;
+                case DIM.TEXTURE3D: dims = `vec4<u32>(textureDimensions(${t.name}${level}), ${levels})`; break;
+                default: throw new ShaderTranslateError("resinfo of dimension " + dimension);
+            }
+            // (a mip level beyond the texture reads zeros in D3D; WGSL clamps it)
+            if (type === 2) return this.write(ins, this.swizzled(dims, ins.src[1]), "u");
+            let value = `vec4<f32>(${dims})`;
+            if (type === 1) value = `vec4<f32>(vec3<f32>(1.0) / vec4<f32>(${dims}).xyz, f32(${levels}))`;
+            this.write(ins, this.swizzled(value, ins.src[1]), "f");
+        }
+
+        // ---------------------------------------------------------------
+        // Raw and structured buffers, atomics (SM5)
+
+        bufferName(operand) {
+            const slot = operand.indices[0].imm;
+            switch (operand.type) {
+                case OPERAND.RESOURCE: return { name: "t" + slot, atomic: false, stride: (this.p.resources.get(slot) || {}).stride || 0 };
+                case OPERAND.UAV: return { name: "u" + slot, atomic: true, stride: (this.p.uavs.get(slot) || {}).stride || 0 };
+                case OPERAND.THREAD_GROUP_SHARED_MEMORY: return { name: "g" + slot, atomic: true, stride: (this.p.tgsm.get(slot) || {}).stride || 0 };
+            }
+            throw new ShaderTranslateError("a buffer operand of type " + operand.type);
+        }
+
+        loadRaw(ins, structured) {
+            const b = this.bufferName(ins.src[structured ? 2 : 1]);
+            const address = structured ? `(u32(${this.u(ins, 0)}.x) * ${b.stride}u + u32(${this.u(ins, 1)}.x)) / 4u` :
+                `u32(${this.u(ins, 0)}.x) / 4u`;
+            const word = k => b.atomic ? `atomicLoad(&${b.name}[base + ${k}u])` : `${b.name}[base + ${k}u]`;
+            this.line("{");
+            this.indent++;
+            this.line(`let base = ${address};`);
+            this.write(ins, this.swizzled(`vec4<u32>(${word(0)}, ${word(1)}, ${word(2)}, ${word(3)})`, ins.src[structured ? 2 : 1]), "u");
+            this.indent--;
+            this.line("}");
+        }
+
+        storeRaw(ins, structured) {
+            const dst = ins.dst[0];
+            const b = this.bufferName(dst);
+            const address = structured ? `(u32(${this.u(ins, 0)}.x) * ${b.stride}u + u32(${this.u(ins, 1)}.x)) / 4u` :
+                `u32(${this.u(ins, 0)}.x) / 4u`;
+            const value = this.u(ins, structured ? 2 : 1);
+            this.line("{");
+            this.indent++;
+            this.line(`let base = ${address};`);
+            this.line(`let value = ${value};`);
+            let k = 0;
+            for (let c = 0; c < 4; c++) {
+                if (!(dst.mask >> c & 1)) continue;
+                this.line(b.atomic ? `atomicStore(&${b.name}[base + ${k}u], value.${LANES[c]});` : `${b.name}[base + ${k}u] = value.${LANES[c]};`);
+                k++;
+            }
+            this.indent--;
+            this.line("}");
+        }
+
+        atomic(ins) {
+            const immediate = ins.op >= OP.IMM_ATOMIC_ALLOC;
+            const target = immediate ? ins.src[0] : ins.dst[0];
+            const srcs = immediate ? ins.src.slice(1) : ins.src;
+            if (ins.op === OP.IMM_ATOMIC_ALLOC || ins.op === OP.IMM_ATOMIC_CONSUME) {
+                this.warn("append/consume counters are not supported yet");
+                return this.write(ins, "vec4<u32>(0u)", "u");
+            }
+            const b = this.bufferName(target);
+            const read = i => this.read(srcs[i], "u");
+            // raw: a byte address; structured: (element, byte offset)
+            const address = b.stride ? `(${read(0)}.x * ${b.stride}u + ${read(0)}.y) / 4u` : `${read(0)}.x / 4u`;
+            const name = {
+                [OP.ATOMIC_AND]: "atomicAnd", [OP.ATOMIC_OR]: "atomicOr", [OP.ATOMIC_XOR]: "atomicXor",
+                [OP.ATOMIC_IADD]: "atomicAdd", [OP.ATOMIC_UMAX]: "atomicMax", [OP.ATOMIC_UMIN]: "atomicMin",
+                [OP.ATOMIC_IMAX]: "atomicMax", [OP.ATOMIC_IMIN]: "atomicMin",
+                [OP.IMM_ATOMIC_IADD]: "atomicAdd", [OP.IMM_ATOMIC_AND]: "atomicAnd", [OP.IMM_ATOMIC_OR]: "atomicOr",
+                [OP.IMM_ATOMIC_XOR]: "atomicXor", [OP.IMM_ATOMIC_EXCH]: "atomicExchange",
+                [OP.IMM_ATOMIC_UMAX]: "atomicMax", [OP.IMM_ATOMIC_UMIN]: "atomicMin",
+                [OP.IMM_ATOMIC_IMAX]: "atomicMax", [OP.IMM_ATOMIC_IMIN]: "atomicMin",
+            }[ins.op];
+            if (ins.op === OP.ATOMIC_IMAX || ins.op === OP.ATOMIC_IMIN || ins.op === OP.IMM_ATOMIC_IMAX || ins.op === OP.IMM_ATOMIC_IMIN) {
+                this.warn("signed atomic min/max are done unsigned");
+            }
+            if (ins.op === OP.ATOMIC_CMP_STORE || ins.op === OP.IMM_ATOMIC_CMP_EXCH) {
+                const call = `atomicCompareExchangeWeak(&${b.name}[${address}], ${read(1)}.x, ${read(2)}.x).old_value`;
+                if (immediate) this.write(ins, `vec4<u32>(${call})`, "u");
+                else this.line(`_ = ${call};`);
+                return;
+            }
+            const call = `${name}(&${b.name}[${address}], ${read(1)}.x)`;
+            if (immediate) this.write(ins, `vec4<u32>(${call})`, "u");
+            else this.line(`_ = ${call};`);
+        }
+
+        // ---------------------------------------------------------------
+
+        helperCode() {
+            const h = this.helpers, out = [];
+            if (h.has("umul_hi") || h.has("imul_hi")) {
+                out.push(`fn gx_umul_hi1(a: u32, b: u32) -> u32 {
+    let al = a & 0xFFFFu; let ah = a >> 16u; let bl = b & 0xFFFFu; let bh = b >> 16u;
+    let ll = al * bl; let lh = al * bh; let hl = ah * bl; let hh = ah * bh;
+    let mid = (ll >> 16u) + (lh & 0xFFFFu) + (hl & 0xFFFFu);
+    return hh + (lh >> 16u) + (hl >> 16u) + (mid >> 16u);
+}
+fn gx_umul_hi(a: vec4<u32>, b: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(gx_umul_hi1(a.x, b.x), gx_umul_hi1(a.y, b.y), gx_umul_hi1(a.z, b.z), gx_umul_hi1(a.w, b.w));
+}`);
+            }
+            if (h.has("imul_hi")) {
+                out.push(`fn gx_imul_hi(a: vec4<i32>, b: vec4<i32>) -> vec4<i32> {
+    let ua = bitcast<vec4<u32>>(a); let ub = bitcast<vec4<u32>>(b);
+    var hi = gx_umul_hi(ua, ub);
+    hi = hi - select(vec4<u32>(0u), ub, a < vec4<i32>(0)) - select(vec4<u32>(0u), ua, b < vec4<i32>(0));
+    return bitcast<vec4<i32>>(hi);
+}`);
+            }
+            if (h.has("ubfe")) {
+                out.push(`fn gx_ubfe1(w: u32, o: u32, v: u32) -> u32 {
+    let width = w & 31u; let offset = o & 31u;
+    if (width == 0u) { return 0u; }
+    if (width + offset < 32u) { return (v << (32u - width - offset)) >> (32u - width); }
+    return v >> offset;
+}
+fn gx_ubfe(w: vec4<u32>, o: vec4<u32>, v: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(gx_ubfe1(w.x, o.x, v.x), gx_ubfe1(w.y, o.y, v.y), gx_ubfe1(w.z, o.z, v.z), gx_ubfe1(w.w, o.w, v.w));
+}`);
+            }
+            if (h.has("ibfe")) {
+                out.push(`fn gx_ibfe1(w: u32, o: u32, v: i32) -> i32 {
+    let width = w & 31u; let offset = o & 31u;
+    if (width == 0u) { return 0; }
+    if (width + offset < 32u) { return (v << (32u - width - offset)) >> (32u - width); }
+    return v >> offset;
+}
+fn gx_ibfe(w: vec4<u32>, o: vec4<u32>, v: vec4<i32>) -> vec4<i32> {
+    return vec4<i32>(gx_ibfe1(w.x, o.x, v.x), gx_ibfe1(w.y, o.y, v.y), gx_ibfe1(w.z, o.z, v.z), gx_ibfe1(w.w, o.w, v.w));
+}`);
+            }
+            if (h.has("bfi")) {
+                out.push(`fn gx_bfi1(w: u32, o: u32, insert: u32, base: u32) -> u32 {
+    let width = w & 31u; let offset = o & 31u;
+    let mask = (((1u << width) - 1u) << offset);
+    return ((insert << offset) & mask) | (base & ~mask);
+}
+fn gx_bfi(w: vec4<u32>, o: vec4<u32>, insert: vec4<u32>, base: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(gx_bfi1(w.x, o.x, insert.x, base.x), gx_bfi1(w.y, o.y, insert.y, base.y),
+        gx_bfi1(w.z, o.z, insert.z, base.z), gx_bfi1(w.w, o.w, insert.w, base.w));
+}`);
+            }
+            if (h.has("f32tof16")) {
+                out.push(`fn gx_f32tof16(v: vec4<f32>) -> vec4<u32> {
+    return vec4<u32>(pack2x16float(vec2<f32>(v.x, 0.0)), pack2x16float(vec2<f32>(v.y, 0.0)),
+        pack2x16float(vec2<f32>(v.z, 0.0)), pack2x16float(vec2<f32>(v.w, 0.0))) & vec4<u32>(0xFFFFu);
+}`);
+            }
+            if (h.has("f16tof32")) {
+                out.push(`fn gx_f16tof32(v: vec4<u32>) -> vec4<f32> {
+    return vec4<f32>(unpack2x16float(v.x).x, unpack2x16float(v.y).x, unpack2x16float(v.z).x, unpack2x16float(v.w).x);
+}`);
+            }
+            if (h.has("sample_pos")) {
+                // the standard 4-sample pattern, in pixels from the center
+                out.push(`fn gx_sample_pos(i: u32) -> vec4<f32> {
+    var p = array<vec2<f32>, 4>(vec2<f32>(-0.125, -0.375), vec2<f32>(0.375, -0.125), vec2<f32>(-0.375, 0.125), vec2<f32>(0.125, 0.375));
+    return vec4<f32>(p[i & 3u], 0.0, 0.0);
+}`);
+            }
+            return out;
+        }
+    }
+
+    // code inside a switch: every instruction but case/default/endswitch opens its case
+    const originalInstruction = Emitter.prototype.instruction;
+    Emitter.prototype.instruction = function(ins) {
+        if (this.switches.length && ins.op !== OP.CASE && ins.op !== OP.DEFAULT && ins.op !== OP.ENDSWITCH) this.openCase();
+        return originalInstruction.call(this, ins);
+    };
+
+    function inputRegister(input) {
+        const o = input.operand;
+        return o && o.indices.length ? o.indices[o.indices.length - 1].imm : input.index;
+    }
+
+    /** value with only the masked lanes of `bits` written over `old` */
+    function maskInto(old, bits, mask) {
+        if (!mask || mask === ALL) return bits;
+        const lanes = [0, 1, 2, 3].map(c => mask >> c & 1 ? `(${bits}).${LANES[c]}` : `${old}.${LANES[c]}`);
+        return `vec4<u32>(${lanes.join(", ")})`;
+    }
+
+    function fromBits(value, type) {
+        return type === "u32" ? value : `bitcast<vec4<${type}>>(${value})`;
+    }
+
+    /** How a pixel shader input is interpolated, and its type */
+    function varyingOf(input) {
+        const m = input.interpolation;
+        if (m === INTERPOLATION.CONSTANT) return { type: "u32", interpolation: "flat", sampling: "" };
+        const linear = m === INTERPOLATION.LINEAR_NOPERSPECTIVE || m === INTERPOLATION.LINEAR_NOPERSPECTIVE_CENTROID ||
+            m === INTERPOLATION.LINEAR_NOPERSPECTIVE_SAMPLE;
+        const sampling = m === INTERPOLATION.LINEAR_CENTROID || m === INTERPOLATION.LINEAR_NOPERSPECTIVE_CENTROID ? "centroid" :
+            m === INTERPOLATION.LINEAR_SAMPLE || m === INTERPOLATION.LINEAR_NOPERSPECTIVE_SAMPLE ? "sample" : "";
+        return { type: "f32", interpolation: linear ? "linear" : "perspective", sampling };
+    }
+
+    function interpolationAttribute(vary, type) {
+        if (type === "u32" || vary.interpolation === "flat") return "@interpolate(flat) ";
+        if (vary.interpolation === "linear") return `@interpolate(linear${vary.sampling ? ", " + vary.sampling : ""}) `;
+        if (vary.sampling) return `@interpolate(perspective, ${vary.sampling}) `;
+        return "";
+    }
+
+    /** Without a pixel shader to link with: every output but the position, perspective */
+    function defaultVaryings(program) {
+        const varyings = {};
+        for (const output of program.outputs) {
+            if (output.type !== OPERAND.OUTPUT || output.name !== NAME.UNDEFINED) continue;
+            varyings[output.index] = { type: "f32", interpolation: "perspective", sampling: "" };
+        }
+        return varyings;
+    }
+
+    /**
+     * The varyings a pixel shader reads (for linking a vertex shader to it)
+     * @return register -> { type, interpolation, sampling }
+     */
+    function pixelVaryings(program) {
+        const varyings = {};
+        for (const input of program.inputs) {
+            if (input.type !== OPERAND.INPUT) continue;
+            if (input.name !== NAME.UNDEFINED && input.name !== NAME.CLIP_DISTANCE && input.name !== NAME.CULL_DISTANCE) {
+                if (input.name !== NAME.PRIMITIVE_ID && input.name !== NAME.RENDER_TARGET_ARRAY_INDEX &&
+                    input.name !== NAME.VIEWPORT_ARRAY_INDEX) continue;
+            }
+            if (input.name !== NAME.UNDEFINED) continue;
+            varyings[inputRegister(input)] = varyingOf(input);
+        }
+        return varyings;
+    }
+
+    const api = { emit, pixelVaryings, ShaderTranslateError, BINDING };
+    if (typeof module === "object" && module.exports) module.exports = api;
+    else global.V86WGSLEmitter = api;
+})(typeof globalThis !== "undefined" ? globalThis : this);
