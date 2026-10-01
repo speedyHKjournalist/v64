@@ -70,6 +70,21 @@ const NOT_DX = new Set([
     C.SVGA_3D_CMD_RESERVED5, C.SVGA_3D_CMD_RESERVED6, C.SVGA_3D_CMD_RESERVED7, C.SVGA_3D_CMD_RESERVED8,
 ]);
 
+/**
+ * The DX commands that only move surfaces' contents: Windows' kernel driver
+ * sends them outside of DX contexts (present blits to the screen targets)
+ */
+const SURFACE_ONLY = new Set([
+    C.SVGA_3D_CMD_DX_PRESENTBLT, C.SVGA_3D_CMD_DX_PRED_COPY_REGION, C.SVGA_3D_CMD_DX_PRED_COPY,
+    C.SVGA_3D_CMD_DX_BUFFER_COPY, C.SVGA_3D_CMD_DX_TRANSFER_FROM_BUFFER, C.SVGA_3D_CMD_DX_PRED_TRANSFER_FROM_BUFFER,
+    C.SVGA_3D_CMD_DX_SURFACE_COPY_AND_READBACK, C.SVGA_3D_CMD_DX_UPDATE_SUBRESOURCE, C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE,
+    C.SVGA_3D_CMD_DX_INVALIDATE_SUBRESOURCE, C.SVGA_3D_CMD_DX_BUFFER_UPDATE, C.SVGA_3D_CMD_DX_RESOLVE_COPY,
+    C.SVGA_3D_CMD_DX_PRED_RESOLVE_COPY, C.SVGA_3D_CMD_DX_PRED_CONVERT_REGION, C.SVGA_3D_CMD_DX_PRED_CONVERT,
+    C.SVGA_3D_CMD_DX_PRED_STAGING_COPY, C.SVGA_3D_CMD_DX_STAGING_COPY, C.SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION,
+    C.SVGA_3D_CMD_DX_PRED_STAGING_CONVERT_REGION, C.SVGA_3D_CMD_DX_PRED_STAGING_CONVERT,
+    C.SVGA_3D_CMD_DX_STAGING_BUFFER_COPY, C.SVGA_3D_CMD_DX_TRANSFER_TO_BUFFER,
+]);
+
 /** Query results (SVGADXQueryResultUnion member sizes), by type */
 const QUERY_RESULT_BYTES = [4, 8, 12, 88, 4, 16, 4, 8, 16, 16, 16, 16, 4, 4, 4, 4];
 
@@ -179,11 +194,14 @@ export function DXDevice(svga3d)
     this.s = svga3d;
     /** @type {!Map<number, !DXContext>} */
     this.contexts = new Map();
+    /** @type {DXContext} */
+    this.device_dx = null;
 }
 
 DXDevice.prototype.reset = function()
 {
     this.contexts.clear();
+    this.device_dx = null;
 };
 
 DXDevice.prototype.warn = function(key, text)
@@ -355,7 +373,8 @@ DXDevice.prototype.command = function(id, body, cid)
         case C.SVGA_3D_CMD_DX_BIND_SHADER_IFACE: return true;
         case C.SVGA_3D_CMD_DX_HINT: return true;
     }
-    const context = this.contexts.get(cid);
+    let context = this.contexts.get(cid);
+    if(!context && SURFACE_ONLY.has(id)) context = this.device_context();
     if(!context)
     {
         this.warn("cid", "a DX command (" + id + ") outside of a DX context");
@@ -364,6 +383,17 @@ DXDevice.prototype.command = function(id, body, cid)
     if(this.define(context, id, p, true)) return true;
     this.state_command(context, id, p);
     return true;
+};
+
+/** The context of the surface-only commands that come without one */
+DXDevice.prototype.device_context = function()
+{
+    if(!this.device_dx)
+    {
+        this.device_dx = new DXContext(INVALID);
+        this.gx().command(GX.CONTEXT_DEFINE, [INVALID]);
+    }
+    return this.device_dx;
 };
 
 DXDevice.prototype.define_context = function(cid)
@@ -1001,6 +1031,7 @@ DXDevice.prototype.get_state = function()
 DXDevice.prototype.set_state = function(state)
 {
     this.contexts.clear();
+    this.device_dx = null;
     for(const [cid, mob, saved] of state || [])
     {
         this.define_context(cid);

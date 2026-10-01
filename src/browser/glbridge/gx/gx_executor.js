@@ -357,8 +357,9 @@
             const f = s.f;
             const columns = Math.ceil(w / f.bw), rows = Math.ceil(h / f.bh);
             const rowBytes = Math.min(pitch, columns * f.bytes);
-            const emulated = f.can.includes("e");
-            const gpuRow = emulated ? columns * 4 : rowBytes;
+            const codec = f.can.includes("e") ? EMULATED[s.format] : null;
+            const emulated = !!codec;
+            const gpuRow = emulated ? columns * codec.texels * codec.gpu : rowBytes;
             const alignedPitch = align(Math.max(gpuRow, 1), 256);
             const slices = Math.max(1, d);
             const staged = new Uint8Array(alignedPitch * rows * slices);
@@ -373,8 +374,10 @@
             if (!emulated) this.convertIn(s, staged, alignedPitch, columns, rows * slices);
             this.endPass();
             const level = this.level(s, mip);
-            const copyWidth = Math.min(align(w, f.bw), align(level.width, f.bw) - x);
-            const copyHeight = Math.min(align(h, f.bh), align(level.height, f.bh) - y);
+            // (an emulated format's texture has blocks of one texel)
+            const bw = emulated ? 1 : f.bw, bh = emulated ? 1 : f.bh;
+            const copyWidth = Math.min(align(w, bw), align(level.width, bw) - x, emulated ? columns * codec.texels : Infinity);
+            const copyHeight = Math.min(align(h, bh), align(level.height, bh) - y);
             if (copyWidth <= 0 || copyHeight <= 0) return;
             this.encoder().copyBufferToTexture(
                 { buffer: this.staging(staged), bytesPerRow: alignedPitch, rowsPerImage: rows },
@@ -418,14 +421,16 @@
             }
             const f = s.f;
             const columns = Math.ceil(w / f.bw), rows = Math.ceil(h / f.bh);
-            const emulated = f.can.includes("e");
-            const rowBytes = columns * f.bytes, gpuRow = emulated ? columns * 4 : rowBytes, alignedPitch = align(gpuRow, 256);
+            const codec = f.can.includes("e") ? EMULATED[s.format] : null;
+            const emulated = !!codec;
+            const texels = emulated ? Math.min(w, columns * codec.texels) : w;
+            const rowBytes = columns * f.bytes, gpuRow = emulated ? texels * codec.gpu : rowBytes, alignedPitch = align(gpuRow, 256);
             const slices = Math.max(1, d);
             const target = this.device.createBuffer({ size: alignedPitch * rows * slices, usage: BUFFER_USAGE.MAP_READ | BUFFER_USAGE.COPY_DST });
             this.encoder().copyTextureToBuffer(
                 { texture: s.texture, mipLevel: mip, origin: [x, y, s.volume ? z : layer], aspect: isDepthFormat(f.gpu) ? "depth-only" : "all" },
                 { buffer: target, bytesPerRow: alignedPitch, rowsPerImage: rows },
-                [align(w, f.bw), align(h, f.bh), slices]);
+                [emulated ? texels : align(w, f.bw), emulated ? h : align(h, f.bh), slices]);
             this.flushEncoder();
             this.pending.push(target.mapAsync(1).then(() => {
                 const mapped = new Uint8Array(target.getMappedRange());
@@ -1572,37 +1577,117 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             "src1": "src1-alpha", "one-minus-src1": "one-minus-src1-alpha" }[factor] || factor;
     }
 
-    // Pixels of formats WebGPU lacks, stored as rgba8unorm: 16-bit ones
-    const SIXTEEN = { 3: "565", 139: "565", 4: "1555", 5: "1555", 140: "1555", 6: "4444", 145: "4444" };
+    // Formats WebGPU lacks, stored wider (svga_dx_formats.js "e"): per SVGA
+    // format, how many texels a guest block holds, the bytes of a texel on
+    // the GPU, and the conversions of one block
+    const F16 = (() => {
+        const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
+        return {
+            encode(v) {
+                f32[0] = v;
+                const x = u32[0], sign = x >>> 16 & 0x8000, exp = (x >>> 23 & 0xFF) - 127 + 15, mant = x & 0x7FFFFF;
+                if (exp <= 0) return sign;
+                if (exp >= 31) return sign | 0x7C00;
+                return sign | exp << 10 | mant >>> 13;
+            },
+            decode(h) {
+                const sign = h & 0x8000 ? -1 : 1, exp = h >> 10 & 31, mant = h & 1023;
+                if (!exp) return sign * mant * 2 ** -24;
+                if (exp === 31) return mant ? NaN : sign * Infinity;
+                return sign * (1 + mant / 1024) * 2 ** (exp - 15);
+            },
+        };
+    })();
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    /** n channels of a normalized integer type, as floats of `width` bytes (2 or 4) */
+    function normalized(n, bits, signed, width) {
+        const max = signed ? 2 ** (bits - 1) - 1 : 2 ** bits - 1;
+        const bytes = bits / 8;
+        const read = (v, o) => bits === 8 ? (signed ? v.getInt8(o) : v.getUint8(o)) : (signed ? v.getInt16(o, true) : v.getUint16(o, true));
+        const write = (v, o, x) => bits === 8 ? (signed ? v.setInt8(o, x) : v.setUint8(o, x)) : (signed ? v.setInt16(o, x, true) : v.setUint16(o, x, true));
+        return {
+            texels: 1, gpu: n * width,
+            expand(src, si, dst, di) {
+                for (let c = 0; c < n; c++) {
+                    const value = Math.max(read(src, si + c * bytes) / max, -1);
+                    if (width === 4) dst.setFloat32(di + 4 * c, value, true);
+                    else dst.setUint16(di + 2 * c, F16.encode(value), true);
+                }
+            },
+            pack(src, si, dst, di) {
+                for (let c = 0; c < n; c++) {
+                    const value = width === 4 ? src.getFloat32(si + 4 * c, true) : F16.decode(src.getUint16(si + 2 * c, true));
+                    write(dst, di + c * bytes, Math.round(clamp(value, signed ? -1 : 0, 1) * max));
+                }
+            },
+        };
+    }
+    /** RGB32 into RGBA32: alpha 1 */
+    const rgb32 = one => ({
+        texels: 1, gpu: 16,
+        expand(src, si, dst, di) { for (let c = 0; c < 3; c++) dst.setUint32(di + 4 * c, src.getUint32(si + 4 * c, true), true); dst.setUint32(di + 12, one, true); },
+        pack(src, si, dst, di) { for (let c = 0; c < 3; c++) dst.setUint32(di + 4 * c, src.getUint32(si + 4 * c, true), true); },
+    });
+    /** 16-bit packed colors into RGBA8 */
+    const packed16 = (decode, encode) => ({
+        texels: 1, gpu: 4,
+        expand(src, si, dst, di) { const [r, g, b, a] = decode(src.getUint16(si, true)); dst.setUint8(di, r); dst.setUint8(di + 1, g); dst.setUint8(di + 2, b); dst.setUint8(di + 3, a); },
+        pack(src, si, dst, di) { dst.setUint16(di, encode(src.getUint8(si), src.getUint8(si + 1), src.getUint8(si + 2), src.getUint8(si + 3)), true); },
+    });
+    const c5 = v => (v & 31) * 255 / 31, c6 = v => (v & 63) * 255 / 63, c4 = v => (v & 15) * 17;
+    const R565 = packed16(v => [c5(v >> 11), c6(v >> 5), c5(v), 255], (r, g, b) => (r >> 3) << 11 | (g >> 2) << 5 | b >> 3);
+    const R1555 = packed16(v => [c5(v >> 10), c5(v >> 5), c5(v), v & 0x8000 ? 255 : 0], (r, g, b, a) => (a >> 7) << 15 | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3);
+    const R4444 = packed16(v => [c4(v >> 8), c4(v >> 4), c4(v), c4(v >> 12)], (r, g, b, a) => (a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | b >> 4);
+    /** Two texels sharing R and B in a 4-byte block (R8G8_B8G8, G8R8_G8B8) */
+    const pair = (r, g0, b, g1) => ({
+        texels: 2, gpu: 4,
+        expand(src, si, dst, di) {
+            for (const [t, g] of [[0, g0], [1, g1]]) {
+                dst.setUint8(di + 4 * t, src.getUint8(si + r)); dst.setUint8(di + 4 * t + 1, src.getUint8(si + g));
+                dst.setUint8(di + 4 * t + 2, src.getUint8(si + b)); dst.setUint8(di + 4 * t + 3, 255);
+            }
+        },
+        pack(src, si, dst, di) {
+            dst.setUint8(di + r, src.getUint8(si)); dst.setUint8(di + g0, src.getUint8(si + 1));
+            dst.setUint8(di + b, src.getUint8(si + 2)); dst.setUint8(di + g1, src.getUint8(si + 5));
+        },
+    });
+    const EMULATED = {
+        3: R565, 139: R565, 4: R1555, 5: R1555, 140: R1555, 6: R4444, 145: R4444,
+        // A8 and ALPHA8: (0, 0, 0, a)
+        135: { texels: 1, gpu: 4, expand(s, si, d, di) { d.setUint32(di, s.getUint8(si) << 24 >>> 0, true); }, pack(s, si, d, di) { d.setUint8(di, s.getUint8(si + 3)); } },
+        32: { texels: 1, gpu: 4, expand(s, si, d, di) { d.setUint32(di, s.getUint8(si) << 24 >>> 0, true); }, pack(s, si, d, di) { d.setUint8(di, s.getUint8(si + 3)); } },
+        // LUMINANCE8 (L, L, L, 1), LUMINANCE8_ALPHA8 (L, L, L, A)
+        11: { texels: 1, gpu: 4, expand(s, si, d, di) { const l = s.getUint8(si); d.setUint32(di, (l | l << 8 | l << 16 | 255 << 24) >>> 0, true); }, pack(s, si, d, di) { d.setUint8(di, s.getUint8(si)); } },
+        14: { texels: 1, gpu: 4, expand(s, si, d, di) { const l = s.getUint8(si), a = s.getUint8(si + 1); d.setUint32(di, (l | l << 8 | l << 16 | a << 24) >>> 0, true); },
+            pack(s, si, d, di) { d.setUint8(di, s.getUint8(si)); d.setUint8(di + 1, s.getUint8(si + 3)); } },
+        // A2R10G10B10 into rgb10a2unorm: R and B change places
+        26: { texels: 1, gpu: 4, expand(s, si, d, di) { const v = s.getUint32(si, true); d.setUint32(di, ((v & 0xC00FFC00) | (v >>> 20 & 0x3FF) | (v & 0x3FF) << 20) >>> 0, true); },
+            pack(s, si, d, di) { const v = s.getUint32(si, true); d.setUint32(di, ((v & 0xC00FFC00) | (v >>> 20 & 0x3FF) | (v & 0x3FF) << 20) >>> 0, true); } },
+        49: rgb32(0x3F800000), 50: rgb32(0x3F800000), 51: rgb32(1), 52: rgb32(1),
+        124: normalized(4, 16, false, 4), 55: normalized(4, 16, true, 4),
+        129: normalized(2, 16, false, 4), 130: normalized(2, 16, true, 4),
+        88: normalized(1, 16, false, 4), 90: normalized(1, 16, true, 4),
+        127: normalized(4, 8, true, 2), 132: normalized(2, 8, true, 2), 95: normalized(1, 8, true, 2),
+        99: pair(0, 1, 2, 3), 100: pair(1, 0, 3, 2),
+    };
 
-    /** A row of the guest's pixels into RGBA8 */
+    /** A row of the guest's blocks into the GPU's texels */
     function expandRow(format, bytes, from, to) {
-        const kind = SIXTEEN[format];
-        const count = Math.floor(from.length / bytes);
-        for (let i = 0; i < count; i++) {
-            const o = i * 4;
-            if (!kind) { to[o] = from[i * bytes]; to[o + 3] = 255; continue; }
-            const v = from[2 * i] | from[2 * i + 1] << 8;
-            if (kind === "565") { to[o] = (v >> 11 & 31) * 255 / 31; to[o + 1] = (v >> 5 & 63) * 255 / 63; to[o + 2] = (v & 31) * 255 / 31; to[o + 3] = 255; }
-            else if (kind === "1555") { to[o] = (v >> 10 & 31) * 255 / 31; to[o + 1] = (v >> 5 & 31) * 255 / 31; to[o + 2] = (v & 31) * 255 / 31; to[o + 3] = v & 0x8000 ? 255 : 0; }
-            else { to[o] = (v >> 8 & 15) * 17; to[o + 1] = (v >> 4 & 15) * 17; to[o + 2] = (v & 15) * 17; to[o + 3] = (v >> 12 & 15) * 17; }
-        }
+        const codec = EMULATED[format];
+        if (!codec) return;
+        const src = new DataView(from.buffer, from.byteOffset, from.byteLength), dst = new DataView(to.buffer, to.byteOffset, to.byteLength);
+        const step = codec.gpu * codec.texels;
+        for (let i = 0; (i + 1) * bytes <= from.length && (i + 1) * step <= to.length; i++) codec.expand(src, i * bytes, dst, i * step);
     }
 
-    /** A row of RGBA8 into the guest's pixels */
+    /** A row of the GPU's texels into the guest's blocks */
     function packRow(format, bytes, from, to) {
-        const kind = SIXTEEN[format];
-        const count = Math.floor(to.length / bytes);
-        for (let i = 0; i < count; i++) {
-            const r = from[4 * i], g = from[4 * i + 1], b = from[4 * i + 2], a = from[4 * i + 3];
-            if (!kind) { to[i * bytes] = r; continue; }
-            let v;
-            if (kind === "565") v = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3;
-            else if (kind === "1555") v = (a >> 7) << 15 | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3;
-            else v = (a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | b >> 4;
-            to[2 * i] = v & 0xFF;
-            to[2 * i + 1] = v >> 8;
-        }
+        const codec = EMULATED[format];
+        if (!codec) return;
+        const src = new DataView(from.buffer, from.byteOffset, from.byteLength), dst = new DataView(to.buffer, to.byteOffset, to.byteLength);
+        const step = codec.gpu * codec.texels;
+        for (let i = 0; (i + 1) * bytes <= to.length && (i + 1) * step <= from.length; i++) codec.pack(src, i * step, dst, i * bytes);
     }
 
     const api = { GXExecutor, GX, GX_MAGIC };

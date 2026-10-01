@@ -61,6 +61,7 @@
         "dual-source-blending",
         "rg11b10ufloat-renderable",
         "indirect-first-instance",
+        "texture-compression-bc-sliced-3d",
     ];
 
     // Limits raised to what the adapter allows: D3D10 has 8 render targets

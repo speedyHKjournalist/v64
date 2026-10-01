@@ -256,7 +256,7 @@ function dx_format_caps()
         if(can.includes("d")) value |= C.SVGA3D_DXFMT_DEPTH_RENDERTARGET;
         if(can.includes("b")) value |= C.SVGA3D_DXFMT_BLENDABLE;
         if(texture) value |= C.SVGA3D_DXFMT_MIPS | C.SVGA3D_DXFMT_ARRAY;
-        if(texture && !can.includes("d") && !texture.startsWith("bc")) value |= C.SVGA3D_DXFMT_VOLUME;
+        if(texture && !can.includes("d")) value |= C.SVGA3D_DXFMT_VOLUME;
         if(vertex) value |= C.SVGA3D_DXFMT_DX_VERTEX_BUFFER;
         if(can.includes("m")) value |= C.SVGA3D_DXFMT_MULTISAMPLE;
         caps.push([index, value]);
