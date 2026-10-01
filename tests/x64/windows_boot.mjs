@@ -21,6 +21,7 @@
 // <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>",
 // "launch <command line>" (run by the launcher with cmd /c, see WIN_LAUNCHER),
 // "display <width> <height> [index]" (V86.set_display_size), "mouse <dx> <dy>",
+// "pointer <x> <y> <screen width> <screen height>",
 // "snapshot" (saved
 // and restored in place),
 // "svgalog on|off" (the SVGA3D commands other than DX and the frequent GB
@@ -709,6 +710,9 @@ try
         else if(verb === "display") vm.set_display_size(...argument.split(/\s+/).map(Number));
         // a relative mouse movement (PS/2), in pixels, y up
         else if(verb === "mouse") vm.bus.send("mouse-delta", argument.split(/\s+/).map(Number));
+        // an absolute position on a screen of the given size (the VMware
+        // backdoor's mouse, which takes over from PS/2 once its driver runs)
+        else if(verb === "pointer") vm.bus.send("mouse-absolute", argument.split(/\s+/).map(Number));
         // a snapshot saved and restored in place (the disks are not in it, and unchanged)
         else if(verb === "snapshot")
         {
