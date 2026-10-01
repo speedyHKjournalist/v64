@@ -2673,7 +2673,7 @@ CPU.prototype.init = function(settings, device_bus)
         if(this.graphics_adapter_descriptor)
         {
             this.devices.graphics_adapter = new GraphicsAdapter(this, this.graphics_adapter_descriptor,
-                { vram_size: settings.vram_size });
+                { vram_size: settings.vram_size, test: settings.graphics_adapter_test });
             // (tests and debugging reach into the VGA core)
             this.devices.vga = this.devices.graphics_adapter.vga();
         }

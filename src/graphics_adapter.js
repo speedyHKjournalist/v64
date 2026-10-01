@@ -26,6 +26,10 @@ const IMPLEMENTED = ["bochs_vga", "none"];
 /** The global registry plugin files add their descriptors to */
 const REGISTRY = "V86GraphicsAdapters";
 
+/** Where allocate_io looks for ports (below the virtio_devices pool at 0xE000) */
+const IO_POOL_START = 0xD000;
+const IO_POOL_END = 0xE000;
+
 /** state[52] is [STATE_TAG, STATE_VERSION, adapter name, device state] */
 const STATE_TAG = "graphics_adapter";
 const STATE_VERSION = 1;
@@ -283,6 +287,9 @@ export function GraphicsAdapter(cpu, descriptor, options)
 
     this.device = descriptor["create"](this.create_handle(), {
         "vram_size": options.vram_size,
+        // graphics_adapter_test: internal, for tests that pin what the
+        // adapter declares (its level); not part of the public options
+        "test": options.test,
     });
     if(!this.device || typeof this.device["get_state"] !== "function" || typeof this.device["set_state"] !== "function")
     {
@@ -315,6 +322,7 @@ GraphicsAdapter.prototype.create_handle = function()
             else io.register_write_consecutive(port, owner, w8_1, w8_2);
         },
         "mmap_register": (address, size, r8, w8, r32, w32) => io.mmap_register(address, size, r8, w8, r32, w32),
+        "allocate_io": size => this.allocate_io(size),
 
         "mmio_ram_allocate": size => cpu.mmio_ram_allocate(size),
         "mmio_ram_backing": region => cpu.mmio_ram_backing(region),
@@ -368,6 +376,28 @@ GraphicsAdapter.prototype.create_handle = function()
             "add_source": source => hub.add_source(new PluginDisplaySource(source)),
         },
     };
+};
+
+/**
+ * A free window of I/O ports for an I/O BAR, aligned to its size: the same
+ * one for the same machine configuration, so that snapshots line up. The
+ * guest's firmware usually moves it anyway (PCI.set_io_bars).
+ * @param {number} size a power of two
+ * @return {number}
+ */
+GraphicsAdapter.prototype.allocate_io = function(size)
+{
+    const ports = this.cpu.io.ports;
+    for(let base = IO_POOL_START; base + size <= IO_POOL_END; base += size)
+    {
+        let free = true;
+        for(let port = base; port < base + size && free; port++)
+        {
+            free = !ports[port].device;
+        }
+        if(free) return base;
+    }
+    throw new Error("graphics_adapter \"" + this.name + "\": no free I/O ports");
 };
 
 /**

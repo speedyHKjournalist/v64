@@ -371,6 +371,8 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.extended_memory_size = options.extended_memory_size;
     settings.extended_memory_cache = options.extended_memory_cache;
     settings.vram_size = options["vram_size"];
+    // (internal, see src/graphics_adapter.js)
+    settings.graphics_adapter_test = options["graphics_adapter_test"];
     settings.boot_order = boot_order;
     settings.fastboot = options.fastboot || false;
     settings.bootmenu = options.bootmenu || false;

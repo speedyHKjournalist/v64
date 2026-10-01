@@ -38,6 +38,7 @@ export function encode_worker_options(o, plugins = [])
         "memory_size": o.memory_size,
         // The worker loads the display adapter's plugin itself, from an absolute URL
         "graphics_adapter": o["graphics_adapter"], "vram_size": o["vram_size"],
+        "graphics_adapter_test": o["graphics_adapter_test"],
         "graphics_adapter_path": o["graphics_adapter"] === "none" ? undefined :
             new URL(o["graphics_adapter_path"] || default_graphics_adapter_path(o["graphics_adapter"]), location.href).href,
         "extended_memory_size": o.extended_memory_size, "extended_memory_cache": o.extended_memory_cache,

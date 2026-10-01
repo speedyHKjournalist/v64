@@ -901,7 +901,7 @@ virtio-gpu 在 Windows 上只有 2D（D1 暂缓），所以没有 virtio 的 3DM
 
 | 里程碑 | 状态 | 说明 |
 | --- | --- | --- |
-| A0 准备和探测 | 未开始 | |
+| A0 准备和探测 | 基本完成 | 见附录 B；剩 Windows 镜像的可写副本和驱动预装，放到 S1 的 Windows 验证时做；U4（KB2919355）同时确认 |
 | A1 公共基础设施 | 进行中 | 已完成（2026-10-01）：显示适配器插件框架（`src/graphics_adapter.js`、`src/graphics_adapters/`）、`bochs_vga` 迁出核心（`build/v86-bochs-vga.js`）、`graphics_adapter` 必填和 `"none"`、`vram_size` 取代 `vga_memory_size`、VGA BIOS 的 PCI ID 改写、旧存档兼容；测试 `tests/devices/graphics_adapter.js`。未完成：`pci.js` 的 prefetchable 和多个内存 BAR、`mmio_ram` 非像素区域、`virtio.js` 改造、GPU 扫描输出/光标平面/多屏、`gpu_channel.js`、检查点框架 |
 | A2 trace 抓取和重放 | 未开始 | |
 | S1 SVGA 基本 2D | 未开始 | |
@@ -918,6 +918,37 @@ virtio-gpu 在 Windows 上只有 2D（D1 暂缓），所以没有 virtio 的 3DM
 | V5 HOST3D blob | 未开始 | |
 | S8 收尾 | 未开始 | |
 | （原 V6/V7/V8） | 暂缓 | D1、D6 |
+
+## 附录 B：A0 的结论（2026-10-01）
+
+**驱动包和来源**（放在 `~/Downloads/v86-gpu/`，不进仓库）：
+
+- VMware Tools 13.1.5（`VMware-tools-13.1.5-25544008-x64.exe`，140 MB）。SVGA 驱动在内嵌 MSI 的 `VmVideo.cab` 里，Win 8 版本文件名带 `_Win8.<GUID>` 后缀，已整理到 `vm3d-win8-13.1.5/`，驱动版本 9.17.09.0007。
+- VMware Tools 11.3.5（`VMware-tools-11.3.5-18557794-x86_64.exe`，99 MB），留作对照。
+- virtio-win 0.1.240（628 MB）：带 `viogpudo\w8.1\amd64`（与 `2k12R2` 硬链接同一份文件），驱动版本 63.93.104.24000，Red Hat 签名。**U3 已解决。**
+
+**PCI 身份必须精确匹配 INF：**
+
+- SVGA II：`vm3d.inf` 的 `NTamd64.6.3`（Win 8.1）只匹配 `PCI\VEN_15AD&DEV_0405&SUBSYS_040515AD&REV_00`。
+- virtio-gpu：`viogpudo.inf` 只匹配 `PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01`。
+
+**Win 8.1 驱动开启 3D 的条件**（反汇编 `vm3dmp.sys` 的能力检查函数得出；**U1 大部分已解决**）：
+
+- 驱动内部标志位：`CAP_GMR`、FIFO 的 `SCREEN_OBJECT`/`SCREEN_OBJECT_2`、`CAP_GMR2`、"`COMMAND_BUFFERS` 和 `CMD_BUFFERS_2` 同时具备"；GB 模式要求后者加上 `CAP_GBOBJECTS`。
+- **旧式（非 GB）3D 路径仍然存在**，D2 的前提成立。它要求：
+  - `SVGA_CAP_3D`、`CAP_GMR2`、`CAP_EXTENDED_FIFO`；
+  - FIFO 寄存器区大于 `0x480` 字节，并且 FIFO 里有 `SVGA3DCAPS_RECORD_DEVCAPS`（类型 `0x100`）的能力记录；
+  - FIFO `3D_HWVERSION`（有 `FIFO_CAP_3D_HWVERSION_REVISED` 时读 `_REVISED`）不低于 `SVGA3D_HWVERSION_WS8_B1`（`0x20001`）；
+  - devcap `3D` 非 0，`VERTEX_SHADER_VERSION` 不低于 5（VS 2.0），`FRAGMENT_SHADER_VERSION` 不低于 11（PS 2.0）。3DMark06 需要 VS=7、PS=13（3.0）；
+  - `SVGA_REG_MEMORY_SIZE` 足够大，阈值和屏幕数有关，最多需要 64 MB；不满足时日志会写"host memory size"。
+- GB 模式下 devcap 通过 `SVGA_REG_DEV_CAP` 逐项读取（0–261），否则从 FIFO 能力记录读取。
+- DX 相关开关：`SVGA_CAP_DX`（第 28 位）、`CAP2_DX2`、`CAP2_DX3`，以及 SM5/FL11_0 的判断。
+- 驱动通过 backdoor 的 RPCI 读 `guestinfo.svga.wddm.*` 配置（如 `enableGBObjects`、`enableDX10`）；没有 RPCI 时用默认值，不影响加载。
+- U2（设备声明 DX 能力时 D3D9 走哪种命令）留到 S5 实测。
+
+**Linux 测试盘**：`tools/alpine_gpu_repo.mjs` 按依赖闭包下载 Alpine 3.24 的 122 个包（115 MiB，保留官方签名的 APKINDEX），打成 `build/x64-linux/gpu-repo.tar`。`tests/x64/linux_gpu.mjs` 启动官方 virt ISO，离线安装 Mesa、kmscube、modetest，加载适配器的 DRM 驱动并截图。基线：bochs_vga 加 llvmpipe，27 秒登录，kmscube 约 15.6 fps。Alpine 3.24 没有 glmark2。
+
+**常量**：`tools/gen_svga_constants.js` 从 `third_party/vmware-svga` 生成 `src/graphics_adapters/vmware_svga/svga_constants.js`（2616 个；带预处理器、BigInt 求值）。
 
 ## 附录 A：各等级的能力表（A0 起填写）
 

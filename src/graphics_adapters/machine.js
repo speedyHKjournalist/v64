@@ -242,6 +242,16 @@ GraphicsMachine.prototype.mmap_register = function(address, size, read8, write8,
 };
 
 /**
+ * A free window of I/O ports for an I/O BAR
+ * @param {number} size a power of two
+ * @return {number} its first port
+ */
+GraphicsMachine.prototype.allocate_io = function(size)
+{
+    return this.handle["allocate_io"](size);
+};
+
+/**
  * Device memory (src/rust/cpu/mmio_ram.rs)
  * @param {number} size
  * @return {number} the region, or -1

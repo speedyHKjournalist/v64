@@ -60,8 +60,11 @@ const VGA_HOST_MEMORY_SPACE_SIZE = Uint32Array.from([
  * @implements {DisplaySource}
  * @param {GraphicsMachine} machine
  * @param {number} vga_memory_size
+ * @param {{pci: (boolean|undefined), display_source: (boolean|undefined)}=} options
+ *     An adapter that embeds the core (SVGA II, virtio-vga) describes the PCI
+ *     function and owns the scanout itself: pci: false, display_source: false
  */
-export function VGAScreen(machine, vga_memory_size)
+export function VGAScreen(machine, vga_memory_size, options)
 {
     /** @const */
     this.machine = machine;
@@ -409,13 +412,19 @@ export function VGAScreen(machine, vga_memory_size)
         (addr, value) => this.vga_memory_write(addr, value),
     );
 
-    machine.register_pci({
-        pci_space: this.pci_space,
-        pci_bars: this.pci_bars,
-        pci_rom_size: this.pci_rom_size,
-        pci_rom_address: this.pci_rom_address,
-    });
-    this.display.add_source(this);
+    if(!options || options.pci !== false)
+    {
+        machine.register_pci({
+            pci_space: this.pci_space,
+            pci_bars: this.pci_bars,
+            pci_rom_size: this.pci_rom_size,
+            pci_rom_address: this.pci_rom_address,
+        });
+    }
+    if(!options || options.display_source !== false)
+    {
+        this.display.add_source(this);
+    }
 }
 
 VGAScreen.prototype.get_state = function()
@@ -559,6 +568,15 @@ VGAScreen.prototype.set_state = function(state)
     this.character_map_select = state[63] === undefined ? 0 : state[63];
     this.font_page_ab_enabled = state[64] === undefined ? 0 : state[64];
 
+    this.redisplay();
+};
+
+/**
+ * Send the current mode, size, font and picture to the display again: after
+ * a restore, or when an adapter that embeds the core hands the scanout back
+ */
+VGAScreen.prototype.redisplay = function()
+{
     this.set_graphical_mode(this.graphical_mode);
 
     // Ensure set_size_graphical/set_size_graphical_text will update
