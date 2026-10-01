@@ -904,8 +904,8 @@ virtio-gpu 在 Windows 上只有 2D（D1 暂缓），所以没有 virtio 的 3DM
 | A0 准备和探测 | 基本完成 | 见附录 B；剩 Windows 镜像的可写副本和驱动预装，放到 S1 的 Windows 验证时做；U4（KB2919355）同时确认 |
 | A1 公共基础设施 | 进行中 | 已完成（2026-10-01）：显示适配器插件框架（`src/graphics_adapter.js`、`src/graphics_adapters/`）、`bochs_vga` 迁出核心（`build/v86-bochs-vga.js`）、`graphics_adapter` 必填和 `"none"`、`vram_size` 取代 `vga_memory_size`、VGA BIOS 的 PCI ID 改写、旧存档兼容；测试 `tests/devices/graphics_adapter.js`。未完成：`pci.js` 的 prefetchable 和多个内存 BAR、`mmio_ram` 非像素区域、`virtio.js` 改造、GPU 扫描输出/光标平面/多屏、`gpu_channel.js`、检查点框架 |
 | A2 trace 抓取和重放 | 未开始 | |
-| S1 SVGA 基本 2D | 未开始 | |
-| S2 SVGA 完整 2D | 未开始 | |
+| S1 SVGA 基本 2D | Linux 已验收，Windows 进行中 | 设备在 `src/graphics_adapters/vmware_svga/`，测试 `tests/devices/vmware_svga.js`。Linux（Alpine 3.24，`tests/x64/linux_gpu.mjs`）：vmwgfx 用传统显示单元，1280×800，kmscube 约 9 fps。Win 8.1 在设备的 VGA 核心上（VBE）启动到桌面；vm3d 驱动安装和接管的验证在进行中 |
+| S2 SVGA 完整 2D | Linux 已验收，Windows 待验证 | GMR1/GMR2（`svga_gmr.js`）、Screen Object（`svga_screens.js`）、硬件光标（`svga_cursor.js`）、命令缓冲区和设备上下文、显示拓扑；存档版本 2。Linux 的 vmwgfx 在等级 `2d-full` 下用 Screen Object 显示单元和命令缓冲区，kmscube 画面正确。Alpine 3.24 内核的 vmwgfx 对没有 MOB 的设备不画光标（日志 "Unknown Cursor Type!"），所以 Linux 的光标验收挪到 S4 |
 | S3 VGPU9 + 3DMark06 | 未开始 | ABI 冻结点：冻结后在此注明，然后才能抓状态 |
 | V1 virtio-gpu 2D | 未开始 | |
 | S4 GB 对象 | 未开始 | |

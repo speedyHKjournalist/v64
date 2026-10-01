@@ -8,7 +8,8 @@
 //
 // GPU_ADAPTER: bochs_vga (default), vmware_svga, virtio_gpu
 // GPU_SCENARIO: the steps below (default: drm)
-// GPU_OUT: the output directory (default build/x64-linux/gpu-<adapter>/)
+// GPU_LEVEL: pins the adapter's level (graphics_adapter_test), e.g. 2d or 2d-full
+// GPU_OUT: the output directory (default build/x64-linux/gpu-<adapter>[-<level>]/)
 // SHOW_LOGS=1: echo the serial console; LINUX_GPU_TIMEOUT: ms (default 900000)
 
 import assert from "node:assert/strict";
@@ -22,7 +23,7 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 const directory = root + "build/x64-linux/";
 const adapter = process.env.GPU_ADAPTER || "bochs_vga";
 const scenario = process.env.GPU_SCENARIO || "drm";
-const out = process.env.GPU_OUT || path.join(directory, "gpu-" + adapter);
+const out = process.env.GPU_OUT || path.join(directory, "gpu-" + adapter + (process.env.GPU_LEVEL ? "-" + process.env.GPU_LEVEL : ""));
 fs.mkdirSync(out, { recursive: true });
 
 const iso = directory + "alpine-virt-3.24.0-x86_64.iso";
@@ -126,6 +127,7 @@ const emulator = new V86({
     disable_jit: !!+process.env.LINUX_GPU_NO_JIT, experimental_smp_jit: !+process.env.LINUX_GPU_NO_JIT,
     log_level: 0, net_device: { type: "none" }, screen_adapter: sink,
     ...(process.env.VRAM_SIZE ? { vram_size: Number(process.env.VRAM_SIZE) } : {}),
+    ...(process.env.GPU_LEVEL ? { graphics_adapter_test: { level: process.env.GPU_LEVEL } } : {}),
 });
 
 let serial = "";
