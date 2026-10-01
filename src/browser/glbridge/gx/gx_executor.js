@@ -182,6 +182,8 @@
          */
         async submit(bytes, options) {
             this.write = options.writeResponse;
+            // (a batch cut out of a bigger message may start anywhere)
+            if (bytes.byteOffset & 3) bytes = bytes.slice();
             const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 2);
             if (words[0] !== GX_MAGIC) throw new Error("not a GX batch");
             const end = Math.min(words[2], words.length);

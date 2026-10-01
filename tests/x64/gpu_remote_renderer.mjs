@@ -8,7 +8,7 @@
 //   new V86({ ..., graphics_adapter_test: { level: "vgpu9", renderer: remote.renderer } });
 //
 // GL_CHROME selects the browser. Frames on the socket: a type byte, then
-//   1 submit: seq (u32), the batch      2 reset
+//   1 submit: seq (u32), the batch      2 reset      7 submit of a GX batch
 //   3 write: offset (u32), the bytes    4 done: seq (u32)
 //   5 lost: the reason (UTF-8)          6 ready (the renderer is up)
 
@@ -21,7 +21,7 @@ import { createHash as create_hash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6 };
+const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6, submit_gx: 7, log: 8 };
 
 /** One binary WebSocket frame, server to client (not masked) */
 function frame(payload)
@@ -93,6 +93,7 @@ export async function create_remote_renderer(options = {})
             if(!message) return;
             const type = message[0];
             if(type === TYPES.ready) { ready_resolve(); return; }
+            if(type === TYPES.log) { console.log("renderer: " + message.subarray(1).toString()); return; }
             if(!to_device) return;
             if(type === TYPES.write)
             {
@@ -137,7 +138,7 @@ export async function create_remote_renderer(options = {})
             if(message["type"] === "submit")
             {
                 const bytes = message["bytes"], head = Buffer.alloc(5);
-                head[0] = TYPES.submit;
+                head[0] = message["stream"] === "gx" ? TYPES.submit_gx : TYPES.submit;
                 head.writeUInt32LE(message["seq"], 1);
                 stats.batches++;
                 stats.bytes += bytes.length;

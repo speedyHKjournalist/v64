@@ -7,7 +7,19 @@
 // The browser half of tests/x64/gpu_remote_renderer.mjs: the SVGA renderer,
 // on this page's WebGPU, for a device in a node process at the other end of
 // the WebSocket. The frame format is described there.
-const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6 };
+const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6, submit_gx: 7, log: 8 };
+// the renderer's warnings go to the harness, for its log
+for(const method of ["warn", "error"])
+{
+    const original = console[method];
+    console[method] = (...args) => {
+        original.apply(console, args);
+        const text = args.map(a => typeof a === "object" ? (a && a.stack) || JSON.stringify(a) : String(a)).join(" ");
+        if(globalThis.remoteSocket && globalThis.remoteSocket.readyState === 1) {
+            globalThis.remoteSocket.send(new Uint8Array([TYPES.log, ...new TextEncoder().encode(text.slice(0, 4000))]));
+        }
+    };
+}
 const status = document.getElementById("status");
 const socket = new WebSocket(new URLSearchParams(location.search).get("ws"));
 socket.binaryType = "arraybuffer";
@@ -28,13 +40,18 @@ const renderer = V86SVGARenderer({
     listen: handler => { to_renderer = handler; },
 }, {});
 let batches = 0;
+globalThis.remoteSocket = socket;
 socket.onopen = () => {
     status.textContent = "connected";
     socket.send(new Uint8Array([TYPES.ready]));
 };
 socket.onmessage = event => {
     const bytes = new Uint8Array(event.data);
-    if(bytes[0] === TYPES.submit)
+    if(bytes[0] === TYPES.submit_gx)
+    {
+        to_renderer({ type: "submit", stream: "gx", seq: new DataView(event.data).getUint32(1, true), bytes: bytes.subarray(5) });
+    }
+    else if(bytes[0] === TYPES.submit)
     {
         batches++;
         to_renderer({ type: "submit", seq: new DataView(event.data).getUint32(1, true), bytes: bytes.subarray(5) });
