@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>The D3D11 tessellator on the GPU</title>
+<pre id="result">RUNNING</pre>
+<script src="../../src/browser/glbridge/gx/tessellator.js"></script>
+<script src="../../src/browser/glbridge/gx/tessellator_wgsl.js"></script>
+<script type="module">
+// GX's tessellator in WGSL (tessellator_wgsl.js) against the JavaScript port
+// it mirrors (tessellator.js, itself checked against Microsoft's reference):
+// batches of patches with random tess factors, for every domain,
+// partitioning and output primitive, must give the same points (u, v,
+// patch) and indices.
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const { tessellate } = globalThis.V86Tessellator;
+const { TESSELLATOR_WGSL } = globalThis.V86TessellatorWGSL;
+
+(async () => {
+    try {
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+        const module = device.createShaderModule({ code: TESSELLATOR_WGSL });
+        const info = await module.getCompilationInfo();
+        const errors = info.messages.filter(m => m.type === "error");
+        check(!errors.length, "the WGSL compiles" + (errors.length ? ": " + errors.map(e => e.lineNum + ": " + e.message).join("; ") : ""));
+        const layout = device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: 4, buffer: { type: "uniform" } },
+            { binding: 1, visibility: 4, buffer: { type: "read-only-storage" } },
+            ...[2, 3, 4, 5, 6].map(binding => ({ binding, visibility: 4, buffer: { type: "storage" } })),
+        ] });
+        const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+        const pipeline = entryPoint => device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint } });
+        const count = pipeline("count"), scan = pipeline("scan"), generate = pipeline("generate");
+
+        let seed = 777;
+        const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+        const pick = () => { const r = rand(); return r < 0.2 ? Math.ceil(rand() * 8) : r < 0.3 ? rand() * 70 : r < 0.35 ? 1 : r < 0.37 ? 0 : rand() * 12 + 0.5; };
+        const PATCHES = 48, MAX_POINTS = PATCHES * 4500, MAX_INDICES = PATCHES * 26000;
+        const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+        let batches = 0, totalPatches = 0;
+        for(let domain = 1; domain <= 3; domain++)
+        for(let partitioning = 1; partitioning <= 4; partitioning++)
+        for(let primitive = 1; primitive <= (domain === 1 ? 2 : 4); primitive++)
+        {
+            const n = domain === 3 ? 6 : domain === 2 ? 4 : 2;
+            const factors = Array.from({ length: PATCHES }, () => Array.from({ length: n }, pick).map(Math.fround));
+            // the hull records: two vec4s of factors each
+            const hull = new Float32Array(PATCHES * 8);
+            factors.forEach((f, i) => hull.set(f, i * 8));
+            const params = new Uint32Array([PATCHES, domain, partitioning, primitive, 2, 0, MAX_POINTS, MAX_INDICES]);
+            const buffer = (data, size, usage) => {
+                const b = device.createBuffer({ size: size || data.byteLength, usage });
+                if(data) device.queue.writeBuffer(b, 0, data);
+                return b;
+            };
+            const uniform = buffer(params, 0, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+            const hullBuffer = buffer(hull, 0, STORAGE);
+            const counts = buffer(null, PATCHES * 8, STORAGE), offsets = buffer(null, PATCHES * 8, STORAGE);
+            const points = buffer(null, MAX_POINTS * 16, STORAGE), indices = buffer(null, MAX_INDICES * 4, STORAGE);
+            const args = buffer(null, 32, STORAGE | GPUBufferUsage.INDIRECT);
+            const group = device.createBindGroup({ layout, entries: [uniform, hullBuffer, counts, offsets, points, indices, args]
+                .map((b, binding) => ({ binding, resource: { buffer: b } })) });
+            const encoder = device.createCommandEncoder();
+            for(const [pipe, x] of [[count, Math.ceil(PATCHES / 64)], [scan, 1], [generate, Math.ceil(PATCHES / 64)]])
+            {
+                const pass = encoder.beginComputePass();
+                pass.setPipeline(pipe);
+                pass.setBindGroup(0, group);
+                pass.dispatchWorkgroups(x);
+                pass.end();
+            }
+            const read = [args, offsets, points, indices].map(b => {
+                const r = device.createBuffer({ size: b.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+                encoder.copyBufferToBuffer(b, 0, r, 0, b.size);
+                return r;
+            });
+            device.queue.submit([encoder.finish()]);
+            await Promise.all(read.map(r => r.mapAsync(GPUMapMode.READ)));
+            const [gotArgs, gotOffsets, gotPoints, gotIndices] = [
+                new Uint32Array(read[0].getMappedRange()), new Uint32Array(read[1].getMappedRange()),
+                new Uint32Array(read[2].getMappedRange()), new Uint32Array(read[3].getMappedRange())];
+            const pointsF = new Float32Array(gotPoints.buffer);
+            // the reference, patch by patch
+            let pointBase = 0, indexBase = 0;
+            for(let p = 0; p < PATCHES; p++)
+            {
+                const ref = tessellate({ domain, partitioning, primitive, factors: factors[p] });
+                const where = `domain ${domain} partitioning ${partitioning} primitive ${primitive} patch ${p} factors ${factors[p].map(f => f.toFixed(3))}`;
+                if(gotOffsets[p * 2] !== pointBase || gotOffsets[p * 2 + 1] !== indexBase)
+                    throw new Error("offsets " + gotOffsets[p * 2] + "/" + gotOffsets[p * 2 + 1] + " vs " + pointBase + "/" + indexBase + ": " + where);
+                for(let i = 0; i < ref.points.length / 2; i++)
+                {
+                    const at = (pointBase + i) * 4;
+                    if(pointsF[at] !== ref.points[i * 2] || pointsF[at + 1] !== ref.points[i * 2 + 1] || gotPoints[at + 2] !== p)
+                        throw new Error(`point ${i}: ${pointsF[at]},${pointsF[at + 1]} vs ${ref.points[i * 2]},${ref.points[i * 2 + 1]}: ` + where);
+                }
+                for(let i = 0; i < ref.indices.length; i++)
+                {
+                    if(gotIndices[indexBase + i] !== pointBase + ref.indices[i])
+                        throw new Error(`index ${i}: ${gotIndices[indexBase + i] - pointBase} vs ${ref.indices[i]}: ` + where);
+                }
+                pointBase += ref.points.length / 2;
+                indexBase += ref.indices.length;
+            }
+            if(gotArgs[3] !== indexBase || gotArgs[7] !== pointBase) throw new Error("the indirect arguments: " + Array.from(gotArgs));
+            read.forEach(r => r.unmap());
+            batches++;
+            totalPatches += PATCHES;
+        }
+        check(batches === 4 * 2 + 2 * 4 * 4, batches + " batches (" + totalPatches + " patches) match the reference, points and indices");
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error.stack || error) + "\n" + checks.join("\n");
+    }
+})();
+</script>
