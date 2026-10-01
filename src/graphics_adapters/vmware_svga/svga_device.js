@@ -139,7 +139,7 @@ export const LEVELS = {
 export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10", "dx10.1"];
 
 /** The level without a pinned one: the highest implemented, or 2D without a renderer */
-export const DEFAULT_3D_LEVEL = "dx10";
+export const DEFAULT_3D_LEVEL = "dx10.1";
 export const DEFAULT_2D_LEVEL = "2d-full";
 
 /**

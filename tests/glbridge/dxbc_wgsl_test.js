@@ -237,6 +237,26 @@ const TEX = program(PROGRAM.PS,
     console.log("PASS: arrays, cubes, comparisons, ld, resinfo, gradients, gather, 1D as 2D, derivatives");
 }
 
+// ---- two destinations, one of them a source: sincos r1.x, r0.x, r1.x ----------
+
+{
+    const SINCOS = program(PROGRAM.PS,
+        dcl_input_ps(1, XYZW, INTERPOLATION.LINEAR),
+        dcl_output(0, XYZW),
+        dcl_temps(2),
+        ins(OP.MOV, r(1, { mask: XYZW }), v(1, XYZW_S)),
+        ins(OP.SINCOS, r(1, { mask: X }), r(0, { mask: X }), r(1, { select: 0 })),
+        ins(OP.IMUL, r(1, { mask: Y }), r(0, { mask: Y }), r(1, { select: 1 }), r(1, { select: 1 })),
+        ins(OP.MOV, r(0, { mask: Z | W_ }), r(1, XYZW_S)),
+        ins(OP.MOV, o(0, { mask: XYZW }), r(0, XYZW_S)),
+        RET);
+    const { result } = translate("sincos", SINCOS, { targets: { 0: "f32" } });
+    // the cosine is of the source, not of the sine just written over it
+    assert.match(result.code, /let a = [^;]*r\[1u\][^;]*;\s*r\[1u\]\.x = [^;]*sin\(a\)[^;]*;\s*r\[0u\]\.x = [^;]*cos\(a\)/);
+    assert.match(result.code, /let a = [^;]*;\s*let b = [^;]*;\s*r\[1u\]\.y = [^;]*gx_imul_hi\(a, b\)[^;]*;\s*r\[0u\]\.y = [^;]*a \* b/);
+    console.log("PASS: sincos and imul whose destination is their source read it first");
+}
+
 // ---- shader model 4.1: cube arrays, lod, the rasterizer's samples, per-sample inputs ----
 
 const rasterizer = sel => operand(OPERAND.RASTERIZER, [], sel || XYZW_S);

@@ -25,7 +25,7 @@
 // (the GB shaders' bytecode, as "svga3d-shader" events).
 // WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; vmware_svga, whose
 // level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
-// a headless Chrome, and the device its highest level, dx10);
+// a headless Chrome, and the device its highest level, dx10.1);
 // WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install; WIN_HDB=<image>: a
 // second disk in place of the tools disk, read-only like the first.
 // WIN_LAUNCHER=<guest path of LAUNCH.EXE>: started from the Run dialog once
@@ -93,7 +93,7 @@ function save_overlay(filename)
 }
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
-// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (the default level, dx10)
+// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (the default level, dx10.1)
 const remote_renderer = process.env.WIN_GPU_RENDERER === "chrome" ?
     await (await import("./gpu_remote_renderer.mjs")).create_remote_renderer() : null;
 const vm = new V86({
@@ -678,6 +678,15 @@ try
                 const code = sh.code ? new Uint32Array(sh.code.buffer, sh.code.byteOffset, sh.code.byteLength >> 2) : [];
                 event("svga3d-shader", {shid, type: sh.type, code: Array.from(code, v => (v >>> 0).toString(16)).join(" ")});
             }
+        }
+        else if(verb === "dxshaders")
+        {
+            // the DX shaders' tokens as they are bound, as "dx-shader" events
+            const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+            if(svga && svga.svga3d) svga.svga3d.shader_log = argument === "off" ? null : (shid, type, bytes) => {
+                const code = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 2);
+                event("dx-shader", {shid, type, code: Array.from(code, v => (v >>> 0).toString(16)).join(" ")});
+            };
         }
         else if(verb === "svgalog")
         {

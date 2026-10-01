@@ -663,6 +663,8 @@ DXDevice.prototype.shader_code = function(context, shid, type, size, mob, offset
 {
     const bytes = size ? this.s.device.mobs.read(mob, offset, size & ~3) : null;
     if(!bytes) return this.warn("shader-mob", "a DX shader outside of its MOB");
+    // (a test's hook: tests/x64/windows_boot.mjs, "dxshaders")
+    if(this.s.shader_log) this.s.shader_log(shid, type, bytes);
     this.gx().command(GX.SHADER_CODE, [context.cid, shid, type], bytes);
 };
 

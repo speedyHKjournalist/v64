@@ -849,8 +849,14 @@
                 case OP.DP3: return wf(`vec4<f32>(dot(${f(0)}.xyz, ${f(1)}.xyz))`);
                 case OP.DP4: return wf(`vec4<f32>(dot(${f(0)}, ${f(1)}))`);
                 case OP.SINCOS:
-                    if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) this.write(ins, `sin(${f(0)})`, "f", 0);
-                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) this.write(ins, `cos(${f(0)})`, "f", 1);
+                    // (the source read once: a destination may be it, "sincos r1.x, r0.x, r1.x")
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let a = ${f(0)};`);
+                    if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) this.write(ins, "sin(a)", "f", 0);
+                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) this.write(ins, "cos(a)", "f", 1);
+                    this.indent--;
+                    this.line("}");
                     return;
                 case OP.EQ: return wu(mask(`${f(0)} == ${f(1)}`));
                 case OP.NE: return wu(mask(`${f(0)} != ${f(1)}`));
@@ -905,12 +911,17 @@
                 case OP.UMUL: {
                     const signed = ins.op === OP.IMUL;
                     this.helpers.add(signed ? "imul_hi" : "umul_hi");
+                    // (the sources read once: the high half may overwrite one)
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let a = ${signed ? I(0) : U(0)};`);
+                    this.line(`let b = ${signed ? I(1) : U(1)};`);
                     if (ins.dst[0] && ins.dst[0].type !== OPERAND.NULL) {
-                        this.write(ins, signed ? `gx_imul_hi(${I(0)}, ${I(1)})` : `gx_umul_hi(${U(0)}, ${U(1)})`, signed ? "i" : "u", 0);
+                        this.write(ins, signed ? "gx_imul_hi(a, b)" : "gx_umul_hi(a, b)", signed ? "i" : "u", 0);
                     }
-                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) {
-                        this.write(ins, signed ? `${I(0)} * ${I(1)}` : `${U(0)} * ${U(1)}`, signed ? "i" : "u", 1);
-                    }
+                    if (ins.dst[1] && ins.dst[1].type !== OPERAND.NULL) this.write(ins, "a * b", signed ? "i" : "u", 1);
+                    this.indent--;
+                    this.line("}");
                     return;
                 }
                 case OP.UDIV: {

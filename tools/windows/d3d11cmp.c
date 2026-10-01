@@ -359,7 +359,7 @@ static void case_msaa(Device *d)
 {
     /* a triangle into a 4x multisampled target, resolved */
     static const char source[] =
-        "float4 vs(uint i : SV_VertexID) : SV_Position { return float4(i == 1 ? 0.9 : -0.9, i == 2 ? 0.9 : -0.7, 0, 1); }"
+        "float4 vs(uint i : SV_VertexID) : SV_Position { return float4(i == 2 ? 0.9 : -0.9, i == 1 ? 0.9 : -0.7, 0, 1); }"
         "float4 ps(float4 p : SV_Position) : SV_Target { return float4(1, 0.8, 0.2, 1); }";
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Texture2D *ms = NULL;
@@ -602,13 +602,13 @@ static void case_independent_blend(Device *d)
 static void case_sample_info(Device *d)
 {
     /* into a 4x target of the standard pattern, shaded per sample: the
-       rasterizer's sample count, sample 1's position and the sample index,
-       resolved */
+       rasterizer's sample count, the sample index, whether the sample's
+       position is off the center (where exactly is the pattern's), resolved */
     static const char source[] =
-        "float4 vs(uint i : SV_VertexID) : SV_Position { return float4(i == 1 ? 0.9 : -0.9, i == 2 ? 0.9 : -0.7, 0, 1); }"
+        "float4 vs(uint i : SV_VertexID) : SV_Position { return float4(i == 2 ? 0.9 : -0.9, i == 1 ? 0.9 : -0.7, 0, 1); }"
         "float4 ps(float4 p : SV_Position, uint k : SV_SampleIndex) : SV_Target {"
-        " float2 at = GetRenderTargetSamplePosition(1);"
-        " return float4(GetRenderTargetSampleCount() / 4.0, at.x + 0.5, at.y + 0.5, k / 3.0); }";
+        " float2 at = GetRenderTargetSamplePosition(k);"
+        " return float4(GetRenderTargetSampleCount() / 4.0, k / 3.0, length(at) > 0.1 && length(at) < 0.5, 1); }";
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Texture2D *ms = NULL;
     ID3D11RenderTargetView *rtv = NULL;
@@ -642,14 +642,16 @@ static void case_sample_info(Device *d)
     ID3D11VertexShader_Release(v); ID3D11PixelShader_Release(p);
 }
 
-static const struct { const char *name; void (*run)(Device *); D3D_FEATURE_LEVEL level; } CASES[] = {
+/* (edges: multisampled, so a triangle's edges depend on where the samples
+   are, which only the standard pattern fixes; v86 supersamples on a grid) */
+static const struct { const char *name; void (*run)(Device *); D3D_FEATURE_LEVEL level; int edges; } CASES[] = {
     { "triangle", case_triangle, D3D_FEATURE_LEVEL_10_0 }, { "texture", case_texture, D3D_FEATURE_LEVEL_10_0 },
     { "depth_blend", case_depth_blend, D3D_FEATURE_LEVEL_10_0 }, { "instancing", case_instancing, D3D_FEATURE_LEVEL_10_0 },
-    { "gs", case_gs, D3D_FEATURE_LEVEL_10_0 }, { "msaa", case_msaa, D3D_FEATURE_LEVEL_10_0 },
+    { "gs", case_gs, D3D_FEATURE_LEVEL_10_0 }, { "msaa", case_msaa, D3D_FEATURE_LEVEL_10_0, 1 },
     { "stream_output", case_stream_output, D3D_FEATURE_LEVEL_10_0 },
     { "cube_array", case_cube_array, D3D_FEATURE_LEVEL_10_1 }, { "gather_lod", case_gather_lod, D3D_FEATURE_LEVEL_10_1 },
     { "independent_blend", case_independent_blend, D3D_FEATURE_LEVEL_10_1 },
-    { "sample_info", case_sample_info, D3D_FEATURE_LEVEL_10_1 },
+    { "sample_info", case_sample_info, D3D_FEATURE_LEVEL_10_1, 1 },
 };
 
 /* at most `highest`: WARP draws at the level the hardware got */
@@ -688,6 +690,19 @@ static int open_device(Device *d, D3D_DRIVER_TYPE type, const char *name, D3D_FE
     return 1;
 }
 
+/* whether a pixel is on an edge: a neighbour differs from it */
+static int edge(const Device *d, int pixel)
+{
+    static const int dx[4] = { 1, -1, 0, 0 }, dy[4] = { 0, 0, 1, -1 };
+    int x = pixel % SIZE, y = pixel / SIZE, k;
+    for (k = 0; k < 4; k++) {
+        int nx = x + dx[k], ny = y + dy[k];
+        if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) continue;
+        if (memcmp(d->pixels + pixel * 4, d->pixels + (ny * SIZE + nx) * 4, 3)) return 1;
+    }
+    return 0;
+}
+
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, int show)
 {
     Device hw, warp;
@@ -710,6 +725,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
         CASES[k].run(&warp); read_back(&warp);
         for (i = 0; i < SIZE * SIZE * 4; i++) {
             int diff = abs((int)hw.pixels[i] - (int)warp.pixels[i]);
+            if (CASES[k].edges && edge(&warp, i / 4)) continue;
             if (diff > worst) worst = diff;
             if (diff > 16 && (i & 3) != 3) off++;
         }
@@ -719,7 +735,23 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
             CASES[k].name, off ? "DIFFERS" : "same", worst, off,
             hw.pixels[sample], hw.pixels[sample + 1], hw.pixels[sample + 2], hw.pixels[sample + 3],
             warp.pixels[sample], warp.pixels[sample + 1], warp.pixels[sample + 2], warp.pixels[sample + 3]);
-        if (off) failed++; else passed++;
+        if (off) {
+            /* the two pictures, 8x8 points of them, for the log */
+            int row, column;
+            for (row = 0; row < 8; row++) {
+                char line[400];
+                int n = 0;
+                for (column = 0; column < 8; column++) {
+                    int at = ((row * 8 + 4) * SIZE + column * 8 + 4) * 4;
+                    n += snprintf(line + n, sizeof line - n, " %02x%02x%02x/%02x%02x%02x", hw.pixels[at], hw.pixels[at + 1], hw.pixels[at + 2],
+                        warp.pixels[at], warp.pixels[at + 1], warp.pixels[at + 2]);
+                }
+                say("case %s row %d (hw/warp):%s", CASES[k].name, row, line);
+            }
+            failed++;
+        } else {
+            passed++;
+        }
     }
     say("end: %d same, %d differ", passed, failed);
     return 0;

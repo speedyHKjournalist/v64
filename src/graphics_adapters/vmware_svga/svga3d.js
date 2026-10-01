@@ -183,6 +183,8 @@ export function SVGA3D(device, renderer)
     this.warned = new Set();
     /** @type {?function(number, !Int32Array)} sees each command (for test harnesses) */
     this.command_log = null;
+    /** @type {?function(number, number, !Uint8Array)} tests: each DX shader bound (shid, type, tokens) */
+    this.shader_log = null;
     /** @type {!Array<string>} the first warnings, for test harnesses */
     this.warnings = [];
     /** @type {!Object<number, number>} how often each command came (for the harnesses) */
@@ -1955,6 +1957,36 @@ SVGA3D.prototype.update_gb_surface = function(surface)
 };
 
 /**
+ * UPDATE_ZERO_SURFACE: the surface's images become zeros (its MOB is not
+ * read, VMware's DX driver sends it for resources made without contents);
+ * WRITE_ZERO_SURFACE: and its MOB too
+ */
+SVGA3D.prototype.zero_gb_surface = function(surface, write_mob)
+{
+    const zeros = {
+        read: /** @type {function(number, number, number): Uint8Array} */ ((id, offset, length) => new Uint8Array(length)),
+        write: /** @type {function(number, number, Uint8Array): boolean} */ ((id, offset, bytes) => false),
+    };
+    for(let face = 0; face < layers_of(surface); face++)
+    {
+        for(let mip = 0; mip < surface.sizes.length; mip++)
+        {
+            const { offset, pitch } = this.mob_image(surface, face, mip);
+            const level = level_layout(surface, mip);
+            if(write_mob && surface.mob !== INVALID)
+            {
+                this.device.mobs.write(surface.mob, offset, new Uint8Array(pitch * level.rows * level.depth));
+            }
+            // (a new texture is zeros already; a multisampled one takes no upload)
+            if(surface.samples > 1) continue;
+            this.dma_to_host(surface, face, mip, zeros, 0, offset, pitch,
+                [0, 0, 0, level.width, level.height, level.depth, 0, 0, 0]);
+        }
+    }
+    surface.host_newer = false;
+};
+
+/**
  * READBACK_GB_IMAGE(_PARTIAL): an image from the GPU into the MOB, written
  * when the renderer has read it (fences and command buffers after it wait)
  */
@@ -2212,6 +2244,13 @@ SVGA3D.prototype.gb_command = function(id, p)
         {
             const surface = enough(1) && this.surfaces.get(u(0));
             if(surface) this.update_gb_surface(surface);
+            return true;
+        }
+        case C.SVGA_3D_CMD_UPDATE_ZERO_SURFACE:
+        case C.SVGA_3D_CMD_WRITE_ZERO_SURFACE:
+        {
+            const surface = enough(1) && this.surfaces.get(u(0));
+            if(surface) this.zero_gb_surface(surface, id === C.SVGA_3D_CMD_WRITE_ZERO_SURFACE);
             return true;
         }
         case C.SVGA_3D_CMD_READBACK_GB_IMAGE:
