@@ -20,7 +20,8 @@
 // "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
 // <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>",
 // "launch <command line>" (run by the launcher with cmd /c, see WIN_LAUNCHER),
-// "display <width> <height> [index]" (V86.set_display_size), "snapshot" (saved
+// "display <width> <height> [index]" (V86.set_display_size), "mouse <dx> <dy>",
+// "snapshot" (saved
 // and restored in place),
 // "svgalog on|off" (the SVGA3D commands other than DX and the frequent GB
 // ones, with their first words, as "svga3d-command" events), "svgashaders"
@@ -398,6 +399,7 @@ function observe_svga()
         const t = cpu.devices.graphics_adapter.pci_device;
         const state = {active: gpu.active, scanouts: gpu.scanouts.map(sc => [sc.enabled, sc.host_width, sc.host_height, sc.resource_id, sc.width, sc.height]),
             resources: gpu.resources.size, errors: gpu.stats.errors, last_error: gpu.stats.last_error.toString(16), commands: gpu.stats.commands,
+            cursor: [gpu.stats.cursor_updates, gpu.stats.cursor_moves, gpu.cursor.width, gpu.cursor.height, gpu.cursor.visible],
             status: t && t.device_status, features: t && Array.from(t.driver_feature || [], f => (f >>> 0).toString(16)),
             queues: t && t.queues && t.queues.map(q => [q.size, q.enabled, (q.desc_addr || 0).toString(16), q.avail_last_idx]),
             isr: t && t.isr_status, irq_line: cpu.devices.pci.device_spaces[cpu.devices.graphics_adapter.pci_id][15] & 0xFF};
@@ -705,6 +707,8 @@ try
         else if(verb === "shot") screenshot(true);
         // the page's size for a display (V86.set_display_size; virtio_gpu tells the guest)
         else if(verb === "display") vm.set_display_size(...argument.split(/\s+/).map(Number));
+        // a relative mouse movement (PS/2), in pixels, y up
+        else if(verb === "mouse") vm.bus.send("mouse-delta", argument.split(/\s+/).map(Number));
         // a snapshot saved and restored in place (the disks are not in it, and unchanged)
         else if(verb === "snapshot")
         {

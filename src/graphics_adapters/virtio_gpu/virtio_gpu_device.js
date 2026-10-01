@@ -226,7 +226,7 @@ export function VirtioGPU(machine, options)
     this.blank = null;
     this.serial = 0x0086;
     /** What the driver has done, for harnesses and debugging */
-    this.stats = { commands: {}, errors: 0, last_error: 0, transfers: 0, flushes: 0 };
+    this.stats = { commands: {}, errors: 0, last_error: 0, transfers: 0, flushes: 0, cursor_updates: 0, cursor_moves: 0 };
 
     const features = LEVELS[this.level].features;
     this.virtio = machine.create_virtio({
@@ -739,6 +739,7 @@ VirtioGPU.prototype.cursor_command = function(bytes)
     const x = scanout.screen_x + view.getInt32(HEADER_SIZE + 4, true), y = scanout.screen_y + view.getInt32(HEADER_SIZE + 8, true);
     if(type === CMD_UPDATE_CURSOR && bytes.length >= HEADER_SIZE + 28)
     {
+        this.stats.cursor_updates++;
         const id = view.getUint32(HEADER_SIZE + 16, true);
         const resource = this.resources.get(id);
         if(!resource)
@@ -758,6 +759,7 @@ VirtioGPU.prototype.cursor_command = function(bytes)
     }
     else if(type === CMD_MOVE_CURSOR)
     {
+        this.stats.cursor_moves++;
         this.cursor.move(x, y, this.cursor.visible);
     }
 };
