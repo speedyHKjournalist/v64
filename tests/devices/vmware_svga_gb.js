@@ -277,4 +277,30 @@ assert.equal(fence_passed(), 10);
 assert.equal(errors(), 1);
 console.log("PASS: snapshots of the gb9 level");
 
+// The device's ABI: a restore declares the level and the capabilities the
+// snapshot's device declared (its driver read them at boot), not what this
+// version would choose or what its tables say now
+const { LEVELS } = await import("../../src/graphics_adapters/vmware_svga/svga_device.js");
+const gb9_caps = reg(C.SVGA_REG_CAPABILITIES);
+reg(C.SVGA_REG_DEV_CAP, C.SVGA3D_DEVCAP_MAX_TEXTURE_WIDTH);
+const declared_width = reg(C.SVGA_REG_DEV_CAP);
+const saving2 = vm.save_state();
+await new Promise(resolve => setTimeout(resolve, 0));
+run_renderer();
+const state2 = await saving2;
+// as if this machine had chosen another level, and the table had changed since
+svga.level = "vgpu9";
+svga.caps = LEVELS["vgpu9"].caps;
+svga.configure_objects();
+svga.devcaps.set(C.SVGA3D_DEVCAP_MAX_TEXTURE_WIDTH, 1);
+assert.equal(svga.mobs, null, "no MOBs at vgpu9");
+await vm.restore_state(state2);
+run_renderer();
+assert.equal(svga.level, "gb9", "the snapshot's level");
+assert.equal(reg(C.SVGA_REG_CAPABILITIES), gb9_caps, "its capabilities");
+reg(C.SVGA_REG_DEV_CAP, C.SVGA3D_DEVCAP_MAX_TEXTURE_WIDTH);
+assert.equal(reg(C.SVGA_REG_DEV_CAP), declared_width, "the devcap value it declared");
+assert.equal(svga.mobs.read32(1, PAGE + 8), 0xC0FFEE, "and its MOBs");
+console.log("PASS: a restore declares the snapshot's level and capabilities");
+
 await vm.destroy();

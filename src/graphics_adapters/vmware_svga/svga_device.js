@@ -120,6 +120,10 @@ export const LEVELS = {
 /** Lowest to highest; without a pinned level the highest one there is a renderer for */
 export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10"];
 
+/** The level without a pinned one: the highest implemented, or 2D without a renderer */
+export const DEFAULT_3D_LEVEL = "dx10";
+export const DEFAULT_2D_LEVEL = "2d-full";
+
 /**
  * @param {number} bpp
  * @return {number}
@@ -144,16 +148,11 @@ export function SVGADevice(machine, options)
     /** @const */
     this.display = machine.display;
 
-    const level = options.level || (options.renderer ? "vgpu9" : "2d-full");
-    if(!LEVELS[level])
-    {
-        throw new Error("vmware_svga: unknown level " + JSON.stringify(level) + "; levels: " + LEVEL_ORDER.join(", "));
-    }
-    if((LEVELS[level].caps & C.SVGA_CAP_3D) && !options.renderer)
-    {
-        throw new Error("vmware_svga: level " + level + " needs a 3D renderer (WebGPU and libv86-webgpu.js)");
-    }
-    /** @const @type {string} */
+    /** @const the channel to the 3D renderer, if there is one */
+    this.renderer = options.renderer || null;
+    const level = options.level || (options.renderer ? DEFAULT_3D_LEVEL : DEFAULT_2D_LEVEL);
+    this.check_level(level);
+    /** @type {string} what the device declares (a restore may change it to the snapshot's) */
     this.level = level;
     this.caps = LEVELS[level].caps;
     this.fifo_caps = LEVELS[level].fifo_caps;
@@ -200,16 +199,15 @@ export function SVGADevice(machine, options)
     /** What the driver has done, for harnesses and debugging */
     this.stats = { fifo_commands: 0, command_buffers: 0, unknown_commands: 0, last_unknown: 0, errors: 0, commands: {}, contexts: {}, statuses: {},
         irq_raised: 0, irq_status_reads: 0, irq_acks: 0 };
-    // guest-backed objects, at the levels that have them
-    const gb = !!(this.caps & C.SVGA_CAP_GBOBJECTS);
-    /** @const @type {MOBTable} */
-    this.mobs = gb ? new MOBTable(machine) : null;
-    /** @const @type {OTables} */
-    this.otables = gb ? new OTables(machine) : null;
-    /** @const @type {!Map<number, number>} SVGA3D_DEVCAP_* through SVGA_REG_DEV_CAP */
-    this.devcaps = new Map(this.caps & C.SVGA_CAP_DX ? DX10_DEVCAPS : VGPU9_DEVCAPS);
-    /** @const @type {SVGA3D} 3D, at the levels that have it */
-    this.svga3d = (LEVELS[level].caps & C.SVGA_CAP_3D) ? new SVGA3D(this, /** @type {!Object} */ (options.renderer)) : null;
+    /** @type {MOBTable} guest-backed objects, at the levels that have them */
+    this.mobs = null;
+    /** @type {OTables} */
+    this.otables = null;
+    /** @type {!Map<number, number>} SVGA3D_DEVCAP_* through SVGA_REG_DEV_CAP */
+    this.devcaps = new Map();
+    /** @type {SVGA3D} 3D, at the levels that have it */
+    this.svga3d = null;
+    this.configure_objects();
 
     // The picture of the SVGA mode, in wasm memory (mmio_ram_allocate_pixels)
     this.pixels = null;
@@ -234,6 +232,36 @@ export function SVGADevice(machine, options)
     this.pci_registered = true;
     this.display.add_source(this);
 }
+
+/**
+ * Whether this device can declare a level: one that exists, with a renderer
+ * if it has 3D
+ */
+SVGADevice.prototype.check_level = function(level)
+{
+    if(!LEVELS[level])
+    {
+        throw new Error("vmware_svga: unknown level " + JSON.stringify(level) + "; levels: " + LEVEL_ORDER.join(", "));
+    }
+    if((LEVELS[level].caps & C.SVGA_CAP_3D) && !this.renderer)
+    {
+        throw new Error("vmware_svga: level " + level + " needs a 3D renderer (WebGPU and libv86-webgpu.js)");
+    }
+};
+
+/**
+ * The objects the declared capabilities need: MOBs and object tables, the
+ * devcaps, 3D
+ */
+SVGADevice.prototype.configure_objects = function()
+{
+    const gb = !!(this.caps & C.SVGA_CAP_GBOBJECTS);
+    this.mobs = gb ? new MOBTable(this.machine) : null;
+    this.otables = gb ? new OTables(this.machine) : null;
+    this.devcaps = new Map(this.caps & C.SVGA_CAP_DX ? DX10_DEVCAPS : VGPU9_DEVCAPS);
+    // (a new one takes over the renderer's channel)
+    this.svga3d = this.caps & C.SVGA_CAP_3D ? new SVGA3D(this, /** @type {!Object} */ (this.renderer)) : null;
+};
 
 /**
  * The frame buffer (BAR1), as a view taken now: growing wasm memory detaches
@@ -1363,7 +1391,12 @@ SVGADevice.prototype.render_screens = function()
 // ---------------------------------------------------------------------------
 // Snapshots
 
-const STATE_VERSION = 4;
+// The device's ABI (plan section 13): a snapshot keeps the level and every
+// capability the guest's driver read at boot (caps, FIFO caps, CAP2, the
+// devcaps), and a restore declares those again, whatever this version would
+// choose or its tables now say. A new capability therefore needs a new level;
+// what a level once declared keeps working.
+const STATE_VERSION = 5;
 
 SVGADevice.prototype.get_state = function()
 {
@@ -1385,6 +1418,8 @@ SVGADevice.prototype.get_state = function()
         // version 4: guest-backed objects
         this.mobs ? this.mobs.get_state() : null, this.otables ? this.otables.get_state() : null,
         [this.devcap_index, this.cursor_mob, ...this.guest_driver],
+        // version 5: the capabilities declared
+        [this.caps, this.fifo_caps, this.cap2, Array.from(this.devcaps)],
     ];
 };
 
@@ -1400,10 +1435,19 @@ SVGADevice.prototype.prepare_save = function()
 SVGADevice.prototype.set_state = function(state)
 {
     if(state[0] < 1 || state[0] > STATE_VERSION) throw new Error("vmware_svga: unsupported state version " + state[0]);
-    if(state[1] !== this.level)
+    // the snapshot's level and capabilities, not this machine's choice
+    this.check_level(state[1]);
+    const declared = state[0] >= 5 ? state[17] : null;
+    const caps = declared ? declared[0] : LEVELS[state[1]].caps;
+    this.level = state[1];
+    this.fifo_caps = declared ? declared[1] : LEVELS[state[1]].fifo_caps;
+    this.cap2 = declared ? declared[2] : LEVELS[state[1]].cap2 || 0;
+    if(caps !== this.caps)
     {
-        throw new Error("vmware_svga: the snapshot's device declares level " + state[1] + ", this one " + this.level);
+        this.caps = caps;
+        this.configure_objects();
     }
+    if(declared) this.devcaps = new Map(declared[3]);
     if(state[2] !== this.vram_size)
     {
         throw new Error("vmware_svga: the snapshot has vram_size " + state[2] + ", this machine " + this.vram_size);

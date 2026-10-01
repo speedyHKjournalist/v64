@@ -25,7 +25,7 @@
 // (the GB shaders' bytecode, as "svga3d-shader" events).
 // WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; vmware_svga, whose
 // level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
-// a headless Chrome, and the level vgpu9);
+// a headless Chrome, and the device its highest level, dx10);
 // WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install; WIN_HDB=<image>: a
 // second disk in place of the tools disk, read-only like the first.
 // WIN_LAUNCHER=<guest path of LAUNCH.EXE>: started from the Run dialog once
@@ -92,13 +92,13 @@ function save_overlay(filename)
 }
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
-// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (level vgpu9)
+// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (the default level, dx10)
 const remote_renderer = process.env.WIN_GPU_RENDERER === "chrome" ?
     await (await import("./gpu_remote_renderer.mjs")).create_remote_renderer() : null;
 const vm = new V86({
     graphics_adapter: process.env.WIN_GRAPHICS_ADAPTER || "bochs_vga",
     // WIN_SVGA_LEVEL: pin what vmware_svga declares (2d, 2d-full, ...)
-    ...(process.env.WIN_SVGA_LEVEL || remote_renderer ? {graphics_adapter_test: {level: process.env.WIN_SVGA_LEVEL || "vgpu9",
+    ...(process.env.WIN_SVGA_LEVEL || remote_renderer ? {graphics_adapter_test: {level: process.env.WIN_SVGA_LEVEL || undefined,
         renderer: remote_renderer && remote_renderer.renderer}} : {}),
     wasm_path: process.env.WASM_PATH,
     ...(process.env.WIN_CDROM ? {cdrom: {url: path.resolve(process.env.WIN_CDROM)}} : {}),
