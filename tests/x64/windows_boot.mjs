@@ -22,7 +22,8 @@
 // WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; vmware_svga, whose
 // level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
 // a headless Chrome, and the level vgpu9);
-// WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install.
+// WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install; WIN_HDB=<image>: a
+// second disk in place of the tools disk, read-only like the first.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -55,6 +56,11 @@ const probe32 = build("i686-w64-mingw32-gcc", "_entry@0", path.join(out, "PROBE3
 const cpuload = build("x86_64-w64-mingw32-gcc", "entry", path.join(out, "CPULOAD.EXE"), "tests/x64/windows_cpuload.c");
 const tools = new MemoryDisk(make_fat16({"PROBE64.EXE": probe64, "PROBE32.EXE": probe32, "CPULOAD.EXE": cpuload}));
 const source = new ReadOnlyOverlayDisk(image_path);
+// WIN_HDB=<image>: that disk (e.g. retro-gaming-site/game/3dmark06.img) in
+// place of the tools disk, never written either (its writes stay in memory)
+const hdb_path = process.env.WIN_HDB && path.resolve(process.env.WIN_HDB);
+const hdb_stat = hdb_path && fs.statSync(hdb_path);
+const hdb = hdb_path ? new ReadOnlyOverlayDisk(hdb_path) : tools;
 // Overlay file: "V86OVL1\0", image size (u64), sector count (u32), the
 // sector numbers (u32 each), then their contents
 if(process.env.WIN_OVERLAY_LOAD)
@@ -89,7 +95,7 @@ const vm = new V86({
     wasm_path: process.env.WASM_PATH,
     ...(process.env.WIN_CDROM ? {cdrom: {url: path.resolve(process.env.WIN_CDROM)}} : {}),
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
-    hda: source, hdb: tools, memory_size: memory_mb * 1048576, vram_size: 16 << 20,
+    hda: source, hdb, memory_size: memory_mb * 1048576, vram_size: 16 << 20,
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
     // WIN_QEMU_COMPATIBLE=1: devices where QEMU, which the image was installed with, had them
     qemu_compatible: !!+process.env.WIN_QEMU_COMPATIBLE,
@@ -849,7 +855,8 @@ try
         }
         assert.ok(!shutdown_deadline || performance.now() < shutdown_deadline, "the guest powered off");
     }
-    for(const arch of process.env.WIN_STOP_AT_DESKTOP || process.env.WIN_IDLE ? [] : [64, 32])
+    // (the probes run in plain qualification runs, not in setup sessions)
+    for(const arch of process.env.WIN_STOP_AT_DESKTOP || process.env.WIN_IDLE || process.env.WIN_SETUP || process.env.WIN_HDB ? [] : [64, 32])
     {
         const r = report.results[arch];
         assert.ok(r, `probe ${arch} completed`);
@@ -907,10 +914,12 @@ finally
     await vm.stop();
     const final_stat = fs.statSync(image_path);
     assert.equal(final_stat.mtimeMs, source_stat.mtimeMs, "the source image was never written");
+    if(hdb_path) assert.equal(fs.statSync(hdb_path).mtimeMs, hdb_stat.mtimeMs, "the second disk's image was never written");
     report.wall_s = elapsed();
     fs.writeFileSync(path.join(out, `result-${jit ? "page" : "interpreter"}-${cores}c${report.parallel ? "-parallel" : ""}.json`),
         JSON.stringify(report, null, 1));
     fs.writeFileSync(path.join(out, "tools-final.img"), tools.bytes);
     await vm.destroy();
     source.close();
+    if(hdb_path) hdb.close();
 }
