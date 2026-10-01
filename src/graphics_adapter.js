@@ -21,7 +21,7 @@ import { CPU } from "./cpu.js";
 const ADAPTERS = ["bochs_vga", "vmware_svga", "virtio_gpu", "none"];
 
 /** The ones that exist so far */
-const IMPLEMENTED = ["bochs_vga", "none"];
+const IMPLEMENTED = ["bochs_vga", "vmware_svga", "none"];
 
 /** The global registry plugin files add their descriptors to */
 const REGISTRY = "V86GraphicsAdapters";
@@ -430,6 +430,15 @@ GraphicsAdapter.prototype.register_pci = function(description)
 GraphicsAdapter.prototype.vga = function()
 {
     return this.device["vga"];
+};
+
+/**
+ * A machine reset (PCIRST#): the plugin's optional reset hook
+ */
+GraphicsAdapter.prototype.reset = function()
+{
+    const reset = this.device["reset"];
+    if(typeof reset === "function") reset();
 };
 
 GraphicsAdapter.prototype.get_state = function()

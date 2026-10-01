@@ -200,7 +200,7 @@ try
 catch(error)
 {
     failed = true;
-    console.error("LINUX_GPU_FAIL " + adapter + ": " + error.message);
+    console.error("LINUX_GPU_FAIL " + adapter + ": " + error.message + "\n" + error.stack);
     emulator.v86 && emulator.v86.cpu.devices.display && emulator.v86.cpu.devices.display.request_frame(true);
     save_png(sink, "failure");
 }

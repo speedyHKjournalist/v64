@@ -364,7 +364,7 @@ export interface V86Options {
      * gives a machine without a display (serial console only).
      * "bochs_vga" is the display v86 always had.
      */
-    graphics_adapter: "bochs_vga" | "none";
+    graphics_adapter: "bochs_vga" | "vmware_svga" | "none";
     /**
      * Path or URL of the graphics_adapter's plugin file. By default
      * build/v86-<name>.js relative to the page (beside libv86.js in node),

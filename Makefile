@@ -128,7 +128,7 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 # when graphics_adapter names it. Built with every bundle, which looks for
 # them beside itself. The boundary to v86 uses quoted names only, so a plugin
 # works with any bundle, including the ADVANCED-compiled v86_all.js.
-GRAPHICS_ADAPTER_PLUGINS=build/v86-bochs-vga.js
+GRAPHICS_ADAPTER_PLUGINS=build/v86-bochs-vga.js build/v86-vmware-svga.js
 GRAPHICS_ADAPTER_COMMON=src/cjs.js src/const.js src/lib.js src/log.js src/bus.js src/display.js \
 	src/graphics_adapters/machine.js src/graphics_adapters/vga_core.js
 
@@ -145,6 +145,14 @@ build/v86-bochs-vga.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/graph
 		--compilation_level SIMPLE --jscomp_off=missingProperties \
 		--output_wrapper ';(function(){%output%}).call(this);' \
 		--js $(GRAPHICS_ADAPTER_COMMON) --js src/graphics_adapters/bochs_vga/plugin.js
+
+build/v86-vmware-svga.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/graphics_adapters/vmware_svga/*.js
+	mkdir -p build
+	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
+		--compilation_level SIMPLE --jscomp_off=missingProperties \
+		--output_wrapper ';(function(){%output%}).call(this);' \
+		--js $(GRAPHICS_ADAPTER_COMMON) --js src/graphics_adapters/vmware_svga/svga_constants.js \
+		--js src/graphics_adapters/vmware_svga/svga_device.js --js src/graphics_adapters/vmware_svga/plugin.js
 
 .PHONY: graphics-adapters
 graphics-adapters: $(GRAPHICS_ADAPTER_PLUGINS)
@@ -429,6 +437,7 @@ acpi-tests: acpi-table-tests acpi-device-tests acpi-guest-tests
 devices-test: build/v86-debug.wasm
 	./tests/devices/display.js
 	./tests/devices/graphics_adapter.js
+	./tests/devices/vmware_svga.js
 	./tests/devices/mmio_ram.js
 	./tests/devices/virtio_9p.js
 	./tests/devices/virtio_console.js

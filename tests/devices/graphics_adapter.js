@@ -47,7 +47,7 @@ async function start(options)
 for(const [options, message] of [
     [{}, /graphics_adapter is required/],
     [{ graphics_adapter: "cirrus" }, /Unknown graphics_adapter "cirrus"/],
-    [{ graphics_adapter: "vmware_svga" }, /"vmware_svga" is not implemented yet/],
+    [{ graphics_adapter: "virtio_gpu" }, /"virtio_gpu" is not implemented yet/],
     [{ graphics_adapter: () => {} }, /use graphics_proxy: true/],
     [{ graphics_adapter: "bochs_vga", vga_memory_size: 8 << 20 }, /vga_memory_size was renamed to vram_size/],
     [{ graphics_adapter: "bochs_vga", vram_size: 3 << 20 }, /vram_size must be a power of two/],

@@ -2040,6 +2040,10 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
     {
         device.reset();
     }
+    if(this.devices.graphics_adapter)
+    {
+        this.devices.graphics_adapter.reset();
+    }
 
     if(keep_memory)
     {
