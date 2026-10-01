@@ -8,7 +8,7 @@
 // A value is "<serial> <command line>"; each new serial runs its line with
 // cmd /c (tests/x64/windows_boot.mjs: "launch <command line>").
 //
-//   x86_64-w64-mingw32-gcc -O2 -nostdlib -e entry -o LAUNCH.EXE launch.c -lkernel32
+//   x86_64-w64-mingw32-gcc -O2 -nostdlib -e entry -mwindows -o LAUNCH.EXE launch.c -lkernel32
 //
 // v86 lets user mode use the backdoor port, as VMware does.
 
