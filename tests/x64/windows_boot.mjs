@@ -29,7 +29,8 @@
 // WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install; WIN_HDB=<image>: a
 // second disk in place of the tools disk, read-only like the first.
 // WIN_LAUNCHER=<guest path of LAUNCH.EXE>: started from the Run dialog once
-// the desktop shows; then "launch" runs programs as the user without typing.
+// the desktop shows; then "launch" runs programs as the user without typing
+// (WIN_LAUNCHER_ADMIN=1: elevated, through UAC once, so they are too).
 // WIN_NO_PROBE=1: no qualification probe (its Run dialog takes the focus from
 // full-screen programs), and no signing in again unless a password box shows.
 import assert from "node:assert/strict";
@@ -833,7 +834,8 @@ try
             event("desktop");
             for(let attempt = 0; process.env.WIN_LAUNCHER && !launcher_ready && attempt < 4; attempt++)
             {
-                await run_command(process.env.WIN_LAUNCHER);
+                if(process.env.WIN_LAUNCHER_ADMIN) await run_admin(process.env.WIN_LAUNCHER);
+                else await run_command(process.env.WIN_LAUNCHER);
                 for(const limit = performance.now() + 60000; performance.now() < limit && !launcher_ready;) await delay(500);
                 event(launcher_ready ? "launcher" : "launcher-retry");
             }
