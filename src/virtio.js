@@ -151,6 +151,9 @@ var VirtIO_DeviceSpecificCapabilityOptions;
  *     notification: VirtIO_NotificationCapabilityOptions,
  *     isr_status: VirtIO_ISRCapabilityOptions,
  *     device_specific: (undefined | VirtIO_DeviceSpecificCapabilityOptions),
+ *     class_code: (undefined | number),
+ *     revision: (undefined | number),
+ *     bars: (undefined | !Array<{bar: number, size: number, address: number, prefetchable: boolean, on_move: function(number)}>),
  * }}
  */
 var VirtIO_Options;
@@ -184,9 +187,11 @@ export function VirtIO(cpu, options)
         // Status - enable capabilities list
         0x10, 0x00,
         // Revision ID
-        0x01,
-        // Prof IF, Subclass, Class code
-        0x00, 0x02, 0x00,
+        options.revision === undefined ? 0x01 : options.revision,
+        // Prof IF, Subclass, Class code (by default 0x000200, as v86's
+        // virtio devices always had; virtio-vga is a VGA controller, 0x030000)
+        ...(options.class_code === undefined ? [0x00, 0x02, 0x00] :
+            [options.class_code & 0xFF, options.class_code >> 8 & 0xFF, options.class_code >> 16 & 0xFF]),
         // Cache line size
         0x00,
         // Latency Timer
@@ -237,8 +242,19 @@ export function VirtIO(cpu, options)
 
     this.pci_id = options.pci_id;
 
-    // PCI bars gets filled in by capabilities further below.
+    // PCI bars gets filled in by capabilities further below, and by the
+    // device's own memory BARs (virtio-vga's frame buffer)
     this.pci_bars = [];
+    for(const bar of options.bars || [])
+    {
+        this.pci_bars[bar.bar] = { size: bar.size, on_move: bar.on_move };
+        const at = 0x10 + 4 * bar.bar;
+        const value = (bar.address & ~0xF | (bar.prefetchable ? 8 : 0)) >>> 0;
+        this.pci_space[at] = value & 0xFF;
+        this.pci_space[at + 1] = value >>> 8 & 0xFF;
+        this.pci_space[at + 2] = value >>> 16 & 0xFF;
+        this.pci_space[at + 3] = value >>> 24;
+    }
 
     this.name = options.name;
 
@@ -730,6 +746,14 @@ VirtIO.prototype.init_capabilities = function(capabilities)
     // Current offset.
     let cap_ptr = cap_next;
 
+    // Capabilities may share a BAR (at their offsets): it spans the furthest
+    const bar_extent = [];
+    for(const cap of capabilities)
+    {
+        const end = cap.offset + cap.struct.reduce((bytes, field) => bytes + field.bytes, 0);
+        bar_extent[cap.bar] = Math.max(bar_extent[cap.bar] || 0, end);
+    }
+
     for(const cap of capabilities)
     {
         const cap_len = VIRTIO_PCI_CAP_LENGTH + cap.extra.length;
@@ -743,12 +767,13 @@ VirtIO.prototype.init_capabilities = function(capabilities)
         dbg_assert(0 <= cap.bar && cap.bar < 6,
             "VirtIO device<" + this.name + "> capability invalid bar number");
 
-        let bar_size = cap.struct.reduce((bytes, field) => bytes + field.bytes, 0);
-        bar_size += cap.offset;
+        let bar_size = bar_extent[cap.bar];
 
         // Round up to next power of 2,
         // Minimum 16 bytes for its size to be detectable in general (esp. mmio).
         bar_size = bar_size < 16 ? 16 : 1 << (int_log2(bar_size - 1) + 1);
+        // (this capability's own length: its struct)
+        const cap_size = cap.struct.reduce((bytes, field) => bytes + field.bytes, 0);
 
         dbg_assert((cap.port & (bar_size - 1)) === 0,
             "VirtIO device<" + this.name + "> capability port should be aligned to pci bar size");
@@ -773,10 +798,14 @@ VirtIO.prototype.init_capabilities = function(capabilities)
         this.pci_space[cap_ptr + 10] = (cap.offset >>> 16) & 0xFF;
         this.pci_space[cap_ptr + 11] = cap.offset >>> 24;
 
-        this.pci_space[cap_ptr + 12] = bar_size & 0xFF;
-        this.pci_space[cap_ptr + 13] = (bar_size >>> 8) & 0xFF;
-        this.pci_space[cap_ptr + 14] = (bar_size >>> 16) & 0xFF;
-        this.pci_space[cap_ptr + 15] = bar_size >>> 24;
+        // (the length of the capability's window: the whole BAR when it has
+        // it alone, as before; its struct when it shares)
+        const shared = capabilities.filter(other => other.bar === cap.bar).length > 1;
+        const cap_window = shared ? Math.max(cap_size, 4) : bar_size;
+        this.pci_space[cap_ptr + 12] = cap_window & 0xFF;
+        this.pci_space[cap_ptr + 13] = (cap_window >>> 8) & 0xFF;
+        this.pci_space[cap_ptr + 14] = (cap_window >>> 16) & 0xFF;
+        this.pci_space[cap_ptr + 15] = cap_window >>> 24;
 
         for(const [i, extra_byte] of cap.extra.entries())
         {

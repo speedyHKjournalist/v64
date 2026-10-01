@@ -390,6 +390,52 @@ GraphicsMachine.prototype.write_physical = function(bytes, address)
     this.handle["write_physical"](bytes, address);
 };
 
+/**
+ * @param {number} address
+ * @return {number}
+ */
+GraphicsMachine.prototype.read16_physical = function(address)
+{
+    return this.handle["read16_physical"](address);
+};
+
+/**
+ * @param {number} address
+ * @return {number}
+ */
+GraphicsMachine.prototype.read32_physical = function(address)
+{
+    return this.handle["read32_physical"](address);
+};
+
+/**
+ * @param {number} address
+ * @param {number} value
+ */
+GraphicsMachine.prototype.write16_physical = function(address, value)
+{
+    this.handle["write16_physical"](address, value);
+};
+
+/**
+ * @param {number} address
+ * @param {number} value
+ */
+GraphicsMachine.prototype.write32_physical = function(address, value)
+{
+    this.handle["write32_physical"](address, value);
+};
+
+/**
+ * @param {number} address
+ * @param {number} length
+ * @return {boolean}
+ */
+GraphicsMachine.prototype.validate_physical_range = function(address, length)
+{
+    return this.handle["validate_physical_range"](address, length);
+};
+
 /** @return {number} the machine clock, in milliseconds */
 GraphicsMachine.prototype.now = function()
 {

@@ -373,6 +373,12 @@ GraphicsAdapter.prototype.create_handle = function()
 
         "read_physical": (address, length) => cpu.read_blob_physical(address, length),
         "write_physical": (bytes, address) => cpu.write_blob_physical(bytes, address),
+        // (virtqueues: virtio_gpu's rings in guest memory)
+        "read16_physical": address => cpu.read16_physical(address),
+        "read32_physical": address => cpu.read32_physical(address),
+        "write16_physical": (address, value) => cpu.write16_physical(address, value),
+        "write32_physical": (address, value) => cpu.write32_physical(address, value),
+        "validate_physical_range": (address, length) => cpu.validate_physical_range(address, length),
 
         "now": () => cpu.clock.now(),
         "in_vm86": () => !!(cpu.flags[0] & FLAG_VM),
