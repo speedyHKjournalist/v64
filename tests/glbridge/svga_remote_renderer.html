@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Remote SVGA renderer</title>
+<pre id="status">connecting</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script>
+// The browser half of tests/x64/gpu_remote_renderer.mjs: the SVGA renderer,
+// on this page's WebGPU, for a device in a node process at the other end of
+// the WebSocket. The frame format is described there.
+const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6 };
+const status = document.getElementById("status");
+const socket = new WebSocket(new URLSearchParams(location.search).get("ws"));
+socket.binaryType = "arraybuffer";
+let to_renderer = null;
+const send = (type, number, bytes) => {
+    const message = new Uint8Array(5 + (bytes ? bytes.length : 0));
+    message[0] = type;
+    new DataView(message.buffer).setUint32(1, number >>> 0, true);
+    if(bytes) message.set(bytes, 5);
+    socket.send(message);
+};
+const renderer = V86SVGARenderer({
+    post: message => {
+        if(message.type === "write") send(TYPES.write, message.offset, message.bytes);
+        else if(message.type === "done") send(TYPES.done, message.seq);
+        else if(message.type === "lost") socket.send(new Uint8Array([TYPES.lost, ...new TextEncoder().encode(message.reason)]));
+    },
+    listen: handler => { to_renderer = handler; },
+}, {});
+let batches = 0;
+socket.onopen = () => {
+    status.textContent = "connected";
+    socket.send(new Uint8Array([TYPES.ready]));
+};
+socket.onmessage = event => {
+    const bytes = new Uint8Array(event.data);
+    if(bytes[0] === TYPES.submit)
+    {
+        batches++;
+        to_renderer({ type: "submit", seq: new DataView(event.data).getUint32(1, true), bytes: bytes.subarray(5) });
+    }
+    else if(bytes[0] === TYPES.reset)
+    {
+        to_renderer({ type: "reset" });
+    }
+};
+socket.onclose = () => { status.textContent = "closed after " + batches + " batches"; };
+</script>

@@ -137,6 +137,8 @@ export function SVGA3D(device, renderer)
     /** @type {!Map<number, function(Uint8Array, number)>} request id -> answer */
     this.requests = new Map();
     this.warned = new Set();
+    /** @type {!Object<number, number>} how often each command came (for the harnesses) */
+    this.counts = {};
     renderer.listen(message => this.receive(message));
 }
 
@@ -287,6 +289,7 @@ SVGA3D.prototype.answer = function(offset, bytes)
 SVGA3D.prototype.command = function(id, p)
 {
     const f = new Float32Array(p.buffer, p.byteOffset, p.length);
+    this.counts[id] = (this.counts[id] || 0) + 1;
     switch(id)
     {
         case C.SVGA_3D_CMD_SURFACE_DEFINE: this.define_surface(p, false); break;

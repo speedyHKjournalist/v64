@@ -20,7 +20,8 @@
 // "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
 // <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>".
 // WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; vmware_svga, whose
-// level WIN_SVGA_LEVEL pins);
+// level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
+// a headless Chrome, and the level vgpu9);
 // WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install.
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -77,10 +78,14 @@ function save_overlay(filename)
 }
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (level vgpu9)
+const remote_renderer = process.env.WIN_GPU_RENDERER === "chrome" ?
+    await (await import("./gpu_remote_renderer.mjs")).create_remote_renderer() : null;
 const vm = new V86({
     graphics_adapter: process.env.WIN_GRAPHICS_ADAPTER || "bochs_vga",
     // WIN_SVGA_LEVEL: pin what vmware_svga declares (2d, 2d-full, ...)
-    ...(process.env.WIN_SVGA_LEVEL ? {graphics_adapter_test: {level: process.env.WIN_SVGA_LEVEL}} : {}),
+    ...(process.env.WIN_SVGA_LEVEL || remote_renderer ? {graphics_adapter_test: {level: process.env.WIN_SVGA_LEVEL || "vgpu9",
+        renderer: remote_renderer && remote_renderer.renderer}} : {}),
     wasm_path: process.env.WASM_PATH,
     ...(process.env.WIN_CDROM ? {cdrom: {url: path.resolve(process.env.WIN_CDROM)}} : {}),
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
@@ -214,11 +219,14 @@ const enter = () => press([28, 156]);
 // vga.svga_memory is a lib.js view (a Proxy that builds a typed array on
 // every element access): read the frame buffer through one plain array
 const svga_bytes = () => new Uint8Array(cpu.wasm_memory.buffer, cpu.devices.vga.svga_memory.byteOffset, cpu.devices.vga.vga_memory_size);
-// The picture on screen: the SVGA II register mode (vmware_svga with its
-// driver) or the VGA core's VBE mode; null in text and planar modes
+// The picture on screen: vmware_svga's first screen object (RGBA), its
+// register mode, or the VGA core's VBE mode (BGR in the frame buffer); null
+// in text and planar modes
 function frame_buffer()
 {
     const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+    const screen = svga && svga.svga_active() && svga.screens.screens.get(0);
+    if(screen) return {width: screen.width, height: screen.height, bpp: 32, pitch: screen.width * 4, offset: 0, rgba: screen.rgba};
     if(svga && svga.svga_active()) return {width: svga.width, height: svga.height, bpp: svga.bpp, pitch: svga.pitch(), offset: 0};
     const vga = cpu.devices.vga;
     if(!vga.svga_enabled) return null;
@@ -241,7 +249,8 @@ function pixel(x, y)
         pixel_memory = svga_bytes();
         pixel_memory_at = Math.floor(performance.now() / 50);
     }
-    const at = fb.offset + y * fb.pitch + x * bytes_per, m = pixel_memory;
+    const at = fb.offset + y * fb.pitch + x * bytes_per, m = fb.rgba || pixel_memory;
+    if(fb.rgba) return [m[at], m[at + 1], m[at + 2]];
     return bytes_per === 2 ? [(m[at + 1] >> 3) << 3, (m[at] >> 5 | (m[at + 1] & 7) << 3) << 2, (m[at] & 31) << 3] : [m[at + 2], m[at + 1], m[at]];
 }
 function password_box_visible()
@@ -356,17 +365,26 @@ function observe_svga()
         guest_id: svga.guest_id, config_done: svga.config_done, irq_mask: svga.irq_mask, id: svga.id.toString(16)};
     const key = JSON.stringify(state);
     if(key !== svga_seen) { svga_seen = key; event("svga", state); }
+    // the 3D commands so far, every 30 s while they change
+    if(svga.svga3d && performance.now() >= svga3d_next)
+    {
+        svga3d_next = performance.now() + 30000;
+        const counts = JSON.stringify(svga.svga3d.counts);
+        if(counts !== svga3d_seen) { svga3d_seen = counts; event("svga3d", {counts: svga.svga3d.counts, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size}); }
+    }
 }
+let svga3d_next = 0, svga3d_seen = "";
 function screenshot(force)
 {
     const fb = frame_buffer();
     if(!fb || !fb.width || !fb.height || ![32, 24, 16].includes(fb.bpp)) return null;
     const width = fb.width, height = fb.height;
-    const bytes_per = fb.bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = svga_bytes();
+    const bytes_per = fb.bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = fb.rgba || svga_bytes();
     for(let y = 0; y < height; y++) for(let x = 0; x < width; x++)
     {
         const from = fb.offset + y * fb.pitch + x * bytes_per, to = y * stride + 1 + x * 3;
-        if(bytes_per === 2)
+        if(fb.rgba) { raw[to] = memory[from]; raw[to + 1] = memory[from + 1]; raw[to + 2] = memory[from + 2]; }
+        else if(bytes_per === 2)
         {
             const v = memory[from] | memory[from + 1] << 8;
             raw[to] = (v >> 11 & 31) << 3; raw[to + 1] = (v >> 5 & 63) << 2; raw[to + 2] = (v & 31) << 3;
@@ -839,6 +857,11 @@ catch(error)
 }
 finally
 {
+    if(remote_renderer)
+    {
+        console.log("X64_WIN_RENDERER " + JSON.stringify(remote_renderer.stats));
+        remote_renderer.close();
+    }
     if(profiler) await profile_window();
     if(cpu && process.env.WIN_SIZE_STATS) cpu.wm.exports.x64_pagegen_size_dump();
     // WIN_DUMP_OVERLAY=<file>: the sectors written so far (no shutdown: what

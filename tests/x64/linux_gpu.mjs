@@ -9,7 +9,8 @@
 // GPU_ADAPTER: bochs_vga (default), vmware_svga, virtio_gpu
 // GPU_SCENARIO: the steps below (default: drm)
 // GPU_LEVEL: pins the adapter's level (graphics_adapter_test), e.g. 2d or 2d-full;
-// vgpu9 records the 3D batches into <out>/trace.bin (tests/x64/gpu_trace.mjs)
+// vgpu9 records the 3D batches into <out>/trace.bin (tests/x64/gpu_trace.mjs),
+// or with GPU_RENDERER=chrome draws them on the GPU of a headless Chrome
 // GPU_OUT: the output directory (default build/x64-linux/gpu-<adapter>[-<level>]/)
 // SHOW_LOGS=1: echo the serial console; LINUX_GPU_TIMEOUT: ms (default 900000)
 
@@ -20,6 +21,7 @@ import { deflateSync as deflate_sync } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { create_trace_renderer } from "./gpu_trace.mjs";
+import { create_remote_renderer } from "./gpu_remote_renderer.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const directory = root + "build/x64-linux/";
@@ -50,7 +52,9 @@ const SCENARIOS = {
         ["modetest -c 2>&1 | head -30; echo STEP_MODES_DONE", /STEP_MODES_DONE/],
         ["SCREENSHOT console", null],
         // (a screenshot 20 s into the command, while it draws)
-        ["kmscube -c 400 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/, { screenshot: "kmscube", after: 20000 }],
+        // (with 3D the 400 frames take seconds, not a minute)
+        ["kmscube -c 400 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube", after: process.env.GPU_LEVEL === "vgpu9" ? 2500 : 20000 }],
     ],
 };
 const steps = SCENARIOS[scenario];
@@ -118,9 +122,11 @@ function save_png(sink, name)
 
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const sink = new PictureSink();
-// A 3D level needs a renderer: in node, one that records the batches into a
-// trace (tests/x64/gpu_trace.mjs) and renders nothing
-const trace = process.env.GPU_LEVEL === "vgpu9" ?
+// A 3D level needs a renderer: the real one in a headless Chrome
+// (GPU_RENDERER=chrome, tests/x64/gpu_remote_renderer.mjs), or one that
+// records the batches into a trace (tests/x64/gpu_trace.mjs) and renders nothing
+const remote = process.env.GPU_LEVEL === "vgpu9" && process.env.GPU_RENDERER === "chrome" ? await create_remote_renderer() : null;
+const trace = process.env.GPU_LEVEL === "vgpu9" && !remote ?
     create_trace_renderer(path.join(out, "trace.bin"), { adapter, level: process.env.GPU_LEVEL, scenario }) : null;
 const emulator = new V86({
     graphics_adapter: adapter,
@@ -133,7 +139,7 @@ const emulator = new V86({
     disable_jit: !!+process.env.LINUX_GPU_NO_JIT, experimental_smp_jit: !+process.env.LINUX_GPU_NO_JIT,
     log_level: 0, net_device: { type: "none" }, screen_adapter: sink,
     ...(process.env.VRAM_SIZE ? { vram_size: Number(process.env.VRAM_SIZE) } : {}),
-    ...(process.env.GPU_LEVEL ? { graphics_adapter_test: { level: process.env.GPU_LEVEL, renderer: trace && trace.renderer } } : {}),
+    ...(process.env.GPU_LEVEL ? { graphics_adapter_test: { level: process.env.GPU_LEVEL, renderer: remote ? remote.renderer : trace && trace.renderer } } : {}),
 });
 
 let serial = "";
@@ -172,6 +178,23 @@ try
     const cpu = emulator.v86.cpu;
     cpu.wm.exports.set_x64_test_capabilities(1);
     emulator.run();
+    // GPU_DEBUG_BLITS=n: the first n BLIT_SURFACE_TO_SCREEN commands and what came of them
+    const svga3d_debug = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"]?.svga3d;
+    if(svga3d_debug && +process.env.GPU_DEBUG_BLITS)
+    {
+        let left = +process.env.GPU_DEBUG_BLITS;
+        const blit = svga3d_debug.blit_surface_to_screen.bind(svga3d_debug), to_desktop = svga3d_debug.to_desktop.bind(svga3d_debug);
+        svga3d_debug.blit_surface_to_screen = p => { if(left > 0) console.log("BLIT_SURFACE_TO_SCREEN " + Array.from(p).join(" ")); blit(p); };
+        svga3d_debug.to_desktop = (...args) => {
+            if(left-- > 0)
+            {
+                const [surface] = args;
+                console.log("to_desktop format=" + surface.format + " sizes=" + JSON.stringify(surface.sizes) + " " + args.slice(1).map(a => JSON.stringify(a)).join(" ") +
+                    " screens=" + JSON.stringify([...svga3d_debug.device.screens.screens.values()].map(s => [s.id, s.x, s.y, s.width, s.height])));
+            }
+            to_desktop(...args);
+        };
+    }
 
     await wait_for(/localhost login:/, 0);
     emulator.serial0_send("root\n");
@@ -215,6 +238,13 @@ catch(error)
 finally
 {
     fs.writeFileSync(path.join(out, "serial.log"), serial);
+    const svga3d = emulator.v86 && emulator.v86.cpu.devices.graphics_adapter && emulator.v86.cpu.devices.graphics_adapter.device["svga"]?.svga3d;
+    if(svga3d) console.log("svga3d commands: " + JSON.stringify(svga3d.counts));
+    if(remote)
+    {
+        remote.close();
+        console.log("renderer: " + JSON.stringify(remote.stats));
+    }
     if(trace)
     {
         trace.close();
