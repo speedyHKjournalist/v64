@@ -1,6 +1,6 @@
-// d3d11cmp.exe: Direct3D 11 at feature level 10_1 (or 10_0), drawn by the
-// hardware driver and by WARP, compared. The 10_1 cases (shader model 4.1)
-// are skipped when the hardware device only has 10_0. Each case renders a 64x64 RGBA8 picture
+// d3d11cmp.exe: Direct3D 11 at feature level 11_0 (or 10_1, 10_0), drawn
+// by the hardware driver and by WARP, compared. The cases a level lacks
+// (shader model 4.1, 5: compute, tessellation) are skipped. Each case renders a 64x64 RGBA8 picture
 // offscreen with shaders compiled here by d3dcompiler_47 (from HLSL), reads it
 // back, and reports through the VMware backdoor (RPCI "log", printed by
 // tests/x64/windows_boot.mjs) how far the hardware picture is from WARP's.
@@ -104,7 +104,7 @@ static ID3DBlob *compile(const char *source, const char *entry, const char *prof
 static ID3D11VertexShader *vs(Device *d, const char *source, ID3DBlob **keep)
 {
     ID3D11VertexShader *shader = NULL;
-    ID3DBlob *code = compile(source, "vs", d->level >= D3D_FEATURE_LEVEL_10_1 ? "vs_4_1" : "vs_4_0");
+    ID3DBlob *code = compile(source, "vs", d->level >= D3D_FEATURE_LEVEL_11_0 ? "vs_5_0" : d->level >= D3D_FEATURE_LEVEL_10_1 ? "vs_4_1" : "vs_4_0");
     if (!code) return NULL;
     ID3D11Device_CreateVertexShader(d->device, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &shader);
     if (keep) *keep = code; else ID3D10Blob_Release(code);
@@ -114,7 +114,7 @@ static ID3D11VertexShader *vs(Device *d, const char *source, ID3DBlob **keep)
 static ID3D11PixelShader *ps(Device *d, const char *source)
 {
     ID3D11PixelShader *shader = NULL;
-    ID3DBlob *code = compile(source, "ps", d->level >= D3D_FEATURE_LEVEL_10_1 ? "ps_4_1" : "ps_4_0");
+    ID3DBlob *code = compile(source, "ps", d->level >= D3D_FEATURE_LEVEL_11_0 ? "ps_5_0" : d->level >= D3D_FEATURE_LEVEL_10_1 ? "ps_4_1" : "ps_4_0");
     if (!code) return NULL;
     ID3D11Device_CreatePixelShader(d->device, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &shader);
     ID3D10Blob_Release(code);
@@ -644,6 +644,135 @@ static void case_sample_info(Device *d)
 
 /* (edges: multisampled, so a triangle's edges depend on where the samples
    are, which only the standard pattern fixes; v86 supersamples on a grid) */
+/* ---- feature level 11_0 (shader model 5) ---- */
+
+static void case_compute(Device *d)
+{
+    /* a compute shader writes a typed UAV, through shared memory and a
+       barrier (each thread shows another's value); copied to the target */
+    static const char source[] =
+        "RWTexture2D<float4> u : register(u0); groupshared uint s[64];"
+        "[numthreads(8, 8, 1)] void cs(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {"
+        " s[gi] = id.x * 3 + id.y * 5; GroupMemoryBarrierWithGroupSync(); uint v = s[63 - gi];"
+        " u[id.xy] = float4((v & 255) / 255.0, id.x / 63.0, id.y / 63.0, 1); }";
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D *texture = NULL;
+    ID3D11UnorderedAccessView *uav = NULL;
+    ID3D11ComputeShader *c = NULL;
+    ID3DBlob *code = compile(source, "cs", "cs_5_0");
+    if (!code) return;
+    ID3D11Device_CreateComputeShader(d->device, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &c);
+    ZeroMemory(&desc, sizeof desc);
+    desc.Width = desc.Height = SIZE; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    if (FAILED(ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &texture)) ||
+        FAILED(ID3D11Device_CreateUnorderedAccessView(d->device, (ID3D11Resource *)texture, NULL, &uav))) {
+        say("%s: no UAV texture", d->name);
+        return;
+    }
+    begin(d, 0, 0, 0);
+    ID3D11DeviceContext_CSSetShader(d->context, c, NULL, 0);
+    ID3D11DeviceContext_CSSetUnorderedAccessViews(d->context, 0, 1, &uav, NULL);
+    ID3D11DeviceContext_Dispatch(d->context, SIZE / 8, SIZE / 8, 1);
+    ID3D11DeviceContext_CopyResource(d->context, (ID3D11Resource *)d->target, (ID3D11Resource *)texture);
+    ID3D11UnorderedAccessView_Release(uav); ID3D11Texture2D_Release(texture);
+    ID3D11ComputeShader_Release(c); ID3D10Blob_Release(code);
+}
+
+/* a quad patch from SV_VertexID, tessellated (the partitioning and factors
+   given), placed bilinearly and displaced so the triangles show, coloured
+   by the domain location */
+static void tessellate(Device *d, const char *partitioning, const char *factors)
+{
+    char source[2048];
+    ID3D11HullShader *h = NULL;
+    ID3D11DomainShader *ds = NULL;
+    ID3D11RasterizerState *raster = NULL;
+    D3D11_RASTERIZER_DESC raster_desc;
+    ID3DBlob *hc, *dc;
+    ID3D11VertexShader *v;
+    ID3D11PixelShader *p;
+    snprintf(source, sizeof source,
+        "struct V { float2 p : POS; };"
+        "V vs(uint i : SV_VertexID) { V o; o.p = float2(i == 1 || i == 2 ? 0.8 : -0.8, i >= 2 ? -0.8 : 0.8); return o; }"
+        "struct PC { float e[4] : SV_TessFactor; float i[2] : SV_InsideTessFactor; };"
+        "PC pc(InputPatch<V, 4> ip) { PC o; %s return o; }"
+        "[domain(\"quad\")] [partitioning(\"%s\")] [outputtopology(\"triangle_cw\")] [outputcontrolpoints(4)] [patchconstantfunc(\"pc\")]"
+        "V hs(InputPatch<V, 4> ip, uint i : SV_OutputControlPointID) { return ip[i]; }"
+        "struct O { float4 p : SV_Position; float4 c : COLOR; };"
+        "[domain(\"quad\")] O ds(PC pc, float2 uv : SV_DomainLocation, const OutputPatch<V, 4> cp) {"
+        " float2 p = lerp(lerp(cp[0].p, cp[1].p, uv.x), lerp(cp[3].p, cp[2].p, uv.x), uv.y);"
+        " p += 0.15 * float2(sin(uv.y * 6.2831853), sin(uv.x * 6.2831853));"
+        " O o; o.p = float4(p, 0, 1); o.c = float4(uv, 0, 1); return o; }"
+        "float4 ps(O i) : SV_Target { return i.c; }", factors, partitioning);
+    v = vs(d, source, NULL);
+    p = ps(d, source);
+    hc = compile(source, "hs", "hs_5_0");
+    dc = compile(source, "ds", "ds_5_0");
+    if (!v || !p || !hc || !dc) return;
+    ID3D11Device_CreateHullShader(d->device, ID3D10Blob_GetBufferPointer(hc), ID3D10Blob_GetBufferSize(hc), NULL, &h);
+    ID3D11Device_CreateDomainShader(d->device, ID3D10Blob_GetBufferPointer(dc), ID3D10Blob_GetBufferSize(dc), NULL, &ds);
+    ZeroMemory(&raster_desc, sizeof raster_desc);
+    raster_desc.FillMode = D3D11_FILL_SOLID; raster_desc.CullMode = D3D11_CULL_NONE; raster_desc.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(d->device, &raster_desc, &raster);
+    begin(d, 0, 0, 0.2f);
+    ID3D11DeviceContext_RSSetState(d->context, raster);
+    ID3D11DeviceContext_IASetPrimitiveTopology(d->context, D3D11_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
+    ID3D11DeviceContext_VSSetShader(d->context, v, NULL, 0);
+    ID3D11DeviceContext_HSSetShader(d->context, h, NULL, 0);
+    ID3D11DeviceContext_DSSetShader(d->context, ds, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(d->context, p, NULL, 0);
+    ID3D11DeviceContext_Draw(d->context, 4, 0);
+    ID3D11RasterizerState_Release(raster);
+    ID3D11HullShader_Release(h); ID3D11DomainShader_Release(ds);
+    ID3D10Blob_Release(hc); ID3D10Blob_Release(dc);
+    ID3D11VertexShader_Release(v); ID3D11PixelShader_Release(p);
+}
+
+static void case_tessellation(Device *d)
+{
+    tessellate(d, "integer", "o.e[0] = 3; o.e[1] = 5; o.e[2] = 2; o.e[3] = 4; o.i[0] = 4; o.i[1] = 3;");
+}
+
+static void case_tessellation_fractional(Device *d)
+{
+    tessellate(d, "fractional_odd", "o.e[0] = 2.6; o.e[1] = 5.3; o.e[2] = 1.7; o.e[3] = 4.2; o.i[0] = 3.4; o.i[1] = 6.1;");
+}
+
+static void case_msaa8(Device *d)
+{
+    /* a triangle into an 8x multisampled target, resolved */
+    static const char source[] =
+        "float4 vs(uint i : SV_VertexID) : SV_Position { return float4(i == 2 ? 0.9 : -0.9, i == 1 ? 0.9 : -0.7, 0, 1); }"
+        "float4 ps(float4 p : SV_Position) : SV_Target { return float4(0.2, 0.9, 0.4, 1); }";
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D *ms = NULL;
+    ID3D11RenderTargetView *rtv = NULL;
+    float clear[4] = { 0.3f, 0, 0, 1 };
+    D3D11_VIEWPORT viewport = { 0, 0, SIZE, SIZE, 0, 1 };
+    ID3D11VertexShader *v = vs(d, source, NULL);
+    ID3D11PixelShader *p = ps(d, source);
+    if (!v || !p) return;
+    ZeroMemory(&desc, sizeof desc);
+    desc.Width = desc.Height = SIZE; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 8; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &ms))) { say("%s: no 8x MSAA target", d->name); return; }
+    ID3D11Device_CreateRenderTargetView(d->device, (ID3D11Resource *)ms, NULL, &rtv);
+    ID3D11DeviceContext_ClearState(d->context);
+    ID3D11DeviceContext_ClearRenderTargetView(d->context, rtv, clear);
+    ID3D11DeviceContext_OMSetRenderTargets(d->context, 1, &rtv, NULL);
+    ID3D11DeviceContext_RSSetViewports(d->context, 1, &viewport);
+    ID3D11DeviceContext_IASetPrimitiveTopology(d->context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(d->context, v, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(d->context, p, NULL, 0);
+    ID3D11DeviceContext_Draw(d->context, 3, 0);
+    ID3D11DeviceContext_ResolveSubresource(d->context, (ID3D11Resource *)d->target, 0, (ID3D11Resource *)ms, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+    ID3D11RenderTargetView_Release(rtv); ID3D11Texture2D_Release(ms);
+    ID3D11VertexShader_Release(v); ID3D11PixelShader_Release(p);
+}
+
 static const struct { const char *name; void (*run)(Device *); D3D_FEATURE_LEVEL level; int edges; } CASES[] = {
     { "triangle", case_triangle, D3D_FEATURE_LEVEL_10_0 }, { "texture", case_texture, D3D_FEATURE_LEVEL_10_0 },
     { "depth_blend", case_depth_blend, D3D_FEATURE_LEVEL_10_0 }, { "instancing", case_instancing, D3D_FEATURE_LEVEL_10_0 },
@@ -652,15 +781,18 @@ static const struct { const char *name; void (*run)(Device *); D3D_FEATURE_LEVEL
     { "cube_array", case_cube_array, D3D_FEATURE_LEVEL_10_1 }, { "gather_lod", case_gather_lod, D3D_FEATURE_LEVEL_10_1 },
     { "independent_blend", case_independent_blend, D3D_FEATURE_LEVEL_10_1 },
     { "sample_info", case_sample_info, D3D_FEATURE_LEVEL_10_1, 1 },
+    { "compute", case_compute, D3D_FEATURE_LEVEL_11_0 }, { "tessellation", case_tessellation, D3D_FEATURE_LEVEL_11_0 },
+    { "tessellation_fractional", case_tessellation_fractional, D3D_FEATURE_LEVEL_11_0 },
+    { "msaa8", case_msaa8, D3D_FEATURE_LEVEL_11_0, 1 },
 };
 
 /* at most `highest`: WARP draws at the level the hardware got */
 static int open_device(Device *d, D3D_DRIVER_TYPE type, const char *name, D3D_FEATURE_LEVEL highest)
 {
-    D3D_FEATURE_LEVEL levels[2] = { D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 }, got = 0;
+    D3D_FEATURE_LEVEL levels[3] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 }, got = 0;
+    int skip = highest < D3D_FEATURE_LEVEL_10_1 ? 2 : highest < D3D_FEATURE_LEVEL_11_0 ? 1 : 0;
     D3D11_TEXTURE2D_DESC desc;
-    HRESULT hr = D3D11CreateDevice(NULL, type, NULL, 0, levels + (highest < D3D_FEATURE_LEVEL_10_1), 2 - (highest < D3D_FEATURE_LEVEL_10_1),
-        D3D11_SDK_VERSION, &d->device, &got, &d->context);
+    HRESULT hr = D3D11CreateDevice(NULL, type, NULL, 0, levels + skip, 3 - skip, D3D11_SDK_VERSION, &d->device, &got, &d->context);
     d->name = name;
     d->level = got;
     if (FAILED(hr)) { say("%s: D3D11CreateDevice 0x%08lX", name, (unsigned long)hr); return 0; }
@@ -712,7 +844,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     ZeroMemory(&hw, sizeof hw); ZeroMemory(&warp, sizeof warp);
     g_compile = compiler ? (Compile)GetProcAddress(compiler, "D3DCompile") : NULL;
     if (!g_compile) { say("no d3dcompiler_47.dll"); return 1; }
-    if (!open_device(&hw, D3D_DRIVER_TYPE_HARDWARE, "hardware", D3D_FEATURE_LEVEL_10_1) ||
+    if (!open_device(&hw, D3D_DRIVER_TYPE_HARDWARE, "hardware", D3D_FEATURE_LEVEL_11_0) ||
         !open_device(&warp, D3D_DRIVER_TYPE_WARP, "warp", hw.level)) {
         say("end: no devices");
         return 1;

@@ -16,7 +16,7 @@ import { ScreenObjects } from "./svga_screens.js";
 import { SoftwareCursor, cursor_masks_length } from "./svga_cursor.js";
 import { SVGA3D } from "./svga3d.js";
 import { MOBTable, OTables, OTABLE_ENTRY_BYTES, MOB_MAX_SIZE, GB_MEMORY_KB } from "./svga_gb.js";
-import { VGPU9_DEVCAPS, DX10_DEVCAPS, DX10_1_DEVCAPS } from "./svga3d_tables.js";
+import { VGPU9_DEVCAPS, DX10_DEVCAPS, DX10_1_DEVCAPS, DX11_DEVCAPS } from "./svga3d_tables.js";
 
 // For Types Only
 import { DisplaySource } from "../../display.js";
@@ -133,10 +133,28 @@ export const LEVELS = {
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG | C.SVGA_CAP2_DX2,
         devcaps: DX10_1_DEVCAPS,
     },
+    // S7: shader model 5 (feature level 11_0, GL 4.3): SVGA_CAP2_DX3 with
+    // the SM5 devcap is what both VMware's Windows driver and Linux's
+    // vmwgfx look for
+    "dx11": {
+        caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
+            C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
+            C.SVGA_CAP_CURSOR | C.SVGA_CAP_CURSOR_BYPASS | C.SVGA_CAP_CURSOR_BYPASS_2 | C.SVGA_CAP_ALPHA_CURSOR |
+            C.SVGA_CAP_8BIT_EMULATION | C.SVGA_CAP_MULTIMON | C.SVGA_CAP_DISPLAY_TOPOLOGY |
+            C.SVGA_CAP_GMR | C.SVGA_CAP_GMR2 | C.SVGA_CAP_SCREEN_OBJECT_2 |
+            C.SVGA_CAP_COMMAND_BUFFERS | C.SVGA_CAP_CMD_BUFFERS_2 | C.SVGA_CAP_HP_CMD_QUEUE | C.SVGA_CAP_3D |
+            C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_CAP2_REGISTER | C.SVGA_CAP_DX,
+        fifo_caps: C.SVGA_FIFO_CAP_FENCE | C.SVGA_FIFO_CAP_PITCHLOCK | C.SVGA_FIFO_CAP_RESERVE |
+            C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
+            C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
+        cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
+            C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG | C.SVGA_CAP2_DX2 | C.SVGA_CAP2_DX3,
+        devcaps: DX11_DEVCAPS,
+    },
 };
 
 /** Lowest to highest; without a pinned level the highest one there is a renderer for */
-export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10", "dx10.1"];
+export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10", "dx10.1", "dx11"];
 
 /** The level without a pinned one: the highest implemented, or 2D without a renderer */
 export const DEFAULT_3D_LEVEL = "dx10.1";

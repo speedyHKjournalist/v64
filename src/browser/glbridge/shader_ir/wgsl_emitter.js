@@ -135,6 +135,8 @@
                 this.gsPerPrim = this.gsOutput === "point-list" ? 1 : this.gsOutput === "line-list" ? 2 : 3;
                 const max = Math.max(1, g.maxVertices);
                 this.gsMaxPrims = this.gsOutput === "point-list" ? max : Math.max(1, max - this.gsPerPrim + 1);
+                // GS instancing: invocations per input primitive (SV_GSInstanceID)
+                this.gsInstances = Math.max(1, g.instances || 1);
             }
             for (const input of p.inputs) if (input.type === OPERAND.INPUT) this.inputCount = Math.max(this.inputCount, inputRegister(input) + 1);
             for (const output of p.outputs) if (output.type === OPERAND.OUTPUT) this.outputCount = Math.max(this.outputCount, output.index + 1);
@@ -191,7 +193,7 @@
                 // a hull shader's records: its control points, patch constants and tess factors
                 hull: this.hull || null,
                 gs: this.mode === "geometry" ? { vertices: this.gsVertices, topology: this.gsOutput,
-                    perPrim: this.gsPerPrim, maxPrims: this.gsMaxPrims } : null,
+                    perPrim: this.gsPerPrim, maxPrims: this.gsMaxPrims, instances: this.gsInstances } : null,
             };
         }
 
@@ -461,7 +463,7 @@
                 if (input.type !== OPERAND.INPUT) continue;
                 switch (input.name) {
                     case NAME.POSITION: {
-                        const pixel = perSample ? "input.position.xy * 0.5" : "floor(input.position.xy * 0.5) + 0.5";
+                        const pixel = perSample ? "input.position.xy / gx_scale" : "floor(input.position.xy / gx_scale) + 0.5";
                         const position = `vec4<f32>(select(input.position.xy, ${pixel}, gx_ss != 0u), input.position.zw)`;
                         loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, `bitcast<vec4<u32>>(${position})`, input.mask)};`);
                         continue;
@@ -518,13 +520,16 @@
             if (p.outputs.some(output => output.type === OPERAND.OUTPUT_COVERAGE_MASK)) discards.push("((omask >> gx_sample) & 1u) == 0u");
             discards.push("((gx_sample_mask >> gx_sample) & 1u) == 0u");
             if (targets[0] === "f32" && this.outputCount > 0) {
-                discards.push("gx_ss != 0u && gx_a2c != 0u && bitcast<f32>(o[0].w) < (f32(gx_sample) + 0.5) * 0.25");
+                discards.push("gx_ss != 0u && gx_a2c != 0u && bitcast<f32>(o[0].w) < (f32(gx_sample) + 0.5) / select(4.0, 8.0, gx_ss == 2u)");
             }
             const struct_in = `struct PSIn {\n${fields.join("\n")}\n}\n`;
             const struct_out = outFields.length ? `struct PSOut {\n${outFields.join("\n")}\n}\n` : "";
             return struct_in + struct_out +
                 `@fragment fn main(input: PSIn)${outFields.length ? " -> PSOut" : ""} {\n` +
-                "    gx_sample = select(0u, (u32(input.position.x) & 1u) | ((u32(input.position.y) & 1u) << 1u), gx_ss != 0u);\n" +
+                // (gx_ss 1: 4 samples, 2 x 2; 2: 8 samples, 4 x 2)
+                "    let gx_scale = select(vec2<f32>(2.0, 2.0), vec2<f32>(4.0, 2.0), gx_ss == 2u);\n" +
+                "    gx_sample = select(select(0u, (u32(input.position.x) & 1u) | ((u32(input.position.y) & 1u) << 1u), gx_ss == 1u),\n" +
+                "        (u32(input.position.x) & 3u) | ((u32(input.position.y) & 1u) << 2u), gx_ss == 2u);\n" +
                 loads.map(l => "    " + l).join("\n") + "\n" +
                 "    shader_main();\n" +
                 `    if (${discards.map(d => "(" + d + ")").join(" || ")}) { discard; }\n` +
@@ -673,6 +678,7 @@
             out.push("var<private> gs_len: u32;");
             out.push("var<private> gs_prims: u32;");
             out.push("var<private> gs_base: u32;");
+            out.push("var<private> gs_instance: u32;");
             out.push(`fn gs_put(slot: u32, value: array<vec4<u32>, ${OUT}>) {\n` +
                 `    let at = slot * ${REC}u;\n` +
                 `    for (var i = 0u; i < ${OUT}u; i++) { gx_out[at + i] = value[i]; }\n` +
@@ -726,12 +732,15 @@
                     for (let n = 0; n < NV; n++) loads.push(`v[${n}][${reg}] = vec4<u32>(prim);`);
                 }
             }
+            // (a primitive's GS instances one after the other, so their output keeps D3D's order)
+            const GI = this.gsInstances;
             return "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n" +
-                "    let total = gx_geo.prims * gx_geo.instances;\n" +
+                `    let total = gx_geo.prims * gx_geo.instances * ${GI}u;\n` +
                 "    let k = gid.x + gid.y * 65535u * 64u;\n" +
                 "    if (k >= total) { return; }\n" +
-                "    let instance = k / gx_geo.prims;\n" +
-                "    let prim = k % gx_geo.prims;\n" +
+                `    gs_instance = k % ${GI}u;\n` +
+                `    let instance = k / ${GI}u / gx_geo.prims;\n` +
+                `    let prim = (k / ${GI}u) % gx_geo.prims;\n` +
                 `    for (var n = 0u; n < ${NV}u; n++) {\n` +
                 "        let at = (instance * gx_geo.count + gx_vertex(prim, n)) * gx_geo.in_record;\n" +
                 `        for (var reg = 0u; reg < min(${this.inputCount}u, gx_geo.in_record); reg++) { v[n][reg] = gx_in[at + reg]; }\n` +
@@ -930,6 +939,7 @@
                     if (!this.p.icb) this.p.icb = new Uint32Array(4);
                     return `icb[${this.index(i[0])}]`;
                 case OPERAND.INPUT_PRIMITIVEID: return "vec4<u32>(prim_id)";
+                case OPERAND.INPUT_GS_INSTANCE_ID: return "vec4<u32>(gs_instance)";
                 case OPERAND.OUTPUT_DEPTH:
                 case OPERAND.OUTPUT_DEPTH_GREATER_EQUAL:
                 case OPERAND.OUTPUT_DEPTH_LESS_EQUAL:
@@ -1576,8 +1586,11 @@
                     call = `textureLoad(${t.name}, ${a}.xyz${o[0] || o[1] || o[2] ? ` + vec3<i32>(${o[0]}, ${o[1]}, ${o[2]})` : ""}, ${a}.w)`; break;
                 case DIM.TEXTURE2DMS:
                 case DIM.TEXTURE2DMSARRAY: {
+                    // (2 x 2 texels a pixel for 4 samples, 4 x 2 for 8)
                     this.helpers.add("ms_texel");
-                    const texel = `(${a}.xy${off2}) * 2 + gx_ms_texel(u32(${ms ? this.scalar(ins, 2, "i") : "0"}))`;
+                    const eight = this.msSamples(t.slot) === 8;
+                    const sample = `u32(${ms ? this.scalar(ins, 2, "i") : "0"})`;
+                    const texel = `(${a}.xy${off2}) * ${eight ? "vec2<i32>(4, 2)" : "2"} + ${eight ? `gx_ms_texel8(${sample})` : `gx_ms_texel(${sample})`}`;
                     call = dimension === DIM.TEXTURE2DMS ? `textureLoad(${t.name}, ${texel}, 0)` : `textureLoad(${t.name}, ${texel}, ${a}.z, 0)`;
                     break;
                 }
@@ -1611,11 +1624,11 @@
                 case DIM.TEXTURE1DARRAY: dims = `vec4<u32>(textureDimensions(${t.name}${level}).x, textureNumLayers(${t.name}), 0u, ${levels})`; break;
                 case DIM.TEXTURE2D:
                 case DIM.TEXTURECUBE: dims = `vec4<u32>(textureDimensions(${t.name}${level}), 0u, ${levels})`; break;
-                // (supersampled: the texture is twice the surface)
-                case DIM.TEXTURE2DMS: dims = `vec4<u32>(textureDimensions(${t.name}) / 2u, 0u, 1u)`; break;
+                // (supersampled: the texture is 2 x 2 or 4 x 2 times the surface)
+                case DIM.TEXTURE2DMS: dims = `vec4<u32>(textureDimensions(${t.name}) / ${this.msScale(t.slot)}, 0u, 1u)`; break;
                 case DIM.TEXTURE2DARRAY:
                 case DIM.TEXTURECUBEARRAY: dims = `vec4<u32>(textureDimensions(${t.name}${level}), textureNumLayers(${t.name}), ${levels})`; break;
-                case DIM.TEXTURE2DMSARRAY: dims = `vec4<u32>(textureDimensions(${t.name}) / 2u, textureNumLayers(${t.name}), 1u)`; break;
+                case DIM.TEXTURE2DMSARRAY: dims = `vec4<u32>(textureDimensions(${t.name}) / ${this.msScale(t.slot)}, textureNumLayers(${t.name}), 1u)`; break;
                 case DIM.TEXTURE3D: dims = `vec4<u32>(textureDimensions(${t.name}${level}), ${levels})`; break;
                 default: throw new ShaderTranslateError("resinfo of dimension " + dimension);
             }
@@ -1637,7 +1650,17 @@
             }
             const t = this.resource(operand);
             const ms = t.r.dimension === DIM.TEXTURE2DMS || t.r.dimension === DIM.TEXTURE2DMSARRAY;
-            return ms ? "4u" : "1u";
+            return ms ? this.msSamples(t.slot) + "u" : "1u";
+        }
+
+        /** A multisampled resource's samples (options.msSamples; 4 when not said) */
+        msSamples(slot) {
+            return ((this.o.msSamples || {})[slot]) || 4;
+        }
+
+        /** ... and how many texels wide and high a pixel is */
+        msScale(slot) {
+            return this.msSamples(slot) === 8 ? "vec2<u32>(4u, 2u)" : "2u";
         }
 
         /**
@@ -1934,13 +1957,17 @@ fn gx_bfi(w: vec4<u32>, o: vec4<u32>, insert: vec4<u32>, base: vec4<u32>) -> vec
                 // the center, four on the supersampled 2x2 grid (gx_ms_texel);
                 // an index past the samples is at 0
                 out.push(`fn gx_sample_pos(i: u32, count: u32) -> vec4<f32> {
-    if (count != 4u || i >= 4u) { return vec4<f32>(0.0); }
-    return vec4<f32>(f32(i & 1u) * 0.5 - 0.25, f32(i >> 1u) * 0.5 - 0.25, 0.0, 0.0);
+    if (count == 4u && i < 4u) { return vec4<f32>(f32(i & 1u) * 0.5 - 0.25, f32(i >> 1u) * 0.5 - 0.25, 0.0, 0.0); }
+    if (count == 8u && i < 8u) { return vec4<f32>((f32(i & 3u) + 0.5) * 0.25 - 0.5, f32(i >> 2u) * 0.5 - 0.25, 0.0, 0.0); }
+    return vec4<f32>(0.0);
 }`);
             }
             if (h.has("ms_texel")) {
                 out.push(`fn gx_ms_texel(sample: u32) -> vec2<i32> {
     return vec2<i32>(i32(sample & 1u), i32((sample >> 1u) & 1u));
+}
+fn gx_ms_texel8(sample: u32) -> vec2<i32> {
+    return vec2<i32>(i32(sample & 3u), i32((sample >> 2u) & 1u));
 }`);
             }
             if (h.has("cube_face")) {

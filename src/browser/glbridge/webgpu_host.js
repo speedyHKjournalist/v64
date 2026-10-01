@@ -62,17 +62,23 @@
         "rg11b10ufloat-renderable",
         "indirect-first-instance",
         "texture-compression-bc-sliced-3d",
+        // D3D11's typed UAVs of B8G8R8A8
+        "bgra8unorm-storage",
     ];
 
     // Limits raised to what the adapter allows: D3D10 has 8 render targets
     // of up to 16 bytes a pixel, 32 varyings, 128 textures and 16 samplers a
-    // stage, 16 vertex buffers (gx_executor.js). Higher limits cost nothing
-    // to the executors that need less.
+    // stage, 16 vertex buffers; D3D11 16384 texels a side, 8 (64) UAVs,
+    // thread groups of 1024 with 32 KiB shared (gx_executor.js). Higher
+    // limits cost nothing to the executors that need less.
     const RAISED_LIMITS = [
         "maxColorAttachmentBytesPerSample", "maxInterStageShaderVariables", "maxSampledTexturesPerShaderStage",
         "maxSamplersPerShaderStage", "maxStorageBuffersPerShaderStage", "maxUniformBuffersPerShaderStage",
         "maxVertexBuffers", "maxVertexAttributes", "maxBindingsPerBindGroup", "maxTextureArrayLayers",
         "maxStorageBufferBindingSize", "maxBufferSize",
+        "maxTextureDimension1D", "maxTextureDimension2D", "maxTextureDimension3D", "maxStorageTexturesPerShaderStage",
+        "maxComputeWorkgroupStorageSize", "maxComputeInvocationsPerWorkgroup", "maxComputeWorkgroupSizeX",
+        "maxComputeWorkgroupSizeY", "maxComputeWorkgroupSizeZ", "maxComputeWorkgroupsPerDimension",
     ];
 
     function srgbSiblingOf(format) {
@@ -158,6 +164,7 @@
                 clipDistances: has("clip-distances"),
                 depth32Stencil8: has("depth32float-stencil8"),
                 dualSourceBlending: has("dual-source-blending"),
+                bgra8unormStorage: has("bgra8unorm-storage"),
             };
         }
 

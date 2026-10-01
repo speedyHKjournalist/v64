@@ -263,6 +263,24 @@ export const DX10_1_DEVCAPS = with_devcaps(DX10_DEVCAPS, [
     [C.SVGA3D_DEVCAP_DXFMT_NV12, C.SVGA3D_DXFMT_SUPPORTED],
 ]);
 
+/**
+ * The devcaps at level dx11: dx10.1's and shader model 5 (compute, UAVs,
+ * tessellation: GX emulates the stages WebGPU lacks), 8x multisampling
+ * (supersampled 4 x 2), 16384-texel textures, and what Linux's vmwgfx and
+ * Mesa want for GL 4.3: the GL43 devcap and a forced sample count of at
+ * least 4 (draws without targets)
+ * @type {!Array<!Array<number>>}
+ */
+export const DX11_DEVCAPS = with_devcaps(DX10_1_DEVCAPS, [
+    [C.SVGA3D_DEVCAP_SM5, 1],
+    [C.SVGA3D_DEVCAP_MULTISAMPLE_8X, 1],
+    [C.SVGA3D_DEVCAP_MAX_FORCED_SAMPLE_COUNT, 8],
+    [C.SVGA3D_DEVCAP_GL43, 1],
+    [C.SVGA3D_DEVCAP_MAX_TEXTURE_WIDTH, 16384],
+    [C.SVGA3D_DEVCAP_MAX_TEXTURE_HEIGHT, 16384],
+    [C.SVGA3D_DEVCAP_MAX_TEXTURE_REPEAT, 16384],
+]);
+
 /** A level's devcaps from the one below's, some of them changed */
 function with_devcaps(base, changes)
 {

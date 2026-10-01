@@ -420,8 +420,9 @@ const SM41 = (() => {
     assert.match(result.code, /var t2: texture_2d<f32>/);
     assert.match(result.code, /textureLoad\(t2, .*\.xy\) \* 2 \+ gx_ms_texel\(/);
     assert.match(result.code, /override gx_ss: u32 = 0u;/);
-    assert.match(result.code, /gx_sample = select\(0u, \(u32\(input\.position\.x\) & 1u\)/);
-    assert.match(result.code, /input\.position\.xy \* 0\.5/, "per-sample shading sees the sample's position");
+    assert.match(result.code, /gx_sample = select\(select\(0u, \(u32\(input\.position\.x\) & 1u\)/, "4 samples: 2 x 2");
+    assert.match(result.code, /\(u32\(input\.position\.x\) & 3u\) \| \(\(u32\(input\.position\.y\) & 1u\) << 2u\)/, "8 samples: 4 x 2");
+    assert.match(result.code, /input\.position\.xy \/ gx_scale/, "per-sample shading sees the sample's position");
     assert.match(result.code, /\{ discard; \}/);
     assert.match(result.code, /override gx_samples: u32 = 1u;/);
     assert.ok(result.usesSamples, "the rasterizer's samples are the pipeline's");
@@ -480,7 +481,7 @@ const GS = program(PROGRAM.GS,
 {
     const { p, result } = translate("gs", GS, { mode: "geometry" });
     assert.equal(p.stage, "gs");
-    assert.deepEqual(result.gs, { vertices: 3, topology: "triangle-list", perPrim: 3, maxPrims: 4 });
+    assert.deepEqual(result.gs, { vertices: 3, topology: "triangle-list", perPrim: 3, maxPrims: 4, instances: 1 });
     assert.equal(result.record, 3, "two outputs and the flag");
     assert.match(result.code, /var<private> v: array<array<vec4<u32>, 2>, 3>/);
     assert.match(result.code, /gs_emit\(\);/);
@@ -504,9 +505,32 @@ const GS_POINTS = program(PROGRAM.GS,
     RET);
 {
     const { result } = translate("gs-points", GS_POINTS, { mode: "geometry" });
-    assert.deepEqual(result.gs, { vertices: 1, topology: "triangle-list", perPrim: 3, maxPrims: 2 });
+    assert.deepEqual(result.gs, { vertices: 1, topology: "triangle-list", perPrim: 3, maxPrims: 2, instances: 1 });
     assert.match(result.code, /vec4<u32>\(prim_id\)/);
     console.log("PASS: a geometry shader making quads of points, with the primitive id");
+}
+
+// GS instancing: three invocations a point, each moved by its SV_GSInstanceID
+const GS_INSTANCED = program(PROGRAM.GS,
+    ins(OP.DCL_GS_INPUT_PRIMITIVE, { controls: 1 }),
+    ins(OP.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, { controls: 1 /* points */ }),
+    ins(OP.DCL_MAX_OUTPUT_VERTEX_COUNT, 1),
+    ins(OP.DCL_GS_INSTANCE_COUNT, 3),
+    ins(OP.DCL_INPUT, operand(OPERAND.INPUT, [1, 0], { mask: XYZW })),
+    ins(OP.DCL_INPUT, operand(OPERAND.INPUT_GS_INSTANCE_ID, [], { zero: true })),
+    dcl_output_siv(0, XYZW, NAME.POSITION),
+    dcl_temps(1),
+    ins(OP.UTOF, r(0, { mask: X }), operand(OPERAND.INPUT_GS_INSTANCE_ID, [], { select: 0 })),
+    ins(OP.MAD, o(0, { mask: X }), r(0, { select: 0 }), imm(0.1), vin(0, 0, { select: 0 })),
+    ins(OP.MOV, o(0, { mask: Y | Z | W_ }), vin(0, 0, XYZW_S)),
+    ins(OP.EMIT),
+    RET);
+{
+    const { result } = translate("gs-instanced", GS_INSTANCED, { mode: "geometry" });
+    assert.equal(result.gs.instances, 3);
+    assert.match(result.code, /gs_instance = k % 3u;/);
+    assert.match(result.code, /vec4<u32>\(gs_instance\)/);
+    console.log("PASS: GS instancing: three invocations a primitive, SV_GSInstanceID");
 }
 
 console.log("PASS: " + checked + " shaders" + (naga ? " validated by naga" : " (naga not found: not validated)"));

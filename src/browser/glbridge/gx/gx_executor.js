@@ -323,7 +323,7 @@
             const f = this.formatOf(format);
             const s = { sid, format, f, flags, width: Math.max(1, width), height: Math.max(1, height),
                 depth: Math.max(1, depth), mips: Math.max(1, mips), layers: Math.max(1, layers), samples,
-                cube: !!cube, buffer: null, texture: null, shadow: null, generation: 0, views: new Map(), ss: 1 };
+                cube: !!cube, buffer: null, texture: null, shadow: null, generation: 0, views: new Map(), ss: [1, 1] };
             this.surfaces.set(sid, s);
             if (format === SVGA3D_BUFFER) {
                 const size = align(Math.max(4, s.width * s.height * s.depth), 4);
@@ -344,11 +344,12 @@
             // is supersampled: a texture twice as wide and high, each sample
             // a texel of a 2x2 block, drawn at that size. Every format can
             // be, unlike WebGPU's multisampling, and nothing mixes sample
-            // counts in a pass. (s.ss: the scale)
+            // counts in a pass. (s.ss: the scale, x and y: 2 x 2 for 4x,
+            // 4 x 2 for 8x)
             const multisampled = samples > 1 && !volume;
-            s.ss = multisampled ? 2 : 1;
+            s.ss = !multisampled ? [1, 1] : samples > 4 ? [4, 2] : [2, 2];
             const descriptor = {
-                size: [s.width * s.ss, s.height * s.ss, volume ? s.depth : s.layers],
+                size: [s.width * s.ss[0], s.height * s.ss[1], volume ? s.depth : s.layers],
                 dimension: volume ? "3d" : "2d",
                 format: f.gpu,
                 mipLevelCount: multisampled ? 1 : Math.min(s.mips, mipCount(s.width, s.height, volume ? s.depth : 1)),
@@ -636,18 +637,18 @@ struct Box { x: u32, y: u32, w: u32, pad: u32 }
             h = Math.min(h, sl.height - sy, dl.height - dy);
             d = Math.max(1, Math.min(d, S.volume ? sl.depth - sz : 1, D.volume ? dl.depth - dz : 1));
             if (w <= 0 || h <= 0) return;
-            if (!sameFamily || S.ss !== D.ss) {
+            if (!sameFamily || S.ss[0] !== D.ss[0] || S.ss[1] !== D.ss[1]) {
                 // a different format: drawn, not copied
-                if (S.ss !== 1 || D.ss !== 1) return this.warn("copy-ms", "a copy between multisampled surfaces of different formats");
+                if (S.ss[0] !== 1 || D.ss[0] !== 1) return this.warn("copy-ms", "a copy between multisampled surfaces of different formats");
                 return this.blit(S, sLayer, sMip, [sx, sy, sx + w, sy + h], D, dLayer, dMip, [dx, dy, dx + w, dy + h], false);
             }
             // (multisampled: every sample of the box)
-            const k = S.ss;
+            const [kx, ky] = S.ss;
             this.endPass();
             this.encoder().copyTextureToTexture(
-                { texture: S.texture, mipLevel: sMip, origin: [sx * k, sy * k, S.volume ? sz : sLayer] },
-                { texture: D.texture, mipLevel: dMip, origin: [dx * k, dy * k, D.volume ? dz : dLayer] },
-                [align(w, S.f.bw) * k, align(h, S.f.bh) * k, d]);
+                { texture: S.texture, mipLevel: sMip, origin: [sx * kx, sy * ky, S.volume ? sz : sLayer] },
+                { texture: D.texture, mipLevel: dMip, origin: [dx * kx, dy * ky, D.volume ? dz : dLayer] },
+                [align(w, S.f.bw) * kx, align(h, S.f.bh) * ky, d]);
         }
 
         /**
@@ -1105,26 +1106,28 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         /** A multisampled (supersampled) surface into one that is not: each pixel the mean of its samples */
         resolve(dst, dstSub, src, srcSub) {
             const D = this.surfaces.get(dst), S = this.surfaces.get(src);
-            if (!D || !S || !D.texture || !S.texture || S.ss <= 1 || D.ss !== 1) return;
+            if (!D || !S || !D.texture || !S.texture || S.ss[0] <= 1 || D.ss[0] !== 1) return;
             const [dMip, dLayer] = subresource(D, dstSub);
             const sLayer = Math.min(srcSub, S.layers - 1);
             const format = D.f.gpu, kind = sampleKind(S.f.gpu);
             if (isDepthFormat(format) || isDepthFormat(S.f.gpu)) return this.warn("resolve-depth", "depth surfaces are not resolved");
-            const key = "resolve:" + format + ":" + kind;
+            const [kx, ky] = S.ss;
+            const key = "resolve:" + format + ":" + kind + ":" + kx + "x" + ky;
             let pipeline = this.blitPipelines.get(key);
             if (!pipeline) {
                 const type = kind === "sint" ? "i32" : kind === "uint" ? "u32" : "f32";
                 const outType = sampleKind(format) === "sint" ? "i32" : sampleKind(format) === "uint" ? "u32" : "f32";
                 // (integers are not resolved in D3D: sample 0)
-                const value = type === "f32" ? "(textureLoad(t, at, 0) + textureLoad(t, at + vec2<i32>(1, 0), 0) + " +
-                    "textureLoad(t, at + vec2<i32>(0, 1), 0) + textureLoad(t, at + vec2<i32>(1, 1), 0)) * 0.25" : "textureLoad(t, at, 0)";
+                const texels = [];
+                for (let y = 0; y < ky; y++) for (let x = 0; x < kx; x++) texels.push(`textureLoad(t, at + vec2<i32>(${x}, ${y}), 0)`);
+                const value = type === "f32" ? `(${texels.join(" + ")}) * ${1 / (kx * ky)}` : "textureLoad(t, at, 0)";
                 const code = `
 @group(0) @binding(0) var t: texture_2d<${type}>;
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(f32(i & 1u) * 2.0 - 1.0, 1.0 - f32(i >> 1u) * 2.0, 0.0, 1.0);
 }
 @fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<${outType}> {
-    let at = vec2<i32>(p.xy) * 2;
+    let at = vec2<i32>(p.xy) * vec2<i32>(${kx}, ${ky});
     return vec4<${outType}>(${value});
 }`;
                 const module = this.device.createShaderModule({ code });
@@ -1281,7 +1284,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 const f = this.formatOf(view.format) || S.f;
                 const format = f.gpu || S.f.gpu;
                 const level = this.level(S, view.mip);
-                width = level.width * S.ss; height = level.height * S.ss; samples = S.ss > 1 ? 4 : 1;
+                width = level.width * S.ss[0]; height = level.height * S.ss[1]; samples = S.ss[0] * S.ss[1];
                 colors.push({ S, view, format, x: f.can.includes("x") });
                 const kind = sampleKind(format);
                 targets[i] = kind === "sint" ? "i32" : kind === "uint" ? "u32" : "f32";
@@ -1292,11 +1295,34 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             if (DS && DS.texture) {
                 depthFormat = DS.f.gpu;
                 const level = this.level(DS, dsView.mip);
-                if (!width) { width = level.width * DS.ss; height = level.height * DS.ss; samples = DS.ss > 1 ? 4 : 1; }
+                if (!width) { width = level.width * DS.ss[0]; height = level.height * DS.ss[1]; samples = DS.ss[0] * DS.ss[1]; }
             }
-            if (!width) return null;
+            if (!width) return this.noAttachments(c);
             // (width, height: the textures'; ss: their scale, of supersampled multisampling)
-            return { colors, targets, width, height, samples, ss: samples > 1 ? 2 : 1, DS, dsView, depthFormat };
+            return { colors, targets, width, height, samples, ss: samples > 4 ? [4, 2] : samples > 1 ? [2, 2] : [1, 1], DS, dsView, depthFormat };
+        }
+
+        /**
+         * A draw without targets whose pixel shader writes UAVs (or GL's
+         * framebuffers without attachments): WebGPU passes need one, so a
+         * scratch one of the viewport's size, never written (write mask 0)
+         */
+        noAttachments(c) {
+            const st = c.state;
+            const ps = c.shaders.get(c.stages[SHADER_PS].shader);
+            if (!ps || !ps.program || !ps.program.uavs.size) return null;
+            const v = st.viewports[0] || [0, 0, 1, 1];
+            const width = Math.max(1, Math.min(16384, Math.ceil(v[0] + v[2]))), height = Math.max(1, Math.min(16384, Math.ceil(v[1] + v[3])));
+            const key = width + "x" + height;
+            this.scratchTargets = this.scratchTargets || new Map();
+            let S = this.scratchTargets.get(key);
+            if (!S) {
+                const texture = this.device.createTexture({ size: [width, height, 1], format: "rgba8unorm", usage: TEXTURE_USAGE.RENDER_ATTACHMENT });
+                S = { sid: "scratch:" + key, generation: 0, texture, views: new Map(), layers: 1, gpuMips: 1, volume: false, ss: [1, 1] };
+                this.scratchTargets.set(key, S);
+            }
+            const colors = [{ S, view: { mip: 0, first: 0 }, format: "rgba8unorm", x: false, scratch: true }];
+            return { colors, targets: {}, width, height, samples: 1, ss: [1, 1], DS: null, dsView: null, depthFormat: null };
         }
 
         /**
@@ -1376,7 +1402,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const dualSource = !!(blend && usesSource1(blend.words));
             const vsOptions = { group: 0, vertexInputs, varyings };
             const psOptions = { group: 1, targets, dualSource };
-            if (ps && ps.program && ps.program.uavs.size) psOptions.uavFormats = this.uavFormats(c, SHADER_PS, ps.program);
+            if (ps && ps.program) this.stageOptions(c, SHADER_PS, ps.program, psOptions);
             let vsModule, psModule = null;
             try {
                 vsModule = this.module(vs, vsOptions);
@@ -1389,7 +1415,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const depth = c.depths.get(st.depth);
             const key = [vs.id, ps ? ps.id : 0, JSON.stringify(vsOptions), JSON.stringify(psOptions), topology,
                 call.indexed && /strip/.test(topology) ? (st.ib.format === SVGA3D_R16_UINT ? 16 : 32) : 0,
-                JSON.stringify(buffers), colors.map(t => t ? t.format + (t.x ? "x" : "") : "-").join(","), depthFormat, samples,
+                JSON.stringify(buffers), colors.map(t => t ? t.format + (t.x ? "x" : "") + (t.scratch ? "s" : "") : "-").join(","), depthFormat, samples,
                 blend ? blend.words.join(",") : "", raster ? raster.words.join(",") : "", depth ? depth.words.join(",") : "",
                 st.sampleMask, this.bindingKinds(c, vsModule, psModule)].join("|");
             let pipeline = this.pipelines.get(key);
@@ -1481,7 +1507,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             }
             const g = gsModule.result.gs;
             const vsRecord = Math.max(1, vsModule.result.record), gsRecord = gsModule.result.record;
-            const vertices = count * instances, invocations = prims * instances;
+            // (GS instancing: g.instances invocations per input primitive)
+            const vertices = count * instances, invocations = prims * instances * (g.instances || 1);
             const slots = invocations * g.maxPrims * g.perPrim;
             const vsOut = this.storageBuffer(vertices * vsRecord * 16);
             const gsOut = this.storageBuffer(slots * gsRecord * 16);
@@ -1764,11 +1791,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const dualSource = !!(blend && usesSource1(blend.words));
             let psModule = null;
             try {
-                if (ps && ps.program) {
-                    const psOptions = { group: 1, targets: a.targets, dualSource };
-                    if (ps.program.uavs.size) psOptions.uavFormats = this.uavFormats(c, SHADER_PS, ps.program);
-                    psModule = this.module(ps, psOptions);
-                }
+                if (ps && ps.program) psModule = this.module(ps, this.stageOptions(c, SHADER_PS, ps.program, { group: 1, targets: a.targets, dualSource }));
             } catch (error) {
                 return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
             }
@@ -1776,7 +1799,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const depth = c.depths.get(st.depth);
             const plain = { indexed: false, count, instances: 1, first: 0, base: 0, firstInstance: 0 };
             const key = [passKey, ps ? ps.id : 0, JSON.stringify({ targets: a.targets, dualSource }), topology,
-                a.colors.map(t => t ? t.format + (t.x ? "x" : "") : "-").join(","), a.depthFormat, a.samples,
+                a.colors.map(t => t ? t.format + (t.x ? "x" : "") + (t.scratch ? "s" : "") : "-").join(","), a.depthFormat, a.samples,
                 blend ? blend.words.join(",") : "", raster ? raster.words.join(",") : "", depth ? depth.words.join(",") : "",
                 st.sampleMask, this.bindingKinds(c, null, psModule)].join("|");
             let pipeline = this.pipelines.get(key);
@@ -2049,10 +2072,10 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         }
 
         /** The viewport WebGPU takes, and how the position moves to make up for it */
-        viewport(st, width, height, ss = 1) {
-            const v = st.viewports[0] || [0, 0, width / ss, height / ss, 0, 1];
+        viewport(st, width, height, ss = [1, 1]) {
+            const v = st.viewports[0] || [0, 0, width / ss[0], height / ss[1], 0, 1];
             let [x, y, w, h, min, max] = v;
-            x *= ss; y *= ss; w *= ss; h *= ss;
+            x *= ss[0]; y *= ss[1]; w *= ss[0]; h *= ss[1];
             min = Math.min(1, Math.max(0, min)); max = Math.min(1, Math.max(min, max));
             if (w <= 0 || h <= 0) return { x: 0, y: 0, width: 1, height: 1, min, max, fix: [1, 1, 0, 0] };
             const cx = Math.max(0, x), cy = Math.max(0, y);
@@ -2064,11 +2087,11 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             return { x: cx, y: cy, width: cw, height: ch, min, max, fix: [sx, sy, ox, oy] };
         }
 
-        scissor(st, raster, width, height, ss = 1) {
+        scissor(st, raster, width, height, ss = [1, 1]) {
             // (rasterizer dword 4: depthClipEnable, scissorEnable, ...)
             const enabled = raster && (raster.words[4] >> 8 & 0xFF);
             if (!enabled || !st.scissors.length) return [0, 0, width, height];
-            const [l, t, r, b] = st.scissors[0].map(v => v * ss);
+            const [l, t, r, b] = st.scissors[0].map((v, i) => v * ss[i & 1]);
             const x = Math.min(width, Math.max(0, l)), y = Math.min(height, Math.max(0, t));
             return [x, y, Math.max(0, Math.min(width, r) - x), Math.max(0, Math.min(height, b) - y)];
         }
@@ -2200,7 +2223,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 descriptor.depthStencil = ds;
             }
             // the sample mask and alpha to coverage, by the pixel shader (wgsl_emitter.js)
-            const psConstants = { gx_ss: o.samples > 1 ? 1 : 0, gx_sample_mask: c.state.sampleMask >>> 0,
+            const psConstants = { gx_ss: o.samples > 4 ? 2 : o.samples > 1 ? 1 : 0, gx_sample_mask: c.state.sampleMask >>> 0,
                 gx_a2c: o.blend && (o.blend.words[0] & 0xFF) ? 1 : 0 };
             if (o.psModule) {
                 const targets = o.colors.map((t, i) => {
@@ -2227,8 +2250,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                             }
                         }
                     }
-                    // an "X" target keeps its alpha at 1
+                    // an "X" target keeps its alpha at 1; a scratch one (no targets) is never written
                     if (t.x) target.writeMask = (target.writeMask === undefined ? 0xF : target.writeMask) & 0x7;
+                    if (t.scratch) { target.writeMask = 0; delete target.blend; }
                     return target;
                 });
                 descriptor.fragment = { module: o.psModule.module, entryPoint: "main", targets, constants: psConstants };
@@ -2312,6 +2336,23 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         // ------------------------------------------------------------------
         // UAVs and compute (SM5)
 
+        /**
+         * A stage's module options for what is bound: the typed UAVs'
+         * formats, the multisampled resources' sample counts (8; 4 when
+         * not said)
+         */
+        stageOptions(c, type, program, options) {
+            if (program.uavs.size) options.uavFormats = this.uavFormats(c, type, program);
+            const stage = c.stages[type];
+            for (const [slot, r] of program.resources) {
+                if (r.dimension !== 4 && r.dimension !== 9) continue;
+                const srv = c.srvs.get(stage.srvs[slot]);
+                const S = srv && this.surfaces.get(srv.sid);
+                if (S && S.ss[0] * S.ss[1] === 8) (options.msSamples = options.msSamples || {})[slot] = 8;
+            }
+            return options;
+        }
+
         /** What the typed UAVs a shader declares are bound to: storage formats, a typed buffer's 32-bit lanes */
         uavFormats(c, type, program) {
             const formats = {};
@@ -2330,7 +2371,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         /** A typed texture UAV's view, or a stand-in of the binding's format */
         storageView(view, b) {
             const S = view && this.surfaces.get(view.sid);
-            if (S && S.texture && S.f.gpu === b.format && S.ss === 1) {
+            if (S && S.texture && S.f.gpu === b.format && S.ss[0] === 1) {
                 const [mip, first, count] = view.desc;
                 const volume = b.dimension === "3d";
                 const layers = volume ? 1 : S.layers;
@@ -2399,7 +2440,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             if (!cs || !cs.program) return this.warn("no-cs", "a dispatch without a compute shader");
             let module;
             try {
-                module = this.module(cs, { group: 0, uavFormats: this.uavFormats(c, SHADER_CS, cs.program) });
+                module = this.module(cs, this.stageOptions(c, SHADER_CS, cs.program, { group: 0 }));
             } catch (error) {
                 return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
             }

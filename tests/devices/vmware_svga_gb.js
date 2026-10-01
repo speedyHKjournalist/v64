@@ -332,4 +332,21 @@ assert.ok(!dx10_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_R10G10B10_XR_BIAS_A2_UNORM));
 assert.ok(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_R10G10B10_XR_BIAS_A2_UNORM) & C.SVGA3D_DXFMT_SUPPORTED);
 console.log("PASS: level dx10.1: dx10 and SVGA_CAP2_DX2, SM41, 4x multisampling of every target format, NV12/YUY2");
 
+// dx11 is dx10.1 and shader model 5
+const { DX11_DEVCAPS } = await import("../../src/graphics_adapters/vmware_svga/svga3d_tables.js");
+assert.equal(LEVELS["dx11"].caps, LEVELS["dx10.1"].caps);
+assert.equal(LEVELS["dx11"].cap2, LEVELS["dx10.1"].cap2 | C.SVGA_CAP2_DX3, "SM5 wants DX3");
+const dx11_devcaps = new Map(DX11_DEVCAPS);
+for(const [index, value] of dx10_1_devcaps)
+{
+    const now = dx11_devcaps.get(index);
+    assert.ok(now === value || now >= value, "dx11 keeps or raises devcap " + index);
+}
+for(const [index, value] of [[C.SVGA3D_DEVCAP_SM5, 1], [C.SVGA3D_DEVCAP_MULTISAMPLE_8X, 1], [C.SVGA3D_DEVCAP_GL43, 1],
+    [C.SVGA3D_DEVCAP_MAX_FORCED_SAMPLE_COUNT, 8], [C.SVGA3D_DEVCAP_MAX_TEXTURE_WIDTH, 16384]])
+{
+    assert.equal(dx11_devcaps.get(index), value, "dx11 devcap " + index);
+}
+console.log("PASS: level dx11: dx10.1 and SVGA_CAP2_DX3, SM5, 8x multisampling, GL43, 16384-texel textures");
+
 await vm.destroy();
