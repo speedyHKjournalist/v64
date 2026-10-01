@@ -300,6 +300,24 @@ export function GraphicsAdapter(cpu, descriptor, options)
 }
 
 /**
+ * Whether the device keeps state outside of the machine (a GPU) that a
+ * snapshot has to fetch first, with prepare_save
+ * @return {boolean}
+ */
+GraphicsAdapter.prototype.has_host_state = function()
+{
+    return !!this.device["has_host_state"] && this.device["has_host_state"]();
+};
+
+/**
+ * @return {!Promise<undefined>}
+ */
+GraphicsAdapter.prototype.prepare_save = function()
+{
+    return this.has_host_state() ? this.device["prepare_save"]() : Promise.resolve(undefined);
+};
+
+/**
  * What the plugin gets to work with (src/graphics_adapters/machine.js)
  */
 GraphicsAdapter.prototype.create_handle = function()

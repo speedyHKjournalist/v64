@@ -20,6 +20,10 @@
 //   cursor, screenshots and snapshots stay where the 2D levels have them.
 // - Completion: fences and command buffers that follow GPU work complete
 //   when the renderer has run every batch before them (after_work).
+// - Snapshots (plan 4.7): the GPU's objects have no guest backing, so before
+//   a save every surface is read back (prepare_save). The snapshot keeps each
+//   surface's definition and contents, and each context's shaders and the
+//   last command for each piece of its state; restoring replays them.
 
 import { LOG_VGA } from "../../const.js";
 import { dbg_log } from "../../log.js";
@@ -83,6 +87,11 @@ function Surface(sid, flags, format, faces, sizes, samples)
     this.data = null;
     /** a buffer's D9WG buffers, by role */
     this.roles = [0, 0, 0];
+    /** @type {Int32Array} the SURFACE_DEFINE(_V2) body, for snapshots */
+    this.definition = null;
+    this.definition_id = 0;
+    /** @type {Array<Uint8Array>} contents read back for a snapshot: (face or slice, mip) */
+    this.saved = null;
 }
 
 /**
@@ -107,6 +116,10 @@ function Context(cid, device)
     this.instanced = 0;
     /** the color target 0 surface, for the clear and viewport sizes */
     this.target = null;
+    /** @type {!Map<string, !Int32Array>} SHADER_DEFINE bodies by "type:shid", for snapshots */
+    this.shader_definitions = new Map();
+    /** @type {!Map<string, !Array>} the last command setting each piece of state: [id, body] */
+    this.state = new Map();
 }
 
 /**
@@ -290,6 +303,7 @@ SVGA3D.prototype.command = function(id, p)
 {
     const f = new Float32Array(p.buffer, p.byteOffset, p.length);
     this.counts[id] = (this.counts[id] || 0) + 1;
+    this.record(id, p);
     switch(id)
     {
         case C.SVGA_3D_CMD_SURFACE_DEFINE: this.define_surface(p, false); break;
@@ -339,6 +353,148 @@ SVGA3D.prototype.command = function(id, p)
     if(this.writer.size() > BATCH_FLUSH_BYTES) this.flush();
 };
 
+/**
+ * Keep what a snapshot needs to set a context's state again: per piece of
+ * state, the last command (split into one per state where a command sets several)
+ * @param {number} id
+ * @param {!Int32Array} p
+ */
+SVGA3D.prototype.record = function(id, p)
+{
+    if(!p.length) return;
+    const context = this.contexts.get(p[0] >>> 0);
+    if(!context) return;
+    const state = context.state, cid = p[0];
+    const keep = (key, body) => state.set(key, [id, body]);
+    switch(id)
+    {
+        case C.SVGA_3D_CMD_SETTRANSFORM: keep("xf" + p[1], p.slice()); break;
+        case C.SVGA_3D_CMD_SETZRANGE: keep("zr", p.slice()); break;
+        case C.SVGA_3D_CMD_SETRENDERTARGET: keep("rt" + p[1], p.slice()); break;
+        case C.SVGA_3D_CMD_SETMATERIAL: keep("mat" + p[1], p.slice()); break;
+        case C.SVGA_3D_CMD_SETLIGHTDATA: keep("ld" + p[1], p.slice()); break;
+        case C.SVGA_3D_CMD_SETLIGHTENABLED: keep("le" + p[1], p.slice()); break;
+        case C.SVGA_3D_CMD_SETVIEWPORT: keep("vp", p.slice()); break;
+        case C.SVGA_3D_CMD_SETCLIPPLANE: keep("cp" + p[1], p.slice()); break;
+        case C.SVGA_3D_CMD_SETSCISSORRECT: keep("sc", p.slice()); break;
+        case C.SVGA_3D_CMD_SET_SHADER: keep("sh" + p[1], p.slice()); break;
+        case C.SVGA_3D_CMD_SETRENDERSTATE:
+            for(let at = 1; at + 2 <= p.length; at += 2) keep("rs" + p[at], Int32Array.of(cid, p[at], p[at + 1]));
+            break;
+        case C.SVGA_3D_CMD_SETTEXTURESTATE:
+            for(let at = 1; at + 3 <= p.length; at += 3) keep("ts" + p[at] + ":" + p[at + 1], Int32Array.of(cid, p[at], p[at + 1], p[at + 2]));
+            break;
+        case C.SVGA_3D_CMD_SET_SHADER_CONST:
+            for(let r = 0; 4 + 4 * r + 4 <= p.length; r++)
+            {
+                const body = Int32Array.of(cid, p[1] + r, p[2], p[3], p[4 + 4 * r], p[5 + 4 * r], p[6 + 4 * r], p[7 + 4 * r]);
+                keep("c" + p[2] + ":" + p[3] + ":" + (p[1] + r), body);
+            }
+            break;
+        case C.SVGA_3D_CMD_SHADER_DEFINE:
+            if(p.length >= 3) context.shader_definitions.set(p[2] + ":" + (p[1] >>> 0), p.slice());
+            break;
+        case C.SVGA_3D_CMD_SHADER_DESTROY:
+            if(p.length >= 3) context.shader_definitions.delete(p[2] + ":" + (p[1] >>> 0));
+            break;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Snapshots
+
+/**
+ * Before a save: the batches sent so far run, and every surface's contents
+ * come back from the GPU
+ * @return {!Promise<undefined>}
+ */
+SVGA3D.prototype.prepare_save = function()
+{
+    for(const surface of this.surfaces.values())
+    {
+        surface.saved = null;
+        // depth and multisampled surfaces cannot be read back: they come back cleared
+        if(!surface.handle || surface.info.depth || surface.samples > 1) continue;
+        const saved = surface.saved = [];
+        const volume = surface.kind === KIND.TEXTURE_VOLUME;
+        for(let face = 0; face < surface.faces; face++)
+        {
+            for(let mip = 0; mip < surface.sizes.length; mip++)
+            {
+                const level = level_layout(surface, mip);
+                const layers = volume ? level.depth : 1;
+                const bytes = new Uint8Array(level.pitch * level.rows * layers);
+                saved.push(bytes);
+                for(let layer = 0; layer < layers; layer++)
+                {
+                    const base = layer * level.pitch * level.rows;
+                    this.read_rows(surface, volume ? layer : face, mip, 0, level.rows, (data, first, count, pitch) => {
+                        bytes.set(data.subarray(0, count * pitch), base + first * pitch);
+                    });
+                }
+            }
+        }
+    }
+    return new Promise(resolve => this.after_work(resolve));
+};
+
+SVGA3D.prototype.get_state = function()
+{
+    const surfaces = [];
+    for(const s of this.surfaces.values())
+    {
+        surfaces.push([s.definition_id, s.definition, s.data, s.saved || []]);
+    }
+    const contexts = [];
+    for(const c of this.contexts.values())
+    {
+        contexts.push([c.cid, [...c.shader_definitions.values()], [...c.state.values()].map(([id, body]) => [id, body])]);
+    }
+    return [1, surfaces, contexts];
+};
+
+/**
+ * Make the GPU's objects again, in a fresh renderer
+ */
+SVGA3D.prototype.set_state = function(state)
+{
+    this.reset();
+    if(!state || state[0] !== 1) return;
+    for(const [id, definition, data, saved] of state[1])
+    {
+        const body = Int32Array.from(definition);
+        this.command(id, body);
+        const surface = this.surfaces.get(body[0] >>> 0);
+        if(!surface) continue;
+        if(surface.data && data) surface.data.set(data);
+        if(!surface.handle || !saved.length) continue;
+        const volume = surface.kind === KIND.TEXTURE_VOLUME;
+        let i = 0;
+        for(let face = 0; face < surface.faces; face++)
+        {
+            for(let mip = 0; mip < surface.sizes.length; mip++)
+            {
+                const bytes = saved[i++];
+                if(!bytes) continue;
+                const level = level_layout(surface, mip);
+                const w = this.writer.begin(OP.UPDATE_TEXTURE).u32(surface.handle).u32(mip).u32(0).u32(0)
+                    .u32(volume ? 0 : surface.kind === KIND.TEXTURE_CUBE ? face : 0)
+                    .u32(level.width).u32(level.height).u32(volume ? level.depth : 1)
+                    .u32(level.pitch).u32(level.pitch * level.rows).u32(bytes.length);
+                w.patch(w.placeholder(), w.data(bytes));
+                if(this.writer.size() > BATCH_FLUSH_BYTES) this.flush();
+            }
+        }
+    }
+    for(const [cid, shaders, entries] of state[2])
+    {
+        this.command(C.SVGA_3D_CMD_CONTEXT_DEFINE, Int32Array.of(cid));
+        for(const body of shaders) this.command(C.SVGA_3D_CMD_SHADER_DEFINE, Int32Array.from(body));
+        for(const [id, body] of entries) this.command(id, Int32Array.from(body));
+    }
+    this.flush();
+};
+
 // ---------------------------------------------------------------------------
 // Surfaces
 
@@ -368,6 +524,8 @@ SVGA3D.prototype.define_surface = function(p, v2)
     }
     if(this.surfaces.has(sid)) this.destroy_surface(sid);
     const surface = new Surface(sid, flags, format, faces, sizes, samples);
+    surface.definition = p.slice();
+    surface.definition_id = v2 ? C.SVGA_3D_CMD_SURFACE_DEFINE_V2 : C.SVGA_3D_CMD_SURFACE_DEFINE;
     this.surfaces.set(sid, surface);
     const info = surface.info;
     if(!info)

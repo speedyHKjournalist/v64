@@ -248,4 +248,38 @@ const clears = find(sent(), OP.CLEAR);
 assert.deepEqual([0, 1, 2, 5].map(i => u32(clears[0], i)), [device, 1, 0xFF00FF00, 0]);
 console.log("PASS: command buffers with 3D complete after it");
 
+// Snapshots: the GPU's contents are read back first, and a restore makes the
+// objects again in a fresh renderer, filled and with their state
+sent();
+const saving = vm.save_state();
+// (the readbacks of the save need the renderer)
+await new Promise(resolve => setTimeout(resolve, 0));
+run_renderer();
+const state = await saving;
+commands = sent();
+assert.ok(find(commands, OP.READBACK_SURFACE).length >= 1, "the save read the render target back");
+await vm.restore_state(state);
+run_renderer();
+commands = sent();
+const created = find(commands, OP.CREATE_TEXTURE_2D);
+assert.equal(created.length, 2, "both textures again");
+const restored_target = u32(created[0], 1);
+const filled = find(commands, OP.UPDATE_TEXTURE).find(c => u32(c, 0) === restored_target);
+assert.ok(filled, "the render target is filled again");
+const texels = new Uint8Array(filled.view.buffer.slice(filled.view.byteOffset + u32(filled, 11), filled.view.byteOffset + u32(filled, 11) + 16 * 16 * 4));
+assert.deepEqual([...texels.subarray((6 * 16 + 5) * 4, (6 * 16 + 5) * 4 + 3)], [5, 6, target & 0xFF], "with what was read back");
+const restored_states = new Map(find(commands, OP.SET_RENDER_STATE).map(c => [u32(c, 1), u32(c, 2)]));
+assert.equal(restored_states.get(22), 3, "the context's render states are set again");
+assert.equal(find(commands, OP.CREATE_VERTEX_SHADER).length, 1, "and its shaders defined");
+assert.equal(u32(find(commands, OP.SET_RENDER_TARGET)[0], 2), restored_target, "its target is the new texture");
+// the buffer's bytes are in the snapshot itself
+cmd3d(C.SVGA_3D_CMD_DRAW_PRIMITIVES, CID, 1, 1,
+    C.SVGA3D_DECLTYPE_FLOAT3, C.SVGA3D_DECLMETHOD_DEFAULT, C.SVGA3D_DECLUSAGE_POSITION, 0, 2, 0, 12, 0, 2,
+    C.SVGA3D_PRIMITIVE_TRIANGLELIST, 1, 0xFFFFFFFF, 0, 0, 0, 0);
+fence(6);
+run_renderer();
+const again = find(sent(), OP.UPDATE_BUFFER)[0];
+assert.deepEqual([...new Float32Array(again.view.buffer.slice(again.view.byteOffset + u32(again, 3), again.view.byteOffset + u32(again, 3) + 36))], vertices);
+console.log("PASS: snapshots of the 3D level");
+
 await vm.destroy();

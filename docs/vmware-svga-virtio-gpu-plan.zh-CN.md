@@ -910,11 +910,11 @@ virtio-gpu 在 Windows 上只有 2D（D1 暂缓），所以没有 virtio 的 3DM
 | 里程碑 | 状态 | 说明 |
 | --- | --- | --- |
 | A0 准备和探测 | 基本完成 | 见附录 B；剩 Windows 镜像的可写副本和驱动预装，放到 S1 的 Windows 验证时做；U4（KB2919355）同时确认 |
-| A1 公共基础设施 | 进行中 | 已完成（2026-10-01）：显示适配器插件框架（`src/graphics_adapter.js`、`src/graphics_adapters/`）、`bochs_vga` 迁出核心（`build/v86-bochs-vga.js`）、`graphics_adapter` 必填和 `"none"`、`vram_size` 取代 `vga_memory_size`、VGA BIOS 的 PCI ID 改写、旧存档兼容；测试 `tests/devices/graphics_adapter.js`。未完成：`pci.js` 的 prefetchable 和多个内存 BAR、`mmio_ram` 非像素区域、`virtio.js` 改造、GPU 扫描输出/光标平面/多屏、`gpu_channel.js`、检查点框架 |
-| A2 trace 抓取和重放 | 未开始 | |
+| A1 公共基础设施 | 进行中 | 已完成（2026-10-01）：显示适配器插件框架（`src/graphics_adapter.js`、`src/graphics_adapters/`）、`bochs_vga` 迁出核心（`build/v86-bochs-vga.js`）、`graphics_adapter` 必填和 `"none"`、`vram_size` 取代 `vga_memory_size`、VGA BIOS 的 PCI ID 改写、旧存档兼容；测试 `tests/devices/graphics_adapter.js`。设备和渲染器之间的通道（2026-10-01，主线程模式）：页面有 `libv86-webgpu.js` 和 WebGPU 时，`starter.js` 用本地通道把 `vmware_svga` 接到 `V86SVGARenderer`，消息为 submit/reset 和 write/done/lost（见 `svga_renderer.js` 开头）。未完成：CPU worker 和并行模式下的渲染器通道、`pci.js` 的 prefetchable 和多个内存 BAR、`mmio_ram` 非像素区域、`virtio.js` 改造、合成器直接显示 GPU 纹理和光标平面（暂由回读代替，见 5.8 节）、检查点框架 |
+| A2 trace 抓取和重放 | 完成（2026-10-01） | `tests/x64/gpu_trace.mjs` 记录设备送给渲染器的批次（批次自带数据，trace 就是批次序列），Linux 测试在 `GPU_LEVEL=vgpu9` 时写 `trace.bin`；`tests/glbridge/svga_trace_replay_browser_test.html` 在真 GPU 上重放，按回读的纹理存 PNG。另有 `tests/x64/gpu_remote_renderer.mjs`：node 里的客户机用无头 Chrome 里的渲染器作真 GPU（`GPU_RENDERER=chrome`、`WIN_GPU_RENDERER=chrome`），测试脚本的自动化照旧 |
 | S1 SVGA 基本 2D | Linux 已验收，Windows 进行中 | 设备在 `src/graphics_adapters/vmware_svga/`，测试 `tests/devices/vmware_svga.js`。Linux（Alpine 3.24，`tests/x64/linux_gpu.mjs`）：vmwgfx 用传统显示单元，1280×800，kmscube 约 9 fps。Win 8.1 在设备的 VGA 核心上（VBE）启动到桌面；vm3d 驱动安装和接管的验证在进行中 |
 | S2 SVGA 完整 2D | Linux 已验收，Windows 待验证 | GMR1/GMR2（`svga_gmr.js`）、Screen Object（`svga_screens.js`）、硬件光标（`svga_cursor.js`）、命令缓冲区和设备上下文、显示拓扑；存档版本 2。Linux 的 vmwgfx 在等级 `2d-full` 下用 Screen Object 显示单元和命令缓冲区，kmscube 画面正确。Alpine 3.24 内核的 vmwgfx 对没有 MOB 的设备不画光标（日志 "Unknown Cursor Type!"），所以 Linux 的光标验收挪到 S4 |
-| S3 VGPU9 + 3DMark06 | 未开始 | ABI 冻结点：冻结后在此注明，然后才能抓状态 |
+| S3 VGPU9 + 3DMark06 | 进行中 | 已完成（2026-10-01）：等级 `vgpu9`（`SVGA_CAP_3D`、硬件版本 WS8_B1、SM3.0 devcap 记录），旧式 SVGA3D 命令全部翻译成 D9WG（5.8 节的做法），渲染器 `svga_renderer.js`；测试 `tests/devices/vmware_svga_3d.js`、`tests/glbridge/svga_renderer_browser_test.html`。**Linux 已通过**：Alpine 3.24 的 vmwgfx 开启 3D，kmscube 用 Mesa svga（"SVGA3D; build: RELEASE; LLVM;"），真 GPU 下约 43 fps，画面与 llvmpipe 一致。未完成：Windows 8.1 的 vm3d 3D、3DMark06、`vgpu9` 的存档（GPU 上的表面和上下文还不进存档，恢复后 3D 从空开始）。ABI 冻结点：冻结后在此注明，然后才能抓状态 |
 | V1 virtio-gpu 2D | 未开始 | |
 | S4 GB 对象 | 未开始 | |
 | S5 DX10 + GX | 未开始 | |

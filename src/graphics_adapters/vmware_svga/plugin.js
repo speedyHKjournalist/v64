@@ -26,6 +26,9 @@ register_graphics_adapter({
             "get_state": () => device.get_state(),
             "set_state": state => device.set_state(state),
             "reset": () => device.reset(),
+            // a snapshot of the 3D levels needs the GPU's contents first
+            "has_host_state": () => !!device.svga3d,
+            "prepare_save": () => device.prepare_save(),
         };
     },
 });

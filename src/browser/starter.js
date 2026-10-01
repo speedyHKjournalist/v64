@@ -1275,8 +1275,11 @@ V86.prototype.save_state = async function()
 {
     if(this.worker_controller) return this.worker_controller.state("save");
     dbg_assert(arguments.length === 0);
-    if(!this.device_plugins.length) return this.v86.save_state();
-    return this.with_device_state(() => this.save_with_plugins(() => this.v86.save_state()), true);
+    if(!this.device_plugins.length && !this.adapter_host_state()) return this.v86.save_state();
+    return this.with_device_state(async () => {
+        if(this.adapter_host_state()) await this.v86.cpu.devices.graphics_adapter.prepare_save();
+        return this.save_with_plugins(() => this.v86.save_state());
+    }, true);
 };
 
 /**
@@ -1288,8 +1291,11 @@ V86.prototype.save_state_stream = async function(write)
 {
     if(typeof write !== "function") throw new TypeError("Snapshot writer must be a function");
     if(this.worker_controller) return this.worker_controller.state_stream("save", write);
-    if(!this.device_plugins.length) return this.v86.save_state_stream(write);
-    return this.with_device_state(() => this.save_with_plugins(() => this.v86.save_state_stream(write)), true);
+    if(!this.device_plugins.length && !this.adapter_host_state()) return this.v86.save_state_stream(write);
+    return this.with_device_state(async () => {
+        if(this.adapter_host_state()) await this.v86.cpu.devices.graphics_adapter.prepare_save();
+        return this.save_with_plugins(() => this.v86.save_state_stream(write));
+    }, true);
 };
 
 /**
@@ -1303,6 +1309,16 @@ V86.prototype.restore_state_stream = async function(source)
     if(this.worker_controller) return this.worker_controller.state_stream("restore", source);
     if(!this.device_plugins.length) return this.v86.restore_state_stream(source);
     return this.with_device_state(() => this.restore_with_plugins(() => this.v86.restore_state_stream(source)), false);
+};
+
+/**
+ * Whether the display adapter keeps state on the GPU that a snapshot fetches
+ * @return {boolean}
+ */
+V86.prototype.adapter_host_state = function()
+{
+    const adapter = this.v86 && this.v86.cpu.devices.graphics_adapter;
+    return !!adapter && adapter.has_host_state();
 };
 
 /**

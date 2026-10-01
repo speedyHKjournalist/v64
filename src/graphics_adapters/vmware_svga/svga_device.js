@@ -1136,7 +1136,7 @@ SVGADevice.prototype.render_screens = function()
 // ---------------------------------------------------------------------------
 // Snapshots
 
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 
 SVGADevice.prototype.get_state = function()
 {
@@ -1153,12 +1153,23 @@ SVGADevice.prototype.get_state = function()
         [this.gmr_id, this.command_high, this.prepend_low, this.prepend_high, this.cursor_count,
             this.cursor_on, this.cursor_x, this.cursor_y],
         this.topology.map(entry => entry || null),
+        // version 3: the 3D objects (svga3d.js; prepare_save read their contents back)
+        this.svga3d ? this.svga3d.get_state() : null,
     ];
+};
+
+/**
+ * Before a snapshot: what only the GPU has comes back
+ * @return {!Promise<undefined>}
+ */
+SVGADevice.prototype.prepare_save = function()
+{
+    return this.svga3d ? this.svga3d.prepare_save() : Promise.resolve(undefined);
 };
 
 SVGADevice.prototype.set_state = function(state)
 {
-    if(state[0] !== 1 && state[0] !== STATE_VERSION) throw new Error("vmware_svga: unsupported state version " + state[0]);
+    if(state[0] < 1 || state[0] > STATE_VERSION) throw new Error("vmware_svga: unsupported state version " + state[0]);
     if(state[1] !== this.level)
     {
         throw new Error("vmware_svga: the snapshot's device declares level " + state[1] + ", this one " + this.level);
@@ -1190,9 +1201,7 @@ SVGADevice.prototype.set_state = function(state)
         this.screens.reset();
         this.cursor.reset();
     }
-    // TODO(S3 checkpoint): the GPU's surfaces and contexts are not in the
-    // snapshot yet; the guest's 3D starts over empty
-    if(this.svga3d) this.svga3d.reset();
+    if(this.svga3d) this.svga3d.set_state(state[0] >= 3 ? state[13] : null);
     this.mode_key = "";
     this.showing = false;
     this.update_scanout();
