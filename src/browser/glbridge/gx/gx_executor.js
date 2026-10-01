@@ -65,6 +65,9 @@
     // depth formats whose guest layout differs: D3D9's 32-bit integer depth, and depth in the high 24 bits
     const SVGA3D_Z_D32 = 7, SVGA3D_Z_D24S8 = 9, SVGA3D_Z_D24X8 = 0x26, SVGA3D_Z_DF24 = 0x77, SVGA3D_Z_D24S8_INT = 0x78;
     const SURFACE_CUBEMAP = 1, SURFACE_VOLUME = 0x8000;
+    // the tessellator (tessellator_wgsl.js); patch lists' topologies: 10 + control points
+    const TESS = isNode ? require("./tessellator_wgsl.js") : global.V86TessellatorWGSL;
+    const TOPOLOGY_PATCHLIST_1 = 11, TOPOLOGY_PATCHLIST_32 = 42;
     // (in the flags' high word: SVGA3D_SURFACE_BIND_UAVIEW, 1 << 33)
     const SURFACE2_BIND_UAVIEW = 2;
     // what WebGPU stores into (typed UAVs); bgra8unorm with "bgra8unorm-storage"
@@ -1345,12 +1348,16 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const vs = c.shaders.get(vsStage.shader), ps = c.shaders.get(psStage.shader);
             if (!vs || !vs.program) return this.warn("no-vs", "a draw without a vertex shader");
             const gs = c.stages[SHADER_GS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_GS].shader) : null;
-            const topology = TOPOLOGY[st.topology];
+            const topology = st.topology >= TOPOLOGY_PATCHLIST_1 && st.topology <= TOPOLOGY_PATCHLIST_32 ? "patches" : TOPOLOGY[st.topology];
             if (!topology) return this.warn("topology" + st.topology, "topology " + st.topology + " is not supported");
             const so = this.streamOutput(c);
             const a = this.attachments(c);
             if (!a && !so) return;
             const input = this.inputLayout(c);
+            // hull and domain shaders: tessellation, as compute
+            const hs = c.stages[SHADER_HS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_HS].shader) : null;
+            const ds = c.stages[SHADER_DS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_DS].shader) : null;
+            if (hs && hs.program && ds && ds.program) return this.drawTessellated(c, call, vs, hs, ds, gs, ps, a, input, so);
             // a geometry shader: the vertex and geometry shaders run as compute
             if (gs && gs.program) return this.drawGeometry(c, call, vs, gs, ps, a, input, so);
             // vertices WebGPU cannot fetch: the vertex shader pulls them, as compute
@@ -1708,7 +1715,11 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
          * A draw of records a compute stage wrote: position and varyings as
          * the pixel shader reads them (`instances` of `count` records each)
          */
-        drawRecords(c, a, ps, shader, module, buffer, topology, count, instances) {
+        /**
+         * Draw a compute stage's records (tess: { indices, args }: by the
+         * tessellator's indices, as many as its indirect arguments say)
+         */
+        drawRecords(c, a, ps, shader, module, buffer, topology, count, instances, tess) {
             instances = instances || 1;
             const st = c.state;
             const varyings = ps && ps.program ? WGSL.pixelVaryings(ps.program) : {};
@@ -1717,7 +1728,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             for (const output of shader.program.outputs) if (output.name === IR.NAME.POSITION && output.type === IR.OPERAND.OUTPUT) position = output.index;
             const perInstance = instances > 1 ? count : 0;
             const passKey = "records:" + record + ":" + outputs + ":" + position + ":" + (module.result.gs ? 1 : 0) + ":" +
-                JSON.stringify(varyings) + ":" + perInstance;
+                JSON.stringify(varyings) + ":" + perInstance + (tess ? ":tess" : "");
             let pass = this.modules.get(passKey);
             if (!pass) {
                 const fields = ["    @builtin(position) position: vec4<f32>,"], stores = [];
@@ -1734,23 +1745,30 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 const code = "struct GXDraw { base_vertex: u32, base_instance: u32, pad0: u32, pad1: u32, viewport: vec4<f32> }\n" +
                     "@group(0) @binding(15) var<uniform> gx_draw: GXDraw;\n" +
                     "@group(0) @binding(232) var<storage, read> gx_in: array<vec4<u32>>;\n" +
+                    (tess ? "@group(0) @binding(231) var<storage, read> gx_tindex: array<u32>;\n" : "") +
                     `struct Out {\n${fields.join("\n")}\n}\n` +
                     "@vertex fn main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> Out {\n" +
-                    `    let at = (iid * ${perInstance}u + vid) * ${record}u;\n    var out: Out;\n` +
+                    (tess ? `    let at = gx_tindex[vid] * ${record}u;\n    var out: Out;\n` :
+                        `    let at = (iid * ${perInstance}u + vid) * ${record}u;\n    var out: Out;\n`) +
                     // an unused slot (a geometry shader's flag lane): outside the clip volume
                     (module.result.gs ? `    if (gx_in[at + ${outputs}u].x == 0u) { out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0); return out; }\n` : "") +
                     (position >= 0 ? `    let p = bitcast<vec4<f32>>(gx_in[at + ${position}u]);\n` : "    let p = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n") +
                     "    out.position = vec4<f32>(p.xy * gx_draw.viewport.xy + gx_draw.viewport.zw * p.w, p.zw);\n" +
                     stores.map(x => "    " + x).join("\n") + "\n    return out;\n}\n";
                 pass = { module: this.device.createShaderModule({ code }),
-                    result: { bindings: [{ binding: 15, type: "draw" }, { binding: 232, type: "stage-in" }] } };
+                    result: { bindings: [{ binding: 15, type: "draw" }, { binding: 232, type: "stage-in" },
+                        ...(tess ? [{ binding: 231, type: "index" }] : [])] } };
                 this.modules.set(passKey, pass);
             }
             const blend = c.blends.get(st.blend);
             const dualSource = !!(blend && usesSource1(blend.words));
             let psModule = null;
             try {
-                if (ps && ps.program) psModule = this.module(ps, { group: 1, targets: a.targets, dualSource });
+                if (ps && ps.program) {
+                    const psOptions = { group: 1, targets: a.targets, dualSource };
+                    if (ps.program.uavs.size) psOptions.uavFormats = this.uavFormats(c, SHADER_PS, ps.program);
+                    psModule = this.module(ps, psOptions);
+                }
             } catch (error) {
                 return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
             }
@@ -1770,12 +1788,135 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 this.stats.pipelines++;
             }
             const viewport = this.viewport(st, a.width, a.height, a.ss);
-            const groups = [this.bindGroup(c, SHADER_VS, pass, pipeline.layouts[0], plain, viewport.fix, { "stage-in": { buffer } }),
+            const extra = { "stage-in": { buffer } };
+            if (tess) extra.index = { buffer: tess.indices };
+            const groups = [this.bindGroup(c, SHADER_VS, pass, pipeline.layouts[0], plain, viewport.fix, extra),
                 psModule ? this.bindGroup(c, SHADER_PS, psModule, pipeline.layouts[1], plain, null) : this.emptyGroup];
             if (groups.includes(null)) return;
             const renderPass = this.renderPass(c, a, pipeline, groups, viewport, raster);
             this.stats.draws++;
-            renderPass.draw(count, instances, 0, 0);
+            // (the tessellator's arguments: the draw's after the dispatch's three words)
+            if (tess) renderPass.drawIndirect(tess.args, 12);
+            else renderPass.draw(count, instances, 0, 0);
+        }
+
+        // ------------------------------------------------------------------
+        // Tessellation: no WebGPU stages, so the vertex shader runs as
+        // compute (its records per control point), the hull shader as
+        // compute once per patch (control points, patch constants, tess
+        // factors), the D3D11 tessellator in WGSL (tessellator_wgsl.js:
+        // counts, their prefix sums and the indirect arguments, then the
+        // points and indices), the domain shader as compute once per point
+        // (an indirect dispatch), and the points are drawn by the
+        // tessellator's indices (an indirect draw)
+
+        tessellatorPipelines() {
+            if (this.tessPipelines) return this.tessPipelines;
+            const module = this.device.createShaderModule({ code: TESS.TESSELLATOR_WGSL });
+            const layout = this.device.createBindGroupLayout({ entries: [
+                { binding: 0, visibility: 4, buffer: { type: "uniform" } },
+                { binding: 1, visibility: 4, buffer: { type: "read-only-storage" } },
+                ...[2, 3, 4, 5, 6].map(binding => ({ binding, visibility: 4, buffer: { type: "storage" } })),
+            ] });
+            const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout] });
+            const make = entryPoint => this.device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint } });
+            this.tessPipelines = { layout, count: make("count"), scan: make("scan"), generate: make("generate") };
+            return this.tessPipelines;
+        }
+
+        drawTessellated(c, call, vs, hs, ds, gs, ps, a, input, so) {
+            const st = c.state;
+            if (call.indirect) return this.warn("tess-indirect", "indirect draws with tessellation are not supported");
+            if (st.topology < TOPOLOGY_PATCHLIST_1 || st.topology > TOPOLOGY_PATCHLIST_32) {
+                return this.warn("tess-topology", "tessellation needs a patch list topology");
+            }
+            if (gs && gs.program) this.warn("tess-gs", "a geometry shader after tessellation is not supported: left out");
+            if (so) this.warn("tess-so", "stream output after tessellation is not supported");
+            const count = call.count, instances = call.instances;
+            if (!count || !instances || !a) return;
+            let vsModule, hsModule, dsModule;
+            try {
+                vsModule = this.module(vs, { group: 0, mode: "vertex-compute", fetch: input.fetch });
+                hsModule = this.module(hs, { group: 0, mode: "hull" });
+                dsModule = this.module(ds, { group: 0, mode: "domain" });
+            } catch (error) {
+                return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
+            }
+            const h = hsModule.result.hull;
+            const inCPs = st.topology - TOPOLOGY_PATCHLIST_1 + 1;
+            if (inCPs !== h.inCPs) this.warn("tess-cps", "the patch list has " + inCPs + " control points, the hull shader " + h.inCPs);
+            const patches = Math.floor(count / inCPs), total = patches * instances;
+            if (!patches) return;
+            const vsRecord = Math.max(1, vsModule.result.record), dsRecord = Math.max(1, dsModule.result.record);
+            const vertices = count * instances;
+            // room for what the tessellator makes: by the hull shader's largest factor, at most about a million points
+            const f = Math.min(64, Math.max(1, Math.ceil(h.maxTessFactor || 64)));
+            const perPatchPoints = (f + 1) * (f + 2), perPatchIndices = 6 * f * f + 12 * f;
+            const maxPoints = Math.min(total * perPatchPoints, 1 << 20), maxIndices = Math.min(total * perPatchIndices, 6 << 20);
+            const vsOut = this.storageBuffer(vertices * vsRecord * 16);
+            const hsOut = this.storageBuffer(total * h.record * 16);
+            const counts = this.storageBuffer(total * 8), offsets = this.storageBuffer(total * 8);
+            const points = this.storageBuffer(maxPoints * 16), indices = this.storageBuffer(maxIndices * 4);
+            const args = this.device.createBuffer({ size: 32, usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.INDIRECT | BUFFER_USAGE.COPY_DST });
+            this.transient.push(args);
+            const dsOut = this.storageBuffer(maxPoints * dsRecord * 16);
+
+            const vsPipe = this.computePipeline(c, SHADER_VS, vsModule);
+            const hsPipe = this.computePipeline(c, SHADER_HS, hsModule);
+            const dsPipe = this.computePipeline(c, SHADER_DS, dsModule);
+            if (!vsPipe || !hsPipe || !dsPipe) return;
+            const ib = this.surfaces.get(st.ib.sid);
+            const vsGroup = this.bindGroup(c, SHADER_VS, vsModule, vsPipe.layout, call, null, {
+                "fetch": this.uniform(this.fetchParameters(st, call, input)),
+                "index": { buffer: call.indexed && ib && ib.buffer ? ib.buffer : this.dummyBuffer },
+                "vertex-buffer": slot => {
+                    const vb = st.vbs[slot];
+                    const S = vb && this.surfaces.get(vb.sid);
+                    return { buffer: S && S.buffer ? S.buffer : this.dummyBuffer };
+                },
+                "stage-out": { buffer: vsOut },
+            });
+            const hsGroup = this.bindGroup(c, SHADER_HS, hsModule, hsPipe.layout, call, null, {
+                "hull": this.uniform(new Uint32Array([patches, instances, count, vsRecord])),
+                "stage-in": { buffer: vsOut }, "stage-out": { buffer: hsOut },
+            });
+            const dsGroup = this.bindGroup(c, SHADER_DS, dsModule, dsPipe.layout, call, null, {
+                "domain": this.uniform(new Uint32Array([patches, h.record, h.cpRegs, h.pcAt])),
+                "stage-in": { buffer: hsOut }, "tess-points": { buffer: points }, "tess-args": { buffer: args },
+                "stage-out": { buffer: dsOut },
+            });
+            if (!vsGroup || !hsGroup || !dsGroup) return;
+            const tp = this.tessellatorPipelines();
+            const params = new Uint32Array([total, h.domain, h.partitioning, h.outputPrimitive, h.record, h.factorAt, maxPoints, maxIndices]);
+            const tessGroup = this.device.createBindGroup({ layout: tp.layout, entries: [
+                this.uniform(params), { buffer: hsOut }, { buffer: counts }, { buffer: offsets }, { buffer: points }, { buffer: indices }, { buffer: args },
+            ].map((resource, binding) => ({ binding, resource })) });
+
+            this.endPass();
+            const compute = this.encoder().beginComputePass();
+            compute.setPipeline(vsPipe.pipeline);
+            compute.setBindGroup(0, vsGroup);
+            this.dispatch(compute, vertices);
+            compute.setPipeline(hsPipe.pipeline);
+            compute.setBindGroup(0, hsGroup);
+            this.dispatch(compute, total);
+            compute.setBindGroup(0, tessGroup);
+            compute.setPipeline(tp.count);
+            this.dispatch(compute, total);
+            compute.setPipeline(tp.scan);
+            compute.dispatchWorkgroups(1);
+            compute.setPipeline(tp.generate);
+            this.dispatch(compute, total);
+            compute.end();
+            // (the domain shader's dispatch reads the arguments the scan wrote: a pass of its own)
+            const domain = this.encoder().beginComputePass();
+            domain.setPipeline(dsPipe.pipeline);
+            domain.setBindGroup(0, dsGroup);
+            domain.dispatchWorkgroupsIndirect(args, 0);
+            domain.end();
+            this.stats.tessellatedDraws = (this.stats.tessellatedDraws || 0) + 1;
+            const topology = h.outputPrimitive === 1 ? "point-list" : h.outputPrimitive === 2 ? "line-list" : "triangle-list";
+            this.drawRecords(c, a, ps, ds, dsModule, dsOut, topology, 0, 1, { indices, args });
         }
 
         /** A draw whose vertices WebGPU cannot fetch: the vertex shader as compute, then its records drawn */
@@ -1974,9 +2115,10 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     entries.push({ binding: b.binding, visibility, texture: { sampleType, viewDimension: b.dimension, multisampled: b.multisampled } });
                 } else if (b.type === "sampler" || b.type === "comparison") {
                     entries.push({ binding: b.binding, visibility, sampler: { type: b.type === "comparison" ? "comparison" : "filtering" } });
-                } else if (b.type === "uniform" || b.type === "draw" || b.type === "fetch" || b.type === "geo") {
+                } else if (b.type === "uniform" || b.type === "draw" || b.type === "fetch" || b.type === "geo" || b.type === "hull" || b.type === "domain") {
                     entries.push({ binding: b.binding, visibility, buffer: { type: "uniform" } });
-                } else if (b.type === "read-storage" || b.type === "index" || b.type === "vertex-buffer" || b.type === "stage-in") {
+                } else if (b.type === "read-storage" || b.type === "index" || b.type === "vertex-buffer" || b.type === "stage-in" ||
+                    b.type === "tess-points" || b.type === "tess-args") {
                     entries.push({ binding: b.binding, visibility, buffer: { type: "read-only-storage" } });
                 } else if (b.type === "storage" || b.type === "stage-out" || b.type === "uav" || b.type === "uav-counter") {
                     entries.push({ binding: b.binding, visibility, buffer: { type: "storage" } });

@@ -15,7 +15,7 @@ const files = [
     "gl-webgpu/gl_shader_translator.js", "gl-webgpu/gl_fixed_function.js",
     "gl-webgpu/gl_arb_program.js", "gl-webgpu/gl_executor.js",
     "graphics_journal.js", "v86_network_bridge.js", "webgpu_compositor.js", "v86gl_device.js", "graphics_proxy.js",
-    "shader_ir/dxbc_frontend.js", "shader_ir/wgsl_emitter.js", "gx/gx_executor.js",
+    "shader_ir/dxbc_frontend.js", "shader_ir/wgsl_emitter.js", "gx/tessellator_wgsl.js", "gx/gx_executor.js",
     "svga_renderer.js",
 ];
 const contents = await Promise.all(files.map(file => read_file(new URL(file, source), "utf8")));

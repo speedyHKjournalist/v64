@@ -303,6 +303,86 @@ const TEX = program(PROGRAM.PS,
     console.log("PASS: compute: typed texture UAVs (write, R32 read-write), an append counter, raw atomics, shared memory, bufinfo");
 }
 
+// ---- tessellation: a hull shader's phases, a domain shader, as compute ------
+
+{
+    const icp = (cp, reg, sel) => operand(OPERAND.INPUT_CONTROL_POINT, [cp, reg], sel || XYZW_S);
+    // vicp[vOutputControlPointID][0]: the first index relative to a register
+    const icpByID = sel => {
+        const token = (2 | 1 << 2 | 0xE4 << 4 | OPERAND.INPUT_CONTROL_POINT << 12 | 2 << 20 | 2 /* relative */ << 22) >>> 0;
+        return [token, ...operand(OPERAND.OUTPUT_CONTROL_POINT_ID, [], { select: 0 }), 0];
+    };
+    const HS = (() => {
+        const p = program(PROGRAM.HS,
+            ins(OP.HS_DECLS),
+            ins(OP.DCL_INPUT_CONTROL_POINT_COUNT, { controls: 4 }),
+            ins(OP.DCL_OUTPUT_CONTROL_POINT_COUNT, { controls: 4 }),
+            ins(OP.DCL_TESS_DOMAIN, { controls: 3 }),
+            ins(OP.DCL_TESS_PARTITIONING, { controls: 1 }),
+            ins(OP.DCL_TESS_OUTPUT_PRIMITIVE, { controls: 3 }),
+            ins(OP.DCL_HS_MAX_TESSFACTOR, f32(64)),
+            ins(OP.HS_CONTROL_POINT_PHASE),
+            ins(OP.DCL_INPUT, icp(4, 0, { mask: XYZW })),
+            ins(OP.DCL_INPUT, operand(OPERAND.OUTPUT_CONTROL_POINT_ID, [], { zero: true })),
+            dcl_output(0, XYZW),
+            ins(OP.MOV, o(0, { mask: XYZW }), icpByID()),
+            RET,
+            ins(OP.HS_FORK_PHASE),
+            ins(OP.DCL_HS_FORK_PHASE_INSTANCE_COUNT, 1),
+            dcl_output_siv(0, X, NAME.FINAL_QUAD_U_EQ_0_EDGE_TESSFACTOR),
+            dcl_output_siv(1, X, NAME.FINAL_QUAD_V_EQ_0_EDGE_TESSFACTOR),
+            dcl_output_siv(2, X, NAME.FINAL_QUAD_U_EQ_1_EDGE_TESSFACTOR),
+            dcl_output_siv(3, X, NAME.FINAL_QUAD_V_EQ_1_EDGE_TESSFACTOR),
+            ins(OP.MOV, o(0, { mask: X }), imm(4.0)),
+            ins(OP.MOV, o(1, { mask: X }), imm(4.0)),
+            ins(OP.MOV, o(2, { mask: X }), imm(4.0)),
+            ins(OP.MOV, o(3, { mask: X }), imm(4.0)),
+            RET,
+            ins(OP.HS_JOIN_PHASE),
+            dcl_output_siv(4, X, NAME.FINAL_QUAD_U_INSIDE_TESSFACTOR),
+            dcl_output_siv(5, X, NAME.FINAL_QUAD_V_INSIDE_TESSFACTOR),
+            ins(OP.MOV, o(4, { mask: X }), operand(OPERAND.INPUT_PATCH_CONSTANT, [0], { select: 0 })),
+            ins(OP.MOV, o(5, { mask: X }), imm(3.0)),
+            RET);
+        p[0] = PROGRAM.HS << 16 | 5 << 4;
+        return p;
+    })();
+    const hs = translate("hull", HS, { group: 0, mode: "hull" });
+    const h = hs.result.hull;
+    assert.deepEqual([h.inCPs, h.outCPs, h.cpRegs, h.pcRegs, h.domain, h.partitioning, h.outputPrimitive], [4, 4, 1, 6, 3, 1, 3]);
+    assert.equal(hs.result.record, 4 * 1 + 6 + 2, "control points, patch constants, tess factors");
+    assert.match(hs.result.code, /fn hs_phase1\(\)/);
+    assert.match(hs.result.code, /vicp\[[^\]]*hs_cpid[^\]]*\]\[0u\]/, "the control point the invocation makes");
+    assert.match(hs.result.code, /opc\[0u\]\.x = /, "fork phases write patch constants");
+    assert.match(hs.result.code, /vec4<f32>\(bitcast<f32>\(opc\[0\]\.x\), bitcast<f32>\(opc\[1\]\.x\)/, "the edge tess factors");
+
+    const DS = (() => {
+        const neg = 1;
+        const p = program(PROGRAM.DS,
+            ins(OP.DCL_INPUT_CONTROL_POINT_COUNT, { controls: 4 }),
+            ins(OP.DCL_TESS_DOMAIN, { controls: 3 }),
+            ins(OP.DCL_INPUT, operand(OPERAND.INPUT_DOMAIN_POINT, [], { mask: XY })),
+            ins(OP.DCL_INPUT, icp(4, 0, { mask: XY })),
+            dcl_output_siv(0, XYZW, NAME.POSITION),
+            dcl_temps(2),
+            ins(OP.ADD, r(0, { mask: XY }), icp(0, 0, XYZW_S).map((w, i) => i === 0 ? w : w), icp(1, 0)),
+            ins(OP.MAD, r(0, { mask: XY }), operand(OPERAND.INPUT_DOMAIN_POINT, [], SW(0, 0, 0, 0)), r(0, XYZW_S), icp(0, 0)),
+            ins(OP.ADD, r(1, { mask: XY }), operand(OPERAND.INPUT_CONTROL_POINT, [3, 0], XYZW_S, neg), icp(2, 0)),
+            ins(OP.MAD, r(1, { mask: XY }), operand(OPERAND.INPUT_DOMAIN_POINT, [], SW(0, 0, 0, 0)), r(1, XYZW_S), icp(3, 0)),
+            ins(OP.ADD, r(1, { mask: XY }), r(0, XYZW_S, neg), r(1, XYZW_S)),
+            ins(OP.MAD, o(0, { mask: XY }), operand(OPERAND.INPUT_DOMAIN_POINT, [], SW(1, 1, 1, 1)), r(1, XYZW_S), r(0, XYZW_S)),
+            ins(OP.MOV, o(0, { mask: Z | W_ }), imm(0.0, 0.0, 0.0, 1.0)),
+            RET);
+        p[0] = PROGRAM.DS << 16 | 5 << 4;
+        return p;
+    })();
+    const ds = translate("domain", DS, { group: 0, mode: "domain" });
+    assert.match(ds.result.code, /gx_domain = vec3<f32>\(u, v, 0\.0\);/, "a quad's domain point");
+    assert.match(ds.result.code, /vicp\[0u\]\[0u\]/);
+    assert.deepEqual(ds.result.bindings.map(b => b.type).sort(), ["domain", "stage-in", "stage-out", "tess-args", "tess-points"]);
+    console.log("PASS: tessellation: a hull shader's control point, fork and join phases, a domain shader, as compute");
+}
+
 // ---- shader model 4.1: cube arrays, lod, the rasterizer's samples, per-sample inputs ----
 
 const rasterizer = sel => operand(OPERAND.RASTERIZER, [], sel || XYZW_S);

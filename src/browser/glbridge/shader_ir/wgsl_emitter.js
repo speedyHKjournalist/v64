@@ -48,7 +48,16 @@
     class ShaderTranslateError extends Error {}
 
     const BINDING = { CB: 0, DRAW: 15, SAMPLER: 16, RESOURCE: 32, UAV: 160, VB: 200, FETCH: 230, INDEX: 231,
-        STAGE_IN: 232, STAGE_OUT: 233, GEO: 234, VIEWS: 299, UAV_COUNTER: 300 };
+        STAGE_IN: 232, STAGE_OUT: 233, GEO: 234, TESS_POINTS: 235, TESS_ARGS: 236, VIEWS: 299, UAV_COUNTER: 300 };
+    // the markers that begin a hull shader's phases
+    const HS_PHASE_MARKERS = new Set([OP.HS_DECLS, OP.HS_CONTROL_POINT_PHASE, OP.HS_FORK_PHASE, OP.HS_JOIN_PHASE]);
+    // where each tess factor goes among the tessellator's six (tessellator_wgsl.js)
+    const TESS_FACTOR_SLOT = { [NAME.FINAL_QUAD_U_EQ_0_EDGE_TESSFACTOR]: 0, [NAME.FINAL_QUAD_V_EQ_0_EDGE_TESSFACTOR]: 1,
+        [NAME.FINAL_QUAD_U_EQ_1_EDGE_TESSFACTOR]: 2, [NAME.FINAL_QUAD_V_EQ_1_EDGE_TESSFACTOR]: 3,
+        [NAME.FINAL_QUAD_U_INSIDE_TESSFACTOR]: 4, [NAME.FINAL_QUAD_V_INSIDE_TESSFACTOR]: 5,
+        [NAME.FINAL_TRI_U_EQ_0_EDGE_TESSFACTOR]: 0, [NAME.FINAL_TRI_V_EQ_0_EDGE_TESSFACTOR]: 1,
+        [NAME.FINAL_TRI_W_EQ_0_EDGE_TESSFACTOR]: 2, [NAME.FINAL_TRI_INSIDE_TESSFACTOR]: 3,
+        [NAME.FINAL_LINE_DENSITY_TESSFACTOR]: 0, [NAME.FINAL_LINE_DETAIL_TESSFACTOR]: 1 };
     // where a buffer view starts, in words, in GXViews: UAV n at n, resource n at 64 + n
     const VIEW_BASE_UAV = 0, VIEW_BASE_RESOURCE = 64, VIEW_BASES = 192;
     // vertices of a GS input primitive (D3D10_SB_PRIMITIVE): point, line, triangle, line_adj, triangle_adj
@@ -110,9 +119,13 @@
         run() {
             const p = this.p;
             const geometry = this.mode === "geometry" && this.stage === PROGRAM.GS;
-            if (this.stage !== PROGRAM.VS && this.stage !== PROGRAM.PS && this.stage !== PROGRAM.CS && !geometry) {
+            const hull = this.mode === "hull" && this.stage === PROGRAM.HS;
+            const domain = this.mode === "domain" && this.stage === PROGRAM.DS;
+            if (this.stage !== PROGRAM.VS && this.stage !== PROGRAM.PS && this.stage !== PROGRAM.CS && !geometry && !hull && !domain) {
                 throw new ShaderTranslateError(p.stage + " shaders are emulated elsewhere");
             }
+            if (hull) this.hull = this.hullLayout();
+            if (domain) this.domain = this.domainLayout();
             if (geometry) {
                 const g = p.gs;
                 this.gsVertices = GS_INPUT_VERTICES[g.input] || 0;
@@ -128,13 +141,25 @@
             this.scanUsage();
 
             // the body first: it says which helpers are needed
-            const [main, labels] = this.split();
+            const [main, labels] = hull ? [[], []] : this.split();
             const functions = [];
             for (const [label, code] of labels) {
                 this.lines = [];
                 this.indent = 1;
                 this.body(code);
                 functions.push("fn label" + label + "() {\n" + this.lines.join("\n") + "\n}\n");
+            }
+            // a hull shader: a function per phase
+            if (hull) {
+                p.tess.phases.forEach((phase, k) => {
+                    if (phase.kind === "decls") return;
+                    this.hsPhase = phase.kind;
+                    this.lines = [];
+                    this.indent = 1;
+                    this.body(p.code.filter(ins => ins.phase === k && !HS_PHASE_MARKERS.has(ins.op)));
+                    functions.push(`fn hs_phase${k}() {\n` + this.lines.join("\n") + "\n}\n");
+                });
+                this.hsPhase = null;
             }
             this.lines = [];
             this.indent = 1;
@@ -162,7 +187,9 @@
                 warnings: this.warnings,
                 stage: p.stage,
                 // a compute variant's records: vec4s per vertex, and a geometry shader's output
-                record: this.mode === "geometry" ? this.outputCount + 1 : this.outputCount,
+                record: this.mode === "geometry" ? this.outputCount + 1 : this.mode === "hull" ? this.hull.record : this.outputCount,
+                // a hull shader's records: its control points, patch constants and tess factors
+                hull: this.hull || null,
                 gs: this.mode === "geometry" ? { vertices: this.gsVertices, topology: this.gsOutput,
                     perPrim: this.gsPerPrim, maxPrims: this.gsMaxPrims } : null,
             };
@@ -266,6 +293,8 @@
             }
             out.push(`var<private> o: array<vec4<u32>, ${this.outputCount}>;`);
             if (this.mode === "vertex-compute") out.push(...this.fetchDeclarations());
+            if (this.mode === "hull") out.push(...this.hullDeclarations());
+            if (this.mode === "domain") out.push(...this.domainDeclarations());
             if (this.mode === "geometry") out.push(...this.geometryDeclarations());
             if (this.stage === PROGRAM.PS) {
                 out.push("var<private> odepth: u32;");
@@ -342,6 +371,8 @@
         entryPoint() {
             if (this.mode === "vertex-compute") return this.vertexComputeEntry();
             if (this.mode === "geometry") return this.geometryEntry();
+            if (this.mode === "hull") return this.hullEntry();
+            if (this.mode === "domain") return this.domainEntry();
             switch (this.stage) {
                 case PROGRAM.VS: return this.vertexEntry();
                 case PROGRAM.PS: return this.fragmentEntry();
@@ -714,6 +745,152 @@
         }
 
         // ---------------------------------------------------------------
+        // Tessellation: hull and domain shaders as compute (see GX's
+        // drawTessellated). A hull shader runs once per patch, its phases
+        // in order; its record per patch: the output control points
+        // (cpRegs vec4s each), the patch constants (pcRegs), then the six
+        // tess factors (two vec4s of floats, tessellator_wgsl.js's order). A
+        // domain shader runs once per point the tessellator made.
+
+        hullLayout() {
+            const p = this.p, t = p.tess;
+            const kind = phase => (t.phases[phase] || {}).kind;
+            let inRegs = 1, cpRegs = 0, pcRegs = 1;
+            for (const input of p.inputs) {
+                if (input.type === OPERAND.INPUT_CONTROL_POINT) inRegs = Math.max(inRegs, input.index2 + 1);
+            }
+            const hasCP = t.phases.some(ph => ph.kind === "cp");
+            for (const output of p.outputs) {
+                if (output.type !== OPERAND.OUTPUT) continue;
+                if (kind(output.phase) === "cp") cpRegs = Math.max(cpRegs, output.index + 1);
+                else pcRegs = Math.max(pcRegs, output.index + 1);
+            }
+            // without a control point phase the input control points pass through
+            if (!hasCP) cpRegs = inRegs;
+            cpRegs = Math.max(1, cpRegs);
+            const inCPs = Math.max(1, t.inputCPs), outCPs = Math.max(1, hasCP ? t.outputCPs : t.outputCPs || t.inputCPs);
+            const pcAt = outCPs * cpRegs;
+            return { inCPs, outCPs, inRegs, cpRegs, pcRegs, hasCP, pcAt, factorAt: pcAt + pcRegs, record: pcAt + pcRegs + 2,
+                domain: t.domain, partitioning: t.partitioning, outputPrimitive: t.outputPrimitive, maxTessFactor: t.maxTessFactor };
+        }
+
+        hullDeclarations() {
+            const g = this.group, h = this.hull, out = [];
+            out.push("struct GXHull { patches: u32, instances: u32, count: u32, in_record: u32 }");
+            out.push(`@group(${g}) @binding(${BINDING.GEO}) var<uniform> gx_hull: GXHull;`);
+            out.push(`@group(${g}) @binding(${BINDING.STAGE_IN}) var<storage, read> gx_in: array<vec4<u32>>;`);
+            out.push(`@group(${g}) @binding(${BINDING.STAGE_OUT}) var<storage, read_write> gx_out: array<vec4<u32>>;`);
+            this.bindings.push({ binding: BINDING.GEO, type: "hull" });
+            this.bindings.push({ binding: BINDING.STAGE_IN, type: "stage-in" });
+            this.bindings.push({ binding: BINDING.STAGE_OUT, type: "stage-out" });
+            out.push(`var<private> vicp: array<array<vec4<u32>, ${h.inRegs}>, ${h.inCPs}>;`);
+            out.push(`var<private> vocp: array<array<vec4<u32>, ${h.cpRegs}>, ${h.outCPs}>;`);
+            out.push(`var<private> opc: array<vec4<u32>, ${h.pcRegs}>;`);
+            out.push("var<private> hs_cpid: u32;");
+            out.push("var<private> hs_inst: u32;");
+            out.push("var<private> prim_id: u32;");
+            return out;
+        }
+
+        hullEntry() {
+            const p = this.p, h = this.hull, phases = p.tess.phases;
+            const lines = [];
+            lines.push("    let k = gid.x + gid.y * 65535u * 64u;");
+            lines.push("    if (k >= gx_hull.patches * gx_hull.instances) { return; }");
+            lines.push("    let instance = k / gx_hull.patches;");
+            lines.push("    let prim = k % gx_hull.patches;");
+            lines.push(`    for (var n = 0u; n < ${h.inCPs}u; n++) {`);
+            lines.push(`        let at = (instance * gx_hull.count + prim * ${h.inCPs}u + n) * gx_hull.in_record;`);
+            lines.push(`        for (var reg = 0u; reg < min(${h.inRegs}u, gx_hull.in_record); reg++) { vicp[n][reg] = gx_in[at + reg]; }`);
+            lines.push("    }");
+            lines.push("    prim_id = prim;");
+            const cp = phases.findIndex(ph => ph.kind === "cp");
+            lines.push(`    for (var cp = 0u; cp < ${h.outCPs}u; cp++) {`);
+            lines.push("        hs_cpid = cp;");
+            if (cp >= 0) {
+                lines.push(`        for (var reg = 0u; reg < ${this.outputCount}u; reg++) { o[reg] = vec4<u32>(); }`);
+                lines.push(`        hs_phase${cp}();`);
+                lines.push(`        for (var reg = 0u; reg < ${h.cpRegs}u; reg++) { vocp[cp][reg] = o[reg]; }`);
+            } else {
+                lines.push(`        for (var reg = 0u; reg < ${h.cpRegs}u; reg++) { vocp[cp][reg] = vicp[min(cp, ${h.inCPs - 1}u)][reg]; }`);
+            }
+            lines.push("    }");
+            phases.forEach((phase, k) => {
+                if (phase.kind !== "fork" && phase.kind !== "join") return;
+                lines.push(`    for (var i = 0u; i < ${Math.max(1, phase.instances)}u; i++) { hs_inst = i; hs_phase${k}(); }`);
+            });
+            lines.push(`    let out = k * ${h.record}u;`);
+            lines.push(`    for (var cp = 0u; cp < ${h.outCPs}u; cp++) {`);
+            lines.push(`        for (var reg = 0u; reg < ${h.cpRegs}u; reg++) { gx_out[out + cp * ${h.cpRegs}u + reg] = vocp[cp][reg]; }`);
+            lines.push("    }");
+            lines.push(`    for (var reg = 0u; reg < ${h.pcRegs}u; reg++) { gx_out[out + ${h.pcAt}u + reg] = opc[reg]; }`);
+            // the tess factors, from the patch constants their declarations name
+            const factors = ["0.0", "0.0", "0.0", "0.0", "0.0", "0.0"];
+            for (const output of p.outputs) {
+                const slot = TESS_FACTOR_SLOT[output.name];
+                if (slot === undefined || output.type !== OPERAND.OUTPUT) continue;
+                let lane = 0;
+                while (lane < 3 && !(output.mask >> lane & 1)) lane++;
+                factors[slot] = `bitcast<f32>(opc[${output.index}].${LANES[lane]})`;
+            }
+            lines.push(`    gx_out[out + ${h.factorAt}u] = bitcast<vec4<u32>>(vec4<f32>(${factors.slice(0, 4).join(", ")}));`);
+            lines.push(`    gx_out[out + ${h.factorAt + 1}u] = bitcast<vec4<u32>>(vec4<f32>(${factors[4]}, ${factors[5]}, 0.0, 0.0));`);
+            return "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n" + lines.join("\n") + "\n}\n";
+        }
+
+        domainLayout() {
+            const p = this.p;
+            let cpRegs = 1, pcRegs = 1;
+            for (const input of p.inputs) {
+                if (input.type === OPERAND.INPUT_CONTROL_POINT) cpRegs = Math.max(cpRegs, input.index2 + 1);
+                if (input.type === OPERAND.INPUT_PATCH_CONSTANT) pcRegs = Math.max(pcRegs, input.index + 1);
+            }
+            return { cps: Math.max(1, p.tess.inputCPs), cpRegs, pcRegs, domain: p.tess.domain };
+        }
+
+        domainDeclarations() {
+            const g = this.group, d = this.domain, out = [];
+            // the hull shader's records: cp_regs vec4s per control point, the patch constants at pc_at
+            out.push("struct GXDomain { patches: u32, hull_record: u32, cp_regs: u32, pc_at: u32 }");
+            out.push(`@group(${g}) @binding(${BINDING.GEO}) var<uniform> gx_dom: GXDomain;`);
+            out.push(`@group(${g}) @binding(${BINDING.STAGE_IN}) var<storage, read> gx_in: array<vec4<u32>>;`);
+            out.push(`@group(${g}) @binding(${BINDING.TESS_POINTS}) var<storage, read> gx_points: array<vec4<u32>>;`);
+            out.push(`@group(${g}) @binding(${BINDING.TESS_ARGS}) var<storage, read> gx_targs: array<u32>;`);
+            out.push(`@group(${g}) @binding(${BINDING.STAGE_OUT}) var<storage, read_write> gx_out: array<vec4<u32>>;`);
+            this.bindings.push({ binding: BINDING.GEO, type: "domain" });
+            this.bindings.push({ binding: BINDING.STAGE_IN, type: "stage-in" });
+            this.bindings.push({ binding: BINDING.TESS_POINTS, type: "tess-points" });
+            this.bindings.push({ binding: BINDING.TESS_ARGS, type: "tess-args" });
+            this.bindings.push({ binding: BINDING.STAGE_OUT, type: "stage-out" });
+            out.push(`var<private> vicp: array<array<vec4<u32>, ${d.cpRegs}>, ${d.cps}>;`);
+            out.push(`var<private> vpc: array<vec4<u32>, ${d.pcRegs}>;`);
+            out.push("var<private> gx_domain: vec3<f32>;");
+            out.push("var<private> prim_id: u32;");
+            return out;
+        }
+
+        domainEntry() {
+            const d = this.domain, OUT = this.outputCount;
+            return "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n" +
+                "    let k = gid.x + gid.y * 65535u * 64u;\n" +
+                // (the tessellator's point count, after the draw's arguments)
+                "    if (k >= gx_targs[7]) { return; }\n" +
+                "    let point = gx_points[k];\n" +
+                "    let u = bitcast<f32>(point.x);\n" +
+                "    let v = bitcast<f32>(point.y);\n" +
+                (d.domain === 2 ? "    gx_domain = vec3<f32>(u, v, 1.0 - u - v);\n" : "    gx_domain = vec3<f32>(u, v, 0.0);\n") +
+                "    let at = point.z * gx_dom.hull_record;\n" +
+                `    for (var cp = 0u; cp < ${d.cps}u; cp++) {\n` +
+                `        for (var reg = 0u; reg < min(${d.cpRegs}u, gx_dom.cp_regs); reg++) { vicp[cp][reg] = gx_in[at + cp * gx_dom.cp_regs + reg]; }\n` +
+                "    }\n" +
+                `    for (var reg = 0u; reg < ${d.pcRegs}u; reg++) { vpc[reg] = gx_in[at + gx_dom.pc_at + reg]; }\n` +
+                "    prim_id = point.z % max(gx_dom.patches, 1u);\n" +
+                "    shader_main();\n" +
+                `    for (var reg = 0u; reg < ${OUT}u; reg++) { gx_out[k * ${OUT}u + reg] = o[reg]; }\n` +
+                "}\n";
+        }
+
+        // ---------------------------------------------------------------
         // Operands
 
         /** An index (immediate, plus maybe a register's component) as a u32 expression */
@@ -732,7 +909,15 @@
                     // a geometry shader's are [vertex][register]
                     if (this.mode === "geometry" && i.length > 1) return `v[${this.index(i[0])}][${this.index(i[1])}]`;
                     return `v[${this.index(i[i.length - 1])}]`;
-                case OPERAND.OUTPUT: return `o[${this.index(i[0])}]`;
+                // (a hull shader's fork and join phases write patch constants)
+                case OPERAND.OUTPUT: return this.hsPhase === "fork" || this.hsPhase === "join" ? `opc[${this.index(i[0])}]` : `o[${this.index(i[0])}]`;
+                case OPERAND.INPUT_CONTROL_POINT: return `vicp[${this.index(i[0])}][${this.index(i[1])}]`;
+                case OPERAND.OUTPUT_CONTROL_POINT: return `vocp[${this.index(i[0])}][${this.index(i[1])}]`;
+                case OPERAND.INPUT_PATCH_CONSTANT: return this.mode === "hull" ? `opc[${this.index(i[0])}]` : `vpc[${this.index(i[0])}]`;
+                case OPERAND.OUTPUT_CONTROL_POINT_ID: return "vec4<u32>(hs_cpid)";
+                case OPERAND.INPUT_FORK_INSTANCE_ID:
+                case OPERAND.INPUT_JOIN_INSTANCE_ID: return "vec4<u32>(hs_inst)";
+                case OPERAND.INPUT_DOMAIN_POINT: return "bitcast<vec4<u32>>(vec4<f32>(gx_domain, 0.0))";
                 case OPERAND.INDEXABLE_TEMP: return `x${i[0].imm}[${this.index(i[1])}]`;
                 case OPERAND.CONSTANT_BUFFER: {
                     const slot = i[0].imm;

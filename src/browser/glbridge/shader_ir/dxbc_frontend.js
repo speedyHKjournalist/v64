@@ -86,6 +86,12 @@
         UNDEFINED: 0, POSITION: 1, CLIP_DISTANCE: 2, CULL_DISTANCE: 3, RENDER_TARGET_ARRAY_INDEX: 4,
         VIEWPORT_ARRAY_INDEX: 5, VERTEX_ID: 6, PRIMITIVE_ID: 7, INSTANCE_ID: 8, IS_FRONT_FACE: 9,
         SAMPLE_INDEX: 10,
+        // a hull shader's tess factors (patch constant outputs)
+        FINAL_QUAD_U_EQ_0_EDGE_TESSFACTOR: 11, FINAL_QUAD_V_EQ_0_EDGE_TESSFACTOR: 12,
+        FINAL_QUAD_U_EQ_1_EDGE_TESSFACTOR: 13, FINAL_QUAD_V_EQ_1_EDGE_TESSFACTOR: 14,
+        FINAL_QUAD_U_INSIDE_TESSFACTOR: 15, FINAL_QUAD_V_INSIDE_TESSFACTOR: 16,
+        FINAL_TRI_U_EQ_0_EDGE_TESSFACTOR: 17, FINAL_TRI_V_EQ_0_EDGE_TESSFACTOR: 18, FINAL_TRI_W_EQ_0_EDGE_TESSFACTOR: 19,
+        FINAL_TRI_INSIDE_TESSFACTOR: 20, FINAL_LINE_DETAIL_TESSFACTOR: 21, FINAL_LINE_DENSITY_TESSFACTOR: 22,
     };
 
     const INTERPOLATION = {
@@ -150,11 +156,16 @@
             inputs: [], outputs: [], resources: new Map(), samplers: new Map(), cbuffers: new Map(),
             uavs: new Map(), tgsm: new Map(), globalFlags: 0,
             gs: { input: 0, outputTopology: 0, maxVertices: 0, instances: 1, streams: [] },
+            // hull and domain shaders: control points, the tessellator's
+            // settings, and a hull shader's phases (code and declarations
+            // carry their phase's index; -1 outside of a hull shader)
+            tess: { inputCPs: 0, outputCPs: 0, domain: 0, partitioning: 0, outputPrimitive: 0, maxTessFactor: 64, phases: [] },
             threadGroup: [1, 1, 1], indexRanges: [],
             signature: decodeSignature(tokens, length),
         };
 
         let at = 2;
+        let phase = -1;
         while (at < length) {
             const start = at;
             const token = tokens[at];
@@ -173,8 +184,14 @@
                 throw new ShaderDecodeError("instruction " + (OP_NAMES[op] || op) + " at " + start + ": length " + size);
             }
             const end = start + size;
+            // a hull shader's phases begin with these
+            const PHASES = { [OP.HS_DECLS]: "decls", [OP.HS_CONTROL_POINT_PHASE]: "cp", [OP.HS_FORK_PHASE]: "fork", [OP.HS_JOIN_PHASE]: "join" };
+            if (PHASES[op]) {
+                program.tess.phases.push({ kind: PHASES[op], instances: 1 });
+                phase = program.tess.phases.length - 1;
+            }
             const instruction = {
-                op, name: OP_NAMES[op] || ("op" + op), at: start,
+                op, name: OP_NAMES[op] || ("op" + op), at: start, phase,
                 controls: token >>> 11 & 0x1FFF,
                 saturate: !!(token >>> 13 & 1),
                 test: token >>> 18 & 1,
@@ -353,7 +370,7 @@
                     op === OP.DCL_INPUT_PS_SGV || op === OP.DCL_INPUT_PS_SIV ? word() & 0xFFFF : 0;
                 const interpolation = op >= OP.DCL_INPUT_PS && op <= OP.DCL_INPUT_PS_SIV ? controls & 0xF : 0;
                 program.inputs.push({ operand: o, type: o.type, index: indexOf(o), index2: o.indices.length > 1 ? o.indices[1].imm : -1,
-                    mask: o.mask, name, interpolation });
+                    mask: o.mask, name, interpolation, phase: instruction.phase });
                 break;
             }
             case OP.DCL_OUTPUT:
@@ -361,7 +378,7 @@
             case OP.DCL_OUTPUT_SIV: {
                 const o = operand();
                 const name = op !== OP.DCL_OUTPUT ? word() & 0xFFFF : 0;
-                program.outputs.push({ operand: o, type: o.type, index: indexOf(o), mask: o.mask, name });
+                program.outputs.push({ operand: o, type: o.type, index: indexOf(o), mask: o.mask, name, phase: instruction.phase });
                 break;
             }
             case OP.DCL_RESOURCE: {
@@ -447,6 +464,30 @@
             case OP.DCL_THREAD_GROUP:
                 program.threadGroup = [word(), word(), word()];
                 break;
+            case OP.DCL_INPUT_CONTROL_POINT_COUNT:
+                program.tess.inputCPs = controls & 0x3F;
+                break;
+            case OP.DCL_OUTPUT_CONTROL_POINT_COUNT:
+                program.tess.outputCPs = controls & 0x3F;
+                break;
+            case OP.DCL_TESS_DOMAIN:
+                program.tess.domain = controls & 3;
+                break;
+            case OP.DCL_TESS_PARTITIONING:
+                program.tess.partitioning = controls & 7;
+                break;
+            case OP.DCL_TESS_OUTPUT_PRIMITIVE:
+                program.tess.outputPrimitive = controls & 7;
+                break;
+            case OP.DCL_HS_MAX_TESSFACTOR:
+                program.tess.maxTessFactor = new Float32Array(new Uint32Array([word()]).buffer)[0];
+                break;
+            case OP.DCL_HS_FORK_PHASE_INSTANCE_COUNT:
+            case OP.DCL_HS_JOIN_PHASE_INSTANCE_COUNT: {
+                const p = program.tess.phases[instruction.phase];
+                if (p) p.instances = word();
+                break;
+            }
             default:
                 // the tessellation and interface declarations are taken as
                 // they come; the stages that need them read instruction.raw
