@@ -15,9 +15,13 @@ const files = [
     "gl-webgpu/gl_shader_translator.js", "gl-webgpu/gl_fixed_function.js",
     "gl-webgpu/gl_arb_program.js", "gl-webgpu/gl_executor.js",
     "graphics_journal.js", "v86_network_bridge.js", "webgpu_compositor.js", "v86gl_device.js", "graphics_proxy.js",
+    "shader_ir/dxbc_frontend.js", "shader_ir/wgsl_emitter.js", "gx/gx_executor.js",
     "svga_renderer.js",
 ];
 const contents = await Promise.all(files.map(file => read_file(new URL(file, source), "utf8")));
+// GX's format table, from the device's (tools/svga_gx_formats.mjs)
+const { gx_formats } = await import(new URL("tools/svga_gx_formats.mjs", root));
+const formats = "globalThis.V86SVGADXFormats = " + JSON.stringify(gx_formats()) + ";";
 const worker = await read_file(new URL("d3d9-webgpu/d3d9_shader_worker.js", source), "utf8");
 const journal_worker = await read_file(new URL("graphics_journal_worker.js", source), "utf8");
 // The device half alone, for the CPU worker (importScripts)
@@ -26,7 +30,7 @@ const revision = create_hash("sha256").update(contents.join("\n") + worker + jou
 const prefix = `globalThis.V86GL_BUILD_REVISION = ${JSON.stringify(revision)};\n`;
 await mkdir(output, { recursive: true });
 // Isolate CommonJS detection from a consuming page's module/require globals.
-const bundle = prefix + "(function(module, require) {\n" + contents.join("\n;\n") + "\n})();\n";
+const bundle = prefix + "(function(module, require) {\n" + [formats, ...contents].join("\n;\n") + "\n})();\n";
 await write_file(new URL("libv86-webgpu.js", output), bundle);
 await write_file(new URL("d3d9_shader_worker.js", output), prefix + worker);
 await write_file(new URL("d3d9_shader_pipeline.js", output), prefix + contents[2]);

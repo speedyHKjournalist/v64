@@ -4,6 +4,7 @@
 // mode, alpha reference, gamma, texture arguments) are noted where they are.
 
 import * as C from "./svga_constants.js";
+import { DX_FORMATS } from "./svga_dx_formats.js";
 
 // D3DFORMAT values
 const D3DFMT = {
@@ -218,6 +219,52 @@ export const VGPU9_DEVCAPS = [
     [C.SVGA3D_DEVCAP_MAX_LINE_WIDTH, f32_bits(1)],
     [C.SVGA3D_DEVCAP_MAX_AA_LINE_WIDTH, f32_bits(1)],
 ];
+
+/**
+ * The devcaps at level dx10: those of vgpu9, DX contexts, and per format what
+ * GX does with it (svga_dx_formats.js)
+ * @type {!Array<!Array<number>>}
+ */
+export const DX10_DEVCAPS = [
+    ...VGPU9_DEVCAPS,
+    [C.SVGA3D_DEVCAP_DXCONTEXT, 1],
+    [C.SVGA3D_DEVCAP_DX_MAX_VERTEXBUFFERS, 16],
+    [C.SVGA3D_DEVCAP_DX_MAX_CONSTANT_BUFFERS, 14],
+    // the first vertex provokes (WebGPU's), not chosen per draw
+    [C.SVGA3D_DEVCAP_DX_PROVOKING_VERTEX, 0],
+    [C.SVGA3D_DEVCAP_MULTISAMPLE_2X, 0],
+    [C.SVGA3D_DEVCAP_MULTISAMPLE_4X, 1],
+    [C.SVGA3D_DEVCAP_MS_FULL_QUALITY, 0],
+    [C.SVGA3D_DEVCAP_SM41, 0],
+    [C.SVGA3D_DEVCAP_SM5, 0],
+    ...dx_format_caps(),
+];
+
+/** SVGA3D_DEVCAP_DXFMT_* from svga_dx_formats.js */
+function dx_format_caps()
+{
+    const caps = [];
+    for(const name of Object.keys(DX_FORMATS))
+    {
+        const index = C["SVGA3D_DEVCAP_DXFMT_" + name.slice("SVGA3D_".length)];
+        if(index === undefined) continue;
+        const [texture, can, vertex] = DX_FORMATS[name];
+        let value = 0;
+        if(texture || vertex) value |= C.SVGA3D_DXFMT_SUPPORTED;
+        if(can.includes("s") || can.includes("u")) value |= C.SVGA3D_DXFMT_SHADER_SAMPLE;
+        if(can.includes("r")) value |= C.SVGA3D_DXFMT_COLOR_RENDERTARGET;
+        if(can.includes("d")) value |= C.SVGA3D_DXFMT_DEPTH_RENDERTARGET;
+        if(can.includes("b")) value |= C.SVGA3D_DXFMT_BLENDABLE;
+        if(texture) value |= C.SVGA3D_DXFMT_MIPS | C.SVGA3D_DXFMT_ARRAY;
+        if(texture && !can.includes("d") && !texture.startsWith("bc")) value |= C.SVGA3D_DXFMT_VOLUME;
+        if(vertex) value |= C.SVGA3D_DXFMT_DX_VERTEX_BUFFER;
+        if(can.includes("m")) value |= C.SVGA3D_DXFMT_MULTISAMPLE;
+        caps.push([index, value]);
+    }
+    // a buffer is supported as one
+    caps.push([C.SVGA3D_DEVCAP_DXFMT_BUFFER, C.SVGA3D_DXFMT_SUPPORTED]);
+    return caps;
+}
 
 function f32_bits(value)
 {

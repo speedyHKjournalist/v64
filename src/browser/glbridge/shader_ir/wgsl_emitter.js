@@ -164,7 +164,9 @@
                 this.bindings.push({ binding: BINDING.CB + slot, type: "uniform", slot, size: size * 16 });
             }
             if (this.usesDraw) {
-                out.push("struct GXDraw { base_vertex: u32, base_instance: u32, pad0: u32, pad1: u32 }");
+                // viewport: (scale x, scale y, offset x, offset y) applied to
+                // the position, for viewports WebGPU would not take as they are
+                out.push("struct GXDraw { base_vertex: u32, base_instance: u32, pad0: u32, pad1: u32, viewport: vec4<f32> }");
                 out.push(`@group(${g}) @binding(${BINDING.DRAW}) var<uniform> gx_draw: GXDraw;`);
                 this.bindings.push({ binding: BINDING.DRAW, type: "draw" });
             }
@@ -303,8 +305,9 @@
                 if (output.name === NAME.POSITION) position = output.index;
             }
             outFields.push("    @builtin(position) position: vec4<f32>,");
+            this.usesDraw = true;
             stores.push(position === null ? "out.position = vec4<f32>(0.0, 0.0, 0.0, 1.0);" :
-                `out.position = bitcast<vec4<f32>>(o[${position}]);`);
+                `let p = bitcast<vec4<f32>>(o[${position}]);\n    out.position = vec4<f32>(p.xy * gx_draw.viewport.xy + gx_draw.viewport.zw * p.w, p.zw);`);
             // the varyings the pixel shader reads, as it declares them
             const varyings = o.varyings || defaultVaryings(p);
             for (const reg of Object.keys(varyings).map(Number).sort((a, b) => a - b)) {

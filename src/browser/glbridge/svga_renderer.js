@@ -53,13 +53,37 @@
             channel.post({ type: "lost", reason: String(reason) });
         };
 
+        // GX (DX contexts, level dx10 and up), made on the D3D9 executor's device the first time
+        let gx = null;
+        const gxExecutor = async () => {
+            if (gx) return gx;
+            if (!executor.device) await executor.initialize();
+            const GX = global.V86GXExecutor;
+            if (!GX || !global.V86SVGADXFormats) throw new Error("the SVGA renderer needs gx_executor.js (libv86-webgpu.js)");
+            gx = new GX.GXExecutor({ device: executor.device, formats: global.V86SVGADXFormats,
+                features: executor.deviceFeatures || {} });
+            return gx;
+        };
+
         channel.listen(message => {
             switch (message.type) {
                 case "submit": {
                     const seq = message.seq, bytes = message.bytes, forGeneration = generation;
+                    const stream = message.stream || "d9wg";
                     queue = queue.then(async () => {
                         if (forGeneration !== generation) return;
-                        if (!lost) {
+                        if (!lost && stream === "gx") {
+                            try {
+                                const target = await gxExecutor();
+                                await target.submit(bytes, { writeResponse: (offset, data) => {
+                                    if (forGeneration !== generation) return;
+                                    const copy = data.slice();
+                                    channel.post({ type: "write", offset, bytes: copy }, [copy.buffer]);
+                                } });
+                            } catch (error) {
+                                fail(error && error.stack || error);
+                            }
+                        } else if (!lost) {
                             await executor.submit(bytes, { writeGuestMemory: writer(forGeneration),
                                 submitCount: seq });
                             if (executor.failed && !executor.device) fail(executor.failed);
@@ -70,13 +94,17 @@
                 }
                 case "reset":
                     ++generation;
-                    queue = queue.then(() => executor.resetForReplay()).catch(error => fail(error));
+                    queue = queue.then(() => {
+                        if (gx) gx.reset();
+                        return executor.resetForReplay();
+                    }).catch(error => fail(error));
                     break;
             }
         });
 
         return {
             executor,
+            get gx() { return gx; },
             // the batches sent so far have run
             idle: () => queue.then(() => executor.checkpointIdle()),
             destroy() {

@@ -105,6 +105,8 @@ export function D9WGWriter()
     this.sequence = 0;
     // the command being written: where its header is
     this.command_at = -1;
+    /** @type {?function()} called before each command: the other stream is sent first */
+    this.before = null;
 }
 
 /** @return {boolean} */
@@ -136,6 +138,7 @@ D9WGWriter.prototype.reserve = function(bytes)
  */
 D9WGWriter.prototype.begin = function(opcode)
 {
+    if(this.before) this.before();
     this.end();
     this.reserve(COMMAND_HEADER_BYTES);
     this.command_at = this.length;

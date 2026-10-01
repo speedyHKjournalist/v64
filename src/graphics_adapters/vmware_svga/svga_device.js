@@ -16,7 +16,7 @@ import { ScreenObjects } from "./svga_screens.js";
 import { SoftwareCursor, cursor_masks_length } from "./svga_cursor.js";
 import { SVGA3D } from "./svga3d.js";
 import { MOBTable, OTables, OTABLE_ENTRY_BYTES, MOB_MAX_SIZE, GB_MEMORY_KB } from "./svga_gb.js";
-import { VGPU9_DEVCAPS } from "./svga3d_tables.js";
+import { VGPU9_DEVCAPS, DX10_DEVCAPS } from "./svga3d_tables.js";
 
 // For Types Only
 import { DisplaySource } from "../../display.js";
@@ -100,10 +100,25 @@ export const LEVELS = {
         cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG,
     },
+    // S5: DX contexts (VGPU10, shader model 4.0), drawn by GX
+    "dx10": {
+        caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
+            C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
+            C.SVGA_CAP_CURSOR | C.SVGA_CAP_CURSOR_BYPASS | C.SVGA_CAP_CURSOR_BYPASS_2 | C.SVGA_CAP_ALPHA_CURSOR |
+            C.SVGA_CAP_8BIT_EMULATION | C.SVGA_CAP_MULTIMON | C.SVGA_CAP_DISPLAY_TOPOLOGY |
+            C.SVGA_CAP_GMR | C.SVGA_CAP_GMR2 | C.SVGA_CAP_SCREEN_OBJECT_2 |
+            C.SVGA_CAP_COMMAND_BUFFERS | C.SVGA_CAP_CMD_BUFFERS_2 | C.SVGA_CAP_HP_CMD_QUEUE | C.SVGA_CAP_3D |
+            C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_CAP2_REGISTER | C.SVGA_CAP_DX,
+        fifo_caps: C.SVGA_FIFO_CAP_FENCE | C.SVGA_FIFO_CAP_PITCHLOCK | C.SVGA_FIFO_CAP_RESERVE |
+            C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
+            C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
+        cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
+            C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG,
+    },
 };
 
 /** Lowest to highest; without a pinned level the highest one there is a renderer for */
-export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9"];
+export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10"];
 
 /**
  * @param {number} bpp
@@ -192,7 +207,7 @@ export function SVGADevice(machine, options)
     /** @const @type {OTables} */
     this.otables = gb ? new OTables(machine) : null;
     /** @const @type {!Map<number, number>} SVGA3D_DEVCAP_* through SVGA_REG_DEV_CAP */
-    this.devcaps = new Map(VGPU9_DEVCAPS);
+    this.devcaps = new Map(this.caps & C.SVGA_CAP_DX ? DX10_DEVCAPS : VGPU9_DEVCAPS);
     /** @const @type {SVGA3D} 3D, at the levels that have it */
     this.svga3d = (LEVELS[level].caps & C.SVGA_CAP_3D) ? new SVGA3D(this, /** @type {!Object} */ (options.renderer)) : null;
 
@@ -911,7 +926,9 @@ SVGADevice.prototype.submit_command_buffer = function(address, context)
     }
     else
     {
-        const dwords = new Int32Array(bytes.buffer, 0, bytes.length >> 2);
+        const dwords = new Int32Array(bytes.buffer, bytes.byteOffset, bytes.length >> 2);
+        // DX commands act on the context the buffer names
+        if(this.svga3d) this.svga3d.dx_context = flags & C.SVGA_CB_FLAG_DX_CONTEXT ? header.getUint32(36, true) : 0xFFFFFFFF;
         for(let at = 0; at < dwords.length;)
         {
             const read = i => dwords[at + i];

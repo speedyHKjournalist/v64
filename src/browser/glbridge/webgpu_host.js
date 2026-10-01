@@ -54,6 +54,24 @@
         // (plan deviation D-05). Not yet shipping in any browser; asking for it
         // costs nothing when absent.
         "clip-distances",
+        // VMware SVGA's DX contexts (gx_executor.js): D24/D32 with stencil
+        // 8 of D3D10's formats, SRC1 blend factors, DrawInstancedIndirect's
+        // first instance
+        "depth32float-stencil8",
+        "dual-source-blending",
+        "rg11b10ufloat-renderable",
+        "indirect-first-instance",
+    ];
+
+    // Limits raised to what the adapter allows: D3D10 has 8 render targets
+    // of up to 16 bytes a pixel, 32 varyings, 128 textures and 16 samplers a
+    // stage, 16 vertex buffers (gx_executor.js). Higher limits cost nothing
+    // to the executors that need less.
+    const RAISED_LIMITS = [
+        "maxColorAttachmentBytesPerSample", "maxInterStageShaderVariables", "maxSampledTexturesPerShaderStage",
+        "maxSamplersPerShaderStage", "maxStorageBuffersPerShaderStage", "maxUniformBuffersPerShaderStage",
+        "maxVertexBuffers", "maxVertexAttributes", "maxBindingsPerBindGroup", "maxTextureArrayLayers",
+        "maxStorageBufferBindingSize", "maxBufferSize",
     ];
 
     function srgbSiblingOf(format) {
@@ -103,8 +121,15 @@
                     for (const name of wanted) {
                         if (supports(name)) requested.push(name);
                     }
-                    this.device = await this.adapter.requestDevice(
-                        requested.length ? { requiredFeatures: requested } : {});
+                    const requiredLimits = {};
+                    const limits = this.adapter.limits || {};
+                    for (const name of RAISED_LIMITS) {
+                        if (typeof limits[name] === "number") requiredLimits[name] = limits[name];
+                    }
+                    this.device = await this.adapter.requestDevice({
+                        ...(requested.length ? { requiredFeatures: requested } : {}),
+                        requiredLimits,
+                    });
                 }
                 this.deviceFeatures = this.featureFlags();
                 this.limits = this.device.limits || (this.adapter && this.adapter.limits) || {};
@@ -130,6 +155,8 @@
                 timestampQuery: has("timestamp-query"),
                 depthClipControl: has("depth-clip-control"),
                 clipDistances: has("clip-distances"),
+                depth32Stencil8: has("depth32float-stencil8"),
+                dualSourceBlending: has("dual-source-blending"),
             };
         }
 
