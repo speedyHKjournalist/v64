@@ -3150,8 +3150,15 @@ pub unsafe fn update_cs_size(new_size: bool) {
     }
 }
 
+/// VMware's backdoor port: VMware lets every privilege level use it (its
+/// tools and its user-mode 3D driver do), and so does v86 (src/vmware.js)
+pub const VMWARE_BACKDOOR_PORT: i32 = 0x5658;
+
 #[inline(never)]
 pub unsafe fn test_privileges_for_io(port: i32, size: i32) -> bool {
+    if port == VMWARE_BACKDOOR_PORT {
+        return true;
+    }
     // compatibility mode: the 64-bit TSS base
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
         return match crate::x64::system::check_io_access(port as u16, (size * 8) as u8) {

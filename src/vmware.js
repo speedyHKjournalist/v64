@@ -519,7 +519,7 @@ VMwareMouse.prototype.rpci = function(channel)
     {
         reply = "1 ";
     }
-    channel.reply = Uint8Array.from(reply, c => c.charCodeAt(0) & 0xFF);
+    channel.reply = new TextEncoder().encode(reply);
     channel.read = 0;
 };
 

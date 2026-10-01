@@ -833,6 +833,9 @@ unsafe fn table_instruction(d: &Decoded) -> Result<(), Fault> {
 }
 
 pub unsafe fn check_io_access(port: u16, width: u8) -> Result<(), Fault> {
+    if port as i32 == cpu::VMWARE_BACKDOOR_PORT {
+        return Ok(());
+    }
     if *gp::cpl as i32 > cpu::getiopl() {
         if *gp::segment_is_null.add(6) || *gp::segment_limits.add(6) < 103 {
             return Err(Fault::gp());

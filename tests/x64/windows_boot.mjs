@@ -367,7 +367,9 @@ function observe_svga()
     const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
     if(!svga) return;
     const state = {enable: svga.enable, mode: `${svga.width}x${svga.height}x${svga.bpp}`, pitch: svga.pitch(),
-        guest_id: svga.guest_id, config_done: svga.config_done, irq_mask: svga.irq_mask, id: svga.id.toString(16)};
+        guest_id: svga.guest_id, config_done: svga.config_done, irq_mask: svga.irq_mask, id: svga.id.toString(16),
+        screens: [...svga.screens.screens.values()].map(sc => [sc.id, sc.x, sc.y, sc.width, sc.height, sc.backing ? sc.backing.gmr : -1]),
+        unknown: svga.stats ? svga.stats.last_unknown : 0, errors: svga.stats ? svga.stats.errors : 0};
     const key = JSON.stringify(state);
     if(key !== svga_seen) { svga_seen = key; event("svga", state); }
     // the 3D commands so far, every 30 s while they change
@@ -375,7 +377,8 @@ function observe_svga()
     {
         svga3d_next = performance.now() + 30000;
         const counts = JSON.stringify(svga.svga3d.counts);
-        if(counts !== svga3d_seen) { svga3d_seen = counts; event("svga3d", {counts: svga.svga3d.counts, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size}); }
+        const activity = counts + JSON.stringify(svga.stats);
+        if(activity !== svga3d_seen) { svga3d_seen = activity; event("svga3d", {counts: svga.svga3d.counts, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size, device: svga.stats}); }
     }
 }
 let svga3d_next = 0, svga3d_seen = "";
@@ -529,6 +532,14 @@ try
 {
     await new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); });
     cpu = vm.v86.cpu;
+    // WIN_GUESTINFO=key=value;...: what the VMware backdoor answers for
+    // guestinfo.<key> (VMware's drivers read their settings so, e.g.
+    // loglevel.vm3d.all=10 or svga.wddm.miniportLogging=TRUE)
+    for(const entry of (process.env.WIN_GUESTINFO || "").split(";").filter(Boolean))
+    {
+        const at = entry.indexOf("=");
+        cpu.devices.vmware.guestinfo.set(entry.slice(0, at), entry.slice(at + 1));
+    }
     if(process.env.WIN_X64_PROFILE !== "0") cpu.wm.exports.set_x64_test_capabilities(1);
     if(process.env.WIN_PAGE_TIER === "0") cpu.wm.exports.x64_page_set_enabled(0);
     if(process.env.WIN_STEP_PROFILE) cpu.wm.exports.x64_page_profile(1);

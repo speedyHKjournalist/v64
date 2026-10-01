@@ -158,6 +158,9 @@ export function SVGADevice(machine, options)
     this.cursor = new SoftwareCursor();
     /** SVGA_REG_DISPLAY_*: [id, primary, x, y, width, height] each */
     this.topology = [];
+    /** What the driver has done, for harnesses and debugging */
+    this.stats = { fifo_commands: 0, command_buffers: 0, unknown_commands: 0, last_unknown: 0, errors: 0, commands: {}, contexts: {}, statuses: {},
+        irq_raised: 0, irq_status_reads: 0, irq_acks: 0 };
     /** @const @type {SVGA3D} 3D, at the levels that have it */
     this.svga3d = (LEVELS[level].caps & C.SVGA_CAP_3D) ? new SVGA3D(this, /** @type {!Object} */ (options.renderer)) : null;
 
@@ -282,9 +285,10 @@ SVGADevice.prototype.register_ports = function()
     machine.register_write(base + C.SVGA_BIOS_PORT, this,
         function(value) {}, undefined, function(value) {});
     machine.register_read(base + C.SVGA_IRQSTATUS_PORT, this,
-        function(port) { return this.irq_status & 0xFF; }, undefined, function(port) { return this.irq_status; });
+        function(port) { this.stats.irq_status_reads++; return this.irq_status & 0xFF; }, undefined,
+        function(port) { this.stats.irq_status_reads++; return this.irq_status; });
     machine.register_write(base + C.SVGA_IRQSTATUS_PORT, this,
-        function(value) { this.clear_irq(value); }, undefined, function(value) { this.clear_irq(value); });
+        function(value) { this.stats.irq_acks++; this.clear_irq(value); }, undefined, function(value) { this.stats.irq_acks++; this.clear_irq(value); });
 };
 
 /**
@@ -548,13 +552,18 @@ SVGADevice.prototype.update_irq = function()
 {
     // (the PCI function, and so its interrupt line, comes after the first reset)
     if(!this.pci_registered) return;
-    if(this.irq_status & this.irq_mask) this.machine.raise_irq();
+    if(this.irq_status & this.irq_mask)
+    {
+        this.stats.irq_raised++;
+        this.machine.raise_irq();
+    }
     else this.machine.lower_irq();
 };
 
 /** @param {number} flags */
 SVGADevice.prototype.set_irq = function(flags)
 {
+    if(flags & C.SVGA_IRQFLAG_ERROR) this.stats.errors++;
     this.irq_status |= flags;
     this.update_irq();
 };
@@ -601,6 +610,7 @@ SVGADevice.prototype.process_fifo = function()
         const read = n => fifo[(stop - min + 4 * n) % (max - min) + min >> 2];
         const length = this.run_command(read, available);
         if(length === 0) break;       // incomplete: the rest is not written yet
+        this.stats.fifo_commands++;
         if(length < 0)
         {
             // unknown command: its length is unknown, nothing after it can be parsed
@@ -627,6 +637,7 @@ SVGADevice.prototype.process_fifo = function()
 SVGADevice.prototype.run_command = function(read, available)
 {
     const id = read(0) >>> 0;
+    this.stats.commands[id] = (this.stats.commands[id] || 0) + 1;
     const need = n => available >= n;
 
     switch(id)
@@ -783,6 +794,8 @@ SVGADevice.prototype.run_command = function(read, available)
     }
 
     dbg_log("svga: unknown FIFO command " + id, LOG_VGA);
+    this.stats.unknown_commands++;
+    this.stats.last_unknown = id;
     return -1;
 };
 
@@ -797,6 +810,8 @@ SVGADevice.prototype.run_command = function(read, available)
  */
 SVGADevice.prototype.submit_command_buffer = function(address, context)
 {
+    this.stats.command_buffers++;
+    this.stats.contexts[context] = (this.stats.contexts[context] || 0) + 1;
     const header = new DataView(this.machine.read_physical(address, 64).slice().buffer);
     const flags = header.getUint32(16, true), length = header.getUint32(20, true);
     const pa = header.getUint32(24, true) + header.getUint32(28, true) * 0x100000000;
@@ -829,6 +844,7 @@ SVGADevice.prototype.submit_command_buffer = function(address, context)
         }
     }
 
+    this.stats.statuses[status] = (this.stats.statuses[status] || 0) + 1;
     const complete = () => {
         const done = new DataView(new ArrayBuffer(8));
         done.setUint32(0, status, true);
