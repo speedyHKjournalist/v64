@@ -246,6 +246,8 @@ export function VirtioGPU(machine, options)
         "capability_bar": 2,
         "pci_rom_size": this.vga.pci_rom_size,
         "pci_rom_address": this.vga.pci_rom_address,
+        // (viogpudo gives up when its configuration vector does not read back)
+        "keep_msix_vectors": true,
         "features": features,
         "queues": [{ "size": 256 }, { "size": 16 }],
         "config": [

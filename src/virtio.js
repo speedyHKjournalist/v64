@@ -157,6 +157,7 @@ var VirtIO_DeviceSpecificCapabilityOptions;
  *     capability_bar: (undefined | number),
  *     rom_size: (undefined | number),
  *     rom_address: (undefined | number),
+ *     keep_msix_vectors: (undefined | boolean),
  * }}
  */
 var VirtIO_Options;
@@ -264,6 +265,13 @@ export function VirtIO(cpu, options)
     // virtio-vga: the VGA BIOS, as the expansion ROM (PCI sizes and places it)
     this.pci_rom_size = options.rom_size || 0;
     this.pci_rom_address = options.rom_address || 0;
+
+    // Without MSI-X, the vector registers read NO_VECTOR. With this, they
+    // keep what the driver writes, as QEMU's do: viogpudo always asks for a
+    // configuration vector and gives up when it does not read back
+    // (interrupts stay INTx either way)
+    this.keep_msix_vectors = !!options.keep_msix_vectors;
+    this.msix_config_vector = 0xFFFF;
 
     // Feature bits grouped in dwords, dword selected by decive_feature_select.
     this.device_feature_select = 0;
@@ -429,11 +437,12 @@ VirtIO.prototype.create_common_capability = function(options)
                 read: () =>
                 {
                     dbg_log("No msi-x capability supported.", LOG_VIRTIO);
-                    return 0xFFFF;
+                    return this.msix_config_vector;
                 },
                 write: data =>
                 {
                     dbg_log("No msi-x capability supported.", LOG_VIRTIO);
+                    if(this.keep_msix_vectors) this.msix_config_vector = data;
                 },
             },
             {
@@ -554,11 +563,12 @@ VirtIO.prototype.create_common_capability = function(options)
                 read: () =>
                 {
                     dbg_log("No msi-x capability supported.", LOG_VIRTIO);
-                    return 0xFFFF;
+                    return this.queue_selected ? this.queue_selected.msix_vector : 0xFFFF;
                 },
                 write: data =>
                 {
                     dbg_log("No msi-x capability supported.", LOG_VIRTIO);
+                    if(this.keep_msix_vectors && this.queue_selected) this.queue_selected.msix_vector = data;
                 },
             },
             {
@@ -1108,6 +1118,7 @@ VirtIO.prototype.reset = function()
 
     this.features_ok = true;
     this.device_status = 0;
+    this.msix_config_vector = 0xFFFF;
 
     this.queue_select = 0;
     this.queue_selected = this.queues[0];
@@ -1213,6 +1224,8 @@ function VirtQueue(cpu, virtio, options)
     this.notify_offset = options.notify_offset;
 
     this.address_words = new Uint32Array(6);
+    // (see VirtIO.keep_msix_vectors)
+    this.msix_vector = 0xFFFF;
     this.desc_addr = 0;
 
     this.avail_addr = 0;
@@ -1271,6 +1284,7 @@ VirtQueue.prototype.reset = function()
     this.avail_last_idx = 0;
     this.used_addr = 0;
     this.num_staged_replies = 0;
+    this.msix_vector = 0xFFFF;
     this.set_size(this.size_supported);
 };
 

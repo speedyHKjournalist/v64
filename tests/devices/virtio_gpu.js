@@ -86,6 +86,14 @@ const mmio_write32 = (address, value) => cpu.mmap_write32(address, value);
 assert.equal(mmio_read32(config + 8), 2, "num_scanouts");
 assert.equal(mmio_read32(config + 12), 0, "num_capsets: no 3D at the 2d level");
 assert.ok(cpu.devices.vga === gpu.vga, "the VGA core is the machine's VGA");
+// Status is read-only or write-1-to-clear: Windows clears it with a 16-bit
+// write, which must leave the capability list (virtio drivers look for it)
+io.port_write32(0xcf8, 0x80000000 | BDF << 8 | 0x04);
+io.port_write16(0xcfe, 0xFFFF);
+assert.equal(pci_read(0x04) >>> 16 & 0x10, 0x10, "the capability list survives a write to the status register");
+io.port_write8(0xcfe, 0);
+assert.equal(pci_read(0x04) >>> 16 & 0x10, 0x10, "and a byte write");
+
 // An OS that moves BAR2: the capabilities follow, the old place is unmapped
 const pci_write = (reg, value) => { io.port_write32(0xcf8, 0x80000000 | BDF << 8 | reg); io.port_write32(0xcfc, value); };
 const MOVED = 0xFEA00000;
@@ -122,9 +130,15 @@ function start_driver()
     w32(8, 0); w32(12, 6); w32(8, 1); w32(12, 1);
     w8(20, 11);
     assert.equal(mmio_read8(common + 20), 11, "FEATURES_OK accepted");
+    // (viogpudo always asks for configuration vector 0 and gives up when it
+    // does not read back; interrupts stay INTx)
+    w16(16, 0);
+    assert.equal(mmio_read16(common + 16), 0, "msix_config keeps what the driver writes");
     QUEUES.forEach((q, i) => {
         w16(22, i);
         q.size = mmio_read16(common + 24);
+        w16(26, 0xFFFF);
+        assert.equal(mmio_read16(common + 26), 0xFFFF, "queue_msix_vector");
         w32(32, q.desc); w32(36, 0);
         w32(40, q.avail); w32(44, 0);
         w32(48, q.used); w32(52, 0);

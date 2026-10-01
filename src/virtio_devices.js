@@ -119,8 +119,9 @@ export function create_virtio_devices(cpu, descriptors)
  * the adapter's own memory BARs ("bars": quoted { bar, size, address,
  * prefetchable, on_move }), "capability_bar", the one memory BAR that holds
  * all four capabilities at their windows' offsets (viogpudo maps no I/O
- * BARs), and the VGA BIOS as its
- * expansion ROM ("pci_rom_size", "pci_rom_address"). Its state belongs to the
+ * BARs), the VGA BIOS as its
+ * expansion ROM ("pci_rom_size", "pci_rom_address"), and "keep_msix_vectors"
+ * (see VirtIO.keep_msix_vectors). Its state belongs to the
  * adapter's snapshot entry (the handle's "transport" and "set_transport").
  * @param {CPU} cpu
  * @param {*} descriptor
@@ -150,6 +151,7 @@ export function create_adapter_virtio_device(cpu, descriptor, pci_id)
         capability_bar: descriptor["capability_bar"],
         rom_size: descriptor["pci_rom_size"],
         rom_address: descriptor["pci_rom_address"],
+        keep_msix_vectors: !!descriptor["keep_msix_vectors"],
     });
 }
 
@@ -358,7 +360,8 @@ function is_io_window_free(cpu, io_base)
  * @param {number} slot
  * @param {number} io_base
  * @param {{class_code: (number|undefined), revision: (number|undefined), bars: !Array,
- *     capability_bar: (number|undefined), rom_size: (number|undefined), rom_address: (number|undefined)}=} transport
+ *     capability_bar: (number|undefined), rom_size: (number|undefined), rom_address: (number|undefined),
+ *     keep_msix_vectors: (boolean|undefined)}=} transport
  *     a display adapter's layout (create_adapter_virtio_device)
  */
 function VirtioDevice(cpu, descriptor, slot, io_base, transport)
@@ -394,6 +397,7 @@ function VirtioDevice(cpu, descriptor, slot, io_base, transport)
         capability_bar: transport && transport.capability_bar,
         rom_size: transport && transport.rom_size,
         rom_address: transport && transport.rom_address,
+        keep_msix_vectors: transport && transport.keep_msix_vectors,
         on_reset: () =>
         {
             this.generation++;

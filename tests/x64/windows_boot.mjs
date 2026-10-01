@@ -20,6 +20,8 @@
 // "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
 // <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>",
 // "launch <command line>" (run by the launcher with cmd /c, see WIN_LAUNCHER),
+// "display <width> <height> [index]" (V86.set_display_size), "snapshot" (saved
+// and restored in place),
 // "svgalog on|off" (the SVGA3D commands other than DX and the frequent GB
 // ones, with their first words, as "svga3d-command" events), "svgashaders"
 // (the GB shaders' bytecode, as "svga3d-shader" events).
@@ -701,6 +703,17 @@ try
         else if(verb === "space") await press([57, 185]);
         else if(verb === "password") { await type(password); await enter(); }
         else if(verb === "shot") screenshot(true);
+        // the page's size for a display (V86.set_display_size; virtio_gpu tells the guest)
+        else if(verb === "display") vm.set_display_size(...argument.split(/\s+/).map(Number));
+        // a snapshot saved and restored in place (the disks are not in it, and unchanged)
+        else if(verb === "snapshot")
+        {
+            await vm.stop();
+            const state = await vm.save_state();
+            await vm.restore_state(state);
+            vm.run();
+            event("snapshot", {bytes: state.byteLength});
+        }
         else if(verb === "rips") next_samples = 0;
         else if(verb === "trace") { cpu.wm.exports.x64_user_trace_enable(argument !== "off"); trace_seen = 0; }
         else if(verb === "launch")
