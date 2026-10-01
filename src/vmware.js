@@ -367,7 +367,7 @@ VMwareMouse.prototype.port_read32 = function()
             if(!svga) break;
             this.set_reg(REG_EBX, VMWARE_MAGIC);
             const subcommand = reg32[REG_ECX] >>> 16;
-            return subcommand === 0 ? svga.capabilities : subcommand === 2 ? svga.hardware_version : 0;
+            return (subcommand === 0 ? svga.capabilities : subcommand === 2 ? svga.hardware_version : 0) | 0;
         }
 
         case CMD_ABSPOINTER_STATUS:

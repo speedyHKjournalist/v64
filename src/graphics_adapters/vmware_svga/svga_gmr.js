@@ -118,23 +118,22 @@ export function remap_gmr2_payload(flags, count)
 }
 
 /**
- * The guest physical runs behind [offset, offset + length) of a region
- * @param {number} id
+ * The guest physical runs behind [offset, offset + length) of a list of pages
+ * @param {!Float64Array} pages guest physical page numbers
  * @param {number} offset
  * @param {number} length
- * @return {Array<{address: number, length: number}>} null if out of the region
+ * @return {Array<{address: number, length: number}>} null if out of the pages
  */
-GMRTable.prototype.runs = function(id, offset, length)
+export function page_runs(pages, offset, length)
 {
-    const region = this.regions.get(id);
-    if(!region || offset < 0 || length < 0 || offset + length > region.length * PAGE) return null;
+    if(offset < 0 || length < 0 || offset + length > pages.length * PAGE) return null;
     const runs = [];
     let at = offset, left = length;
     while(left > 0)
     {
         const page = Math.floor(at / PAGE), within = at % PAGE;
         const take = Math.min(left, PAGE - within);
-        const address = region[page] * PAGE + within;
+        const address = pages[page] * PAGE + within;
         const last = runs[runs.length - 1];
         if(last && last.address + last.length === address) last.length += take;
         else runs.push({ address, length: take });
@@ -142,7 +141,51 @@ GMRTable.prototype.runs = function(id, offset, length)
         left -= take;
     }
     return runs;
-};
+}
+
+/**
+ * Read from a list of pages
+ * @param {GraphicsMachine} machine
+ * @param {!Float64Array} pages
+ * @param {number} offset
+ * @param {number} length
+ * @return {Uint8Array} a copy, or null if the range is not in the pages
+ */
+export function read_pages(machine, pages, offset, length)
+{
+    const runs = page_runs(pages, offset, length);
+    if(!runs) return null;
+    if(runs.length === 1) return machine.read_physical(runs[0].address, length).slice();
+    const out = new Uint8Array(length);
+    let at = 0;
+    for(const run of runs)
+    {
+        out.set(machine.read_physical(run.address, run.length), at);
+        at += run.length;
+    }
+    return out;
+}
+
+/**
+ * Write into a list of pages
+ * @param {GraphicsMachine} machine
+ * @param {!Float64Array} pages
+ * @param {number} offset
+ * @param {!Uint8Array} bytes
+ * @return {boolean}
+ */
+export function write_pages(machine, pages, offset, bytes)
+{
+    const runs = page_runs(pages, offset, bytes.length);
+    if(!runs) return false;
+    let at = 0;
+    for(const run of runs)
+    {
+        machine.write_physical(bytes.subarray(at, at + run.length), run.address);
+        at += run.length;
+    }
+    return true;
+}
 
 /**
  * Read through an SVGAGuestPtr
@@ -156,20 +199,11 @@ GMRTable.prototype.read = function(id, offset, length)
     if(id === C.SVGA_GMR_FRAMEBUFFER)
     {
         const vram = this.vram();
-        if(offset + length > vram.length) return null;
+        if(offset < 0 || offset + length > vram.length) return null;
         return vram.slice(offset, offset + length);
     }
-    const runs = this.runs(id, offset, length);
-    if(!runs) return null;
-    if(runs.length === 1) return this.machine.read_physical(runs[0].address, length).slice();
-    const out = new Uint8Array(length);
-    let at = 0;
-    for(const run of runs)
-    {
-        out.set(this.machine.read_physical(run.address, run.length), at);
-        at += run.length;
-    }
-    return out;
+    const region = this.regions.get(id);
+    return region ? read_pages(this.machine, region, offset, length) : null;
 };
 
 /**
@@ -184,19 +218,12 @@ GMRTable.prototype.write = function(id, offset, bytes)
     if(id === C.SVGA_GMR_FRAMEBUFFER)
     {
         const vram = this.vram();
-        if(offset + bytes.length > vram.length) return false;
+        if(offset < 0 || offset + bytes.length > vram.length) return false;
         vram.set(bytes, offset);
         return true;
     }
-    const runs = this.runs(id, offset, bytes.length);
-    if(!runs) return false;
-    let at = 0;
-    for(const run of runs)
-    {
-        this.machine.write_physical(bytes.subarray(at, at + run.length), run.address);
-        at += run.length;
-    }
-    return true;
+    const region = this.regions.get(id);
+    return region ? write_pages(this.machine, region, offset, bytes) : false;
 };
 
 GMRTable.prototype.get_state = function()

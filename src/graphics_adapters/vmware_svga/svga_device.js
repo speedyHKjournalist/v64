@@ -11,10 +11,12 @@ import { h } from "../../lib.js";
 import { dbg_log } from "../../log.js";
 import { VGAScreen } from "../vga_core.js";
 import * as C from "./svga_constants.js";
-import { GMRTable, GMR_MAX_IDS, GMR_MAX_PAGES, GMR_MAX_DESCRIPTOR_LENGTH, remap_gmr2_payload } from "./svga_gmr.js";
+import { GMRTable, GMR_MAX_IDS, GMR_MAX_PAGES, GMR_MAX_DESCRIPTOR_LENGTH, remap_gmr2_payload, read_pages, write_pages } from "./svga_gmr.js";
 import { ScreenObjects } from "./svga_screens.js";
 import { SoftwareCursor, cursor_masks_length } from "./svga_cursor.js";
 import { SVGA3D } from "./svga3d.js";
+import { MOBTable, OTables, OTABLE_ENTRY_BYTES, MOB_MAX_SIZE, GB_MEMORY_KB } from "./svga_gb.js";
+import { VGPU9_DEVCAPS } from "./svga3d_tables.js";
 
 // For Types Only
 import { DisplaySource } from "../../display.js";
@@ -39,9 +41,14 @@ const CB_MAX_SIZE = C.SVGA_CB_MAX_SIZE;
 /** The FIFO's register area, in dwords, that the driver must leave free */
 const FIFO_REGS = C.SVGA_FIFO_NUM_REGS;
 
+/** The cursor a cursor MOB may hold (SVGA_CAP2_CURSOR_MOB) */
+const CURSOR_MAX_DIMENSION = 256;
+const CURSOR_HEADER_BYTES = 32;
+const CURSOR_MAX_BYTE_SIZE = CURSOR_HEADER_BYTES + CURSOR_MAX_DIMENSION * CURSOR_MAX_DIMENSION * 4;
+
 /**
  * What each level declares. A level is fixed once chosen: a snapshot keeps it.
- * @type {!Object<string, {caps: number, fifo_caps: number}>}
+ * @type {!Object<string, {caps: number, fifo_caps: number, cap2: (number|undefined)}>}
  */
 export const LEVELS = {
     // S1: modes through the registers, the FIFO with UPDATE/RECT_COPY/FENCE,
@@ -77,10 +84,26 @@ export const LEVELS = {
             C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
             C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
     },
+    // S4: the same 3D with guest-backed objects (svga_gb.js): MOBs, object
+    // tables, screen targets, the cursor in a MOB
+    "gb9": {
+        caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
+            C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
+            C.SVGA_CAP_CURSOR | C.SVGA_CAP_CURSOR_BYPASS | C.SVGA_CAP_CURSOR_BYPASS_2 | C.SVGA_CAP_ALPHA_CURSOR |
+            C.SVGA_CAP_8BIT_EMULATION | C.SVGA_CAP_MULTIMON | C.SVGA_CAP_DISPLAY_TOPOLOGY |
+            C.SVGA_CAP_GMR | C.SVGA_CAP_GMR2 | C.SVGA_CAP_SCREEN_OBJECT_2 |
+            C.SVGA_CAP_COMMAND_BUFFERS | C.SVGA_CAP_CMD_BUFFERS_2 | C.SVGA_CAP_HP_CMD_QUEUE | C.SVGA_CAP_3D |
+            C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_CAP2_REGISTER,
+        fifo_caps: C.SVGA_FIFO_CAP_FENCE | C.SVGA_FIFO_CAP_PITCHLOCK | C.SVGA_FIFO_CAP_RESERVE |
+            C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
+            C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
+        cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
+            C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG,
+    },
 };
 
 /** Lowest to highest; without a pinned level the highest one there is a renderer for */
-export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9"];
+export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9"];
 
 /**
  * @param {number} bpp
@@ -119,6 +142,7 @@ export function SVGADevice(machine, options)
     this.level = level;
     this.caps = LEVELS[level].caps;
     this.fifo_caps = LEVELS[level].fifo_caps;
+    this.cap2 = LEVELS[level].cap2 || 0;
 
     const vram_size = options.vram_size || DEFAULT_VRAM_SIZE;
     if(vram_size < MIN_VRAM_SIZE)
@@ -161,6 +185,14 @@ export function SVGADevice(machine, options)
     /** What the driver has done, for harnesses and debugging */
     this.stats = { fifo_commands: 0, command_buffers: 0, unknown_commands: 0, last_unknown: 0, errors: 0, commands: {}, contexts: {}, statuses: {},
         irq_raised: 0, irq_status_reads: 0, irq_acks: 0 };
+    // guest-backed objects, at the levels that have them
+    const gb = !!(this.caps & C.SVGA_CAP_GBOBJECTS);
+    /** @const @type {MOBTable} */
+    this.mobs = gb ? new MOBTable(machine) : null;
+    /** @const @type {OTables} */
+    this.otables = gb ? new OTables(machine) : null;
+    /** @const @type {!Map<number, number>} SVGA3D_DEVCAP_* through SVGA_REG_DEV_CAP */
+    this.devcaps = new Map(VGPU9_DEVCAPS);
     /** @const @type {SVGA3D} 3D, at the levels that have it */
     this.svga3d = (LEVELS[level].caps & C.SVGA_CAP_3D) ? new SVGA3D(this, /** @type {!Object} */ (options.renderer)) : null;
 
@@ -229,6 +261,11 @@ SVGADevice.prototype.reset = function()
     this.cursor_y = 0;
     this.palette.fill(0);
     this.scratch.fill(0);
+    this.devcap_index = 0;
+    this.guest_driver = [0, 0, 0, 0];
+    this.cursor_mob = C.SVGA_ID_INVALID;
+    if(this.mobs) this.mobs.reset();
+    if(this.otables) this.otables.reset();
     this.gmrs.reset();
     this.screens.reset();
     this.cursor.reset();
@@ -386,6 +423,17 @@ SVGADevice.prototype.read_register = function(index)
         case C.SVGA_REG_CURSOR_X: return this.cursor_x;
         case C.SVGA_REG_CURSOR_Y: return this.cursor_y;
         case C.SVGA_REG_CURSOR_ON: return this.cursor_on;
+        case C.SVGA_REG_CAP2: return this.caps & C.SVGA_CAP_CAP2_REGISTER ? this.cap2 : 0;
+        case C.SVGA_REG_FIFO_CAPS: return this.fifo_caps;
+        case C.SVGA_REG_FENCE: return this.fifo()[C.SVGA_FIFO_FENCE] >>> 0;
+        case C.SVGA_REG_SCREENDMA:
+            // there is no picture a guest could read that it did not send
+            return this.cap2 & C.SVGA_CAP2_SCREENDMA_REG ? C.SVGA_SCREENDMA_REG_NOT_PRESENT : 0;
+        case C.SVGA_REG_GUEST_DRIVER_ID:
+        case C.SVGA_REG_GUEST_DRIVER_VERSION1:
+        case C.SVGA_REG_GUEST_DRIVER_VERSION2:
+        case C.SVGA_REG_GUEST_DRIVER_VERSION3:
+            return this.guest_driver[index - C.SVGA_REG_GUEST_DRIVER_ID];
         case C.SVGA_REG_DISPLAY_IS_PRIMARY:
         case C.SVGA_REG_DISPLAY_POSITION_X:
         case C.SVGA_REG_DISPLAY_POSITION_Y:
@@ -394,6 +442,24 @@ SVGADevice.prototype.read_register = function(index)
         {
             const entry = this.topology[this.display_id];
             return entry ? entry[index - C.SVGA_REG_DISPLAY_IS_PRIMARY + 1] : 0;
+        }
+    }
+    if(this.mobs)
+    {
+        switch(index)
+        {
+            case C.SVGA_REG_DEV_CAP: return this.devcaps.get(this.devcap_index) >>> 0 || 0;
+            case C.SVGA_REG_MAX_PRIMARY_MEM: return this.vram_size;
+            case C.SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB:
+            case C.SVGA_REG_GBOBJECT_MEM_SIZE_KB:
+                return GB_MEMORY_KB;
+            case C.SVGA_REG_SCREENTARGET_MAX_WIDTH: return MAX_WIDTH;
+            case C.SVGA_REG_SCREENTARGET_MAX_HEIGHT: return MAX_HEIGHT;
+            case C.SVGA_REG_MOB_MAX_SIZE: return MOB_MAX_SIZE;
+            case C.SVGA_REG_BLANK_SCREEN_TARGETS: return 0;
+            case C.SVGA_REG_CURSOR_MOBID: return this.cursor_mob;
+            case C.SVGA_REG_CURSOR_MAX_BYTE_SIZE: return this.cap2 & C.SVGA_CAP2_CURSOR_MOB ? CURSOR_MAX_BYTE_SIZE : 0;
+            case C.SVGA_REG_CURSOR_MAX_DIMENSION: return this.cap2 & C.SVGA_CAP2_CURSOR_MOB ? CURSOR_MAX_DIMENSION : 0;
         }
     }
     if(index >= C.SVGA_PALETTE_BASE && index < C.SVGA_PALETTE_BASE + C.SVGA_NUM_PALETTE_REGS)
@@ -489,6 +555,22 @@ SVGADevice.prototype.write_register = function(index, value)
             break;
         case C.SVGA_REG_CMD_PREPEND_LOW:
             this.prepend_low = value;
+            break;
+        case C.SVGA_REG_DEV_CAP:
+            this.devcap_index = value;
+            break;
+        case C.SVGA_REG_GUEST_DRIVER_ID:
+        case C.SVGA_REG_GUEST_DRIVER_VERSION1:
+        case C.SVGA_REG_GUEST_DRIVER_VERSION2:
+        case C.SVGA_REG_GUEST_DRIVER_VERSION3:
+            // which driver this is; SUBMIT ends the list
+            if(index !== C.SVGA_REG_GUEST_DRIVER_ID || value !== 0xFFFFFFFF)
+            {
+                this.guest_driver[index - C.SVGA_REG_GUEST_DRIVER_ID] = value;
+            }
+            break;
+        case C.SVGA_REG_CURSOR_MOBID:
+            if(this.cap2 & C.SVGA_CAP2_CURSOR_MOB) this.define_cursor_mob(value);
             break;
         case C.SVGA_REG_CMD_PREPEND_HIGH:
             this.prepend_high = value;
@@ -818,15 +900,17 @@ SVGADevice.prototype.submit_command_buffer = function(address, context)
     const offset = header.getUint32(32, true);
     let status = C.SVGA_CB_STATUS_COMPLETED, error_offset = 0;
 
-    if(flags & C.SVGA_CB_FLAG_MOB || length > CB_MAX_SIZE || offset > length || length & 3 || offset & 3 ||
-        context !== C.SVGA_CB_CONTEXT_DEVICE && context >= C.SVGA_CB_CONTEXT_MAX)
+    // a buffer in a MOB (guest-backed objects): ptr is mobid, mobOffset
+    const in_mob = !!(flags & C.SVGA_CB_FLAG_MOB);
+    const bytes = length > CB_MAX_SIZE || offset > length || length & 3 || offset & 3 ? null :
+        in_mob ? this.mobs && this.mobs.read(header.getUint32(24, true), header.getUint32(28, true) + offset, length - offset) :
+        this.machine.read_physical(pa + offset, length - offset).slice();
+    if(!bytes || context !== C.SVGA_CB_CONTEXT_DEVICE && context >= C.SVGA_CB_CONTEXT_MAX)
     {
-        // (MOB-backed buffers come with guest-backed objects)
         status = C.SVGA_CB_STATUS_CB_HEADER_ERROR;
     }
     else
     {
-        const bytes = this.machine.read_physical(pa + offset, length - offset).slice();
         const dwords = new Int32Array(bytes.buffer, 0, bytes.length >> 2);
         for(let at = 0; at < dwords.length;)
         {
@@ -884,6 +968,116 @@ SVGADevice.prototype.run_device_command = function(read, available)
         case C.SVGA_DC_CMD_EMPTY_CONTEXT_QUEUE: return available >= 2 ? 2 : -1;
     }
     return -1;
+};
+
+// ---------------------------------------------------------------------------
+// Guest-backed objects: MOBs and object tables (svga_gb.js); the objects in
+// them are svga3d.js's
+
+/**
+ * DEFINE_GB_MOB(64), REDEFINE_GB_MOB64
+ */
+SVGADevice.prototype.define_mob = function(id, format, base, size)
+{
+    if(!this.mobs.define(id, format, base, size))
+    {
+        this.set_irq(C.SVGA_IRQFLAG_ERROR);
+        return;
+    }
+    // SVGAOTableMobEntry: ptDepth, sizeInBytes, base (64 bits)
+    this.otables.write_entry(C.SVGA_OTABLE_MOB, id,
+        new Uint8Array(Uint32Array.of(format, size, base % 0x100000000, Math.floor(base / 0x100000000)).buffer));
+};
+
+SVGADevice.prototype.destroy_mob = function(id)
+{
+    this.mobs.destroy(id);
+    this.otables.write_entry(C.SVGA_OTABLE_MOB, id, null);
+    if(id === this.cursor_mob) this.cursor_mob = C.SVGA_ID_INVALID;
+};
+
+/**
+ * SET_OTABLE_BASE(64): where a table is. Entries the driver says are valid
+ * (after a reset, to get its objects back) are taken as defined.
+ */
+SVGADevice.prototype.set_otable = function(type, format, base, size, valid)
+{
+    if(!this.otables.set(type, format, base, size))
+    {
+        dbg_log("svga: invalid object table " + type, LOG_VGA);
+        this.set_irq(C.SVGA_IRQFLAG_ERROR);
+        return;
+    }
+    const entries = Math.min(this.otables.capacity(type), Math.floor(valid / OTABLE_ENTRY_BYTES[type]));
+    if(entries) this.load_otable(type, entries);
+};
+
+/**
+ * GROW_OTABLE: a bigger table; the device moves the valid entries into it
+ */
+SVGADevice.prototype.grow_otable = function(type, format, base, size, valid)
+{
+    const old = this.otables.tables[type];
+    const keep = old ? Math.min(valid, old.size, size) : 0;
+    const bytes = keep ? read_pages(this.machine, old.pages, 0, keep) : null;
+    if(!this.otables.set(type, format, base, size))
+    {
+        this.set_irq(C.SVGA_IRQFLAG_ERROR);
+        return;
+    }
+    if(bytes) write_pages(this.machine, this.otables.tables[type].pages, 0, bytes);
+};
+
+/**
+ * The objects in the first `count` entries of a table: MOBs are walked
+ * again, the others are svga3d's
+ */
+SVGADevice.prototype.load_otable = function(type, count)
+{
+    for(let index = 0; index < count; index++)
+    {
+        const bytes = this.otables.read_entry(type, index);
+        if(!bytes || bytes.every(b => b === 0)) continue;
+        const entry = new Uint32Array(bytes.slice().buffer);
+        if(type === C.SVGA_OTABLE_MOB)
+        {
+            if(entry[1]) this.mobs.define(index, entry[0], entry[2] + entry[3] * 0x100000000, entry[1]);
+        }
+        else if(this.svga3d)
+        {
+            this.svga3d.load_entry(type, index, entry);
+        }
+    }
+};
+
+/**
+ * SVGA_REG_CURSOR_MOBID: the cursor is an SVGAGBCursorHeader and its image
+ * in this MOB
+ */
+SVGADevice.prototype.define_cursor_mob = function(id)
+{
+    this.cursor_mob = id;
+    const header = this.mobs.read(id, 0, CURSOR_HEADER_BYTES);
+    if(!header) return;
+    const h = new Uint32Array(header.slice().buffer);
+    const type = h[0], hot_x = h[1], hot_y = h[2], width = h[3], height = h[4];
+    if(!width || !height || width > CURSOR_MAX_DIMENSION || height > CURSOR_MAX_DIMENSION) return;
+    if(type === C.SVGA_ALPHA_CURSOR)
+    {
+        const image = this.mobs.read(id, CURSOR_HEADER_BYTES, width * height * 4);
+        if(!image) return;
+        const dwords = new Int32Array(image.buffer, image.byteOffset, width * height);
+        this.cursor.define_alpha(hot_x, hot_y, width, height, i => dwords[i]);
+    }
+    else if(type === C.SVGA_COLOR_CURSOR)
+    {
+        const and_depth = h[5], xor_depth = h[6];
+        if(![1, 32].includes(and_depth) || ![1, 8, 24, 32].includes(xor_depth)) return;
+        const image = this.mobs.read(id, CURSOR_HEADER_BYTES, cursor_masks_length(width, height, and_depth, xor_depth) * 4);
+        if(!image) return;
+        const dwords = new Int32Array(image.buffer, image.byteOffset, image.length >> 2);
+        this.cursor.define(hot_x, hot_y, width, height, and_depth, xor_depth, i => dwords[i], this.palette);
+    }
 };
 
 /**
@@ -1152,7 +1346,7 @@ SVGADevice.prototype.render_screens = function()
 // ---------------------------------------------------------------------------
 // Snapshots
 
-const STATE_VERSION = 3;
+const STATE_VERSION = 4;
 
 SVGADevice.prototype.get_state = function()
 {
@@ -1171,6 +1365,9 @@ SVGADevice.prototype.get_state = function()
         this.topology.map(entry => entry || null),
         // version 3: the 3D objects (svga3d.js; prepare_save read their contents back)
         this.svga3d ? this.svga3d.get_state() : null,
+        // version 4: guest-backed objects
+        this.mobs ? this.mobs.get_state() : null, this.otables ? this.otables.get_state() : null,
+        [this.devcap_index, this.cursor_mob, ...this.guest_driver],
     ];
 };
 
@@ -1216,6 +1413,20 @@ SVGADevice.prototype.set_state = function(state)
         this.gmrs.reset();
         this.screens.reset();
         this.cursor.reset();
+    }
+    // the MOBs first: restoring the 3D objects reads them
+    if(this.mobs) this.mobs.set_state(state[0] >= 4 && state[14] || []);
+    if(this.otables)
+    {
+        if(state[0] >= 4 && state[15]) this.otables.set_state(state[15]);
+        else this.otables.reset();
+    }
+    if(state[0] >= 4)
+    {
+        const registers = state[16];
+        this.devcap_index = registers[0];
+        this.cursor_mob = registers[1];
+        this.guest_driver = Array.from(registers.slice(2, 6));
     }
     if(this.svga3d) this.svga3d.set_state(state[0] >= 3 ? state[13] : null);
     this.mode_key = "";

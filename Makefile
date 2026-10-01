@@ -153,7 +153,7 @@ build/v86-vmware-svga.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/gra
 		--output_wrapper ';(function(){%output%}).call(this);' \
 		--js $(GRAPHICS_ADAPTER_COMMON) --js src/graphics_adapters/vmware_svga/svga_constants.js \
 		--js src/graphics_adapters/vmware_svga/svga_gmr.js --js src/graphics_adapters/vmware_svga/svga_screens.js \
-		--js src/graphics_adapters/vmware_svga/svga_cursor.js \
+		--js src/graphics_adapters/vmware_svga/svga_cursor.js --js src/graphics_adapters/vmware_svga/svga_gb.js \
 		--js src/graphics_adapters/vmware_svga/svga3d_d9wg.js --js src/graphics_adapters/vmware_svga/svga3d_tables.js \
 		--js src/graphics_adapters/vmware_svga/svga3d.js \
 		--js src/graphics_adapters/vmware_svga/svga_device.js --js src/graphics_adapters/vmware_svga/plugin.js
@@ -443,6 +443,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/graphics_adapter.js
 	./tests/devices/vmware_svga.js
 	./tests/devices/vmware_svga_3d.js
+	./tests/devices/vmware_svga_gb.js
 	./tests/devices/vmware_backdoor.js
 	./tests/devices/mmio_ram.js
 	./tests/devices/virtio_9p.js

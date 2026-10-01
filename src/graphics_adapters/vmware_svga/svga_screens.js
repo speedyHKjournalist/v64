@@ -114,6 +114,45 @@ ScreenObjects.prototype.define = function(read, dwords)
     return true;
 };
 
+/**
+ * DEFINE_GB_SCREENTARGET: a screen whose picture comes from a surface
+ * (svga3d.js); like a screen object without backing store
+ * @return {boolean}
+ */
+ScreenObjects.prototype.define_target = function(id, flags, width, height, x, y)
+{
+    if(!width || !height || width > C.SVGA_MAX_SCREEN_SIZE || height > C.SVGA_MAX_SCREEN_SIZE || id >= C.SVGA_MAX_DISPLAYS)
+    {
+        return false;
+    }
+    const old = this.screens.get(id);
+    const screen = new Screen(id, flags & C.SVGA_STFLAG_PRIMARY ? C.SVGA_SCREEN_IS_PRIMARY : 0, width, height, x, y, null);
+    if(old)
+    {
+        const w = Math.min(old.width, width) * 4;
+        for(let row = 0; row < Math.min(old.height, height); row++)
+        {
+            screen.rgba.set(old.rgba.subarray(row * old.width * 4, row * old.width * 4 + w), row * width * 4);
+        }
+    }
+    this.screens.set(id, screen);
+    this.layout_changed = true;
+    return true;
+};
+
+/**
+ * A screen target without an image shows black
+ * @param {number} id
+ */
+ScreenObjects.prototype.blank = function(id)
+{
+    const screen = this.screens.get(id);
+    if(!screen) return;
+    screen.rgba.fill(0);
+    for(let i = 3; i < screen.rgba.length; i += 4) screen.rgba[i] = 255;
+    screen.mark(0, screen.height);
+};
+
 /** @param {number} id */
 ScreenObjects.prototype.destroy = function(id)
 {

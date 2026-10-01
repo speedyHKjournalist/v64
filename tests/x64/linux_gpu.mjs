@@ -39,6 +39,8 @@ for(const file of [iso, directory + "boot/vmlinuz-virt", directory + "boot/initr
 assert.ok(fs.existsSync(repo), repo + " is missing: run tools/alpine_gpu_repo.mjs");
 
 const DRIVER = { bochs_vga: "bochs", vmware_svga: "vmwgfx", virtio_gpu: "virtio_gpu" }[adapter];
+// the levels with 3D (vmware_svga's vgpu9 and up)
+const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11"].includes(process.env.GPU_LEVEL);
 assert.ok(DRIVER, "GPU_ADAPTER is bochs_vga, vmware_svga or virtio_gpu");
 
 const APK = "apk add --no-network --repository /mnt/repo/main --repository /mnt/repo/community";
@@ -54,7 +56,7 @@ const SCENARIOS = {
         // (a screenshot 20 s into the command, while it draws)
         // (with 3D the 400 frames take seconds, not a minute)
         ["kmscube -c 400 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
-            { screenshot: "kmscube", after: process.env.GPU_LEVEL === "vgpu9" ? 2500 : 20000 }],
+            { screenshot: "kmscube", after: LEVEL_3D ? 2500 : 20000 }],
     ],
 };
 const steps = SCENARIOS[scenario];
@@ -125,8 +127,8 @@ const sink = new PictureSink();
 // A 3D level needs a renderer: the real one in a headless Chrome
 // (GPU_RENDERER=chrome, tests/x64/gpu_remote_renderer.mjs), or one that
 // records the batches into a trace (tests/x64/gpu_trace.mjs) and renders nothing
-const remote = process.env.GPU_LEVEL === "vgpu9" && process.env.GPU_RENDERER === "chrome" ? await create_remote_renderer() : null;
-const trace = process.env.GPU_LEVEL === "vgpu9" && !remote ?
+const remote = LEVEL_3D && process.env.GPU_RENDERER === "chrome" ? await create_remote_renderer() : null;
+const trace = LEVEL_3D && !remote ?
     create_trace_renderer(path.join(out, "trace.bin"), { adapter, level: process.env.GPU_LEVEL, scenario }) : null;
 const emulator = new V86({
     graphics_adapter: adapter,

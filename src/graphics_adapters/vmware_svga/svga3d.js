@@ -92,6 +92,14 @@ function Surface(sid, flags, format, faces, sizes, samples)
     this.definition_id = 0;
     /** @type {Array<Uint8Array>} contents read back for a snapshot: (face or slice, mip) */
     this.saved = null;
+    // guest-backed surfaces: the MOB with their image, and the pitch of
+    // its first level there if the driver gave one
+    this.mob = INVALID;
+    this.mob_pitch = 0;
+    /** @type {?{format: number, flags: number, flags2: number, filter: number, array_size: number, pattern: number, quality: number, stride: number, layers: number}} a GB surface's definition */
+    this.gb = null;
+    /** the GPU may have what the MOB does not: drawn into, copied into */
+    this.host_newer = false;
 }
 
 /**
@@ -120,6 +128,8 @@ function Context(cid, device)
     this.shader_definitions = new Map();
     /** @type {!Map<string, !Array>} the last command setting each piece of state: [id, body] */
     this.state = new Map();
+    /** @type {number|undefined} a GB context's MOB */
+    this.mob = undefined;
 }
 
 /**
@@ -152,6 +162,12 @@ export function SVGA3D(device, renderer)
     this.warned = new Set();
     /** @type {!Object<number, number>} how often each command came (for the harnesses) */
     this.counts = {};
+    /** guest-backed objects (level gb9 and up) */
+    this.gb = !!(device.caps & C.SVGA_CAP_GBOBJECTS);
+    /** @type {!Map<number, {type: number, size: number, mob: number, offset: number, handle: number, code: Uint8Array}>} GB shaders by shid */
+    this.gb_shaders = new Map();
+    /** @type {!Map<number, {width: number, height: number, x: number, y: number, flags: number, dpi: number, image: Array<number>}>} screen targets */
+    this.targets = new Map();
     renderer.listen(message => this.receive(message));
 }
 
@@ -161,6 +177,8 @@ SVGA3D.prototype.reset = function()
     this.surfaces.clear();
     this.contexts.clear();
     this.declarations.clear();
+    this.gb_shaders.clear();
+    this.targets.clear();
     this.completions = [];
     this.requests.clear();
     this.completed = this.submitted;
@@ -333,7 +351,7 @@ SVGA3D.prototype.command = function(id, p)
         case C.SVGA_3D_CMD_DRAW_PRIMITIVES: this.draw_primitives(p); break;
         case C.SVGA_3D_CMD_SETSCISSORRECT: this.set_scissor(p); break;
         case C.SVGA_3D_CMD_BEGIN_QUERY: this.begin_query(p); break;
-        case C.SVGA_3D_CMD_END_QUERY: this.end_query(p); break;
+        case C.SVGA_3D_CMD_END_QUERY: this.end_query(p, this.device.gmrs); break;
         case C.SVGA_3D_CMD_WAIT_FOR_QUERY:
             // the result is written when it is known; the driver polls it
             break;
@@ -348,7 +366,10 @@ SVGA3D.prototype.command = function(id, p)
             this.warn_once("cmd" + id, "command " + id + " is not implemented");
             break;
         default:
-            this.warn_once("cmd" + id, "command " + id + " ignored at level vgpu9");
+            if(!(this.gb && this.gb_command(id, p)))
+            {
+                this.warn_once("cmd" + id, "command " + id + " ignored at level " + this.device.level);
+            }
     }
     if(this.writer.size() > BATCH_FLUSH_BYTES) this.flush();
 };
@@ -443,14 +464,23 @@ SVGA3D.prototype.get_state = function()
     const surfaces = [];
     for(const s of this.surfaces.values())
     {
-        surfaces.push([s.definition_id, s.definition, s.data, s.saved || []]);
+        surfaces.push([s.definition_id, s.definition, s.data, s.saved || [], s.mob, s.mob_pitch]);
     }
     const contexts = [];
     for(const c of this.contexts.values())
     {
-        contexts.push([c.cid, [...c.shader_definitions.values()], [...c.state.values()].map(([id, body]) => [id, body])]);
+        contexts.push([c.cid, [...c.shader_definitions.values()], [...c.state.values()].map(([id, body]) => [id, body]),
+            c.mob === undefined ? null : c.mob]);
     }
-    return [1, surfaces, contexts];
+    // GB shaders keep their bytecode: the MOB it came from may have changed since
+    const shaders = [];
+    for(const [shid, sh] of this.gb_shaders)
+    {
+        shaders.push([shid, sh.type, sh.size, sh.mob, sh.offset, sh.code || null]);
+    }
+    const targets = [];
+    for(const [stid, t] of this.targets) targets.push([stid, t.width, t.height, t.x, t.y, t.flags, t.dpi, t.image]);
+    return [2, surfaces, contexts, shaders, targets];
 };
 
 /**
@@ -459,13 +489,18 @@ SVGA3D.prototype.get_state = function()
 SVGA3D.prototype.set_state = function(state)
 {
     this.reset();
-    if(!state || state[0] !== 1) return;
-    for(const [id, definition, data, saved] of state[1])
+    if(!state || state[0] < 1 || state[0] > 2) return;
+    for(const [id, definition, data, saved, mob, mob_pitch] of state[1])
     {
         const body = Int32Array.from(definition);
         this.command(id, body);
         const surface = this.surfaces.get(body[0] >>> 0);
         if(!surface) continue;
+        if(mob !== undefined)
+        {
+            surface.mob = mob;
+            surface.mob_pitch = mob_pitch;
+        }
         if(surface.data && data) surface.data.set(data);
         if(!surface.handle || !saved.length) continue;
         const volume = surface.kind === KIND.TEXTURE_VOLUME;
@@ -486,13 +521,64 @@ SVGA3D.prototype.set_state = function(state)
             }
         }
     }
-    for(const [cid, shaders, entries] of state[2])
+    if(state[0] >= 2)
+    {
+        for(const [shid, type, size, mob, offset, code] of state[3])
+        {
+            this.gb_shaders.set(shid, { type, size, mob, offset, handle: 0, code: null });
+            if(code) this.create_gb_shader(this.gb_shaders.get(shid), new Uint8Array(code));
+        }
+        for(const [stid, width, height, x, y, flags, dpi, image] of state[4])
+        {
+            // (the screens keep their pictures themselves)
+            this.targets.set(stid, { width, height, x, y, flags, dpi, image: image && Array.from(image) });
+        }
+    }
+    for(const [cid, shaders, entries, mob] of state[2])
     {
         this.command(C.SVGA_3D_CMD_CONTEXT_DEFINE, Int32Array.of(cid));
+        if(mob !== null && mob !== undefined) this.contexts.get(cid).mob = mob;
         for(const body of shaders) this.command(C.SVGA_3D_CMD_SHADER_DEFINE, Int32Array.from(body));
         for(const [id, body] of entries) this.command(id, Int32Array.from(body));
     }
     this.flush();
+};
+
+/**
+ * An object in a table the driver set up again (SET_OTABLE_BASE with valid
+ * entries, after a reset): defined again from its entry
+ * @param {!Uint32Array} e the entry
+ */
+SVGA3D.prototype.load_entry = function(type, index, e)
+{
+    switch(type)
+    {
+        case C.SVGA_OTABLE_SURFACE:
+        {
+            // as DEFINE_GB_SURFACE_V4, then its image from the MOB
+            this.define_gb_surface(Int32Array.of(index, e[1], e[11], e[0], e[2], e[3], e[12] & 0xFF, e[12] >>> 8 & 0xFF,
+                e[4], e[5], e[6], e[7], e[9], e[12] >>> 16), 4);
+            const surface = this.surfaces.get(index);
+            if(surface && e[8] !== INVALID)
+            {
+                this.bind_gb_surface(surface, e[8], e[10]);
+                this.update_gb_surface(surface);
+            }
+            break;
+        }
+        case C.SVGA_OTABLE_CONTEXT:
+            this.define_gb_context(e[0]);
+            this.bind_gb_context(e[0], e[1], 0);
+            break;
+        case C.SVGA_OTABLE_SHADER:
+            this.define_gb_shader(index, e[0], e[1]);
+            this.bind_gb_shader(index, e[3], e[2]);
+            break;
+        case C.SVGA_OTABLE_SCREENTARGET:
+            this.define_screen_target(index, e[3], e[4], e[5] | 0, e[6] | 0, e[7], e[8]);
+            if(e[0] !== INVALID) this.bind_screen_target(index, e[0], e[1], e[2]);
+            break;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -522,23 +608,34 @@ SVGA3D.prototype.define_surface = function(p, v2)
         const at = head + 3 * i;
         sizes.push([p[at] >>> 0, p[at + 1] >>> 0, Math.max(1, p[at + 2] >>> 0)]);
     }
-    if(this.surfaces.has(sid)) this.destroy_surface(sid);
-    const surface = new Surface(sid, flags, format, faces, sizes, samples);
+    const surface = this.create_surface(sid, flags, format, faces, sizes, samples);
     surface.definition = p.slice();
     surface.definition_id = v2 ? C.SVGA_3D_CMD_SURFACE_DEFINE_V2 : C.SVGA_3D_CMD_SURFACE_DEFINE;
+};
+
+/**
+ * A surface and its D9WG resource (a buffer gets its resources as draws use it)
+ * @param {!Array<!Array<number>>} sizes [width, height, depth] of each mip level
+ * @return {!Surface}
+ */
+SVGA3D.prototype.create_surface = function(sid, flags, format, faces, sizes, samples)
+{
+    if(this.surfaces.has(sid)) this.destroy_surface(sid);
+    const surface = new Surface(sid, flags, format, faces, sizes, samples);
     this.surfaces.set(sid, surface);
     const info = surface.info;
+    const mips = sizes.length;
     if(!info)
     {
         this.warn_once("format" + format, "surface format " + format + " is not supported");
-        return;
+        return surface;
     }
     const [width, height, depth] = sizes[0];
     if(!info.d3d)
     {
         // a buffer: its D9WG buffers are made as draws use it
         surface.data = new Uint8Array(width * height * depth);
-        return;
+        return surface;
     }
 
     const handle = surface.handle = this.next_handle++;
@@ -566,6 +663,7 @@ SVGA3D.prototype.define_surface = function(p, v2)
         w.begin(OP.CREATE_TEXTURE_2D).u32(UTILITY_DEVICE).u32(handle).u32(width).u32(height).u32(mips)
             .u32(info.d3d).u32(usage).u32(0).u32(samples > 1 ? samples : 0).u32(0);
     }
+    return surface;
 };
 
 SVGA3D.prototype.destroy_surface = function(sid)
@@ -638,18 +736,20 @@ SVGA3D.prototype.surface_dma = function(p)
         const b = 7 + 9 * i;
         const box = [p[b] >>> 0, p[b + 1] >>> 0, p[b + 2] >>> 0, p[b + 3] >>> 0, p[b + 4] >>> 0, p[b + 5] >>> 0,
             p[b + 6] >>> 0, p[b + 7] >>> 0, p[b + 8] >>> 0];
-        if(transfer === C.SVGA3D_WRITE_HOST_VRAM) this.dma_to_host(surface, face, mip, gmr, offset, pitch, box);
-        else if(transfer === C.SVGA3D_READ_HOST_VRAM) this.dma_to_guest(surface, face, mip, gmr, offset, pitch, box);
+        const gmrs = this.device.gmrs;
+        if(transfer === C.SVGA3D_WRITE_HOST_VRAM) this.dma_to_host(surface, face, mip, gmrs, gmr, offset, pitch, box);
+        else if(transfer === C.SVGA3D_READ_HOST_VRAM) this.dma_to_guest(surface, face, mip, gmrs, gmr, offset, pitch, box);
     }
 };
 
 /**
- * One box from guest memory into a surface
+ * One box from guest memory (a GMR or a MOB) into a surface
+ * @param {{read: function(number, number, number):Uint8Array, write: function(number, number, !Uint8Array):boolean}} gmrs
+ *     the GMRs or the MOBs
  * @param {!Array<number>} box x, y, z, w, h, d (host), srcx, srcy, srcz (guest)
  */
-SVGA3D.prototype.dma_to_host = function(surface, face, mip, gmr, offset, pitch, box)
+SVGA3D.prototype.dma_to_host = function(surface, face, mip, gmrs, gmr, offset, pitch, box)
 {
-    const gmrs = this.device.gmrs;
     let [x, y, z, w, h, d, sx, sy, sz] = box;
     if(surface.data)
     {
@@ -697,11 +797,11 @@ SVGA3D.prototype.dma_to_host = function(surface, face, mip, gmr, offset, pitch, 
 };
 
 /**
- * One box from a surface into guest memory
+ * One box from a surface into guest memory (a GMR or a MOB)
+ * @param {{read: function(number, number, number):Uint8Array, write: function(number, number, !Uint8Array):boolean}} gmrs
  */
-SVGA3D.prototype.dma_to_guest = function(surface, face, mip, gmr, offset, pitch, box)
+SVGA3D.prototype.dma_to_guest = function(surface, face, mip, gmrs, gmr, offset, pitch, box)
 {
-    const gmrs = this.device.gmrs;
     let [x, y, z, w, h, d, sx, sy, sz] = box;
     if(surface.data)
     {
@@ -802,6 +902,7 @@ SVGA3D.prototype.surface_stretch = function(p)
 
 SVGA3D.prototype.stretch = function(src, src_face, src_mip, sl, st, sr, sb, dst, dst_face, dst_mip, dl, dt, dr, db, point)
 {
+    dst.host_newer = true;
     this.writer.begin(OP.STRETCH_RECT).u32(UTILITY_DEVICE)
         .u32(src.handle).u32(src_mip).i32(sl).i32(st).i32(sr).i32(sb)
         .u32(dst.handle).u32(dst_mip).i32(dl).i32(dt).i32(dr).i32(db)
@@ -814,7 +915,9 @@ SVGA3D.prototype.stretch = function(src, src_face, src_mip, sl, st, sr, sb, dst,
 SVGA3D.prototype.generate_mipmaps = function(p)
 {
     const surface = this.image(p, 0);
-    if(surface && surface.handle) this.writer.begin(OP.GENERATE_MIPS).u32(UTILITY_DEVICE).u32(surface.handle);
+    if(!surface || !surface.handle) return;
+    surface.host_newer = true;
+    this.writer.begin(OP.GENERATE_MIPS).u32(UTILITY_DEVICE).u32(surface.handle);
 };
 
 // ---------------------------------------------------------------------------
@@ -994,6 +1097,8 @@ SVGA3D.prototype.set_render_target = function(p)
     const type = p[1] >>> 0, sid = p[2] >>> 0, face = p[3] >>> 0, mip = p[4] >>> 0;
     const surface = sid === INVALID ? null : this.surfaces.get(sid) || null;
     const handle = surface && surface.handle || 0;
+    // drawn into from now on: the MOB is behind
+    if(surface) surface.host_newer = true;
     if(type === C.SVGA3D_RT_DEPTH)
     {
         const size = surface ? surface.sizes[Math.min(mip, surface.sizes.length - 1)] : [0, 0];
@@ -1209,7 +1314,8 @@ SVGA3D.prototype.set_shader = function(p)
     const context = this.context(p);
     if(!context || p.length < 3) return;
     const type = p[1] >>> 0, shid = p[2] >>> 0;
-    const handle = shid === INVALID ? 0 : context.shaders.get(type + ":" + shid) || 0;
+    const gb = this.gb_shaders.get(shid);
+    const handle = shid === INVALID ? 0 : context.shaders.get(type + ":" + shid) || gb && gb.type === type && gb.handle || 0;
     if(type === C.SVGA3D_SHADERTYPE_VS) this.writer.begin(OP.SET_VERTEX_SHADER).u32(context.device).u32(handle);
     else if(type === C.SVGA3D_SHADERTYPE_PS) this.writer.begin(OP.SET_PIXEL_SHADER).u32(context.device).u32(handle);
 };
@@ -1369,17 +1475,18 @@ SVGA3D.prototype.begin_query = function(p)
 };
 
 /**
- * END_QUERY: cid, type, guestResult (gmrId, offset). The result is pending
- * until the renderer has the count.
+ * END_QUERY: cid, type, guestResult (gmrId, offset); END_GB_QUERY: cid,
+ * type, mobid, offset. The result is pending until the renderer has the count.
+ * @param {{write: function(number, number, !Uint8Array):boolean}} memory the GMRs or the MOBs
  */
-SVGA3D.prototype.end_query = function(p)
+SVGA3D.prototype.end_query = function(p, memory)
 {
     const context = this.context(p);
     if(!context || p.length < 4) return;
     const gmr = p[2] >>> 0, offset = p[3] >>> 0;
     const result = (state, value) => {
         const bytes = new Uint32Array([12, state, value]);
-        this.device.gmrs.write(gmr, offset, new Uint8Array(bytes.buffer));
+        memory.write(gmr, offset, new Uint8Array(bytes.buffer));
     };
     const handle = context.query;
     if((p[1] >>> 0) !== C.SVGA3D_QUERYTYPE_OCCLUSION || !handle)
@@ -1397,6 +1504,551 @@ SVGA3D.prototype.end_query = function(p)
     });
     this.writer.begin(OP.END_QUERY).u32(context.device).u32(handle).u32(slot).u32(id);
     this.writer.begin(OP.DESTROY_RESOURCE).u32(handle).u32(KIND.QUERY);
+};
+
+// ---------------------------------------------------------------------------
+// Guest-backed objects (level gb9; plan section 5.9)
+//
+// The objects are the same as at vgpu9 (svga_gb.js has the MOBs and object
+// tables); what changes is where their contents live between uses: a
+// surface's image in its MOB, moved by UPDATE (MOB to GPU) and READBACK
+// (GPU to MOB); a shader's bytecode in a MOB; a query's result in a MOB.
+// Screen targets are screens whose picture is a surface.
+
+/**
+ * Write an object's entry in its object table
+ * @param {Array<number>} dwords null clears it
+ */
+SVGA3D.prototype.otable = function(type, index, dwords)
+{
+    const tables = this.device.otables;
+    if(!tables) return;
+    tables.write_entry(type, index, dwords && new Uint8Array(Uint32Array.from(dwords, v => v >>> 0).buffer));
+};
+
+/**
+ * The entry of a surface (SVGAOTableSurfaceEntry)
+ */
+SVGA3D.prototype.surface_otable = function(surface)
+{
+    const g = surface.gb;
+    if(!g) return;
+    const [width, height, depth] = surface.sizes[0];
+    this.otable(C.SVGA_OTABLE_SURFACE, surface.sid, [g.format, g.flags, surface.sizes.length, surface.samples, g.filter,
+        width, height, depth, surface.mob, g.array_size, surface.mob_pitch, g.flags2,
+        g.pattern | g.quality << 8 | g.stride << 16, 0, 0, 0]);
+};
+
+/**
+ * DEFINE_GB_SURFACE (v1 to v4)
+ * @param {number} version 1 to 4
+ */
+SVGA3D.prototype.define_gb_surface = function(p, version)
+{
+    const wide = version >= 3;
+    if(p.length < [9, 11, 13, 14][version - 1]) return;
+    const at = wide ? 1 : 0;
+    const sid = p[0] >>> 0, flags = p[1] >>> 0, flags2 = wide ? p[2] >>> 0 : 0;
+    const format = p[2 + at] >>> 0, mips = Math.max(1, p[3 + at] >>> 0), samples = p[4 + at] >>> 0;
+    const pattern = wide ? p[6] >>> 0 : 0, quality = wide ? p[7] >>> 0 : 0;
+    const rest = wide ? 8 : 5;
+    const filter = p[rest] >>> 0;
+    const width = p[rest + 1] >>> 0, height = p[rest + 2] >>> 0, depth = Math.max(1, p[rest + 3] >>> 0);
+    const array_size = version >= 2 ? p[rest + 4] >>> 0 : 0;
+    const stride = version === 4 ? p[13] & 0xFFFF : 0;
+    const cube = !!(flags & C.SVGA3D_SURFACE_CUBEMAP);
+    const layers = cube ? Math.max(6, array_size) : Math.max(1, array_size);
+    if(layers > (cube ? 6 : 1)) this.warn_once("gb-array", "surface arrays need DX (level dx10)");
+    const sizes = [];
+    for(let i = 0; i < mips; i++) sizes.push([Math.max(1, width >> i), Math.max(1, height >> i), Math.max(1, depth >> i)]);
+    const surface = this.create_surface(sid, flags, format, cube ? 6 : 1, sizes, samples);
+    surface.gb = { format, flags, flags2, filter, array_size, pattern, quality, stride, layers };
+    surface.definition = p.slice();
+    surface.definition_id = [C.SVGA_3D_CMD_DEFINE_GB_SURFACE, C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2,
+        C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V3, C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V4][version - 1];
+    this.surface_otable(surface);
+};
+
+SVGA3D.prototype.destroy_gb_surface = function(sid)
+{
+    const surface = this.surfaces.get(sid);
+    if(!surface || !surface.gb) return;
+    this.destroy_surface(sid);
+    this.otable(C.SVGA_OTABLE_SURFACE, sid, null);
+};
+
+/**
+ * Where an image of a surface is in its MOB: layer after layer, each a
+ * chain of mip levels, each level packed (vmw_surf_get_image_offset)
+ * @return {{offset: number, pitch: number}}
+ */
+SVGA3D.prototype.mob_image = function(surface, layer, mip)
+{
+    let chain = 0, before = 0;
+    for(let i = 0; i < surface.sizes.length; i++)
+    {
+        const level = level_layout(surface, i);
+        const pitch = i === 0 && surface.mob_pitch ? surface.mob_pitch : level.pitch;
+        const bytes = pitch * level.rows * level.depth;
+        if(i < mip) before += bytes;
+        chain += bytes;
+    }
+    const pitch = mip === 0 && surface.mob_pitch ? surface.mob_pitch : level_layout(surface, mip).pitch;
+    return { offset: layer * chain + before, pitch };
+};
+
+/** The layers of a surface's MOB image: cube faces (volumes keep slices in their levels) */
+function layers_of(surface)
+{
+    return surface.gb ? surface.gb.layers : surface.faces;
+}
+
+/**
+ * UPDATE_GB_IMAGE: a box of an image from the MOB to the GPU
+ * @param {Array<number>} box x, y, z, w, h, d; null for all of it
+ */
+SVGA3D.prototype.update_gb_image = function(surface, face, mip, box)
+{
+    if(surface.mob === INVALID || !surface.info || mip >= surface.sizes.length || face >= layers_of(surface)) return;
+    const { offset, pitch } = this.mob_image(surface, face, mip);
+    const [width, height, depth] = surface.sizes[mip];
+    const [x, y, z, w, h, d] = box || [0, 0, 0, width, height, depth];
+    this.dma_to_host(surface, face, mip, this.device.mobs, surface.mob, offset, pitch, [x, y, z, w, h, d, x, y, z]);
+};
+
+SVGA3D.prototype.update_gb_surface = function(surface)
+{
+    if(surface.mob === INVALID) return;
+    for(let face = 0; face < layers_of(surface); face++)
+    {
+        for(let mip = 0; mip < surface.sizes.length; mip++) this.update_gb_image(surface, face, mip, null);
+    }
+    surface.host_newer = false;
+};
+
+/**
+ * READBACK_GB_IMAGE(_PARTIAL): an image from the GPU into the MOB, written
+ * when the renderer has read it (fences and command buffers after it wait)
+ */
+SVGA3D.prototype.readback_gb_image = function(surface, face, mip, box)
+{
+    if(surface.mob === INVALID || !surface.info || mip >= surface.sizes.length || face >= layers_of(surface)) return;
+    if(surface.info.depth || surface.samples > 1)
+    {
+        return this.warn_once("gb-readback-depth", "depth and multisampled surfaces are not read back");
+    }
+    const { offset, pitch } = this.mob_image(surface, face, mip);
+    const [width, height, depth] = surface.sizes[mip];
+    const [x, y, z, w, h, d] = box || [0, 0, 0, width, height, depth];
+    this.dma_to_guest(surface, face, mip, this.device.mobs, surface.mob, offset, pitch, [x, y, z, w, h, d, x, y, z]);
+};
+
+SVGA3D.prototype.readback_gb_surface = function(surface)
+{
+    if(surface.mob === INVALID) return;
+    for(let face = 0; face < layers_of(surface); face++)
+    {
+        for(let mip = 0; mip < surface.sizes.length; mip++) this.readback_gb_image(surface, face, mip, null);
+    }
+    surface.host_newer = false;
+};
+
+/**
+ * BIND_GB_SURFACE(_WITH_PITCH), COND_BIND_GB_SURFACE
+ */
+SVGA3D.prototype.bind_gb_surface = function(surface, mob, pitch)
+{
+    surface.mob = mob;
+    surface.mob_pitch = pitch;
+    this.surface_otable(surface);
+};
+
+/** An SVGA3dSurfaceImageId: [surface, face, mip], the surface null if it is not defined */
+SVGA3D.prototype.image_id = function(p, at)
+{
+    return [this.surfaces.get(p[at] >>> 0) || null, p[at + 1] >>> 0, p[at + 2] >>> 0];
+};
+
+/**
+ * DEFINE/BIND_GB_CONTEXT. A context's state stays with its D9WG device,
+ * so its MOB is only remembered (READBACK and INVALIDATE have nothing to do)
+ */
+SVGA3D.prototype.define_gb_context = function(cid)
+{
+    this.define_context(cid);
+    this.contexts.get(cid).mob = INVALID;
+    this.otable(C.SVGA_OTABLE_CONTEXT, cid, [cid, INVALID]);
+};
+
+SVGA3D.prototype.bind_gb_context = function(cid, mob, valid)
+{
+    const context = this.contexts.get(cid);
+    if(!context) return;
+    context.mob = mob;
+    this.otable(C.SVGA_OTABLE_CONTEXT, cid, [cid, mob]);
+};
+
+/**
+ * DEFINE_GB_SHADER: shid, type, sizeInBytes. GB shaders belong to no
+ * context; their bytecode comes with BIND_GB_SHADER.
+ */
+SVGA3D.prototype.define_gb_shader = function(shid, type, size)
+{
+    this.destroy_gb_shader(shid);
+    this.gb_shaders.set(shid, { type, size, mob: INVALID, offset: 0, handle: 0, code: null });
+    this.otable(C.SVGA_OTABLE_SHADER, shid, [type, size, 0, INVALID]);
+};
+
+SVGA3D.prototype.destroy_gb_shader = function(shid)
+{
+    const shader = this.gb_shaders.get(shid);
+    if(!shader) return;
+    if(shader.handle)
+    {
+        this.writer.begin(OP.DESTROY_RESOURCE).u32(shader.handle)
+            .u32(shader.type === C.SVGA3D_SHADERTYPE_VS ? KIND.VERTEX_SHADER : KIND.PIXEL_SHADER);
+    }
+    this.gb_shaders.delete(shid);
+    this.otable(C.SVGA_OTABLE_SHADER, shid, null);
+};
+
+/**
+ * BIND_GB_SHADER: shid, mobid, offsetInBytes: the bytecode is read now
+ */
+SVGA3D.prototype.bind_gb_shader = function(shid, mob, offset)
+{
+    const shader = this.gb_shaders.get(shid);
+    if(!shader) return;
+    shader.mob = mob;
+    shader.offset = offset;
+    this.otable(C.SVGA_OTABLE_SHADER, shid, [shader.type, shader.size, offset, mob]);
+    if(mob === INVALID) return;
+    const bytes = this.device.mobs.read(mob, offset, shader.size & ~3);
+    if(!bytes || shader.size < 4) return this.warn_once("gb-shader", "a shader outside of its MOB");
+    if(shader.type !== C.SVGA3D_SHADERTYPE_VS && shader.type !== C.SVGA3D_SHADERTYPE_PS)
+    {
+        return this.warn_once("gb-shader-type", "shader type " + shader.type + " needs DX (level dx10)");
+    }
+    this.create_gb_shader(shader, bytes);
+};
+
+/**
+ * The D9WG shader of a GB shader, from its bytecode
+ * @param {!Uint8Array} bytes
+ */
+SVGA3D.prototype.create_gb_shader = function(shader, bytes)
+{
+    const kind = shader.type === C.SVGA3D_SHADERTYPE_VS ? KIND.VERTEX_SHADER : KIND.PIXEL_SHADER;
+    if(shader.handle) this.writer.begin(OP.DESTROY_RESOURCE).u32(shader.handle).u32(kind);
+    shader.code = bytes;
+    const handle = shader.handle = SHADER_HANDLE_BASE + 2 * this.next_shader++;
+    const tokens = new Int32Array(bytes.buffer, bytes.byteOffset, bytes.length >> 2);
+    const [low, high] = hash_tokens(tokens);
+    const w = this.writer.begin(shader.type === C.SVGA3D_SHADERTYPE_VS ? OP.CREATE_VERTEX_SHADER : OP.CREATE_PIXEL_SHADER)
+        .u32(UTILITY_DEVICE).u32(handle).u32(tokens.length);
+    const code = w.placeholder();
+    w.u32(low).u32(high);
+    w.patch(code, w.data(bytes));
+};
+
+/**
+ * SET_GB_SHADERCONSTS_INLINE: cid, regStart, shaderType, constType, then
+ * the values: four dwords per float or int register, one per bool. Run as
+ * SET_SHADER_CONST, which has four dwords for every type.
+ */
+SVGA3D.prototype.set_gb_shader_consts = function(p)
+{
+    if(p.length < 4) return;
+    if((p[3] >>> 0) !== C.SVGA3D_CONST_TYPE_BOOL)
+    {
+        this.command(C.SVGA_3D_CMD_SET_SHADER_CONST, p);
+        return;
+    }
+    const count = p.length - 4;
+    const body = new Int32Array(4 + 4 * count);
+    body.set(p.subarray(0, 4));
+    for(let i = 0; i < count; i++) body[4 + 4 * i] = p[4 + i];
+    this.command(C.SVGA_3D_CMD_SET_SHADER_CONST, body);
+};
+
+/**
+ * GB_MOB_FENCE: value, mobId, mobOffset: written once the work before it is done
+ */
+SVGA3D.prototype.mob_fence = function(value, mob, offset)
+{
+    this.after_work(() => {
+        this.device.mobs.write32(mob, offset, value);
+        this.device.set_irq(C.SVGA_IRQFLAG_MOB_FENCE);
+    });
+};
+
+/**
+ * The commands of guest-backed objects
+ * @return {boolean} whether it was one
+ */
+SVGA3D.prototype.gb_command = function(id, p)
+{
+    const device = this.device, mobs = device.mobs;
+    const u = i => p[i] >>> 0;
+    const enough = n => {
+        if(p.length >= n) return true;
+        this.warn_once("short" + id, "command " + id + " is too short");
+        return false;
+    };
+    switch(id)
+    {
+        case C.SVGA_3D_CMD_SET_OTABLE_BASE:
+            if(enough(5)) device.set_otable(u(0), u(4), u(1), u(2), u(3));
+            return true;
+        case C.SVGA_3D_CMD_SET_OTABLE_BASE64:
+            if(enough(6)) device.set_otable(u(0), u(5), u(1) + u(2) * 0x100000000, u(3), u(4));
+            return true;
+        case C.SVGA_3D_CMD_GROW_OTABLE:
+            if(enough(6)) device.grow_otable(u(0), u(5), u(1) + u(2) * 0x100000000, u(3), u(4));
+            return true;
+        case C.SVGA_3D_CMD_READBACK_OTABLE:
+            // the entries are written as objects change
+            return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_MOB:
+            if(enough(4)) device.define_mob(u(0), u(1), u(2), u(3));
+            return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_MOB64:
+        case C.SVGA_3D_CMD_REDEFINE_GB_MOB64:
+            if(enough(5)) device.define_mob(u(0), u(1), u(2) + u(3) * 0x100000000, u(4));
+            return true;
+        case C.SVGA_3D_CMD_DESTROY_GB_MOB:
+            if(enough(1)) device.destroy_mob(u(0));
+            return true;
+        case C.SVGA_3D_CMD_UPDATE_GB_MOB_MAPPING:
+        {
+            // the page table changed: walk it again
+            const mob = enough(1) && mobs.mobs.get(u(0));
+            if(mob) device.define_mob(u(0), mob.format, mob.base, mob.size);
+            return true;
+        }
+        case C.SVGA_3D_CMD_DEFINE_GB_SURFACE: this.define_gb_surface(p, 1); return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2: this.define_gb_surface(p, 2); return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V3: this.define_gb_surface(p, 3); return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V4: this.define_gb_surface(p, 4); return true;
+        case C.SVGA_3D_CMD_DESTROY_GB_SURFACE:
+            if(enough(1)) this.destroy_gb_surface(u(0));
+            return true;
+        case C.SVGA_3D_CMD_BIND_GB_SURFACE:
+        case C.SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH:
+        {
+            const surface = enough(2) && this.surfaces.get(u(0));
+            if(surface) this.bind_gb_surface(surface, u(1), id === C.SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH && p.length >= 3 ? u(2) : 0);
+            return true;
+        }
+        case C.SVGA_3D_CMD_COND_BIND_GB_SURFACE:
+        {
+            // sid, testMobid, mobid, flags: only if it is bound to testMobid
+            const surface = enough(4) && this.surfaces.get(u(0));
+            if(!surface || surface.mob !== u(1)) return true;
+            if(u(3) & C.SVGA3D_COND_BIND_GB_SURFACE_FLAG_READBACK) this.readback_gb_surface(surface);
+            this.bind_gb_surface(surface, u(2), 0);
+            if(u(3) & C.SVGA3D_COND_BIND_GB_SURFACE_FLAG_UPDATE) this.update_gb_surface(surface);
+            return true;
+        }
+        case C.SVGA_3D_CMD_UPDATE_GB_IMAGE:
+        {
+            const [surface, face, mip] = enough(9) ? this.image_id(p, 0) : [null, 0, 0];
+            if(surface) this.update_gb_image(surface, face, mip, [u(3), u(4), u(5), u(6), u(7), u(8)]);
+            return true;
+        }
+        case C.SVGA_3D_CMD_UPDATE_GB_SURFACE:
+        {
+            const surface = enough(1) && this.surfaces.get(u(0));
+            if(surface) this.update_gb_surface(surface);
+            return true;
+        }
+        case C.SVGA_3D_CMD_READBACK_GB_IMAGE:
+        {
+            const [surface, face, mip] = enough(3) ? this.image_id(p, 0) : [null, 0, 0];
+            if(surface) this.readback_gb_image(surface, face, mip, null);
+            return true;
+        }
+        case C.SVGA_3D_CMD_READBACK_GB_IMAGE_PARTIAL:
+        {
+            // (invertBox: the box is what not to read; reading all of it is as good)
+            const [surface, face, mip] = enough(10) ? this.image_id(p, 0) : [null, 0, 0];
+            if(surface) this.readback_gb_image(surface, face, mip, u(9) ? null : [u(3), u(4), u(5), u(6), u(7), u(8)]);
+            return true;
+        }
+        case C.SVGA_3D_CMD_READBACK_GB_SURFACE:
+        {
+            const surface = enough(1) && this.surfaces.get(u(0));
+            if(surface) this.readback_gb_surface(surface);
+            return true;
+        }
+        case C.SVGA_3D_CMD_INVALIDATE_GB_IMAGE:
+        case C.SVGA_3D_CMD_INVALIDATE_GB_SURFACE:
+        case C.SVGA_3D_CMD_INVALIDATE_GB_IMAGE_PARTIAL:
+            // the GPU's copy may be dropped; keeping it is as good
+            return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_CONTEXT:
+            if(enough(1)) this.define_gb_context(u(0));
+            return true;
+        case C.SVGA_3D_CMD_DESTROY_GB_CONTEXT:
+            if(enough(1))
+            {
+                this.destroy_context(u(0));
+                this.otable(C.SVGA_OTABLE_CONTEXT, u(0), null);
+            }
+            return true;
+        case C.SVGA_3D_CMD_BIND_GB_CONTEXT:
+            if(enough(3)) this.bind_gb_context(u(0), u(1), u(2));
+            return true;
+        case C.SVGA_3D_CMD_READBACK_GB_CONTEXT:
+        case C.SVGA_3D_CMD_INVALIDATE_GB_CONTEXT:
+            return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_SHADER:
+            if(enough(3)) this.define_gb_shader(u(0), u(1), u(2));
+            return true;
+        case C.SVGA_3D_CMD_DESTROY_GB_SHADER:
+            if(enough(1)) this.destroy_gb_shader(u(0));
+            return true;
+        case C.SVGA_3D_CMD_BIND_GB_SHADER:
+            if(enough(3)) this.bind_gb_shader(u(0), u(1), u(2));
+            return true;
+        case C.SVGA_3D_CMD_SET_GB_SHADERCONSTS_INLINE:
+            this.set_gb_shader_consts(p);
+            return true;
+        case C.SVGA_3D_CMD_BEGIN_GB_QUERY:
+            this.begin_query(p);
+            return true;
+        case C.SVGA_3D_CMD_END_GB_QUERY:
+            this.end_query(p, mobs);
+            return true;
+        case C.SVGA_3D_CMD_WAIT_FOR_GB_QUERY:
+            // the result is written when it is known: what follows waits for it
+            return true;
+        case C.SVGA_3D_CMD_NOP:
+            return true;
+        case C.SVGA_3D_CMD_GB_MOB_FENCE:
+            if(enough(3)) this.mob_fence(u(0), u(1), u(2));
+            return true;
+        case C.SVGA_3D_CMD_DEFINE_GB_SCREENTARGET:
+            if(enough(7)) this.define_screen_target(u(0), u(1), u(2), p[3], p[4], u(5), u(6));
+            return true;
+        case C.SVGA_3D_CMD_DESTROY_GB_SCREENTARGET:
+            if(enough(1)) this.destroy_screen_target(u(0));
+            return true;
+        case C.SVGA_3D_CMD_BIND_GB_SCREENTARGET:
+            if(enough(4)) this.bind_screen_target(u(0), u(1), u(2), u(3));
+            return true;
+        case C.SVGA_3D_CMD_UPDATE_GB_SCREENTARGET:
+        case C.SVGA_3D_CMD_UPDATE_GB_SCREENTARGET_V2:
+            if(enough(5)) this.update_screen_target(u(0), p[1], p[2], u(3), u(4), p[1], p[2]);
+            return true;
+        case C.SVGA_3D_CMD_UPDATE_GB_SCREENTARGET_MOVE:
+            // stid, rect, type, srcPoint: the rectangle comes from elsewhere in the surface
+            if(enough(8)) this.update_screen_target(u(0), p[1], p[2], u(3), u(4), p[6], p[7]);
+            return true;
+        case C.SVGA_3D_CMD_GB_SCREEN_DMA:
+            if(enough(5)) this.screen_dma(u(0), u(2), u(3));
+            return true;
+    }
+    return false;
+};
+
+// ---------------------------------------------------------------------------
+// Screen targets: screens (svga_screens.js) whose picture is a surface image,
+// copied into them by UPDATE_GB_SCREENTARGET
+
+SVGA3D.prototype.target_otable = function(stid)
+{
+    const t = this.targets.get(stid);
+    if(!t) return this.otable(C.SVGA_OTABLE_SCREENTARGET, stid, null);
+    const image = t.image || [INVALID, 0, 0];
+    this.otable(C.SVGA_OTABLE_SCREENTARGET, stid, [image[0], image[1], image[2], t.width, t.height, t.x, t.y, t.flags, t.dpi]);
+};
+
+SVGA3D.prototype.define_screen_target = function(stid, width, height, x, y, flags, dpi)
+{
+    if(!this.device.screens.define_target(stid, flags, width, height, x, y))
+    {
+        this.warn_once("target", "an invalid screen target");
+        return;
+    }
+    this.targets.set(stid, { width, height, x, y, flags, dpi, image: null });
+    this.target_otable(stid);
+};
+
+SVGA3D.prototype.destroy_screen_target = function(stid)
+{
+    this.targets.delete(stid);
+    this.device.screens.destroy(stid);
+    this.target_otable(stid);
+};
+
+SVGA3D.prototype.bind_screen_target = function(stid, sid, face, mip)
+{
+    const target = this.targets.get(stid);
+    if(!target) return;
+    target.image = sid === INVALID ? null : [sid, face, mip];
+    this.target_otable(stid);
+    if(!target.image) this.device.screens.blank(stid);
+};
+
+/**
+ * UPDATE_GB_SCREENTARGET: rectangle (x, y, w, h) of a screen target from its
+ * image, at (sx, sy) in it. An image the GPU has nothing newer of is read
+ * from its MOB; otherwise from the GPU.
+ */
+SVGA3D.prototype.update_screen_target = function(stid, x, y, w, h, sx, sy)
+{
+    const target = this.targets.get(stid);
+    const screen = this.device.screens.screens.get(stid);
+    if(!target || !target.image || !screen) return;
+    const surface = this.surfaces.get(target.image[0]);
+    if(!surface || !surface.info) return;
+    const [, face, mip] = target.image;
+    x = Math.max(0, x); y = Math.max(0, y);
+    w = Math.min(w, screen.width - x); h = Math.min(h, screen.height - y);
+    const [width, height] = surface.sizes[Math.min(mip, surface.sizes.length - 1)];
+    w = Math.min(w, width - sx); h = Math.min(h, height - sy);
+    if(w <= 0 || h <= 0 || sx < 0 || sy < 0) return;
+    if(surface.host_newer || surface.mob === INVALID)
+    {
+        if(surface.handle) this.to_desktop(surface, sx, sy, w, h, screen.x + x, screen.y + y, w, h, null);
+        return;
+    }
+    const pixel = pixel_reader(surface.info.d3d);
+    if(!pixel) return this.warn_once("present-format" + surface.format, "presenting format " + surface.format + " is not supported");
+    const { offset, pitch } = this.mob_image(surface, face, mip);
+    const bytes_per = surface.info.bytes;
+    const rows = this.device.mobs.read(surface.mob, offset + sy * pitch, (h - 1) * pitch + (sx + w) * bytes_per);
+    if(!rows) return this.warn_once("target-mob", "a screen target image outside of its MOB");
+    for(let row = 0; row < h; row++)
+    {
+        const at = ((y + row) * screen.width + x) * 4;
+        for(let column = 0; column < w; column++)
+        {
+            pixel(rows, row * pitch + (sx + column) * bytes_per, screen.rgba, at + column * 4);
+        }
+    }
+    screen.mark(y, y + h);
+};
+
+/**
+ * GB_SCREEN_DMA: screenId, (dead), destMobID, destPitch: the screen's
+ * picture into a MOB, as BGRX
+ */
+SVGA3D.prototype.screen_dma = function(id, mob, pitch)
+{
+    const screen = this.device.screens.screens.get(id);
+    if(!screen || pitch < screen.width * 4) return;
+    const row = new Uint8Array(screen.width * 4);
+    for(let y = 0; y < screen.height; y++)
+    {
+        for(let x = 0; x < screen.width; x++)
+        {
+            const at = (y * screen.width + x) * 4;
+            row[x * 4] = screen.rgba[at + 2]; row[x * 4 + 1] = screen.rgba[at + 1]; row[x * 4 + 2] = screen.rgba[at]; row[x * 4 + 3] = 0;
+        }
+        if(!this.device.mobs.write(mob, y * pitch, row)) return;
+    }
 };
 
 // ---------------------------------------------------------------------------
