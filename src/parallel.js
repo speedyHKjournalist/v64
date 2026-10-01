@@ -8,14 +8,17 @@ const DATA_PORT = 0;
 const STATUS_PORT = 1;
 const CONTROL_PORT = 2;
 
-const STATUS_ERROR = 0x08;
-const STATUS_SELECT = 0x10;
 const STATUS_ACK = 0x40;
-const STATUS_NOT_BUSY = 0x80;
 
 const CONTROL_IRQ_ENABLE = 0x10;
 const CONTROL_MASK = 0x1F;
-const STATUS_IDLE = STATUS_NOT_BUSY | STATUS_ACK | STATUS_SELECT | STATUS_ERROR;
+// Nothing plugged in: the status lines float high, which reads as busy (bit 7
+// is inverted) with paper-out, select and no error, like a real port without
+// a cable. Drivers then give up on the port quickly (Windows polls a ready
+// port for an IEEE 1284 device for seconds at boot). A peripheral drives the
+// lines through "parallelN-status-input" (idle: not busy, ACK, select and no
+// error, 0xD8).
+const STATUS_UNPLUGGED = 0x7F;
 
 /**
  * Parallel port.
@@ -37,7 +40,7 @@ export function ParallelPort(cpu, port, irq, lpt, bus)
     this.bus = bus;
 
     this.data = 0;
-    this.status = STATUS_IDLE;
+    this.status = STATUS_UNPLUGGED;
     this.control = 0;
     this.status_latched = undefined;
     this.irq = irq;

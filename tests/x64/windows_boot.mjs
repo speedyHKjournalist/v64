@@ -13,7 +13,8 @@
 // WIN_OVERLAY_SAVE=<file> (after the desktop: a full shutdown, then the disk
 // overlay, i.e. every sector the guest wrote, is saved), WIN_OVERLAY_LOAD=<file>
 // (boot with such an overlay: the state after Windows installed the drivers
-// for this machine; the image itself is never written). While it runs, a line written to
+// for this machine; the image itself is never written), WIN_IDLE=1 (after the
+// desktop: host and in-guest CPU load of the idle desktop, see host_window). While it runs, a line written to
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
 // "trace on|off" (WIN_USER_TRACE=1 enables it from the start).
@@ -37,16 +38,17 @@ const password = process.env.WIN_USER_PASSWORD || "admin1";
 const memory_mb = +(process.env.WIN_MEMORY_MB || 2048);
 const source_stat = fs.statSync(image_path);
 
-function build(compiler, entry, output)
+function build(compiler, entry, output, source = "tests/x64/windows_probe.c")
 {
     const result = spawnSync(compiler, ["-Os", "-nostdlib", "-fno-builtin", "-fno-stack-protector", "-mno-stack-arg-probe",
-        `-Wl,--entry,${entry}`, "-Wl,--subsystem,console", "-o", output, path.join(root, "tests/x64/windows_probe.c"), "-lkernel32"], {encoding: "utf8"});
+        `-Wl,--entry,${entry}`, "-Wl,--subsystem,console", "-o", output, path.join(root, source), "-lkernel32"], {encoding: "utf8"});
     assert.equal(result.status, 0, result.stderr);
     return fs.readFileSync(output);
 }
 const probe64 = build("x86_64-w64-mingw32-gcc", "entry", path.join(out, "PROBE64.EXE"));
 const probe32 = build("i686-w64-mingw32-gcc", "_entry@0", path.join(out, "PROBE32.EXE"));
-const tools = new MemoryDisk(make_fat16({"PROBE64.EXE": probe64, "PROBE32.EXE": probe32}));
+const cpuload = build("x86_64-w64-mingw32-gcc", "entry", path.join(out, "CPULOAD.EXE"), "tests/x64/windows_cpuload.c");
+const tools = new MemoryDisk(make_fat16({"PROBE64.EXE": probe64, "PROBE32.EXE": probe32, "CPULOAD.EXE": cpuload}));
 const source = new ReadOnlyOverlayDisk(image_path);
 // Overlay file: "V86OVL1\0", image size (u64), sector count (u32), the
 // sector numbers (u32 each), then their contents
@@ -76,6 +78,8 @@ const vm = new V86({
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
     hda: source, hdb: tools, memory_size: memory_mb * 1048576, vga_memory_size: 16 << 20,
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
+    // WIN_QEMU_COMPATIBLE=1: devices where QEMU, which the image was installed with, had them
+    qemu_compatible: !!+process.env.WIN_QEMU_COMPATIBLE,
     // WIN_QUANTUM: instructions per core slice when cores take turns
     ...(process.env.WIN_QUANTUM ? {cpu_quantum: +process.env.WIN_QUANTUM} : {}),
     // WIN_ASYNC_PUBLICATION=1: compile generated modules asynchronously, as
@@ -83,7 +87,8 @@ const vm = new V86({
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: !+process.env.WIN_ASYNC_PUBLICATION,
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
     // WIN_PARALLEL=1: the application processors run in vCPU workers
-    ...(+process.env.WIN_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),
+    // (WIN_PARALLEL_WASM: another build of it)
+    ...(+process.env.WIN_PARALLEL ? {parallel: true, wasm_path: process.env.WIN_PARALLEL_WASM || root + "build/v86-parallel.wasm"} : {}),
 });
 
 // Rolling host profiles of this process (node:inspector), so that each boot
@@ -103,6 +108,62 @@ async function profile_window()
     const {profile} = await profiler.post("Profiler.stop");
     fs.writeFileSync(path.join(out, `prof-${String(elapsed()).padStart(4, "0")}s.cpuprofile`), JSON.stringify(profile));
     await profiler.post("Profiler.start");
+    // page functions are named x64_page_<linear page>: name the guest module
+    // of each (<out>/modules.json, for offline profiles by guest module)
+    if(!cpu) return;
+    const limit = performance.now() + 300;
+    for(const node of profile.nodes)
+    {
+        const match = node.callFrame.functionName.match(/^x64_page_([0-9a-f]+)$/);
+        if(match && !page_modules[match[1]] && performance.now() < limit) page_modules[match[1]] = guest_module(BigInt("0x" + match[1]));
+    }
+    fs.writeFileSync(path.join(out, "modules.json"), JSON.stringify(page_modules, null, 1));
+}
+// (the most recent address spaces first)
+const page_modules = {}, seen_cr3 = new Set(), module_headers = new Map();
+// The PE image containing a linear address, as "name+0xoffset": scan down to
+// its MZ header, name it by the PDB of its CodeView debug entry (or its
+// export name); user addresses under each address space seen so far
+function guest_module(address)
+{
+    const spaces = [current_cr3(), ...[...seen_cr3].reverse().slice(0, 16)];
+    for(const cr3 of address >= 0xFFFF800000000000n ? spaces.slice(0, 1) : spaces)
+    {
+        const u8 = va => { const at = physical(cr3, va); return at === null ? null : cpu.mem8[at]; };
+        // (a cached header scan: the image base of the page, or none)
+        const cached = module_headers.get(cr3 + ":" + address.toString(16));
+        if(cached === null) continue;
+        const u16 = va => { const a = u8(va), b = u8(va + 1n); return a === null || b === null ? null : a | b << 8; };
+        const u32 = va => { const a = u16(va), b = u16(va + 2n); return a === null || b === null ? null : (a | b << 16) >>> 0; };
+        const string = va => { let text = ""; for(let c; text.length < 64 && (c = u8(va)) && c >= 32 && c < 127; va++) text += String.fromCharCode(c); return text; };
+        for(let page = address & ~0xFFFn, n = 0; n < 4096; n++, page -= 0x1000n)
+        {
+            if(u16(page) !== 0x5A4D) continue;
+            const pe = page + BigInt(u32(page + 0x3Cn) ?? 0);
+            if(u32(pe) !== 0x4550) continue;
+            const optional = pe + 24n, wide = u16(optional) === 0x20B;
+            if(address - page >= BigInt(u32(optional + 56n) ?? 0)) break;
+            const directories = optional + (wide ? 112n : 96n);
+            let name = "";
+            const debug = u32(directories + 6n * 8n), debug_size = u32(directories + 6n * 8n + 4n);
+            for(let i = 0; debug && i < debug_size / 28 && !name; i++)
+            {
+                const entry = page + BigInt(debug) + BigInt(i * 28);
+                const data = u32(entry + 20n);
+                if(u32(entry + 12n) === 2 && data && u32(page + BigInt(data)) === 0x53445352)
+                    name = string(page + BigInt(data) + 24n).split("\\").pop().replace(/\.pdb$/i, "");
+            }
+            const exports = u32(directories);
+            if(!name && exports) name = string(page + BigInt(u32(page + BigInt(exports) + 12n) ?? 0));
+            return (name || "0x" + page.toString(16)) + "+0x" + (address - page).toString(16);
+        }
+        module_headers.set(cr3 + ":" + address.toString(16), null);
+    }
+    return null;
+}
+function current_cr3()
+{
+    return BigInt(cpu.cr[3] >>> 0) & ~0xFFFn | BigInt(new Uint32Array(cpu.wasm_memory.buffer, 1612, 1)[0]) << 32n;
 }
 const started = performance.now();
 const elapsed = () => Math.round((performance.now() - started) / 1000);
@@ -287,7 +348,8 @@ function stats()
     const d = cpu.get_diagnostics();
     return {page_tier: tier, cores: d.cores.map(core => ({state: core.state, ip: core.linear_ip, cs: core.cs, retired: core.retired_instructions, halted: core.halted})),
         mode: d.cpu.mode, overlay_sectors: source.overlay.size, execution: d.execution,
-        workers: d.parallel ? d.parallel.cores.map(core => ({steps: core.steps})) : undefined};
+        workers: d.parallel ? d.parallel.cores.map(core => ({steps: core.steps, slices: core.slices, waits: core.waits, io: core.io, refused: core.refused})) : undefined,
+        kicks: cpu.wm.exports.parallel_kick_count ? cpu.wm.exports.parallel_kick_count() : undefined};
 }
 // Read-only 4-level walk (no A/D updates), for diagnostics only.
 function physical(cr3, address)
@@ -354,6 +416,29 @@ function poll_user_trace()
     }
     trace_seen = count;
 }
+// WIN_IDLE=1: after the desktop, how busy the idle guest is. Host windows
+// of 10 s (per core: share of the wall clock spent executing, MIPS, HLTs),
+// and CPULOAD.EXE (tests/x64/windows_cpuload.c): Windows' own accounting,
+// the numbers Task Manager shows, over WIN_IDLE_ROUNDS windows of 10 s,
+// started WIN_IDLE_SETTLE_S (20) seconds after the desktop appeared.
+let host_last = null;
+function host_window()
+{
+    const ex = cpu.wm.exports, now = performance.now(), usage = process.cpuUsage();
+    const sample = {at: now, usage, cores: Array.from({length: cores}, (_, core) => [0, 3, 4].map(f => ex.core_statistics_get(core, f)))};
+    if(host_last)
+    {
+        const wall = now - host_last.at;
+        event("host-window", {wall_ms: Math.round(wall),
+            host_cpu: +((usage.user + usage.system - host_last.usage.user - host_last.usage.system) / 1000 / wall).toFixed(2),
+            cores: sample.cores.map(([retired, halts, runtime], core) => {
+                const [retired0, halts0, runtime0] = host_last.cores[core];
+                return {busy: +((runtime - runtime0) / wall).toFixed(3), mips: Math.round((retired - retired0) / wall / 1000), halts: halts - halts0};
+            })});
+    }
+    host_last = sample;
+}
+const port_counts = new Map();
 const result_text = name => { const bytes = read_fat16(tools.bytes, name); return bytes ? Buffer.from(bytes).toString("ascii") : ""; };
 
 try
@@ -385,6 +470,22 @@ try
         };
     }
     if(process.env.X64_COMPAT_JIT) cpu.wm.exports.x64_set_compat_jit(process.env.X64_COMPAT_JIT !== "0");
+    // WIN_LPT_STATUS=<hex>: the status register of the unconnected LPT1
+    if(process.env.WIN_LPT_STATUS) cpu.devices.parallel0.status = parseInt(process.env.WIN_LPT_STATUS, 16);
+    // WIN_PORT_STATS=1: port accesses by port and size, printed each minute
+    if(process.env.WIN_PORT_STATS)
+    {
+        for(const [name, kind] of [["port_read8", "in8"], ["port_read16", "in16"], ["port_read32", "in32"],
+            ["port_write8", "out8"], ["port_write16", "out16"], ["port_write32", "out32"]])
+        {
+            const f = cpu.io[name].bind(cpu.io);
+            cpu.io[name] = (port, ...rest) => {
+                const key = kind + ":" + port.toString(16);
+                port_counts.set(key, (port_counts.get(key) || 0) + 1);
+                return f(port, ...rest);
+            };
+        }
+    }
     if(process.env.WIN_USER_TRACE) cpu.wm.exports.x64_user_trace_enable(1);
     // The reset is noted before any state is replaced: record the code at
     // each faulting RIP and the descriptor tables while they are intact.
@@ -428,6 +529,7 @@ try
     let next_profile = performance.now() + 1000 * +(process.env.WIN_CPU_PROFILE || 0);
     let next_report = 0, next_samples = performance.now() + 60000, next_shot = 0, resets = 0, signed_in = false, probe_sent = 0, text_seen = "";
     let shutdown_at = 0, shutdown_sent = false, shutdown_deadline = 0;
+    let idle_at = 0, idle_sent = false, next_host_window = 0;
     while(performance.now() < deadline)
     {
         await delay(200);
@@ -471,11 +573,17 @@ try
             event("reset", cpu.last_reset);
         }
         sample_rip();
+        if(cpu.cr[4] & 1 << 5) { const cr3 = current_cr3(); seen_cr3.delete(cr3); seen_cr3.add(cr3); }
         if(performance.now() >= next_samples)
         {
             next_samples = performance.now() + 60000;
             const top = [...rip_samples].sort((a, b) => b[1] - a[1]).slice(0, 12);
             console.log("X64_WIN_RIPS " + JSON.stringify(top));
+            if(port_counts.size)
+            {
+                console.log("X64_WIN_PORTS " + JSON.stringify([...port_counts].sort((a, b) => b[1] - a[1]).slice(0, 16)));
+                port_counts.clear();
+            }
             rip_samples.clear();
             if(process.env.WIN_STEP_PROFILE)
             {
@@ -490,8 +598,20 @@ try
                 const retries = [];
                 for(let key = 0; key < 0x20000; key++) { const n = get(0x20000 + key); if(n) retries.push([n, key]); }
                 retries.sort((a, b) => b[0] - a[0]);
+                // the most stepped instructions: where, and their bytes
+                const step_rip = cpu.wm.exports.x64_page_step_rip, hot = [];
+                for(let n = 0; n < 24; n++)
+                {
+                    const low = step_rip(n, false, false);
+                    if(low < 0) break;
+                    const rip = BigInt(step_rip(n, true, false)) << 32n | BigInt(low);
+                    const at = physical(current_cr3(), rip);
+                    hot.push({rip: "0x" + rip.toString(16), n: step_rip(n, false, true), at: guest_module(rip),
+                        bytes: at === null ? null : Buffer.from(cpu.mem8.subarray(at, at + 12)).toString("hex")});
+                }
+                console.log("X64_WIN_STEP_RIPS " + JSON.stringify(hot));
                 console.log("X64_WIN_RETRIES " + retries.slice(0, 30).map(([n, key]) => `${name(key)}:${n}`).join(" ") +
-                    " refused(cross,fault,device,code)=" + [0, 1, 2, 3].map(i => get(0x40000 + i)).join(","));
+                    " refused(cross,fault,device,code)=" + [0, 1, 2, 3].map(i => get(0x40000 + i)).join(",") + " unserved_steps=" + get(0x40004) + " retries_pe_clear=" + get(0x40005) + " late_entries(call,aligned,other)=" + [6, 7, 8].map(i => get(0x40000 + i)).join(","));
             }
         }
         if(performance.now() >= next_report)
@@ -518,7 +638,7 @@ try
                 if(password_box_visible() || performance.now() - last_sign_in > 180000) await sign_in();
                 probe_sent = performance.now() + 20000;
             }
-            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP)
+            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP && !process.env.WIN_IDLE)
             {
                 const arch = report.results[64] ? 32 : 64;
                 const started = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\probe${arch}.exe %d:\\probe${arch}.exe`);
@@ -544,6 +664,7 @@ try
             report.desktop_s = elapsed();
             event("desktop");
             if(process.env.WIN_OVERLAY_SAVE) shutdown_at = performance.now() + 30000;
+            else if(process.env.WIN_IDLE) idle_at = performance.now() + 1000 * +(process.env.WIN_IDLE_SETTLE_S || 20);
             else if(process.env.WIN_DESKTOP_TEST)
             {
                 // desktop responsiveness: open programs one after another
@@ -558,6 +679,28 @@ try
                 break;
             }
             else if(process.env.WIN_STOP_AT_DESKTOP) break;
+        }
+        if(idle_at && performance.now() >= idle_at && !idle_sent)
+        {
+            host_window();
+            next_host_window = performance.now() + 10000;
+            idle_sent = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\cpuload.exe %d:\\cpuload.exe ${+process.env.WIN_IDLE_ROUNDS || 6}`);
+            if(!idle_sent) idle_at = performance.now() + 20000;
+        }
+        if(idle_sent && performance.now() >= next_host_window)
+        {
+            host_window();
+            next_host_window += 10000;
+        }
+        if(idle_sent)
+        {
+            const load = result_text("CPULOAD.TXT");
+            if(load.includes("CPULOAD_DONE"))
+            {
+                report.cpuload = load;
+                console.log(load);
+                break;
+            }
         }
         // WIN_OVERLAY_SAVE: after the desktop has settled, a full (not
         // hybrid) shutdown; the overlay is saved once the guest is off
@@ -576,7 +719,7 @@ try
         }
         assert.ok(!shutdown_deadline || performance.now() < shutdown_deadline, "the guest powered off");
     }
-    for(const arch of process.env.WIN_STOP_AT_DESKTOP ? [] : [64, 32])
+    for(const arch of process.env.WIN_STOP_AT_DESKTOP || process.env.WIN_IDLE ? [] : [64, 32])
     {
         const r = report.results[arch];
         assert.ok(r, `probe ${arch} completed`);
@@ -587,6 +730,7 @@ try
         if(arch === 64) assert.ok(BigInt("0x" + r.high_block) >> 32n > 0n, "x64 top-down allocation above 4 GiB");
     }
     if(process.env.WIN_STOP_AT_DESKTOP) assert.ok(report.desktop_s, "desktop reached");
+    if(process.env.WIN_IDLE) assert.ok(report.cpuload, "CPULOAD.EXE completed");
     report.passed = true;
     console.log("X64_WIN_PASS " + JSON.stringify(report.results));
 }
@@ -601,6 +745,29 @@ finally
 {
     if(profiler) await profile_window();
     if(cpu && process.env.WIN_SIZE_STATS) cpu.wm.exports.x64_pagegen_size_dump();
+    // WIN_DUMP_OVERLAY=<file>: the sectors written so far (no shutdown: what
+    // the guest had flushed), e.g. to read setupapi.dev.log
+    if(process.env.WIN_DUMP_OVERLAY) save_overlay(process.env.WIN_DUMP_OVERLAY);
+    // WIN_DUMP_IMAGES=ci,ntkrnlmp: those guest modules (named as in
+    // modules.json) as mapped in memory, to <out>/<name>@<base>.bin
+    for(const name of cpu ? (process.env.WIN_DUMP_IMAGES || "").split(",").filter(Boolean) : [])
+    {
+        const entry = Object.entries(page_modules).find(([, where]) => where && where.split("+")[0] === name);
+        if(!entry) continue;
+        const base = BigInt("0x" + entry[0]) - BigInt(entry[1].split("+")[1]);
+        const cr3 = current_cr3(), at = physical(cr3, base);
+        if(at === null) continue;
+        const pe = base + BigInt(cpu.mem8[at + 0x3C] | cpu.mem8[at + 0x3D] << 8);
+        const size_at = physical(cr3, pe + 24n + 56n);
+        const size = new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset + size_at, 4).getUint32(0, true);
+        const image = Buffer.alloc(size);
+        for(let offset = 0; offset < size; offset += 4096)
+        {
+            const page = physical(cr3, base + BigInt(offset));
+            if(page !== null) image.set(cpu.mem8.subarray(page, page + Math.min(4096, size - offset)), offset);
+        }
+        fs.writeFileSync(path.join(out, `${name}@${base.toString(16)}.bin`), image);
+    }
     if(cpu) { report.final = stats(); screenshot(true); report.text_screen = text_screen(); }
     await vm.stop();
     const final_stat = fs.statSync(image_path);

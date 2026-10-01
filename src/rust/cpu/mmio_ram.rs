@@ -100,7 +100,10 @@ pub unsafe fn write_host(address: u32, bytes: u32) -> Option<*mut u8> {
 #[inline]
 unsafe fn mark_page(region: &Region, page: u32) {
     dbg_assert!(page >> 6 < region.dirty_words);
-    parallel::or64(region.dirty.add((page >> 6) as usize).cast(), 1 << (page & 63))
+    parallel::or64(
+        region.dirty.add((page >> 6) as usize).cast(),
+        1 << (page & 63),
+    )
 }
 
 /// Whether `host` is the memory of any region (the x64 page tier's direct
@@ -198,7 +201,11 @@ pub unsafe fn mmio_ram_map(id: u32, base: u32) {
         || base % PAGE_SIZE != 0
         || !free_for_devices(base, region.size)
     {
-        dbg_log!("mmio_ram_map: region {} cannot be decoded at {:x}", id, base);
+        dbg_log!(
+            "mmio_ram_map: region {} cannot be decoded at {:x}",
+            id,
+            base
+        );
         region.mapped = false;
     }
     else {
@@ -391,14 +398,20 @@ mod tests {
 
             let p = write_host(0xE000_1000, 4).unwrap();
             *(p as *mut u32) = 0x11223344;
-            assert_eq!(*(read_host(0xE000_1000, 4).unwrap() as *const u32), 0x11223344);
+            assert_eq!(
+                *(read_host(0xE000_1000, 4).unwrap() as *const u32),
+                0x11223344
+            );
             let region = find(0xE000_0000, 1).unwrap();
             assert_eq!(*region.dirty, 0b10, "page 1 written");
 
             // moved by the guest: decoded at the new place, same memory
             mmio_ram_map(id, 0xF000_0000);
             assert!(!contains(0xE000_1000));
-            assert_eq!(*(read_host(0xF000_1000, 4).unwrap() as *const u32), 0x11223344);
+            assert_eq!(
+                *(read_host(0xF000_1000, 4).unwrap() as *const u32),
+                0x11223344
+            );
             mmio_ram_unmap(id);
             assert!(!contains(0xF000_1000));
         }

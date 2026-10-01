@@ -14,7 +14,9 @@ impl std::hash::Hasher for FastHasher {
         }
     }
     fn write_u32(&mut self, v: u32) { self.write_u64(v as u64) }
-    fn write_u64(&mut self, v: u64) { self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517C_C1B7_2722_0A95); }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517C_C1B7_2722_0A95);
+    }
     fn write_usize(&mut self, v: usize) { self.write_u64(v as u64) }
 }
 type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;
@@ -209,8 +211,10 @@ impl WasmBuilder {
     /// Call internal function `number` (its index is patched in finish).
     pub fn call_internal(&mut self, number: u32) {
         self.instruction_body.push(op::OP_CALL);
-        self.internal_calls.push((self.instruction_body.len(), number));
-        self.instruction_body.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0]);
+        self.internal_calls
+            .push((self.instruction_body.len(), number));
+        self.instruction_body
+            .extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0]);
     }
 
     /// Vector signatures are for Wasm-to-Wasm calls; JS helpers need a scratch-memory ABI.

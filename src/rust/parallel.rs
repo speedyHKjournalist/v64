@@ -108,12 +108,17 @@ pub unsafe fn parallel_wake_addr(core: u32) -> u32 {
 /// Make a core notice new work soon: leave its current slice and, if it
 /// waits, wake up. Called after an interrupt, INIT/SIPI or a request was
 /// posted for it. Harmless for the core that calls it.
+/// Kicks by all cores (diagnostics: parallel_kick_count)
+static mut KICKS: u32 = 0;
+#[no_mangle]
+pub unsafe fn parallel_kick_count() -> u32 { *machine(&raw mut KICKS) }
 pub unsafe fn kick(core: usize) {
     #[cfg(feature = "parallel")]
     {
         if !ACTIVE || core >= MAX_CORES {
             return;
         }
+        (*(machine(&raw mut KICKS) as *const AtomicU32)).fetch_add(1, SeqCst);
         let flag = *machine(&raw mut CORE_YIELD).cast::<u32>().add(core);
         if flag != 0 {
             (*(flag as *const AtomicU8)).store(1, SeqCst);
@@ -1010,16 +1015,17 @@ pub mod code {
             &raw mut PUBLISH_SEEN,
             &mut pages,
         );
+        // (the x64 interpreter checks every store: only the access cache's
+        // write entries of those pages must go)
         if overflow || pages.len() > 32 {
             crate::cpu::cpu::full_clear_tlb();
+            crate::x64::jac::flush_all();
         }
         else {
             for &page in &pages {
                 crate::cpu::cpu::tlb_set_has_code(crate::page::Page::page_of(page << 12), true);
+                crate::x64::jac::retire_writes_on(me(), page << 12);
             }
-        }
-        if overflow || !pages.is_empty() {
-            crate::x64::jac::flush_all();
         }
         word_store(
             machine(&raw mut ACKED).cast::<u32>().add(me()),

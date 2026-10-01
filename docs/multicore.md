@@ -168,13 +168,21 @@ AP runs in a vCPU Worker ([`src/parallel/`](../src/parallel/)).
   CMPXCHG16B. These run in *exclusive* mode, while aligned CAS commits run in
   *shared* mode, so the two kinds never interleave. A/D bits are set with an
   atomic OR.
-- *JIT*: all three tiers use atomic load and store templates. LOCKed
-  instructions and XCHG with memory are left to the interpreter's CAS path.
+- *JIT*: all three tiers use atomic load and store templates. In the x64
+  page tier, a LOCKed read-modify-write or XCHG with memory on an aligned
+  operand is a compare-exchange loop that commits through the same shared
+  mode as the interpreter's (`x64_page_lock_commit`); unaligned ones go to
+  the interpreter. Unaligned plain accesses do not leave compiled code: reads
+  are copied with plain loads and a fence, stores are plain stores after a
+  fence. Compiled code leaves its function when another core kicks this one
+  (an IPI, a code publication), so interrupts wait at most one block. The
+  other tiers leave LOCKed instructions to the interpreter.
 - *Code coherence*: every backing page has an OWNERS byte, one bit per core.
   Before a core installs compiled code, it announces the page on a publish ring
   and waits until the other cores acknowledge, bounded by a count. Writes to a
   page that another core owns go to an invalidation ring. Cores `poll` these
-  rings on each dispatch and on CPUID, IRET and interrupt delivery.
+  rings on each dispatch and on CPUID, IRET and interrupt delivery; a
+  publication retires only the access cache's write entries of that page.
 - *Faults*: a failing worker releases every lock it holds (IOAPIC, split lock,
   extended RAM). The machine stops and emits `emulator-error`.
 

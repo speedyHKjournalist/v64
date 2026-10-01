@@ -239,7 +239,12 @@ impl Tlb {
         value: Translation,
     ) {
         if value.page_shift > 12 {
-            let (word, bit) = if value.page_shift > 21 { (TLB_LARGE_WORDS - 1, 1) } else { tlb_region_bit(address.0) };
+            let (word, bit) = if value.page_shift > 21 {
+                (TLB_LARGE_WORDS - 1, 1)
+            }
+            else {
+                tlb_region_bit(address.0)
+            };
             self.large[word] |= bit;
             // (a 1 GiB page makes every invalidation a full scan)
             if value.page_shift > 21 {
@@ -298,12 +303,9 @@ impl Tlb {
     /// restore. Epochs and native layout/pointers are deliberately excluded.
     pub fn snapshot(&self) -> Vec<u32> {
         let mut records = Vec::new();
-        for entry in self
-            .entries
-            .iter()
-            .flatten()
-            .filter(|entry| entry.epoch == if entry.value.global { self.global_epoch } else { self.epoch })
-        {
+        for entry in self.entries.iter().flatten().filter(|entry| {
+            entry.epoch == if entry.value.global { self.global_epoch } else { self.epoch }
+        }) {
             let value = entry.value;
             records.extend_from_slice(&[
                 entry.linear_page as u32,

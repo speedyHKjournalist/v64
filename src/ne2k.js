@@ -6,6 +6,7 @@ import { dbg_assert, dbg_log } from "./log.js";
 import { CPU } from "./cpu.js";
 import { PCI } from "./pci.js";
 import { BusConnector } from "./bus.js";
+import { pci_functions } from "./platform.js";
 
 // http://www.ethernut.de/pdf/8019asds.pdf
 
@@ -328,7 +329,7 @@ export function Ne2k(cpu, bus, preserve_mac_from_state_image, mac_address_transl
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x00, 0x11,
             0x00, 0x00, 0xb8, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
         ];
-        this.pci_id = (this.id === 0 ? 0x05 : (0x07 + this.id)) << 3;
+        this.pci_id = this.id === 0 ? pci_functions(cpu.platform).ne2k : (0x07 + this.id) << 3;
         this.pci_bars = [
             {
                 size: 32,

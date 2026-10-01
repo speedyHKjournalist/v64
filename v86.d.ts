@@ -747,6 +747,18 @@ export interface V86Options {
      * @default false
      */
     parallel1?: boolean;
+
+    /**
+     * Present the PCI devices, drives and ACPI namespace with the places and
+     * identities of QEMU's default i440FX PC (PCI root _UID 0, IDE at 01.1,
+     * ACPI at 01.3, VGA at 02.0, NE2000 at 03.0, QEMU's subsystem ids and
+     * drive names). A Windows installed under QEMU then finds its devices
+     * unchanged instead of installing them again at every boot. The
+     * processor and the host bridge keep v86's identity (SeaBIOS would take
+     * QEMU's host bridge for QEMU).
+     * @default false
+     */
+    qemu_compatible?: boolean;
 }
 
 /** A custom virtio device (see V86Options.virtio_devices). */

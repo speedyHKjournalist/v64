@@ -176,6 +176,14 @@ enum Op {
         dst: Opnd,
         count: Option<u8>,
     },
+    /// Shifts and rotates without a template (8/16-bit by CL, RCL/RCR up to
+    /// 32 bits): the interpreter's semantics through x64_page_shift
+    ShiftCall {
+        code: u8,
+        width: u8,
+        dst: Opnd,
+        count: Option<u8>,
+    },
     Imul {
         width: u8,
         dst: Reg,
@@ -298,6 +306,13 @@ enum Op {
     Stos {
         width: u8,
         rep: bool,
+    },
+    /// REPE/REPNE CMPS (SCAS: `scan`) with 64-bit addresses and no FS/GS
+    /// source: natively inside one page per operand, forward (else a step)
+    RepCompare {
+        width: u8,
+        scan: bool,
+        equal: bool,
     },
     MovSreg {
         segment: u8,
@@ -538,7 +553,7 @@ fn classify(d: &Decoded) -> Op {
     };
     // REP/REPNE are ignored by these forms in the interpreter (or select
     // their catalog entry); anything else with REP is a step.
-    let rep_ok = matches!(op, 0xC2 | 0xC3 | 0xE8 | 0xE9 | 0xEB | 0x70..=0x7F | 0x0F80..=0x0F8F | 0x0FB8 | 0x0FBC | 0x0FBD | 0x0F1E | 0xA4 | 0xA5 | 0xAA | 0xAB)
+    let rep_ok = matches!(op, 0xC2 | 0xC3 | 0xE8 | 0xE9 | 0xEB | 0x70..=0x7F | 0x0F80..=0x0F8F | 0x0FB8 | 0x0FBC | 0x0FBD | 0x0F1E | 0xA4..=0xA7 | 0xAA..=0xAF)
         || op == 0xFF && matches!(group, 2 | 4)
         // F3/F2 that select an SSE instruction are not repeat prefixes
         || matches!(d.opcode >> 16, 0xF2 | 0xF3);
@@ -560,11 +575,9 @@ fn classify(d: &Decoded) -> Op {
     if d.prefixes.lock && !lock_ok {
         return Op::Step;
     }
-    // With cores in workers, a locked read-modify-write commits atomically in
-    // the interpreter (x64::memory::run_locked); XCHG with memory is locked
-    if crate::parallel::active() && memory && (d.prefixes.lock || matches!(op, 0x86 | 0x87)) {
-        return Op::Step;
-    }
+    // With cores in workers, a locked read-modify-write (XCHG with memory is
+    // locked) commits with a compare-exchange loop (see locked_rmw), or
+    // atomically in the interpreter (x64::memory::run_locked).
     let result = (|| -> Option<Op> {
         Some(match op {
             0x00..=0x3D if op & 7 <= 5 => {
@@ -708,16 +721,25 @@ fn classify(d: &Decoded) -> Op {
                     _ => return None,
                 }
             },
-            0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD3 => {
+            0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 => {
                 let width = if op & 1 == 0 { 8 } else { w };
                 let count = match op {
                     0xC0 | 0xC1 => Some(imm? as u8),
                     0xD0 | 0xD1 => Some(1),
                     _ => None,
                 };
-                // Rotates through carry, and narrow CL shifts or rotates, step.
+                // Rotates through carry, and narrow CL shifts or rotates,
+                // call the interpreter's semantics (64-bit RCL/RCR step).
                 if matches!(group, 2 | 3) || count.is_none() && width < 32 {
-                    return None;
+                    if width == 64 {
+                        return None;
+                    }
+                    return Some(Op::ShiftCall {
+                        code: group,
+                        width,
+                        dst: rm(width)?,
+                        count,
+                    });
                 }
                 Op::Shift {
                     code: group,
@@ -846,7 +868,9 @@ fn classify(d: &Decoded) -> Op {
             0xFA => Op::Cli,
             0xFB => Op::Sti,
             0x0F01 if d.modrm == Some(0xF8) => Op::Swapgs,
-            0x0F01 if group == 7 && memory => Op::Invlpg { address: d.address? },
+            0x0F01 if group == 7 && memory => Op::Invlpg {
+                address: d.address?,
+            },
             0x0F31 => Op::Rdtsc,
             0xA4 | 0xA5 | 0xAA | 0xAB
                 if d.address_size == 64
@@ -859,6 +883,17 @@ fn classify(d: &Decoded) -> Op {
                 }
                 else {
                     Op::Stos { width, rep }
+                }
+            },
+            0xA6 | 0xA7 | 0xAE | 0xAF
+                if d.address_size == 64
+                    && d.prefixes.rep.is_some()
+                    && !(op <= 0xA7 && matches!(d.prefixes.segment, Some(4 | 5))) =>
+            {
+                Op::RepCompare {
+                    width: if op & 1 == 0 { 8 } else { w },
+                    scan: op >= 0xAE,
+                    equal: d.prefixes.rep == Some(0xF3),
                 }
             },
             0x8C if group < 6 => Op::MovSreg {
@@ -920,9 +955,11 @@ fn classify(d: &Decoded) -> Op {
                 address: d.address?,
             },
             0x0F01 if d.modrm == Some(0xF9) => Op::Rdtscp,
-            0x0F20 if matches!(d.reg, Some(0 | 2 | 3 | 4)) && d.rm_register.is_some() => Op::ReadCr {
-                control: d.reg?,
-                reg: reg(d.rm_register?, 64),
+            0x0F20 if matches!(d.reg, Some(0 | 2 | 3 | 4)) && d.rm_register.is_some() => {
+                Op::ReadCr {
+                    control: d.reg?,
+                    reg: reg(d.rm_register?, 64),
+                }
             },
             0x0F20 | 0x0F22 if d.reg == Some(8) && d.rm_register.is_some() => Op::Cr8 {
                 write: op == 0x0F22,
@@ -1147,6 +1184,8 @@ fn effects(op: &Op) -> (u32, u32) {
             ..
         } => (CF | OF, CF | OF),
         Op::Shift { count: None, .. } => (CF | PF | ZF | SF | OF, CF | PF | ZF | SF | OF),
+        // (the helper takes and returns all of EFLAGS)
+        Op::ShiftCall { .. } => (ARITH, ARITH),
         Op::Imul { .. } | Op::MulWide { .. } => (0, CF | OF),
         Op::Bt { .. } => (0, CF),
         Op::BitScan { .. } => (0, ZF),
@@ -1168,6 +1207,8 @@ fn effects(op: &Op) -> (u32, u32) {
         Op::Sahf => (0, SF | ZF | AF | PF | CF),
         Op::Vcompare { .. } => (0, ARITH),
         Op::Step => (ARITH, ARITH),
+        // (RCX = 0 leaves EFLAGS as they were)
+        Op::RepCompare { .. } => (ARITH, ARITH),
         _ => (0, 0),
     }
 }
@@ -1222,6 +1263,13 @@ struct Inst {
     fused: Option<Known>,
     /// Producer: keep operands for a fused consumer.
     keep: bool,
+    /// An instruction that continues into the next page: its bytes there
+    /// (little endian) and how many. It runs only while the next page
+    /// fetches as these bytes (x64_page_straddle), else it is stepped.
+    straddle: Option<(u64, u8)>,
+    /// A locked read-modify-write of memory (LOCK, XCHG) with cores in
+    /// workers: committed with a compare-exchange loop (Emitter::read_dst)
+    locked: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum End {
@@ -1249,6 +1297,55 @@ fn is_rep_string(d: &Decoded) -> bool {
     d.prefixes.rep.is_some() && matches!(d.base_opcode(), 0x6C..=0x6F | 0xA4..=0xA7 | 0xAA..=0xAF)
 }
 
+/// With cores in workers: a locked read-modify-write of memory.
+fn locked_rmw(d: &Decoded, op: &Op) -> bool {
+    crate::parallel::active()
+        && d.rm_register.is_none()
+        && (d.prefixes.lock
+            || matches!(
+                op,
+                Op::Xchg {
+                    a: Opnd::Mem(_),
+                    ..
+                }
+            ))
+}
+/// Templates that commit a locked memory operand with a compare-exchange
+/// loop (Emitter::read_dst and write_dst; the rest are stepped).
+fn lockable(op: &Op) -> bool {
+    match *op {
+        Op::Alu {
+            code,
+            dst: Opnd::Mem(_),
+            ..
+        } => code != 7,
+        Op::IncDec {
+            dst: Opnd::Mem(_), ..
+        }
+        | Op::Neg {
+            dst: Opnd::Mem(_), ..
+        }
+        | Op::Not {
+            dst: Opnd::Mem(_), ..
+        }
+        | Op::Xadd {
+            dst: Opnd::Mem(_), ..
+        }
+        | Op::Cmpxchg {
+            dst: Opnd::Mem(_), ..
+        }
+        | Op::Xchg {
+            a: Opnd::Mem(_), ..
+        } => true,
+        Op::Bt {
+            action,
+            dst: Opnd::Mem(_),
+            ..
+        } => action != 0,
+        _ => false,
+    }
+}
+
 pub struct Compiled {
     pub bytes: Vec<u8>,
     /// Block starts, as a bitmap of page offsets.
@@ -1269,22 +1366,33 @@ impl std::hash::Hasher for OffsetHasher {
             self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         }
     }
-    fn write_u16(&mut self, value: u16) { self.0 = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15); }
+    fn write_u16(&mut self, value: u16) {
+        self.0 = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 struct Decoder<'a> {
     bytes: &'a [u8],
+    /// the first bytes of the next page as compiled (may be empty)
+    next: &'a [u8],
     page: u64,
     cache: HashMap<u16, Option<(Decoded, Op)>, std::hash::BuildHasherDefault<OffsetHasher>>,
 }
 impl Decoder<'_> {
     fn at(&mut self, offset: u16) -> Option<(Decoded, Op)> {
-        let (bytes, page) = (self.bytes, self.page);
+        let (bytes, next, page) = (self.bytes, self.next, self.page);
         *self.cache.entry(offset).or_insert_with(|| {
             let d =
                 decode::decode_with(GuestIp(page + offset as u64), ExecutionMode::Long64, |i| {
-                    bytes.get(offset as usize + i as usize).copied().ok_or(())
+                    let at = offset as usize + i as usize;
+                    if at < PAGE { bytes.get(at) } else { next.get(at - PAGE) }
+                        .copied()
+                        .ok_or(())
                 })
                 .ok()?;
+            // (at most 8 bytes in the next page: x64_page_straddle compares one word)
+            if offset as usize + d.length as usize > PAGE + 8 {
+                return None;
+            }
             Some((d, classify(&d)))
         })
     }
@@ -1295,14 +1403,23 @@ impl Decoder<'_> {
 /// wherever the page is mapped (gp::x64_page_linear), so every mapping of the
 /// same backing page shares it. Addresses below are relative to the page.
 /// `chaining`: leaving the page, tail-call the function serving the new page
-/// when the chaining table (pages::CHAIN) has it.
-pub fn compile(bytes: &[u8], entries: &[u16], chaining: bool, name: String) -> Option<Compiled> {
+/// when the chaining table (pages::CHAIN) has it. `next`: the first bytes of
+/// the next linear page where it was compiled, for instructions that
+/// straddle into it (empty: those are stepped).
+pub fn compile(
+    bytes: &[u8],
+    next: &[u8],
+    entries: &[u16],
+    chaining: bool,
+    name: String,
+) -> Option<Compiled> {
     let page = 0;
     if bytes.len() != PAGE || entries.is_empty() {
         return None;
     }
     let mut decoder = Decoder {
         bytes,
+        next,
         page,
         cache: HashMap::default(),
     };
@@ -1369,7 +1486,9 @@ pub fn compile(bytes: &[u8], entries: &[u16], chaining: bool, name: String) -> O
                     }
                     break;
                 },
-                Op::Movs { rep: true, .. } | Op::Stos { rep: true, .. } if o != start => {
+                Op::Movs { rep: true, .. } | Op::Stos { rep: true, .. } | Op::RepCompare { .. }
+                    if o != start =>
+                {
                     add(o as u64, &mut starts, &mut work);
                     break;
                 },
@@ -1398,7 +1517,8 @@ pub fn compile(bytes: &[u8], entries: &[u16], chaining: bool, name: String) -> O
         let mut o = start;
         let end = loop {
             if o as usize >= PAGE {
-                break End::Next(PAGE as u16);
+                // (past the page end after a straddling instruction)
+                break End::Next(o);
             }
             if o != start && starts.contains(&o) {
                 break End::Next(o);
@@ -1414,6 +1534,13 @@ pub fn compile(bytes: &[u8], entries: &[u16], chaining: bool, name: String) -> O
             let next = o + d.length as u16;
             let (reads, writes) = effects(&op);
             let liveness = if matches!(op, Op::Step) { 0 } else { reads };
+            let locked = cfg!(feature = "parallel") && locked_rmw(&d, &op);
+            let op = if locked && !lockable(&op) { Op::Step } else { op };
+            let straddle = (next as usize > PAGE).then(|| {
+                let count = next as usize - PAGE;
+                let word = (0..count).fold(0u64, |w, i| w | (decoder.next[i] as u64) << (8 * i));
+                (word, count as u8)
+            });
             insts.push(Inst {
                 d,
                 op,
@@ -1423,6 +1550,8 @@ pub fn compile(bytes: &[u8], entries: &[u16], chaining: bool, name: String) -> O
                 live_out: ARITH,
                 fused: None,
                 keep: false,
+                straddle,
+                locked: locked && !matches!(op, Op::Step),
             });
             match op {
                 Op::Jcc { .. } | Op::Step => break End::Next(next),
@@ -1556,7 +1685,11 @@ const BASE: usize = 29;
 /// results of the two halves of an SSE floating point operation (vfp)
 const FP0: usize = 30;
 const FP1: usize = 31;
-const LOCALS64: usize = 32;
+/// the value a locked instruction read (read_dst), for its compare-exchange
+const OLD: usize = 32;
+/// a value being stored (store: cores in workers)
+const SV: usize = 33;
+const LOCALS64: usize = 34;
 // i32 locals
 const FL: usize = 0;
 const N: usize = 1;
@@ -1574,7 +1707,11 @@ const FK: usize = 10;
 const CI: usize = 11;
 /// REP MOVS source host address (host() clobbers HH)
 const SRC: usize = 12;
-const LOCALS32: usize = 13;
+/// an SSE arithmetic lane was inexact (vfp)
+const INX: usize = 13;
+/// the host address of a store (store, load_any: cores in workers)
+const SH: usize = 14;
+const LOCALS32: usize = 15;
 const RAX: Reg = Reg {
     index: 0,
     high: false,
@@ -1607,6 +1744,8 @@ struct Emitter {
     current: usize,
     /// the module's access-cache lookup function (see access_function)
     access: Option<u32>,
+    /// the compare-exchange loop of a locked instruction (read_dst)
+    lock_loop: Option<Label>,
 }
 /// Dispatch through a table of 16-byte buckets and compares instead of a
 /// page-sized table (x64_page_set_bucket_dispatch).
@@ -1628,7 +1767,12 @@ static mut OUTLINE_ACCESS: bool = true;
 pub fn x64_page_set_outline(enabled: bool) { unsafe { OUTLINE_ACCESS = enabled } }
 
 impl Emitter {
-    fn emit(blocks: &[Block], index: &BTreeMap<u16, usize>, chaining: bool, name: String) -> Vec<u8> {
+    fn emit(
+        blocks: &[Block],
+        index: &BTreeMap<u16, usize>,
+        chaining: bool,
+        name: String,
+    ) -> Vec<u8> {
         let mut b = WasmBuilder::new();
         b.set_entry_result();
         b.set_function_name(name);
@@ -1646,6 +1790,7 @@ impl Emitter {
             labels: Vec::new(),
             current: 0,
             access: None,
+            lock_loop: None,
         };
         let mark = e.b.body_len();
         e.prologue();
@@ -1668,6 +1813,13 @@ impl Emitter {
         e.b.add_i32();
         e.b.get_local(&e.budget);
         e.b.geu_i32();
+        if cfg!(feature = "parallel") {
+            // (cores in workers: another core kicked this one, e.g. with an
+            // IPI; see parallel::kick)
+            e.c32(&raw const crate::cpu::cpu::core_yield as i32);
+            e.b.guest_load_u8(0);
+            e.b.or_i32();
+        }
         e.b.br_if(exit);
         e.g(RIP);
         e.g(BASE);
@@ -1941,6 +2093,11 @@ impl Emitter {
                 self.b.eq_i32();
                 self.b.and_i32();
             }
+            // nor when another core kicked this one
+            self.c32(&raw const crate::cpu::cpu::core_yield as i32);
+            self.b.guest_load_u8(0);
+            self.b.eqz_i32();
+            self.b.and_i32();
         }
         self.b.if_void();
         self.g(RIP);
@@ -2016,7 +2173,11 @@ impl Emitter {
         if unsafe { BLOCK_COUNT } {
             // (a block left early, by a retry or a step, counts the rest of
             // its instructions too: N bounds activations and feeds statistics)
-            let native = block.insts.iter().filter(|i| !matches!(i.op, Op::Step)).count();
+            let native = block
+                .insts
+                .iter()
+                .filter(|i| !matches!(i.op, Op::Step))
+                .count();
             if native != 0 {
                 self.gi(N);
                 self.c32(native as i32);
@@ -2162,7 +2323,8 @@ impl Emitter {
             "x64_page_access",
             Signature::new(&[WasmType::I64, WasmType::I32], &[WasmType::I32]),
         );
-        let mut c: Vec<u8> = vec![2, 1, op::TYPE_I64, 2, op::TYPE_I32];
+        // locals: tag (i64), entry, offset, host (i32)
+        let mut c: Vec<u8> = vec![2, 1, op::TYPE_I64, 3, op::TYPE_I32];
         let i32c = |c: &mut Vec<u8>, v: i32| {
             c.push(op::OP_I32CONST);
             write_leb_i32(c, v);
@@ -2190,15 +2352,41 @@ impl Emitter {
         i32c(&mut c, 4095);
         c.extend_from_slice(&[op::OP_I32AND, op::OP_SETLOCAL, 4]);
         // hit: tag matches and the access stays in the page
-        c.extend_from_slice(&[op::OP_GETLOCAL, 3, op::OP_I64LOAD, 3, 0, op::OP_GETLOCAL, 2, op::OP_I64EQ]);
+        c.extend_from_slice(&[
+            op::OP_GETLOCAL,
+            3,
+            op::OP_I64LOAD,
+            3,
+            0,
+            op::OP_GETLOCAL,
+            2,
+            op::OP_I64EQ,
+        ]);
         c.extend_from_slice(&[op::OP_GETLOCAL, 4]);
         i32c(&mut c, 4096);
         c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
         i32c(&mut c, 255);
         c.extend_from_slice(&[op::OP_I32AND, op::OP_I32SUB, op::OP_I32LEU, op::OP_I32AND]);
+        c.extend_from_slice(&[op::OP_IF, op::TYPE_I32]);
+        c.extend_from_slice(&[
+            op::OP_GETLOCAL,
+            3,
+            op::OP_I32LOAD,
+            2,
+            8,
+            op::OP_GETLOCAL,
+            4,
+            op::OP_I32ADD,
+        ]);
         if WasmBuilder::ATOMIC_GUEST_MEMORY {
-            // (cores in workers: natural alignment, min(size, 8))
-            c.extend_from_slice(&[op::OP_GETLOCAL, 4, op::OP_GETLOCAL, 1]);
+            // Cores in workers access guest memory with atomics, which need
+            // natural alignment (min(size, 8)). An unaligned read is copied
+            // with plain loads, then a fence (x86 orders it before later
+            // loads), to an aligned buffer (pages::BOUNCE) the caller reads.
+            // An unaligned write host is returned as it is when the caller
+            // stores unaligned itself (kind bit 9: host_store), else the
+            // slow path refuses it (retried).
+            c.extend_from_slice(&[op::OP_TEELOCAL, 5, op::OP_GETLOCAL, 1]);
             i32c(&mut c, 255);
             c.push(op::OP_I32AND);
             i32c(&mut c, 8);
@@ -2208,11 +2396,68 @@ impl Emitter {
             i32c(&mut c, 8);
             c.extend_from_slice(&[op::OP_I32LTU, op::OP_SELECT]);
             i32c(&mut c, 1);
-            c.extend_from_slice(&[op::OP_I32SUB, op::OP_I32AND, op::OP_I32EQZ, op::OP_I32AND]);
+            c.extend_from_slice(&[op::OP_I32SUB, op::OP_I32AND, op::OP_IF, op::TYPE_I32]);
+            c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 0x100);
+            c.extend_from_slice(&[op::OP_I32AND, op::OP_IF, op::TYPE_I32]);
+            // (a write whose code handles unaligned hosts, bit 9: store)
+            c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 0x200);
+            c.extend_from_slice(&[
+                op::OP_I32AND,
+                op::OP_IF,
+                op::TYPE_I32,
+                op::OP_GETLOCAL,
+                5,
+                op::OP_ELSE,
+            ]);
+            c.extend_from_slice(&[op::OP_GETLOCAL, 0, op::OP_GETLOCAL, 1, op::OP_CALL]);
+            write_leb_u32(&mut c, slow);
+            c.push(op::OP_END);
+            c.push(op::OP_ELSE);
+            let bounce = unsafe { super::pages::bounce_address() } as i32;
+            // (sizes 2, 4, 8, 16: the first 8 bytes or fewer, then the rest)
+            let copy = |c: &mut Vec<u8>, load: u8, store: u8, align: u8, offset: u32| {
+                i32c(c, bounce);
+                c.extend_from_slice(&[op::OP_GETLOCAL, 5, load, 0]);
+                write_leb_u32(c, offset);
+                c.extend_from_slice(&[store, align]);
+                write_leb_u32(c, offset);
+            };
+            c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 255);
+            c.push(op::OP_I32AND);
+            i32c(&mut c, 4);
+            c.extend_from_slice(&[op::OP_I32LTU, op::OP_IF, op::TYPE_VOID_BLOCK]);
+            copy(&mut c, op::OP_I32LOAD16U, op::OP_I32STORE16, 1, 0);
+            c.push(op::OP_ELSE);
+            c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 255);
+            c.push(op::OP_I32AND);
+            i32c(&mut c, 4);
+            c.extend_from_slice(&[op::OP_I32EQ, op::OP_IF, op::TYPE_VOID_BLOCK]);
+            copy(&mut c, op::OP_I32LOAD, op::OP_I32STORE, 2, 0);
+            c.push(op::OP_ELSE);
+            copy(&mut c, op::OP_I64LOAD, op::OP_I64STORE, 3, 0);
+            c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 255);
+            c.push(op::OP_I32AND);
+            i32c(&mut c, 16);
+            c.extend_from_slice(&[op::OP_I32EQ, op::OP_IF, op::TYPE_VOID_BLOCK]);
+            copy(&mut c, op::OP_I64LOAD, op::OP_I64STORE, 3, 8);
+            c.extend_from_slice(&[op::OP_END, op::OP_END, op::OP_END]);
+            c.extend_from_slice(&[0xFE, 0x03, 0x00]); // atomic.fence
+            i32c(&mut c, bounce);
+            c.extend_from_slice(&[op::OP_END, op::OP_ELSE, op::OP_GETLOCAL, 5, op::OP_END]);
         }
-        c.extend_from_slice(&[op::OP_IF, op::TYPE_I32]);
-        c.extend_from_slice(&[op::OP_GETLOCAL, 3, op::OP_I32LOAD, 2, 8, op::OP_GETLOCAL, 4, op::OP_I32ADD]);
-        c.extend_from_slice(&[op::OP_ELSE, op::OP_GETLOCAL, 0, op::OP_GETLOCAL, 1, op::OP_CALL]);
+        c.extend_from_slice(&[
+            op::OP_ELSE,
+            op::OP_GETLOCAL,
+            0,
+            op::OP_GETLOCAL,
+            1,
+            op::OP_CALL,
+        ]);
         write_leb_u32(&mut c, slow);
         c.extend_from_slice(&[op::OP_END, op::OP_END]);
         let f = self.b.add_internal_function(
@@ -2222,11 +2467,28 @@ impl Emitter {
         self.access = Some(f);
         f
     }
+    /// The host address of a store or read-modify-write of `size` bytes at
+    /// ADDR (else a retry). With cores in workers it may be unaligned:
+    /// store() and load_any() handle that.
+    fn host_store(&mut self, size: u32, start: u64) {
+        if WasmBuilder::ATOMIC_GUEST_MEMORY && unsafe { OUTLINE_ACCESS } && size > 1 {
+            self.host_kind(size, 0x300, start, self.f().retry)
+        }
+        else {
+            self.host(size, true, start)
+        }
+    }
     fn host_or(&mut self, size: u32, write: bool, start: u64, fallback: Label) {
+        self.host_kind(size, (write as u32) << 8, start, fallback)
+    }
+    /// host_or() with the lookup's kind bits (write: 0x100, unaligned write
+    /// hosts accepted: 0x200; outlined lookups only)
+    fn host_kind(&mut self, size: u32, bits: u32, start: u64, fallback: Label) {
+        let write = bits & 0x100 != 0;
         if unsafe { OUTLINE_ACCESS } {
             let f = self.access_function();
             self.g(ADDR);
-            self.c32(size as i32 | (write as i32) << 8);
+            self.c32((size | bits) as i32);
             self.b.call_internal(f);
             self.ti(HH);
             self.b.eqz_i32();
@@ -2296,7 +2558,62 @@ impl Emitter {
         self.b.block_end();
     }
     fn load(&mut self, width: u8) { self.b.guest_load_i64_bits(width as u32, 0); }
-    fn store(&mut self, width: u8) { self.b.guest_store_i64_bits(width as u32, 0); }
+    /// [host, value] -> []. With cores in workers, an unaligned host (see
+    /// host_store) is a plain store after a fence (x86 orders it after the
+    /// accesses before it), as the interpreter does.
+    fn store(&mut self, width: u8) {
+        if !WasmBuilder::ATOMIC_GUEST_MEMORY || width == 8 {
+            return self.b.guest_store_i64_bits(width as u32, 0);
+        }
+        self.s(SV);
+        self.ti(SH);
+        self.c32(width as i32 / 8 - 1);
+        self.b.and_i32();
+        self.b.if_void();
+        self.b.guest_fence();
+        self.gi(SH);
+        self.g(SV);
+        self.b.memory_op(
+            match width {
+                16 => op::OP_I64STORE16,
+                32 => op::OP_I64STORE32,
+                _ => op::OP_I64STORE,
+            },
+            op::MEM_NO_ALIGN,
+            0,
+        );
+        self.b.else_();
+        self.gi(SH);
+        self.g(SV);
+        self.b.guest_store_i64_bits(width as u32, 0);
+        self.b.block_end();
+    }
+    /// load() from a host of host_store: [host] -> [value]; unaligned (cores
+    /// in workers) a plain load, then a fence
+    fn load_any(&mut self, width: u8) {
+        if !WasmBuilder::ATOMIC_GUEST_MEMORY || width == 8 {
+            return self.load(width);
+        }
+        self.ti(SH);
+        self.c32(width as i32 / 8 - 1);
+        self.b.and_i32();
+        self.b.if_i64();
+        self.gi(SH);
+        self.b.memory_op(
+            match width {
+                16 => op::OP_I64LOAD16U,
+                32 => op::OP_I64LOAD32U,
+                _ => op::OP_I64LOAD,
+            },
+            op::MEM_NO_ALIGN,
+            0,
+        );
+        self.b.guest_fence();
+        self.b.else_();
+        self.gi(SH);
+        self.load(width);
+        self.b.block_end();
+    }
     /// Push the (zero-extended) value of a source operand.
     fn read(&mut self, o: Opnd, width: u8, inst: &Inst) {
         match o {
@@ -2314,18 +2631,68 @@ impl Emitter {
     /// first when `write` (its host address stays in HOST).
     fn read_dst(&mut self, o: Opnd, width: u8, write: bool, inst: &Inst) {
         match o {
+            Opnd::Mem(a) if inst.locked => {
+                self.address(&a, inst.d.next.0, true);
+                self.s(ADDR);
+                self.host(width as u32 / 8, true, inst.d.start.0);
+                self.si(HOST);
+                self.locked_load(width);
+            },
+            Opnd::Mem(a) if write => {
+                self.address(&a, inst.d.next.0, true);
+                self.s(ADDR);
+                self.host_store(width as u32 / 8, inst.d.start.0);
+                self.ti(HOST);
+                self.load_any(width);
+            },
             Opnd::Mem(a) => {
                 self.address(&a, inst.d.next.0, true);
                 self.s(ADDR);
-                self.host(width as u32 / 8, write, inst.d.start.0);
+                self.host(width as u32 / 8, false, inst.d.start.0);
                 self.ti(HOST);
                 self.load(width);
             },
             _ => self.read(o, width, inst),
         }
     }
+    /// A locked instruction (cores in workers) with its operand's host
+    /// address in HOST: from here to write_dst is a loop that computes from
+    /// the value read, and commits with a compare-exchange; it starts over
+    /// when another core changed the operand meanwhile. Pushes the value.
+    fn locked_load(&mut self, width: u8) {
+        debug_assert!(self.lock_loop.is_none());
+        self.lock_loop = Some(self.b.loop_void());
+        self.gi(HOST);
+        self.load(width);
+        self.s(OLD);
+        self.g(OLD);
+    }
+    /// The locked instruction's write: [] -> [], leaves the loop when the
+    /// compare-exchange found the value read. It commits as the
+    /// interpreter's does (x64_page_lock_commit: never interleaved with a
+    /// split locked operation on the same bytes).
+    fn locked_store(&mut self, width: u8, value: usize) {
+        let again = self.lock_loop.take().unwrap();
+        self.gi(HOST);
+        self.g(OLD);
+        self.g(value);
+        self.c32(width as i32 / 8);
+        self.b.call_signature(
+            "x64_page_lock_commit",
+            Signature::new(
+                &[WasmType::I32, WasmType::I64, WasmType::I64, WasmType::I32],
+                &[WasmType::I32],
+            ),
+        );
+        self.b.eqz_i32();
+        self.b.br_if(again);
+        self.b.block_end();
+    }
     /// Store local `value` to a destination read by read_dst.
     fn write_dst(&mut self, o: Opnd, width: u8, value: usize) {
+        if self.lock_loop.is_some() {
+            return self.locked_store(width, value);
+        }
         match o {
             Opnd::Reg(r) => {
                 self.g(value);
@@ -2343,7 +2710,7 @@ impl Emitter {
     fn prepare_store(&mut self, a: &AddressExpr, width: u8, inst: &Inst) {
         self.address(a, inst.d.next.0, true);
         self.s(ADDR);
-        self.host(width as u32 / 8, true, inst.d.start.0);
+        self.host_store(width as u32 / 8, inst.d.start.0);
         self.si(HOST);
     }
     fn mask_to(&mut self, width: u8) {
@@ -2697,13 +3064,30 @@ impl Emitter {
         let before = self.b.body_len();
         self.instruction_inner(inst, index);
         let name = format!("{:?}", inst.op);
-        let name = name.split([' ', '{', '(']).next().unwrap_or("?").to_string();
+        let name = name
+            .split([' ', '{', '('])
+            .next()
+            .unwrap_or("?")
+            .to_string();
         size_note(name, self.b.body_len() - before);
     }
     fn instruction_inner(&mut self, inst: &Inst, index: &BTreeMap<u16, usize>) {
         let start = inst.d.start.0;
         let next = inst.d.next.0;
         let need = inst.writes & inst.live_out;
+        if let (Some((word, count)), false) = (inst.straddle, matches!(inst.op, Op::Step)) {
+            // the next page still fetches as compiled, else step it
+            self.c64(word);
+            self.c32(count as i32);
+            self.b.call_signature(
+                "x64_page_straddle",
+                Signature::new(&[WasmType::I64, WasmType::I32], &[WasmType::I32]),
+            );
+            self.b.eqz_i32();
+            self.b.if_void();
+            self.leave_to(self.f().step, start);
+            self.b.block_end();
+        }
         match inst.op {
             Op::Step => {
                 self.leave_to(self.f().step, start);
@@ -2887,6 +3271,45 @@ impl Emitter {
                 self.shift_cl(inst, code, width, dst, inst.writes);
                 self.written(inst.writes);
             },
+            Op::ShiftCall {
+                code,
+                width,
+                dst,
+                count,
+            } => {
+                self.materialize_if(ARITH);
+                self.read_dst(dst, width, true, inst);
+                self.s(TA);
+                self.g(TA);
+                match count {
+                    Some(count) => self.c32(count as i32),
+                    None => {
+                        self.g(1);
+                        self.b.wrap_i64_to_i32();
+                    },
+                }
+                self.gi(FL);
+                self.c32(code as i32 | (width as i32) << 8);
+                self.b.call_signature(
+                    "x64_page_shift",
+                    Signature::new(
+                        &[WasmType::I64, WasmType::I32, WasmType::I32, WasmType::I32],
+                        &[WasmType::I64],
+                    ),
+                );
+                self.s(TV);
+                self.g(TV);
+                self.c64(0xFFFF_FFFF);
+                self.b.and_i64();
+                self.s(TR);
+                self.write_dst(dst, width, TR);
+                self.g(TV);
+                self.c64(32);
+                self.b.shr_u_i64();
+                self.b.wrap_i64_to_i32();
+                self.si(FL);
+                self.written(ARITH);
+            },
             Op::Imul { width, dst, a, b } => {
                 self.read(a, width, inst);
                 self.s(TA);
@@ -2915,12 +3338,12 @@ impl Emitter {
                 if need != 0 {
                     self.flags_begin(need);
                     if width == 64 {
-                        self.g(TA);
-                        self.g(TB);
-                        self.b.call_signature(
-                            "x64_page_imul_overflow",
-                            Signature::new(&[WasmType::I64, WasmType::I64], &[WasmType::I32]),
-                        );
+                        // the high half is not the sign extension of the low
+                        self.mul_high(TA, TB, true);
+                        self.g(TR);
+                        self.c64(63);
+                        self.b.shr_s_i64();
+                        self.b.ne_i64();
                     }
                     else {
                         self.g(TR);
@@ -2946,16 +3369,7 @@ impl Emitter {
                     self.g(TB);
                     self.b.mul_i64();
                     self.s(TR);
-                    self.g(TA);
-                    self.g(TB);
-                    self.c32(signed as i32);
-                    self.b.call_signature(
-                        "x64_page_mul_high",
-                        Signature::new(
-                            &[WasmType::I64, WasmType::I64, WasmType::I32],
-                            &[WasmType::I64],
-                        ),
-                    );
+                    self.mul_high(TA, TB, signed);
                     self.s(TV);
                 }
                 else {
@@ -3205,6 +3619,21 @@ impl Emitter {
                 self.b.eq_i64();
                 self.si(COND);
                 match dst {
+                    Opnd::Mem(_) if inst.locked => {
+                        // (unequal: the value read is written back, no change)
+                        self.get_reg(src, width);
+                        self.g(TB);
+                        self.gi(COND);
+                        self.b.select();
+                        self.s(TV);
+                        self.locked_store(width, TV);
+                        self.gi(COND);
+                        self.b.eqz_i32();
+                        self.b.if_void();
+                        self.g(TB);
+                        self.set_reg(RAX, width);
+                        self.b.block_end();
+                    },
                     Opnd::Mem(_) => {
                         // the memory operand is always written
                         self.gi(HOST);
@@ -3274,8 +3703,14 @@ impl Emitter {
                         }
                         self.s(ADDR);
                         self.host(width as u32 / 8, action != 0, start);
-                        self.ti(HOST);
-                        self.load(width);
+                        if inst.locked {
+                            self.si(HOST);
+                            self.locked_load(width);
+                        }
+                        else {
+                            self.ti(HOST);
+                            self.load(width);
+                        }
                         self.s(TA);
                     },
                     Opnd::Imm(_) => unreachable!(),
@@ -3517,6 +3952,7 @@ impl Emitter {
                 self.set_reg(RDX, 32);
             },
             Op::Div { signed, width, src } => self.divide(inst, signed, width, src),
+            Op::RepCompare { width, scan, equal } => self.rep_compare(inst, width, scan, equal),
             Op::Movs { width, rep } | Op::Stos { width, rep } => {
                 self.string(inst, matches!(inst.op, Op::Movs { .. }), width, rep)
             },
@@ -3712,8 +4148,12 @@ impl Emitter {
                     self.b.simd_zero();
                     let mut lanes = [16; 16];
                     for (k, lane) in lanes.iter_mut().enumerate() {
-                        let index =
-                            if kind == 3 { k as i32 + count as i32 } else { k as i32 - count as i32 };
+                        let index = if kind == 3 {
+                            k as i32 + count as i32
+                        }
+                        else {
+                            k as i32 - count as i32
+                        };
                         if (0..16).contains(&index) {
                             *lane = index as u8;
                         }
@@ -3978,15 +4418,18 @@ impl Emitter {
         src: Xmm,
     ) {
         self.sse_check(start);
-        // (DAZ and FTZ change nothing for the operands and results below)
+        // (DAZ and FTZ change nothing for the operands and results below;
+        // the exception flags other than PE are never set by them)
         self.b.load_fixed_i32(gp::mxcsr as u32);
-        self.c32(0x7FA0);
+        self.c32(0x7F80);
         self.b.and_i32();
-        self.c32(0x1FA0);
+        self.c32(0x1F80);
         self.b.ne_i32();
         self.b.if_void();
         self.leave_to(self.f().retry, start);
         self.b.block_end();
+        self.c32(0);
+        self.si(INX);
         let bits = if packed {
             128
         }
@@ -4051,6 +4494,15 @@ impl Emitter {
         self.gi(COND);
         self.b.if_void();
         self.leave_to(self.f().retry, start);
+        self.b.block_end();
+        // an inexact result sets PE (sticky)
+        self.gi(INX);
+        self.b.if_void();
+        self.c32(gp::mxcsr as i32);
+        self.b.load_fixed_i32(gp::mxcsr as u32);
+        self.c32(0x20);
+        self.b.or_i32();
+        self.b.store_aligned_i32(0);
         self.b.block_end();
         self.g(FP0);
         self.xmm_store(dst, 0, if packed || double { 64 } else { 32 }, true);
@@ -4154,6 +4606,172 @@ impl Emitter {
         self.b.eqz_i32();
         self.b.and_i32();
         self.fp_refuse();
+        self.fp_inexact(code, double);
+        self.gi(INX);
+        self.b.or_i32();
+        self.si(INX);
+    }
+    /// Push i32 1 when the lane's result (TR) is not the exact result of the
+    /// operation on TA and TB (sets MXCSR.PE), for the operands and results
+    /// fp_lane admits. Single precision: the operation is exact in double
+    /// (TwoSum for ADD/SUB). Double: TwoSum, and Dekker's TwoProduct for MUL
+    /// (and DIV: the product of quotient and divisor is the dividend), which
+    /// refuse extreme exponents where its terms would overflow or underflow.
+    fn fp_inexact(&mut self, code: u8, double: bool) {
+        let value = |e: &mut Self, i: usize| {
+            e.g(i);
+            if double {
+                e.b.reinterpret_i64_as_f64();
+            }
+            else {
+                e.b.wrap_i64_to_i32();
+                e.b.reinterpret_i32_as_f32();
+                e.b.promote_f32_to_f64();
+            }
+        };
+        value(self, TA);
+        let x = self.b.set_new_local_f64();
+        value(self, TB);
+        if code == 0x5C {
+            self.b.unary_f64(true);
+        }
+        let y = self.b.set_new_local_f64();
+        value(self, TR);
+        let r = self.b.set_new_local_f64();
+        let f = |e: &mut Self, l: &crate::wasmgen::wasm_builder::WasmLocalF64| e.b.get_local_f64(l);
+        match (code, double) {
+            (0x58 | 0x5C, _) => {
+                // TwoSum: s = x + y, err = (x - (s - bb)) + (y - bb), bb = s - x
+                f(self, &x);
+                f(self, &y);
+                self.b.arithmetic_f64(0);
+                let s = self.b.set_new_local_f64();
+                f(self, &s);
+                f(self, &x);
+                self.b.arithmetic_f64(1);
+                let bb = self.b.set_new_local_f64();
+                f(self, &x);
+                f(self, &s);
+                f(self, &bb);
+                self.b.arithmetic_f64(1);
+                self.b.arithmetic_f64(1);
+                f(self, &y);
+                f(self, &bb);
+                self.b.arithmetic_f64(1);
+                self.b.arithmetic_f64(0);
+                self.b.const_f64(0.0);
+                self.b.ne_f64();
+                f(self, &s);
+                f(self, &r);
+                self.b.ne_f64();
+                self.b.or_i32();
+                self.b.free_local_f64(s);
+                self.b.free_local_f64(bb);
+            },
+            (0x59, false) => {
+                f(self, &x);
+                f(self, &y);
+                self.b.arithmetic_f64(2);
+                f(self, &r);
+                self.b.ne_f64();
+            },
+            (_, false) => {
+                f(self, &r);
+                f(self, &y);
+                self.b.arithmetic_f64(2);
+                f(self, &x);
+                self.b.ne_f64();
+            },
+            (_, true) => {
+                // TwoProduct of (a, b) = (x, y) for MUL, (r, y) for DIV;
+                // exact when the error term is 0 (and, for DIV, the product
+                // is the dividend). Refused: an operand or the result (not
+                // zero) outside 2^-450..2^450, where splitting could overflow
+                // or the error terms lose bits to underflow.
+                for i in [TA, TB, TR] {
+                    self.g(i);
+                    self.c64(52);
+                    self.b.shr_u_i64();
+                    self.c64(0x7FF);
+                    self.b.and_i64();
+                    self.c64(0x3FF - 450);
+                    self.b.sub_i64();
+                    self.c64(900);
+                    self.b.gtu_i64();
+                    self.g(i);
+                    self.c64(0x7FFF_FFFF_FFFF_FFFF);
+                    self.b.and_i64();
+                    self.c64(0);
+                    self.b.ne_i64();
+                    self.b.and_i32();
+                    self.fp_refuse();
+                }
+                let (a, p) = if code == 0x59 { (&x, &r) } else { (&r, &x) };
+                let split = |e: &mut Self, v: &crate::wasmgen::wasm_builder::WasmLocalF64| {
+                    // hi = c - (c - v), c = v * (2^27 + 1); lo = v - hi
+                    e.b.const_f64(134217729.0);
+                    f(e, v);
+                    e.b.arithmetic_f64(2);
+                    let c = e.b.set_new_local_f64();
+                    f(e, &c);
+                    f(e, &c);
+                    f(e, v);
+                    e.b.arithmetic_f64(1);
+                    e.b.arithmetic_f64(1);
+                    let hi = e.b.set_new_local_f64();
+                    f(e, v);
+                    f(e, &hi);
+                    e.b.arithmetic_f64(1);
+                    let lo = e.b.set_new_local_f64();
+                    e.b.free_local_f64(c);
+                    (hi, lo)
+                };
+                let (ah, al) = split(self, a);
+                let (bh, bl) = split(self, &y);
+                // product = a * b rounded (MUL: the result; DIV: computed)
+                if code == 0x59 {
+                    f(self, &r);
+                }
+                else {
+                    f(self, a);
+                    f(self, &y);
+                    self.b.arithmetic_f64(2);
+                }
+                let product = self.b.set_new_local_f64();
+                // err = ((ah*bh - product) + ah*bl + al*bh) + al*bl
+                f(self, &ah);
+                f(self, &bh);
+                self.b.arithmetic_f64(2);
+                f(self, &product);
+                self.b.arithmetic_f64(1);
+                f(self, &ah);
+                f(self, &bl);
+                self.b.arithmetic_f64(2);
+                self.b.arithmetic_f64(0);
+                f(self, &al);
+                f(self, &bh);
+                self.b.arithmetic_f64(2);
+                self.b.arithmetic_f64(0);
+                f(self, &al);
+                f(self, &bl);
+                self.b.arithmetic_f64(2);
+                self.b.arithmetic_f64(0);
+                self.b.const_f64(0.0);
+                self.b.ne_f64();
+                if code != 0x59 {
+                    f(self, &product);
+                    f(self, p);
+                    self.b.ne_f64();
+                    self.b.or_i32();
+                }
+                for l in [ah, al, bh, bl, product] {
+                    self.b.free_local_f64(l);
+                }
+            },
+        }
+        self.b.free_local_f64(x);
+        self.b.free_local_f64(y);
+        self.b.free_local_f64(r);
     }
     fn fp_refuse(&mut self) {
         self.gi(COND);
@@ -4904,6 +5522,183 @@ impl Emitter {
         self.s(7);
         self.c64(0);
         self.s(1);
+        self.b.block_end();
+    }
+    /// Push the high 64 bits of the 128-bit product of i64 locals `a` and
+    /// `b` (signed or unsigned), from 32-bit halves (TC and TX are scratch).
+    fn mul_high(&mut self, a: usize, b: usize, signed: bool) {
+        let half = |e: &mut Self, l: usize, high: bool| {
+            e.g(l);
+            if high {
+                e.c64(32);
+                e.b.shr_u_i64();
+            }
+            else {
+                e.c64(0xFFFF_FFFF);
+                e.b.and_i64();
+            }
+        };
+        // TC = lo(a) * lo(b) >> 32
+        half(self, a, false);
+        half(self, b, false);
+        self.b.mul_i64();
+        self.c64(32);
+        self.b.shr_u_i64();
+        self.s(TC);
+        // TX = hi(a) * lo(b) + TC (no carry out of 64 bits)
+        half(self, a, true);
+        half(self, b, false);
+        self.b.mul_i64();
+        self.g(TC);
+        self.b.add_i64();
+        self.s(TX);
+        // TC = lo(a) * hi(b) + lo(TX)
+        half(self, a, false);
+        half(self, b, true);
+        self.b.mul_i64();
+        half(self, TX, false);
+        self.b.add_i64();
+        self.s(TC);
+        // hi(a) * hi(b) + hi(TX) + hi(TC)
+        half(self, a, true);
+        half(self, b, true);
+        self.b.mul_i64();
+        half(self, TX, true);
+        self.b.add_i64();
+        half(self, TC, true);
+        self.b.add_i64();
+        if signed {
+            // minus b when a is negative, minus a when b is negative
+            for (x, y) in [(a, b), (b, a)] {
+                self.g(x);
+                self.c64(63);
+                self.b.shr_s_i64();
+                self.g(y);
+                self.b.and_i64();
+                self.b.sub_i64();
+            }
+        }
+    }
+    /// REPE/REPNE CMPS or SCAS inside one page per operand, forward: one
+    /// loop over the elements, EFLAGS of the last comparison; anything else
+    /// is stepped (the step dispatches back here to continue).
+    fn rep_compare(&mut self, inst: &Inst, width: u8, scan: bool, equal: bool) {
+        let start = inst.d.start.0;
+        let size = width as u64 / 8;
+        self.materialize_if(ARITH);
+        // RCX = 0: nothing happens
+        self.g(1);
+        self.b.op(op::OP_I64EQZ);
+        self.b.eqz_i32();
+        self.b.if_void();
+        self.gi(FL);
+        self.c32(0x400);
+        self.b.and_i32();
+        self.g(1);
+        self.c64(4096 / size);
+        self.b.op(op::OP_I64GTU);
+        self.b.or_i32();
+        self.step_if(start);
+        // at most this many bytes, within 4096
+        self.g(1);
+        self.c64(size);
+        self.b.mul_i64();
+        self.b.wrap_i64_to_i32();
+        self.si(COND);
+        for register in if scan { [7].as_slice() } else { [6, 7].as_slice() } {
+            self.g(*register);
+            self.b.wrap_i64_to_i32();
+            self.c32(4095);
+            self.b.and_i32();
+            self.gi(COND);
+            self.b.add_i32();
+            self.c32(4096);
+            self.b.gtu_i32();
+            self.step_if(start);
+        }
+        if !scan {
+            self.g(6);
+            self.s(ADDR);
+            self.host_or(1, false, start, self.f().step);
+            self.si(SRC);
+        }
+        self.g(7);
+        self.s(ADDR);
+        self.host_or(1, false, start, self.f().step);
+        self.si(HOST);
+        // (the elements are plain loads, ordered as a whole by a fence with
+        // cores in workers; any alignment)
+        let plain = |e: &mut Self, base: usize| {
+            e.gi(base);
+            e.gi(ENT);
+            e.b.add_i32();
+            e.b.memory_op(
+                match width {
+                    8 => op::OP_I64LOAD8U,
+                    16 => op::OP_I64LOAD16U,
+                    32 => op::OP_I64LOAD32U,
+                    _ => op::OP_I64LOAD,
+                },
+                op::MEM_NO_ALIGN,
+                0,
+            );
+        };
+        if scan {
+            self.get_reg(RAX, width);
+            self.s(TA);
+        }
+        self.c32(0);
+        self.si(ENT);
+        let again = self.b.loop_void();
+        if !scan {
+            plain(self, SRC);
+            self.s(TA);
+        }
+        plain(self, HOST);
+        self.s(TB);
+        self.gi(ENT);
+        self.c32(size as i32);
+        self.b.add_i32();
+        self.si(ENT);
+        self.g(TA);
+        self.g(TB);
+        if equal {
+            self.b.eq_i64();
+        }
+        else {
+            self.b.ne_i64();
+        }
+        self.gi(ENT);
+        self.gi(COND);
+        self.b.ltu_i32();
+        self.b.and_i32();
+        self.b.br_if(again);
+        self.b.block_end();
+        self.b.guest_fence();
+        // elements done: RCX, RSI, RDI
+        self.gi(ENT);
+        self.b.extend_unsigned_i32_to_i64();
+        self.s(TX);
+        self.g(1);
+        self.g(TX);
+        self.c64(size.trailing_zeros() as u64);
+        self.b.shr_u_i64();
+        self.b.sub_i64();
+        self.s(1);
+        for register in if scan { [7].as_slice() } else { [6, 7].as_slice() } {
+            self.g(*register);
+            self.g(TX);
+            self.b.add_i64();
+            self.s(*register);
+        }
+        // EFLAGS: the last comparison
+        self.g(TA);
+        self.g(TB);
+        self.b.sub_i64();
+        self.mask_to(width);
+        self.s(TR);
+        self.alu_flags(7, width, 0);
+        self.record(7, width, ARITH, 0, inst);
         self.b.block_end();
     }
     fn compare_exchange(&mut self, inst: &Inst, wide: bool, address: &AddressExpr) {

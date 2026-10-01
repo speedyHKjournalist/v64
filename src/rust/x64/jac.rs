@@ -126,6 +126,19 @@ unsafe fn retire_writes(retire: impl Fn(&Entry) -> bool) {
         }
     }
 }
+/// With cores in workers: another core published code from the RAM backing
+/// page `backing` (crate::parallel::code::poll). Only `core` (this
+/// instance's) has entries; its read entries and chaining stay valid.
+pub unsafe fn retire_writes_on(core: usize, backing: u32) {
+    let host = (memory::mem8 as u32).wrapping_add(backing);
+    for table in JAC[core].tables[2..].iter_mut() {
+        for entry in table.iter_mut() {
+            if entry.tag != 0 && entry.host == host {
+                entry.tag = 0;
+            }
+        }
+    }
+}
 /// Write entries of device memory (a frame buffer) mark their page dirty
 /// when they are filled. Once the device has taken its written pages, the
 /// next write must mark them again.

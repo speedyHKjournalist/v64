@@ -173,9 +173,10 @@ export const STATICS = {
     // (IOAPIC_LOCK guards it while cores run in workers; UNUSED stands in for it in the normal build)
     "cpu/ioapic.rs": { IOAPIC: "machine", IOAPIC_LOCK: "machine", UNUSED: "machine" },
     "cpu/instructions_0f.rs": { X64_TEST_CAPABILITIES: "machine", X64_ARCH_CAPABILITIES: "machine" },
-    "cpu/memory.rs": { mem8: "machine", vga_mem8: "machine", vga_memory_size: "machine", ram_fast_limit: "machine" },
+    "cpu/memory.rs": { mem8: "machine", ram_fast_limit: "machine" },
+    // device memory regions (frame buffers) and where they are mapped
+    "cpu/mmio_ram.rs": { TABLE: "machine" },
     "cpu/pic.rs": { PIC: "machine" },
-    "cpu/vga.rs": { dest_buffer: "machine", dirty_bitmap: "machine" },
     "ir/debug.rs": { AUDIT: "debug", RECORDS: "debug" },
     "ir/frontend/encodings.rs": { ENCODINGS: "machine", OPCODES: "machine" },
     "ir/runtime/cache.rs": {
@@ -216,6 +217,7 @@ export const STATICS = {
         OWNERS: "machine", OWNER_PAGES: "machine", PUBLISH_NEXT: "machine", PUBLISHED: "machine",
         INVALIDATE_NEXT: "machine", INVALIDATED: "machine", ACKED: "machine", IDLE: "machine",
         REFUSED: "debug", PUBLISH_SEEN: "cache", INVALIDATE_SEEN: "cache", CLAIMED: "cache",
+        KICKS: "debug",
     },
     "profiler.rs": Object.fromEntries([
         "PERFORMANCE_BATCH_CHUNKS", "PERFORMANCE_CODEGEN", "PERFORMANCE_COUNTDOWN", "PERFORMANCE_COUNTERS", "PERFORMANCE_EXECUTION",
@@ -240,7 +242,9 @@ export const STATICS = {
     "x64/pages.rs": { RUNTIME: "machine", FAST: "machine", ACTIVE: "scratch", CODE_WRITES: "machine", STEPS: "debug", ACCESS_REFUSED: "debug", STEP_PROFILE: "debug",
         // per core, tagged with that core's access cache epoch
         CODE_TLB: "cache", CHAIN: "cache",
-        COUNTERS: "debug", CHAINING: "machine", LAST_UNSERVED: "cache", BOUNCE: "scratch", RECOMPILE_MISSES: "machine", TIMING: "debug", TIME_IN_CALLS: "debug", TIME_IN_EXECUTE: "debug", TIME_FIRST_CALLS: "debug", BYTES_COMPILED: "debug" },
+        COUNTERS: "debug", CHAINING: "machine", LAST_UNSERVED: "cache", BOUNCE: "scratch", RECOMPILE_MISSES: "machine", TIMING: "debug", TIME_IN_CALLS: "debug", TIME_IN_EXECUTE: "debug", TIME_FIRST_CALLS: "debug", BYTES_COMPILED: "debug",
+        // (step profile: stepped instructions by RIP)
+        STEP_RIPS: "debug", SORTED: "debug" },
     // derived from each core's x64 TLB (flushed with it); FRAME_BUFFER_WRITES:
     // some entry maps the VGA frame buffer
     "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache" },

@@ -3,6 +3,7 @@ import { LOG_DISK } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 import { CMOS_BIOS_DISKTRANSFLAG, CMOS_DISK_DATA, CMOS_DISK_DRIVE1_CYL, CMOS_DISK_DRIVE1_TYPE, CMOS_DISK_DRIVE2_CYL, CMOS_DISK_DRIVE2_TYPE } from "./rtc.js";
+import { QEMU_PCI_SUBSYSTEM, pci_functions } from "./platform.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
@@ -319,7 +320,8 @@ export function IDEController(cpu, bus, ide_config)
         const control_base1 = has_secondary ? this.secondary.control_base : 0;
 
         this.name = "ide";
-        this.pci_id = 0x1E << 3;
+        this.pci_id = pci_functions(cpu.platform).ide;
+        const subsystem = cpu.platform.qemu_compatible ? QEMU_PCI_SUBSYSTEM : [0x43, 0x10, 0xD4, 0x82];
         this.pci_space = [
             vendor_id & 0xFF, vendor_id >> 8, device_id & 0xFF, device_id >> 8, 0x05, 0x00, 0xA0, 0x02,
             0x00, prog_if, subclass, class_code, 0x00, 0x00, 0x00, 0x00,
@@ -330,7 +332,7 @@ export function IDEController(cpu, bus, ide_config)
             BUS_MASTER_BASE & 0xFF | 1, BUS_MASTER_BASE >> 8, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
-            0x43, 0x10, 0xD4, 0x82,
+            ...subsystem,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, interrupt_line, 0x01, 0x00, 0x00,
             // 0x40
@@ -1598,17 +1600,11 @@ IDEInterface.prototype.atapi_handle = function()
                 0x05, 0x80, 0x01, 0x31,
                 // 4: Additional length, Reserved, Reserved, Reserved
                 31, 0, 0, 0,
-                // 8: Vendor Identification "SONY    "
-                0x53, 0x4F, 0x4E, 0x59,
-                0x20, 0x20, 0x20, 0x20,
-                // 16: Product Identification "CD-ROM CDU-1000 "
-                0x43, 0x44, 0x2D, 0x52,
-                0x4F, 0x4D, 0x20, 0x43,
-                0x44, 0x55, 0x2D, 0x31,
-                0x30, 0x30, 0x30, 0x20,
-                // 32: Product Revision Level "1.1a"
-                0x31, 0x2E, 0x31, 0x61,
             ]);
+            // 8: Vendor Identification, 16: Product Identification,
+            // 32: Product Revision Level (QEMU's with platform.qemu_compatible)
+            [...this.cpu.platform.qemu_compatible ? "QEMU    QEMU DVD-ROM    2.5+" : "SONY    CD-ROM CDU-1000 1.1a"]
+                .forEach((c, i) => { this.data[8 + i] = c.charCodeAt(0); });
             this.data_end = this.data_length = Math.min(36, length);
             break;
 
@@ -2760,12 +2756,15 @@ IDEInterface.prototype.create_identify_packet = function()
         sector_count_high & 0xFF, sector_count_high >> 8 & 0xFF, 0, 0,
     ]);
 
+    // (QEMU's with platform.qemu_compatible: Windows names a drive after them)
+    const qemu = this.cpu.platform.qemu_compatible;
+    // (padded with spaces, as QEMU's are: strcpy_be16 does not pad)
     // 10-19 serial number
-    strcpy_be16(this.data, 10, 10, `8086-86${this.channel_nr}${this.interface_nr}`);
+    strcpy_be16(this.data, 10, 10, qemu ? ("QM0000" + (this.channel_nr * 2 + this.interface_nr + 1)).padEnd(20) : `8086-86${this.channel_nr}${this.interface_nr}`);
     // 23-26 firmware revision
-    strcpy_be16(this.data, 23, 4, "1.00");
+    strcpy_be16(this.data, 23, 4, qemu ? "2.5+".padEnd(8) : "1.00");
     // 27-46 model number
-    strcpy_be16(this.data, 27, 20, this.is_atapi ? "v86 ATAPI CD-ROM" : "v86 ATA HD");
+    strcpy_be16(this.data, 27, 20, qemu ? (this.is_atapi ? "QEMU DVD-ROM" : "QEMU HARDDISK").padEnd(40) : this.is_atapi ? "v86 ATAPI CD-ROM" : "v86 ATA HD");
 
     this.data_length = 512;
     this.data_end = 512;

@@ -30,7 +30,14 @@ const HOT: u32 = 2000;
 static mut RECOMPILE_MISSES: u32 = 64;
 #[no_mangle]
 pub unsafe fn x64_page_set_recompile_misses(misses: u32) { RECOMPILE_MISSES = misses.max(1); }
-const MAX_RECOMPILES: u32 = 12;
+/// Compiles of a page before each further one waits twice as long (heat
+/// and unserved entries): a page recompiled for ever new entries, or
+/// rewritten over and over, costs ever less; its code stays in use.
+const FREE_RECOMPILES: u32 = 4;
+fn backoff(compiles: u32) -> u32 { compiles.saturating_sub(FREE_RECOMPILES).min(16) }
+fn recompile_due(state: &PageState) -> bool {
+    state.misses >= unsafe { RECOMPILE_MISSES } << backoff(state.compiles)
+}
 pub const MAX_FUNCTIONS: usize = 9000;
 const MAX_TRACKED_PAGES: usize = 65536;
 const FAST_SLOTS: usize = 16384;
@@ -140,6 +147,8 @@ pub const COUNT_UNALIGNED_READS: usize = 7;
 #[repr(C, align(16))]
 struct Bounce([u8; 16]);
 static mut BOUNCE: Bounce = Bounce([0; 16]);
+/// (generated code copies unaligned reads there itself: pagegen)
+pub unsafe fn bounce_address() -> u32 { &raw mut BOUNCE as u32 }
 /// x64_page_timing: milliseconds inside page function calls and in execute
 /// as a whole (x64_page_stat 20 and 22; 23: first calls, 24: bytes compiled)
 static mut TIMING: bool = false;
@@ -405,7 +414,7 @@ pub unsafe fn run(budget: u32) -> Attempt {
                 // An entry the function does not serve: recompile once
                 // enough repeated such entries accumulate (note_unserved)
                 let state = r.pages.entry(page).or_default();
-                if state.misses >= RECOMPILE_MISSES && state.compiles < MAX_RECOMPILES {
+                if recompile_due(state) {
                     state.misses = 0;
                     return compile(page);
                 }
@@ -427,7 +436,7 @@ pub unsafe fn run(budget: u32) -> Attempt {
             }
             let state = r.pages.entry(page).or_default();
             state.heat += 1;
-            if state.heat >= HOT && state.compiles < MAX_RECOMPILES {
+            if state.heat >= HOT << backoff(state.compiles) {
                 state.heat = 0;
                 if state.entry_count == 0 {
                     state.entries[offset as usize / 64] |= 1 << (offset % 64);
@@ -455,11 +464,33 @@ fn note_unserved(r: &mut Runtime, page: u32, offset: u16) -> bool {
         state.entry_count += 1;
         state.misses += 1;
         r.stats[ENTRIES] += 1;
+        if unsafe { (*(&raw const STEP_PROFILE)).is_some() } && !is_extended(page) {
+            unsafe { ACCESS_REFUSED[6 + late_entry_kind(page, offset)] += 1 };
+        }
     }
     else {
         state.seen[word] |= mask;
     }
-    state.misses >= unsafe { RECOMPILE_MISSES } && state.compiles < MAX_RECOMPILES
+    recompile_due(state)
+}
+/// (profile) 0: the instruction before looks like a call, 1: 16-byte
+/// aligned, 2: other
+fn late_entry_kind(page: u32, offset: u16) -> usize {
+    let at = |o: u16| unsafe { *crate::cpu::memory::mem8.add(((page << 12) + o as u32) as usize) };
+    let o = offset;
+    let call = o >= 5 && at(o - 5) == 0xE8
+        || o >= 6 && at(o - 6) == 0xFF && at(o - 5) == 0x15
+        || o >= 2 && at(o - 2) == 0xFF && at(o - 1) & 0xF8 == 0xD0
+        || o >= 3 && at(o - 3) == 0xFF && at(o - 2) & 0x38 == 0x10 && at(o - 2) >> 6 == 1;
+    if call {
+        0
+    }
+    else if o % 16 == 0 {
+        1
+    }
+    else {
+        2
+    }
 }
 static mut LAST_UNSERVED: u64 = 0;
 /// Generated code reached an offset its function does not serve (dispatch
@@ -471,13 +502,16 @@ pub unsafe fn x64_page_unserved(rip: u64) -> i32 {
     let far = !(LAST_UNSERVED < rip && rip - LAST_UNSERVED <= 15);
     LAST_UNSERVED = rip;
     if !far {
+        ACCESS_REFUSED[4] += 1;
         return 0;
     }
     let Some((page, _)) = code_page(rip)
     else {
         return 1;
     };
-    note_unserved(rt(), page, (rip & 4095) as u16) as i32
+    let leave = note_unserved(rt(), page, (rip & 4095) as u16) as i32;
+    ACCESS_REFUSED[4] += (leave == 0) as u64;
+    leave
 }
 
 fn note_entry(r: &mut Runtime, page: u32, offset: u16) {
@@ -543,6 +577,9 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     match exit {
         pagegen::EXIT_RETRY => {
             r.stats[RETRIES] += 1;
+            if (*(&raw const STEP_PROFILE)).is_some() && *gp::mxcsr & 0x20 == 0 {
+                ACCESS_REFUSED[5] += 1;
+            }
             profile_instruction(0x20000);
             // (native code resumes after the interpreted instruction: an
             // unserved entry, noted when the function steps there)
@@ -558,13 +595,16 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     }
 }
 
-
 unsafe fn compile(page: u32) -> Attempt {
     let r = rt();
     let state = r.pages.entry(page).or_default();
     state.compiles += 1;
     let recompile = state.compiles > 1;
-    let mut entries: Vec<u16> = (0..4096u16).filter(|&o| bit(&state.entries, o)).collect();
+    // (a recompile serves the unserved offsets seen once so far too: each
+    // would otherwise count towards the next recompile)
+    let mut entries: Vec<u16> = (0..4096u16)
+        .filter(|&o| bit(&state.entries, o) || recompile && bit(&state.seen, o))
+        .collect();
     let bytes = if is_extended(page) {
         extended::copy_page(page - extended::CODE_KEY_BASE)
     }
@@ -581,8 +621,16 @@ unsafe fn compile(page: u32) -> Attempt {
         }
     }
     // (named after the linear page it was compiled for: host profiles)
-    let name = format!("x64_page_{:x}", state::read_rip() & !4095);
-    let Some(code) = pagegen::compile(&bytes, &entries, chaining(), name)
+    let linear = state::read_rip() & !4095;
+    let name = format!("x64_page_{:x}", linear);
+    let next = next_page_bytes(linear);
+    let Some(code) = pagegen::compile(
+        &bytes,
+        next.as_ref().map_or(&[][..], |b| &b[..]),
+        &entries,
+        chaining(),
+        name,
+    )
     else {
         rt().stats[FAILED] += 1;
         return miss();
@@ -615,12 +663,8 @@ unsafe fn compile(page: u32) -> Attempt {
     r.next_id += 1;
     // Watching the page retires cached write translations to it (jac). An
     // extended page is watched by extended.rs, once its old function is gone.
-    let watched = if is_extended(page) {
-        HashSet::new()
-    }
-    else {
-        HashSet::from([Page::page_of(page << 12)])
-    };
+    let watched =
+        if is_extended(page) { HashSet::new() } else { HashSet::from([Page::page_of(page << 12)]) };
     let Some(slot) = crate::jit::ir_reserve_slot(id, watched)
     else {
         rt().stats[FAILED] += 1;
@@ -678,6 +722,35 @@ unsafe fn compile(page: u32) -> Attempt {
         retired: 0,
         submitted: false,
     }
+}
+
+/// The first bytes of the linear page after `linear_page` as instruction
+/// fetch sees them now, when that page is plain RAM (instructions that
+/// straddle into it, see pagegen).
+unsafe fn next_page_bytes(linear_page: u64) -> Option<[u8; 16]> {
+    let next = linear_page.wrapping_add(4096);
+    let physical = memory::translate(next, paging::Access::Execute, false, false).ok()?;
+    let backing = jac::ram_backing(physical)?;
+    let mut bytes = [0u8; 16];
+    std::ptr::copy_nonoverlapping(
+        crate::cpu::memory::mem8.add(backing as usize),
+        bytes.as_mut_ptr(),
+        16,
+    );
+    Some(bytes)
+}
+/// Generated code, before an instruction that continues into the next page:
+/// whether that page (after gp::x64_page_linear) fetches as `word`, its
+/// first `count` bytes when compiled. Else the instruction is stepped (the
+/// interpreter fetches it, faults included).
+#[no_mangle]
+pub unsafe fn x64_page_straddle(word: u64, count: u32) -> i32 {
+    let Some(bytes) = next_page_bytes(*gp::x64_page_linear)
+    else {
+        return 0;
+    };
+    let mask = if count >= 8 { !0 } else { (1u64 << (8 * count)) - 1 };
+    (u64::from_le_bytes(bytes[..8].try_into().unwrap()) & mask == word) as i32
 }
 
 fn retire(r: &mut Runtime, index: usize) { retire_with(r, index, true) }
@@ -896,15 +969,18 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
     }
     // generated accesses are atomic with cores in workers: aligned only. An
     // unaligned read of RAM is served from a copy (a racing write may or may
-    // not be in it, as for a split access); an unaligned write is retried.
+    // not be in it, as for a split access); an unaligned write is retried,
+    // unless its code stores unaligned itself (kind bit 9, pagegen store).
     if crate::wasmgen::wasm_builder::WasmBuilder::ATOMIC_GUEST_MEMORY
         && address & (size.min(8) - 1) != 0
+        && !(write && kind & 0x200 != 0)
     {
         if !write {
             if let Ok((physical, _, _)) = memory::translate_page(address, paging::Access::Read) {
                 if let Some(backing) = jac::ram_backing(physical) {
                     let bounce = &raw mut BOUNCE as *mut u8;
-                    let from = crate::cpu::memory::mem8.add((backing + (address & 4095) as u32) as usize);
+                    let from =
+                        crate::cpu::memory::mem8.add((backing + (address & 4095) as u32) as usize);
                     for i in 0..size as usize {
                         *bounce.add(i) = crate::parallel::load8(from.add(i));
                     }
@@ -928,13 +1004,29 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         // write entry for a page with a page function: extended::cache_frame)
         if let Some(host) = super::extended::cache_frame(physical, write) {
             let backing = host.wrapping_sub(crate::cpu::memory::mem8 as u32);
-            jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing, large, global);
+            jac::fill(
+                apic::current_core(),
+                *gp::cpl == 3,
+                write,
+                address,
+                backing,
+                large,
+                global,
+            );
             return host.wrapping_add((address & 4095) as u32);
         }
         // the VGA frame buffer: plain memory with dirty tracking
         if let Some(backing) = jac::frame_buffer_backing(physical, write) {
             COUNTERS[COUNT_LFB_FILLS] += 1;
-            jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing, large, global);
+            jac::fill(
+                apic::current_core(),
+                *gp::cpl == 3,
+                write,
+                address,
+                backing,
+                large,
+                global,
+            );
             return (crate::cpu::memory::mem8 as u32)
                 .wrapping_add(backing)
                 .wrapping_add((address & 4095) as u32);
@@ -946,7 +1038,15 @@ pub unsafe fn x64_page_access(address: u64, kind: u32) -> u32 {
         ACCESS_REFUSED[3] += 1;
         return 0;
     }
-    jac::fill(apic::current_core(), *gp::cpl == 3, write, address, backing, large, global);
+    jac::fill(
+        apic::current_core(),
+        *gp::cpl == 3,
+        write,
+        address,
+        backing,
+        large,
+        global,
+    );
     (crate::cpu::memory::mem8 as u32)
         .wrapping_add(backing)
         .wrapping_add((address & 4095) as u32)
@@ -984,8 +1084,12 @@ unsafe fn context() -> Context {
 /// Interpret the instruction at RIP (state was written back). Continue the
 /// activation only if nothing it depends on changed.
 /// Refused cache fills (then retried in the interpreter): page crossing,
-/// translation fault, device or VGA memory, page with compiled code.
-static mut ACCESS_REFUSED: [u64; 4] = [0; 4];
+/// translation fault, device or VGA memory, page with compiled code; then
+/// instructions stepped because the function was entered at an offset it
+/// does not serve (x64_page_unserved), and (with the step profile) retries
+/// with MXCSR.PE clear; then late entries (unserved offsets seen twice) by
+/// kind: after a call, 16-byte aligned, other.
+static mut ACCESS_REFUSED: [u64; 9] = [0; 9];
 /// Opt-in histogram of stepped instructions by opcode (x64_page_profile).
 static mut STEP_PROFILE: Option<Vec<u32>> = None;
 #[no_mangle]
@@ -1006,7 +1110,46 @@ pub unsafe fn x64_page_profile_get(key: u32) -> f64 {
         .as_ref()
         .map_or(0.0, |p| p.get(key as usize).copied().unwrap_or(0) as f64)
 }
-unsafe fn profile_step() { profile_instruction(0); }
+/// With the step profile: stepped instructions by RIP (x64_page_step_rips)
+static mut STEP_RIPS: Option<HashMap<u64, u32>> = None;
+unsafe fn profile_step() {
+    if (*(&raw const STEP_PROFILE)).is_none() {
+        return;
+    }
+    let rips = (*(&raw mut STEP_RIPS)).get_or_insert_with(HashMap::new);
+    if rips.len() < 1 << 16 {
+        *rips.entry(state::read_rip()).or_default() += 1;
+    }
+    profile_instruction(0);
+}
+/// The `n`th most stepped RIP (sorted when n is 0) and its count; clears
+/// the histogram when `n` is past its end
+#[no_mangle]
+pub unsafe fn x64_page_step_rip(n: u32, high: bool, count: bool) -> f64 {
+    static mut SORTED: Vec<(u64, u32)> = Vec::new();
+    let sorted = &mut *(&raw mut SORTED);
+    if n == 0 && !high && !count {
+        *sorted = (*(&raw mut STEP_RIPS))
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    }
+    let Some(&(rip, times)) = sorted.get(n as usize)
+    else {
+        return -1.0;
+    };
+    if count {
+        times as f64
+    }
+    else if high {
+        (rip >> 32) as f64
+    }
+    else {
+        (rip & 0xFFFF_FFFF) as f64
+    }
+}
 unsafe fn profile_instruction(base: usize) {
     let Some(profile) = (*(&raw mut STEP_PROFILE)).as_mut()
     else {
@@ -1101,6 +1244,29 @@ pub unsafe fn x64_page_invlpg(address: u64) -> bool {
     memory::invlpg(address);
     cpu::invlpg(address as i32);
     jac::epoch_bits(core) != before || address >> 21 == *gp::x64_page_linear >> 21
+}
+
+/// The commit of a locked instruction (pagegen locked_store, cores in
+/// workers): replace `expected` by `value` at the aligned host address, as
+/// the interpreter's locked instructions do; 0 when another core changed it.
+#[no_mangle]
+pub unsafe fn x64_page_lock_commit(host: u32, expected: u64, value: u64, bytes: u32) -> i32 {
+    crate::parallel::compare_exchange(host as *mut u8, bytes, expected, value) as i32
+}
+
+/// Shifts and rotates without a template (pagegen Op::ShiftCall): `kind` =
+/// ALU group code | width << 8 (at most 32); the result in the low half,
+/// EFLAGS in the high half.
+#[no_mangle]
+pub fn x64_page_shift(a: u64, count: u32, flags: u32, kind: u32) -> u64 {
+    let (r, f) = super::execute::shift(
+        (kind & 7) as u8,
+        a,
+        count as u8,
+        (kind >> 8) as u8,
+        flags as u64,
+    );
+    r & 0xFFFF_FFFF | f << 32
 }
 
 /// RDTSC for generated code (the privilege check is inline).

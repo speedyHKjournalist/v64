@@ -160,6 +160,7 @@ const PLATFORMS = [
     ["256 MiB, defaults", {}, 256 << 20],
     ["32 MiB, all serial and parallel ports", { uart1: true, uart2: true, uart3: true, parallel1: true }, 32 << 20],
     ["2 GiB", {}, 2 ** 31 - (1 << 17)],
+    ["QEMU compatible", { qemu_compatible: true }, 256 << 20],
 ];
 
 for(const [label, settings, memory] of PLATFORMS)
@@ -218,6 +219,13 @@ for(const [label, settings, memory] of PLATFORMS)
         assert.ok(dsdt.includes(Buffer.from([0x0C, 0x41, 0xD0, 0x03, 0x03])), "PNP0303 (SeaBIOS checks for it)");
         const com_ports = (dsdt.toString("latin1").match(/COM\d/g) || []).length;
         assert.equal(com_ports, platform.uarts.length, "one COM device per emulated UART");
+        // Device (PCI0) {Name (_HID, PNP0A03) Name (_UID, n)}: QEMU's PC has 0
+        const pci0 = dsdt.indexOf("PCI0");
+        const uid = dsdt.indexOf("_UID", pci0);
+        assert.ok(uid > pci0 && uid - pci0 < 32, "PCI0 _UID");
+        assert.equal(dsdt[uid + 4] === 0x00 ? 0 : dsdt[uid + 4] === 0x01 ? 1 : -1, settings.qemu_compatible ? 0 : 1, "PCI0 _UID");
+        // (QEMU's PC does not describe the PIC, timer, DMA, speaker and FPU)
+        assert.equal(dsdt.includes("SPKR"), !settings.qemu_compatible, "legacy ISA devices");
     });
 }
 

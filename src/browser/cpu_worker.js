@@ -50,7 +50,7 @@ export function encode_worker_options(o, plugins = [])
         "x87_jit_cache": o["x87_jit_cache"],
         "fastboot": o.fastboot, "bootmenu": o.bootmenu, "cmdline": o.cmdline,
         "cpuid_level": o.cpuid_level, "uart1": o.uart1, "uart2": o.uart2, "uart3": o.uart3,
-        "parallel1": o.parallel1, "virtio_balloon": o.virtio_balloon,
+        "parallel1": o.parallel1, "qemu_compatible": o.qemu_compatible, "virtio_balloon": o.virtio_balloon,
         "virtio_console": !!o.virtio_console, "modem": o.modem && { "uart": o.modem.uart },
         "preserve_mac_from_state_image": o.preserve_mac_from_state_image,
         "mac_address_translation": o.mac_address_translation,

@@ -19,6 +19,23 @@ export const PCI_MMIO_END = 0xFEBFFFFF;
 
 // PIIX4 power management function (PCI 00:07.0)
 export const ACPI_PM_PCI_ID = 0x07 << 3;
+
+/** The PCI subsystem (vendor 1AF4, device 1100) of QEMU's emulated devices */
+export const QEMU_PCI_SUBSYSTEM = [0xF4, 0x1A, 0x00, 0x11];
+
+/**
+ * PCI functions (device << 3 | function on bus 0) of the devices whose place
+ * differs between v86's layout and QEMU's i440FX PC (settings.qemu_compatible:
+ * a Windows installed under QEMU then finds its devices where they were)
+ * @param {?Platform} platform
+ * @return {{ide: number, acpi_pm: number, vga: number, ne2k: number}}
+ */
+export function pci_functions(platform)
+{
+    return platform && platform.qemu_compatible ?
+        { ide: 0x01 << 3 | 1, acpi_pm: 0x01 << 3 | 3, vga: 0x02 << 3, ne2k: 0x03 << 3 } :
+        { ide: 0x1E << 3, acpi_pm: ACPI_PM_PCI_ID, vga: 0x12 << 3, ne2k: 0x05 << 3 };
+}
 /** PM I/O block size decoded at PMBA (PCI config 0x40) */
 export const ACPI_PM_LENGTH = 0x40;
 /**
@@ -88,6 +105,7 @@ const PARALLEL_PORTS = [
  *     pci_mmio_start: number,
  *     uarts: !Array<{index: number, port: number, irq: number}>,
  *     parallel_ports: !Array<{index: number, port: number, irq: number}>,
+ *     qemu_compatible: boolean,
  * }}
  */
 export var Platform;
@@ -132,6 +150,9 @@ export function create_platform(settings, memory_size)
         pci_mmio_start,
         uarts: indexed(UARTS),
         parallel_ports: indexed(PARALLEL_PORTS),
+        // devices with the places and identities of QEMU's i440FX PC
+        // (pci_functions, and the ACPI namespace, see acpi_tables.js)
+        qemu_compatible: !!settings.qemu_compatible,
     };
 
     check_platform(platform);

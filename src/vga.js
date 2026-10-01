@@ -8,6 +8,7 @@ import { round_up_to_next_power_of_2, view } from "./lib.js";
 import { CPU } from "./cpu.js";
 import { BusConnector } from "./bus.js";
 import { DisplayHub, DisplaySource } from "./display.js";
+import { pci_functions } from "./platform.js";
 
 // Always 64k
 const VGA_BANK_SIZE = 64 * 1024;
@@ -233,7 +234,9 @@ export function VGAScreen(cpu, bus, display, vga_memory_size)
     }
     dbg_log("effective vga memory size: " + this.vga_memory_size, LOG_VGA);
 
-    const pci_revision = 0; // set to 2 for qemu extended registers
+    // 2 announces QEMU's extended registers (BAR2), which are not implemented;
+    // QEMU's revision, so that a guest installed there knows the device
+    const pci_revision = cpu.platform.qemu_compatible ? 2 : 0;
 
     // Experimental, could probably need some changes
     // 01:00.0 VGA compatible controller: NVIDIA Corporation GT216 [GeForce GT 220] (rev a2)
@@ -244,7 +247,7 @@ export function VGAScreen(cpu, bus, display, vga_memory_size)
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x00, 0x11,
         0x00, 0x00, 0xbe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    this.pci_id = 0x12 << 3;
+    this.pci_id = pci_functions(cpu.platform).vga;
     this.pci_bars = [
         {
             size: this.vga_memory_size,

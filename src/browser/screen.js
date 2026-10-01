@@ -794,6 +794,10 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
     this.get_text_row = function(y)
     {
+        if(!(y >= 0 && y < text_mode_height))
+        {
+            return "";
+        }
         const begin = y * text_mode_width * TEXT_BUF_COMPONENT_SIZE + CHARACTER_INDEX;
         const end = begin + text_mode_width * TEXT_BUF_COMPONENT_SIZE;
         let row = "";

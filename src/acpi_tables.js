@@ -328,11 +328,15 @@ function build_dsdt_body(platform, pm_base)
         isa_device("KBD", "PNP0303", aml_resources(res_io(0x60, 1), res_io(0x64, 1), res_irq_noflags([1]))),
         isa_device("MOU", "PNP0F13", aml_resources(res_irq_noflags([12]))),
         isa_device("FDC0", "PNP0700", aml_resources(res_io(0x3F2, 4), res_io(0x3F7, 1), res_irq_noflags([6]), res_dma([2]))),
-        isa_device("PIC", "PNP0000", aml_resources(res_io(0x20, 2), res_io(0xA0, 2), res_io(0x4D0, 2), res_irq_noflags([2]))),
-        isa_device("TMR", "PNP0100", aml_resources(res_io(0x40, 4), res_irq_noflags([0]))),
-        isa_device("DMAC", "PNP0200", aml_resources(res_io(0x00, 0x10), res_io(0x80, 0x10), res_io(0xC0, 0x20), res_dma([4]))),
-        isa_device("SPKR", "PNP0800", aml_resources(res_io(0x61, 1))),
-        isa_device("FPU", "PNP0C04", aml_resources(res_io(0xF0, 0x10), res_irq_noflags([13]))),
+        // (QEMU's PC does not describe these: with platform.qemu_compatible
+        // a guest installed there sees no new devices)
+        ...platform.qemu_compatible ? [] : [
+            isa_device("PIC", "PNP0000", aml_resources(res_io(0x20, 2), res_io(0xA0, 2), res_io(0x4D0, 2), res_irq_noflags([2]))),
+            isa_device("TMR", "PNP0100", aml_resources(res_io(0x40, 4), res_irq_noflags([0]))),
+            isa_device("DMAC", "PNP0200", aml_resources(res_io(0x00, 0x10), res_io(0x80, 0x10), res_io(0xC0, 0x20), res_dma([4]))),
+            isa_device("SPKR", "PNP0800", aml_resources(res_io(0x61, 1))),
+            isa_device("FPU", "PNP0C04", aml_resources(res_io(0xF0, 0x10), res_irq_noflags([13]))),
+        ],
     ];
     for(const { index, port, irq } of platform.uarts)
     {
@@ -374,7 +378,8 @@ function build_dsdt_body(platform, pm_base)
             // a device has either _HID or _ADR; the root bridge is identified by _HID
             aml_device("PCI0",
                 aml_name_decl("_HID", aml_eisa_id("PNP0A03")),
-                aml_name_decl("_UID", aml_int(1)),
+                // (QEMU's PC: 0; the instance ids of all devices below derive from it)
+                aml_name_decl("_UID", aml_int(platform.qemu_compatible ? 0 : 1)),
                 aml_name_decl("_CRS", pci_crs),
                 aml_name_decl("_PRT", aml_package(...prt)),
                 aml_device("ISA",

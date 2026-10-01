@@ -108,7 +108,7 @@ DisplaySink.prototype.get_text_screen = function() {};
 
 /**
  * @param {number} y
- * @return {string}
+ * @return {string} "" for rows outside the text screen
  */
 DisplaySink.prototype.get_text_row = function(y) {};
 

@@ -135,6 +135,10 @@ export class DummyScreenAdapter
     /** @override */
     get_text_row(y)
     {
+        if(!(y >= 0 && y < this.text_height))
+        {
+            return "";
+        }
         let row = "";
         for(let col = 0; col < this.text_width; col++)
         {

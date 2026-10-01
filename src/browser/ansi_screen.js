@@ -30,6 +30,10 @@ export class ANSIScreenAdapter extends DummyScreenAdapter
     /** @override */
     get_text_row(y)
     {
+        if(!(y >= 0 && y < this.text_height))
+        {
+            return "";
+        }
         let previous_bg = null;
         let previous_fg = null;
         let row = "";

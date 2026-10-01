@@ -275,7 +275,11 @@ pub unsafe fn translate_page(address: u64, access: Access) -> Result<(u64, bool,
         nx_enable: state::efer() & state::EFER_NXE != 0,
     };
     let t = X64_TLBS[apic::current_core()].lookup(LinearAddress(address), access, c);
-    Ok((physical, t.map_or(true, |t| t.page_shift > 12), t.is_some_and(|t| t.global)))
+    Ok((
+        physical,
+        t.map_or(true, |t| t.page_shift > 12),
+        t.is_some_and(|t| t.global),
+    ))
 }
 pub unsafe fn translate(
     address: u64,

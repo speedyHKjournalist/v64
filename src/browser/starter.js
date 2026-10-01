@@ -348,6 +348,7 @@ V86.prototype.continue_init = async function(emulator, options)
 
     settings.acpi = options.acpi;
     settings.cpu_cores = options.cpu_cores;
+    settings.qemu_compatible = options.qemu_compatible;
     settings.parallel = this.parallel_requested;
     settings.parallel_fault = options["parallel_fault"];   // (test hook, src/parallel/vcpu.js)
     settings.cpu_clock = options.cpu_clock;
@@ -1917,72 +1918,60 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
 {
     const match_multi = Array.isArray(expected);
     const timeout_msec = options?.timeout_msec || 0;
-    const changed_rows = new Set();
-    const screen_put_char = args => changed_rows.add(args[0]);
     const contains_expected = (screen_line, pattern) => pattern.test ? pattern.test(screen_line) : screen_line.startsWith(pattern);
-    const screen_lines = [];
 
-    this.add_listener("screen-put-char", screen_put_char);
-
-    for(const screen_line of this.screen_adapter.get_text_screen())
+    const screen_contains_expected = () =>
     {
-        if(match_multi)
+        const screen = this.screen_adapter.get_text_screen();
+        if(!match_multi)
         {
-            screen_lines.push(screen_line.trimRight());
+            return screen.some(screen_line => contains_expected(screen_line, expected));
         }
-        else if(contains_expected(screen_line, expected))
-        {
-            this.remove_listener("screen-put-char", screen_put_char);
-            return true;
-        }
-    }
 
-    let succeeded = false;
+        const screen_lines = screen.map(screen_line => screen_line.trimRight());
+        let screen_height = screen_lines.length;
+        while(screen_height > 0 && screen_lines[screen_height - 1] === "")
+        {
+            screen_height--;
+        }
+        const screen_offset = screen_height - expected.length;
+        if(screen_offset < 0)
+        {
+            return false;
+        }
+        for(let i = 0; i < expected.length; i++)
+        {
+            if(!contains_expected(screen_lines[screen_offset + i], expected[i]))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // Read the whole screen again after any change: a mode set resizes the
+    // text screen through transient sizes (80x256 while the VGA BIOS programs
+    // the CRTC), so rows that changed earlier may no longer exist
+    let screen_changed = false;
+    const on_screen_change = () => { screen_changed = true; };
+    this.add_listener("screen-put-char", on_screen_change);
+    this.add_listener("screen-set-size", on_screen_change);
+
+    let succeeded = screen_contains_expected();
     const end = timeout_msec ? performance.now() + timeout_msec : 0;
-    loop: while(!end || performance.now() < end)
+    while(!succeeded && (!end || performance.now() < end))
     {
-        if(match_multi)
-        {
-            let screen_height = screen_lines.length;
-            while(screen_height > 0 && screen_lines[screen_height - 1] === "")
-            {
-                screen_height--;
-            }
-            const screen_offset = screen_height - expected.length;
-            if(screen_offset >= 0)
-            {
-                let matches = true;
-                for(let i = 0; i < expected.length && matches; i++)
-                {
-                    matches = contains_expected(screen_lines[screen_offset + i], expected[i]);
-                }
-                if(matches)
-                {
-                    succeeded = true;
-                    break;
-                }
-            }
-        }
-
         await new Promise(resolve => setTimeout(resolve, 100));
 
-        for(const row of changed_rows)
+        if(screen_changed)
         {
-            const screen_line = this.screen_adapter.get_text_row(row);
-            if(match_multi)
-            {
-                screen_lines[row] = screen_line.trimRight();
-            }
-            else if(contains_expected(screen_line, expected))
-            {
-                succeeded = true;
-                break loop;
-            }
+            screen_changed = false;
+            succeeded = screen_contains_expected();
         }
-        changed_rows.clear();
     }
 
-    this.remove_listener("screen-put-char", screen_put_char);
+    this.remove_listener("screen-put-char", on_screen_change);
+    this.remove_listener("screen-set-size", on_screen_change);
     return succeeded;
 };
 

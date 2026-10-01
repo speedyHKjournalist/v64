@@ -6,7 +6,9 @@
 // memory operands with SIB/RIP/FS bases, LOCK RMW, stack, calls, forward
 // branches) with interpreter steps and page-crossing accesses (retries).
 //
-// PAGE_FUZZ_SEED, PAGE_FUZZ_CASES (per guest), PAGE_FUZZ_GUESTS.
+// PAGE_FUZZ_SEED, PAGE_FUZZ_CASES (per guest), PAGE_FUZZ_GUESTS;
+// PAGE_FUZZ_STRADDLE=1: each case starts near the end of a page, so that its
+// loop runs across the page boundary (instructions that straddle it).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {assemble} from "./guest_runner.mjs";
@@ -119,9 +121,11 @@ function instruction(state)
         case 52: case 53: case 54: case 55: return sse_instruction();
         case 40: { const wide = random() < 0.5; const d = wide ? "r11" : "r11d";
             return `mov r11d, ${int(3, 0x7FFFFFF0) | 3}\n${pick([`xor edx, edx\ndiv ${d}`, `${wide ? "cqo" : "cdq"}\nidiv ${d}`, `mov edx, 1\ndiv ${d}`, (at => `or ${SIZE[wide ? 64 : 32]} [r14+${at}], 3\nxor edx, edx\ndiv ${SIZE[wide ? 64 : 32]} [r14+${at}]`)(int(0, 8000) & ~7)])}`; }
-        case 50: case 51: case 41: { const op = pick(["movsb", "movsw", "movsd", "movsq", "stosb", "stosw", "stosd", "stosq"]);
+        case 50: case 51: case 41: { const op = pick(["movsb", "movsw", "movsd", "movsq", "stosb", "stosw", "stosd", "stosq",
+            "cmpsb", "cmpsw", "cmpsd", "cmpsq", "scasb", "scasw", "scasd", "scasq"]);
             const src = int(0, 8000), dst = random() < 0.3 ? src + int(-16, 16) : int(0, 8000), count = pick([0, 1, int(2, 16), int(17, 600)]);
-            return `lea rsi, [r14+${src}]\nlea rdi, [r14+${Math.max(0, dst)}]\nxor [rsi], r15d\nmov eax, r15d\nmov ecx, ${count}\n${random() < 0.2 ? "std\n" : ""}${random() < 0.8 ? "rep " : ""}${op}\ncld`; }
+            const prefix = random() < 0.8 ? (/^(cmps|scas)/.test(op) ? pick(["repe ", "repne "]) : "rep ") : "";
+            return `lea rsi, [r14+${src}]\nlea rdi, [r14+${Math.max(0, dst)}]\nxor [rsi], r15d\nmov eax, r15d\nmov ecx, ${count}\n${random() < 0.2 ? "std\n" : ""}${prefix}${op}\ncld`; }
         case 42: return "swapgs\nadd r12, [gs:8]\nswapgs";
         case 43: return pick(["cli", "mov eax, ds", "mov r9w, ss", `mov word [r14+${int(0, 8000)}], cs`, "mov rdx, fs"]);
         case 44: { const sw = pick([32, 64]); return `${pick(["shld", "shrd"])} ${rm(sw)}, ${low_reg(sw)}, ${int(0, 70)}`; }
@@ -219,10 +223,11 @@ wrmsr
         }
         if(process.env.PAGE_FUZZ_SAVE && +process.env.PAGE_FUZZ_SAVE_GUEST === guest && c === +process.env.PAGE_FUZZ_SAVE_CASE)
             fs.writeFileSync(process.env.PAGE_FUZZ_SAVE, JSON.stringify({init, lines}, null, 1));
+        const straddle = process.env.PAGE_FUZZ_STRADDLE ? `jmp near .body\ntimes ${4096 - int(360, 1400)} db 0xCC\n.body:\n` : "";
         functions += `
 align 4096
 case_${c}:
-${init}
+${straddle}${init}
 mov r13d, ${int(0, 255)}
 mov r14, 0x500000
 mov r15d, ${ITERATIONS}
