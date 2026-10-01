@@ -7,7 +7,7 @@
 //     GPU_ADAPTER=bochs_vga node tests/x64/linux_gpu.mjs
 //
 // GPU_ADAPTER: bochs_vga (default), vmware_svga, virtio_gpu
-// GPU_SCENARIO: the steps below (default: drm)
+// GPU_SCENARIO: the steps below: drm (default), gl
 // GPU_LEVEL: pins the adapter's level (graphics_adapter_test), e.g. 2d or 2d-full;
 // vgpu9 records the 3D batches into <out>/trace.bin (tests/x64/gpu_trace.mjs),
 // or with GPU_RENDERER=chrome draws them on the GPU of a headless Chrome
@@ -57,6 +57,28 @@ const SCENARIOS = {
         // (with 3D the 400 frames take seconds, not a minute)
         ["kmscube -c 400 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube", after: LEVEL_3D ? 2500 : 20000 }],
+    ],
+    // OpenGL beyond kmscube: the version Mesa reports on GBM, a textured
+    // kmscube, and weston on DRM with its EGL and shm clients
+    gl: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        [APK + " kmscube mesa-dri-gallium mesa-utils mesa-demos weston weston-backend-drm weston-shell-desktop " +
+            "weston-clients seatd >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; grep -i error /tmp/apk.log | head -5; " +
+            "command -v eglinfo kmscube weston weston-simple-egl seatd >/dev/null && echo STEP_APK_PROGRAMS", /STEP_APK_PROGRAMS/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["eglinfo -B -p gbm 2>&1 | grep -E 'OpenGL|renderer|version' | head -12; echo STEP_EGLINFO_DONE",
+            LEVEL_3D ? /OpenGL core profile version: (3\.[3-9]|4\.)/ : /STEP_EGLINFO_DONE/],
+        ["kmscube -M rgba -c 200 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube-rgba", after: LEVEL_3D ? 2500 : 20000 }],
+        ["seatd -g video >/tmp/seatd.log 2>&1 & sleep 1; export XDG_RUNTIME_DIR=/tmp/xdg; mkdir -p -m 700 $XDG_RUNTIME_DIR; " +
+            "(weston --backend=drm --shell=desktop --idle-time=0 --continue-without-input >/tmp/weston.log 2>&1 &); sleep 15; export WAYLAND_DISPLAY=$(ls $XDG_RUNTIME_DIR | grep -m1 '^wayland-[0-9]*$'); echo $WAYLAND_DISPLAY; " +
+            "[ -n \"$WAYLAND_DISPLAY\" ] || tail -25 /tmp/weston.log /tmp/seatd.log; echo STEP_WESTON_UP",
+            /wayland-\d[\s\S]*STEP_WESTON_UP/],
+        ["timeout 20 weston-simple-egl -f 2>&1 | tail -3; echo STEP_EGL_DONE", /STEP_EGL_DONE/,
+            { screenshot: "weston-simple-egl", after: 12000 }],
+        ["timeout 10 weston-simple-shm 2>&1 | tail -3; echo STEP_SHM_DONE", /STEP_SHM_DONE/,
+            { screenshot: "weston-simple-shm", after: 6000 }],
+        ["grep -i -E 'error|renderer|GL version|EGL' /tmp/weston.log | head -20; echo STEP_WESTON_LOG", /STEP_WESTON_LOG/],
     ],
 };
 const steps = SCENARIOS[scenario];
