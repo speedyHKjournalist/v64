@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Real GPU test, isolated from the game page and the user's browser profile.
-// GL_CHROME can select a Chromium executable on non-macOS hosts.
+// GL_CHROME can select a Chromium executable on non-macOS hosts; GL_TIMEOUT_MS
+// the time a page has (60 s). A page can save files (screenshots) by POSTing
+// them to /__test_file?name=<name>: they land in build/browser-test-output/.
 "use strict";
 const http = require("http"), fs = require("fs"), path = require("path");
 const { spawn } = require("child_process");
@@ -8,6 +10,18 @@ const root = path.resolve(__dirname, "../..");
 const profile = fs.mkdtempSync(path.join(require("os").tmpdir(), "gl-multipass-"));
 let browser, timeout;
 const server = http.createServer((req, res) => {
+    if (req.method === "POST" && req.url.startsWith("/__test_file?")) {
+        const name = path.basename(new URL(req.url, "http://localhost").searchParams.get("name") || "file");
+        const chunks = [];
+        req.on("data", data => chunks.push(data));
+        req.on("end", () => {
+            const directory = path.join(root, "build/browser-test-output");
+            fs.mkdirSync(directory, { recursive: true });
+            fs.writeFileSync(path.join(directory, name), Buffer.concat(chunks));
+            res.end("OK");
+        });
+        return;
+    }
     if (req.method === "POST" && req.url === "/__test_result") {
         let body = "";
         req.on("data", data => { body += data; });
@@ -61,5 +75,5 @@ server.listen(0, "127.0.0.1", () => {
     timeout = setTimeout(() => {
         console.error("FAIL: real GPU test timed out\n" + stderr);
         finish(1);
-    }, 60000);
+    }, +process.env.GL_TIMEOUT_MS || 60000);
 });

@@ -421,6 +421,14 @@ new V86({
 
   D9WG 执行器都已支持，这里只需把它的能力如实映射成 SVGA devcap。
 
+实现时定下的做法（2026-10-01，`svga3d.js`、`svga3d_tables.js`、`svga3d_d9wg.js`，渲染侧 `svga_renderer.js`）：
+
+- **每个 SVGA3D 上下文对应一个 D9WG 设备。** 执行器本来就按设备保存完整的 D3D9 状态，表面、着色器和顶点声明是各设备共用的资源。所以 CPU 侧不必为切换上下文维护状态影子。`CONTEXT_DEFINE` 每次都分配新的设备句柄，得到干净的默认状态。
+- **缓冲表面按用途建 D9WG 资源。** `SVGA3D_BUFFER` 表面在第一次被绘制用作顶点缓冲、16 位或 32 位索引缓冲时，才建对应的 D9WG 缓冲。CPU 侧保留它的字节（缓冲只经 `SURFACE_DMA` 改变），新建的用途可以直接装满，`SURFACE_DMA` 回读到客户机也不用经过 GPU。
+- **画面经回读回到设备（暂代 4.5 节的 GPU 扫描输出）。** `PRESENT` 和 `BLIT_SURFACE_TO_SCREEN` 都回读源表面的对应行，由设备按格式转换、缩放、裁剪后写进 Screen Object 的画面，没有 Screen Object 时写进寄存器模式的帧缓冲。光标、截图、存档、`BLIT_SCREEN_TO_GMRFB` 因此都和 2D 等级一样工作。代价是每次呈现多一次回读。合成器直接显示 GPU 纹理的做法留到性能需要时再做。
+- **完成顺序。** `SVGA_CMD_FENCE` 和命令缓冲区的完成状态，排在它之前送出的所有批次之后（`after_work`）。渲染器跑完一个批次、送回它的所有写入之后，才发 `done`。所以驱动在 fence 或命令缓冲区完成之后，一定能读到回读的数据和查询结果。
+- **语义差异的换算**：`CULLMODE`（剔除哪一面）加 `FRONTWINDING`（哪种绕序是正面）合成 D3D9 的剔除绕序；`ALPHAREF` 是 0–1 的浮点数；`OUTPUTGAMMA`、纹理的 `GAMMA` 为 2.2 时表示 sRGB；纹理参数里 SVGA3D 的 `ALPHA`/`ONE_MINUS` 位对应 D3D 的 `ALPHAREPLICATE`/`COMPLEMENT`，位置正好相反；`SVGA3D_BLENDOP_BLENDFACTOR` 是 D3D 的 14；D3D9 的 `SetRenderTarget` 会重置视口和裁剪矩形，SVGA3D 不会，所以换 0 号目标后重新下发两者。
+
 ### 5.9 GB 对象
 
 | 组 | 命令 / 机制 | 要点 |

@@ -154,6 +154,8 @@ build/v86-vmware-svga.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/gra
 		--js $(GRAPHICS_ADAPTER_COMMON) --js src/graphics_adapters/vmware_svga/svga_constants.js \
 		--js src/graphics_adapters/vmware_svga/svga_gmr.js --js src/graphics_adapters/vmware_svga/svga_screens.js \
 		--js src/graphics_adapters/vmware_svga/svga_cursor.js \
+		--js src/graphics_adapters/vmware_svga/svga3d_d9wg.js --js src/graphics_adapters/vmware_svga/svga3d_tables.js \
+		--js src/graphics_adapters/vmware_svga/svga3d.js \
 		--js src/graphics_adapters/vmware_svga/svga_device.js --js src/graphics_adapters/vmware_svga/plugin.js
 
 .PHONY: graphics-adapters
@@ -440,6 +442,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/display.js
 	./tests/devices/graphics_adapter.js
 	./tests/devices/vmware_svga.js
+	./tests/devices/vmware_svga_3d.js
 	./tests/devices/mmio_ram.js
 	./tests/devices/virtio_9p.js
 	./tests/devices/virtio_console.js
@@ -631,6 +634,7 @@ display-browser-tests: build/cpu-worker.js build/libv86.mjs build/libv86.js buil
 	node tests/glbridge/gl_multipass_browser_runner.js display_text_glyphs_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js display_compositor_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js graphics_vga_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js svga_renderer_browser_test.html
 
 # A browser/library rebuild must ship the matching wire-protocol implementation.
 build/v86_all.js build/v86_all_debug.js build/libv86.js build/libv86.mjs build/libv86-debug.js build/libv86-debug.mjs: | build/cpu-worker.js

@@ -14,6 +14,7 @@ import * as C from "./svga_constants.js";
 import { GMRTable, GMR_MAX_IDS, GMR_MAX_PAGES, GMR_MAX_DESCRIPTOR_LENGTH, remap_gmr2_payload } from "./svga_gmr.js";
 import { ScreenObjects } from "./svga_screens.js";
 import { SoftwareCursor, cursor_masks_length } from "./svga_cursor.js";
+import { SVGA3D } from "./svga3d.js";
 
 // For Types Only
 import { DisplaySource } from "../../display.js";
@@ -63,10 +64,23 @@ export const LEVELS = {
             C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
             C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
     },
+    // S3: legacy 3D (svga3d.js), what Windows 8.1's vm3d uses without
+    // guest-backed objects; needs a renderer
+    "vgpu9": {
+        caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
+            C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
+            C.SVGA_CAP_CURSOR | C.SVGA_CAP_CURSOR_BYPASS | C.SVGA_CAP_CURSOR_BYPASS_2 | C.SVGA_CAP_ALPHA_CURSOR |
+            C.SVGA_CAP_8BIT_EMULATION | C.SVGA_CAP_MULTIMON | C.SVGA_CAP_DISPLAY_TOPOLOGY |
+            C.SVGA_CAP_GMR | C.SVGA_CAP_GMR2 | C.SVGA_CAP_SCREEN_OBJECT_2 |
+            C.SVGA_CAP_COMMAND_BUFFERS | C.SVGA_CAP_CMD_BUFFERS_2 | C.SVGA_CAP_HP_CMD_QUEUE | C.SVGA_CAP_3D,
+        fifo_caps: C.SVGA_FIFO_CAP_FENCE | C.SVGA_FIFO_CAP_PITCHLOCK | C.SVGA_FIFO_CAP_RESERVE |
+            C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
+            C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
+    },
 };
 
-/** Lowest to highest; without a pinned level the highest is used */
-export const LEVEL_ORDER = ["2d", "2d-full"];
+/** Lowest to highest; without a pinned level the highest one there is a renderer for */
+export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9"];
 
 /**
  * @param {number} bpp
@@ -81,7 +95,8 @@ function bytes_per_pixel(bpp)
  * @constructor
  * @implements {DisplaySource}
  * @param {GraphicsMachine} machine
- * @param {{vram_size: (number|undefined), level: (string|undefined)}} options
+ * @param {{vram_size: (number|undefined), level: (string|undefined), renderer: (Object|undefined)}} options
+ *     renderer: the channel to the 3D renderer ({post, listen}), if there is one
  */
 export function SVGADevice(machine, options)
 {
@@ -91,10 +106,14 @@ export function SVGADevice(machine, options)
     /** @const */
     this.display = machine.display;
 
-    const level = options.level || LEVEL_ORDER[LEVEL_ORDER.length - 1];
+    const level = options.level || (options.renderer ? "vgpu9" : "2d-full");
     if(!LEVELS[level])
     {
         throw new Error("vmware_svga: unknown level " + JSON.stringify(level) + "; levels: " + LEVEL_ORDER.join(", "));
+    }
+    if((LEVELS[level].caps & C.SVGA_CAP_3D) && !options.renderer)
+    {
+        throw new Error("vmware_svga: level " + level + " needs a 3D renderer (WebGPU and libv86-webgpu.js)");
     }
     /** @const @type {string} */
     this.level = level;
@@ -139,6 +158,8 @@ export function SVGADevice(machine, options)
     this.cursor = new SoftwareCursor();
     /** SVGA_REG_DISPLAY_*: [id, primary, x, y, width, height] each */
     this.topology = [];
+    /** @const @type {SVGA3D} 3D, at the levels that have it */
+    this.svga3d = (LEVELS[level].caps & C.SVGA_CAP_3D) ? new SVGA3D(this, /** @type {!Object} */ (options.renderer)) : null;
 
     // The picture of the SVGA mode, in wasm memory (mmio_ram_allocate_pixels)
     this.pixels = null;
@@ -208,6 +229,7 @@ SVGADevice.prototype.reset = function()
     this.gmrs.reset();
     this.screens.reset();
     this.cursor.reset();
+    if(this.svga3d) this.svga3d.reset();
     this.update_irq();
     this.init_fifo_registers();
     this.update_scanout();
@@ -298,6 +320,7 @@ SVGADevice.prototype.init_fifo_registers = function()
     fifo[C.SVGA_FIFO_FLAGS] = 0;
     fifo[C.SVGA_FIFO_3D_HWVERSION] = 0;
     fifo[C.SVGA_FIFO_3D_HWVERSION_REVISED] = 0;
+    if(this.svga3d) SVGA3D.write_fifo_caps(fifo);
     Atomics.store(fifo, C.SVGA_FIFO_BUSY, 0);
 };
 
@@ -741,11 +764,21 @@ SVGADevice.prototype.run_command = function(read, available)
 
     if(id >= C.SVGA_3D_CMD_LEGACY_BASE && id < C.SVGA_3D_CMD_MAX)
     {
-        // SVGA3dCmdHeader: id, size in bytes. No 3D at this level.
+        // SVGA3dCmdHeader: id, size in bytes
         if(!need(2)) return 0;
-        const length = 2 + ((read(1) >>> 0) + 3 >> 2);
+        const size = read(1) >>> 0;
+        const length = 2 + (size + 3 >> 2);
         if(!need(length)) return 0;
-        dbg_log("svga: 3D command " + id + " ignored (no 3D at level " + this.level + ")", LOG_VGA);
+        if(this.svga3d)
+        {
+            const body = new Int32Array(size >> 2);
+            for(let i = 0; i < body.length; i++) body[i] = read(2 + i);
+            this.svga3d.command(id, body);
+        }
+        else
+        {
+            dbg_log("svga: 3D command " + id + " ignored (no 3D at level " + this.level + ")", LOG_VGA);
+        }
         return length;
     }
 
@@ -796,19 +829,24 @@ SVGADevice.prototype.submit_command_buffer = function(address, context)
         }
     }
 
-    const done = new DataView(new ArrayBuffer(8));
-    done.setUint32(0, status, true);
-    done.setUint32(4, error_offset, true);
-    this.machine.write_physical(new Uint8Array(done.buffer), address);
-    if(status !== C.SVGA_CB_STATUS_COMPLETED)
-    {
-        dbg_log("svga: command buffer at " + h(address) + " failed: status " + status + " at " + error_offset, LOG_VGA);
-        this.set_irq(C.SVGA_IRQFLAG_ERROR);
-    }
-    if(!(flags & C.SVGA_CB_FLAG_NO_IRQ) || status !== C.SVGA_CB_STATUS_COMPLETED)
-    {
-        this.set_irq(C.SVGA_IRQFLAG_COMMAND_BUFFER);
-    }
+    const complete = () => {
+        const done = new DataView(new ArrayBuffer(8));
+        done.setUint32(0, status, true);
+        done.setUint32(4, error_offset, true);
+        this.machine.write_physical(new Uint8Array(done.buffer), address);
+        if(status !== C.SVGA_CB_STATUS_COMPLETED)
+        {
+            dbg_log("svga: command buffer at " + h(address) + " failed: status " + status + " at " + error_offset, LOG_VGA);
+            this.set_irq(C.SVGA_IRQFLAG_ERROR);
+        }
+        if(!(flags & C.SVGA_CB_FLAG_NO_IRQ) || status !== C.SVGA_CB_STATUS_COMPLETED)
+        {
+            this.set_irq(C.SVGA_IRQFLAG_COMMAND_BUFFER);
+        }
+    };
+    // a buffer is complete when the GPU work before it is (readbacks have landed)
+    if(this.svga3d) this.svga3d.after_work(complete);
+    else complete();
 };
 
 /**
@@ -837,9 +875,13 @@ SVGADevice.prototype.run_device_command = function(read, available)
  */
 SVGADevice.prototype.fence = function(fence)
 {
-    // Commands complete as they are read
-    Atomics.store(this.fifo(), C.SVGA_FIFO_FENCE, fence | 0);
-    this.set_irq(C.SVGA_IRQFLAG_ANY_FENCE);
+    // 2D commands complete as they are read; 3D ones when the renderer has run them
+    const pass = () => {
+        Atomics.store(this.fifo(), C.SVGA_FIFO_FENCE, fence | 0);
+        this.set_irq(C.SVGA_IRQFLAG_ANY_FENCE);
+    };
+    if(this.svga3d) this.svga3d.after_work(pass);
+    else pass();
 };
 
 /**
@@ -1148,6 +1190,9 @@ SVGADevice.prototype.set_state = function(state)
         this.screens.reset();
         this.cursor.reset();
     }
+    // TODO(S3 checkpoint): the GPU's surfaces and contexts are not in the
+    // snapshot yet; the guest's 3D starts over empty
+    if(this.svga3d) this.svga3d.reset();
     this.mode_key = "";
     this.showing = false;
     this.update_scanout();

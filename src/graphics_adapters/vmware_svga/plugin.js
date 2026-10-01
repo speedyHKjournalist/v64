@@ -15,8 +15,10 @@ register_graphics_adapter({
         const test = options["test"] || {};
         const device = new SVGADevice(new GraphicsMachine(handle), {
             vram_size: options["vram_size"],
-            // without it, the highest level this build implements
+            // without it, the highest level there is a renderer for
             level: test["level"],
+            // the channel to the 3D renderer (svga_renderer.js); tests bring their own
+            renderer: options["renderer"] || test["renderer"],
         });
         return {
             "vga": device.vga,

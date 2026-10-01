@@ -8,7 +8,8 @@
 //
 // GPU_ADAPTER: bochs_vga (default), vmware_svga, virtio_gpu
 // GPU_SCENARIO: the steps below (default: drm)
-// GPU_LEVEL: pins the adapter's level (graphics_adapter_test), e.g. 2d or 2d-full
+// GPU_LEVEL: pins the adapter's level (graphics_adapter_test), e.g. 2d or 2d-full;
+// vgpu9 records the 3D batches into <out>/trace.bin (tests/x64/gpu_trace.mjs)
 // GPU_OUT: the output directory (default build/x64-linux/gpu-<adapter>[-<level>]/)
 // SHOW_LOGS=1: echo the serial console; LINUX_GPU_TIMEOUT: ms (default 900000)
 
@@ -18,6 +19,7 @@ import path from "node:path";
 import { deflateSync as deflate_sync } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { create_trace_renderer } from "./gpu_trace.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const directory = root + "build/x64-linux/";
@@ -116,6 +118,10 @@ function save_png(sink, name)
 
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const sink = new PictureSink();
+// A 3D level needs a renderer: in node, one that records the batches into a
+// trace (tests/x64/gpu_trace.mjs) and renders nothing
+const trace = process.env.GPU_LEVEL === "vgpu9" ?
+    create_trace_renderer(path.join(out, "trace.bin"), { adapter, level: process.env.GPU_LEVEL, scenario }) : null;
 const emulator = new V86({
     graphics_adapter: adapter,
     wasm_path: process.env.WASM_PATH,
@@ -127,7 +133,7 @@ const emulator = new V86({
     disable_jit: !!+process.env.LINUX_GPU_NO_JIT, experimental_smp_jit: !+process.env.LINUX_GPU_NO_JIT,
     log_level: 0, net_device: { type: "none" }, screen_adapter: sink,
     ...(process.env.VRAM_SIZE ? { vram_size: Number(process.env.VRAM_SIZE) } : {}),
-    ...(process.env.GPU_LEVEL ? { graphics_adapter_test: { level: process.env.GPU_LEVEL } } : {}),
+    ...(process.env.GPU_LEVEL ? { graphics_adapter_test: { level: process.env.GPU_LEVEL, renderer: trace && trace.renderer } } : {}),
 });
 
 let serial = "";
@@ -209,6 +215,11 @@ catch(error)
 finally
 {
     fs.writeFileSync(path.join(out, "serial.log"), serial);
+    if(trace)
+    {
+        trace.close();
+        console.log("trace: " + JSON.stringify(trace.stats) + " in " + path.join(out, "trace.bin"));
+    }
     emulator.destroy();
 }
 process.exit(failed ? 1 : 0);

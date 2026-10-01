@@ -268,7 +268,7 @@ PluginDisplaySource.prototype.invalidate = function()
  * @constructor
  * @param {CPU} cpu
  * @param {!Object} descriptor from load_graphics_adapter
- * @param {!Object} options { vram_size }
+ * @param {!Object} options { vram_size, test, renderer }
  */
 export function GraphicsAdapter(cpu, descriptor, options)
 {
@@ -290,6 +290,8 @@ export function GraphicsAdapter(cpu, descriptor, options)
         // graphics_adapter_test: internal, for tests that pin what the
         // adapter declares (its level); not part of the public options
         "test": options.test,
+        // the channel to the adapter's 3D renderer, if the page made one
+        "renderer": options.renderer || null,
     });
     if(!this.device || typeof this.device["get_state"] !== "function" || typeof this.device["set_state"] !== "function")
     {

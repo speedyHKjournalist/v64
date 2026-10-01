@@ -3,7 +3,7 @@ import { instantiate_v86, memory_import } from "../parallel/relocate.js";
 import { default_worker_url, parallel_unsupported_reason } from "../parallel/machine.js";
 import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
 import { v86 } from "../main.js";
-import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
+import { LOG_CPU, LOG_VGA, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { get_rand_int, load_file, read_sized_string_from_mem } from "../lib.js";
 import { dbg_assert, dbg_trace, dbg_log, set_log_level } from "../log.js";
 import * as print_stats from "./print_stats.js";
@@ -55,6 +55,32 @@ function create_graphics_proxy(options)
     }
     return factory(proxy === true ? {} : proxy);
 }
+
+/**
+ * The 3D renderer of the display adapter, on this page: vmware_svga's
+ * (V86SVGARenderer of libv86-webgpu.js), when the page has loaded it and
+ * WebGPU has an adapter. The device then declares 3D (level vgpu9).
+ * @return {!Promise<Object>} the device's end of the channel, or null
+ */
+V86.prototype.create_adapter_renderer = async function()
+{
+    const create = globalThis["V86SVGARenderer"];
+    const gpu = typeof navigator !== "undefined" && navigator["gpu"];
+    if(this.graphics_adapter !== "vmware_svga" || typeof create !== "function" || !gpu) return null;
+    let adapter = null;
+    try
+    {
+        adapter = await gpu["requestAdapter"]();
+    }
+    catch(e)
+    {
+        dbg_log("WebGPU: " + e, LOG_VGA);
+    }
+    if(!adapter || this.destroyed) return null;
+    const channel = create_local_channel();
+    this.adapter_renderer = create(channel.host, {});
+    return channel.device;
+};
 
 /**
  * The ends of a channel between a plugin's device and its host side on one
@@ -110,6 +136,8 @@ export function V86(options)
     // talking over a channel (docs/graphics-proxy-plugin-plan.md)
     this["graphics_proxy"] = create_graphics_proxy(options);
     this.device_plugins = this["graphics_proxy"] ? [this["graphics_proxy"]] : [];
+    /** the display adapter's 3D renderer on this page (create_adapter_renderer) */
+    this.adapter_renderer = null;
     this.plugins_ready = [];
 
     if(options["cpu_worker"] && typeof Worker !== "undefined")
@@ -573,10 +601,12 @@ V86.prototype.continue_init = async function(emulator, options)
         return;
     }
 
-    // The display adapter's plugin, fetched while the files load
+    // The display adapter's plugin, fetched while the files load, and its 3D
+    // renderer if it has one and WebGPU works
     const graphics_adapter = this.graphics_adapter === "none" ? Promise.resolve(undefined) :
         load_graphics_adapter(this.graphics_adapter, options["graphics_adapter_path"]);
     graphics_adapter.catch(() => {});
+    const adapter_renderer = this.create_adapter_renderer();
 
     // ugly, but required for closure compiler compilation
     function put_on_settings(name, buffer)
@@ -865,6 +895,7 @@ V86.prototype.continue_init = async function(emulator, options)
         }
 
         settings.graphics_adapter = await graphics_adapter;
+        settings.graphics_adapter_renderer = await adapter_renderer;
 
         if(this.destroyed) return;
         this.v86.init(settings);
@@ -1109,6 +1140,7 @@ V86.prototype.destroy = async function()
     {
         plugin["destroy"] && await plugin["destroy"]();
     }
+    this.adapter_renderer && this.adapter_renderer["destroy"]();
     this.v86 && this.v86.destroy();
     this.keyboard_adapter && this.keyboard_adapter.destroy();
     this.network_adapter && this.network_adapter.destroy();
