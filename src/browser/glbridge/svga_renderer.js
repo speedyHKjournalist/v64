@@ -60,8 +60,13 @@
             if (!executor.device) await executor.initialize();
             const GX = global.V86GXExecutor;
             if (!GX || !global.V86SVGADXFormats) throw new Error("the SVGA renderer needs gx_executor.js (libv86-webgpu.js)");
+            // surfaces legacy 3D and DX share are copied between the two on the GPU
+            const peer = {
+                resource: handle => executor.resources ? executor.resources.get(handle) || null : null,
+                flush: () => { if (executor.frame) executor.finishFrame(false); },
+            };
             gx = new GX.GXExecutor({ device: executor.device, formats: global.V86SVGADXFormats,
-                features: executor.deviceFeatures || {} });
+                features: executor.deviceFeatures || {}, peer });
             return gx;
         };
 

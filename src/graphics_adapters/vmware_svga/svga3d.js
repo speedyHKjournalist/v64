@@ -85,8 +85,15 @@ function Surface(sid, flags, format, faces, sizes, samples)
         bytes: /** @type {number} */ (desc[4]) };
     this.buffer = format === C.SVGA3D_BUFFER || !!(/** @type {number} */ (desc[0]) & SVGA3DBLOCKDESC_BUFFER);
     this.depth = !!(/** @type {number} */ (desc[0]) & SVGA3DBLOCKDESC_DEPTH);
-    /** where its contents are on the GPU: "" (nowhere yet: a GB surface's MOB has them), "d9wg", "gx" */
+    /** where its newest contents are on the GPU: "" (nowhere yet: a GB
+     * surface's MOB has them), "d9wg", "gx" */
     this.home = "";
+    /** it has a D9WG resource (legacy 3D used it) and a GX one (DX used it);
+     * the D3D9 driver and DWM share surfaces, so it can have both */
+    this.in_d9 = false;
+    this.in_gx = false;
+    /** the copy that is not at home is older (when it has both) */
+    this.stale = false;
     this.faces = faces;
     /** [width, height, depth] of each mip level */
     this.sizes = sizes;
@@ -134,6 +141,8 @@ function Context(cid, device)
     this.instanced = 0;
     /** the color target 0 surface, for the clear and viewport sizes */
     this.target = null;
+    /** @type {!Map<number, !Surface>} the bound targets by SVGA3dRenderTargetType: draws write them */
+    this.targets = new Map();
     /** @type {!Map<string, !Int32Array>} SHADER_DEFINE bodies by "type:shid", for snapshots */
     this.shader_definitions = new Map();
     /** @type {!Map<string, !Array>} the last command setting each piece of state: [id, body] */
@@ -154,6 +163,8 @@ export function SVGA3D(device, renderer)
     this.writer = new D9WGWriter();
     /** @type {!Map<number, !Surface>} */
     this.surfaces = new Map();
+    /** @type {!Set<!Surface>} surfaces both D9WG and GX have (the D3D9 driver's and DWM's) */
+    this.duals = new Set();
     /** @type {!Map<number, !Context>} */
     this.contexts = new Map();
     this.declarations = new Map();
@@ -217,6 +228,7 @@ SVGA3D.prototype.reset = function()
     if(this.dx) this.dx.reset();
     this.dx_context = INVALID;
     this.surfaces.clear();
+    this.duals.clear();
     this.contexts.clear();
     this.declarations.clear();
     this.gb_shaders.clear();
@@ -718,7 +730,10 @@ SVGA3D.prototype.make_d9wg = function(surface)
 {
     const info = surface.info, flags = surface.flags, sizes = surface.sizes, faces = surface.faces;
     const mips = sizes.length, samples = surface.samples;
-    surface.home = "d9wg";
+    // (the caller copies what GX has, if it has the newest contents)
+    const fill = !surface.home;
+    if(fill) surface.home = "d9wg";
+    surface.in_d9 = true;
     if(!info)
     {
         this.warn_once("format" + surface.format, "surface format " + surface.format + " is not supported by legacy 3D");
@@ -728,7 +743,7 @@ SVGA3D.prototype.make_d9wg = function(surface)
     if(!info.d3d)
     {
         surface.data = new Uint8Array(width * height * depth);
-        if(surface.gb && surface.mob !== INVALID)
+        if(fill && surface.gb && surface.mob !== INVALID)
         {
             const bytes = this.device.mobs.read(surface.mob, 0, surface.data.length);
             if(bytes) surface.data.set(bytes);
@@ -762,47 +777,91 @@ SVGA3D.prototype.make_d9wg = function(surface)
             .u32(info.d3d).u32(usage).u32(0).u32(samples > 1 ? samples : 0).u32(0);
     }
     // a GB surface brings what its MOB has
-    if(surface.gb && surface.mob !== INVALID && !surface.host_newer) this.update_gb_surface(surface);
+    if(fill && surface.gb && surface.mob !== INVALID && !surface.host_newer) this.update_gb_surface(surface);
 };
 
 /**
- * A surface's D9WG handle, made the first time legacy 3D uses it
- * @return {number} 0 if it has none (a buffer, or it lives in GX)
+ * A surface's D9WG handle, made the first time legacy 3D uses it, with the
+ * newest contents (copied on the GPU from GX if DX has them)
+ * @param {boolean=} write whether legacy 3D will change it
+ * @return {number} 0 if it has none (a buffer, or no D3D9 format)
  */
-SVGA3D.prototype.d9 = function(surface)
+SVGA3D.prototype.d9 = function(surface, write)
 {
-    if(!surface.home) this.make_d9wg(surface);
-    else if(surface.home === "gx") this.warn_once("homes", "a surface used by both DX and legacy 3D");
+    const made = !surface.in_d9;
+    if(made)
+    {
+        this.make_d9wg(surface);
+        if(surface.in_gx) this.duals.add(surface);
+    }
+    if(surface.home === "gx")
+    {
+        if(surface.buffer)
+        {
+            // (its bytes would have to come back from the GPU first)
+            this.warn_once("homes", "a buffer written by DX is read by legacy 3D");
+            return 0;
+        }
+        if((made || surface.stale) && surface.handle) this.gxw.command(GX.SURFACE_EXPORT, [surface.sid, surface.handle]);
+        surface.home = "d9wg";
+        surface.stale = false;
+    }
+    if(write && surface.in_gx) surface.stale = true;
     return surface.handle;
 };
 
 /**
- * Make a surface in GX, the first time DX (or a copy into a DX surface) uses it
+ * Before a legacy draw or clear: surfaces DX changed since come over, and the
+ * bound targets are written
  */
-SVGA3D.prototype.gx_surface = function(surface)
+SVGA3D.prototype.drawing = function(context)
 {
-    if(surface.home === "gx" || !this.gxw) return;
+    if(!this.duals.size) return;
+    for(const surface of this.duals) if(surface.home === "gx" && surface.stale) this.d9(surface);
+    for(const surface of context.targets.values())
+    {
+        if(surface.in_gx && this.surfaces.get(surface.sid) === surface) this.d9(surface, true);
+    }
+};
+
+/**
+ * Make a surface in GX the first time DX (or a copy into a DX surface) uses
+ * it, with the newest contents (copied on the GPU from D9WG if legacy 3D has them)
+ * @param {boolean=} write whether DX will change it
+ */
+SVGA3D.prototype.gx_surface = function(surface, write)
+{
+    if(!this.gxw) return;
+    const made = !surface.in_gx;
+    if(made)
+    {
+        const [width, height, depth] = surface.sizes[0];
+        const g = surface.gb;
+        const cube = !!(surface.flags & C.SVGA3D_SURFACE_CUBEMAP);
+        const layers = g ? g.layers : surface.faces;
+        this.gxw.command(GX.SURFACE_DEFINE, [surface.sid, surface.format, surface.flags, g ? g.flags2 : 0,
+            width, height, depth, surface.sizes.length, layers, surface.samples, cube ? 1 : 0]);
+        surface.in_gx = true;
+        if(surface.in_d9) this.duals.add(surface);
+        if(!surface.home)
+        {
+            surface.home = "gx";
+            if(surface.gb && surface.mob !== INVALID && !surface.host_newer) this.update_gb_surface(surface);
+        }
+    }
     if(surface.home === "d9wg")
     {
-        if(!surface.data) return this.warn_once("homes", "a surface used by both DX and legacy 3D");
-        // a buffer moves over with its bytes
+        if(made || surface.stale)
+        {
+            // a buffer's bytes are here; a texture is copied on the GPU
+            if(surface.data) this.gxw.command(GX.SURFACE_UPLOAD, [surface.sid, 0, 0, 0, 0, 0,
+                surface.data.length, 1, 1, surface.data.length, surface.data.length], surface.data);
+            else if(surface.handle) this.gxw.command(GX.SURFACE_IMPORT, [surface.sid, surface.handle]);
+        }
+        surface.home = "gx";
+        surface.stale = false;
     }
-    const [width, height, depth] = surface.sizes[0];
-    const g = surface.gb;
-    const cube = !!(surface.flags & C.SVGA3D_SURFACE_CUBEMAP);
-    const layers = g ? g.layers : surface.faces;
-    this.gxw.command(GX.SURFACE_DEFINE, [surface.sid, surface.format, surface.flags, g ? g.flags2 : 0,
-        width, height, depth, surface.sizes.length, layers, surface.samples, cube ? 1 : 0]);
-    const was = surface.home;
-    surface.home = "gx";
-    if(was === "d9wg" && surface.data)
-    {
-        this.upload(surface, 0, 0, 0, 0, 0, surface.data.length, 1, 1, surface.data.length, 1, surface.data);
-    }
-    else if(surface.gb && surface.mob !== INVALID && !surface.host_newer)
-    {
-        this.update_gb_surface(surface);
-    }
+    if(write && surface.in_d9) surface.stale = true;
 };
 
 /**
@@ -811,6 +870,7 @@ SVGA3D.prototype.gx_surface = function(surface)
  */
 SVGA3D.prototype.upload = function(surface, layer, mip, x, y, z, w, h, d, pitch, rows, data)
 {
+    if(surface.in_d9 && surface.in_gx) surface.stale = true;
     if(surface.home === "gx")
     {
         this.gxw.command(GX.SURFACE_UPLOAD, [surface.sid, layer, mip, x, y, z, w, h, d, pitch, pitch * rows], data);
@@ -834,11 +894,9 @@ SVGA3D.prototype.destroy_surface = function(sid)
     const surface = this.surfaces.get(sid);
     if(!surface) return;
     this.surfaces.delete(sid);
-    if(surface.home === "gx")
-    {
-        this.gxw.command(GX.SURFACE_DESTROY, [sid]);
-        return;
-    }
+    this.duals.delete(surface);
+    if(surface.in_gx) this.gxw.command(GX.SURFACE_DESTROY, [sid]);
+    if(!surface.in_d9) return;
     const w = this.writer;
     if(surface.handle) w.begin(OP.DESTROY_RESOURCE).u32(surface.handle).u32(surface.kind);
     for(let role = 0; role < 3; role++)
@@ -853,8 +911,8 @@ SVGA3D.prototype.destroy_surface = function(sid)
  */
 SVGA3D.prototype.buffer_role = function(surface, role)
 {
-    if(!surface.home) this.make_d9wg(surface);
-    if(!surface.data) return 0;
+    this.d9(surface);
+    if(!surface.data || surface.home !== "d9wg") return 0;
     if(surface.roles[role]) return surface.roles[role];
     const handle = surface.roles[role] = this.next_handle++;
     const w = this.writer;
@@ -1079,17 +1137,24 @@ SVGA3D.prototype.image = function(p, at)
 };
 
 /**
- * Where two surfaces meet for a copy: GX if DX has either (or nobody has
- * them yet, at a DX level), else D9WG; both are made there
+ * Where two surfaces meet for a copy: where the destination's contents are
+ * (else the source's; GX if neither has any yet, at a DX level). Both get
+ * their newest contents there.
  * @return {string}
  */
-SVGA3D.prototype.meet = function(a, b)
+SVGA3D.prototype.meet = function(src, dst)
 {
-    const home = this.dx && a.home !== "d9wg" && b.home !== "d9wg" ? "gx" : "d9wg";
-    for(const surface of [a, b])
+    const where = dst.home || src.home || (this.dx ? "gx" : "d9wg");
+    const home = where === "gx" && this.gxw ? "gx" : "d9wg";
+    if(home === "gx")
     {
-        if(home === "gx") this.gx_surface(surface);
-        else this.d9(surface);
+        this.gx_surface(src);
+        this.gx_surface(dst, true);
+    }
+    else
+    {
+        this.d9(src);
+        this.d9(dst, true);
     }
     return home;
 };
@@ -1165,8 +1230,7 @@ SVGA3D.prototype.generate_mipmaps = function(p)
 {
     const surface = this.image(p, 0);
     if(!surface) return;
-    if(surface.home === "gx") return this.warn_once("gx-genmips", "GENERATE_MIPMAPS of a DX surface");
-    if(!this.d9(surface)) return;
+    if(!this.d9(surface, true)) return;
     surface.host_newer = true;
     this.writer.begin(OP.GENERATE_MIPS).u32(UTILITY_DEVICE).u32(surface.handle);
 };
@@ -1347,9 +1411,11 @@ SVGA3D.prototype.set_render_target = function(p)
     if(!context || p.length < 5) return;
     const type = p[1] >>> 0, sid = p[2] >>> 0, face = p[3] >>> 0, mip = p[4] >>> 0;
     const surface = sid === INVALID ? null : this.surfaces.get(sid) || null;
-    const handle = surface && this.d9(surface) || 0;
+    const handle = surface && this.d9(surface, true) || 0;
     // drawn into from now on: the MOB is behind
     if(surface) surface.host_newer = true;
+    if(surface) context.targets.set(type, surface);
+    else context.targets.delete(type);
     if(type === C.SVGA3D_RT_DEPTH)
     {
         const size = surface ? surface.sizes[Math.min(mip, surface.sizes.length - 1)] : [0, 0];
@@ -1492,6 +1558,7 @@ SVGA3D.prototype.clear = function(p, f)
 {
     const context = this.context(p);
     if(!context || p.length < 5) return;
+    this.drawing(context);
     const rects = Math.floor((p.length - 5) / 4);
     // the flag bits are D3DCLEAR's
     const w = this.writer.begin(OP.CLEAR).u32(context.device).u32(p[1] & 7).u32(p[2] >>> 0).f32(f[3]).u32(p[4] >>> 0).u32(rects);
@@ -1617,6 +1684,7 @@ SVGA3D.prototype.draw_primitives = function(p)
     const decls = p[1] >>> 0, ranges = p[2] >>> 0;
     const ranges_at = 3 + 9 * decls, divisors_at = ranges_at + 7 * ranges;
     if(decls > 32 || ranges > 32 || p.length < divisors_at) return;
+    this.drawing(context);
     const has_divisors = p.length >= divisors_at + decls;
     const w = this.writer, device = context.device;
 

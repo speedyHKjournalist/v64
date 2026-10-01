@@ -1,0 +1,102 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VMware SVGA II: surfaces legacy 3D and DX share</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// A D3D9 app on Windows draws with legacy SVGA3D commands (D9WG) and DWM
+// composes with DX (GX), and they share surfaces: the app's picture is copied
+// into DWM's, and the app draws over what DX drew. The device keeps such a
+// surface in both executors and copies it between them on the GPU
+// (GX SURFACE_IMPORT and SURFACE_EXPORT) when the other side needs it.
+import * as C from "../../src/graphics_adapters/vmware_svga/svga_constants.js";
+import { SVGA3D } from "../../src/graphics_adapters/vmware_svga/svga3d.js";
+import { ScreenObjects } from "../../src/graphics_adapters/vmware_svga/svga_screens.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+(async () => {
+    try {
+        const mobs = new Map();
+        const mob_table = {
+            read: (id, offset, length) => { const m = mobs.get(id); return m && offset + length <= m.length ? m.slice(offset, offset + length) : null; },
+            write: (id, offset, bytes) => { const m = mobs.get(id); if(!m || offset + bytes.length > m.length) return false; m.set(bytes, offset); return true; },
+            size: id => mobs.has(id) ? mobs.get(id).length : -1,
+        };
+        const screens = new ScreenObjects({ read: () => null, write: () => false });
+        const device = { caps: C.SVGA_CAP_3D | C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_DX, level: "dx10",
+            gmrs: { read: () => null, write: () => false }, mobs: mob_table, otables: null, screens,
+            set_irq: () => {}, svga_active: () => false };
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        globalThis.svgaWarnings = [];
+        for(const method of ["warn", "error"])
+        {
+            const original = console[method];
+            console[method] = (...args) => { globalThis.svgaWarnings.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); original.apply(console, args); };
+        }
+        const svga3d = new SVGA3D(device, end(0, 1));
+        const run = (id, ...body) => svga3d.command(id, Int32Array.from(body, v => v | 0));
+        const finished = () => new Promise(resolve => svga3d.after_work(resolve));
+        const pixel = (mob, x, y) => Array.from(mobs.get(mob).subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4)).join();
+
+        // APP: the D3D9 app's back buffer (X8R8G8B8); WIN: DWM's surface for
+        // its window (B8G8R8A8), which DWM draws with DX
+        const APP = 20, WIN = 21, CID = 1, LEGACY = 5;
+        mobs.set(1, new Uint8Array(64 * 64 * 4));
+        mobs.set(2, new Uint8Array(64 * 64 * 4));
+        const BIND_RT = C.SVGA3D_SURFACE_BIND_RENDER_TARGET | C.SVGA3D_SURFACE_BIND_SHADER_RESOURCE;
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, APP, C.SVGA3D_SURFACE_HINT_RENDERTARGET, C.SVGA3D_X8R8G8B8, 1, 0, 0, 64, 64, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, WIN, BIND_RT, C.SVGA3D_B8G8R8A8_UNORM, 1, 0, 0, 64, 64, 1, 1, 0);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, APP, 1);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, WIN, 2);
+
+        // DWM clears its surface red
+        run(C.SVGA_3D_CMD_DX_DEFINE_CONTEXT, CID);
+        svga3d.dx_context = CID;
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 0, WIN, C.SVGA3D_B8G8R8A8_UNORM, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, 0, f32(1), f32(0), f32(0), f32(1));
+
+        // the app clears its back buffer green (alpha 0: an X format's is
+        // ignored) and presents: a copy of its top left quarter into DWM's
+        run(C.SVGA_3D_CMD_CONTEXT_DEFINE, LEGACY);
+        run(C.SVGA_3D_CMD_SETRENDERTARGET, LEGACY, C.SVGA3D_RT_COLOR0, APP, 0, 0);
+        run(C.SVGA_3D_CMD_CLEAR, LEGACY, C.SVGA3D_CLEAR_COLOR, 0x0000FF00, f32(1), 0);
+        run(C.SVGA_3D_CMD_SURFACE_COPY, APP, 0, 0, WIN, 0, 0, 0, 0, 0, 32, 32, 1, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, WIN, 0);
+        await finished();
+        check(pixel(2, 8, 8) === "0,255,0,255", "the app's picture reached DWM's surface, opaque (" + pixel(2, 8, 8) + ")");
+        check(pixel(2, 56, 56) === "0,0,255,255", "and the rest is DWM's red (" + pixel(2, 56, 56) + ")");
+
+        // now the app draws into DWM's surface: a blue clear of its top
+        // right quarter, over what DX drew
+        run(C.SVGA_3D_CMD_SETRENDERTARGET, LEGACY, C.SVGA3D_RT_COLOR0, WIN, 0, 0);
+        run(C.SVGA_3D_CMD_CLEAR, LEGACY, C.SVGA3D_CLEAR_COLOR, 0xFF0000FF, f32(1), 0, 32, 0, 32, 32);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, WIN, 0);
+        await finished();
+        check(pixel(2, 48, 8) === "255,0,0,255", "legacy 3D drew into DWM's surface (" + pixel(2, 48, 8) + ")");
+        check(pixel(2, 8, 8) === "0,255,0,255", "over what was there: the copy (" + pixel(2, 8, 8) + ")");
+        check(pixel(2, 56, 56) === "0,0,255,255", "and DX's clear (" + pixel(2, 56, 56) + ")");
+
+        // and DWM draws on: a DX clear sees the app's blue first
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 1, WIN, C.SVGA3D_B8G8R8A8_UNORM, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0xFFFFFFFF, 1);
+        run(C.SVGA_3D_CMD_DX_PRED_COPY_REGION, WIN, 0, APP, 0, 0, 56, 0, 8, 8, 1, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, WIN, 0);
+        await finished();
+        check(pixel(2, 48, 8) === "255,0,0,255", "the app's blue is in GX's copy too (" + pixel(2, 48, 8) + ")");
+        check(pixel(2, 4, 60) === "0,255,0,255", "and a DX copy from the app's back buffer (" + pixel(2, 4, 60) + ")");
+        check(renderer.gx, "GX made on the D3D9 executor's device");
+
+        const warnings = globalThis.svgaWarnings.filter(w => /\[gx\]|WGSL|WebGPU|d3d9/i.test(w));
+        check(!warnings.length, "no warnings: " + warnings.join(" / "));
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error.stack || error) + "\n" + checks.join("\n") + "\nwarnings: " + (globalThis.svgaWarnings || []).join("\n");
+    }
+})();
+</script>

@@ -28,7 +28,7 @@
     const GX = {
         SURFACE_DEFINE: 1, SURFACE_DESTROY: 2, SURFACE_UPLOAD: 3, SURFACE_READBACK: 4,
         CONTEXT_DEFINE: 5, CONTEXT_DESTROY: 6, SHADER_CODE: 7, DX: 8, SURFACE_COPY: 9, QUERY_END: 10,
-        COTABLE_RESET: 11, SURFACE_STRETCH: 12,
+        COTABLE_RESET: 11, SURFACE_STRETCH: 12, SURFACE_IMPORT: 13, SURFACE_EXPORT: 14,
     };
 
     // SVGA_3D_CMD_DX_* (svga3d_cmd.h)
@@ -126,6 +126,8 @@
          */
         constructor(options) {
             this.device = options.device;
+            /** the D3D9 executor on the same device: { resource(handle), flush() } */
+            this.peer = options.peer || null;
             this.formats = options.formats;
             this.features = options.features || {};
             this.write = null;
@@ -223,6 +225,8 @@
                 case GX.DX: return this.dx(b[0], b[1], b.subarray(2));
                 case GX.SURFACE_COPY: return this.copySurface(b);
                 case GX.SURFACE_STRETCH: return this.stretch(b);
+                case GX.SURFACE_IMPORT: return this.share(b[0], b[1], false);
+                case GX.SURFACE_EXPORT: return this.share(b[0], b[1], true);
                 case GX.QUERY_END: return this.endQuery(b);
                 case GX.COTABLE_RESET: {
                     const c = this.contexts.get(b[0]);
@@ -508,6 +512,60 @@
                 [align(w, S.f.bw), align(h, S.f.bh), d]);
         }
 
+        /**
+         * Copy every image between a surface and the D9WG resource that is
+         * the same surface for legacy 3D (options.peer: the D3D9 executor on
+         * the same device): a copy where the formats are the same, else a
+         * draw. An "X" format's alpha is 1.
+         */
+        share(sid, handle, toPeer) {
+            const s = this.surfaces.get(sid);
+            const peer = this.peer && this.peer.resource(handle);
+            if (!s || !s.texture || !peer || !peer.gpuTexture) {
+                if (s && s.buffer) this.warn("share-buffer", "a buffer shared by DX and legacy 3D");
+                else this.warn("share-missing", "a shared surface is missing on one side");
+                return;
+            }
+            // (the D3D9 executor records draws for later: they go first)
+            this.peer.flush();
+            const gpu = peer.gpuFormat;
+            const block = gpu.startsWith("bc") ? 4 : 1;
+            const p = { texture: peer.gpuTexture, f: { gpu, can: "", bw: block, bh: block, bytes: 0 },
+                width: peer.width, height: peer.height, depth: peer.depth || 1,
+                volume: peer.textureType === "3d", layers: peer.layerCount || 1,
+                gpuMips: peer.levelCount || 1, samples: 1 };
+            if (s.samples > 1 || isDepthFormat(s.f.gpu) || isDepthFormat(gpu)) {
+                this.warn("share-kind", "a multisampled or depth surface shared by DX and legacy 3D");
+                return;
+            }
+            const [S, D] = toPeer ? [s, p] : [p, s];
+            const opaque = s.f.can.includes("x");
+            const sameFamily = S.f.gpu === D.f.gpu || SRGB[S.f.gpu] === D.f.gpu || SRGB[D.f.gpu] === S.f.gpu;
+            const mips = Math.min(S.gpuMips, D.gpuMips);
+            const layers = S.volume || D.volume ? 1 : Math.min(S.layers, D.layers);
+            this.endPass();
+            for (let mip = 0; mip < mips; mip++) {
+                const sl = this.level(S, mip), dl = this.level(D, mip);
+                const w = Math.min(sl.width, dl.width), h = Math.min(sl.height, dl.height);
+                for (let layer = 0; layer < layers; layer++) {
+                    if (sameFamily && !opaque) {
+                        this.encoder().copyTextureToTexture(
+                            { texture: S.texture, mipLevel: mip, origin: [0, 0, S.volume ? 0 : layer] },
+                            { texture: D.texture, mipLevel: mip, origin: [0, 0, D.volume ? 0 : layer] },
+                            [align(w, block), align(h, block), S.volume && D.volume ? Math.min(sl.depth, dl.depth) : 1]);
+                    } else if (S.volume || D.volume || block > 1) {
+                        this.warn("share-format:" + S.f.gpu + ":" + D.f.gpu, "a shared surface's formats differ: " +
+                            S.f.gpu + " and " + D.f.gpu);
+                        return;
+                    } else {
+                        this.blit(S, layer, mip, [0, 0, w, h], D, layer, mip, [0, 0, w, h], false, opaque);
+                    }
+                    // (D9WG warns about levels nothing has written: these are written)
+                    if (toPeer && peer.uploadedLevels) peer.uploadedLevels.add(peer.layerCount === 6 ? mip * 6 + layer : mip);
+                }
+            }
+        }
+
         stretch(b) {
             const [src, sLayer, sMip, sl, st, sr, sb, dst, dLayer, dMip, dl, dt, dr, db, linear] = b;
             const S = this.surfaces.get(src), D = this.surfaces.get(dst);
@@ -518,11 +576,11 @@
         /**
          * Draw a rectangle of a texture into one of another, scaled
          */
-        blit(S, sLayer, sMip, [sl, st, sr, sb], D, dLayer, dMip, [dl, dt, dr, db], linear) {
+        blit(S, sLayer, sMip, [sl, st, sr, sb], D, dLayer, dMip, [dl, dt, dr, db], linear, opaque) {
             const format = D.f.gpu;
             if (isDepthFormat(format) || isDepthFormat(S.f.gpu)) return this.warn("blit-depth", "blits of depth surfaces are not supported");
             const kind = sampleKind(S.f.gpu);
-            const key = format + ":" + kind;
+            const key = format + ":" + kind + (opaque ? ":opaque" : "");
             let pipeline = this.blitPipelines.get(key);
             if (!pipeline) {
                 const type = kind === "sint" ? "i32" : kind === "uint" ? "u32" : "f32";
@@ -541,8 +599,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
     return out;
 }
 @fragment fn fs(input: Out) -> @location(0) vec4<${outType}> {
-    ${type === "f32" ? `return vec4<${outType}>(textureSampleLevel(t, s, input.uv / box.size.xy, 0.0));` :
-        `return vec4<${outType}>(textureLoad(t, vec2<i32>(input.uv), 0));`}
+    ${type === "f32" ? `let c = textureSampleLevel(t, s, input.uv / box.size.xy, 0.0);` :
+        `let c = textureLoad(t, vec2<i32>(input.uv), 0);`}
+    return vec4<${outType}>(${opaque ? `vec4<${type}>(c.rgb, ${type === "f32" ? "1.0" : "1"})` : "c"});
 }`;
                 const module = this.device.createShaderModule({ code });
                 pipeline = this.device.createRenderPipeline({ layout: "auto",

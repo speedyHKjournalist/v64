@@ -41,6 +41,10 @@ export const GX = {
     QUERY_END: 10,          // cid, qid, type, request id
     COTABLE_RESET: 11,      // cid, SVGACOTableType: forget the objects of a type
     SURFACE_STRETCH: 12,    // src sid, layer, mip, l, t, r, b, dst sid, layer, mip, l, t, r, b, linear
+    // a surface both GX and D9WG have (D3D9 apps' and DWM's): every image of
+    // the D9WG resource into GX's surface, or back
+    SURFACE_IMPORT: 13,     // sid, D9WG handle
+    SURFACE_EXPORT: 14,     // sid, D9WG handle
 };
 
 /** Bytes of a COTable entry, per SVGACOTableType */
@@ -224,8 +228,12 @@ DXDevice.prototype.forward = function(cid, id, p)
     this.gx().command(GX.DX, words);
 };
 
-/** Make sure a surface a command names is in GX (0 or INVALID name none) */
-DXDevice.prototype.surface = function(sid)
+/**
+ * Make sure a surface a command names is in GX, with its newest contents (0
+ * or INVALID name none)
+ * @param {boolean=} write whether DX will change it
+ */
+DXDevice.prototype.surface = function(sid, write)
 {
     if(sid === INVALID || sid === 0 && !this.s.surfaces.has(0)) return null;
     const surface = this.s.surfaces.get(sid);
@@ -234,15 +242,34 @@ DXDevice.prototype.surface = function(sid)
         this.warn("sid", "a DX command names an undefined surface");
         return null;
     }
-    this.s.gx_surface(surface);
+    this.s.gx_surface(surface, write);
     return surface;
 };
 
 /** ... and that the GPU will write it */
 DXDevice.prototype.written = function(sid)
 {
-    const surface = this.surface(sid);
+    const surface = this.surface(sid, true);
     if(surface) surface.host_newer = true;
+};
+
+/**
+ * Before a draw: surfaces legacy 3D changed since come over, and the bound
+ * targets are written (the D3D9 driver and DWM share surfaces)
+ */
+DXDevice.prototype.drawing = function(context)
+{
+    const s = this.s;
+    if(!s.duals.size) return;
+    for(const surface of s.duals) if(surface.home === "d9wg" && surface.stale) s.gx_surface(surface);
+    const st = context.state;
+    const mark = (kind, view) => {
+        const sid = context.views[kind].get(view);
+        const surface = sid === undefined ? null : s.surfaces.get(sid);
+        if(surface && surface.in_d9) s.gx_surface(surface, true);
+    };
+    mark(VIEW_DSV, st[DXCTX.DSV]);
+    for(let i = 0; i < 8; i++) mark(VIEW_RTV, st[DXCTX.RTVS + i]);
 };
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1033,8 @@ DXDevice.prototype.state_command = function(context, id, p)
         case C.SVGA_3D_CMD_DX_DRAW_INDEXED_INSTANCED:
         case C.SVGA_3D_CMD_DX_DRAW_AUTO:
         case C.SVGA_3D_CMD_DX_DISPATCH:
+            this.drawing(context);
+            break;
         case C.SVGA_3D_CMD_DX_BEGIN_QUERY:
         case C.SVGA_3D_CMD_DX_SET_SHADER_IFACE:
         case C.SVGA_3D_CMD_DX_SET_STRUCTURE_COUNT:
