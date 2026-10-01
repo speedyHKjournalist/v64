@@ -157,7 +157,7 @@ var VirtIO_DeviceSpecificCapabilityOptions;
  *     capability_bar: (undefined | number),
  *     rom_size: (undefined | number),
  *     rom_address: (undefined | number),
- *     keep_msix_vectors: (undefined | boolean),
+ *     qemu_compatible: (undefined | boolean),
  * }}
  */
 var VirtIO_Options;
@@ -266,11 +266,13 @@ export function VirtIO(cpu, options)
     this.pci_rom_size = options.rom_size || 0;
     this.pci_rom_address = options.rom_address || 0;
 
-    // Without MSI-X, the vector registers read NO_VECTOR. With this, they
-    // keep what the driver writes, as QEMU's do: viogpudo always asks for a
-    // configuration vector and gives up when it does not read back
-    // (interrupts stay INTx either way)
-    this.keep_msix_vectors = !!options.keep_msix_vectors;
+    // Registers as QEMU's virtio-pci has them, where drivers depend on it
+    // (viogpudo): the vector registers keep what the driver writes, though
+    // there is no MSI-X (viogpudo always asks for a configuration vector and
+    // gives up when it does not read back; interrupts stay INTx), and a
+    // configuration change sets both ISR bits (viogpudo's INTx handler takes
+    // only 1 and 3)
+    this.qemu_compatible = !!options.qemu_compatible;
     this.msix_config_vector = 0xFFFF;
 
     // Feature bits grouped in dwords, dword selected by decive_feature_select.
@@ -442,7 +444,7 @@ VirtIO.prototype.create_common_capability = function(options)
                 write: data =>
                 {
                     dbg_log("No msi-x capability supported.", LOG_VIRTIO);
-                    if(this.keep_msix_vectors) this.msix_config_vector = data;
+                    if(this.qemu_compatible) this.msix_config_vector = data;
                 },
             },
             {
@@ -568,7 +570,7 @@ VirtIO.prototype.create_common_capability = function(options)
                 write: data =>
                 {
                     dbg_log("No msi-x capability supported.", LOG_VIRTIO);
-                    if(this.keep_msix_vectors && this.queue_selected) this.queue_selected.msix_vector = data;
+                    if(this.qemu_compatible && this.queue_selected) this.queue_selected.msix_vector = data;
                 },
             },
             {
@@ -1145,7 +1147,7 @@ VirtIO.prototype.notify_config_changes = function()
 
     if(this.device_status & VIRTIO_STATUS_DRIVER_OK)
     {
-        this.raise_irq(VIRTIO_ISR_DEVICE_CFG);
+        this.raise_irq(this.qemu_compatible ? VIRTIO_ISR_DEVICE_CFG | VIRTIO_ISR_QUEUE : VIRTIO_ISR_DEVICE_CFG);
     }
     else
     {
@@ -1224,7 +1226,7 @@ function VirtQueue(cpu, virtio, options)
     this.notify_offset = options.notify_offset;
 
     this.address_words = new Uint32Array(6);
-    // (see VirtIO.keep_msix_vectors)
+    // (see VirtIO.qemu_compatible)
     this.msix_vector = 0xFFFF;
     this.desc_addr = 0;
 

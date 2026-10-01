@@ -328,7 +328,7 @@ console.log("PASS: the cursor queue");
 mmio_read8(isr);
 emulator.set_display_size(1280, 720);
 assert.equal(mmio_read32(config), 1, "events_read: VIRTIO_GPU_EVENT_DISPLAY");
-assert.equal(mmio_read8(isr) & 2, 2, "a configuration change interrupt");
+assert.equal(mmio_read8(isr), 3, "a configuration change interrupt (both bits, as QEMU: viogpudo's INTx handler takes only 1 and 3)");
 mmio_write32(config + 4, 1);
 assert.equal(mmio_read32(config), 0, "events_clear");
 command(0x0100);
