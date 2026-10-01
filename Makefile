@@ -645,6 +645,7 @@ display-browser-tests: build/cpu-worker.js build/libv86.mjs build/libv86.js buil
 	node tests/glbridge/gl_multipass_browser_runner.js svga_fixed_function_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js svga_gs_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js svga_so_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js svga_pull_browser_test.html
 
 # A browser/library rebuild must ship the matching wire-protocol implementation.
 build/v86_all.js build/v86_all_debug.js build/libv86.js build/libv86.mjs build/libv86-debug.js build/libv86-debug.mjs: | build/cpu-worker.js

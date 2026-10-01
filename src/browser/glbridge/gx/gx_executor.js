@@ -1132,6 +1132,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const st = c.state;
             const layout = c.layouts.get(st.layout);
             const vertexInputs = {}, buffers = [], slots = [], fetch = [];
+            let pull = false;
             if (layout) {
                 const bySlot = new Map();
                 const running = new Map();
@@ -1145,24 +1146,25 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     if (offset === INVALID) offset = running.get(e.slot) || 0;
                     running.set(e.slot, offset + vertexSize(f.vertex));
                     fetch.push({ reg: e.register, slot: e.slot, offset, format: f.vertex, instanced: !!e.instanced });
+                    // what WebGPU's vertex fetch cannot take: the vertices are pulled
+                    if (/^pull:/.test(f.vertex) || e.instanced && e.rate > 1 || offset % Math.min(4, vertexSize(f.vertex))) pull = true;
                     if (!bySlot.has(e.slot)) bySlot.set(e.slot, { instanced: e.instanced, attributes: [] });
                     bySlot.get(e.slot).attributes.push({ format: f.vertex, offset, shaderLocation: e.register });
                     vertexInputs[e.register] = /sint/.test(f.vertex) ? "i32" : /uint/.test(f.vertex) ? "u32" : "f32";
-                    if (e.instanced && e.rate > 1) this.warn("rate", "instance data step rates above 1 are not supported");
                 }
                 for (const [slot, b] of [...bySlot].sort((a, b2) => a[0] - b2[0])) {
                     const vb = st.vbs[slot] || { sid: INVALID, stride: 0, offset: 0 };
                     let stride = vb.stride;
                     const end = Math.max(...b.attributes.map(a => a.offset + vertexSize(a.format)));
-                    if (stride && (stride & 3 || stride < end)) {
-                        this.warn("stride", "a vertex stride WebGPU does not take (" + stride + ")");
+                    if (stride && (stride & 3 || stride < end || stride > 2048)) {
+                        pull = true;
                         stride = align(Math.max(stride, end), 4);
                     }
                     buffers.push({ arrayStride: stride, stepMode: b.instanced ? "instance" : "vertex", attributes: b.attributes });
                     slots.push({ slot, vb });
                 }
             }
-            return { vertexInputs, buffers, slots, fetch, layout };
+            return { vertexInputs, buffers, slots, fetch, layout, pull };
         }
 
         draw(c, call) {
@@ -1179,6 +1181,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const input = this.inputLayout(c);
             // a geometry shader: the vertex and geometry shaders run as compute
             if (gs && gs.program) return this.drawGeometry(c, call, vs, gs, ps, a, input, so);
+            // vertices WebGPU cannot fetch: the vertex shader pulls them, as compute
+            if (input.pull && !so) return a ? this.drawPulled(c, call, vs, ps, a, input) : undefined;
             // stream output of the vertex shader's primitives
             if (so) {
                 this.streamVertices(c, call, vs, input, so);
@@ -1527,14 +1531,20 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             this.draw(c, { count: 0, first: 0, instances: 1, firstInstance: 0, indirect: { buffer: args, offset: 0 } });
         }
 
-        /** A draw of records a compute stage wrote: position and varyings as the pixel shader reads them */
-        drawRecords(c, a, ps, shader, module, buffer, topology, count) {
+        /**
+         * A draw of records a compute stage wrote: position and varyings as
+         * the pixel shader reads them (`instances` of `count` records each)
+         */
+        drawRecords(c, a, ps, shader, module, buffer, topology, count, instances) {
+            instances = instances || 1;
             const st = c.state;
             const varyings = ps && ps.program ? WGSL.pixelVaryings(ps.program) : {};
             const record = module.result.record, outputs = module.result.gs ? record - 1 : record;
             let position = -1;
             for (const output of shader.program.outputs) if (output.name === IR.NAME.POSITION && output.type === IR.OPERAND.OUTPUT) position = output.index;
-            const passKey = "records:" + record + ":" + outputs + ":" + position + ":" + (module.result.gs ? 1 : 0) + ":" + JSON.stringify(varyings);
+            const perInstance = instances > 1 ? count : 0;
+            const passKey = "records:" + record + ":" + outputs + ":" + position + ":" + (module.result.gs ? 1 : 0) + ":" +
+                JSON.stringify(varyings) + ":" + perInstance;
             let pass = this.modules.get(passKey);
             if (!pass) {
                 const fields = ["    @builtin(position) position: vec4<f32>,"], stores = [];
@@ -1552,8 +1562,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     "@group(0) @binding(15) var<uniform> gx_draw: GXDraw;\n" +
                     "@group(0) @binding(232) var<storage, read> gx_in: array<vec4<u32>>;\n" +
                     `struct Out {\n${fields.join("\n")}\n}\n` +
-                    "@vertex fn main(@builtin(vertex_index) vid: u32) -> Out {\n" +
-                    `    let at = vid * ${record}u;\n    var out: Out;\n` +
+                    "@vertex fn main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> Out {\n" +
+                    `    let at = (iid * ${perInstance}u + vid) * ${record}u;\n    var out: Out;\n` +
                     // an unused slot (a geometry shader's flag lane): outside the clip volume
                     (module.result.gs ? `    if (gx_in[at + ${outputs}u].x == 0u) { out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0); return out; }\n` : "") +
                     (position >= 0 ? `    let p = bitcast<vec4<f32>>(gx_in[at + ${position}u]);\n` : "    let p = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n") +
@@ -1592,7 +1602,44 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             if (groups.includes(null)) return;
             const renderPass = this.renderPass(c, a, pipeline, groups, viewport, raster);
             this.stats.draws++;
-            renderPass.draw(count, 1, 0, 0);
+            renderPass.draw(count, instances, 0, 0);
+        }
+
+        /** A draw whose vertices WebGPU cannot fetch: the vertex shader as compute, then its records drawn */
+        drawPulled(c, call, vs, ps, a, input) {
+            const st = c.state;
+            if (call.indirect) return this.warn("pull-indirect", "indirect draws of vertices WebGPU cannot fetch are not supported");
+            if (!call.count || !call.instances) return;
+            let vsModule;
+            try {
+                vsModule = this.module(vs, { group: 0, mode: "vertex-compute", fetch: input.fetch });
+            } catch (error) {
+                return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
+            }
+            const record = Math.max(1, vsModule.result.record);
+            const vsOut = this.storageBuffer(call.count * call.instances * record * 16);
+            const vsPipe = this.computePipeline(c, SHADER_VS, vsModule);
+            if (!vsPipe) return;
+            const ib = this.surfaces.get(st.ib.sid);
+            const group = this.bindGroup(c, SHADER_VS, vsModule, vsPipe.layout, call, null, {
+                "fetch": this.uniform(this.fetchParameters(st, call, input)),
+                "index": { buffer: call.indexed && ib && ib.buffer ? ib.buffer : this.dummyBuffer },
+                "vertex-buffer": slot => {
+                    const vb = st.vbs[slot];
+                    const S = vb && this.surfaces.get(vb.sid);
+                    return { buffer: S && S.buffer ? S.buffer : this.dummyBuffer };
+                },
+                "stage-out": { buffer: vsOut },
+            });
+            if (!group) return;
+            this.endPass();
+            const compute = this.encoder().beginComputePass();
+            compute.setPipeline(vsPipe.pipeline);
+            compute.setBindGroup(0, group);
+            this.dispatch(compute, call.count * call.instances);
+            compute.end();
+            this.stats.pulledDraws = (this.stats.pulledDraws || 0) + 1;
+            this.drawRecords(c, a, ps, vs, vsModule, vsOut, TOPOLOGY[st.topology], call.count, call.instances);
         }
 
         /** GXFetch: the draw, and each vertex buffer's offset, stride and instance step rate */
