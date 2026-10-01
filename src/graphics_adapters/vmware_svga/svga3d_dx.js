@@ -229,6 +229,20 @@ DXDevice.prototype.forward = function(cid, id, p)
 };
 
 /**
+ * A staging copy: written to GX, then, when it says readback, its
+ * destination's subresource (-1: all of them) into the destination's MOB
+ */
+DXDevice.prototype.staging_copy = function(cid, id, p, dst_sid, subresource, readback)
+{
+    this.written(dst_sid);
+    this.forward(cid, id, p);
+    const dst = readback && this.s.surfaces.get(dst_sid);
+    if(!dst) return;
+    if(subresource < 0) this.s.readback_surface(dst);
+    else this.s.readback_subresource(dst, subresource);
+};
+
+/**
  * Make sure a surface a command names is in GX, with its newest contents (0
  * or INVALID name none)
  * @param {boolean=} write whether DX will change it
@@ -930,25 +944,33 @@ DXDevice.prototype.state_command = function(context, id, p)
             this.surface(p[0]);
             break;
         case C.SVGA_3D_CMD_DX_PRED_COPY_REGION:
-        case C.SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION:
         case C.SVGA_3D_CMD_DX_RESOLVE_COPY:
         case C.SVGA_3D_CMD_DX_PRED_RESOLVE_COPY:
             this.surface(p[2]);
             this.written(p[0]);
             break;
         case C.SVGA_3D_CMD_DX_PRED_COPY:
-        case C.SVGA_3D_CMD_DX_PRED_STAGING_COPY:
-        case C.SVGA_3D_CMD_DX_STAGING_COPY:
         case C.SVGA_3D_CMD_DX_PRED_CONVERT:
-        case C.SVGA_3D_CMD_DX_PRED_STAGING_CONVERT:
             this.surface(p[1]);
             this.written(p[0]);
             break;
         case C.SVGA_3D_CMD_DX_PRED_CONVERT_REGION:
-        case C.SVGA_3D_CMD_DX_PRED_STAGING_CONVERT_REGION:
             this.surface(p[8]);
             this.written(p[0]);
             break;
+        // the staging copies (FL11's readbacks): a copy, then, with their
+        // readback byte, the destination (subresource) into its MOB
+        case C.SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION:
+            this.surface(p[2]);
+            return this.staging_copy(cid, id, p, p[0], p[1], (p[13] & 0xFF) !== 0);
+        case C.SVGA_3D_CMD_DX_PRED_STAGING_COPY:
+        case C.SVGA_3D_CMD_DX_STAGING_COPY:
+        case C.SVGA_3D_CMD_DX_PRED_STAGING_CONVERT:
+            this.surface(p[1]);
+            return this.staging_copy(cid, id, p, p[0], -1, (p[2] & 0xFF) !== 0);
+        case C.SVGA_3D_CMD_DX_PRED_STAGING_CONVERT_REGION:
+            this.surface(p[8]);
+            return this.staging_copy(cid, id, p, p[0], p[1], (p[16] & 0xFF) !== 0);
         case C.SVGA_3D_CMD_DX_BUFFER_COPY:
         case C.SVGA_3D_CMD_DX_STAGING_BUFFER_COPY:
             this.surface(p[1]);

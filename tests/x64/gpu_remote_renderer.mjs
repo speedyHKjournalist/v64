@@ -114,6 +114,13 @@ export async function create_remote_renderer(options = {})
         `--user-data-dir=${profile}`,
         `http://127.0.0.1:${port}/tests/glbridge/svga_remote_renderer.html?ws=ws://127.0.0.1:${port}/renderer`,
     ], { stdio: ["ignore", "ignore", "pipe"] });
+    // A harness stopped by a signal skips close(); Chrome would outlive it
+    const kill_browser = () => browser.kill("SIGKILL");
+    process.on("exit", kill_browser);
+    for(const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]])
+    {
+        if(!process.listenerCount(signal)) process.once(signal, () => process.exit(code));
+    }
     let stderr = "";
     browser.stderr.on("data", data => { stderr = (stderr + data).slice(-4000); });
     let closing = false;
@@ -158,6 +165,7 @@ export async function create_remote_renderer(options = {})
             closing = true;
             socket && socket.destroy();
             browser.kill();
+            process.off("exit", kill_browser);
             server.close();
             // (Chrome may still be writing its profile as it goes)
             setTimeout(() => fs.rm(profile, { recursive: true, force: true, maxRetries: 5 }, () => {}), 1000).unref();
