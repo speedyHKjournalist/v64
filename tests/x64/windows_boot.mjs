@@ -17,7 +17,11 @@
 // desktop: host and in-guest CPU load of the idle desktop, see host_window). While it runs, a line written to
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
-// "trace on|off" (WIN_USER_TRACE=1 enables it from the start).
+// "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
+// <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>".
+// WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; vmware_svga, whose
+// level WIN_SVGA_LEVEL pins);
+// WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -74,8 +78,11 @@ function save_overlay(filename)
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const vm = new V86({
-    graphics_adapter: "bochs_vga",
+    graphics_adapter: process.env.WIN_GRAPHICS_ADAPTER || "bochs_vga",
+    // WIN_SVGA_LEVEL: pin what vmware_svga declares (2d, 2d-full, ...)
+    ...(process.env.WIN_SVGA_LEVEL ? {graphics_adapter_test: {level: process.env.WIN_SVGA_LEVEL}} : {}),
     wasm_path: process.env.WASM_PATH,
+    ...(process.env.WIN_CDROM ? {cdrom: {url: path.resolve(process.env.WIN_CDROM)}} : {}),
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
     hda: source, hdb: tools, memory_size: memory_mb * 1048576, vram_size: 16 << 20,
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
@@ -207,23 +214,39 @@ const enter = () => press([28, 156]);
 // vga.svga_memory is a lib.js view (a Proxy that builds a typed array on
 // every element access): read the frame buffer through one plain array
 const svga_bytes = () => new Uint8Array(cpu.wasm_memory.buffer, cpu.devices.vga.svga_memory.byteOffset, cpu.devices.vga.vga_memory_size);
+// The picture on screen: the SVGA II register mode (vmware_svga with its
+// driver) or the VGA core's VBE mode; null in text and planar modes
+function frame_buffer()
+{
+    const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+    if(svga && svga.svga_active()) return {width: svga.width, height: svga.height, bpp: svga.bpp, pitch: svga.pitch(), offset: 0};
+    const vga = cpu.devices.vga;
+    if(!vga.svga_enabled) return null;
+    const bytes = vga.svga_bpp / 8;
+    return {width: vga.svga_width, height: vga.svga_height, bpp: vga.svga_bpp, pitch: vga.svga_width * bytes, offset: vga.svga_offset * bytes};
+}
+// 1024x768 at 16/24/32 bpp, as the pixel heuristics below expect
+function desktop_mode()
+{
+    const fb = frame_buffer();
+    return fb && fb.width === 1024 && fb.height === 768 && [32, 24, 16].includes(fb.bpp) ? fb : null;
+}
 let pixel_memory = null, pixel_memory_at = -1;
 function pixel(x, y)
 {
-    const vga = cpu.devices.vga, bytes_per = vga.svga_bpp / 8;
+    const fb = frame_buffer(), bytes_per = fb.bpp / 8;
     // (one array per polling round: the wasm memory may grow in between)
     if(pixel_memory_at !== Math.floor(performance.now() / 50) || pixel_memory.buffer !== cpu.wasm_memory.buffer)
     {
         pixel_memory = svga_bytes();
         pixel_memory_at = Math.floor(performance.now() / 50);
     }
-    const at = (vga.svga_offset + y * vga.svga_width + x) * bytes_per, m = pixel_memory;
+    const at = fb.offset + y * fb.pitch + x * bytes_per, m = pixel_memory;
     return bytes_per === 2 ? [(m[at + 1] >> 3) << 3, (m[at] >> 5 | (m[at + 1] & 7) << 3) << 2, (m[at] & 31) << 3] : [m[at + 2], m[at + 1], m[at]];
 }
 function password_box_visible()
 {
-    const vga = cpu.devices.vga;
-    if(!vga.svga_enabled || vga.svga_width !== 1024 || vga.svga_height !== 768 || ![32, 24, 16].includes(vga.svga_bpp)) return false;
+    if(!desktop_mode()) return false;
     const background = pixel(100, 100), tile = pixel(260, 190);
     return [[620, 248], [680, 248], [720, 256], [735, 240]].every(([x, y]) => pixel(x, y).every(c => c > 230)) &&
         // a plain background, not white, around the gray user tile
@@ -234,8 +257,7 @@ function password_box_visible()
 // panes split by a vertical gap)
 function desktop_visible()
 {
-    const vga = cpu.devices.vga;
-    if(!vga.svga_enabled || vga.svga_width !== 1024 || vga.svga_height !== 768 || ![32, 24, 16].includes(vga.svga_bpp)) return false;
+    if(!desktop_mode()) return false;
     const white = (x, y) => pixel(x, y).every(c => c > 220);
     return [[16, 744], [30, 744], [16, 752], [30, 752]].every(([x, y]) => white(x, y)) && !white(23, 746) && !white(10, 745) && !white(40, 745);
 }
@@ -264,8 +286,7 @@ async function sign_in()
 // focus border
 function run_dialog_ready()
 {
-    const vga = cpu.devices.vga;
-    if(!vga.svga_enabled || vga.svga_width !== 1024 || vga.svga_height !== 768 || ![32, 24, 16].includes(vga.svga_bpp)) return false;
+    if(!desktop_mode()) return false;
     const white = (x, y) => pixel(x, y).every(c => c > 245);
     const [r, , b] = pixel(398, 622);
     return white(300, 555) && white(300, 600) && white(100, 650) && pixel(60, 700).every(c => Math.abs(c - 240) <= 6) && b > 200 && r < 120;
@@ -288,6 +309,33 @@ async function run_command(line)
     return true;
 }
 
+// A command line for cmd /c, elevated: PowerShell's Start-Process -Verb
+// RunAs from the Run dialog, then Alt+Y on the UAC prompt (the line must not
+// contain quotes)
+async function run_admin(line)
+{
+    event("runadmin", {line});
+    if(!await run_command(`powershell -c "start-process cmd -verb runas -argumentlist '/c ${line}'"`)) return false;
+    // The UAC prompt dims the desktop (its Start logo is gone): wait for it,
+    // answer Yes, and wait for the desktop to come back
+    for(const limit = performance.now() + 600000; performance.now() < limit && desktop_visible();)
+    {
+        await delay(1000);
+        screenshot(false);
+    }
+    if(desktop_visible()) { event("uac-missing"); return false; }
+    await delay(5000);
+    screenshot(true);
+    event("uac");
+    for(let i = 0; i < 5 && !desktop_visible(); i++)
+    {
+        await press([0x38, 0x15, 0x95, 0xB8]); // Alt+Y
+        for(const limit = performance.now() + 30000; performance.now() < limit && !desktop_visible();) await delay(500);
+    }
+    event(desktop_visible() ? "uac-accepted" : "uac-stuck");
+    return desktop_visible();
+}
+
 function text_screen()
 {
     const vga = cpu.devices.vga;
@@ -298,14 +346,26 @@ function text_screen()
     }).join("").trimEnd()).join("\n").trim();
 }
 let last_hash = "", shots = 0, last_saved = 0, last_change = 0, dark_fraction = 1, colors = 0;
+let svga_seen = "";
+// The SVGA II registers as the guest's driver sets them, logged on change
+function observe_svga()
+{
+    const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+    if(!svga) return;
+    const state = {enable: svga.enable, mode: `${svga.width}x${svga.height}x${svga.bpp}`, pitch: svga.pitch(),
+        guest_id: svga.guest_id, config_done: svga.config_done, irq_mask: svga.irq_mask, id: svga.id.toString(16)};
+    const key = JSON.stringify(state);
+    if(key !== svga_seen) { svga_seen = key; event("svga", state); }
+}
 function screenshot(force)
 {
-    const vga = cpu.devices.vga, width = vga.svga_width, height = vga.svga_height;
-    if(!vga.svga_enabled || !width || !height || ![32, 24, 16].includes(vga.svga_bpp)) return null;
-    const bytes_per = vga.svga_bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = svga_bytes();
+    const fb = frame_buffer();
+    if(!fb || !fb.width || !fb.height || ![32, 24, 16].includes(fb.bpp)) return null;
+    const width = fb.width, height = fb.height;
+    const bytes_per = fb.bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = svga_bytes();
     for(let y = 0; y < height; y++) for(let x = 0; x < width; x++)
     {
-        const from = (vga.svga_offset + y * width + x) * bytes_per, to = y * stride + 1 + x * 3;
+        const from = fb.offset + y * fb.pitch + x * bytes_per, to = y * stride + 1 + x * 3;
         if(bytes_per === 2)
         {
             const v = memory[from] | memory[from + 1] << 8;
@@ -530,6 +590,45 @@ try
     let next_profile = performance.now() + 1000 * +(process.env.WIN_CPU_PROFILE || 0);
     let next_report = 0, next_samples = performance.now() + 60000, next_shot = 0, resets = 0, signed_in = false, probe_sent = 0, text_seen = "";
     let shutdown_at = 0, shutdown_sent = false, shutdown_deadline = 0;
+    // a line of command.txt (see the top of this file), or of WIN_SETUP
+    // (a bad line is reported, not fatal: the guest's state is worth more)
+    const command = line => run_one(line).catch(error => {
+        if(error === execution_error) throw error;
+        event("command-failed", {line, error: String(error && error.message || error)});
+    });
+    const run_one = async line => {
+        const [verb, ...rest] = line.split(" "), argument = rest.join(" ");
+        event("command", {line});
+        if(verb === "key") await press(argument.split(/\s+/).map(v => parseInt(v, 16)));
+        else if(verb === "type") await type(argument);
+        else if(verb === "run") await run_command(argument);
+        else if(verb === "runadmin") await run_admin(argument);
+        else if(verb === "enter") await enter();
+        else if(verb === "space") await press([57, 185]);
+        else if(verb === "password") { await type(password); await enter(); }
+        else if(verb === "shot") screenshot(true);
+        else if(verb === "rips") next_samples = 0;
+        else if(verb === "trace") { cpu.wm.exports.x64_user_trace_enable(argument !== "off"); trace_seen = 0; }
+        else if(verb === "wait")
+        {
+            // (the main loop is not running: keep watching the screen, and
+            // take commands from command.txt)
+            for(const limit = performance.now() + 1000 * +argument; performance.now() < limit;)
+            {
+                await delay(2000);
+                if(execution_error) throw execution_error;
+                screenshot(false);
+                observe_svga();
+                const file = path.join(out, "command.txt");
+                if(fs.existsSync(file))
+                {
+                    const lines = fs.readFileSync(file, "utf8").split("\n").map(line => line.trim()).filter(Boolean);
+                    fs.unlinkSync(file);
+                    for(const next of lines) await command(next);
+                }
+            }
+        }
+    };
     let idle_at = 0, idle_sent = false, next_host_window = 0;
     while(performance.now() < deadline)
     {
@@ -540,22 +639,10 @@ try
         {
             const lines = fs.readFileSync(command_file, "utf8").split("\n").map(line => line.trim()).filter(Boolean);
             fs.unlinkSync(command_file);
-            for(const line of lines)
-            {
-                const [verb, ...rest] = line.split(" "), argument = rest.join(" ");
-                event("command", {line});
-                if(verb === "key") await press(argument.split(/\s+/).map(v => parseInt(v, 16)));
-                else if(verb === "type") await type(argument);
-                else if(verb === "run") await run_command(argument);
-                else if(verb === "enter") await enter();
-                else if(verb === "space") await press([57, 185]);
-                else if(verb === "password") { await type(password); await enter(); }
-                else if(verb === "shot") screenshot(true);
-                else if(verb === "rips") next_samples = 0;
-                else if(verb === "trace") { cpu.wm.exports.x64_user_trace_enable(argument !== "off"); trace_seen = 0; }
-            }
+            for(const line of lines) await command(line);
         }
         poll_user_trace();
+        observe_svga();
         if(profiler && performance.now() >= next_profile)
         {
             next_profile = performance.now() + 1000 * +process.env.WIN_CPU_PROFILE;
@@ -664,6 +751,14 @@ try
         {
             report.desktop_s = elapsed();
             event("desktop");
+            // WIN_SETUP: commands separated by ";;" once the desktop shows
+            // (e.g. "runadmin E:\\INSTVM3D.CMD;;wait 300;;shot"), before
+            // WIN_OVERLAY_SAVE shuts down and keeps what they did
+            for(const line of (process.env.WIN_SETUP || "").split(";;").map(line => line.trim()).filter(Boolean))
+            {
+                await command(line);
+            }
+            if(process.env.WIN_SETUP && !process.env.WIN_OVERLAY_SAVE) break;
             if(process.env.WIN_OVERLAY_SAVE) shutdown_at = performance.now() + 30000;
             else if(process.env.WIN_IDLE) idle_at = performance.now() + 1000 * +(process.env.WIN_IDLE_SETTLE_S || 20);
             else if(process.env.WIN_DESKTOP_TEST)
