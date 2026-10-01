@@ -85,7 +85,7 @@ void WINAPI entry(void)
     if (!SetTokenInformation(primary, TokenSessionId, &session, sizeof session)) fail("SetTokenInformation");
     ZeroMemory(&startup, sizeof startup);
     startup.cb = sizeof startup;
-    startup.lpDesktop = "winsta0\\default";
+    startup.lpDesktop = "winsta0\\winlogon";
     if (!CreateProcessAsUserA(primary, NULL, line, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process)) fail("CreateProcessAsUser");
     {
         char text[300];

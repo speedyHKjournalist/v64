@@ -316,6 +316,11 @@ static void probe_umd(void)
                     c.Type = type; c.pInfo = info; c.pData = data; c.DataSize = sizeof data;
                     r = funcs.pfnGetCaps(arg.hAdapter, &c);
                     if (FAILED(r)) n += wsprintfA(text + n, " %u:%08lX", type, (unsigned long)r);
+                    else if (type <= 2) {
+                        const unsigned *d = (const unsigned *)data;
+                        LOG(BITS ": GetCaps(%s) -> %08x %08x %08x %08x %08x %08x %08x %08x", type == 1 ? "DDRAW" : "DDRAW_MODE",
+                            d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+                    }
                     if (n > 340) { LOG(BITS ": GetCaps failing types:%s", text); n = 0; text[0] = 0; }
                 }
                 LOG(BITS ": GetCaps failing types:%s", n ? text : " none");
