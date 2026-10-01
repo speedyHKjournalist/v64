@@ -399,8 +399,11 @@
                 return;
             }
             if (!s.texture || mip >= s.gpuMips) return;
-            // (multisampled textures are not copy destinations)
-            if (s.samples > 1) return this.warn("upload-ms", "uploads into multisampled surfaces are not supported");
+            // (multisampled surfaces: their samples are not in guest memory; zeros, which is what a new one has, are no news)
+            if (s.samples > 1) {
+                if (!data.every(b => b === 0)) this.warn("upload-ms", "uploads into multisampled surfaces are not supported");
+                return;
+            }
             if (isDepthFormat(s.f.gpu)) return this.uploadDepth(s, s.volume ? 0 : layer, mip, x, y, w, h, data, pitch);
             const f = s.f;
             const columns = Math.ceil(w / f.bw), rows = Math.ceil(h / f.bh);
