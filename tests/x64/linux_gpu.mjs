@@ -40,10 +40,14 @@ assert.ok(fs.existsSync(repo), repo + " is missing: run tools/alpine_gpu_repo.mj
 
 const DRIVER = { bochs_vga: "bochs", vmware_svga: "vmwgfx", virtio_gpu: "virtio_gpu" }[adapter];
 // the levels with 3D (vmware_svga's vgpu9 and up)
-const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11"].includes(process.env.GPU_LEVEL);
+const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "virgl"].includes(process.env.GPU_LEVEL);
 assert.ok(DRIVER, "GPU_ADAPTER is bochs_vga, vmware_svga or virtio_gpu");
 
 const APK = "apk add --no-network --repository /mnt/repo/main --repository /mnt/repo/community";
+// Alpine 3.23's Mesa (25.2), which has the virgl driver 3.24's (26.1)
+// lacks: from a pinned (tagged) repository, so that nothing else comes from it
+const APK_VIRGL = "printf '@v323 /mnt/repo/v3.23/main\\n@v323 /mnt/repo/v3.23/community\\n' >> /etc/apk/repositories; " + APK +
+    " mesa@v323 mesa-dri-gallium@v323 mesa-gbm@v323 mesa-egl@v323 mesa-gl@v323 mesa-gles@v323 llvm21-libs@v323";
 const SCENARIOS = {
     // KMS through the adapter's DRM driver: modes, a test pattern, kmscube
     drm: [
@@ -117,6 +121,33 @@ const SCENARIOS = {
             { screenshot: "kmscube-msaa8", after: 5000 }],
         ["kmscube -M rgba -c 200 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube-rgba", after: 2500 }],
+    ],
+    // virtio_gpu's 3D (GPU_LEVEL=virgl): Mesa's virgl driver on the capsets,
+    // what it reports, and kmscube
+    // (Alpine 3.24's Mesa has no virgl driver: 3.23's, from v3.23/ of the repository)
+    virgl: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        [APK_VIRGL + " kmscube mesa-utils mesa-demos >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; tail -5 /tmp/apk.log", /STEP_APK_RC=0/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["dmesg | grep -i -E 'features:|capset|virgl' | tail -8; echo STEP_DMESG_DONE", /\+virgl[\s\S]*STEP_DMESG_DONE/],
+        // which of GL 3.0's and GLES 3.0's prerequisites Mesa does not offer
+        ["eglinfo -p gbm 2>&1 | sed -n '/compatibility profile extensions/,/OpenGL ES profile/p' | tr ',' '\\n' | sed 's/^ *//' | sort -u > /tmp/ext.txt; " +
+            "for e in GL_ARB_color_buffer_float GL_ARB_depth_buffer_float GL_ARB_half_float_vertex GL_ARB_map_buffer_range " +
+            "GL_ARB_shader_texture_lod GL_ARB_texture_float GL_ARB_texture_rg GL_ARB_texture_compression_rgtc GL_EXT_draw_buffers2 " +
+            "GL_ARB_framebuffer_object GL_EXT_framebuffer_sRGB GL_EXT_packed_float GL_EXT_texture_array GL_EXT_texture_shared_exponent " +
+            "GL_EXT_transform_feedback GL_NV_conditional_render GL_EXT_texture_sRGB GL_EXT_pixel_buffer_object GL_ARB_draw_instanced " +
+            "GL_ARB_texture_buffer_object GL_ARB_uniform_buffer_object GL_ARB_texture_rectangle GL_NV_primitive_restart " +
+            "GL_ARB_copy_buffer GL_EXT_texture_integer GL_ARB_texture_multisample GL_ARB_depth_clamp GL_ARB_ES3_compatibility " +
+            "GL_ARB_draw_elements_base_vertex GL_EXT_provoking_vertex GL_EXT_vertex_array_bgra GL_EXT_texture_snorm " +
+            "GL_ARB_seamless_cube_map GL_ARB_sync GL_ARB_fragment_coord_conventions GL_ARB_provoking_vertex " +
+            "GL_ARB_blend_func_extended GL_ARB_explicit_attrib_location GL_ARB_occlusion_query2 GL_ARB_sampler_objects " +
+            "GL_ARB_shader_bit_encoding GL_ARB_texture_rgb10_a2ui GL_ARB_texture_swizzle GL_ARB_timer_query " +
+            "GL_ARB_instanced_arrays GL_ARB_vertex_type_2_10_10_10_rev; do grep -q \"^$e$\" /tmp/ext.txt || echo MISSING $e; done; " +
+            "wc -l < /tmp/ext.txt; echo STEP_MISSING_DONE", /STEP_MISSING_DONE/],
+        ["HOST stats", null],
+        ["eglinfo -B -p gbm 2>&1 | grep -E 'OpenGL.*(renderer|version)' | head -12; echo STEP_EGLINFO_DONE", /virgl[\s\S]*STEP_EGLINFO_DONE/],
+        ["kmscube -c 60 2>&1 | grep -E 'Rendered|renderer|failed|error' | head -5", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube", after: 20000 }],
     ],
     // the page's size reaching the guest (virtio_gpu): a display event, the
     // new preferred mode, which a KMS client then sets
@@ -219,7 +250,7 @@ const emulator = new V86({
     bzimage: { url: directory + "boot/vmlinuz-virt" }, initrd: { url: directory + "boot/initramfs-virt" },
     cdrom: { url: iso }, hda: { url: repo },
     cmdline: "console=ttyS0,115200 loglevel=4 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage",
-    memory_size: Number(process.env.LINUX_GPU_MEMORY || 1024) << 20, acpi: true, autostart: false,
+    memory_size: Number(process.env.LINUX_GPU_MEMORY || 1024) * 1048576, acpi: true, autostart: false,
     disable_jit: !!+process.env.LINUX_GPU_NO_JIT, experimental_smp_jit: !+process.env.LINUX_GPU_NO_JIT,
     log_level: 0, net_device: { type: "none" }, screen_adapter: sink,
     ...(process.env.VRAM_SIZE ? { vram_size: Number(process.env.VRAM_SIZE) } : {}),
@@ -296,6 +327,14 @@ try
             // HOST snapshot (saved, then restored in place)
             const [verb, ...values] = command.slice(5).split(" ");
             if(verb === "set_display_size") emulator.set_display_size(...values.map(Number));
+            else if(verb === "stats")
+            {
+                // what the adapter's device has done (virtio_gpu: commands, virgl's)
+                const device = emulator.v86.cpu.devices.graphics_adapter.device;
+                const gpu = device["virtio_gpu"];
+                if(gpu) console.log("virtio-gpu " + JSON.stringify({ stats: gpu.stats,
+                    virgl: gpu.virgl && { counts: gpu.virgl.counts, warnings: gpu.virgl.warnings, submitted: gpu.virgl.submitted, completed: gpu.virgl.completed } }));
+            }
             else if(verb === "snapshot")
             {
                 await emulator.stop();

@@ -19,6 +19,8 @@ register_graphics_adapter({
             level: test["level"],
             // how many displays the guest gets (tests; 1 otherwise)
             scanouts: test["scanouts"],
+            // the channel to GX (the page's; tests bring their own): 3D
+            renderer: options["renderer"] || test["renderer"],
         });
         return {
             "vga": device.vga,
@@ -26,6 +28,9 @@ register_graphics_adapter({
             "get_state": () => device.get_state(),
             "set_state": state => device.set_state(state),
             "reset": () => device.reset(),
+            // what the GPU has of the guest's 3D (a snapshot cannot hold it yet)
+            "has_host_state": () => !!device.virgl,
+            "prepare_save": () => device.prepare_save(),
         };
     },
 });

@@ -60,9 +60,9 @@ function create_graphics_proxy(options)
 export const ADAPTER_RENDERER_CHANNEL = "graphics_adapter_renderer";
 
 /**
- * The 3D renderer of the display adapter, on this page: vmware_svga's
- * (V86SVGARenderer of libv86-webgpu.js), when the page has loaded it and
- * WebGPU has an adapter. The device then declares 3D.
+ * The 3D renderer of the display adapter, on this page: GX (V86SVGARenderer
+ * of libv86-webgpu.js), for vmware_svga and virtio_gpu (virgl), when the
+ * page has loaded it and WebGPU has an adapter. The device then declares 3D.
  *
  * With a CPU worker the device is in the worker and the renderer stays here:
  * `host` is this page's end of their channel (CPUWorkerController's
@@ -79,7 +79,7 @@ V86.prototype.create_adapter_renderer = async function(options, host)
     if(remote) return remote;
     const create = globalThis["V86SVGARenderer"];
     const gpu = typeof navigator !== "undefined" && navigator["gpu"];
-    if(this.graphics_adapter !== "vmware_svga" || typeof create !== "function" || !gpu) return null;
+    if(this.graphics_adapter !== "vmware_svga" && this.graphics_adapter !== "virtio_gpu" || typeof create !== "function" || !gpu) return null;
     let adapter = null;
     try
     {

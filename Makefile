@@ -160,13 +160,16 @@ build/v86-vmware-svga.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/gra
 		--js src/graphics_adapters/vmware_svga/svga3d.js \
 		--js src/graphics_adapters/vmware_svga/svga_device.js --js src/graphics_adapters/vmware_svga/plugin.js
 
-build/v86-virtio-gpu.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/graphics_adapters/virtio_gpu/*.js src/graphics_adapters/vmware_svga/svga_cursor.js
+build/v86-virtio-gpu.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/graphics_adapters/virtio_gpu/*.js src/graphics_adapters/vmware_svga/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
 		--compilation_level SIMPLE --jscomp_off=missingProperties \
 		--output_wrapper ';(function(){%output%}).call(this);' \
 		--js $(GRAPHICS_ADAPTER_COMMON) --js src/graphics_adapters/vmware_svga/svga_cursor.js \
-		--js src/graphics_adapters/virtio_gpu/edid.js --js src/graphics_adapters/virtio_gpu/virtio_gpu_device.js \
+		--js src/graphics_adapters/vmware_svga/svga_constants.js --js src/graphics_adapters/vmware_svga/svga_dx_formats.js \
+		--js src/graphics_adapters/virtio_gpu/edid.js --js src/graphics_adapters/virtio_gpu/virgl_caps.js \
+		--js src/graphics_adapters/virtio_gpu/virgl_context.js --js src/graphics_adapters/virtio_gpu/virgl.js \
+		--js src/graphics_adapters/virtio_gpu/virtio_gpu_device.js \
 		--js src/graphics_adapters/virtio_gpu/plugin.js
 
 .PHONY: graphics-adapters

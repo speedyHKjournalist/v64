@@ -14,6 +14,8 @@
 import { VGAScreen } from "../vga_core.js";
 import { SoftwareCursor } from "../vmware_svga/svga_cursor.js";
 import { make_edid } from "./edid.js";
+import { Virgl, Resource3D } from "./virgl.js";
+import { CAPSETS, capset } from "./virgl_caps.js";
 
 // For Types Only
 import { GraphicsMachine } from "../machine.js";
@@ -28,6 +30,7 @@ const VIRTIO_GPU_SUBSYSTEM_ID = 0x1100;
 const VGA_CLASS = 0x030000;
 
 // Feature bits
+const VIRTIO_GPU_F_VIRGL = 0;
 const VIRTIO_GPU_F_EDID = 1;
 const VIRTIO_GPU_F_RESOURCE_UUID = 2;
 const VIRTIO_F_RING_INDIRECT_DESC = 28;
@@ -39,8 +42,12 @@ const CURSORQ = 1;
 // vmware_svga's levels: a new feature needs a new level
 const LEVELS = {
     "2d": { features: [VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_F_RING_INDIRECT_DESC] },
+    // 3D: virgl contexts (Mesa's virgl driver), drawn by GX; needs a renderer
+    "virgl": { features: [VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_F_RING_INDIRECT_DESC], three_d: true },
 };
-const LEVEL_ORDER = ["2d"];
+const LEVEL_ORDER = ["2d", "virgl"];
+/** Without a pinned level: virgl when there is a renderer, 2d otherwise */
+const DEFAULT_3D_LEVEL = "virgl";
 const DEFAULT_LEVEL = "2d";
 
 // Commands
@@ -56,18 +63,29 @@ const CMD_GET_CAPSET_INFO = 0x0108;
 const CMD_GET_CAPSET = 0x0109;
 const CMD_GET_EDID = 0x010A;
 const CMD_RESOURCE_ASSIGN_UUID = 0x010B;
+const CMD_CTX_CREATE = 0x0200;
+const CMD_CTX_DESTROY = 0x0201;
+const CMD_CTX_ATTACH_RESOURCE = 0x0202;
+const CMD_CTX_DETACH_RESOURCE = 0x0203;
+const CMD_RESOURCE_CREATE_3D = 0x0204;
+const CMD_TRANSFER_TO_HOST_3D = 0x0205;
+const CMD_TRANSFER_FROM_HOST_3D = 0x0206;
+const CMD_SUBMIT_3D = 0x0207;
 const CMD_UPDATE_CURSOR = 0x0300;
 const CMD_MOVE_CURSOR = 0x0301;
 
 // Responses
 const RESP_OK_NODATA = 0x1100;
 const RESP_OK_DISPLAY_INFO = 0x1101;
+const RESP_OK_CAPSET_INFO = 0x1102;
+const RESP_OK_CAPSET = 0x1103;
 const RESP_OK_EDID = 0x1104;
 const RESP_OK_RESOURCE_UUID = 0x1105;
 const RESP_ERR_UNSPEC = 0x1200;
 const RESP_ERR_OUT_OF_MEMORY = 0x1201;
 const RESP_ERR_INVALID_SCANOUT_ID = 0x1202;
 const RESP_ERR_INVALID_RESOURCE_ID = 0x1203;
+const RESP_ERR_INVALID_CONTEXT_ID = 0x1204;
 const RESP_ERR_INVALID_PARAMETER = 0x1205;
 
 const FLAG_FENCE = 1;
@@ -180,7 +198,8 @@ Scanout.prototype.add_dirty = function(x0, y0, x1, y1)
  * @constructor
  * @implements {DisplaySource}
  * @param {GraphicsMachine} machine
- * @param {{vram_size: (number|undefined), level: (string|undefined), scanouts: (number|undefined)}} options
+ * @param {{vram_size: (number|undefined), level: (string|undefined), scanouts: (number|undefined), renderer: (Object|undefined)}} options
+ *     renderer: the channel to GX (the page's or a test's), which 3D needs
  */
 export function VirtioGPU(machine, options)
 {
@@ -197,10 +216,14 @@ export function VirtioGPU(machine, options)
     /** @const */
     this.vram_size = vram_size;
 
-    this.level = options.level || DEFAULT_LEVEL;
+    this.level = options.level || (options.renderer ? DEFAULT_3D_LEVEL : DEFAULT_LEVEL);
     if(!LEVELS[this.level])
     {
         throw new Error("virtio_gpu: unknown level " + JSON.stringify(this.level) + "; levels: " + LEVEL_ORDER.join(", "));
+    }
+    if(LEVELS[this.level].three_d && !options.renderer)
+    {
+        throw new Error("virtio_gpu: level " + this.level + " needs a renderer (WebGPU)");
     }
     this.num_scanouts = Math.max(1, Math.min(MAX_SCANOUTS, options.scanouts || 1));
 
@@ -209,7 +232,7 @@ export function VirtioGPU(machine, options)
     /** @const */
     this.vga = new VGAScreen(machine, vram_size, { pci: false, display_source: false });
 
-    /** @type {!Map<number, !Resource>} */
+    /** @type {!Map<number, (!Resource|!Resource3D)>} 2D and 3D resources */
     this.resources = new Map();
     this.host_memory = 0;
     /** @type {!Array<!Scanout>} */
@@ -227,6 +250,13 @@ export function VirtioGPU(machine, options)
     this.serial = 0x0086;
     /** What the driver has done, for harnesses and debugging */
     this.stats = { commands: {}, errors: 0, last_error: 0, transfers: 0, flushes: 0, cursor_updates: 0, cursor_moves: 0 };
+    /** @type {Virgl} 3D, at the virgl level */
+    this.virgl = LEVELS[this.level].three_d ? new Virgl(this, /** @type {!Object} */ (options.renderer)) : null;
+    /** @type {!Array<{request: !Object, bytes: !Uint8Array, response: !Uint8Array, ready: boolean}>}
+     * control requests answered in the order they came: some wait for the GPU */
+    this.pending = [];
+    /** @type {?function(function())} set by a command whose answer waits */
+    this.deferred = null;
 
     const features = LEVELS[this.level].features;
     this.virtio = machine.create_virtio({
@@ -254,7 +284,7 @@ export function VirtioGPU(machine, options)
             { "bytes": 4, "name": "events_read", "read": () => this.events_read },
             { "bytes": 4, "name": "events_clear", "read": () => 0, "write": value => { this.events_read &= ~value; } },
             { "bytes": 4, "name": "num_scanouts", "read": () => this.num_scanouts },
-            { "bytes": 4, "name": "num_capsets", "read": () => 0 },
+            { "bytes": 4, "name": "num_capsets", "read": () => this.virgl ? CAPSETS.length : 0 },
         ],
         "notify": queue => this.notify(queue),
         "reset": () => this.reset_device(),
@@ -276,6 +306,9 @@ VirtioGPU.prototype.reset = function()
  */
 VirtioGPU.prototype.reset_device = function()
 {
+    // (requests popped before are stale: the transport drops their answers)
+    this.pending = [];
+    if(this.virgl) this.virgl.reset();
     this.resources.clear();
     this.host_memory = 0;
     for(const scanout of this.scanouts)
@@ -342,15 +375,37 @@ VirtioGPU.prototype.notify = function(queue)
         {
             this.set_active(true);
             const response = this.control(bytes);
-            this.respond(request, bytes, response);
+            const wait = this.deferred;
+            this.deferred = null;
+            const entry = { request, bytes, response, ready: !wait };
+            this.pending.push(entry);
+            if(wait) wait(() => { entry.ready = true; this.drain(); });
         }
         else if(queue === CURSORQ)
         {
             this.cursor_command(bytes);
+            request["complete"]();
         }
-        request["complete"]();
     }
-    this.virtio["flush"](queue);
+    if(queue === CONTROLQ) this.drain();
+    else this.virtio["flush"](queue);
+};
+
+/**
+ * Answer the control requests that are ready, in order (a fence must not
+ * pass the GPU work before it)
+ */
+VirtioGPU.prototype.drain = function()
+{
+    let answered = false;
+    while(this.pending.length && this.pending[0].ready)
+    {
+        const { request, bytes, response } = this.pending.shift();
+        this.respond(request, bytes, response);
+        request["complete"]();
+        answered = true;
+    }
+    if(answered) this.virtio["flush"](CONTROLQ);
 };
 
 /**
@@ -443,9 +498,37 @@ VirtioGPU.prototype.control = function(bytes)
             if(!need(8)) break;
             return this.assign_uuid(u32(0));
         case CMD_GET_CAPSET_INFO:
+        {
+            if(!need(8)) break;
+            const entry = this.virgl && CAPSETS[u32(0)];
+            if(!entry) return this.error(RESP_ERR_INVALID_PARAMETER, type);
+            const out = response(RESP_OK_CAPSET_INFO, HEADER_SIZE + 16);
+            const v = new DataView(out.buffer);
+            v.setUint32(HEADER_SIZE, entry[0], true);
+            v.setUint32(HEADER_SIZE + 4, entry[1], true);
+            v.setUint32(HEADER_SIZE + 8, entry[2], true);
+            return out;
+        }
         case CMD_GET_CAPSET:
-            // no capsets (num_capsets is 0)
-            return this.error(RESP_ERR_INVALID_PARAMETER, type);
+        {
+            if(!need(8)) break;
+            const entry = this.virgl && CAPSETS.find(c => c[0] === u32(0));
+            if(!entry || u32(4) > entry[1]) return this.error(RESP_ERR_INVALID_PARAMETER, type);
+            const data = capset(entry[0]);
+            const out = response(RESP_OK_CAPSET, HEADER_SIZE + data.length);
+            out.set(data, HEADER_SIZE);
+            return out;
+        }
+        case CMD_CTX_CREATE:
+        case CMD_CTX_DESTROY:
+        case CMD_CTX_ATTACH_RESOURCE:
+        case CMD_CTX_DETACH_RESOURCE:
+        case CMD_RESOURCE_CREATE_3D:
+        case CMD_TRANSFER_TO_HOST_3D:
+        case CMD_TRANSFER_FROM_HOST_3D:
+        case CMD_SUBMIT_3D:
+            if(!this.virgl) break;
+            return this.command_3d(type, view.getUint32(16, true), bytes, u32, need);
     }
     return this.error(RESP_ERR_UNSPEC, type);
 };
@@ -528,7 +611,8 @@ VirtioGPU.prototype.unref = function(id)
     {
         if(scanout.resource_id === id) this.disable_scanout(scanout);
     }
-    this.host_memory -= resource.data.length;
+    if(resource.three_d) this.virgl.destroy_resource(/** @type {!Resource3D} */ (resource));
+    else this.host_memory -= resource.data.length;
     this.resources.delete(id);
     return this.ok();
 };
@@ -592,6 +676,24 @@ VirtioGPU.prototype.flush = function(id, x, y, width, height)
  */
 VirtioGPU.prototype.present = function(scanout, resource, x, y, width, height)
 {
+    if(resource.three_d && !(resource.host_newer && resource.data))
+    {
+        // (its picture is on the GPU: read back, then converted)
+        if(!TO_RGBA[resource.format]) return;
+        this.virgl.read_picture(resource, scanout.x + x, scanout.y + y, width, height, (first, count) => {
+            if(this.scanouts[scanout.index].resource_id !== resource.id || !scanout.rgba) return;
+            this.convert(scanout, resource, x, first - scanout.y, width, count);
+        });
+        return;
+    }
+    this.convert(scanout, resource, x, y, width, height);
+};
+
+/**
+ * A rectangle of a scanout from its resource's host copy into its picture
+ */
+VirtioGPU.prototype.convert = function(scanout, resource, x, y, width, height)
+{
     const convert = TO_RGBA[resource.format];
     const src = new Int32Array(resource.data.buffer);
     const dst = new Int32Array(scanout.rgba.buffer);
@@ -614,6 +716,25 @@ VirtioGPU.prototype.transfer_to_host = function(id, x, y, width, height, offset)
         return this.error(RESP_ERR_INVALID_PARAMETER, CMD_TRANSFER_TO_HOST_2D);
     }
     this.stats.transfers++;
+    if(resource.three_d)
+    {
+        // a 3D resource the kernel treats as 2D (a dumb buffer: fbcon, KMS
+        // clients): a host copy for the screen, and GX's copy for drawing
+        if(!resource.data) resource.data = new Uint8Array(resource.width * resource.height * resource.block().bytes);
+        const pitch = resource.width * resource.block().bytes;
+        const read = (from, out, at, length) => this.read_backing(resource, from, out, at, length);
+        if(!this.virgl.transfer_to_host(/** @type {!Resource3D} */ (resource), [x, y, 0, width, height, 1], 0, offset, pitch, 0, read))
+        {
+            return this.error(RESP_ERR_INVALID_PARAMETER, CMD_TRANSFER_TO_HOST_2D);
+        }
+        const bytes = resource.block().bytes;
+        for(let h = 0; h < height; h++)
+        {
+            this.read_backing(resource, offset + pitch * h, resource.data, (y + h) * pitch + x * bytes, width * bytes);
+        }
+        resource.host_newer = true;
+        return this.ok();
+    }
     const stride = resource.width * 4, row = width * 4;
     if(offset === 0 && x === 0 && y === 0 && width === resource.width)
     {
@@ -636,9 +757,9 @@ VirtioGPU.prototype.transfer_to_host = function(id, x, y, width, height, offset)
 
 /**
  * Bytes of a resource's backing (guest RAM, or the frame buffer in BAR0)
- * @param {!Resource} resource
+ * @param {(!Resource|!Resource3D)} resource
  * @param {number} from the offset in the backing
- * @param {!Uint8Array} out
+ * @param {Uint8Array} out
  * @param {number} at
  * @param {number} length
  * @return {boolean} whether the backing has them
@@ -686,6 +807,128 @@ VirtioGPU.prototype.read_guest = function(address, length)
     }
     if(!this.virtio["is_ram"](address, length)) return null;
     return this.virtio["read_memory"](address, length);
+};
+
+/**
+ * Bytes into a resource's backing (a 3D readback)
+ * @param {!Object} resource
+ * @param {number} at the offset in the backing
+ * @param {!Uint8Array} bytes
+ */
+VirtioGPU.prototype.write_backing = function(resource, at, bytes)
+{
+    if(!resource.backing || at + bytes.length > resource.backing_length) return;
+    const starts = resource.backing_starts, entries = resource.backing;
+    let low = 0, high = starts.length - 1;
+    while(low < high)
+    {
+        const mid = low + high + 1 >> 1;
+        if(starts[mid] <= at) low = mid;
+        else high = mid - 1;
+    }
+    let done = 0;
+    for(let i = low; done < bytes.length; i++)
+    {
+        const skip = at + done - starts[i];
+        const count = Math.min(entries[i * 2 + 1] - skip, bytes.length - done);
+        if(count <= 0) continue;
+        const address = entries[i * 2] + skip, piece = bytes.subarray(done, done + count);
+        const lfb = this.vga.lfb_address;
+        if(address >= lfb && address + count <= lfb + this.vram_size)
+        {
+            this.vga.svga_memory.set(piece, address - lfb);
+            this.machine.mmio_ram_mark_dirty(this.vga.lfb_region);
+        }
+        else if(this.virtio["is_ram"](address, count))
+        {
+            this.virtio["write_memory"](piece, address);
+        }
+        done += count;
+    }
+};
+
+/**
+ * The 3D commands (level virgl)
+ * @param {number} type
+ * @param {number} ctx_id from the request's header
+ * @param {!Uint8Array} bytes the request
+ * @param {function(number):number} u32 a dword after the header
+ * @param {function(number):boolean} need
+ * @return {!Uint8Array}
+ */
+VirtioGPU.prototype.command_3d = function(type, ctx_id, bytes, u32, need)
+{
+    const virgl = /** @type {!Virgl} */ (this.virgl);
+    // the answer once the GPU has done what was sent so far (and `work`)
+    const after_work = () => {
+        let finish = null, finished = false;
+        virgl.after_work(() => { finished = true; if(finish) finish(); });
+        this.deferred = done => { if(finished) done(); else finish = done; };
+    };
+    switch(type)
+    {
+        case CMD_CTX_CREATE:
+            virgl.create_context(ctx_id);
+            return this.ok();
+        case CMD_CTX_DESTROY:
+            virgl.destroy_context(ctx_id);
+            return this.ok();
+        case CMD_CTX_ATTACH_RESOURCE:
+        case CMD_CTX_DETACH_RESOURCE:
+            // (every context sees every resource)
+            if(!need(8)) break;
+            return this.resources.has(u32(0)) ? this.ok() : this.error(RESP_ERR_INVALID_RESOURCE_ID, type);
+        case CMD_RESOURCE_CREATE_3D:
+        {
+            if(!need(48)) break;
+            const id = u32(0);
+            if(id === 0 || this.resources.has(id)) return this.error(RESP_ERR_INVALID_RESOURCE_ID, type);
+            const r = new Resource3D(id, u32(4), u32(8), u32(12), u32(16), u32(20), u32(24), u32(28), u32(32), u32(36), u32(40));
+            r.set_backing = Resource.prototype.set_backing;
+            if(!virgl.create_resource(r)) return this.error(RESP_ERR_INVALID_PARAMETER, type);
+            this.resources.set(id, r);
+            return this.ok();
+        }
+        case CMD_TRANSFER_TO_HOST_3D:
+        case CMD_TRANSFER_FROM_HOST_3D:
+        {
+            if(!need(48)) break;
+            const box = [u32(0), u32(4), u32(8), u32(12), u32(16), u32(20)];
+            const offset = u32(24) + u32(28) * 0x100000000;
+            const found = this.resources.get(u32(32));
+            if(!found || !found.three_d) return this.error(RESP_ERR_INVALID_RESOURCE_ID, type);
+            const r = /** @type {!Resource3D} */ (found);
+            if(!r.backing) return this.error(RESP_ERR_UNSPEC, type);
+            const level = u32(36), stride = u32(40), layer_stride = u32(44);
+            if(type === CMD_TRANSFER_TO_HOST_3D)
+            {
+                const read = (from, out, at, length) => this.read_backing(r, from, out, at, length);
+                if(!virgl.transfer_to_host(r, box, level, offset, stride, layer_stride, read))
+                {
+                    return this.error(RESP_ERR_INVALID_PARAMETER, type);
+                }
+                return this.ok();
+            }
+            let finish = null, finished = false;
+            virgl.transfer_from_host(r, box, level, offset, stride, layer_stride, (at, data) => { this.write_backing(r, at, data); return true; },
+                () => { finished = true; if(finish) finish(); });
+            this.deferred = done => { if(finished) done(); else finish = done; };
+            return this.ok();
+        }
+        case CMD_SUBMIT_3D:
+        {
+            if(!need(8)) break;
+            const size = u32(0);
+            if(size & 3 || HEADER_SIZE + 8 + size > bytes.length) return this.error(RESP_ERR_INVALID_PARAMETER, type);
+            if(!virgl.contexts.has(ctx_id)) return this.error(RESP_ERR_INVALID_CONTEXT_ID, type);
+            const start = bytes.byteOffset + HEADER_SIZE + 8;
+            const words = new Uint32Array(bytes.buffer.slice(start, start + size));
+            virgl.submit(ctx_id, words, id => this.resources.get(id) || null);
+            after_work();
+            return this.ok();
+        }
+    }
+    return this.error(RESP_ERR_UNSPEC, type);
 };
 
 VirtioGPU.prototype.attach_backing = function(id, entries)
@@ -747,15 +990,27 @@ VirtioGPU.prototype.cursor_command = function(bytes)
             this.cursor.move(x, y, false);
             return;
         }
-        const pixels = new Int32Array(resource.data.buffer);
         const convert = TO_RGBA[resource.format], shift = ALPHA_SHIFT[resource.format];
-        // premultiplied 0xAARRGGBB (as DRM's cursor planes are by default)
-        this.cursor.define_alpha(view.getUint32(HEADER_SIZE + 20, true), view.getUint32(HEADER_SIZE + 24, true),
-            resource.width, resource.height, i => {
+        if(!convert) return;
+        const hot_x = view.getUint32(HEADER_SIZE + 20, true), hot_y = view.getUint32(HEADER_SIZE + 24, true);
+        const define = () => {
+            const pixels = new Int32Array(resource.data.buffer);
+            // premultiplied 0xAARRGGBB (as DRM's cursor planes are by default)
+            this.cursor.define_alpha(hot_x, hot_y, resource.width, resource.height, i => {
                 const rgba = convert(pixels[i]), alpha = shift === undefined ? 0xFF : pixels[i] >>> shift & 0xFF;
                 return alpha << 24 | (rgba & 0xFF) << 16 | rgba & 0xFF00 | rgba >>> 16 & 0xFF;
             });
-        this.cursor.move(x, y, true);
+            this.cursor.move(x, y, true);
+        };
+        if(resource.three_d && !(resource.host_newer && resource.data))
+        {
+            // (drawn on the GPU: read back first)
+            this.virgl.read_picture(/** @type {!Resource3D} */ (resource), 0, 0, resource.width, resource.height, (first, count) => {
+                if(first + count === resource.height && this.resources.get(id) === resource) define();
+            });
+            return;
+        }
+        define();
     }
     else if(type === CMD_MOVE_CURSOR)
     {
@@ -872,6 +1127,18 @@ VirtioGPU.prototype.render = function()
 
 // ---------------------------------------------------------------------------
 // Snapshots
+
+/**
+ * Before a snapshot: the GPU has run what was sent. (Its 3D resources'
+ * contents and the contexts' objects are not in snapshots yet.)
+ * @return {!Promise<undefined>}
+ */
+VirtioGPU.prototype.prepare_save = function()
+{
+    const virgl = this.virgl;
+    if(!virgl) return Promise.resolve(undefined);
+    return new Promise(resolve => virgl.after_work(() => resolve(undefined)));
+};
 
 const STATE_VERSION = 1;
 
