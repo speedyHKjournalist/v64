@@ -246,6 +246,27 @@ export const DX10_DEVCAPS = [
     ...dx_format_caps(),
 ];
 
+/**
+ * The devcaps at level dx10.1: dx10's, shader model 4.1, and NV12 and YUY2
+ * surfaces, which VMware's driver wants (from Direct3D 11.1 on) before it
+ * offers feature level 10_1. GX keeps those two in guest memory only: they
+ * are made and copied, never sampled or drawn into.
+ * @type {!Array<!Array<number>>}
+ */
+export const DX10_1_DEVCAPS = with_devcaps(DX10_DEVCAPS, [
+    [C.SVGA3D_DEVCAP_SM41, 1],
+    [C.SVGA3D_DEVCAP_DXFMT_YUY2, C.SVGA3D_DXFMT_SUPPORTED],
+    [C.SVGA3D_DEVCAP_DXFMT_NV12, C.SVGA3D_DXFMT_SUPPORTED],
+]);
+
+/** A level's devcaps from the one below's, some of them changed */
+function with_devcaps(base, changes)
+{
+    const caps = new Map(base);
+    for(const [index, value] of changes) caps.set(index, value);
+    return Array.from(caps);
+}
+
 /** SVGA3D_DEVCAP_DXFMT_* from svga_dx_formats.js */
 function dx_format_caps()
 {

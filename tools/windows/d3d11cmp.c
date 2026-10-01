@@ -1,5 +1,6 @@
-// d3d11cmp.exe: Direct3D 11 at feature level 10_0, drawn by the hardware
-// driver and by WARP, compared. Each case renders a 64x64 RGBA8 picture
+// d3d11cmp.exe: Direct3D 11 at feature level 10_1 (or 10_0), drawn by the
+// hardware driver and by WARP, compared. The 10_1 cases (shader model 4.1)
+// are skipped when the hardware device only has 10_0. Each case renders a 64x64 RGBA8 picture
 // offscreen with shaders compiled here by d3dcompiler_47 (from HLSL), reads it
 // back, and reports through the VMware backdoor (RPCI "log", printed by
 // tests/x64/windows_boot.mjs) how far the hardware picture is from WARP's.
@@ -78,6 +79,7 @@ static Compile g_compile;
 /* A device and what every case draws into */
 typedef struct {
     const char *name;
+    D3D_FEATURE_LEVEL level;
     ID3D11Device *device;
     ID3D11DeviceContext *context;
     ID3D11Texture2D *target, *staging;
@@ -102,7 +104,7 @@ static ID3DBlob *compile(const char *source, const char *entry, const char *prof
 static ID3D11VertexShader *vs(Device *d, const char *source, ID3DBlob **keep)
 {
     ID3D11VertexShader *shader = NULL;
-    ID3DBlob *code = compile(source, "vs", "vs_4_0");
+    ID3DBlob *code = compile(source, "vs", d->level >= D3D_FEATURE_LEVEL_10_1 ? "vs_4_1" : "vs_4_0");
     if (!code) return NULL;
     ID3D11Device_CreateVertexShader(d->device, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &shader);
     if (keep) *keep = code; else ID3D10Blob_Release(code);
@@ -112,7 +114,7 @@ static ID3D11VertexShader *vs(Device *d, const char *source, ID3DBlob **keep)
 static ID3D11PixelShader *ps(Device *d, const char *source)
 {
     ID3D11PixelShader *shader = NULL;
-    ID3DBlob *code = compile(source, "ps", "ps_4_0");
+    ID3DBlob *code = compile(source, "ps", d->level >= D3D_FEATURE_LEVEL_10_1 ? "ps_4_1" : "ps_4_0");
     if (!code) return NULL;
     ID3D11Device_CreatePixelShader(d->device, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &shader);
     ID3D10Blob_Release(code);
@@ -437,17 +439,228 @@ static void case_stream_output(Device *d)
     ID3D11VertexShader_Release(v); ID3D11VertexShader_Release(v2); ID3D11PixelShader_Release(p);
 }
 
-static const struct { const char *name; void (*run)(Device *); } CASES[] = {
-    { "triangle", case_triangle }, { "texture", case_texture }, { "depth_blend", case_depth_blend },
-    { "instancing", case_instancing }, { "gs", case_gs }, { "msaa", case_msaa }, { "stream_output", case_stream_output },
+
+/* ---- feature level 10_1 (shader model 4.1) ---- */
+
+static ID3D11SamplerState *linear_sampler(Device *d, D3D11_TEXTURE_ADDRESS_MODE address)
+{
+    D3D11_SAMPLER_DESC desc;
+    ID3D11SamplerState *sampler = NULL;
+    ZeroMemory(&desc, sizeof desc);
+    desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    desc.AddressU = desc.AddressV = desc.AddressW = address;
+    desc.MaxLOD = D3D11_FLOAT32_MAX;
+    ID3D11Device_CreateSamplerState(d->device, &desc, &sampler);
+    return sampler;
+}
+
+static void case_cube_array(Device *d)
+{
+    /* two 4x4 cubes in one array, each face its own colour: the left half
+       looks into cube 0, the right half into cube 1, around a circle */
+    static const char source[] =
+        "TextureCubeArray t : register(t0); SamplerState s : register(s0);"
+        "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };"
+        "float4 ps(O i) : SV_Target { float a = i.uv.y * 6.2831853; float3 dir = float3(cos(a), sin(a) * 0.7, sin(a * 2) * 0.9);"
+        " return t.Sample(s, float4(dir, i.uv.x < 0.5 ? 0 : 1)); }";
+    static const unsigned colours[12] = {
+        0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFF00FFFFu, 0xFFFF00FFu, 0xFFFFFF00u,
+        0xFF000080u, 0xFF008000u, 0xFF800000u, 0xFF008080u, 0xFF800080u, 0xFF808000u,
+    };
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_SHADER_RESOURCE_VIEW_DESC view;
+    ID3D11Texture2D *texture = NULL;
+    ID3D11ShaderResourceView *srv = NULL;
+    ID3D11SamplerState *sampler = linear_sampler(d, D3D11_TEXTURE_ADDRESS_CLAMP);
+    unsigned texels[16];
+    int face, i;
+    ID3D11VertexShader *v = vs(d, QUAD_VS, NULL);
+    ID3D11PixelShader *p = ps(d, source);
+    if (!v || !p) return;
+    ZeroMemory(&desc, sizeof desc);
+    desc.Width = desc.Height = 4; desc.MipLevels = 1; desc.ArraySize = 12;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+    if (FAILED(ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &texture))) { say("%s: no cube array", d->name); return; }
+    for (face = 0; face < 12; face++) {
+        for (i = 0; i < 16; i++) texels[i] = colours[face];
+        ID3D11DeviceContext_UpdateSubresource(d->context, (ID3D11Resource *)texture, face, NULL, texels, 16, 0);
+    }
+    ZeroMemory(&view, sizeof view);
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+    view.TextureCubeArray.MipLevels = 1; view.TextureCubeArray.First2DArrayFace = 0; view.TextureCubeArray.NumCubes = 2;
+    if (FAILED(ID3D11Device_CreateShaderResourceView(d->device, (ID3D11Resource *)texture, &view, &srv))) { say("%s: no cube array view", d->name); return; }
+    begin(d, 0, 0, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(d->context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(d->context, v, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(d->context, p, NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(d->context, 0, 1, &srv);
+    ID3D11DeviceContext_PSSetSamplers(d->context, 0, 1, &sampler);
+    ID3D11DeviceContext_Draw(d->context, 3, 0);
+    ID3D11SamplerState_Release(sampler); ID3D11ShaderResourceView_Release(srv); ID3D11Texture2D_Release(texture);
+    ID3D11VertexShader_Release(v); ID3D11PixelShader_Release(p);
+}
+
+static void case_gather_lod(Device *d)
+{
+    /* the top half: Gather of an 8x8 texture's red channel, its four texels
+       as colours; the bottom half: CalculateLevelOfDetail of a 64x64 one
+       mipmapped, under a zoom that grows along x, as grey levels */
+    static const char source[] =
+        "Texture2D t : register(t0); Texture2D m : register(t1); SamplerState s : register(s0);"
+        "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };"
+        "float4 ps(O i) : SV_Target {"
+        " if (i.uv.y < 0.5) { float4 g = t.Gather(s, i.uv * float2(1, 2)); return float4(g.x, g.y, (g.z + g.w) * 0.5, 1); }"
+        " float zoom = exp2(i.uv.x * 6); float2 uv = i.uv * zoom;"
+        " return float4(m.CalculateLevelOfDetail(s, uv) / 6.0, m.CalculateLevelOfDetailUnclamped(s, uv) / 8.0, 0, 1); }";
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D *small = NULL, *mipped = NULL;
+    ID3D11ShaderResourceView *srvs[2] = { NULL, NULL };
+    ID3D11SamplerState *sampler = linear_sampler(d, D3D11_TEXTURE_ADDRESS_WRAP);
+    unsigned char red[64];
+    unsigned big[64 * 64];
+    int i;
+    ID3D11VertexShader *v = vs(d, QUAD_VS, NULL);
+    ID3D11PixelShader *p = ps(d, source);
+    if (!v || !p) return;
+    for (i = 0; i < 64; i++) red[i] = (unsigned char)((i * 37) & 0xFF);
+    for (i = 0; i < 64 * 64; i++) big[i] = 0xFF808080u;
+    ZeroMemory(&desc, sizeof desc);
+    desc.Width = desc.Height = 8; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8_UNORM; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &small);
+    ID3D11DeviceContext_UpdateSubresource(d->context, (ID3D11Resource *)small, 0, NULL, red, 8, 0);
+    desc.Width = desc.Height = 64; desc.MipLevels = 7; desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &mipped);
+    ID3D11DeviceContext_UpdateSubresource(d->context, (ID3D11Resource *)mipped, 0, NULL, big, 256, 0);
+    ID3D11Device_CreateShaderResourceView(d->device, (ID3D11Resource *)small, NULL, &srvs[0]);
+    ID3D11Device_CreateShaderResourceView(d->device, (ID3D11Resource *)mipped, NULL, &srvs[1]);
+    begin(d, 0, 0, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(d->context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(d->context, v, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(d->context, p, NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(d->context, 0, 2, srvs);
+    ID3D11DeviceContext_PSSetSamplers(d->context, 0, 1, &sampler);
+    ID3D11DeviceContext_Draw(d->context, 3, 0);
+    ID3D11SamplerState_Release(sampler);
+    ID3D11ShaderResourceView_Release(srvs[0]); ID3D11ShaderResourceView_Release(srvs[1]);
+    ID3D11Texture2D_Release(small); ID3D11Texture2D_Release(mipped);
+    ID3D11VertexShader_Release(v); ID3D11PixelShader_Release(p);
+}
+
+static void case_independent_blend(Device *d)
+{
+    /* two targets with their own blending: target 0 (another texture) adds,
+       target 1 (the one compared) multiplies by the colour already there */
+    static const char source[] =
+        "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };"
+        "struct T { float4 a : SV_Target0; float4 b : SV_Target1; };"
+        "T ps(O i) { T t; t.a = float4(0.5, 0.5, 0.5, 1); t.b = float4(i.uv.x, i.uv.y, 1 - i.uv.x, 1); return t; }";
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_BLEND_DESC blend_desc;
+    ID3D11Texture2D *other = NULL;
+    ID3D11RenderTargetView *rtvs[2] = { NULL, NULL };
+    ID3D11BlendState *blend = NULL;
+    float grey[4] = { 0.2f, 0.2f, 0.2f, 1 };
+    ID3D11VertexShader *v = vs(d, QUAD_VS, NULL);
+    ID3D11PixelShader *p = ps(d, source);
+    if (!v || !p) return;
+    ZeroMemory(&desc, sizeof desc);
+    desc.Width = desc.Height = SIZE; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &other);
+    ID3D11Device_CreateRenderTargetView(d->device, (ID3D11Resource *)other, NULL, &rtvs[0]);
+    rtvs[1] = d->rtv;
+    ZeroMemory(&blend_desc, sizeof blend_desc);
+    blend_desc.IndependentBlendEnable = TRUE;
+    blend_desc.RenderTarget[0].BlendEnable = TRUE;
+    blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE; blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    blend_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; blend_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    blend_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    blend_desc.RenderTarget[1] = blend_desc.RenderTarget[0];
+    blend_desc.RenderTarget[1].SrcBlend = D3D11_BLEND_DEST_COLOR; blend_desc.RenderTarget[1].DestBlend = D3D11_BLEND_ZERO;
+    blend_desc.RenderTarget[1].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
+        D3D11_COLOR_WRITE_ENABLE_BLUE | D3D11_COLOR_WRITE_ENABLE_ALPHA;
+    ID3D11Device_CreateBlendState(d->device, &blend_desc, &blend);
+    begin(d, 0.9f, 0.6f, 0.3f);
+    ID3D11DeviceContext_ClearRenderTargetView(d->context, rtvs[0], grey);
+    ID3D11DeviceContext_OMSetRenderTargets(d->context, 2, rtvs, NULL);
+    ID3D11DeviceContext_OMSetBlendState(d->context, blend, NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_IASetPrimitiveTopology(d->context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(d->context, v, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(d->context, p, NULL, 0);
+    ID3D11DeviceContext_Draw(d->context, 3, 0);
+    ID3D11BlendState_Release(blend); ID3D11RenderTargetView_Release(rtvs[0]); ID3D11Texture2D_Release(other);
+    ID3D11VertexShader_Release(v); ID3D11PixelShader_Release(p);
+}
+
+static void case_sample_info(Device *d)
+{
+    /* into a 4x target of the standard pattern, shaded per sample: the
+       rasterizer's sample count, sample 1's position and the sample index,
+       resolved */
+    static const char source[] =
+        "float4 vs(uint i : SV_VertexID) : SV_Position { return float4(i == 1 ? 0.9 : -0.9, i == 2 ? 0.9 : -0.7, 0, 1); }"
+        "float4 ps(float4 p : SV_Position, uint k : SV_SampleIndex) : SV_Target {"
+        " float2 at = GetRenderTargetSamplePosition(1);"
+        " return float4(GetRenderTargetSampleCount() / 4.0, at.x + 0.5, at.y + 0.5, k / 3.0); }";
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D *ms = NULL;
+    ID3D11RenderTargetView *rtv = NULL;
+    float clear[4] = { 0, 0, 0, 0 };
+    D3D11_VIEWPORT viewport = { 0, 0, SIZE, SIZE, 0, 1 };
+    ID3D11VertexShader *v = vs(d, source, NULL);
+    ID3D11PixelShader *p = ps(d, source);
+    if (!v || !p) return;
+    ZeroMemory(&desc, sizeof desc);
+    desc.Width = desc.Height = SIZE; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 4;
+    desc.SampleDesc.Quality = D3D11_STANDARD_MULTISAMPLE_PATTERN; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &ms))) {
+        say("%s: no 4x target of the standard pattern; quality 0", d->name);
+        desc.SampleDesc.Quality = 0;
+        if (FAILED(ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &ms))) { say("%s: no 4x MSAA target", d->name); return; }
+    }
+    ID3D11Device_CreateRenderTargetView(d->device, (ID3D11Resource *)ms, NULL, &rtv);
+    ID3D11DeviceContext_ClearState(d->context);
+    ID3D11DeviceContext_ClearRenderTargetView(d->context, d->rtv, clear);
+    ID3D11DeviceContext_ClearRenderTargetView(d->context, rtv, clear);
+    ID3D11DeviceContext_OMSetRenderTargets(d->context, 1, &rtv, NULL);
+    ID3D11DeviceContext_RSSetViewports(d->context, 1, &viewport);
+    ID3D11DeviceContext_IASetPrimitiveTopology(d->context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(d->context, v, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(d->context, p, NULL, 0);
+    ID3D11DeviceContext_Draw(d->context, 3, 0);
+    ID3D11DeviceContext_ResolveSubresource(d->context, (ID3D11Resource *)d->target, 0, (ID3D11Resource *)ms, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+    ID3D11RenderTargetView_Release(rtv); ID3D11Texture2D_Release(ms);
+    ID3D11VertexShader_Release(v); ID3D11PixelShader_Release(p);
+}
+
+static const struct { const char *name; void (*run)(Device *); D3D_FEATURE_LEVEL level; } CASES[] = {
+    { "triangle", case_triangle, D3D_FEATURE_LEVEL_10_0 }, { "texture", case_texture, D3D_FEATURE_LEVEL_10_0 },
+    { "depth_blend", case_depth_blend, D3D_FEATURE_LEVEL_10_0 }, { "instancing", case_instancing, D3D_FEATURE_LEVEL_10_0 },
+    { "gs", case_gs, D3D_FEATURE_LEVEL_10_0 }, { "msaa", case_msaa, D3D_FEATURE_LEVEL_10_0 },
+    { "stream_output", case_stream_output, D3D_FEATURE_LEVEL_10_0 },
+    { "cube_array", case_cube_array, D3D_FEATURE_LEVEL_10_1 }, { "gather_lod", case_gather_lod, D3D_FEATURE_LEVEL_10_1 },
+    { "independent_blend", case_independent_blend, D3D_FEATURE_LEVEL_10_1 },
+    { "sample_info", case_sample_info, D3D_FEATURE_LEVEL_10_1 },
 };
 
-static int open_device(Device *d, D3D_DRIVER_TYPE type, const char *name)
+/* at most `highest`: WARP draws at the level the hardware got */
+static int open_device(Device *d, D3D_DRIVER_TYPE type, const char *name, D3D_FEATURE_LEVEL highest)
 {
-    D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_10_0, got = 0;
+    D3D_FEATURE_LEVEL levels[2] = { D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 }, got = 0;
     D3D11_TEXTURE2D_DESC desc;
-    HRESULT hr = D3D11CreateDevice(NULL, type, NULL, 0, &level, 1, D3D11_SDK_VERSION, &d->device, &got, &d->context);
+    HRESULT hr = D3D11CreateDevice(NULL, type, NULL, 0, levels + (highest < D3D_FEATURE_LEVEL_10_1), 2 - (highest < D3D_FEATURE_LEVEL_10_1),
+        D3D11_SDK_VERSION, &d->device, &got, &d->context);
     d->name = name;
+    d->level = got;
     if (FAILED(hr)) { say("%s: D3D11CreateDevice 0x%08lX", name, (unsigned long)hr); return 0; }
     ZeroMemory(&desc, sizeof desc);
     desc.Width = desc.Height = SIZE; desc.MipLevels = 1; desc.ArraySize = 1;
@@ -470,13 +683,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     ZeroMemory(&hw, sizeof hw); ZeroMemory(&warp, sizeof warp);
     g_compile = compiler ? (Compile)GetProcAddress(compiler, "D3DCompile") : NULL;
     if (!g_compile) { say("no d3dcompiler_47.dll"); return 1; }
-    if (!open_device(&hw, D3D_DRIVER_TYPE_HARDWARE, "hardware") || !open_device(&warp, D3D_DRIVER_TYPE_WARP, "warp")) {
+    if (!open_device(&hw, D3D_DRIVER_TYPE_HARDWARE, "hardware", D3D_FEATURE_LEVEL_10_1) ||
+        !open_device(&warp, D3D_DRIVER_TYPE_WARP, "warp", hw.level)) {
         say("end: no devices");
         return 1;
     }
     for (k = 0; k < sizeof CASES / sizeof CASES[0]; k++) {
         int i, worst = 0, off = 0, sample;
         if (*command_line && !strstr(command_line, CASES[k].name)) continue;
+        if (hw.level < CASES[k].level) { say("case %s: skipped, it needs feature level 0x%x", CASES[k].name, CASES[k].level); continue; }
         CASES[k].run(&hw); read_back(&hw);
         CASES[k].run(&warp); read_back(&warp);
         for (i = 0; i < SIZE * SIZE * 4; i++) {

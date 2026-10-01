@@ -16,7 +16,7 @@ import { ScreenObjects } from "./svga_screens.js";
 import { SoftwareCursor, cursor_masks_length } from "./svga_cursor.js";
 import { SVGA3D } from "./svga3d.js";
 import { MOBTable, OTables, OTABLE_ENTRY_BYTES, MOB_MAX_SIZE, GB_MEMORY_KB } from "./svga_gb.js";
-import { VGPU9_DEVCAPS, DX10_DEVCAPS } from "./svga3d_tables.js";
+import { VGPU9_DEVCAPS, DX10_DEVCAPS, DX10_1_DEVCAPS } from "./svga3d_tables.js";
 
 // For Types Only
 import { DisplaySource } from "../../display.js";
@@ -48,7 +48,7 @@ const CURSOR_MAX_BYTE_SIZE = CURSOR_HEADER_BYTES + CURSOR_MAX_DIMENSION * CURSOR
 
 /**
  * What each level declares. A level is fixed once chosen: a snapshot keeps it.
- * @type {!Object<string, {caps: number, fifo_caps: number, cap2: (number|undefined)}>}
+ * @type {!Object<string, {caps: number, fifo_caps: number, cap2: (number|undefined), devcaps: (!Array<!Array<number>>|undefined)}>}
  */
 export const LEVELS = {
     // S1: modes through the registers, the FIFO with UPDATE/RECT_COPY/FENCE,
@@ -114,11 +114,29 @@ export const LEVELS = {
             C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
         cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG,
+        devcaps: DX10_DEVCAPS,
+    },
+    // S6: shader model 4.1 (feature level 10_1; Linux's vmwgfx wants
+    // SVGA_CAP2_DX2 and the SM41 devcap, and Mesa then multisamples)
+    "dx10.1": {
+        caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
+            C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
+            C.SVGA_CAP_CURSOR | C.SVGA_CAP_CURSOR_BYPASS | C.SVGA_CAP_CURSOR_BYPASS_2 | C.SVGA_CAP_ALPHA_CURSOR |
+            C.SVGA_CAP_8BIT_EMULATION | C.SVGA_CAP_MULTIMON | C.SVGA_CAP_DISPLAY_TOPOLOGY |
+            C.SVGA_CAP_GMR | C.SVGA_CAP_GMR2 | C.SVGA_CAP_SCREEN_OBJECT_2 |
+            C.SVGA_CAP_COMMAND_BUFFERS | C.SVGA_CAP_CMD_BUFFERS_2 | C.SVGA_CAP_HP_CMD_QUEUE | C.SVGA_CAP_3D |
+            C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_CAP2_REGISTER | C.SVGA_CAP_DX,
+        fifo_caps: C.SVGA_FIFO_CAP_FENCE | C.SVGA_FIFO_CAP_PITCHLOCK | C.SVGA_FIFO_CAP_RESERVE |
+            C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
+            C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
+        cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
+            C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG | C.SVGA_CAP2_DX2,
+        devcaps: DX10_1_DEVCAPS,
     },
 };
 
 /** Lowest to highest; without a pinned level the highest one there is a renderer for */
-export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10"];
+export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10", "dx10.1"];
 
 /** The level without a pinned one: the highest implemented, or 2D without a renderer */
 export const DEFAULT_3D_LEVEL = "dx10";
@@ -258,7 +276,7 @@ SVGADevice.prototype.configure_objects = function()
     const gb = !!(this.caps & C.SVGA_CAP_GBOBJECTS);
     this.mobs = gb ? new MOBTable(this.machine) : null;
     this.otables = gb ? new OTables(this.machine) : null;
-    this.devcaps = new Map(this.caps & C.SVGA_CAP_DX ? DX10_DEVCAPS : VGPU9_DEVCAPS);
+    this.devcaps = new Map(LEVELS[this.level].devcaps || VGPU9_DEVCAPS);
     // (a new one takes over the renderer's channel)
     this.svga3d = this.caps & C.SVGA_CAP_3D ? new SVGA3D(this, /** @type {!Object} */ (this.renderer)) : null;
 };
@@ -1447,7 +1465,7 @@ SVGADevice.prototype.set_state = function(state)
         this.caps = caps;
         this.configure_objects();
     }
-    if(declared) this.devcaps = new Map(declared[3]);
+    this.devcaps = new Map(declared ? declared[3] : LEVELS[this.level].devcaps || VGPU9_DEVCAPS);
     if(state[2] !== this.vram_size)
     {
         throw new Error("vmware_svga: the snapshot has vram_size " + state[2] + ", this machine " + this.vram_size);

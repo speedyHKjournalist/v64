@@ -77,6 +77,7 @@
             this.helpers = new Set();
             this.warnings = [];
             this.usesDraw = false;
+            this.usesSamples = false;
             // resources used for comparison: they are depth textures
             this.compared = new Set();
             this.gathered = new Set();
@@ -138,6 +139,7 @@
             if (this.stage === PROGRAM.PS && this.o.dualSource) out.push("enable dual_source_blending;");
             out.push("");
             out.push(...this.declarations());
+            if (this.usesSamples) out.push("override gx_samples: u32 = 1u;");
             out.push(...this.helperCode());
             out.push(...functions);
             out.push("fn shader_main() {\n" + mainBody + "\n}\n");
@@ -146,6 +148,8 @@
                 code: out.join("\n"),
                 bindings: this.bindings,
                 usesDraw: this.usesDraw,
+                // the override constant gx_samples: the pipeline's sample count
+                usesSamples: this.usesSamples,
                 warnings: this.warnings,
                 stage: p.stage,
                 // a compute variant's records: vec4s per vertex, and a geometry shader's output
@@ -1083,17 +1087,15 @@
                 case OP.RESINFO:
                     return this.resinfo(ins);
                 case OP.SAMPLE_INFO: {
-                    const r = ins.src[0];
-                    if (r.type === OPERAND.RASTERIZER) return wu("vec4<u32>(1u)");
-                    const t = `t${r.indices[0].imm}`;
-                    return (ins.controls & 1) ? wu(`vec4<u32>(textureNumSamples(${t}))`) : wf(`vec4<f32>(f32(textureNumSamples(${t})))`);
+                    const count = this.sampleCount(ins.src[0]);
+                    const value = (ins.controls & 1) ? `vec4<u32>(${count}, 0u, 0u, 0u)` : `vec4<f32>(f32(${count}), 0.0, 0.0, 0.0)`;
+                    return this.write(ins, this.swizzled(value, ins.src[0]), (ins.controls & 1) ? "u" : "f");
                 }
                 case OP.SAMPLE_POS:
                     this.helpers.add("sample_pos");
-                    return wf(`gx_sample_pos(${this.u(ins, 1)}.x)`);
+                    return this.write(ins, this.swizzled(`gx_sample_pos(${this.u(ins, 1)}.x, ${this.sampleCount(ins.src[0])})`, ins.src[0]), "f");
                 case OP.LOD:
-                    this.warn("lod is approximated by 0");
-                    return wf("vec4<f32>(0.0)");
+                    return this.lod(ins);
                 case OP.BUFINFO: {
                     const r = ins.src[0];
                     if (r.type === OPERAND.RESOURCE) return wu(`vec4<u32>(arrayLength(&t${r.indices[0].imm}))`);
@@ -1356,6 +1358,59 @@
             this.write(ins, this.swizzled(value, ins.src[1]), "f");
         }
 
+        /**
+         * The samples of the rasterizer (the pipeline's, an override
+         * constant) or of a multisampled resource, as a u32 expression
+         */
+        sampleCount(operand) {
+            if (operand.type === OPERAND.RASTERIZER) {
+                this.usesSamples = true;
+                return "gx_samples";
+            }
+            const t = this.resource(operand);
+            const ms = t.r.dimension === DIM.TEXTURE2DMS || t.r.dimension === DIM.TEXTURE2DMSARRAY;
+            return ms ? `textureNumSamples(${t.name})` : "1u";
+        }
+
+        /**
+         * lod: the mip level a sample would take, from the coordinates'
+         * derivatives (WGSL has no query): x clamped to the view's levels,
+         * y not. Only pixel shaders have derivatives; elsewhere it is 0.
+         */
+        lod(ins) {
+            const t = this.resource(ins.src[1]);
+            if (this.stage !== PROGRAM.PS) return this.write(ins, "vec4<f32>(0.0)", "f");
+            const a = this.f(ins, 0), name = t.name;
+            let coords, size;
+            switch (t.r.dimension) {
+                case DIM.TEXTURE1D:
+                case DIM.TEXTURE1DARRAY:
+                    coords = `vec3<f32>(${a}.x, 0.0, 0.0)`;
+                    size = `vec3<f32>(f32(textureDimensions(${name}).x), 0.0, 0.0)`;
+                    break;
+                case DIM.TEXTURE2D:
+                case DIM.TEXTURE2DARRAY:
+                    coords = `vec3<f32>(${a}.xy, 0.0)`;
+                    size = `vec3<f32>(vec2<f32>(textureDimensions(${name})), 0.0)`;
+                    break;
+                case DIM.TEXTURE3D:
+                    coords = `${a}.xyz`;
+                    size = `vec3<f32>(textureDimensions(${name}))`;
+                    break;
+                case DIM.TEXTURECUBE:
+                case DIM.TEXTURECUBEARRAY:
+                    // on the face: the direction over its major axis, [-1, 1] across
+                    this.helpers.add("cube_face");
+                    coords = `gx_cube_face(${a}.xyz)`;
+                    size = `vec3<f32>(f32(textureDimensions(${name}).x) * 0.5)`;
+                    break;
+                default:
+                    throw new ShaderTranslateError("lod of a resource of dimension " + t.r.dimension);
+            }
+            this.helpers.add("lod");
+            this.write(ins, this.swizzled(`gx_lod(${coords} * ${size}, f32(textureNumLevels(${name})))`, ins.src[1]), "f");
+        }
+
         // ---------------------------------------------------------------
         // Raw and structured buffers, atomics (SM5)
 
@@ -1505,10 +1560,28 @@ fn gx_bfi(w: vec4<u32>, o: vec4<u32>, insert: vec4<u32>, base: vec4<u32>) -> vec
 }`);
             }
             if (h.has("sample_pos")) {
-                // the standard 4-sample pattern, in pixels from the center
-                out.push(`fn gx_sample_pos(i: u32) -> vec4<f32> {
+                // D3D's standard patterns (one sample at the center, four
+                // as WebGPU places them), in pixels from the center; an index
+                // past the samples is at 0
+                out.push(`fn gx_sample_pos(i: u32, count: u32) -> vec4<f32> {
     var p = array<vec2<f32>, 4>(vec2<f32>(-0.125, -0.375), vec2<f32>(0.375, -0.125), vec2<f32>(-0.375, 0.125), vec2<f32>(0.125, 0.375));
-    return vec4<f32>(p[i & 3u], 0.0, 0.0);
+    if (count != 4u || i >= 4u) { return vec4<f32>(0.0); }
+    return vec4<f32>(p[i], 0.0, 0.0);
+}`);
+            }
+            if (h.has("cube_face")) {
+                out.push(`fn gx_cube_face(d: vec3<f32>) -> vec3<f32> {
+    let m = max(max(abs(d.x), abs(d.y)), abs(d.z));
+    return d / max(m, 1e-30);
+}`);
+            }
+            if (h.has("lod")) {
+                // texels: the coordinates scaled by the texture's size
+                out.push(`fn gx_lod(texels: vec3<f32>, levels: f32) -> vec4<f32> {
+    let dx = dpdx(texels);
+    let dy = dpdy(texels);
+    let lod = 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-30));
+    return vec4<f32>(clamp(lod, 0.0, levels - 1.0), lod, 0.0, 0.0);
 }`);
             }
             return out;

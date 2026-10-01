@@ -61,6 +61,8 @@
 
     const SVGA3D_BUFFER = 37;
     const SVGA3D_R16_UINT = 89, SVGA3D_R32_UINT = 77;
+    // depth formats whose guest layout differs: D3D9's 32-bit integer depth, and depth in the high 24 bits
+    const SVGA3D_Z_D32 = 7, SVGA3D_Z_D24S8 = 9, SVGA3D_Z_D24X8 = 0x26, SVGA3D_Z_DF24 = 0x77, SVGA3D_Z_D24S8_INT = 0x78;
     const SURFACE_CUBEMAP = 1, SURFACE_VOLUME = 0x8000;
     const INVALID = 0xFFFFFFFF;
     const SHADER_VS = 1, SHADER_PS = 2, SHADER_GS = 3, SHADER_HS = 4, SHADER_DS = 5, SHADER_CS = 6;
@@ -162,6 +164,7 @@
             this.occlusion = null;
             this.activeOcclusion = new Map();
             this.blitPipelines = new Map();
+            this.depthUploadPipelines = new Map();
             this.emptyLayout = this.device.createBindGroupLayout({ entries: [] });
             this.emptyGroup = this.device.createBindGroup({ layout: this.emptyLayout, entries: [] });
             this.dummyBuffer = this.device.createBuffer({ size: 65536, usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.STORAGE | BUFFER_USAGE.VERTEX });
@@ -372,6 +375,9 @@
                 return;
             }
             if (!s.texture || mip >= s.gpuMips) return;
+            // (multisampled textures are not copy destinations)
+            if (s.samples > 1) return this.warn("upload-ms", "uploads into multisampled surfaces are not supported");
+            if (isDepthFormat(s.f.gpu)) return this.uploadDepth(s, s.volume ? 0 : layer, mip, x, y, w, h, data, pitch);
             const f = s.f;
             const columns = Math.ceil(w / f.bw), rows = Math.ceil(h / f.bh);
             const rowBytes = Math.min(pitch, columns * f.bytes);
@@ -401,6 +407,98 @@
                 { buffer: this.staging(staged), bytesPerRow: alignedPitch, rowsPerImage: rows },
                 { texture: s.texture, mipLevel: mip, origin: [x, y, s.volume ? z : layer], aspect: "all" },
                 [copyWidth, copyHeight, slices]);
+        }
+
+        /**
+         * Depth and stencil from the guest. WebGPU copies into depth16unorm
+         * and into stencil aspects only; the other depth formats get their
+         * depth by a draw that writes it (frag_depth), from the guest's
+         * values decoded here.
+         */
+        uploadDepth(s, layer, mip, x, y, w, h, data, pitch) {
+            const format = s.f.gpu, bytes = s.f.bytes;
+            const level = this.level(s, mip);
+            w = Math.min(w, level.width - x);
+            h = Math.min(h, level.height - y);
+            if (w <= 0 || h <= 0) return;
+            const words = new DataView(data.buffer, data.byteOffset, data.byteLength);
+            const at = (row, column) => row * pitch + column * bytes;
+            if (at(h - 1, w - 1) + Math.min(bytes, 4) > data.byteLength) return;
+            this.endPass();
+            if (format === "depth16unorm") {
+                const alignedPitch = align(w * 2, 256), staged = new Uint8Array(alignedPitch * h);
+                for (let row = 0; row < h; row++) staged.set(data.subarray(row * pitch, row * pitch + w * 2), row * alignedPitch);
+                this.encoder().copyBufferToTexture({ buffer: this.staging(staged), bytesPerRow: alignedPitch, rowsPerImage: h },
+                    { texture: s.texture, mipLevel: mip, origin: [x, y, layer], aspect: "depth-only" }, [w, h, 1]);
+                return;
+            }
+            // where each format keeps depth and stencil (D3D9's D24S8 has
+            // depth in the high bits, DXGI's D24_UNORM_S8_UINT in the low)
+            const highDepth = s.format === SVGA3D_Z_D24S8 || s.format === SVGA3D_Z_D24X8 || s.format === SVGA3D_Z_DF24 ||
+                s.format === SVGA3D_Z_D24S8_INT;
+            const depth = new Float32Array(w * h);
+            const stencil = hasStencil(format) ? new Uint8Array(align(w, 256) * h) : null;
+            for (let row = 0; row < h; row++) {
+                for (let column = 0; column < w; column++) {
+                    const offset = at(row, column), word = words.getUint32(offset, true);
+                    let value, stencilValue = 0;
+                    if (format === "depth32float" || format === "depth32float-stencil8") {
+                        value = s.format === SVGA3D_Z_D32 ? word / 0xFFFFFFFF : words.getFloat32(offset, true);
+                        if (bytes >= 8) stencilValue = words.getUint8(offset + 4);
+                    } else if (highDepth) {
+                        value = (word >>> 8) / 0xFFFFFF;
+                        stencilValue = word & 0xFF;
+                    } else {
+                        value = (word & 0xFFFFFF) / 0xFFFFFF;
+                        stencilValue = word >>> 24;
+                    }
+                    depth[row * w + column] = Math.min(1, Math.max(0, value || 0));
+                    if (stencil) stencil[row * align(w, 256) + column] = stencilValue;
+                }
+            }
+            let pipeline = this.depthUploadPipelines.get(format);
+            if (!pipeline) {
+                const code = `
+struct Box { x: u32, y: u32, w: u32, pad: u32 }
+@group(0) @binding(0) var<storage, read> values: array<f32>;
+@group(0) @binding(1) var<uniform> box: Box;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(f32(i & 1u) * 2.0 - 1.0, 1.0 - f32(i >> 1u) * 2.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4<f32>) -> @builtin(frag_depth) f32 {
+    return values[(u32(p.y) - box.y) * box.w + u32(p.x) - box.x];
+}`;
+                const module = this.device.createShaderModule({ code });
+                pipeline = this.device.createRenderPipeline({ layout: "auto",
+                    vertex: { module, entryPoint: "vs" },
+                    fragment: { module, entryPoint: "fs", targets: [] },
+                    primitive: { topology: "triangle-strip" },
+                    depthStencil: { format, depthWriteEnabled: true, depthCompare: "always" } });
+                this.depthUploadPipelines.set(format, pipeline);
+            }
+            const values = this.device.createBuffer({ size: depth.byteLength, usage: BUFFER_USAGE.STORAGE, mappedAtCreation: true });
+            new Float32Array(values.getMappedRange()).set(depth);
+            values.unmap();
+            const uniform = this.device.createBuffer({ size: 16, usage: BUFFER_USAGE.UNIFORM, mappedAtCreation: true });
+            new Uint32Array(uniform.getMappedRange()).set([x, y, w, 0]);
+            uniform.unmap();
+            this.transient.push(values, uniform);
+            const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+                { binding: 0, resource: { buffer: values } }, { binding: 1, resource: { buffer: uniform } }] });
+            const attachment = { view: s.texture.createView({ dimension: "2d", baseMipLevel: mip, mipLevelCount: 1,
+                baseArrayLayer: layer, arrayLayerCount: 1 }), depthLoadOp: "load", depthStoreOp: "store" };
+            if (stencil) { attachment.stencilLoadOp = "load"; attachment.stencilStoreOp = "store"; }
+            const pass = this.encoder().beginRenderPass({ colorAttachments: [], depthStencilAttachment: attachment });
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, group);
+            pass.setViewport(0, 0, level.width, level.height, 0, 1);
+            pass.setScissorRect(x, y, w, h);
+            pass.draw(4);
+            pass.end();
+            if (stencil) {
+                this.encoder().copyBufferToTexture({ buffer: this.staging(stencil), bytesPerRow: align(w, 256), rowsPerImage: h },
+                    { texture: s.texture, mipLevel: mip, origin: [x, y, layer], aspect: "stencil-only" }, [w, h, 1]);
+            }
         }
 
         /** Guest pixels into what the texture holds: opaque alpha for "X" formats */
@@ -1837,6 +1935,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 primitive,
                 multisample: { count: o.samples },
             };
+            // sample_info and sample_pos of the rasterizer read the pipeline's samples
+            if (o.vsModule.result && o.vsModule.result.usesSamples) descriptor.vertex.constants = { gx_samples: o.samples };
             if (o.call.indexed && /strip/.test(o.topology)) {
                 const st = c.state;
                 primitive.stripIndexFormat = st.ib.format === SVGA3D_R16_UINT ? "uint16" : "uint32";
@@ -1906,6 +2006,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     return target;
                 });
                 descriptor.fragment = { module: o.psModule.module, entryPoint: "main", targets };
+                if (o.psModule.result.usesSamples) descriptor.fragment.constants = { gx_samples: o.samples };
             }
             try {
                 return { pipeline: this.device.createRenderPipeline(descriptor), layouts };
@@ -2042,8 +2143,12 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const mipCountView = Math.max(1, Math.min(mips === INVALID ? S.gpuMips : mips, S.gpuMips - baseMip));
             let layers = S.volume ? 1 : S.layers;
             let baseLayer = S.volume ? 0 : Math.min(first, layers - 1);
+            // (a cube array's view counts cubes)
+            const cubes = Math.floor((layers - baseLayer) / 6);
             let layerCount = dimension === "2d" ? 1 : dimension === "cube" ? 6 :
-                dimension === "cube-array" ? Math.floor((layers - baseLayer) / 6) * 6 : Math.max(1, Math.min(count || 1, layers - baseLayer));
+                dimension === "cube-array" ? Math.min(count && count !== INVALID ? count : cubes, cubes) * 6 :
+                Math.max(1, Math.min(count || 1, layers - baseLayer));
+            if (dimension === "cube-array" && !layerCount) return this.dummyTexture(binding);
             if (dimension === "2d-array" && !count) layerCount = layers - baseLayer;
             if (dimension === "cube" && layers - baseLayer < 6) return this.dummyTexture(binding);
             const aspect = isDepthFormat(format) ? (srv.format === 82 || srv.format === 63 ? "stencil-only" : "depth-only") : "all";

@@ -1,0 +1,132 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VMware SVGA II DX: depth and stencil from the guest</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// A D24_UNORM_S8_UINT surface whose MOB holds depth 0.25 on the left, 0.75
+// on the right, and stencil 5 everywhere. WebGPU copies nothing into a 24-bit
+// depth aspect: GX draws the depth in and copies the stencil. A quad at depth
+// 0.5 with LESS and stencil EQUAL 5 then shows on the right half only; a
+// second one at depth 0 with stencil EQUAL 6 shows nowhere.
+import * as C from "../../src/graphics_adapters/vmware_svga/svga_constants.js";
+import { SVGA3D } from "../../src/graphics_adapters/vmware_svga/svga3d.js";
+import { ScreenObjects } from "../../src/graphics_adapters/vmware_svga/svga_screens.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+const OPERAND = { INPUT: 1, OUTPUT: 2, IMMEDIATE32: 4 };
+const operand = (type, indices, mask) => [(2 | (mask === undefined ? 15 : mask) << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const swizzled = (type, indices) => [(2 | 1 << 2 | 0xE4 << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const ins = (op, ...operands) => { const body = operands.flat(); return [(op | (1 + body.length) << 24) >>> 0, ...body]; };
+const program = (type, ...code) => { const body = code.flat(); return new Uint32Array([type << 16 | 4 << 4, 2 + body.length, ...body]); };
+const DCL_INPUT = 95, DCL_OUTPUT = 101, DCL_OUTPUT_SIV = 103, MOV = 54, RET = 62;
+const imm = (...values) => [(2 | OPERAND.IMMEDIATE32 << 12) >>> 0, ...values.map(f32)];
+// VS: the position as given (xyz), w 1
+const VS = program(1,
+    ins(DCL_INPUT, operand(OPERAND.INPUT, [0])),
+    ins(DCL_OUTPUT_SIV, operand(OPERAND.OUTPUT, [0]), 1),
+    ins(MOV, operand(OPERAND.OUTPUT, [0], 7), swizzled(OPERAND.INPUT, [0])),
+    ins(MOV, operand(OPERAND.OUTPUT, [0], 8), imm(0, 0, 0, 1)),
+    ins(RET));
+const colour = (...rgba) => program(0,
+    ins(DCL_OUTPUT, operand(OPERAND.OUTPUT, [0])),
+    ins(MOV, operand(OPERAND.OUTPUT, [0]), imm(...rgba)),
+    ins(RET));
+const WHITE = colour(1, 1, 1, 1), RED = colour(1, 0, 0, 1);
+
+(async () => {
+    try {
+        const mobs = new Map();
+        const mob_table = {
+            read: (id, offset, length) => { const m = mobs.get(id); return m && offset + length <= m.length ? m.slice(offset, offset + length) : null; },
+            write: (id, offset, bytes) => { const m = mobs.get(id); if(!m || offset + bytes.length > m.length) return false; m.set(bytes, offset); return true; },
+            size: id => mobs.has(id) ? mobs.get(id).length : -1,
+        };
+        const screens = new ScreenObjects({ read: () => null, write: () => false });
+        const device = { caps: C.SVGA_CAP_3D | C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_DX, level: "dx10",
+            gmrs: { read: () => null, write: () => false }, mobs: mob_table, otables: null, screens,
+            set_irq: () => {}, svga_active: () => false };
+
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        globalThis.svgaWarnings = [];
+        for(const method of ["warn", "error"])
+        {
+            const original = console[method];
+            console[method] = (...args) => { globalThis.svgaWarnings.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); original.apply(console, args); };
+        }
+        const svga3d = new SVGA3D(device, end(0, 1));
+        const run = (id, ...body) => svga3d.command(id, Int32Array.from(body, v => v | 0));
+        const finished = () => new Promise(resolve => svga3d.after_work(resolve));
+
+        // MOB 1: the target; 2: the depth surface; 3: two quads; 4: the shaders
+        const RT = 10, DS = 11, VB = 12;
+        mobs.set(1, new Uint8Array(64 * 64 * 4));
+        const depth = new Uint32Array(64 * 64);
+        for(let y = 0; y < 64; y++) for(let x = 0; x < 64; x++)
+            depth[y * 64 + x] = Math.round((x < 32 ? 0.25 : 0.75) * 0xFFFFFF) | 5 << 24;
+        mobs.set(2, new Uint8Array(depth.buffer));
+        const quad = z => [-1, -1, z, -1, 1, z, 1, -1, z, 1, -1, z, -1, 1, z, 1, 1, z];
+        mobs.set(3, new Uint8Array(new Float32Array([...quad(0.5), ...quad(0.0)]).buffer));
+        const shaders = new Uint8Array(4096);
+        shaders.set(new Uint8Array(VS.buffer), 0);
+        shaders.set(new Uint8Array(WHITE.buffer), 1024);
+        shaders.set(new Uint8Array(RED.buffer), 2048);
+        mobs.set(4, shaders);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, RT, C.SVGA3D_SURFACE_BIND_RENDER_TARGET, C.SVGA3D_B8G8R8A8_UNORM, 1, 0, 0, 64, 64, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, DS, C.SVGA3D_SURFACE_BIND_DEPTH_STENCIL, C.SVGA3D_D24_UNORM_S8_UINT, 1, 0, 0, 64, 64, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, VB, C.SVGA3D_SURFACE_BIND_VERTEX_BUFFER, C.SVGA3D_BUFFER, 1, 0, 0, 2 * 18 * 4, 1, 1, 1, 0);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, RT, 1);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, DS, 2);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, VB, 3);
+        run(C.SVGA_3D_CMD_UPDATE_GB_SURFACE, DS);
+        const CID = 1;
+        run(C.SVGA_3D_CMD_DX_DEFINE_CONTEXT, CID);
+        svga3d.dx_context = CID;
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 0, RT, C.SVGA3D_B8G8R8A8_UNORM, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_DEFINE_DEPTHSTENCIL_VIEW, 0, DS, C.SVGA3D_D24_UNORM_S8_UINT, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1, 0);
+        // depth LESS without writes; stencil EQUAL, keep (comparison: LESS 2, EQUAL 3; KEEP 1)
+        const face = 1 | 1 << 8 | 1 << 16 | 3 << 24;
+        run(C.SVGA_3D_CMD_DX_DEFINE_DEPTHSTENCIL_STATE, 0, 1 | 0 << 8 | 2 << 16 | 1 << 24, 1 | 1 << 8 | 0xFF << 16 | 0 << 24, face, face);
+        run(C.SVGA_3D_CMD_DX_DEFINE_ELEMENTLAYOUT, 0, 0, 0, C.SVGA3D_R32G32B32_FLOAT, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 1, C.SVGA3D_SHADERTYPE_VS, VS.byteLength);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 2, C.SVGA3D_SHADERTYPE_PS, WHITE.byteLength);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 3, C.SVGA3D_SHADERTYPE_PS, RED.byteLength);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 1, 4, 0);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 2, 4, 1024);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 3, 4, 2048);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 1, C.SVGA3D_SHADERTYPE_VS);
+        run(C.SVGA_3D_CMD_DX_SET_INPUT_LAYOUT, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS, 0, VB, 12, 0);
+        run(C.SVGA_3D_CMD_DX_SET_TOPOLOGY, C.SVGA3D_PRIMITIVE_TRIANGLELIST);
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(0), f32(0), f32(64), f32(64), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, 0, f32(0), f32(0), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 2, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_SET_DEPTHSTENCIL_STATE, 0, 5);
+        run(C.SVGA_3D_CMD_DX_DRAW, 6, 0);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 3, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_SET_DEPTHSTENCIL_STATE, 0, 6);
+        run(C.SVGA_3D_CMD_DX_DRAW, 6, 6);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, RT, 0);
+        await finished();
+        const target = mobs.get(1);
+        // B8G8R8A8: blue, green, red, alpha
+        const pixel = (x, y) => Array.from(target.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4)).join();
+        check(pixel(16, 32) === "0,0,0,255", "the left half's depth 0.25 hides the quad at 0.5 (" + pixel(16, 32) + ")");
+        check(pixel(48, 32) === "255,255,255,255", "the right half's depth 0.75 lets it through, with stencil 5 (" + pixel(48, 32) + ")");
+        check(pixel(8, 8) !== "0,0,255,255" && pixel(56, 56) !== "0,0,255,255", "stencil 6 matches nowhere: no red");
+
+        const warnings = globalThis.svgaWarnings.filter(w => /\[gx\]|WGSL|WebGPU/.test(w));
+        check(!warnings.length, "no GX warnings: " + warnings.join(" / "));
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error.stack || error) + "\n" + checks.join("\n") + "\nwarnings: " + (globalThis.svgaWarnings || []).join("\n");
+    }
+})();
+</script>

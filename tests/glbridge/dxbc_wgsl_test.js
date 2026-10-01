@@ -237,6 +237,47 @@ const TEX = program(PROGRAM.PS,
     console.log("PASS: arrays, cubes, comparisons, ld, resinfo, gradients, gather, 1D as 2D, derivatives");
 }
 
+// ---- shader model 4.1: cube arrays, lod, the rasterizer's samples, per-sample inputs ----
+
+const rasterizer = sel => operand(OPERAND.RASTERIZER, [], sel || XYZW_S);
+const SM41 = (() => {
+    const p = program(PROGRAM.PS,
+        dcl_sampler(0),
+        dcl_resource(0, DIM.TEXTURECUBEARRAY), dcl_resource(1, DIM.TEXTURE2D), dcl_resource(2, DIM.TEXTURE2DMS),
+        dcl_input_ps(1, XYZW, INTERPOLATION.LINEAR_SAMPLE),
+        dcl_output(0, XYZW),
+        dcl_temps(4),
+        ins(OP.SAMPLE, r(0, { mask: XYZW }), v(1, XYZW_S), t(0), s(0)),
+        ins(OP.GATHER4, r(1, { mask: XYZW }), v(1, XYZW_S), t(0), operand(OPERAND.SAMPLER, [0], { select: 0 })),
+        ins(OP.LOD, r(2, { mask: XY }), v(1, XYZW_S), t(0), s(0)),
+        ins(OP.LOD, r(2, { mask: Z | W_ }), v(1, XYZW_S), t(1, SW(0, 0, 1, 1)), s(0)),
+        ins(OP.SAMPLE_INFO, { controls: 1 }, r(3, { mask: X }), rasterizer(SW(0, 0, 0, 0))),
+        ins(OP.SAMPLE_INFO, r(3, { mask: Y }), t(2, SW(0, 0, 0, 0))),
+        ins(OP.SAMPLE_POS, r(3, { mask: Z | W_ }), rasterizer(SW(0, 0, 0, 1)), imm(1)),
+        ins(OP.ADD, r(0, { mask: XYZW }), r(0, XYZW_S), r(1, XYZW_S)),
+        ins(OP.ADD, r(0, { mask: XYZW }), r(0, XYZW_S), r(2, XYZW_S)),
+        ins(OP.ADD, o(0, { mask: XYZW }), r(0, XYZW_S), r(3, XYZW_S)),
+        RET);
+    p[0] = PROGRAM.PS << 16 | 4 << 4 | 1;     // version 4.1
+    return p;
+})();
+{
+    const { p, result } = translate("sm41", SM41, { targets: { 0: "f32" } });
+    assert.equal(p.minor, 1);
+    assert.match(result.code, /texture_cube_array<f32>/);
+    assert.match(result.code, /texture_multisampled_2d<f32>/);
+    assert.match(result.code, /override gx_samples: u32 = 1u;/);
+    assert.ok(result.usesSamples, "the rasterizer's samples are the pipeline's");
+    assert.match(result.code, /fn gx_lod\(/);
+    assert.match(result.code, /gx_cube_face\(/);
+    assert.match(result.code, /textureNumSamples\(t2\)/);
+    assert.match(result.code, /@interpolate\(perspective, sample\)/);
+    assert.ok(!result.warnings.some(w => /lod/.test(w)), "lod is computed, not approximated");
+    const cube = result.bindings.find(b => b.type === "texture" && b.dimension === "cube-array");
+    assert.ok(cube, "a cube array binding");
+    console.log("PASS: shader model 4.1: cube arrays, gather4, lod, sample_info/sample_pos of the rasterizer, per-sample inputs");
+}
+
 // ---- compute variants for geometry shaders: a vertex shader that pulls its
 // vertices, and geometry shaders ------------------------------------------------
 

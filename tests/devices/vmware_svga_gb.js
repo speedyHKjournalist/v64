@@ -303,4 +303,20 @@ assert.equal(reg(C.SVGA_REG_DEV_CAP), declared_width, "the devcap value it decla
 assert.equal(svga.mobs.read32(1, PAGE + 8), 0xC0FFEE, "and its MOBs");
 console.log("PASS: a restore declares the snapshot's level and capabilities");
 
+// dx10.1 is dx10 and what shader model 4.1 adds; dx10 itself is unchanged
+const { DX10_DEVCAPS, DX10_1_DEVCAPS } = await import("../../src/graphics_adapters/vmware_svga/svga3d_tables.js");
+assert.equal(LEVELS["dx10.1"].caps, LEVELS["dx10"].caps);
+assert.equal(LEVELS["dx10.1"].fifo_caps, LEVELS["dx10"].fifo_caps);
+assert.equal(LEVELS["dx10.1"].cap2, LEVELS["dx10"].cap2 | C.SVGA_CAP2_DX2, "Linux's vmwgfx wants DX2 for SM4.1");
+assert.ok(!(LEVELS["dx10"].cap2 & C.SVGA_CAP2_DX2));
+const dx10_devcaps = new Map(DX10_DEVCAPS), dx10_1_devcaps = new Map(DX10_1_DEVCAPS);
+// (a devcap dx10 does not list reads as 0)
+const changed = [...dx10_1_devcaps].filter(([index, value]) => (dx10_devcaps.get(index) || 0) !== value).map(([index]) => index);
+assert.ok([...dx10_devcaps.keys()].every(index => dx10_1_devcaps.has(index)));
+assert.deepEqual(changed.sort((a, b) => a - b),
+    [C.SVGA3D_DEVCAP_DXFMT_YUY2, C.SVGA3D_DEVCAP_DXFMT_NV12, C.SVGA3D_DEVCAP_SM41]);
+assert.equal(dx10_devcaps.get(C.SVGA3D_DEVCAP_SM41), 0);
+assert.equal(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_SM41), 1);
+console.log("PASS: level dx10.1: dx10 with SVGA_CAP2_DX2, SM41, NV12 and YUY2");
+
 await vm.destroy();
