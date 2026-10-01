@@ -8,6 +8,7 @@
 window.onload = function()
 {
     var emulator = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: "../build/v86.wasm",
 
         // Uncomment to see what's going on

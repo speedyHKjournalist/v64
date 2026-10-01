@@ -21,13 +21,14 @@ console.log(`relocation table: ${table.uleb5.length} offsets, ${table.sleb5.leng
 
 const timeout = setTimeout(() => { console.log("timeout"); process.exit(1); }, 900000);
 
-const a = new V86({ ...linux4_options(), wasm_path: PARALLEL_WASM, memory_size: 128 << 20, cpu_cores: 2, experimental_smp_jit: true });
+const a = new V86({ graphics_adapter: "bochs_vga", ...linux4_options(), wasm_path: PARALLEL_WASM, memory_size: 128 << 20, cpu_cores: 2, experimental_smp_jit: true });
 await new Promise(resolve => a.add_listener("emulator-loaded", resolve));
 const memory = a.v86.cpu.wasm_memory;
 assert.ok(memory.buffer instanceof SharedArrayBuffer);
 
 let base_b = 0;
 const b = new V86({
+    graphics_adapter: "bochs_vga",
     ...linux4_options(), memory_size: 96 << 20,
     wasm_fn: async env => {
         const { instance, base } = await instantiate_relocated(bytes, env, memory, 1);

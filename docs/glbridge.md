@@ -24,7 +24,7 @@ Load the bundle after `libv86.js` and turn the proxy on:
 ```js
 new V86({
     screen_container: document.getElementById("screen_container"),
-    graphics_adapter: "bochs_vga",   // the display hardware; the default
+    graphics_adapter: "bochs_vga",   // the display hardware; required
     graphics_proxy: true,            // or options, e.g. { onError }
     // ...
 });

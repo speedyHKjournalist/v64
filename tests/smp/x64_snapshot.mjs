@@ -4,7 +4,7 @@
 // independently prove stale translations survive until architectural INVLPG.
 import assert from "node:assert/strict";
 const { V86 } = await import(process.env.V86_LIB_PATH || (+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js"));
-const emulator = new V86({ wasm_path: process.env.WASM_PATH, memory_size: 16 << 20,
+const emulator = new V86({ graphics_adapter: "bochs_vga", wasm_path: process.env.WASM_PATH, memory_size: 16 << 20,
     acpi: true, cpu_cores: 2, disable_jit: true, autostart: false, log_level: 0,
     net_device: { type: "none" } });
 await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));

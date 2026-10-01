@@ -20,7 +20,7 @@ WebAssembly.instantiate=(bytes,imports)=>{
     return instantiate(bytes,imports);
 };
 // Region-tier publication on the portable core: Tier-0 (on by default) is off.
-const vm=new V86({wasm_path:"build/v86-ir-test.wasm",ir_tier0:false,memory_size:32<<20,
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:"build/v86-ir-test.wasm",ir_tier0:false,memory_size:32<<20,
     bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));

@@ -14,7 +14,7 @@ async function test(name, run)
 
 async function machine(cores = 1, extra = {})
 {
-    const emulator = new V86({ acpi: true, cpu_cores: cores, memory_size: 16 << 20,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: cores, memory_size: 16 << 20,
         autostart: false, log_level: 0, cpu_quantum: 17, cpu_schedule_seed: 0x12345678,
         cpu_clock: { mode: "deterministic", instructions_per_ms: 1000 }, ...extra });
     await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));

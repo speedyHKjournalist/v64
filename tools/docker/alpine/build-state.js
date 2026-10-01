@@ -14,11 +14,12 @@ const V86_ROOT = path.join(__dirname, "../../..");
 const OUTPUT_FILE = path.join(V86_ROOT, "images/alpine-state.bin");
 
 var emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: path.join(V86_ROOT, "bios/seabios.bin") },
     vga_bios: { url: path.join(V86_ROOT, "bios/vgabios.bin") },
     autostart: true,
     memory_size: 512 * 1024 * 1024,
-    vga_memory_size: 8 * 1024 * 1024,
+    vram_size: 8 * 1024 * 1024,
     network_relay_url: "<UNUSED>",
     bzimage_initrd_from_filesystem: true,
     cmdline: "rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci tsc=reliable init_on_free=on",

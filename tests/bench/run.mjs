@@ -76,6 +76,7 @@ function load_pe(file) {
 
 async function create(arm) {
     const vm = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: arm.wasm, memory_size: 128 << 20,
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,

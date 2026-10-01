@@ -73,9 +73,9 @@ const report = { image: { path: image_path, size: source_stat.size, original_mti
     javascript: hash(fs.readFileSync(module_url)), wasm: hash(wasm_bytes), cores,
     binaries: Object.fromEntries(Object.entries({ original_hal, original_kernel, hal, kernel }).map(([name, bytes]) => [name, { sha256: hash(bytes), strings: version_strings(bytes) }])),
     initial: null, smp: null, qualification: "not yet run", modes: [], interventions: [] };
-const vm = new V86({ wasm_fn: async imports => (await WebAssembly.instantiate(wasm, imports)).exports,
+const vm = new V86({ graphics_adapter: "bochs_vga", wasm_fn: async imports => (await WebAssembly.instantiate(wasm, imports)).exports,
     bios: { url: path.join(root, "bios/seabios.bin") }, vga_bios: { url: path.join(root, "bios/vgabios.bin") },
-    hda: source, hdb: auxiliary, memory_size: 512 << 20, vga_memory_size: 16 << 20,
+    hda: source, hdb: auxiliary, memory_size: 512 << 20, vram_size: 16 << 20,
     acpi: true, cpu_cores: cores, experimental_smp_jit: true, ir_tier0: true,
     ir_sync_publication: true, net_device: { type: "ne2k" }, autostart: false, log_level: 0 });
 let phase = "load", serial = "", last_mode_ms = 0, graphics_seen = false, cpu, heartbeat;

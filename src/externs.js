@@ -2,6 +2,13 @@ var global = {};
 var process = { hrtime: function() {} };
 
 /**
+ * The bundle's own URL, defined by the output wrapper of libv86.mjs
+ * (import.meta.url, which Closure cannot compile)
+ * @type {string|undefined}
+ */
+var V86_BUNDLE_URL;
+
+/**
  * @param {string} name
  * @param {function()} processor
  */

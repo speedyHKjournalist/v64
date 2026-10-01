@@ -48,6 +48,7 @@ Install Modem on UART1 and map dial address `123` to WebSocket address `wss://ex
 
 ```javascript
 const emulator = new V86({
+   graphics_adapter: "bochs_vga",
    // ...
    modem: {
        uart: 1,

@@ -111,7 +111,7 @@ CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
 		-C link-args="--import-memory --export-memory --emit-relocs --no-check-features --max-memory=4294967296 --global-base=32768 --export=__heap_base --export=__data_end"
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
-	   dma.js pit.js display.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
+	   dma.js pit.js display.js graphics_adapter.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   virtio_devices.js \
@@ -124,6 +124,14 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
           print_stats.js filestorage.js modem.js graphics_performance.js performance_recorder.js
 
+# Display adapter plugins (src/graphics_adapter.js): each its own file, loaded
+# when graphics_adapter names it. Built with every bundle, which looks for
+# them beside itself. The boundary to v86 uses quoted names only, so a plugin
+# works with any bundle, including the ADVANCED-compiled v86_all.js.
+GRAPHICS_ADAPTER_PLUGINS=build/v86-bochs-vga.js
+GRAPHICS_ADAPTER_COMMON=src/cjs.js src/const.js src/lib.js src/log.js src/bus.js src/display.js \
+	src/graphics_adapters/machine.js src/graphics_adapters/vga_core.js
+
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
 
@@ -131,7 +139,17 @@ CORE_FILES:=$(addprefix src/,$(CORE_FILES))
 LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
 BROWSER_FILES:=$(addprefix src/browser/,$(BROWSER_FILES))
 
-build/v86_all.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
+build/v86-bochs-vga.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/graphics_adapters/bochs_vga/*.js
+	mkdir -p build
+	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
+		--compilation_level SIMPLE --jscomp_off=missingProperties \
+		--output_wrapper ';(function(){%output%}).call(this);' \
+		--js $(GRAPHICS_ADAPTER_COMMON) --js src/graphics_adapters/bochs_vga/plugin.js
+
+.PHONY: graphics-adapters
+graphics-adapters: $(GRAPHICS_ADAPTER_PLUGINS)
+
+build/v86_all.js: $(GRAPHICS_ADAPTER_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	-ls -lh build/v86_all.js
 	java -jar $(CLOSURE) \
@@ -146,7 +164,7 @@ build/v86_all.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.j
 		--js src/browser/main.js
 	ls -lh build/v86_all.js
 
-build/v86_all_debug.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
+build/v86_all_debug.js: $(GRAPHICS_ADAPTER_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/v86_all_debug.js\
@@ -159,7 +177,7 @@ build/v86_all_debug.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js l
 		--js $(BROWSER_FILES)\
 		--js src/browser/main.js
 
-build/libv86.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
+build/libv86.js: $(GRAPHICS_ADAPTER_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	-ls -lh build/libv86.js
 	java -jar $(CLOSURE) \
@@ -174,7 +192,7 @@ build/libv86.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 		--js $(LIB_FILES)
 	ls -lh build/libv86.js
 
-build/libv86.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
+build/libv86.mjs: $(GRAPHICS_ADAPTER_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	-ls -lh build/libv86.js
 	java -jar $(CLOSURE) \
@@ -183,7 +201,7 @@ build/libv86.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.j
 		$(CLOSURE_FLAGS)\
 		--compilation_level SIMPLE\
 		--jscomp_off=missingProperties\
-		--output_wrapper ';let module = {exports:{}}; %output%; export default module.exports.V86; export let {V86, CPU} = module.exports;'\
+		--output_wrapper ';let module = {exports:{}}; var V86_BUNDLE_URL = import.meta.url; %output%; export default module.exports.V86; export let {V86, CPU} = module.exports;'\
 		--js $(CORE_FILES)\
 		--js $(BROWSER_FILES)\
 		--js $(LIB_FILES)\
@@ -191,7 +209,7 @@ build/libv86.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.j
 		--emit_use_strict=false
 	ls -lh build/libv86.mjs
 
-build/libv86-debug.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
+build/libv86-debug.js: $(GRAPHICS_ADAPTER_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86-debug.js\
@@ -206,7 +224,7 @@ build/libv86-debug.js: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browse
 		--js $(LIB_FILES)
 	ls -lh build/libv86-debug.js
 
-build/libv86-debug.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
+build/libv86-debug.mjs: $(GRAPHICS_ADAPTER_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86-debug.mjs\
@@ -215,7 +233,7 @@ build/libv86-debug.mjs: $(CLOSURE) src/*.js src/parallel/*.js lib/*.js src/brows
 		$(CLOSURE_READABLE)\
 		--compilation_level SIMPLE\
 		--jscomp_off=missingProperties\
-		--output_wrapper ';let module = {exports:{}}; %output%; export default module.exports.V86; export let {V86, CPU} = module.exports;'\
+		--output_wrapper ';let module = {exports:{}}; var V86_BUNDLE_URL = import.meta.url; %output%; export default module.exports.V86; export let {V86, CPU} = module.exports;'\
 		--js $(CORE_FILES)\
 		--js $(BROWSER_FILES)\
 		--js $(LIB_FILES)\
@@ -289,6 +307,7 @@ build/zstddeclib.o: lib/zstd/zstddeclib.c
 
 clean:
 	-rm build/libv86.js
+	-rm $(GRAPHICS_ADAPTER_PLUGINS)
 	-rm build/libv86.mjs
 	-rm build/libv86-debug.js
 	-rm build/libv86-debug.mjs
@@ -409,6 +428,7 @@ acpi-tests: acpi-table-tests acpi-device-tests acpi-guest-tests
 
 devices-test: build/v86-debug.wasm
 	./tests/devices/display.js
+	./tests/devices/graphics_adapter.js
 	./tests/devices/mmio_ram.js
 	./tests/devices/virtio_9p.js
 	./tests/devices/virtio_console.js
@@ -562,7 +582,7 @@ sse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-fal
 	node tests/rust/sse3.mjs build/v86-debug.wasm
 
 # Keep the worker's public option/event wire names stable across bundles.
-build/cpu-worker.js: $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
+build/cpu-worker.js: $(GRAPHICS_ADAPTER_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
 		--compilation_level SIMPLE --jscomp_off=missingProperties \

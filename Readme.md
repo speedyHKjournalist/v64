@@ -190,6 +190,7 @@ Using v86 for your own purposes is as easy as:
 
 ```javascript
 var emulator = new V86({
+    graphics_adapter: "bochs_vga",
     screen_container: document.getElementById("screen_container"),
     bios: {
         url: "../../bios/seabios.bin",

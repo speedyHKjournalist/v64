@@ -74,9 +74,10 @@ function save_overlay(filename)
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const vm = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path: process.env.WASM_PATH,
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
-    hda: source, hdb: tools, memory_size: memory_mb * 1048576, vga_memory_size: 16 << 20,
+    hda: source, hdb: tools, memory_size: memory_mb * 1048576, vram_size: 16 << 20,
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
     // WIN_QEMU_COMPATIBLE=1: devices where QEMU, which the image was installed with, had them
     qemu_compatible: !!+process.env.WIN_QEMU_COMPATIBLE,

@@ -36,6 +36,7 @@ async function sample(root)
 {
     const { V86 } = await import(path_to_file_url(path.join(root, "build/libv86.mjs")));
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: path.join(root, "build/v86.wasm"),
         bios: { url: path.join(assets, "bios/seabios.bin") },
         vga_bios: { url: path.join(assets, "bios/vgabios.bin") },

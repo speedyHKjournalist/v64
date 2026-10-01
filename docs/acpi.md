@@ -194,9 +194,10 @@ hibernation.
 
 ```js
 emulator = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path: "v86.wasm",
     memory_size: 512 * 1024 * 1024,
-    vga_memory_size: 16 * 1024 * 1024,
+    vram_size: 16 * 1024 * 1024,
     bios: { url: "bios/seabios.bin" },
     vga_bios: { url: "bios/vgabios.bin" },
     screen_container: document.getElementById("screen_container"),

@@ -42,6 +42,7 @@ async function create(extra)
 {
     const started = performance.now();
     const vm = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: "build/v86-ir-runtime.wasm",
         bios: { buffer: bios.slice(0) },
         memory_size: 32 << 20,

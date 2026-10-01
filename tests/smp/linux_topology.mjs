@@ -62,6 +62,7 @@ function check_smbios(cpu, count)
 async function test(count)
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: process.env.WASM_PATH,
         bios: { url: local("../../bios/seabios.bin") },
         vga_bios: { url: local("../../bios/vgabios.bin") },

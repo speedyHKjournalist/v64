@@ -12,7 +12,7 @@ assert(Number.isFinite(duration) && duration >= 100 && duration <= 10000);
 const recording=process.env.IR_BENCH_RECORD === "1";
 const results=[];
 for(const size of [2,256,1024]) {
- const vm = new V86({wasm_path:wasm,bios:{buffer:Uint8Array.from(fs.readFileSync("build/cpu-worker-test.bin")).buffer},memory_size:32<<20,disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false,ir_tier0:false});
+ const vm = new V86({graphics_adapter: "bochs_vga", wasm_path:wasm,bios:{buffer:Uint8Array.from(fs.readFileSync("build/cpu-worker-test.bin")).buffer},memory_size:32<<20,disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false,ir_tier0:false});
  try {
  await new Promise((resolve,reject)=>{vm.add_listener("emulator-loaded",resolve);vm.add_listener("emulator-error",reject);});
  const cpu=vm.v86.cpu, e=cpu.wm.exports;

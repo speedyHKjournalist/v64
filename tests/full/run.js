@@ -1371,6 +1371,7 @@ function run_test(test, done)
     }
 
     var settings = {
+        graphics_adapter: "bochs_vga",
         bios: { url: bios },
         vga_bios: { url: vga_bios },
         autostart: true,

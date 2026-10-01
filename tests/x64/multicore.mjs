@@ -20,7 +20,7 @@ const CONTROL = 0x380000, RECORDS = 0x390000, ITERATIONS = 512;
 async function run(mode, seed, quantum)
 {
     const label = `${mode} seed=${seed} quantum=${quantum}`;
-    const emulator = new V86({multiboot: {url: kernel}, memory_size: 32 << 20, cpu_cores: 4,
+    const emulator = new V86({graphics_adapter: "bochs_vga", multiboot: {url: kernel}, memory_size: 32 << 20, cpu_cores: 4,
         cpu_quantum: quantum, cpu_schedule_seed: seed, acpi: true, autostart: false,
         disable_jit: mode === "interpreter", experimental_smp_jit: true, ir_tier0: mode === "tier0",
         ir_sync_publication: true, ir_region_budget: {hot_threshold: 2, promotion_threshold: 8}, log_level: 0});

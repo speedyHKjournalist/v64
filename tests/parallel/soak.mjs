@@ -20,7 +20,7 @@ const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv
 const minutes = +(process.env.SOAK_MINUTES || 60), cores = +(process.env.CPU_CORES || 4);
 const jit = !+process.env.DISABLE_JIT, sleep_every = +(process.env.SOAK_SLEEP_EVERY || 5);
 const alarm_seconds = +(process.env.SOAK_ALARM_SECONDS || 5);
-const emulator = new V86({ ...linux4_options(), wasm_path: PARALLEL_WASM, memory_size: 128 << 20,
+const emulator = new V86({ graphics_adapter: "bochs_vga", ...linux4_options(), wasm_path: PARALLEL_WASM, memory_size: 128 << 20,
     cpu_cores: cores, parallel: true, experimental_smp_jit: jit, disable_jit: !jit });
 const errors = [];
 emulator.add_listener("emulator-error", error => errors.push(error));

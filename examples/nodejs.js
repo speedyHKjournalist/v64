@@ -14,6 +14,7 @@ process.stdin.setEncoding("utf8");
 console.log("Now booting, please stand by ...");
 
 var emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../images/linux4.iso" },

@@ -5,7 +5,7 @@ const cases=JSON.parse(fs.readFileSync("build/ir-multiply/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>{
     const bytes=fs.readFileSync(`build/ir-multiply/${i}-${opt}.wasm`);assert(WebAssembly.validate(bytes));return new WebAssembly.Module(bytes);
 }));
-const vm=new V86({wasm_path:"build/v86-ir-test.wasm",memory_size:32<<20,
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:"build/v86-ir-test.wasm",memory_size:32<<20,
     bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,
     disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));

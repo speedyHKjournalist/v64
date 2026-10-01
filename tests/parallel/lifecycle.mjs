@@ -22,6 +22,7 @@ const JIT = !+process.env.DISABLE_JIT;
 async function machine(rounds, options = {})
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         multiboot: { url: kernel }, memory_size: 32 << 20, acpi: true, cpu_cores: CORES,
         disable_jit: !JIT, experimental_smp_jit: JIT, ir_sync_publication: true,
         parallel: true, wasm_path: PARALLEL_WASM, autostart: false, log_level: 0, ...options,
@@ -152,7 +153,7 @@ for(const kind of ["throw", "trap", "exit"])
     await until_finished(m, "auto fallback");
     check_results(m, rounds, "auto fallback");
     await m.emulator.destroy();
-    const forced = new V86({ multiboot: { url: kernel }, memory_size: 32 << 20, acpi: true, cpu_cores: CORES,
+    const forced = new V86({ graphics_adapter: "bochs_vga", multiboot: { url: kernel }, memory_size: 32 << 20, acpi: true, cpu_cores: CORES,
         parallel: true, wasm_path: ROOT + "build/v86.wasm", autostart: false, log_level: 0 });
     const error = await new Promise(resolve => {
         forced.add_listener("emulator-error", resolve);

@@ -123,7 +123,7 @@ async function execute(vm, program, label) {
 
 try {
     for(const options of [{ disable_jit: true }, ...COMPILED_ARMS.map(arm => arm.options)]) {
-        const vm = new V86({ wasm_path, bios: { buffer: bios.slice(0) }, ...options,
+        const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path, bios: { buffer: bios.slice(0) }, ...options,
             memory_size: 32 << 20, disable_keyboard: true, disable_mouse: true,
             disable_speaker: true, net_device: { type: "none" }, autostart: false });
         machines.push(vm);

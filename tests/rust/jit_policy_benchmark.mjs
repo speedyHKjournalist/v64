@@ -23,7 +23,7 @@ for(let round = 0; round < 5; round++) {
     if(round & 1) order.reverse();
     for(const index of order) {
         const [tier0, hot_threshold, promotion_threshold] = policies[index];
-        const vm = new V86({ wasm_path, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
+        const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
             ir_tier0: tier0, ir_region_budget: { hot_threshold, promotion_threshold },
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });

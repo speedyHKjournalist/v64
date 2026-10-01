@@ -17,7 +17,7 @@ const results=arms.map(()=>[]);
 const word=(vm,a)=>new DataView(Uint8Array.from(vm.read_memory(a,4)).buffer).getUint32(0,true);
 for(let round=0;round<5;round++) for(const index of round&1 ? [...arms.keys()].reverse() : arms.keys()) {
     const { label, wasm, options }=arms[index];
-    const vm=new V86({wasm_path:wasm,bios:{buffer:bios.slice(0)},memory_size:32<<20,...options,
+    const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:wasm,bios:{buffer:bios.slice(0)},memory_size:32<<20,...options,
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
     try {
         await new Promise(r=>vm.add_listener("emulator-loaded",r));

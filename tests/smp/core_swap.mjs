@@ -27,6 +27,7 @@ const REG_EDI = 7;
 async function machine()
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         multiboot: { url: KERNEL },
         memory_size: 32 * 1024 * 1024,
         autostart: false,

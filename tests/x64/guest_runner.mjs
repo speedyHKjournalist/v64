@@ -98,7 +98,7 @@ export async function actual(directory, {address = 0x300000, magic = 0xC064C064,
     // long-mode code), X64_IR_TIER0=0 additionally with ir_tier0: false.
     const jit = process.env.X64_JIT ? {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true,
         ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {})} : {};
-    const emulator = new V86({multiboot: {url: directory + "guest.bin"}, memory_size: 32 << 20, acpi: true,
+    const emulator = new V86({graphics_adapter: "bochs_vga", multiboot: {url: directory + "guest.bin"}, memory_size: 32 << 20, acpi: true,
         cpu_cores: Number(process.env.X64_CORES || 1), disable_jit: true, autostart: false, log_level: 0, ...jit, ...options});
     try
     {

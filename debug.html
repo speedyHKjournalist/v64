@@ -172,6 +172,16 @@
             </tr>
 
             <tr>
+                <td><label for="graphics_adapter">Graphics adapter</label></td>
+                <td>
+                    <select id="graphics_adapter">
+                        <option value="bochs_vga" selected>Bochs VGA</option>
+                        <option value="none">None (serial console only)</option>
+                    </select><br>
+                </td>
+            </tr>
+
+            <tr>
                 <td><label for="vga_memory_size">Video Memory size</label></td>
                 <td>
                     <input id="vga_memory_size" type="number" value="8" min="1" max="128" step="1"> MB<br>

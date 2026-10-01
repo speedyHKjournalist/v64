@@ -161,6 +161,7 @@ if(+process.env.X64_LINUX_QEMU)
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const jit = !!+process.env.X64_JIT;
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path: process.env.WASM_PATH,
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
     bzimage: {url: directory + kernel_file}, initrd: {url: directory + initrd_file},

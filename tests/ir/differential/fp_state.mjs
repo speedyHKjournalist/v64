@@ -11,6 +11,7 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
     const wasm_path=process.argv[2]?.endsWith(".wasm")?process.argv[2]
         :(process.argv[2]||"build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
+        graphics_adapter: "bochs_vga",
         wasm_fn:async imports=>{
             const original=imports.env.log_from_wasm;
             imports.env.log_from_wasm=(...args)=>log_observer?log_observer(...args):original(...args);

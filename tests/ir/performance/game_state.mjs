@@ -69,7 +69,11 @@ if(header.getInt32(0, true) !== (0x86768676 | 0))
     throw new Error("expected an uncompressed v86 state (decompress .zst first)");
 const info = JSON.parse(raw.subarray(16, 16 + header.getUint32(12, true)).toString("utf8"));
 const memory_size = info.state[0];
-const vga_memory_size = Array.isArray(info.state[52]) ? info.state[52][0] : 8 * 1024 * 1024;
+// state[52]: ["graphics_adapter", version, name, VGA state], or before
+// display adapter plugins the Bochs VGA's own state
+const adapter_state = info.state[52];
+const vga_state = Array.isArray(adapter_state) && adapter_state[0] === "graphics_adapter" ? adapter_state[3] : adapter_state;
+const vga_memory_size = Array.isArray(vga_state) ? vga_state[0] : 8 * 1024 * 1024;
 
 // --- null renderer ---------------------------------------------------------
 const RESPONSE_REGION = 16 * 1024 * 1024 - 4 * 1024 * 1024;
@@ -142,9 +146,10 @@ function on_submit(event) {
 }
 
 const vm = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path: option("wasm", "build/v86-ir-runtime.wasm"),
     ir_tier0: option("tier0", "1") === "1",
-    memory_size, vga_memory_size,
+    memory_size, vram_size: vga_memory_size,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: new SyncDisk(hda), ...(hdb ? { hdb: new SyncDisk(hdb) } : {}),
     x87_fast_math: true, x87_jit_cache: true,

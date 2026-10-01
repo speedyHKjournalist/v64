@@ -57,6 +57,7 @@ async function test(count)
     const disk = new Uint8Array(1440 * 1024);
     disk.set(sector);
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { url: local("../../bios/seabios.bin") },
         vga_bios: { url: local("../../bios/vgabios.bin") },
         fda: { buffer: disk.buffer },

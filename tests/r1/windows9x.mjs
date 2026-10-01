@@ -53,8 +53,9 @@ const image_mtimes = [system_disk, game_disk].filter(Boolean).map(file => fs.sta
 
 const disks = { hda: new ReadOnlyOverlayDisk(system_disk), hdb: game_disk ? new ReadOnlyOverlayDisk(game_disk) : undefined };
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path, bios: { url: bios_dir + "seabios.bin" }, vga_bios: { url: bios_dir + "vgabios.bin" },
-    memory_size: 256 << 20, vga_memory_size: 16 << 20, acpi: false, boot_order: 0x213,
+    memory_size: 256 << 20, vram_size: 16 << 20, acpi: false, boot_order: 0x213,
     hda: disks.hda, ...(disks.hdb ? { hdb: disks.hdb } : {}),
     net_device: { type: "ne2k" }, preserve_mac_from_state_image: false, mac_address_translation: true,
     ...v86gl,

@@ -123,6 +123,7 @@ for(const work of workloads) for(let round = 0; round < repetitions; round++) {
         const { label, wasm } = arm;
         const context = `${work.name}/${label}/round=${round}`;
         const vm = new V86({
+            graphics_adapter: "bochs_vga",
             wasm_path: wasm, ir_tier0: false, memory_size: 32 << 20,
             bios: { buffer: bios.slice(0) }, disable_keyboard: true,
             disable_mouse: true, disable_speaker: true,

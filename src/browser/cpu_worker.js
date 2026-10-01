@@ -3,6 +3,7 @@ import { state_stream_server } from "./state_stream_transport.js";
 // in the worker; this side owns DOM adapters and asynchronous GPU execution.
 import { GraphicsPerformance } from "./graphics_performance.js";
 import { DISPLAY_SINK_REPLAY } from "../display.js";
+import { default_graphics_adapter_path } from "../graphics_adapter.js";
 
 export function encode_worker_file(f)
 {
@@ -34,7 +35,11 @@ export function encode_worker_options(o, plugins = [])
         "parallel": o["parallel"],
         "parallel_wasm_path": o["parallel_wasm_path"] && new URL(o["parallel_wasm_path"], location.href).href,
         "vcpu_worker_url": o["vcpu_worker_url"] && new URL(o["vcpu_worker_url"], location.href).href,
-        "memory_size": o.memory_size, "vga_memory_size": o.vga_memory_size,
+        "memory_size": o.memory_size,
+        // The worker loads the display adapter's plugin itself, from an absolute URL
+        "graphics_adapter": o["graphics_adapter"], "vram_size": o["vram_size"],
+        "graphics_adapter_path": o["graphics_adapter"] === "none" ? undefined :
+            new URL(o["graphics_adapter_path"] || default_graphics_adapter_path(o["graphics_adapter"]), location.href).href,
         "extended_memory_size": o.extended_memory_size, "extended_memory_cache": o.extended_memory_cache,
         "high_memory_size": o.high_memory_size,
         "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,

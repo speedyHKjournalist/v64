@@ -52,7 +52,7 @@ for(const work of workloads) work.iterations*=scale;
 const results=[];
 const arms=variants;
 for(const work of workloads) for(let round=0;round<repetitions;round++) for(const {label,wasm,interpreter} of round%2?[...arms].reverse():arms) {
- const vm=new V86({wasm_path:wasm,memory_size:32<<20,...interpreter?{disable_jit:true}:{ir_tier0:false,ir_region_budget:{promotion_threshold}},
+ const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:wasm,memory_size:32<<20,...interpreter?{disable_jit:true}:{ir_tier0:false,ir_region_budget:{promotion_threshold}},
   bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
  try {
   await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});

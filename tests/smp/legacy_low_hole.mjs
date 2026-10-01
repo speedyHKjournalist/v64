@@ -20,7 +20,7 @@ const code = new Uint8Array([
 ]);
 for(const mode of modes)
 {
-    const emulator = new V86({ wasm_path: process.env.WASM_PATH, memory_size: 16 << 20,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", wasm_path: process.env.WASM_PATH, memory_size: 16 << 20,
         acpi: true, cpu_cores: 2, disable_jit: mode === "interpreter", experimental_smp_jit: true,
         ir_tier0: mode === "tier0", ir_sync_publication: true,
         ir_region_budget: { hot_threshold: 2, promotion_threshold: 8 },

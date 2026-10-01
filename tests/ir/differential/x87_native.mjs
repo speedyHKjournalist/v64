@@ -59,7 +59,7 @@ function program(){
 }
 
 async function boot(options){
-    const vm=new V86({wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
+    const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false,...options});
     await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
     const cpu=vm.v86.cpu,view=()=>new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset);

@@ -34,6 +34,7 @@ async function run(mode, cores)
     const parallel = mode.startsWith("parallel");
     const jit = mode.endsWith("-jit");
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         multiboot: { url: kernel }, memory_size: 32 << 20, acpi: true, cpu_cores: cores,
         disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, experimental_x64: long_mode,
         ...(parallel ? { parallel: true, wasm_path: PARALLEL_WASM } : {}),

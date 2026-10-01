@@ -10,6 +10,7 @@ const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "..
 process.on("unhandledRejection", exn => { throw exn; });
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     fda: { url: __dirname + "/../../images/freedos722.img", async: true },

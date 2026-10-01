@@ -27,6 +27,7 @@ hda.get = (start, length, callback) => setTimeout(() => base.get(start, length, 
 hda.set = (start, data, callback) => setTimeout(() => base.set(start, data, () => { writes_landed++; callback(); }), LATENCY);
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: root + "bios/seabios.bin" }, vga_bios: { url: root + "bios/vgabios.bin" },
     hda, memory_size: 32 << 20, acpi: true, autostart: false, log_level: 0,
 });

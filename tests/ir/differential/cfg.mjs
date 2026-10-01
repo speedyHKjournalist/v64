@@ -3,7 +3,7 @@ import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const cases = JSON.parse(fs.readFileSync("build/ir-cfg/cases.json"));
 const modules = cases.map((_, i) => new WebAssembly.Module(fs.readFileSync(`build/ir-cfg/${i}.wasm`)));
-const vm = new V86({wasm_path:process.argv[2] || "build/v86-ir-test.wasm", memory_size:32<<20,
+const vm = new V86({graphics_adapter: "bochs_vga", wasm_path:process.argv[2] || "build/v86-ir-test.wasm", memory_size:32<<20,
     bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard:true, disable_mouse:true, disable_speaker:true, net_device:{type:"none"}, autostart:false});
 const sleep = ms => new Promise(r => setTimeout(r, ms));

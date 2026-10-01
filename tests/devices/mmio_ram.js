@@ -22,13 +22,14 @@ floppy[510] = 0x55;
 floppy[511] = 0xAA;
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     fda: { buffer: floppy.buffer },
     boot_order: 0x321,
     autostart: true,
     memory_size: 32 * 1024 * 1024,
-    vga_memory_size: 8 * 1024 * 1024,
+    vram_size: 8 * 1024 * 1024,
     net_device: { type: "none" },
     disable_speaker: true,
     log_level: 0,

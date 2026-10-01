@@ -276,7 +276,7 @@ data: times 8192 db 0
     const length = 8 + cases * RECORD;
     const run = async jit => {
         const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
-        const emulator = new V86({multiboot: {url: dir + "guest.bin"}, memory_size: 32 << 20, acpi: true,
+        const emulator = new V86({graphics_adapter: "bochs_vga", multiboot: {url: dir + "guest.bin"}, memory_size: 32 << 20, acpi: true,
             disable_jit: !jit, experimental_smp_jit: true, ir_sync_publication: true, autostart: false, log_level: 0});
         try
         {

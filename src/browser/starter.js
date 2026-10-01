@@ -10,6 +10,7 @@ import * as print_stats from "./print_stats.js";
 import { Bus } from "../bus.js";
 import { BOOT_ORDER_FD_FIRST, BOOT_ORDER_HD_FIRST, BOOT_ORDER_CD_FIRST } from "../rtc.js";
 import { EEXIST, ENOENT } from "../../lib/9p.js";
+import { check_graphics_adapter_options, load_graphics_adapter } from "../graphics_adapter.js";
 
 import { SpeakerAdapter } from "./speaker.js";
 import { NetworkAdapter } from "./network.js";
@@ -29,22 +30,14 @@ import { SyncBuffer, buffer_from_object } from "../buffer.js";
 import { FS } from "../../lib/filesystem.js";
 
 /**
- * graphics_adapter selects the display hardware the guest sees; graphics_proxy
- * adds the D3D/DDraw/GL proxy of libv86-webgpu.js, which the page loads first,
- * as xterm.js for a serial terminal (docs/graphics-proxy-plugin-plan.md)
+ * graphics_adapter selects the display hardware the guest sees (a plugin,
+ * src/graphics_adapter.js); graphics_proxy adds the D3D/DDraw/GL proxy of
+ * libv86-webgpu.js, which the page loads first, as xterm.js for a serial
+ * terminal (docs/glbridge.md)
  * @return {Object} the proxy's device plugin, or null
  */
 function create_graphics_proxy(options)
 {
-    const adapter = options["graphics_adapter"];
-    if(typeof adapter === "function")
-    {
-        throw new Error("graphics_adapter now selects the display hardware; use graphics_proxy: true instead of installV86GLGraphicsAdapter");
-    }
-    if(adapter !== undefined && adapter !== "bochs_vga")
-    {
-        throw new Error("Unknown graphics_adapter \"" + adapter + "\"; supported: bochs_vga");
-    }
     if(options["v86gl_pci"] !== undefined)
     {
         throw new Error("v86gl_pci was removed; use graphics_proxy: true");
@@ -104,6 +97,9 @@ export function V86(options)
     this.cpu_is_running = false;
     this.destroyed = false;
     this.cpu_exception_hook = function(n) {};
+
+    // The display adapter is required; its plugin loads with the other files
+    this.graphics_adapter = check_graphics_adapter_options(options);
 
     const bus = Bus.create();
     this.bus = bus[0];
@@ -374,7 +370,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.high_memory_size = options.high_memory_size;
     settings.extended_memory_size = options.extended_memory_size;
     settings.extended_memory_cache = options.extended_memory_cache;
-    settings.vga_memory_size = options.vga_memory_size || 8 * 1024 * 1024;
+    settings.vram_size = options["vram_size"];
     settings.boot_order = boot_order;
     settings.fastboot = options.fastboot || false;
     settings.bootmenu = options.bootmenu || false;
@@ -574,6 +570,11 @@ V86.prototype.continue_init = async function(emulator, options)
         await this.worker_controller.start();
         return;
     }
+
+    // The display adapter's plugin, fetched while the files load
+    const graphics_adapter = this.graphics_adapter === "none" ? Promise.resolve(undefined) :
+        load_graphics_adapter(this.graphics_adapter, options["graphics_adapter_path"]);
+    graphics_adapter.catch(() => {});
 
     // ugly, but required for closure compiler compilation
     function put_on_settings(name, buffer)
@@ -860,6 +861,8 @@ V86.prototype.continue_init = async function(emulator, options)
                 await new Promise(resolve => settings.hdb.get_and_cache(0, 512, resolve));
             }
         }
+
+        settings.graphics_adapter = await graphics_adapter;
 
         if(this.destroyed) return;
         this.v86.init(settings);
@@ -1916,6 +1919,10 @@ V86.prototype.automatically = function(steps)
  */
 V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
 {
+    if(this.graphics_adapter === "none")
+    {
+        throw new Error("wait_until_vga_screen_contains: there is no VGA text screen (graphics_adapter is \"none\")");
+    }
     const match_multi = Array.isArray(expected);
     const timeout_msec = options?.timeout_msec || 0;
     const contains_expected = (screen_line, pattern) => pattern.test ? pattern.test(screen_line) : screen_line.startsWith(pattern);

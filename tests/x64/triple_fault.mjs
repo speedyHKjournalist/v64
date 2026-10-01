@@ -25,7 +25,7 @@ const directory = assemble("triple-fault", long_mode_guest(body, data));
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 for(const jit of [false, true])
 {
-    const emulator = new V86({multiboot: {url: directory + "guest.bin"}, memory_size: 32 << 20, acpi: true, autostart: false,
+    const emulator = new V86({graphics_adapter: "bochs_vga", multiboot: {url: directory + "guest.bin"}, memory_size: 32 << 20, acpi: true, autostart: false,
         log_level: 0, disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true});
     await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
     const cpu = emulator.v86.cpu;

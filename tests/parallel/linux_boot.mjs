@@ -11,7 +11,7 @@ const CORES = +process.env.CPU_CORES || 2;
 
 const timeout = setTimeout(() => { console.log("timeout\n" + shell.serial.slice(-3000)); process.exit(1); }, +process.env.TIMEOUT || 900000);
 const JIT = !process.env.DISABLE_JIT || !+process.env.DISABLE_JIT;
-const emulator = new V86({ ...linux4_options(), wasm_path: PARALLEL_WASM, memory_size: 128 << 20,
+const emulator = new V86({ graphics_adapter: "bochs_vga", ...linux4_options(), wasm_path: PARALLEL_WASM, memory_size: 128 << 20,
     cpu_cores: CORES, parallel: true, experimental_smp_jit: JIT, disable_jit: !JIT });
 const shell = new Shell(emulator, "parallel");
 const t0 = Date.now();

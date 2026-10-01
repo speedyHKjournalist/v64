@@ -11,11 +11,12 @@ const { V86 } = await import(BENCH_COLLECT_STATS ? "../../src/main.js" : "../../
 const V86_ROOT = path.join(__dirname, "../..");
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: path.join(V86_ROOT, "/bios/seabios.bin") },
     vga_bios: { url: path.join(V86_ROOT, "/bios/vgabios.bin") },
     autostart: true,
     memory_size: 512 * 1024 * 1024,
-    vga_memory_size: 8 * 1024 * 1024,
+    vram_size: 8 * 1024 * 1024,
     net_device: {
         type: "virtio",
         relay_url: "<UNUSED>",

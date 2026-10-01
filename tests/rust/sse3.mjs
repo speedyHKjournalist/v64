@@ -67,7 +67,7 @@ function calculate(name, width, source, target) {
 try {
     // Compare the interpreter with both IR code generators within one build.
     for(const options of [{ disable_jit: true }, ...COMPILED_ARMS.map(arm => arm.options)]) {
-        const vm = new V86({ wasm_path: candidate, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
+        const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: candidate, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
             ...options, disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });
         machines.push(vm);

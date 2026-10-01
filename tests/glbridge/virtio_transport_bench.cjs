@@ -13,6 +13,7 @@ const { createV86GLDevice } = require("../../src/browser/glbridge/v86gl_device.j
         post: message => toDevice({ type: "done", id: message.id }) });
     toDevice({ type: "available", value: true });
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: path.join(__dirname,"../../build/v86.wasm"),
         memory_size: 32 * 1024 * 1024,
         bios: { buffer: new Uint8Array(65536).fill(0xf4).buffer },

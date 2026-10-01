@@ -10,7 +10,7 @@ import { PerformanceRecorder } from "../../src/browser/performance_recorder.js";
     const bios = new Uint8Array(65536).fill(0xf4);
     bios.set([0xea, 0x00, 0x01, 0x00, 0xf0], 0xfff0); // jmp F000:0100
     bios.set([0x40, 0xeb, 0xfd], 0x100); // inc ax; jmp back
-    const emulator = new V86({ wasm_path: "../../build/v86.wasm", memory_size: 32 * 1024 * 1024,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", wasm_path: "../../build/v86.wasm", memory_size: 32 * 1024 * 1024,
         bios: { buffer: bios.buffer }, hda: { buffer: new ArrayBuffer(2 * 1024 * 1024) },
         disable_keyboard: true, disable_mouse: true, disable_speaker: true,
         net_device: { type: "none" }, autostart: false });

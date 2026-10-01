@@ -10,7 +10,7 @@ const cases = [
     ["movq", 8, 0], ["movhps", 8, 8], ["movntps", 16, 0], ["maskmovdqu", 16, 0],
 ];
 const wasm = process.argv[2] || "build/v86-ir-test.wasm";
-const vm = new V86({ wasm_path: wasm, memory_size: 32 << 20,
+const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: wasm, memory_size: 32 << 20,
     bios: { buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer },
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
     net_device: { type: "none" }, autostart: false });

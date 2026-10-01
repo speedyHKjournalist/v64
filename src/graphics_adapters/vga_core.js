@@ -1,14 +1,16 @@
-import { LOG_VGA, FLAG_VM } from "./const.js";
-import { h } from "./lib.js";
-import { dbg_assert, dbg_log } from "./log.js";
-import { DISPLAY_FLAG_BLINKING, DISPLAY_FLAG_FONT_PAGE_B } from "./display.js";
-import { round_up_to_next_power_of_2, view } from "./lib.js";
+// The VGA core shared by the display adapter plugins: the VGA registers and
+// memory, the Bochs VBE (dispi) interface and the linear frame buffer. The
+// bochs_vga plugin is this core on its own; the SVGA II and virtio-vga
+// adapters embed it for the BIOS, DOS and boot screens.
+import { LOG_VGA } from "../const.js";
+import { h } from "../lib.js";
+import { dbg_assert, dbg_log } from "../log.js";
+import { DISPLAY_FLAG_BLINKING, DISPLAY_FLAG_FONT_PAGE_B } from "../display.js";
+import { round_up_to_next_power_of_2, view } from "../lib.js";
 
 // For Types Only
-import { CPU } from "./cpu.js";
-import { BusConnector } from "./bus.js";
-import { DisplayHub, DisplaySource } from "./display.js";
-import { pci_functions } from "./platform.js";
+import { DisplaySource } from "../display.js";
+import { GraphicsMachine } from "./machine.js";
 
 // Always 64k
 const VGA_BANK_SIZE = 64 * 1024;
@@ -56,20 +58,16 @@ const VGA_HOST_MEMORY_SPACE_SIZE = Uint32Array.from([
 /**
  * @constructor
  * @implements {DisplaySource}
- * @param {CPU} cpu
- * @param {BusConnector} bus
- * @param {DisplayHub} display
+ * @param {GraphicsMachine} machine
  * @param {number} vga_memory_size
  */
-export function VGAScreen(cpu, bus, display, vga_memory_size)
+export function VGAScreen(machine, vga_memory_size)
 {
-    this.cpu = cpu;
+    /** @const */
+    this.machine = machine;
 
     /** @const */
-    this.bus = bus;
-
-    /** @const */
-    this.display = display;
+    this.display = machine.display;
 
     this.vga_memory_size = vga_memory_size;
 
@@ -236,7 +234,7 @@ export function VGAScreen(cpu, bus, display, vga_memory_size)
 
     // 2 announces QEMU's extended registers (BAR2), which are not implemented;
     // QEMU's revision, so that a guest installed there knows the device
-    const pci_revision = cpu.platform.qemu_compatible ? 2 : 0;
+    const pci_revision = machine.qemu_compatible ? 2 : 0;
 
     // Experimental, could probably need some changes
     // 01:00.0 VGA compatible controller: NVIDIA Corporation GT216 [GeForce GT 220] (rev a2)
@@ -247,7 +245,6 @@ export function VGAScreen(cpu, bus, display, vga_memory_size)
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x00, 0x11,
         0x00, 0x00, 0xbe, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    this.pci_id = pci_functions(cpu.platform).vga;
     this.pci_bars = [
         {
             size: this.vga_memory_size,
@@ -318,7 +315,7 @@ export function VGAScreen(cpu, bus, display, vga_memory_size)
 
     this.font_page_ab_enabled = false;
 
-    var io = cpu.io;
+    var io = machine;
 
     io.register_write(0x3C0, this, this.port3C0_write);
     io.register_read(0x3C0, this, this.port3C0_read, this.port3C0_read16);
@@ -381,10 +378,10 @@ export function VGAScreen(cpu, bus, display, vga_memory_size)
 
     // The frame buffer is device memory in the Rust core, which the guest
     // reaches at memory speed through the LFB, wherever BAR0 puts it
-    this.lfb_region = cpu.mmio_ram_allocate(this.vga_memory_size);
+    this.lfb_region = machine.mmio_ram_allocate(this.vga_memory_size);
     dbg_assert(this.lfb_region >= 0, "no device memory for the VGA frame buffer");
-    const vga_offset = cpu.mmio_ram_backing(this.lfb_region) >>> 0;
-    this.svga_memory = view(Uint8Array, cpu.wasm_memory, vga_offset, this.vga_memory_size);
+    const vga_offset = machine.mmio_ram_backing(this.lfb_region) >>> 0;
+    this.svga_memory = view(Uint8Array, machine.wasm_memory, vga_offset, this.vga_memory_size);
     this.lfb_address = 0;
     this.move_lfb(VGA_LFB_ADDRESS);
 
@@ -412,8 +409,13 @@ export function VGAScreen(cpu, bus, display, vga_memory_size)
         (addr, value) => this.vga_memory_write(addr, value),
     );
 
-    cpu.devices.pci.register_device(this);
-    display.add_source(this);
+    machine.register_pci({
+        pci_space: this.pci_space,
+        pci_bars: this.pci_bars,
+        pci_rom_size: this.pci_rom_size,
+        pci_rom_address: this.pci_rom_address,
+    });
+    this.display.add_source(this);
 }
 
 VGAScreen.prototype.get_state = function()
@@ -597,7 +599,7 @@ VGAScreen.prototype.set_state = function(state)
 VGAScreen.prototype.move_lfb = function(base)
 {
     this.lfb_address = base >>> 0;
-    this.cpu.mmio_ram_map(this.lfb_region, this.lfb_address);
+    this.machine.mmio_ram_map(this.lfb_region, this.lfb_address);
 };
 
 VGAScreen.prototype.vga_memory_read = function(addr)
@@ -605,7 +607,7 @@ VGAScreen.prototype.vga_memory_read = function(addr)
     if(this.svga_enabled)
     {
         // vbe banked mode (accessing svga memory through the regular vga memory range)
-        return this.cpu.mmio_ram_read8(this.lfb_region, (addr - 0xA0000 | this.svga_bank_offset) >>> 0);
+        return this.machine.mmio_ram_read8(this.lfb_region, (addr - 0xA0000 | this.svga_bank_offset) >>> 0);
     }
 
     var memory_space_select = this.miscellaneous_graphics_register >> 2 & 0x3;
@@ -679,7 +681,7 @@ VGAScreen.prototype.vga_memory_write = function(addr, value)
     if(this.svga_enabled)
     {
         // vbe banked mode (accessing svga memory through the regular vga memory range)
-        this.cpu.mmio_ram_write8(this.lfb_region, (addr - 0xA0000 | this.svga_bank_offset) >>> 0, value);
+        this.machine.mmio_ram_write8(this.lfb_region, (addr - 0xA0000 | this.svga_bank_offset) >>> 0, value);
         return;
     }
 
@@ -999,7 +1001,7 @@ VGAScreen.prototype.complete_redraw = function()
     {
         if(this.svga_enabled)
         {
-            this.cpu.mmio_ram_mark_dirty(this.lfb_region);
+            this.machine.mmio_ram_mark_dirty(this.lfb_region);
         }
         else
         {
@@ -1205,9 +1207,9 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
         this.virtual_height = virtual_height;
 
         const size = virtual_width * virtual_height;
-        this.dest_buffer_offset = this.cpu.mmio_ram_allocate_pixels(this.lfb_region, size) >>> 0;
+        this.dest_buffer_offset = this.machine.mmio_ram_allocate_pixels(this.lfb_region, size) >>> 0;
         this.create_pixel_view();
-        this.cpu.mmio_ram_mark_dirty(this.lfb_region);
+        this.machine.mmio_ram_mark_dirty(this.lfb_region);
     }
 
     if(needs_update || !this.size_reported)
@@ -1240,7 +1242,7 @@ VGAScreen.prototype.set_graphical_mode = function(graphical)
 VGAScreen.prototype.create_pixel_view = function()
 {
     this.pixels = {
-        data: new Uint8ClampedArray(this.cpu.wasm_memory.buffer, this.dest_buffer_offset,
+        data: new Uint8ClampedArray(this.machine.wasm_memory.buffer, this.dest_buffer_offset,
             4 * this.virtual_width * this.virtual_height),
         width: this.virtual_width,
         height: this.virtual_height,
@@ -2236,7 +2238,7 @@ VGAScreen.prototype.port3DA_read = function()
 {
     dbg_log("3DA read - status 1 and clear attr index", LOG_VGA);
 
-    const in_retrace = this.display.time_since_vblank(this.cpu.clock.now()) < this.retrace_duration();
+    const in_retrace = this.display.time_since_vblank(this.machine.now()) < this.retrace_duration();
 
     this.port_3DA_value = (this.port_3DA_value ^ 1) & 1;
     let value = this.port_3DA_value;
@@ -2300,7 +2302,7 @@ VGAScreen.prototype.port1CF_write = function(value)
         case 4:
             // enable, options
             this.dispi_enable_value = value;
-            if(!(value & 1) && this.svga_enabled && (this.cpu.flags[0] & FLAG_VM))
+            if(!(value & 1) && this.svga_enabled && this.machine.in_vm86())
             {
                 // XXX: hack to make cmd.exe work on Win9x with vbemp driver:
                 // Win9x's VDD virtualises the legacy VGA ports for a windowed
@@ -2587,7 +2589,7 @@ VGAScreen.prototype.vga_redraw = function()
 {
     var start = this.diff_addr_min;
     var end = Math.min(this.diff_addr_max, VGA_PIXEL_BUFFER_SIZE - 1);
-    const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffer_offset, this.virtual_width * this.virtual_height);
+    const buffer = new Int32Array(this.machine.wasm_memory.buffer, this.dest_buffer_offset, this.virtual_width * this.virtual_height);
 
     var mask = 0xFF;
     var colorset = 0x00;
@@ -2652,8 +2654,8 @@ VGAScreen.prototype.render = function()
         if(this.svga_bpp === 8)
         {
             // XXX: Slow, should be ported to rust, but it doesn't have access to vga256_palette
-            const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffer_offset, this.screen_width * this.screen_height);
-            const svga_memory = new Uint8Array(this.cpu.wasm_memory.buffer, this.svga_memory.byteOffset, this.vga_memory_size);
+            const buffer = new Int32Array(this.machine.wasm_memory.buffer, this.dest_buffer_offset, this.screen_width * this.screen_height);
+            const svga_memory = new Uint8Array(this.machine.wasm_memory.buffer, this.svga_memory.byteOffset, this.vga_memory_size);
             // svga_offset selects the visible part of svga_memory, used for page flipping (e.g. Master of Orion 2)
             const base = this.svga_offset;
             const end = Math.min(buffer.length, this.vga_memory_size - base);
@@ -2666,11 +2668,11 @@ VGAScreen.prototype.render = function()
         }
         else
         {
-            this.cpu.mmio_ram_fill_pixels(this.lfb_region, this.svga_bpp, this.svga_offset);
+            this.machine.mmio_ram_fill_pixels(this.lfb_region, this.svga_bpp, this.svga_offset);
 
             const bytes_per_pixel = this.svga_bpp === 15 ? 2 : this.svga_bpp / 8;
-            min_y = (((this.cpu.svga_dirty_bitmap_min_offset[0] / bytes_per_pixel | 0) - this.svga_offset) / this.svga_width | 0);
-            max_y = (((this.cpu.svga_dirty_bitmap_max_offset[0] / bytes_per_pixel | 0) - this.svga_offset) / this.svga_width | 0) + 1;
+            min_y = (((this.machine.dirty_min_offset() / bytes_per_pixel | 0) - this.svga_offset) / this.svga_width | 0);
+            max_y = (((this.machine.dirty_max_offset() / bytes_per_pixel | 0) - this.svga_offset) / this.svga_width | 0) + 1;
         }
 
         if(min_y < max_y)

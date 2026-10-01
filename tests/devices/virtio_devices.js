@@ -68,6 +68,7 @@ function echo_device(log)
 function create_emulator(virtio_devices)
 {
     return new V86({
+        graphics_adapter: "bochs_vga",
         memory_size: MEMORY_SIZE,
         // hlt forever: nothing moves the BARs from where the device put them
         bios: { buffer: new Uint8Array(65536).fill(0xF4).buffer },

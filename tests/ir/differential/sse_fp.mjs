@@ -10,6 +10,7 @@ for(const release of [false,true]){
     let log_observer=null;
     const wasm_path=(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
+        graphics_adapter: "bochs_vga",
         wasm_fn:async imports=>{
             const original=imports.env.log_from_wasm;
             imports.env.log_from_wasm=(...args)=>log_observer?log_observer():original(...args);

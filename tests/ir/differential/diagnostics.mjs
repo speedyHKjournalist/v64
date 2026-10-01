@@ -3,7 +3,7 @@ import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const wasm=process.argv[2]||"build/v86-ir-cache-test.wasm";
 let clock_observer=null,rdtsc_active=false;
-const vm=new V86({wasm_fn:async imports=>{
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_fn:async imports=>{
  const tick=imports.env.microtick;
  imports.env.microtick=()=>{if(rdtsc_active)clock_observer?.();return tick();};
  return (await WebAssembly.instantiate(fs.readFileSync(wasm),imports)).instance.exports;

@@ -9,6 +9,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 for(const release of [false,true]){
     let random_observer;
     const vm=new V86({
+        graphics_adapter: "bochs_vga",
         wasm_fn:async imports=>{
             imports.env.get_rand_int=()=>{random_observer?.();return 0x89ABCDEF|0;};
             return (await WebAssembly.instantiate(fs.readFileSync((process.argv[2]||"build/v86-ir-test")+(release?"-release":"")+".wasm"),imports)).instance.exports;

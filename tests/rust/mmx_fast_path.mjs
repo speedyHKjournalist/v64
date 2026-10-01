@@ -50,7 +50,7 @@ try {
     for(const [label, wasm_path, options] of [
         [interpreted ? "interpreter" : paths[0], paths[0], interpreted ? { disable_jit: true } : {}],
         ...COMPILED_ARMS.map(arm => [arm.label, paths[1], arm.options])]) {
-        const vm = new V86({ wasm_path, ...options, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
+        const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path, ...options, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });
         machines.push(vm); labels.push(label);

@@ -211,7 +211,7 @@ const oracle=await qemu_oracle();assert.equal(oracle.length,tests.length*RECORD)
 console.log(`QEMU TCG: ${tests.length} integer/flags/aliases/atomic64/CX16 cases, high RIP reached`);
 if(process.env.X64_ORACLE_ONLY)process.exit(0);
 const {V86}=await import(+process.env.TEST_RELEASE_BUILD?"../../build/libv86.mjs":"../../src/main.js");
-const emulator=new V86({multiboot:{url:dir+"guest.bin"},memory_size:32<<20,acpi:true,cpu_cores:Number(process.env.X64_CORES||1),disable_jit:!process.env.X64_JIT,experimental_smp_jit:true,ir_sync_publication:true,autostart:false,log_level:0});
+const emulator=new V86({graphics_adapter: "bochs_vga", multiboot:{url:dir+"guest.bin"},memory_size:32<<20,acpi:true,cpu_cores:Number(process.env.X64_CORES||1),disable_jit:!process.env.X64_JIT,experimental_smp_jit:true,ir_sync_publication:true,autostart:false,log_level:0});
 try
 {
     await new Promise(resolve=>emulator.add_listener("emulator-loaded",resolve));const cpu=emulator.v86.cpu;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 // disable_jit: fixture modules run by hand, with the IR scheduler idle.
-const vm=new V86({wasm_path:process.argv[2]||"build/v86-ir-test.wasm",disable_jit:true,memory_size:32<<20,
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:process.argv[2]||"build/v86-ir-test.wasm",disable_jit:true,memory_size:32<<20,
  bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
  disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));

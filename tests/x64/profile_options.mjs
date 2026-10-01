@@ -14,7 +14,7 @@ const MAX = 2 ** 31 - 128 * 1024;
 
 for(const gib of [4, 6, 8])
 {
-    const emulator = new V86({bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
+    const emulator = new V86({graphics_adapter: "bochs_vga", bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
         memory_size: gib * 2 ** 30, autostart: false, log_level: 0});
     const error = await new Promise(resolve => {
         emulator.add_listener("emulator-loaded", () => resolve(null));

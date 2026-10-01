@@ -29,7 +29,7 @@ const rows = [];
 for(let round = 0; round < rounds; round++) {
     const ordered = arms.slice(round % arms.length).concat(arms.slice(0, round % arms.length));
     for(const arm of ordered) {
-        const vm = new V86({ wasm_path: arm.wasm, ir_tier0: false, memory_size: 32 << 20,
+        const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: arm.wasm, ir_tier0: false, memory_size: 32 << 20,
             bios: { buffer: bios.slice(0) }, autostart: false, disable_keyboard: true,
             disable_mouse: true, disable_speaker: true, net_device: { type: "none" } });
         try {

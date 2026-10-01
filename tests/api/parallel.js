@@ -70,6 +70,7 @@ function dump_screen(emulator)
 async function test_parallel_port(lpt, enable_lpt2)
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         ...base_config,
         parallel1: enable_lpt2,
     });

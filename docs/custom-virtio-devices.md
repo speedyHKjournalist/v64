@@ -41,6 +41,7 @@ const rng = {
 };
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     // ...
     virtio_devices: [rng],
 });

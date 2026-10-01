@@ -34,7 +34,7 @@ try {
         };
     };
     const fakeGraphics = { createBridge: fakeBridge };
-    vm = new V86({ cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
+    vm = new V86({ graphics_adapter: "bochs_vga", cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
         wasm_path: corePath, ...jitOptions, bios: { url: "../../build/cpu-worker-test.bin" },
         memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
         disable_keyboard: !irBackend, disable_mouse: !irBackend, disable_speaker: true,
@@ -190,7 +190,7 @@ try {
     const state2=await vm.save_state();
     await vm.destroy();vm=null;
     // Boot directly from a saved state, including the graphics checkpoint.
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
+    vm=new V86({graphics_adapter: "bochs_vga", cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:state2},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_proxy:fakeGraphics,autostart:false});
@@ -199,7 +199,7 @@ try {
     check(!vm.is_running(),"initial-state load preserves requested stopped mode");
     check((await vm.read_memory(0x101000,1))[0]===13,"initial state restores worker RAM");
     await vm.destroy();await vm.destroy();vm=null;
-    vm=new V86({wasm_path: corePath, ...jitOptions,bios:{url:"../../build/cpu-worker-test.bin"},
+    vm=new V86({graphics_adapter: "bochs_vga", wasm_path: corePath, ...jitOptions,bios:{url:"../../build/cpu-worker-test.bin"},
         memory_size:32<<20,screen:{container:document.getElementById("screen")},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_proxy:fakeGraphics,autostart:false});
@@ -208,7 +208,7 @@ try {
     await vm.restore_state(state2);
     check(vm.read_memory(0x101000,1)[0]===13,"main-thread mode loads a worker snapshot");
     const legacy=await vm.save_state();await vm.destroy();vm=null;
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
+    vm=new V86({graphics_adapter: "bochs_vga", cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:legacy},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_proxy:fakeGraphics,autostart:false});

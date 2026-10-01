@@ -14,7 +14,8 @@
     "build/libv86*.js.map",
     "build/*.mjs",
     "build/glbridge/",
-    "build/v86*.wasm"
+    "build/v86*.wasm",
+    "build/v86-*.js"
   ],
   "main": "build/libv86.mjs",
   "types": "v86.d.ts",

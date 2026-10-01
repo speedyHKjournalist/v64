@@ -39,7 +39,7 @@ import { read_elf, elf_unsupported_reason } from "./elf.js";
 import { FloppyController } from "./floppy.js";
 import { IDEController } from "./ide.js";
 import { VirtioNet } from "./virtio_net.js";
-import { VGAScreen } from "./vga.js";
+import { GraphicsAdapter, graphics_adapter_of_state, patch_vga_bios_ids } from "./graphics_adapter.js";
 import { DisplayHub } from "./display.js";
 import { VirtioBalloon } from "./virtio_balloon.js";
 import { create_virtio_devices, get_virtio_devices_state, resolve_virtio_devices_state, set_virtio_devices_state } from "./virtio_devices.js";
@@ -742,7 +742,8 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[49] = this.devices.dma;
     state[50] = this.devices.acpi;
     // 51 (formerly hpet)
-    state[52] = this.devices.vga;
+    // the display adapter (nothing with graphics_adapter: "none")
+    state[52] = this.devices.graphics_adapter;
     state[53] = this.devices.ps2;
     state[54] = this.devices.uart0;
     state[55] = this.devices.fdc;
@@ -1036,6 +1037,15 @@ CPU.prototype.validate_state = function(state)
     this.validate_machine_core_state(state[96]);
     this.validate_physical_state(state[97]);
     resolve_virtio_devices_state(this.devices.virtio_devices, state[92]);
+    if(this.devices.graphics_adapter)
+    {
+        this.devices.graphics_adapter.check_state(state[52]);
+    }
+    else if(this.devices.display && graphics_adapter_of_state(state[52]) !== "none")
+    {
+        throw new Error("The snapshot is from a machine with graphics_adapter: \"" +
+            graphics_adapter_of_state(state[52]) + "\", this one has \"none\"");
+    }
     // A remapped snapshot must retain the RAM/MMIO split used when validating
     // its windows. Reject this before changing clocks, RAM, or CPU state.
     if(state[97] && state[0] !== this.memory_size[0] &&
@@ -1123,7 +1133,7 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.devices.dma && this.devices.dma.set_state(state[49]);
     this.devices.acpi && this.devices.acpi.set_state(state[50]);
     // 51 (formerly hpet)
-    this.devices.vga && this.devices.vga.set_state(state[52]);
+    this.devices.graphics_adapter && this.devices.graphics_adapter.set_state(state[52]);
     this.devices.ps2 && this.devices.ps2.set_state(state[53]);
     this.devices.uart0 && this.devices.uart0.set_state(state[54]);
     this.devices.fdc && this.devices.fdc.set_state(state[55]);
@@ -2461,6 +2471,8 @@ CPU.prototype.init = function(settings, device_bus)
     this.io = io;
 
     this.bios.main = settings.bios;
+    // The display adapter plugin's descriptor; none with graphics_adapter: "none"
+    this.graphics_adapter_descriptor = settings.graphics_adapter;
     this.bios.vga = settings.vga_bios;
 
     this.load_bios();
@@ -2658,7 +2670,13 @@ CPU.prototype.init = function(settings, device_bus)
         this.devices.dma = new DMA(this);
 
         this.devices.display = new DisplayHub(device_bus, settings.screen);
-        this.devices.vga = new VGAScreen(this, device_bus, this.devices.display, settings.vga_memory_size || 8 * 1024 * 1024);
+        if(this.graphics_adapter_descriptor)
+        {
+            this.devices.graphics_adapter = new GraphicsAdapter(this, this.graphics_adapter_descriptor,
+                { vram_size: settings.vram_size });
+            // (tests and debugging reach into the VGA core)
+            this.devices.vga = this.devices.graphics_adapter.vga();
+        }
 
         this.devices.ps2 = new PS2(this, device_bus);
         this.devices.vmware = new VMwareMouse(this, device_bus);
@@ -3230,12 +3248,18 @@ CPU.prototype.load_bios = function()
 
     this.write_blob(data, start);
 
-    if(vga_bios)
+    const adapter = this.graphics_adapter_descriptor;
+    if(vga_bios && !adapter)
+    {
+        dbg_log("Warning: VGA BIOS not loaded: graphics_adapter is \"none\"");
+    }
+    else if(vga_bios)
     {
         dbg_assert(vga_bios instanceof ArrayBuffer);
 
-        // load vga bios
-        var vga_bios8 = new Uint8Array(vga_bios);
+        // load vga bios, its PCI ROM header naming the adapter's device
+        var vga_bios8 = new Uint8Array(vga_bios).slice();
+        patch_vga_bios_ids(vga_bios8, adapter["pci_vendor"], adapter["pci_device"]);
 
         // older versions of seabios
         this.write_blob(vga_bios8, 0xC0000);

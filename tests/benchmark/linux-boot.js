@@ -16,6 +16,7 @@ const LOG_SERIAL = true;
 if(true)
 {
     var emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { url: __dirname + "/../../bios/seabios.bin" },
         vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
         cdrom: { url: __dirname + "/../../images/linux3.iso" },
@@ -28,11 +29,12 @@ if(true)
 else
 {
     var emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { url: path.join(V86_ROOT, "/bios/seabios.bin") },
         vga_bios: { url: path.join(V86_ROOT, "/bios/vgabios.bin") },
         autostart: true,
         memory_size: 512 * 1024 * 1024,
-        vga_memory_size: 8 * 1024 * 1024,
+        vram_size: 8 * 1024 * 1024,
         network_relay_url: "<UNUSED>",
         bzimage_initrd_from_filesystem: true,
         cmdline: "rw console=ttyS0 apm=off root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose mitigations=off audit=0 tsc=reliable nowatchdog init=/usr/bin/init-openrc",

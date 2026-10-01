@@ -69,6 +69,7 @@ async function measure(name, cores, mode)
     const total = Math.round(WORKLOADS[name].total * SCALE);
     const parallel = mode === "parallel";
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         multiboot: { url: kernel }, memory_size: 64 << 20, acpi: true, cpu_cores: cores,
         disable_jit: !JIT, experimental_smp_jit: JIT && cores > 1,
         ...(parallel ? { parallel: true, wasm_path: PARALLEL_WASM } :
