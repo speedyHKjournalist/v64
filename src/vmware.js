@@ -14,6 +14,7 @@ const CMD_GETNEXTPIECE = 7;
 const CMD_SETSELLENGTH = 8;
 const CMD_SETNEXTPIECE = 9;
 const CMD_GETVERSION = 10;
+const CMD_GETHWVERSION = 17;
 const CMD_GETTIME = 23;
 const CMD_ABSPOINTER_DATA = 39;
 const CMD_ABSPOINTER_STATUS = 40;
@@ -47,6 +48,11 @@ const ABSPOINTER_RELATIVE = 0x4C455252;
 const ABSPOINTER_ABSOLUTE = 0x53424152;
 
 const READ_ID = 0x3442554A;
+
+/** GETVERSION's product type (VMX_TYPE_WORKSTATION in open-vm-tools' backdoor_def.h) */
+const VMX_TYPE_WORKSTATION = 4;
+/** What GETHWVERSION reports: Workstation 12.5's, the first with SVGA 3D on Windows 8.1 guests through WDDM 1.3 */
+const VIRTUAL_HARDWARE_VERSION = 13;
 
 const BUTTON_LEFT = 0x20;
 const BUTTON_RIGHT = 0x10;
@@ -274,8 +280,16 @@ VMwareMouse.prototype.port_read32 = function()
     switch(reg32[REG_ECX] & 0xFFFF)
     {
         case CMD_GETVERSION:
-            reg32[REG_EBX] = VMWARE_MAGIC;
+            // EAX: the backdoor's version; ECX: the product. VMware Tools'
+            // installer refuses a machine whose product it does not know
+            this.set_reg(REG_EBX, VMWARE_MAGIC);
+            this.set_reg(REG_ECX, VMX_TYPE_WORKSTATION);
             return 6;
+
+        case CMD_GETHWVERSION:
+            // the virtual hardware version (a VM's "hardware compatibility")
+            this.set_reg(REG_EBX, VMWARE_MAGIC);
+            return VIRTUAL_HARDWARE_VERSION;
 
         case CMD_GETSELLENGTH:
             if(!this.clip_out_fresh)

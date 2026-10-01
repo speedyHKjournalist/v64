@@ -73,6 +73,14 @@ function rpci(text)
     return String.fromCharCode(...reply);
 }
 
+// what VMware Tools' installer asks first: which product, which hardware
+reg[EAX] = MAGIC; reg[EBX] = 0; reg[ECX] = 10; reg[EDX] = PORT;
+assert.equal(io.port_read32(PORT), 6, "GETVERSION: the backdoor's version");
+assert.deepEqual([reg[EBX] >>> 0, reg[ECX]], [MAGIC, 4], "the magic, and the product: VMware Workstation");
+reg[EAX] = MAGIC; reg[ECX] = 17; reg[EDX] = PORT;
+assert.ok(io.port_read32(PORT) >= 11, "GETHWVERSION: a virtual hardware version");
+console.log("PASS: GETVERSION names the product, GETHWVERSION the hardware version");
+
 const logs = [];
 vm.add_listener("vmware-log", text => logs.push(text));
 assert.equal(rpci("log vm3d: WDDM 3D is enabled."), "1 ");
