@@ -623,7 +623,7 @@ build/cpu-worker-test.bin: tests/rust/cpu_worker.asm
 	nasm -f bin $< -o $@
 
 .PHONY: cpu-worker-tests
-cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs build/libv86.js build/v86_all.js build/v86.wasm glbridge
+cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs build/libv86.js build/v86_all.js build/v86.wasm build/v86-vmware-svga.js glbridge
 	node tests/glbridge/cpu_worker_screen_test.mjs
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_gpu_browser_test.html
