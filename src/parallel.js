@@ -186,5 +186,6 @@ ParallelPort.prototype.set_state = function(state)
     this.data = state[0];
     this.status = state[1];
     this.control = state[2];
-    this.status_latched = state[3];
+    // (nothing latched is undefined, which a snapshot stores as null)
+    this.status_latched = state[3] === null ? undefined : state[3];
 };
