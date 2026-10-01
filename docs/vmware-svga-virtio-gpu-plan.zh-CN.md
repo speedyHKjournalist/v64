@@ -905,6 +905,13 @@ virtio-gpu 在 Windows 上只有 2D（D1 暂缓），所以没有 virtio 的 3DM
 
 已定（2026-10-01）：第一次 3DMark06 验收只声明到 `vgpu9`。理由是复用最多现成代码，最早能看到结果；之后再升 `gb9`、`dx10`、`dx11`，每升一级用 3DMark06 回归一次。有一个前提要在 A0 验证：VMware 的 Win 8.1 驱动在只有 `vgpu9` 能力时仍然开放 D3D9 3D。如果它要求必须有 GB 对象，就把 S3 和 S4 合并，第一次验收改用 `gb9`，后端仍然是 D9WG。
 
+**前提不成立（2026-10-01 实测）**：Win 8.1 上 VMware 的驱动在没有 DX 能力的设备上开不了 D3D11，DWM 因此起不来，画面全黑，3DMark06 也就无从谈起。所以 Win 8.1 的第一次 3DMark06 验收改在 `dx10`（S5 之后）。实测经过：
+
+- Tools 13.1.5 和 11.3.5 的 vm3d 在 `vgpu9` 和 `gb9` 下都以完整 WDDM 驱动加载（日志 "SVGA WDDM Full Display driver"、"WDDM 3D is on"，`gb9` 下还有 "Guest backed surface is on"），但 `D3DKMTQueryAdapterInfo(DRIVERVERSION)` 是 WDDM 1.0。
+- DWM 每隔几秒以 0x8898008d 退出；`D3D11CreateDevice(HARDWARE)` 在所有特性等级上都返回 `DXGI_ERROR_UNSUPPORTED`；设备上一个 3D 上下文都没有建过。
+- 用户态驱动本身没问题：按 D3D9 运行时的方式直接调 `vm3dum64_loader.dll` 的 `OpenAdapter`，成功，D3D9 能力是 VS/PS 3.0、41 种格式。但它的 D3D10/11 入口 `OpenAdapter10_2` 也成功，却报告 0 个支持的 DDI 版本、3D 管线等级为空。D3D11 运行时因此判定不支持，而不会退回到基于 D3D9 DDI 的 10level9。
+- 诊断工具：`tools/windows/d3dprobe.c`（DXGI、D3DKMT、直接打开用户态驱动）、`runs1.c`（在控制台会话里启动程序；目前在 DWM 失败的会话里起不来，0xC0000142）、日志代理的 `EXTRA.CMD`（DWM/DXGI/D3D11 的诊断通道从 .etl 读，事件没有描述文字，用处不大）。
+
 ## 13. 实施进度
 
 | 里程碑 | 状态 | 说明 |
@@ -916,7 +923,7 @@ virtio-gpu 在 Windows 上只有 2D（D1 暂缓），所以没有 virtio 的 3DM
 | S2 SVGA 完整 2D | Linux 已验收，Windows 待验证 | GMR1/GMR2（`svga_gmr.js`）、Screen Object（`svga_screens.js`）、硬件光标（`svga_cursor.js`）、命令缓冲区和设备上下文、显示拓扑；存档版本 2。Linux 的 vmwgfx 在等级 `2d-full` 下用 Screen Object 显示单元和命令缓冲区，kmscube 画面正确。Alpine 3.24 内核的 vmwgfx 对没有 MOB 的设备不画光标（日志 "Unknown Cursor Type!"），所以 Linux 的光标验收挪到 S4 |
 | S3 VGPU9 + 3DMark06 | 进行中 | 已完成（2026-10-01）：等级 `vgpu9`（`SVGA_CAP_3D`、硬件版本 WS8_B1、SM3.0 devcap 记录），旧式 SVGA3D 命令全部翻译成 D9WG（5.8 节的做法），渲染器 `svga_renderer.js`；测试 `tests/devices/vmware_svga_3d.js`、`tests/glbridge/svga_renderer_browser_test.html`。**Linux 已通过**：Alpine 3.24 的 vmwgfx 开启 3D，kmscube 用 Mesa svga（"SVGA3D; build: RELEASE; LLVM;"），真 GPU 下约 43 fps，画面与 llvmpipe 一致。未完成：Windows 8.1 的 vm3d 3D、3DMark06、`vgpu9` 的存档（GPU 上的表面和上下文还不进存档，恢复后 3D 从空开始）。ABI 冻结点：冻结后在此注明，然后才能抓状态 |
 | V1 virtio-gpu 2D | 未开始 | |
-| S4 GB 对象 | 未开始 | |
+| S4 GB 对象 | Linux 已验收，Windows 待 S5 | 已完成（2026-10-01）：等级 `gb9`（`SVGA_CAP_GBOBJECTS`、CAP2：GROW_OTABLE、OTABLE_PTDEPTH_2、GB_MEMSIZE_2、CURSOR_MOB、SCREENDMA_REG）。`svga_gb.js`：MOB 和全部页表格式、对象表（设备写表项，`SET_OTABLE_BASE` 带有效项时重新载入对象）；`svga3d.js`：GB 表面（UPDATE 从 MOB 上传、READBACK 回写 MOB，`host_newer` 记录 GPU 是否有更新的内容）、GB 上下文和着色器、内联常量、查询和 MOB fence、Screen Target（GPU 没有更新内容时直接从 MOB 读）、光标 MOB、MOB 里的命令缓冲区、`SVGA_REG_DEV_CAP`、存档（状态版本 4）、GART 命令只记账。测试 `tests/devices/vmware_svga_gb.js`。**Linux 已通过**：vmwgfx 用 Screen Target 显示单元和 GB 对象，fbcon 和 kmscube 正确，约 43 fps。Windows：vm3d 开启 GB 表面和光标 MOB，但见 12 节 D2：没有 DX 就没有 DWM。存档大小和耗时的测量还没做 |
 | S5 DX10 + GX | 未开始 | |
 | V3 virgl GL 3.3 | 未开始 | |
 | S6 DX10.1 | 未开始 | |

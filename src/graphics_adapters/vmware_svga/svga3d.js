@@ -168,6 +168,8 @@ export function SVGA3D(device, renderer)
     this.gb_shaders = new Map();
     /** @type {!Map<number, {width: number, height: number, x: number, y: number, flags: number, dpi: number, image: Array<number>}>} screen targets */
     this.targets = new Map();
+    /** @type {?{mob: number, maps: !Map<number, number>}} the GART: its MOB, and MOBs by page offset */
+    this.gart = null;
     renderer.listen(message => this.receive(message));
 }
 
@@ -179,6 +181,7 @@ SVGA3D.prototype.reset = function()
     this.declarations.clear();
     this.gb_shaders.clear();
     this.targets.clear();
+    this.gart = null;
     this.completions = [];
     this.requests.clear();
     this.completed = this.submitted;
@@ -1947,6 +1950,27 @@ SVGA3D.prototype.gb_command = function(id, p)
             return true;
         case C.SVGA_3D_CMD_GB_SCREEN_DMA:
             if(enough(5)) this.screen_dma(u(0), u(2), u(3));
+            return true;
+        // The GART: an aperture of MOB pages Windows' vm3d keeps for its
+        // memory segment. Commands name MOBs, not GART offsets, so the
+        // mappings are only kept.
+        case C.SVGA_3D_CMD_ENABLE_GART:
+            if(enough(1)) this.gart = { mob: u(0), maps: new Map() };
+            return true;
+        case C.SVGA_3D_CMD_DISABLE_GART:
+            this.gart = null;
+            return true;
+        case C.SVGA_3D_CMD_MAP_MOB_INTO_GART:
+            if(enough(2) && this.gart) this.gart.maps.set(u(1), u(0));
+            return true;
+        case C.SVGA_3D_CMD_UNMAP_GART_RANGE:
+            if(enough(2) && this.gart)
+            {
+                for(const offset of this.gart.maps.keys())
+                {
+                    if(offset >= u(0) && offset < u(0) + u(1)) this.gart.maps.delete(offset);
+                }
+            }
             return true;
     }
     return false;
