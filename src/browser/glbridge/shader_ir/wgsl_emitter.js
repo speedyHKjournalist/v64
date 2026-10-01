@@ -967,8 +967,9 @@
                 const v = op.imm.length === 4 ? op.imm : [op.imm[0], op.imm[0], op.imm[0], op.imm[0]];
                 value = `vec4<u32>(${v.map(u32).join(", ")})`;
             } else if (op.type === OPERAND.IMMEDIATE64) {
-                this.warn("double precision is not supported");
-                value = "vec4<u32>()";
+                // the doubles' dwords: two doubles, or one twice
+                const v = op.imm.length >= 4 ? op.imm.slice(0, 4) : [op.imm[0], op.imm[1], op.imm[0], op.imm[1]];
+                value = `vec4<u32>(${v.map(u32).join(", ")})`;
             } else {
                 value = this.reg(op);
                 // scalars (odepth, omask) are vectors when read
@@ -993,6 +994,27 @@
         f(ins, i) { return this.read(ins.src[i], "f"); }
         i(ins, i) { return this.read(ins.src[i], "i"); }
         u(ins, i) { return this.read(ins.src[i], "u"); }
+
+        /** A double source: its lanes as bits, a negate or abs modifier on each double's high word */
+        doubleSource(ins, i) {
+            const op = ins.src[i];
+            const value = this.read(op, "u");
+            switch (op.modifier) {
+                case 1: return `(${value} ^ vec4<u32>(0u, 0x80000000u, 0u, 0x80000000u))`;
+                case 2: return `(${value} & vec4<u32>(0xFFFFFFFFu, 0x7FFFFFFFu, 0xFFFFFFFFu, 0x7FFFFFFFu))`;
+                case 3: return `(${value} | vec4<u32>(0u, 0x80000000u, 0u, 0x80000000u))`;
+            }
+            return value;
+        }
+
+        /**
+         * Two results (one per double) onto the destination's written lanes,
+         * in order: "dtof r0.z, r1.xy" puts the first in z
+         */
+        spread(ins, pair, kind) {
+            const T = kind === "f" ? "f32" : kind === "i" ? "i32" : "u32";
+            return `gx_spread_${T}(${pair}, ${ins.dst[0] ? ins.dst[0].mask : 15}u)`;
+        }
 
         /** The component of a select-1 or scalar source, of a type */
         scalar(ins, i, kind) {
@@ -1072,6 +1094,63 @@
                 case OP.DP2: return wf(`vec4<f32>(dot(${f(0)}.xy, ${f(1)}.xy))`);
                 case OP.DP3: return wf(`vec4<f32>(dot(${f(0)}.xyz, ${f(1)}.xyz))`);
                 case OP.DP4: return wf(`vec4<f32>(dot(${f(0)}, ${f(1)}))`);
+                // double precision (SM5): a double is two lanes (low, high
+                // word), so a vec4 holds two; WGSL has no f64, so they are
+                // computed as f32 (gx_d2f, gx_f2d): ranges and precision
+                // are float's
+                case OP.DADD: case OP.DMUL: case OP.DMAX: case OP.DMIN: case OP.DDIV: case OP.DFMA: case OP.DRCP: {
+                    this.helpers.add("doubles");
+                    const d = i => this.doubleSource(ins, i);
+                    const op = {
+                        [OP.DADD]: "a + b", [OP.DMUL]: "a * b", [OP.DMAX]: "max(a, b)", [OP.DMIN]: "min(a, b)",
+                        [OP.DDIV]: "a / b", [OP.DFMA]: "fma(a, b, c)", [OP.DRCP]: "1.0 / a",
+                    }[ins.op];
+                    const args = ins.op === OP.DFMA ? 3 : ins.op === OP.DRCP ? 1 : 2;
+                    this.line("{");
+                    this.indent++;
+                    this.line(`let a = gx_d2f2(${d(0)});`);
+                    if (args > 1) this.line(`let b = gx_d2f2(${d(1)});`);
+                    if (args > 2) this.line(`let c = gx_d2f2(${d(2)});`);
+                    wu(`gx_f2d2(${op})`);
+                    this.indent--;
+                    this.line("}");
+                    return;
+                }
+                case OP.DEQ: case OP.DGE: case OP.DLT: case OP.DNE: {
+                    this.helpers.add("doubles");
+                    const cmp = { [OP.DEQ]: "==", [OP.DGE]: ">=", [OP.DLT]: "<", [OP.DNE]: "!=" }[ins.op];
+                    const r = `gx_d2f2(${this.doubleSource(ins, 0)}) ${cmp} gx_d2f2(${this.doubleSource(ins, 1)})`;
+                    return wu(this.spread(ins, `select(vec2<u32>(0u), vec2<u32>(0xFFFFFFFFu), ${r})`, "u"));
+                }
+                case OP.DMOV:
+                    return wu(this.doubleSource(ins, 0));
+                case OP.DMOVC:
+                    return wu(`select(${this.doubleSource(ins, 2)}, ${this.doubleSource(ins, 1)}, ${U(0)} != vec4<u32>(0u))`);
+                case OP.DTOF:
+                    this.helpers.add("doubles");
+                    return wf(this.spread(ins, `gx_d2f2(${this.doubleSource(ins, 0)})`, "f"));
+                case OP.DTOI:
+                    this.helpers.add("doubles");
+                    return wi(this.spread(ins, `vec2<i32>(gx_d2f2(${this.doubleSource(ins, 0)}))`, "i"));
+                case OP.DTOU:
+                    this.helpers.add("doubles");
+                    return wu(this.spread(ins, `vec2<u32>(gx_d2f2(${this.doubleSource(ins, 0)}))`, "u"));
+                case OP.FTOD: case OP.ITOD: case OP.UTOD: {
+                    // the first one or two source lanes, to the destination's doubles
+                    this.helpers.add("doubles");
+                    const src = ins.op === OP.FTOD ? f(0) : ins.op === OP.ITOD ? `vec4<f32>(${I(0)})` : `vec4<f32>(${U(0)})`;
+                    return wu(`gx_f2d2(${src}.xy)`);
+                }
+                // pull-model interpolation: the attribute where the fragment is (each fragment is a sample)
+                case OP.EVAL_SNAPPED: case OP.EVAL_SAMPLE_INDEX: case OP.EVAL_CENTROID:
+                    this.warn("eval_* reads the attribute where the fragment is");
+                    return wu(U(0));
+                case OP.MSAD:
+                    this.helpers.add("msad");
+                    return wu(`gx_msad(${U(0)}, ${U(1)}, ${U(2)})`);
+                case OP.ABORT:
+                case OP.DEBUG_BREAK:
+                    return;
                 case OP.SINCOS:
                     // (the source read once: a destination may be it, "sincos r1.x, r0.x, r1.x")
                     this.line("{");
@@ -1968,6 +2047,45 @@ fn gx_bfi(w: vec4<u32>, o: vec4<u32>, insert: vec4<u32>, base: vec4<u32>) -> vec
 }
 fn gx_ms_texel8(sample: u32) -> vec2<i32> {
     return vec2<i32>(i32(sample & 3u), i32((sample >> 2u) & 1u));
+}`);
+            }
+            if (h.has("doubles")) {
+                out.push(`fn gx_d2f(lo: u32, hi: u32) -> f32 {
+    let e = (hi >> 20u) & 0x7FFu;
+    let s = select(1.0, -1.0, (hi >> 31u) != 0u);
+    if (e == 0u) { return 0.0 * s; }
+    if (e == 0x7FFu) { return s * bitcast<f32>(0x7F800000u | select(0u, 0x400000u, ((hi & 0xFFFFFu) | lo) != 0u)); }
+    let m = f32(hi & 0xFFFFFu) / 1048576.0 + f32(lo >> 11u) / 2199023255552.0;
+    return s * ldexp(1.0 + m, i32(e) - 1023);
+}
+fn gx_f2d(f: f32) -> vec2<u32> {
+    let b = bitcast<u32>(f);
+    let s = b & 0x80000000u;
+    let e = (b >> 23u) & 0xFFu;
+    let m = b & 0x7FFFFFu;
+    if (e == 0u) { return vec2<u32>(0u, s); }
+    if (e == 0xFFu) { return vec2<u32>(0u, s | 0x7FF00000u | select(0u, 0x80000u, m != 0u)); }
+    return vec2<u32>(m << 29u, s | ((e + 896u) << 20u) | (m >> 3u));
+}
+fn gx_d2f2(v: vec4<u32>) -> vec2<f32> { return vec2<f32>(gx_d2f(v.x, v.y), gx_d2f(v.z, v.w)); }
+fn gx_f2d2(v: vec2<f32>) -> vec4<u32> { let a = gx_f2d(v.x); let b = gx_f2d(v.y); return vec4<u32>(a.x, a.y, b.x, b.y); }
+fn gx_spread_f32(p: vec2<f32>, m: u32) -> vec4<f32> { var r = vec4<f32>(0.0); var k = 0u; for (var c = 0u; c < 4u; c++) { if (((m >> c) & 1u) != 0u) { r[c] = p[k & 1u]; k++; } } return r; }
+fn gx_spread_i32(p: vec2<i32>, m: u32) -> vec4<i32> { var r = vec4<i32>(0); var k = 0u; for (var c = 0u; c < 4u; c++) { if (((m >> c) & 1u) != 0u) { r[c] = p[k & 1u]; k++; } } return r; }
+fn gx_spread_u32(p: vec2<u32>, m: u32) -> vec4<u32> { var r = vec4<u32>(0u); var k = 0u; for (var c = 0u; c < 4u; c++) { if (((m >> c) & 1u) != 0u) { r[c] = p[k & 1u]; k++; } } return r; }`);
+            }
+            if (h.has("msad")) {
+                // masked sum of absolute byte differences: bytes of the reference that are 0 do not count
+                out.push(`fn gx_msad1(r: u32, s: u32, a: u32) -> u32 {
+    var sum = a;
+    for (var i = 0u; i < 32u; i += 8u) {
+        let rb = (r >> i) & 0xFFu;
+        let sb = (s >> i) & 0xFFu;
+        if (rb != 0u) { sum += select(sb - rb, rb - sb, rb > sb); }
+    }
+    return sum;
+}
+fn gx_msad(r: vec4<u32>, s: vec4<u32>, a: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(gx_msad1(r.x, s.x, a.x), gx_msad1(r.y, s.y, a.y), gx_msad1(r.z, s.z, a.z), gx_msad1(r.w, s.w, a.w));
 }`);
             }
             if (h.has("cube_face")) {

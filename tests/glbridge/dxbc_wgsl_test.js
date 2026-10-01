@@ -383,6 +383,40 @@ const TEX = program(PROGRAM.PS,
     console.log("PASS: tessellation: a hull shader's control point, fork and join phases, a domain shader, as compute");
 }
 
+// ---- doubles (as floats), msad, eval_* --------------------------------------
+
+{
+    const d64 = (...values) => {
+        const words = new Uint32Array(new Float64Array(values).buffer);
+        const token = (values.length === 2 ? 2 : 1) | OPERAND.IMMEDIATE64 << 12;
+        return [token, ...words];
+    };
+    const DOUBLES = (() => {
+        const p = program(PROGRAM.PS,
+            dcl_input_ps(1, XYZW, INTERPOLATION.LINEAR),
+            dcl_output(0, XYZW),
+            dcl_temps(3),
+            ins(OP.FTOD, r(0, { mask: XYZW }), v(1, SW(0, 1, 0, 1))),
+            ins(OP.DADD, r(0, { mask: XYZW }), r(0, XYZW_S), d64(0.5, -0.25)),
+            ins(OP.DMUL, r(0, { mask: X | Y }), r(0, XYZW_S, 1 /* neg */), r(0, XYZW_S)),
+            ins(OP.DEQ, r(1, { mask: X }), r(0, XYZW_S), d64(1.0, 1.0)),
+            ins(OP.DTOF, r(1, { mask: Z | W_ }), r(0, XYZW_S)),
+            ins(OP.MSAD, r(2, { mask: XYZW }), v(1, XYZW_S), v(1, SW(1, 2, 3, 0)), imm(0, 0, 0, 0)),
+            ins(OP.EVAL_CENTROID, r(2, { mask: X }), v(1, { select: 0 })),
+            ins(OP.ADD, o(0, { mask: XYZW }), r(1, XYZW_S), r(2, XYZW_S)),
+            RET);
+        p[0] = PROGRAM.PS << 16 | 5 << 4;
+        return p;
+    })();
+    const { result } = translate("doubles", DOUBLES, { targets: { 0: "f32" } });
+    assert.match(result.code, /fn gx_d2f\(/);
+    assert.match(result.code, /gx_f2d2\(a \+ b\)/);
+    assert.match(result.code, /\^ vec4<u32>\(0u, 0x80000000u, 0u, 0x80000000u\)/, "a negated double flips its high word's sign");
+    assert.match(result.code, /gx_spread_f32\(gx_d2f2\([^)]*\), 12u\)/, "dtof into z and w");
+    assert.match(result.code, /gx_msad\(/);
+    console.log("PASS: doubles (computed as floats), msad, eval_centroid");
+}
+
 // ---- shader model 4.1: cube arrays, lod, the rasterizer's samples, per-sample inputs ----
 
 const rasterizer = sel => operand(OPERAND.RASTERIZER, [], sel || XYZW_S);

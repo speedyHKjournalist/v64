@@ -98,6 +98,23 @@ const SCENARIOS = {
         ["kmscube -M rgba -c 200 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube-rgba", after: 2500 }],
     ],
+    // shader model 5 (vmware_svga's dx11): vmwgfx makes SM5 contexts with
+    // GL 4.3's extras, Mesa reports GL 4.3 with compute, tessellation,
+    // SSBOs and images; kmscube with 8x MSAA
+    sm5: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        [APK + " kmscube mesa-dri-gallium mesa-utils >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; tail -5 /tmp/apk.log", /STEP_APK_RC=0/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["dmesg | grep -i -E 'shader model|dx3' | tail -8; echo STEP_DMESG_DONE", /shader model: SM_5_1X[\s\S]*STEP_DMESG_DONE/],
+        ["eglinfo -B -p gbm 2>&1 | grep -E 'OpenGL core profile (version|shading)' | head -4; echo STEP_EGLINFO_DONE",
+            /OpenGL core profile version: 4\.3/],
+        ["eglinfo -p gbm 2>&1 | grep -o -E 'GL_ARB_(compute_shader|tessellation_shader|shader_storage_buffer_object|shader_image_load_store|gpu_shader5)' | sort -u; echo STEP_EXTENSIONS_DONE",
+            /GL_ARB_compute_shader[\s\S]*GL_ARB_gpu_shader5[\s\S]*GL_ARB_shader_image_load_store[\s\S]*GL_ARB_shader_storage_buffer_object[\s\S]*GL_ARB_tessellation_shader/],
+        ["kmscube -s 8 -c 400 2>&1 | grep -E 'Rendered|renderer|samples|failed'", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube-msaa8", after: 5000 }],
+        ["kmscube -M rgba -c 200 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube-rgba", after: 2500 }],
+    ],
 };
 const steps = SCENARIOS[scenario];
 assert.ok(steps, "unknown GPU_SCENARIO " + scenario);
