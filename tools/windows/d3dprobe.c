@@ -191,6 +191,7 @@ typedef struct { HANDLE hAdapter; UINT Interface; UINT Version; const ADAPTERCAL
 typedef HRESULT (APIENTRY *OPENADAPTER_FN)(OPENADAPTER_ARG *);
 #define KMTQAITYPE_UMDRIVERPRIVATE 0
 #define D3DDDICAPS_GETFORMATCOUNT 3
+#define D3DDDICAPS_GETFORMATDATA 4
 #define D3DDDICAPS_GETD3D9CAPS 13
 
 static QUERY_FN kmt_query;
@@ -284,10 +285,47 @@ static void probe_umd(void)
             c.Type = D3DDDICAPS_GETFORMATCOUNT; c.pInfo = NULL; c.pData = &formats; c.DataSize = sizeof formats;
             hr = funcs.pfnGetCaps(arg.hAdapter, &c);
             LOG(BITS ": GetCaps(FORMATCOUNT) -> 0x%08lX %u", (unsigned long)hr, formats);
+            if (SUCCEEDED(hr) && formats && formats <= 256) {
+                /* FORMATOP: format, D3DFORMAT_OP_* operations, flip and blt multisample types, bits */
+                static unsigned ops[256 * 5];
+                unsigned k;
+                c.Type = D3DDDICAPS_GETFORMATDATA; c.pData = ops; c.DataSize = formats * 20;
+                hr = funcs.pfnGetCaps(arg.hAdapter, &c);
+                LOG(BITS ": GetCaps(FORMATDATA) -> 0x%08lX", (unsigned long)hr);
+                for (k = 0; SUCCEEDED(hr) && k < formats; k += 4) {
+                    LOG(BITS ":   fmt %u ops 0x%x | %u 0x%x | %u 0x%x | %u 0x%x", ops[5 * k], ops[5 * k + 1],
+                        k + 1 < formats ? ops[5 * k + 5] : 0, k + 1 < formats ? ops[5 * k + 6] : 0,
+                        k + 2 < formats ? ops[5 * k + 10] : 0, k + 2 < formats ? ops[5 * k + 11] : 0,
+                        k + 3 < formats ? ops[5 * k + 15] : 0, k + 3 < formats ? ops[5 * k + 16] : 0);
+                }
+            }
+            {
+                /* every caps type the D3D9 runtime may ask, and what the driver says */
+                static unsigned char info[256], data[16384];
+                char text[400];
+                unsigned type, n = 0;
+                text[0] = 0;
+                /* DDRAW, DDRAW_MODE_SPECIFIC, FORMATCOUNT, FORMATDATA, QUERYCOUNT,
+                   QUERYDATA, D3D3..D3D9 caps: the runtime's questions at startup */
+                static const unsigned types[] = { 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13 };
+                unsigned t;
+                for (t = 0; t < sizeof types / sizeof types[0]; t++) {
+                    HRESULT r;
+                    type = types[t];
+                    ZeroMemory(info, sizeof info);
+                    c.Type = type; c.pInfo = info; c.pData = data; c.DataSize = sizeof data;
+                    r = funcs.pfnGetCaps(arg.hAdapter, &c);
+                    if (FAILED(r)) n += wsprintfA(text + n, " %u:%08lX", type, (unsigned long)r);
+                    if (n > 340) { LOG(BITS ": GetCaps failing types:%s", text); n = 0; text[0] = 0; }
+                }
+                LOG(BITS ": GetCaps failing types:%s", n ? text : " none");
+            }
+            c.pInfo = NULL;
             c.Type = D3DDDICAPS_GETD3D9CAPS; c.pData = &caps; c.DataSize = sizeof caps;
             hr = funcs.pfnGetCaps(arg.hAdapter, &c);
-            LOG(BITS ": GetCaps(D3D9CAPS) -> 0x%08lX vs=0x%x ps=0x%x", (unsigned long)hr,
-                (unsigned)caps.VertexShaderVersion, (unsigned)caps.PixelShaderVersion);
+            LOG(BITS ": GetCaps(D3D9CAPS) -> 0x%08lX vs=0x%x ps=0x%x devcaps=0x%x caps2=0x%x primitive=0x%x raster=0x%x",
+                (unsigned long)hr, (unsigned)caps.VertexShaderVersion, (unsigned)caps.PixelShaderVersion,
+                (unsigned)caps.DevCaps, (unsigned)caps.Caps2, (unsigned)caps.PrimitiveMiscCaps, (unsigned)caps.RasterCaps);
             if (funcs.pfnCloseAdapter) funcs.pfnCloseAdapter(arg.hAdapter);
             break;
         }
