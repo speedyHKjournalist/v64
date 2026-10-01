@@ -23,9 +23,9 @@
 // "svgalog on|off" (the SVGA3D commands other than DX and the frequent GB
 // ones, with their first words, as "svga3d-command" events), "svgashaders"
 // (the GB shaders' bytecode, as "svga3d-shader" events).
-// WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; vmware_svga, whose
+// WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; virtio_gpu; vmware_svga, whose
 // level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
-// a headless Chrome, and the device its highest level, dx10.1);
+// a headless Chrome, and the device its highest level, dx11);
 // WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install; WIN_HDB=<image>: a
 // second disk in place of the tools disk, read-only like the first.
 // WIN_LAUNCHER=<guest path of LAUNCH.EXE>: started from the Run dialog once
@@ -93,7 +93,7 @@ function save_overlay(filename)
 }
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
-// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (the default level, dx10.1)
+// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (the default level, dx11)
 const remote_renderer = process.env.WIN_GPU_RENDERER === "chrome" ?
     await (await import("./gpu_remote_renderer.mjs")).create_remote_renderer() : null;
 const vm = new V86({
@@ -246,10 +246,13 @@ const enter = () => press([28, 156]);
 // every element access): read the frame buffer through one plain array
 const svga_bytes = () => new Uint8Array(cpu.wasm_memory.buffer, cpu.devices.vga.svga_memory.byteOffset, cpu.devices.vga.vga_memory_size);
 // The picture on screen: vmware_svga's first screen object (RGBA), its
-// register mode, or the VGA core's VBE mode (BGR in the frame buffer); null
-// in text and planar modes
+// register mode, virtio_gpu's first display (RGBA), or the VGA core's VBE
+// mode (BGR in the frame buffer); null in text and planar modes
 function frame_buffer()
 {
+    const gpu = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"];
+    const scanout = gpu && gpu.active && gpu.scanouts[0];
+    if(scanout && scanout.rgba) return {width: scanout.width, height: scanout.height, bpp: 32, pitch: scanout.width * 4, offset: 0, rgba: scanout.rgba};
     const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
     const screen = svga && svga.svga_active() && svga.screens.screens.get(0);
     if(screen) return {width: screen.width, height: screen.height, bpp: 32, pitch: screen.width * 4, offset: 0, rgba: screen.rgba};
@@ -385,6 +388,21 @@ let svga_seen = "";
 // The SVGA II registers as the guest's driver sets them, logged on change
 function observe_svga()
 {
+    // virtio_gpu: whether its displays are on screen, what they show, what the driver sent
+    const gpu = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"];
+    if(gpu)
+    {
+        // (the transport: v86's VirtIO object, from the source tree)
+        const t = cpu.devices.graphics_adapter.pci_device;
+        const state = {active: gpu.active, scanouts: gpu.scanouts.map(sc => [sc.enabled, sc.host_width, sc.host_height, sc.resource_id, sc.width, sc.height]),
+            resources: gpu.resources.size, errors: gpu.stats.errors, last_error: gpu.stats.last_error.toString(16), commands: gpu.stats.commands,
+            status: t && t.device_status, features: t && Array.from(t.driver_feature || [], f => (f >>> 0).toString(16)),
+            queues: t && t.queues && t.queues.map(q => [q.size, q.enabled, (q.desc_addr || 0).toString(16), q.avail_last_idx]),
+            isr: t && t.isr_status, irq_line: cpu.devices.pci.device_spaces[cpu.devices.graphics_adapter.pci_id][15] & 0xFF};
+        const key = JSON.stringify(state);
+        if(key !== svga_seen && performance.now() >= svga3d_next) { svga_seen = key; svga3d_next = performance.now() + 5000; event("virtio-gpu", state); }
+        return;
+    }
     const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
     if(!svga) return;
     const state = {enable: svga.enable, mode: `${svga.width}x${svga.height}x${svga.bpp}`, pitch: svga.pitch(),
@@ -553,6 +571,27 @@ try
 {
     await new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); });
     cpu = vm.v86.cpu;
+    // virtio_gpu: every device status the driver writes, every control
+    // command and every reset of the transport, as they happen
+    const virtio = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"] &&
+        cpu.devices.graphics_adapter.pci_device;
+    if(virtio)
+    {
+        const status_field = virtio.mmio_fields.find(field => field.offset === 20);
+        const write_status = status_field.write;
+        status_field.write = value => { event("virtio-status", {value, before: virtio.device_status}); write_status(value); };
+        const gpu = cpu.devices.graphics_adapter.device["virtio_gpu"];
+        const control = gpu.control.bind(gpu);
+        let logged = 0;
+        gpu.control = bytes => {
+            const response = control(bytes);
+            const type = bytes[0] | bytes[1] << 8, result = response[0] | response[1] << 8;
+            if(logged++ < 200 || result >= 0x1200) event("virtio-command", {type: type.toString(16), result: result.toString(16), length: bytes.length});
+            return response;
+        };
+        const needs_reset = virtio.needs_reset.bind(virtio);
+        virtio.needs_reset = () => { event("virtio-needs-reset"); needs_reset(); };
+    }
     // WIN_GUESTINFO=key=value;...: what the VMware backdoor answers for
     // guestinfo.<key> (VMware's drivers read their settings so, e.g.
     // loglevel.vm3d.all=10 or svga.wddm.miniportLogging=TRUE)

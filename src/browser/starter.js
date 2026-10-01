@@ -1672,6 +1672,20 @@ V86.prototype.screen_set_scale = function(sx, sy)
 };
 
 /**
+ * Tell the display adapter what size the page would show the guest's display
+ * at, such as the size of its window. Adapters that can ask the guest to
+ * change its resolution do (virtio_gpu); the others ignore it.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @param {number=} display which of the guest's displays (0, the first)
+ */
+V86.prototype.set_display_size = function(width, height, display)
+{
+    this.bus.send("display-host-size", [width >>> 0, height >>> 0, display >>> 0]);
+};
+
+/**
  * Go fullscreen (only browsers)
  */
 V86.prototype.screen_go_fullscreen = function()

@@ -11,6 +11,7 @@ import { LOG_PCI, FLAG_VM } from "./const.js";
 import { dbg_log } from "./log.js";
 import { pci_functions } from "./platform.js";
 import { DisplaySource } from "./display.js";
+import { create_adapter_virtio_device } from "./virtio_devices.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
@@ -19,9 +20,6 @@ import { CPU } from "./cpu.js";
 
 /** Every value graphics_adapter may name */
 const ADAPTERS = ["bochs_vga", "vmware_svga", "virtio_gpu", "none"];
-
-/** The ones that exist so far */
-const IMPLEMENTED = ["bochs_vga", "vmware_svga", "none"];
 
 /** The global registry plugin files add their descriptors to */
 const REGISTRY = "V86GraphicsAdapters";
@@ -52,7 +50,7 @@ const BUNDLE_URL = typeof V86_BUNDLE_URL === "string" ? V86_BUNDLE_URL :
 export function check_graphics_adapter_options(options)
 {
     const adapter = options["graphics_adapter"];
-    const supported = IMPLEMENTED.map(name => "\"" + name + "\"").join(", ");
+    const supported = ADAPTERS.map(name => "\"" + name + "\"").join(", ");
 
     if(typeof adapter === "function")
     {
@@ -66,10 +64,6 @@ export function check_graphics_adapter_options(options)
     if(typeof adapter !== "string" || !ADAPTERS.includes(adapter))
     {
         throw new Error("Unknown graphics_adapter " + JSON.stringify(adapter) + "; supported: " + supported);
-    }
-    if(!IMPLEMENTED.includes(adapter))
-    {
-        throw new Error("graphics_adapter \"" + adapter + "\" is not implemented yet; supported: " + supported);
     }
 
     if(options["vga_memory_size"] !== undefined)
@@ -368,6 +362,9 @@ GraphicsAdapter.prototype.create_handle = function()
         "dirty_max_offset": () => cpu.svga_dirty_bitmap_max_offset[0],
 
         "register_pci": description => this.register_pci(description),
+        // virtio-vga: the adapter's PCI function is a virtio device (the
+        // descriptor as for virtio_devices, see create_adapter_virtio_device)
+        "create_virtio": descriptor => this.create_virtio(descriptor),
         "raise_irq": () => cpu.devices.pci.raise_irq(this.pci_id),
         "lower_irq": () => cpu.devices.pci.lower_irq(this.pci_id),
 
@@ -381,6 +378,10 @@ GraphicsAdapter.prototype.create_handle = function()
         "validate_physical_range": (address, length) => cpu.validate_physical_range(address, length),
 
         "now": () => cpu.clock.now(),
+        // The size the page would like the guest's display to have
+        // (V86.set_display_size): width, height, the display's index
+        "on_host_display_size": handler =>
+            cpu.bus.register("display-host-size", data => handler(data[0], data[1], data[2] || 0), this),
         "in_vm86": () => !!(cpu.flags[0] & FLAG_VM),
 
         "display": {
@@ -459,6 +460,21 @@ GraphicsAdapter.prototype.register_pci = function(description)
         pci_rom_address: description["pci_rom_address"],
     };
     this.cpu.devices.pci.register_device(this.pci_device);
+};
+
+/**
+ * @param {*} descriptor
+ * @return {!Object} the device's quoted handle
+ */
+GraphicsAdapter.prototype.create_virtio = function(descriptor)
+{
+    if(this.pci_device)
+    {
+        throw new Error("graphics_adapter \"" + this.name + "\" registered its PCI function twice");
+    }
+    const device = create_adapter_virtio_device(this.cpu, descriptor, this.pci_id);
+    this.pci_device = device.virtio;
+    return device.handle;
 };
 
 /**

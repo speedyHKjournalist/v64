@@ -1018,6 +1018,15 @@ export class V86 {
     screen_set_scale(sx: number, sy: number): void;
 
     /**
+     * Tell the display adapter what size the page would show the guest's
+     * display at (such as its window's). Adapters that can ask the guest to
+     * change its resolution do (virtio_gpu); the others ignore it.
+     *
+     * @param display which of the guest's displays (0, the first)
+     */
+    set_display_size(width: number, height: number, display?: number): void;
+
+    /**
      * Go fullscreen (only browsers)
      */
     screen_go_fullscreen(): void;

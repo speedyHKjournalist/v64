@@ -1,4 +1,4 @@
-import { LOG_VIRTIO } from "./const.js";
+import { LOG_VIRTIO, MMAP_BLOCK_SIZE } from "./const.js";
 import { h, int_log2 } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
@@ -154,6 +154,9 @@ var VirtIO_DeviceSpecificCapabilityOptions;
  *     class_code: (undefined | number),
  *     revision: (undefined | number),
  *     bars: (undefined | !Array<{bar: number, size: number, address: number, prefetchable: boolean, on_move: function(number)}>),
+ *     capability_bar: (undefined | number),
+ *     rom_size: (undefined | number),
+ *     rom_address: (undefined | number),
  * }}
  */
 var VirtIO_Options;
@@ -258,6 +261,10 @@ export function VirtIO(cpu, options)
 
     this.name = options.name;
 
+    // virtio-vga: the VGA BIOS, as the expansion ROM (PCI sizes and places it)
+    this.pci_rom_size = options.rom_size || 0;
+    this.pci_rom_address = options.rom_address || 0;
+
     // Feature bits grouped in dwords, dword selected by decive_feature_select.
     this.device_feature_select = 0;
     this.driver_feature_select = 0;
@@ -326,7 +333,32 @@ export function VirtIO(cpu, options)
     {
         capabilities.push(this.create_device_specific_capability(options.device_specific));
     }
+    // virtio-vga: every capability in one memory BAR (viogpudo maps only
+    // memory BARs), each at its window's distance from the common
+    // configuration's, which starts the BAR
+    /** @type {!Array<{offset: number, bytes: number, read: function():number, write: function(number), pending: number}>} */
+    this.mmio_fields = [];
+    /** @type {Int16Array} the field at each offset of the BAR, or -1 */
+    this.mmio_index = null;
+    this.mmio_base = 0;
+    this.mmio_size = 0;
+    if(options.capability_bar !== undefined)
+    {
+        const base = options.common.initial_port;
+        for(const cap of capabilities)
+        {
+            cap.offset = cap.port - base;
+            cap.port = 0;
+            cap.bar = options.capability_bar;
+            cap.use_mmio = true;
+        }
+    }
     this.init_capabilities(capabilities);
+    // (the template's BARs that nothing took read as none)
+    for(let bar = 0; bar < 6; bar++)
+    {
+        if(!this.pci_bars[bar]) this.pci_space.fill(0, 0x10 + 4 * bar, 0x14 + 4 * bar);
+    }
 
     cpu.devices.pci.register_device(this);
     this.reset();
@@ -772,16 +804,18 @@ VirtIO.prototype.init_capabilities = function(capabilities)
         // Round up to next power of 2,
         // Minimum 16 bytes for its size to be detectable in general (esp. mmio).
         bar_size = bar_size < 16 ? 16 : 1 << (int_log2(bar_size - 1) + 1);
+        // (memory is decoded in blocks: the BAR has whole ones to itself)
+        if(cap.use_mmio) bar_size = Math.max(bar_size, MMAP_BLOCK_SIZE);
         // (this capability's own length: its struct)
         const cap_size = cap.struct.reduce((bytes, field) => bytes + field.bytes, 0);
 
         dbg_assert((cap.port & (bar_size - 1)) === 0,
             "VirtIO device<" + this.name + "> capability port should be aligned to pci bar size");
 
-        this.pci_bars[cap.bar] =
-        {
-            size: bar_size,
-        };
+        this.pci_bars[cap.bar] = cap.use_mmio ?
+            { size: bar_size, on_move: base => this.move_mmio(base) } :
+            { size: bar_size };
+        if(cap.use_mmio) this.mmio_size = bar_size;
 
         this.pci_space[cap_ptr] = VIRTIO_PCI_CAP_VENDOR;
         this.pci_space[cap_ptr + 1] = cap_next;
@@ -853,7 +887,8 @@ VirtIO.prototype.init_capabilities = function(capabilities)
 
             if(cap.use_mmio)
             {
-                dbg_assert(false, "VirtIO device <" + this.name + "> mmio capability not implemented.");
+                // (port is the offset in the BAR: move_mmio maps it)
+                this.mmio_fields.push({ offset: port, bytes: field.bytes, read, write, pending: 0 });
             }
             else
             {
@@ -906,6 +941,13 @@ VirtIO.prototype.init_capabilities = function(capabilities)
         }
     }
 
+    if(this.mmio_fields.length)
+    {
+        const end = Math.max(...this.mmio_fields.map(field => field.offset + field.bytes));
+        this.mmio_index = new Int16Array(end).fill(-1);
+        this.mmio_fields.forEach((field, i) => this.mmio_index.fill(i, field.offset, field.offset + field.bytes));
+    }
+
     // Terminate linked list with the pci config access capability.
 
     const cap_len = VIRTIO_PCI_CAP_LENGTH + 4;
@@ -951,6 +993,71 @@ VirtIO.prototype.init_capabilities = function(capabilities)
     // 1, 2, or 4.
     //
     // This requires some sort of pci devicespace read and write handlers.
+};
+
+/**
+ * The capabilities' memory BAR moved (the BIOS or the OS placed it)
+ * @param {number} base
+ */
+VirtIO.prototype.move_mmio = function(base)
+{
+    if(this.mmio_base) this.cpu.io.mmap_unregister(this.mmio_base, this.mmio_size);
+    this.mmio_base = base;
+    if(base)
+    {
+        this.cpu.io.mmap_register(base, this.mmio_size,
+            addr => this.mmio_read8(addr), (addr, value) => this.mmio_write8(addr, value),
+            addr => this.mmio_read32(addr), (addr, value) => this.mmio_write32(addr, value));
+    }
+};
+
+/**
+ * @param {number} addr
+ * @return {?{offset: number, bytes: number, read: function():number, write: function(number), pending: number}}
+ */
+VirtIO.prototype.mmio_field = function(addr)
+{
+    // (addresses above 2 GiB arrive as negative int32s)
+    const offset = addr - this.mmio_base >>> 0;
+    const i = offset < this.mmio_index.length ? this.mmio_index[offset] : -1;
+    return i >= 0 ? this.mmio_fields[i] : null;
+};
+
+VirtIO.prototype.mmio_read8 = function(addr)
+{
+    const field = this.mmio_field(addr);
+    return field ? field.read() >>> 8 * ((addr - this.mmio_base >>> 0) - field.offset) & 0xFF : 0;
+};
+
+/**
+ * A byte of a field. The CPU writes 16-bit values a byte at a time, so a
+ * wider field takes effect with its last byte.
+ */
+VirtIO.prototype.mmio_write8 = function(addr, value)
+{
+    const field = this.mmio_field(addr);
+    if(!field) return;
+    const at = (addr - this.mmio_base >>> 0) - field.offset;
+    field.pending = (at ? field.pending & (1 << 8 * at) - 1 : 0) | value << 8 * at;
+    if(at === field.bytes - 1) field.write(field.bytes === 4 ? field.pending | 0 : field.pending);
+};
+
+VirtIO.prototype.mmio_read32 = function(addr)
+{
+    const field = this.mmio_field(addr);
+    if(field && field.bytes === 4 && (addr - this.mmio_base >>> 0) === field.offset) return field.read() | 0;
+    return this.mmio_read8(addr) | this.mmio_read8(addr + 1) << 8 | this.mmio_read8(addr + 2) << 16 | this.mmio_read8(addr + 3) << 24;
+};
+
+VirtIO.prototype.mmio_write32 = function(addr, value)
+{
+    const field = this.mmio_field(addr);
+    if(field && field.bytes === 4 && (addr - this.mmio_base >>> 0) === field.offset)
+    {
+        field.write(value);
+        return;
+    }
+    for(let i = 0; i < 4; i++) this.mmio_write8(addr + i, value >>> 8 * i & 0xFF);
 };
 
 VirtIO.prototype.get_state = function()

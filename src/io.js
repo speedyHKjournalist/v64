@@ -37,7 +37,8 @@ export function IO(cpu)
         cpu.memory_map_read32[i] = cpu.memory_map_write32[i] = undefined;
     }
 
-    this.mmap_register(memory_size, MMAP_MAX - memory_size,
+    // (kept for mmap_unregister)
+    this.unmapped = [
         function(addr) {
             // read outside of the memory size
             dbg_log("Read from unmapped memory space, addr=" + h(addr >>> 0, 8), LOG_IO);
@@ -53,8 +54,9 @@ export function IO(cpu)
         },
         function(addr, value) {
             dbg_log("Write to unmapped memory space, addr=" + h(addr >>> 0, 8) + " value=" + h(value >>> 0, 8), LOG_IO);
-        }
-    );
+        },
+    ];
+    this.mmap_register(memory_size, MMAP_MAX - memory_size, this.unmapped[0], this.unmapped[1], this.unmapped[2], this.unmapped[3]);
 }
 
 IO.prototype.create_empty_entry = function()
@@ -326,6 +328,16 @@ IO.prototype.mmap_register = function(addr, size, read_func8, write_func8, read_
     }
 };
 
+/**
+ * Give a range back to the unmapped-memory handlers (a device's memory BAR
+ * that moved away)
+ * @param {number} addr
+ * @param {number} size
+ */
+IO.prototype.mmap_unregister = function(addr, size)
+{
+    this.mmap_register(addr, size, this.unmapped[0], this.unmapped[1], this.unmapped[2], this.unmapped[3]);
+};
 
 IO.prototype.port_write8 = function(port_addr, data)
 {

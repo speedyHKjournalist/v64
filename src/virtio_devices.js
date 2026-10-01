@@ -114,6 +114,46 @@ export function create_virtio_devices(cpu, descriptors)
 }
 
 /**
+ * A display adapter's virtio function (virtio-vga, in the VGA slot): the
+ * descriptor's fields as for virtio_devices, plus "class_code", "revision",
+ * the adapter's own memory BARs ("bars": quoted { bar, size, address,
+ * prefetchable, on_move }), "capability_bar", the one memory BAR that holds
+ * all four capabilities at their windows' offsets (viogpudo maps no I/O
+ * BARs), and the VGA BIOS as its
+ * expansion ROM ("pci_rom_size", "pci_rom_address"). Its state belongs to the
+ * adapter's snapshot entry (the handle's "transport" and "set_transport").
+ * @param {CPU} cpu
+ * @param {*} descriptor
+ * @param {number} pci_id
+ * @return {!VirtioDevice}
+ */
+export function create_adapter_virtio_device(cpu, descriptor, pci_id)
+{
+    check_descriptor(descriptor, new Set());
+    const bars = descriptor["bars"] || [];
+    if(!Array.isArray(bars) || bars.some(bar => !bar || !Number.isInteger(bar["bar"]) || bar["bar"] < 0 || bar["bar"] > 5 ||
+        !Number.isInteger(bar["size"]) || bar["size"] < 16 || (bar["size"] & (bar["size"] - 1))))
+    {
+        throw new TypeError("virtio device \"" + descriptor["name"] + "\": bars must be { bar, size (a power of two) }");
+    }
+    // (no I/O ports: the windows' offsets in the memory BAR are 0x000, 0x100, 0x200, 0x300)
+    return new VirtioDevice(cpu, /** @type {!Object} */ (descriptor), pci_id >> 3, 0, {
+        class_code: descriptor["class_code"],
+        revision: descriptor["revision"],
+        bars: bars.map(bar => ({
+            bar: bar["bar"],
+            size: bar["size"],
+            address: bar["address"] || 0,
+            prefetchable: !!bar["prefetchable"],
+            on_move: bar["on_move"],
+        })),
+        capability_bar: descriptor["capability_bar"],
+        rom_size: descriptor["pci_rom_size"],
+        rom_address: descriptor["pci_rom_address"],
+    });
+}
+
+/**
  * The value of state[92]: nothing when no device is configured, so that
  * snapshots of machines without custom devices do not change
  * @param {Array<VirtioDevice>|undefined} devices
@@ -317,8 +357,11 @@ function is_io_window_free(cpu, io_base)
  * @param {!Object} descriptor
  * @param {number} slot
  * @param {number} io_base
+ * @param {{class_code: (number|undefined), revision: (number|undefined), bars: !Array,
+ *     capability_bar: (number|undefined), rom_size: (number|undefined), rom_address: (number|undefined)}=} transport
+ *     a display adapter's layout (create_adapter_virtio_device)
  */
-function VirtioDevice(cpu, descriptor, slot, io_base)
+function VirtioDevice(cpu, descriptor, slot, io_base, transport)
 {
     /** @const @type {CPU} */
     this.cpu = cpu;
@@ -345,6 +388,12 @@ function VirtioDevice(cpu, descriptor, slot, io_base)
         pci_id: slot << 3,
         device_id: descriptor["device_id"],
         subsystem_device_id: descriptor["subsystem_device_id"] || 0,
+        class_code: transport && transport.class_code,
+        revision: transport && transport.revision,
+        bars: transport && transport.bars,
+        capability_bar: transport && transport.capability_bar,
+        rom_size: transport && transport.rom_size,
+        rom_address: transport && transport.rom_address,
         on_reset: () =>
         {
             this.generation++;
@@ -407,6 +456,11 @@ VirtioDevice.prototype.create_handle = function()
         "is_feature_negotiated": bit => this.virtio.is_feature_negotiated(bit),
         "needs_reset": () => this.virtio.needs_reset(),
         "config_changed": () => { if(this.is_ready()) this.virtio.notify_config_changes(); },
+        // (a display adapter's function: its transport in the adapter's
+        // snapshot entry, and the adapter's resets)
+        "transport": () => this.virtio,
+        "set_transport": state => { this.generation++; this.virtio.set_state(state); },
+        "reset": () => this.reset(),
     };
 };
 

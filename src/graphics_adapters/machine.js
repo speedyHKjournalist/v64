@@ -360,6 +360,29 @@ GraphicsMachine.prototype.register_pci = function(description)
     });
 };
 
+/**
+ * Make the device's PCI function a virtio device (virtio-vga), in place of
+ * register_pci. The descriptor uses quoted names, as for the virtio_devices
+ * option, with "class_code", "revision", "bars" and "capability_bar"
+ * (src/virtio_devices.js, create_adapter_virtio_device).
+ * @param {!Object} descriptor
+ * @return {!Object} the quoted handle: has_request, pop_request, flush,
+ *     read_memory, write_memory, config_changed, transport, set_transport, reset, ...
+ */
+GraphicsMachine.prototype.create_virtio = function(descriptor)
+{
+    return this.handle["create_virtio"](descriptor);
+};
+
+/**
+ * The size the page would like a display to have (V86.set_display_size)
+ * @param {function(number, number, number)} handler width, height, display
+ */
+GraphicsMachine.prototype.on_host_display_size = function(handler)
+{
+    this.handle["on_host_display_size"](handler);
+};
+
 GraphicsMachine.prototype.raise_irq = function()
 {
     this.handle["raise_irq"]();

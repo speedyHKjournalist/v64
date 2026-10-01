@@ -2674,6 +2674,19 @@ async function start_emulation(profile, query_args)
 
     if(DEBUG) window.emulator = emulator;
 
+    // virtio_gpu: the guest's display follows the window (the guest's
+    // driver asks for the new size after a display event)
+    if((settings.graphics_adapter || DEFAULT_GRAPHICS_ADAPTER) === "virtio_gpu")
+    {
+        let resize_timer = 0;
+        const report_display_size = () => {
+            clearTimeout(resize_timer);
+            resize_timer = setTimeout(() => emulator.set_display_size(window.innerWidth, window.innerHeight), 250);
+        };
+        window.addEventListener("resize", report_display_size);
+        emulator.add_listener("emulator-ready", report_display_size);
+    }
+
     emulator.add_listener("emulator-ready", function()
     {
         if(DEBUG && !emulator.worker_controller)

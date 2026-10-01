@@ -7,7 +7,7 @@
 //     GPU_ADAPTER=bochs_vga node tests/x64/linux_gpu.mjs
 //
 // GPU_ADAPTER: bochs_vga (default), vmware_svga, virtio_gpu
-// GPU_SCENARIO: the steps below: drm (default), gl
+// GPU_SCENARIO: the steps below: drm (default), gl, sm41, sm5, resize
 // GPU_LEVEL: pins the adapter's level (graphics_adapter_test), e.g. 2d or 2d-full;
 // vgpu9 records the 3D batches into <out>/trace.bin (tests/x64/gpu_trace.mjs),
 // or with GPU_RENDERER=chrome draws them on the GPU of a headless Chrome
@@ -79,6 +79,9 @@ const SCENARIOS = {
         ["timeout 10 weston-simple-shm 2>&1 | tail -3; echo STEP_SHM_DONE", /STEP_SHM_DONE/,
             { screenshot: "weston-simple-shm", after: 6000 }],
         ["grep -i -E 'error|renderer|GL version|EGL' /tmp/weston.log | head -20; echo STEP_WESTON_LOG", /STEP_WESTON_LOG/],
+        // the page's size changes (virtio_gpu tells the guest; the others ignore it)
+        ["HOST set_display_size 1280 800", null],
+        ["sleep 10; tail -6 /tmp/weston.log; echo STEP_WESTON_RESIZE", /STEP_WESTON_RESIZE/, { screenshot: "weston-host-resize", after: 9000 }],
     ],
     // shader model 4.1 (vmware_svga's dx10.1): vmwgfx makes SM4_1 contexts,
     // Mesa offers what that adds to GL 3.3 (Mesa's svga needs SM5 for GL 4),
@@ -114,6 +117,28 @@ const SCENARIOS = {
             { screenshot: "kmscube-msaa8", after: 5000 }],
         ["kmscube -M rgba -c 200 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube-rgba", after: 2500 }],
+    ],
+    // the page's size reaching the guest (virtio_gpu): a display event, the
+    // new preferred mode, which a KMS client then sets
+    resize: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        [APK + " kmscube libdrm-tests mesa-dri-gallium >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; tail -5 /tmp/apk.log", /STEP_APK_RC=0/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["dmesg | grep -i -E 'virtio_gpu|virtio-pci|fb0|features:|scanouts' | tail -12; echo STEP_DMESG_DONE", /\+edid[\s\S]*STEP_DMESG_DONE/],
+        ["cat /sys/class/drm/card*-Virtual-1/modes | head -3; echo STEP_MODES_DONE", /^1024x768\r?$/m],
+        ["SCREENSHOT console", null],
+        ["HOST set_display_size 1280 800", null],
+        // (sysfs lists what fbdev's probe kept, which is no larger than its
+        // frame buffer; a KMS client's probe sees every mode)
+        ["sleep 3; modetest -M virtio_gpu -c | grep -m3 -E '#[0-9]+ '; echo STEP_MODES_DONE", /#0 1280x800 [\s\S]*preferred[\s\S]*STEP_MODES_DONE/],
+        ["C=$(modetest -M virtio_gpu -c | awk '$3==\"connected\" {print $1; exit}'); sleep 10 | modetest -M virtio_gpu -s $C:1280x800 2>&1 | head -4",
+            /setting mode 1280x800/, { screenshot: "modetest-1280x800", after: 7000 }],
+        // a snapshot taken and restored with the mode set: the guest carries on
+        ["HOST snapshot", null],
+        ["SCREENSHOT restored", null],
+        ["cat /sys/class/drm/card*-Virtual-1/status; echo STEP_RESTORED", /connected[\s\S]*STEP_RESTORED/],
+        ["kmscube -c 100 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube", after: 20000 }],
     ],
 };
 const steps = SCENARIOS[scenario];
@@ -265,6 +290,24 @@ try
     for(const step of steps)
     {
         const [command, expect] = step;
+        if(command.startsWith("HOST "))
+        {
+            // the page's side: HOST set_display_size <width> <height> [display],
+            // HOST snapshot (saved, then restored in place)
+            const [verb, ...values] = command.slice(5).split(" ");
+            if(verb === "set_display_size") emulator.set_display_size(...values.map(Number));
+            else if(verb === "snapshot")
+            {
+                await emulator.stop();
+                const state = await emulator.save_state();
+                await emulator.restore_state(state);
+                await emulator.run();
+                console.log(`[${elapsed()}] snapshot: ${(state.byteLength / 1048576).toFixed(1)} MiB, restored`);
+            }
+            else throw new Error("unknown HOST step " + verb);
+            console.log(`[${elapsed()}] ${command}`);
+            continue;
+        }
         if(command.startsWith("SCREENSHOT "))
         {
             // nothing presents in node: ask for a whole frame first
