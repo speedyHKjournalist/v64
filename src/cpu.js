@@ -3268,8 +3268,11 @@ CPU.prototype.load_bios = function()
         // older versions of seabios
         this.write_blob(vga_bios8, 0xC0000);
 
-        // newer versions of seabios (needs to match pci rom address, see vga.js)
-        this.io.mmap_register(0xFEB00000, 0x100000,
+        // newer versions of seabios (needs to match pci rom address, see
+        // vga_core.js). One block of the memory map, no more: SeaBIOS puts
+        // other devices' BARs right above the ROM (virtio-vga's capabilities),
+        // and this runs again at every reset
+        this.io.mmap_register(0xFEB00000, 0x20000,
             function(addr)
             {
                 addr = (addr - 0xFEB00000) | 0;

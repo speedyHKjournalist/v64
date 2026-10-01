@@ -382,6 +382,7 @@ assert.ok(gpu.active);
 await emulator.restart();
 assert.ok(!gpu.active);
 assert.equal(mmio_read8(common + 20), 0);
+assert.equal(mmio_read32(config + 8), 2, "the capabilities still answer at BAR2 (the BIOS's VGA ROM window does not cover them)");
 console.log("PASS: resets");
 
 await emulator.destroy();
