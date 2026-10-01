@@ -237,5 +237,79 @@ const TEX = program(PROGRAM.PS,
     console.log("PASS: arrays, cubes, comparisons, ld, resinfo, gradients, gather, 1D as 2D, derivatives");
 }
 
+// ---- compute variants for geometry shaders: a vertex shader that pulls its
+// vertices, and geometry shaders ------------------------------------------------
+
+{
+    const fetch = [
+        { reg: 0, slot: 0, offset: 0, format: "float32x4", instanced: false },
+        { reg: 1, slot: 1, offset: 4, format: "unorm8x4-bgra", instanced: true },
+    ];
+    const { result } = translate("vs-compute", VS, { mode: "vertex-compute", fetch });
+    assert.match(result.code, /@compute @workgroup_size\(64\) fn main/);
+    assert.equal(result.record, 2, "a record of its two outputs");
+    const types = Object.fromEntries(result.bindings.map(b => [b.binding, b.type]));
+    assert.equal(types[200], "vertex-buffer");
+    assert.equal(types[201], "vertex-buffer");
+    assert.equal(types[230], "fetch");
+    assert.equal(types[231], "index");
+    assert.equal(types[233], "stage-out");
+    // every format the GX table has, pulled
+    const formats = ["float32", "float32x2", "float32x3", "float16", "float16x2", "float16x4", "unorm8", "unorm8x2", "unorm8x4",
+        "snorm8x4", "uint8x4", "sint8x2", "unorm16x4", "snorm16x2", "uint16", "sint16x4", "uint32x3", "sint32x4",
+        "unorm10-10-10-2", "pull:uint10-10-10-2", "pull:ufloat11-11-10"];
+    const many = formats.map((format, i) => ({ reg: 0, slot: i % 4, offset: 4 * i, format, instanced: false }));
+    for (const f of many) translate("fetch-" + f.format.replace(/[^a-z0-9]/g, "_"), VS, { mode: "vertex-compute", fetch: [f] });
+    console.log("PASS: a vertex shader as compute, pulling " + formats.length + " vertex formats");
+}
+
+const vin = (vertex, reg, sel) => operand(OPERAND.INPUT, [vertex, reg], sel);
+const GS = program(PROGRAM.GS,
+    ins(OP.DCL_GS_INPUT_PRIMITIVE, { controls: 3 /* triangle */ }),
+    ins(OP.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, { controls: 5 /* triangle strip */ }),
+    ins(OP.DCL_MAX_OUTPUT_VERTEX_COUNT, 6),
+    ins(OP.DCL_INPUT, operand(OPERAND.INPUT, [3, 0], { mask: XYZW })),
+    ins(OP.DCL_INPUT, operand(OPERAND.INPUT, [3, 1], { mask: XYZW })),
+    dcl_output_siv(0, XYZW, NAME.POSITION), dcl_output(1, XYZW),
+    dcl_temps(1),
+    // each vertex as it came, then a cut, then the first again, alone
+    ...[0, 1, 2].map(i => [ins(OP.MOV, o(0, { mask: XYZW }), vin(i, 0, XYZW_S)), ins(OP.MOV, o(1, { mask: XYZW }), vin(i, 1, XYZW_S)),
+        ins(OP.EMIT)]).flat(),
+    ins(OP.CUT),
+    ins(OP.MOV, o(0, { mask: XYZW }), vin(0, 0, XYZW_S)),
+    ins(OP.EMITTHENCUT),
+    RET);
+{
+    const { p, result } = translate("gs", GS, { mode: "geometry" });
+    assert.equal(p.stage, "gs");
+    assert.deepEqual(result.gs, { vertices: 3, topology: "triangle-list", perPrim: 3, maxPrims: 4 });
+    assert.equal(result.record, 3, "two outputs and the flag");
+    assert.match(result.code, /var<private> v: array<array<vec4<u32>, 2>, 3>/);
+    assert.match(result.code, /gs_emit\(\);/);
+    assert.match(result.code, /gs_cut\(\);/);
+    assert.throws(() => W.emit(p, {}), /emulated elsewhere/, "only as compute");
+    console.log("PASS: a geometry shader as compute: 2D inputs, emit and cut, triangles from strips");
+}
+
+const GS_POINTS = program(PROGRAM.GS,
+    ins(OP.DCL_GS_INPUT_PRIMITIVE, { controls: 1 /* point */ }),
+    ins(OP.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, { controls: 5 }),
+    ins(OP.DCL_MAX_OUTPUT_VERTEX_COUNT, 4),
+    ins(OP.DCL_INPUT, operand(OPERAND.INPUT, [1, 0], { mask: XYZW })),
+    ins(OP.DCL_INPUT, operand(OPERAND.INPUT_PRIMITIVEID, [], { zero: true })),
+    dcl_output_siv(0, XYZW, NAME.POSITION), dcl_output(1, X),
+    dcl_temps(1),
+    ...[[-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1], [0.1, 0.1]].map(([dx, dy]) => [
+        ins(OP.ADD, o(0, { mask: XYZW }), vin(0, 0, XYZW_S), imm(dx, dy, 0.0, 0.0)),
+        ins(OP.MOV, o(1, { mask: X }), operand(OPERAND.INPUT_PRIMITIVEID, [], { select: 0 })),
+        ins(OP.EMIT)]).flat(),
+    RET);
+{
+    const { result } = translate("gs-points", GS_POINTS, { mode: "geometry" });
+    assert.deepEqual(result.gs, { vertices: 1, topology: "triangle-list", perPrim: 3, maxPrims: 2 });
+    assert.match(result.code, /vec4<u32>\(prim_id\)/);
+    console.log("PASS: a geometry shader making quads of points, with the primitive id");
+}
+
 console.log("PASS: " + checked + " shaders" + (naga ? " validated by naga" : " (naga not found: not validated)"));
 fs.rmSync(scratch, { recursive: true, force: true });

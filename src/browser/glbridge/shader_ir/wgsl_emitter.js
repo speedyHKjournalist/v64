@@ -21,6 +21,20 @@
 // Bindings in the group: constant buffer n at n (0-14), the draw
 // parameters at 15, sampler n at 16 + n, resource n at 32 + n, UAV n at
 // 160 + n. emit() returns them, for the bind group layout.
+//
+// Geometry shaders have no WebGPU stage, so a draw with one runs its
+// vertex and geometry shaders as compute shaders (options.mode):
+//   "vertex-compute": a vertex shader that pulls its inputs from the vertex
+//       buffers (vertex buffer n at 200 + n, read as words; options.fetch:
+//       [{ reg, slot, offset, format, instanced }]), the indices at 231 and
+//       the draw at 230 (GXFetch), and stores each vertex's outputs (a
+//       record of `record` vec4s) at 233
+//   "geometry": a geometry shader, one invocation per input primitive (and
+//       instance): its vertices come from the vertex shader's records at
+//       232 (GXGeo at 234 says how many, the topology and the record
+//       size), and what it emits goes to 233 as primitives of the output
+//       topology, maxPrims slots of each per input primitive, a record of
+//       outputs + 1 vec4s each (the last: 1 if the slot is used)
 (function(global) {
     "use strict";
 
@@ -30,7 +44,10 @@
 
     class ShaderTranslateError extends Error {}
 
-    const BINDING = { CB: 0, DRAW: 15, SAMPLER: 16, RESOURCE: 32, UAV: 160 };
+    const BINDING = { CB: 0, DRAW: 15, SAMPLER: 16, RESOURCE: 32, UAV: 160, VB: 200, FETCH: 230, INDEX: 231,
+        STAGE_IN: 232, STAGE_OUT: 233, GEO: 234 };
+    // vertices of a GS input primitive (D3D10_SB_PRIMITIVE): point, line, triangle, line_adj, triangle_adj
+    const GS_INPUT_VERTICES = { 1: 1, 2: 2, 3: 3, 6: 4, 7: 6 };
     const LANES = "xyzw";
     const ALL = 0xF;
 
@@ -69,6 +86,7 @@
             this.switches = [];
             this.needDepth = false;
             this.needMask = false;
+            this.mode = options.mode || "";
         }
 
         warn(text) {
@@ -81,8 +99,19 @@
 
         run() {
             const p = this.p;
-            if (this.stage !== PROGRAM.VS && this.stage !== PROGRAM.PS && this.stage !== PROGRAM.CS) {
+            const geometry = this.mode === "geometry" && this.stage === PROGRAM.GS;
+            if (this.stage !== PROGRAM.VS && this.stage !== PROGRAM.PS && this.stage !== PROGRAM.CS && !geometry) {
                 throw new ShaderTranslateError(p.stage + " shaders are emulated elsewhere");
+            }
+            if (geometry) {
+                const g = p.gs;
+                this.gsVertices = GS_INPUT_VERTICES[g.input] || 0;
+                if (!this.gsVertices) throw new ShaderTranslateError("geometry shader input primitive " + g.input);
+                // the output topology (D3D10_SB_PRIMITIVE_TOPOLOGY): point list 1, line strip 3, triangle strip 5
+                this.gsOutput = g.outputTopology === 1 ? "point-list" : g.outputTopology === 3 ? "line-list" : "triangle-list";
+                this.gsPerPrim = this.gsOutput === "point-list" ? 1 : this.gsOutput === "line-list" ? 2 : 3;
+                const max = Math.max(1, g.maxVertices);
+                this.gsMaxPrims = this.gsOutput === "point-list" ? max : Math.max(1, max - this.gsPerPrim + 1);
             }
             for (const input of p.inputs) if (input.type === OPERAND.INPUT) this.inputCount = Math.max(this.inputCount, inputRegister(input) + 1);
             for (const output of p.outputs) if (output.type === OPERAND.OUTPUT) this.outputCount = Math.max(this.outputCount, output.index + 1);
@@ -119,6 +148,10 @@
                 usesDraw: this.usesDraw,
                 warnings: this.warnings,
                 stage: p.stage,
+                // a compute variant's records: vec4s per vertex, and a geometry shader's output
+                record: this.mode === "geometry" ? this.outputCount + 1 : this.outputCount,
+                gs: this.mode === "geometry" ? { vertices: this.gsVertices, topology: this.gsOutput,
+                    perPrim: this.gsPerPrim, maxPrims: this.gsMaxPrims } : null,
             };
         }
 
@@ -199,8 +232,14 @@
             }
             out.push(`var<private> r: array<vec4<u32>, ${this.temps}>;`);
             for (const [index, x] of p.indexable) out.push(`var<private> x${index}: array<vec4<u32>, ${Math.max(1, x.size)}>;`);
-            out.push(`var<private> v: array<vec4<u32>, ${this.inputCount}>;`);
+            if (this.mode === "geometry") {
+                out.push(`var<private> v: array<array<vec4<u32>, ${this.inputCount}>, ${this.gsVertices}>;`);
+            } else {
+                out.push(`var<private> v: array<vec4<u32>, ${this.inputCount}>;`);
+            }
             out.push(`var<private> o: array<vec4<u32>, ${this.outputCount}>;`);
+            if (this.mode === "vertex-compute") out.push(...this.fetchDeclarations());
+            if (this.mode === "geometry") out.push(...this.geometryDeclarations());
             if (this.stage === PROGRAM.PS) {
                 out.push("var<private> odepth: u32;");
                 out.push("var<private> omask: u32 = 0xFFFFFFFFu;");
@@ -261,6 +300,8 @@
         // Entry points
 
         entryPoint() {
+            if (this.mode === "vertex-compute") return this.vertexComputeEntry();
+            if (this.mode === "geometry") return this.geometryEntry();
             switch (this.stage) {
                 case PROGRAM.VS: return this.vertexEntry();
                 case PROGRAM.PS: return this.fragmentEntry();
@@ -416,6 +457,205 @@
         }
 
         // ---------------------------------------------------------------
+        // Compute variants: a vertex shader that pulls its vertices, and a
+        // geometry shader (see the top of this file)
+
+        fetchDeclarations() {
+            const g = this.group, out = [];
+            out.push("struct GXFetch { count: u32, first: u32, base: i32, indexed: u32, instances: u32, first_instance: u32, " +
+                "index16: u32, index_offset: u32, vb: array<vec4<u32>, 16> }");
+            out.push(`@group(${g}) @binding(${BINDING.FETCH}) var<uniform> gx_fetch: GXFetch;`);
+            out.push(`@group(${g}) @binding(${BINDING.INDEX}) var<storage, read> gx_index: array<u32>;`);
+            out.push(`@group(${g}) @binding(${BINDING.STAGE_OUT}) var<storage, read_write> gx_out: array<vec4<u32>>;`);
+            this.bindings.push({ binding: BINDING.FETCH, type: "fetch" });
+            this.bindings.push({ binding: BINDING.INDEX, type: "index" });
+            this.bindings.push({ binding: BINDING.STAGE_OUT, type: "stage-out" });
+            const slots = [...new Set((this.o.fetch || []).map(f => f.slot))].sort((a, b) => a - b);
+            for (const slot of slots) {
+                out.push(`@group(${g}) @binding(${BINDING.VB + slot}) var<storage, read> vb${slot}: array<u32>;`);
+                this.bindings.push({ binding: BINDING.VB + slot, type: "vertex-buffer", slot });
+                // a word at any byte
+                out.push(`fn vbword${slot}(byte: u32) -> u32 { let w = byte >> 2u; let s = (byte & 3u) * 8u;\n` +
+                    `    if (s == 0u) { return vb${slot}[w]; }\n    return (vb${slot}[w] >> s) | (vb${slot}[w + 1u] << (32u - s)); }`);
+            }
+            out.push("fn gx_sext(value: u32, bits: u32) -> u32 { return u32(i32(value << (32u - bits)) >> (32u - bits)); }");
+            out.push("fn gx_unorm(value: u32, bits: u32) -> u32 { return bitcast<u32>(f32(value) / f32((1u << bits) - 1u)); }");
+            out.push("fn gx_snorm(value: u32, bits: u32) -> u32 { let v = i32(value << (32u - bits)) >> (32u - bits);\n" +
+                "    return bitcast<u32>(max(f32(v) / f32((1u << (bits - 1u)) - 1u), -1.0)); }");
+            out.push("fn gx_uf(value: u32, mantissa: u32) -> u32 { let e = value >> mantissa; let m = value & ((1u << mantissa) - 1u);\n" +
+                "    if (e == 0u) { return bitcast<u32>(f32(m) * exp2(-14.0 - f32(mantissa))); }\n" +
+                "    if (e == 31u) { return select(0x7F800000u, 0x7FC00000u, m != 0u); }\n" +
+                "    return bitcast<u32>((1.0 + f32(m) / f32(1u << mantissa)) * exp2(f32(e) - 15.0)); }");
+            out.push("");
+            return out;
+        }
+
+        /** An input element's value, from its bytes at `byte` in its slot, as vec4<u32> lanes */
+        fetchValue(format, slot) {
+            const word = at => `vbword${slot}(byte + ${at}u)`;
+            const ONE = "0x3F800000u";
+            const pad = (lanes, n, one) => { while (lanes.length < 4) lanes.push(lanes.length === 3 ? one : "0u"); return `vec4<u32>(${lanes.join(", ")})`; };
+            if (format === "unorm10-10-10-2") {
+                return `vec4<u32>(gx_unorm(${word(0)} & 0x3FFu, 10u), gx_unorm((${word(0)} >> 10u) & 0x3FFu, 10u), ` +
+                    `gx_unorm((${word(0)} >> 20u) & 0x3FFu, 10u), gx_unorm(${word(0)} >> 30u, 2u))`;
+            }
+            if (format === "pull:uint10-10-10-2") {
+                return `vec4<u32>(${word(0)} & 0x3FFu, (${word(0)} >> 10u) & 0x3FFu, (${word(0)} >> 20u) & 0x3FFu, ${word(0)} >> 30u)`;
+            }
+            if (format === "pull:ufloat11-11-10") {
+                return `vec4<u32>(gx_uf(${word(0)} & 0x7FFu, 6u), gx_uf((${word(0)} >> 11u) & 0x7FFu, 6u), gx_uf(${word(0)} >> 22u, 5u), ${ONE})`;
+            }
+            const m = /^(float|unorm|snorm|uint|sint)(8|16|32)(?:x(\d))?(-bgra)?$/.exec(format);
+            if (!m) {
+                this.warn("vertex format " + format + " is read as zeros");
+                return "vec4<u32>(0u, 0u, 0u, 0u)";
+            }
+            const kind = m[1], bits = +m[2], count = m[3] ? +m[3] : 1;
+            const integer = kind === "uint" || kind === "sint";
+            const one = integer ? "1u" : ONE;
+            const lanes = [];
+            for (let c = 0; c < count; c++) {
+                const bit = c * bits;
+                const raw = bits === 32 ? word(4 * c) : `((${word(bit >> 5 << 2)} >> ${bit & 31}u) & ${(2 ** bits - 1) >>> 0}u)`;
+                if (kind === "float") lanes.push(bits === 32 ? raw : `bitcast<u32>(unpack2x16float(${raw}).x)`);
+                else if (kind === "uint") lanes.push(raw);
+                else if (kind === "sint") lanes.push(bits === 32 ? raw : `gx_sext(${raw}, ${bits}u)`);
+                else if (kind === "unorm") lanes.push(`gx_unorm(${raw}, ${bits}u)`);
+                else lanes.push(`gx_snorm(${raw}, ${bits}u)`);
+            }
+            if (m[4]) [lanes[0], lanes[2]] = [lanes[2], lanes[0]];
+            return pad(lanes, count, one);
+        }
+
+        vertexComputeEntry() {
+            const p = this.p, loads = [];
+            const fetch = new Map((this.o.fetch || []).map(f => [f.reg, f]));
+            for (const input of p.inputs) {
+                if (input.type !== OPERAND.INPUT) continue;
+                const reg = inputRegister(input);
+                if (input.name === NAME.VERTEX_ID) {
+                    loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(vid)", input.mask)};`);
+                } else if (input.name === NAME.INSTANCE_ID) {
+                    loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(instance)", input.mask)};`);
+                } else if (fetch.has(reg)) {
+                    const f = fetch.get(reg);
+                    const record = f.instanced ? "gx_fetch.first_instance + instance / max(1u, gx_fetch.vb[" + f.slot + "].z)" : "vertex";
+                    loads.push(`{ let byte = gx_fetch.vb[${f.slot}].x + (${record}) * gx_fetch.vb[${f.slot}].y + ${f.offset}u;\n` +
+                        `        v[${reg}] = ${this.fetchValue(f.format, f.slot)}; }`);
+                    fetch.delete(reg);
+                }
+            }
+            const stores = [];
+            for (let i = 0; i < this.outputCount; i++) stores.push(`gx_out[at + ${i}u] = o[${i}];`);
+            return "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n" +
+                "    let total = gx_fetch.count * gx_fetch.instances;\n" +
+                "    let k = gid.x + gid.y * 65535u * 64u;\n" +
+                "    if (k >= total) { return; }\n" +
+                "    let instance = k / gx_fetch.count;\n" +
+                "    let n = k % gx_fetch.count;\n" +
+                "    var vertex = gx_fetch.first + n;\n" +
+                "    var vid = vertex;\n" +
+                "    if (gx_fetch.indexed != 0u) {\n" +
+                "        let byte = gx_fetch.index_offset + (gx_fetch.first + n) * select(4u, 2u, gx_fetch.index16 != 0u);\n" +
+                "        var index = gx_index[byte >> 2u];\n" +
+                "        if (gx_fetch.index16 != 0u) { index = (index >> ((byte & 2u) * 8u)) & 0xFFFFu; }\n" +
+                "        vid = index;\n" +
+                "        vertex = u32(i32(index) + gx_fetch.base);\n" +
+                "    }\n" +
+                loads.map(l => "    " + l).join("\n") + "\n" +
+                "    shader_main();\n" +
+                `    let at = k * ${this.outputCount}u;\n` +
+                stores.map(l => "    " + l).join("\n") + "\n}\n";
+        }
+
+        geometryDeclarations() {
+            const g = this.group, out = [];
+            out.push("struct GXGeo { prims: u32, instances: u32, count: u32, topology: u32, in_record: u32, pad0: u32, pad1: u32, pad2: u32 }");
+            out.push(`@group(${g}) @binding(${BINDING.GEO}) var<uniform> gx_geo: GXGeo;`);
+            out.push(`@group(${g}) @binding(${BINDING.STAGE_IN}) var<storage, read> gx_in: array<vec4<u32>>;`);
+            out.push(`@group(${g}) @binding(${BINDING.STAGE_OUT}) var<storage, read_write> gx_out: array<vec4<u32>>;`);
+            this.bindings.push({ binding: BINDING.GEO, type: "geo" });
+            this.bindings.push({ binding: BINDING.STAGE_IN, type: "stage-in" });
+            this.bindings.push({ binding: BINDING.STAGE_OUT, type: "stage-out" });
+            const OUT = this.outputCount, REC = OUT + 1, MAXP = this.gsMaxPrims;
+            out.push("var<private> prim_id: u32;");
+            out.push(`var<private> gs_s0: array<vec4<u32>, ${OUT}>;`);
+            out.push(`var<private> gs_s1: array<vec4<u32>, ${OUT}>;`);
+            out.push("var<private> gs_len: u32;");
+            out.push("var<private> gs_prims: u32;");
+            out.push("var<private> gs_base: u32;");
+            out.push(`fn gs_put(slot: u32, value: array<vec4<u32>, ${OUT}>) {\n` +
+                `    let at = slot * ${REC}u;\n` +
+                `    for (var i = 0u; i < ${OUT}u; i++) { gx_out[at + i] = value[i]; }\n` +
+                `    gx_out[at + ${OUT}u] = vec4<u32>(1u, 0u, 0u, 0u);\n}`);
+            // what the strip so far makes with this vertex: a triangle of the
+            // last three (winding kept), a line of the last two, a point
+            let make;
+            if (this.gsOutput === "triangle-list") {
+                make = "if (gs_len >= 2u) {\n" +
+                    "        let at = gs_base + gs_prims * 3u;\n" +
+                    "        if ((gs_len & 1u) == 0u) { gs_put(at, gs_s0); gs_put(at + 1u, gs_s1); }\n" +
+                    "        else { gs_put(at, gs_s1); gs_put(at + 1u, gs_s0); }\n" +
+                    "        gs_put(at + 2u, cur);\n        gs_prims += 1u;\n    }";
+            } else if (this.gsOutput === "line-list") {
+                make = "if (gs_len >= 1u) { let at = gs_base + gs_prims * 2u; gs_put(at, gs_s1); gs_put(at + 1u, cur); gs_prims += 1u; }";
+            } else {
+                make = "gs_put(gs_base + gs_prims, cur);\n    gs_prims += 1u;";
+            }
+            out.push("fn gs_emit() {\n    let cur = o;\n" +
+                `    if (gs_prims < ${MAXP}u) {\n    ${make}\n    }\n` +
+                "    gs_s0 = gs_s1;\n    gs_s1 = cur;\n    gs_len += 1u;\n}");
+            out.push("fn gs_cut() { gs_len = 0u; }");
+            // the vertex of an input primitive, by the draw's topology (GXGeo.topology:
+            // 1 point list, 2 line list, 3 line strip, 4 triangle list, 5 triangle strip,
+            // 10-13 their adjacency kinds)
+            out.push("fn gx_vertex(prim: u32, n: u32) -> u32 {\n" +
+                "    switch (gx_geo.topology) {\n" +
+                "        case 1u: { return prim; }\n" +
+                "        case 2u: { return prim * 2u + n; }\n" +
+                "        case 3u, 11u: { return prim + n; }\n" +
+                "        case 4u: { return prim * 3u + n; }\n" +
+                "        case 5u: { if ((prim & 1u) == 1u && n < 2u) { return prim + 1u - n; } return prim + n; }\n" +
+                "        case 10u: { return prim * 4u + n; }\n" +
+                "        case 12u: { return prim * 6u + n; }\n" +
+                "        case 13u: { return prim * 2u + n; }\n" +
+                `        default: { return prim * ${this.gsVertices}u + n; }\n` +
+                "    }\n}");
+            out.push("");
+            return out;
+        }
+
+        geometryEntry() {
+            const p = this.p, NV = this.gsVertices, OUT = this.outputCount, REC = OUT + 1;
+            const slots = this.gsMaxPrims * this.gsPerPrim;
+            const loads = [];
+            for (const input of p.inputs) {
+                if (input.type === OPERAND.INPUT_PRIMITIVEID) continue;
+                if (input.type !== OPERAND.INPUT) continue;
+                if (input.name === NAME.PRIMITIVE_ID) {
+                    const reg = inputRegister(input);
+                    for (let n = 0; n < NV; n++) loads.push(`v[${n}][${reg}] = vec4<u32>(prim);`);
+                }
+            }
+            return "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n" +
+                "    let total = gx_geo.prims * gx_geo.instances;\n" +
+                "    let k = gid.x + gid.y * 65535u * 64u;\n" +
+                "    if (k >= total) { return; }\n" +
+                "    let instance = k / gx_geo.prims;\n" +
+                "    let prim = k % gx_geo.prims;\n" +
+                `    for (var n = 0u; n < ${NV}u; n++) {\n` +
+                "        let at = (instance * gx_geo.count + gx_vertex(prim, n)) * gx_geo.in_record;\n" +
+                `        for (var reg = 0u; reg < min(${this.inputCount}u, gx_geo.in_record); reg++) { v[n][reg] = gx_in[at + reg]; }\n` +
+                "    }\n" +
+                loads.map(l => "    " + l).join("\n") + "\n" +
+                "    prim_id = prim;\n" +
+                `    gs_base = k * ${slots}u;\n` +
+                `    for (var i = 0u; i < ${slots}u; i++) { gx_out[(gs_base + i) * ${REC}u + ${OUT}u] = vec4<u32>(); }\n` +
+                "    gs_len = 0u;\n    gs_prims = 0u;\n" +
+                "    shader_main();\n}\n";
+        }
+
+        // ---------------------------------------------------------------
         // Operands
 
         /** An index (immediate, plus maybe a register's component) as a u32 expression */
@@ -431,7 +671,8 @@
             switch (op.type) {
                 case OPERAND.TEMP: return `r[${this.index(i[0])}]`;
                 case OPERAND.INPUT:
-                    // (GS inputs are [vertex][register]: GS is emulated elsewhere)
+                    // a geometry shader's are [vertex][register]
+                    if (this.mode === "geometry" && i.length > 1) return `v[${this.index(i[0])}][${this.index(i[1])}]`;
                     return `v[${this.index(i[i.length - 1])}]`;
                 case OPERAND.OUTPUT: return `o[${this.index(i[0])}]`;
                 case OPERAND.INDEXABLE_TEMP: return `x${i[0].imm}[${this.index(i[1])}]`;
@@ -875,8 +1116,22 @@
                 case OP.EMITTHENCUT:
                 case OP.EMIT_STREAM:
                 case OP.CUT_STREAM:
-                case OP.EMITTHENCUT_STREAM:
-                    throw new ShaderTranslateError("geometry shader instruction " + ins.name);
+                case OP.EMITTHENCUT_STREAM: {
+                    if (this.mode !== "geometry") throw new ShaderTranslateError("geometry shader instruction " + ins.name);
+                    const streamed = ins.op === OP.EMIT_STREAM || ins.op === OP.CUT_STREAM || ins.op === OP.EMITTHENCUT_STREAM;
+                    const operand = (ins.dst && ins.dst[0]) || (ins.src && ins.src[0]);
+                    const stream = streamed && operand ? operand.indices[0].imm : 0;
+                    if (stream !== 0) {
+                        // only stream 0 is rasterized; the others only feed stream output
+                        this.warn("geometry shader stream " + stream + " is not emulated");
+                        return;
+                    }
+                    const emit = ins.op === OP.EMIT || ins.op === OP.EMITTHENCUT || ins.op === OP.EMIT_STREAM || ins.op === OP.EMITTHENCUT_STREAM;
+                    const cut = ins.op === OP.CUT || ins.op === OP.EMITTHENCUT || ins.op === OP.CUT_STREAM || ins.op === OP.EMITTHENCUT_STREAM;
+                    if (emit) this.line("gs_emit();");
+                    if (cut) this.line("gs_cut();");
+                    return;
+                }
             }
             if (ins.op >= OP.ATOMIC_AND && ins.op <= OP.IMM_ATOMIC_UMIN) return this.atomic(ins);
             throw new ShaderTranslateError("instruction " + ins.name + " is not supported");

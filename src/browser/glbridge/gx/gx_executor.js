@@ -87,6 +87,14 @@
     // SVGA3dPrimitiveType -> WebGPU topology (adjacency drawn without it)
     const TOPOLOGY = [null, "triangle-list", "point-list", "line-list", "line-strip", "triangle-strip", null,
         "line-list", "line-strip", "triangle-list", "triangle-strip"];
+    // the input primitives of a geometry shader, by SVGA3dPrimitiveType: the
+    // topology code wgsl_emitter.js assembles them by, and how many a draw of
+    // n vertices has
+    const GS_ASSEMBLY = {
+        1: { code: 4, prims: n => Math.floor(n / 3) }, 2: { code: 1, prims: n => n }, 3: { code: 2, prims: n => n >> 1 },
+        4: { code: 3, prims: n => n - 1 }, 5: { code: 5, prims: n => n - 2 }, 7: { code: 10, prims: n => n >> 2 },
+        8: { code: 11, prims: n => n - 3 }, 9: { code: 12, prims: n => Math.floor(n / 6) }, 10: { code: 13, prims: n => (n - 4) >> 1 },
+    };
 
     const SRGB = {
         "rgba8unorm": "rgba8unorm-srgb", "rgba8unorm-srgb": "rgba8unorm", "bgra8unorm": "bgra8unorm-srgb",
@@ -669,7 +677,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     }
                 });
             }
-            entry = { module, result };
+            entry = { module, result, key };
             this.modules.set(key, entry);
             return entry;
         }
@@ -1060,18 +1068,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         // ------------------------------------------------------------------
         // Drawing
 
-        draw(c, call) {
+        /** The render and depth targets of a draw (null: none) */
+        attachments(c) {
             const st = c.state;
-            const vsStage = c.stages[SHADER_VS], psStage = c.stages[SHADER_PS];
-            const vs = c.shaders.get(vsStage.shader), ps = c.shaders.get(psStage.shader);
-            if (!vs || !vs.program) return this.warn("no-vs", "a draw without a vertex shader");
-            if (c.stages[SHADER_GS].shader !== INVALID && c.shaders.get(c.stages[SHADER_GS].shader)) {
-                this.warn("gs", "geometry shaders are not supported yet: drawn without");
-            }
-            const topology = TOPOLOGY[st.topology];
-            if (!topology) return this.warn("topology" + st.topology, "topology " + st.topology + " is not supported");
-
-            // render targets
             const colors = [];
             let width = 0, height = 0, samples = 1;
             const targets = {};
@@ -1095,11 +1094,18 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 const level = this.level(DS, dsView.mip);
                 if (!width) { width = level.width; height = level.height; samples = DS.samples > 1 ? 4 : 1; }
             }
-            if (!width) return;
+            if (!width) return null;
+            return { colors, targets, width, height, samples, DS, dsView, depthFormat };
+        }
 
-            // the input layout
+        /**
+         * The input layout: as WebGPU vertex buffers, and as the elements a
+         * vertex shader run as compute pulls itself (fetch)
+         */
+        inputLayout(c) {
+            const st = c.state;
             const layout = c.layouts.get(st.layout);
-            const vertexInputs = {}, buffers = [], slots = [];
+            const vertexInputs = {}, buffers = [], slots = [], fetch = [];
             if (layout) {
                 const bySlot = new Map();
                 const running = new Map();
@@ -1112,6 +1118,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     let offset = e.offset;
                     if (offset === INVALID) offset = running.get(e.slot) || 0;
                     running.set(e.slot, offset + vertexSize(f.vertex));
+                    fetch.push({ reg: e.register, slot: e.slot, offset, format: f.vertex, instanced: !!e.instanced });
                     if (!bySlot.has(e.slot)) bySlot.set(e.slot, { instanced: e.instanced, attributes: [] });
                     bySlot.get(e.slot).attributes.push({ format: f.vertex, offset, shaderLocation: e.register });
                     vertexInputs[e.register] = /sint/.test(f.vertex) ? "i32" : /uint/.test(f.vertex) ? "u32" : "f32";
@@ -1129,6 +1136,24 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     slots.push({ slot, vb });
                 }
             }
+            return { vertexInputs, buffers, slots, fetch, layout };
+        }
+
+        draw(c, call) {
+            const st = c.state;
+            const vsStage = c.stages[SHADER_VS], psStage = c.stages[SHADER_PS];
+            const vs = c.shaders.get(vsStage.shader), ps = c.shaders.get(psStage.shader);
+            if (!vs || !vs.program) return this.warn("no-vs", "a draw without a vertex shader");
+            const gs = c.stages[SHADER_GS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_GS].shader) : null;
+            const topology = TOPOLOGY[st.topology];
+            if (!topology) return this.warn("topology" + st.topology, "topology " + st.topology + " is not supported");
+            const a = this.attachments(c);
+            if (!a) return;
+            const input = this.inputLayout(c);
+            // a geometry shader: the vertex and geometry shaders run as compute
+            if (gs && gs.program) return this.drawGeometry(c, call, vs, gs, ps, a, input);
+            const { colors, targets, width, height, samples, DS, dsView, depthFormat } = a;
+            const { vertexInputs, buffers, slots } = input;
 
             // the pixel shader's interface decides the vertex shader's outputs
             const varyings = ps && ps.program ? WGSL.pixelVaryings(ps.program) : {};
@@ -1166,23 +1191,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 psModule ? this.bindGroup(c, SHADER_PS, psModule, pipeline.layouts[1], call, null) : this.emptyGroup];
             if (groups.includes(null)) return;
 
-            // the pass: the same attachments keep it open
-            const passKey = colors.map(t => t ? t.S.sid + ":" + t.S.generation + ":" + t.view.mip + ":" + t.view.first + ":" + t.format : "-").join(",") +
-                "|" + (DS && DS.texture ? DS.sid + ":" + DS.generation + ":" + dsView.mip + ":" + dsView.first : "-") +
-                "|" + [...this.activeOcclusion.keys()].length;
-            if (!this.pass || this.passKey !== passKey) {
-                this.endPass();
-                this.beginPass(colors, DS && DS.texture ? { S: DS, view: dsView } : null, passKey);
-            }
-            const pass = this.pass;
-            pass.setPipeline(pipeline.pipeline);
-            pass.setBindGroup(0, groups[0]);
-            pass.setBindGroup(1, groups[1]);
-            pass.setViewport(viewport.x, viewport.y, viewport.width, viewport.height, viewport.min, viewport.max);
-            const scissor = this.scissor(st, raster, width, height);
-            pass.setScissorRect(scissor[0], scissor[1], scissor[2], scissor[3]);
-            pass.setBlendConstant(st.blendFactor);
-            pass.setStencilReference(st.stencilRef & 0xFF);
+            const pass = this.renderPass(c, a, pipeline, groups, viewport, raster);
             slots.forEach(({ vb }, i) => {
                 const S = this.surfaces.get(vb.sid);
                 if (S && S.buffer && vb.offset < S.shadow.length) pass.setVertexBuffer(i, S.buffer, vb.offset & ~3);
@@ -1207,6 +1216,219 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             } else {
                 pass.draw(call.count, call.instances, call.first, call.firstInstance);
             }
+        }
+
+        /** The render pass of a draw's attachments (the same ones keep it open), its state set */
+        renderPass(c, a, pipeline, groups, viewport, raster) {
+            const st = c.state, { colors, DS, dsView, width, height } = a;
+            const passKey = colors.map(t => t ? t.S.sid + ":" + t.S.generation + ":" + t.view.mip + ":" + t.view.first + ":" + t.format : "-").join(",") +
+                "|" + (DS && DS.texture ? DS.sid + ":" + DS.generation + ":" + dsView.mip + ":" + dsView.first : "-") +
+                "|" + [...this.activeOcclusion.keys()].length;
+            if (!this.pass || this.passKey !== passKey) {
+                this.endPass();
+                this.beginPass(colors, DS && DS.texture ? { S: DS, view: dsView } : null, passKey);
+            }
+            const pass = this.pass;
+            pass.setPipeline(pipeline.pipeline);
+            pass.setBindGroup(0, groups[0]);
+            pass.setBindGroup(1, groups[1]);
+            pass.setViewport(viewport.x, viewport.y, viewport.width, viewport.height, viewport.min, viewport.max);
+            const scissor = this.scissor(st, raster, width, height);
+            pass.setScissorRect(scissor[0], scissor[1], scissor[2], scissor[3]);
+            pass.setBlendConstant(st.blendFactor);
+            pass.setStencilReference(st.stencilRef & 0xFF);
+            return pass;
+        }
+
+        // ------------------------------------------------------------------
+        // Geometry shaders: no WebGPU stage, so the vertex shader runs as
+        // compute and pulls its vertices, the geometry shader runs as compute
+        // on what it stored, and what that emitted is drawn by a vertex
+        // shader reading it (wgsl_emitter.js, "vertex-compute" and "geometry")
+
+        drawGeometry(c, call, vs, gs, ps, a, input) {
+            const st = c.state;
+            if (call.indirect) return this.warn("gs-indirect", "indirect draws with a geometry shader are not supported");
+            const count = call.count, instances = call.instances;
+            if (!count || !instances) return;
+            const assembly = GS_ASSEMBLY[st.topology];
+            if (!assembly) return this.warn("gs-topology" + st.topology, "topology " + st.topology + " with a geometry shader");
+            const prims = assembly.prims(count);
+            if (prims <= 0) return;
+            let vsModule, gsModule;
+            try {
+                vsModule = this.module(vs, { group: 0, mode: "vertex-compute", fetch: input.fetch });
+                gsModule = this.module(gs, { group: 0, mode: "geometry" });
+            } catch (error) {
+                return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
+            }
+            const g = gsModule.result.gs;
+            const vsRecord = Math.max(1, vsModule.result.record), gsRecord = gsModule.result.record;
+            const vertices = count * instances, invocations = prims * instances;
+            const slots = invocations * g.maxPrims * g.perPrim;
+            const vsOut = this.storageBuffer(vertices * vsRecord * 16);
+            const gsOut = this.storageBuffer(slots * gsRecord * 16);
+
+            // the vertex shader, pulling its vertices
+            const vsPipe = this.computePipeline(c, SHADER_VS, vsModule);
+            const gsPipe = this.computePipeline(c, SHADER_GS, gsModule);
+            if (!vsPipe || !gsPipe) return;
+            const ib = this.surfaces.get(st.ib.sid);
+            const vsGroup = this.bindGroup(c, SHADER_VS, vsModule, vsPipe.layout, call, null, {
+                "fetch": this.uniform(this.fetchParameters(st, call, input)),
+                "index": { buffer: call.indexed && ib && ib.buffer ? ib.buffer : this.dummyBuffer },
+                "vertex-buffer": slot => {
+                    const vb = st.vbs[slot];
+                    const S = vb && this.surfaces.get(vb.sid);
+                    return { buffer: S && S.buffer ? S.buffer : this.dummyBuffer };
+                },
+                "stage-out": { buffer: vsOut },
+            });
+            // ... and the geometry shader on its records
+            const geo = new Uint32Array([prims, instances, count, assembly.code, vsRecord, 0, 0, 0]);
+            const gsGroup = this.bindGroup(c, SHADER_GS, gsModule, gsPipe.layout, call, null, {
+                "geo": this.uniform(geo), "stage-in": { buffer: vsOut }, "stage-out": { buffer: gsOut },
+            });
+            if (!vsGroup || !gsGroup) return;
+            this.endPass();
+            const compute = this.encoder().beginComputePass();
+            compute.setPipeline(vsPipe.pipeline);
+            compute.setBindGroup(0, vsGroup);
+            this.dispatch(compute, vertices);
+            compute.setPipeline(gsPipe.pipeline);
+            compute.setBindGroup(0, gsGroup);
+            this.dispatch(compute, invocations);
+            compute.end();
+            this.stats.geometryDraws = (this.stats.geometryDraws || 0) + 1;
+
+            // what it emitted
+            this.drawRecords(c, a, ps, gs, gsModule, gsOut, g.topology, slots);
+        }
+
+        /** A draw of records a compute stage wrote: position and varyings as the pixel shader reads them */
+        drawRecords(c, a, ps, shader, module, buffer, topology, count) {
+            const st = c.state;
+            const varyings = ps && ps.program ? WGSL.pixelVaryings(ps.program) : {};
+            const record = module.result.record, outputs = module.result.gs ? record - 1 : record;
+            let position = -1;
+            for (const output of shader.program.outputs) if (output.name === IR.NAME.POSITION && output.type === IR.OPERAND.OUTPUT) position = output.index;
+            const passKey = "records:" + record + ":" + outputs + ":" + position + ":" + (module.result.gs ? 1 : 0) + ":" + JSON.stringify(varyings);
+            let pass = this.modules.get(passKey);
+            if (!pass) {
+                const fields = ["    @builtin(position) position: vec4<f32>,"], stores = [];
+                for (const reg of Object.keys(varyings).map(Number).sort((x, y) => x - y)) {
+                    const vary = varyings[reg];
+                    const type = vary.type === "u32" ? "u32" : "f32";
+                    const flat = type === "u32" || vary.interpolation === "flat" ? "@interpolate(flat) " :
+                        vary.interpolation === "linear" ? `@interpolate(linear${vary.sampling ? ", " + vary.sampling : ""}) ` :
+                        vary.sampling ? `@interpolate(perspective, ${vary.sampling}) ` : "";
+                    fields.push(`    ${flat}@location(${reg}) o${reg}: vec4<${type}>,`);
+                    const value = reg < outputs && reg !== position ? `gx_in[at + ${reg}u]` : "vec4<u32>()";
+                    stores.push(type === "u32" ? `out.o${reg} = ${value};` : `out.o${reg} = bitcast<vec4<f32>>(${value});`);
+                }
+                const code = "struct GXDraw { base_vertex: u32, base_instance: u32, pad0: u32, pad1: u32, viewport: vec4<f32> }\n" +
+                    "@group(0) @binding(15) var<uniform> gx_draw: GXDraw;\n" +
+                    "@group(0) @binding(232) var<storage, read> gx_in: array<vec4<u32>>;\n" +
+                    `struct Out {\n${fields.join("\n")}\n}\n` +
+                    "@vertex fn main(@builtin(vertex_index) vid: u32) -> Out {\n" +
+                    `    let at = vid * ${record}u;\n    var out: Out;\n` +
+                    // an unused slot (a geometry shader's flag lane): outside the clip volume
+                    (module.result.gs ? `    if (gx_in[at + ${outputs}u].x == 0u) { out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0); return out; }\n` : "") +
+                    (position >= 0 ? `    let p = bitcast<vec4<f32>>(gx_in[at + ${position}u]);\n` : "    let p = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n") +
+                    "    out.position = vec4<f32>(p.xy * gx_draw.viewport.xy + gx_draw.viewport.zw * p.w, p.zw);\n" +
+                    stores.map(x => "    " + x).join("\n") + "\n    return out;\n}\n";
+                pass = { module: this.device.createShaderModule({ code }),
+                    result: { bindings: [{ binding: 15, type: "draw" }, { binding: 232, type: "stage-in" }] } };
+                this.modules.set(passKey, pass);
+            }
+            const blend = c.blends.get(st.blend);
+            const dualSource = !!(blend && usesSource1(blend.words));
+            let psModule = null;
+            try {
+                if (ps && ps.program) psModule = this.module(ps, { group: 1, targets: a.targets, dualSource });
+            } catch (error) {
+                return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
+            }
+            const raster = c.rasters.get(st.raster);
+            const depth = c.depths.get(st.depth);
+            const plain = { indexed: false, count, instances: 1, first: 0, base: 0, firstInstance: 0 };
+            const key = [passKey, ps ? ps.id : 0, JSON.stringify({ targets: a.targets, dualSource }), topology,
+                a.colors.map(t => t ? t.format + (t.x ? "x" : "") : "-").join(","), a.depthFormat, a.samples,
+                blend ? blend.words.join(",") : "", raster ? raster.words.join(",") : "", depth ? depth.words.join(",") : "",
+                st.sampleMask, this.bindingKinds(c, null, psModule)].join("|");
+            let pipeline = this.pipelines.get(key);
+            if (!pipeline) {
+                pipeline = this.createPipeline(c, { vsModule: pass, psModule, buffers: [], topology, call: plain, colors: a.colors,
+                    depthFormat: a.depthFormat, samples: a.samples, blend, raster, depth, dualSource });
+                if (!pipeline) return;
+                this.pipelines.set(key, pipeline);
+                this.stats.pipelines++;
+            }
+            const viewport = this.viewport(st, a.width, a.height);
+            const groups = [this.bindGroup(c, SHADER_VS, pass, pipeline.layouts[0], plain, viewport.fix, { "stage-in": { buffer } }),
+                psModule ? this.bindGroup(c, SHADER_PS, psModule, pipeline.layouts[1], plain, null) : this.emptyGroup];
+            if (groups.includes(null)) return;
+            const renderPass = this.renderPass(c, a, pipeline, groups, viewport, raster);
+            this.stats.draws++;
+            renderPass.draw(count, 1, 0, 0);
+        }
+
+        /** GXFetch: the draw, and each vertex buffer's offset, stride and instance step rate */
+        fetchParameters(st, call, input) {
+            const words = new Uint32Array(8 + 64);
+            const ib = st.ib;
+            words[0] = call.count; words[1] = call.first; words[2] = (call.indexed ? call.base : 0) >>> 0;
+            words[3] = call.indexed ? 1 : 0; words[4] = call.instances; words[5] = call.firstInstance >>> 0;
+            words[6] = ib.format === SVGA3D_R16_UINT ? 1 : 0; words[7] = ib.offset >>> 0;
+            const rates = new Map();
+            if (input.layout) for (const e of input.layout.elements) if (e.instanced) rates.set(e.slot, Math.max(1, e.rate || 1));
+            for (let slot = 0; slot < 16; slot++) {
+                const vb = st.vbs[slot];
+                if (!vb) continue;
+                words[8 + 4 * slot] = vb.offset >>> 0;
+                words[9 + 4 * slot] = vb.stride >>> 0;
+                words[10 + 4 * slot] = rates.get(slot) || 1;
+            }
+            return words;
+        }
+
+        /** A uniform buffer with these words, for this encoder's work */
+        uniform(words) {
+            const buffer = this.device.createBuffer({ size: align(Math.max(16, words.byteLength), 16), usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST });
+            this.device.queue.writeBuffer(buffer, 0, words);
+            this.transient.push(buffer);
+            return { buffer };
+        }
+
+        /** A storage buffer for this encoder's work */
+        storageBuffer(size) {
+            const buffer = this.device.createBuffer({ size: align(Math.max(16, size), 16), usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC });
+            this.transient.push(buffer);
+            return buffer;
+        }
+
+        computePipeline(c, type, module) {
+            const key = "compute:" + type + ":" + module.key + ":" + this.bindingKinds(c, module, null, type);
+            let pipe = this.pipelines.get(key);
+            if (pipe) return pipe;
+            try {
+                const layout = this.bindGroupLayout(c, type, module, 4);
+                pipe = { pipeline: this.device.createComputePipeline({
+                    layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+                    compute: { module: module.module, entryPoint: "main" } }), layout };
+            } catch (error) {
+                this.warn("compute:" + error.message, "a compute pipeline failed: " + error.message);
+                return null;
+            }
+            this.pipelines.set(key, pipe);
+            return pipe;
+        }
+
+        /** Enough workgroups of 64 for n invocations (the y dimension past 65535) */
+        dispatch(compute, n) {
+            const groups = Math.ceil(n / 64);
+            const x = Math.min(groups, 65535), y = Math.ceil(groups / 65535);
+            compute.dispatchWorkgroups(x, y);
         }
 
         setIndexBuffer(pass, st) {
@@ -1268,9 +1490,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         }
 
         /** Part of the pipeline key: what the bound views are (depth, filterable) */
-        bindingKinds(c, vsModule, psModule) {
+        bindingKinds(c, vsModule, psModule, vsType) {
             const parts = [];
-            for (const [type, module] of [[SHADER_VS, vsModule], [SHADER_PS, psModule]]) {
+            for (const [type, module] of [[vsType === undefined ? SHADER_VS : vsType, vsModule], [SHADER_PS, psModule]]) {
                 if (!module) continue;
                 const stage = c.stages[type];
                 for (const b of module.result.bindings) {
@@ -1293,36 +1515,40 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             return "float";
         }
 
+        /** The bind group layout of a module's bindings, for a stage's state */
+        bindGroupLayout(c, type, module, visibility) {
+            const stage = c.stages[type];
+            const entries = [];
+            const unfilterable = new Set();
+            for (const b of module.result.bindings) {
+                if (b.type === "texture") {
+                    const srv = c.srvs.get(stage.srvs[b.slot]);
+                    const S = srv && this.surfaces.get(srv.sid);
+                    let sampleType = S && S.texture ? this.textureSampleType(S, srv, b) : (b.sampleType === "depth" ? "depth" : b.sampleType === "float" ? "unfilterable-float" : b.sampleType);
+                    if (sampleType === "unfilterable-float") unfilterable.add(b.slot);
+                    entries.push({ binding: b.binding, visibility, texture: { sampleType, viewDimension: b.dimension, multisampled: b.multisampled } });
+                } else if (b.type === "sampler" || b.type === "comparison") {
+                    entries.push({ binding: b.binding, visibility, sampler: { type: b.type === "comparison" ? "comparison" : "filtering" } });
+                } else if (b.type === "uniform" || b.type === "draw" || b.type === "fetch" || b.type === "geo") {
+                    entries.push({ binding: b.binding, visibility, buffer: { type: "uniform" } });
+                } else if (b.type === "read-storage" || b.type === "index" || b.type === "vertex-buffer" || b.type === "stage-in") {
+                    entries.push({ binding: b.binding, visibility, buffer: { type: "read-only-storage" } });
+                } else if (b.type === "storage" || b.type === "stage-out") {
+                    entries.push({ binding: b.binding, visibility, buffer: { type: "storage" } });
+                }
+            }
+            // samplers used with unfilterable textures must not filter
+            if (unfilterable.size) {
+                for (const e of entries) if (e.sampler && e.sampler.type === "filtering") e.sampler.type = "non-filtering";
+            }
+            return this.device.createBindGroupLayout({ entries });
+        }
+
         createPipeline(c, o) {
             const layouts = [];
             for (const [type, module] of [[SHADER_VS, o.vsModule], [SHADER_PS, o.psModule]]) {
                 if (!module) { layouts.push(this.emptyLayout); continue; }
-                const visibility = type === SHADER_VS ? 1 : 2;
-                const stage = c.stages[type];
-                const entries = [];
-                const unfilterable = new Set();
-                for (const b of module.result.bindings) {
-                    if (b.type === "texture") {
-                        const srv = c.srvs.get(stage.srvs[b.slot]);
-                        const S = srv && this.surfaces.get(srv.sid);
-                        let sampleType = S && S.texture ? this.textureSampleType(S, srv, b) : (b.sampleType === "depth" ? "depth" : b.sampleType === "float" ? "unfilterable-float" : b.sampleType);
-                        if (sampleType === "unfilterable-float") unfilterable.add(b.slot);
-                        entries.push({ binding: b.binding, visibility, texture: { sampleType, viewDimension: b.dimension, multisampled: b.multisampled } });
-                    } else if (b.type === "sampler" || b.type === "comparison") {
-                        entries.push({ binding: b.binding, visibility, sampler: { type: b.type === "comparison" ? "comparison" : "filtering" } });
-                    } else if (b.type === "uniform" || b.type === "draw") {
-                        entries.push({ binding: b.binding, visibility, buffer: { type: "uniform" } });
-                    } else if (b.type === "read-storage") {
-                        entries.push({ binding: b.binding, visibility, buffer: { type: "read-only-storage" } });
-                    } else if (b.type === "storage") {
-                        entries.push({ binding: b.binding, visibility, buffer: { type: "storage" } });
-                    }
-                }
-                // samplers used with unfilterable textures must not filter
-                if (unfilterable.size) {
-                    for (const e of entries) if (e.sampler && e.sampler.type === "filtering") e.sampler.type = "non-filtering";
-                }
-                layouts.push(this.device.createBindGroupLayout({ entries }));
+                layouts.push(this.bindGroupLayout(c, type, module, type === SHADER_VS ? 1 : 2));
             }
             const raster = o.raster ? o.raster.words : [3 | 3 << 8 | 0 << 16, 0, 0, 0, 1, 0, 0];
             const fill = raster[0] & 0xFF, cull = raster[0] >> 8 & 0xFF, ccw = raster[0] >> 16 & 0xFF;
@@ -1420,10 +1646,19 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             }
         }
 
-        bindGroup(c, type, module, layout, call, fix) {
+        /**
+         * @param extra the resources of the compute variants' bindings: by
+         *     binding type, and "vertex-buffer" a function of the slot
+         */
+        bindGroup(c, type, module, layout, call, fix, extra) {
             const stage = c.stages[type];
             const entries = [];
             for (const b of module.result.bindings) {
+                if (extra && extra[b.type]) {
+                    const resource = typeof extra[b.type] === "function" ? extra[b.type](b.slot) : extra[b.type];
+                    entries.push({ binding: b.binding, resource });
+                    continue;
+                }
                 switch (b.type) {
                     case "uniform": {
                         const cb = stage.cbs[b.slot];
