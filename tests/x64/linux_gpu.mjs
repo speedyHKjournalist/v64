@@ -143,6 +143,8 @@ const emulator = new V86({
 });
 
 let serial = "";
+// the guest drivers' logs through the VMware backdoor (vmwgfx's host log)
+emulator.add_listener("vmware-log", text => console.log("guest-log: " + String(text).trim()));
 emulator.add_listener("serial0-output-byte", byte => {
     const c = String.fromCharCode(byte);
     serial += c;

@@ -300,6 +300,18 @@ export function GraphicsAdapter(cpu, descriptor, options)
 }
 
 /**
+ * For the VMware backdoor: a VMware SVGA device's capabilities and 3D
+ * hardware version, or null for the other adapters
+ * @return {?{capabilities: number, hardware_version: number}}
+ */
+GraphicsAdapter.prototype.svga_capabilities = function()
+{
+    const get = this.device["svga_capabilities"];
+    const result = get ? get() : null;
+    return result ? { capabilities: result["capabilities"] >>> 0, hardware_version: result["hardware_version"] >>> 0 } : null;
+};
+
+/**
  * Whether the device keeps state outside of the machine (a GPU) that a
  * snapshot has to fetch first, with prepare_save
  * @return {boolean}

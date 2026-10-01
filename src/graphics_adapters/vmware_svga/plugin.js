@@ -4,6 +4,7 @@
 
 import { GraphicsMachine, register_graphics_adapter } from "../machine.js";
 import { SVGADevice } from "./svga_device.js";
+import { SVGA3D_HWVERSION_WS8_B1 as SVGA3D_HWVERSION } from "./svga_constants.js";
 
 register_graphics_adapter({
     "name": "vmware_svga",
@@ -28,6 +29,11 @@ register_graphics_adapter({
             "reset": () => device.reset(),
             // a snapshot of the 3D levels needs the GPU's contents first
             "has_host_state": () => !!device.svga3d,
+            // for the VMware backdoor (src/vmware.js, GET_SVGA_CAPABILITIES)
+            "svga_capabilities": () => ({
+                "capabilities": device.caps,
+                "hardware_version": device.svga3d ? SVGA3D_HWVERSION : 0,
+            }),
             "prepare_save": () => device.prepare_save(),
         };
     },

@@ -109,6 +109,14 @@ assert.equal(devcaps.get(C.SVGA3D_DEVCAP_VERTEX_SHADER_VERSION), C.SVGA3DVSVERSI
 assert.equal(devcaps.get(C.SVGA3D_DEVCAP_FRAGMENT_SHADER_VERSION), C.SVGA3DPSVERSION_30);
 assert.equal(devcaps.get(C.SVGA3D_DEVCAP_MAX_RENDER_TARGETS), 4);
 assert.ok(devcaps.get(C.SVGA3D_DEVCAP_SURFACEFMT_ARGB_S10E5) & C.SVGA3DFORMAT_OP_OFFSCREEN_RENDERTARGET);
+// what VMware's Windows driver asks the backdoor before it has the device
+// (it loads as a full WDDM driver only with 3D there)
+const backdoor = subcommand => {
+    cpu.reg32[0] = 0x564D5868; cpu.reg32[3] = 0; cpu.reg32[1] = subcommand << 16 | 75; cpu.reg32[2] = 0x5658;
+    return [io.port_read32(0x5658) >>> 0, cpu.reg32[3] >>> 0];
+};
+assert.deepEqual(backdoor(0), [reg(C.SVGA_REG_CAPABILITIES), 0x564D5868], "GET_SVGA_CAPABILITIES: the capabilities");
+assert.deepEqual(backdoor(2), [C.SVGA3D_HWVERSION_WS8_B1, 0x564D5868], "and the 3D hardware version");
 console.log("PASS: level vgpu9 declares 3D: hardware version, devcaps record (" + devcaps.size + " caps)");
 
 let next = MIN;

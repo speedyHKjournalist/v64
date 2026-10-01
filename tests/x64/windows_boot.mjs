@@ -182,6 +182,11 @@ const started = performance.now();
 const elapsed = () => Math.round((performance.now() - started) / 1000);
 let powered_off = null;
 vm.add_listener("acpi-power-off", state => { powered_off = state; });
+// the guest drivers' logs through the VMware backdoor (vm3d's release log)
+vm.add_listener("vmware-log", text => event("guest-log", {text: String(text).slice(0, 400)}));
+vm.add_listener("vmware-rpci", text => event("rpci", {text: String(text).slice(0, 200)}));
+const backdoor_seen = new Set();
+vm.add_listener("vmware-backdoor-unknown", command => { if(!backdoor_seen.has(command)) { backdoor_seen.add(command); event("backdoor-unknown", {command}); } });
 const report = {image: {path: image_path, size: source_stat.size, mtime_ms: source_stat.mtimeMs}, cores, jit,
     parallel: !!+process.env.WIN_PARALLEL, memory_mb, modes: [], events: [], results: {}};
 const event = (kind, detail = {}) => { const e = {s: elapsed(), kind, ...detail}; report.events.push(e); console.log("X64_WIN_EVENT " + JSON.stringify(e)); };

@@ -443,6 +443,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/graphics_adapter.js
 	./tests/devices/vmware_svga.js
 	./tests/devices/vmware_svga_3d.js
+	./tests/devices/vmware_backdoor.js
 	./tests/devices/mmio_ram.js
 	./tests/devices/virtio_9p.js
 	./tests/devices/virtio_console.js
