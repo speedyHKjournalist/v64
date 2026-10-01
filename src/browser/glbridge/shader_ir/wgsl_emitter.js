@@ -248,6 +248,13 @@
                 out.push("var<private> odepth: u32;");
                 out.push("var<private> omask: u32 = 0xFFFFFFFFu;");
                 out.push("var<private> prim_id: u32;");
+                // which sample of a supersampled target a fragment is
+                out.push("var<private> gx_sample: u32;");
+                // set by GX per pipeline: whether the target is multisampled
+                // (supersampled), the sample mask, alpha to coverage
+                out.push("override gx_ss: u32 = 0u;");
+                out.push("override gx_sample_mask: u32 = 0xFFFFFFFFu;");
+                out.push("override gx_a2c: u32 = 0u;");
             }
             if (this.stage === PROGRAM.CS) {
                 out.push("var<private> cs_thread: vec3<u32>;");
@@ -281,12 +288,12 @@
                 case DIM.TEXTURE1DARRAY:
                 case DIM.TEXTURE2DARRAY:
                     wgsl = depth ? "texture_depth_2d_array" : `texture_2d_array<${scalar}>`; dimension = "2d-array"; break;
+                // GX keeps multisampled surfaces supersampled: each sample a
+                // texel of a texture twice as wide and high (gx_ms_texel)
                 case DIM.TEXTURE2DMS:
-                    wgsl = depth ? "texture_depth_multisampled_2d" : `texture_multisampled_2d<${scalar}>`;
-                    dimension = "2d"; multisampled = true; break;
+                    wgsl = depth ? "texture_depth_2d" : `texture_2d<${scalar}>`; dimension = "2d"; break;
                 case DIM.TEXTURE2DMSARRAY:
-                    this.warn("multisampled 2D array textures are read as their first layer");
-                    wgsl = `texture_multisampled_2d<${scalar}>`; dimension = "2d"; multisampled = true; break;
+                    wgsl = depth ? "texture_depth_2d_array" : `texture_2d_array<${scalar}>`; dimension = "2d-array"; break;
                 case DIM.TEXTURE3D:
                     wgsl = `texture_3d<${scalar}>`; dimension = "3d"; break;
                 case DIM.TEXTURECUBE:
@@ -372,30 +379,39 @@
                 stores.map(s => "    " + s).join("\n") + "\n    return out;\n}\n";
         }
 
+        /**
+         * The pixel shader's entry point. Into a multisampled target (GX
+         * supersamples them, gx_ss 1) each fragment is a sample: its index
+         * comes from the position, the position is the pixel's again, and
+         * the sample mask, alpha to coverage and oMask discard the samples
+         * they leave out.
+         */
         fragmentEntry() {
             const p = this.p, o = this.o;
-            const fields = [], loads = [];
+            // (the position always: it says which sample a fragment is)
+            const fields = ["    @builtin(position) position: vec4<f32>,"], loads = [];
             const seen = new Set();
+            // per-sample shading sees the sample's position, else the pixel's center
+            const perSample = p.inputs.some(i => i.type === OPERAND.INPUT && (i.name === NAME.SAMPLE_INDEX ||
+                i.interpolation === INTERPOLATION.LINEAR_SAMPLE || i.interpolation === INTERPOLATION.LINEAR_NOPERSPECTIVE_SAMPLE));
             for (const input of p.inputs) {
                 const reg = inputRegister(input);
                 if (input.type === OPERAND.INPUT_PRIMITIVEID) continue;
-                if (input.type === OPERAND.INPUT_COVERAGE_MASK) {
-                    fields.push("    @builtin(sample_mask) coverage: u32,");
-                    continue;
-                }
+                if (input.type === OPERAND.INPUT_COVERAGE_MASK) continue;
                 if (input.type !== OPERAND.INPUT) continue;
                 switch (input.name) {
-                    case NAME.POSITION:
-                        fields.push("    @builtin(position) position: vec4<f32>,");
-                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "bitcast<vec4<u32>>(input.position)", input.mask)};`);
+                    case NAME.POSITION: {
+                        const pixel = perSample ? "input.position.xy * 0.5" : "floor(input.position.xy * 0.5) + 0.5";
+                        const position = `vec4<f32>(select(input.position.xy, ${pixel}, gx_ss != 0u), input.position.zw)`;
+                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, `bitcast<vec4<u32>>(${position})`, input.mask)};`);
                         continue;
+                    }
                     case NAME.IS_FRONT_FACE:
                         fields.push("    @builtin(front_facing) front: bool,");
                         loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(select(0u, 0xFFFFFFFFu, input.front))", input.mask)};`);
                         continue;
                     case NAME.SAMPLE_INDEX:
-                        fields.push("    @builtin(sample_index) sample: u32,");
-                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(input.sample)", input.mask)};`);
+                        loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(gx_sample)", input.mask)};`);
                         continue;
                     case NAME.PRIMITIVE_ID:
                         loads.push(`v[${reg}] = ${maskInto(`v[${reg}]`, "vec4<u32>(0u)", input.mask)};`);
@@ -436,17 +452,22 @@
                     outFields.push("    @builtin(frag_depth) depth: f32,");
                     stores.push("out.depth = bitcast<f32>(odepth);");
                 }
-                if (output.type === OPERAND.OUTPUT_COVERAGE_MASK) {
-                    outFields.push("    @builtin(sample_mask) mask: u32,");
-                    stores.push("out.mask = omask;");
-                }
             }
-            const struct_in = fields.length ? `struct PSIn {\n${fields.join("\n")}\n}\n` : "";
+            // the samples left out
+            const discards = [];
+            if (p.outputs.some(output => output.type === OPERAND.OUTPUT_COVERAGE_MASK)) discards.push("((omask >> gx_sample) & 1u) == 0u");
+            discards.push("((gx_sample_mask >> gx_sample) & 1u) == 0u");
+            if (targets[0] === "f32" && this.outputCount > 0) {
+                discards.push("gx_ss != 0u && gx_a2c != 0u && bitcast<f32>(o[0].w) < (f32(gx_sample) + 0.5) * 0.25");
+            }
+            const struct_in = `struct PSIn {\n${fields.join("\n")}\n}\n`;
             const struct_out = outFields.length ? `struct PSOut {\n${outFields.join("\n")}\n}\n` : "";
             return struct_in + struct_out +
-                `@fragment fn main(${fields.length ? "input: PSIn" : ""})${outFields.length ? " -> PSOut" : ""} {\n` +
+                `@fragment fn main(input: PSIn)${outFields.length ? " -> PSOut" : ""} {\n` +
+                "    gx_sample = select(0u, (u32(input.position.x) & 1u) | ((u32(input.position.y) & 1u) << 1u), gx_ss != 0u);\n" +
                 loads.map(l => "    " + l).join("\n") + "\n" +
                 "    shader_main();\n" +
+                `    if (${discards.map(d => "(" + d + ")").join(" || ")}) { discard; }\n` +
                 (outFields.length ? "    var out: PSOut;\n" + stores.map(s => "    " + s).join("\n") + "\n    return out;\n" : "") +
                 "}\n";
         }
@@ -505,6 +526,10 @@
             }
             if (format === "pull:uint10-10-10-2") {
                 return `vec4<u32>(${word(0)} & 0x3FFu, (${word(0)} >> 10u) & 0x3FFu, (${word(0)} >> 20u) & 0x3FFu, ${word(0)} >> 30u)`;
+            }
+            if (format === "pull:unorm8x4-bgrx") {
+                return `vec4<u32>(gx_unorm((${word(0)} >> 16u) & 0xFFu, 8u), gx_unorm((${word(0)} >> 8u) & 0xFFu, 8u), ` +
+                    `gx_unorm(${word(0)} & 0xFFu, 8u), ${ONE})`;
             }
             if (format === "pull:ufloat11-11-10") {
                 return `vec4<u32>(gx_uf(${word(0)} & 0x7FFu, 6u), gx_uf((${word(0)} >> 11u) & 0x7FFu, 6u), gx_uf(${word(0)} >> 22u, 5u), ${ONE})`;
@@ -697,7 +722,8 @@
                     this.needDepth = true;
                     return "odepth";
                 case OPERAND.OUTPUT_COVERAGE_MASK: return "omask";
-                case OPERAND.INPUT_COVERAGE_MASK: return "vec4<u32>(0xFFFFFFFFu)";
+                // (one sample per fragment)
+                case OPERAND.INPUT_COVERAGE_MASK: return "vec4<u32>(select(1u, 1u << gx_sample, gx_ss != 0u))";
                 case OPERAND.INPUT_THREAD_ID: return "vec4<u32>(cs_thread, 0u)";
                 case OPERAND.INPUT_THREAD_GROUP_ID: return "vec4<u32>(cs_group, 0u)";
                 case OPERAND.INPUT_THREAD_ID_IN_GROUP: return "vec4<u32>(cs_local, 0u)";
@@ -1313,8 +1339,12 @@
                 case DIM.TEXTURE3D:
                     call = `textureLoad(${t.name}, ${a}.xyz${o[0] || o[1] || o[2] ? ` + vec3<i32>(${o[0]}, ${o[1]}, ${o[2]})` : ""}, ${a}.w)`; break;
                 case DIM.TEXTURE2DMS:
-                case DIM.TEXTURE2DMSARRAY:
-                    call = `textureLoad(${t.name}, ${a}.xy${off2}, ${ms ? this.scalar(ins, 2, "i") : "0"})`; break;
+                case DIM.TEXTURE2DMSARRAY: {
+                    this.helpers.add("ms_texel");
+                    const texel = `(${a}.xy${off2}) * 2 + gx_ms_texel(u32(${ms ? this.scalar(ins, 2, "i") : "0"}))`;
+                    call = dimension === DIM.TEXTURE2DMS ? `textureLoad(${t.name}, ${texel}, 0)` : `textureLoad(${t.name}, ${texel}, ${a}.z, 0)`;
+                    break;
+                }
                 default:
                     throw new ShaderTranslateError("ld from a resource of dimension " + dimension);
             }
@@ -1337,17 +1367,19 @@
             const mip = `u32(${this.i(ins, 0)}.x)`;
             const type = ins.controls & 3;
             let dims;
-            const levels = dimension === DIM.TEXTURE2DMS || dimension === DIM.TEXTURE2DMSARRAY ? "1u" : `textureNumLevels(${t.name})`;
-            const level = dimension === DIM.TEXTURE2DMS || dimension === DIM.TEXTURE2DMSARRAY ? "" : `, ${mip}`;
+            const ms = dimension === DIM.TEXTURE2DMS || dimension === DIM.TEXTURE2DMSARRAY;
+            const levels = ms ? "1u" : `textureNumLevels(${t.name})`;
+            const level = ms ? "" : `, ${mip}`;
             switch (dimension) {
                 case DIM.TEXTURE1D: dims = `vec4<u32>(textureDimensions(${t.name}${level}).x, 0u, 0u, ${levels})`; break;
                 case DIM.TEXTURE1DARRAY: dims = `vec4<u32>(textureDimensions(${t.name}${level}).x, textureNumLayers(${t.name}), 0u, ${levels})`; break;
                 case DIM.TEXTURE2D:
-                case DIM.TEXTURE2DMS:
                 case DIM.TEXTURECUBE: dims = `vec4<u32>(textureDimensions(${t.name}${level}), 0u, ${levels})`; break;
+                // (supersampled: the texture is twice the surface)
+                case DIM.TEXTURE2DMS: dims = `vec4<u32>(textureDimensions(${t.name}) / 2u, 0u, 1u)`; break;
                 case DIM.TEXTURE2DARRAY:
                 case DIM.TEXTURECUBEARRAY: dims = `vec4<u32>(textureDimensions(${t.name}${level}), textureNumLayers(${t.name}), ${levels})`; break;
-                case DIM.TEXTURE2DMSARRAY: dims = `vec4<u32>(textureDimensions(${t.name}), 1u, 1u)`; break;
+                case DIM.TEXTURE2DMSARRAY: dims = `vec4<u32>(textureDimensions(${t.name}) / 2u, textureNumLayers(${t.name}), 1u)`; break;
                 case DIM.TEXTURE3D: dims = `vec4<u32>(textureDimensions(${t.name}${level}), ${levels})`; break;
                 default: throw new ShaderTranslateError("resinfo of dimension " + dimension);
             }
@@ -1369,7 +1401,7 @@
             }
             const t = this.resource(operand);
             const ms = t.r.dimension === DIM.TEXTURE2DMS || t.r.dimension === DIM.TEXTURE2DMSARRAY;
-            return ms ? `textureNumSamples(${t.name})` : "1u";
+            return ms ? "4u" : "1u";
         }
 
         /**
@@ -1560,13 +1592,17 @@ fn gx_bfi(w: vec4<u32>, o: vec4<u32>, insert: vec4<u32>, base: vec4<u32>) -> vec
 }`);
             }
             if (h.has("sample_pos")) {
-                // D3D's standard patterns (one sample at the center, four
-                // as WebGPU places them), in pixels from the center; an index
-                // past the samples is at 0
+                // where GX's samples are, in pixels from the center: one at
+                // the center, four on the supersampled 2x2 grid (gx_ms_texel);
+                // an index past the samples is at 0
                 out.push(`fn gx_sample_pos(i: u32, count: u32) -> vec4<f32> {
-    var p = array<vec2<f32>, 4>(vec2<f32>(-0.125, -0.375), vec2<f32>(0.375, -0.125), vec2<f32>(-0.375, 0.125), vec2<f32>(0.125, 0.375));
     if (count != 4u || i >= 4u) { return vec4<f32>(0.0); }
-    return vec4<f32>(p[i], 0.0, 0.0);
+    return vec4<f32>(f32(i & 1u) * 0.5 - 0.25, f32(i >> 1u) * 0.5 - 0.25, 0.0, 0.0);
+}`);
+            }
+            if (h.has("ms_texel")) {
+                out.push(`fn gx_ms_texel(sample: u32) -> vec2<i32> {
+    return vec2<i32>(i32(sample & 1u), i32((sample >> 1u) & 1u));
 }`);
             }
             if (h.has("cube_face")) {

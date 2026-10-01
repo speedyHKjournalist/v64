@@ -80,6 +80,24 @@ const SCENARIOS = {
             { screenshot: "weston-simple-shm", after: 6000 }],
         ["grep -i -E 'error|renderer|GL version|EGL' /tmp/weston.log | head -20; echo STEP_WESTON_LOG", /STEP_WESTON_LOG/],
     ],
+    // shader model 4.1 (vmware_svga's dx10.1): vmwgfx makes SM4_1 contexts,
+    // Mesa offers what that adds to GL 3.3 (Mesa's svga needs SM5 for GL 4),
+    // and multisamples: kmscube with 4x MSAA
+    sm41: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        [APK + " kmscube mesa-dri-gallium mesa-utils >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; tail -5 /tmp/apk.log", /STEP_APK_RC=0/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["dmesg | grep -i -E 'shader model|dx2|capabilities' | tail -8; echo STEP_DMESG_DONE", /shader model: SM4_1[\s\S]*STEP_DMESG_DONE/],
+        ["eglinfo -B -p gbm 2>&1 | grep -E 'OpenGL core profile (version|shading)' | head -4; echo STEP_EGLINFO_DONE",
+            /OpenGL core profile version: 3\.3/],
+        ["eglinfo -p gbm 2>&1 | grep -o -E 'GL_ARB_(texture_cube_map_array|texture_gather|draw_buffers_blend|sample_shading|texture_query_lod)' | sort -u; echo STEP_EXTENSIONS_DONE",
+            /GL_ARB_draw_buffers_blend[\s\S]*GL_ARB_sample_shading[\s\S]*GL_ARB_texture_cube_map_array[\s\S]*GL_ARB_texture_gather[\s\S]*GL_ARB_texture_query_lod/],
+        // (it starts slower than without MSAA)
+        ["kmscube -s 4 -c 400 2>&1 | grep -E 'Rendered|renderer|samples|failed'", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube-msaa", after: 5000 }],
+        ["kmscube -M rgba -c 200 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube-rgba", after: 2500 }],
+    ],
 };
 const steps = SCENARIOS[scenario];
 assert.ok(steps, "unknown GPU_SCENARIO " + scenario);

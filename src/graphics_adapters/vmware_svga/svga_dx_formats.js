@@ -8,7 +8,8 @@
 // vertex format or ""]. What it can do, as letters:
 //   s  sampled, filtered            u  sampled, not filtered (integers)
 //   r  color render target          b  blendable
-//   d  depth (stencil) target       m  4x multisample
+//   d  depth (stencil) target       m  4x multisample at level dx10
+//   (from dx10.1 on every target format multisamples: GX supersamples)
 //   x  its alpha is "X": reads as 1 (GX forces it when writing)
 //   e  emulated: stored as the WebGPU format, converted on the way in and out
 // A vertex format "pull:..." has no WebGPU vertex format; GX would read it
@@ -145,7 +146,7 @@ export const DX_FORMATS = {
     "SVGA3D_B8G8R8A8_UNORM": ["bgra8unorm", "srbm", "unorm8x4-bgra"],
     "SVGA3D_B8G8R8A8_UNORM_SRGB": ["bgra8unorm-srgb", "srbm", ""],
     "SVGA3D_B8G8R8X8_TYPELESS": ["bgra8unorm", "srbmx", ""],
-    "SVGA3D_B8G8R8X8_UNORM": ["bgra8unorm", "srbmx", ""],
+    "SVGA3D_B8G8R8X8_UNORM": ["bgra8unorm", "srbmx", "pull:unorm8x4-bgrx"],
     "SVGA3D_B8G8R8X8_UNORM_SRGB": ["bgra8unorm-srgb", "srbmx", ""],
     "SVGA3D_B5G6R5_UNORM": ["rgba8unorm", "srbme", ""],
     "SVGA3D_B5G5R5A1_UNORM": ["rgba8unorm", "srbme", ""],
@@ -153,4 +154,15 @@ export const DX_FORMATS = {
     "SVGA3D_Z_DF16": ["depth16unorm", "dum", ""],
     "SVGA3D_Z_DF24": ["depth24plus", "dum", ""],
     "SVGA3D_Z_D24S8_INT": ["depth24plus-stencil8", "dum", ""],
+    // (made and copied only)
+    "SVGA3D_R10G10B10_XR_BIAS_A2_UNORM": ["rgb10a2unorm", "", ""],
+};
+
+/**
+ * What the table gained after level dx10 declared it: dx10 goes on not
+ * offering it (its devcaps are fixed, see svga_device.js)
+ */
+export const AFTER_DX10 = {
+    formats: new Set(["SVGA3D_R10G10B10_XR_BIAS_A2_UNORM"]),
+    vertex: new Set(["SVGA3D_B8G8R8X8_UNORM"]),
 };

@@ -304,7 +304,7 @@
             const f = this.formatOf(format);
             const s = { sid, format, f, flags, width: Math.max(1, width), height: Math.max(1, height),
                 depth: Math.max(1, depth), mips: Math.max(1, mips), layers: Math.max(1, layers), samples,
-                cube: !!cube, buffer: null, texture: null, shadow: null, generation: 0, views: new Map() };
+                cube: !!cube, buffer: null, texture: null, shadow: null, generation: 0, views: new Map(), ss: 1 };
             this.surfaces.set(sid, s);
             if (format === SVGA3D_BUFFER) {
                 const size = align(Math.max(4, s.width * s.height * s.depth), 4);
@@ -321,18 +321,21 @@
             const volume = s.depth > 1 || !!(flags & SURFACE_VOLUME);
             const compressed = f.gpu.startsWith("bc");
             const target = (f.can.includes("r") || f.can.includes("d")) && !compressed && !volume;
-            const multisampled = samples > 1;
+            // A multisampled surface (4x, the one count the device offers)
+            // is supersampled: a texture twice as wide and high, each sample
+            // a texel of a 2x2 block, drawn at that size. Every format can
+            // be, unlike WebGPU's multisampling, and nothing mixes sample
+            // counts in a pass. (s.ss: the scale)
+            const multisampled = samples > 1 && !volume;
+            s.ss = multisampled ? 2 : 1;
             const descriptor = {
-                size: [s.width, s.height, volume ? s.depth : s.layers],
+                size: [s.width * s.ss, s.height * s.ss, volume ? s.depth : s.layers],
                 dimension: volume ? "3d" : "2d",
                 format: f.gpu,
                 mipLevelCount: multisampled ? 1 : Math.min(s.mips, mipCount(s.width, s.height, volume ? s.depth : 1)),
-                sampleCount: multisampled ? 4 : 1,
                 usage: TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.COPY_DST |
                     (target ? TEXTURE_USAGE.RENDER_ATTACHMENT : 0),
             };
-            // (multisampled textures are drawn into, sampled and resolved; not copied)
-            if (multisampled) descriptor.usage = TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.RENDER_ATTACHMENT;
             if (SRGB[f.gpu]) descriptor.viewFormats = [SRGB[f.gpu]];
             s.volume = volume;
             s.texture = this.device.createTexture(descriptor);
@@ -613,15 +616,18 @@ struct Box { x: u32, y: u32, w: u32, pad: u32 }
             h = Math.min(h, sl.height - sy, dl.height - dy);
             d = Math.max(1, Math.min(d, S.volume ? sl.depth - sz : 1, D.volume ? dl.depth - dz : 1));
             if (w <= 0 || h <= 0) return;
-            if (!sameFamily || S.samples !== D.samples) {
+            if (!sameFamily || S.ss !== D.ss) {
                 // a different format: drawn, not copied
+                if (S.ss !== 1 || D.ss !== 1) return this.warn("copy-ms", "a copy between multisampled surfaces of different formats");
                 return this.blit(S, sLayer, sMip, [sx, sy, sx + w, sy + h], D, dLayer, dMip, [dx, dy, dx + w, dy + h], false);
             }
+            // (multisampled: every sample of the box)
+            const k = S.ss;
             this.endPass();
             this.encoder().copyTextureToTexture(
-                { texture: S.texture, mipLevel: sMip, origin: [sx, sy, S.volume ? sz : sLayer] },
-                { texture: D.texture, mipLevel: dMip, origin: [dx, dy, D.volume ? dz : dLayer] },
-                [align(w, S.f.bw), align(h, S.f.bh), d]);
+                { texture: S.texture, mipLevel: sMip, origin: [sx * k, sy * k, S.volume ? sz : sLayer] },
+                { texture: D.texture, mipLevel: dMip, origin: [dx * k, dy * k, D.volume ? dz : dLayer] },
+                [align(w, S.f.bw) * k, align(h, S.f.bh) * k, d]);
         }
 
         /**
@@ -1060,15 +1066,49 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             this.upload(words);
         }
 
+        /** A multisampled (supersampled) surface into one that is not: each pixel the mean of its samples */
         resolve(dst, dstSub, src, srcSub) {
             const D = this.surfaces.get(dst), S = this.surfaces.get(src);
-            if (!D || !S || !D.texture || !S.texture || S.samples <= 1) return;
+            if (!D || !S || !D.texture || !S.texture || S.ss <= 1 || D.ss !== 1) return;
             const [dMip, dLayer] = subresource(D, dstSub);
+            const sLayer = Math.min(srcSub, S.layers - 1);
+            const format = D.f.gpu, kind = sampleKind(S.f.gpu);
+            if (isDepthFormat(format) || isDepthFormat(S.f.gpu)) return this.warn("resolve-depth", "depth surfaces are not resolved");
+            const key = "resolve:" + format + ":" + kind;
+            let pipeline = this.blitPipelines.get(key);
+            if (!pipeline) {
+                const type = kind === "sint" ? "i32" : kind === "uint" ? "u32" : "f32";
+                const outType = sampleKind(format) === "sint" ? "i32" : sampleKind(format) === "uint" ? "u32" : "f32";
+                // (integers are not resolved in D3D: sample 0)
+                const value = type === "f32" ? "(textureLoad(t, at, 0) + textureLoad(t, at + vec2<i32>(1, 0), 0) + " +
+                    "textureLoad(t, at + vec2<i32>(0, 1), 0) + textureLoad(t, at + vec2<i32>(1, 1), 0)) * 0.25" : "textureLoad(t, at, 0)";
+                const code = `
+@group(0) @binding(0) var t: texture_2d<${type}>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(f32(i & 1u) * 2.0 - 1.0, 1.0 - f32(i >> 1u) * 2.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<${outType}> {
+    let at = vec2<i32>(p.xy) * 2;
+    return vec4<${outType}>(${value});
+}`;
+                const module = this.device.createShaderModule({ code });
+                pipeline = this.device.createRenderPipeline({ layout: "auto",
+                    vertex: { module, entryPoint: "vs" },
+                    fragment: { module, entryPoint: "fs", targets: [{ format }] },
+                    primitive: { topology: "triangle-strip" } });
+                this.blitPipelines.set(key, pipeline);
+            }
+            const view = S.texture.createView({ dimension: "2d", baseArrayLayer: sLayer, arrayLayerCount: 1 });
+            const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: view }] });
+            const level = this.level(D, dMip);
             this.endPass();
             const pass = this.encoder().beginRenderPass({ colorAttachments: [{
-                view: S.texture.createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1 }),
-                resolveTarget: D.texture.createView({ dimension: "2d", baseMipLevel: dMip, mipLevelCount: 1, baseArrayLayer: dLayer, arrayLayerCount: 1 }),
+                view: D.texture.createView({ dimension: "2d", baseMipLevel: dMip, mipLevelCount: 1, baseArrayLayer: dLayer, arrayLayerCount: 1 }),
                 loadOp: "load", storeOp: "store" }] });
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, group);
+            pass.setScissorRect(0, 0, Math.min(level.width, S.width), Math.min(level.height, S.height));
+            pass.draw(4);
             pass.end();
         }
 
@@ -1205,7 +1245,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 const f = this.formatOf(view.format) || S.f;
                 const format = f.gpu || S.f.gpu;
                 const level = this.level(S, view.mip);
-                width = level.width; height = level.height; samples = S.samples > 1 ? 4 : 1;
+                width = level.width * S.ss; height = level.height * S.ss; samples = S.ss > 1 ? 4 : 1;
                 colors.push({ S, view, format, x: f.can.includes("x") });
                 const kind = sampleKind(format);
                 targets[i] = kind === "sint" ? "i32" : kind === "uint" ? "u32" : "f32";
@@ -1216,10 +1256,11 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             if (DS && DS.texture) {
                 depthFormat = DS.f.gpu;
                 const level = this.level(DS, dsView.mip);
-                if (!width) { width = level.width; height = level.height; samples = DS.samples > 1 ? 4 : 1; }
+                if (!width) { width = level.width * DS.ss; height = level.height * DS.ss; samples = DS.ss > 1 ? 4 : 1; }
             }
             if (!width) return null;
-            return { colors, targets, width, height, samples, DS, dsView, depthFormat };
+            // (width, height: the textures'; ss: their scale, of supersampled multisampling)
+            return { colors, targets, width, height, samples, ss: samples > 1 ? 2 : 1, DS, dsView, depthFormat };
         }
 
         /**
@@ -1320,7 +1361,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             }
 
             // the bind groups: the vertex shader's and the pixel shader's
-            const viewport = this.viewport(st, width, height);
+            const viewport = this.viewport(st, width, height, a.ss);
             const groups = [this.bindGroup(c, SHADER_VS, vsModule, pipeline.layouts[0], call, viewport.fix),
                 psModule ? this.bindGroup(c, SHADER_PS, psModule, pipeline.layouts[1], call, null) : this.emptyGroup];
             if (groups.includes(null)) return;
@@ -1368,7 +1409,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             pass.setBindGroup(0, groups[0]);
             pass.setBindGroup(1, groups[1]);
             pass.setViewport(viewport.x, viewport.y, viewport.width, viewport.height, viewport.min, viewport.max);
-            const scissor = this.scissor(st, raster, width, height);
+            const scissor = this.scissor(st, raster, width, height, a.ss);
             pass.setScissorRect(scissor[0], scissor[1], scissor[2], scissor[3]);
             pass.setBlendConstant(st.blendFactor);
             pass.setStencilReference(st.stencilRef & 0xFF);
@@ -1694,7 +1735,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 this.pipelines.set(key, pipeline);
                 this.stats.pipelines++;
             }
-            const viewport = this.viewport(st, a.width, a.height);
+            const viewport = this.viewport(st, a.width, a.height, a.ss);
             const groups = [this.bindGroup(c, SHADER_VS, pass, pipeline.layouts[0], plain, viewport.fix, { "stage-in": { buffer } }),
                 psModule ? this.bindGroup(c, SHADER_PS, psModule, pipeline.layouts[1], plain, null) : this.emptyGroup];
             if (groups.includes(null)) return;
@@ -1833,9 +1874,10 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         }
 
         /** The viewport WebGPU takes, and how the position moves to make up for it */
-        viewport(st, width, height) {
-            const v = st.viewports[0] || [0, 0, width, height, 0, 1];
+        viewport(st, width, height, ss = 1) {
+            const v = st.viewports[0] || [0, 0, width / ss, height / ss, 0, 1];
             let [x, y, w, h, min, max] = v;
+            x *= ss; y *= ss; w *= ss; h *= ss;
             min = Math.min(1, Math.max(0, min)); max = Math.min(1, Math.max(min, max));
             if (w <= 0 || h <= 0) return { x: 0, y: 0, width: 1, height: 1, min, max, fix: [1, 1, 0, 0] };
             const cx = Math.max(0, x), cy = Math.max(0, y);
@@ -1847,11 +1889,11 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             return { x: cx, y: cy, width: cw, height: ch, min, max, fix: [sx, sy, ox, oy] };
         }
 
-        scissor(st, raster, width, height) {
+        scissor(st, raster, width, height, ss = 1) {
             // (rasterizer dword 4: depthClipEnable, scissorEnable, ...)
             const enabled = raster && (raster.words[4] >> 8 & 0xFF);
             if (!enabled || !st.scissors.length) return [0, 0, width, height];
-            const [l, t, r, b] = st.scissors[0];
+            const [l, t, r, b] = st.scissors[0].map(v => v * ss);
             const x = Math.min(width, Math.max(0, l)), y = Math.min(height, Math.max(0, t));
             return [x, y, Math.max(0, Math.min(width, r) - x), Math.max(0, Math.min(height, b) - y)];
         }
@@ -1875,6 +1917,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         textureSampleType(S, srv, binding) {
             if (binding.sampleType === "depth") return "depth";
             if (binding.sampleType !== "float") return binding.sampleType;
+            // (WebGPU filters no multisampled texture)
+            if (binding.multisampled) return "unfilterable-float";
             const f = this.formatOf(srv.format) || S.f;
             const format = f.gpu || S.f.gpu;
             if (isDepthFormat(format)) return "unfilterable-float";
@@ -1933,7 +1977,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 layout: this.device.createPipelineLayout({ bindGroupLayouts: layouts }),
                 vertex: { module: o.vsModule.module, entryPoint: "main", buffers: o.buffers },
                 primitive,
-                multisample: { count: o.samples },
+                // (multisampled targets are supersampled: one sample per fragment)
+                multisample: { count: 1 },
             };
             // sample_info and sample_pos of the rasterizer read the pipeline's samples
             if (o.vsModule.result && o.vsModule.result.usesSamples) descriptor.vertex.constants = { gx_samples: o.samples };
@@ -1973,9 +2018,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 }
                 descriptor.depthStencil = ds;
             }
-            const sampleMask = c.state.sampleMask >>> 0;
-            if (o.samples > 1 && sampleMask !== 0xFFFFFFFF) descriptor.multisample.mask = sampleMask;
-            if (o.blend && (o.blend.words[0] & 0xFF)) descriptor.multisample.alphaToCoverageEnabled = o.samples > 1;
+            // the sample mask and alpha to coverage, by the pixel shader (wgsl_emitter.js)
+            const psConstants = { gx_ss: o.samples > 1 ? 1 : 0, gx_sample_mask: c.state.sampleMask >>> 0,
+                gx_a2c: o.blend && (o.blend.words[0] & 0xFF) ? 1 : 0 };
             if (o.psModule) {
                 const targets = o.colors.map((t, i) => {
                     if (!t) return null;
@@ -2005,8 +2050,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     if (t.x) target.writeMask = (target.writeMask === undefined ? 0xF : target.writeMask) & 0x7;
                     return target;
                 });
-                descriptor.fragment = { module: o.psModule.module, entryPoint: "main", targets };
-                if (o.psModule.result.usesSamples) descriptor.fragment.constants = { gx_samples: o.samples };
+                descriptor.fragment = { module: o.psModule.module, entryPoint: "main", targets, constants: psConstants };
+                if (o.psModule.result.usesSamples) psConstants.gx_samples = o.samples;
             }
             try {
                 return { pipeline: this.device.createRenderPipeline(descriptor), layouts };

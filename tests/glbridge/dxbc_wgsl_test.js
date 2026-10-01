@@ -245,8 +245,9 @@ const SM41 = (() => {
         dcl_sampler(0),
         dcl_resource(0, DIM.TEXTURECUBEARRAY), dcl_resource(1, DIM.TEXTURE2D), dcl_resource(2, DIM.TEXTURE2DMS),
         dcl_input_ps(1, XYZW, INTERPOLATION.LINEAR_SAMPLE),
+        dcl_input_ps_siv(0, XYZW, INTERPOLATION.LINEAR_NOPERSPECTIVE, NAME.POSITION),
         dcl_output(0, XYZW),
-        dcl_temps(4),
+        dcl_temps(5),
         ins(OP.SAMPLE, r(0, { mask: XYZW }), v(1, XYZW_S), t(0), s(0)),
         ins(OP.GATHER4, r(1, { mask: XYZW }), v(1, XYZW_S), t(0), operand(OPERAND.SAMPLER, [0], { select: 0 })),
         ins(OP.LOD, r(2, { mask: XY }), v(1, XYZW_S), t(0), s(0)),
@@ -254,6 +255,10 @@ const SM41 = (() => {
         ins(OP.SAMPLE_INFO, { controls: 1 }, r(3, { mask: X }), rasterizer(SW(0, 0, 0, 0))),
         ins(OP.SAMPLE_INFO, r(3, { mask: Y }), t(2, SW(0, 0, 0, 0))),
         ins(OP.SAMPLE_POS, r(3, { mask: Z | W_ }), rasterizer(SW(0, 0, 0, 1)), imm(1)),
+        // sample 2 of the multisampled texture, at the pixel
+        ins(OP.FTOI, r(4, { mask: XY }), v(0, XYZW_S)),
+        ins(OP.LD_MS, r(4, { mask: XYZW }), r(4, XYZW_S), t(2), imm(2)),
+        ins(OP.ADD, r(3, { mask: XYZW }), r(3, XYZW_S), r(4, XYZW_S)),
         ins(OP.ADD, r(0, { mask: XYZW }), r(0, XYZW_S), r(1, XYZW_S)),
         ins(OP.ADD, r(0, { mask: XYZW }), r(0, XYZW_S), r(2, XYZW_S)),
         ins(OP.ADD, o(0, { mask: XYZW }), r(0, XYZW_S), r(3, XYZW_S)),
@@ -265,12 +270,18 @@ const SM41 = (() => {
     const { p, result } = translate("sm41", SM41, { targets: { 0: "f32" } });
     assert.equal(p.minor, 1);
     assert.match(result.code, /texture_cube_array<f32>/);
-    assert.match(result.code, /texture_multisampled_2d<f32>/);
+    // multisampled surfaces are supersampled: plain textures, a sample a texel
+    assert.match(result.code, /var t2: texture_2d<f32>/);
+    assert.match(result.code, /textureLoad\(t2, .*\.xy\) \* 2 \+ gx_ms_texel\(/);
+    assert.match(result.code, /override gx_ss: u32 = 0u;/);
+    assert.match(result.code, /gx_sample = select\(0u, \(u32\(input\.position\.x\) & 1u\)/);
+    assert.match(result.code, /input\.position\.xy \* 0\.5/, "per-sample shading sees the sample's position");
+    assert.match(result.code, /\{ discard; \}/);
     assert.match(result.code, /override gx_samples: u32 = 1u;/);
     assert.ok(result.usesSamples, "the rasterizer's samples are the pipeline's");
     assert.match(result.code, /fn gx_lod\(/);
     assert.match(result.code, /gx_cube_face\(/);
-    assert.match(result.code, /textureNumSamples\(t2\)/);
+    assert.match(result.code, /vec4<f32>\(f32\(4u\)/, "sample_info of the texture: 4");
     assert.match(result.code, /@interpolate\(perspective, sample\)/);
     assert.ok(!result.warnings.some(w => /lod/.test(w)), "lod is computed, not approximated");
     const cube = result.bindings.find(b => b.type === "texture" && b.dimension === "cube-array");

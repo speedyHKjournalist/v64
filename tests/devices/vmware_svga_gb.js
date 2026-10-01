@@ -311,12 +311,25 @@ assert.equal(LEVELS["dx10.1"].cap2, LEVELS["dx10"].cap2 | C.SVGA_CAP2_DX2, "Linu
 assert.ok(!(LEVELS["dx10"].cap2 & C.SVGA_CAP2_DX2));
 const dx10_devcaps = new Map(DX10_DEVCAPS), dx10_1_devcaps = new Map(DX10_1_DEVCAPS);
 // (a devcap dx10 does not list reads as 0)
-const changed = [...dx10_1_devcaps].filter(([index, value]) => (dx10_devcaps.get(index) || 0) !== value).map(([index]) => index);
 assert.ok([...dx10_devcaps.keys()].every(index => dx10_1_devcaps.has(index)));
-assert.deepEqual(changed.sort((a, b) => a - b),
-    [C.SVGA3D_DEVCAP_DXFMT_YUY2, C.SVGA3D_DEVCAP_DXFMT_NV12, C.SVGA3D_DEVCAP_SM41]);
+for(const [index, value] of dx10_1_devcaps)
+{
+    const old = dx10_devcaps.get(index) || 0;
+    assert.equal((value & old) >>> 0, old >>> 0, "dx10.1 only adds to devcap " + index);
+}
 assert.equal(dx10_devcaps.get(C.SVGA3D_DEVCAP_SM41), 0);
 assert.equal(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_SM41), 1);
-console.log("PASS: level dx10.1: dx10 with SVGA_CAP2_DX2, SM41, NV12 and YUY2");
+assert.equal(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_NV12), C.SVGA3D_DXFMT_SUPPORTED);
+// 4x multisampling of every target format (GX supersamples), where dx10 had WebGPU's formats only
+assert.ok(!(dx10_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_R32G32B32A32_FLOAT) & C.SVGA3D_DXFMT_MULTISAMPLE));
+assert.ok(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_R32G32B32A32_FLOAT) & C.SVGA3D_DXFMT_MULTISAMPLE);
+assert.ok(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_R16G16_UNORM) & C.SVGA3D_DXFMT_MULTISAMPLE);
+assert.ok(!(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_BC1_UNORM) & C.SVGA3D_DXFMT_MULTISAMPLE));
+// B8G8R8X8 vertices and XR_BIAS surfaces from dx10.1 on
+assert.ok(!(dx10_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_B8G8R8X8_UNORM) & C.SVGA3D_DXFMT_DX_VERTEX_BUFFER));
+assert.ok(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_B8G8R8X8_UNORM) & C.SVGA3D_DXFMT_DX_VERTEX_BUFFER);
+assert.ok(!dx10_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_R10G10B10_XR_BIAS_A2_UNORM));
+assert.ok(dx10_1_devcaps.get(C.SVGA3D_DEVCAP_DXFMT_R10G10B10_XR_BIAS_A2_UNORM) & C.SVGA3D_DXFMT_SUPPORTED);
+console.log("PASS: level dx10.1: dx10 and SVGA_CAP2_DX2, SM41, 4x multisampling of every target format, NV12/YUY2");
 
 await vm.destroy();

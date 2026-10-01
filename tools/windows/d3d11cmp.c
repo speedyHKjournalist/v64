@@ -671,6 +671,20 @@ static int open_device(Device *d, D3D_DRIVER_TYPE type, const char *name, D3D_FE
     desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     ID3D11Device_CreateTexture2D(d->device, &desc, NULL, &d->staging);
     say("%s: feature level 0x%x", name, got);
+    /* what the driver says it has, for when a feature level or MSAA is missing */
+    {
+        static const struct { DXGI_FORMAT format; const char *name; } formats[] = {
+            { DXGI_FORMAT_NV12, "NV12" }, { DXGI_FORMAT_YUY2, "YUY2" }, { DXGI_FORMAT_R8G8B8A8_UNORM, "R8G8B8A8_UNORM" },
+            { DXGI_FORMAT_D24_UNORM_S8_UINT, "D24_UNORM_S8_UINT" },
+        };
+        unsigned k;
+        for (k = 0; k < sizeof formats / sizeof formats[0]; k++) {
+            UINT support = 0, quality = 0;
+            ID3D11Device_CheckFormatSupport(d->device, formats[k].format, &support);
+            ID3D11Device_CheckMultisampleQualityLevels(d->device, formats[k].format, 4, &quality);
+            say("%s: %s support 0x%08x, 4x quality levels %u", name, formats[k].name, support, quality);
+        }
+    }
     return 1;
 }
 

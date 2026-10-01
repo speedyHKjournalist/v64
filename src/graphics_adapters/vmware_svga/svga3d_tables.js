@@ -4,7 +4,7 @@
 // mode, alpha reference, gamma, texture arguments) are noted where they are.
 
 import * as C from "./svga_constants.js";
-import { DX_FORMATS } from "./svga_dx_formats.js";
+import { DX_FORMATS, AFTER_DX10 } from "./svga_dx_formats.js";
 
 // D3DFORMAT values
 const D3DFMT = {
@@ -243,18 +243,22 @@ export const DX10_DEVCAPS = [
     [C.SVGA3D_DEVCAP_MS_FULL_QUALITY, 0],
     [C.SVGA3D_DEVCAP_SM41, 0],
     [C.SVGA3D_DEVCAP_SM5, 0],
-    ...dx_format_caps(),
+    ...dx_format_caps("dx10"),
 ];
 
 /**
- * The devcaps at level dx10.1: dx10's, shader model 4.1, and NV12 and YUY2
- * surfaces, which VMware's driver wants (from Direct3D 11.1 on) before it
- * offers feature level 10_1. GX keeps those two in guest memory only: they
- * are made and copied, never sampled or drawn into.
+ * The devcaps at level dx10.1: dx10's and shader model 4.1, with what
+ * VMware's driver wants before it offers feature level 10_1 (its table,
+ * vm3dum64_10.dll at 0x180060a20): 4x multisampling of every target format
+ * (GX supersamples), and from Direct3D 11.1 on NV12 and YUY2 surfaces,
+ * R10G10B10_XR_BIAS_A2_UNORM ones and B8G8R8X8_UNORM vertices. GX keeps
+ * the NV12 and YUY2 surfaces in guest memory only: they are made and copied,
+ * never sampled or drawn into.
  * @type {!Array<!Array<number>>}
  */
 export const DX10_1_DEVCAPS = with_devcaps(DX10_DEVCAPS, [
     [C.SVGA3D_DEVCAP_SM41, 1],
+    ...dx_format_caps("dx10.1"),
     [C.SVGA3D_DEVCAP_DXFMT_YUY2, C.SVGA3D_DXFMT_SUPPORTED],
     [C.SVGA3D_DEVCAP_DXFMT_NV12, C.SVGA3D_DXFMT_SUPPORTED],
 ]);
@@ -267,15 +271,21 @@ function with_devcaps(base, changes)
     return Array.from(caps);
 }
 
-/** SVGA3D_DEVCAP_DXFMT_* from svga_dx_formats.js */
-function dx_format_caps()
+/**
+ * SVGA3D_DEVCAP_DXFMT_* from svga_dx_formats.js, at a level: dx10 leaves out
+ * what came later (AFTER_DX10) and multisamples the "m" formats only
+ * @param {string} level
+ */
+function dx_format_caps(level)
 {
+    const dx10 = level === "dx10";
     const caps = [];
     for(const name of Object.keys(DX_FORMATS))
     {
         const index = C["SVGA3D_DEVCAP_DXFMT_" + name.slice("SVGA3D_".length)];
-        if(index === undefined) continue;
-        const [texture, can, vertex] = DX_FORMATS[name];
+        if(index === undefined || dx10 && AFTER_DX10.formats.has(name)) continue;
+        const [texture, can] = DX_FORMATS[name];
+        const vertex = dx10 && AFTER_DX10.vertex.has(name) ? "" : DX_FORMATS[name][2];
         let value = 0;
         if(texture || vertex) value |= C.SVGA3D_DXFMT_SUPPORTED;
         if(can.includes("s") || can.includes("u")) value |= C.SVGA3D_DXFMT_SHADER_SAMPLE;
@@ -285,7 +295,7 @@ function dx_format_caps()
         if(texture) value |= C.SVGA3D_DXFMT_MIPS | C.SVGA3D_DXFMT_ARRAY;
         if(texture && !can.includes("d")) value |= C.SVGA3D_DXFMT_VOLUME;
         if(vertex) value |= C.SVGA3D_DXFMT_DX_VERTEX_BUFFER;
-        if(can.includes("m")) value |= C.SVGA3D_DXFMT_MULTISAMPLE;
+        if(dx10 ? can.includes("m") : texture && (can.includes("r") || can.includes("d"))) value |= C.SVGA3D_DXFMT_MULTISAMPLE;
         caps.push([index, value]);
     }
     // a buffer is supported as one
