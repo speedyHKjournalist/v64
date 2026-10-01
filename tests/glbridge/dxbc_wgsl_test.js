@@ -257,6 +257,52 @@ const TEX = program(PROGRAM.PS,
     console.log("PASS: sincos and imul whose destination is their source read it first");
 }
 
+// ---- compute (SM5): typed texture UAVs, an append counter, raw atomics, shared memory ----
+
+{
+    const uav = (i, sel) => operand(OPERAND.UAV, [i], sel || { mask: XYZW });
+    const g = (i, sel) => operand(OPERAND.THREAD_GROUP_SHARED_MEMORY, [i], sel || { mask: X });
+    const tid = sel => operand(OPERAND.INPUT_THREAD_ID, [], sel || XYZW_S);
+    const RET4 = (t) => t | t << 4 | t << 8 | t << 12;
+    const CS = (() => {
+        const p = program(PROGRAM.CS,
+            ins(OP.DCL_THREAD_GROUP, 8, 8, 1),
+            ins(OP.DCL_UAV_TYPED, { controls: DIM.TEXTURE2D }, uav(0, { zero: true }), RET4(RETURN.FLOAT)),
+            ins(OP.DCL_UAV_TYPED, { controls: DIM.TEXTURE2D }, uav(1, { zero: true }), RET4(RETURN.UINT)),
+            ins(OP.DCL_UAV_STRUCTURED, uav(2, { zero: true }), 16),
+            ins(OP.DCL_UAV_RAW, uav(3, { zero: true })),
+            ins(OP.DCL_TGSM_RAW, g(0, { zero: true }), 64),
+            ins(OP.DCL_INPUT, tid({ mask: XY })),
+            dcl_temps(4),
+            ins(OP.STORE_UAV_TYPED, uav(0), tid(SW(0, 1, 1, 1)), imm(1.0, 0.0, 0.0, 1.0)),
+            ins(OP.LD_UAV_TYPED, r(0, { mask: X }), tid(SW(0, 1, 1, 1)), uav(1, SW(0, 0, 0, 0))),
+            ins(OP.IADD, r(0, { mask: X }), r(0, { select: 0 }), imm(1)),
+            ins(OP.STORE_UAV_TYPED, uav(1), tid(SW(0, 1, 1, 1)), r(0, SW(0, 0, 0, 0))),
+            ins(OP.IMM_ATOMIC_ALLOC, r(1, { mask: X }), uav(2, { zero: true })),
+            ins(OP.STORE_STRUCTURED, uav(2), r(1, { select: 0 }), imm(0), tid(SW(0, 1, 0, 1))),
+            ins(OP.ATOMIC_IADD, uav(3, { mask: X }), imm(0), imm(1)),
+            ins(OP.STORE_RAW, g(0), imm(0), r(0, { select: 0 })),
+            ins(OP.SYNC, { controls: 1 | 2 }),
+            ins(OP.LD_RAW, r(2, { mask: X }), imm(0), g(0, SW(0, 0, 0, 0))),
+            ins(OP.BUFINFO, r(3, { mask: X }), uav(2, SW(0, 0, 0, 0))),
+            RET);
+        p[0] = PROGRAM.CS << 16 | 5 << 4 | 0;     // version 5.0
+        return p;
+    })();
+    const { result } = translate("compute", CS, { uavFormats: { 0: { format: "rgba8unorm" } } });
+    assert.match(result.code, /var u0: texture_storage_2d<rgba8unorm, write>;/);
+    assert.match(result.code, /var u1: texture_storage_2d<r32uint, read_write>;/, "a read R32 UAV is read-write");
+    assert.match(result.code, /var<storage, read_write> uc2: atomic<u32>;/, "the append counter");
+    assert.match(result.code, /atomicAdd\(&uc2, 1u\)/);
+    assert.match(result.code, /textureStore\(u0, /);
+    assert.match(result.code, /textureLoad\(u1, /);
+    assert.match(result.code, /gx_view_base\(2u\)/, "a view's first element");
+    assert.match(result.code, /@compute @workgroup_size\(8, 8, 1\)/);
+    const kinds = result.bindings.map(b => b.type).sort();
+    assert.deepEqual(kinds, ["uav", "uav", "uav-counter", "uav-texture", "uav-texture", "views"]);
+    console.log("PASS: compute: typed texture UAVs (write, R32 read-write), an append counter, raw atomics, shared memory, bufinfo");
+}
+
 // ---- shader model 4.1: cube arrays, lod, the rasterizer's samples, per-sample inputs ----
 
 const rasterizer = sel => operand(OPERAND.RASTERIZER, [], sel || XYZW_S);

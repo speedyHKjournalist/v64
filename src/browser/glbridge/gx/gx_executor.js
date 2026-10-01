@@ -52,6 +52,7 @@
         DEFINE_UA_VIEW: 1245, DESTROY_UA_VIEW: 1246, CLEAR_UA_VIEW_UINT: 1247, CLEAR_UA_VIEW_FLOAT: 1248,
         SET_UA_VIEWS: 1250, DRAW_INDEXED_INSTANCED_INDIRECT: 1251, DRAW_INSTANCED_INDIRECT: 1252, DISPATCH: 1253,
         DISPATCH_INDIRECT: 1254, TRANSFER_TO_BUFFER: 1257, SET_CS_UA_VIEWS: 1268, SET_MIN_LOD: 1269,
+        COPY_STRUCTURE_COUNT: 1249, SET_STRUCTURE_COUNT: 1258,
         DEFINE_DEPTHSTENCIL_VIEW_V2: 1272, DEFINE_STREAMOUTPUT_WITH_MOB: 1273, BIND_STREAMOUTPUT: 1275,
         PRED_STAGING_COPY: 1281, STAGING_COPY: 1282, PRED_STAGING_COPY_REGION: 1283, SET_VERTEX_BUFFERS_V2: 1284,
         SET_INDEX_BUFFER_V2: 1285, SET_VERTEX_BUFFERS_OFFSET_AND_SIZE: 1286, SET_INDEX_BUFFER_OFFSET_AND_SIZE: 1287,
@@ -64,6 +65,16 @@
     // depth formats whose guest layout differs: D3D9's 32-bit integer depth, and depth in the high 24 bits
     const SVGA3D_Z_D32 = 7, SVGA3D_Z_D24S8 = 9, SVGA3D_Z_D24X8 = 0x26, SVGA3D_Z_DF24 = 0x77, SVGA3D_Z_D24S8_INT = 0x78;
     const SURFACE_CUBEMAP = 1, SURFACE_VOLUME = 0x8000;
+    // (in the flags' high word: SVGA3D_SURFACE_BIND_UAVIEW, 1 << 33)
+    const SURFACE2_BIND_UAVIEW = 2;
+    // what WebGPU stores into (typed UAVs); bgra8unorm with "bgra8unorm-storage"
+    const STORAGE_FORMATS = new Set(["rgba8unorm", "rgba8snorm", "rgba8uint", "rgba8sint", "rgba16uint", "rgba16sint", "rgba16float",
+        "r32uint", "r32sint", "r32float", "rg32uint", "rg32sint", "rg32float", "rgba32uint", "rgba32sint", "rgba32float"]);
+    // SVGA3dUABufferFlags
+    const UABUFFER_RAW = 1;
+    const DIM_BUFFER = 1;
+    // where a buffer view starts, in GXViews (wgsl_emitter.js): UAV n at n, resource n at 64 + n
+    const VIEW_BASE_RESOURCE = 64, VIEW_BASES = 192;
     const INVALID = 0xFFFFFFFF;
     const SHADER_VS = 1, SHADER_PS = 2, SHADER_GS = 3, SHADER_HS = 4, SHADER_DS = 5, SHADER_CS = 6;
     const COTABLE = { RTVIEW: 0, DSVIEW: 1, SRVIEW: 2, ELEMENTLAYOUT: 3, BLENDSTATE: 4, DEPTHSTENCIL: 5,
@@ -157,7 +168,7 @@
             this.samplerCache = new Map();
             this.warned = new Set();
             this.errors = 0;
-            this.stats = { batches: 0, draws: 0, pipelines: 0, shaders: 0, passes: 0, uploads: 0, readbacks: 0 };
+            this.stats = { batches: 0, draws: 0, pipelines: 0, shaders: 0, passes: 0, uploads: 0, readbacks: 0, dispatches: 0 };
             this.drawBuffer = this.device.createBuffer({ size: DRAW_SLOT * DRAW_SLOTS,
                 usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST });
             this.drawSlot = 0;
@@ -168,6 +179,11 @@
             this.emptyLayout = this.device.createBindGroupLayout({ entries: [] });
             this.emptyGroup = this.device.createBindGroup({ layout: this.emptyLayout, entries: [] });
             this.dummyBuffer = this.device.createBuffer({ size: 65536, usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.STORAGE | BUFFER_USAGE.VERTEX });
+            // (UAVs bound to nothing write here: never the vertex buffers' dummy, which a pass reads)
+            this.dummyUav = this.device.createBuffer({ size: 65536, usage: BUFFER_USAGE.STORAGE });
+            this.dummyStorageTextures = new Map();
+            this.clearPipelines = new Map();
+            if (this.features.bgra8unormStorage) STORAGE_FORMATS.add("bgra8unorm");
             this.dummyTextures = new Map();
             this.linearSampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear" });
             this.nearestSampler = this.device.createSampler({});
@@ -334,7 +350,8 @@
                 format: f.gpu,
                 mipLevelCount: multisampled ? 1 : Math.min(s.mips, mipCount(s.width, s.height, volume ? s.depth : 1)),
                 usage: TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.COPY_DST |
-                    (target ? TEXTURE_USAGE.RENDER_ATTACHMENT : 0),
+                    (target ? TEXTURE_USAGE.RENDER_ATTACHMENT : 0) |
+                    ((flags2 & SURFACE2_BIND_UAVIEW) && !multisampled && STORAGE_FORMATS.has(f.gpu) ? TEXTURE_USAGE.STORAGE_BINDING : 0),
             };
             if (SRGB[f.gpu]) descriptor.viewFormats = [SRGB[f.gpu]];
             s.volume = volume;
@@ -944,8 +961,23 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     }
                     return;
                 case DX.SET_UA_VIEWS:
-                case DX.SET_CS_UA_VIEWS:
+                    // splice index (where the targets end), then a view per slot
+                    for (let i = 0; i < 64; i++) st.uavs[i] = i + 1 < p.length ? p[i + 1] : INVALID;
                     return;
+                case DX.SET_CS_UA_VIEWS:
+                    for (let i = 0; i + 1 < p.length && p[0] + i < 64; i++) st.csUavs[p[0] + i] = p[i + 1];
+                    return;
+                case DX.SET_STRUCTURE_COUNT:
+                    // (~0: keep it)
+                    if (p[1] !== INVALID) this.copyIn(this.uavCounter(c, p[0]), 0, Uint32Array.of(p[1]));
+                    return;
+                case DX.COPY_STRUCTURE_COUNT: {
+                    const D = this.surfaces.get(p[1]);
+                    if (!D || !D.buffer || p[2] + 4 > D.shadow.length || p[2] & 3) return;
+                    this.endPass();
+                    this.encoder().copyBufferToBuffer(this.uavCounter(c, p[0]), 0, D.buffer, p[2], 4);
+                    return;
+                }
                 case DX.SET_MIN_LOD:
                     return;
             }
@@ -966,13 +998,14 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 case DX.DRAW_AUTO:
                     return this.drawAuto(c);
                 case DX.DISPATCH:
+                    return this.dispatchCompute(c, [p[0], p[1], p[2]], null);
                 case DX.DISPATCH_INDIRECT:
-                    return this.warn("dispatch", "compute is not supported yet");
+                    return this.dispatchCompute(c, null, { sid: p[0], offset: p[1] });
                 case DX.CLEAR_RENDERTARGET_VIEW: return this.clearRTV(c, p[0], [f32(p[1]), f32(p[2]), f32(p[3]), f32(p[4])]);
                 case DX.CLEAR_DEPTHSTENCIL_VIEW: return this.clearDSV(c, p[1], p[0] & 0xFFFF, p[0] >>> 16, f32(p[2]));
                 case DX.CLEAR_UA_VIEW_UINT:
                 case DX.CLEAR_UA_VIEW_FLOAT:
-                    return this.warn("uav-clear", "UAV clears are not supported yet");
+                    return this.clearUAV(c, p[0], Array.from(p.subarray(1, 5)), id === DX.CLEAR_UA_VIEW_FLOAT);
                 case DX.PRED_COPY_REGION:
                 case DX.PRED_STAGING_COPY_REGION:
                     return this.copyRegion(p[0], p[1], p[2], p[3], Array.from(p.subarray(4, 13)));
@@ -1336,6 +1369,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const dualSource = !!(blend && usesSource1(blend.words));
             const vsOptions = { group: 0, vertexInputs, varyings };
             const psOptions = { group: 1, targets, dualSource };
+            if (ps && ps.program && ps.program.uavs.size) psOptions.uavFormats = this.uavFormats(c, SHADER_PS, ps.program);
             let vsModule, psModule = null;
             try {
                 vsModule = this.module(vs, vsOptions);
@@ -1944,8 +1978,13 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     entries.push({ binding: b.binding, visibility, buffer: { type: "uniform" } });
                 } else if (b.type === "read-storage" || b.type === "index" || b.type === "vertex-buffer" || b.type === "stage-in") {
                     entries.push({ binding: b.binding, visibility, buffer: { type: "read-only-storage" } });
-                } else if (b.type === "storage" || b.type === "stage-out") {
+                } else if (b.type === "storage" || b.type === "stage-out" || b.type === "uav" || b.type === "uav-counter") {
                     entries.push({ binding: b.binding, visibility, buffer: { type: "storage" } });
+                } else if (b.type === "uav-texture") {
+                    entries.push({ binding: b.binding, visibility, storageTexture: { access: b.access === "read_write" ? "read-write" : "write-only",
+                        format: b.format, viewDimension: b.dimension } });
+                } else if (b.type === "views") {
+                    entries.push({ binding: b.binding, visibility, buffer: { type: "uniform" } });
                 }
             }
             // samplers used with unfilterable textures must not filter
@@ -2067,6 +2106,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
          */
         bindGroup(c, type, module, layout, call, fix, extra) {
             const stage = c.stages[type];
+            const uavIds = type === SHADER_CS ? c.state.csUavs : c.state.uavs;
             const entries = [];
             for (const b of module.result.bindings) {
                 if (extra && extra[b.type]) {
@@ -2102,6 +2142,21 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                         entries.push({ binding: b.binding, resource: S && S.buffer ? { buffer: S.buffer } : { buffer: this.dummyBuffer } });
                         break;
                     }
+                    case "uav": {
+                        const view = c.uavs.get(uavIds[b.slot]);
+                        const S = view && this.surfaces.get(view.sid);
+                        entries.push({ binding: b.binding, resource: { buffer: S && S.buffer ? S.buffer : this.dummyUav } });
+                        break;
+                    }
+                    case "uav-counter":
+                        entries.push({ binding: b.binding, resource: { buffer: this.uavCounter(c, uavIds[b.slot]) } });
+                        break;
+                    case "uav-texture":
+                        entries.push({ binding: b.binding, resource: this.storageView(c.uavs.get(uavIds[b.slot]), b) });
+                        break;
+                    case "views":
+                        entries.push({ binding: b.binding, resource: this.uniform(this.viewBases(c, type, module)) });
+                        break;
                 }
             }
             try {
@@ -2110,6 +2165,184 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 this.warn("group:" + error.message, "a bind group failed: " + error.message);
                 return null;
             }
+        }
+
+        // ------------------------------------------------------------------
+        // UAVs and compute (SM5)
+
+        /** What the typed UAVs a shader declares are bound to: storage formats, a typed buffer's 32-bit lanes */
+        uavFormats(c, type, program) {
+            const formats = {};
+            const ids = type === SHADER_CS ? c.state.csUavs : c.state.uavs;
+            for (const [slot, u] of program.uavs) {
+                if (u.kind !== "typed") continue;
+                const view = c.uavs.get(ids[slot]);
+                const S = view && this.surfaces.get(view.sid);
+                const f = view && (this.formatOf(view.format) || (S && S.f));
+                if (u.dimension === DIM_BUFFER) formats[slot] = { lanes: f ? Math.max(1, Math.min(4, f.bytes >> 2)) : 1 };
+                else if (f && STORAGE_FORMATS.has(f.gpu)) formats[slot] = { format: f.gpu };
+            }
+            return formats;
+        }
+
+        /** A typed texture UAV's view, or a stand-in of the binding's format */
+        storageView(view, b) {
+            const S = view && this.surfaces.get(view.sid);
+            if (S && S.texture && S.f.gpu === b.format && S.ss === 1) {
+                const [mip, first, count] = view.desc;
+                const volume = b.dimension === "3d";
+                const layers = volume ? 1 : S.layers;
+                const baseLayer = volume ? 0 : Math.min(first, layers - 1);
+                const layerCount = b.dimension === "2d" ? 1 : volume ? 1 : Math.max(1, Math.min(count || layers, layers - baseLayer));
+                const key = "u:" + b.format + ":" + b.dimension + ":" + mip + ":" + baseLayer + ":" + layerCount;
+                let v = S.views.get(key);
+                if (!v) {
+                    v = S.texture.createView({ format: b.format, dimension: b.dimension, baseMipLevel: Math.min(mip, S.gpuMips - 1),
+                        mipLevelCount: 1, baseArrayLayer: baseLayer, arrayLayerCount: layerCount });
+                    S.views.set(key, v);
+                }
+                return v;
+            }
+            if (S) this.warn("uav-format" + S.format, "a UAV of format " + S.format + " is not a storage texture");
+            const key = b.format + ":" + b.dimension;
+            let v = this.dummyStorageTextures.get(key);
+            if (!v) {
+                const texture = this.device.createTexture({ size: [1, 1, 1], dimension: b.dimension === "3d" ? "3d" : "2d", format: b.format,
+                    usage: TEXTURE_USAGE.STORAGE_BINDING });
+                v = texture.createView({ dimension: b.dimension });
+                this.dummyStorageTextures.set(key, v);
+            }
+            return v;
+        }
+
+        /** An append/consume counter (a UAV's hidden one), made at 0 */
+        uavCounter(c, id) {
+            let counter = c.uavCounters.get(id);
+            if (!counter) {
+                counter = this.device.createBuffer({ size: 4, usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC | BUFFER_USAGE.COPY_DST });
+                c.uavCounters.set(id, counter);
+            }
+            return counter;
+        }
+
+        /** Words into a buffer in this encoder's order (not the queue's) */
+        copyIn(buffer, offset, words) {
+            this.endPass();
+            this.encoder().copyBufferToBuffer(this.staging(new Uint8Array(words.buffer, words.byteOffset, words.byteLength)), 0,
+                buffer, offset, words.byteLength);
+        }
+
+        /** Where the buffer views a shader reads start, in words (GXViews) */
+        viewBases(c, type, module) {
+            const bases = new Uint32Array(VIEW_BASES);
+            const stage = c.stages[type];
+            const uavIds = type === SHADER_CS ? c.state.csUavs : c.state.uavs;
+            for (const b of module.result.bindings) {
+                if (b.type === "uav") {
+                    const view = c.uavs.get(uavIds[b.slot]);
+                    // SVGA3dUAViewDesc buffer: firstElement, numElements, flags
+                    if (view) bases[b.slot] = view.desc[0] * (b.kind === "structured" ? b.stride >> 2 : b.kind === "typed" ? b.lanes || 1 : 1);
+                } else if (b.type === "read-storage") {
+                    const srv = c.srvs.get(stage.srvs[b.slot]);
+                    // SVGA3dShaderResourceViewDesc buffer(ex): firstElement, numElements
+                    if (srv) bases[VIEW_BASE_RESOURCE + b.slot] = srv.desc[0] * (b.kind === "structured" ? b.stride >> 2 : 1);
+                }
+            }
+            return bases;
+        }
+
+        /** DISPATCH(_INDIRECT): the compute shader over the thread groups */
+        dispatchCompute(c, groups, indirect) {
+            const cs = c.shaders.get(c.stages[SHADER_CS].shader);
+            if (!cs || !cs.program) return this.warn("no-cs", "a dispatch without a compute shader");
+            let module;
+            try {
+                module = this.module(cs, { group: 0, uavFormats: this.uavFormats(c, SHADER_CS, cs.program) });
+            } catch (error) {
+                return this.warn("translate:" + error.message, "shader translation failed: " + error.message);
+            }
+            const pipe = this.computePipeline(c, SHADER_CS, module);
+            if (!pipe) return;
+            const group = this.bindGroup(c, SHADER_CS, module, pipe.layout, { indexed: false, count: 0, instances: 0, first: 0, base: 0, firstInstance: 0 }, null);
+            if (!group) return;
+            let args = null;
+            if (indirect) {
+                const S = this.surfaces.get(indirect.sid);
+                if (!S || !S.buffer) return;
+                args = { buffer: S.buffer, offset: indirect.offset };
+            } else if (!groups[0] || !groups[1] || !groups[2]) {
+                return;
+            }
+            this.endPass();
+            const pass = this.encoder().beginComputePass();
+            pass.setPipeline(pipe.pipeline);
+            pass.setBindGroup(0, group);
+            if (args) pass.dispatchWorkgroupsIndirect(args.buffer, args.offset);
+            else pass.dispatchWorkgroups(Math.min(groups[0], 65535), Math.min(groups[1], 65535), Math.min(groups[2], 65535));
+            pass.end();
+            this.stats.dispatches++;
+        }
+
+        /**
+         * CLEAR_UA_VIEW_UINT/FLOAT: a buffer's elements (each 32-bit word the
+         * first value: raw and structured; the values: typed), a texture's
+         * texels by a compute shader
+         */
+        clearUAV(c, id, value, float) {
+            const view = c.uavs.get(id);
+            const S = view && this.surfaces.get(view.sid);
+            if (!S) return;
+            if (S.buffer) {
+                const f = this.formatOf(view.format);
+                const raw = !!(view.desc[2] & UABUFFER_RAW) || !f || !f.gpu && !f.vertex;
+                const lanes = raw ? 1 : Math.max(1, Math.min(4, f.bytes >> 2));
+                const elementBytes = raw ? 4 : lanes * 4;
+                // (a structured buffer's elements are not known here: all of it from the view's start)
+                const start = view.desc[0] * elementBytes;
+                const count = Math.min(view.desc[1] ? view.desc[1] * elementBytes : S.shadow.length, S.shadow.length - start) >> 2;
+                if (count <= 0 || start & 3) return;
+                const words = new Uint32Array(count);
+                for (let i = 0; i < count; i++) {
+                    const v = value[i % lanes];
+                    words[i] = float ? new Uint32Array(new Float32Array([new Float32Array(new Uint32Array([v]).buffer)[0]]).buffer)[0] : v;
+                }
+                this.copyIn(S.buffer, start, words);
+                return;
+            }
+            if (!S.texture || !(S.texture.usage & TEXTURE_USAGE.STORAGE_BINDING)) {
+                return this.warn("uav-clear" + S.format, "clears of UAVs of format " + S.format + " are not supported");
+            }
+            const format = S.f.gpu, volume = S.volume;
+            const kind = /uint$/.test(format) ? "u32" : /sint$/.test(format) ? "i32" : "f32";
+            const key = format + (volume ? ":3d" : ":2d-array");
+            let pipeline = this.clearPipelines.get(key);
+            if (!pipeline) {
+                const code = `
+@group(0) @binding(0) var t: texture_storage_${volume ? "3d" : "2d_array"}<${format}, write>;
+@group(0) @binding(1) var<uniform> value: vec4<u32>;
+@compute @workgroup_size(8, 8, 1) fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+    let size = textureDimensions(t);
+    if (g.x >= size.x || g.y >= size.y) { return; }
+    let v = ${kind === "f32" ? (float ? "bitcast<vec4<f32>>(value)" : "vec4<f32>(value)") : kind === "i32" ? "bitcast<vec4<i32>>(value)" : "value"};
+    textureStore(t, ${volume ? "g.xyz" : "g.xy, g.z"}, v);
+}`;
+                const module = this.device.createShaderModule({ code });
+                pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
+                this.clearPipelines.set(key, pipeline);
+            }
+            const [mip, first, count] = view.desc;
+            const level = this.level(S, Math.min(mip, S.gpuMips - 1));
+            const layers = volume ? 1 : Math.max(1, Math.min(count || S.layers, S.layers - Math.min(first, S.layers - 1)));
+            const target = S.texture.createView({ dimension: volume ? "3d" : "2d-array", baseMipLevel: Math.min(mip, S.gpuMips - 1), mipLevelCount: 1,
+                baseArrayLayer: volume ? 0 : Math.min(first, S.layers - 1), arrayLayerCount: layers });
+            const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+                { binding: 0, resource: target }, { binding: 1, resource: this.uniform(Uint32Array.from(value)) }] });
+            this.endPass();
+            const pass = this.encoder().beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, group);
+            pass.dispatchWorkgroups(Math.ceil(level.width / 8), Math.ceil(level.height / 8), volume ? level.depth : layers);
+            pass.end();
         }
 
         /** A constant buffer binding: aligned and big enough, or a copy that is */
@@ -2243,7 +2476,11 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 topology: 1, rtvs: [], dsv: INVALID, blend: INVALID, blendFactor: [0, 0, 0, 0], sampleMask: INVALID,
                 depth: INVALID, stencilRef: 0, raster: INVALID, viewports: [], scissors: [], predication: [INVALID, 0],
                 soid: INVALID, soTargets: [],
+                // UAVs: of the pixel shader (slots shared with the targets), of compute
+                uavs: new Array(64).fill(INVALID), csUavs: new Array(64).fill(INVALID),
             };
+            /** append/consume counters: UAV id -> a GPUBuffer of one u32 */
+            this.uavCounters = new Map();
         }
 
         stage(type) {

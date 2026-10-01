@@ -1003,7 +1003,14 @@ DXDevice.prototype.state_command = function(context, id, p)
         }
         case C.SVGA_3D_CMD_DX_CLEAR_UA_VIEW_UINT:
         case C.SVGA_3D_CMD_DX_CLEAR_UA_VIEW_FLOAT:
+        {
+            const sid = view_sid(VIEW_UAV, p[0]);
+            if(sid !== undefined) this.written(sid);
+            break;
+        }
         case C.SVGA_3D_CMD_DX_COPY_STRUCTURE_COUNT:
+            // srcUAViewId, destSid, destByteOffset
+            this.written(p[1]);
             break;
 
         // moving contents between MOBs and the GPU

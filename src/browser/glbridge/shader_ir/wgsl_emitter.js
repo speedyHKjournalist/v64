@@ -20,7 +20,10 @@
 //
 // Bindings in the group: constant buffer n at n (0-14), the draw
 // parameters at 15, sampler n at 16 + n, resource n at 32 + n, UAV n at
-// 160 + n. emit() returns them, for the bind group layout.
+// 160 + n, its append/consume counter at 300 + n, and at 299 where the
+// buffer views start (GXViews). emit() returns them, for the bind group
+// layout. options.uavFormats: { slot: { format, lanes } }, a typed UAV's
+// view: the storage texture format, or a typed buffer's 32-bit lanes.
 //
 // Geometry shaders have no WebGPU stage, so a draw with one runs its
 // vertex and geometry shaders as compute shaders (options.mode):
@@ -45,7 +48,9 @@
     class ShaderTranslateError extends Error {}
 
     const BINDING = { CB: 0, DRAW: 15, SAMPLER: 16, RESOURCE: 32, UAV: 160, VB: 200, FETCH: 230, INDEX: 231,
-        STAGE_IN: 232, STAGE_OUT: 233, GEO: 234 };
+        STAGE_IN: 232, STAGE_OUT: 233, GEO: 234, VIEWS: 299, UAV_COUNTER: 300 };
+    // where a buffer view starts, in words, in GXViews: UAV n at n, resource n at 64 + n
+    const VIEW_BASE_UAV = 0, VIEW_BASE_RESOURCE = 64, VIEW_BASES = 192;
     // vertices of a GS input primitive (D3D10_SB_PRIMITIVE): point, line, triangle, line_adj, triangle_adj
     const GS_INPUT_VERTICES = { 1: 1, 2: 2, 3: 3, 6: 4, 7: 6 };
     const LANES = "xyzw";
@@ -81,6 +86,10 @@
             // resources used for comparison: they are depth textures
             this.compared = new Set();
             this.gathered = new Set();
+            this.counters = new Set();
+            this.uavLoads = new Set();
+            // whether a buffer view's start is read from GXViews
+            this.usesViews = false;
             this.temps = Math.max(1, program.temps);
             this.inputCount = 1;
             this.outputCount = 1;
@@ -168,6 +177,13 @@
                         if (r) this.compared.add(r.indices[0].imm);
                         break;
                     }
+                    // UAVs with an append/consume counter, typed UAVs read
+                    case OP.IMM_ATOMIC_ALLOC: case OP.IMM_ATOMIC_CONSUME:
+                        if (ins.src[0]) this.counters.add(ins.src[0].indices[0].imm);
+                        break;
+                    case OP.LD_UAV_TYPED:
+                        if (ins.src[1]) this.uavLoads.add(ins.src[1].indices[0].imm);
+                        break;
                 }
             }
         }
@@ -217,13 +233,20 @@
                 out.push(`@group(${g}) @binding(${BINDING.RESOURCE + slot}) var t${slot}: ${type.wgsl};`);
                 this.bindings.push({ binding: BINDING.RESOURCE + slot, slot, ...type.binding });
             }
+            if (p.uavs.size && this.stage === PROGRAM.VS && !this.mode) this.warn("vertex shader UAVs are not supported");
             for (const [slot, u] of p.uavs) {
-                if (u.kind === "typed") {
-                    this.warn("typed UAVs are not supported yet");
+                if (u.kind === "typed" && u.dimension !== DIM.BUFFER) {
+                    out.push(this.storageTexture(g, slot, u));
                     continue;
                 }
+                // raw, structured and typed buffers: 32-bit words
+                const lanes = u.kind === "typed" ? ((this.o.uavFormats || {})[slot] || {}).lanes || 1 : 0;
                 out.push(`@group(${g}) @binding(${BINDING.UAV + slot}) var<storage, read_write> u${slot}: array<atomic<u32>>;`);
-                this.bindings.push({ binding: BINDING.UAV + slot, slot, type: "storage", stride: u.stride || 0 });
+                this.bindings.push({ binding: BINDING.UAV + slot, slot, type: "uav", kind: u.kind, stride: u.stride || 0, lanes });
+                if (this.counters.has(slot)) {
+                    out.push(`@group(${g}) @binding(${BINDING.UAV_COUNTER + slot}) var<storage, read_write> uc${slot}: atomic<u32>;`);
+                    this.bindings.push({ binding: BINDING.UAV_COUNTER + slot, slot, type: "uav-counter" });
+                }
             }
             for (const [slot, t] of p.tgsm) {
                 out.push(`var<workgroup> g${slot}: array<atomic<u32>, ${Math.max(1, Math.ceil(t.bytes / 4))}>;`);
@@ -255,6 +278,12 @@
                 out.push("override gx_ss: u32 = 0u;");
                 out.push("override gx_sample_mask: u32 = 0xFFFFFFFFu;");
                 out.push("override gx_a2c: u32 = 0u;");
+            }
+            if (this.usesViews) {
+                out.push(`struct GXViews { base: array<vec4<u32>, ${VIEW_BASES / 4}> }`);
+                out.push(`@group(${g}) @binding(${BINDING.VIEWS}) var<uniform> gx_views: GXViews;`);
+                out.push("fn gx_view_base(i: u32) -> u32 { return gx_views.base[i >> 2u][i & 3u]; }");
+                this.bindings.push({ binding: BINDING.VIEWS, type: "views" });
             }
             if (this.stage === PROGRAM.CS) {
                 out.push("var<private> cs_thread: vec3<u32>;");
@@ -1134,10 +1163,21 @@
                 case OP.LOD:
                     return this.lod(ins);
                 case OP.BUFINFO: {
+                    // the buffer's words past the view's start, in elements (raw: bytes)
                     const r = ins.src[0];
-                    if (r.type === OPERAND.RESOURCE) return wu(`vec4<u32>(arrayLength(&t${r.indices[0].imm}))`);
-                    return wu(`vec4<u32>(arrayLength(&u${r.indices[0].imm}))`);
+                    const slot = r.indices[0].imm;
+                    const b = this.bufferName(r);
+                    const decl = (r.type === OPERAND.RESOURCE ? this.p.resources : this.p.uavs).get(slot) || {};
+                    const words = `(arrayLength(&${b.name}) - ${b.base})`;
+                    const lanes = decl.kind === "typed" ? ((this.o.uavFormats || {})[slot] || {}).lanes || 1 : 0;
+                    const elements = decl.kind === "structured" ? `${words} * 4u / ${Math.max(4, decl.stride || 4)}u` :
+                        decl.kind === "raw" ? `${words} * 4u` : lanes ? `${words} / ${lanes}u` : words;
+                    return wu(`vec4<u32>(${elements})`);
                 }
+                case OP.LD_UAV_TYPED:
+                    return this.loadTyped(ins);
+                case OP.STORE_UAV_TYPED:
+                    return this.storeTyped(ins);
                 case OP.LD_RAW:
                     return this.loadRaw(ins, false);
                 case OP.LD_STRUCTURED:
@@ -1328,7 +1368,7 @@
         load(ins) {
             const ms = ins.op === OP.LD_MS;
             const tOperand = ins.src[1];
-            if (tOperand.type === OPERAND.UAV) return this.warn("typed UAV loads are not supported yet");
+            if (tOperand.type === OPERAND.UAV) return this.loadTyped(ins);
             const t = this.resource(tOperand);
             const dimension = t.r.dimension;
             const a = this.i(ins, 0);
@@ -1457,12 +1497,103 @@
         // ---------------------------------------------------------------
         // Raw and structured buffers, atomics (SM5)
 
+        /**
+         * A typed texture UAV: a storage texture of the bound view's format
+         * (options.uavFormats; R32 of the declared type when none is bound),
+         * read-write if the shader reads it (WebGPU can for R32 formats only,
+         * as D3D11.0 can)
+         */
+        storageTexture(g, slot, u) {
+            const t = this.storageInfo(slot, u);
+            if (this.uavLoads.has(slot) && t.access !== "read_write") this.warn("typed UAV loads of " + t.format + " read zeros");
+            this.bindings.push({ binding: BINDING.UAV + slot, slot, type: "uav-texture", format: t.format, access: t.access, dimension: t.dimension });
+            return `@group(${g}) @binding(${BINDING.UAV + slot}) var u${slot}: texture_storage_${t.wgsl}<${t.format}, ${t.access}>;`;
+        }
+
+        /** A typed texture UAV's storage format, access, dimension and texel kind */
+        storageInfo(slot, u) {
+            const info = (this.o.uavFormats || {})[slot] || {};
+            const ret = u.returnTypes ? u.returnTypes[0] : RETURN.FLOAT;
+            const format = info.format || (ret === RETURN.UINT ? "r32uint" : ret === RETURN.SINT ? "r32sint" : "r32float");
+            const access = this.uavLoads.has(slot) && /^r32/.test(format) ? "read_write" : "write";
+            const [wgsl, dimension] = {
+                [DIM.TEXTURE1D]: ["2d", "2d"], [DIM.TEXTURE2D]: ["2d", "2d"],
+                [DIM.TEXTURE1DARRAY]: ["2d_array", "2d-array"], [DIM.TEXTURE2DARRAY]: ["2d_array", "2d-array"],
+                [DIM.TEXTURE3D]: ["3d", "3d"],
+            }[u.dimension] || [];
+            if (!wgsl) throw new ShaderTranslateError("a typed UAV of dimension " + u.dimension);
+            const kind = /uint$/.test(format) ? "u" : /sint$/.test(format) ? "i" : "f";
+            return { format, access, wgsl, dimension, kind };
+        }
+
+        /** A typed UAV's coordinates and layer, from an integer address */
+        storageAddress(slot, a) {
+            const u = this.p.uavs.get(slot);
+            switch (u.dimension) {
+                case DIM.TEXTURE1D: return `vec2<i32>(${a}.x, 0)`;
+                case DIM.TEXTURE1DARRAY: return `vec2<i32>(${a}.x, 0), ${a}.y`;
+                case DIM.TEXTURE2D: return `${a}.xy`;
+                case DIM.TEXTURE2DARRAY: return `${a}.xy, ${a}.z`;
+                case DIM.TEXTURE3D: return `${a}.xyz`;
+            }
+            throw new ShaderTranslateError("a typed UAV of dimension " + u.dimension);
+        }
+
+        loadTyped(ins) {
+            const operand = ins.src[1];
+            const slot = operand.indices[0].imm;
+            const u = this.p.uavs.get(slot);
+            if (!u) throw new ShaderTranslateError("UAV u" + slot + " is not declared");
+            if (u.dimension === DIM.BUFFER) {
+                const b = this.bufferName(operand);
+                const lanes = ((this.o.uavFormats || {})[slot] || {}).lanes || 1;
+                const word = k => k < lanes ? `atomicLoad(&u${slot}[${b.base} + base + ${k}u])` : k === 3 ? "1u" : "0u";
+                this.line("{");
+                this.indent++;
+                this.line(`let base = u32(${this.i(ins, 0)}.x) * ${lanes}u;`);
+                this.write(ins, this.swizzled(`vec4<u32>(${word(0)}, ${word(1)}, ${word(2)}, ${word(3)})`, operand), "u");
+                this.indent--;
+                this.line("}");
+                return;
+            }
+            const t = this.storageInfo(slot, u);
+            if (t.access !== "read_write") return this.write(ins, "vec4<u32>(0u)", "u");
+            this.write(ins, this.swizzled(`textureLoad(u${slot}, ${this.storageAddress(slot, this.i(ins, 0))})`, operand), t.kind);
+        }
+
+        storeTyped(ins) {
+            const dst = ins.dst[0];
+            const slot = dst.indices[0].imm;
+            const u = this.p.uavs.get(slot);
+            if (!u) throw new ShaderTranslateError("UAV u" + slot + " is not declared");
+            if (u.dimension === DIM.BUFFER) {
+                const b = this.bufferName(dst);
+                const lanes = ((this.o.uavFormats || {})[slot] || {}).lanes || 1;
+                this.line("{");
+                this.indent++;
+                this.line(`let base = u32(${this.i(ins, 0)}.x) * ${lanes}u;`);
+                this.line(`let value = ${this.u(ins, 1)};`);
+                for (let c = 0; c < lanes; c++) this.line(`atomicStore(&u${slot}[${b.base} + base + ${c}u], value.${LANES[c]});`);
+                this.indent--;
+                this.line("}");
+                return;
+            }
+            const kind = this.storageInfo(slot, u).kind;
+            const value = kind === "u" ? this.u(ins, 1) : kind === "i" ? this.i(ins, 1) : this.f(ins, 1);
+            this.line(`textureStore(u${slot}, ${this.storageAddress(slot, this.i(ins, 0))}, ${value});`);
+        }
+
         bufferName(operand) {
             const slot = operand.indices[0].imm;
+            // (a view's first element: from GXViews)
+            const base = index => { this.usesViews = true; return `gx_view_base(${index}u)`; };
             switch (operand.type) {
-                case OPERAND.RESOURCE: return { name: "t" + slot, atomic: false, stride: (this.p.resources.get(slot) || {}).stride || 0 };
-                case OPERAND.UAV: return { name: "u" + slot, atomic: true, stride: (this.p.uavs.get(slot) || {}).stride || 0 };
-                case OPERAND.THREAD_GROUP_SHARED_MEMORY: return { name: "g" + slot, atomic: true, stride: (this.p.tgsm.get(slot) || {}).stride || 0 };
+                case OPERAND.RESOURCE: return { name: "t" + slot, atomic: false, stride: (this.p.resources.get(slot) || {}).stride || 0,
+                    base: base(VIEW_BASE_RESOURCE + slot) };
+                case OPERAND.UAV: return { name: "u" + slot, atomic: true, stride: (this.p.uavs.get(slot) || {}).stride || 0,
+                    base: base(VIEW_BASE_UAV + slot) };
+                case OPERAND.THREAD_GROUP_SHARED_MEMORY: return { name: "g" + slot, atomic: true, stride: (this.p.tgsm.get(slot) || {}).stride || 0,
+                    base: "0u" };
             }
             throw new ShaderTranslateError("a buffer operand of type " + operand.type);
         }
@@ -1474,7 +1605,7 @@
             const word = k => b.atomic ? `atomicLoad(&${b.name}[base + ${k}u])` : `${b.name}[base + ${k}u]`;
             this.line("{");
             this.indent++;
-            this.line(`let base = ${address};`);
+            this.line(`let base = ${b.base} + ${address};`);
             this.write(ins, this.swizzled(`vec4<u32>(${word(0)}, ${word(1)}, ${word(2)}, ${word(3)})`, ins.src[structured ? 2 : 1]), "u");
             this.indent--;
             this.line("}");
@@ -1488,7 +1619,7 @@
             const value = this.u(ins, structured ? 2 : 1);
             this.line("{");
             this.indent++;
-            this.line(`let base = ${address};`);
+            this.line(`let base = ${b.base} + ${address};`);
             this.line(`let value = ${value};`);
             let k = 0;
             for (let c = 0; c < 4; c++) {
@@ -1505,13 +1636,24 @@
             const target = immediate ? ins.src[0] : ins.dst[0];
             const srcs = immediate ? ins.src.slice(1) : ins.src;
             if (ins.op === OP.IMM_ATOMIC_ALLOC || ins.op === OP.IMM_ATOMIC_CONSUME) {
-                this.warn("append/consume counters are not supported yet");
-                return this.write(ins, "vec4<u32>(0u)", "u");
+                // the UAV's hidden counter: the index before the increment, or after the decrement
+                const slot = target.indices[0].imm;
+                return this.write(ins, ins.op === OP.IMM_ATOMIC_ALLOC ? `vec4<u32>(atomicAdd(&uc${slot}, 1u))` :
+                    `vec4<u32>(atomicSub(&uc${slot}, 1u) - 1u)`, "u");
+            }
+            if (target.type === OPERAND.UAV && (this.p.uavs.get(target.indices[0].imm) || {}).kind === "typed" &&
+                this.p.uavs.get(target.indices[0].imm).dimension !== DIM.BUFFER) {
+                this.warn("atomics on typed texture UAVs are not supported");
+                if (immediate) this.write(ins, "vec4<u32>(0u)", "u");
+                return;
             }
             const b = this.bufferName(target);
             const read = i => this.read(srcs[i], "u");
-            // raw: a byte address; structured: (element, byte offset)
-            const address = b.stride ? `(${read(0)}.x * ${b.stride}u + ${read(0)}.y) / 4u` : `${read(0)}.x / 4u`;
+            // raw: a byte address; structured: (element, byte offset); typed buffer: an element
+            const typedLanes = target.type === OPERAND.UAV && (this.p.uavs.get(target.indices[0].imm) || {}).kind === "typed" ?
+                ((this.o.uavFormats || {})[target.indices[0].imm] || {}).lanes || 1 : 0;
+            const address = `${b.base} + ` + (typedLanes ? `${read(0)}.x * ${typedLanes}u` :
+                b.stride ? `(${read(0)}.x * ${b.stride}u + ${read(0)}.y) / 4u` : `${read(0)}.x / 4u`);
             const name = {
                 [OP.ATOMIC_AND]: "atomicAnd", [OP.ATOMIC_OR]: "atomicOr", [OP.ATOMIC_XOR]: "atomicXor",
                 [OP.ATOMIC_IADD]: "atomicAdd", [OP.ATOMIC_UMAX]: "atomicMax", [OP.ATOMIC_UMIN]: "atomicMin",
