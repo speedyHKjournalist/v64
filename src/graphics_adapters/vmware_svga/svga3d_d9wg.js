@@ -80,17 +80,7 @@ export const KIND = {
     QUERY: 9,
 };
 
-/** Where the executor writes answers: offsets into a 16 MiB arena whose last
- * 4 MiB are the response region (query slots first, then readbacks) */
-export const RESPONSE_REGION_OFFSET = 12 << 20;
-export const RESPONSE_REGION_BYTES = 4 << 20;
-export const QUERY_SLOT_BYTES = 16;
-export const QUERY_REGION_BYTES = 16 * 1024;
-export const READBACK_HEADER_BYTES = 16;
-/** The largest readback payload one request may carry */
-export const READBACK_MAX_BYTES = RESPONSE_REGION_BYTES - QUERY_REGION_BYTES - READBACK_HEADER_BYTES - 16;
-export const RESPONSE_OK = 1;
-export const RESPONSE_FAILED = 2;
+// (the response region's layout: ../renderer_protocol.js)
 
 /**
  * Builds one batch at a time

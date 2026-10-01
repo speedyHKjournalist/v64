@@ -15,7 +15,8 @@ process.on("unhandledRejection", exn => { throw exn; });
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const C = await import("../../src/graphics_adapters/vmware_svga/svga_constants.js");
-const { d9wg_commands, OP, QUERY_REGION_BYTES } = await import("../../src/graphics_adapters/vmware_svga/svga3d_d9wg.js");
+const { d9wg_commands, OP } = await import("../../src/graphics_adapters/vmware_svga/svga3d_d9wg.js");
+const { QUERY_REGION_BYTES } = await import("../../src/graphics_adapters/renderer_protocol.js");
 
 const floppy = new Uint8Array(1474560);
 floppy.set([0xfa, 0xf4, 0xeb, 0xfd]);

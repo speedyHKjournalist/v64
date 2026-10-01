@@ -130,7 +130,7 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 # works with any bundle, including the ADVANCED-compiled v86_all.js.
 GRAPHICS_ADAPTER_PLUGINS=build/v86-bochs-vga.js build/v86-vmware-svga.js build/v86-virtio-gpu.js
 GRAPHICS_ADAPTER_COMMON=src/cjs.js src/const.js src/lib.js src/log.js src/bus.js src/display.js \
-	src/graphics_adapters/machine.js src/graphics_adapters/vga_core.js
+	src/graphics_adapters/machine.js src/graphics_adapters/vga_core.js src/graphics_adapters/renderer_protocol.js
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs

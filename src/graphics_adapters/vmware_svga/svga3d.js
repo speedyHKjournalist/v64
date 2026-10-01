@@ -28,9 +28,10 @@
 import { LOG_VGA } from "../../const.js";
 import { dbg_log } from "../../log.js";
 import * as C from "./svga_constants.js";
-import { D9WGWriter, OP, KIND, RESPONSE_REGION_OFFSET, QUERY_REGION_BYTES, QUERY_SLOT_BYTES,
-    READBACK_HEADER_BYTES, READBACK_MAX_BYTES, RESPONSE_OK } from "./svga3d_d9wg.js";
-import { DXDevice, GXWriter, GX } from "./svga3d_dx.js";
+import { D9WGWriter, OP, KIND } from "./svga3d_d9wg.js";
+import { RESPONSE_REGION_OFFSET, QUERY_REGION_BYTES, QUERY_SLOT_BYTES, READBACK_HEADER_BYTES, READBACK_MAX_BYTES,
+    RESPONSE_OK, GXWriter, GX } from "../renderer_protocol.js";
+import { DXDevice } from "./svga3d_dx.js";
 import { SURFACE_DESCS, SVGA3DBLOCKDESC_BUFFER, SVGA3DBLOCKDESC_DEPTH } from "./svga_formats.js";
 import { FORMATS, D3DFMT, VGPU9_DEVCAPS, PRIMITIVES, primitive_vertices, d3d_transform, d3d_light_type,
     D3DRS, SAME_RENDER_STATES, d3d_blend, D3DTSS, D3DSAMP, TEXTURE_OPS, d3d_texture_argument,
