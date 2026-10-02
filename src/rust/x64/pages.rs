@@ -134,7 +134,7 @@ const EVICTED: usize = 11;
 /// (x64_page_access calls), access cache fills of the VGA frame buffer, MOV
 /// CR3 keeping global translations, INVLPG flushing a large-page region,
 /// unaligned reads served from BOUNCE.
-pub static mut COUNTERS: [u64; 8] = [0; 8];
+pub static mut COUNTERS: [u64; 15] = [0; 15];
 pub const COUNT_ACTIVATIONS: usize = 0;
 pub const COUNT_INVLPG: usize = 1;
 pub const COUNT_CR_WRITES: usize = 2;
@@ -144,6 +144,18 @@ pub const COUNT_CR3_KEEP_GLOBAL: usize = 5;
 pub const COUNT_JAC_LARGE_FLUSH: usize = 6;
 /// (cores in workers) unaligned reads served from BOUNCE
 pub const COUNT_UNALIGNED_READS: usize = 7;
+/// control register writes by register (x64_page_stat 26..28), and those
+/// that flushed every translation (29)
+pub const COUNT_CR0_WRITES: usize = 8;
+pub const COUNT_CR3_WRITES: usize = 9;
+pub const COUNT_CR4_WRITES: usize = 10;
+pub const COUNT_FULL_FLUSHES: usize = 11;
+/// translations that walked the page tables (x64_page_stat 30); 32-bit TLB
+/// entries filled from x64 translations in compatibility mode (31), of which
+/// for pages it had already (32)
+pub const COUNT_WALKS: usize = 12;
+pub const COUNT_COMPAT_FILLS: usize = 13;
+pub const COUNT_COMPAT_REFILLS: usize = 14;
 #[repr(C, align(16))]
 struct Bounce([u8; 16]);
 static mut BOUNCE: Bounce = Bounce([0; 16]);
@@ -944,6 +956,7 @@ pub fn x64_page_stat(field: u32) -> f64 {
         22 => unsafe { TIME_IN_EXECUTE },
         23 => unsafe { TIME_FIRST_CALLS },
         25 => unsafe { COUNTERS[COUNT_UNALIGNED_READS] as f64 },
+        f @ 26..=32 => unsafe { COUNTERS[f as usize - 26 + COUNT_CR0_WRITES] as f64 },
         24 => unsafe { BYTES_COMPILED as f64 },
         // pages compiled at least once (while tracked)
         21 => r.pages.values().filter(|state| state.compiles != 0).count() as f64,

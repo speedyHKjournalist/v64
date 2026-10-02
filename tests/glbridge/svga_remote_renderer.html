@@ -31,10 +31,30 @@ const send = (type, number, bytes) => {
     if(bytes) message.set(bytes, 5);
     socket.send(message);
 };
+// every 10 s, to the harness's log: batches, bytes, and how long they took
+// from arriving to done (the device's fences wait for that)
+const arrived = new Map();
+let window_stats = { batches: 0, bytes: 0, latency: 0, max: 0, start: performance.now() };
+setInterval(() => {
+    const w = window_stats, seconds = (performance.now() - w.start) / 1000;
+    if(w.batches) console.warn("renderer-stats " + JSON.stringify({ seconds: +seconds.toFixed(1), batches: w.batches, mib: +(w.bytes / 1048576).toFixed(1),
+        latency_ms: +(w.latency / w.batches).toFixed(1), max_ms: +w.max.toFixed(1), pending: arrived.size }));
+    window_stats = { batches: 0, bytes: 0, latency: 0, max: 0, start: performance.now() };
+}, 10000);
 const renderer = V86SVGARenderer({
     post: message => {
         if(message.type === "write") send(TYPES.write, message.offset, message.bytes);
-        else if(message.type === "done") send(TYPES.done, message.seq);
+        else if(message.type === "done")
+        {
+            const t = arrived.get(message.seq);
+            if(t !== undefined)
+            {
+                arrived.delete(message.seq);
+                const ms = performance.now() - t;
+                window_stats.batches++; window_stats.latency += ms; window_stats.max = Math.max(window_stats.max, ms);
+            }
+            send(TYPES.done, message.seq);
+        }
         else if(message.type === "lost") socket.send(new Uint8Array([TYPES.lost, ...new TextEncoder().encode(message.reason)]));
     },
     listen: handler => { to_renderer = handler; },
@@ -47,6 +67,11 @@ socket.onopen = () => {
 };
 socket.onmessage = event => {
     const bytes = new Uint8Array(event.data);
+    if(bytes[0] === TYPES.submit_gx || bytes[0] === TYPES.submit_vx || bytes[0] === TYPES.submit)
+    {
+        arrived.set(new DataView(event.data).getUint32(1, true), performance.now());
+        window_stats.bytes += bytes.length;
+    }
     if(bytes[0] === TYPES.submit_gx || bytes[0] === TYPES.submit_vx)
     {
         to_renderer({ type: "submit", stream: bytes[0] === TYPES.submit_gx ? "gx" : "vx", seq: new DataView(event.data).getUint32(1, true), bytes: bytes.subarray(5) });

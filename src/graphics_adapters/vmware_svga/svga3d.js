@@ -190,6 +190,10 @@ export function SVGA3D(device, renderer)
     this.warnings = [];
     /** @type {!Object<number, number>} how often each command came (for the harnesses) */
     this.counts = {};
+    /** @type {!Object<number, number>} the batch bytes each command made (for the harnesses) */
+    this.bytes = {};
+    /** batch bytes sent so far */
+    this.bytes_sent = 0;
     /** guest-backed objects (level gb9 and up) */
     this.gb = !!(device.caps & C.SVGA_CAP_GBOBJECTS);
     /** @type {!Map<number, {type: number, size: number, mob: number, offset: number, handle: number, code: Uint8Array}>} GB shaders by shid */
@@ -296,12 +300,14 @@ SVGA3D.prototype.flush = function()
 {
     if(!this.writer.empty())
     {
+        this.bytes_sent += this.writer.size();
         const bytes = this.writer.finish(++this.frame, 0);
         const seq = ++this.submitted;
         this.renderer.post({ "type": "submit", "seq": seq, "bytes": bytes }, [bytes.buffer]);
     }
     if(this.gxw && !this.gxw.empty())
     {
+        this.bytes_sent += this.gxw.size();
         const bytes = this.gxw.finish();
         const seq = ++this.submitted;
         this.renderer.post({ "type": "submit", "seq": seq, "bytes": bytes, "stream": "gx" }, [bytes.buffer]);
@@ -407,6 +413,23 @@ SVGA3D.prototype.answer = function(offset, bytes)
  * @param {!Int32Array} p its body, after SVGA3dCmdHeader
  */
 SVGA3D.prototype.command = function(id, p)
+{
+    const before = this.bytes_written();
+    this.run_command(id, p);
+    this.bytes[id] = (this.bytes[id] || 0) + this.bytes_written() - before;
+};
+
+/** @return {number} batch bytes written so far (sent, and being written) */
+SVGA3D.prototype.bytes_written = function()
+{
+    return this.bytes_sent + this.writer.size() + (this.gxw ? this.gxw.size() : 0);
+};
+
+/**
+ * @param {number} id SVGA_3D_CMD_*
+ * @param {!Int32Array} p its body, after SVGA3dCmdHeader
+ */
+SVGA3D.prototype.run_command = function(id, p)
 {
     const f = new Float32Array(p.buffer, p.byteOffset, p.length);
     this.counts[id] = (this.counts[id] || 0) + 1;

@@ -2181,28 +2181,38 @@ pub unsafe fn translate_address(
     user: bool,
     side_effects: bool,
 ) -> OrPageFault<u32> {
-    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
-        return ia32e_translate(address, for_writing, user, side_effects);
-    }
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
-    if entry
+    let refused = entry
         & (TLB_VALID
             | if user { TLB_NO_USER } else { 0 }
             | if for_writing { TLB_READONLY } else { 0 })
-        != TLB_VALID
-    {
+        != TLB_VALID;
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // compatibility mode: the 32-bit TLB holds x64 translations of 32-bit
+        // linear addresses (fill_ia32e_tlb; data-only entries are good for
+        // data); 64-bit code never uses it
+        if refused || *x64_cs_long != 0 {
+            return ia32e_translate(address, for_writing, user, side_effects);
+        }
+        return Ok(((entry & !0xFFF ^ address) as u32).wrapping_sub(memory::mem8 as u32));
+    }
+    if refused {
         entry = do_page_walk(address, for_writing, user, side_effects)?.get();
     }
     Ok((entry & !0xFFF ^ address) as u32 - memory::mem8 as u32)
 }
 
 pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPageFault<(u32, bool)> {
-    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
-        return ia32e_translate(address, true, *cpl == 3, true).map(|address| (address, false));
-    }
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     let user = *cpl == 3;
-    if entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID {
+    let refused = entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID;
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // (compatibility mode: as translate_address)
+        if refused || *x64_cs_long != 0 {
+            return ia32e_translate(address, true, user, true).map(|address| (address, false));
+        }
+    }
+    else if refused {
         entry = do_page_walk(address, true, user, true)?.get();
     }
     Ok((
@@ -2452,6 +2462,7 @@ pub unsafe fn fill_ia32e_tlb(
     user: bool,
 ) {
     use crate::x64::paging::Access;
+    crate::x64::pages::COUNTERS[crate::x64::pages::COUNT_COMPAT_FILLS] += 1;
     // (extended RAM: its frame while cores share this thread; never 32-bit
     // code, and never a write entry for a page with page-tier code, so no
     // code-write notification; see crate::x64::extended::cache_frame)
@@ -2469,6 +2480,9 @@ pub unsafe fn fill_ia32e_tlb(
         },
     };
     let page = address >> 12;
+    if tlb_data[page as usize] != 0 {
+        crate::x64::pages::COUNTERS[crate::x64::pages::COUNT_COMPAT_REFILLS] += 1;
+    }
     if tlb_data[page as usize] == 0 {
         if valid_tlb_entries_count == VALID_TLB_ENTRY_MAX {
             clear_tlb();
@@ -2479,16 +2493,12 @@ pub unsafe fn fill_ia32e_tlb(
         valid_tlb_entries[valid_tlb_entries_count as usize] = page as i32;
         valid_tlb_entries_count += 1;
     }
+    let has_code = !extended && jit::page_needs_notification(Page::page_of(backing));
     let info = TLB_VALID
         | if access == Access::Write { 0 } else { TLB_READONLY }
         | if user { 0 } else { TLB_NO_USER }
         | if access == Access::Execute { 0 } else { TLB_IA32E_DATA }
-        | if !extended && jit::page_needs_notification(Page::page_of(backing)) {
-            TLB_HAS_CODE
-        }
-        else {
-            0
-        };
+        | if has_code { TLB_HAS_CODE } else { 0 };
     tlb_data[page as usize] =
         backing.wrapping_add(memory::mem8 as u32) as i32 ^ (page << 12) as i32 | info;
 }
@@ -2631,11 +2641,14 @@ pub fn check_tlb_invariants() {
 pub const DISABLE_EIP_TRANSLATION_OPTIMISATION: bool = false;
 
 pub unsafe fn read_imm8() -> OrPageFault<i32> {
-    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
-        return ia32e_fetch8();
-    }
     let eip = *instruction_pointer;
-    if DISABLE_EIP_TRANSLATION_OPTIMISATION || 0 != eip & !0xFFF ^ *last_virt_eip {
+    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // (compatibility mode with the fetch page cached: as below)
+        if *x64_cs_long != 0 || 0 != eip & !0xFFF ^ *last_virt_eip {
+            return ia32e_fetch8();
+        }
+    }
+    else if DISABLE_EIP_TRANSLATION_OPTIMISATION || 0 != eip & !0xFFF ^ *last_virt_eip {
         return read_imm8_uncached(eip);
     }
     // cached pages are plain RAM (see cache_fetch_page)
@@ -2672,14 +2685,13 @@ unsafe fn cache_fetch_page(eip: i32, phys: u32) {
 pub unsafe fn read_imm8s() -> OrPageFault<i32> { return Ok(read_imm8()? << 24 >> 24); }
 
 pub unsafe fn read_imm16() -> OrPageFault<i32> {
-    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
-        return Ok(read_imm8()? | read_imm8()? << 8);
-    }
     // Two checks in one comparison:
     // 1. Did the high 20 bits of eip change
     // or 2. Are the low 12 bits of eip 0xFFF (and this read crosses a page boundary)
+    // (IA-32e mode: compatibility mode with the fetch page cached only)
     if DISABLE_EIP_TRANSLATION_OPTIMISATION
         || (*instruction_pointer ^ *last_virt_eip) as u32 > 0xFFE
+        || crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 && *x64_cs_long != 0
     {
         return Ok(read_imm8()? | read_imm8()? << 8);
     }
@@ -2691,12 +2703,10 @@ pub unsafe fn read_imm16() -> OrPageFault<i32> {
 }
 
 pub unsafe fn read_imm32s() -> OrPageFault<i32> {
-    if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
-        return Ok(read_imm16()? | read_imm16()? << 16);
-    }
     // Analogue to the above comment
     if DISABLE_EIP_TRANSLATION_OPTIMISATION
         || (*instruction_pointer ^ *last_virt_eip) as u32 > 0xFFC
+        || crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 && *x64_cs_long != 0
     {
         return Ok(read_imm16()? | read_imm16()? << 16);
     }
@@ -3465,7 +3475,15 @@ unsafe fn ia32e_phys_eip() -> OrPageFault<u32> {
     )
     .map_err(|fault| crate::x64::system::raise(fault))?;
     match crate::x64::physical::ram_page(address & !4095) {
-        Ok(page) => Ok(page.backing | (address & 4095) as u32),
+        Ok(page) => {
+            let phys = page.backing | (address & 4095) as u32;
+            // compatibility mode: remember the page (get_phys_eip, read_imm*)
+            if *x64_cs_long == 0 {
+                *eip_phys = (phys ^ *instruction_pointer as u32) as i32;
+                *last_virt_eip = *instruction_pointer & !0xFFF;
+            }
+            Ok(phys)
+        },
         // code in extended RAM runs from its aperture address (interpreted:
         // nothing compiles from the mapped range)
         Err(_) if crate::x64::extended::contains(address) => {
@@ -3536,6 +3554,24 @@ unsafe fn ia32e_write128(addr: i32, value: reg128) -> OrPageFault<()> {
 
 pub unsafe fn get_phys_eip() -> OrPageFault<u32> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // compatibility mode: the last fetch page too (ia32e_phys_eip fills
+        // it; whatever may change its translation resets last_virt_eip)
+        let eip = *instruction_pointer;
+        if *x64_cs_long == 0 {
+            if 0 == eip & !0xFFF ^ *last_virt_eip {
+                return Ok((*eip_phys ^ eip) as u32);
+            }
+            // an entry a fetch made (not data-only: NX was checked), which
+            // is RAM (fill_ia32e_tlb makes none of another kind for fetches)
+            let entry = tlb_data[(eip as u32 >> 12) as usize];
+            let mask = TLB_VALID | TLB_IA32E_DATA | if *cpl == 3 { TLB_NO_USER } else { 0 };
+            if entry & mask == TLB_VALID {
+                let phys = ((entry & !0xFFF ^ eip) as u32).wrapping_sub(memory::mem8 as u32);
+                *eip_phys = (phys ^ eip as u32) as i32;
+                *last_virt_eip = eip & !0xFFF;
+                return Ok(phys);
+            }
+        }
         return ia32e_phys_eip();
     }
     let eip = *instruction_pointer;
@@ -4043,8 +4079,34 @@ pub unsafe fn virt_boundary_write32(low: u32, high: u32, value: i32) {
     memory::write8(high as u32, value >> 24);
 }
 
+/// Compatibility mode: the backing of `bytes` bytes at `addr` (not crossing a
+/// page) when the 32-bit TLB has the page for this access (writes: neither
+/// read-only nor with compiled code), else None. Entries are x64
+/// translations of 32-bit linear addresses (fill_ia32e_tlb), of RAM or an
+/// extended RAM frame: plain memory, possibly outside the guest's RAM range,
+/// so callers read and write the wasm memory directly.
+#[inline(always)]
+unsafe fn ia32e_compat_backing(addr: i32, bytes: u32, write: bool) -> Option<u32> {
+    if *x64_cs_long != 0 || (addr as u32 & 0xFFF) > 0x1000 - bytes {
+        return None;
+    }
+    let entry = tlb_data[(addr as u32 >> 12) as usize];
+    let mask = TLB_VALID
+        | if *cpl == 3 { TLB_NO_USER } else { 0 }
+        | if write { TLB_READONLY | TLB_HAS_CODE } else { 0 };
+    if entry & mask != TLB_VALID {
+        return None;
+    }
+    Some(((entry & !0xFFF ^ addr) as u32).wrapping_sub(memory::mem8 as u32))
+}
+#[inline(always)]
+unsafe fn compat_host(backing: u32) -> *mut u8 { memory::mem8.wrapping_add(backing as usize) }
+
 pub unsafe fn safe_read8(addr: i32) -> OrPageFault<i32> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 1, false) {
+            return Ok(*compat_host(backing) as i32);
+        }
         return ia32e_read(addr, 8).map(|value| value as i32);
     }
     Ok(memory::read8(translate_address_read(addr)?))
@@ -4052,6 +4114,9 @@ pub unsafe fn safe_read8(addr: i32) -> OrPageFault<i32> {
 
 pub unsafe fn safe_read16(addr: i32) -> OrPageFault<i32> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 2, false) {
+            return Ok(memory::read16_no_mmap_check(backing));
+        }
         return ia32e_read(addr, 16).map(|value| value as i32);
     }
     if addr & 0xFFF == 0xFFF {
@@ -4064,6 +4129,9 @@ pub unsafe fn safe_read16(addr: i32) -> OrPageFault<i32> {
 
 pub unsafe fn safe_read32s(addr: i32) -> OrPageFault<i32> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 4, false) {
+            return Ok(memory::read32_no_mmap_check(backing));
+        }
         return ia32e_read(addr, 32).map(|value| value as i32);
     }
     if addr & 0xFFF >= 0xFFD {
@@ -4080,6 +4148,9 @@ pub unsafe fn safe_read_f32(addr: i32) -> OrPageFault<f32> {
 
 pub unsafe fn safe_read64s(addr: i32) -> OrPageFault<u64> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 8, false) {
+            return Ok(std::ptr::read_unaligned(compat_host(backing) as *const u64));
+        }
         return ia32e_read(addr, 64);
     }
     if addr & 0xFFF > 0x1000 - 8 {
@@ -4106,6 +4177,10 @@ pub unsafe fn safe_read128s(addr: i32) -> OrPageFault<reg128> {
 
 pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 1, true) {
+            memory::write8_no_mmap_or_dirty_check(backing, value);
+            return Ok(());
+        }
         return ia32e_write(addr, 8, value as u32 as u64);
     }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
@@ -4126,6 +4201,10 @@ pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
 
 pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 2, true) {
+            memory::write16_no_mmap_or_dirty_check(backing, value);
+            return Ok(());
+        }
         return ia32e_write(addr, 16, value as u32 as u64);
     }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
@@ -4150,6 +4229,10 @@ pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
 
 pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 4, true) {
+            memory::write32_no_mmap_or_dirty_check(backing, value);
+            return Ok(());
+        }
         return ia32e_write(addr, 32, value as u32 as u64);
     }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
@@ -4177,6 +4260,10 @@ pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
 
 pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        if let Some(backing) = ia32e_compat_backing(addr, 8, true) {
+            memory::write64_no_mmap_or_dirty_check(backing, value);
+            return Ok(());
+        }
         return ia32e_write(addr, 64, value);
     }
     if addr & 0xFFF > 0x1000 - 8 {
@@ -4279,6 +4366,11 @@ unsafe fn read_write_ram(phys_addr: u32, bytes: u32, instruction: &dyn Fn(i32) -
 #[inline(always)]
 pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // (compatibility mode, the page in the 32-bit TLB: as below)
+        if let Some(backing) = ia32e_compat_backing(addr, 1, true) {
+            read_write_ram(backing, 1, instruction);
+            return;
+        }
         let _ = wide_read_write(addr, 8, instruction);
         return;
     }
@@ -4311,6 +4403,11 @@ pub unsafe fn safe_read_write16_checked(
     instruction: &dyn Fn(i32) -> i32,
 ) -> OrPageFault<()> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // (compatibility mode, the page in the 32-bit TLB: as below)
+        if let Some(backing) = ia32e_compat_backing(addr, 2, true) {
+            read_write_ram(backing, 2, instruction);
+            return Ok(());
+        }
         return wide_read_write(addr, 16, instruction);
     }
     let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
@@ -4343,6 +4440,11 @@ pub unsafe fn safe_read_write16_checked(
 #[inline(always)]
 pub unsafe fn safe_read_write32(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
+        // (compatibility mode, the page in the 32-bit TLB: as below)
+        if let Some(backing) = ia32e_compat_backing(addr, 4, true) {
+            read_write_ram(backing, 4, instruction);
+            return;
+        }
         let _ = wide_read_write(addr, 32, instruction);
         return;
     }

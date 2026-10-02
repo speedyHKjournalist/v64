@@ -37,6 +37,12 @@
 // (WIN_LAUNCHER_ADMIN=1: elevated, through UAC once, so they are too).
 // WIN_NO_PROBE=1: no qualification probe (its Run dialog takes the focus from
 // full-screen programs), and no signing in again unless a password box shows.
+// "savestate <file>": the machine saved to <file>.state, with what the guest
+// wrote to its disks (<file>.hda.ovl, <file>.hdb.ovl) and the harness's own
+// (<file>.json); WIN_STATE_LOAD=<file> starts from there instead of booting
+// (same WIN_* machine settings; the session is signed in, the launcher runs).
+// WIN_RATES=<s>: every <s> seconds, the SVGA3D commands per second
+// ("svga3d-rates": presents among them, for frame rates).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -76,19 +82,23 @@ const hdb_stat = hdb_path && fs.statSync(hdb_path);
 const hdb = hdb_path ? new ReadOnlyOverlayDisk(hdb_path) : tools;
 // Overlay file: "V86OVL1\0", image size (u64), sector count (u32), the
 // sector numbers (u32 each), then their contents
-if(process.env.WIN_OVERLAY_LOAD)
+function load_overlay(disk, filename)
 {
-    const file = fs.readFileSync(process.env.WIN_OVERLAY_LOAD);
+    const file = fs.readFileSync(filename);
     assert.equal(file.toString("latin1", 0, 8), "V86OVL1\0", "overlay file");
-    assert.equal(Number(file.readBigUInt64LE(8)), source.byteLength, "overlay of this image");
+    assert.equal(Number(file.readBigUInt64LE(8)), disk.byteLength, "overlay of this image");
     const count = file.readUInt32LE(16);
     const sectors = new Uint32Array(file.buffer.slice(file.byteOffset + 20, file.byteOffset + 20 + count * 4));
     const bytes = new Uint8Array(file.buffer, file.byteOffset + 20 + count * 4, count * 512);
-    source.set_state([1, source.byteLength, sectors, bytes]);
+    disk.set_state([1, disk.byteLength, sectors, bytes]);
 }
-function save_overlay(filename)
+const state_load = process.env.WIN_STATE_LOAD && path.resolve(process.env.WIN_STATE_LOAD);
+if(state_load) load_overlay(source, state_load + ".hda.ovl");
+else if(process.env.WIN_OVERLAY_LOAD) load_overlay(source, process.env.WIN_OVERLAY_LOAD);
+if(state_load && hdb_path && fs.existsSync(state_load + ".hdb.ovl")) load_overlay(hdb, state_load + ".hdb.ovl");
+function save_overlay(filename, disk = source)
 {
-    const [, size, sectors, bytes] = source.get_state();
+    const [, size, sectors, bytes] = disk.get_state();
     const header = Buffer.alloc(20);
     header.write("V86OVL1\0", 0, "latin1");
     header.writeBigUInt64LE(BigInt(size), 8);
@@ -142,14 +152,31 @@ async function profile_window()
     await profiler.post("Profiler.start");
     // page functions are named x64_page_<linear page>: name the guest module
     // of each (<out>/modules.json, for offline profiles by guest module)
+    // (compatibility-mode code: the 32-bit compiler's t0_<linear page>)
     if(!cpu) return;
-    const limit = performance.now() + 300;
-    for(const node of profile.nodes)
+    const self = new Map(), by_id = new Map(profile.nodes.map(node => [node.id, node]));
+    let total = 0;
+    profile.samples.forEach((id, i) => {
+        const d = profile.timeDeltas[i] || 0, name = by_id.get(id).callFrame.functionName;
+        total += d;
+        const match = name.match(/^(?:x64_page_|t0_)([0-9a-f]+)$/);
+        if(match) self.set(match[1], (self.get(match[1]) || 0) + d);
+    });
+    const limit = performance.now() + 2000;
+    for(const [page] of [...self].sort((a, b) => b[1] - a[1]))
     {
-        const match = node.callFrame.functionName.match(/^x64_page_([0-9a-f]+)$/);
-        if(match && !page_modules[match[1]] && performance.now() < limit) page_modules[match[1]] = guest_module(BigInt("0x" + match[1]));
+        if(page_modules[page] === undefined && performance.now() < limit) page_modules[page] = guest_module(BigInt("0x" + page));
     }
     fs.writeFileSync(path.join(out, "modules.json"), JSON.stringify(page_modules, null, 1));
+    // the generated code's time by guest module (% of the window)
+    const modules = new Map();
+    for(const [page, t] of self)
+    {
+        const m = page_modules[page], name = m ? m.replace(/\+0x[0-9a-f]+$/, "") : BigInt("0x" + page) >= 0xFFFF800000000000n ? "kernel ?" : "user ?";
+        modules.set(name, (modules.get(name) || 0) + t);
+    }
+    console.log("X64_WIN_PROFILE_MODULES " + JSON.stringify([...modules].sort((a, b) => b[1] - a[1]).slice(0, 20)
+        .map(([name, t]) => [name, +(100 * t / total).toFixed(2)])));
 }
 // (the most recent address spaces first)
 const page_modules = {}, seen_cr3 = new Set(), module_headers = new Map();
@@ -422,7 +449,7 @@ function observe_svga()
         svga3d_next = performance.now() + 30000;
         const counts = JSON.stringify(svga.svga3d.counts);
         const activity = counts + JSON.stringify(svga.stats);
-        if(activity !== svga3d_seen) { svga3d_seen = activity; event("svga3d", {counts: svga.svga3d.counts, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size, device: svga.stats, warnings: svga.svga3d.warnings}); }
+        if(activity !== svga3d_seen) { svga3d_seen = activity; event("svga3d", {counts: svga.svga3d.counts, bytes: svga.svga3d.bytes, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size, device: svga.stats, warnings: svga.svga3d.warnings}); }
     }
 }
 let svga3d_next = 0, svga3d_seen = "";
@@ -474,7 +501,7 @@ function stats()
 {
     const ex = cpu.wm.exports;
     const tier = ex.x64_page_stat ? Object.fromEntries([["compiled", 0], ["native", 1], ["retries", 2], ["unknown", 3], ["steps", 4], ["invalidated", 5],
-        ["failed", 7], ["recompiled", 8], ["evicted", 11], ["live", 12], ["activations", 13], ["invlpg", 14], ["cr_writes", 15], ["access_misses", 16], ["lfb_fills", 17], ["cr3_keep_global", 18], ["jac_large_flush", 19], ["unaligned_reads", 25], ["distinct", 21], ["ms_in_calls", 20], ["ms_in_execute", 22], ["ms_first_calls", 23], ["bytes_compiled", 24]]
+        ["failed", 7], ["recompiled", 8], ["evicted", 11], ["live", 12], ["activations", 13], ["invlpg", 14], ["cr_writes", 15], ["access_misses", 16], ["lfb_fills", 17], ["cr3_keep_global", 18], ["jac_large_flush", 19], ["unaligned_reads", 25], ["distinct", 21], ["ms_in_calls", 20], ["ms_in_execute", 22], ["ms_first_calls", 23], ["bytes_compiled", 24], ["cr0_writes", 26], ["cr3_writes", 27], ["cr4_writes", 28], ["full_flushes", 29], ["walks", 30], ["compat_fills", 31], ["compat_refills", 32]]
         .map(([name, i]) => [name, ex.x64_page_stat(i)])) : null;
     const d = cpu.get_diagnostics();
     return {page_tier: tier, cores: d.cores.map(core => ({state: core.state, ip: core.linear_ip, cs: core.cs, retired: core.retired_instructions, halted: core.halted})),
@@ -525,6 +552,16 @@ function sample_rip()
     const key = compat ? "compat:0x" + rip.toString(16) :
         kernel_base !== null && rip >= kernel_base && rip < kernel_base + 0x1000000n ? "nt+0x" + (rip - kernel_base).toString(16) : "0x" + rip.toString(16);
     rip_samples.set(key, (rip_samples.get(key) || 0) + 1);
+    if(!rip_raw.has(key)) rip_raw.set(key, rip);
+}
+// (a sampled key's RIP, for its code bytes in the report)
+const rip_raw = new Map();
+function rip_bytes(key)
+{
+    const rip = rip_raw.get(key);
+    if(rip === undefined) return null;
+    const at = physical(current_cr3(), rip - 16n);
+    return at === null ? null : Buffer.from(cpu.mem8.subarray(at, at + 32)).toString("hex");
 }
 // WIN_USER_TRACE=1: exceptions taken from user mode (compatibility mode: all;
 // 64-bit: all but #PF), with the code at the faulting RIP, read while the
@@ -684,11 +721,30 @@ try
     };
     const run_cores = cpu.run_cores.bind(cpu);
     cpu.run_cores = () => { try { return run_cores(); } catch(error) { execution_error = error; vm.stop(); return 100; } };
+    let resumed = null;
+    if(state_load)
+    {
+        const fd = fs.openSync(state_load + ".state", "r"), size = fs.fstatSync(fd).size;
+        await vm.restore_state_stream({size, read: async (offset, length) => {
+            const bytes = new Uint8Array(length);
+            for(let done = 0; done < length;) done += fs.readSync(fd, bytes, done, length - done, offset + done);
+            return bytes;
+        }});
+        fs.closeSync(fd);
+        resumed = JSON.parse(fs.readFileSync(state_load + ".json", "utf8"));
+        launch_serial = resumed.launch_serial;
+        launcher_ready = resumed.launcher_ready;
+        event("state-loaded", {file: state_load, bytes: size});
+    }
     vm.run();
     const deadline = performance.now() + +(process.env.WIN_TIMEOUT_MS || 3600000);
     let next_profile = performance.now() + 1000 * +(process.env.WIN_CPU_PROFILE || 0);
     let next_report = 0, next_samples = performance.now() + 60000, next_shot = 0, resets = 0, signed_in = false, probe_sent = 0, text_seen = "";
     let shutdown_at = 0, shutdown_sent = false, shutdown_deadline = 0;
+    // (a loaded state is signed in, past the desktop)
+    if(resumed) { signed_in = true; probe_sent = Infinity; report.desktop_s = elapsed(); }
+    let next_rates = performance.now() + 1000 * +(process.env.WIN_RATES || 0), rates_counts = null, rates_at = performance.now(), rates_retired = 0;
+    let rate_samples = {n: 0, halted: 0, backlog: 0, waiting: 0};
     // a line of command.txt (see the top of this file), or of WIN_SETUP
     // (a bad line is reported, not fatal: the guest's state is worth more)
     const command = line => run_one(line).catch(error => {
@@ -713,6 +769,25 @@ try
         // an absolute position on a screen of the given size (the VMware
         // backdoor's mouse, which takes over from PS/2 once its driver runs)
         else if(verb === "pointer") vm.bus.send("mouse-absolute", argument.split(/\s+/).map(Number));
+        // the machine into files, to start from later (WIN_STATE_LOAD)
+        // (streamed: with the GPU's contents a state passes 4 GiB)
+        else if(verb === "savestate")
+        {
+            const file = path.resolve(argument);
+            await vm.stop();
+            let bytes = 0;
+            try
+            {
+                const fd = fs.openSync(file + ".state", "w");
+                try { await vm.save_state_stream(chunk => { fs.writeSync(fd, chunk); bytes += chunk.length; }); }
+                finally { fs.closeSync(fd); }
+                save_overlay(file + ".hda.ovl");
+                if(hdb_path) save_overlay(file + ".hdb.ovl", hdb);
+                fs.writeFileSync(file + ".json", JSON.stringify({launch_serial, launcher_ready, signed_in: true}));
+            }
+            finally { vm.run(); }
+            event("savestate", {file, bytes});
+        }
         // a snapshot saved and restored in place (the disks are not in it, and unchanged)
         else if(verb === "snapshot")
         {
@@ -791,6 +866,37 @@ try
         }
         poll_user_trace();
         observe_svga();
+        // WIN_RATES: the SVGA3D commands per second since the last time;
+        // the guest's MIPS, how often its core was halted (sampled each
+        // loop) and the renderer's backlog (batches sent, not yet done)
+        const svga_rates = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+        if(+process.env.WIN_RATES && svga_rates && svga_rates.svga3d)
+        {
+            const s3 = svga_rates.svga3d, core = cpu.get_diagnostics().cores[0];
+            rate_samples.n++;
+            if(core.halted) rate_samples.halted++;
+            rate_samples.backlog += s3.submitted - s3.completed;
+            if(s3.completions.length) rate_samples.waiting++;
+            if(performance.now() >= next_rates)
+            {
+                const now = performance.now(), counts = {...s3.counts}, seconds = (now - rates_at) / 1000;
+                const retired = Number(core.retired_instructions);
+                if(rates_counts)
+                {
+                    const rates = Object.entries(counts).map(([id, n]) => [id, (n - (rates_counts[id] || 0)) / seconds]).filter(r => r[1] > 0)
+                        .sort((a, b) => b[1] - a[1]).slice(0, 16).map(([id, r]) => [+id, +r.toFixed(2)]);
+                    const frames = ((counts[1127] || 0) - (rates_counts[1127] || 0)) / seconds;
+                    event("svga3d-rates", {s: +seconds.toFixed(1), frames: +frames.toFixed(2), mips: +((retired - rates_retired) / seconds / 1e6).toFixed(1),
+                        halted: +(rate_samples.halted / rate_samples.n).toFixed(2), completions_pending: +(rate_samples.waiting / rate_samples.n).toFixed(2),
+                        backlog: +(rate_samples.backlog / rate_samples.n).toFixed(1), rates});
+                }
+                rates_counts = counts;
+                rates_retired = retired;
+                rates_at = now;
+                rate_samples = {n: 0, halted: 0, backlog: 0, waiting: 0};
+                next_rates = now + 1000 * +process.env.WIN_RATES;
+            }
+        }
         if(profiler && performance.now() >= next_profile)
         {
             next_profile = performance.now() + 1000 * +process.env.WIN_CPU_PROFILE;
@@ -798,9 +904,10 @@ try
         }
         const text = text_screen();
         if(text && text !== text_seen) { text_seen = text; event("text", {text}); }
+        // (WIN_SHOT_MS: how often; a screenshot of 1280x1024 costs the host a few per cent at 2 s)
         if(performance.now() >= next_shot)
         {
-            next_shot = performance.now() + 2000;
+            next_shot = performance.now() + +(process.env.WIN_SHOT_MS || 2000);
             screenshot(false);
         }
         if(cpu.last_reset && cpu.last_reset.count !== resets)
@@ -815,6 +922,19 @@ try
             next_samples = performance.now() + 60000;
             const top = [...rip_samples].sort((a, b) => b[1] - a[1]).slice(0, 12);
             console.log("X64_WIN_RIPS " + JSON.stringify(top));
+            // the code around the three most sampled RIPs (16 bytes before, 16 from)
+            console.log("X64_WIN_RIP_BYTES " + JSON.stringify(top.slice(0, 3).map(([key]) => [key, rip_bytes(key)])));
+            // the samples by guest module (image name and the offset of the hottest RIP in it)
+            const modules = new Map();
+            for(const [key, n] of rip_samples)
+            {
+                const rip = rip_raw.get(key);
+                let name = "?";
+                try { const m = rip === undefined ? null : guest_module(rip); name = m ? m.replace(/\+0x[0-9a-f]+$/, "") : key.startsWith("nt+") ? "nt" : "?"; } catch(e) {}
+                modules.set(name, (modules.get(name) || 0) + n);
+            }
+            console.log("X64_WIN_RIP_MODULES " + JSON.stringify([...modules].sort((a, b) => b[1] - a[1]).slice(0, 16)));
+            rip_raw.clear();
             if(port_counts.size)
             {
                 console.log("X64_WIN_PORTS " + JSON.stringify([...port_counts].sort((a, b) => b[1] - a[1]).slice(0, 16)));
