@@ -395,7 +395,20 @@ static void result(const char *name, const unsigned char *bytes, int length, int
             }
         }
     }
-    else bad = max > tolerance;
+    else
+    {
+        bad = max > tolerance;
+        // (numbers: the first word that differs, for the log)
+        for(int i = 0; i + 4 <= length && bad; i += 4)
+        {
+            const unsigned int *g = (const unsigned int *)(bytes + i), *r = (const unsigned int *)(ref + i);
+            if(*g != *r)
+            {
+                printf("GLTEST %s first difference at byte %d: got %u (0x%x), expected %u (0x%x)\n", name, i, *g, *g, *r, *r);
+                break;
+            }
+        }
+    }
     // (a few pixels on edges may differ: GPUs need not rasterize alike)
     int ok = !error && bad <= (image ? 8 : 0);
     printf("GLTEST %s %s max=%d bad=%d", name, ok ? "ok" : "FAIL", max, bad);

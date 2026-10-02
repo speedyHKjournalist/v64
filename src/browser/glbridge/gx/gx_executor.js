@@ -80,6 +80,9 @@
     const VIEW_BASE_RESOURCE = 64, VIEW_BASES = 192;
     const INVALID = 0xFFFFFFFF;
     const SHADER_VS = 1, SHADER_PS = 2, SHADER_GS = 3, SHADER_HS = 4, SHADER_DS = 5, SHADER_CS = 6;
+    // SVGA3dQueryType: stream output statistics (all streams, stream 0-3)
+    // and overflow predicates (all, stream 0-3); GX counts stream 0's
+    const SO_QUERIES = new Set([5, 6, 8, 9, 10, 11, 12, 13, 14, 15]);
     const COTABLE = { RTVIEW: 0, DSVIEW: 1, SRVIEW: 2, ELEMENTLAYOUT: 3, BLENDSTATE: 4, DEPTHSTENCIL: 5,
         RASTERIZERSTATE: 6, SAMPLER: 7, STREAMOUTPUT: 8, DXQUERY: 9, DXSHADER: 10, UAVIEW: 11 };
 
@@ -134,6 +137,16 @@
 
     function isDepthFormat(format) {
         return format.startsWith("depth") || format === "stencil8";
+    }
+
+    /** A WebGPU format's family: its sRGB twin views the same texture */
+    function family(format) {
+        return format.replace(/-srgb$/, "");
+    }
+
+    /** A format's typeless group (D3D's): the channels and their sizes, not their type */
+    function typelessGroup(format) {
+        return format.replace(/(unorm|snorm|uint|sint|float|ufloat)(-srgb)?$/, "");
     }
 
     function hasStencil(format) {
@@ -324,6 +337,89 @@
             return { gpu: f[0], can: f[1], vertex: f[2], bw: f[3], bh: f[4], bytes: f[5] };
         }
 
+        /** The table's first SVGA format of a WebGPU format, as formatOf gives it */
+        gpuInfo(gpu) {
+            if (!this.gpuInfos) this.gpuInfos = new Map();
+            if (!this.gpuInfos.has(gpu)) {
+                const at = Object.keys(this.formats).find(k => this.formats[k][0] === gpu);
+                this.gpuInfos.set(gpu, at === undefined ? null : this.formatOf(at));
+            }
+            return this.gpuInfos.get(gpu);
+        }
+
+        // ------------------------------------------------------------------
+        // Format aliases. A surface of a TYPELESS format (Mesa's svga makes
+        // most of them so) is one WebGPU texture of one format, but its
+        // views may be of any format of its texel layout (R32G32B32A32_UINT
+        // of R32G32B32A32_FLOAT's texture), which WebGPU does not allow. Such
+        // a view gets a texture of its own format's family, an alias; the
+        // contents follow the family used last, copied raw (through a buffer)
+        // when another family is used. (S.valid: the families that have them)
+
+        /**
+         * The texture that holds S as `format` (a WebGPU format), made
+         * current; `write`: the others are stale after
+         * @return {?{texture: !GPUTexture, views: !Map}} S itself for its own
+         * family; null where no alias can be (other texel sizes, depth,
+         * compressed): the caller uses S's texture as before
+         */
+        textureFor(S, format, write) {
+            if (!S.texture) return null;
+            const fam = family(format), own = family(S.f.gpu);
+            let entry = S;
+            if (fam !== own) {
+                const f = this.gpuInfo(fam);
+                if (!f || f.bytes !== S.f.bytes || f.bw !== 1 || f.bh !== 1 || S.f.bw !== 1 || S.f.bh !== 1 ||
+                    typelessGroup(fam) !== typelessGroup(own) ||
+                    isDepthFormat(fam) || isDepthFormat(own) || f.can.includes("e") || S.f.can.includes("e")) return null;
+                if (!S.aliases) S.aliases = new Map();
+                entry = S.aliases.get(fam);
+                if (!entry) {
+                    const t = S.texture;
+                    const descriptor = { size: [t.width, t.height, t.depthOrArrayLayers], dimension: t.dimension, format: fam,
+                        mipLevelCount: t.mipLevelCount,
+                        usage: TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.COPY_DST |
+                            (f.can.includes("r") && (t.usage & TEXTURE_USAGE.RENDER_ATTACHMENT) ? TEXTURE_USAGE.RENDER_ATTACHMENT : 0) |
+                            (STORAGE_FORMATS.has(fam) && S.uav ? TEXTURE_USAGE.STORAGE_BINDING : 0) };
+                    if (SRGB[fam]) descriptor.viewFormats = [SRGB[fam]];
+                    entry = { texture: this.device.createTexture(descriptor), views: new Map(), family: fam };
+                    S.aliases.set(fam, entry);
+                }
+            }
+            if (S.aliases) {
+                if (!S.valid) S.valid = new Set([own]);
+                if (!S.valid.has(fam)) {
+                    const from = [...S.valid][0];
+                    this.copyRaw(S, from === own ? S.texture : S.aliases.get(from).texture, entry.texture);
+                    S.valid.add(fam);
+                }
+                if (write) S.valid = new Set([fam]);
+            }
+            return entry;
+        }
+
+        /** S's own texture made current (copies, uploads, readbacks use it) */
+        primary(S, write) {
+            if (S && S.aliases) this.textureFor(S, S.f.gpu, write);
+        }
+
+        /** Every image of `from` into `to`, as bytes (formats of the same texel size) */
+        copyRaw(S, from, to) {
+            this.endPass();
+            const encoder = this.encoder();
+            const bytes = S.f.bytes;
+            for (let mip = 0; mip < from.mipLevelCount; mip++) {
+                const w = Math.max(1, from.width >> mip), h = Math.max(1, from.height >> mip);
+                const layers = from.dimension === "3d" ? Math.max(1, from.depthOrArrayLayers >> mip) : from.depthOrArrayLayers;
+                const bytesPerRow = align(w * bytes, 256);
+                const buffer = this.device.createBuffer({ size: bytesPerRow * h * layers, usage: BUFFER_USAGE.COPY_SRC | BUFFER_USAGE.COPY_DST });
+                this.transient.push(buffer);
+                encoder.copyTextureToBuffer({ texture: from, mipLevel: mip }, { buffer, bytesPerRow, rowsPerImage: h }, [w, h, layers]);
+                encoder.copyBufferToTexture({ buffer, bytesPerRow, rowsPerImage: h }, { texture: to, mipLevel: mip }, [w, h, layers]);
+            }
+            this.stats.aliasCopies = (this.stats.aliasCopies || 0) + 1;
+        }
+
         defineSurface(b) {
             const [sid, format, flags, flags2, width, height, depth, mips, layers, samples, cube] = b;
             const old = this.surfaces.get(sid);
@@ -367,6 +463,8 @@
             };
             if (SRGB[f.gpu]) descriptor.viewFormats = [SRGB[f.gpu]];
             s.volume = volume;
+            // (UAVs of it may be of another format: format aliases)
+            s.uav = !!(flags2 & SURFACE2_BIND_UAVIEW) && !multisampled;
             s.texture = this.device.createTexture(descriptor);
             s.gpuMips = descriptor.mipLevelCount;
             // "X" formats read as opaque: their alpha starts at 1
@@ -376,6 +474,8 @@
         releaseSurface(s) {
             if (s.soFilled) s.soFilled.destroy();
             s.soFilled = null;
+            if (s.aliases) for (const alias of s.aliases.values()) alias.texture.destroy();
+            s.aliases = s.valid = null;
             if (s.buffer) s.buffer.destroy();
             if (s.texture) s.texture.destroy();
             s.buffer = s.texture = null;
@@ -407,6 +507,7 @@
                 return;
             }
             if (!s.texture || mip >= s.gpuMips) return;
+            this.primary(s, true);
             // (multisampled surfaces: their samples are not in guest memory; zeros, which is what a new one has, are no news)
             if (s.samples > 1) {
                 if (!data.every(b => b === 0)) this.warn("upload-ms", "uploads into multisampled surfaces are not supported");
@@ -566,6 +667,7 @@ struct Box { x: u32, y: u32, w: u32, pad: u32 }
                 }, () => fail()));
                 return;
             }
+            this.primary(s, false);
             if (!s.texture || s.samples > 1 || isDepthFormat(s.f.gpu) && s.f.gpu !== "depth32float" && s.f.gpu !== "depth16unorm") {
                 this.warn("readback" + s.format, "reading back format " + s.format + " is not supported");
                 return fail();
@@ -608,6 +710,7 @@ struct Box { x: u32, y: u32, w: u32, pad: u32 }
         }
 
         clearTexture(s, color) {
+            this.primary(s, true);
             for (let layer = 0; layer < (s.volume ? 1 : s.layers); layer++) {
                 this.endPass();
                 const pass = this.encoder().beginRenderPass({ colorAttachments: [{
@@ -642,7 +745,25 @@ struct Box { x: u32, y: u32, w: u32, pad: u32 }
 
         copyTexture(S, sLayer, sMip, sx, sy, sz, D, dLayer, dMip, dx, dy, dz, w, h, d) {
             if (sMip >= S.gpuMips || dMip >= D.gpuMips) return;
-            const sameFamily = S.f.gpu === D.f.gpu || SRGB[S.f.gpu] === D.f.gpu;
+            this.primary(S, false);
+            this.primary(D, true);
+            // (formats of one texel layout: D's alias of S's family takes the bytes)
+            let sameFamily = S.f.gpu === D.f.gpu || SRGB[S.f.gpu] === D.f.gpu;
+            if (!sameFamily && S.ss[0] === 1 && D.ss[0] === 1) {
+                const alias = this.textureFor(D, S.f.gpu, true);
+                if (alias) {
+                    const sl = this.level(S, sMip), dl = this.level(D, dMip);
+                    w = Math.min(w, sl.width - sx, dl.width - dx);
+                    h = Math.min(h, sl.height - sy, dl.height - dy);
+                    d = Math.max(1, Math.min(d, S.volume ? sl.depth - sz : 1, D.volume ? dl.depth - dz : 1));
+                    if (w <= 0 || h <= 0) return;
+                    this.endPass();
+                    this.encoder().copyTextureToTexture(
+                        { texture: S.texture, mipLevel: sMip, origin: [sx, sy, S.volume ? sz : sLayer] },
+                        { texture: alias.texture, mipLevel: dMip, origin: [dx, dy, D.volume ? dz : dLayer] }, [w, h, d]);
+                    return;
+                }
+            }
             const sl = this.level(S, sMip), dl = this.level(D, dMip);
             w = Math.min(w, sl.width - sx, dl.width - dx);
             h = Math.min(h, sl.height - sy, dl.height - dy);
@@ -671,6 +792,7 @@ struct Box { x: u32, y: u32, w: u32, pad: u32 }
         share(sid, handle, toPeer) {
             const s = this.surfaces.get(sid);
             const peer = this.peer && this.peer.resource(handle);
+            if (s) this.primary(s, !toPeer);
             if (!s || !s.texture || !peer || !peer.gpuTexture) {
                 if (s && s.buffer) this.warn("share-buffer", "a buffer shared by DX and legacy 3D");
                 else this.warn("share-missing", "a shared surface is missing on one side");
@@ -727,6 +849,8 @@ struct Box { x: u32, y: u32, w: u32, pad: u32 }
          * Draw a rectangle of a texture into one of another, scaled
          */
         blit(S, sLayer, sMip, [sl, st, sr, sb], D, dLayer, dMip, [dl, dt, dr, db], linear, opaque) {
+            this.primary(S, false);
+            this.primary(D, true);
             const format = D.f.gpu;
             if (isDepthFormat(format) || isDepthFormat(S.f.gpu)) return this.warn("blit-depth", "blits of depth surfaces are not supported");
             const kind = sampleKind(S.f.gpu);
@@ -975,10 +1099,13 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                         if (S && S.buffer && target.offset !== INVALID) this.device.queue.writeBuffer(this.soFilled(S), 0, Uint32Array.of(target.offset));
                     }
                     return;
-                case DX.SET_UA_VIEWS:
-                    // splice index (where the targets end), then a view per slot
-                    for (let i = 0; i < 64; i++) st.uavs[i] = i + 1 < p.length ? p[i + 1] : INVALID;
+                case DX.SET_UA_VIEWS: {
+                    // splice index (where the targets end: the shaders' first
+                    // UAV register), then the views from that register on
+                    const splice = Math.min(p[0], 64);
+                    for (let i = 0; i < 64; i++) st.uavs[i] = i >= splice && i - splice + 1 < p.length ? p[i - splice + 1] : INVALID;
                     return;
+                }
                 case DX.SET_CS_UA_VIEWS:
                     for (let i = 0; i + 1 < p.length && p[0] + i < 64; i++) st.csUavs[p[0] + i] = p[i + 1];
                     return;
@@ -1118,6 +1245,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         resolve(dst, dstSub, src, srcSub) {
             const D = this.surfaces.get(dst), S = this.surfaces.get(src);
             if (!D || !S || !D.texture || !S.texture || S.ss[0] <= 1 || D.ss[0] !== 1) return;
+            this.primary(S, false);
+            this.primary(D, true);
             const [dMip, dLayer] = subresource(D, dstSub);
             const sLayer = Math.min(srcSub, S.layers - 1);
             const format = D.f.gpu, kind = sampleKind(S.f.gpu);
@@ -1185,7 +1314,14 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const pass = this.encoder().beginRenderPass({ colorAttachments: [{
                 view: this.attachmentView(S, view, f.gpu || S.f.gpu),
                 loadOp: "clear", storeOp: "store",
-                clearValue: kind === "float" ? color : color.map(v => Math.trunc(v)) }] });
+                // (integers: Mesa's svga sends a UINT target's values as
+                // its signed ints, (float)(int), -16 for 0xFFFFFFF0: those
+                // wrap; the rest saturate, as D3D's conversion)
+                clearValue: kind === "float" ? color : color.map(v => {
+                    v = Math.trunc(v);
+                    if (kind === "uint") return v < 0 ? (Math.max(v, -0x80000000) | 0) >>> 0 : Math.min(v, 0xFFFFFFFF);
+                    return Math.max(-0x80000000, Math.min(0x7FFFFFFF, v));
+                }) }] });
             pass.end();
         }
 
@@ -1213,12 +1349,15 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         /** A view of one mip level and layer, to render into */
         attachmentView(S, view, format) {
             const layer = S.volume ? 0 : Math.min(view.first, S.layers - 1);
+            // (drawn into: the format's texture is current from here on)
+            const T = this.textureFor(S, format, true) || S;
+            if (T === S && format !== S.f.gpu && SRGB[S.f.gpu] !== format) format = S.f.gpu;
             const key = "a:" + format + ":" + view.mip + ":" + layer;
-            let v = S.views.get(key);
+            let v = T.views.get(key);
             if (!v) {
-                v = S.texture.createView({ format, dimension: "2d", baseMipLevel: Math.min(view.mip, S.gpuMips - 1), mipLevelCount: 1,
+                v = T.texture.createView({ format, dimension: "2d", baseMipLevel: Math.min(view.mip, S.gpuMips - 1), mipLevelCount: 1,
                     baseArrayLayer: layer, arrayLayerCount: 1 });
-                S.views.set(key, v);
+                T.views.set(key, v);
             }
             return v;
         }
@@ -1229,6 +1368,13 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         beginQuery(c, qid) {
             const q = c.queries.get(qid);
             if (!q) return;
+            if (SO_QUERIES.has(q.type)) {
+                // stream output statistics and overflow: counted by the
+                // stream output passes, from here on
+                if (q.soBegin) q.soBegin.destroy();
+                q.soBegin = this.soSnapshot();
+                return;
+            }
             if (q.type === 0 || q.type === 4 || q.type === 7) {
                 // occlusion: counted in the render passes from here on
                 this.endPass();
@@ -1255,6 +1401,25 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 if (type === 4) view.setUint32(0, value64 ? 1 : 0, true);
                 this.respond(id, bytes);
             };
+            if (q && SO_QUERIES.has(type)) {
+                // (written, needed: SVGA3dQueryResult's soStats; an overflow predicate: whether any)
+                const begin = q.soBegin || null, end = this.soSnapshot();
+                q.soBegin = null;
+                this.flushEncoder();
+                const read = buffer => buffer ? buffer.mapAsync(1).then(() => { const v = new Uint32Array(buffer.getMappedRange().slice(0)); buffer.destroy(); return v; }) :
+                    Promise.resolve(new Uint32Array(4));
+                this.pending.push(Promise.all([read(begin), read(end)]).then(([a, b]) => {
+                    const bytes = new Uint8Array(88);
+                    const view = new DataView(bytes.buffer);
+                    if (type === 6 || type >= 12) view.setUint32(0, b[2] !== a[2] ? 1 : 0, true);
+                    else {
+                        view.setUint32(0, (b[0] - a[0]) >>> 0, true);
+                        view.setUint32(8, (b[1] - a[1]) >>> 0, true);
+                    }
+                    this.respond(id, bytes);
+                }, () => answer(0)));
+                return;
+            }
             if (!q || !(type === 0 || type === 4 || type === 7)) {
                 answer(type === 1 ? Math.floor(performance.now() * 1e6) : 0);
                 return;
@@ -1417,7 +1582,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const varyings = ps && ps.program ? WGSL.pixelVaryings(ps.program) : {};
             const blend = c.blends.get(st.blend);
             const dualSource = !!(blend && usesSource1(blend.words));
-            const vsOptions = { group: 0, vertexInputs, varyings };
+            const vsOptions = { group: 0, vertexInputs, varyings, clipDistances: !!this.features.clipDistances };
             const psOptions = { group: 1, targets, dualSource };
             this.stageOptions(c, SHADER_VS, vs.program, vsOptions);
             if (ps && ps.program) this.stageOptions(c, SHADER_PS, ps.program, psOptions);
@@ -1726,6 +1891,22 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             return { decl, targets, noRaster: (decl.rasterized | 0) === -1 };
         }
 
+        /** Stream output's counts since the start: primitives written, needed, overflows */
+        soStatistics() {
+            if (!this.soStats) {
+                this.soStats = this.device.createBuffer({ size: 16, usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC | BUFFER_USAGE.COPY_DST });
+            }
+            return this.soStats;
+        }
+
+        /** A copy of soStatistics where the encoder is, to read */
+        soSnapshot() {
+            const target = this.device.createBuffer({ size: 16, usage: BUFFER_USAGE.MAP_READ | BUFFER_USAGE.COPY_DST });
+            this.endPass();
+            this.encoder().copyBufferToBuffer(this.soStatistics(), 0, target, 0, 16);
+            return target;
+        }
+
         /** A buffer's stream output filled size (bytes), on the GPU */
         soFilled(S) {
             if (!S.soFilled) {
@@ -1795,7 +1976,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             for (let slot = 0; slot < 4; slot++) strides[slot] = decl.strides[slot] || running[slot];
             const used = [0, 1, 2, 3].filter(slot => so.targets[slot] && strides[slot] && (running[slot] || writes.some(w => w.slot === slot)));
             if (!used.length) return;
-            const key = "so:" + JSON.stringify({ writes, strides, used, record, g: shape.geometry, p: shape.perPrim });
+            const key = "so2:" + JSON.stringify({ writes, strides, used, record, g: shape.geometry, p: shape.perPrim });
             let pipe = this.pipelines.get(key);
             if (!pipe) {
                 const P = shape.perPrim, lanes = "xyzw";
@@ -1805,6 +1986,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 lines.push("@group(0) @binding(1) var<uniform> P: SOParams;");
                 lines.push("@group(0) @binding(2) var<storage, read_write> filled: array<u32>;");
                 for (const slot of used) lines.push(`@group(0) @binding(${3 + slot}) var<storage, read_write> so${slot}: array<u32>;`);
+                // the statistics queries' counts: primitives written, needed, overflows
+                lines.push("@group(0) @binding(7) var<storage, read_write> stats: array<u32>;");
                 lines.push("fn gx_vertex(prim: u32, n: u32) -> u32 {\n    switch (P.topology) {\n" +
                     "        case 1u: { return prim; }\n        case 2u: { return prim * 2u + n; }\n        case 3u: { return prim + n; }\n" +
                     "        case 4u: { return prim * 3u + n; }\n" +
@@ -1812,6 +1995,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     "        default: { return prim + n; }\n    }\n}");
                 lines.push("@compute @workgroup_size(1) fn main() {");
                 for (const slot of used) lines.push(`    var c${slot} = filled[${slot}u];`);
+                lines.push("    var stopped = false;");
                 lines.push("    for (var u = 0u; u < P.units; u++) {");
                 if (shape.geometry) {
                     lines.push(`        let first = u * ${P}u;`);
@@ -1819,8 +2003,12 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 } else {
                     lines.push("        let instance = u / P.prims;\n        let prim = u % P.prims;");
                 }
-                // the whole primitive fits, or the stream output stops
-                lines.push("        if (" + used.map(slot => `c${slot} + ${P * strides[slot]}u > P.sizes[${slot}]`).join(" || ") + ") { break; }");
+                // the whole primitive fits, or the stream output stops (the
+                // primitives after it still count as needed)
+                lines.push("        stats[1] += 1u;");
+                lines.push("        if (stopped) { continue; }");
+                lines.push("        if (" + used.map(slot => `c${slot} + ${P * strides[slot]}u > P.sizes[${slot}]`).join(" || ") + ") { stopped = true; stats[2] += 1u; continue; }");
+                lines.push("        stats[0] += 1u;");
                 lines.push(`        for (var n = 0u; n < ${P}u; n++) {`);
                 lines.push(shape.geometry ? `            let at = (first + n) * ${record}u;` :
                     `            let at = (instance * P.count + gx_vertex(prim, n)) * ${record}u;`);
@@ -1847,6 +2035,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const entries = [{ binding: 0, resource: { buffer: src } }, { binding: 1, resource: this.uniform(params) },
                 { binding: 2, resource: { buffer: filled } }];
             for (const slot of used) entries.push({ binding: 3 + slot, resource: { buffer: so.targets[slot].S.buffer } });
+            entries.push({ binding: 7, resource: { buffer: this.soStatistics() } });
             let group;
             try {
                 group = this.device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries });
@@ -2556,18 +2745,19 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         /** A typed texture UAV's view, or a stand-in of the binding's format */
         storageView(view, b) {
             const S = view && this.surfaces.get(view.sid);
-            if (S && S.texture && S.f.gpu === b.format && S.ss[0] === 1) {
+            const T = S && S.texture && S.ss[0] === 1 ? (S.f.gpu === b.format ? (this.primary(S, true), S) : this.textureFor(S, b.format, true)) : null;
+            if (T && T.texture.format === b.format && (T.texture.usage & TEXTURE_USAGE.STORAGE_BINDING)) {
                 const [mip, first, count] = view.desc;
                 const volume = b.dimension === "3d";
                 const layers = volume ? 1 : S.layers;
                 const baseLayer = volume ? 0 : Math.min(first, layers - 1);
                 const layerCount = b.dimension === "2d" ? 1 : volume ? 1 : Math.max(1, Math.min(count || layers, layers - baseLayer));
                 const key = "u:" + b.format + ":" + b.dimension + ":" + mip + ":" + baseLayer + ":" + layerCount;
-                let v = S.views.get(key);
+                let v = T.views.get(key);
                 if (!v) {
-                    v = S.texture.createView({ format: b.format, dimension: b.dimension, baseMipLevel: Math.min(mip, S.gpuMips - 1),
+                    v = T.texture.createView({ format: b.format, dimension: b.dimension, baseMipLevel: Math.min(mip, S.gpuMips - 1),
                         mipLevelCount: 1, baseArrayLayer: baseLayer, arrayLayerCount: layerCount });
-                    S.views.set(key, v);
+                    T.views.set(key, v);
                 }
                 return v;
             }
@@ -2677,6 +2867,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 this.copyIn(S.buffer, start, words);
                 return;
             }
+            this.primary(S, true);
             if (!S.texture || !(S.texture.usage & TEXTURE_USAGE.STORAGE_BINDING)) {
                 return this.warn("uav-clear" + S.format, "clears of UAVs of format " + S.format + " are not supported");
             }
@@ -2791,7 +2982,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             if (!S || !S.texture) return this.dummyTexture(binding);
             const f = this.formatOf(srv.format) || S.f;
             let format = f.gpu || S.f.gpu;
-            if (format !== S.f.gpu && SRGB[S.f.gpu] !== format) format = S.f.gpu;
+            // (another family of the texel layout: its alias)
+            const T = this.textureFor(S, format, false) || S;
+            if (T === S && format !== S.f.gpu && SRGB[S.f.gpu] !== format) format = S.f.gpu;
             const [most, first, mips, count] = srv.desc;
             const dimension = binding.dimension;
             const baseMip = Math.min(most, S.gpuMips - 1);
@@ -2808,12 +3001,12 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             if (dimension === "cube" && layers - baseLayer < 6) return this.dummyTexture(binding);
             const aspect = isDepthFormat(format) ? (srv.format === 82 || srv.format === 63 ? "stencil-only" : "depth-only") : "all";
             const key = "v:" + format + ":" + dimension + ":" + baseMip + ":" + mipCountView + ":" + baseLayer + ":" + layerCount + ":" + aspect;
-            let view = S.views.get(key);
+            let view = T.views.get(key);
             if (!view) {
                 // (one aspect of a depth-stencil texture: its own format, WebGPU's default for it)
-                view = S.texture.createView({ format: aspect === "all" ? format : undefined, dimension: S.volume ? "3d" : dimension,
+                view = T.texture.createView({ format: aspect === "all" ? format : undefined, dimension: S.volume ? "3d" : dimension,
                     baseMipLevel: baseMip, mipLevelCount: mipCountView, baseArrayLayer: baseLayer, arrayLayerCount: S.volume ? 1 : layerCount, aspect });
-                S.views.set(key, view);
+                T.views.set(key, view);
             }
             return view;
         }

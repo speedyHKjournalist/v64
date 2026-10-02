@@ -47,8 +47,9 @@
 
     class ShaderTranslateError extends Error {}
 
+    // (SAMPLER_COMPARE: the comparison twin of a sampler used both ways)
     const BINDING = { CB: 0, DRAW: 15, SAMPLER: 16, RESOURCE: 32, UAV: 160, VB: 200, FETCH: 230, INDEX: 231,
-        STAGE_IN: 232, STAGE_OUT: 233, GEO: 234, TESS_POINTS: 235, TESS_ARGS: 236, VIEWS: 299, UAV_COUNTER: 300 };
+        STAGE_IN: 232, STAGE_OUT: 233, GEO: 234, TESS_POINTS: 235, TESS_ARGS: 236, SAMPLER_COMPARE: 240, VIEWS: 299, UAV_COUNTER: 300 };
     // the markers that begin a hull shader's phases
     const HS_PHASE_MARKERS = new Set([OP.HS_DECLS, OP.HS_CONTROL_POINT_PHASE, OP.HS_FORK_PHASE, OP.HS_JOIN_PHASE]);
     // where each tess factor goes among the tessellator's six (tessellator_wgsl.js)
@@ -96,6 +97,13 @@
             this.usesSamples = false;
             // resources used for comparison: they are depth textures
             this.compared = new Set();
+            // samplers used for comparisons, and for plain sampling: WGSL's
+            // sampler types differ, and a declaration's mode does not say
+            // (Mesa's svga declares every sampler "default")
+            this.compareSamplers = new Set();
+            this.plainSamplers = new Set();
+            // samplers that are both: a comparison twin at SAMPLER_COMPARE
+            this.twinSamplers = new Set();
             this.gathered = new Set();
             this.counters = new Set();
             this.uavLoads = new Set();
@@ -107,6 +115,7 @@
             this.switches = [];
             this.needDepth = false;
             this.needMask = false;
+            this.clipDistances = 0;
             this.mode = options.mode || "";
         }
 
@@ -175,6 +184,7 @@
             const out = [];
             out.push("diagnostic(off, derivative_uniformity);");
             if (this.stage === PROGRAM.PS && this.o.dualSource) out.push("enable dual_source_blending;");
+            if (this.clipDistances) out.push("enable clip_distances;");
             out.push("");
             out.push(...this.declarations());
             if (this.usesSamples) out.push("override gx_samples: u32 = 1u;");
@@ -206,6 +216,13 @@
                     case OP.SAMPLE_C: case OP.SAMPLE_C_LZ: case OP.GATHER4_C: case OP.GATHER4_PO_C: {
                         const r = ins.op === OP.GATHER4_PO_C ? ins.src[2] : ins.src[1];
                         if (r) this.compared.add(r.indices[0].imm);
+                        const s = ins.op === OP.GATHER4_PO_C ? ins.src[3] : ins.src[2];
+                        if (s) this.compareSamplers.add(s.indices[0].imm);
+                        break;
+                    }
+                    case OP.SAMPLE: case OP.SAMPLE_B: case OP.SAMPLE_L: case OP.SAMPLE_D: case OP.GATHER4: case OP.GATHER4_PO: {
+                        const s = ins.op === OP.GATHER4_PO ? ins.src[3] : ins.src[2];
+                        if (s) this.plainSamplers.add(s.indices[0].imm);
                         break;
                     }
                     // UAVs with an append/consume counter, typed UAVs read
@@ -255,9 +272,16 @@
                 this.bindings.push({ binding: BINDING.DRAW, type: "draw" });
             }
             for (const [slot, s] of p.samplers) {
-                const comparison = s.mode === 1;
+                // as used: a comparison sampler when nothing samples plainly with it
+                const plain = this.plainSamplers.has(slot), compares = this.compareSamplers.has(slot);
+                const comparison = !plain && (compares || s.mode === 1);
                 out.push(`@group(${g}) @binding(${BINDING.SAMPLER + slot}) var s${slot}: ${comparison ? "sampler_comparison" : "sampler"};`);
                 this.bindings.push({ binding: BINDING.SAMPLER + slot, type: comparison ? "comparison" : "sampler", slot });
+                if (plain && compares) {
+                    this.twinSamplers.add(slot);
+                    out.push(`@group(${g}) @binding(${BINDING.SAMPLER_COMPARE + slot}) var sc${slot}: sampler_comparison;`);
+                    this.bindings.push({ binding: BINDING.SAMPLER_COMPARE + slot, type: "comparison", slot });
+                }
             }
             for (const [slot, r] of p.resources) {
                 const type = this.resourceType(slot, r);
@@ -423,6 +447,20 @@
                 if (output.name === NAME.POSITION) position = output.index;
             }
             outFields.push("    @builtin(position) position: vec4<f32>,");
+            // clip distances (SV_ClipDistance): WebGPU's, where the device has them
+            const clips = [];
+            for (const output of p.outputs) {
+                if (output.type !== OPERAND.OUTPUT || output.name !== NAME.CLIP_DISTANCE) continue;
+                for (let c = 0; c < 4; c++) if (output.mask >> c & 1) clips.push([output.index, c]);
+            }
+            clips.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+            if (clips.length && o.clipDistances) {
+                this.clipDistances = Math.min(8, clips.length);
+                outFields.push(`    @builtin(clip_distances) clip: array<f32, ${this.clipDistances}>,`);
+                clips.slice(0, 8).forEach(([reg, c], i) => stores.push(`out.clip[${i}] = bitcast<f32>(o[${reg}].${"xyzw"[c]});`));
+            } else if (clips.length) {
+                this.warn("clip distances need WebGPU's clip-distances");
+            }
             this.usesDraw = true;
             stores.push(position === null ? "out.position = vec4<f32>(0.0, 0.0, 0.0, 1.0);" :
                 `let p = bitcast<vec4<f32>>(o[${position}]);\n    out.position = vec4<f32>(p.xy * gx_draw.viewport.xy + gx_draw.viewport.zw * p.w, p.zw);`);
@@ -1321,7 +1359,19 @@
                         this.line("}");
                         return;
                     }
-                    this.warn("VMware opcode " + ins.vmware + " (double precision)");
+                    if (ins.vmware === VMWARE_OP.DFRC || ins.vmware === VMWARE_OP.DRSQ) {
+                        // double fraction and reciprocal square root (Mesa's
+                        // svga), as f32 like the other double instructions
+                        this.helpers.add("doubles");
+                        this.line("{");
+                        this.indent++;
+                        this.line(`let a = gx_d2f2(${this.doubleSource(ins, 0)});`);
+                        wu(`gx_f2d2(${ins.vmware === VMWARE_OP.DFRC ? "a - floor(a)" : "inverseSqrt(a)"})`);
+                        this.indent--;
+                        this.line("}");
+                        return;
+                    }
+                    this.warn("VMware opcode " + ins.vmware);
                     return;
 
                 // derivatives
@@ -1573,9 +1623,62 @@
             return ret === RETURN.SINT ? "i" : ret === RETURN.UINT ? "u" : "f";
         }
 
+        /** A sampler's name, for comparisons or not (twinSamplers) */
+        samplerName(operand, compare) {
+            const slot = operand.indices[0].imm;
+            return (compare && this.twinSamplers.has(slot) ? "sc" : "s") + slot;
+        }
+
+        /**
+         * Sampling an integer texture (GL's texture() on an isampler, as
+         * Mesa's svga sends it; WGSL samples only floats): the texel under
+         * the coordinates, clamped to the level's edges
+         */
+        sampleInteger(ins, t, kind) {
+            const a = this.f(ins, 0), name = t.name;
+            const level = ins.op === OP.SAMPLE_L ? `i32(${this.scalar(ins, 3, "f")})` : "0";
+            const o = ins.offsets || [0, 0, 0];
+            const texel = (coords, size, offset) =>
+                `clamp(vec${size.n}<i32>(floor(${coords} * vec${size.n}<f32>(${size.v}))) + ${offset}, vec${size.n}<i32>(0), ${size.v} - vec${size.n}<i32>(1))`;
+            const layer = c => `clamp(i32(round(${c})), 0, i32(textureNumLayers(${name})) - 1)`;
+            let call;
+            switch (t.r.dimension) {
+                case DIM.TEXTURE1D:
+                case DIM.TEXTURE1DARRAY: {
+                    const size = { n: 2, v: `vec2<i32>(textureDimensions(${name}, ${level}))` };
+                    const at = texel(`vec2<f32>(${a}.x, 0.0)`, size, `vec2<i32>(${o[0]}, 0)`);
+                    call = t.r.dimension === DIM.TEXTURE1D ? `textureLoad(${name}, ${at}, ${level})` :
+                        `textureLoad(${name}, ${at}, ${layer(a + ".y")}, ${level})`;
+                    break;
+                }
+                case DIM.TEXTURE2D:
+                case DIM.TEXTURE2DARRAY: {
+                    const size = { n: 2, v: `vec2<i32>(textureDimensions(${name}, ${level}))` };
+                    const at = texel(`${a}.xy`, size, `vec2<i32>(${o[0]}, ${o[1]})`);
+                    call = t.r.dimension === DIM.TEXTURE2D ? `textureLoad(${name}, ${at}, ${level})` :
+                        `textureLoad(${name}, ${at}, ${layer(a + ".z")}, ${level})`;
+                    break;
+                }
+                case DIM.TEXTURE3D: {
+                    const size = { n: 3, v: `vec3<i32>(textureDimensions(${name}, ${level}))` };
+                    call = `textureLoad(${name}, ${texel(`${a}.xyz`, size, `vec3<i32>(${o[0]}, ${o[1]}, ${o[2]})`)}, ${level})`;
+                    break;
+                }
+                default:
+                    // (cubes: a texel of a face; not done)
+                    this.warn("sampling an integer cube texture");
+                    call = kind === "i" ? "vec4<i32>(0)" : "vec4<u32>(0u)";
+            }
+            this.write(ins, this.swizzled(call, ins.src[1]), kind);
+        }
+
         sample(ins) {
             const t = this.resource(ins.src[1]);
-            const sampler = `s${ins.src[2].indices[0].imm}`;
+            const integer = this.resultKind(t.r);
+            if (integer !== "f" && !this.compared.has(t.slot) && ins.op !== OP.SAMPLE_C && ins.op !== OP.SAMPLE_C_LZ) {
+                return this.sampleInteger(ins, t, integer);
+            }
+            const sampler = this.samplerName(ins.src[2], ins.op === OP.SAMPLE_C || ins.op === OP.SAMPLE_C_LZ);
             const dimension = t.r.dimension;
             const [coords, layer] = this.coordinates(dimension, this.f(ins, 0));
             const offset = this.offset(ins, dimension);
@@ -1621,7 +1724,7 @@
             const compare = ins.op === OP.GATHER4_C || ins.op === OP.GATHER4_PO_C;
             const tOperand = ins.src[po ? 2 : 1], sOperand = ins.src[po ? 3 : 2];
             const t = this.resource(tOperand);
-            const sampler = `s${sOperand.indices[0].imm}`;
+            const sampler = this.samplerName(sOperand, compare);
             const dimension = t.r.dimension;
             let address = this.f(ins, 0);
             const [coords0, layer] = this.coordinates(dimension, address);

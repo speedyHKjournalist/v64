@@ -402,6 +402,20 @@ try
         };
     }
 
+    // vmware_svga's DX shaders as they come (VGPU10 tokens): GPU_OUT/dxbc/, each once
+    if(svga3d_debug)
+    {
+        const dir = path.join(out, "dxbc");
+        fs.mkdirSync(dir, { recursive: true });
+        const seen = new Set();
+        svga3d_debug.shader_log = (shid, type, bytes) => {
+            const key = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+            if(seen.has(key)) return;
+            seen.add(key);
+            fs.writeFileSync(path.join(dir, String(seen.size).padStart(3, "0") + "-" + type + ".bin"), bytes);
+        };
+    }
+
     await wait_for(/localhost login:/, 0);
     emulator.serial0_send("root\n");
     await wait_for(/localhost:~# /, 0);
@@ -490,7 +504,7 @@ finally
         console.log("gltest picture " + save_png({ width, height, rgba }, "gltest-" + key));
     }
     const svga3d = emulator.v86 && emulator.v86.cpu.devices.graphics_adapter && emulator.v86.cpu.devices.graphics_adapter.device["svga"]?.svga3d;
-    if(svga3d) console.log("svga3d commands: " + JSON.stringify(svga3d.counts));
+    if(svga3d) console.log("svga3d commands: " + JSON.stringify(svga3d.counts) + " warnings: " + JSON.stringify(svga3d.warnings));
     const virgl_end = emulator.v86 && emulator.v86.cpu.devices.graphics_adapter && emulator.v86.cpu.devices.graphics_adapter.device["virtio_gpu"]?.virgl;
     if(virgl_end) console.log("virgl: " + JSON.stringify({ counts: virgl_end.counts, warnings: virgl_end.warnings }));
     if(remote)
