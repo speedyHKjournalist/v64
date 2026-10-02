@@ -406,6 +406,12 @@ VirglContext.prototype.command = function(command, object, p)
         case CCMD.SET_TESS_STATE:
             // the default tessellation levels (a control shader always sets its own)
             return;
+        case CCMD.PIPE_RESOURCE_CREATE:
+            // a HOST3D blob's template (target, format, bind, width, height,
+            // depth, array size, last level, samples, flags), which
+            // RESOURCE_CREATE_BLOB takes by the blob id
+            if(p.length >= 11) this.virgl.blob_templates.set(this.ctx_id + ":" + p[10], Array.from(p.subarray(0, 10)));
+            return;
         case CCMD.SET_RENDER_CONDITION:
         {
             const q = p[0] && sub.objects.get(p[0]);
@@ -741,6 +747,7 @@ VirglContext.prototype.inline_write = function(p)
         out.set(bytes.subarray(from, from + length), to);
         return true;
     });
+    this.virgl.wrote(r);
 };
 
 // ---------------------------------------------------------------------------
@@ -753,7 +760,7 @@ VirglContext.prototype.written = function(sub)
     {
         const s = handle && sub.objects.get(handle);
         const r = s && this.resource(s.res);
-        if(r && r.three_d) r.host_newer = false;
+        if(r && r.three_d) this.virgl.wrote(r);
     }
 };
 
@@ -1109,7 +1116,7 @@ VirglContext.prototype.ua_views = function(sub, stage)
         // raw: in dwords
         ids[slot] = view("b" + [b.res, b.offset, b.length], [b.res, C.SVGA3D_R32_TYPELESS, C.SVGA3D_RESOURCE_BUFFER,
             b.offset >>> 2, Math.max(1, b.length >>> 2), C.SVGA3D_UABUFFER_RAW, 0]);
-        r.host_newer = false;
+        this.virgl.wrote(r);
     });
     sub.images[stage].forEach((image, slot) => {
         const r = image && this.resource(image.res);
@@ -1120,7 +1127,7 @@ VirglContext.prototype.ua_views = function(sub, stage)
             [image.level, first, Math.max(1, last - first + 1), 0];
         ids[IMAGE_UAV + slot] = view("i" + [image.res, image.format, image.layers, image.level],
             [image.res, info.svga, resource_dimension(r), ...desc]);
-        r.host_newer = false;
+        this.virgl.wrote(r);
     });
     return ids;
 };
@@ -1242,7 +1249,7 @@ VirglContext.prototype.set_streamout_targets = function(sub, p)
         if(r)
         {
             words.push(t.res, append >> i & 1 ? INVALID : t.offset, t.size);
-            if(r.three_d) r.host_newer = false;
+            if(r.three_d) this.virgl.wrote(r);
         }
         else words.push(INVALID, 0, 0);
     }
@@ -1259,6 +1266,13 @@ VirglContext.prototype.stream_output = function(sub, handle, variant, discard)
 {
     const so = sub.so_targets.some(t => t) && variant ? this.shader_so(sub, handle) : null;
     if(!so) return INVALID;
+    // (the draw writes the targets)
+    for(const target of sub.so_targets)
+    {
+        const t = target && sub.objects.get(target);
+        const r = t && t.kind === OBJECT.STREAMOUT_TARGET && this.resource(t.res);
+        if(r && r.three_d) this.virgl.wrote(r);
+    }
     let soid = variant.soids.get(discard);
     if(soid !== undefined) return soid;
     // SVGA3dStreamOutputDeclarationEntry: buffer, register, mask, stream; gaps
@@ -1325,7 +1339,7 @@ VirglContext.prototype.blit = function(sub, p)
             }
         }
     }
-    dst.host_newer = false;
+    this.virgl.wrote(dst);
 };
 
 /** RESOURCE_COPY_REGION: destination (resource, level, x, y, z), source (resource, level, x, y, z), size */
@@ -1350,7 +1364,7 @@ VirglContext.prototype.copy_region = function(p)
             gxw.command(GX.SURFACE_COPY, [p[5], sz + i, p[6], sx, sy, 0, p[0], dz + i, p[1], dx, dy, 0, w, h, 1]);
         }
     }
-    dst.host_newer = false;
+    this.virgl.wrote(dst);
 };
 
 // ---------------------------------------------------------------------------

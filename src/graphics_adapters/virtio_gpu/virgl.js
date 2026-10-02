@@ -56,6 +56,16 @@ export function Resource3D(id, target, format, bind, width, height, depth, array
     this.uuid = null;
     /** @type {Array<Uint8Array>} the contents, for a snapshot (save_contents) */
     this.saved = null;
+    /** A blob of the host's (BLOB_MEM_HOST3D): its flags, else -1 */
+    this.blob_flags = -1;
+    this.blob_size = 0;
+    /** Where the blob is mapped in the host visible memory (MAP_BLOB), else -1 */
+    this.map_offset = -1;
+    /** Readbacks of the mapping on their way, and the pages the guest wrote
+     * (and were uploaded) since they were asked for: they keep the guest's */
+    this.readbacks = 0;
+    /** @type {!Set<number>} */
+    this.fresh = new Set();
 }
 
 Resource3D.prototype.is_buffer = function()
@@ -121,6 +131,12 @@ export function Virgl(gpu, renderer, images)
     this.shader_log = null;
     /** @type {?function(string)} a test's hook: what draws do */
     this.debug_log = null;
+    /** @type {!Map<string, !Array<number>>} PIPE_RESOURCE_CREATE's templates of
+     * HOST3D blobs, by context and blob id, until RESOURCE_CREATE_BLOB */
+    this.blob_templates = new Map();
+    /** @type {!Set<!Resource3D>} mapped blobs the GPU has written since the
+     * device last read them back into their mappings */
+    this.written = new Set();
     renderer.listen(message => this.receive(message));
 }
 
@@ -138,6 +154,8 @@ Virgl.prototype.reset = function()
     this.contexts.clear();
     this.gxw = new GXWriter();
     this.completions = [];
+    this.blob_templates.clear();
+    this.written.clear();
     for(const answer of this.requests.values()) answer(null, 0);
     this.requests.clear();
     this.completed = this.submitted;
@@ -264,6 +282,42 @@ Virgl.prototype.create_resource = function(r)
     this.gxw.command(GX.SURFACE_DEFINE, [r.id, r.info.svga, flags, flags2, r.width, r.height,
         r.target === TARGET.TEXTURE_3D ? r.depth : 1, r.last_level + 1, layers, r.nr_samples > 1 ? r.nr_samples : 0, cube ? 1 : 0]);
     return true;
+};
+
+/**
+ * The GPU writes a resource (draws, copies, stream output, UA views): the
+ * screen's picture of it is old, and so is its mapping, if it has one
+ * @param {!Resource3D} r
+ */
+Virgl.prototype.wrote = function(r)
+{
+    r.host_newer = false;
+    if(r.map_offset >= 0) this.written.add(r);
+};
+
+/**
+ * Bytes of a buffer from GX: `done` with them (null if GX could not)
+ * @param {!Resource3D} r
+ * @param {number} x
+ * @param {number} w
+ * @param {function(Uint8Array)} done
+ */
+Virgl.prototype.read_buffer = function(r, x, w, done)
+{
+    const out = new Uint8Array(w);
+    let waiting = 0, failed = false;
+    for(let at = 0; at < w; at += READBACK_MAX_BYTES)
+    {
+        const count = Math.min(READBACK_MAX_BYTES, w - at);
+        waiting++;
+        const id = this.request(bytes => {
+            if(bytes) out.set(bytes.subarray(0, count), at);
+            else failed = true;
+            if(--waiting === 0) done(failed ? null : out);
+        });
+        this.gxw.command(GX.SURFACE_READBACK, [r.id, 0, 0, x + at, 0, 0, count, 1, 1, id]);
+    }
+    if(!w) done(out);
 };
 
 /** @param {!Resource3D} r */
@@ -517,7 +571,7 @@ Virgl.prototype.get_state = function()
 {
     const contexts = [];
     for(const context of this.contexts.values()) contexts.push(context.get_state());
-    return [contexts];
+    return [contexts, [...this.blob_templates]];
 };
 
 /**
@@ -529,6 +583,7 @@ Virgl.prototype.set_state = function(state, resource)
     this.contexts.clear();
     this.next_cid = 1;
     this.next_private_sid = 0xF0000000;
+    this.blob_templates = new Map(state[1] || []);
     for(const saved of state[0])
     {
         const context = new VirglContext(this, saved[0]);

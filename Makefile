@@ -460,6 +460,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/vmware_svga_3d.js
 	./tests/devices/vmware_svga_gb.js
 	./tests/devices/virtio_gpu.js
+	./tests/devices/virtio_gpu_hostmem.js
 	./tests/devices/virgl_tgsi.js
 	./tests/devices/vmware_backdoor.js
 	./tests/devices/mmio_ram.js

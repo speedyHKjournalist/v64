@@ -16,6 +16,7 @@ import { SoftwareCursor } from "../vmware_svga/svga_cursor.js";
 import { make_edid } from "./edid.js";
 import { Virgl, Resource3D } from "./virgl.js";
 import { CAPSETS, capset } from "./virgl_caps.js";
+import { GX } from "../renderer_protocol.js";
 
 // For Types Only
 import { GraphicsMachine } from "../machine.js";
@@ -54,10 +55,14 @@ const LEVELS = {
     "2d-blob": { features: [VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_GPU_F_RESOURCE_BLOB, VIRTIO_F_RING_INDIRECT_DESC], blob: true },
     "virgl43-blob": { features: [VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_GPU_F_RESOURCE_BLOB,
         VIRTIO_GPU_F_CONTEXT_INIT, VIRTIO_F_RING_INDIRECT_DESC], three_d: true, gl43: true, blob: true },
+    // ... and blobs of the host's (HOST3D) mapped into host visible memory
+    // (BAR4): persistent, coherent buffer mappings (ARB_buffer_storage)
+    "virgl43-hostmem": { features: [VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_GPU_F_RESOURCE_BLOB,
+        VIRTIO_GPU_F_CONTEXT_INIT, VIRTIO_F_RING_INDIRECT_DESC], three_d: true, gl43: true, blob: true, hostmem: true },
 };
-const LEVEL_ORDER = ["2d", "2d-blob", "virgl", "virgl43", "virgl43-blob"];
+const LEVEL_ORDER = ["2d", "2d-blob", "virgl", "virgl43", "virgl43-blob", "virgl43-hostmem"];
 /** Without a pinned level: the highest, with a renderer or without */
-const DEFAULT_3D_LEVEL = "virgl43-blob";
+const DEFAULT_3D_LEVEL = "virgl43-hostmem";
 const DEFAULT_LEVEL = "2d-blob";
 
 // Commands
@@ -75,6 +80,8 @@ const CMD_GET_EDID = 0x010A;
 const CMD_RESOURCE_ASSIGN_UUID = 0x010B;
 const CMD_RESOURCE_CREATE_BLOB = 0x010C;
 const CMD_SET_SCANOUT_BLOB = 0x010D;
+const CMD_RESOURCE_MAP_BLOB = 0x0208;
+const CMD_RESOURCE_UNMAP_BLOB = 0x0209;
 const CMD_CTX_CREATE = 0x0200;
 const CMD_CTX_DESTROY = 0x0201;
 const CMD_CTX_ATTACH_RESOURCE = 0x0202;
@@ -93,6 +100,7 @@ const RESP_OK_CAPSET_INFO = 0x1102;
 const RESP_OK_CAPSET = 0x1103;
 const RESP_OK_EDID = 0x1104;
 const RESP_OK_RESOURCE_UUID = 0x1105;
+const RESP_OK_MAP_INFO = 0x1106;
 const RESP_ERR_UNSPEC = 0x1200;
 const RESP_ERR_OUT_OF_MEMORY = 0x1201;
 const RESP_ERR_INVALID_SCANOUT_ID = 0x1202;
@@ -173,8 +181,18 @@ Resource.prototype.set_backing = function(entries)
     this.backing_length = length;
 };
 
-/** BLOB_MEM_GUEST: a blob's storage is guest memory */
+/** BLOB_MEM_GUEST: a blob's storage is guest memory; HOST3D: a 3D resource
+ * of the host's, from a template of PIPE_RESOURCE_CREATE */
 const BLOB_MEM_GUEST = 1;
+const BLOB_MEM_HOST3D = 2;
+const BLOB_FLAG_USE_MAPPABLE = 1;
+/** MAP_BLOB's answer: the guest may cache the mapping */
+const MAP_CACHE_CACHED = 1;
+
+/** The host visible memory (BAR4, shared memory region 1), at level hostmem */
+const HOST_VISIBLE_SIZE = 64 << 20;
+const HOST_VISIBLE_SHMID = 1;
+const PAGE = 4096;
 
 /**
  * A blob resource in guest memory (RESOURCE_CREATE_BLOB, BLOB_MEM_GUEST):
@@ -293,6 +311,42 @@ export function VirtioGPU(machine, options)
     /** @type {?function(function())} set by a command whose answer waits */
     this.deferred = null;
 
+    // The host visible memory: device memory of the core's, which the guest
+    // reads and writes at memory speed; the pages it writes are uploaded into
+    // the mapped blobs before each SUBMIT_3D, and blobs the GPU wrote are
+    // read back into it before their fences complete
+    this.hostmem_region = -1;
+    this.hostmem_backing = 0;
+    /** @type {Uint32Array} pages written and not yet uploaded, as taken from the core */
+    this.hostmem_pending = null;
+    /** @type {!Map<number, !Resource3D>} the mapped blobs, by resource id */
+    this.mapped = new Map();
+    const bars = [{
+        "bar": 0,
+        "size": vram_size,
+        "address": this.vga.lfb_address,
+        "prefetchable": true,
+        "on_move": base => this.vga.move_lfb(base),
+    }];
+    const shared_memory = [];
+    if(LEVELS[this.level].hostmem)
+    {
+        this.hostmem_region = machine.mmio_ram_allocate(HOST_VISIBLE_SIZE);
+        if(this.hostmem_region < 0) throw new Error("virtio_gpu: no device memory for the host visible memory");
+        this.hostmem_backing = machine.mmio_ram_backing(this.hostmem_region) >>> 0;
+        this.hostmem_pending = new Uint32Array(Math.ceil(HOST_VISIBLE_SIZE / PAGE / 64) * 2);
+        // (a 32-bit BAR: the core decodes device memory below 4 GiB; the
+        // firmware places it)
+        bars.push({
+            "bar": 4,
+            "size": HOST_VISIBLE_SIZE,
+            "address": 0,
+            "prefetchable": true,
+            "on_move": base => machine.mmio_ram_map(this.hostmem_region, base),
+        });
+        shared_memory.push({ "id": HOST_VISIBLE_SHMID, "bar": 4, "offset": 0, "length": HOST_VISIBLE_SIZE });
+    }
+
     const features = LEVELS[this.level].features;
     this.virtio = machine.create_virtio({
         "name": "virtio-gpu",
@@ -300,13 +354,8 @@ export function VirtioGPU(machine, options)
         "subsystem_device_id": VIRTIO_GPU_SUBSYSTEM_ID,
         "class_code": VGA_CLASS,
         "revision": 1,
-        "bars": [{
-            "bar": 0,
-            "size": vram_size,
-            "address": this.vga.lfb_address,
-            "prefetchable": true,
-            "on_move": base => this.vga.move_lfb(base),
-        }],
+        "bars": bars,
+        "shared_memory": shared_memory,
         // (as QEMU's virtio-vga; viogpudo maps only memory BARs)
         "capability_bar": 2,
         "pci_rom_size": this.vga.pci_rom_size,
@@ -346,6 +395,12 @@ VirtioGPU.prototype.reset_device = function()
     if(this.virgl) this.virgl.reset();
     this.resources.clear();
     this.host_memory = 0;
+    this.mapped.clear();
+    if(this.hostmem_pending)
+    {
+        this.take_hostmem_dirty();
+        this.hostmem_pending.fill(0);
+    }
     for(const scanout of this.scanouts)
     {
         scanout.resource_id = 0;
@@ -544,8 +599,16 @@ VirtioGPU.prototype.control = function(bytes)
                 entries[i * 2] = u32(32 + i * 16) + u32(36 + i * 16) * 0x100000000;
                 entries[i * 2 + 1] = u32(40 + i * 16);
             }
-            return this.create_blob(u32(0), u32(4), u32(8), u32(24) + u32(28) * 0x100000000, entries);
+            return this.create_blob(u32(0), u32(4), u32(8), u32(24) + u32(28) * 0x100000000, entries,
+                view.getUint32(16, true), u32(16) + u32(20) * 0x100000000);
         }
+        case CMD_RESOURCE_MAP_BLOB:
+            // resource, padding, offset (64)
+            if(!LEVELS[this.level].hostmem || !need(16)) break;
+            return this.map_blob(u32(0), u32(8) + u32(12) * 0x100000000);
+        case CMD_RESOURCE_UNMAP_BLOB:
+            if(!LEVELS[this.level].hostmem || !need(8)) break;
+            return this.unmap_blob(u32(0));
         case CMD_SET_SCANOUT_BLOB:
             // rectangle, scanout, resource, width, height, format, padding, strides[4], offsets[4]
             if(!LEVELS[this.level].blob || !need(72)) break;
@@ -568,7 +631,7 @@ VirtioGPU.prototype.control = function(bytes)
             if(!need(8)) break;
             const entry = this.virgl && CAPSETS.find(c => c[0] === u32(0));
             if(!entry || u32(4) > entry[1]) return this.error(RESP_ERR_INVALID_PARAMETER, type);
-            const data = capset(entry[0], !!LEVELS[this.level].gl43);
+            const data = capset(entry[0], !!LEVELS[this.level].gl43, !!LEVELS[this.level].hostmem);
             const out = response(RESP_OK_CAPSET, HEADER_SIZE + data.length);
             out.set(data, HEADER_SIZE);
             return out;
@@ -665,22 +728,181 @@ VirtioGPU.prototype.unref = function(id)
     {
         if(scanout.resource_id === id) this.disable_scanout(scanout);
     }
-    if(resource.three_d) this.virgl.destroy_resource(/** @type {!Resource3D} */ (resource));
+    if(resource.three_d)
+    {
+        this.mapped.delete(id);
+        resource.map_offset = -1;
+        this.virgl.destroy_resource(/** @type {!Resource3D} */ (resource));
+    }
     else if(!resource.blob) this.host_memory -= resource.data.length;
     this.resources.delete(id);
     return this.ok();
 };
 
-/** RESOURCE_CREATE_BLOB: in guest memory (the host's kinds come with V5) */
-VirtioGPU.prototype.create_blob = function(id, mem, flags, size, entries)
+/**
+ * RESOURCE_CREATE_BLOB: in guest memory, or (level hostmem) a 3D resource of
+ * the template that the context's PIPE_RESOURCE_CREATE gave the blob id
+ */
+VirtioGPU.prototype.create_blob = function(id, mem, flags, size, entries, ctx_id, blob_id)
 {
     if(id === 0 || this.resources.has(id)) return this.error(RESP_ERR_INVALID_RESOURCE_ID, CMD_RESOURCE_CREATE_BLOB);
+    if(mem === BLOB_MEM_HOST3D && LEVELS[this.level].hostmem)
+    {
+        const virgl = /** @type {!Virgl} */ (this.virgl);
+        const key = ctx_id + ":" + blob_id;
+        const t = virgl.blob_templates.get(key);
+        if(!t) return this.error(RESP_ERR_INVALID_PARAMETER, CMD_RESOURCE_CREATE_BLOB);
+        virgl.blob_templates.delete(key);
+        const r = new Resource3D(id, t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9]);
+        r.set_backing = Resource.prototype.set_backing;
+        r.blob_flags = flags;
+        r.blob_size = size;
+        if(r.is_buffer() && size < r.width || !virgl.create_resource(r))
+        {
+            return this.error(RESP_ERR_INVALID_PARAMETER, CMD_RESOURCE_CREATE_BLOB);
+        }
+        this.resources.set(id, r);
+        return this.ok();
+    }
     if(mem !== BLOB_MEM_GUEST) return this.error(RESP_ERR_INVALID_PARAMETER, CMD_RESOURCE_CREATE_BLOB);
     const r = new BlobResource(id, flags, size);
     r.set_backing(entries);
     if(r.backing_length < size) return this.error(RESP_ERR_INVALID_PARAMETER, CMD_RESOURCE_CREATE_BLOB);
     this.resources.set(id, r);
     return this.ok();
+};
+
+/**
+ * MAP_BLOB: a HOST3D blob's place in the host visible memory (the guest's
+ * kernel allocates it). Buffers only: their mapping is their bytes.
+ */
+VirtioGPU.prototype.map_blob = function(id, offset)
+{
+    const found = this.resources.get(id);
+    if(!found || !found.three_d || found.blob_flags < 0 || !(found.blob_flags & BLOB_FLAG_USE_MAPPABLE))
+    {
+        return this.error(RESP_ERR_INVALID_RESOURCE_ID, CMD_RESOURCE_MAP_BLOB);
+    }
+    const r = /** @type {!Resource3D} */ (found);
+    if(!r.is_buffer() || r.map_offset >= 0 || offset % PAGE || offset + r.blob_size > HOST_VISIBLE_SIZE)
+    {
+        return this.error(RESP_ERR_INVALID_PARAMETER, CMD_RESOURCE_MAP_BLOB);
+    }
+    // the new buffer's bytes are zeros, as GX's
+    this.take_hostmem_dirty();
+    this.hostmem_bytes().fill(0, offset, offset + r.blob_size);
+    this.for_pages(offset, r.blob_size, page => { this.hostmem_pending[page >>> 5] &= ~(1 << (page & 31)); });
+    r.map_offset = offset;
+    this.mapped.set(id, r);
+    const out = response(RESP_OK_MAP_INFO, HEADER_SIZE + 8);
+    out[HEADER_SIZE] = MAP_CACHE_CACHED;
+    return out;
+};
+
+VirtioGPU.prototype.unmap_blob = function(id)
+{
+    const r = this.mapped.get(id);
+    if(!r) return this.error(RESP_ERR_INVALID_RESOURCE_ID, CMD_RESOURCE_UNMAP_BLOB);
+    this.mapped.delete(id);
+    r.map_offset = -1;
+    return this.ok();
+};
+
+/** @return {!Uint8Array} the host visible memory, in the wasm memory */
+VirtioGPU.prototype.hostmem_bytes = function()
+{
+    return new Uint8Array(this.machine.wasm_memory.buffer, this.hostmem_backing, HOST_VISIBLE_SIZE);
+};
+
+/** @param {function(number)} f each page of [offset, offset + length) */
+VirtioGPU.prototype.for_pages = function(offset, length, f)
+{
+    for(let page = Math.floor(offset / PAGE); page < Math.ceil((offset + length) / PAGE); page++) f(page);
+};
+
+/** The pages the guest wrote, from the core's bitmap into hostmem_pending */
+VirtioGPU.prototype.take_hostmem_dirty = function()
+{
+    if(this.hostmem_region < 0) return;
+    const at = this.machine.mmio_ram_take_dirty(this.hostmem_region) >>> 0;
+    if(!at) return;
+    const pending = this.hostmem_pending;
+    // (64-bit words, little endian: the low dword's bits are the first pages)
+    const words = new Uint32Array(this.machine.wasm_memory.buffer, at, pending.length);
+    for(let i = 0; i < pending.length; i++) pending[i] |= words[i];
+};
+
+/**
+ * Before the GPU runs what the guest sent: the pages of mappings the guest
+ * wrote go into their blobs
+ */
+VirtioGPU.prototype.upload_hostmem = function()
+{
+    if(this.hostmem_region < 0) return;
+    this.take_hostmem_dirty();
+    const pending = this.hostmem_pending;
+    if(!this.mapped.size || !pending.some(word => word !== 0))
+    {
+        pending.fill(0);
+        return;
+    }
+    const bytes = this.hostmem_bytes();
+    const gxw = /** @type {!Virgl} */ (this.virgl).gxw;
+    for(const r of this.mapped.values())
+    {
+        const first = r.map_offset / PAGE, end = Math.ceil((r.map_offset + r.width) / PAGE);
+        let run = -1;
+        for(let page = first; page <= end; page++)
+        {
+            if(page < end && (pending[page >>> 5] >>> (page & 31) & 1))
+            {
+                if(r.readbacks) r.fresh.add(page);
+                if(run < 0) run = page;
+                continue;
+            }
+            if(run < 0) continue;
+            // the run's bytes, as the buffer's
+            const x = run * PAGE - r.map_offset, w = Math.min(r.width, page * PAGE - r.map_offset) - x;
+            gxw.command(GX.SURFACE_UPLOAD, [r.id, 0, 0, x, 0, 0, w, 1, 1, w, w], bytes.subarray(r.map_offset + x, r.map_offset + x + w));
+            run = -1;
+        }
+    }
+    // (and the pages of no mapping are of no blob)
+    pending.fill(0);
+    /** @type {!Virgl} */ (this.virgl).flush_big();
+};
+
+/**
+ * After the GPU work sent: the mapped blobs it wrote come back into their
+ * mappings (before the fence completes), except for the pages the guest has
+ * written since
+ */
+VirtioGPU.prototype.read_back_hostmem = function()
+{
+    const virgl = /** @type {!Virgl} */ (this.virgl);
+    if(!virgl.written.size) return;
+    for(const r of virgl.written)
+    {
+        if(r.map_offset < 0 || this.resources.get(r.id) !== r) continue;
+        const offset = r.map_offset;
+        r.readbacks++;
+        virgl.read_buffer(r, 0, r.width, data => {
+            r.readbacks--;
+            if(data && r.map_offset === offset && this.resources.get(r.id) === r)
+            {
+                this.take_hostmem_dirty();
+                const bytes = this.hostmem_bytes(), pending = this.hostmem_pending;
+                for(let x = 0; x < data.length; x += PAGE)
+                {
+                    const page = (offset + x) / PAGE;
+                    if(pending[page >>> 5] >>> (page & 31) & 1 || r.fresh.has(page)) continue;
+                    bytes.set(data.subarray(x, Math.min(data.length, x + PAGE)), offset + x);
+                }
+            }
+            if(!r.readbacks) r.fresh.clear();
+        });
+    }
+    virgl.written.clear();
 };
 
 /**
@@ -1046,7 +1268,9 @@ VirtioGPU.prototype.command_3d = function(type, ctx_id, bytes, u32, need)
             if(!virgl.contexts.has(ctx_id)) return this.error(RESP_ERR_INVALID_CONTEXT_ID, type);
             const start = bytes.byteOffset + HEADER_SIZE + 8;
             const words = new Uint32Array(bytes.buffer.slice(start, start + size));
+            this.upload_hostmem();
             virgl.submit(ctx_id, words, id => this.resources.get(id) || null);
+            this.read_back_hostmem();
             after_work();
             return this.ok();
         }
@@ -1272,6 +1496,8 @@ VirtioGPU.prototype.prepare_save = function()
     const virgl = this.virgl;
     if(!virgl) return Promise.resolve(undefined);
     const resources = /** @type {!Array<!Resource3D>} */ ([...this.resources.values()].filter(r => r.three_d));
+    // (the mappings' newest bytes into their blobs, and back)
+    this.upload_hostmem();
     return new Promise(resolve => virgl.after_work(() => resolve(undefined))).then(() => virgl.save_contents(resources));
 };
 
@@ -1287,7 +1513,8 @@ VirtioGPU.prototype.get_state = function()
         {
             const r = /** @type {!Resource3D} */ (found);
             resources_3d.push([r.id, r.target, r.format, r.bind, r.width, r.height, r.depth, r.array_size, r.last_level,
-                r.nr_samples, r.flags, r.backing, r.uuid, r.saved || [], r.data, r.host_newer]);
+                r.nr_samples, r.flags, r.backing, r.uuid, r.saved || [], r.data, r.host_newer, r.blob_flags, r.blob_size,
+                r.map_offset, r.map_offset >= 0 ? this.hostmem_bytes().slice(r.map_offset, r.map_offset + r.blob_size) : null]);
             continue;
         }
         if(found.blob)
@@ -1332,6 +1559,13 @@ VirtioGPU.prototype.set_state = function(state)
     this.virtio["set_transport"](state[4]);
     this.resources.clear();
     this.host_memory = 0;
+    this.mapped.clear();
+    if(this.hostmem_pending)
+    {
+        // (what the guest wrote before belongs to the old machine)
+        this.take_hostmem_dirty();
+        this.hostmem_pending.fill(0);
+    }
     for(const [id, format, width, height, data, backing, uuid] of state[5])
     {
         const r = new Resource(id, format, width, height);
@@ -1356,9 +1590,20 @@ VirtioGPU.prototype.set_state = function(state)
     {
         this.virgl.reset();
         for(const [id, target, format, bind, width, height, depth, array_size, last_level, nr_samples, flags, backing, uuid,
-            saved, data, host_newer] of state[10] || [])
+            saved, data, host_newer, blob_flags, blob_size, map_offset, mapping] of state[10] || [])
         {
             const r = new Resource3D(id, target, format, bind, width, height, depth, array_size, last_level, nr_samples, flags);
+            if(blob_flags !== undefined && blob_flags >= 0)
+            {
+                r.blob_flags = blob_flags;
+                r.blob_size = blob_size;
+                if(map_offset >= 0 && mapping && this.hostmem_region >= 0)
+                {
+                    r.map_offset = map_offset;
+                    this.hostmem_bytes().set(mapping, map_offset);
+                    this.mapped.set(id, r);
+                }
+            }
             r.set_backing = Resource.prototype.set_backing;
             if(backing) r.set_backing(Float64Array.from(backing));
             r.uuid = uuid ? Uint8Array.from(uuid) : null;

@@ -20,6 +20,8 @@ typedef unsigned char GLubyte, GLboolean;
 typedef float GLfloat;
 typedef long GLintptr, GLsizeiptr;
 typedef char GLchar;
+typedef unsigned long GLuint64;
+typedef struct GLsync_ *GLsync;
 typedef unsigned long size_t;
 typedef void *EGLDisplay, *EGLContext, *EGLConfig, *EGLSurface;
 typedef int EGLint;
@@ -137,7 +139,11 @@ __attribute__((used)) void start_c(long *p)
     F(void, glUniform1d, (GLint, double)) \
     F(void, glDrawArraysIndirect, (GLenum, const void *)) F(void, glDrawElementsIndirect, (GLenum, GLenum, const void *)) \
     F(GLuint, glCreateShaderProgramv, (GLenum, GLsizei, const GLchar *const *)) \
-    F(void, glTexImage2DMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLboolean))
+    F(void, glTexImage2DMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLboolean)) \
+    F(void, glGetIntegerv, (GLenum, GLint *)) F(const GLubyte *, glGetStringi, (GLenum, GLuint)) \
+    F(void, glBufferStorage, (GLenum, GLsizeiptr, const void *, GLbitfield)) \
+    F(GLsync, glFenceSync, (GLenum, GLbitfield)) F(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) \
+    F(void, glDeleteSync, (GLsync))
 
 #define DECLARE(ret, name, args) static ret (*name) args;
 GL_FUNCTIONS(DECLARE)
@@ -294,6 +300,14 @@ GL_FUNCTIONS(DECLARE)
 #define GL_READ_ONLY 0x88B8
 #define GL_READ_WRITE 0x88BA
 #define GL_R32UI_IMAGE 0x8236
+#define GL_MAP_WRITE_BIT 0x0002
+#define GL_MAP_PERSISTENT_BIT 0x0040
+#define GL_MAP_COHERENT_BIT 0x0080
+#define GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT 0x4000
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define GL_SYNC_FLUSH_COMMANDS_BIT 0x0001
+#define GL_NUM_EXTENSIONS 0x821D
+#define GL_EXTENSIONS 0x1F03
 #define EGL_CONTEXT_OPENGL_PROFILE_MASK 0x30FD
 #define EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT 0x1
 
@@ -1447,6 +1461,119 @@ static void test_indirect_gather(void)
     glDeleteTextures(1, &tex);
 }
 
+static int has_extension(const char *name)
+{
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for(int i = 0; i < count; i++)
+    {
+        const GLubyte *e = glGetStringi(GL_EXTENSIONS, i);
+        if(e && !strcmp((const char *)e, name)) return 1;
+    }
+    return 0;
+}
+
+/** Wait until the GPU has done everything so far (a fence, as persistent mappings need) */
+static void wait_gpu(void)
+{
+    GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 5000000000ul);
+    glDeleteSync(sync);
+}
+
+/**
+ * ARB_buffer_storage: persistent, coherent mappings (virtio-gpu's host
+ * visible memory). Vertices written through a mapping while it stays mapped,
+ * in pages far apart and again after the GPU used them; a compute shader that
+ * reads its input through one and writes its output that the CPU reads from it.
+ */
+static void test_buffer_storage(void)
+{
+    if(!has_extension("GL_ARB_buffer_storage"))
+    {
+        printf("GLTEST buffer-storage skipped (no GL_ARB_buffer_storage)\n");
+        return;
+    }
+    target(0);
+    fresh_vao();
+    GLenum types[2] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+    const char *sources[2] = {
+        VS43 "layout(location = 0) in vec2 p; layout(location = 1) in vec3 c; out vec3 v;\n"
+        "void main() { v = c; gl_Position = vec4(p, 0.0, 1.0); }",
+        VS43 "in vec3 v; out vec4 o; void main() { o = vec4(v, 1.0); }" };
+    program_stages(types, sources, 2);
+    const int size = 65536;
+    const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    GLuint b;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_ARRAY_BUFFER, b);
+    glBufferStorage(GL_ARRAY_BUFFER, size, 0, flags);
+    float *mapped = glMapBufferRange(GL_ARRAY_BUFFER, 0, size, flags);
+    if(!mapped)
+    {
+        printf("GLTEST buffer-storage FAIL no mapping (%x)\n", glGetError());
+        failures++;
+        return;
+    }
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    // a triangle: x, y, r, g, b each vertex
+    const float tri[3][15] = {
+        { -0.9f, -0.9f, 1, 0, 0, -0.1f, -0.9f, 1, 0, 0, -0.5f, -0.1f, 1, 1, 0 },
+        { 0.1f, -0.9f, 0, 1, 0, 0.9f, -0.9f, 0, 1, 0, 0.5f, -0.1f, 0, 1, 1 },
+        { -0.4f, 0.1f, 0, 0, 1, 0.4f, 0.1f, 0, 0, 1, 0.0f, 0.9f, 1, 0, 1 },
+    };
+    // the first at the start, the second 32 KiB in
+    memcpy(mapped, tri[0], sizeof(tri[0]));
+    memcpy((char *)mapped + 32768, tri[1], sizeof(tri[1]));
+    for(int k = 0; k < 2; k++)
+    {
+        const long at = k ? 32768 : 0;
+        glVertexAttribPointer(0, 2, GL_FLOAT, 0, 20, (const void *)at);
+        glVertexAttribPointer(1, 3, GL_FLOAT, 0, 20, (const void *)(at + 8));
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    // the first one's bytes again, once the GPU has drawn it
+    wait_gpu();
+    memcpy(mapped, tri[2], sizeof(tri[2]));
+    glVertexAttribPointer(0, 2, GL_FLOAT, 0, 20, (const void *)0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, 0, 20, (const void *)8);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    finish("buffer-storage-vertices", 2);
+    glDeleteBuffers(1, &b);
+
+    // compute: in[i] written by the CPU, out[i] = in[i] * 3 + i read by it
+    const char *cs = VS43 "layout(local_size_x = 64) in;\n"
+        "layout(std430, binding = 2) buffer Data { uint in_[1024]; uint pad[1024]; uint out_[1024]; };\n"
+        "void main() { uint i = gl_GlobalInvocationID.x; out_[i] = in_[i] * 3u + i; }";
+    GLenum type = GL_COMPUTE_SHADER;
+    program_stages(&type, &cs, 1);
+    const GLbitfield rw = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
+    glBufferStorage(GL_SHADER_STORAGE_BUFFER, 3 * 4096, 0, rw);
+    unsigned int *words = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 3 * 4096, rw);
+    if(!words)
+    {
+        printf("GLTEST buffer-storage FAIL no storage mapping (%x)\n", glGetError());
+        failures++;
+        return;
+    }
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, b);
+    static unsigned char data[2 * 4096];
+    for(int round = 0; round < 2; round++)
+    {
+        for(int i = 0; i < 1024; i++) words[i] = i * 7u + round * 100000u;
+        glDispatchCompute(16, 1, 1);
+        glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+        wait_gpu();
+        memcpy(data + round * 4096, words + 2048, 4096);
+    }
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+    result("buffer-storage-compute", data, sizeof(data), 0, 0);
+    glDeleteBuffers(1, &b);
+}
+
 static void run_gl43(EGLDisplay display)
 {
     const EGLint attributes[] = { EGL_CONTEXT_MAJOR_VERSION, 4, EGL_CONTEXT_MINOR_VERSION, 3,
@@ -1465,6 +1592,7 @@ static void run_gl43(EGLDisplay display)
     test_doubles();
     test_indirect_gather();
     test_tessellation();
+    test_buffer_storage();
 }
 
 int main(int argc, char **argv, char **envp)

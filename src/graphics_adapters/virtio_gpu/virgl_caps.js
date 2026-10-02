@@ -167,6 +167,8 @@ const VIRGL_CAP_ROBUST_BUFFER_ACCESS = 1 << 9;
 const VIRGL_CAP_SRGB_WRITE_CONTROL = 1 << 15;
 const VIRGL_CAP_FBO_MIXED_COLOR_FORMATS = 1 << 18;
 const VIRGL_CAP_CLIP_HALFZ = 1 << 27;
+// persistent, coherent mappings: HOST3D blobs in host visible memory
+const VIRGL_CAP_ARB_BUFFER_STORAGE = 1 << 31;
 
 // PIPE_PRIM_*: points, lines, line strip, triangles, triangle strip, and
 // the adjacency ones (the rest Mesa converts: line loops, fans, quads, polygons)
@@ -185,11 +187,13 @@ export const CAPSETS = [[1, 1, CAPS_V1_BYTES], [2, 2, CAPS_V2_BYTES]];
  * shader storage and images in fragment and compute shaders, tessellation,
  * doubles as GX does them (f32), indirect draws, 16 viewports, texture
  * views). A level's capsets never change (snapshots keep the level).
+ * Level virgl43-hostmem adds persistent, coherent buffer mappings.
  * @param {number} id
  * @param {boolean=} gl43
+ * @param {boolean=} buffer_storage
  * @return {!Uint8Array}
  */
-export function capset(id, gl43)
+export function capset(id, gl43, buffer_storage)
 {
     const bytes = new Uint8Array(CAPS_V2_BYTES);
     const view = new DataView(bytes.buffer);
@@ -264,7 +268,8 @@ export function capset(id, gl43)
     u32(388, 256);              // shader_buffer_offset_alignment
     u32(392, VIRGL_CAP_TGSI_INVARIANT | VIRGL_CAP_SRGB_WRITE_CONTROL | VIRGL_CAP_FBO_MIXED_COLOR_FORMATS |
         VIRGL_CAP_CLIP_HALFZ | (gl43 ? VIRGL_CAP_TEXTURE_VIEW | VIRGL_CAP_COPY_IMAGE | VIRGL_CAP_TXQS | VIRGL_CAP_MEMORY_BARRIER |
-        VIRGL_CAP_COMPUTE_SHADER | VIRGL_CAP_FB_NO_ATTACH | VIRGL_CAP_ROBUST_BUFFER_ACCESS : 0));
+        VIRGL_CAP_COMPUTE_SHADER | VIRGL_CAP_FB_NO_ATTACH | VIRGL_CAP_ROBUST_BUFFER_ACCESS : 0) |
+        (buffer_storage ? VIRGL_CAP_ARB_BUFFER_STORAGE : 0));
     // sample_locations[1] is 4x (Mesa's virgl_get_sample_position): a byte
     // per sample, x and y in 16ths; GX supersamples it, the centres of a 2x2 block
     u32(396 + 4, 0xCC4CC444);

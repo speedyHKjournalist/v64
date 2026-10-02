@@ -13,6 +13,7 @@
 // or with GPU_RENDERER=chrome draws them on the GPU of a headless Chrome
 // GPU_OUT: the output directory (default build/x64-linux/gpu-<adapter>[-<level>]/)
 // SHOW_LOGS=1: echo the serial console; LINUX_GPU_TIMEOUT: ms (default 900000)
+// LINUX_GPU_MEMORY: MiB (default 1024; 1536 for the virgl scenario)
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -41,7 +42,7 @@ assert.ok(fs.existsSync(repo), repo + " is missing: run tools/alpine_gpu_repo.mj
 
 const DRIVER = { bochs_vga: "bochs", vmware_svga: "vmwgfx", virtio_gpu: "virtio_gpu" }[adapter];
 // the levels with 3D (vmware_svga's vgpu9 and up)
-const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "virgl", "virgl43", "virgl43-blob"].includes(process.env.GPU_LEVEL);
+const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "virgl", "virgl43", "virgl43-blob", "virgl43-hostmem"].includes(process.env.GPU_LEVEL);
 assert.ok(DRIVER, "GPU_ADAPTER is bochs_vga, vmware_svga or virtio_gpu");
 
 const APK = "apk add --no-network --repository /mnt/repo/main --repository /mnt/repo/community";
@@ -129,6 +130,8 @@ const SCENARIOS = {
         ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
         [APK_VIRGL + " >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; grep -i -A3 error /tmp/apk.log | head", /STEP_APK_RC=0/],
         [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        // (virtio_gpu: its features, and the host visible memory at level virgl43-hostmem)
+        ["dmesg | grep -i -E 'features:|host memory window|shader model' | tail -4; echo STEP_DMESG_DONE", /STEP_DMESG_DONE/],
         ["tar -xf /dev/sdb -C /tmp && LIBGL_ALWAYS_SOFTWARE=1 /tmp/gltest ref 2>&1 | grep -E '^GLTEST (renderer|done|egl)|GL error|^shader|^link'; echo STEP_REF_DONE",
             /llvmpipe[\s\S]*STEP_REF_DONE/],
         ["/tmp/gltest cmp >/tmp/gltest.log 2>&1; grep -v '^GLIMG' /tmp/gltest.log; grep -q FAIL /tmp/gltest.log && grep '^GLIMG' /tmp/gltest.log; " +
@@ -139,6 +142,7 @@ const SCENARIOS = {
     // (Alpine 3.24's Mesa has no virgl driver: 3.23's, from v3.23/ of the repository)
     virgl: [
         ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        ["free -m | head -2; df -m / | tail -1; echo STEP_MEMORY_DONE", /STEP_MEMORY_DONE/],
         [APK_VIRGL + " kmscube mesa-utils mesa-demos weston weston-backend-drm weston-shell-desktop weston-clients seatd " +
             ">/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; grep -i -A3 error /tmp/apk.log | head -20", /STEP_APK_RC=[02]/],
         [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
@@ -318,7 +322,8 @@ const emulator = new V86({
     bzimage: { url: directory + "boot/vmlinuz-virt" }, initrd: { url: directory + "boot/initramfs-virt" },
     cdrom: { url: iso }, hda: { url: repo }, ...(gltest ? { hdb: { url: gltest } } : {}),
     cmdline: "console=ttyS0,115200 loglevel=4 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage",
-    memory_size: Number(process.env.LINUX_GPU_MEMORY || 1024) * 1048576, acpi: true, autostart: false,
+    // (the root file system is half the RAM: the virgl scenario's packages need more than 1 GiB's)
+    memory_size: Number(process.env.LINUX_GPU_MEMORY || (scenario === "virgl" ? 1536 : 1024)) * 1048576, acpi: true, autostart: false,
     disable_jit: !!+process.env.LINUX_GPU_NO_JIT, experimental_smp_jit: !+process.env.LINUX_GPU_NO_JIT,
     log_level: 0, net_device: { type: "none" }, screen_adapter: sink,
     ...(process.env.VRAM_SIZE ? { vram_size: Number(process.env.VRAM_SIZE) } : {}),

@@ -306,6 +306,22 @@ GraphicsMachine.prototype.mmio_ram_mark_dirty = function(region)
 };
 
 /**
+ * Take the region's bitmap of written pages (a bit a page, 64 a word)
+ * @param {number} region
+ * @return {number} the offset of the words in wasm memory (0: none)
+ */
+GraphicsMachine.prototype.mmio_ram_take_dirty = function(region)
+{
+    return this.handle["mmio_ram_take_dirty"](region);
+};
+
+/** @param {number} region */
+GraphicsMachine.prototype.mmio_ram_unmap = function(region)
+{
+    this.handle["mmio_ram_unmap"](region);
+};
+
+/**
  * @param {number} region
  * @param {number} pixels
  * @return {number} the offset of the RGBA picture in wasm memory

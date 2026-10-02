@@ -21,6 +21,7 @@ const VIRTIO_PCI_CAP_NOTIFY_CFG = 2;
 const VIRTIO_PCI_CAP_ISR_CFG = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG = 4;
 const VIRTIO_PCI_CAP_PCI_CFG = 5;
+const VIRTIO_PCI_CAP_SHARED_MEMORY_CFG = 8;
 
 // Status bits (device_status values).
 
@@ -155,6 +156,7 @@ var VirtIO_DeviceSpecificCapabilityOptions;
  *     revision: (undefined | number),
  *     bars: (undefined | !Array<{bar: number, size: number, address: number, prefetchable: boolean, on_move: function(number)}>),
  *     capability_bar: (undefined | number),
+ *     shared_memory: (undefined | !Array<{id: number, bar: number, offset: number, length: number}>),
  *     rom_size: (undefined | number),
  *     rom_address: (undefined | number),
  *     qemu_compatible: (undefined | boolean),
@@ -363,7 +365,7 @@ export function VirtIO(cpu, options)
             cap.use_mmio = true;
         }
     }
-    this.init_capabilities(capabilities);
+    this.init_capabilities(capabilities, options.shared_memory || []);
     // (the template's BARs that nothing took read as none)
     for(let bar = 0; bar < 6; bar++)
     {
@@ -781,8 +783,10 @@ VirtIO.prototype.create_device_specific_capability = function(options)
  * Writes capabilities into pci_space and hook up IO/MMIO handlers.
  * Call only within constructor.
  * @param {!Array<VirtIO_CapabilityInfo>} capabilities
+ * @param {!Array<{id: number, bar: number, offset: number, length: number}>} shared_memory
+ *     shared memory regions (the device's own memory BARs, options.bars)
  */
-VirtIO.prototype.init_capabilities = function(capabilities)
+VirtIO.prototype.init_capabilities = function(capabilities, shared_memory)
 {
     // Next available offset for capabilities linked list.
     let cap_next = this.pci_space[0x34] = 0x40;
@@ -958,6 +962,29 @@ VirtIO.prototype.init_capabilities = function(capabilities)
         const end = Math.max(...this.mmio_fields.map(field => field.offset + field.bytes));
         this.mmio_index = new Int16Array(end).fill(-1);
         this.mmio_fields.forEach((field, i) => this.mmio_index.fill(i, field.offset, field.offset + field.bytes));
+    }
+
+    // Shared memory regions: struct virtio_pci_cap64, the id in the byte
+    // after the BAR, the offset's and length's high dwords after the struct
+    for(const region of shared_memory)
+    {
+        const cap_len = VIRTIO_PCI_CAP_LENGTH + 8;
+        cap_ptr = cap_next;
+        cap_next = cap_ptr + cap_len;
+        dbg_assert(cap_next <= 256,
+            "VirtIO device<" + this.name + "> can't fit all capabilities into 256byte configspace");
+        this.pci_space[cap_ptr] = VIRTIO_PCI_CAP_VENDOR;
+        this.pci_space[cap_ptr + 1] = cap_next;
+        this.pci_space[cap_ptr + 2] = cap_len;
+        this.pci_space[cap_ptr + 3] = VIRTIO_PCI_CAP_SHARED_MEMORY_CFG;
+        this.pci_space[cap_ptr + 4] = region.bar;
+        this.pci_space[cap_ptr + 5] = region.id;
+        for(let i = 0; i < 4; i++)
+        {
+            this.pci_space[cap_ptr + 8 + i] = region.offset >>> 8 * i & 0xFF;
+            this.pci_space[cap_ptr + 12 + i] = region.length >>> 8 * i & 0xFF;
+        }
+        this.pci_space.fill(0, cap_ptr + 16, cap_ptr + 24);
     }
 
     // Terminate linked list with the pci config access capability.

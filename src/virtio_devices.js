@@ -137,6 +137,14 @@ export function create_adapter_virtio_device(cpu, descriptor, pci_id)
     {
         throw new TypeError("virtio device \"" + descriptor["name"] + "\": bars must be { bar, size (a power of two) }");
     }
+    // (virtio-gpu's host visible memory: a region of one of those BARs)
+    const shared_memory = descriptor["shared_memory"] || [];
+    if(!Array.isArray(shared_memory) || shared_memory.some(region => !region ||
+        !Number.isInteger(region["id"]) || region["id"] < 0 || region["id"] > 0xFF ||
+        !bars.some(bar => bar["bar"] === region["bar"] && (region["offset"] || 0) + region["length"] <= bar["size"])))
+    {
+        throw new TypeError("virtio device \"" + descriptor["name"] + "\": shared_memory must be { id, bar, offset, length } within one of the bars");
+    }
     // (no I/O ports: the windows' offsets in the memory BAR are 0x000, 0x100, 0x200, 0x300)
     return new VirtioDevice(cpu, /** @type {!Object} */ (descriptor), pci_id >> 3, 0, {
         class_code: descriptor["class_code"],
@@ -149,6 +157,12 @@ export function create_adapter_virtio_device(cpu, descriptor, pci_id)
             on_move: bar["on_move"],
         })),
         capability_bar: descriptor["capability_bar"],
+        shared_memory: shared_memory.map(region => ({
+            id: region["id"],
+            bar: region["bar"],
+            offset: region["offset"] || 0,
+            length: region["length"],
+        })),
         rom_size: descriptor["pci_rom_size"],
         rom_address: descriptor["pci_rom_address"],
         qemu_compatible: !!descriptor["qemu_compatible"],
@@ -360,7 +374,8 @@ function is_io_window_free(cpu, io_base)
  * @param {number} slot
  * @param {number} io_base
  * @param {{class_code: (number|undefined), revision: (number|undefined), bars: !Array,
- *     capability_bar: (number|undefined), rom_size: (number|undefined), rom_address: (number|undefined),
+ *     capability_bar: (number|undefined), shared_memory: (!Array|undefined),
+ *     rom_size: (number|undefined), rom_address: (number|undefined),
  *     qemu_compatible: (boolean|undefined)}=} transport
  *     a display adapter's layout (create_adapter_virtio_device)
  */
@@ -395,6 +410,7 @@ function VirtioDevice(cpu, descriptor, slot, io_base, transport)
         revision: transport && transport.revision,
         bars: transport && transport.bars,
         capability_bar: transport && transport.capability_bar,
+        shared_memory: transport && transport.shared_memory,
         rom_size: transport && transport.rom_size,
         rom_address: transport && transport.rom_address,
         qemu_compatible: transport && transport.qemu_compatible,

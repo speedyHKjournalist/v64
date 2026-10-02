@@ -667,6 +667,7 @@ CPU.prototype.wasm_patch = function()
     this.mmio_ram_read8 = get_import("mmio_ram_read8");
     this.mmio_ram_write8 = get_import("mmio_ram_write8");
     this.mmio_ram_mark_dirty = get_import("mmio_ram_mark_dirty");
+    this.mmio_ram_take_dirty = get_import("mmio_ram_take_dirty");
     this.mmio_ram_allocate_pixels = get_import("mmio_ram_allocate_pixels");
     this.mmio_ram_fill_pixels = get_import("mmio_ram_fill_pixels");
 
