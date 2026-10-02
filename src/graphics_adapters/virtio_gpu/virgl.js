@@ -180,6 +180,21 @@ Virgl.prototype.flush = function()
     this.renderer.post({ "type": "submit", "seq": seq, "bytes": bytes, "stream": "gx" }, [bytes.buffer]);
 };
 
+/**
+ * Another stream's batch (Venus's VX), in order with GX's: the same
+ * sequence numbers, the same answers
+ * @param {!Uint8Array} bytes
+ * @param {string} stream
+ * @return {number} its sequence number
+ */
+Virgl.prototype.submit_stream = function(bytes, stream)
+{
+    this.flush();
+    const seq = ++this.submitted;
+    this.renderer.post({ "type": "submit", "seq": seq, "bytes": bytes, "stream": stream }, [bytes.buffer]);
+    return seq;
+};
+
 Virgl.prototype.flush_big = function()
 {
     if(this.gxw.size() > BATCH_FLUSH_BYTES) this.flush();

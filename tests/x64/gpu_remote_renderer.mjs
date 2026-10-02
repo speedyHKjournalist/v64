@@ -11,6 +11,7 @@
 //   1 submit: seq (u32), the batch      2 reset      7 submit of a GX batch
 //   3 write: offset (u32), the bytes    4 done: seq (u32)
 //   5 lost: the reason (UTF-8)          6 ready (the renderer is up)
+//   8 log: a line of the renderer's     9 submit of a VX batch (Venus)
 
 import http from "node:http";
 import fs from "node:fs";
@@ -21,7 +22,7 @@ import { createHash as create_hash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6, submit_gx: 7, log: 8 };
+const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6, submit_gx: 7, log: 8, submit_vx: 9 };
 
 /** One binary WebSocket frame, server to client (not masked) */
 function frame(payload)
@@ -145,7 +146,7 @@ export async function create_remote_renderer(options = {})
             if(message["type"] === "submit")
             {
                 const bytes = message["bytes"], head = Buffer.alloc(5);
-                head[0] = message["stream"] === "gx" ? TYPES.submit_gx : TYPES.submit;
+                head[0] = message["stream"] === "gx" ? TYPES.submit_gx : message["stream"] === "vx" ? TYPES.submit_vx : TYPES.submit;
                 head.writeUInt32LE(message["seq"], 1);
                 stats.batches++;
                 stats.bytes += bytes.length;

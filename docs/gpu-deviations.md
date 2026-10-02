@@ -28,6 +28,10 @@ do is emulated and listed here rather than hidden.
 | G-30 | Host visible memory (virtio-gpu `virgl43-hostmem`) | The guest's writes are uploaded by page before each `SUBMIT_3D`; mapped buffers the GPU wrote are read back whole before the submit's fence | Page granularity; the whole buffer is read back after each submit that writes it |
 | G-31 | 3D scanout | 3D results reach the screen by readback into the device's picture (only the dirty rectangle's columns from GX) | One readback per present |
 | G-32 | SVGA video overlay | Drawn over the device's picture like the cursor (each unit a patch of the desktop with the video where it shows); BT.601 video range, nearest-neighbour scaling | No filtering when scaled |
+| G-33 | Venus host visible memory | A GPU buffer, mirrored in BAR4 while the guest maps it: written pages go up before each submission, the byte ranges the GPU writes (copies, fills, updates, image to buffer copies, the whole of each storage buffer a draw or dispatch binds) come back before its fence and semaphores signal | Reads back whole bound storage ranges; a guest write racing a GPU write to the same bytes loses (Vulkan leaves it undefined) |
+| G-34 | Vulkan push constants | A read-only storage buffer at a group after the sets (or binding 998 of the last group), written per draw that changed them | One more storage buffer per stage |
+| G-35 | Combined image samplers | Split into an image and a sampler before naga reads the SPIR-V (Vulkan binding b is WGSL binding 2b, its sampler 2b + 1) | Descriptor arrays of more than one element are not done |
+| G-36 | Vulkan's clip space | naga flips Y of the position; viewports and scissors are WebGPU's, clamped into the target | Viewports of a negative height (`VK_KHR_maintenance1`) are not done |
 
 ## Not done
 
@@ -38,7 +42,8 @@ do is emulated and listed here rather than hidden.
 | Geometry shader streams 1–3 | Not drawn |
 | virgl: tessellation evaluation without a control shader, tessellation followed by a geometry shader, image atomics and image size queries, indirect draws with a count buffer, GLES 3.2 | Not offered or not handled |
 | virgl: `BLOB_MEM_HOST3D_GUEST`, mapping textures | Rejected (Mesa uses neither) |
-| virtio-gpu 3D on Windows, Venus (Vulkan) | Deferred |
+| virtio-gpu 3D on Windows | Deferred |
+| Venus (Vulkan 1.1 on WebGPU), in progress | Not offered: geometry and tessellation shaders, texel buffers (no format has the features), linear tiling, sparse resources, queries' results (occlusion, timestamps), `vkCmdClearAttachments`, polygon modes other than fill, triangle fans, adjacency, sampler LOD bias and border colors (clamped to the edge), dynamic stencil masks, depth bias and line width (the pipeline's), more than 8 vertex buffers (16 declared, as Vulkan's minimum), WSI (VK5), snapshots of Venus contexts (VK6) |
 | SVGA resolution following the page | Not done: VMware does it through VMware Tools' service in the guest (vmtoolsd, `Resolution_Set` over a TCLO channel), which the backdoor does not have; virtio-gpu follows `V86.set_display_size` |
 
 ## Known issues (Mesa's svga on Linux, `tests/x64/gltest.c`)

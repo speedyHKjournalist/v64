@@ -1,0 +1,140 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VX: Venus's transfers on WebGPU</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// The renderer half of virtio-gpu's Venus contexts (vx/vx_executor.js),
+// through the page's renderer (svga_renderer.js) as the device drives it:
+// VX batches of memory and images, a submission's transfer commands
+// (copies, fills, updates, buffer-image copies of WebGPU's pitch and of
+// others, clears, blits, resolves), and readbacks of memory.
+import { GXWriter, VX, VX_MAGIC, QUERY_REGION_BYTES } from "../../src/graphics_adapters/renderer_protocol.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+(async () => {
+    try {
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        const device = end(0, 1);
+        const answers = new Map(), done = new Map();
+        device.listen(message => {
+            if(message.type === "write" && message.offset === QUERY_REGION_BYTES)
+            {
+                const v = new DataView(message.bytes.buffer, message.bytes.byteOffset);
+                answers.set(v.getUint32(0, true), v.getUint32(12, true) === 1 ? message.bytes.slice(16, 16 + v.getUint32(4, true)) : null);
+            }
+            if(message.type === "done") { const resolve = done.get(message.seq); if(resolve) resolve(); }
+            if(message.type === "lost") throw new Error("renderer lost: " + message.reason);
+        });
+        let seq = 0, request = 1;
+        const w = new GXWriter(VX_MAGIC);
+        const send = () => {
+            const s = ++seq;
+            const finished = new Promise(resolve => done.set(s, resolve));
+            device.post({ type: "submit", seq: s, bytes: w.finish(), stream: "vx" });
+            return finished;
+        };
+        /** read memory back: the bytes */
+        const read = async (id, offset, length) => {
+            const r = request++;
+            w.command(VX.MEMORY_READ, [id, offset, 0, length, r]);
+            await send();
+            return answers.get(r);
+        };
+
+        // Memory: writes, copies, fills, updates
+        const A = 1, B = 2;
+        w.command(VX.MEMORY_CREATE, [A, 4096, 0]);
+        w.command(VX.MEMORY_CREATE, [B, 4096, 0]);
+        const pattern = Uint8Array.from({ length: 4096 }, (_, i) => i * 7 & 0xFF);
+        w.command(VX.MEMORY_WRITE, [A, 0, 0, 4096], pattern);
+        w.command(VX.BEGIN, []);
+        w.command(VX.COPY_BUFFER, [A, 64, 0, B, 128, 0, 64, 0]);
+        w.command(VX.FILL_BUFFER, [B, 512, 0, 64, 0, 0xAABBCCDD]);
+        w.command(VX.FILL_BUFFER, [B, 1024, 0, 16, 0, 0]);
+        w.command(VX.UPDATE_BUFFER, [B, 768, 0, 6], Uint8Array.from([1, 2, 3, 4, 5, 6]));
+        w.command(VX.END, []);
+        let bytes = await read(B, 0, 2048);
+        check(bytes && bytes.length === 2048, "memory read back");
+        check(bytes.slice(128, 192).every((v, i) => v === pattern[64 + i]), "COPY_BUFFER");
+        check(new Uint32Array(bytes.buffer, 512, 16).every(v => v === 0xAABBCCDD), "FILL_BUFFER with a value");
+        check(bytes.slice(768, 774).join() === "1,2,3,4,5,6", "UPDATE_BUFFER");
+        check((await read(A, 3, 5)).join() === Array.from(pattern.slice(3, 8)).join(), "a read at an odd offset");
+
+        // An image of R8G8B8A8_UNORM, 16x16, 2 mips: in from memory at a
+        // pitch of 64 bytes (row by row), out at 256 (WebGPU's)
+        const IMG = 3, IMG2 = 4;
+        w.command(VX.TEXTURE_CREATE, [IMG, 37, 1, 16, 16, 1, 2, 1, 1, 0x17, 0]);
+        w.command(VX.TEXTURE_CREATE, [IMG2, 37, 1, 16, 16, 1, 1, 1, 1, 0x17, 0]);
+        w.command(VX.BEGIN, []);
+        w.command(VX.COPY_BUFFER_IMAGE, [1, A, 0, 0, 0, 0, IMG, 1, 0, 0, 1, 0, 0, 0, 16, 16, 1]);
+        w.command(VX.COPY_BUFFER_IMAGE, [0, B, 0, 0, 64, 0, IMG, 1, 0, 0, 1, 0, 0, 0, 16, 16, 1]);
+        w.command(VX.END, []);
+        bytes = await read(B, 0, 4096);
+        check(Array.from({ length: 16 }).every((_, r) => bytes.slice(r * 256, r * 256 + 64).every((v, i) => v === pattern[r * 64 + i])),
+            "COPY_BUFFER_IMAGE: in at a pitch of 64, out at 256");
+
+        // CLEAR_IMAGE (0.5, 0.25, 1, 0) on mip 1; COPY_IMAGE of mip 0 into the other image
+        w.command(VX.BEGIN, []);
+        w.command(VX.CLEAR_IMAGE, [IMG, 1, 1, 1, 0, 1, f32(0.5), f32(0.25), f32(1), f32(0)]);
+        w.command(VX.COPY_IMAGE, [IMG, 1, 0, 0, 4, 4, 0, IMG2, 1, 0, 0, 0, 0, 0, 8, 8, 1, 1]);
+        w.command(VX.COPY_BUFFER_IMAGE, [0, B, 0, 0, 0, 0, IMG, 1, 1, 0, 1, 0, 0, 0, 8, 8, 1]);
+        w.command(VX.COPY_BUFFER_IMAGE, [0, B, 1024, 0, 0, 0, IMG2, 1, 0, 0, 1, 0, 0, 0, 16, 16, 1]);
+        w.command(VX.END, []);
+        bytes = await read(B, 0, 4096);
+        check(bytes.slice(0, 4).join() === "128,64,255,0", "CLEAR_IMAGE of mip 1: " + bytes.slice(0, 4).join());
+        check(bytes.slice(1024, 1028).join() === Array.from(pattern.slice(4 * 64 + 16, 4 * 64 + 20)).join(), "COPY_IMAGE");
+
+        // BLIT_IMAGE: mip 0 (16x16) into IMG2's 8x8 corner, flipped horizontally, nearest
+        w.command(VX.BEGIN, []);
+        w.command(VX.CLEAR_IMAGE, [IMG2, 1, 0, 1, 0, 1, 0, 0, 0, 0]);
+        w.command(VX.BLIT_IMAGE, [IMG, 0, 0, 0, 0, 0, 16, 16, 1, IMG2, 0, 0, 8, 0, 0, 0, 8, 1, 1, 0]);
+        w.command(VX.COPY_BUFFER_IMAGE, [0, B, 0, 0, 64, 0, IMG2, 1, 0, 0, 1, 0, 0, 0, 16, 16, 1]);
+        w.command(VX.END, []);
+        bytes = await read(B, 0, 4096);
+        // dst (0, 0) of the flipped blit samples the source near (15, 0)
+        const src = (x, y) => Array.from(pattern.slice((y * 16 + x) * 4, (y * 16 + x) * 4 + 4)).join();
+        check(bytes.slice(0, 4).join() === src(15, 1) || bytes.slice(0, 4).join() === src(14, 0) || bytes.slice(0, 4).join() === src(15, 0),
+            "BLIT_IMAGE, flipped: " + bytes.slice(0, 4).join() + " vs " + src(15, 0));
+        check(bytes.slice(8 * 4, 8 * 4 + 4).join() === "0,0,0,0", "outside of the blit: the clear");
+
+        // Depth: D32_SFLOAT cleared to 0.75, copied out
+        const DEPTH = 5;
+        w.command(VX.TEXTURE_CREATE, [DEPTH, 126, 1, 8, 8, 1, 1, 1, 1, 0x23, 0]);
+        w.command(VX.BEGIN, []);
+        w.command(VX.CLEAR_IMAGE, [DEPTH, 2, 0, 1, 0, 1, f32(0.75), 0, 0, 0]);
+        w.command(VX.COPY_BUFFER_IMAGE, [0, B, 0, 0, 64, 0, DEPTH, 2, 0, 0, 1, 0, 0, 0, 8, 8, 1]);
+        w.command(VX.END, []);
+        bytes = await read(B, 0, 256);
+        check(new Float32Array(bytes.buffer, 0, 1)[0] === 0.75, "depth cleared and copied: " + new Float32Array(bytes.buffer, 0, 1)[0]);
+
+        // MSAA: a 4x image cleared, resolved into a 1x one
+        const MS = 6, RES = 7;
+        w.command(VX.TEXTURE_CREATE, [MS, 37, 1, 8, 8, 1, 1, 1, 4, 0x10, 0]);
+        w.command(VX.TEXTURE_CREATE, [RES, 37, 1, 8, 8, 1, 1, 1, 1, 0x13, 0]);
+        w.command(VX.BEGIN, []);
+        w.command(VX.CLEAR_IMAGE, [MS, 1, 0, 1, 0, 1, f32(1), f32(0), f32(0.5), f32(1)]);
+        w.command(VX.RESOLVE_IMAGE, [MS, 0, 0, 0, 0, RES, 0, 0, 0, 0, 8, 8, 1]);
+        w.command(VX.COPY_BUFFER_IMAGE, [0, B, 0, 0, 64, 0, RES, 1, 0, 0, 1, 0, 0, 0, 8, 8, 1]);
+        w.command(VX.END, []);
+        bytes = await read(B, 0, 4);
+        check(bytes.join() === "255,0,128,255", "RESOLVE_IMAGE: " + bytes.join());
+
+        // DESTROY, then a read of what is gone fails
+        w.command(VX.DESTROY, [A]);
+        check(await read(A, 0, 4) === null, "a destroyed memory reads as nothing");
+
+        const vx = renderer.vx;
+        check(vx.errors === 0, "no errors: " + vx.warnings.join("; "));
+        result.textContent = "PASS " + checks.length + " checks\n" + checks.join("\n");
+    } catch(e) {
+        result.textContent = "FAIL " + (e.stack || e) + "\n" + checks.join("\n");
+    }
+})();
+</script>

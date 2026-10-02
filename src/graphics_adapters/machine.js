@@ -152,6 +152,16 @@ GraphicsDisplay.prototype.time_since_vblank = function(now)
 };
 
 /**
+ * Called whenever the machine's timers run (each slice of the CPU's): a
+ * device's own polling. Returns milliseconds until it needs to run again.
+ * @param {function(number):number} timer
+ */
+GraphicsDisplay.prototype.add_timer = function(timer)
+{
+    this.handle["add_timer"](timer);
+};
+
+/**
  * A device with a scanout: { vblank_period(), on_vblank(), render(), invalidate() }
  * @param {!Object} source
  */

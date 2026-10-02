@@ -7,7 +7,8 @@
 // as readbacks, and the device shows them on its screens like 2D ones.
 //
 // Channel messages, device -> renderer:
-//   submit { seq, bytes }   a D9WG batch
+//   submit { seq, bytes, stream }   a D9WG batch, or with stream "gx" a GX
+//                           batch, "vx" a VX one (virtio-gpu's Vulkan)
 //   reset  {}               the machine was reset: forget every object
 // renderer -> device:
 //   write  { offset, bytes } into the response region: a query result or a
@@ -70,6 +71,17 @@
             return gx;
         };
 
+        // VX (virtio-gpu's Venus contexts), on the same device
+        let vx = null;
+        const vxExecutor = async () => {
+            if (vx) return vx;
+            if (!executor.device) await executor.initialize();
+            const VX = global.V86VXExecutor;
+            if (!VX) throw new Error("the renderer needs vx_executor.js (libv86-webgpu.js)");
+            vx = new VX.VXExecutor({ device: executor.device, formats: global.V86VenusFormats });
+            return vx;
+        };
+
         channel.listen(message => {
             switch (message.type) {
                 case "submit": {
@@ -77,7 +89,18 @@
                     const stream = message.stream || "d9wg";
                     queue = queue.then(async () => {
                         if (forGeneration !== generation) return;
-                        if (!lost && stream === "gx") {
+                        if (!lost && stream === "vx") {
+                            try {
+                                const target = await vxExecutor();
+                                await target.submit(bytes, { writeResponse: (offset, data) => {
+                                    if (forGeneration !== generation) return;
+                                    const copy = data.slice();
+                                    channel.post({ type: "write", offset, bytes: copy }, [copy.buffer]);
+                                } });
+                            } catch (error) {
+                                fail(error && error.stack || error);
+                            }
+                        } else if (!lost && stream === "gx") {
                             try {
                                 const target = await gxExecutor();
                                 await target.submit(bytes, { writeResponse: (offset, data) => {
@@ -101,6 +124,7 @@
                     ++generation;
                     queue = queue.then(() => {
                         if (gx) gx.reset();
+                        if (vx) vx.reset();
                         return executor.resetForReplay();
                     }).catch(error => fail(error));
                     break;
@@ -110,6 +134,7 @@
         return {
             executor,
             get gx() { return gx; },
+            get vx() { return vx; },
             // the batches sent so far have run
             idle: () => queue.then(() => executor.checkpointIdle()),
             destroy() {

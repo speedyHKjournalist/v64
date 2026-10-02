@@ -150,6 +150,9 @@ export function DisplayHub(bus, sink)
     /** @type {DisplaySource} */
     this.source = null;
 
+    /** @type {!Array<function(number):number>} devices' timers */
+    this.timers = [];
+
     /** machine time of the most recent and the next vertical retrace */
     this.last_vblank = 0;
     this.next_vblank = 0;
@@ -177,10 +180,12 @@ DisplayHub.prototype.add_source = function(source)
  */
 DisplayHub.prototype.timer = function(now)
 {
+    let next = 100;
+    for(const timer of this.timers) next = Math.min(next, timer(now));
     const source = this.source;
     if(!source)
     {
-        return 100;
+        return next;
     }
     if(now < this.last_vblank)
     {
@@ -196,7 +201,17 @@ DisplayHub.prototype.timer = function(now)
         this.frame_count++;
         source.on_vblank();
     }
-    return this.next_vblank - now;
+    return Math.min(next, this.next_vblank - now);
+};
+
+/**
+ * A device's timer, run with the display's (each time the machine's timers
+ * run): returns milliseconds until it needs to run again
+ * @param {function(number):number} timer
+ */
+DisplayHub.prototype.add_timer = function(timer)
+{
+    this.timers.push(timer);
 };
 
 /**

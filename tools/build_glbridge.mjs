@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFile as read_file, mkdir, writeFile as write_file } from "node:fs/promises";
+import { readFile as read_file, mkdir, writeFile as write_file, copyFile as copy_file } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { createHash as create_hash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -16,12 +17,14 @@ const files = [
     "gl-webgpu/gl_arb_program.js", "gl-webgpu/gl_executor.js",
     "graphics_journal.js", "v86_network_bridge.js", "webgpu_compositor.js", "v86gl_device.js", "graphics_proxy.js",
     "shader_ir/dxbc_frontend.js", "shader_ir/wgsl_emitter.js", "gx/tessellator_wgsl.js", "gx/gx_executor.js",
-    "svga_renderer.js",
+    "vx/vx_executor.js", "svga_renderer.js",
 ];
 const contents = await Promise.all(files.map(file => read_file(new URL(file, source), "utf8")));
 // GX's format table, from the device's (tools/svga_gx_formats.mjs)
 const { gx_formats } = await import(new URL("tools/svga_gx_formats.mjs", root));
-const formats = "globalThis.V86SVGADXFormats = " + JSON.stringify(gx_formats()) + ";";
+const formats = "globalThis.V86SVGADXFormats = " + JSON.stringify(gx_formats()) + ";\n" +
+    // VX's, the Venus device's (src/graphics_adapters/virtio_gpu/venus_device_info.js)
+    "globalThis.V86VenusFormats = " + JSON.stringify((await import(new URL("src/graphics_adapters/virtio_gpu/venus_device_info.js", root))).FORMATS) + ";";
 const worker = await read_file(new URL("d3d9-webgpu/d3d9_shader_worker.js", source), "utf8");
 const journal_worker = await read_file(new URL("graphics_journal_worker.js", source), "utf8");
 // The device half alone, for the CPU worker (importScripts)
@@ -36,8 +39,17 @@ await write_file(new URL("d3d9_shader_worker.js", output), prefix + worker);
 await write_file(new URL("d3d9_shader_pipeline.js", output), prefix + contents[2]);
 await write_file(new URL("graphics_journal_worker.js", output), prefix + journal_worker);
 await write_file(new URL("v86gl-device.js", output), prefix + device);
+// VX's SPIR-V to WGSL (naga, src/browser/glbridge/vx/naga): built with cargo
+// (from its cache when it can), next to the bundle, which loads it when a
+// Venus context first makes a shader
+const naga = fileURLToPath(new URL("src/browser/glbridge/vx/naga/", root));
+const cargo_args = ["build", "--release", "--target", "wasm32-unknown-unknown"];
+let built = spawnSync("cargo", [...cargo_args, "--offline"], { cwd: naga, stdio: "inherit" }).status === 0 ||
+    spawnSync("cargo", cargo_args, { cwd: naga, stdio: "inherit" }).status === 0;
+if(built) await copy_file(new URL("build/wasm32-unknown-unknown/release/vx_naga.wasm", root), new URL("vx_naga.wasm", output));
+else console.warn("cargo failed: build/glbridge/vx_naga.wasm (Venus's shaders) is not built");
 await write_file(new URL("manifest.json", output), JSON.stringify({ revision, files: [
     "libv86-webgpu.js", "d3d9_shader_worker.js", "d3d9_shader_pipeline.js", "graphics_journal_worker.js",
-    "v86gl-device.js",
+    "v86gl-device.js", ...(built ? ["vx_naga.wasm"] : []),
 ] }, null, 2) + "\n");
 console.log(`Built WebGPU graphics ${revision} in ${fileURLToPath(output)}`);

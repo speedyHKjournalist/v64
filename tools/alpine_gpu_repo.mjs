@@ -30,6 +30,8 @@ export const PACKAGES = [
     "kmscube", "mesa-demos", "mesa-utils", "libdrm-tests",
     "weston", "weston-backend-drm", "weston-shell-desktop", "weston-terminal", "weston-clients",
     "seatd", "vulkan-tools",
+    // Vulkan: Venus (virtio_gpu's) and lavapipe (the reference to compare it with)
+    "mesa-vulkan-virtio", "mesa-vulkan-swrast",
 ];
 /** The Mesa with virgl (Alpine 3.23's), under v3.23/ */
 export const VIRGL_PACKAGES = ["mesa-dri-gallium", "mesa-gbm", "mesa-egl", "mesa-gl", "mesa-gles"];

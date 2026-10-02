@@ -7,7 +7,7 @@
 //     GPU_ADAPTER=bochs_vga node tests/x64/linux_gpu.mjs
 //
 // GPU_ADAPTER: bochs_vga (default), vmware_svga, virtio_gpu
-// GPU_SCENARIO: the steps below: drm (default), gl, sm41, sm5, resize
+// GPU_SCENARIO: the steps below: drm (default), gl, sm41, sm5, gltest, virgl, venus, resize
 // GPU_LEVEL: pins the adapter's level (graphics_adapter_test), e.g. 2d or 2d-full;
 // vgpu9 records the 3D batches into <out>/trace.bin (tests/x64/gpu_trace.mjs),
 // or with GPU_RENDERER=chrome draws them on the GPU of a headless Chrome
@@ -42,7 +42,8 @@ assert.ok(fs.existsSync(repo), repo + " is missing: run tools/alpine_gpu_repo.mj
 
 const DRIVER = { bochs_vga: "bochs", vmware_svga: "vmwgfx", virtio_gpu: "virtio_gpu" }[adapter];
 // the levels with 3D (vmware_svga's vgpu9 and up)
-const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "dx11-full", "virgl", "virgl43", "virgl43-blob", "virgl43-hostmem"].includes(process.env.GPU_LEVEL);
+const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "dx11-full", "virgl", "virgl43", "virgl43-blob", "virgl43-hostmem",
+    "venus"].includes(process.env.GPU_LEVEL);
 assert.ok(DRIVER, "GPU_ADAPTER is bochs_vga, vmware_svga or virtio_gpu");
 
 const APK = "apk add --no-network --repository /mnt/repo/main --repository /mnt/repo/community";
@@ -192,6 +193,31 @@ const SCENARIOS = {
             { screenshot: "es2gears", after: 10000 }],
         ["grep -i -E 'error|renderer|GL version|EGL' /tmp/weston.log | head -20; echo STEP_WESTON_LOG", /STEP_WESTON_LOG/],
     ],
+    // virtio_gpu's Vulkan (GPU_LEVEL=venus): Mesa's venus driver on the
+    // device's Venus contexts (src/graphics_adapters/virtio_gpu/venus.js),
+    // what vulkaninfo reports, next to lavapipe's
+    venus: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        [APK + " mesa-vulkan-virtio mesa-vulkan-swrast vulkan-loader vulkan-tools >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; " +
+            "grep -i -A3 error /tmp/apk.log | head; ls /usr/share/vulkan/icd.d/", /STEP_APK_RC=0/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["dmesg | grep -i -E 'features:|capset|host memory window' | tail -6; echo STEP_DMESG_DONE", /\+context_init[\s\S]*STEP_DMESG_DONE/],
+        ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json vulkaninfo --summary > /tmp/lvp.txt 2>&1; echo rc=$?; " +
+            "grep -E 'apiVersion|deviceName|driverName' /tmp/lvp.txt || head -30 /tmp/lvp.txt; echo STEP_LAVAPIPE_DONE", /STEP_LAVAPIPE_DONE/],
+        ["VN_DEBUG=init VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vulkaninfo --summary 2>&1 | tail -40; echo STEP_SUMMARY_DONE",
+            /Venus[\s\S]*STEP_SUMMARY_DONE/],
+        ["HOST stats", null],
+        ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vulkaninfo > /tmp/vulkaninfo.txt 2>&1; echo STEP_VULKANINFO_RC=$?; " +
+            "wc -l < /tmp/vulkaninfo.txt; grep -i -E 'error|abort|fail' /tmp/vulkaninfo.txt | head -10", /STEP_VULKANINFO_RC=0/],
+        // tests/x64/vktest.c: lavapipe's results, then Venus's (a real GPU: GPU_RENDERER=chrome)
+        ["tar -xf /dev/sdb -C /tmp && for t in " + (process.env.VKTEST_ONLY || "\"\"") + "; do VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json /tmp/vktest $t" +
+            " 2>&1 | grep VKTEST; done; echo STEP_LVP_DONE",
+            /VKTEST done[\s\S]*STEP_LVP_DONE/],
+        ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json /tmp/vktest " + (process.env.VKTEST_ONLY || "") +
+            " 2>&1 | grep -E 'VKTEST|rror|abort'; echo STEP_VKTEST_DONE",
+            /STEP_VKTEST_DONE/],
+        ["HOST stats", null],
+    ],
     // the page's size reaching the guest (virtio_gpu): a display event, the
     // new preferred mode, which a KMS client then sets
     resize: [
@@ -310,11 +336,76 @@ function build_gltest()
     run("bsdtar", ["--format", "ustar", "--no-xattrs", "--no-mac-metadata", "--uid", "0", "--gid", "0", "-cf", dir + "gltest.tar", "-C", dir, "gltest"]);
     return dir + "gltest.tar";
 }
-const gltest = steps.some(step => step[0].includes("/dev/sdb")) ? build_gltest() : null;
+// tests/x64/vktest.c, for the venus scenario (/dev/sdb): the same way,
+// against the Vulkan loader, with third_party/vulkan's headers
+function build_vktest()
+{
+    const dir = directory + "vktest/", sysroot = dir + "sysroot/";
+    const run = (program, args) => {
+        const result = spawnSync(program, args, { encoding: "utf8" });
+        assert.equal(result.status, 0, `${program}: ${result.stderr || result.error}`);
+        return result.stdout.trim();
+    };
+    fs.mkdirSync(sysroot, { recursive: true });
+    const packages = directory + "gpu-repo/main/x86_64/";
+    for(const name of fs.readdirSync(packages).filter(f => /^(musl|vulkan-loader)-\d.*\.apk$/.test(f)))
+    {
+        spawnSync("bsdtar", ["-xf", packages + name, "-C", sysroot]);
+    }
+    const host = run("rustc", ["-vV"]).match(/host: (.+)/)[1];
+    const lld = process.env.LD_LLD || `${run("rustc", ["--print", "sysroot"])}/lib/rustlib/${host}/bin/rust-lld`;
+    // the shaders, as C arrays: tests/x64/vktest_shaders/ by naga (Vulkan GLSL)
+    const shaders = [];
+    for(const name of fs.readdirSync(root + "tests/x64/vktest_shaders").sort())
+    {
+        const stage = { vert: "vert", frag: "frag", comp: "compute" }[name.split(".").pop()];
+        const spv = dir + name + ".spv";
+        run(process.env.NAGA || "naga", ["--input-kind", "glsl", "--shader-stage", stage, "--keep-coordinate-space",
+            root + "tests/x64/vktest_shaders/" + name, spv]);
+        const file = fs.readFileSync(spv);
+        const words = new Uint32Array(file.buffer.slice(file.byteOffset, file.byteOffset + file.length));
+        shaders.push(`static const uint32_t SPV_${name.replace(".", "_")}[] = { ${Array.from(words, w => "0x" + w.toString(16)).join(", ")} };`);
+    }
+    // vkcube's (glslang's: combined image samplers), out of the guest's vulkan-tools
+    const tools = fs.readdirSync(packages).find(f => /^vulkan-tools-\d.*\.apk$/.test(f));
+    spawnSync("bsdtar", ["-xf", packages + tools, "-C", dir, "usr/bin/vkcube"]);
+    const binary = fs.readFileSync(dir + "usr/bin/vkcube");
+    for(let align = 0; align < 4; align++)
+    {
+        const w = new Uint32Array(binary.buffer.slice(binary.byteOffset + align, binary.byteOffset + align + (binary.length - align & ~3)));
+        for(let i = 0; i < w.length; i++)
+        {
+            if(w[i] !== 0x07230203) continue;
+            // the module: instructions while they parse, to its last OpFunctionEnd
+            let at = i + 5, end = 0, model = -1;
+            while(at < w.length)
+            {
+                const count = w[at] >>> 16, op = w[at] & 0xFFFF;
+                if(!count || op > 400 && op < 4400) break;
+                if(op === 15 && model < 0) model = w[at + 1];
+                at += count;
+                if(op === 56) end = at;
+            }
+            const stage = { 0: "vert", 4: "frag" }[model];
+            if(!end || !stage) continue;
+            shaders.push(`static const uint32_t SPV_cube_${stage}[] = { ${Array.from(w.subarray(i, end), x => "0x" + x.toString(16)).join(", ")} };`);
+        }
+    }
+    fs.writeFileSync(dir + "vktest_shaders.h", "// generated by tests/x64/linux_gpu.mjs\n" + shaders.join("\n") + "\n");
+    run(process.env.CLANG || "clang", ["--target=x86_64-unknown-linux-musl", "-fPIC", "-O1", "-I", dir, "-I", root + "tests/x64/include", "-I", root + "third_party/vulkan",
+        "-c", root + "tests/x64/vktest.c", "-o", dir + "vktest.o"]);
+    run(lld, ["-flavor", "gnu", "-m", "elf_x86_64", "-pie", "--dynamic-linker", "/lib/ld-musl-x86_64.so.1", "--allow-shlib-undefined",
+        "-o", dir + "vktest", dir + "vktest.o", sysroot + "lib/ld-musl-x86_64.so.1", sysroot + "usr/lib/libvulkan.so.1"]);
+    run("bsdtar", ["--format", "ustar", "--no-xattrs", "--no-mac-metadata", "--uid", "0", "--gid", "0", "-cf", dir + "vktest.tar", "-C", dir, "vktest"]);
+    return dir + "vktest.tar";
+}
+const gltest = steps.some(step => step[0].includes("/dev/sdb")) ? (scenario === "venus" ? build_vktest() : build_gltest()) : null;
 
 const remote = LEVEL_3D && process.env.GPU_RENDERER === "chrome" ? await create_remote_renderer() : null;
 const trace = LEVEL_3D && !remote ?
     create_trace_renderer(path.join(out, "trace.bin"), { adapter, level: process.env.GPU_LEVEL, scenario }) : null;
+// VENUS_TRACE=1: the Venus commands the device runs, as decoded (venus.js's on_command)
+const venus_trace = name => +process.env.VENUS_TRACE > 1 || !/^vk(Cmd|SetReply|Get(PhysicalDevice|Device|Image|Buffer)\w*(Properties|Requirements))/.test(name);
 const emulator = new V86({
     graphics_adapter: adapter,
     wasm_path: process.env.WASM_PATH,
@@ -367,6 +458,16 @@ try
     });
     const cpu = emulator.v86.cpu;
     cpu.wm.exports.set_x64_test_capabilities(1);
+    const venus = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"]?.venus;
+    if(venus && +process.env.VENUS_TRACE)
+    {
+        venus.on_command = (name, a) => {
+            if(!venus_trace(name)) return;
+            const brief = JSON.stringify(a, (k, v) => ArrayBuffer.isView(v) ? "[" + v.length + " bytes]" : v);
+            console.log("venus: " + name + " " + brief.slice(0, 300));
+        };
+        if(+process.env.VENUS_TRACE > 1) venus.vk.debug = text => console.log("venus-device: " + text);
+    }
     emulator.run();
     // GPU_DEBUG_BLITS=n: the first n BLIT_SURFACE_TO_SCREEN commands and what came of them
     const svga3d_debug = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"]?.svga3d;
@@ -438,7 +539,9 @@ try
                 if(gpu) console.log("virtio-gpu " + JSON.stringify({ stats: gpu.stats, active: gpu.active,
                     scanouts: gpu.scanouts.map(s => [s.enabled, s.resource_id, s.width, s.height, !!s.rgba]), pending: gpu.pending && gpu.pending.length,
                     virgl: gpu.virgl && { counts: gpu.virgl.counts, warnings: gpu.virgl.warnings, submitted: gpu.virgl.submitted, completed: gpu.virgl.completed,
-                        requests: gpu.virgl.requests.size, completions: gpu.virgl.completions.length } }));
+                        requests: gpu.virgl.requests.size, completions: gpu.virgl.completions.length },
+                    venus: gpu.venus && { stats: gpu.venus.stats, vk: gpu.venus.vk.stats, warnings: gpu.venus.vk.warnings,
+                        contexts: [...gpu.venus.contexts.values()].map(c => ({ rings: c.rings.size, objects: c.objects.size })) } }));
             }
             else if(verb === "snapshot")
             {

@@ -547,20 +547,40 @@ new V86({
   - 这样能满足 `ARB_buffer_storage` 的 persistent/coherent 映射。以后如果做 Venus，它要求的 host-visible 内存语义（coherent 内存在 submit 时可见）也能满足。
 - **`BLOB_MEM_HOST3D_GUEST`**：同上，额外保留客户机副本。
 
-### 6.5 Venus（暂缓，D6）
+### 6.5 Venus（D6，2026-10-02 起）
 
-本节只保留可行性分析，不在本轮排期里。
+Linux 客户机上 virtio-gpu 的 Vulkan。客户机用 Alpine 3.24 的 Mesa 26.1.6 里的 Venus 驱动（`mesa-vulkan-virtio`；3.23 的 Mesa 没有它），对照用同一 Mesa 的 lavapipe（`mesa-vulkan-swrast`），两者都放进本地仓库（2026-10-02 经用户同意下载）。
 
-- Venus 把 Vulkan 调用序列化（`venus-protocol`），宿主机必须有一个 Vulkan 实现。这里等于要在 WebGPU 上用 JS 写一个 Vulkan 驱动。
-- 可行的原因是 Vulkan 允许驱动声明不支持某些特性（`geometryShader`、`tessellationShader` 等都可以报 false），而 Vulkan 1.0 的核心特性大多能对上 WebGPU。
-- 需要的东西：
-  - SPIR-V 前端；
-  - push constant 模拟；
-  - 子通道拆成多个 render pass；
-  - 描述符集映射成 bind group；
-  - 二级命令缓冲录制后回放；
-  - HOST3D 内存（6.4）。
-- 规模是整个计划里最大的单项（量级 20k 行以上）。以后重新考虑时，建议先在 GX 和 virgl 完成之后做 `vulkaninfo`、`vkcube` 的原型，再决定是否继续。
+**客户机这边要什么**（读 Mesa 26.1.6 的 `src/virtio/vulkan` 得出）：
+
+- capset 4（`virgl_renderer_capset_venus`：wire format 版本、vk.xml 版本、两个协议扩展的版本、`supports_blob_id_0`、扩展掩码、`allow_vk_wait_syncs`、`supports_multiple_timelines`）；`CONTEXT_INIT` 按 capset 4 建上下文，带环（ring_idx）数和轮询掩码；内核参数要 `3D_FEATURES`、`CAPSET_QUERY_FIX`、`RESOURCE_BLOB`、`CONTEXT_INIT`、`HOST_VISIBLE`。
+- 共享内存：`HOST3D`、`MAPPABLE`、`blob_id` 0 的 blob 就是一块宿主机共享内存（放在 BAR4），命令环和回复都在里面。设备直接读写 BAR4 里的这些字节，不用同步。
+- 命令环：客户机在环里写命令、推进 tail，宿主机消费、推进 head；环空闲时宿主机置 IDLE 位，客户机就用 `vkNotifyRingMESA`（经 `SUBMIT_3D`）叫醒。客户机等待时有看门狗，宿主机要定期置 ALIVE 位，否则客户机会中止。所以设备要一个比 vblank 快的定时器。
+- 回复：`vkSetReplyCommandStreamMESA` 指定回复写到哪块共享内存；带 `GENERATE_REPLY` 标志的命令把返回值和输出参数编码进去。
+- `VkDeviceMemory`：host visible 的内存以内存对象的 id 作 `blob_id` 建 `HOST3D` blob，映射进 BAR4（V5 的做法）。
+- WSI：宿主机没有 `VK_EXT_external_memory_dma_buf` 时，Venus 走软件 WSI（交换链图像经 CPU 内存交给窗口系统，比如 `wl_shm`），不需要跨进程共享缓冲。`VK_KHR_swapchain` 要求同步 fd 能导入信号量（Venus 用空提交加协议命令模拟）。
+- 渲染器要 Vulkan 1.1 以上（`VN_MIN_RENDERER_VERSION`）。
+
+**做法**：
+
+- 协议：解码器从客户机自己的编码器生成（Mesa 26.1.6 的 `src/virtio/venus-protocol/vn_protocol_driver_*.h`，生成的 C 代码，形状只有七十多种），所以和客户机的线格式完全一致；回复的编码器从客户机的回复解码器生成。生成脚本 `tools/venus_protocol_gen.mjs`，产物是数据表，运行时解释。
+- 设备这边（插件）：解码命令，维护 Vulkan 对象（id 是客户机分配的），能当场回答的当场回答（属性、特性、格式、内存类型、对象创建），命令缓冲录成列表，提交时连同同步对象转成渲染器的批次。
+- 渲染器这边：新的 WebGPU 执行器；SPIR-V 用 naga（编成 wasm，约 650 KB，本机 cargo 缓存里已有，离线可编）转 WGSL；push constant 放进一个带动态偏移的 uniform 缓冲；描述符集对应 bind group；子通道拆成 render pass。
+- 内存：每块 `VkDeviceMemory` 一个 GPUBuffer，绑在上面的 `VkBuffer` 用（缓冲，偏移）引用它；`VkImage` 各自一张纹理；host visible 内存按 V5 的办法同步（提交前上传写过的页，GPU 写过的在 fence 前读回）。
+
+**里程碑**：
+
+| 编号 | 内容 | 完成标准 |
+| --- | --- | --- |
+| VK0 | 传输：capset 4 和新等级，Venus 上下文，共享内存 blob，命令环和回复流，`MESA` 传输命令，设备定时器；协议生成器 | 设备单元测试：手写的环和命令得到正确回复 |
+| VK1 | 实例和物理设备：版本、扩展、特性、属性、限制、格式、内存类型、队列族，从 WebGPU 的能力推出，按等级固定 | 客户机里 `vulkaninfo` 跑通，显示 Venus 设备 |
+| VK2 | 设备、队列、内存、缓冲、图像、视图、采样器、命令池和命令缓冲，拷贝、清除、blit，fence、信号量（二值和时间线）、事件，提交 | `vktest`（对照 lavapipe）的传输类用例通过 |
+| VK3 | 着色器（naga），管线布局，描述符集，render pass 和动态渲染，图形管线，绘制，push constant，动态状态 | `vktest` 的绘制类用例通过 |
+| VK4 | 计算，存储缓冲和图像，查询，二级命令缓冲，间接绘制，多重采样，mip 生成 | `vktest` 全部通过 |
+| VK5 | WSI：交换链（软件路径）、同步 fd | weston 上 `vkcube` 正常 |
+| VK6 | 存档和恢复 | `vkcube` 运行中存档恢复后继续 |
+
+进度（2026-10-02）：VK0–VK3 完成。设备单元测试（`tests/devices/virtio_gpu_venus.js`、`venus_protocol.js`）通过；客户机里 `vulkaninfo` 跑通；`vktest` 的 21 个用例（传输、同步、绘制、深度、混合加多重采样、纹理、计算、`vkCmdClearAttachments`、vkcube 的着色器）在 Venus 上全部通过，结果和 lavapipe 一致。
 
 ### 6.6 Windows 8.1 上的 virtio-gpu
 

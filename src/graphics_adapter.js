@@ -415,6 +415,7 @@ GraphicsAdapter.prototype.create_handle = function()
             }))),
             "time_since_vblank": now => hub.time_since_vblank(now),
             "add_source": source => hub.add_source(new PluginDisplaySource(source)),
+            "add_timer": timer => hub.add_timer(timer),
         },
     };
 };
