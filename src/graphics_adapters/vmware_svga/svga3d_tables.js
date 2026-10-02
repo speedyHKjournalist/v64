@@ -281,6 +281,16 @@ export const DX11_DEVCAPS = with_devcaps(DX10_1_DEVCAPS, [
     [C.SVGA3D_DEVCAP_MAX_TEXTURE_REPEAT, 16384],
 ]);
 
+/**
+ * The devcaps at level dx11-full: dx11's, and the last vertex provoking where
+ * the rasterizer state asks (GX reorders: GL's flat shading, which Mesa's
+ * svga otherwise converts in the guest)
+ * @type {!Array<!Array<number>>}
+ */
+export const DX11_FULL_DEVCAPS = with_devcaps(DX11_DEVCAPS, [
+    [C.SVGA3D_DEVCAP_DX_PROVOKING_VERTEX, 1],
+]);
+
 /** A level's devcaps from the one below's, some of them changed */
 function with_devcaps(base, changes)
 {

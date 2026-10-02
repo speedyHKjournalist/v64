@@ -410,7 +410,7 @@ function observe_svga()
     }
     const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
     if(!svga) return;
-    const state = {enable: svga.enable, mode: `${svga.width}x${svga.height}x${svga.bpp}`, pitch: svga.pitch(),
+    const state = {level: svga.level, enable: svga.enable, mode: `${svga.width}x${svga.height}x${svga.bpp}`, pitch: svga.pitch(),
         guest_id: svga.guest_id, config_done: svga.config_done, irq_mask: svga.irq_mask, id: svga.id.toString(16),
         screens: [...svga.screens.screens.values()].map(sc => [sc.id, sc.x, sc.y, sc.width, sc.height, sc.backing ? sc.backing.gmr : -1]),
         unknown: svga.stats ? svga.stats.last_unknown : 0, errors: svga.stats ? svga.stats.errors : 0};

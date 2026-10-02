@@ -26,7 +26,8 @@ do is emulated and listed here rather than hidden.
 | G-28 | Clip distances | WebGPU's `clip-distances` on the vertex stage | Not when the last stage before the rasterizer is a geometry or domain shader (warned) |
 | G-29 | Integer clears with float values | Mesa's svga sends a UINT target's values as its signed ints (`-16.0` for `0xFFFFFFF0`): negative values wrap, the rest saturate as D3D converts | None for Mesa; D3D applications get D3D's saturation |
 | G-30 | Host visible memory (virtio-gpu `virgl43-hostmem`) | The guest's writes are uploaded by page before each `SUBMIT_3D`; mapped buffers the GPU wrote are read back whole before the submit's fence | Page granularity; the whole buffer is read back after each submit that writes it |
-| G-31 | 3D scanout | 3D results reach the screen by readback into the device's picture | One readback per present |
+| G-31 | 3D scanout | 3D results reach the screen by readback into the device's picture (only the dirty rectangle's columns from GX) | One readback per present |
+| G-32 | SVGA video overlay | Drawn over the device's picture like the cursor (each unit a patch of the desktop with the video where it shows); BT.601 video range, nearest-neighbour scaling | No filtering when scaled |
 
 ## Not done
 
@@ -38,17 +39,17 @@ do is emulated and listed here rather than hidden.
 | virgl: tessellation evaluation without a control shader, tessellation followed by a geometry shader, image atomics and image size queries, indirect draws with a count buffer, GLES 3.2 | Not offered or not handled |
 | virgl: `BLOB_MEM_HOST3D_GUEST`, mapping textures | Rejected (Mesa uses neither) |
 | virtio-gpu 3D on Windows, Venus (Vulkan) | Deferred |
-| SVGA video overlay (`SVGA_ESCAPE_VMWARE_VIDEO*`) | Not implemented: `SVGA_FIFO_CAP_VIDEO` is not declared, escapes are ignored. Only X.org's vmware driver uses it (XVideo) |
 | SVGA resolution following the page | Not done: VMware does it through VMware Tools' service in the guest (vmtoolsd, `Resolution_Set` over a TCLO channel), which the backdoor does not have; virtio-gpu follows `V86.set_display_size` |
 
 ## Known issues (Mesa's svga on Linux, `tests/x64/gltest.c`)
 
-At level `dx11`, 30 of the 34 cases match llvmpipe. The four that do not:
+At level `dx11-full`, 31 of the 34 cases match llvmpipe (at `dx11`, 30: see
+`flat-indexed-strip`). The ones that do not:
 
 | Case | What happens |
 | --- | --- |
 | `fan-lines-points` | Points (which Mesa's svga expands with its own geometry shader) come out mirrored vertically; lines and the fan are right |
-| `flat-indexed-strip` | With flat shading by the last vertex and a restart in the strip, one triangle of the first strip takes the vertex id of the vertex after the one it should (`gl_VertexID` off by one) |
+| `flat-indexed-strip` (`dx11` and below only) | These levels do not declare `DX_PROVOKING_VERTEX`, so Mesa converts the indices for GL's last provoking vertex itself, and its conversion of a strip with a restart makes a triangle of the restart index; `dx11-full` declares it and GX reorders |
 | `rect-buffer-integer-textures` | The rectangle texture's coordinate scale is not among the constants Mesa uploads (its extra constants hold only the buffer texture's size), so the rectangle reads its first texel |
 | `compute-buffer` | Mesa bakes the grid size into the compute shader's immediates (`key.cs.grid_size`); the shader it sends has 0 for `gl_NumWorkGroups` |
 

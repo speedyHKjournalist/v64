@@ -16,7 +16,8 @@ import { ScreenObjects } from "./svga_screens.js";
 import { SoftwareCursor, cursor_masks_length } from "./svga_cursor.js";
 import { SVGA3D } from "./svga3d.js";
 import { MOBTable, OTables, OTABLE_ENTRY_BYTES, MOB_MAX_SIZE, GB_MEMORY_KB } from "./svga_gb.js";
-import { VGPU9_DEVCAPS, DX10_DEVCAPS, DX10_1_DEVCAPS, DX11_DEVCAPS } from "./svga3d_tables.js";
+import { VGPU9_DEVCAPS, DX10_DEVCAPS, DX10_1_DEVCAPS, DX11_DEVCAPS, DX11_FULL_DEVCAPS } from "./svga3d_tables.js";
+import { VideoOverlay } from "./svga_video.js";
 
 // For Types Only
 import { DisplaySource } from "../../display.js";
@@ -151,13 +152,30 @@ export const LEVELS = {
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG | C.SVGA_CAP2_DX2 | C.SVGA_CAP2_DX3,
         devcaps: DX11_DEVCAPS,
     },
+    // S8: the video overlay (svga_video.js) and GL's provoking vertex
+    "dx11-full": {
+        caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
+            C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
+            C.SVGA_CAP_CURSOR | C.SVGA_CAP_CURSOR_BYPASS | C.SVGA_CAP_CURSOR_BYPASS_2 | C.SVGA_CAP_ALPHA_CURSOR |
+            C.SVGA_CAP_8BIT_EMULATION | C.SVGA_CAP_MULTIMON | C.SVGA_CAP_DISPLAY_TOPOLOGY |
+            C.SVGA_CAP_GMR | C.SVGA_CAP_GMR2 | C.SVGA_CAP_SCREEN_OBJECT_2 |
+            C.SVGA_CAP_COMMAND_BUFFERS | C.SVGA_CAP_CMD_BUFFERS_2 | C.SVGA_CAP_HP_CMD_QUEUE | C.SVGA_CAP_3D |
+            C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_CAP2_REGISTER | C.SVGA_CAP_DX,
+        fifo_caps: C.SVGA_FIFO_CAP_FENCE | C.SVGA_FIFO_CAP_PITCHLOCK | C.SVGA_FIFO_CAP_RESERVE |
+            C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
+            C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2 |
+            C.SVGA_FIFO_CAP_VIDEO,
+        cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
+            C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG | C.SVGA_CAP2_DX2 | C.SVGA_CAP2_DX3,
+        devcaps: DX11_FULL_DEVCAPS,
+    },
 };
 
 /** Lowest to highest; without a pinned level the highest one there is a renderer for */
-export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10", "dx10.1", "dx11"];
+export const LEVEL_ORDER = ["2d", "2d-full", "vgpu9", "gb9", "dx10", "dx10.1", "dx11", "dx11-full"];
 
 /** The level without a pinned one: the highest implemented, or 2D without a renderer */
-export const DEFAULT_3D_LEVEL = "dx11";
+export const DEFAULT_3D_LEVEL = "dx11-full";
 export const DEFAULT_2D_LEVEL = "2d-full";
 
 /**
@@ -230,6 +248,11 @@ export function SVGADevice(machine, options)
     this.screens = new ScreenObjects(this.gmrs);
     /** @const */
     this.cursor = new SoftwareCursor();
+    /** @const the video overlay's units (SVGA_FIFO_CAP_VIDEO) */
+    this.video = new VideoOverlay((id, offset, length) => this.gmrs.read(id, offset, length), id => {
+        const s = this.screens.screens.get(id);
+        return s ? { x: s.x, y: s.y } : null;
+    });
     /** SVGA_REG_DISPLAY_*: [id, primary, x, y, width, height] each */
     this.topology = [];
     /** What the driver has done, for harnesses and debugging */
@@ -346,6 +369,7 @@ SVGADevice.prototype.reset = function()
     if(this.mobs) this.mobs.reset();
     if(this.otables) this.otables.reset();
     this.gmrs.reset();
+    this.video.reset();
     this.screens.reset();
     this.cursor.reset();
     if(this.svga3d) this.svga3d.reset();
@@ -832,6 +856,13 @@ SVGADevice.prototype.run_command = function(read, available)
             const size = read(2) >>> 0;
             const length = 3 + (size + 3 >> 2);
             if(!need(length)) return 0;
+            // the video overlay's commands (VMware's namespace)
+            if((read(1) >>> 0) === C.SVGA_ESCAPE_NSID_VMWARE && (this.fifo_caps & C.SVGA_FIFO_CAP_VIDEO) && size >= 8)
+            {
+                const words = new Uint32Array(size >> 2);
+                for(let i = 0; i < words.length; i++) words[i] = read(3 + i);
+                if(this.video.escape(words)) return length;
+            }
             dbg_log("svga: escape nsid=" + h(read(1) >>> 0) + " size=" + size + " ignored", LOG_VGA);
             return length;
         }
@@ -1357,12 +1388,12 @@ SVGADevice.prototype.render_legacy = function()
         pixels, screen_x: x, screen_y: y, buffer_x: x, buffer_y: y, buffer_width: w, buffer_height: h,
     });
     if(min_y < max_y) layers.push(layer(0, min_y, width, max_y - min_y));
-    layers.push(...this.cursor.layers(
-        (x, y) => x >= 0 && y >= 0 && x < width && y < height ? { data: pixels.data, at: (y * buffer_width + x) * 4 } : null,
-        (x, y, w, h) => {
-            const x0 = Math.max(x, 0), y0 = Math.max(y, 0), x1 = Math.min(x + w, width), y1 = Math.min(y + h, height);
-            return x0 < x1 && y0 < y1 ? [layer(x0, y0, x1 - x0, y1 - y0)] : [];
-        }));
+    const under = (x, y) => x >= 0 && y >= 0 && x < width && y < height ? { data: pixels.data, at: (y * buffer_width + x) * 4 } : null;
+    const region = (x, y, w, h) => {
+        const x0 = Math.max(x, 0), y0 = Math.max(y, 0), x1 = Math.min(x + w, width), y1 = Math.min(y + h, height);
+        return x0 < x1 && y0 < y1 ? [layer(x0, y0, x1 - x0, y1 - y0)] : [];
+    };
+    this.push_overlay_and_cursor(layers, under, region, 0, 0);
     if(layers.length) this.display.update_buffer(layers);
 };
 
@@ -1396,7 +1427,7 @@ SVGADevice.prototype.render_screens = function()
     const cursor = this.cursor, x = cursor.x, y = cursor.y;
     cursor.x -= box.x;
     cursor.y -= box.y;
-    layers.push(...cursor.layers(
+    this.push_overlay_and_cursor(layers,
         (px, py) => {
             const hit = screen_at(px, py);
             return hit ? { data: hit.s.rgba, at: (hit.sy * hit.s.width + hit.sx) * 4 } : null;
@@ -1418,10 +1449,40 @@ SVGADevice.prototype.render_screens = function()
                 }
             }
             return out;
-        }));
+        }, box.x, box.y);
     cursor.x = x;
     cursor.y = y;
     if(layers.length) this.display.update_buffer(layers);
+};
+
+/**
+ * After the picture's layers: the video overlay's (where it changed, or the
+ * picture under it did), then the cursor over both
+ * @param {!Array<!Object>} layers the picture's, added to
+ * @param {function(number, number):?{data: !Uint8ClampedArray, at: number}} under
+ * @param {function(number, number, number, number):!Array<!Object>} region
+ * @param {number} ox where the layers' origin is on the desktop
+ * @param {number} oy
+ */
+SVGADevice.prototype.push_overlay_and_cursor = function(layers, under, region, ox, oy)
+{
+    if(this.video.active())
+    {
+        const overlay = this.video.layers(under, region, layers, ox, oy);
+        layers.push(...overlay);
+        under = this.video.under(under, ox, oy);
+        region = this.video.region(region, ox, oy);
+        // (drawn over the cursor: where it was is put back, with the
+        // overlay, and it is drawn again)
+        const d = this.cursor.drawn;
+        if(d && overlay.some(l => l.screen_x < d[0] + d[2] && d[0] < l.screen_x + l.buffer_width &&
+            l.screen_y < d[1] + d[3] && d[1] < l.screen_y + l.buffer_height))
+        {
+            layers.push(...region(d[0], d[1], d[2], d[3]));
+            this.cursor.drawn = null;
+        }
+    }
+    layers.push(...this.cursor.layers(under, region));
 };
 
 // ---------------------------------------------------------------------------
@@ -1432,7 +1493,7 @@ SVGADevice.prototype.render_screens = function()
 // devcaps), and a restore declares those again, whatever this version would
 // choose or its tables now say. A new capability therefore needs a new level;
 // what a level once declared keeps working.
-const STATE_VERSION = 5;
+const STATE_VERSION = 6;
 
 SVGADevice.prototype.get_state = function()
 {
@@ -1456,6 +1517,8 @@ SVGADevice.prototype.get_state = function()
         [this.devcap_index, this.cursor_mob, ...this.guest_driver],
         // version 5: the capabilities declared
         [this.caps, this.fifo_caps, this.cap2, Array.from(this.devcaps)],
+        // version 6: the video overlay's units
+        this.video.get_state(),
     ];
 };
 
@@ -1526,6 +1589,8 @@ SVGADevice.prototype.set_state = function(state)
         this.guest_driver = Array.from(registers.slice(2, 6));
     }
     if(this.svga3d) this.svga3d.set_state(state[0] >= 3 ? state[13] : null);
+    // (after the GMRs: the frames are read again)
+    this.video.set_state(state[0] >= 6 ? state[18] : null);
     this.mode_key = "";
     this.showing = false;
     this.update_scanout();

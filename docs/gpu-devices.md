@@ -45,7 +45,7 @@ new level. Tests pin a level with `graphics_adapter_test: { level }`.
 
 | Adapter | Levels, lowest first | Default |
 | --- | --- | --- |
-| `vmware_svga` | `2d`, `2d-full`, `vgpu9`, `gb9`, `dx10`, `dx10.1`, `dx11` | `dx11` with a renderer, `2d-full` without |
+| `vmware_svga` | `2d`, `2d-full`, `vgpu9`, `gb9`, `dx10`, `dx10.1`, `dx11`, `dx11-full` | `dx11-full` with a renderer, `2d-full` without |
 | `virtio_gpu` | `2d`, `2d-blob`, `virgl`, `virgl43`, `virgl43-blob`, `virgl43-hostmem` | `virgl43-hostmem` with a renderer, `2d-blob` without |
 
 ## Architecture
@@ -95,6 +95,12 @@ IRQSTATUS); BAR1: VRAM (the VGA core's LFB); BAR2: the FIFO.
 - **2D** (`2d`, `2d-full`): registers, FIFO with RESERVE, `UPDATE`, ROP copies,
   cursors (mono, color, alpha), Screen Object 1/2, GMR1/GMR2, command buffers
   with device contexts, display topology, INTx.
+- **Video overlay** (`dx11-full`, `svga_video.js`): 32 overlay units set and
+  shown through `SVGA_CMD_ESCAPE`; YV12, YUY2 and UYVY frames from a GMR or
+  VRAM, scaled into their destination rectangle, with the color key. Like the
+  cursor, the overlay is drawn over the device's picture, not into guest
+  memory. The same level declares `DX_PROVOKING_VERTEX` (GX reorders for GL's
+  last-vertex flat shading).
 - **Legacy 3D** (`vgpu9`): the SVGA3D commands 1040–1082 become D9WG commands
   (`svga3d.js`, `svga3d_d9wg.js`), the same executor the D3D9 proxy uses. Each
   SVGA3D context is a D9WG device.
