@@ -365,6 +365,8 @@ Translator.prototype.declare = function()
     const reg_in = i => operand(T.INPUT, [i]);
     /** the varyings a stage reads: semantic key -> register (where the previous stage writes them) */
     this.link_inputs = {};
+    /** @type {!Object<number, number>} the vertex stages' TGSI outputs -> registers */
+    this.output_regs = {};
     this.in_map = [];
     this.out_map = [];
     this.sv_map = [];
@@ -510,6 +512,7 @@ Translator.prototype.declare = function()
             if(name === "POSITION")
             {
                 const reg = free();
+                this.output_regs[i] = reg;
                 const o = operand(T.OUTPUT, [reg]);
                 this.decl(OP.DCL_OUTPUT_SIV, [as_dst(o)], 0, [NAME.POSITION]);
                 // into a temp: the viewport's fixes are made at the end (at each vertex of a GS)
@@ -519,9 +522,12 @@ Translator.prototype.declare = function()
                 return;
             }
             const k = semantic_key(name, d.semantic_index);
-            if(k in outputs)
+            // (stream output wants every output, read by the next stage or not)
+            if(k in outputs || key.all_outputs)
             {
-                const o = operand(T.OUTPUT, [outputs[k]]);
+                const reg = k in outputs ? outputs[k] : free();
+                this.output_regs[i] = reg;
+                const o = operand(T.OUTPUT, [reg]);
                 if(name === "LAYER") this.decl(OP.DCL_OUTPUT_SIV, [as_dst(o, 1)], 0, [NAME.RENDER_TARGET_ARRAY_INDEX]);
                 else if(name === "VIEWPORT_INDEX") this.decl(OP.DCL_OUTPUT_SIV, [as_dst(o, 1)], 0, [NAME.VIEWPORT_ARRAY_INDEX]);
                 else if(name === "PRIMID" && this.gs) this.decl(OP.DCL_OUTPUT_SGV, [as_dst(o, 1)], 0, [NAME.PRIMITIVE_ID]);
@@ -1185,10 +1191,11 @@ Translator.prototype.view_swizzle = function(result, out, swizzle, integer, sat)
 /**
  * One TGSI program, for a variant
  * @param {!Object} program from parse_tgsi
- * @param {!Object} key outputs (semantic key -> register), flip_y, halfz,
- *     swizzles (per view: 4 PIPE_SWIZZLE_*), color_buffers, flatshade,
- *     alpha_func, alpha_ref
- * @return {{tokens: !Uint32Array, inputs: !Object<string, number>, problems: !Array<string>, type: number}}
+ * @param {!Object} key outputs (semantic key -> register), all_outputs
+ *     (stream output: every output in a register), flip_y, halfz, swizzles
+ *     (per view: 4 PIPE_SWIZZLE_*), color_buffers, flatshade, alpha_func, alpha_ref
+ * @return {{tokens: !Uint32Array, inputs: !Object<string, number>, outputs: !Object<number, number>,
+ *     problems: !Array<string>, type: number}}
  */
 export function tgsi_to_vgpu10(program, key)
 {
@@ -1219,5 +1226,5 @@ export function tgsi_to_vgpu10(program, key)
     tokens[1] = length;
     tokens.set(decls, 2);
     tokens.set(t.code, 2 + decls.length);
-    return { tokens, inputs: t.link_inputs, problems: t.problems, type };
+    return { tokens, inputs: t.link_inputs, outputs: t.output_regs, problems: t.problems, type };
 }

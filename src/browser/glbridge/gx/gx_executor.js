@@ -167,6 +167,8 @@
             this.pending = [];
             this.transient = [];
             this.pipelines = new Map();
+            /** the orders of draws without indices that flat shade with the last vertex (provokingLast) */
+            this.provokingIndices = new Map();
             this.modules = new Map();
             this.samplerCache = new Map();
             this.warned = new Set();
@@ -1416,15 +1418,19 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 
             const raster = c.rasters.get(st.raster);
             const depth = c.depths.get(st.depth);
-            const key = [vs.id, ps ? ps.id : 0, JSON.stringify(vsOptions), JSON.stringify(psOptions), topology,
-                call.indexed && /strip/.test(topology) ? (st.ib.format === SVGA3D_R16_UINT ? 16 : 32) : 0,
+            // the last vertex flat shading: vertices reordered (and drawn as a list)
+            const reorder = this.provokingLast(c, raster, varyings, topology, call);
+            if (reorder === false) return;
+            const drawTopology = reorder ? reorder.topology : topology;
+            const key = [vs.id, ps ? ps.id : 0, JSON.stringify(vsOptions), JSON.stringify(psOptions), drawTopology,
+                call.indexed && !reorder && /strip/.test(topology) ? (st.ib.format === SVGA3D_R16_UINT ? 16 : 32) : 0,
                 JSON.stringify(buffers), colors.map(t => t ? t.format + (t.x ? "x" : "") + (t.scratch ? "s" : "") : "-").join(","), depthFormat, samples,
                 blend ? blend.words.join(",") : "", raster ? raster.words.join(",") : "", depth ? depth.words.join(",") : "",
                 st.sampleMask, this.bindingKinds(c, vsModule, psModule)].join("|");
             let pipeline = this.pipelines.get(key);
             if (!pipeline) {
-                pipeline = this.createPipeline(c, { vsModule, psModule, buffers, topology, call, colors, depthFormat, samples,
-                    blend, raster, depth, dualSource });
+                pipeline = this.createPipeline(c, { vsModule, psModule, buffers, topology: drawTopology, call: reorder ? { ...call, indexed: false } : call,
+                    colors, depthFormat, samples, blend, raster, depth, dualSource });
                 if (!pipeline) return;
                 this.pipelines.set(key, pipeline);
                 this.stats.pipelines++;
@@ -1456,12 +1462,132 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 return;
             }
             if (!call.count || !call.instances) return;
-            if (call.indexed) {
+            if (reorder) {
+                pass.setIndexBuffer(reorder.buffer, "uint32", 0);
+                if (reorder.args) pass.drawIndexedIndirect(reorder.args, 0);
+                else pass.drawIndexed(reorder.count, call.instances, 0, call.first, call.firstInstance);
+            } else if (call.indexed) {
                 if (!this.setIndexBuffer(pass, st)) return;
                 pass.drawIndexed(call.count, call.instances, call.first, call.base, call.firstInstance);
             } else {
                 pass.draw(call.count, call.instances, call.first, call.firstInstance);
             }
+        }
+
+        /**
+         * GL's provoking vertex is the last of a primitive (the rasterizer
+         * state's provokingVertexLast), WebGPU's the first (G-17): a draw with
+         * flat varyings has its vertices reordered, the last first, as a list
+         * (a rotation, so triangles keep their winding). Without indices
+         * the order is made here once per count; with indices a compute pass
+         * rewrites them (strips' restarts included) and the draw is indirect.
+         * @return {?Object|boolean} { topology, buffer, count | args }; null:
+         *     drawn as it is; false: not drawn
+         */
+        provokingLast(c, raster, varyings, topology, call) {
+            if (!raster || !(raster.words[0] >>> 24 & 0xFF) || call.indirect) return null;
+            if (!Object.values(varyings).some(v => v.type === "u32" || v.interpolation === "flat")) return null;
+            const kind = { "triangle-list": 1, "triangle-strip": 2, "line-list": 3, "line-strip": 4 }[topology];
+            if (!kind || !call.count) return null;
+            const list = kind <= 2 ? "triangle-list" : "line-list";
+            if (!call.indexed) {
+                const key = kind + ":" + call.count;
+                let entry = this.provokingIndices.get(key);
+                if (!entry) {
+                    const n = call.count, out = [];
+                    if (kind === 1) for (let k = 0; k + 2 < n; k += 3) out.push(k + 2, k, k + 1);
+                    else if (kind === 2) for (let k = 0; k + 2 < n; k++) out.push(...(k & 1 ? [k + 2, k + 1, k] : [k + 2, k, k + 1]));
+                    else if (kind === 3) for (let k = 0; k + 1 < n; k += 2) out.push(k + 1, k);
+                    else for (let k = 0; k + 1 < n; k++) out.push(k + 1, k);
+                    if (!out.length) return false;
+                    const data = Uint32Array.from(out);
+                    const buffer = this.device.createBuffer({ size: align(data.byteLength, 4), usage: BUFFER_USAGE.INDEX | BUFFER_USAGE.COPY_DST });
+                    this.device.queue.writeBuffer(buffer, 0, data);
+                    if (this.provokingIndices.size >= 64) {
+                        for (const old of this.provokingIndices.values()) old.buffer.destroy();
+                        this.provokingIndices.clear();
+                    }
+                    entry = { buffer, count: out.length };
+                    this.provokingIndices.set(key, entry);
+                }
+                return { topology: list, buffer: entry.buffer, count: entry.count };
+            }
+            const st = c.state;
+            const S = this.surfaces.get(st.ib.sid);
+            if (!S || !S.buffer) return false;
+            const wide = st.ib.format !== SVGA3D_R16_UINT;
+            let pipe = this.pipelines.get("provoking");
+            if (!pipe) {
+                const code = [
+                    "struct P { count: u32, offset: u32, wide: u32, kind: u32, base: u32, instances: u32, first_instance: u32, pad: u32 }",
+                    "@group(0) @binding(0) var<storage, read> src: array<u32>;",
+                    "@group(0) @binding(1) var<uniform> p: P;",
+                    "@group(0) @binding(2) var<storage, read_write> dst: array<u32>;",
+                    "@group(0) @binding(3) var<storage, read_write> args: array<u32, 5>;",
+                    "fn index(i: u32) -> u32 {",
+                    "    let at = p.offset + i;",
+                    "    if (p.wide == 1u) { return src[at]; }",
+                    "    let w = src[at >> 1u];",
+                    "    return select(w & 0xFFFFu, w >> 16u, (at & 1u) == 1u);",
+                    "}",
+                    "@compute @workgroup_size(1) fn main() {",
+                    "    let cut = select(0xFFFFu, 0xFFFFFFFFu, p.wide == 1u);",
+                    "    var n = 0u;",
+                    "    var start = 0u;",
+                    "    var i = 0u;",
+                    "    loop {",
+                    "        if (i >= p.count) { break; }",
+                    "        if (p.kind == 1u) {",
+                    "            if (i + 2u < p.count) { dst[n] = index(i + 2u); dst[n + 1u] = index(i); dst[n + 2u] = index(i + 1u); n += 3u; }",
+                    "            i += 3u; continue;",
+                    "        }",
+                    "        if (p.kind == 3u) {",
+                    "            if (i + 1u < p.count) { dst[n] = index(i + 1u); dst[n + 1u] = index(i); n += 2u; }",
+                    "            i += 2u; continue;",
+                    "        }",
+                    "        // strips: a restart starts another",
+                    "        if (index(i) == cut) { start = i + 1u; i++; continue; }",
+                    "        let k = i - start;",
+                    "        if (p.kind == 2u && k >= 2u && index(i - 1u) != cut && index(i - 2u) != cut) {",
+                    "            if ((k & 1u) == 1u) { dst[n] = index(i); dst[n + 1u] = index(i - 1u); dst[n + 2u] = index(i - 2u); }",
+                    "            else { dst[n] = index(i); dst[n + 1u] = index(i - 2u); dst[n + 2u] = index(i - 1u); }",
+                    "            n += 3u;",
+                    "        }",
+                    "        if (p.kind == 4u && k >= 1u) { dst[n] = index(i); dst[n + 1u] = index(i - 1u); n += 2u; }",
+                    "        i++;",
+                    "    }",
+                    "    args[0] = n; args[1] = p.instances; args[2] = 0u; args[3] = p.base; args[4] = p.first_instance;",
+                    "}",
+                ].join("\n");
+                try {
+                    pipe = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code }), entryPoint: "main" } });
+                } catch (error) {
+                    this.warn("provoking:" + error.message, "the provoking vertex shader failed: " + error.message);
+                    return null;
+                }
+                this.pipelines.set("provoking", pipe);
+            }
+            const offset = Math.floor(st.ib.offset / (wide ? 4 : 2)) + call.first;
+            const dst = this.device.createBuffer({ size: align(Math.max(16, call.count * 3 * 4), 16), usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.INDEX });
+            const args = this.device.createBuffer({ size: 32, usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.INDIRECT });
+            this.transient.push(dst, args);
+            const params = this.uniform(new Uint32Array([call.count, offset, wide ? 1 : 0, kind, call.base >>> 0, call.instances, call.firstInstance, 0]));
+            let group;
+            try {
+                group = this.device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+                    { binding: 0, resource: { buffer: S.buffer } }, { binding: 1, resource: params },
+                    { binding: 2, resource: { buffer: dst } }, { binding: 3, resource: { buffer: args } }] });
+            } catch (error) {
+                this.warn("provoking-group:" + error.message, "the provoking vertex bind group failed: " + error.message);
+                return null;
+            }
+            this.endPass();
+            const compute = this.encoder().beginComputePass();
+            compute.setPipeline(pipe);
+            compute.setBindGroup(0, group);
+            compute.dispatchWorkgroups(1);
+            compute.end();
+            return { topology: list, buffer: dst, args };
         }
 
         /** The render pass of a draw's attachments (the same ones keep it open), its state set */

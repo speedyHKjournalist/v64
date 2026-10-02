@@ -20,6 +20,7 @@ import path from "node:path";
 import { deflateSync as deflate_sync } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { create_trace_renderer } from "./gpu_trace.mjs";
 import { create_remote_renderer } from "./gpu_remote_renderer.mjs";
 
@@ -122,6 +123,17 @@ const SCENARIOS = {
         ["kmscube -M rgba -c 200 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube-rgba", after: 2500 }],
     ],
+    // tests/x64/gltest.c on the adapter's 3D driver (virgl, svga): each
+    // test's picture compared with llvmpipe's
+    gltest: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        [APK_VIRGL + " >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; grep -i -A3 error /tmp/apk.log | head", /STEP_APK_RC=0/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["tar -xf /dev/sdb -C /tmp && LIBGL_ALWAYS_SOFTWARE=1 /tmp/gltest ref 2>&1 | grep -E '^GLTEST (renderer|done|egl)|GL error|^shader|^link'; echo STEP_REF_DONE",
+            /llvmpipe[\s\S]*STEP_REF_DONE/],
+        ["/tmp/gltest cmp >/tmp/gltest.log 2>&1; grep -v '^GLIMG' /tmp/gltest.log; grep -q FAIL /tmp/gltest.log && grep '^GLIMG' /tmp/gltest.log; echo STEP_GLTEST_DONE",
+            /GLTEST done 0 failures[\s\S]*STEP_GLTEST_DONE/],
+    ],
     // virtio_gpu's 3D (GPU_LEVEL=virgl): Mesa's virgl driver on the capsets,
     // what it reports, and kmscube
     // (Alpine 3.24's Mesa has no virgl driver: 3.23's, from v3.23/ of the repository)
@@ -147,6 +159,11 @@ const SCENARIOS = {
             "wc -l < /tmp/ext.txt; echo STEP_MISSING_DONE", /STEP_MISSING_DONE/],
         ["HOST stats", null],
         ["eglinfo -B -p gbm 2>&1 | grep -E 'OpenGL.*(renderer|version)' | head -12; echo STEP_EGLINFO_DONE", /virgl[\s\S]*STEP_EGLINFO_DONE/],
+        // tests/x64/gltest.c: llvmpipe's pictures, then virgl's compared with them
+        ["tar -xf /dev/sdb -C /tmp && LIBGL_ALWAYS_SOFTWARE=1 /tmp/gltest ref 2>&1 | grep -E '^GLTEST (renderer|done|egl)|GL error|^shader|^link'; echo STEP_REF_DONE",
+            /llvmpipe[\s\S]*STEP_REF_DONE/],
+        ["/tmp/gltest cmp >/tmp/gltest.log 2>&1; grep -v '^GLIMG' /tmp/gltest.log; grep -q FAIL /tmp/gltest.log && grep '^GLIMG' /tmp/gltest.log; echo STEP_GLTEST_DONE",
+            /STEP_GLTEST_DONE/],
         ["kmscube -c 300 2>&1 | grep -E 'Rendered|renderer|failed|error' | head -5", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube", after: 4000 }],
         ["kmscube -M rgba -c 300 2>&1 | grep -E 'Rendered|failed|error' | head -5", /Rendered [1-9]\d* frames/,
@@ -252,6 +269,33 @@ const sink = new PictureSink();
 // A 3D level needs a renderer: the real one in a headless Chrome
 // (GPU_RENDERER=chrome, tests/x64/gpu_remote_renderer.mjs), or one that
 // records the batches into a trace (tests/x64/gpu_trace.mjs) and renders nothing
+// tests/x64/gltest.c for the scenarios that run it (/dev/sdb): built here
+// with clang and rust-lld against musl's libc and Mesa's libEGL, taken from
+// the repository's Alpine 3.23 packages
+function build_gltest()
+{
+    const dir = directory + "gltest/", sysroot = dir + "sysroot/";
+    const run = (program, args) => {
+        const result = spawnSync(program, args, { encoding: "utf8" });
+        assert.equal(result.status, 0, `${program}: ${result.stderr || result.error}`);
+        return result.stdout.trim();
+    };
+    fs.mkdirSync(sysroot, { recursive: true });
+    const packages = directory + "gpu-repo/v3.23/main/x86_64/";
+    for(const name of fs.readdirSync(packages).filter(f => /^(musl|mesa-egl)-\d.*\.apk$/.test(f)))
+    {
+        spawnSync("bsdtar", ["-xf", packages + name, "-C", sysroot]);
+    }
+    const host = run("rustc", ["-vV"]).match(/host: (.+)/)[1];
+    const lld = process.env.LD_LLD || `${run("rustc", ["--print", "sysroot"])}/lib/rustlib/${host}/bin/rust-lld`;
+    run(process.env.CLANG || "clang", ["--target=x86_64-unknown-linux-musl", "-fPIC", "-O1", "-c", root + "tests/x64/gltest.c", "-o", dir + "gltest.o"]);
+    run(lld, ["-flavor", "gnu", "-m", "elf_x86_64", "-pie", "--dynamic-linker", "/lib/ld-musl-x86_64.so.1", "--allow-shlib-undefined",
+        "-o", dir + "gltest", dir + "gltest.o", sysroot + "lib/ld-musl-x86_64.so.1", sysroot + "usr/lib/libEGL.so.1"]);
+    run("bsdtar", ["--format", "ustar", "--no-xattrs", "--no-mac-metadata", "--uid", "0", "--gid", "0", "-cf", dir + "gltest.tar", "-C", dir, "gltest"]);
+    return dir + "gltest.tar";
+}
+const gltest = steps.some(step => step[0].includes("/dev/sdb")) ? build_gltest() : null;
+
 const remote = LEVEL_3D && process.env.GPU_RENDERER === "chrome" ? await create_remote_renderer() : null;
 const trace = LEVEL_3D && !remote ?
     create_trace_renderer(path.join(out, "trace.bin"), { adapter, level: process.env.GPU_LEVEL, scenario }) : null;
@@ -260,7 +304,7 @@ const emulator = new V86({
     wasm_path: process.env.WASM_PATH,
     bios: { url: root + "bios/seabios.bin" }, vga_bios: { url: root + "bios/vgabios.bin" },
     bzimage: { url: directory + "boot/vmlinuz-virt" }, initrd: { url: directory + "boot/initramfs-virt" },
-    cdrom: { url: iso }, hda: { url: repo },
+    cdrom: { url: iso }, hda: { url: repo }, ...(gltest ? { hdb: { url: gltest } } : {}),
     cmdline: "console=ttyS0,115200 loglevel=4 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage",
     memory_size: Number(process.env.LINUX_GPU_MEMORY || 1024) * 1048576, acpi: true, autostart: false,
     disable_jit: !!+process.env.LINUX_GPU_NO_JIT, experimental_smp_jit: !+process.env.LINUX_GPU_NO_JIT,
@@ -408,6 +452,23 @@ catch(error)
 finally
 {
     fs.writeFileSync(path.join(out, "serial.log"), serial);
+    // gltest's failures: its pictures (PPM in base64) as PNG
+    const pictures = new Map();
+    for(const m of serial.replace(/\r/g, "").matchAll(/^GLIMG (\S+) (\S+) (\d+) (\S+)$/gm))
+    {
+        const key = m[1] + "-" + m[2];
+        pictures.set(key, (pictures.get(key) || "") + m[4]);
+    }
+    for(const [key, text] of pictures)
+    {
+        const ppm = Buffer.from(text, "base64");
+        const header = /^P6\n(\d+) (\d+)\n255\n/.exec(ppm.subarray(0, 32).toString("latin1"));
+        if(!header) continue;
+        const width = +header[1], height = +header[2], rgb = ppm.subarray(header[0].length);
+        const rgba = new Uint8Array(width * height * 4);
+        for(let i = 0; i < width * height; i++) rgba.set([rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2], 255], 4 * i);
+        console.log("gltest picture " + save_png({ width, height, rgba }, "gltest-" + key));
+    }
     const svga3d = emulator.v86 && emulator.v86.cpu.devices.graphics_adapter && emulator.v86.cpu.devices.graphics_adapter.device["svga"]?.svga3d;
     if(svga3d) console.log("svga3d commands: " + JSON.stringify(svga3d.counts));
     const virgl_end = emulator.v86 && emulator.v86.cpu.devices.graphics_adapter && emulator.v86.cpu.devices.graphics_adapter.device["virtio_gpu"]?.virgl;

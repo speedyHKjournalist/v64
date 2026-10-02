@@ -190,10 +190,12 @@ export function capset(id)
     const render = format_mask((f, n) => !!f && f.can.includes("r") && (!f.swizzle || n === 134));
     const depth = format_mask(f => !!f && f.can.includes("d"));
     const vertex = format_mask(f => !!f && !!f.vertex);
+    // (no fragment_coord_conventions: D3D's fragment position is GL's upper
+    // left, and Mesa moves it for the rest itself)
     let bset = 0;
     for(const name of ["indep_blend_enable", "indep_blend_func", "conditional_render", "primitive_restart",
         "blend_eq_sep", "instanceid", "vertex_element_instance_divisor", "seamless_cube_map", "occlusion_query",
-        "timer_query", "texture_multisample", "fragment_coord_conventions", "depth_clip_disable", "ubo"])
+        "timer_query", "texture_multisample", "depth_clip_disable", "ubo"])
     {
         bset |= 1 << BSET[name];
     }

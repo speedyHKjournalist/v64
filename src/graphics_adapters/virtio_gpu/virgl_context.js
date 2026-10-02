@@ -71,6 +71,7 @@ const WRAP = [1, 3, 3, 4, 2, 5, 5, 5];
 const PRIMITIVE = [2, 3, 0, 4, 1, 5, 0, 0, 0, 0, 7, 8, 9, 10];
 // PIPE_POLYGON_MODE_* -> SVGA3D_FILLMODE_*
 const FILL = [3, 2, 1, 3];
+const QUERY_PRIMITIVES_GENERATED = 6, QUERY_PRIMITIVES_EMITTED = 7;
 // PIPE_QUERY_* -> SVGA3dQueryType (the others are answered by the device)
 const QUERY_TYPE = { 0: C.SVGA3D_QUERYTYPE_OCCLUSION64, 1: C.SVGA3D_QUERYTYPE_OCCLUSIONPREDICATE, 2: C.SVGA3D_QUERYTYPE_OCCLUSIONPREDICATE,
     3: C.SVGA3D_QUERYTYPE_TIMESTAMP };
@@ -112,6 +113,10 @@ function SubContext(context, cid)
     this.user_buffers = [];
     /** the device's buffer of widened 8-bit indices */
     this.index_scratch = null;
+    /** the stream output targets (STREAMOUT_TARGET handles) */
+    this.so_targets = [];
+    /** @type {!Set<!Object>} the queries counting primitives that are running */
+    this.counting = new Set();
     /** @type {!Map<string, string>} what was last sent, by command */
     this.sent = new Map();
     this.gx(GX.CONTEXT_DEFINE, [cid]);
@@ -359,6 +364,9 @@ VirglContext.prototype.command = function(command, object, p)
             // (end_query writes the result once the GPU has it, and SUBMIT_3D
             // completes after that)
             return;
+        case CCMD.SET_STREAMOUT_TARGETS:
+            this.set_streamout_targets(sub, p);
+            return;
         case CCMD.SET_RENDER_CONDITION:
         {
             const q = p[0] && sub.objects.get(p[0]);
@@ -392,7 +400,6 @@ VirglContext.prototype.create_object = function(sub, kind, p)
         case OBJECT.QUERY: return this.create_query(sub, p);
         case OBJECT.STREAMOUT_TARGET:
             sub.objects.set(handle, { kind, res: p[1], offset: p[2], size: p[3] });
-            sub.warn("streamout", "virgl: transform feedback is not supported yet");
             return;
     }
     sub.warn("object" + kind, "virgl object type " + kind + " is not supported yet");
@@ -418,7 +425,11 @@ VirglContext.prototype.destroy_object = function(sub, handle)
             break;
         case OBJECT.QUERY: if(o.defined) sub.dx(C.SVGA_3D_CMD_DX_DESTROY_QUERY, [handle]); break;
         case OBJECT.SHADER:
-            for(const v of o.variants.values()) sub.dx(C.SVGA_3D_CMD_DX_DESTROY_SHADER, [v.shid]);
+            for(const v of o.variants.values())
+            {
+                sub.dx(C.SVGA_3D_CMD_DX_DESTROY_SHADER, [v.shid]);
+                for(const soid of v.soids.values()) sub.dx(C.SVGA_3D_CMD_DX_DESTROY_STREAMOUTPUT, [soid]);
+            }
             break;
     }
     // what named it is sent again (the same handle may come back as another object)
@@ -645,8 +656,7 @@ VirglContext.prototype.create_shader = function(p)
     {
         sub.warn("tgsi:" + e.message, "virgl: a shader does not parse: " + e.message);
     }
-    sub.objects.set(handle, { kind: OBJECT.SHADER, stage: type, program, variants: new Map(), so: pending.so });
-    if(pending.so) sub.warn("streamout", "virgl: transform feedback is not supported yet");
+    sub.objects.set(handle, { kind: OBJECT.SHADER, stage: type, program, variants: new Map(), so: stream_output_info(pending.so) });
 };
 
 /**
@@ -722,7 +732,7 @@ VirglContext.prototype.variant = function(sub, handle, key)
     const bytes = new Uint8Array(result.tokens.buffer, result.tokens.byteOffset, result.tokens.byteLength);
     sub.dx(C.SVGA_3D_CMD_DX_DEFINE_SHADER, [shid, type, bytes.length]);
     sub.gx(GX.SHADER_CODE, [sub.cid, shid, type], bytes);
-    v = { shid, inputs: result.inputs };
+    v = { shid, inputs: result.inputs, outputs: result.outputs, soids: new Map() };
     o.variants.set(text, v);
     return v;
 };
@@ -736,17 +746,21 @@ function view_swizzles(sub, stage)
     });
 }
 
-/** The rasterizer state's DX variant: front faces flipped when Y is */
-VirglContext.prototype.rasterizer_variant = function(sub, flip_y)
+/**
+ * The rasterizer state's DX object, made at its first draw. (Its front face
+ * is right as it is: Mesa flips it for framebuffer objects, whose Y the
+ * vertex stage flips, and so gallium's window coordinates are D3D's.)
+ */
+VirglContext.prototype.rasterizer_variant = function(sub)
 {
     const o = sub.objects.get(sub.rasterizer);
     if(!o || o.kind !== OBJECT.RASTERIZER) return INVALID;
-    let id = o.variants.get(flip_y);
+    let id = o.variants.get("dx");
     if(id !== undefined) return id;
     const [s0, , , s3, line_width, units, scale, clamp] = o.words;
     const cull = s0 >>> 8 & 3;
     if(cull === 3) sub.warn("cull-both", "virgl: culling both faces is not supported");
-    const front_ccw = (s0 >>> 15 & 1) ^ (flip_y ? 1 : 0);
+    const front_ccw = s0 >>> 15 & 1;
     const offset = s0 >>> 20 & 1;
     id = sub.next_variant++;
     sub.dx(C.SVGA_3D_CMD_DX_DEFINE_RASTERIZER_STATE_V2, [id,
@@ -754,7 +768,7 @@ VirglContext.prototype.rasterizer_variant = function(sub, flip_y)
         offset ? Math.round(f32.from(units)) : 0, offset ? clamp : 0, offset ? scale : 0,
         (s0 >>> 1 & 1) | (s0 >>> 14 & 1) << 8 | (s0 >>> 25 & 1) << 16 | (s0 >>> 26 & 1) << 24,
         line_width, (s0 >>> 27 & 1) | (s3 >>> 16 & 0xFF) << 8 | (s3 & 0xFFFF) << 16, 0]);
-    o.variants.set(flip_y, id);
+    o.variants.set("dx", id);
     return id;
 };
 
@@ -841,16 +855,32 @@ VirglContext.prototype.draw = function(sub, p)
     const fsv = fs ? this.variant(sub, fs, fs_key) : null;
     const fs_inputs = fsv ? fsv.inputs : {};
     let vsv, gsv = null;
+    // (what stream output captures must be in output registers)
+    const streaming = sub.so_targets.some(t => t);
+    const all_outputs = handle => streaming && !!this.shader_so(sub, handle);
     if(gs)
     {
-        gsv = this.variant(sub, gs, { outputs: fs_inputs, flip_y, halfz, swizzles: view_swizzles(sub, PIPE_SHADER.GEOMETRY) });
+        gsv = this.variant(sub, gs, { outputs: fs_inputs, all_outputs: all_outputs(gs), flip_y, halfz,
+            swizzles: view_swizzles(sub, PIPE_SHADER.GEOMETRY) });
         vsv = this.variant(sub, vs, { outputs: gsv ? gsv.inputs : {}, flip_y: false, halfz: true, swizzles: view_swizzles(sub, PIPE_SHADER.VERTEX) });
     }
     else
     {
-        vsv = this.variant(sub, vs, { outputs: fs_inputs, flip_y, halfz, swizzles: view_swizzles(sub, PIPE_SHADER.VERTEX) });
+        vsv = this.variant(sub, vs, { outputs: fs_inputs, all_outputs: all_outputs(vs), flip_y, halfz,
+            swizzles: view_swizzles(sub, PIPE_SHADER.VERTEX) });
     }
     if(!vsv) return;
+    // primitives counted for the queries running (before rasterizer discard)
+    if(sub.counting.size)
+    {
+        const prims = primitive_count(mode, count) * Math.max(1, instances);
+        for(const q of sub.counting) q.count += prims;
+    }
+    // stream output: of the last vertex stage, into the targets bound
+    const discard = !!(s0 >>> 3 & 1);
+    const soid = this.stream_output(sub, gs ? gs : vs, gs ? gsv : vsv, discard);
+    if(discard && soid === INVALID) return;
+    sub.dx_changed("soid", C.SVGA_3D_CMD_DX_SET_STREAMOUTPUT, [soid]);
     sub.dx_changed("vs", C.SVGA_3D_CMD_DX_SET_SHADER, [vsv.shid, C.SVGA3D_SHADERTYPE_VS]);
     sub.dx_changed("gs", C.SVGA_3D_CMD_DX_SET_SHADER, [gsv ? gsv.shid : INVALID, C.SVGA3D_SHADERTYPE_GS]);
     sub.dx_changed("ps", C.SVGA_3D_CMD_DX_SET_SHADER, [fsv ? fsv.shid : INVALID, C.SVGA3D_SHADERTYPE_PS]);
@@ -859,7 +889,7 @@ VirglContext.prototype.draw = function(sub, p)
     if(gs) this.bind_stage(sub, PIPE_SHADER.GEOMETRY);
 
     // fixed function
-    sub.dx_changed("rasterizer", C.SVGA_3D_CMD_DX_SET_RASTERIZER_STATE, [this.rasterizer_variant(sub, flip_y)]);
+    sub.dx_changed("rasterizer", C.SVGA_3D_CMD_DX_SET_RASTERIZER_STATE, [this.rasterizer_variant(sub)]);
     sub.dx_changed("blend", C.SVGA_3D_CMD_DX_SET_BLEND_STATE, [sub.objects.has(sub.blend) ? sub.blend : INVALID,
         ...sub.blend_color.map(f32.bits), sub.sample_mask]);
     sub.dx_changed("depth", C.SVGA_3D_CMD_DX_SET_DEPTHSTENCIL_STATE, [sub.objects.has(sub.dsa) ? sub.dsa : INVALID, sub.stencil_ref]);
@@ -890,7 +920,12 @@ VirglContext.prototype.draw = function(sub, p)
     sub.dx_changed("topology", C.SVGA_3D_CMD_DX_SET_TOPOLOGY, [topology]);
 
     const n = Math.max(1, instances);
-    if(indexed)
+    if(p.length > 11 && p[11])
+    {
+        // as many vertices as stream output wrote into vertex buffer 0
+        sub.dx(C.SVGA_3D_CMD_DX_DRAW_AUTO, []);
+    }
+    else if(indexed)
     {
         const ib = sub.index_buffer;
         if(!ib) return;
@@ -898,7 +933,7 @@ VirglContext.prototype.draw = function(sub, p)
         if(ib.size === 1)
         {
             // D3D has no 8-bit indices: the guest's copy, widened
-            sid = this.widen_indices(sub, ib, count);
+            sid = this.widen_indices(sub, ib, count, !!p[7]);
             if(!sid) return;
             offset = 0;
             format = C.SVGA3D_R16_UINT;
@@ -917,8 +952,11 @@ VirglContext.prototype.draw = function(sub, p)
     this.virgl.flush_big();
 };
 
-/** 8-bit indices as 16-bit ones in a buffer of the device's, from the guest's copy */
-VirglContext.prototype.widen_indices = function(sub, ib, count)
+/**
+ * 8-bit indices as 16-bit ones in a buffer of the device's, from the
+ * guest's copy (with primitive restart, 0xFF restarts as 0xFFFF)
+ */
+VirglContext.prototype.widen_indices = function(sub, ib, count, restart)
 {
     const r = this.resource(ib.res);
     if(!r || !r.backing) return 0;
@@ -926,6 +964,7 @@ VirglContext.prototype.widen_indices = function(sub, ib, count)
     if(!this.virgl.gpu.read_backing(r, ib.offset, bytes, 0, count)) return 0;
     const wide = new Uint16Array(count + 1 & ~1);
     wide.set(bytes);
+    if(restart) for(let i = 0; i < count; i++) if(wide[i] === 0xFF) wide[i] = 0xFFFF;
     if(!sub.index_scratch || sub.index_scratch.bytes < wide.byteLength)
     {
         if(sub.index_scratch) sub.gx(GX.SURFACE_DESTROY, [sub.index_scratch.sid]);
@@ -936,6 +975,110 @@ VirglContext.prototype.widen_indices = function(sub, ib, count)
     const data = new Uint8Array(wide.buffer);
     sub.gx(GX.SURFACE_UPLOAD, [sub.index_scratch.sid, 0, 0, 0, 0, 0, data.length, 1, 1, data.length, data.length], data);
     return sub.index_scratch.sid;
+};
+
+/** How many primitives a draw of `count` vertices of mode `mode` (PIPE_PRIM_*) makes */
+function primitive_count(mode, count)
+{
+    switch(mode)
+    {
+        case 0: return count;
+        case 1: return count >> 1;
+        case 3: return Math.max(0, count - 1);
+        case 4: return Math.floor(count / 3);
+        case 5: return Math.max(0, count - 2);
+        case 10: return count >> 2;
+        case 11: return Math.max(0, count - 3);
+        case 12: return Math.floor(count / 6);
+        case 13: return Math.max(0, (count - 4) >> 1);
+    }
+    return 0;
+}
+
+/**
+ * A shader's stream output (CREATE_OBJECT SHADER's): 4 strides in dwords,
+ * then per output: register | start component << 8 | components << 10 |
+ * buffer << 13 | offset in dwords << 16, and the stream
+ * @return {?{strides: !Array<number>, outputs: !Array<!Object>}}
+ */
+function stream_output_info(words)
+{
+    if(!words) return null;
+    const outputs = [];
+    for(let at = 4; at + 1 < words.length; at += 2)
+    {
+        const w = words[at];
+        outputs.push({ register: w & 0xFF, start: w >>> 8 & 3, components: w >>> 10 & 7, buffer: w >>> 13 & 7,
+            offset: w >>> 16, stream: words[at + 1] & 3 });
+    }
+    return { strides: words.slice(0, 4), outputs };
+}
+
+/** A shader's stream output, if it has one */
+VirglContext.prototype.shader_so = function(sub, handle)
+{
+    const o = sub.objects.get(handle);
+    return o && o.kind === OBJECT.SHADER && o.so && o.so.outputs.length ? o.so : null;
+};
+
+/**
+ * SET_STREAMOUT_TARGETS: the append mask, then the targets (STREAMOUT_TARGET
+ * handles); an appended target goes on from where stream output got to
+ */
+VirglContext.prototype.set_streamout_targets = function(sub, p)
+{
+    const append = p[0];
+    sub.so_targets = Array.from(p.subarray(1, 5));
+    const words = [0];
+    for(let i = 0; i < 4; i++)
+    {
+        const t = sub.so_targets[i] && sub.objects.get(sub.so_targets[i]);
+        const r = t && t.kind === OBJECT.STREAMOUT_TARGET && this.resource(t.res);
+        if(r)
+        {
+            words.push(t.res, append >> i & 1 ? INVALID : t.offset, t.size);
+            if(r.three_d) r.host_newer = false;
+        }
+        else words.push(INVALID, 0, 0);
+    }
+    // (sent each time: targets set again start from their offsets again)
+    sub.dx(C.SVGA_3D_CMD_DX_SET_SOTARGETS, words);
+};
+
+/**
+ * The stream output declaration of a shader variant (its outputs' registers),
+ * defined once: INVALID without stream output
+ * @param {boolean} discard nothing is rasterized
+ */
+VirglContext.prototype.stream_output = function(sub, handle, variant, discard)
+{
+    const so = sub.so_targets.some(t => t) && variant ? this.shader_so(sub, handle) : null;
+    if(!so) return INVALID;
+    let soid = variant.soids.get(discard);
+    if(soid !== undefined) return soid;
+    // SVGA3dStreamOutputDeclarationEntry: buffer, register, mask, stream; gaps
+    // (where nothing is written) as registers no shader has
+    const entries = [], filled = [0, 0, 0, 0];
+    const sorted = so.outputs.slice().sort((a, b) => a.buffer - b.buffer || a.offset - b.offset);
+    for(const o of sorted)
+    {
+        while(filled[o.buffer] < o.offset)
+        {
+            const gap = Math.min(4, o.offset - filled[o.buffer]);
+            entries.push([o.buffer, 0xFFFF, (1 << gap) - 1, o.stream]);
+            filled[o.buffer] += gap;
+        }
+        const reg = variant.outputs[o.register];
+        entries.push([o.buffer, reg === undefined ? 0xFFFF : reg, ((1 << o.components) - 1) << o.start, o.stream]);
+        filled[o.buffer] += o.components;
+    }
+    soid = sub.next_variant++;
+    const words = [soid, Math.min(entries.length, 64)];
+    for(let i = 0; i < 64; i++) words.push(...(entries[i] || [0, 0, 0, 0]));
+    words.push(...so.strides.map(s => s * 4), discard ? INVALID : 0);
+    sub.dx(C.SVGA_3D_CMD_DX_DEFINE_STREAMOUTPUT, words);
+    variant.soids.set(discard, soid);
+    return soid;
 };
 
 // ---------------------------------------------------------------------------
@@ -1012,7 +1155,13 @@ VirglContext.prototype.copy_region = function(p)
 VirglContext.prototype.begin_query = function(sub, handle)
 {
     const q = sub.objects.get(handle);
-    if(q && q.kind === OBJECT.QUERY && q.defined) sub.dx(C.SVGA_3D_CMD_DX_BEGIN_QUERY, [handle]);
+    if(!q || q.kind !== OBJECT.QUERY) return;
+    if(q.defined) sub.dx(C.SVGA_3D_CMD_DX_BEGIN_QUERY, [handle]);
+    else if(q.type === QUERY_PRIMITIVES_GENERATED || q.type === QUERY_PRIMITIVES_EMITTED)
+    {
+        q.count = 0;
+        sub.counting.add(q);
+    }
 };
 
 VirglContext.prototype.end_query = function(sub, handle)
@@ -1032,11 +1181,11 @@ VirglContext.prototype.end_query = function(sub, handle)
     };
     if(!q.defined)
     {
-        // what GX does not count: GPU_FINISHED is true, the rest 0
-        write(q.type === 11 ? 1 : 0);
+        // primitives counted here; GPU_FINISHED is true, the rest 0
+        sub.counting.delete(q);
+        write(q.type === QUERY_PRIMITIVES_GENERATED || q.type === QUERY_PRIMITIVES_EMITTED ? q.count : q.type === 11 ? 1 : 0);
         return;
     }
-    sub.dx(C.SVGA_3D_CMD_DX_END_QUERY, [handle]);
     const id = this.virgl.request(bytes => {
         let value = 0;
         if(bytes && bytes.length >= 8)
