@@ -1,0 +1,17 @@
+FRAG
+DCL IN[0].xy, GENERIC[0], PERSPECTIVE
+DCL IN[1].x, GENERIC[1], CONSTANT
+DCL OUT[0], COLOR
+DCL SAMP[0]
+DCL SVIEW[0], 2D, FLOAT
+DCL TEMP[0..2]
+IMM[0] UINT32 {1, 1056964608, 1065353216, 0}
+DCL TEMP[3..6]
+  0: MOV TEMP[0].x, IN[1].xxxx
+  1: MOV TEMP[0].y, IMM[0].xxxx
+  2: TG4 TEMP[1], IN[0].xyyy, IMM[0].xxxx, SAMP[0], 2D, TEMP[0].xyz
+  3: ADD TEMP[2].x, TEMP[1].zxxx, TEMP[1].wxxx
+  4: MUL OUT[0].z, IMM[0].yyyy, TEMP[2].xxxx
+  5: MOV OUT[0].xy, TEMP[1].xyxx
+  6: MOV OUT[0].w, IMM[0].zzzz
+  7: END

@@ -44,8 +44,11 @@ const LEVELS = {
     "2d": { features: [VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_F_RING_INDIRECT_DESC] },
     // 3D: virgl contexts (Mesa's virgl driver), drawn by GX; needs a renderer
     "virgl": { features: [VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_F_RING_INDIRECT_DESC], three_d: true },
+    // ... and the capsets of OpenGL 4.3 / GLES 3.2 (virgl_caps.js)
+    "virgl43": { features: [VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_F_RING_INDIRECT_DESC], three_d: true,
+        gl43: true },
 };
-const LEVEL_ORDER = ["2d", "virgl"];
+const LEVEL_ORDER = ["2d", "virgl", "virgl43"];
 /** Without a pinned level: virgl when there is a renderer, 2d otherwise */
 const DEFAULT_3D_LEVEL = "virgl";
 const DEFAULT_LEVEL = "2d";
@@ -251,7 +254,7 @@ export function VirtioGPU(machine, options)
     /** What the driver has done, for harnesses and debugging */
     this.stats = { commands: {}, errors: 0, last_error: 0, transfers: 0, flushes: 0, cursor_updates: 0, cursor_moves: 0 };
     /** @type {Virgl} 3D, at the virgl level */
-    this.virgl = LEVELS[this.level].three_d ? new Virgl(this, /** @type {!Object} */ (options.renderer)) : null;
+    this.virgl = LEVELS[this.level].three_d ? new Virgl(this, /** @type {!Object} */ (options.renderer), !!LEVELS[this.level].gl43) : null;
     /** @type {!Array<{request: !Object, bytes: !Uint8Array, response: !Uint8Array, ready: boolean}>}
      * control requests answered in the order they came: some wait for the GPU */
     this.pending = [];
@@ -514,7 +517,7 @@ VirtioGPU.prototype.control = function(bytes)
             if(!need(8)) break;
             const entry = this.virgl && CAPSETS.find(c => c[0] === u32(0));
             if(!entry || u32(4) > entry[1]) return this.error(RESP_ERR_INVALID_PARAMETER, type);
-            const data = capset(entry[0]);
+            const data = capset(entry[0], !!LEVELS[this.level].gl43);
             const out = response(RESP_OK_CAPSET, HEADER_SIZE + data.length);
             out.set(data, HEADER_SIZE);
             return out;

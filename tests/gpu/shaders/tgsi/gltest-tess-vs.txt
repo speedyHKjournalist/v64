@@ -1,0 +1,6 @@
+VERT
+DCL IN[0]
+DCL OUT[0].xy, POSITION
+DCL TEMP[0..3]
+  0: MOV OUT[0].xy, IN[0].xyxx
+  1: END

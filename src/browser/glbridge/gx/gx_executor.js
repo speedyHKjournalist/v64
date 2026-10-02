@@ -2740,6 +2740,15 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             u[1] = call.firstInstance >>> 0;
             f.set(fix, 4);
             this.device.queue.writeBuffer(this.drawBuffer, offset, data);
+            // an indirect draw's base vertex and first instance are in its
+            // arguments (D3D's ids leave them out, WebGPU's have them)
+            const S = call.indirect && call.indirect.sid !== undefined ? this.surfaces.get(call.indirect.sid) : null;
+            if (S && S.buffer && call.indirect.offset + (call.indexed ? 20 : 16) <= S.shadow.length) {
+                this.endPass();
+                const encoder = this.encoder();
+                if (call.indexed) encoder.copyBufferToBuffer(S.buffer, call.indirect.offset + 12, this.drawBuffer, offset, 8);
+                else encoder.copyBufferToBuffer(S.buffer, call.indirect.offset + 12, this.drawBuffer, offset + 4, 4);
+            }
             return { buffer: this.drawBuffer, offset, size: 32 };
         }
 

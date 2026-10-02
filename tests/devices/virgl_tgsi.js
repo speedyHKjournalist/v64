@@ -76,6 +76,38 @@ for(const [name, program] of programs)
     }
     count++;
 }
+// tessellation: the control shader as a hull shader (two phases), the
+// evaluation shader as a domain shader
+{
+    const tcs = programs.get("gltest-tess-tcs.txt"), tes = programs.get("gltest-tess-tes.txt");
+    const ds = tgsi_to_vgpu10(tes, { outputs: { GENERIC0: 0 }, cps: 4, flip_y: true, halfz: false });
+    assert.deepEqual(ds.problems, []);
+    const hs = tgsi_to_vgpu10(tcs, { outputs: ds.inputs, in_cps: 4, domain: "quad", partitioning: 1, output_primitive: 3 });
+    assert.deepEqual(hs.problems, []);
+    const hp = IR.decode(hs.tokens), dp = IR.decode(ds.tokens);
+    assert.deepEqual(hp.tess.phases.map(phase => phase.kind), ["decls", "cp", "fork"]);
+    assert.deepEqual([hp.tess.inputCPs, hp.tess.outputCPs, hp.tess.domain], [4, 4, 3]);
+    for(const [name, p, mode] of [["tess-hull", hp, "hull"], ["tess-domain", dp, "domain"]])
+    {
+        const wgsl = W.emit(p, { group: 0, mode });
+        assert.deepEqual(wgsl.warnings, [], name);
+        validate(name, wgsl.code);
+    }
+    count += 2;
+}
+
+// compute shaders
+for(const [name, program] of programs)
+{
+    if(program.processor !== 5) continue;
+    const result = tgsi_to_vgpu10(program, {});
+    assert.deepEqual(result.problems, [], name);
+    const p = IR.decode(result.tokens);
+    const wgsl = W.emit(p, { group: 0 });
+    assert.deepEqual(wgsl.warnings, [], name);
+    validate(name, wgsl.code);
+    count++;
+}
 assert.ok(count >= 5);
 console.log("PASS: " + count + " TGSI programs translated" + (naga ? ", their WGSL valid by naga" : " (naga not found: WGSL unchecked)"));
 fs.rmSync(scratch, { recursive: true, force: true });

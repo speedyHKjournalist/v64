@@ -79,6 +79,8 @@ export const VIRGL_FORMATS = {
     125: ["SVGA3D_R9G9B9E5_SHAREDEXP", null],
     126: ["SVGA3D_D32_FLOAT_S8X24_UINT", null],
     134: ["SVGA3D_R8G8B8A8_UNORM", [X, Y, Z, ONE]],  // R8G8B8X8
+    136: ["SVGA3D_X24_G8_UINT", [Y, ZERO, ZERO, ONE]],        // X24S8_UINT: the stencil of Z24_UNORM_S8_UINT
+    138: ["SVGA3D_X32_G8X24_UINT", [Y, ZERO, ZERO, ONE]],     // X32_S8X24_UINT
     177: ["SVGA3D_R8_UINT", null],
     178: ["SVGA3D_R8G8_UINT", null],
     180: ["SVGA3D_R8G8B8A8_UINT", null],
@@ -154,6 +156,13 @@ const BSET = {
 
 // capability_bits
 const VIRGL_CAP_TGSI_INVARIANT = 1 << 0;
+const VIRGL_CAP_TEXTURE_VIEW = 1 << 1;
+const VIRGL_CAP_COPY_IMAGE = 1 << 3;
+const VIRGL_CAP_TXQS = 1 << 5;
+const VIRGL_CAP_MEMORY_BARRIER = 1 << 6;
+const VIRGL_CAP_COMPUTE_SHADER = 1 << 7;
+const VIRGL_CAP_FB_NO_ATTACH = 1 << 8;
+const VIRGL_CAP_ROBUST_BUFFER_ACCESS = 1 << 9;
 // a surface's format says whether it encodes sRGB (GL_FRAMEBUFFER_SRGB)
 const VIRGL_CAP_SRGB_WRITE_CONTROL = 1 << 15;
 const VIRGL_CAP_FBO_MIXED_COLOR_FORMATS = 1 << 18;
@@ -171,11 +180,16 @@ export const CAPS_V2_BYTES = 1408;
 export const CAPSETS = [[1, 1, CAPS_V1_BYTES], [2, 2, CAPS_V2_BYTES]];
 
 /**
- * A capset's contents: VIRGL (1) is virgl_caps_v1, VIRGL2 (2) virgl_caps_v2
+ * A capset's contents: VIRGL (1) is virgl_caps_v1, VIRGL2 (2) virgl_caps_v2.
+ * Level virgl is GL 3.3 / GLES 3.0; virgl43 GL 4.3 / GLES 3.2 (compute,
+ * shader storage and images in fragment and compute shaders, tessellation,
+ * doubles as GX does them (f32), indirect draws, 16 viewports, texture
+ * views). A level's capsets never change (snapshots keep the level).
  * @param {number} id
+ * @param {boolean=} gl43
  * @return {!Uint8Array}
  */
-export function capset(id)
+export function capset(id, gl43)
 {
     const bytes = new Uint8Array(CAPS_V2_BYTES);
     const view = new DataView(bytes.buffer);
@@ -199,6 +213,15 @@ export function capset(id)
     {
         bset |= 1 << BSET[name];
     }
+    if(gl43)
+    {
+        for(const name of ["cube_map_array", "start_instance", "streamout_pause_resume", "texture_query_lod", "has_fp64",
+            "has_tessellation_shaders", "has_indirect_draw", "has_sample_shading", "conditional_render_inverted",
+            "derivative_control"])
+        {
+            bset |= 1 << BSET[name];
+        }
+    }
 
     // virgl_caps_v1
     u32(0, id === 1 ? 1 : 2);   // max_version
@@ -207,18 +230,20 @@ export function capset(id)
     mask(132, depth);
     mask(196, vertex);
     u32(260, bset);
-    u32(264, 330);              // glsl_level
+    u32(264, gl43 ? 430 : 330); // glsl_level
     u32(268, 2048);             // max_texture_array_layers
     u32(272, 4);                // max_streamout_buffers
     u32(276, 1);                // max_dual_source_render_targets
     u32(280, 8);                // max_render_targets
     u32(284, 4);                // max_samples
-    u32(288, PRIM_MASK);
+    // (with tessellation: patches, else Mesa's primitive converter takes them, endlessly)
+    u32(288, PRIM_MASK | (gl43 ? 1 << 14 : 0));
     u32(292, 1 << 16);          // max_tbo_size
     // the default uniform block and 13 UBOs: the 14 constant buffers of a D3D11 stage
-    u32(296, 14);               // max_uniform_blocks
-    u32(300, 1);                // max_viewports
-    u32(304, 0);                // max_texture_gather_components
+    // (GL 4.3 wants 14 UBOs a stage: slots 0 to 14)
+    u32(296, gl43 ? 15 : 14);   // max_uniform_blocks
+    u32(300, gl43 ? 16 : 1);    // max_viewports
+    u32(304, gl43 ? 4 : 0);     // max_texture_gather_components
     if(id === 1) return bytes.slice(0, CAPS_V1_BYTES);
 
     // virgl_caps_v2
@@ -231,21 +256,36 @@ export function capset(id)
     u32(348, 1024);             // max_geom_total_output_components
     u32(352, 16);               // max_vertex_outputs
     u32(356, 16);               // max_vertex_attribs
-    u32(360, 0);                // max_shader_patch_varyings
+    u32(360, gl43 ? 30 : 0);    // max_shader_patch_varyings
     i32(364, -8); i32(368, 7);  // texel offsets
-    i32(372, 0); i32(376, 0);   // texture gather offsets
+    if(gl43) { i32(372, -32); i32(376, 31); }  // texture gather offsets
     u32(380, 16);               // texture_buffer_offset_alignment
     u32(384, 256);              // uniform_buffer_offset_alignment
     u32(388, 256);              // shader_buffer_offset_alignment
     u32(392, VIRGL_CAP_TGSI_INVARIANT | VIRGL_CAP_SRGB_WRITE_CONTROL | VIRGL_CAP_FBO_MIXED_COLOR_FORMATS |
-        VIRGL_CAP_CLIP_HALFZ);
+        VIRGL_CAP_CLIP_HALFZ | (gl43 ? VIRGL_CAP_TEXTURE_VIEW | VIRGL_CAP_COPY_IMAGE | VIRGL_CAP_TXQS | VIRGL_CAP_MEMORY_BARRIER |
+        VIRGL_CAP_COMPUTE_SHADER | VIRGL_CAP_FB_NO_ATTACH | VIRGL_CAP_ROBUST_BUFFER_ACCESS : 0));
     // sample_locations[1] is 4x (Mesa's virgl_get_sample_position): a byte
     // per sample, x and y in 16ths; GX supersamples it, the centres of a 2x2 block
     u32(396 + 4, 0xCC4CC444);
     u32(428, 2048);             // max_vertex_attrib_stride
-    u32(484, 8192);             // max_texture_2d_size
+    if(gl43)
+    {
+        // shader storage and images: fragment and compute shaders (D3D11's UAVs)
+        u32(432, 8);            // max_shader_buffer_frag_compute
+        u32(436, 0);            // max_shader_buffer_other_stages
+        u32(440, 8);            // max_shader_image_frag_compute
+        u32(444, 0);            // max_shader_image_other_stages
+        u32(448, 0);            // max_image_samples
+        u32(452, 1024);         // max_compute_work_group_invocations
+        u32(456, 32768);        // max_compute_shared_memory_size
+        for(let i = 0; i < 3; i++) u32(460 + 4 * i, 65535);   // max_compute_grid_size
+        [1024, 1024, 64].forEach((n, i) => u32(472 + 4 * i, n)); // max_compute_block_size
+    }
+    u32(484, gl43 ? 16384 : 8192);  // max_texture_2d_size
     u32(488, 2048);             // max_texture_3d_size
-    u32(492, 8192);             // max_texture_cube_size
+    u32(492, gl43 ? 16384 : 8192);  // max_texture_cube_size
+    if(gl43) u32(496, 8);       // max_combined_shader_buffers
     u32(556, 15);               // host_feature_check_version
     mask(560, format_mask(f => !!f && /[sud]/.test(f.can)));   // supported_readback_formats
     mask(624, format_mask((f, n) => SCANOUT_FORMATS.includes(n)));
@@ -259,6 +299,8 @@ export function capset(id)
     for(let i = 0; i < 6; i++) u32(832 + i * 4, 65536);  // max_const_buffer_size
     u32(856, 0);                // num_video_caps
     u32(1372, 65536);           // max_uniform_block_size
+    // max_shader_storage_blocks by stage (vertex, fragment, geometry, tessellation control, evaluation, compute)
+    if(gl43) [0, 8, 0, 0, 0, 8].forEach((n, i) => u32(1384 + 4 * i, n));
     u32(1372, 65536);           // max_uniform_block_size
     return bytes;
 }

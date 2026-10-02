@@ -20,7 +20,7 @@
 import { GX } from "../renderer_protocol.js";
 import { virgl_format, TARGET } from "./virgl_caps.js";
 import { parse_tgsi } from "./tgsi.js";
-import { tgsi_to_vgpu10, SVGA_SHADER_TYPE } from "./tgsi_vgpu10.js";
+import { tgsi_to_vgpu10, SVGA_SHADER_TYPE, IMAGE_UAV, GRID_CONSTANT_BUFFER } from "./tgsi_vgpu10.js";
 import * as C from "../vmware_svga/svga_constants.js";
 
 // VIRGL_CCMD_*
@@ -52,6 +52,7 @@ const INVALID = 0xFFFFFFFF;
 const VARIANT_ID = 0x80000000;
 const CONSTANT_BUFFER_BYTES = 65536;
 const STAGES = 6;
+const PIPE_PRIM_PATCHES = 14;
 const PIPE_SHADER = { VERTEX: 0, FRAGMENT: 1, GEOMETRY: 2, TESS_CTRL: 3, TESS_EVAL: 4, COMPUTE: 5 };
 
 const f32 = (() => {
@@ -119,6 +120,13 @@ function SubContext(context, cid)
     this.counting = new Set();
     /** @type {Array<number>} the render condition (SET_PREDICATION's words) */
     this.predication = null;
+    /** per stage: shader storage buffers ({res, offset, length}) and images ({res, format, ...}) */
+    this.buffers = Array.from({ length: STAGES }, () => []);
+    this.images = Array.from({ length: STAGES }, () => []);
+    /** @type {!Map<string, number>} the UA views made of them, by what they view */
+    this.ua_views = new Map();
+    /** the device's buffer of a dispatch's grid size (gl_NumWorkGroups) */
+    this.grid_buffer = 0;
     /** @type {!Map<string, string>} what was last sent, by command */
     this.sent = new Map();
     this.gx(GX.CONTEXT_DEFINE, [cid]);
@@ -311,7 +319,8 @@ VirglContext.prototype.command = function(command, object, p)
             sub.fb = { zsurf: p[1], cbufs: Array.from(p.subarray(2, 2 + Math.min(p[0], 8))) };
             return;
         case CCMD.SET_FRAMEBUFFER_STATE_NO_ATTACH:
-            sub.fb = { zsurf: 0, cbufs: [] };
+            // the size of drawing without attachments (Mesa sends it with
+            // every framebuffer; GX takes the viewport's then)
             return;
         case CCMD.SET_VERTEX_BUFFERS:
             sub.vertex_buffers = [];
@@ -368,6 +377,34 @@ VirglContext.prototype.command = function(command, object, p)
             return;
         case CCMD.SET_STREAMOUT_TARGETS:
             this.set_streamout_targets(sub, p);
+            return;
+        case CCMD.SET_SHADER_BUFFERS:
+            // stage, first slot, then (offset, length, resource) each
+            if(p[0] < STAGES)
+            {
+                for(let i = 0; 2 + 3 * i + 2 < p.length; i++)
+                {
+                    const w = 2 + 3 * i;
+                    sub.buffers[p[0]][p[1] + i] = p[w + 2] ? { res: p[w + 2], offset: p[w], length: p[w + 1] } : null;
+                }
+            }
+            return;
+        case CCMD.SET_SHADER_IMAGES:
+            // stage, first slot, then (format, access, first layer | last << 16 or buffer offset, level or buffer size, resource) each
+            if(p[0] < STAGES)
+            {
+                for(let i = 0; 2 + 5 * i + 4 < p.length; i++)
+                {
+                    const w = 2 + 5 * i;
+                    sub.images[p[0]][p[1] + i] = p[w + 4] ? { res: p[w + 4], format: p[w], layers: p[w + 2], level: p[w + 3] } : null;
+                }
+            }
+            return;
+        case CCMD.LAUNCH_GRID:
+            this.launch_grid(sub, p);
+            return;
+        case CCMD.SET_TESS_STATE:
+            // the default tessellation levels (a control shader always sets its own)
             return;
         case CCMD.SET_RENDER_CONDITION:
         {
@@ -579,9 +616,8 @@ VirglContext.prototype.create_view = function(sub, p)
     let desc;
     if(r.is_buffer())
     {
-        // (in elements of the view's format)
-        const element = element_bytes(info.name);
-        desc = [Math.floor(p[3] / element), Math.max(0, Math.floor((p[4] - p[3] + 1) / element)), 0, 0];
+        // first and last element (of the view's format)
+        desc = [p[3], Math.max(0, p[4] - p[3] + 1), 0, 0];
     }
     else
     {
@@ -637,7 +673,10 @@ VirglContext.prototype.create_query = function(sub, p)
 VirglContext.prototype.create_shader = function(p)
 {
     const handle = p[0], type = p[1], offlen = p[2];
-    const so_count = p[4];
+    // (a compute shader has its shared memory's size where the others have
+    // their stream output)
+    const compute = type === PIPE_SHADER.COMPUTE;
+    const so_count = compute ? 0 : p[4];
     const header = 5 + (so_count && !(offlen >>> 31) ? 4 + 2 * so_count : 0);
     const text = new Uint8Array(p.buffer, p.byteOffset + header * 4, Math.max(0, p.length - header) * 4);
     let pending;
@@ -652,7 +691,7 @@ VirglContext.prototype.create_shader = function(p)
     else
     {
         pending = { handle, type, bytes: new Uint8Array(offlen), got: text.length,
-            so: so_count ? Array.from(p.subarray(5, 5 + 4 + 2 * so_count)) : null, sub: this.sub };
+            so: so_count ? Array.from(p.subarray(5, 5 + 4 + 2 * so_count)) : null, shared: compute ? p[4] : 0, sub: this.sub };
         pending.bytes.set(text.subarray(0, offlen));
         this.pending_shader = pending;
     }
@@ -662,11 +701,15 @@ VirglContext.prototype.create_shader = function(p)
     if(end < 0) end = pending.bytes.length;
     const source = new TextDecoder().decode(pending.bytes.subarray(0, end));
     if(this.virgl.shader_log) this.virgl.shader_log(pending.type, source);
-    this.define_shader(pending.sub, handle, pending.type, source, pending.so);
+    this.define_shader(pending.sub, handle, pending.type, source, pending.so, pending.shared);
 };
 
-/** A shader object: its TGSI parsed (variants are made at draws) */
-VirglContext.prototype.define_shader = function(sub, handle, type, source, so_words)
+/**
+ * A shader object: its TGSI parsed (variants are made at draws)
+ * @param {Array<number>} so_words its stream output
+ * @param {number=} shared a compute shader's shared memory, in bytes
+ */
+VirglContext.prototype.define_shader = function(sub, handle, type, source, so_words, shared)
 {
     if(sub.objects.has(handle)) this.destroy_object(sub, handle);
     let program = null;
@@ -678,8 +721,9 @@ VirglContext.prototype.define_shader = function(sub, handle, type, source, so_wo
     {
         sub.warn("tgsi:" + e.message, "virgl: a shader does not parse: " + e.message);
     }
+    if(program) program.shared = shared || 0;
     sub.objects.set(handle, { kind: OBJECT.SHADER, stage: type, program, variants: new Map(), so: stream_output_info(so_words),
-        source, so_words });
+        source, so_words, shared: shared || 0 });
 };
 
 /**
@@ -760,6 +804,24 @@ VirglContext.prototype.variant = function(sub, handle, key)
     return v;
 };
 
+/**
+ * The tessellator's settings, from the evaluation shader's properties (and
+ * the control shader's output control points)
+ * @return {?{domain: string, partitioning: number, output_primitive: number, in_cps: number, out_cps: number}}
+ */
+VirglContext.prototype.tessellator = function(sub, tes, tcs, in_cps)
+{
+    const e = sub.objects.get(tes), c = sub.objects.get(tcs);
+    if(!e || !e.program || !c || !c.program) return null;
+    const prop = (o, name, value) => +((o.program.properties[name] || [value])[0]);
+    const domain = { 1: "isoline", 4: "tri", 7: "quad" }[prop(e, "TES_PRIM_MODE", 7)] || "quad";
+    // PIPE_TESS_SPACING_* (fractional odd, fractional even, equal) -> VGPU10's partitioning
+    const partitioning = [3, 4, 1][prop(e, "TES_SPACING", 2)] || 1;
+    // (GL's clockwise is D3D's counter-clockwise: Mesa's svga does so)
+    const output_primitive = prop(e, "TES_POINT_MODE", 0) ? 1 : domain === "isoline" ? 2 : prop(e, "TES_VERTEX_ORDER_CW", 0) ? 4 : 3;
+    return { domain, partitioning, output_primitive, in_cps, out_cps: prop(c, "TCS_VERTICES_OUT", in_cps) };
+};
+
 /** The swizzles of a stage's sampler views (for its shader's key) */
 function view_swizzles(sub, stage)
 {
@@ -818,7 +880,7 @@ VirglContext.prototype.bind_stage = function(sub, stage)
 {
     const type = stage + 1;
     const cbs = sub.cbs[stage];
-    for(let slot = 0; slot < 14; slot++)
+    for(let slot = 0; slot < 15; slot++)
     {
         const cb = cbs[slot];
         const key = "cb" + stage + ":" + slot;
@@ -846,18 +908,25 @@ VirglContext.prototype.bind_stage = function(sub, stage)
 VirglContext.prototype.draw = function(sub, p)
 {
     const [start, count, mode, indexed, instances, index_bias, start_instance] = p;
-    const topology = PRIMITIVE[mode];
+    // (patches: SVGA's patch lists, by the vertices a patch has)
+    const topology = mode === PIPE_PRIM_PATCHES ? 10 + Math.max(1, Math.min(32, p[12] || 1)) : PRIMITIVE[mode];
     if(!topology)
     {
         sub.warn("prim" + mode, "virgl: primitive " + mode + " is not supported");
         return;
     }
-    if(p.length > 14 && p[14])
+    // indirect: a buffer of D3D's arguments too (GL's are the same), count draws stride apart
+    const indirect = p.length > 14 && p[14] ? { res: p[14], offset: p[15], stride: p[16], count: p[17], count_res: p[19] } : null;
+    if(indirect && indirect.count_res) sub.warn("indirect-count", "virgl: indirect draw counts are not supported yet");
+    const vs = sub.shaders[PIPE_SHADER.VERTEX], fs = sub.shaders[PIPE_SHADER.FRAGMENT], gs = sub.shaders[PIPE_SHADER.GEOMETRY];
+    const tes = mode === PIPE_PRIM_PATCHES ? sub.shaders[PIPE_SHADER.TESS_EVAL] : 0;
+    const tcs = tes ? sub.shaders[PIPE_SHADER.TESS_CTRL] : 0;
+    if(this.virgl.debug_log && mode === PIPE_PRIM_PATCHES) this.virgl.debug_log("patches " + JSON.stringify({ tes, tcs, p: Array.from(p) }));
+    if(tes && !tcs)
     {
-        sub.warn("indirect", "virgl: indirect draws are not supported yet");
+        sub.warn("no-tcs", "virgl: tessellation without a control shader is not supported yet");
         return;
     }
-    const vs = sub.shaders[PIPE_SHADER.VERTEX], fs = sub.shaders[PIPE_SHADER.FRAGMENT], gs = sub.shaders[PIPE_SHADER.GEOMETRY];
     if(!vs) return;
     const rs = sub.objects.get(sub.rasterizer);
     const s0 = rs && rs.kind === OBJECT.RASTERIZER ? rs.words[0] : 0;
@@ -884,17 +953,29 @@ VirglContext.prototype.draw = function(sub, p)
     // (what stream output captures must be in output registers)
     const streaming = sub.so_targets.some(t => t);
     const all_outputs = handle => streaming && !!this.shader_so(sub, handle);
+    let tesv = null, tcsv = null;
+    // the stages from the last to the first: each writes where the next reads
+    let next = fs_inputs;
     if(gs)
     {
-        gsv = this.variant(sub, gs, { outputs: fs_inputs, all_outputs: all_outputs(gs), flip_y, halfz,
+        gsv = this.variant(sub, gs, { outputs: next, all_outputs: all_outputs(gs), flip_y, halfz,
             swizzles: view_swizzles(sub, PIPE_SHADER.GEOMETRY) });
-        vsv = this.variant(sub, vs, { outputs: gsv ? gsv.inputs : {}, flip_y: false, halfz: true, swizzles: view_swizzles(sub, PIPE_SHADER.VERTEX) });
+        next = gsv ? gsv.inputs : {};
     }
-    else
+    if(tes)
     {
-        vsv = this.variant(sub, vs, { outputs: fs_inputs, all_outputs: all_outputs(vs), flip_y, halfz,
-            swizzles: view_swizzles(sub, PIPE_SHADER.VERTEX) });
+        const t = this.tessellator(sub, tes, tcs, p[12] || 1);
+        if(!t) return;
+        tesv = this.variant(sub, tes, { outputs: next, all_outputs: !gs && all_outputs(tes), flip_y: !gs && flip_y, halfz: gs ? true : halfz,
+            cps: t.out_cps, swizzles: view_swizzles(sub, PIPE_SHADER.TESS_EVAL) });
+        tcsv = tesv && this.variant(sub, tcs, { outputs: tesv.inputs, in_cps: t.in_cps, domain: t.domain, partitioning: t.partitioning,
+            output_primitive: t.output_primitive, swizzles: view_swizzles(sub, PIPE_SHADER.TESS_CTRL) });
+        if(!tcsv) return;
+        next = tcsv.inputs;
     }
+    const last = !gs && !tes;
+    vsv = this.variant(sub, vs, { outputs: next, all_outputs: last && all_outputs(vs), flip_y: last && flip_y, halfz: last ? halfz : true,
+        swizzles: view_swizzles(sub, PIPE_SHADER.VERTEX) });
     if(!vsv) return;
     // primitives counted for the queries running (before rasterizer discard)
     if(sub.counting.size)
@@ -904,15 +985,24 @@ VirglContext.prototype.draw = function(sub, p)
     }
     // stream output: of the last vertex stage, into the targets bound
     const discard = !!(s0 >>> 3 & 1);
-    const soid = this.stream_output(sub, gs ? gs : vs, gs ? gsv : vsv, discard);
+    const soid = this.stream_output(sub, gs ? gs : tes ? tes : vs, gs ? gsv : tes ? tesv : vsv, discard);
     if(discard && soid === INVALID) return;
     sub.dx_changed("soid", C.SVGA_3D_CMD_DX_SET_STREAMOUTPUT, [soid]);
     sub.dx_changed("vs", C.SVGA_3D_CMD_DX_SET_SHADER, [vsv.shid, C.SVGA3D_SHADERTYPE_VS]);
     sub.dx_changed("gs", C.SVGA_3D_CMD_DX_SET_SHADER, [gsv ? gsv.shid : INVALID, C.SVGA3D_SHADERTYPE_GS]);
+    sub.dx_changed("hs", C.SVGA_3D_CMD_DX_SET_SHADER, [tcsv ? tcsv.shid : INVALID, C.SVGA3D_SHADERTYPE_HS]);
+    sub.dx_changed("ds", C.SVGA_3D_CMD_DX_SET_SHADER, [tesv ? tesv.shid : INVALID, C.SVGA3D_SHADERTYPE_DS]);
     sub.dx_changed("ps", C.SVGA_3D_CMD_DX_SET_SHADER, [fsv ? fsv.shid : INVALID, C.SVGA3D_SHADERTYPE_PS]);
     this.bind_stage(sub, PIPE_SHADER.VERTEX);
     this.bind_stage(sub, PIPE_SHADER.FRAGMENT);
     if(gs) this.bind_stage(sub, PIPE_SHADER.GEOMETRY);
+    if(tes)
+    {
+        this.bind_stage(sub, PIPE_SHADER.TESS_CTRL);
+        this.bind_stage(sub, PIPE_SHADER.TESS_EVAL);
+    }
+    // (UAVs: the fragment stage's; D3D11 has them there and in compute)
+    sub.dx_changed("uavs", C.SVGA_3D_CMD_DX_SET_UA_VIEWS, [0, ...this.ua_views(sub, PIPE_SHADER.FRAGMENT)]);
 
     // fixed function
     sub.dx_changed("rasterizer", C.SVGA_3D_CMD_DX_SET_RASTERIZER_STATE, [this.rasterizer_variant(sub)]);
@@ -946,7 +1036,24 @@ VirglContext.prototype.draw = function(sub, p)
     sub.dx_changed("topology", C.SVGA_3D_CMD_DX_SET_TOPOLOGY, [topology]);
 
     const n = Math.max(1, instances);
-    if(p.length > 11 && p[11])
+    if(this.virgl.debug_log) this.virgl.debug_log("draw " + JSON.stringify({ mode, topology, count, start, indexed, n, indirect,
+        vs: vsv && vsv.shid, tcs: tcsv && tcsv.shid, tes: tesv && tesv.shid, gs: gsv && gsv.shid, fs: fsv && fsv.shid, flip_y, halfz }));
+    if(indirect)
+    {
+        if(indexed)
+        {
+            const ib = sub.index_buffer;
+            if(!ib || ib.size === 1) return;
+            sub.dx_changed("ib", C.SVGA_3D_CMD_DX_SET_INDEX_BUFFER, [ib.res, ib.size === 4 ? C.SVGA3D_R32_UINT : C.SVGA3D_R16_UINT, ib.offset]);
+        }
+        const id = indexed ? C.SVGA_3D_CMD_DX_DRAW_INDEXED_INSTANCED_INDIRECT : C.SVGA_3D_CMD_DX_DRAW_INSTANCED_INDIRECT;
+        const size = indexed ? 20 : 16;
+        for(let i = 0; i < Math.max(1, indirect.count); i++)
+        {
+            sub.dx(id, [indirect.res, indirect.offset + i * (indirect.stride || size)]);
+        }
+    }
+    else if(p.length > 11 && p[11])
     {
         // as many vertices as stream output wrote into vertex buffer 0
         sub.dx(C.SVGA_3D_CMD_DX_DRAW_AUTO, []);
@@ -975,6 +1082,78 @@ VirglContext.prototype.draw = function(sub, p)
         else sub.dx(C.SVGA_3D_CMD_DX_DRAW, [count, start]);
     }
     this.written(sub);
+    this.virgl.flush_big();
+};
+
+/**
+ * A stage's shader storage buffers and images as UA views (raw buffers at
+ * u0 on, typed images at u8 on): 64 view ids
+ * @return {!Array<number>}
+ */
+VirglContext.prototype.ua_views = function(sub, stage)
+{
+    const ids = new Array(64).fill(INVALID);
+    const view = (key, words) => {
+        let id = sub.ua_views.get(key);
+        if(id === undefined)
+        {
+            id = sub.next_variant++;
+            sub.ua_views.set(key, id);
+            sub.dx(C.SVGA_3D_CMD_DX_DEFINE_UA_VIEW, [id, ...words]);
+        }
+        return id;
+    };
+    sub.buffers[stage].forEach((b, slot) => {
+        const r = b && this.resource(b.res);
+        if(!r || !r.three_d) return;
+        // raw: in dwords
+        ids[slot] = view("b" + [b.res, b.offset, b.length], [b.res, C.SVGA3D_R32_TYPELESS, C.SVGA3D_RESOURCE_BUFFER,
+            b.offset >>> 2, Math.max(1, b.length >>> 2), C.SVGA3D_UABUFFER_RAW, 0]);
+        r.host_newer = false;
+    });
+    sub.images[stage].forEach((image, slot) => {
+        const r = image && this.resource(image.res);
+        const info = image && virgl_format(image.format);
+        if(!r || !r.three_d || !info || IMAGE_UAV + slot >= 64) return;
+        const first = image.layers & 0xFFFF, last = image.layers >>> 16;
+        const desc = r.is_buffer() ? [image.layers, Math.max(1, image.level), 0, 0] :
+            [image.level, first, Math.max(1, last - first + 1), 0];
+        ids[IMAGE_UAV + slot] = view("i" + [image.res, image.format, image.layers, image.level],
+            [image.res, info.svga, resource_dimension(r), ...desc]);
+        r.host_newer = false;
+    });
+    return ids;
+};
+
+/**
+ * LAUNCH_GRID: block size, grid size, then an indirect buffer and offset
+ * (the grid size from there)
+ */
+VirglContext.prototype.launch_grid = function(sub, p)
+{
+    const cs = sub.shaders[PIPE_SHADER.COMPUTE];
+    const v = cs && this.variant(sub, cs, { swizzles: view_swizzles(sub, PIPE_SHADER.COMPUTE) });
+    if(!v) return;
+    sub.dx_changed("cs", C.SVGA_3D_CMD_DX_SET_SHADER, [v.shid, C.SVGA3D_SHADERTYPE_CS]);
+    this.bind_stage(sub, PIPE_SHADER.COMPUTE);
+    sub.dx_changed("csuavs", C.SVGA_3D_CMD_DX_SET_CS_UA_VIEWS, [0, ...this.ua_views(sub, PIPE_SHADER.COMPUTE)]);
+    // the grid size, for gl_NumWorkGroups
+    if(!sub.grid_buffer)
+    {
+        sub.grid_buffer = this.virgl.next_private_sid++;
+        sub.gx(GX.SURFACE_DEFINE, [sub.grid_buffer, C.SVGA3D_BUFFER, 0, 0, 256, 1, 1, 1, 1, 0, 0]);
+    }
+    const indirect = p.length > 6 && p[6] ? this.resource(p[6]) : null;
+    if(indirect) sub.gx(GX.SURFACE_COPY, [p[6], 0, 0, p[7], 0, 0, sub.grid_buffer, 0, 0, 0, 0, 0, 12, 1, 1]);
+    else
+    {
+        const grid = new Uint8Array(Uint32Array.of(p[3], p[4], p[5], 0).buffer);
+        sub.gx(GX.SURFACE_UPLOAD, [sub.grid_buffer, 0, 0, 0, 0, 0, 16, 1, 1, 16, 16], grid);
+    }
+    sub.dx_changed("cb5:" + GRID_CONSTANT_BUFFER, C.SVGA_3D_CMD_DX_SET_SINGLE_CONSTANT_BUFFER,
+        [GRID_CONSTANT_BUFFER, C.SVGA3D_SHADERTYPE_CS, sub.grid_buffer, 0, 256]);
+    if(indirect) sub.dx(C.SVGA_3D_CMD_DX_DISPATCH_INDIRECT, [p[6], p[7]]);
+    else sub.dx(C.SVGA_3D_CMD_DX_DISPATCH, [p[3], p[4], p[5]]);
     this.virgl.flush_big();
 };
 
@@ -1231,7 +1410,7 @@ VirglContext.prototype.end_query = function(sub, handle)
 
 /** The state of the sub-contexts that a snapshot keeps */
 const SAVED_STATE = ["fb", "viewport", "scissor", "blend", "dsa", "rasterizer", "elements", "blend_color", "stencil_ref",
-    "sample_mask", "vertex_buffers", "index_buffer", "shaders", "views", "samplers", "so_targets", "predication"];
+    "sample_mask", "vertex_buffers", "index_buffer", "shaders", "views", "samplers", "so_targets", "predication", "buffers", "images"];
 
 VirglContext.prototype.get_state = function()
 {
@@ -1243,7 +1422,7 @@ VirglContext.prototype.get_state = function()
         const objects = [];
         for(const [handle, o] of sub.objects)
         {
-            if(o.kind === OBJECT.SHADER) objects.push([OBJECT.SHADER, handle, o.stage, o.source, o.so_words || null]);
+            if(o.kind === OBJECT.SHADER) objects.push([OBJECT.SHADER, handle, o.stage, o.source, o.so_words || null, o.shared]);
             else if(o.create_words) objects.push([o.create_kind, handle, o.create_words]);
         }
         const state = {};
@@ -1269,7 +1448,7 @@ VirglContext.prototype.set_state = function(state, resource)
         const sub = this.sub_context(id);
         for(const o of objects)
         {
-            if(o[0] === OBJECT.SHADER) this.define_shader(sub, o[1], o[2], o[3], o[4]);
+            if(o[0] === OBJECT.SHADER) this.define_shader(sub, o[1], o[2], o[3], o[4], o[5]);
             else this.create_object(sub, o[0], Uint32Array.from(o[2], v => v >>> 0));
         }
         const saved = JSON.parse(json);

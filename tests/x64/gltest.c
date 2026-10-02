@@ -131,6 +131,12 @@ __attribute__((used)) void start_c(long *p)
     F(void, glGetQueryObjectuiv, (GLuint, GLenum, GLuint *)) F(void, glDeleteQueries, (GLsizei, const GLuint *)) \
     F(void, glClearBufferfv, (GLenum, GLint, const GLfloat *)) F(void, glClearBufferuiv, (GLenum, GLint, const GLuint *)) \
     F(void, glTexBuffer, (GLenum, GLenum, GLuint)) \
+    F(void, glDispatchCompute, (GLuint, GLuint, GLuint)) F(void, glMemoryBarrier, (GLbitfield)) \
+    F(void, glBindImageTexture, (GLuint, GLuint, GLint, GLboolean, GLint, GLenum, GLenum)) \
+    F(void, glPatchParameteri, (GLenum, GLint)) F(void, glUniform1ui, (GLint, GLuint)) \
+    F(void, glUniform1d, (GLint, double)) \
+    F(void, glDrawArraysIndirect, (GLenum, const void *)) F(void, glDrawElementsIndirect, (GLenum, GLenum, const void *)) \
+    F(GLuint, glCreateShaderProgramv, (GLenum, GLsizei, const GLchar *const *)) \
     F(void, glTexImage2DMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLboolean))
 
 #define DECLARE(ret, name, args) static ret (*name) args;
@@ -276,6 +282,18 @@ GL_FUNCTIONS(DECLARE)
 #define GL_R32I 0x8235
 #define GL_UNSIGNED_INT_IMM 0
 #define EGL_OPENGL_API 0x30A2
+#define GL_COMPUTE_SHADER 0x91B9
+#define GL_TESS_CONTROL_SHADER 0x8E88
+#define GL_TESS_EVALUATION_SHADER 0x8E87
+#define GL_PATCHES 0x000E
+#define GL_PATCH_VERTICES 0x8E72
+#define GL_SHADER_STORAGE_BUFFER 0x90D2
+#define GL_DRAW_INDIRECT_BUFFER 0x8F3F
+#define GL_ALL_BARRIER_BITS 0xFFFFFFFF
+#define GL_WRITE_ONLY 0x88B9
+#define GL_READ_ONLY 0x88B8
+#define GL_READ_WRITE 0x88BA
+#define GL_R32UI_IMAGE 0x8236
 #define EGL_CONTEXT_OPENGL_PROFILE_MASK 0x30FD
 #define EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT 0x1
 
@@ -1238,6 +1256,217 @@ static void run_gl33(EGLDisplay display)
     test_multisample_texture();
 }
 
+
+// ---------------------------------------------------------------------------
+// OpenGL 4.3 core
+
+#define VS43 "#version 430 core\n"
+
+static GLuint program_stages(const GLenum *types, const char *const *sources, int count)
+{
+    GLuint p = glCreateProgram();
+    for(int i = 0; i < count; i++)
+    {
+        GLuint s = shader(types[i], sources[i]);
+        glAttachShader(p, s);
+        glDeleteShader(s);
+    }
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if(!ok)
+    {
+        char log[1024];
+        glGetProgramInfoLog(p, sizeof(log), 0, log);
+        printf("link: %s\n", log);
+    }
+    glUseProgram(p);
+    return p;
+}
+
+/** A compute shader: shared memory, a barrier, a storage buffer with an atomic, an image */
+static void test_compute(void)
+{
+    const char *cs = VS43 "layout(local_size_x = 8, local_size_y = 8) in;\n"
+        "layout(std430, binding = 0) buffer Out { uint count; uint data[]; };\n"
+        "layout(rgba8, binding = 0) writeonly uniform image2D img;\n"
+        "shared uint tile[64];\n"
+        "uniform uint scale;\n"
+        "void main() { uvec2 g = gl_GlobalInvocationID.xy; uint i = gl_LocalInvocationIndex;\n"
+        "  tile[i] = g.x * scale + g.y; barrier();\n"
+        "  uint v = tile[63u - i];\n"
+        "  atomicAdd(count, 1u);\n"
+        "  data[g.y * 64u + g.x] = v + gl_WorkGroupID.x * 1000u + gl_NumWorkGroups.x * 100000u;\n"
+        "  imageStore(img, ivec2(g), vec4(vec2(g) / 64.0, float(i) / 64.0, 1.0)); }";
+    GLenum type = GL_COMPUTE_SHADER;
+    GLuint p = program_stages(&type, &cs, 1);
+    glUniform1ui(glGetUniformLocation(p, "scale"), 3);
+    target(0);
+    glBindImageTexture(0, fbo_color, 0, 0, 0, GL_WRITE_ONLY, GL_RGBA8);
+    GLuint b;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
+    static unsigned int zeros[1 + 64 * 64];
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(zeros), zeros, GL_STREAM_READ);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, b);
+    glUseProgram(p);
+    glDispatchCompute(8, 8, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    static unsigned char data[16384];
+    const void *mapped = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 16384, GL_MAP_READ_BIT);
+    if(mapped) memcpy(data, mapped, 16384);
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+    result("compute-buffer", data, 16384, 0, 0);
+    glDeleteBuffers(1, &b);
+    finish("compute-image", 0);
+}
+
+/** A fragment shader with a storage buffer (atomics) and an image it reads */
+static void test_fragment_storage(void)
+{
+    // an image to read: a gradient
+    GLuint img;
+    glGenTextures(1, &img);
+    glBindTexture(GL_TEXTURE_2D, img);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32UI, 16, 16);
+    static unsigned int texels[256];
+    for(int i = 0; i < 256; i++) texels[i] = i * 977u;
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 16, 16, GL_RED_INTEGER, GL_UNSIGNED_INT, texels);
+    target(0);
+    fresh_vao();
+    GLenum types[2] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+    const char *sources[2] = {
+        VS43 "in vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }",
+        VS43 "layout(std430, binding = 1) buffer Counts { uint total; uint rows[64]; };\n"
+        "layout(r32ui, binding = 1) readonly uniform uimage2D src; out vec4 o;\n"
+        "void main() { ivec2 at = ivec2(gl_FragCoord.xy); uint v = imageLoad(src, at / 4).x;\n"
+        "  atomicAdd(total, 1u); atomicMax(rows[at.y], uint(at.x));\n"
+        "  o = vec4(float(v & 255u) / 255.0, float((v >> 8) & 255u) / 255.0, 0.25, 1.0); }" };
+    program_stages(types, sources, 2);
+    vbo(0, 2, quad, sizeof(quad));
+    glBindImageTexture(1, img, 0, 0, 0, GL_READ_ONLY, GL_R32UI);
+    GLuint b;
+    glGenBuffers(1, &b);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
+    static unsigned int zeros[65];
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(zeros), zeros, GL_STREAM_READ);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, b);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    static unsigned char data[65 * 4];
+    const void *mapped = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizeof(data), GL_MAP_READ_BIT);
+    if(mapped) memcpy(data, mapped, sizeof(data));
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+    result("fragment-storage-buffer", data, sizeof(data), 0, 0);
+    glDeleteBuffers(1, &b);
+    finish("fragment-image-load", 1);
+    glDeleteTextures(1, &img);
+}
+
+/** Tessellation: a quad patch into a grid, colored by where its vertices are */
+static void test_tessellation(void)
+{
+    target(0);
+    fresh_vao();
+    GLenum types[4] = { GL_VERTEX_SHADER, GL_TESS_CONTROL_SHADER, GL_TESS_EVALUATION_SHADER, GL_FRAGMENT_SHADER };
+    const char *sources[4] = {
+        VS43 "in vec2 p; out vec2 v; void main() { v = p; }",
+        VS43 "layout(vertices = 4) out; in vec2 v[]; out vec2 c[]; patch out float shade;\n"
+        "void main() { c[gl_InvocationID] = v[gl_InvocationID] * 0.9;\n"
+        "  if(gl_InvocationID == 0) { gl_TessLevelOuter[0] = 2.0; gl_TessLevelOuter[1] = 3.0; gl_TessLevelOuter[2] = 4.0;\n"
+        "    gl_TessLevelOuter[3] = 5.0; gl_TessLevelInner[0] = 4.0; gl_TessLevelInner[1] = 3.0; shade = 0.75; } }",
+        VS43 "layout(quads, equal_spacing, ccw) in; in vec2 c[]; patch in float shade; out vec3 color;\n"
+        "void main() { vec2 a = mix(c[0], c[1], gl_TessCoord.x), b = mix(c[3], c[2], gl_TessCoord.x);\n"
+        "  color = vec3(gl_TessCoord.xy, shade); gl_Position = vec4(mix(a, b, gl_TessCoord.y), 0.0, 1.0); }",
+        VS43 "in vec3 color; out vec4 o; void main() { o = vec4(color, 1.0); }" };
+    program_stages(types, sources, 4);
+    const float corners[] = { -1, -1, 1, -1, 1, 1, -1, 1 };
+    vbo(0, 2, corners, sizeof(corners));
+    glPatchParameteri(GL_PATCH_VERTICES, 4);
+    glDrawArrays(GL_PATCHES, 0, 4);
+    finish("tessellation", 2);
+}
+
+/** Doubles (GX computes them as floats: values floats hold exactly) */
+static void test_doubles(void)
+{
+    target(0);
+    fresh_vao();
+    GLenum types[2] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+    const char *sources[2] = {
+        VS43 "in vec2 p; out vec2 t; void main() { t = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }",
+        VS43 "uniform double k; in vec2 t; out vec4 o;\n"
+        "void main() { dvec2 d = dvec2(t) * k + dvec2(0.25, 0.5); double m = max(d.x, d.y) - floor(d.y);\n"
+        "  o = vec4(vec2(fract(d)), float(m * 0.5), 1.0); }" };
+    GLuint p = program_stages(types, sources, 2);
+    glUniform1d(glGetUniformLocation(p, "k"), 2.0);
+    vbo(0, 2, quad, sizeof(quad));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    finish("doubles", 2);
+}
+
+/** Indirect draws, with and without indices; texture gathers with offsets */
+static void test_indirect_gather(void)
+{
+    target(0);
+    fresh_vao();
+    GLenum types[2] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+    const char *sources[2] = {
+        VS43 "in vec2 p; out vec2 t; flat out int instance; void main() { t = p * 0.5 + 0.5; instance = gl_InstanceID;\n"
+        "  gl_Position = vec4(p * 0.45 + vec2(gl_InstanceID % 2, gl_InstanceID / 2) - 0.5, 0.0, 1.0); }",
+        VS43 "uniform sampler2D s; in vec2 t; flat in int instance; out vec4 o;\n"
+        "void main() { vec4 g = textureGatherOffset(s, t, ivec2(instance - 1, 1), 1);\n"
+        "  o = vec4(g.xy, g.z * 0.5 + g.w * 0.5, 1.0); }" };
+    GLuint p = program_stages(types, sources, 2);
+    vbo(0, 2, quad, sizeof(quad));
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    static unsigned char texels[8 * 8 * 4];
+    for(int i = 0; i < 64; i++) { texels[4 * i] = i * 4; texels[4 * i + 1] = 255 - i * 4; texels[4 * i + 2] = (i * 37) & 255; texels[4 * i + 3] = 255; }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glUniform1i(glGetUniformLocation(p, "s"), 0);
+    // two instances without indices (from the second), two with
+    const unsigned int arrays[4] = { 4, 2, 0, 0 };
+    const unsigned int elements[5] = { 4, 2, 0, 0, 2 };
+    const unsigned short indices[4] = { 0, 1, 2, 3 };
+    GLuint ib, args[2];
+    glGenBuffers(1, &ib);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+    glGenBuffers(2, args);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, args[0]);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(arrays), arrays, GL_STATIC_DRAW);
+    glDrawArraysIndirect(GL_TRIANGLE_STRIP, 0);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, args[1]);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(elements), elements, GL_STATIC_DRAW);
+    glDrawElementsIndirect(GL_TRIANGLE_STRIP, GL_UNSIGNED_SHORT, 0);
+    finish("indirect-gather", 1);
+    glDeleteTextures(1, &tex);
+}
+
+static void run_gl43(EGLDisplay display)
+{
+    const EGLint attributes[] = { EGL_CONTEXT_MAJOR_VERSION, 4, EGL_CONTEXT_MINOR_VERSION, 3,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE };
+    EGLContext context = eglCreateContext(display, 0, 0, attributes);
+    if(!context || !eglMakeCurrent(display, 0, 0, context))
+    {
+        // (a driver without OpenGL 4.3: these are not its tests)
+        printf("GLTEST gl43 skipped (%x)\n", eglGetError());
+        return;
+    }
+    vao = 0;
+    printf("GLTEST renderer %s, %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
+    test_compute();
+    test_fragment_storage();
+    test_doubles();
+    test_indirect_gather();
+    test_tessellation();
+}
+
 int main(int argc, char **argv, char **envp)
 {
     mode_ref = argc > 1 && !strcmp(argv[1], "ref");
@@ -1279,6 +1508,7 @@ int main(int argc, char **argv, char **envp)
     test_cube_faces();
     test_integer_target();
     run_gl33(display);
+    run_gl43(display);
     printf("GLTEST done %d failures\n", failures);
     fflush(0);
     return 0;

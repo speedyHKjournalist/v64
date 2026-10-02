@@ -41,15 +41,44 @@ const OP = {
     GATHER4_PO: 127, GATHER4_PO_C: 128, RCP: 129, F32TOF16: 130, F16TOF32: 131, COUNTBITS: 134,
     FIRSTBIT_HI: 135, FIRSTBIT_LO: 136, FIRSTBIT_SHI: 137, UBFE: 138, IBFE: 139, BFI: 140, BFREV: 141,
     EVAL_SNAPPED: 203, EVAL_SAMPLE_INDEX: 204, EVAL_CENTROID: 205,
+    DCL_THREAD_GROUP: 155, DCL_UAV_TYPED: 156, DCL_UAV_RAW: 157, DCL_TGSM_RAW: 159, LD_UAV_TYPED: 163,
+    STORE_UAV_TYPED: 164, LD_RAW: 165, STORE_RAW: 166, IMM_ATOMIC_IADD: 180, IMM_ATOMIC_AND: 181, IMM_ATOMIC_OR: 182,
+    IMM_ATOMIC_XOR: 183, IMM_ATOMIC_EXCH: 184, IMM_ATOMIC_CMP_EXCH: 185, IMM_ATOMIC_IMAX: 186, IMM_ATOMIC_IMIN: 187,
+    IMM_ATOMIC_UMAX: 188, IMM_ATOMIC_UMIN: 189, SYNC: 190,
+    DADD: 191, DMAX: 192, DMIN: 193, DMUL: 194, DEQ: 195, DGE: 196, DLT: 197, DNE: 198, DMOV: 199, DMOVC: 200,
+    DTOF: 201, FTOD: 202, DDIV: 210, DFMA: 211, DRCP: 212, DTOI: 214, DTOU: 215, ITOD: 216, UTOD: 217,
+    HS_DECLS: 113, HS_CONTROL_POINT_PHASE: 114, HS_FORK_PHASE: 115, DCL_INPUT_CONTROL_POINT_COUNT: 147,
+    DCL_OUTPUT_CONTROL_POINT_COUNT: 148, DCL_TESS_DOMAIN: 149, DCL_TESS_PARTITIONING: 150, DCL_TESS_OUTPUT_PRIMITIVE: 151,
+    DCL_HS_MAX_TESSFACTOR: 152,
 };
+/** TGSI atomics: VGPU10's returning their old value */
+const ATOMICS = { ATOMUADD: OP.IMM_ATOMIC_IADD, ATOMAND: OP.IMM_ATOMIC_AND, ATOMOR: OP.IMM_ATOMIC_OR,
+    ATOMXOR: OP.IMM_ATOMIC_XOR, ATOMXCHG: OP.IMM_ATOMIC_EXCH, ATOMCAS: OP.IMM_ATOMIC_CMP_EXCH,
+    ATOMIMAX: OP.IMM_ATOMIC_IMAX, ATOMIMIN: OP.IMM_ATOMIC_IMIN, ATOMUMAX: OP.IMM_ATOMIC_UMAX, ATOMUMIN: OP.IMM_ATOMIC_UMIN };
+/** Where GL's shader storage buffers and images are among the UAVs: buffer n is u n, image n u (IMAGE_UAV + n) */
+export const IMAGE_UAV = 8;
+/** The constant buffer of a compute shader's grid size (gl_NumWorkGroups), the device's */
+export const GRID_CONSTANT_BUFFER = 15;
 const VMWARE_IDIV = 0;
 
 // operand types (VGPU10_OPERAND_TYPE)
 const T = {
     TEMP: 0, INPUT: 1, OUTPUT: 2, INDEXABLE_TEMP: 3, IMMEDIATE32: 4, SAMPLER: 6, RESOURCE: 7, CONSTANT_BUFFER: 8,
     IMMEDIATE_CONSTANT_BUFFER: 9, INPUT_PRIMITIVEID: 11, OUTPUT_DEPTH: 12, NULL: 13, OUTPUT_COVERAGE_MASK: 15,
-    INPUT_COVERAGE_MASK: 35,
+    UAV: 30, THREAD_GROUP_SHARED_MEMORY: 31, INPUT_THREAD_ID: 32, INPUT_THREAD_GROUP_ID: 33, INPUT_THREAD_ID_IN_GROUP: 34,
+    INPUT_COVERAGE_MASK: 35, OUTPUT_CONTROL_POINT_ID: 22, INPUT_CONTROL_POINT: 25, INPUT_PATCH_CONSTANT: 27, INPUT_DOMAIN_POINT: 28,
 };
+// the tess factors (VGPU10_NAME_FINAL_*_TESSFACTOR) by domain: GL's outer levels, then inner
+const TESS_FACTORS = {
+    quad: { outer: [11, 12, 13, 14], inner: [15, 16] },
+    tri: { outer: [17, 18, 19], inner: [20] },
+    // (GL: outer[0] the number of lines, outer[1] their segments)
+    isoline: { outer: [22, 21], inner: [] },
+};
+/** Where patch constants are (vpc): the tess factors, then GL's patch varyings */
+const PATCH_VARYINGS = 6;
+/** TES_PRIM_MODE (PIPE_PRIM_*) -> the domain (VGPU10_TESSELLATOR_DOMAIN) */
+const TESS_DOMAIN = { 1: [1, "isoline"], 4: [2, "tri"], 7: [3, "quad"] };
 // system value names (VGPU10_SYSTEM_NAME)
 const NAME = { POSITION: 1, CLIP_DISTANCE: 2, RENDER_TARGET_ARRAY_INDEX: 4, VIEWPORT_ARRAY_INDEX: 5, VERTEX_ID: 6,
     PRIMITIVE_ID: 7, INSTANCE_ID: 8, IS_FRONT_FACE: 9, SAMPLE_INDEX: 10 };
@@ -212,6 +241,11 @@ function Translator(program, key)
     this.vs = program.processor === 0;
     this.fs = program.processor === 1;
     this.gs = program.processor === 2;
+    this.cs = program.processor === 5;
+    this.tcs = program.processor === 3;
+    this.tes = program.processor === 4;
+    /** a tessellation control shader's phase: "cp" (each output control point) or "fork" (the patch's constants) */
+    this.phase = key.hs_phase || null;
     /** @type {!Array<number>} the instructions */
     this.code = [];
     /** @type {!Array<number>} the declarations */
@@ -286,6 +320,10 @@ Translator.prototype.scan = function()
     this.sviews = new Map();    // slot -> { target, return_types }
     this.samplers = new Map();  // slot -> { shadow }
     this.indirect_imm = false;
+    /** shader storage buffers, images, shared memory */
+    this.buffers = new Set();
+    this.images = new Map();
+    this.shared = false;
     for(const d of p.decls)
     {
         switch(d.file)
@@ -302,6 +340,12 @@ Translator.prototype.scan = function()
             case "SVIEW": for(let i = d.first; i <= d.last; i++) this.sviews.set(i, { target: d.target, return_types: d.return_types }); break;
             case "SAMP": for(let i = d.first; i <= d.last; i++) this.samplers.set(i, { shadow: false, used: false }); break;
             case "IMM": break;
+            case "BUFFER": for(let i = d.first; i <= d.last; i++) this.buffers.add(i); break;
+            case "IMAGE": for(let i = d.first; i <= d.last; i++) this.images.set(i, { target: d.target, format: d.format }); break;
+            case "MEMORY":
+                if(d.memory === "SHARED") this.shared = true;
+                else this.problem("memory of type " + d.memory);
+                break;
             default: this.problem("declarations of " + d.file);
         }
     }
@@ -390,6 +434,51 @@ Translator.prototype.declare = function()
             this.fs_input(d, i, i);
         });
     }
+    else if(this.tcs || this.tes)
+    {
+        // control points (vicp, a domain shader's vcp) and a domain shader's
+        // patch constants from the fixed layout (vpc)
+        const cps = this.tcs ? key.in_cps || 1 : key.cps || 1;
+        const domain = this.tes ? (TESS_DOMAIN[+(this.p.properties.TES_PRIM_MODE || [7])[0]] || TESS_DOMAIN[7]) : null;
+        if(this.tes)
+        {
+            this.decl(OP.DCL_TESS_DOMAIN, [], domain[0]);
+            this.decl(OP.DCL_INPUT_CONTROL_POINT_COUNT, [], cps);
+        }
+        this.inputs.forEach((d, i) => {
+            if(!d) return;
+            const name = d.semantic;
+            if(this.tes && (name === "TESSOUTER" || name === "TESSINNER"))
+            {
+                // the levels from the factors' constants
+                const regs = TESS_FACTORS[domain[1]][name === "TESSOUTER" ? "outer" : "inner"].map((_, k) =>
+                    (name === "TESSOUTER" ? 0 : TESS_FACTORS[domain[1]].outer.length) + k);
+                const temp = this.reserve();
+                this.prologue_ops.push(() => {
+                    this.emit(OP.MOV, [as_dst(temp), immf(0)]);
+                    regs.forEach((reg, k) => {
+                        const v = operand(T.INPUT_PATCH_CONSTANT, [reg]);
+                        this.emit(OP.MOV, [as_dst(temp, 1 << k), scalar(v, 0)]);
+                    });
+                });
+                regs.forEach(reg => this.decl(OP.DCL_INPUT, [as_dst(operand(T.INPUT_PATCH_CONSTANT, [reg]), 1)]));
+                this.in_map[i] = temp;
+                return;
+            }
+            if(this.tes && name === "PATCH")
+            {
+                const v = operand(T.INPUT_PATCH_CONSTANT, [PATCH_VARYINGS + d.semantic_index]);
+                this.decl(OP.DCL_INPUT, [as_dst(v)]);
+                this.in_map[i] = v;
+                return;
+            }
+            if(name === "PRIMID") { this.in_map[i] = operand(T.INPUT_PRIMITIVEID, [], 1); return; }
+            // (vicp in each phase, as D3D11 writes them)
+            this.decl(OP.DCL_INPUT, [as_dst(operand(T.INPUT_CONTROL_POINT, [cps, i]))]);
+            this.in_map[i] = "cp";
+            this.link_inputs[semantic_key(name, d.semantic_index)] = i;
+        });
+    }
     else if(this.gs)
     {
         const prim = (this.p.properties.GS_INPUT_PRIMITIVE || ["TRIANGLES"])[0];
@@ -408,11 +497,65 @@ Translator.prototype.declare = function()
             this.link_inputs[semantic_key(d.semantic, d.semantic_index)] = i;
         });
     }
+    if(this.cs)
+    {
+        const size = n => +((this.p.properties["CS_FIXED_BLOCK_" + n] || [1])[0]) || 1;
+        this.block = [size("WIDTH"), size("HEIGHT"), size("DEPTH")];
+        this.decl(OP.DCL_THREAD_GROUP, [], 0, this.block);
+    }
     // system values: after the inputs
     this.svs.forEach((d, i) => {
         if(!d) return;
         const reg = input_count + i;
         const name = d.semantic;
+        if(this.tcs || this.tes)
+        {
+            if(name === "INVOCATIONID" && this.phase === "cp")
+            {
+                this.decl(OP.DCL_INPUT, [operand(T.OUTPUT_CONTROL_POINT_ID, [], 0)]);
+                this.sv_map[i] = operand(T.OUTPUT_CONTROL_POINT_ID, [], 1);
+            }
+            // (the patch's constants: computed once, as by invocation 0)
+            else if(name === "INVOCATIONID") this.sv_map[i] = immu(0);
+            else if(name === "VERTICESIN") this.sv_map[i] = immu(this.tcs ? key.in_cps || 1 : key.cps || 1);
+            else if(name === "TESSCOORD")
+            {
+                this.decl(OP.DCL_INPUT, [as_dst(operand(T.INPUT_DOMAIN_POINT, [], 4), 0b0111)]);
+                this.sv_map[i] = operand(T.INPUT_DOMAIN_POINT, [], 4);
+            }
+            else if(name === "PRIMID")
+            {
+                this.decl(OP.DCL_INPUT, [operand(T.INPUT_PRIMITIVEID, [], 0)]);
+                this.sv_map[i] = operand(T.INPUT_PRIMITIVEID, [], 1);
+            }
+            else
+            {
+                this.problem("system value " + name);
+                this.sv_map[i] = immu(0);
+            }
+            return;
+        }
+        if(this.cs)
+        {
+            const kinds = { BLOCK_ID: T.INPUT_THREAD_GROUP_ID, THREAD_ID: T.INPUT_THREAD_ID_IN_GROUP };
+            if(name in kinds)
+            {
+                this.decl(OP.DCL_INPUT, [as_dst(operand(kinds[name], [], 4), 0b0111)]);
+                this.sv_map[i] = operand(kinds[name], [], 4);
+            }
+            else if(name === "BLOCK_SIZE") this.sv_map[i] = immu(this.block[0], this.block[1], this.block[2], 0);
+            else if(name === "GRID_SIZE")
+            {
+                this.cbuffers.set(GRID_CONSTANT_BUFFER, 1);
+                this.sv_map[i] = operand(T.CONSTANT_BUFFER, [GRID_CONSTANT_BUFFER, 0]);
+            }
+            else
+            {
+                this.problem("system value " + name);
+                this.sv_map[i] = immu(0);
+            }
+            return;
+        }
         if(this.vs && (name === "VERTEXID" || name === "INSTANCEID"))
         {
             this.decl(OP.DCL_INPUT_SGV, [as_dst(reg_in(reg), 1)], 0, [name === "VERTEXID" ? NAME.VERTEX_ID : NAME.INSTANCE_ID]);
@@ -522,7 +665,48 @@ Translator.prototype.declare = function()
             this.epilogue.unshift(() => this.alpha_test(color0));
         }
     }
-    else if(this.vs || this.gs)
+    else if(this.tcs)
+    {
+        const outputs = key.outputs || {};
+        const used = new Set(Object.values(outputs));
+        let next = 0;
+        const free = () => { while(used.has(next)) next++; used.add(next); return next; };
+        const factors = TESS_FACTORS[key.domain || "quad"];
+        this.outputs.forEach((d, i) => {
+            if(!d) return;
+            const name = d.semantic;
+            if(name === "TESSOUTER" || name === "TESSINNER" || name === "PATCH")
+            {
+                // the patch's constants: in temps, into their registers at the end of the fork phase
+                if(this.phase !== "fork") { this.out_map[i] = this.junk(); return; }
+                const temp = this.reserve();
+                this.out_map[i] = temp;
+                if(name === "PATCH")
+                {
+                    const o = operand(T.OUTPUT, [PATCH_VARYINGS + d.semantic_index]);
+                    this.decl(OP.DCL_OUTPUT, [as_dst(o)]);
+                    this.epilogue.push(() => this.emit(OP.MOV, [as_dst(o), as_src(temp)]));
+                    return;
+                }
+                const names = factors[name === "TESSOUTER" ? "outer" : "inner"];
+                const base = name === "TESSOUTER" ? 0 : factors.outer.length;
+                names.forEach((siv, k) => {
+                    const o = operand(T.OUTPUT, [base + k]);
+                    this.decl(OP.DCL_OUTPUT_SIV, [as_dst(o, 1)], 0, [siv]);
+                    this.epilogue.push(() => this.emit(OP.MOV, [as_dst(o, 1), scalar(temp, k)]));
+                });
+                return;
+            }
+            // a control point's outputs: the control point phase's
+            if(this.phase !== "cp") { this.out_map[i] = this.junk(); return; }
+            const k = semantic_key(name, d.semantic_index);
+            const reg = k in outputs ? outputs[k] : free();
+            const o = operand(T.OUTPUT, [reg]);
+            this.decl(OP.DCL_OUTPUT, [as_dst(o)]);
+            this.out_map[i] = o;
+        });
+    }
+    else if(this.vs || this.gs || this.tes)
     {
         const outputs = key.outputs || {};
         const used = new Set(Object.values(outputs));
@@ -583,6 +767,18 @@ Translator.prototype.declare = function()
         const types = (v.return_types || ["FLOAT", "FLOAT", "FLOAT", "FLOAT"]).map(t => RETURN[t] || RETURN.FLOAT);
         this.decl(OP.DCL_RESOURCE, [operand(T.RESOURCE, [slot], 0)], dimension, [types[0] | types[1] << 4 | types[2] << 8 | types[3] << 12]);
         v.integer = types[0] === RETURN.SINT || types[0] === RETURN.UINT;
+    }
+    // GL's shader storage buffers (raw UAVs), images (typed UAVs), shared memory
+    for(const n of this.buffers) this.decl(OP.DCL_UAV_RAW, [operand(T.UAV, [n], 0)]);
+    for(const [n, image] of this.images)
+    {
+        const dimension = (TARGETS[image.target] || TARGETS["2D"])[0];
+        const type = image_return_type(image.format);
+        this.decl(OP.DCL_UAV_TYPED, [operand(T.UAV, [IMAGE_UAV + n], 0)], dimension, [type | type << 4 | type << 8 | type << 12]);
+    }
+    if(this.shared)
+    {
+        this.decl(OP.DCL_TGSM_RAW, [operand(T.THREAD_GROUP_SHARED_MEMORY, [0], 0)], 0, [Math.max(4, (this.p.shared || 4) + 3 & ~3)]);
     }
     // indexable temps
     for(const [id, a] of this.arrays)
@@ -703,6 +899,13 @@ Translator.prototype.register = function(r, write)
             return operand(T.TEMP, [this.addr_base + r.index]);
         case "IN":
         {
+            if((this.tcs || this.tes) && r.has_dim)
+            {
+                const m = this.in_map[r.index];
+                if(m && m !== "cp") return m;
+                const vertex = r.dim_rel ? { imm: r.dim, rel: this.addr(r.dim_rel) } : r.dim;
+                return operand(T.INPUT_CONTROL_POINT, [vertex, rel ? { imm: r.index, rel } : r.index]);
+            }
             if(this.gs)
             {
                 const vertex = r.dim_rel ? { imm: r.dim, rel: this.addr(r.dim_rel) } : r.dim;
@@ -722,6 +925,12 @@ Translator.prototype.register = function(r, write)
         case "OUT":
         {
             const m = this.out_map[r.index];
+            // a control point's own outputs (GLSL writes only gl_InvocationID's)
+            if(this.tcs && r.has_dim)
+            {
+                if(!write && m && m.type === T.OUTPUT) this.problem("reading a control point's outputs");
+                return m || this.junk();
+            }
             if(rel)
             {
                 // an output array: the registers after the first's
@@ -804,6 +1013,10 @@ const SIMPLE = {
     USHR: OP.USHR, IMAX: OP.IMAX, IMIN: OP.IMIN, UMAX: OP.UMAX, UMIN: OP.UMIN, USEQ: OP.IEQ, USNE: OP.INE,
     ISLT: OP.ILT, ISGE: OP.IGE, USLT: OP.ULT, USGE: OP.UGE, UCMP: OP.MOVC, BREV: OP.BFREV,
     POPC: OP.COUNTBITS, LSB: OP.FIRSTBIT_LO,
+    // doubles (a register holds two, .xy and .zw: GX computes them as floats)
+    DADD: OP.DADD, DMUL: OP.DMUL, DMAX: OP.DMAX, DMIN: OP.DMIN, DFMA: OP.DFMA, DMAD: OP.DFMA, DDIV: OP.DDIV,
+    DRCP: OP.DRCP, DSLT: OP.DLT, DSGE: OP.DGE, DSEQ: OP.DEQ, DSNE: OP.DNE, F2D: OP.FTOD, D2F: OP.DTOF,
+    D2I: OP.DTOI, D2U: OP.DTOU, I2D: OP.ITOD, U2D: OP.UTOD,
 };
 /** Those of one source whose result is that of the source's first component, replicated */
 const SCALAR = { RCP: OP.RCP, RSQ: OP.RSQ, SQRT: OP.SQRT, EX2: OP.EXP, LG2: OP.LOG };
@@ -1016,12 +1229,141 @@ Translator.prototype.instruction = function(ins)
             this.emit(OP.F16TOF32, [d(), as_src(t, [0, 1, 0, 1])]);
             return;
         }
+
+        case "DABS":
+        case "DNEG":
+        {
+            const x = s(0);
+            this.emit(OP.DMOV, [d(), Object.assign({}, x, { mod: op === "DABS" ? 2 : x.mod ^ 1 })]);
+            return;
+        }
+        case "DTRUNC": case "DCEIL": case "DFLR": case "DROUND": case "DFRAC": case "DRSQ": case "DSQRT":
+        {
+            // (through a float: GX's doubles are floats anyway)
+            const t = this.scratch();
+            const out = d();
+            this.emit(OP.DTOF, [as_dst(t, 0b0011), s(0)]);
+            this.emit({ DTRUNC: OP.ROUND_Z, DCEIL: OP.ROUND_PI, DFLR: OP.ROUND_NI, DROUND: OP.ROUND_NE, DFRAC: OP.FRC,
+                DRSQ: OP.RSQ, DSQRT: OP.SQRT }[op], [as_dst(t, 0b0011), as_src(t)]);
+            this.emit(OP.FTOD, [out, as_src(t, [0, 1, 0, 1])]);
+            return;
+        }
+        case "DSSG":
+        {
+            // (x > 0) - (x < 0), as a double
+            const a = this.scratch(), b = this.scratch(), zero = immu(0, 0, 0, 0);
+            const out = d();
+            this.emit(OP.DLT, [as_dst(a, 0b0011), zero, s(0)]);
+            this.emit(OP.DLT, [as_dst(b, 0b0011), s(0), zero]);
+            this.emit(OP.IADD, [as_dst(a, 0b0011), as_src(b), as_src(a, null, 1)]);
+            this.emit(OP.ITOF, [as_dst(a, 0b0011), as_src(a)]);
+            this.emit(OP.FTOD, [out, as_src(a, [0, 1, 0, 1])]);
+            return;
+        }
+        case "LOAD":
+        case "STORE":
+        case "RESQ":
+            this.memory(ins);
+            return;
+        case "MEMBAR":
+            // (shared memory and UAVs)
+            this.emit(OP.SYNC, [], 2 | 8);
+            return;
+        case "BARRIER":
+            this.emit(OP.SYNC, [], 1 | 2);
+            return;
         case "TEX": case "TXP": case "TXB": case "TXL": case "TXD": case "TXF": case "TXQ": case "TG4":
         case "LODQ": case "TEX2": case "TXB2": case "TXL2": case "TEX_LZ": case "TXF_LZ": case "TXQS":
             this.texture(ins);
             return;
     }
+    if(op in ATOMICS)
+    {
+        this.atomic(ins);
+        return;
+    }
     this.problem("TGSI " + op);
+};
+
+/** The UAV or shared memory of a TGSI BUFFER, IMAGE or MEMORY register */
+Translator.prototype.memory_operand = function(r)
+{
+    if(r.file === "BUFFER") return operand(T.UAV, [r.index]);
+    if(r.file === "IMAGE") return operand(T.UAV, [IMAGE_UAV + r.index]);
+    if(r.file === "MEMORY") return operand(T.THREAD_GROUP_SHARED_MEMORY, [0]);
+    this.problem("memory of " + r.file);
+    return null;
+};
+
+/**
+ * LOAD, STORE (buffers and shared memory by byte offsets, a component each
+ * 4 bytes on; images by coordinates), RESQ (a buffer's size)
+ */
+Translator.prototype.memory = function(ins)
+{
+    const op = ins.op;
+    if(op === "RESQ")
+    {
+        const r = ins.src[0];
+        const m = this.memory_operand(r);
+        if(!m) return;
+        if(r.file === "BUFFER") this.emit(OP.BUFINFO, [this.dst(ins.dst[0]), as_src(m)]);
+        else
+        {
+            this.problem("sizes of images");
+            this.emit(OP.MOV, [this.dst(ins.dst[0]), immu(0)]);
+        }
+        return;
+    }
+    if(op === "LOAD")
+    {
+        const r = ins.src[0];
+        const m = this.memory_operand(r);
+        if(!m) return;
+        const out = this.dst(ins.dst[0]);
+        if(r.file === "IMAGE") this.emit(OP.LD_UAV_TYPED, [out, this.src(ins.src[1]), as_src(m)]);
+        else this.emit(OP.LD_RAW, [out, first_of(this.src(ins.src[1])), as_src(m)]);
+        return;
+    }
+    // STORE: the first register is where
+    const r = ins.dst[0];
+    const m = this.memory_operand(r);
+    if(!m) return;
+    const address = this.src(ins.src[0]), value = this.src(ins.src[1]);
+    if(r.file === "IMAGE")
+    {
+        this.emit(OP.STORE_UAV_TYPED, [as_dst(m, 0xF), address, value]);
+        return;
+    }
+    // raw stores write their components one after another: a run of the
+    // mask at a time, from its first component's place
+    const mask = r.mask;
+    for(let c = 0; c < 4; c++)
+    {
+        if(!(mask >> c & 1)) continue;
+        let end = c;
+        while(end + 1 < 4 && mask >> end + 1 & 1) end++;
+        let where = first_of(address);
+        if(c)
+        {
+            const t = this.scratch();
+            this.emit(OP.IADD, [as_dst(t, 1), where, immu(4 * c)]);
+            where = scalar(t, 0);
+        }
+        this.emit(OP.STORE_RAW, [as_dst(m, (1 << end + 1) - (1 << c)), where, value]);
+        c = end;
+    }
+};
+
+/** ATOM*: the old value into the destination */
+Translator.prototype.atomic = function(ins)
+{
+    const r = ins.src[0];
+    const m = this.memory_operand(r);
+    if(!m) return;
+    const address = r.file === "IMAGE" ? this.src(ins.src[1]) : first_of(this.src(ins.src[1]));
+    const values = ins.src.slice(2).map(s => first_of(this.src(s)));
+    this.emit(ATOMICS[ins.op], [this.dst(ins.dst[0]), as_src(m), address, ...values]);
 };
 
 /** Before a return: what the outputs need (the epilogue), then RET */
@@ -1073,17 +1415,19 @@ Translator.prototype.texture = function(ins)
     }
 
     let coord = this.src(ins.src[0]);
-    // offsets (immediates only: VGPU10 takes them as such)
-    let extended = null;
+    // offsets: immediates (VGPU10 takes those in the instruction), or for
+    // gathers any (gather4_po)
+    let extended = null, offset = null;
     if(ins.offsets.length)
     {
         const o = ins.offsets[0];
         const imm = o.file === "IMM" ? this.p.imms[o.index] : null;
-        if(imm)
+        if(imm && o.swizzle.slice(0, 3).every(c => (imm.values[c] | 0) >= -8 && (imm.values[c] | 0) <= 7))
         {
             const v = o.swizzle.slice(0, 3).map(c => imm.values[c] & 0xF);
             extended = [(1 | v[0] << 9 | v[1] << 13 | v[2] << 17) >>> 0];
         }
+        else if(op === "TG4") offset = this.src(o);
         else this.problem("texture offsets that are not immediates");
     }
 
@@ -1195,7 +1539,12 @@ Translator.prototype.texture = function(ins)
             // the component: the second source's x (an immediate)
             const c = ins.src[1] && ins.src[1].file === "IMM" ? this.p.imms[ins.src[1].index].values[ins.src[1].swizzle[0]] & 3 : 0;
             const s = Object.assign({}, sampler, { ncomp: 4, mode: "select", swz: [c, c, c, c] });
-            if(ref) this.emit(OP.GATHER4_C, [into, coord, as_src(resource), s, ref], controls, extended);
+            if(offset)
+            {
+                if(ref) this.emit(OP.GATHER4_PO_C, [into, coord, offset, as_src(resource), s, ref], controls);
+                else this.emit(OP.GATHER4_PO, [into, coord, offset, as_src(resource), s], controls);
+            }
+            else if(ref) this.emit(OP.GATHER4_C, [into, coord, as_src(resource), s, ref], controls, extended);
             else this.emit(OP.GATHER4, [into, coord, as_src(resource), s], controls, extended);
             break;
         }
@@ -1205,6 +1554,17 @@ Translator.prototype.texture = function(ins)
     }
     if(result) this.view_swizzle(result, out, swizzle, view.integer, sat);
 };
+
+/** The VGPU10 return type of an image's format (PIPE_FORMAT_*) */
+function image_return_type(format)
+{
+    if(!format) return RETURN.FLOAT;
+    if(/_UINT$/.test(format)) return RETURN.UINT;
+    if(/_SINT$/.test(format)) return RETURN.SINT;
+    if(/_UNORM$/.test(format)) return RETURN.UNORM;
+    if(/_SNORM$/.test(format)) return RETURN.SNORM;
+    return RETURN.FLOAT;
+}
 
 function first_of(o)
 {
@@ -1251,6 +1611,44 @@ Translator.prototype.view_swizzle = function(result, out, swizzle, integer, sat)
  */
 export function tgsi_to_vgpu10(program, key)
 {
+    if(program.processor === 3) return tcs_to_hull(program, key);
+    return translate(program, key);
+}
+
+/**
+ * A tessellation control shader as a hull shader: its declarations (the
+ * tessellator's, from key: domain, partitioning, output primitive, input
+ * and output control points), then the shader twice, as the control point
+ * phase and as the fork phase (the patch constants)
+ */
+function tcs_to_hull(program, key)
+{
+    const cp = translate(program, Object.assign({}, key, { hs_phase: "cp" }), true);
+    const fork = translate(program, Object.assign({}, key, { hs_phase: "fork" }), true);
+    const out_cps = +((program.properties.TCS_VERTICES_OUT || [1])[0]) || 1;
+    const head = [
+        (OP.HS_DECLS | 1 << 24) >>> 0,
+        (OP.DCL_INPUT_CONTROL_POINT_COUNT | (key.in_cps || 1) << 11 | 1 << 24) >>> 0,
+        (OP.DCL_OUTPUT_CONTROL_POINT_COUNT | out_cps << 11 | 1 << 24) >>> 0,
+        (OP.DCL_TESS_DOMAIN | { isoline: 1, tri: 2, quad: 3 }[key.domain || "quad"] << 11 | 1 << 24) >>> 0,
+        (OP.DCL_TESS_PARTITIONING | (key.partitioning || 1) << 11 | 1 << 24) >>> 0,
+        (OP.DCL_TESS_OUTPUT_PRIMITIVE | (key.output_primitive || 3) << 11 | 1 << 24) >>> 0,
+        (OP.DCL_HS_MAX_TESSFACTOR | 2 << 24) >>> 0, f32_bits(64),
+    ];
+    const phase = (marker, part) => [(marker | 1 << 24) >>> 0, (OP.DCL_TEMPS | 2 << 24) >>> 0, part.temps, ...part.decls, ...part.code];
+    const body = [...head, ...phase(OP.HS_CONTROL_POINT_PHASE, cp), ...phase(OP.HS_FORK_PHASE, fork)];
+    const tokens = new Uint32Array(2 + body.length);
+    tokens[0] = (3 << 16 | 5 << 4 | 0) >>> 0;
+    tokens[1] = tokens.length;
+    tokens.set(body, 2);
+    return { tokens, inputs: cp.inputs, outputs: cp.outputs, problems: [...new Set([...cp.problems, ...fork.problems])], type: 3 };
+}
+
+/**
+ * @param {boolean=} parts the declarations and code apart (a hull shader's phase)
+ */
+function translate(program, key, parts)
+{
     const t = new Translator(program, key);
     t.prologue_ops = [];
     t.scan();
@@ -1270,6 +1668,7 @@ export function tgsi_to_vgpu10(program, key)
         for(const imm of program.imms) data.push(...(imm ? imm.values : [0, 0, 0, 0]));
         t.decls.unshift((OP.CUSTOMDATA | 3 << 11) >>> 0, 2 + data.length, ...data);
     }
+    if(parts) return { decls: t.decls, code: t.code, temps: t.temps, inputs: t.link_inputs, outputs: t.output_regs, problems: t.problems };
     const decls = [(OP.DCL_TEMPS | 2 << 24) >>> 0, t.temps, ...t.decls];
     const type = PROGRAM[program.processor];
     const length = 2 + decls.length + t.code.length;

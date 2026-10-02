@@ -17,6 +17,10 @@ import { virgl_format, TARGET } from "./virgl_caps.js";
 import { VirglContext } from "./virgl_context.js";
 import * as C from "../vmware_svga/svga_constants.js";
 
+const VIRGL_BIND_SHADER_BUFFER = 1 << 14;
+/** SVGA3D_SURFACE_BIND_UAVIEW, in a surface's high flags */
+const SURFACE2_BIND_UAVIEW = 2;
+
 /** A batch is sent at the latest when it is this big */
 const BATCH_FLUSH_BYTES = 8 << 20;
 
@@ -86,11 +90,13 @@ function bytes_per_pixel(name)
  * @constructor
  * @param {!Object} gpu the VirtioGPU
  * @param {!Object} renderer the channel: post(message, transfer), listen(handler)
+ * @param {boolean=} images shader images exist (GL 4.3): any texture may be one
  */
-export function Virgl(gpu, renderer)
+export function Virgl(gpu, renderer, images)
 {
     this.gpu = gpu;
     this.renderer = renderer;
+    this.images = !!images;
     this.gxw = new GXWriter();
     /** @type {!Map<number, !VirglContext>} */
     this.contexts = new Map();
@@ -113,6 +119,8 @@ export function Virgl(gpu, renderer)
     this.next_private_sid = 0xF0000000;
     /** @type {?function(number, string)} a test's hook: each shader's TGSI (type, text) */
     this.shader_log = null;
+    /** @type {?function(string)} a test's hook: what draws do */
+    this.debug_log = null;
     renderer.listen(message => this.receive(message));
 }
 
@@ -246,10 +254,14 @@ Virgl.prototype.create_resource = function(r)
         return false;
     }
     const cube = r.target === TARGET.TEXTURE_CUBE || r.target === TARGET.TEXTURE_CUBE_ARRAY;
+    // shader images: GX makes them storage textures (SVGA3D_SURFACE_BIND_UAVIEW,
+    // where WebGPU lets the format be one); Mesa's virgl does not say which
+    // textures will be bound as images, so with images any may be
+    const flags2 = this.images || r.bind & VIRGL_BIND_SHADER_BUFFER ? SURFACE2_BIND_UAVIEW : 0;
     // (a cube's array size is 6 already, a cube array's 6 per cube)
     const layers = r.target === TARGET.TEXTURE_3D ? 1 : r.array_size;
     const flags = r.target === TARGET.TEXTURE_3D ? C.SVGA3D_SURFACE_VOLUME : 0;
-    this.gxw.command(GX.SURFACE_DEFINE, [r.id, r.info.svga, flags, 0, r.width, r.height,
+    this.gxw.command(GX.SURFACE_DEFINE, [r.id, r.info.svga, flags, flags2, r.width, r.height,
         r.target === TARGET.TEXTURE_3D ? r.depth : 1, r.last_level + 1, layers, r.nr_samples > 1 ? r.nr_samples : 0, cube ? 1 : 0]);
     return true;
 };

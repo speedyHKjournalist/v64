@@ -41,7 +41,7 @@ assert.ok(fs.existsSync(repo), repo + " is missing: run tools/alpine_gpu_repo.mj
 
 const DRIVER = { bochs_vga: "bochs", vmware_svga: "vmwgfx", virtio_gpu: "virtio_gpu" }[adapter];
 // the levels with 3D (vmware_svga's vgpu9 and up)
-const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "virgl"].includes(process.env.GPU_LEVEL);
+const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "virgl", "virgl43"].includes(process.env.GPU_LEVEL);
 assert.ok(DRIVER, "GPU_ADAPTER is bochs_vga, vmware_svga or virtio_gpu");
 
 const APK = "apk add --no-network --repository /mnt/repo/main --repository /mnt/repo/community";
@@ -131,8 +131,8 @@ const SCENARIOS = {
         [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
         ["tar -xf /dev/sdb -C /tmp && LIBGL_ALWAYS_SOFTWARE=1 /tmp/gltest ref 2>&1 | grep -E '^GLTEST (renderer|done|egl)|GL error|^shader|^link'; echo STEP_REF_DONE",
             /llvmpipe[\s\S]*STEP_REF_DONE/],
-        ["/tmp/gltest cmp >/tmp/gltest.log 2>&1; grep -v '^GLIMG' /tmp/gltest.log; grep -q FAIL /tmp/gltest.log && grep '^GLIMG' /tmp/gltest.log; echo STEP_GLTEST_DONE",
-            /GLTEST done 0 failures[\s\S]*STEP_GLTEST_DONE/],
+        ["/tmp/gltest cmp >/tmp/gltest.log 2>&1; grep -v '^GLIMG' /tmp/gltest.log; grep -q FAIL /tmp/gltest.log && grep '^GLIMG' /tmp/gltest.log; " +
+            "dmesg | grep -i -A2 segfault | tail -4; echo STEP_GLTEST_DONE", /GLTEST done 0 failures[\s\S]*STEP_GLTEST_DONE/],
     ],
     // virtio_gpu's 3D (GPU_LEVEL=virgl): Mesa's virgl driver on the capsets,
     // what it reports, and kmscube
@@ -385,6 +385,7 @@ try
     {
         const dir = path.join(out, "tgsi");
         fs.mkdirSync(dir, { recursive: true });
+        if(+process.env.GPU_DEBUG_VIRGL) virgl.debug_log = text => console.log("virgl-debug " + text);
         const seen = new Set();
         virgl.shader_log = (type, text) => {
             if(seen.has(text)) return;
