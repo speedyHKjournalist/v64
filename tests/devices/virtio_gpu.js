@@ -28,7 +28,7 @@ const VRAM = 16 << 20;
 const MEMORY = 64 << 20;
 const emulator = new V86({
     graphics_adapter: "virtio_gpu",
-    graphics_adapter_test: { scanouts: 2 },
+    graphics_adapter_test: { scanouts: 2, level: "2d-blob" },
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     fda: { buffer: floppy.buffer },
@@ -370,6 +370,51 @@ command(0x0105, 0, 0, 1, 1, 0, 0, 1, 0);
 command(0x0104, 0, 0, 1, 1, 1, 0);
 assert.deepEqual([...gpu.scanouts[0].rgba.subarray(0, 4)], [0x12, 0x34, 0x56, 255], "and the restored queues and backing work");
 console.log("PASS: snapshots");
+
+// Blobs in guest memory (level 2d-blob): a scanout shows one straight from
+// there, as SET_SCANOUT_BLOB describes it; a flush is enough
+{
+    const BW = 32, BH = 20, BSTRIDE = 160, BOFFSET = 64;
+    const blob = [[0x380000, 2048], [0x390000, BOFFSET + BSTRIDE * BH - 2048]];
+    const blob_address = offset => {
+        for(const [address, length] of blob)
+        {
+            if(offset < length) return address + offset;
+            offset -= length;
+        }
+        throw new Error("outside the blob");
+    };
+    const bput = (x, y, bgrx) => write32(blob_address(BOFFSET + y * BSTRIDE + x * 4), bgrx);
+    for(let y = 0; y < BH; y++) for(let x = 0; x < BW; x++) bput(x, y, x | y << 8 | 0x22 << 16);
+    const size = BOFFSET + BSTRIDE * BH;
+    const blob_entries = concat(...blob.map(([address, length]) => words(address, 0, length, 0)));
+    // resource 9, BLOB_MEM_GUEST, shareable, 2 entries, blob id 0, size
+    submit(0, [concat(header(0x010C), words(9, 1, 2, blob.length, 0, 0, size, 0)), blob_entries]);
+    assert.equal(reply_type(), OK, "RESOURCE_CREATE_BLOB");
+    // rectangle (2, 3, 24 x 16), scanout 1, resource 9, 32 x 20, B8G8R8X8, padding, strides, offsets
+    command(0x010D, 2, 3, 24, 16, 1, 9, BW, BH, 2, 0, BSTRIDE, 0, 0, 0, BOFFSET, 0, 0, 0);
+    assert.equal(reply_type(), OK, "SET_SCANOUT_BLOB");
+    const second = gpu.scanouts[1];
+    const bshown = (x, y) => [...second.rgba.subarray((y * 24 + x) * 4, (y * 24 + x) * 4 + 4)];
+    assert.deepEqual(bshown(0, 0), [0x22, 3, 2, 255], "the rectangle's first pixel, from guest memory");
+    assert.deepEqual(bshown(23, 15), [0x22, 18, 25, 255], "its last (across the blob's two pieces)");
+    bput(10, 10, 0x00ABCDEF);
+    command(0x0104, 0, 0, BW, BH, 9, 0);
+    assert.deepEqual(bshown(8, 7), [0xAB, 0xCD, 0xEF, 255], "RESOURCE_FLUSH reads it again");
+    command(0x0105, 0, 0, 1, 1, 0, 0, 9, 0);
+    assert.equal(reply_type(), OK, "a transfer to a blob has nothing to do");
+    command(0x010D, 0, 0, 64, 64, 1, 9, BW, BH, 2, 0, BSTRIDE, 0, 0, 0, BOFFSET, 0, 0, 0);
+    assert.notEqual(reply_type(), OK, "a rectangle outside the blob's picture");
+    const blob_state = await emulator.save_state();
+    await emulator.restore_state(blob_state);
+    for(const q of QUEUES) q.avail_idx = read32(q.avail) >>> 16;
+    bput(11, 10, 0x00102030);
+    command(0x0104, 0, 0, BW, BH, 9, 0);
+    assert.deepEqual(bshown(9, 7), [0x10, 0x20, 0x30, 255], "a restored blob scanout");
+    command(0x0102, 9, 0);
+    assert.equal(second.resource_id, 0);
+}
+console.log("PASS: blobs in guest memory and their scanouts");
 
 // A device reset gives the screen back to the VGA core
 w8(20, 0);

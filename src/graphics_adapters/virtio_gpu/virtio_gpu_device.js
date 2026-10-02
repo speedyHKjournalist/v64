@@ -33,6 +33,8 @@ const VGA_CLASS = 0x030000;
 const VIRTIO_GPU_F_VIRGL = 0;
 const VIRTIO_GPU_F_EDID = 1;
 const VIRTIO_GPU_F_RESOURCE_UUID = 2;
+const VIRTIO_GPU_F_RESOURCE_BLOB = 3;
+const VIRTIO_GPU_F_CONTEXT_INIT = 4;
 const VIRTIO_F_RING_INDIRECT_DESC = 28;
 
 const CONTROLQ = 0;
@@ -47,11 +49,16 @@ const LEVELS = {
     // ... and the capsets of OpenGL 4.3 / GLES 3.2 (virgl_caps.js)
     "virgl43": { features: [VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_F_RING_INDIRECT_DESC], three_d: true,
         gl43: true },
+    // blob resources in guest memory (scanouts straight from it), and
+    // contexts of a capset (CONTEXT_INIT: virgl's)
+    "2d-blob": { features: [VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_GPU_F_RESOURCE_BLOB, VIRTIO_F_RING_INDIRECT_DESC], blob: true },
+    "virgl43-blob": { features: [VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID, VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_GPU_F_RESOURCE_BLOB,
+        VIRTIO_GPU_F_CONTEXT_INIT, VIRTIO_F_RING_INDIRECT_DESC], three_d: true, gl43: true, blob: true },
 };
-const LEVEL_ORDER = ["2d", "virgl", "virgl43"];
-/** Without a pinned level: OpenGL 4.3 when there is a renderer, 2d otherwise */
-const DEFAULT_3D_LEVEL = "virgl43";
-const DEFAULT_LEVEL = "2d";
+const LEVEL_ORDER = ["2d", "2d-blob", "virgl", "virgl43", "virgl43-blob"];
+/** Without a pinned level: the highest, with a renderer or without */
+const DEFAULT_3D_LEVEL = "virgl43-blob";
+const DEFAULT_LEVEL = "2d-blob";
 
 // Commands
 const CMD_GET_DISPLAY_INFO = 0x0100;
@@ -66,6 +73,8 @@ const CMD_GET_CAPSET_INFO = 0x0108;
 const CMD_GET_CAPSET = 0x0109;
 const CMD_GET_EDID = 0x010A;
 const CMD_RESOURCE_ASSIGN_UUID = 0x010B;
+const CMD_RESOURCE_CREATE_BLOB = 0x010C;
+const CMD_SET_SCANOUT_BLOB = 0x010D;
 const CMD_CTX_CREATE = 0x0200;
 const CMD_CTX_DESTROY = 0x0201;
 const CMD_CTX_ATTACH_RESOURCE = 0x0202;
@@ -164,6 +173,27 @@ Resource.prototype.set_backing = function(entries)
     this.backing_length = length;
 };
 
+/** BLOB_MEM_GUEST: a blob's storage is guest memory */
+const BLOB_MEM_GUEST = 1;
+
+/**
+ * A blob resource in guest memory (RESOURCE_CREATE_BLOB, BLOB_MEM_GUEST):
+ * no copy of the host's; a scanout shows it as SET_SCANOUT_BLOB describes
+ * @constructor
+ */
+function BlobResource(id, flags, size)
+{
+    this.id = id;
+    this.blob = true;
+    this.flags = flags;
+    this.size = size;
+    this.backing = null;
+    this.backing_starts = null;
+    this.backing_length = 0;
+    this.uuid = null;
+}
+BlobResource.prototype.set_backing = Resource.prototype.set_backing;
+
 /**
  * A display of the guest's
  * @constructor
@@ -184,6 +214,8 @@ function Scanout(index)
     // where it is on the page's picture
     this.screen_x = 0;
     this.screen_y = 0;
+    /** SET_SCANOUT_BLOB: the blob's picture (format, width, height, stride, offset) */
+    this.blob = null;
     /** @type {Uint8ClampedArray} the flushed picture, RGBA */
     this.rgba = null;
     /** @type {Array<number>} the part of it not yet sent: x0, y0, x1, y1 */
@@ -235,7 +267,7 @@ export function VirtioGPU(machine, options)
     /** @const */
     this.vga = new VGAScreen(machine, vram_size, { pci: false, display_source: false });
 
-    /** @type {!Map<number, (!Resource|!Resource3D)>} 2D and 3D resources */
+    /** @type {!Map<number, (!Resource|!Resource3D|!BlobResource)>} 2D, 3D and blob resources */
     this.resources = new Map();
     this.host_memory = 0;
     /** @type {!Array<!Scanout>} */
@@ -500,6 +532,25 @@ VirtioGPU.prototype.control = function(bytes)
         case CMD_RESOURCE_ASSIGN_UUID:
             if(!need(8)) break;
             return this.assign_uuid(u32(0));
+        case CMD_RESOURCE_CREATE_BLOB:
+        {
+            // resource, memory, flags, entries, blob id (64), size (64), then the entries
+            if(!LEVELS[this.level].blob || !need(32)) break;
+            const count = u32(12);
+            if(count > MAX_BACKING_ENTRIES || !need(32 + count * 16)) return this.error(RESP_ERR_INVALID_PARAMETER, type);
+            const entries = new Float64Array(count * 2);
+            for(let i = 0; i < count; i++)
+            {
+                entries[i * 2] = u32(32 + i * 16) + u32(36 + i * 16) * 0x100000000;
+                entries[i * 2 + 1] = u32(40 + i * 16);
+            }
+            return this.create_blob(u32(0), u32(4), u32(8), u32(24) + u32(28) * 0x100000000, entries);
+        }
+        case CMD_SET_SCANOUT_BLOB:
+            // rectangle, scanout, resource, width, height, format, padding, strides[4], offsets[4]
+            if(!LEVELS[this.level].blob || !need(72)) break;
+            return this.set_scanout_blob(u32(16), u32(20), u32(0), u32(4), u32(8), u32(12),
+                { width: u32(24), height: u32(28), format: u32(32), stride: u32(40), offset: u32(56) });
         case CMD_GET_CAPSET_INFO:
         {
             if(!need(8)) break;
@@ -615,14 +666,57 @@ VirtioGPU.prototype.unref = function(id)
         if(scanout.resource_id === id) this.disable_scanout(scanout);
     }
     if(resource.three_d) this.virgl.destroy_resource(/** @type {!Resource3D} */ (resource));
-    else this.host_memory -= resource.data.length;
+    else if(!resource.blob) this.host_memory -= resource.data.length;
     this.resources.delete(id);
+    return this.ok();
+};
+
+/** RESOURCE_CREATE_BLOB: in guest memory (the host's kinds come with V5) */
+VirtioGPU.prototype.create_blob = function(id, mem, flags, size, entries)
+{
+    if(id === 0 || this.resources.has(id)) return this.error(RESP_ERR_INVALID_RESOURCE_ID, CMD_RESOURCE_CREATE_BLOB);
+    if(mem !== BLOB_MEM_GUEST) return this.error(RESP_ERR_INVALID_PARAMETER, CMD_RESOURCE_CREATE_BLOB);
+    const r = new BlobResource(id, flags, size);
+    r.set_backing(entries);
+    if(r.backing_length < size) return this.error(RESP_ERR_INVALID_PARAMETER, CMD_RESOURCE_CREATE_BLOB);
+    this.resources.set(id, r);
+    return this.ok();
+};
+
+/**
+ * SET_SCANOUT_BLOB: a scanout shows part of a blob, a picture of the given
+ * format, size and stride from an offset
+ */
+VirtioGPU.prototype.set_scanout_blob = function(index, id, x, y, width, height, blob)
+{
+    const scanout = this.scanouts[index];
+    if(!scanout) return this.error(RESP_ERR_INVALID_SCANOUT_ID, CMD_SET_SCANOUT_BLOB);
+    if(id === 0)
+    {
+        this.disable_scanout(scanout);
+        return this.ok();
+    }
+    const resource = this.resources.get(id);
+    if(!resource || !resource.blob) return this.error(RESP_ERR_INVALID_RESOURCE_ID, CMD_SET_SCANOUT_BLOB);
+    if(!TO_RGBA[blob.format] || width < 16 || height < 16 || x + width > blob.width || y + height > blob.height ||
+        blob.stride < blob.width * 4 || blob.offset + blob.stride * (blob.height - 1) + blob.width * 4 > resource.backing_length)
+    {
+        return this.error(RESP_ERR_INVALID_PARAMETER, CMD_SET_SCANOUT_BLOB);
+    }
+    if(scanout.width !== width || scanout.height !== height || !scanout.rgba)
+    {
+        scanout.rgba = new Uint8ClampedArray(width * height * 4);
+        this.layout_key = "";
+    }
+    Object.assign(scanout, { resource_id: id, x, y, width, height, blob });
+    this.present(scanout, resource, 0, 0, width, height);
     return this.ok();
 };
 
 VirtioGPU.prototype.disable_scanout = function(scanout)
 {
     scanout.resource_id = 0;
+    scanout.blob = null;
     scanout.width = scanout.height = 0;
     scanout.rgba = null;
     scanout.dirty = null;
@@ -649,11 +743,13 @@ VirtioGPU.prototype.set_scanout = function(index, id, x, y, width, height)
         scanout.rgba = new Uint8ClampedArray(width * height * 4);
         this.layout_key = "";
     }
+    if(resource.blob) return this.error(RESP_ERR_INVALID_RESOURCE_ID, CMD_SET_SCANOUT);
     scanout.resource_id = id;
     scanout.x = x;
     scanout.y = y;
     scanout.width = width;
     scanout.height = height;
+    scanout.blob = null;
     this.present(scanout, resource, 0, 0, width, height);
     return this.ok();
 };
@@ -679,6 +775,23 @@ VirtioGPU.prototype.flush = function(id, x, y, width, height)
  */
 VirtioGPU.prototype.present = function(scanout, resource, x, y, width, height)
 {
+    if(resource.blob)
+    {
+        // straight from guest memory, a row at a time
+        const b = scanout.blob;
+        if(!b) return;
+        const convert = TO_RGBA[b.format];
+        const row = new Uint8Array(width * 4), words = new Int32Array(row.buffer);
+        const dst = new Int32Array(scanout.rgba.buffer);
+        for(let r = y; r < y + height; r++)
+        {
+            const from = b.offset + (scanout.y + r) * b.stride + (scanout.x + x) * 4;
+            if(!this.read_backing(resource, from, row, 0, row.length)) return;
+            for(let i = 0, to = r * scanout.width + x; i < width; i++, to++) dst[to] = convert(words[i]);
+        }
+        scanout.add_dirty(x, y, x + width, y + height);
+        return;
+    }
     if(resource.three_d && !(resource.host_newer && resource.data))
     {
         // (its picture is on the GPU: read back, then converted)
@@ -713,6 +826,8 @@ VirtioGPU.prototype.transfer_to_host = function(id, x, y, width, height, offset)
 {
     const resource = this.resources.get(id);
     if(!resource) return this.error(RESP_ERR_INVALID_RESOURCE_ID, CMD_TRANSFER_TO_HOST_2D);
+    // (a blob in guest memory has no host copy to fill)
+    if(resource.blob) return this.ok();
     if(!resource.backing) return this.error(RESP_ERR_UNSPEC, CMD_TRANSFER_TO_HOST_2D);
     if(x + width > resource.width || y + height > resource.height || x + width < x || y + height < y)
     {
@@ -760,7 +875,7 @@ VirtioGPU.prototype.transfer_to_host = function(id, x, y, width, height, offset)
 
 /**
  * Bytes of a resource's backing (guest RAM, or the frame buffer in BAR0)
- * @param {(!Resource|!Resource3D)} resource
+ * @param {(!Resource|!Resource3D|!BlobResource)} resource
  * @param {number} from the offset in the backing
  * @param {Uint8Array} out
  * @param {number} at
@@ -871,8 +986,13 @@ VirtioGPU.prototype.command_3d = function(type, ctx_id, bytes, u32, need)
     switch(type)
     {
         case CMD_CTX_CREATE:
+        {
+            // name length, context_init (the capset in its low byte: virgl's or none), name
+            const capset = LEVELS[this.level].features.includes(VIRTIO_GPU_F_CONTEXT_INIT) ? u32(4) & 0xFF : 0;
+            if(capset && !CAPSETS.some(c => c[0] === capset)) return this.error(RESP_ERR_INVALID_PARAMETER, type);
             virgl.create_context(ctx_id);
             return this.ok();
+        }
         case CMD_CTX_DESTROY:
             virgl.destroy_context(ctx_id);
             return this.ok();
@@ -987,11 +1107,18 @@ VirtioGPU.prototype.cursor_command = function(bytes)
     {
         this.stats.cursor_updates++;
         const id = view.getUint32(HEADER_SIZE + 16, true);
-        const resource = this.resources.get(id);
+        let resource = this.resources.get(id);
         if(!resource)
         {
             this.cursor.move(x, y, false);
             return;
+        }
+        if(resource.blob)
+        {
+            // a cursor in guest memory: 64 x 64, ARGB (DRM's cursor planes)
+            const data = new Uint8Array(64 * 64 * 4);
+            if(!this.read_backing(resource, 0, data, 0, data.length)) return;
+            resource = { format: 1, width: 64, height: 64, data, three_d: false };
         }
         const convert = TO_RGBA[resource.format], shift = ALPHA_SHIFT[resource.format];
         if(!convert) return;
@@ -1153,7 +1280,7 @@ const STATE_VERSION = 2;
 
 VirtioGPU.prototype.get_state = function()
 {
-    const resources = [], resources_3d = [];
+    const resources = [], resources_3d = [], blobs = [];
     for(const found of this.resources.values())
     {
         if(found.three_d)
@@ -1161,6 +1288,11 @@ VirtioGPU.prototype.get_state = function()
             const r = /** @type {!Resource3D} */ (found);
             resources_3d.push([r.id, r.target, r.format, r.bind, r.width, r.height, r.depth, r.array_size, r.last_level,
                 r.nr_samples, r.flags, r.backing, r.uuid, r.saved || [], r.data, r.host_newer]);
+            continue;
+        }
+        if(found.blob)
+        {
+            blobs.push([found.id, found.flags, found.size, found.backing, found.uuid]);
             continue;
         }
         const r = /** @type {!Resource} */ (found);
@@ -1180,6 +1312,8 @@ VirtioGPU.prototype.get_state = function()
         this.active,
         resources_3d,
         this.virgl ? this.virgl.get_state() : null,
+        blobs,
+        this.scanouts.map(s => s.blob ? [s.blob.width, s.blob.height, s.blob.format, s.blob.stride, s.blob.offset] : null),
     ];
 };
 
@@ -1207,6 +1341,16 @@ VirtioGPU.prototype.set_state = function(state)
         this.resources.set(id, r);
         this.host_memory += r.data.length;
     }
+    for(const [id, flags, size, backing, uuid] of state[12] || [])
+    {
+        const r = new BlobResource(id, flags, size);
+        if(backing) r.set_backing(Float64Array.from(backing));
+        r.uuid = uuid ? Uint8Array.from(uuid) : null;
+        this.resources.set(id, r);
+    }
+    (state[13] || []).forEach((b, i) => {
+        if(b && this.scanouts[i]) this.scanouts[i].pending_blob = { width: b[0], height: b[1], format: b[2], stride: b[3], offset: b[4] };
+    });
     // 3D: GX starts again from the resources and contexts saved
     if(this.virgl)
     {
@@ -1229,7 +1373,9 @@ VirtioGPU.prototype.set_state = function(state)
     }
     state[6].forEach(([enabled, host_width, host_height, resource_id, x, y, width, height], i) => {
         const s = this.scanouts[i];
-        Object.assign(s, { enabled, host_width, host_height, resource_id: 0, x, y, width: 0, height: 0, rgba: null, dirty: null });
+        Object.assign(s, { enabled, host_width, host_height, resource_id: 0, x, y, width: 0, height: 0, rgba: null, dirty: null,
+            blob: s.pending_blob || null });
+        s.pending_blob = null;
         const resource = resource_id && this.resources.get(resource_id);
         if(resource)
         {

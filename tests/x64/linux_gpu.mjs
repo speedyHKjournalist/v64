@@ -41,7 +41,7 @@ assert.ok(fs.existsSync(repo), repo + " is missing: run tools/alpine_gpu_repo.mj
 
 const DRIVER = { bochs_vga: "bochs", vmware_svga: "vmwgfx", virtio_gpu: "virtio_gpu" }[adapter];
 // the levels with 3D (vmware_svga's vgpu9 and up)
-const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "virgl", "virgl43"].includes(process.env.GPU_LEVEL);
+const LEVEL_3D = ["vgpu9", "gb9", "dx10", "dx10.1", "dx11", "virgl", "virgl43", "virgl43-blob"].includes(process.env.GPU_LEVEL);
 assert.ok(DRIVER, "GPU_ADAPTER is bochs_vga, vmware_svga or virtio_gpu");
 
 const APK = "apk add --no-network --repository /mnt/repo/main --repository /mnt/repo/community";
@@ -209,6 +209,8 @@ const SCENARIOS = {
         ["cat /sys/class/drm/card*-Virtual-1/status; echo STEP_RESTORED", /connected[\s\S]*STEP_RESTORED/],
         ["kmscube -c 100 2>&1 | grep -E 'Rendered|renderer'", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube", after: 20000 }],
+        // (the commands the guest sent: blob ones at the levels with blobs)
+        ["HOST stats", null],
     ],
 };
 const steps = SCENARIOS[scenario];
