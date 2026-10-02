@@ -872,6 +872,39 @@ static void test_primitives(void)
     finish("fan-lines-points", 2);
 }
 
+/** Flat shading by the last vertex with indices: a strip with a restart, a fan */
+static void test_flat_indexed(void)
+{
+    const char *vs = VS_HEADER "in vec2 p; flat out int k; void main() { k = gl_VertexID; gl_Position = vec4(p, 0.0, 1.0); }";
+    const char *fs = FS_HEADER "flat in int k; out vec4 o; void main() { o = vec4(float(k % 3) / 2.0, float(k / 3) / 2.0, 0.5, 1.0); }";
+    // a 3 x 3 grid of vertices, row by row
+    float grid[18];
+    for(int i = 0; i < 9; i++) { grid[2 * i] = (i % 3 - 1) * 0.9f; grid[2 * i + 1] = (i / 3 - 1) * 0.9f; }
+    target(0);
+    fresh_vao();
+    program(vs, fs);
+    vbo(0, 2, grid, sizeof(grid));
+    const unsigned short strip[] = { 0, 3, 1, 4, 2, 5, 0xFFFF, 3, 6, 4, 7, 5, 8 };
+    GLuint ib;
+    glGenBuffers(1, &ib);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(strip), strip, GL_STATIC_DRAW);
+    glEnable(GL_PRIMITIVE_RESTART_FIXED_INDEX);
+    glDrawElements(GL_TRIANGLE_STRIP, 13, GL_UNSIGNED_SHORT, 0);
+    finish("flat-indexed-strip", 1);
+    target(0);
+    fresh_vao();
+    program(vs, fs);
+    vbo(0, 2, grid, sizeof(grid));
+    // around the middle
+    const unsigned short fan[] = { 4, 0, 1, 2, 5, 8, 7, 6, 3, 0 };
+    glGenBuffers(1, &ib);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(fan), fan, GL_STATIC_DRAW);
+    glDrawElements(GL_TRIANGLE_FAN, 10, GL_UNSIGNED_SHORT, 0);
+    finish("flat-indexed-fan", 1);
+}
+
 int main(int argc, char **argv, char **envp)
 {
     mode_ref = argc > 1 && !strcmp(argv[1], "ref");
@@ -907,6 +940,7 @@ int main(int argc, char **argv, char **envp)
     test_occlusion();
     test_blit();
     test_primitives();
+    test_flat_indexed();
     printf("GLTEST done %d failures\n", failures);
     fflush(0);
     return 0;

@@ -67,7 +67,7 @@
     const SURFACE_CUBEMAP = 1, SURFACE_VOLUME = 0x8000;
     // the tessellator (tessellator_wgsl.js); patch lists' topologies: 10 + control points
     const TESS = isNode ? require("./tessellator_wgsl.js") : global.V86TessellatorWGSL;
-    const TOPOLOGY_PATCHLIST_1 = 11, TOPOLOGY_PATCHLIST_32 = 42;
+    const TOPOLOGY_PATCHLIST_1 = 11, TOPOLOGY_PATCHLIST_32 = 42, TOPOLOGY_TRIANGLEFAN = 6;
     // (in the flags' high word: SVGA3D_SURFACE_BIND_UAVIEW, 1 << 33)
     const SURFACE2_BIND_UAVIEW = 2;
     // what WebGPU stores into (typed UAVs); bgra8unorm with "bgra8unorm-storage"
@@ -1379,12 +1379,18 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const vs = c.shaders.get(vsStage.shader), ps = c.shaders.get(psStage.shader);
             if (!vs || !vs.program) return this.warn("no-vs", "a draw without a vertex shader");
             const gs = c.stages[SHADER_GS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_GS].shader) : null;
-            const topology = st.topology >= TOPOLOGY_PATCHLIST_1 && st.topology <= TOPOLOGY_PATCHLIST_32 ? "patches" : TOPOLOGY[st.topology];
+            // (fans, which D3D10 has not but Mesa's svga sends: drawn as lists, by provokingLast)
+            const fan = st.topology === TOPOLOGY_TRIANGLEFAN;
+            const topology = st.topology >= TOPOLOGY_PATCHLIST_1 && st.topology <= TOPOLOGY_PATCHLIST_32 ? "patches" :
+                fan ? "triangle-fan" : TOPOLOGY[st.topology];
             if (!topology) return this.warn("topology" + st.topology, "topology " + st.topology + " is not supported");
             const so = this.streamOutput(c);
             const a = this.attachments(c);
             if (!a && !so) return;
             const input = this.inputLayout(c);
+            if (fan && (gs || so || input.pull || c.stages[SHADER_HS].shader !== INVALID)) {
+                return this.warn("fan", "triangle fans with geometry shaders, stream output or tessellation are not supported");
+            }
             // hull and domain shaders: tessellation, as compute
             const hs = c.stages[SHADER_HS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_HS].shader) : null;
             const ds = c.stages[SHADER_DS].shader !== INVALID ? c.shaders.get(c.stages[SHADER_DS].shader) : null;
@@ -1478,27 +1484,35 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
          * GL's provoking vertex is the last of a primitive (the rasterizer
          * state's provokingVertexLast), WebGPU's the first (G-17): a draw with
          * flat varyings has its vertices reordered, the last first, as a list
-         * (a rotation, so triangles keep their winding). Without indices
-         * the order is made here once per count; with indices a compute pass
-         * rewrites them (strips' restarts included) and the draw is indirect.
+         * (a rotation, so triangles keep their winding). Fans are always
+         * drawn so (their first vertex leads unless GL's last does). Without
+         * indices the order is made here once per count; with indices a
+         * compute pass rewrites them (restarts included), the draw indirect.
          * @return {?Object|boolean} { topology, buffer, count | args }; null:
          *     drawn as it is; false: not drawn
          */
         provokingLast(c, raster, varyings, topology, call) {
-            if (!raster || !(raster.words[0] >>> 24 & 0xFF) || call.indirect) return null;
-            if (!Object.values(varyings).some(v => v.type === "u32" || v.interpolation === "flat")) return null;
-            const kind = { "triangle-list": 1, "triangle-strip": 2, "line-list": 3, "line-strip": 4 }[topology];
-            if (!kind || !call.count) return null;
-            const list = kind <= 2 ? "triangle-list" : "line-list";
+            const fan = topology === "triangle-fan";
+            const last = !!raster && !!(raster.words[0] >>> 24 & 0xFF) &&
+                Object.values(varyings).some(v => v.type === "u32" || v.interpolation === "flat");
+            if (!fan && (!last || call.indirect)) return null;
+            if (fan && call.indirect) {
+                this.warn("fan-indirect", "indirect triangle fans are not supported");
+                return false;
+            }
+            const kind = { "triangle-list": 1, "triangle-strip": 2, "line-list": 3, "line-strip": 4, "triangle-fan": 5 }[topology];
+            if (!kind || !call.count) return fan ? false : null;
+            const list = kind <= 2 || kind === 5 ? "triangle-list" : "line-list";
             if (!call.indexed) {
-                const key = kind + ":" + call.count;
+                const key = kind + ":" + call.count + ":" + last;
                 let entry = this.provokingIndices.get(key);
                 if (!entry) {
                     const n = call.count, out = [];
                     if (kind === 1) for (let k = 0; k + 2 < n; k += 3) out.push(k + 2, k, k + 1);
                     else if (kind === 2) for (let k = 0; k + 2 < n; k++) out.push(...(k & 1 ? [k + 2, k + 1, k] : [k + 2, k, k + 1]));
                     else if (kind === 3) for (let k = 0; k + 1 < n; k += 2) out.push(k + 1, k);
-                    else for (let k = 0; k + 1 < n; k++) out.push(k + 1, k);
+                    else if (kind === 4) for (let k = 0; k + 1 < n; k++) out.push(k + 1, k);
+                    else for (let k = 1; k + 1 < n; k++) out.push(...(last ? [k + 1, 0, k] : [k, k + 1, 0]));
                     if (!out.length) return false;
                     const data = Uint32Array.from(out);
                     const buffer = this.device.createBuffer({ size: align(data.byteLength, 4), usage: BUFFER_USAGE.INDEX | BUFFER_USAGE.COPY_DST });
@@ -1519,7 +1533,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             let pipe = this.pipelines.get("provoking");
             if (!pipe) {
                 const code = [
-                    "struct P { count: u32, offset: u32, wide: u32, kind: u32, base: u32, instances: u32, first_instance: u32, pad: u32 }",
+                    "struct P { count: u32, offset: u32, wide: u32, kind: u32, base: u32, instances: u32, first_instance: u32, last: u32 }",
                     "@group(0) @binding(0) var<storage, read> src: array<u32>;",
                     "@group(0) @binding(1) var<uniform> p: P;",
                     "@group(0) @binding(2) var<storage, read_write> dst: array<u32>;",
@@ -1554,6 +1568,12 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                     "            n += 3u;",
                     "        }",
                     "        if (p.kind == 4u && k >= 1u) { dst[n] = index(i); dst[n + 1u] = index(i - 1u); n += 2u; }",
+                    "        if (p.kind == 5u && k >= 2u) {",
+                    "            let first = index(start);",
+                    "            if (p.last == 1u) { dst[n] = index(i); dst[n + 1u] = first; dst[n + 2u] = index(i - 1u); }",
+                    "            else { dst[n] = index(i - 1u); dst[n + 1u] = index(i); dst[n + 2u] = first; }",
+                    "            n += 3u;",
+                    "        }",
                     "        i++;",
                     "    }",
                     "    args[0] = n; args[1] = p.instances; args[2] = 0u; args[3] = p.base; args[4] = p.first_instance;",
@@ -1571,7 +1591,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const dst = this.device.createBuffer({ size: align(Math.max(16, call.count * 3 * 4), 16), usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.INDEX });
             const args = this.device.createBuffer({ size: 32, usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.INDIRECT });
             this.transient.push(dst, args);
-            const params = this.uniform(new Uint32Array([call.count, offset, wide ? 1 : 0, kind, call.base >>> 0, call.instances, call.firstInstance, 0]));
+            const params = this.uniform(new Uint32Array([call.count, offset, wide ? 1 : 0, kind, call.base >>> 0, call.instances, call.firstInstance, last ? 1 : 0]));
             let group;
             try {
                 group = this.device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
@@ -2386,6 +2406,11 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 });
                 descriptor.fragment = { module: o.psModule.module, entryPoint: "main", targets, constants: psConstants };
                 if (o.psModule.result.usesSamples) psConstants.gx_samples = o.samples;
+            } else if (o.colors.some(t => t)) {
+                // no pixel shader, targets bound: they are not written (WebGPU
+                // wants a fragment stage for the pass's attachments)
+                descriptor.fragment = { module: this.nullPixelShader(o.colors), entryPoint: "main",
+                    targets: o.colors.map(t => t && { format: t.format, writeMask: 0 }) };
             }
             try {
                 return { pipeline: this.device.createRenderPipeline(descriptor), layouts };
@@ -2393,6 +2418,23 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 this.warn("pipeline:" + error.message, "a pipeline failed: " + error.message);
                 return null;
             }
+        }
+
+        /** A pixel shader writing zeros into targets of these formats, for draws without one */
+        nullPixelShader(colors) {
+            const types = colors.map(t => {
+                if (!t) return null;
+                const kind = sampleKind(t.format);
+                return kind === "sint" ? "i32" : kind === "uint" ? "u32" : "f32";
+            });
+            const key = "null-ps:" + types.join(",");
+            let module = this.pipelines.get(key);
+            if (!module) {
+                const fields = types.map((type, i) => type && `@location(${i}) c${i}: vec4<${type}>,`).filter(f => f);
+                module = this.device.createShaderModule({ code: `struct Out { ${fields.join(" ")} }\n@fragment fn main() -> Out { var o: Out; return o; }` });
+                this.pipelines.set(key, module);
+            }
+            return module;
         }
 
         /**
