@@ -8,6 +8,10 @@
 import { DX_FORMATS } from "../vmware_svga/svga_dx_formats.js";
 import * as C from "../vmware_svga/svga_constants.js";
 
+// PIPE_TEXTURE_* (struct virtio_gpu_resource_create_3d's target)
+export const TARGET = { BUFFER: 0, TEXTURE_1D: 1, TEXTURE_2D: 2, TEXTURE_3D: 3, TEXTURE_CUBE: 4, TEXTURE_RECT: 5,
+    TEXTURE_1D_ARRAY: 6, TEXTURE_2D_ARRAY: 7, TEXTURE_CUBE_ARRAY: 8 };
+
 /** The renderer's name in the capset (Mesa shows "virgl (<it>)") */
 const RENDERER = "v86 GX on WebGPU";
 

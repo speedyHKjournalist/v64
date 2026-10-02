@@ -127,7 +127,8 @@ const SCENARIOS = {
     // (Alpine 3.24's Mesa has no virgl driver: 3.23's, from v3.23/ of the repository)
     virgl: [
         ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
-        [APK_VIRGL + " kmscube mesa-utils mesa-demos >/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; tail -5 /tmp/apk.log", /STEP_APK_RC=0/],
+        [APK_VIRGL + " kmscube mesa-utils mesa-demos weston weston-backend-drm weston-shell-desktop weston-clients seatd " +
+            ">/tmp/apk.log 2>&1; echo STEP_APK_RC=$?; grep -i -A3 error /tmp/apk.log | head -20", /STEP_APK_RC=[02]/],
         [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
         ["dmesg | grep -i -E 'features:|capset|virgl' | tail -8; echo STEP_DMESG_DONE", /\+virgl[\s\S]*STEP_DMESG_DONE/],
         // which of GL 3.0's and GLES 3.0's prerequisites Mesa does not offer
@@ -146,8 +147,19 @@ const SCENARIOS = {
             "wc -l < /tmp/ext.txt; echo STEP_MISSING_DONE", /STEP_MISSING_DONE/],
         ["HOST stats", null],
         ["eglinfo -B -p gbm 2>&1 | grep -E 'OpenGL.*(renderer|version)' | head -12; echo STEP_EGLINFO_DONE", /virgl[\s\S]*STEP_EGLINFO_DONE/],
-        ["kmscube -c 60 2>&1 | grep -E 'Rendered|renderer|failed|error' | head -5", /Rendered [1-9]\d* frames/,
-            { screenshot: "kmscube", after: 20000 }],
+        ["kmscube -c 300 2>&1 | grep -E 'Rendered|renderer|failed|error' | head -5", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube", after: 4000 }],
+        ["kmscube -M rgba -c 300 2>&1 | grep -E 'Rendered|failed|error' | head -5", /Rendered [1-9]\d* frames/,
+            { screenshot: "kmscube-rgba", after: 4000 }],
+        ["seatd -g video >/tmp/seatd.log 2>&1 & sleep 1; export XDG_RUNTIME_DIR=/tmp/xdg; mkdir -p -m 700 $XDG_RUNTIME_DIR; " +
+            "(weston --backend=drm --shell=desktop --idle-time=0 --continue-without-input >/tmp/weston.log 2>&1 &); sleep 15; export WAYLAND_DISPLAY=$(ls $XDG_RUNTIME_DIR | grep -m1 '^wayland-[0-9]*$'); echo $WAYLAND_DISPLAY; " +
+            "[ -n \"$WAYLAND_DISPLAY\" ] || tail -25 /tmp/weston.log /tmp/seatd.log; echo STEP_WESTON_UP",
+            /wayland-\d[\s\S]*STEP_WESTON_UP/],
+        ["timeout 20 weston-simple-egl -f 2>&1 | tail -3; echo STEP_EGL_DONE", /STEP_EGL_DONE/,
+            { screenshot: "weston-simple-egl", after: 12000 }],
+        ["timeout 15 es2gears_wayland 2>&1 | tail -3; echo STEP_GEARS_DONE", /STEP_GEARS_DONE/,
+            { screenshot: "es2gears", after: 10000 }],
+        ["grep -i -E 'error|renderer|GL version|EGL' /tmp/weston.log | head -20; echo STEP_WESTON_LOG", /STEP_WESTON_LOG/],
     ],
     // the page's size reaching the guest (virtio_gpu): a display event, the
     // new preferred mode, which a KMS client then sets
@@ -313,6 +325,21 @@ try
         };
     }
 
+    // virgl's shaders as they come (TGSI text): GPU_OUT/tgsi/, each once
+    const virgl = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"]?.virgl;
+    if(virgl)
+    {
+        const dir = path.join(out, "tgsi");
+        fs.mkdirSync(dir, { recursive: true });
+        const seen = new Set();
+        virgl.shader_log = (type, text) => {
+            if(seen.has(text)) return;
+            seen.add(text);
+            const stage = ["vs", "fs", "gs", "tcs", "tes", "cs"][type] || "s" + type;
+            fs.writeFileSync(path.join(dir, String(seen.size).padStart(3, "0") + "-" + stage + ".txt"), text);
+        };
+    }
+
     await wait_for(/localhost login:/, 0);
     emulator.serial0_send("root\n");
     await wait_for(/localhost:~# /, 0);
@@ -383,6 +410,8 @@ finally
     fs.writeFileSync(path.join(out, "serial.log"), serial);
     const svga3d = emulator.v86 && emulator.v86.cpu.devices.graphics_adapter && emulator.v86.cpu.devices.graphics_adapter.device["svga"]?.svga3d;
     if(svga3d) console.log("svga3d commands: " + JSON.stringify(svga3d.counts));
+    const virgl_end = emulator.v86 && emulator.v86.cpu.devices.graphics_adapter && emulator.v86.cpu.devices.graphics_adapter.device["virtio_gpu"]?.virgl;
+    if(virgl_end) console.log("virgl: " + JSON.stringify({ counts: virgl_end.counts, warnings: virgl_end.warnings }));
     if(remote)
     {
         remote.close();

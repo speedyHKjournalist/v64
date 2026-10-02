@@ -168,6 +168,7 @@ build/v86-virtio-gpu.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/grap
 		--js $(GRAPHICS_ADAPTER_COMMON) --js src/graphics_adapters/vmware_svga/svga_cursor.js \
 		--js src/graphics_adapters/vmware_svga/svga_constants.js --js src/graphics_adapters/vmware_svga/svga_dx_formats.js \
 		--js src/graphics_adapters/virtio_gpu/edid.js --js src/graphics_adapters/virtio_gpu/virgl_caps.js \
+		--js src/graphics_adapters/virtio_gpu/tgsi.js --js src/graphics_adapters/virtio_gpu/tgsi_vgpu10.js \
 		--js src/graphics_adapters/virtio_gpu/virgl_context.js --js src/graphics_adapters/virtio_gpu/virgl.js \
 		--js src/graphics_adapters/virtio_gpu/virtio_gpu_device.js \
 		--js src/graphics_adapters/virtio_gpu/plugin.js
@@ -459,6 +460,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/vmware_svga_3d.js
 	./tests/devices/vmware_svga_gb.js
 	./tests/devices/virtio_gpu.js
+	./tests/devices/virgl_tgsi.js
 	./tests/devices/vmware_backdoor.js
 	./tests/devices/mmio_ram.js
 	./tests/devices/virtio_9p.js

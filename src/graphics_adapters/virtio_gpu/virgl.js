@@ -13,16 +13,13 @@
 import { LOG_VGA } from "../../const.js";
 import { dbg_log } from "../../log.js";
 import { GX, GXWriter, QUERY_REGION_BYTES, READBACK_HEADER_BYTES, READBACK_MAX_BYTES, RESPONSE_OK } from "../renderer_protocol.js";
-import { virgl_format } from "./virgl_caps.js";
+import { virgl_format, TARGET } from "./virgl_caps.js";
 import { VirglContext } from "./virgl_context.js";
 import * as C from "../vmware_svga/svga_constants.js";
 
 /** A batch is sent at the latest when it is this big */
 const BATCH_FLUSH_BYTES = 8 << 20;
 
-// PIPE_TEXTURE_* (struct virtio_gpu_resource_create_3d's target)
-export const TARGET = { BUFFER: 0, TEXTURE_1D: 1, TEXTURE_2D: 2, TEXTURE_3D: 3, TEXTURE_CUBE: 4, TEXTURE_RECT: 5,
-    TEXTURE_1D_ARRAY: 6, TEXTURE_2D_ARRAY: 7, TEXTURE_CUBE_ARRAY: 8 };
 
 /**
  * A 3D resource: a GX surface (the resource id is its sid) and, as for 2D
@@ -108,6 +105,12 @@ export function Virgl(gpu, renderer)
     this.warnings = [];
     /** @type {!Object<number, number>} virgl commands seen, by VIRGL_CCMD_* (for the harnesses) */
     this.counts = {};
+    /** GX contexts (one per sub-context of a virgl context) */
+    this.next_cid = 1;
+    /** GX surfaces of the device's own (above the guest's resource ids) */
+    this.next_private_sid = 0xF0000000;
+    /** @type {?function(number, string)} a test's hook: each shader's TGSI (type, text) */
+    this.shader_log = null;
     renderer.listen(message => this.receive(message));
 }
 

@@ -1,0 +1,33 @@
+VERT
+DCL IN[0]
+DCL IN[1]
+DCL OUT[0], POSITION
+DCL OUT[1], GENERIC[0]
+DCL CONST[0..9]
+DCL TEMP[0..19]
+IMM[0] UINT32 {0, 1045220557, 0, 0}
+DCL TEMP[20..23]
+  0: MUL TEMP[0].xyz, CONST[4].xyzz, IN[1].xxxx
+  1: MUL TEMP[1].xyz, CONST[5].xyzz, IN[1].yyyy
+  2: ADD TEMP[2].xyz, TEMP[0].xyzx, TEMP[1].xyzx
+  3: MUL TEMP[3].xyz, CONST[6].xyzz, IN[1].zzzz
+  4: ADD TEMP[4].xyz, TEMP[2].xyzx, TEMP[3].xyzx
+  5: ADD TEMP[5].xyz, TEMP[4].xyzx, CONST[7].xyzz
+  6: DP3 TEMP[6].x, TEMP[5].xyzx, TEMP[5].xyzx
+  7: RSQ TEMP[7].x, TEMP[6].xxxx
+  8: MUL TEMP[8].xyz, TEMP[5].xyzz, TEMP[7].xxxx
+  9: DP3 TEMP[9].x, CONST[8].xyzx, CONST[8].xyzx
+ 10: RSQ TEMP[10].x, TEMP[9].xxxx
+ 11: MUL TEMP[11].xyz, CONST[8].xyzz, TEMP[10].xxxx
+ 12: DP3 TEMP[12].x, TEMP[8].xyzx, TEMP[11].xyzx
+ 13: MAX TEMP[13].x, TEMP[12].xxxx, IMM[0].xxxx
+ 14: ADD TEMP[14].x, IMM[0].yyyy, TEMP[13].xxxx
+ 15: MUL OUT[1].xyz, TEMP[14].xxxx, CONST[9].xyzx
+ 16: MUL TEMP[15], CONST[0], IN[0].xxxx
+ 17: MUL TEMP[16], CONST[1], IN[0].yyyy
+ 18: ADD TEMP[17], TEMP[15], TEMP[16]
+ 19: MUL TEMP[18], CONST[2], IN[0].zzzz
+ 20: ADD TEMP[19], TEMP[17], TEMP[18]
+ 21: ADD OUT[0], TEMP[19], CONST[3]
+ 22: MOV OUT[1].w, CONST[9].xxxw
+ 23: END

@@ -232,6 +232,9 @@
             }
             let dsts = NO_DESTINATION.has(op) ? 0 : (DESTINATIONS.get(op) || 1);
             if (STORES.has(op)) dsts = 1;
+            // VMware's integer division: quotient and remainder (Mesa's svga
+            // writes the second as a null operand)
+            if (op === OP.VMWARE && (instruction.controls & 0xF) === VMWARE_OP.IDIV) dsts = 2;
             instruction.dst = operands.slice(0, dsts);
             instruction.src = operands.slice(dsts);
             if (op === OP.VMWARE) instruction.vmware = instruction.controls & 0xF;
