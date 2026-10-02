@@ -1133,20 +1133,34 @@ VirtioGPU.prototype.render = function()
  * contents and the contexts' objects are not in snapshots yet.)
  * @return {!Promise<undefined>}
  */
+/**
+ * Before a save: the GPU's work done, then the 3D resources' contents read
+ * back (a snapshot keeps them: they are the host's, not in guest memory)
+ */
 VirtioGPU.prototype.prepare_save = function()
 {
     const virgl = this.virgl;
     if(!virgl) return Promise.resolve(undefined);
-    return new Promise(resolve => virgl.after_work(() => resolve(undefined)));
+    const resources = /** @type {!Array<!Resource3D>} */ ([...this.resources.values()].filter(r => r.three_d));
+    return new Promise(resolve => virgl.after_work(() => resolve(undefined))).then(() => virgl.save_contents(resources));
 };
 
-const STATE_VERSION = 1;
+/** 2: with the 3D resources and virgl's contexts */
+const STATE_VERSION = 2;
 
 VirtioGPU.prototype.get_state = function()
 {
-    const resources = [];
-    for(const r of this.resources.values())
+    const resources = [], resources_3d = [];
+    for(const found of this.resources.values())
     {
+        if(found.three_d)
+        {
+            const r = /** @type {!Resource3D} */ (found);
+            resources_3d.push([r.id, r.target, r.format, r.bind, r.width, r.height, r.depth, r.array_size, r.last_level,
+                r.nr_samples, r.flags, r.backing, r.uuid, r.saved || [], r.data, r.host_newer]);
+            continue;
+        }
+        const r = /** @type {!Resource} */ (found);
         resources.push([r.id, r.format, r.width, r.height, r.data, r.backing, r.uuid]);
     }
     return [
@@ -1161,12 +1175,14 @@ VirtioGPU.prototype.get_state = function()
         this.cursor.get_state(),
         this.events_read,
         this.active,
+        resources_3d,
+        this.virgl ? this.virgl.get_state() : null,
     ];
 };
 
 VirtioGPU.prototype.set_state = function(state)
 {
-    if(state[0] !== STATE_VERSION)
+    if(state[0] !== 1 && state[0] !== STATE_VERSION)
     {
         throw new Error("virtio_gpu: unsupported state version " + state[0]);
     }
@@ -1187,6 +1203,26 @@ VirtioGPU.prototype.set_state = function(state)
         r.uuid = uuid ? Uint8Array.from(uuid) : null;
         this.resources.set(id, r);
         this.host_memory += r.data.length;
+    }
+    // 3D: GX starts again from the resources and contexts saved
+    if(this.virgl)
+    {
+        this.virgl.reset();
+        for(const [id, target, format, bind, width, height, depth, array_size, last_level, nr_samples, flags, backing, uuid,
+            saved, data, host_newer] of state[10] || [])
+        {
+            const r = new Resource3D(id, target, format, bind, width, height, depth, array_size, last_level, nr_samples, flags);
+            r.set_backing = Resource.prototype.set_backing;
+            if(backing) r.set_backing(Float64Array.from(backing));
+            r.uuid = uuid ? Uint8Array.from(uuid) : null;
+            r.saved = saved;
+            r.data = data ? Uint8Array.from(data) : null;
+            r.host_newer = !!host_newer;
+            this.resources.set(id, r);
+            this.virgl.restore_resource(r);
+            r.saved = null;
+        }
+        if(state[11]) this.virgl.set_state(state[11], id => this.resources.get(id) || null);
     }
     state[6].forEach(([enabled, host_width, host_height, resource_id, x, y, width, height], i) => {
         const s = this.scanouts[i];

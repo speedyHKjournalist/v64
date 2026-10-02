@@ -168,6 +168,16 @@ const SCENARIOS = {
             { screenshot: "kmscube", after: 4000 }],
         ["kmscube -M rgba -c 300 2>&1 | grep -E 'Rendered|failed|error' | head -5", /Rendered [1-9]\d* frames/,
             { screenshot: "kmscube-rgba", after: 4000 }],
+        // a snapshot while kmscube draws (the 3D resources and the context
+        // go into it and come back), then the tests again
+        // (stdin a pipe nothing comes through: kmscube stops at the first input)
+        ["sleep 1000 | kmscube -M rgba -c 100000 > /tmp/kmscube.log 2>&1 & sleep 6; echo STEP_BACKGROUND", /STEP_BACKGROUND/],
+        ["HOST snapshot", null],
+        ["sleep 3; echo STEP_AFTER_SNAPSHOT", /STEP_AFTER_SNAPSHOT/, { screenshot: "kmscube-after-snapshot", after: 2000 }],
+        // (it went on drawing: SUBMIT_3D, 519, went on)
+        ["HOST stats", null],
+        ["pkill kmscube; sleep 1; grep -c Rendered /tmp/kmscube.log; tail -2 /tmp/kmscube.log; echo STEP_KILLED", /STEP_KILLED/],
+        ["/tmp/gltest cmp 2>&1 | grep -E 'FAIL|done'; echo STEP_GLTEST_AGAIN", /GLTEST done 0 failures[\s\S]*STEP_GLTEST_AGAIN/],
         ["seatd -g video >/tmp/seatd.log 2>&1 & sleep 1; export XDG_RUNTIME_DIR=/tmp/xdg; mkdir -p -m 700 $XDG_RUNTIME_DIR; " +
             "(weston --backend=drm --shell=desktop --idle-time=0 --continue-without-input >/tmp/weston.log 2>&1 &); sleep 15; export WAYLAND_DISPLAY=$(ls $XDG_RUNTIME_DIR | grep -m1 '^wayland-[0-9]*$'); echo $WAYLAND_DISPLAY; " +
             "[ -n \"$WAYLAND_DISPLAY\" ] || tail -25 /tmp/weston.log /tmp/seatd.log; echo STEP_WESTON_UP",
@@ -403,8 +413,10 @@ try
                 // what the adapter's device has done (virtio_gpu: commands, virgl's)
                 const device = emulator.v86.cpu.devices.graphics_adapter.device;
                 const gpu = device["virtio_gpu"];
-                if(gpu) console.log("virtio-gpu " + JSON.stringify({ stats: gpu.stats,
-                    virgl: gpu.virgl && { counts: gpu.virgl.counts, warnings: gpu.virgl.warnings, submitted: gpu.virgl.submitted, completed: gpu.virgl.completed } }));
+                if(gpu) console.log("virtio-gpu " + JSON.stringify({ stats: gpu.stats, active: gpu.active,
+                    scanouts: gpu.scanouts.map(s => [s.enabled, s.resource_id, s.width, s.height, !!s.rgba]), pending: gpu.pending && gpu.pending.length,
+                    virgl: gpu.virgl && { counts: gpu.virgl.counts, warnings: gpu.virgl.warnings, submitted: gpu.virgl.submitted, completed: gpu.virgl.completed,
+                        requests: gpu.virgl.requests.size, completions: gpu.virgl.completions.length } }));
             }
             else if(verb === "snapshot")
             {

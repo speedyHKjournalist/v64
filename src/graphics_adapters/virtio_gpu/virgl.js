@@ -50,6 +50,8 @@ export function Resource3D(id, target, format, bind, width, height, depth, array
     this.backing_starts = null;
     this.backing_length = 0;
     this.uuid = null;
+    /** @type {Array<Uint8Array>} the contents, for a snapshot (save_contents) */
+    this.saved = null;
 }
 
 Resource3D.prototype.is_buffer = function()
@@ -402,4 +404,123 @@ Virgl.prototype.submit = function(ctx_id, words, resource)
     }
     context.run(words, resource);
     this.flush_big();
+};
+
+// ---------------------------------------------------------------------------
+// Snapshots: the resources' contents come back from GX before a save (a
+// level's image per layer or slice), and go to GX again with the contexts
+
+/**
+ * The images of a resource, as save_contents reads them: [layer or slice,
+ * level, width, height] each
+ * @param {!Resource3D} r
+ * @return {!Array<!Array<number>>}
+ */
+function images(r)
+{
+    const out = [];
+    if(r.is_buffer()) return [[0, 0, r.width, 1]];
+    const volume = r.target === TARGET.TEXTURE_3D;
+    const layers = r.array_size * (r.target === TARGET.TEXTURE_CUBE ? 6 : 1);
+    for(let level = 0; level <= r.last_level; level++)
+    {
+        const w = Math.max(1, r.width >> level), h = Math.max(1, r.height >> level);
+        const count = volume ? Math.max(1, r.depth >> level) : layers;
+        for(let i = 0; i < count; i++) out.push([i, level, w, h]);
+    }
+    return out;
+}
+
+/**
+ * Every 3D resource's contents into `r.saved` (null where GX has none to
+ * give: multisampled, depth), once the GPU has them
+ * @param {!Array<!Resource3D>} resources
+ * @return {!Promise}
+ */
+Virgl.prototype.save_contents = function(resources)
+{
+    for(const r of resources)
+    {
+        r.saved = [];
+        if(r.nr_samples > 1 || !r.is_buffer() && !r.info) continue;
+        const volume = r.target === TARGET.TEXTURE_3D;
+        images(r).forEach(([i, level, w, h], k) => {
+            if(r.is_buffer())
+            {
+                const bytes = new Uint8Array(w);
+                r.saved[k] = bytes;
+                for(let at = 0; at < w; at += READBACK_MAX_BYTES)
+                {
+                    const count = Math.min(READBACK_MAX_BYTES, w - at);
+                    const id = this.request(data => { if(data) bytes.set(data.subarray(0, count), at); else r.saved[k] = null; });
+                    this.gxw.command(GX.SURFACE_READBACK, [r.id, 0, 0, at, 0, 0, count, 1, 1, id]);
+                }
+                return;
+            }
+            const { bytes: block_bytes, bw, bh } = r.block();
+            const row_bytes = Math.ceil(w / bw) * block_bytes, rows = Math.ceil(h / bh);
+            const image = new Uint8Array(row_bytes * rows);
+            r.saved[k] = image;
+            const per_request = Math.max(1, Math.floor(READBACK_MAX_BYTES / row_bytes));
+            for(let first = 0; first < rows; first += per_request)
+            {
+                const count = Math.min(per_request, rows - first);
+                const id = this.request(data => {
+                    if(data) image.set(data.subarray(0, count * row_bytes), first * row_bytes);
+                    else r.saved[k] = null;
+                });
+                this.gxw.command(GX.SURFACE_READBACK, [r.id, volume ? 0 : i, level, 0, first * bh, volume ? i : 0,
+                    w, Math.min(count * bh, h - first * bh), 1, id]);
+            }
+        });
+    }
+    return new Promise(resolve => this.after_work(() => resolve(undefined)));
+};
+
+/**
+ * A resource from a snapshot: made in GX again, with what it had
+ * @param {!Resource3D} r with `saved`
+ */
+Virgl.prototype.restore_resource = function(r)
+{
+    if(!this.create_resource(r)) return;
+    const volume = r.target === TARGET.TEXTURE_3D;
+    images(r).forEach(([i, level, w, h], k) => {
+        const data = r.saved && r.saved[k];
+        if(!data) return;
+        if(r.is_buffer())
+        {
+            this.gxw.command(GX.SURFACE_UPLOAD, [r.id, 0, 0, 0, 0, 0, w, 1, 1, w, w], data);
+            return;
+        }
+        const { bytes: block_bytes, bw } = r.block();
+        const row_bytes = Math.ceil(w / bw) * block_bytes;
+        this.gxw.command(GX.SURFACE_UPLOAD, [r.id, volume ? 0 : i, level, 0, 0, volume ? i : 0, w, h, 1, row_bytes, data.length], data);
+        this.flush_big();
+    });
+};
+
+Virgl.prototype.get_state = function()
+{
+    const contexts = [];
+    for(const context of this.contexts.values()) contexts.push(context.get_state());
+    return [contexts];
+};
+
+/**
+ * @param {!Array} state from get_state
+ * @param {function(number):?Object} resource by id
+ */
+Virgl.prototype.set_state = function(state, resource)
+{
+    this.contexts.clear();
+    this.next_cid = 1;
+    this.next_private_sid = 0xF0000000;
+    for(const saved of state[0])
+    {
+        const context = new VirglContext(this, saved[0]);
+        context.set_state(saved, resource);
+        this.contexts.set(saved[0], context);
+    }
+    this.flush();
 };

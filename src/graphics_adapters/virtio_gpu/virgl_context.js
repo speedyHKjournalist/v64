@@ -117,6 +117,8 @@ function SubContext(context, cid)
     this.so_targets = [];
     /** @type {!Set<!Object>} the queries counting primitives that are running */
     this.counting = new Set();
+    /** @type {Array<number>} the render condition (SET_PREDICATION's words) */
+    this.predication = null;
     /** @type {!Map<string, string>} what was last sent, by command */
     this.sent = new Map();
     this.gx(GX.CONTEXT_DEFINE, [cid]);
@@ -370,7 +372,8 @@ VirglContext.prototype.command = function(command, object, p)
         case CCMD.SET_RENDER_CONDITION:
         {
             const q = p[0] && sub.objects.get(p[0]);
-            sub.dx_changed("predication", C.SVGA_3D_CMD_DX_SET_PREDICATION, q && q.defined ? [p[0], p[1] ? 1 : 0] : [INVALID, 0]);
+            sub.predication = q && q.defined ? [p[0], p[1] ? 1 : 0] : null;
+            sub.dx_changed("predication", C.SVGA_3D_CMD_DX_SET_PREDICATION, sub.predication || [INVALID, 0]);
             return;
         }
     }
@@ -384,6 +387,19 @@ VirglContext.prototype.create_object = function(sub, kind, p)
 {
     const handle = p[0];
     if(sub.objects.has(handle)) this.destroy_object(sub, handle);
+    this.create_kind(sub, kind, p);
+    // (what made it: a snapshot makes it again so)
+    const o = sub.objects.get(handle);
+    if(o)
+    {
+        o.create_kind = kind;
+        o.create_words = Array.from(p);
+    }
+};
+
+VirglContext.prototype.create_kind = function(sub, kind, p)
+{
+    const handle = p[0];
     switch(kind)
     {
         case OBJECT.BLEND: return this.create_blend(sub, p);
@@ -645,7 +661,12 @@ VirglContext.prototype.create_shader = function(p)
     if(end < 0) end = pending.bytes.length;
     const source = new TextDecoder().decode(pending.bytes.subarray(0, end));
     if(this.virgl.shader_log) this.virgl.shader_log(pending.type, source);
-    const sub = pending.sub;
+    this.define_shader(pending.sub, handle, pending.type, source, pending.so);
+};
+
+/** A shader object: its TGSI parsed (variants are made at draws) */
+VirglContext.prototype.define_shader = function(sub, handle, type, source, so_words)
+{
     if(sub.objects.has(handle)) this.destroy_object(sub, handle);
     let program = null;
     try
@@ -656,7 +677,8 @@ VirglContext.prototype.create_shader = function(p)
     {
         sub.warn("tgsi:" + e.message, "virgl: a shader does not parse: " + e.message);
     }
-    sub.objects.set(handle, { kind: OBJECT.SHADER, stage: type, program, variants: new Map(), so: stream_output_info(pending.so) });
+    sub.objects.set(handle, { kind: OBJECT.SHADER, stage: type, program, variants: new Map(), so: stream_output_info(so_words),
+        source, so_words });
 };
 
 /**
@@ -1197,4 +1219,62 @@ VirglContext.prototype.end_query = function(sub, handle)
         write(value);
     });
     sub.gx(GX.QUERY_END, [sub.cid, handle, q.svga, id, 0]);
+};
+
+// ---------------------------------------------------------------------------
+// Snapshots: each sub-context's objects (as the commands that made them, or
+// a shader's text) and gallium's state; GX gets them again from these
+
+/** The state of the sub-contexts that a snapshot keeps */
+const SAVED_STATE = ["fb", "viewport", "scissor", "blend", "dsa", "rasterizer", "elements", "blend_color", "stencil_ref",
+    "sample_mask", "vertex_buffers", "index_buffer", "shaders", "views", "samplers", "so_targets", "predication"];
+
+VirglContext.prototype.get_state = function()
+{
+    const subs = [];
+    let active = 0;
+    for(const [id, sub] of this.subs)
+    {
+        if(sub === this.sub) active = id;
+        const objects = [];
+        for(const [handle, o] of sub.objects)
+        {
+            if(o.kind === OBJECT.SHADER) objects.push([OBJECT.SHADER, handle, o.stage, o.source, o.so_words || null]);
+            else if(o.create_words) objects.push([o.create_kind, handle, o.create_words]);
+        }
+        const state = {};
+        for(const name of SAVED_STATE) state[name] = sub[name];
+        state.cbs = sub.cbs.map(stage => stage.map(cb => cb ? (cb.user ? { user: Array.from(cb.user) } : cb) : null));
+        subs.push([id, objects, JSON.stringify(state)]);
+    }
+    return [this.ctx_id, active, subs];
+};
+
+/**
+ * @param {!Array} state from get_state
+ * @param {function(number):?Object} resource by id
+ */
+VirglContext.prototype.set_state = function(state, resource)
+{
+    const [, active, subs] = state;
+    this.resource = resource;
+    for(const sub of this.subs.values()) sub.destroy();
+    this.subs.clear();
+    for(const [id, objects, json] of subs)
+    {
+        const sub = this.sub_context(id);
+        for(const o of objects)
+        {
+            if(o[0] === OBJECT.SHADER) this.define_shader(sub, o[1], o[2], o[3], o[4]);
+            else this.create_object(sub, o[0], Uint32Array.from(o[2], v => v >>> 0));
+        }
+        const saved = JSON.parse(json);
+        for(const name of SAVED_STATE) if(saved[name] !== undefined) sub[name] = saved[name];
+        sub.cbs = saved.cbs.map(stage => stage.map(cb => cb && cb.user ? { user: Uint32Array.from(cb.user) } : cb));
+        sub.sent.clear();
+        // what is sent when it is set, not at draws
+        if(sub.so_targets.some(t => t)) this.set_streamout_targets(sub, Uint32Array.from([0xF, ...sub.so_targets]));
+        if(sub.predication) sub.dx(C.SVGA_3D_CMD_DX_SET_PREDICATION, sub.predication);
+    }
+    this.sub = this.sub_context(active);
 };
