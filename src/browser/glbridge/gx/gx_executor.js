@@ -28,7 +28,7 @@
     const GX = {
         SURFACE_DEFINE: 1, SURFACE_DESTROY: 2, SURFACE_UPLOAD: 3, SURFACE_READBACK: 4,
         CONTEXT_DEFINE: 5, CONTEXT_DESTROY: 6, SHADER_CODE: 7, DX: 8, SURFACE_COPY: 9, QUERY_END: 10,
-        COTABLE_RESET: 11, SURFACE_STRETCH: 12, SURFACE_IMPORT: 13, SURFACE_EXPORT: 14,
+        COTABLE_RESET: 11, SURFACE_STRETCH: 12, SURFACE_IMPORT: 13, SURFACE_EXPORT: 14, CLEAR_RTV_INTEGER: 15,
     };
 
     // SVGA_3D_CMD_DX_* (svga3d_cmd.h)
@@ -263,6 +263,12 @@
                 case GX.SURFACE_STRETCH: return this.stretch(b);
                 case GX.SURFACE_IMPORT: return this.share(b[0], b[1], false);
                 case GX.SURFACE_EXPORT: return this.share(b[0], b[1], true);
+                case GX.CLEAR_RTV_INTEGER: {
+                    // cid, view, signed, 4 values: exact (DX's clear has floats)
+                    const c = this.contexts.get(b[0]);
+                    if (c) this.clearRTV(c, b[1], Array.from(b.subarray(3, 7), v => b[2] ? v | 0 : v >>> 0));
+                    return;
+                }
                 case GX.QUERY_END: return this.endQuery(b);
                 case GX.COTABLE_RESET: {
                     const c = this.contexts.get(b[0]);
@@ -1413,6 +1419,7 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const dualSource = !!(blend && usesSource1(blend.words));
             const vsOptions = { group: 0, vertexInputs, varyings };
             const psOptions = { group: 1, targets, dualSource };
+            this.stageOptions(c, SHADER_VS, vs.program, vsOptions);
             if (ps && ps.program) this.stageOptions(c, SHADER_PS, ps.program, psOptions);
             let vsModule, psModule = null;
             try {
@@ -2516,6 +2523,13 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             if (program.uavs.size) options.uavFormats = this.uavFormats(c, type, program);
             const stage = c.stages[type];
             for (const [slot, r] of program.resources) {
+                // typed buffers: the view's format, which their loads decode
+                if (r.dimension === DIM_BUFFER && r.kind === "texture") {
+                    const srv = c.srvs.get(stage.srvs[slot]);
+                    const f = srv && this.formatOf(srv.format);
+                    if (f && f.vertex) (options.srvFormats = options.srvFormats || {})[slot] = { format: f.vertex };
+                    continue;
+                }
                 if (r.dimension !== 4 && r.dimension !== 9) continue;
                 const srv = c.srvs.get(stage.srvs[slot]);
                 const S = srv && this.surfaces.get(srv.sid);
@@ -2787,8 +2801,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             const key = "v:" + format + ":" + dimension + ":" + baseMip + ":" + mipCountView + ":" + baseLayer + ":" + layerCount + ":" + aspect;
             let view = S.views.get(key);
             if (!view) {
-                view = S.texture.createView({ format, dimension: S.volume ? "3d" : dimension, baseMipLevel: baseMip, mipLevelCount: mipCountView,
-                    baseArrayLayer: baseLayer, arrayLayerCount: S.volume ? 1 : layerCount, aspect });
+                // (one aspect of a depth-stencil texture: its own format, WebGPU's default for it)
+                view = S.texture.createView({ format: aspect === "all" ? format : undefined, dimension: S.volume ? "3d" : dimension,
+                    baseMipLevel: baseMip, mipLevelCount: mipCountView, baseArrayLayer: baseLayer, arrayLayerCount: S.volume ? 1 : layerCount, aspect });
                 S.views.set(key, view);
             }
             return view;

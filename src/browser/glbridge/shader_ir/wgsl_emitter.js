@@ -89,6 +89,8 @@
             this.lines = [];
             this.indent = 1;
             this.helpers = new Set();
+            /** @type {!Map<string, string>} the typed buffers' readers, by name */
+            this.typedBuffers = new Map();
             this.warnings = [];
             this.usesDraw = false;
             this.usesSamples = false;
@@ -259,7 +261,9 @@
             }
             for (const [slot, r] of p.resources) {
                 const type = this.resourceType(slot, r);
-                out.push(`@group(${g}) @binding(${BINDING.RESOURCE + slot}) var t${slot}: ${type.wgsl};`);
+                // (buffers: storage buffers read only)
+                const space = type.binding.type === "read-storage" ? "<storage, read>" : "";
+                out.push(`@group(${g}) @binding(${BINDING.RESOURCE + slot}) var${space} t${slot}: ${type.wgsl};`);
                 this.bindings.push({ binding: BINDING.RESOURCE + slot, slot, ...type.binding });
             }
             if (p.uavs.size && this.stage === PROGRAM.VS && !this.mode) this.warn("vertex shader UAVs are not supported");
@@ -1680,13 +1684,18 @@
             this.write(ins, this.swizzled(call, tOperand), kind);
         }
 
+        /**
+         * A typed buffer's element: decoded by the view's format (GX gives
+         * it, o.srvFormats: a WebGPU format name) from the 32-bit words,
+         * from the view's first element on; what the format lacks is 0, alpha 1
+         */
         loadTypedBuffer(ins, t) {
-            // the buffer's elements are 32-bit lanes; four per element is the
-            // common case (R32G32B32A32); narrower formats are taken as one lane
-            this.warn("typed buffer loads assume 32-bit lanes");
-            const index = `u32(${this.i(ins, 0)}.x)`;
-            const value = `vec4<u32>(${t.name}[${index} * 4u], ${t.name}[${index} * 4u + 1u], ${t.name}[${index} * 4u + 2u], ${t.name}[${index} * 4u + 3u])`;
-            this.write(ins, this.swizzled(value, ins.src[1]), "u");
+            const format = ((this.o.srvFormats || {})[t.slot] || {}).format || "rgba32uint";
+            const name = `gx_tb${t.slot}`;
+            if (!this.typedBuffers.has(name)) this.typedBuffers.set(name, typedBufferReader(name, t.name, format));
+            this.usesViews = true;
+            const index = `(u32(${this.i(ins, 0)}.x) + gx_view_base(${VIEW_BASE_RESOURCE + t.slot}u))`;
+            this.write(ins, this.swizzled(`${name}(${index})`, ins.src[1]), "u");
         }
 
         resinfo(ins) {
@@ -1967,7 +1976,7 @@
         // ---------------------------------------------------------------
 
         helperCode() {
-            const h = this.helpers, out = [];
+            const h = this.helpers, out = [...this.typedBuffers.values()];
             if (h.has("umul_hi") || h.has("imul_hi")) {
                 out.push(`fn gx_umul_hi1(a: u32, b: u32) -> u32 {
     let al = a & 0xFFFFu; let ah = a >> 16u; let bl = b & 0xFFFFu; let bh = b >> 16u;
@@ -2162,6 +2171,41 @@ fn gx_msad(r: vec4<u32>, s: vec4<u32>, a: vec4<u32>) -> vec4<u32> {
      * The varyings a pixel shader reads (for linking a vertex shader to it)
      * @return register -> { type, interpolation, sampling }
      */
+    /**
+     * A WGSL function reading element `i` of a typed buffer `buffer`
+     * (array<u32>) of a format as WebGPU's vertex formats name the memory
+     * ("unorm8x4", "float32x3", "unorm8x4-bgra"): its lanes as bits (floats
+     * for the float and normalized formats)
+     */
+    function typedBufferReader(name, buffer, format) {
+        const v = /^(unorm|snorm|uint|sint|float)(8|16|32)(?:x(\d))?(-bgra)?$/.exec(format) || [0, "uint", "32", "4", ""];
+        const m = [0, v[4] ? "bgra" : "rgba".slice(0, +(v[3] || 1)), v[2], v[1]];
+        const comps = m[1].length, bits = +m[2], kind = m[3];
+        const integer = kind === "uint" || kind === "sint";
+        const one = integer ? "1u" : "0x3F800000u";
+        const lanes = [];
+        if (bits === 32) {
+            for (let c = 0; c < 4; c++) lanes.push(c < comps ? `${buffer}[i * ${comps}u + ${c}u]` : c === 3 ? one : "0u");
+        } else {
+            // a component's bits: from the word holding them
+            const at = c => `(i * ${comps * bits / 8}u + ${c * bits / 8}u)`;
+            const raw = c => `((${buffer}[${at(c)} >> 2u] >> ((${at(c)} & 3u) * 8u)) & ${bits === 8 ? "0xFFu" : "0xFFFFu"})`;
+            const max = bits === 8 ? 255 : 65535, half = bits === 8 ? 127 : 32767, sign = bits === 8 ? 24 : 16;
+            const decode = v => {
+                switch (kind) {
+                    case "uint": return v;
+                    case "sint": return `u32((i32(${v} << ${sign}u)) >> ${sign}u)`;
+                    case "unorm": return `bitcast<u32>(f32(${v}) / ${max}.0)`;
+                    case "snorm": return `bitcast<u32>(max(f32((i32(${v} << ${sign}u)) >> ${sign}u) / ${half}.0, -1.0))`;
+                    default: return `bitcast<u32>(unpack2x16float(${v}).x)`;
+                }
+            };
+            for (let c = 0; c < 4; c++) lanes.push(c < comps ? decode(raw(c)) : c === 3 ? one : "0u");
+            if (m[1] === "bgra") [lanes[0], lanes[2]] = [lanes[2], lanes[0]];
+        }
+        return `fn ${name}(i: u32) -> vec4<u32> { return vec4<u32>(${lanes.join(", ")}); }`;
+    }
+
     function pixelVaryings(program) {
         const varyings = {};
         for (const input of program.inputs) {

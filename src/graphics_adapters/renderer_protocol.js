@@ -37,6 +37,7 @@ export const GX = {
     // the D9WG resource into GX's surface, or back
     SURFACE_IMPORT: 13,     // sid, D9WG handle
     SURFACE_EXPORT: 14,     // sid, D9WG handle
+    CLEAR_RTV_INTEGER: 15,  // cid, render target view, signed, 4 values (DX's clear has floats)
 };
 
 /**

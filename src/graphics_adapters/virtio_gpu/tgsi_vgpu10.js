@@ -444,6 +444,28 @@ Translator.prototype.declare = function()
         }
     });
 
+    // GL's clip distances (key.clip_enable, a bit each): varyings from the
+    // last vertex stage, and fragments where one is below zero discarded
+    if(this.fs && key.clip_enable)
+    {
+        const base = input_count + this.svs.length;
+        for(let k = 0; k < 2; k++)
+        {
+            const mask = key.clip_enable >> 4 * k & 0xF;
+            if(!mask) continue;
+            const v = operand(T.INPUT, [base + k]);
+            this.decl(OP.DCL_INPUT_PS, [as_dst(v)], INTERP.LINEAR);
+            this.link_inputs[semantic_key("CLIPDIST", k)] = base + k;
+            this.prologue_ops.push(() => {
+                const t = this.reserve();
+                this.emit(OP.LT, [as_dst(t, mask), as_src(v), immf(0)]);
+                this.emit(OP.OR, [as_dst(t, 0b0011), as_src(t, [0, 1, 0, 0]), as_src(t, [2, 3, 0, 0])]);
+                this.emit(OP.OR, [as_dst(t, 1), scalar(t, 0), scalar(t, 1)]);
+                this.emit(OP.DISCARD, [scalar(t, 0)], 1 << 7);
+            });
+        }
+    }
+
     // outputs
     if(this.fs)
     {
@@ -511,7 +533,9 @@ Translator.prototype.declare = function()
             const name = d.semantic;
             if(name === "POSITION")
             {
-                const reg = free();
+                // (where a geometry shader reads it, else anywhere: the rasterizer takes it)
+                const k = semantic_key(name, d.semantic_index);
+                const reg = k in outputs ? outputs[k] : free();
                 this.output_regs[i] = reg;
                 const o = operand(T.OUTPUT, [reg]);
                 this.decl(OP.DCL_OUTPUT_SIV, [as_dst(o)], 0, [NAME.POSITION]);
@@ -537,7 +561,6 @@ Translator.prototype.declare = function()
             }
             // what nothing after reads (or D3D has no place for: point
             // sizes, clip vertices, edge flags) goes nowhere
-            if(name === "CLIPDIST") this.problem("clip distances");
             this.out_map[i] = this.junk();
         });
     }
@@ -1083,6 +1106,34 @@ Translator.prototype.texture = function(ins)
         return;
     }
 
+    // texture() of an integer texture (D3D samples only floats): the texel
+    // under the coordinates, by a fetch from the level (clamped to its edges)
+    if(view.integer && !SHADOW_REF[target] && (op === "TEX" || op === "TXP" || op === "TXB" || op === "TXL" || op === "TEX_LZ") &&
+        dimension !== DIM.TEXTURECUBE && dimension !== DIM.TEXTURECUBEARRAY && dimension !== DIM.BUFFER)
+    {
+        const t = this.scratch(), size = this.scratch(), at = this.scratch();
+        if(op === "TXP") this.emit(OP.DIV, [as_dst(t, 0b0111), coord, scalar(coord, 3)]);
+        else this.emit(OP.MOV, [as_dst(t), coord]);
+        if(op === "TXL") this.emit(OP.FTOI, [as_dst(at, 0b1000), scalar(coord, 3)]);
+        else this.emit(OP.MOV, [as_dst(at, 0b1000), immu(0)]);
+        this.emit(OP.RESINFO, [as_dst(size), scalar(at, 3), as_src(resource)], 2);
+        // the dimensions scaled (an array's layer is not)
+        const scaled = { [DIM.TEXTURE1D]: 1, [DIM.TEXTURE1DARRAY]: 1, [DIM.TEXTURE2D]: 2, [DIM.TEXTURE2DARRAY]: 2, [DIM.TEXTURE3D]: 3 }[dimension] || 2;
+        const mask = (1 << scaled) - 1;
+        const fsize = this.scratch();
+        this.emit(OP.UTOF, [as_dst(fsize, mask), as_src(size)]);
+        this.emit(OP.MUL, [as_dst(t, mask), as_src(t), as_src(fsize)]);
+        this.emit(OP.ROUND_NI, [as_dst(t, mask), as_src(t)]);
+        if(scaled < coords) this.emit(OP.ROUND_NE, [as_dst(t, 1 << scaled), as_src(t)]);
+        this.emit(OP.FTOI, [as_dst(at, (1 << coords) - 1), as_src(t)]);
+        this.emit(OP.IADD, [as_dst(size, mask), as_src(size), immu(0xFFFFFFFF)]);
+        this.emit(OP.IMAX, [as_dst(at, mask), as_src(at), immu(0)]);
+        this.emit(OP.IMIN, [as_dst(at, mask), as_src(at), as_src(size)]);
+        this.emit(OP.LD, [into, as_src(at), as_src(resource)], controls, extended);
+        if(result) this.view_swizzle(result, out, swizzle, true, sat);
+        return;
+    }
+
     // projective: divided by w first
     if(op === "TXP")
     {
@@ -1193,7 +1244,8 @@ Translator.prototype.view_swizzle = function(result, out, swizzle, integer, sat)
  * @param {!Object} program from parse_tgsi
  * @param {!Object} key outputs (semantic key -> register), all_outputs
  *     (stream output: every output in a register), flip_y, halfz, swizzles
- *     (per view: 4 PIPE_SWIZZLE_*), color_buffers, flatshade, alpha_func, alpha_ref
+ *     (per view: 4 PIPE_SWIZZLE_*), color_buffers, flatshade, alpha_func, alpha_ref,
+ *     clip_enable (GL's clip distances in use: discarded where below zero)
  * @return {{tokens: !Uint32Array, inputs: !Object<string, number>, outputs: !Object<number, number>,
  *     problems: !Array<string>, type: number}}
  */

@@ -246,7 +246,8 @@ Virgl.prototype.create_resource = function(r)
         return false;
     }
     const cube = r.target === TARGET.TEXTURE_CUBE || r.target === TARGET.TEXTURE_CUBE_ARRAY;
-    const layers = r.target === TARGET.TEXTURE_3D ? 1 : r.array_size * (r.target === TARGET.TEXTURE_CUBE ? 6 : 1);
+    // (a cube's array size is 6 already, a cube array's 6 per cube)
+    const layers = r.target === TARGET.TEXTURE_3D ? 1 : r.array_size;
     const flags = r.target === TARGET.TEXTURE_3D ? C.SVGA3D_SURFACE_VOLUME : 0;
     this.gxw.command(GX.SURFACE_DEFINE, [r.id, r.info.svga, flags, 0, r.width, r.height,
         r.target === TARGET.TEXTURE_3D ? r.depth : 1, r.last_level + 1, layers, r.nr_samples > 1 ? r.nr_samples : 0, cube ? 1 : 0]);
@@ -421,7 +422,7 @@ function images(r)
     const out = [];
     if(r.is_buffer()) return [[0, 0, r.width, 1]];
     const volume = r.target === TARGET.TEXTURE_3D;
-    const layers = r.array_size * (r.target === TARGET.TEXTURE_CUBE ? 6 : 1);
+    const layers = r.array_size;
     for(let level = 0; level <= r.last_level; level++)
     {
         const w = Math.max(1, r.width >> level), h = Math.max(1, r.height >> level);

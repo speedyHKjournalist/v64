@@ -129,7 +129,9 @@ __attribute__((used)) void start_c(long *p)
     F(void, glPolygonOffset, (GLfloat, GLfloat)) \
     F(void, glGenQueries, (GLsizei, GLuint *)) F(void, glBeginQuery, (GLenum, GLuint)) F(void, glEndQuery, (GLenum)) \
     F(void, glGetQueryObjectuiv, (GLuint, GLenum, GLuint *)) F(void, glDeleteQueries, (GLsizei, const GLuint *)) \
-    F(void, glClearBufferfv, (GLenum, GLint, const GLfloat *)) F(void, glClearBufferuiv, (GLenum, GLint, const GLuint *))
+    F(void, glClearBufferfv, (GLenum, GLint, const GLfloat *)) F(void, glClearBufferuiv, (GLenum, GLint, const GLuint *)) \
+    F(void, glTexBuffer, (GLenum, GLenum, GLuint)) \
+    F(void, glTexImage2DMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLboolean))
 
 #define DECLARE(ret, name, args) static ret (*name) args;
 GL_FUNCTIONS(DECLARE)
@@ -263,6 +265,19 @@ GL_FUNCTIONS(DECLARE)
 #define GL_VERSION 0x1F02
 #define GL_RENDERER 0x1F01
 #define GL_COLOR 0x1800
+#define GL_TEXTURE_RECTANGLE 0x84F5
+#define GL_TEXTURE_BUFFER 0x8C2A
+#define GL_TEXTURE_2D_MULTISAMPLE 0x9100
+#define GL_CLIP_DISTANCE0 0x3000
+#define GL_GEOMETRY_SHADER 0x8DD9
+#define GL_DEPTH_COMPONENT32F 0x8CAC
+#define GL_RGBA32UI 0x8D70
+#define GL_RGBA8I 0x8D8E
+#define GL_R32I 0x8235
+#define GL_UNSIGNED_INT_IMM 0
+#define EGL_OPENGL_API 0x30A2
+#define EGL_CONTEXT_OPENGL_PROFILE_MASK 0x30FD
+#define EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT 0x1
 
 // ---------------------------------------------------------------------------
 
@@ -416,6 +431,26 @@ static GLuint program2(const char *vs, const char *fs, int count, const char *co
 static GLuint program(const char *vs, const char *fs)
 {
     return program2(vs, fs, 0, 0, 0);
+}
+
+static GLuint program_gs(const char *vs, const char *gs, const char *fs)
+{
+    GLuint p = glCreateProgram();
+    GLuint v = shader(GL_VERTEX_SHADER, vs), g = shader(GL_GEOMETRY_SHADER, gs), f = shader(GL_FRAGMENT_SHADER, fs);
+    glAttachShader(p, v);
+    glAttachShader(p, g);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if(!ok)
+    {
+        char log[1024];
+        glGetProgramInfoLog(p, sizeof(log), 0, log);
+        printf("link: %s\n", log);
+    }
+    glUseProgram(p);
+    return p;
 }
 
 /** A framebuffer of a 64 x 64 RGBA8 texture, maybe with depth and stencil */
@@ -905,6 +940,304 @@ static void test_flat_indexed(void)
     finish("flat-indexed-fan", 1);
 }
 
+
+/** A depth texture drawn into, then sampled with a comparison */
+static void test_shadow(void)
+{
+    // the depth: a gradient from left (0) to right (1)
+    GLuint depth;
+    glGenTextures(1, &depth);
+    glBindTexture(GL_TEXTURE_2D, depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, W, H, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    GLuint f;
+    glGenFramebuffers(1, &f);
+    glBindFramebuffer(GL_FRAMEBUFFER, f);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+    glViewport(0, 0, W, H);
+    glClearDepthf(1.0f);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    fresh_vao();
+    program(VS_HEADER "in vec2 p; void main() { gl_Position = vec4(p, p.x, 1.0); }", FS_HEADER "out vec4 o; void main() { o = vec4(1.0); }");
+    vbo(0, 2, quad, sizeof(quad));
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &f);
+    // compared with a reference that rises from bottom to top
+    target(0);
+    fresh_vao();
+    GLuint p = program(VS_HEADER "in vec2 p; out vec2 t; void main() { t = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }",
+        FS_HEADER "uniform highp sampler2DShadow s; in vec2 t; out vec4 o; void main() { float r = texture(s, vec3(t, t.y)); o = vec4(r, t.x, 0.0, 1.0); }");
+    vbo(0, 2, quad, sizeof(quad));
+    glBindTexture(GL_TEXTURE_2D, depth);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    glUniform1i(glGetUniformLocation(p, "s"), 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // (along the diagonal the depth and the reference meet: rounding decides)
+    finish("shadow-sampler", 2);
+    glDeleteTextures(1, &depth);
+}
+
+/** A cube map, a 3D texture and an array, sampled */
+static void test_texture_kinds(void)
+{
+    target(0);
+    fresh_vao();
+    GLuint p = program(VS_HEADER "in vec2 p; out vec2 t; void main() { t = p; gl_Position = vec4(p, 0.0, 1.0); }",
+        FS_HEADER "uniform samplerCube c; uniform highp sampler3D v; uniform highp sampler2DArray a; in vec2 t; out vec4 o;\n"
+        "void main() { vec2 u = t * 0.5 + 0.5;\n"
+        "  if(t.y > 0.0) o = texture(c, vec3(t.x * 2.0, 1.0, t.y * 3.0 - 1.5));\n"
+        "  else if(t.x < 0.0) o = texture(v, vec3(u.x * 2.0, u.y * 2.0, fract(u.x * 4.0)));\n"
+        "  else o = texture(a, vec3(fract(u * 4.0), floor(u.x * 6.0) - 3.0)); }");
+    vbo(0, 2, quad, sizeof(quad));
+    GLuint tex[3];
+    glGenTextures(3, tex);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex[0]);
+    for(int face = 0; face < 6; face++)
+    {
+        unsigned char texels[2 * 2 * 4];
+        for(int i = 0; i < 4; i++)
+        {
+            texels[4 * i] = face & 1 ? 255 : 40 * i; texels[4 * i + 1] = face & 2 ? 255 : 60; texels[4 * i + 2] = face & 4 ? 255 : 30 * face; texels[4 * i + 3] = 255;
+        }
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glActiveTexture(GL_TEXTURE0 + 1);
+    glBindTexture(GL_TEXTURE_3D, tex[1]);
+    static unsigned char volume[4 * 4 * 4 * 4];
+    for(int i = 0; i < 64; i++) { volume[4 * i] = (i & 3) * 80; volume[4 * i + 1] = (i >> 2 & 3) * 80; volume[4 * i + 2] = (i >> 4) * 80; volume[4 * i + 3] = 255; }
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 4, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, volume);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glActiveTexture(GL_TEXTURE0 + 2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex[2]);
+    static unsigned char layers[2 * 2 * 3 * 4];
+    for(int i = 0; i < 12; i++) { layers[4 * i] = i / 4 == 0 ? 255 : 0; layers[4 * i + 1] = i / 4 == 1 ? 255 : 0; layers[4 * i + 2] = i / 4 == 2 ? 255 : (i & 3) * 60; layers[4 * i + 3] = 255; }
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 2, 2, 3, 0, GL_RGBA, GL_UNSIGNED_BYTE, layers);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glUniform1i(glGetUniformLocation(p, "c"), 0);
+    glUniform1i(glGetUniformLocation(p, "v"), 1);
+    glUniform1i(glGetUniformLocation(p, "a"), 2);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    finish("cube-3d-array", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glDeleteTextures(3, tex);
+}
+
+/** Each cube face in a stripe of its own (2 x 2 texels: its orientation), then each layer of an array */
+static void test_cube_faces(void)
+{
+    target(0);
+    fresh_vao();
+    GLuint p = program(VS_HEADER "in vec2 p; out vec2 t; void main() { t = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }",
+        FS_HEADER "uniform samplerCube c; uniform highp sampler2DArray a; in vec2 t; out vec4 o;\n"
+        "void main() { float k = floor(t.x * 6.0); vec2 u = vec2(fract(t.x * 6.0), t.y * 2.0) * 1.6 - 0.8;\n"
+        "  if(t.y < 0.5) { o = texture(a, vec3(fract(t.x * 4.0), t.y * 2.0, floor(t.x * 4.0))); return; }\n"
+        "  u = vec2(fract(t.x * 6.0), t.y * 2.0 - 1.0) * 1.6 - 0.8;\n"
+        "  vec3 d = k == 0.0 ? vec3(1.0, u.y, u.x) : k == 1.0 ? vec3(-1.0, u.y, u.x) : k == 2.0 ? vec3(u.x, 1.0, u.y) :\n"
+        "    k == 3.0 ? vec3(u.x, -1.0, u.y) : k == 4.0 ? vec3(u.x, u.y, 1.0) : vec3(u.x, u.y, -1.0);\n"
+        "  o = texture(c, d); }");
+    vbo(0, 2, quad, sizeof(quad));
+    GLuint tex[2];
+    glGenTextures(2, tex);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex[0]);
+    for(int face = 0; face < 6; face++)
+    {
+        unsigned char texels[2 * 2 * 4];
+        for(int i = 0; i < 4; i++)
+        {
+            texels[4 * i] = face * 40 + 35; texels[4 * i + 1] = i & 1 ? 230 : 20; texels[4 * i + 2] = i & 2 ? 230 : 20; texels[4 * i + 3] = 255;
+        }
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glActiveTexture(GL_TEXTURE0 + 1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex[1]);
+    static unsigned char layers[2 * 2 * 4 * 4];
+    for(int i = 0; i < 16; i++) { layers[4 * i] = (i / 4) * 70 + 20; layers[4 * i + 1] = i & 1 ? 230 : 20; layers[4 * i + 2] = i & 2 ? 230 : 20; layers[4 * i + 3] = 255; }
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 2, 2, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, layers);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glUniform1i(glGetUniformLocation(p, "c"), 0);
+    glUniform1i(glGetUniformLocation(p, "a"), 1);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    finish("cube-faces-array-layers", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glDeleteTextures(2, tex);
+}
+
+/** An integer render target, read back as integers */
+static void test_integer_target(void)
+{
+    target(0);
+    GLuint t;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, 32, 32, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+    const GLuint clear[] = { 7, 70000, 0xFFFFFFF0u, 3 };
+    glClearBufferuiv(GL_COLOR, 0, clear);
+    glViewport(0, 0, 32, 32);
+    fresh_vao();
+    program(VS_HEADER "in vec2 p; flat out uint k; void main() { k = uint(gl_VertexID) * 1000u + 5u; gl_Position = vec4(p * 0.5, 0.0, 1.0); }",
+        FS_HEADER "flat in uint k; out uvec4 o; void main() { o = uvec4(k, uint(gl_FragCoord.x) << 20, 0x80000000u | uint(gl_FragCoord.y), 9u); }");
+    vbo(0, 2, quad, sizeof(quad));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, 32, 32, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pixels);
+    result("integer-target", pixels, 32 * 32 * 16, 0, 0);
+    glViewport(0, 0, W, H);
+    finish(0, 0);
+    glDeleteTextures(1, &t);
+}
+
+// ---------------------------------------------------------------------------
+// OpenGL 3.3 core
+
+#define VS33 "#version 330 core\n"
+
+/** A geometry shader: points into quads, with a varying of its own */
+static void test_geometry_shader(void)
+{
+    target(0);
+    fresh_vao();
+    program_gs(VS33 "in vec2 p; out vec3 c; void main() { c = vec3(p * 0.5 + 0.5, 0.25); gl_Position = vec4(p, 0.0, 1.0); }",
+        VS33 "layout(points) in; layout(triangle_strip, max_vertices = 4) out; in vec3 c[]; out vec3 color; out vec2 corner;\n"
+        "void main() { for(int i = 0; i < 4; i++) { vec2 d = vec2(i & 1, i >> 1) * 2.0 - 1.0; corner = d; color = c[0];\n"
+        "  gl_Position = gl_in[0].gl_Position + vec4(d * 0.15, 0.0, 0.0); EmitVertex(); } EndPrimitive(); }",
+        VS33 "in vec3 color; in vec2 corner; out vec4 o; void main() { o = vec4(color, 1.0) * (1.0 - 0.5 * length(corner) / 1.5); }");
+    const float points[] = { -0.6f, -0.6f, 0.6f, -0.5f, 0.0f, 0.0f, -0.5f, 0.6f, 0.6f, 0.6f };
+    vbo(0, 2, points, sizeof(points));
+    glDrawArrays(GL_POINTS, 0, 5);
+    finish("geometry-shader", 2);
+}
+
+/** gl_ClipDistance: the triangle cut along a line */
+static void test_clip_distance(void)
+{
+    target(0);
+    fresh_vao();
+    program(VS33 "in vec2 p; out vec3 c; void main() { c = vec3(1.0, p * 0.5 + 0.5); gl_ClipDistance[0] = p.x + p.y * 0.5; gl_Position = vec4(p, 0.0, 1.0); }",
+        VS33 "in vec3 c; out vec4 o; void main() { o = vec4(c, 1.0); }");
+    glEnable(GL_CLIP_DISTANCE0);
+    const float p[] = { -0.9f, -0.9f, 0.9f, -0.9f, 0.0f, 0.9f };
+    vbo(0, 2, p, sizeof(p));
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_CLIP_DISTANCE0);
+    finish("clip-distance", 2);
+}
+
+/** Rectangle textures, buffer textures, texture() on an integer texture */
+static void test_texture_33(void)
+{
+    target(0);
+    fresh_vao();
+    GLuint p = program(VS33 "in vec2 p; out vec2 t; void main() { t = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }",
+        VS33 "uniform sampler2DRect r; uniform samplerBuffer b; uniform isampler2D i; in vec2 t; out vec4 o;\n"
+        "void main() { if(t.y < 0.5) o = texture(r, t * vec2(5.0, 6.0));\n"
+        "  else if(t.x < 0.5) o = texelFetch(b, int(t.x * 16.0));\n"
+        "  else o = vec4(texture(i, t)) / 255.0; }");
+    vbo(0, 2, quad, sizeof(quad));
+    GLuint tex[3], buffer;
+    glGenTextures(3, tex);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_RECTANGLE, tex[0]);
+    unsigned char rect[5 * 3 * 4];
+    for(int k = 0; k < 15; k++) { rect[4 * k] = k * 17; rect[4 * k + 1] = 255 - k * 17; rect[4 * k + 2] = k & 1 ? 200 : 50; rect[4 * k + 3] = 255; }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA8, 5, 3, 0, GL_RGBA, GL_UNSIGNED_BYTE, rect);
+    glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glActiveTexture(GL_TEXTURE0 + 1);
+    float values[16 * 4];
+    for(int k = 0; k < 64; k++) values[k] = (k * 7 % 16) / 15.0f;
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_TEXTURE_BUFFER, buffer);
+    glBufferData(GL_TEXTURE_BUFFER, sizeof(values), values, GL_STATIC_DRAW);
+    glBindTexture(GL_TEXTURE_BUFFER, tex[1]);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, buffer);
+    glActiveTexture(GL_TEXTURE0 + 2);
+    glBindTexture(GL_TEXTURE_2D, tex[2]);
+    signed char ints[4 * 4 * 4];
+    for(int k = 0; k < 64; k++) ints[k] = (k * 13) & 127;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8I, 4, 4, 0, GL_RGBA_INTEGER, GL_BYTE, ints);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glUniform1i(glGetUniformLocation(p, "r"), 0);
+    glUniform1i(glGetUniformLocation(p, "b"), 1);
+    glUniform1i(glGetUniformLocation(p, "i"), 2);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    finish("rect-buffer-integer-textures", 1);
+    glActiveTexture(GL_TEXTURE0);
+    glDeleteTextures(3, tex);
+    glDeleteBuffers(1, &buffer);
+}
+
+/** A multisampled texture drawn into, then read sample by sample */
+static void test_multisample_texture(void)
+{
+    GLuint ms, f;
+    glGenTextures(1, &ms);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, ms);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8, W, H, 1);
+    glGenFramebuffers(1, &f);
+    glBindFramebuffer(GL_FRAMEBUFFER, f);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, ms, 0);
+    glViewport(0, 0, W, H);
+    glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    fresh_vao();
+    program(VS33 "in vec2 p; void main() { gl_Position = vec4(p * 0.5, 0.0, 1.0); }", VS33 "out vec4 o; void main() { o = vec4(1.0, 0.0, 0.5, 1.0); }");
+    vbo(0, 2, quad, sizeof(quad));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &f);
+    target(0);
+    fresh_vao();
+    program(VS33 "in vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }",
+        VS33 "uniform sampler2DMS s; out vec4 o; void main() { ivec2 at = ivec2(gl_FragCoord.xy); o = vec4(0.0);\n"
+        "  for(int i = 0; i < 4; i++) o += texelFetch(s, at, i) * 0.25; }");
+    vbo(0, 2, quad, sizeof(quad));
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, ms);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // (the quad's edges: sample positions differ between GPUs)
+    finish("multisample-texture", 2);
+    glDeleteTextures(1, &ms);
+}
+
+static void run_gl33(EGLDisplay display)
+{
+    eglBindAPI(EGL_OPENGL_API);
+    const EGLint attributes[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE };
+    EGLContext context = eglCreateContext(display, 0, 0, attributes);
+    if(!context || !eglMakeCurrent(display, 0, 0, context))
+    {
+        printf("GLTEST gl33 FAIL no context (%x)\n", eglGetError());
+        failures++;
+        return;
+    }
+    vao = 0;
+    printf("GLTEST renderer %s, %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
+    test_geometry_shader();
+    test_clip_distance();
+    test_texture_33();
+    test_multisample_texture();
+}
+
 int main(int argc, char **argv, char **envp)
 {
     mode_ref = argc > 1 && !strcmp(argv[1], "ref");
@@ -941,6 +1274,11 @@ int main(int argc, char **argv, char **envp)
     test_blit();
     test_primitives();
     test_flat_indexed();
+    test_shadow();
+    test_texture_kinds();
+    test_cube_faces();
+    test_integer_target();
+    run_gl33(display);
     printf("GLTEST done %d failures\n", failures);
     fflush(0);
     return 0;

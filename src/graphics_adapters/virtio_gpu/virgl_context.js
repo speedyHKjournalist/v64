@@ -587,7 +587,8 @@ VirglContext.prototype.create_view = function(sub, p)
     {
         const first_level = p[4] & 0xFF, last_level = p[4] >>> 8 & 0xFF;
         const first_layer = p[3] & 0xFFFF, last_layer = p[3] >>> 16;
-        desc = [first_level, last_level - first_level + 1, first_layer, Math.max(1, last_layer - first_layer + 1)];
+        // (SVGA3dShaderResourceViewDesc: most detailed mip, first slice, mips, slices)
+        desc = [first_level, first_layer, last_level - first_level + 1, Math.max(1, last_layer - first_layer + 1)];
     }
     o.defined = true;
     sub.dx(C.SVGA_3D_CMD_DX_DEFINE_SHADERRESOURCE_VIEW, [handle, p[1], info.svga, resource_dimension(r), ...desc]);
@@ -721,8 +722,8 @@ VirglContext.prototype.clear = function(sub, p)
         const s = sub.objects.get(handle);
         if(!s || !s.defined || s.depth) return;
         // integer targets get their values as integers
-        const color = [1, 2, 3, 4].map(k => s.integer ? f32.bits(s.signed ? p[k] | 0 : p[k] >>> 0) : p[k]);
-        sub.dx(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, [handle, ...color]);
+        if(s.integer) sub.gx(GX.CLEAR_RTV_INTEGER, [sub.cid, handle, s.signed ? 1 : 0, p[1], p[2], p[3], p[4]]);
+        else sub.dx(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, [handle, p[1], p[2], p[3], p[4]]);
     });
     if(buffers & 3 && sub.fb.zsurf)
     {
@@ -869,6 +870,9 @@ VirglContext.prototype.draw = function(sub, p)
         swizzles: view_swizzles(sub, PIPE_SHADER.FRAGMENT),
         flatshade: !!(s0 & 1),
     };
+    // GL's clip distances (the rasterizer state's clip_plane_enable)
+    const clip_enable = rs && rs.kind === OBJECT.RASTERIZER ? rs.words[3] >>> 24 & 0xFF : 0;
+    if(clip_enable) fs_key.clip_enable = clip_enable;
     if(dsa && dsa.alpha)
     {
         fs_key.alpha_func = dsa.alpha.func;
