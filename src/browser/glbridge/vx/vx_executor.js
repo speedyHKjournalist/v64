@@ -23,6 +23,7 @@
         SET_VERTEX_BUFFER: 24, SET_INDEX_BUFFER: 25, SET_PUSH_CONSTANTS: 26, SET_VIEWPORT: 27, SET_SCISSOR: 28,
         SET_BLEND_CONSTANTS: 29, SET_STENCIL_REFERENCE: 30, DRAW: 31, DRAW_INDEXED: 32, DRAW_INDIRECT: 33,
         DISPATCH: 34, DISPATCH_INDIRECT: 35, CLEAR_ATTACHMENTS: 36,
+        QUERY_POOL_CREATE: 37, BEGIN_QUERY: 38, END_QUERY: 39, COPY_QUERY_RESULTS: 40, TEXTURE_READ: 41, TEXTURE_WRITE: 42,
     };
     // where the bundle is: naga's wasm is beside it
     const SCRIPT = typeof document !== "undefined" && document.currentScript ? document.currentScript.src : null;
@@ -72,6 +73,9 @@
             this.naga = null;
             this.pass = null;
             this.computePass = null;
+            this.queryResolves = [];
+            this.activeQuery = -1;
+            this.ones = null;
             this.resetState();
         }
 
@@ -110,6 +114,7 @@
 
         release(object) {
             if (object.buffer) object.buffer.destroy();
+            if (object.querySet) object.querySet.destroy();
             if (object.texture && object.kind === "texture") object.texture.destroy();
         }
 
@@ -220,6 +225,24 @@
                 case VX.DISPATCH: return this.dispatch(b, false);
                 case VX.DISPATCH_INDIRECT: return this.dispatch(b, true);
                 case VX.CLEAR_ATTACHMENTS: return this.clearAttachments(this.json(b, 0));
+                case VX.QUERY_POOL_CREATE:
+                    if (b[1] === 0) this.objects.set(b[0], { kind: "queries", querySet: this.device.createQuerySet({ type: "occlusion", count: Math.max(1, b[2]) }) });
+                    return;
+                case VX.BEGIN_QUERY:
+                    if (this.pass && this.passInfo.occlusion === b[0]) { this.pass.beginOcclusionQuery(b[1]); this.activeQuery = b[1]; }
+                    else this.warn("query-outside", "an occlusion query outside of a render pass, or of another pool than the pass's");
+                    return;
+                case VX.END_QUERY: {
+                    if (!this.pass || this.activeQuery !== b[1]) return;
+                    this.pass.endOcclusionQuery();
+                    this.activeQuery = -1;
+                    const pool = this.objects.get(b[0]), memory = this.memory(b[2]);
+                    if (pool && memory) this.queryResolves.push([pool.querySet, b[1], memory]);
+                    return;
+                }
+                case VX.COPY_QUERY_RESULTS: return this.copyQueryResults(b);
+                case VX.TEXTURE_READ: return this.readTexture(b);
+                case VX.TEXTURE_WRITE: return this.writeTexture(b);
             }
             this.warn("op" + op, "unknown VX op " + op);
         }
@@ -235,8 +258,41 @@
         }
 
         endPasses() {
-            if (this.pass) { this.pass.end(); this.pass = null; }
+            if (this.pass) { this.pass.end(); this.pass = null; this.resolveQueries(); }
             if (this.computePass) { this.computePass.end(); this.computePass = null; }
+        }
+
+        /** the occlusion queries a pass ended: their results into their pools' memory (through 256-aligned places) */
+        resolveQueries() {
+            const list = this.queryResolves;
+            if (!list.length) return;
+            this.queryResolves = [];
+            const scratch = this.scratch(list.length * 256, BUFFER.QUERY_RESOLVE | BUFFER.COPY_SRC);
+            const encoder = this.encoder();
+            list.forEach(([set, index, memory], i) => {
+                encoder.resolveQuerySet(set, index, 1, scratch, i * 256);
+                encoder.copyBufferToBuffer(scratch, i * 256, memory.buffer, index * 8, 8);
+            });
+        }
+
+        /** vkCmdCopyQueryPoolResults: the u64 results, or their low halves, and availability (1: run in order, they are done) */
+        copyQueryResults(b) {
+            const [from, first, count, to, low, high, stride, flags] = b;
+            const src = this.memory(from), dst = this.memory(to);
+            if (!src || !dst) return;
+            const offset = low + high * 0x100000000, size = flags & 1 ? 8 : 4;
+            if (!this.ones) {
+                this.ones = this.device.createBuffer({ size: 8, usage: BUFFER.COPY_SRC, mappedAtCreation: true });
+                new Uint32Array(this.ones.getMappedRange()).set([1, 0]);
+                this.ones.unmap();
+            }
+            const encoder = this.encoder();
+            for (let i = 0; i < count; i++) {
+                const at = offset + i * stride;
+                if (at + size > dst.buffer.size) break;
+                encoder.copyBufferToBuffer(src.buffer, (first + i) * 8, dst.buffer, at, size);
+                if (flags & 4 && at + 2 * size <= dst.buffer.size) encoder.copyBufferToBuffer(this.ones, 0, dst.buffer, at + size, size);
+            }
         }
 
         flushEncoder() {
@@ -452,6 +508,43 @@
                 return { aspect: t.f.hasStencil ? "depth-only" : "all", bytes: t.f.gpu === "depth16unorm" ? 2 : 4 };
             }
             return { aspect: "all", bytes: t.f.bytes };
+        }
+
+        /** a texture's image (one mip, one layer or slice, one aspect), for a snapshot: null where WebGPU cannot copy it (multisampled, 24-bit depth) */
+        readTexture(b) {
+            const [id, aspectMask, mip, layer, request] = b;
+            const t = this.texture(id);
+            const a = t && t.samples <= 1 ? this.copyAspect(t, aspectMask) : null;
+            if (!a) return this.respond(request, null);
+            const w = Math.max(1, t.width >> mip), h = Math.max(1, t.height >> mip);
+            const rowBytes = w * a.bytes, aligned = align(rowBytes, 256);
+            const target = this.device.createBuffer({ size: aligned * h, usage: BUFFER.MAP_READ | BUFFER.COPY_DST });
+            this.encoder().copyTextureToBuffer({ texture: t.texture, mipLevel: mip, origin: [0, 0, layer], aspect: a.aspect },
+                { buffer: target, bytesPerRow: aligned, rowsPerImage: h }, [w, h, 1]);
+            this.flushEncoder();
+            this.pending.push(target.mapAsync(1).then(() => {
+                const all = new Uint8Array(target.getMappedRange()), out = new Uint8Array(rowBytes * h);
+                for (let r = 0; r < h; r++) out.set(all.subarray(r * aligned, r * aligned + rowBytes), r * rowBytes);
+                target.destroy();
+                this.respond(request, out);
+            }, () => { target.destroy(); this.respond(request, null); }));
+        }
+
+        /** a snapshot's image back into its texture (WebGPU writes no depth32float: those come back cleared) */
+        writeTexture(b) {
+            const [id, aspectMask, mip, layer, length] = b;
+            const t = this.texture(id);
+            const a = t ? this.copyAspect(t, aspectMask) : null;
+            if (!a || t.samples > 1) return;
+            if (t.f.gpu === "depth32float" || t.f.gpu === "depth32float-stencil8" && a.aspect === "depth-only") {
+                this.warn("restore-depth32", "32-bit depth comes back from a snapshot cleared");
+                return;
+            }
+            const w = Math.max(1, t.width >> mip), h = Math.max(1, t.height >> mip);
+            if (length < w * h * a.bytes) return;
+            this.flushEncoder();
+            this.device.queue.writeTexture({ texture: t.texture, mipLevel: mip, origin: [0, 0, layer], aspect: a.aspect },
+                new Uint8Array(b.buffer, b.byteOffset + 20, length), { bytesPerRow: w * a.bytes, rowsPerImage: h }, [w, h, 1]);
         }
 
         copyBufferImage(b) {
@@ -821,10 +914,14 @@
                     descriptor.depthStencilAttachment = ds;
                 }
             }
+            const queries = d.occlusion ? this.objects.get(d.occlusion) : null;
+            if (queries && queries.querySet) descriptor.occlusionQuerySet = queries.querySet;
             this.pass = this.encoder().beginRenderPass(descriptor);
+            this.activeQuery = -1;
             const first = d.colors.find(c => c) || d.depth;
             const firstView = first && this.objects.get(first.view);
-            this.passInfo = { colors: d.colors, depth: d.depth, samples: firstView && firstView.texture ? firstView.texture.samples : 1 };
+            this.passInfo = { colors: d.colors, depth: d.depth, samples: firstView && firstView.texture ? firstView.texture.samples : 1,
+                occlusion: queries && queries.querySet ? d.occlusion : 0 };
             this.state.passWidth = d.width;
             this.state.passHeight = d.height;
             this.state.pipelineApplied = false;
@@ -833,7 +930,7 @@
         }
 
         endPass() {
-            if (this.pass) { this.pass.end(); this.pass = null; }
+            if (this.pass) { this.pass.end(); this.pass = null; this.resolveQueries(); }
         }
 
         // ------------------------------------------------------------------

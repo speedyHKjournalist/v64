@@ -15,6 +15,7 @@
 
 import { COMMANDS, EXTENSIONS, VenusReader, VenusWriter, VK_XML_VERSION, WIRE_FORMAT_VERSION } from "./venus_protocol.js";
 import { dbg_log } from "../../log.js";
+import { encode_objects, decode_objects } from "./venus_state.js";
 import { LOG_VIRTIO } from "../../const.js";
 
 export const CAPSET_VENUS = 4;
@@ -145,7 +146,11 @@ export function Venus(gpu, vk)
     this.vk = vk;
     /** @type {!Map<number, !VenusContext>} */
     this.contexts = new Map();
-    this.stats = { commands: 0, replies: 0, rings: 0, waits: 0, errors: 0, unknown: {} };
+    // failures: the commands that answered an error, with the last one (VkResult)
+    // last_error: what made the last command fail (decoding, a handler), and in which command
+    this.stats = { commands: 0, replies: 0, rings: 0, waits: 0, errors: 0, unknown: {}, failures: {}, last_error: "" };
+    /** the command being run, for errors */
+    this.current = "";
     /** @type {?function(string, !Object)} a harness's hook: each command as decoded */
     this.on_command = null;
     this.last_alive = 0;
@@ -155,6 +160,77 @@ Venus.prototype.reset = function()
 {
     for(const ctx of this.contexts.values()) this.vk.destroy_context(ctx);
     this.contexts.clear();
+};
+
+// ---------------------------------------------------------------------------
+// Snapshots: the contexts (rings, reply streams, the model's objects); the
+// commands that waited are read again from where their rings stopped
+
+/** @return {!Array} */
+Venus.prototype.get_state = function()
+{
+    const contexts = [];
+    for(const ctx of this.contexts.values())
+    {
+        const rings = [...ctx.rings.values()].map(r => [r.id, r.blob.id, r.head_offset, r.tail_offset, r.status_offset, r.buffer_offset,
+            r.buffer_size, r.extra_offset, r.extra_size, r.head, r.fatal]);
+        const reply = ctx.reply ? [ctx.reply.blob.id, ctx.reply.offset, ctx.reply.size, ctx.reply.position] : null;
+        const objects = encode_objects(ctx.objects, o => o instanceof VenusContext ? ["ctx", o.id] : o instanceof VenusBlob ? ["blob", o.id] : null);
+        contexts.push([ctx.id, rings, reply, [...ctx.virtqueue_seqnos], objects, ctx.physical_device]);
+    }
+    return [contexts, this.vk.get_state()];
+};
+
+/**
+ * @param {!Array} state from get_state
+ * @param {function(number): VenusBlob} blob_of the restored blob of a resource id
+ */
+Venus.prototype.set_state = function(state, blob_of)
+{
+    // (the renderer was reset: its objects are gone already)
+    this.contexts.clear();
+    const [contexts, vk_state] = state;
+    for(const [id, rings, reply, seqnos, objects, physical_device] of contexts)
+    {
+        const ctx = new VenusContext(this, id);
+        this.contexts.set(id, ctx);
+        ctx.physical_device = physical_device;
+        ctx.objects = decode_objects(objects, ([kind, x]) => kind === "ctx" ? this.contexts.get(x) || null : kind === "blob" ? blob_of(x) : null);
+        for(const [ring_id, blob_id, head_offset, tail_offset, status_offset, buffer_offset, buffer_size, extra_offset, extra_size, head, fatal] of rings)
+        {
+            const blob = blob_of(blob_id);
+            if(!blob) continue;
+            const ring = new Ring(ring_id, blob, { headOffset: head_offset, tailOffset: tail_offset, statusOffset: status_offset,
+                bufferOffset: buffer_offset, bufferSize: buffer_size, extraOffset: extra_offset, extraSize: extra_size });
+            ring.head = head;
+            ring.fatal = fatal;
+            ctx.rings.set(ring_id, ring);
+        }
+        const reply_blob = reply && blob_of(reply[0]);
+        if(reply_blob) ctx.reply = { blob: reply_blob, offset: reply[1], size: reply[2], position: reply[3] };
+        ctx.virtqueue_seqnos = new Map(seqnos);
+    }
+    this.vk.set_state(vk_state, [...this.contexts.values()]);
+};
+
+/**
+ * Before a save: the rings run (the machine is stopped: nothing else runs
+ * them) until `idle` says the device's requests are done, for a while at most
+ * @param {function(): boolean} idle
+ * @return {!Promise}
+ */
+Venus.prototype.settle = function(idle)
+{
+    const deadline = Date.now() + 5000;
+    return new Promise(resolve => {
+        const step = () => {
+            for(const ctx of this.contexts.values()) this.run_rings(ctx);
+            this.vk.wake();
+            if(idle() || Date.now() > deadline) resolve(undefined);
+            else setTimeout(step, 5);
+        };
+        step();
+    });
 };
 
 /** @param {number} id */
@@ -279,7 +355,8 @@ Venus.prototype.resume = function(ctx, run)
         catch(e)
         {
             this.stats.errors++;
-            dbg_log("venus: " + (e && e.message || e), LOG_VIRTIO);
+            this.stats.last_error = (this.current || "decoding") + ": " + String(e && e.message || e).slice(0, 200);
+            dbg_log("venus: " + this.stats.last_error, LOG_VIRTIO);
             this.fatal(ctx, run);
             return;
         }
@@ -325,8 +402,10 @@ Venus.prototype.command = function(ctx, r)
 {
     const type = r.u32(), flags = r.u32();
     const entry = COMMANDS[type];
+    this.current = "";
     if(!entry) throw new Error("unknown command " + type);
     const name = entry[0];
+    this.current = name;
     const args = entry[1](r);
     this.stats.commands++;
     if(this.on_command) this.on_command(name, args);
@@ -336,6 +415,7 @@ Venus.prototype.command = function(ctx, r)
     if(!entry[2]) throw new Error(name + " has no reply");
     if(!wait)
     {
+        this.note_result(name, args);
         this.write_reply(ctx, entry[2], args);
         return null;
     }
@@ -343,6 +423,7 @@ Venus.prototype.command = function(ctx, r)
     return done => wait(() => {
         try
         {
+            this.note_result(name, args);
             this.write_reply(ctx, entry[2], args);
         }
         catch(e)
@@ -352,6 +433,12 @@ Venus.prototype.command = function(ctx, r)
         }
         done();
     });
+};
+
+/** an error a command answers, in the stats (VK_NOT_READY and VK_TIMEOUT are no errors) */
+Venus.prototype.note_result = function(name, args)
+{
+    if(typeof args.ret === "number" && args.ret < 0) this.stats.failures[name] = args.ret;
 };
 
 /**

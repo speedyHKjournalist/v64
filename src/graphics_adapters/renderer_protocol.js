@@ -88,6 +88,12 @@ export const VX = {
     DISPATCH: 34,           // x, y, z
     DISPATCH_INDIRECT: 35,  // memory, offset (64)
     CLEAR_ATTACHMENTS: 36,  // then JSON: attachments [{aspect, index, clear}], rects [{x, y, width, height}]
+    QUERY_POOL_CREATE: 37,  // id, VkQueryType, count (occlusion queries: a query set)
+    BEGIN_QUERY: 38,        // pool, query (in a render pass begun with the pool as its occlusion queries)
+    END_QUERY: 39,          // pool, query, memory: the result (u64) into the memory at query * 8 when the pass ends
+    COPY_QUERY_RESULTS: 40, // results memory, first, count, dst memory, dst offset (64), stride, VkQueryResultFlags
+    TEXTURE_READ: 41,       // texture, aspect, mip, layer or slice, request id: answered with the image's texels, rows packed
+    TEXTURE_WRITE: 42,      // texture, aspect, mip, layer or slice, length, then the texels (rows packed): a snapshot's contents
 };
 
 /**
@@ -103,6 +109,8 @@ export function GXWriter(magic)
     this.count = 0;
     /** @type {?function()} called before each command: the other stream is sent first */
     this.before = null;
+    /** @type {?function(number, !IArrayLike<number>, (Uint8Array|undefined))} sees each command (Venus keeps its creations for snapshots) */
+    this.listener = null;
 }
 
 GXWriter.prototype.empty = function()
@@ -135,6 +143,7 @@ GXWriter.prototype.reserve = function(dwords)
 GXWriter.prototype.command = function(op, dwords, bytes)
 {
     if(this.before) this.before();
+    if(this.listener) this.listener(op, dwords, bytes);
     const byte_count = bytes ? bytes.length : 0;
     const body = dwords.length + (byte_count + 3 >> 2);
     this.reserve(2 + body);

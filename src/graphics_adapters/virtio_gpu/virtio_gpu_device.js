@@ -1587,19 +1587,31 @@ VirtioGPU.prototype.prepare_save = function()
     const resources = /** @type {!Array<!Resource3D>} */ ([...this.resources.values()].filter(r => r.three_d));
     // (the mappings' newest bytes into their blobs, and back)
     this.upload_hostmem();
-    return new Promise(resolve => virgl.after_work(() => resolve(undefined))).then(() => virgl.save_contents(resources));
+    const venus = this.venus;
+    const done = () => new Promise(resolve => virgl.after_work(() => resolve(undefined)));
+    return done().then(() => virgl.save_contents(resources)).then(() => {
+        if(!venus) return undefined;
+        // Venus: the requests that wait (SUBMIT_3D) answered, the GPU's work
+        // done, then its memories' and images' contents read back
+        return venus.settle(() => !this.pending.length).then(done).then(() => venus.vk.save_contents());
+    });
 };
 
-/** 2: with the 3D resources and virgl's contexts */
-const STATE_VERSION = 2;
+/** 2: with the 3D resources and virgl's contexts; 3: with Venus's */
+const STATE_VERSION = 3;
 
 VirtioGPU.prototype.get_state = function()
 {
-    const resources = [], resources_3d = [], blobs = [];
+    const resources = [], resources_3d = [], blobs = [], venus_blobs = [];
     for(const found of this.resources.values())
     {
-        // (Venus's state is not saved yet)
-        if(found.venus) continue;
+        if(found.venus)
+        {
+            const b = /** @type {!VenusBlob} */ (found);
+            venus_blobs.push([b.id, b.ctx_id, b.blob_id, b.blob_flags, b.blob_size, b.map_offset,
+                b.map_offset >= 0 ? this.hostmem_bytes().slice(b.map_offset, b.map_offset + b.blob_size) : null]);
+            continue;
+        }
         if(found.three_d)
         {
             const r = /** @type {!Resource3D} */ (found);
@@ -1632,12 +1644,14 @@ VirtioGPU.prototype.get_state = function()
         this.virgl ? this.virgl.get_state() : null,
         blobs,
         this.scanouts.map(s => s.blob ? [s.blob.width, s.blob.height, s.blob.format, s.blob.stride, s.blob.offset] : null),
+        venus_blobs,
+        this.venus ? this.venus.get_state() : null,
     ];
 };
 
 VirtioGPU.prototype.set_state = function(state)
 {
-    if(state[0] !== 1 && state[0] !== STATE_VERSION)
+    if(state[0] !== 1 && state[0] !== 2 && state[0] !== STATE_VERSION)
     {
         throw new Error("virtio_gpu: unsupported state version " + state[0]);
     }
@@ -1706,6 +1720,23 @@ VirtioGPU.prototype.set_state = function(state)
             r.saved = null;
         }
         if(state[11]) this.virgl.set_state(state[11], id => this.resources.get(id) || null);
+    }
+    // Venus: its blobs, mapped where they were, then its contexts
+    for(const [id, ctx_id, blob_id, flags, size, map_offset, mapping] of state[14] || [])
+    {
+        const blob = new VenusBlob(id, ctx_id, blob_id, flags, size);
+        if(map_offset >= 0 && mapping && this.hostmem_region >= 0)
+        {
+            blob.map_offset = map_offset;
+            this.hostmem_bytes().set(mapping, map_offset);
+            this.mapped.set(id, blob);
+        }
+        this.resources.set(id, blob);
+    }
+    if(this.venus)
+    {
+        if(state[15]) this.venus.set_state(state[15], id => { const r = this.resources.get(id); return r && r.venus ? /** @type {!VenusBlob} */ (r) : null; });
+        else this.venus.reset();
     }
     state[6].forEach(([enabled, host_width, host_height, resource_id, x, y, width, height], i) => {
         const s = this.scanouts[i];

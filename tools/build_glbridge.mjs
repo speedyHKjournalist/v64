@@ -25,6 +25,17 @@ const { gx_formats } = await import(new URL("tools/svga_gx_formats.mjs", root));
 const formats = "globalThis.V86SVGADXFormats = " + JSON.stringify(gx_formats()) + ";\n" +
     // VX's, the Venus device's (src/graphics_adapters/virtio_gpu/venus_device_info.js)
     "globalThis.V86VenusFormats = " + JSON.stringify((await import(new URL("src/graphics_adapters/virtio_gpu/venus_device_info.js", root))).FORMATS) + ";";
+// VX's opcodes: the executor's table is the device's (renderer_protocol.js)
+{
+    const { VX } = await import(new URL("src/graphics_adapters/renderer_protocol.js", root));
+    const executor = contents[files.indexOf("vx/vx_executor.js")];
+    const table = executor.slice(executor.indexOf("const VX = {"), executor.indexOf("};", executor.indexOf("const VX = {")));
+    const theirs = Object.fromEntries([...table.matchAll(/([A-Z_]+): (\d+)/g)].map(m => [m[1], +m[2]]));
+    for(const [name, op] of Object.entries(VX))
+    {
+        if(theirs[name] !== op) throw new Error("vx_executor.js: VX." + name + " is " + theirs[name] + ", renderer_protocol.js says " + op);
+    }
+}
 const worker = await read_file(new URL("d3d9-webgpu/d3d9_shader_worker.js", source), "utf8");
 const journal_worker = await read_file(new URL("graphics_journal_worker.js", source), "utf8");
 // The device half alone, for the CPU worker (importScripts)

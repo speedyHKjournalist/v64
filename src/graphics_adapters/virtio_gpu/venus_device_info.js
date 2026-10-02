@@ -84,6 +84,9 @@ export const STYPE = {
     EXTERNAL_IMAGE_FORMAT_PROPERTIES: 1000071001,
     PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO: 1000071000,
     SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES: 1000156005,
+    SEMAPHORE_TYPE_CREATE_INFO: 1000207002,
+    DYNAMIC_RENDERING_FEATURES: 1000044003,
+    DEPTH_STENCIL_RESOLVE_PROPERTIES: 1000199000,
 };
 
 const KB = 1024, MB = 1024 * 1024;
@@ -229,6 +232,8 @@ const FEATURES = {
     depthBiasClamp: 1,
     samplerAnisotropy: 1,
     fragmentStoresAndAtomics: 1,
+    // (not occlusionQueryPrecise: WebGPU promises only zero or not, and
+    // Chrome's Metal backend answers 1)
 };
 
 // VK_SUBGROUP_FEATURE_BASIC_BIT, VK_SHADER_STAGE_COMPUTE_BIT
@@ -245,6 +250,8 @@ const VULKAN_1_1_PROPERTIES = {
 
 /** Properties of chain structs, by sType */
 const CHAIN_PROPERTIES = {
+    // (VK_RESOLVE_MODE_SAMPLE_ZERO_BIT, as required: WebGPU resolves no depth, see the deviations)
+    [STYPE.DEPTH_STENCIL_RESOLVE_PROPERTIES]: { supportedDepthResolveModes: 1, supportedStencilResolveModes: 1, independentResolveNone: 0, independentResolve: 0 },
     [STYPE.VULKAN_1_1_PROPERTIES]: VULKAN_1_1_PROPERTIES,
     [STYPE.ID_PROPERTIES]: { deviceUUID: DEVICE_UUID, driverUUID: DRIVER_UUID, deviceLUID: [0, 0, 0, 0, 0, 0, 0, 0], deviceNodeMask: 0, deviceLUIDValid: 0 },
     [STYPE.SUBGROUP_PROPERTIES]: { subgroupSize: SUBGROUP.subgroupSize, supportedStages: SUBGROUP.subgroupSupportedStages,
@@ -262,6 +269,7 @@ const CHAIN_PROPERTIES = {
 /** Features of chain structs, by sType (absent: all false) */
 const CHAIN_FEATURES = {
     [STYPE.TIMELINE_SEMAPHORE_FEATURES]: { timelineSemaphore: 1 },
+    [STYPE.DYNAMIC_RENDERING_FEATURES]: { dynamicRendering: 1 },
 };
 
 /**
@@ -302,7 +310,8 @@ export function features()
 
 // VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT
 export const QUEUE_FAMILIES = [
-    { queueFlags: 7, queueCount: 1, timestampValidBits: 0, minImageTransferGranularity: { width: 1, height: 1, depth: 1 } },
+    // (timestamps: the time the device makes the batch, in ns)
+    { queueFlags: 7, queueCount: 1, timestampValidBits: 64, minImageTransferGranularity: { width: 1, height: 1, depth: 1 } },
 ];
 
 const DEVICE_LOCAL = 1, HOST_VISIBLE = 2, HOST_COHERENT = 4, HOST_CACHED = 8;
@@ -461,8 +470,11 @@ export function image_format_properties(format, type, tiling, usage, flags)
     // VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT and the others need nothing more
     const depth = entry[1].includes("d");
     if(type === 2 && depth) return null;
-    // (sparse, protected and the like are not offered)
-    if(flags & ~(0x8 | 0x10 | 0x20 | 0x80)) return null;
+    // mutable format, cube and 2D array compatible, block texel view
+    // compatible, extended usage, alias (swapchain images have it: their
+    // memory is theirs alone here); sparse, protected and the like are not
+    // offered
+    if(flags & ~(0x8 | 0x10 | 0x20 | 0x80 | 0x100 | 0x400)) return null;
     const max = type === 0 ? [8192, 1, 1] : type === 1 ? [8192, 8192, 1] : [2048, 2048, 2048];
     const levels = Math.floor(Math.log2(Math.max(...max))) + 1;
     const multisample = type === 1 && entry[1].includes("m") && !(flags & 0x10) && !(usage & 0x8);
@@ -480,4 +492,18 @@ export const DEVICE_EXTENSIONS = {
     "VK_KHR_driver_properties": 1,
     // (the device keeps the values; one queue runs in order)
     "VK_KHR_timeline_semaphore": 2,
+    // sync files: the driver makes them itself (a SUBMIT_3D on the queue's
+    // timeline) and tells the device what they mean for the semaphore or
+    // fence (vkImportSemaphoreResourceMESA and friends); Venus offers
+    // VK_KHR_swapchain only when semaphores import them
+    "VK_KHR_external_semaphore_fd": 1,
+    "VK_KHR_external_fence_fd": 1,
+    // render passes without render pass objects (and what it needs)
+    "VK_KHR_create_renderpass2": 1,
+    "VK_KHR_depth_stencil_resolve": 1,
+    "VK_KHR_dynamic_rendering": 1,
 };
+
+// VkExternalSemaphoreHandleTypeFlagBits, VkExternalFenceHandleTypeFlagBits
+export const SEMAPHORE_SYNC_FD = 0x10;
+export const FENCE_SYNC_FD = 0x8;

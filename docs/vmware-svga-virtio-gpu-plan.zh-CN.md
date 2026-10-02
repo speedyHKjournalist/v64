@@ -580,7 +580,11 @@ Linux 客户机上 virtio-gpu 的 Vulkan。客户机用 Alpine 3.24 的 Mesa 26.
 | VK5 | WSI：交换链（软件路径）、同步 fd | weston 上 `vkcube` 正常 |
 | VK6 | 存档和恢复 | `vkcube` 运行中存档恢复后继续 |
 
-进度（2026-10-02）：VK0–VK3 完成。设备单元测试（`tests/devices/virtio_gpu_venus.js`、`venus_protocol.js`）通过；客户机里 `vulkaninfo` 跑通；`vktest` 的 21 个用例（传输、同步、绘制、深度、混合加多重采样、纹理、计算、`vkCmdClearAttachments`、vkcube 的着色器）在 Venus 上全部通过，结果和 lavapipe 一致。
+进度（2026-10-02）：VK0–VK6 完成。
+- VK0–VK3：设备单元测试（`tests/devices/virtio_gpu_venus.js`、`venus_protocol.js`）通过；客户机里 `vulkaninfo` 跑通；`vktest` 的传输、同步、绘制、深度、混合加多重采样、纹理、计算、`vkCmdClearAttachments`、vkcube 的着色器用例在 Venus 上全部通过，结果和 lavapipe 一致。
+- VK4：查询（遮挡查询用 WebGPU 的，一个 render pass 用一个查询池，模型向后看找出它；时间戳是设备生成批次的时间；结果在 fence 之前读回；`vkCmdCopyQueryPoolResults` 在 GPU 上拷贝）、二级命令缓冲、间接绘制、blit 生成 mip、存储图像、`VK_KHR_dynamic_rendering`。`vktest` 共 27 个用例，Venus 和 lavapipe 结果一致。WebGPU 的遮挡查询只保证"是否为零"（Chrome 的 Metal 后端给 1），所以不声明 `occlusionQueryPrecise`。
+- VK5：设备声明 `VK_KHR_external_semaphore_fd`/`_fence_fd`（SYNC_FD 可导入导出），Venus 才开 `VK_KHR_swapchain`；`vkImportSemaphoreResourceMESA`、`vkWaitSemaphoreResourceMESA`、`vkResetFenceResourceMESA` 按导出 sync file 的语义处理（挂起的信号交给 sync file 后不再落到对象上）。没有 dma-buf，Mesa 走软件 WSI：每次呈现把交换链图像拷进 host visible 缓冲（fence 前读回），再由 CPU 拷进 `wl_shm`。交换链图像带 `VK_IMAGE_CREATE_ALIAS_BIT`，格式检查原来拒绝它，这是 vkcube 一开始段错误的原因。**weston（pixman 渲染器）上 vkcube 正常，1000 帧 17 秒，约 59 fps**（`GPU_SCENARIO=vkcube`）。
+- VK6：模型记下每个渲染器对象的创建命令（内存、图像、视图、采样器、着色器、管线、查询池；被销毁但仍有管线在用的着色器也留着）。存档前把各环跑到设备的请求都答复、GPU 做完，再读回所有内存和图像的内容；存档里有上下文（环、回复流、模型对象的 JSON）、blob 及其映射、创建命令和内容；恢复时在渲染器里重建并填回。等待中的命令从环停下的地方重新读。vkcube 运行中存档再恢复，继续画（`vkcube-after-snapshot.png`）。多重采样图像和 24/32 位深度的内容不保存（WebGPU 拷不出或写不回）。
 
 ### 6.6 Windows 8.1 上的 virtio-gpu
 

@@ -13,7 +13,7 @@
 // or with GPU_RENDERER=chrome draws them on the GPU of a headless Chrome
 // GPU_OUT: the output directory (default build/x64-linux/gpu-<adapter>[-<level>]/)
 // SHOW_LOGS=1: echo the serial console; LINUX_GPU_TIMEOUT: ms (default 900000)
-// LINUX_GPU_MEMORY: MiB (default 1024; 1536 for the virgl scenario)
+// LINUX_GPU_MEMORY: MiB (default 1024; 1536 for the virgl and vkcube scenarios)
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -218,6 +218,45 @@ const SCENARIOS = {
             /STEP_VKTEST_DONE/],
         ["HOST stats", null],
     ],
+    // Venus's WSI (GPU_LEVEL=venus): vkcube on weston, through the driver's
+    // software WSI (no dma-buf: each frame copied into a host visible buffer,
+    // then into weston's wl_shm buffer); weston draws with pixman (Alpine
+    // 3.24's Mesa has no GL driver for virtio-gpu)
+    vkcube: [
+        ["mkdir -p /mnt/repo && tar -xf /dev/sda -C /mnt/repo && echo STEP_REPO_OK", /STEP_REPO_OK/],
+        // (the repository lacks two install_if packages: seatd-openrc, gstreamer-ptp-helper)
+        [APK + " mesa-vulkan-virtio mesa-vulkan-swrast vulkan-loader vulkan-tools weston weston-backend-drm weston-shell-desktop seatd >/tmp/apk.log 2>&1; " +
+            "echo STEP_APK_RC=$?; grep -i error /tmp/apk.log | head -5; command -v weston vkcube seatd >/dev/null && echo STEP_APK_PROGRAMS", /STEP_APK_PROGRAMS/],
+        [`modprobe ${DRIVER} && sleep 2 && ls /dev/dri && echo STEP_DRM_OK`, /STEP_DRM_OK/],
+        ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vulkaninfo 2>/dev/null | grep -E '(VK_KHR_swapchain|VK_KHR_external_semaphore_fd|VK_KHR_external_fence_fd) ' | sort -u; " +
+            "echo STEP_EXTENSIONS_DONE", /VK_KHR_swapchain[\s\S]*STEP_EXTENSIONS_DONE/],
+        ["seatd -g video >/tmp/seatd.log 2>&1 & sleep 1; export XDG_RUNTIME_DIR=/tmp/xdg; mkdir -p -m 700 $XDG_RUNTIME_DIR; " +
+            "(weston --backend=drm --renderer=pixman --shell=desktop --idle-time=0 --continue-without-input >/tmp/weston.log 2>&1 &); sleep 15; " +
+            "export WAYLAND_DISPLAY=$(ls $XDG_RUNTIME_DIR | grep -m1 '^wayland-[0-9]*$'); echo $WAYLAND_DISPLAY; " +
+            "[ -n \"$WAYLAND_DISPLAY\" ] || tail -25 /tmp/weston.log /tmp/seatd.log; echo STEP_WESTON_UP",
+            /wayland-\d[\s\S]*STEP_WESTON_UP/],
+        // what the Wayland surface offers (formats, present modes, extents)
+        ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vulkaninfo 2>&1 | sed -n '/Presentable Surfaces/,/Device Properties and Extensions/p' | " +
+            "grep -v -E '^\\s*$' | head -60; echo STEP_SURFACE_DONE", /STEP_SURFACE_DONE/],
+        // (lavapipe's first: vkcube itself on this weston)
+        ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json timeout 60 vkcube --wsi wayland --c 20 > /tmp/vkcube-lvp.log 2>&1; " +
+            "echo STEP_LVP_RC=$?; tail -5 /tmp/vkcube-lvp.log; dmesg | grep -i segfault | tail -3", /STEP_LVP_RC=/],
+        // (frames per second: the frames over the seconds they took)
+        ["S=$(date +%s); MESA_LOG_LEVEL=debug VN_DEBUG=result VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json timeout 120 vkcube --wsi wayland --c " +
+            (process.env.VKCUBE_FRAMES || 1000) + " > /tmp/vkcube.log 2>&1; echo STEP_VKCUBE_RC=$? seconds=$(($(date +%s) - S)); tail -15 /tmp/vkcube.log; " +
+            "dmesg | grep -i segfault | tail -2", /STEP_VKCUBE_RC=0/,
+            { screenshot: "vkcube", after: 12000 }],
+        ["HOST stats", null],
+        // a snapshot while vkcube draws (VK6): the Venus context, its objects
+        // and the GPU's contents go into it and come back; vkcube goes on
+        ["(VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vkcube --wsi wayland --c 1000000 > /tmp/vkcube-bg.log 2>&1 &); " +
+            "sleep 8; echo STEP_BACKGROUND", /STEP_BACKGROUND/, { screenshot: "vkcube-before-snapshot", after: 7000 }],
+        ["HOST snapshot", null],
+        ["sleep 6; echo STEP_AFTER_SNAPSHOT", /STEP_AFTER_SNAPSHOT/, { screenshot: "vkcube-after-snapshot", after: 5000 }],
+        ["HOST stats", null],
+        ["pidof vkcube && echo STEP_VKCUBE_ALIVE; pkill vkcube; sleep 1; tail -5 /tmp/vkcube-bg.log; echo STEP_KILLED", /STEP_VKCUBE_ALIVE[\s\S]*STEP_KILLED/],
+        ["grep -i -E 'error|warn' /tmp/weston.log | head -10; echo STEP_WESTON_LOG", /STEP_WESTON_LOG/],
+    ],
     // the page's size reaching the guest (virtio_gpu): a display event, the
     // new preferred mode, which a KMS client then sets
     resize: [
@@ -413,8 +452,8 @@ const emulator = new V86({
     bzimage: { url: directory + "boot/vmlinuz-virt" }, initrd: { url: directory + "boot/initramfs-virt" },
     cdrom: { url: iso }, hda: { url: repo }, ...(gltest ? { hdb: { url: gltest } } : {}),
     cmdline: "console=ttyS0,115200 loglevel=4 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage",
-    // (the root file system is half the RAM: the virgl scenario's packages need more than 1 GiB's)
-    memory_size: Number(process.env.LINUX_GPU_MEMORY || (scenario === "virgl" ? 1536 : 1024)) * 1048576, acpi: true, autostart: false,
+    // (the root file system is half the RAM: the virgl and vkcube scenarios' packages need more than 1 GiB's)
+    memory_size: Number(process.env.LINUX_GPU_MEMORY || (scenario === "virgl" || scenario === "vkcube" ? 1536 : 1024)) * 1048576, acpi: true, autostart: false,
     disable_jit: !!+process.env.LINUX_GPU_NO_JIT, experimental_smp_jit: !+process.env.LINUX_GPU_NO_JIT,
     log_level: 0, net_device: { type: "none" }, screen_adapter: sink,
     ...(process.env.VRAM_SIZE ? { vram_size: Number(process.env.VRAM_SIZE) } : {}),

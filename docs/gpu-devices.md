@@ -15,7 +15,7 @@ plan, with the milestone history and the probing notes, is
 | Windows 8.1 x64 | virtio-gpu | viogpudo (virtio-win 0.1.240, w8.1, test signed) | 2D, EDID, cursor, live resolution changes |
 | Linux x86_64 (Alpine) | SVGA II | vmwgfx + Mesa svga | OpenGL 4.3 core (SM5), GLES 3.1, KMS |
 | Linux x86_64 (Alpine) | virtio-gpu | virtio_gpu + Mesa virgl (Mesa 25.2) | OpenGL 4.3 core/compat, GLES 3.1, blob scanouts, persistent buffer mappings |
-| Linux x86_64 (Alpine) | virtio-gpu (level `venus`) | virtio_gpu + Mesa venus (Mesa 26.1) | Vulkan 1.1 (in progress): vulkaninfo, transfers, synchronization, mapped memory, graphics and compute (`vktest`: 21 cases, same as lavapipe) |
+| Linux x86_64 (Alpine) | virtio-gpu (level `venus`) | virtio_gpu + Mesa venus (Mesa 26.1) | Vulkan 1.1: vulkaninfo, transfers, synchronization, mapped memory, graphics, compute, queries, dynamic rendering (`vktest`: same results as lavapipe), vkcube on weston, snapshots |
 
 ## Configuration
 
@@ -193,6 +193,33 @@ objects and answers.
   (2b + 1 for the sampler half), push constants become a storage buffer, Y is
   flipped. Pipelines use WebGPU's automatic layouts; bind groups are made per
   pipeline from the bound sets' contents.
+- **Queries**: a pool's results are a VX memory. Occlusion queries are
+  WebGPU's (the render pass names the pool it uses: the model looks ahead
+  for the first one begun in it), resolved into that memory when the pass
+  ends; timestamps are the time the device makes the batch. The results of
+  a submission's queries come back before its fence;
+  `vkCmdCopyQueryPoolResults` copies them on the GPU.
+- **Dynamic rendering** (`VK_KHR_dynamic_rendering`): `vkCmdBeginRendering`
+  is a render pass of the views it names; pipelines take their formats from
+  `VkPipelineRenderingCreateInfo`.
+- **WSI**: Venus offers `VK_KHR_swapchain` when the device imports sync
+  files into semaphores (`VK_KHR_external_semaphore_fd`, `_fence_fd`). The
+  driver makes the sync files itself (a `SUBMIT_3D` on the queue's timeline)
+  and tells the device what they did with `vkImportSemaphoreResourceMESA`,
+  `vkWaitSemaphoreResourceMESA` and `vkResetFenceResourceMESA`: a pending
+  signal that went into a sync file no longer lands on its semaphore or
+  fence. Without dma-buf, Mesa's WSI is its software one: each present
+  copies the swapchain image into a host visible buffer (read back before
+  the present's fence) and from there into the compositor's `wl_shm` buffer.
+  vkcube on weston runs at about 60 frames per second.
+- **Snapshots**: the model keeps the VX command that made each renderer
+  object (memory, image, view, sampler, shader, pipeline, query pool). Before
+  a save the rings run until the device's requests are answered, the GPU
+  finishes, and every memory's and image's contents are read back. A
+  snapshot holds the contexts (rings, reply streams, the model's objects as
+  JSON), the blobs with their mappings, the creation commands and the
+  contents; a restore makes the renderer's objects again and fills them.
+  A command that waited is read again from where its ring stopped.
 
 ## GX
 
@@ -240,6 +267,7 @@ the GPU finish and reads back what only the GPU has.
 | Device units (registers, FIFO, GMR/MOB, command buffers, virtqueues, EDID, blobs, host visible memory, snapshots) | `tests/devices/vmware_svga*.js`, `tests/devices/virtio_gpu*.js`, `tests/devices/virgl_tgsi.js` (`make devices-test`) |
 | Shader translation, tessellator | `tests/glbridge/` (`make test-glbridge`), `tests/gpu/shaders/` |
 | Linux guest, real GPU in headless Chrome | `tests/x64/linux_gpu.mjs` with `GPU_ADAPTER`, `GPU_LEVEL`, `GPU_SCENARIO` (`gltest`: `tests/x64/gltest.c`, 34 GL/GLES cases compared with llvmpipe in the guest; `virgl`: kmscube, a snapshot while drawing, weston, es2gears; `venus`: vulkaninfo and `tests/x64/vktest.c`, run on lavapipe and on Venus) and `GPU_RENDERER=chrome` |
-| Venus protocol and transport | `tests/devices/venus_protocol.js`, `tests/devices/virtio_gpu_venus.js` |
+| Venus protocol and transport | `tests/devices/venus_protocol.js`, `tests/devices/virtio_gpu_venus.js` (with sync files and a snapshot) |
+| Venus WSI and snapshots in a Linux guest | `tests/x64/linux_gpu.mjs` with `GPU_LEVEL=venus GPU_SCENARIO=vkcube GPU_RENDERER=chrome`: weston (pixman), vkcube on Venus timed and screenshotted, a snapshot saved and restored while it draws |
 | VX on WebGPU | `tests/glbridge/vx_transfer_browser_test.html` |
 | Windows guest | `tests/x64/windows_boot.mjs` with an overlay of the user's image; `tools/windows/d3d11cmp.c` (D3D11 cases compared with WARP) |

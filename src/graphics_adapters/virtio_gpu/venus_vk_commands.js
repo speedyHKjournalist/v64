@@ -17,6 +17,35 @@ const SEMAPHORE_TYPE_TIMELINE = 1;
 const SEMAPHORE_WAIT_ANY = 1;
 const FENCE_CREATE_SIGNALED = 1;
 const QUERY_RESULT_64 = 1, QUERY_RESULT_WAIT = 2, QUERY_RESULT_WITH_AVAILABILITY = 4;
+const QUERY_TYPE_OCCLUSION = 0;
+
+/**
+ * The occlusion query pool a render pass uses (WebGPU's passes name theirs
+ * when they begin): the first one begun before the pass ends
+ * @return {Object} the pool or null
+ */
+function occlusion_pool(ctx, commands, from)
+{
+    for(let i = from; i < commands.length; i++)
+    {
+        const [name, a] = commands[i];
+        if(name === "vkCmdEndRenderPass" || name === "vkCmdEndRenderPass2" || name === "vkCmdEndRendering") break;
+        if(name === "vkCmdBeginQuery" || name === "vkCmdBeginQueryIndexedEXT")
+        {
+            const pool = ctx.objects.get(a.queryPool);
+            if(pool && pool.query_type === QUERY_TYPE_OCCLUSION) return pool;
+        }
+        if(name === "vkCmdExecuteCommands")
+        {
+            for(const id of a.pCommandBuffers || [])
+            {
+                const secondary = ctx.objects.get(id), pool = secondary && occlusion_pool(ctx, secondary.commands, 0);
+                if(pool) return pool;
+            }
+        }
+    }
+    return null;
+}
 
 /** a timeline value's wait can go to the renderer: it is signaled, or a signal of it went first */
 function timeline_ready(semaphore, value)
@@ -153,7 +182,7 @@ export const COMMAND_HANDLERS = {
 
     "vkCreateFence": function(vk, ctx, a)
     {
-        ctx.objects.set(a.pFence, { type: "fence", signaled: !!(a.pCreateInfo.flags & FENCE_CREATE_SIGNALED), pending: 0 });
+        ctx.objects.set(a.pFence, { type: "fence", signaled: !!(a.pCreateInfo.flags & FENCE_CREATE_SIGNALED), pending: 0, generation: 0 });
         a.ret = VK_SUCCESS;
         return null;
     },
@@ -164,10 +193,13 @@ export const COMMAND_HANDLERS = {
         a.ret = VK_SUCCESS;
         return null;
     },
+    // vkGetFenceFdKHR: the driver made the sync file (its signal pending or
+    // done); the fence is unsignaled, as an export of a sync file leaves it,
+    // and its pending signal is the sync file's now
     "vkResetFenceResourceMESA": function(vk, ctx, a)
     {
         const fence = ctx.objects.get(a.fence);
-        if(fence) fence.signaled = false;
+        if(fence) { fence.signaled = false; fence.pending = 0; fence.generation++; }
         return null;
     },
     "vkGetFenceStatus": function(vk, ctx, a)
@@ -192,7 +224,7 @@ export const COMMAND_HANDLERS = {
         {
             if(s.sType === STYPE_SEMAPHORE_TYPE_CREATE_INFO) { timeline = s.semaphoreType === SEMAPHORE_TYPE_TIMELINE; value = s.initialValue; }
         }
-        ctx.objects.set(a.pSemaphore, { type: "semaphore", timeline, value, submitted: value, signaled: false });
+        ctx.objects.set(a.pSemaphore, { type: "semaphore", timeline, value, submitted: value, signaled: false, generation: 0 });
         a.ret = VK_SUCCESS;
         return null;
     },
@@ -224,12 +256,19 @@ export const COMMAND_HANDLERS = {
         const check = () => info.flags & SEMAPHORE_WAIT_ANY ? pairs.some(reached) : pairs.every(reached);
         return wait_until(vk, check, a.timeout, ok => { a.ret = ok ? VK_SUCCESS : VK_TIMEOUT; });
     },
-    "vkWaitSemaphoreResourceMESA": function(vk, ctx, a) { return null; },
+    // vkGetSemaphoreFdKHR: the sync file took the semaphore's payload (a
+    // wait, as the export of a sync file is)
+    "vkWaitSemaphoreResourceMESA": function(vk, ctx, a)
+    {
+        const semaphore = ctx.objects.get(a.semaphore);
+        if(semaphore && !semaphore.timeline) { semaphore.signaled = false; semaphore.generation++; }
+        return null;
+    },
+    // a sync file the driver waited for (resource 0): signaled
     "vkImportSemaphoreResourceMESA": function(vk, ctx, a)
     {
-        // (a sync file's payload: signaled, as the renderer runs in order)
-        const semaphore = ctx.objects.get(a.semaphore);
-        if(semaphore) semaphore.signaled = true;
+        const info = a.pImportSemaphoreResourceInfo, semaphore = info && ctx.objects.get(info.semaphore);
+        if(semaphore && !semaphore.timeline) semaphore.signaled = true;
         return null;
     },
 
@@ -265,15 +304,31 @@ export const COMMAND_HANDLERS = {
 
     // Queries (their results come with VK3's render passes)
 
+    // a pool's results (u64 each) are a VX memory: occlusion queries resolve
+    // into it, timestamps are written into it; read back after a submission
+    // that touches them, before its fence
     "vkCreateQueryPool": function(vk, ctx, a)
     {
-        const info = a.pCreateInfo;
-        ctx.objects.set(a.pQueryPool, { type: "query_pool", query_type: info.queryType, count: info.queryCount,
-            results: new Float64Array(info.queryCount), available: new Uint8Array(info.queryCount) });
+        const info = a.pCreateInfo, count = info.queryCount;
+        const pool = { type: "query_pool", query_type: info.queryType, count, rid: vk.new_rid(), memory: { rid: vk.new_rid(), size: count * 8 },
+            results: new Float64Array(count), available: new Uint8Array(count) };
+        vk.vx.command(VX.MEMORY_CREATE, [pool.memory.rid, count * 8, 0]);
+        vk.vx.command(VX.QUERY_POOL_CREATE, [pool.rid, info.queryType, count]);
+        ctx.objects.set(a.pQueryPool, pool);
         a.ret = VK_SUCCESS;
         return null;
     },
-    "vkDestroyQueryPool": function(vk, ctx, a) { ctx.objects.delete(a.queryPool); return null; },
+    "vkDestroyQueryPool": function(vk, ctx, a)
+    {
+        const pool = ctx.objects.get(a.queryPool);
+        if(pool && pool.type === "query_pool")
+        {
+            vk.vx.command(VX.DESTROY, [pool.rid]);
+            vk.vx.command(VX.DESTROY, [pool.memory.rid]);
+        }
+        ctx.objects.delete(a.queryPool);
+        return null;
+    },
     "vkResetQueryPool": function(vk, ctx, a)
     {
         const pool = ctx.objects.get(a.queryPool);
@@ -347,6 +402,52 @@ export function command_state()
  * an attachment in the render pass loads as the render pass says, later
  * ones keep what is there) and clear values
  */
+// VkRenderingFlagBits
+const RENDERING_RESUMING = 4;
+// VkAttachmentLoadOp, VkAttachmentStoreOp
+const LOAD_OP_LOAD = 0, STORE_OP_STORE = 0;
+
+/**
+ * vkCmdBeginRendering: a render pass of the views it names (as begin_subpass's)
+ * @param {!Object} vk
+ * @param {!Object} ctx
+ * @param {!Object} info VkRenderingInfo
+ * @param {!Object} p the pass's state
+ */
+function begin_rendering(vk, ctx, info, p)
+{
+    // (Venus encodes each VkClearValue as a color: a depth clear is its bits)
+    const bits = c => c && c.color ? Array.from(c.color.uint32 || c.color.int32 || [0, 0, 0, 0], x => x >>> 0) : [0, 0, 0, 0];
+    const resuming = info.flags & RENDERING_RESUMING;
+    let size = null;
+    const view = id => {
+        const v = id ? ctx.objects.get(id) : null;
+        if(v && !size) size = v;
+        return v;
+    };
+    const colors = (info.pColorAttachments || []).map(c => {
+        const v = view(c.imageView);
+        if(!v) return null;
+        const resolve = c.resolveMode && c.resolveImageView ? (ctx.objects.get(c.resolveImageView) || { rid: 0 }).rid : 0;
+        return { view: v.rid, load: resuming ? LOAD_OP_LOAD : c.loadOp, store: c.storeOp, clear: bits(c.clearValue), resolve, format: v.format };
+    });
+    let depth = null;
+    const d = info.pDepthAttachment && view(info.pDepthAttachment.imageView) ? info.pDepthAttachment : null;
+    const st = info.pStencilAttachment && view(info.pStencilAttachment.imageView) ? info.pStencilAttachment : null;
+    if(d || st)
+    {
+        const v = ctx.objects.get((d || st).imageView);
+        depth = { view: v.rid, load: d && !resuming ? d.loadOp : LOAD_OP_LOAD, store: d ? d.storeOp : STORE_OP_STORE,
+            stencil_load: st && !resuming ? st.loadOp : LOAD_OP_LOAD, stencil_store: st ? st.storeOp : STORE_OP_STORE,
+            clear_depth: d ? new Float32Array(new Uint32Array([bits(d.clearValue)[0]]).buffer)[0] : 1,
+            clear_stencil: st ? bits(st.clearValue)[1] : 0, format: v.format };
+    }
+    const area = info.renderArea;
+    const width = size ? size.width : area.offset.x + area.extent.width, height = size ? size.height : area.offset.y + area.extent.height;
+    const occlusion = p.occlusion ? p.occlusion.rid : 0;
+    vk.vx.command(VX.BEGIN_PASS, [], new TextEncoder().encode(JSON.stringify({ colors, depth, width, height, occlusion })));
+}
+
 function begin_subpass(vk, ctx, p)
 {
     const sub = p.pass.subpasses[p.subpass];
@@ -374,7 +475,8 @@ function begin_subpass(vk, ctx, p)
             clear_depth: new Float32Array(new Uint32Array([bits[0]]).buffer)[0], clear_stencil: bits[1], format: a.format };
     }
     for(const r of sub.colors.concat([sub.depth], sub.resolves || [])) if(r && r.attachment !== REMAINING) p.used.add(r.attachment);
-    vk.vx.command(VX.BEGIN_PASS, [], new TextEncoder().encode(JSON.stringify({ colors, depth, width: fb.width, height: fb.height })));
+    const occlusion = p.occlusion ? p.occlusion.rid : 0;
+    vk.vx.command(VX.BEGIN_PASS, [], new TextEncoder().encode(JSON.stringify({ colors, depth, width: fb.width, height: fb.height, occlusion })));
 }
 
 /**
@@ -444,8 +546,15 @@ export function translate(vk, ctx, commands, state)
             }
         }
     };
-    for(const [name, a] of commands)
+    /** a query the submission touches: its result comes back before the fence */
+    const touch = (pool, query) => {
+        let set = state.queries.get(pool);
+        if(!set) state.queries.set(pool, set = new Set());
+        set.add(query);
+    };
+    for(let index = 0; index < commands.length; index++)
     {
+        const [name, a] = commands[index];
         switch(name)
         {
             // Render passes
@@ -455,7 +564,8 @@ export function translate(vk, ctx, commands, state)
                 const info = a.pRenderPassBegin;
                 const pass = ctx.objects.get(info.renderPass), framebuffer = ctx.objects.get(info.framebuffer);
                 if(!pass || !framebuffer) break;
-                cb.pass = { pass, framebuffer, subpass: 0, clears: info.pClearValues || [], used: new Set() };
+                cb.pass = { pass, framebuffer, subpass: 0, clears: info.pClearValues || [], used: new Set(),
+                    occlusion: occlusion_pool(ctx, commands, index + 1) };
                 begin_subpass(vk, ctx, cb.pass);
                 break;
             }
@@ -468,6 +578,20 @@ export function translate(vk, ctx, commands, state)
                 break;
             case "vkCmdEndRenderPass":
             case "vkCmdEndRenderPass2":
+                if(!cb.pass) break;
+                vx.command(VX.END_PASS, []);
+                cb.pass = null;
+                break;
+            // Dynamic rendering (VK_KHR_dynamic_rendering)
+            case "vkCmdBeginRendering":
+            {
+                const info = a.pRenderingInfo;
+                if(!info) break;
+                cb.pass = { dynamic: true, occlusion: occlusion_pool(ctx, commands, index + 1) };
+                begin_rendering(vk, ctx, info, cb.pass);
+                break;
+            }
+            case "vkCmdEndRendering":
                 if(!cb.pass) break;
                 vx.command(VX.END_PASS, []);
                 cb.pass = null;
@@ -727,6 +851,49 @@ export function translate(vk, ctx, commands, state)
             {
                 const pool = ctx.objects.get(a.queryPool);
                 if(pool) pool.available.fill(0, a.firstQuery, a.firstQuery + a.queryCount);
+                break;
+            }
+            case "vkCmdBeginQuery":
+            case "vkCmdBeginQueryIndexedEXT":
+            {
+                const pool = ctx.objects.get(a.queryPool);
+                if(!pool) break;
+                if(pool.query_type === QUERY_TYPE_OCCLUSION)
+                {
+                    if(cb.pass && cb.pass.occlusion === pool) vx.command(VX.BEGIN_QUERY, [pool.rid, a.query]);
+                    else vk.warn_once("query-outside", "an occlusion query outside of a render pass is 0");
+                }
+                touch(pool, a.query);
+                break;
+            }
+            case "vkCmdEndQuery":
+            case "vkCmdEndQueryIndexedEXT":
+            {
+                const pool = ctx.objects.get(a.queryPool);
+                if(pool && pool.query_type === QUERY_TYPE_OCCLUSION && cb.pass && cb.pass.occlusion === pool)
+                    vx.command(VX.END_QUERY, [pool.rid, a.query, pool.memory.rid]);
+                break;
+            }
+            case "vkCmdWriteTimestamp":
+            case "vkCmdWriteTimestamp2":
+            {
+                // (WebGPU has no timestamps in encoders: the time the batch is made, in ns)
+                const pool = ctx.objects.get(a.queryPool);
+                if(!pool) break;
+                const ns = Math.floor(vk.clock() * 1e6), bytes = new Uint8Array(8), view = new DataView(bytes.buffer);
+                view.setUint32(0, lo(ns), true);
+                view.setUint32(4, hi(ns), true);
+                vx.command(VX.UPDATE_BUFFER, [pool.memory.rid, a.query * 8, 0, 8], bytes);
+                touch(pool, a.query);
+                break;
+            }
+            case "vkCmdCopyQueryPoolResults":
+            {
+                const pool = ctx.objects.get(a.queryPool), dst = at(ctx, a.dstBuffer, a.dstOffset);
+                if(!pool || !dst || !a.queryCount) break;
+                vx.command(VX.COPY_QUERY_RESULTS, [pool.memory.rid, a.firstQuery, a.queryCount, dst[0].rid, lo(dst[1]), hi(dst[1]), a.stride, a.flags]);
+                const size = (a.flags & QUERY_RESULT_64 ? 8 : 4) * (a.flags & QUERY_RESULT_WITH_AVAILABILITY ? 2 : 1);
+                write(dst[0], dst[1], a.stride * (a.queryCount - 1) + size);
                 break;
             }
             // (one queue, in order: barriers and event waits are kept already)

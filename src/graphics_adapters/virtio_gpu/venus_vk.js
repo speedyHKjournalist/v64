@@ -16,7 +16,12 @@ import { VK_SUCCESS, VK_NOT_READY, VK_TIMEOUT, VK_INCOMPLETE, VK_ERROR_OUT_OF_HO
     VK_ERROR_FEATURE_NOT_PRESENT, VK_ERROR_FORMAT_NOT_SUPPORTED, out_array } from "./venus_device_info.js";
 
 const PAGE = 4096;
+/** the VX commands that make renderer objects (what a snapshot makes again) */
+const CREATIONS = new Set([VX.MEMORY_CREATE, VX.TEXTURE_CREATE, VX.VIEW_CREATE, VX.SAMPLER_CREATE, VX.SHADER_CREATE,
+    VX.PIPELINE_CREATE, VX.QUERY_POOL_CREATE]);
 const STYPE_DEVICE_QUEUE_TIMELINE_INFO_MESA = 1000384005;
+// VkExternal{Semaphore,Fence}FeatureFlagBits
+const EXTERNAL_EXPORTABLE = 1, EXTERNAL_IMPORTABLE = 2;
 
 /**
  * @constructor
@@ -32,6 +37,23 @@ export function VulkanModel(options)
     this.warnings = [];
     /** the VX batch being written: object creations, then a submission's commands */
     this.vx = new GXWriter(VX_MAGIC);
+    /** @type {!Map<number, !Array>} the renderer's objects as made: rid -> [op, dwords, bytes], for snapshots */
+    this.created = new Map();
+    /** @type {!Map<number, !Array>} shaders destroyed while pipelines made of them may live (they are made again for those) */
+    this.retired = new Map();
+    this.vx.listener = (op, dwords, bytes) => {
+        if(CREATIONS.has(op)) this.created.set(dwords[0], [op, Array.from(dwords), bytes ? bytes.slice() : null]);
+        else if(op === VX.DESTROY)
+        {
+            const entry = this.created.get(dwords[0]);
+            if(entry && entry[0] === VX.SHADER_CREATE)
+            {
+                this.retired.set(dwords[0], entry);
+                if(this.retired.size > 256) this.prune_retired();
+            }
+            this.created.delete(dwords[0]);
+        }
+    };
     this.next_rid = 1;
     this.host_allocated = 0;
     this.device_allocated = 0;
@@ -44,6 +66,146 @@ export function VulkanModel(options)
     /** @type {?function(string)} a harness's hook: uploads, submissions, readbacks */
     this.debug = null;
 }
+
+// ---------------------------------------------------------------------------
+// Snapshots: the renderer's objects are made again from their creation
+// commands, with the contents the GPU had (read back before the save)
+
+/**
+ * The contents of the renderer's memories and images, read back (the GPU
+ * has done its work)
+ * @return {!Promise}
+ */
+VulkanModel.prototype.save_contents = function()
+{
+    const saved = this.saved = new Map();
+    const reads = [];
+    const read = (op, words, then) => reads.push(new Promise(resolve => {
+        const id = this.gpu.virgl.request(bytes => { then(bytes); resolve(undefined); });
+        this.vx.command(op, [...words, id]);
+    }));
+    for(const [rid, entry] of this.created)
+    {
+        const op = entry[0], words = entry[1];
+        if(op === VX.MEMORY_CREATE)
+        {
+            const size = words[1] + words[2] * 0x100000000;
+            if(size) read(VX.MEMORY_READ, [rid, 0, 0, size], data => { if(data) saved.set(rid, data); });
+        }
+        else if(op === VX.TEXTURE_CREATE)
+        {
+            const [, format, type, , , depth, mips, layers, samples] = words;
+            const entry = INFO.FORMATS[format];
+            if(samples > 1 || !entry || !entry[0]) continue;
+            const gpu_format = entry[0];
+            // VkImageAspectFlagBits: color, depth, stencil
+            const aspects = /^depth/.test(gpu_format) ? (/stencil/.test(gpu_format) ? [2, 4] : [2]) : gpu_format === "stencil8" ? [4] : [1];
+            const images = [];
+            saved.set(rid, images);
+            for(let mip = 0; mip < mips; mip++)
+            {
+                const count = type === 2 ? Math.max(1, depth >> mip) : layers;
+                for(let layer = 0; layer < count; layer++)
+                {
+                    for(const aspect of aspects)
+                    {
+                        read(VX.TEXTURE_READ, [rid, aspect, mip, layer], data => { if(data) images.push([aspect, mip, layer, data]); });
+                    }
+                }
+            }
+        }
+    }
+    this.send();
+    return Promise.all(reads);
+};
+
+/** The shaders the live pipelines are made of, by rid */
+VulkanModel.prototype.pipeline_shaders = function()
+{
+    const used = new Set();
+    for(const [op, , bytes] of this.created.values())
+    {
+        if(op !== VX.PIPELINE_CREATE || !bytes) continue;
+        let end = bytes.length;
+        while(end && !bytes[end - 1]) end--;
+        for(const stage of JSON.parse(new TextDecoder().decode(bytes.subarray(0, end)))["stages"] || []) used.add(stage["shader"]);
+    }
+    return used;
+};
+
+/** Forget the destroyed shaders no live pipeline is made of */
+VulkanModel.prototype.prune_retired = function()
+{
+    const used = this.pipeline_shaders();
+    for(const rid of [...this.retired.keys()]) if(!used.has(rid)) this.retired.delete(rid);
+};
+
+/** @return {!Array} */
+VulkanModel.prototype.get_state = function()
+{
+    this.prune_retired();
+    // (the destroyed shaders of live pipelines first, destroyed again once the pipelines are made)
+    const retired = [...this.retired.values()];
+    const created = retired.concat([...this.created.values()]).map(([op, dwords, bytes]) => [op, dwords, bytes])
+        .concat(retired.map(([, dwords]) => [VX.DESTROY, [dwords[0]], null]));
+    const contents = this.saved ? [...this.saved] : [];
+    this.saved = null;
+    return [this.next_rid, this.host_allocated, this.device_allocated, created, contents];
+};
+
+/**
+ * The renderer's objects again (it was reset), then the contexts' objects
+ * fixed up: nothing on its way any more
+ * @param {!Array} state from get_state
+ * @param {!Array<!Object>} contexts the Venus contexts, their objects restored
+ */
+VulkanModel.prototype.set_state = function(state, contexts)
+{
+    const [next_rid, host_allocated, device_allocated, created, contents] = state;
+    this.next_rid = next_rid;
+    this.host_allocated = host_allocated;
+    this.device_allocated = device_allocated;
+    this.created.clear();
+    this.retired.clear();
+    this.queues.clear();
+    this.waiters = [];
+    if(!this.vx.empty()) this.vx.finish();
+    for(const [op, dwords, bytes] of created) this.vx.command(op, dwords, bytes || undefined);
+    const CHUNK = 16 << 20;
+    for(const [rid, content] of contents)
+    {
+        if(ArrayBuffer.isView(content))
+        {
+            const bytes = /** @type {!Uint8Array} */ (content);
+            for(let at = 0; at < bytes.length; at += CHUNK)
+            {
+                const piece = bytes.subarray(at, Math.min(bytes.length, at + CHUNK));
+                this.vx.command(VX.MEMORY_WRITE, [rid, at, 0, piece.length], piece);
+            }
+        }
+        else
+        {
+            for(const [aspect, mip, layer, bytes] of content) this.vx.command(VX.TEXTURE_WRITE, [rid, aspect, mip, layer, bytes.length], bytes);
+        }
+    }
+    for(const ctx of contexts)
+    {
+        for(const object of ctx.objects.values())
+        {
+            if(object.type === "memory")
+            {
+                object.pending = [];
+                if(object.blob) object.blob.memory = object;
+            }
+            else if(object.type === "queue")
+            {
+                object.inflight = 0;
+                if(object.pending && object.pending.length) this.queues.add(object);
+            }
+        }
+    }
+    this.send();
+};
 
 /** @return {number} a renderer object's id */
 VulkanModel.prototype.new_rid = function()
@@ -267,7 +429,7 @@ VulkanModel.prototype.submit = function(ctx, queue_id, submits, fence_id)
     if(!queue) return;
     const fence = fence_id ? ctx.objects.get(fence_id) : null;
     if(fence) { fence.signaled = false; fence.pending++; }
-    queue.pending.push({ ctx, submits, fence });
+    queue.pending.push({ ctx, submits, fence, generation: fence ? fence.generation : 0 });
     queue.ctx = ctx;
     this.queues.add(queue);
     this.pump();
@@ -303,7 +465,7 @@ VulkanModel.prototype.run_submission = function(queue, entry)
     this.stats.submissions++;
     // the guest's writes through its mappings first
     this.gpu.upload_hostmem();
-    const state = { written: new Map(), after: [] };
+    const state = { written: new Map(), after: [], queries: new Map() };
     const signals = [];
     for(const submit of entry.submits)
     {
@@ -328,24 +490,53 @@ VulkanModel.prototype.run_submission = function(queue, entry)
             const semaphore = ctx.objects.get(id);
             if(!semaphore) continue;
             if(semaphore.timeline) semaphore.submitted = Math.max(semaphore.submitted, value);
-            signals.push([semaphore, value]);
+            signals.push([semaphore, value, semaphore.generation]);
         }
     }
     this.read_back(state.written);
+    this.read_queries(state.queries);
     if(this.debug) this.debug("submission of " + entry.submits.map(s => s.command_buffers.join("+")).join(", ") + ": writes " +
         [...state.written].map(([m, r]) => m.rid + ":" + JSON.stringify(r)).join(" "));
     queue.inflight++;
     this.after(() => {
         queue.inflight--;
         for(const run of state.after) run();
-        for(const [semaphore, value] of signals)
+        // (not the signals a sync file took: their objects' generation moved on)
+        for(const [semaphore, value, generation] of signals)
         {
             if(semaphore.timeline) semaphore.value = Math.max(semaphore.value, value);
-            else semaphore.signaled = true;
+            else if(semaphore.generation === generation) semaphore.signaled = true;
         }
-        if(entry.fence && !--entry.fence.pending) entry.fence.signaled = true;
+        if(entry.fence && entry.fence.generation === entry.generation && !--entry.fence.pending) entry.fence.signaled = true;
         this.wake();
     });
+};
+
+/**
+ * The results of the queries a submission touched, into their pools (before
+ * its fence: the answers come before the batch's completion)
+ * @param {!Map} queries pool -> Set of queries
+ */
+VulkanModel.prototype.read_queries = function(queries)
+{
+    for(const [pool, set] of queries)
+    {
+        const list = [...set].sort((p, q) => p - q), first = list[0], count = list[list.length - 1] - first + 1;
+        this.read(pool.memory, first * 8, count * 8, data => {
+            const view = data && data.length >= count * 8 ? new DataView(data.buffer, data.byteOffset, data.length) : null;
+            for(const q of list)
+            {
+                if(view) pool.results[q] = view.getUint32((q - first) * 8, true) + view.getUint32((q - first) * 8 + 4, true) * 0x100000000;
+                pool.available[q] = 1;
+            }
+        });
+    }
+};
+
+/** Milliseconds, for timestamps */
+VulkanModel.prototype.clock = function()
+{
+    return typeof performance !== "undefined" ? performance.now() : Date.now();
 };
 
 /**
@@ -600,13 +791,24 @@ const HANDLERS = {
     {
         a.pExternalBufferProperties.externalMemoryProperties = { externalMemoryFeatures: 0, exportFromImportedHandleTypes: 0, compatibleHandleTypes: 0 };
     },
+    // sync files of binary semaphores and of fences: exportable and importable
     "vkGetPhysicalDeviceExternalSemaphoreProperties": function(vk, ctx, a)
     {
-        Object.assign(a.pExternalSemaphoreProperties, { exportFromImportedHandleTypes: 0, compatibleHandleTypes: 0, externalSemaphoreFeatures: 0 });
+        const info = a.pExternalSemaphoreInfo;
+        let timeline = false;
+        for(let s = info.pNext; s; s = s.pNext)
+        {
+            if(s.sType === INFO.STYPE.SEMAPHORE_TYPE_CREATE_INFO && s.semaphoreType === 1) timeline = true;
+        }
+        const types = info.handleType === INFO.SEMAPHORE_SYNC_FD && !timeline ? INFO.SEMAPHORE_SYNC_FD : 0;
+        Object.assign(a.pExternalSemaphoreProperties, { exportFromImportedHandleTypes: types, compatibleHandleTypes: types,
+            externalSemaphoreFeatures: types ? EXTERNAL_EXPORTABLE | EXTERNAL_IMPORTABLE : 0 });
     },
     "vkGetPhysicalDeviceExternalFenceProperties": function(vk, ctx, a)
     {
-        Object.assign(a.pExternalFenceProperties, { exportFromImportedHandleTypes: 0, compatibleHandleTypes: 0, externalFenceFeatures: 0 });
+        const types = a.pExternalFenceInfo.handleType === INFO.FENCE_SYNC_FD ? INFO.FENCE_SYNC_FD : 0;
+        Object.assign(a.pExternalFenceProperties, { exportFromImportedHandleTypes: types, compatibleHandleTypes: types,
+            externalFenceFeatures: types ? EXTERNAL_EXPORTABLE | EXTERNAL_IMPORTABLE : 0 });
     },
     "vkGetPhysicalDeviceToolProperties": function(vk, ctx, a)
     {

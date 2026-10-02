@@ -173,7 +173,7 @@ build/v86-virtio-gpu.js: $(CLOSURE) src/*.js src/graphics_adapters/*.js src/grap
 		--js src/graphics_adapters/virtio_gpu/venus_protocol.js --js src/graphics_adapters/virtio_gpu/venus_device_info.js \
 		--js src/graphics_adapters/virtio_gpu/venus_vk_resources.js --js src/graphics_adapters/virtio_gpu/venus_vk_commands.js \
 		--js src/graphics_adapters/virtio_gpu/venus_vk_pipeline.js \
-		--js src/graphics_adapters/virtio_gpu/venus_vk.js --js src/graphics_adapters/virtio_gpu/venus.js \
+		--js src/graphics_adapters/virtio_gpu/venus_vk.js --js src/graphics_adapters/virtio_gpu/venus_state.js --js src/graphics_adapters/virtio_gpu/venus.js \
 		--js src/graphics_adapters/virtio_gpu/virtio_gpu_device.js \
 		--js src/graphics_adapters/virtio_gpu/plugin.js
 

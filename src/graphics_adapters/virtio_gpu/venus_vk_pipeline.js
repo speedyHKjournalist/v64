@@ -8,6 +8,7 @@ import { VX } from "../renderer_protocol.js";
 import { VK_SUCCESS, VK_ERROR_OUT_OF_HOST_MEMORY, REMAINING, out_array } from "./venus_device_info.js";
 
 const STYPE_RENDER_PASS_MULTIVIEW = 1000053000;
+const STYPE_PIPELINE_RENDERING_CREATE_INFO = 1000044002;
 
 /** UTF-8 of a JSON description, for the renderer */
 function json_bytes(object)
@@ -63,12 +64,26 @@ function graphics_pipeline(ctx, info)
     const pass = ctx.objects.get(info.renderPass);
     const subpass = pass && pass.subpasses[info.subpass] || { colors: [], depth: null };
     const layout = ctx.objects.get(info.layout) || { sets: [], push_size: 0 };
-    const formats = subpass.colors.map(r => r && r.attachment !== REMAINING && pass.attachments[r.attachment] ? pass.attachments[r.attachment].format : 0);
-    const depth = subpass.depth && subpass.depth.attachment !== REMAINING && pass.attachments[subpass.depth.attachment];
-    const samples = subpass.colors.concat([subpass.depth]).map(r => r && r.attachment !== REMAINING && pass.attachments[r.attachment])
-        .filter(a => a).map(a => a.samples)[0] || 1;
     const vi = info.pVertexInputState || {}, ia = info.pInputAssemblyState || {}, rs = info.pRasterizationState || {};
     const ms = info.pMultisampleState || {}, ds = info.pDepthStencilState, cb = info.pColorBlendState || {};
+    let formats, depth, samples;
+    if(pass)
+    {
+        formats = subpass.colors.map(r => r && r.attachment !== REMAINING && pass.attachments[r.attachment] ? pass.attachments[r.attachment].format : 0);
+        depth = subpass.depth && subpass.depth.attachment !== REMAINING && pass.attachments[subpass.depth.attachment];
+        samples = subpass.colors.concat([subpass.depth]).map(r => r && r.attachment !== REMAINING && pass.attachments[r.attachment])
+            .filter(a => a).map(a => a.samples)[0] || 1;
+    }
+    else
+    {
+        // dynamic rendering: the formats are the pipeline's (VkPipelineRenderingCreateInfo)
+        let rendering = null;
+        for(let s = info.pNext; s; s = s.pNext) if(s.sType === STYPE_PIPELINE_RENDERING_CREATE_INFO) rendering = s;
+        formats = rendering ? Array.from(rendering.pColorAttachmentFormats || []) : [];
+        const depth_format = rendering ? rendering.depthAttachmentFormat || rendering.stencilAttachmentFormat : 0;
+        depth = depth_format ? { format: depth_format } : null;
+        samples = ms.rasterizationSamples || 1;
+    }
     const stencil = s => s && { fail: s.failOp, pass: s.passOp, depth_fail: s.depthFailOp, compare: s.compareOp,
         read_mask: s.compareMask, write_mask: s.writeMask, reference: s.reference };
     return {

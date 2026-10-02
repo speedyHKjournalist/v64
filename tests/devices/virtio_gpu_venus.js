@@ -448,6 +448,62 @@ reply = call("vkGetSemaphoreCounterValue", { device: DEVICE, semaphore: SEM, pVa
 assert.equal(reply.pValue, 2, "the submission signaled 2");
 console.log("PASS: a timeline wait the host meets; the GPU's and the guest's writes to one page");
 
+// Sync files (Venus's WSI needs them): what the device says of them; a
+// fence's or semaphore's pending signal that went into a sync file does not
+// land on it any more; a sync file the driver waited for signals a semaphore
+reply = call("vkGetPhysicalDeviceExternalSemaphoreProperties", { physicalDevice: PHYSICAL_DEVICE,
+    pExternalSemaphoreInfo: { sType: 1000076000, handleType: 0x10 }, pExternalSemaphoreProperties: { sType: 1000076001 } });
+assert.equal(reply.pExternalSemaphoreProperties.externalSemaphoreFeatures, 3, "binary semaphores: sync files export and import");
+reply = call("vkGetPhysicalDeviceExternalSemaphoreProperties", { physicalDevice: PHYSICAL_DEVICE,
+    pExternalSemaphoreInfo: { sType: 1000076000, pNext: { sType: 1000207002, semaphoreType: 1, initialValue: 0 }, handleType: 0x10 },
+    pExternalSemaphoreProperties: { sType: 1000076001 } });
+assert.equal(reply.pExternalSemaphoreProperties.externalSemaphoreFeatures, 0, "timeline semaphores: none");
+reply = call("vkGetPhysicalDeviceExternalFenceProperties", { physicalDevice: PHYSICAL_DEVICE,
+    pExternalFenceInfo: { sType: 1000112000, handleType: 8 }, pExternalFenceProperties: { sType: 1000112001 } });
+assert.equal(reply.pExternalFenceProperties.externalFenceFeatures, 3, "fences: sync files export and import");
+const FENCE = 0x3007, BSEM = 0x3008;
+const submit_signaling = () => ["vkQueueSubmit", { queue: QUEUE, submitCount: 1, pSubmits: [{ sType: 4, waitSemaphoreCount: 0, pWaitSemaphores: null,
+    pWaitDstStageMask: null, commandBufferCount: 1, pCommandBuffers: [CB], signalSemaphoreCount: 1, pSignalSemaphores: [BSEM] }], fence: FENCE }];
+ring_write(encode(["vkCreateFence", { device: DEVICE, pCreateInfo: { sType: 8, flags: 0 }, pFence: FENCE }],
+    ["vkCreateSemaphore", { device: DEVICE, pCreateInfo: { sType: 9 }, pSemaphore: BSEM }]));
+const binary = () => gpu.venus.contexts.get(CTX).objects.get(BSEM).signaled;
+held = [];
+ring_write(encode(submit_signaling(), ["vkResetFenceResourceMESA", { device: DEVICE, fence: FENCE }],
+    ["vkWaitSemaphoreResourceMESA", { device: DEVICE, semaphore: BSEM }]));
+flush_renderer();
+assert.equal(call("vkGetFenceStatus", { device: DEVICE, fence: FENCE }).ret, 1, "VK_NOT_READY: the fence's signal went to the sync file");
+assert.equal(binary(), false, "and the semaphore's");
+held = [];
+ring_write(encode(submit_signaling()));
+flush_renderer();
+assert.equal(call("vkGetFenceStatus", { device: DEVICE, fence: FENCE }).ret, 0, "a submission's fence signals as before");
+assert.equal(binary(), true);
+ring_write(encode(["vkWaitSemaphoreResourceMESA", { device: DEVICE, semaphore: BSEM }]));
+assert.equal(binary(), false, "a sync file took the signal");
+ring_write(encode(["vkImportSemaphoreResourceMESA", { device: DEVICE, pImportSemaphoreResourceInfo: { sType: 1000384004, semaphore: BSEM, resourceId: 0 } }]));
+assert.equal(binary(), true, "a sync file the driver waited for signals it");
+console.log("PASS: sync files of fences and semaphores");
+
+// A snapshot, saved and restored: the context, its ring, reply stream and
+// objects, the renderer's memory with what the GPU wrote, the mapping
+const mem_rid = gpu.venus.contexts.get(CTX).objects.get(MEM).rid;
+assert.equal(read32(mem_base + 64), 2);
+const state = await emulator.save_state();
+vx_memory.clear();
+vx_log.length = 0;
+await emulator.restore_state(state);
+assert.ok(vx_log.includes(VX.MEMORY_CREATE), "the renderer's memory made again");
+assert.equal(new DataView(vx_memory.get(mem_rid).buffer).getUint32(64, true), 2, "with what the GPU had written");
+assert.equal(read32(mem_base + 64), 2, "the mapping");
+assert.equal(call("vkGetSemaphoreCounterValue", { device: DEVICE, semaphore: SEM, pValue: 0 }).pValue, 2, "the ring and the semaphore go on");
+assert.equal(call("vkGetFenceStatus", { device: DEVICE, fence: FENCE }).ret, 0, "the fence");
+write32(mem_base, 7);
+ring_write(encode(["vkQueueSubmit", { queue: QUEUE, submitCount: 1, pSubmits: [{ sType: 4, waitSemaphoreCount: 0, pWaitSemaphores: null,
+    pWaitDstStageMask: null, commandBufferCount: 1, pCommandBuffers: [CB], signalSemaphoreCount: 0, pSignalSemaphores: null }], fence: 0 }]));
+assert.equal(call("vkGetSemaphoreCounterValue", { device: DEVICE, semaphore: SEM, pValue: 0 }).pValue, 2);
+assert.equal(read32(mem_base + 64), 7, "the command buffer, recorded before the snapshot, runs after it");
+console.log("PASS: snapshots");
+
 // Destroying the context
 assert.equal(command(0x0201), OK, "CTX_DESTROY");
 assert.ok(!gpu.venus.contexts.has(CTX));
