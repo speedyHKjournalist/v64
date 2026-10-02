@@ -770,7 +770,9 @@
             const kind = phase => (t.phases[phase] || {}).kind;
             let inRegs = 1, cpRegs = 0, pcRegs = 1;
             for (const input of p.inputs) {
-                if (input.type === OPERAND.INPUT_CONTROL_POINT) inRegs = Math.max(inRegs, input.index2 + 1);
+                if (input.type === OPERAND.INPUT_CONTROL_POINT || (input.type === OPERAND.INPUT && input.index2 >= 0)) {
+                    inRegs = Math.max(inRegs, input.index2 + 1);
+                }
             }
             const hasCP = t.phases.some(ph => ph.kind === "cp");
             for (const output of p.outputs) {
@@ -921,6 +923,8 @@
                 case OPERAND.INPUT:
                     // a geometry shader's are [vertex][register]
                     if (this.mode === "geometry" && i.length > 1) return `v[${this.index(i[0])}][${this.index(i[1])}]`;
+                    // a hull shader's control point phase names the input control points v[cp][register]
+                    if (this.mode === "hull" && i.length > 1) return `vicp[${this.index(i[0])}][${this.index(i[1])}]`;
                     return `v[${this.index(i[i.length - 1])}]`;
                 // (a hull shader's fork and join phases write patch constants)
                 case OPERAND.OUTPUT: return this.hsPhase === "fork" || this.hsPhase === "join" ? `opc[${this.index(i[0])}]` : `o[${this.index(i[0])}]`;

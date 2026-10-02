@@ -49,8 +49,8 @@ const LEVELS = {
         gl43: true },
 };
 const LEVEL_ORDER = ["2d", "virgl", "virgl43"];
-/** Without a pinned level: virgl when there is a renderer, 2d otherwise */
-const DEFAULT_3D_LEVEL = "virgl";
+/** Without a pinned level: OpenGL 4.3 when there is a renderer, 2d otherwise */
+const DEFAULT_3D_LEVEL = "virgl43";
 const DEFAULT_LEVEL = "2d";
 
 // Commands
