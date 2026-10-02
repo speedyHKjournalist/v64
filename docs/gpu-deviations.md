@@ -38,7 +38,8 @@ do is emulated and listed here rather than hidden.
 | virgl: tessellation evaluation without a control shader, tessellation followed by a geometry shader, image atomics and image size queries, indirect draws with a count buffer, GLES 3.2 | Not offered or not handled |
 | virgl: `BLOB_MEM_HOST3D_GUEST`, mapping textures | Rejected (Mesa uses neither) |
 | virtio-gpu 3D on Windows, Venus (Vulkan) | Deferred |
-| SVGA video overlay (`SVGA_ESCAPE_VMWARE_VIDEO*`) | Not implemented: `SVGA_FIFO_CAP_VIDEO` is not declared, escapes are ignored |
+| SVGA video overlay (`SVGA_ESCAPE_VMWARE_VIDEO*`) | Not implemented: `SVGA_FIFO_CAP_VIDEO` is not declared, escapes are ignored. Only X.org's vmware driver uses it (XVideo) |
+| SVGA resolution following the page | Not done: VMware does it through VMware Tools' service in the guest (vmtoolsd, `Resolution_Set` over a TCLO channel), which the backdoor does not have; virtio-gpu follows `V86.set_display_size` |
 
 ## Known issues (Mesa's svga on Linux, `tests/x64/gltest.c`)
 

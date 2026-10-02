@@ -1102,12 +1102,19 @@ SVGA3D.prototype.dma_to_guest = function(surface, face, mip, gmrs, gmr, offset, 
  * Read rows (of blocks) of a mip level of a layer (a face or array element;
  * a slice of a volume) from where the surface is: the GPU, in pieces that fit
  * the response region, or its MOB; `done` gets each piece as it arrives
- * @param {function(!Uint8Array, number, number, number)} done (bytes, first row, rows, pitch)
+ * @param {function(!Uint8Array, number, number, number, number)} done (bytes,
+ *     first row, rows, pitch, first column the bytes start at)
+ * @param {number=} x columns x .. x + w only, where the GPU has the surface
+ *     (GX; uncompressed formats), else whole rows
+ * @param {number=} w
  */
-SVGA3D.prototype.read_rows = function(surface, layer, mip, first, rows, done)
+SVGA3D.prototype.read_rows = function(surface, layer, mip, first, rows, done, x, w)
 {
     const level = level_layout(surface, mip);
     const block_h = surface.layout.block_h;
+    // (part of the rows: GX reads back a box)
+    const part = surface.home === "gx" && block_h === 1 && surface.layout.block === 1 && w !== undefined && w > 0 && w < level.width;
+    const x0 = part ? /** @type {number} */ (x) : 0, width = part ? w : level.width, pitch = part ? w * surface.layout.bytes : level.pitch;
     const volume = is_volume(surface);
     if(!surface.home)
     {
@@ -1115,21 +1122,21 @@ SVGA3D.prototype.read_rows = function(surface, layer, mip, first, rows, done)
         const image = this.mob_image(surface, volume ? 0 : layer, mip);
         const start = image.offset + (volume ? layer * image.pitch * level.rows : 0) + first * image.pitch;
         const bytes = this.device.mobs.read(surface.mob, start, rows * image.pitch);
-        if(bytes) done(bytes, first, rows, image.pitch);
+        if(bytes) done(bytes, first, rows, image.pitch, 0);
         return;
     }
-    const per_request = Math.max(1, Math.floor(READBACK_MAX_BYTES / level.pitch));
+    const per_request = Math.max(1, Math.floor(READBACK_MAX_BYTES / pitch));
     for(let row = first; row < first + rows; row += per_request)
     {
         const count = Math.min(per_request, first + rows - row);
         const request = this.request((bytes, status) => {
-            if(bytes) done(bytes, row, count, level.pitch);
+            if(bytes) done(bytes, row, count, pitch, x0);
         });
         const top = row * block_h, height = Math.min(count * block_h, level.height - row * block_h);
         if(surface.home === "gx")
         {
-            this.gxw.command(GX.SURFACE_READBACK, [surface.sid, volume ? 0 : layer, mip, 0, top, volume ? layer : 0,
-                level.width, height, 1, request.id]);
+            this.gxw.command(GX.SURFACE_READBACK, [surface.sid, volume ? 0 : layer, mip, x0, top, volume ? layer : 0,
+                width, height, 1, request.id]);
             continue;
         }
         this.writer.begin(OP.READBACK_SURFACE).u32(UTILITY_DEVICE).u32(surface.handle).u32(mip)
@@ -2433,9 +2440,11 @@ SVGA3D.prototype.update_screen_target = function(stid, x, y, w, h, sx, sy)
     const bytes_per = surface.layout.bytes;
     const rows = this.device.mobs.read(surface.mob, offset + sy * pitch, (h - 1) * pitch + (sx + w) * bytes_per);
     if(!rows) return this.warn_once("target-mob", "a screen target image outside of its MOB");
+    const word = surface_word_converter(surface);
     for(let row = 0; row < h; row++)
     {
         const at = ((y + row) * screen.width + x) * 4;
+        if(word && convert_row_32(word, rows, row * pitch + sx * 4, screen.rgba, at, w)) continue;
         for(let column = 0; column < w; column++)
         {
             pixel(rows, row * pitch + (sx + column) * bytes_per, screen.rgba, at + column * 4);
@@ -2531,14 +2540,17 @@ SVGA3D.prototype.to_desktop = function(surface, sx, sy, sw, sh, dx, dy, dw, dh, 
     if(!pixel) return this.warn_once("present-format" + surface.format, "presenting format " + surface.format + " is not supported");
     const device = this.device;
     const bytes_per = surface.layout.bytes;
-    this.read_rows(surface, 0, 0, sy, sh, (data, first, count, pitch) => {
+    // (unscaled 32-bit pixels: a row at a time, as words)
+    const word = sw === dw && sh === dh ? surface_word_converter(surface) : null;
+    this.read_rows(surface, 0, 0, sy, sh, (data, first, count, pitch, x0) => {
         // the destination rows this piece of source rows makes
         const top = dy + Math.ceil((first - sy) * dh / sh), bottom = dy + Math.ceil((first - sy + count) * dh / sh);
         const put = (rgba, row_at, left, right, y) => {
             const source_row = sy + Math.floor((y - dy) * sh / dh) - first;
+            if(word && convert_row_32(word, data, source_row * pitch + (sx + left - dx - x0) * 4, rgba, row_at + left * 4, right - left)) return;
             for(let x = left; x < right; x++)
             {
-                const column = sx + Math.floor((x - dx) * sw / dw);
+                const column = sx + Math.floor((x - dx) * sw / dw) - x0;
                 pixel(data, source_row * pitch + column * bytes_per, rgba, row_at + x * 4);
             }
         };
@@ -2582,8 +2594,48 @@ SVGA3D.prototype.to_desktop = function(surface, sx, sy, sw, sh, dx, dy, dw, dh, 
             }
             device.machine.mmio_ram_mark_dirty(device.vga.lfb_region);
         }
-    });
+    }, sx, sw);
 };
+
+/**
+ * How to turn a 32-bit pixel of a surface, as a little-endian word, into an
+ * RGBA one (opaque): for the formats presents mostly have, else null
+ * @return {?function(number):number}
+ */
+function surface_word_converter(surface)
+{
+    const d3d = surface.info && surface.info.d3d;
+    if(d3d === D3DFMT.X8R8G8B8 || d3d === D3DFMT.A8R8G8B8) return bgra_to_rgba;
+    if(d3d === D3DFMT.A8B8G8R8) return rgba_opaque;
+    if(d3d) return null;
+    switch(surface.format)
+    {
+        case C.SVGA3D_B8G8R8A8_UNORM: case C.SVGA3D_B8G8R8X8_UNORM: case C.SVGA3D_B8G8R8A8_UNORM_SRGB:
+        case C.SVGA3D_B8G8R8X8_UNORM_SRGB: case C.SVGA3D_B8G8R8A8_TYPELESS: case C.SVGA3D_B8G8R8X8_TYPELESS:
+            return bgra_to_rgba;
+        case C.SVGA3D_R8G8B8A8_UNORM: case C.SVGA3D_R8G8B8A8_UNORM_SRGB: case C.SVGA3D_R8G8B8A8_TYPELESS:
+            return rgba_opaque;
+    }
+    return null;
+}
+
+const bgra_to_rgba = v => 0xFF000000 | (v & 0xFF) << 16 | v & 0xFF00 | v >>> 16 & 0xFF;
+const rgba_opaque = v => v | 0xFF000000;
+
+/**
+ * `count` 32-bit pixels from `source` (at byte `from`) into `rgba` (at byte
+ * `to`), converted by `word`
+ * @return {boolean} false where the bytes are not word aligned (the caller
+ *     converts pixel by pixel)
+ */
+function convert_row_32(word, source, from, rgba, to, count)
+{
+    if(((source.byteOffset + from) & 3) || ((rgba.byteOffset + to) & 3) || count <= 0) return count <= 0;
+    const s = new Int32Array(source.buffer, source.byteOffset + from, count);
+    const d = new Int32Array(rgba.buffer, rgba.byteOffset + to, count);
+    for(let i = 0; i < count; i++) d[i] = word(s[i]);
+    return true;
+}
 
 /**
  * How to turn a pixel of a surface into RGBA: its D3D9 format, or a DX one

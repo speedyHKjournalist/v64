@@ -124,6 +124,8 @@ memory, a shared memory capability (shmid 1).
 - **2D**: display info and EDID (the preferred mode follows
   `V86.set_display_size`), resources with scattered backing, transfers,
   scanouts (up to 16, side by side), cursor queue, display events, fences.
+  The demo page follows the window's size, and with `?displays=N` gives the
+  guest N displays, each a share of the window's width.
 - **Blobs** (`2d-blob`, `virgl43-blob`): `BLOB_MEM_GUEST` resources scanned out
   straight from guest memory (`SET_SCANOUT_BLOB`), cursors from blobs, and
   `CONTEXT_INIT`.

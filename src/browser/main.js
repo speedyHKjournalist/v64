@@ -2374,6 +2374,12 @@ async function start_emulation(profile, query_args)
             {
                 settings.graphics_adapter = query_args.get("graphics_adapter");
             }
+            // virtio_gpu: how many displays the guest gets (side by side in
+            // the window), a developer's setting
+            if(query_args.has("displays"))
+            {
+                settings.displays = Math.max(1, Math.min(4, parseInt(query_args.get("displays"), 10) || 1));
+            }
 
             settings.acpi = query_args.has("acpi") ? bool_arg(query_args.get("acpi")) : settings.acpi;
             settings.use_bochs_bios = query_args.get("bios") === "bochs";
@@ -2511,6 +2517,13 @@ async function start_emulation(profile, query_args)
 
         settings.graphics_adapter = $("graphics_adapter").value || DEFAULT_GRAPHICS_ADAPTER;
         if(settings.graphics_adapter !== DEFAULT_GRAPHICS_ADAPTER) new_query_args.set("graphics_adapter", settings.graphics_adapter);
+        // (?displays=N: virtio_gpu's displays, kept from the address)
+        const displays = parseInt(new URLSearchParams(window.location.search).get("displays"), 10);
+        if(displays > 1)
+        {
+            settings.displays = Math.min(4, displays);
+            new_query_args.set("displays", String(settings.displays));
+        }
 
         const boot_order = parseInt($("boot_order").value, 16) || DEFAULT_BOOT_ORDER;
         if(!settings.boot_order || boot_order !== DEFAULT_BOOT_ORDER)
@@ -2642,6 +2655,7 @@ async function start_emulation(profile, query_args)
         extended_memory_size: settings.extended_memory_size || undefined,
         "graphics_adapter": settings.graphics_adapter || DEFAULT_GRAPHICS_ADAPTER,
         "vram_size": settings.vram_size,
+        "graphics_adapter_test": settings.displays > 1 && settings.graphics_adapter === "virtio_gpu" ? { "scanouts": settings.displays } : undefined,
         boot_order: settings.boot_order,
 
         bios: settings.bios,
@@ -2675,13 +2689,17 @@ async function start_emulation(profile, query_args)
     if(DEBUG) window.emulator = emulator;
 
     // virtio_gpu: the guest's display follows the window (the guest's
-    // driver asks for the new size after a display event)
+    // driver asks for the new size after a display event); with several
+    // displays (?displays=N), each gets its share of the width
     if((settings.graphics_adapter || DEFAULT_GRAPHICS_ADAPTER) === "virtio_gpu")
     {
         let resize_timer = 0;
+        const displays = settings.displays || 1;
         const report_display_size = () => {
             clearTimeout(resize_timer);
-            resize_timer = setTimeout(() => emulator.set_display_size(window.innerWidth, window.innerHeight), 250);
+            resize_timer = setTimeout(() => {
+                for(let i = 0; i < displays; i++) emulator.set_display_size(Math.floor(window.innerWidth / displays), window.innerHeight, i);
+            }, 250);
         };
         window.addEventListener("resize", report_display_size);
         emulator.add_listener("emulator-ready", report_display_size);
