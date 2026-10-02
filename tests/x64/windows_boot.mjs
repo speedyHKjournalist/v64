@@ -872,7 +872,7 @@ try
         const svga_rates = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
         if(+process.env.WIN_RATES && svga_rates && svga_rates.svga3d)
         {
-            const s3 = svga_rates.svga3d, core = cpu.get_diagnostics().cores[0];
+            const s3 = svga_rates.svga3d, cores_now = cpu.get_diagnostics().cores, core = cores_now[0];
             rate_samples.n++;
             if(core.halted) rate_samples.halted++;
             rate_samples.backlog += s3.submitted - s3.completed;
@@ -880,7 +880,7 @@ try
             if(performance.now() >= next_rates)
             {
                 const now = performance.now(), counts = {...s3.counts}, seconds = (now - rates_at) / 1000;
-                const retired = Number(core.retired_instructions);
+                const retired = cores_now.reduce((sum, c) => sum + Number(c.retired_instructions), 0);
                 if(rates_counts)
                 {
                     const rates = Object.entries(counts).map(([id, n]) => [id, (n - (rates_counts[id] || 0)) / seconds]).filter(r => r[1] > 0)
