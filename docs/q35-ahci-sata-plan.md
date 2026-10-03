@@ -5,6 +5,7 @@
 本计划基于 2026 年 10 月 3 日审查的当前 v86 分支。目标是增加
 `machine_type: "i440fx" | "q35"`：默认保留现有 i440FX 行为；选择 Q35 时自动创建
 Q35 MCH、ICH9 LPC 和 AHCI 控制器，将现有硬盘与光驱配置连接到 SATA 端口。
+文中引用的固件与参考实现行为已对照 SeaBIOS rel-1.16.2 和 QEMU 9.2.0 源码核实。
 
 首个完整交付版本应支持 SATA 硬盘和 SATA ATAPI 光驱的系统安装、启动、读写、
 复位及快照恢复。它是逐步对齐 QEMU Q35 平台的基础版本，不代表一次实现完整
@@ -28,16 +29,24 @@ new V86({
 | 未填写或 `"i440fx"` | 保留当前 i440FX/PIIX 行为 | IDE 硬盘与 ATAPI 光驱 |
 | `"q35"` | Q35 MCH 与 ICH9 LPC | AHCI 控制器连接 SATA 硬盘与 SATA ATAPI 光驱 |
 
-- Q35 提供 6 个 SATA 端口，固定 `hda → port 0`、`hdb → port 1`、`cdrom → port 2`。
-  未连接设备的端口返回正确的未连接状态；省略前面的磁盘不改变后面设备的端口号。
+- Q35 提供 6 个 SATA 端口，固定 `hda → port 0`、`hdb → port 1`、`cdrom → port 2`，与 QEMU
+  的 `-hda/-hdb/-cdrom` 一致。省略前面的磁盘不改变后面设备的端口号：未提供 `hda` 时
+  `hdb` 仍接在 port 1，而现有 IDE 在这种配置下会忽略 `hdb`。
+- port 2 始终连接 SATA ATAPI 光驱，未提供 `cdrom` 时为空托盘，与现有 IDE 总是创建空光驱
+  一致。`set_cdrom/eject_cdrom` 通过 ATAPI 介质事件换盘，不依赖 SATA 热插拔。没有磁盘的
+  port 0/1 以及 port 3–5 返回正确的未连接状态。
 - SATA 每个端口连接一个设备，不使用 IDE 的 master/slave。
 - 不增加必须手动设置的 `ahci: true` 或 `sata: true` 开关；机器型号决定默认控制器。
-- 建议 Q35 首版默认启用 ACPI，并对显式 `acpi: false` 给出不支持的配置错误。
-  i440FX 的 ACPI 默认行为保持不变。
+- Q35 首版默认启用 ACPI，并对显式 `acpi: false` 给出不支持的配置错误：v86 在
+  `acpi: false` 时既不创建 PM 功能也不启用 IOAPIC，而 SeaBIOS 自带的后备 DSDT 只有
+  i440FX 版本。i440FX 的 ACPI 默认行为保持不变。
 - 非法 `machine_type` 在初始化时明确报错。
 - `qemu_compatible` 保留现有 i440FX 兼容语义。Q35 使用自己的设备布局，不能因该选项
   又套用 i440FX 地址；Q35 下该选项对设备名称及 subsystem identity 的作用需单独定义。
 - 快照记录机器型号与设备布局版本。旧快照缺少型号时按 i440FX 解释，拒绝跨型号直接恢复。
+- Q35 面向带 AHCI 驱动的客体。依赖 vm86 下 int13h 访问磁盘的客体不支持 Q35，继续使用
+  i440FX，包括 DOS + EMM386/QEMM、Windows 3.x 增强模式和 Windows 9x 的兼容模式磁盘访问。
+  原因是 v86 没有 SMM，SeaBIOS 的 AHCI 磁盘服务无法在 vm86 下进入 32 位模式，见 P2 固件部分。
 
 Q35、AHCI、SATA 属于不同层次：Q35/ICH9 定义平台，AHCI 定义操作系统访问存储控制器的
 接口，SATA 定义控制器与设备之间的协议。模拟器需要实现客体可见的寄存器、FIS
@@ -48,13 +57,17 @@ Q35、AHCI、SATA 属于不同层次：Q35/ICH9 定义平台，AHCI 定义操作
 | 代码入口 | 当前情况 | 计划中的处理 |
 | --- | --- | --- |
 | [`src/platform.js`](../src/platform.js) | 已集中描述部分设备位置、资源和 CPU 拓扑 | 增加机器型号、芯片组资源、ECAM、IRQ 与存储配置 |
-| [`src/pci.js`](../src/pci.js) | 硬编码 i440FX/PIIX，配置空间为 256B，设备表和快照围绕 bus 0 | 抽离芯片组，统一 BDF 配置访问，增加 ECAM 与可扩展设备表 |
+| [`src/pci.js`](../src/pci.js) | 硬编码 i440FX/PIIX，配置空间为 256B，设备表和快照围绕 bus 0；部分写路径有缺陷（见 P1） | 抽离芯片组，统一 BDF 配置访问，增加 ECAM 与可扩展设备表 |
+| [`src/rust/cpu/cpu.rs`](../src/rust/cpu/cpu.rs) | `device_raise_irq` 同时驱动 PIC 与 IOAPIC 的同号引脚 | 增加只驱动 IOAPIC 的共享电平输入（GSI 16–23） |
 | [`src/io.js`](../src/io.js) 与 [`src/const.js`](../src/const.js) | MMIO 注册按 128KiB 粒度对齐 | 增加精确子区间映射、迁移和解除映射 |
+| [`src/virtio.js`](../src/virtio.js) 与 [`src/virtio_devices.js`](../src/virtio_devices.js) | MMIO BAR 放大到 128KiB；插件在 0x10–0x1F 号槽中自动分配 | 现有 BAR 保持不变；Q35 下预留 `00:1f.*` |
+| [`src/graphics_adapters/vga_core.js`](../src/graphics_adapters/vga_core.js) | LFB 默认 `0xE0000000`；ROM 固定在 `0xFEB00000` 并忽略 BAR 写入 | ROM 改为跟随固件分配，或登记为固定资源 |
 | [`src/acpi.js`](../src/acpi.js) 与 [`src/acpi_tables.js`](../src/acpi_tables.js) | PIIX4 PM 和对应 ACPI 表，尚无 MCFG | 复用公共电源逻辑，新增 ICH9 布局与 Q35 表描述 |
 | [`src/cpu.js`](../src/cpu.js) | 初始化、复位和快照包含 IDE 专用分支 | 按机器选择设备，校验并保存对应控制器状态 |
-| [`src/ide.js`](../src/ide.js) | ATA/ATAPI 语义与 IDE 通道、PIO、BMDMA 混合 | 提取共享设备逻辑，保留 IDE 传输层 |
+| [`src/browser/`](../src/browser/) | Worker 选项转发表固定；镜像导出、下载和磁盘统计直接访问 `devices.ide` | 转发 `machine_type`，改走统一存储接口 |
+| [`src/ide.js`](../src/ide.js) | ATA/ATAPI 语义与 IDE 通道、PIO、BMDMA 混合 | 抽出传输接口，ATA/ATAPI 语义由 IDE 与 AHCI 共用（见 P3） |
 | [`src/buffer.js`](../src/buffer.js) 与 [`src/state_io.js`](../src/state_io.js) | 已有磁盘后端、缓存与在途 I/O 跟踪 | 复用并补齐错误、取消与 flush 适配 |
-| [`bios/seabios.config`](../bios/seabios.config) | 已启用 `CONFIG_AHCI=y` | 以现有 SeaBIOS 为第一轮验证基础 |
+| [`bios/seabios.config`](../bios/seabios.config) | 已启用 `CONFIG_AHCI=y`、`CONFIG_USE_SMM=y`、`CONFIG_CALL32_SMM=y` | 以现有 SeaBIOS 为第一轮验证基础 |
 | [`bios/fetch-and-build-seabios.sh`](../bios/fetch-and-build-seabios.sh) | 固定 SeaBIOS `rel-1.16.2` | 针对固定版本审计 Q35 初始化路径 |
 
 当前分支已有支持跨页、高内存与地址校验的物理访问接口，以及 LBA48 和稀疏大磁盘测试。
@@ -77,11 +90,15 @@ flowchart TD
 | --- | --- | --- |
 | P0 | 配置契约与机器描述 | 默认 i440FX 行为不变，选项贯穿所有入口 |
 | P1 | PCI 配置访问与精确 MMIO 映射 | 为 Q35 和 AHCI 提供公共基础；旧设备回归通过 |
-| P2 | Q35/ICH9、固件、ACPI、中断 | 依赖 P1；完成枚举、资源描述和中断验证 |
+| P2 | Q35/ICH9、固件、ACPI、中断 | 依赖 P1；可先用软盘或直接内核启动完成枚举、资源描述和中断验证 |
 | P3 | 共享 ATA/ATAPI 与块后端接口 | 可与 P1/P2 并行；IDE 行为和测试保持通过 |
-| P4 | AHCI/SATA 控制器及硬盘、光驱 | 依赖 P1/P3，与 P2 集成；实现真实 BIOS 启动 |
+| P4 | AHCI/SATA 控制器及硬盘、光驱 | 依赖 P1/P3；可先通过测试内部挂接在 i440FX 上联调，再与 P2 集成；实现真实 BIOS 启动 |
 | P5 | 数据完整性、复位、快照和客体验证 | 是发布条件；生命周期接口应在前面阶段就设计好 |
 | P6 | 高地址 DMA、MSI、NCQ、热插拔和完整平台扩展 | 基础版本通过后，逐项实现并开放对应能力 |
+
+AHCI 控制器不依赖 Q35 芯片组：SeaBIOS 按 class `01:06:01` 查找控制器，QEMU 的 pc 机型也能
+挂接 ICH9 AHCI。因此 P4 可以先在 i440FX 上联调，不必等待 P2。这种挂接只供测试内部使用，
+不是公开选项，与“机器型号决定默认控制器”并不冲突。
 
 ## P0 配置与机器描述
 
@@ -89,37 +106,58 @@ flowchart TD
 来自同一份描述。避免在各设备中散落对 `machine_type` 的判断。
 
 选项需要贯穿 [`v86.d.ts`](../v86.d.ts)、[`src/browser/starter.js`](../src/browser/starter.js)、
-[`src/browser/cpu_worker.js`](../src/browser/cpu_worker.js) 和 CPU 初始化；同时覆盖浏览器及
-Node 入口。新模块加入 [`Makefile`](../Makefile) 的构建输入。
+[`src/browser/cpu_worker.js`](../src/browser/cpu_worker.js)（其选项转发表需加入
+`machine_type`）和 CPU 初始化；同时覆盖浏览器及 Node 入口。新模块加入
+[`Makefile`](../Makefile) 的构建输入。以下入口目前直接访问 `devices.ide`，需改走统一存储
+接口：[`cpu_worker_runtime.js`](../src/browser/cpu_worker_runtime.js) 的镜像导出、
+[`main.js`](../src/browser/main.js) 的镜像下载按钮和
+[`performance_recorder.js`](../src/browser/performance_recorder.js) 的磁盘统计。
 
 将芯片组创建与通用 PCI 总线逻辑分开，CPU 按平台创建 IDE 或 AHCI，并通过统一介质接口
-提供光驱操作。机器描述同时向固件、ACPI 表和设备实现提供资源信息。
+提供光驱操作。机器描述同时向固件、ACPI 表和设备实现提供资源信息，其中包括：
+
+- Q35 的槽位布局：`00:1f.*` 保留给 ICH9。`pci_functions` 目前只有两种 i440FX 布局，
+  需要增加 Q35 下显卡、网卡等设备的位置。
+- virtio 插件在 0x10–0x1F 号槽中自动分配（[`src/virtio_devices.js`](../src/virtio_devices.js)）。
+  Q35 下必须跳过 0x1F，芯片组设备需在插件分配之前完成注册。
+- 按机器型号生成的固定 I/O 范围表：ICH9 的 GPE0 并入 PM 区，不再使用 PIIX4 的 `0xAFE0`。
+- Q35 下检查低端 RAM 结束于 `0xB0000000` 之下。当前低端 RAM 最多 2GiB，满足这一条件。
 
 验收：未填写和显式填写 i440FX 的设备集合一致；Q35 的配置能够正确传入 Worker；
-非法选项失败明确，Q35 不意外创建 IDE 控制器。
+非法选项失败明确，Q35 不意外创建 IDE 控制器，插件设备不占用 0x1F 号槽。
 
 ## P1 PCI 与 MMIO 公共基础
 
 统一配置访问为 `config_read/write(bdf, offset, size)`。BDF 包含总线号、设备号和功能号。
-传统 `CF8/CFC` 与 ECAM 使用同一后端，支持按函数选择 256B 或 4KiB 配置空间。
-设备表及快照改为可扩展的 BDF 集合；首版 Q35 可以先只布置 root bus 上的设备。
+传统 `CF8/CFC` 与 ECAM 使用同一后端，支持按函数选择 256B 或 4KiB 配置空间；256B 的函数
+经 ECAM 读取 `0x100` 以上时返回全一。设备表及快照改为可扩展的 BDF 集合；首版 Q35 可以先
+只布置 root bus 上的设备。现有 i440FX 快照（包括站点分发的状态文件）必须继续按原格式恢复。
 
 配置访问需要统一处理：
 
-- 不存在函数的全一返回值、配置边界和 8/16/32 位访问。
+- 不存在函数的全一返回值、配置边界和 8/16/32 位访问。写入不存在的函数一律丢弃；目前
+  `pci_write8/16` 会先访问 `undefined.buffer` 而抛出异常。
 - 按字段实现只读、写一清零、保留位与设备回调，避免不同访问宽度语义不一致。
+- `CF8` 读回写入的地址并检查 bit 31；目前读回的是“设备是否存在”。
 - BAR 大小探测、重定位与解除映射。
-- PCI Memory Enable、Bus Master Enable、INTx Disable 的实际效果。
+- PCI Memory Enable、Bus Master Enable、INTx Disable 的实际效果。命令寄存器的 32 位写目前
+  只记录日志、不保存数值，必须先修正，否则用 dword 写开启总线主控的客体将无法 DMA。
 - 恢复快照后重新建立映射和中断状态。
 
 当前 128KiB MMIO 粒度无法直接表示小型 AHCI BAR 和 16KiB ICH9 RCBA。建议保留粗粒度
 快路径，在需要的块中加入按精确地址区间分发的处理器。每段映射具有明确 owner，支持迁移、
 释放、空洞及跨边界访问；解除一个设备的映射不能清除同块其他设备。
 
-禁止通过扩大客体看到的 BAR 大小或向外取整覆盖整个 MMIO 块来绕过该问题。
+新设备禁止通过扩大客体看到的 BAR 大小或向外取整覆盖整个 MMIO 块来绕过该问题。现有
+virtio 已把 MMIO BAR 放大到 128KiB，这是已安装客体看到的布局：i440FX 下保持不变，
+Q35 下暂时沿用。
+
+VGA ROM 固定在 `0xFEB00000`，独占一个 128KiB 块，并忽略 ROM BAR 写入。SeaBIOS 从窗口
+顶端向下分配 BAR，并不知道这块 ROM 不会移动；Q35 的 BAR 集合不同，无法保证其他 BAR 不会
+落进这一块。需要让 ROM BAR 跟随固件分配，或把它登记为固定资源并检查重叠。
 
 验收：CF8/CFC 与 ECAM 前 256B 一致；同一个粗块内两个设备独立工作；BAR 探测、迁移、
-关闭解码、解除映射和快照恢复均正确。
+关闭解码、解除映射和快照恢复均正确；固定资源不与固件分配的 BAR 重叠；旧快照可以恢复。
 
 ## P2 Q35 ICH9 固件与 ACPI
 
@@ -132,19 +170,24 @@ Node 入口。新模块加入 [`Makefile`](../Makefile) 的构建输入。
 | `00:1f.2` | ICH9 AHCI | `8086:2922`，class `01:06:01` |
 
 这对应 QEMU 的 Q35/ICH9 核心组织方式；AHCI 提供 6 个端口，主要寄存器位于 BAR5。
-参考 [QEMU Q35 机器实现](https://github.com/qemu/qemu/blob/master/hw/i386/pc_q35.c)
-与 [ICH9 AHCI 实现](https://github.com/qemu/qemu/blob/master/hw/ide/ich.c)。
+参考 [QEMU Q35 机器实现](https://github.com/qemu/qemu/blob/v9.2.0/hw/i386/pc_q35.c)
+与 [ICH9 AHCI 实现](https://github.com/qemu/qemu/blob/v9.2.0/hw/ide/ich.c)。
 
 ### MCH 与内存布局
 
-至少实现固件实际使用的 PCIEXBAR、ECAM、PAM/BIOS shadow 行为，以及一致的 RAM/PCI hole。
-SeaBIOS 识别 Q35 后会设置 PCIEXBAR，并立即使用 ECAM 进行后续配置访问，因此必须一起
-实现设备身份与对应行为，不能先换 ID 再等待后续补齐 ECAM。
+至少实现固件实际使用的 PCIEXBAR（config `0x60`）、ECAM、PAM（`0x90–0x96`）和
+SMRAM（`0x9D`）行为，以及一致的 RAM/PCI hole。SeaBIOS 识别 Q35 后会设置 PCIEXBAR，此后
+32 位代码的配置访问全部经 ECAM（16 位 PCI BIOS 仍走 `CF8/CFC`），因此必须一起实现设备
+身份与对应行为，不能先换 ID 再等待后续补齐 ECAM。
 
-沿用当前固定版本 SeaBIOS 时，建议匹配它的默认布局：ECAM 位于 `0xB0000000`，占 256MiB，
-普通 PCI MMIO 从 `0xC0000000` 开始。平台的实际 RAM 映射、E820、ACPI `_CRS` 和 MCFG
-必须一致；较大 RAM 配置需要配套保留及重映射。当前 VGA LFB 默认使用 `0xE0000000`，
-不能在未协调显存映射时把 ECAM 放在那里。
+SeaBIOS rel-1.16.2 把 ECAM 写死在 `0xB0000000`（256MiB），并从 `0xC0000000` 开始分配普通
+PCI MMIO，平台只能与之匹配。平台的实际 RAM 映射、E820、ACPI `_CRS` 和 MCFG 必须一致；
+较大 RAM 配置需要配套保留及重映射。当前 VGA LFB 默认使用 `0xE0000000`，不能在未协调
+显存映射时把 ECAM 放在那里。
+
+PAM0 必须像 i440FX 现有实现一样读出 `0x10`。SeaBIOS 的 `make_bios_writable` 据此判断
+shadow RAM 中已有 BIOS；否则它会从 4GiB 以下的 BIOS 别名执行代码并复制自身，而 v86
+不允许在那里执行代码。
 
 参考 [SeaBIOS PCI 初始化](https://github.com/coreboot/seabios/blob/rel-1.16.2/src/fw/pciinit.c)
 与 [Q35 常量](https://github.com/coreboot/seabios/blob/rel-1.16.2/src/fw/dev-q35.h)。
@@ -154,47 +197,106 @@ SeaBIOS 识别 Q35 后会设置 PCIEXBAR，并立即使用 ECAM 进行后续配�
 复用公共 PM 定时器、SCI、睡眠和共享 IRQ 逻辑，但为 ICH9 实现独立的寄存器布局：
 
 - PMBASE 位于 PCI config `0x40`，PM 区域按 128B 对齐，长度为 128B。
-- ACPI enable 位位于 config `0x44` bit 7，不能沿用 PIIX4 的 config `0x80`。
+- ACPI enable 位位于 config `0x44` bit 7，不能沿用 PIIX4 的 config `0x80`；bits 2:0 选择
+  SCI，SeaBIOS 写 0，即 IRQ9。
 - GPE0 位于 `PMBASE + 0x20`，长度为 16B，FADT 同步描述。
-- RCBA 位于 config `0xF0`，实现固件使用的映射及寄存器行为。
-- 支持 PIRQA–H 八路路由；PIC 路径、IOAPIC GSI 16–23、设备引脚路由和 AML 保持一致。
-- ACPI enable/disable 命令值、SCI、复位和睡眠行为按平台描述生成。
+- SMI_EN 位于 `PMBASE + 0x30`。SeaBIOS 读它来判断是否跳过 SMM 初始化，随后写入 APMC_EN
+  与 GLB_SMI_EN；它还会先按 16 位读、再按 32 位写回 GEN_PMCON_1（config `0xA0`）。没有
+  SMM 时，这些寄存器只需保存数值。
+- RCBA 位于 config `0xF0`，实现固件使用的映射及寄存器行为。SeaBIOS 写入 `0xFED1C000`
+  并在 E820 中保留 16KiB，小于 MMIO 映射粒度，需要精确映射。
+- PIRQA–D 路由寄存器位于 config `0x60–0x63`，PIRQE–H 位于 `0x68–0x6B`；bit 7 置位表示不
+  路由到 PIC。
+- ACPI enable/disable 命令值（QEMU 的 ICH9 用 `0x02/0x03`）、SCI、复位和睡眠行为按平台
+  描述生成，并与 `0xB2` 的处理保持一致。
+
+中断拓扑按 QEMU Q35：0–24 号槽的 INTA–D 按 `(slot + pin) % 4` 接到 PIRQE–H；25–31 号槽
+（包括 `00:1f.2` 的 AHCI）的 INTA–D 依次接到 PIRQA–D。APIC 模式下 PIRQn 固定接 IOAPIC
+GSI 16+n；PIC 模式下按路由寄存器接到 ISA IRQ。这些规则适用于所有 PCI 功能，统一在
+`PCI.get_irq_line` 中实现，不只针对 AHCI。
+
+当前的 `device_raise_irq(i)` 同时驱动 PIC 和 IOAPIC 的第 i 号引脚，`set_shared_irq_level`
+也经由它实现，表达不了“PIC 走 PIRQ 路由、IOAPIC 走 16+n”。需要新增只驱动 IOAPIC 的共享
+电平输入；现有 24 项的 `shared_irq_sources` 及其快照可以直接覆盖引脚 16–23。PIC 路径可以
+继续用现有的共享电平逻辑，IOAPIC 同号 ISA 引脚会随之变化，QEMU 的 ICH9 也是这样。
 
 Q35 不再创建独立的 PIIX4 PM PCI function。参考
-[QEMU ICH9 定义](https://github.com/qemu/qemu/blob/master/include/hw/southbridge/ich9.h)。
+[QEMU ICH9 定义](https://github.com/qemu/qemu/blob/v9.2.0/include/hw/southbridge/ich9.h)
+与 [ICH9 LPC 实现](https://github.com/qemu/qemu/blob/v9.2.0/hw/isa/lpc_ich9.c)。
 
 ### ACPI 与固件
 
 继续使用现有 fw_cfg 与 `etc/table-loader` 交付 ACPI 表。增加 MCFG，将根节点描述为
 `PNP0A08` 并提供 `PNP0A03` 兼容 ID，更新 `_SEG`、`_BBN`、`_CRS`、`_PRT`、LPC 地址及
-FADT 的 PM/GPE/SCI 信息。仅声明已实现和验证的能力与睡眠状态。
+FADT 的 PM/GPE/SCI 信息。仅声明已实现和验证的能力与睡眠状态；`ACPI_SLEEP_STATES` 目前是
+全局表，需要改为按机器描述生成。此外：
 
-现有 SeaBIOS 配置已启用 AHCI，可以先复用当前固件验证。v86 当前没有真实 SMM，已有
-`0xB3` 兼容读取和 `0xB2` 直接处理 ACPI 命令的路径。Q35 应先验证这一策略；若有问题，
-再提供同版本构建的无 SMM 固件。完整 SMM、SMRAM 隔离和 RSM 留到后续平台工作，
-不能把兼容绕过描述成已支持 SMM。
+- `_CRS` 的 32 位窗口不能包含 ECAM。现有窗口从 `pci_mmio_start` 开始，内存为 256MiB 时
+  起点是 `0x10000000`，会把 ECAM 包进去，操作系统的资源分配器会把它当成可用地址。
+- 按 PCI Firmware 规范，ECAM 应由 ACPI 主板资源保留（PNP0C02；QEMU 用 PNP0C01 的
+  `DRAC`）。SeaBIOS 只在 E820 中保留它；Linux 6.12 的早期检查对 BIOS 日期早于 2016 年的
+  机器接受 E820 保留（SeaBIOS 报 2014 年），晚期检查只认 ACPI 主板资源。
+- 按模式提供两张 `_PRT`：QEMU 用 `_PIC` 记录模式，PIC 模式用 LNKA–H 链接设备（PRTP），
+  APIC 模式用 GSIA–H（PRTA，GSI 16–23）。现有 DSDT 只有一张基于 LNKA–D 的 `_PRT`，
+  也没有 `_PIC`。
+- ISA 设备移到 LPC（`_ADR 0x001F0000`）下，并保留 PS/2 键盘的 `PNP0303`：SeaBIOS 解析
+  DSDT，找不到它就不初始化 PS/2。
+
+现有 SeaBIOS 配置已启用 AHCI，可以先复用当前固件验证。v86 当前没有真实 SMM：读 `0xB3`
+返回 0，使 `smm_relocate_and_restore` 不必等待 SMI；写 `0xB2` 直接处理 ACPI 命令。ICH9 与
+PIIX4 共用这段代码，额外访问的 SMI_EN、GEN_PMCON_1 和 SMRAM 见上文。与 i440FX 相同，
+SeaBIOS 会把 `0x38000`、`0x3FE00` 附近的原内容暂存到 `0xA8000`、`0xAFE00`（v86 中为
+VGA 显存）再取回。Q35 应先验证这一策略；若有问题，再提供同版本构建的无 SMM 固件。
+
+缺少 SMM 还有一个直接后果：SeaBIOS 的 AHCI 磁盘服务在 vm86 下不可用。AHCI 驱动只在
+32 位模式运行（[`block.c`](https://github.com/coreboot/seabios/blob/rel-1.16.2/src/block.c)
+的 `process_op_32`），16 位 int13h 要经 `call32` 进入。`call32_prep` 遇到 CR0.PE=1 直接返回
+错误（[`stacks.c`](https://github.com/coreboot/seabios/blob/rel-1.16.2/src/stacks.c)）；而经
+SMM 的 `call32_smm` 需要 `HaveSmmCall32`，该标志只在 SMI 处理程序真正执行时置位
+（[`smm.c`](https://github.com/coreboot/seabios/blob/rel-1.16.2/src/fw/smm.c)）。QEMU 依靠
+SMM 避开了这一点，改用无 SMM 固件也无法解决。因此配置契约把依赖 vm86 下 int13h 的客体
+排除在 Q35 之外。完整 SMM、SMRAM 隔离和 RSM 留到后续平台工作，不能把兼容绕过描述成
+已支持 SMM。
 
 验收：SeaBIOS 完成 Q35 枚举，Linux 可读取正确 PCI/ACPI 信息；ACPI 表校验和、ECAM、
-资源保留、PM 和 IRQ 测试通过。直接启动内核可用于阶段调试，但不能替代最终磁盘启动验收。
+资源保留、PM 和 IRQ 测试通过；PIC 和 APIC 两种模式下，显卡、virtio 和 AHCI 的中断都按
+`_PRT` 到达。直接启动内核可用于阶段调试，但不能替代最终磁盘启动验收。
 
 ## P3 共享 ATA ATAPI 与块后端
 
 将存储拆成块后端、ATA/ATAPI 设备语义和控制器传输层。现有 `IDEInterface` 混合了命令、
-PIO 状态、通道选择和 IRQ，不能直接作为 AHCI 后端使用。
+PIO 状态、通道选择和 IRQ，但它对 `IDEChannel` 的依赖集中在少数几处：PRDT 地址、BMDMA
+状态、中断（`dma_segments`、`do_*_dma`、`push_irq`）以及主从盘引用。
+
+建议采用 QEMU 已验证的路线。QEMU 的 AHCI 没有拆分 IDE 设备模型，而是给每个端口挂一条
+单设备 IDE 总线，由 AHCI 实现 DMA/PIO 搬运和中断
+（[`ahci.c`](https://github.com/qemu/qemu/blob/v9.2.0/hw/ide/ahci.c)）。v86 先把上述依赖
+抽成传输接口，由 IDE 通道和 AHCI 端口分别实现；ATA/ATAPI 命令语义原地复用，H2D FIS
+装入现有任务文件寄存器（含 HOB 字节）后执行。这比把设备语义整体抽离改动小，IDE 回归
+风险也更低。只有这条路线走不通时，才把设备语义整体抽离。
 
 | 可共享部分 | 保留在 IDE 的部分 | AHCI 新增部分 |
 | --- | --- | --- |
-| IDENTIFY、容量、LBA28/LBA48、读写命令、错误与介质状态 | I/O 端口、task file、HOB、master/slave、PIO、BMDMA | Command List、Command Table、FIS、AHCI PRDT、端口状态机 |
+| IDENTIFY、容量、LBA28/LBA48、读写命令、task file 寄存器、错误与介质状态 | I/O 端口（含 task file 与 HOB 的端口访问）、master/slave、PIO 数据端口、BMDMA | Command List、Command Table、FIS 与 task file 的互相装载、AHCI PRDT、端口状态机 |
 | ATAPI packet 命令、sense、光盘读写语义及换盘状态 | IDE 下的 packet/data 阶段传输 | AHCI ACMD、FIS 与客体内存数据传输 |
 
 共享设备生成 IDENTIFY 时，根据 PATA/SATA 连接方式和实际实现生成能力字段。
 不能照搬 PATA 字段，也不能声明尚未实现的 NCQ、队列深度或高级电源管理。
 
+共享层不能继承以下 IDE 行为，本阶段需一并修正：
+
+- 越界读写时把状态写成 `0xFF`。放进 D2H FIS 就等于 BSY，SeaBIOS 会等到超时，Linux 会进入
+  错误恢复。改为 `ERR|DRDY`，错误寄存器报告 IDNF 或 ABRT。
+- PIO 写在后端写入完成前就置 DRDY 并发出中断，与 DMA 写的顺序不一致；FLUSH CACHE 则立即
+  完成。统一改为后端完成后才报告写完成，FLUSH 等待此前全部在途写入。现有缓冲区的 `set`
+  都同步回调，对它们没有可见差异；延迟后端的测试需要覆盖新的顺序。
+
 磁盘后端继续使用现有镜像、缓存和 `get/set/get_state` 能力，增加统一的异步完成、错误、
 取消与 flush/barrier 适配。对内存 overlay 和持久化后端分别明确 flush 所能兑现的语义，
 不要求用户更换镜像格式。
 
-验收：现有 IDE 启动、读写、光驱、换盘、复位和大磁盘测试保持通过。
+验收：现有 IDE 启动、读写、光驱、换盘、复位和大磁盘测试保持通过；延迟后端下 PIO 写、
+DMA 写和 FLUSH 的完成顺序正确。
 
 ## P4 AHCI 控制器与 SATA 端口
 
@@ -204,12 +306,12 @@ DMA 和设备语义分开。首版使用 INTx，MSI 后续加入。
 | 部分 | 首版范围 |
 | --- | --- |
 | PCI 包装 | ICH9 AHCI 身份、BAR5、解码开关、总线主控与 INTx |
-| HBA 全局寄存器 | `CAP/GHC/IS/PI/VS`，全局复位及中断控制 |
+| HBA 全局寄存器 | `CAP/GHC/IS/PI/VS`，全局复位及中断控制；VS 报 1.0，与 QEMU 相同（`CAP2/BOHC` 自 AHCI 1.2 才定义，Linux 只在 VS≥1.2 时读取 CAP2） |
 | 端口寄存器 | `PxCLB/CLBU/FB/FBU/IS/IE/CMD/TFD/SIG/SSTS/SCTL/SERR/SACT/CI` 等 |
-| 命令引擎 | Command Header、Command Table、H2D Register FIS、ATAPI packet |
+| 命令引擎 | Command Header（含 R/C 位）、Command Table、H2D Register FIS（C 位区分命令与 Device Control 更新，后者用于 SRST）、ATAPI packet |
 | 数据搬运 | Scatter/Gather PRDT、长度与地址验证、PRDBC 更新 |
 | 完成路径 | Received FIS、任务状态、错误状态、命令完成与中断撤销 |
-| SATA 状态 | 空端口、设备签名、COMRESET、SRST、HBA reset、端口启停 |
+| SATA 状态 | 空端口、设备签名与初始 D2H FIS、COMRESET、SRST、HBA reset、端口启停 |
 
 命令执行路径：
 
@@ -228,8 +330,9 @@ DMA 和设备语义分开。首版使用 INTx，MSI 后续加入。
 高级链路电源管理，对应能力位只在实现后开放。
 
 寄存器必须正确实现只读、写一清零、保留位、复位默认值，以及 `ST/FRE` 与 `CR/FR`
-启停关系。状态产生与实际 IRQ 输出分离：更新 `PxIS` 和 Received FIS 不依赖中断是否打开，
-中断再按 `PxIE`、全局状态、`GHC.IE` 和 PCI INTx 控制组合决定，并正确撤销。
+启停关系；`ST` 由 1 变 0 时清除 `PxCI` 与 `PxSACT`。状态产生与实际 IRQ 输出分离：
+更新 `PxIS` 和 Received FIS 不依赖中断是否打开，中断再按 `PxIE`、全局状态、`GHC.IE`
+和 PCI INTx 控制组合决定，并正确撤销。
 
 ATA 最低命令集覆盖 IDENTIFY、READ/WRITE DMA 及 EXT、必要的 PIO 类读写、FLUSH CACHE
 及 EXT、SET FEATURES、容量查询和不支持命令的 ABRT。AHCI 下的 PIO 类命令同样通过
@@ -243,15 +346,30 @@ SATA ATAPI 光驱纳入首个完整版本，覆盖 IDENTIFY PACKET、PACKET/ACMD
 [Intel AHCI 1.3.1 规范](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/serial-ata-ahci-spec-rev1-3-1.pdf)
 为依据；客体看到的 AHCI 版本与能力必须匹配实际实现。
 
-SeaBIOS 联调需要专门覆盖以下行为：
+SeaBIOS 与 Linux 联调需要专门覆盖以下行为：
 
-1. 它先向硬盘发送 IDENTIFY PACKET DEVICE，收到正常错误完成后才尝试 IDENTIFY DEVICE。
-   错误命令必须更新 FIS 和状态，并允许后续恢复，不能让固件等到超时。
+1. SeaBIOS 先向硬盘发送 IDENTIFY PACKET DEVICE，收到正常错误完成后才尝试 IDENTIFY
+   DEVICE。错误命令必须更新 FIS 和状态，并允许 SeaBIOS 的非排队错误恢复（清 ST、等 CR
+   清零、清 SERR/IS，必要时 COMRESET），不能让固件等到超时。
 2. 它会将 `PxIE` 设为零并轮询 `PxIS` 与 Received FIS，因此屏蔽 IRQ 不得屏蔽状态更新。
-3. 无数据 SET FEATURES 仍可能带有 PRDT。必须先按命令语义确定数据阶段，不能依据
-   未使用的 PRDT 长度盲目发起 DMA。
+3. 它只识别 `PxIS` 的 DHRS 与 PSS 两位。错误完成必须发送带 ERR 的 D2H Register FIS 并
+   置 DHRS；只置 TFES 时，它会等满 32 秒超时。
+4. PSS 置位时，它从 PIO Setup FIS 第 2 字节读取状态。因此 PSS 只能由 I=1 的 PIO Setup
+   FIS 置位（QEMU 在 ATAPI 命令包阶段使用 I=0），否则 ATAPI 命令会读到命令包阶段的状态，
+   失败的 TEST UNIT READY 也会被当成成功。Linux 对 PIO 读命令则从同一 FIS 的第 15 字节
+   （E_Status）取结果状态，两处都必须有效。
+5. 成功判定要求 DRDY=1，ATAPI 命令也一样。
+6. `PxTFD` 的复位值 `0x7F` 含 DRQ。设备连接时必须模拟初始 D2H Register FIS，更新签名和
+   状态；否则 SeaBIOS 在每个端口上等满 32 秒后放弃该设备。链路须在置 SUD 后 10ms 内显示
+   `PxSSTS.DET=3`。
+7. 探测成功后，SeaBIOS 在端口复位后改写 CLB/FB，再用一次写同时置上 FRE 与 ST。HBA 不能
+   缓存旧地址，并须接受两位同时置位。
+8. 无数据命令仍带有 PRDT：SET FEATURES 的长度为 0 且命令头 W=1，TEST UNIT READY 的缓冲区
+   为 NULL，两者的 PRDT 都描述从地址 0 开始的 4MiB。数据方向与长度必须按命令和 CDB 语义
+   确定，不能依据 PRDT 长度或 W 位盲目发起 DMA。
 
-参考 [SeaBIOS AHCI 驱动](https://github.com/coreboot/seabios/blob/rel-1.16.2/src/hw/ahci.c)。
+参考 [SeaBIOS AHCI 驱动](https://github.com/coreboot/seabios/blob/rel-1.16.2/src/hw/ahci.c)
+与 [Linux libahci](https://github.com/torvalds/linux/blob/v6.12/drivers/ata/libahci.c)。
 
 ## P5 数据正确性与生命周期
 
@@ -272,9 +390,10 @@ LBA48 大磁盘与高地址 DMA 分别验收。首版可暂设 `S64A=0`；CLB、
 介质状态。首版采用停止提交新命令并等待在途 I/O 完成的策略，不序列化 Promise 或网络请求。
 恢复前校验机器与磁盘拓扑，恢复后重建 BAR/ECAM 映射和中断电平。
 
-CPU 的初始化、复位、保存和恢复不能继续假定 `devices.ide` 一定存在。
-`set_cdrom/eject_cdrom` 保持可用，通过统一介质接口分发；磁盘活动事件和统计也应能表达
-AHCI 端口，并明确原有 IDE 事件的兼容策略。
+CPU 的初始化、复位、保存和恢复不能继续假定 `devices.ide` 一定存在；旧快照中的 IDE 槽位
+保持原义，AHCI 使用新的槽位。`set_cdrom/eject_cdrom` 保持可用，通过统一介质接口分发：
+AHCI 光驱提供与 IDE 光驱相同的 `has_disk/set_cdrom/eject/buffer`，页面和 Worker 的光驱
+菜单无需区分。磁盘活动事件和统计也应能表达 AHCI 端口，并明确原有 IDE 事件的兼容策略。
 
 关机、复位和休眠需区分语义：复位使旧命令完成回调失效，S5 等待已提交写入按现有平台语义
 完成；Q35 的 S3/S4 只有在固件和存储生命周期验证后才能对客体声明支持。
@@ -284,12 +403,12 @@ AHCI 端口，并明确原有 IDE 事件的兼容策略。
 | 层级 | 必须达到的结果 |
 | --- | --- |
 | 机器契约 | 默认及显式 i440FX 保持旧行为，Q35 自动创建 AHCI，非法选项明确失败 |
-| 旧平台回归 | IDE、旧快照、光盘 API、原有 PCI 与 ACPI 测试保持通过 |
-| PCI 与资源 | CF8/ECAM 一致，配置宽度、空 BDF、BAR 探测与迁移、MSE/BME、资源冲突正确处理 |
-| ACPI 与中断 | 表校验和、MCFG、FADT、`_CRS`、`_PRT` 对应硬件，PIC/IOAPIC 路由正确 |
+| 旧平台回归 | IDE、旧快照（含站点分发的状态文件）、光盘 API、原有 PCI 与 ACPI 测试保持通过 |
+| PCI 与资源 | CF8/ECAM 一致，配置宽度、空 BDF、BAR 探测与迁移、MSE/BME、资源冲突正确处理，固定资源不与固件分配的 BAR 重叠 |
+| ACPI 与中断 | 表校验和、MCFG、FADT、`_CRS`、`_PRT` 对应硬件，ECAM 在主板资源中保留，PIC/IOAPIC 路由正确 |
 | AHCI 命令 | 各槽位、多个 PRDT、跨页、短传输与非法请求、空端口、复位、状态清除正确 |
 | 数据完整性 | 随机读写回读校验、末扇区、只读盘、非法地址、LBA48 大磁盘 |
-| 固件启动 | SeaBIOS 实际从 SATA 硬盘与 SATA ATAPI ISO 启动，覆盖错误探测和轮询路径 |
+| 固件启动 | SeaBIOS 实际从 SATA 硬盘与 SATA ATAPI ISO 启动，覆盖错误探测和轮询路径；DOS 在实模式下经 int13h 读写 SATA 硬盘，加载 EMM386 后按预期失败 |
 | Linux 客体 | 原生 ahci/libata 驱动完成安装、挂载、文件校验和重启后的再次校验 |
 | Windows 客体 | 使用自带 AHCI 驱动的版本完成安装与重启；旧系统另列驱动与兼容边界 |
 | 生命周期 | 读写中的 reset/save/restore/关机、迟到回调、多端口、换光盘 |
@@ -306,12 +425,22 @@ AHCI 端口，并明确原有 IDE 事件的兼容策略。
 - [`tests/devices/acpi_guest.js`](../tests/devices/acpi_guest.js)：真实客体、重启及电源状态。
 - [`tests/smp/physical_bus.mjs`](../tests/smp/physical_bus.mjs)：物理地址、跨页及地址空洞。
 
+本地可用的客体镜像：
+
+- `images/linux4.iso`（Linux 4.16）的内核内置 ahci/libata，已用于 IOAPIC 路由测试，适合
+  作为第一个 Linux AHCI 客体；`images/TinyCore-11.0.iso`（Linux 5.4）同样内置 ahci。
+- `images/buildroot-bzimage68.bin` 不含 libata，不能用于 AHCI 验收。
+- `images/msdos622.img`（64MiB 硬盘镜像）可以直接作为 SATA 硬盘，验证实模式 int13h 路径；
+  EMM386 反例需要另备配置。
+
 在现有 `platform-contract-tests` 和 `platform-release-gate` 中增加 Q35/AHCI 验收阶段。
 与 QEMU 的差分验证固定一个版本，比较枚举结果、寄存器语义和相同命令序列的结果，
 记录允许存在的能力差异；不依赖不断变化的 master 作为唯一验收基线。
 
 新系统安装与已有镜像迁移分开验证。已有 IDE 系统盘切换到 AHCI 后，客体可能因启动驱动
 未准备好而无法启动；修改机器型号不等于完成系统盘迁移，更不意味着快照可跨平台恢复。
+Windows 镜像可以先在 i440FX 下启用系统自带的 AHCI 驱动，再切换到 Q35：Windows 7 把
+`msahci` 的 Start 设为 0；Windows 8 起把 `storahci` 的 Start 设为 0，并处理其 StartOverride。
 参考 [Microsoft 启动设备错误说明](https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/inaccessible-boot-device-stop-error)。
 
 ## P6 后续能力
@@ -321,10 +450,11 @@ AHCI 端口，并明确原有 IDE 事件的兼容策略。
 1. 高地址 DMA，覆盖所有相关地址高位与高内存传输。
 2. MSI，验证启用/关闭、向量投递及 INTx 切换。
 3. NCQ，包含并发命令、tag、完成通知、flush 顺序及 queued error recovery。
-4. SATA 热插拔与介质事件。
+4. SATA 热插拔。光驱换盘已由 ATAPI 介质事件覆盖，不依赖此项。
 5. PCIe Root Port、桥后设备和多总线拓扑。
 6. 链路电源管理、HPET、SMBus，以及更完整的 ICH9 行为。
-7. 真实 SMM、SMRAM 和其他完整平台兼容能力。
+7. 真实 SMM、SMRAM 和其他完整平台兼容能力。实现 SMM 后，SeaBIOS 的 `call32_smm` 才能
+   让 vm86 下的 AHCI int13h 工作。
 
 性能优化在数据正确性之后进行，重点测量批量数据搬运、后端请求合并和多端口并发。
 AHCI 接口本身不保证模拟器比 IDE 更快，应使用相同客体、镜像与后端做对照测量。
