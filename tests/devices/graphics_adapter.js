@@ -50,6 +50,8 @@ for(const [options, message] of [
     [{ graphics_adapter: () => {} }, /use graphics_proxy: true/],
     [{ graphics_adapter: "bochs_vga", vga_memory_size: 8 << 20 }, /vga_memory_size was renamed to vram_size/],
     [{ graphics_adapter: "bochs_vga", vram_size: 3 << 20 }, /vram_size must be a power of two/],
+    // (the VGA core backs 256 MiB; a 512 MiB BAR1 made vmware_svga's VRAM view throw once a driver used it)
+    [{ graphics_adapter: "vmware_svga", vram_size: 512 << 20 }, /vram_size must be at most 256 MiB/],
 ])
 {
     assert.throws(() => new V86({ ...BASE, autostart: false, ...options }), message);

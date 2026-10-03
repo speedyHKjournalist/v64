@@ -25,7 +25,7 @@ Three options are public:
 ```js
 new V86({
     graphics_adapter: "vmware_svga",   // required: "bochs_vga" | "vmware_svga" | "virtio_gpu" | "none"
-    vram_size: 64 << 20,               // optional, a power of two; the adapter's default otherwise
+    vram_size: 64 << 20,               // optional, a power of two up to 256 MiB; the adapter's default otherwise
     graphics_adapter_path: "lib/v86-vmware-svga.js", // optional: the plugin file
 });
 ```
@@ -36,8 +36,11 @@ new V86({
   PCI slot, so the other devices keep their PCI addresses. A machine has one
   display adapter or none.
 - **`vram_size`** is the size of the adapter's VRAM BAR, the VGA core's linear
-  frame buffer. With `"none"` it is ignored, with a warning. `vmware_svga`
-  refuses a snapshot whose `vram_size` differs from the machine's.
+  frame buffer, at most 256 MiB (all the VGA core backs). With `"none"` it is
+  ignored, with a warning. `vmware_svga` refuses a snapshot whose `vram_size`
+  differs from the machine's. A larger one does not help 3D: both devices
+  take 3D data from guest memory (GMRs and GB objects; resource backing and
+  virtio-gpu's host-visible BAR), not from the VRAM.
 - **`graphics_adapter_path`** is the path or URL of the plugin file, for pages
   that do not put it beside the libv86 bundle ([Loading](#adapter-plugins)).
 - **`graphics_proxy`** ([glbridge.md](glbridge.md)) is a separate option and
@@ -53,7 +56,7 @@ new V86({
 (the message lists the supported values), when it is a function (the old
 `installV86GLGraphicsAdapter` hook; use `graphics_proxy: true`), when
 `vga_memory_size` is given (renamed to `vram_size`), or when `vram_size` is not
-a power of two. A plugin file that cannot be loaded is an `emulator-error`
+a power of two or is above 256 MiB. A plugin file that cannot be loaded is an `emulator-error`
 that names the URL it tried and suggests `graphics_adapter_path`. A size below
 the adapter's minimum, an unknown level or a 3D level without a renderer
 throw when the device is made. `tests/devices/graphics_adapter.js` checks the
@@ -62,7 +65,8 @@ option errors.
 **Demo page.** `index.html` has a *Graphics adapter* selector (Bochs VGA, the
 default; VMware SVGA II; virtio-gpu; None, serial console only) and takes
 `?graphics_adapter=<name>`. The *Video Memory size* field or `?vram=<MiB>` sets
-`vram_size`; virtio-gpu needs 16 or more there. `?displays=N` gives virtio-gpu
+`vram_size`, rounded up to a power of two and at most 256; virtio-gpu needs 16
+or more there. `?displays=N` gives virtio-gpu
 N displays, at most 4 ([virtio-gpu](#virtio-gpu)). `debug.html` has the same
 selector without virtio-gpu. The page's OS profiles use `"bochs_vga"` unless
 `?graphics_adapter=` names another.

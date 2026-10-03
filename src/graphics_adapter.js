@@ -21,6 +21,13 @@ import { CPU } from "./cpu.js";
 /** Every value graphics_adapter may name */
 const ADAPTERS = ["bochs_vga", "vmware_svga", "virtio_gpu", "none"];
 
+/**
+ * The largest vram_size: the VGA core backs at most this much
+ * (VGA_MAX_MEMORY_SIZE in graphics_adapters/vga_core.js), and a device whose
+ * BAR were larger would reach past it
+ */
+export const MAX_VRAM_SIZE = 256 << 20;
+
 /** The global registry plugin files add their descriptors to */
 const REGISTRY = "V86GraphicsAdapters";
 
@@ -74,6 +81,10 @@ export function check_graphics_adapter_options(options)
     if(vram_size !== undefined && !(Number.isSafeInteger(vram_size) && vram_size > 0 && (vram_size & (vram_size - 1)) === 0))
     {
         throw new Error("vram_size must be a power of two (in bytes)");
+    }
+    if(vram_size > MAX_VRAM_SIZE)
+    {
+        throw new Error("vram_size must be at most " + (MAX_VRAM_SIZE >> 20) + " MiB");
     }
     if(adapter === "none" && vram_size !== undefined)
     {

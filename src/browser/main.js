@@ -1,5 +1,6 @@
 import { WorkerPerformanceRecorder } from "./cpu_worker.js";
 import { V86, CPU_TYPES } from "./starter.js";
+import { MAX_VRAM_SIZE } from "../graphics_adapter.js";
 import { LOG_NAMES } from "../const.js";
 import { SyncBuffer, SyncFileBuffer } from "../buffer.js";
 import { h, pad0, pads, hex_dump, dump_file, download, round_up_to_next_power_of_2 } from "../lib.js";
@@ -175,6 +176,17 @@ async function save_state_stream_to_file(emulator, name)
     const parts = [];
     await emulator.save_state_stream(chunk => { parts.push(chunk.slice()); });
     dump_file(parts, name);
+}
+
+/**
+ * A Video Memory size in MB that can be configured: vram_size is a power of
+ * two, at most MAX_VRAM_SIZE
+ * @param {number} size
+ * @return {number}
+ */
+function clamp_vram_size(size)
+{
+    return round_up_to_next_power_of_2(Math.min(Math.max(1, size), MAX_VRAM_SIZE >> 20));
 }
 
 /**
@@ -2376,7 +2388,7 @@ async function start_emulation(profile, query_args)
             const vram = parseInt(query_args.get("vram"), 10);
             if(vram > 0)
             {
-                settings.vram_size = vram * 1024 * 1024;
+                settings.vram_size = clamp_vram_size(vram) * 1024 * 1024;
             }
             if(query_args.has("graphics_adapter"))
             {
@@ -2516,14 +2528,20 @@ async function start_emulation(profile, query_args)
         }
         if(memory_size !== DEFAULT_MEMORY_SIZE) new_query_args.set("m", String(memory_size));
 
-        const vram_mb = parseInt($("vga_memory_size").value, 10) || DEFAULT_VGA_MEMORY_SIZE;
+        const vram_mb = clamp_vram_size(parseInt($("vga_memory_size").value, 10) || DEFAULT_VGA_MEMORY_SIZE);
+        $("vga_memory_size").value = String(vram_mb);
         if(!settings.vram_size || vram_mb !== DEFAULT_VGA_MEMORY_SIZE)
         {
             settings.vram_size = vram_mb * MB;
         }
         if(vram_mb !== DEFAULT_VGA_MEMORY_SIZE) new_query_args.set("vram", String(vram_mb));
 
-        settings.graphics_adapter = $("graphics_adapter").value || DEFAULT_GRAPHICS_ADAPTER;
+        // (like the sizes above: the field's default keeps a profile's or ?graphics_adapter='s choice)
+        const graphics_adapter = $("graphics_adapter").value || DEFAULT_GRAPHICS_ADAPTER;
+        if(!settings.graphics_adapter || graphics_adapter !== DEFAULT_GRAPHICS_ADAPTER)
+        {
+            settings.graphics_adapter = graphics_adapter;
+        }
         if(settings.graphics_adapter !== DEFAULT_GRAPHICS_ADAPTER) new_query_args.set("graphics_adapter", settings.graphics_adapter);
         // (?displays=N: virtio_gpu's displays, kept from the address)
         const displays = parseInt(new URLSearchParams(window.location.search).get("displays"), 10);
