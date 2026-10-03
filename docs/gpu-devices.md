@@ -1438,19 +1438,32 @@ Frames are screen target updates and MIPS the guest's retired instructions
 
 - **The GPU side is not the bottleneck.** The guest never halts (0% halted),
   fences are almost never pending, the renderer's latency is 2–20 ms and its
-  backlog about 0. The second game test's batch data, about 100 MB/s, costs a
-  few per cent.
-- **The host emulates the guest** about 85% of the time (generated code
-  40–50%, the runtime 25–40%). The device's JavaScript takes 2–5%, the
-  renderer channel 1–2%.
+  backlog about 0. In GT2 the device sends about 100 MB/s of batch data,
+  nearly all of it `UPDATE_GB_IMAGE` uploads the guest driver asks for (10–22
+  a frame, 30–60 MB a frame).
+- **Where the host's time goes**, by call stack (a runtime helper counts for
+  the guest code that called it; device work a port write starts counts for
+  the device), in GT2 (Firefly Forest, about 2000 draws a frame), three runs:
+  3DMark06's own code (the exe, D3DX, its C runtime) 21–22%; the D3D9
+  runtime, VMware's D3D9 driver and the graphics kernel (`dxgkrnl`,
+  `dxgmms1`, `vm3dmp.sys`) 16%; the Windows kernel and WOW64 14%; background
+  services 2–3%; the emulator's dispatchers and its runtime outside compiled
+  code 16%; the SVGA device's JavaScript (parsing SVGA3D, reading guest
+  memory, writing D9WG batches) 10% and the renderer channel 5% (a WebSocket
+  in node); host GC, the harness and idle time the rest. For comparison,
+  with the D3D9 proxy on Windows XP ([glbridge.md](glbridge.md); the 3DMark06
+  demo, measured 2026-09-27) 3DMark06's own code took about 58% of the host
+  and the proxy 6–9%: per unit of 3DMark06's work, Windows 8.1 with the real
+  driver stack costs the host about 2.8 times as much.
 - **System overhead slows the guest.** In the game tests the guest runs at
   100–300 MIPS, in the CPU tests (PhysX, pure computation) at 900–1100 MIPS.
   The difference is kernel and WOW64 transitions and address translation, not
   3DMark06's own code. 3DMark06, d3d9 and VMware's user-mode driver are 32-bit
   code running under WOW64 in compatibility mode.
-- **A frame is about 100 million guest instructions.** GT1 makes about 1500
-  draws and 3700 shader constant updates a frame, each through 3DMark06,
-  d3d9, VMware's user-mode driver and the WDDM kernel. DWM and background
+- **A frame is about 100 million guest instructions.** GT1 (Return to
+  Proxycon) makes 1100–1500 draws and 4400–4900 shader constant updates a
+  frame, GT2 (Firefly Forest) 1500–2300 draws and 1700–3600 updates, each
+  through 3DMark06, d3d9, VMware's user-mode driver and the WDDM kernel. DWM and background
   services add to that: `sppsvc`, `sysmain` and `cbscore` together take 3–4%
   of the host.
 
@@ -1464,17 +1477,18 @@ through the 32-bit JIT"; the `x64_page_stat` counters in
 
 Same state, same stretches of rendering:
 
-| Version | Stretch 1: fps (MIPS) | Stretch 2: fps (MIPS) |
+| Version | GT1 (Return to Proxycon): fps (MIPS) | GT2 (Firefly Forest): fps (MIPS) |
 | --- | --- | --- |
 | Before (4 runs) | 1.35–1.66, mean 1.48 (about 219) | 1.70–1.99, mean 1.86 (about 160) |
 | After (3 runs) | 1.37–1.74 (179–254) | 2.30–2.58, mean 2.43 (204–231) |
 
-The longer stretch renders about 30% faster.
+GT2 renders about 30% faster; GT1's change is within the noise.
 
 **The ceiling.** 30 fps in 3DMark06 is out of reach. At about 100 million
 instructions a frame, 30 fps needs 3000 MIPS, and the emulator reaches about
 1000 MIPS even on pure computation. With all of the game tests' system
-overhead gone, at the CPU tests' speed, GT1 would still get only about 10 fps.
+overhead gone, at the CPU tests' speed, the game tests would still get only
+about 10 fps.
 
 **What could still help**, by estimated gain:
 

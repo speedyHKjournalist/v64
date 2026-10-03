@@ -6745,6 +6745,35 @@ await test("an info-severity guest log is reported without being a warning",
         "identification is not a warning");
 });
 
+// Restoring a state replays the graphics journal, which holds every report
+// since the guest started (3DMark06's: one identification line per process
+// that loaded the DLL). Those were printed when they happened.
+await test("a replayed guest log is kept but not printed again", async () => {
+    const { executor } = makeExecutor();
+    const text = "proxy build guest-log-20260816 loaded";
+    const payload = Buffer.alloc(8 + text.length);
+    payload.writeUInt32LE(0, 0);            // severity: info
+    payload.writeUInt32LE(text.length, 4);
+    payload.write(text, 8, "ascii");
+
+    const printed = [];
+    const real = { log: console.log, warn: console.warn, error: console.error };
+    console.log = console.warn = console.error = (...args) => printed.push(args.join(" "));
+    try {
+        await executor.submit(buildBatch([
+            command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
+            command(OP.GUEST_LOG, payload),
+        ]), { replay: true });
+        await executor.idle();
+    } finally {
+        Object.assign(console, real);
+    }
+    assert.equal(executor.stats.guestReports, 1);
+    assert.deepEqual(executor.guestReports, [text], "the black-screen report still has it");
+    assert.ok(!printed.some(line => line.includes(text)),
+        "a replay does not print it again: " + printed.join(" | "));
+});
+
 // A truncated length field must not read past the command into whatever
 // follows it in the batch.
 await test("a guest log claiming more text than it carries is rejected",

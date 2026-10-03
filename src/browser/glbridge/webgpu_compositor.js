@@ -271,7 +271,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 label: "v86 scanout",
                 size: { width: this.scanoutWidth, height: this.scanoutHeight, depthOrArrayLayers: 1 },
                 format: "rgba8unorm",
-                usage: USAGE_COPY_DST | USAGE_TEXTURE_BINDING | USAGE_COPY_SRC,
+                // RENDER_ATTACHMENT for clear(), which blanks it with a render pass
+                usage: USAGE_COPY_DST | USAGE_TEXTURE_BINDING | USAGE_COPY_SRC | USAGE_RENDER_ATTACHMENT,
             });
             this.scanoutBindGroup = null;
             this.scanoutDirty = true;

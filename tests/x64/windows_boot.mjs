@@ -25,7 +25,8 @@
 // "snapshot" (saved
 // and restored in place),
 // "svgalog on|off" (the SVGA3D commands other than DX and the frequent GB
-// ones, with their first words, as "svga3d-command" events), "svgashaders"
+// ones, with their first words, as "svga3d-command" events; "svgalog
+// 1101,1267" logs only those command ids), "svgashaders"
 // (the GB shaders' bytecode, as "svga3d-shader" events).
 // WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; virtio_gpu; vmware_svga, whose
 // level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
@@ -827,8 +828,10 @@ try
         {
             const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
             const quiet = new Set([1094, 1098, 1119, 1126, 1127, 1135]);
+            // "svgalog 1101,1267": only those commands (any range)
+            const only = /^\d+(,\d+)*$/.test(argument) ? new Set(argument.split(",").map(Number)) : null;
             if(svga && svga.svga3d) svga.svga3d.command_log = argument === "off" ? null : (id, p) => {
-                if(id >= 1143 && id < 1300 || quiet.has(id)) return;
+                if(only ? !only.has(id) : id >= 1143 && id < 1300 || quiet.has(id)) return;
                 event("svga3d-command", {id, n: p.length, body: Array.from(p.subarray(0, 24), v => (v >>> 0).toString(16)).join(" ")});
             };
         }

@@ -8281,7 +8281,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // filesystem is not reachable from here. The guest deduplicates by
         // exact text, so each distinct message arrives once no matter how many
         // frames it repeats on.
-        onGuestLog(bytes, view, offset, length) {
+        onGuestLog(bytes, view, offset, length, metadata) {
             const severity = view.getUint32(offset, true);
             const textBytes = view.getUint32(offset + 4, true);
             if (8 + textBytes > length) {
@@ -8293,6 +8293,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 text += String.fromCharCode(bytes[offset + 8 + index]);
             ++this.stats.guestReports;
             (this.guestReports || (this.guestReports = [])).push(text);
+            // A state restore replays the graphics journal, and with it every
+            // report since the guest started: one "proxy build ... loaded" per
+            // process that ever loaded the DLL. They were printed when the
+            // guest sent them; the console shows what happens now.
+            if (metadata && metadata.replay) return;
             // Severity picks the console channel only. The identification
             // line the guest sends at startup is info: its job is to make a
             // later silence mean "nothing was refused" rather than "the DLL in

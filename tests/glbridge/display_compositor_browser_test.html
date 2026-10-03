@@ -49,6 +49,8 @@ const PROGRAM = [0xb8,0x13,0x0,0xcd,0x10,0x68,0x0,0xa0,0x7,0x31,0xff,0xb0,0x4,0x
         check(compositor && compositor.attached && compositor.canvas === canvas, "the compositor owns the screen canvas");
         check(bridge.d3d9Executor.device === compositor.device && bridge.glExecutor.device === compositor.device,
             "executors and compositor share one GPUDevice");
+        const gpu_errors = [];
+        compositor.device.addEventListener("uncapturederror", event => gpu_errors.push(event.error.message));
         await booted;
 
         const shot = async () => {
@@ -191,6 +193,29 @@ const PROGRAM = [0xb8,0x13,0x0,0xcd,0x10,0x68,0x0,0xa0,0x7,0x31,0xff,0xb0,0x4,0x
         await d3d9([[0x21D, [1, 0x1234, 0, 1, 100, 60, 64, 48, 64, 48]]], false);
         pixel = await shot();
         check(!layer.visible && near(pixel(132, 84), RED), "a hidden window reveals the desktop: " + pixel(132, 84));
+
+        // The screen-off bit (sequencer clocking mode): the scanout is cleared,
+        // as on every mode set, which blanks the screen through the attribute
+        // controller while it reprograms the registers
+        io.port_write8(0x3c4, 1);
+        const clocking_mode = io.port_read8(0x3c5);
+        compositor.device.pushErrorScope("validation");
+        io.port_write8(0x3c5, clocking_mode | 0x20);
+        const clear_error = await compositor.device.popErrorScope();
+        check(!clear_error, "the scanout is cleared without a WebGPU error: " + (clear_error && clear_error.message));
+        pixel = await shot();
+        check(near(pixel(20, 20), [0, 0, 0]) && near(pixel(132, 84), [0, 0, 0]), "a blanked screen is black: " + pixel(20, 20));
+        io.port_write8(0x3c5, clocking_mode);
+        for(let i = 0; i < 100; i++)
+        {
+            pixel = await shot();
+            if(near(pixel(20, 20), RED)) break;
+            await sleep(50);
+        }
+        check(near(pixel(20, 20), RED), "turned back on, it shows the desktop again: " + pixel(20, 20));
+        await compositor.device.queue.onSubmittedWorkDone();
+        await sleep(100);
+        check(!gpu_errors.length, "no uncaptured WebGPU errors: " + gpu_errors.join(" | "));
 
         await emulator.destroy();
         document.getElementById("result").textContent = "PASS\n" + checks.join("\n");
