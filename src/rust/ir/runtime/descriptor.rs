@@ -126,6 +126,16 @@ pub unsafe fn ir_invlpg(address: u32, width: u32) -> u32 {
     cpu::invlpg(address as i32);
     commit()
 }
+/// RDTSCP: #UD outside the x86-64 profile, CPU-owned (instructions_0f::rdtscp).
+#[no_mangle]
+pub unsafe fn ir_rdtscp(reg: u32, width: u32) -> u32 {
+    valid(width);
+    assert!(reg == 1);
+    if !instructions_0f::rdtscp() {
+        return fault();
+    }
+    commit()
+}
 #[no_mangle]
 pub unsafe fn ir_descriptor_ud(reg: u32, width: u32) -> u32 {
     valid(width);

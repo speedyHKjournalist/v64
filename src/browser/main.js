@@ -1,5 +1,5 @@
 import { WorkerPerformanceRecorder } from "./cpu_worker.js";
-import { V86 } from "./starter.js";
+import { V86, CPU_TYPES } from "./starter.js";
 import { LOG_NAMES } from "../const.js";
 import { SyncBuffer, SyncFileBuffer } from "../buffer.js";
 import { h, pad0, pads, hex_dump, dump_file, download, round_up_to_next_power_of_2 } from "../lib.js";
@@ -19,6 +19,7 @@ const DEFAULT_MEMORY_SIZE = 128;
 const MAX_HEAP_MEMORY_SIZE = 2048;
 const MAX_MEMORY_SIZE = MAX_HEAP_MEMORY_SIZE + 60 * 1024;
 const DEFAULT_CPU_CORES = 1;
+const DEFAULT_CPU_TYPE = CPU_TYPES[0];
 const DEFAULT_VGA_MEMORY_SIZE = 8;
 const DEFAULT_GRAPHICS_ADAPTER = "bochs_vga";
 const DEFAULT_BOOT_ORDER = 0;
@@ -43,6 +44,17 @@ function set_title(text)
 function bool_arg(x)
 {
     return !!x && x !== "0";
+}
+
+/**
+ * ?cpu_type=; undefined when absent or unknown
+ * @param {URLSearchParams} query_args
+ * @return {string|undefined}
+ */
+function cpu_type_arg(query_args)
+{
+    const cpu_type = query_args.get("cpu_type");
+    return cpu_type && CPU_TYPES.includes(cpu_type) ? cpu_type : undefined;
 }
 
 function format_timestamp(time)
@@ -237,7 +249,6 @@ function onload()
     }
 
     const query_args = new URLSearchParams(location.search);
-    if(query_args.has("cpu_worker")) $("cpu_worker").checked = bool_arg(query_args.get("cpu_worker"));
     if(query_args.has("graphics_proxy")) $("graphics_proxy").checked = bool_arg(query_args.get("graphics_proxy"));
     const host = query_args.get("cdn") || (ON_LOCALHOST ? "images/" : "//i.copy.sh/");
 
@@ -1869,7 +1880,7 @@ function onload()
     if(query_args.has("m")) $("memory_size").value = query_args.get("m");
     if(query_args.has("cores")) $("cpu_cores").value = query_args.get("cores");
     if(query_args.has("parallel")) $("parallel").checked = bool_arg(query_args.get("parallel"));
-    if(query_args.has("x64")) $("x64").checked = bool_arg(query_args.get("x64"));
+    $("cpu_type").value = cpu_type_arg(query_args) || $("cpu_type").value;
     if(query_args.has("vram")) $("vga_memory_size").value = query_args.get("vram");
     if(query_args.has("graphics_adapter")) $("graphics_adapter").value = query_args.get("graphics_adapter");
     if(query_args.has("relay_url")) $("relay_url").value = query_args.get("relay_url");
@@ -2194,8 +2205,8 @@ async function start_emulation(profile, query_args)
 
     $("boot_options").style.display = "none";
 
-    const cpu_worker = query_args?.has("cpu_worker") ?
-        bool_arg(query_args.get("cpu_worker")) : $("cpu_worker").checked;
+    // The CPU runs in a Worker unless the URL says ?cpu_worker=0
+    const cpu_worker = !cpu_args.has("cpu_worker") || bool_arg(cpu_args.get("cpu_worker"));
     const graphics_proxy = query_args?.has("graphics_proxy") ?
         bool_arg(query_args.get("graphics_proxy")) : $("graphics_proxy").checked;
     set_graphics_proxy_status("");
@@ -2360,10 +2371,7 @@ async function start_emulation(profile, query_args)
             {
                 settings.parallel = bool_arg(query_args.get("parallel"));
             }
-            if(query_args.has("x64"))
-            {
-                settings.experimental_x64 = bool_arg(query_args.get("x64"));
-            }
+            settings.cpu_type = cpu_type_arg(query_args);
 
             const vram = parseInt(query_args.get("vram"), 10);
             if(vram > 0)
@@ -2546,18 +2554,18 @@ async function start_emulation(profile, query_args)
         }
         if(settings.cpu_cores > 1 && !settings.parallel) new_query_args.set("parallel", "0");
 
-        if(settings.experimental_x64 === undefined)
+        if(settings.cpu_type === undefined)
         {
-            settings.experimental_x64 = $("x64").checked;
+            settings.cpu_type = $("cpu_type").value || DEFAULT_CPU_TYPE;
         }
         // only a 64-bit CPU reaches extended RAM
-        if(settings.extended_memory_size && !settings.experimental_x64)
+        if(settings.extended_memory_size && settings.cpu_type !== "x86_64")
         {
-            console.log("More than " + MAX_HEAP_MEMORY_SIZE + " MB of memory: turning on the x86-64 CPU");
-            settings.experimental_x64 = true;
-            $("x64").checked = true;
+            console.log("More than " + MAX_HEAP_MEMORY_SIZE + " MB of memory: selecting the x86_64 CPU");
+            settings.cpu_type = "x86_64";
+            $("cpu_type").value = "x86_64";
         }
-        if(settings.experimental_x64) new_query_args.set("x64", "1");
+        if(settings.cpu_type !== DEFAULT_CPU_TYPE) new_query_args.set("cpu_type", settings.cpu_type);
 
         // multiple cores are described to the guest through ACPI (MADT)
         if(settings.cpu_cores > 1 && !settings.acpi)
@@ -2673,7 +2681,7 @@ async function start_emulation(profile, query_args)
         bzimage_initrd_from_filesystem: settings.bzimage_initrd_from_filesystem,
         acpi: settings.acpi || settings.cpu_cores > 1,
         cpu_cores: settings.cpu_cores,
-        experimental_x64: settings.experimental_x64,
+        "cpu_type": settings.cpu_type,
         // without it, more than one core runs in the interpreter
         experimental_smp_jit: settings.cpu_cores > 1 && !settings.disable_jit,
         disable_jit: settings.disable_jit,
@@ -2710,6 +2718,15 @@ async function start_emulation(profile, query_args)
         if(DEBUG && !emulator.worker_controller)
         {
             debug_start(emulator);
+        }
+        else if(DEBUG)
+        {
+            // the CPU is in the Worker (a release build): nothing to inspect here
+            for(const id of ["dump_regs", "dump_gdt", "dump_idt", "dump_pt"])
+            {
+                $(id).disabled = true;
+                $(id).title = "The CPU runs in a Worker; open debug.html?cpu_worker=0 to debug it in the page";
+            }
         }
 
         if(!emulator.worker_controller && emulator.v86.cpu.wm.exports["profiler_is_enabled"]())
@@ -2786,6 +2803,11 @@ async function start_emulation(profile, query_args)
     {
         $("loading").style.display = "block";
         $("loading").textContent = "Emulator failed: " + error.message;
+        if(DEBUG && emulator.worker_controller && !emulator.worker_controller.ready)
+        {
+            $("loading").textContent += " (the CPU Worker is build/cpu-worker.js from `make all-debug`; " +
+                "debug.html?cpu_worker=0 runs the CPU in the page)";
+        }
     });
 
     emulator.add_listener("download-progress", function(e)

@@ -870,6 +870,8 @@ x64-system-tests: build/v86-debug.wasm
 	node tests/x64/triple_fault.mjs
 	node tests/x64/direct_loader.mjs
 	node tests/x64/profile_options.mjs
+	node tests/x64/protected_mode_msrs.mjs
+	node tests/x64/protected_mode_rdtscp.mjs
 	node tests/x64/task_faults.mjs
 
 x64-differential-tests: build/v86-debug.wasm

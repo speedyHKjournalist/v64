@@ -1,5 +1,5 @@
-// GX: the renderer of VMware SVGA's DX contexts (VGPU10, level dx10; plan
-// sections 4.6 and 5.10), D3D10-style state on WebGPU. The device side
+// GX: the renderer of VMware SVGA's DX contexts (VGPU10, level dx10;
+// docs/gpu-devices.md, "GX"), D3D10-style state on WebGPU. The device side
 // (src/graphics_adapters/vmware_svga/svga3d_dx.js) sends GX batches: the
 // surfaces (with their contents, read from MOBs), the DX commands as the
 // guest wrote them, shader tokens; this keeps the objects, translates the

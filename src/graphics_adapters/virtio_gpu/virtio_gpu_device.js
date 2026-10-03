@@ -2,14 +2,16 @@
 // BIOS, boot loaders and VBE (its frame buffer is BAR0), and the virtio-gpu
 // device on the same function, its four capabilities in the memory BAR2
 // (as QEMU's virtio-vga: viogpudo maps no I/O BARs).
-// Section 6 of docs/vmware-svga-virtio-gpu-plan.zh-CN.md; the protocol is
+// See docs/gpu-devices.md, "virtio-gpu"; the protocol is
 // third_party/virtio/virtio_gpu.h.
 //
-// This file is the 2D device (V1): resources in host memory, filled from
-// their guest backing by TRANSFER_TO_HOST_2D and shown on a scanout by
-// RESOURCE_FLUSH, the cursor queue, EDID, and display events when the page's
-// size changes (V86.set_display_size). The screen shows the VGA core until
-// the driver's first control command, and again after a device reset.
+// This file is the device: the control and cursor queues, 2D resources in
+// host memory, filled from their guest backing by TRANSFER_TO_HOST_2D and
+// shown on a scanout by RESOURCE_FLUSH, EDID, display events when the page's
+// size changes (V86.set_display_size), guest and HOST3D blobs, the host
+// visible memory (BAR4) and snapshots. 3D contexts are virgl.js's (virgl)
+// and venus.js's (Venus). The screen shows the VGA core until the driver's
+// first control command, and again after a device reset.
 
 import { VGAScreen } from "../vga_core.js";
 import { SoftwareCursor } from "../vmware_svga/svga_cursor.js";
@@ -1571,11 +1573,6 @@ VirtioGPU.prototype.render = function()
 // ---------------------------------------------------------------------------
 // Snapshots
 
-/**
- * Before a snapshot: the GPU has run what was sent. (Its 3D resources'
- * contents and the contexts' objects are not in snapshots yet.)
- * @return {!Promise<undefined>}
- */
 /**
  * Before a save: the GPU's work done, then the 3D resources' contents read
  * back (a snapshot keeps them: they are the host's, not in guest memory)

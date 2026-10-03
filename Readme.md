@@ -22,12 +22,20 @@ list of emulated hardware:
 - An 8259 Programmable Interrupt Controller (PIC).
 - Partial APIC support.
 - A CMOS Real Time Clock (RTC).
-- A generic VGA card with SVGA support and Bochs VBE Extensions.
+- A display adapter, chosen with `graphics_adapter`
+  ([GPU devices](docs/gpu-devices.md)):
+  - A generic VGA card with SVGA support and Bochs VBE Extensions
+    (`bochs_vga`).
+  - VMware SVGA II (`vmware_svga`). With WebGPU (`libv86-webgpu.js`), it
+    runs the guest's 3D: Direct3D 9–11 through VMware's Windows driver,
+    OpenGL 4.3 through Mesa.
+  - virtio-gpu as virtio-vga (`virtio_gpu`). With WebGPU, it runs OpenGL 4.3
+    (virgl) and Vulkan 1.1 (Venus) through Mesa.
 - A PCI bus. This one is partly incomplete and not used by every device.
 - An IDE disk controller.
   - A built-in ISO 9660 CD-ROM generator with Joliet support.
 - An NE2000 (RTL8390) PCI network card.
-- Various virtio devices: Filesystem, network and balloon.
+- Various virtio devices: Filesystem, network, balloon and GPU.
 - A SoundBlaster 16 sound card.
 - A hayes-compatible dial-up Modem.
 
@@ -72,6 +80,11 @@ list of emulated hardware:
 [Windows NT guest setup](docs/windows-nt.md) —
 [9p filesystem](docs/filesystem.md) —
 [Linux rootfs on 9p](docs/linux-9p-image.md) —
+[GPU devices: VMware SVGA II and virtio-gpu](docs/gpu-devices.md) —
+[GPU deviations from hardware](docs/gpu-deviations.md) —
+[Display design](docs/display-design.md) —
+[Graphics proxy](docs/glbridge.md) —
+[Custom virtio devices](docs/custom-virtio-devices.md) —
 [Profiling](docs/profiling.md)
 
 ## Compatibility
@@ -118,7 +131,7 @@ You need:
 - make
 - Rust with the wasm32-unknown-unknown target
 - A version of clang compatible with Rust
-- java (for Closure Compiler, not necessary when using `debug.html`)
+- java (for Closure Compiler, not necessary when using `debug.html?cpu_worker=0`)
 - nodejs (a recent version is required, v24.16 is known to be working)
 - To run tests: nasm, gdb, qemu-system, gcc, libc-i386 and rustfmt
 
@@ -126,7 +139,11 @@ See [tools/docker/test-image/Dockerfile](tools/docker/test-image/Dockerfile)
 for a full setup on Debian or
 [WSL](https://docs.microsoft.com/en-us/windows/wsl/install).
 
-- Run `make` to build the debug build (at `debug.html`).
+- Run `make all-debug` to build the debug build (at `debug.html`). Like
+  `index.html`, it runs the CPU in a Worker, `build/cpu-worker.js` (a release
+  bundle). `debug.html?cpu_worker=0` runs the CPU in the page from the source
+  tree, with the register dumps, the debug panel and debug logs; it needs only
+  `make`.
 - Run `make all` to build the optimized build (at `index.html`). It includes
   `build/v86-parallel.wasm` and `build/vcpu-worker.js`, with which `index.html`
   runs a guest with more than one CPU core in host threads (one per core). That

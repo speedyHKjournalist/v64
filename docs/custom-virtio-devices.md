@@ -14,7 +14,7 @@ own guest driver can live in a separate project.
 Descriptors run on the CPU's thread, so `virtio_devices` cannot be combined
 with `cpu_worker`. Device plugins can: `graphics_proxy` is one. Its device
 runs in the worker and talks to the page over a channel; see
-[graphics-proxy-plugin-plan.md](graphics-proxy-plugin-plan.md).
+[glbridge.md](glbridge.md).
 
 ## Example: an entropy device
 

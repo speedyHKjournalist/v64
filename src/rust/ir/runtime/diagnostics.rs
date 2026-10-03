@@ -133,7 +133,7 @@ pub fn helper_category(name: &str) -> u32 {
         n if n.starts_with("ir_far_") || n == "ir_iret" || n == "ir_software_interrupt" => 5,
         "ir_pop_flags" | "ir_cli" | "ir_cli_check" | "ir_sti_finish_continue" => 6,
         "ir_lgdt" | "ir_lidt" | "ir_ltr_reg" | "ir_lldt_reg" | "ir_invlpg" => 7,
-        "ir_rdtsc" | "ir_rdtsc_continue" => 12,
+        "ir_rdtsc" | "ir_rdtsc_continue" | "ir_rdtscp" => 12,
         "ir_cpuid" | "ir_cpuid_continue" => 13,
         "ir_read_cr" | "ir_read_cr_continue" => 14,
         "ir_write_cr" => 15,

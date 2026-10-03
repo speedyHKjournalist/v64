@@ -362,13 +362,19 @@ export interface V86Options {
      * Each adapter is a plugin file (build/v86-<name>.js, e.g.
      * build/v86-bochs-vga.js) that is loaded only when named here; "none"
      * gives a machine without a display (serial console only).
-     * "bochs_vga" is the display v86 always had.
+     * "bochs_vga" is the display v86 always had. "vmware_svga" (VMware SVGA
+     * II) and "virtio_gpu" (virtio-gpu as virtio-vga) offer 3D when the page
+     * has loaded build/glbridge/libv86-webgpu.js and WebGPU has an adapter,
+     * and 2D only otherwise (docs/gpu-devices.md).
      */
-    graphics_adapter: "bochs_vga" | "vmware_svga" | "none";
+    graphics_adapter: "bochs_vga" | "vmware_svga" | "virtio_gpu" | "none";
     /**
      * Path or URL of the graphics_adapter's plugin file. By default
-     * build/v86-<name>.js relative to the page (beside libv86.js in node),
-     * like wasm_path.
+     * v86-<name>.js beside the libv86 bundle when the bundle knows its own
+     * location (libv86.js as a classic script in a page, libv86.mjs,
+     * CommonJS in node), otherwise build/v86-<name>.js relative to the page,
+     * like wasm_path. Without cpu_worker, a page may also load the plugin
+     * file itself first; it registers in globalThis.V86GraphicsAdapters.
      */
     graphics_adapter_path?: string;
     /**
@@ -421,7 +427,8 @@ export interface V86Options {
      * what fits in the emulator's 32-bit WebAssembly memory. Its pages are
      * kept in host ArrayBuffers and cached in extended_memory_cache bytes of
      * the WebAssembly heap: slower than memory_size, and code in it is
-     * interpreted. Only a 64-bit guest (experimental_x64) can address it.
+     * interpreted. Only a 64-bit guest (cpu_type: "x86_64") can address
+     * it.
      * Snapshots of it need save_state_stream. Fails at startup when the host
      * cannot allocate it.
      * @default 0
@@ -432,9 +439,11 @@ export interface V86Options {
 
     /**
      * Video memory of the graphics_adapter in bytes, a power of two (formerly
-     * vga_memory_size, which is now an error).
+     * vga_memory_size, which is now an error). At least 4 MiB for
+     * "vmware_svga" and 16 MiB for "virtio_gpu".
      * @example 8 * 1024 * 1024
-     * @default 8 * 1024 * 1024 for "bochs_vga"
+     * @default 8 * 1024 * 1024 for "bochs_vga", 32 * 1024 * 1024 for
+     *     "vmware_svga" and "virtio_gpu"
      */
     vram_size?: number;
 
@@ -640,12 +649,13 @@ export interface V86Options {
     /** Testing option: opt into multicore JIT while the cross-core stress matrix is being qualified. */
     experimental_smp_jit?: boolean;
     /**
-     * Experimental: present an x86-64 CPU (CPUID long mode, NX, SYSCALL,
-     * CMPXCHG16B, ...), needed by 64-bit operating systems such as Windows
-     * 8.1 x64 or x86_64 Linux.
-     * @default false
+     * The guest's CPU. "x86" is the 32-bit CPU v86 always had; "x86_64"
+     * (experimental) adds long mode, NX, SYSCALL, CMPXCHG16B, ..., needed by
+     * 64-bit operating systems such as Windows 8.1 x64 or x86_64 Linux.
+     * Other values fail at startup.
+     * @default "x86"
      */
-    experimental_x64?: boolean;
+    cpu_type?: "x86" | "x86_64";
 
     /**
      * Log level (for debug builds)

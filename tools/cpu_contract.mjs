@@ -39,8 +39,8 @@ const VOLATILE = new Set([0x10, 0xE7, 0xE8]);
 const PROFILES = {
     "legacy-1": {},
     "legacy-4": { cpu_cores: 4, acpi: true },
-    "x64-1": { experimental_x64: true },
-    "x64-4": { experimental_x64: true, cpu_cores: 4, acpi: true },
+    "x64-1": { cpu_type: "x86_64" },
+    "x64-4": { cpu_type: "x86_64", cpu_cores: 4, acpi: true },
 };
 
 const OUT = 0x300000, CPUID_AT = OUT + 16, MSR_AT = CPUID_AT + 16 * LEAVES.length;

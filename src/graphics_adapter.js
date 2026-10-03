@@ -5,7 +5,7 @@
 // Plugins are not compiled with v86 (v86_all.js renames properties), so the
 // handle a plugin gets and the descriptor and device it gives back use quoted
 // names only. src/graphics_adapters/machine.js is the plugin's end of it.
-// See docs/vmware-svga-virtio-gpu-plan.zh-CN.md, section 4.8.
+// See docs/gpu-devices.md, "Adapter plugins".
 
 import { LOG_PCI, FLAG_VM } from "./const.js";
 import { dbg_log } from "./log.js";

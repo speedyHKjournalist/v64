@@ -1,9 +1,10 @@
-// VX: the renderer of virtio-gpu's Venus contexts (Vulkan; plan section 6.5),
-// on WebGPU. The device (src/graphics_adapters/virtio_gpu/venus_vk*.js) keeps
-// the guest's Vulkan objects and sends VX batches: the GPU objects to make,
-// the bytes the guest wrote into mapped memory, each submission's commands
-// (BEGIN .. END: one command encoder), and readbacks of memory, answered
-// through the response region as GX answers its own.
+// VX: the renderer of virtio-gpu's Venus contexts (Vulkan; docs/gpu-devices.md,
+// "Venus (Vulkan)"), on WebGPU. The device
+// (src/graphics_adapters/virtio_gpu/venus_vk*.js) keeps the guest's Vulkan
+// objects and sends VX batches: the GPU objects to make, the bytes the guest
+// wrote into mapped memory, each submission's commands (BEGIN .. END: one
+// command encoder), and readbacks of memory, answered through the response
+// region as GX answers its own.
 //
 // - A VkDeviceMemory is a GPUBuffer; buffers are ranges of it, named in
 //   each command by (memory, offset). A VkImage is a GPUTexture (cubes are

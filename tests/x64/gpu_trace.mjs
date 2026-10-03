@@ -1,7 +1,7 @@
-// GPU traces (plan section 8.2, A2): what a display adapter's device sends its
-// 3D renderer, recorded so the renderer can be run on it again without the
-// guest (tests/glbridge/svga_trace_replay_browser_test.html). A batch is
-// self-contained, so a trace is the batches in order.
+// GPU traces (docs/gpu-devices.md, "Tests"): what a display adapter's device
+// sends its 3D renderer, recorded so the renderer can be run on it again
+// without the guest (tests/glbridge/svga_trace_replay_browser_test.html). A
+// batch is self-contained, so a trace is the batches in order.
 //
 // File: "V86GTRC1", then records of (u32 type, u32 length, bytes):
 //   type 1: a D9WG batch, as the device submitted it

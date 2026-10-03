@@ -2,8 +2,10 @@
 // Embedder options for 64-bit guests:
 // - memory_size above the wasm32 limit is reduced to 2 GiB - 128 KiB instead
 //   of wrapping (8 GiB used to become 0 bytes, then the BIOS load failed);
-// - experimental_x64 presents the x86-64 CPU profile: CPUID.80000001h:EDX
-//   long mode (bit 29), NX (20) and SYSCALL (11) only when it is set.
+// - cpu_type: "x86_64" presents the x86-64 CPU profile: CPUID.80000001h:EDX
+//   long mode (bit 29), NX (20) and SYSCALL (11) only when it is set; an
+//   unknown cpu_type, or the removed experimental_x64, fails in the
+//   constructor.
 import assert from "node:assert/strict";
 import url from "node:url";
 import {assemble, actual} from "./guest_runner.mjs";
@@ -40,10 +42,29 @@ hlt
 jmp $
 image_end:
 `);
-for(const [x64, expected] of [[false, 0], [true, 1 << 29 | 1 << 20 | 1 << 11]])
+const X64_EDX = 1 << 29 | 1 << 20 | 1 << 11;
+for(const [options, expected] of [
+    [{}, 0],
+    [{cpu_type: "x86"}, 0],
+    [{cpu_type: "x86_64"}, X64_EDX],
+])
 {
-    const result = await actual(directory, {length: 8, options: {experimental_x64: x64}});
+    const result = await actual(directory, {length: 8, options});
     const edx = result.readUInt32LE(4);
-    assert.equal(edx & (1 << 29 | 1 << 20 | 1 << 11), expected >>> 0, `experimental_x64: ${x64}, EDX ${edx.toString(16)}`);
-    console.log(`PASS experimental_x64: ${x64} -> CPUID.80000001h:EDX ${edx.toString(16)}`);
+    const name = JSON.stringify(options);
+    assert.equal(edx & X64_EDX, expected >>> 0, `${name}, EDX ${edx.toString(16)}`);
+    console.log(`PASS ${name} -> CPUID.80000001h:EDX ${edx.toString(16)}`);
+}
+
+for(const cpu_type of ["arm64", "x86-64", ""])
+{
+    assert.throws(() => new V86({graphics_adapter: "bochs_vga", cpu_type, autostart: false}),
+        /Unknown cpu_type .*supported: "x86", "x86_64"/, `cpu_type ${JSON.stringify(cpu_type)} is refused`);
+    console.log(`PASS cpu_type ${JSON.stringify(cpu_type)} is refused`);
+}
+for(const experimental_x64 of [true, false])
+{
+    assert.throws(() => new V86({graphics_adapter: "bochs_vga", experimental_x64, autostart: false}),
+        /experimental_x64 was replaced by cpu_type: "x86_64"/, `experimental_x64: ${experimental_x64} is refused`);
+    console.log(`PASS experimental_x64: ${experimental_x64} is refused`);
 }

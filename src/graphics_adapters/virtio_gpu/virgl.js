@@ -1,10 +1,10 @@
-// virtio-gpu's 3D (virgl, plan section 6.3): the device side. Mesa's virgl
-// driver sends gallium's state and draws as the virgl command stream
-// (third_party/virgl/virgl_protocol.h) in SUBMIT_3D; it is translated here
-// into what GX runs (src/browser/glbridge/gx/gx_executor.js), as SVGA's DX
-// does: 3D resources are GX surfaces, and the context's state becomes the
-// DX commands of a GX context (virgl_context.js), with TGSI shaders turned
-// into VGPU10 programs (tgsi_vgpu10.js).
+// virtio-gpu's 3D (virgl; docs/gpu-devices.md, "virtio-gpu"): the device
+// side. Mesa's virgl driver sends gallium's state and draws as the virgl
+// command stream (third_party/virgl/virgl_protocol.h) in SUBMIT_3D; it is
+// translated here into what GX runs (src/browser/glbridge/gx/gx_executor.js),
+// as SVGA's DX does: 3D resources are GX surfaces, and the context's state
+// becomes the DX commands of a GX context (virgl_context.js), with TGSI
+// shaders turned into VGPU10 programs (tgsi_vgpu10.js).
 //
 // GX runs in the renderer (the page's WebGPU device, or a headless
 // Chrome's in tests), batch by batch; the device completes what waits for

@@ -1,6 +1,6 @@
 v86 has a built-in profiler, which instruments generated code to count certain
 events and types of instructions. It can be used by building with `make
-debug-with-profiler` and opening debug.html.
+debug-with-profiler` and opening debug.html?cpu_worker=0 (the CPU in the page).
 
 For debugging networking, packet logging is available in the UI in both debug
 and release builds. The resulting `traffic.hex` file can be loaded in Wireshark
@@ -36,3 +36,9 @@ scene is profiled again and again without booting:
 Use the release build (`TEST_RELEASE_BUILD=1`): the source tree runs the debug
 wasm. Runs from one state differ by about 10% in frames per second; compare
 several of each.
+
+The harness itself costs the host about 5–8%: screenshots, logs, and the
+WebSocket channel to the renderer page in headless Chrome
+([`tests/x64/gpu_remote_renderer.mjs`](../tests/x64/gpu_remote_renderer.mjs);
+3DMark06 on Windows 8.1, 2026-10-02). A browser page has none of it, so node
+runs understate what a page reaches by about that much.

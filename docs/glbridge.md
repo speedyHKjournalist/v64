@@ -7,7 +7,7 @@ guest's driver and passes them to a renderer in the browser, which uses WebGPU.
 Neither is part of v86 itself: both are in the graphics bundle
 `build/glbridge/libv86-webgpu.js` (`make glbridge`), and v86 hosts the device
 through its `virtio_devices` API
-(see [graphics-proxy-plugin-plan.md](graphics-proxy-plugin-plan.md)).
+(see [custom-virtio-devices.md](custom-virtio-devices.md)).
 
 - [`src/browser/glbridge/v86gl_device.js`](../src/browser/glbridge/v86gl_device.js):
   the device, next to the CPU (the page, or the CPU worker)

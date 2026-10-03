@@ -247,7 +247,7 @@ const SCENARIOS = {
             "dmesg | grep -i segfault | tail -2", /STEP_VKCUBE_RC=0/,
             { screenshot: "vkcube", after: 12000 }],
         ["HOST stats", null],
-        // a snapshot while vkcube draws (VK6): the Venus context, its objects
+        // a snapshot while vkcube draws: the Venus context, its objects
         // and the GPU's contents go into it and come back; vkcube goes on
         ["(VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vkcube --wsi wayland --c 1000000 > /tmp/vkcube-bg.log 2>&1 &); " +
             "sleep 8; echo STEP_BACKGROUND", /STEP_BACKGROUND/, { screenshot: "vkcube-before-snapshot", after: 7000 }],

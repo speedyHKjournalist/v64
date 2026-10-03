@@ -439,7 +439,7 @@
   },
   "x64-1": {
    "options": {
-    "experimental_x64": true
+    "cpu_type": "x86_64"
    },
    "cpuid": {
     "0x00000000.0": [
@@ -657,7 +657,7 @@
   },
   "x64-4": {
    "options": {
-    "experimental_x64": true,
+    "cpu_type": "x86_64",
     "cpu_cores": 4,
     "acpi": true
    },

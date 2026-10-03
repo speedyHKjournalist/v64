@@ -1,4 +1,4 @@
-// The shader IR (dxbc_frontend.js) as WGSL (plan 4.6).
+// The shader IR (dxbc_frontend.js) as WGSL (docs/gpu-devices.md, "GX").
 //
 // The register files are arrays of raw 32-bit lanes (vec4<u32>): DXBC
 // registers have no type, each instruction says how it reads them, so every

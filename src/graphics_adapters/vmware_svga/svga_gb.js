@@ -1,6 +1,7 @@
-// Guest-backed objects (SVGA_CAP_GBOBJECTS, level gb9 and up; plan section
-// 5.9): memory objects (MOBs) and the object tables that list the guest's
-// MOBs, surfaces, contexts, shaders and screen targets.
+// Guest-backed objects (SVGA_CAP_GBOBJECTS, level gb9 and up;
+// docs/gpu-devices.md, "VMware SVGA II"): memory objects (MOBs) and the
+// object tables that list the guest's MOBs, surfaces, contexts, shaders and
+// screen targets.
 //
 // A MOB is guest memory the driver names by an id: a page table of one of
 // the SVGAMobFormat shapes, walked once when the MOB is defined. Objects

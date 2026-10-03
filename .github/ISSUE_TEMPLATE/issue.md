@@ -19,6 +19,6 @@ Before reporting OS incompatibilities, check existing issues and the compatibili
 When reporting issues, please provide the following information:
 - Version of v86 (see the bottom of index.html or the output of `git describe --tags HEAD`)
 - Browser/OS
-- The browser's console output: Open debug.html and press ctrl+shift+k (firefox) or ctrl+shift+j (chromium)
+- The browser's console output: Open debug.html?cpu_worker=0 and press ctrl+shift+k (firefox) or ctrl+shift+j (chromium)
 - If relevant, upload the disk images to allow developers to reproduce the problem locally
 -->

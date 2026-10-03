@@ -115,6 +115,33 @@ function create_local_channel()
     return { device: end(0, 1), host: end(1, 0) };
 }
 
+/** The guest CPUs of new V86() (`cpu_type`); the first is the default */
+export const CPU_TYPES = ["x86", "x86_64"];
+
+/**
+ * Check the guest CPU of new V86() (`cpu_type`)
+ * @param {!Object} options
+ * @return {string} one of CPU_TYPES
+ */
+function check_cpu_type(options)
+{
+    if(options["experimental_x64"] !== undefined)
+    {
+        throw new Error("experimental_x64 was replaced by cpu_type: \"x86_64\"");
+    }
+    const cpu_type = options["cpu_type"];
+    if(cpu_type === undefined)
+    {
+        return CPU_TYPES[0];
+    }
+    if(!CPU_TYPES.includes(cpu_type))
+    {
+        throw new Error("Unknown cpu_type " + JSON.stringify(cpu_type) + "; supported: " +
+            CPU_TYPES.map(name => "\"" + name + "\"").join(", "));
+    }
+    return cpu_type;
+}
+
 /**
  * Constructor for emulator instances.
  *
@@ -144,6 +171,7 @@ export function V86(options)
 
     // The display adapter is required; its plugin loads with the other files
     this.graphics_adapter = check_graphics_adapter_options(options);
+    this.cpu_type = check_cpu_type(options);
 
     const bus = Bus.create();
     this.bus = bus[0];
@@ -397,7 +425,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.cpu_quantum = options.cpu_quantum;
     settings.cpu_schedule_seed = options.cpu_schedule_seed;
     settings.experimental_smp_jit = options.experimental_smp_jit;
-    settings.experimental_x64 = options.experimental_x64;
+    settings["cpu_type"] = this.cpu_type;
     settings.disable_jit = options.disable_jit;
     settings["jit_backend"] = options["jit_backend"];
     settings["ir_region_budget"] = options["ir_region_budget"];
@@ -935,7 +963,7 @@ V86.prototype.continue_init = async function(emulator, options)
             const bytes = parallel_bytes;
             const worker_settings = {};
             for(const key of ["disable_jit", "jit_backend", "ir_region_budget", "ir_opt_level", "ir_passes_disabled",
-                "ir_tier0", "ir_page_mode", "ir_verify", "experimental_x64", "x87_fast_math", "x87_jit_cache", "cpuid_level", "cpu_quantum",
+                "ir_tier0", "ir_page_mode", "ir_verify", "cpu_type", "x87_fast_math", "x87_jit_cache", "cpuid_level", "cpu_quantum",
                 "parallel_fault"])
             {
                 if(settings[key] !== undefined) worker_settings[key] = settings[key];

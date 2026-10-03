@@ -1,7 +1,7 @@
 // The VMware SVGA II adapter (15AD:0405), the device side: the register
 // interface, the command FIFO, the 2D commands and interrupts, on top of the
 // VGA core for the BIOS, DOS and boot screens. What it declares is set by its
-// level (LEVELS); see docs/vmware-svga-virtio-gpu-plan.zh-CN.md, section 5.
+// level (LEVELS); see docs/gpu-devices.md, "VMware SVGA II".
 //
 // PCI: BAR0 I/O (index +0, value +1, BIOS +2, IRQ status +8), BAR1 the frame
 // buffer (the VGA core's LFB region), BAR2 the FIFO (its own device memory).
@@ -52,14 +52,14 @@ const CURSOR_MAX_BYTE_SIZE = CURSOR_HEADER_BYTES + CURSOR_MAX_DIMENSION * CURSOR
  * @type {!Object<string, {caps: number, fifo_caps: number, cap2: (number|undefined), devcaps: (!Array<!Array<number>>|undefined)}>}
  */
 export const LEVELS = {
-    // S1: modes through the registers, the FIFO with UPDATE/RECT_COPY/FENCE,
-    // interrupts. No hardware cursor yet (the guest draws its own).
+    // modes through the registers, the FIFO with UPDATE/RECT_COPY/FENCE,
+    // interrupts. No hardware cursor (the guest draws its own).
     "2d": {
         caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
             C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES,
         fifo_caps: C.SVGA_FIFO_CAP_FENCE | C.SVGA_FIFO_CAP_PITCHLOCK | C.SVGA_FIFO_CAP_RESERVE,
     },
-    // S2: the whole 2D device: guest memory regions, screen objects,
+    // the whole 2D device: guest memory regions, screen objects,
     // multiple displays, the hardware cursor, command buffers
     "2d-full": {
         caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
@@ -72,7 +72,7 @@ export const LEVELS = {
             C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
             C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
     },
-    // S3: legacy 3D (svga3d.js), what Windows 8.1's vm3d uses without
+    // legacy 3D (svga3d.js), what Windows 8.1's vm3d uses without
     // guest-backed objects; needs a renderer
     "vgpu9": {
         caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
@@ -85,7 +85,7 @@ export const LEVELS = {
             C.SVGA_FIFO_CAP_CURSOR_BYPASS_3 | C.SVGA_FIFO_CAP_ESCAPE |
             C.SVGA_FIFO_CAP_SCREEN_OBJECT | C.SVGA_FIFO_CAP_SCREEN_OBJECT_2 | C.SVGA_FIFO_CAP_GMR2,
     },
-    // S4: the same 3D with guest-backed objects (svga_gb.js): MOBs, object
+    // the same 3D with guest-backed objects (svga_gb.js): MOBs, object
     // tables, screen targets, the cursor in a MOB
     "gb9": {
         caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
@@ -101,7 +101,7 @@ export const LEVELS = {
         cap2: C.SVGA_CAP2_GROW_OTABLE | C.SVGA_CAP2_OTABLE_PTDEPTH_2 | C.SVGA_CAP2_GB_MEMSIZE_2 |
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG,
     },
-    // S5: DX contexts (VGPU10, shader model 4.0), drawn by GX
+    // DX contexts (VGPU10, shader model 4.0), drawn by GX
     "dx10": {
         caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
             C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
@@ -117,7 +117,7 @@ export const LEVELS = {
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG,
         devcaps: DX10_DEVCAPS,
     },
-    // S6: shader model 4.1 (feature level 10_1; Linux's vmwgfx wants
+    // shader model 4.1 (feature level 10_1; Linux's vmwgfx wants
     // SVGA_CAP2_DX2 and the SM41 devcap, and Mesa then multisamples)
     "dx10.1": {
         caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
@@ -134,7 +134,7 @@ export const LEVELS = {
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG | C.SVGA_CAP2_DX2,
         devcaps: DX10_1_DEVCAPS,
     },
-    // S7: shader model 5 (feature level 11_0, GL 4.3): SVGA_CAP2_DX3 with
+    // shader model 5 (feature level 11_0, GL 4.3): SVGA_CAP2_DX3 with
     // the SM5 devcap is what both VMware's Windows driver and Linux's
     // vmwgfx look for
     "dx11": {
@@ -152,7 +152,7 @@ export const LEVELS = {
             C.SVGA_CAP2_CURSOR_MOB | C.SVGA_CAP2_SCREENDMA_REG | C.SVGA_CAP2_DX2 | C.SVGA_CAP2_DX3,
         devcaps: DX11_DEVCAPS,
     },
-    // S8: the video overlay (svga_video.js) and GL's provoking vertex
+    // the video overlay (svga_video.js) and GL's provoking vertex
     "dx11-full": {
         caps: C.SVGA_CAP_RECT_COPY | C.SVGA_CAP_EXTENDED_FIFO | C.SVGA_CAP_PITCHLOCK |
             C.SVGA_CAP_IRQMASK | C.SVGA_CAP_TRACES |
@@ -1488,11 +1488,12 @@ SVGADevice.prototype.push_overlay_and_cursor = function(layers, under, region, o
 // ---------------------------------------------------------------------------
 // Snapshots
 
-// The device's ABI (plan section 13): a snapshot keeps the level and every
-// capability the guest's driver read at boot (caps, FIFO caps, CAP2, the
-// devcaps), and a restore declares those again, whatever this version would
-// choose or its tables now say. A new capability therefore needs a new level;
-// what a level once declared keeps working.
+// The device's ABI (levels; docs/gpu-devices.md, "Configuration"): a
+// snapshot keeps the level and every capability the guest's driver read at
+// boot (caps, FIFO caps, CAP2, the devcaps), and a restore declares those
+// again, whatever this version would choose or its tables now say. A new
+// capability therefore needs a new level; what a level once declared keeps
+// working.
 const STATE_VERSION = 6;
 
 SVGADevice.prototype.get_state = function()

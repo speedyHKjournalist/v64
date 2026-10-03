@@ -313,9 +313,38 @@ pub unsafe fn instr16_0F01_6_mem(addr: i32) {
 pub unsafe fn instr32_0F01_6_mem(addr: i32) { instr16_0F01_6_mem(addr) }
 
 #[no_mangle]
-pub unsafe fn instr16_0F01_7_reg(_r: i32) { trigger_ud(); }
+pub unsafe fn instr16_0F01_7_reg(r: i32) {
+    if r == 1 {
+        rdtscp();
+    }
+    else {
+        trigger_ud();
+    }
+}
 #[no_mangle]
-pub unsafe fn instr32_0F01_7_reg(_r: i32) { trigger_ud(); }
+pub unsafe fn instr32_0F01_7_reg(r: i32) { instr16_0F01_7_reg(r) }
+
+/// RDTSCP (0F 01 F9): RDTSC that also loads ECX with IA32_TSC_AUX. Only the
+/// x86-64 profile advertises it (CPUID.80000001h:EDX[27]), and a 32-bit kernel
+/// there uses it too (Linux's rdtsc_ordered); the legacy profile raises #UD.
+/// In IA-32e mode x64::system has it in either profile, and so does
+/// compatibility-mode code that compiled code steps through here. Whether it
+/// completed.
+pub unsafe fn rdtscp() -> bool {
+    if !X64_TEST_CAPABILITIES && crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0 {
+        trigger_ud();
+        return false;
+    }
+    if 0 != *cpl && 0 != *cr.offset(4) & CR4_TSD {
+        trigger_gp(0);
+        return false;
+    }
+    let tsc = read_tsc();
+    write_reg32(EAX, tsc as i32);
+    write_reg32(EDX, (tsc >> 32) as i32);
+    write_reg32(ECX, *x64_tsc_aux as i32);
+    true
+}
 
 #[no_mangle]
 pub unsafe fn instr16_0F01_7_mem(addr: i32) {
@@ -1241,23 +1270,22 @@ pub unsafe fn wrmsr_checked() -> bool {
         dbg_log!("wrmsr ecx={:x} data={:x}:{:x}", index, high, low);
     }
 
+    // in the order of instr_0F32
     let x64 = crate::x64::state::efer() & crate::x64::state::EFER_LME != 0;
+    let value = low as u32 as u64 | (high as u32 as u64) << 32;
     if (0xC0000080..=0xC0000084).contains(&(index as u32)) || x64 {
-        match crate::x64::system::write_msr(
-            index as u32,
-            low as u32 as u64 | (high as u32 as u64) << 32,
-        ) {
-            Ok(true) => return true,
-            Err(fault) => {
-                crate::x64::system::raise(fault);
-                return false;
-            },
-            Ok(false) => {},
+        if let Some(completed) = wrmsr_ia32e(index, value) {
+            return completed;
         }
     }
     match write_msr_table(index, low, high) {
         Ok(true) => true,
         Ok(false) if !x64 => {
+            if X64_TEST_CAPABILITIES {
+                if let Some(completed) = wrmsr_ia32e(index, value) {
+                    return completed;
+                }
+            }
             dbg_log!("Unknown msr: {:x}", index);
             dbg_assert!(false);
             true
@@ -1266,6 +1294,19 @@ pub unsafe fn wrmsr_checked() -> bool {
             trigger_gp(0);
             false
         },
+    }
+}
+
+/// WRMSR of an MSR x64::system owns: whether it completed, None if it owns
+/// no such MSR.
+unsafe fn wrmsr_ia32e(index: i32, value: u64) -> Option<bool> {
+    match crate::x64::system::write_msr(index as u32, value) {
+        Ok(true) => Some(true),
+        Err(fault) => {
+            crate::x64::system::raise(fault);
+            Some(false)
+        },
+        Ok(false) => None,
     }
 }
 
@@ -1360,20 +1401,14 @@ pub unsafe fn instr_0F32() {
     let index = read_reg32(ECX);
     dbg_log!("rdmsr ecx={:x}", index);
 
+    // x64::system owns the IA-32e MSRs, and in long mode it comes first: it
+    // widens shared ones such as SYSENTER_EIP. The x64 profile advertises the
+    // IA-32e MSRs in every mode (IA32_ARCH_CAPABILITIES, KERNEL_GS_BASE,
+    // TSC_AUX); outside long mode they come after the table, so the shared
+    // ones keep its 32-bit semantics.
     let x64 = crate::x64::state::efer() & crate::x64::state::EFER_LME != 0;
-    if (0xC0000080..=0xC0000084).contains(&(index as u32)) || x64 {
-        match crate::x64::system::read_msr(index as u32) {
-            Ok(Some(value)) => {
-                write_reg32(EAX, value as i32);
-                write_reg32(EDX, (value >> 32) as i32);
-                return;
-            },
-            Err(fault) => {
-                crate::x64::system::raise(fault);
-                return;
-            },
-            Ok(None) => {},
-        }
+    if ((0xC0000080..=0xC0000084).contains(&(index as u32)) || x64) && rdmsr_ia32e(index) {
+        return;
     }
     let (low, high) = match read_msr_table(index) {
         Some(value) => value,
@@ -1382,6 +1417,7 @@ pub unsafe fn instr_0F32() {
             trigger_gp(0);
             return;
         },
+        None if X64_TEST_CAPABILITIES && rdmsr_ia32e(index) => return,
         None => {
             dbg_log!("Unknown msr: {:x}", index);
             dbg_assert!(false);
@@ -1391,6 +1427,19 @@ pub unsafe fn instr_0F32() {
 
     write_reg32(EAX, low);
     write_reg32(EDX, high);
+}
+
+/// RDMSR of an MSR x64::system owns; false if it owns no such MSR.
+unsafe fn rdmsr_ia32e(index: i32) -> bool {
+    match crate::x64::system::read_msr(index as u32) {
+        Ok(Some(value)) => {
+            write_reg32(EAX, value as i32);
+            write_reg32(EDX, (value >> 32) as i32);
+        },
+        Err(fault) => crate::x64::system::raise(fault),
+        Ok(None) => return false,
+    }
+    true
 }
 
 // Memory-type range registers, the page attribute table and machine-check

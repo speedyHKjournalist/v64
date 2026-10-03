@@ -302,7 +302,7 @@ export const COMMAND_HANDLERS = {
         return null;
     },
 
-    // Queries (their results come with VK3's render passes)
+    // Queries
 
     // a pool's results (u64 each) are a VX memory: occlusion queries resolve
     // into it, timestamps are written into it; read back after a submission

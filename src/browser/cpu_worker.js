@@ -48,7 +48,7 @@ export function encode_worker_options(o, plugins = [], adapter_renderer = false)
         "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,
         "cpu_clock": o.cpu_clock, "cpu_quantum": o.cpu_quantum, "cpu_schedule_seed": o.cpu_schedule_seed,
         "experimental_smp_jit": o.experimental_smp_jit, "disable_jit": o.disable_jit,
-        "experimental_x64": o.experimental_x64,
+        "cpu_type": o["cpu_type"],
         "jit_backend": o["jit_backend"], "ir_region_budget": o["ir_region_budget"],
         "ir_stats": o["ir_stats"],
         "ir_verify": o["ir_verify"], "ir_dump": o["ir_dump"],

@@ -4,14 +4,15 @@ import {V86} from "../../../build/libv86.mjs";
 const cases=JSON.parse(fs.readFileSync("build/ir-descriptor/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-descriptor/${i}-${opt}.wasm`))));
 for(const release of [false,true]){
-const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+let clock;
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_fn:async imports=>{const original=imports.env.microtick;imports.env.microtick=()=>clock===undefined?original():clock;return (await WebAssembly.instantiate(fs.readFileSync(release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm"),imports)).instance.exports;},memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8,words=new Uint32Array(e.memory.buffer),raw=new Uint8Array(e.memory.buffer);
     const v=new DataView(mem.buffer,mem.byteOffset),set32=(a,n)=>v.setUint32(a,n,true),get32=a=>v.getUint32(a,true),set16=(a,n)=>v.setUint16(a,n,true),get16=a=>v.getUint16(a,true);
     vm.run();const deadline=performance.now()+10000;while(get16(0x500)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();
     const PC=0x8000,BASE=0x310000,STACK=0x90000,GP=0x180000,UD=0x180100,PF=0x180200,cr0=cpu.cr[0],cr4=cpu.cr[4];let target=BASE+0x40,events=[],on_event,calls=0;
-    const imports={...e,m:e.memory};for(const name of ["ir_sgdt","ir_sidt","ir_lgdt","ir_lidt","ir_smsw_mem","ir_smsw_reg","ir_lmsw_mem","ir_lmsw_reg","ir_invlpg","ir_descriptor_ud"])imports[name]=(...args)=>{calls++;return e[name](...args);};
+    const imports={...e,m:e.memory};for(const name of ["ir_sgdt","ir_sidt","ir_lgdt","ir_lidt","ir_smsw_mem","ir_smsw_reg","ir_lmsw_mem","ir_lmsw_reg","ir_invlpg","ir_rdtscp","ir_descriptor_ud"])imports[name]=(...args)=>{calls++;return e[name](...args);};
     const instances=modules.map(pair=>pair.map(m=>new WebAssembly.Instance(m,{e:imports})));
     const illegal=c=>c[5]<8&&![4,6].includes(c[4]),writing=c=>c[5]>=8&&[0,1,4].includes(c[4]);
     function desc(n,base,limit,access,flags){set32(0x3000+n*8,limit&65535|base<<16);set32(0x3004+n*8,base&0xFF000000|(base>>>16&255)|access<<8|(limit&0xF0000)|flags<<20);}
@@ -76,5 +77,15 @@ try {
         compare(i,configure,102,false,()=>{const a=read(BASE+0x40),b=read(BASE+0x1040);assert.equal(a,0xB22D);assert.equal(b,0xC33D);return [a,b];});invalidation++;
     }
     console.log(`PASS (${release?"release":"debug"}): ${invalidation} INVLPG warmed/global target invalidations with adjacent TLB entry retention`);
+    // RDTSCP (0F 01 F9) is #UD above (illegal): the legacy profile lacks it.
+    // The x86-64 profile has it outside long mode too, with a fixed clock here.
+    let rdtscp=0;e.set_x64_test_capabilities(1);
+    for(const [c,i] of cases.map((c,i)=>[c,i]).filter(([c])=>c[4]===7&&c[5]===1)) for(const cpl of [0,3]) for(const tsd of [false,true]) for(const vm86 of [false,true]){
+        if(vm86&&(cpl!==3||c[1])) continue;const fault=cpl!==0&&tsd;
+        const actual=compare(i,()=>{reset(i,{cpl,vm86});if(tsd)cpu.cr[4]|=4;words[1784>>2]=0xA5A5A5A5;e.ir_test_tsc_reset(0n);clock=1000.25;},fault?101:102);
+        if(fault)assert.equal(actual.ip,GP);else assert.deepEqual([actual.regs[0],actual.regs[2],actual.regs[1]],[1000250000,0,0xA5A5A5A5]);rdtscp++;
+    }
+    e.set_x64_test_capabilities(0);clock=undefined;
+    console.log(`PASS (${release?"release":"debug"}): ${rdtscp} x86-64 profile RDTSCP TSC/TSC_AUX and CPL/CR4.TSD/VM86 cases`);
 } finally {await vm.destroy();}
 }

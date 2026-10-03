@@ -27,7 +27,7 @@ const emulator = new V86({
     bios: { url: root + "bios/seabios.bin" }, vga_bios: { url: root + "bios/vgabios.bin" },
     bzimage: { url: kernel }, initrd: { url: initrd }, cdrom: { url: iso },
     cmdline: "console=ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage",
-    memory_size: 512 << 20, cpu_cores: cores, acpi: true, autostart: false, experimental_x64: true,
+    memory_size: 512 << 20, cpu_cores: cores, acpi: true, autostart: false, cpu_type: "x86_64",
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0,
     ...(+process.env.POWEROFF_PARALLEL ? { parallel: true, wasm_path: root + "build/v86-parallel.wasm" } : {}),
 });

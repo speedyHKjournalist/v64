@@ -1,8 +1,9 @@
 // VGPU10 shader tokens (SM4.0, SM4.1, SM5.0: the DXBC SHEX instruction
 // stream VMware's SVGA DX commands carry, plus its VMWARE opcodes) decoded
-// into the shader IR wgsl_emitter.js turns into WGSL (plan 4.6). The IR is
-// the instruction list with its operands spelled out, and the declarations
-// gathered by kind; the TGSI front end (virgl) will produce the same shape.
+// into the shader IR wgsl_emitter.js turns into WGSL (docs/gpu-devices.md,
+// "GX"). The IR is the instruction list with its operands spelled out, and
+// the declarations gathered by kind. virgl's TGSI comes here too, as VGPU10
+// tokens (src/graphics_adapters/virtio_gpu/tgsi_vgpu10.js).
 //
 // Token layout: VGPU10ShaderTokens.h (third_party/vmware-svga). A program is
 // a version token, a length token (dwords, both included), then

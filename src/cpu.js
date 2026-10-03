@@ -2453,7 +2453,7 @@ CPU.prototype.init = function(settings, device_bus)
     this.configure_jit_backend(interpreted ? Object.assign({}, settings, { disable_jit: true }) : settings);
     // The x86-64 CPU profile (CPUID long mode, NX, SYSCALL, CX16, ...) is
     // opt-in while x64 support is experimental
-    this.wm.exports["set_x64_test_capabilities"](!!settings.experimental_x64);
+    this.wm.exports["set_x64_test_capabilities"](settings["cpu_type"] === "x86_64");
     this.wm.exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     this.wm.exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
     this.create_memory(

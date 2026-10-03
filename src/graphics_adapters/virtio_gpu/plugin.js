@@ -28,7 +28,7 @@ register_graphics_adapter({
             "get_state": () => device.get_state(),
             "set_state": state => device.set_state(state),
             "reset": () => device.reset(),
-            // what the GPU has of the guest's 3D (a snapshot cannot hold it yet)
+            // what the GPU has of the guest's 3D (a snapshot reads it back first)
             "has_host_state": () => !!device.virgl,
             "prepare_save": () => device.prepare_save(),
         };

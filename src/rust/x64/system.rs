@@ -120,9 +120,8 @@ pub unsafe fn write_cr(index: usize, value: u64) -> Result<(), Fault> {
         cpu::clear_tlb();
         memory::invalidate_core_nonglobal(crate::cpu::apic::current_core());
     }
-    // CR0 and CR4 writes that change no bit translations depend on (Windows
-    // flips CR0.TS, for one, thousands of times a second): nothing to flush,
-    // as on hardware
+    // CR0 and CR4 writes that change no bit translations depend on (CR0.TS,
+    // for one): nothing to flush, as on hardware
     else if index != 3
         && (c.cr0 ^ old.cr0) & TRANSLATION_CR0 == 0
         && (c.cr4 ^ old.cr4) & TRANSLATION_CR4 == 0
@@ -209,6 +208,10 @@ pub unsafe fn write_msr(index: u32, value: u64) -> Result<bool, Fault> {
                 crate::cpu::apic::current_core() as u32,
                 enabled,
             );
+        },
+        // read-only
+        0x10A if crate::cpu::instructions_0f::arch_capabilities().is_some() => {
+            return Err(Fault::gp())
         },
         _ => return Ok(false),
     }

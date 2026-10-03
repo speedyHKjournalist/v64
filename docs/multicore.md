@@ -279,7 +279,7 @@ emulator = new V86({
     hda: { url: "windows8/windows8.img", async: true, size: WINDOWS8_IMAGE_BYTES },
     acpi: true,                    // required for cpu_cores > 1 (it turns on the local APICs)
     cpu_cores: 4,                  // 1 socket x 4 cores x 1 thread
-    experimental_x64: true,
+    cpu_type: "x86_64",
     experimental_smp_jit: true,    // compile on every core; without it, N > 1 is interpreted
     net_device: { type: "ne2k", relay_url: "wss://relay.widgetry.org/" },
     autostart: true,

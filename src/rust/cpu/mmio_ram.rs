@@ -1,9 +1,10 @@
 //! Device memory in the guest's physical address space: plain wasm memory
-//! that a device owns -- the VGA frame buffer today; a VMware SVGA frame
-//! buffer and command FIFO later -- decoded where the device's PCI memory BAR
-//! currently is. The guest reads and writes it at memory speed; each region
-//! keeps a bitmap of the 4 KiB pages written since its device last took them,
-//! and can convert those pages into an RGBA picture for the screen.
+//! that a device owns -- the VGA core's frame buffer (every display adapter),
+//! VMware SVGA's command FIFO, virtio-gpu's host visible memory -- decoded
+//! where the device's PCI memory BAR currently is. The guest reads and writes
+//! it at memory speed; each region keeps a bitmap of the 4 KiB pages written
+//! since its device last took them, and can convert those pages into an RGBA
+//! picture for the screen.
 //!
 //! Regions are page aligned and a whole number of pages, so an access that
 //! does not cross a page boundary is entirely inside one region or outside all

@@ -4,7 +4,7 @@
 // class, so that the device code reads like any other v86 device, and
 // converts what crosses the boundary (port handlers, display layers, the PCI
 // description) between plugin names and quoted names.
-// See docs/vmware-svga-virtio-gpu-plan.zh-CN.md, section 4.8.
+// See docs/gpu-devices.md, "Adapter plugins".
 
 /** The global registry plugins add their descriptors to */
 const REGISTRY = "V86GraphicsAdapters";

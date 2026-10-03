@@ -1,6 +1,6 @@
-// Legacy 3D (level vgpu9; plan section 5.8): the SVGA3D commands of VMware's
-// pre-guest-backed 3D, the D3D9-shaped API that Windows' vm3d and Mesa's svga
-// driver speak to a device without SVGA_CAP_GBOBJECTS.
+// Legacy 3D (level vgpu9; docs/gpu-devices.md, "VMware SVGA II"): the SVGA3D
+// commands of VMware's pre-guest-backed 3D, the D3D9-shaped API that Windows'
+// vm3d and Mesa's svga driver speak to a device without SVGA_CAP_GBOBJECTS.
 //
 // The CPU side (this file) validates commands, reads the guest memory they
 // refer to, and writes self-contained D9WG batches (svga3d_d9wg.js) for the
@@ -20,10 +20,11 @@
 //   cursor, screenshots and snapshots stay where the 2D levels have them.
 // - Completion: fences and command buffers that follow GPU work complete
 //   when the renderer has run every batch before them (after_work).
-// - Snapshots (plan 4.7): the GPU's objects have no guest backing, so before
-//   a save every surface is read back (prepare_save). The snapshot keeps each
-//   surface's definition and contents, and each context's shaders and the
-//   last command for each piece of its state; restoring replays them.
+// - Snapshots (docs/gpu-devices.md, "Snapshots"): the GPU's objects have no
+//   guest backing, so before a save every surface is read back
+//   (prepare_save). The snapshot keeps each surface's definition and
+//   contents, and each context's shaders and the last command for each piece
+//   of its state; restoring replays them.
 
 import { LOG_VGA } from "../../const.js";
 import { dbg_log } from "../../log.js";
@@ -1867,7 +1868,7 @@ SVGA3D.prototype.end_query = function(p, memory)
 };
 
 // ---------------------------------------------------------------------------
-// Guest-backed objects (level gb9; plan section 5.9)
+// Guest-backed objects (level gb9; docs/gpu-devices.md, "VMware SVGA II")
 //
 // The objects are the same as at vgpu9 (svga_gb.js has the MOBs and object
 // tables); what changes is where their contents live between uses: a

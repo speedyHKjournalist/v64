@@ -50,6 +50,7 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_ltr_mem"
         | "ir_ltr_reg"
         | "ir_pop_flags"
+        | "ir_rdtscp"
         | "ir_read_cr"
         | "ir_read_cr_continue"
         | "ir_read_dr"

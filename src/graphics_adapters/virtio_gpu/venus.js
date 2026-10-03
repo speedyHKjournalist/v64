@@ -3,7 +3,7 @@
 // shared memory the driver allocates (HOST3D blobs of blob id 0, in the host
 // visible memory, BAR4), the command rings in it, reply streams and the
 // MESA transport commands. The Vulkan commands themselves go to the Vulkan
-// model (venus_vk.js). docs/vmware-svga-virtio-gpu-plan.zh-CN.md, section 6.5.
+// model (venus_vk.js). See docs/gpu-devices.md, "Venus (Vulkan)".
 //
 // The driver writes commands into a ring and moves its tail; this device
 // reads them on its timer (every time the machine's timers run) and when the

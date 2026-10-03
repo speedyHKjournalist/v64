@@ -1,10 +1,13 @@
-// The host half of the VMware SVGA II adapter's 3D (graphics_adapter:
-// "vmware_svga" at level vgpu9; docs/vmware-svga-virtio-gpu-plan.zh-CN.md
-// section 5.8). The device (src/graphics_adapters/vmware_svga/svga3d.js)
-// turns the guest's SVGA3D commands into D9WG batches; this runs them through
-// a D3D9 executor of its own and answers with what they wrote back and when
-// each has run. It draws nothing on the page: pictures go back to the device
-// as readbacks, and the device shows them on its screens like 2D ones.
+// The host half of the display adapters' 3D (graphics_adapter "vmware_svga"
+// and "virtio_gpu"; docs/gpu-devices.md, "Architecture"). At levels vgpu9 and
+// gb9 the SVGA device (src/graphics_adapters/vmware_svga/svga3d.js) turns the
+// guest's SVGA3D commands into D9WG batches; this runs them through a D3D9
+// executor of its own. GX batches (SVGA's DX levels, virgl) go to GX
+// (gx/gx_executor.js) and VX batches (Venus) to VX (vx/vx_executor.js), both
+// on the D3D9 executor's WebGPU device. It answers with what the batches
+// wrote back and when each has run. It draws nothing on the page: pictures go
+// back to the device as readbacks, and the device shows them on its screens
+// like 2D ones.
 //
 // Channel messages, device -> renderer:
 //   submit { seq, bytes, stream }   a D9WG batch, or with stream "gx" a GX

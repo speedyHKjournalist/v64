@@ -1,5 +1,6 @@
-// DX (SVGA_CAP_DX, level dx10 and up; plan section 5.10): the device side of
-// VMware's VGPU10 contexts. The renderer side is GX
+// DX (SVGA_CAP_DX, level dx10 and up; docs/gpu-devices.md,
+// "VMware SVGA II"): the device side of VMware's VGPU10 contexts. The
+// renderer side is GX
 // (src/browser/glbridge/gx/gx_executor.js); between them go GX batches
 // (GXWriter, src/graphics_adapters/renderer_protocol.js).
 //
