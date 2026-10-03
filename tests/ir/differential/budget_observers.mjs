@@ -7,7 +7,7 @@ const STACK = 0x90000, HANDLER = 0x180000, INITIAL = 0xFFFFFFFE;
 const fixture_dir = process.env.IR_OBSERVER_FIXTURES || "build/ir-budget-observers";
 const cases = JSON.parse(fs.readFileSync(`${fixture_dir}/cases.json`));
 const wasm = process.argv[2] || "build/v86-ir-test.wasm";
-const vm = new V86({wasm_path: wasm, memory_size: 32 << 20,
+const vm = new V86({graphics_adapter: "bochs_vga", wasm_path: wasm, memory_size: 32 << 20,
     bios: {buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
     net_device: {type: "none"}, autostart: false});

@@ -79,6 +79,7 @@ Due to a problem with CPUID, you need to add `cpuid_level: 2` and `acpi: false` 
 
 ```js
 var emulator = new V86({
+    graphics_adapter: "bochs_vga",
     ...
     cpuid_level: 2,
     acpi: false

@@ -3,6 +3,7 @@ import { state_stream_server } from "./state_stream_transport.js";
 // in the worker; this side owns DOM adapters and asynchronous GPU execution.
 import { GraphicsPerformance } from "./graphics_performance.js";
 import { DISPLAY_SINK_REPLAY } from "../display.js";
+import { default_graphics_adapter_path } from "../graphics_adapter.js";
 
 export function encode_worker_file(f)
 {
@@ -17,7 +18,7 @@ export function encode_worker_file(f)
  * @param {!Object} o
  * @param {!Array<!Object>=} plugins device plugins: the worker loads their devices' scripts
  */
-export function encode_worker_options(o, plugins = [])
+export function encode_worker_options(o, plugins = [], adapter_renderer = false)
 {
     const file = encode_worker_file;
     const fs = o.filesystem;
@@ -34,7 +35,14 @@ export function encode_worker_options(o, plugins = [])
         "parallel": o["parallel"],
         "parallel_wasm_path": o["parallel_wasm_path"] && new URL(o["parallel_wasm_path"], location.href).href,
         "vcpu_worker_url": o["vcpu_worker_url"] && new URL(o["vcpu_worker_url"], location.href).href,
-        "memory_size": o.memory_size, "vga_memory_size": o.vga_memory_size,
+        "memory_size": o.memory_size,
+        // The worker loads the display adapter's plugin itself, from an absolute URL
+        "graphics_adapter": o["graphics_adapter"], "vram_size": o["vram_size"],
+        "graphics_adapter_test": o["graphics_adapter_test"],
+        // whether the display adapter's 3D renderer is on the page (its channel is "graphics_adapter_renderer")
+        "graphics_adapter_renderer": adapter_renderer,
+        "graphics_adapter_path": o["graphics_adapter"] === "none" ? undefined :
+            new URL(o["graphics_adapter_path"] || default_graphics_adapter_path(o["graphics_adapter"]), location.href).href,
         "extended_memory_size": o.extended_memory_size, "extended_memory_cache": o.extended_memory_cache,
         "high_memory_size": o.high_memory_size,
         "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,
@@ -74,6 +82,8 @@ export class CPUWorkerController
     {
         this.emulator = emulator;
         this.options = options;
+        /** whether the display adapter's 3D renderer is on this page (starter.js) */
+        this.adapter_renderer = false;
         this.pending = new Map();
         this.next_id = 0;
         this.epoch = 1;
@@ -163,7 +173,7 @@ export class CPUWorkerController
     {
         const plugins = this.emulator.device_plugins;
         await Promise.all(this.emulator.plugins_ready);
-        const host_states = await this.rpc("init", [encode_worker_options(this.options, plugins)]);
+        const host_states = await this.rpc("init", [encode_worker_options(this.options, plugins, this.adapter_renderer)]);
         this.devices_ready = true;
         for(const [name, message, transfer] of this.device_queue.splice(0))
         {

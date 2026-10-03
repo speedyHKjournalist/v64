@@ -9,7 +9,7 @@ const sleep = ms => new Promise(r => setTimeout(r,ms));
 const u32 = n => [n&255,n>>>8&255,n>>>16&255,n>>>24&255];
 let vm;
 try {
-    vm = new V86({ cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
+    vm = new V86({ graphics_adapter: "bochs_vga", cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
         wasm_path: "../../build/v86.wasm", bios: { url: "../../build/cpu-worker-test.bin" },
         memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
         disable_keyboard: true, disable_mouse: true, disable_speaker: true,

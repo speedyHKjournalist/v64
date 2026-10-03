@@ -50,7 +50,7 @@ function bzimage(protocol)
 
 async function boot(options)
 {
-    const emulator = new V86({memory_size: 32 << 20, autostart: false, disable_jit: true, log_level: 0, ...options});
+    const emulator = new V86({graphics_adapter: "bochs_vga", memory_size: 32 << 20, autostart: false, disable_jit: true, log_level: 0, ...options});
     try
     {
         return await new Promise(resolve => {

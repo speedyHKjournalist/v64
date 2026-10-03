@@ -23,6 +23,7 @@ const cycles = +(process.env.POWEROFF_CYCLES || 20), cores = +(process.env.X64_C
 const jit = process.env.X64_JIT !== "0";
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: root + "bios/seabios.bin" }, vga_bios: { url: root + "bios/vgabios.bin" },
     bzimage: { url: kernel }, initrd: { url: initrd }, cdrom: { url: iso },
     cmdline: "console=ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage",

@@ -108,6 +108,7 @@ async function halted(cpu, label)
 for(const mode of modes)
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: process.env.WASM_PATH,
         memory_size: 16 << 20, acpi: true, cpu_cores: specifications.length,
         cpu_quantum: 17, cpu_schedule_seed: 42,
@@ -200,7 +201,7 @@ for(const mode of modes)
 
 // Snapshots predating the per-core extension have no statistics to restore.
 // They must start at zero rather than inheriting the destination VM's history.
-const legacy_vm = new V86({ acpi: true, cpu_cores: 1, memory_size: 16 << 20,
+const legacy_vm = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: 1, memory_size: 16 << 20,
     wasm_path: process.env.WASM_PATH, disable_jit: true, autostart: false, log_level: 0 });
 try
 {

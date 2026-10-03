@@ -8,7 +8,7 @@ const jitOptions=irBackend?{jit_backend:"ir"}:{};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let vm;
 try {
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:corePath,...jitOptions,
+    vm=new V86({graphics_adapter: "bochs_vga", cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:corePath,...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},memory_size:32<<20,
         disable_keyboard:true,disable_mouse:true,net_device:{type:"none"},autostart:false});
     await Promise.race([new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);}),sleep(10000).then(()=>{throw new Error("Audio initialization blocked on autoplay");})]);

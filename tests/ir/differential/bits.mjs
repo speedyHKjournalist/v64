@@ -29,7 +29,7 @@ function reference(c,regs,flags,last,data,index) {
     if(rm<8&&kind!==0)out[rm]=width===32?Number(result):(out[rm]&0xFFFF0000|Number(result))>>>0;
     return {regs:out,flags:flags>>>0,data:Number(result)};
 }
-const vm=new V86({wasm_path:"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8,words=new Uint32Array(e.memory.buffer);

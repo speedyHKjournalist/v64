@@ -44,6 +44,7 @@ try
     floppy[511] = 0xAA;
     const container = document.getElementById("screen");
     emulator = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: "../../build/v86.wasm",
         bios: { url: "../../bios/seabios.bin" },
         vga_bios: { url: "../../bios/vgabios.bin" },

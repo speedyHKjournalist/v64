@@ -49,12 +49,15 @@ struct Table {
     count: usize,
     /// RGBA pictures converted from a region (mmio_ram_fill_pixels)
     pixels: [Vec<u32>; MAX_REGIONS],
+    /// Bitmap words taken from a region (mmio_ram_take_dirty)
+    taken: [Vec<u64>; MAX_REGIONS],
 }
 
 static mut TABLE: Table = Table {
     regions: [EMPTY; MAX_REGIONS],
     count: 0,
     pixels: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+    taken: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
 };
 
 #[inline(always)]
@@ -253,6 +256,30 @@ pub unsafe fn mmio_ram_mark_dirty(id: u32) {
             parallel::or64(region.dirty.add(i).cast(), u64::MAX);
         }
     }
+}
+
+/// Take the region's bitmap (the pages written since the last call, a bit a
+/// page, 64 pages a word) into a buffer of the table's, for a device that
+/// keeps a copy of the region elsewhere (virtio-gpu's host visible memory
+/// and the GPU's buffers)
+/// @return the buffer's address, relative to the start of the wasm memory
+/// (as many words as the region has), or 0
+#[no_mangle]
+pub unsafe fn mmio_ram_take_dirty(id: u32) -> u32 {
+    let Some(region) = region(id)
+    else {
+        return 0;
+    };
+    let region = *region;
+    let taken = &mut table().taken[id as usize];
+    taken.clear();
+    taken.resize(region.dirty_words as usize, 0);
+    for i in 0..region.dirty_words as usize {
+        taken[i] = take_word(region.dirty.add(i));
+    }
+    // (as mmio_ram_fill_pixels: direct x64 write translations mark again)
+    crate::x64::jac::retire_frame_buffer_writes();
+    taken.as_mut_ptr() as u32
 }
 
 /// An RGBA buffer of `pixels` pixels that mmio_ram_fill_pixels converts the

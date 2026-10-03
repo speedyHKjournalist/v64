@@ -72,6 +72,7 @@ function normalise_wast(wast)
 function run_test({ name, executable_file, expect_file, actual_file, actual_wasm, asm_file }, onfinished)
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         autostart: false,
         memory_size: 2 * 1024 * 1024,
         log_level: LOG_LEVEL,

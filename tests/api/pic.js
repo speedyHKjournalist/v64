@@ -19,6 +19,7 @@ if(!fs.existsSync(root_path + "/images/fs.json"))
 }
 
 const config = {
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     bzimage_initrd_from_filesystem: true,

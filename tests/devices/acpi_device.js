@@ -48,6 +48,7 @@ const OTHER_SOURCE = 0x40; // stands in for a PCI function sharing IRQ 9
 const TICKS_PER_MS = 3579545 / 1000;
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     acpi: true,

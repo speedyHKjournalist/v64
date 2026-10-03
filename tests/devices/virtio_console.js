@@ -13,6 +13,7 @@ const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     bzimage: { url: __dirname + "/../../images/buildroot-bzimage68.bin" },

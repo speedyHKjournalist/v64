@@ -12,6 +12,9 @@ const PG: u64 = 1 << 31;
 const PAE: u64 = 1 << 5;
 const CR0_VALID: u64 = 0xE005_003F;
 const CR4_VALID: u64 = 0x7FF; // no VMX, PCID, XSAVE, LA57, SMEP or SMAP in v1
+/// The bits of CR0 and CR4 that translations depend on: PE, WP, PG; PSE, PAE, PGE
+const TRANSLATION_CR0: u64 = PE | 1 << 16 | PG;
+const TRANSLATION_CR4: u64 = 1 << 4 | PAE | 1 << 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlState {
@@ -94,7 +97,9 @@ pub unsafe fn write_cr(index: usize, value: u64) -> Result<(), Fault> {
         crate::cpu::apic::write32(0x80, (value << 4) as u32);
         return Ok(());
     }
-    crate::x64::pages::COUNTERS[crate::x64::pages::COUNT_CR_WRITES] += 1;
+    use crate::x64::pages::{COUNTERS, COUNT_CR0_WRITES, COUNT_CR_WRITES, COUNT_FULL_FLUSHES};
+    COUNTERS[COUNT_CR_WRITES] += 1;
+    COUNTERS[COUNT_CR0_WRITES + if index == 0 { 0 } else if index == 3 { 1 } else { 2 }] += 1;
     let old = controls();
     let mut c = controls();
     c.write_cr(index, value)?;
@@ -115,7 +120,17 @@ pub unsafe fn write_cr(index: usize, value: u64) -> Result<(), Fault> {
         cpu::clear_tlb();
         memory::invalidate_core_nonglobal(crate::cpu::apic::current_core());
     }
+    // CR0 and CR4 writes that change no bit translations depend on (Windows
+    // flips CR0.TS, for one, thousands of times a second): nothing to flush,
+    // as on hardware
+    else if index != 3
+        && (c.cr0 ^ old.cr0) & TRANSLATION_CR0 == 0
+        && (c.cr4 ^ old.cr4) & TRANSLATION_CR4 == 0
+        && c.efer == old.efer
+    {
+    }
     else {
+        COUNTERS[COUNT_FULL_FLUSHES] += 1;
         cpu::full_clear_tlb();
         memory::invalidate_core(crate::cpu::apic::current_core());
     }
@@ -833,6 +848,9 @@ unsafe fn table_instruction(d: &Decoded) -> Result<(), Fault> {
 }
 
 pub unsafe fn check_io_access(port: u16, width: u8) -> Result<(), Fault> {
+    if port as i32 == cpu::VMWARE_BACKDOOR_PORT {
+        return Ok(());
+    }
     if *gp::cpl as i32 > cpu::getiopl() {
         if *gp::segment_is_null.add(6) || *gp::segment_limits.add(6) < 103 {
             return Err(Fault::gp());

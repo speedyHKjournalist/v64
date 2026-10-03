@@ -11,6 +11,7 @@ const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "..
 process.on("unhandledRejection", exn => { throw exn; });
 
 const emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { buffer: new Uint8Array(0x10000).fill(0xF4).buffer },
     // (without a primary drive, restoring before PCI enumeration hits a
     // separate bug in PCI.set_state)

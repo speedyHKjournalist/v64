@@ -23,6 +23,8 @@ const assert = require("node:assert/strict");
         save_with_plugins: V86.prototype.save_with_plugins,
         restore_with_plugins: V86.prototype.restore_with_plugins,
         with_device_state: V86.prototype.with_device_state,
+        // (no display adapter here: nothing of it on the GPU)
+        adapter_host_state: V86.prototype.adapter_host_state,
     };
     const emulator = { ...lifecycle, device_plugins: [plugin],
         is_running() { return false; }, async stop() {},

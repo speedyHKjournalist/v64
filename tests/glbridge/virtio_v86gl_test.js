@@ -35,6 +35,7 @@ function localChannel() {
     const arenaBytes = () => descriptor.get_state()[2];
 
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path: path.join(__dirname, "../../build/v86.wasm"),
         memory_size: 32 * 1024 * 1024,
         bios: { buffer: new Uint8Array(65536).fill(0xf4).buffer },

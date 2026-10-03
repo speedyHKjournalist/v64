@@ -8,6 +8,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
     const vm=new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path:(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm",
         memory_size:32<<20,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},

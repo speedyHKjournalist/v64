@@ -12,7 +12,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
 const machines = [];
 async function boot(options, wasm = process.argv[2] || "build/v86.wasm") {
-    const vm = new V86({ wasm_path: wasm, bios: { buffer: bios.slice(0) },
+    const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: wasm, bios: { buffer: bios.slice(0) },
         memory_size: 32 << 20, x87_fast_math: true, ...options,
         disable_keyboard: true, disable_mouse: true, disable_speaker: true, net_device: { type: "none" }, autostart: false });
     machines.push(vm);

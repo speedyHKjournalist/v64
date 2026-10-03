@@ -1,0 +1,122 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VMware SVGA II DX: VGPU10 through GX to WebGPU and back</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// The DX path end to end, without a guest: GB surfaces in MOBs, a DX context
+// with views, an input layout, VGPU10 shaders and state, through the device's
+// DX layer (svga3d_dx.js), GX batches, the renderer (svga_renderer.js) and GX
+// (gx/gx_executor.js) on a real GPU, and the picture back into the render
+// target's MOB: a blue clear with a red triangle over its top left half.
+import * as C from "../../src/graphics_adapters/vmware_svga/svga_constants.js";
+import { SVGA3D } from "../../src/graphics_adapters/vmware_svga/svga3d.js";
+import { ScreenObjects } from "../../src/graphics_adapters/vmware_svga/svga_screens.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+// a VGPU10 assembler: just what these shaders need
+const OPERAND = { TEMP: 0, INPUT: 1, OUTPUT: 2, IMMEDIATE32: 4, CONSTANT_BUFFER: 8 };
+const operand = (type, indices, mask) => [(2 | (mask === undefined ? 15 : mask) << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const swizzled = (type, indices) => [(2 | 1 << 2 | 0xE4 << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const ins = (op, ...operands) => { const body = operands.flat(); return [(op | (1 + body.length) << 24) >>> 0, ...body]; };
+const insc = (op, controls, ...operands) => { const body = operands.flat(); return [(op | controls << 11 | (1 + body.length) << 24) >>> 0, ...body]; };
+const program = (type, ...code) => { const body = code.flat(); return new Uint32Array([type << 16 | 4 << 4, 2 + body.length, ...body]); };
+const DCL_INPUT = 95, DCL_OUTPUT = 101, DCL_OUTPUT_SIV = 103, DCL_CONSTANT_BUFFER = 89, MOV = 54, RET = 62;
+const VS = program(1,
+    ins(DCL_INPUT, operand(OPERAND.INPUT, [0])),
+    ins(DCL_OUTPUT_SIV, operand(OPERAND.OUTPUT, [0]), 1),
+    ins(MOV, operand(OPERAND.OUTPUT, [0]), swizzled(OPERAND.INPUT, [0])),
+    ins(RET));
+const PS = program(0,
+    ins(DCL_CONSTANT_BUFFER, swizzled(OPERAND.CONSTANT_BUFFER, [0, 1])),
+    ins(DCL_OUTPUT, operand(OPERAND.OUTPUT, [0])),
+    ins(MOV, operand(OPERAND.OUTPUT, [0]), swizzled(OPERAND.CONSTANT_BUFFER, [0, 0])),
+    ins(RET));
+
+(async () => {
+    try {
+        // MOBs: plain arrays
+        const mobs = new Map();
+        const mob_table = {
+            read: (id, offset, length) => { const m = mobs.get(id); return m && offset + length <= m.length ? m.slice(offset, offset + length) : null; },
+            write: (id, offset, bytes) => { const m = mobs.get(id); if(!m || offset + bytes.length > m.length) return false; m.set(bytes, offset); return true; },
+            size: id => mobs.has(id) ? mobs.get(id).length : -1,
+        };
+        const screens = new ScreenObjects({ read: () => null, write: () => false });
+        const device = { caps: C.SVGA_CAP_3D | C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_DX, level: "dx10",
+            gmrs: { read: () => null, write: () => false }, mobs: mob_table, otables: null, screens,
+            set_irq: () => {}, svga_active: () => false };
+
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        globalThis.svgaRenderer = renderer;
+        globalThis.svgaWarnings = [];
+        for(const method of ["warn", "error"])
+        {
+            const original = console[method];
+            console[method] = (...args) => { globalThis.svgaWarnings.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); original.apply(console, args); };
+        }
+        const svga3d = new SVGA3D(device, end(0, 1));
+        const run = (id, ...body) => svga3d.command(id, Int32Array.from(body, v => v | 0));
+        const finished = () => new Promise(resolve => svga3d.after_work(resolve));
+
+        // MOB 1: the 64x64 target; 2: three vertices; 3: the color; 4: the shaders
+        const RT = 10, VB = 11, CB = 12;
+        mobs.set(1, new Uint8Array(64 * 64 * 4));
+        mobs.set(2, new Uint8Array(new Float32Array([-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1]).buffer));
+        mobs.set(3, new Uint8Array(new Float32Array([1, 0, 0, 1]).buffer));
+        const shaders = new Uint8Array(4096);
+        shaders.set(new Uint8Array(VS.buffer), 0);
+        shaders.set(new Uint8Array(PS.buffer), 1024);
+        mobs.set(4, shaders);
+        const BIND_RT = C.SVGA3D_SURFACE_BIND_RENDER_TARGET | C.SVGA3D_SURFACE_BIND_SHADER_RESOURCE;
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, RT, BIND_RT, C.SVGA3D_B8G8R8A8_UNORM, 1, 0, 0, 64, 64, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, VB, C.SVGA3D_SURFACE_BIND_VERTEX_BUFFER, C.SVGA3D_BUFFER, 1, 0, 0, 48, 1, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, CB, C.SVGA3D_SURFACE_BIND_CONSTANT_BUFFER, C.SVGA3D_BUFFER, 1, 0, 0, 16, 1, 1, 1, 0);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, RT, 1);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, VB, 2);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, CB, 3);
+
+        // the DX context and its objects
+        const CID = 1;
+        run(C.SVGA_3D_CMD_DX_DEFINE_CONTEXT, CID);
+        svga3d.dx_context = CID;
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 0, RT, C.SVGA3D_B8G8R8A8_UNORM, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_DEFINE_ELEMENTLAYOUT, 0, 0, 0, C.SVGA3D_R32G32B32A32_FLOAT, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 1, C.SVGA3D_SHADERTYPE_VS, VS.byteLength);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 2, C.SVGA3D_SHADERTYPE_PS, PS.byteLength);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 1, 4, 0);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 2, 4, 1024);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 1, C.SVGA3D_SHADERTYPE_VS);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 2, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_SET_INPUT_LAYOUT, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS, 0, VB, 16, 0);
+        run(C.SVGA_3D_CMD_DX_SET_TOPOLOGY, C.SVGA3D_PRIMITIVE_TRIANGLELIST);
+        run(C.SVGA_3D_CMD_DX_SET_SINGLE_CONSTANT_BUFFER, 0, C.SVGA3D_SHADERTYPE_PS, CB, 0, 16);
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0xFFFFFFFF, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(0), f32(0), f32(64), f32(64), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, 0, f32(0), f32(0), f32(1), f32(1));
+        run(C.SVGA_3D_CMD_DX_DRAW, 3, 0);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, RT, 0);
+        await finished();
+        const gx = renderer.gx;
+        check(gx, "GX made on the D3D9 executor's device");
+        check(gx.stats.draws === 1 && gx.stats.pipelines === 1, "one draw, one pipeline (" + JSON.stringify(gx.stats) + ")");
+        const target = mobs.get(1);
+        const pixel = (x, y) => Array.from(target.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 4));
+        check(pixel(8, 8).join() === "0,0,255,255", "inside the triangle: red, as BGRA (" + pixel(8, 8) + ")");
+        check(pixel(56, 56).join() === "255,0,0,255", "outside: the blue clear (" + pixel(56, 56) + ")");
+
+        const warnings = globalThis.svgaWarnings.filter(w => /\[gx\]|WGSL|WebGPU/.test(w));
+        check(!warnings.length, "no GX warnings: " + warnings.join(" / "));
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error.stack || error) + "\n" + checks.join("\n") + "\nwarnings: " + (globalThis.svgaWarnings || []).join("\n");
+    }
+})();
+</script>

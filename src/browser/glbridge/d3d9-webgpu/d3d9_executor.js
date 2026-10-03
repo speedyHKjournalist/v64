@@ -248,6 +248,8 @@
     // streams -- which is refused and counted rather than silently truncated.
     const MAX_STREAMS = 16;
     const MAX_VERTEX_BUFFERS_PER_DRAW = 8;
+    // The pseudo-stream of a layout whose attributes read defaultAttributeBuffer()
+    const DEFAULT_ATTRIBUTE_STREAM = -1;
     // fill_caps() reports NumSimultaneousRTs = 4.
     const MAX_RENDER_TARGETS = 4;
     // WebGPU's minUniformBufferOffsetAlignment default. The vertex and pixel
@@ -3127,6 +3129,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 hotspotX: 0, hotspotY: 0, x: 0, y: 0, visible: false,
                 pipeline: null, sampler: null, uniform: null };
             this.fallbackTexture = null;
+            this.defaultAttributes = null;
             this.fallbackView = null;
             this.fallbackDepth = null;
             this.fallbackViews = null;
@@ -3307,6 +3310,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 // Fixed-function pixel stages routed to a varying the bound
                 // translated vertex shader never assigned.
                 drawsWithUnwrittenCoordVarying: 0,
+                drawsWithDefaultedInputs: 0,
                 // The same seam one stage earlier, and entirely inside the
                 // fixed-function path: a stage whose D3DTSS_TEXCOORDINDEX names
                 // a coordinate set the *declaration* does not carry. The vertex
@@ -4472,6 +4476,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             this.lastSwapTexture = null;
             this.windowState = null;
             this.fallbackTexture = null;
+            this.defaultAttributes = null;
             this.fallbackView = null;
             this.fallbackDepth = null;
             this.fallbackViews = null;
@@ -8800,6 +8805,16 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // inputs. Elements no shader input consumes are simply left out --
         // they still occupy bytes in the vertex, but the stride comes from
         // SetStreamSource, never from summing the elements.
+        // (0, 0, 0, 1): what a vertex shader input no stream supplies reads
+        defaultAttributeBuffer() {
+            if (!this.defaultAttributes) {
+                this.defaultAttributes = this.device.createBuffer({ size: 16,
+                    usage: BUFFER_USAGE_VERTEX | BUFFER_USAGE_COPY_DST });
+                this.device.queue.writeBuffer(this.defaultAttributes, 0, new Float32Array([0, 0, 0, 1]));
+            }
+            return this.defaultAttributes;
+        }
+
         vertexBufferLayoutsFor(elements, state, locationFor, instanceData) {
             const perStream = new Map();
             for (const element of elements) {
@@ -9879,7 +9894,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             // does not reinterpolate a shader's outputs by shade mode.
             const flatShading =
                 (rs.get(D3DRS_SHADEMODE) || D3DSHADE_GOURAUD) === D3DSHADE_FLAT;
-            const vsHandle = state.vertexShaderHandle;
+            // Pre-transformed vertices (a POSITIONT element) skip vertex
+            // processing even with a vertex shader bound: D3D9 draws them as
+            // fixed-function screen-space geometry, as wined3d's use_vs()
+            // does. Apps draw HUD quads so without unbinding their shader;
+            // matching POSITIONT against the shader's POSITION input instead
+            // dropped the draw, or built a pipeline missing attribute 0, which
+            // invalidates the whole frame's command buffer.
+            const pretransformed = elements.some(element =>
+                element.usage === DECLUSAGE_POSITIONT && element.usageIndex === 0);
+            const vsHandle = pretransformed ? 0 : state.vertexShaderHandle;
             const psHandle = state.pixelShaderHandle;
             const vsResource = vsHandle ? this.resources.get(vsHandle) : null;
             const psResource = psHandle ? this.resources.get(psHandle) : null;
@@ -10501,6 +10525,27 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if (vertexBuffers === null)
                 return { error: "the declaration needs more vertex buffers " +
                     "than WebGPU binds per draw" };
+            // A vertex shader input the declaration does not supply reads
+            // (0, 0, 0, 1), as D3D9 hardware does, instead of leaving the
+            // pipeline without the attribute (an invalid pipeline invalidates
+            // the whole command buffer and with it the frame)
+            if (vertexReflection && vertexReflection.inputs) {
+                const supplied = new Set();
+                for (const layout of vertexBuffers)
+                    for (const attribute of layout.attributes) supplied.add(attribute.shaderLocation);
+                const missing = vertexReflection.inputs.map(input => input.location)
+                    .filter(location => location >= 0 && !supplied.has(location));
+                if (missing.length) {
+                    if (vertexBuffers.length >= MAX_VERTEX_BUFFERS_PER_DRAW)
+                        return { error: "the vertex shader reads inputs the declaration " +
+                            "does not supply and no vertex buffer slot is left for them" };
+                    ++this.stats.drawsWithDefaultedInputs;
+                    vertexBuffers.push({ stream: DEFAULT_ATTRIBUTE_STREAM, arrayStride: 0,
+                        stepMode: "vertex", attributes: [...new Set(missing)].sort((a, b) => a - b)
+                            .map(location => ({ shaderLocation: location, offset: 0,
+                                format: "float32x4" })) });
+                }
+            }
             if (!vertexBuffers.length)
                 return { error: "no vertex stream supplies any attribute the " +
                     "vertex stage reads" };
@@ -11733,6 +11778,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             // order, so slot N in the pipeline is slot N here.
             const vertexBuffers = [];
             for (const layout of program.vertexBuffers) {
+                if (layout.stream === DEFAULT_ATTRIBUTE_STREAM) {
+                    vertexBuffers.push({ buffer: this.defaultAttributeBuffer(), offset: 0 });
+                    continue;
+                }
                 const binding = geometry.streams.get(layout.stream);
                 if (!binding) {
                     this.noteDroppedDraw(which, state,

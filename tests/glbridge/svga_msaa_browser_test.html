@@ -1,0 +1,187 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VMware SVGA II DX: multisampling, supersampled</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// GX supersamples 4x multisampled surfaces: a texture twice as wide and
+// high, each sample a texel. So every format multisamples, here
+// R32G32B32A32_FLOAT, which WebGPU cannot. A triangle's edge resolves to
+// partly covered pixels; a pixel shader run per sample sees its sample index
+// (and the resolve averages them); a sample mask of one sample leaves a
+// quarter of the coverage.
+import * as C from "../../src/graphics_adapters/vmware_svga/svga_constants.js";
+import { SVGA3D } from "../../src/graphics_adapters/vmware_svga/svga3d.js";
+import { ScreenObjects } from "../../src/graphics_adapters/vmware_svga/svga_screens.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+const OPERAND = { TEMP: 0, INPUT: 1, OUTPUT: 2, IMMEDIATE32: 4 };
+const operand = (type, indices, mask) => [(2 | (mask === undefined ? 15 : mask) << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const swizzled = (type, indices) => [(2 | 1 << 2 | 0xE4 << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const selected = (type, indices, lane) => [(2 | 2 << 2 | lane << 4 | type << 12 | indices.length << 20) >>> 0, ...indices];
+const ins = (op, ...operands) => { const body = operands.flat(); return [(op | (1 + body.length) << 24) >>> 0, ...body]; };
+const insc = (op, controls, ...operands) => { const body = operands.flat(); return [(op | controls << 11 | (1 + body.length) << 24) >>> 0, ...body]; };
+const program = (type, ...code) => { const body = code.flat(); return new Uint32Array([type << 16 | 4 << 4 | 1, 2 + body.length, ...body]); };
+const DCL_INPUT = 95, DCL_INPUT_PS_SGV = 99, DCL_OUTPUT = 101, DCL_OUTPUT_SIV = 103, DCL_TEMPS = 104, MOV = 54, MUL = 56, UTOF = 86, RET = 62;
+const imm = (...values) => [(2 | OPERAND.IMMEDIATE32 << 12) >>> 0, ...values.map(f32)];
+const VS = program(1,
+    ins(DCL_INPUT, operand(OPERAND.INPUT, [0])),
+    ins(DCL_OUTPUT_SIV, operand(OPERAND.OUTPUT, [0]), 1),
+    ins(MOV, operand(OPERAND.OUTPUT, [0], 3), swizzled(OPERAND.INPUT, [0])),
+    ins(MOV, operand(OPERAND.OUTPUT, [0], 12), imm(0, 0, 0, 1)),
+    ins(RET));
+const WHITE = program(0,
+    ins(DCL_OUTPUT, operand(OPERAND.OUTPUT, [0])),
+    ins(MOV, operand(OPERAND.OUTPUT, [0]), imm(1, 1, 1, 1)),
+    ins(RET));
+// o0 = sample index / 3, so the four samples' mean is 0.5
+const SAMPLE = program(0,
+    insc(DCL_INPUT_PS_SGV, 1 /* constant */, operand(OPERAND.INPUT, [1], 1), 10 /* SAMPLE_INDEX */),
+    ins(DCL_OUTPUT, operand(OPERAND.OUTPUT, [0])),
+    ins(DCL_TEMPS, 1),
+    ins(UTOF, operand(OPERAND.TEMP, [0], 1), selected(OPERAND.INPUT, [1], 0)),
+    ins(MUL, operand(OPERAND.OUTPUT, [0]), selected(OPERAND.TEMP, [0], 0), imm(1 / 3, 1 / 3, 1 / 3, 1 / 3)),
+    ins(RET));
+
+(async () => {
+    try {
+        const mobs = new Map();
+        const mob_table = {
+            read: (id, offset, length) => { const m = mobs.get(id); return m && offset + length <= m.length ? m.slice(offset, offset + length) : null; },
+            write: (id, offset, bytes) => { const m = mobs.get(id); if(!m || offset + bytes.length > m.length) return false; m.set(bytes, offset); return true; },
+            size: id => mobs.has(id) ? mobs.get(id).length : -1,
+        };
+        const screens = new ScreenObjects({ read: () => null, write: () => false });
+        const device = { caps: C.SVGA_CAP_3D | C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_DX, level: "dx10.1",
+            gmrs: { read: () => null, write: () => false }, mobs: mob_table, otables: null, screens,
+            set_irq: () => {}, svga_active: () => false };
+
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        globalThis.svgaWarnings = [];
+        for(const method of ["warn", "error"])
+        {
+            const original = console[method];
+            console[method] = (...args) => { globalThis.svgaWarnings.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); original.apply(console, args); };
+        }
+        const svga3d = new SVGA3D(device, end(0, 1));
+        const run = (id, ...body) => svga3d.command(id, Int32Array.from(body, v => v | 0));
+        const finished = () => new Promise(resolve => svga3d.after_work(resolve));
+
+        // MS: the multisampled target; OUT: what it resolves into (MOB 1); VB: a triangle (MOB 2); shaders (MOB 3)
+        const MS = 10, OUT = 11, VB = 12, MS8 = 13, OUT8 = 14, X8 = 15, OUTX8 = 16;
+        const SIZE = 16, F = C.SVGA3D_R32G32B32A32_FLOAT, U8 = C.SVGA3D_R8G8B8A8_UNORM;
+        mobs.set(1, new Uint8Array(SIZE * SIZE * 16));
+        mobs.set(4, new Uint8Array(SIZE * SIZE * 4));
+        mobs.set(5, new Uint8Array(SIZE * SIZE * 16));
+        // the lower left half, with a diagonal edge; then a quad over everything
+        mobs.set(2, new Uint8Array(new Float32Array([-1, -1, -1, 1, 1, -1,  -1, -1, -1, 1, 1, -1, -1, 1, 1, 1, 1, -1]).buffer));
+        const shaders = new Uint8Array(4096);
+        shaders.set(new Uint8Array(VS.buffer), 0);
+        shaders.set(new Uint8Array(WHITE.buffer), 1024);
+        shaders.set(new Uint8Array(SAMPLE.buffer), 2048);
+        mobs.set(3, shaders);
+        const BIND = C.SVGA3D_SURFACE_BIND_RENDER_TARGET | C.SVGA3D_SURFACE_BIND_SHADER_RESOURCE;
+        // DEFINE_GB_SURFACE_V2: sid, flags, format, mips, samples, filter, width, height, depth, array size, (pad)
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, MS, BIND, F, 1, 4, 0, SIZE, SIZE, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, OUT, BIND, F, 1, 0, 0, SIZE, SIZE, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, MS8, BIND, U8, 1, 4, 0, SIZE, SIZE, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, OUT8, BIND, U8, 1, 0, 0, SIZE, SIZE, 1, 1, 0);
+        // eight samples: 4 x 2 texels a pixel
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, X8, BIND, F, 1, 8, 0, SIZE, SIZE, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, OUTX8, BIND, F, 1, 0, 0, SIZE, SIZE, 1, 1, 0);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, VB, C.SVGA3D_SURFACE_BIND_VERTEX_BUFFER, C.SVGA3D_BUFFER, 1, 0, 0, 72, 1, 1, 1, 0);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, OUT, 1);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, OUT8, 4);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, OUTX8, 5);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, VB, 2);
+        const CID = 1;
+        run(C.SVGA_3D_CMD_DX_DEFINE_CONTEXT, CID);
+        svga3d.dx_context = CID;
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 0, MS, F, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 1, MS8, U8, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW, 2, X8, F, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1);
+        run(C.SVGA_3D_CMD_DX_DEFINE_ELEMENTLAYOUT, 0, 0, 0, C.SVGA3D_R32G32_FLOAT, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 1, C.SVGA3D_SHADERTYPE_VS, VS.byteLength);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 2, C.SVGA3D_SHADERTYPE_PS, WHITE.byteLength);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 3, C.SVGA3D_SHADERTYPE_PS, SAMPLE.byteLength);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 1, 3, 0);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 2, 3, 1024);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 3, 3, 2048);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 1, C.SVGA3D_SHADERTYPE_VS);
+        run(C.SVGA_3D_CMD_DX_SET_INPUT_LAYOUT, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS, 0, VB, 8, 0);
+        run(C.SVGA_3D_CMD_DX_SET_TOPOLOGY, C.SVGA3D_PRIMITIVE_TRIANGLELIST);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(0), f32(0), f32(SIZE), f32(SIZE), f32(0), f32(1));
+
+        // 1. the triangle into the float target, resolved
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0xFFFFFFFF, 0);
+        run(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, 0, f32(0), f32(0), f32(0), f32(0));
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 2, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_DRAW, 3, 0);
+        run(C.SVGA_3D_CMD_DX_RESOLVE_COPY, OUT, 0, MS, 0, F);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, OUT, 0);
+        // 2. per sample: the sample index, resolved to the mean
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0xFFFFFFFF, 1);
+        run(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, 1, f32(0), f32(0), f32(0), f32(0));
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 3, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_DRAW, 6, 3);
+        // 3. then white through a sample mask of sample 0, over the right half only (a scissor would be simpler; a viewport will do)
+        run(C.SVGA_3D_CMD_DX_SET_BLEND_STATE, 0xFFFFFFFF, f32(0), f32(0), f32(0), f32(0), 1);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(SIZE / 2), f32(0), f32(SIZE / 2), f32(SIZE), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 2, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_DRAW, 6, 3);
+        run(C.SVGA_3D_CMD_DX_RESOLVE_COPY, OUT8, 0, MS8, 0, U8);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, OUT8, 0);
+        // 4. eight samples: the triangle's edge in eighths; per sample, indices / 3
+        run(C.SVGA_3D_CMD_DX_SET_BLEND_STATE, 0xFFFFFFFF, f32(0), f32(0), f32(0), f32(0), 0xFFFFFFFF);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(0), f32(0), f32(SIZE), f32(SIZE), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0xFFFFFFFF, 2);
+        run(C.SVGA_3D_CMD_DX_CLEAR_RENDERTARGET_VIEW, 2, f32(0), f32(0), f32(0), f32(0));
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 3, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(SIZE / 2), f32(0), f32(SIZE / 2), f32(SIZE), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_DRAW, 6, 3);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 2, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(0), f32(0), f32(SIZE / 2), f32(SIZE), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_DRAW, 3, 0);
+        run(C.SVGA_3D_CMD_DX_RESOLVE_COPY, OUTX8, 0, X8, 0, F);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, OUTX8, 0);
+        await finished();
+
+        const floats = new Float32Array(mobs.get(1).buffer);
+        const red = (x, y) => floats[(y * SIZE + x) * 4];
+        check(red(2, 13) === 1 && red(13, 2) === 0, "inside the triangle 1, outside 0 (" + red(2, 13) + ", " + red(13, 2) + ")");
+        // the diagonal from (0, 0) to (16, 16): pixels on it are partly covered
+        const partial = [];
+        for(let x = 0; x < SIZE; x++) if(red(x, x) > 0 && red(x, x) < 1) partial.push(x + ":" + red(x, x));
+        check(partial.length >= SIZE / 2, "the edge's pixels are partly covered: " + partial.join(" "));
+        const bytes = mobs.get(4);
+        const px = (x, y) => Array.from(bytes.subarray((y * SIZE + x) * 4, (y * SIZE + x) * 4 + 4));
+        check(Math.abs(px(4, 8)[0] - 128) <= 2, "per-sample shading: the samples' indices / 3 resolve to 0.5 (" + px(4, 8) + ")");
+        // the right half: sample 0 white, the others from step 2 (1/3, 2/3, 1): (1 + 1/3 + 2/3 + 1) / 4
+        check(Math.abs(px(12, 8)[0] - 191) <= 2, "a sample mask of sample 0 changes a quarter (" + px(12, 8) + ")");
+
+        const x8 = new Float32Array(mobs.get(5).buffer);
+        const at8 = (x, y) => x8[(y * SIZE + x) * 4];
+        // (the left half: the triangle squeezed into it; its edge from (0, 0) to (8, 16))
+        const eighths = new Set();
+        for(let y = 0; y < SIZE; y++) for(let x = 0; x < SIZE / 2; x++) { const v = at8(x, y); if(v > 0 && v < 1) eighths.add(v * 8); }
+        check(eighths.size >= 2 && [...eighths].every(v => Math.abs(v - Math.round(v)) < 1e-4),
+            "8x: partly covered edge pixels in eighths (" + [...eighths].sort((a, b) => a - b).join(", ") + " / 8)");
+        const meanX8 = at8(12, 8);
+        // (a float target: nothing clamps)
+        check(Math.abs(meanX8 - (0 + 1 + 2 + 3 + 4 + 5 + 6 + 7) / 3 / 8) < 1e-4, "8x per-sample shading: the eight indices / 3 resolve to their mean (" + meanX8 + ")");
+
+        const warnings = globalThis.svgaWarnings.filter(w => /\[gx\]|WGSL|WebGPU/.test(w));
+        check(!warnings.length, "no GX warnings: " + warnings.join(" / "));
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error.stack || error) + "\n" + checks.join("\n") + "\nwarnings: " + (globalThis.svgaWarnings || []).join("\n");
+    }
+})();
+</script>

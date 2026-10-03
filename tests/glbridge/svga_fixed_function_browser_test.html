@@ -1,0 +1,165 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VMware SVGA II 3D: a fixed-function vertex stage with a pixel shader</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// The legacy 3D path end to end, without a guest: SVGA3D commands into the
+// device's 3D layer (src/graphics_adapters/vmware_svga/svga3d.js), its D9WG
+// batches through the renderer (src/browser/glbridge/svga_renderer.js) and the
+// D3D9 executor on a real GPU, and the pictures back: a cleared render target
+// with a triangle presented on a screen object, and a texture uploaded with
+// SURFACE_DMA and read back into guest memory.
+import * as C from "../../src/graphics_adapters/vmware_svga/svga_constants.js";
+import { SVGA3D } from "../../src/graphics_adapters/vmware_svga/svga3d.js";
+import { ScreenObjects } from "../../src/graphics_adapters/vmware_svga/svga_screens.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+(async () => {
+    try {
+        // GMR 1: 64 KiB of "guest memory"
+        const guest = new Uint8Array(65536);
+        const gmrs = {
+            read: (id, offset, length) => id === 1 && offset + length <= guest.length ? guest.slice(offset, offset + length) : null,
+            write: (id, offset, bytes) => { if(id !== 1 || offset + bytes.length > guest.length) return false; guest.set(bytes, offset); return true; },
+        };
+        const screens = new ScreenObjects(gmrs);
+        const screen_def = [44, 0, C.SVGA_SCREEN_MUST_BE_SET | C.SVGA_SCREEN_IS_PRIMARY, 64, 64, 0, 0, C.SVGA_GMR_NULL, 0, 0, 0];
+        check(screens.define(i => screen_def[i], 11), "a 64x64 screen object");
+        const screen = screens.screens.get(0);
+        let irq = 0;
+        // at level dx10, with MOBs: a GB surface gets its D9WG texture when
+        // legacy 3D first uses it
+        const mob = new Uint8Array(16 * 16 * 4);
+        const mobs = {
+            read: (id, offset, length) => id === 1 && offset + length <= mob.length ? mob.slice(offset, offset + length) : null,
+            write: (id, offset, bytes) => { if(id !== 1 || offset + bytes.length > mob.length) return false; mob.set(bytes, offset); return true; },
+            size: id => id === 1 ? mob.length : -1,
+        };
+        const device = { caps: C.SVGA_CAP_3D | C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_DX, level: "dx10", gmrs, mobs, otables: null,
+            screens, set_irq: flags => { irq |= flags; }, svga_active: () => false };
+
+        // the two ends of the channel, as the page's local channel does it
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        globalThis.svgaExecutor = renderer.executor;
+        globalThis.svgaWarnings = [];
+        for(const method of ["warn", "error"])
+        {
+            const original = console[method];
+            console[method] = (...args) => { globalThis.svgaWarnings.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); original.apply(console, args); };
+        }
+        const svga3d = new SVGA3D(device, end(0, 1));
+        const run = (id, ...body) => svga3d.command(id, Int32Array.from(body, v => v | 0));
+        const finished = () => new Promise(resolve => svga3d.after_work(resolve));
+        const NO_MIPS = [0, 0, 0, 0, 0];
+
+        // a 64x64 render target and a triangle's vertex buffer
+        // What VMware's D3D9 driver sends for a textured quad of
+        // pre-transformed vertices (XYZRHW, DIFFUSE, TEX1): no vertex shader,
+        // and a ps_2_0 it made for the texture stages, which reads t0
+        run(C.SVGA_3D_CMD_SURFACE_DEFINE, 1, C.SVGA3D_SURFACE_HINT_RENDERTARGET, C.SVGA3D_X8R8G8B8, 1, ...NO_MIPS, 64, 64, 1);
+        run(C.SVGA_3D_CMD_SURFACE_DEFINE, 2, C.SVGA3D_SURFACE_HINT_VERTEXBUFFER, C.SVGA3D_BUFFER, 1, ...NO_MIPS, 6 * 28, 1, 1);
+        // the texture is guest-backed, as the driver makes it: in MOB 1, a
+        // render target too, and updated before anything draws with it.
+        // Texel (x, y) is ARGB(255, 16x, 16y, 128), as the guest's test makes it.
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, 3, C.SVGA3D_SURFACE_HINT_TEXTURE | C.SVGA3D_SURFACE_BIND_SHADER_RESOURCE |
+            C.SVGA3D_SURFACE_BIND_RENDER_TARGET, C.SVGA3D_A8R8G8B8, 1, 0, 0, 16, 16, 1, 1, 0);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, 3, 1);
+        const texels = new Uint32Array(mob.buffer);
+        for(let y = 0; y < 16; y++) for(let x = 0; x < 16; x++) texels[y * 16 + x] = (0xFF000000 | x * 16 << 16 | y * 16 << 8 | 128) >>> 0;
+        run(C.SVGA_3D_CMD_UPDATE_GB_IMAGE, 3, 0, 0, 0, 0, 0, 16, 16, 1);
+        // two triangles over the whole target: x, y, z, rhw, diffuse, u, v
+        const corner = (x, y) => [x * 64, y * 64, 0.5, 1, 0xFFFFFFFF, x, y];
+        const quad = [corner(0, 0), corner(1, 0), corner(0, 1), corner(0, 1), corner(1, 0), corner(1, 1)];
+        const vertices = new DataView(guest.buffer, 0, 6 * 28);
+        quad.forEach((v, i) => {
+            for(let k = 0; k < 7; k++)
+            {
+                if(k === 4) vertices.setUint32(i * 28 + 16, v[k], true);
+                else vertices.setFloat32(i * 28 + 4 * k, v[k], true);
+            }
+        });
+        run(C.SVGA_3D_CMD_SURFACE_DMA, 1, 0, 6 * 28, 2, 0, 0, C.SVGA3D_WRITE_HOST_VRAM, 0, 0, 0, 6 * 28, 1, 1, 0, 0, 0);
+
+        const CID = 1;
+        run(C.SVGA_3D_CMD_CONTEXT_DEFINE, CID);
+        run(C.SVGA_3D_CMD_SETRENDERTARGET, CID, C.SVGA3D_RT_COLOR0, 1, 0, 0);
+        run(C.SVGA_3D_CMD_SETVIEWPORT, CID, 0, 0, 64, 64);
+        run(C.SVGA_3D_CMD_SETZRANGE, CID, f32(0), f32(1));
+        run(C.SVGA_3D_CMD_SETRENDERSTATE, CID, C.SVGA3D_RS_CULLMODE, C.SVGA3D_FACE_NONE, C.SVGA3D_RS_ZENABLE, 0,
+            C.SVGA3D_RS_BLENDENABLE, 0, C.SVGA3D_RS_COLORWRITEENABLE, 0xF, C.SVGA3D_RS_LIGHTINGENABLE, 0);
+        run(C.SVGA_3D_CMD_CLEAR, CID, C.SVGA3D_CLEAR_COLOR, 0xFF202020, f32(1), 0);
+        run(C.SVGA_3D_CMD_SETTEXTURESTATE, CID, 0, C.SVGA3D_TS_BIND_TEXTURE, 3,
+            0, C.SVGA3D_TS_MINFILTER, C.SVGA3D_TEX_FILTER_NEAREST, 0, C.SVGA3D_TS_MAGFILTER, C.SVGA3D_TEX_FILTER_NEAREST,
+            0, C.SVGA3D_TS_TEXCOORDINDEX, 0);
+        run(C.SVGA_3D_CMD_SHADER_DEFINE, CID, 1, C.SVGA3D_SHADERTYPE_PS,
+            0xffff0200, 0x2fffe, 0x54584554, 0x464624, 0x200001f, 0x80000000, 0x900f0000, 0x200001f, 0x80000000,
+            0xb00f0000, 0x200001f, 0x90000000, 0xa00f0800, 0x3000042, 0x802f0001, 0xb0e40000, 0xa0e40800, 0x3000005,
+            0x80370005, 0x80e40001, 0x90e40000, 0x2000001, 0x80380005, 0x80e40001, 0x2000001, 0x802f0001, 0x80e40005,
+            0x2000001, 0x802f0800, 0x80e40001, 0xffff);
+        run(C.SVGA_3D_CMD_SET_SHADER, CID, C.SVGA3D_SHADERTYPE_PS, 1);
+        const decl = (type, usage, offset) => [type, C.SVGA3D_DECLMETHOD_DEFAULT, usage, 0, 2, offset, 28, 0, 5];
+        run(C.SVGA_3D_CMD_DRAW_PRIMITIVES, CID, 3, 1,
+            ...decl(C.SVGA3D_DECLTYPE_FLOAT4, C.SVGA3D_DECLUSAGE_POSITIONT, 0),
+            ...decl(C.SVGA3D_DECLTYPE_D3DCOLOR, C.SVGA3D_DECLUSAGE_COLOR, 16),
+            ...decl(C.SVGA3D_DECLTYPE_FLOAT2, C.SVGA3D_DECLUSAGE_TEXCOORD, 20),
+            C.SVGA3D_PRIMITIVE_TRIANGLELIST, 2, -1, 0, 0, 0, 0);
+        run(C.SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN, 1, 0, 0, 0, 0, 64, 64, 0, 0, 0, 64, 64);
+        await finished();
+        const pixel = (x, y) => Array.from(screen.rgba.subarray((y * 64 + x) * 4, (y * 64 + x) * 4 + 3));
+        const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 2);
+        // pixel (x, y) shows texel (x / 4, y / 4)
+        check(near(pixel(9, 9), [32, 32, 128]), "the texture's texel (2, 2) at pixel (9, 9): " + pixel(9, 9));
+        check(near(pixel(61, 33), [240, 128, 128]), "texel (15, 8) at pixel (61, 33): " + pixel(61, 33));
+
+        // A vertex shader left bound does not apply to pre-transformed
+        // vertices: the quad is drawn as before, here in its vertex colour
+        // (white) through a pixel shader showing v0
+        run(C.SVGA_3D_CMD_SHADER_DEFINE, CID, 3, C.SVGA3D_SHADERTYPE_PS,
+            0xFFFF0200, 0x0200001F, 0x80000000, 0x900F0000, 0x02000001, 0x800F0800, 0x90E40000, 0x0000FFFF);
+        run(C.SVGA_3D_CMD_SET_SHADER, CID, C.SVGA3D_SHADERTYPE_PS, 3);
+        const VS = [0xFFFE0200, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x8000000A, 0x900F0001,
+            0x0200001F, 0x80000005, 0x900F0002, 0x02000001, 0xC00F0000, 0x90E40000,
+            0x02000001, 0xD00F0000, 0x90E40001, 0x02000001, 0xE00F0000, 0x90E40002, 0x0000FFFF];
+        run(C.SVGA_3D_CMD_SHADER_DEFINE, CID, 2, C.SVGA3D_SHADERTYPE_VS, ...VS);
+        run(C.SVGA_3D_CMD_SET_SHADER, CID, C.SVGA3D_SHADERTYPE_VS, 2);
+        run(C.SVGA_3D_CMD_CLEAR, CID, C.SVGA3D_CLEAR_COLOR, 0xFF00FF00, f32(1), 0);
+        run(C.SVGA_3D_CMD_DRAW_PRIMITIVES, CID, 3, 1,
+            ...decl(C.SVGA3D_DECLTYPE_FLOAT4, C.SVGA3D_DECLUSAGE_POSITIONT, 0),
+            ...decl(C.SVGA3D_DECLTYPE_D3DCOLOR, C.SVGA3D_DECLUSAGE_COLOR, 16),
+            ...decl(C.SVGA3D_DECLTYPE_FLOAT2, C.SVGA3D_DECLUSAGE_TEXCOORD, 20),
+            C.SVGA3D_PRIMITIVE_TRIANGLELIST, 2, -1, 0, 0, 0, 0);
+        run(C.SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN, 1, 0, 0, 0, 0, 64, 64, 0, 0, 0, 64, 64);
+        await finished();
+        check(near(pixel(9, 9), [255, 255, 255]), "POSITIONT with a vertex shader bound: drawn pre-transformed: " + pixel(9, 9));
+
+        // The shader's COLOR and TEXCOORD inputs are not in this declaration:
+        // they read (0, 0, 0, 1), and a pixel shader showing v0 makes the quad black
+        run(C.SVGA_3D_CMD_SURFACE_DEFINE, 4, C.SVGA3D_SURFACE_HINT_VERTEXBUFFER, C.SVGA3D_BUFFER, 1, ...NO_MIPS, 6 * 16, 1, 1);
+        new Float32Array(guest.buffer, 0x3000, 24).set([-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1, -1, -1, 0, 1, 1, 1, 0, 1, 1, -1, 0, 1]);
+        run(C.SVGA_3D_CMD_SURFACE_DMA, 1, 0x3000, 6 * 16, 4, 0, 0, C.SVGA3D_WRITE_HOST_VRAM, 0, 0, 0, 6 * 16, 1, 1, 0, 0, 0);
+        run(C.SVGA_3D_CMD_CLEAR, CID, C.SVGA3D_CLEAR_COLOR, 0xFF00FF00, f32(1), 0);
+        run(C.SVGA_3D_CMD_DRAW_PRIMITIVES, CID, 1, 1,
+            C.SVGA3D_DECLTYPE_FLOAT4, C.SVGA3D_DECLMETHOD_DEFAULT, C.SVGA3D_DECLUSAGE_POSITION, 0, 4, 0, 16, 0, 5,
+            C.SVGA3D_PRIMITIVE_TRIANGLELIST, 2, -1, 0, 0, 0, 0);
+        run(C.SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN, 1, 0, 0, 0, 0, 64, 64, 0, 0, 0, 64, 64);
+        await finished();
+        check(near(pixel(9, 9), [0, 0, 0]), "inputs the declaration does not supply read (0, 0, 0, 1): " + pixel(9, 9));
+        check(!irq, "the renderer reported no errors");
+        const stats = renderer.executor.stats;
+        check(stats.commandsFailed === 0 && stats.malformedBatches === 0, "the executor ran every command");
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        const executor = globalThis.svgaExecutor;
+        const stats = executor ? Object.entries(executor.stats).filter(([, v]) => v).map(([k, v]) => k + "=" + v).join(" ") : "";
+        result.textContent = "FAIL " + (error && error.stack || error) + "\n" + checks.join("\n") + "\nstats: " + stats +
+            "\nwarnings: " + (globalThis.svgaWarnings || []).join("\n");
+    }
+})();
+</script>

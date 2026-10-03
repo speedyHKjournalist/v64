@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GPU trace replay</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script>
+// A2: run a GPU trace (tests/x64/gpu_trace.mjs) through the renderer of the
+// VMware SVGA II adapter on a real GPU, without the guest that made it:
+//
+//   GL_TIMEOUT_MS=600000 node tests/glbridge/gl_multipass_browser_runner.js \
+//       'svga_trace_replay_browser_test.html?trace=build/x64-linux/gpu-vmware_svga-vgpu9/trace.bin'
+//
+// It fails on commands the executor could not run, and saves the last
+// picture each read back texture had (what the guest presented, mostly) as
+// build/browser-test-output/trace-<texture>.png.
+const RESPONSE_REGION_OFFSET = 12 << 20;
+const result = document.getElementById("result");
+
+(async () => {
+    const warnings = new Map();
+    for(const method of ["warn", "error"])
+    {
+        const original = console[method];
+        console[method] = (...args) => {
+            const text = args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ").slice(0, 300);
+            warnings.set(text, (warnings.get(text) || 0) + 1);
+            original.apply(console, args);
+        };
+    }
+    try {
+        const parameters = new URLSearchParams(location.search);
+        const response = await fetch("../../" + parameters.get("trace"));
+        if(!response.ok) throw new Error("no trace at " + parameters.get("trace"));
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if(new TextDecoder().decode(bytes.subarray(0, 8)) !== "V86GTRC1") throw new Error("not a GPU trace");
+        const view = new DataView(bytes.buffer);
+        let note = null;
+        const batches = [];
+        for(let at = 8; at + 8 <= bytes.length;)
+        {
+            const type = view.getUint32(at, true), length = view.getUint32(at + 4, true);
+            if(type === 2) note = JSON.parse(new TextDecoder().decode(bytes.subarray(at + 8, at + 8 + length)));
+            if(type === 1) batches.push(bytes.subarray(at + 8, at + 8 + length));
+            at += 8 + length;
+        }
+
+        // what each readback is of, from its command
+        const requests = new Map();
+        const pictures = new Map();
+        let device = null;
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = V86SVGARenderer(end(1, 0), {});
+        let done = 0;
+        end(0, 1).listen(message => {
+            if(message.type === "done") done = message.seq;
+            if(message.type !== "write" || message.offset < 16384) return;
+            const answer = new DataView(message.bytes.buffer, message.bytes.byteOffset);
+            const request = requests.get(answer.getUint32(0, true));
+            if(!request || answer.getUint32(12, true) !== 1 || request.pitch !== request.width * 4) return;
+            let picture = pictures.get(request.texture);
+            if(!picture || picture.width !== request.width || picture.height !== request.height)
+            {
+                picture = { width: request.width, height: request.height, rgba: new Uint8ClampedArray(request.width * request.height * 4) };
+                pictures.set(request.texture, picture);
+            }
+            const rows = message.bytes.subarray(16);
+            for(let i = 0; i < request.rows * request.width; i++)
+            {
+                const t = (request.first * request.width + i) * 4, s = i * 4;
+                picture.rgba[t] = rows[s + 2]; picture.rgba[t + 1] = rows[s + 1]; picture.rgba[t + 2] = rows[s]; picture.rgba[t + 3] = 255;
+            }
+        });
+        const started = performance.now();
+        for(let i = 0; i < batches.length; i++)
+        {
+            const batch = batches[i], v = new DataView(batch.buffer, batch.byteOffset, batch.byteLength);
+            for(let at = 32; at < 32 + v.getUint32(20, true);)
+            {
+                const size = v.getUint32(at + 4, true), p = at + 16;
+                if(v.getUint16(at, true) === 12)
+                {
+                    requests.set(v.getUint32(p + 44, true), { texture: v.getUint32(p + 4, true), width: v.getUint32(p + 16, true),
+                        height: v.getUint32(p + 20, true), first: v.getUint32(p + 24, true), rows: v.getUint32(p + 28, true),
+                        pitch: v.getUint32(p + 32, true) });
+                }
+                at += size;
+            }
+            end(0, 1).post({ type: "submit", seq: i + 1, bytes: batch.slice() });
+            // keep a bounded number in flight
+            if(i - done > 32) await renderer.idle();
+        }
+        await renderer.idle();
+        const seconds = (performance.now() - started) / 1000;
+
+        for(const [texture, picture] of pictures)
+        {
+            const canvas = new OffscreenCanvas(picture.width, picture.height);
+            canvas.getContext("2d").putImageData(new ImageData(picture.rgba, picture.width, picture.height), 0, 0);
+            const png = await canvas.convertToBlob({ type: "image/png" });
+            await fetch("/__test_file?name=trace-" + texture + ".png", { method: "POST", body: png });
+        }
+        const stats = renderer.executor.stats;
+        const summary = Object.entries(stats).filter(([, v]) => v).map(([k, v]) => k + "=" + v).join(" ");
+        const lines = [
+            "trace: " + JSON.stringify(note) + ", " + batches.length + " batches in " + seconds.toFixed(1) + " s",
+            "pictures: " + [...pictures.keys()].map(t => "trace-" + t + ".png").join(" "),
+            "stats: " + summary,
+            "warnings:", ...[...warnings].map(([text, count]) => "  " + count + "x " + text),
+        ];
+        const failed = stats.commandsFailed || stats.malformedBatches || stats.droppedDraws;
+        result.textContent = (failed ? "FAIL " : "PASS ") + lines.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error && error.stack || error) + "\nwarnings:\n" + [...warnings.keys()].join("\n");
+    }
+})();
+</script>

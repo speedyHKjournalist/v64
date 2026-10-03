@@ -7,7 +7,7 @@ const source=k=>[0,1,3,6].includes(k),destination=k=>k!==3&&k!==6;
 const input=c=>c.kind===5,output=c=>c.kind===6;
 const encode=c=>{const b=[];if(c.width!==1&&c.mode===(c.width===2))b.push(0x66);if(c.mode!==c.asize)b.push(0x67);if(c.seg!==3)b.push([0x26,0x2E,0x36,0x3E,0x64,0x65][c.seg]);b.push(c.repne?0xF2:0xF3);b.push([0xA4,0xA6,0xAA,0xAC,0xAE,0x6C,0x6E][c.kind]+Number(c.width!==1));return b;};
 export async function boot(path){
-    const vm=new V86({wasm_path:path,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+    const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:path,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
     await new Promise(r=>vm.add_listener("emulator-loaded",r));const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8,words=new Uint32Array(e.memory.buffer),v=new DataView(mem.buffer,mem.byteOffset),set32=(a,n)=>v.setUint32(a,n,true),get32=a=>v.getUint32(a,true);
     vm.run();const until=performance.now()+10000;while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<until);await sleep(1);} await vm.stop();
     const cr0=cpu.cr[0];let events=[],from,to,windows=[],on_event,active;

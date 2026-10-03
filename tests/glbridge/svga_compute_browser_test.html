@@ -1,0 +1,181 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VMware SVGA II DX: compute shaders and UAVs</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+// A compute shader (SM5) of 8x8 threads, dispatched once: each thread writes
+// its position into a typed UAV (an RGBA8 texture), appends its index to an
+// append buffer, and counts itself into a raw buffer with an atomic add.
+// Then the append buffer's counter is copied into a buffer, and a UAV clear
+// sets the raw buffer to 7.
+import * as C from "../../src/graphics_adapters/vmware_svga/svga_constants.js";
+import { SVGA3D } from "../../src/graphics_adapters/vmware_svga/svga3d.js";
+import { ScreenObjects } from "../../src/graphics_adapters/vmware_svga/svga_screens.js";
+
+const result = document.getElementById("result");
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const f32 = v => new Uint32Array(new Float32Array([v]).buffer)[0];
+
+const OPERAND = { TEMP: 0, IMMEDIATE32: 4, UAV: 30, INPUT_THREAD_ID: 32 };
+const token = (type, indices, sel) => [(sel | type << 12 | indices.length << 20) >>> 0, ...indices];
+const mask = m => 2 | m << 4, swz = (x, y, z, w) => 2 | 1 << 2 | (x | y << 2 | z << 4 | w << 6) << 4, one = c => 2 | 2 << 2 | c << 4;
+const ins = (op, ...operands) => { const body = operands.flat(); return [(op | (1 + body.length) << 24) >>> 0, ...body]; };
+const insc = (op, controls, ...operands) => { const body = operands.flat(); return [(op | controls << 11 | (1 + body.length) << 24) >>> 0, ...body]; };
+const imm = (...values) => [(values.length === 4 ? 2 : 1) | OPERAND.IMMEDIATE32 << 12, ...values];
+const r = (i, sel) => token(OPERAND.TEMP, [i], sel);
+const u = (i, sel) => token(OPERAND.UAV, [i], sel);
+const tid = sel => token(OPERAND.INPUT_THREAD_ID, [], sel);
+const OP = { DCL_THREAD_GROUP: 155, DCL_UAV_TYPED: 156, DCL_UAV_RAW: 157, DCL_UAV_STRUCTURED: 158, DCL_INPUT: 95, DCL_TEMPS: 104,
+    UTOF: 86, MUL: 56, MOV: 54, IMAD: 35, STORE_UAV_TYPED: 164, IMM_ATOMIC_ALLOC: 178, STORE_STRUCTURED: 168, ATOMIC_IADD: 173, RET: 62 };
+const CS = (() => {
+    const body = [
+        ins(OP.DCL_THREAD_GROUP, 8, 8, 1),
+        insc(OP.DCL_UAV_TYPED, 3 /* TEXTURE2D */, u(0, 0), 0x5555 /* float */),
+        ins(OP.DCL_UAV_STRUCTURED, u(1, 0), 4),
+        ins(OP.DCL_UAV_RAW, u(2, 0)),
+        ins(OP.DCL_INPUT, tid(mask(3))),
+        ins(OP.DCL_TEMPS, 2),
+        ins(OP.UTOF, r(0, mask(3)), tid(swz(0, 1, 0, 0))),
+        ins(OP.MUL, r(0, mask(3)), r(0, swz(0, 1, 0, 0)), imm(f32(0.125), f32(0.125), 0, 0)),
+        ins(OP.MOV, r(0, mask(12)), imm(0, 0, 0, f32(1))),
+        ins(OP.STORE_UAV_TYPED, u(0, mask(15)), tid(swz(0, 1, 1, 1)), r(0, swz(0, 1, 2, 3))),
+        ins(OP.IMAD, r(1, mask(1)), tid(one(1)), imm(8), tid(one(0))),
+        ins(OP.IMM_ATOMIC_ALLOC, r(1, mask(2)), u(1, 0)),
+        ins(OP.STORE_STRUCTURED, u(1, mask(1)), r(1, one(1)), imm(0), r(1, one(0))),
+        ins(OP.ATOMIC_IADD, u(2, mask(1)), imm(0), imm(1)),
+        ins(OP.RET),
+    ].flat();
+    return new Uint32Array([5 << 16 | 5 << 4, 2 + body.length, ...body]);
+})();
+
+// a vertex shader passing the position on; a pixel shader counting its pixels into u0 (no targets)
+const VS = (() => {
+    const body = [
+        ins(95 /* DCL_INPUT */, token(1, [0], mask(3))),
+        ins(103 /* DCL_OUTPUT_SIV */, token(2, [0], mask(15)), 1),
+        ins(OP.MOV, token(2, [0], mask(3)), token(1, [0], swz(0, 1, 0, 0))),
+        ins(OP.MOV, token(2, [0], mask(12)), imm(0, 0, 0, f32(1))),
+        ins(OP.RET),
+    ].flat();
+    return new Uint32Array([1 << 16 | 5 << 4, 2 + body.length, ...body]);
+})();
+const PS = (() => {
+    const body = [
+        ins(OP.DCL_UAV_RAW, u(0, 0)),
+        ins(OP.ATOMIC_IADD, u(0, mask(1)), imm(0), imm(1)),
+        ins(OP.RET),
+    ].flat();
+    return new Uint32Array([0 << 16 | 5 << 4, 2 + body.length, ...body]);
+})();
+
+(async () => {
+    try {
+        const mobs = new Map();
+        const mob_table = {
+            read: (id, offset, length) => { const m = mobs.get(id); return m && offset + length <= m.length ? m.slice(offset, offset + length) : null; },
+            write: (id, offset, bytes) => { const m = mobs.get(id); if(!m || offset + bytes.length > m.length) return false; m.set(bytes, offset); return true; },
+            size: id => mobs.has(id) ? mobs.get(id).length : -1,
+        };
+        const screens = new ScreenObjects({ read: () => null, write: () => false });
+        const device = { caps: C.SVGA_CAP_3D | C.SVGA_CAP_GBOBJECTS | C.SVGA_CAP_DX, level: "dx11",
+            gmrs: { read: () => null, write: () => false }, mobs: mob_table, otables: null, screens,
+            set_irq: () => {}, svga_active: () => false };
+        const handlers = [null, null];
+        const end = (self, other) => ({ post: message => handlers[other] && handlers[other](message), listen: handler => { handlers[self] = handler; } });
+        const renderer = globalThis.V86SVGARenderer(end(1, 0), {});
+        globalThis.svgaWarnings = [];
+        for(const method of ["warn", "error"])
+        {
+            const original = console[method];
+            console[method] = (...args) => { globalThis.svgaWarnings.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); original.apply(console, args); };
+        }
+        const svga3d = new SVGA3D(device, end(0, 1));
+        const run = (id, ...body) => svga3d.command(id, Int32Array.from(body, v => v | 0));
+        const finished = () => new Promise(resolve => svga3d.after_work(resolve));
+
+        const TEX = 10, APPEND = 11, RAW = 12, COUNT = 13;
+        const U8 = C.SVGA3D_R8G8B8A8_UNORM;
+        mobs.set(1, new Uint8Array(8 * 8 * 4));
+        mobs.set(2, new Uint8Array(64 * 4));
+        mobs.set(3, new Uint8Array(16));
+        mobs.set(4, new Uint8Array(16));
+        const shaders = new Uint8Array(4096);
+        shaders.set(new Uint8Array(CS.buffer), 0);
+        shaders.set(new Uint8Array(VS.buffer), 1024);
+        shaders.set(new Uint8Array(PS.buffer), 2048);
+        mobs.set(5, shaders);
+        // DEFINE_GB_SURFACE_V3: sid, flags (low, high), format, mips, samples, pattern, quality, filter, width, height, depth, array size
+        const UAV_HIGH = 2;     // SVGA3D_SURFACE_BIND_UAVIEW >> 32
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V3, TEX, C.SVGA3D_SURFACE_BIND_SHADER_RESOURCE, UAV_HIGH, U8, 1, 0, 0, 0, 0, 8, 8, 1, 1);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V3, APPEND, 0, UAV_HIGH, C.SVGA3D_BUFFER, 1, 0, 0, 0, 0, 64 * 4, 1, 1, 1);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V3, RAW, 0, UAV_HIGH, C.SVGA3D_BUFFER, 1, 0, 0, 0, 0, 16, 1, 1, 1);
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V3, COUNT, 0, 0, C.SVGA3D_BUFFER, 1, 0, 0, 0, 0, 16, 1, 1, 1);
+        for(const [sid, mob] of [[TEX, 1], [APPEND, 2], [RAW, 3], [COUNT, 4]]) run(C.SVGA_3D_CMD_BIND_GB_SURFACE, sid, mob);
+        const CID = 1;
+        run(C.SVGA_3D_CMD_DX_DEFINE_CONTEXT, CID);
+        svga3d.dx_context = CID;
+        // DEFINE_UA_VIEW: id, sid, format, dimension, desc (buffer: first element, elements, flags)
+        run(C.SVGA_3D_CMD_DX_DEFINE_UA_VIEW, 0, TEX, U8, C.SVGA3D_RESOURCE_TEXTURE2D, 0, 0, 1, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_UA_VIEW, 1, APPEND, C.SVGA3D_FORMAT_INVALID, C.SVGA3D_RESOURCE_BUFFER, 0, 64, C.SVGA3D_UABUFFER_APPEND, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_UA_VIEW, 2, RAW, C.SVGA3D_R32_TYPELESS, C.SVGA3D_RESOURCE_BUFFER, 0, 4, C.SVGA3D_UABUFFER_RAW, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 1, C.SVGA3D_SHADERTYPE_CS, CS.byteLength);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 1, 5, 0);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 1, C.SVGA3D_SHADERTYPE_CS);
+        run(C.SVGA_3D_CMD_DX_SET_CS_UA_VIEWS, 0, 0, 1, 2);
+        run(C.SVGA_3D_CMD_DX_SET_STRUCTURE_COUNT, 1, 0);
+        run(C.SVGA_3D_CMD_DX_DISPATCH, 1, 1, 1);
+        run(C.SVGA_3D_CMD_DX_COPY_STRUCTURE_COUNT, 1, COUNT, 4);
+        for(const sid of [TEX, APPEND, RAW, COUNT]) run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, sid, 0);
+        await finished();
+        const gx = renderer.gx;
+        check(gx && gx.stats.dispatches === 1, "one dispatch (" + JSON.stringify(gx && gx.stats) + ")");
+        const tex = mobs.get(1);
+        const texel = (x, y) => Array.from(tex.subarray((y * 8 + x) * 4, (y * 8 + x) * 4 + 4)).join();
+        check(texel(0, 0) === "0,0,0,255" && texel(4, 2) === "128,64,0,255", "the typed UAV: each thread's position (" + texel(0, 0) + " / " + texel(4, 2) + ")");
+        const raw = new Uint32Array(mobs.get(3).buffer);
+        check(raw[0] === 64, "the raw UAV: 64 atomic adds (" + raw[0] + ")");
+        const count = new Uint32Array(mobs.get(4).buffer);
+        check(count[1] === 64, "the append counter, copied out: 64 (" + count[1] + ")");
+        const appended = Array.from(new Uint32Array(mobs.get(2).buffer)).sort((a, b) => a - b);
+        check(appended.every((v, i) => v === i), "the append buffer has every thread's index once (" + appended.slice(0, 8) + "...)");
+
+        // a UAV clear: the raw buffer's words become 7
+        run(C.SVGA_3D_CMD_DX_CLEAR_UA_VIEW_UINT, 2, 7, 7, 7, 7);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, RAW, 0);
+        await finished();
+        check(Array.from(new Uint32Array(mobs.get(3).buffer)).join() === "7,7,7,7", "CLEAR_UA_VIEW_UINT on the raw buffer: " + Array.from(new Uint32Array(mobs.get(3).buffer)));
+
+        // a draw with no targets: the pixel shader's UAV (the raw buffer, cleared) counts the 8 x 8 pixels
+        const VB = 14;
+        mobs.set(6, new Uint8Array(new Float32Array([-1, -1, -1, 3, 3, -1]).buffer));
+        run(C.SVGA_3D_CMD_DEFINE_GB_SURFACE_V3, VB, C.SVGA3D_SURFACE_BIND_VERTEX_BUFFER, 0, C.SVGA3D_BUFFER, 1, 0, 0, 0, 0, 24, 1, 1, 1);
+        run(C.SVGA_3D_CMD_BIND_GB_SURFACE, VB, 6);
+        run(C.SVGA_3D_CMD_DX_DEFINE_ELEMENTLAYOUT, 0, 0, 0, C.SVGA3D_R32G32_FLOAT, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 2, C.SVGA3D_SHADERTYPE_VS, VS.byteLength);
+        run(C.SVGA_3D_CMD_DX_DEFINE_SHADER, 3, C.SVGA3D_SHADERTYPE_PS, PS.byteLength);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 2, 5, 1024);
+        run(C.SVGA_3D_CMD_DX_BIND_SHADER, CID, 3, 5, 2048);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 2, C.SVGA3D_SHADERTYPE_VS);
+        run(C.SVGA_3D_CMD_DX_SET_SHADER, 3, C.SVGA3D_SHADERTYPE_PS);
+        run(C.SVGA_3D_CMD_DX_SET_INPUT_LAYOUT, 0);
+        run(C.SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS, 0, VB, 8, 0);
+        run(C.SVGA_3D_CMD_DX_SET_TOPOLOGY, C.SVGA3D_PRIMITIVE_TRIANGLELIST);
+        run(C.SVGA_3D_CMD_DX_SET_RENDERTARGETS, 0xFFFFFFFF);
+        run(C.SVGA_3D_CMD_DX_SET_UA_VIEWS, 0, 2);
+        run(C.SVGA_3D_CMD_DX_SET_VIEWPORTS, 0, f32(0), f32(0), f32(8), f32(8), f32(0), f32(1));
+        run(C.SVGA_3D_CMD_DX_CLEAR_UA_VIEW_UINT, 2, 0, 0, 0, 0);
+        run(C.SVGA_3D_CMD_DX_DRAW, 3, 0);
+        run(C.SVGA_3D_CMD_DX_READBACK_SUBRESOURCE, RAW, 0);
+        await finished();
+        check(new Uint32Array(mobs.get(3).buffer)[0] === 64, "a draw without targets: its pixel shader's UAV counts 64 pixels (" + new Uint32Array(mobs.get(3).buffer)[0] + ")");
+
+        const warnings = globalThis.svgaWarnings.filter(w => /\[gx\]|WGSL|WebGPU/.test(w));
+        check(!warnings.length, "no GX warnings: " + warnings.join(" / "));
+        result.textContent = "PASS\n" + checks.join("\n");
+    } catch(error) {
+        result.textContent = "FAIL " + (error.stack || error) + "\n" + checks.join("\n") + "\nwarnings: " + (globalThis.svgaWarnings || []).join("\n");
+    }
+})();
+</script>

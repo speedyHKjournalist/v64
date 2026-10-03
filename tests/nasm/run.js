@@ -381,6 +381,7 @@ else {
     let test_timeout;
 
     let emulator = new V86({
+        graphics_adapter: "bochs_vga",
         autostart: false,
         memory_size: 2 * 1024 * 1024,
         disable_jit: +process.env.DISABLE_JIT,

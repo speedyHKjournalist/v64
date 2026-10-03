@@ -62,7 +62,7 @@ const back = -guest.length - 5; guest.push(0xE9, ...u32(back));
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
 for(const {label, options} of [{label: "interpreter", options: {disable_jit: true}}, ...COMPILED_ARMS]) {
     const interpreted = !!options.disable_jit;
-    const vm = new V86({wasm_path: process.argv[2] || "build/v86.wasm", bios: {buffer: bios.slice(0)}, ...options,
+    const vm = new V86({graphics_adapter: "bochs_vga", wasm_path: process.argv[2] || "build/v86.wasm", bios: {buffer: bios.slice(0)}, ...options,
         memory_size: 32 << 20, disable_keyboard: true, disable_mouse: true, disable_speaker: true,
         net_device: {type: "none"}, autostart: false});
     try {

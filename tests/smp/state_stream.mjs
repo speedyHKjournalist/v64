@@ -12,7 +12,7 @@ import { state_stream_client, state_stream_server } from "../../src/browser/stat
 const { V86 } = await import(process.env.V86_LIB_PATH || (+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js"));
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), "v86-state-stream-"));
 const file = await fs.open(path.join(directory, "state.v7"), "w+");
-const emulator = new V86({ wasm_path: process.env.WASM_PATH, memory_size: 16 << 20,
+const emulator = new V86({ graphics_adapter: "bochs_vga", wasm_path: process.env.WASM_PATH, memory_size: 16 << 20,
     cpu_cores: 2, acpi: true, disable_jit: true, autostart: false, log_level: 0,
     net_device: { type: "none" } });
 await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));

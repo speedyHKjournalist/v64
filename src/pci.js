@@ -389,6 +389,11 @@ PCI.prototype.pci_write8 = function(address, written)
     dbg_log("PCI write8 dev=" + h(bdf >> 3, 2) + " (" + device.name + ") addr=" + h(addr, 4) +
             " value=" + h(written, 2), LOG_PCI);
 
+    if(addr === 0x06 || addr === 0x07)
+    {
+        this.write_status(bdf, written << 8 * (addr - 0x06));
+        return;
+    }
     space[addr] = written;
     device.on_config_write && device.on_config_write(addr);
 };
@@ -421,8 +426,28 @@ PCI.prototype.pci_write16 = function(address, written)
     dbg_log("PCI writ16 dev=" + h(bdf >> 3, 2) + " (" + device.name + ") addr=" + h(addr, 4) +
             " value=" + h(written, 4), LOG_PCI);
 
+    if(addr === 0x06)
+    {
+        this.write_status(bdf, written);
+        return;
+    }
     space[addr >>> 1] = written;
     device.on_config_write && device.on_config_write(addr);
+};
+
+/**
+ * The status register: its bits are read-only (the capability list, ...) or
+ * cleared by writing 1 (the error bits), never set by a write. Windows clears
+ * the error bits with a 16-bit write; storing that value took the capability
+ * list from devices that have one (virtio's drivers then find no capabilities).
+ * @param {number} bdf
+ * @param {number} written
+ */
+PCI.prototype.write_status = function(bdf, written)
+{
+    const RW1C = 0xF900;
+    const space = new Uint16Array(this.device_spaces[bdf].buffer);
+    space[3] &= ~(written & RW1C);
 };
 
 PCI.prototype.pci_write32 = function(address, written)

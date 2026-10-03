@@ -256,7 +256,7 @@ for(const [n, [hex, , length]] of rows.entries())
     lengths.push(used);
 }
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
-const emulator = new V86({multiboot: {url: directory + "guest.bin"}, memory_size: 64 << 20, acpi: true,
+const emulator = new V86({graphics_adapter: "bochs_vga", multiboot: {url: directory + "guest.bin"}, memory_size: 64 << 20, acpi: true,
     disable_jit: !process.env.X64_JIT, ir_sync_publication: true, autostart: false, log_level: 0});
 const outcomes = [];
 try

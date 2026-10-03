@@ -61,10 +61,11 @@ class SyncDisk {
 let milestone = null;
 let phase = "bios";
 const vm = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path: wasm, ir_region_budget: region_budget,
     ...(process.env.IR_SYNC_PUB !== undefined ? {ir_sync_publication: process.env.IR_SYNC_PUB === "1"} : {}),
     ...(process.env.IR_OPT_LEVEL !== undefined ? {ir_opt_level: Number(process.env.IR_OPT_LEVEL)} : {}),
-    memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
+    memory_size: 2048 * 1024 * 1024, vram_size: 16 * 1024 * 1024,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: process.env.IR_SYNC_DISK === "1" ? new SyncDisk(disk) : { url: disk, size: fs.statSync(disk).size, async: true },
     x87_fast_math: true, x87_jit_cache: true,

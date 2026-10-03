@@ -1,5 +1,6 @@
-import { REG_EAX, REG_EBX, REG_ECX, REG_EDX, LOG_OTHER } from "./const.js";
+import { REG_EAX, REG_EBX, REG_ECX, REG_EDX, REG_ESI, REG_EDI, LOG_OTHER } from "./const.js";
 import { dbg_log } from "./log.js";
+import { STATE_OFFSETS } from "./state_layout.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
@@ -13,10 +14,33 @@ const CMD_GETNEXTPIECE = 7;
 const CMD_SETSELLENGTH = 8;
 const CMD_SETNEXTPIECE = 9;
 const CMD_GETVERSION = 10;
+const CMD_GETHWVERSION = 17;
 const CMD_GETTIME = 23;
 const CMD_ABSPOINTER_DATA = 39;
 const CMD_ABSPOINTER_STATUS = 40;
 const CMD_ABSPOINTER_COMMAND = 41;
+const CMD_MESSAGE = 30;
+// The display adapter's capabilities before the driver has the device: VMware's
+// Windows driver (vm3dmp) loads as a full WDDM driver only if subcommand 0
+// shows SVGA_CAP_3D and either SVGA_CAP_GBOBJECTS or, from subcommand 2, a
+// 3D hardware version of at least 0x20000; else as a display-only driver
+const CMD_GET_SVGA_CAPABILITIES = 75;
+
+// The message channel (open-vm-tools lib/message): ECX's high word is the
+// step, the status comes back in ECX's high word, the channel in EDX's
+const MESSAGE_OPEN = 0;
+const MESSAGE_SENDSIZE = 1;
+const MESSAGE_SENDPAYLOAD = 2;
+const MESSAGE_RECVSIZE = 3;
+const MESSAGE_RECVPAYLOAD = 4;
+const MESSAGE_RECVSTATUS = 5;
+const MESSAGE_CLOSE = 6;
+const MESSAGE_STATUS_SUCCESS = 0x0001;
+const MESSAGE_STATUS_DORECV = 0x0002;
+const RPCI_PROTOCOL = 0x49435052;
+const GUESTMSG_FLAG_COOKIE = 0x80000000;
+const MESSAGE_CHANNELS = 8;
+const MESSAGE_MAX = 0x10000;
 
 const ABSPOINTER_ENABLE = 0x45414552;
 const ABSPOINTER_DISABLE = 0x000000F5;
@@ -24,6 +48,11 @@ const ABSPOINTER_RELATIVE = 0x4C455252;
 const ABSPOINTER_ABSOLUTE = 0x53424152;
 
 const READ_ID = 0x3442554A;
+
+/** GETVERSION's product type (VMX_TYPE_WORKSTATION in open-vm-tools' backdoor_def.h) */
+const VMX_TYPE_WORKSTATION = 4;
+/** What GETHWVERSION reports: Workstation 12.5's, the first with SVGA 3D on Windows 8.1 guests through WDDM 1.3 */
+const VIRTUAL_HARDWARE_VERSION = 13;
 
 const BUTTON_LEFT = 0x20;
 const BUTTON_RIGHT = 0x10;
@@ -75,6 +104,12 @@ export function VMwareMouse(cpu, bus)
     this.last_x = -1;
     this.last_y = -1;
     this.tail_is_move = false;
+
+    /** @type {!Array<?{send: Uint8Array, sent: number, reply: Uint8Array, read: number}>}
+     *  RPCI channels (CMD_MESSAGE): guests' logs and guestinfo queries */
+    this.channels = [];
+    /** @type {!Map<string, string>} what "info-get guestinfo.<key>" answers */
+    this.guestinfo = new Map();
 
     /** @type {Uint8Array} host→guest text staged for the guest to read */
     this.clip_out = new Uint8Array(0);
@@ -245,8 +280,16 @@ VMwareMouse.prototype.port_read32 = function()
     switch(reg32[REG_ECX] & 0xFFFF)
     {
         case CMD_GETVERSION:
-            reg32[REG_EBX] = VMWARE_MAGIC;
+            // EAX: the backdoor's version; ECX: the product. VMware Tools'
+            // installer refuses a machine whose product it does not know
+            this.set_reg(REG_EBX, VMWARE_MAGIC);
+            this.set_reg(REG_ECX, VMX_TYPE_WORKSTATION);
             return 6;
+
+        case CMD_GETHWVERSION:
+            // the virtual hardware version (a VM's "hardware compatibility")
+            this.set_reg(REG_EBX, VMWARE_MAGIC);
+            return VIRTUAL_HARDWARE_VERSION;
 
         case CMD_GETSELLENGTH:
             if(!this.clip_out_fresh)
@@ -314,6 +357,19 @@ VMwareMouse.prototype.port_read32 = function()
             return now / 1000 >>> 0;
         }
 
+        case CMD_MESSAGE:
+            return this.message(reg32);
+
+        case CMD_GET_SVGA_CAPABILITIES:
+        {
+            const adapter = this.cpu.devices.graphics_adapter;
+            const svga = adapter && adapter.svga_capabilities();
+            if(!svga) break;
+            this.set_reg(REG_EBX, VMWARE_MAGIC);
+            const subcommand = reg32[REG_ECX] >>> 16;
+            return (subcommand === 0 ? svga.capabilities : subcommand === 2 ? svga.hardware_version : 0) | 0;
+        }
+
         case CMD_ABSPOINTER_STATUS:
             return this.enabled ? this.queue.length : 0xFFFF0000 | 0;
 
@@ -358,7 +414,127 @@ VMwareMouse.prototype.port_read32 = function()
             return 0;
     }
 
+    // (what guests ask that this does not know: for the harnesses' logs)
+    this.bus.send("vmware-backdoor-unknown", reg32[REG_ECX] & 0xFFFF);
     return 0xFFFFFFFF | 0;
+};
+
+/**
+ * Set a register from the backdoor: a 32-bit write, which in long mode
+ * clears the upper half
+ */
+VMwareMouse.prototype.set_reg = function(reg, value)
+{
+    this.cpu.reg32[reg] = value;
+    if(this.cpu.state_base !== undefined)
+    {
+        new Int32Array(this.cpu.wasm_memory.buffer, this.cpu.state_base + STATE_OFFSETS.x64_gpr_hi, 16)[reg] = 0;
+    }
+};
+
+/**
+ * CMD_MESSAGE: one step of the RPCI exchange, the low-bandwidth way (four
+ * bytes per port access)
+ * @return {number} EAX
+ */
+VMwareMouse.prototype.message = function(reg32)
+{
+    const step = reg32[REG_ECX] >>> 16, id = reg32[REG_EDX] >>> 16;
+    // the status, and EAX
+    const ok = status => { this.set_reg(REG_ECX, (status | MESSAGE_STATUS_SUCCESS) << 16); return 0; };
+    const fail = () => { this.set_reg(REG_ECX, 0); return 0; };
+    if(step === MESSAGE_OPEN)
+    {
+        if(((reg32[REG_EBX] >>> 0) & ~GUESTMSG_FLAG_COOKIE) !== RPCI_PROTOCOL) return fail();
+        let free = this.channels.findIndex(channel => !channel);
+        if(free < 0)
+        {
+            if(this.channels.length >= MESSAGE_CHANNELS) return fail();
+            free = this.channels.length;
+        }
+        this.channels[free] = { send: null, sent: 0, reply: null, read: 0 };
+        this.set_reg(REG_EDX, free << 16 | VMWARE_PORT);
+        // (cookies: any values do, the guest gives them back)
+        this.set_reg(REG_ESI, 0x56383601);
+        this.set_reg(REG_EDI, 0x76383602);
+        return ok(0);
+    }
+    const channel = this.channels[id];
+    if(!channel) return fail();
+    switch(step)
+    {
+        case MESSAGE_SENDSIZE:
+        {
+            const size = reg32[REG_EBX] >>> 0;
+            if(size > MESSAGE_MAX) return fail();
+            channel.send = new Uint8Array(size);
+            channel.sent = 0;
+            if(!size) this.rpci(channel);
+            return ok(0);
+        }
+        case MESSAGE_SENDPAYLOAD:
+        {
+            const send = channel.send;
+            if(!send) return fail();
+            const v = reg32[REG_EBX];
+            for(let i = 0; i < 4 && channel.sent < send.length; i++) send[channel.sent++] = v >>> 8 * i;
+            if(channel.sent >= send.length) this.rpci(channel);
+            return ok(0);
+        }
+        case MESSAGE_RECVSIZE:
+            if(!channel.reply) return ok(0);
+            this.set_reg(REG_EBX, channel.reply.length);
+            // (EDX's high word: what the host sends next)
+            this.set_reg(REG_EDX, MESSAGE_SENDSIZE << 16 | VMWARE_PORT);
+            return ok(MESSAGE_STATUS_DORECV);
+        case MESSAGE_RECVPAYLOAD:
+        {
+            const reply = channel.reply;
+            if(!reply) return fail();
+            let v = 0;
+            for(let i = 0; i < 4; i++) v |= (reply[channel.read + i] | 0) << 8 * i;
+            channel.read += 4;
+            this.set_reg(REG_EBX, v);
+            this.set_reg(REG_EDX, MESSAGE_SENDPAYLOAD << 16 | VMWARE_PORT);
+            return ok(0);
+        }
+        case MESSAGE_RECVSTATUS:
+            channel.reply = null;
+            channel.read = 0;
+            return ok(0);
+        case MESSAGE_CLOSE:
+            this.channels[id] = null;
+            return ok(0);
+    }
+    return fail();
+};
+
+/**
+ * A whole RPCI request has come: answer it ("1 <result>" or "0 <error>")
+ */
+VMwareMouse.prototype.rpci = function(channel)
+{
+    const request = new TextDecoder().decode(channel.send).replace(/\0+$/, "");
+    channel.send = null;
+    let reply = "0 Unknown command";
+    if(!request.startsWith("log ")) this.bus.send("vmware-rpci", request);
+    if(request.startsWith("log "))
+    {
+        // the drivers' logs (vmwgfx, VMware's WDDM driver): to whoever listens
+        this.bus.send("vmware-log", request.slice(4));
+        reply = "1 ";
+    }
+    else if(request.startsWith("info-get guestinfo."))
+    {
+        const value = this.guestinfo.get(request.slice(19));
+        reply = value === undefined ? "0 No value found" : "1 " + value;
+    }
+    else if(request.startsWith("tools.capability.") || request.startsWith("tools.set.version"))
+    {
+        reply = "1 ";
+    }
+    channel.reply = new TextEncoder().encode(reply);
+    channel.read = 0;
 };
 
 VMwareMouse.prototype.get_state = function()

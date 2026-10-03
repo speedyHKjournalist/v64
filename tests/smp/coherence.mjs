@@ -26,6 +26,7 @@ async function run(cores, seed, quantum, mode, writer = "guest", asynchronous = 
 {
     const iterations = 128 + seed * 7;
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         multiboot: { url: kernel },
         memory_size: 16 << 20,
         acpi: true,

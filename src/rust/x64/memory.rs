@@ -315,6 +315,7 @@ pub unsafe fn translate_user(
         }
         return Ok(physical);
     }
+    super::pages::COUNTERS[super::pages::COUNT_WALKS] += 1;
     let result = paging::walk(
         &mut physical::PageTables,
         LinearAddress(address),

@@ -9,7 +9,7 @@ const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv
 
 async function machine(cores)
 {
-    const emulator = new V86({ acpi: true, cpu_cores: cores, memory_size: 16 << 20,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: cores, memory_size: 16 << 20,
         disable_jit: true, autostart: false, log_level: 0 });
     await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
     return emulator;

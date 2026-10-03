@@ -358,10 +358,19 @@ export interface V86Options {
     /** Worker bundle URL, relative to the page. Default: build/cpu-worker.js. */
     cpu_worker_url?: string;
     /**
-     * The display hardware the guest sees.
-     * @default "bochs_vga"
+     * The display hardware the guest sees, like QEMU's -vga. Required.
+     * Each adapter is a plugin file (build/v86-<name>.js, e.g.
+     * build/v86-bochs-vga.js) that is loaded only when named here; "none"
+     * gives a machine without a display (serial console only).
+     * "bochs_vga" is the display v86 always had.
      */
-    graphics_adapter?: "bochs_vga";
+    graphics_adapter: "bochs_vga" | "vmware_svga" | "none";
+    /**
+     * Path or URL of the graphics_adapter's plugin file. By default
+     * build/v86-<name>.js relative to the page (beside libv86.js in node),
+     * like wasm_path.
+     */
+    graphics_adapter_path?: string;
     /**
      * Forward the guest's Direct3D/DirectDraw/OpenGL calls to WebGPU. Needs
      * build/glbridge/libv86-webgpu.js loaded before the emulator is created,
@@ -422,11 +431,12 @@ export interface V86Options {
     extended_memory_cache?: number;
 
     /**
-     * VGA memory size in bytes.
+     * Video memory of the graphics_adapter in bytes, a power of two (formerly
+     * vga_memory_size, which is now an error).
      * @example 8 * 1024 * 1024
-     * @default 8 * 1024 * 1024
+     * @default 8 * 1024 * 1024 for "bochs_vga"
      */
-    vga_memory_size?: number;
+    vram_size?: number;
 
     /**
      * If emulation should be started when emulator is ready.
@@ -1006,6 +1016,15 @@ export class V86 {
      * @param {number} sy
      */
     screen_set_scale(sx: number, sy: number): void;
+
+    /**
+     * Tell the display adapter what size the page would show the guest's
+     * display at (such as its window's). Adapters that can ask the guest to
+     * change its resolution do (virtio_gpu); the others ignore it.
+     *
+     * @param display which of the guest's displays (0, the first)
+     */
+    set_display_size(width: number, height: number, display?: number): void;
 
     /**
      * Go fullscreen (only browsers)

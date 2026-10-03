@@ -1,0 +1,21 @@
+TESS_EVAL
+PROPERTY TES_PRIM_MODE 7
+PROPERTY TES_SPACING 2
+PROPERTY TES_VERTEX_ORDER_CW 0
+PROPERTY TES_POINT_MODE 0
+DCL IN[][0], POSITION
+DCL SV[0], TESSCOORD
+DCL OUT[0], POSITION
+DCL OUT[1].xy, GENERIC[0]
+DCL TEMP[0..3]
+IMM[0] UINT32 {0, 1065353216, 0, 0}
+DCL TEMP[4..7]
+  0: LRP TEMP[1].xy, SV[0].xxxx, IN[1][0].xyyy, IN[0][0].xyyy
+  1: LRP TEMP[2].xy, SV[0].xxxx, IN[2][0].xyyy, IN[3][0].xyyy
+  2: LRP TEMP[0].xy, SV[0].yyyy, TEMP[2].xyxx, TEMP[1].xyxx
+  3: MOV TEMP[0].z, IMM[0].xxxx
+  4: MOV TEMP[0].w, IMM[0].yyyy
+  5: MOV OUT[0], TEMP[0]
+  6: MOV TEMP[3].xy, SV[0].xyxx
+  7: MOV OUT[1].xy, TEMP[3].xyxx
+  8: END

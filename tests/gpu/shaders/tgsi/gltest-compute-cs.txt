@@ -1,0 +1,50 @@
+COMP
+PROPERTY CS_FIXED_BLOCK_WIDTH 8
+PROPERTY CS_FIXED_BLOCK_HEIGHT 8
+PROPERTY CS_FIXED_BLOCK_DEPTH 1
+DCL SV[0], BLOCK_ID
+DCL SV[1], THREAD_ID
+DCL SV[2], GRID_SIZE
+DCL IMAGE[0], 2D, PIPE_FORMAT_R8G8B8A8_UNORM, WR
+DCL BUFFER[0]
+DCL MEMORY[1], SHARED
+DCL CONST[0]
+DCL TEMP[0..24]
+IMM[0] UINT32 {3, 2, 24, 252}
+IMM[1] UINT32 {0, 1, 6, 4}
+IMM[2] UINT32 {1000, 100000, 1115684864, 1065353216}
+DCL TEMP[25..28]
+DCL TEMP[29]
+  0: MOV TEMP[29].xyz, SV[0].xyzz
+  1: SHL TEMP[2].xy, TEMP[29].xyzx, IMM[0].xxxx
+  2: UADD TEMP[3].xy, TEMP[2].xyxx, SV[1].xyxx
+  3: SHL TEMP[4].x, SV[1].yxxx, IMM[0].xxxx
+  4: UADD TEMP[5].x, TEMP[4].xxxx, SV[1].xxxx
+  5: SHL TEMP[6].x, TEMP[5].xxxx, IMM[0].yyyy
+  6: UMUL TEMP[7].x, TEMP[3].xxxx, CONST[0].xxxx
+  7: UADD TEMP[8].x, TEMP[7].xxxx, TEMP[3].yxxx
+  8: STORE MEMORY[0].x, TEMP[6].xxxx, TEMP[8].xxxx
+  9: MEMBAR IMM[0].zzzz
+ 10: BARRIER
+ 11: INEG TEMP[9].x, TEMP[5].xxxx
+ 12: SHL TEMP[10].x, TEMP[9].xxxx, IMM[0].yyyy
+ 13: UADD TEMP[11].x, TEMP[10].xxxx, IMM[0].wwww
+ 14: LOAD TEMP[12].x, MEMORY[0], TEMP[11].xxxx
+ 15: ATOMUADD TEMP[13].x, BUFFER[0], IMM[1].xxxx, IMM[1].yyyy
+ 16: SHL TEMP[14].x, TEMP[3].yxxx, IMM[1].zzzz
+ 17: UADD TEMP[15].x, TEMP[14].xxxx, TEMP[3].xxxx
+ 18: SHL TEMP[16].x, TEMP[15].xxxx, IMM[0].yyyy
+ 19: UADD TEMP[17].x, TEMP[16].xxxx, IMM[1].wwww
+ 20: UMUL TEMP[18].x, TEMP[29].xxxx, IMM[2].xxxx
+ 21: UADD TEMP[19].x, TEMP[12].xxxx, TEMP[18].xxxx
+ 22: UMUL TEMP[20].x, SV[2].xxxx, IMM[2].yyyy
+ 23: UADD TEMP[21].x, TEMP[19].xxxx, TEMP[20].xxxx
+ 24: STORE BUFFER[0].x, TEMP[17].xxxx, TEMP[21].xxxx
+ 25: U2F TEMP[22].xy, TEMP[3].xyyy
+ 26: DIV TEMP[1].xy, TEMP[22].xyxx, IMM[2].zzzz
+ 27: U2F TEMP[23].x, TEMP[5].xxxx
+ 28: DIV TEMP[1].z, TEMP[23].xxxx, IMM[2].zzzz
+ 29: MOV TEMP[1].w, IMM[2].wwww
+ 30: MOV TEMP[0].xy, TEMP[3].xyxx
+ 31: STORE IMAGE[0], TEMP[0], TEMP[1], 2D, PIPE_FORMAT_R8G8B8A8_UNORM
+ 32: END

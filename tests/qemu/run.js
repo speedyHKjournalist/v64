@@ -13,6 +13,7 @@ process.on("unhandledRejection", exn => { throw exn; });
 var test_executable = new Uint8Array(fs.readFileSync(__dirname + "/test-i386"));
 
 var emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/linux4.iso" },

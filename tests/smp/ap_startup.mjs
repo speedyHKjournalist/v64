@@ -23,6 +23,7 @@ const fields = ["boots", "signature", "vector", "real_cr0", "real_cs", "reserved
 async function test(count)
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         multiboot: { url: KERNEL },
         memory_size: 32 * 1024 * 1024,
         cpu_cores: count,

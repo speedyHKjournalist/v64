@@ -9,6 +9,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 for(const release of [false,true]){
     let controlled=false;
     const vm=new V86({
+        graphics_adapter: "bochs_vga",
         wasm_fn:async imports=>{
             for(const name of ["microtick","run_hardware_timers","cpu_event_halt","stop_idling"]) {
                 const original=imports.env[name];imports.env[name]=(...args)=>controlled?1000.25:original(...args);

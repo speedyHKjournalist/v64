@@ -12,6 +12,7 @@ const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "..
 var test_executable = new Uint8Array(fs.readFileSync(__dirname + "/test-jit"));
 
 var emulator = new V86({
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/linux4.iso" },

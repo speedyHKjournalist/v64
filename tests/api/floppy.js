@@ -78,6 +78,7 @@ async function expect(emulator, command, expected, timeout_msec)
 }
 
 const CONFIG_MSDOS622_HD = {
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     hda: { url: __dirname + "/../../images/msdos622.img" },
@@ -88,6 +89,7 @@ const CONFIG_MSDOS622_HD = {
 };
 
 const CONFIG_TINYCORE_CD = {
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/TinyCore-11.0.iso" },

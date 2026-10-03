@@ -44,6 +44,7 @@ JavaScript applications that do not use the v86 web interface (but instead embed
 * **Example 1:** Provide an emulated NE2000 NIC to the guest OS and use the `wsproxy` backend with a secure wsproxy server at public host `relay.widgetry.org` listening at default TLS port 443:
    ```javascript
    let example_1 = new V86({
+       graphics_adapter: "bochs_vga",
        net_device: {
            relay_url: "wss://relay.widgetry.org/"
        },
@@ -54,6 +55,7 @@ JavaScript applications that do not use the v86 web interface (but instead embed
 * **Example 2:** Provide a VirtIO NIC to the guest OS and use the `fetch` backend with a CORS proxy server at the local machine listening at port number 23456:
    ```javascript
    let example_2 = new V86({
+       graphics_adapter: "bochs_vga",
        net_device: {
            type: "virtio",
            relay_url: "fetch",

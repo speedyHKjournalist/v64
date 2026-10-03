@@ -1,0 +1,45 @@
+FRAG
+DCL IN[0].xy, GENERIC[0], PERSPECTIVE
+DCL OUT[0], COLOR
+DCL CONST[0]
+DCL TEMP[0..10]
+IMM[0] UINT32 {0, 1070596096, 1071644672, 3220176896}
+IMM[1] UINT32 {1065353216, 0, 0, 0}
+DCL TEMP[11..14]
+  0: F2D TEMP[0].xy, IN[0].xyyy
+  1: F2D TEMP[1].xy, IN[0].yyyy
+  2: MOV TEMP[11].xy, TEMP[0].xyxy
+  3: MOV TEMP[12].xy, CONST[0].xyxy
+  4: MOV TEMP[13].xy, IMM[0].xyxy
+  5: DMAD TEMP[2].xy, TEMP[11], TEMP[12], TEMP[13]
+  6: MOV TEMP[11].xy, TEMP[1].xyxy
+  7: MOV TEMP[12].xy, CONST[0].xyxy
+  8: MOV TEMP[13].xy, IMM[0].xzxz
+  9: DMAD TEMP[3].xy, TEMP[11], TEMP[12], TEMP[13]
+ 10: MOV TEMP[11].xy, TEMP[2].xyxy
+ 11: DFRAC TEMP[4].xy, TEMP[11]
+ 12: MOV TEMP[11].xy, TEMP[3].xyxy
+ 13: DFRAC TEMP[5].xy, TEMP[11]
+ 14: MOV TEMP[11].xy, TEMP[4].xyxy
+ 15: D2F OUT[0].x, TEMP[11]
+ 16: MOV TEMP[11].xy, TEMP[5].xyxy
+ 17: D2F OUT[0].y, TEMP[11]
+ 18: MOV TEMP[11].xy, TEMP[2].xyxy
+ 19: MOV TEMP[12].xy, TEMP[3].xyxy
+ 20: DMAX TEMP[6].xy, TEMP[11], TEMP[12]
+ 21: MOV TEMP[11].xy, TEMP[5].xyxy
+ 22: MOV TEMP[12].xy, IMM[0].xwxw
+ 23: MOV TEMP[13].xy, TEMP[3].xyxy
+ 24: DMAD TEMP[7].xy, TEMP[11], TEMP[12], TEMP[13]
+ 25: MOV TEMP[11].xy, TEMP[7].xyxy
+ 26: MOV TEMP[12].xy, IMM[0].xwxw
+ 27: MOV TEMP[13].xy, TEMP[6].xyxy
+ 28: DMAD TEMP[8].xy, TEMP[11], TEMP[12], TEMP[13]
+ 29: MOV TEMP[11].xy, TEMP[8].xyxy
+ 30: MOV TEMP[12].xy, IMM[0].xzxz
+ 31: DMUL TEMP[9].xy, TEMP[11], TEMP[12]
+ 32: MOV TEMP[11].xy, TEMP[9].xyxy
+ 33: D2F TEMP[10].x, TEMP[11]
+ 34: MOV OUT[0].z, TEMP[10].xxxx
+ 35: MOV OUT[0].w, IMM[1].xxxx
+ 36: END

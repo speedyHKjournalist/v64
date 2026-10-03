@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Remote SVGA renderer</title>
+<pre id="status">connecting</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script>
+// The browser half of tests/x64/gpu_remote_renderer.mjs: the SVGA renderer,
+// on this page's WebGPU, for a device in a node process at the other end of
+// the WebSocket. The frame format is described there.
+const TYPES = { submit: 1, reset: 2, write: 3, done: 4, lost: 5, ready: 6, submit_gx: 7, log: 8, submit_vx: 9 };
+// the renderer's warnings go to the harness, for its log
+for(const method of ["warn", "error"])
+{
+    const original = console[method];
+    console[method] = (...args) => {
+        original.apply(console, args);
+        const text = args.map(a => typeof a === "object" ? (a && a.stack) || JSON.stringify(a) : String(a)).join(" ");
+        if(globalThis.remoteSocket && globalThis.remoteSocket.readyState === 1) {
+            globalThis.remoteSocket.send(new Uint8Array([TYPES.log, ...new TextEncoder().encode(text.slice(0, 4000))]));
+        }
+    };
+}
+const status = document.getElementById("status");
+const socket = new WebSocket(new URLSearchParams(location.search).get("ws"));
+socket.binaryType = "arraybuffer";
+let to_renderer = null;
+const send = (type, number, bytes) => {
+    const message = new Uint8Array(5 + (bytes ? bytes.length : 0));
+    message[0] = type;
+    new DataView(message.buffer).setUint32(1, number >>> 0, true);
+    if(bytes) message.set(bytes, 5);
+    socket.send(message);
+};
+// every 10 s, to the harness's log: batches, bytes, and how long they took
+// from arriving to done (the device's fences wait for that)
+const arrived = new Map();
+let window_stats = { batches: 0, bytes: 0, latency: 0, max: 0, start: performance.now() };
+setInterval(() => {
+    const w = window_stats, seconds = (performance.now() - w.start) / 1000;
+    if(w.batches) console.warn("renderer-stats " + JSON.stringify({ seconds: +seconds.toFixed(1), batches: w.batches, mib: +(w.bytes / 1048576).toFixed(1),
+        latency_ms: +(w.latency / w.batches).toFixed(1), max_ms: +w.max.toFixed(1), pending: arrived.size }));
+    window_stats = { batches: 0, bytes: 0, latency: 0, max: 0, start: performance.now() };
+}, 10000);
+const renderer = V86SVGARenderer({
+    post: message => {
+        if(message.type === "write") send(TYPES.write, message.offset, message.bytes);
+        else if(message.type === "done")
+        {
+            const t = arrived.get(message.seq);
+            if(t !== undefined)
+            {
+                arrived.delete(message.seq);
+                const ms = performance.now() - t;
+                window_stats.batches++; window_stats.latency += ms; window_stats.max = Math.max(window_stats.max, ms);
+            }
+            send(TYPES.done, message.seq);
+        }
+        else if(message.type === "lost") socket.send(new Uint8Array([TYPES.lost, ...new TextEncoder().encode(message.reason)]));
+    },
+    listen: handler => { to_renderer = handler; },
+}, {});
+let batches = 0;
+globalThis.remoteSocket = socket;
+socket.onopen = () => {
+    status.textContent = "connected";
+    socket.send(new Uint8Array([TYPES.ready]));
+};
+socket.onmessage = event => {
+    const bytes = new Uint8Array(event.data);
+    if(bytes[0] === TYPES.submit_gx || bytes[0] === TYPES.submit_vx || bytes[0] === TYPES.submit)
+    {
+        arrived.set(new DataView(event.data).getUint32(1, true), performance.now());
+        window_stats.bytes += bytes.length;
+    }
+    if(bytes[0] === TYPES.submit_gx || bytes[0] === TYPES.submit_vx)
+    {
+        to_renderer({ type: "submit", stream: bytes[0] === TYPES.submit_gx ? "gx" : "vx", seq: new DataView(event.data).getUint32(1, true), bytes: bytes.subarray(5) });
+    }
+    else if(bytes[0] === TYPES.submit)
+    {
+        batches++;
+        to_renderer({ type: "submit", seq: new DataView(event.data).getUint32(1, true), bytes: bytes.subarray(5) });
+    }
+    else if(bytes[0] === TYPES.reset)
+    {
+        to_renderer({ type: "reset" });
+    }
+};
+socket.onclose = () => { status.textContent = "closed after " + batches + " batches"; };
+</script>

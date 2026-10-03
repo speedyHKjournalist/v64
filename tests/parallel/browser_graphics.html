@@ -21,8 +21,9 @@ try
     const bundle = params.get("build") === "bundle";
     const { V86 } = await import(bundle ? "../../build/libv86.mjs" : "../../src/main.js");
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         multiboot: { url: "../../build/parallel-graphics.bin" }, memory_size: 32 << 20, acpi: true, cpu_cores: 2,
-        screen_container: document.getElementById("screen_container"), vga_memory_size: 8 << 20,
+        screen_container: document.getElementById("screen_container"), vram_size: 8 << 20,
         autostart: false, log_level: 0, parallel: "auto", wasm_path: "../../build/v86-parallel.wasm",
         ...(bundle ? { vcpu_worker_url: "../../build/vcpu-worker.js" } : {}),
     });

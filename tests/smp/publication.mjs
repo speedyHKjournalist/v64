@@ -4,7 +4,7 @@
 // compilation promise; validators are spies so a missing epoch guard is seen.
 import assert from "node:assert/strict";
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
-const vm = new V86({ acpi: true, cpu_cores: 2, memory_size: 16 << 20, autostart: false, log_level: 0 });
+const vm = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: 2, memory_size: 16 << 20, autostart: false, log_level: 0 });
 await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
 try
 {

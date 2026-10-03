@@ -17,7 +17,7 @@ export async function backend_scenarios(V86, options, log = console.log)
     // The scenarios exercise the region tiers with small budgets, so Tier-0
     // (on by default) is off unless a scenario asks for the defaults.
     const create = async (extra = {}, expected_error) => {
-        vm = new V86({ memory_size: 32 << 20, disable_keyboard: true, disable_mouse: true,
+        vm = new V86({ graphics_adapter: "bochs_vga", memory_size: 32 << 20, disable_keyboard: true, disable_mouse: true,
             disable_speaker: true, net_device: { type: "none" }, ir_tier0: false, ...options, autostart: false, ...extra });
         let loaded = false, failure;
         vm.add_listener("emulator-loaded", () => { loaded = true; });

@@ -20,6 +20,7 @@ const MAX_HEAP_MEMORY_SIZE = 2048;
 const MAX_MEMORY_SIZE = MAX_HEAP_MEMORY_SIZE + 60 * 1024;
 const DEFAULT_CPU_CORES = 1;
 const DEFAULT_VGA_MEMORY_SIZE = 8;
+const DEFAULT_GRAPHICS_ADAPTER = "bochs_vga";
 const DEFAULT_BOOT_ORDER = 0;
 const DEFAULT_MTU = 1500;
 const DEFAULT_NIC_TYPE = "ne2k";
@@ -246,7 +247,7 @@ function onload()
             id: "archlinux",
             name: "Arch Linux",
             memory_size: 512 * 1024 * 1024,
-            vga_memory_size: 8 * 1024 * 1024,
+            vram_size: 8 * 1024 * 1024,
             state: { url: host + "arch_state-v3.bin.zst" },
             filesystem: {
                 baseurl: host + "arch/",
@@ -257,7 +258,7 @@ function onload()
             id: "archlinux-boot",
             name: "Arch Linux",
             memory_size: 512 * 1024 * 1024,
-            vga_memory_size: 8 * 1024 * 1024,
+            vram_size: 8 * 1024 * 1024,
             filesystem: {
                 baseurl: host + "arch/",
                 basefs: { url: host + "fs.json" },
@@ -1849,7 +1850,8 @@ function onload()
                     id: p["id"],
                     name: p["name"],
                     memory_size: p["memory_size"],
-                    vga_memory_size: p["vga_memory_size"],
+                    graphics_adapter: p["graphics_adapter"],
+                    vram_size: p["vram_size"] || p["vga_memory_size"],
                     acpi: p["acpi"],
                     boot_order: p["boot_order"],
                     hda: handle_image(p["hda"]),
@@ -1869,6 +1871,7 @@ function onload()
     if(query_args.has("parallel")) $("parallel").checked = bool_arg(query_args.get("parallel"));
     if(query_args.has("x64")) $("x64").checked = bool_arg(query_args.get("x64"));
     if(query_args.has("vram")) $("vga_memory_size").value = query_args.get("vram");
+    if(query_args.has("graphics_adapter")) $("graphics_adapter").value = query_args.get("graphics_adapter");
     if(query_args.has("relay_url")) $("relay_url").value = query_args.get("relay_url");
     if(query_args.has("mute")) $("disable_audio").checked = bool_arg(query_args.get("mute"));
     if(query_args.has("acpi")) $("acpi").checked = bool_arg(query_args.get("acpi"));
@@ -2252,7 +2255,8 @@ async function start_emulation(profile, query_args)
         settings.cpuid_level = profile.cpuid_level;
         settings.acpi = profile.acpi;
         settings.memory_size = profile.memory_size;
-        settings.vga_memory_size = profile.vga_memory_size;
+        settings.graphics_adapter = profile.graphics_adapter;
+        settings.vram_size = profile.vram_size;
         settings.boot_order = profile.boot_order;
         settings.net_device_type = profile.net_device_type;
         settings.modem = profile.modem;
@@ -2364,7 +2368,17 @@ async function start_emulation(profile, query_args)
             const vram = parseInt(query_args.get("vram"), 10);
             if(vram > 0)
             {
-                settings.vga_memory_size = vram * 1024 * 1024;
+                settings.vram_size = vram * 1024 * 1024;
+            }
+            if(query_args.has("graphics_adapter"))
+            {
+                settings.graphics_adapter = query_args.get("graphics_adapter");
+            }
+            // virtio_gpu: how many displays the guest gets (side by side in
+            // the window), a developer's setting
+            if(query_args.has("displays"))
+            {
+                settings.displays = Math.max(1, Math.min(4, parseInt(query_args.get("displays"), 10) || 1));
             }
 
             settings.acpi = query_args.has("acpi") ? bool_arg(query_args.get("acpi")) : settings.acpi;
@@ -2494,12 +2508,22 @@ async function start_emulation(profile, query_args)
         }
         if(memory_size !== DEFAULT_MEMORY_SIZE) new_query_args.set("m", String(memory_size));
 
-        const vga_memory_size = parseInt($("vga_memory_size").value, 10) || DEFAULT_VGA_MEMORY_SIZE;
-        if(!settings.vga_memory_size || vga_memory_size !== DEFAULT_VGA_MEMORY_SIZE)
+        const vram_mb = parseInt($("vga_memory_size").value, 10) || DEFAULT_VGA_MEMORY_SIZE;
+        if(!settings.vram_size || vram_mb !== DEFAULT_VGA_MEMORY_SIZE)
         {
-            settings.vga_memory_size = vga_memory_size * MB;
+            settings.vram_size = vram_mb * MB;
         }
-        if(vga_memory_size !== DEFAULT_VGA_MEMORY_SIZE) new_query_args.set("vram", String(vga_memory_size));
+        if(vram_mb !== DEFAULT_VGA_MEMORY_SIZE) new_query_args.set("vram", String(vram_mb));
+
+        settings.graphics_adapter = $("graphics_adapter").value || DEFAULT_GRAPHICS_ADAPTER;
+        if(settings.graphics_adapter !== DEFAULT_GRAPHICS_ADAPTER) new_query_args.set("graphics_adapter", settings.graphics_adapter);
+        // (?displays=N: virtio_gpu's displays, kept from the address)
+        const displays = parseInt(new URLSearchParams(window.location.search).get("displays"), 10);
+        if(displays > 1)
+        {
+            settings.displays = Math.min(4, displays);
+            new_query_args.set("displays", String(settings.displays));
+        }
 
         const boot_order = parseInt($("boot_order").value, 16) || DEFAULT_BOOT_ORDER;
         if(!settings.boot_order || boot_order !== DEFAULT_BOOT_ORDER)
@@ -2629,7 +2653,9 @@ async function start_emulation(profile, query_args)
 
         memory_size: settings.memory_size,
         extended_memory_size: settings.extended_memory_size || undefined,
-        vga_memory_size: settings.vga_memory_size,
+        "graphics_adapter": settings.graphics_adapter || DEFAULT_GRAPHICS_ADAPTER,
+        "vram_size": settings.vram_size,
+        "graphics_adapter_test": settings.displays > 1 && settings.graphics_adapter === "virtio_gpu" ? { "scanouts": settings.displays } : undefined,
         boot_order: settings.boot_order,
 
         bios: settings.bios,
@@ -2661,6 +2687,23 @@ async function start_emulation(profile, query_args)
     });
 
     if(DEBUG) window.emulator = emulator;
+
+    // virtio_gpu: the guest's display follows the window (the guest's
+    // driver asks for the new size after a display event); with several
+    // displays (?displays=N), each gets its share of the width
+    if((settings.graphics_adapter || DEFAULT_GRAPHICS_ADAPTER) === "virtio_gpu")
+    {
+        let resize_timer = 0;
+        const displays = settings.displays || 1;
+        const report_display_size = () => {
+            clearTimeout(resize_timer);
+            resize_timer = setTimeout(() => {
+                for(let i = 0; i < displays; i++) emulator.set_display_size(Math.floor(window.innerWidth / displays), window.innerHeight, i);
+            }, 250);
+        };
+        window.addEventListener("resize", report_display_size);
+        emulator.add_listener("emulator-ready", report_display_size);
+    }
 
     emulator.add_listener("emulator-ready", function()
     {
@@ -2780,7 +2823,8 @@ function init_ui(profile, settings, emulator)
                 "version": $("version").textContent,
                 "memory_size": settings.memory_size,
                 "extended_memory_size": settings.extended_memory_size || 0,
-                "vga_memory_size": settings.vga_memory_size,
+                "graphics_adapter": settings.graphics_adapter || DEFAULT_GRAPHICS_ADAPTER,
+                "vram_size": settings.vram_size,
                 "graphics_revision": globalThis["V86GL_BUILD_REVISION"] || null,
             },
             on_stop: () => {

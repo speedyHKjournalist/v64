@@ -170,7 +170,7 @@ image_end:
 
 const directory = assemble("frame-buffer", source);
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
-const emulator = new V86({multiboot: {url: directory + "guest.bin"}, memory_size: 32 << 20, acpi: true,
+const emulator = new V86({graphics_adapter: "bochs_vga", multiboot: {url: directory + "guest.bin"}, memory_size: 32 << 20, acpi: true,
     disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true, autostart: false, log_level: 0});
 await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
 const cpu = emulator.v86.cpu, io = cpu.io, vga = cpu.devices.vga;

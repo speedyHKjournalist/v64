@@ -3,7 +3,7 @@ import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const cases=JSON.parse(fs.readFileSync("build/ir-strings/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-strings/${i}-${opt}.wasm`))));
-const vm=new V86({wasm_path:"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const source=c=>[0xA4,0xA6,0xAC].includes(c[4]),destination=c=>c[4]!==0xAC,stores=c=>[0xA4,0xAA].includes(c[4]),steps=c=>stores(c)?2:3;
 try {

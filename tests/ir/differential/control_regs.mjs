@@ -7,7 +7,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 for(const release of [false,true]){
     const core=new WebAssembly.Module(fs.readFileSync((process.argv[2]||"build/v86-ir-test")+(release?"-release":"")+".wasm"));
     const bios=Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
-    const create_vm=()=>new V86({wasm_fn:async imports=>new WebAssembly.Instance(core,imports).exports,memory_size:32<<20,bios:{buffer:bios},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+    const create_vm=()=>new V86({graphics_adapter: "bochs_vga", wasm_fn:async imports=>new WebAssembly.Instance(core,imports).exports,memory_size:32<<20,bios:{buffer:bios},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
     let vm=create_vm();
     try {
         let cpu,e,mem,words,raw,pdpte,dr,v;

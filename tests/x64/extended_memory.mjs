@@ -377,7 +377,7 @@ assert.deepEqual(results[1], results[0], "page tier and interpreter agree");
 
 // the snapshot stream carries extended RAM into another machine
 {
-    const emulator = new V86({ multiboot: { url: directory + "guest.bin" }, acpi: true, autostart: false, log_level: 0,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", multiboot: { url: directory + "guest.bin" }, acpi: true, autostart: false, log_level: 0,
         cpu_cores: Number(process.env.X64_CORES || 1), ...options });
     await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
     await emulator.restore_state_stream({ size: snapshot.length, read: async (offset, length) => snapshot.subarray(offset, offset + length) });

@@ -10,6 +10,7 @@ const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 
 const config_async_cdrom = {
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/linux4.iso", async: true },
@@ -21,6 +22,7 @@ const config_async_cdrom = {
 };
 
 const config_sync_cdrom = {
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/linux4.iso", async: false },
@@ -32,6 +34,7 @@ const config_sync_cdrom = {
 };
 
 const config_filesystem = {
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     autostart: true,
@@ -45,12 +48,13 @@ const config_filesystem = {
 };
 
 const config_large_memory = {
+    graphics_adapter: "bochs_vga",
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/linux4.iso", async: true },
     autostart: true,
     memory_size: 2048 * 1024 * 1024,
-    vga_memory_size: 512 * 1024 * 1024,
+    vram_size: 512 * 1024 * 1024,
     network_relay_url: "<UNUSED>",
     disable_jit: +process.env.DISABLE_JIT,
     log_level: 0,
@@ -104,6 +108,7 @@ async function run_test(name, config, done)
 async function run_test_before_pci_enumeration()
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { buffer: new Uint8Array(0x10000).fill(0xF4).buffer },
         memory_size: 16 * 1024 * 1024,
         autostart: false,

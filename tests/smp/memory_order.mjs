@@ -22,7 +22,7 @@ const RECORDS = 0x381000;
 async function run(cores, seed, quantum, mode)
 {
     const count = 4096 + seed * 17;
-    const emulator = new V86({ multiboot: { url: kernel }, memory_size: 16 << 20,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", multiboot: { url: kernel }, memory_size: 16 << 20,
         acpi: true, cpu_cores: cores, cpu_quantum: quantum, cpu_schedule_seed: seed,
         disable_jit: mode === "interpreter", experimental_smp_jit: true,
         ir_tier0: mode === "tier0", ir_sync_publication: true,

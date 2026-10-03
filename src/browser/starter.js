@@ -3,13 +3,14 @@ import { instantiate_v86, memory_import } from "../parallel/relocate.js";
 import { default_worker_url, parallel_unsupported_reason } from "../parallel/machine.js";
 import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
 import { v86 } from "../main.js";
-import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
+import { LOG_CPU, LOG_VGA, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { get_rand_int, load_file, read_sized_string_from_mem } from "../lib.js";
 import { dbg_assert, dbg_trace, dbg_log, set_log_level } from "../log.js";
 import * as print_stats from "./print_stats.js";
 import { Bus } from "../bus.js";
 import { BOOT_ORDER_FD_FIRST, BOOT_ORDER_HD_FIRST, BOOT_ORDER_CD_FIRST } from "../rtc.js";
 import { EEXIST, ENOENT } from "../../lib/9p.js";
+import { check_graphics_adapter_options, load_graphics_adapter } from "../graphics_adapter.js";
 
 import { SpeakerAdapter } from "./speaker.js";
 import { NetworkAdapter } from "./network.js";
@@ -29,22 +30,14 @@ import { SyncBuffer, buffer_from_object } from "../buffer.js";
 import { FS } from "../../lib/filesystem.js";
 
 /**
- * graphics_adapter selects the display hardware the guest sees; graphics_proxy
- * adds the D3D/DDraw/GL proxy of libv86-webgpu.js, which the page loads first,
- * as xterm.js for a serial terminal (docs/graphics-proxy-plugin-plan.md)
+ * graphics_adapter selects the display hardware the guest sees (a plugin,
+ * src/graphics_adapter.js); graphics_proxy adds the D3D/DDraw/GL proxy of
+ * libv86-webgpu.js, which the page loads first, as xterm.js for a serial
+ * terminal (docs/glbridge.md)
  * @return {Object} the proxy's device plugin, or null
  */
 function create_graphics_proxy(options)
 {
-    const adapter = options["graphics_adapter"];
-    if(typeof adapter === "function")
-    {
-        throw new Error("graphics_adapter now selects the display hardware; use graphics_proxy: true instead of installV86GLGraphicsAdapter");
-    }
-    if(adapter !== undefined && adapter !== "bochs_vga")
-    {
-        throw new Error("Unknown graphics_adapter \"" + adapter + "\"; supported: bochs_vga");
-    }
     if(options["v86gl_pci"] !== undefined)
     {
         throw new Error("v86gl_pci was removed; use graphics_proxy: true");
@@ -62,6 +55,50 @@ function create_graphics_proxy(options)
     }
     return factory(proxy === true ? {} : proxy);
 }
+
+/** The name of the channel between the display adapter's device and its renderer, with a CPU worker */
+export const ADAPTER_RENDERER_CHANNEL = "graphics_adapter_renderer";
+
+/**
+ * The 3D renderer of the display adapter, on this page: GX (V86SVGARenderer
+ * of libv86-webgpu.js), for vmware_svga and virtio_gpu (virgl), when the
+ * page has loaded it and WebGPU has an adapter. The device then declares 3D.
+ *
+ * With a CPU worker the device is in the worker and the renderer stays here:
+ * `host` is this page's end of their channel (CPUWorkerController's
+ * device_channel), and the worker gives the device the other end. In the
+ * worker, `options` brings that end (graphics_adapter_renderer_channel).
+ * @param {Object=} options
+ * @param {Object=} host
+ * @return {!Promise<Object>} the device's end of the channel (`host`
+ *     itself if it was given), or null
+ */
+V86.prototype.create_adapter_renderer = async function(options, host)
+{
+    const remote = options && options["graphics_adapter_renderer_channel"];
+    if(remote) return remote;
+    const create = globalThis["V86SVGARenderer"];
+    const gpu = typeof navigator !== "undefined" && navigator["gpu"];
+    if(this.graphics_adapter !== "vmware_svga" && this.graphics_adapter !== "virtio_gpu" || typeof create !== "function" || !gpu) return null;
+    let adapter = null;
+    try
+    {
+        adapter = await gpu["requestAdapter"]();
+    }
+    catch(e)
+    {
+        dbg_log("WebGPU: " + e, LOG_VGA);
+    }
+    if(!adapter || this.destroyed) return null;
+    if(host)
+    {
+        this.adapter_renderer = create(host, {});
+        return host;
+    }
+    const channel = create_local_channel();
+    this.adapter_renderer = create(channel.host, {});
+    return channel.device;
+};
 
 /**
  * The ends of a channel between a plugin's device and its host side on one
@@ -105,6 +142,9 @@ export function V86(options)
     this.destroyed = false;
     this.cpu_exception_hook = function(n) {};
 
+    // The display adapter is required; its plugin loads with the other files
+    this.graphics_adapter = check_graphics_adapter_options(options);
+
     const bus = Bus.create();
     this.bus = bus[0];
     this.emulator_bus = bus[1];
@@ -114,6 +154,8 @@ export function V86(options)
     // talking over a channel (docs/graphics-proxy-plugin-plan.md)
     this["graphics_proxy"] = create_graphics_proxy(options);
     this.device_plugins = this["graphics_proxy"] ? [this["graphics_proxy"]] : [];
+    /** the display adapter's 3D renderer on this page (create_adapter_renderer) */
+    this.adapter_renderer = null;
     this.plugins_ready = [];
 
     if(options["cpu_worker"] && typeof Worker !== "undefined")
@@ -374,7 +416,9 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.high_memory_size = options.high_memory_size;
     settings.extended_memory_size = options.extended_memory_size;
     settings.extended_memory_cache = options.extended_memory_cache;
-    settings.vga_memory_size = options.vga_memory_size || 8 * 1024 * 1024;
+    settings.vram_size = options["vram_size"];
+    // (internal, see src/graphics_adapter.js)
+    settings.graphics_adapter_test = options["graphics_adapter_test"];
     settings.boot_order = boot_order;
     settings.fastboot = options.fastboot || false;
     settings.bootmenu = options.bootmenu || false;
@@ -571,9 +615,19 @@ V86.prototype.continue_init = async function(emulator, options)
         this.serial_adapter?.show?.();
         this.virtio_console_adapter?.show?.();
         this.modem?.initialize();
+        // the display adapter's renderer stays on this page (WebGPU is here)
+        this.worker_controller.adapter_renderer = !!await this.create_adapter_renderer(undefined,
+            this.worker_controller.device_channel(ADAPTER_RENDERER_CHANNEL));
         await this.worker_controller.start();
         return;
     }
+
+    // The display adapter's plugin, fetched while the files load, and its 3D
+    // renderer if it has one and WebGPU works
+    const graphics_adapter = this.graphics_adapter === "none" ? Promise.resolve(undefined) :
+        load_graphics_adapter(this.graphics_adapter, options["graphics_adapter_path"]);
+    graphics_adapter.catch(() => {});
+    const adapter_renderer = this.create_adapter_renderer(options);
 
     // ugly, but required for closure compiler compilation
     function put_on_settings(name, buffer)
@@ -861,6 +915,9 @@ V86.prototype.continue_init = async function(emulator, options)
             }
         }
 
+        settings.graphics_adapter = await graphics_adapter;
+        settings.graphics_adapter_renderer = await adapter_renderer;
+
         if(this.destroyed) return;
         this.v86.init(settings);
 
@@ -1104,6 +1161,7 @@ V86.prototype.destroy = async function()
     {
         plugin["destroy"] && await plugin["destroy"]();
     }
+    this.adapter_renderer && this.adapter_renderer["destroy"]();
     this.v86 && this.v86.destroy();
     this.keyboard_adapter && this.keyboard_adapter.destroy();
     this.network_adapter && this.network_adapter.destroy();
@@ -1238,8 +1296,11 @@ V86.prototype.save_state = async function()
 {
     if(this.worker_controller) return this.worker_controller.state("save");
     dbg_assert(arguments.length === 0);
-    if(!this.device_plugins.length) return this.v86.save_state();
-    return this.with_device_state(() => this.save_with_plugins(() => this.v86.save_state()), true);
+    if(!this.device_plugins.length && !this.adapter_host_state()) return this.v86.save_state();
+    return this.with_device_state(async () => {
+        if(this.adapter_host_state()) await this.v86.cpu.devices.graphics_adapter.prepare_save();
+        return this.save_with_plugins(() => this.v86.save_state());
+    }, true);
 };
 
 /**
@@ -1251,8 +1312,11 @@ V86.prototype.save_state_stream = async function(write)
 {
     if(typeof write !== "function") throw new TypeError("Snapshot writer must be a function");
     if(this.worker_controller) return this.worker_controller.state_stream("save", write);
-    if(!this.device_plugins.length) return this.v86.save_state_stream(write);
-    return this.with_device_state(() => this.save_with_plugins(() => this.v86.save_state_stream(write)), true);
+    if(!this.device_plugins.length && !this.adapter_host_state()) return this.v86.save_state_stream(write);
+    return this.with_device_state(async () => {
+        if(this.adapter_host_state()) await this.v86.cpu.devices.graphics_adapter.prepare_save();
+        return this.save_with_plugins(() => this.v86.save_state_stream(write));
+    }, true);
 };
 
 /**
@@ -1266,6 +1330,16 @@ V86.prototype.restore_state_stream = async function(source)
     if(this.worker_controller) return this.worker_controller.state_stream("restore", source);
     if(!this.device_plugins.length) return this.v86.restore_state_stream(source);
     return this.with_device_state(() => this.restore_with_plugins(() => this.v86.restore_state_stream(source)), false);
+};
+
+/**
+ * Whether the display adapter keeps state on the GPU that a snapshot fetches
+ * @return {boolean}
+ */
+V86.prototype.adapter_host_state = function()
+{
+    const adapter = this.v86 && this.v86.cpu.devices.graphics_adapter;
+    return !!adapter && adapter.has_host_state();
 };
 
 /**
@@ -1598,6 +1672,20 @@ V86.prototype.screen_set_scale = function(sx, sy)
 };
 
 /**
+ * Tell the display adapter what size the page would show the guest's display
+ * at, such as the size of its window. Adapters that can ask the guest to
+ * change its resolution do (virtio_gpu); the others ignore it.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @param {number=} display which of the guest's displays (0, the first)
+ */
+V86.prototype.set_display_size = function(width, height, display)
+{
+    this.bus.send("display-host-size", [width >>> 0, height >>> 0, display >>> 0]);
+};
+
+/**
  * Go fullscreen (only browsers)
  */
 V86.prototype.screen_go_fullscreen = function()
@@ -1916,6 +2004,10 @@ V86.prototype.automatically = function(steps)
  */
 V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
 {
+    if(this.graphics_adapter === "none")
+    {
+        throw new Error("wait_until_vga_screen_contains: there is no VGA text screen (graphics_adapter is \"none\")");
+    }
     const match_multi = Array.isArray(expected);
     const timeout_msec = options?.timeout_msec || 0;
     const contains_expected = (screen_line, pattern) => pattern.test ? pattern.test(screen_line) : screen_line.startsWith(pattern);

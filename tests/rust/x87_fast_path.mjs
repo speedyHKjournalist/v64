@@ -5,7 +5,7 @@ import { PerformanceRecorder } from "../../src/browser/performance_recorder.js";
 const bios = Uint8Array.from(fs.readFileSync("build/x87-fast-test.bin")).buffer;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function run(wasm, interpreted, fast_math = false) {
-    const vm = new V86({ wasm_path: wasm, bios: { buffer: bios }, memory_size: 32 << 20,
+    const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: wasm, bios: { buffer: bios }, memory_size: 32 << 20,
         disable_jit: interpreted, disable_keyboard: true, disable_mouse: true,
         x87_fast_math: fast_math,
         disable_speaker: true, net_device: { type: "none" }, autostart: false });

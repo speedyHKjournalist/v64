@@ -17,6 +17,7 @@ const SIPI = 2;
 for(const count of [2, 4, 8])
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { url: root + "bios/seabios.bin" },
         vga_bios: { url: root + "bios/vgabios.bin" },
         acpi: true,

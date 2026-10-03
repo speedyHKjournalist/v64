@@ -1,0 +1,22 @@
+[package]
+name = "vx_naga"
+version = "0.1.0"
+edition = "2021"
+description = "SPIR-V to WGSL for VX (virtio-gpu's Venus contexts), with naga"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+naga = { version = "30.0.0", default-features = false, features = ["spv-in", "wgsl-out"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
+
+# (not a member of v86's workspace)
+[workspace]

@@ -65,7 +65,7 @@ function firmware_inputs(cpu, cores)
 
 for(const cores of [1, 2, 3, 4, 5, 6, 7, 8])
 {
-    const emulator = new V86({ acpi: true, cpu_cores: cores, memory_size: 16 << 20,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: cores, memory_size: 16 << 20,
         disable_jit: true, autostart: false, log_level: 0 });
     let timeout;
     try
@@ -142,7 +142,7 @@ for(const count of [0, -1, 1.5, 9])
 // multicore profile cannot hide the topology leaves it requires.
 for(const [cores, level, rejected] of [[1, 2, false], [2, 2, true], [2, 0x1F, false]])
 {
-    const emulator = new V86({ acpi: true, cpu_cores: cores, cpuid_level: level,
+    const emulator = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: cores, cpuid_level: level,
         memory_size: 16 << 20, disable_jit: true, autostart: false, log_level: 0 });
     let timeout;
     try

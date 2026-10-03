@@ -49,6 +49,7 @@ if(!TEST_RELEASE_BUILD)
 for(const [name, screen] of [["dummy", undefined], ["ansi", { ansi: true }]])
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { url: __dirname + "/../../bios/seabios.bin" },
         vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
         fda: { url: __dirname + "/../../images/freedos722.img" },
@@ -105,6 +106,7 @@ async function count_retrace_ticks(mode, cpu_clock)
     floppy[511] = 0xAA;
 
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { url: __dirname + "/../../bios/seabios.bin" },
         vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
         fda: { buffer: floppy.buffer },

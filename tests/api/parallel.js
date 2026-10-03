@@ -70,6 +70,7 @@ function dump_screen(emulator)
 async function test_parallel_port(lpt, enable_lpt2)
 {
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         ...base_config,
         parallel1: enable_lpt2,
     });
@@ -128,6 +129,13 @@ async function test_parallel_port(lpt, enable_lpt2)
             parallel_control.length > 0,
             "expected DOS " + dos_device + " write to drive the parallel control lines"
         );
+
+        // after a snapshot, the status register still reads as a byte
+        // (nothing latched is undefined, which a snapshot stores as null)
+        const state = await emulator.save_state();
+        await emulator.restore_state(state);
+        const status = emulator.v86.cpu.io.port_read8((lpt === 0 ? 0x378 : 0x278) + 1);
+        assert.equal(typeof status, "number", "the status register after a restore");
     }
     catch(err)
     {

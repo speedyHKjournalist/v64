@@ -6,7 +6,7 @@ import { STATE_OFFSETS } from "../../src/state_layout.js";
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 async function machine(count)
 {
-    const vm = new V86({ acpi: true, cpu_cores: count, memory_size: 16 << 20,
+    const vm = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: count, memory_size: 16 << 20,
         disable_jit: true, autostart: false, log_level: 0,
         cpu_clock: { mode: "deterministic", instructions_per_ms: 100 }, cpu_schedule_seed: 42 });
     await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));

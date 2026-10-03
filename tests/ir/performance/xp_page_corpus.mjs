@@ -7,8 +7,9 @@ import { V86 } from "../../../build/libv86.mjs";
 const [disk, out, wasm = "build/v86-ir-runtime.wasm"] = process.argv.slice(2);
 assert(disk && out);
 const vm = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path: wasm, jit_backend: "ir",
-    memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
+    memory_size: 2048 * 1024 * 1024, vram_size: 16 * 1024 * 1024,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: { url: disk, size: fs.statSync(disk).size, async: true },
     x87_fast_math: true, x87_jit_cache: true,

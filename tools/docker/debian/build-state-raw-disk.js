@@ -22,12 +22,13 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", handle_key);
 
 var emulator = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path: path.join(V86_ROOT, "build/v86.wasm"),
     bios: { url: path.join(V86_ROOT, "/bios/seabios.bin") },
     vga_bios: { url: path.join(V86_ROOT, "/bios/vgabios.bin") },
     autostart: true,
     memory_size: 1636 * 1024 * 1024,
-    vga_memory_size: 8 * 1024 * 1024,
+    vram_size: 8 * 1024 * 1024,
     network_relay_url: "<UNUSED>",
     bzimage: { url: path.join(V86_ROOT, "images/debian-bzImage") },
     initrd: { url: path.join(V86_ROOT, "images/debian-initrd") },

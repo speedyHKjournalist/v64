@@ -16,7 +16,7 @@ const machines = [];
 const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
 try {
     for(const { wasm, options } of arms) {
-        const vm = new V86({ wasm_path: wasm, ...options, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
+        const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: wasm, ...options, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
             disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });
         machines.push(vm);

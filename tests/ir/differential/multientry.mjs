@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const modules=[0,1,2].map(i=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-multientry/${i}-${opt}.wasm`))));
-const vm=new V86({wasm_path:process.argv[2]||"build/v86-ir-test.wasm",memory_size:32<<20,
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:process.argv[2]||"build/v86-ir-test.wasm",memory_size:32<<20,
     bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 try {

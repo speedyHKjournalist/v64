@@ -34,6 +34,7 @@ for(const name of ["copy","dce","gvn","cfg"]) {
 console.log(`PASS: ${standalone_comparisons} standalone IR-10 copy/DCE/GVN/CFG per-pass comparisons`);
 
 const vm = new V86({
+    graphics_adapter: "bochs_vga",
     wasm_path:process.argv[2] || "build/v86-ir-test.wasm",
     memory_size:32<<20,
     bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},

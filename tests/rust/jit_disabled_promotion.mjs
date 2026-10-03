@@ -5,7 +5,7 @@ import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
 const wasm = process.argv[2] || "build/v86-debug.wasm";
 // Region tiers only; Tier 2 waits for an explicit promotion threshold below.
-const vm = new V86({ wasm_path: wasm, memory_size: 32 << 20, ir_tier0: false,
+const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: wasm, memory_size: 32 << 20, ir_tier0: false,
     ir_region_budget: { hot_threshold: 2, promotion_threshold: 1000000 },
     bios: { buffer: Uint8Array.from(fs.readFileSync("build/cpu-worker-test.bin")).buffer },
     disable_keyboard: true, disable_mouse: true, disable_speaker: true, net_device: { type: "none" } });

@@ -17,7 +17,32 @@
 // desktop: host and in-guest CPU load of the idle desktop, see host_window). While it runs, a line written to
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
-// "trace on|off" (WIN_USER_TRACE=1 enables it from the start).
+// "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
+// <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>",
+// "launch <command line>" (run by the launcher with cmd /c, see WIN_LAUNCHER),
+// "display <width> <height> [index]" (V86.set_display_size), "mouse <dx> <dy>",
+// "pointer <x> <y> <screen width> <screen height>",
+// "snapshot" (saved
+// and restored in place),
+// "svgalog on|off" (the SVGA3D commands other than DX and the frequent GB
+// ones, with their first words, as "svga3d-command" events), "svgashaders"
+// (the GB shaders' bytecode, as "svga3d-shader" events).
+// WIN_GRAPHICS_ADAPTER: the display adapter (bochs_vga; virtio_gpu; vmware_svga, whose
+// level WIN_SVGA_LEVEL pins; WIN_GPU_RENDERER=chrome gives it a 3D renderer, in
+// a headless Chrome, and the device its highest level, dx11);
+// WIN_CDROM=<iso>: a CD-ROM, e.g. with drivers to install; WIN_HDB=<image>: a
+// second disk in place of the tools disk, read-only like the first.
+// WIN_LAUNCHER=<guest path of LAUNCH.EXE>: started from the Run dialog once
+// the desktop shows; then "launch" runs programs as the user without typing
+// (WIN_LAUNCHER_ADMIN=1: elevated, through UAC once, so they are too).
+// WIN_NO_PROBE=1: no qualification probe (its Run dialog takes the focus from
+// full-screen programs), and no signing in again unless a password box shows.
+// "savestate <file>": the machine saved to <file>.state, with what the guest
+// wrote to its disks (<file>.hda.ovl, <file>.hdb.ovl) and the harness's own
+// (<file>.json); WIN_STATE_LOAD=<file> starts from there instead of booting
+// (same WIN_* machine settings; the session is signed in, the launcher runs).
+// WIN_RATES=<s>: every <s> seconds, the SVGA3D commands per second
+// ("svga3d-rates": presents among them, for frame rates).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -50,21 +75,30 @@ const probe32 = build("i686-w64-mingw32-gcc", "_entry@0", path.join(out, "PROBE3
 const cpuload = build("x86_64-w64-mingw32-gcc", "entry", path.join(out, "CPULOAD.EXE"), "tests/x64/windows_cpuload.c");
 const tools = new MemoryDisk(make_fat16({"PROBE64.EXE": probe64, "PROBE32.EXE": probe32, "CPULOAD.EXE": cpuload}));
 const source = new ReadOnlyOverlayDisk(image_path);
+// WIN_HDB=<image>: that disk (e.g. retro-gaming-site/game/3dmark06.img) in
+// place of the tools disk, never written either (its writes stay in memory)
+const hdb_path = process.env.WIN_HDB && path.resolve(process.env.WIN_HDB);
+const hdb_stat = hdb_path && fs.statSync(hdb_path);
+const hdb = hdb_path ? new ReadOnlyOverlayDisk(hdb_path) : tools;
 // Overlay file: "V86OVL1\0", image size (u64), sector count (u32), the
 // sector numbers (u32 each), then their contents
-if(process.env.WIN_OVERLAY_LOAD)
+function load_overlay(disk, filename)
 {
-    const file = fs.readFileSync(process.env.WIN_OVERLAY_LOAD);
+    const file = fs.readFileSync(filename);
     assert.equal(file.toString("latin1", 0, 8), "V86OVL1\0", "overlay file");
-    assert.equal(Number(file.readBigUInt64LE(8)), source.byteLength, "overlay of this image");
+    assert.equal(Number(file.readBigUInt64LE(8)), disk.byteLength, "overlay of this image");
     const count = file.readUInt32LE(16);
     const sectors = new Uint32Array(file.buffer.slice(file.byteOffset + 20, file.byteOffset + 20 + count * 4));
     const bytes = new Uint8Array(file.buffer, file.byteOffset + 20 + count * 4, count * 512);
-    source.set_state([1, source.byteLength, sectors, bytes]);
+    disk.set_state([1, disk.byteLength, sectors, bytes]);
 }
-function save_overlay(filename)
+const state_load = process.env.WIN_STATE_LOAD && path.resolve(process.env.WIN_STATE_LOAD);
+if(state_load) load_overlay(source, state_load + ".hda.ovl");
+else if(process.env.WIN_OVERLAY_LOAD) load_overlay(source, process.env.WIN_OVERLAY_LOAD);
+if(state_load && hdb_path && fs.existsSync(state_load + ".hdb.ovl")) load_overlay(hdb, state_load + ".hdb.ovl");
+function save_overlay(filename, disk = source)
 {
-    const [, size, sectors, bytes] = source.get_state();
+    const [, size, sectors, bytes] = disk.get_state();
     const header = Buffer.alloc(20);
     header.write("V86OVL1\0", 0, "latin1");
     header.writeBigUInt64LE(BigInt(size), 8);
@@ -73,10 +107,18 @@ function save_overlay(filename)
 }
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+// WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (the default level, dx11)
+const remote_renderer = process.env.WIN_GPU_RENDERER === "chrome" ?
+    await (await import("./gpu_remote_renderer.mjs")).create_remote_renderer() : null;
 const vm = new V86({
+    graphics_adapter: process.env.WIN_GRAPHICS_ADAPTER || "bochs_vga",
+    // WIN_SVGA_LEVEL: pin what vmware_svga declares (2d, 2d-full, ...)
+    ...(process.env.WIN_SVGA_LEVEL || remote_renderer ? {graphics_adapter_test: {level: process.env.WIN_SVGA_LEVEL || undefined,
+        renderer: remote_renderer && remote_renderer.renderer}} : {}),
     wasm_path: process.env.WASM_PATH,
+    ...(process.env.WIN_CDROM ? {cdrom: {url: path.resolve(process.env.WIN_CDROM)}} : {}),
     bios: {url: root + "bios/seabios.bin"}, vga_bios: {url: root + "bios/vgabios.bin"},
-    hda: source, hdb: tools, memory_size: memory_mb * 1048576, vga_memory_size: 16 << 20,
+    hda: source, hdb, memory_size: memory_mb * 1048576, vram_size: 16 << 20,
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
     // WIN_QEMU_COMPATIBLE=1: devices where QEMU, which the image was installed with, had them
     qemu_compatible: !!+process.env.WIN_QEMU_COMPATIBLE,
@@ -110,14 +152,31 @@ async function profile_window()
     await profiler.post("Profiler.start");
     // page functions are named x64_page_<linear page>: name the guest module
     // of each (<out>/modules.json, for offline profiles by guest module)
+    // (compatibility-mode code: the 32-bit compiler's t0_<linear page>)
     if(!cpu) return;
-    const limit = performance.now() + 300;
-    for(const node of profile.nodes)
+    const self = new Map(), by_id = new Map(profile.nodes.map(node => [node.id, node]));
+    let total = 0;
+    profile.samples.forEach((id, i) => {
+        const d = profile.timeDeltas[i] || 0, name = by_id.get(id).callFrame.functionName;
+        total += d;
+        const match = name.match(/^(?:x64_page_|t0_)([0-9a-f]+)$/);
+        if(match) self.set(match[1], (self.get(match[1]) || 0) + d);
+    });
+    const limit = performance.now() + 2000;
+    for(const [page] of [...self].sort((a, b) => b[1] - a[1]))
     {
-        const match = node.callFrame.functionName.match(/^x64_page_([0-9a-f]+)$/);
-        if(match && !page_modules[match[1]] && performance.now() < limit) page_modules[match[1]] = guest_module(BigInt("0x" + match[1]));
+        if(page_modules[page] === undefined && performance.now() < limit) page_modules[page] = guest_module(BigInt("0x" + page));
     }
     fs.writeFileSync(path.join(out, "modules.json"), JSON.stringify(page_modules, null, 1));
+    // the generated code's time by guest module (% of the window)
+    const modules = new Map();
+    for(const [page, t] of self)
+    {
+        const m = page_modules[page], name = m ? m.replace(/\+0x[0-9a-f]+$/, "") : BigInt("0x" + page) >= 0xFFFF800000000000n ? "kernel ?" : "user ?";
+        modules.set(name, (modules.get(name) || 0) + t);
+    }
+    console.log("X64_WIN_PROFILE_MODULES " + JSON.stringify([...modules].sort((a, b) => b[1] - a[1]).slice(0, 20)
+        .map(([name, t]) => [name, +(100 * t / total).toFixed(2)])));
 }
 // (the most recent address spaces first)
 const page_modules = {}, seen_cr3 = new Set(), module_headers = new Map();
@@ -169,6 +228,17 @@ const started = performance.now();
 const elapsed = () => Math.round((performance.now() - started) / 1000);
 let powered_off = null;
 vm.add_listener("acpi-power-off", state => { powered_off = state; });
+// the guest drivers' logs through the VMware backdoor (vm3d's release log)
+vm.add_listener("vmware-log", text => event("guest-log", {text: String(text).slice(0, 400)}));
+vm.add_listener("vmware-rpci", text => {
+    // (the launcher asks once a second)
+    if(String(text) !== "info-get guestinfo.v86.run") event("rpci", {text: String(text).slice(0, 200)});
+});
+// the launcher (tools/windows/launch.c) in the user's session, once it said so
+let launcher_ready = false, launch_serial = 0;
+vm.add_listener("vmware-log", text => { if(String(text) === "launch: ready") launcher_ready = true; });
+const backdoor_seen = new Set();
+vm.add_listener("vmware-backdoor-unknown", command => { if(!backdoor_seen.has(command)) { backdoor_seen.add(command); event("backdoor-unknown", {command}); } });
 const report = {image: {path: image_path, size: source_stat.size, mtime_ms: source_stat.mtimeMs}, cores, jit,
     parallel: !!+process.env.WIN_PARALLEL, memory_mb, modes: [], events: [], results: {}};
 const event = (kind, detail = {}) => { const e = {s: elapsed(), kind, ...detail}; report.events.push(e); console.log("X64_WIN_EVENT " + JSON.stringify(e)); };
@@ -206,23 +276,46 @@ const enter = () => press([28, 156]);
 // vga.svga_memory is a lib.js view (a Proxy that builds a typed array on
 // every element access): read the frame buffer through one plain array
 const svga_bytes = () => new Uint8Array(cpu.wasm_memory.buffer, cpu.devices.vga.svga_memory.byteOffset, cpu.devices.vga.vga_memory_size);
+// The picture on screen: vmware_svga's first screen object (RGBA), its
+// register mode, virtio_gpu's first display (RGBA), or the VGA core's VBE
+// mode (BGR in the frame buffer); null in text and planar modes
+function frame_buffer()
+{
+    const gpu = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"];
+    const scanout = gpu && gpu.active && gpu.scanouts[0];
+    if(scanout && scanout.rgba) return {width: scanout.width, height: scanout.height, bpp: 32, pitch: scanout.width * 4, offset: 0, rgba: scanout.rgba};
+    const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+    const screen = svga && svga.svga_active() && svga.screens.screens.get(0);
+    if(screen) return {width: screen.width, height: screen.height, bpp: 32, pitch: screen.width * 4, offset: 0, rgba: screen.rgba};
+    if(svga && svga.svga_active()) return {width: svga.width, height: svga.height, bpp: svga.bpp, pitch: svga.pitch(), offset: 0};
+    const vga = cpu.devices.vga;
+    if(!vga.svga_enabled) return null;
+    const bytes = vga.svga_bpp / 8;
+    return {width: vga.svga_width, height: vga.svga_height, bpp: vga.svga_bpp, pitch: vga.svga_width * bytes, offset: vga.svga_offset * bytes};
+}
+// 1024x768 at 16/24/32 bpp, as the pixel heuristics below expect
+function desktop_mode()
+{
+    const fb = frame_buffer();
+    return fb && fb.width === 1024 && fb.height === 768 && [32, 24, 16].includes(fb.bpp) ? fb : null;
+}
 let pixel_memory = null, pixel_memory_at = -1;
 function pixel(x, y)
 {
-    const vga = cpu.devices.vga, bytes_per = vga.svga_bpp / 8;
+    const fb = frame_buffer(), bytes_per = fb.bpp / 8;
     // (one array per polling round: the wasm memory may grow in between)
     if(pixel_memory_at !== Math.floor(performance.now() / 50) || pixel_memory.buffer !== cpu.wasm_memory.buffer)
     {
         pixel_memory = svga_bytes();
         pixel_memory_at = Math.floor(performance.now() / 50);
     }
-    const at = (vga.svga_offset + y * vga.svga_width + x) * bytes_per, m = pixel_memory;
+    const at = fb.offset + y * fb.pitch + x * bytes_per, m = fb.rgba || pixel_memory;
+    if(fb.rgba) return [m[at], m[at + 1], m[at + 2]];
     return bytes_per === 2 ? [(m[at + 1] >> 3) << 3, (m[at] >> 5 | (m[at + 1] & 7) << 3) << 2, (m[at] & 31) << 3] : [m[at + 2], m[at + 1], m[at]];
 }
 function password_box_visible()
 {
-    const vga = cpu.devices.vga;
-    if(!vga.svga_enabled || vga.svga_width !== 1024 || vga.svga_height !== 768 || ![32, 24, 16].includes(vga.svga_bpp)) return false;
+    if(!desktop_mode()) return false;
     const background = pixel(100, 100), tile = pixel(260, 190);
     return [[620, 248], [680, 248], [720, 256], [735, 240]].every(([x, y]) => pixel(x, y).every(c => c > 230)) &&
         // a plain background, not white, around the gray user tile
@@ -233,8 +326,7 @@ function password_box_visible()
 // panes split by a vertical gap)
 function desktop_visible()
 {
-    const vga = cpu.devices.vga;
-    if(!vga.svga_enabled || vga.svga_width !== 1024 || vga.svga_height !== 768 || ![32, 24, 16].includes(vga.svga_bpp)) return false;
+    if(!desktop_mode()) return false;
     const white = (x, y) => pixel(x, y).every(c => c > 220);
     return [[16, 744], [30, 744], [16, 752], [30, 752]].every(([x, y]) => white(x, y)) && !white(23, 746) && !white(10, 745) && !white(40, 745);
 }
@@ -263,8 +355,7 @@ async function sign_in()
 // focus border
 function run_dialog_ready()
 {
-    const vga = cpu.devices.vga;
-    if(!vga.svga_enabled || vga.svga_width !== 1024 || vga.svga_height !== 768 || ![32, 24, 16].includes(vga.svga_bpp)) return false;
+    if(!desktop_mode()) return false;
     const white = (x, y) => pixel(x, y).every(c => c > 245);
     const [r, , b] = pixel(398, 622);
     return white(300, 555) && white(300, 600) && white(100, 650) && pixel(60, 700).every(c => Math.abs(c - 240) <= 6) && b > 200 && r < 120;
@@ -287,6 +378,33 @@ async function run_command(line)
     return true;
 }
 
+// A command line for cmd /c, elevated: PowerShell's Start-Process -Verb
+// RunAs from the Run dialog, then Alt+Y on the UAC prompt (the line must not
+// contain quotes)
+async function run_admin(line)
+{
+    event("runadmin", {line});
+    if(!await run_command(`powershell -c "start-process cmd -verb runas -argumentlist '/c ${line}'"`)) return false;
+    // The UAC prompt dims the desktop (its Start logo is gone): wait for it,
+    // answer Yes, and wait for the desktop to come back
+    for(const limit = performance.now() + 600000; performance.now() < limit && desktop_visible();)
+    {
+        await delay(1000);
+        screenshot(false);
+    }
+    if(desktop_visible()) { event("uac-missing"); return false; }
+    await delay(5000);
+    screenshot(true);
+    event("uac");
+    for(let i = 0; i < 5 && !desktop_visible(); i++)
+    {
+        await press([0x38, 0x15, 0x95, 0xB8]); // Alt+Y
+        for(const limit = performance.now() + 30000; performance.now() < limit && !desktop_visible();) await delay(500);
+    }
+    event(desktop_visible() ? "uac-accepted" : "uac-stuck");
+    return desktop_visible();
+}
+
 function text_screen()
 {
     const vga = cpu.devices.vga;
@@ -297,15 +415,55 @@ function text_screen()
     }).join("").trimEnd()).join("\n").trim();
 }
 let last_hash = "", shots = 0, last_saved = 0, last_change = 0, dark_fraction = 1, colors = 0;
+let svga_seen = "";
+// The SVGA II registers as the guest's driver sets them, logged on change
+function observe_svga()
+{
+    // virtio_gpu: whether its displays are on screen, what they show, what the driver sent
+    const gpu = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"];
+    if(gpu)
+    {
+        // (the transport: v86's VirtIO object, from the source tree)
+        const t = cpu.devices.graphics_adapter.pci_device;
+        const state = {active: gpu.active, scanouts: gpu.scanouts.map(sc => [sc.enabled, sc.host_width, sc.host_height, sc.resource_id, sc.width, sc.height]),
+            resources: gpu.resources.size, errors: gpu.stats.errors, last_error: gpu.stats.last_error.toString(16), commands: gpu.stats.commands,
+            cursor: [gpu.stats.cursor_updates, gpu.stats.cursor_moves, gpu.cursor.width, gpu.cursor.height, gpu.cursor.visible],
+            status: t && t.device_status, features: t && Array.from(t.driver_feature || [], f => (f >>> 0).toString(16)),
+            queues: t && t.queues && t.queues.map(q => [q.size, q.enabled, (q.desc_addr || 0).toString(16), q.avail_last_idx]),
+            isr: t && t.isr_status, irq_line: cpu.devices.pci.device_spaces[cpu.devices.graphics_adapter.pci_id][15] & 0xFF};
+        const key = JSON.stringify(state);
+        if(key !== svga_seen && performance.now() >= svga3d_next) { svga_seen = key; svga3d_next = performance.now() + 5000; event("virtio-gpu", state); }
+        return;
+    }
+    const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+    if(!svga) return;
+    const state = {level: svga.level, enable: svga.enable, mode: `${svga.width}x${svga.height}x${svga.bpp}`, pitch: svga.pitch(),
+        guest_id: svga.guest_id, config_done: svga.config_done, irq_mask: svga.irq_mask, id: svga.id.toString(16),
+        screens: [...svga.screens.screens.values()].map(sc => [sc.id, sc.x, sc.y, sc.width, sc.height, sc.backing ? sc.backing.gmr : -1]),
+        unknown: svga.stats ? svga.stats.last_unknown : 0, errors: svga.stats ? svga.stats.errors : 0};
+    const key = JSON.stringify(state);
+    if(key !== svga_seen) { svga_seen = key; event("svga", state); }
+    // the 3D commands so far, every 30 s while they change
+    if(svga.svga3d && performance.now() >= svga3d_next)
+    {
+        svga3d_next = performance.now() + 30000;
+        const counts = JSON.stringify(svga.svga3d.counts);
+        const activity = counts + JSON.stringify(svga.stats);
+        if(activity !== svga3d_seen) { svga3d_seen = activity; event("svga3d", {counts: svga.svga3d.counts, bytes: svga.svga3d.bytes, surfaces: svga.svga3d.surfaces.size, contexts: svga.svga3d.contexts.size, device: svga.stats, warnings: svga.svga3d.warnings}); }
+    }
+}
+let svga3d_next = 0, svga3d_seen = "";
 function screenshot(force)
 {
-    const vga = cpu.devices.vga, width = vga.svga_width, height = vga.svga_height;
-    if(!vga.svga_enabled || !width || !height || ![32, 24, 16].includes(vga.svga_bpp)) return null;
-    const bytes_per = vga.svga_bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = svga_bytes();
+    const fb = frame_buffer();
+    if(!fb || !fb.width || !fb.height || ![32, 24, 16].includes(fb.bpp)) return null;
+    const width = fb.width, height = fb.height;
+    const bytes_per = fb.bpp / 8, stride = width * 3 + 1, raw = Buffer.alloc(stride * height), memory = fb.rgba || svga_bytes();
     for(let y = 0; y < height; y++) for(let x = 0; x < width; x++)
     {
-        const from = (vga.svga_offset + y * width + x) * bytes_per, to = y * stride + 1 + x * 3;
-        if(bytes_per === 2)
+        const from = fb.offset + y * fb.pitch + x * bytes_per, to = y * stride + 1 + x * 3;
+        if(fb.rgba) { raw[to] = memory[from]; raw[to + 1] = memory[from + 1]; raw[to + 2] = memory[from + 2]; }
+        else if(bytes_per === 2)
         {
             const v = memory[from] | memory[from + 1] << 8;
             raw[to] = (v >> 11 & 31) << 3; raw[to + 1] = (v >> 5 & 63) << 2; raw[to + 2] = (v & 31) << 3;
@@ -343,7 +501,7 @@ function stats()
 {
     const ex = cpu.wm.exports;
     const tier = ex.x64_page_stat ? Object.fromEntries([["compiled", 0], ["native", 1], ["retries", 2], ["unknown", 3], ["steps", 4], ["invalidated", 5],
-        ["failed", 7], ["recompiled", 8], ["evicted", 11], ["live", 12], ["activations", 13], ["invlpg", 14], ["cr_writes", 15], ["access_misses", 16], ["lfb_fills", 17], ["cr3_keep_global", 18], ["jac_large_flush", 19], ["unaligned_reads", 25], ["distinct", 21], ["ms_in_calls", 20], ["ms_in_execute", 22], ["ms_first_calls", 23], ["bytes_compiled", 24]]
+        ["failed", 7], ["recompiled", 8], ["evicted", 11], ["live", 12], ["activations", 13], ["invlpg", 14], ["cr_writes", 15], ["access_misses", 16], ["lfb_fills", 17], ["cr3_keep_global", 18], ["jac_large_flush", 19], ["unaligned_reads", 25], ["distinct", 21], ["ms_in_calls", 20], ["ms_in_execute", 22], ["ms_first_calls", 23], ["bytes_compiled", 24], ["cr0_writes", 26], ["cr3_writes", 27], ["cr4_writes", 28], ["full_flushes", 29], ["walks", 30], ["compat_fills", 31], ["compat_refills", 32]]
         .map(([name, i]) => [name, ex.x64_page_stat(i)])) : null;
     const d = cpu.get_diagnostics();
     return {page_tier: tier, cores: d.cores.map(core => ({state: core.state, ip: core.linear_ip, cs: core.cs, retired: core.retired_instructions, halted: core.halted})),
@@ -394,6 +552,16 @@ function sample_rip()
     const key = compat ? "compat:0x" + rip.toString(16) :
         kernel_base !== null && rip >= kernel_base && rip < kernel_base + 0x1000000n ? "nt+0x" + (rip - kernel_base).toString(16) : "0x" + rip.toString(16);
     rip_samples.set(key, (rip_samples.get(key) || 0) + 1);
+    if(!rip_raw.has(key)) rip_raw.set(key, rip);
+}
+// (a sampled key's RIP, for its code bytes in the report)
+const rip_raw = new Map();
+function rip_bytes(key)
+{
+    const rip = rip_raw.get(key);
+    if(rip === undefined) return null;
+    const at = physical(current_cr3(), rip - 16n);
+    return at === null ? null : Buffer.from(cpu.mem8.subarray(at, at + 32)).toString("hex");
 }
 // WIN_USER_TRACE=1: exceptions taken from user mode (compatibility mode: all;
 // 64-bit: all but #PF), with the code at the faulting RIP, read while the
@@ -445,6 +613,35 @@ try
 {
     await new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); });
     cpu = vm.v86.cpu;
+    // virtio_gpu: every device status the driver writes, every control
+    // command and every reset of the transport, as they happen
+    const virtio = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"] &&
+        cpu.devices.graphics_adapter.pci_device;
+    if(virtio)
+    {
+        const status_field = virtio.mmio_fields.find(field => field.offset === 20);
+        const write_status = status_field.write;
+        status_field.write = value => { event("virtio-status", {value, before: virtio.device_status}); write_status(value); };
+        const gpu = cpu.devices.graphics_adapter.device["virtio_gpu"];
+        const control = gpu.control.bind(gpu);
+        let logged = 0;
+        gpu.control = bytes => {
+            const response = control(bytes);
+            const type = bytes[0] | bytes[1] << 8, result = response[0] | response[1] << 8;
+            if(logged++ < 200 || result >= 0x1200) event("virtio-command", {type: type.toString(16), result: result.toString(16), length: bytes.length});
+            return response;
+        };
+        const needs_reset = virtio.needs_reset.bind(virtio);
+        virtio.needs_reset = () => { event("virtio-needs-reset"); needs_reset(); };
+    }
+    // WIN_GUESTINFO=key=value;...: what the VMware backdoor answers for
+    // guestinfo.<key> (VMware's drivers read their settings so, e.g.
+    // loglevel.vm3d.all=10 or svga.wddm.miniportLogging=TRUE)
+    for(const entry of (process.env.WIN_GUESTINFO || "").split(";").filter(Boolean))
+    {
+        const at = entry.indexOf("=");
+        cpu.devices.vmware.guestinfo.set(entry.slice(0, at), entry.slice(at + 1));
+    }
     if(process.env.WIN_X64_PROFILE !== "0") cpu.wm.exports.set_x64_test_capabilities(1);
     if(process.env.WIN_PAGE_TIER === "0") cpu.wm.exports.x64_page_set_enabled(0);
     if(process.env.WIN_STEP_PROFILE) cpu.wm.exports.x64_page_profile(1);
@@ -524,11 +721,137 @@ try
     };
     const run_cores = cpu.run_cores.bind(cpu);
     cpu.run_cores = () => { try { return run_cores(); } catch(error) { execution_error = error; vm.stop(); return 100; } };
+    let resumed = null;
+    if(state_load)
+    {
+        const fd = fs.openSync(state_load + ".state", "r"), size = fs.fstatSync(fd).size;
+        await vm.restore_state_stream({size, read: async (offset, length) => {
+            const bytes = new Uint8Array(length);
+            for(let done = 0; done < length;) done += fs.readSync(fd, bytes, done, length - done, offset + done);
+            return bytes;
+        }});
+        fs.closeSync(fd);
+        resumed = JSON.parse(fs.readFileSync(state_load + ".json", "utf8"));
+        launch_serial = resumed.launch_serial;
+        launcher_ready = resumed.launcher_ready;
+        event("state-loaded", {file: state_load, bytes: size});
+    }
     vm.run();
     const deadline = performance.now() + +(process.env.WIN_TIMEOUT_MS || 3600000);
     let next_profile = performance.now() + 1000 * +(process.env.WIN_CPU_PROFILE || 0);
     let next_report = 0, next_samples = performance.now() + 60000, next_shot = 0, resets = 0, signed_in = false, probe_sent = 0, text_seen = "";
     let shutdown_at = 0, shutdown_sent = false, shutdown_deadline = 0;
+    // (a loaded state is signed in, past the desktop)
+    if(resumed) { signed_in = true; probe_sent = Infinity; report.desktop_s = elapsed(); }
+    let next_rates = performance.now() + 1000 * +(process.env.WIN_RATES || 0), rates_counts = null, rates_at = performance.now(), rates_retired = 0;
+    let rate_samples = {n: 0, halted: 0, backlog: 0, waiting: 0};
+    // a line of command.txt (see the top of this file), or of WIN_SETUP
+    // (a bad line is reported, not fatal: the guest's state is worth more)
+    const command = line => run_one(line).catch(error => {
+        if(error === execution_error) throw error;
+        event("command-failed", {line, error: String(error && error.message || error)});
+    });
+    const run_one = async line => {
+        const [verb, ...rest] = line.split(" "), argument = rest.join(" ");
+        event("command", {line});
+        if(verb === "key") await press(argument.split(/\s+/).map(v => parseInt(v, 16)));
+        else if(verb === "type") await type(argument);
+        else if(verb === "run") await run_command(argument);
+        else if(verb === "runadmin") await run_admin(argument);
+        else if(verb === "enter") await enter();
+        else if(verb === "space") await press([57, 185]);
+        else if(verb === "password") { await type(password); await enter(); }
+        else if(verb === "shot") screenshot(true);
+        // the page's size for a display (V86.set_display_size; virtio_gpu tells the guest)
+        else if(verb === "display") vm.set_display_size(...argument.split(/\s+/).map(Number));
+        // a relative mouse movement (PS/2), in pixels, y up
+        else if(verb === "mouse") vm.bus.send("mouse-delta", argument.split(/\s+/).map(Number));
+        // an absolute position on a screen of the given size (the VMware
+        // backdoor's mouse, which takes over from PS/2 once its driver runs)
+        else if(verb === "pointer") vm.bus.send("mouse-absolute", argument.split(/\s+/).map(Number));
+        // the machine into files, to start from later (WIN_STATE_LOAD)
+        // (streamed: with the GPU's contents a state passes 4 GiB)
+        else if(verb === "savestate")
+        {
+            const file = path.resolve(argument);
+            await vm.stop();
+            let bytes = 0;
+            try
+            {
+                const fd = fs.openSync(file + ".state", "w");
+                try { await vm.save_state_stream(chunk => { fs.writeSync(fd, chunk); bytes += chunk.length; }); }
+                finally { fs.closeSync(fd); }
+                save_overlay(file + ".hda.ovl");
+                if(hdb_path) save_overlay(file + ".hdb.ovl", hdb);
+                fs.writeFileSync(file + ".json", JSON.stringify({launch_serial, launcher_ready, signed_in: true}));
+            }
+            finally { vm.run(); }
+            event("savestate", {file, bytes});
+        }
+        // a snapshot saved and restored in place (the disks are not in it, and unchanged)
+        else if(verb === "snapshot")
+        {
+            await vm.stop();
+            const state = await vm.save_state();
+            await vm.restore_state(state);
+            vm.run();
+            event("snapshot", {bytes: state.byteLength});
+        }
+        else if(verb === "rips") next_samples = 0;
+        else if(verb === "trace") { cpu.wm.exports.x64_user_trace_enable(argument !== "off"); trace_seen = 0; }
+        else if(verb === "launch")
+        {
+            if(!launcher_ready) event("launcher-missing");
+            cpu.devices.vmware.guestinfo.set("v86.run", ++launch_serial + " " + argument);
+        }
+        else if(verb === "svgashaders")
+        {
+            // the legacy (GB) shaders' bytecode, as "svga3d-shader" events
+            const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+            for(const [shid, sh] of svga && svga.svga3d ? svga.svga3d.gb_shaders : [])
+            {
+                const code = sh.code ? new Uint32Array(sh.code.buffer, sh.code.byteOffset, sh.code.byteLength >> 2) : [];
+                event("svga3d-shader", {shid, type: sh.type, code: Array.from(code, v => (v >>> 0).toString(16)).join(" ")});
+            }
+        }
+        else if(verb === "dxshaders")
+        {
+            // the DX shaders' tokens as they are bound, as "dx-shader" events
+            const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+            if(svga && svga.svga3d) svga.svga3d.shader_log = argument === "off" ? null : (shid, type, bytes) => {
+                const code = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 2);
+                event("dx-shader", {shid, type, code: Array.from(code, v => (v >>> 0).toString(16)).join(" ")});
+            };
+        }
+        else if(verb === "svgalog")
+        {
+            const svga = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+            const quiet = new Set([1094, 1098, 1119, 1126, 1127, 1135]);
+            if(svga && svga.svga3d) svga.svga3d.command_log = argument === "off" ? null : (id, p) => {
+                if(id >= 1143 && id < 1300 || quiet.has(id)) return;
+                event("svga3d-command", {id, n: p.length, body: Array.from(p.subarray(0, 24), v => (v >>> 0).toString(16)).join(" ")});
+            };
+        }
+        else if(verb === "wait")
+        {
+            // (the main loop is not running: keep watching the screen, and
+            // take commands from command.txt)
+            for(const limit = performance.now() + 1000 * +argument; performance.now() < limit;)
+            {
+                await delay(2000);
+                if(execution_error) throw execution_error;
+                screenshot(false);
+                observe_svga();
+                const file = path.join(out, "command.txt");
+                if(fs.existsSync(file))
+                {
+                    const lines = fs.readFileSync(file, "utf8").split("\n").map(line => line.trim()).filter(Boolean);
+                    fs.unlinkSync(file);
+                    for(const next of lines) await command(next);
+                }
+            }
+        }
+    };
     let idle_at = 0, idle_sent = false, next_host_window = 0;
     while(performance.now() < deadline)
     {
@@ -539,22 +862,41 @@ try
         {
             const lines = fs.readFileSync(command_file, "utf8").split("\n").map(line => line.trim()).filter(Boolean);
             fs.unlinkSync(command_file);
-            for(const line of lines)
-            {
-                const [verb, ...rest] = line.split(" "), argument = rest.join(" ");
-                event("command", {line});
-                if(verb === "key") await press(argument.split(/\s+/).map(v => parseInt(v, 16)));
-                else if(verb === "type") await type(argument);
-                else if(verb === "run") await run_command(argument);
-                else if(verb === "enter") await enter();
-                else if(verb === "space") await press([57, 185]);
-                else if(verb === "password") { await type(password); await enter(); }
-                else if(verb === "shot") screenshot(true);
-                else if(verb === "rips") next_samples = 0;
-                else if(verb === "trace") { cpu.wm.exports.x64_user_trace_enable(argument !== "off"); trace_seen = 0; }
-            }
+            for(const line of lines) await command(line);
         }
         poll_user_trace();
+        observe_svga();
+        // WIN_RATES: the SVGA3D commands per second since the last time;
+        // the guest's MIPS, how often its core was halted (sampled each
+        // loop) and the renderer's backlog (batches sent, not yet done)
+        const svga_rates = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["svga"];
+        if(+process.env.WIN_RATES && svga_rates && svga_rates.svga3d)
+        {
+            const s3 = svga_rates.svga3d, cores_now = cpu.get_diagnostics().cores, core = cores_now[0];
+            rate_samples.n++;
+            if(core.halted) rate_samples.halted++;
+            rate_samples.backlog += s3.submitted - s3.completed;
+            if(s3.completions.length) rate_samples.waiting++;
+            if(performance.now() >= next_rates)
+            {
+                const now = performance.now(), counts = {...s3.counts}, seconds = (now - rates_at) / 1000;
+                const retired = cores_now.reduce((sum, c) => sum + Number(c.retired_instructions), 0);
+                if(rates_counts)
+                {
+                    const rates = Object.entries(counts).map(([id, n]) => [id, (n - (rates_counts[id] || 0)) / seconds]).filter(r => r[1] > 0)
+                        .sort((a, b) => b[1] - a[1]).slice(0, 16).map(([id, r]) => [+id, +r.toFixed(2)]);
+                    const frames = ((counts[1127] || 0) - (rates_counts[1127] || 0)) / seconds;
+                    event("svga3d-rates", {s: +seconds.toFixed(1), frames: +frames.toFixed(2), mips: +((retired - rates_retired) / seconds / 1e6).toFixed(1),
+                        halted: +(rate_samples.halted / rate_samples.n).toFixed(2), completions_pending: +(rate_samples.waiting / rate_samples.n).toFixed(2),
+                        backlog: +(rate_samples.backlog / rate_samples.n).toFixed(1), rates});
+                }
+                rates_counts = counts;
+                rates_retired = retired;
+                rates_at = now;
+                rate_samples = {n: 0, halted: 0, backlog: 0, waiting: 0};
+                next_rates = now + 1000 * +process.env.WIN_RATES;
+            }
+        }
         if(profiler && performance.now() >= next_profile)
         {
             next_profile = performance.now() + 1000 * +process.env.WIN_CPU_PROFILE;
@@ -562,9 +904,10 @@ try
         }
         const text = text_screen();
         if(text && text !== text_seen) { text_seen = text; event("text", {text}); }
+        // (WIN_SHOT_MS: how often; a screenshot of 1280x1024 costs the host a few per cent at 2 s)
         if(performance.now() >= next_shot)
         {
-            next_shot = performance.now() + 2000;
+            next_shot = performance.now() + +(process.env.WIN_SHOT_MS || 2000);
             screenshot(false);
         }
         if(cpu.last_reset && cpu.last_reset.count !== resets)
@@ -579,6 +922,19 @@ try
             next_samples = performance.now() + 60000;
             const top = [...rip_samples].sort((a, b) => b[1] - a[1]).slice(0, 12);
             console.log("X64_WIN_RIPS " + JSON.stringify(top));
+            // the code around the three most sampled RIPs (16 bytes before, 16 from)
+            console.log("X64_WIN_RIP_BYTES " + JSON.stringify(top.slice(0, 3).map(([key]) => [key, rip_bytes(key)])));
+            // the samples by guest module (image name and the offset of the hottest RIP in it)
+            const modules = new Map();
+            for(const [key, n] of rip_samples)
+            {
+                const rip = rip_raw.get(key);
+                let name = "?";
+                try { const m = rip === undefined ? null : guest_module(rip); name = m ? m.replace(/\+0x[0-9a-f]+$/, "") : key.startsWith("nt+") ? "nt" : "?"; } catch(e) {}
+                modules.set(name, (modules.get(name) || 0) + n);
+            }
+            console.log("X64_WIN_RIP_MODULES " + JSON.stringify([...modules].sort((a, b) => b[1] - a[1]).slice(0, 16)));
+            rip_raw.clear();
             if(port_counts.size)
             {
                 console.log("X64_WIN_PORTS " + JSON.stringify([...port_counts].sort((a, b) => b[1] - a[1]).slice(0, 16)));
@@ -635,10 +991,12 @@ try
             {
                 // lock screen (sign-in lost, or locked after idling with the
                 // display off), password box, or still signing in
-                if(password_box_visible() || performance.now() - last_sign_in > 180000) await sign_in();
+                // (WIN_NO_PROBE: a full-screen program hides the desktop for
+                // long; only a password box means the session is locked)
+                if(password_box_visible() || !process.env.WIN_NO_PROBE && performance.now() - last_sign_in > 180000) await sign_in();
                 probe_sent = performance.now() + 20000;
             }
-            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP && !process.env.WIN_IDLE)
+            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP && !process.env.WIN_IDLE && !process.env.WIN_NO_PROBE)
             {
                 const arch = report.results[64] ? 32 : 64;
                 const started = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\probe${arch}.exe %d:\\probe${arch}.exe`);
@@ -663,6 +1021,21 @@ try
         {
             report.desktop_s = elapsed();
             event("desktop");
+            for(let attempt = 0; process.env.WIN_LAUNCHER && !launcher_ready && attempt < 4; attempt++)
+            {
+                if(process.env.WIN_LAUNCHER_ADMIN) await run_admin(process.env.WIN_LAUNCHER);
+                else await run_command(process.env.WIN_LAUNCHER);
+                for(const limit = performance.now() + 60000; performance.now() < limit && !launcher_ready;) await delay(500);
+                event(launcher_ready ? "launcher" : "launcher-retry");
+            }
+            // WIN_SETUP: commands separated by ";;" once the desktop shows
+            // (e.g. "runadmin E:\\INSTVM3D.CMD;;wait 300;;shot"), before
+            // WIN_OVERLAY_SAVE shuts down and keeps what they did
+            for(const line of (process.env.WIN_SETUP || "").split(";;").map(line => line.trim()).filter(Boolean))
+            {
+                await command(line);
+            }
+            if(process.env.WIN_SETUP && !process.env.WIN_OVERLAY_SAVE) break;
             if(process.env.WIN_OVERLAY_SAVE) shutdown_at = performance.now() + 30000;
             else if(process.env.WIN_IDLE) idle_at = performance.now() + 1000 * +(process.env.WIN_IDLE_SETTLE_S || 20);
             else if(process.env.WIN_DESKTOP_TEST)
@@ -719,7 +1092,8 @@ try
         }
         assert.ok(!shutdown_deadline || performance.now() < shutdown_deadline, "the guest powered off");
     }
-    for(const arch of process.env.WIN_STOP_AT_DESKTOP || process.env.WIN_IDLE ? [] : [64, 32])
+    // (the probes run in plain qualification runs, not in setup sessions)
+    for(const arch of process.env.WIN_STOP_AT_DESKTOP || process.env.WIN_IDLE || process.env.WIN_SETUP || process.env.WIN_HDB ? [] : [64, 32])
     {
         const r = report.results[arch];
         assert.ok(r, `probe ${arch} completed`);
@@ -743,6 +1117,11 @@ catch(error)
 }
 finally
 {
+    if(remote_renderer)
+    {
+        console.log("X64_WIN_RENDERER " + JSON.stringify(remote_renderer.stats));
+        remote_renderer.close();
+    }
     if(profiler) await profile_window();
     if(cpu && process.env.WIN_SIZE_STATS) cpu.wm.exports.x64_pagegen_size_dump();
     // WIN_DUMP_OVERLAY=<file>: the sectors written so far (no shutdown: what
@@ -772,10 +1151,12 @@ finally
     await vm.stop();
     const final_stat = fs.statSync(image_path);
     assert.equal(final_stat.mtimeMs, source_stat.mtimeMs, "the source image was never written");
+    if(hdb_path) assert.equal(fs.statSync(hdb_path).mtimeMs, hdb_stat.mtimeMs, "the second disk's image was never written");
     report.wall_s = elapsed();
     fs.writeFileSync(path.join(out, `result-${jit ? "page" : "interpreter"}-${cores}c${report.parallel ? "-parallel" : ""}.json`),
         JSON.stringify(report, null, 1));
     fs.writeFileSync(path.join(out, "tools-final.img"), tools.bytes);
     await vm.destroy();
     source.close();
+    if(hdb_path) hdb.close();
 }

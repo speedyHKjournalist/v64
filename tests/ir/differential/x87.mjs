@@ -10,6 +10,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
     const vm=new V86({
+        graphics_adapter: "bochs_vga",
         wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",
         memory_size:32<<20,
         // This suite asserts exact F80 payloads and all rounding/precision modes,

@@ -270,6 +270,7 @@ if(isMainThread)
 
 
     const emulator = new V86({
+        graphics_adapter: "bochs_vga",
         bios: { url: __dirname + "/../../bios/seabios.bin" },
         vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
         bzimage: { url: __dirname + "/../../images/buildroot-bzimage68.bin" },

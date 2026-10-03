@@ -4,7 +4,7 @@ import {V86} from "../../../build/libv86.mjs";
 const wasm="build/v86-ir-runtime.wasm";
 const names=WebAssembly.Module.exports(new WebAssembly.Module(fs.readFileSync(wasm))).map(x=>x.name);
 assert(names.includes("ir_compile_live"));assert(!names.some(n=>n.startsWith("ir_test_")||n.startsWith("jit_test_")||n==="__stack_pointer"));
-const vm=new V86({wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));const cpu=vm.v86.cpu,e=cpu.wm.exports;
