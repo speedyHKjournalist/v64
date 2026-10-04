@@ -2155,15 +2155,13 @@ pub unsafe fn instr_F1() {
 }
 
 pub unsafe fn instr_F2() {
-    // repnz
-    dbg_assert!(*prefixes & prefix::PREFIX_MASK_REP == 0);
+    // repnz (after F3, the last of the two counts: decode_rules::apply_prefix)
     *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0xF2).unwrap();
     run_prefix_instruction();
     *prefixes = 0;
 }
 pub unsafe fn instr_F3() {
-    // repz
-    dbg_assert!(*prefixes & prefix::PREFIX_MASK_REP == 0);
+    // repz (after F2, the last of the two counts)
     *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0xF3).unwrap();
     run_prefix_instruction();
     *prefixes = 0;

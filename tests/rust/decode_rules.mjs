@@ -1,0 +1,162 @@
+// Decode rules shared by the 32-bit interpreter and both IR code generators
+// (docs/simd-xsave-plan.md 5.2): which row the 66/F2/F3 prefixes select
+// (decode_rules::mandatory_variant), the order of repeated F2/F3, and #UD for
+// a mandatory prefix without a row of its own. Each case runs in the
+// interpreter, then hot under Tier-0 and under the region tiers.
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import { V86 } from "../../build/libv86.mjs";
+import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
+
+const candidate = process.argv[2] || "build/v86.wasm";
+const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
+const CODE = 0x100000, DATA = 0x200000, OUT = 0x210000;
+const IDT = 0x250000, DESCRIPTOR = 0x251000, HANDLER = 0x280000;
+const machines = [];
+const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
+const load = (r, a) => [0xF3, 0x0F, 0x6F, 5 | r << 3, ...u32(a)];
+const store = (r, a) => [0xF3, 0x0F, 0x7F, 5 | r << 3, ...u32(a)];
+
+async function run(vm, program, warm = true)
+{
+    const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    if(warm) cpu.jit_clear_cache();
+    vm.write_memory(Uint8Array.from(program), CODE);
+    vm.write_memory(new Uint8Array(4), 0x600);
+    cpu.reg32[4] = 0x8000;
+    cpu.flags[0] = 2; cpu.flags_changed[0] = 0;
+    cpu.instruction_pointer[0] = CODE; cpu.in_hlt[0] = 0;
+    const start = compiled_activations(e);
+    vm.run();
+    const deadline = performance.now() + 20000;
+    while(word(vm, 0x600) !== 0xCAFE || warm && vm !== machines[0] && compiled_activations(e) === start)
+    {
+        assert(performance.now() < deadline, "program/JIT timeout");
+        await sleep(1);
+    }
+    if(warm) await sleep(20);
+    await vm.stop();
+}
+// the body repeats until byte 0x604 is set, then halts after one more round
+function loop(body)
+{
+    const p = [...body, 0xC7, 0x05, ...u32(0x600), ...u32(0xCAFE), 0x80, 0x3D, ...u32(0x604), 0, 0x75, 5];
+    p.push(0xE9, ...u32(-p.length - 5), 0xF4);
+    return p;
+}
+async function run_all(program, before = () => {})
+{
+    for(const vm of machines)
+    {
+        before(vm);
+        vm.write_memory(new Uint8Array(1), 0x604);
+        await run(vm, program);
+        vm.write_memory(Uint8Array.of(1), 0x604);
+        await run(vm, program, false);
+    }
+}
+
+try
+{
+    for(const options of [{ disable_jit: true }, ...COMPILED_ARMS.map(arm => arm.options)])
+    {
+        const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: candidate, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
+            ...options, disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+            net_device: { type: "none" }, autostart: false });
+        machines.push(vm);
+        await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
+        vm.run();
+        const deadline = performance.now() + 10000;
+        while(word(vm, 0x500) !== 0xCAFE) { assert(performance.now() < deadline); await sleep(1); }
+        await vm.stop();
+    }
+
+    // 66 with F2/F3 is an operand-size prefix; of F2 and F3 the last counts.
+    // MOVSS/MOVSD between registers replace the low 32/64 bits only.
+    const data = new Uint8Array(64);
+    for(let i = 0; i < data.length; i++) data[i] = i * 29 + 7 & 255;
+    const moves = [
+        [[], 16], [[0x66], 16], [[0x66, 0xF3], 4], [[0xF3, 0x66], 4], [[0x66, 0xF2], 8], [[0xF2, 0x66], 8],
+        [[0xF2, 0xF3], 4], [[0xF3, 0xF2], 8], [[0xF2, 0xF3, 0x66], 4], [[0x66, 0xF3, 0xF2], 8],
+    ];
+    const p = [];
+    for(const [n, [prefixes]] of moves.entries())
+    {
+        p.push(...load(0, DATA), ...load(1, DATA + 16), ...prefixes, 0x0F, 0x10, 0xC1, ...store(0, OUT + n * 16));
+    }
+    const results = [];
+    await run_all(loop(p), vm => vm.write_memory(data, DATA));
+    for(const vm of machines)
+    {
+        const bytes = Uint8Array.from(vm.read_memory(OUT, moves.length * 16));
+        for(const [n, [prefixes, low]] of moves.entries())
+        {
+            const expected = data.slice(0, 16);
+            expected.set(data.slice(16, 16 + low));
+            assert.deepEqual(bytes.slice(n * 16, n * 16 + 16), expected, `0F 10 with ${prefixes.map(b => b.toString(16)).join(" ")}`);
+        }
+        results.push(bytes);
+    }
+    console.log(`PASS: ${moves.length} 0F 10 prefix orders select MOVUPS/MOVUPD/MOVSS/MOVSD as iced-x86 does, on ${machines.length} arms`);
+
+    // REPE/REPNE CMPSB: the last of F2/F3 decides
+    const strings = new Uint8Array(64);
+    strings.set([5, 5, 5, 7, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], 0);
+    strings.set([5, 5, 5, 9, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], 32);
+    const reps = [[[0xF3], 12, 4], [[0xF2], 15, 1], [[0xF2, 0xF3], 12, 4], [[0xF3, 0xF2], 15, 1]];
+    const q = [0xFC];
+    for(const [n, [prefixes]] of reps.entries())
+    {
+        q.push(0xBE, ...u32(DATA), 0xBF, ...u32(DATA + 32), 0xB9, ...u32(16), ...prefixes, 0xA6,
+            0x89, 0x0D, ...u32(OUT + n * 8), 0x89, 0x35, ...u32(OUT + n * 8 + 4));
+    }
+    await run_all(loop(q), vm => vm.write_memory(strings, DATA));
+    for(const vm of machines)
+    {
+        for(const [n, [prefixes, ecx, advanced]] of reps.entries())
+        {
+            assert.equal(word(vm, OUT + n * 8), ecx, `CMPSB with ${prefixes} ECX`);
+            assert.equal(word(vm, OUT + n * 8 + 4), DATA + advanced, `CMPSB with ${prefixes} ESI`);
+        }
+    }
+    console.log(`PASS: ${reps.length} REPE/REPNE CMPSB prefix orders`);
+
+    // A mandatory prefix without a row of its own is #UD at the first prefix
+    // byte; outside the SSE maps F2/F3 are ignored repeat prefixes.
+    const undefined_forms = [
+        [0xF3, 0x0F, 0x2B, 0x00], [0xF2, 0x0F, 0x2B, 0x00], // MOVNTPS (F3: AMD's MOVNTSS)
+        [0x66, 0x0F, 0xC3, 0x00], [0xF3, 0x0F, 0xC3, 0x00], // MOVNTI
+        [0xF2, 0x0F, 0x77], [0x66, 0x0F, 0x77],             // EMMS
+        [0x66, 0x0F, 0xAE, 0x00], [0xF2, 0x0F, 0xAE, 0x00], // FXSAVE
+    ];
+    let undefined_cases = 0;
+    for(const form of undefined_forms)
+    {
+        // #UD handler: record the faulting EIP, skip the instruction
+        const h = [0x8B, 0x44, 0x24, 0, 0xA3, ...u32(OUT), 0x83, 0x44, 0x24, 0, form.length, 0xCF];
+        const prologue = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), 0xB8, ...u32(DATA)];
+        const fault_eip = CODE + prologue.length;
+        const program = loop([...prologue, ...form]);
+        await run_all(program, vm => {
+            vm.write_memory(Uint8Array.from([HANDLER & 255, HANDLER >>> 8 & 255, 8, 0, 0, 0x8E, HANDLER >>> 16 & 255, HANDLER >>> 24]), IDT + 6 * 8);
+            vm.write_memory(Uint8Array.from([255, 7, ...u32(IDT)]), DESCRIPTOR);
+            vm.write_memory(Uint8Array.from(h), HANDLER);
+            vm.write_memory(new Uint8Array(4), OUT);
+        });
+        for(const vm of machines)
+        {
+            assert.equal(word(vm, OUT), fault_eip, `${form.map(b => b.toString(16)).join(" ")}: #UD at the first prefix`);
+        }
+        undefined_cases++;
+    }
+    // IMUL r32, r/m32 with F3: a repeat prefix, ignored
+    await run_all(loop([0xB8, ...u32(7), 0xB9, ...u32(6), 0xF3, 0x0F, 0xAF, 0xC1, 0xA3, ...u32(OUT)]));
+    for(const vm of machines) assert.equal(word(vm, OUT), 42, "F3 IMUL");
+    console.log(`PASS: ${undefined_cases} undefined mandatory prefixes raise #UD, F3 IMUL ignores the prefix`);
+}
+finally
+{
+    for(const vm of machines) await vm.destroy();
+}

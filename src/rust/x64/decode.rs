@@ -205,10 +205,6 @@ fn invalid_long_opcode(opcode: u32) -> bool {
             | 0x0F26
     )
 }
-/// 0F opcodes whose 66/F2/F3 prefix is part of the opcode.
-fn mandatory_prefix_map(opcode: u32) -> bool {
-    matches!(opcode, 0x0F10..=0x0F17 | 0x0F28..=0x0F2F | 0x0F50..=0x0F7F | 0x0FC2..=0x0FC6 | 0x0FD0..=0x0FFE | 0x0FAE)
-}
 fn operand_size(mode: ExecutionMode, prefixes: PrefixState, opcode: u32, modrm: Option<u8>) -> u8 {
     if !mode.is_long() {
         return if prefixes.operand { 48 - mode.operand_default() } else { mode.operand_default() };
@@ -360,36 +356,39 @@ where
     if !mode.is_long() && matches!(base_opcode, 0x0F05 | 0x0F07) {
         return Err(DecodeError::InvalidOpcode);
     }
-    let mut opcode = base_opcode;
+    // The 66/F2/F3 variants of the opcode in the shared catalogue, chosen by
+    // the rule all three decoders share (decode_rules::mandatory_variant): in
+    // the SSE maps a mandatory prefix without a row of its own is #UD, after
+    // the ModRM byte as in the 32-bit interpreter.
+    use crate::prefix::{PREFIX_66, PREFIX_F2, PREFIX_F3};
     let shift = if first == 0x0F { 16 } else { 8 };
-    // Match the existing profile's mandatory-prefix precedence; ordinary REP
-    // instructions retain the last repeat prefix in the shared state.
-    for prefix in [
-        if prefixes.operand && first == 0x0F { Some(0x66) } else { None },
-        prefixes.rep,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let candidate = (prefix as u32) << shift | base_opcode;
-        if !candidates(candidate).is_empty() {
-            opcode = candidate;
-            break;
+    let variants = [(0x66u32, PREFIX_66), (0xF2, PREFIX_F2), (0xF3, PREFIX_F3)];
+    let mut available = 0;
+    let mut refining = candidates(base_opcode).iter().any(|row| row.sse || row.refining);
+    for (prefix, mask) in variants {
+        if prefix != 0x66 || first == 0x0F {
+            let rows = candidates(prefix << shift | base_opcode);
+            if !rows.is_empty() {
+                available |= mask;
+                refining |= rows.iter().any(|row| row.sse || row.refining);
+            }
         }
     }
-    // SSE/MMX maps: the mandatory prefix selects the instruction, and a
-    // 66/F2/F3 prefix without an entry of its own is #UD, never the
-    // unprefixed form (SDM Vol.2A §2.1.1, instruction tables).
-    if mode.is_long() && first == 0x0F && mandatory_prefix_map(base_opcode) {
-        let keyed = opcode != base_opcode;
-        let rep_selected = keyed
-            && prefixes
-                .rep
-                .is_some_and(|p| opcode == (p as u32) << shift | base_opcode);
-        if prefixes.rep.is_some() && !rep_selected || prefixes.operand && !keyed {
-            return Err(DecodeError::InvalidOpcode);
-        }
-    }
+    let flags = if prefixes.operand { PREFIX_66 } else { 0 }
+        | match prefixes.rep {
+            Some(0xF2) => PREFIX_F2,
+            Some(0xF3) => PREFIX_F3,
+            _ => 0,
+        };
+    use crate::decode_rules::Variant;
+    let variant = crate::decode_rules::mandatory_variant(flags, available, refining);
+    let opcode = match variant {
+        Variant::Prefixed(selected) => {
+            let prefix = variants.iter().find(|v| v.1 == selected).unwrap().0;
+            prefix << shift | base_opcode
+        },
+        Variant::Plain | Variant::Undefined => base_opcode,
+    };
     let rows = candidates(opcode);
     let first_row = rows.first().ok_or(DecodeError::UnknownOpcode(opcode))?;
     // ModRM-taking forms the shared catalog lists without one: the 0F0D
@@ -398,6 +397,9 @@ where
     let hint_0f0d =
         mode.is_long() && matches!(base_opcode, 0x0F0D | 0x0F1A | 0x0F1B | 0x0FB9 | 0x0FFF);
     let modrm = if first_row.fetch_modrm || hint_0f0d { Some(c.byte()?) } else { None };
+    if variant == Variant::Undefined {
+        return Err(DecodeError::InvalidOpcode);
+    }
     let row = rows
         .iter()
         .find(|row| row.group < 0 || modrm.is_some_and(|m| (m >> 3 & 7) as i8 == row.group))
@@ -538,6 +540,28 @@ mod tests {
         assert_eq!(d(&[0x0F, 0x07]).base_opcode(), 0x0F07);
         assert_eq!(d(&[0x0F, 0x01, 0xF9]).modrm, Some(0xF9));
         assert_eq!(d(&[0xF3, 0x48, 0x0F, 0xB8, 0xC1]).base_opcode(), 0x0FB8);
+    }
+    #[test]
+    fn mandatory_prefixes_follow_the_shared_rule_in_every_mode() {
+        for mode in [ExecutionMode::Long64, ExecutionMode::Compatibility32, ExecutionMode::Protected32] {
+            let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+            // 66 with F3/F2 is an operand-size prefix (iced-x86, XED): MOVSS/MOVSD
+            assert_eq!(decode(&[0x66, 0xF3, 0x0F, 0x10, 0xC1]).unwrap().opcode, 0xF30F10);
+            assert_eq!(decode(&[0xF3, 0x66, 0x0F, 0x10, 0xC1]).unwrap().opcode, 0xF30F10);
+            assert_eq!(decode(&[0x66, 0xF2, 0x0F, 0x10, 0xC1]).unwrap().opcode, 0xF20F10);
+            // of F2 and F3 the last one counts
+            assert_eq!(decode(&[0xF2, 0xF3, 0x0F, 0x10, 0xC1]).unwrap().opcode, 0xF30F10);
+            assert_eq!(decode(&[0xF3, 0xF2, 0x0F, 0x10, 0xC1]).unwrap().opcode, 0xF20F10);
+            // a mandatory prefix without a row is #UD in every mode, after ModRM
+            for bytes in [&[0xF3, 0x0F, 0x2B, 0x00][..], &[0x66, 0x0F, 0xC3, 0x00], &[0xF2, 0x0F, 0x77]] {
+                assert_eq!(decode(bytes).unwrap_err(), DecodeError::InvalidOpcode, "{bytes:02X?} {mode:?}");
+                if bytes.len() == 4 {
+                    assert!(matches!(decode(&bytes[..3]), Err(DecodeError::Fetch { offset: 3, .. })));
+                }
+            }
+            // outside the SSE maps F2/F3 are repeat prefixes
+            assert_eq!(decode(&[0xF3, 0x0F, 0xAF, 0xC1]).unwrap().opcode, 0x0FAF);
+        }
     }
     #[test]
     fn prefetchw_consumes_the_complete_address_without_reading_data() {

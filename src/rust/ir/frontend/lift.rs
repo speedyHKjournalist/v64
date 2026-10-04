@@ -109,10 +109,7 @@ fn lift_inner(
         }
         offset += i.length as usize;
         count += 1;
-        if cfg!(debug_assertions)
-            && (i.debug_prefix_assert
-                || i.encoding.opcode == 0x0FAE && i.encoding.group == 2 && i.ea.is_none())
-        {
+        if cfg!(debug_assertions) && i.encoding.opcode == 0x0FAE && i.encoding.group == 2 && i.ea.is_none() {
             return Err(CompileError::Unsupported("baseline debug prefix assertion"));
         }
         if i.prefixes.lock && !super::exchange::lock_supported(&i) {
@@ -137,8 +134,17 @@ fn lift_inner(
             }
             let state = snapshot(&mut b, i.instruction_pc, i.next_pc, count - 1);
             b.region.states[state.index()].resume = crate::ir::state::ResumeKind::BeforeInstruction;
+            // (an undefined mandatory prefix is #UD before the task-switch guard)
             let guard = b.constant(
-                if i.encoding.sse { 2 } else { i.encoding.task_switch_test as u32 },
+                if i.prefix_ud {
+                    0
+                }
+                else if i.encoding.sse {
+                    2
+                }
+                else {
+                    i.encoding.task_switch_test as u32
+                },
                 Type::I32,
             );
             let (offset, segment) = if let Some(ea) = i.ea {

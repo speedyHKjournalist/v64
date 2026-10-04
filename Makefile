@@ -1468,4 +1468,10 @@ ISA_GLIBC ?= build/simd-xsave/p0-baseline/glibc/root/usr/lib/x86_64-linux-gnu
 isa-hot-forms:
 	CARGO_TARGET_DIR=build/isa-forms-target cargo run --release --manifest-path tools/isa_forms/Cargo.toml -- --hot gen/isa_hot_forms.json $(ISA_GLIBC)/libc.so.6 $(ISA_GLIBC)/libm.so.6 $(ISA_GLIBC)/ld-linux-x86-64.so.2
 
-.PHONY: isa-forms isa-forms-check isa-hot-forms
+# The decode rules of the plan (5.2) on the 32-bit interpreter and both IR
+# code generators: mandatory prefixes, F2/F3 order, #UD for unlisted prefixes
+decode-rules-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+	node tests/rust/decode_rules.mjs
+	node tests/rust/decode_rules.mjs build/v86-debug.wasm
+
+.PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests

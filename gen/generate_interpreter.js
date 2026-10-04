@@ -150,40 +150,39 @@ function gen_instruction_body(encodings, size)
         });
     }
 
-    if(has_66.length || has_f2.length || has_f3.length)
+    // In the SSE maps the 66/F2/F3 prefixes select instructions, and one
+    // without a row of its own is #UD (decode_rules::mandatory_variant)
+    const refining = encodings.some(e => e.sse || e.refining);
+
+    if(has_66.length || has_f2.length || has_f3.length || refining)
     {
-        const if_blocks = [];
+        const cases = [];
+        const variant = "crate::decode_rules::Variant::";
 
         if(has_66.length) {
-            const body = gen_instruction_body_after_prefix(has_66, size);
-            if_blocks.push({ condition: "selected_prefix == prefix::PREFIX_66", body, });
+            cases.push({ conditions: [variant + "Prefixed(prefix::PREFIX_66)"], body: gen_instruction_body_after_prefix(has_66, size) });
         }
         if(has_f2.length) {
-            const body = gen_instruction_body_after_prefix(has_f2, size);
-            if_blocks.push({ condition: "selected_prefix == prefix::PREFIX_F2", body, });
+            cases.push({ conditions: [variant + "Prefixed(prefix::PREFIX_F2)"], body: gen_instruction_body_after_prefix(has_f2, size) });
         }
         if(has_f3.length) {
-            const body = gen_instruction_body_after_prefix(has_f3, size);
-            if_blocks.push({ condition: "selected_prefix == prefix::PREFIX_F3", body, });
+            cases.push({ conditions: [variant + "Prefixed(prefix::PREFIX_F3)"], body: gen_instruction_body_after_prefix(has_f3, size) });
         }
+        cases.push({
+            conditions: [variant + "Plain"],
+            body: no_prefix.length ? gen_instruction_body_after_prefix(no_prefix, size) : ["trigger_ud();"],
+        });
 
-        const check_prefixes = encoding.sse ? "(prefix::PREFIX_66 | prefix::PREFIX_F2 | prefix::PREFIX_F3)" : "(prefix::PREFIX_F2 | prefix::PREFIX_F3)";
-
-        const else_block = {
-            body: [].concat(
-                "dbg_assert!((prefixes_ & " + check_prefixes + ") == 0);",
-                gen_instruction_body_after_prefix(no_prefix, size)
-            )
-        };
+        const available = [has_66.length && "prefix::PREFIX_66", has_f2.length && "prefix::PREFIX_F2", has_f3.length && "prefix::PREFIX_F3"].filter(Boolean).join(" | ") || "0";
 
         return [].concat(
             "let prefixes_ = *prefixes;",
             code,
-            `let selected_prefix = crate::decode_rules::mandatory_prefix(prefixes_, ${[has_66.length && "prefix::PREFIX_66", has_f2.length && "prefix::PREFIX_F2", has_f3.length && "prefix::PREFIX_F3"].filter(Boolean).join(" | ")});`,
             {
-                type: "if-else",
-                if_blocks,
-                else_block,
+                type: "switch",
+                condition: `crate::decode_rules::mandatory_variant(prefixes_, ${available}, ${refining})`,
+                cases,
+                default_case: { body: ["trigger_ud();"] },
             }
         );
     }

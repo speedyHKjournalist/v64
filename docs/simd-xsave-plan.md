@@ -850,3 +850,18 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   `v86.wasm` 保存在本地的 `build/simd-xsave/p0-baseline/`（SHA-256 `be6b4283…`），后续对比
   用 `--baseline` 交错运行，不比较绝对数值。
 - **决定**：Q2、Q3、Q7 已定；Q4、Q5、Q6 采纳建议；Q1 留到 P12。
+
+### P1a：统一强制前缀规则（2026-10-04）
+
+- `decode_rules::mandatory_variant` 成为三个解码器（32 位解释器生成器、IR 解码、x64 解码）共用的
+  规则：F2/F3 优先于 66，F2/F3 并存时取最后一个（`apply_prefix` 不再累积两者）。在 SSE 映射中
+  （表中有 `sse` 或 `refining` 行的操作码），没有对应行的强制前缀在读完 ModRM 后 #UD，
+  不读 SIB、位移和立即数，也不做 CR0 检查；其他操作码里 F2/F3 只是被忽略的重复前缀。
+- 行为变化（都与 iced-x86 一致）：`66 F3 0F 10` 等组合改为 MOVSS/MOVSD；`F2 66 0F 10` 由
+  MOVUPD 改为 MOVSD；未列出的强制前缀在 32 位解释器、兼容模式中也 #UD（以前 release 构建执行
+  无前缀形式，x64 只在 64 位模式 #UD）；`F2 F3` 重复前缀取后者（以前 debug 构建断言失败）。
+- 表中新增 `refining` 标志：MOVNTI（`0F C3`）和 `0F 78`–`7B` 是强制前缀族但不是 SSE 指令。
+- 测试：`tests/ir/decode/decode.rs` 和 `x64::decode` 的单元测试覆盖新规则；新增
+  `make decode-rules-tests`（`tests/rust/decode_rules.mjs`），在解释器、Tier-0 和 regions 上
+  验证 10 种 `0F 10` 前缀顺序、4 种 CMPSB 重复前缀顺序、8 个未定义强制前缀的 #UD 位置。
+  x64 长模式 opcode 矩阵与 iced 的对拍不变（349888 行，iced 判为合法的 123947 行一致）。

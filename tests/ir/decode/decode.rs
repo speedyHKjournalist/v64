@@ -30,9 +30,10 @@ fn prefixes_boundaries_and_missing_page() {
         d(&[0xF3, 0xF2, 0x0F, 0x10, 0xC0], true).encoding.opcode,
         0xF20F10
     );
+    // F2/F3 take precedence over 66 (decode_rules::mandatory_variant)
     assert_eq!(
         d(&[0xF2, 0x66, 0x0F, 0x10, 0xC0], true).encoding.opcode,
-        0x660F10
+        0xF20F10
     );
     assert!(d(&[0xF0, 0x01, 0x00], true).prefixes.lock);
     assert!(d(&[0x8D, 0xC0], true).baseline_ud);
@@ -46,21 +47,41 @@ fn prefixes_boundaries_and_missing_page() {
 
 #[test]
 fn prefix_product_and_missing_groups_are_explicit() {
-    use crate::decode_rules::{apply_prefix, mandatory_prefix};
+    use crate::decode_rules::{apply_prefix, mandatory_variant, Variant};
     use crate::prefix::*;
-    // All presence combinations, variant subsets and ordered repeated prefixes.
+    // The mandatory-prefix rule, against an independent statement of it: the
+    // last F2/F3 before 66; in a refining (SSE) opcode a prefix without a row
+    // is #UD, elsewhere F2/F3 are ignored.
     for flags in 0..256u16 {
+        let flags = flags as u8;
+        if flags & PREFIX_F2 != 0 && flags & PREFIX_F3 != 0 {
+            continue; // apply_prefix keeps only the last of the two
+        }
         for available in 0..8 {
             let mask = (if available & 1 != 0 { PREFIX_66 } else { 0 })
                 | (if available & 2 != 0 { PREFIX_F2 } else { 0 })
                 | (if available & 4 != 0 { PREFIX_F3 } else { 0 });
-            let expected = [PREFIX_66, PREFIX_F2, PREFIX_F3]
-                .into_iter()
-                .find(|p| flags as u8 & mask & p != 0)
-                .unwrap_or(0);
-            assert_eq!(mandatory_prefix(flags as u8, mask), expected);
+            for refining in [false, true] {
+                let rep = flags & (PREFIX_F2 | PREFIX_F3);
+                let expected = if rep != 0 && mask & rep != 0 {
+                    Variant::Prefixed(rep)
+                }
+                else if refining && rep != 0 {
+                    Variant::Undefined
+                }
+                else if refining && flags & PREFIX_66 != 0 {
+                    if mask & PREFIX_66 != 0 { Variant::Prefixed(PREFIX_66) } else { Variant::Undefined }
+                }
+                else {
+                    Variant::Plain
+                };
+                assert_eq!(mandatory_variant(flags, mask, refining), expected);
+            }
         }
     }
+    // of F2 and F3 the last one counts, in either order
+    assert_eq!(apply_prefix(apply_prefix(0, 0xF2).unwrap(), 0xF3), Some(PREFIX_F3));
+    assert_eq!(apply_prefix(apply_prefix(0, 0xF3).unwrap(), 0xF2), Some(PREFIX_F2));
     for a in [
         0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3,
     ] {
@@ -73,21 +94,18 @@ fn prefix_product_and_missing_groups_are_explicit() {
                 let flags = [a, b, a]
                     .into_iter()
                     .fold(0, |f, p| apply_prefix(f, p).unwrap());
-                let expected = match mandatory_prefix(flags, PREFIX_66 | PREFIX_F2 | PREFIX_F3) {
-                    PREFIX_66 => 0x660F10,
-                    PREFIX_F2 => 0xF20F10,
-                    PREFIX_F3 => 0xF30F10,
-                    _ => 0x0F10,
+                // 0F 10 has rows for all of 66, F2 and F3
+                let expected = match mandatory_variant(flags, PREFIX_66 | PREFIX_F2 | PREFIX_F3, true) {
+                    Variant::Prefixed(PREFIX_66) => 0x660F10,
+                    Variant::Prefixed(PREFIX_F2) => 0xF20F10,
+                    Variant::Prefixed(PREFIX_F3) => 0xF30F10,
+                    variant => {
+                        assert_eq!(variant, Variant::Plain);
+                        0x0F10
+                    },
                 };
                 assert_eq!(decoded.encoding.opcode, expected);
-                assert_eq!(
-                    decoded.debug_prefix_assert,
-                    [a, b, a]
-                        .iter()
-                        .filter(|p| matches!(p, 0xF2 | 0xF3))
-                        .count()
-                        > 1
-                );
+                assert!(!decoded.prefix_ud);
                 // No read past the supplied snapshot, including prefix and ModRM boundaries.
                 for n in 0..bytes.len() {
                     assert!(matches!(
@@ -107,6 +125,19 @@ fn prefix_product_and_missing_groups_are_explicit() {
             }
         }
     }
+    // 66 with F3 is an operand-size prefix: MOVSS, as iced-x86 and XED decode
+    assert_eq!(d(&[0x66, 0xF3, 0x0F, 0x10, 0xC1], true).encoding.opcode, 0xF30F10);
+    assert_eq!(d(&[0xF3, 0x66, 0x0F, 0x10, 0xC1], true).encoding.opcode, 0xF30F10);
+    // A mandatory prefix without a row: #UD after ModRM, without SIB,
+    // displacement or immediate (F3 0F 2B is AMD's MOVNTSS, 66 0F C3 not MOVNTI)
+    for bytes in [&[0xF3, 0x0F, 0x2B, 0x04, 0x24][..], &[0x66, 0x0F, 0xC3, 0x04, 0x24], &[0xF2, 0x0F, 0x77]] {
+        let i = d(bytes, true);
+        assert!(i.baseline_ud && i.prefix_ud && i.ea.is_none(), "{bytes:02X?}");
+        assert_eq!(i.length as usize, bytes.len() - if bytes.len() > 3 { 1 } else { 0 }, "{bytes:02X?}");
+    }
+    // Outside the SSE maps F2/F3 are plain repeat prefixes
+    let i = d(&[0xF3, 0x0F, 0xAF, 0xC1], true);
+    assert!(i.encoding.opcode == 0x0FAF && !i.baseline_ud);
     for e in encodings().iter().filter(|e| e.group_ud) {
         let mut bytes = Vec::new();
         if e.opcode > 0xFFFF {

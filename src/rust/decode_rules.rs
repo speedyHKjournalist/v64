@@ -26,14 +26,16 @@ pub fn prefix(byte: u8) -> Option<Prefix> {
         _ => return None,
     })
 }
-/// Baseline repeats accumulate rather than toggle; the last segment wins.
+/// Repeated prefixes accumulate; the last segment wins, and of F2 and F3 the
+/// last one counts, as iced-x86 and XED decode (the SDM calls more than one
+/// prefix of a group unpredictable).
 pub fn apply_prefix(flags: u8, byte: u8) -> Option<u8> {
     Some(match prefix(byte)? {
         Prefix::Segment(s) => flags & !PREFIX_MASK_SEGMENT | (s + 1),
         Prefix::Operand => flags | PREFIX_66,
         Prefix::Address => flags | PREFIX_67,
-        Prefix::Repne => flags | PREFIX_F2,
-        Prefix::Rep => flags | PREFIX_F3,
+        Prefix::Repne => flags & !PREFIX_F3 | PREFIX_F2,
+        Prefix::Rep => flags & !PREFIX_F2 | PREFIX_F3,
         Prefix::Lock => flags | PREFIX_LOCK,
     })
 }
@@ -62,19 +64,39 @@ pub fn lock_allowed(opcode: u32, modrm: Option<u8>) -> bool {
         _ => false,
     }
 }
-/// `available` describes variants from the single generated opcode catalogue.
+/// Which row of an opcode the 66/F2/F3 prefixes select
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Variant {
+    /// The unprefixed row: 66 is an operand-size prefix, F2/F3 are repeat
+    /// prefixes (ignored by most instructions)
+    Plain,
+    /// The row keyed with this prefix (PREFIX_66, PREFIX_F2 or PREFIX_F3)
+    Prefixed(u8),
+    /// A mandatory prefix without a row of its own: #UD
+    Undefined,
+}
+/// The variant of an opcode whose prefixed rows in the generated catalogue
+/// are `available` (PREFIX_66/F2/F3). F2/F3 (the last one, see apply_prefix)
+/// take precedence over 66, which with them is an operand-size prefix: MOVSS is
+/// also 66 F3 0F 10, CRC32 r32, r/m16 is 66 F2 0F 38 F1 (iced-x86 and XED
+/// decode the same). Where the prefixes select instructions (`refining`: the
+/// SSE maps) one without a row of its own is #UD; elsewhere F2/F3 are plain
+/// repeat prefixes.
 #[inline]
-pub fn mandatory_prefix(flags: u8, available: u8) -> u8 {
-    let present = flags & available;
-    if present & PREFIX_66 != 0 {
-        PREFIX_66
+pub fn mandatory_variant(flags: u8, available: u8, refining: bool) -> Variant {
+    let rep = flags & (PREFIX_F2 | PREFIX_F3);
+    if rep != 0 {
+        if available & rep != 0 {
+            return Variant::Prefixed(rep);
+        }
+        if refining {
+            return Variant::Undefined;
+        }
     }
-    else if present & PREFIX_F2 != 0 {
-        PREFIX_F2
+    if refining && flags & PREFIX_66 != 0 {
+        return if available & PREFIX_66 != 0 { Variant::Prefixed(PREFIX_66) } else { Variant::Undefined };
     }
-    else {
-        present & PREFIX_F3
-    }
+    Variant::Plain
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

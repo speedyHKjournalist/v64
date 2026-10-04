@@ -52,6 +52,8 @@ const TESTS_ASSUME_INTEL = false;
 // prefix: is a prefix instruction
 // imm8, imm8s, imm16, imm1632, immaddr, extra_imm8, extra_imm16: one or two immediate bytes follows the instruction
 // custom: will callback jit to generate custom code
+// refining: 66/F2/F3 select instructions, as in the SSE maps (sse implies it): a
+//   prefix without a row of its own is #UD (decode_rules::mandatory_variant)
 // block_boundary: may change eip in a way not handled by the jit
 // no_next_instruction: jit will stop analysing after instruction (e.g., unconditional jump, ret)
 const encodings = [
@@ -670,11 +672,11 @@ const encodings = [
     { sse: 1, opcode: 0x0F77, custom: 1, skip: 1 }, // emms (skip as it breaks gdb printing of float registers)
 
     // vmx instructions
-    { opcode: 0x0F78, skip: 1, block_boundary: 1 },
-    { opcode: 0x0F79, skip: 1, block_boundary: 1 },
+    { opcode: 0x0F78, skip: 1, block_boundary: 1, refining: 1 },
+    { opcode: 0x0F79, skip: 1, block_boundary: 1, refining: 1 },
 
-    { opcode: 0x0F7A, skip: 1, block_boundary: 1 }, // ud
-    { opcode: 0x0F7B, skip: 1, block_boundary: 1 }, // ud
+    { opcode: 0x0F7A, skip: 1, block_boundary: 1, refining: 1 }, // ud
+    { opcode: 0x0F7B, skip: 1, block_boundary: 1, refining: 1 }, // ud
 
     { sse: 1, opcode: 0x660F7C, e: 1, custom: 1 }, // sse3
     { sse: 1, opcode: 0xF20F7C, e: 1, custom: 1 }, // sse3
@@ -696,7 +698,7 @@ const encodings = [
     { sse: 1, opcode: 0xF20FC2, e: 1, imm8: 1, custom: 1 },
     { sse: 1, opcode: 0xF30FC2, e: 1, imm8: 1, custom: 1 },
 
-    { opcode: 0x0FC3, e: 1, custom: 1, reg_ud: 1 }, // movnti: Uses normal registers, hence not marked as sse
+    { opcode: 0x0FC3, e: 1, custom: 1, reg_ud: 1, refining: 1 }, // movnti: Uses normal registers, hence not marked as sse
 
     { sse: 1, opcode: 0x0FC4, e: 1, imm8: 1, custom: 1 },
     { sse: 1, opcode: 0x660FC4, e: 1, imm8: 1, custom: 1 },
