@@ -200,10 +200,12 @@ pub fn validate(d: &HelperDescriptor) -> Result<(), &'static str> {
 }
 
 /// Audited register-only SSE arithmetic/conversion forms. They read only the
-/// two XMM operands and MXCSR/x87 backing, modify only the destination XMM and
-/// FP backing, and cannot call host observers after the CR0 task guard succeeds.
-/// Integer/FLAGS conversions and every memory form retain the full contract.
-/// The SSSE3 XMM forms read and write only the XMM operands.
+/// two XMM operands and MXCSR/x87 backing, modify only the destination XMM,
+/// MXCSR's flags and FP backing, and cannot call host observers or fault after
+/// the CR0 task guard succeeds unless MXCSR unmasks an exception (the backend's
+/// sse_task_observation takes the full-state path for both). Integer/FLAGS
+/// conversions and every memory form retain the full contract. The SSSE3 XMM
+/// forms read and write only the XMM operands.
 pub fn xmm_register_operands(
     region: &crate::ir::hir::Region,
     args: &[crate::ir::ids::ValueId],

@@ -93,6 +93,42 @@ pub unsafe fn ir_t0_condition(cc: u32) -> u32 {
     (base != (cc & 1 != 0)) as u32
 }
 
+/// The operands of ir_t0_sse_fp: the destination (replaced by the result)
+/// and the source, written by the page function.
+#[repr(C, align(16))]
+pub struct SseFpOperands(pub [u128; 2]);
+pub static mut T0_SSE_FP: SseFpOperands = SseFpOperands([0; 2]);
+/// Address of T0_SSE_FP for generated code
+pub fn sse_fp_operands() -> u32 { (&raw const T0_SSE_FP) as u32 }
+
+/// SSE floating point exactly (cpu::simd_fp), for the native templates'
+/// refused instructions, on T0_SSE_FP: `key` is the catalogue key and
+/// `imm8` CMPPS' predicate; the result (for conversions to an integer and
+/// COMISS, the integer or the EFLAGS bits) replaces the destination and
+/// MXCSR's flags are updated. 1 if the instruction faults: only MXCSR's
+/// flags are set, as the interpreter, which delivers the fault, sets them
+/// again; else 0.
+#[no_mangle]
+pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
+    use crate::cpu::simd_fp;
+    let [destination, source] = T0_SSE_FP.0;
+    let result = match key as u8 {
+        0x52 | 0x53 => Ok(simd_fp::reciprocal(key, destination, source)),
+        0x2E | 0x2F => simd_fp::compare_flags(key, destination, source).map(u128::from),
+        0x2A | 0x2C | 0x2D | 0x5A | 0x5B | 0xE6 => {
+            simd_fp::convert(key, false, destination, source)
+        },
+        _ => simd_fp::arithmetic(key, destination, source, imm8 as u8),
+    };
+    match result {
+        Ok(result) => {
+            T0_SSE_FP.0[0] = result;
+            0
+        },
+        Err(simd_fp::Unmasked) => 1,
+    }
+}
+
 /// Interpreter steps by their first two instruction bytes (a diagnostic of
 /// missing templates, see tests/bench/run.mjs --fallbacks).
 static mut STEPS: [u32; 0x10000] = [0; 0x10000];

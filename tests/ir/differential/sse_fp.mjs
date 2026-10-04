@@ -167,9 +167,11 @@ for(const release of [false,true]){
             e.ir_test_step();
             return state();
         }
+        /** expected_count: a number, or a function of the interpreter's state */
         function compare(i,configure,expected_count){
             configure();
             const expected=interpreter(i);
+            if(typeof expected_count==="function") expected_count=expected_count(expected);
             // ir_test_step() intentionally executes interpreter semantics without
             // the main loop's instruction-counter accounting. Count is therefore
             // an IR execution invariant, not part of the interpreter state oracle.
@@ -187,8 +189,11 @@ for(const release of [false,true]){
             const i=cases.findIndex(c=>c[1]&&c[2]===op&&!c[3]&&!c[4]&&!c[0].includes(0x67));
             assert(i>=0);
             for(const opt of [0,1]) {
-                reset(i);cpu.reg_xmm32s.fill(0x3F800000);register_calls=0;instances[i][opt].exports.f(0);
+                // (native only with PE set already: an inexact result changes nothing)
+                reset(i);cpu.mxcsr[0]|=0x20;cpu.reg_xmm32s.fill(0x3F800000);register_calls=0;instances[i][opt].exports.f(0);
                 assert.equal(register_calls,0,"finite packed arithmetic must use native SIMD");
+                reset(i);cpu.reg_xmm32s.fill(0x3F800000);register_calls=0;instances[i][opt].exports.f(0);
+                assert.equal(register_calls,1,"PE not set yet: the exact helper");
                 reset(i,{sample:2});register_calls=0;instances[i][opt].exports.f(0);
                 assert.equal(register_calls,1,"special values must retain scalar payload semantics");
                 reset(i,{task:8});register_calls=0;instances[i][opt].exports.f(0);
@@ -198,7 +203,10 @@ for(const release of [false,true]){
         // Each operation has a unique non-NaN IEEE result. Exercise cases the
         // previous three finite-value guards rejected, plus invalid operations
         // whose result (rather than an input) introduces a NaN. Compare full
-        // XMM/MXCSR/x87/FLAGS state, without canonicalising NaN bits.
+        // XMM/MXCSR/x87/FLAGS state, without canonicalising NaN bits. With PE
+        // set, the native path is refused exactly where a flag other than PE
+        // could change (ir::native_fp): another rounding mode, a denormal
+        // operand, a NaN or infinite result, an inexact tiny product or quotient.
         let result_guard_cases=0;
         const pairs32 = [[0x7F800000n,0x3F800000n], [0xFF800000n,0xBF800000n],
             [0x3F800000n,0x7F800000n], [0xBF800000n,0xFF800000n],
@@ -222,9 +230,13 @@ for(const release of [false,true]){
             const words=double?2:1, lanes=scalar?1:4/words;
             const i=cases.findIndex(c=>c[1]&&c[2]===op&&!c[3]&&!c[4]&&!c[0].includes(0x67));
             assert(i>=0,`missing native FP form ${op.toString(16)}`);
+            const abs=double?0x7FFFFFFFFFFFFFFFn:0x7FFFFFFFn, min=double?0x0010000000000000n:0x00800000n;
+            const inf=double?0x7FF0000000000000n:0x7F800000n;
+            const denormal=x=>(x&abs)>0n&&(x&abs)<min;
             for(const [a,b] of double?pairs64:pairs32) for(let rounding=0;rounding<4;rounding++) {
                 const configure=()=>{
                     reset(i,{rounding});
+                    cpu.mxcsr[0]|=0x20;
                     // Inactive scalar lanes contain signaling/quiet NaNs. They
                     // must not force fallback or lose payload bits during merge.
                     cpu.reg_xmm32s.set([0x7F812345,0xFFF01234,0x7FF12345,0xFF812345,
@@ -235,17 +247,18 @@ for(const release of [false,true]){
                     }
                 };
                 configure();const expected=interpreter(i);
-                let nan=false;
+                let refused=rounding!==0||denormal(a)||denormal(b);
                 for(let lane=0;lane<lanes;lane++) {
                     const low=BigInt(expected.xmm[4+lane*words]>>>0);
                     const bits=double?low|BigInt(expected.xmm[5+lane*words]>>>0)<<32n:low;
-                    nan ||= double ? (bits&0x7FFFFFFFFFFFFFFFn)>0x7FF0000000000000n
-                        : (bits&0x7FFFFFFFn)>0x7F800000n;
+                    refused ||= (bits&abs)>=inf;
+                    const exact_zero=(bits&abs)===0n&&((a&abs)===0n||operation===0x59&&(b&abs)===0n);
+                    refused ||= (operation===0x59||operation===0x5E)&&(bits&abs)<min&&!exact_zero;
                 }
                 for(const opt of [0,1]) {
                     configure();register_calls=0;instances[i][opt].exports.f(0);
                     assert.deepEqual(state(),expected,`result guard ${op}/${a}/${b}/${rounding}/${opt}`);
-                    assert.equal(register_calls,Number(nan),"only active NaN results require the payload-preserving helper");
+                    assert.equal(register_calls,Number(refused),`native admission ${op.toString(16)}/${a}/${b}/${rounding}`);
                     assert.equal(linear32[664>>2],102);
                     result_guard_cases++;
                 }
@@ -270,8 +283,9 @@ for(const release of [false,true]){
                 assert.equal(expected.ip,PC+cases[i][0].length); comparisons++;
             }
             if(mode && !memory && !dirty && !cases[i][0].includes(0x67)) {
+                // (unmasked exceptions fault: #UD without CR4.OSXMMEXCPT)
                 for(const sample of [1,2,9,10,11,14,15]) for(let rounding=0;rounding<4;rounding++) for(let denormal=0;denormal<4;denormal++) for(const masks of [false,true]) {
-                    compare(i,()=>reset(i,{sample,rounding,denormal,masks}),before+1); comparisons++;
+                    compare(i,()=>reset(i,{sample,rounding,denormal,masks}),expected=>expected.ip===UD?before:before+1); comparisons++;
                 }
             }
             if(memory) {

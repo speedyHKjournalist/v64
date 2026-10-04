@@ -200,6 +200,8 @@ export const STATICS = {
     // device memory regions (frame buffers) and where they are mapped
     "cpu/mmio_ram.rs": { TABLE: "machine" },
     "cpu/pic.rs": { PIC: "machine" },
+    // SoftFloat's state around one SSE instruction (saved and restored)
+    "cpu/simd_fp.rs": { softfloat_roundingMode: "scratch", softfloat_exceptionFlags: "scratch" },
     "ir/debug.rs": { AUDIT: "debug", RECORDS: "debug" },
     "ir/frontend/encodings.rs": { ENCODINGS: "machine", OPCODES: "machine", FORMS: "debug" },
     "ir/runtime/cache.rs": {
@@ -227,7 +229,11 @@ export const STATICS = {
         DIRECT_T2: "machine", FORCED: "machine", HEAT: "machine", HEAT_STEPS: "machine", HEAT_STEPS_PER_VISIT: "machine",
         PAGE_HEAT: "machine", SCHEDULER: "machine", T0_RANGES: "machine", TIER0: "machine", RESERVED: "machine",
     },
-    "ir/runtime/tier0.rs": { COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine" },
+    "ir/runtime/tier0.rs": {
+        COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine",
+        // the operands of one ir_t0_sse_fp call
+        T0_SSE_FP: "scratch",
+    },
     "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
     // the parallel runtime: where this instance's statics are and whether
     // cores run in workers, then machine-wide words reached through machine():

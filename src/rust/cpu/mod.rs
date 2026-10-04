@@ -18,6 +18,7 @@ pub mod misc_instr;
 pub mod mmio_ram;
 pub mod modrm;
 pub mod pic;
+pub mod simd_fp;
 pub mod simd_int;
 pub mod smm;
 pub mod sse_instr;

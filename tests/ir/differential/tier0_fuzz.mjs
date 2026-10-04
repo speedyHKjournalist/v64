@@ -9,6 +9,8 @@
 // Needs build/bench/boot.bin (make bench-build): flat protected mode, paging.
 // FUZZ_STRADDLE=1 places each program across a page boundary and compiles
 // Tier-0 page functions with their neighbor pages (ir_t0_set_ranges).
+// Debugging: FUZZ_DEBUG=1 prints each case's MXCSR and code, FUZZ_BODY=<hex>
+// replaces the random instructions.
 import fs from "node:fs";
 import assert from "node:assert/strict";
 import { V86 } from "../../../build/libv86.mjs";
@@ -35,7 +37,8 @@ const disp = () => random() % 28 * 4;                    // [ebx + disp8], 0..10
 const mem = r => [0x43 | r << 3, disp()];                 // modrm for [ebx + disp8]
 const rr = (r, m) => 0xC0 | r << 3 | m;
 
-// FUZZ_KIND=i0..i33 / s0..s10 restricts programs to one instruction kind.
+// FUZZ_KIND=i0..i33 / s0..s11 restricts programs to one instruction kind
+// (s11: SSE floating point over special values, see fp_instruction).
 const only = process.env.FUZZ_KIND || "";
 const straddle = process.env.FUZZ_STRADDLE === "1";
 function instruction() {
@@ -81,9 +84,109 @@ function instruction() {
         }
     }
 }
+// SSE floating point (docs/simd-xsave-plan.md 7.4): the arithmetic forms,
+// conversions and compares, and the moves and shuffles carrying values between
+// them (Tier-0 tracks which registers hold neither NaNs nor denormals), on
+// zeros, denormals, infinities, NaNs and values that overflow or underflow.
+function fp_instruction(x, y) {
+    const prefix = pick([[], [0x66], [0xF3], [0xF2]]);
+    const packed = prefix.length === 0 || prefix[0] === 0x66;
+    const source = () => random() % 3 ? [rr(x, y)] : [0x43 | x << 3, packed ? disp() & ~15 : disp() & ~7];
+    switch(random() % 16) {
+        case 0: case 1: case 2: case 3: case 4: case 5:
+            return [...prefix, 0x0F, pick([0x51, 0x58, 0x59, 0x5C, 0x5D, 0x5E, 0x5F]), ...source()];
+        case 6: return [...pick([[], [0xF3]]), 0x0F, pick([0x52, 0x53]), rr(x, y)];      // RCP/RSQRT
+        case 7: return [...prefix, 0x0F, 0x5A, rr(x, y)];                                  // CVTPS2PD...
+        case 8: return [...pick([[], [0x66], [0xF3]]), 0x0F, 0x5B, rr(x, y)];              // CVTDQ2PS...
+        case 9: return [...pick([[0x66], [0xF2], [0xF3]]), 0x0F, 0xE6, rr(x, y)];          // CVTDQ2PD...
+        case 10: {                                                                     // CVTSI2SS... CVT(T)SS2SI...
+            const op = pick([0x2A, 0x2C, 0x2D]);
+            return [pick([0xF3, 0xF2]), 0x0F, op, op === 0x2A ? rr(x, y) : rr(reg(), y)];
+        }
+        case 11: return [...pick([[], [0x66]]), 0x0F, pick([0x2E, 0x2F]), rr(x, y)];        // (U)COMIS*
+        case 12: return random() % 3 ? [pick([0xF3, 0xF2]), 0x0F, 0x10, rr(x, y)]         // MOVSS/MOVSD
+            : [0x0F, 0x28, rr(x, y)];                                                      // MOVAPS
+        case 13: return random() & 1 ? [0x0F, pick([0x14, 0x15, 0x16]), rr(x, y)]          // UNPCK*/MOVLHPS
+            : [0x0F, 0xC6, rr(x, y), random() & 255];                                      // SHUFPS
+        case 14: return [0x0F, 0x57, rr(x, random() & 1 ? x : y)];                         // XORPS (zero idiom)
+        default: return random() & 1 ? [0x0F, 0x28, 0x43 | x << 3, disp() & ~15]          // MOVAPS xmm, m128
+            : [pick([0xF3, 0xF2]), 0x0F, 0x10, 0x43 | x << 3, disp() & ~7];               // MOVSS/MOVSD xmm, m
+    }
+}
+const SPECIAL_SINGLE = [0, 0x80000000, 0x3F800000, 0xBF800000, 1, 0x807FFFFF, 0x00800000, 0x00800001, 0x7F7FFFFF,
+    0x7F800000, 0xFF800000, 0x7FC00000, 0x7FA00000, 0xFFC12345, 0x3EFFFFFF, 0x01000000, 0x1F800000, 0x5F000000,
+    0x40490FDB, 0x3DCCCCCD, 0x4F000000, 0xCF000001];
+const SPECIAL_DOUBLE = [[0, 0], [0, 0x80000000], [0, 0x3FF00000], [1, 0], [0xFFFFFFFF, 0x800FFFFF], [0, 0x00100000],
+    [1, 0x00100000], [0xFFFFFFFF, 0x7FEFFFFF], [0, 0x7FF00000], [0, 0xFFF00000], [0, 0x7FF80000], [1, 0x7FF00000],
+    [0xFFFFFFFF, 0x3FDFFFFF], [0, 0x00200000], [0, 0x1FF00000], [0, 0x5FF00000], [0x54442D18, 0x400921FB],
+    [0x9999999A, 0x3FB99999], [0, 0x41E00000], [0, 0xC1E00000]];
+/** 16 bytes of special floats (4 singles or 2 doubles) as words */
+function special_words() {
+    if(random() & 1) return Array.from({ length: 4 }, () => random() % 5 ? pick(SPECIAL_SINGLE) : random());
+    return Array.from({ length: 2 }, () => random() % 5 ? pick(SPECIAL_DOUBLE) : [random(), random()]).flat();
+}
+// s12: what Tier-0 knows about registers within a block. Values around the
+// smallest normal, whose sums and differences are exact denormals, consumed
+// by forms that are then admitted natively unless that knowledge is right
+// (MXCSR with only PE set keeps a missed DE or IE visible).
+// (no denormals or NaNs to begin with: they would set DE and IE anyway)
+const NEAR_SINGLE = [0x00800000, 0x00800001, 0x00800003, 0x80800000, 0x80800001, 0x00C00000, 0x3F800000,
+    0x4B000000, 0, 0x80000000];
+const NEAR_DOUBLE = [[0, 0x00100000], [1, 0x00100000], [3, 0x00100000], [0, 0x80100000], [1, 0x80100000],
+    [0, 0x00180000], [0, 0x3FF00000], [0, 0x43300000], [0, 0], [0, 0x80000000]];
+// (one precision per program: the halves of doubles are often denormal
+// singles, which would set DE anyway)
+let near_single = true, last = 0;
+function near_words() {
+    const near = (list, k) => random() & 1 ? list[k] : pick(list);
+    // (a fourth of the registers with a denormal or NaN above lane 0, which a
+    // check of lane 0 alone or a wrong shuffle would let through)
+    const odd = random() % 4 ? -1 : 1 + random() % (near_single ? 3 : 1);
+    if(near_single) return Array.from({ length: 4 }, (_, i) => i === odd ? pick([0x00000003, 0x80400000, 0x7FC00000]) : near(NEAR_SINGLE, random() % 5));
+    return Array.from({ length: 2 }, (_, i) => i === odd ? pick([[3, 0], [0, 0x80080000], [0, 0x7FF80000]]) : near(NEAR_DOUBLE, random() % 5)).flat();
+}
+function tracking_instruction(x, y) {
+    const single = near_single;
+    // Patterns for each fact Tier-0 keeps, a consumer reading what a wrong
+    // fact would leave unchecked (z: another register)
+    const z = (x + 1 + random() % 7) & 7;
+    const packed = single ? [] : [0x66], scalar = single ? [0xF3] : [0xF2];
+    switch(random() % 8) {
+        case 0: // a clean register shuffled with an unchecked one
+            return [...packed, 0x0F, 0x59, rr(x, x),
+                ...single ? [0x0F, 0xC6, rr(x, y), random() & 255] : [0x66, 0x0F, pick([0x14, 0x15]), rr(x, y)],
+                ...packed, 0x0F, 0x58, rr(z, x)];
+        case 1: // a scalar check covers lane 0 only
+            return [...scalar, 0x0F, pick([0x58, 0x59, 0x5D]), rr(x, y), ...packed, 0x0F, pick([0x58, 0x5F]), rr(z, y)];
+        case 2: // a sum may be an exact denormal
+            return [...packed, 0x0F, pick([0x58, 0x5C]), rr(x, y), ...packed, 0x0F, pick([0x58, 0x5D, 0x59]), rr(z, x)];
+        case 3: // copies and scalar moves
+            return [...packed, 0x0F, 0x59, rr(x, x), ...pick([[0x0F, 0x28, rr(z, y)], [...scalar, 0x0F, 0x10, rr(x, y)]]),
+                ...packed, 0x0F, 0x58, rr(z, x)];
+    }
+    // (reading the last result half of the time)
+    if(random() & 1) y = last;
+    last = x;
+    const prefix = single ? pick([[], [0xF3]]) : pick([[0x66], [0xF2]]);
+    switch(random() % 10) {
+        case 0: case 1: case 2: return [...prefix, 0x0F, pick([0x58, 0x5C]), rr(x, y)];        // ADD/SUB
+        case 3: return [...prefix, 0x0F, pick([0x59, 0x5D, 0x5F, 0x51, 0x5E]), rr(x, y)];      // MUL/MIN/MAX/SQRT/DIV
+        // (only templated forms: an interpreted one ends the block)
+        case 4: return [single ? 0xF3 : 0xF2, 0x0F, 0x10, rr(x, y)];                             // MOVSS/MOVSD
+        case 5: return [...(single ? [] : [0x66]), 0x0F, pick([0x2E, 0x2F]), rr(x, y)];         // (U)COMIS*
+        case 6: return [0x0F, 0x28, rr(x, y)];                                                    // MOVAPS
+        case 7: return single ? [0x0F, 0xC6, rr(x, y), random() & 255]                          // SHUFPS
+            : random() & 1 ? [0x66, 0x0F, 0xC6, rr(x, y), random() & 3]                          // SHUFPD
+            : [0x66, 0x0F, pick([0x14, 0x15]), rr(x, y)];                                        // UNPCKxPD
+        case 8: return single ? [0x0F, 0x5A, rr(x, y)] : [0x66, 0x0F, 0x28, rr(x, y)];          // CVTPS2PD / MOVAPD
+        default: return [0x0F, 0x57, rr(x, x)];                                                   // XORPS x, x
+    }
+}
+// Masked MXCSRs: defaults, PE set, all flags set, rounding modes, DAZ and FZ
+const FP_MXCSRS = [0x1F80, 0x1FA0, 0x1FBF, 0x3FA0, 0x5F80, 0x7FA0, 0x1FE0, 0x9FA0, 0x9FE0];
 function simd() {
     const x = random() & 7, y = random() & 7;
-    const kind = random() % 11;
+    const kind = random() % 13;
     switch(only.startsWith("s") ? Number(only.slice(1)) : kind) {
         case 0: return [0x0F, 0x10, 0x43 | x << 3, disp() & ~15];                 // MOVUPS xmm, m128
         case 1: return [0x0F, pick([0x58, 0x59, 0x5C, 0x5D, 0x5F]), rr(x, y)];     // ADDPS...
@@ -104,6 +207,8 @@ function simd() {
                 default: return [0x66, 0x0F, 0x3A, 0x0F, rr(x, y), random() & 31];  // PALIGNR
             }
         }
+        case 11: return fp_instruction(x, y);
+        case 12: return tracking_instruction(x, y);
         default: return [0x66, 0x0F, 0x72, rr(pick([2, 4, 6]), x), random() & 63]; // PSxLD imm
     }
 }
@@ -142,14 +247,26 @@ function x87() {
         default: return [0xD9, 0x7B, d(), 0xD9, 0x6B, d(), 0xDD, 0x43, d(), 0xDD, 0x5B, d()];  // FNSTCW; FLDCW; FLD; FSTP
     }
 }
+// s11/s12 iterations start alike: LDMXCSR and MOVAPS of all registers from
+// DATA + 256.. (not compared), so that a flag missed in compiled code is not
+// set by a later iteration (MXCSR's flags are sticky).
+const RESET = 256;
+function reset() {
+    const out = [0x0F, 0xAE, 0x93, ...u32(RESET + 128)];
+    for(let k = 0; k < 8; k++) out.push(0x0F, 0x28, 0x83 | k << 3, ...u32(RESET + 16 * k));
+    return out;
+}
 function program() {
-    const body = [];
+    const body = ["s11", "s12"].includes(only) ? reset() : [];
     const mix = random() % 5;
-    for(let k = 0; k < 40; k++) {
+    if(process.env.FUZZ_BODY) body.push(...process.env.FUZZ_BODY.match(/../g).map(h => parseInt(h, 16)));
+    else
+    // (s12: short, so that one missed flag is not set by anything else)
+    for(let k = 0; k < (only === "s12" ? 4 + random() % 6 : 40); k++) {
         const vector = only ? only.startsWith("s") : !(mix && random() % 5);
         const float = only ? only === "x" : random() % 7 === 0;
         // Single-kind programs still interleave PUSHFD/LAHF to expose FLAGS.
-        body.push(...(only && k % 4 === 3 ? [0x9C, 0x8F, 0x43, disp()] : float ? x87() : vector ? simd() : instruction()));
+        body.push(...(only && only !== "s12" && k % 4 === 3 ? [0x9C, 0x8F, 0x43, disp()] : float ? x87() : vector ? simd() : instruction()));
     }
     // DEC DWORD [ebx + 124]; JNZ top; HLT
     const tail = [0xFF, 0x4B, 124];
@@ -187,14 +304,16 @@ async function run(m, code, init, page, split) {
     cpu.mem8.set(code, base);
     cpu.mem8.set(init.data, DATA);
     cpu.mem8.fill(0, STACK - 0x1000, STACK);
-    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ITERATIONS, true);
+    // (FP programs reload MXCSR, interpreted, at the top: more iterations
+    // let Tier-0 recompile the page with an entry after it)
+    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ["s11", "s12"].includes(only) ? 20 * ITERATIONS : ITERATIONS, true);
     cpu.reg32.set(init.regs);
     cpu.reg32[3] = DATA; cpu.reg32[4] = STACK;
     cpu.flags[0] = 2; cpu.flags_changed[0] = 0; cpu.in_hlt[0] = 0;
     cpu.instruction_pointer[0] = base;
     e.fpu_discard_cache();
     new Uint32Array(cpu.reg_xmm32s.buffer, cpu.reg_xmm32s.byteOffset, 32).set(init.xmm);
-    cpu.mxcsr[0] = 0x1F80;
+    cpu.mxcsr[0] = init.mxcsr;
     cpu.fpu_st.fill(0); cpu.fpu_stack_empty[0] = 255; cpu.fpu_stack_ptr[0] = 0;
     e.set_control_word(0x37F); cpu.fpu_status_word[0] = 0;
     e.update_state_flags();
@@ -219,6 +338,7 @@ async function run(m, code, init, page, split) {
         data: Array.from(cpu.mem8.subarray(DATA, DATA + 256)),
         stack: Array.from(cpu.mem8.subarray(STACK - 64, STACK)),
         xmm: Array.from(new Uint32Array(cpu.reg_xmm32s.buffer, cpu.reg_xmm32s.byteOffset, 32), v => v >>> 0),
+        mxcsr: cpu.mxcsr[0] >>> 0,
         count: new Uint32Array(e.memory.buffer)[664 >> 2] >>> 0,
         fpu: (e.fpu_sync_all(), [cpu.fpu_stack_ptr[0], cpu.fpu_stack_empty[0], cpu.fpu_status_word[0], ...Array.from(new Uint8Array(cpu.fpu_st.buffer, cpu.fpu_st.byteOffset, 128))]),
         status: new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).getUint32(0x608, true),
@@ -228,15 +348,24 @@ async function run(m, code, init, page, split) {
 const reference = await machine(false), tier0 = await machine(true);
 let failures = 0;
 for(let c = 0; c < cases; c++) {
+    near_single = (random() & 1) === 1;
     const code = program();
+    const special = only === "s11", near = only === "s12";
+    const reset_state = (xmm, mxcsr) => [...xmm.flatMap(u32), ...u32(mxcsr)];
     const init = {
         regs: Array.from({ length: 8 }, () => random()),
-        data: Array.from({ length: 256 }, () => random() & 255),
+        data: special ? Array.from({ length: 16 }, () => special_words().flatMap(u32)).flat()
+            : Array.from({ length: 256 }, () => random() & 255),
         // Finite floats: exponents kept in range so arithmetic rarely makes NaNs.
-        xmm: Array.from({ length: 32 }, () => random() & 0xBFFFFFFF),
+        xmm: special ? Array.from({ length: 8 }, special_words).flat()
+            : near ? Array.from({ length: 8 }, near_words).flat()
+            : Array.from({ length: 32 }, () => random() & 0xBFFFFFFF),
+        mxcsr: special ? pick(FP_MXCSRS) : near ? 0x1FA0 : 0x1F80,
     };
+    if(special || near) init.data.push(...reset_state(init.xmm, init.mxcsr));
     const split = straddle ? 4 + random() % (code.length - 8) : 0;
     const expected = await run(reference, code, init, c, split), actual = await run(tier0, code, init, c, split);
+    if(process.env.FUZZ_DEBUG) console.log(`case ${c}: mxcsr ${expected.mxcsr.toString(16)} / ${actual.mxcsr.toString(16)} count ${expected.count} code ${Buffer.from(code).toString("hex")}`);
     for(const key of Object.keys(expected)) {
         try { assert.deepEqual(actual[key], expected[key]); }
         catch{

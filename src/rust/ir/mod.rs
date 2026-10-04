@@ -30,6 +30,7 @@ pub mod lowering;
 #[path = "../../../tests/ir/semantics/memory.rs"]
 mod memory_tests;
 pub mod mir;
+pub mod native_fp;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/page_bench.rs"]
 mod page_bench_tests;

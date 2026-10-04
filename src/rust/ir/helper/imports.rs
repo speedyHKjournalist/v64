@@ -80,6 +80,7 @@ imports! {
     "ir_t0_write_slow": [I32,I32,I32] -> [I32], Check, "tier-0: probes, then writes with interpreter effects; 1 = would fault (nothing written), 2 = wrote watched code";
     "ir_t0_condition": [I32] -> [I32], Pure, "tier-0: Jcc condition over lazy FLAGS; no writes";
     "ir_t0_x87": [I32,I32,I32] -> [I64], X87, "tier-0 ir_x87_op: compile-time form and transfer kind, no f64 mirroring";
+    "ir_t0_sse_fp": [I32,I32] -> [I32], Check, "tier-0: exact SSE floating point on its operand block; MXCSR flags; 1 = would fault, nothing changed";
     "ir_x87_op": [I32,I32,I32,I32] -> [I64], X87, "x87 stack/status/control and f64 shadow cache only; operand words in, stored words out; no fault, exit, GPR/FLAGS or memory access";
     "ir_memory_write": [I32,I32,I32] -> [I32], CpuExit, "ordered write, callbacks, code invalidation; returns 2 or 4; caller retires";
     "ir_memory_write_unmasked_word": [I32,I32,I32] -> [I32], CpuExit, "ENTER16 MMIO compatibility; returns 2 or 4; caller retires";

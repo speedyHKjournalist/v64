@@ -1546,10 +1546,19 @@ impl Emitter<'_> {
     }
     /// Nonzero when SSE task checking can fault or observe the host. A debug
     /// OSFXSR warning is an observer even when CR0 permits the instruction.
+    /// Push i32 nonzero when an SSE register helper may fault or call the
+    /// host: CR0.EM or CR0.TS (#UD, #NM), an unmasked MXCSR exception (#XM or
+    /// #UD, cpu::simd_fp) and, in debug builds, the OSFXSR log
     fn sse_task_observation(&mut self) {
         self.w.load_fixed_i32(gp::cr as u32);
         self.w.const_i32(12);
         self.w.and_i32();
+        self.w.load_fixed_i32(gp::mxcsr as u32);
+        self.w.const_i32(0x1F80);
+        self.w.and_i32();
+        self.w.const_i32(0x1F80);
+        self.w.ne_i32();
+        self.w.or_i32();
         if cfg!(debug_assertions) {
             self.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
             self.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
@@ -1632,24 +1641,24 @@ impl Emitter<'_> {
             self.w.simd(fp.opcode);
             let result = self.w.set_new_local_v128();
             // Scalar and ordinary SIMD add/sub/mul/div have the same IEEE
-            // result bits except for the permitted choice of NaN payload/sign.
-            // Test the result once: result != result detects every NaN lane,
-            // including invalid operations with non-NaN operands. Signed zero,
-            // subnormals, infinities and overflow remain exact, not fast-math.
-            // These baseline arithmetic forms do not update MXCSR. Keep task
-            // faults, debug observers and scalar NaNs before architectural writes.
+            // result bits as cpu::simd_fp where ir::native_fp admits them
+            // (MXCSR at its defaults with PE set; no denormal operand, no NaN
+            // or infinite result, no inexact tiny product or quotient), and
+            // then leave MXCSR as it is. Only lane zero of a scalar form is
+            // evaluated: upper lanes may hold anything. Keep task faults,
+            // debug observers and refused lanes before architectural writes.
             self.sse_task_observation();
-            self.w.get_local_v128(&result);
-            self.w.get_local_v128(&result);
-            self.w.simd(if fp.double { 0x48 } else { 0x42 }); // f64x2.ne / f32x4.ne
-            if fp.scalar {
-                // Only lane zero is architecturally evaluated. Upper lanes may
-                // contain signalling NaNs and must neither reject nor change.
-                self.w.simd_lane(0x1B, 0); // i32x4.extract_lane (low mask word)
-            }
-            else {
-                self.w.simd(0x53);
-            } // v128.any_true
+            crate::ir::native_fp::arithmetic_refused(
+                &mut self.w,
+                fp.operation,
+                fp.double,
+                fp.scalar,
+                [&left, &right],
+                [false, false],
+                &result,
+            );
+            self.w.or_i32();
+            crate::ir::native_fp::mxcsr_refused(&mut self.w);
             self.w.or_i32();
             self.w.eqz_i32();
             self.w.if_void();

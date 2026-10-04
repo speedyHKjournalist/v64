@@ -64,6 +64,12 @@ pub union reg128 {
     pub f64: [f64; 2],
 }
 
+impl reg128 {
+    /// The register's 128 bits (lane 0 in the low bits)
+    pub fn bits(self) -> u128 { unsafe { std::mem::transmute(self) } }
+    pub fn of_bits(bits: u128) -> reg128 { unsafe { std::mem::transmute(bits) } }
+}
+
 pub const INTERPRETER_ITERATION_LIMIT: u32 = 100_001;
 
 // How often, in milliseconds, to yield to the browser for rendering and running events
@@ -4033,6 +4039,25 @@ pub unsafe fn trigger_gp(code: i32) {
     crate::cpu::exceptions::fault(CPU_EXCEPTION_GP, Some(code));
 }
 
+/// An unmasked SIMD floating-point exception (cpu/simd_fp.rs): #XM, or #UD
+/// without CR4.OSXMMEXCPT
+#[inline(never)]
+pub unsafe fn trigger_simd_fp() {
+    if *cr.offset(4) & CR4_OSXMMEXCPT == 0 {
+        trigger_ud();
+        return;
+    }
+    crate::cpu::execution::mark_fault();
+    dbg_log!("#xm");
+    *instruction_pointer = *previous_ip;
+    if DEBUG {
+        if js::cpu_exception_hook(CPU_EXCEPTION_XM) {
+            return;
+        }
+    }
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_XM, None);
+}
+
 #[cold]
 pub unsafe fn virt_boundary_read16(low: u32, high: u32) -> i32 {
     dbg_assert!(low & 0xFFF == 0xFFF);
@@ -4606,32 +4631,9 @@ pub unsafe fn task_switch_test() -> bool {
     };
 }
 
+/// RC, DAZ, FZ and the exception masks apply through cpu::simd_fp
 pub unsafe fn set_mxcsr(new_mxcsr: i32) {
     dbg_assert!(new_mxcsr & !MXCSR_MASK == 0); // checked by caller
-
-    if *mxcsr & MXCSR_DAZ == 0 && new_mxcsr & MXCSR_DAZ != 0 {
-        dbg_log!("Warning: Unimplemented MXCSR bit: Denormals Are Zero");
-    }
-    if *mxcsr & MXCSR_FZ == 0 && new_mxcsr & MXCSR_FZ != 0 {
-        dbg_log!("Warning: Unimplemented MXCSR bit: Flush To Zero");
-    }
-
-    let rounding_mode = new_mxcsr >> MXCSR_RC_SHIFT & 3;
-    if *mxcsr >> MXCSR_RC_SHIFT & 3 == 0 && rounding_mode != 0 {
-        dbg_log!(
-            "Warning: Unimplemented MXCSR rounding mode: {}",
-            rounding_mode
-        );
-    }
-
-    let exception_mask = new_mxcsr >> 7 & 0b111111;
-    if *mxcsr >> 7 & 0b111111 != exception_mask && exception_mask != 0b111111 {
-        dbg_log!(
-            "Warning: Unimplemented MXCSR exception mask: 0b{:b}",
-            exception_mask
-        );
-    }
-
     *mxcsr = new_mxcsr;
 }
 

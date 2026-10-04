@@ -470,6 +470,9 @@ helper。快路径的准入条件：
 
 - MXCSR 控制位是默认值：RC 为就近舍入，DAZ=FZ=0，异常全部屏蔽。
 - 输入或结果出现 NaN、非规格化数、无穷或零时（可能引发 IE/DE/ZE/OE/UE），回退到精确 helper。
+  实现（P4a）细化为：非规格化操作数，或者结果为 NaN、无穷时回退；MUL、DIV 和窄化转换的结果
+  按舍入后判断为微小（绝对值不超过最小规格化数）时回退，除非它是零因子（被除数）得到的精确零。
+  零操作数本身不回退。
 - 状态位是粘滞的：PE 已置位时，可以省掉不精确检测；PE 未置位时，要么检测不精确，要么回退
   一次，回退之后 PE 就已置位。
 
@@ -806,7 +809,7 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
 | 编号 | 问题 | 建议 |
 | --- | --- | --- |
 | Q1 | 新建 VM 默认采用哪个 CPU 配置 | 留到 P12 决定。建议：新能力在新旧 profile 下都达到性能预算之前，默认保持旧配置，由用户显式开启 |
-| Q2 | SSE/AVX 浮点的精度策略 | **已定（2026-10-04）**：默认精确，用 7.4 节的快路径准入保住性能；性能预算按这一策略测量。P4a 达不到预算时再重新讨论 |
+| Q2 | SSE/AVX 浮点的精度策略 | **已定（2026-10-04）**：默认精确，用 7.4 节的快路径准入保住性能；性能预算按这一策略测量。P4a 达不到预算时再重新讨论。P4a 结果（2026-10-05）：全套基准中位数不变，SSE 浮点四项 x0.72–0.89（14 节），待复核 |
 | Q3 | 是否实现 XSAVES/XRSTORS | **已定（2026-10-04）**：实现，作为 M5 的最后一步，并对 Linux 的 XSAVES/XRSTORS 路径做完整验收 |
 | Q4 | 公开配置的 API 形态 | **P0 采纳建议**：能力位图，外加 `x86-64-v2` 这类预设级别；不满足依赖的组合直接报错 |
 | Q5 | 兼容模式由哪个引擎执行 | **P0 采纳建议**：共用解码与语义（3.1 节），并保留双引擎差分作为回归手段 |
@@ -1083,3 +1086,75 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   - 32 位路径的 legacy SSE 在 CR4.OSFXSR=0 时仍只记日志，旧形式也不查对齐（3.3 节）。SSSE3
     与旧形式共用前一项检查，两项一并在 P4a 修正（7.4 节）。
   - MMX 形式不因 x87 未决异常产生 #MF，与现有 MMX 形式一致。
+
+### P4a：精确的 SSE 浮点（2026-10-05）
+
+本节记录 P4a 的第一部分：32 位引擎的 SSE/SSE2/SSE3 浮点改为精确实现。legacy SSE 的
+OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
+
+- **公共核心**：`src/rust/cpu/simd_fp.rs` 实现全部 SSE 浮点形式的精确语义，32 位解释器、
+  regions 的 helper 和 x64 解释器（`x64/vector.rs`，删去了它自己的一份）共用：
+  - SoftFloat 的 8086-SSE 规则：x86 的 NaN 选择，舍入后判断微小。
+  - MXCSR：RC，DAZ，FZ（只在 UM 屏蔽时），粘滞的状态位。异常顺序按 SDM 第 1 卷 11.5.3 节：
+    运算前的异常（IE、DE、ZE）未屏蔽时直接产生故障，不再置运算后的状态位；然后才是 OE、UE、PE。
+    产生故障时目的寄存器不变。同一 lane 中，QNaN 操作数、无效运算和 ZE 优先于 DE。UE 未屏蔽时，
+    任何微小结果都产生异常，即使结果精确。
+  - 微小按舍入后判断，取 SoftFloat 的 underflow 标志：不精确且舍入后进到最小规格化数的乘积
+    或商也算微小（UE；FZ 时清零）。测试新加的边界值发现了这个问题，同时修正了核心和两条快路径。
+  - 未屏蔽的异常：CR4.OSXMMEXCPT=1 时 #XM（向量 19），否则 #UD。
+  - 覆盖 ADD/SUB/MUL/DIV/MIN/MAX/SQRT/CMP 的 PS/PD/SS/SD 形式、HADD/HSUB/ADDSUB、
+    (U)COMISS/SD 和全部转换。RCP/RSQRT 不产生异常：返回正确舍入的近似值，非规格化输入
+    视为零，微小结果为零。
+  - x64 page tier 原本就是精确的（TwoSum/TwoProduct 检测不精确），未改动。
+- **快路径准入**（7.4 节，`src/rust/ir/native_fp.rs`）：
+  - MXCSR 条件为 `(mxcsr & 0xFFE0) == 0x1FA0`。
+  - lane 条件：操作数不是非规格化数；结果有限。MUL、DIV 和窄化转换的结果按舍入后判断不是微小
+    （绝对值大于最小规格化数），零因子（被除数）得到的精确零除外。MIN/MAX、比较和扩宽转换只要求
+    操作数既不是 NaN 也不是非规格化数。RCP/RSQRT 要求源是有限的规格化数（RSQRT 还要为正），
+    结果不低于最小规格化数。
+  - 解释器的快路径（`simd_fp::fast_lane`）采用同一条件。
+  - 掩码的实现方式：有限值用 `x - x == 0`；非规格化数用 2|x| - 1 的范围；双精度只比较高半部分，
+    最小规格化数本身也会被拒绝。常量在每个 32 位 lane 中取同一个值，在 ARM64 上各是一条立即数
+    指令。任意 v128 常量每次使用都要经过一次通用寄存器和一次传送，代价比检查本身还大。
+- **Tier-0**：
+  - MXCSR 条件每个块只算一次。
+  - 被拒绝的指令通过 `ir_t0_sse_fp`（操作数块上的 helper）在原地精确执行，不再交给解释器重试。
+    原先的重试会留下入口点，把热循环切成许多小块：每两条浮点指令之间都要把 XMM 缓存写回再读回。
+    只有在指令产生故障，或 lane 检查失败而本指令要记录寄存器事实时，才重试。
+  - `Page::xmm_clean` 记录块内寄存器中已知既不是 NaN 也不是非规格化数的 lane，这些操作数不再
+    检查。来源有：被准入的 MUL/DIV/SQRT/MIN/MAX 和转换的结果、已检查过的操作数、寄存器复制、
+    搬动整个 lane 的 shuffle、`XORPS x, x`。ADD/SUB 的结果不算在内，它可能是精确的非规格化数。
+  - 标量 MUL/DIV 先做一次廉价检查，指数为零或结果微小时才做完整检查，零只能在完整检查中放过。
+    打包形式直接做完整检查，因为向量和矩阵数据常含零，廉价检查每次都会失败。
+- **regions**：ADD/SUB/MUL/DIV 的寄存器形式仍是原生代码，按同样的条件准入；其他形式走 helper。
+- **性能**（12.2 节）：`tests/bench` 全套 36 项与 P3 交错比较（M1 Pro，负载约 3–4；
+  `build/simd-xsave/p4a-bench-full.json`），warm 几何平均 x0.975，cold x0.971，中位数约 x1.00，
+  在 5% 的中位数预算之内。SSE 浮点四项回退：601.matmul.sse x0.72、606.nbody.sse x0.83、
+  611.mandel.sse x0.89、620.simd.sse x0.72。其余各项（整数、x87、MMX、SSE2 整数）在 x0.94–x1.06
+  之间，属于噪声。最初的精确版本在这四项上只有 x0.42–0.58。
+  - 剩余开销主要有两项，都按指令逐条计算：一是还未确认干净的操作数要做非规格化检查，每对约 6 条
+    指令；二是乘积要做带零例外的微小检查，约 6 条指令。检查分支和 MXCSR 的代价很小。
+  - 可继续的方向：块间传递寄存器事实（循环中不变的寄存器每轮都要重新检查），以及按指令位置
+    自适应地选择一级或两级检查。
+  - 这一回退记录在第 13 节 Q2，供复核。
+- **测试**：
+  - `make sse-fp-tests`：
+    - `tests/rust/sse_fp.mjs` 以 `tests/rust/sse_fp_model.mjs` 为准。该模型用 BigInt 做精确的
+      有理数运算，不依赖 SoftFloat 和 `simd_fp.rs`。测试覆盖 68 个形式、寄存器源和内存源、
+      11 种 MXCSR，以及 #XM 和 #UD，共 117744 例，在解释器、Tier-0 和 regions 上运行；
+      分别用 release、无 SIMD 和 debug 构建。
+    - `tests/ir/differential/sse_fp_tracking.mjs` 用 15 个序列检查 Tier-0 记录的寄存器事实，
+      逐条验证过：故意写错的三条规则（ADD 结果算作干净、shuffle 只要部分 lane 干净就算干净、
+      标量检查推出整个寄存器干净）都会被对应序列发现。
+  - Tier-0 fuzz 比较 MXCSR，并新增两类：`s11` 用特殊值和 9 种屏蔽的 MXCSR；`s12` 针对寄存器
+    事实。两类程序每轮开头都用 LDMXCSR 和 MOVAPS 重置状态，因为 MXCSR 的状态位是粘滞的，
+    之后的轮次会把漏掉的状态位补上。
+  - x64 的 vector oracle 在共用核心上解释执行和 page tier 下都通过。`ir-sse-fp-tests` 检查
+    helper 和原生路径的约定（原生路径要求 PE 已置位）。
+- **回归**：`sse-fp-tests`、`ssse3-tests`、`rust-test`、`x64-decode-tests`、`ir-decoder-tests`、
+  `ir-decode-contract-tests`、`decode-rules-tests`、`ir-mmx-tests`、`ir-sse-fp-tests`、
+  `ir-coverage-tests`、`ir-fp-state-tests`、`ir-tier0-tests`、`ir-differential-tests`、
+  `ir-simd-integer-tests`、`ir-simd-shuffle-tests`、`packed-simd-tests`、`sse3-tests`、`xsave-tests`、
+  `x64-system-tests`、opcode 矩阵、`x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、
+  `nasmtests-force-jit`、`kvm-unit-test`、`smp-tests`、`api-tests`、`platform-contract-tests`、
+  rustfmt 和 state layout 检查全部通过。

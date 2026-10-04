@@ -833,6 +833,13 @@ struct Page {
     /// interpreter step, see xmm_store).
     xmm: [Option<WasmLocalV128>; 8],
     xmm_dirty: u8,
+    /// native_fp::mxcsr_refused, once evaluated in the block: MXCSR changes
+    /// only in interpreter steps, which leave the block, and ir_t0_sse_fp,
+    /// which sets flags it ignores
+    fp_mxcsr: Option<WasmLocal>,
+    /// Per XMM register, the floating-point lanes known to be neither NaN nor
+    /// denormal in the block (simd::CLEAN_*; see native_fp)
+    xmm_clean: [u8; 8],
     /// x87 TOP/tags/VALID/DIRTY in function-wide locals while `x87_is_open`
     /// (then the CPU state is behind; see x87_open/x87_close).
     x87: X87Cache,
@@ -1613,6 +1620,10 @@ impl Page {
         for local in self.xmm.iter_mut().filter_map(Option::take) {
             self.w.free_local_v128(local);
         }
+        if let Some(local) = self.fp_mxcsr.take() {
+            self.w.free_local(local);
+        }
+        self.xmm_clean = [0; 8];
     }
     fn emit_flags(&mut self, flags: PendingFlags) {
         if flags.op1 {
@@ -3425,6 +3436,8 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         flags: PendingFlags::default(),
         xmm: Default::default(),
         xmm_dirty: 0,
+        fp_mxcsr: None,
+        xmm_clean: [0; 8],
         x87: X87Cache {
             top: locals.pop().unwrap(),
             tags: locals.pop().unwrap(),

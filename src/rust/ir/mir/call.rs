@@ -87,6 +87,9 @@ pub struct Delivery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeFp {
     pub opcode: u32,
+    /// The guest operation (0F 58 ADD, 59 MUL, 5C SUB, 5E DIV), for
+    /// ir::native_fp's admission
+    pub operation: u8,
     pub double: bool,
     pub scalar: bool,
 }
@@ -111,6 +114,7 @@ impl NativeFp {
         };
         Some(Self {
             opcode: if double { 0xF0 } else { 0xE4 } + operation,
+            operation: opcode as u8,
             double,
             scalar,
         })

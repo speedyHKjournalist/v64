@@ -34,9 +34,11 @@ bench-quick: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 	node tests/bench/run.mjs --quick $(BENCH_ARGS)
 
 # Tier-0 page functions against the interpreter on random programs.
-ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
+ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin
 	node tests/ir/differential/tier0_fuzz.mjs 60 1
-	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 s10 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
+	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 s10 s11 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
+	FUZZ_KIND=s12 node tests/ir/differential/tier0_fuzz.mjs 40 2
+	node tests/ir/differential/sse_fp_tracking.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/tier0_fetch_fault.mjs
 
 .PHONY: glbridge test-glbridge
@@ -1510,5 +1512,14 @@ ssse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-de
 	node tests/rust/ssse3.mjs build/v86-fallback.wasm
 	node tests/x64/ssse3.mjs
 	TEST_RELEASE_BUILD=1 node tests/x64/ssse3.mjs
+
+# Exact SSE floating point in the 32-bit engines against an independent model
+# (docs/simd-xsave-plan.md 7.4, P4a), and what Tier-0 knows about registers.
+.PHONY: sse-fp-tests
+sse-fp-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/sse_fp.mjs
+	node tests/rust/sse_fp.mjs build/v86-fallback.wasm
+	node tests/rust/sse_fp.mjs build/v86-debug.wasm
+	node tests/ir/differential/sse_fp_tracking.mjs
 
 .PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests xsave-tests ssse3-tests
