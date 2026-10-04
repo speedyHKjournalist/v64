@@ -1022,7 +1022,10 @@ export class V86 {
     restore_state(state: ArrayBuffer): Promise<void>;
 
     /**
-     * Asynchronously save the current state of the emulator.
+     * Asynchronously save the current state of the emulator, in one buffer:
+     * less than 2 GiB (the RAM in use, the video memory, the devices' state).
+     * A larger state rejects with a RangeError; save_state_stream saves any
+     * machine (and is needed with extended RAM).
      */
     save_state(): Promise<ArrayBuffer>;
 

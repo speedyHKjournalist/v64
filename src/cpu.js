@@ -9,7 +9,7 @@ import {
     REG_ESP, REG_EBP, REG_ESI, REG_EAX, REG_EBX, REG_ECX, REG_EDX, REG_EDI,
     REG_CS, REG_DS, REG_ES, REG_FS, REG_GS, REG_SS, CR0_PG, CR4_PAE, REG_LDTR,
     FLAG_VM, FLAG_INTERRUPT, FLAG_CARRY, FLAG_ADJUST, FLAG_ZERO, FLAG_SIGN, FLAG_TRAP,
-    FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_PARITY,
+    FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_PARITY, STATE_MAX_SINGLE_BUFFER,
 } from "./const.js";
 import { h, view, Bitmap } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
@@ -1915,8 +1915,15 @@ CPU.prototype.pack_memory = function()
         }
     }
 
+    // (only single-buffer snapshots pack RAM: streams write it page by page)
+    const packed_size = nonzero_pages.length * 0x1000;
+    if(packed_size > STATE_MAX_SINGLE_BUFFER)
+    {
+        throw new RangeError("The state (" + Math.ceil(packed_size / 1048576) + " MB of RAM) is larger than a " +
+            "single-buffer snapshot can be (2 GiB): use save_state_stream");
+    }
     const bitmap = new Bitmap(page_count);
-    const packed_memory = new Uint8Array(nonzero_pages.length << 12);
+    const packed_memory = new Uint8Array(packed_size);
 
     for(const [i, page] of nonzero_pages.entries())
     {

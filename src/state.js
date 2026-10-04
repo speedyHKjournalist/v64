@@ -1,4 +1,5 @@
 import { h } from "./lib.js";
+import { STATE_MAX_SINGLE_BUFFER } from "./const.js";
 import { dbg_assert, dbg_log } from "./log.js";
 import { CPU } from "./cpu.js";
 
@@ -148,8 +149,13 @@ export function save_state(cpu)
 
         total_buffer_size += len;
 
-        // align
-        total_buffer_size = total_buffer_size + 3 & ~3;
+        // align (not with 32-bit operators: the sum may pass 2 GiB)
+        total_buffer_size += (4 - total_buffer_size % 4) % 4;
+    }
+    if(total_buffer_size > STATE_MAX_SINGLE_BUFFER)
+    {
+        throw new RangeError("The state (" + Math.ceil(total_buffer_size / 1048576) + " MB) is larger than a single-buffer " +
+            "snapshot can be (2 GiB): use save_state_stream");
     }
 
     var info_object = JSON.stringify({
@@ -161,6 +167,11 @@ export function save_state(cpu)
     var buffer_block_start = STATE_INFO_BLOCK_START + info_block.length;
     buffer_block_start = buffer_block_start + 3 & ~3;
     var total_size = buffer_block_start + total_buffer_size;
+    if(total_size > STATE_MAX_SINGLE_BUFFER)
+    {
+        throw new RangeError("The state (" + Math.ceil(total_size / 1048576) + " MB) is larger than a single-buffer " +
+            "snapshot can be (2 GiB): use save_state_stream");
+    }
 
     //console.log("State: json_size=" + Math.ceil(buffer_block_start / 1024 / 1024) + "MB " +
     //               "buffer_size=" + Math.ceil(total_buffer_size / 1024 / 1024) + "MB");

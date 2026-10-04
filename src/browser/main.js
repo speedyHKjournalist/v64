@@ -171,6 +171,9 @@ function $(id)
     return document.getElementById(id);
 }
 
+/** RAM and video memory from which the page saves states as V7 streams */
+const STREAMED_STATE_MEMORY = 1024 * 1024 * 1024;
+
 /**
  * Save a V7 snapshot, which never exists in one buffer: straight into a file
  * where the browser lets the page write one, else collected into a Blob
@@ -3591,16 +3594,26 @@ function init_ui(profile, settings, emulator)
         button.textContent = "Saving...";
         try
         {
-            if(settings.extended_memory_size)
+            // A single-buffer snapshot is less than 2 GiB (the RAM in use,
+            // video memory, the SVGA's 3D objects), and the browser allocates
+            // it in one piece, beside the guest's RAM: machines of 1 GiB or
+            // more save a V7 stream, written to the file as it is made (into
+            // a Blob where the browser lets the page write no file); the
+            // others too when one buffer fails (RangeError)
+            let result = null;
+            if(!settings.extended_memory_size && settings.memory_size + (settings.vram_size || 0) < STREAMED_STATE_MEMORY)
             {
-                // one buffer cannot hold extended RAM: a V7 stream
-                await save_state_stream_to_file(emulator, "v86state.bin");
+                try
+                {
+                    result = await emulator.save_state();
+                }
+                catch(error)
+                {
+                    if(!/RangeError|save_state_stream/.test(String(error && (error.stack || error.message)))) throw error;
+                }
             }
-            else
-            {
-                const result = await emulator.save_state();
-                dump_file(result, "v86state.bin");
-            }
+            if(result) dump_file(result, "v86state.bin");
+            else await save_state_stream_to_file(emulator, "v86state.bin");
         }
         catch(error)
         {

@@ -140,3 +140,10 @@ export const MIXER_CHANNEL_BOTH = 2;
 export const MIXER_SRC_MASTER = 0;
 export const MIXER_SRC_PCSPEAKER = 1;
 export const MIXER_SRC_DAC = 2;
+
+/**
+ * The largest single-buffer snapshot (save_state): its header holds the
+ * length as an Int32, and browsers allocate no ArrayBuffer of 2 GiB (Chrome
+ * fails from there). Larger machines are saved with save_state_stream.
+ */
+export const STATE_MAX_SINGLE_BUFFER = 0x7FFFFFFF;
