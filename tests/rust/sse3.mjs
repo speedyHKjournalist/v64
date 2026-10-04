@@ -39,8 +39,10 @@ async function run(vm, program, warm = true) {
     if(warm) await sleep(20);
     await vm.stop();
 }
+// SSE enabled (CR4.OSFXSR, OSXMMEXCPT: the BIOS leaves them clear)
+const ENABLE_SSE = [0x0F,0x20,0xE0,0x0D,...u32(0x600),0x0F,0x22,0xE0];
 function loop(body) {
-    const p = [...body,0xC7,0x05,...u32(0x600),...u32(0xCAFE)];
+    const p = [...ENABLE_SSE,...body,0xC7,0x05,...u32(0x600),...u32(0xCAFE)];
     p.push(0xE9,...u32(-p.length-5)); return p;
 }
 function calculate(name, width, source, target) {
@@ -109,7 +111,8 @@ try {
         const p = [], expected = [];
         for(let n = 0; n < 96; n++) {
             const src = n >> 3 & 7, dst = n & 7, memory = name === "lddqu" || n >= 64;
-            const offset = name.startsWith("addsub") ? [0,16,4080,4096][n&3] : [0,1,4080,4095][n&3];
+            // (an m128 operand must be 16-byte aligned, but MOVDDUP's m64 and LDDQU's)
+            const offset = name === "movddup" || name === "lddqu" ? [0,1,4080,4095][n&3] : [0,16,4080,4096][n&3];
             const source = memory ? offset : src*16, target = 512+dst*16;
             p.push(...load(dst,DATA+target),...load(src,DATA+source));
             p.push(0xF9,prefix,0x0F,op,(memory ? 5 : 0xC0|src)|dst<<3,...(memory ? u32(DATA+source) : []),
@@ -219,7 +222,7 @@ try {
     }
     fault_cases.push({ name: "lddqu register invalid", vector: 6, instruction: [0xF2,0x0F,0xF0,0xC1] });
     for(const { name,vector,instruction } of fault_cases) {
-        const p = [0x0F,0x01,0x1D,...u32(descriptor),
+        const p = [0x0F,0x01,0x1D,...u32(descriptor),...ENABLE_SSE,
             0x0F,0x20,0xC0,0x83,0xE0,0xF3,0x0F,0x22,0xC0,...load(0,DATA),...load(1,DATA),0xF3,0x0F,0x12,0xC9];
         if(vector === 7 || vector === 6 && !name.includes("invalid"))
             p.push(0x0F,0x20,0xC0,0x83,0xC8,vector === 7 ? 8 : 4,0x0F,0x22,0xC0);

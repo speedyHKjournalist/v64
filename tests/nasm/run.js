@@ -364,6 +364,10 @@ else {
         cpu.reboot_internal();
         cpu.reset_memory();
         cpu.load_multiboot(fs.readFileSync(TEST_DIR + current_test.img_name).buffer);
+        // SSE enabled by the OS (CR4.OSFXSR and OSXMMEXCPT), as the QEMU
+        // oracle's stub does (qemu_oracle.js): the BIOS and the multiboot
+        // entry leave CR4 as it is
+        cpu.cr[4] |= 0x600;
 
         test_timeout = setTimeout(() => {
             console.error("Test " + test.img_name + " timed out after " + (SINGLE_TEST_TIMEOUT / 1000) + " seconds.");

@@ -15,13 +15,6 @@ unsafe fn finish(success: bool) -> u32 {
 }
 unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
     assert!((0..8).contains(&source) && (0..8).contains(&destination));
-    // The baseline debug guard logs through a host import when OSFXSR is off.
-    // That observer may change code, context or XMMs. Revoke certificates before
-    // it runs and retain CPU-owned post-state via a terminal success below.
-    let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
-    if observes {
-        super::entry::ir_admission_barrier();
-    }
     if !cpu::task_switch_test_mmx() {
         return finish(false);
     }
@@ -115,12 +108,7 @@ unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u3
     }
     // All register semantics preserve the execution context. Retirement stays
     // with the generated continuation, and canonical F80 holds MMX/x87 aliases.
-    if observes {
-        finish(true)
-    }
-    else {
-        Outcome::Normal as u32
-    }
+    Outcome::Normal as u32
 }
 #[no_mangle]
 pub unsafe fn ir_mmx_reg_continue(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {

@@ -41,10 +41,12 @@ async function run(vm, program, warm = true, interpreter = vm === machines[0])
     if(warm) await sleep(20);
     await vm.stop();
 }
+// SSE enabled (CR4.OSFXSR, OSXMMEXCPT: the BIOS leaves them clear)
+const ENABLE_SSE = [0x0F, 0x20, 0xE0, 0x0D, ...u32(0x600), 0x0F, 0x22, 0xE0];
 // the body repeats until byte 0x604 is set, then halts after one more round
 function loop(body)
 {
-    const p = [...body, 0xC7, 0x05, ...u32(0x600), ...u32(0xCAFE), 0x80, 0x3D, ...u32(0x604), 0, 0x75, 5];
+    const p = [...ENABLE_SSE, ...body, 0xC7, 0x05, ...u32(0x600), ...u32(0xCAFE), 0x80, 0x3D, ...u32(0x604), 0, 0x75, 5];
     p.push(0xE9, ...u32(-p.length - 5), 0xF4);
     return p;
 }
@@ -84,7 +86,7 @@ async function expect_undefined(forms, set = machines)
     {
         const h = [0x8B, 0x44, 0x24, 0, 0xA3, ...u32(OUT), 0x83, 0x44, 0x24, 0, form.length, 0xCF];
         const prologue = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), 0xB8, ...u32(DATA)];
-        const fault_eip = CODE + prologue.length;
+        const fault_eip = CODE + ENABLE_SSE.length + prologue.length;
         await run_all(loop([...prologue, ...form]), vm => {
             vm.write_memory(Uint8Array.from([HANDLER & 255, HANDLER >>> 8 & 255, 8, 0, 0, 0x8E, HANDLER >>> 16 & 255, HANDLER >>> 24]), IDT + 6 * 8);
             vm.write_memory(Uint8Array.from([255, 7, ...u32(IDT)]), DESCRIPTOR);

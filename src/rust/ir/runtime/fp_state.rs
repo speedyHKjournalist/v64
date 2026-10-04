@@ -3,7 +3,8 @@ use crate::cpu::{cpu, global_pointers as gp, misc_instr, xstate};
 use crate::ir::helper::Outcome;
 unsafe fn address(offset: u32, segment: u32, sse: bool) -> Result<i32, ()> {
     assert!(segment < 6);
-    if !(if sse { cpu::task_switch_test_mmx() } else { cpu::task_switch_test() }) {
+    // (LDMXCSR and STMXCSR are XMM forms)
+    if !(if sse { cpu::task_switch_test_xmm() } else { cpu::task_switch_test() }) {
         return Err(());
     }
     Ok(offset.wrapping_add(cpu::get_seg(segment as i32)? as u32) as i32)

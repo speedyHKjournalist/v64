@@ -971,8 +971,10 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
             )?;
         },
         0xF30F12 | 0xF30F16 => {
+            // MOVSLDUP/MOVSHDUP: an aligned m128 (SDM exception type 4; QEMU
+            // too), unlike MOVDDUP's m64
             guard(true)?;
-            let v = source(d, 128, false, false)?;
+            let v = source(d, 128, true, false)?;
             let first = if b == 0x12 { 0 } else { 32 };
             let lo = (v >> first) & u32::MAX as u128;
             let hi = (v >> (first + 64)) & u32::MAX as u128;

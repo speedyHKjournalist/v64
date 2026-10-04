@@ -15,10 +15,13 @@ pub struct Observation {
     pub values: StateId,
     pub count: StateId,
 }
+/// The inline test of a Check: the call runs if any `mask` bit of the word
+/// at `address` is set, or any bit of `required.1` at `required.0` is clear
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlobalGuard {
     pub address: u32,
     pub mask: i32,
+    pub required: Option<(u32, i32)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EffectPlan {
@@ -34,6 +37,8 @@ pub enum EffectPlan {
     },
     Check {
         guard: Option<GlobalGuard>,
+        /// The call runs if the value (an address) has any of these bits set
+        misaligned: Option<(ValueId, i32)>,
         before: StateId,
         call: RuntimeCall,
         success: Option<i32>,
@@ -91,6 +96,7 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
         },
         Op::GuestCheck { bytes, write } => EffectPlan::Check {
             guard: None,
+            misaligned: None,
             before: inst.state.unwrap(),
             call: RuntimeCall::i32(
                 "ir_memory_check",
@@ -100,10 +106,26 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
             success: Some(0),
             fault: 2,
         },
+        // (XMM forms: CR0.EM and CR0.TS clear, CR4.OSFXSR set)
+        // (the address is the call's argument: a use for allocation)
+        Op::AlignmentCheck { bytes } => EffectPlan::Check {
+            guard: None,
+            misaligned: Some((inst.args[0], bytes as i32 - 1)),
+            before: inst.state.unwrap(),
+            call: RuntimeCall::i32(
+                "ir_alignment_fault",
+                vec![Value(inst.args[0])],
+                WasmType::I32,
+            ),
+            success: None,
+            fault: 2,
+        },
         Op::SseCheck => EffectPlan::Check {
+            misaligned: None,
             guard: Some(GlobalGuard {
                 address: gp::cr as u32,
                 mask: 12,
+                required: Some((unsafe { gp::cr.add(4) } as u32, crate::cpu::cpu::CR4_OSFXSR)),
             }),
             before: inst.state.unwrap(),
             call: RuntimeCall::i32("ir_sse_guard", vec![], WasmType::I32),
@@ -111,9 +133,11 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
             fault: 2,
         },
         Op::FpuCheck => EffectPlan::Check {
+            misaligned: None,
             guard: Some(GlobalGuard {
                 address: gp::cr as u32,
                 mask: 12,
+                required: None,
             }),
             before: inst.state.unwrap(),
             call: RuntimeCall::i32("ir_fpu_guard", vec![], WasmType::I32),

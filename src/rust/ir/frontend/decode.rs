@@ -53,6 +53,9 @@ pub struct Encoding {
     pub custom_sti: bool,
     pub is_fpu: bool,
     pub sse: bool,
+    /// An SSE row whose register operands are MMX registers (gen/x86_table.js
+    /// mmx_form): its task checks ignore CR4.OSFXSR
+    pub mmx: bool,
     /// The prefixes that select instructions in this opcode (decode_rules::
     /// mandatory_variant): REFINING_ALL in the SSE maps
     pub refining: u8,
@@ -66,6 +69,19 @@ pub struct Encoding {
     pub is_string: bool,
 }
 impl Encoding {
+    /// A legacy SSE m128 operand of this form, read or written with `bytes`,
+    /// must be 16-byte aligned (#GP(0), SDM vol. 2, Table 2-21): of every XMM
+    /// form accessing 16 bytes but MOVUPS, MOVUPD, MOVDQU and LDDQU, and of
+    /// UNPCKLPS/UNPCKLPD, which read its low quadword
+    pub fn aligned_m128(&self, bytes: u8) -> bool {
+        self.sse
+            && !self.mmx
+            && !matches!(
+                self.opcode,
+                0x0F10 | 0x660F10 | 0xF30F6F | 0x0F11 | 0x660F11 | 0xF30F7F | 0xF20FF0
+            )
+            && (bytes == 16 || matches!(self.opcode, 0x0F14 | 0x660F14))
+    }
     /// The row exists on this machine (its feature is present)
     pub fn exists(&self) -> bool { self.feature == 0 || crate::cpu::features::has(self.feature) }
     /// The row has its semantics (not Encoding::unimplemented). cargo test

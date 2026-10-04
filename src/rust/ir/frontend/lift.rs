@@ -144,7 +144,12 @@ fn lift_inner(
                     0
                 }
                 else if i.encoding.sse {
-                    2
+                    if i.encoding.mmx {
+                        2
+                    }
+                    else {
+                        3
+                    }
                 }
                 else {
                     i.encoding.task_switch_test as u32

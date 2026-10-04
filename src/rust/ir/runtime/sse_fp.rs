@@ -1,5 +1,6 @@
 //! Explicit semantic calls: guard and ordered load precede any destination update.
-//! Retains baseline floating-point/NaN/rounding behavior, including its limitations.
+//! Floating point is the interpreter's, exact (cpu::simd_fp: MXCSR rounding and
+//! flags, unmasked exceptions as #XM or #UD).
 //! The SSSE3 XMM forms share these adapters (integer semantics, no MXCSR).
 use crate::cpu::{
     cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
@@ -25,14 +26,7 @@ pub unsafe fn ir_sse_fp_reg_continue(
     immediate: i32,
 ) -> u32 {
     assert!((0..8).contains(&source) && (0..8).contains(&destination));
-    // The debug OSFXSR warning calls the host before the task guard succeeds.
-    // Its callback can replace code or CPU state, so successful semantics must
-    // return committed CPU-owned post-state rather than retain selective SSA.
-    let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
-    if observes {
-        super::entry::ir_admission_barrier();
-    }
-    if !cpu::task_switch_test_mmx() {
+    if !cpu::task_switch_test_xmm() {
         return finish(false);
     }
     fpu::fpu_cache_barrier();
@@ -386,12 +380,7 @@ pub unsafe fn ir_sse_fp_reg_continue(
         },
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
-    if observes {
-        terminal(Outcome::Normal as u32)
-    }
-    else {
-        finish(true)
-    }
+    finish(true)
 }
 unsafe fn memory(
     op: u32,
@@ -429,27 +418,27 @@ unsafe fn memory(
             }
         },
         0x0F51 => {
-            if !sem::instr_0F51(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F51(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F52 => {
-            if !sem::instr_0F52(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F52(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F53 => {
-            if !sem::instr_0F53(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F53(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F58 => {
-            if !sem::instr_0F58(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F58(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F59 => {
-            if !sem::instr_0F59(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F59(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
@@ -459,32 +448,32 @@ unsafe fn memory(
             }
         },
         0x0F5B => {
-            if !sem::instr_0F5B(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F5B(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F5C => {
-            if !sem::instr_0F5C(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F5C(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F5D => {
-            if !sem::instr_0F5D(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F5D(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F5E => {
-            if !sem::instr_0F5E(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F5E(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0F5F => {
-            if !sem::instr_0F5F(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_0F5F(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x0FC2 => {
-            if !sem::instr_0FC2(cpu::safe_read128s(addr)?, destination, immediate) {
+            if !sem::instr_0FC2(cpu::safe_read128s_aligned(addr)?, destination, immediate) {
                 return Err(());
             }
         },
@@ -494,12 +483,12 @@ unsafe fn memory(
             }
         },
         0x660F2C => {
-            if !sem::instr_660F2C(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F2C(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F2D => {
-            if !sem::instr_660F2D(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F2D(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
@@ -514,62 +503,62 @@ unsafe fn memory(
             }
         },
         0x660F51 => {
-            if !sem::instr_660F51(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F51(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F58 => {
-            if !sem::instr_660F58(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F58(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F59 => {
-            if !sem::instr_660F59(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F59(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F5A => {
-            if !sem::instr_660F5A(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F5A(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F5B => {
-            if !sem::instr_660F5B(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F5B(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F5C => {
-            if !sem::instr_660F5C(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F5C(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F5D => {
-            if !sem::instr_660F5D(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F5D(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F5E => {
-            if !sem::instr_660F5E(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F5E(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F5F => {
-            if !sem::instr_660F5F(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F5F(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F7C => {
-            if !sem::instr_660F7C(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F7C(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660F7D => {
-            if !sem::instr_660F7D(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660F7D(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660FC2 => {
-            if !sem::instr_660FC2(cpu::safe_read128s(addr)?, destination, immediate) {
+            if !sem::instr_660FC2(cpu::safe_read128s_aligned(addr)?, destination, immediate) {
                 return Err(());
             }
         },
@@ -578,12 +567,12 @@ unsafe fn memory(
                 cpu::trigger_gp(0);
                 return Err(());
             }
-            if !sem::instr_660FD0(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660FD0(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0x660FE6 => {
-            if !sem::instr_660FE6(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_660FE6(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
@@ -643,12 +632,12 @@ unsafe fn memory(
             }
         },
         0xF20F7C => {
-            if !sem::instr_F20F7C(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_F20F7C(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0xF20F7D => {
-            if !sem::instr_F20F7D(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_F20F7D(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
@@ -662,12 +651,12 @@ unsafe fn memory(
                 cpu::trigger_gp(0);
                 return Err(());
             }
-            if !sem::instr_F20FD0(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_F20FD0(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
         0xF20FE6 => {
-            if !sem::instr_F20FE6(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_F20FE6(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
@@ -717,7 +706,7 @@ unsafe fn memory(
             }
         },
         0xF30F5B => {
-            if !sem::instr_F30F5B(cpu::safe_read128s(addr)?, destination) {
+            if !sem::instr_F30F5B(cpu::safe_read128s_aligned(addr)?, destination) {
                 return Err(());
             }
         },
@@ -770,18 +759,14 @@ pub unsafe fn ir_sse_fp_mem_continue(
     immediate: i32,
 ) -> u32 {
     assert!(segment < 6 && (0..8).contains(&destination));
-    let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
-    if observes {
-        super::entry::ir_admission_barrier();
-    }
-    if !cpu::task_switch_test_mmx() {
+    if !cpu::task_switch_test_xmm() {
         return finish(false);
     }
     let before = ContinuationContext::capture();
     if memory(op, offset, segment, destination, immediate).is_err() {
         return finish(false);
     }
-    if !observes && before.epoch != u64::MAX && before.matches_current() {
+    if before.epoch != u64::MAX && before.matches_current() {
         Outcome::Normal as u32
     }
     else {

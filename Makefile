@@ -1270,8 +1270,8 @@ build/v86-ir-runtime.wasm: build/v86.wasm
 
 .PHONY: ir-cache-tests
 ir-cache-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cache-test-release.wasm build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin
-	node tests/ir/differential/fp_debug_deferral.mjs build/v86-ir-cache-test.wasm
-	node tests/ir/differential/fp_debug_deferral.mjs build/v86-ir-cache-test-release.wasm --release
+	node tests/ir/differential/sse_task_faults.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/sse_task_faults.mjs build/v86-ir-cache-test-release.wasm --release
 	node tests/ir/differential/cache.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/cache.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/cache.mjs build/v86-ir-runtime.wasm
@@ -1521,5 +1521,13 @@ sse-fp-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-d
 	node tests/rust/sse_fp.mjs build/v86-fallback.wasm
 	node tests/rust/sse_fp.mjs build/v86-debug.wasm
 	node tests/ir/differential/sse_fp_tracking.mjs
+
+# The legacy SSE exception conditions in the 32-bit engines (docs/simd-xsave-plan.md
+# 3.3, P4a): CR4.OSFXSR for XMM forms only, 16-byte alignment, their order
+.PHONY: sse-fault-tests
+sse-fault-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/sse_faults.mjs
+	node tests/rust/sse_faults.mjs build/v86-fallback.wasm
+	node tests/rust/sse_faults.mjs build/v86-debug.wasm
 
 .PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests xsave-tests ssse3-tests

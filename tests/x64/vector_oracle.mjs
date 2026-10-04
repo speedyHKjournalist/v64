@@ -58,6 +58,8 @@ fault("unmasked SIMD divzero destination suppression","divpd xmm8,xmm9",0x1D80,d
 fault("SIMD disabled OSFXSR","mov rax,cr4\nbtr rax,9\nmov cr4,rax\npxor xmm8,xmm9");
 fault("SIMD TS lazy switch","mov rax,cr0\nbts rax,3\nmov cr0,rax\nmovaps xmm8,xmm9");
 fault("unaligned packed #GP","movaps xmm8,[0x600FF8]");
+fault("unaligned MOVSLDUP #GP","movsldup xmm8,[0x600FF8]");
+fault("unaligned MOVSHDUP #GP","movshdup xmm8,[0x600FF8]");
 fault("cross-page vector load #PF","movdqu xmm8,[0x600FF8]");
 fault("cross-page vector store no partial write","movdqu [0x600FF8],xmm8");
 fault("cross-page FXSAVE no partial write","fxsave64 [0x600F00]");
@@ -79,6 +81,11 @@ const specification = new Map([
     // SDM opcode map Table A-3 gives 66 0F 12 only an Mq source (memory);
     // QEMU 10.2 executes the undefined register form as a low-qword move.
     ["invalid SIMD form MOVLPD register", {vector:6,mxcsr:0x1F80,unchanged:true}],
+    // MOVSLDUP/MOVSHDUP take an m128 of exception type 4 (SDM): legacy SSE
+    // raises #GP(0) unless it is 16-byte aligned (only LDDQU and PCMPxSTRx
+    // are exempt). QEMU 10.2 does not check, and page-faults on the crossing.
+    ["unaligned MOVSLDUP #GP", {vector:13,mxcsr:0x1F80,unchanged:true}],
+    ["unaligned MOVSHDUP #GP", {vector:13,mxcsr:0x1F80,unchanged:true}],
 ]);
 const selected = process.env.X64_VECTOR_FILTER ? cases.filter(x=>x.name.includes(process.env.X64_VECTOR_FILTER)) : cases;
 assert.ok(selected.length);

@@ -71,7 +71,8 @@ imports! {
     "ir_pop_address": [I32,I32,I32] -> [I64], Packed, "segment/null check; fault also unwinds temporary SP";
     "ir_memory_read": [I32,I32] -> [I64], Packed, "translation, A/D bits and device read; high32=0 or 2";
     "ir_memory_check": [I32,I32,I32] -> [I32], Check, "translation preflight; no device read; returns 0 or 2";
-    "ir_sse_guard": [] -> [I32], Check, "reads CR0 TS/EM; returns 0 or CPU-owned fault 2";
+    "ir_alignment_fault": [I32] -> [I32], Check, "raises #GP(0) for a misaligned legacy SSE m128 operand (the address); returns CPU-owned fault 2";
+    "ir_sse_guard": [] -> [I32], Check, "reads CR0 TS/EM and CR4.OSFXSR (XMM forms); returns 0 or CPU-owned fault 2";
     "ir_fpu_guard": [] -> [I32], Check, "reads CR0 TS/EM; x87 #NM; returns 0 or CPU-owned fault 2";
     "ir_t0_step": [I32] -> [I32], Pure, "tier-0 fallback: interprets one instruction at EIP (all CPU effects, faults, devices); returns 0 next, 1 dispatch, 2 exit";
     "ir_t0_link": [] -> [I32], Entry, "tier-0: table index of the page function serving the written-back EIP (caller tail-calls it) or -1; no guest state change";

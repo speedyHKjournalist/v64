@@ -23,6 +23,11 @@ pub unsafe fn mov_r_m128(addr: i32, r: i32) {
     let data = read_xmm128s(r);
     return_on_pagefault!(safe_write128(addr, data));
 }
+/// MOVAPS/MOVAPD/MOVDQA/MOVNT* m128, xmm: #GP(0) unless 16-byte aligned
+pub unsafe fn mov_r_m128_aligned(addr: i32, r: i32) {
+    return_on_pagefault!(aligned16(addr));
+    mov_r_m128(addr, r);
+}
 pub unsafe fn mov_rm_r128(source: reg128, r: i32) {
     // mov* xmm, xmm/m128
     write_xmm_reg128(r, source);

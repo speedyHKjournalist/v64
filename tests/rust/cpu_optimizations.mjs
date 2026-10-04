@@ -45,6 +45,8 @@ try {
     while(word(0x500) !== 0xCAFE) { assert(performance.now() < deadline); await sleep(1); }
     await vm.stop();
     cpu = vm.v86.cpu; e = cpu.wm.exports;
+    // SSE enabled (CR4.OSFXSR, OSXMMEXCPT: the BIOS leaves them clear)
+    cpu.cr[4] |= 0x600;
     const patterns = new Uint8Array(512);
     let seed = 0x9132913;
     for(let i = 0; i < patterns.length; i++) {

@@ -946,6 +946,21 @@ export function opcode_family(opcode)
     return opcode & (map === "0F38" || map === "0F3A" ? 0xFFFFFF : map === "0F" ? 0xFFFF : 0xFF);
 }
 
+/**
+ * Whether an SSE row is an MMX form, whose register operands are all MMX
+ * registers: no mandatory prefix, and the MMX instructions, their SSE
+ * extensions (0F 70, C4, C5, D0-FF) or the SSSE3 MMX forms. MMX forms raise
+ * #UD for CR0.EM and #NM for CR0.TS; the others, the XMM forms, also #UD
+ * when CR4.OSFXSR is clear (SDM vol. 2, 2.5).
+ */
+export function mmx_form(opcode)
+{
+    if(is_vex_key(opcode) || opcode_prefix(opcode) !== 0) return false;
+    const map = opcode_map(opcode), byte = opcode & 0xFF;
+    return map === "0F38" || map === "0F3A" ||
+        map === "0F" && (byte >= 0x60 && byte <= 0x7F || byte === 0xC4 || byte === 0xC5 || byte >= 0xD0);
+}
+
 const MAP_ORDER = { "": 0, "0F": 1, "0F38": 2, "0F3A": 3 };
 encodings.sort((e1, e2) => {
     const o1 = MAP_ORDER[opcode_map(e1.opcode)] << 8 | e1.opcode & 0xFF;

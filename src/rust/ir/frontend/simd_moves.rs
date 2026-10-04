@@ -38,6 +38,25 @@ pub fn supports(i: &DecodedInstruction) -> bool {
             | 0xF30F7F
     )
 }
+/// #GP(0) for a misaligned m128 operand of `bytes` (Encoding::aligned_m128),
+/// before the access and with its fault map
+pub fn check_alignment(
+    b: &mut IntegerBuilder,
+    i: &DecodedInstruction,
+    address: crate::ir::ids::ValueId,
+    bytes: u8,
+    map: crate::ir::ids::StateId,
+) {
+    if i.encoding.aligned_m128(bytes) {
+        b.effect = b.region.append(
+            b.block,
+            Op::AlignmentCheck { bytes: 16 },
+            vec![address, b.effect],
+            &[Type::Effect],
+            Some(map),
+        )[0];
+    }
+}
 pub fn is_store(i: &DecodedInstruction) -> bool {
     matches!(
         i.encoding.opcode,
@@ -93,6 +112,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         b.region.states[map.index()].resume = ResumeKind::BeforeInstruction;
         let offset = effective_offset(b, &ea);
         let address = segmented(b, offset, ea.segment, map);
+        check_alignment(b, i, address, bytes, map);
         if is_store(i) {
             b.effect = b.region.append(
                 b.block,

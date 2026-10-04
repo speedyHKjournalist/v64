@@ -192,6 +192,12 @@ pub unsafe fn ir_memory_check(address: u32, bytes: u32, write: u32) -> u32 {
 /// divide conditions; this adapter owns exactly one real CPU #DE delivery.
 #[no_mangle]
 pub unsafe fn ir_divide_fault() { cpu::trigger_de(); }
+/// A misaligned legacy SSE m128 operand at `_address` (Op::AlignmentCheck)
+#[no_mangle]
+pub unsafe fn ir_alignment_fault(_address: u32) -> u32 {
+    cpu::trigger_gp(0);
+    crate::ir::helper::Outcome::ControlTransferred as u32
+}
 
 /// Compatibility for the pinned ENTER16 frame push. RAM truncates to a word,
 /// but safe_write16 passes the full value to same-page MMIO. Its debug assertion

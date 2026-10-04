@@ -9,7 +9,9 @@
 //! sets the exponent to 0xFFFF, and the form ends with
 //! cpu::transition_fpu_to_mmx (all tags valid, TOP 0).
 use super::Page;
-use crate::cpu::{cpu::CR0_EM, cpu::CR0_TS, cpu::FLAGS_ALL, fpu, global_pointers as gp};
+use crate::cpu::{
+    cpu::CR0_EM, cpu::CR0_TS, cpu::CR4_OSFXSR, cpu::FLAGS_ALL, fpu, global_pointers as gp,
+};
 use crate::ir::helper::imports::signature;
 use crate::ir::{frontend::decode::DecodedInstruction, native_fp};
 use crate::wasmgen::wasm_builder::{Signature, WasmBuilder, WasmLocalV128, WasmType};
@@ -87,14 +89,12 @@ pub(super) enum Simd {
         reg: u8,
         mmx: bool,
     },
-    /// reg = op(reg, source). `aligned`: a memory source must be 16-byte
-    /// aligned (else the interpreter raises #GP).
+    /// reg = op(reg, source) (see simd_source for its alignment)
     Packed {
         op: Packed,
         reg: u8,
         mmx: bool,
         source: u8,
-        aligned: bool,
     },
     /// PSRLx/PSRAx/PSLLx/PSRLDQ/PSLLDQ reg, imm8 (`kind` is the ModRM reg).
     ShiftImmediate {
@@ -142,6 +142,9 @@ pub(super) enum Simd {
     },
     Emms,
 }
+
+/// (see Encoding::aligned_m128)
+fn aligned_m128(i: &DecodedInstruction, bytes: u8) -> bool { i.encoding.aligned_m128(bytes) }
 
 /// Bytes of the r/m operand the interpreter reads (its instr_* source type).
 fn source_bytes(op: u32) -> u8 {
@@ -312,7 +315,6 @@ fn ssse3(i: &DecodedInstruction) -> Option<Simd> {
         reg: i.modrm? >> 3 & 7,
         mmx,
         source: n as u8,
-        aligned: !mmx,
     })
 }
 
@@ -460,7 +462,6 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
                 reg,
                 mmx: op == 0x0F70,
                 source: source_bytes(op),
-                aligned: false,
             }
         },
         0x0F14 => Simd::Packed {
@@ -468,82 +469,85 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
             reg,
             mmx: false,
             source: 8,
-            aligned: false,
         },
         0x0F15 => Simd::Packed {
             op: Packed::Unpack(4, true),
             reg,
             mmx: false,
             source: 16,
-            aligned: false,
         },
         0x660F14 => Simd::Packed {
             op: Packed::Unpack(8, false),
             reg,
             mmx: false,
             source: 8,
-            aligned: false,
         },
         0x660F15 => Simd::Packed {
             op: Packed::Unpack(8, true),
             reg,
             mmx: false,
             source: 16,
-            aligned: false,
         },
         0x0F16 => Simd::Packed {
             op: Packed::Shuffle([0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]),
             reg,
             mmx: false,
             source: 8,
-            aligned: false,
         },
         0x0F54 | 0x660F54 => Simd::Packed {
             op: Packed::Binary(0x4E),
             reg,
             mmx: false,
             source: 16,
-            aligned: false,
         },
         0x0F55 | 0x660F55 => Simd::Packed {
             op: Packed::AndNot,
             reg,
             mmx: false,
             source: 16,
-            aligned: false,
         },
         0x0F56 | 0x660F56 => Simd::Packed {
             op: Packed::Binary(0x50),
             reg,
             mmx: false,
             source: 16,
-            aligned: false,
         },
         0x0F57 | 0x660F57 => Simd::Packed {
             op: Packed::Binary(0x51),
             reg,
             mmx: false,
             source: 16,
-            aligned: false,
         },
         _ if prefix == 0 || prefix == 0x66 => Simd::Packed {
             op: packed(code, prefix == 0)?,
             reg,
             mmx: prefix == 0,
             source: source_bytes(op),
-            aligned: false,
         },
         _ => return None,
     })
 }
 
 impl Page {
-    /// #UD (CR0.EM) and #NM (CR0.TS) belong to the interpreter.
-    fn simd_guard(&mut self) {
+    /// #UD (CR0.EM, and for XMM forms no CR4.OSFXSR) and #NM (CR0.TS)
+    /// belong to the interpreter; checked once per block (see simd_checked).
+    fn simd_guard(&mut self, xmm: bool) {
+        let checks = if xmm { 3 } else { 1 };
+        if self.simd_checked & checks == checks {
+            return;
+        }
         self.w.load_fixed_i32(gp::cr as u32);
         self.w.const_i32(CR0_EM | CR0_TS);
         self.w.and_i32();
+        if xmm {
+            self.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
+            self.w.const_i32(CR4_OSFXSR);
+            self.w.and_i32();
+            self.w.eqz_i32();
+            self.w.or_i32();
+        }
         self.retry_if();
+        self.simd_checked |= checks;
     }
     fn load_xmm(&mut self, r: u8) { self.load_xmm_bytes(r, 16) }
     /// The low `bytes` of XMM `r`, zero-extended, from the block's register
@@ -718,11 +722,23 @@ impl Page {
             None => self.load_xmm(i.modrm.unwrap() & 7),
         }
     }
-    /// Push the r/m operand: an MMX/XMM register or `bytes` of memory.
+    /// retry() unless the linear address (Page::addr) is 16-byte aligned:
+    /// the interpreter raises #GP(0)
+    fn retry_unaligned(&mut self) {
+        self.w.get_local(&self.addr);
+        self.w.const_i32(15);
+        self.w.and_i32();
+        self.retry_if();
+    }
+    /// Push the r/m operand: an MMX/XMM register or `bytes` of memory (with
+    /// the alignment of aligned_m128).
     fn simd_source(&mut self, i: &DecodedInstruction, mmx: bool, bytes: u8) {
         match &i.ea {
             Some(ea) => {
                 self.linear(ea);
+                if aligned_m128(i, bytes) {
+                    self.retry_unaligned();
+                }
                 self.load_vector(bytes);
             },
             None if mmx => self.load_mmx(i.modrm.unwrap() & 7),
@@ -802,7 +818,7 @@ impl Page {
     }
 
     pub(super) fn simd(&mut self, form: Simd, i: &DecodedInstruction) {
-        self.simd_guard();
+        self.simd_guard(!i.encoding.mmx);
         let rm = i.modrm.unwrap_or(0) & 7;
         match form {
             Simd::Load128 { reg } => {
@@ -817,6 +833,9 @@ impl Page {
             Simd::Store128 { reg } => {
                 if let Some(ea) = &i.ea {
                     self.linear(ea);
+                    if aligned_m128(i, 16) {
+                        self.retry_unaligned();
+                    }
                 }
                 self.load_xmm(reg);
                 let v = self.w.set_new_local_v128();
@@ -952,19 +971,8 @@ impl Page {
                 reg,
                 mmx,
                 source,
-                aligned,
             } => {
-                match &i.ea {
-                    Some(ea) if aligned => {
-                        self.linear(ea);
-                        self.w.get_local(&self.addr);
-                        self.w.const_i32(15);
-                        self.w.and_i32();
-                        self.retry_if();
-                        self.load_vector(source);
-                    },
-                    _ => self.simd_source(i, mmx, source),
-                }
+                self.simd_source(i, mmx, source);
                 let src = self.w.set_new_local_v128();
                 if mmx {
                     self.load_mmx(reg);

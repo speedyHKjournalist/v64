@@ -84,7 +84,7 @@ for(const release of [false,true]){
         function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~14|task);
-            cpu.cr[4]=cr4|512; // Keep ordinary forms on IR; OSFXSR observers are tested separately.
+            cpu.cr[4]=cr4|512; // (SSE forms #UD without OSFXSR)
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);

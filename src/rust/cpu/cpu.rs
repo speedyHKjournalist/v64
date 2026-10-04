@@ -4202,14 +4202,18 @@ pub unsafe fn safe_read64s(addr: i32) -> OrPageFault<u64> {
     }
 }
 
-/// The 16-byte memory operand of a legacy SSE form that requires alignment
-/// (exception type 4): #GP(0) unless 16-byte aligned, whatever the segment,
-/// before any page fault
-pub unsafe fn safe_read128s_aligned(addr: i32) -> OrPageFault<reg128> {
+/// The m128 operand of a legacy SSE form other than MOVUPS, MOVUPD, MOVDQU
+/// and LDDQU (exception type 4, SDM vol. 2 table 2-21): #GP(0) unless
+/// 16-byte aligned, whatever the segment, before any page fault
+pub unsafe fn aligned16(addr: i32) -> OrPageFault<()> {
     if addr & 15 != 0 {
         trigger_gp(0);
         return Err(());
     }
+    Ok(())
+}
+pub unsafe fn safe_read128s_aligned(addr: i32) -> OrPageFault<reg128> {
+    aligned16(addr)?;
     safe_read128s(addr)
 }
 
@@ -4637,11 +4641,26 @@ pub unsafe fn set_mxcsr(new_mxcsr: i32) {
     *mxcsr = new_mxcsr;
 }
 
+/// The checks of an MMX form (gen/x86_table.js mmx_form): #UD with CR0.EM,
+/// then #NM with CR0.TS
 pub unsafe fn task_switch_test_mmx() -> bool {
-    if *cr.offset(4) & CR4_OSFXSR == 0 {
-        dbg_log!("Warning: Unimplemented task switch test with cr4.osfxsr=0");
-    }
     if 0 != *cr & CR0_EM {
+        trigger_ud();
+        return false;
+    }
+    else if 0 != *cr & CR0_TS {
+        trigger_nm();
+        return false;
+    }
+    else {
+        return true;
+    };
+}
+
+/// The checks of a legacy SSE XMM form: #UD with CR0.EM or without
+/// CR4.OSFXSR, then #NM with CR0.TS
+pub unsafe fn task_switch_test_xmm() -> bool {
+    if 0 != *cr & CR0_EM || 0 == *cr.offset(4) & CR4_OSFXSR {
         trigger_ud();
         return false;
     }

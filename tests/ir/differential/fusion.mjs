@@ -20,8 +20,7 @@ try {
   cpu.segment_limits.fill(0xFFFFFFFF,0,6);cpu.sreg.set([16,8,16,16,16,16]);
   cpu.segment_access_bytes.set([0x93,0x9B,0x93,0x93,0x93,0x93]);cpu.stack_size_32[0]=1;w[612>>2]=0;
   cpu.reg32.set([0x7FFFFFFF,0x87654321,miss?0x7000:B-base,A-base,STACK,0,mmio?0xA0000:DATA,0xFEDCBA98]);
-  // OSFXSR/OSXMMEXCPT as an OS sets them: debug builds decline SSE code at
-  // entry without OSFXSR (the interpreter's warning is a host observer).
+  // OSFXSR/OSXMMEXCPT as an OS sets them (SSE forms #UD without OSFXSR)
   cpu.cr[4]|=0x600;
   cpu.is_32[0]=+mode;cpu.flags[0]=0x8D7;cpu.flags_changed[0]=lazy?0x8D5:0;
   w[96>>2]=31;w[104>>2]=0x7FFFFFFF;w[112>>2]=0x80000000;

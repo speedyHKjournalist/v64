@@ -648,6 +648,10 @@ pub fn verify(region: &Region) -> Result<()> {
                         && results.is_empty(),
                     "page preflight types or range",
                 )?,
+                Op::AlignmentCheck { bytes } => require(
+                    *bytes == 16 && args == [Type::LinearAddress] && results.is_empty(),
+                    "alignment check types or size",
+                )?,
                 Op::LinearOffset => require(
                     args == [Type::LinearAddress, Type::I32] && results == [Type::LinearAddress],
                     "linear offset types",

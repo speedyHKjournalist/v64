@@ -78,6 +78,7 @@ pub fn lower_draft_limited(
                     | Op::GuestStore { .. }
                     | Op::PartialStore { .. }
                     | Op::GuestCheck { .. }
+                    | Op::AlignmentCheck { .. }
                     | Op::SegmentAddress { .. }
                     | Op::PopAddress { .. }
                     | Op::RmwLoad { .. }

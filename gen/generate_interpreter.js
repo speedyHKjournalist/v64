@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import url from "node:url";
 
-import x86_table, { opcode_map, opcode_prefix, opcode_family } from "./x86_table.js";
+import x86_table, { opcode_map, opcode_prefix, opcode_family, mmx_form } from "./x86_table.js";
 import * as rust_ast from "./rust_ast.js";
 import { hex, get_switch_value, get_switch_exist, finalize_table_rust } from "./util.js";
 
@@ -291,7 +291,8 @@ function gen_instruction_body_after_fixed_g(encoding, size)
                 type: "if-else",
                 if_blocks: [
                     {
-                        condition: encoding.sse ? "!task_switch_test_mmx()" : "!task_switch_test()",
+                        condition: !encoding.sse ? "!task_switch_test()" :
+                            mmx_form(encoding.opcode) ? "!task_switch_test_mmx()" : "!task_switch_test_xmm()",
                         body: ["return;"],
                     }
                 ],
@@ -519,7 +520,7 @@ function gen_table()
 
             "use crate::cpu::cpu::{after_block_boundary, modrm_resolve};",
             "use crate::cpu::cpu::{read_imm8, read_imm16, read_imm32s};",
-            "use crate::cpu::cpu::{task_switch_test, task_switch_test_mmx, trigger_ud};",
+            "use crate::cpu::cpu::{task_switch_test, task_switch_test_mmx, task_switch_test_xmm, trigger_ud};",
             "use crate::cpu::instructions_0f;",
             "use crate::cpu::global_pointers::{instruction_pointer, prefixes};",
             "use crate::prefix;",
@@ -562,7 +563,7 @@ function gen_table()
 
             "use crate::cpu::cpu::{after_block_boundary, modrm_resolve};",
             "use crate::cpu::cpu::{read_imm8, read_imm16, read_imm32s};",
-            "use crate::cpu::cpu::{task_switch_test, task_switch_test_mmx, trigger_ud};",
+            "use crate::cpu::cpu::{task_switch_test, task_switch_test_mmx, task_switch_test_xmm, trigger_ud};",
             `use crate::cpu::instructions_${map.toLowerCase()};`,
             "use crate::cpu::global_pointers::{instruction_pointer, prefixes};",
             "use crate::prefix;",

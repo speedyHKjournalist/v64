@@ -52,6 +52,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         b.region.states[map.index()].resume = ResumeKind::BeforeInstruction;
         let offset = effective_offset(b, &ea);
         let address = segmented(b, offset, ea.segment, map);
+        super::simd_moves::check_alignment(b, i, address, 16, map);
         let values = b.region.append(
             b.block,
             Op::XmmShuffle {

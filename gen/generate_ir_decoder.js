@@ -2,7 +2,7 @@
 // Encoding facts come only from x86_table. Semantic coverage is deliberately separate.
 import fs from "node:fs";
 import assert from "node:assert/strict";
-import table, {opcode_map, opcode_prefix, opcode_family as family_key} from "./x86_table.js";
+import table, {opcode_map, opcode_prefix, opcode_family as family_key, mmx_form} from "./x86_table.js";
 import {lowering, loweringTests as lowering_tests} from "./ir_semantics.js";
 const hex = n => n.toString(16).toUpperCase();
 const family_modrm = new Map();
@@ -45,13 +45,14 @@ const encoding_id = e => {
 const rows = source_rows.filter(e => !e.prefix).map(e => ({...e,
     id: encoding_id(e),
     fetch_modrm: family_modrm.get(family_key(e.opcode)),
+    mmx: e.sse && mmx_form(e.opcode),
 })).sort((a, b) => a.opcode - b.opcode || (a.fixed_g ?? -1) - (b.fixed_g ?? -1));
 assert.equal(new Set(rows.map(e => e.id)).size, rows.length);
 const bool = x => x ? "true" : "false";
 const imm = e => e.imm8 ? "Byte" : e.imm8s ? "SignedByte" : e.imm16 ? "Word" :
     e.imm1632 ? "Operand" : e.immaddr ? "Address" : "None";
 const flags = ["fetch_modrm", "group_ud", "task_switch_test", "custom", "e", "ignore_mod", "reg_ud", "mem_ud", "os", "block_boundary", "no_next_instruction",
-    "absolute_jump", "jump_offset_imm", "conditional_jump", "custom_sti", "is_fpu", "sse", "is_string", "unimplemented"];
+    "absolute_jump", "jump_offset_imm", "conditional_jump", "custom_sti", "is_fpu", "sse", "mmx", "is_string", "unimplemented"];
 const refining = e => e.sse || e.refining === 1 ? "crate::decode_rules::REFINING_ALL" : e.refining === "rep" ? "crate::decode_rules::REFINING_REP" : "0";
 const feature = e => e.feature ? "crate::cpu::features::" + e.feature.replace(".", "_") : "0";
 // the VEX fields a VEX row accepts (gen/vex_table.js, decode_rules::vex)

@@ -21,6 +21,8 @@ async function boot(options, wasm = process.argv[2] || "build/v86.wasm") {
     const end = performance.now() + 10000;
     while(word(vm, 0x500) !== 0xCAFE) { assert(performance.now() < end); await sleep(1); }
     await vm.stop();
+    // SSE enabled (CR4.OSFXSR, OSXMMEXCPT: the BIOS leaves them clear)
+    vm.v86.cpu.cr[4] |= 0x600;
     return vm;
 }
 async function run(vm, body, data, interpreted = false) {

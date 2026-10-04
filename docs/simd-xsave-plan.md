@@ -161,7 +161,8 @@ VEX 编码的 GPR 指令属 Type 13），清单为每个形式登记所属类型
   开启 AVX 时照样可用；VEX.L=1 时 #UD，非 64 位模式下忽略 VEX.W1。
 - VEX 访存除 Type 1（对齐 move、VMOVNTDQA 等）外不要求对齐。
 - 传统 SSE 的 16 字节对齐要求有例外：MOVU*/LDDQU、PCMPxSTRx，以及按窄宽度访问内存的形式。
-- 现有 32 位路径在 CR4.OSFXSR=0 时只打日志，不产生 #UD。新旧形式共用同一个检查函数，并一起修正。
+- 32 位路径原先在 CR4.OSFXSR=0 时只打日志，不产生 #UD。P4a 改为新旧形式共用同一组检查
+  （14 节 P4a 第二部分）。
 
 普通向量运算先检查合法性、读取需要的操作数，再提交目的状态。不得提前读取比指令规定
 更宽的内存，例如把窄源扩展读取成完整 16/32 字节。编译阶段只读指令快照，不触发数据 MMIO
@@ -454,8 +455,9 @@ P0 先确定精度策略（第 13 节 Q2）：像默认开启的 `x87_fast_math`
 还是默认精确、另设快路径。
 
 P4a 同时修正 32 位引擎中 legacy SSE 的异常条件（3.3 节），新旧形式共用一个检查：CR4.OSFXSR=0
-时 XMM 形式 #UD（现在只记日志）；要求对齐的 16 字节内存操作数未对齐时 #GP(0)（现在只有
-ADDSUBPS/PD 和 P3 的 SSSE3 形式检查）。x64 引擎已经这样做，兼容模式下两个引擎因此不同。
+时 XMM 形式 #UD（原先只记日志）；要求对齐的 16 字节内存操作数未对齐时 #GP(0)（原先只有
+ADDSUBPS/PD 和 P3 的 SSSE3 形式检查）。x64 引擎已经这样做，原先兼容模式下两个引擎因此不同。
+这部分已在 P4a 第二部分完成（14 节）。
 
 抽取 x64 已有 FP 处理（`vector.rs`，基于 SoftFloat）中的可复用部分，补齐所有目标指令用到的
 f32/f64 操作、转换、比较、舍入及异常记录。可扩展当前 SoftFloat 接口，但不得通过中间
@@ -1084,7 +1086,7 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   `8d2b7c04` 上同样如此（6 次中失败 2 次），与本计划无关，已另立任务。
 - **遗留**：
   - 32 位路径的 legacy SSE 在 CR4.OSFXSR=0 时仍只记日志，旧形式也不查对齐（3.3 节）。SSSE3
-    与旧形式共用前一项检查，两项一并在 P4a 修正（7.4 节）。
+    与旧形式共用前一项检查，两项一并在 P4a 修正（7.4 节）。已在 P4a 第二部分修正。
   - MMX 形式不因 x87 未决异常产生 #MF，与现有 MMX 形式一致。
 
 ### P4a：精确的 SSE 浮点（2026-10-05）
@@ -1158,3 +1160,86 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `x64-system-tests`、opcode 矩阵、`x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、
   `nasmtests-force-jit`、`kvm-unit-test`、`smp-tests`、`api-tests`、`platform-contract-tests`、
   rustfmt 和 state layout 检查全部通过。
+
+### P4a 第二部分：legacy SSE 的异常条件（2026-10-05）
+
+本节记录 P4a 的第二部分：32 位引擎按 SDM 的异常类型 4 检查 legacy SSE 形式（3.3 节）。x64 引擎
+原本就这样做，兼容模式下两个引擎不再不同。
+
+- **CR4.OSFXSR**：
+  - XMM 形式在 CR0.EM=1 或 CR4.OSFXSR=0 时 #UD，然后才是 CR0.TS 的 #NM。MMX 形式只检查
+    CR0.EM 和 CR0.TS。MMX 形式是无前缀的 0F 60–7F、C4、C5、D0–FF 以及 0F38/0F3A 映射中的形式
+    （`gen/x86_table.js` 的 `mmx_form`），与 x64 `vector.rs` 的划分相同。MMX 与 XMM 寄存器之间的
+    转换（CVTPI2PS、CVTPS2PI、MOVQ2DQ、MOVDQ2Q 等）引用 XMM 寄存器，属于 XMM 形式。
+    LDMXCSR/STMXCSR 按 XMM 形式检查，EMMS 按 MMX 形式检查，FXSAVE/FXRSTOR 不看 OSFXSR。
+  - 解释器：生成器为 MMX 形式生成 `task_switch_test_mmx`，为其余 SSE 形式生成新的
+    `task_switch_test_xmm`。OSFXSR=0 时原来打的日志删去。
+  - regions：IR 编码表新增 `mmx` 标志（94 行）。`SseCheck` 的守卫增加 `required` 条件
+    （CR4.OSFXSR 必须置位）；invalid/reserved 形式的守卫区分 MMX 和 XMM；helper 和
+    LDMXCSR/STMXCSR 改用 `task_switch_test_xmm`。
+  - Tier-0：守卫每个块只做一次（`Page::simd_checked`）。MMX 条件与 x87 守卫共用一位，XMM 形式
+    另需 OSFXSR 一位，所以块中先出现 MMX 形式时，之后的 XMM 形式仍会检查 OSFXSR。
+  - 删去了 debug 构建中只记录、不产生故障的 OSFXSR 观察机制（后端的 `debug_sse_*`、语义 fixture
+    和 `tests/ir/differential/fp_debug_deferral.mjs`）。新测试 `tests/ir/differential/sse_task_faults.mjs`
+    让缓存的 region 与解释器逐一比较：18 个形式（SSE、MMX、原生 SIMD、LDMXCSR/STMXCSR、
+    invalid/reserved 形式、STI 之后），两个 tier，两个优化级别，7 种 CR0/CR4/诊断组合，共 504 次。
+- **16 字节对齐**：
+  - legacy SSE 形式的 m128 操作数不是 16 字节对齐时 #GP(0)：按线性地址判断，先于 #PF，没有任何
+    效果。例外是 MOVUPS、MOVUPD、MOVDQU 和 LDDQU（PCMPxSTRx 在 P4b）。UNPCKLPS/UNPCKLPD 只读
+    8 字节，但操作数是 m128，同样要求对齐。较窄的操作数、MMX 形式和 MASKMOVDQU/MASKMOVQ 的
+    隐式操作数不要求对齐。
+  - 解释器：109 个内存形式改用 `safe_read128s_aligned`，UNPCKLPS/UNPCKLPD 先调用 `aligned16`；
+    6 个对齐存储（MOVAPS、MOVAPD、MOVNTPS、MOVNTPD、MOVDQA、MOVNTDQ）改用 `mov_r_m128_aligned`。
+  - IR：`Encoding::aligned_m128` 是唯一的判断。regions 在访存前插入 `Op::AlignmentCheck`，在 MIR
+    中是 `Check` 的 `misaligned` 条件，不对齐时调用 `ir_alignment_fault`；SSE helper 的内存读取
+    改用对齐版本。Tier-0 遇到不对齐的地址时重试，由解释器产生 #GP。
+  - x64 引擎的 MOVSLDUP/MOVSHDUP 内存操作数原先不查对齐，已修正。
+- **测试环境**：不少测试在裸机上运行 SSE 代码，却没有置位 CR4.OSFXSR，或者特意用未对齐的 m128
+  操作数测试跨页访问。以前前者只记日志，后者不检查，现在都会产生故障，因此逐一修改：
+  - v86 的 multiboot 入口不设置 CR4（multiboot 规范不要求），BIOS 也不设置。`tests/nasm/run.js`
+    像 QEMU oracle 的启动代码一样置位 CR4.OSFXSR 和 OSXMMEXCPT；`decode_rules.mjs`、`sse3.mjs`、
+    `xsave.mjs`、`packed_simd.mjs` 在程序开头置位；`cpu_optimizations.mjs`、
+    `cpu_plan_sequences.mjs`、`x87_jit_cache.mjs` 在机器启动后置位（这些程序按绝对地址引用自身）。
+  - 未对齐的操作数：`sse3.mjs`（HADD/HSUB、MOVSLDUP/MOVSHDUP）和 `packed_simd.mjs` 让要求对齐
+    的形式使用对齐的地址，包括页内最后一个 16 字节位置；MOVDDUP、LDDQU 和窄操作数仍测跨页。
+    IR 差分测试（`sse_fp.mjs`、`simd_integer/shuffle/moves/transfer/lane.mjs`）用按 SDM 独立写出的
+    `aligned_m128`（`tests/ir/differential/sse_fixture.mjs`）判断：要求对齐的形式在未对齐和跨页的
+    地址上期望 #GP(0)，且设备看不到任何访问，在页末对齐的位置上测 MMIO；其余形式照旧测跨页、
+    部分故障和映射变化。IR 的 SIMD 差分测试在 OSFXSR=0 时期望故障。
+  - x64 vector oracle 新增未对齐 MOVSLDUP/MOVSHDUP 两例。QEMU 10.2 不检查这两条的对齐，直接在
+    跨页处 #PF；SDM 把它们列为异常类型 4，因此登记为 QEMU 的已知差异，按 SDM 判定 #GP(0)。
+  - `tests/expect` 中固定了 SSE 守卫代码的期望（`task_switch_test_sse.wast`），已更新：入口处原先
+    的 debug 观察检查删去，守卫合并为 `(cr0 & 12) | ((cr4 & 512) ^ 512)`。
+- **测试**：`make sse-fault-tests`（`tests/rust/sse_faults.mjs`）。每个程序在解释器、Tier-0 和
+  regions 上先热运行，再单独运行一轮，两次的故障记录、寄存器和内存都要与解释器一致。分别用
+  release、无 SIMD 和 debug 构建运行：
+  - 没有 OSFXSR 时，131 个 XMM 形式的 244 个寄存器/内存变体都是 #UD，CR0.TS=1、内存操作数未对齐
+    或所在页不存在时也一样；25 个 MMX 形式、EMMS 和 FXSAVE 照常执行，结果与开启 OSFXSR 时相同。
+    XMM 与 MMX 形式交替排列，覆盖块中先检查了 MMX 条件的情况。CR0.TS=1 时全部 #NM。
+  - 140 个内存形式各在对齐和未对齐的地址上运行：73 个 #GP(0)，寄存器和内存都不变（FXSAVE/FXRSTOR
+    也一样）；其余 67 个的结果与对齐时相同。
+  - 17 个顺序用例：未对齐的 #GP(0) 先于 #PF；跨页访问的 #PF 报告第一个不存在的字节；跨页存储
+    不写入任何字节。CR0.TS 的 #NM 先于两者。
+  - 故意植入 8 个错误来验证测试能力，全部被发现：Tier-0 的 OSFXSR 守卫、块内守卫缓存、源操作数
+    和存储的对齐检查、UNPCKLPS 的 m128 规则，regions 的 OSFXSR 守卫和对齐检查，以及 helper 的
+    对齐读取。最初 regions 用默认的热度阈值：故障之后的恢复点每轮只运行一次，来不及编译，3 个
+    regions 错误都漏掉了。现在测试中 regions 的阈值为 1，并同步发布。
+- **性能**：与第一部分交错比较 SIMD 六项（601/606/611/620 SSE 浮点、621 SSE2 整数、625 MMX；
+  `build/simd-xsave/p4a2-bench.json`），warm x1.017，cold x0.988，在噪声之内。测量时机器负载约 25，
+  只有交错比较可信。Tier-0 每块只检查一次 OSFXSR；对齐检查是每个访存一次的 `and` 加条件分支。
+- **回归**：`sse-fault-tests`、`sse-fp-tests`、`ssse3-tests`、`rust-test`、`ir-tests`（`-D warnings`）、
+  `x64-decode-tests`、`ir-decoder-tests`、`ir-decode-contract-tests`、`decode-rules-tests`、
+  `ir-mmx-tests`、`ir-sse-fp-tests`、`ir-coverage-tests`、`ir-fp-state-tests`、`ir-tier0-tests`、
+  `ir-differential-tests`、七个 `ir-simd-*-tests`、`ir-sti-tests`、`ir-fusion-tests`、`ir-cfg-tests`、
+  `ir-cache-tests`、`ir-helper-reload-tests`、`packed-simd-tests`、`sse3-tests`、`xsave-tests`、
+  `x64-system-tests`、opcode 矩阵、`x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、
+  `nasmtests-force-jit`、`kvm-unit-test`、`smp-tests`、`api-tests`、`expect-tests`、`jitpagingtests`、
+  `cpu-optimization-tests`、`cpu-plan-tests`、`cpu-worker-tests`、`flags-provenance-tests`、
+  `jit-tiers-tests`、`jit-disabled-tests`、`mmx-fast-tests`、`softfloat-fast-tests`、四个 x87 目标、
+  `performance-recording-tests`、`platform-contract-tests`、rustfmt、state layout 和 eslint 全部通过。
+  以下失败与本部分无关，已另立任务：`ir-control-reference-tests` 在计划开始前的 `8d2b7c04` 上就
+  无法编译（它把旧版函数体拼进当前源码），P2 的 FXSAVE 改动又增加了几处错误；
+  `ir-portable-tests` 的 `fallback.mjs` 在 2026-10-01/03 的显示适配器改动后，于 JS 选项处理中崩溃；
+  `cpu::mmio_ram` 的两个单元测试共用静态表，并行运行时互相干扰（串行运行通过）。
+- **遗留**：PSHUFB 的内存形式在 regions 中仍走 helper；现在有了对齐检查，可以改为原生代码，
+  留到 P12 与其他只走 helper 的形式一起处理。

@@ -322,6 +322,8 @@ try {
         const deadline = performance.now() + 10000;
         while(word(vm, 0x500) !== 0xCAFE) { assert(performance.now() < deadline); await sleep(1); }
         await vm.stop();
+        // SSE enabled (CR4.OSFXSR, OSXMMEXCPT: the BIOS leaves them clear)
+        vm.v86.cpu.cr[4] |= 0x600;
     }
     const selected = programs.filter(([name]) => !process.env.SEQUENCE_FILTER || (process.env.SEQUENCE_FILTER === "nonfloating" ? !name.startsWith("floating") : name.includes(process.env.SEQUENCE_FILTER)));
     for(const [name, body] of selected) {

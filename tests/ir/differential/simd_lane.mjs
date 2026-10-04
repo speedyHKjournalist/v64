@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {run_sse_fixture} from "./debug_sse_fixture.mjs";
+import {aligned_m128,run_sse_fixture} from "./sse_fixture.mjs";
 import fs from "node:fs";
 import {lane} from "./lane_model.mjs";
 import {V86} from "../../../build/libv86.mjs";
@@ -66,10 +66,13 @@ for(const release of [false,true]){
             const {expected,counts}=compare(i,()=>{reset(i,{task,cpl});if(c[7]>=8)cpu.segment_is_null[3]=1;set32(0x13000+0x310*4,0);e.full_clear_tlb();e.update_state_flags();},{fault:true});
             assert.equal(expected.ip,task&4?UD:NM);assert(counts.every(([n,g])=>n===0&&g===1));task_cases++;
         }
-        for(const option of [{osfxsr:false},{real:true},{vm86:true,cpl:3}]){compare(i,()=>reset(i,option));modes++;}
+        for(const option of [{osfxsr:false},{real:true},{vm86:true,cpl:3}]){compare(i,()=>reset(i,option),{fault:option.osfxsr===false});modes++;}
+        // (a misaligned m128 that must be aligned: #GP(0), also before #PF)
         if(c[7]>=8) for(const offset of [0x41,0xFF0,0xFF8,0xFFC,0xFFF]){
-            compare(i,()=>reset(i,{offset,hot:true}));access++;
-            const {expected}=compare(i,()=>{reset(i,{offset:0x1000-c[4]+1,cpl:3});set32(0x13000+0x311*4,0);e.full_clear_tlb();},{fault:true});assert.equal(expected.ip,PF);access++;
+            const misaligned=aligned_m128(c[3],c[4])&&(offset&15)!==0;
+            const {expected:result}=compare(i,()=>reset(i,{offset,hot:true}),{fault:misaligned});if(misaligned)assert.equal(result.ip,GP);access++;
+            const crossing=0x1000-c[4]+1;
+            const {expected}=compare(i,()=>{reset(i,{offset:crossing,cpl:3});set32(0x13000+0x311*4,0);e.full_clear_tlb();},{fault:true});assert.equal(expected.ip,aligned_m128(c[3],c[4])&&(crossing&15)!==0?GP:PF);access++;
         }
     }
     for(let i=0;i<cases.length;i++){const c=cases[i];if(!c[1]||c[2]!==32||c[6]!==0||c[7]<8||[1,2].includes(c[8])||c[9]!==0) continue;const {expected}=compare(i,()=>{reset(i);cpu.segment_is_null[c[8]<0?3:c[8]]=1;e.update_state_flags();},{fault:true});assert.equal(expected.ip,GP);segments++;}
@@ -95,9 +98,11 @@ for(const release of [false,true]){
     let devices=0,mutations=0,late=0,early=0;
     for(const [c,i] of selected){
         if(c[7]<8) continue;
-        for(const offset of [0x40,0xFF8,0xFFC,0xFFF]){compare(i,()=>device(i,{offset}));devices++;}
+        for(const offset of [0x40,0xFF0,0xFF8,0xFFC,0xFFF]){compare(i,()=>device(i,{offset}),{fault:aligned_m128(c[3],c[4])&&(offset&15)!==0});devices++;}
         compare(i,()=>{device(i);on_event=()=>{xmm.set([0x12345678,0x89ABCDEF,0xFEDCBA98,0x76543210],0);xmm[28]=0x12345678;cpu.reg32[0]=0xCAFEBABE;};});assert.equal(xmm[28],0x12345678);assert.equal(cpu.reg32[0]>>>0,0xCAFEBABE);mutations++;
-        if(c[5]){
+        if(aligned_m128(c[3],c[4])){
+            const {expected,observed}=compare(i,()=>device(i,{offset:0xFFF,cpl:3}),{fault:true});assert.equal(expected.ip,GP);assert.equal(observed.length,0);late++;
+        } else if(c[5]){
             const {expected}=compare(i,()=>{device(i,{offset:0xFFF,cpl:3});on_event=kind=>{if(kind.startsWith("w")){set32(0x13000+0x311*4,0);e.full_clear_tlb();}};},{abort:true});
             {assert.equal(expected.ip,PF);late++;}
         } else {

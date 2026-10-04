@@ -29,6 +29,8 @@ const cpuid = (leaf, subleaf, out) => [...mov_eax(leaf), ...mov_ecx(subleaf), 0x
     ...store_eax(out), ...store_ebx(out + 4), ...store_ecx(out + 8), ...store_edx(out + 12)];
 const OSXSAVE = [0x0F, 0x20, 0xE0, 0x0D, ...u32(1 << 18), 0x0F, 0x22, 0xE0];          // CR4 |= OSXSAVE
 const NO_OSXSAVE = [0x0F, 0x20, 0xE0, 0x25, ...u32(~(1 << 18) >>> 0), 0x0F, 0x22, 0xE0];
+// SSE enabled (CR4.OSFXSR, OSXMMEXCPT: the BIOS leaves them clear)
+const ENABLE_SSE = [0x0F, 0x20, 0xE0, 0x0D, ...u32(0x600), 0x0F, 0x22, 0xE0];
 const SET_TS = [0x0F, 0x20, 0xC0, 0x0D, ...u32(8), 0x0F, 0x22, 0xC0], CLTS = [0x0F, 0x06];
 const XGETBV = [0x0F, 0x01, 0xD0], XSETBV = [0x0F, 0x01, 0xD1];
 const xsetbv = value => [...mov_ecx(0), ...mov_eax(value), ...mov_edx(0), ...XSETBV];
@@ -95,7 +97,7 @@ async function run_all(program, before = () => {}, set = machines)
             vm.write_memory(Uint8Array.from(handler(vector, error_code)), h);
         });
         // (the program first loads the IDT)
-        const p = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), ...preamble, ...program];
+        const p = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), ...ENABLE_SSE, ...preamble, ...program];
         for(const warm of [true, false])
         {
             before(vm);
@@ -129,8 +131,8 @@ async function create_machines(options = {})
  */
 async function expect_fault(set, prologue, faulting, vector, { epilogue = [], before = () => {}, cr2, label } = {})
 {
-    // (the IDT load and the preamble come first)
-    const at = CODE + 7 + preamble.length + prologue.length;
+    // (the IDT load, SSE and the preamble come first)
+    const at = CODE + 7 + ENABLE_SSE.length + preamble.length + prologue.length;
     await run_all([...prologue, ...faulting, ...epilogue], vm => {
         vm.write_memory(Uint8Array.from(u32(faulting.length)), SKIP);
         before(vm);

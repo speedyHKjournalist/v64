@@ -5,7 +5,8 @@ use crate::{
 };
 #[no_mangle]
 pub unsafe fn ir_sse_guard() -> u32 {
-    if cpu::task_switch_test_mmx() {
+    // (Op::SseCheck guards XMM forms)
+    if cpu::task_switch_test_xmm() {
         Outcome::Normal as u32
     }
     else {

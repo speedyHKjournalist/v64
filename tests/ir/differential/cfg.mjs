@@ -24,8 +24,8 @@ try {
         cpu.reg32.set([0x7FFFFFFF,counter,0x11223344,0x80000000,STACK,0x99AABBCC,DATA,0xFEDCBA98]);
         // CPUID leaf 0 also exercises an adapter after the entry prologue.
         if(c[0]===11) cpu.reg32[0]=0;
-        // These semantic fixtures must execute SSE instead of taking the debug
-        // OSFXSR observer deferral. Fault/disabled-SSE paths have separate tests.
+        // These semantic fixtures execute SSE (#UD without OSFXSR). Fault and
+        // disabled-SSE paths have separate tests.
         cpu.cr[4] |= 0x600; cpu.cr[0] &= ~12;
         cpu.is_32[0]=+mode; cpu.flags[0]=flags; cpu.flags_changed[0]=lazy?0x8D5:0;
         words[96>>2]=31; words[104>>2]=0x7FFFFFFF; words[112>>2]=flags&64?0:0x80000000;

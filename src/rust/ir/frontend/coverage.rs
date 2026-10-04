@@ -54,7 +54,19 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         0x0FC7 => ("ir_rdrand", vec![destination, width]),
         op => {
             let behavior = b.constant(behavior(op, i.encoding.group, i.ea.is_some()), Type::I32);
-            let guard = b.constant(i.encoding.sse as u32, Type::I32);
+            // (the task checks: 1 of an MMX form, 2 of an XMM form)
+            let guard = b.constant(
+                if !i.encoding.sse {
+                    0
+                }
+                else if i.encoding.mmx {
+                    1
+                }
+                else {
+                    2
+                },
+                Type::I32,
+            );
             ("ir_reserved_form", vec![behavior, guard, offset, segment])
         },
     };

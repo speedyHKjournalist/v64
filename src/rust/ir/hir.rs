@@ -143,6 +143,11 @@ pub enum Op {
         bytes: u16,
         write: bool,
     },
+    /// #GP(0) unless the linear address is a multiple of `bytes` (a legacy
+    /// SSE m128 operand, Encoding::aligned_m128)
+    AlignmentCheck {
+        bytes: u8,
+    },
     CallHelper(HelperId),
     RmwLoad {
         bytes: u8,
@@ -168,6 +173,7 @@ impl Op {
                 | Self::GuestStore { .. }
                 | Self::PartialStore { .. }
                 | Self::GuestCheck { .. }
+                | Self::AlignmentCheck { .. }
                 | Self::CallHelper(_)
                 | Self::Divide { .. }
                 | Self::RmwLoad { .. }

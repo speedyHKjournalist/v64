@@ -22,11 +22,13 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         b.region.states[map.index()].resume = ResumeKind::BeforeInstruction;
         let offset = effective_offset(b, &ea);
         let address = segmented(b, offset, ea.segment, map);
+        let bytes = if matches!(i.encoding.opcode, 0x0F14 | 0x660F14) { 8 } else { 16 };
+        super::simd_moves::check_alignment(b, i, address, bytes, map);
         let values = b.region.append(
             b.block,
             Op::XmmBinary {
                 operation,
-                bytes: if matches!(i.encoding.opcode, 0x0F14 | 0x660F14) { 8 } else { 16 },
+                bytes,
                 register,
             },
             vec![address, destination, b.effect],

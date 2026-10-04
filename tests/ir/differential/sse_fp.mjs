@@ -1,21 +1,17 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
+import {aligned_m128} from "./sse_fixture.mjs";
 
 const cases=JSON.parse(fs.readFileSync("build/ir-sse-fp/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-sse-fp/${i}-${opt}.wasm`))));
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
-    let log_observer=null;
     const wasm_path=(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
         graphics_adapter: "bochs_vga",
-        wasm_fn:async imports=>{
-            const original=imports.env.log_from_wasm;
-            imports.env.log_from_wasm=(...args)=>log_observer?log_observer():original(...args);
-            return (await WebAssembly.instantiate(fs.readFileSync(wasm_path),imports)).instance.exports;
-        },
+        wasm_fn:async imports=>(await WebAssembly.instantiate(fs.readFileSync(wasm_path),imports)).instance.exports,
         memory_size:32<<20,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
@@ -84,10 +80,11 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0,denormal=0,masks=true}={}){
+        function reset(i,{task=0,osfxsr=true,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0,denormal=0,masks=true}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4|512; // Ordinary continuation excludes the debug OSFXSR observer.
+            // (XMM forms #UD without CR4.OSFXSR)
+            cpu.cr[4]=osfxsr?cr4|512:cr4&~512;
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -263,10 +260,10 @@ for(const release of [false,true]){
                     result_guard_cases++;
                 }
             }
-            for(const task of [4,8,12]) for(const opt of [0,1]) {
-                reset(i,{task});const expected=interpreter(i);
-                reset(i,{task});register_calls=0;instances[i][opt].exports.f(0);
-                assert.deepEqual(state(),expected,`native FP task guard ${op}/${task}/${opt}`);
+            for(const [task,osfxsr] of [[4,true],[8,true],[12,true],[0,false],[8,false]]) for(const opt of [0,1]) {
+                reset(i,{task,osfxsr});const expected=interpreter(i);
+                reset(i,{task,osfxsr});register_calls=0;instances[i][opt].exports.f(0);
+                assert.deepEqual(state(),expected,`native FP task guard ${op}/${task}/${osfxsr}/${opt}`);
                 assert.equal(register_calls,1,"task fault must keep precise CPU helper recovery");
                 assert.equal(linear32[664>>2],101);
                 result_guard_cases++;
@@ -276,8 +273,8 @@ for(const release of [false,true]){
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,opcode,dirty,memory,width]=cases[i], before=dirty?102:101;
-            // (ADDSUBPS/PD and SSSE3 check 16-byte alignment)
-            const aligned=(opcode&255)===0xD0 || [0x0F38,0x0F3A].includes(opcode>>>8&0xFFFF);
+            // (an m128 operand must be 16-byte aligned)
+            const aligned=aligned_m128(opcode,width);
             for(let sample=0;sample<16;sample++) for(let rounding=0;rounding<4;rounding++) {
                 const expected=compare(i,()=>reset(i,{sample,rounding}),before+1);
                 assert.equal(expected.ip,PC+cases[i][0].length); comparisons++;
@@ -296,105 +293,13 @@ for(const release of [false,true]){
                 assert.equal(compare(i,()=>reset(i,{nullSegment:true}),before).ip,GP); comparisons++;
                 if(aligned) { assert.equal(compare(i,()=>reset(i,{delta:0xFFF,pageFault:true}),before).ip,GP); comparisons++; }
             }
-            if(!dirty) for(const task of [4,8,12]) {
-                const expected=compare(i,()=>reset(i,{task,nullSegment:true}),101);
-                assert.equal(expected.ip,task===8?NM:UD); comparisons++;
+            // (#UD for CR0.EM or no CR4.OSFXSR comes before #NM for CR0.TS)
+            if(!dirty) for(const [task,osfxsr] of [[4,true],[8,true],[12,true],[0,false],[8,false]]) {
+                const expected=compare(i,()=>reset(i,{task,osfxsr,nullSegment:true}),101);
+                assert.equal(expected.ip,task===8&&osfxsr?NM:UD); comparisons++;
             }
         }
-        console.log(`PASS (${release?"release":"debug"}): ${comparisons} SSE FP arithmetic/conversion/NaN/rounding, dirty XMM, MMIO, page/alignment faults and #NM/#UD priority cases`);
-
-        if(!release) {
-            const observer_cases=JSON.parse(fs.readFileSync("build/ir-sse-fp-observer/cases.json"));
-            let observers=0;
-            for(let i=0;i<observer_cases.length;i++) {
-                const [name,bytes,mode,opt,after]=observer_cases[i];
-                const module=new WebAssembly.Module(fs.readFileSync(`build/ir-sse-fp-observer/${i}.wasm`));
-                let links=0;
-                for(const path of ["entry","dynamic","direct"]) for(const mutation of ["none","code","context","xmm","counter","all"]) {
-                    const instance=new WebAssembly.Instance(module,{e:{...imports,
-                        ir_request_link:()=>{links++;},
-                        ir_enter_checked:(...args)=>{
-                            const accepted=e.ir_enter_checked(...args);
-                            if(path==="dynamic")cpu.cr[4]&=~512;
-                            return accepted;
-                        },
-                    }});
-                    let calls=0;
-                    const configure=()=>{
-                        reset(0);mem.set(bytes,PC);cpu.is_32[0]=+mode;cpu.reg32[7]=DATA;
-                        cpu.cr[4]&=~512;e.update_state_flags();calls=0;links=0;
-                        log_observer=()=>{
-                            // The prelude's interpreter-only debug warning has
-                            // no callback side effects. Inspect the target SSE
-                            // observer, including its fully committed prefix.
-                            if(cpu.instruction_pointer[0]!==PC+after) return;
-                            calls++;
-                            assert.equal(cpu.reg_xmm32s[8],0,"unrelated dirty XMM must reach the observer");
-                            assert.equal(linear32[664>>2],102,"observer sees the exact retired prefix");
-                            if(["code","all"].includes(mutation))mem[PC+after]=0x48;
-                            if(["context","all"].includes(mutation)) {
-                                cpu.reg32[3]=0x12345678;cpu.segment_offsets[3]=16;
-                            }
-                            if(["xmm","all"].includes(mutation)) {
-                                cpu.reg_xmm32s[8]=0x13579BDF;cpu.reg_xmm32s[0]=0x40000000;
-                            }
-                            if(["counter","all"].includes(mutation))linear32[664>>2]=0xFFFFFFFF;
-                        };
-                    };
-                    configure();e.ir_test_step();linear32[664>>2]++;
-                    e.ir_test_step();linear32[664>>2]++;
-                    e.ir_test_step();
-                    const expected=state(),expected_retired=(linear32[664>>2]+1)>>>0;
-                    assert.equal(calls,1,"baseline target observer executes once");
-                    configure();
-                    const epoch_address=e.ir_admission_epoch_address();
-                    const epoch=new DataView(e.memory.buffer).getBigUint64(epoch_address,true);
-                    if(path==="entry") {
-                        const before=state();
-                        instance.exports.f(0);
-                        assert.equal(calls,0,"entry deferral cannot run an observer");
-                        assert.equal(linear32[664>>2],100,"entry deferral retires no work");
-                        assert.deepEqual(state(),before,"entry deferral has no CPU side effects");
-                        assert.equal(new DataView(e.memory.buffer).getBigUint64(epoch_address,true),epoch);
-                        e.ir_test_step();linear32[664>>2]++;
-                        e.ir_test_step();linear32[664>>2]++;
-                    }
-                    else if(path==="dynamic") {
-                        cpu.cr[4]|=512;
-                        instance.exports.f(0);
-                        assert.equal(calls,0,"dynamic deferral cannot run an observer");
-                        assert.equal(cpu.instruction_pointer[0],PC+1,"dynamic deferral stops at the prelude's first SSE opcode");
-                        assert.equal(linear32[664>>2],101,"dynamic deferral retires only the integer prefix");
-                        assert(new DataView(e.memory.buffer).getBigUint64(epoch_address,true)>epoch);
-                        e.ir_test_step();linear32[664>>2]++;
-                    }
-                    else {
-                        e.ir_test_step();linear32[664>>2]++;
-                        e.ir_test_step();linear32[664>>2]++;
-                    }
-                    if(path==="direct") {
-                        linear32[560>>2]=PC+5;cpu.instruction_pointer[0]=PC+after;
-                        const opcode=name==="selective"?0xF51:name==="full"?0xF2C:0xF58;
-                        const outcome=name==="memory"?e.ir_sse_fp_mem_continue(opcode,DATA,3,1,0)
-                            :e.ir_sse_fp_reg_continue(opcode,0,1,0);
-                        assert.equal(outcome,4,"direct helper debug observer retains its terminal ABI");
-                    }
-                    else {
-                        // The standalone fixture has no CPU dispatcher. Execute
-                        // the explicitly deferred instruction exactly once.
-                        e.ir_test_step();linear32[664>>2]++;
-                    }
-                    assert.equal(calls,1,`${name}/${mode}/${opt}/${path}/${mutation}: target observer runs once`);
-                    assert.equal(links,0,"observing SSE success cannot request normal chaining");
-                    assert.equal(linear32[664>>2],expected_retired,"completed prefix retires once, including callback count wrap");
-                    assert.equal(cpu.instruction_pointer[0],PC+after,"observer prevents stale suffix execution");
-                    assert.equal(cpu.segment_offsets[3],["context","all"].includes(mutation)?16:0);
-                    assert.deepEqual(state(),expected,`${name}/${mode}/${opt}/${path}/${mutation}: CPU-owned post-state`);
-                    log_observer=null;observers++;
-                }
-            }
-            console.log(`PASS (debug): ${observers} SSE OSFXSR entry/dynamic deferrals and direct helper observers, native/selective/full/memory, dirty XMM/GPR/context/code and exact counter wrap`);
-        }
+        console.log(`PASS (${release?"release":"debug"}): ${comparisons} SSE FP arithmetic/conversion/NaN/rounding, dirty XMM, MMIO, page/alignment faults and #NM/#UD (EM, OSFXSR) priority cases`);
 
     } finally {
         await vm.destroy();

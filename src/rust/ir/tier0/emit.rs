@@ -840,6 +840,10 @@ struct Page {
     /// Per XMM register, the floating-point lanes known to be neither NaN nor
     /// denormal in the block (simd::CLEAN_*; see native_fp)
     xmm_clean: [u8; 8],
+    /// The SIMD task checks the block has made (simd::simd_guard): 1 those of
+    /// MMX forms, 2 also those of XMM forms. CR0 and CR4 change only in
+    /// interpreter steps, which leave the block.
+    simd_checked: u8,
     /// x87 TOP/tags/VALID/DIRTY in function-wide locals while `x87_is_open`
     /// (then the CPU state is behind; see x87_open/x87_close).
     x87: X87Cache,
@@ -1624,6 +1628,7 @@ impl Page {
             self.w.free_local(local);
         }
         self.xmm_clean = [0; 8];
+        self.simd_checked = 0;
     }
     fn emit_flags(&mut self, flags: PendingFlags) {
         if flags.op1 {
@@ -1805,13 +1810,18 @@ impl Page {
         true
     }
     /// x87 forms fault (#NM) when CR0.EM or CR0.TS is set: the interpreter
-    /// runs them then.
+    /// runs them then. (The condition of MMX forms, once per block: see
+    /// simd_checked.)
     fn x87_guard(&mut self) {
+        if self.simd_checked & 1 != 0 {
+            return;
+        }
         self.w.load_fixed_i32(gp::cr as u32);
         self.w
             .const_i32(crate::cpu::cpu::CR0_EM | crate::cpu::cpu::CR0_TS);
         self.w.and_i32();
         self.retry_if();
+        self.simd_checked |= 1;
     }
     /// Push a shift count (already masked for immediates, CL & 31).
     fn count(&mut self, count: Count) {
@@ -3438,6 +3448,7 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         xmm_dirty: 0,
         fp_mxcsr: None,
         xmm_clean: [0; 8],
+        simd_checked: 0,
         x87: X87Cache {
             top: locals.pop().unwrap(),
             tags: locals.pop().unwrap(),
