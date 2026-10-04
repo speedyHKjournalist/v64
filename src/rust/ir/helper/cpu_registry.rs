@@ -289,9 +289,9 @@ pub fn xmm_register_operands(
             | 0x660F382B
             | 0x660F3830..=0x660F3835
             | 0x660F3837..=0x660F3841
-            | 0x660F3A0C..=0x660F3A0E
+            | 0x660F3A08..=0x660F3A0E
             | 0x660F3A21
-            | 0x660F3A42
+            | 0x660F3A40..=0x660F3A42
     ) {
         return None;
     }

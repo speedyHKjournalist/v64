@@ -10,14 +10,15 @@
 import assert from "node:assert/strict";
 import {assemble, reference, actual} from "./guest_runner.mjs";
 import {long_mode_guest} from "./guest_builder.mjs";
-import {extract, get, insert, insertps, ptest, set, sse4_38, sse4_3a} from "../rust/sse4_model.mjs";
+import {Fp, dot_product, extract, get, insert, insertps, ptest, round_lane, set, sse4_38, sse4_3a} from "../rust/sse4_model.mjs";
 
 const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, MATCH = OUT + 0xC0, FAULTS = OUT + 0x100, RESULTS = OUT + 0x1000;
 // (compatibility-mode code is compiled only after a while)
 const IDT = 0x380000, ROUNDS = 400, COMPAT_ROUNDS = 20000;
 
-// 16 sample vectors: random bytes and lanes of edge values
-const samples = new Uint8Array(16 * 16);
+// 16 sample vectors: random bytes and lanes of edge values; then fractional,
+// halfway, tiny and special floating-point values (16-18 single, 19-20 double)
+const samples = new Uint8Array(21 * 16);
 {
     const view = new DataView(samples.buffer);
     let seed = 0x2468ACE1;
@@ -36,6 +37,14 @@ const samples = new Uint8Array(16 * 16);
             else view.setUint32(n * 16 + i, value, true);
         }
     }
+}
+{
+    const view = new DataView(samples.buffer);
+    [[0.5, -1.5, 2.5, -0.25], [3.7, -2.3, 1e-40, -1e30], [NaN, -0, Infinity, 1e-45]].forEach((values, n) =>
+        values.forEach((v, i) => view.setFloat32((16 + n) * 16 + i * 4, v, true)));
+    [[2.5, -0.5], [1e-310, -1234.5678]].forEach((values, n) => values.forEach((v, i) => view.setFloat64((19 + n) * 16 + i * 8, v, true)));
+    // (an SNaN in the last single lane)
+    view.setUint32(18 * 16 + 12, 0x7F800001, true);
 }
 const sample = i => samples.subarray(i * 16, i * 16 + 16);
 const hex = b => Buffer.from(b).toString("hex");
@@ -92,6 +101,35 @@ for(const long of [true, false])
         const n = cases.length;
         cases.push({long, kind: "movntdqa", name: "movntdqa", op: 0x2A, memory: true, dst: base + n % 8, a: n % 16, b: (n + 4) % 16, imm8: 0, offset: 0});
     }
+    // ROUND and DPPS/DPPD from the default MXCSR; its flags afterwards in the next slot
+    for(const [name, op, double, scalar] of [["roundps", 0x08, false, false], ["roundpd", 0x09, true, false],
+        ["roundss", 0x0A, false, true], ["roundsd", 0x0B, true, true]])
+        for(const memory of [false, true]) for(const imm8 of [0, 1, 2, 3, 4, 8, 9, 10, 11, 12])
+    {
+        const n = cases.length;
+        cases.push({long, kind: "round", name, op, double, scalar, memory, dst: base + n % 8, src: memory ? undefined : base + (n + 3) % 8,
+            a: n % 16, b: double ? 19 + (n & 1) : 16 + n % 3, imm8, offset: 0});
+        cases.push({long, kind: "mxcsr", name: name + " MXCSR"});
+    }
+    // (QEMU 10.2 propagates SSE NaNs as the x87 does, the larger significand
+    // of two QNaNs: against it, at most one NaN product meets in an addition.
+    // tests/rust/sse_fp.mjs checks every combination against the model.)
+    const operands = [[16, 17, [0xFF, 0xF1, 0x3C, 0x81, 0x33, 0x12]], [17, 16, [0xFF, 0x5A]],
+        [17, 18, [0x81, 0x3C, 0x12, 0x33]], [18, 16, [0x81, 0x3C, 0x12, 0x33]]];
+    for(const [name, op, double] of [["dpps", 0x40, false], ["dppd", 0x41, true]])
+        for(const memory of [false, true]) for(const [a, b, imms] of double ? [[19, 20, [0xFF, 0x31, 0x12, 0x23]], [20, 19, [0x33, 0x11]]] : operands) for(const imm8 of imms)
+    {
+        const n = cases.length;
+        cases.push({long, kind: "dot", name, op, double, memory, dst: base + n % 8, src: memory ? undefined : base + (n + 3) % 8, a, b, imm8, offset: 0});
+        cases.push({long, kind: "mxcsr", name: name + " MXCSR"});
+    }
+}
+// (X64_SSE4_FILTER=text: only the cases whose name has it, for debugging)
+if(process.env.X64_SSE4_FILTER)
+{
+    const kept = cases.filter((c, n) => c.name.includes(process.env.X64_SSE4_FILTER) || c.kind === "mxcsr" && cases[n - 1].name.includes(process.env.X64_SSE4_FILTER));
+    cases.length = 0;
+    cases.push(...kept);
 }
 const at = (i, offset = 0) => `[samples + ${i * 16 + offset}]`;
 const code = (c, n) => {
@@ -148,6 +186,19 @@ const code = (c, n) => {
             break;
         case "movntdqa":
             lines.push(`movntdqa ${x(c.dst)},${at(c.b)}`, `movdqu [${out}],${x(c.dst)}`);
+            break;
+        case "round": case "dot":
+        {
+            // (a scalar ROUND's memory operand: its lane)
+            const width = c.scalar ? c.double ? "qword " : "dword " : "";
+            lines.push("ldmxcsr [mxcsr_default]", `movdqu ${x(c.dst)},${at(c.a)}`);
+            if(!c.memory) lines.push(`movdqu ${x(c.src)},${at(c.b)}`);
+            lines.push(`${c.name} ${x(c.dst)},${c.memory ? width + at(c.b) : x(c.src)},${c.imm8}`, `movdqu [${out}],${x(c.dst)}`);
+            lines.push(`stmxcsr [${out + 16}]`, `mov dword [${out + 20}],0`, `mov dword [${out + 24}],0`, `mov dword [${out + 28}],0`);
+            break;
+        }
+        // (written by the case before)
+        case "mxcsr":
             break;
     }
     return lines.join("\n");
@@ -259,15 +310,27 @@ iretq
 align 8
 idtr: dw 511
 dq ${IDT}
+mxcsr_default: dd 0x1F80
 align 16
 samples: db ${Array.from(samples).join(",")}
 `));
 
 const length = RESULTS - OUT + cases.length * 16;
-const expected_result = (c) => {
+const floating = (c) => {
+    if(c.kind === "dot") return dot_product(0x1F80, sample(c.a), sample(c.b), c.imm8, c.double);
+    const fp = new Fp(0x1F80), result = Uint8Array.from(sample(c.a)), size = c.double ? 8 : 4;
+    for(let i = 0; i < (c.scalar ? 1 : 16 / size); i++) set(result, size, i, round_lane(fp, get(sample(c.b), size, i), c.double, c.imm8));
+    return {result, mxcsr: fp.finish().mxcsr};
+};
+const expected_result = (c, n) => {
     const result = new Uint8Array(16);
     switch(c.kind)
     {
+        case "round": case "dot":
+            return floating(c).result;
+        case "mxcsr":
+            set(result, 4, 0, BigInt(floating(cases[n - 1]).mxcsr));
+            return result;
         case "binary":
         {
             // XMM0 loaded first, then the destination, then a register source
@@ -315,7 +378,7 @@ const check = (result, label) => {
     // the model first: QEMU is a reference, not the specification
     cases.forEach((c, n) => {
         const value = Uint8Array.from(result.subarray(RESULTS - OUT + n * 16, RESULTS - OUT + n * 16 + 16));
-        assert.equal(hex(value), hex(expected_result(c)),
+        assert.equal(hex(value), hex(expected_result(c, n)),
             `${label}: ${c.long ? "64-bit" : "compatibility"} ${c.name} xmm${c.dst}, ${c.memory ? "[mem]" : c.src === undefined ? "r" : "xmm" + c.src} imm8=${c.imm8}`);
     });
     FAULT_CASES.forEach(([vector, what, , , qemu], n) => {

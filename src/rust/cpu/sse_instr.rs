@@ -436,6 +436,34 @@ pub unsafe fn sse_fp_arithmetic(op: u32, r: i32, source: u128, imm8: i32) -> boo
         },
     }
 }
+/// ROUNDPS/PD/SS/SD (simd_fp::round, `op` the catalogue key) of `source`
+/// into XMM r: false after an unmasked exception (XMM r unchanged)
+pub unsafe fn sse_fp_round(op: u32, r: i32, source: u128, imm8: i32) -> bool {
+    match simd_fp::round(op, read_xmm128s(r).bits(), source, imm8 as u8) {
+        Ok(v) => {
+            write_xmm_reg128(r, reg128::of_bits(v));
+            true
+        },
+        Err(simd_fp::Unmasked) => {
+            trigger_simd_fp();
+            false
+        },
+    }
+}
+/// DPPS/DPPD (simd_fp::dot_product) of XMM r and `source`: false after an
+/// unmasked exception (XMM r unchanged)
+pub unsafe fn sse_fp_dot_product(double: bool, r: i32, source: u128, imm8: i32) -> bool {
+    match simd_fp::dot_product(double, read_xmm128s(r).bits(), source, imm8 as u8) {
+        Ok(v) => {
+            write_xmm_reg128(r, reg128::of_bits(v));
+            true
+        },
+        Err(simd_fp::Unmasked) => {
+            trigger_simd_fp();
+            false
+        },
+    }
+}
 /// COMISS/UCOMISS/COMISD/UCOMISD of XMM r and `source`: ZF, PF and CF (the
 /// other arithmetic flags cleared), or false after an unmasked exception
 pub unsafe fn sse_fp_compare_flags(op: u32, r: i32, source: u128) -> bool {

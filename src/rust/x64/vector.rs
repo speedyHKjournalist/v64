@@ -1798,8 +1798,8 @@ unsafe fn ssse3(d: &Decoded) -> Result<bool, Fault> {
     Ok(true)
 }
 
-/// SSE4.1 and SSE4.2 integer forms with 66 (0F 38 and 0F 3A), with the
-/// semantics of crate::cpu::simd_int. REX.W selects PEXTRQ and PINSRQ; a
+/// SSE4.1 and SSE4.2 forms with 66 (0F 38 and 0F 3A), with the semantics of
+/// crate::cpu::simd_int and simd_fp (ROUND, DPPS/DPPD). REX.W selects PEXTRQ and PINSRQ; a
 /// register destination of PEXTRB/PEXTRW/PEXTRD/EXTRACTPS is zero-extended.
 unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
     let base = d.base_opcode();
@@ -1840,6 +1840,27 @@ unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
                 return Err(Fault::ud());
             }
             put_xmm(r, source(d, 128, true, false)?);
+        },
+        0x0F3A08..=0x0F3A0B => {
+            guard(true)?;
+            let v = match base {
+                0x0F3A0A => source(d, 32, false, false)?,
+                0x0F3A0B => source(d, 64, false, false)?,
+                _ => source(d, 128, true, false)?,
+            };
+            put_xmm(
+                r,
+                simd_fp::round(base, xmm(r), v, imm).map_err(|e| simd_fault(e))?,
+            );
+        },
+        0x0F3A40 | 0x0F3A41 => {
+            guard(true)?;
+            let v = source(d, 128, true, false)?;
+            put_xmm(
+                r,
+                simd_fp::dot_product(base == 0x0F3A41, xmm(r), v, imm)
+                    .map_err(|e| simd_fault(e))?,
+            );
         },
         0x0F3A0C..=0x0F3A0E | 0x0F3A42 => {
             guard(true)?;

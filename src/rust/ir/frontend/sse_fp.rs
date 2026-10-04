@@ -94,7 +94,7 @@ pub const OPERATIONS: &[(u32, u32)] = &[
     (0x660F381D, 16),
     (0x660F381E, 16),
     (0x660F3A0F, 16),
-    // SSE4.1 and SSE4.2 (integer, no MXCSR; the bytes of the memory operand):
+    // SSE4.1 and SSE4.2 (ROUND and DPPS/DPPD with MXCSR; the bytes of the memory operand):
     // PMOVSX/PMOVZX read what they extend, PEXTR*/EXTRACTPS store an
     // element, PINSRB/PINSRD/INSERTPS load one
     (0x660F3810, 16),
@@ -128,6 +128,10 @@ pub const OPERATIONS: &[(u32, u32)] = &[
     (0x660F383F, 16),
     (0x660F3840, 16),
     (0x660F3841, 16),
+    (0x660F3A08, 16),
+    (0x660F3A09, 16),
+    (0x660F3A0A, 4),
+    (0x660F3A0B, 8),
     (0x660F3A0C, 16),
     (0x660F3A0D, 16),
     (0x660F3A0E, 16),
@@ -138,6 +142,8 @@ pub const OPERATIONS: &[(u32, u32)] = &[
     (0x660F3A20, 1),
     (0x660F3A21, 4),
     (0x660F3A22, 4),
+    (0x660F3A40, 16),
+    (0x660F3A41, 16),
     (0x660F3A42, 16),
 ];
 pub fn supports(i: &DecodedInstruction) -> bool {

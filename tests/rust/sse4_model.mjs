@@ -161,32 +161,37 @@ export function round_lane(fp, x0, double, imm8)
 /**
  * DPPS/DPPD: the products imm8[7:4] selects (else +0.0), summed pairwise in
  * the SDM's order, each operation rounded, to the lanes imm8[3:0] selects
- * (else +0.0). Returns the lanes and whether an unmasked exception stops it:
- * the operations run in order, the first one raising an unmasked exception
- * faults (its flags as for a single operation, SDM Vol. 1, 11.5.3), later
- * ones do not run.
+ * (else +0.0). Returns the lanes, MXCSR and whether an unmasked exception
+ * faults. Each multiplication and addition has its own exceptions (as a
+ * single operation, SDM Vol. 1, 11.5.3) and sets its flags; the SDM's
+ * pseudo-code looks for an unmasked one after DPPD's two multiplications
+ * and after each addition (DPPS: only after the additions, so the first
+ * addition runs even when a multiplication had one).
  */
 export function dot_product(mxcsr, d, s, imm8, double)
 {
     const size = double ? 8 : 4, n = 16 / size;
-    const fp = new Fp(mxcsr);
     let flags = 0, fault = false;
-    // one operation, with its own exception order
     const step = (op, a, b) => {
-        if(fault) return 0n;
         const one = new Fp(mxcsr);
         const r = one.binary(op, a, b, double);
         const done = one.finish();
         flags |= done.mxcsr & 0x3F;
-        if(done.fault) fault = true;
+        fault ||= done.fault;
         return r;
     };
+    const done = sum => ({ result: lanes(size, i => imm8 >> i & 1 ? sum : 0n), mxcsr: mxcsr | flags, fault });
     const products = Array.from({ length: n }, (_, i) => imm8 >> 4 + i & 1 ? step("mul", get(d, size, i), get(s, size, i)) : 0n);
-    let sum;
-    if(double) sum = step("add", products[0], products[1]);
-    else sum = step("add", step("add", products[0], products[1]), step("add", products[2], products[3]));
-    fp.flags = flags;
-    return { result: lanes(size, i => imm8 >> i & 1 ? sum : 0n), mxcsr: mxcsr | flags, fault };
+    if(double)
+    {
+        if(fault) return done(0n);
+        return done(step("add", products[0], products[1]));
+    }
+    const low = step("add", products[0], products[1]);
+    if(fault) return done(0n);
+    const high = step("add", products[2], products[3]);
+    if(fault) return done(0n);
+    return done(step("add", low, high));
 }
 
 /**

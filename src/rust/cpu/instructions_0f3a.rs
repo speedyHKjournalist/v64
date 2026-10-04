@@ -4,6 +4,7 @@
 
 use crate::cpu::cpu::*;
 use crate::cpu::simd_int;
+use crate::cpu::sse_instr::{sse_fp_dot_product, sse_fp_round};
 
 pub unsafe fn instr_0F3A0F(source: u64, r: i32, imm8: i32) {
     // palignr mm, mm/m64, imm8
@@ -122,4 +123,68 @@ pub unsafe fn instr_660F3A21_reg(r1: i32, r2: i32, imm: i32) {
 }
 pub unsafe fn instr_660F3A21_mem(addr: i32, r: i32, imm: i32) {
     instr_660F3A21(return_on_pagefault!(safe_read32s(addr)) as u32, r, imm)
+}
+
+// roundps/roundpd xmm, xmm/m128, imm8; roundss xmm, xmm/m32, imm8; roundsd
+// xmm, xmm/m64, imm8 (false: an unmasked exception, nothing changed)
+pub unsafe fn instr_660F3A08(source: reg128, r: i32, imm: i32) -> bool {
+    sse_fp_round(0x660F3A08, r, source.bits(), imm)
+}
+pub unsafe fn instr_660F3A08_reg(r1: i32, r2: i32, imm: i32) {
+    instr_660F3A08(read_xmm128s(r1), r2, imm);
+}
+pub unsafe fn instr_660F3A08_mem(addr: i32, r: i32, imm: i32) {
+    instr_660F3A08(return_on_pagefault!(safe_read128s_aligned(addr)), r, imm);
+}
+pub unsafe fn instr_660F3A09(source: reg128, r: i32, imm: i32) -> bool {
+    sse_fp_round(0x660F3A09, r, source.bits(), imm)
+}
+pub unsafe fn instr_660F3A09_reg(r1: i32, r2: i32, imm: i32) {
+    instr_660F3A09(read_xmm128s(r1), r2, imm);
+}
+pub unsafe fn instr_660F3A09_mem(addr: i32, r: i32, imm: i32) {
+    instr_660F3A09(return_on_pagefault!(safe_read128s_aligned(addr)), r, imm);
+}
+pub unsafe fn instr_660F3A0A(source: u32, r: i32, imm: i32) -> bool {
+    sse_fp_round(0x660F3A0A, r, source as u128, imm)
+}
+pub unsafe fn instr_660F3A0A_reg(r1: i32, r2: i32, imm: i32) {
+    instr_660F3A0A(read_xmm128s(r1).u32[0], r2, imm);
+}
+pub unsafe fn instr_660F3A0A_mem(addr: i32, r: i32, imm: i32) {
+    instr_660F3A0A(return_on_pagefault!(safe_read32s(addr)) as u32, r, imm);
+}
+pub unsafe fn instr_660F3A0B(source: u64, r: i32, imm: i32) -> bool {
+    sse_fp_round(0x660F3A0B, r, source as u128, imm)
+}
+pub unsafe fn instr_660F3A0B_reg(r1: i32, r2: i32, imm: i32) {
+    instr_660F3A0B(read_xmm64s(r1), r2, imm);
+}
+pub unsafe fn instr_660F3A0B_mem(addr: i32, r: i32, imm: i32) {
+    instr_660F3A0B(return_on_pagefault!(safe_read64s(addr)), r, imm);
+}
+// dpps/dppd xmm, xmm/m128, imm8
+pub unsafe fn instr_660F3A40(source: reg128, r: i32, imm: i32) -> bool {
+    sse_fp_dot_product(false, r, source.bits(), imm)
+}
+pub unsafe fn instr_660F3A40_reg(r1: i32, r2: i32, imm: i32) {
+    instr_660F3A40(read_xmm128s(r1), r2, imm);
+}
+pub unsafe fn instr_660F3A40_mem(addr: i32, r: i32, imm: i32) {
+    instr_660F3A40(return_on_pagefault!(safe_read128s_aligned(addr)), r, imm);
+}
+pub unsafe fn instr_660F3A41(source: reg128, r: i32, imm: i32) -> bool {
+    sse_fp_dot_product(true, r, source.bits(), imm)
+}
+pub unsafe fn instr_660F3A41_reg(r1: i32, r2: i32, imm: i32) {
+    instr_660F3A41(read_xmm128s(r1), r2, imm);
+}
+pub unsafe fn instr_660F3A41_mem(addr: i32, r: i32, imm: i32) {
+    instr_660F3A41(return_on_pagefault!(safe_read128s_aligned(addr)), r, imm);
+}
+
+/// ROUNDPS/PD/SS/SD of the XMM `source` register's value (the IR helper):
+/// false after an unmasked exception
+pub unsafe fn instr_660F3A08_any(op: u32, source: reg128, r: i32, imm: i32) -> bool {
+    sse_fp_round(op, r, source.bits(), imm)
 }

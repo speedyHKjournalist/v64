@@ -41,6 +41,8 @@ extern "C" {
     fn f32_to_i64(a: u32, rounding: u8, exact: bool) -> i64;
     fn f64_to_i32(a: u64, rounding: u8, exact: bool) -> i32;
     fn f64_to_i64(a: u64, rounding: u8, exact: bool) -> i64;
+    fn f32_roundToInt(a: u32, rounding: u8, exact: bool) -> u32;
+    fn f64_roundToInt(a: u64, rounding: u8, exact: bool) -> u64;
     static mut softfloat_roundingMode: u8;
     static mut softfloat_exceptionFlags: u8;
 }
@@ -499,6 +501,97 @@ pub unsafe fn arithmetic(
         result = set_lane(result, i, double, v);
     }
     fp.finish()?;
+    Ok(result)
+}
+
+/// ROUNDPS/ROUNDPD/ROUNDSS/ROUNDSD (66 0F 3A 08-0B by `op`'s low byte): each
+/// lane (a scalar form's low one, the others from the destination) to an
+/// integral value, rounded as imm8[1:0] says or, with imm8[2], as MXCSR.RC
+/// does; imm8[3] suppresses the precision exception. DAZ applies, the
+/// denormal operand exception does not (SDM); an SNaN is an invalid operation.
+pub unsafe fn round(op: u32, destination: u128, source: u128, imm8: u8) -> Result<u128, Unmasked> {
+    let double = op & 1 != 0;
+    let scalar = op & 0xFF >= 0x0A;
+    let mut fp = Fp::new();
+    let rounding = if imm8 & 4 != 0 { fp.rounding() } else { ROUNDING[(imm8 & 3) as usize] };
+    let exact = imm8 & 8 == 0;
+    let mut result = destination;
+    for i in 0..if scalar {
+        1
+    }
+    else if double {
+        2
+    }
+    else {
+        4
+    } {
+        let v = fp.convert_input(lane(source, i, double), double, true);
+        let r = if double {
+            f64_roundToInt(v, rounding, exact)
+        }
+        else {
+            f32_roundToInt(v as u32, rounding, exact) as u64
+        };
+        fp.convert_lane();
+        result = set_lane(result, i, double, r);
+    }
+    fp.finish()?;
+    Ok(result)
+}
+
+/// DPPS/DPPD (66 0F 3A 40/41): the products of the lanes imm8[7:4] selects
+/// (+0.0 for the others), summed pairwise in the SDM's order, in the lanes
+/// imm8[3:0] selects (+0.0 in the others). Each multiplication and addition
+/// has its own exceptions (as a single operation, SDM Vol. 1, 11.5.3) and
+/// sets its flags in MXCSR. An unmasked one faults, the destination left
+/// alone, where the SDM's pseudo-code looks for it: after DPPD's two
+/// multiplications and after each addition (DPPS: only after the additions,
+/// so the first addition runs even when a multiplication had one).
+pub unsafe fn dot_product(
+    double: bool,
+    destination: u128,
+    source: u128,
+    imm8: u8,
+) -> Result<u128, Unmasked> {
+    unsafe fn step(op: u8, a: u64, b: u64, double: bool, unmasked: &mut bool) -> u64 {
+        let mut fp = Fp::new();
+        let r = fp.binary(op, a, b, double);
+        *unmasked |= fp.finish().is_err();
+        r
+    }
+    let lanes = if double { 2 } else { 4 };
+    let mut unmasked = false;
+    let mut products = [0; 4];
+    for i in 0..lanes {
+        if imm8 >> (4 + i) & 1 != 0 {
+            products[i] = step(
+                0x59,
+                lane(destination, i, double),
+                lane(source, i, double),
+                double,
+                &mut unmasked,
+            );
+        }
+    }
+    let check = |unmasked: bool| if unmasked { Err(Unmasked) } else { Ok(()) };
+    let sum = if double {
+        check(unmasked)?;
+        step(0x58, products[0], products[1], double, &mut unmasked)
+    }
+    else {
+        let low = step(0x58, products[0], products[1], double, &mut unmasked);
+        check(unmasked)?;
+        let high = step(0x58, products[2], products[3], double, &mut unmasked);
+        check(unmasked)?;
+        step(0x58, low, high, double, &mut unmasked)
+    };
+    check(unmasked)?;
+    let mut result = 0;
+    for i in 0..lanes {
+        if imm8 >> i & 1 != 0 {
+            result = set_lane(result, i, double, sum);
+        }
+    }
     Ok(result)
 }
 

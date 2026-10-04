@@ -221,7 +221,7 @@ try
     {
         await expect_fault([], encode(0x38, op, 1, undefined, SOURCE, undefined), 6, { label: `${name} without SSE4` });
     }
-    for(const [op, name] of [...IMMEDIATE, ...EXTRACT, ...INSERT])
+    for(const [op, name] of [...IMMEDIATE, ...EXTRACT, ...INSERT, [0x08, "roundps"], [0x0B, "roundsd"], [0x40, "dpps"], [0x41, "dppd"]])
     {
         await expect_fault([], encode(0x3A, op, 1, 2, undefined, 0), 6, { label: `${name} without SSE4` });
     }

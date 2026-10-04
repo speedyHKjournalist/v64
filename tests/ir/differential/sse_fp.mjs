@@ -292,6 +292,8 @@ for(const release of [false,true]){
                 // (across into the absent page; a byte operand in it)
                 assert.equal(compare(i,()=>reset(i,{delta:aligned?0:width===1?0x1000:0xFFF,pageFault:true}),before).ip,PF); comparisons++;
                 assert.equal(compare(i,()=>reset(i,{nullSegment:true}),before).ip,GP); comparisons++;
+                // (the exact extent: a narrow operand that ends at the page end, the next page absent)
+                if(width<16) { assert.equal(compare(i,()=>reset(i,{delta:0x1000-width,pageFault:true,sample:4}),before+1).ip,PC+cases[i][0].length); comparisons++; }
                 if(aligned) { assert.equal(compare(i,()=>reset(i,{delta:0xFFF,pageFault:true}),before).ip,GP); comparisons++; }
             }
             // (#UD for CR0.EM or no CR4.OSFXSR comes before #NM for CR0.TS)

@@ -1291,3 +1291,49 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、`nasmtests-force-jit`、`kvm-unit-test`、
   `smp-tests`、`api-tests`、`expect-tests`、`cpu-optimization-tests`、`cpu-plan-tests`、`jitpagingtests`、
   `platform-contract-tests`、rustfmt、state layout、isa-forms 检查和 eslint 全部通过。
+
+### P4b 第二部分：ROUND 与 DPPS/DPPD（2026-10-05）
+
+- **范围**：ROUNDPS/PD/SS/SD（66 0F 3A 08–0B）和 DPPS/DPPD（66 0F 3A 40/41）。SSE4.1 至此完整；
+  PCMPxSTRx 和 CRC32 在第三部分，此前仍 #UD。
+- **语义**：`cpu/simd_fp.rs` 新增 `round` 和 `dot_product`，三个引擎共用，与 P4a 的其他浮点形式
+  共享 MXCSR。
+  - ROUND：imm8[1:0] 给出舍入方式；imm8[2]=1 时改用 MXCSR.RC；imm8[3]=1 时不报告精度异常。
+    DAZ 把非规格化输入当作零，但不报告 DE（SDM 明确 ROUND 不产生 DE）；只有 SNaN 产生 IE，
+    结果为对应的 QNaN。标量形式只处理源的低 lane，其余 lane 取自目的。内存操作数：ROUNDSS
+    读 4 字节，ROUNDSD 读 8 字节，均不要求对齐；ROUNDPS/PD 的 m128 要求对齐。
+  - DPPS/DPPD：imm8[7:4] 选出参与相乘的 lane（未选的乘积为 +0.0），按 SDM 的次序两两相加，
+    结果写入 imm8[3:0] 选出的 lane，其余 lane 为 +0.0：DPPD 为 p0+p1，DPPS 为 (p0+p1)+(p2+p3)。
+    每次乘法和加法单独判定异常（单个运算按 11.5.3 节的次序），并在 MXCSR 中置位。未屏蔽异常
+    在 SDM 伪代码检查的位置产生故障，目的不变：DPPD 在两次乘法之后和加法之后检查；DPPS 只在
+    每次加法之后检查，因此即使某次乘法已有未屏蔽异常，第一次加法仍会执行并置位。最初的实现
+    在第一个未屏蔽异常处立即停止，对照 SDM 伪代码后改正。`sse_fp.mjs` 的未屏蔽 MXCSR 列能
+    区分这两种做法：旧构建对新模型时，乘积的 UE 状态位缺失。
+- **解释器**：`instructions_0f3a.rs`，经 `sse_instr.rs` 的 `sse_fp_round`/`sse_fp_dot_product`；
+  未屏蔽异常按 CR4.OSXMMEXCPT 产生 #XM 或 #UD。
+- **IR**：regions 经 SSE helper 执行，内存宽度登记为 08/09/40/41 16 字节、0A 4 字节、0B 8 字节。
+  这六个形式只读写两个 XMM 操作数，已加入 `xmm_register_operands` 审计。Tier-0 逐条解释；
+  ROUNDSS/SD 的原生模板在第四部分。
+- **x64**：`vector.rs` 经共用核心执行，源宽度分别为 32、64 和对齐的 128 位，未屏蔽异常映射为
+  `simd_fault`。page tier 逐条解释。
+- **测试**：
+  - `tests/rust/sse_fp.mjs` 新增 6 个形式：ROUND 的 imm8 低 4 位全部取到，DPP 的 imm8 经常
+    选中全部乘积。对照 `tests/rust/sse4_model.mjs` 的 `round_lane` 和 `dot_product`，覆盖 11 种
+    MXCSR（含未屏蔽异常）。现在共 74 个形式、126368 例，在三个构建上运行。
+  - `tests/x64/sse4.mjs` 新增 ROUND（imm8 取 0–4 和 8–12）和 DPP 用例，每例之后用
+    STMXCSR 取出 MXCSR 比较。操作数含 NaN、±0、无穷、非规格化数和 SNaN。QEMU 10.2 按 x87 的
+    规则传播 SSE NaN（P4a 已登记），因此 DPP 的操作数保证每次加法至多遇到一个 NaN 乘积；
+    NaN 的全部组合由 `sse_fp.mjs` 对照模型检查。共 924 例和 12 个故障，与 QEMU 和模型一致。
+  - nasm：60 个新测试（每个形式 10 个），QEMU fixture 全部通过。
+  - IR 的 SSE helper 差分新增“恰好到页尾”的用例：窄内存操作数结束于页尾，下一页不存在，
+    不得产生故障。植入的错误（regions 中 ROUNDSS 读 8 字节）只有在这种情形下才可观察，
+    `sse_fp.mjs` 没有发现它，这个用例发现了。x64 中 ROUNDSD 只读 32 位的错误由
+    `tests/x64/sse4.mjs` 发现。
+- **回归**：`sse4-tests`、`sse-fault-tests`、`sse-fp-tests`、`ssse3-tests`、`sse3-tests`、`rust-test`、
+  `x64-decode-tests`、`ir-decoder-tests`、`ir-decode-contract-tests`、`decode-rules-tests`、`ir-mmx-tests`、
+  `ir-sse-fp-tests`、`ir-coverage-tests`、`ir-fp-state-tests`、`ir-tier0-tests`、`ir-differential-tests`、
+  七个 `ir-simd-*-tests`、`ir-sti-tests`、`ir-fusion-tests`、`ir-cfg-tests`、`ir-cache-tests`、
+  `ir-helper-reload-tests`、`packed-simd-tests`、`xsave-tests`、`x64-system-tests`、opcode 矩阵、
+  `x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、`nasmtests-force-jit`、`kvm-unit-test`、
+  `smp-tests`、`api-tests`、`expect-tests`、`cpu-optimization-tests`、`cpu-plan-tests`、`jitpagingtests`、
+  `platform-contract-tests`、rustfmt、state layout、isa-forms 检查和 eslint 全部通过。

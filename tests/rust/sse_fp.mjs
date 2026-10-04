@@ -1,5 +1,6 @@
 // Exact SSE floating point in the 32-bit engines (docs/simd-xsave-plan.md
-// 7.4, P4a): every SSE/SSE2/SSE3 floating-point form, with register and
+// 7.4, P4a, P4b): every SSE/SSE2/SSE3/SSE4.1 floating-point form (ROUND and
+// DPPS/DPPD with tests/rust/sse4_model.mjs's use of the model), with register and
 // memory sources, against the model of tests/rust/sse_fp_model.mjs (exact
 // rational arithmetic, independent of SoftFloat and cpu/simd_fp.rs). Each
 // case sets MXCSR (the four rounding modes, DAZ, FZ, masked and unmasked
@@ -14,6 +15,7 @@ import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
 import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
 import * as model from "./sse_fp_model.mjs";
+import { dot_product, round_lane } from "./sse4_model.mjs";
 
 const candidate = process.argv[2] || "build/v86.wasm";
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
@@ -101,6 +103,18 @@ FORMS.push(
     { name: "cvttpd2pi", prefix: [0x66], code: 0x2C, kind: "to_mmx", double: true, truncate: true },
 );
 
+// SSE4.1 (66 0F 3A): every rounding control with and without PE suppressed,
+// and the dot products' lane masks (all products often)
+for(const [code, name, double, scalar] of [[0x08, "roundps", false, false], [0x09, "roundpd", true, false],
+    [0x0A, "roundss", false, true], [0x0B, "roundsd", true, true]])
+{
+    FORMS.push({ name, prefix: [0x66], map: 0x3A, code, kind: "round", double, scalar, imm8: (mi, n) => (mi * 5 + n) & 15 });
+}
+for(const [code, name, double] of [[0x40, "dpps", false], [0x41, "dppd", true]])
+{
+    FORMS.push({ name, prefix: [0x66], map: 0x3A, code, kind: "dot", double, imm8: (mi, n) => n % 3 === 0 ? 0xFF : (mi * 37 + n * 101) & 255 });
+}
+
 // integer sources: the edges of the conversions
 const INTEGERS = [0n, 1n, 0xFFFFFFFFn, 0x7FFFFFFFn, 0x80000000n, 0x01000001n, 0xFEFFFFFFn, 0x075BCD15n, 0x80000001n, 0x00FFFFFFn];
 
@@ -139,7 +153,7 @@ function cases(form)
                 }
             }
             const ca = of_lanes(a, lane_double), cb = of_lanes(b, lane_double);
-            const imm8 = form.imm8 ? (mi + n) & 7 : 0;
+            const imm8 = typeof form.imm8 === "function" ? form.imm8(mi, n) : form.imm8 ? (mi + n) & 7 : 0;
             out.push({ mxcsr, a: ca, b: cb, imm8, ...expect(form, mxcsr, ca, cb, imm8) });
         }
     });
@@ -177,6 +191,19 @@ function expect(form, mxcsr, a, b, imm8)
             }
             result = of_lanes(r, form.double);
             break;
+        }
+        case "round":
+        {
+            const la = lanes_of(a, form.double), lb = lanes_of(b, form.double);
+            for(let i = 0; i < (form.scalar ? 1 : la.length); i++) la[i] = round_lane(fp, lb[i], form.double, imm8);
+            result = of_lanes(la, form.double);
+            break;
+        }
+        case "dot":
+        {
+            // (each operation with its own exceptions, see the model)
+            const r = dot_product(mxcsr, bytes128(a), bytes128(b), imm8, form.double);
+            return { result: r.result.reduceRight((v, x) => v << 8n | BigInt(x), 0n), after: r.mxcsr, fault: r.fault };
         }
         case "comi":
         {
@@ -266,7 +293,7 @@ const EMMS = [0x0F, 0x77];
 function instruction(form, memory, source, imm8)
 {
     const rm = memory ? [0x05 | 1 << 3, ...u32(source)] : [0xC0 | 1 << 3 | 0];
-    return [...form.prefix, 0x0F, form.code, ...rm, ...(form.imm8 ? [imm8] : [])];
+    return [...form.prefix, 0x0F, ...(form.map ? [form.map] : []), form.code, ...rm, ...(form.imm8 ? [imm8] : [])];
 }
 function program(form, memory, list)
 {
@@ -339,6 +366,8 @@ async function create_machines()
     for(const arm of [{ disable_jit: true }, ...COMPILED_ARMS.map(arm => arm.options)])
     {
         const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: candidate, bios: { buffer: bios.slice(0) }, memory_size: 64 << 20,
+            // (the SSE4.1 forms: ROUND, DPPS/DPPD)
+            cpu_features: ["SSSE3", "SSE4.1"],
             ...arm, disable_keyboard: true, disable_mouse: true, disable_speaker: true, net_device: { type: "none" }, autostart: false });
         set.push(vm);
         await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
@@ -361,6 +390,8 @@ try
         const prologue = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), 0x0F, 0x06, ...cr4];
         for(const form of xmm_exceptions ? FORMS : FORMS.filter(f => f.kind === "binary" && !f.double))
         {
+            // (SSE_FP_ONLY=name: one form, for debugging)
+            if(process.env.SSE_FP_ONLY && form.name !== process.env.SSE_FP_ONLY) continue;
             for(const memory of [false, true])
             {
                 const list = cases(form);

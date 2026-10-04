@@ -5,7 +5,7 @@
 //! semantics, no MXCSR).
 use crate::cpu::{
     cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
-    instructions_0f3a as sem3a,
+    instructions_0f3a as sem3a, sse_instr,
 };
 use crate::ir::helper::Outcome;
 
@@ -399,6 +399,21 @@ pub unsafe fn ir_sse_fp_reg_continue(
         0x660F3A0C..=0x660F3A0E | 0x660F3A42 => {
             sem3a::sse4_imm_xmm(op as u8, cpu::read_xmm128s(source), destination, immediate)
         },
+        0x660F3A08 | 0x660F3A09 | 0x660F3A0A | 0x660F3A0B => {
+            if !sem3a::instr_660F3A08_any(op, cpu::read_xmm128s(source), destination, immediate) {
+                return finish(false);
+            }
+        },
+        0x660F3A40 | 0x660F3A41 => {
+            if !sse_instr::sse_fp_dot_product(
+                op == 0x660F3A41,
+                destination,
+                cpu::read_xmm128s(source).bits(),
+                immediate,
+            ) {
+                return finish(false);
+            }
+        },
         // (the interpreter's forms: `source` is the GPR of PEXTR*/EXTRACTPS
         // and PINSRB/PINSRD, the XMM register of INSERTPS)
         0x660F3A14 => sem3a::instr_660F3A14_reg(source, destination, immediate),
@@ -785,6 +800,22 @@ unsafe fn memory(
             destination,
             immediate,
         ),
+        0x660F3A08..=0x660F3A0B => {
+            let source = match op {
+                0x660F3A0A => cpu::safe_read32s(addr)? as u32 as u128,
+                0x660F3A0B => cpu::safe_read64s(addr)? as u128,
+                _ => cpu::safe_read128s_aligned(addr)?.bits(),
+            };
+            if !sse_instr::sse_fp_round(op, destination, source, immediate) {
+                return Err(());
+            }
+        },
+        0x660F3A40 | 0x660F3A41 => {
+            let source = cpu::safe_read128s_aligned(addr)?.bits();
+            if !sse_instr::sse_fp_dot_product(op == 0x660F3A41, destination, source, immediate) {
+                return Err(());
+            }
+        },
         0x660F3A14 => cpu::safe_write8(addr, sem3a::extract(destination, 1, immediate) as i32)?,
         0x660F3A15 => cpu::safe_write16(addr, sem3a::extract(destination, 2, immediate) as i32)?,
         0x660F3A16 | 0x660F3A17 => {
