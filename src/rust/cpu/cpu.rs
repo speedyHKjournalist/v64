@@ -3872,7 +3872,10 @@ pub unsafe fn main_loop() -> f64 {
 
     if *in_hlt {
         profiler::performance_execution_add(4, 1.0);
-        if *flags & FLAG_INTERRUPT != 0 || *acpi_enabled && !*nmi_blocked && apic::nmi_pending() {
+        if *flags & FLAG_INTERRUPT != 0
+            || *acpi_enabled && !*nmi_blocked && apic::nmi_pending()
+            || crate::cpu::smm::smi_deliverable()
+        {
             let performance_start = profiler::performance_timer_start();
             let t = js::run_hardware_timers(*acpi_enabled, start);
             handle_irqs();
@@ -4829,6 +4832,11 @@ pub unsafe fn handle_irqs() {
     if shutdown == 2 {
         return;
     }
+    // SMI: before NMI, regardless of IF; latched while in SMM (until RSM)
+    if !crate::cpu::smm::smm_active() && apic::take_smi() && crate::cpu::smm::smm_enter() {
+        crate::cpu::exceptions::exception_restore(core, 0);
+        return;
+    }
     // NMI: regardless of IF, not while an NMI handler runs (until IRET)
     if *acpi_enabled && !*nmi_blocked && apic::take_nmi() {
         crate::cpu::exceptions::exception_restore(core, 0);
@@ -4880,6 +4888,49 @@ unsafe fn device_lower_irq(i: u8) {
         ioapic::clear_irq(i);
     }
     handle_irqs()
+}
+
+/// An IOAPIC input without a PIC counterpart: GSI 16-23, where Q35 connects
+/// the PIRQs (the PIC sees them only through the PIRQ routing registers)
+#[no_mangle]
+unsafe fn ioapic_raise_irq(i: u8) {
+    if *acpi_enabled {
+        ioapic::set_irq(i);
+    }
+    handle_irqs()
+}
+
+#[no_mangle]
+unsafe fn ioapic_lower_irq(i: u8) {
+    if *acpi_enabled {
+        ioapic::clear_irq(i);
+    }
+    handle_irqs()
+}
+
+/// A message signalled interrupt (PCI MSI): a device's write of `data` to
+/// `address` in the local APICs' range. Address bits 19:12 are the
+/// destination, bit 2 the destination mode; data bits 7:0 the vector, 10:8
+/// the delivery mode. Edge triggered. Returns whether a local APIC took it.
+#[no_mangle]
+unsafe fn apic_msi(address: u32, data: u32) -> bool {
+    if !*acpi_enabled || address >> 20 != 0xFEE {
+        return false;
+    }
+    let mode = (data >> 8 & 7) as u8;
+    // fixed, lowest priority, SMI, NMI, INIT, ExtINT
+    if !matches!(mode, 0 | 1 | 2 | 4 | 5 | 7) {
+        return false;
+    }
+    let accepted = apic::route(
+        data as u8,
+        mode,
+        false,
+        (address >> 12) as u8,
+        (address >> 2 & 1) as u8,
+    );
+    handle_irqs();
+    accepted
 }
 
 pub fn io_port_read8(port: i32) -> i32 {
@@ -5008,6 +5059,7 @@ pub unsafe fn reset_cpu() {
     *in_hlt = false;
     *nmi_blocked = false;
     *interrupt_shadow = 0;
+    crate::cpu::smm::reset();
     *slice_budget = LOOP_COUNTER as u32;
     crate::cpu::execution::reset();
     // the local APIC (present with ACPI) is enabled at reset

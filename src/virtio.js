@@ -354,6 +354,9 @@ export function VirtIO(cpu, options)
     this.mmio_index = null;
     this.mmio_base = 0;
     this.mmio_size = 0;
+    /** Where the guest put the capabilities' memory BAR (decoded at mmio_base, or not: 0) */
+    this.mmio_assigned = 0;
+    this.on_upstream_change = () => this.update_mmio();
     if(options.capability_bar !== undefined)
     {
         const base = options.common.initial_port;
@@ -1040,6 +1043,22 @@ VirtIO.prototype.init_capabilities = function(capabilities, shared_memory)
  */
 VirtIO.prototype.move_mmio = function(base)
 {
+    this.mmio_assigned = base;
+    this.update_mmio();
+};
+
+/**
+ * Decode the capabilities' memory BAR where it is assigned; behind a bridge
+ * only while the bridges forward it (on_upstream_change)
+ */
+VirtIO.prototype.update_mmio = function()
+{
+    const assigned = this.mmio_assigned;
+    const base = assigned && this.cpu.devices.pci.upstream_forwards_memory(this.pci_id, assigned >>> 0, this.mmio_size) ? assigned : 0;
+    if(base === this.mmio_base)
+    {
+        return;
+    }
     if(this.mmio_base) this.cpu.io.mmap_unregister(this.mmio_base, this.mmio_size);
     this.mmio_base = base;
     if(base)

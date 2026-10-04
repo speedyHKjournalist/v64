@@ -213,6 +213,11 @@ export interface Event {
     "emulator-stopped": void;
     "eth-receive-end": [byte_count: number];
     "eth-transmit-end": [byte_count: number];
+    /**
+     * Disk activity of hda/hdb (channel 0) and the CD drive (channel 1), on
+     * IDE and on the AHCI ports of machine_type "q35" alike (there the channel
+     * is the one the drive would have on IDE).
+     */
     "ide-read-end": [channel_nr: number, byte_count: number, sector_count: number];
     "ide-read-start": void;
     "ide-write-end": [channel_nr: number, byte_count: number, sector_count: number];
@@ -627,9 +632,56 @@ export interface V86Options {
      * firmware's resume path, "acpi-wake"), S4 (the guest hibernates to its
      * disk and turns the machine off) and S5 (soft off); after S4/S5 the
      * emulator stops and emits "acpi-power-off". See power_state().
-     * @default false
+     * @default false (true with machine_type "q35")
      */
     acpi?: boolean;
+
+    /**
+     * The chipset. "i440fx": i440FX host bridge, PIIX3/PIIX4 and IDE (hda,
+     * hdb and cdrom on the IDE channels). "q35": Q35 host bridge with PCI
+     * Express configuration space (ECAM), ICH9 LPC with its power management,
+     * and an ICH9 AHCI controller with six SATA ports: hda on port 0, hdb on
+     * port 1 and an ATAPI drive on port 2 that holds cdrom (empty without
+     * it). Q35 always has ACPI; acpi: false is an error. Guests should have
+     * an AHCI driver: the firmware disk services reach the AHCI controller
+     * from virtual-8086 mode (DOS with EMM386, Windows 3.x enhanced mode,
+     * Windows 9x compatibility mode) only through system management mode,
+     * two SMIs per call, so such guests are better off on "i440fx". A
+     * snapshot only restores into an emulator of the same machine type. See
+     * docs/q35-ahci-sata-plan.md.
+     * @default "i440fx"
+     */
+    machine_type?: "i440fx" | "q35";
+
+    /**
+     * machine_type "q35" only: the number of ICH9 PCI Express root ports
+     * (00:1c.0 and up, 0 to 6). Each is a PCI-to-PCI bridge whose secondary
+     * bus can hold a device (virtio_devices: pcie_root_port); the guest
+     * numbers the buses and opens the bridges' windows itself (SeaBIOS does).
+     * No hot plug on them.
+     * @default 0
+     */
+    pcie_root_ports?: number;
+
+    /**
+     * machine_type "q35" only: ICH9's High Precision Event Timer at
+     * 0xFED00000 (three timers, 14.31818 MHz), described by the ACPI HPET
+     * table. Guests may then use it as clock source and timer (Linux:
+     * clocksource=hpet; Windows takes its clock interrupt from it, as FSB
+     * messages); with its legacy replacement route, it takes IRQ 0 and 8
+     * from the PIT and the RTC.
+     * @default false
+     */
+    hpet?: boolean;
+
+    /**
+     * machine_type "q35" only: ICH9's SMBus controller (00:1f.3) with eight
+     * 256-byte SPD EEPROMs at 0x50-0x57, as QEMU's Q35 has it. Off by
+     * default, which keeps the machine's set of devices (Windows 8.1 knows
+     * the controller from its own INF).
+     * @default false
+     */
+    smbus?: boolean;
 
     /**
      * Number of CPU cores available to the guest operating system, from 1 to 8.
@@ -994,6 +1046,28 @@ export class V86 {
      * Eject the CD-ROM.
      */
     eject_cdrom(): void | Promise<void>;
+
+    /**
+     * Hot plug a drive into a free SATA port of the Q35 machine's AHCI
+     * controller (ports 0-5; hda, hdb and cdrom are on ports 0, 1 and 2). The
+     * guest sees the link come up and finds the drive by resetting the port.
+     * To restore a snapshot taken with a hot plugged drive, attach the same
+     * image to the same port first; otherwise the restored guest sees the
+     * drive removed.
+     *
+     * @param port the port, 0-5
+     * @param image the disk image, or for a CD drive the disc (null: empty)
+     * @param options cdrom: attach an ATAPI CD drive instead of a hard disk
+     */
+    attach_sata_drive(port: number, image: V86Image | null, options?: { cdrom?: boolean }): Promise<void>;
+
+    /**
+     * Remove the drive of a SATA port of the Q35 machine (a surprise
+     * removal); the guest learns of it from the link going down.
+     *
+     * @param port the port, 0-5
+     */
+    detach_sata_drive(port: number): void | Promise<void>;
 
     /**
      * Send a sequence of scan codes to the emulated PS2 controller. A list of

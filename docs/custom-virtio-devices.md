@@ -54,6 +54,7 @@ const emulator = new V86({
 | `name` | Unique among the devices; its part of a saved state is stored under this name |
 | `device_id`, `subsystem_device_id` | PCI IDs; the vendor is always 0x1AF4 |
 | `pci_slot` | Optional (1 to 31). By default, the first free slot from 0x10. A stable slot matters to guests that remember devices by location, such as Windows |
+| `pcie_root_port` | Optional, instead of `pci_slot`: put the device behind PCI Express root port n (from 0) of a `machine_type: "q35"` machine with `pcie_root_ports` above n, as device 0 of the port's secondary bus. One device per root port. The guest numbers the bus and opens the port's windows (SeaBIOS does) |
 | `io_base` | Optional base of four 256-byte I/O windows. By default, allocated from 0xE000 |
 | `features` | Device feature bits. `VIRTIO_F_VERSION_1` (32) is always added |
 | `queues` | `[{ size }]`, with sizes that are powers of two |

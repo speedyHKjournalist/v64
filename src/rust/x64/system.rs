@@ -417,6 +417,14 @@ pub unsafe fn execute(instruction: &Decoded) -> Result<bool, Fault> {
             state::write_gpr(0, value, 32);
             state::write_gpr(2, value >> 32, 32);
         },
+        0x0FAA => {
+            // RSM (a 64-bit SMM handler's)
+            if !crate::cpu::smm::smm_active() {
+                return Err(Fault::ud());
+            }
+            crate::cpu::smm::rsm();
+            return Ok(true);
+        },
         0x0FA2 => {
             crate::cpu::instructions_0f::instr_0FA2();
             for r in 0..4 {

@@ -319,13 +319,161 @@ IO.prototype.mmap_register = function(addr, size, read_func8, write_func8, read_
 
     for(; size > 0; aligned_addr++)
     {
-        this.cpu.memory_map_read8[aligned_addr] = read_func8;
-        this.cpu.memory_map_write8[aligned_addr] = write_func8;
-        this.cpu.memory_map_read32[aligned_addr] = read_func32;
-        this.cpu.memory_map_write32[aligned_addr] = write_func32;
+        const shared = this.mmio_blocks && this.mmio_blocks.get(aligned_addr);
+        if(shared)
+        {
+            // a block with exact ranges: this becomes what the rest of it decodes
+            shared.background = [read_func8, write_func8, read_func32, write_func32];
+        }
+        else
+        {
+            this.cpu.memory_map_read8[aligned_addr] = read_func8;
+            this.cpu.memory_map_write8[aligned_addr] = write_func8;
+            this.cpu.memory_map_read32[aligned_addr] = read_func32;
+            this.cpu.memory_map_write32[aligned_addr] = write_func32;
+        }
 
         size -= MMAP_BLOCK_SIZE;
     }
+};
+
+/**
+ * Map a memory range that need not be made of whole blocks of the memory map
+ * (MMAP_BLOCK_SIZE): a small BAR, a chipset register block. Blocks that hold
+ * such ranges dispatch every access by address; what the ranges don't cover
+ * keeps decoding as before (the block's "background": unmapped, or a device
+ * that registered the whole block). Each range has an owner; removing one
+ * leaves the other ranges of the block alone.
+ * @param {number} addr
+ * @param {number} size
+ * @param {Object} owner
+ * @param {function(number):number} read8
+ * @param {function(number, number)} write8
+ * @param {function(number):number=} read32 aligned dwords inside the range
+ * @param {function(number, number)=} write32
+ */
+IO.prototype.mmap_register_range = function(addr, size, owner, read8, write8, read32, write32)
+{
+    addr >>>= 0;
+    dbg_log("mmap_register_range addr=" + h(addr, 8) + " size=" + h(size) + " (" + owner.name + ")", LOG_IO);
+    dbg_assert(size > 0 && addr + size <= MMAP_MAX);
+
+    if(!this.mmio_blocks)
+    {
+        /** @type {!Map<number, {ranges: !Array<!Object>, background: !Array<!Function>}>} */
+        this.mmio_blocks = new Map();
+    }
+
+    const range = { start: addr, end: addr + size, owner, read8, write8, read32, write32 };
+
+    for(let block = addr >>> MMAP_BLOCK_BITS; block <= addr + size - 1 >>> MMAP_BLOCK_BITS; block++)
+    {
+        let shared = this.mmio_blocks.get(block);
+        if(!shared)
+        {
+            const cpu = this.cpu;
+            shared = {
+                ranges: [],
+                background: [cpu.memory_map_read8[block], cpu.memory_map_write8[block],
+                             cpu.memory_map_read32[block], cpu.memory_map_write32[block]],
+            };
+            this.mmio_blocks.set(block, shared);
+            this.install_block_dispatch(block, shared);
+        }
+        for(const other of shared.ranges)
+        {
+            dbg_assert(other.end <= range.start || range.end <= other.start,
+                "MMIO range " + h(addr, 8) + " (" + owner.name + ") overlaps " + h(other.start, 8) + " (" + other.owner.name + ")");
+        }
+        shared.ranges.push(range);
+    }
+};
+
+/**
+ * Remove the ranges of an owner that mmap_register_range mapped at addr
+ * @param {number} addr
+ * @param {number} size
+ * @param {Object} owner
+ */
+IO.prototype.mmap_unregister_range = function(addr, size, owner)
+{
+    addr >>>= 0;
+    dbg_log("mmap_unregister_range addr=" + h(addr, 8) + " size=" + h(size) + " (" + owner.name + ")", LOG_IO);
+    if(!this.mmio_blocks) return;
+
+    for(let block = addr >>> MMAP_BLOCK_BITS; block <= addr + size - 1 >>> MMAP_BLOCK_BITS; block++)
+    {
+        const shared = this.mmio_blocks.get(block);
+        if(!shared) continue;
+        shared.ranges = shared.ranges.filter(r => r.owner !== owner || r.start !== addr);
+        if(shared.ranges.length === 0)
+        {
+            // back to the plain block
+            const cpu = this.cpu;
+            [cpu.memory_map_read8[block], cpu.memory_map_write8[block],
+             cpu.memory_map_read32[block], cpu.memory_map_write32[block]] = shared.background;
+            this.mmio_blocks.delete(block);
+        }
+    }
+};
+
+/**
+ * @param {number} block
+ * @param {{ranges: !Array<!Object>, background: !Array<!Function>}} shared
+ */
+IO.prototype.install_block_dispatch = function(block, shared)
+{
+    const find = addr => {
+        for(const range of shared.ranges)
+        {
+            if(addr >= range.start && addr < range.end) return range;
+        }
+        return null;
+    };
+    const read8 = addr => {
+        const range = find(addr >>> 0);
+        return range ? range.read8(addr >>> 0) : shared.background[0](addr);
+    };
+    const write8 = (addr, value) => {
+        const range = find(addr >>> 0);
+        range ? range.write8(addr >>> 0, value) : shared.background[1](addr, value);
+    };
+    // A dword inside one range goes to its 32-bit handler; one that
+    // straddles a range boundary is split into bytes
+    const read32 = addr => {
+        const start = addr >>> 0;
+        const range = find(start);
+        if(range && start + 4 <= range.end && (start & 3) === 0 && range.read32)
+        {
+            return range.read32(start);
+        }
+        if(!range && !find(start + 3) && !find(start + 1) && !find(start + 2))
+        {
+            return shared.background[2](addr);
+        }
+        return read8(addr) | read8(addr + 1) << 8 | read8(addr + 2) << 16 | read8(addr + 3) << 24;
+    };
+    const write32 = (addr, value) => {
+        const start = addr >>> 0;
+        const range = find(start);
+        if(range && start + 4 <= range.end && (start & 3) === 0 && range.write32)
+        {
+            range.write32(start, value);
+            return;
+        }
+        if(!range && !find(start + 3) && !find(start + 1) && !find(start + 2))
+        {
+            shared.background[3](addr, value);
+            return;
+        }
+        for(let i = 0; i < 4; i++) write8(addr + i, value >>> (i << 3) & 0xFF);
+    };
+
+    const cpu = this.cpu;
+    cpu.memory_map_read8[block] = read8;
+    cpu.memory_map_write8[block] = write8;
+    cpu.memory_map_read32[block] = read32;
+    cpu.memory_map_write32[block] = write32;
 };
 
 /**

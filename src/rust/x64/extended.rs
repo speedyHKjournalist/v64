@@ -449,13 +449,15 @@ pub mod aperture {
     //! Compatibility-mode (32-bit) memory helpers take 32-bit bus
     //! addresses (crate::x64::memory::legacy_translate). An extended page
     //! gets a slot of this aperture, a range of the 32-bit bus the platform
-    //! leaves unused (between the IOAPIC and the local APIC): an address in
-    //! it reaches the page through crate::cpu::memory's mapped (MMIO) path,
-    //! never cached, never compiled from. Each core reuses its own slots in
-    //! order, so the few pages one instruction touches keep theirs.
+    //! leaves unused (above the local APIC, below the BIOS; not between the
+    //! IOAPIC and the local APIC, where Q35 has its HPET at 0xFED00000 and
+    //! its root complex registers at 0xFED1C000): an address in it reaches
+    //! the page through crate::cpu::memory's mapped (MMIO) path, never
+    //! cached, never compiled from. Each core reuses its own slots in order,
+    //! so the few pages one instruction touches keep theirs.
     use super::*;
 
-    pub const BASE: u32 = 0xFED0_0000;
+    pub const BASE: u32 = 0xFEF0_0000;
     const SLOTS_PER_CORE: u32 = 32;
     pub const SIZE: u32 = crate::parallel::MAX_CORES as u32 * SLOTS_PER_CORE * PAGE as u32;
 

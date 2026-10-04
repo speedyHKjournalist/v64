@@ -44,6 +44,9 @@
 // (same WIN_* machine settings; the session is signed in, the launcher runs).
 // WIN_RATES=<s>: every <s> seconds, the SVGA3D commands per second
 // ("svga3d-rates": presents among them, for frame rates).
+// WIN_MACHINE=q35: the Q35 machine (AHCI; Windows boots from it only with
+// storahci enabled, see docs/q35-ahci-sata-plan.md), with WIN_HPET=1 the
+// HPET, WIN_ROOT_PORTS=<n> PCI Express root ports, WIN_SMBUS=1 the SMBus.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -123,6 +126,8 @@ const vm = new V86({
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
     // WIN_QEMU_COMPATIBLE=1: devices where QEMU, which the image was installed with, had them
     qemu_compatible: !!+process.env.WIN_QEMU_COMPATIBLE,
+    ...(process.env.WIN_MACHINE ? {machine_type: process.env.WIN_MACHINE, hpet: !!+process.env.WIN_HPET,
+        pcie_root_ports: +process.env.WIN_ROOT_PORTS || 0, smbus: !!+process.env.WIN_SMBUS} : {}),
     // WIN_QUANTUM: instructions per core slice when cores take turns
     ...(process.env.WIN_QUANTUM ? {cpu_quantum: +process.env.WIN_QUANTUM} : {}),
     // WIN_ASYNC_PUBLICATION=1: compile generated modules asynchronously, as

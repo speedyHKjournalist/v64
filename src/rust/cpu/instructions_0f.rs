@@ -3514,6 +3514,8 @@ pub const ARCH_CAPABILITIES: u64 = 1
 pub unsafe fn arch_capabilities() -> Option<u64> {
     (X64_TEST_CAPABILITIES && X64_ARCH_CAPABILITIES).then_some(ARCH_CAPABILITIES)
 }
+/// The x86-64 profile (e.g. its SMRAM save map, crate::cpu::smm)
+pub unsafe fn long_mode_capable() -> bool { X64_TEST_CAPABILITIES }
 
 fn apply_x64_test_capabilities(enabled: bool, leaf: u32, registers: &mut [u32; 4]) {
     if !enabled {
@@ -3812,8 +3814,12 @@ pub unsafe fn instr32_0FA9() {
 }
 #[no_mangle]
 pub unsafe fn instr_0FAA() {
-    // rsm
-    undefined_instruction();
+    // rsm: only in system management mode
+    if !crate::cpu::smm::smm_active() {
+        undefined_instruction();
+        return;
+    }
+    crate::cpu::smm::rsm();
 }
 #[no_mangle]
 pub unsafe fn instr16_0FAB_reg(r1: i32, r2: i32) {

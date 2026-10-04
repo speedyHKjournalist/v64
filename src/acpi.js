@@ -1,10 +1,16 @@
-// ACPI fixed hardware of the PIIX4 power management function (PCI 00:07.0).
+// ACPI fixed hardware: the PIIX4 power management function (PCI 00:07.0) of
+// the i440FX machine, or the power management of the ICH9 LPC (Q35).
 //
-// The PM I/O block (PM1 event and control registers, PM timer) is decoded at
-// the base the firmware writes to PMBA (PCI config 0x40) once PMREGMISC
-// (0x80) enables it; with v86's own ACPI tables SeaBIOS uses 0x600. The GPE0
-// block is fixed at 0xAFE0 (as in QEMU), the SCI is IRQ 9, SMI_CMD is 0xB2
-// with ACPI_ENABLE = 0xF1 and ACPI_DISABLE = 0xF0 (src/platform.js).
+// PIIX4: the PM I/O block (PM1 event and control registers, PM timer) is
+// decoded at the base the firmware writes to PMBA (PCI config 0x40) once
+// PMREGMISC (0x80) enables it; with v86's own ACPI tables SeaBIOS uses 0x600.
+// The GPE0 block is fixed at 0xAFE0 (as in QEMU), SMI_CMD is 0xB2 with
+// ACPI_ENABLE = 0xF1 and ACPI_DISABLE = 0xF0.
+// ICH9: the LPC function (src/q35.js) decodes the 128-byte block at PMBASE
+// (LPC config 0x40) once ACPI_EN (config 0x44 bit 7) is set and tells this
+// device (set_pm_decode). GPE0 is part of the block (+0x20, 16 bytes), SMI_EN
+// is at +0x30, SMI_CMD values are QEMU's 0x02/0x03. The SCI is IRQ 9 on both
+// (src/platform.js describes the layouts).
 //
 // Register semantics: ACPI 6.6, section 4.8 (fixed hardware registers)
 // https://uefi.org/specs/ACPI/6.6/04_ACPI_Hardware_Specification.html
@@ -12,14 +18,15 @@
 import { LOG_ACPI } from "../src/const.js";
 import { h } from "./lib.js";
 import { dbg_log } from "./log.js";
+import { ICH9_PM_TCO, ICH9_TCO_LENGTH, SMI_TCO, TCO } from "./ich9_tco.js";
 import {
-    ACPI_DISABLE, ACPI_ENABLE, ACPI_GPE0_BASE, ACPI_GPE0_LENGTH, ACPI_PM_LENGTH,
-    ACPI_SCI_IRQ, ACPI_SLEEP_STATES, ACPI_SMI_CMD_PORT, QEMU_PCI_SUBSYSTEM, pci_functions,
+    ACPI_SCI_IRQ, ACPI_SMI_CMD_PORT, QEMU_PCI_SUBSYSTEM, pci_functions,
 } from "./platform.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
 import { BusConnector } from "./bus.js";
+import { Platform } from "./platform.js";
 
 /** Source id of the SCI on its (possibly shared) IRQ line; PCI functions use their pci_id */
 export const ACPI_SCI_SOURCE = 0x100;
@@ -57,6 +64,13 @@ const PM1_CNT_WRITABLE = BM_RLS | SLP_TYP;
 
 // PIIX4 GLBCTL: SeaBIOS sets SMI_EN in it. Without SMM it is plain storage.
 const PM_GLBCTL = 0x28;
+// ICH9 SMI_EN and SMI_STS: SeaBIOS reads SMI_EN to decide whether to set up
+// SMM and then sets APMC_EN/GLB_SMI_EN. Without SMM they are plain storage.
+const ICH9_PM_SMI_EN = 0x30;
+const ICH9_PM_SMI_STS = 0x34;
+/** SMI_EN.APMC_EN and SMI_STS.APM_STS: SMIs from writes to the APM control port */
+const ICH9_SMI_APM = 1 << 5;
+const APM_STS_PORT = 0xB3;
 
 const STATE_FORMAT = 3;
 
@@ -67,13 +81,14 @@ const CMOS_SHUTDOWN_S3_RESUME = 0xFE;
 /**
  * Contents of the fw_cfg file etc/system-states, read by SeaBIOS's ACPI
  * builder: indexed by sleep state, bit 7 = advertised, bits 0-6 = SLP_TYP.
+ * @param {Platform} platform
  * @return {!Uint8Array}
  */
-export function acpi_system_states_file()
+export function acpi_system_states_file(platform)
 {
     const states = new Uint8Array(6);
     states[0] = 0x80;
-    for(const { state, slp_typ, supported } of ACPI_SLEEP_STATES)
+    for(const { state, slp_typ, supported } of platform.sleep_states)
     {
         states[state] = (supported ? 0x80 : 0) | slp_typ;
     }
@@ -100,30 +115,44 @@ export function ACPI(cpu, bus)
      */
     this.clock = () => this.cpu.clock.now();
 
-    // (QEMU's: revision 3 and its subsystem)
-    const qemu = cpu.platform.qemu_compatible;
-    const acpi = {
-        pci_id: pci_functions(cpu.platform).acpi_pm,
-        pci_space: [
-            0x86, 0x80, 0x13, 0x71, 0x07, 0x00, 0x80, 0x02, qemu ? 0x03 : 0x08, 0x00, 0x80, 0x06, 0x00, 0x00, 0x80, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ...qemu ? QEMU_PCI_SUBSYSTEM : [0x00, 0x00, 0x00, 0x00],
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x01, 0x00, 0x00,
-        ],
-        pci_bars: [],
-        name: "acpi",
-        on_config_write: offset => {
-            if(offset >> 2 === PCI_PMBA >> 2 || offset >> 2 === PCI_PMREGMISC >> 2)
-            {
-                this.update_pm_decode();
-            }
-        },
-        on_config_restore: () => this.update_pm_decode(),
-    };
+    /** @const @type {Platform} */
+    this.platform = /** @type {Platform} */ (cpu.platform);
 
-    // 00:07.0 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 08)
-    /** @const @type {!Int32Array} */
-    this.pci_config = cpu.devices.pci.register_device(acpi);
+    /** PIIX4 (with its own PCI function) or ICH9 (decoded by the LPC) */
+    this.ich9 = this.platform.machine === "q35";
+
+    /** @const */
+    this.pm_length = this.platform.pm.length;
+
+    /** @type {Int32Array} PIIX4: the PM function's configuration space */
+    this.pci_config = null;
+
+    if(!this.ich9)
+    {
+        // (QEMU's: revision 3 and its subsystem)
+        const qemu = cpu.platform.qemu_compatible;
+        const acpi = {
+            pci_id: pci_functions(cpu.platform).acpi_pm,
+            pci_space: [
+                0x86, 0x80, 0x13, 0x71, 0x07, 0x00, 0x80, 0x02, qemu ? 0x03 : 0x08, 0x00, 0x80, 0x06, 0x00, 0x00, 0x80, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ...qemu ? QEMU_PCI_SUBSYSTEM : [0x00, 0x00, 0x00, 0x00],
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x01, 0x00, 0x00,
+            ],
+            pci_bars: [],
+            name: "acpi",
+            on_config_write: offset => {
+                if(offset >> 2 === PCI_PMBA >> 2 || offset >> 2 === PCI_PMREGMISC >> 2)
+                {
+                    this.update_pm_decode();
+                }
+            },
+            on_config_restore: () => this.update_pm_decode(),
+        };
+
+        // 00:07.0 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 08)
+        this.pci_config = cpu.devices.pci.register_device(acpi);
+    }
 
     /** Base of the decoded PM I/O block, -1 while not decoded */
     this.pm_base = -1;
@@ -135,6 +164,14 @@ export function ACPI(cpu, bus)
     this.gpe_en = 0;
     this.smi_cmd = 0;
     this.glbctl = 0;
+    /** ICH9 SMI_EN and SMI_STS */
+    this.smi_en = 0;
+    this.smi_sts = 0;
+    /** ICH9: the TCO watchdog, at PMBASE + 0x60, with SMIs if SMI_EN.TCO_EN */
+    // (as in QEMU, TCO SMIs go to the bootstrap processor)
+    this.tco = this.ich9 ? new TCO(cpu, () => this.raise_smi(SMI_TCO, 0)) : null;
+    /** ICH9: APM status port (0xB3), a scratch register (SeaBIOS's SMM handshake) */
+    this.apm_sts = 0;
 
     /**
      * 0 while the machine is on, otherwise the sleeping state (4 or 5) the
@@ -168,7 +205,11 @@ export function ACPI(cpu, bus)
 
     const io = cpu.io;
     this.reset_pm_config();
-    this.register_block(io, ACPI_GPE0_BASE, ACPI_GPE0_LENGTH, this.gpe_read, this.gpe_write);
+    if(!this.ich9)
+    {
+        // (ICH9's GPE0 block is part of the PM block)
+        this.register_block(io, this.platform.pm.gpe0_base, this.platform.pm.gpe0_length, this.gpe_read, this.gpe_write);
+    }
 
     io.register_read(ACPI_SMI_CMD_PORT, this,
         () => this.smi_cmd,
@@ -178,6 +219,11 @@ export function ACPI(cpu, bus)
         value => this.smi_cmd_write(value & 0xFF),
         value => this.smi_cmd_write(value & 0xFF),
         value => this.smi_cmd_write(value & 0xFF));
+    if(this.ich9)
+    {
+        io.register_read(APM_STS_PORT, this, () => this.apm_sts);
+        io.register_write(APM_STS_PORT, this, value => { this.apm_sts = value & 0xFF; });
+    }
 }
 
 /**
@@ -204,15 +250,22 @@ ACPI.prototype.register_block = function(io, base, length, read, write)
     }
 };
 
-/** PMBA and PMREGMISC after PCIRST#: PM I/O space disabled */
+/**
+ * PMBA and PMREGMISC after PCIRST#: PM I/O space disabled (PIIX4; the ICH9
+ * LPC resets PMBASE and ACPI_CNTL itself)
+ */
 ACPI.prototype.reset_pm_config = function()
 {
+    if(this.ich9)
+    {
+        return;
+    }
     this.pci_config[PCI_PMBA >> 2] = 1;
     this.pci_config[PCI_PMREGMISC >> 2] &= ~0xFF;
     this.update_pm_decode();
 };
 
-/** Move the PM I/O block to the base in PMBA, or stop decoding it */
+/** PIIX4: move the PM I/O block to the base in PMBA, or stop decoding it */
 ACPI.prototype.update_pm_decode = function()
 {
     // bits 31:16 and 5:1 are reserved (zero), bit 0 is hardwired to 1
@@ -220,8 +273,16 @@ ACPI.prototype.update_pm_decode = function()
     this.pci_config[PCI_PMBA >> 2] = pmba | 1;
 
     const enabled = (this.pci_config[PCI_PMREGMISC >> 2] & 1) !== 0;
-    const base = enabled && pmba !== 0 ? pmba : -1;
+    this.set_pm_decode(enabled && pmba !== 0 ? pmba : -1);
+};
 
+/**
+ * Decode the PM I/O block at base, or nowhere (-1). PIIX4 derives the base
+ * from its configuration; on Q35 the ICH9 LPC calls this.
+ * @param {number} base
+ */
+ACPI.prototype.set_pm_decode = function(base)
+{
     if(base === this.pm_base)
     {
         return;
@@ -230,7 +291,7 @@ ACPI.prototype.update_pm_decode = function()
     const io = this.cpu.io;
     if(this.pm_base !== -1)
     {
-        io.unregister_range(this.pm_base, ACPI_PM_LENGTH, this);
+        io.unregister_range(this.pm_base, this.pm_length, this);
     }
 
     dbg_log("ACPI PM block " + (base === -1 ? "disabled" : "at " + h(base, 4)), LOG_ACPI);
@@ -239,7 +300,7 @@ ACPI.prototype.update_pm_decode = function()
 
     if(base !== -1)
     {
-        for(let port = base; port < base + ACPI_PM_LENGTH; port++)
+        for(let port = base; port < base + this.pm_length; port++)
         {
             if(io.ports[port].device)
             {
@@ -247,7 +308,7 @@ ACPI.prototype.update_pm_decode = function()
                 break;
             }
         }
-        this.register_block(io, base, ACPI_PM_LENGTH, this.pm_read, this.pm_write);
+        this.register_block(io, base, this.pm_length, this.pm_read, this.pm_write);
     }
 };
 
@@ -271,6 +332,31 @@ ACPI.prototype.pm_read = function(offset, size)
 
 ACPI.prototype.pm_read_byte = function(offset, timer)
 {
+    if(this.ich9)
+    {
+        const gpe0 = this.platform.pm.gpe0_offset;
+        if(offset >= gpe0 && offset < gpe0 + this.platform.pm.gpe0_length)
+        {
+            return this.gpe_read(offset - gpe0, 1);
+        }
+        if(offset >= ICH9_PM_SMI_EN && offset < ICH9_PM_SMI_EN + 4)
+        {
+            return this.smi_en >>> ((offset - ICH9_PM_SMI_EN) << 3) & 0xFF;
+        }
+        if(offset >= ICH9_PM_SMI_STS && offset < ICH9_PM_SMI_STS + 4)
+        {
+            return this.smi_sts >>> ((offset - ICH9_PM_SMI_STS) << 3) & 0xFF;
+        }
+        if(offset >= PM_GLBCTL && offset < PM_GLBCTL + 4)
+        {
+            // (ICH9 has no GLBCTL here)
+            return 0;
+        }
+        if(offset >= ICH9_PM_TCO && offset < ICH9_PM_TCO + ICH9_TCO_LENGTH)
+        {
+            return this.tco.read_byte(offset - ICH9_PM_TCO);
+        }
+    }
     switch(offset)
     {
         case 0: return this.pm1_sts & 0xFF;
@@ -319,12 +405,22 @@ ACPI.prototype.pm_write = function(offset, size, value)
                 break;
             case PM_GLBCTL: case PM_GLBCTL + 1: case PM_GLBCTL + 2: case PM_GLBCTL + 3:
             {
+                if(this.ich9)
+                {
+                    // (ICH9: part of GPE0)
+                    this.pm_write_ich9(o, byte);
+                    break;
+                }
                 const glbctl_shift = (o - PM_GLBCTL) << 3;
                 this.glbctl = this.glbctl & ~(0xFF << glbctl_shift) | byte << glbctl_shift;
                 break;
             }
             default:
                 // the timer is read-only; everything else is reserved
+                if(this.ich9)
+                {
+                    this.pm_write_ich9(o, byte);
+                }
                 break;
         }
     }
@@ -337,30 +433,84 @@ ACPI.prototype.pm_write = function(offset, size, value)
     }
 };
 
+/**
+ * ICH9 PM registers that PIIX4 doesn't have (GPE0 inside the block, SMI_EN,
+ * SMI_STS); one byte
+ * @param {number} offset
+ * @param {number} byte
+ */
+ACPI.prototype.pm_write_ich9 = function(offset, byte)
+{
+    const gpe0 = this.platform.pm.gpe0_offset;
+    if(offset >= gpe0 && offset < gpe0 + this.platform.pm.gpe0_length)
+    {
+        this.gpe_write(offset - gpe0, 1, byte);
+    }
+    else if(offset >= ICH9_PM_SMI_EN && offset < ICH9_PM_SMI_EN + 4)
+    {
+        const shift = (offset - ICH9_PM_SMI_EN) << 3;
+        this.smi_en = (this.smi_en & ~(0xFF << shift) | byte << shift) >>> 0;
+    }
+    else if(offset >= ICH9_PM_SMI_STS && offset < ICH9_PM_SMI_STS + 4)
+    {
+        // write one to clear
+        this.smi_sts = (this.smi_sts & ~(byte << ((offset - ICH9_PM_SMI_STS) << 3))) >>> 0;
+    }
+    else if(offset >= ICH9_PM_TCO && offset < ICH9_PM_TCO + ICH9_TCO_LENGTH)
+    {
+        this.tco.write_byte(offset - ICH9_PM_TCO, byte);
+    }
+};
+
+/**
+ * GPE0: the status bytes (write one to clear), then as many enable bytes.
+ * PIIX4 has 2 + 2 bytes, ICH9 8 + 8; gpe_sts and gpe_en hold the first 32
+ * bits (no GPE source above them is implemented)
+ * @param {number} offset
+ * @param {number} size
+ * @return {number}
+ */
 ACPI.prototype.gpe_read = function(offset, size)
 {
-    const value = (this.gpe_sts | this.gpe_en << 16) >>> (offset << 3);
-    return size === 4 ? value | 0 : value & ((1 << (size << 3)) - 1);
+    const half = this.platform.pm.gpe0_length >> 1;
+    let value = 0;
+    for(let i = 0; i < size; i++)
+    {
+        const o = offset + i;
+        const register = o < half ? this.gpe_sts : this.gpe_en;
+        const index = o < half ? o : o - half;
+        const byte = index < 4 ? register >>> (index << 3) & 0xFF : 0;
+        value |= byte << (i << 3);
+    }
+    return size === 4 ? value | 0 : value;
 };
 
 ACPI.prototype.gpe_write = function(offset, size, value)
 {
     dbg_log("ACPI GPE write" + (size << 3) + " offset=" + offset + " value=" + h(value >>> 0), LOG_ACPI);
 
-    for(let i = 0; i < size && offset + i < ACPI_GPE0_LENGTH; i++)
+    const half = this.platform.pm.gpe0_length >> 1;
+    const bits_mask = half >= 4 ? -1 : (1 << (half << 3)) - 1;
+
+    for(let i = 0; i < size && offset + i < this.platform.pm.gpe0_length; i++)
     {
         const o = offset + i;
-        const shift = (o & 1) << 3;
+        const index = o < half ? o : o - half;
+        if(index >= 4)
+        {
+            continue;
+        }
+        const shift = index << 3;
         const bits = (value >>> (i << 3) & 0xFF) << shift;
 
-        if(o < 2)
+        if(o < half)
         {
             // GPE0_STS: write one to clear
-            this.gpe_sts &= ~bits;
+            this.gpe_sts = (this.gpe_sts & ~bits) & bits_mask;
         }
         else
         {
-            this.gpe_en = this.gpe_en & ~(0xFF << shift) | bits;
+            this.gpe_en = (this.gpe_en & ~(0xFF << shift) | bits) & bits_mask;
         }
     }
 
@@ -370,24 +520,49 @@ ACPI.prototype.gpe_write = function(offset, size, value)
 /**
  * Port 0xB2 (APM control). The FADT names it SMI_CMD: OSPM writes
  * ACPI_ENABLE/ACPI_DISABLE to switch SCI_EN. On real hardware this goes
- * through an SMI handler; v86 has no SMM, so the device switches it.
+ * through an SMI handler; here the device switches it (as QEMU's does). On
+ * ICH9 every other value raises an SMI if SMI_EN.APMC_EN is set (SeaBIOS's
+ * SMM: the SMBASE relocation, call32_smm).
  */
 ACPI.prototype.smi_cmd_write = function(value)
 {
     this.smi_cmd = value;
 
-    if(value === ACPI_ENABLE)
+    if(value === this.platform.pm.acpi_enable)
     {
         dbg_log("ACPI enable", LOG_ACPI);
         this.pm1_cnt |= SCI_EN;
         this.update_sci();
     }
-    else if(value === ACPI_DISABLE)
+    else if(value === this.platform.pm.acpi_disable)
     {
         dbg_log("ACPI disable", LOG_ACPI);
         this.pm1_cnt &= ~SCI_EN;
         this.update_sci();
     }
+    else if(this.ich9)
+    {
+        this.raise_smi(ICH9_SMI_APM);
+    }
+};
+
+/**
+ * ICH9: an SMI source fired; with its enable bit in SMI_EN, its status bit
+ * in SMI_STS is set and a core enters SMM: by default the one whose port
+ * access raised it (the APM control port's). (Like QEMU, SMI_EN.GBL_SMI_EN is
+ * not needed: SeaBIOS does not set it.)
+ * @param {number} bit
+ * @param {number=} core
+ */
+ACPI.prototype.raise_smi = function(bit, core)
+{
+    if(!(this.smi_en & bit))
+    {
+        return;
+    }
+    dbg_log("SMI (SMI_STS " + h(bit, 8) + ")", LOG_ACPI);
+    this.smi_sts = (this.smi_sts | bit) >>> 0;
+    this.cpu.smi(core);
 };
 
 /**
@@ -419,9 +594,9 @@ ACPI.prototype.sync_sci = function()
 
 ACPI.prototype.enter_sleep_state = function(slp_typ)
 {
-    const sleep_state = ACPI_SLEEP_STATES.find(s => s.slp_typ === slp_typ);
+    const sleep_state = this.platform.sleep_states.find(s => s.slp_typ === slp_typ);
 
-    if(sleep_state && sleep_state.state >= 4)
+    if(sleep_state && sleep_state.state >= 4 && sleep_state.supported)
     {
         // S4 and S5 turn the machine off; for S4 the guest resumes from disk
         // at the next power-on
@@ -545,6 +720,10 @@ ACPI.prototype.reset = function()
     this.gpe_en = 0;
     this.smi_cmd = 0;
     this.glbctl = 0;
+    this.smi_en = 0;
+    this.smi_sts = 0;
+    this.apm_sts = 0;
+    this.tco && this.tco.reset();
     this.soft_off = 0;
     this.sleeping = 0;
     this.update_sci();
@@ -639,14 +818,15 @@ ACPI.prototype.timer = function(now)
 {
     const ticks = this.timer_ticks(now);
     this.update_timer_status(ticks);
+    const tco = this.tco ? this.tco.timer(now) : 100;
 
     if((this.pm1_en & TMR) && (this.pm1_cnt & SCI_EN))
     {
         const next = (this.timer_period + 1) * PM_TIMER_STATUS_PERIOD;
-        return Math.min(100, (next - ticks) / PM_TIMER_TICKS_PER_MS);
+        return Math.min(100, tco, (next - ticks) / PM_TIMER_TICKS_PER_MS);
     }
 
-    return 100;
+    return tco;
 };
 
 ACPI.prototype.get_state = function()
@@ -655,7 +835,14 @@ ACPI.prototype.get_state = function()
     state[0] = this.pm1_cnt;
     state[1] = this.pm1_sts;
     state[2] = this.pm1_en;
-    state[3] = new Uint8Array([this.gpe_sts & 0xFF, this.gpe_sts >> 8, this.gpe_en & 0xFF, this.gpe_en >> 8]);
+    // GPE0 status bytes, then enable bytes (PIIX4: 2 + 2, ICH9: 8 + 8)
+    const half = this.platform.pm.gpe0_length >> 1;
+    state[3] = new Uint8Array(half << 1);
+    for(let i = 0; i < Math.min(half, 4); i++)
+    {
+        state[3][i] = this.gpe_sts >>> (i << 3) & 0xFF;
+        state[3][half + i] = this.gpe_en >>> (i << 3) & 0xFF;
+    }
     state[4] = STATE_FORMAT;
     state[5] = this.timer_ticks(this.clock());
     state[6] = this.timer_period;
@@ -663,15 +850,32 @@ ACPI.prototype.get_state = function()
     state[8] = this.glbctl;
     state[9] = this.soft_off;
     state[10] = this.sleeping;
+    state[11] = this.smi_en;
+    state[12] = this.smi_sts;
+    state[13] = this.tco ? this.tco.get_state() : null;
+    state[14] = this.apm_sts;
     return state;
 };
 
 ACPI.prototype.set_state = function(state)
 {
     const gpe = state[3];
+    const gpe_half = gpe.length >> 1;
+    const gpe_bytes = (start) => {
+        let value = 0;
+        for(let i = 0; i < Math.min(gpe_half, 4); i++) value |= gpe[start + i] << (i << 3);
+        return value >>> 0;
+    };
     this.pm1_sts = state[1] & PM1_STS_MASK;
     this.pm1_en = state[2] & PM1_EN_MASK;
-    this.gpe_en = gpe[2] | gpe[3] << 8;
+    this.gpe_en = gpe_bytes(gpe_half);
+    this.smi_en = state[11] || 0;
+    this.smi_sts = state[12] || 0;
+    if(this.tco && state[13])
+    {
+        this.tco.set_state(state[13]);
+    }
+    this.apm_sts = state[14] || 0;
 
     let ticks = 0;
 
@@ -690,7 +894,7 @@ ACPI.prototype.set_state = function(state)
     else
     {
         this.pm1_cnt = state[0] & (SCI_EN | PM1_CNT_WRITABLE);
-        this.gpe_sts = gpe[0] | gpe[1] << 8;
+        this.gpe_sts = gpe_bytes(0);
         ticks = state[5];
         this.timer_period = state[6];
         this.smi_cmd = state[7];

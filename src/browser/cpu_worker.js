@@ -45,7 +45,7 @@ export function encode_worker_options(o, plugins = [], adapter_renderer = false)
             new URL(o["graphics_adapter_path"] || default_graphics_adapter_path(o["graphics_adapter"]), location.href).href,
         "extended_memory_size": o.extended_memory_size, "extended_memory_cache": o.extended_memory_cache,
         "high_memory_size": o.high_memory_size,
-        "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,
+        "boot_order": o.boot_order, "acpi": o.acpi, "machine_type": o.machine_type, "pcie_root_ports": o.pcie_root_ports, "hpet": o.hpet, "smbus": o.smbus, "cpu_cores": o.cpu_cores,
         "cpu_clock": o.cpu_clock, "cpu_quantum": o.cpu_quantum, "cpu_schedule_seed": o.cpu_schedule_seed,
         "experimental_smp_jit": o.experimental_smp_jit, "disable_jit": o.disable_jit,
         "cpu_type": o["cpu_type"],

@@ -10,11 +10,12 @@
 
 import { dbg_assert } from "./log.js";
 import {
-    ACPI_GPE0_BASE, ACPI_GPE0_LENGTH, ACPI_PM_LENGTH, ACPI_SCI_IRQ, ACPI_SMI_CMD_PORT,
-    ACPI_ENABLE, ACPI_DISABLE, ACPI_SLEEP_STATES, FW_CFG_PORT, IOAPIC_ADDRESS, IOAPIC_ID,
-    LAPIC_ADDRESS, PCI_LINK_IRQS, PCI_MMIO_END, RESET_PORT, RESET_VALUE,
+    ACPI_SCI_IRQ, ACPI_SMI_CMD_PORT, FW_CFG_PORT, ICH9_RCBA_ADDRESS, ICH9_RCBA_SIZE,
+    IOAPIC_ADDRESS, IOAPIC_ID, LAPIC_ADDRESS, PCI_LINK_IRQS, PCI_MMIO_END, RESET_PORT, RESET_VALUE,
+    gpe0_block,
 } from "./platform.js";
 import { CMOS_CENTURY } from "./rtc.js";
+import { HPET_ADDRESS, HPET_BLOCK_ID, HPET_SIZE } from "./hpet.js";
 
 // For Types Only
 import { Platform } from "./platform.js";
@@ -54,6 +55,7 @@ const CREATE_DWORD_FIELD_OP = 0x8A;
 const LLESS_OP = 0x95;
 const IF_OP = 0xA0;
 const RETURN_OP = 0xA4;
+const NOOP_OP = 0xA3;
 
 const REGION_SYSTEM_IO = 0x01;
 const REGION_PCI_CONFIG = 0x02;
@@ -250,6 +252,8 @@ function res_word_space(type, type_flags, min, max)
 }
 const res_word_bus = (min, max) => res_word_space(2, 0, min, max);
 const res_word_io = (min, max) => res_word_space(1, 0x03, min, max);
+/** 32-bit fixed memory range, read/write (reserved by a motherboard device) */
+const res_memory32_fixed = (base, length) => [0x86, 9, 0, 1].concat(le(base, 4), le(length, 4));
 /** Cacheable read/write memory window */
 const res_dword_memory = (min, max) =>
     [0x87, 23, 0, 0, 0x0C, 0x03].concat(le(0, 4), le(min, 4), le(max, 4), le(0, 4), le(max - min + 1 >>> 0, 4));
@@ -289,12 +293,62 @@ const isa_device = (name, hid, resources, uid) => aml_device(name,
     aml_name_decl("_CRS", resources));
 
 /**
+ * The devices behind the ISA (PIIX3) or LPC (ICH9) bridge
+ * @param {Platform} platform
+ * @return {!Array<!Array<number>>}
+ */
+function isa_devices_of(platform)
+{
+    const isa_devices = [
+        isa_device("RTC", "PNP0B00", aml_resources(res_io(0x70, 2), res_irq_noflags([8]))),
+        // SeaBIOS looks for PNP0303 to enable its PS/2 support
+        isa_device("KBD", "PNP0303", aml_resources(res_io(0x60, 1), res_io(0x64, 1), res_irq_noflags([1]))),
+        isa_device("MOU", "PNP0F13", aml_resources(res_irq_noflags([12]))),
+        isa_device("FDC0", "PNP0700", aml_resources(res_io(0x3F2, 4), res_io(0x3F7, 1), res_irq_noflags([6]), res_dma([2]))),
+        // (QEMU's PC does not describe these: with platform.qemu_compatible
+        // a guest installed there sees no new devices)
+        ...platform.qemu_compatible ? [] : [
+            isa_device("PIC", "PNP0000", aml_resources(res_io(0x20, 2), res_io(0xA0, 2), res_io(0x4D0, 2), res_irq_noflags([2]))),
+            isa_device("TMR", "PNP0100", aml_resources(res_io(0x40, 4), res_irq_noflags([0]))),
+            isa_device("DMAC", "PNP0200", aml_resources(res_io(0x00, 0x10), res_io(0x80, 0x10), res_io(0xC0, 0x20), res_dma([4]))),
+            isa_device("SPKR", "PNP0800", aml_resources(res_io(0x61, 1))),
+            isa_device("FPU", "PNP0C04", aml_resources(res_io(0xF0, 0x10), res_irq_noflags([13]))),
+        ],
+    ];
+    for(const { index, port, irq } of platform.uarts)
+    {
+        isa_devices.push(isa_device("COM" + (index + 1), "PNP0501", aml_resources(res_io(port, 8), res_irq_noflags([irq])), index + 1));
+    }
+    for(const { index, port, irq } of platform.parallel_ports)
+    {
+        isa_devices.push(isa_device(index === 0 ? "LPT" : "LPT" + (index + 1), "PNP0400", aml_resources(res_io(port, 8), res_irq_noflags([irq])), index + 1));
+    }
+    return isa_devices;
+}
+
+/**
+ * \_Sx packages of the sleep states the machine advertises
+ * @param {Platform} platform
+ * @return {!Array<!Array<number>>}
+ */
+function sleep_state_packages(platform)
+{
+    return platform.sleep_states.filter(s => s.supported).map(({ state, slp_typ }) =>
+        aml_name_decl("\\_S" + state, aml_package(aml_int(slp_typ), aml_int(slp_typ), aml_int(0), aml_int(0))));
+}
+
+/**
  * @param {Platform} platform
  * @param {number} pm_base
  * @return {!Array<number>} the DSDT body (after the table header)
  */
 function build_dsdt_body(platform, pm_base)
 {
+    if(platform.machine === "q35")
+    {
+        return build_q35_dsdt_body(platform, pm_base);
+    }
+
     const LINKS = ["LNKA", "LNKB", "LNKC", "LNKD"];
     const PIRQ_FIELDS = ["PRQ0", "PRQ1", "PRQ2", "PRQ3"];
 
@@ -322,30 +376,8 @@ function build_dsdt_body(platform, pm_base)
             aml_create_dword_field(aml_arg(0), 5, "PRRI"),
             aml_store(aml_name("PRRI"), aml_name(PIRQ_FIELDS[i])))));
 
-    const isa_devices = [
-        isa_device("RTC", "PNP0B00", aml_resources(res_io(0x70, 2), res_irq_noflags([8]))),
-        // SeaBIOS looks for PNP0303 to enable its PS/2 support
-        isa_device("KBD", "PNP0303", aml_resources(res_io(0x60, 1), res_io(0x64, 1), res_irq_noflags([1]))),
-        isa_device("MOU", "PNP0F13", aml_resources(res_irq_noflags([12]))),
-        isa_device("FDC0", "PNP0700", aml_resources(res_io(0x3F2, 4), res_io(0x3F7, 1), res_irq_noflags([6]), res_dma([2]))),
-        // (QEMU's PC does not describe these: with platform.qemu_compatible
-        // a guest installed there sees no new devices)
-        ...platform.qemu_compatible ? [] : [
-            isa_device("PIC", "PNP0000", aml_resources(res_io(0x20, 2), res_io(0xA0, 2), res_io(0x4D0, 2), res_irq_noflags([2]))),
-            isa_device("TMR", "PNP0100", aml_resources(res_io(0x40, 4), res_irq_noflags([0]))),
-            isa_device("DMAC", "PNP0200", aml_resources(res_io(0x00, 0x10), res_io(0x80, 0x10), res_io(0xC0, 0x20), res_dma([4]))),
-            isa_device("SPKR", "PNP0800", aml_resources(res_io(0x61, 1))),
-            isa_device("FPU", "PNP0C04", aml_resources(res_io(0xF0, 0x10), res_irq_noflags([13]))),
-        ],
-    ];
-    for(const { index, port, irq } of platform.uarts)
-    {
-        isa_devices.push(isa_device("COM" + (index + 1), "PNP0501", aml_resources(res_io(port, 8), res_irq_noflags([irq])), index + 1));
-    }
-    for(const { index, port, irq } of platform.parallel_ports)
-    {
-        isa_devices.push(isa_device(index === 0 ? "LPT" : "LPT" + (index + 1), "PNP0400", aml_resources(res_io(port, 8), res_irq_noflags([irq])), index + 1));
-    }
+    const isa_devices = isa_devices_of(platform);
+    const gpe0 = gpe0_block(platform, pm_base);
 
     // Ports that belong to the chipset but no device above: ACPI PM and GPE
     // blocks, SMI_CMD/APM, fw_cfg, port 0x92 and the PIIX reset register
@@ -353,8 +385,8 @@ function build_dsdt_body(platform, pm_base)
         aml_name_decl("_HID", aml_eisa_id("PNP0C02")),
         aml_name_decl("_UID", aml_int(1)),
         aml_name_decl("_CRS", aml_resources(
-            res_io(pm_base, ACPI_PM_LENGTH),
-            res_io(ACPI_GPE0_BASE, ACPI_GPE0_LENGTH),
+            res_io(pm_base, platform.pm.length),
+            res_io(gpe0.base, gpe0.length),
             res_io(ACPI_SMI_CMD_PORT, 2),
             res_io(FW_CFG_PORT, 2),
             res_io(0x92, 1))));
@@ -367,8 +399,7 @@ function build_dsdt_body(platform, pm_base)
         res_dword_memory(0xA0000, 0xBFFFF),
         res_dword_memory(platform.pci_mmio_start, PCI_MMIO_END));
 
-    const sleep_states = ACPI_SLEEP_STATES.filter(s => s.supported).map(({ state, slp_typ }) =>
-        aml_name_decl("\\_S" + state, aml_package(aml_int(slp_typ), aml_int(slp_typ), aml_int(0), aml_int(0))));
+    const sleep_states = sleep_state_packages(platform);
 
     // ProcID i matches the ACPI processor id of the i-th MADT entry
     const processors = platform.apic_ids.map((_, i) => aml_processor("CP" + i.toString(16).toUpperCase().padStart(2, "0"), i));
@@ -402,6 +433,138 @@ function build_dsdt_body(platform, pm_base)
             ...links,
             ...processors),
         ...sleep_states,
+    ]);
+}
+
+/**
+ * Q35: the PCI Express root bridge with the devices of the ICH9 LPC bridge,
+ * the eight PIRQ links in PIC mode and their GSIs 16-23 in APIC mode (the
+ * wiring of src/q35.js, which is QEMU's)
+ * @param {Platform} platform
+ * @param {number} pm_base
+ * @return {!Array<number>} the DSDT body (after the table header)
+ */
+function build_q35_dsdt_body(platform, pm_base)
+{
+    const PIRQS = ["A", "B", "C", "D", "E", "F", "G", "H"];
+    const PIRQ_FIELDS = PIRQS.map(p => "PRQ" + p);
+
+    // PIRQ of interrupt pin p (0 = INTA) of device d on bus 0; the defaults of
+    // the device 25-31 route registers (INTA..D -> PIRQA..D)
+    const pirq_of = (d, p) => d <= 24 ? 4 + (d + p) % 4 : d === 30 ? 4 + p : p;
+    const routing_table = prefix => {
+        const entries = [];
+        for(let d = 0; d < 32; d++)
+        {
+            for(let p = 0; p < 4; p++)
+            {
+                entries.push(aml_package(aml_int((d << 16 | 0xFFFF) >>> 0), aml_int(p), aml_name(prefix + PIRQS[pirq_of(d, p)]), aml_int(0)));
+            }
+        }
+        return aml_package(...entries);
+    };
+
+    // PIC mode: link devices over the LPC's PIRQ route registers
+    const links = PIRQS.map((pirq, i) => aml_device("LNK" + pirq,
+        aml_name_decl("_HID", aml_eisa_id("PNP0C0F")),
+        aml_name_decl("_UID", aml_int(i)),
+        aml_name_decl("_PRS", aml_resources(res_interrupt_shared_level(PCI_LINK_IRQS))),
+        aml_method("_STA", 0, false, aml_return(aml_name("IQST").concat(aml_name(PIRQ_FIELDS[i])))),
+        aml_method("_DIS", 0, false, aml_or(aml_name(PIRQ_FIELDS[i]), aml_int(0x80), aml_name(PIRQ_FIELDS[i]))),
+        aml_method("_CRS", 0, false, aml_return(aml_name("IQCR").concat(aml_name(PIRQ_FIELDS[i])))),
+        aml_method("_SRS", 1, false,
+            aml_create_dword_field(aml_arg(0), 5, "PRRI"),
+            aml_store(aml_name("PRRI"), aml_name(PIRQ_FIELDS[i])))));
+
+    // APIC mode: PIRQx is IOAPIC input 16 + x, always connected
+    const gsi_links = PIRQS.map((pirq, i) => {
+        const resources = aml_resources(res_interrupt_shared_level([16 + i]));
+        return aml_device("GSI" + pirq,
+            aml_name_decl("_HID", aml_eisa_id("PNP0C0F")),
+            aml_name_decl("_UID", aml_int(8 + i)),
+            aml_name_decl("_PRS", resources),
+            aml_name_decl("_CRS", resources),
+            aml_method("_STA", 0, false, aml_return(aml_int(0x0B))),
+            aml_method("_DIS", 0, false, [NOOP_OP]),
+            aml_method("_SRS", 1, false, [NOOP_OP]));
+    });
+
+    // Chipset resources no device above claims: the PM block (GPE0 is part of
+    // it), SMI_CMD/APM, fw_cfg, port 0x92, and the root complex register block
+    const motherboard = aml_device("MBRS",
+        aml_name_decl("_HID", aml_eisa_id("PNP0C02")),
+        aml_name_decl("_UID", aml_int(1)),
+        aml_name_decl("_CRS", aml_resources(
+            res_io(pm_base, platform.pm.length),
+            res_io(ACPI_SMI_CMD_PORT, 2),
+            res_io(FW_CFG_PORT, 2),
+            res_io(0x92, 1),
+            res_memory32_fixed(ICH9_RCBA_ADDRESS, ICH9_RCBA_SIZE))));
+
+    const pci_crs = aml_resources(
+        res_word_bus(0x00, platform.ecam.size / 0x100000 - 1),
+        res_io(0xCF8, 8),
+        res_word_io(0x0000, 0x0CF7),
+        res_word_io(0x0D00, 0xFFFF),
+        res_dword_memory(0xA0000, 0xBFFFF),
+        // (above the ECAM window)
+        res_dword_memory(platform.pci_mmio_start, PCI_MMIO_END));
+
+    const processors = platform.apic_ids.map((_, i) => aml_processor("CP" + i.toString(16).toUpperCase().padStart(2, "0"), i));
+
+    return flat([
+        // OSPM tells the interrupt model through \_PIC: 0 PIC, 1 APIC
+        aml_name_decl("\\PICF", aml_int(0)),
+        aml_method("\\_PIC", 1, false, aml_store(aml_arg(0), aml_name("\\PICF"))),
+        aml_scope("\\_SB",
+            aml_device("PCI0",
+                aml_name_decl("_HID", aml_eisa_id("PNP0A08")),
+                aml_name_decl("_CID", aml_eisa_id("PNP0A03")),
+                // (a device has either _HID or _ADR; the root bridge is identified by _HID)
+                aml_name_decl("_UID", aml_int(0)),
+                aml_name_decl("_SEG", aml_int(0)),
+                aml_name_decl("_BBN", aml_int(0)),
+                aml_name_decl("_CRS", pci_crs),
+                aml_name_decl("PRTP", routing_table("LNK")),
+                aml_name_decl("PRTA", routing_table("GSI")),
+                aml_method("_PRT", 0, false,
+                    aml_if(aml_name("\\PICF"), aml_return(aml_name("PRTA"))),
+                    aml_return(aml_name("PRTP"))),
+                aml_device("ISA",
+                    aml_name_decl("_ADR", aml_int(0x001F0000)),
+                    // ICH9 PIRQ route control registers (PIRQA..D, SIRQ_CNTL and reserved, PIRQE..H)
+                    aml_op_region("PIRQ", REGION_PCI_CONFIG, 0x60, 0x0C),
+                    ...isa_devices_of(platform),
+                    ...platform.hpet ? [aml_device("HPET",
+                        aml_name_decl("_HID", aml_eisa_id("PNP0103")),
+                        aml_name_decl("_UID", aml_int(0)),
+                        aml_name_decl("_CRS", aml_resources(res_memory32_fixed(HPET_ADDRESS, HPET_SIZE))))] : [],
+                    motherboard)),
+            aml_field("PCI0.ISA.PIRQ", FIELD_BYTE_ACC | FIELD_PRESERVE, [
+                ...PIRQ_FIELDS.slice(0, 4).map(name => ({ name, bits: 8 })),
+                { name: undefined, bits: 32 },
+                ...PIRQ_FIELDS.slice(4).map(name => ({ name, bits: 8 })),
+            ]),
+            // _STA of a link: disabled (bit 7 set) or enabled
+            aml_method("IQST", 1, false,
+                aml_if(aml_and(aml_int(0x80), aml_arg(0)), aml_return(aml_int(0x09))),
+                aml_return(aml_int(0x0B))),
+            // _CRS of a link: its current IRQ, or none
+            aml_method("IQCR", 1, true,
+                aml_name_decl("PRR0", aml_resources(res_interrupt_shared_level([0]))),
+                aml_create_dword_field(aml_name("PRR0"), 5, "PRRI"),
+                aml_if(aml_lless(aml_arg(0), aml_int(0x80)), aml_store(aml_arg(0), aml_name("PRRI"))),
+                aml_return(aml_name("PRR0"))),
+            ...links,
+            ...gsi_links,
+            // the ECAM window, which the root bridge's _CRS leaves out (PCI
+            // Firmware 3.3, 4.1.2: reserved by a motherboard resource; QEMU's DRAC)
+            aml_device("DRAC",
+                aml_name_decl("_HID", aml_eisa_id("PNP0C01")),
+                aml_name_decl("_UID", aml_int(2)),
+                aml_name_decl("_CRS", aml_resources(res_memory32_fixed(platform.ecam.base, platform.ecam.size)))),
+            ...processors),
+        ...sleep_state_packages(platform),
     ]);
 }
 
@@ -460,8 +623,13 @@ const USE_PLATFORM_CLOCK = 1 << 15;
 const LEGACY_DEVICES = 1 << 0;
 const HAS_8042 = 1 << 1;
 
-function build_fadt(pm_base)
+/**
+ * @param {Platform} platform
+ * @param {number} pm_base
+ */
+function build_fadt(platform, pm_base)
 {
+    const gpe0 = gpe0_block(platform, pm_base);
     const body = [].concat(
         le(0, 4), // FIRMWARE_CTRL (patched by the loader)
         le(0, 4), // DSDT (patched by the loader)
@@ -469,13 +637,13 @@ function build_fadt(pm_base)
         [0], // Preferred_PM_Profile: unspecified
         le(ACPI_SCI_IRQ, 2),
         le(ACPI_SMI_CMD_PORT, 4),
-        [ACPI_ENABLE, ACPI_DISABLE, 0, 0], // S4BIOS_REQ, PSTATE_CNT
+        [platform.pm.acpi_enable, platform.pm.acpi_disable, 0, 0], // S4BIOS_REQ, PSTATE_CNT
         le(pm_base, 4), le(0, 4), // PM1a/b_EVT_BLK
         le(pm_base + 4, 4), le(0, 4), // PM1a/b_CNT_BLK
         le(0, 4), // PM2_CNT_BLK
         le(pm_base + 8, 4), // PM_TMR_BLK
-        le(ACPI_GPE0_BASE, 4), le(0, 4), // GPE0/1_BLK
-        [4, 2, 0, 4, ACPI_GPE0_LENGTH, 0, 0, 0], // lengths, GPE1_BASE, CST_CNT
+        le(gpe0.base, 4), le(0, 4), // GPE0/1_BLK
+        [4, 2, 0, 4, gpe0.length, 0, 0, 0], // lengths, GPE1_BASE, CST_CNT
         le(101, 2), // P_LVL2_LAT > 100: no C2
         le(1001, 2), // P_LVL3_LAT > 1000: no C3
         le(0, 4), // FLUSH_SIZE, FLUSH_STRIDE
@@ -491,7 +659,7 @@ function build_fadt(pm_base)
         gas_io(pm_base + 4, 16), GAS_NONE, // X_PM1a/b_CNT_BLK
         GAS_NONE, // X_PM2_CNT_BLK
         gas_io(pm_base + 8, 32), // X_PM_TMR_BLK
-        gas_io(ACPI_GPE0_BASE, ACPI_GPE0_LENGTH * 8), GAS_NONE); // X_GPE0/1_BLK
+        gas_io(gpe0.base, gpe0.length * 8), GAS_NONE); // X_GPE0/1_BLK
 
     const fadt = table("FACP", 3, "V86FACP", body);
     dbg_assert(fadt.length === FADT_LENGTH);
@@ -518,6 +686,29 @@ function build_madt(platform)
     entries.push([4, 6, 0xFF, 0, 0, 1]); // local APIC NMI on LINT1 of every processor
 
     return table("APIC", 1, "V86APIC", le(LAPIC_ADDRESS, 4).concat(le(PCAT_COMPAT, 4), flat(entries)));
+}
+
+/**
+ * The HPET description table (IA-PC HPET 1.0a, 3.2.4): the event timer
+ * block's ID, its address (system memory), HPET number 0, no minimum clock
+ * tick, no page protection (QEMU's values)
+ */
+function build_hpet()
+{
+    return table("HPET", 1, "V86HPET", le(HPET_BLOCK_ID, 4).concat(
+        [0, 0, 0, 0], le(HPET_ADDRESS, 8), [0], le(0, 2), [0]));
+}
+
+/**
+ * PCI Express memory-mapped configuration space (PCI Firmware 3.3, 4.1.2):
+ * one allocation, segment 0, buses 0 to the last one of the ECAM window
+ * @param {Platform} platform
+ */
+function build_mcfg(platform)
+{
+    const ecam = platform.ecam;
+    return table("MCFG", 1, "V86MCFG", le(0, 8).concat(
+        le(ecam.base, 8), le(0, 2), [0, ecam.size / 0x100000 - 1], le(0, 4)));
 }
 
 // ---------------------------------------------------------------------------
@@ -567,8 +758,10 @@ export function build_acpi_tables(platform, pm_base)
     const parts = [
         ["FACS", build_facs()],
         ["DSDT", table("DSDT", 1, "V86DSDT", build_dsdt_body(platform, pm_base))],
-        ["FACP", build_fadt(pm_base)],
+        ["FACP", build_fadt(platform, pm_base)],
         ["APIC", build_madt(platform)],
+        ...platform.ecam ? [["MCFG", build_mcfg(platform)]] : [],
+        ...platform.hpet ? [["HPET", build_hpet()]] : [],
     ];
 
     // RSDT and XSDT list every table except FACS and DSDT (the FADT points to those)

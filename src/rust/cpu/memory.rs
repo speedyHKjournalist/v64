@@ -58,14 +58,19 @@ pub fn in_mapped_range(addr: u32) -> bool {
     addr >= 0xA0000 && addr < 0xC0000
         || addr >= unsafe { ram_fast_limit }
             && (addr >= unsafe { *memory_size }
-                || unsafe { crate::x64::physical::is_low_ram_hole(addr) })
+                || unsafe { crate::x64::physical::is_low_ram_hole(addr) }
+                || unsafe { crate::cpu::smm::in_tseg(addr) })
 }
 
+/// RAM that the low bus does not decode: relocated above 4 GiB, or TSEG
+/// outside SMM (crate::cpu::smm)
 #[inline]
 fn low_ram_hole(addr: u32) -> bool {
     addr >= unsafe { ram_fast_limit }
         && addr < unsafe { *memory_size }
-        && unsafe { crate::x64::physical::is_low_ram_hole(addr) }
+        && unsafe {
+            crate::x64::physical::is_low_ram_hole(addr) || crate::cpu::smm::tseg_blackhole(addr)
+        }
 }
 
 #[inline]
@@ -79,9 +84,15 @@ fn touches_low_hole(addr: u32, bytes: u32) -> bool {
     low_ram_hole(addr) || low_ram_hole(addr.wrapping_add(bytes - 1))
         // (and the extended RAM aperture: accessed byte by byte, or by aligned dwords)
         || aperture::contains(addr) || aperture::contains(addr.wrapping_add(bytes - 1))
+        // (and accesses across an edge of TSEG, in SMM)
+        || unsafe {
+            crate::cpu::smm::in_tseg(addr) || crate::cpu::smm::in_tseg(addr.wrapping_add(bytes - 1))
+        }
 }
 
 use crate::x64::extended::aperture;
+// SMRAM: compatible SMRAM behind the VGA window, TSEG (crate::cpu::smm)
+use crate::cpu::smm::smram_hit;
 // Extended RAM through the aperture (crate::x64::extended), in long mode only;
 // elsewhere the range reads as open bus
 fn aperture_read8(addr: u32) -> i32 {
@@ -119,7 +130,10 @@ pub fn read8(addr: u32) -> i32 {
 #[inline(never)]
 fn read8_mapped(addr: u32) -> i32 {
     {
-        if low_ram_hole(addr) {
+        if unsafe { smram_hit(addr, 1) } {
+            read8_no_mmap_check(addr)
+        }
+        else if low_ram_hole(addr) {
             0xFF
         }
         else if aperture::contains(addr) {
@@ -159,7 +173,10 @@ pub fn read16(addr: u32) -> i32 {
 #[inline(never)]
 fn read16_mapped(addr: u32) -> i32 {
     {
-        if let Some(host) = unsafe { mmio_ram::read_host(addr, 2) } {
+        if unsafe { smram_hit(addr, 2) } {
+            read16_no_mmap_check(addr)
+        }
+        else if let Some(host) = unsafe { mmio_ram::read_host(addr, 2) } {
             unsafe { ptr::read_unaligned(host as *const u16) as i32 }
         }
         else {
@@ -185,6 +202,9 @@ pub fn read32s(addr: u32) -> i32 {
 #[inline(never)]
 fn read32s_mapped(addr: u32) -> i32 {
     {
+        if unsafe { smram_hit(addr, 4) } {
+            return read32_no_mmap_check(addr);
+        }
         if aperture::contains(addr) && addr & 3 == 0 && unsafe { long_mode() } {
             return unsafe { aperture::read32(addr) }.map_or(-1, |v| v as i32);
         }
@@ -214,7 +234,10 @@ pub fn read32_no_mmap_check(addr: u32) -> i32 {
 
 pub unsafe fn read64s(addr: u32) -> i64 {
     if mapped_width(addr, 8) {
-        if let Some(host) = mmio_ram::read_host(addr, 8) {
+        if smram_hit(addr, 8) {
+            read64_no_mmap_check(addr) as i64
+        }
+        else if let Some(host) = mmio_ram::read_host(addr, 8) {
             ptr::read_unaligned(host as *const i64)
         }
         else {
@@ -230,7 +253,11 @@ pub unsafe fn read64s(addr: u32) -> i64 {
 
 pub unsafe fn read128(addr: u32) -> reg128 {
     if mapped_width(addr, 16) {
-        if let Some(host) = mmio_ram::read_host(addr, 16) {
+        if smram_hit(addr, 16) {
+            let [low, high] = parallel::load128(mem8.offset(addr as isize));
+            reg128 { u64: [low, high] }
+        }
+        else if let Some(host) = mmio_ram::read_host(addr, 16) {
             ptr::read_unaligned(host as *const reg128)
         }
         else {
@@ -405,6 +432,10 @@ pub unsafe fn memcpy_into_mmio_ram(src_addr: u32, dst_addr: u32, count: u32) {
 }
 
 pub unsafe fn mmap_write8(addr: u32, value: i32) {
+    if smram_hit(addr, 1) {
+        write8_ram(addr, value);
+        return;
+    }
     if low_ram_hole(addr) {
         return;
     }
@@ -420,6 +451,10 @@ pub unsafe fn mmap_write8(addr: u32, value: i32) {
     }
 }
 pub unsafe fn mmap_write16(addr: u32, value: i32) {
+    if smram_hit(addr, 2) {
+        write16_ram(addr, value);
+        return;
+    }
     if addr & 4095 > 4094 || touches_low_hole(addr, 2) {
         write8(addr, value & 0xFF);
         write8(addr.wrapping_add(1), value >> 8 & 0xFF);
@@ -433,6 +468,10 @@ pub unsafe fn mmap_write16(addr: u32, value: i32) {
     }
 }
 pub unsafe fn mmap_write32(addr: u32, value: i32) {
+    if smram_hit(addr, 4) {
+        write32_ram(addr, value);
+        return;
+    }
     if aperture::contains(addr) && addr & 3 == 0 && long_mode() {
         aperture::write32(addr, value as u32);
         return;
@@ -459,6 +498,11 @@ pub unsafe fn mmap_write32(addr: u32, value: i32) {
     }
 }
 pub unsafe fn mmap_write64(addr: u32, value: u64) {
+    if smram_hit(addr, 8) {
+        jit::jit_dirty_cache_small(addr, addr + 8);
+        write64_no_mmap_or_dirty_check(addr, value);
+        return;
+    }
     if addr & 4095 > 4088 || touches_low_hole(addr, 8) {
         for index in 0..8 {
             write8(
@@ -476,6 +520,11 @@ pub unsafe fn mmap_write64(addr: u32, value: u64) {
     }
 }
 pub unsafe fn mmap_write128(addr: u32, v0: u64, v1: u64) {
+    if smram_hit(addr, 16) {
+        jit::jit_dirty_cache_small(addr, addr + 16);
+        write128_no_mmap_or_dirty_check(addr, reg128 { u64: [v0, v1] });
+        return;
+    }
     if addr & 4095 > 4080 || touches_low_hole(addr, 16) {
         for (offset, value) in [(0, v0), (8, v1)] {
             for index in 0..8 {

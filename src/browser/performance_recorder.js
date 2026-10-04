@@ -154,10 +154,8 @@ export class PerformanceRecorder
         cpu.jit_clear_func = count_one;
         this.cleanup.push(() => { if(cpu.jit_clear_func === count_one) cpu.jit_clear_func = clear_one; });
 
-        const ide = cpu.devices.ide;
         const seen = new Set();
-        for(const [name, disk] of [["hda", ide?.primary?.master], ["hdb", ide?.primary?.slave],
-            ["cdrom", ide?.secondary?.master], ["secondary_slave", ide?.secondary?.slave]])
+        for(const [name, disk] of cpu.disk_devices())
         {
             const buffer = disk && disk.buffer;
             if(!buffer || seen.has(buffer)) continue;

@@ -201,12 +201,15 @@ pub unsafe fn parallel_sync() {
 }
 
 /// Machine configuration that may change while the cores run (ACPI enable,
-/// the CPU profile): copied into a worker at the start of each of its slices
+/// the CPU profile, TSEG): copied into a worker at the start of each of its
+/// slices
 pub unsafe fn sync_worker_configuration() {
     if is_worker() {
         use crate::cpu::global_pointers as gp;
         *gp::acpi_enabled = *machine_state(gp::acpi_enabled);
         crate::cpu::cpu::copy_machine_configuration();
+        // (the chipset's TSEG)
+        crate::cpu::smm::sync_worker();
     }
 }
 

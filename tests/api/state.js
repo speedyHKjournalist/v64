@@ -54,7 +54,8 @@ const config_large_memory = {
     cdrom: { url: __dirname + "/../../images/linux4.iso", async: true },
     autostart: true,
     memory_size: 2048 * 1024 * 1024,
-    vram_size: 512 * 1024 * 1024,
+    // (the most vram_size allows, MAX_VRAM_SIZE in src/graphics_adapter.js)
+    vram_size: 256 * 1024 * 1024,
     network_relay_url: "<UNUSED>",
     disable_jit: +process.env.DISABLE_JIT,
     log_level: 0,

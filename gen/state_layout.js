@@ -133,6 +133,10 @@ export const STATE_FIELDS = [
     { name: "x64_page_lazy_kind", offset: 1824, rust: "u32", size: 4, owner: "scratch", note: "lazy EFLAGS record a page function tail-called with (0: flags are materialized)" },
     { name: "x64_page_lazy_a", offset: 1832, rust: "u64", size: 8, owner: "scratch", note: "its first operand" },
     { name: "x64_page_lazy_b", offset: 1840, rust: "u64", size: 8, owner: "scratch", note: "its second operand" },
+    // System management mode (src/rust/cpu/smm.rs). Its own per-core range, so
+    // that snapshots from before it restore it to its reset value.
+    { name: "smm_state", offset: 1856, rust: "u32", size: 4, owner: "core", note: "bit 0: in SMM; bit 1: NMIs were blocked at the SMI; bit 2: the state is in the 64-bit save map" },
+    { name: "smbase", offset: 1860, rust: "u32", size: 4, owner: "core", note: "SMRAM state save base: 0x30000 at reset, kept across INIT" },
     { name: "ir_tlb_base", offset: 2048, rust: "u32", size: 4, owner: "machine",
         doc: ["Address of cpu::tlb_data, written at startup. Generated IR code loads it", "from this fixed slot (below --global-base) instead of calling an import."] },
     // Memory-type and machine-check MSRs (x64 profile; see instructions_0f.rs
@@ -151,7 +155,7 @@ export const STATICS = {
     // one local APIC per core, indexed by core; the scheduler's current core and INIT/SIPI events
     // the state block of this instance in the parallel build: each relocated instance has its own
     "cpu/global_pointers.rs": { STATE_BLOCK: "core" },
-    "cpu/apic.rs": { APICS: "core", APIC_AUX: "core", CURRENT_CORE: "machine", CORE_COUNT: "machine", CORE_EVENTS: "machine", NMI_PENDING: "machine" },
+    "cpu/apic.rs": { APICS: "core", APIC_AUX: "core", CURRENT_CORE: "machine", CORE_COUNT: "machine", CORE_EVENTS: "machine", NMI_PENDING: "machine", SMI_PENDING: "machine" },
     "cpu/cpu.rs": {
         INTERPRETED: "debug", INTERPRETED_OFFSETS: "debug", INTERPRETED_PAGES: "debug", INTERPRETED_WATCH: "debug",
         INSTRUCTION_TRACE: "debug", INSTRUCTION_TRACE_NEXT: "debug", INSTRUCTION_TRACE_ENABLED: "debug",
@@ -173,6 +177,9 @@ export const STATICS = {
     // (IOAPIC_LOCK guards it while cores run in workers; UNUSED stands in for it in the normal build)
     "cpu/ioapic.rs": { IOAPIC: "machine", IOAPIC_LOCK: "machine", UNUSED: "machine" },
     "cpu/instructions_0f.rs": { X64_TEST_CAPABILITIES: "machine", X64_ARCH_CAPABILITIES: "machine" },
+    // the chipset's SMRAM control (Q35 MCH: G_SMRAME, D_OPEN) and TSEG; per
+    // instance: the TSEG generation its fast RAM limit reflects
+    "cpu/smm.rs": { SMRAM_CONTROL: "machine", TSEG: "machine", TSEG_SEEN: "cache" },
     "cpu/memory.rs": { mem8: "machine", ram_fast_limit: "machine" },
     // device memory regions (frame buffers) and where they are mapped
     "cpu/mmio_ram.rs": { TABLE: "machine" },

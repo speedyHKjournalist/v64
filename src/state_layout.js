@@ -98,6 +98,8 @@ export const STATE_OFFSETS = {
     x64_page_lazy_kind: 1824,
     x64_page_lazy_a: 1832,
     x64_page_lazy_b: 1840,
+    smm_state: 1856,
+    smbase: 1860,
     ir_tlb_base: 2048,
     x64_mtrr_def_type: 2056,
     x64_mtrr_fixed: 2064,
@@ -123,5 +125,6 @@ export const CORE_STATE_RANGES = [
     [1152, 1280],
     [1360, 1748],
     [1752, 1788],
+    [1856, 1864],
     [2056, 2424],
 ];

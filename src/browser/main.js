@@ -3246,11 +3246,11 @@ function init_ui(profile, settings, emulator)
         $("reset").blur();
     };
 
-    add_image_download_button(settings.hda, () => emulator.v86.cpu.devices.ide.primary.master.buffer, "hda");
-    add_image_download_button(settings.hdb, () => emulator.v86.cpu.devices.ide.primary.slave.buffer, "hdb");
+    add_image_download_button(settings.hda, () => emulator.v86.cpu.disk_device("hda").buffer, "hda");
+    add_image_download_button(settings.hdb, () => emulator.v86.cpu.disk_device("hdb").buffer, "hdb");
     add_image_download_button(settings.fda, () => emulator.v86.cpu.devices.fdc.drives[0].buffer, "fda");
     add_image_download_button(settings.fdb, () => emulator.v86.cpu.devices.fdc.drives[1].buffer, "fdb");
-    add_image_download_button(settings.cdrom, () => emulator.v86.cpu.devices.cdrom.buffer, "cdrom");
+    add_image_download_button(settings.cdrom, () => emulator.v86.cpu.disk_device("cdrom").buffer, "cdrom");
 
     function add_image_download_button(obj, get_buffer, type)
     {
