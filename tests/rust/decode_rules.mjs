@@ -166,12 +166,17 @@ try
     for(const vm of machines) assert.equal(word(vm, OUT), 42, "F3 IMUL");
     console.log(`PASS: ${undefined_forms.length} undefined mandatory prefixes raise #UD, F3 IMUL ignores the prefix`);
 
-    // The three-byte maps decode in all three decoders, and each encoding is
-    // #UD until its semantics come (docs/simd-xsave-plan.md), whether or not
-    // the machine has its CPUID feature; so is an opcode byte without rows
-    const three_byte = [
+    // The three-byte maps decode in all three decoders. SSSE3 (P3) is #UD
+    // without its feature; every other encoding is #UD until its semantics
+    // come (docs/simd-xsave-plan.md), whether or not the machine has its CPUID
+    // feature; so are F2/F3 at the SSSE3 opcodes and an opcode byte without rows
+    const ssse3 = [
         [0x66, 0x0F, 0x38, 0x00, 0xC1], [0x0F, 0x38, 0x00, 0xC1],                  // pshufb
         [0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], [0x0F, 0x3A, 0x0F, 0xC1, 0x08],      // palignr
+    ];
+    await expect_undefined(ssse3);
+    const three_byte = [
+        [0xF3, 0x0F, 0x38, 0x00, 0xC1], [0x66, 0xF2, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], // pshufb, palignr
         [0x66, 0x0F, 0x38, 0x10, 0x00], [0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x0C],      // pblendvb, pcmpistri
         [0xF2, 0x0F, 0x38, 0xF1, 0xC1], [0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],      // crc32
         [0x0F, 0x38, 0xF0, 0x00], [0xF3, 0x0F, 0x38, 0xF0, 0x00],                  // movbe
@@ -216,7 +221,7 @@ try
     {
         for(const vm of featured) await vm.destroy();
     }
-    console.log(`PASS: ${three_byte.length} three-byte map and ${vex.length} VEX encodings raise #UD with and without their features; ` +
+    console.log(`PASS: ${ssse3.length} SSSE3 encodings raise #UD without SSSE3; ${three_byte.length} three-byte map and ${vex.length} VEX encodings with and without their features; ` +
         "LES/LDS with a memory operand; F3 0F BC/BD are BSF/BSR without BMI1/LZCNT and #UD with them until P10");
 }
 finally

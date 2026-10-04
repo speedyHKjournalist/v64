@@ -535,9 +535,8 @@ fn three_byte_maps_decode_and_stay_undefined_until_implemented() {
     for features in [0, ALL] {
         TEST_FEATURES.with(|f| f.set(features));
         for (bytes, key) in [
-            (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], 0x660F3800), // pshufb xmm
-            (&[0x0F, 0x38, 0x00, 0xC1], 0x0F3800),             // pshufb mm
-            (&[0x66, 0x0F, 0x3A, 0x0F, 0xC1], 0x660F3A0F),     // palignr xmm (no imm8 read)
+            (&[0x66, 0x0F, 0x38, 0x20, 0xC1][..], 0x660F3820), // pmovsxbw
+            (&[0x66, 0x0F, 0x3A, 0x08, 0xC1], 0x660F3A08),     // roundps (no imm8 read)
             (&[0x66, 0x0F, 0x38, 0x10, 0x04], 0x660F3810),     // pblendvb (no SIB read)
             (&[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1], 0xF20F38F1), // crc32 r32, r/m16
             (&[0x0F, 0x38, 0xF0, 0x00], 0x0F38F0),             // movbe
@@ -582,6 +581,49 @@ fn three_byte_maps_decode_and_stay_undefined_until_implemented() {
             decode(&[0x66, 0x0F, 0x38], GuestEip(0), LinearAddress(0), true),
             Err(DecodeStop::Incomplete { .. })
         ));
+    }
+    TEST_FEATURES.with(|f| f.set(0));
+}
+
+#[test]
+fn ssse3_rows_decode_with_their_feature() {
+    use crate::cpu::features::{SSSE3, TEST_FEATURES};
+    for features in [0, SSSE3] {
+        TEST_FEATURES.with(|f| f.set(features));
+        for mode32 in [false, true] {
+            for (bytes, key, memory, imm8) in [
+                (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], 0x660F3800, false, None), // pshufb xmm
+                (&[0x0F, 0x38, 0x04, 0xC1], 0x0F3804, false, None),             // pmaddubsw mm
+                (&[0x0F, 0x38, 0x1C, 0x07], 0x0F381C, true, None),              // pabsb mm, [..]
+                (
+                    &[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x11],
+                    0x660F3A0F,
+                    false,
+                    Some(0x11),
+                ), // palignr
+                (&[0x0F, 0x3A, 0x0F, 0x07, 0x80], 0x0F3A0F, true, Some(0x80)),
+            ] {
+                let i = d(bytes, mode32);
+                assert_eq!(i.encoding.opcode, key, "{bytes:02X?}");
+                if features == 0 {
+                    // #UD right after the ModRM byte: no EA, no immediate
+                    assert!(i.early_ud && i.baseline_ud && i.ea.is_none() && i.immediate.is_none());
+                    assert_eq!(i.length as usize, bytes.len() - imm8.map_or(0, |_| 1));
+                    continue;
+                }
+                assert!(!i.early_ud && !i.baseline_ud, "{bytes:02X?}");
+                assert_eq!(i.length as usize, bytes.len());
+                assert_eq!(i.ea.is_some(), memory);
+                assert_eq!(i.immediate, imm8);
+            }
+            // F2/F3 select no SSSE3 form
+            for bytes in [
+                &[0xF3, 0x0F, 0x38, 0x00, 0xC1][..],
+                &[0xF2, 0x0F, 0x3A, 0x0F, 0xC1],
+            ] {
+                assert!(d(bytes, mode32).early_ud, "{bytes:02X?}");
+            }
+        }
     }
     TEST_FEATURES.with(|f| f.set(0));
 }

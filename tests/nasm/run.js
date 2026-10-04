@@ -387,6 +387,9 @@ else {
         disable_jit: +process.env.DISABLE_JIT,
         // the references are hardware results: exact x87 arithmetic and flags
         x87_fast_math: false,
+        // the generated tests include the forms of docs/simd-xsave-plan.md
+        // that are implemented so far
+        cpu_features: ["SSSE3"],
         ...FORCE_JIT ? { ir_region_budget: { hot_threshold: 1, promotion_threshold: 1 } } : {},
         log_level: 0,
     });

@@ -5,12 +5,44 @@ use super::{
     lift::{effective_offset, segmented, snapshot},
     simd_moves::prepare,
 };
-use crate::ir::{hir::Op, simd::ShuffleOp, state::ResumeKind, types::Type};
+use crate::ir::{
+    hir::Op,
+    simd::{PackedOp, ShuffleOp},
+    state::ResumeKind,
+    types::Type,
+};
 pub fn supports(i: &DecodedInstruction) -> bool {
     ShuffleOp::from_encoding(i.encoding.opcode).is_some()
+        // PALIGNR xmm, xmm (an aligned memory operand: the SSE helper)
+        || i.encoding.opcode == 0x660F3A0F && i.ea.is_none()
+}
+/// PALIGNR xmm, xmm, imm8: one shuffle of the destination with the source,
+/// or with zero once imm8 reaches beyond the source
+fn palignr(b: &mut IntegerBuilder, i: &DecodedInstruction) {
+    let register = (i.modrm.unwrap() >> 3 & 7) as usize;
+    let destination = b.xmm[register];
+    let (lanes, zero) = crate::cpu::simd_int::palignr_lanes(i.immediate.unwrap() as u8, 16);
+    let second = if zero {
+        b.node(
+            Op::VectorBinary(PackedOp::Xor),
+            vec![destination, destination],
+            Type::V128,
+        )
+    }
+    else {
+        b.xmm[(i.modrm.unwrap() & 7) as usize]
+    };
+    b.xmm[register] = b.node(
+        Op::VectorShuffle(lanes),
+        vec![destination, second],
+        Type::V128,
+    );
 }
 pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     prepare(b, i, count);
+    if i.encoding.opcode == 0x660F3A0F {
+        return palignr(b, i);
+    }
     let operation = ShuffleOp::from_encoding(i.encoding.opcode).unwrap();
     let immediate = i.immediate.unwrap() as u8;
     let register = i.modrm.unwrap() >> 3 & 7;

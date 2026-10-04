@@ -453,6 +453,10 @@ PMULHRSW 按精确定义处理舍入与结果截取，不能套用通用饱和�
 P0 先确定精度策略（第 13 节 Q2）：像默认开启的 `x87_fast_math` 那样保留一个快速模式，
 还是默认精确、另设快路径。
 
+P4a 同时修正 32 位引擎中 legacy SSE 的异常条件（3.3 节），新旧形式共用一个检查：CR4.OSFXSR=0
+时 XMM 形式 #UD（现在只记日志）；要求对齐的 16 字节内存操作数未对齐时 #GP(0)（现在只有
+ADDSUBPS/PD 和 P3 的 SSSE3 形式检查）。x64 引擎已经这样做，兼容模式下两个引擎因此不同。
+
 抽取 x64 已有 FP 处理（`vector.rs`，基于 SoftFloat）中的可复用部分，补齐所有目标指令用到的
 f32/f64 操作、转换、比较、舍入及异常记录。可扩展当前 SoftFloat 接口，但不得通过中间
 extF80 转换不经证明地替代所有 f32/f64 操作，避免双重舍入。
@@ -1014,3 +1018,68 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   `ir-coverage-tests`、`ir-fp-state-tests`、`ir-tier0-tests`、`ir-differential-tests`、`sse3-tests`、
   `packed-simd-tests`、`ir-sse-fp-tests`、`x64-system-tests`、`smp-tests`、`api-tests`、
   `q35-device-tests`、`kvm-unit-test`、`decode-rules-tests` 和 `platform-contract-tests` 全部通过。
+- **事后修正（P3 期间）**：P2 的回归没有包括 `x64-differential-tests` 和 `x64-page-tier-tests`。
+  它们发现 x64 引擎的 FXSAVE/FXRSTOR（与 XSAVE 共用 `Area`）在保存区跨入缺页时，#PF 的 CR2
+  指向越界字段的最后一个字节，而不是缺页的第一个字节。现已与 32 位路径和 QEMU 一致，修正单独提交。
+
+### P3：SSSE3（2026-10-04）
+
+- **语义**：`src/rust/cpu/simd_int.rs` 是公共的打包整数语义：输入输出都是字节向量，不读写 CPU
+  状态。MMX 形式为 8 字节，XMM 形式为 16 字节，VEX.256 以后按 128 位 lane 复用。覆盖 16 条指令：
+  PSHUFB、PHADDW/D/SW、PMADDUBSW、PHSUBW/D/SW、PSIGNB/W/D、PMULHRSW、PABSB/W/D、PALIGNR。
+  单元测试覆盖：PSHUFB 的 bit 7 清零和索引截断（MMX 取低 3 位，XMM 取低 4 位）、饱和边界、
+  最小负数的取反和绝对值、PMULHRSW 的舍入、PMADDUBSW 的无符号×有符号组合，以及 PALIGNR 的
+  全部 imm8。
+- **32 位解释器**：`instructions_0f38.rs`、`instructions_0f3a.rs` 按生成器的命名提供各形式。
+  32 行 SSSE3 去掉 `unimplemented` 和 `skip`（后者让它们进入 nasm 测试）。
+  - 没有 SSSE3 时 #UD，先于 #NM；F2/F3 前缀 #UD。
+  - XMM 形式的内存操作数未按 16 字节对齐时 #GP(0)（异常类型 4），与已有的 ADDSUBPS/PD 相同，
+    新增 `safe_read128s_aligned`。MMX 形式没有对齐要求。
+  - MMX 形式按 MMX 规则改写 x87 状态：目的寄存器的指数为全 1，TOP 为 0，标记全有效；内存故障时
+    x87 状态不变。
+- **IR**：
+  - Tier-0 对 PSHUFB 和 PALIGNR 有原生模板（`i8x16.swizzle`、`i8x16.shuffle`），覆盖 MMX 和
+    XMM、寄存器源和内存源。XMM 内存操作数未对齐时重试，由解释器产生 #GP。其余 SSSE3 形式
+    逐条交给解释器执行（`ir_t0_step`）。
+  - regions 对 PSHUFB、PALIGNR 的寄存器形式原生翻译：PSHUFB 是 `PackedOp::ShuffleBytes`，
+    PALIGNR 是 `VectorShuffle`，移出源寄存器时与零向量 shuffle。其余形式以及这两条的内存形式经
+    helper：MMX 形式走 `ir_mmx_*`；XMM 形式走 SSE helper（`ir_sse_fp_*`），寄存器形式在审计
+    名单内，调用后只重新载入目的 XMM。
+  - Tier-0、regions 和 page tier 的 PALIGNR shuffle lane 都来自 `simd_int::palignr_lanes`。
+- **x64**：`x64/vector.rs` 执行全部 MMX/XMM 形式；64 位模式下可用 XMM8–15，MMX 寄存器忽略
+  REX。page tier 对 PSHUFB、PALIGNR 的 XMM 形式有原生模板，其他形式逐条解释（Step）。兼容
+  模式下两个引擎都执行 SSSE3，测试中与 QEMU 一致，包括编译后的兼容模式代码。
+- **热点形式（5.1 节）**：SSSE3 的两个热点形式 PALIGNR xmm、PSHUFB xmm 在 Tier-0、regions
+  （寄存器形式）和 page tier 上都是原生代码。一个 PSHUFB+PALIGNR 循环的速度：解释器 32 MIPS，
+  Tier-0 531 MIPS，regions 381 MIPS。只走 helper 的 PMADDUBSW+PHADDW 循环为 20–33 MIPS，
+  它们的性能留到 P12。
+- **测试**：
+  - `make ssse3-tests`：
+    - `tests/rust/ssse3.mjs` 以 `tests/rust/ssse3_model.mjs` 为准。该模型按 SDM 伪代码独立
+      编写，不调用 `simd_int.rs`。在解释器、Tier-0、regions 上运行全部 32 个形式，共 2432 例：
+      寄存器源和内存源、目的即源、PALIGNR 全部 256 个 imm8。另外覆盖 MMX 的 x87 转换，
+      #UD/#NM/#GP/#PF 及故障时目的寄存器不变，并检查 Tier-0 确实执行了 PSHUFB/PALIGNR 模板。
+      分别在 Wasm SIMD、debug 和无 SIMD 构建上运行。
+    - `tests/x64/ssse3.mjs` 覆盖 64 位模式和兼容模式下的 285 例和 8 种故障，结果与 QEMU 和模型
+      都一致。分别以解释执行、page tier、page tier 加兼容模式 JIT 运行，并检查 page tier 模板
+      确实执行（热循环中 69.8 万条指令原生退休，只有 3 次 step）。
+  - nasm：`create_tests.js` 支持三字节映射，新增 320 个 SSSE3 测试，QEMU fixture 全部通过；
+    `run.js` 打开 SSSE3。
+  - IR：MMX 和 SSE helper 的 fixture 差分包含 SSSE3 形式，差分所用机器打开了 SSSE3。
+    `mir_value` 检查 PSHUFB/PALIGNR 的寄存器形式原生、内存形式走 helper。Tier-0 fuzz 新增
+    SSSE3 类别（`FUZZ_KIND=s10`）。
+  - 解码：x64 和 IR 的解码测试改用 SSE4.1 行作为“未实现”的例子，并新增 SSSE3 行的解码测试。
+    `decode_rules.mjs` 中 SSSE3 只在没有能力时 #UD。P1d 语料的约定改为：有能力时，只有已实现
+    的行可以解出。
+- **回归**：`ssse3-tests`、`rust-test`、`x64-decode-tests`、`ir-decoder-tests`、
+  `ir-decode-contract-tests`、`decode-rules-tests`、`ir-mmx-tests`、`ir-sse-fp-tests`、
+  `ir-coverage-tests`、`ir-fp-state-tests`、`ir-tier0-tests`、`ir-differential-tests`、
+  `ir-simd-integer-tests`、`ir-simd-shuffle-tests`、`packed-simd-tests`、`sse3-tests`、`xsave-tests`、
+  `x64-system-tests`、opcode 矩阵、`x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、
+  `nasmtests-force-jit`、`kvm-unit-test`、`smp-tests`、`api-tests` 和 `platform-contract-tests`
+  全部通过。`q35-device-tests` 中 `tests/devices/smm.js` 的两个 x86-64 用例偶发失败；计划开始前的
+  `8d2b7c04` 上同样如此（6 次中失败 2 次），与本计划无关，已另立任务。
+- **遗留**：
+  - 32 位路径的 legacy SSE 在 CR4.OSFXSR=0 时仍只记日志，旧形式也不查对齐（3.3 节）。SSSE3
+    与旧形式共用前一项检查，两项一并在 P4a 修正（7.4 节）。
+  - MMX 形式不因 x87 未决异常产生 #MF，与现有 MMX 形式一致。

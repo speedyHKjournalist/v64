@@ -1,5 +1,8 @@
 //! Checked MMX adapters preserve x87 aliasing and tag transitions on completion.
-use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem};
+use crate::cpu::{
+    cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
+    instructions_0f3a as sem3a,
+};
 use crate::ir::helper::Outcome;
 unsafe fn finish(success: bool) -> u32 {
     if success {
@@ -104,6 +107,10 @@ unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u3
         0x0FD7 => cpu::write_reg32(destination, sem::instr_0FD7(source)),
         0xF20FD6 => sem::instr_F20FD6_reg(source, destination),
         0xF30FD6 => sem::instr_F30FD6_reg(source, destination),
+        0x0F3800..=0x0F380B | 0x0F381C..=0x0F381E => {
+            sem38::ssse3_mmx(op as u8, cpu::read_mmx64s(source), destination)
+        },
+        0x0F3A0F => sem3a::instr_0F3A0F(cpu::read_mmx64s(source), destination, immediate),
         _ => unreachable!("unregistered MMX operation"),
     }
     // All register semantics preserve the execution context. Retirement stays
@@ -214,6 +221,10 @@ unsafe fn memory(
             cpu::safe_write64(addr, cpu::read_mmx64s(destination))?;
             cpu::transition_fpu_to_mmx();
         },
+        0x0F3800..=0x0F380B | 0x0F381C..=0x0F381E => {
+            sem38::ssse3_mmx(op as u8, cpu::safe_read64s(addr)?, destination)
+        },
+        0x0F3A0F => sem3a::instr_0F3A0F(cpu::safe_read64s(addr)?, destination, immediate),
         _ => unreachable!("unregistered MMX operation"),
     }
     Ok(())

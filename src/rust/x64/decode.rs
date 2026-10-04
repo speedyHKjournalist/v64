@@ -753,9 +753,8 @@ mod tests {
             ] {
                 let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
                 for bytes in [
-                    &[0x66, 0x0F, 0x38, 0x00, 0xC1][..],
-                    &[0x0F, 0x38, 0x00, 0xC1],
-                    &[0x66, 0x0F, 0x3A, 0x0F, 0xC1],
+                    &[0x66, 0x0F, 0x38, 0x20, 0xC1][..],
+                    &[0x66, 0x0F, 0x3A, 0x08, 0xC1],
                     &[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],
                     &[0x0F, 0x38, 0xF0, 0x00],
                     &[0xF3, 0x0F, 0x38, 0xF0, 0x00],
@@ -775,6 +774,70 @@ mod tests {
                     decode(&[0x0F, 0x38, 0xFF, 0xC1]),
                     Err(DecodeError::UnknownOpcode(0x0F38FF))
                 ));
+            }
+        }
+        TEST_FEATURES.with(|f| f.set(0));
+    }
+    #[test]
+    fn ssse3_forms_decode_with_their_feature() {
+        use crate::cpu::features::{SSSE3, TEST_FEATURES};
+        for features in [0, SSSE3] {
+            TEST_FEATURES.with(|f| f.set(features));
+            for mode in [
+                ExecutionMode::Long64,
+                ExecutionMode::Compatibility32,
+                ExecutionMode::Protected16,
+            ] {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+                for (bytes, opcode, imm8) in [
+                    (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], 0x660F3800, None), // pshufb xmm
+                    (&[0x0F, 0x38, 0x1E, 0x08], 0x0F381E, None),             // pabsd mm, [..]
+                    (
+                        &[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x83],
+                        0x660F3A0F,
+                        Some(0x83),
+                    ), // palignr
+                    (&[0x0F, 0x3A, 0x0F, 0xC1, 0xFF], 0x0F3A0F, Some(0xFF)),
+                ] {
+                    if features == 0 {
+                        // #UD after the ModRM byte (and before the immediate)
+                        let n = if imm8.is_some() { bytes.len() - 1 } else { bytes.len() };
+                        assert_eq!(decode(&bytes[..n]).unwrap_err(), DecodeError::InvalidOpcode);
+                        continue;
+                    }
+                    let d = decode(bytes).unwrap();
+                    assert_eq!(
+                        (d.opcode, d.length as usize),
+                        (opcode, bytes.len()),
+                        "{bytes:02X?}"
+                    );
+                    assert_eq!(d.immediate.map(|i| i.value as u8), imm8);
+                    assert!(matches!(
+                        decode(&bytes[..bytes.len() - 1]),
+                        Err(DecodeError::Fetch { .. })
+                    ));
+                }
+                // F2/F3 select no SSSE3 form: #UD, also with 66 (decode_rules::mandatory_variant)
+                for bytes in [
+                    &[0xF3, 0x0F, 0x38, 0x00, 0xC1][..],
+                    &[0x66, 0xF2, 0x0F, 0x38, 0x00, 0xC1],
+                    &[0xF3, 0x0F, 0x3A, 0x0F, 0xC1],
+                ] {
+                    assert_eq!(decode(bytes).unwrap_err(), DecodeError::InvalidOpcode);
+                }
+            }
+            // REX.R and REX.B reach XMM8-15
+            if features != 0 {
+                let d = decode(
+                    &[0x66, 0x45, 0x0F, 0x38, 0x00, 0xC1],
+                    GuestIp(0x1000),
+                    ExecutionMode::Long64,
+                )
+                .unwrap();
+                assert_eq!(
+                    (d.opcode, d.reg, d.rm_register),
+                    (0x660F3800, Some(8), Some(9))
+                );
             }
         }
         TEST_FEATURES.with(|f| f.set(0));

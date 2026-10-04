@@ -15,7 +15,13 @@ use crate::wasmgen::wasm_builder::{Signature, WasmBuilder, WasmLocalV128, WasmTy
 
 #[derive(Clone, Copy)]
 pub(super) enum Packed {
+    /// i8x16.shuffle over (destination, source)
     Shuffle([u8; 16]),
+    /// i8x16.shuffle over (destination, zero)
+    ShuffleZero([u8; 16]),
+    /// PSHUFB: the destination's bytes by the source's indices, masked
+    /// (bit 7 selects zero)
+    Swizzle(u8),
     Binary(u32),
     AndNot,
     Unpack(u8, bool),
@@ -73,12 +79,14 @@ pub(super) enum Simd {
         reg: u8,
         mmx: bool,
     },
-    /// reg = op(reg, source).
+    /// reg = op(reg, source). `aligned`: a memory source must be 16-byte
+    /// aligned (else the interpreter raises #GP).
     Packed {
         op: Packed,
         reg: u8,
         mmx: bool,
         source: u8,
+        aligned: bool,
     },
     /// PSRLx/PSRAx/PSLLx/PSRLDQ/PSLLDQ reg, imm8 (`kind` is the ModRM reg).
     ShiftImmediate {
@@ -225,11 +233,43 @@ fn shuffle_lanes(op: u32, imm: u32) -> ([u8; 16], bool) {
     (lanes, matches!(op, 0x0FC6 | 0x660FC6))
 }
 
+/// PALIGNR with `imm8` on `n`-byte operands (simd_int::palignr_lanes)
+fn palignr(imm8: u8, n: u32) -> Packed {
+    match crate::cpu::simd_int::palignr_lanes(imm8, n as usize) {
+        (lanes, true) => Packed::ShuffleZero(lanes),
+        (lanes, false) => Packed::Shuffle(lanes),
+    }
+}
+
+/// PSHUFB and PALIGNR (SSSE3), the hot forms of 0F 38 and 0F 3A
+fn ssse3(i: &DecodedInstruction) -> Option<Simd> {
+    let op = i.encoding.opcode;
+    let mmx = op >> 24 == 0;
+    let n = if mmx { 8 } else { 16 };
+    Some(Simd::Packed {
+        op: match op & 0xFFFFFF {
+            0x0F3800 => Packed::Swizzle(if mmx { 0x87 } else { 0x8F }),
+            0x0F3A0F => palignr(i.immediate? as u8, n),
+            _ => return None,
+        },
+        reg: i.modrm? >> 3 & 7,
+        mmx,
+        source: n as u8,
+        aligned: !mmx,
+    })
+}
+
 pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
     if !cfg!(target_feature = "simd128") {
         return None;
     }
     let op = i.encoding.opcode;
+    if matches!(op, 0x0F3800 | 0x660F3800 | 0x0F3A0F | 0x660F3A0F)
+        && !i.prefixes.lock
+        && !i.baseline_ud
+    {
+        return ssse3(i);
+    }
     if op & 0xFF00 != 0x0F00 || i.prefixes.lock || i.baseline_ud {
         return None;
     }
@@ -363,6 +403,7 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
                 reg,
                 mmx: op == 0x0F70,
                 source: source_bytes(op),
+                aligned: false,
             }
         },
         0x0F14 => Simd::Packed {
@@ -370,60 +411,70 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
             reg,
             mmx: false,
             source: 8,
+            aligned: false,
         },
         0x0F15 => Simd::Packed {
             op: Packed::Unpack(4, true),
             reg,
             mmx: false,
             source: 16,
+            aligned: false,
         },
         0x660F14 => Simd::Packed {
             op: Packed::Unpack(8, false),
             reg,
             mmx: false,
             source: 8,
+            aligned: false,
         },
         0x660F15 => Simd::Packed {
             op: Packed::Unpack(8, true),
             reg,
             mmx: false,
             source: 16,
+            aligned: false,
         },
         0x0F16 => Simd::Packed {
             op: Packed::Shuffle([0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]),
             reg,
             mmx: false,
             source: 8,
+            aligned: false,
         },
         0x0F54 | 0x660F54 => Simd::Packed {
             op: Packed::Binary(0x4E),
             reg,
             mmx: false,
             source: 16,
+            aligned: false,
         },
         0x0F55 | 0x660F55 => Simd::Packed {
             op: Packed::AndNot,
             reg,
             mmx: false,
             source: 16,
+            aligned: false,
         },
         0x0F56 | 0x660F56 => Simd::Packed {
             op: Packed::Binary(0x50),
             reg,
             mmx: false,
             source: 16,
+            aligned: false,
         },
         0x0F57 | 0x660F57 => Simd::Packed {
             op: Packed::Binary(0x51),
             reg,
             mmx: false,
             source: 16,
+            aligned: false,
         },
         _ if prefix == 0 || prefix == 0x66 => Simd::Packed {
             op: packed(code, prefix == 0)?,
             reg,
             mmx: prefix == 0,
             source: source_bytes(op),
+            aligned: false,
         },
         _ => return None,
     })
@@ -788,8 +839,19 @@ impl Page {
                 reg,
                 mmx,
                 source,
+                aligned,
             } => {
-                self.simd_source(i, mmx, source);
+                match &i.ea {
+                    Some(ea) if aligned => {
+                        self.linear(ea);
+                        self.w.get_local(&self.addr);
+                        self.w.const_i32(15);
+                        self.w.and_i32();
+                        self.retry_if();
+                        self.load_vector(source);
+                    },
+                    _ => self.simd_source(i, mmx, source),
+                }
                 let src = self.w.set_new_local_v128();
                 if mmx {
                     self.load_mmx(reg);
@@ -1051,6 +1113,19 @@ impl Page {
     fn packed(&mut self, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128, bytes: u8) {
         let w = &mut self.w;
         match op {
+            Packed::ShuffleZero(lanes) => {
+                w.get_local_v128(dst);
+                w.simd_zero();
+                w.simd_shuffle(lanes);
+            },
+            Packed::Swizzle(mask) => {
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                w.const_i32(mask as i32);
+                w.simd(0x0F); // i8x16.splat
+                w.simd(0x4E); // v128.and
+                w.simd(0x0E); // i8x16.swizzle
+            },
             Packed::MulHigh(signed) => {
                 w.get_local_v128(dst);
                 w.get_local_v128(src);

@@ -277,7 +277,9 @@ mod tests {
 
     #[test]
     fn mmx_register_continuations_keep_the_automatic_candidate_suffix() {
+        use crate::cpu::features::{SSSE3, TEST_FEATURES};
         use crate::ir::frontend::mmx::OPERATIONS;
+        TEST_FEATURES.with(|f| f.set(SSSE3));
         for default_32 in [false, true] {
             for &(key, _, forms) in OPERATIONS {
                 let opcode = key & 0xFFFFFF;
@@ -285,15 +287,20 @@ mod tests {
                     continue;
                 }
                 let mut bytes = Vec::new();
-                if opcode > 0xFFFF {
-                    bytes.push((opcode >> 16) as u8);
+                if matches!(opcode >> 8, 0x0F38 | 0x0F3A) {
+                    bytes.extend_from_slice(&[0x0F, (opcode >> 8) as u8, opcode as u8]);
                 }
-                bytes.extend_from_slice(&[0x0F, opcode as u8]);
+                else {
+                    if opcode > 0xFFFF {
+                        bytes.push((opcode >> 16) as u8);
+                    }
+                    bytes.extend_from_slice(&[0x0F, opcode as u8]);
+                }
                 if forms != 4 {
                     let group = if key >> 24 != 0 { key >> 24 } else { 1 };
                     bytes.push((group << 3) as u8 | 0xC0);
                 }
-                if key >> 24 != 0 || matches!(opcode, 0x0F70 | 0x0FC4 | 0x0FC5) {
+                if key >> 24 != 0 || matches!(opcode, 0x0F70 | 0x0FC4 | 0x0FC5 | 0x0F3A0F) {
                     bytes.push(0);
                 }
                 bytes.push(0x40);
@@ -304,6 +311,7 @@ mod tests {
                 );
             }
         }
+        TEST_FEATURES.with(|f| f.set(0));
     }
 
     fn selected_length(bytes: &[u8], default_32: bool) -> usize {

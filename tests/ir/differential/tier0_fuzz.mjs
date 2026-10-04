@@ -35,7 +35,7 @@ const disp = () => random() % 28 * 4;                    // [ebx + disp8], 0..10
 const mem = r => [0x43 | r << 3, disp()];                 // modrm for [ebx + disp8]
 const rr = (r, m) => 0xC0 | r << 3 | m;
 
-// FUZZ_KIND=i0..i33 / s0..s9 restricts programs to one instruction kind.
+// FUZZ_KIND=i0..i33 / s0..s10 restricts programs to one instruction kind.
 const only = process.env.FUZZ_KIND || "";
 const straddle = process.env.FUZZ_STRADDLE === "1";
 function instruction() {
@@ -83,7 +83,7 @@ function instruction() {
 }
 function simd() {
     const x = random() & 7, y = random() & 7;
-    const kind = random() % 10;
+    const kind = random() % 11;
     switch(only.startsWith("s") ? Number(only.slice(1)) : kind) {
         case 0: return [0x0F, 0x10, 0x43 | x << 3, disp() & ~15];                 // MOVUPS xmm, m128
         case 1: return [0x0F, pick([0x58, 0x59, 0x5C, 0x5D, 0x5F]), rr(x, y)];     // ADDPS...
@@ -96,6 +96,14 @@ function simd() {
         case 6: return [0x0F, 0x2E, rr(x, y)];                                    // UCOMISS
         case 7: return [0xF2, 0x0F, 0x2C, rr(reg(), y)];                          // CVTTSD2SI
         case 8: return [0x0F, 0x11, 0x43 | x << 3, disp() & ~15];                 // MOVUPS m128, xmm
+        case 10: {                                                                 // SSSE3
+            const op = pick([0x00, 0x00, 0x01, 0x04, 0x0B, 0x1C]);                 // (PSHUFB has a template)
+            switch(random() % 3) {
+                case 0: return [0x66, 0x0F, 0x38, op, rr(x, y)];
+                case 1: return [0x66, 0x0F, 0x38, op, 0x43 | x << 3, disp() & ~15];
+                default: return [0x66, 0x0F, 0x3A, 0x0F, rr(x, y), random() & 31];  // PALIGNR
+            }
+        }
         default: return [0x66, 0x0F, 0x72, rr(pick([2, 4, 6]), x), random() & 63]; // PSxLD imm
     }
 }
@@ -153,6 +161,7 @@ async function machine(tier0) {
     const vm = new V86({
         graphics_adapter: "bochs_vga",
         wasm_path: wasm, disable_jit: !tier0, memory_size: 128 << 20, // reference: the interpreter only
+        cpu_features: ["SSSE3"],
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });

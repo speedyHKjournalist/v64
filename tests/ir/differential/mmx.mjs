@@ -22,6 +22,7 @@ for(const release of [false,true]){
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
+        cpu_features:["SSSE3"], // (the fixtures include the SSSE3 forms)
     });
     try {
         await new Promise(resolve=>vm.add_listener("emulator-loaded",resolve));

@@ -36,7 +36,7 @@ bench-quick: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 # Tier-0 page functions against the interpreter on random programs.
 ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 	node tests/ir/differential/tier0_fuzz.mjs 60 1
-	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
+	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 s10 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
 	node tests/ir/differential/tier0_fetch_fault.mjs
 
 .PHONY: glbridge test-glbridge
@@ -1501,4 +1501,14 @@ xsave-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-de
 	node tests/smp/xstate_lifecycle.mjs
 	TEST_RELEASE_BUILD=1 node tests/smp/xstate_lifecycle.mjs
 
-.PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests xsave-tests
+# SSSE3 (docs/simd-xsave-plan.md P3): the 32-bit engines against a model of
+# the SDM (with Wasm SIMD, debug, and without SIMD), the x64 engine against
+# QEMU and the model
+ssse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/ssse3.mjs
+	node tests/rust/ssse3.mjs build/v86-debug.wasm
+	node tests/rust/ssse3.mjs build/v86-fallback.wasm
+	node tests/x64/ssse3.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/ssse3.mjs
+
+.PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests xsave-tests ssse3-tests

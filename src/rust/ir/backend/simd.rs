@@ -85,6 +85,14 @@ pub(super) fn binary(
             w.simd_shuffle(*pack);
             w.free_local_v128(sums);
         },
+        PackedPlan::Swizzle { mask } => {
+            w.get_local_v128(destination);
+            w.get_local_v128(source);
+            w.const_i32(*mask as i32);
+            w.simd(0x0F); // i8x16.splat
+            w.simd(0x4E); // v128.and
+            w.simd(0x0E); // i8x16.swizzle
+        },
         PackedPlan::Binary { opcode, reverse } => {
             let (a, b) = if *reverse { (source, destination) } else { (destination, source) };
             w.get_local_v128(a);

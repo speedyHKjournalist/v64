@@ -20,6 +20,7 @@ for(const release of [false,true]){
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
+        cpu_features:["SSSE3"], // (the fixtures include the SSSE3 forms)
     });
     try {
         await new Promise(resolve=>vm.add_listener("emulator-loaded",resolve));
@@ -262,7 +263,8 @@ for(const release of [false,true]){
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,opcode,dirty,memory,width]=cases[i], before=dirty?102:101;
-            const aligned=(opcode&255)===0xD0;
+            // (ADDSUBPS/PD and SSSE3 check 16-byte alignment)
+            const aligned=(opcode&255)===0xD0 || [0x0F38,0x0F3A].includes(opcode>>>8&0xFFFF);
             for(let sample=0;sample<16;sample++) for(let rounding=0;rounding<4;rounding++) {
                 const expected=compare(i,()=>reset(i,{sample,rounding}),before+1);
                 assert.equal(expected.ip,PC+cases[i][0].length); comparisons++;

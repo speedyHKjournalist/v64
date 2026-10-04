@@ -135,7 +135,11 @@ fn scalar_widths_and_normalization_generate_typed_programs() {
 #[test]
 fn packed_selection_is_shared_by_register_and_memory_paths() {
     let mut count = 0;
-    for operation in (0..256).filter_map(PackedOp::from_id) {
+    // (PSHUFB, below: not a 66 0F form, and only between registers)
+    for operation in (0..256)
+        .filter_map(PackedOp::from_id)
+        .filter(|&o| o != PackedOp::ShuffleBytes)
+    {
         count += 1;
         for memory in [false, true] {
             let mut r = lift_cpu(
@@ -185,6 +189,45 @@ fn packed_selection_is_shared_by_register_and_memory_paths() {
         }
     }
     assert_eq!(count, 57);
+    // PSHUFB and PALIGNR between registers are native (Wasm i8x16.swizzle and
+    // i8x16.shuffle); their memory forms keep the SSE helper, which checks
+    // the operand's alignment
+    use crate::cpu::features::{SSSE3, TEST_FEATURES};
+    TEST_FEATURES.with(|f| f.set(SSSE3));
+    assert_eq!(
+        PackedOp::from_encoding(0x660F3800),
+        Some(PackedOp::ShuffleBytes)
+    );
+    assert_eq!(PackedOp::from_encoding(0x660F00), None);
+    for (bytes, native) in [
+        (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], true),
+        (&[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x05], true),
+        (&[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x15], true),
+        (&[0x66, 0x0F, 0x38, 0x00, 0x06], false),
+        (&[0x66, 0x0F, 0x3A, 0x0F, 0x06, 0x05], false),
+    ] {
+        let r = lift_cpu(bytes, GuestEip(0x8000), LinearAddress(0x8000), true).unwrap();
+        let mir = lower(&r).unwrap();
+        let steps: Vec<_> = mir.values.iter().flatten().flat_map(|p| &p.steps).collect();
+        let swizzle = steps.iter().any(|s| {
+            matches!(
+                s,
+                Step::Packed {
+                    plan: PackedPlan::Swizzle { mask: 0x8F },
+                    ..
+                }
+            )
+        });
+        let shuffle = steps.iter().any(|s| matches!(s, Step::Shuffle(_)));
+        let helper = r.helpers.iter().any(|h| h.name == "ir_sse_fp_mem_continue");
+        assert_eq!(
+            (swizzle || shuffle, helper),
+            (native, !native),
+            "{bytes:02X?}"
+        );
+        emit_cpu(&mir, 100).unwrap();
+    }
+    TEST_FEATURES.with(|f| f.set(0));
     assert_eq!(
         vector::lower(PackedOp::AndNot),
         PackedPlan::Binary {

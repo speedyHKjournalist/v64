@@ -1,6 +1,10 @@
 //! Explicit semantic calls: guard and ordered load precede any destination update.
 //! Retains baseline floating-point/NaN/rounding behavior, including its limitations.
-use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem};
+//! The SSSE3 XMM forms share these adapters (integer semantics, no MXCSR).
+use crate::cpu::{
+    cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
+    instructions_0f3a as sem3a,
+};
 use crate::ir::helper::Outcome;
 
 use super::continuation::ContinuationContext;
@@ -238,6 +242,12 @@ pub unsafe fn ir_sse_fp_reg_continue(
         0xF30FE6 => {
             sem::instr_F30FE6(cpu::read_xmm64s(source), destination);
         },
+        0x660F3800..=0x660F380B | 0x660F381C..=0x660F381E => {
+            sem38::ssse3_xmm(op as u8, cpu::read_xmm128s(source), destination);
+        },
+        0x660F3A0F => {
+            sem3a::instr_660F3A0F(cpu::read_xmm128s(source), destination, immediate);
+        },
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
     if observes {
@@ -468,6 +478,12 @@ unsafe fn memory(
         },
         0xF30FE6 => {
             sem::instr_F30FE6(cpu::safe_read64s(addr)?, destination);
+        },
+        0x660F3800..=0x660F380B | 0x660F381C..=0x660F381E => {
+            sem38::ssse3_xmm(op as u8, cpu::safe_read128s_aligned(addr)?, destination);
+        },
+        0x660F3A0F => {
+            sem3a::instr_660F3A0F(cpu::safe_read128s_aligned(addr)?, destination, immediate);
         },
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }

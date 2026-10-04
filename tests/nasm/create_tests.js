@@ -8,7 +8,7 @@ import util from "node:util";
 import url from "node:url";
 import { execFile, spawnSync } from "node:child_process";
 
-import encodings from "../../gen/x86_table.js";
+import encodings, { opcode_map, opcode_prefix } from "../../gen/x86_table.js";
 import Rand from "./rand.js";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
@@ -204,7 +204,7 @@ function create_tests()
 function format_opcode(n)
 {
     let x = n.toString(16);
-    return (x.length === 1 || x.length === 3) ? "0" + x : x;
+    return x.length % 2 ? "0" + x : x;
 }
 
 function create_nasm_modrm_combinations_16()
@@ -443,22 +443,31 @@ function create_instruction_test(op, config, nth_test)
     }
     else
     {
-        assert(opcode < 0x1000000);
-        if(opcode >= 0x10000)
+        if(opcode_map(opcode) === "0F38" || opcode_map(opcode) === "0F3A")
         {
-            let c = opcode >> 16;
-            assert(c === 0x66 || c === 0xF3 || c === 0xF2);
-            codes.push("db " + c);
-            opcode &= ~0xFF0000;
+            // the three-byte maps: mandatory prefix, 0F 38/3A, opcode
+            if(opcode_prefix(opcode)) codes.push("db " + opcode_prefix(opcode));
+            codes.push("db " + 0x0F, "db " + (opcode >> 8 & 0xFF), "db " + (opcode & 0xFF));
         }
-        if(opcode >= 0x100)
+        else
         {
-            let c = opcode >> 8;
-            assert(c === 0x0F || c === 0xF2 || c === 0xF3, "Expected 0F, F2, or F3 prefix, got " + c.toString(16));
-            codes.push("db " + c);
-            opcode &= ~0xFF00;
+            assert(opcode < 0x1000000);
+            if(opcode >= 0x10000)
+            {
+                let c = opcode >> 16;
+                assert(c === 0x66 || c === 0xF3 || c === 0xF2);
+                codes.push("db " + c);
+                opcode &= ~0xFF0000;
+            }
+            if(opcode >= 0x100)
+            {
+                let c = opcode >> 8;
+                assert(c === 0x0F || c === 0xF2 || c === 0xF3, "Expected 0F, F2, or F3 prefix, got " + c.toString(16));
+                codes.push("db " + c);
+                opcode &= ~0xFF00;
+            }
+            codes.push("db " + opcode);
         }
-        codes.push("db " + opcode);
 
         if(is_modrm)
         {

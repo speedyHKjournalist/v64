@@ -7,7 +7,10 @@ use super::{
 };
 use crate::ir::{hir::Op, simd::PackedOp, state::ResumeKind, types::Type};
 pub fn supports(i: &DecodedInstruction) -> bool {
+    // PSHUFB's memory operand must be 16-byte aligned, which the native
+    // memory path does not check: that form stays with the SSE helper
     PackedOp::from_encoding(i.encoding.opcode).is_some()
+        && !(i.encoding.opcode == 0x660F3800 && i.ea.is_some())
 }
 pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     prepare(b, i, count);

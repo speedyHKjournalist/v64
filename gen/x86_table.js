@@ -887,17 +887,19 @@ for(let i = 0; i < 8; i++)
 }
 
 // The three-byte maps 0F 38 and 0F 3A: every legacy form in
-// gen/isa_forms.json (checked by gen/cpu_features.js). Their semantics come in
-// later phases of docs/simd-xsave-plan.md.
+// gen/isa_forms.json (checked by gen/cpu_features.js). The rows marked
+// unimplemented get their semantics in later phases of
+// docs/simd-xsave-plan.md.
 {
     const SSSE3 = "SSSE3", SSE4_1 = "SSE4.1", SSE4_2 = "SSE4.2";
     const vector = (opcode, feature, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, skip: 1, feature, unimplemented: 1, ...extra });
-    // SSSE3: an MMX form without prefix and an XMM form with 66
+    // SSSE3 (P3): an MMX form without prefix and an XMM form with 66
+    const ssse3 = (opcode, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, feature: SSSE3, ...extra });
     for(const byte of [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x1C, 0x1D, 0x1E])
     {
-        encodings.push(vector(0x0F3800 | byte, SSSE3), vector(0x660F3800 | byte, SSSE3));
+        encodings.push(ssse3(0x0F3800 | byte), ssse3(0x660F3800 | byte));
     }
-    encodings.push(vector(0x0F3A0F, SSSE3, { imm8: 1 }), vector(0x660F3A0F, SSSE3, { imm8: 1 })); // palignr
+    encodings.push(ssse3(0x0F3A0F, { imm8: 1 }), ssse3(0x660F3A0F, { imm8: 1 })); // palignr
     for(const byte of [0x10, 0x14, 0x15, 0x17, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2B,
         0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41])
     {

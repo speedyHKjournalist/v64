@@ -1,4 +1,5 @@
-//! Explicit packed XMM integer semantics. IDs are the canonical 66 0F opcode byte.
+//! Explicit packed XMM integer semantics. IDs are the canonical 66 0F opcode
+//! byte, except PSHUFB's (66 0F 38 00), which takes the unused 00.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[repr(u8)]
 pub enum PackedOp {
@@ -60,6 +61,8 @@ pub enum PackedOp {
     AndNot = 0xDF,
     Or = 0xEB,
     Xor = 0xEF,
+    /// PSHUFB (SSSE3)
+    ShuffleBytes = 0x00,
 }
 impl PackedOp {
     pub fn from_id(id: u32) -> Option<Self> {
@@ -122,6 +125,7 @@ impl PackedOp {
             0xDF => Self::AndNot,
             0xEB => Self::Or,
             0xEF => Self::Xor,
+            0x00 => Self::ShuffleBytes,
             _ => return None,
         })
     }
@@ -135,7 +139,8 @@ impl PackedOp {
             0x0F55 | 0x660F55 => Some(Self::AndNot),
             0x0F56 | 0x660F56 => Some(Self::Or),
             0x0F57 | 0x660F57 => Some(Self::Xor),
-            _ if op >> 8 == 0x660F => Self::from_id(op & 255),
+            0x660F3800 => Some(Self::ShuffleBytes),
+            _ if op >> 8 == 0x660F && op & 255 != 0 => Self::from_id(op & 255),
             _ => None,
         }
     }
@@ -213,6 +218,9 @@ impl PackedOp {
     /// CPU slow completion: destination is sampled after the entire source read.
     pub fn apply(self, destination: [u8; 16], source: [u8; 16]) -> [u8; 16] {
         use PackedOp::*;
+        if self == ShuffleBytes {
+            return crate::cpu::simd_int::ssse3(0x00, destination, source);
+        }
         fn lane(v: &[u8; 16], bytes: usize, index: usize) -> u64 {
             let mut value = [0; 8];
             value[..bytes].copy_from_slice(&v[index * bytes..(index + 1) * bytes]);

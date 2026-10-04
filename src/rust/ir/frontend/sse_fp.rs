@@ -1,4 +1,5 @@
-//! Baseline-compatible SSE floating-point adapters with CPU state reloads.
+//! Baseline-compatible SSE floating-point adapters with CPU state reloads, and
+//! the SSSE3 XMM forms (shared semantics in crate::cpu::simd_int).
 use super::{
     adapters::call_abi,
     decode::DecodedInstruction,
@@ -75,6 +76,23 @@ pub const OPERATIONS: &[(u32, u32)] = &[
     (0xF30F5F, 4),
     (0xF30FC2, 4),
     (0xF30FE6, 8),
+    // SSSE3
+    (0x660F3800, 16),
+    (0x660F3801, 16),
+    (0x660F3802, 16),
+    (0x660F3803, 16),
+    (0x660F3804, 16),
+    (0x660F3805, 16),
+    (0x660F3806, 16),
+    (0x660F3807, 16),
+    (0x660F3808, 16),
+    (0x660F3809, 16),
+    (0x660F380A, 16),
+    (0x660F380B, 16),
+    (0x660F381C, 16),
+    (0x660F381D, 16),
+    (0x660F381E, 16),
+    (0x660F3A0F, 16),
 ];
 pub fn supports(i: &DecodedInstruction) -> bool {
     OPERATIONS.iter().any(|&(op, _)| op == i.encoding.opcode)

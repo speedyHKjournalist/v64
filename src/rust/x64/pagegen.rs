@@ -420,7 +420,12 @@ enum Op {
 /// Packed operations of Op::Vpacked (Wasm SIMD opcodes).
 #[derive(Clone, Copy, Debug)]
 enum Packed {
+    /// i8x16.shuffle over (destination, source)
     Shuffle([u8; 16]),
+    /// i8x16.shuffle over (destination, zero)
+    ShuffleZero([u8; 16]),
+    /// PSHUFB: the destination's bytes by the source's indices (bit 7 selects zero)
+    Swizzle,
     Binary(u32),
     /// element bytes, high halves
     Unpack(u8, bool),
@@ -506,6 +511,14 @@ fn shuffle_lanes(op: u32, imm: u32) -> [u8; 16] {
         } as u8;
     }
     lanes
+}
+
+/// PALIGNR xmm, xmm/m128, imm8 (simd_int::palignr_lanes)
+fn palignr(imm8: u64) -> Packed {
+    match crate::cpu::simd_int::palignr_lanes(imm8.min(255) as u8, 16) {
+        (lanes, true) => Packed::ShuffleZero(lanes),
+        (lanes, false) => Packed::Shuffle(lanes),
+    }
 }
 
 fn register(encoded: u8, width: u8, rex: bool) -> Reg {
@@ -965,7 +978,12 @@ fn classify(d: &Decoded) -> Op {
                 write: op == 0x0F22,
                 reg: reg(d.rm_register?, 64),
             },
-            _ if d.opcode >> 8 & 0xFF == 0x0F || d.opcode >> 16 == 0x0F => return sse(d),
+            _ if d.opcode >> 8 & 0xFF == 0x0F
+                || d.opcode >> 16 == 0x0F
+                || matches!(op >> 8, 0x0F38 | 0x0F3A) =>
+            {
+                return sse(d)
+            },
             _ => return None,
         })
     })();
@@ -1131,6 +1149,17 @@ fn sse(d: &Decoded) -> Option<Op> {
         },
         op if op >> 8 == 0x660F => Op::Vpacked {
             op: packed_op(op as u8)?,
+            dst: register,
+            src: xmm_rm()?,
+        },
+        // PSHUFB, PALIGNR (SSSE3)
+        0x660F3800 => Op::Vpacked {
+            op: Packed::Swizzle,
+            dst: register,
+            src: xmm_rm()?,
+        },
+        0x660F3A0F => Op::Vpacked {
+            op: palignr(d.immediate?.value),
             dst: register,
             src: xmm_rm()?,
         },
@@ -4839,6 +4868,19 @@ impl Emitter {
     fn packed(&mut self, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128) {
         let w = &mut self.b;
         match op {
+            Packed::ShuffleZero(lanes) => {
+                w.get_local_v128(dst);
+                w.simd_zero();
+                w.simd_shuffle(lanes);
+            },
+            Packed::Swizzle => {
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                w.const_i32(0x8F);
+                w.simd(0x0F); // i8x16.splat
+                w.simd(0x4E); // v128.and
+                w.simd(0x0E); // i8x16.swizzle
+            },
             Packed::MulHigh(signed) => {
                 w.get_local_v128(dst);
                 w.get_local_v128(src);

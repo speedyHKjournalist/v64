@@ -563,6 +563,7 @@ function gen_table()
             "use crate::cpu::cpu::{after_block_boundary, modrm_resolve};",
             "use crate::cpu::cpu::{read_imm8, read_imm16, read_imm32s};",
             "use crate::cpu::cpu::{task_switch_test, task_switch_test_mmx, trigger_ud};",
+            `use crate::cpu::instructions_${map.toLowerCase()};`,
             "use crate::cpu::global_pointers::{instruction_pointer, prefixes};",
             "use crate::prefix;",
 

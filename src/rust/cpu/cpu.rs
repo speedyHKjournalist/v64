@@ -4177,6 +4177,17 @@ pub unsafe fn safe_read64s(addr: i32) -> OrPageFault<u64> {
     }
 }
 
+/// The 16-byte memory operand of a legacy SSE form that requires alignment
+/// (exception type 4): #GP(0) unless 16-byte aligned, whatever the segment,
+/// before any page fault
+pub unsafe fn safe_read128s_aligned(addr: i32) -> OrPageFault<reg128> {
+    if addr & 15 != 0 {
+        trigger_gp(0);
+        return Err(());
+    }
+    safe_read128s(addr)
+}
+
 pub unsafe fn safe_read128s(addr: i32) -> OrPageFault<reg128> {
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
         return ia32e_read128(addr);

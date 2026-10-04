@@ -10,7 +10,10 @@ use crate::ir::{
 };
 #[test]
 fn sse_fp_fixtures() {
+    use crate::cpu::features::{SSSE3, TEST_FEATURES};
     std::fs::create_dir_all("build/ir-sse-fp").unwrap();
+    // (tests/ir/differential/sse_fp.mjs runs these on a machine with SSSE3)
+    TEST_FEATURES.with(|f| f.set(SSSE3));
     let mut cases = Vec::new();
     for &(opcode, width) in OPERATIONS {
         for mode in [false, true] {
@@ -24,10 +27,20 @@ fn sse_fp_fixtures() {
                         if mode != address32 {
                             bytes.push(0x67);
                         }
-                        if opcode > 0xFFFF {
-                            bytes.push((opcode >> 16) as u8);
+                        if matches!(opcode >> 8 & 0xFFFF, 0x0F38 | 0x0F3A) {
+                            bytes.extend_from_slice(&[
+                                (opcode >> 24) as u8,
+                                0x0F,
+                                (opcode >> 8) as u8,
+                                opcode as u8,
+                            ]);
                         }
-                        bytes.extend_from_slice(&[0x0F, opcode as u8]);
+                        else {
+                            if opcode > 0xFFFF {
+                                bytes.push((opcode >> 16) as u8);
+                            }
+                            bytes.extend_from_slice(&[0x0F, opcode as u8]);
+                        }
                         bytes.push(
                             8 | if memory {
                                 if address32 {
@@ -46,11 +59,14 @@ fn sse_fp_fixtures() {
                                 &0x6000u32.to_le_bytes()[..if address32 { 4 } else { 2 }],
                             );
                         }
-                        if opcode & 255 == 0xC2 {
-                            bytes.push(
-                                (u8::from(mode) * 4 + u8::from(address32) * 2 + u8::from(dirty))
-                                    | 0xF8,
-                            );
+                        let variant =
+                            usize::from(mode) * 4 + usize::from(address32) * 2 + usize::from(dirty);
+                        if opcode & 0xFFFF == 0x0FC2 {
+                            bytes.push(variant as u8 | 0xF8);
+                        }
+                        if opcode == 0x660F3A0F {
+                            // palignr: within, at and beyond the source
+                            bytes.push([0, 1, 7, 15, 16, 17, 31, 32][variant]);
                         }
                         assert!(
                             lift(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode).is_err()
@@ -99,6 +115,7 @@ fn sse_fp_fixtures() {
         format!("[{}]", cases.join(",")),
     )
     .unwrap();
+    TEST_FEATURES.with(|f| f.set(0));
 }
 
 #[test]

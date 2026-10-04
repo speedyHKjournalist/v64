@@ -207,8 +207,8 @@ fn simd_decode_corpus() {
         valid += x.is_ok() as usize;
     }
     // Without the features every VEX and three-byte map encoding is #UD;
-    // with them but without semantics too (the release contract until each
-    // phase); F3 0F BC/BD are BSF/BSR without BMI1/LZCNT
+    // with them, so is every one whose row has no semantics yet (the release
+    // contract until each phase); F3 0F BC/BD are BSF/BSR without BMI1/LZCNT
     for (features, all) in [(0, true), (ALL, false)] {
         TEST_FEATURES.with(|f| f.set(features));
         TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(all));
@@ -226,7 +226,7 @@ fn simd_decode_corpus() {
                     matches!(
                         x,
                         Err(DecodeError::InvalidOpcode | DecodeError::UnknownOpcode(_))
-                    ),
+                    ) || features != 0 && x.as_ref().is_ok_and(|d| d.encoding.implemented()),
                     "{features:x} {bits} {bytes:02X?}: {x:?}"
                 );
             }

@@ -203,6 +203,7 @@ pub fn validate(d: &HelperDescriptor) -> Result<(), &'static str> {
 /// two XMM operands and MXCSR/x87 backing, modify only the destination XMM and
 /// FP backing, and cannot call host observers after the CR0 task guard succeeds.
 /// Integer/FLAGS conversions and every memory form retain the full contract.
+/// The SSSE3 XMM forms read and write only the XMM operands.
 pub fn xmm_register_operands(
     region: &crate::ir::hir::Region,
     args: &[crate::ir::ids::ValueId],
@@ -275,6 +276,9 @@ pub fn xmm_register_operands(
             | 0xF30F5F
             | 0xF30FC2
             | 0xF30FE6
+            | 0x660F3800..=0x660F380B
+            | 0x660F381C..=0x660F381E
+            | 0x660F3A0F
     ) {
         return None;
     }

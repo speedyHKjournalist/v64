@@ -7,7 +7,10 @@ use super::{
     memory::{self, Fault},
     state,
 };
-use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem, xstate};
+use crate::cpu::{
+    cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
+    instructions_0f3a as sem3a, xstate,
+};
 use crate::softfloat::F80;
 
 extern "C" {
@@ -2142,8 +2145,49 @@ unsafe fn x87(d: &Decoded) -> Result<bool, Fault> {
 
 /// Returns false only for instructions outside this semantic family. A true
 /// result commits RIP; exceptions leave the faulting RIP and destination intact.
+/// SSSE3 (0F 38 and PALIGNR, 0F 3A 0F): the MMX forms without prefix, the
+/// XMM forms with 66. The semantics are crate::cpu::simd_int's.
+unsafe fn ssse3(d: &Decoded) -> Result<bool, Fault> {
+    let base = d.base_opcode();
+    if !matches!(base, 0x0F3800..=0x0F380B | 0x0F381C..=0x0F381E | 0x0F3A0F)
+        || !matches!(d.opcode >> 24, 0 | 0x66)
+    {
+        return Ok(false);
+    }
+    let xmm = d.opcode >> 24 == 0x66;
+    let r = d.reg.unwrap_or(0);
+    let imm = d.immediate.map_or(0, |i| i.value as i32);
+    guard(xmm)?;
+    if xmm {
+        let v = std::mem::transmute(source(d, 128, true, false)?);
+        if base == 0x0F3A0F {
+            sem3a::instr_660F3A0F(v, r as i32, imm);
+        }
+        else {
+            sem38::ssse3_xmm(base as u8, v, r as i32);
+        }
+    }
+    else {
+        let v = source(d, 64, false, true)? as u64;
+        if base == 0x0F3A0F {
+            sem3a::instr_0F3A0F(v, (r & 7) as i32, imm);
+        }
+        else {
+            sem38::ssse3_mmx(base as u8, v, (r & 7) as i32);
+        }
+    }
+    Ok(true)
+}
+
 pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
     if x87(d)? {
+        state::write_rip(d.next.0);
+        return Ok(true);
+    }
+    if matches!(d.base_opcode() >> 8, 0x0F38 | 0x0F3A) {
+        if !ssse3(d)? {
+            return Ok(false);
+        }
         state::write_rip(d.next.0);
         return Ok(true);
     }
