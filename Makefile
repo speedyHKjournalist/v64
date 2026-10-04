@@ -1476,8 +1476,10 @@ isa-hot-forms:
 
 # The decode rules of the plan (5.2) on the 32-bit interpreter and both IR
 # code generators: mandatory prefixes, F2/F3 order, #UD for unlisted prefixes
-decode-rules-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+decode-rules-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-ir-test.wasm build/v86-ir-test-release.wasm
 	node tests/rust/decode_rules.mjs
 	node tests/rust/decode_rules.mjs build/v86-debug.wasm
+	node tests/ir/decode/vex_modes.mjs
+	node tests/ir/decode/vex_modes.mjs build/v86-ir-test-release.wasm
 
 .PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests

@@ -402,7 +402,8 @@ function gen_table()
     let by_opcode0f = Object.create(null);
     const by_map = { "0F38": Object.create(null), "0F3A": Object.create(null) };
 
-    for(let o of x86_table)
+    // (VEX rows: src/rust/cpu/vex.rs decodes the VEX prefix and selects them)
+    for(let o of x86_table.filter(o => !o.vex))
     {
         const map = opcode_map(o.opcode);
         const table = map === "0F" ? by_opcode0f : map === "" ? by_opcode : by_map[map];

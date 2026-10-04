@@ -1,8 +1,9 @@
 // Decode rules shared by the 32-bit interpreter and both IR code generators
 // (docs/simd-xsave-plan.md 5.2): which row the 66/F2/F3 prefixes select
-// (decode_rules::mandatory_variant), the order of repeated F2/F3, and #UD for
-// a mandatory prefix without a row of its own. Each case runs in the
-// interpreter, then hot under Tier-0 and under the region tiers.
+// (decode_rules::mandatory_variant), the order of repeated F2/F3, #UD for a
+// mandatory prefix without a row of its own, the three-byte maps and VEX.
+// Each case runs in the interpreter, then hot under Tier-0 and under the
+// region tiers. (tests/ir/decode/vex_modes.mjs: C4/C5 by mode.)
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
@@ -177,16 +178,46 @@ try
         [0x0F, 0x38, 0x10, 0xC1], [0x0F, 0x38, 0xFF, 0xC1], [0x0F, 0x3A, 0xFF, 0xC1, 0x00], // no row
     ];
     await expect_undefined(three_byte);
-    const featured = await create_machines({ cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "MOVBE"] });
+
+    // VEX (C4/C5 with a register ModRM byte in protected mode): #UD until the
+    // semantics come, with and without the features; so are 66/F2/F3/LOCK
+    // before VEX, VEX.vvvv other than 1111b where it is no operand, the
+    // reserved maps and opcodes without rows
+    const vex = [
+        [0xC5, 0xF8, 0x77], [0xC4, 0xE1, 0x7C, 0x77],                 // vzeroupper, vzeroall
+        [0xC4, 0xE2, 0x79, 0x18, 0x00], [0xC4, 0xE2, 0x78, 0xF2, 0xC1], // vbroadcastss xmm0, [eax]; andn
+        [0xC4, 0xE3, 0x79, 0x4A, 0xC1, 0x20], [0xC4, 0xE2, 0x61, 0x90, 0x14, 0x88], // vblendvps, vpgatherdd
+        [0xC5, 0xF0, 0x77], [0x66, 0xC5, 0xF8, 0x77], [0xF3, 0xC5, 0xF8, 0x77], [0xF0, 0xC5, 0xF8, 0x77],
+        [0xC4, 0xE0, 0x78, 0x77], [0xC5, 0xF8, 0x00],
+    ];
+    await expect_undefined(vex);
+    // ... and with a memory ModRM byte, LES and LDS
+    const far = [0x8C, 0x1D, ...u32(DATA + 4), 0xC7, 0x05, ...u32(DATA), ...u32(0x12345678),
+        0xC4, 0x1D, ...u32(DATA), 0x89, 0x1D, ...u32(OUT), 0x8C, 0x05, ...u32(OUT + 4),
+        0xC5, 0x0D, ...u32(DATA), 0x89, 0x0D, ...u32(OUT + 8), 0x1E, 0x07];
+    await run_all(loop(far));
+    for(const vm of machines)
+    {
+        assert.equal(word(vm, OUT), 0x12345678, "LES");
+        assert.equal(word(vm, OUT + 4) & 0xFFFF, word(vm, DATA + 4) & 0xFFFF, "LES: ES");
+        assert.equal(word(vm, OUT + 8), 0x12345678, "LDS");
+    }
+    // TZCNT and LZCNT without their features: BSF and BSR
+    const bit_scans = [[0xF3, 0x0F, 0xBC, 0xC1], [0xF3, 0x0F, 0xBD, 0xC1]];
+    await run_all(loop([0xB9, ...u32(0x810000), ...bit_scans[0], 0xA3, ...u32(OUT), ...bit_scans[1], 0xA3, ...u32(OUT + 4)]));
+    for(const vm of machines) assert.deepEqual([word(vm, OUT), word(vm, OUT + 4)], [16, 23], "F3 BSF, F3 BSR");
+
+    const featured = await create_machines({ cpu_type: "x86_64", cpu_features: "x86-64-v3" });
     try
     {
-        await expect_undefined(three_byte, featured);
+        await expect_undefined([...three_byte, ...vex, ...bit_scans], featured);
     }
     finally
     {
         for(const vm of featured) await vm.destroy();
     }
-    console.log(`PASS: ${three_byte.length} three-byte map encodings raise #UD, with and without their features`);
+    console.log(`PASS: ${three_byte.length} three-byte map and ${vex.length} VEX encodings raise #UD with and without their features; ` +
+        "LES/LDS with a memory operand; F3 0F BC/BD are BSF/BSR without BMI1/LZCNT and #UD with them until P10");
 }
 finally
 {

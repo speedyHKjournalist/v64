@@ -109,7 +109,11 @@ fn lift_inner(
         }
         offset += i.length as usize;
         count += 1;
-        if cfg!(debug_assertions) && i.encoding.opcode == 0x0FAE && i.encoding.group == 2 && i.ea.is_none() {
+        if cfg!(debug_assertions)
+            && i.encoding.opcode == 0x0FAE
+            && i.encoding.group == 2
+            && i.ea.is_none()
+        {
             return Err(CompileError::Unsupported("baseline debug prefix assertion"));
         }
         if i.prefixes.lock && !super::exchange::lock_supported(&i) {

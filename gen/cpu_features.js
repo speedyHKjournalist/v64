@@ -113,28 +113,32 @@ function check_forms()
 
 /**
  * The opcode table (gen/x86_table.js) has a row with the right feature for
- * every legacy form of gen/isa_forms.json in the three-byte maps, and no others
+ * every legacy form of gen/isa_forms.json in the three-byte maps, and no
+ * others; one for TZCNT and LZCNT; and one per VEX form (gen/vex_table.js)
  */
 async function check_table(forms)
 {
     const { default: table, opcode_map, opcode_prefix } = await import("./x86_table.js");
     const key = (map, prefix, byte) => `${map} ${prefix || "-"} ${byte.toString(16).padStart(2, "0")}`;
+    const legacy = f => f.encoding === "legacy" && (f.map === "0F38" || f.map === "0F3A" || f.isa[0] === "BMI1" || f.isa[0] === "LZCNT");
     const expected = new Map();
-    for(const f of forms.forms)
+    for(const f of forms.forms.filter(legacy))
     {
-        if(f.encoding !== "legacy" || f.map !== "0F38" && f.map !== "0F3A") continue;
         expected.set(key(f.map, f.prefix === "NP" ? "" : f.prefix, f.byte), f.isa[0]);
     }
     const actual = new Map();
     for(const e of table)
     {
         const map = opcode_map(e.opcode);
-        if(map !== "0F38" && map !== "0F3A") continue;
+        if(map !== "0F38" && map !== "0F3A" && !(map === "0F" && (e.feature === "BMI1" || e.feature === "LZCNT"))) continue;
         const prefix = opcode_prefix(e.opcode);
         actual.set(key(map, prefix ? prefix.toString(16).toUpperCase() : "", e.opcode & 0xFF), e.feature);
     }
-    assert.deepEqual([...actual].sort(), [...expected].sort(), "gen/x86_table.js three-byte maps and gen/isa_forms.json disagree");
-    return actual.size;
+    assert.deepEqual([...actual].sort(), [...expected].sort(), "gen/x86_table.js legacy rows and gen/isa_forms.json disagree");
+    const vex = table.filter(e => e.vex).map(e => `${e.form} ${e.feature}`).sort();
+    assert.deepEqual(vex, forms.forms.filter(f => f.encoding === "VEX").map(f => `${f.id} ${f.isa[0]}`).sort(),
+        "gen/x86_table.js VEX rows and gen/isa_forms.json disagree");
+    return actual.size + vex.length;
 }
 
 /** Each feature's bit is set in the contract exactly where it is open */
@@ -189,10 +193,13 @@ function rust_consts()
     lines.push(`pub const COUNT: usize = ${bits.length};`);
     lines.push(`pub const ALL: u32 = ${hex((2 ** bits.length) - 1)};`);
     lines.push("/// The other features each one requires (the always-present ones left out)");
+    lines.push("#[rustfmt::skip]");
     lines.push(`pub const REQUIRES: [u32; COUNT] = [${bits.map(f => mask(f.requires)).join(", ")}];`);
     lines.push("/// Where CPUID reports each: (leaf, subleaf, register: 0 = EAX .. 3 = EDX, bit)");
+    lines.push("#[rustfmt::skip]");
     lines.push(`pub const CPUID: [(u32, u32, usize, u32); COUNT] = [${bits.map(f => `(${hex(f.cpuid[0])}, ${f.cpuid[1]}, ${REGISTERS.indexOf(f.cpuid[2])}, ${f.cpuid[3]})`).join(", ")}];`);
     lines.push("/// The lowest maximum basic leaf (cpuid_level) that lets CPUID report each");
+    lines.push("#[rustfmt::skip]");
     lines.push(`pub const MIN_CPUID_LEVEL: [u32; COUNT] = [${bits.map(f => hex(min_level(f))).join(", ")}];`);
     lines.push("/// Features the legacy (x86) profile may not have");
     lines.push(`pub const X86_64_ONLY: u32 = ${mask(bits.filter(f => f.profiles && !f.profiles.includes("x86")).map(f => f.name))};`);
@@ -253,7 +260,7 @@ async function main()
         else if(current !== content) fs.writeFileSync(file, content);
     }
     const open = FEATURES.filter(f => (f.open || []).length && f.milestone !== "existing").map(f => f.name);
-    console.log(`${FEATURES.length} features, ${forms.total} forms (${rows} three-byte map rows agree); open: ${open.length ? open.join(" ") : "none"} (contract agrees)`);
+    console.log(`${FEATURES.length} features, ${forms.total} forms (${rows} rows agree); open: ${open.length ? open.join(" ") : "none"} (contract agrees)`);
 }
 
 if(process.argv[1] && path.resolve(process.argv[1]) === url.fileURLToPath(import.meta.url))

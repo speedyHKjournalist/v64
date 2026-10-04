@@ -485,6 +485,9 @@ helper。快路径的准入条件：
 | 控制与清零 | VLDMXCSR/VSTMXCSR、VZEROUPPER/VZEROALL |
 
 P5 先完成 128 位与统一三操作数/上半策略，再在 P6 完成全部合法 256 位形式。
+IR 解码器不知道 CPU 模式，总把寄存器形式的 C4/C5 解成 VEX（P1c）。VEX 行有了语义后，
+IR 和 Tier-0 的代码要在运行时检查实模式和虚拟 8086 模式并 #UD，与解释器一致
+（BMI1/BMI2 的 P10 同样需要）。
 VEX.128 的许多整数形式属于 AVX，256 位整数扩展通常属于 AVX2；每个形式按能力定义
 判断，不能仅凭 mnemonic 或目的宽度猜测。并非所有标量、点积和转换都存在 L=1 形式。
 
@@ -900,3 +903,39 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   都 #UD。回归：`nasmtests` 15629/15629，x64 opcode 矩阵与 iced 对拍不变，P0 列出的其余目标
   和 `make rust-test` 全部通过。P1a 漏改的单元测试 `rep_contract_and_progress_maps`（仍要求
   debug 构建拒绝 `F2 F3` 重复前缀）在此更新。
+
+### P1c：VEX 解码（2026-10-04）
+
+- **VEX 行**：`gen/vex_table.js` 从 `gen/isa_forms.json` 为 688 个 VEX 形式各生成一行，键为
+  `0xC4_MM_PP_OO`（map 1–3、pp、opcode）。每行记录接受的 VEX 字段与操作数编码：VEX.L、VEX.W
+  （WIG32：W 只在 64 位模式有效）、vvvv 是否为操作数（否则必须为 1111b）、只在 64 位模式、
+  is4、VSIB、gather 的寄存器互异要求、GPR 指令（BMI1/BMI2，异常类型 13，不要求 AVX 状态），
+  以及只有寄存器或只有内存形式。生成时检查任一编码最多被一行接受。IR 目录增至 1711 个编码；
+  测试用的 `FORMS` 表给出每个 VEX 行对应的 iced-x86 形式名。
+- **共用规则**（`decode_rules`）：`is_vex`（64 位模式总是 VEX，其他模式看下一字节的 bits 7:6
+  是否为 11b）、`Vex` 字段解码、`vex_row`（按 ModRM.reg 组、寄存器/内存形式、L、W、模式选行）、
+  `vex_valid`（vvvv、VSIB 要求 SIB 且不能是 16 位寻址）、`vex_prefixes_ud`。三个解码器都调用
+  它们：32 位解释器经 LES/LDS 寄存器形式进入 `cpu/vex.rs`；IR 解码器的 `decode_vex`；x64 解码器
+  的 `decode_vex`（64 位模式下 VEX.R/X/B 扩展寄存器，W1 行的通用寄存器操作数为 64 位）。
+- **#UD 位置**（三个解码器一致）：VEX 前有 66、F2、F3、LOCK 或 REX，在 VEX 第一个字节后 #UD；
+  保留 map 和没有行的键，在 opcode 字节后 #UD；没有行接受这些字段、能力缺失或尚无语义，在
+  ModRM 后 #UD；gather 的目的、索引、掩码寄存器重复，在 SIB 后 #UD。实模式和虚拟 8086 模式
+  没有 VEX，C4/C5 的寄存器形式仍是 LES/LDS 的 #UD；IR 解码器不知道模式，VEX 行有语义后需要
+  运行时模式检查（P5）。取指故障先于 #UD，只取解码需要的字节。
+- **与 iced 的分歧**：16/32 位模式下三字节 VEX 第 2 字节的 bit 6（vvvv 最高位）按 SDM 2.3.5.6
+  忽略，也不参与“必须为 1111b”的检查（QEMU 相同）；iced 仍要求它为 1。P1d 的差分登记这一项。
+- **TZCNT/LZCNT**：表中 `F3 0F BC`、`F3 0F BD` 两行分别属于 BMI1 和 LZCNT。没有能力时 F3 被
+  忽略，按 BSF/BSR 执行；有能力时在 P10 之前 #UD。
+- **测试**：只在 cargo test 中有效的 `TEST_DECODE_UNIMPLEMENTED` 让解码器把尚无语义的行当作已
+  实现，用来检查长度、操作数和拒绝条件。IR 解码与 x64 解码的单元测试从每个 VEX 行自己的编码
+  解出该行（x64 覆盖三种模式），并检查 L/W/vvvv 改变后的选行、VSIB、prefix 和取指顺序。
+  `tests/ir/decode/vex_modes.mjs` 在实模式、虚拟 8086、16/32 位保护模式下单步解释器，覆盖
+  LES/LDS、VEX 与取指故障顺序；`decode_rules.mjs` 在解释器、Tier-0 和 regions 上验证 12 个 VEX
+  编码、LES/LDS 内存形式以及 TZCNT/LZCNT 的两种行为。IR 的 far-control 夹具去掉了寄存器形式的
+  LES/LDS（它们现在是 VEX 前缀），invalid-form 夹具跳过 VEX 行。
+- **回归**：`make rust-test`（361 个）、`x64-decode-tests`、opcode 矩阵（不变）、`nasmtests`
+  15629/15629、`ir-decode-contract-tests`、`ir-tier0-tests`、`ir-differential-tests` 和
+  `decode-rules-tests` 等全部通过。`ir-segment-tests` 的 `segments.mjs:93`（描述符 accessed 位
+  写故障应当陷出编译代码）失败，在本计划开始前的 `8d2b7c04` 上同样失败，与本计划无关，另行
+  处理。P1a–P1b 留下的 rustfmt 差异一并修正，`gen/cpu_features.js` 生成的数组加
+  `#[rustfmt::skip]`。

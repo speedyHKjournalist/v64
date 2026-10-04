@@ -61,15 +61,33 @@ pub struct Encoding {
     pub feature: u32,
     /// #UD even with the feature (docs/simd-xsave-plan.md: semantics later)
     pub unimplemented: bool,
+    /// A VEX row: the VEX fields it accepts (decode_rules::vex; 0: a legacy row)
+    pub vex: u16,
     pub is_string: bool,
 }
 impl Encoding {
     /// The row exists on this machine (its feature is present)
     pub fn exists(&self) -> bool { self.feature == 0 || crate::cpu::features::has(self.feature) }
+    /// The row has its semantics (not Encoding::unimplemented). cargo test
+    /// may decode the others as if it had (TEST_DECODE_UNIMPLEMENTED).
+    pub fn implemented(&self) -> bool {
+        #[cfg(test)]
+        if TEST_DECODE_UNIMPLEMENTED.with(|t| t.get()) {
+            return true;
+        }
+        !self.unimplemented
+    }
+}
+#[cfg(test)]
+thread_local! {
+    /// cargo test: decode rows whose semantics come later as if they had
+    /// them, for their length, operands and the encodings they refuse
+    pub static TEST_DECODE_UNIMPLEMENTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectiveAddress {
     pub base: Option<u8>,
+    /// (a vector register for a VSIB operand, Encoding::vex)
     pub index: Option<u8>,
     pub scale: u8,
     pub displacement: u32,
@@ -126,8 +144,12 @@ pub struct DecodedInstruction {
     /// #UD right after the ModRM byte, before EA, immediate and task-switch
     /// guards: a mandatory prefix without a row of its own (decode_rules::
     /// Variant::Undefined), a row whose CPUID feature is absent, or one whose
-    /// semantics come later (Encoding::unimplemented)
+    /// semantics come later (Encoding::unimplemented). For VEX: also no row
+    /// accepting the VEX fields (decode_rules::vex_row, vex_valid), and a
+    /// 66/F2/F3/LOCK prefix, which is #UD right after the first VEX byte.
     pub early_ud: bool,
+    /// The VEX prefix (C4/C5 with a register ModRM byte, decode_rules::is_vex)
+    pub vex: Option<crate::decode_rules::Vex>,
     pub flow: Flow,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,6 +177,18 @@ impl Cursor<'_> {
         self.position += 1;
         Ok(byte)
     }
+    /// The next byte, which the instruction includes whatever it is
+    fn peek(&self) -> Result<u8, DecodeStop> {
+        if self.position == 15 {
+            return Err(DecodeStop::TooLong);
+        }
+        self.bytes
+            .get(self.position)
+            .copied()
+            .ok_or(DecodeStop::Incomplete {
+                available: self.bytes.len(),
+            })
+    }
     fn integer(&mut self, bytes: u8) -> Result<u32, DecodeStop> {
         let mut value = 0;
         for shift in 0..bytes {
@@ -165,7 +199,16 @@ impl Cursor<'_> {
 }
 
 pub fn encodings() -> &'static [Encoding] { generated::ENCODINGS }
-fn candidates(opcode: u32) -> &'static [Encoding] {
+/// The iced-x86 form (gen/isa_forms.json) of a VEX row
+#[cfg(test)]
+pub fn form(e: &Encoding) -> &'static str {
+    let i = generated::FORMS
+        .binary_search_by_key(&e.id, |&(id, _)| id)
+        .unwrap();
+    generated::FORMS[i].1
+}
+/// The rows of a catalogue key
+pub fn candidates(opcode: u32) -> &'static [Encoding] {
     match generated::OPCODES.binary_search_by_key(&opcode, |&(key, _, _)| key) {
         Ok(i) => {
             let (_, start, end) = generated::OPCODES[i];
@@ -205,6 +248,13 @@ pub fn decode(
             None => break byte,
         }
     };
+    // C4/C5 with a register ModRM byte: a VEX prefix. This decoder does not
+    // know the mode; in real and virtual-8086 mode, which have no VEX, the
+    // interpreter raises #UD for the register form of LES/LDS instead, so a
+    // VEX row needs that guard when it gets semantics.
+    if (first == 0xC4 || first == 0xC5) && crate::decode_rules::is_vex(c.peek()?, false) {
+        return decode_vex(c, bytes, pc, linear, default_32, prefixes, first);
+    }
     // 0F 38 and 0F 3A lead to the three-byte maps (key 0x0F38xx, 0x0F3Axx)
     let base_opcode = if first == 0x0F {
         let second = c.read()?;
@@ -226,10 +276,20 @@ pub fn decode(
         (0xF2, crate::prefix::PREFIX_F2),
         (0xF3, crate::prefix::PREFIX_F3),
     ];
-    let shift = if base_opcode > 0xFFFF { 24 } else if first == 0x0F { 16 } else { 8 };
+    let shift = if base_opcode > 0xFFFF {
+        24
+    }
+    else if first == 0x0F {
+        16
+    }
+    else {
+        8
+    };
     // the prefixes select instructions where a row of the opcode says so; a
     // row whose feature is absent is not available
-    let mut refining = candidates(base_opcode).iter().fold(0, |m, row| m | row.refining);
+    let mut refining = candidates(base_opcode)
+        .iter()
+        .fold(0, |m, row| m | row.refining);
     let mut family = candidates(base_opcode).first();
     for (prefix, mask) in variants {
         if prefix != 0x66 || first == 0x0F {
@@ -246,7 +306,12 @@ pub fn decode(
         | if prefixes.rep { crate::prefix::PREFIX_F3 } else { 0 };
     use crate::decode_rules::{Variant, REFINING_REP};
     let variant = crate::decode_rules::mandatory_variant(flags, available, refining);
-    let refused = if flags & REFINING_REP != 0 { flags & REFINING_REP } else { flags & crate::prefix::PREFIX_66 };
+    let refused = if flags & REFINING_REP != 0 {
+        flags & REFINING_REP
+    }
+    else {
+        flags & crate::prefix::PREFIX_66
+    };
     let opcode = match variant {
         Variant::Prefixed(selected) => variants
             .iter()
@@ -272,8 +337,13 @@ pub fn decode(
         .find(|row| row.group < 0 || modrm.map(|m| (m >> 3 & 7) as i8) == Some(row.group));
     let early_ud = variant == Variant::Undefined
         || rows.is_empty()
-        || row.is_some_and(|row| !row.exists() || row.unimplemented);
-    let encoding = if early_ud { row.unwrap_or(first) } else { row.ok_or(DecodeStop::UnknownEncoding { opcode })? };
+        || row.is_some_and(|row| !row.exists() || !row.implemented());
+    let encoding = if early_ud {
+        row.unwrap_or(first)
+    }
+    else {
+        row.ok_or(DecodeStop::UnknownEncoding { opcode })?
+    };
     let ea = match modrm {
         Some(m) if encoding.e && m < 0xC0 && !encoding.ignore_mod && !early_ud => {
             Some(decode_ea(&mut c, m, address_size, prefixes.segment)?)
@@ -335,8 +405,132 @@ pub fn decode(
         extra_immediate,
         baseline_ud,
         early_ud,
+        vex: None,
         flow,
     })
+}
+
+/// A VEX instruction: `first` (C4 or C5) and its prefixes are read
+fn decode_vex(
+    mut c: Cursor<'_>,
+    bytes: &[u8],
+    pc: GuestEip,
+    linear: LinearAddress,
+    default_32: bool,
+    prefixes: Prefixes,
+    first: u8,
+) -> Result<DecodedInstruction, DecodeStop> {
+    use crate::decode_rules::{vex_prefixes_ud, vex_row, vex_valid, Vex};
+    let address_size = if default_32 != prefixes.address { 32 } else { 16 };
+    let byte1 = c.read()?;
+    let flags = if prefixes.operand { crate::prefix::PREFIX_66 } else { 0 }
+        | if prefixes.repne { crate::prefix::PREFIX_F2 } else { 0 }
+        | if prefixes.rep { crate::prefix::PREFIX_F3 } else { 0 }
+        | if prefixes.lock { crate::prefix::PREFIX_LOCK } else { 0 };
+    let instruction = |c: &Cursor<'_>,
+                       encoding,
+                       modrm,
+                       modrm_offset,
+                       ea,
+                       immediate,
+                       baseline_ud,
+                       early_ud,
+                       vex| {
+        let mut raw = [0; 15];
+        raw[..c.position].copy_from_slice(&bytes[..c.position]);
+        DecodedInstruction {
+            encoding,
+            instruction_pc: pc,
+            next_pc: GuestEip(pc.0.wrapping_add(c.position as u32)),
+            linear_pc: linear,
+            bytes: raw,
+            length: c.position as u8,
+            // (VEX instructions on general-purpose registers are 32-bit
+            // outside 64-bit mode)
+            operand_size: 32,
+            address_size,
+            prefixes,
+            modrm,
+            modrm_offset,
+            ea,
+            immediate,
+            extra_immediate: None,
+            baseline_ud,
+            early_ud,
+            vex,
+            flow: if baseline_ud { Flow::Boundary } else { Flow::Next },
+        }
+    };
+    // 66, F2, F3 or LOCK before VEX: #UD at the first VEX byte, where the
+    // interpreter's LES/LDS (whose ModRM byte it is) checks LOCK
+    if vex_prefixes_ud(flags) {
+        let les = &candidates(first as u32)[0];
+        return Ok(instruction(
+            &c, les, None, None, None, None, true, true, None,
+        ));
+    }
+    let v =
+        if first == 0xC4 { Vex::three(byte1, c.read()?, false) } else { Vex::two(byte1, false) };
+    let key = v.key(c.read()?);
+    let rows = candidates(key);
+    // (a key without rows, including the reserved maps, is unknown: #UD at
+    // the opcode byte when run)
+    let family = rows
+        .first()
+        .ok_or(DecodeStop::UnknownEncoding { opcode: key })?;
+    let modrm_offset = if family.fetch_modrm { Some(c.position as u8) } else { None };
+    let modrm = if family.fetch_modrm { Some(c.read()?) } else { None };
+    let Some(row) = vex_row(rows, v, modrm, false)
+        .filter(|row| row.exists() && row.implemented() && vex_valid(row, v, modrm, address_size))
+    else {
+        let row = vex_row(rows, v, modrm, false).unwrap_or(family);
+        return Ok(instruction(
+            &c,
+            row,
+            modrm,
+            modrm_offset,
+            None,
+            None,
+            true,
+            true,
+            Some(v),
+        ));
+    };
+    use crate::decode_rules::vex;
+    // (a VSIB index names a vector register, xmm4/ymm4 included)
+    let vsib_index = || bytes[modrm_offset.unwrap() as usize + 1] >> 3 & 7;
+    let vsib = row.vex & vex::VSIB != 0;
+    let ea = match modrm {
+        Some(m) if m < 0xC0 => {
+            let mut ea = decode_ea(&mut c, m, address_size, prefixes.segment)?;
+            if vsib {
+                ea.index = Some(vsib_index());
+            }
+            Some(ea)
+        },
+        _ => None,
+    };
+    let immediate = match row.immediate {
+        ImmediateKind::Byte => Some(c.read()? as u32),
+        ImmediateKind::None => None,
+        _ => unreachable!("VEX rows have no other immediates"),
+    };
+    // destination, index and mask registers differ (gathers)
+    let baseline_ud = row.vex & vex::UNIQUE != 0 && {
+        let (reg, mask, index) = (modrm.unwrap() >> 3 & 7, v.vvvv, vsib_index());
+        reg == index || mask == index || reg == mask
+    };
+    Ok(instruction(
+        &c,
+        row,
+        modrm,
+        modrm_offset,
+        ea,
+        immediate,
+        baseline_ud,
+        false,
+        Some(v),
+    ))
 }
 
 fn decode_ea(

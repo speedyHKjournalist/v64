@@ -20,3 +20,4 @@ pub mod smm;
 pub mod sse_instr;
 pub mod string;
 pub mod topology;
+pub mod vex;

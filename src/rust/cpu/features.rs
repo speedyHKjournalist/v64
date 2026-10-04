@@ -25,10 +25,13 @@ pub const XSAVES: u32 = 1 << 15;
 pub const COUNT: usize = 16;
 pub const ALL: u32 = 0xFFFF;
 /// The other features each one requires (the always-present ones left out)
+#[rustfmt::skip]
 pub const REQUIRES: [u32; COUNT] = [0, SSSE3, SSE4_1, 0, XSAVE | SSE4_2, AVX, AVX, AVX, 0, 0, 0, 0, XSAVE, XSAVE, XSAVE, XSAVEC];
 /// Where CPUID reports each: (leaf, subleaf, register: 0 = EAX .. 3 = EDX, bit)
+#[rustfmt::skip]
 pub const CPUID: [(u32, u32, usize, u32); COUNT] = [(0x1, 0, 2, 9), (0x1, 0, 2, 19), (0x1, 0, 2, 20), (0x1, 0, 2, 26), (0x1, 0, 2, 28), (0x7, 0, 1, 5), (0x1, 0, 2, 12), (0x1, 0, 2, 29), (0x7, 0, 1, 3), (0x7, 0, 1, 8), (0x80000001, 0, 2, 5), (0x1, 0, 2, 22), (0xD, 1, 0, 0), (0xD, 1, 0, 1), (0xD, 1, 0, 2), (0xD, 1, 0, 3)];
 /// The lowest maximum basic leaf (cpuid_level) that lets CPUID report each
+#[rustfmt::skip]
 pub const MIN_CPUID_LEVEL: [u32; COUNT] = [0x1, 0x1, 0x1, 0xD, 0x1, 0x7, 0x1, 0x1, 0x7, 0x7, 0x1, 0x1, 0xD, 0xD, 0xD, 0xD];
 /// Features the legacy (x86) profile may not have
 pub const X86_64_ONLY: u32 = LZCNT;
@@ -63,7 +66,10 @@ pub fn all() -> u32 {
 #[no_mangle]
 pub unsafe fn set_cpu_features(features: u32) {
     dbg_assert!(features & !ALL == 0);
-    dbg_assert!(valid(features, crate::cpu::instructions_0f::long_mode_capable()));
+    dbg_assert!(valid(
+        features,
+        crate::cpu::instructions_0f::long_mode_capable()
+    ));
     FEATURES = features;
 }
 #[no_mangle]
@@ -98,12 +104,25 @@ mod tests {
         assert!(valid(0, false) && valid(ALL, true));
         assert!(!valid(SSE4_1, false), "SSE4.1 requires SSSE3");
         assert!(valid(SSSE3 | SSE4_1 | SSE4_2, false));
-        assert!(!valid(AVX, true) && !valid(AVX | XSAVE, true) && valid(AVX | XSAVE | SSSE3 | SSE4_1 | SSE4_2, true));
-        assert!(!valid(LZCNT, false) && valid(LZCNT, true), "LZCNT needs the extended leaves of the x86-64 profile");
-        assert!(valid(BMI1 | BMI2 | MOVBE, false), "general-purpose extensions stand alone");
+        assert!(
+            !valid(AVX, true)
+                && !valid(AVX | XSAVE, true)
+                && valid(AVX | XSAVE | SSSE3 | SSE4_1 | SSE4_2, true)
+        );
+        assert!(
+            !valid(LZCNT, false) && valid(LZCNT, true),
+            "LZCNT needs the extended leaves of the x86-64 profile"
+        );
+        assert!(
+            valid(BMI1 | BMI2 | MOVBE, false),
+            "general-purpose extensions stand alone"
+        );
         assert_eq!(CPUID[SSSE3.trailing_zeros() as usize], (1, 0, 2, 9));
         assert_eq!(CPUID[AVX2.trailing_zeros() as usize], (7, 0, 1, 5));
-        assert_eq!(CPUID[LZCNT.trailing_zeros() as usize], (0x8000_0001, 0, 2, 5));
+        assert_eq!(
+            CPUID[LZCNT.trailing_zeros() as usize],
+            (0x8000_0001, 0, 2, 5)
+        );
         assert_eq!(MIN_CPUID_LEVEL[XSAVE.trailing_zeros() as usize], 0xD);
         assert_eq!(MIN_CPUID_LEVEL[BMI2.trailing_zeros() as usize], 7);
     }

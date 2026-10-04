@@ -180,6 +180,8 @@ export const STATICS = {
     // the CPU features of docs/simd-xsave-plan.md this machine has;
     // TEST_FEATURES replaces them per thread under cargo test
     "cpu/features.rs": { FEATURES: "machine", TEST_FEATURES: "debug" },
+    // cargo test only: decode rows whose semantics come later
+    "ir/frontend/decode.rs": { TEST_DECODE_UNIMPLEMENTED: "debug" },
     // the chipset's SMRAM control (Q35 MCH: G_SMRAME, D_OPEN) and TSEG; per
     // instance: the TSEG generation its fast RAM limit reflects
     "cpu/smm.rs": { SMRAM_CONTROL: "machine", TSEG: "machine", TSEG_SEEN: "cache" },
@@ -188,7 +190,7 @@ export const STATICS = {
     "cpu/mmio_ram.rs": { TABLE: "machine" },
     "cpu/pic.rs": { PIC: "machine" },
     "ir/debug.rs": { AUDIT: "debug", RECORDS: "debug" },
-    "ir/frontend/encodings.rs": { ENCODINGS: "machine", OPCODES: "machine" },
+    "ir/frontend/encodings.rs": { ENCODINGS: "machine", OPCODES: "machine", FORMS: "debug" },
     "ir/runtime/cache.rs": {
         // compiled code and lookup caches; hits re-check the live TLB and CPU context
         CACHE: "machine", COLLECTION_PENDING: "machine", FAST: "machine", FAST_CHAINS: "machine", FAST_HITS: "debug",

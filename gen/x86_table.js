@@ -1,5 +1,7 @@
 // http://ref.x86asm.net/coder32.html
 
+import { VEX_ROWS, is_vex_key } from "./vex_table.js";
+
 const zf = 1 << 6;
 const of = 1 << 11;
 const cf = 1 << 0;
@@ -61,6 +63,7 @@ const TESTS_ASSUME_INTEL = false;
 //   not exist: its encoding is #UD, or runs the row a prefix does not select
 // unimplemented: #UD even with the feature (docs/simd-xsave-plan.md: the
 //   semantics come in later phases)
+// vex: a VEX row (gen/vex_table.js: key 0xC4_MM_PP_OO, the VEX fields it accepts)
 // block_boundary: may change eip in a way not handled by the jit
 // no_next_instruction: jit will stop analysing after instruction (e.g., unconditional jump, ret)
 const encodings = [
@@ -441,6 +444,9 @@ const encodings = [
 
     { opcode: 0x0FBC, os: 1, e: 1, mask_flags: of | sf | af | pf | cf, custom: 1 }, // bsf
     { opcode: 0x0FBD, os: 1, e: 1, mask_flags: of | sf | af | pf | cf, custom: 1 },
+    // tzcnt, lzcnt: without the feature F3 is ignored (bsf, bsr)
+    { opcode: 0xF30FBC, os: 1, e: 1, custom: 1, skip: 1, feature: "BMI1", unimplemented: 1 },
+    { opcode: 0xF30FBD, os: 1, e: 1, custom: 1, skip: 1, feature: "LZCNT", unimplemented: 1 },
 
     // note: overflow flag only undefined if shift is > 1
     { opcode: 0x0FA4, os: 1, e: 1, custom: 1, imm8: 1, mask_flags: af | of }, // shld
@@ -912,22 +918,25 @@ for(let i = 0; i < 8; i++)
     );
 }
 
-/** The opcode map of a key: "", "0F", "0F38" or "0F3A" */
+/** The opcode map of a key: "", "0F", "0F38", "0F3A", or "VEX0F", "VEX0F38", "VEX0F3A" */
 export function opcode_map(opcode)
 {
+    if(is_vex_key(opcode)) return "VEX" + ["", "0F", "0F38", "0F3A"][opcode >>> 16 & 0xFF];
     if((opcode >>> 8 & 0xFFFF) === 0x0F38) return "0F38";
     if((opcode >>> 8 & 0xFFFF) === 0x0F3A) return "0F3A";
     return (opcode >>> 8 & 0xFF) === 0x0F ? "0F" : "";
 }
-/** The mandatory prefix of a key (0x66, 0xF2, 0xF3, or 0) */
+/** The mandatory prefix of a key (0x66, 0xF2, 0xF3, or 0; VEX.pp is part of a VEX key) */
 export function opcode_prefix(opcode)
 {
+    if(is_vex_key(opcode)) return 0;
     const map = opcode_map(opcode);
     return map === "0F38" || map === "0F3A" ? opcode >>> 24 : map === "0F" ? opcode >>> 16 & 0xFF : opcode >>> 8 & 0xFF;
 }
 /** The key without its prefix: the opcode byte with the bytes of its map */
 export function opcode_family(opcode)
 {
+    if(is_vex_key(opcode)) return opcode;
     const map = opcode_map(opcode);
     return opcode & (map === "0F38" || map === "0F3A" ? 0xFFFFFF : map === "0F" ? 0xFFFF : 0xFF);
 }
@@ -938,6 +947,9 @@ encodings.sort((e1, e2) => {
     const o2 = MAP_ORDER[opcode_map(e2.opcode)] << 8 | e2.opcode & 0xFF;
     return o1 - o2 || e1.fixed_g - e2.fixed_g;
 });
+
+// (the VEX rows come sorted)
+encodings.push(...VEX_ROWS);
 
 const result = Object.freeze(encodings.map(entry => Object.freeze(entry)));
 export default result;
