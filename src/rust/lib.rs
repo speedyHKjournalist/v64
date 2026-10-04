@@ -22,6 +22,9 @@ mod jit;
 mod leb;
 mod page;
 mod prefix;
+#[cfg(test)]
+#[path = "../../tests/decode/simd_corpus.rs"]
+mod simd_corpus;
 mod softfloat;
 mod state_flags;
 mod wasmgen;

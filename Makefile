@@ -893,6 +893,7 @@ platform-release-gate:
 # Alpine ISO on first use and run for several minutes on the interpreter.
 x64-decode-tests: state-layout-check
 	cargo test x64::
+	cargo test simd_corpus -- --nocapture
 	CARGO_TARGET_DIR=build/x64-oracle-target cargo run --manifest-path tests/x64/oracle/Cargo.toml --release
 
 x64-system-tests: build/v86-debug.wasm
