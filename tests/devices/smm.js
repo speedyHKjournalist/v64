@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-// System management mode on the Q35 machine (docs/q35-ahci-sata-plan.md,
-// P6), with SeaBIOS: its SMM setup (SMBASE relocated to 0xA0000, SMRAM
+// System management mode on the Q35 machine (docs/q35.md), with
+// SeaBIOS: its SMM setup (SMBASE relocated to 0xA0000, SMRAM
 // closed with G_SMRAME), the state save area in QEMU's 32-bit layout, SMRAM
 // visibility (the VGA window outside SMM, RAM in SMM and with D_OPEN), an SMI
 // with a handler of the test's own that only executes RSM (the state comes

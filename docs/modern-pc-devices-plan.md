@@ -6,8 +6,8 @@
 USB 大容量存储、受限 WebUSB 直通、HD Audio、e1000/e1000e，以及 OVMF、Secure Boot
 和 TPM 2.0。默认保留旧机器配置；新增能力采用显式选项，验证后再组合成现代 PC 配置。
 
-本计划与 [Q35 AHCI SATA 计划](q35-ahci-sata-plan.md) 共用平台、PCI、MMIO、中断与存储
-基础。Q35 在当前工作区仍是计划，不能作为已经存在的实现。USB、音频和网卡可先在现有
+本计划与 Q35（[q35.md](q35.md)、[ahci.md](ahci.md)、[sata.md](sata.md)）共用平台、PCI、MMIO、
+中断与存储基础；Q35 已经实现。USB、音频和网卡可先在现有
 i440FX 平台验证；最终现代 PC 集成以 Q35 为主。本文面向 x86/x86-64，ARM64 的固件和
 设备接入另见 [ARM64 virt 与 Android 16 计划](arm64-virt-android16-plan.md)。
 

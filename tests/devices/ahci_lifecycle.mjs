@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AHCI commands with disk I/O in flight (docs/q35-ahci-sata-plan.md): the
+// AHCI commands with disk I/O in flight (docs/ahci.md): the
 // hard disk is an embedder's asynchronous buffer whose reads and writes
 // complete 100 ms later.
 // - a machine reset while a READ DMA is in flight: no data reaches RAM, no

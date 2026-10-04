@@ -249,7 +249,13 @@ export function start_cpu_worker()
         "read_memory": (offset, length) => emulator.read_memory(offset, length).slice(),
         "write_memory": (bytes, offset) => emulator.write_memory(bytes, offset),
         "memory_dump": () => emulator.v86.cpu.mem8.slice(),
-        "disk": name => new Promise(resolve => disk(name).get_buffer(bytes => resolve(bytes?.slice(0)))),
+        "disk": name => {
+            const buffer = disk(name);
+            // (a local file read in parts, which has no buffer: the file with
+            // the blocks written, a File the page gets without a copy)
+            if(buffer.get_as_file) return buffer.get_as_file(buffer.file.name);
+            return new Promise(resolve => buffer.get_buffer(bytes => resolve(bytes?.slice(0))));
+        },
         "set_fda": file => emulator.set_fda(file), "set_fdb": file => emulator.set_fdb(file),
         "set_cdrom": file => emulator.set_cdrom(file),
         "eject_fda": () => emulator.eject_fda(), "eject_fdb": () => emulator.eject_fdb(),

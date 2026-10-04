@@ -671,7 +671,7 @@ export interface V86Options {
      * Windows 9x compatibility mode) only through system management mode,
      * two SMIs per call, so such guests are better off on "i440fx". A
      * snapshot only restores into an emulator of the same machine type. See
-     * docs/q35-ahci-sata-plan.md.
+     * docs/q35.md.
      * @default "i440fx"
      */
     machine_type?: "i440fx" | "q35";

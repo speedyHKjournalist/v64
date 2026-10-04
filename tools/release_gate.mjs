@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Release gate (the release levels of docs/acpi.md, docs/x86-64.md,
-// docs/multicore.md and docs/q35-ahci-sata-plan.md): runs the acceptance targets of each release level,
+// docs/multicore.md and docs/q35.md): runs the acceptance targets of each release level,
 // records per target the command,
 // exit status, duration and log tail, together with the commit, the
 // uncommitted changes, the toolchain and the host, and writes
@@ -48,7 +48,7 @@ const LEVELS = {
     "R-extended-memory": [
         ["extended-memory-tests"], ["x64-extended-guest-tests", true],
     ],
-    // machine_type "q35": chipset, ACPI tables, AHCI (docs/q35-ahci-sata-plan.md)
+    // machine_type "q35": chipset, ACPI tables, AHCI (docs/q35.md, docs/ahci.md)
     "R-q35": [
         ["acpi-table-tests"], ["q35-device-tests"], ["q35-guest-tests", true], ["q35-hotplug-tests", true],
     ],

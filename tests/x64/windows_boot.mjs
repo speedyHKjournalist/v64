@@ -44,8 +44,8 @@
 // (same WIN_* machine settings; the session is signed in, the launcher runs).
 // WIN_RATES=<s>: every <s> seconds, the SVGA3D commands per second
 // ("svga3d-rates": presents among them, for frame rates).
-// WIN_MACHINE=q35: the Q35 machine (AHCI; Windows boots from it only with
-// storahci enabled, see docs/q35-ahci-sata-plan.md), with WIN_HPET=1 the
+// WIN_MACHINE=q35: the Q35 machine (AHCI; a Windows installed on IDE may need
+// its storahci driver enabled first, see docs/ahci.md), with WIN_HPET=1 the
 // HPET, WIN_ROOT_PORTS=<n> PCI Express root ports, WIN_SMBUS=1 the SMBus.
 // WIN_PCIE_DEVICE=<port>: a virtio device (Windows 8.1 has no driver for it)
 // behind that root port, its hot plug slot empty at boot; "pcieattach <port>"
