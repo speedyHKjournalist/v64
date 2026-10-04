@@ -256,6 +256,15 @@ export function start_cpu_worker()
         "eject_cdrom": () => emulator.eject_cdrom(),
         "attach_sata_drive": (port, file, options) => emulator.attach_sata_drive(port, file || null, options),
         "detach_sata_drive": port => emulator.detach_sata_drive(port),
+        "attach_pcie_device": port => emulator.attach_pcie_device(port),
+        // (answered once the removal started: one through the attention
+        // button waits for the guest, and the commands after it must not;
+        // its end comes as the result for done_id)
+        "detach_pcie_device": (port, options, done_id) => {
+            emulator.detach_pcie_device(port, options).then(
+                () => send("result", { "id": done_id, "value": undefined }),
+                error => send("result", { "id": done_id, "error": String(error?.stack || error) }));
+        },
         "get_disk_fda": () => emulator.get_disk_fda()?.slice() || null, "get_disk_fdb": () => emulator.get_disk_fdb()?.slice() || null,
         "create_file": (name, bytes) => emulator.create_file(name, bytes),
         "read_file": async name => (await emulator.read_file(name))?.slice(),

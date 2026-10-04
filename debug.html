@@ -175,6 +175,18 @@
             </tr>
 
             <tr>
+                <td><label for="machine_type">Machine type</label></td>
+                <td>
+                    <select id="machine_type">
+                        <option value="i440fx" selected>i440FX (IDE)</option>
+                        <option value="q35">Q35 (AHCI, PCI Express)</option>
+                    </select><br>
+                    <small>Q35 puts the hard disks and the CD-ROM on an AHCI (SATA) controller, and has ACPI, an HPET and an SMBus controller. The guest needs an AHCI driver
+                    (a Windows installed on i440FX: enable its storahci driver first)</small>
+                </td>
+            </tr>
+
+            <tr>
                 <td><label for="graphics_adapter">Graphics adapter</label></td>
                 <td>
                     <select id="graphics_adapter">
@@ -352,7 +364,7 @@
     Cores: <span id="info_execution"></span><br>
     <br>
     <div id="info_storage" style="display: none">
-        <b>IDE device<span id="ide_type"></span></b><br>
+        <b><span id="storage_bus">IDE</span> device<span id="ide_type"></span></b><br>
         Sectors read: <span id="info_storage_sectors_read">0</span><br>
         Bytes read: <span id="info_storage_bytes_read">0</span><br>
         Sectors written: <span id="info_storage_sectors_written">0</span><br>

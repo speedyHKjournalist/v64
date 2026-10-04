@@ -50,7 +50,7 @@ const LEVELS = {
     ],
     // machine_type "q35": chipset, ACPI tables, AHCI (docs/q35-ahci-sata-plan.md)
     "R-q35": [
-        ["acpi-table-tests"], ["q35-device-tests"], ["q35-guest-tests", true],
+        ["acpi-table-tests"], ["q35-device-tests"], ["q35-guest-tests", true], ["q35-hotplug-tests", true],
     ],
 };
 

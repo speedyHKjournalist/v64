@@ -306,6 +306,11 @@ export function VirtIO(cpu, options)
 
     this.config_has_changed = false;
     this.config_generation = 0;
+    /**
+     * Counts the times the function left the bus (a hot plug slot emptied
+     * or switched off): requests taken before are not completed after
+     */
+    this.plug_generation = 0;
 
     /** @type {!Array<VirtQueue>} */
     this.queues = [];
@@ -1038,6 +1043,15 @@ VirtIO.prototype.init_capabilities = function(capabilities, shared_memory)
 };
 
 /**
+ * The function left the bus (src/pci.js set_function_present): what the
+ * driver handed over before is gone with the card
+ */
+VirtIO.prototype.on_unplug = function()
+{
+    this.plug_generation++;
+};
+
+/**
  * The capabilities' memory BAR moved (the BIOS or the OS placed it)
  * @param {number} base
  */
@@ -1400,6 +1414,8 @@ VirtQueue.prototype.count_requests = function()
 VirtQueue.prototype.has_request = function()
 {
     if(!this.enabled || this.virtio.device_status & VIRTIO_STATUS_DEVICE_NEEDS_RESET) return false;
+    // (off the bus: a hot plug slot that is empty or switched off)
+    if(this.virtio.pci.absent[this.virtio.pci_id]) return false;
     try
     {
         return this.count_requests() !== 0;
@@ -1439,7 +1455,7 @@ VirtQueue.prototype.pop_request = function()
  */
 VirtQueue.prototype.push_reply = function(bufchain)
 {
-    if(!bufchain.valid) return;
+    if(!bufchain.valid || bufchain.plug_generation !== this.virtio.plug_generation) return;
     dbg_assert(this.used_addr, "VirtQueue addresses must be configured before use");
     dbg_assert(this.num_staged_replies < this.size, "VirtQueue replies must not exceed queue size");
 
@@ -1457,6 +1473,12 @@ VirtQueue.prototype.push_reply = function(bufchain)
  */
 VirtQueue.prototype.flush_replies = function()
 {
+    if(this.virtio.pci.absent[this.virtio.pci_id])
+    {
+        // (off the bus: nothing reaches the driver's rings)
+        this.num_staged_replies = 0;
+        return;
+    }
     dbg_assert(this.used_addr, "VirtQueue addresses must be configured before use");
 
     if(this.num_staged_replies === 0)
@@ -1620,6 +1642,8 @@ function VirtQueueBufferChain(virtqueue, head_idx)
     this.length_written = 0;
     this.length_writable = 0;
     this.valid = false;
+    /** (see VirtIO.plug_generation) */
+    this.plug_generation = virtqueue.virtio.plug_generation;
 
     try
     {
@@ -1756,6 +1780,11 @@ VirtQueueBufferChain.prototype.get_next_blob = function(dest_buffer)
  */
 VirtQueueBufferChain.prototype.set_next_blob = function(src_buffer)
 {
+    if(this.plug_generation !== this.virtio.plug_generation)
+    {
+        // (the function left the bus since: its buffers are not its own anymore)
+        return 0;
+    }
     let src_offset = 0;
     let remaining = src_buffer.length;
 

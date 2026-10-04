@@ -13,18 +13,22 @@
 //! mode with 4 GiB segment limits, without paging (and long mode: EFER is
 //! cleared). RSM restores the state, and a new SMBASE from the save area.
 //!
-//! SMRAM: compatible SMRAM (0xA0000-0xBFFFF) is RAM instead of the VGA
-//! window while the core is in SMM and the chipset has G_SMRAME set, or while
-//! software opened it (D_OPEN). TSEG, the top of the RAM below 4 GiB that the
-//! chipset sets aside (ESMRAMC.T_EN with G_SMRAME), is RAM in SMM; elsewhere
-//! it reads as all ones and ignores writes. Those addresses stay mapped
-//! (crate::cpu::memory's out-of-line paths decide; TSEG lowers the fast RAM
-//! limit, and the x64 bus decodes it, crate::x64::physical), so nothing in
-//! them is cached or compiled.
+//! SMRAM, as the Q35 MCH decodes it (src/q35.js passes its controls):
+//! - compatible SMRAM, the RAM behind the VGA window (0xA0000-0xBFFFF): in SMM
+//!   with G_SMRAME (D_CLS keeps data accesses on the VGA window then, but not
+//!   instruction fetches), and for everyone while software opened it (D_OPEN);
+//! - high SMRAM (ESMRAMC.H_SMRAME): instead of that, the same RAM at
+//!   0xFEDA0000-0xFEDBFFFF, under the same conditions (SMBASE may point there);
+//! - TSEG, the top of the RAM below 4 GiB (ESMRAMC.T_EN with G_SMRAME): RAM in
+//!   SMM; elsewhere it reads as all ones and ignores writes.
+//! Those addresses stay mapped (crate::cpu::memory's out-of-line paths
+//! decide; TSEG lowers the fast RAM limit, and the x64 bus decodes it,
+//! crate::x64::physical), so nothing in them is cached or compiled.
 //!
-//! Not supported: high SMRAM (H_SMRAME), D_CLS, and the auto HALT and I/O
-//! instruction restart fields (RSM after an SMI in HLT resumes after it, as
-//! in QEMU).
+//! An SMI that interrupts HLT sets the auto HALT restart field of the save
+//! area; RSM returns to the halt state if the handler left it set. Not
+//! supported: the I/O instruction restart field (cleared at the SMI, ignored
+//! by RSM), and ESMRAMC.E_SMERR, as in QEMU.
 
 use crate::cpu::apic;
 use crate::cpu::cpu::*;
@@ -42,11 +46,20 @@ const SMM_ACTIVE: u32 = 1 << 0;
 const SMM_NMI_BLOCKED: u32 = 1 << 1;
 /// The state is in the 64-bit save map (RSM reads the map the SMI wrote)
 const SMM_MAP_64: u32 = 1 << 2;
+/// The SMI interrupted HLT (the auto HALT restart field may return to it)
+const SMM_HALTED: u32 = 1 << 3;
 
 /// The chipset's SMRAM control, the same for every core
 pub static mut SMRAM_CONTROL: u8 = 0;
 pub const SMRAM_G_SMRAME: u8 = 1 << 0;
 pub const SMRAM_D_OPEN: u8 = 1 << 1;
+pub const SMRAM_H_SMRAME: u8 = 1 << 2;
+pub const SMRAM_D_CLS: u8 = 1 << 3;
+
+/// High SMRAM: compatible SMRAM's RAM at this address, with H_SMRAME
+const HIGH_SMRAM: u32 = 0xFEDA_0000;
+const COMPATIBLE_SMRAM: u32 = 0xA0000;
+const SMRAM_SIZE: u32 = 0x20000;
 
 /// TSEG: [base, end), empty without it. `generation` counts changes, so that
 /// cores in workers take them over (sync_worker).
@@ -65,7 +78,7 @@ pub static mut TSEG: Tseg = Tseg {
 static mut TSEG_SEEN: u32 = 0;
 
 /// The chipset's SMRAM control changed (src/q35.js): G_SMRAME (bit 0),
-/// D_OPEN (bit 1)
+/// D_OPEN (bit 1), H_SMRAME (bit 2), D_CLS (bit 3)
 #[no_mangle]
 pub unsafe fn smram_set_control(value: u8) {
     *crate::parallel::machine(&raw mut SMRAM_CONTROL) = value;
@@ -129,16 +142,30 @@ pub unsafe fn smm_active() -> bool { *smm_state & SMM_ACTIVE != 0 }
 /// An SMI is waiting that this core can take
 pub unsafe fn smi_deliverable() -> bool { !smm_active() && apic::smi_pending() }
 
-/// Whether an access to `addr` (`bytes` long) goes to the RAM of SMRAM:
-/// compatible SMRAM behind the VGA window, TSEG in SMM
+/// Where an access to `addr` (`bytes` long) reaches the RAM of SMRAM:
+/// compatible SMRAM behind the VGA window, its alias at 0xFEDA0000 (high
+/// SMRAM), TSEG in SMM; None elsewhere. `fetch`: an instruction fetch (D_CLS
+/// does not keep those from compatible SMRAM).
 #[inline(always)]
-pub unsafe fn smram_hit(addr: u32, bytes: u32) -> bool {
-    if addr >= 0xA0000 && addr.wrapping_add(bytes) <= 0xC0000 {
+pub unsafe fn smram_ram(addr: u32, bytes: u32, fetch: bool) -> Option<u32> {
+    let last = addr.wrapping_add(bytes - 1);
+    if addr >= COMPATIBLE_SMRAM && last < COMPATIBLE_SMRAM + SMRAM_SIZE {
         let control = *crate::parallel::machine(&raw mut SMRAM_CONTROL);
-        control & SMRAM_D_OPEN != 0 || control & SMRAM_G_SMRAME != 0 && smm_active()
+        (control & SMRAM_H_SMRAME == 0
+            && (control & SMRAM_D_OPEN != 0
+                || control & SMRAM_G_SMRAME != 0
+                    && smm_active()
+                    && (fetch || control & SMRAM_D_CLS == 0)))
+            .then_some(addr)
+    }
+    else if addr >= HIGH_SMRAM && last < HIGH_SMRAM + SMRAM_SIZE {
+        let control = *crate::parallel::machine(&raw mut SMRAM_CONTROL);
+        (control & SMRAM_H_SMRAME != 0
+            && (control & SMRAM_D_OPEN != 0 || control & SMRAM_G_SMRAME != 0 && smm_active()))
+        .then_some(addr - HIGH_SMRAM + COMPATIBLE_SMRAM)
     }
     else {
-        in_tseg(addr) && in_tseg(addr.wrapping_add(bytes - 1)) && smm_active()
+        (in_tseg(addr) && in_tseg(last) && smm_active()).then_some(addr)
     }
 }
 
@@ -183,9 +210,29 @@ unsafe fn load_segment(segment: i32, selector: u32, base: u64, limit: u32, attri
     *segment_is_null.offset(segment as isize) = false;
 }
 
-/// The save area, at SMBASE + 0x8000 (offsets 0x7E00-0x7FFF)
+/// The save area: the RAM of SMBASE + 0x8000 (offsets 0x7E00-0x7FFF)
 #[derive(Clone, Copy)]
 struct SaveArea(u32);
+
+/// The save area of SMBASE `base`: in RAM, or in compatible SMRAM where high
+/// SMRAM shows it (with `checked`, only if the chipset enables high SMRAM for
+/// SMM). None: SMBASE + 0xFE00-0xFFFF is neither.
+unsafe fn save_area(base: u32, checked: bool) -> Option<SaveArea> {
+    let first = base.checked_add(0xFE00)?;
+    let last = base.checked_add(0xFFFF)?;
+    if (last as u64) < *memory_size as u64 {
+        Some(SaveArea(base + 0x8000))
+    }
+    else if first >= HIGH_SMRAM && last < HIGH_SMRAM + SMRAM_SIZE {
+        let control = *crate::parallel::machine(&raw mut SMRAM_CONTROL);
+        let enabled =
+            control & (SMRAM_G_SMRAME | SMRAM_H_SMRAME) == SMRAM_G_SMRAME | SMRAM_H_SMRAME;
+        (enabled || !checked).then_some(SaveArea(base + 0x8000 - HIGH_SMRAM + COMPATIBLE_SMRAM))
+    }
+    else {
+        None
+    }
+}
 impl SaveArea {
     unsafe fn read32(self, offset: u32) -> u32 {
         memory::read32_no_mmap_check(self.0 + offset) as u32
@@ -212,8 +259,10 @@ fn segment_slots_32(segment: i32) -> (u32, u32) {
     (selector, cache)
 }
 
-/// The 32-bit save area (revision 0x20000)
-unsafe fn save_32(area: SaveArea) {
+/// The 32-bit save area (revision 0x20000); `halted`: the SMI interrupted
+/// HLT (the auto HALT restart field at 0x7F02, next to the I/O instruction
+/// restart field at 0x7F00)
+unsafe fn save_32(area: SaveArea, halted: bool) {
     area.write32(0x7FFC, *cr as u32);
     area.write32(0x7FF8, *cr.offset(3) as u32);
     area.write32(0x7FF4, get_eflags() as u32);
@@ -247,14 +296,16 @@ unsafe fn save_32(area: SaveArea) {
         area.write32(cache, attributes(segment));
     }
     area.write32(0x7F14, *cr.offset(4) as u32);
+    area.write32(0x7F00, (halted as u32) << 16);
     area.write32(0x7EFC, SMM_REVISION_32);
     area.write32(0x7EF8, *smbase);
 }
 
 /// The 64-bit save area (revision 0x20064): ES-GS at 0x7E00 + 16 * n
-/// (selector, attributes, limit, base), the descriptor tables and TR, EFER,
-/// RIP, RFLAGS, the debug and control registers, the 16 GPRs
-unsafe fn save_64(area: SaveArea) {
+/// (selector, attributes, limit, base), the descriptor tables and TR, the I/O
+/// instruction and auto HALT restart bytes (0x7EC8, 0x7EC9, as AMD64 has
+/// them), EFER, RIP, RFLAGS, the debug and control registers, the 16 GPRs
+unsafe fn save_64(area: SaveArea, halted: bool) {
     let descriptor = |offset: u32, segment: i32| {
         area.write32(
             offset,
@@ -272,6 +323,7 @@ unsafe fn save_64(area: SaveArea) {
     area.write32(0x7E84, *idtr_size as u32);
     area.write64(0x7E88, x64::read_idtr_base());
     descriptor(0x7E90, TR);
+    area.write32(0x7EC8, (halted as u32) << 8);
     area.write64(0x7ED0, x64::efer());
 
     for register in 0..16 {
@@ -291,32 +343,34 @@ unsafe fn save_64(area: SaveArea) {
 
 /// An SMI on this core (crate::cpu::apic::take_smi): save the state, run
 /// the handler. False if the core is in SMM already (an SMI is not nested)
-/// or SMBASE is not in RAM (the SMI is dropped).
+/// or the save area is not in RAM or enabled high SMRAM (the SMI is dropped).
 #[no_mangle]
 pub unsafe fn smm_enter() -> bool {
     if smm_active() {
         return false;
     }
     let base = *smbase;
-    let area = SaveArea(base.wrapping_add(0x8000));
-    if (area.0 as u64) + 0x8000 > *memory_size as u64 {
-        dbg_log!("SMI: SMBASE {:x} is not in RAM, dropped", base);
+    let Some(area) = save_area(base, true)
+    else {
+        dbg_log!("SMI: SMBASE {:x} is not in RAM or SMRAM, dropped", base);
         return false;
-    }
+    };
     dbg_log!("SMI: enter SMM, SMBASE {:x}", base);
     let long = layout_64();
+    let halted = *in_hlt;
     if long {
-        save_64(area);
+        save_64(area, halted);
     }
     else {
-        save_32(area);
+        save_32(area, halted);
     }
 
     // SMM: NMIs blocked until RSM, interrupts off, real mode with 4 GiB
     // limits, no paging; with the 64-bit map, EFER cleared
     *smm_state = SMM_ACTIVE
         | if *nmi_blocked { SMM_NMI_BLOCKED } else { 0 }
-        | if long { SMM_MAP_64 } else { 0 };
+        | if long { SMM_MAP_64 } else { 0 }
+        | if halted { SMM_HALTED } else { 0 };
     *nmi_blocked = true;
     if *in_hlt {
         js::stop_idling();
@@ -487,9 +541,15 @@ unsafe fn restore_64(area: SaveArea) -> Restored {
 
 /// RSM: the state from the save area, out of SMM
 pub unsafe fn rsm() {
-    let area = SaveArea((*smbase).wrapping_add(0x8000));
+    // (the area the SMI saved to: SMBASE changes only here)
+    let area = save_area(*smbase, false).unwrap();
     dbg_log!("RSM: leave SMM, SMBASE {:x}", *smbase);
-    let restored = if *smm_state & SMM_MAP_64 != 0 { restore_64(area) } else { restore_32(area) };
+    let map_64 = *smm_state & SMM_MAP_64 != 0;
+    // auto HALT restart: back to HLT, if the SMI came there and the handler
+    // left the field set
+    let halt = *smm_state & SMM_HALTED != 0
+        && if map_64 { area.read32(0x7EC8) >> 8 & 1 } else { area.read32(0x7F00) >> 16 & 1 } != 0;
+    let restored = if map_64 { restore_64(area) } else { restore_32(area) };
 
     // derived state: the mode, the sizes of CS and SS, null data segments,
     // the TSS type, CPL (CS.RPL)
@@ -522,6 +582,11 @@ pub unsafe fn rsm() {
     entered_mode();
     if x64::efer() & x64::EFER_LMA == 0 && *cr.offset(4) & CR4_PAE != 0 && *cr & CR0_PG != 0 {
         load_pdpte(*cr.offset(3) & !0b1111);
+    }
+    if halt {
+        *in_hlt = true;
+        crate::cpu::execution::note_halt();
+        request_core_yield();
     }
     // an SMI or NMI that waited for RSM: taken at the start of the next slice
     if apic::smi_pending() || apic::nmi_pending() && !*nmi_blocked {

@@ -168,11 +168,18 @@ const PARALLEL_PORTS = [
  *     sleep_states: !Array<{state: number, slp_typ: number, supported: boolean}>,
  *     reserved_pci_slots: !Array<number>,
  *     pcie_root_ports: number,
+ *     root_port_devices: !Object<string, number>,
  *     hpet: boolean,
  *     smbus: boolean,
  * }}
  */
 export var Platform;
+
+/**
+ * The built-in devices that may sit behind a root port (their options'
+ * pcie_root_port), by their name in settings.root_port_devices
+ */
+export const ROOT_PORT_DEVICES = ["net", "virtio_9p", "virtio_console", "virtio_balloon"];
 
 /**
  * The machine type of the settings, validated
@@ -249,6 +256,29 @@ export function create_platform(settings, memory_size)
     {
         throw new Error("pcie_root_ports requires machine_type \"q35\"");
     }
+    // built-in devices behind root ports (settings.root_port_devices: their
+    // root port, and whether they start plugged in), one per port
+    const root_port_devices = {};
+    const taken = new Set();
+    for(const [name, placement] of Object.entries(settings.root_port_devices || {}))
+    {
+        const port = placement.port;
+        if(!ROOT_PORT_DEVICES.includes(name))
+        {
+            throw new Error("root_port_devices: unknown device " + JSON.stringify(name));
+        }
+        if(!(Number.isInteger(port) && port >= 0 && port < root_ports))
+        {
+            throw new Error(name + ": pcie_root_port must be the number of a root port (0 to pcie_root_ports - 1), got " +
+                port + (q35 ? "" : " (root ports need machine_type \"q35\")"));
+        }
+        if(taken.has(port))
+        {
+            throw new Error(name + ": root port " + port + " is taken by another device");
+        }
+        taken.add(port);
+        root_port_devices[name] = port;
+    }
     // Q35: ICH9's high precision event timer (settings.hpet) and SMBus
     // controller (settings.smbus)
     const hpet = !!settings.hpet;
@@ -302,6 +332,7 @@ export function create_platform(settings, memory_size)
         // the root ports at 00:1c.0 and up; behind port n is the bus that
         // pci_ids number n + 1
         pcie_root_ports: root_ports,
+        root_port_devices,
         hpet,
         smbus,
     };

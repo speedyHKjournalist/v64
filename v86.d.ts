@@ -349,7 +349,30 @@ type V86NetworkDevice =
          * @default 1500
          */
         mtu?: number;
-    };
+    } & PCIeRootPortPlacement;
+
+/**
+ * Where a built-in device goes on a machine_type "q35" machine (net_device,
+ * filesystem, virtio_console, virtio_balloon; virtio_devices descriptors
+ * have the same fields): behind a PCI Express root port instead of a slot of
+ * bus 0, as the card in the port's hot plug slot (see
+ * {@link V86.attach_pcie_device}, {@link V86.detach_pcie_device}).
+ */
+export interface PCIeRootPortPlacement {
+    /**
+     * Put the device behind PCI Express root port n (from 0, with
+     * pcie_root_ports above n), as device 0 of the port's secondary bus. One
+     * device per root port. The guest numbers the bus and opens the port's
+     * windows (SeaBIOS does). An NE2000 there gets its I/O ports from 0x1300.
+     */
+    pcie_root_port?: number;
+
+    /**
+     * false: the slot starts empty, attach_pcie_device plugs the device in.
+     * @default true
+     */
+    pcie_plugged?: boolean;
+}
 
 /**
  * Emulator instance constructor options.
@@ -579,7 +602,7 @@ export interface V86Options {
          * Use this to connect to a custom 9p server over websocket.
          */
         proxy_url?: string;
-    };
+    } & PCIeRootPortPlacement;
 
     /**
      * A textarea that will receive and send data to the emulated serial terminal (only browsers).
@@ -608,7 +631,7 @@ export interface V86Options {
      * Console adapter for virtio console.
      * Setting to true, creates virtio console device without adapter
      */
-    virtio_console?: ConsoleConfig;
+    virtio_console?: ConsoleConfig | (Partial<ConsoleConfig> & PCIeRootPortPlacement);
 
     /**
      * Emulator screen element (only browsers).
@@ -656,9 +679,13 @@ export interface V86Options {
     /**
      * machine_type "q35" only: the number of ICH9 PCI Express root ports
      * (00:1c.0 and up, 0 to 6). Each is a PCI-to-PCI bridge whose secondary
-     * bus can hold a device (virtio_devices: pcie_root_port); the guest
-     * numbers the buses and opens the bridges' windows itself (SeaBIOS does).
-     * No hot plug on them.
+     * bus can hold a device (pcie_root_port in the options of net_device,
+     * filesystem, virtio_console, virtio_balloon and virtio_devices); the
+     * guest numbers the buses and opens the bridges' windows itself (SeaBIOS
+     * does). Each port has a slot with PCI Express native hot plug (attention
+     * button, power controller, indicators, presence detect, data link layer
+     * events; MSI or INTx), which the ACPI tables give the guest through
+     * _OSC; see {@link V86.attach_pcie_device}.
      * @default 0
      */
     pcie_root_ports?: number;
@@ -737,7 +764,7 @@ export interface V86Options {
      * Create a virtio balloon device
      * @default false
      */
-    virtio_balloon?: boolean;
+    virtio_balloon?: boolean | PCIeRootPortPlacement;
 
     /**
      * Override the maximum supported cpuid level
@@ -842,6 +869,10 @@ export interface VirtioDeviceDescriptor {
     subsystem_device_id?: number;
     /** PCI slot (1-31). A stable slot keeps the guest's device instance. Default: the first free slot from 0x10. */
     pci_slot?: number;
+    /** Instead of pci_slot: behind this PCI Express root port (see {@link PCIeRootPortPlacement}). */
+    pcie_root_port?: number;
+    /** With pcie_root_port, false: the slot starts empty (see {@link PCIeRootPortPlacement}). */
+    pcie_plugged?: boolean;
     /** Base of four 256-byte I/O windows (256-byte aligned). Default: allocated from 0xE000. */
     io_base?: number;
     /** Device feature bits; VIRTIO_F_VERSION_1 (32) is added. */
@@ -854,7 +885,7 @@ export interface VirtioDeviceDescriptor {
     init?(device: VirtioDeviceHandle): void;
     /** The driver notified a queue. Only called after DRIVER_OK. */
     notify(queue: number): void;
-    /** The driver reset the device, or the machine reset. */
+    /** The driver reset the device, the machine reset, or the device starts afresh in its hot plug slot. */
     reset?(): void;
     /** Work the device still waits for from elsewhere (0 when none); saving waits for 0. */
     busy?(): number;
@@ -1068,6 +1099,42 @@ export class V86 {
      * @param port the port, 0-5
      */
     detach_sata_drive(port: number): void | Promise<void>;
+
+    /**
+     * Plug a card into the hot plug slot of a PCI Express root port of the
+     * Q35 machine: the device whose options put it behind that port
+     * (pcie_root_port), after it was pulled out or when it started out of
+     * the slot (pcie_plugged: false). The device starts afresh. Into a slot
+     * that is off (as empty slots are after reset, like QEMU's, unless the
+     * guest switched them on): presence detect changed and the attention
+     * button pressed, as QEMU does, and the guest switches the slot on (Linux
+     * and Windows do at once). Into a powered slot: presence detect changed
+     * and the link comes up. Guests need PCI Express native hot plug (Linux:
+     * pciehp). A snapshot holds which slots have their card in.
+     *
+     * @param port the root port, from 0
+     */
+    attach_pcie_device(port: number): Promise<void>;
+
+    /**
+     * Pull the card out of the hot plug slot of a PCI Express root port of
+     * the Q35 machine. By default as with the slot's attention button: the
+     * guest releases the device and switches the slot and its power indicator
+     * off, then the card leaves and the promise is fulfilled (Linux and
+     * Windows wait 5 seconds for a second press, which would cancel; a guest
+     * without hot plug never does).
+     * surprise: true pulls the card at once; reads from it then return all
+     * ones, as on real hardware. Linux (as of 6.18) does not survive that
+     * for a virtio device with a driver: its hot plug thread waits forever
+     * for the device's reset to finish. Windows 8.1 answers the button by
+     * switching the slot off at the end of the 5 seconds without stopping
+     * the device's driver first; a storage controller's removal then never
+     * finishes (devices without a driver come out fine).
+     *
+     * @param port the root port, from 0
+     * @param options surprise: pull the card out at once
+     */
+    detach_pcie_device(port: number, options?: { surprise?: boolean }): Promise<void>;
 
     /**
      * Send a sequence of scan codes to the emulated PS2 controller. A list of

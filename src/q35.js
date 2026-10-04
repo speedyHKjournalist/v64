@@ -236,18 +236,19 @@ Q35.prototype.mch_config_written = function(offset, size)
 
 /**
  * The CPU's view of SMRAM (src/rust/cpu/smm.rs): compatible SMRAM is RAM at
- * 0xA0000-0xBFFFF in SMM with G_SMRAME, and always with D_OPEN; TSEG (T_EN
- * with G_SMRAME), the top of the RAM below 4 GiB, is RAM in SMM only. As in
- * QEMU: TSEG_SZ 11 is the extended size (EXT_TSEG_MBYTES). (D_CLS, data in
- * SMM to the VGA window, and H_SMRAME, SMRAM at 0xFEDA0000, are not
- * implemented.)
+ * 0xA0000-0xBFFFF in SMM with G_SMRAME (with D_CLS, for instruction fetches
+ * only), and always with D_OPEN; with H_SMRAME, the same RAM is at
+ * 0xFEDA0000-0xFEDBFFFF instead (high SMRAM). TSEG (T_EN with G_SMRAME), the
+ * top of the RAM below 4 GiB, is RAM in SMM only. As in QEMU: TSEG_SZ 11 is
+ * the extended size (EXT_TSEG_MBYTES).
  */
 Q35.prototype.update_smram = function()
 {
     const smram = this.mch_space8[MCH_SMRAM];
     const esmramc = this.mch_space8[MCH_ESMRAMC];
     this.cpu.smram_set_control && this.cpu.smram_set_control(
-        (smram & SMRAM_G_SMRAME ? 1 : 0) | (smram & SMRAM_D_OPEN ? 2 : 0));
+        (smram & SMRAM_G_SMRAME ? 1 : 0) | (smram & SMRAM_D_OPEN ? 2 : 0) |
+        (esmramc & ESMRAMC_H_SMRAME ? 4 : 0) | (smram & SMRAM_D_CLS ? 8 : 0));
     const top = this.cpu.low_memory_size;
     let size = 0;
     if(esmramc & ESMRAMC_T_EN && smram & SMRAM_G_SMRAME)
@@ -256,7 +257,6 @@ Q35.prototype.update_smram = function()
     }
     this.cpu.smram_set_tseg && this.cpu.smram_set_tseg(top - size, top);
 };
-
 
 /** Map the ECAM window where PCIEXBAR puts it, or unmap it */
 Q35.prototype.update_ecam = function()

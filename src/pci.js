@@ -183,6 +183,19 @@ export function PCI(cpu)
     this.ecam_base = -1;
     this.ecam_size = 0;
 
+    /**
+     * Functions behind a hot plug slot that are not on the bus (the slot is
+     * empty or off, src/pcie_root_port.js), by pci_id: see set_function_present
+     * @type {!Array<boolean|undefined>}
+     */
+    this.absent = [];
+    /**
+     * The power-on configuration space of each function behind a bridge,
+     * which a card plugged into a hot plug slot has again
+     * @type {!Array<Int32Array|undefined>}
+     */
+    this.templates = [];
+
     // Configuration data port. Accesses wider than a byte are one config
     // access each, so that registers keep their access-width semantics.
     const data_port = offset => this.pci_addr32[0] + offset | 0;
@@ -325,6 +338,8 @@ PCI.prototype.get_state = function()
     state[262] = this.intx_levels.map((level, pci_id) => level ? pci_id : -1).filter(id => id >= 0);
     state[263] = this.asserted_irq_lines.map((irq, pci_id) => irq === undefined ? undefined : [pci_id, irq]).filter(e => e);
     state[264] = this.asserted_gsis.map((gsi, pci_id) => gsi === undefined ? undefined : [pci_id, gsi]).filter(e => e);
+    // functions of empty or switched-off hot plug slots
+    state[265] = this.absent.map((absent, pci_id) => absent ? pci_id : -1).filter(id => id >= 0);
 
     return state;
 };
@@ -442,6 +457,11 @@ PCI.prototype.set_state = function(state)
     {
         this.asserted_gsis[pci_id] = gsi;
     }
+    this.absent = [];
+    for(const pci_id of state[265] || [])
+    {
+        if(this.devices[pci_id]) this.absent[pci_id] = true;
+    }
 
     // devices behind bridges: decode and bus mastering as the restored bridges forward them
     this.devices.forEach((device, pci_id) => {
@@ -526,7 +546,7 @@ PCI.prototype.route_config = function(bdf)
                     return -1;
                 }
                 const pci_id = behind << 8 | bdf & 0xFF;
-                return this.device_spaces[pci_id] ? pci_id : -1;
+                return this.device_spaces[pci_id] && !this.absent[pci_id] ? pci_id : -1;
             }
             if(bus > secondary && bus <= subordinate)
             {
@@ -912,6 +932,10 @@ PCI.prototype.is_bus_master = function(bdf)
  */
 PCI.prototype.upstream_bus_master = function(pci_id)
 {
+    if(this.absent[pci_id])
+    {
+        return false;
+    }
     for(let bridge = this.parent_bridge(pci_id); bridge !== -1; bridge = this.parent_bridge(bridge))
     {
         if(!(this.get_command(bridge) & PCI_COMMAND_MASTER))
@@ -945,6 +969,10 @@ PCI.prototype.parent_bridge = function(pci_id)
  */
 PCI.prototype.upstream_forwards_memory = function(pci_id, base, size)
 {
+    if(this.absent[pci_id])
+    {
+        return false;
+    }
     const end = base + size - 1;
     for(let bridge = this.parent_bridge(pci_id); bridge !== -1; bridge = this.parent_bridge(bridge))
     {
@@ -978,6 +1006,10 @@ PCI.prototype.upstream_forwards_memory = function(pci_id, base, size)
  */
 PCI.prototype.upstream_forwards_io = function(pci_id, port, size)
 {
+    if(this.absent[pci_id])
+    {
+        return false;
+    }
     const end = port + size - 1;
     for(let bridge = this.parent_bridge(pci_id); bridge !== -1; bridge = this.parent_bridge(bridge))
     {
@@ -1246,6 +1278,10 @@ PCI.prototype.register_device = function(device)
     space.set(new Int32Array(new Uint8Array(device.pci_space).buffer));
     this.device_spaces[device_id] = space;
     this.devices[device_id] = device;
+    if(device_id >= 256)
+    {
+        this.templates[device_id] = space.slice();
+    }
 
     if((device.pci_space[0x0E] & 0x7F) === PCI_HEADER_TYPE_BRIDGE)
     {
@@ -1310,6 +1346,51 @@ PCI.prototype.register_device = function(device)
     }
 
     return space;
+};
+
+/**
+ * A function behind a hot plug slot comes or goes (src/pcie_root_port.js).
+ * Absent, nothing reaches it: configuration cycles, its BARs (the bridges do
+ * not forward to it), and it neither masters the bus (DMA, MSI) nor drives
+ * its pin. Arriving `fresh` (a card plugged in, or switched on), it has its
+ * power-on configuration space, its BARs where that has them, and the device
+ * is reset.
+ * @param {number} pci_id a function behind a bridge
+ * @param {boolean} present
+ * @param {boolean=} fresh
+ */
+PCI.prototype.set_function_present = function(pci_id, present, fresh)
+{
+    const device = this.devices[pci_id];
+    dbg_assert(device && pci_id >= 256);
+    dbg_log("PCI " + h(pci_id, 4) + " (" + device.name + "): " + (present ? "on the bus" : "off the bus"), LOG_PCI);
+    if(!present && !this.absent[pci_id])
+    {
+        device.on_unplug && device.on_unplug();
+    }
+    this.absent[pci_id] = !present;
+    if(present && fresh)
+    {
+        const template = /** @type {!Int32Array} */ (this.templates[pci_id]);
+        this.device_spaces[pci_id].set(template);
+        device.pci_bars.forEach((bar, i) => {
+            if(!bar) return;
+            const value = template[(0x10 >> 2) + i];
+            if(value & 1)
+            {
+                if(bar.on_move) this.move_io_bar(bar, value & ~3 & 0xFFFF);
+                else bar.assigned = value & ~1 & 0xFFFF;
+            }
+            else if(bar.on_move)
+            {
+                this.move_memory_bar(bar, value & ~0xF);
+            }
+        });
+        this.intx_levels[pci_id] = false;
+        device.reset && device.reset();
+    }
+    this.set_irq_level(pci_id, !!this.intx_levels[pci_id]);
+    this.upstream_changed(pci_id);
 };
 
 /**
@@ -1446,7 +1527,7 @@ PCI.prototype.set_irq_level = function(pci_id, level)
     }
 
     const disabled = space !== undefined && (space[1] & PCI_COMMAND_INTX_DISABLE) !== 0;
-    this.drive_intx(pci_id, level && !disabled);
+    this.drive_intx(pci_id, level && !disabled && !this.absent[pci_id]);
 };
 
 /**

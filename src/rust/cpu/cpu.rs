@@ -2205,7 +2205,8 @@ pub unsafe fn translate_address(
 pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPageFault<(u32, bool)> {
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     let user = *cpl == 3;
-    let refused = entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID;
+    let refused =
+        entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID;
     if crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0 {
         // (compatibility mode: as translate_address)
         if refused || *x64_cs_long != 0 {
@@ -2663,7 +2664,7 @@ unsafe fn read_imm8_uncached(eip: i32) -> OrPageFault<i32> {
     let phys = translate_address_read(eip)?;
     cache_fetch_page(eip, phys);
     // A remapped low RAM page is an open bus, never the high RAM backing
-    let data8 = memory::read8(phys);
+    let data8 = memory::fetch8(phys);
     *instruction_pointer = eip + 1;
     Ok(data8)
 }
@@ -3659,7 +3660,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32, budget: u32) {
             && (crate::x64::state::efer() & crate::x64::state::EFER_LMA == 0
                 || crate::x64::extended::aperture::contains(phys_addr))
         {
-            memory::read8(phys_addr)
+            memory::fetch8(phys_addr)
         }
         else {
             *memory::mem8.offset(phys_addr as isize) as i32

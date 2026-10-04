@@ -99,7 +99,13 @@ pub unsafe fn write_cr(index: usize, value: u64) -> Result<(), Fault> {
     }
     use crate::x64::pages::{COUNTERS, COUNT_CR0_WRITES, COUNT_CR_WRITES, COUNT_FULL_FLUSHES};
     COUNTERS[COUNT_CR_WRITES] += 1;
-    COUNTERS[COUNT_CR0_WRITES + if index == 0 { 0 } else if index == 3 { 1 } else { 2 }] += 1;
+    // (CR0, CR3, CR4)
+    let counter = match index {
+        0 => COUNT_CR0_WRITES,
+        3 => COUNT_CR0_WRITES + 1,
+        _ => COUNT_CR0_WRITES + 2,
+    };
+    COUNTERS[counter] += 1;
     let old = controls();
     let mut c = controls();
     c.write_cr(index, value)?;

@@ -859,6 +859,8 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[102] = this.devices.hpet;
     state[103] = [this.platform.machine, MACHINE_LAYOUT_VERSION];
     state[104] = this.devices.smbus;
+    // the root ports' hot plug slots
+    state[105] = (this.devices.pcie_root_ports || []).map(port => port.get_state());
     return state;
 };
 
@@ -1214,6 +1216,11 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.devices.hpet && state[102] && this.devices.hpet.set_state(state[102]);
     this.devices.smbus && state[104] && this.devices.smbus.set_state(state[104]);
     this.devices.pci && this.devices.pci.set_state(state[48]);
+    // (after the root ports' registers: snapshots from before hot plug have
+    // every card in)
+    (this.devices.pcie_root_ports || []).forEach((port, i) => {
+        port.set_state(state[105] && state[105][i] || [1, port.has_card(), false, false]);
+    });
 
     this.devices.pit && this.devices.pit.set_state(state[58]);
     this.devices.net && this.devices.net.set_state(state[59]);
@@ -2055,6 +2062,10 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
     {
         this.devices.pci.reset();
     }
+    for(const port of this.devices.pcie_root_ports || [])
+    {
+        port.reset();
+    }
     if(this.devices.acpi)
     {
         this.devices.acpi.reset();
@@ -2233,6 +2244,19 @@ CPU.prototype.create_q35_storage = function(settings, device_bus)
         { buffer: settings.cdrom, is_cdrom: true },
     ]);
     this.devices.cdrom = this.devices.ahci.disk_device("cdrom");
+};
+
+/**
+ * Where a built-in device goes when its options put it behind a PCI Express
+ * root port (pcie_root_port, platform.root_port_devices): device 0 on that
+ * port's secondary bus; undefined for its usual place
+ * @param {string} name
+ * @return {number|undefined}
+ */
+CPU.prototype.root_port_pci_id = function(name)
+{
+    const port = this.platform.root_port_devices[name];
+    return port === undefined ? undefined : this.devices.pcie_root_ports[port].pci_secondary_bus << 8;
 };
 
 /**
@@ -2953,32 +2977,34 @@ CPU.prototype.init = function(settings, device_bus)
 
         if(settings.net_device.type === "ne2k")
         {
-            this.devices.net = new Ne2k(this, device_bus, settings.preserve_mac_from_state_image, settings.mac_address_translation);
+            this.devices.net = new Ne2k(this, device_bus, settings.preserve_mac_from_state_image, settings.mac_address_translation,
+                0, this.root_port_pci_id("net"));
         }
         else if(settings.net_device.type === "virtio")
         {
-            this.devices.virtio_net = new VirtioNet(this, device_bus, settings.preserve_mac_from_state_image, settings.net_device.mtu);
+            this.devices.virtio_net = new VirtioNet(this, device_bus, settings.preserve_mac_from_state_image, settings.net_device.mtu,
+                this.root_port_pci_id("net"));
         }
 
         if(settings.fs9p)
         {
-            this.devices.virtio_9p = new Virtio9p(settings.fs9p, this, device_bus);
+            this.devices.virtio_9p = new Virtio9p(settings.fs9p, this, device_bus, this.root_port_pci_id("virtio_9p"));
         }
         else if(settings.handle9p)
         {
-            this.devices.virtio_9p = new Virtio9pHandler(settings.handle9p, this);
+            this.devices.virtio_9p = new Virtio9pHandler(settings.handle9p, this, this.root_port_pci_id("virtio_9p"));
         }
         else if(settings.proxy9p)
         {
-            this.devices.virtio_9p = new Virtio9pProxy(settings.proxy9p, this);
+            this.devices.virtio_9p = new Virtio9pProxy(settings.proxy9p, this, this.root_port_pci_id("virtio_9p"));
         }
         if(settings.virtio_console)
         {
-            this.devices.virtio_console = new VirtioConsole(this, device_bus);
+            this.devices.virtio_console = new VirtioConsole(this, device_bus, this.root_port_pci_id("virtio_console"));
         }
         if(settings.virtio_balloon)
         {
-            this.devices.virtio_balloon = new VirtioBalloon(this, device_bus);
+            this.devices.virtio_balloon = new VirtioBalloon(this, device_bus, this.root_port_pci_id("virtio_balloon"));
         }
 
         if(true)
@@ -2992,10 +3018,20 @@ CPU.prototype.init = function(settings, device_bus)
             this.devices.virtio_devices = create_virtio_devices(this, settings.virtio_devices);
         }
 
-        // the root ports' slots and links: is something behind them?
+        // the root ports' slots: the cards the options put behind them,
+        // plugged in unless pcie_plugged is false
+        const unplugged = new Set();
+        for(const placement of Object.values(settings.root_port_devices || {}))
+        {
+            if(!placement.plugged) unplugged.add(placement.port);
+        }
+        for(const descriptor of settings.virtio_devices || [])
+        {
+            if(descriptor["pcie_root_port"] !== undefined && descriptor["pcie_plugged"] === false) unplugged.add(descriptor["pcie_root_port"]);
+        }
         for(const port of this.devices.pcie_root_ports || [])
         {
-            port.set_present(this.devices.pci.device_spaces[port.pci_secondary_bus << 8] !== undefined);
+            port.setup(!unplugged.has(port.number));
         }
     }
 

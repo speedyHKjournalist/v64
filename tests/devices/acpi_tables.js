@@ -465,6 +465,39 @@ if(ACPIEXEC)
     });
 }
 
+if(ACPIEXEC)
+{
+    test("acpiexec (Q35): _OSC grants native PCI Express hot plug, SHPC, PME, AER and the PCI Express capability", () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "v86-acpi-"));
+        write_installed_tables(dir, { machine_type: "q35", pcie_root_ports: 2 });
+        const uuid = "(5B 4D DB 33 F7 1F 1C 40 96 57 74 41 C0 3D D7 66)";
+        const commands = [
+            // (support: everything; control asked: hot plug, SHPC, PME, AER, capability, LTR)
+            "evaluate \\_SB.PCI0._OSC " + uuid + " 1 3 (00 00 00 00 1F 01 00 00 3F 00 00 00)",
+            "evaluate \\_SB.PCI0._OSC " + uuid + " 1 3 (01 00 00 00 1F 01 00 00 1D 00 00 00)",
+            "evaluate \\_SB.PCI0._OSC (00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF) 1 3 (00 00 00 00 00 00 00 00 1F 00 00 00)",
+            "evaluate \\_SB.PCI0._OSC " + uuid + " 2 3 (00 00 00 00 00 00 00 00 1F 00 00 00)",
+        ].join("; ");
+        let out;
+        try
+        {
+            out = execFileSync(ACPIEXEC, ["-b", commands, "dsdt.dat"], { cwd: dir, encoding: "utf8", stdio: "pipe" });
+        }
+        catch(e)
+        {
+            out = e.stdout;
+        }
+        const blocks = out.split(/Evaluating /).slice(1);
+        assert.equal(blocks.length, 4, out);
+        assert.match(blocks[0], /10 00 00 00 1F 01 00 00 1F 00 00 00/, "granted 0x1F, LTR masked (and so reported)");
+        assert.match(blocks[1], /01 00 00 00 1F 01 00 00 1D 00 00 00/, "a query of a subset: granted as asked");
+        assert.match(blocks[2], /04 00 00 00 00 00 00 00 1F 00 00 00/, "another UUID: unrecognized");
+        assert.match(blocks[3], /08 00 00 00 00 00 00 00 1F 00 00 00/, "revision 2: unrecognized revision");
+        assert.doesNotMatch(out, /ACPI Error: (?!\d+ \(0x[0-9a-f]+\) Outstanding cache allocations)/, out);
+        fs.rmSync(dir, { recursive: true });
+    });
+}
+
 let failed = 0;
 for(const { name, fn } of tests)
 {

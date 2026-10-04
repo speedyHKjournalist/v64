@@ -47,13 +47,17 @@ const OP_REGION_OP = 0x80;
 const FIELD_OP = 0x81;
 const DEVICE_OP = 0x82;
 const PROCESSOR_OP = 0x83;
+const LOCAL0_OP = 0x60;
 const ARG0_OP = 0x68;
 const STORE_OP = 0x70;
 const AND_OP = 0x7B;
 const OR_OP = 0x7D;
 const CREATE_DWORD_FIELD_OP = 0x8A;
+const LNOT_OP = 0x92;
+const LEQUAL_OP = 0x93;
 const LLESS_OP = 0x95;
 const IF_OP = 0xA0;
+const ELSE_OP = 0xA1;
 const RETURN_OP = 0xA4;
 const NOOP_OP = 0xA3;
 
@@ -176,6 +180,7 @@ function aml_eisa_id(id)
 }
 
 const aml_arg = n => [ARG0_OP + n];
+const aml_local = n => [LOCAL0_OP + n];
 const aml_name_decl = (path, value) => [NAME_OP].concat(aml_name(path), value);
 const aml_scope = (path, ...terms) => [SCOPE_OP].concat(with_pkg_length(aml_name(path).concat(flat(terms))));
 const aml_device = (path, ...terms) => [EXT_OP, DEVICE_OP].concat(with_pkg_length(aml_name(path).concat(flat(terms))));
@@ -186,7 +191,11 @@ const aml_store = (source, target) => [STORE_OP].concat(source, target);
 const aml_and = (a, b, target = [0]) => [AND_OP].concat(a, b, target);
 const aml_or = (a, b, target = [0]) => [OR_OP].concat(a, b, target);
 const aml_lless = (a, b) => [LLESS_OP].concat(a, b);
+const aml_lequal = (a, b) => [LEQUAL_OP].concat(a, b);
+const aml_lnot = a => [LNOT_OP].concat(a);
 const aml_if = (predicate, ...terms) => [IF_OP].concat(with_pkg_length(predicate.concat(flat(terms))));
+/** (right after the aml_if it belongs to) */
+const aml_else = (...terms) => [ELSE_OP].concat(with_pkg_length(flat(terms)));
 const aml_create_dword_field = (buffer, index, name) => [CREATE_DWORD_FIELD_OP].concat(buffer, aml_int(index), aml_name(name));
 
 /**
@@ -530,6 +539,7 @@ function build_q35_dsdt_body(platform, pm_base)
                 aml_method("_PRT", 0, false,
                     aml_if(aml_name("\\PICF"), aml_return(aml_name("PRTA"))),
                     aml_return(aml_name("PRTP"))),
+                pci_host_bridge_osc(),
                 aml_device("ISA",
                     aml_name_decl("_ADR", aml_int(0x001F0000)),
                     // ICH9 PIRQ route control registers (PIRQA..D, SIRQ_CNTL and reserved, PIRQE..H)
@@ -664,6 +674,41 @@ function build_fadt(platform, pm_base)
     const fadt = table("FACP", 3, "V86FACP", body);
     dbg_assert(fadt.length === FADT_LENGTH);
     return fadt;
+}
+
+/**
+ * _OSC of the PCI Express host bridge (PCI Firmware Specification 3.0, 4.5),
+ * as QEMU's Q35 has it with native hot plug: the OS gets the control it asks
+ * for among native PCI Express hot plug (the root ports' slots,
+ * pcie_root_port.js), SHPC hot plug, PME, AER and the PCI Express capability
+ * structure; other control bits are masked (and reported so). An unknown
+ * UUID or revision is reported in the first dword too.
+ * @return {!Array<number>}
+ */
+function pci_host_bridge_osc()
+{
+    // ToUUID ("33db4d5b-1ff7-401c-9657-7441c03dd766"), the PCI host bridge
+    const PCI_HOST_BRIDGE_UUID = [0x5B, 0x4D, 0xDB, 0x33, 0xF7, 0x1F, 0x1C, 0x40, 0x96, 0x57, 0x74, 0x41, 0xC0, 0x3D, 0xD7, 0x66];
+    const OSC_UNRECOGNIZED_UUID = 0x04;
+    const OSC_UNRECOGNIZED_REVISION = 0x08;
+    const OSC_CAPABILITIES_MASKED = 0x10;
+    const GRANTED = 0x1F;
+    const cdw1 = aml_name("CDW1"), cdw3 = aml_name("CDW3"), local0 = aml_local(0);
+    return aml_method("_OSC", 4, false,
+        aml_create_dword_field(aml_arg(3), 0, "CDW1"),
+        aml_if(aml_lequal(aml_arg(0), aml_buffer(PCI_HOST_BRIDGE_UUID)),
+            aml_create_dword_field(aml_arg(3), 4, "CDW2"),
+            aml_create_dword_field(aml_arg(3), 8, "CDW3"),
+            aml_store(cdw3, local0),
+            aml_and(local0, aml_int(GRANTED), local0),
+            aml_if(aml_lnot(aml_lequal(aml_arg(1), aml_int(1))),
+                aml_or(cdw1, aml_int(OSC_UNRECOGNIZED_REVISION), cdw1)),
+            aml_if(aml_lnot(aml_lequal(cdw3, local0)),
+                aml_or(cdw1, aml_int(OSC_CAPABILITIES_MASKED), cdw1)),
+            aml_store(local0, cdw3)),
+        aml_else(
+            aml_or(cdw1, aml_int(OSC_UNRECOGNIZED_UUID), cdw1)),
+        aml_return(aml_arg(3)));
 }
 
 /** @param {Platform} platform */

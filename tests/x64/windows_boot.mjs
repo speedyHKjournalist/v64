@@ -47,6 +47,16 @@
 // WIN_MACHINE=q35: the Q35 machine (AHCI; Windows boots from it only with
 // storahci enabled, see docs/q35-ahci-sata-plan.md), with WIN_HPET=1 the
 // HPET, WIN_ROOT_PORTS=<n> PCI Express root ports, WIN_SMBUS=1 the SMBus.
+// WIN_PCIE_DEVICE=<port>: a virtio device (Windows 8.1 has no driver for it)
+// behind that root port, its hot plug slot empty at boot; "pcieattach <port>"
+// plugs it in, "pciedetach <port> [surprise]" takes it out (by the attention
+// button: "pcie-detached" once the guest switched the slot and its power
+// indicator off), "pcieslot <port>" reports the slot's registers;
+// WIN_PCIE_TRACE=1: every slot control write of the guest and every slot
+// event, as "pcie-sltctl" and "pcie-event". WIN_PCIE_AHCI=<port>: instead, a
+// second AHCI controller (Windows has its driver) with a 16 MiB FAT16 disk,
+// in that root port's slot from boot; WIN_AHCI_TRACE=1: its global and port
+// control writes and its configuration writes, as "ahci-write", "ahci-config".
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -111,6 +121,14 @@ function save_overlay(filename, disk = source)
 }
 
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+// WIN_PCIE_AHCI's disk: FAT16 like the tools disk, with a disk signature of
+// its own (Windows takes a disk whose signature collides with another offline)
+function hot_plug_disk()
+{
+    const bytes = make_fat16({"HOTPLUG.TXT": Buffer.from("v86 PCI Express hot plug\r\n")});
+    new DataView(bytes.buffer).setUint32(440, 0x76386870, true);
+    return bytes;
+}
 // WIN_GPU_RENDERER=chrome: vmware_svga's 3D drawn by a headless Chrome (the default level, dx11-full)
 const remote_renderer = process.env.WIN_GPU_RENDERER === "chrome" ?
     await (await import("./gpu_remote_renderer.mjs")).create_remote_renderer() : null;
@@ -128,6 +146,10 @@ const vm = new V86({
     qemu_compatible: !!+process.env.WIN_QEMU_COMPATIBLE,
     ...(process.env.WIN_MACHINE ? {machine_type: process.env.WIN_MACHINE, hpet: !!+process.env.WIN_HPET,
         pcie_root_ports: +process.env.WIN_ROOT_PORTS || 0, smbus: !!+process.env.WIN_SMBUS} : {}),
+    ...(process.env.WIN_PCIE_DEVICE ? {virtio_devices: [{"name": "hotplug", "device_id": 0x1044, "subsystem_device_id": 4,
+        "queues": [{"size": 8}], "pcie_root_port": +process.env.WIN_PCIE_DEVICE, "pcie_plugged": false, "notify": () => {}}]} : {}),
+    // (behind root port n is the bus that pci_ids number n + 1)
+    ...(process.env.WIN_PCIE_AHCI ? {ahci_test_drives: [{buffer: new MemoryDisk(hot_plug_disk())}], ahci_test_pci_id: +process.env.WIN_PCIE_AHCI + 1 << 8} : {}),
     // WIN_QUANTUM: instructions per core slice when cores take turns
     ...(process.env.WIN_QUANTUM ? {cpu_quantum: +process.env.WIN_QUANTUM} : {}),
     // WIN_ASYNC_PUBLICATION=1: compile generated modules asynchronously, as
@@ -619,6 +641,31 @@ try
 {
     await new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); });
     cpu = vm.v86.cpu;
+    if(+process.env.WIN_AHCI_TRACE && cpu.devices.ahci_test)
+    {
+        // GHC, and each port's PxIE, PxCMD, PxSCTL; and its configuration
+        // space writes (command, power management, MSI)
+        const ahci = cpu.devices.ahci_test, write32 = ahci.write32.bind(ahci);
+        ahci.write32 = (offset, value, mask) => {
+            if(offset === 4 || offset >= 0x100 && [0x14, 0x18, 0x2C].includes(offset & 0x7F))
+                event("ahci-write", {offset: offset.toString(16), value: (value >>> 0).toString(16)});
+            write32(offset, value, mask);
+        };
+        const pci = cpu.devices.pci, function_write = pci.function_write.bind(pci);
+        pci.function_write = (pci_id, offset, size, value) => {
+            if(pci_id === ahci.pci_id && offset >= 4) event("ahci-config", {offset: offset.toString(16), size, value: (value >>> 0).toString(16)});
+            function_write(pci_id, offset, size, value);
+        };
+    }
+    if(+process.env.WIN_PCIE_TRACE)
+    {
+        for(const port of cpu.devices.pcie_root_ports || [])
+        {
+            const written = port.slot_control_written.bind(port), raised = port.event.bind(port);
+            port.slot_control_written = value => { event("pcie-sltctl", {port: port.number, value: value.toString(16)}); written(value); };
+            port.event = events => { if(events !== 0x10) event("pcie-event", {port: port.number, events: events.toString(16)}); raised(events); };
+        }
+    }
     // virtio_gpu: every device status the driver writes, every control
     // command and every reset of the transport, as they happen
     const virtio = cpu.devices.graphics_adapter && cpu.devices.graphics_adapter.device["virtio_gpu"] &&
@@ -804,6 +851,23 @@ try
             event("snapshot", {bytes: state.byteLength});
         }
         else if(verb === "rips") next_samples = 0;
+        // PCI Express hot plug (WIN_PCIE_DEVICE)
+        else if(verb === "pcieattach") await vm.attach_pcie_device(+argument);
+        else if(verb === "pciedetach")
+        {
+            const [port, how] = argument.split(/\s+/);
+            const asked = performance.now();
+            vm.detach_pcie_device(+port, {surprise: how === "surprise"}).then(
+                () => event("pcie-detached", {port: +port, after_s: Math.round((performance.now() - asked) / 100) / 10}),
+                error => event("pcie-detach-failed", {port: +port, error: String(error && error.message || error)}));
+        }
+        else if(verb === "pcieslot")
+        {
+            const port = cpu.devices.pcie_root_ports[+argument];
+            const read = (offset, size) => cpu.devices.pci.function_read(port.pci_id, offset, size).toString(16);
+            event("pcie-slot", {port: +argument, card: port.card, slot_control: read(0x58, 2), slot_status: read(0x5A, 2),
+                link_status: read(0x52, 2), msi_control: read(0x82, 2), command: read(0x04, 2)});
+        }
         else if(verb === "trace") { cpu.wm.exports.x64_user_trace_enable(argument !== "off"); trace_seen = 0; }
         else if(verb === "launch")
         {

@@ -465,8 +465,13 @@ q35-device-tests: build/v86-debug.wasm
 q35-guest-tests: build/v86-debug.wasm
 	./tests/devices/q35_guest.js
 
-.PHONY: q35-device-tests q35-guest-tests q35-tests
-q35-tests: acpi-table-tests q35-device-tests q35-guest-tests
+# PCI Express hot plug with Linux: Alpine's x86_64 virt kernel (pciehp), the
+# pinned Alpine ISO downloaded on first use as for the x64 linux targets
+q35-hotplug-tests: build/v86-debug.wasm
+	./tests/devices/pcie_hotplug.mjs
+
+.PHONY: q35-device-tests q35-guest-tests q35-hotplug-tests q35-tests
+q35-tests: acpi-table-tests q35-device-tests q35-guest-tests q35-hotplug-tests
 
 # ACPICA's iasl/acpiexec are used when found on PATH or in IASL/ACPIEXEC
 acpi-table-tests:
@@ -671,6 +676,7 @@ cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_svga_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_audio_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_ui_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_hotplug_browser_test.html
 
 # One canvas for text, graphics and composited D3D/GL windows (docs/display-design.md)
 .PHONY: display-browser-tests

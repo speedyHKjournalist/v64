@@ -72,7 +72,8 @@ export function create_virtio_devices(cpu, descriptors)
                 throw new Error("virtio_devices: \"" + name + "\" asks for root port " + root_port +
                     ", the machine has " + count + " (pcie_root_ports)");
             }
-            if(root_ports.has(root_port))
+            if(root_ports.has(root_port) ||
+                cpu.devices.pci.device_spaces[cpu.devices.pcie_root_ports[root_port].pci_secondary_bus << 8] !== undefined)
             {
                 throw new Error("virtio_devices: \"" + name + "\" asks for root port " + root_port + ", which is taken");
             }
@@ -324,6 +325,11 @@ function check_descriptor(descriptor, names)
     if(root_port !== undefined && slot !== undefined)
     {
         fail("pci_slot and pcie_root_port exclude each other");
+    }
+    const plugged = descriptor["pcie_plugged"];
+    if(plugged !== undefined && (typeof plugged !== "boolean" || root_port === undefined))
+    {
+        fail("pcie_plugged must be a boolean, for a device behind a root port (pcie_root_port)");
     }
     const io_base = descriptor["io_base"];
     if(io_base !== undefined && !(Number.isInteger(io_base) && io_base > 0 && !(io_base & 0xFF) &&
@@ -699,7 +705,8 @@ VirtioDevice.prototype.read_memory = function(address, length)
  */
 VirtioDevice.prototype.write_memory = function(bytes, address)
 {
-    if(!bytes.length) return;
+    // (off the bus: a hot plug slot that is empty or switched off)
+    if(!bytes.length || this.virtio.pci.absent[this.virtio.pci_id]) return;
     if(!this.is_ram(address, bytes.length))
     {
         throw new RangeError("virtio device " + this.name + ": 0x" + address.toString(16) +

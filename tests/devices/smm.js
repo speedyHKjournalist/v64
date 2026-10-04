@@ -7,8 +7,10 @@
 // with a handler of the test's own that only executes RSM (the state comes
 // back), an SMI in SMM (latched until RSM), SMIs from the local APIC (an IPI,
 // an MSI), snapshots (also in SMM), TSEG (all ones outside SMM, RAM in it;
-// QEMU's extended TSEG) and D_LCK. Then the x86-64 CPU profile: SeaBIOS with QEMU's
-// 64-bit save area. (An SMI in long mode: tests/x64/smm_long_mode.mjs.)
+// QEMU's extended TSEG), high SMRAM (H_SMRAME, also with SMBASE there),
+// D_CLS, the auto HALT restart field and D_LCK. Then the x86-64 CPU profile:
+// SeaBIOS with QEMU's 64-bit save area. (An SMI in long mode:
+// tests/x64/smm_long_mode.mjs.)
 
 import assert from "node:assert/strict";
 import url from "node:url";
@@ -231,6 +233,75 @@ test("TSEG: G_SMRAME clear: no TSEG; TSEG_SZ 11: the extended size", () => {
     pci().config_write(0, MCH_ESMRAMC, 1, 0x38);
     assert.equal(cpu.read32s(TOP - (1 << 20)) >>> 0, 0xCAFEF0A5, "T_EN clear: RAM");
 });
+
+const HIGH_SMRAM = 0xFEDA0000;
+test("H_SMRAME: the RAM at 0xFEDA0000 instead (with D_OPEN for everyone, in SMM), the VGA window at 0xA0000", () => {
+    pci().config_write(0, MCH_ESMRAMC, 1, 0xB8);
+    assert.equal(pci().config_read(0, MCH_ESMRAMC, 1), 0xB8);
+    assert.notEqual(cpu.read32s(HIGH_SMRAM + 0x8000) & 0xFFFF, 0xAA0F, "outside SMM: not SMRAM");
+    pci().config_write(0, MCH_SMRAM, 1, 0x4A);
+    assert.equal(cpu.read32s(HIGH_SMRAM + 0x8000) & 0xFFFF, 0xAA0F, "D_OPEN: high SMRAM is the RAM of 0xA0000");
+    assert.notEqual(cpu.read32s(0xA8000) & 0xFFFF, 0xAA0F, "and 0xA0000 the VGA window");
+    cpu.write8(HIGH_SMRAM + 0x10, 0x5C);
+    assert.equal(cpu.mem8[0xA0010], 0x5C, "a write reaches that RAM");
+    pci().config_write(0, MCH_SMRAM, 1, 0x0A);
+    assert.notEqual(cpu.read32s(HIGH_SMRAM + 0x8000) & 0xFFFF, 0xAA0F, "closed");
+});
+test("H_SMRAME: SMBASE in high SMRAM, the save area and the handler through it", () => {
+    state32(STATE_OFFSETS.smbase)[0] = HIGH_SMRAM;
+    cpu.reg32[3] = 0x13579BDF;
+    cpu.smi();
+    assert.ok(in_smm());
+    assert.equal(cpu.segment_offsets[1] >>> 0, HIGH_SMRAM, "CS base: SMBASE");
+    assert.equal(cpu.instruction_pointer[0] >>> 0, HIGH_SMRAM + 0x8000);
+    assert.equal(cpu.read32s(HIGH_SMRAM + 0x8000) & 0xFFFF, 0xAA0F, "in SMM: high SMRAM");
+    assert.notEqual(cpu.read32s(0xA8000) & 0xFFFF, 0xAA0F, "in SMM with H_SMRAME: 0xA0000 is the VGA window");
+    assert.equal(ram32(0xAFFDC), 0x13579BDF, "EBX in the save area, in the RAM of 0xA0000");
+    assert.equal(ram32(0xAFEF8), HIGH_SMRAM, "SMBASE in the save area");
+    // (the RSM, fetched from high SMRAM)
+    cpu.run_cpu_slice(1);
+    assert.ok(!in_smm());
+    assert.equal(cpu.instruction_pointer[0], before.eip);
+    assert.equal(cpu.reg32[3] >>> 0, 0x13579BDF);
+    assert.equal(smbase(), HIGH_SMRAM);
+    pci().config_write(0, MCH_ESMRAMC, 1, 0x38);
+    cpu.smi();
+    assert.ok(!in_smm(), "high SMRAM off: the save area is nowhere, the SMI is dropped");
+    state32(STATE_OFFSETS.smbase)[0] = 0xA0000;
+});
+test("D_CLS: in SMM, data accesses to the VGA window, instruction fetches to compatible SMRAM", () => {
+    pci().config_write(0, MCH_SMRAM, 1, 0x2A);
+    assert.equal(pci().config_read(0, MCH_SMRAM, 1), 0x2A);
+    cpu.smi();
+    assert.ok(in_smm());
+    assert.notEqual(cpu.read32s(0xA8000) & 0xFFFF, 0xAA0F, "data: the VGA window");
+    cpu.run_cpu_slice(1);
+    assert.ok(!in_smm(), "the handler's RSM came from SMRAM");
+    assert.equal(cpu.instruction_pointer[0], before.eip);
+    pci().config_write(0, MCH_SMRAM, 1, 0x0A);
+});
+test("auto HALT restart (0x7F02): RSM halts again after an SMI in HLT, unless the handler clears it", () => {
+    cpu.in_hlt[0] = 1;
+    cpu.smi();
+    assert.ok(in_smm());
+    assert.ok(!cpu.in_hlt[0], "the handler runs");
+    assert.equal(ram32(0xAFF00), 0x00010000, "auto HALT restart set, I/O instruction restart (0x7F00) clear");
+    cpu.run_cpu_slice(1);
+    assert.ok(!in_smm());
+    assert.ok(cpu.in_hlt[0], "halted again");
+    assert.equal(cpu.instruction_pointer[0], before.eip);
+    cpu.smi();
+    assert.equal(ram32(0xAFF00), 0x00010000);
+    cpu.mem8[0xAFF02] = 0;
+    cpu.run_cpu_slice(1);
+    assert.ok(!in_smm() && !cpu.in_hlt[0], "cleared by the handler: on after the HLT");
+    cpu.smi();
+    assert.equal(ram32(0xAFF00), 0, "an SMI outside HLT: clear");
+    cpu.mem8[0xAFF02] = 1;
+    cpu.run_cpu_slice(1);
+    assert.ok(!in_smm() && !cpu.in_hlt[0], "set by the handler without HLT: ignored");
+    assert.equal(cpu.instruction_pointer[0], before.eip);
+});
 cpu.mem8.set(saved_handler, 0xA8000);
 
 pci().config_write(0, MCH_ESMRAMC, 1, 0x39);
@@ -309,6 +380,16 @@ test("x86-64: RSM restores the 64-bit registers (and what the handler changed)",
     assert.equal(gpr_ext[1] >>> 0, Number(wide.r9 & 0xFFFFFFFFn));
     assert.equal(gpr_high[9] >>> 0, Number(wide.r9 >> 32n), "R9's high half");
     assert.equal(cpu.sreg[3], wide.ds);
+});
+test("x86-64: the auto HALT restart byte (0x7EC9)", () => {
+    cpu.in_hlt[0] = 1;
+    cpu.smi();
+    assert.ok(in_smm());
+    assert.equal(cpu.mem8[0xA8000 + 0x7EC9], 1, "auto HALT restart");
+    assert.equal(cpu.mem8[0xA8000 + 0x7EC8], 0, "I/O instruction restart");
+    cpu.run_cpu_slice(1);
+    assert.ok(!in_smm() && cpu.in_hlt[0], "halted again");
+    cpu.in_hlt[0] = 0;
 });
 emulator.destroy();
 
