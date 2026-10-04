@@ -1,6 +1,5 @@
 pub const PREFIX_REPZ: u8 = 0b01000;
 pub const PREFIX_REPNZ: u8 = 0b10000;
-pub const PREFIX_MASK_REP: u8 = PREFIX_REPZ | PREFIX_REPNZ;
 
 pub const PREFIX_MASK_OPSIZE: u8 = 0b100000;
 pub const PREFIX_MASK_ADDRSIZE: u8 = 0b1000000;

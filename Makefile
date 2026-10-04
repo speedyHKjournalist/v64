@@ -112,7 +112,7 @@ CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js display.js graphics_adapter.js ps2.js rtc.js uart.js parallel.js vmware.js \
-	   acpi.js acpi_tables.js platform.js q35.js ahci.js pcie_root_port.js hpet.js smbus.js ich9_tco.js state_layout.js iso9660.js \
+	   acpi.js acpi_tables.js platform.js q35.js ahci.js pcie_root_port.js hpet.js smbus.js ich9_tco.js state_layout.js cpu_features.js iso9660.js \
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   virtio_devices.js \
 	   bus.js log.js cpu.js \
@@ -851,8 +851,10 @@ acpi-sleep-tests: build/v86-debug.wasm images/linux4.iso
 # firmware tables (the ACPICA part needs iasl/acpiexec)
 platform-contract-tests: build/v86-debug.wasm build/libv86.mjs build/v86.wasm
 	node gen/state_layout.js --check
+	node gen/cpu_features.js --check
 	node tools/cpu_contract.mjs --check
 	node tests/x64/profile_options.mjs
+	node tests/x64/cpu_features.mjs
 	node tests/smp/topology.mjs
 	node tests/devices/acpi_tables.js
 

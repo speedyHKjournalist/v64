@@ -3490,6 +3490,7 @@ pub unsafe fn copy_cpu_profile() {
     use crate::parallel::machine;
     X64_TEST_CAPABILITIES = *machine(&raw mut X64_TEST_CAPABILITIES);
     X64_ARCH_CAPABILITIES = *machine(&raw mut X64_ARCH_CAPABILITIES);
+    crate::cpu::features::copy_from_machine();
 }
 
 /// The emulated core executes nothing speculatively, so it reports itself
@@ -3731,6 +3732,7 @@ pub unsafe fn instr_0FA2() {
 
     let mut topology = [eax as u32, ebx as u32, ecx as u32, edx as u32];
     apply_x64_test_capabilities(X64_TEST_CAPABILITIES, level, &mut topology);
+    crate::cpu::features::cpuid(level, read_reg32(ECX) as u32, &mut topology);
     crate::cpu::topology::apply(
         level,
         read_reg32(ECX) as u32,

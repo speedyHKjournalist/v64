@@ -434,6 +434,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.cpu_schedule_seed = options.cpu_schedule_seed;
     settings.experimental_smp_jit = options.experimental_smp_jit;
     settings["cpu_type"] = this.cpu_type;
+    settings["cpu_features"] = options["cpu_features"]; // (internal while in development, src/cpu.js)
     settings.disable_jit = options.disable_jit;
     settings["jit_backend"] = options["jit_backend"];
     settings["ir_region_budget"] = options["ir_region_budget"];

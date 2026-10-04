@@ -5,6 +5,7 @@ pub mod context;
 pub mod cpu;
 pub mod exceptions;
 pub mod execution;
+pub mod features;
 pub mod fpu;
 pub mod global_pointers;
 pub mod instructions;

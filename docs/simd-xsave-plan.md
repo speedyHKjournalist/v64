@@ -865,3 +865,16 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   `make decode-rules-tests`（`tests/rust/decode_rules.mjs`），在解释器、Tier-0 和 regions 上
   验证 10 种 `0F 10` 前缀顺序、4 种 CMPSB 重复前缀顺序、8 个未定义强制前缀的 #UD 位置。
   x64 长模式 opcode 矩阵与 iced 的对拍不变（349888 行，iced 判为合法的 123947 行一致）。
+
+### P1e：能力位图（2026-10-04）
+
+- `gen/cpu_features.js` 生成 `src/rust/cpu/features.rs` 的常量（每个能力一位、依赖、CPUID 位置、
+  最低 `cpuid_level`、只属于 x86-64 配置的能力）和 `src/cpu_features.js`（供设置解析）。
+- 机器级静态变量 `features::FEATURES` 在创建时固定，并经 `copy_cpu_profile` 复制到并行实例；
+  CPUID 的叶 1、7、0x80000001 和 0xD.1 按它报告。叶 7 和 0xD 区分子叶，其他叶忽略 ECX。
+- 内部设置 `cpu_features`（`starter.js`、CPU worker 透传）：能力名数组，或预设
+  `x86-64-v2`、`x86-64-v3`。未知能力、配置不允许的能力（32 位配置的 LZCNT）和缺少依赖时报错；
+  `cpuid_level` 报告不了的能力连同依赖它的能力一起去掉（`cpuid_level` 为 7 时去掉 XSAVE、AVX、
+  AVX2、FMA、F16C；为 2 时再去掉 BMI1、BMI2）。
+- 测试：`tests/x64/cpu_features.mjs`（并入 `make platform-contract-tests`）；`cargo test
+  cpu::features`；默认配置的 CPU contract 不变。

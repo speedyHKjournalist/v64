@@ -21,6 +21,7 @@ import { ACPI, acpi_system_states_file } from "./acpi.js";
 import { ACPI_LOADER_FILE, ACPI_RSDP_FILE, ACPI_TABLES_FILE, build_acpi_tables, locate_acpi_tables } from "./acpi_tables.js";
 import { ACPI_PM_BASE_DEFAULT, MACHINE_LAYOUT_VERSION, Platform, check_platform, create_platform } from "./platform.js";
 import { CORE_STATE_RANGES, STATE_OFFSETS } from "./state_layout.js";
+import { CPU_FEATURES, CPU_FEATURE_PRESETS } from "./cpu_features.js";
 import { ParallelMachine } from "./parallel/machine.js";
 import { ExtendedStore } from "./extended_memory.js";
 import { COMMAND_RELOAD, COMMAND_RESET } from "./parallel/control.js";
@@ -904,6 +905,48 @@ CPU.prototype.validate_physical_state = function(state)
         !this.with_wide_state_buffer(state[1], (pointer, count) => this.wm.exports["x64_phys_validate_windows"](pointer, count)))
         throw new Error("Invalid physical memory map in snapshot");
 };
+
+/**
+ * The feature set (src/rust/cpu/features.rs) of the setting cpu_features: an
+ * array of the names of src/cpu_features.js, or the name of a preset. A
+ * feature that cpuid_level cannot report is left out, with the features that
+ * require it (docs/simd-xsave-plan.md 6.1); an unknown feature, one the CPU
+ * profile cannot have or one without its requirements is an error.
+ * @param {Array<string>|string|undefined} requested
+ * @param {boolean} x86_64
+ * @param {number} cpuid_level
+ * @return {number}
+ */
+export function resolve_cpu_features(requested, x86_64, cpuid_level)
+{
+    if(requested === undefined)
+    {
+        return 0;
+    }
+    const names = typeof requested === "string" ? CPU_FEATURE_PRESETS[requested] : requested;
+    if(!Array.isArray(names))
+    {
+        throw new Error("cpu_features: unknown preset " + JSON.stringify(requested));
+    }
+    const profile = x86_64 ? "x86_64" : "x86";
+    for(const name of names)
+    {
+        const feature = CPU_FEATURES[name];
+        if(!feature) throw new Error("cpu_features: unknown feature " + JSON.stringify(name));
+        if(!feature["profiles"].includes(profile)) throw new Error("cpu_features: " + name + " needs cpu_type: \"x86_64\"");
+        for(const required of feature["requires"])
+        {
+            if(!names.includes(required)) throw new Error("cpu_features: " + name + " requires " + required);
+        }
+    }
+    let kept = names.filter(name => CPU_FEATURES[name]["min_cpuid_level"] <= cpuid_level);
+    for(let count = -1; count !== kept.length;)
+    {
+        count = kept.length;
+        kept = kept.filter(name => CPU_FEATURES[name]["requires"].every(required => kept.includes(required)));
+    }
+    return kept.reduce((set, name) => set | 1 << CPU_FEATURES[name]["bit"], 0);
+}
 
 // [offset, size] of core state that survives INIT
 const INIT_PRESERVED = [[STATE_OFFSETS.x64_pat, 8],
@@ -2675,6 +2718,10 @@ CPU.prototype.init = function(settings, device_bus)
     this.configure_extended_memory(settings.extended_memory_size || 0, settings.extended_memory_cache);
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
+    // The features of docs/simd-xsave-plan.md (src/cpu_features.js). Internal
+    // while in development: only tests set cpu_features.
+    this.cpu_features = resolve_cpu_features(settings["cpu_features"], settings["cpu_type"] === "x86_64", settings.cpuid_level || 0x16);
+    this.wm.exports["set_cpu_features"](this.cpu_features);
 
     this.acpi_enabled[0] = +this.platform.acpi;
 
