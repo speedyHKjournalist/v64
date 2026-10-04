@@ -12,8 +12,8 @@
 // Serial ATA AHCI 1.3.1 specification:
 // https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/serial-ata-ahci-spec-rev1-3-1.pdf
 // Behaviour the guests depend on (SeaBIOS rel-1.16.2 src/hw/ahci.c, Linux
-// drivers/ata/libahci.c, QEMU hw/ide/ahci.c) is listed in
-// docs/q35-ahci-sata-plan.md.
+// drivers/ata/libahci.c, QEMU hw/ide/ahci.c) is listed in docs/ahci.md; the
+// ports, links and devices are described in docs/sata.md.
 
 import { LOG_DISK } from "./const.js";
 import { h } from "./lib.js";

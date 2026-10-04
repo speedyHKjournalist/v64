@@ -2,8 +2,8 @@
 
 // The ICH9 SMBus controller of the Q35 machine (smbus: true), driven through
 // its I/O registers as SeaBIOS sets it up (BAR4 at the PM base + 0x100,
-// HOSTC.HST_EN) and as Linux's i2c-i801 drives it (docs/q35-ahci-sata-plan.md,
-// P6): decode, quick/byte/byte data/word data commands to the EEPROMs at
+// HOSTC.HST_EN) and as Linux's i2c-i801 drives it (docs/q35.md):
+// decode, quick/byte/byte data/word data commands to the EEPROMs at
 // 0x50-0x57, NACK for absent devices, block commands through the 32-byte
 // buffer and byte by byte, I2C block reads, interrupts and snapshots.
 

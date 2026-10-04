@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // The TCO watchdog of the Q35 machine's ICH9 (PMBASE + 0x60), with a
-// machine clock the test moves (docs/q35-ahci-sata-plan.md, P6): stopped
+// machine clock the test moves (docs/q35.md): stopped
 // until software reloads it, 0.6 s ticks from TCO_TMR, TIMEOUT on the first
 // timeout and SMI_STS.TCO_STS, SECOND_TO_STS and BOOT_STS on the second, a
 // reset only with NO_REBOOT (RCBA GCS) cleared, reloads keeping it from

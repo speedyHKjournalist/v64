@@ -2,7 +2,7 @@
 
 // The PCI Express root ports of the Q35 machine (pcie_root_ports) and the
 // devices behind them, driven through configuration space and the devices'
-// registers; no guest code runs (docs/q35-ahci-sata-plan.md, P6): the type 1
+// registers; no guest code runs (docs/q35.md): the type 1
 // header and the capabilities, configuration routing by the bus numbers the
 // guest programs, memory and I/O forwarding through the windows, bus
 // mastering (DMA, MSI) through the bridge, INTx through the swizzle and

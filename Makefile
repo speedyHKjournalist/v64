@@ -450,7 +450,7 @@ acpi-guest-tests: build/v86-debug.wasm
 	DISABLE_JIT=1 ./tests/devices/acpi_guest.js
 	GUEST=linux4 ./tests/devices/acpi_guest.js
 
-# The Q35 machine (docs/q35-ahci-sata-plan.md): the AHCI controller driven
+# The Q35 machine (docs/q35.md, docs/ahci.md, docs/sata.md): the AHCI controller driven
 # without a guest, its commands with disk I/O in flight, and real guests
 # (images/linux4.iso, msdos622.img, buildroot-bzimage68.bin)
 q35-device-tests: build/v86-debug.wasm

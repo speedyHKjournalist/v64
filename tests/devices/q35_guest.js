@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // The Q35 machine (machine_type: "q35") with real guests and the real
-// firmware (docs/q35-ahci-sata-plan.md). PARTS selects (comma separated):
+// firmware (docs/q35.md, docs/ahci.md, docs/sata.md). PARTS selects (comma separated):
 //   linux: SeaBIOS boots linux4.iso (Linux 4.16, IOAPIC routing) from the
 //     SATA CD drive through AHCI; the tables have MCFG and the ICH9 layout;
 //     the guest uses ECAM, ahci/libata with MSI and 64-bit DMA, reads its root from sr0,

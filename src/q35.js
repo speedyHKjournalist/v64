@@ -9,7 +9,7 @@
 // defaults and interrupt routing the guest sees here as well:
 // https://github.com/qemu/qemu/blob/v9.2.0/hw/pci-host/q35.c
 // https://github.com/qemu/qemu/blob/v9.2.0/hw/isa/lpc_ich9.c
-// See docs/q35-ahci-sata-plan.md.
+// See docs/q35.md.
 
 import { LOG_PCI } from "./const.js";
 import { h } from "./lib.js";

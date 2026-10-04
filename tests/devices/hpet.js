@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // The HPET of the Q35 machine (hpet: true), driven through its registers
-// with a machine clock the test moves (docs/q35-ahci-sata-plan.md, P6): the
+// with a machine clock the test moves (docs/q35.md): the
 // capabilities, the main counter, one-shot and periodic timers in 32- and
 // 64-bit mode, the legacy replacement route (and the PIT and RTC losing IRQ
 // 0 and 8), I/O APIC routes edge and level triggered, FSB messages (also of

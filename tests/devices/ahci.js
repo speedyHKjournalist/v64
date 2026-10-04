@@ -2,7 +2,7 @@
 
 // The AHCI controller of the Q35 machine, driven through its registers and
 // command structures in guest memory; no guest code runs. Covers the
-// behaviour SeaBIOS and Linux depend on (docs/q35-ahci-sata-plan.md):
+// behaviour SeaBIOS and Linux depend on (docs/ahci.md):
 // presence and signatures, the initial D2H FIS, PIO, DMA and ATAPI commands,
 // PRDTs, error completion and recovery, native command queuing and its error
 // log, link power management, interrupts, resets, hot plug and snapshots.
