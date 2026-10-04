@@ -177,8 +177,9 @@ export const STATICS = {
     // (IOAPIC_LOCK guards it while cores run in workers; UNUSED stands in for it in the normal build)
     "cpu/ioapic.rs": { IOAPIC: "machine", IOAPIC_LOCK: "machine", UNUSED: "machine" },
     "cpu/instructions_0f.rs": { X64_TEST_CAPABILITIES: "machine", X64_ARCH_CAPABILITIES: "machine" },
-    // the CPU features of docs/simd-xsave-plan.md this machine has
-    "cpu/features.rs": { FEATURES: "machine" },
+    // the CPU features of docs/simd-xsave-plan.md this machine has;
+    // TEST_FEATURES replaces them per thread under cargo test
+    "cpu/features.rs": { FEATURES: "machine", TEST_FEATURES: "debug" },
     // the chipset's SMRAM control (Q35 MCH: G_SMRAME, D_OPEN) and TSEG; per
     // instance: the TSEG generation its fast RAM limit reflects
     "cpu/smm.rs": { SMRAM_CONTROL: "machine", TSEG: "machine", TSEG_SEEN: "cache" },

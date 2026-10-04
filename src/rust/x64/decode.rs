@@ -122,7 +122,10 @@ impl Decoded {
     /// 0F opcode map. Executors still inspect `opcode` to distinguish SIMD
     /// variants and `prefixes` for architectural REP/operand semantics.
     pub fn base_opcode(&self) -> u32 {
-        if self.opcode & 0xFF00 == 0x0F00 {
+        if matches!(self.opcode >> 8 & 0xFFFF, 0x0F38 | 0x0F3A) {
+            self.opcode & 0xFF_FFFF
+        }
+        else if self.opcode & 0xFF00 == 0x0F00 {
             self.opcode & 0xFFFF
         }
         else {
@@ -349,7 +352,19 @@ where
             break b;
         }
     };
-    let base_opcode = if first == 0x0F { 0x0F00 | c.byte()? as u32 } else { first as u32 };
+    // 0F 38 and 0F 3A lead to the three-byte maps (key 0x0F38xx, 0x0F3Axx)
+    let base_opcode = if first == 0x0F {
+        let second = c.byte()?;
+        if second == 0x38 || second == 0x3A {
+            0x0F0000 | (second as u32) << 8 | c.byte()? as u32
+        }
+        else {
+            0x0F00 | second as u32
+        }
+    }
+    else {
+        first as u32
+    };
     if mode.is_long() && invalid_long_opcode(base_opcode) {
         return Err(DecodeError::InvalidOpcode);
     }
@@ -357,20 +372,23 @@ where
         return Err(DecodeError::InvalidOpcode);
     }
     // The 66/F2/F3 variants of the opcode in the shared catalogue, chosen by
-    // the rule all three decoders share (decode_rules::mandatory_variant): in
-    // the SSE maps a mandatory prefix without a row of its own is #UD, after
-    // the ModRM byte as in the 32-bit interpreter.
+    // the rule all three decoders share (decode_rules::mandatory_variant): a
+    // refining prefix without a row of its own, a row whose CPUID feature is
+    // absent or an unimplemented row is #UD after the ModRM byte, as in the
+    // 32-bit interpreter.
     use crate::prefix::{PREFIX_66, PREFIX_F2, PREFIX_F3};
-    let shift = if first == 0x0F { 16 } else { 8 };
+    let shift = if base_opcode > 0xFFFF { 24 } else if first == 0x0F { 16 } else { 8 };
     let variants = [(0x66u32, PREFIX_66), (0xF2, PREFIX_F2), (0xF3, PREFIX_F3)];
     let mut available = 0;
-    let mut refining = candidates(base_opcode).iter().any(|row| row.sse || row.refining);
+    let mut refining = candidates(base_opcode).iter().fold(0, |m, row| m | row.refining);
+    let mut family = candidates(base_opcode).first();
     for (prefix, mask) in variants {
         if prefix != 0x66 || first == 0x0F {
             let rows = candidates(prefix << shift | base_opcode);
-            if !rows.is_empty() {
+            refining |= rows.iter().fold(0, |m, row| m | row.refining);
+            family = family.or(rows.first());
+            if rows.iter().any(Encoding::exists) {
                 available |= mask;
-                refining |= rows.iter().any(|row| row.sse || row.refining);
             }
         }
     }
@@ -390,20 +408,20 @@ where
         Variant::Plain | Variant::Undefined => base_opcode,
     };
     let rows = candidates(opcode);
-    let first_row = rows.first().ok_or(DecodeError::UnknownOpcode(opcode))?;
+    let first_row = family.ok_or(DecodeError::UnknownOpcode(opcode))?;
     // ModRM-taking forms the shared catalog lists without one: the 0F0D
     // prefetch hint, the reserved-NOP hints 0F1A/0F1B (MPX space, NOPs
     // without MPX) and UD1/UD0 (whose length bounds the #UD encoding).
     let hint_0f0d =
         mode.is_long() && matches!(base_opcode, 0x0F0D | 0x0F1A | 0x0F1B | 0x0FB9 | 0x0FFF);
     let modrm = if first_row.fetch_modrm || hint_0f0d { Some(c.byte()?) } else { None };
-    if variant == Variant::Undefined {
-        return Err(DecodeError::InvalidOpcode);
-    }
     let row = rows
         .iter()
         .find(|row| row.group < 0 || modrm.is_some_and(|m| (m >> 3 & 7) as i8 == row.group))
         .ok_or(DecodeError::InvalidOpcode)?;
+    if variant == Variant::Undefined || !row.exists() || row.unimplemented {
+        return Err(DecodeError::InvalidOpcode);
+    }
     if prefixes.lock && !crate::decode_rules::lock_allowed(base_opcode, modrm) {
         return Err(DecodeError::InvalidOpcode);
     }
@@ -562,6 +580,31 @@ mod tests {
             // outside the SSE maps F2/F3 are repeat prefixes
             assert_eq!(decode(&[0xF3, 0x0F, 0xAF, 0xC1]).unwrap().opcode, 0x0FAF);
         }
+    }
+    #[test]
+    fn three_byte_maps_are_undefined_after_modrm_until_implemented() {
+        use crate::cpu::features::{TEST_FEATURES, ALL};
+        for features in [0, ALL] {
+            TEST_FEATURES.with(|f| f.set(features));
+            for mode in [ExecutionMode::Long64, ExecutionMode::Compatibility32, ExecutionMode::Protected32] {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+                for bytes in [
+                    &[0x66, 0x0F, 0x38, 0x00, 0xC1][..],
+                    &[0x0F, 0x38, 0x00, 0xC1],
+                    &[0x66, 0x0F, 0x3A, 0x0F, 0xC1],
+                    &[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],
+                    &[0x0F, 0x38, 0xF0, 0x00],
+                    &[0xF3, 0x0F, 0x38, 0xF0, 0x00],
+                ] {
+                    assert_eq!(decode(bytes).unwrap_err(), DecodeError::InvalidOpcode, "{bytes:02X?} {mode:?}");
+                    // ... after the ModRM byte, which is fetched first
+                    let n = bytes.len() - 1;
+                    assert!(matches!(decode(&bytes[..n]), Err(DecodeError::Fetch { offset, .. }) if offset as usize == n));
+                }
+                assert!(matches!(decode(&[0x0F, 0x38, 0xFF, 0xC1]), Err(DecodeError::UnknownOpcode(0x0F38FF))));
+            }
+        }
+        TEST_FEATURES.with(|f| f.set(0));
     }
     #[test]
     fn prefetchw_consumes_the_complete_address_without_reading_data() {

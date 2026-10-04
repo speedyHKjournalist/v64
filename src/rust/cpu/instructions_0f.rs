@@ -1654,22 +1654,30 @@ pub unsafe fn instr_0F37() {
     // getsec
     undefined_instruction();
 }
+/// The three-byte opcode maps (gen/x86_table.js, docs/simd-xsave-plan.md)
 #[no_mangle]
-pub unsafe fn instr_0F38() { unimplemented_sse(); }
+pub unsafe fn instr_0F38() {
+    let opcode = return_on_pagefault!(read_imm8());
+    crate::gen::interpreter0f38::run(opcode as u32 | (is_osize_32() as u32) << 8);
+}
 #[no_mangle]
-pub unsafe fn instr_0F39() { unimplemented_sse(); }
+pub unsafe fn instr_0F3A() {
+    let opcode = return_on_pagefault!(read_imm8());
+    crate::gen::interpreter0f3a::run(opcode as u32 | (is_osize_32() as u32) << 8);
+}
+// (undefined)
 #[no_mangle]
-pub unsafe fn instr_0F3A() { unimplemented_sse(); }
+pub unsafe fn instr_0F39() { trigger_ud(); }
 #[no_mangle]
-pub unsafe fn instr_0F3B() { unimplemented_sse(); }
+pub unsafe fn instr_0F3B() { trigger_ud(); }
 #[no_mangle]
-pub unsafe fn instr_0F3C() { unimplemented_sse(); }
+pub unsafe fn instr_0F3C() { trigger_ud(); }
 #[no_mangle]
-pub unsafe fn instr_0F3D() { unimplemented_sse(); }
+pub unsafe fn instr_0F3D() { trigger_ud(); }
 #[no_mangle]
-pub unsafe fn instr_0F3E() { unimplemented_sse(); }
+pub unsafe fn instr_0F3E() { trigger_ud(); }
 #[no_mangle]
-pub unsafe fn instr_0F3F() { unimplemented_sse(); }
+pub unsafe fn instr_0F3F() { trigger_ud(); }
 
 pub unsafe fn instr16_0F40_mem(addr: i32, r: i32) {
     cmovcc16(test_o(), return_on_pagefault!(safe_read16(addr)), r);

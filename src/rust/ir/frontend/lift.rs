@@ -134,9 +134,9 @@ fn lift_inner(
             }
             let state = snapshot(&mut b, i.instruction_pc, i.next_pc, count - 1);
             b.region.states[state.index()].resume = crate::ir::state::ResumeKind::BeforeInstruction;
-            // (an undefined mandatory prefix is #UD before the task-switch guard)
+            // (an early #UD comes before the task-switch guard)
             let guard = b.constant(
-                if i.prefix_ud {
+                if i.early_ud {
                     0
                 }
                 else if i.encoding.sse {

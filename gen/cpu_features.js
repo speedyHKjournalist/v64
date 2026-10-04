@@ -111,6 +111,32 @@ function check_forms()
     return forms;
 }
 
+/**
+ * The opcode table (gen/x86_table.js) has a row with the right feature for
+ * every legacy form of gen/isa_forms.json in the three-byte maps, and no others
+ */
+async function check_table(forms)
+{
+    const { default: table, opcode_map, opcode_prefix } = await import("./x86_table.js");
+    const key = (map, prefix, byte) => `${map} ${prefix || "-"} ${byte.toString(16).padStart(2, "0")}`;
+    const expected = new Map();
+    for(const f of forms.forms)
+    {
+        if(f.encoding !== "legacy" || f.map !== "0F38" && f.map !== "0F3A") continue;
+        expected.set(key(f.map, f.prefix === "NP" ? "" : f.prefix, f.byte), f.isa[0]);
+    }
+    const actual = new Map();
+    for(const e of table)
+    {
+        const map = opcode_map(e.opcode);
+        if(map !== "0F38" && map !== "0F3A") continue;
+        const prefix = opcode_prefix(e.opcode);
+        actual.set(key(map, prefix ? prefix.toString(16).toUpperCase() : "", e.opcode & 0xFF), e.feature);
+    }
+    assert.deepEqual([...actual].sort(), [...expected].sort(), "gen/x86_table.js three-byte maps and gen/isa_forms.json disagree");
+    return actual.size;
+}
+
 /** Each feature's bit is set in the contract exactly where it is open */
 function check_contract()
 {
@@ -209,7 +235,7 @@ function rust_file(current)
     return current.slice(0, start + BEGIN.length) + rust_consts() + current.slice(end);
 }
 
-function main()
+async function main()
 {
     validate();
     for(const [name, features] of Object.entries(PRESETS))
@@ -217,6 +243,7 @@ function main()
         for(const f of features) assert.ok(feature_bits().some(g => g.name === f), `preset ${name}: unknown feature ${f}`);
     }
     const forms = check_forms();
+    const rows = await check_table(forms);
     check_contract();
     const outputs = [[RUST_PATH, rust_file(fs.readFileSync(RUST_PATH, "utf8"))], [JS_PATH, js_file()]];
     for(const [file, content] of outputs)
@@ -226,10 +253,10 @@ function main()
         else if(current !== content) fs.writeFileSync(file, content);
     }
     const open = FEATURES.filter(f => (f.open || []).length && f.milestone !== "existing").map(f => f.name);
-    console.log(`${FEATURES.length} features, ${forms.total} forms; open: ${open.length ? open.join(" ") : "none"} (contract agrees)`);
+    console.log(`${FEATURES.length} features, ${forms.total} forms (${rows} three-byte map rows agree); open: ${open.length ? open.join(" ") : "none"} (contract agrees)`);
 }
 
 if(process.argv[1] && path.resolve(process.argv[1]) === url.fileURLToPath(import.meta.url))
 {
-    main();
+    await main();
 }

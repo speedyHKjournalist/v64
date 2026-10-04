@@ -53,9 +53,19 @@ pub struct Encoding {
     pub custom_sti: bool,
     pub is_fpu: bool,
     pub sse: bool,
-    /// 66/F2/F3 select instructions (implied by sse): decode_rules::mandatory_variant
-    pub refining: bool,
+    /// The prefixes that select instructions in this opcode (decode_rules::
+    /// mandatory_variant): REFINING_ALL in the SSE maps
+    pub refining: u8,
+    /// The CPUID feature without which the row does not exist (crate::cpu::
+    /// features; 0: always)
+    pub feature: u32,
+    /// #UD even with the feature (docs/simd-xsave-plan.md: semantics later)
+    pub unimplemented: bool,
     pub is_string: bool,
+}
+impl Encoding {
+    /// The row exists on this machine (its feature is present)
+    pub fn exists(&self) -> bool { self.feature == 0 || crate::cpu::features::has(self.feature) }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectiveAddress {
@@ -113,10 +123,11 @@ pub struct DecodedInstruction {
     pub immediate: Option<u32>,
     pub extra_immediate: Option<u16>,
     pub baseline_ud: bool,
-    /// A mandatory prefix without a row of its own (decode_rules::Variant::
-    /// Undefined): #UD right after the ModRM byte, before EA, immediate and
-    /// task-switch guards
-    pub prefix_ud: bool,
+    /// #UD right after the ModRM byte, before EA, immediate and task-switch
+    /// guards: a mandatory prefix without a row of its own (decode_rules::
+    /// Variant::Undefined), a row whose CPUID feature is absent, or one whose
+    /// semantics come later (Encoding::unimplemented)
+    pub early_ud: bool,
     pub flow: Flow,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -194,7 +205,19 @@ pub fn decode(
             None => break byte,
         }
     };
-    let base_opcode = if first == 0x0F { 0x0F00 | c.read()? as u32 } else { first as u32 };
+    // 0F 38 and 0F 3A lead to the three-byte maps (key 0x0F38xx, 0x0F3Axx)
+    let base_opcode = if first == 0x0F {
+        let second = c.read()?;
+        if second == 0x38 || second == 0x3A {
+            0x0F0000 | (second as u32) << 8 | c.read()? as u32
+        }
+        else {
+            0x0F00 | second as u32
+        }
+    }
+    else {
+        first as u32
+    };
     let operand_size = if default_32 != prefixes.operand { 32 } else { 16 };
     let address_size = if default_32 != prefixes.address { 32 } else { 16 };
     let mut available = 0;
@@ -203,46 +226,61 @@ pub fn decode(
         (0xF2, crate::prefix::PREFIX_F2),
         (0xF3, crate::prefix::PREFIX_F3),
     ];
-    let shift = if first == 0x0F { 16 } else { 8 };
-    // the prefixes select instructions where a row of the opcode says so
-    let mut refining = candidates(base_opcode).iter().any(|row| row.sse || row.refining);
+    let shift = if base_opcode > 0xFFFF { 24 } else if first == 0x0F { 16 } else { 8 };
+    // the prefixes select instructions where a row of the opcode says so; a
+    // row whose feature is absent is not available
+    let mut refining = candidates(base_opcode).iter().fold(0, |m, row| m | row.refining);
+    let mut family = candidates(base_opcode).first();
     for (prefix, mask) in variants {
         if prefix != 0x66 || first == 0x0F {
             let rows = candidates(prefix << shift | base_opcode);
-            if !rows.is_empty() {
+            refining |= rows.iter().fold(0, |m, row| m | row.refining);
+            family = family.or(rows.first());
+            if rows.iter().any(Encoding::exists) {
                 available |= mask;
-                refining |= rows.iter().any(|row| row.sse || row.refining);
             }
         }
     }
     let flags = if prefixes.operand { crate::prefix::PREFIX_66 } else { 0 }
         | if prefixes.repne { crate::prefix::PREFIX_F2 } else { 0 }
         | if prefixes.rep { crate::prefix::PREFIX_F3 } else { 0 };
-    use crate::decode_rules::Variant;
+    use crate::decode_rules::{Variant, REFINING_REP};
     let variant = crate::decode_rules::mandatory_variant(flags, available, refining);
+    let refused = if flags & REFINING_REP != 0 { flags & REFINING_REP } else { flags & crate::prefix::PREFIX_66 };
     let opcode = match variant {
         Variant::Prefixed(selected) => variants
             .iter()
             .find(|(_, mask)| *mask == selected)
             .map_or(base_opcode, |(prefix, _)| prefix << shift | base_opcode),
-        Variant::Plain | Variant::Undefined => base_opcode,
+        // (undefined: the rows of the refused prefix, when it has some)
+        Variant::Undefined => variants
+            .iter()
+            .find(|(_, mask)| *mask == refused)
+            .map(|(prefix, _)| prefix << shift | base_opcode)
+            .filter(|key| !candidates(*key).is_empty())
+            .unwrap_or(base_opcode),
+        Variant::Plain => base_opcode,
     };
-    let prefix_ud = variant == Variant::Undefined;
     let rows = candidates(opcode);
-    let first = rows.first().ok_or(DecodeStop::UnknownEncoding { opcode })?;
+    // (an opcode without a row in any variant is unknown: the interpreter
+    // raises #UD at its last opcode byte)
+    let first = family.ok_or(DecodeStop::UnknownEncoding { opcode })?;
     let modrm_offset = if first.fetch_modrm { Some(c.position as u8) } else { None };
     let modrm = if first.fetch_modrm { Some(c.read()?) } else { None };
-    let encoding = rows
+    let row = rows
         .iter()
-        .find(|row| row.group < 0 || modrm.map(|m| (m >> 3 & 7) as i8) == Some(row.group))
-        .ok_or(DecodeStop::UnknownEncoding { opcode })?;
+        .find(|row| row.group < 0 || modrm.map(|m| (m >> 3 & 7) as i8) == Some(row.group));
+    let early_ud = variant == Variant::Undefined
+        || rows.is_empty()
+        || row.is_some_and(|row| !row.exists() || row.unimplemented);
+    let encoding = if early_ud { row.unwrap_or(first) } else { row.ok_or(DecodeStop::UnknownEncoding { opcode })? };
     let ea = match modrm {
-        Some(m) if encoding.e && m < 0xC0 && !encoding.ignore_mod && !prefix_ud => {
+        Some(m) if encoding.e && m < 0xC0 && !encoding.ignore_mod && !early_ud => {
             Some(decode_ea(&mut c, m, address_size, prefixes.segment)?)
         },
         _ => None,
     };
-    let immediate = match if prefix_ud { ImmediateKind::None } else { encoding.immediate } {
+    let immediate = match if early_ud { ImmediateKind::None } else { encoding.immediate } {
         ImmediateKind::None => None,
         ImmediateKind::Byte => Some(c.integer(1)?),
         ImmediateKind::SignedByte => Some(c.read()? as i8 as i32 as u32),
@@ -250,13 +288,13 @@ pub fn decode(
         ImmediateKind::Operand => Some(c.integer(operand_size / 8)?),
         ImmediateKind::Address => Some(c.integer(address_size / 8)?),
     };
-    let extra_immediate = if encoding.extra_bytes > 0 && !prefix_ud {
+    let extra_immediate = if encoding.extra_bytes > 0 && !early_ud {
         Some(c.integer(encoding.extra_bytes)? as u16)
     }
     else {
         None
     };
-    let baseline_ud = prefix_ud
+    let baseline_ud = early_ud
         || (if ea.is_some() { encoding.mem_ud } else { encoding.reg_ud })
         || prefixes.lock && !crate::decode_rules::lock_allowed(base_opcode, modrm);
     let flow = if encoding.jump_offset_imm {
@@ -296,7 +334,7 @@ pub fn decode(
         immediate,
         extra_immediate,
         baseline_ud,
-        prefix_ud,
+        early_ud,
         flow,
     })
 }

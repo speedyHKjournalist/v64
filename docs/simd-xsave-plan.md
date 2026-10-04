@@ -878,3 +878,25 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   AVX2、FMA、F16C；为 2 时再去掉 BMI1、BMI2）。
 - 测试：`tests/x64/cpu_features.mjs`（并入 `make platform-contract-tests`）；`cargo test
   cpu::features`；默认配置的 CPU contract 不变。
+
+### P1b：三字节映射（2026-10-04）
+
+- `gen/x86_table.js` 新增 88 行 `0F38`/`0F3A`：SSSE3 32 行（无前缀的 MMX 形式和 66 的 XMM 形式，
+  含 PALIGNR）、SSE4.1 47 行、SSE4.2 5 行（PCMPGTQ 和四条 PCMPxSTRx）、MOVBE 2 行、CRC32 2 行。
+  每行带所属能力（`feature`）；尚未实现的行带 `unimplemented`，在读完 ModRM 后 #UD，不读 SIB、
+  位移和立即数。`0F 38`、`0F 3A` 本身是 `escape` 行。`node gen/cpu_features.js --check` 校验这些
+  行与 `gen/isa_forms.json` 的 legacy 形式一一对应。
+- 三个解码器都读第三个 opcode 字节，编码键为 `0x0F38xx`/`0x0F3Axx`（强制前缀在 24–31 位）：
+  32 位解释器由生成器产生 `interpreter0f38.rs`、`interpreter0f3a.rs`，`instr_0F38`/`instr_0F3A`
+  按操作码字节分派；IR 解码目录 `encodings.rs` 增至 1021 个编码；x64 解码器和 `base_opcode`
+  识别这两个映射。`0F 39`、`0F 3B`–`3F` 仍在第二个字节 #UD。以前 `0F 38`/`0F 3A` 在第二个字节
+  #UD；现在先读第三字节和 ModRM，这两个字节上的取指故障优先于 #UD。
+- 能力门控：能力未开放的行视为不存在。表中的 `refining` 区分两类映射：SSE 映射里 66/F2/F3
+  都选择指令；MOVBE/CRC32 只有 F2/F3 选择指令，66 是操作数大小。因此 `F3 0F 38 F0` #UD，
+  `66 0F 38 F1` 是 16 位 MOVBE，`66 F2 0F 38 F1` 是 CRC32 r32, r/m16。
+- 测试：IR 解码单元测试 `three_byte_maps_decode_and_stay_undefined_until_implemented` 遍历
+  全部三字节编码，在能力全关和全开时检查长度与提前 #UD；x64 单元测试在三种模式下检查同样的
+  行为；`decode_rules.mjs` 在解释器、Tier-0 和 regions 上验证 13 个三字节编码在开不开能力时
+  都 #UD。回归：`nasmtests` 15629/15629，x64 opcode 矩阵与 iced 对拍不变，P0 列出的其余目标
+  和 `make rust-test` 全部通过。P1a 漏改的单元测试 `rep_contract_and_progress_maps`（仍要求
+  debug 构建拒绝 `F2 F3` 重复前缀）在此更新。

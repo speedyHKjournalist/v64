@@ -79,25 +79,28 @@ pub enum Variant {
 /// are `available` (PREFIX_66/F2/F3). F2/F3 (the last one, see apply_prefix)
 /// take precedence over 66, which with them is an operand-size prefix: MOVSS is
 /// also 66 F3 0F 10, CRC32 r32, r/m16 is 66 F2 0F 38 F1 (iced-x86 and XED
-/// decode the same). Where the prefixes select instructions (`refining`: the
-/// SSE maps) one without a row of its own is #UD; elsewhere F2/F3 are plain
-/// repeat prefixes.
+/// decode the same). A `refining` prefix selects instructions (all three in
+/// the SSE maps, F2/F3 at MOVBE/CRC32): one without a row of its own is #UD.
+/// Otherwise F2/F3 are plain repeat prefixes and 66 sets the operand size.
 #[inline]
-pub fn mandatory_variant(flags: u8, available: u8, refining: bool) -> Variant {
+pub fn mandatory_variant(flags: u8, available: u8, refining: u8) -> Variant {
     let rep = flags & (PREFIX_F2 | PREFIX_F3);
     if rep != 0 {
         if available & rep != 0 {
             return Variant::Prefixed(rep);
         }
-        if refining {
+        if refining & rep != 0 {
             return Variant::Undefined;
         }
     }
-    if refining && flags & PREFIX_66 != 0 {
+    if refining & PREFIX_66 != 0 && flags & PREFIX_66 != 0 {
         return if available & PREFIX_66 != 0 { Variant::Prefixed(PREFIX_66) } else { Variant::Undefined };
     }
     Variant::Plain
 }
+/// The refining prefixes (see mandatory_variant) of a row of the catalogue
+pub const REFINING_ALL: u8 = PREFIX_66 | PREFIX_F2 | PREFIX_F3;
+pub const REFINING_REP: u8 = PREFIX_F2 | PREFIX_F3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AddressForm {

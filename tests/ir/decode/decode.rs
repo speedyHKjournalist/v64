@@ -47,11 +47,12 @@ fn prefixes_boundaries_and_missing_page() {
 
 #[test]
 fn prefix_product_and_missing_groups_are_explicit() {
-    use crate::decode_rules::{apply_prefix, mandatory_variant, Variant};
+    use crate::decode_rules::{apply_prefix, mandatory_variant, Variant, REFINING_ALL, REFINING_REP};
     use crate::prefix::*;
     // The mandatory-prefix rule, against an independent statement of it: the
-    // last F2/F3 before 66; in a refining (SSE) opcode a prefix without a row
-    // is #UD, elsewhere F2/F3 are ignored.
+    // last F2/F3 before 66; a refining prefix (all three in the SSE maps,
+    // F2/F3 at MOVBE/CRC32) without a row is #UD, other prefixes are ignored
+    // or set the operand size.
     for flags in 0..256u16 {
         let flags = flags as u8;
         if flags & PREFIX_F2 != 0 && flags & PREFIX_F3 != 0 {
@@ -61,15 +62,15 @@ fn prefix_product_and_missing_groups_are_explicit() {
             let mask = (if available & 1 != 0 { PREFIX_66 } else { 0 })
                 | (if available & 2 != 0 { PREFIX_F2 } else { 0 })
                 | (if available & 4 != 0 { PREFIX_F3 } else { 0 });
-            for refining in [false, true] {
+            for refining in [0, REFINING_REP, REFINING_ALL] {
                 let rep = flags & (PREFIX_F2 | PREFIX_F3);
                 let expected = if rep != 0 && mask & rep != 0 {
                     Variant::Prefixed(rep)
                 }
-                else if refining && rep != 0 {
+                else if refining & rep != 0 {
                     Variant::Undefined
                 }
-                else if refining && flags & PREFIX_66 != 0 {
+                else if refining & PREFIX_66 != 0 && flags & PREFIX_66 != 0 {
                     if mask & PREFIX_66 != 0 { Variant::Prefixed(PREFIX_66) } else { Variant::Undefined }
                 }
                 else {
@@ -95,7 +96,7 @@ fn prefix_product_and_missing_groups_are_explicit() {
                     .into_iter()
                     .fold(0, |f, p| apply_prefix(f, p).unwrap());
                 // 0F 10 has rows for all of 66, F2 and F3
-                let expected = match mandatory_variant(flags, PREFIX_66 | PREFIX_F2 | PREFIX_F3, true) {
+                let expected = match mandatory_variant(flags, PREFIX_66 | PREFIX_F2 | PREFIX_F3, REFINING_ALL) {
                     Variant::Prefixed(PREFIX_66) => 0x660F10,
                     Variant::Prefixed(PREFIX_F2) => 0xF20F10,
                     Variant::Prefixed(PREFIX_F3) => 0xF30F10,
@@ -105,7 +106,7 @@ fn prefix_product_and_missing_groups_are_explicit() {
                     },
                 };
                 assert_eq!(decoded.encoding.opcode, expected);
-                assert!(!decoded.prefix_ud);
+                assert!(!decoded.early_ud);
                 // No read past the supplied snapshot, including prefix and ModRM boundaries.
                 for n in 0..bytes.len() {
                     assert!(matches!(
@@ -132,7 +133,7 @@ fn prefix_product_and_missing_groups_are_explicit() {
     // displacement or immediate (F3 0F 2B is AMD's MOVNTSS, 66 0F C3 not MOVNTI)
     for bytes in [&[0xF3, 0x0F, 0x2B, 0x04, 0x24][..], &[0x66, 0x0F, 0xC3, 0x04, 0x24], &[0xF2, 0x0F, 0x77]] {
         let i = d(bytes, true);
-        assert!(i.baseline_ud && i.prefix_ud && i.ea.is_none(), "{bytes:02X?}");
+        assert!(i.baseline_ud && i.early_ud && i.ea.is_none(), "{bytes:02X?}");
         assert_eq!(i.length as usize, bytes.len() - if bytes.len() > 3 { 1 } else { 0 }, "{bytes:02X?}");
     }
     // Outside the SSE maps F2/F3 are plain repeat prefixes
@@ -175,6 +176,24 @@ fn ea_and_wrapping() {
     assert_eq!(i.ea.unwrap().segment, 3);
 }
 
+/// The opcode bytes of a catalogue key: mandatory prefix, escapes, opcode
+fn catalogue_bytes(opcode: u32) -> Vec<u8> {
+    if matches!(opcode >> 8 & 0xFFFF, 0x0F38 | 0x0F3A) {
+        let mut bytes = if opcode >> 24 != 0 { vec![(opcode >> 24) as u8] } else { vec![] };
+        bytes.extend([0x0F, (opcode >> 8) as u8, opcode as u8]);
+        return bytes;
+    }
+    let mut bytes = Vec::new();
+    if opcode > 0xFFFF {
+        bytes.push((opcode >> 16) as u8);
+    }
+    if opcode > 0xFF {
+        bytes.push((opcode >> 8) as u8);
+    }
+    bytes.push(opcode as u8);
+    bytes
+}
+
 #[test]
 fn catalogue_lengths_and_all_modrm_sib_forms() {
     let mut count = 0;
@@ -184,17 +203,19 @@ fn catalogue_lengths_and_all_modrm_sib_forms() {
                 if encoding.group >= 0 && (m >> 3 & 7) != encoding.group as u32 {
                     continue;
                 }
-                let mut bytes = Vec::new();
-                if encoding.opcode > 0xFFFF {
-                    bytes.push((encoding.opcode >> 16) as u8);
-                }
-                if encoding.opcode > 0xFF {
-                    bytes.push((encoding.opcode >> 8) as u8);
-                }
-                bytes.push(encoding.opcode as u8);
+                let mut bytes = catalogue_bytes(encoding.opcode);
                 let op_size32 = mode32 != bytes.contains(&0x66);
                 if encoding.fetch_modrm {
                     bytes.push(m as u8);
+                }
+                // A row whose semantics come later (or whose feature is
+                // absent) is #UD right after its ModRM byte
+                if encoding.unimplemented || !encoding.exists() {
+                    let decoded = d(&bytes, mode32);
+                    assert!(decoded.early_ud && decoded.baseline_ud && decoded.ea.is_none(), "{:x} {m:x}", encoding.opcode);
+                    assert_eq!((decoded.encoding.id, decoded.length as usize), (encoding.id, bytes.len()), "{:x} {m:x}", encoding.opcode);
+                    count += 1;
+                    continue;
                 }
                 let sib_count =
                     if mode32 && encoding.e && !encoding.ignore_mod && m < 0xC0 && m & 7 == 4 {
@@ -456,4 +477,42 @@ fn lock_requires_a_supported_memory_destination() {
     ] {
         assert!(!d(bytes, true).baseline_ud, "{bytes:02x?}");
     }
+}
+
+#[test]
+fn three_byte_maps_decode_and_stay_undefined_until_implemented() {
+    use crate::cpu::features::{TEST_FEATURES, ALL};
+    for features in [0, ALL] {
+        TEST_FEATURES.with(|f| f.set(features));
+        for (bytes, key) in [
+            (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], 0x660F3800), // pshufb xmm
+            (&[0x0F, 0x38, 0x00, 0xC1], 0x0F3800),             // pshufb mm
+            (&[0x66, 0x0F, 0x3A, 0x0F, 0xC1], 0x660F3A0F),     // palignr xmm (no imm8 read)
+            (&[0x66, 0x0F, 0x38, 0x10, 0x04], 0x660F3810),     // pblendvb (no SIB read)
+            (&[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1], 0xF20F38F1), // crc32 r32, r/m16
+            (&[0x0F, 0x38, 0xF0, 0x00], 0x0F38F0),             // movbe
+            (&[0x66, 0x0F, 0x38, 0xF1, 0x00], 0x0F38F1),       // movbe m16 (66: operand size)
+        ] {
+            let i = d(bytes, true);
+            assert!(i.early_ud && i.baseline_ud && i.ea.is_none() && i.immediate.is_none(), "{bytes:02X?}");
+            assert_eq!((i.encoding.opcode, i.length as usize), (key, bytes.len()), "{bytes:02X?}");
+        }
+        // F3 at MOVBE/CRC32 and 66 at the MOVBE rows' CRC32 are refused; an
+        // unprefixed 0F 38 10 has no row
+        for bytes in [&[0xF3, 0x0F, 0x38, 0xF0, 0x00][..], &[0x0F, 0x38, 0x10, 0xC1]] {
+            let i = d(bytes, true);
+            assert!(i.early_ud && i.length as usize == bytes.len(), "{bytes:02X?}");
+        }
+        // an opcode byte without rows is unknown (#UD at that byte when run)
+        assert_eq!(
+            decode(&[0x0F, 0x38, 0xFF, 0xC1], GuestEip(0), LinearAddress(0), true).unwrap_err(),
+            DecodeStop::UnknownEncoding { opcode: 0x0F38FF }
+        );
+        // the escape and third byte belong to the instruction
+        assert!(matches!(
+            decode(&[0x66, 0x0F, 0x38], GuestEip(0), LinearAddress(0), true),
+            Err(DecodeStop::Incomplete { .. })
+        ));
+    }
+    TEST_FEATURES.with(|f| f.set(0));
 }

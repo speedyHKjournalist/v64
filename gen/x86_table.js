@@ -53,7 +53,14 @@ const TESTS_ASSUME_INTEL = false;
 // imm8, imm8s, imm16, imm1632, immaddr, extra_imm8, extra_imm16: one or two immediate bytes follows the instruction
 // custom: will callback jit to generate custom code
 // refining: 66/F2/F3 select instructions, as in the SSE maps (sse implies it): a
-//   prefix without a row of its own is #UD (decode_rules::mandatory_variant)
+//   prefix without a row of its own is #UD (decode_rules::mandatory_variant);
+//   "rep": only F2/F3 do, and 66 is an operand-size prefix (MOVBE, CRC32)
+// escape: 0F 38 and 0F 3A lead to the three-byte maps (opcode 0x0F38xx and
+//   0x0F3Axx, a mandatory prefix in bits 24-31)
+// feature: the CPUID feature (gen/cpu_features.js) without which the row does
+//   not exist: its encoding is #UD, or runs the row a prefix does not select
+// unimplemented: #UD even with the feature (docs/simd-xsave-plan.md: the
+//   semantics come in later phases)
 // block_boundary: may change eip in a way not handled by the jit
 // no_next_instruction: jit will stop analysing after instruction (e.g., unconditional jump, ret)
 const encodings = [
@@ -404,10 +411,10 @@ const encodings = [
     { opcode: 0x0F36, skip: 1, block_boundary: 1 }, // ud
     { opcode: 0x0F37, skip: 1, block_boundary: 1 }, // getsec
 
-    // ssse3+
-    { opcode: 0x0F38, skip: 1, block_boundary: 1 },
+    // the three-byte maps
+    { opcode: 0x0F38, escape: 1, skip: 1 },
     { opcode: 0x0F39, skip: 1, block_boundary: 1 },
-    { opcode: 0x0F3A, skip: 1, block_boundary: 1 },
+    { opcode: 0x0F3A, escape: 1, skip: 1 },
     { opcode: 0x0F3B, skip: 1, block_boundary: 1 },
     { opcode: 0x0F3C, skip: 1, block_boundary: 1 },
     { opcode: 0x0F3D, skip: 1, block_boundary: 1 },
@@ -870,9 +877,65 @@ for(let i = 0; i < 8; i++)
     ]);
 }
 
+// The three-byte maps 0F 38 and 0F 3A: every legacy form in
+// gen/isa_forms.json (checked by gen/cpu_features.js). Their semantics come in
+// later phases of docs/simd-xsave-plan.md.
+{
+    const SSSE3 = "SSSE3", SSE4_1 = "SSE4.1", SSE4_2 = "SSE4.2";
+    const vector = (opcode, feature, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, skip: 1, feature, unimplemented: 1, ...extra });
+    // SSSE3: an MMX form without prefix and an XMM form with 66
+    for(const byte of [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x1C, 0x1D, 0x1E])
+    {
+        encodings.push(vector(0x0F3800 | byte, SSSE3), vector(0x660F3800 | byte, SSSE3));
+    }
+    encodings.push(vector(0x0F3A0F, SSSE3, { imm8: 1 }), vector(0x660F3A0F, SSSE3, { imm8: 1 })); // palignr
+    for(const byte of [0x10, 0x14, 0x15, 0x17, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2B,
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41])
+    {
+        encodings.push(vector(0x660F3800 | byte, SSE4_1));
+    }
+    encodings.push(vector(0x660F382A, SSE4_1, { reg_ud: 1 })); // movntdqa
+    for(const byte of [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x14, 0x15, 0x16, 0x17, 0x20, 0x21, 0x22, 0x40, 0x41, 0x42])
+    {
+        encodings.push(vector(0x660F3A00 | byte, SSE4_1, { imm8: 1 }));
+    }
+    encodings.push(vector(0x660F3837, SSE4_2)); // pcmpgtq
+    for(const byte of [0x60, 0x61, 0x62, 0x63]) encodings.push(vector(0x660F3A00 | byte, SSE4_2, { imm8: 1 })); // pcmp[ei]str[im]
+    // MOVBE (memory only; 66 is the operand size) and CRC32 share 0F 38 F0/F1,
+    // where F2 selects CRC32 and F3 is #UD
+    const integer = { e: 1, custom: 1, skip: 1, refining: "rep", unimplemented: 1 };
+    encodings.push(
+        { ...integer, opcode: 0x0F38F0, os: 1, reg_ud: 1, feature: "MOVBE" },
+        { ...integer, opcode: 0x0F38F1, os: 1, reg_ud: 1, feature: "MOVBE" },
+        { ...integer, opcode: 0xF20F38F0, feature: SSE4_2 },
+        { ...integer, opcode: 0xF20F38F1, os: 1, feature: SSE4_2 },
+    );
+}
+
+/** The opcode map of a key: "", "0F", "0F38" or "0F3A" */
+export function opcode_map(opcode)
+{
+    if((opcode >>> 8 & 0xFFFF) === 0x0F38) return "0F38";
+    if((opcode >>> 8 & 0xFFFF) === 0x0F3A) return "0F3A";
+    return (opcode >>> 8 & 0xFF) === 0x0F ? "0F" : "";
+}
+/** The mandatory prefix of a key (0x66, 0xF2, 0xF3, or 0) */
+export function opcode_prefix(opcode)
+{
+    const map = opcode_map(opcode);
+    return map === "0F38" || map === "0F3A" ? opcode >>> 24 : map === "0F" ? opcode >>> 16 & 0xFF : opcode >>> 8 & 0xFF;
+}
+/** The key without its prefix: the opcode byte with the bytes of its map */
+export function opcode_family(opcode)
+{
+    const map = opcode_map(opcode);
+    return opcode & (map === "0F38" || map === "0F3A" ? 0xFFFFFF : map === "0F" ? 0xFFFF : 0xFF);
+}
+
+const MAP_ORDER = { "": 0, "0F": 1, "0F38": 2, "0F3A": 3 };
 encodings.sort((e1, e2) => {
-    let o1 = (e1.opcode & 0xFF00) === 0x0F00 ? e1.opcode & 0xFFFF : e1.opcode & 0xFF;
-    let o2 = (e2.opcode & 0xFF00) === 0x0F00 ? e2.opcode & 0xFFFF : e2.opcode & 0xFF;
+    const o1 = MAP_ORDER[opcode_map(e1.opcode)] << 8 | e1.opcode & 0xFF;
+    const o2 = MAP_ORDER[opcode_map(e2.opcode)] << 8 | e2.opcode & 0xFF;
     return o1 - o2 || e1.fixed_g - e2.fixed_g;
 });
 

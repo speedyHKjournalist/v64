@@ -37,13 +37,26 @@ pub const X86_64_ONLY: u32 = LZCNT;
 /// The features of this machine (bits above)
 static mut FEATURES: u32 = 0;
 
+#[cfg(test)]
+thread_local! {
+    /// cargo test: the features of the test thread (the tests run in parallel)
+    pub static TEST_FEATURES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Whether the machine has all of `features`
 #[inline]
-pub fn has(features: u32) -> bool { unsafe { FEATURES & features == features } }
+pub fn has(features: u32) -> bool { all() & features == features }
 
 /// The features of this machine
 #[inline]
-pub fn all() -> u32 { unsafe { FEATURES } }
+pub fn all() -> u32 {
+    #[cfg(test)]
+    return TEST_FEATURES.with(|f| f.get());
+    #[cfg(not(test))]
+    unsafe {
+        FEATURES
+    }
+}
 
 /// Set by src/cpu.js before the CPU runs, after it checked requirements,
 /// profile and cpuid_level (CPU.prototype.resolve_cpu_features)

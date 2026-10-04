@@ -19,7 +19,8 @@ const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffe
 const load = (r, a) => [0xF3, 0x0F, 0x6F, 5 | r << 3, ...u32(a)];
 const store = (r, a) => [0xF3, 0x0F, 0x7F, 5 | r << 3, ...u32(a)];
 
-async function run(vm, program, warm = true)
+// (machines[0] of a set is the interpreter: it compiles nothing)
+async function run(vm, program, warm = true, interpreter = vm === machines[0])
 {
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
     if(warm) cpu.jit_clear_cache();
@@ -31,7 +32,7 @@ async function run(vm, program, warm = true)
     const start = compiled_activations(e);
     vm.run();
     const deadline = performance.now() + 20000;
-    while(word(vm, 0x600) !== 0xCAFE || warm && vm !== machines[0] && compiled_activations(e) === start)
+    while(word(vm, 0x600) !== 0xCAFE || warm && !interpreter && compiled_activations(e) === start)
     {
         assert(performance.now() < deadline, "program/JIT timeout");
         await sleep(1);
@@ -46,32 +47,59 @@ function loop(body)
     p.push(0xE9, ...u32(-p.length - 5), 0xF4);
     return p;
 }
-async function run_all(program, before = () => {})
+async function run_all(program, before = () => {}, set = machines)
 {
-    for(const vm of machines)
+    for(const vm of set)
     {
         before(vm);
         vm.write_memory(new Uint8Array(1), 0x604);
-        await run(vm, program);
+        await run(vm, program, true, vm === set[0]);
         vm.write_memory(Uint8Array.of(1), 0x604);
-        await run(vm, program, false);
+        await run(vm, program, false, vm === set[0]);
     }
 }
-
-try
+/** The interpreter, then Tier-0 and the region tiers, with `options` */
+async function create_machines(options = {})
 {
-    for(const options of [{ disable_jit: true }, ...COMPILED_ARMS.map(arm => arm.options)])
+    const set = [];
+    for(const arm of [{ disable_jit: true }, ...COMPILED_ARMS.map(arm => arm.options)])
     {
         const vm = new V86({ graphics_adapter: "bochs_vga", wasm_path: candidate, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20,
-            ...options, disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+            ...arm, ...options, disable_keyboard: true, disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false });
-        machines.push(vm);
+        set.push(vm);
         await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
         vm.run();
         const deadline = performance.now() + 10000;
         while(word(vm, 0x500) !== 0xCAFE) { assert(performance.now() < deadline); await sleep(1); }
         await vm.stop();
     }
+    return set;
+}
+/** Each form raises #UD at its first byte (the handler skips the form) */
+async function expect_undefined(forms, set = machines)
+{
+    for(const form of forms)
+    {
+        const h = [0x8B, 0x44, 0x24, 0, 0xA3, ...u32(OUT), 0x83, 0x44, 0x24, 0, form.length, 0xCF];
+        const prologue = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), 0xB8, ...u32(DATA)];
+        const fault_eip = CODE + prologue.length;
+        await run_all(loop([...prologue, ...form]), vm => {
+            vm.write_memory(Uint8Array.from([HANDLER & 255, HANDLER >>> 8 & 255, 8, 0, 0, 0x8E, HANDLER >>> 16 & 255, HANDLER >>> 24]), IDT + 6 * 8);
+            vm.write_memory(Uint8Array.from([255, 7, ...u32(IDT)]), DESCRIPTOR);
+            vm.write_memory(Uint8Array.from(h), HANDLER);
+            vm.write_memory(new Uint8Array(4), OUT);
+        }, set);
+        for(const vm of set)
+        {
+            assert.equal(word(vm, OUT), fault_eip, `${form.map(b => b.toString(16)).join(" ")}: #UD at the first byte`);
+        }
+    }
+}
+
+try
+{
+    machines.push(...await create_machines());
 
     // 66 with F2/F3 is an operand-size prefix; of F2 and F3 the last counts.
     // MOVSS/MOVSD between registers replace the low 32/64 bits only.
@@ -131,30 +159,34 @@ try
         [0xF2, 0x0F, 0x77], [0x66, 0x0F, 0x77],             // EMMS
         [0x66, 0x0F, 0xAE, 0x00], [0xF2, 0x0F, 0xAE, 0x00], // FXSAVE
     ];
-    let undefined_cases = 0;
-    for(const form of undefined_forms)
-    {
-        // #UD handler: record the faulting EIP, skip the instruction
-        const h = [0x8B, 0x44, 0x24, 0, 0xA3, ...u32(OUT), 0x83, 0x44, 0x24, 0, form.length, 0xCF];
-        const prologue = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), 0xB8, ...u32(DATA)];
-        const fault_eip = CODE + prologue.length;
-        const program = loop([...prologue, ...form]);
-        await run_all(program, vm => {
-            vm.write_memory(Uint8Array.from([HANDLER & 255, HANDLER >>> 8 & 255, 8, 0, 0, 0x8E, HANDLER >>> 16 & 255, HANDLER >>> 24]), IDT + 6 * 8);
-            vm.write_memory(Uint8Array.from([255, 7, ...u32(IDT)]), DESCRIPTOR);
-            vm.write_memory(Uint8Array.from(h), HANDLER);
-            vm.write_memory(new Uint8Array(4), OUT);
-        });
-        for(const vm of machines)
-        {
-            assert.equal(word(vm, OUT), fault_eip, `${form.map(b => b.toString(16)).join(" ")}: #UD at the first prefix`);
-        }
-        undefined_cases++;
-    }
+    await expect_undefined(undefined_forms);
     // IMUL r32, r/m32 with F3: a repeat prefix, ignored
     await run_all(loop([0xB8, ...u32(7), 0xB9, ...u32(6), 0xF3, 0x0F, 0xAF, 0xC1, 0xA3, ...u32(OUT)]));
     for(const vm of machines) assert.equal(word(vm, OUT), 42, "F3 IMUL");
-    console.log(`PASS: ${undefined_cases} undefined mandatory prefixes raise #UD, F3 IMUL ignores the prefix`);
+    console.log(`PASS: ${undefined_forms.length} undefined mandatory prefixes raise #UD, F3 IMUL ignores the prefix`);
+
+    // The three-byte maps decode in all three decoders, and each encoding is
+    // #UD until its semantics come (docs/simd-xsave-plan.md), whether or not
+    // the machine has its CPUID feature; so is an opcode byte without rows
+    const three_byte = [
+        [0x66, 0x0F, 0x38, 0x00, 0xC1], [0x0F, 0x38, 0x00, 0xC1],                  // pshufb
+        [0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], [0x0F, 0x3A, 0x0F, 0xC1, 0x08],      // palignr
+        [0x66, 0x0F, 0x38, 0x10, 0x00], [0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x0C],      // pblendvb, pcmpistri
+        [0xF2, 0x0F, 0x38, 0xF1, 0xC1], [0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],      // crc32
+        [0x0F, 0x38, 0xF0, 0x00], [0xF3, 0x0F, 0x38, 0xF0, 0x00],                  // movbe
+        [0x0F, 0x38, 0x10, 0xC1], [0x0F, 0x38, 0xFF, 0xC1], [0x0F, 0x3A, 0xFF, 0xC1, 0x00], // no row
+    ];
+    await expect_undefined(three_byte);
+    const featured = await create_machines({ cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "MOVBE"] });
+    try
+    {
+        await expect_undefined(three_byte, featured);
+    }
+    finally
+    {
+        for(const vm of featured) await vm.destroy();
+    }
+    console.log(`PASS: ${three_byte.length} three-byte map encodings raise #UD, with and without their features`);
 }
 finally
 {
