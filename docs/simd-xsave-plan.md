@@ -1,12 +1,13 @@
-# SSSE3、SSE4.1/4.2、AVX/AVX2 与 XSAVE 完整实现计划
+# SSSE3 至 x86-64-v3 指令集与 XSAVE 完整实现计划
 
 状态：设计与实施计划；本文不表示这些功能已经实现或通过验收。
 
 初稿基于 2026 年 10 月 3 日的工作区（Git 基线 `696d91ab`）。2026 年 10 月 4 日复核到
 `6912875a`，其间合入了 SMM（见第 2 节），并按审阅意见修订了解码前缀、浮点、XSAVE、
-快照/INIT、测试参考和发布顺序。目标是让现有
+快照/INIT、测试参考和发布顺序；同日把 x86-64-v3 的其余指令（FMA、F16C、BMI1、BMI2、
+LZCNT、MOVBE）纳入范围。目标是让现有
 `cpu_type: "x86"` 和 `cpu_type: "x86_64"` 在架构允许的执行模式下完整支持这些指令集，
-覆盖解释执行、编译执行、操作系统状态切换、快照和多核。实现完成前，保持相应 CPUID
+使 x64 配置达到 x86-64-v3，并覆盖解释执行、编译执行、操作系统状态切换、快照和多核。实现完成前，保持相应 CPUID
 能力位关闭；不能以少量程序能够运行、指令名称已登记或解释器与 JIT 结果相同作为完整性证明。
 
 ## 1. 交付范围与完成定义
@@ -20,6 +21,12 @@
 | SSE4.2 | 字符串比较四条指令、PCMPGTQ、CRC32；独立审计已有 POPCNT |
 | AVX | 两字节/三字节 VEX、架构定义的 128/256 位形式、三操作数、标量合并、YMM 状态及零化指令 |
 | AVX2 | 256 位整数扩展、新增 128/256 位形式、广播、排列、变长移位、掩码读写与 gather |
+| FMA | VFMADD、VFMSUB、VFNMADD、VFNMSUB、VFMADDSUB、VFMSUBADD 的 132/213/231 全部形式（PS/PD/SS/SD，128/256 位），乘加只舍入一次 |
+| F16C | VCVTPH2PS、VCVTPS2PH 的 128/256 位、寄存器/内存形式及 imm8 舍入控制 |
+| BMI1 | ANDN、BEXTR、BLSI、BLSMSK、BLSR 的 32/64 位形式，TZCNT 的 16/32/64 位形式；未开放时 `F3 0F BC` 按 BSF 执行 |
+| BMI2 | BZHI、MULX、PDEP、PEXT、RORX、SARX、SHLX、SHRX 的 32/64 位形式 |
+| LZCNT | 16/32/64 位形式，只在 x64 配置开放（第 13 节 Q7）；未开放时，包括在 32 位配置中，`F3 0F BD` 按 BSR 执行 |
+| MOVBE | 16/32/64 位的加载与存储形式（只有内存操作数形式） |
 | 基础 XSAVE | XSAVE、XRSTOR、XGETBV(0)、XSETBV、XCR0、CR4.OSXSAVE、CPUID leaf 0xD |
 | XSAVE 家族扩展 | 分阶段完成 XSAVEOPT、XGETBV(1)、XSAVEC 并分别公布能力位；XSAVES/XRSTORS 为可选的最后一步（第 13 节 Q3） |
 | 状态分量 | x87/MMX、SSE/MXCSR、YMM_Hi128；按架构定义处理初始化状态与 32/64 位格式 |
@@ -32,11 +39,14 @@ supervisor state 分量，XSAVES 没有功能收益，公开后却会让 Linux �
 XSAVES/XRSTORS 压缩格式路径。若实现，则同时实现 `IA32_XSS` 及其校验，初始受支持 XSS
 位图为零，不能借此宣称支持其他状态组件。
 
-不将 FMA/FMA4、F16C、BMI1/2、AES/PCLMUL、SHA、SSE4a、XOP、AVX-512、AVX10、
-MPX、PKRU、AMX 或 APX 混入 AVX2。它们有独立能力位或状态组件，后续另行规划。
-需要注意，本计划全部完成后仍达不到 x86-64-v3：还缺 FMA、F16C、BMI1、BMI2、LZCNT 和
-MOVBE，而很多“要求 AVX2”的软件实际按 v3 检测。MOVBE 与 CRC32 共用 `0F 38 F0/F1`，
-在 P1/P4b 顺带实现的成本很低（第 13 节 Q7）。
+本计划覆盖 x86-64-v3 的全部要求：在 x86-64-v2 之上，还有 AVX、AVX2、BMI1、BMI2、F16C、
+FMA、LZCNT、MOVBE 和 OSXSAVE。很多“要求 AVX2”的软件实际按 v3 整组检测；glibc 的 AVX2
+字符串函数也要求 AVX2、BMI1、BMI2、LZCNT 同时可用，只开放 AVX2 时不会被选中。
+x86-64-v3 只针对 x64 配置；32 位配置开放其中除 LZCNT 以外的指令（第 13 节 Q7）。
+
+不将 FMA4、AES/PCLMUL、VAES/VPCLMULQDQ、GFNI、AVX-VNNI、SHA、ADX、SSE4a、XOP、AVX-512、
+AVX10、MPX、PKRU、AMX 或 APX 纳入本计划。它们有独立能力位或状态组件，后续另行规划；
+其中落在 `0F38`/`0F3A` 或 VEX 编码空间的指令，本计划只保证它们稳定地产生 #UD。
 本计划要求指令可观察的行为正确，不要求模拟特定物理 CPU 的周期数、缓存实现或
 AVX/SSE 转换性能惩罚。非临时访问涉及的内存行为仍须符合现有内存模型。
 
@@ -77,10 +87,13 @@ semantic oracle / positive tests / negative tests / lifecycle tests
 | [`src/rust/x64/vector.rs`](../src/rust/x64/vector.rs)、[`src/rust/x64/pagegen.rs`](../src/rust/x64/pagegen.rs) | 已有 SSE–SSE3、较完整的 FP 处理及部分原生模板 | 抽取可复用语义，扩展 16 个 YMM 和 page tier |
 | [`gen/state_layout.js`](../gen/state_layout.js) | XMM0–7 与 XMM8–15 分库存放；无 YMM_Hi128/XCR0；固定状态区为 4096 字节 | 追加每核字段并重新生成 Rust/JS 布局；校验空间、范围与快照兼容 |
 | [`src/rust/cpu/misc_instr.rs`](../src/rust/cpu/misc_instr.rs)、`x64/vector.rs` | 分别实现 legacy 与 long-mode FXSAVE/FXRSTOR。legacy 的对齐 #GP 只是 `dbg_assert`；x64 的 FXSAVE 整块写出 512 字节（SDM 规定处理器不写 464–511 字节），并且在非 64 位模式下也存取 XMM8–15 | 提取模式相关的状态编解码，修复影响 XSAVE 的旧路径缺陷（6.2 节） |
-| `instructions_0f.rs`、[`src/rust/x64/system.rs`](../src/rust/x64/system.rs) | CPUID 未公布目标扩展，无 leaf 0xD；两条路径的 CR4 合法位校验不一致（legacy 接受 bit 18 OSXSAVE）。CPU 配置只是布尔值 `X64_TEST_CAPABILITIES`，不进快照；`cpuid_level` 可配置（Windows NT 用 2） | 集中能力定义并改为能力位图，统一 OSXSAVE、XCR0 和异常规则 |
+| `instructions_0f.rs`、[`src/rust/x64/system.rs`](../src/rust/x64/system.rs) | CPUID 未公布目标扩展，无 leaf 0xD；两条路径的 CR4 合法位校验不一致（legacy 接受 bit 18 OSXSAVE）。CPU 配置只是布尔值 `X64_TEST_CAPABILITIES`，不进快照；`cpuid_level` 可配置（Windows NT 用 2）。32 位配置的 CPUID 0x80000000 返回 5，即没有有效的扩展 leaf，因此无法报告 LZCNT（0x80000001:ECX[5]） | 集中能力定义并改为能力位图，统一 OSXSAVE、XCR0 和异常规则；32 位配置不补扩展 leaf，也不开放 LZCNT（第 13 节 Q7） |
 | [`src/rust/cpu/smm.rs`](../src/rust/cpu/smm.rs)（基线后合入） | SMI 进入时把 CR4 清零；RSM 原样恢复 CR4，不做合法位校验；`entered_mode()` 会调用 `ir_admission_barrier` | RSM 与 MOV CR4 共用校验，并列入 JIT 失效写入方（6.1 节） |
 | [`src/rust/ir/runtime/sse_fp.rs`](../src/rust/ir/runtime/sse_fp.rs)、[`src/rust/cpu/cpu.rs`](../src/rust/cpu/cpu.rs) | 32 位引擎（解释器、Tier-0、regions）的 SSE/SSE2 算术直接用宿主或 Wasm 运算：不设置任何 MXCSR 状态位，算术不支持 RC/DAZ/FZ（`set_mxcsr` 只打日志），也从不产生 #XM。x64 的 `vector.rs` 基于 SoftFloat，是精确的 | 单列 P4a：建立准确的公共 FP 核心，改造现有 SSE/SSE2 浮点路径（7.4 节） |
 | [`src/rust/ir/runtime/continuation.rs`](../src/rust/ir/runtime/continuation.rs) | selective continuation 保存范围包含 legacy XMM，但没有 YMM 高半 | 扩展捕获/恢复与失效规则，防止 helper 返回后恢复过期高半 |
+| [`lib/softfloat/softfloat.c`](../lib/softfloat/softfloat.c)、[`src/rust/softfloat.rs`](../src/rust/softfloat.rs) | 捆绑的 C SoftFloat 已包含 `f32_mulAdd`、`f64_mulAdd`、`f32_to_f16` 和 `f16_to_f32`，Rust 侧尚未声明 | FMA/F16C 的精确路径直接复用；x86 的 NaN 选择规则在外层实现（9.3 节） |
+| `gen/x86_table.js` 的 BSF/BSR、`x64/execute.rs`、`x64/pagegen.rs` | `0F BC/BD` 忽略 F3 前缀，行为等同于不支持 BMI1/LZCNT 的 CPU | TZCNT/LZCNT 是唯一随能力位改变解码结果、而不是变成 #UD 的形式：能力关闭时仍按 BSF/BSR 执行（5.2 节） |
+| 惰性标志：32 位引擎的 `flags_changed`/`last_op1`/`last_result`，x64 page tier 的惰性标志记录 | 只覆盖现有整数指令 | BMI1/BMI2/LZCNT/TZCNT 接入两套机制，未定义标志取固定值（9.2 节） |
 | [`src/cpu.js`](../src/cpu.js) | 多核快照按区间恢复，缺失区间填复位值（SMBASE 是先例）；单核旧快照把 1360 以上的 core 区间清零。INIT 只保留 `INIT_PRESERVED` 中的 PAT、MTRR、MC 和 SMBASE，其余（包括 x87、XMM、MXCSR）都取复位值 | 按 6.4 节加入 XCR0/XSS 的填充与 INIT 规则 |
 | [`tests/nasm/`](../tests/nasm/)、[`tests/x64/`](../tests/x64/) | 已有差分与外部 oracle；NASM fixture 目前只记录 XMM0–7；`qemu_oracle.js` 只解析 `XMM0n=`，并以 `-cpu max` 运行 QEMU | 版本化记录格式，增加 YMM、MXCSR、XCR0、异常与内存副作用；处理 11.1 节列出的 QEMU 缺口 |
 
@@ -112,7 +125,8 @@ x64 解码共同调用，从结构上消除兼容模式下的双引擎分歧。�
 直接访问全局 CPU 或客体内存。各执行引擎负责模式检查、地址转换、异常交付和结果提交。
 字符串比较、FP、gather 与 xstate 使用明确的专用结果类型，不强行塞进单一“向量二元运算”。
 
-新模块建议按职责组织为 SIMD 整数、SIMD 浮点、字符串/CRC、xstate；最终路径随现有
+新模块建议按职责组织为 SIMD 整数、SIMD 浮点（含 FMA/F16C）、字符串/CRC、位操作
+（BMI/LZCNT/MOVBE）、xstate；最终路径随现有
 Rust 模块结构确定。公共 helper 的读写状态、副作用和异常出口必须登记到 IR helper contract。
 
 ### 3.2 YMM 表示与状态所有权
@@ -134,12 +148,16 @@ Rust 模块结构确定。公共 helper 的读写状态、副作用和异常出�
 ### 3.3 精确异常与内存访问
 
 建立逐类异常表，明确 #UD、#NM、#GP、#SS、#AC、#PF、#XM 的条件和优先顺序。
-分类直接采用 SDM Volume 2A 第 2 章的 SIMD 异常类型（Exception Type 1–12），清单为每个
-形式登记所属类型。不能给所有 SIMD 指令套用同一套 CR0/CR4 检查：MMX、legacy XMM、AVX、CRC32、
-POPCNT、XSAVE 和 XGETBV/XSETBV 的条件不同。最容易出错的几条规则要显式写进测试：
+分类直接采用 SDM Volume 2A 第 2 章的异常类型（Exception Type 1–13；F16C 属 Type 11，
+VEX 编码的 GPR 指令属 Type 13），清单为每个形式登记所属类型。不能给所有 SIMD 指令套用
+同一套 CR0/CR4 检查：MMX、legacy XMM、AVX、BMI、CRC32、POPCNT、XSAVE 和 XGETBV/XSETBV
+的条件不同。最容易出错的几条规则要显式写进测试：
 
-- VEX 指令不检查 CR0.EM 和 CR4.OSFXSR，但要求 CR4.OSXSAVE=1 且 XCR0[2:1]=11b，否则 #UD；
-  CR0.TS=1 时 #NM。
+- VEX 编码的 SIMD 指令（包括 FMA、F16C）要求 CR4.OSXSAVE=1 且 XCR0[2:1]=11b，否则 #UD；
+  CR0.TS=1 时 #NM。SDM 的异常类型表只对传统 SSE 列出 CR0.EM 和 CR4.OSFXSR；QEMU 对 VEX
+  指令也检查 CR0.EM，这一点需要硬件判定（11.1 节）。
+- VEX 编码的 GPR 指令（BMI1、BMI2）不受 CR0.TS、CR4.OSXSAVE 和 XCR0 影响，操作系统没有
+  开启 AVX 时照样可用；VEX.L=1 时 #UD，非 64 位模式下忽略 VEX.W1。
 - VEX 访存除 Type 1（对齐 move、VMOVNTDQA 等）外不要求对齐。
 - 传统 SSE 的 16 字节对齐要求有例外：MOVU*/LDDQU、PCMPxSTRx，以及按窄宽度访问内存的形式。
 - 现有 32 位路径在 CR4.OSFXSR=0 时只打日志，不产生 #UD。新旧形式共用同一个检查函数，并一起修正。
@@ -167,9 +185,12 @@ gather 允许架构规定的逐元素进度，不能套用普通指令的整体�
 | P7 | AVX2 普通整数、广播、排列、变长移位 | P6 | 逐形式和双 128 位 lane 边界测试通过 |
 | P8 | AVX2 gather 与掩码故障/重启完整性 | P7；复杂访存框架可提前并行 | 故障进度、mask 写回、重启及 MMIO 计数通过 |
 | P9 | XSAVEOPT、XGETBV(1)、XSAVEC；XSAVES/XRSTORS 视 Q3 而定 | P2；与 P5–P8 并行 | 各独立能力位、格式及状态跟踪通过 |
-| P10 | 发布集成、真实客体、浏览器/可移植构建及性能 | P3–P9 | 完整清单无缺口，所有发布验收完成 |
+| P10 | BMI1、BMI2、LZCNT/TZCNT、MOVBE：VEX 编码 GPR 指令、旧编码位操作与标志位接入 | P1；与 P2–P9 并行 | 逐形式语义与标志位通过；能力关闭时 TZCNT/LZCNT 按 BSF/BSR 执行的测试通过 |
+| P11 | FMA、F16C | P4a、P6 | 单次舍入、NaN/MXCSR 规则、F16C 舍入控制与独立 oracle 通过 |
+| P12 | 发布集成、真实客体、浏览器/可移植构建及性能 | P3–P11 | 完整清单无缺口，所有发布验收完成 |
 
 P1 的 legacy maps 可先交付，以便推进 P3/P4b；P2 不依赖 P1，可以在 P0 之后直接开始。
+P10 只依赖 P1 的 VEX 解码，不涉及 YMM、XSAVE 和 MXCSR，可以与 P2–P9 并行。
 P4a 的 FP 核心、oracle/fixture 升级也可从 P0 后独立推进。解码元数据、寄存器状态接口和
 能力定义先冻结，再并行开发指令族。每个阶段都要接入相应编译执行路径和测试，不把所有
 后端工作积压到最后。
@@ -183,7 +204,7 @@ P4a 的 FP 核心、oracle/fixture 升级也可从 P0 后独立推进。解码�
 | M1 x86-64-v2 | P1 的 legacy maps、P3、P4a、P4b | 两个配置都开放 SSSE3、SSE4.1、SSE4.2 | x64 配置已有 CX16、LAHF/SAHF、POPCNT 和 SSE3，补齐后即达到 x86-64-v2（RHEL 9 系要求它；Windows 11 24H2 要求 SSE4.2 和 POPCNT）。不需要 VEX、YMM 或 XSAVE |
 | M2 基础 XSAVE | P2 | XSAVE（OSXSAVE 位随 CR4 反映）；XCR0 只支持 x87 和 SSE | 有 XSAVE 而无 AVX 有硬件先例（Goldmont），可以先验证操作系统的上下文切换路径。XCR0 的可支持位由 CPU 配置推导，开放 AVX 后才允许 bit 2 |
 | M3 AVX | P5、P6 | AVX；XCR0 bit 2 | 依赖 M1、M2 |
-| M4 AVX2 | P7、P8 | AVX2 | 依赖 M3 |
+| M4 x86-64-v3 | P7、P8、P10、P11 | AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE 一起开放（32 位配置不含 LZCNT） | 依赖 M3。软件多按 v3 整组检测；glibc 的 AVX2 字符串函数要求 AVX2、BMI1、BMI2、LZCNT 同时可用，libm 的 `_fma` 变体要求 FMA 和 AVX2，只开放其中一部分收益有限。P10 的指令可以更早用内部 feature mask 测试，对外随 M4 开放 |
 | M5 XSAVE 扩展 | P9 | XSAVEOPT、XGETBV(1)、XSAVEC；XSAVES 视 Q3 而定 | 依赖 M2；每开放一项都会改变 Linux 和 glibc 的代码路径（6.3 节） |
 
 每个里程碑开放能力位之前，5.1 节热点形式清单中属于该里程碑的形式，必须已在编译路径上有
@@ -204,10 +225,11 @@ SDM 表格；SDM 只做仲裁，分歧逐条登记。XED 或已有的 iced-x86�
 P0 输出各 ISA 的 forms 数量并固定在基线中，本文不凭 mnemonic 数量估算完整性。
 
 P0 同时产出“热点形式清单”。做法是反汇编目标客体中会因能力位开放而改走新路径的代码，
-列出其中实际执行的形式。这类代码包括 glibc 的 IFUNC 变体与 ld.so 惰性绑定、Linux 内核的
-上下文切换，以及 Windows 的对应库。清单中的形式例如 PCMPISTRI、VMOVDQU ymm、VPCMPEQB、
-VPMOVMSKB、VZEROUPPER、PSHUFB、PALIGNR 和 XSAVE/XRSTOR。它用于 4.1 节的开放前提和
-12.2 节的性能基准。
+列出其中实际执行的形式。这类代码包括 glibc 的 IFUNC 变体（含 libm 的 `_fma` 变体）与 ld.so
+惰性绑定、Linux 内核的上下文切换、zstd 这类按 BMI2 运行时分派的库，以及 Windows 的对应库。
+清单中的形式例如 PCMPISTRI、VMOVDQU ymm、VPCMPEQB、VPMOVMSKB、VZEROUPPER、TZCNT、
+LZCNT、BLSR、SHLX/SARX/BZHI、VFMADD231SD/PD、PSHUFB、PALIGNR 和 XSAVE/XRSTOR。
+它用于 4.1 节的开放前提和 12.2 节的性能基准。
 
 ### 5.2 解码改造
 
@@ -223,6 +245,12 @@ VPMOVMSKB、VZEROUPPER、PSHUFB、PALIGNR 和 XSAVE/XRSTOR。它用于 4.1 节�
   模式下 #UD，而硬件执行 MOVSS。统一后会改变旧 `0F` 表的行为，这是有意修正，需补回归测试。
 - 未列出的强制前缀在所有模式、所有构建下一律 #UD。现在 32 位生成器只有 `dbg_assert`，
   release 构建会执行无前缀形式；照搬到 `0F38` 后，`F3 0F 38 00` 会被执行成 MMX PSHUFB。
+- `F3 0F BC/BD` 在开放 BMI1/LZCNT 时是 TZCNT/LZCNT，未开放时 F3 被忽略、按 BSF/BSR 执行。
+  这是本计划中唯一随能力位改变解码结果、而不是变成 #UD 的情形。解码缓存、Tier-0 和
+  page tier 的编译结果都以 CPU 配置为前提；恢复快照导致配置变化时一并清空。
+- `0F 38 F0/F1`：无前缀或只有 66（操作数大小）时是 MOVBE，只有内存形式，寄存器形式和
+  F3 前缀 #UD；F2 前缀是 CRC32，`66 F2` 是 CRC32 的 16 位源形式。
+- BMI1/BMI2 的 VEX.vvvv 用法各异（源、目的或控制操作数），按清单逐条登记。
 - 支持 imm8 高位编码第四源的 VBLENDV* / VPBLENDVB，及 gather 的 VSIB 索引。
 - VSIB 保留向量索引寄存器、元素宽度和 scale，不能沿用普通 SIB 的 GPR 索引及 no-index 判断。
 - 对合法和非法编码均验证长度、15 字节上限、截断输入、跨取指页和 #UD/取指故障顺序。
@@ -239,17 +267,21 @@ P1 验收包含独立解码器差分、所有 prefix/字段组合的边界集、
 
 | 枚举入口 | 需要落实的内容 |
 | --- | --- |
-| CPUID.1:ECX | SSSE3[9]、SSE4.1[19]、SSE4.2[20]、XSAVE[26]、OSXSAVE[27]、AVX[28]；POPCNT[23] 独立 |
-| CPUID.7.0:EBX | AVX2[5]，保留其他既有位；不顺带打开 BMI/FMA 等能力 |
-| CPUID.0 | 最大 basic leaf 能到达 0xD，并保留 `cpuid_level` 等已有配置契约。`cpuid_level` 小于 0xD 时隐藏 XSAVE、OSXSAVE、AVX 和 AVX2，小于 7 时隐藏 AVX2；否则 Linux 会因 leaf 0xD 不可达而告警，并退回 FXSAVE |
+| CPUID.1:ECX | SSSE3[9]、FMA[12]、SSE4.1[19]、SSE4.2[20]、MOVBE[22]、XSAVE[26]、OSXSAVE[27]、AVX[28]、F16C[29]；POPCNT[23] 独立 |
+| CPUID.7.0:EBX | BMI1[3]、AVX2[5]、BMI2[8]，保留其他既有位（例如 ERMS[9]） |
+| CPUID.80000001H:ECX | LZCNT[5]（AMD 称 ABM），保留 LAHF/SAHF[0]；只在 x64 配置报告。32 位配置的 0x80000000 继续返回 5（没有扩展 leaf），不报告 LZCNT（第 13 节 Q7） |
+| CPUID.0 | 最大 basic leaf 能到达 0xD，并保留 `cpuid_level` 等已有配置契约。`cpuid_level` 小于 0xD 时，隐藏 XSAVE、OSXSAVE 以及依赖它们的 AVX、AVX2、FMA、F16C；小于 7 时，隐藏 AVX2、BMI1 和 BMI2。否则 Linux 会因 leaf 0xD 不可达而告警，并退回 FXSAVE |
 | CPUID.0xD,0 | 支持的 XCR0 位图、当前启用状态所需标准大小、全部支持分量所需大小 |
 | CPUID.0xD,1 | EAX 中 XSAVEOPT[0]、XSAVEC[1]、XGETBV(1)[2]、XSAVES/XRSTORS[3]；适用的 compacted 大小及支持的 XSS 位图 |
 | CPUID.0xD,2 | YMM_Hi128 的大小、标准偏移和属性；其他未支持分量子叶正确返回零 |
 
 CPUID 中硬件能力与 OS 启用状态分开：OSXSAVE 根据当前 vCPU 的 CR4.OSXSAVE 返回，
-AVX/AVX2 硬件能力不随一次 XSETBV 被清除。执行时检查对应能力、CR0/CR4 和 XCR0。
+AVX、AVX2、FMA、F16C 的硬件能力不随一次 XSETBV 被清除。执行时检查对应能力、CR0/CR4 和 XCR0。
 Linux 的应用检测流程也要求结合 CPUID 与 XGETBV，见
 [Linux xstate 文档](https://www.kernel.org/doc/html/latest/arch/x86/xstate.html)。
+
+能力之间的依赖由 CPU 配置统一校验，不满足时拒绝创建：AVX 依赖 XSAVE，AVX2、FMA 和 F16C
+依赖 AVX；BMI1、BMI2、LZCNT 和 MOVBE 不依赖 AVX 与 XSAVE，也不受 OS 是否开启 AVX 影响。
 
 基础 XCR0 支持位为 x87[0]、SSE[1]、YMM[2]；复位值为 1。可支持位由 CPU 配置推导：
 未开放 AVX 时只有 x87 和 SSE（M2），CPUID.0xD,0 的 EAX 和各大小字段随之变化。XSETBV 检查 ECX、CPL、
@@ -469,7 +501,9 @@ RCP/RSQRT 等近似指令按规定误差及特殊值要求验收，不要求与�
 实现相关结果使用允许结果集或 postcondition；v86 自身各后端仍保持确定且一致的结果。
 参考 SDM Volume 2A 的 DPPS 条目（[合订本](https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf)）。
 
-## 9. P7–P8：AVX2
+## 9. P7–P8、P10–P11：AVX2 与 x86-64-v3 的其余指令
+
+### 9.1 AVX2（P7–P8）
 
 | 分组 | 覆盖要求 |
 | --- | --- |
@@ -501,6 +535,59 @@ v86 对这些设备地址选择确定的逐 lane 行为，并用 MMIO 计数器�
 这是模拟器的行为约定和 RETRY 检查，不能作为“硬件保证每个元素恰好访问一次”的证明。
 参考 [Intel SDM 的 gather 与 masked move 条目](https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf)。
 
+### 9.2 BMI1、BMI2、LZCNT 与 MOVBE（P10）
+
+| 类别 | 指令 |
+| --- | --- |
+| BMI1 | ANDN、BEXTR、BLSI、BLSMSK、BLSR（VEX 编码）；TZCNT（`F3 0F BC`） |
+| BMI2 | BZHI、MULX、PDEP、PEXT、RORX、SARX、SHLX、SHRX（VEX 编码） |
+| LZCNT | LZCNT（`F3 0F BD`），只在 x64 配置开放 |
+| MOVBE | MOVBE 加载/存储（`0F 38 F0/F1`，只有内存操作数） |
+
+这些都是通用寄存器指令，只依赖 P1 的 VEX 与 `0F38`/`0F3A` 解码，不涉及 YMM、XSAVE 和 MXCSR：
+
+- **标志位**：ANDN、BEXTR、BLSI、BLSMSK、BLSR、BZHI、TZCNT、LZCNT 写入规定的标志，
+  其余标志未定义；MULX、PDEP、PEXT、RORX 和 SARX/SHLX/SHRX 不修改标志。未定义标志由 v86
+  固定一种取值，测试按允许结果判定。新指令要接入各引擎现有的惰性标志机制：32 位引擎的
+  `flags_changed`/`last_op1`/`last_result`，以及 x64 page tier 的惰性标志记录。
+- **操作数宽度**：VEX.W1 在 64 位模式下选 64 位操作数，在非 64 位模式下被忽略。
+  SARX/SHLX/SHRX 的移位量按操作数宽度取模；BEXTR 的起点/长度和 BZHI 的位置超出操作数宽度时，
+  按 SDM 处理（BZHI 此时置 CF）。
+- **MULX**：不修改标志，同时写两个目的寄存器；两个目的相同时，结果取乘积的高半部分。
+- **TZCNT/LZCNT**：源为 0 时返回操作数宽度并置 CF。能力关闭时按 BSF/BSR 执行，保留现有
+  BSF/BSR 在源为 0 时的行为（5.2 节）。
+- **MOVBE**：只有内存形式；按操作数宽度做一次读或写再交换字节，不能拆成逐字节访问，也不能多读多写。
+- **参考模型**：独立的位级模型覆盖全部宽度的边界值，包括 PDEP/PEXT 的全零/全一掩码、
+  BEXTR/BZHI 的越界参数和 MULX 的最大乘数。
+
+### 9.3 FMA 与 F16C（P11）
+
+| 类别 | 指令 |
+| --- | --- |
+| FMA | VFMADD、VFMSUB、VFNMADD、VFNMSUB 的 132/213/231 形式（PS、PD、SS、SD）；VFMADDSUB、VFMSUBADD 的 132/213/231 形式（PS、PD） |
+| F16C | VCVTPH2PS、VCVTPS2PH |
+
+FMA 和 F16C 是 VEX 编码的 SIMD 指令，门控与 AVX 相同，并依赖 P4a 的精确 FP 核心：
+
+- **FMA 的运算规则**：乘法和加法只舍入一次。VEX.W 区分单精度与双精度；132/213/231 决定
+  哪两个操作数相乘、哪个相加，三种排列都要测试全部源/目的别名组合。目的寄存器同时也是源操作数：
+  标量形式的 [127:32] 或 [127:64] 保留目的寄存器原值，而不是像其他 VEX 标量指令那样取自
+  vvvv 源；[MAXVL-1:128] 清零。异常类型是 Type 2（向量）和 Type 3（标量）。
+- **FMA 的精确路径**：复用捆绑的 SoftFloat 中已有的 `f32_mulAdd`/`f64_mulAdd`，DAZ/FZ 和 DE 由外层的
+  MXCSR 包装处理（与 x64 `vector.rs` 的做法一致）。NaN 的来源选择、0×∞ 加 QNaN 时是否报 IE 等
+  特殊值规则，按 SDM 在 SoftFloat 外层实现并逐条测试，不默认 SoftFloat 的 NaN 传播与 x86 一致。
+- **FMA 的快路径**：Wasm 没有确定性的融合乘加，relaxed-simd 的 `madd` 可能融合也可能不融合，
+  禁止使用。单精度形式可以在 f64 中算出精确乘积，以“舍入到奇数”求和后再舍入回 f32，理论上
+  能给出正确舍入（Boldo–Melquiond）；但必须先在 P0 用穷举和随机对拍验证，才能作为快路径。
+  双精度形式走 SoftFloat helper。
+- **FMA 的性能**：glibc libm 在 FMA 和 AVX2 都可用时，会把 exp、log、pow、sin、cos、tan、atan
+  等改用 `_fma` 变体（`ifunc-fma.h`）。所以 FMA 属于热点形式，性能按 12.2 节在新 profile 下单独测。
+- **F16C**：VCVTPH2PS 把半精度转为单精度，结果精确。VCVTPS2PH 按 imm8[1:0] 选择舍入方式，
+  imm8[2]=1 时改用 MXCSR.RC；它忽略 MXCSR.FTZ，下溢结果转为半精度非规格化数；DAZ=0 时可能报 DE。
+  两者都要覆盖半精度的非规格化数、无穷、NaN（含 SNaN 静默化）和 MXCSR 标志，异常类型是 Type 11。
+  精确路径可以复用 SoftFloat 的 `f16_to_f32`/`f32_to_f16`。
+- **VCVTPS2PH 的写入宽度**：内存目的形式按 VEX.L 只写 8 或 16 字节；寄存器目的形式清零其余高位。
+
 ## 10. 编译后端与优化约束
 
 每批语义进入解释器后立即接入其他执行路径：
@@ -525,6 +612,14 @@ Wasm 快路径的已知陷阱，从 P0 起写进模板审查清单：
 - `pmin`/`pmax` 的操作数顺序要对应 x86 的规则：相等（含 ±0）或有 NaN 时返回第二操作数。
 - 用 `i8x16.swizzle` 实现 PSHUFB 时，索引要先 `& 0x8F`。
 
+x86-64-v3 通用寄存器指令的模板要点：
+
+- Wasm 的 `clz`/`ctz` 在输入为 0 时返回位宽，与 LZCNT/TZCNT 一致，32/64 位形式可以直接映射；
+  16 位形式要单独处理。
+- PDEP/PEXT 没有对应的 Wasm 指令，用按掩码位循环的实现或 helper。
+- 64 位 MULX 的 64×64→128 乘法要拆成部分积，或走 helper。
+- MOVBE 的字节交换没有单条 Wasm 指令，用移位与掩码组合实现。
+
 发布报告分别给出“完整语义覆盖”和“原生模板/内联覆盖”，避免所有指令都回退执行却被
 误报为性能实现完成。复杂指令保留 helper 是允许的，只要语义、可恢复性和性能预算达标。
 
@@ -536,9 +631,11 @@ Wasm 快路径的已知陷阱，从 P0 起写进模板审查清单：
 [`tests/rust/compiled_arms.mjs`](../tests/rust/compiled_arms.mjs) 的编译执行计数，
 以及 [`tests/x64/vector_oracle.mjs`](../tests/x64/vector_oracle.mjs) 的外部客体参考方式。
 
-- 整数/CRC/字符串采用独立位级模型，避免直接把实现代码复制进测试。
+- 整数/CRC/字符串/BMI 采用独立位级模型，避免直接把实现代码复制进测试。FMA 的参考不能
+  与实现共用同一份 SoftFloat：在测试中用大整数或有理数精确算出乘加结果再舍入，作为独立参考。
 - 使用可用的 x86 硬件结果、固定 QEMU TCG 版本和 SDM postconditions 交叉验证。
   现有 x64 oracle 已记录 QEMU 在部分 FP 异常/NaN 上的差异，不能单纯以 QEMU 为真值。
+  QEMU TCG 支持 FMA、F16C、MOVBE、LZCNT（ABM）、BMI1 和 BMI2，可以作为这部分的参考。
   已知的 QEMU 缺口（2026-10-04 对照 QEMU master 核对）：
   - TCG 不支持 XSAVEC/XSAVES（`TCG_XSAVE_FEATURES` 的注释写明缺失）。这两项以及 XRSTORS
     只能依靠硬件或按 SDM 编写的模型判定。
@@ -546,18 +643,22 @@ Wasm 快路径的已知陷阱，从 P0 起写进模板审查清单：
     RFBM[1] 或 RFBM[2]。“只请求 YMM”的用例必然与 QEMU 不符，需要预先登记一条 `QEMU_DEVIATIONS`。
   - XCR0 同时启用 SSE 和 YMM 后，QEMU 的寄存器转储从 `XMMnn=` 变为 `YMMnn=`；
     `tests/nasm/qemu_oracle.js` 现在只解析 `XMM0n=`，会直接失败。
-  - 现有 oracle 用 `-cpu max`，会顺带开启 FMA、BMI、AES 等。依赖能力位的负例和 CPUID 用例，
-    要固定一个与 v86 CPU 配置一致的 QEMU CPU 型号。
+  - 现有 oracle 用 `-cpu max`，会顺带开启 AES、PCLMUL、SHA、ADX 等范围外能力。依赖能力位的
+    负例和 CPUID 用例，以及 TZCNT/LZCNT 回退为 BSF/BSR 的用例，要固定一个与 v86 CPU 配置一致的
+    QEMU CPU 型号。
+  - QEMU 对 VEX 编码的 SIMD 指令也检查 CR0.EM，而 SDM 的异常类型表只对传统 SSE 列出 CR0.EM。
+    以硬件结果为准，登记后再决定是否加入 `QEMU_DEVIATIONS`。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
-  特权指令、XSETBV 和 CPL0 下的 XSAVE。
+  特权指令、XSETBV 和 CPL0 下的 XSAVE；其余 x86-64-v3 指令在 Rosetta 2 下是否可用，要先探测。
 - 规范允许多种结果的情形，一律按允许结果集或 postcondition 判定，并集中登记：
   - DPPS 的部分 NaN 传播、RCP/RSQRT 的近似值（第 8 节）；
   - 开启对齐检查时，XSAVE/FXSAVE 未对齐报 #AC 还是 #GP；
   - CR4.OSFXSR=0 时，FXSAVE 是否写 XMM/MXCSR 区；
   - VMASKMOV 被屏蔽 lane 的 A/D 位；
-  - gather 故障时，目的/mask 高位和更高序元素的状态。
+  - gather 故障时，目的/mask 高位和更高序元素的状态；
+  - BMI1/BMI2/LZCNT/TZCNT 未定义的标志位。
 - 扩展 NASM fixture/GDB/QEMU stub 或新增版本化 guest record，包含所有可见 YMM、
   MXCSR、XCR0、EFLAGS、异常向量/错误码/IP、内存变化。旧 fixture 保持可读。
 - AVX 客体初始化必须设置 CR4.OSXSAVE/XCR0，分别处理 CPL0 boot stub 与宿主用户态测试。
@@ -568,7 +669,7 @@ Wasm 快路径的已知陷阱，从 P0 起写进模板审查清单：
 | 维度 | 必测内容 |
 | --- | --- |
 | 模式 | real/protected 16/32、VM86、compatibility 16/32、long64；按各指令合法性验证执行或拒绝 |
-| 编码 | legacy、VEX2/3、map、pp、W/L/vvvv、ModRM/SIB/VSIB、REX、imm8、非法组合与长度 |
+| 编码 | legacy、VEX2/3、map、pp、W/L/vvvv、ModRM/SIB/VSIB、REX、imm8、非法组合与长度；能力开、关两种配置下的 TZCNT/LZCNT 与 BSF/BSR |
 | 数据 | 全零/全一、符号边界、溢出/饱和、随机 lane、全 imm8；FP 特殊值和控制位组合 |
 | 寄存器 | 源/目的全别名、隐式 XMM0、ECX/长度寄存器、0–7/8–15、YMM 高低半 |
 | 内存 | 对齐/非对齐、真实访问宽度、跨页/跨段、权限、canonical 地址、高物理地址、MMIO、自修改代码 |
@@ -583,14 +684,22 @@ Wasm 快路径的已知陷阱，从 P0 起写进模板审查清单：
 
 - 基于已有 Linux x86/x86_64 客体，验证实际 CPUID→OSXSAVE→XSETBV→XSAVE 路径；
   加入进程/线程切换、signal/sigreturn、系统调用和线程跨核迁移的 YMM 指纹探针。
-- 验证开放能力后，客体切换到的路径确实被执行且结果正确。这些路径包括：内核上下文切换所用的
-  XSAVE 变体、ld.so 惰性绑定的 xsave/xsavec，以及 glibc IFUNC 选中的 `_sse42`、`_ssse3`、`_avx2`
-  变体（例如 `__strcmp_sse42`、`__strcspn_sse42`、`__memmove_ssse3`、`__strlen_avx2`、
-  `__memmove_avx_unaligned_erms`）。同一组探针也用于 12.2 节的性能测量。
+- 验证开放能力后，客体切换到的路径确实被执行且结果正确。这些路径包括：
+  - 内核上下文切换所用的 XSAVE 变体，以及 ld.so 惰性绑定的 xsave/xsavec；
+  - glibc IFUNC 选中的 `_sse42`、`_ssse3`、`_avx2` 变体，例如 `__strcmp_sse42`、`__strcspn_sse42`、
+    `__memmove_ssse3`、`__strlen_avx2`、`__memmove_avx_unaligned_erms`。`_avx2` 字符串变体要求
+    AVX2、BMI1、BMI2、LZCNT 同时可用（`ifunc-avx2.h`）；
+  - libm 的 `_fma` 变体，要求 FMA 和 AVX2。
+
+  同一组探针也用于 12.2 节的性能测量。
+- x86-64-v3 整体验收：在 x64 Linux 客体中，`ld.so --help` 报告 `x86-64-v3 (supported, searched)`，
+  `glibc-hwcaps/x86-64-v3` 下的库被实际加载；以 `-march=x86-64-v3` 编译的程序和要求 v3 的发行版
+  用户态（例如 RHEL 10 系）能正常运行。
 - 基于已有 Windows 8.1 x64 客体，验证 64 位和 WOW64 AVX 程序、线程/异常上下文保存、
   多核及快照恢复；不把桌面启动成功等同于 AVX 状态正确。
-- 用明确编译选项构建 SSSE3/SSE4/AVX/AVX2 小程序并检查产物实际包含目标指令。
-  不使用会隐式引入 FMA/BMI/AES 等额外要求的整机 `-march` 配置作为唯一探针。
+- 用明确编译选项构建 SSSE3/SSE4/AVX/AVX2/FMA/F16C/BMI/LZCNT/MOVBE 小程序，并检查产物
+  实际包含目标指令。`-march=x86-64-v3` 只引入范围内的能力，可以使用；`-march=haswell` 这类
+  整机配置会引入 AES、PCLMUL 等范围外能力，不能作为唯一探针。
 - 正向探针之外，增加禁用 OSXSAVE/XCR0 的负例、旧 guest/旧快照回归，以及调度中途
   修改不同 vCPU 控制状态的测试。
 
@@ -616,24 +725,26 @@ make bench-quick
 ```
 
 **计划新增** `ssse3-tests`、`sse41-tests`、`sse42-tests`、`xsave-tests`、`avx-tests`、
-`avx2-tests`、`simd-xsave-tests`，并接入 CI；这些名称当前不是可依赖的已有目标。
+`avx2-tests`、`bmi-tests`（含 LZCNT/TZCNT/MOVBE）、`fma-tests`、`f16c-tests`、`simd-xsave-tests`，
+并接入 CI；这些名称当前不是可依赖的已有目标。
 CI 分为快速确定性语义/解码检查与较长的差分、浏览器、OS 集成任务，合并与发布分别设 gate。
 `make all-tests` 不能代替上述专项汇总。发布 gate 按 4.1 节的里程碑，在
 [`tools/release_gate.mjs`](../tools/release_gate.mjs) 中增加 `R-SSE4`、`R-XSAVE`、`R-AVX`、
-`R-AVX2`、`R-XSAVE-ext` 等级，用法与现有的 `R-x64-UP`、`R-q35` 等等级一致。
+`R-x86-64-v3`、`R-XSAVE-ext` 等级，用法与现有的 `R-x64-UP`、`R-q35` 等等级一致。
 
 ## 12. 发布、性能和最终检查表
 
 ### 12.1 能力开放与兼容策略
 
 内部开发可使用测试专用 feature mask；公共 CPUID 只在整个 ISA 的合法形式、异常和所有
-执行入口通过后开放。SSSE3、SSE4.1、SSE4.2、基础 XSAVE、AVX、AVX2 以及 XSAVE
-家族扩展独立验收，并按 4.1 节的里程碑开放；AVX2 必须建立在完整 AVX/xstate 上。
+执行入口通过后开放。SSSE3、SSE4.1、SSE4.2、基础 XSAVE、AVX、AVX2、FMA、F16C、BMI1、
+BMI2、LZCNT、MOVBE 以及 XSAVE 家族扩展独立验收，并按 4.1 节的里程碑开放；AVX2、FMA 和
+F16C 必须建立在完整 AVX/xstate 上。
 开放之前还要满足 12.2 节的热点形式前提。
 
 CPU feature profile 在 VM 创建时固定并保存到快照；不允许运行中从旧能力集升级到新能力集。
-保留当前旧 profile 用于快照和回归，新建 VM 是否默认采用扩展 profile 在 P10 按兼容性结果
-确定。若增加公开配置，应同时更新 `v86.d.ts`、starter、CPU Worker 和文档，并拒绝不满足
+保留当前旧 profile 用于快照和回归，新建 VM 是否默认采用扩展 profile 在 P12 按兼容性结果
+确定（第 13 节 Q1）。若增加公开配置，应同时更新 `v86.d.ts`、starter、CPU Worker 和文档，并拒绝不满足
 依赖的能力组合。宿主 SIMD 快路径不可用不应偷偷缩减客体 profile。
 
 更新并人工审核 [`tests/platform/cpu-contract.json`](../tests/platform/cpu-contract.json)，
@@ -653,14 +764,17 @@ P0 固定旧 profile 的启动、整数、x87、SSE、代码生成大小/时间�
 上有原生模板，该里程碑才能开放能力位。P4a 改造现有 SSE 浮点之后，也要在旧 profile 下
 单独过一遍预算。
 
-新 ISA 增加纯寄存器、访存、跨 lane、字符串比较、gather 和 XSAVE 上下文切换基准，
+新 ISA 增加纯寄存器、访存、跨 lane、字符串比较、gather、FMA、位操作和 XSAVE 上下文切换基准，
 分别报告解释器、编译路径、helper 占比、Wasm 大小与无 SIMD 构建。性能比较使用相同工作量，
 不预设双 v128 实现的 AVX2 必然比 SSE 快两倍。
 
 ### 12.3 最终验收
 
 - [ ] 机器可读 forms 清单完整，所有目标形式具有实现和独立测试归属，无未解释缺口。
-- [ ] SSSE3 MMX/XMM、SSE4.1/4.2、AVX/AVX2 的全部合法编码、模式和操作数形式完成。
+- [ ] SSSE3 MMX/XMM、SSE4.1/4.2、AVX/AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE 的
+  全部合法编码、模式和操作数形式完成。
+- [ ] x64 配置通过 x86-64-v3 检测：glibc 报告 x86-64-v3 受支持，要求 v3 的用户态正常运行。
+- [ ] 能力关闭时（包括 32 位配置中的 LZCNT），TZCNT/LZCNT 按 BSF/BSR 执行，与开放时的行为分别通过测试。
 - [ ] 基础 XSAVE 及计划内家族扩展逐项完成；未实现的其他状态组件不被公布。
 - [ ] CR0/CR4/XCR0/CPUID 的能力检查和故障顺序在各引擎一致，并符合独立规范测试。
 - [ ] FP 舍入、NaN、MXCSR 和未屏蔽异常正确，近似指令按误差要求验收。
@@ -689,7 +803,7 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
 | Q4 | 公开配置的 API 形态 | 能力位图，外加 `x86-64-v2` 这类预设级别；不满足依赖的组合直接报错 |
 | Q5 | 兼容模式由哪个引擎执行 | 共用解码与语义（3.1 节），并保留双引擎差分作为回归手段 |
 | Q6 | INIT 是否保留 x87/XMM/YMM/MXCSR | 按 SDM 保留，与 XCR0/XSS 一起加入 `INIT_PRESERVED` |
-| Q7 | x86-64-v3 的剩余部分（FMA、F16C、BMI1、BMI2、LZCNT、MOVBE） | 另立计划；MOVBE 可在 P1/P4b 顺带完成 |
+| Q7 | 32 位配置是否开放 x86-64-v3 中的指令 | **已定（2026-10-04）**：开放 BMI1、BMI2、MOVBE、FMA 和 F16C，不开放 LZCNT。32 位配置的 CPUID 0x80000000 继续返回 5，旧系统看到的扩展 leaf 不变，`F3 0F BD` 继续按 BSR 执行。x86-64-v3 是否完整只看 x64 配置 |
 
 ### 13.1 风险与工作量初评
 
@@ -702,7 +816,9 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
 | P1 | 中 | 统一前缀规则会改变旧 `0F` 表的行为；需要三个解码器协同修改 |
 | P8 | 中 | gather 的部分完成与重启语义，以及它与 RETRY 机制的交互 |
 | P2、P9 | 中 | 操作系统上下文切换路径；QEMU 无法作为 XSAVEC/XSAVES 的参考 |
+| P11 | 中 | Wasm 没有确定性的 FMA，精确与性能难以兼顾；libm 改用 `_fma` 变体后成为热点 |
 | P3、P4b | 中低 | 形式多但语义规整；PCMPxSTRx 和 CRC32 需要独立的位级模型 |
+| P10 | 中低 | TZCNT/LZCNT 的解码随能力位变化；要接入两套惰性标志机制；PDEP/PEXT/MULX 在 Wasm 中没有直接对应的指令 |
 
 全部完成后，按项目惯例把本计划压缩进 [`docs/x86-64.md`](x86-64.md) 的 CPU 能力表和一份
 新的 SIMD 设计文档，然后删除本计划。
