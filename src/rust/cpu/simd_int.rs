@@ -16,6 +16,13 @@ fn put(v: &mut [u8], size: usize, index: usize, value: i64) {
     v[index * size..(index + 1) * size].copy_from_slice(&value.to_le_bytes()[..size]);
 }
 fn saturate_word(value: i64) -> i64 { value.clamp(i16::MIN as i64, i16::MAX as i64) }
+/// The lane of `size` bytes at `index`, zero-extended
+fn unsigned(v: &[u8], size: usize, index: usize) -> u64 {
+    v[index * size..(index + 1) * size]
+        .iter()
+        .rev()
+        .fold(0, |n, &b| n << 8 | b as u64)
+}
 
 /// The SSSE3 operations of the opcode map 0F 38, by their opcode byte:
 /// PSHUFB (00), PHADDW/D/SW (01-03), PMADDUBSW (04), PHSUBW/D/SW (05-07),
@@ -106,6 +113,170 @@ pub fn palignr<const N: usize>(destination: [u8; N], source: [u8; N], imm8: u8) 
     })
 }
 
+/// The SSE4.1 and SSE4.2 operations of the opcode map 66 0F 38 but PTEST and
+/// MOVNTDQA, by their opcode byte: PBLENDVB, BLENDVPS, BLENDVPD (10, 14, 15:
+/// the sign of each lane of `xmm0` selects the source), PMOVSX and PMOVZX
+/// (20-25, 30-35: the low lanes of the source, extended), PMULDQ (28),
+/// PCMPEQQ (29), PACKUSDW (2B), PCMPGTQ (37), PMINSB/SD/UW/UD and
+/// PMAXSB/SD/UW/UD (38-3F), PMULLD (40) and PHMINPOSUW (41).
+pub fn sse4(op: u8, destination: [u8; 16], source: [u8; 16], xmm0: [u8; 16]) -> [u8; 16] {
+    let mut result = [0; 16];
+    match op {
+        0x10 | 0x14 | 0x15 => {
+            let size = match op {
+                0x10 => 1,
+                0x14 => 4,
+                _ => 8,
+            };
+            for i in 0..16 / size {
+                let selected =
+                    if xmm0[(i + 1) * size - 1] & 0x80 != 0 { &source } else { &destination };
+                result[i * size..(i + 1) * size]
+                    .copy_from_slice(&selected[i * size..(i + 1) * size]);
+            }
+        },
+        // (from, to): BW, BD, BQ, WD, WQ, DQ
+        0x20..=0x25 | 0x30..=0x35 => {
+            let (from, to) = [(1, 2), (1, 4), (1, 8), (2, 4), (2, 8), (4, 8)][(op & 7) as usize];
+            for i in 0..16 / to {
+                let value = if op < 0x30 {
+                    lane(&source, from, i)
+                }
+                else {
+                    unsigned(&source, from, i) as i64
+                };
+                put(&mut result, to, i, value);
+            }
+        },
+        // the even signed dwords, multiplied to quadwords
+        0x28 => {
+            for i in 0..2 {
+                put(
+                    &mut result,
+                    8,
+                    i,
+                    lane(&destination, 4, 2 * i) * lane(&source, 4, 2 * i),
+                );
+            }
+        },
+        0x29 | 0x37 => {
+            for i in 0..2 {
+                let (a, b) = (lane(&destination, 8, i), lane(&source, 8, i));
+                put(
+                    &mut result,
+                    8,
+                    i,
+                    -((if op == 0x29 { a == b } else { a > b }) as i64),
+                );
+            }
+        },
+        // signed dwords to unsigned saturated words: the destination's, then the source's
+        0x2B => {
+            for i in 0..8 {
+                let value = if i < 4 { lane(&destination, 4, i) } else { lane(&source, 4, i - 4) };
+                put(&mut result, 2, i, value.clamp(0, 0xFFFF));
+            }
+        },
+        // (lane size, signed) by the low two bits: SB, SD, UW, UD
+        0x38..=0x3F => {
+            let size = [1, 4, 2, 4][(op & 3) as usize];
+            let signed = op & 3 < 2;
+            for i in 0..16 / size {
+                let (a, b) = if signed {
+                    (lane(&destination, size, i), lane(&source, size, i))
+                }
+                else {
+                    (
+                        unsigned(&destination, size, i) as i64,
+                        unsigned(&source, size, i) as i64,
+                    )
+                };
+                put(
+                    &mut result,
+                    size,
+                    i,
+                    if op >= 0x3C { a.max(b) } else { a.min(b) },
+                );
+            }
+        },
+        // the low halves of the products
+        0x40 => {
+            for i in 0..4 {
+                put(
+                    &mut result,
+                    4,
+                    i,
+                    lane(&destination, 4, i) * lane(&source, 4, i),
+                );
+            }
+        },
+        // the smallest unsigned word of the source and its index (the lowest on ties)
+        0x41 => {
+            let (index, value) = (0..8)
+                .map(|i| (i, unsigned(&source, 2, i)))
+                .min_by_key(|&(i, value)| (value, i))
+                .unwrap();
+            put(&mut result, 2, 0, value as i64);
+            put(&mut result, 2, 1, index as i64);
+        },
+        _ => unreachable!("SSE4 opcode 66 0F 38 {op:02x}"),
+    }
+    result
+}
+
+/// PTEST (66 0F 38 17): (ZF, CF), whether source AND destination and source
+/// AND NOT destination are zero
+pub fn ptest(destination: [u8; 16], source: [u8; 16]) -> (bool, bool) {
+    (
+        (0..16).all(|i| destination[i] & source[i] == 0),
+        (0..16).all(|i| !destination[i] & source[i] == 0),
+    )
+}
+
+/// The SSE4.1 operations with imm8 of the map 66 0F 3A that move or combine
+/// integer lanes: BLENDPS, BLENDPD, PBLENDW (0C-0E: imm8 bit i takes lane i
+/// of the source) and MPSADBW (42: eight sums of absolute byte differences
+/// against the source's 4-byte block imm8[1:0], from the destination's byte
+/// 4 * imm8[2] on)
+pub fn sse4_imm(op: u8, destination: [u8; 16], source: [u8; 16], imm8: u8) -> [u8; 16] {
+    let mut result = destination;
+    match op {
+        0x0C | 0x0D | 0x0E => {
+            let size = [4, 8, 2][(op - 0x0C) as usize];
+            for i in 0..16 / size {
+                if imm8 >> i & 1 != 0 {
+                    result[i * size..(i + 1) * size]
+                        .copy_from_slice(&source[i * size..(i + 1) * size]);
+                }
+            }
+        },
+        0x42 => {
+            let (s, d) = ((imm8 & 3) as usize * 4, (imm8 >> 2 & 1) as usize * 4);
+            for i in 0..8 {
+                let sum = (0..4)
+                    .map(|j| (destination[d + i + j] as i64 - source[s + j] as i64).abs())
+                    .sum();
+                put(&mut result, 2, i, sum);
+            }
+        },
+        _ => unreachable!("SSE4 opcode 66 0F 3A {op:02x}"),
+    }
+    result
+}
+
+/// INSERTPS (66 0F 3A 21): `value` (the source register's dword imm8[7:6],
+/// or the m32) into dword imm8[5:4], then the dwords of imm8[3:0] zeroed
+pub fn insertps(destination: [u8; 16], value: u32, imm8: u8) -> [u8; 16] {
+    let mut result = destination;
+    put(&mut result, 4, (imm8 >> 4 & 3) as usize, value as i64);
+    for i in 0..4 {
+        if imm8 >> i & 1 != 0 {
+            put(&mut result, 4, i, 0);
+        }
+    }
+    result
+}
+
 /// PALIGNR as one i8x16.shuffle for compiled code (`n`: 8 or 16 bytes): the
 /// lanes over (destination, source), or over (destination, zero) when the
 /// second result is true (imm8 reaches beyond the source)
@@ -145,6 +316,8 @@ mod tests {
         let bytes: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
         bytes.try_into().unwrap()
     }
+    /// sse4 without a mask in XMM0
+    fn s4(op: u8, d: [u8; 16], s: [u8; 16]) -> [u8; 16] { sse4(op, d, s, [0; 16]) }
     #[test]
     fn pshufb_zeroes_with_bit_7_and_wraps_the_index() {
         let a: [u8; 16] = std::array::from_fn(|i| 0xA0 + i as u8);
@@ -265,6 +438,163 @@ mod tests {
                 assert_eq!(shuffled, expected, "{n} {imm}");
             }
         }
+    }
+    #[test]
+    fn blendv_takes_the_sign_of_each_xmm0_lane() {
+        let d = [0x11; 16];
+        let s = [0x22; 16];
+        let mut mask = [0u8; 16];
+        mask[0] = 0x80;
+        mask[7] = 0x80; // the sign of dword 1 and of quadword 0
+        mask[3] = 0x7F;
+        let r = sse4(0x10, d, s, mask);
+        assert_eq!((r[0], r[1], r[3], r[7]), (0x22, 0x11, 0x11, 0x22));
+        assert_eq!(
+            &sse4(0x14, d, s, mask)[..8],
+            &[0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22]
+        );
+        assert_eq!(
+            &sse4(0x15, d, s, mask)[..9],
+            &[0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x11]
+        );
+    }
+    #[test]
+    fn pmovsx_and_pmovzx_extend_the_low_lanes() {
+        let s: [u8; 16] = [
+            0x80, 0x7F, 0xFF, 1, 0, 0, 0, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 9, 9, 9, 9,
+        ];
+        assert_eq!(
+            words(s4(0x20, [0; 16], s)),
+            [-128, 127, -1, 1, 0, 0, 0, -128]
+        );
+        assert_eq!(
+            words(s4(0x30, [0; 16], s)),
+            [128, 127, 255, 1, 0, 0, 0, 128]
+        );
+        assert_eq!(
+            &s4(0x22, [0; 16], s)[..16],
+            &[0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0, 0, 0, 0, 0, 0, 0]
+        );
+        // DQ: the low two dwords
+        let r = s4(0x25, [0; 16], s);
+        assert_eq!(
+            (lane(&r, 8, 0), lane(&r, 8, 1)),
+            (0x01FF_7F80, i32::MIN as i64)
+        );
+        let r = s4(0x35, [0; 16], s);
+        assert_eq!(
+            (unsigned(&r, 8, 0), unsigned(&r, 8, 1)),
+            (0x01FF_7F80, 0x8000_0000)
+        );
+        // WD and WQ
+        assert_eq!(lane(&s4(0x23, [0; 16], s), 4, 1), 0x01FF);
+        assert_eq!(lane(&s4(0x24, [0; 16], s), 8, 0), 0x7F80);
+        assert_eq!(lane(&s4(0x21, [0; 16], s), 4, 2), -1);
+        assert_eq!(unsigned(&s4(0x31, [0; 16], s), 4, 2), 0xFF);
+    }
+    #[test]
+    fn quadword_compare_multiply_and_pack() {
+        let mut d = [0u8; 16];
+        let mut s = [0u8; 16];
+        put(&mut d, 8, 0, -1);
+        put(&mut s, 8, 0, -1);
+        put(&mut d, 8, 1, i64::MIN);
+        put(&mut s, 8, 1, i64::MAX);
+        assert_eq!(
+            (lane(&s4(0x29, d, s), 8, 0), lane(&s4(0x29, d, s), 8, 1)),
+            (-1, 0)
+        );
+        assert_eq!(
+            (lane(&s4(0x37, d, s), 8, 0), lane(&s4(0x37, d, s), 8, 1)),
+            (0, 0)
+        );
+        assert_eq!(lane(&s4(0x37, s, d), 8, 1), -1);
+        // PMULDQ: the even dwords, signed
+        let mut d = [0u8; 16];
+        let mut s = [0u8; 16];
+        put(&mut d, 4, 0, i32::MIN as i64);
+        put(&mut s, 4, 0, i32::MIN as i64);
+        put(&mut d, 4, 1, 7);
+        put(&mut d, 4, 2, -3);
+        put(&mut s, 4, 2, 0x7FFF_FFFF);
+        let r = s4(0x28, d, s);
+        assert_eq!(
+            (lane(&r, 8, 0), lane(&r, 8, 1)),
+            (1 << 62, -3 * 0x7FFF_FFFF)
+        );
+        // PMULLD keeps the low half; PACKUSDW saturates to unsigned words
+        assert_eq!(lane(&s4(0x40, d, s), 4, 0), 0);
+        assert_eq!(lane(&s4(0x40, d, s), 4, 2), -3i64 * 0x7FFF_FFFF << 32 >> 32);
+        let mut d = [0u8; 16];
+        for (i, v) in [-1i64, 0x10000, 0xFFFF, 0x8000].iter().enumerate() {
+            put(&mut d, 4, i, *v);
+        }
+        assert_eq!(
+            words(s4(0x2B, d, [0; 16])),
+            [0, -1, -1, -0x8000, 0, 0, 0, 0]
+        );
+    }
+    #[test]
+    fn min_max_signedness_and_phminposuw() {
+        let mut d = [0u8; 16];
+        let mut s = [0u8; 16];
+        put(&mut d, 4, 0, -1);
+        put(&mut s, 4, 0, 1);
+        assert_eq!(lane(&s4(0x39, d, s), 4, 0), -1); // PMINSD
+        assert_eq!(lane(&s4(0x3B, d, s), 4, 0), 1); // PMINUD
+        assert_eq!(lane(&s4(0x3D, d, s), 4, 0), 1); // PMAXSD
+        assert_eq!(lane(&s4(0x3F, d, s), 4, 0), -1); // PMAXUD
+        assert_eq!(s4(0x38, [0x80; 16], [0x7F; 16])[0], 0x80); // PMINSB
+        assert_eq!(s4(0x3C, [0x80; 16], [0x7F; 16])[0], 0x7F); // PMAXSB
+        assert_eq!(
+            words(s4(0x3A, from_words(&[-1; 8]), from_words(&[1; 8])))[0],
+            1
+        ); // PMINUW
+        assert_eq!(
+            words(s4(0x3E, from_words(&[-1; 8]), from_words(&[1; 8])))[0],
+            -1
+        ); // PMAXUW
+           // the first of equal minimums; the rest zero
+        let s = from_words::<16>(&[9, 3, -1, 3, 4, 3, 8, 3]);
+        assert_eq!(words(s4(0x41, [0xFF; 16], s)), [3, 1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            words(s4(0x41, [0; 16], from_words(&[-1; 8]))),
+            [-1, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
+    #[test]
+    fn ptest_flags() {
+        assert_eq!(ptest([0xF0; 16], [0x0F; 16]), (true, false));
+        assert_eq!(ptest([0xFF; 16], [0x0F; 16]), (false, true));
+        assert_eq!(ptest([0; 16], [0; 16]), (true, true));
+        let mut s = [0u8; 16];
+        s[15] = 0x80;
+        assert_eq!(ptest([0x7F; 16], s), (true, false));
+    }
+    #[test]
+    fn blends_mpsadbw_and_insertps() {
+        let d: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let s: [u8; 16] = std::array::from_fn(|i| 0x80 + i as u8);
+        assert_eq!(
+            &sse4_imm(0x0C, d, s, 0b1010)[..8],
+            &[0, 1, 2, 3, 0x84, 0x85, 0x86, 0x87]
+        );
+        assert_eq!(sse4_imm(0x0D, d, s, 0b10)[8], 0x88);
+        assert_eq!(sse4_imm(0x0E, d, s, 0x81)[..4], [0x80, 0x81, 2, 3]);
+        assert_eq!(sse4_imm(0x0E, d, s, 0x81)[14], 0x8E);
+        // MPSADBW: |d[off + i + j] - s[4k + j]|
+        let r = words(sse4_imm(0x42, d, s, 0b110));
+        let expected: Vec<i16> = (0..8)
+            .map(|i| (0..4).map(|j| (0x80 + 8 + j - (4 + i + j)) as i16).sum())
+            .collect();
+        assert_eq!(r, expected);
+        // INSERTPS: dword 2 := value, then dwords 0 and 3 zeroed
+        let r = insertps(d, 0xAABBCCDD, 0b10_1001);
+        assert_eq!(unsigned(&r, 4, 2), 0xAABBCCDD);
+        assert_eq!(
+            (unsigned(&r, 4, 0), unsigned(&r, 4, 1), unsigned(&r, 4, 3)),
+            (0, 0x07060504, 0)
+        );
     }
     #[test]
     fn palignr_every_shift() {

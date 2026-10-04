@@ -1243,3 +1243,51 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `cpu::mmio_ram` 的两个单元测试共用静态表，并行运行时互相干扰（串行运行通过）。
 - **遗留**：PSHUFB 的内存形式在 regions 中仍走 helper；现在有了对齐检查，可以改为原生代码，
   留到 P12 与其他只走 helper 的形式一起处理。
+
+### P4b 第一部分：SSE4.1 的整数与数据搬运形式（2026-10-05）
+
+- **范围**：SSE4.1 中除 ROUNDPS/PD/SS/SD 和 DPPS/DPPD 之外的全部 41 行，外加 SSE4.2 的 PCMPGTQ。
+  浮点的 ROUND/DPP 在第二部分，PCMPxSTRx 和 CRC32 在第三部分，此前这些行仍 #UD。
+  - 66 0F 38：PBLENDVB、BLENDVPS/PD（隐式以 XMM0 为掩码），PTEST（置 ZF、CF，其余算术标志
+    清零），12 个 PMOVSX/PMOVZX（只读要扩展的字节，不要求对齐），PMULDQ、PCMPEQQ、PACKUSDW、
+    PCMPGTQ、PMINSB/SD/UW/UD、PMAXSB/SD/UW/UD、PMULLD、PHMINPOSUW（最小值相同时取最低下标），
+    MOVNTDQA（只有对齐的内存形式）。
+  - 66 0F 3A：BLENDPS/PD、PBLENDW、MPSADBW，INSERTPS，PEXTRB/W/D 和 EXTRACTPS（寄存器目的
+    零扩展，内存目的只写元素宽度），PINSRB/D（取寄存器的低位）。
+- **语义**：`cpu/simd_int.rs` 新增 `sse4`、`ptest`、`sse4_imm` 和 `insertps`，三个引擎共用。
+- **解释器**：`instructions_0f38.rs`、`instructions_0f3a.rs`。
+- **IR**：regions 经 SSE helper（`ir_sse_fp_*`）执行，helper 直接调用解释器的语义函数，自行读写
+  内存。只读写两个 XMM 操作数的形式加入 `xmm_register_operands` 审计；BLENDV（读 XMM0）、
+  PTEST（写标志）和 PEXTR/PINSR（读写 GPR）不在其中。Tier-0 逐条解释。热点形式的原生模板
+  放在第四部分（4.1 节的开放前提）。
+- **x64**：`vector.rs` 的 `sse4`：可用 XMM8–15，REX.W 选择 PEXTRQ/PINSRQ，寄存器目的零扩展到
+  64 位。page tier 逐条解释。
+- **测试**：
+  - `make sse4-tests`：
+    - `tests/rust/sse4.mjs` 以 `tests/rust/sse4_model.mjs` 为准。该模型按 SDM 伪代码独立编写，
+      不调用 `simd_int.rs`，其中 PCMPxSTRx、CRC32、ROUND 和 DPPS 的部分供后续两部分使用。
+      29 个 66 0F 38 形式各 64 例（寄存器源和内存源，目的即源或即 XMM0），5 个 imm8 形式各
+      512 例（全部 imm8，寄存器源和内存源），PEXTR/PINSR 到寄存器和内存，PTEST 的标志，MOVNTDQA。
+      异常：没有特性时 #UD，CR0.EM 或没有 OSFXSR 时 #UD，CR0.TS 时 #NM，LOCK/F2/F3 和 MOVNTDQA 的
+      寄存器形式 #UD，未对齐的 m128 #GP(0)（窄操作数没有），跨页读写 #PF 且不写入任何字节。共
+      4913 项，在解释器、Tier-0 和 regions 上运行，分别用 release、无 SIMD 和 debug 构建。
+    - `tests/x64/sse4.mjs`：64 位模式和兼容模式共 428 例、12 个故障，与 QEMU 和模型一致；
+      分别以解释执行、page tier、page tier 加兼容模式 JIT 运行。QEMU 10.2 不检查 legacy PTEST
+      的对齐，登记为差异，按 SDM 判定为 #GP(0)。
+  - nasm：420 个新测试覆盖新增各行，QEMU fixture 全部通过。
+  - IR：SSE helper 的 fixture 差分包含新形式（含 imm8 变体，以及字节操作数的跨页）。
+  - 故意植入 3 个错误验证测试能力，全部被发现：regions 中 PEXTRB 的操作数次序、PMOVSX 的窄读，
+    以及 x64 PEXTR 的零扩展。
+- **测试框架的修正**：`tests/rust/ssse3.mjs`、`sse_fp.mjs`、`sse3.mjs` 和 `decode_rules.mjs` 原先只在
+  冷运行之后检查结果。冷运行前程序被重写，编译代码随之作废，冷运行基本是解释执行，因此
+  编译路径的结果从未被检查。植入的 regions 错误因此全部漏掉，这个问题才暴露出来。现在热运行
+  （编译代码）和冷运行都检查。修正后全部通过，P3、P4a 的结论不变。`xsave.mjs` 结构相同，P9 时
+  一并修正。
+- **回归**：`sse4-tests`、`sse-fault-tests`、`sse-fp-tests`、`ssse3-tests`、`sse3-tests`、`rust-test`、
+  `x64-decode-tests`、`ir-decoder-tests`、`ir-decode-contract-tests`、`decode-rules-tests`、`ir-mmx-tests`、
+  `ir-sse-fp-tests`、`ir-coverage-tests`、`ir-fp-state-tests`、`ir-tier0-tests`、`ir-differential-tests`、
+  七个 `ir-simd-*-tests`、`ir-sti-tests`、`ir-fusion-tests`、`ir-cfg-tests`、`ir-cache-tests`、
+  `ir-helper-reload-tests`、`packed-simd-tests`、`xsave-tests`、`x64-system-tests`、opcode 矩阵、
+  `x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、`nasmtests-force-jit`、`kvm-unit-test`、
+  `smp-tests`、`api-tests`、`expect-tests`、`cpu-optimization-tests`、`cpu-plan-tests`、`jitpagingtests`、
+  `platform-contract-tests`、rustfmt、state layout、isa-forms 检查和 eslint 全部通过。

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::cpu::{
     cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
-    instructions_0f3a as sem3a, simd_fp, xstate,
+    instructions_0f3a as sem3a, simd_fp, simd_int, xstate,
 };
 use crate::softfloat::F80;
 
@@ -1798,13 +1798,125 @@ unsafe fn ssse3(d: &Decoded) -> Result<bool, Fault> {
     Ok(true)
 }
 
+/// SSE4.1 and SSE4.2 integer forms with 66 (0F 38 and 0F 3A), with the
+/// semantics of crate::cpu::simd_int. REX.W selects PEXTRQ and PINSRQ; a
+/// register destination of PEXTRB/PEXTRW/PEXTRD/EXTRACTPS is zero-extended.
+unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
+    let base = d.base_opcode();
+    if d.opcode >> 24 != 0x66 {
+        return Ok(false);
+    }
+    let r = d.reg.unwrap_or(0);
+    let imm = d.immediate.map_or(0, |i| i.value as u8);
+    let vector = |v: u128| v.to_le_bytes();
+    match base {
+        0x0F3810
+        | 0x0F3814
+        | 0x0F3815
+        | 0x0F3820..=0x0F3825
+        | 0x0F3828
+        | 0x0F3829
+        | 0x0F382B
+        | 0x0F3830..=0x0F3835
+        | 0x0F3837..=0x0F3841 => {
+            guard(true)?;
+            let op = base as u8;
+            let bytes = sem38::sse4_source_bytes(op);
+            let v = source(d, bytes * 8, bytes == 16, false)?;
+            let result = simd_int::sse4(op, vector(xmm(r)), vector(v), vector(xmm(0)));
+            put_xmm(r, u128::from_le_bytes(result));
+        },
+        0x0F3817 => {
+            guard(true)?;
+            let v = source(d, 128, true, false)?;
+            let (zero, carry) = simd_int::ptest(vector(xmm(r)), vector(v));
+            state::write_flags64(
+                state::read_flags64() & !0x8D5 | (zero as u64) << 6 | carry as u64,
+            );
+        },
+        0x0F382A => {
+            guard(true)?;
+            if d.rm_register.is_some() {
+                return Err(Fault::ud());
+            }
+            put_xmm(r, source(d, 128, true, false)?);
+        },
+        0x0F3A0C..=0x0F3A0E | 0x0F3A42 => {
+            guard(true)?;
+            let v = source(d, 128, true, false)?;
+            put_xmm(
+                r,
+                u128::from_le_bytes(simd_int::sse4_imm(
+                    base as u8,
+                    vector(xmm(r)),
+                    vector(v),
+                    imm,
+                )),
+            );
+        },
+        // PEXTRB, PEXTRW, PEXTRD/PEXTRQ, EXTRACTPS
+        0x0F3A14..=0x0F3A17 => {
+            guard(true)?;
+            let bytes = match base {
+                0x0F3A14 => 1,
+                0x0F3A15 => 2,
+                0x0F3A16 if d.prefixes.w() => 8,
+                _ => 4,
+            };
+            let at = (imm as u32 & (16 / bytes - 1)) * bytes * 8;
+            let value = (xmm(r) >> at) as u64 & (u64::MAX >> (64 - bytes * 8));
+            if let Some(rm) = d.rm_register {
+                state::write_gpr(rm as usize, value, if bytes == 8 { 64 } else { 32 });
+            }
+            else {
+                let (a, stack) = address(d);
+                memory::write(a, bytes as u8 * 8, value, stack)?;
+            }
+        },
+        // PINSRB, INSERTPS, PINSRD/PINSRQ
+        0x0F3A20..=0x0F3A22 => {
+            guard(true)?;
+            if base == 0x0F3A21 {
+                let value = match d.rm_register {
+                    Some(rm) => (xmm(rm) >> ((imm >> 6 & 3) * 32)) as u32,
+                    None => source(d, 32, false, false)? as u32,
+                };
+                put_xmm(
+                    r,
+                    u128::from_le_bytes(simd_int::insertps(vector(xmm(r)), value, imm)),
+                );
+            }
+            else {
+                let bytes = if base == 0x0F3A20 {
+                    1
+                }
+                else if d.prefixes.w() {
+                    8
+                }
+                else {
+                    4
+                };
+                let value =
+                    gpr_source(d, bytes as u8 * 8)? as u128 & (u128::MAX >> (128 - bytes * 8));
+                let at = (imm as u32 & (16 / bytes - 1)) * bytes * 8;
+                put_xmm(
+                    r,
+                    xmm(r) & !((u128::MAX >> (128 - bytes * 8)) << at) | value << at,
+                );
+            }
+        },
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
     if x87(d)? {
         state::write_rip(d.next.0);
         return Ok(true);
     }
     if matches!(d.base_opcode() >> 8, 0x0F38 | 0x0F3A) {
-        if !ssse3(d)? {
+        if !ssse3(d)? && !sse4(d)? {
             return Ok(false);
         }
         state::write_rip(d.next.0);

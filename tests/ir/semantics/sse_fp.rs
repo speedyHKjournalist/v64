@@ -10,15 +10,20 @@ use crate::ir::{
 };
 #[test]
 fn sse_fp_fixtures() {
-    use crate::cpu::features::{SSSE3, TEST_FEATURES};
+    use crate::cpu::features::{SSE4_1, SSE4_2, SSSE3, TEST_FEATURES};
     std::fs::create_dir_all("build/ir-sse-fp").unwrap();
-    // (tests/ir/differential/sse_fp.mjs runs these on a machine with SSSE3)
-    TEST_FEATURES.with(|f| f.set(SSSE3));
+    // (tests/ir/differential/sse_fp.mjs runs these on a machine with SSSE3,
+    // SSE4.1 and SSE4.2)
+    TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1 | SSE4_2));
     let mut cases = Vec::new();
     for &(opcode, width) in OPERATIONS {
         for mode in [false, true] {
             for address32 in [false, true] {
                 for memory in [false, true] {
+                    // (MOVNTDQA has no register form)
+                    if opcode == 0x660F382A && !memory {
+                        continue;
+                    }
                     for dirty in [false, true] {
                         let mut bytes = vec![0x46];
                         if dirty {
@@ -68,6 +73,11 @@ fn sse_fp_fixtures() {
                             // palignr: within, at and beyond the source
                             bytes.push([0, 1, 7, 15, 16, 17, 31, 32][variant]);
                         }
+                        else if opcode >> 8 & 0xFFFF == 0x0F3A {
+                            // (the element, blend mask, INSERTPS fields and
+                            // MPSADBW blocks vary)
+                            bytes.push([0x00, 0xFF, 0x1B, 0x5A, 0xA5, 0x0F, 0xF0, 0x93][variant]);
+                        }
                         assert!(
                             lift(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode).is_err()
                         );
@@ -77,7 +87,8 @@ fn sse_fp_fixtures() {
                         suffix.push(0x90);
                         assert!(
                             lift_cpu(&suffix, GuestEip(0x8000), LinearAddress(0x8000), mode)
-                                .is_ok()
+                                .is_ok(),
+                            "{opcode:X} memory={memory}"
                         );
                         for opt in 0..2 {
                             if opt != 0 {

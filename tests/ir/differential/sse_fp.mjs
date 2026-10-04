@@ -16,7 +16,7 @@ for(const release of [false,true]){
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
-        cpu_features:["SSSE3"], // (the fixtures include the SSSE3 forms)
+        cpu_features:["SSSE3","SSE4.1","SSE4.2"], // (the fixtures include the SSSE3 and SSE4 forms)
     });
     try {
         await new Promise(resolve=>vm.add_listener("emulator-loaded",resolve));
@@ -289,7 +289,8 @@ for(const release of [false,true]){
                 for(const mmio of [false,true]) {
                     compare(i,()=>reset(i,{mmio,delta:aligned?0xFF0:0xFFF,sample:4}),before+1); comparisons++;
                 }
-                assert.equal(compare(i,()=>reset(i,{delta:aligned?0:0xFFF,pageFault:true}),before).ip,PF); comparisons++;
+                // (across into the absent page; a byte operand in it)
+                assert.equal(compare(i,()=>reset(i,{delta:aligned?0:width===1?0x1000:0xFFF,pageFault:true}),before).ip,PF); comparisons++;
                 assert.equal(compare(i,()=>reset(i,{nullSegment:true}),before).ip,GP); comparisons++;
                 if(aligned) { assert.equal(compare(i,()=>reset(i,{delta:0xFFF,pageFault:true}),before).ip,GP); comparisons++; }
             }

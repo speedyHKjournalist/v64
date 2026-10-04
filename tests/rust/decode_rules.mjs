@@ -50,15 +50,20 @@ function loop(body)
     p.push(0xE9, ...u32(-p.length - 5), 0xF4);
     return p;
 }
-async function run_all(program, before = () => {}, set = machines)
+/** Runs `program` on each machine of `set`, hot, then once more cold (the
+ * cold run is mostly interpreted: the program was rewritten);
+ * `verify(vm, run)` checks after each run */
+async function run_all(program, before = () => {}, set = machines, verify = () => {})
 {
-    for(const vm of set)
+    for(const [i, vm] of set.entries())
     {
-        before(vm);
-        vm.write_memory(new Uint8Array(1), 0x604);
-        await run(vm, program, true, vm === set[0]);
-        vm.write_memory(Uint8Array.of(1), 0x604);
-        await run(vm, program, false, vm === set[0]);
+        for(const warm of [true, false])
+        {
+            before(vm);
+            vm.write_memory(Uint8Array.of(warm ? 0 : 1), 0x604);
+            await run(vm, program, warm, vm === set[0]);
+            verify(vm, `machine ${i} ${warm ? "hot" : "one round"}`);
+        }
     }
 }
 /** The interpreter, then Tier-0 and the region tiers, with `options` */
@@ -92,11 +97,7 @@ async function expect_undefined(forms, set = machines)
             vm.write_memory(Uint8Array.from([255, 7, ...u32(IDT)]), DESCRIPTOR);
             vm.write_memory(Uint8Array.from(h), HANDLER);
             vm.write_memory(new Uint8Array(4), OUT);
-        }, set);
-        for(const vm of set)
-        {
-            assert.equal(word(vm, OUT), fault_eip, `${form.map(b => b.toString(16)).join(" ")}: #UD at the first byte`);
-        }
+        }, set, (vm, run) => assert.equal(word(vm, OUT), fault_eip, `${form.map(b => b.toString(16)).join(" ")} (${run}): #UD at the first byte`));
     }
 }
 
@@ -117,19 +118,15 @@ try
     {
         p.push(...load(0, DATA), ...load(1, DATA + 16), ...prefixes, 0x0F, 0x10, 0xC1, ...store(0, OUT + n * 16));
     }
-    const results = [];
-    await run_all(loop(p), vm => vm.write_memory(data, DATA));
-    for(const vm of machines)
-    {
+    await run_all(loop(p), vm => vm.write_memory(data, DATA), machines, (vm, run) => {
         const bytes = Uint8Array.from(vm.read_memory(OUT, moves.length * 16));
         for(const [n, [prefixes, low]] of moves.entries())
         {
             const expected = data.slice(0, 16);
             expected.set(data.slice(16, 16 + low));
-            assert.deepEqual(bytes.slice(n * 16, n * 16 + 16), expected, `0F 10 with ${prefixes.map(b => b.toString(16)).join(" ")}`);
+            assert.deepEqual(bytes.slice(n * 16, n * 16 + 16), expected, `0F 10 with ${prefixes.map(b => b.toString(16)).join(" ")} (${run})`);
         }
-        results.push(bytes);
-    }
+    });
     console.log(`PASS: ${moves.length} 0F 10 prefix orders select MOVUPS/MOVUPD/MOVSS/MOVSD as iced-x86 does, on ${machines.length} arms`);
 
     // REPE/REPNE CMPSB: the last of F2/F3 decides
@@ -143,15 +140,13 @@ try
         q.push(0xBE, ...u32(DATA), 0xBF, ...u32(DATA + 32), 0xB9, ...u32(16), ...prefixes, 0xA6,
             0x89, 0x0D, ...u32(OUT + n * 8), 0x89, 0x35, ...u32(OUT + n * 8 + 4));
     }
-    await run_all(loop(q), vm => vm.write_memory(strings, DATA));
-    for(const vm of machines)
-    {
+    await run_all(loop(q), vm => vm.write_memory(strings, DATA), machines, (vm, run) => {
         for(const [n, [prefixes, ecx, advanced]] of reps.entries())
         {
-            assert.equal(word(vm, OUT + n * 8), ecx, `CMPSB with ${prefixes} ECX`);
-            assert.equal(word(vm, OUT + n * 8 + 4), DATA + advanced, `CMPSB with ${prefixes} ESI`);
+            assert.equal(word(vm, OUT + n * 8), ecx, `CMPSB with ${prefixes} ECX (${run})`);
+            assert.equal(word(vm, OUT + n * 8 + 4), DATA + advanced, `CMPSB with ${prefixes} ESI (${run})`);
         }
-    }
+    });
     console.log(`PASS: ${reps.length} REPE/REPNE CMPSB prefix orders`);
 
     // A mandatory prefix without a row of its own is #UD at the first prefix
@@ -164,14 +159,15 @@ try
     ];
     await expect_undefined(undefined_forms);
     // IMUL r32, r/m32 with F3: a repeat prefix, ignored
-    await run_all(loop([0xB8, ...u32(7), 0xB9, ...u32(6), 0xF3, 0x0F, 0xAF, 0xC1, 0xA3, ...u32(OUT)]));
-    for(const vm of machines) assert.equal(word(vm, OUT), 42, "F3 IMUL");
+    await run_all(loop([0xB8, ...u32(7), 0xB9, ...u32(6), 0xF3, 0x0F, 0xAF, 0xC1, 0xA3, ...u32(OUT)]), undefined, machines,
+        (vm, run) => assert.equal(word(vm, OUT), 42, `F3 IMUL (${run})`));
     console.log(`PASS: ${undefined_forms.length} undefined mandatory prefixes raise #UD, F3 IMUL ignores the prefix`);
 
-    // The three-byte maps decode in all three decoders. SSSE3 (P3) is #UD
-    // without its feature; every other encoding is #UD until its semantics
-    // come (docs/simd-xsave-plan.md), whether or not the machine has its CPUID
-    // feature; so are F2/F3 at the SSSE3 opcodes and an opcode byte without rows
+    // The three-byte maps decode in all three decoders. SSSE3 (P3) and the
+    // implemented SSE4 forms (P4b) are #UD without their feature; every other
+    // encoding is #UD until its semantics come (docs/simd-xsave-plan.md),
+    // whether or not the machine has its CPUID feature; so are F2/F3 at the
+    // SSSE3 opcodes and an opcode byte without rows
     const ssse3 = [
         [0x66, 0x0F, 0x38, 0x00, 0xC1], [0x0F, 0x38, 0x00, 0xC1],                  // pshufb
         [0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], [0x0F, 0x3A, 0x0F, 0xC1, 0x08],      // palignr
@@ -179,7 +175,7 @@ try
     await expect_undefined(ssse3);
     const three_byte = [
         [0xF3, 0x0F, 0x38, 0x00, 0xC1], [0x66, 0xF2, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], // pshufb, palignr
-        [0x66, 0x0F, 0x38, 0x10, 0x00], [0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x0C],      // pblendvb, pcmpistri
+        [0x66, 0x0F, 0x3A, 0x08, 0x00, 0x04], [0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x0C], // roundps, pcmpistri
         [0xF2, 0x0F, 0x38, 0xF1, 0xC1], [0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],      // crc32
         [0x0F, 0x38, 0xF0, 0x00], [0xF3, 0x0F, 0x38, 0xF0, 0x00],                  // movbe
         [0x0F, 0x38, 0x10, 0xC1], [0x0F, 0x38, 0xFF, 0xC1], [0x0F, 0x3A, 0xFF, 0xC1, 0x00], // no row
@@ -202,17 +198,15 @@ try
     const far = [0x8C, 0x1D, ...u32(DATA + 4), 0xC7, 0x05, ...u32(DATA), ...u32(0x12345678),
         0xC4, 0x1D, ...u32(DATA), 0x89, 0x1D, ...u32(OUT), 0x8C, 0x05, ...u32(OUT + 4),
         0xC5, 0x0D, ...u32(DATA), 0x89, 0x0D, ...u32(OUT + 8), 0x1E, 0x07];
-    await run_all(loop(far));
-    for(const vm of machines)
-    {
-        assert.equal(word(vm, OUT), 0x12345678, "LES");
-        assert.equal(word(vm, OUT + 4) & 0xFFFF, word(vm, DATA + 4) & 0xFFFF, "LES: ES");
-        assert.equal(word(vm, OUT + 8), 0x12345678, "LDS");
-    }
+    await run_all(loop(far), undefined, machines, (vm, run) => {
+        assert.equal(word(vm, OUT), 0x12345678, `LES (${run})`);
+        assert.equal(word(vm, OUT + 4) & 0xFFFF, word(vm, DATA + 4) & 0xFFFF, `LES: ES (${run})`);
+        assert.equal(word(vm, OUT + 8), 0x12345678, `LDS (${run})`);
+    });
     // TZCNT and LZCNT without their features: BSF and BSR
     const bit_scans = [[0xF3, 0x0F, 0xBC, 0xC1], [0xF3, 0x0F, 0xBD, 0xC1]];
-    await run_all(loop([0xB9, ...u32(0x810000), ...bit_scans[0], 0xA3, ...u32(OUT), ...bit_scans[1], 0xA3, ...u32(OUT + 4)]));
-    for(const vm of machines) assert.deepEqual([word(vm, OUT), word(vm, OUT + 4)], [16, 23], "F3 BSF, F3 BSR");
+    await run_all(loop([0xB9, ...u32(0x810000), ...bit_scans[0], 0xA3, ...u32(OUT), ...bit_scans[1], 0xA3, ...u32(OUT + 4)]), undefined, machines,
+        (vm, run) => assert.deepEqual([word(vm, OUT), word(vm, OUT + 4)], [16, 23], `F3 BSF, F3 BSR (${run})`));
 
     const featured = await create_machines({ cpu_type: "x86_64", cpu_features: "x86-64-v3" });
     try

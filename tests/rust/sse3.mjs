@@ -241,6 +241,9 @@ try {
             vm.write_memory(Uint8Array.from([255,7,...u32(idt)]),descriptor);
             vm.write_memory(Uint8Array.from(h),handler); vm.write_memory(new Uint8Array(1),0x604);
             await run(vm,p);
+            // (the hot run stops anywhere in its loop: its fault record, not its registers)
+            assert.equal(word(vm,OUT),fault_eip,`${name} precise #${vector} (hot)`);
+            vm.write_memory(new Uint8Array(4),OUT);
             vm.write_memory(Uint8Array.of(1),0x604); await run(vm,p,false);
             assert.equal(word(vm,OUT),fault_eip,`${name} precise #${vector}`);
             assert.deepEqual(new Uint8Array(vm.v86.cpu.reg_xmm32s.buffer,vm.v86.cpu.reg_xmm32s.byteOffset,16),data.slice(0,16),`${name} fault preserves XMM0`);

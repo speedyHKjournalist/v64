@@ -1,5 +1,6 @@
 //! Baseline-compatible SSE floating-point adapters with CPU state reloads, and
-//! the SSSE3 XMM forms (shared semantics in crate::cpu::simd_int).
+//! the SSSE3, SSE4.1 and SSE4.2 XMM forms (shared semantics in
+//! crate::cpu::simd_int).
 use super::{
     adapters::call_abi,
     decode::DecodedInstruction,
@@ -93,6 +94,51 @@ pub const OPERATIONS: &[(u32, u32)] = &[
     (0x660F381D, 16),
     (0x660F381E, 16),
     (0x660F3A0F, 16),
+    // SSE4.1 and SSE4.2 (integer, no MXCSR; the bytes of the memory operand):
+    // PMOVSX/PMOVZX read what they extend, PEXTR*/EXTRACTPS store an
+    // element, PINSRB/PINSRD/INSERTPS load one
+    (0x660F3810, 16),
+    (0x660F3814, 16),
+    (0x660F3815, 16),
+    (0x660F3817, 16),
+    (0x660F3820, 8),
+    (0x660F3821, 4),
+    (0x660F3822, 2),
+    (0x660F3823, 8),
+    (0x660F3824, 4),
+    (0x660F3825, 8),
+    (0x660F3828, 16),
+    (0x660F3829, 16),
+    (0x660F382A, 16),
+    (0x660F382B, 16),
+    (0x660F3830, 8),
+    (0x660F3831, 4),
+    (0x660F3832, 2),
+    (0x660F3833, 8),
+    (0x660F3834, 4),
+    (0x660F3835, 8),
+    (0x660F3837, 16),
+    (0x660F3838, 16),
+    (0x660F3839, 16),
+    (0x660F383A, 16),
+    (0x660F383B, 16),
+    (0x660F383C, 16),
+    (0x660F383D, 16),
+    (0x660F383E, 16),
+    (0x660F383F, 16),
+    (0x660F3840, 16),
+    (0x660F3841, 16),
+    (0x660F3A0C, 16),
+    (0x660F3A0D, 16),
+    (0x660F3A0E, 16),
+    (0x660F3A14, 1),
+    (0x660F3A15, 2),
+    (0x660F3A16, 4),
+    (0x660F3A17, 4),
+    (0x660F3A20, 1),
+    (0x660F3A21, 4),
+    (0x660F3A22, 4),
+    (0x660F3A42, 16),
 ];
 pub fn supports(i: &DecodedInstruction) -> bool {
     OPERATIONS.iter().any(|&(op, _)| op == i.encoding.opcode)

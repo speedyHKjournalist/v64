@@ -1522,6 +1522,17 @@ sse-fp-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-d
 	node tests/rust/sse_fp.mjs build/v86-debug.wasm
 	node tests/ir/differential/sse_fp_tracking.mjs
 
+# SSE4.1 and SSE4.2 (docs/simd-xsave-plan.md P4b): the 32-bit engines against a
+# model of the SDM (with Wasm SIMD, debug, and without SIMD), the x64 engine
+# against QEMU and the model
+.PHONY: sse4-tests
+sse4-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/sse4.mjs
+	node tests/rust/sse4.mjs build/v86-debug.wasm
+	node tests/rust/sse4.mjs build/v86-fallback.wasm
+	node tests/x64/sse4.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/sse4.mjs
+
 # The legacy SSE exception conditions in the 32-bit engines (docs/simd-xsave-plan.md
 # 3.3, P4a): CR4.OSFXSR for XMM forms only, 16-byte alignment, their order
 .PHONY: sse-fault-tests

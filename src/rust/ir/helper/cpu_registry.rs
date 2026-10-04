@@ -204,8 +204,8 @@ pub fn validate(d: &HelperDescriptor) -> Result<(), &'static str> {
 /// MXCSR's flags and FP backing, and cannot call host observers or fault after
 /// the CR0 task guard succeeds unless MXCSR unmasks an exception (the backend's
 /// sse_task_observation takes the full-state path for both). Integer/FLAGS
-/// conversions and every memory form retain the full contract. The SSSE3 XMM
-/// forms read and write only the XMM operands.
+/// conversions and every memory form retain the full contract. The SSSE3 and
+/// listed SSE4 XMM forms read and write only the XMM operands.
 pub fn xmm_register_operands(
     region: &crate::ir::hir::Region,
     args: &[crate::ir::ids::ValueId],
@@ -281,6 +281,17 @@ pub fn xmm_register_operands(
             | 0x660F3800..=0x660F380B
             | 0x660F381C..=0x660F381E
             | 0x660F3A0F
+            // SSE4.1/SSE4.2 between two XMM registers (not BLENDV: XMM0;
+            // PTEST: FLAGS; PEXTR*/PINSR*: a GPR)
+            | 0x660F3820..=0x660F3825
+            | 0x660F3828
+            | 0x660F3829
+            | 0x660F382B
+            | 0x660F3830..=0x660F3835
+            | 0x660F3837..=0x660F3841
+            | 0x660F3A0C..=0x660F3A0E
+            | 0x660F3A21
+            | 0x660F3A42
     ) {
         return None;
     }

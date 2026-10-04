@@ -110,10 +110,13 @@ function handler(vector, error_code)
 }
 const VECTORS = [[6, false], [7, false], [13, true], [14, true]];
 const PROLOGUE = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), ...CLTS, ...CLEAR_CR0(4), ...OSFXSR];
-/** Runs `program` on each machine of `set`: warm (compiled), then once more cold */
-async function run_all(program, before = () => {}, set = machines)
+/** Runs `program` on each machine of `set`: warm (compiled), then once more
+ * cold; returns what `read` reads after each run (the cold run is mostly
+ * interpreted: the program was rewritten) */
+async function run_all(program, before = () => {}, set = machines, read = () => null)
 {
-    for(const vm of set)
+    const results = [];
+    for(const [i, vm] of set.entries())
     {
         vm.write_memory(Uint8Array.from([255, 7, ...u32(IDT)]), DESCRIPTOR);
         VECTORS.forEach(([vector, error_code], i) => {
@@ -127,8 +130,10 @@ async function run_all(program, before = () => {}, set = machines)
             vm.write_memory(new Uint8Array(16), FAULT);
             vm.write_memory(Uint8Array.of(warm ? 0 : 1), 0x604);
             await run(vm, loop([...PROLOGUE, ...program]), warm, vm === set[0]);
+            results.push({ run: `machine ${i} ${warm ? "hot" : "one round"}`, data: read(vm) });
         }
     }
+    return results;
 }
 async function create_machines(options = {})
 {
@@ -147,20 +152,22 @@ async function create_machines(options = {})
     }
     return set;
 }
-/** `faulting` raises `vector` at its first byte after `prologue`; the handler skips it */
-async function expect_fault(set, prologue, faulting, vector, { epilogue = [], before = () => {}, cr2, error_code, label } = {})
+/** `faulting` raises `vector` at its first byte after `prologue` (the
+ * handler skips it) in every run; `check(out, run)` sees OUT after each */
+async function expect_fault(set, prologue, faulting, vector, { epilogue = [], before = () => {}, cr2, error_code, label, check } = {})
 {
     const at = CODE + PROLOGUE.length + prologue.length;
-    await run_all([...prologue, ...faulting, ...epilogue], vm => {
+    const results = await run_all([...prologue, ...faulting, ...epilogue], vm => {
         vm.write_memory(Uint8Array.from(u32(faulting.length)), SKIP);
         before(vm);
-    }, set);
-    for(const vm of set)
+    }, set, vm => ({ fault: [0, 4, 8, 12].map(o => word(vm, FAULT + o)), out: bytes(vm, OUT, 28) }));
+    const name = label || faulting.map(b => b.toString(16)).join(" ");
+    for(const { run, data } of results)
     {
-        const name = label || faulting.map(b => b.toString(16)).join(" ");
-        assert.deepEqual([word(vm, FAULT), word(vm, FAULT + 4)], [vector, at], `${name}: vector, EIP`);
-        if(cr2 !== undefined) assert.equal(word(vm, FAULT + 8), cr2, `${name}: CR2`);
-        if(error_code !== undefined) assert.equal(word(vm, FAULT + 12), error_code, `${name}: error code`);
+        assert.deepEqual(data.fault.slice(0, 2), [vector, at], `${name} (${run}): vector, EIP`);
+        if(cr2 !== undefined) assert.equal(data.fault[2], cr2, `${name} (${run}): CR2`);
+        if(error_code !== undefined) assert.equal(data.fault[3], error_code, `${name} (${run}): error code`);
+        check?.(data.out, `${name} (${run})`);
     }
 }
 const pages = (vm, page, present) => {
@@ -213,11 +220,11 @@ try
             }
             if(!xmm) program.push(...EMMS);
             for(const vm of machines) vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
-            await run_all(program, vm => {
+            const runs = await run_all(program, vm => {
                 vm.write_memory(destinations, DEST);
                 vm.write_memory(sources, SOURCE);
                 vm.write_memory(new Uint8Array(count * 16), OUT);
-            });
+            }, machines, vm => bytes(vm, OUT, count * 16));
             // Tier-0 (machine 1) has templates for PSHUFB and PALIGNR; it
             // steps the others through the interpreter (keyed by their first
             // two bytes: 66 0F, 0F 38 or 0F 3A), each round. A build without
@@ -227,7 +234,7 @@ try
             const templates = t0_steps(xmm ? 0x0FF3 : 0x6F0F) < count / 2;
             if(templates && (op === 0x00 || op === PALIGNR)) assert.ok(steps < count / 2, `${name}: Tier-0 template (${steps} steps)`);
             else assert.ok(steps >= count, `${name}: Tier-0 steps (${steps})`);
-            const results = machines.map(vm => bytes(vm, OUT, count * 16));
+            const results = runs.map(({ data }) => data);
             for(let n = 0; n < count; n++)
             {
                 const { dst, src, memory, address, imm8 } = operands(n, xmm, count);
@@ -239,7 +246,7 @@ try
                 {
                     assert.deepEqual(result.slice(n * 16, n * 16 + size), expected,
                         `${name} ${xmm ? "xmm" : "mm"}${dst}, ${memory ? "[mem]" : (xmm ? "xmm" : "mm") + src}` +
-                        `${op === PALIGNR ? ", " + imm8 : ""} on machine ${i}: d=${Buffer.from(destination).toString("hex")} s=${Buffer.from(source).toString("hex")}`);
+                        `${op === PALIGNR ? ", " + imm8 : ""} on ${runs[i].run}: d=${Buffer.from(destination).toString("hex")} s=${Buffer.from(source).toString("hex")}`);
                 }
             }
             cases += count;
@@ -253,29 +260,24 @@ try
     const FNINIT = [0xDB, 0xE3], FLD1 = [0xD9, 0xE8], fnstenv = a => [0xD9, 0x35, ...u32(a)], fxsave = a => [0x0F, 0xAE, 0x05, ...u32(a)];
     for(const [op, name] of OPS)
     {
-        await run_all([...FNINIT, ...FLD1, ...LOAD_MM, ...absolute(3, DEST), ...FNINIT, ...FLD1,
+        const runs = await run_all([...FNINIT, ...FLD1, ...LOAD_MM, ...absolute(3, DEST), ...FNINIT, ...FLD1,
             ...encode(op, false, 3, 5, undefined, 4), ...fnstenv(OUT), ...fxsave(OUT + 0x40), ...EMMS], vm => {
             vm.write_memory(destinations, DEST);
-        });
-        for(const vm of machines)
+        }, machines, vm => ({ env: bytes(vm, OUT, 28), area: bytes(vm, OUT + 0x40, 512) }));
+        for(const { run, data: { env, area } } of runs)
         {
-            const env = bytes(vm, OUT, 28), area = bytes(vm, OUT + 0x40, 512);
-            assert.equal(env[5] >> 3 & 7, 0, `${name}: TOP`);
-            assert.equal(env[8] | env[9] << 8, 0, `${name}: tag word, all valid`);
-            assert.deepEqual([area[32 + 3 * 16 + 8], area[32 + 3 * 16 + 9]], [0xFF, 0xFF], `${name}: MM3's exponent`);
+            assert.equal(env[5] >> 3 & 7, 0, `${name} (${run}): TOP`);
+            assert.equal(env[8] | env[9] << 8, 0, `${name} (${run}): tag word, all valid`);
+            assert.deepEqual([area[32 + 3 * 16 + 8], area[32 + 3 * 16 + 9]], [0xFF, 0xFF], `${name} (${run}): MM3's exponent`);
         }
         checks++;
         // #PF on the source: no transition
         await expect_fault(machines, [...FNINIT, ...FLD1], encode(op, false, 3, undefined, ABSENT + 8, 0x11), 14, {
             epilogue: [...fnstenv(OUT), ...FNINIT], cr2: ABSENT + 8, label: `${name} mm3, [absent page]`,
             before: vm => pages(vm, ABSENT, false),
+            check: (env, run) => assert.deepEqual([env[5] >> 3 & 7, env[8] | env[9] << 8], [7, 0x3FFF], `${run}: x87 state after #PF`),
         });
-        for(const vm of machines)
-        {
-            const env = bytes(vm, OUT, 28);
-            assert.deepEqual([env[5] >> 3 & 7, env[8] | env[9] << 8], [7, 0x3FFF], `${name}: x87 state after #PF`);
-            pages(vm, ABSENT, true);
-        }
+        for(const vm of machines) pages(vm, ABSENT, true);
         checks++;
     }
     console.log(`PASS: ${OPS.length} MMX forms set TOP 0, all tags valid and the exponent of their destination; none after #PF`);
@@ -289,39 +291,32 @@ try
         for(const xmm of [false, true])
         {
             const label = `${name} ${xmm ? "xmm" : "mm"}`;
-            const check = () => {
-                for(const vm of machines) assert.deepEqual(bytes(vm, OUT, xmm ? 16 : 8), destinations.slice(0, xmm ? 16 : 8), `${label}: destination kept`);
-            };
+            const check = (out, run) => assert.deepEqual(out.slice(0, xmm ? 16 : 8), destinations.slice(0, xmm ? 16 : 8), `${run}: destination kept`);
             const before = vm => vm.write_memory(destinations, DEST);
             await expect_fault(machines, [...keep(xmm, 6), ...SET_CR0(8)], encode(op, xmm, 6, 1, undefined, 1), 7,
-                { epilogue: [...CLTS, ...kept(xmm, 6)], before, label: label + " with CR0.TS" });
-            check();
+                { epilogue: [...CLTS, ...kept(xmm, 6)], before, label: label + " with CR0.TS", check });
             await expect_fault(machines, [...keep(xmm, 6), ...SET_CR0(4)], encode(op, xmm, 6, undefined, SOURCE, 1), 6,
-                { epilogue: [...CLEAR_CR0(4), ...kept(xmm, 6)], before, label: label + " with CR0.EM" });
-            check();
+                { epilogue: [...CLEAR_CR0(4), ...kept(xmm, 6)], before, label: label + " with CR0.EM", check });
             for(const prefix of [0xF0, 0xF2, 0xF3])
             {
                 await expect_fault(machines, keep(xmm, 6), encode(op, xmm, 6, 1, undefined, 1, [prefix]), 6,
-                    { epilogue: kept(xmm, 6), before, label: `${prefix.toString(16)} ${label}` });
-                check();
+                    { epilogue: kept(xmm, 6), before, label: `${prefix.toString(16)} ${label}`, check });
             }
             // (the absolute address is linear: the flat segments have base 0)
             const misaligned = encode(op, xmm, 6, undefined, SOURCE + 8, 1);
             if(xmm)
             {
-                await expect_fault(machines, keep(xmm, 6), misaligned, 13, { epilogue: kept(xmm, 6), before, error_code: 0, label: label + ", [misaligned]" });
-                check();
+                await expect_fault(machines, keep(xmm, 6), misaligned, 13, { epilogue: kept(xmm, 6), before, error_code: 0, label: label + ", [misaligned]", check });
             }
             else
             {
-                await run_all([...keep(xmm, 6), ...misaligned, ...kept(xmm, 6), ...EMMS], before);
-                for(const vm of machines) assert.equal(word(vm, FAULT), 0, label + ", [misaligned]: no fault");
+                const runs = await run_all([...keep(xmm, 6), ...misaligned, ...kept(xmm, 6), ...EMMS], before, machines, vm => word(vm, FAULT));
+                for(const { run, data } of runs) assert.equal(data, 0, `${label}, [misaligned] (${run}): no fault`);
             }
             await expect_fault(machines, keep(xmm, 6), encode(op, xmm, 6, undefined, ABSENT + 16, 1), 14, {
                 epilogue: kept(xmm, 6), cr2: ABSENT + 16, label: label + ", [absent page]",
-                before: vm => { before(vm); pages(vm, ABSENT, false); },
+                before: vm => { before(vm); pages(vm, ABSENT, false); }, check,
             });
-            check();
             for(const vm of machines) pages(vm, ABSENT, true);
             checks += 7;
         }

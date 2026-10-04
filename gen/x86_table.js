@@ -900,17 +900,21 @@ for(let i = 0; i < 8; i++)
         encodings.push(ssse3(0x0F3800 | byte), ssse3(0x660F3800 | byte));
     }
     encodings.push(ssse3(0x0F3A0F, { imm8: 1 }), ssse3(0x660F3A0F, { imm8: 1 })); // palignr
+    // SSE4.1 and SSE4.2 (P4b): XMM forms with 66; ROUND and DPPS/DPPD
+    // (floating point, P4b part 2) and PCMPxSTRx (part 3) still #UD
+    const sse4 = (opcode, feature, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, feature, ...extra });
     for(const byte of [0x10, 0x14, 0x15, 0x17, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2B,
         0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41])
     {
-        encodings.push(vector(0x660F3800 | byte, SSE4_1));
+        encodings.push(sse4(0x660F3800 | byte, SSE4_1));
     }
-    encodings.push(vector(0x660F382A, SSE4_1, { reg_ud: 1 })); // movntdqa
+    encodings.push(sse4(0x660F382A, SSE4_1, { reg_ud: 1 })); // movntdqa
     for(const byte of [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x14, 0x15, 0x16, 0x17, 0x20, 0x21, 0x22, 0x40, 0x41, 0x42])
     {
-        encodings.push(vector(0x660F3A00 | byte, SSE4_1, { imm8: 1 }));
+        const floating = [0x08, 0x09, 0x0A, 0x0B, 0x40, 0x41].includes(byte);
+        encodings.push((floating ? vector : sse4)(0x660F3A00 | byte, SSE4_1, { imm8: 1 }));
     }
-    encodings.push(vector(0x660F3837, SSE4_2)); // pcmpgtq
+    encodings.push(sse4(0x660F3837, SSE4_2)); // pcmpgtq
     for(const byte of [0x60, 0x61, 0x62, 0x63]) encodings.push(vector(0x660F3A00 | byte, SSE4_2, { imm8: 1 })); // pcmp[ei]str[im]
     // MOVBE (memory only; 66 is the operand size) and CRC32 share 0F 38 F0/F1,
     // where F2 selects CRC32 and F3 is #UD

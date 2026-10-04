@@ -372,7 +372,9 @@ try
                     data.set(bytes128(c.b), n * 64 + 16);
                     data.set(u32(c.mxcsr), n * 64 + 32);
                 });
-                for(const vm of machines)
+                // (every run: the cold one is mostly interpreted, the program was rewritten)
+                const runs = [];
+                for(const [m, vm] of machines.entries())
                 {
                     vm.write_memory(Uint8Array.from([255, 7, ...u32(IDT)]), DESCRIPTOR);
                     VECTORS.forEach(([vector, error_code], i) => {
@@ -388,15 +390,16 @@ try
                         vm.write_memory(new Uint8Array(list.length * 4), FAULTS);
                         vm.write_memory(Uint8Array.of(warm ? 0 : 1), 0x604);
                         await run(vm, code, warm, vm === machines[0]);
+                        runs.push({ run: `machine ${m} ${warm ? "hot" : "one round"}`, out: Uint8Array.from(vm.read_memory(OUT, list.length * 32)),
+                            faults: Uint8Array.from(vm.read_memory(FAULTS, list.length * 4)) });
                     }
                 }
-                for(const [m, vm] of machines.entries())
+                for(const { run, out, faults: fault_bytes } of runs)
                 {
-                    const out = Uint8Array.from(vm.read_memory(OUT, list.length * 32));
-                    const faults = new DataView(Uint8Array.from(vm.read_memory(FAULTS, list.length * 4)).buffer);
+                    const faults = new DataView(fault_bytes.buffer);
                     const view = new DataView(out.buffer);
                     list.forEach((c, n) => {
-                        const label = `${form.name}${memory ? " [mem]" : ""} case ${n} on machine ${m}: mxcsr ${c.mxcsr.toString(16)} a ${c.a.toString(16)} b ${c.b.toString(16)}${form.imm8 ? " imm8 " + c.imm8 : ""}`;
+                        const label = `${form.name}${memory ? " [mem]" : ""} case ${n} on ${run}: mxcsr ${c.mxcsr.toString(16)} a ${c.a.toString(16)} b ${c.b.toString(16)}${form.imm8 ? " imm8 " + c.imm8 : ""}`;
                         const vector = faults.getUint32(n * 4, true);
                         assert.equal(vector, c.fault ? xmm_exceptions ? 19 : 6 : 0, label + ": fault");
                         assert.equal(view.getUint32(n * 32 + 16, true), c.after, label + ": MXCSR");

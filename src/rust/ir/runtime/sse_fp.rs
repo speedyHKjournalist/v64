@@ -1,7 +1,8 @@
 //! Explicit semantic calls: guard and ordered load precede any destination update.
 //! Floating point is the interpreter's, exact (cpu::simd_fp: MXCSR rounding and
 //! flags, unmasked exceptions as #XM or #UD).
-//! The SSSE3 XMM forms share these adapters (integer semantics, no MXCSR).
+//! The SSSE3, SSE4.1 and SSE4.2 XMM forms share these adapters (integer
+//! semantics, no MXCSR).
 use crate::cpu::{
     cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
     instructions_0f3a as sem3a,
@@ -9,6 +10,21 @@ use crate::cpu::{
 use crate::ir::helper::Outcome;
 
 use super::continuation::ContinuationContext;
+
+/// The forms of crate::cpu::simd_int::sse4 (66 0F 38)
+macro_rules! sse4 {
+    () => {
+        0x660F3810
+            | 0x660F3814
+            | 0x660F3815
+            | 0x660F3820..=0x660F3825
+            | 0x660F3828
+            | 0x660F3829
+            | 0x660F382B
+            | 0x660F3830..=0x660F3835
+            | 0x660F3837..=0x660F3841
+    };
+}
 
 unsafe fn finish(success: bool) -> u32 {
     if success {
@@ -378,6 +394,20 @@ pub unsafe fn ir_sse_fp_reg_continue(
         0x660F3A0F => {
             sem3a::instr_660F3A0F(cpu::read_xmm128s(source), destination, immediate);
         },
+        sse4!() => sem38::sse4_xmm(op as u8, cpu::read_xmm128s(source), destination),
+        0x660F3817 => sem38::instr_660F3817(cpu::read_xmm128s(source), destination),
+        0x660F3A0C..=0x660F3A0E | 0x660F3A42 => {
+            sem3a::sse4_imm_xmm(op as u8, cpu::read_xmm128s(source), destination, immediate)
+        },
+        // (the interpreter's forms: `source` is the GPR of PEXTR*/EXTRACTPS
+        // and PINSRB/PINSRD, the XMM register of INSERTPS)
+        0x660F3A14 => sem3a::instr_660F3A14_reg(source, destination, immediate),
+        0x660F3A15 => sem3a::instr_660F3A15_reg(source, destination, immediate),
+        0x660F3A16 => sem3a::instr_660F3A16_reg(source, destination, immediate),
+        0x660F3A17 => sem3a::instr_660F3A17_reg(source, destination, immediate),
+        0x660F3A20 => sem3a::instr_660F3A20_reg(source, destination, immediate),
+        0x660F3A21 => sem3a::instr_660F3A21_reg(source, destination, immediate),
+        0x660F3A22 => sem3a::instr_660F3A22_reg(source, destination, immediate),
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
     finish(true)
@@ -746,6 +776,25 @@ unsafe fn memory(
         0x660F3A0F => {
             sem3a::instr_660F3A0F(cpu::safe_read128s_aligned(addr)?, destination, immediate);
         },
+        sse4!() => sem38::sse4_xmm(op as u8, sem38::sse4_source(op as u8, addr)?, destination),
+        0x660F3817 => sem38::instr_660F3817(cpu::safe_read128s_aligned(addr)?, destination),
+        0x660F382A => cpu::write_xmm_reg128(destination, cpu::safe_read128s_aligned(addr)?),
+        0x660F3A0C..=0x660F3A0E | 0x660F3A42 => sem3a::sse4_imm_xmm(
+            op as u8,
+            cpu::safe_read128s_aligned(addr)?,
+            destination,
+            immediate,
+        ),
+        0x660F3A14 => cpu::safe_write8(addr, sem3a::extract(destination, 1, immediate) as i32)?,
+        0x660F3A15 => cpu::safe_write16(addr, sem3a::extract(destination, 2, immediate) as i32)?,
+        0x660F3A16 | 0x660F3A17 => {
+            cpu::safe_write32(addr, sem3a::extract(destination, 4, immediate) as i32)?
+        },
+        0x660F3A20 => sem3a::insert(destination, 1, cpu::safe_read8(addr)? as u32, immediate),
+        0x660F3A21 => {
+            sem3a::instr_660F3A21(cpu::safe_read32s(addr)? as u32, destination, immediate)
+        },
+        0x660F3A22 => sem3a::insert(destination, 4, cpu::safe_read32s(addr)? as u32, immediate),
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
     Ok(())
