@@ -1619,9 +1619,13 @@ struct Area {
 impl xstate::Area for Area {
     type Fault = Fault;
     unsafe fn check(&mut self, offset: u32, length: u32, write: bool) -> Result<(), Fault> {
-        // (a field is shorter than a page: its first and last bytes cover it)
+        // (a field is shorter than a page: its first byte and, when it
+        // crosses into the next page, that page's first byte cover it, which
+        // a page fault reports in CR2)
         let first = self.a.wrapping_add(offset as u64);
-        for at in [first, first.wrapping_add(length as u64 - 1)] {
+        let last = first.wrapping_add(length as u64 - 1);
+        let next = (last >> 12 != first >> 12).then_some(last & !0xFFF);
+        for at in std::iter::once(first).chain(next) {
             if write {
                 memory::probe_write(at, 8, self.stack)?;
             }
