@@ -295,8 +295,10 @@ function dump_packet(packet, prefix)
  * @param {Boolean} preserve_mac_from_state_image
  * @param {Boolean} mac_address_translation
  * @param {number} [id=0] id
+ * @param {number=} pci_id where the machine puts it (behind a root port), or
+ *     its usual slot
  */
-export function Ne2k(cpu, bus, preserve_mac_from_state_image, mac_address_translation, id)
+export function Ne2k(cpu, bus, preserve_mac_from_state_image, mac_address_translation, id, pci_id)
 {
     /** @const @type {CPU} */
     this.cpu = cpu;
@@ -315,7 +317,9 @@ export function Ne2k(cpu, bus, preserve_mac_from_state_image, mac_address_transl
         this.receive(data);
     }, this);
 
-    this.port = 0x300 + 0x100 * this.id;
+    // (behind a bridge, the I/O BAR starts above the legacy ports, which
+    // bridges do not forward)
+    this.port = (pci_id !== undefined && pci_id >= 0x100 ? 0x1300 : 0x300) + 0x100 * this.id;
 
     this.name = "ne2k";
 
@@ -329,7 +333,7 @@ export function Ne2k(cpu, bus, preserve_mac_from_state_image, mac_address_transl
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x00, 0x11,
             0x00, 0x00, 0xb8, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
         ];
-        this.pci_id = this.id === 0 ? pci_functions(cpu.platform).ne2k : (0x07 + this.id) << 3;
+        this.pci_id = pci_id !== undefined ? pci_id : this.id === 0 ? pci_functions(cpu.platform).ne2k : (0x07 + this.id) << 3;
         this.pci_bars = [
             {
                 size: 32,

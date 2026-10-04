@@ -283,12 +283,19 @@ for(const count of [2, 4, 8])
         send(0, 2 << 18 | 1 << 8 | 0x64);
         assert.deepEqual(targets(0x64), Array.from({ length: count }, (_, i) => i === 1));
         reset();
-        for(const mode of [2, 3, 7])
+        for(const mode of [3, 7])
         {
             cpu.switch_core(0);
             send(1, mode << 8 | 0x65);
             assert.equal(irr(1, 0x65), false);
         }
+        // nor does an SMI (delivery mode 2): it is latched for the core
+        // (src/rust/cpu/smm.rs), its vector ignored
+        cpu.switch_core(0);
+        send(1, 2 << 8 | 0x65);
+        assert.equal(irr(1, 0x65), false);
+        assert.equal(cpu.apic_core_smi_pending(1), 1, "SMI latched");
+        cpu.apic_restore_smi(1, false);
         cpu.switch_core(0);
         send(1, 0x0F);
         write(0x280, 0);
@@ -296,8 +303,8 @@ for(const count of [2, 4, 8])
         send(1, 0xFF);
         assert.equal(irr(1, 0xFF), true, "0xFF is a valid fixed vector");
         cpu.switch_core(0);
-        assert.equal(cpu.wm.exports.apic_core_ipi_sent(0), 1);
-        assert.equal(cpu.wm.exports.apic_core_ipi_received(1), 1);
+        assert.equal(cpu.wm.exports.apic_core_ipi_sent(0), 2, "the SMI and the fixed IPI");
+        assert.equal(cpu.wm.exports.apic_core_ipi_received(1), 2);
 
         // Cluster broadcast retains the member mask; reserved DFR values do
         // not silently act as the cluster model.

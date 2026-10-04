@@ -25,8 +25,11 @@ const VIRTIO_CONSOLE_F_EMERG_WRITE    = 2;
  * @constructor
  *
  * @param {CPU} cpu
+ * @param {BusConnector} bus
+ * @param {number=} pci_id where the machine puts it (behind a root port), or
+ *     its usual slot
  */
-export function VirtioConsole(cpu, bus)
+export function VirtioConsole(cpu, bus, pci_id)
 {
     /** @const @type {BusConnector} */
     this.bus = bus;
@@ -63,7 +66,7 @@ export function VirtioConsole(cpu, bus)
     this.virtio = new VirtIO(cpu,
     {
         name: "virtio-console",
-        pci_id: 0x0C << 3,
+        pci_id: pci_id === undefined ? 0x0C << 3 : pci_id,
         device_id: 0x1043,
         subsystem_device_id: 3,
         common:

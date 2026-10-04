@@ -15,6 +15,7 @@ pub mod misc_instr;
 pub mod mmio_ram;
 pub mod modrm;
 pub mod pic;
+pub mod smm;
 pub mod sse_instr;
 pub mod string;
 pub mod topology;

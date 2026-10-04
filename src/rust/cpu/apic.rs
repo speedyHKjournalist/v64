@@ -36,6 +36,7 @@ const IOAPIC_DELIVERY_FIXED: u8 = 0;
 const DELIVERY_LOWEST_PRIORITY: u8 = 1;
 const DELIVERY_STARTUP: u8 = 6;
 const DELIVERY_EXTINT: u8 = 7;
+const DELIVERY_SMI: u8 = 2;
 
 const ICR_LEVEL_ASSERT: u32 = 1 << 14;
 const APIC_SOFTWARE_ENABLE: u32 = 1 << 8;
@@ -130,6 +131,8 @@ static mut CORE_COUNT: usize = 1;
 static mut CORE_EVENTS: [u32; MAX_CORES] = [0; MAX_CORES];
 /// NMIs latched for each core until it can take one (nmi_blocked)
 static mut NMI_PENDING: [u32; MAX_CORES] = [0; MAX_CORES];
+/// SMIs latched for each core until it can take one (not in SMM)
+static mut SMI_PENDING: [u32; MAX_CORES] = [0; MAX_CORES];
 
 // With cores in workers (crate::parallel), the APICs, their latches and the
 // core count are the machine instance's, reached through parallel::machine;
@@ -148,6 +151,14 @@ fn nmi_latch(core: usize) -> *mut u32 {
     dbg_assert!(core < MAX_CORES);
     unsafe {
         parallel::machine(&raw mut NMI_PENDING)
+            .cast::<u32>()
+            .add(core)
+    }
+}
+fn smi_latch(core: usize) -> *mut u32 {
+    dbg_assert!(core < MAX_CORES);
+    unsafe {
+        parallel::machine(&raw mut SMI_PENDING)
             .cast::<u32>()
             .add(core)
     }
@@ -264,6 +275,7 @@ pub unsafe fn apic_set_core_count(count: u32) {
         }
         *core_events(core) = 0;
         *nmi_latch(core) = 0;
+        *smi_latch(core) = 0;
     }
 }
 
@@ -290,6 +302,35 @@ pub unsafe fn nmi_pending() -> bool { parallel::word_load(nmi_latch(current_core
 #[no_mangle]
 pub unsafe fn apic_core_nmi_pending(core: u32) -> bool {
     parallel::word_load(nmi_latch(core as usize)) != 0
+}
+
+/// An SMI for `core`: the chipset's SMI# (src/acpi.js), or an SMI message
+/// (an IPI, MSI or IOAPIC entry with delivery mode SMI). Latched, one deep,
+/// until the core can take it: not while it is in SMM (crate::cpu::smm)
+#[no_mangle]
+pub unsafe fn apic_raise_smi(core: u32) {
+    dbg_assert!((core as usize) < core_count());
+    parallel::word_store(smi_latch(core as usize), 1);
+    parallel::kick(core as usize);
+}
+
+/// Take a pending SMI of the active core
+pub unsafe fn take_smi() -> bool {
+    parallel::word_load(smi_latch(current_core())) != 0
+        && parallel::word_swap(smi_latch(current_core()), 0) != 0
+}
+
+pub unsafe fn smi_pending() -> bool { parallel::word_load(smi_latch(current_core())) != 0 }
+
+#[no_mangle]
+pub unsafe fn apic_core_smi_pending(core: u32) -> bool {
+    parallel::word_load(smi_latch(core as usize)) != 0
+}
+
+#[no_mangle]
+pub unsafe fn apic_restore_smi(core: u32, pending: bool) {
+    dbg_assert!((core as usize) < core_count());
+    parallel::word_store(smi_latch(core as usize), pending as u32);
 }
 
 #[no_mangle]
@@ -620,9 +661,9 @@ fn write32_internal(
             // delivery is immediate: the status bit (12) always reads as idle
             apic.icr0 = value & !(1 << 12);
 
-            // ExtINT is not a legal ICR delivery mode; SMI is unsupported by
-            // this platform. Reserved encodings must never become fixed IRQs.
-            if matches!(delivery_mode, 2 | 3 | DELIVERY_EXTINT) {
+            // ExtINT is not a legal ICR delivery mode. Reserved encodings
+            // must never become fixed IRQs.
+            if matches!(delivery_mode, 3 | DELIVERY_EXTINT) {
                 return None;
             }
             if matches!(
@@ -867,6 +908,7 @@ fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ip
             IOAPIC_DELIVERY_INIT => unsafe {
                 parallel::word_store(core_events(core), CORE_EVENT_INIT);
                 parallel::word_store(nmi_latch(core), 0);
+                parallel::word_store(smi_latch(core), 0);
                 parallel::word_store(&raw mut aux_of(core).extint_pending, 0);
                 true
             },
@@ -877,6 +919,11 @@ fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ip
             },
             IOAPIC_DELIVERY_NMI => unsafe {
                 parallel::word_store(nmi_latch(core), 1);
+                true
+            },
+            // (the vector is ignored)
+            DELIVERY_SMI => unsafe {
+                parallel::word_store(smi_latch(core), 1);
                 true
             },
             DELIVERY_EXTINT => {
@@ -891,7 +938,7 @@ fn deliver_to_cores(cores: &[usize], vector: u8, mode: u8, is_level: bool, is_ip
             IOAPIC_DELIVERY_FIXED => {
                 deliver(apic_of(core), aux_of(core), vector, is_level, remote(core))
             },
-            _ => false, // reserved and unsupported SMI: never reinterpret as fixed
+            _ => false, // reserved: never reinterpret as fixed
         };
         if accepted_here && is_ipi {
             count_ipi(core);

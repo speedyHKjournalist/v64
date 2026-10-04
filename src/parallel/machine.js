@@ -130,6 +130,8 @@ export class ParallelMachine
             const op = ctrl[at(C.IO_OP)], addr = ctrl[at(C.IO_ADDR)];
             const v0 = ctrl[at(C.IO_V0)], v1 = ctrl[at(C.IO_V1)], v2 = ctrl[at(C.IO_V2)], v3 = ctrl[at(C.IO_V3)];
             let result = 0;
+            // (e.g. an SMI from the APM control port goes to this core)
+            cpu.io_core = core;
             switch(op)
             {
                 case C.OP_IN8: result = this.exports["machine_io_read8"](addr); break;
@@ -147,6 +149,7 @@ export class ParallelMachine
                 case C.OP_MMIO_WRITE128: cpu.mmap_write128(addr >>> 0, v0, v1, v2, v3); break;
                 default: dbg_log("vCPU " + core + ": unknown request " + op, LOG_CPU);
             }
+            cpu.io_core = -1;
             ctrl[at(C.IO_RESULT)] = result;
             ctrl[at(C.IO_COUNT)]++;
             Atomics.store(ctrl, at(C.IO_STATE), C.IO_DONE);

@@ -480,6 +480,16 @@ pub unsafe fn write128(address: u64, value: u128, stack: bool) -> Result<(), Fau
 }
 pub unsafe fn fetch(address: u64) -> Result<u8, Fault> {
     let address = translate(address, Access::Execute, false, false)?;
+    fetch_physical(address)
+}
+/// An instruction byte outside plain RAM (SMRAM serves code fetches in SMM
+/// also with D_CLS: crate::cpu::memory::fetch8)
+unsafe fn fetch_physical(address: u64) -> Result<u8, Fault> {
+    if address >> 32 == 0 {
+        if let Some(ram) = crate::cpu::smm::smram_ram(address as u32, 1, true) {
+            return Ok(*crate::cpu::memory::mem8.add(ram as usize));
+        }
+    }
     physical::read8(address).map_err(|_| Fault::gp())
 }
 /// Instruction fetch within one decode: `page` remembers the last linear to
@@ -496,7 +506,7 @@ pub unsafe fn fetch_cached(address: u64, page: &mut Option<(u64, u64)>) -> Resul
     if physical::plain_ram(physical, 1) {
         return Ok(*crate::cpu::memory::mem8.add(physical as usize));
     }
-    physical::read8(physical).map_err(|_| Fault::gp())
+    fetch_physical(physical)
 }
 pub unsafe fn read_system(address: u64, width: u8) -> Result<u64, Fault> {
     assert!(matches!(width, 8 | 16 | 32 | 64));

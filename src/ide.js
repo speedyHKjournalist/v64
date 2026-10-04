@@ -76,6 +76,7 @@ const BMI_REG_PRDT = 0x04;        // Bus Master IDE PRD Table Address register
 // Error register bits:
 // All bits except for bit 0x04 are command dependent.
 const ATA_ER_ABRT = 0x04;  // Command aborted
+const ATA_ER_IDNF = 0x10;  // ID not found: the address is beyond the end of the disk
 
 // Status register bits:
 const ATA_SR_ERR  = 0x01;  // Error (ATA)
@@ -246,6 +247,7 @@ const ATAPI_SK_ABORTED_COMMAND = 11;
 
 // ATAPI 8-bit Additional Sense Codes, see [MMC-2] 9.1.18.3, Table 124
 // https://github.com/qemu/qemu/blob/3c5a5e213e5f08fbfe70728237f7799ac70f5b99/hw/ide/ide-internal.h#L288
+const ATAPI_ASC_LBA_OUT_OF_RANGE = 0x21;
 const ATAPI_ASC_INV_FIELD_IN_CMD_PACKET = 0x24;
 const ATAPI_ASC_MEDIUM_MAY_HAVE_CHANGED = 0x28;
 const ATAPI_ASC_MEDIUM_NOT_PRESENT = 0x3A;
@@ -403,6 +405,12 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
     this.control_base = control_base;
     this.irq = irq;
     this.name = "ide" + channel_nr;
+    /** The drives of channel 0 have their geometry in the CMOS */
+    this.cmos_geometry = true;
+    /** Parallel ATA (IDENTIFY reports the transport) */
+    this.sata = false;
+    /** No native command queuing */
+    this.ncq_depth = 0;
 
     const master_cfg = channel_config ? channel_config[0] : undefined;
     const slave_cfg = channel_config ? channel_config[1] : undefined;
@@ -850,12 +858,18 @@ IDEChannel.prototype.set_state = function(state)
 };
 
 /**
+ * An ATA or ATAPI device. Its transport (channel) is an IDEChannel or an AHCI
+ * port (src/ahci.js), which provide: push_irq() (the device signals an
+ * interrupt or a new phase), dma_status (bit 0: a DMA transfer may run),
+ * dma_segments(byte_count), master/slave (the devices of the transport),
+ * channel_nr (with interface_nr: the drive's IDE position, for names and
+ * events), cmos_geometry, sata, ncq_depth, cpu, bus and name.
  * @constructor
- * @param {IDEChannel} channel
+ * @param {?} channel
  * @param {number} interface_nr
  * @param {boolean} is_cd
  */
-function IDEInterface(channel, interface_nr, buffer, is_cd)
+export function IDEInterface(channel, interface_nr, buffer, is_cd)
 {
     this.channel = channel;
     this.name = channel.name + "." + interface_nr;
@@ -953,6 +967,10 @@ function IDEInterface(channel, interface_nr, buffer, is_cd)
     this.cancelled_io_ids = new Set();
     /** @type {number} device resets so far: a write completing after one is dropped */
     this.reset_epoch = 0;
+    /** @type {number} writes the backend hasn't confirmed yet */
+    this.writes_in_flight = 0;
+    /** @type {!Array<function()>} FLUSH CACHE commands waiting for them */
+    this.write_waiters = [];
 
     // ATAPI-only
     /** @type {number} */
@@ -1135,15 +1153,16 @@ IDEInterface.prototype.set_disk_buffer = function(buffer)
         //   https://github.com/copy/v86/blob/master/src/rtc.js
         //   https://github.com/coreboot/seabios/blob/master/src/hw/rtc.h
         //   https://web.archive.org/web/20240119203005/http://www.bioscentral.com/misc/cmosmap.htm
-        const rtc = this.cpu.devices.rtc;
+        // (IDE drives only: SeaBIOS takes the geometry of AHCI disks from IDENTIFY)
+        const rtc = this.channel.cmos_geometry ? this.cpu.devices.rtc : undefined;
 
         // two bits per drive, the drive index is channel_nr * 2 + interface_nr
         const shift = (this.channel_nr * 2 + this.interface_nr) * 2;
-        rtc.cmos_write(CMOS_BIOS_DISKTRANSFLAG,
+        rtc && rtc.cmos_write(CMOS_BIOS_DISKTRANSFLAG,
                        rtc.cmos_read(CMOS_BIOS_DISKTRANSFLAG) & ~(3 << shift) |
                        translation << shift);
 
-        if(this.channel_nr === 0)
+        if(rtc && this.channel_nr === 0)
         {
             const is_drive1 = this.interface_nr === 0;
 
@@ -1209,6 +1228,15 @@ IDEInterface.prototype.ata_abort_command = function()
     this.push_irq();
 };
 
+/** The sectors of a read or write are beyond the end of the disk */
+IDEInterface.prototype.ata_id_not_found = function()
+{
+    this.current_command = -1;
+    this.error_reg = ATA_ER_IDNF;
+    this.status_reg = ATA_SR_DRDY|ATA_SR_ERR;
+    this.push_irq();
+};
+
 IDEInterface.prototype.dma_abort = function()
 {
     this.channel.dma_status = this.channel.dma_status & ~1 | 2;
@@ -1216,11 +1244,24 @@ IDEInterface.prototype.dma_abort = function()
     this.ata_abort_command();
 };
 
-// Bus-master IDE has 32-bit PRDT and buffer addresses. Validate every segment
-// before any payload transfer, including holes created by RAM relocation.
+/**
+ * The guest memory a DMA transfer of byte_count bytes goes to or comes from,
+ * as described by the transport (an IDE channel's bus master PRD table, an
+ * AHCI command's PRDT). Throws a RangeError for a table that doesn't cover
+ * the transfer or points outside guest RAM.
+ * @param {number} byte_count
+ * @return {!Array<{address: number, offset: number, length: number}>}
+ */
 IDEInterface.prototype.dma_segments = function(byte_count)
 {
-    let table = this.channel.prdt_addr >>> 0;
+    return this.channel.dma_segments(byte_count);
+};
+
+// Bus-master IDE has 32-bit PRDT and buffer addresses. Validate every segment
+// before any payload transfer, including holes created by RAM relocation.
+IDEChannel.prototype.dma_segments = function(byte_count)
+{
+    let table = this.prdt_addr >>> 0;
     let offset = 0;
     const segments = [];
     while(offset < byte_count)
@@ -1348,7 +1389,7 @@ IDEInterface.prototype.ata_command = function(cmd)
             this.channel.master.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
             this.channel.master.error_reg = 0x01;    // Master drive passed, slave drive passed or not present
             this.channel.master.push_irq();
-            if(this.channel.slave.drive_connected)
+            if(this.channel.slave && this.channel.slave.drive_connected)
             {
                 this.channel.slave.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
                 this.channel.slave.error_reg = 0x01; // Slave drive passed
@@ -1445,13 +1486,14 @@ IDEInterface.prototype.ata_command = function(cmd)
             break;
 
         case ATA_CMD_FLUSH_CACHE:
-            this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
-            this.push_irq();
-            break;
-
         case ATA_CMD_FLUSH_CACHE_EXT:
-            this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
-            this.push_irq();
+            // the writes before it have reached the backend
+            this.status_reg = ATA_SR_DRDY|ATA_SR_DSC|ATA_SR_BSY;
+            this.when_writes_done(() =>
+            {
+                this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
+                this.push_irq();
+            });
             break;
 
         case ATA_CMD_IDENTIFY_DEVICE:
@@ -1851,21 +1893,82 @@ IDEInterface.prototype.atapi_check_condition_response = function(sense_key, addi
 
 IDEInterface.prototype.do_write = function()
 {
-    this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
-
     dbg_assert(this.data_length <= this.data.length);
-    var data = this.data.subarray(0, this.data_length);
+    // (a copy: the next command may reuse this.data before the backend is done)
+    var data = this.data.slice(0, this.data_length);
 
     //dbg_log(hex_dump(data), LOG_DISK);
     dbg_assert(this.data_length % 512 === 0);
-    this.ata_advance(this.current_command, this.data_length / 512);
-    this.push_irq();
+    const sectors = this.data_length / 512;
 
-    track_state_io(this.cpu, done => this.buffer.set(this.write_dest, data, done), function()
+    // Busy until the backend has the data: completion is reported after it
+    this.status_reg = ATA_SR_DRDY|ATA_SR_DSC|ATA_SR_BSY;
+    this.write_to_backend(this.write_dest, data, () =>
     {
+        this.ata_advance(this.current_command, sectors);
+        this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
+        this.push_irq();
     });
 
     this.report_write(this.data_length);
+};
+
+/**
+ * Write to the disk image. The callback runs once the backend has taken the
+ * data, unless a device reset happened in between; FLUSH CACHE waits for
+ * every write in flight (when_writes_done).
+ * @param {number} start
+ * @param {!Uint8Array} data
+ * @param {function()} callback
+ */
+IDEInterface.prototype.write_to_backend = function(start, data, callback)
+{
+    const epoch = this.reset_epoch;
+    this.writes_in_flight++;
+    track_state_io(this.cpu, done => this.buffer.set(start, data, done), () =>
+    {
+        this.writes_in_flight--;
+        if(epoch === this.reset_epoch)
+        {
+            callback();
+        }
+        if(this.writes_in_flight === 0)
+        {
+            const waiting = this.write_waiters;
+            this.write_waiters = [];
+            waiting.forEach(f => f());
+        }
+    });
+};
+
+/**
+ * Call back when no write is in flight any more, and the backend's own
+ * flush (if it has one) is done: FLUSH CACHE
+ * @param {function()} callback
+ */
+IDEInterface.prototype.when_writes_done = function(callback)
+{
+    const epoch = this.reset_epoch;
+    const flush = () =>
+    {
+        const finish = () => { if(epoch === this.reset_epoch) callback(); };
+        if(this.buffer && typeof this.buffer.flush === "function")
+        {
+            track_state_io(this.cpu, done => this.buffer.flush(done), finish);
+        }
+        else
+        {
+            finish();
+        }
+    };
+    if(this.writes_in_flight === 0)
+    {
+        flush();
+    }
+    else
+    {
+        this.write_waiters.push(flush);
+    }
 };
 
 IDEInterface.prototype.atapi_read = function(cmd)
@@ -1901,17 +2004,15 @@ IDEInterface.prototype.atapi_read = function(cmd)
 
     if(!this.buffer)
     {
-        dbg_assert(false, this.name + ": CD read: no buffer", LOG_DISK);
-        this.status_reg = 0xFF;
-        this.error_reg = 0x41;
+        dbg_log(this.name + ": CD read: no medium", LOG_DISK);
+        this.atapi_check_condition_response(ATAPI_SK_NOT_READY, ATAPI_ASC_MEDIUM_NOT_PRESENT);
         this.push_irq();
     }
     else if(start >= this.buffer.byteLength)
     {
-        dbg_assert(false, this.name + ": CD read: Outside of disk  end=" + h(start + byte_count) +
+        dbg_log(this.name + ": CD read: Outside of disk  end=" + h(start + byte_count) +
                           " size=" + h(this.buffer.byteLength), LOG_DISK);
-
-        this.status_reg = 0xFF;
+        this.atapi_check_condition_response(ATAPI_SK_ILLEGAL_REQUEST, ATAPI_ASC_LBA_OUT_OF_RANGE);
         this.push_irq();
     }
     else if(byte_count === 0)
@@ -1971,10 +2072,10 @@ IDEInterface.prototype.atapi_read_dma = function(cmd)
 
     if(start >= this.buffer.byteLength)
     {
-        dbg_assert(false, this.name + ": CD read: Outside of disk  end=" + h(start + byte_count) +
+        dbg_log(this.name + ": CD read: Outside of disk  end=" + h(start + byte_count) +
                           " size=" + h(this.buffer.byteLength), LOG_DISK);
-
-        this.status_reg = 0xFF;
+        this.channel.dma_status &= ~1;
+        this.atapi_check_condition_response(ATAPI_SK_ILLEGAL_REQUEST, ATAPI_ASC_LBA_OUT_OF_RANGE);
         this.push_irq();
     }
     else
@@ -2311,10 +2412,8 @@ IDEInterface.prototype.ata_read_sectors = function(cmd)
 
     if(start + byte_count > this.buffer.byteLength)
     {
-        dbg_assert(false, this.name + ": ATA read: Outside of disk", LOG_DISK);
-
-        this.status_reg = 0xFF;
-        this.push_irq();
+        dbg_log(this.name + ": ATA read: Outside of disk", LOG_DISK);
+        this.ata_id_not_found();
     }
     else
     {
@@ -2357,10 +2456,8 @@ IDEInterface.prototype.ata_read_sectors_dma = function(cmd)
 
     if(start + byte_count > this.buffer.byteLength)
     {
-        dbg_assert(false, this.name + ": ATA read: Outside of disk", LOG_DISK);
-
-        this.status_reg = 0xFF;
-        this.push_irq();
+        dbg_log(this.name + ": ATA read: Outside of disk", LOG_DISK);
+        this.ata_id_not_found();
         return;
     }
 
@@ -2439,10 +2536,8 @@ IDEInterface.prototype.ata_write_sectors = function(cmd)
 
     if(start + byte_count > this.buffer.byteLength)
     {
-        dbg_assert(false, this.name + ": ATA write: Outside of disk", LOG_DISK);
-
-        this.status_reg = 0xFF;
-        this.push_irq();
+        dbg_log(this.name + ": ATA write: Outside of disk", LOG_DISK);
+        this.ata_id_not_found();
     }
     else
     {
@@ -2471,10 +2566,8 @@ IDEInterface.prototype.ata_write_sectors_dma = function(cmd)
 
     if(start + byte_count > this.buffer.byteLength)
     {
-        dbg_assert(false, this.name + ": ATA DMA write: Outside of disk", LOG_DISK);
-
-        this.status_reg = 0xFF;
-        this.push_irq();
+        dbg_log(this.name + ": ATA DMA write: Outside of disk", LOG_DISK);
+        this.ata_id_not_found();
         return;
     }
 
@@ -2508,10 +2601,8 @@ IDEInterface.prototype.do_ata_write_sectors_dma = function()
         return;
     }
 
-    const epoch = this.reset_epoch;
-    track_state_io(this.cpu, done => this.buffer.set(start, buffer, done), () =>
+    this.write_to_backend(start, buffer, () =>
     {
-        if(epoch !== this.reset_epoch) return;
         if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
         {
             dbg_log(this.name + ": DMA write completed", LOG_DISK);
@@ -2766,6 +2857,37 @@ IDEInterface.prototype.create_identify_packet = function()
     // 27-46 model number
     strcpy_be16(this.data, 27, 20, qemu ? (this.is_atapi ? "QEMU DVD-ROM" : "QEMU HARDDISK").padEnd(40) : this.is_atapi ? "v86 ATAPI CD-ROM" : "v86 ATA HD");
 
+    if(this.channel.sata)
+    {
+        // A Serial ATA device ([ATA8-ACS] 7.12.7.38-41). Linux tells SATA
+        // from PATA by words 80 (ATA-5 or later) and 93 (no cable detection).
+        const word = (index, value) => { this.data[index << 1] = value & 0xFF; this.data[(index << 1) + 1] = value >> 8; };
+        const read_word = index => this.data[index << 1] | this.data[(index << 1) + 1] << 8;
+        // DMA is supported (the AHCI transport moves all data by its PRDT):
+        // word 49 DMA, word 53 word 88 valid, PIO modes 3 and 4, UDMA 0-5
+        // with mode 5 selected (as QEMU reports)
+        word(49, read_word(49) | 1 << 8);
+        word(53, read_word(53) | 1 << 2);
+        word(64, 0x0003);
+        word(88, 0x003F | 1 << 13);
+        const queue_depth = this.is_atapi ? 0 : this.channel.ncq_depth;
+        word(75, queue_depth ? queue_depth - 1 : 0);
+        // Gen1 signaling speed, native command queuing, host-initiated
+        // interface power management (partial and slumber)
+        word(76, 1 << 1 | (queue_depth ? 1 << 8 : 0) | 1 << 9);
+        if(queue_depth)
+        {
+            // general purpose logging (READ LOG EXT: NCQ error recovery)
+            word(84, read_word(84) | 1 << 5);
+            word(87, read_word(87) | 1 << 5);
+        }
+        word(77, 0);
+        word(78, 0);
+        word(79, 0);
+        word(80, 0x0070); // ATA/ATAPI-4, -5 and -6
+        word(93, 0);
+    }
+
     this.data_length = 512;
     this.data_end = 512;
 };
@@ -2890,6 +3012,10 @@ IDEInterface.prototype.get_state = function()
 
 IDEInterface.prototype.set_state = function(state)
 {
+    // I/O of the machine before the restore must not reach the restored one
+    this.cancel_io_operations();
+    this.reset_epoch++;
+
     this.sector_count_reg = state[0];
     this.cylinder_count = state[1];
     this.lba_high_reg = state[2];

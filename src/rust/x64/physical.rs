@@ -184,7 +184,11 @@ impl PhysicalBus {
             }
             return Ok(Resolved {
                 backing: address as u32,
-                kind: if address >= ram_size as u64 || (0xA0000..0xC0000).contains(&address) {
+                kind: if address >= ram_size as u64
+                    || (0xA0000..0xC0000).contains(&address)
+                    // (TSEG outside SMM: the legacy bus's all-ones hole)
+                    || unsafe { crate::cpu::smm::tseg_blackhole(address as u32) }
+                {
                     WindowKind::Mmio
                 }
                 else {
@@ -591,8 +595,26 @@ pub unsafe fn restore_windows(windows: [Option<Window>; MAX_WINDOWS]) -> Result<
     Ok(())
 }
 
-unsafe fn invalidate_mapping() {
-    memory::ram_fast_limit = (&*(&raw const PHYSICAL_BUS))
+/// The chipset changed what the low bus decodes (TSEG, crate::cpu::smm)
+/// while cores may run: a new generation for cached RAM views, the fast RAM
+/// limit and this instance's translations (cores in workers take the change
+/// over at their next slice: crate::cpu::smm::sync_worker). Compiled code
+/// stays; what it reads and writes goes through the translations.
+pub unsafe fn memory_map_changed() {
+    let bus = &mut *(&raw mut PHYSICAL_BUS);
+    bus.generation = bus
+        .generation
+        .checked_add(1)
+        .expect("physical bus generation");
+    memory::ram_fast_limit = fast_limit();
+    context::invalidate_all_tlbs();
+    crate::ir::runtime::entry::ir_admission_barrier();
+}
+
+/// The first relocated low RAM byte, or the first byte of TSEG (at the top of
+/// low RAM), or the end of RAM
+unsafe fn fast_limit() -> u32 {
+    (&*(&raw const PHYSICAL_BUS))
         .windows
         .iter()
         .flatten()
@@ -600,7 +622,12 @@ unsafe fn invalidate_mapping() {
         .map(|window| window.backing)
         .min()
         .unwrap_or(*global_pointers::memory_size)
-        .min(*global_pointers::memory_size);
+        .min(*global_pointers::memory_size)
+        .min(crate::cpu::smm::tseg_floor())
+}
+
+unsafe fn invalidate_mapping() {
+    memory::ram_fast_limit = fast_limit();
     context::invalidate_all_tlbs();
     crate::jit::jit_clear_cache_js();
     crate::ir::runtime::entry::ir_admission_barrier();

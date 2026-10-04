@@ -9,7 +9,7 @@ import {
     REG_ESP, REG_EBP, REG_ESI, REG_EAX, REG_EBX, REG_ECX, REG_EDX, REG_EDI,
     REG_CS, REG_DS, REG_ES, REG_FS, REG_GS, REG_SS, CR0_PG, CR4_PAE, REG_LDTR,
     FLAG_VM, FLAG_INTERRUPT, FLAG_CARRY, FLAG_ADJUST, FLAG_ZERO, FLAG_SIGN, FLAG_TRAP,
-    FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_PARITY,
+    FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_PARITY, STATE_MAX_SINGLE_BUFFER,
 } from "./const.js";
 import { h, view, Bitmap } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
@@ -19,7 +19,7 @@ import { MachineClock } from "./machine_clock.js";
 import { SB16 } from "./sb16.js";
 import { ACPI, acpi_system_states_file } from "./acpi.js";
 import { ACPI_LOADER_FILE, ACPI_RSDP_FILE, ACPI_TABLES_FILE, build_acpi_tables, locate_acpi_tables } from "./acpi_tables.js";
-import { ACPI_PM_BASE_DEFAULT, Platform, check_platform, create_platform } from "./platform.js";
+import { ACPI_PM_BASE_DEFAULT, MACHINE_LAYOUT_VERSION, Platform, check_platform, create_platform } from "./platform.js";
 import { CORE_STATE_RANGES, STATE_OFFSETS } from "./state_layout.js";
 import { ParallelMachine } from "./parallel/machine.js";
 import { ExtendedStore } from "./extended_memory.js";
@@ -32,12 +32,17 @@ import { Ne2k } from "./ne2k.js";
 import { IO } from "./io.js";
 import { VirtioConsole } from "./virtio_console.js";
 import { PCI } from "./pci.js";
+import { Q35 } from "./q35.js";
 import { PS2 } from "./ps2.js";
 import { VMwareMouse } from "./vmware.js";
 import { read_elf, elf_unsupported_reason } from "./elf.js";
 
 import { FloppyController } from "./floppy.js";
 import { IDEController } from "./ide.js";
+import { AHCIController } from "./ahci.js";
+import { PCIeRootPort } from "./pcie_root_port.js";
+import { HPET } from "./hpet.js";
+import { SMBus } from "./smbus.js";
 import { VirtioNet } from "./virtio_net.js";
 import { GraphicsAdapter, graphics_adapter_of_state, patch_vga_bios_ids } from "./graphics_adapter.js";
 import { DisplayHub } from "./display.js";
@@ -271,6 +276,9 @@ export function CPU(bus, wm, stop_idling)
      */
     this.cores = [];
     this.active_core = 0;
+    /** The core in a worker whose port or MMIO access is being performed
+     * (src/parallel/machine.js), or -1: the active core's */
+    this.io_core = -1;
     /** State of a core after reset_cpu, used for INIT @type {!Array<!Uint8Array>} */
     this.core_reset_state = [];
 
@@ -640,6 +648,9 @@ CPU.prototype.wasm_patch = function()
     this.apic_core_interrupt_pending = get_import("apic_core_interrupt_pending");
     this.apic_addr = get_address_import("apic_addr");
     this.apic_core_nmi_pending = get_import("apic_core_nmi_pending");
+    this.apic_raise_smi = get_import("apic_raise_smi");
+    this.apic_core_smi_pending = get_import("apic_core_smi_pending");
+    this.apic_restore_smi = get_import("apic_restore_smi");
     this.update_state_flags = get_import("update_state_flags");
 
     this.set_tsc = get_import("set_tsc");
@@ -649,6 +660,16 @@ CPU.prototype.wasm_patch = function()
 
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
+    // (IOAPIC inputs 16-23 of the Q35 PIRQs; missing in older builds)
+    this.ioapic_raise_irq = get_optional_import("ioapic_raise_irq");
+    this.ioapic_lower_irq = get_optional_import("ioapic_lower_irq");
+    // (PCI message signalled interrupts; missing in older builds)
+    this.apic_msi = get_optional_import("apic_msi");
+    // (system management mode, src/rust/cpu/smm.rs; missing in older builds)
+    this.smm_enter = get_optional_import("smm_enter");
+    this.smm_active = get_optional_import("smm_active");
+    this.smram_set_control = get_optional_import("smram_set_control");
+    this.smram_set_tseg = get_optional_import("smram_set_tseg");
 
     this.apic_timer = get_import("apic_timer");
 
@@ -749,7 +770,11 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[54] = this.devices.uart0;
     state[55] = this.devices.fdc;
 
-    if(!this.devices.ide.secondary)
+    if(!this.devices.ide)
+    {
+        // (Q35: the drives are on the AHCI ports, state[101])
+    }
+    else if(!this.devices.ide.secondary)
     {
         if(this.devices.ide.primary?.master.is_atapi)
         {
@@ -827,6 +852,15 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[97] = [1, this.get_physical_windows()];
     // extended RAM pages (its contents are records of the snapshot stream)
     state[98] = this.extended_pages;
+    // the machine type and the version of its device layout
+    // (99: the extended RAM bitmap of streamed snapshots, src/state.js)
+    state[100] = this.devices.q35;
+    state[101] = this.devices.ahci;
+    state[102] = this.devices.hpet;
+    state[103] = [this.platform.machine, MACHINE_LAYOUT_VERSION];
+    state[104] = this.devices.smbus;
+    // the root ports' hot plug slots
+    state[105] = (this.devices.pcie_root_ports || []).map(port => port.get_state());
     return state;
 };
 
@@ -873,7 +907,8 @@ CPU.prototype.validate_physical_state = function(state)
 
 // [offset, size] of core state that survives INIT
 const INIT_PRESERVED = [[STATE_OFFSETS.x64_pat, 8],
-    [STATE_OFFSETS.x64_mtrr_def_type, STATE_OFFSETS.x64_mc_banks + 128 - STATE_OFFSETS.x64_mtrr_def_type]];
+    [STATE_OFFSETS.x64_mtrr_def_type, STATE_OFFSETS.x64_mc_banks + 128 - STATE_OFFSETS.x64_mtrr_def_type],
+    [STATE_OFFSETS.smbase, 4]];
 
 // Version 1 predates the x64 extension banks. Keep exact byte ranges for import.
 const CORE_STATE_RANGES_V1 = [[64, 108], [112, 552], [556, 620], [628, 652], [668, 716],
@@ -893,7 +928,8 @@ CPU.prototype.get_machine_core_state = function()
             this.apic_peek_core_events(id), !!this.apic_core_nmi_pending(id),
             [ex["context_tsc_get"](id, false) >>> 0, ex["context_tsc_get"](id, true) >>> 0],
             tlb, core.slices, core.steps,
-            new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id) >>> 0, ex["core_statistics_size"]()).slice(), ex["exception_shutdown"](id), this.get_wide_tlb(id)];
+            new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id) >>> 0, ex["core_statistics_size"]()).slice(), ex["exception_shutdown"](id), this.get_wide_tlb(id),
+            !!this.apic_core_smi_pending(id)];
     });
     return [2, this.cores.length, this.active_core, this.scheduler_quantum,
         this.scheduler_seed, this.scheduler_round, cores, CORE_STATE_RANGES.map(range => range.slice())];
@@ -957,12 +993,18 @@ CPU.prototype.set_machine_core_state = function(state)
                 view.setUint32(STATE_OFFSETS.x64_pat - start, 0x00070406, true);
                 view.setUint32(STATE_OFFSETS.x64_pat - start + 4, 0x00070406, true);
             }
+            if(start <= STATE_OFFSETS.smbase && end >= STATE_OFFSETS.smbase + 4)
+            {
+                // (SMBASE's reset value)
+                new DataView(bytes.buffer).setUint32(STATE_OFFSETS.smbase - start, 0x30000, true);
+            }
             return bytes;
         });
         this.cores[id] = { running: saved[0], saved: fixed, slices: saved[8], steps: saved[9] };
         new Uint8Array(this.wasm_memory.buffer, this.apic_addr(id), 184).set(saved[2]);
         new Uint8Array(this.wasm_memory.buffer, ex["apic_aux_addr"](id) >>> 0, ex["apic_aux_size"]()).set(saved[3]);
         this.apic_restore_core_events(id, saved[4], saved[5]);
+        this.apic_restore_smi(id, !!saved[13]);
         ex["exception_restore"](id, saved[11] || 0);
         ex["context_tsc_set"](id, saved[6][0], saved[6][1]);
         if(saved[10]) new Uint8Array(this.wasm_memory.buffer, ex["core_statistics_addr"](id) >>> 0, ex["core_statistics_size"]()).set(saved[10]);
@@ -1035,6 +1077,13 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.validate_state = function(state)
 {
+    // (snapshots from before machine_type are of i440FX machines)
+    const machine = state[103] ? state[103][0] : "i440fx";
+    if(machine !== this.platform.machine)
+    {
+        throw new Error("The snapshot is from a machine with machine_type: \"" + machine +
+            "\", this one has \"" + this.platform.machine + "\"");
+    }
     this.validate_machine_core_state(state[96]);
     this.validate_physical_state(state[97]);
     resolve_virtio_devices_state(this.devices.virtio_devices, state[92]);
@@ -1139,7 +1188,7 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.devices.uart0 && this.devices.uart0.set_state(state[54]);
     this.devices.fdc && this.devices.fdc.set_state(state[55]);
 
-    if(state[56] || state[57])
+    if((state[56] || state[57]) && this.devices.ide)
     {
         // ide device from older version of v86, only primary: state[56] contains cdrom, state[57] contains hard drive
 
@@ -1157,12 +1206,21 @@ CPU.prototype.set_state = function(state, skip_memory = false)
         this.devices.cdrom = state[56] ? this.devices.ide.primary.master : undefined;
         this.devices.ide.primary.set_state(state[56] || state[57]);
     }
-    else if(state[85])
+    else if(state[85] && this.devices.ide)
     {
         this.devices.ide.set_state(state[85]);
     }
 
+    this.devices.q35 && state[100] && this.devices.q35.set_state(state[100]);
+    this.devices.ahci && state[101] && this.devices.ahci.set_state(state[101]);
+    this.devices.hpet && state[102] && this.devices.hpet.set_state(state[102]);
+    this.devices.smbus && state[104] && this.devices.smbus.set_state(state[104]);
     this.devices.pci && this.devices.pci.set_state(state[48]);
+    // (after the root ports' registers: snapshots from before hot plug have
+    // every card in)
+    (this.devices.pcie_root_ports || []).forEach((port, i) => {
+        port.set_state(state[105] && state[105][i] || [1, port.has_card(), false, false]);
+    });
 
     this.devices.pit && this.devices.pit.set_state(state[58]);
     this.devices.net && this.devices.net.set_state(state[59]);
@@ -1227,6 +1285,7 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.apic_enabled[0] = state[94] ? state[94][0] : this.acpi_enabled[0];
     new Uint8Array(this.wasm_memory.buffer)[this.state_base + STATE_OFFSETS.nmi_blocked] = state[94]?.[1] || 0;
     this.apic_restore_core_events(0, state[94]?.[3] || 0, !!state[94]?.[2]);
+    this.apic_restore_smi(0, false);
     this.wm.exports["apic_restore_legacy_aux"](0, !!this.apic_enabled[0]);
     new Uint8Array(this.wasm_memory.buffer)[this.state_base + STATE_OFFSETS.interrupt_shadow] = 0;
     if(state[96]) this.set_machine_core_state(state[96]);
@@ -1236,6 +1295,7 @@ CPU.prototype.set_state = function(state, skip_memory = false)
         const bytes = new Uint8Array(this.wasm_memory.buffer);
         for(const [start, end] of CORE_STATE_RANGES) if(start >= 1360) bytes.fill(0, this.state_base + start, this.state_base + end);
         new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.x64_pat, 2).fill(0x00070406);
+        new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.smbase, 1)[0] = 0x30000;
         this.with_wide_state_buffer(new Uint32Array(0), (pointer, count) => this.wm.exports["x64_tlb_snapshot_restore"](0, pointer, count));
         this.wm.exports["exception_restore"](0, 0);
         this.cores[0].slices = this.cores[0].steps = 0;
@@ -1259,6 +1319,9 @@ CPU.prototype.set_state = function(state, skip_memory = false)
         state[93]?.[irq]?.forEach(source => sources.add(source));
     });
     this.devices.acpi && this.devices.acpi.sync_sci();
+    // (a drive present in the snapshot or in this machine only is a hot
+    // plug event for the restored guest)
+    this.devices.ahci && this.devices.ahci.update_irq();
 };
 
 CPU.prototype.set_state_pic = function(state)
@@ -1435,17 +1498,19 @@ CPU.prototype.core_runnable = function(core)
         const view = new DataView(state.saved[index].buffer, offset - CORE_STATE_RANGES[index][0], size);
         return size === 1 ? view.getUint8(0) : view.getInt32(0, true);
     };
+    const nmi = !!this.apic_core_nmi_pending(core) && !field(STATE_OFFSETS.nmi_blocked, 1);
+    // (an SMI waits while the core is in SMM: smm_state bit 0)
+    const smi = !!this.apic_core_smi_pending(core) && !(field(STATE_OFFSETS.smm_state, 4) & 1);
     const shutdown = this.wm.exports["exception_shutdown"](core);
-    if(shutdown) return shutdown === 1 && !!this.apic_core_nmi_pending(core) && !field(STATE_OFFSETS.nmi_blocked, 1);
+    if(shutdown) return shutdown === 1 && (nmi || smi);
     const halted = field(STATE_OFFSETS.in_hlt, 1) !== 0;
     if(!halted)
     {
         return true;
     }
     const interrupts_enabled = (field(STATE_OFFSETS.flags, 4) & FLAG_INTERRUPT) !== 0;
-    const nmi = this.apic_core_nmi_pending(core) && !field(STATE_OFFSETS.nmi_blocked, 1);
     // The BSP also accepts the legacy PIC, which is checked in run_cpu_slice.
-    return nmi || interrupts_enabled && this.apic_core_interrupt_pending(core);
+    return nmi || smi || interrupts_enabled && this.apic_core_interrupt_pending(core);
 };
 
 /**
@@ -1513,7 +1578,7 @@ CPU.prototype.run_cores = function()
     // round. Do not sleep until a device timer before scheduling that core.
     if(this.cores.some((_, core) => this.apic_peek_core_events(core) ||
         this.core_runnable(core) && (this.apic_core_interrupt_pending(core) ||
-            this.apic_core_nmi_pending(core)))) next = 0;
+            this.apic_core_nmi_pending(core) || this.apic_core_smi_pending(core)))) next = 0;
     this.clock.now();
     // The guest may have reprogrammed a timer before HLT. Recompute its
     // deadline next round before sleeping or advancing deterministic time.
@@ -1850,8 +1915,15 @@ CPU.prototype.pack_memory = function()
         }
     }
 
+    // (only single-buffer snapshots pack RAM: streams write it page by page)
+    const packed_size = nonzero_pages.length * 0x1000;
+    if(packed_size > STATE_MAX_SINGLE_BUFFER)
+    {
+        throw new RangeError("The state (" + Math.ceil(packed_size / 1048576) + " MB of RAM) is larger than a " +
+            "single-buffer snapshot can be (2 GiB): use save_state_stream");
+    }
     const bitmap = new Bitmap(page_count);
-    const packed_memory = new Uint8Array(nonzero_pages.length << 12);
+    const packed_memory = new Uint8Array(packed_size);
 
     for(const [i, page] of nonzero_pages.entries())
     {
@@ -1997,9 +2069,25 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
     {
         this.devices.pci.reset();
     }
+    for(const port of this.devices.pcie_root_ports || [])
+    {
+        port.reset();
+    }
     if(this.devices.acpi)
     {
         this.devices.acpi.reset();
+    }
+    if(this.devices.q35)
+    {
+        this.devices.q35.reset();
+    }
+    if(this.devices.hpet)
+    {
+        this.devices.hpet.reset();
+    }
+    if(this.devices.smbus)
+    {
+        this.devices.smbus.reset();
     }
 
     // Like PCIRST#, a reset deasserts every level-triggered source
@@ -2007,7 +2095,8 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
         if(sources.size)
         {
             sources.clear();
-            this.device_lower_irq(irq);
+            // (16-23: IOAPIC-only inputs)
+            irq < 16 ? this.device_lower_irq(irq) : this.ioapic_lower_irq(irq);
         }
     });
 
@@ -2015,6 +2104,14 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
     if(this.devices.ide)
     {
         this.devices.ide.reset();
+    }
+    if(this.devices.ahci)
+    {
+        this.devices.ahci.reset();
+    }
+    if(this.devices.ahci_test)
+    {
+        this.devices.ahci_test.reset();
     }
     if(this.devices.dma)
     {
@@ -2071,6 +2168,47 @@ CPU.prototype.reboot_internal = function(reason, keep_memory)
 };
 
 /**
+ * The storage device behind a configured drive name ("hda", "hdb",
+ * "cdrom"): an IDE interface, or the device on an AHCI port. Every one has
+ * `buffer`; the CD drive also has has_disk/set_cdrom/eject. Undefined for a
+ * drive the machine does not have.
+ * @param {string} name
+ * @return {?}
+ */
+CPU.prototype.disk_device = function(name)
+{
+    const devices = this.devices;
+    if(devices.ahci)
+    {
+        return devices.ahci.disk_device(name);
+    }
+    const ide = devices.ide;
+    switch(name)
+    {
+        case "hda": return ide && ide.primary ? ide.primary.master : undefined;
+        case "hdb": return ide && ide.primary ? ide.primary.slave : undefined;
+        case "cdrom": return devices.cdrom;
+    }
+    return undefined;
+};
+
+/**
+ * Every storage device that can hold a disk, with a name for diagnostics
+ * @return {!Array<!Array<?>>} [name, device] pairs
+ */
+CPU.prototype.disk_devices = function()
+{
+    const devices = this.devices;
+    if(devices.ahci)
+    {
+        return devices.ahci.disk_devices();
+    }
+    const ide = devices.ide;
+    return [["hda", ide?.primary?.master], ["hdb", ide?.primary?.slave],
+        ["cdrom", ide?.secondary?.master], ["secondary_slave", ide?.secondary?.slave]].filter(([, device]) => device);
+};
+
+/**
  * Drive a level-triggered interrupt source that may share its line with
  * others (ACPI SCI, PCI INTx). The line stays asserted until every source on
  * it has deasserted. Devices that own their line exclusively keep calling
@@ -2094,6 +2232,77 @@ CPU.prototype.set_shared_irq_level = function(irq, source, level)
         if(sources.size === 0)
         {
             this.device_lower_irq(irq);
+        }
+    }
+};
+
+/**
+ * The storage of the Q35 machine: the ICH9 AHCI controller (00:1f.2) with
+ * hda on port 0, hdb on port 1 and an ATAPI drive on port 2 that holds cdrom
+ * (empty without it)
+ * @param {Object} settings
+ * @param {BusConnector} device_bus
+ */
+CPU.prototype.create_q35_storage = function(settings, device_bus)
+{
+    this.devices.ahci = new AHCIController(this, device_bus, [
+        settings.hda ? { buffer: settings.hda } : undefined,
+        settings.hdb ? { buffer: settings.hdb } : undefined,
+        { buffer: settings.cdrom, is_cdrom: true },
+    ]);
+    this.devices.cdrom = this.devices.ahci.disk_device("cdrom");
+};
+
+/**
+ * Where a built-in device goes when its options put it behind a PCI Express
+ * root port (pcie_root_port, platform.root_port_devices): device 0 on that
+ * port's secondary bus; undefined for its usual place
+ * @param {string} name
+ * @return {number|undefined}
+ */
+CPU.prototype.root_port_pci_id = function(name)
+{
+    const port = this.platform.root_port_devices[name];
+    return port === undefined ? undefined : this.devices.pcie_root_ports[port].pci_secondary_bus << 8;
+};
+
+/**
+ * An SMI (Q35: the APM control port, the TCO watchdog) for a core, by
+ * default the one whose port access raised it: latched until the core can
+ * enter system management mode (src/rust/cpu/smm.rs). The current core
+ * enters it at once (after the long-mode instruction it is in, if any),
+ * another core at its next slice, a core in SMM after RSM.
+ * @param {number=} core
+ */
+CPU.prototype.smi = function(core)
+{
+    this.apic_raise_smi(core === undefined ? (this.io_core >= 0 ? this.io_core : this.active_core) : core);
+    this.handle_irqs();
+};
+
+/**
+ * set_shared_irq_level for an IOAPIC input without a PIC counterpart (GSI
+ * 16-23: Q35's PIRQ lines in APIC mode)
+ * @param {number} gsi
+ * @param {number} source
+ * @param {boolean} level
+ */
+CPU.prototype.set_shared_gsi_level = function(gsi, source, level)
+{
+    dbg_assert(gsi >= 16 && gsi < this.shared_irq_sources.length);
+    const sources = this.shared_irq_sources[gsi];
+
+    if(level)
+    {
+        sources.add(source);
+        this.ioapic_raise_irq(gsi);
+    }
+    else
+    {
+        sources.delete(source);
+        if(sources.size === 0)
+        {
+            this.ioapic_lower_irq(gsi);
         }
     }
 };
@@ -2467,7 +2676,7 @@ CPU.prototype.init = function(settings, device_bus)
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
-    this.acpi_enabled[0] = +settings.acpi;
+    this.acpi_enabled[0] = +this.platform.acpi;
 
     this.reset_cpu();
     this.setup_cores();
@@ -2666,7 +2875,28 @@ CPU.prototype.init = function(settings, device_bus)
 
             // Only read by SeaBIOS's fallback builder, if the loader fails:
             // advertise only the sleep states that are implemented
-            this.option_roms.push({ name: "etc/system-states", data: acpi_system_states_file() });
+            this.option_roms.push({ name: "etc/system-states", data: acpi_system_states_file(platform) });
+        }
+
+        if(this.platform.machine === "q35")
+        {
+            if(!this.ioapic_raise_irq)
+            {
+                throw new Error("machine_type \"q35\" needs a newer v86.wasm (ioapic_raise_irq)");
+            }
+            // (the MCH and the ICH9 LPC; the AHCI function is created with the drives)
+            this.devices.q35 = new Q35(this);
+            // the PCI Express root ports, before anything is put behind them
+            const root_ports = this.platform.pcie_root_ports;
+            this.devices.pcie_root_ports = Array.from({ length: root_ports }, (_, i) => new PCIeRootPort(this, i, root_ports));
+            if(this.platform.hpet)
+            {
+                this.devices.hpet = new HPET(this);
+            }
+            if(this.platform.smbus)
+            {
+                this.devices.smbus = new SMBus(this);
+            }
         }
 
         this.devices.rtc = new RTC(this);
@@ -2717,46 +2947,71 @@ CPU.prototype.init = function(settings, device_bus)
 
         this.devices.fdc = new FloppyController(this, settings.fda, settings.fdb);
 
-        const ide_config = [[undefined, undefined], [undefined, undefined]];
-        if(settings.hda)
+        if(this.platform.machine === "q35")
         {
-            ide_config[0][0] = { buffer: settings.hda };
-            ide_config[0][1] = { buffer: settings.hdb };
+            this.create_q35_storage(settings, device_bus);
+
+            if(settings["ahci_test_drives"])
+            {
+                // (tests only: a second AHCI controller with drives of its
+                // own, e.g. behind a root port with ahci_test_pci_id 1 << 8;
+                // not part of the machine contract)
+                this.devices.ahci_test = new AHCIController(this, device_bus, settings["ahci_test_drives"],
+                    settings["ahci_test_pci_id"] === undefined ? 0x0D << 3 : settings["ahci_test_pci_id"]);
+            }
         }
-        ide_config[1][0] = { is_cdrom: true, buffer: settings.cdrom };
-        this.devices.ide = new IDEController(this, device_bus, ide_config);
-        this.devices.cdrom = this.devices.ide.secondary.master;
+        else
+        {
+            const ide_config = [[undefined, undefined], [undefined, undefined]];
+            if(settings.hda)
+            {
+                ide_config[0][0] = { buffer: settings.hda };
+                ide_config[0][1] = { buffer: settings.hdb };
+            }
+            ide_config[1][0] = { is_cdrom: true, buffer: settings.cdrom };
+            this.devices.ide = new IDEController(this, device_bus, ide_config);
+            this.devices.cdrom = this.devices.ide.secondary.master;
+
+            if(settings["ahci_test_drives"])
+            {
+                // (tests only: an AHCI controller on the i440FX at 00:0d.0,
+                // with drives of its own; not part of the machine contract)
+                this.devices.ahci_test = new AHCIController(this, device_bus, settings["ahci_test_drives"], 0x0D << 3);
+            }
+        }
 
         this.devices.pit = new PIT(this, device_bus);
 
         if(settings.net_device.type === "ne2k")
         {
-            this.devices.net = new Ne2k(this, device_bus, settings.preserve_mac_from_state_image, settings.mac_address_translation);
+            this.devices.net = new Ne2k(this, device_bus, settings.preserve_mac_from_state_image, settings.mac_address_translation,
+                0, this.root_port_pci_id("net"));
         }
         else if(settings.net_device.type === "virtio")
         {
-            this.devices.virtio_net = new VirtioNet(this, device_bus, settings.preserve_mac_from_state_image, settings.net_device.mtu);
+            this.devices.virtio_net = new VirtioNet(this, device_bus, settings.preserve_mac_from_state_image, settings.net_device.mtu,
+                this.root_port_pci_id("net"));
         }
 
         if(settings.fs9p)
         {
-            this.devices.virtio_9p = new Virtio9p(settings.fs9p, this, device_bus);
+            this.devices.virtio_9p = new Virtio9p(settings.fs9p, this, device_bus, this.root_port_pci_id("virtio_9p"));
         }
         else if(settings.handle9p)
         {
-            this.devices.virtio_9p = new Virtio9pHandler(settings.handle9p, this);
+            this.devices.virtio_9p = new Virtio9pHandler(settings.handle9p, this, this.root_port_pci_id("virtio_9p"));
         }
         else if(settings.proxy9p)
         {
-            this.devices.virtio_9p = new Virtio9pProxy(settings.proxy9p, this);
+            this.devices.virtio_9p = new Virtio9pProxy(settings.proxy9p, this, this.root_port_pci_id("virtio_9p"));
         }
         if(settings.virtio_console)
         {
-            this.devices.virtio_console = new VirtioConsole(this, device_bus);
+            this.devices.virtio_console = new VirtioConsole(this, device_bus, this.root_port_pci_id("virtio_console"));
         }
         if(settings.virtio_balloon)
         {
-            this.devices.virtio_balloon = new VirtioBalloon(this, device_bus);
+            this.devices.virtio_balloon = new VirtioBalloon(this, device_bus, this.root_port_pci_id("virtio_balloon"));
         }
 
         if(true)
@@ -2768,6 +3023,22 @@ CPU.prototype.init = function(settings, device_bus)
         if(settings.virtio_devices)
         {
             this.devices.virtio_devices = create_virtio_devices(this, settings.virtio_devices);
+        }
+
+        // the root ports' slots: the cards the options put behind them,
+        // plugged in unless pcie_plugged is false
+        const unplugged = new Set();
+        for(const placement of Object.values(settings.root_port_devices || {}))
+        {
+            if(!placement.plugged) unplugged.add(placement.port);
+        }
+        for(const descriptor of settings.virtio_devices || [])
+        {
+            if(descriptor["pcie_root_port"] !== undefined && descriptor["pcie_plugged"] === false) unplugged.add(descriptor["pcie_root_port"]);
+        }
+        for(const port of this.devices.pcie_root_ports || [])
+        {
+            port.setup(!unplugged.has(port.number));
         }
     }
 
@@ -3411,6 +3682,7 @@ CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
     const pit_time = this.devices.pit.timer(now, false);
     const rtc_time = this.devices.rtc.timer(now, false);
     const display_time = this.devices.display.timer(now);
+    const hpet_time = this.devices.hpet ? this.devices.hpet.timer(now) : 100;
 
     let acpi_time = 100;
     let apic_time = 100;
@@ -3420,7 +3692,7 @@ CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
         apic_time = this.apic_timer(now);
     }
 
-    return Math.min(pit_time, rtc_time, display_time, acpi_time, apic_time);
+    return Math.min(pit_time, rtc_time, display_time, hpet_time, acpi_time, apic_time);
 };
 
 CPU.prototype.debug_init = function()

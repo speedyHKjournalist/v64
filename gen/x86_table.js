@@ -442,7 +442,7 @@ const encodings = [
     { opcode: 0x0FA6, skip: 1, block_boundary: 1 }, // ud
     { opcode: 0x0FA7, skip: 1, block_boundary: 1 }, // ud
 
-    { opcode: 0x0FAA, skip: 1 },
+    { opcode: 0x0FAA, block_boundary: 1, skip: 1 }, // rsm
 
     { opcode: 0x0FAE, e: 1, fixed_g: 0, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxsave
     { opcode: 0x0FAE, e: 1, fixed_g: 1, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxrstor

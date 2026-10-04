@@ -341,7 +341,9 @@ v86.prototype.restore_state_stream = function(source)
 v86.prototype.save_state = function()
 {
     if(this.cpu.parallel) return this.state_transaction(() => this.parallel_save(() => save_state(this.cpu)), true);
-    if(this.state_busy) return this.state_transaction(() => save_state(this.cpu), true);
+    // (disk I/O in flight: the commands complete first, their devices are
+    // then in a state a snapshot can hold)
+    if(this.state_busy || this.cpu["snapshot_io_pending"]) return this.state_transaction(() => save_state(this.cpu), true);
     if(this.cpu.in_cpu) return Promise.resolve().then(() => this.save_state());
     const paused = this.cpu.clock.paused;
     this.cpu.clock.pause();

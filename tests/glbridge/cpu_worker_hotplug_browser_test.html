@@ -1,0 +1,59 @@
+<!doctype html><meta charset="utf-8"><title>CPU Worker: PCI Express hot plug</title>
+<pre id="result">RUNNING</pre>
+<script type="module">
+// V86.attach_pcie_device and detach_pcie_device with the CPU in a Worker: the
+// built-in devices' placements behind the root ports reach the worker, its
+// errors come back, and a removal through the attention button (which waits
+// for the guest; SeaBIOS never answers) holds back none of the commands
+// after it, until a reset gives it up
+import { V86 } from "../../build/libv86.mjs";
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const within = (promise, ms, what) => Promise.race([promise, sleep(ms).then(() => { throw new Error(what + ": no answer in " + ms + " ms"); })]);
+const outcome = promise => promise.then(() => "ok", error => "error: " + (error && error.message || error));
+let vm;
+try {
+    vm = new V86({ graphics_adapter: "bochs_vga", cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
+        wasm_path: "../../build/v86.wasm", bios: { url: "../../bios/seabios.bin" }, vga_bios: { url: "../../bios/vgabios.bin" },
+        machine_type: "q35", pcie_root_ports: 4, memory_size: 64 << 20,
+        net_device: { type: "virtio", pcie_root_port: 0 },
+        virtio_console: { pcie_root_port: 1, pcie_plugged: false },
+        virtio_balloon: { pcie_root_port: 2 },
+        filesystem: { pcie_root_port: 3 },
+        screen_dummy: true, disable_keyboard: true, disable_mouse: true, disable_speaker: true, autostart: true });
+    await within(new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); }),
+        15000, "startup");
+    check(!vm.v86, "the CPU runs in the Worker");
+    check(await outcome(vm.attach_pcie_device(1)) === "ok", "the console, out of its slot at boot, plugs in (its placement reached the Worker)");
+    for(const [port, name] of [[0, "virtio-net"], [1, "the console"], [2, "the balloon"], [3, "9p"]])
+    {
+        check(await outcome(vm.detach_pcie_device(port, { surprise: true })) === "ok" && await outcome(vm.attach_pcie_device(port)) === "ok",
+            name + " behind root port " + port + ": pulled out and plugged in again");
+    }
+    check(/attach_pcie_device: no root port 5 \(machine_type "q35", pcie_root_ports: 4\)/.test(await outcome(vm.attach_pcie_device(5))),
+        "attaching to a root port the machine lacks: the Worker's error");
+    check(/detach_pcie_device: no root port 7/.test(await outcome(vm.detach_pcie_device(7))),
+        "detaching from a root port the machine lacks: the Worker's error");
+
+    check(await outcome(vm.detach_pcie_device(1)) === "ok" && await outcome(vm.attach_pcie_device(1)) === "ok",
+        "the console's slot is off (empty at boot, and no OS switches it on): its card leaves at once");
+    const button = outcome(vm.detach_pcie_device(0));
+    check(await Promise.race([button.then(() => "settled"), sleep(1000).then(() => "pending")]) === "pending",
+        "removal through the attention button from the NIC's powered slot: waiting for the guest");
+    await within(vm.stop(), 5000, "stop");
+    await within(vm.run(), 5000, "run");
+    const state = await within(vm.save_state(), 10000, "save_state");
+    check(state.byteLength > 0, "stop, run and save_state answer meanwhile");
+    await within(vm.restart(), 10000, "restart");
+    check(/the machine was reset before the guest released the device/.test(await within(button, 5000, "the removal after the reset")),
+        "a reset gives the removal up");
+    check(await outcome(vm.attach_pcie_device(0)) === "ok", "the card stayed in");
+    await vm.destroy();
+    vm = null;
+    document.getElementById("result").textContent = "PASS\n" + checks.join("\n");
+} catch(error) {
+    if(vm) await vm.destroy().catch(() => {});
+    document.getElementById("result").textContent = "FAIL\n" + error.stack + "\n" + checks.join("\n");
+}
+</script>

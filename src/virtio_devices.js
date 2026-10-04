@@ -53,6 +53,7 @@ export function create_virtio_devices(cpu, descriptors)
     const names = new Set();
     const slots = new Set();
     const windows = new Set();
+    const root_ports = new Set();
 
     // Fixed slots and windows first, so that allocation steps around them
     for(const descriptor of descriptors)
@@ -61,7 +62,24 @@ export function create_virtio_devices(cpu, descriptors)
         const name = descriptor["name"];
         const slot = descriptor["pci_slot"];
         const io_base = descriptor["io_base"];
-        if(slot !== undefined)
+        const root_port = descriptor["pcie_root_port"];
+        if(root_port !== undefined)
+        {
+            // behind a PCI Express root port (machine_type "q35", pcie_root_ports)
+            const count = cpu.devices.pcie_root_ports ? cpu.devices.pcie_root_ports.length : 0;
+            if(root_port >= count)
+            {
+                throw new Error("virtio_devices: \"" + name + "\" asks for root port " + root_port +
+                    ", the machine has " + count + " (pcie_root_ports)");
+            }
+            if(root_ports.has(root_port) ||
+                cpu.devices.pci.device_spaces[cpu.devices.pcie_root_ports[root_port].pci_secondary_bus << 8] !== undefined)
+            {
+                throw new Error("virtio_devices: \"" + name + "\" asks for root port " + root_port + ", which is taken");
+            }
+            root_ports.add(root_port);
+        }
+        else if(slot !== undefined)
         {
             if(slots.has(slot) || !is_slot_free(cpu, slot))
             {
@@ -80,8 +98,14 @@ export function create_virtio_devices(cpu, descriptors)
     }
 
     return descriptors.map(descriptor => {
+        const root_port = descriptor["pcie_root_port"];
         let slot = descriptor["pci_slot"];
-        if(slot === undefined)
+        if(root_port !== undefined)
+        {
+            // device 0 on the root port's secondary bus
+            slot = -1;
+        }
+        else if(slot === undefined)
         {
             slot = FIRST_FREE_SLOT;
             while(slot <= LAST_SLOT && (slots.has(slot) || !is_slot_free(cpu, slot))) slot++;
@@ -107,9 +131,10 @@ export function create_virtio_devices(cpu, descriptors)
             windows.add(io_base);
         }
 
-        dbg_log("virtio device " + descriptor["name"] + " at slot 0x" + slot.toString(16) +
+        const pci_id = root_port !== undefined ? cpu.devices.pcie_root_ports[root_port].pci_secondary_bus << 8 : slot << 3;
+        dbg_log("virtio device " + descriptor["name"] + " at " + (root_port !== undefined ? "root port " + root_port : "slot 0x" + slot.toString(16)) +
             ", ports 0x" + io_base.toString(16), LOG_PCI);
-        return new VirtioDevice(cpu, descriptor, slot, io_base);
+        return new VirtioDevice(cpu, descriptor, pci_id, io_base);
     });
 }
 
@@ -146,7 +171,7 @@ export function create_adapter_virtio_device(cpu, descriptor, pci_id)
         throw new TypeError("virtio device \"" + descriptor["name"] + "\": shared_memory must be { id, bar, offset, length } within one of the bars");
     }
     // (no I/O ports: the windows' offsets in the memory BAR are 0x000, 0x100, 0x200, 0x300)
-    return new VirtioDevice(cpu, /** @type {!Object} */ (descriptor), pci_id >> 3, 0, {
+    return new VirtioDevice(cpu, /** @type {!Object} */ (descriptor), pci_id, 0, {
         class_code: descriptor["class_code"],
         revision: descriptor["revision"],
         bars: bars.map(bar => ({
@@ -292,6 +317,20 @@ function check_descriptor(descriptor, names)
     {
         fail("pci_slot must be between 1 and 31");
     }
+    const root_port = descriptor["pcie_root_port"];
+    if(root_port !== undefined && !(Number.isInteger(root_port) && root_port >= 0))
+    {
+        fail("pcie_root_port must be the number of a root port (0 and up)");
+    }
+    if(root_port !== undefined && slot !== undefined)
+    {
+        fail("pci_slot and pcie_root_port exclude each other");
+    }
+    const plugged = descriptor["pcie_plugged"];
+    if(plugged !== undefined && (typeof plugged !== "boolean" || root_port === undefined))
+    {
+        fail("pcie_plugged must be a boolean, for a device behind a root port (pcie_root_port)");
+    }
     const io_base = descriptor["io_base"];
     if(io_base !== undefined && !(Number.isInteger(io_base) && io_base > 0 && !(io_base & 0xFF) &&
         io_base + IO_WINDOW_BYTES <= 0x10000))
@@ -351,7 +390,8 @@ function check_descriptor(descriptor, names)
  */
 function is_slot_free(cpu, slot)
 {
-    return !cpu.devices.pci.devices[slot << 3];
+    // (the chipset's device numbers, e.g. Q35's 00:1f.*, even before its functions are registered)
+    return !cpu.devices.pci.devices[slot << 3] && !cpu.platform.reserved_pci_slots.includes(slot);
 }
 
 /**
@@ -371,7 +411,7 @@ function is_io_window_free(cpu, io_base)
  * @constructor
  * @param {CPU} cpu
  * @param {!Object} descriptor
- * @param {number} slot
+ * @param {number} pci_id its function (behind a root port: device 0 of the port's bus)
  * @param {number} io_base
  * @param {{class_code: (number|undefined), revision: (number|undefined), bars: !Array,
  *     capability_bar: (number|undefined), shared_memory: (!Array|undefined),
@@ -379,7 +419,7 @@ function is_io_window_free(cpu, io_base)
  *     qemu_compatible: (boolean|undefined)}=} transport
  *     a display adapter's layout (create_adapter_virtio_device)
  */
-function VirtioDevice(cpu, descriptor, slot, io_base, transport)
+function VirtioDevice(cpu, descriptor, pci_id, io_base, transport)
 {
     /** @const @type {CPU} */
     this.cpu = cpu;
@@ -403,7 +443,7 @@ function VirtioDevice(cpu, descriptor, slot, io_base, transport)
     this.virtio = new VirtIO(cpu,
     {
         name: "virtio-" + this.name,
-        pci_id: slot << 3,
+        pci_id,
         device_id: descriptor["device_id"],
         subsystem_device_id: descriptor["subsystem_device_id"] || 0,
         class_code: transport && transport.class_code,
@@ -665,7 +705,8 @@ VirtioDevice.prototype.read_memory = function(address, length)
  */
 VirtioDevice.prototype.write_memory = function(bytes, address)
 {
-    if(!bytes.length) return;
+    // (off the bus: a hot plug slot that is empty or switched off)
+    if(!bytes.length || this.virtio.pci.absent[this.virtio.pci_id]) return;
     if(!this.is_ram(address, bytes.length))
     {
         throw new RangeError("virtio device " + this.name + ": 0x" + address.toString(16) +

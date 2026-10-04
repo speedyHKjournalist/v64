@@ -95,7 +95,8 @@ const checksum = bytes => bytes.reduce((a, b) => a + b, 0) & 0xFF;
 const text = bytes => String.fromCharCode(...bytes);
 
 /** Walk the installed tables from the RSDP, checking checksums and pointers */
-function install(platform, pm_base = PM_BASE)
+function install(platform, pm_base = PM_BASE,
+    listed = ["APIC", "FACP"].concat(platform.hpet ? ["HPET"] : [], platform.ecam ? ["MCFG"] : []))
 {
     const built = build_acpi_tables(platform, pm_base);
     const { allocated, read } = run_loader(built);
@@ -135,7 +136,7 @@ function install(platform, pm_base = PM_BASE)
         assert.ok(!tables[t.signature], "listed once: " + t.signature);
         tables[t.signature] = t;
     }
-    assert.deepEqual(Object.keys(tables).sort(), ["APIC", "FACP"]);
+    assert.deepEqual(Object.keys(tables).sort(), listed);
 
     const fadt = tables["FACP"].data;
     const facs_address = le(fadt.subarray(36, 40));
@@ -229,6 +230,62 @@ for(const [label, settings, memory] of PLATFORMS)
     });
 }
 
+test("Q35: MCFG, the ICH9 PM layout in the FADT, the PCI Express root bridge, S5 only", () => {
+    const platform = create_platform({ machine_type: "q35", cpu_cores: 2 }, 512 << 20);
+    const { tables } = install(platform);
+    const f = tables["FACP"].data;
+    const u = (o, n) => le(f.subarray(o, o + n));
+    assert.deepEqual([f[52], f[53]], [0x02, 0x03], "ICH9 ACPI_ENABLE/ACPI_DISABLE");
+    assert.deepEqual([u(56, 4), u(64, 4), u(76, 4), u(80, 4)], [PM_BASE, PM_BASE + 4, PM_BASE + 8, PM_BASE + 0x20], "GPE0 inside the PM block");
+    assert.deepEqual([f[88], f[89], f[91], f[92]], [4, 2, 4, 16], "block lengths");
+    assert.deepEqual([f[220], f[221], le(f.subarray(224, 232))], [1, 128, PM_BASE + 0x20], "X_GPE0_BLK");
+
+    const m = tables["MCFG"].data;
+    assert.equal(m.length, 60);
+    assert.deepEqual([le(m.subarray(44, 52)), le(m.subarray(52, 54)), m[54], m[55]], [0xB0000000, 0, 0, 255], "ECAM, segment 0, buses 0-255");
+
+    const dsdt = Buffer.from(tables["DSDT"].data);
+    const latin = dsdt.toString("latin1");
+    assert.ok(dsdt.includes(Buffer.from([0x0C, 0x41, 0xD0, 0x0A, 0x08])), "PNP0A08");
+    assert.ok(dsdt.includes(Buffer.from([0x0C, 0x41, 0xD0, 0x0A, 0x03])), "PNP0A03 (_CID)");
+    assert.ok(dsdt.includes(Buffer.from([0x0C, 0x41, 0xD0, 0x03, 0x03])), "PNP0303 (SeaBIOS checks for it)");
+    assert.ok(latin.includes("_S5_") && !latin.includes("_S3_") && !latin.includes("_S4_"), "S5 only");
+    for(const name of ["PICF", "_PIC", "PRTP", "PRTA", "GSIA", "GSIH", "LNKE", "LNKH", "DRAC"]) assert.ok(latin.includes(name), name);
+    // Memory32Fixed descriptors: the ECAM window (DRAC) and the RCBA block (MBRS)
+    const memory32 = (base, length) => Buffer.from([0x86, 9, 0, 1, ...[base, length].flatMap(v => [v & 0xFF, v >> 8 & 0xFF, v >> 16 & 0xFF, v >>> 24])]);
+    assert.ok(dsdt.includes(memory32(0xB0000000, 0x10000000)), "ECAM reserved");
+    assert.ok(dsdt.includes(memory32(0xFED1C000, 0x4000)), "RCBA reserved");
+    // the root bridge's memory window starts above the ECAM window
+    // (DWord memory: flags, granularity, minimum, maximum)
+    const window = Buffer.from([0x0C, 0x03, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0xFF, 0xBF, 0xFE]);
+    assert.ok(dsdt.includes(window), "PCI memory window 0xC0000000-0xFEBFFFFF");
+});
+
+test("Q35 with hpet: the HPET table, a PNP0103 device with the timer block's memory", () => {
+    const platform = create_platform({ machine_type: "q35", hpet: true }, 256 << 20);
+    const { tables } = install(platform);
+    const h = tables["HPET"].data;
+    assert.equal(h.length, 56);
+    assert.equal(le(h.subarray(36, 40)), 0x8086A201, "event timer block ID");
+    assert.deepEqual([h[40], le(h.subarray(44, 52))], [0, 0xFED00000], "system memory at 0xFED00000");
+    const dsdt = Buffer.from(tables["DSDT"].data);
+    assert.ok(dsdt.includes(Buffer.from([0x0C, 0x41, 0xD0, 0x01, 0x03])), "PNP0103");
+    assert.ok(dsdt.includes(Buffer.from([0x86, 9, 0, 1, 0x00, 0x00, 0xD0, 0xFE, 0x00, 0x04, 0x00, 0x00])), "Memory32Fixed(0xFED00000, 0x400)");
+    assert.ok(!install(create_platform({ machine_type: "q35" }, 256 << 20)).tables["HPET"], "no table without hpet");
+});
+
+test("Q35: invalid machine types and acpi: false are rejected", () => {
+    assert.throws(() => create_platform({ machine_type: "pc" }, 256 << 20), /machine_type/);
+    assert.throws(() => create_platform({ machine_type: "q35", acpi: false }, 256 << 20), /requires ACPI/);
+    assert.equal(create_platform({ machine_type: "q35" }, 256 << 20).acpi, true, "on by default");
+    assert.equal(create_platform({}, 256 << 20).machine, "i440fx");
+    assert.throws(() => create_platform({ hpet: true }, 256 << 20), /hpet requires machine_type "q35"/);
+    assert.throws(() => create_platform({ pcie_root_ports: 1 }, 256 << 20), /pcie_root_ports requires machine_type "q35"/);
+    assert.throws(() => create_platform({ machine_type: "q35", pcie_root_ports: 7 }, 256 << 20), /from 0 to 6/);
+    assert.deepEqual(create_platform({ machine_type: "q35", pcie_root_ports: 2 }, 256 << 20).reserved_pci_slots, [0x00, 0x1F, 0x1C],
+        "root ports reserve device 28");
+});
+
 test("the table sizes do not depend on the PM base (tables are regenerated when read)", () => {
     const platform = create_platform({}, 256 << 20);
     const a = build_acpi_tables(platform, 0x600);
@@ -267,9 +324,9 @@ const IASL = find_tool("iasl", "IASL");
 const ACPIEXEC = find_tool("acpiexec", "ACPIEXEC");
 const skipped = [];
 
-function write_installed_tables(dir)
+function write_installed_tables(dir, settings = { uart1: true })
 {
-    const platform = create_platform({ uart1: true }, 256 << 20);
+    const platform = create_platform(settings, 256 << 20);
     const { tables } = install(platform);
     for(const [name, { data }] of Object.entries(tables))
     {
@@ -277,16 +334,18 @@ function write_installed_tables(dir)
     }
 }
 
-if(IASL)
+for(const [label, settings, names] of IASL ? [["", undefined, ["dsdt", "facp", "apic", "facs"]],
+    [" (Q35)", { machine_type: "q35" }, ["dsdt", "facp", "apic", "facs", "mcfg"]],
+    [" (Q35 with the HPET)", { machine_type: "q35", hpet: true }, ["dsdt", "facp", "apic", "facs", "mcfg", "hpet"]]] : [])
 {
-    test("iasl disassembles every table and recompiles the DSDT without errors", () => {
+    test("iasl disassembles every table and recompiles the DSDT without errors" + label, () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "v86-acpi-"));
-        write_installed_tables(dir);
+        write_installed_tables(dir, settings);
         const iasl = args => {
             const { status, stdout, stderr } = spawnSync(IASL, args, { cwd: dir, encoding: "utf8" });
             return { status, out: stdout + stderr };
         };
-        for(const name of ["dsdt", "facp", "apic", "facs"])
+        for(const name of names)
         {
             const { status, out } = iasl(["-d", name + ".dat"]);
             assert.equal(status, 0, out);
@@ -306,7 +365,7 @@ if(IASL)
         fs.rmSync(dir, { recursive: true });
     });
 }
-else
+if(!IASL)
 {
     skipped.push("iasl (set IASL=/path/to/iasl)");
 }
@@ -362,6 +421,81 @@ if(ACPIEXEC)
 else
 {
     skipped.push("acpiexec (set ACPIEXEC=/path/to/acpiexec)");
+}
+
+if(ACPIEXEC)
+{
+    // (the 128-entry _PRT packages don't fit the debugger's output buffer:
+    // the routing itself is checked by the guests of tests/devices/q35_guest.js)
+    test("acpiexec (Q35): _PIC records the mode, GSI links report 16-23, PIRQ links work", () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "v86-acpi-"));
+        write_installed_tables(dir, { machine_type: "q35" });
+        const commands = [
+            "evaluate \\PICF",
+            "evaluate \\_PIC 1",
+            "evaluate \\PICF",
+            "evaluate \\_SB.GSIA._CRS",
+            "evaluate \\_SB.GSIH._CRS",
+            "evaluate \\_SB.GSIE._STA",
+            "evaluate \\_SB.LNKE._STA",
+            "evaluate \\_SB.LNKE._SRS (89 06 00 09 01 0A 00 00 00 79 00)",
+            "evaluate \\_SB.LNKE._CRS",
+            "evaluate \\_S5",
+        ].join("; ");
+        let out;
+        try
+        {
+            out = execFileSync(ACPIEXEC, ["-b", commands, "dsdt.dat"], { cwd: dir, encoding: "utf8", stdio: "pipe" });
+        }
+        catch(e)
+        {
+            out = e.stdout;
+        }
+        const blocks = out.split(/Evaluating /).slice(1);
+        assert.equal(blocks.length, 10, out);
+        assert.match(blocks[0], /\[Integer\] = 0000000000000000/, "PIC mode until _PIC");
+        assert.match(blocks[2], /\[Integer\] = 0000000000000001/, "APIC mode after _PIC(1)");
+        assert.match(blocks[3], /89 06 00 09 01 10 00 00 00 79 00/, "GSIA: IRQ 16, level, active high, shared");
+        assert.match(blocks[4], /89 06 00 09 01 17 00 00 00 79 00/, "GSIH: IRQ 23");
+        assert.match(blocks[5], /000000000000000B/);
+        assert.match(blocks[8], /89 06 00 09 01 0A 00 00 00 79 00/, "LNKE routed to IRQ 10");
+        assert.match(blocks[9], /\[Integer\] = 0000000000000000/);
+        assert.doesNotMatch(out, /ACPI Error: (?!\d+ \(0x[0-9a-f]+\) Outstanding cache allocations)/, out);
+        fs.rmSync(dir, { recursive: true });
+    });
+}
+
+if(ACPIEXEC)
+{
+    test("acpiexec (Q35): _OSC grants native PCI Express hot plug, SHPC, PME, AER and the PCI Express capability", () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "v86-acpi-"));
+        write_installed_tables(dir, { machine_type: "q35", pcie_root_ports: 2 });
+        const uuid = "(5B 4D DB 33 F7 1F 1C 40 96 57 74 41 C0 3D D7 66)";
+        const commands = [
+            // (support: everything; control asked: hot plug, SHPC, PME, AER, capability, LTR)
+            "evaluate \\_SB.PCI0._OSC " + uuid + " 1 3 (00 00 00 00 1F 01 00 00 3F 00 00 00)",
+            "evaluate \\_SB.PCI0._OSC " + uuid + " 1 3 (01 00 00 00 1F 01 00 00 1D 00 00 00)",
+            "evaluate \\_SB.PCI0._OSC (00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF) 1 3 (00 00 00 00 00 00 00 00 1F 00 00 00)",
+            "evaluate \\_SB.PCI0._OSC " + uuid + " 2 3 (00 00 00 00 00 00 00 00 1F 00 00 00)",
+        ].join("; ");
+        let out;
+        try
+        {
+            out = execFileSync(ACPIEXEC, ["-b", commands, "dsdt.dat"], { cwd: dir, encoding: "utf8", stdio: "pipe" });
+        }
+        catch(e)
+        {
+            out = e.stdout;
+        }
+        const blocks = out.split(/Evaluating /).slice(1);
+        assert.equal(blocks.length, 4, out);
+        assert.match(blocks[0], /10 00 00 00 1F 01 00 00 1F 00 00 00/, "granted 0x1F, LTR masked (and so reported)");
+        assert.match(blocks[1], /01 00 00 00 1F 01 00 00 1D 00 00 00/, "a query of a subset: granted as asked");
+        assert.match(blocks[2], /04 00 00 00 00 00 00 00 1F 00 00 00/, "another UUID: unrecognized");
+        assert.match(blocks[3], /08 00 00 00 00 00 00 00 1F 00 00 00/, "revision 2: unrecognized revision");
+        assert.doesNotMatch(out, /ACPI Error: (?!\d+ \(0x[0-9a-f]+\) Outstanding cache allocations)/, out);
+        fs.rmSync(dir, { recursive: true });
+    });
 }
 
 let failed = 0;

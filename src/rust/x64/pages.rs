@@ -228,7 +228,10 @@ pub unsafe fn allowed() -> bool {
     {
         return false;
     }
-    crate::ir::runtime::schedule::enabled() && !apic::has_core_events() && !apic::nmi_pending()
+    crate::ir::runtime::schedule::enabled()
+        && !apic::has_core_events()
+        && !apic::nmi_pending()
+        && !crate::cpu::smm::smi_deliverable()
 }
 
 /// Per core: the last code page translation (access cache epoch | user,

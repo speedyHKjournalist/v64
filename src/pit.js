@@ -103,6 +103,13 @@ PIT.prototype.set_state = function(state)
     this.counter_start_value = state[8];
 };
 
+/** Counter 0's output reaches IRQ 0, unless the HPET's legacy replacement route took it */
+PIT.prototype.drives_irq0 = function()
+{
+    const hpet = this.cpu.devices.hpet;
+    return !hpet || !hpet.legacy_replacement();
+};
+
 PIT.prototype.timer = function(now, no_irq)
 {
     var time_to_next_interrupt = 100;
@@ -124,9 +131,11 @@ PIT.prototype.timer = function(now, no_irq)
             // This isn't strictly correct, but it's necessary since browsers
             // may sleep longer than necessary to trigger the else branch below
             // and clear the irq
-            this.cpu.device_lower_irq(0);
-
-            this.cpu.device_raise_irq(0);
+            if(this.drives_irq0())
+            {
+                this.cpu.device_lower_irq(0);
+                this.cpu.device_raise_irq(0);
+            }
             var mode = this.counter_mode[0];
 
             if(mode === 0)
@@ -134,7 +143,7 @@ PIT.prototype.timer = function(now, no_irq)
                 this.counter_enabled[0] = 0;
             }
         }
-        else
+        else if(this.drives_irq0())
         {
             this.cpu.device_lower_irq(0);
         }
@@ -311,7 +320,7 @@ PIT.prototype.port43_write = function(reg_byte)
         this.counter_next_low[i] = 1;
     }
 
-    if(i === 0)
+    if(i === 0 && this.drives_irq0())
     {
         this.cpu.device_lower_irq(0);
     }

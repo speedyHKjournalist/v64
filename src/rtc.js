@@ -163,13 +163,20 @@ RTC.prototype.update_time = function(time)
     this.last_update = time;
 };
 
+/** The RTC's interrupt reaches IRQ 8, unless the HPET's legacy replacement route took it */
+RTC.prototype.drives_irq8 = function()
+{
+    const hpet = this.cpu.devices.hpet;
+    return !hpet || !hpet.legacy_replacement();
+};
+
 RTC.prototype.timer = function(time, legacy_mode)
 {
     this.update_time(time);
 
     if(this.periodic_interrupt && this.next_interrupt <= time)
     {
-        this.cpu.device_raise_irq(8);
+        this.drives_irq8() && this.cpu.device_raise_irq(8);
         this.cmos_c |= 1 << 6 | 1 << 7;
 
         // Coalesce missed edges and move strictly beyond this service point.
@@ -179,7 +186,7 @@ RTC.prototype.timer = function(time, legacy_mode)
     }
     if(this.next_interrupt_alarm && this.next_interrupt_alarm <= time)
     {
-        this.cpu.device_raise_irq(8);
+        this.drives_irq8() && this.cpu.device_raise_irq(8);
         this.cmos_c |= 1 << 5 | 1 << 7;
 
         this.next_interrupt_alarm = 0;
@@ -188,7 +195,7 @@ RTC.prototype.timer = function(time, legacy_mode)
     }
     if(this.update_interrupt && this.update_interrupt_time <= time)
     {
-        this.cpu.device_raise_irq(8);
+        this.drives_irq8() && this.cpu.device_raise_irq(8);
         this.cmos_c |= 1 << 4 | 1 << 7;
 
         this.update_interrupt_time = time + 1000; // 1 second
@@ -324,7 +331,7 @@ RTC.prototype.cmos_port_read = function()
             // will contain a bitmask telling which interrupt happened.
             // What is important is that if register C is not read after an
             // IRQ 8, then the interrupt will not happen again.
-            this.cpu.device_lower_irq(8);
+            this.drives_irq8() && this.cpu.device_lower_irq(8);
 
             dbg_log("cmos reg C read", LOG_RTC);
             // Missing IRQF flag

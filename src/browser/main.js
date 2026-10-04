@@ -1,6 +1,7 @@
 import { WorkerPerformanceRecorder } from "./cpu_worker.js";
 import { V86, CPU_TYPES } from "./starter.js";
 import { MAX_VRAM_SIZE } from "../graphics_adapter.js";
+import { MACHINE_TYPES, Q35_ROOT_PORTS_MAX } from "../platform.js";
 import { LOG_NAMES } from "../const.js";
 import { SyncBuffer, SyncFileBuffer } from "../buffer.js";
 import { h, pad0, pads, hex_dump, dump_file, download, round_up_to_next_power_of_2 } from "../lib.js";
@@ -21,6 +22,7 @@ const MAX_HEAP_MEMORY_SIZE = 2048;
 const MAX_MEMORY_SIZE = MAX_HEAP_MEMORY_SIZE + 60 * 1024;
 const DEFAULT_CPU_CORES = 1;
 const DEFAULT_CPU_TYPE = CPU_TYPES[0];
+const DEFAULT_MACHINE_TYPE = MACHINE_TYPES[0];
 const DEFAULT_VGA_MEMORY_SIZE = 8;
 const DEFAULT_GRAPHICS_ADAPTER = "bochs_vga";
 const DEFAULT_BOOT_ORDER = 0;
@@ -56,6 +58,35 @@ function cpu_type_arg(query_args)
 {
     const cpu_type = query_args.get("cpu_type");
     return cpu_type && CPU_TYPES.includes(cpu_type) ? cpu_type : undefined;
+}
+
+/**
+ * ?machine_type=; undefined when absent or unknown
+ * @param {URLSearchParams} query_args
+ * @return {string|undefined}
+ */
+function machine_type_arg(query_args)
+{
+    const machine_type = query_args.get("machine_type");
+    return machine_type && MACHINE_TYPES.includes(machine_type) ? machine_type : undefined;
+}
+
+/**
+ * The Q35 machine's own optional devices, as the page has them: the HPET and
+ * the SMBus controller, as a real Q35 board and QEMU's Q35 have them; no root
+ * ports, which only serve devices placed behind them (the API's hot plug)
+ */
+const Q35_PAGE_DEVICES = { hpet: true, smbus: true, pcie_root_ports: 0 };
+
+/**
+ * ?root_ports=: Q35's PCI Express root ports; undefined when absent or out of range
+ * @param {URLSearchParams} query_args
+ * @return {number|undefined}
+ */
+function root_ports_arg(query_args)
+{
+    const ports = parseInt(query_args.get("root_ports"), 10);
+    return ports >= 0 && ports <= Q35_ROOT_PORTS_MAX ? ports : undefined;
 }
 
 function format_timestamp(time)
@@ -139,6 +170,9 @@ function $(id)
 {
     return document.getElementById(id);
 }
+
+/** RAM and video memory from which the page saves states as V7 streams */
+const STREAMED_STATE_MEMORY = 1024 * 1024 * 1024;
 
 /**
  * Save a V7 snapshot, which never exists in one buffer: straight into a file
@@ -1893,6 +1927,7 @@ function onload()
     if(query_args.has("cores")) $("cpu_cores").value = query_args.get("cores");
     if(query_args.has("parallel")) $("parallel").checked = bool_arg(query_args.get("parallel"));
     $("cpu_type").value = cpu_type_arg(query_args) || $("cpu_type").value;
+    $("machine_type").value = machine_type_arg(query_args) || $("machine_type").value;
     if(query_args.has("vram")) $("vga_memory_size").value = query_args.get("vram");
     if(query_args.has("graphics_adapter")) $("graphics_adapter").value = query_args.get("graphics_adapter");
     if(query_args.has("relay_url")) $("relay_url").value = query_args.get("relay_url");
@@ -2384,6 +2419,10 @@ async function start_emulation(profile, query_args)
                 settings.parallel = bool_arg(query_args.get("parallel"));
             }
             settings.cpu_type = cpu_type_arg(query_args);
+            settings.machine_type = machine_type_arg(query_args);
+            if(query_args.has("hpet")) settings.hpet = bool_arg(query_args.get("hpet"));
+            if(query_args.has("smbus")) settings.smbus = bool_arg(query_args.get("smbus"));
+            settings.pcie_root_ports = root_ports_arg(query_args);
 
             const vram = parseInt(query_args.get("vram"), 10);
             if(vram > 0)
@@ -2585,8 +2624,26 @@ async function start_emulation(profile, query_args)
         }
         if(settings.cpu_type !== DEFAULT_CPU_TYPE) new_query_args.set("cpu_type", settings.cpu_type);
 
-        // multiple cores are described to the guest through ACPI (MADT)
-        if(settings.cpu_cores > 1 && !settings.acpi)
+        if(settings.machine_type === undefined)
+        {
+            settings.machine_type = $("machine_type").value || DEFAULT_MACHINE_TYPE;
+        }
+        if(settings.machine_type !== DEFAULT_MACHINE_TYPE) new_query_args.set("machine_type", settings.machine_type);
+        if(settings.machine_type === "q35")
+        {
+            // Q35's own devices are not on the form: the page's machine has
+            // Q35_PAGE_DEVICES (?hpet=, ?smbus= and ?root_ports= change them)
+            if(settings.hpet === undefined) settings.hpet = Q35_PAGE_DEVICES.hpet;
+            if(settings.smbus === undefined) settings.smbus = Q35_PAGE_DEVICES.smbus;
+            if(settings.pcie_root_ports === undefined) settings.pcie_root_ports = Q35_PAGE_DEVICES.pcie_root_ports;
+            if(settings.hpet !== Q35_PAGE_DEVICES.hpet) new_query_args.set("hpet", settings.hpet ? "1" : "0");
+            if(settings.smbus !== Q35_PAGE_DEVICES.smbus) new_query_args.set("smbus", settings.smbus ? "1" : "0");
+            if(settings.pcie_root_ports !== Q35_PAGE_DEVICES.pcie_root_ports) new_query_args.set("root_ports", String(settings.pcie_root_ports));
+        }
+
+        // multiple cores are described to the guest through ACPI (MADT);
+        // Q35 always has ACPI
+        if((settings.cpu_cores > 1 || settings.machine_type === "q35") && !settings.acpi)
         {
             settings.acpi = true;
             $("acpi").checked = true;
@@ -2697,9 +2754,13 @@ async function start_emulation(profile, query_args)
 
         cmdline: settings.cmdline,
         bzimage_initrd_from_filesystem: settings.bzimage_initrd_from_filesystem,
-        acpi: settings.acpi || settings.cpu_cores > 1,
+        acpi: settings.acpi || settings.cpu_cores > 1 || settings.machine_type === "q35",
         cpu_cores: settings.cpu_cores,
         "cpu_type": settings.cpu_type,
+        machine_type: settings.machine_type,
+        pcie_root_ports: settings.machine_type === "q35" ? settings.pcie_root_ports : undefined,
+        hpet: settings.machine_type === "q35" ? settings.hpet : undefined,
+        smbus: settings.machine_type === "q35" ? settings.smbus : undefined,
         // without it, more than one core runs in the interpreter
         experimental_smp_jit: settings.cpu_cores > 1 && !settings.disable_jit,
         disable_jit: settings.disable_jit,
@@ -3175,6 +3236,7 @@ function init_ui(profile, settings, emulator)
         write_sectors: 0,
     };
 
+    $("storage_bus").textContent = settings.machine_type === "q35" ? "AHCI" : "IDE";
     $("ide_type").textContent = settings.cdrom ? " (CD-ROM)" : " (hard disk)";
 
     emulator.add_listener("ide-read-start", function()
@@ -3246,11 +3308,11 @@ function init_ui(profile, settings, emulator)
         $("reset").blur();
     };
 
-    add_image_download_button(settings.hda, () => emulator.v86.cpu.devices.ide.primary.master.buffer, "hda");
-    add_image_download_button(settings.hdb, () => emulator.v86.cpu.devices.ide.primary.slave.buffer, "hdb");
+    add_image_download_button(settings.hda, () => emulator.v86.cpu.disk_device("hda").buffer, "hda");
+    add_image_download_button(settings.hdb, () => emulator.v86.cpu.disk_device("hdb").buffer, "hdb");
     add_image_download_button(settings.fda, () => emulator.v86.cpu.devices.fdc.drives[0].buffer, "fda");
     add_image_download_button(settings.fdb, () => emulator.v86.cpu.devices.fdc.drives[1].buffer, "fdb");
-    add_image_download_button(settings.cdrom, () => emulator.v86.cpu.devices.cdrom.buffer, "cdrom");
+    add_image_download_button(settings.cdrom, () => emulator.v86.cpu.disk_device("cdrom").buffer, "cdrom");
 
     function add_image_download_button(obj, get_buffer, type)
     {
@@ -3532,16 +3594,26 @@ function init_ui(profile, settings, emulator)
         button.textContent = "Saving...";
         try
         {
-            if(settings.extended_memory_size)
+            // A single-buffer snapshot is less than 2 GiB (the RAM in use,
+            // video memory, the SVGA's 3D objects), and the browser allocates
+            // it in one piece, beside the guest's RAM: machines of 1 GiB or
+            // more save a V7 stream, written to the file as it is made (into
+            // a Blob where the browser lets the page write no file); the
+            // others too when one buffer fails (RangeError)
+            let result = null;
+            if(!settings.extended_memory_size && settings.memory_size + (settings.vram_size || 0) < STREAMED_STATE_MEMORY)
             {
-                // one buffer cannot hold extended RAM: a V7 stream
-                await save_state_stream_to_file(emulator, "v86state.bin");
+                try
+                {
+                    result = await emulator.save_state();
+                }
+                catch(error)
+                {
+                    if(!/RangeError|save_state_stream/.test(String(error && (error.stack || error.message)))) throw error;
+                }
             }
-            else
-            {
-                const result = await emulator.save_state();
-                dump_file(result, "v86state.bin");
-            }
+            if(result) dump_file(result, "v86state.bin");
+            else await save_state_stream_to_file(emulator, "v86state.bin");
         }
         catch(error)
         {

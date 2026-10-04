@@ -31,8 +31,10 @@ const STAT_NAMES = [
  * @constructor
  * @param {CPU} cpu
  * @param {BusConnector} bus
+ * @param {number=} pci_id where the machine puts it (behind a root port), or
+ *     its usual slot
  */
-export function VirtioBalloon(cpu, bus)
+export function VirtioBalloon(cpu, bus, pci_id)
 {
     /** @const @type {BusConnector} */
     this.bus = bus;
@@ -54,7 +56,7 @@ export function VirtioBalloon(cpu, bus)
     this.virtio = new VirtIO(cpu,
     {
         name: "virtio-balloon",
-        pci_id: 0x0B << 3,
+        pci_id: pci_id === undefined ? 0x0B << 3 : pci_id,
         device_id: 0x1045,
         subsystem_device_id: 5,
         common:

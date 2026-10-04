@@ -676,6 +676,20 @@ AsyncFileBuffer.prototype.get = function(offset, len, fn)
         return;
     }
 
+    // In a worker (the CPU worker), read synchronously, as from a buffer in
+    // memory (about 0.5 ms a request). An asynchronous read completes only
+    // once the CPU loop yields, a whole slice later: a guest that polls
+    // for the data waits that long for each request (SeaBIOS's AHCI
+    // driver, polling through SMM: the 2300 reads of Windows' boot loader
+    // took minutes instead of seconds)
+    if(typeof FileReaderSync !== "undefined")
+    {
+        block = new Uint8Array(new FileReaderSync().readAsArrayBuffer(this.file.slice(offset, offset + len)));
+        this.handle_read(offset, len, block);
+        fn(block);
+        return;
+    }
+
     var fr = new FileReader();
 
     fr.onload = function(e)

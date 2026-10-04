@@ -26,6 +26,7 @@ const IOAPIC_CONFIG_READONLY_MASK: u32 =
 
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
 const IOAPIC_DELIVERY_LOWEST_PRIORITY: u8 = 1;
+const IOAPIC_DELIVERY_SMI: u8 = 2;
 const IOAPIC_DELIVERY_NMI: u8 = 4;
 const IOAPIC_DELIVERY_INIT: u8 = 5;
 const IOAPIC_DELIVERY_EXTINT: u8 = 7;
@@ -163,12 +164,14 @@ fn check_irq(ioapic: &mut Ioapic, irq: u8) {
         if tracks_eoi && config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
             return;
         }
-        // 2 (SMI) is unsupported and 3/6 are reserved. Never panic or
-        // accidentally inject an ordinary fixed interrupt for these modes.
+        // 3/6 are reserved. Never panic or accidentally inject an ordinary
+        // fixed interrupt for these modes. (SMI ignores the vector, and is
+        // edge triggered.)
         if !matches!(
             delivery_mode,
             IOAPIC_DELIVERY_FIXED
                 | IOAPIC_DELIVERY_LOWEST_PRIORITY
+                | IOAPIC_DELIVERY_SMI
                 | IOAPIC_DELIVERY_NMI
                 | IOAPIC_DELIVERY_INIT
                 | IOAPIC_DELIVERY_EXTINT

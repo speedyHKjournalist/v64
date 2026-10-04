@@ -22,6 +22,9 @@ export function encode_worker_options(o, plugins = [], adapter_renderer = false)
 {
     const file = encode_worker_file;
     const fs = o.filesystem;
+    // (a built-in device's place behind a root port)
+    const placement = device => device && typeof device === "object" && device.pcie_root_port !== undefined ?
+        { "pcie_root_port": device.pcie_root_port, "pcie_plugged": device.pcie_plugged } : {};
     if(o.wasm_fn || fs?.handle9p) throw new Error("CPU Worker cannot transfer wasm_fn or handle9p callbacks");
     if(o["virtio_devices"]?.length) throw new Error("CPU Worker cannot transfer virtio_devices; their descriptors run on the CPU's thread");
     return {
@@ -45,7 +48,7 @@ export function encode_worker_options(o, plugins = [], adapter_renderer = false)
             new URL(o["graphics_adapter_path"] || default_graphics_adapter_path(o["graphics_adapter"]), location.href).href,
         "extended_memory_size": o.extended_memory_size, "extended_memory_cache": o.extended_memory_cache,
         "high_memory_size": o.high_memory_size,
-        "boot_order": o.boot_order, "acpi": o.acpi, "cpu_cores": o.cpu_cores,
+        "boot_order": o.boot_order, "acpi": o.acpi, "machine_type": o.machine_type, "pcie_root_ports": o.pcie_root_ports, "hpet": o.hpet, "smbus": o.smbus, "cpu_cores": o.cpu_cores,
         "cpu_clock": o.cpu_clock, "cpu_quantum": o.cpu_quantum, "cpu_schedule_seed": o.cpu_schedule_seed,
         "experimental_smp_jit": o.experimental_smp_jit, "disable_jit": o.disable_jit,
         "cpu_type": o["cpu_type"],
@@ -58,18 +61,20 @@ export function encode_worker_options(o, plugins = [], adapter_renderer = false)
         "x87_jit_cache": o["x87_jit_cache"],
         "fastboot": o.fastboot, "bootmenu": o.bootmenu, "cmdline": o.cmdline,
         "cpuid_level": o.cpuid_level, "uart1": o.uart1, "uart2": o.uart2, "uart3": o.uart3,
-        "parallel1": o.parallel1, "qemu_compatible": o.qemu_compatible, "virtio_balloon": o.virtio_balloon,
-        "virtio_console": !!o.virtio_console, "modem": o.modem && { "uart": o.modem.uart },
+        "parallel1": o.parallel1, "qemu_compatible": o.qemu_compatible,
+        "virtio_balloon": o.virtio_balloon && (typeof o.virtio_balloon === "object" ? placement(o.virtio_balloon) : true),
+        "virtio_console": o.virtio_console && (typeof o.virtio_console === "object" ? placement(o.virtio_console) : true),
+        "modem": o.modem && { "uart": o.modem.uart },
         "preserve_mac_from_state_image": o.preserve_mac_from_state_image,
         "mac_address_translation": o.mac_address_translation,
-        "net_device": { "type": o.net_device?.type || "ne2k" },
+        "net_device": { "type": o.net_device?.type || "ne2k", ...placement(o.net_device) },
         "bios": file(o.bios), "vga_bios": file(o.vga_bios), "hda": file(o.hda), "hdb": file(o.hdb),
         "fda": file(o.fda), "fdb": file(o.fdb), "cdrom": file(o.cdrom),
         "multiboot": file(o.multiboot), "bzimage": file(o.bzimage), "initrd": file(o.initrd),
         "initial_state": file(o.initial_state),
         "filesystem": fs && { "baseurl": fs.baseurl && new URL(fs.baseurl, location.href).href,
             "basefs": typeof fs.basefs === "string" ? new URL(fs.basefs, location.href).href : file(fs.basefs),
-            "proxy_url": fs.proxy_url },
+            "proxy_url": fs.proxy_url, ...placement(fs) },
         "bzimage_initrd_from_filesystem": o.bzimage_initrd_from_filesystem,
         "disable_keyboard": true, "disable_mouse": true, "disable_speaker": true,
         "autostart": false,
@@ -151,6 +156,28 @@ export class CPUWorkerController
             this.pending.set(id, { resolve, reject });
             try { this.post({ "type": "rpc", "id": id, "method": method, "args": args }, transfer); }
             catch(error) { this.pending.delete(id); reject(error); }
+        });
+    }
+
+    /**
+     * V86.detach_pcie_device: the worker answers once the removal started
+     * (one through the attention button waits for the guest, and the worker
+     * does not hold the commands after it back), and reports its end as the
+     * result for a second id
+     * @param {number} port
+     * @param {boolean} surprise
+     * @return {!Promise<void>}
+     */
+    detach_pcie_device(port, surprise)
+    {
+        if(this.closed || this.failed) return Promise.reject(this.failed || new Error("CPU Worker is closed"));
+        const done_id = ++this.next_id;
+        const done = new Promise((resolve, reject) => this.pending.set(done_id, { resolve, reject }));
+        // (its end may come before the answer)
+        done.catch(() => {});
+        return this.rpc("detach_pcie_device", [port, { "surprise": surprise }, done_id]).then(() => done, error => {
+            this.pending.delete(done_id);
+            throw error;
         });
     }
 

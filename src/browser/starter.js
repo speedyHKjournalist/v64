@@ -27,6 +27,8 @@ import { Modem } from "./modem.js";
 
 import { MemoryFileStorage, ServerFileStorageWrapper } from "./filestorage.js";
 import { SyncBuffer, buffer_from_object } from "../buffer.js";
+// (for types only)
+import { PCIeRootPort } from "../pcie_root_port.js";
 import { FS } from "../../lib/filesystem.js";
 
 /**
@@ -417,6 +419,12 @@ V86.prototype.continue_init = async function(emulator, options)
     }
 
     settings.acpi = options.acpi;
+    settings.machine_type = options.machine_type;
+    settings.pcie_root_ports = options.pcie_root_ports;
+    settings.hpet = options.hpet;
+    settings.smbus = options.smbus;
+    settings["ahci_test_drives"] = options["ahci_test_drives"]; // (tests only, see cpu.js)
+    settings["ahci_test_pci_id"] = options["ahci_test_pci_id"];
     settings.cpu_cores = options.cpu_cores;
     settings.qemu_compatible = options.qemu_compatible;
     settings.parallel = this.parallel_requested;
@@ -489,6 +497,19 @@ V86.prototype.continue_init = async function(emulator, options)
     // Enable unconditionally, so that state images don't miss hardware
     // TODO: Should be properly fixed in restore_state
     settings.net_device = options.net_device || { type: "ne2k" };
+
+    // built-in devices behind PCI Express root ports (machine_type "q35"):
+    // pcie_root_port of their options, and pcie_plugged (false: the slot
+    // starts empty; attach_pcie_device plugs the device in)
+    settings.root_port_devices = {};
+    for(const [name, device_options] of [["net", options.net_device], ["virtio_9p", options.filesystem],
+        ["virtio_console", options.virtio_console], ["virtio_balloon", options.virtio_balloon]])
+    {
+        if(device_options && typeof device_options === "object" && device_options.pcie_root_port !== undefined)
+        {
+            settings.root_port_devices[name] = { port: device_options.pcie_root_port, plugged: device_options.pcie_plugged !== false };
+        }
+    }
 
     const screen_options = options.screen || {};
     if(options.screen_container)
@@ -1622,6 +1643,125 @@ V86.prototype.eject_cdrom = function()
     if(this.worker_controller) return this.worker_controller.rpc("eject_cdrom");
     this.v86.cpu.devices.cdrom.eject();
 };
+
+/**
+ * Hot plug a drive into a free SATA port of the Q35 machine's AHCI
+ * controller (ports 0-5; hda, hdb and cdrom are on ports 0, 1 and 2). The
+ * guest sees the link come up and finds the drive by resetting the port, as
+ * with a drive plugged into a hot plug capable port.
+ *
+ * A snapshot holds the drives on the ports. To restore one taken with a hot
+ * plugged drive, attach the same image to the same port first; otherwise the
+ * restored guest sees the drive removed.
+ *
+ * @param {number} port
+ * @param {Object|null} file the image, as for the hda option; for a CD drive
+ *     the disc, or null for an empty drive
+ * @param {{cdrom: (boolean|undefined)}=} options cdrom: an ATAPI CD drive
+ */
+V86.prototype.attach_sata_drive = async function(port, file, options)
+{
+    const cdrom = !!(options && options.cdrom);
+    if(this.worker_controller) return this.worker_controller.rpc("attach_sata_drive", [port, encode_worker_file(file), { "cdrom": cdrom }]);
+    const ahci = this.v86.cpu.devices.ahci;
+    if(!ahci) throw new Error("attach_sata_drive: no AHCI controller (machine_type: \"q35\")");
+    if(!file && !cdrom) throw new Error("attach_sata_drive: a disk needs an image");
+    let image;
+    if(file && file.url && !file.async)
+    {
+        image = await new Promise(resolve => load_file(file.url, { done: result => resolve(new SyncBuffer(result)) }));
+    }
+    else if(file)
+    {
+        // (a descriptor as for the hda option, or a buffer object of one's own)
+        image = await new Promise((resolve, reject) => {
+            const buffer = file.get && file.set && file.load ? file : buffer_from_object(file, this.zstd_decompress_worker.bind(this));
+            if(!buffer) throw new Error("attach_sata_drive: not a disk image");
+            buffer.onload = () => resolve(buffer);
+            Promise.resolve(buffer.load()).catch(reject);
+        });
+    }
+    if(image && !cdrom)
+    {
+        // (the disk's CHS geometry comes from its partition table)
+        await new Promise(resolve => image.get_and_cache(0, 512, resolve));
+    }
+    ahci.attach(port, { buffer: image, is_cdrom: cdrom });
+};
+
+/**
+ * Remove the drive of a SATA port of the Q35 machine (a surprise removal,
+ * as when pulling a drive out of a hot plug capable port). Writes the guest
+ * issued before are in the image; the guest learns of the removal from the
+ * link going down.
+ *
+ * @param {number} port
+ */
+V86.prototype.detach_sata_drive = function(port)
+{
+    if(this.worker_controller) return this.worker_controller.rpc("detach_sata_drive", [port]);
+    const ahci = this.v86.cpu.devices.ahci;
+    if(!ahci) throw new Error("detach_sata_drive: no AHCI controller (machine_type: \"q35\")");
+    ahci.detach(port);
+};
+
+/**
+ * Plug a card into a PCI Express root port of the Q35 machine: the device
+ * whose options put it behind that port (pcie_root_port), after it was
+ * pulled out or when it started out (pcie_plugged: false). The guest sees a
+ * card inserted into a hot plug slot, and the device starts afresh: in a slot
+ * that is off (empty slots are after reset, as in QEMU), presence detect
+ * changed and the attention button pressed (as QEMU), and the guest switches
+ * the slot on; in a powered slot, presence detect changed and the link comes
+ * up. Guests need PCI Express native hot plug (Linux: pciehp; the ACPI tables
+ * grant it through _OSC).
+ *
+ * A snapshot holds which slots have their card in.
+ *
+ * @param {number} port
+ */
+V86.prototype.attach_pcie_device = async function(port)
+{
+    if(this.worker_controller) return this.worker_controller.rpc("attach_pcie_device", [port]);
+    root_port_of(this, port, "attach_pcie_device").insert();
+};
+
+/**
+ * Pull the card out of a PCI Express root port of the Q35 machine. By
+ * default, as with the slot's attention button: the guest releases the
+ * device and switches the slot and its power indicator off, then the card
+ * leaves (Linux and Windows wait 5 seconds for a second press, which would
+ * cancel), and the promise is fulfilled. A guest without hot plug never does; surprise: true pulls the
+ * card at once, as from a slot without a button. (Reads from a card that is
+ * gone return all ones; Linux's virtio drivers, as of 6.18, then wait forever
+ * for the device's reset: take virtio devices out with the button.)
+ *
+ * @param {number} port
+ * @param {{surprise: (boolean|undefined)}=} options
+ * @return {!Promise<void>}
+ */
+V86.prototype.detach_pcie_device = async function(port, options)
+{
+    const surprise = !!(options && options.surprise);
+    if(this.worker_controller) return this.worker_controller.detach_pcie_device(port, surprise);
+    await root_port_of(this, port, "detach_pcie_device").remove(surprise);
+};
+
+/**
+ * @param {V86} emulator
+ * @param {number} port
+ * @param {string} caller
+ * @return {PCIeRootPort}
+ */
+function root_port_of(emulator, port, caller)
+{
+    const ports = emulator.v86.cpu.devices.pcie_root_ports || [];
+    if(!ports[port])
+    {
+        throw new Error(caller + ": no root port " + port + " (machine_type \"q35\", pcie_root_ports: " + ports.length + ")");
+    }
+    return ports[port];
+}
 
 /**
  * Send a sequence of scan codes to the emulated PS2 controller. A list of

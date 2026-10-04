@@ -139,6 +139,8 @@ state!(x64_code_base: u32 = 1820);
 state!(x64_page_lazy_kind: u32 = 1824);
 state!(x64_page_lazy_a: u64 = 1832);
 state!(x64_page_lazy_b: u64 = 1840);
+state!(smm_state: u32 = 1856);
+state!(smbase: u32 = 1860);
 // Address of cpu::tlb_data, written at startup. Generated IR code loads it
 // from this fixed slot (below --global-base) instead of calling an import.
 state!(ir_tlb_base: u32 = 2048);

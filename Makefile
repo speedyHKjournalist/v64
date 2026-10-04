@@ -112,7 +112,7 @@ CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js display.js graphics_adapter.js ps2.js rtc.js uart.js parallel.js vmware.js \
-	   acpi.js acpi_tables.js platform.js state_layout.js iso9660.js \
+	   acpi.js acpi_tables.js platform.js q35.js ahci.js pcie_root_port.js hpet.js smbus.js ich9_tco.js state_layout.js iso9660.js \
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   virtio_devices.js \
 	   bus.js log.js cpu.js \
@@ -450,6 +450,29 @@ acpi-guest-tests: build/v86-debug.wasm
 	DISABLE_JIT=1 ./tests/devices/acpi_guest.js
 	GUEST=linux4 ./tests/devices/acpi_guest.js
 
+# The Q35 machine (docs/q35-ahci-sata-plan.md): the AHCI controller driven
+# without a guest, its commands with disk I/O in flight, and real guests
+# (images/linux4.iso, msdos622.img, buildroot-bzimage68.bin)
+q35-device-tests: build/v86-debug.wasm
+	./tests/devices/ahci.js
+	./tests/devices/ahci_lifecycle.mjs
+	./tests/devices/pcie_root_port.js
+	./tests/devices/hpet.js
+	./tests/devices/smbus.js
+	./tests/devices/ich9_tco.js
+	./tests/devices/smm.js
+
+q35-guest-tests: build/v86-debug.wasm
+	./tests/devices/q35_guest.js
+
+# PCI Express hot plug with Linux: Alpine's x86_64 virt kernel (pciehp), the
+# pinned Alpine ISO downloaded on first use as for the x64 linux targets
+q35-hotplug-tests: build/v86-debug.wasm
+	./tests/devices/pcie_hotplug.mjs
+
+.PHONY: q35-device-tests q35-guest-tests q35-hotplug-tests q35-tests
+q35-tests: acpi-table-tests q35-device-tests q35-guest-tests q35-hotplug-tests
+
 # ACPICA's iasl/acpiexec are used when found on PATH or in IASL/ACPIEXEC
 acpi-table-tests:
 	./tests/devices/acpi_tables.js
@@ -653,6 +676,7 @@ cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_svga_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_audio_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_ui_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_hotplug_browser_test.html
 
 # One canvas for text, graphics and composited D3D/GL windows (docs/display-design.md)
 .PHONY: display-browser-tests
@@ -849,7 +873,7 @@ x64-extended-guest-tests: build/libv86.mjs build/v86.wasm
 	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_EXTENDED_MEMORY=6442450944 X64_LINUX_MEMTEST=5120 X64_LINUX_TIMEOUT=10800000 node tests/x64/linux_boot.mjs
 
 # Release gate: every level's acceptance targets, with a report in build/release-gate/
-# (GATE_ARGS: --levels R-base,R-ACPI,R-SMP32,R-x64-UP,R-x64-SMP,R-parallel,R-extended-memory --quick --keep-going)
+# (GATE_ARGS: --levels R-base,R-ACPI,R-SMP32,R-x64-UP,R-x64-SMP,R-parallel,R-extended-memory,R-q35 --quick --keep-going)
 platform-release-gate:
 	node tools/release_gate.mjs $(GATE_ARGS)
 
@@ -867,6 +891,7 @@ x64-decode-tests: state-layout-check
 x64-system-tests: build/v86-debug.wasm
 	node tests/x64/system_oracle.mjs
 	node tests/x64/irq_boundary.mjs
+	node tests/x64/smm_long_mode.mjs
 	node tests/x64/triple_fault.mjs
 	node tests/x64/direct_loader.mjs
 	node tests/x64/profile_options.mjs
