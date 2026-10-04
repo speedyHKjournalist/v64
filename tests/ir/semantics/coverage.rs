@@ -27,6 +27,10 @@ fn coverage_fixtures() {
                         if memory && (!enc.e || enc.mem_ud) || !memory && enc.reg_ud {
                             continue;
                         }
+                        // (XSAVE and XRSTOR: fp_state)
+                        if memory && enc.opcode == 0x0FAE && (4..=5).contains(&enc.group) {
+                            continue;
+                        }
                         for dirty in [false, true] {
                             let mut bytes = vec![0x46];
                             if dirty {

@@ -18,6 +18,12 @@
 //   machine  shared by all cores (devices, configuration, JIT caches that are
 //            re-validated against the live TLB and CPU state on every use)
 //   debug    diagnostics and profiling counters
+//
+// A core field may name a `range`: the per-core snapshot ranges
+// (CORE_STATE_RANGES) never merge fields of different ranges, so state added
+// later gets a range of its own, which snapshots from before it lack (and
+// restore to reset values). `init: "keep"` marks core state that INIT leaves
+// alone (INIT_PRESERVED); INIT resets the rest.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -73,22 +79,22 @@ export const STATE_FIELDS = [
     { name: "is_32", offset: 804, rust: "bool", size: 4, owner: "core" },
     { name: "stack_size_32", offset: 808, rust: "bool", size: 4, owner: "core" },
     { name: "memory_size", offset: 812, rust: "u32", size: 4, owner: "machine" },
-    { name: "fpu_stack_empty", offset: 816, rust: "u8", size: 1, owner: "core" },
-    { name: "mxcsr", offset: 824, rust: "i32", size: 4, owner: "core" },
-    { name: "reg_xmm", offset: 832, rust: "reg128", count: 8, size: 128, owner: "core" },
+    { name: "fpu_stack_empty", offset: 816, rust: "u8", size: 1, owner: "core", init: "keep" },
+    { name: "mxcsr", offset: 824, rust: "i32", size: 4, owner: "core", init: "keep" },
+    { name: "reg_xmm", offset: 832, rust: "reg128", count: 8, size: 128, owner: "core", init: "keep" },
     { name: "current_tsc", offset: 960, rust: "u64", size: 8, owner: "cache", note: "written by store_current_tsc for snapshots" },
     { name: "reg_pdpte", offset: 968, rust: "u64", count: 4, size: 32, owner: "core", comment: "4 64-bit entries" },
-    { name: "fpu_stack_ptr", offset: 1032, rust: "u8", size: 1, owner: "core" },
-    { name: "fpu_control_word", offset: 1036, rust: "u16", size: 2, owner: "core" },
-    { name: "fpu_status_word", offset: 1040, rust: "u16", size: 2, owner: "core" },
-    { name: "fpu_opcode", offset: 1044, rust: "i32", size: 4, owner: "core" },
-    { name: "fpu_ip", offset: 1048, rust: "i32", size: 4, owner: "core" },
-    { name: "fpu_ip_selector", offset: 1052, rust: "i32", size: 4, owner: "core" },
-    { name: "fpu_dp", offset: 1056, rust: "i32", size: 4, owner: "core" },
-    { name: "fpu_dp_selector", offset: 1060, rust: "i32", size: 4, owner: "core" },
+    { name: "fpu_stack_ptr", offset: 1032, rust: "u8", size: 1, owner: "core", init: "keep" },
+    { name: "fpu_control_word", offset: 1036, rust: "u16", size: 2, owner: "core", init: "keep" },
+    { name: "fpu_status_word", offset: 1040, rust: "u16", size: 2, owner: "core", init: "keep" },
+    { name: "fpu_opcode", offset: 1044, rust: "i32", size: 4, owner: "core", init: "keep" },
+    { name: "fpu_ip", offset: 1048, rust: "i32", size: 4, owner: "core", init: "keep" },
+    { name: "fpu_ip_selector", offset: 1052, rust: "i32", size: 4, owner: "core", init: "keep" },
+    { name: "fpu_dp", offset: 1056, rust: "i32", size: 4, owner: "core", init: "keep" },
+    { name: "fpu_dp_selector", offset: 1060, rust: "i32", size: 4, owner: "core", init: "keep" },
     { name: "tss_size_32", offset: 1128, rust: "bool", size: 4, owner: "core" },
     { name: "sse_scratch_register", offset: 1136, rust: "reg128", size: 16, owner: "scratch" },
-    { name: "fpu_st", offset: 1152, rust: "F80", count: 8, size: 128, owner: "core" },
+    { name: "fpu_st", offset: 1152, rust: "F80", count: 8, size: 128, owner: "core", init: "keep" },
     { name: "x87_shadow_values", offset: 1280, rust: "[u64; 8]", size: 64, owner: "cache", note: "synced into fpu_st before a switch",
         doc: ["f64 shadow of the physical x87 registers (cpu::fpu), with VALID/DIRTY", "masks, at fixed addresses so natively generated IR fixtures stay valid."] },
     { name: "x87_shadow_valid", offset: 1344, rust: "u32", size: 4, owner: "cache" },
@@ -99,7 +105,7 @@ export const STATE_FIELDS = [
     // Wide architectural banks keep legacy low-register offsets stable.
     { name: "x64_gpr_hi", offset: 1360, rust: "u32", count: 16, size: 64, owner: "core" },
     { name: "x64_gpr_ext_lo", offset: 1424, rust: "u32", count: 8, size: 32, owner: "core" },
-    { name: "x64_xmm_ext", offset: 1456, rust: "reg128", count: 8, size: 128, owner: "core" },
+    { name: "x64_xmm_ext", offset: 1456, rust: "reg128", count: 8, size: 128, owner: "core", init: "keep" },
     { name: "x64_rip_hi", offset: 1584, rust: "u32", size: 4, owner: "core" },
     { name: "x64_previous_ip_hi", offset: 1588, rust: "u32", size: 4, owner: "core" },
     { name: "x64_idtr_base_hi", offset: 1592, rust: "u32", size: 4, owner: "core" },
@@ -118,9 +124,9 @@ export const STATE_FIELDS = [
     { name: "x64_cr8", offset: 1752, rust: "u64", size: 8, owner: "core" },
     { name: "x64_sysenter_esp_hi", offset: 1760, rust: "u32", size: 4, owner: "core" },
     { name: "x64_sysenter_eip_hi", offset: 1764, rust: "u32", size: 4, owner: "core" },
-    { name: "x64_fpu_ip_hi", offset: 1768, rust: "u32", size: 4, owner: "core" },
-    { name: "x64_fpu_dp_hi", offset: 1772, rust: "u32", size: 4, owner: "core" },
-    { name: "x64_pat", offset: 1776, rust: "u64", size: 8, owner: "core" },
+    { name: "x64_fpu_ip_hi", offset: 1768, rust: "u32", size: 4, owner: "core", init: "keep" },
+    { name: "x64_fpu_dp_hi", offset: 1772, rust: "u32", size: 4, owner: "core", init: "keep" },
+    { name: "x64_pat", offset: 1776, rust: "u64", size: 8, owner: "core", init: "keep" },
     { name: "x64_tsc_aux", offset: 1784, rust: "u32", size: 4, owner: "core" },
     // x64 page functions (src/rust/x64/pages.rs): written by the runtime
     // immediately before an activation and read by generated code.
@@ -136,17 +142,22 @@ export const STATE_FIELDS = [
     // System management mode (src/rust/cpu/smm.rs). Its own per-core range, so
     // that snapshots from before it restore it to its reset value.
     { name: "smm_state", offset: 1856, rust: "u32", size: 4, owner: "core", note: "bit 0: in SMM; bit 1: NMIs were blocked at the SMI; bit 2: the state is in the 64-bit save map" },
-    { name: "smbase", offset: 1860, rust: "u32", size: 4, owner: "core", note: "SMRAM state save base: 0x30000 at reset, kept across INIT" },
+    { name: "smbase", offset: 1860, rust: "u32", size: 4, owner: "core", init: "keep", note: "SMRAM state save base: 0x30000 at reset, kept across INIT" },
     { name: "ir_tlb_base", offset: 2048, rust: "u32", size: 4, owner: "machine",
         doc: ["Address of cpu::tlb_data, written at startup. Generated IR code loads it", "from this fixed slot (below --global-base) instead of calling an import."] },
     // Memory-type and machine-check MSRs (x64 profile; see instructions_0f.rs
     // read_msr_table). Disabled/zero after reset, unchanged by INIT.
-    { name: "x64_mtrr_def_type", offset: 2056, rust: "u64", size: 8, owner: "core", note: "IA32_MTRR_DEF_TYPE" },
-    { name: "x64_mtrr_fixed", offset: 2064, rust: "u64", count: 11, size: 88, owner: "core", note: "FIX64K_00000, FIX16K_80000/A0000, FIX4K_C0000..F8000" },
-    { name: "x64_mtrr_var", offset: 2152, rust: "u64", count: 16, size: 128, owner: "core", note: "IA32_MTRR_PHYSBASE0/PHYSMASK0 .. 7, in MSR order" },
-    { name: "x64_mcg_status", offset: 2280, rust: "u64", size: 8, owner: "core" },
-    { name: "x64_mcg_ctl", offset: 2288, rust: "u64", size: 8, owner: "core" },
-    { name: "x64_mc_banks", offset: 2296, rust: "u64", count: 16, size: 128, owner: "core", note: "IA32_MCi_CTL/STATUS/ADDR/MISC for 4 banks" },
+    { name: "x64_mtrr_def_type", offset: 2056, rust: "u64", size: 8, owner: "core", init: "keep", note: "IA32_MTRR_DEF_TYPE" },
+    { name: "x64_mtrr_fixed", offset: 2064, rust: "u64", count: 11, size: 88, owner: "core", init: "keep", note: "FIX64K_00000, FIX16K_80000/A0000, FIX4K_C0000..F8000" },
+    { name: "x64_mtrr_var", offset: 2152, rust: "u64", count: 16, size: 128, owner: "core", init: "keep", note: "IA32_MTRR_PHYSBASE0/PHYSMASK0 .. 7, in MSR order" },
+    { name: "x64_mcg_status", offset: 2280, rust: "u64", size: 8, owner: "core", init: "keep" },
+    { name: "x64_mcg_ctl", offset: 2288, rust: "u64", size: 8, owner: "core", init: "keep" },
+    { name: "x64_mc_banks", offset: 2296, rust: "u64", count: 16, size: 128, owner: "core", init: "keep", note: "IA32_MCi_CTL/STATUS/ADDR/MISC for 4 banks" },
+    // XSAVE-managed state (cpu/xstate.rs, docs/simd-xsave-plan.md 6.4). Like
+    // the x87 and SSE registers, INIT keeps it; RESET sets XCR0 to 1.
+    { name: "xcr0", offset: 2432, rust: "u64", size: 8, owner: "core", range: "xstate", init: "keep" },
+    { name: "xss", offset: 2440, rust: "u64", size: 8, owner: "core", range: "xstate", init: "keep", note: "IA32_XSS (XSAVES)" },
+    { name: "ymm_hi", offset: 2448, rust: "reg128", count: 16, size: 256, owner: "core", range: "xstate", init: "keep", note: "bits 255:128 of YMM0-YMM15" },
 ];
 
 // Every static in src/rust, by file. The check fails on a static that is not
@@ -280,6 +291,8 @@ function validate()
         assert.ok(rust_size, f.name + ": unknown Rust type " + f.rust);
         assert.ok(f.size >= rust_size, f.name + ": slot smaller than the Rust type");
         assert.ok(f.offset >= 64 && f.offset + f.size <= 4096, f.name + ": outside the fixed region");
+        assert.ok(f.owner === "core" || f.range === undefined && f.init === undefined, f.name + ": range and init are for core state");
+        assert.ok(f.init === undefined || f.init === "keep", f.name + ": init");
         const next = sorted[i + 1];
         assert.ok(!next || f.offset + f.size <= next.offset, f.name + " overlaps " + (next && next.name));
     }
@@ -289,18 +302,24 @@ function validate()
     }
 }
 
-/** [start, end) byte ranges covering the core fields, merged across unused gaps */
+/** [start, end) byte ranges covering the core fields, merged across unused gaps within a range */
 export function core_ranges()
 {
     const sorted = [...STATE_FIELDS].sort((a, b) => a.offset - b.offset);
     const ranges = [];
-    let current = null;
+    let current = null, range;
     for(const f of sorted)
     {
         if(f.owner === "core")
         {
+            if(current && f.range !== range)
+            {
+                ranges.push(current);
+                current = null;
+            }
             if(current) current[1] = f.offset + f.size;
             else current = [f.offset, f.offset + f.size];
+            range = f.range;
         }
         else if(current)
         {
@@ -362,7 +381,25 @@ ${Object.entries(offsets).map(([name, offset]) => `    ${name}: ${offset},`).joi
 export const CORE_STATE_RANGES = [
 ${core_ranges().map(([a, b]) => `    [${a}, ${b}],`).join("\n")}
 ];
+
+/** [offset, size] of the core state that INIT keeps (the rest takes its reset value) */
+export const INIT_PRESERVED = [
+${init_preserved().map(([a, b]) => `    [${a}, ${b}],`).join("\n")}
+];
 `;
+}
+
+/** [offset, size] of the fields marked init: "keep", adjacent ones merged */
+function init_preserved()
+{
+    const kept = [];
+    for(const f of [...STATE_FIELDS].sort((a, b) => a.offset - b.offset).filter(f => f.init === "keep"))
+    {
+        const last = kept[kept.length - 1];
+        if(last && last[0] + last[1] === f.offset) last[1] += f.size;
+        else kept.push([f.offset, f.size]);
+    }
+    return kept;
 }
 
 /** Statics declared in src/rust, as {file: [names]} */

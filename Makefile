@@ -428,6 +428,14 @@ kvm-unit-test: build/v86-debug.wasm
 	tests/kvm-unit-tests/run.mjs --expect-pass 11 $(KVM_UNIT_TESTS)/taskswitch2.flat
 	tests/kvm-unit-tests/run.mjs --expect-pass 127 $(KVM_UNIT_TESTS)/realmode.flat
 
+# x86/xsave.flat without XSAVE, with it (XCR0 x87, SSE) and with AVX too (YMM),
+# in the x86_64 build (whose exception tables ASM_TRY fills with .quad)
+kvm-unit-test-xsave: build/v86-debug.wasm
+	tests/kvm-unit-tests/build.sh x86_64 x86/xsave.flat
+	tests/kvm-unit-tests/run.mjs --cpu-type x86_64 --expect-pass 4 build/kvm-unit-tests/x86_64/x86/xsave.flat
+	tests/kvm-unit-tests/run.mjs --cpu-type x86_64 --expect-pass 15 --cpu-features XSAVE build/kvm-unit-tests/x86_64/x86/xsave.flat
+	tests/kvm-unit-tests/run.mjs --cpu-type x86_64 --expect-pass 17 --cpu-features SSSE3,SSE4.1,SSE4.2,XSAVE,AVX build/kvm-unit-tests/x86_64/x86/xsave.flat
+
 kvm-unit-test-release: build/libv86.mjs build/v86.wasm
 	tests/kvm-unit-tests/build.sh i386 x86/realmode.flat x86/taskswitch.flat x86/taskswitch2.flat
 	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs $(KVM_UNIT_TESTS)/taskswitch.flat
@@ -1483,4 +1491,14 @@ decode-rules-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build
 	node tests/ir/decode/vex_modes.mjs
 	node tests/ir/decode/vex_modes.mjs build/v86-ir-test-release.wasm
 
-.PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests
+# The XSAVE feature set (docs/simd-xsave-plan.md P2): the 32-bit engines,
+# the x64 engine and compatibility mode, snapshots, INIT and reset
+xsave-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+	node tests/rust/xsave.mjs
+	node tests/rust/xsave.mjs build/v86-debug.wasm
+	node tests/x64/xsave.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/xsave.mjs
+	node tests/smp/xstate_lifecycle.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/xstate_lifecycle.mjs
+
+.PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests xsave-tests

@@ -66,7 +66,10 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_str_mem"
         | "ir_str_reg"
         | "ir_write_cr"
-        | "ir_write_dr" => 2,
+        | "ir_write_dr"
+        | "ir_xgetbv_xsetbv"
+        | "ir_xrstor"
+        | "ir_xsave" => 2,
         "ir_invalid_form" | "ir_arpl_mem" | "ir_movnti" | "ir_far_jump_mem" | "ir_lar_mem"
         | "ir_lar_reg" | "ir_lsl_mem" | "ir_lsl_reg" | "ir_out" | "ir_out_continue"
         | "ir_pop_segment" | "ir_ins_once" | "ir_outs_once" => 3,

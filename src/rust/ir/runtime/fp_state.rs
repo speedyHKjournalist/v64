@@ -1,5 +1,5 @@
 //! CPU-owned FP environment transfers. State is authoritative after every exit.
-use crate::cpu::{cpu, global_pointers as gp, misc_instr};
+use crate::cpu::{cpu, global_pointers as gp, misc_instr, xstate};
 use crate::ir::helper::Outcome;
 unsafe fn address(offset: u32, segment: u32, sse: bool) -> Result<i32, ()> {
     assert!(segment < 6);
@@ -32,6 +32,30 @@ pub unsafe fn ir_fxrstor(offset: u32, segment: u32) -> u32 {
         return finish(false);
     };
     finish(misc_instr::fxrstor_checked(addr))
+}
+/// XSAVE and XRSTOR: #UD without CR4.OSXSAVE before #NM (cpu::xstate::usable)
+unsafe fn xstate_address(offset: u32, segment: u32) -> Result<i32, ()> {
+    assert!(segment < 6);
+    if !xstate::usable(true) {
+        return Err(());
+    }
+    Ok(offset.wrapping_add(cpu::get_seg(segment as i32)? as u32) as i32)
+}
+#[no_mangle]
+pub unsafe fn ir_xsave(offset: u32, segment: u32) -> u32 {
+    let Ok(addr) = xstate_address(offset, segment)
+    else {
+        return finish(false);
+    };
+    finish(xstate::xsave_32(addr))
+}
+#[no_mangle]
+pub unsafe fn ir_xrstor(offset: u32, segment: u32) -> u32 {
+    let Ok(addr) = xstate_address(offset, segment)
+    else {
+        return finish(false);
+    };
+    finish(xstate::xrstor_32(addr))
 }
 #[no_mangle]
 pub unsafe fn ir_ldmxcsr(offset: u32, segment: u32) -> u32 {

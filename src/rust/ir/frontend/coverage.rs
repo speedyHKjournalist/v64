@@ -15,7 +15,8 @@ pub const OPCODES: &[u32] = &[
 ];
 pub fn supports(i: &DecodedInstruction) -> bool {
     OPCODES.contains(&i.encoding.opcode)
-        && (i.encoding.opcode != 0x0FAE || i.encoding.group >= 4)
+        // (XSAVE and XRSTOR are fp_state's)
+        && (i.encoding.opcode != 0x0FAE || i.encoding.group >= 6 || i.encoding.group >= 4 && i.ea.is_none())
         && (i.encoding.opcode != 0x0FC7 || i.encoding.group == 6)
 }
 // 0: #UD; 1: debug assertion then release #UD; 2/3: baseline debug-only

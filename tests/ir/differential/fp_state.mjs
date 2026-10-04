@@ -83,10 +83,12 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,badMxcsr: bad_mxcsr=false}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,badMxcsr: bad_mxcsr=false,osxsave=true}={}){
             const [bytes,mode,group]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4|512; // Ordinary helper execution; debug warnings have their own dispatcher regression.
+            // Ordinary helper execution (debug warnings have their own
+            // dispatcher regression); XSAVE enabled, XCR0 x87 (its reset value)
+            cpu.cr[4]=cr4|512|(osxsave?1<<18:0);
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -171,7 +173,8 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
                 const expected=compare(i,()=>reset(i,{mmio,delta}),before+1);
                 assert.equal(expected.ip,PC+cases[i][0].length); comparisons++;
             }
-            const delta=group<2?0xF00:0xFFF;
+            // (a misaligned XSAVE area is #GP: the header crosses instead)
+            const delta=group<2?0xF00:group>=4?0xFC0:0xFFF;
             assert.equal(compare(i,()=>reset(i,{delta,pageFault:true}),before).ip,PF); comparisons++;
             assert.equal(compare(i,()=>reset(i,{nullSegment:true}),before).ip,GP); comparisons++;
             if(group===1||group===2) {
@@ -179,7 +182,12 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
             }
             if(!dirty) for(const task of [4,8,12]) {
                 const expected=compare(i,()=>reset(i,{task,nullSegment:true}),101);
-                assert.equal(expected.ip,group<2||task===8?NM:UD); comparisons++;
+                // (XSAVE and XRSTOR test CR0.TS only)
+                assert.equal(expected.ip,group>=4?task&8?NM:GP:group<2||task===8?NM:UD); comparisons++;
+            }
+            // XSAVE and XRSTOR without CR4.OSXSAVE: #UD before #NM and the segment
+            if(group>=4&&!dirty) for(const task of [0,8]) {
+                assert.equal(compare(i,()=>reset(i,{task,nullSegment:true,osxsave:false}),101).ip,UD); comparisons++;
             }
         }
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} FP state transfers, dirty XMM recovery, MXCSR validation, MMIO, cross-page #PF and #NM/#UD priority cases`);

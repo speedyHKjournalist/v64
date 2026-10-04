@@ -227,9 +227,52 @@ pub unsafe fn instr16_0F01_1_mem(addr: i32) { sidt(addr, 0xFFFFFF) }
 pub unsafe fn instr32_0F01_1_mem(addr: i32) { sidt(addr, -1) }
 
 #[no_mangle]
-pub unsafe fn instr16_0F01_2_reg(_r: i32) { trigger_ud(); }
+pub unsafe fn instr16_0F01_2_reg(r: i32) { instr_0F01_2_reg(r) }
 #[no_mangle]
-pub unsafe fn instr32_0F01_2_reg(_r: i32) { trigger_ud(); }
+pub unsafe fn instr32_0F01_2_reg(r: i32) { instr_0F01_2_reg(r) }
+unsafe fn instr_0F01_2_reg(r: i32) {
+    use crate::prefix::{PREFIX_66, PREFIX_F2, PREFIX_F3};
+    // (XGETBV and XSETBV have no mandatory prefix)
+    if *prefixes & (PREFIX_66 | PREFIX_F2 | PREFIX_F3) != 0 {
+        trigger_ud();
+        return;
+    }
+    xgetbv_xsetbv(r);
+}
+/// 0F 01 D0 (XGETBV) and D1 (XSETBV), without a mandatory prefix (the IR
+/// checks that when it decodes them); 0F 01 D2-D7 are #UD. False if a fault
+/// was delivered.
+pub unsafe fn xgetbv_xsetbv(r: i32) -> bool {
+    if r > 1 {
+        trigger_ud();
+        return false;
+    }
+    if !crate::cpu::xstate::usable(false) {
+        return false;
+    }
+    if r == 0 {
+        let Some(value) = crate::cpu::xstate::xgetbv(read_reg32(ECX) as u32)
+        else {
+            trigger_gp(0);
+            return false;
+        };
+        write_reg32(EAX, value as i32);
+        write_reg32(EDX, (value >> 32) as i32);
+        true
+    }
+    else if *cpl != 0
+        || !crate::cpu::xstate::xsetbv(
+            read_reg32(ECX) as u32,
+            (read_reg32(EDX) as u32 as u64) << 32 | read_reg32(EAX) as u32 as u64,
+        )
+    {
+        trigger_gp(0);
+        false
+    }
+    else {
+        true
+    }
+}
 
 unsafe fn lgdt(addr: i32, mask: i32) {
     if 0 != *cpl {
@@ -850,9 +893,7 @@ pub unsafe fn mov_to_cr(r: i32, creg: i32) -> bool {
                 return true;
             }
             dbg_log!("cr4 <- {:x}", data);
-            if 0 != data as u32
-                & ((1 << 11 | 1 << 12 | 1 << 15 | 1 << 16 | 1 << 19) as u32 | 0xFFC00000)
-            {
+            if 0 != data as u32 & !cr4_valid_bits() {
                 dbg_log!("trigger_gp: Invalid cr4 bit");
                 trigger_gp(0);
                 false
@@ -3741,6 +3782,7 @@ pub unsafe fn instr_0FA2() {
     let mut topology = [eax as u32, ebx as u32, ecx as u32, edx as u32];
     apply_x64_test_capabilities(X64_TEST_CAPABILITIES, level, &mut topology);
     crate::cpu::features::cpuid(level, read_reg32(ECX) as u32, &mut topology);
+    crate::cpu::xstate::cpuid(level, read_reg32(ECX) as u32, &mut topology);
     crate::cpu::topology::apply(
         level,
         read_reg32(ECX) as u32,
@@ -3906,17 +3948,23 @@ pub unsafe fn instr_0FAE_3_mem(addr: i32) {
 }
 #[no_mangle]
 pub unsafe fn instr_0FAE_4_reg(_r: i32) { trigger_ud(); }
+// XSAVE and XRSTOR: #UD (CR4.OSXSAVE) and #NM (CR0.TS) come before the
+// operand's segment checks (modrm_resolve)
 #[no_mangle]
-pub unsafe fn instr_0FAE_4_mem(_addr: i32) {
+pub unsafe fn instr_0FAE_4_mem(modrm_byte: i32) {
     // xsave
-    undefined_instruction();
+    if crate::cpu::xstate::usable(true) {
+        crate::cpu::xstate::xsave_32(return_on_pagefault!(modrm_resolve(modrm_byte)));
+    }
 }
 pub unsafe fn instr_0FAE_5_reg(_r: i32) {
     // lfence
 }
-pub unsafe fn instr_0FAE_5_mem(_addr: i32) {
+pub unsafe fn instr_0FAE_5_mem(modrm_byte: i32) {
     // xrstor
-    undefined_instruction();
+    if crate::cpu::xstate::usable(true) {
+        crate::cpu::xstate::xrstor_32(return_on_pagefault!(modrm_resolve(modrm_byte)));
+    }
 }
 #[no_mangle]
 pub unsafe fn instr_0FAE_6_reg(_r: i32) {

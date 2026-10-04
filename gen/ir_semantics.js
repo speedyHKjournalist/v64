@@ -15,7 +15,7 @@ function lowering(encoding, operand) {
     if(op === 0xFB) return "CpuStiHIR";
     if(op >= 0xD8 && op <= 0xDF) return "CpuX87Helper";
     if([0x9A,0xEA,0xCA,0xCB,0xCC,0xCD,0xCE,0xCF].includes(op) || op === 0xFF && [3,5].includes(g)) return "CpuFarControlHelper";
-    if(op === 0x0FAE && g <= 3 && operand === "mem") return "CpuFpStateHelper";
+    if(op === 0x0FAE && g <= 5 && operand === "mem") return "CpuFpStateHelper";
     if(remaining.has(op) && (op !== 0x0FAE || g >= 4) && (op !== 0x0FC7 || g === 6)) return "CpuBaselineHelper";
     if(xmm_immediate.has(op) && operand === "reg") return "CpuSimdHIR";
     if(op===0x660FF7) return "CpuSimdHIR";

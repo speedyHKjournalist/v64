@@ -13,7 +13,8 @@ fn fp_state_fixtures() {
     let mut cases = Vec::new();
     for mode in [false, true] {
         for address32 in [false, true] {
-            for group in 0u8..4 {
+            // FXSAVE, FXRSTOR, LDMXCSR, STMXCSR, XSAVE, XRSTOR
+            for group in 0u8..6 {
                 for dirty in [false, true] {
                     let mut bytes = vec![0x46];
                     if dirty {

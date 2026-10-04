@@ -171,6 +171,8 @@ const emulator = new V86({
     ...(extended_memory ? {extended_memory_size: extended_memory} : {}),
     ...(extended_cache ? {extended_memory_cache: extended_cache} : {}),
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0, net_device: {type: "virtio"},
+    // X64_CPU_FEATURES: CPU features of docs/simd-xsave-plan.md, comma-separated (e.g. XSAVE)
+    ...(process.env.X64_CPU_FEATURES ? {cpu_features: process.env.X64_CPU_FEATURES.split(",")} : {}),
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
     // X64_PARALLEL=1: the application processors run in vCPU workers
     ...(+process.env.X64_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),

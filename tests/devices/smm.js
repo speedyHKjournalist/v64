@@ -393,5 +393,39 @@ test("x86-64: the auto HALT restart byte (0x7EC9)", () => {
 });
 emulator.destroy();
 
+// XSAVE (docs/simd-xsave-plan.md 6.1): an SMI clears CR4, so the handler runs
+// with CR4.OSXSAVE 0; XCR0 is not in the save area and stays; RSM restores a
+// valid CR4 and shuts down for a reserved bit
+emulator = await boot({ cpu_features: ["XSAVE"] });
+cpu = emulator.v86.cpu;
+{
+    const xcr0 = new Uint32Array(cpu.wasm_memory.buffer, cpu.state_base + STATE_OFFSETS.xcr0, 2);
+    cpu.cr[4] |= 1 << 18;
+    xcr0.set([3, 0]);
+    cpu.mem8.set([0x0F, 0xAA], 0xA8000);
+    test("XSAVE: in SMM CR4.OSXSAVE is 0, XCR0 stays", () => {
+        cpu.smi();
+        assert.ok(in_smm());
+        assert.equal(cpu.cr[4], 0);
+        assert.deepEqual(Array.from(xcr0), [3, 0]);
+    });
+    cpu.run_cpu_slice(1);
+    test("XSAVE: RSM restores CR4.OSXSAVE; XCR0 stays", () => {
+        assert.ok(!in_smm());
+        assert.equal(cpu.cr[4] & 1 << 18, 1 << 18);
+        assert.deepEqual(Array.from(xcr0), [3, 0]);
+    });
+    test("RSM to a reserved CR4 bit: shutdown (here a board reset)", () => {
+        const resets = cpu.last_reset ? cpu.last_reset.count : 0;
+        cpu.smi();
+        assert.ok(in_smm());
+        cpu.mem8[0xAFF14 + 2] |= 1 << 6; // CR4 in the 32-bit save area: bit 22
+        cpu.run_cpu_slice(1);
+        assert.equal(cpu.last_reset && cpu.last_reset.count, resets + 1);
+        assert.equal(cpu.last_reset.reason, "triple-fault");
+    });
+}
+emulator.destroy();
+
 console.log((failed ? "FAIL" : "PASS") + ": " + passed + " SMM tests passed, " + failed + " failed");
 process.exit(failed ? 1 : 0);

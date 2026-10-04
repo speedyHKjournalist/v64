@@ -7,7 +7,7 @@ use super::{
     memory::{self, Fault},
     state,
 };
-use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem};
+use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem, xstate};
 use crate::softfloat::F80;
 
 extern "C" {
@@ -1611,6 +1611,49 @@ unsafe fn bytes_write(a: u64, data: &[u8], stack: bool) -> Result<(), Fault> {
 fn u16_at(v: &[u8], at: usize) -> u16 { u16::from_le_bytes(v[at..at + 2].try_into().unwrap()) }
 fn u32_at(v: &[u8], at: usize) -> u32 { u32::from_le_bytes(v[at..at + 4].try_into().unwrap()) }
 fn u64_at(v: &[u8], at: usize) -> u64 { u64::from_le_bytes(v[at..at + 8].try_into().unwrap()) }
+/// An XSAVE or FXSAVE area at a checked linear address (cpu::xstate::Area)
+struct Area {
+    a: u64,
+    stack: bool,
+}
+impl xstate::Area for Area {
+    type Fault = Fault;
+    unsafe fn check(&mut self, offset: u32, length: u32, write: bool) -> Result<(), Fault> {
+        // (a field is shorter than a page: its first and last bytes cover it)
+        let first = self.a.wrapping_add(offset as u64);
+        for at in [first, first.wrapping_add(length as u64 - 1)] {
+            if write {
+                memory::probe_write(at, 8, self.stack)?;
+            }
+            else {
+                memory::probe_read(at, 8, self.stack)?;
+            }
+        }
+        Ok(())
+    }
+    unsafe fn read(&mut self, offset: u32, bytes: &mut [u8]) {
+        let value = memory::read(
+            self.a.wrapping_add(offset as u64),
+            bytes.len() as u8 * 8,
+            self.stack,
+        )
+        .unwrap();
+        bytes.copy_from_slice(&value.to_le_bytes()[..bytes.len()]);
+    }
+    unsafe fn write(&mut self, offset: u32, bytes: &[u8]) {
+        let mut value = [0; 8];
+        value[..bytes.len()].copy_from_slice(bytes);
+        let at = self.a.wrapping_add(offset as u64);
+        memory::write(
+            at,
+            bytes.len() as u8 * 8,
+            u64::from_le_bytes(value),
+            self.stack,
+        )
+        .unwrap();
+    }
+    unsafe fn gp(&mut self) -> Fault { Fault::gp() }
+}
 unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
     if d.base_opcode() != 0x0FAE {
         return Ok(false);
@@ -1625,14 +1668,19 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
         memory::probe_read(a, 8, s)?;
         return Ok(true); // CLFLUSH: guest caches share the coherent RAM image.
     }
-    if group > 3 {
+    // (XSAVEOPT: #UD)
+    if group == 6 {
         return Ok(false);
+    }
+    // XSAVE and XRSTOR: #UD without CR4.OSXSAVE before #NM
+    if group >= 4 && !xstate::enabled() {
+        return Err(Fault::ud());
     }
     if state::read_cr(0) & 8 != 0 {
         return Err(fault(7));
     }
     let (a, s) = address(d);
-    if group >= 2 {
+    if group == 2 || group == 3 {
         guard(true)?;
         if group == 2 {
             let v = memory::read(a, 32, s)? as u32;
@@ -1646,72 +1694,19 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
         }
         return Ok(true);
     }
-    alignment(a, s, 16)?;
-    fpu::fpu_cache_barrier();
-    if group == 0 {
-        let mut out = vec![0u8; 512];
-        out[0..2].copy_from_slice(&(*gp::fpu_control_word).to_le_bytes());
-        out[2..4].copy_from_slice(&fpu::fpu_load_status_word().to_le_bytes());
-        out[4] = !*gp::fpu_stack_empty;
-        out[6..8].copy_from_slice(&(*gp::fpu_opcode as u16).to_le_bytes());
-        out[8..12].copy_from_slice(&(*gp::fpu_ip as u32).to_le_bytes());
-        out[16..20].copy_from_slice(&(*gp::fpu_dp as u32).to_le_bytes());
-        if d.prefixes.w() {
-            out[12..16].copy_from_slice(&(*gp::x64_fpu_ip_hi).to_le_bytes());
-            out[20..24].copy_from_slice(&(*gp::x64_fpu_dp_hi).to_le_bytes());
-        }
-        else {
-            out[12..14].copy_from_slice(&(*gp::fpu_ip_selector as u16).to_le_bytes());
-            out[20..22].copy_from_slice(&(*gp::fpu_dp_selector as u16).to_le_bytes());
-        }
-        if state::read_cr(4) & 0x200 != 0 {
-            out[24..28].copy_from_slice(&(*gp::mxcsr as u32).to_le_bytes());
-            out[28..32].copy_from_slice(&(cpu::MXCSR_MASK as u32).to_le_bytes());
-            for i in 0..16 {
-                out[160 + i * 16..176 + i * 16].copy_from_slice(&xmm(i as u8).to_le_bytes());
-            }
-        }
-        for i in 0..8 {
-            let value = *gp::fpu_st.add((i + *gp::fpu_stack_ptr as usize) & 7);
-            out[32 + i * 16..40 + i * 16].copy_from_slice(&value.mantissa.to_le_bytes());
-            out[40 + i * 16..42 + i * 16].copy_from_slice(&value.sign_exponent.to_le_bytes());
-        }
-        bytes_write(a, &out, s)?;
-    }
-    else {
-        let data = bytes_read(a, 512, s)?;
-        let mxcsr = u32_at(&data, 24);
-        if state::read_cr(4) & 0x200 != 0 && mxcsr & !(cpu::MXCSR_MASK as u32) != 0 {
-            return Err(Fault::gp());
-        }
-        fpu::set_control_word(u16_at(&data, 0));
-        fpu::fpu_set_status_word(u16_at(&data, 2));
-        *gp::fpu_stack_empty = !data[4];
-        *gp::fpu_opcode = (u16_at(&data, 6) & 0x7FF) as i32;
-        *gp::fpu_ip = u32_at(&data, 8) as i32;
-        *gp::fpu_dp = u32_at(&data, 16) as i32;
-        *gp::x64_fpu_ip_hi = if d.prefixes.w() { u32_at(&data, 12) } else { 0 };
-        *gp::x64_fpu_dp_hi = if d.prefixes.w() { u32_at(&data, 20) } else { 0 };
-        *gp::fpu_ip_selector = if d.prefixes.w() { 0 } else { u16_at(&data, 12) as i32 };
-        *gp::fpu_dp_selector = if d.prefixes.w() { 0 } else { u16_at(&data, 20) as i32 };
-        for i in 0..8 {
-            fpu::fpu_write_st(
-                ((i + *gp::fpu_stack_ptr as usize) & 7) as i32,
-                F80 {
-                    mantissa: u64_at(&data, 32 + i * 16),
-                    sign_exponent: u16_at(&data, 40 + i * 16),
-                },
-            );
-        }
-        if state::read_cr(4) & 0x200 != 0 {
-            *gp::mxcsr = mxcsr as i32;
-            for i in 0..16 {
-                put_xmm(
-                    i as u8,
-                    u128::from_le_bytes(data[160 + i * 16..176 + i * 16].try_into().unwrap()),
-                );
-            }
-        }
+    alignment(a, s, if group >= 4 { 64 } else { 16 })?;
+    // the 64-bit format with REX.W; XMM8-15 and YMM8-15 in 64-bit mode
+    let format = xstate::Format {
+        wide: d.prefixes.w(),
+        long: d.mode.is_long(),
+    };
+    let area = &mut Area { a, stack: s };
+    let rfbm = || xstate::requested(state::read_gpr(2) as u32, state::read_gpr(0) as u32);
+    match group {
+        0 => xstate::fxsave(area, format)?,
+        1 => xstate::fxrstor(area, format)?,
+        4 => xstate::xsave(area, rfbm(), format)?,
+        _ => xstate::xrstor(area, rfbm(), format)?,
     }
     Ok(true)
 }

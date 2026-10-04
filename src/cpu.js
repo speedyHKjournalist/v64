@@ -20,7 +20,7 @@ import { SB16 } from "./sb16.js";
 import { ACPI, acpi_system_states_file } from "./acpi.js";
 import { ACPI_LOADER_FILE, ACPI_RSDP_FILE, ACPI_TABLES_FILE, build_acpi_tables, locate_acpi_tables } from "./acpi_tables.js";
 import { ACPI_PM_BASE_DEFAULT, MACHINE_LAYOUT_VERSION, Platform, check_platform, create_platform } from "./platform.js";
-import { CORE_STATE_RANGES, STATE_OFFSETS } from "./state_layout.js";
+import { CORE_STATE_RANGES, INIT_PRESERVED, STATE_OFFSETS } from "./state_layout.js";
 import { CPU_FEATURES, CPU_FEATURE_PRESETS } from "./cpu_features.js";
 import { ParallelMachine } from "./parallel/machine.js";
 import { ExtendedStore } from "./extended_memory.js";
@@ -862,6 +862,8 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[104] = this.devices.smbus;
     // the root ports' hot plug slots
     state[105] = (this.devices.pcie_root_ports || []).map(port => port.get_state());
+    // the CPU features (settings cpu_features, CPU_FEATURES)
+    state[106] = this.cpu_features;
     return state;
 };
 
@@ -947,11 +949,6 @@ export function resolve_cpu_features(requested, x86_64, cpuid_level)
     }
     return kept.reduce((set, name) => set | 1 << CPU_FEATURES[name]["bit"], 0);
 }
-
-// [offset, size] of core state that survives INIT
-const INIT_PRESERVED = [[STATE_OFFSETS.x64_pat, 8],
-    [STATE_OFFSETS.x64_mtrr_def_type, STATE_OFFSETS.x64_mc_banks + 128 - STATE_OFFSETS.x64_mtrr_def_type],
-    [STATE_OFFSETS.smbase, 4]];
 
 // Version 1 predates the x64 extension banks. Keep exact byte ranges for import.
 const CORE_STATE_RANGES_V1 = [[64, 108], [112, 552], [556, 620], [628, 652], [668, 716],
@@ -1040,6 +1037,11 @@ CPU.prototype.set_machine_core_state = function(state)
             {
                 // (SMBASE's reset value)
                 new DataView(bytes.buffer).setUint32(STATE_OFFSETS.smbase - start, 0x30000, true);
+            }
+            if(start <= STATE_OFFSETS.xcr0 && end >= STATE_OFFSETS.xcr0 + 8)
+            {
+                // (XCR0's reset value: x87 state only)
+                new DataView(bytes.buffer).setUint32(STATE_OFFSETS.xcr0 - start, 1, true);
             }
             return bytes;
         });
@@ -1148,6 +1150,15 @@ CPU.prototype.validate_state = function(state)
         throw new Error("Invalid snapshot RAM size");
     if((state[98] || 0) !== this.extended_pages)
         throw new Error("Snapshot extended RAM size differs from this machine's");
+    // The guest has seen these in CPUID and may use them (snapshots from
+    // before them have none)
+    const features = state[106] || 0;
+    if(features !== this.cpu_features)
+    {
+        const names = mask => Object.keys(CPU_FEATURES).filter(name => mask & 1 << CPU_FEATURES[name].bit).join(" ") || "none";
+        throw new Error("The snapshot is from a machine with the CPU features " + names(features) +
+            " (cpu_features), this one has " + names(this.cpu_features));
+    }
 };
 
 CPU.prototype.set_state = function(state, skip_memory = false)
@@ -1300,9 +1311,10 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.fpu_dp_selector[0] = state[74];
     this.fpu_opcode[0] = state[75];
 
-    if(state[86] !== undefined) this.last_result = state[86];
-    if(state[87] !== undefined) this.fpu_status_word = state[87];
-    if(state[88] !== undefined) this.mxcsr = state[88];
+    // (into the views of the Wasm memory, which must not be replaced)
+    if(state[86] !== undefined) this.last_result[0] = state[86][0];
+    if(state[87] !== undefined) this.fpu_status_word[0] = state[87][0];
+    if(state[88] !== undefined) this.mxcsr[0] = state[88][0];
 
     if(!skip_memory)
     {
@@ -1339,6 +1351,7 @@ CPU.prototype.set_state = function(state, skip_memory = false)
         for(const [start, end] of CORE_STATE_RANGES) if(start >= 1360) bytes.fill(0, this.state_base + start, this.state_base + end);
         new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.x64_pat, 2).fill(0x00070406);
         new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.smbase, 1)[0] = 0x30000;
+        new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.xcr0, 2).set([1, 0]);
         this.with_wide_state_buffer(new Uint32Array(0), (pointer, count) => this.wm.exports["x64_tlb_snapshot_restore"](0, pointer, count));
         this.wm.exports["exception_restore"](0, 0);
         this.cores[0].slices = this.cores[0].steps = 0;
@@ -1479,9 +1492,10 @@ CPU.prototype.take_core_events = function(core)
         dbg_log("core " + core + ": INIT", LOG_CPU);
         this.apic_init_core(core);
         this.wm.exports["context_reset"](core);
-        // INIT leaves the PAT, the MTRRs and the machine-check banks alone
-        // (SDM Vol.3A, "Processor States Following Power-up, Reset, or INIT");
-        // everything else takes its reset value
+        // INIT leaves the x87, SSE and XSAVE state, the PAT, the MTRRs, the
+        // machine-check banks and SMBASE alone (SDM Vol.3A, "Processor States
+        // Following Power-up, Reset, or INIT"; INIT_PRESERVED); everything
+        // else takes its reset value
         const next = this.core_reset_state.map(bytes => bytes.slice());
         const current = core === this.active_core ? this.save_core_state() : state.saved;
         if(current) for(const [offset, size] of INIT_PRESERVED)

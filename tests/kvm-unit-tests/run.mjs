@@ -10,6 +10,8 @@
 //   --timeout SEC     give up after SEC seconds (default 60)
 //   --expect-pass N   require at least N "PASS:" reports: a test that exits 0
 //                     without reaching its checks does not count as passed
+//   --cpu-features L  CPU features of docs/simd-xsave-plan.md, comma-separated
+//   --cpu-type T      x86 (default) or x86_64, for the x86_64 builds
 //   --quiet           don't echo the serial output
 // Environment: TEST_RELEASE_BUILD=1 uses build/libv86.mjs, DISABLE_JIT=1 the interpreter.
 //
@@ -23,7 +25,7 @@ import url from "node:url";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
-const options = { acpi: false, cores: 1, memory: 64, timeout: 60, expect_pass: 0, quiet: false };
+const options = { acpi: false, cores: 1, memory: 64, timeout: 60, expect_pass: 0, quiet: false, cpu_features: undefined, cpu_type: undefined };
 let test_file;
 for(let i = 2; i < process.argv.length; i++)
 {
@@ -34,6 +36,8 @@ for(let i = 2; i < process.argv.length; i++)
     else if(arg === "--cores") { options.cores = +process.argv[++i]; options.acpi ||= options.cores > 1; }
     else if(arg === "--timeout") options.timeout = +process.argv[++i];
     else if(arg === "--expect-pass") options.expect_pass = +process.argv[++i];
+    else if(arg === "--cpu-features") options.cpu_features = process.argv[++i].split(",");
+    else if(arg === "--cpu-type") options.cpu_type = process.argv[++i];
     else if(arg.startsWith("--")) { console.error("unknown option " + arg); process.exit(4); }
     else test_file = arg;
 }
@@ -80,6 +84,8 @@ const emulator = new V86({
     memory_size: options.memory * 1024 * 1024,
     acpi: options.acpi,
     cpu_cores: options.cores,
+    cpu_features: options.cpu_features,
+    cpu_type: options.cpu_type,
     disable_jit: +process.env.DISABLE_JIT,
     log_level: 0,
 });

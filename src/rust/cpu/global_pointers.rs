@@ -150,6 +150,9 @@ state!(x64_mtrr_var: u64 = 2152);
 state!(x64_mcg_status: u64 = 2280);
 state!(x64_mcg_ctl: u64 = 2288);
 state!(x64_mc_banks: u64 = 2296);
+state!(xcr0: u64 = 2432);
+state!(xss: u64 = 2440);
+state!(ymm_hi: reg128 = 2448);
 // END GENERATED
 
 pub fn get_reg32_offset(r: u32) -> u32 {

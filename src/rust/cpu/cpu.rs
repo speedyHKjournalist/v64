@@ -175,7 +175,19 @@ pub const CR4_PAE: i32 = 1 << 5;
 pub const CR4_PGE: i32 = 1 << 7;
 pub const CR4_OSFXSR: i32 = 1 << 9;
 pub const CR4_OSXMMEXCPT: i32 = 1 << 10;
+pub const CR4_OSXSAVE: i32 = 1 << 18;
 pub const CR4_SMEP: i32 = 1 << 20;
+/// The CR4 bits MOV to CR4 (legacy and x64) and RSM accept, those of the
+/// features this CPU has: VME through OSXMMEXCPT, OSXSAVE with XSAVE
+pub fn cr4_valid_bits() -> u32 {
+    0x7FF
+        | if crate::cpu::features::has(crate::cpu::features::XSAVE) {
+            CR4_OSXSAVE as u32
+        }
+        else {
+            0
+        }
+}
 
 pub const TSR_BACKLINK: i32 = 0x00;
 pub const TSR_CR3: i32 = 0x1C;
@@ -4996,6 +5008,7 @@ pub fn reset_interrupt_controllers() {
 #[no_mangle]
 pub unsafe fn reset_cpu() {
     crate::x64::state::reset_extension();
+    crate::cpu::xstate::reset();
     crate::cpu::fpu::fpu_discard_cache();
     for i in 0..8 {
         *segment_is_null.offset(i) = false;

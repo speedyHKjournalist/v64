@@ -459,15 +459,18 @@ const encodings = [
 
     { opcode: 0x0FAA, block_boundary: 1, skip: 1 }, // rsm
 
-    { opcode: 0x0FAE, e: 1, fixed_g: 0, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxsave
-    { opcode: 0x0FAE, e: 1, fixed_g: 1, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxrstor
-    { opcode: 0x0FAE, e: 1, fixed_g: 2, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // ldmxcsr
-    { opcode: 0x0FAE, e: 1, fixed_g: 3, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // stmxcsr
+    // 66, F2 and F3 select other instructions (CLFLUSHOPT, RDFSBASE, PTWRITE,
+    // INCSSP, UMONITOR, ...), none of which this CPU has
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 0, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxsave
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 1, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxrstor
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 2, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // ldmxcsr
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 3, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // stmxcsr
 
-    { opcode: 0x0FAE, e: 1, fixed_g: 4, reg_ud: 1, skip: 1, block_boundary: 1 }, // xsave (mem, not implemented)
-    { opcode: 0x0FAE, e: 1, fixed_g: 5, skip: 1, custom: 1 }, // lfence (reg, only 0), xrstor (mem, not implemented)
-    { opcode: 0x0FAE, e: 1, fixed_g: 6, skip: 1, block_boundary: 1 }, // mfence (reg, only 0), xsaveopt (mem, not implemented)
-    { opcode: 0x0FAE, e: 1, fixed_g: 7, skip: 1, block_boundary: 1 }, // sfence (reg, only 0), clflush (mem)
+    // (XSAVE and XRSTOR check CR4.OSXSAVE and CR0.TS before their operand)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 4, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1 }, // xsave (mem)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 5, skip: 1, custom: 1, custom_modrm_resolve: 1 }, // lfence (reg, only 0), xrstor (mem)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 6, skip: 1, block_boundary: 1 }, // mfence (reg, only 0), xsaveopt (mem, not implemented)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 7, skip: 1, block_boundary: 1 }, // sfence (reg, only 0), clflush (mem)
 
     { opcode: 0x0FAF, os: 1, e: 1, mask_flags: TESTS_ASSUME_INTEL ? af | zf : sf | zf | af | pf, custom: 1 }, // imul
 

@@ -957,3 +957,60 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
   iced 解出的形式和长度与 v86 相同。
 - 兼容模式下两个引擎的执行差分（第 2 节末）随各阶段的语义一起做：目前所有新形式都在两边
   #UD，位置由上面的解码一致性保证。
+
+### P2：XCR0、YMM 高半与基础 XSAVE/XRSTOR（2026-10-04）
+
+- **状态**：`gen/state_layout.js` 新增每核 `xcr0`、`xss` 和 `ymm_hi`（16 个 128 位），自成快照区间
+  [2432, 2704]。字段可以声明 `range`，不同 range 的字段不合并成一个区间。旧快照缺这一区间时，
+  XCR0 填 1、其余为 0，多核快照和单核旧快照两条路径都这样处理。字段还可标 `init: "keep"`，由此生成
+  `INIT_PRESERVED`：INIT 保留 x87、MMX/XMM、MXCSR、YMM 高半、XCR0 和 XSS（Q6），以及原有的
+  PAT、MTRR、机器检查寄存器和 SMBASE。`cpu.js` 与并行 vCPU worker 共用这份列表（worker 以前
+  漏了 SMBASE）。RESET 时 XCR0 为 1。
+- **CPUID**：叶 1 ECX[26] 报告 XSAVE，[27] 的 OSXSAVE 随 CR4。叶 0xD 子叶 0 报告支持的 XCR0
+  （没有 AVX 时为 3，有时为 7）、当前 XCR0 和全部支持分量各自所需的标准格式大小（576 或 832）；
+  子叶 2 报告 YMM_Hi128 的大小和偏移；其他子叶为零。
+- **CR4**：legacy 和 x64 的 MOV CR4 以及 RSM 共用 `cr4_valid_bits()`：VME 至 OSXMMEXCPT，
+  OSXSAVE 只在有 XSAVE 时允许。legacy 路径不再接受 CPUID 没有报告的 VMXE、SMXE、PCIDE、SMEP、
+  SMAP 等位。RSM 恢复到带保留位的 CR4 时进入 shutdown。
+- **XGETBV/XSETBV**（`0F 01 D0/D1`）在三条执行路径都已实现。没有 CR4.OSXSAVE 或带 66/F2/F3 前缀时
+  #UD。XSETBV 只接受 XCR0，值必须包含 x87、只含支持的分量、YMM 必须同时有 SSE，CPL>0 时 #GP。
+  XGETBV(1) 在 P9 之前 #GP。XSETBV 会推进 IR 的准入版本。
+- **XSAVE/XRSTOR**（`0F AE /4`、`/5`；64 位模式下带 REX.W 为 XSAVE64/XRSTOR64）使用共用的
+  编解码 `cpu/xstate.rs`，只支持标准格式：
+  - 按所请求的分量逐字段存取，不写保留字节和 464–511 字节；64 位模式外不碰 XMM8–15 和
+    YMM8_H–15_H。
+  - XINUSE 按 SDM 13.6 定义的初始配置精确计算；RFBM[1] 或 [2] 为 1 时存取 MXCSR。
+  - XRSTOR 检查 XCOMP_BV[63]、头部字节 8–23、XSTATE_BV 是否超出 XCR0，以及 MXCSR 保留位。
+  - 每个执行引擎实现 `Area`：32 位解释器和 IR helper（`ir_xsave`、`ir_xrstor`）按线性地址访存，
+    x64 引擎用自己的访存函数。所有字段先检查页故障再搬运数据，故障时内存和状态都不变。
+  - 异常顺序：#UD（OSXSAVE），#NM（CR0.TS），然后才是操作数的段检查，接着 #GP（64 字节对齐），
+    最后 #PF。32 位解释器为此让 XSAVE/XRSTOR 自己解析操作数地址（`custom_modrm_resolve`）；
+    IR 的 coverage 差分发现过这一顺序与 IR helper 不一致。
+- **`0F AE` 改为 refining**：66/F2/F3 在这一组选择 CLFLUSHOPT、RDFSBASE、PTWRITE、INCSSP 等
+  本机没有的指令，所以都在 ModRM 后 #UD，与 iced 一致。
+- **FXSAVE/FXRSTOR** 也改用共用编解码。32 位执行路径未对齐时 #GP，以前只有 `dbg_assert`。
+  x64 的 FXSAVE 不再写 464–511 字节（以前写出整个 512 字节零缓冲区）。64 位模式外只存取 XMM0–7。
+- **快照**：顶层 `state[106]` 记录 CPU 能力位图。恢复到能力不同的机器时，在修改任何状态之前报错；
+  旧快照按没有计划内能力处理。同时修复 `set_state` 的一个旧缺陷：它把 `last_result`、
+  `fpu_status_word`、`mxcsr` 的内存视图换成了快照里的数组，恢复后 JS 读到的是过期值。
+- **测试**：
+  - `make xsave-tests`：
+    - `tests/rust/xsave.mjs` 在解释器、Tier-0 和 regions 上覆盖 CPUID、CR4、XGETBV/XSETBV、
+      往返、部分保存、初始化、各种异常、页故障无部分效果，以及不访问未请求分量的位置。
+    - `tests/x64/xsave.mjs` 覆盖 64 位模式和兼容模式下的格式，以及 x64 引擎的 9 种异常，
+      解释执行和 page tier 各跑一遍。
+    - `tests/smp/xstate_lifecycle.mjs` 覆盖快照、INIT、RESET、旧快照和能力校验。
+  - `cargo test cpu::xstate`。
+  - IR fp_state 差分扩展到 XSAVE/XRSTOR，共 392 个用例：OSXSAVE、TS、空段的先后顺序，MMIO，
+    以及跨页 #PF。
+  - `tests/devices/smm.js` 新增 SMI/RSM 用例。
+  - `make kvm-unit-test-xsave`：kvm-unit-tests 的 x86/xsave（x86_64 构建）在无能力、XSAVE、
+    XSAVE+AVX 三种配置下分别通过 4、15、17 项。为此，构建脚本不再把 clang 对该库的 format 和
+    constant-conversion 警告当作错误。
+- **客体**：Alpine x86_64（virt 内核，单核，page tier）在 `cpu_features: ["XSAVE"]` 下启动到 shell，
+  并通过 64 位和 32 位探针。内核报告 "Enabled xstate features 0x3, context size is 576 bytes,
+  using 'standard' format"，上下文切换使用 XSAVE/XRSTOR。
+- **回归**：`make rust-test`、`x64-decode-tests`、opcode 矩阵、`nasmtests`、`ir-decode-contract-tests`、
+  `ir-coverage-tests`、`ir-fp-state-tests`、`ir-tier0-tests`、`ir-differential-tests`、`sse3-tests`、
+  `packed-simd-tests`、`ir-sse-fp-tests`、`x64-system-tests`、`smp-tests`、`api-tests`、
+  `q35-device-tests`、`kvm-unit-test`、`decode-rules-tests` 和 `platform-contract-tests` 全部通过。
