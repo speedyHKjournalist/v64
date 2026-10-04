@@ -28,15 +28,15 @@ LZCNT、MOVBE）纳入范围。目标是让现有
 | LZCNT | 16/32/64 位形式，只在 x64 配置开放（第 13 节 Q7）；未开放时，包括在 32 位配置中，`F3 0F BD` 按 BSR 执行 |
 | MOVBE | 16/32/64 位的加载与存储形式（只有内存操作数形式） |
 | 基础 XSAVE | XSAVE、XRSTOR、XGETBV(0)、XSETBV、XCR0、CR4.OSXSAVE、CPUID leaf 0xD |
-| XSAVE 家族扩展 | 分阶段完成 XSAVEOPT、XGETBV(1)、XSAVEC 并分别公布能力位；XSAVES/XRSTORS 为可选的最后一步（第 13 节 Q3） |
+| XSAVE 家族扩展 | 分阶段完成 XSAVEOPT、XGETBV(1)、XSAVEC，最后是 XSAVES/XRSTORS，并分别公布能力位（第 13 节 Q3） |
 | 状态分量 | x87/MMX、SSE/MXCSR、YMM_Hi128；按架构定义处理初始化状态与 32/64 位格式 |
 | 所有执行入口 | 32 位解释器、IR Tier-0、IR region 管线、64 位解释器及 page tier；兼容模式同样覆盖，且 32 位解释器与 x64 引擎结果一致 |
 | 可移植性 | Wasm SIMD 和无 `simd128` 构建提供相同客体语义，宿主无需具有原生 AVX |
 
-这里将“XSAVE 完整”明确拆成基础功能和上述家族扩展。基础功能和 XSAVEOPT、XGETBV(1)、
-XSAVEC 列入最终目标；XSAVES/XRSTORS 是否列入由第 13 节 Q3 决定。本项目没有新增
-supervisor state 分量，XSAVES 没有功能收益，公开后却会让 Linux 改走最复杂的
-XSAVES/XRSTORS 压缩格式路径。若实现，则同时实现 `IA32_XSS` 及其校验，初始受支持 XSS
+这里将“XSAVE 完整”明确拆成基础功能和上述家族扩展，两部分均列入最终目标（XSAVES/XRSTORS
+由第 13 节 Q3 定为实现）。本项目没有新增 supervisor state 分量，XSAVES 本身没有功能收益，
+公开后还会让 Linux 改走 XSAVES/XRSTORS 的压缩格式路径，所以它放在 M5 的最后一步，并对这条
+路径做完整的操作系统验收。XSAVES/XRSTORS 同时实现 `IA32_XSS` 及其校验，初始受支持 XSS
 位图为零，不能借此宣称支持其他状态组件。
 
 本计划覆盖 x86-64-v3 的全部要求：在 x86-64-v2 之上，还有 AVX、AVX2、BMI1、BMI2、F16C、
@@ -72,7 +72,8 @@ semantic oracle / positive tests / negative tests / lifecycle tests
 中的 Volume 2 各指令条目及 Volume 3 异常规则为准。P0 固定实际使用的手册版本、
 下载校验值和勘误，避免测试随着在线文档更新而无记录变化。本文统一引用
 [SDM 合订本（cdrdv2 835781）](https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf)，
-并注明卷号和章节；P0 记录它的版本号与 SHA-256，更换版本时同步更新所有引用。
+并注明卷号和章节。P0 固定的版本是 325462-085US（2024 年 10 月），SHA-256
+`ae21642237489554840f3e640848e53bdbbbfa73108a92e60139748b4f804de3`；更换版本时同步更新所有引用。
 
 ## 2. 当前代码基础与缺口
 
@@ -184,7 +185,7 @@ gather 允许架构规定的逐元素进度，不能套用普通指令的整体�
 | P6 | AVX 全部 256 位形式及掩码访存 | P5 | 256 位浮点、排列、异常及 OS 上下文保存通过 |
 | P7 | AVX2 普通整数、广播、排列、变长移位 | P6 | 逐形式和双 128 位 lane 边界测试通过 |
 | P8 | AVX2 gather 与掩码故障/重启完整性 | P7；复杂访存框架可提前并行 | 故障进度、mask 写回、重启及 MMIO 计数通过 |
-| P9 | XSAVEOPT、XGETBV(1)、XSAVEC；XSAVES/XRSTORS 视 Q3 而定 | P2；与 P5–P8 并行 | 各独立能力位、格式及状态跟踪通过 |
+| P9 | XSAVEOPT、XGETBV(1)、XSAVEC，最后是 XSAVES/XRSTORS | P2；与 P5–P8 并行 | 各独立能力位、格式及状态跟踪通过 |
 | P10 | BMI1、BMI2、LZCNT/TZCNT、MOVBE：VEX 编码 GPR 指令、旧编码位操作与标志位接入 | P1；与 P2–P9 并行 | 逐形式语义与标志位通过；能力关闭时 TZCNT/LZCNT 按 BSF/BSR 执行的测试通过 |
 | P11 | FMA、F16C | P4a、P6 | 单次舍入、NaN/MXCSR 规则、F16C 舍入控制与独立 oracle 通过 |
 | P12 | 发布集成、真实客体、浏览器/可移植构建及性能 | P3–P11 | 完整清单无缺口，所有发布验收完成 |
@@ -205,7 +206,7 @@ P4a 的 FP 核心、oracle/fixture 升级也可从 P0 后独立推进。解码�
 | M2 基础 XSAVE | P2 | XSAVE（OSXSAVE 位随 CR4 反映）；XCR0 只支持 x87 和 SSE | 有 XSAVE 而无 AVX 有硬件先例（Goldmont），可以先验证操作系统的上下文切换路径。XCR0 的可支持位由 CPU 配置推导，开放 AVX 后才允许 bit 2 |
 | M3 AVX | P5、P6 | AVX；XCR0 bit 2 | 依赖 M1、M2 |
 | M4 x86-64-v3 | P7、P8、P10、P11 | AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE 一起开放（32 位配置不含 LZCNT） | 依赖 M3。软件多按 v3 整组检测；glibc 的 AVX2 字符串函数要求 AVX2、BMI1、BMI2、LZCNT 同时可用，libm 的 `_fma` 变体要求 FMA 和 AVX2，只开放其中一部分收益有限。P10 的指令可以更早用内部 feature mask 测试，对外随 M4 开放 |
-| M5 XSAVE 扩展 | P9 | XSAVEOPT、XGETBV(1)、XSAVEC；XSAVES 视 Q3 而定 | 依赖 M2；每开放一项都会改变 Linux 和 glibc 的代码路径（6.3 节） |
+| M5 XSAVE 扩展 | P9 | XSAVEOPT、XGETBV(1)、XSAVEC，最后开放 XSAVES | 依赖 M2；每开放一项都会改变 Linux 和 glibc 的代码路径（6.3 节） |
 
 每个里程碑开放能力位之前，5.1 节热点形式清单中属于该里程碑的形式，必须已在编译路径上有
 原生模板（12.2 节）。
@@ -350,7 +351,7 @@ SMI（CR4 清零，所以 SMM 内 OSXSAVE=0）、RSM、INIT/RESET 和快照恢�
 | XSAVEOPT | 标准格式及合法 init/modified 优化语义；保守保存可作为正确性阶段实现，跳过写入优化另测 |
 | XSAVEC | compacted 格式、XCOMP_BV、分量布局和 init 规则；XRSTOR 随同一能力位开始接受压缩格式（6.2 节） |
 | XGETBV(1) | 返回与 XCR0/in-use 语义一致的值，独立 CPUID 门控，不强制将架构允许的保守 in-use 判成错误 |
-| XSAVES/XRSTORS（可选，Q3） | CPL0、IA32_XSS 的 RDMSR/WRMSR、用户/监督状态位图及 compacted 保存恢复；未支持 XSS 位写入 #GP |
+| XSAVES/XRSTORS（M5 最后一步） | CPL0、IA32_XSS 的 RDMSR/WRMSR、用户/监督状态位图及 compacted 保存恢复；未支持 XSS 位写入 #GP |
 
 优化跟踪必须纳入所有写入来源，包括 legacy SSE、VEX、FXRSTOR、XRSTOR、VZERO*、
 复位及快照恢复。首轮可以采用规范允许的保守跟踪；不能漏标 dirty 后错误省略写入。
@@ -793,16 +794,16 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
 
 ## 13. 待决问题
 
-以下问题在 P0 结束前给出结论，并把结论写回相应章节：
+以下问题在 P0 结束前给出结论（Q1 除外，它要等 P12 的兼容性结果），并把结论写回相应章节：
 
 | 编号 | 问题 | 建议 |
 | --- | --- | --- |
-| Q1 | 新建 VM 默认采用哪个 CPU 配置 | 新能力在新旧 profile 下都达到性能预算之前，默认保持旧配置，由用户显式开启 |
-| Q2 | SSE/AVX 浮点的精度策略 | 二选一：参照 `x87_fast_math` 设一个默认的快速模式，或默认精确并采用 7.4 节的快路径；性能预算按选定的默认策略测量 |
-| Q3 | 是否实现 XSAVES/XRSTORS | 没有 supervisor 分量时不纳入首个完整发布 |
-| Q4 | 公开配置的 API 形态 | 能力位图，外加 `x86-64-v2` 这类预设级别；不满足依赖的组合直接报错 |
-| Q5 | 兼容模式由哪个引擎执行 | 共用解码与语义（3.1 节），并保留双引擎差分作为回归手段 |
-| Q6 | INIT 是否保留 x87/XMM/YMM/MXCSR | 按 SDM 保留，与 XCR0/XSS 一起加入 `INIT_PRESERVED` |
+| Q1 | 新建 VM 默认采用哪个 CPU 配置 | 留到 P12 决定。建议：新能力在新旧 profile 下都达到性能预算之前，默认保持旧配置，由用户显式开启 |
+| Q2 | SSE/AVX 浮点的精度策略 | **已定（2026-10-04）**：默认精确，用 7.4 节的快路径准入保住性能；性能预算按这一策略测量。P4a 达不到预算时再重新讨论 |
+| Q3 | 是否实现 XSAVES/XRSTORS | **已定（2026-10-04）**：实现，作为 M5 的最后一步，并对 Linux 的 XSAVES/XRSTORS 路径做完整验收 |
+| Q4 | 公开配置的 API 形态 | **P0 采纳建议**：能力位图，外加 `x86-64-v2` 这类预设级别；不满足依赖的组合直接报错 |
+| Q5 | 兼容模式由哪个引擎执行 | **P0 采纳建议**：共用解码与语义（3.1 节），并保留双引擎差分作为回归手段 |
+| Q6 | INIT 是否保留 x87/XMM/YMM/MXCSR | **P0 采纳建议**：按 SDM 保留，与 XCR0/XSS 一起加入 `INIT_PRESERVED` |
 | Q7 | 32 位配置是否开放 x86-64-v3 中的指令 | **已定（2026-10-04）**：开放 BMI1、BMI2、MOVBE、FMA 和 F16C，不开放 LZCNT。32 位配置的 CPUID 0x80000000 继续返回 5，旧系统看到的扩展 leaf 不变，`F3 0F BD` 继续按 BSR 执行。x86-64-v3 是否完整只看 x64 配置 |
 
 ### 13.1 风险与工作量初评
@@ -822,3 +823,30 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
 
 全部完成后，按项目惯例把本计划压缩进 [`docs/x86-64.md`](x86-64.md) 的 CPU 能力表和一份
 新的 SIMD 设计文档，然后删除本计划。
+
+## 14. 实施记录
+
+### P0（2026-10-04，基线 `8d2b7c04`）
+
+- **编码清单**：`tools/isa_forms` 用 iced-x86 1.21.0 生成 `gen/isa_forms.json`；`make isa-forms`
+  重新生成，`make isa-forms-check` 校验它是否过期。共 814 个形式：SSSE3 32、SSE4.1 53、
+  SSE4.2 12、POPCNT 3、XSAVE 6、XSAVEOPT 2、XSAVEC 2、XSAVES 4、AVX 390、AVX2 172、FMA 96、
+  F16C 4、BMI1 13、BMI2 16、LZCNT 3、MOVBE 6。另有 370 个范围外的 VEX、`0F38`、`0F3A` 编码
+  （`outside_scope`），只要求稳定地产生 #UD。
+- **能力定义**：`gen/cpu_features.js` 记录 17 个能力的 CPUID 位置、依赖、可开放的配置和里程碑，
+  并与 `gen/isa_forms.json` 和 CPU contract 交叉校验；目前没有任何计划内能力被报告。
+- **热点形式**：`make isa-hot-forms` 用 iced 线性解码 Ubuntu 24.04 glibc 2.39
+  （libc6_2.39-0ubuntu8.9_amd64.deb）的 libc、libm 和 ld.so，得到 120 个形式，写入
+  `gen/isa_hot_forms.json`。按扩展分：AVX 68、AVX2 15、FMA 11、BMI1 7、BMI2 5、SSE4.1 3、
+  XSAVE 3、SSSE3 2、LZCNT 2、MOVBE 2、SSE4.2 1、XSAVEC 1。用量最大的是 libm 的 VEX 标量
+  双精度运算（VMOVSD、VMULSD、VADDSD、VSUBSD 各有数百到上千处），以及 libc 的 VPMOVMSKB 和
+  VPCMPEQB（ymm）、TZCNT、PALIGNR、PCMPISTRI。
+- **SDM**：325462-085US（2024 年 10 月，5237 页），见 1.2 节。
+- **测试基线**：`platform-contract-tests`、`x64-decode-tests`、`ir-decoder-tests`、
+  `ir-coverage-tests`、`sse3-tests`、`packed-simd-tests`、`ir-sse-fp-tests`、
+  `ir-simd-integer-tests`、`ir-simd-shuffle-tests` 全部通过。
+- **性能基线**：`make bench-quick` 在负载约为 5 的机器上运行（只作参考，例如 606.nbody.sse
+  1444 MIPS、611.mandel.sse 1532、620.simd.sse 1757、621.simd.int 4460）。基线构建的
+  `v86.wasm` 保存在本地的 `build/simd-xsave/p0-baseline/`（SHA-256 `be6b4283…`），后续对比
+  用 `--baseline` 交错运行，不比较绝对数值。
+- **决定**：Q2、Q3、Q7 已定；Q4、Q5、Q6 采纳建议；Q1 留到 P12。

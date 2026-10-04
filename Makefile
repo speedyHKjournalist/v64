@@ -1450,3 +1450,22 @@ multicore-linux-jit-tests-release: build/smp/affinity_probe build/libv86.mjs bui
 	TEST_RELEASE_BUILD=1 SMP_JIT_MODE=region node tests/smp/linux_topology.mjs
 
 .PHONY: multicore-linux-jit-tests multicore-linux-jit-tests-release
+
+# SSSE3 to x86-64-v3 and XSAVE (docs/simd-xsave-plan.md). gen/isa_forms.json
+# lists the target instruction forms, generated from the pinned iced-x86 like
+# the x64 decode oracle; gen/cpu_features.js holds the CPUID features of the
+# plan and their dependencies.
+isa-forms:
+	CARGO_TARGET_DIR=build/isa-forms-target cargo run --release --manifest-path tools/isa_forms/Cargo.toml -- gen/isa_forms.json
+
+isa-forms-check:
+	CARGO_TARGET_DIR=build/isa-forms-target cargo run --release --manifest-path tools/isa_forms/Cargo.toml -- --check gen/isa_forms.json
+	node gen/cpu_features.js --check
+
+# gen/isa_hot_forms.json: the forms the x86-64 glibc uses (plan 5.1), from
+# the unpacked libc6 package named in that file
+ISA_GLIBC ?= build/simd-xsave/p0-baseline/glibc/root/usr/lib/x86_64-linux-gnu
+isa-hot-forms:
+	CARGO_TARGET_DIR=build/isa-forms-target cargo run --release --manifest-path tools/isa_forms/Cargo.toml -- --hot gen/isa_hot_forms.json $(ISA_GLIBC)/libc.so.6 $(ISA_GLIBC)/libm.so.6 $(ISA_GLIBC)/ld-linux-x86-64.so.2
+
+.PHONY: isa-forms isa-forms-check isa-hot-forms

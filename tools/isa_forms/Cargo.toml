@@ -1,0 +1,10 @@
+[package]
+name = "v86-isa-forms"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# Generates gen/isa_forms.json, the instruction forms of docs/simd-xsave-plan.md
+# (P0). Pinned like tests/x64/oracle so that form ids stay stable.
+[dependencies]
+iced-x86 = { version = "=1.21.0", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info"] }
+serde_json = "1"
