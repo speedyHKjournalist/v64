@@ -456,6 +456,7 @@ acpi-guest-tests: build/v86-debug.wasm
 q35-device-tests: build/v86-debug.wasm
 	./tests/devices/ahci.js
 	./tests/devices/ahci_lifecycle.mjs
+	./tests/devices/disk_write_cache.js
 	./tests/devices/pcie_root_port.js
 	./tests/devices/hpet.js
 	./tests/devices/smbus.js

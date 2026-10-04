@@ -2,7 +2,9 @@
 
 状态：设计与实施计划；本文不表示这些功能已经实现或通过验收。
 
-基于 2026 年 10 月 3 日审查的工作区，Git 基线为 `696d91ab`。目标是让现有
+初稿基于 2026 年 10 月 3 日的工作区（Git 基线 `696d91ab`）。2026 年 10 月 4 日复核到
+`6912875a`，其间合入了 SMM（见第 2 节），并按审阅意见修订了解码前缀、浮点、XSAVE、
+快照/INIT、测试参考和发布顺序。目标是让现有
 `cpu_type: "x86"` 和 `cpu_type: "x86_64"` 在架构允许的执行模式下完整支持这些指令集，
 覆盖解释执行、编译执行、操作系统状态切换、快照和多核。实现完成前，保持相应 CPUID
 能力位关闭；不能以少量程序能够运行、指令名称已登记或解释器与 JIT 结果相同作为完整性证明。
@@ -19,17 +21,22 @@
 | AVX | 两字节/三字节 VEX、架构定义的 128/256 位形式、三操作数、标量合并、YMM 状态及零化指令 |
 | AVX2 | 256 位整数扩展、新增 128/256 位形式、广播、排列、变长移位、掩码读写与 gather |
 | 基础 XSAVE | XSAVE、XRSTOR、XGETBV(0)、XSETBV、XCR0、CR4.OSXSAVE、CPUID leaf 0xD |
-| XSAVE 家族扩展 | 分阶段完成 XSAVEOPT、XSAVEC、XGETBV(1)、XSAVES、XRSTORS，并分别公布能力位 |
+| XSAVE 家族扩展 | 分阶段完成 XSAVEOPT、XGETBV(1)、XSAVEC 并分别公布能力位；XSAVES/XRSTORS 为可选的最后一步（第 13 节 Q3） |
 | 状态分量 | x87/MMX、SSE/MXCSR、YMM_Hi128；按架构定义处理初始化状态与 32/64 位格式 |
-| 所有执行入口 | 32 位解释器、IR Tier-0、IR region 管线、64 位解释器及 page tier；兼容模式同样覆盖 |
+| 所有执行入口 | 32 位解释器、IR Tier-0、IR region 管线、64 位解释器及 page tier；兼容模式同样覆盖，且 32 位解释器与 x64 引擎结果一致 |
 | 可移植性 | Wasm SIMD 和无 `simd128` 构建提供相同客体语义，宿主无需具有原生 AVX |
 
-这里将“XSAVE 完整”明确拆成基础功能和上述家族扩展，两部分均列入最终目标。
-XSAVES/XRSTORS 阶段实现 `IA32_XSS` 及其校验，但本项目没有新增 supervisor state
-分量，因此初始受支持 XSS 位图为零。不能借此宣称支持其他状态组件。
+这里将“XSAVE 完整”明确拆成基础功能和上述家族扩展。基础功能和 XSAVEOPT、XGETBV(1)、
+XSAVEC 列入最终目标；XSAVES/XRSTORS 是否列入由第 13 节 Q3 决定。本项目没有新增
+supervisor state 分量，XSAVES 没有功能收益，公开后却会让 Linux 改走最复杂的
+XSAVES/XRSTORS 压缩格式路径。若实现，则同时实现 `IA32_XSS` 及其校验，初始受支持 XSS
+位图为零，不能借此宣称支持其他状态组件。
 
 不将 FMA/FMA4、F16C、BMI1/2、AES/PCLMUL、SHA、SSE4a、XOP、AVX-512、AVX10、
 MPX、PKRU、AMX 或 APX 混入 AVX2。它们有独立能力位或状态组件，后续另行规划。
+需要注意，本计划全部完成后仍达不到 x86-64-v3：还缺 FMA、F16C、BMI1、BMI2、LZCNT 和
+MOVBE，而很多“要求 AVX2”的软件实际按 v3 检测。MOVBE 与 CRC32 共用 `0F 38 F0/F1`，
+在 P1/P4b 顺带实现的成本很低（第 13 节 Q7）。
 本计划要求指令可观察的行为正确，不要求模拟特定物理 CPU 的周期数、缓存实现或
 AVX/SSE 转换性能惩罚。非临时访问涉及的内存行为仍须符合现有内存模型。
 
@@ -53,30 +60,39 @@ semantic oracle / positive tests / negative tests / lifecycle tests
 
 指令规范以 [Intel SDM 官方入口](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 中的 Volume 2 各指令条目及 Volume 3 异常规则为准。P0 固定实际使用的手册版本、
-下载校验值和勘误，避免测试随着在线文档更新而无记录变化。
+下载校验值和勘误，避免测试随着在线文档更新而无记录变化。本文统一引用
+[SDM 合订本（cdrdv2 835781）](https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf)，
+并注明卷号和章节；P0 记录它的版本号与 SHA-256，更换版本时同步更新所有引用。
 
 ## 2. 当前代码基础与缺口
 
 | 入口 | 审查所得现状 | 所需改动 |
 | --- | --- | --- |
-| [`gen/x86_table.js`](../gen/x86_table.js)、[`gen/generate_interpreter.js`](../gen/generate_interpreter.js) | `0F38/0F3A` 仍是占位；生成器围绕主表和 `0F` 表组织，并假设现有 opcode 长度 | 扩展 map-aware 编码描述和生成器，不能仅追加数值 opcode |
-| [`src/rust/cpu/instructions_0f.rs`](../src/rust/cpu/instructions_0f.rs) | `instr_0F38/0F3A` 调用未实现入口；XSAVE/XRSTOR/XSAVEOPT 为未定义指令路径 | 接入新解码、共享语义及独立功能门控 |
+| [`gen/x86_table.js`](../gen/x86_table.js)、[`gen/generate_interpreter.js`](../gen/generate_interpreter.js)、[`src/rust/decode_rules.rs`](../src/rust/decode_rules.rs) | `0F38/0F3A` 仍是占位；生成器围绕主表和 `0F` 表组织，并假设现有 opcode 长度。`mandatory_prefix` 让 66 优先于 F2/F3；遇到未列出的强制前缀时只有 `dbg_assert`，release 构建执行无前缀形式 | 扩展 map-aware 编码描述和生成器，不能仅追加数值 opcode；按 5.2 节统一前缀规则 |
+| [`src/rust/cpu/instructions_0f.rs`](../src/rust/cpu/instructions_0f.rs) | `instr_0F38/0F3A` 调用未实现入口；XSAVE/XRSTOR/XSAVEOPT 为未定义指令路径；`0FAE /7`（CLFLUSH）一律 #UD，而 x64 配置公布了 CLFSH | 接入新解码、共享语义及独立功能门控；顺带消除 CLFLUSH 在兼容模式下的双引擎分歧 |
 | [`src/rust/ir/frontend/decode.rs`](../src/rust/ir/frontend/decode.rs)、[`gen/generate_ir_decoder.js`](../gen/generate_ir_decoder.js) | 当前解码围绕单字节及 `0F`，无 VEX 元数据 | 扩展编码身份、立即数、第三源及 VSIB 表达 |
-| [`src/rust/x64/decode.rs`](../src/rust/x64/decode.rs) | 长模式拒绝 C4/C5；`base_opcode` 与后续分发需要支持更多 map | 保持解释器/page tier 共用解码结果，增加 VEX 与三字节 map |
+| [`src/rust/x64/decode.rs`](../src/rust/x64/decode.rs) | 长模式拒绝 C4/C5；`base_opcode` 与后续分发需要支持更多 map；同样 66 优先，未列出的强制前缀只在 64 位模式下 #UD | 保持解释器/page tier 共用解码结果，增加 VEX 与三字节 map；前缀规则与 32 位解码器统一 |
 | [`src/rust/ir/tier0/simd.rs`](../src/rust/ir/tier0/simd.rs)、[`src/rust/ir/tier0/emit.rs`](../src/rust/ir/tier0/emit.rs) | SIMD 缓存围绕 8 个 XMM/v128 | 扩展 YMM 高半依赖、物化、写回和 helper 边界 |
 | [`src/rust/ir/types.rs`](../src/rust/ir/types.rs)、[`src/rust/ir/simd.rs`](../src/rust/ir/simd.rs)、[`src/rust/ir/backend/simd.rs`](../src/rust/ir/backend/simd.rs) | 已有 V128、整数 SIMD、scalar 后端及状态恢复基础 | 表达成对 v128 的 256 位值、跨半区操作和副作用 |
 | [`src/rust/x64/vector.rs`](../src/rust/x64/vector.rs)、[`src/rust/x64/pagegen.rs`](../src/rust/x64/pagegen.rs) | 已有 SSE–SSE3、较完整的 FP 处理及部分原生模板 | 抽取可复用语义，扩展 16 个 YMM 和 page tier |
 | [`gen/state_layout.js`](../gen/state_layout.js) | XMM0–7 与 XMM8–15 分库存放；无 YMM_Hi128/XCR0；固定状态区为 4096 字节 | 追加每核字段并重新生成 Rust/JS 布局；校验空间、范围与快照兼容 |
-| [`src/rust/cpu/misc_instr.rs`](../src/rust/cpu/misc_instr.rs)、`x64/vector.rs` | 分别实现 legacy 与 long-mode FXSAVE/FXRSTOR；legacy 对齐检查仍有待补齐 | 提取模式相关的状态编解码，修复影响 XSAVE 的旧路径缺陷 |
-| `instructions_0f.rs`、[`src/rust/x64/system.rs`](../src/rust/x64/system.rs) | CPUID 未公布目标扩展，无 leaf 0xD；两条路径的 CR4 合法位校验不一致 | 集中能力定义，统一 OSXSAVE、XCR0 和异常规则 |
-| [`src/rust/ir/runtime/sse_fp.rs`](../src/rust/ir/runtime/sse_fp.rs)、[`src/rust/cpu/cpu.rs`](../src/rust/cpu/cpu.rs) | 明确保留旧 FP 限制；legacy MXCSR 的部分舍入、DAZ/FZ、未屏蔽异常尚未完整处理 | 为 SSE4.1/AVX 建立准确的公共 FP 核心，修复继承路径 |
+| [`src/rust/cpu/misc_instr.rs`](../src/rust/cpu/misc_instr.rs)、`x64/vector.rs` | 分别实现 legacy 与 long-mode FXSAVE/FXRSTOR。legacy 的对齐 #GP 只是 `dbg_assert`；x64 的 FXSAVE 整块写出 512 字节（SDM 规定处理器不写 464–511 字节），并且在非 64 位模式下也存取 XMM8–15 | 提取模式相关的状态编解码，修复影响 XSAVE 的旧路径缺陷（6.2 节） |
+| `instructions_0f.rs`、[`src/rust/x64/system.rs`](../src/rust/x64/system.rs) | CPUID 未公布目标扩展，无 leaf 0xD；两条路径的 CR4 合法位校验不一致（legacy 接受 bit 18 OSXSAVE）。CPU 配置只是布尔值 `X64_TEST_CAPABILITIES`，不进快照；`cpuid_level` 可配置（Windows NT 用 2） | 集中能力定义并改为能力位图，统一 OSXSAVE、XCR0 和异常规则 |
+| [`src/rust/cpu/smm.rs`](../src/rust/cpu/smm.rs)（基线后合入） | SMI 进入时把 CR4 清零；RSM 原样恢复 CR4，不做合法位校验；`entered_mode()` 会调用 `ir_admission_barrier` | RSM 与 MOV CR4 共用校验，并列入 JIT 失效写入方（6.1 节） |
+| [`src/rust/ir/runtime/sse_fp.rs`](../src/rust/ir/runtime/sse_fp.rs)、[`src/rust/cpu/cpu.rs`](../src/rust/cpu/cpu.rs) | 32 位引擎（解释器、Tier-0、regions）的 SSE/SSE2 算术直接用宿主或 Wasm 运算：不设置任何 MXCSR 状态位，算术不支持 RC/DAZ/FZ（`set_mxcsr` 只打日志），也从不产生 #XM。x64 的 `vector.rs` 基于 SoftFloat，是精确的 | 单列 P4a：建立准确的公共 FP 核心，改造现有 SSE/SSE2 浮点路径（7.4 节） |
 | [`src/rust/ir/runtime/continuation.rs`](../src/rust/ir/runtime/continuation.rs) | selective continuation 保存范围包含 legacy XMM，但没有 YMM 高半 | 扩展捕获/恢复与失效规则，防止 helper 返回后恢复过期高半 |
-| [`tests/nasm/`](../tests/nasm/)、[`tests/x64/`](../tests/x64/) | 已有差分与外部 oracle；NASM fixture 目前只记录 XMM0–7 | 版本化记录格式，增加 YMM、MXCSR、XCR0、异常与内存副作用 |
+| [`src/cpu.js`](../src/cpu.js) | 多核快照按区间恢复，缺失区间填复位值（SMBASE 是先例）；单核旧快照把 1360 以上的 core 区间清零。INIT 只保留 `INIT_PRESERVED` 中的 PAT、MTRR、MC 和 SMBASE，其余（包括 x87、XMM、MXCSR）都取复位值 | 按 6.4 节加入 XCR0/XSS 的填充与 INIT 规则 |
+| [`tests/nasm/`](../tests/nasm/)、[`tests/x64/`](../tests/x64/) | 已有差分与外部 oracle；NASM fixture 目前只记录 XMM0–7；`qemu_oracle.js` 只解析 `XMM0n=`，并以 `-cpu max` 运行 QEMU | 版本化记录格式，增加 YMM、MXCSR、XCR0、异常与内存副作用；处理 11.1 节列出的 QEMU 缺口 |
 
 现有 IR 是唯一的 32 位 JIT，旧 Legacy JIT 已移除。long mode 使用独立 page tier，
 不能假设修改 32 位 IR 就同时完成 64 位支持。沿用
 [`docs/ir-design.md`](ir-design.md) 和 [`docs/x86-64.md`](x86-64.md) 的分工，
 本项目不以建设 64 位 region 管线为前置条件。
+
+兼容模式（LMA=1、CS.L=0）由两个引擎共同执行：在 `X64_COMPAT_JIT` 下，编译过的代码经
+32 位解释器单步执行，未编译的代码走 x64 引擎。两者对同一指令的任何分歧，都要等代码变热后
+才会暴露（RDTSCP 曾因此出现“热了就 #UD”）。目前已知的同类偏差有 CLFLUSH、FXSAVE/FXRSTOR
+的 XMM 范围和 SSE 浮点精度。新形式按 3.1 节共用解码，并按 5.2 节做双引擎差分。
 
 ## 3. 总体设计
 
@@ -85,6 +101,12 @@ semantic oracle / positive tests / negative tests / lifecycle tests
 在生成源中建立规范化编码描述，供解释器表、IR 解码、x64 解码校验和覆盖报告使用。
 建议保留 `gen/x86_table.js` 作为入口，将新 SIMD 表和特性依赖拆到专门模块；
 具体拆文件方式在 P0 确定。不要手工修改生成后的解释器文件或 coverage JSON。
+
+VEX、`0F38` 和 `0F3A` 的字段解析与合法性判定只实现一份（例如扩展
+[`src/rust/decode_rules.rs`](../src/rust/decode_rules.rs)），由 32 位解释器生成器、IR 解码和
+x64 解码共同调用，从结构上消除兼容模式下的双引擎分歧。解释器对 VEX 采用两级分派（先 map
+再 opcode），不把 map×pp×L×W 摊平成巨型 match 或 br_table；V8 遇到数万项的 br_table
+曾因 Zone OOM 中止。
 
 公共语义层接收已经读取的操作数，返回结果及 flags/MXCSR 更新，不在整数 lane 运算中
 直接访问全局 CPU 或客体内存。各执行引擎负责模式检查、地址转换、异常交付和结果提交。
@@ -106,12 +128,21 @@ Rust 模块结构确定。公共 helper 的读写状态、副作用和异常出�
 - 每个编码记录写入策略：legacy SSE 保留高半；VEX.128 向量目的寄存器清零高半；
   VEX.256 写完整两半。标量指令的低半合并、内存源零化等规则逐条描述，不能只看长度决定。
 - `VZEROUPPER/VZEROALL`、FXRSTOR/XRSTOR、helper、去优化、跨页退出和快照都走同一状态边界。
+  非 64 位模式下，VZEROUPPER/VZEROALL 只修改 YMM0–7；FXSAVE/FXRSTOR/XSAVE/XRSTOR 也不存取
+  XMM8–15 及其高半。
 
 ### 3.3 精确异常与内存访问
 
 建立逐类异常表，明确 #UD、#NM、#GP、#SS、#AC、#PF、#XM 的条件和优先顺序。
-不能给所有 SIMD 指令套用同一套 CR0/CR4 检查：MMX、legacy XMM、AVX、CRC32、
-POPCNT、XSAVE 和 XGETBV/XSETBV 的条件不同。
+分类直接采用 SDM Volume 2A 第 2 章的 SIMD 异常类型（Exception Type 1–12），清单为每个
+形式登记所属类型。不能给所有 SIMD 指令套用同一套 CR0/CR4 检查：MMX、legacy XMM、AVX、CRC32、
+POPCNT、XSAVE 和 XGETBV/XSETBV 的条件不同。最容易出错的几条规则要显式写进测试：
+
+- VEX 指令不检查 CR0.EM 和 CR4.OSFXSR，但要求 CR4.OSXSAVE=1 且 XCR0[2:1]=11b，否则 #UD；
+  CR0.TS=1 时 #NM。
+- VEX 访存除 Type 1（对齐 move、VMOVNTDQA 等）外不要求对齐。
+- 传统 SSE 的 16 字节对齐要求有例外：MOVU*/LDDQU、PCMPxSTRx，以及按窄宽度访问内存的形式。
+- 现有 32 位路径在 CR4.OSFXSR=0 时只打日志，不产生 #UD。新旧形式共用同一个检查函数，并一起修正。
 
 普通向量运算先检查合法性、读取需要的操作数，再提交目的状态。不得提前读取比指令规定
 更宽的内存，例如把窄源扩展读取成完整 16/32 字节。编译阶段只读指令快照，不触发数据 MMIO
@@ -125,34 +156,58 @@ gather 允许架构规定的逐元素进度，不能套用普通指令的整体�
 
 | 阶段 | 交付物 | 依赖 | 阶段验收 |
 | --- | --- | --- | --- |
-| P0 | 完整编码清单、能力依赖、测试/性能基线、固定参考版本 | 无 | 目标形式清单可审阅，已有能力无变化 |
-| P1 | `0F38/0F3A` 与 VEX 解码基础、负例、模式适配 | P0 | 独立解码差分通过，旧解码无回归 |
-| P2 | YMM/XCR0 每核状态、基础 XSAVE/XRSTOR、快照迁移 | P0；指令入口依赖 P1 对应部分 | 分量 round-trip、异常、旧快照和多核通过 |
+| P0 | 完整编码清单、能力依赖、热点形式清单、测试/性能基线、固定参考版本；第 13 节待决问题的结论 | 无 | 目标形式清单可审阅，已有能力无变化 |
+| P1 | `0F38/0F3A` 与 VEX 解码基础、统一的强制前缀规则、负例、模式适配 | P0 | 独立解码差分通过，旧解码的有意修正都有回归测试 |
+| P2 | YMM/XCR0 每核状态、基础 XSAVE/XRSTOR（只接受标准格式）、快照迁移 | P0。XSAVE 系列在 `0F AE`/`0F C7`，XGETBV/XSETBV 在 `0F 01`，都属现有 map，不依赖 P1 | 分量 round-trip、异常、旧快照和多核通过 |
 | P3 | SSSE3 全部形式、执行后端与覆盖 | P1 的 legacy maps | MMX/XMM 及三条 32 位执行路径、两条 x64 路径通过 |
-| P4 | SSE4.1/SSE4.2、公共准确 FP 核心 | P1；复用 P3 语义基础 | 全部 forms、FP/字符串边界与独立 oracle 通过 |
-| P5 | AVX 128 位、三操作数、零化、VEX 状态门控 | P1、P2、P3、P4 | legacy/VEX 混合链、标量合并和状态恢复通过 |
+| P4a | 公共准确 FP 核心；现有 SSE/SSE2 浮点改造与快路径准入 | P0 的精度策略结论（Q2） | 旧 SSE 浮点的精确性差分与性能预算都通过 |
+| P4b | SSE4.1/SSE4.2 | P1、P4a；复用 P3 语义基础 | 全部 forms、FP/字符串边界与独立 oracle 通过 |
+| P5 | AVX 128 位、三操作数、零化、VEX 状态门控 | P1、P2、P3、P4b | legacy/VEX 混合链、标量合并和状态恢复通过 |
 | P6 | AVX 全部 256 位形式及掩码访存 | P5 | 256 位浮点、排列、异常及 OS 上下文保存通过 |
 | P7 | AVX2 普通整数、广播、排列、变长移位 | P6 | 逐形式和双 128 位 lane 边界测试通过 |
 | P8 | AVX2 gather 与掩码故障/重启完整性 | P7；复杂访存框架可提前并行 | 故障进度、mask 写回、重启及 MMIO 计数通过 |
-| P9 | XSAVEOPT/XSAVEC/XGETBV(1)/XSAVES/XRSTORS | P2；与 P5–P8 并行 | 各独立能力位、格式及状态跟踪通过 |
+| P9 | XSAVEOPT、XGETBV(1)、XSAVEC；XSAVES/XRSTORS 视 Q3 而定 | P2；与 P5–P8 并行 | 各独立能力位、格式及状态跟踪通过 |
 | P10 | 发布集成、真实客体、浏览器/可移植构建及性能 | P3–P9 | 完整清单无缺口，所有发布验收完成 |
 
-P1 的 legacy maps 可先交付，以便 P3/P4 与 P2 并行。FP 核心、oracle/fixture 升级也可
-从 P0 后独立推进。解码元数据、寄存器状态接口和能力定义先冻结，再并行开发指令族。
-每个阶段都要接入相应编译执行路径和测试，不把所有后端工作积压到最后。
+P1 的 legacy maps 可先交付，以便推进 P3/P4b；P2 不依赖 P1，可以在 P0 之后直接开始。
+P4a 的 FP 核心、oracle/fixture 升级也可从 P0 后独立推进。解码元数据、寄存器状态接口和
+能力定义先冻结，再并行开发指令族。每个阶段都要接入相应编译执行路径和测试，不把所有
+后端工作积压到最后。
+
+### 4.1 发布里程碑
+
+能力位按里程碑开放。每个里程碑独立验收，对应 `tools/release_gate.mjs` 中的一个等级（11.4 节）：
+
+| 里程碑 | 包含阶段 | 开放的能力 | 价值与前提 |
+| --- | --- | --- | --- |
+| M1 x86-64-v2 | P1 的 legacy maps、P3、P4a、P4b | 两个配置都开放 SSSE3、SSE4.1、SSE4.2 | x64 配置已有 CX16、LAHF/SAHF、POPCNT 和 SSE3，补齐后即达到 x86-64-v2（RHEL 9 系要求它；Windows 11 24H2 要求 SSE4.2 和 POPCNT）。不需要 VEX、YMM 或 XSAVE |
+| M2 基础 XSAVE | P2 | XSAVE（OSXSAVE 位随 CR4 反映）；XCR0 只支持 x87 和 SSE | 有 XSAVE 而无 AVX 有硬件先例（Goldmont），可以先验证操作系统的上下文切换路径。XCR0 的可支持位由 CPU 配置推导，开放 AVX 后才允许 bit 2 |
+| M3 AVX | P5、P6 | AVX；XCR0 bit 2 | 依赖 M1、M2 |
+| M4 AVX2 | P7、P8 | AVX2 | 依赖 M3 |
+| M5 XSAVE 扩展 | P9 | XSAVEOPT、XGETBV(1)、XSAVEC；XSAVES 视 Q3 而定 | 依赖 M2；每开放一项都会改变 Linux 和 glibc 的代码路径（6.3 节） |
+
+每个里程碑开放能力位之前，5.1 节热点形式清单中属于该里程碑的形式，必须已在编译路径上有
+原生模板（12.2 节）。
 
 ## 5. P0–P1：清单、能力契约和解码
 
 ### 5.1 编码清单与生成检查
 
 在 `gen/` 下新增目标 ISA 清单及审计工具，为每种 register/memory、W/L、模式、
-立即数和掩码形式分配稳定 ID。利用 Intel 指令表建立范围，使用
-[Intel XED](https://intelxed.github.io/ref-manual/) 或已有 iced-x86 作为独立解码参考。
-解码参考不是执行语义 oracle。
+立即数和掩码形式分配稳定 ID。清单中的 iform、isa-set、CPUID 位、异常类型、操作数宽度和
+属性，直接由 [Intel XED](https://intelxed.github.io/ref-manual/) 的数据文件生成，避免手抄
+SDM 表格；SDM 只做仲裁，分歧逐条登记。XED 或已有的 iced-x86（`tests/x64/oracle`）同时作为
+独立解码参考。解码参考不是执行语义 oracle。
 
 扩展 `ir-coverage.json` 生成、测试归属及未知编码检查。现有 `Pending=0` 只覆盖旧目录；
 新验收应同时断言预期 forms 总集和实现集相等，防止“没登记就不算缺失”。
 P0 输出各 ISA 的 forms 数量并固定在基线中，本文不凭 mnemonic 数量估算完整性。
+
+P0 同时产出“热点形式清单”。做法是反汇编目标客体中会因能力位开放而改走新路径的代码，
+列出其中实际执行的形式。这类代码包括 glibc 的 IFUNC 变体与 ld.so 惰性绑定、Linux 内核的
+上下文切换，以及 Windows 的对应库。清单中的形式例如 PCMPISTRI、VMOVDQU ymm、VPCMPEQB、
+VPMOVMSKB、VZEROUPPER、PSHUFB、PALIGNR 和 XSAVE/XRSTOR。它用于 4.1 节的开放前提和
+12.2 节的性能基准。
 
 ### 5.2 解码改造
 
@@ -162,6 +217,12 @@ P0 输出各 ISA 的 forms 数量并固定在基线中，本文不凭 mnemonic �
 - 按模式区分 legacy LES/LDS 与 VEX；覆盖 16/32 位及兼容模式，不能把所有 C4/C5 都判成 VEX。
 - 独立声明 W0/W1/WIG、L0/L1/LIG 和保留 vvvv 规则；忽略位与非法位不能混为一谈。
 - 校验重复/冲突 prefix、LOCK、REX 与 VEX 的组合，按规范决定可接受、忽略或 #UD。
+- 强制前缀采用 XED 的 refining-prefix 规则：F2/F3 优先于 66，F2/F3 并存时取最后一个；
+  有 F2/F3 时，66 只作操作数大小前缀，例如 `66 F2 0F 38 F1` 是 CRC32 r32, r/m16。现有两个
+  解码器都让 66 优先：按代码推断，`66 F3 0F 10` 在 32 位和兼容模式下执行 MOVUPD，在 64 位
+  模式下 #UD，而硬件执行 MOVSS。统一后会改变旧 `0F` 表的行为，这是有意修正，需补回归测试。
+- 未列出的强制前缀在所有模式、所有构建下一律 #UD。现在 32 位生成器只有 `dbg_assert`，
+  release 构建会执行无前缀形式；照搬到 `0F38` 后，`F3 0F 38 00` 会被执行成 MMX PSHUFB。
 - 支持 imm8 高位编码第四源的 VBLENDV* / VPBLENDVB，及 gather 的 VSIB 索引。
 - VSIB 保留向量索引寄存器、元素宽度和 scale，不能沿用普通 SIB 的 GPR 索引及 no-index 判断。
 - 对合法和非法编码均验证长度、15 字节上限、截断输入、跨取指页和 #UD/取指故障顺序。
@@ -169,6 +230,8 @@ P0 输出各 ISA 的 forms 数量并固定在基线中，本文不凭 mnemonic �
 
 P1 验收包含独立解码器差分、所有 prefix/字段组合的边界集、LES/LDS 回归和取指故障测试。
 未开启某项能力时仍应得到稳定的解码及正确 #UD 行为，不允许执行到另一个旧指令。
+在兼容模式下合法的每个新形式，都要在 32 位解释器和 x64 引擎上做差分（第 2 节末），
+比较长度、#UD 和执行结果。
 
 ## 6. P2 与 P9：XSAVE、CPU 契约和生命周期
 
@@ -178,7 +241,7 @@ P1 验收包含独立解码器差分、所有 prefix/字段组合的边界集、
 | --- | --- |
 | CPUID.1:ECX | SSSE3[9]、SSE4.1[19]、SSE4.2[20]、XSAVE[26]、OSXSAVE[27]、AVX[28]；POPCNT[23] 独立 |
 | CPUID.7.0:EBX | AVX2[5]，保留其他既有位；不顺带打开 BMI/FMA 等能力 |
-| CPUID.0 | 最大 basic leaf 能到达 0xD，并保留 `cpuid_level` 等已有配置契约 |
+| CPUID.0 | 最大 basic leaf 能到达 0xD，并保留 `cpuid_level` 等已有配置契约。`cpuid_level` 小于 0xD 时隐藏 XSAVE、OSXSAVE、AVX 和 AVX2，小于 7 时隐藏 AVX2；否则 Linux 会因 leaf 0xD 不可达而告警，并退回 FXSAVE |
 | CPUID.0xD,0 | 支持的 XCR0 位图、当前启用状态所需标准大小、全部支持分量所需大小 |
 | CPUID.0xD,1 | EAX 中 XSAVEOPT[0]、XSAVEC[1]、XGETBV(1)[2]、XSAVES/XRSTORS[3]；适用的 compacted 大小及支持的 XSS 位图 |
 | CPUID.0xD,2 | YMM_Hi128 的大小、标准偏移和属性；其他未支持分量子叶正确返回零 |
@@ -188,13 +251,23 @@ AVX/AVX2 硬件能力不随一次 XSETBV 被清除。执行时检查对应能力
 Linux 的应用检测流程也要求结合 CPUID 与 XGETBV，见
 [Linux xstate 文档](https://www.kernel.org/doc/html/latest/arch/x86/xstate.html)。
 
-基础 XCR0 支持位为 x87[0]、SSE[1]、YMM[2]；复位值为 1。XSETBV 检查 ECX、CPL、
+基础 XCR0 支持位为 x87[0]、SSE[1]、YMM[2]；复位值为 1。可支持位由 CPU 配置推导：
+未开放 AVX 时只有 x87 和 SSE（M2），CPUID.0xD,0 的 EAX 和各大小字段随之变化。XSETBV 检查 ECX、CPL、
 保留位、x87 必须保留启用、YMM 对 SSE 的依赖，以及 OSXSAVE 前提。XGETBV(0) 与
 XGETBV(1) 分别受对应条件控制；不支持的 index 不能返回伪造零值。
 
-统一 legacy 与 x64 的 CR4 写入校验，修复当前未公布 XSAVE 却接受 OSXSAVE 位的路径。
-能力关闭、OS 未开启、TS/EM 状态和 XCR0 不完整的测试分别记录异常向量与指令位置。
-实现 CR4/XSETBV 写入后的 JIT admission 失效或运行时重检，保证已编译代码立即遵守新状态。
+统一 legacy 与 x64 的 CR4 写入校验，修复当前未公布 XSAVE 却接受 OSXSAVE 位的路径；
+RSM 恢复的 CR4 走同一套校验。能力关闭、OS 未开启、TS/EM 状态和 XCR0 不完整的测试，
+分别记录异常向量与指令位置。
+
+已编译代码必须立即遵守新状态，按变化频率分两种方式处理：
+
+- CR0.TS 在 XP 这类延迟保存 FPU 的系统里切换频繁，沿用 Tier-0 现有的运行时检查（`simd_guard`）。
+- CR4.OSXSAVE 和 XCR0 很少变化，走准入版本号失效（`ir_admission_barrier` 及 page tier 的对应机制）。
+
+写入方要逐一覆盖并各有测试：MOV CR0/CR4、CLTS、LMSW、硬件任务切换（会置 TS）、XSETBV、
+SMI（CR4 清零，所以 SMM 内 OSXSAVE=0）、RSM、INIT/RESET 和快照恢复。XCR0 不在 SMRAM
+保存映像里，跨 SMI/RSM 保持不变。
 
 ### 6.2 状态区编解码
 
@@ -208,61 +281,91 @@ XGETBV(1) 分别受对应条件控制；不支持的 index 不能返回伪造零
 
 仅支持这些分量时，标准格式全部启用的大小为 832 字节。CPUID 动态大小由分量表和启用位
 计算，不能在所有查询中无条件返回 832。compact 格式由对应布局算法处理，即使当前
-分量组合恰好与标准格式使用相同偏移，也必须检查格式位。规则依据
-[Intel SDM Volume 1，第 13 章](https://www.intel.com/content/dam/develop/external/us/en/documents-tps/253665-sdm-vol-11.pdf)。
+分量组合恰好与标准格式使用相同偏移，也必须检查格式位。规则依据 SDM Volume 1 第 13 章
+（[合订本](https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf)）。
 
 实现要求：
 
 - 按每条指令计算 requested/enabled mask，区分“未请求保持不变”“请求恢复存储值”
   和“请求但状态位未置位时恢复初始化值”。
-- XSAVE/XSAVEOPT 保留未请求分量的 XSTATE_BV 位；XSAVEC/XSAVES 按 RFBM/in-use
-  规则重写位图、清零未请求位并设置 XCOMP_BV。各指令未规定写入的保留字节保持不变，
-  不能用统一的 header 清零或合并策略替代。
-- MXCSR/MXCSR_MASK 有专门的保存与恢复条件，不能简单归结为复制 SSE 分量；特别测试
-  只请求 YMM、SSE 标记为 init、非默认 MXCSR、无效 MXCSR 保留位等组合。
+- XSAVE/XSAVEOPT 保留未请求分量的 XSTATE_BV 位，新值为
+  `(旧 XSTATE_BV & ~RFBM) | (XINUSE & RFBM)`；它们只写 XSTATE_BV，不写 XCOMP_BV 和头部其他字节。
+  XSAVEC/XSAVES 按 RFBM/in-use 规则重写位图、清零未请求位并设置 XCOMP_BV。
+  各指令未规定写入的保留字节保持不变，不能用统一的 header 清零或合并策略替代。
+- MXCSR/MXCSR_MASK 有专门的保存与恢复条件，不能简单归结为复制 SSE 分量：
+  - XSAVE 在 RFBM[1] 或 RFBM[2] 为 1 时保存 MXCSR 和 MXCSR_MASK。
+  - 标准格式的 XRSTOR 在同样条件下，不管 XSTATE_BV 是什么，都从内存加载 MXCSR，并校验保留位。
+  - 压缩格式把 MXCSR 归入分量 1，初始化时置为 1F80H。
+  - 特别测试只请求 YMM、SSE 标记为 init、非默认 MXCSR、无效 MXCSR 保留位等组合。
+- XRSTOR 是否接受压缩格式取决于 XSAVEC：`XCOMP_BV[63]=1` 而
+  CPUID.(EAX=0DH,ECX=1):EAX[1]=0 时 #GP(0)。所以 P2 的 XRSTOR 必须拒绝压缩格式，
+  P9 开放 XSAVEC 时在同一能力位下放开。
 - 64 字节对齐、CPL/TS、段限制、页权限、canonical 地址以及各异常优先级逐项验证。
 - 按实际需要访问的字段/分量访存，不预读/预写完整 832 字节，不触碰未请求区域制造额外 #PF。
 - 保存前同步 x87 shadow 与编译器缓存；恢复后更新/失效 x87、XMM/YMM、MXCSR 派生状态。
 - 明确多次访存故障后的允许部分效果和恢复策略；不把普通向量“先检查后提交”当作
   所有 xstate 指令的统一架构要求。
-- 修复共享到这里的 FXSAVE/FXRSTOR 对齐、MXCSR 和模式差异；FXSAVE/FXRSTOR 本身
-  不应偷偷保存、清零或恢复 YMM 高半。
+- 修复共享到这里的 FXSAVE/FXRSTOR 缺陷；FXSAVE/FXRSTOR 本身不应偷偷保存、清零或恢复 YMM 高半：
+  - x64 的 FXSAVE 先构造 512 字节零缓冲区再整块写出，而 SDM 规定处理器不写 464–511 字节
+    （Linux 在信号帧里用这一段存放 sw_reserved）。XSAVE 只写所选分量的字段，不能沿用整块写出。
+  - x64 的 FXSAVE/FXRSTOR 在非 64 位模式下也存取 XMM8–15，应只存取 XMM0–7。
+  - 32 位 FXSAVE/FXRSTOR 未对齐时只有 `dbg_assert`，应产生 #GP。
 
 ### 6.3 家族扩展的单独验收
 
 | 扩展 | 独立工作与验收 |
 | --- | --- |
 | XSAVEOPT | 标准格式及合法 init/modified 优化语义；保守保存可作为正确性阶段实现，跳过写入优化另测 |
-| XSAVEC | compacted 格式、XCOMP_BV、分量布局和 init 规则；XRSTOR 对支持格式正确恢复 |
+| XSAVEC | compacted 格式、XCOMP_BV、分量布局和 init 规则；XRSTOR 随同一能力位开始接受压缩格式（6.2 节） |
 | XGETBV(1) | 返回与 XCR0/in-use 语义一致的值，独立 CPUID 门控，不强制将架构允许的保守 in-use 判成错误 |
-| XSAVES/XRSTORS | CPL0、IA32_XSS 的 RDMSR/WRMSR、用户/监督状态位图及 compacted 保存恢复；未支持 XSS 位写入 #GP |
+| XSAVES/XRSTORS（可选，Q3） | CPL0、IA32_XSS 的 RDMSR/WRMSR、用户/监督状态位图及 compacted 保存恢复；未支持 XSS 位写入 #GP |
 
 优化跟踪必须纳入所有写入来源，包括 legacy SSE、VEX、FXRSTOR、XRSTOR、VZERO*、
 复位及快照恢复。首轮可以采用规范允许的保守跟踪；不能漏标 dirty 后错误省略写入。
 如果实现 modified 优化，还要验证恢复来源、目标缓冲区、权限/地址上下文等适用条件。
 
+开放这些能力会改变客体实际执行的路径，验收要覆盖这些路径：
+
+- Linux 内核在 XSAVE、XSAVEOPT、XSAVEC、XSAVES 中选最后一个可用的。开放 XSAVEC 后，
+  每次上下文切换都用 XSAVEC 加压缩格式的 XRSTOR；开放 XSAVES 后，改用 XSAVES/XRSTORS。
+- x86-64 glibc 的 ld.so 做惰性绑定时，有 XSAVEC 就用 xsavec，否则用 xsave。每个尚未解析的
+  PLT 调用和 TLS descriptor 都会执行它，属于进程启动的热路径。
+
 ### 6.4 快照、复位、多核与迁移
 
 布局改动从 `gen/state_layout.js` 生成，不直接手改 `global_pointers.rs` / `src/state_layout.js`。
-新增字段能放入当前 4096 字节状态槽，但仍须运行布局和 parallel relocation 检查，禁止
-依赖过时文档中的状态总大小。
+新增字段能放入当前 4096 字节状态槽（`x64_mc_banks` 之后到 4096 还有约 1.6 KiB），但仍须
+运行布局和 parallel relocation 检查，禁止依赖过时文档中的状态总大小。
 
-`src/cpu.js` 当前快照范围按精确 `CORE_STATE_RANGES` 校验，追加紧邻字段可能合并旧范围。
-需要显式版本化迁移或兼容范围映射；仅把字段放在尾部不自动保证兼容。
+`src/cpu.js` 当前快照范围按精确 `CORE_STATE_RANGES` 校验。`core_ranges()` 会跨空隙合并相邻的
+core 字段，紧接在 2424 之后追加会把旧区间 [2056,2424] 撑大，旧快照随即校验失败。
+YMM_Hi128、XCR0 和 XSS 应单独成为一个区间；建议在 `state_layout.js` 中引入显式分组，
+不要靠插入非 core 字段来隔开。以下现有机制可以直接复用：
 
+- 多核快照（版本 2）记录各区间，`set_machine_core_state` 对缺失区间填复位值，SMBASE
+  （0x30000）就是这样处理的先例。XCR0=1 照此填写。
+- 单核旧快照路径先把 1360 以上的 core 区间清零，再补写 PAT 和 SMBASE；XCR0=1 也要在这里补写。
 - 老快照缺少新字段：按旧 CPU 能力恢复，YMM 高半初始化为零，XCR0 初始化为 1，XSS 为零。
-  不能让通用“缺失字段填零”生成非法 XCR0。
+  不能让通用“缺失字段填零”生成非法 XCR0。旧的 CR4 写入路径接受 OSXSAVE，旧快照里理论上
+  可能出现 CR4.OSXSAVE=1，恢复时要按 CPU 配置校验。
 - 新快照保存 CPU feature profile、每核 XCR0/YMM/XSS 及架构可见跟踪状态；恢复前完成
   profile、位图和状态范围验证，失败不能部分修改正在运行的 VM。
-- 缺少 feature profile 的旧快照按旧能力集解释；不能因升级模拟器让恢复后的 OS
+- 现在的 CPU 配置只是布尔值 `X64_TEST_CAPABILITIES`，cpu_type 也不进快照。应改为能力位图，
+  存入顶层快照状态（做法同记录机器类型的 `state[103]`），并经 `copy_cpu_profile` 分发到并行实例。
+- 缺少 feature profile 的旧快照，按恢复时 cpu_type 对应的旧能力集解释；不能因升级模拟器让恢复后的 OS
   突然看到新的 AVX 能力。新状态恢复到不支持的实现应清晰拒绝。
-- 区分 reset、INIT、SIPI、软重启的架构状态规则，为 BSP/AP 分别测试，不能全部复用清零。
+- 区分 reset、INIT、SIPI、软重启的架构状态规则，为 BSP/AP 分别测试，不能全部复用清零：
+  - XCR0 和 IA32_XSS 只在 RESET 时复位（XCR0=1、XSS=0），INIT 保持不变；
+    [KVM 按 SDM 也是这样实现的](https://patchew.org/linux/20220126034750.2495371-1-xiaoyao.li@intel.com/)。
+    两者加入 `INIT_PRESERVED`，与 SMBASE 并列。
+  - SDM 规定 INIT 不改变 x87/MMX/XMM/YMM/MXCSR，而 v86 现在的 INIT 会把它们取为复位值。
+    YMM 按哪条规则处理由第 13 节 Q6 决定，建议连同 XMM、x87、MXCSR 一起按 SDM 修正。
 - 同步 [`src/rust/cpu/context.rs`](../src/rust/cpu/context.rs)、
   [`src/parallel/machine.js`](../src/parallel/machine.js) 和 state streaming 的保存恢复。
 - 每核使用不同 XMM/YMM/XCR0 指纹，覆盖单 Worker 调度、parallel Workers、暂停恢复、
   迁移到新 VM、故障重启和浏览器 worker 生命周期。
 
-## 7. P3–P4：SSSE3 与 SSE4
+## 7. P3–P4b：SSSE3 与 SSE4
 
 ### 7.1 SSSE3 清单
 
@@ -307,18 +410,33 @@ PMULHRSW 按精确定义处理舍入与结果截取，不能套用通用饱和�
 - POPCNT 已存在，但它是独立能力位；审计其 16/32/64 位形式和 flags，不用开启 SSE4.2
   替代它自己的门控。CRC32/POPCNT 不应套用 XMM 的任务切换检查。
 
-### 7.4 浮点准确性是前置任务
+### 7.4 浮点准确性是前置任务（P4a）
 
-抽取 x64 已有 FP 处理中的可复用部分，补齐所有目标指令用到的 f32/f64 操作、转换、
-比较、舍入及异常记录。可扩展当前 SoftFloat 接口，但不得通过中间 extF80 转换
-不经证明地替代所有 f32/f64 操作，避免双重舍入。
+这项工作比 SSE4.1 本身更大。32 位引擎现有的 SSE/SSE2 浮点算术不设置 MXCSR 状态位，
+不支持 RC/DAZ/FZ，也不产生 #XM（第 2 节）。SSE4.1 的 ROUND/DPPS 和 AVX 都要与旧 SSE
+共享同一个正确的 MXCSR，因此必须改造全部现有 SSE/SSE2 浮点热路径，而 3DMark06 和游戏的
+性能正取决于这些路径。所以单列为 P4a，并配独立的性能验收。
+
+P0 先确定精度策略（第 13 节 Q2）：像默认开启的 `x87_fast_math` 那样保留一个快速模式，
+还是默认精确、另设快路径。
+
+抽取 x64 已有 FP 处理（`vector.rs`，基于 SoftFloat）中的可复用部分，补齐所有目标指令用到的
+f32/f64 操作、转换、比较、舍入及异常记录。可扩展当前 SoftFloat 接口，但不得通过中间
+extF80 转换不经证明地替代所有 f32/f64 操作，避免双重舍入。
 
 必测四种舍入方式、DAZ/FZ、正负零、subnormal、无穷、qNaN/sNaN、NaN 来源选择、
 溢出/下溢/精度和未屏蔽异常。ROUND 的立即数控制和精度异常抑制、DPPS/DPPD 的
 mask 与加法顺序独立实现。AVX 比较支持 32 种谓词，不能复用现有 `predicate & 7` 截断。
 
 Wasm SIMD 仅在结果、NaN、舍入及 MXCSR 效果等价的条件下走快路径，其余进入公共准确
-helper。旧 SSE 与新 VEX 混合执行同样需要共享正确的 MXCSR，不保留两套互相矛盾的行为。
+helper。快路径的准入条件：
+
+- MXCSR 控制位是默认值：RC 为就近舍入，DAZ=FZ=0，异常全部屏蔽。
+- 输入或结果出现 NaN、非规格化数、无穷或零时（可能引发 IE/DE/ZE/OE/UE），回退到精确 helper。
+- 状态位是粘滞的：PE 已置位时，可以省掉不精确检测；PE 未置位时，要么检测不精确，要么回退
+  一次，回退之后 PE 就已置位。
+
+旧 SSE 与新 VEX 混合执行同样需要共享正确的 MXCSR，不保留两套互相矛盾的行为。
 
 ## 8. P5–P6：AVX
 
@@ -343,12 +461,13 @@ VEX.128 的许多整数形式属于 AVX，256 位整数扩展通常属于 AVX2�
 
 VMASKMOV 按活跃 lane 访存，被屏蔽 lane 不触发架构要求抑制的内存异常。
 测试全零 mask、页边界、不可访问地址、零填充/保留结果和实际写入范围。
-不能用一次整 32 字节 load/store 再做 mask 合并替代。
+不能用一次整 32 字节 load/store 再做 mask 合并替代。被屏蔽 lane 所在页面是否设置 A/D 位
+由实现决定：v86 固定一种行为（建议不设置），测试按允许结果判定；实际读写的页面必须设置 A/D 位。
 
 RCP/RSQRT 等近似指令按规定误差及特殊值要求验收，不要求与某一型号硬件逐位相同；
 规范唯一确定的精确结果和状态位采用逐位比较。DPPS 水平运算的部分 NaN 传播/位置等
 实现相关结果使用允许结果集或 postcondition；v86 自身各后端仍保持确定且一致的结果。
-参考 [Intel SDM Volume 2A 的 DPPS 条目](https://cdrdv2-public.intel.com/812383/253666-sdm-vol-2a.pdf)。
+参考 SDM Volume 2A 的 DPPS 条目（[合订本](https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf)）。
 
 ## 9. P7–P8：AVX2
 
@@ -397,6 +516,15 @@ v86 对这些设备地址选择确定的逐 lane 行为，并用 MMIO 计数器�
 - **调度**：长 helper 的预算、IRQ/NMI 可见边界以及自修改代码失效沿用引擎约定；gather
   的部分进度和 xstate 恢复边界需要额外审查。
 
+Wasm 快路径的已知陷阱，从 P0 起写进模板审查清单：
+
+- PMULHRSW 不能直接用 `i16x8.q15mulr_sat_s`：-32768×-32768 时 x86 得到 0x8000，Wasm 会饱和为 0x7FFF。
+- 禁用 relaxed-simd，它的结果因宿主而异。
+- Wasm 浮点运算可能规范化 NaN，NaN 结果按现有做法回退。
+- `trunc_sat` 的饱和结果与 x86 的整数不定值（0x80000000）不同。
+- `pmin`/`pmax` 的操作数顺序要对应 x86 的规则：相等（含 ±0）或有 NaN 时返回第二操作数。
+- 用 `i8x16.swizzle` 实现 PSHUFB 时，索引要先 `& 0x8F`。
+
 发布报告分别给出“完整语义覆盖”和“原生模板/内联覆盖”，避免所有指令都回退执行却被
 误报为性能实现完成。复杂指令保留 helper 是允许的，只要语义、可恢复性和性能预算达标。
 
@@ -411,8 +539,25 @@ v86 对这些设备地址选择确定的逐 lane 行为，并用 MMIO 计数器�
 - 整数/CRC/字符串采用独立位级模型，避免直接把实现代码复制进测试。
 - 使用可用的 x86 硬件结果、固定 QEMU TCG 版本和 SDM postconditions 交叉验证。
   现有 x64 oracle 已记录 QEMU 在部分 FP 异常/NaN 上的差异，不能单纯以 QEMU 为真值。
+  已知的 QEMU 缺口（2026-10-04 对照 QEMU master 核对）：
+  - TCG 不支持 XSAVEC/XSAVES（`TCG_XSAVE_FEATURES` 的注释写明缺失）。这两项以及 XRSTORS
+    只能依靠硬件或按 SDM 编写的模型判定。
+  - QEMU 的 XSAVE/XRSTOR 只在 `rfbm & XSTATE_SSE_MASK` 时处理 MXCSR，而 SDM 规定的是
+    RFBM[1] 或 RFBM[2]。“只请求 YMM”的用例必然与 QEMU 不符，需要预先登记一条 `QEMU_DEVIATIONS`。
+  - XCR0 同时启用 SSE 和 YMM 后，QEMU 的寄存器转储从 `XMMnn=` 变为 `YMMnn=`；
+    `tests/nasm/qemu_oracle.js` 现在只解析 `XMM0n=`，会直接失败。
+  - 现有 oracle 用 `-cpu max`，会顺带开启 FMA、BMI、AES 等。依赖能力位的负例和 CPUID 用例，
+    要固定一个与 v86 CPU 配置一致的 QEMU CPU 型号。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
-  具备相应能力的 x86 测试环境补足需要硬件判定的案例。
+  具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
+  AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
+  特权指令、XSETBV 和 CPL0 下的 XSAVE。
+- 规范允许多种结果的情形，一律按允许结果集或 postcondition 判定，并集中登记：
+  - DPPS 的部分 NaN 传播、RCP/RSQRT 的近似值（第 8 节）；
+  - 开启对齐检查时，XSAVE/FXSAVE 未对齐报 #AC 还是 #GP；
+  - CR4.OSFXSR=0 时，FXSAVE 是否写 XMM/MXCSR 区；
+  - VMASKMOV 被屏蔽 lane 的 A/D 位；
+  - gather 故障时，目的/mask 高位和更高序元素的状态。
 - 扩展 NASM fixture/GDB/QEMU stub 或新增版本化 guest record，包含所有可见 YMM、
   MXCSR、XCR0、EFLAGS、异常向量/错误码/IP、内存变化。旧 fixture 保持可读。
 - AVX 客体初始化必须设置 CR4.OSXSAVE/XCR0，分别处理 CPL0 boot stub 与宿主用户态测试。
@@ -427,8 +572,8 @@ v86 对这些设备地址选择确定的逐 lane 行为，并用 MMIO 计数器�
 | 数据 | 全零/全一、符号边界、溢出/饱和、随机 lane、全 imm8；FP 特殊值和控制位组合 |
 | 寄存器 | 源/目的全别名、隐式 XMM0、ECX/长度寄存器、0–7/8–15、YMM 高低半 |
 | 内存 | 对齐/非对齐、真实访问宽度、跨页/跨段、权限、canonical 地址、高物理地址、MMIO、自修改代码 |
-| 状态与异常 | CPUID/CR0/CR4/XCR0 组合、MXCSR、#UD/#NM/#XM/#GP/#SS/#AC/#PF、失败后的部分效果 |
-| 执行路径 | 32 位解释器、Tier-0、regions、64 位解释器、page tier；有/无 Wasm SIMD |
+| 状态与异常 | CPUID/CR0/CR4/XCR0 组合、`cpuid_level` 降级、SMI/RSM、MXCSR、#UD/#NM/#XM/#GP/#SS/#AC/#PF、失败后的部分效果 |
+| 执行路径 | 32 位解释器、Tier-0、regions、64 位解释器、page tier；有/无 Wasm SIMD；兼容模式下 32 位解释器与 x64 引擎的双引擎差分 |
 | 生命周期 | reset/INIT/SIPI、每核切换、IR continuation、快照/流式快照、parallel Worker 恢复 |
 
 全 imm8 测试适用于含立即数的目标形式；各模式按可达规则组织代表性组合，不以不可管理的
@@ -438,6 +583,10 @@ v86 对这些设备地址选择确定的逐 lane 行为，并用 MMIO 计数器�
 
 - 基于已有 Linux x86/x86_64 客体，验证实际 CPUID→OSXSAVE→XSETBV→XSAVE 路径；
   加入进程/线程切换、signal/sigreturn、系统调用和线程跨核迁移的 YMM 指纹探针。
+- 验证开放能力后，客体切换到的路径确实被执行且结果正确。这些路径包括：内核上下文切换所用的
+  XSAVE 变体、ld.so 惰性绑定的 xsave/xsavec，以及 glibc IFUNC 选中的 `_sse42`、`_ssse3`、`_avx2`
+  变体（例如 `__strcmp_sse42`、`__strcspn_sse42`、`__memmove_ssse3`、`__strlen_avx2`、
+  `__memmove_avx_unaligned_erms`）。同一组探针也用于 12.2 节的性能测量。
 - 基于已有 Windows 8.1 x64 客体，验证 64 位和 WOW64 AVX 程序、线程/异常上下文保存、
   多核及快照恢复；不把桌面启动成功等同于 AVX 状态正确。
 - 用明确编译选项构建 SSSE3/SSE4/AVX/AVX2 小程序并检查产物实际包含目标指令。
@@ -469,7 +618,9 @@ make bench-quick
 **计划新增** `ssse3-tests`、`sse41-tests`、`sse42-tests`、`xsave-tests`、`avx-tests`、
 `avx2-tests`、`simd-xsave-tests`，并接入 CI；这些名称当前不是可依赖的已有目标。
 CI 分为快速确定性语义/解码检查与较长的差分、浏览器、OS 集成任务，合并与发布分别设 gate。
-`make all-tests` 不能代替上述专项汇总。
+`make all-tests` 不能代替上述专项汇总。发布 gate 按 4.1 节的里程碑，在
+[`tools/release_gate.mjs`](../tools/release_gate.mjs) 中增加 `R-SSE4`、`R-XSAVE`、`R-AVX`、
+`R-AVX2`、`R-XSAVE-ext` 等级，用法与现有的 `R-x64-UP`、`R-q35` 等等级一致。
 
 ## 12. 发布、性能和最终检查表
 
@@ -477,7 +628,8 @@ CI 分为快速确定性语义/解码检查与较长的差分、浏览器、OS �
 
 内部开发可使用测试专用 feature mask；公共 CPUID 只在整个 ISA 的合法形式、异常和所有
 执行入口通过后开放。SSSE3、SSE4.1、SSE4.2、基础 XSAVE、AVX、AVX2 以及 XSAVE
-家族扩展独立验收，AVX2 必须建立在完整 AVX/xstate 上。
+家族扩展独立验收，并按 4.1 节的里程碑开放；AVX2 必须建立在完整 AVX/xstate 上。
+开放之前还要满足 12.2 节的热点形式前提。
 
 CPU feature profile 在 VM 创建时固定并保存到快照；不允许运行中从旧能力集升级到新能力集。
 保留当前旧 profile 用于快照和回归，新建 VM 是否默认采用扩展 profile 在 P10 按兼容性结果
@@ -491,8 +643,15 @@ CPU feature profile 在 VM 创建时固定并保存到快照；不允许运行�
 ### 12.2 性能预算
 
 P0 固定旧 profile 的启动、整数、x87、SSE、代码生成大小/时间和多核基线。建议发布预算：
-既有客体主要工作负载中位数回退不超过 5%，启动场景不超过 10%；超过时先分析和优化，
-不能靠打开 FP 不准确路径换取通过。阈值和重复次数在 P0 与现有 benchmark 的噪声一起固定。
+既有客体主要工作负载中位数回退不超过 5%，启动场景不超过 10%；超过时先分析和优化。
+预算按 Q2 选定的默认精度策略测量，不能为了通过预算另开不准确路径。阈值和重复次数在 P0
+与现有 benchmark 的噪声一起固定。
+
+预算要在旧、新两套 profile 下分别测量。能力位开放后客体会切换代码路径（6.3、11.3 节），
+同一工作负载转而执行新指令；这些形式如果在编译路径上只走 helper，开放能力反而会让现有
+工作负载变慢。因此 5.1 节热点形式清单中属于某个里程碑的形式，必须先在 Tier-0 和 page tier
+上有原生模板，该里程碑才能开放能力位。P4a 改造现有 SSE 浮点之后，也要在旧 profile 下
+单独过一遍预算。
 
 新 ISA 增加纯寄存器、访存、跨 lane、字符串比较、gather 和 XSAVE 上下文切换基准，
 分别报告解释器、编译路径、helper 占比、Wasm 大小与无 SIMD 构建。性能比较使用相同工作量，
@@ -509,7 +668,41 @@ P0 固定旧 profile 的启动、整数、x87、SSE、代码生成大小/时间�
 - [ ] 32 位解释器/Tier-0/regions、64 位解释器/page tier 及无 simd128 构建通过。
 - [ ] 新旧快照、reset/INIT/SIPI、每核状态和 parallel Worker 生命周期通过。
 - [ ] Linux、Windows x64/WOW64 的实际 SIMD 上下文切换探针通过。
+- [ ] 强制前缀和未列出前缀的规则在三个解码器中一致，兼容模式双引擎差分无分歧。
+- [ ] SMI/RSM、`cpuid_level` 降级和所有 CR0/CR4/XCR0 写入方的 JIT 门控测试通过。
+- [ ] 热点形式在编译路径上有原生模板，新旧 profile 下的性能预算都达标。
+- [ ] 11.1 节的 QEMU 偏差逐条登记，并由硬件或 SDM 模型判定。
 - [ ] CPU contract、公开配置与文档一致，既有客体回归和性能预算达标。
 
 达到以上条件才能将本项目标为“完整实现”；仅完成到某一阶段时，按已验收的 ISA 和
 XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指令占位称为全部完成。
+
+## 13. 待决问题
+
+以下问题在 P0 结束前给出结论，并把结论写回相应章节：
+
+| 编号 | 问题 | 建议 |
+| --- | --- | --- |
+| Q1 | 新建 VM 默认采用哪个 CPU 配置 | 新能力在新旧 profile 下都达到性能预算之前，默认保持旧配置，由用户显式开启 |
+| Q2 | SSE/AVX 浮点的精度策略 | 二选一：参照 `x87_fast_math` 设一个默认的快速模式，或默认精确并采用 7.4 节的快路径；性能预算按选定的默认策略测量 |
+| Q3 | 是否实现 XSAVES/XRSTORS | 没有 supervisor 分量时不纳入首个完整发布 |
+| Q4 | 公开配置的 API 形态 | 能力位图，外加 `x86-64-v2` 这类预设级别；不满足依赖的组合直接报错 |
+| Q5 | 兼容模式由哪个引擎执行 | 共用解码与语义（3.1 节），并保留双引擎差分作为回归手段 |
+| Q6 | INIT 是否保留 x87/XMM/YMM/MXCSR | 按 SDM 保留，与 XCR0/XSS 一起加入 `INIT_PRESERVED` |
+| Q7 | x86-64-v3 的剩余部分（FMA、F16C、BMI1、BMI2、LZCNT、MOVBE） | 另立计划；MOVBE 可在 P1/P4b 顺带完成 |
+
+### 13.1 风险与工作量初评
+
+以下为初步估计，P0 按清单规模校准：
+
+| 阶段 | 工作量 | 主要风险 |
+| --- | --- | --- |
+| P4a | 高 | 改动现有 SSE 浮点热路径，直接影响 3DMark06 和游戏的性能 |
+| P5–P6 | 高 | 形式数量最多，并引入 YMM 状态 |
+| P1 | 中 | 统一前缀规则会改变旧 `0F` 表的行为；需要三个解码器协同修改 |
+| P8 | 中 | gather 的部分完成与重启语义，以及它与 RETRY 机制的交互 |
+| P2、P9 | 中 | 操作系统上下文切换路径；QEMU 无法作为 XSAVEC/XSAVES 的参考 |
+| P3、P4b | 中低 | 形式多但语义规整；PCMPxSTRx 和 CRC32 需要独立的位级模型 |
+
+全部完成后，按项目惯例把本计划压缩进 [`docs/x86-64.md`](x86-64.md) 的 CPU 能力表和一份
+新的 SIMD 设计文档，然后删除本计划。

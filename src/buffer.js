@@ -5,6 +5,14 @@ import { dbg_assert, dbg_log } from "./log.js";
 // The smallest size the emulated hardware can emit
 const BLOCK_SIZE = 256;
 
+// The lazily loaded disks keep the blocks written to them in chunks of this
+// many (16 MiB), not in an ArrayBuffer each: gigabytes written are then a few
+// hundred buffers in a snapshot, not millions (a V7 manifest lists every buffer
+// and is limited to 16 MiB), a snapshot references them instead of copying
+// them, and the garbage collector has a few hundred objects to visit, not
+// millions
+const WRITE_CHUNK_BLOCKS = 0x10000;
+
 const ASYNC_SAFE = false;
 
 /**
@@ -119,8 +127,11 @@ function AsyncXHRBuffer(filename, size, fixed_chunk_size)
 
     this.byteLength = size;
 
+    // blocks kept from reads (a Uint8Array each)
     this.block_cache = new Map();
-    this.block_cache_is_write = new Set();
+    // blocks written: block number -> slot, its place in write_chunks
+    this.written_blocks = new Map();
+    this.write_chunks = [];
 
     this.fixed_chunk_size = fixed_chunk_size;
     this.cache_reads = !!fixed_chunk_size; // TODO: could also be useful in other cases (needs testing)
@@ -154,9 +165,7 @@ AsyncXHRBuffer.prototype.get_from_cache = function(offset, len)
 
     for(var i = 0; i < number_of_blocks; i++)
     {
-        var block = this.block_cache.get(block_index + i);
-
-        if(!block)
+        if(!this.written_blocks.has(block_index + i) && !this.block_cache.has(block_index + i))
         {
             return;
         }
@@ -164,17 +173,35 @@ AsyncXHRBuffer.prototype.get_from_cache = function(offset, len)
 
     if(number_of_blocks === 1)
     {
-        return this.block_cache.get(block_index);
+        return this.cached_block(block_index);
     }
     else
     {
         var result = new Uint8Array(len);
         for(var i = 0; i < number_of_blocks; i++)
         {
-            result.set(this.block_cache.get(block_index + i), i * BLOCK_SIZE);
+            result.set(/** @type {!Uint8Array} */ (this.cached_block(block_index + i)), i * BLOCK_SIZE);
         }
         return result;
     }
+};
+
+/**
+ * The data of a block that was written or kept from a read
+ *
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @param {number} index
+ * @return {!Uint8Array|undefined}
+ */
+AsyncXHRBuffer.prototype.cached_block = function(index)
+{
+    const slot = this.written_blocks.get(index);
+    if(slot === undefined)
+    {
+        return this.block_cache.get(index);
+    }
+    const offset = slot % WRITE_CHUNK_BLOCKS * BLOCK_SIZE;
+    return this.write_chunks[Math.floor(slot / WRITE_CHUNK_BLOCKS)].subarray(offset, offset + BLOCK_SIZE);
 };
 
 /**
@@ -245,7 +272,7 @@ AsyncXHRBuffer.prototype.get_and_cache = function(offset, len, fn, options)
 
         for(let i = 0; i < block_count; i++)
         {
-            if(!this.block_cache.has(start_block + i))
+            if(!this.written_blocks.has(start_block + i) && !this.block_cache.has(start_block + i))
             {
                 this.block_cache.set(start_block + i, block.slice(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE));
             }
@@ -256,7 +283,7 @@ AsyncXHRBuffer.prototype.get_and_cache = function(offset, len, fn, options)
 };
 
 /**
- * Relies on this.byteLength and this.block_cache
+ * Relies on this.byteLength, this.written_blocks and this.write_chunks
  *
  * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
  *
@@ -277,24 +304,33 @@ AsyncXHRBuffer.prototype.set = function(start, data, fn)
 
     for(var i = 0; i < block_count; i++)
     {
-        var block = this.block_cache.get(start_block + i);
-
-        if(block === undefined)
-        {
-            const data_slice = data.slice(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE);
-            this.block_cache.set(start_block + i, data_slice);
-        }
-        else
-        {
-            const data_slice = data.subarray(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE);
-            dbg_assert(block.byteLength === data_slice.length);
-            block.set(data_slice);
-        }
-
-        this.block_cache_is_write.add(start_block + i);
+        this.write_block(start_block + i, data.subarray(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE));
     }
 
     fn();
+};
+
+/**
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @param {number} index
+ * @param {!Uint8Array} data
+ */
+AsyncXHRBuffer.prototype.write_block = function(index, data)
+{
+    dbg_assert(data.length === BLOCK_SIZE);
+    let slot = this.written_blocks.get(index);
+    if(slot === undefined)
+    {
+        // (no block leaves written_blocks: the next slot is its size)
+        slot = this.written_blocks.size;
+        if(slot % WRITE_CHUNK_BLOCKS === 0)
+        {
+            this.write_chunks.push(new Uint8Array(WRITE_CHUNK_BLOCKS * BLOCK_SIZE));
+        }
+        this.written_blocks.set(index, slot);
+        this.block_cache.delete(index);
+    }
+    this.write_chunks[Math.floor(slot / WRITE_CHUNK_BLOCKS)].set(data, slot % WRITE_CHUNK_BLOCKS * BLOCK_SIZE);
 };
 
 /**
@@ -313,7 +349,7 @@ AsyncXHRBuffer.prototype.handle_read = function(offset, len, block)
 
     for(var i = 0; i < block_count; i++)
     {
-        const cached_block = this.block_cache.get(start_block + i);
+        const cached_block = this.cached_block(start_block + i);
 
         if(cached_block)
         {
@@ -368,19 +404,21 @@ AsyncXHRBuffer.prototype.get_buffer = function(fn)
  */
 AsyncXHRBuffer.prototype.get_state = function()
 {
-    const state = [];
-    const block_cache = [];
-
-    for(const [index, block] of this.block_cache)
+    // The written blocks: their numbers in the order of their data in the
+    // chunks. The snapshot references the chunks, it does not copy them: the
+    // machine is stopped until it is saved.
+    const count = this.written_blocks.size;
+    const indices = new Float64Array(count);
+    for(const [index, slot] of this.written_blocks)
     {
-        dbg_assert(isFinite(index));
-        if(this.block_cache_is_write.has(index))
-        {
-            block_cache.push([index, block]);
-        }
+        indices[slot] = index;
     }
 
-    state[0] = block_cache;
+    const state = [];
+    state[0] = null; // [[block number, data], ...] in snapshots from before
+    state[1] = indices;
+    state[2] = this.write_chunks.map((chunk, i) =>
+        chunk.subarray(0, Math.min(WRITE_CHUNK_BLOCKS, count - i * WRITE_CHUNK_BLOCKS) * BLOCK_SIZE));
     return state;
 };
 
@@ -389,15 +427,58 @@ AsyncXHRBuffer.prototype.get_state = function()
  */
 AsyncXHRBuffer.prototype.set_state = function(state)
 {
-    const block_cache = state[0];
     this.block_cache.clear();
-    this.block_cache_is_write.clear();
+    this.written_blocks.clear();
+    this.write_chunks = [];
 
-    for(const [index, block] of block_cache)
+    if(state[0])
     {
-        dbg_assert(isFinite(index));
-        this.block_cache.set(index, block);
-        this.block_cache_is_write.add(index);
+        // a snapshot from before: [[block number, data], ...]
+        for(const [index, block] of state[0])
+        {
+            dbg_assert(isFinite(index));
+            this.write_block(index, block);
+        }
+        return;
+    }
+
+    const indices = state[1];
+    const chunks = state[2];
+    const block_count = this.byteLength / BLOCK_SIZE;
+    let total = 0;
+    for(const chunk of chunks)
+    {
+        if(!(chunk instanceof Uint8Array) || chunk.length % BLOCK_SIZE) throw new Error("Invalid disk snapshot: chunk");
+        total += chunk.length / BLOCK_SIZE;
+    }
+    if(!(indices instanceof Float64Array) || indices.length !== total ||
+        indices.some(index => !Number.isInteger(index) || index < 0 || index >= block_count))
+    {
+        throw new Error("Invalid disk snapshot: block numbers");
+    }
+
+    let i = 0;
+    for(const chunk of chunks)
+    {
+        const count = chunk.length / BLOCK_SIZE;
+        if(count === WRITE_CHUNK_BLOCKS && i % WRITE_CHUNK_BLOCKS === 0)
+        {
+            // a full chunk becomes this disk's as it is (a restore makes new
+            // buffers for the snapshot's)
+            this.write_chunks.push(chunk);
+            for(const end = i + count; i < end; i++)
+            {
+                this.written_blocks.set(indices[i], i);
+            }
+            if(this.written_blocks.size !== i) throw new Error("Invalid disk snapshot: a block saved twice");
+        }
+        else
+        {
+            for(let offset = 0; offset < chunk.length; offset += BLOCK_SIZE)
+            {
+                this.write_block(indices[i++], chunk.subarray(offset, offset + BLOCK_SIZE));
+            }
+        }
     }
 };
 
@@ -427,7 +508,8 @@ export function AsyncXHRPartfileBuffer(filename, size, fixed_chunk_size, partfil
     }
 
     this.block_cache = new Map();
-    this.block_cache_is_write = new Set();
+    this.written_blocks = new Map();
+    this.write_chunks = [];
 
     this.byteLength = size;
     this.fixed_chunk_size = fixed_chunk_size;
@@ -557,7 +639,9 @@ AsyncXHRPartfileBuffer.prototype.get = function(offset, len, fn, options)
 
 AsyncXHRPartfileBuffer.prototype.get_from_cache = AsyncXHRBuffer.prototype.get_from_cache;
 AsyncXHRPartfileBuffer.prototype.get_and_cache = AsyncXHRBuffer.prototype.get_and_cache;
+AsyncXHRPartfileBuffer.prototype.cached_block = AsyncXHRBuffer.prototype.cached_block;
 AsyncXHRPartfileBuffer.prototype.set = AsyncXHRBuffer.prototype.set;
+AsyncXHRPartfileBuffer.prototype.write_block = AsyncXHRBuffer.prototype.write_block;
 AsyncXHRPartfileBuffer.prototype.handle_read = AsyncXHRBuffer.prototype.handle_read;
 //AsyncXHRPartfileBuffer.prototype.get_block_cache = AsyncXHRBuffer.prototype.get_block_cache;
 AsyncXHRPartfileBuffer.prototype.get_state = AsyncXHRBuffer.prototype.get_state;
@@ -647,7 +731,8 @@ export function AsyncFileBuffer(file)
     this.byteLength = file.size;
 
     this.block_cache = new Map();
-    this.block_cache_is_write = new Set();
+    this.written_blocks = new Map();
+    this.write_chunks = [];
 
     this.onload = undefined;
     this.onprogress = undefined;
@@ -705,7 +790,9 @@ AsyncFileBuffer.prototype.get = function(offset, len, fn)
 };
 AsyncFileBuffer.prototype.get_from_cache = AsyncXHRBuffer.prototype.get_from_cache;
 AsyncFileBuffer.prototype.get_and_cache = AsyncXHRBuffer.prototype.get_and_cache;
+AsyncFileBuffer.prototype.cached_block = AsyncXHRBuffer.prototype.cached_block;
 AsyncFileBuffer.prototype.set = AsyncXHRBuffer.prototype.set;
+AsyncFileBuffer.prototype.write_block = AsyncXHRBuffer.prototype.write_block;
 AsyncFileBuffer.prototype.handle_read = AsyncXHRBuffer.prototype.handle_read;
 AsyncFileBuffer.prototype.get_state = AsyncXHRBuffer.prototype.get_state;
 AsyncFileBuffer.prototype.set_state = AsyncXHRBuffer.prototype.set_state;
@@ -719,14 +806,23 @@ AsyncFileBuffer.prototype.get_buffer = function(fn)
 AsyncFileBuffer.prototype.get_as_file = function(name)
 {
     var parts = [];
-    var existing_blocks = Array.from(this.block_cache.keys()).sort(function(x, y) { return x - y; });
+    // (blocks kept from reads are as in the file)
+    var existing_blocks = Float64Array.from(this.written_blocks.keys()).sort();
 
     var current_offset = 0;
 
-    for(var i = 0; i < existing_blocks.length; i++)
+    for(var i = 0; i < existing_blocks.length;)
     {
-        var block_index = existing_blocks[i];
-        var block = this.block_cache.get(block_index);
+        // a run of blocks that follow each other on the disk and in a chunk,
+        // as a guest writing data in sequence leaves them: one part
+        const block_index = existing_blocks[i];
+        const slot = this.written_blocks.get(block_index);
+        let count = 1;
+        while(i + count < existing_blocks.length && existing_blocks[i + count] === block_index + count &&
+            this.written_blocks.get(block_index + count) === slot + count && (slot + count) % WRITE_CHUNK_BLOCKS)
+        {
+            count++;
+        }
         var start = block_index * BLOCK_SIZE;
         dbg_assert(start >= current_offset);
 
@@ -736,8 +832,10 @@ AsyncFileBuffer.prototype.get_as_file = function(name)
             current_offset = start;
         }
 
-        parts.push(block);
-        current_offset += block.length;
+        const offset = slot % WRITE_CHUNK_BLOCKS * BLOCK_SIZE;
+        parts.push(this.write_chunks[Math.floor(slot / WRITE_CHUNK_BLOCKS)].subarray(offset, offset + count * BLOCK_SIZE));
+        current_offset += count * BLOCK_SIZE;
+        i += count;
     }
 
     if(current_offset !== this.file.size)

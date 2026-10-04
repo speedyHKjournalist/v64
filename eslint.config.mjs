@@ -23,6 +23,7 @@ export default [
 
                 "Buffer": "readonly",
                 "FileReader": "readonly",
+                "FileReaderSync": "readonly",
                 "TextEncoder": "readonly",
                 "TextDecoder": "readonly",
                 "fetch": "readonly",

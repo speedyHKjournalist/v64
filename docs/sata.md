@@ -290,12 +290,29 @@ device layer registers every read and write with
 | --- | --- | --- | --- |
 | `SyncBuffer` | an `ArrayBuffer` in memory | synchronous | written to memory synchronously |
 | `SyncFileBuffer` | a local file below 256 MB | read whole at start, then synchronous | in memory |
-| `AsyncFileBuffer` | a local file of 256 MB or more | synchronous with `FileReaderSync` in the CPU worker (about 0.5 ms per request), asynchronous with `FileReader` on the main thread; data read is not cached | kept in memory in 256-byte blocks |
-| `AsyncXHRBuffer` and others | a URL (HTTP Range requests), split files | asynchronous (blocks read are cached with `fixed_chunk_size`) | kept in memory in 256-byte blocks |
+| `AsyncFileBuffer` | a local file of 256 MB or more | synchronous with `FileReaderSync` in the CPU worker (about 0.5 ms per request), asynchronous with `FileReader` on the main thread; data read is not cached | kept in memory, 256-byte blocks in 16 MiB chunks |
+| `AsyncXHRBuffer` and others | a URL (HTTP Range requests), split files | asynchronous (blocks read are cached with `fixed_chunk_size`) | kept in memory, 256-byte blocks in 16 MiB chunks |
 
-- Guest writes stay in memory and never change the original file: writing 1.5 GB
-  takes about 2 GB of memory. Measured in the browser, that many small blocks had
-  no noticeable effect on garbage collection.
+- Guest writes stay in memory and never change the original file. The written
+  256-byte blocks are packed into chunks of 65536 (16 MiB), with a map from block
+  number to slot: 1.5 GB written takes about 1.8 GB of memory (about 3 GB with an
+  `ArrayBuffer` for each block, as before, and then every 64 MB of new blocks
+  caused a full garbage collection of millions of objects). A snapshot holds the
+  block numbers as one `Float64Array` and references the chunks without copying
+  them, so its manifest stays a few kilobytes; with a buffer for each block, the
+  6 million blocks that installing VMware Tools in Windows 8.1 writes failed the
+  V7 save with "manifest too large". Snapshots of the format before
+  (`[[block number, data], ...]`) still restore. Measured in headless Chrome
+  (Q35, a local 2 GiB disk, the CPU worker): 1.5 GB written, the page saves 1.8 GB
+  in about 2.5 seconds (manifest 15 KB) and restores it in about 5. The V7
+  records' CRC-32 is computed 16 bytes a step (slicing-by-16, the same values
+  as zlib); computed a byte a step, the same save took about 10 seconds.
+- **Get hard disk image** with a local file read in parts (`AsyncFileBuffer`):
+  `get_as_file` builds a `File` of the original file's slices and the written
+  blocks, one part for each run of blocks that follow each other on the disk and
+  in a chunk. In the CPU worker it is sent to the page as it is (before, the
+  worker asked the backend for a buffer it does not have, and the button gave
+  nothing). The 2 GiB disk above with 1.5 GB written exports in about 1.3 seconds.
 - **Synchronous reads decide how fast Q35 boots in the browser.** SeaBIOS's AHCI
   driver polls for each command's completion, through SMM on Q35, which is slow;
   an asynchronous read arrives only after the emulator finishes a batch of
@@ -329,6 +346,11 @@ device layer registers every read and write with
 - [`tests/devices/ide_large_disk.js`](../tests/devices/ide_large_disk.js): LBA48
   accesses beyond 2^32 sectors on a sparse 3 TiB disk (the device layer is shared
   with IDE).
+- [`tests/devices/disk_write_cache.js`](../tests/devices/disk_write_cache.js): the
+  written blocks of the lazily loaded disks (reads over writes, blocks kept from
+  reads, chunk boundaries, snapshot state in both formats, `get_as_file`), and V7
+  and V6 snapshots of a machine with 40 MB written; `DISK_WRITE_MB=1536` writes
+  as much as the VMware Tools installation.
 
 ## Differences from QEMU and limits
 

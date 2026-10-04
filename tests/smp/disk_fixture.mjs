@@ -54,9 +54,10 @@ export class ReadOnlyOverlayDisk
         sectors.forEach((sector, i) => bytes.set(this.overlay.get(sector), i * 512));
         return [1, this.byteLength, Uint32Array.from(sectors), bytes];
     }
-    // Also takes the written-block cache of the browser's lazily loaded disks
-    // (AsyncXHRBuffer and friends in src/buffer.js: [[[block, 256 bytes], ...]]),
-    // so snapshots saved by a website restore here. Checked by hand: a failing
+    // Also takes the written blocks of the browser's lazily loaded disks
+    // (AsyncXHRBuffer and friends in src/buffer.js: [null, block numbers, their
+    // 256 bytes each in chunks], or [[[block, 256 bytes], ...]] before), so
+    // snapshots saved by a website restore here. Checked by hand: a failing
     // node:assert comparison renders the whole value into a line diff whose cost
     // is quadratic, and node is SIGKILLed with no output long before it throws.
     set_state(state)
@@ -70,6 +71,18 @@ export class ReadOnlyOverlayDisk
                 state[2].length * 512 !== state[3].length) fail("has an invalid sector overlay");
             this.overlay.clear();
             state[2].forEach((sector, i) => this.overlay.set(sector, state[3].slice(i * 512, (i + 1) * 512)));
+        }
+        else if(state[0] === null && state[1] instanceof Float64Array && Array.isArray(state[2]))
+        {
+            const [, blocks, chunks] = state;
+            if(chunks.some(chunk => !(chunk instanceof Uint8Array) || chunk.length % 256) ||
+                chunks.reduce((sum, chunk) => sum + chunk.length / 256, 0) !== blocks.length ||
+                blocks.some(block => !Number.isSafeInteger(block) || block < 0 || (block + 1) * 256 > this.byteLength))
+                fail("has invalid written blocks");
+            this.overlay.clear();
+            let i = 0;
+            for(const chunk of chunks)
+                for(let at = 0; at < chunk.length; at += 256) this.set(blocks[i++] * 256, chunk.subarray(at, at + 256));
         }
         else if(state.length === 1 && Array.isArray(state[0]))
         {

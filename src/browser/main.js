@@ -3327,8 +3327,21 @@ function init_ui(profile, settings, emulator)
         {
             if(emulator.worker_controller)
             {
-                const bytes = await emulator.worker_controller.rpc("disk", [type]);
-                dump_file(bytes, (profile?.id || "v86") + "-" + type + (type === "cdrom" ? ".iso" : ".img"));
+                const name = (profile?.id || "v86") + "-" + type + (type === "cdrom" ? ".iso" : ".img");
+                const result = await emulator.worker_controller.rpc("disk", [type]);
+                if(result instanceof Blob)
+                {
+                    // (a local file read in parts, with the blocks written)
+                    download(result, result instanceof File ? result.name : name);
+                }
+                else if(result)
+                {
+                    dump_file(result, name);
+                }
+                else
+                {
+                    alert("The file could not be loaded. Maybe it's too big?");
+                }
                 elem.blur();
                 return;
             }

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { setImmediate as set_immediate } from "node:timers";
 import { createHash as create_hash } from "node:crypto";
+import { crc32 } from "node:zlib";
 import { MessageChannel } from "node:worker_threads";
 import { begin_state_io } from "../../src/state_io.js";
 import { state_stream_client, state_stream_server } from "../../src/browser/state_stream_transport.js";
@@ -55,6 +56,14 @@ try
     assert.ok(position > 8 << 20);
     const header = new Uint8Array(32); await file.read(header, 0, 32, 0);
     assert.equal(new DataView(header.buffer).getUint32(4, true), 7);
+    // the checksums are CRC-32 as zlib's (files saved before must still load)
+    const manifest = new Uint8Array(new DataView(header.buffer).getUint32(12, true));
+    await file.read(manifest, 0, manifest.length, 32);
+    assert.equal(new DataView(header.buffer).getUint32(28, true), crc32(manifest), "manifest checksum");
+    const record_header = new Uint8Array(16); await file.read(record_header, 0, 16, 32 + manifest.length);
+    const record = new Uint8Array(16 + new DataView(record_header.buffer).getUint32(12, true) + 4);
+    await file.read(record, 0, record.length, 32 + manifest.length);
+    assert.equal(new DataView(record.buffer).getUint32(record.length - 4, true), crc32(record.subarray(0, record.length - 4)), "record checksum");
     let reads = 0;
     const source = { size: position, async read(offset, length) {
         assert.ok(length <= 1024 * 1024); reads++;
