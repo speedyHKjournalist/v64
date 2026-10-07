@@ -190,6 +190,18 @@ fn lift_inner(
             super::sti::lift(&mut b, &i, count);
             continue;
         }
+        if super::avx::supports(&i) {
+            if !cpu {
+                return Err(CompileError::Unsupported("AVX requires CPU ABI"));
+            }
+            super::avx::lift(&mut b, &i, count);
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+                return Ok(b.region);
+            }
+            continue;
+        }
         let op = i.encoding.opcode;
         let rm = i.modrm.map_or(0, |m| m & 7);
         let reg = i.modrm.map_or(0, |m| m >> 3 & 7);

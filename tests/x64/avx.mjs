@@ -1,0 +1,459 @@
+#!/usr/bin/env node
+// AVX in the x64 engine (docs/simd-xsave-plan.md 8, P5): the VEX forms in
+// 64-bit mode (XMM8-15 through VEX.R, VEX.B and VEX.vvvv, memory operands
+// through VEX.X and VEX.B, RIP-relative ones, the VEX.W1 forms with 64-bit
+// general-purpose operands) and in compatibility mode (the 32-bit
+// interpreter: XMM0-7 only, VZEROUPPER leaving YMM8-15's upper halves),
+// against QEMU and the model of tests/rust/avx_model.mjs. Registers are
+// loaded with XRSTOR and stored with XSAVE, which shows the upper halves of
+// the YMM registers. Faults: #UD without CR4.OSXSAVE or with XCR0 3, #NM
+// with CR0.TS, #GP(0) for a misaligned operand of an aligned move and a
+// non-canonical address; CR0.EM does not matter. Interpreted, with the x64
+// page tier, and with compatibility-mode code compiled. Both blocks loop so
+// that they become hot.
+//
+// P5 part 1: the data movement and logic forms, VZEROUPPER, VLDMXCSR and
+// VSTMXCSR.
+import assert from "node:assert/strict";
+import {assemble, reference, actual} from "./guest_runner.mjs";
+import {long_mode_guest} from "./guest_builder.mjs";
+import {FORMS, big, execute, le, mask, memory_bytes} from "../rust/avx_model.mjs";
+
+const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, COUNTER = OUT + 0x88, MATCH = OUT + 0xC0, FAULTS = OUT + 0x100;
+// a case's general-purpose result, its memory destination (48 bytes) and its XSAVE area
+const GPR_OUT = OUT + 0x1000, STORES = OUT + 0x4000, RESULTS = OUT + 0x10000;
+const SPAN = 48, AREA = 832;
+// (compatibility-mode code is compiled only after a while)
+const IDT = 0x380000, ROUNDS = 400, COMPAT_ROUNDS = 4000;
+const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
+const hex = b => Buffer.from(b).toString("hex");
+
+// 8 register files (XMM0-15, YMM0-15's upper halves, MXCSR) and 1 KiB of memory operands
+let seed = 0x13572468;
+const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return seed >>> 0; };
+const AREAS = Array.from({length: 8}, () => {
+    const a = new Uint8Array(AREA);
+    a.set(u32(random() & 0xFFFF), 24);
+    for(let i = 160; i < 416; i++) a[i] = random();
+    a[512] = 6;
+    for(let i = 576; i < 832; i++) a[i] = random();
+    return a;
+});
+const samples = Uint8Array.from({length: 1024}, () => random());
+// (VLDMXCSR's operands: valid values at the last 64 bytes)
+for(let i = 960; i < 1024; i += 4) samples.set(u32(random() & 0xFFFF), i);
+
+/** A VEX instruction: fields map, pp, L, W, vvvv (4 bits) and the
+ * three-byte prefix; ModRM's reg and r/m register `rm` or memory operand
+ * `mem` {base, index, scale, disp}: [base + index << scale + disp32]; imm8.
+ * VEX.R, X and B extend registers 8-15. */
+function encode({map = 1, pp = 0, l = 0, w = 0, vvvv = 0, three = false}, op, reg, rm, mem, imm8)
+{
+    let modrm = [], x = 0, b = 0;
+    if(mem)
+    {
+        const {base, index, scale = 0, disp = 0} = mem;
+        b = base >> 3;
+        if(index !== undefined)
+        {
+            x = index >> 3;
+            modrm = [0x80 | (reg & 7) << 3 | 4, scale << 6 | (index & 7) << 3 | base & 7, ...u32(disp)];
+        }
+        else if((base & 7) === 4) modrm = [0x80 | (reg & 7) << 3 | 4, 0x24, ...u32(disp)];
+        else modrm = [0x80 | (reg & 7) << 3 | base & 7, ...u32(disp)];
+    }
+    else if(rm !== undefined)
+    {
+        b = rm >> 3;
+        modrm = [0xC0 | (reg & 7) << 3 | rm & 7];
+    }
+    const r = reg >> 3;
+    const tail = [op, ...modrm, ...(imm8 === undefined ? [] : [imm8])];
+    const fields = (~vvvv & 15) << 3 | l << 2 | pp;
+    if(map === 1 && !w && !three && !x && !b) return [0xC5, (r ? 0 : 0x80) | fields, ...tail];
+    return [0xC4, (r ? 0 : 0x80) | (x ? 0 : 0x40) | (b ? 0 : 0x20) | map, w << 7 | fields, ...tail];
+}
+const GPR64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
+const GPR32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
+// general-purpose operands and address registers (not RAX, RDX: XRSTOR/XSAVE's; not RSP)
+const OPERANDS = [[1, 9, 14, 6, 11], [1, 3, 6, 7, 5]];
+const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr"];
+
+// the cases: {long, f, k (register file), d, v, m, memory {base, index, scale, at}, gpr}
+const cases = [];
+for(const long of [true, false])
+{
+    const regs = long ? 16 : 8;
+    for(const f of FORMS.filter(f => long || !f.long))
+    {
+        const count = f.kind === "zero_upper" ? 2 : 4;
+        for(let i = 0; i < count; i++)
+        {
+            const n = cases.length;
+            const memory = f.memory || !f.register && i >= count / 2;
+            // (the registers alias in one case of two)
+            const d = (n * 5 + (long ? 3 : 0)) % regs, v = i & 1 ? d : (d + 7) % regs, m = i & 1 ? (v + 1) % regs : d;
+            const gprs = OPERANDS[long ? 0 : 1];
+            const c = {long, f, k: n % 8, d, v, m: memory ? undefined : m, gpr: gprs[n % 3], n};
+            if(memory)
+            {
+                // [base + index << scale + disp]: the operand at `at` of the samples (or of the case's destination)
+                const at = f.aligned ? 16 * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) : (n * 7) % 33;
+                c.memory = {base: gprs[3 + n % 2], index: i === count - 1 ? gprs[(n + 1) % 3] : undefined, scale: n % 4, at, disp: -0x40 + n};
+            }
+            cases.push(c);
+        }
+    }
+}
+const store_kind = c => STORE_KINDS.includes(c.f.kind);
+const code = (c, n) => {
+    const lines = [], f = c.f;
+    const R = c.long ? GPR64 : GPR32;
+    lines.push("mov eax,6", "xor edx,edx", `xrstor [areas + ${c.k * AREA}]`);
+    let reg = c.d, rm = c.m, mem;
+    if(c.memory)
+    {
+        const {base, index, scale, at, disp} = c.memory;
+        const target = store_kind(c) ? `${STORES + n * SPAN + at}` : `samples + ${at}`;
+        // (the index register holds 3)
+        lines.push(`lea ${R[base]},[${target} - ${disp} - ${index === undefined ? 0 : 3 << scale}]`);
+        if(index !== undefined) lines.push(`mov ${R[index]},3`);
+        mem = {base, index, scale, disp};
+    }
+    switch(f.kind)
+    {
+        case "to_gpr":
+            reg = c.gpr;
+            lines.push(`mov ${R[c.gpr]},-1`);
+            break;
+        case "gpr_load": case "gpr_store":
+            if(c.memory) break;
+            rm = c.gpr;
+            c.value = BigInt(random()) << 32n | BigInt(random());
+            lines.push(`mov ${R[c.gpr]},${f.kind === "gpr_load" ? "0x" + (c.long ? c.value : c.value & 0xFFFFFFFFn).toString(16) : -1}`);
+            break;
+        case "ldmxcsr": case "stmxcsr": reg = f.group; break;
+        case "maskmov":
+            lines.push(`mov ${c.long ? "rdi" : "edi"},${STORES + n * SPAN + 5}`);
+            break;
+    }
+    const vvvv = ["binary", "low", "high"].includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !c.memory ? c.v : 0;
+    // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode)
+    const fields = {map: f.map || 1, pp: f.pp, w: f.w === undefined || f.wig32 && !c.long ? n & 1 : f.w, l: f.lig ? n >> 1 & 1 : 0, three: !!(n & 2), vvvv};
+    lines.push(`db ${(f.kind === "zero_upper" ? encode(fields, f.op) : encode(fields, f.op, reg, rm, mem)).join(",")}`);
+    if(["to_gpr"].includes(f.kind) || ["gpr_store"].includes(f.kind) && !c.memory)
+    {
+        lines.push(`mov [${GPR_OUT + n * 16}],${R[c.gpr]}`);
+    }
+    lines.push("mov eax,6", "xor edx,edx", `xsave [${RESULTS + n * AREA}]`);
+    return lines.join("\n");
+};
+const block = long => cases.map((c, n) => c.long === long ? code(c, n) : "").filter(Boolean).join("\n");
+
+// VMOVSS and VMOVSD with VEX.L1 (VEX.LIG): the SDM zeroes bits 255:128 of
+// the destination register as with VEX.L0 (the operation is VEX.128's).
+// QEMU 10.2 runs them as 256-bit operations: between registers those bits
+// come from the first source (VEX.vvvv), VMOVSD from memory keeps them
+// (VMOVSS from memory zeroes them). Against QEMU, any of these.
+const qemu_lig = (c, n) => c.f.lig && (n >> 1 & 1) === 1;
+// The model: each case's XSAVE area (the registers it can reach), its
+// general-purpose result and its memory destination (`qemu`: QEMU's
+// deviations for qemu_lig, "kept" or "first source")
+const expected_case = (c, n, qemu = undefined) => {
+    const area = AREAS[c.k], regs = c.long ? 16 : 8;
+    const s = {
+        x: Array.from({length: 16}, (_, r) => big(area.subarray(160 + 16 * r, 176 + 16 * r))),
+        h: Array.from({length: 16}, (_, r) => big(area.subarray(576 + 16 * r, 592 + 16 * r))),
+        mxcsr: area[24] | area[25] << 8,
+        gpr_out: new Uint8Array(16),
+        dest: new Uint8Array(SPAN),
+    };
+    const at = c.memory?.at ?? 0;
+    s.load = bytes => big(samples.subarray(at, at + bytes));
+    s.store = (bytes, v) => s.dest.set(le(v, bytes), at);
+    s.masked = (value, selected) => le(value).forEach((b, i) => { if(selected[i]) s.dest[5 + i] = b; });
+    s.gpr = () => c.long ? c.value : c.value & 0xFFFFFFFFn;
+    // (32-bit results zero-extended in 64-bit mode; in compatibility mode a 32-bit store)
+    s.set_gpr = (r, value) => s.gpr_out.set(le(value, c.long ? 8 : 4));
+    const o = {d: c.d, v: c.v, m: c.m, long: c.long};
+    if(c.f.kind === "to_gpr") Object.assign(o, {d: c.gpr});
+    if((c.f.kind === "gpr_load" || c.f.kind === "gpr_store") && !c.memory) o.m = c.gpr;
+    const upper = [...s.h];
+    execute(c.f, s, o);
+    if(qemu === "kept") s.h = upper;
+    if(qemu === "first source" && !c.memory) s.h[c.f.op === 0x10 ? c.d : c.m] = upper[c.v];
+    const out = new Uint8Array(AREA);
+    out.set(u32(s.mxcsr), 24);
+    out.set(u32(0xFFFF), 28);
+    for(let r = 0; r < regs; r++)
+    {
+        out.set(le(s.x[r]), 160 + 16 * r);
+        out.set(le(s.h[r]), 576 + 16 * r);
+    }
+    return {area: out, gpr: s.gpr_out, dest: s.dest};
+};
+// (the bytes an XSAVE stores: MXCSR and MXCSR_MASK, the XMM and YMM_Hi128 registers of the mode)
+const xsave_bytes = (area, long) => Buffer.concat([area.subarray(24, 32), area.subarray(160, long ? 416 : 288), area.subarray(576, long ? 832 : 704)]);
+
+// the faults: [vector, what, long, setup, instruction, the vector QEMU raises instead]
+const VMOVAPS = encode({pp: 0}, 0x28, 1, 2), VZEROUPPER = encode({}, 0x77), VLDMXCSR = "vldmxcsr [samples + 960]";
+const FAULT_CASES = [];
+for(const long of [true, false])
+{
+    for(const [what, instruction] of [["vmovaps xmm1,xmm2", `db ${VMOVAPS.join(",")}`], ["vzeroupper", `db ${VZEROUPPER.join(",")}`], ["vldmxcsr", VLDMXCSR],
+        ...long ? [["vpxor xmm12,xmm13,xmm9", "vpxor xmm12,xmm13,xmm9"], ["vmovq r10,xmm11", "vmovq r10,xmm11"]] : [["vmovd ecx,xmm3", "vmovd ecx,xmm3"]]])
+    {
+        FAULT_CASES.push([6, `${what} without CR4.OSXSAVE`, long, "no_osxsave", instruction]);
+        FAULT_CASES.push([6, `${what} with XCR0 3`, long, "xcr0_3", instruction]);
+        FAULT_CASES.push([7, `${what} with CR0.TS`, long, "ts", instruction]);
+        FAULT_CASES.push([6, `${what} with CR0.TS, without CR4.OSXSAVE`, long, "ts no_osxsave", instruction]);
+    }
+    // (0: no fault. VEX forms ignore CR0.EM, SDM exception type tables; QEMU
+    // 10.2 raises #UD, as for legacy SSE)
+    FAULT_CASES.push([0, "vmovaps xmm1,xmm2 with CR0.EM", long, "em", `db ${VMOVAPS.join(",")}`, 6]);
+    FAULT_CASES.push([13, "vmovaps xmm1,[misaligned]", long, "", "vmovaps xmm1,[samples + 8]"]);
+    FAULT_CASES.push([13, "vmovntdq [misaligned],xmm2", long, "", `vmovntdq [${STORES + 4}],xmm2`]);
+    FAULT_CASES.push([13, "vmovntdqa xmm3,[misaligned]", long, "", "vmovntdqa xmm3,[samples + 4]"]);
+    FAULT_CASES.push([0, "vmovups xmm1,[misaligned]", long, "", "vmovups xmm1,[samples + 8]"]);
+    // (QEMU 10.2 does not check MXCSR's reserved bits: no fault, and MXCSR
+    // takes the value until the next LDMXCSR)
+    FAULT_CASES.push([13, "vldmxcsr with a reserved bit", long, "mxcsr", "vldmxcsr [reserved_mxcsr]", 0]);
+    if(long)
+    {
+        FAULT_CASES.push([13, "vmovups xmm1,[non-canonical]", long, "", "mov rbx,0x0000800000000000\nvmovups xmm1,[rbx]"]);
+        // (QEMU 10.2 raises #GP(0) for a non-canonical stack address too: tests/x64/system_oracle.mjs)
+        FAULT_CASES.push([12, "vmovdqu [rbp non-canonical],xmm1", long, "", "mov rbp,0x0000800000000000\nvmovdqu [rbp],xmm1", 13]);
+    }
+}
+const SET_CR0 = (bits, long) => long ? `mov rax,cr0\nor eax,${bits}\nmov cr0,rax` : `mov eax,cr0\nor eax,${bits}\nmov cr0,eax`;
+const CLEAR_CR0 = long => long ? "mov rax,cr0\nand eax,~12\nmov cr0,rax" : "mov eax,cr0\nand eax,~12\nmov cr0,eax";
+const CR4 = (long, or, and = -1) => long ? `mov rax,cr4\nor eax,${or}\nand eax,${and}\nmov cr4,rax` : `mov eax,cr4\nor eax,${or}\nand eax,${and}\nmov cr4,eax`;
+const XSETBV = value => `xor ecx,ecx\nmov eax,${value}\nxor edx,edx\nxsetbv`;
+const faults = long => FAULT_CASES.map(([, what, in_long, setup, instruction], n) => {
+    if(in_long !== long) return "";
+    const before = [], after = [];
+    if(setup.includes("no_osxsave")) { before.push(CR4(long, 0, ~(1 << 18))); after.push(CR4(long, 1 << 18)); }
+    if(setup.includes("xcr0_3")) { before.push(XSETBV(3)); after.push(XSETBV(7)); }
+    if(setup.includes("ts")) before.push(SET_CR0(8, long));
+    if(setup.includes("em")) before.push(SET_CR0(4, long));
+    if(setup.includes("mxcsr")) after.push("ldmxcsr [default_mxcsr]");
+    // (a setup instruction before the faulting one: its address)
+    const [prefix, last] = instruction.includes("\n") ? instruction.split("\n") : ["", instruction];
+    return `
+${before.join("\n")}
+${prefix}
+mov dword [${CASE}],${n}
+mov dword [${SKIP}],fault_end${n} - fault${n}
+fault${n}: ${last}
+fault_end${n}:
+${CLEAR_CR0(long)}
+${after.join("\n")}
+mov eax,fault${n}
+cmp eax,[${FAULTS + n * 16 + 8}]
+sete byte [${MATCH + n}]`;
+}).join("\n");
+
+const directory = assemble("avx", long_mode_guest(`
+mov ebx,6
+mov rax,HIGH+ud
+call set_gate
+mov ebx,7
+mov rax,HIGH+nm
+call set_gate
+mov ebx,12
+mov rax,HIGH+stack_fault
+call set_gate
+mov ebx,13
+mov rax,HIGH+gp
+call set_gate
+lidt [rel idtr]
+mov rax,cr4
+or eax,3 << 9 | 1 << 18 ; OSFXSR, OSXMMEXCPT, OSXSAVE
+mov cr4,rax
+${XSETBV(7)}
+; 64-bit mode
+mov dword [${COUNTER}],${ROUNDS}
+.rounds:
+${block(true)}
+dec dword [${COUNTER}]
+jnz .rounds
+${faults(true)}
+; YMM8-15's upper halves through compatibility mode, where VZEROUPPER leaves them
+mov eax,6
+xor edx,edx
+xrstor [areas]
+; compatibility mode
+push 8
+mov rax,compat
+push rax
+o64 retf
+bits 32
+compat:
+db ${VZEROUPPER.join(",")}
+mov eax,6
+xor edx,edx
+xsave [${RESULTS - AREA}]
+mov dword [${COUNTER}],${COMPAT_ROUNDS}
+.rounds:
+${block(false)}
+dec dword [${COUNTER}]
+jnz .rounds
+${faults(false)}
+jmp 0x18:back
+bits 64
+back:
+mov eax,6
+xor edx,edx
+xsave [${RESULTS - 2 * AREA}]
+mov rax,HIGH+in_long_mode
+jmp rax
+in_long_mode:
+`, `
+set_gate:
+mov rdi,rbx
+shl rdi,4
+add rdi,${IDT}
+mov [rdi],ax
+mov word [rdi + 2],0x18
+mov word [rdi + 4],0x8E00
+shr rax,16
+mov [rdi + 6],ax
+shr rax,16
+mov [rdi + 8],eax
+mov dword [rdi + 12],0
+ret
+ud:
+mov ecx,6
+jmp record
+nm:
+mov ecx,7
+jmp record
+stack_fault:
+add rsp,8
+mov ecx,12
+jmp record
+gp:
+add rsp,8
+mov ecx,13
+record:
+mov edx,[${CASE}]
+shl edx,4
+mov [${FAULTS} + rdx],ecx
+mov rax,[rsp]
+mov [${FAULTS} + rdx + 8],rax
+mov eax,[${SKIP}]
+add [rsp],rax
+iretq
+align 8
+idtr: dw 511
+dq ${IDT}
+reserved_mxcsr: dd 0x10000
+default_mxcsr: dd 0x1F80
+align 64
+areas: db ${AREAS.flatMap(a => Array.from(a)).join(",")}
+align 16
+samples: db ${Array.from(samples).join(",")}
+`));
+
+const length = RESULTS - OUT + cases.length * AREA;
+const check = (result, label) => {
+    // the model first: QEMU is a reference, not the specification
+    cases.forEach((c, n) => {
+        const e = expected_case(c, n);
+        const what = `${label}: ${c.long ? "64-bit" : "compatibility"} ${c.f.name} (${c.f.op.toString(16)}) case ${n}`;
+        const area = result.subarray(RESULTS - OUT + n * AREA, RESULTS - OUT + (n + 1) * AREA);
+        const deviation = label === "QEMU" && qemu_lig(c, n) &&
+            ["kept", "first source"].some(qemu => xsave_bytes(area, c.long).equals(xsave_bytes(expected_case(c, n, qemu).area, c.long)));
+        if(!deviation) assert.equal(hex(xsave_bytes(area, c.long)), hex(xsave_bytes(e.area, c.long)), `${what}: registers`);
+        assert.equal(hex(result.subarray(GPR_OUT - OUT + n * 16, GPR_OUT - OUT + n * 16 + 16)), hex(e.gpr), `${what}: general-purpose result`);
+        assert.equal(hex(result.subarray(STORES - OUT + n * SPAN, STORES - OUT + (n + 1) * SPAN)), hex(e.dest), `${what}: memory`);
+    });
+    // VZEROUPPER in compatibility mode zeroes YMM0-7's upper halves, and
+    // YMM8-15's are kept through the compatibility-mode block (QEMU 10.2
+    // zeroes all 16 in every mode: CPU_NB_REGS in gen_VZEROUPPER)
+    const kept = result.subarray(RESULTS - OUT - 2 * AREA, RESULTS - OUT - AREA);
+    const zeroed = result.subarray(RESULTS - OUT - AREA, RESULTS - OUT);
+    assert.ok(zeroed.subarray(576, 704).every(b => b === 0), `${label}: VZEROUPPER in compatibility mode: YMM0-7 upper halves`);
+    assert.equal(hex(kept.subarray(704, 832)), hex(label === "QEMU" ? new Uint8Array(128) : AREAS[0].subarray(704, 832)),
+        `${label}: YMM8-15 upper halves kept through compatibility mode`);
+    FAULT_CASES.forEach(([vector, what, , , , qemu], n) => {
+        const deviation = label === "QEMU" && qemu !== undefined;
+        assert.equal(result.readUInt32LE(FAULTS - OUT + n * 16), deviation ? qemu : vector, `${label}: ${what}: vector`);
+        assert.equal(result[MATCH - OUT + n], (deviation ? qemu : vector) === 0 ? 0 : 1, `${label}: ${what}: RIP`);
+    });
+};
+// v86 against QEMU, but for the fault records, VMOVSS/VMOVSD's upper halves
+// and YMM8-15's after compatibility mode, where QEMU deviates
+const comparable = buffer => {
+    const copy = Buffer.from(buffer);
+    cases.forEach((c, n) => {
+        if(qemu_lig(c, n)) copy.fill(0, RESULTS - OUT + n * AREA + 576, RESULTS - OUT + (n + 1) * AREA);
+    });
+    copy.fill(0, RESULTS - OUT - 2 * AREA + 704, RESULTS - OUT - AREA);
+    // (XSTATE_BV: XINUSE may be 1 for a component in its initial
+    // configuration, SDM vol. 1, 13.6, and QEMU does not track it: after
+    // VZEROUPPER, the YMM state is initial for v86)
+    for(let n = -2; n < cases.length; n++) copy.fill(0, RESULTS - OUT + n * AREA + 512, RESULTS - OUT + n * AREA + 520);
+    FAULT_CASES.forEach(([, , , , , qemu], n) => {
+        if(qemu === undefined) return;
+        copy.fill(0, FAULTS - OUT + n * 16, FAULTS - OUT + n * 16 + 16);
+        copy[MATCH - OUT + n] = 0;
+    });
+    return copy;
+};
+const expected = await reference(directory, {length});
+// (X64_AVX_LIST=1: list QEMU's differences from the model, for debugging)
+if(process.env.X64_AVX_LIST)
+{
+    cases.forEach((c, n) => {
+        const e = expected_case(c, n);
+        const area = expected.subarray(RESULTS - OUT + n * AREA, RESULTS - OUT + (n + 1) * AREA);
+        const [got, want] = [xsave_bytes(area, c.long), xsave_bytes(e.area, c.long)];
+        const registers = [];
+        for(let i = 0; i < got.length; i++) if(got[i] !== want[i]) registers.push(i < 8 ? "mxcsr" : i < 8 + (c.long ? 256 : 128) ? "xmm" + (i - 8 >> 4) : "ymmh" + (i - 8 - (c.long ? 256 : 128) >> 4));
+        const gpr = !expected.subarray(GPR_OUT - OUT + n * 16, GPR_OUT - OUT + n * 16 + 16).equals(Buffer.from(e.gpr));
+        const memory = !expected.subarray(STORES - OUT + n * SPAN, STORES - OUT + (n + 1) * SPAN).equals(Buffer.from(e.dest));
+        if(registers.length || gpr || memory)
+        {
+            console.log(n, c.long ? "64-bit" : "compat", c.f.name, c.f.kind, c.f.op.toString(16), `d${c.d} v${c.v} m${c.m}`, c.memory ? "memory" : "register",
+                `l${c.f.lig ? n >> 1 & 1 : 0} w${c.f.w ?? n & 1}`, [...new Set(registers)].join(" "), gpr ? "gpr" : "", memory ? "memory" : "");
+        }
+    });
+    FAULT_CASES.forEach(([vector, what], n) => {
+        const got = expected.readUInt32LE(FAULTS - OUT + n * 16);
+        if(got !== vector) console.log("fault", what, "QEMU", got, "SDM", vector);
+    });
+    process.exit(0);
+}
+check(expected, "QEMU");
+const FEATURES = {cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], cpu_features_unreleased: true};
+for(const [label, options, compat] of [["interpreted", {}, false],
+    ["x64 page tier", {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true}, false],
+    ["x64 page tier + compatibility-mode JIT", {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true}, true]])
+{
+    let page = 0, tier0;
+    const result = await actual(directory, {length, timeout: 180000, options: {...FEATURES, ...options},
+        setup: emulator => {
+            const x = emulator.v86.cpu.wm.exports;
+            x.x64_set_compat_jit(compat);
+            if(options.disable_jit === false)
+            {
+                x.ir_auto_set_idle_mode(0, 1);
+                // (compile compatibility-mode pages at their first visit)
+                assert.ok(x.ir_auto_set_page_threshold(1));
+            }
+        },
+        inspect: emulator => {
+            page = emulator.v86.cpu.wm.exports.x64_page_stat(1);
+            tier0 = emulator.v86.cpu.get_jit_info().ir?.tier0;
+        }});
+    check(result, label);
+    {
+        const [mine, theirs] = [comparable(result), comparable(expected)];
+        const at = mine.findIndex((b, i) => b !== theirs[i]);
+        assert.ok(at < 0, `${label}: equal to QEMU (but for its documented deviations): first difference at ${(OUT + at).toString(16)}`);
+    }
+    if(options.disable_jit === false) assert.ok(page > 1000, `${label}: compiled 64-bit code ran (${page})`);
+    if(compat) assert.ok(tier0.activations > 0 && tier0.page_functions > 0, `${label}: compiled compatibility-mode code ran ${JSON.stringify(tier0)}`);
+    console.log(`PASS (${label}): ${cases.length} AVX cases in 64-bit and compatibility mode, ${FAULT_CASES.length} faults, as QEMU and the model`);
+}

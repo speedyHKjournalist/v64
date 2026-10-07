@@ -1377,6 +1377,11 @@ ir-crc32-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-rele
 	cargo test ir::crc32_tests
 	node tests/ir/differential/crc32.mjs
 
+.PHONY: ir-avx-tests
+ir-avx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::avx_tests
+	node tests/ir/differential/avx.mjs
+
 .PHONY: ir-mmx-tests
 ir-mmx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::mmx_tests
@@ -1537,6 +1542,17 @@ sse4-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-deb
 	node tests/rust/sse4.mjs build/v86-fallback.wasm
 	node tests/x64/sse4.mjs
 	TEST_RELEASE_BUILD=1 node tests/x64/sse4.mjs
+
+# AVX (docs/simd-xsave-plan.md P5-P6): the 32-bit engines against a model of
+# the SDM (with Wasm SIMD, debug, and without SIMD), the x64 engine and
+# compatibility mode against QEMU and the model
+.PHONY: avx-tests
+avx-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/avx.mjs
+	node tests/rust/avx.mjs build/v86-debug.wasm
+	node tests/rust/avx.mjs build/v86-fallback.wasm
+	node tests/x64/avx.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/avx.mjs
 
 # The legacy SSE exception conditions in the 32-bit engines (docs/simd-xsave-plan.md
 # 3.3, P4a): CR4.OSFXSR for XMM forms only, 16-byte alignment, their order

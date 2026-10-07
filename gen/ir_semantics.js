@@ -17,6 +17,8 @@ const xmm_immediate = new Set([0x660F71,0x660F72,0x660F73]);
 const xmm_integer = new Set([0x660f60,0x660f61,0x660f62,0x660f68,0x660f69,0x660f6a,0x660f6c,0x660f6d,0x660f63,0x660f67,0x660f6b,0x660fd1,0x660fd2,0x660fd3,0x660fe1,0x660fe2,0x660ff1,0x660ff2,0x660ff3,0xf14,0xf15,0x660f14,0x660f15,0x660ffc,0x660ffd,0x660ffe,0x660fd4,0x660ff8,0x660ff9,0x660ffa,0x660ffb,0x660fec,0x660fed,0x660fdc,0x660fdd,0x660fe8,0x660fe9,0x660fd8,0x660fd9,0x660f64,0x660f65,0x660f66,0x660f74,0x660f75,0x660f76,0x660fda,0x660fde,0x660fea,0x660fee,0x660fe0,0x660fe3,0x660fe4,0x660fe5,0x660ff4,0x660ff6,0x660fd5,0x660ff5,0x660fdb,0x660fdf,0x660feb,0x660fef,0xf54,0xf55,0xf56,0xf57,0x660f54,0x660f55,0x660f56,0x660f57,0x660F3829,0x660F382B,0x660F3837,0x660F3838,0x660F3839,0x660F383A,0x660F383B,0x660F383C,0x660F383D,0x660F383E,0x660F383F,0x660F3840]);
 function lowering(encoding, operand) {
     const op = encoding.opcode, g = encoding.fixed_g;
+    // VEX: the AVX forms through the shared executor (crate::cpu::avx)
+    if(encoding.vex) return encoding.vex.gpr ? "Pending" : "CpuAvxHelper";
     if(mmx.has(op) || [0xF71,0xF72,0xF73].includes(op) && operand === "reg") return "CpuMmxHelper";
     // PSHUFB and PALIGNR between registers are native; their aligned memory forms use the helper
     if([0x660F3800, 0x660F3A0F].includes(op) && operand === "reg") return "CpuSimdHIR";
@@ -94,6 +96,7 @@ function lowering_tests(encoding, operand) {
     else if(category === "CpuMmxHelper") suite = "mmx";
     else if(category === "CpuSseFpHelper") suite = "sse_fp";
     else if(category === "CpuCrc32Helper") suite = "crc32";
+    else if(category === "CpuAvxHelper") suite = "avx";
     else if(category === "CpuFpStateHelper") suite = "fp_state";
     else if([0xC4,0xC5,0x0FB2,0x0FB4,0x0FB5].includes(op) && operand === "reg") suite = "far_control";
     else if(category === "CpuSimdHIR") suite = op===0x660FF7 ? "simd_masked" : xmm_lane.has(op) ? "simd_lane" : xmm_transfer.has(op) ? "simd_transfer" : xmm_moves.has(op) ? "simd_moves" : xmm_immediate.has(op) ? "simd_immediate" : xmm_shuffle.has(op) ? "simd_shuffle" : "simd_integer";

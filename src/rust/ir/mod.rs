@@ -231,6 +231,10 @@ mod sse_fp_tests;
 mod crc32_tests;
 
 #[cfg(test)]
+#[path = "../../../tests/ir/semantics/avx.rs"]
+mod avx_tests;
+
+#[cfg(test)]
 #[path = "../../../tests/ir/semantics/mmx.rs"]
 mod mmx_tests;
 

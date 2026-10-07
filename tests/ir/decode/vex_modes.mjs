@@ -96,7 +96,8 @@ try
 
     for(const mode of ["protected32", "protected16"])
     {
-        // VEX rows without semantics, a reserved map, an opcode without rows
+        // VEX rows without semantics or, VZEROUPPER, the AVX feature (this
+        // machine's default), a reserved map, an opcode without rows
         for(const bytes of [[0xC5, 0xF8, 0x77], [0xC4, 0xE2, 0x79, 0x18, 0xC1], [0xC4, 0xE2, 0x78, 0xF2, 0xC1],
             [0xC4, 0xC0, 0x78, 0x77], [0xC5, 0xF8, 0x00]])
         {

@@ -48,6 +48,39 @@ unsafe fn resolve(modrm: i32, size: u8) -> OrPageFault<i32> {
             0
         }))
 }
+/// A memory operand's offset and segment (its default; get_seg_prefix applies
+/// a prefix), its SIB and displacement bytes fetched, its segment not yet
+/// checked: VEX instructions check the AVX state in between (cpu::vex)
+pub unsafe fn resolve_offset(modrm: i32) -> OrPageFault<(i32, i32)> {
+    let size = if is_asize_32() { 32 } else { 16 };
+    let sib = if size == 32 && modrm & 7 == 4 { Some(read_imm8()? as u8) } else { None };
+    let form = crate::decode_rules::address_form(modrm as u8, size, sib);
+    let register = |r: u8| {
+        if size == 16 {
+            read_reg16(r as i32)
+        }
+        else {
+            read_reg32(r as i32)
+        }
+    };
+    let base = form.base.map_or(0, register);
+    let index = form
+        .index
+        .map_or(0, register)
+        .wrapping_shl(form.scale as u32);
+    let displacement = match form.displacement_bytes {
+        0 => 0,
+        1 => read_imm8s()?,
+        2 => read_imm16()?,
+        4 => read_imm32s()?,
+        _ => unreachable!(),
+    };
+    let offset = base.wrapping_add(index).wrapping_add(displacement);
+    Ok((
+        if size == 16 { offset & 65535 } else { offset },
+        form.segment as i32,
+    ))
+}
 pub unsafe fn resolve_modrm16(m: i32) -> OrPageFault<i32> { resolve(m, 16) }
 pub unsafe fn resolve_modrm32(m: i32) -> OrPageFault<i32> { resolve(m, 32) }
 pub unsafe fn resolve_modrm32_(m: i32) -> OrPageFault<i32> { resolve(m, 32) }

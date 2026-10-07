@@ -8,7 +8,7 @@ use super::{
     state,
 };
 use crate::cpu::{
-    cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
+    avx, cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
     instructions_0f3a as sem3a, simd_fp, simd_int, xstate,
 };
 use crate::softfloat::F80;
@@ -1960,7 +1960,88 @@ unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
     Ok(true)
 }
 
+/// The x64 engine's side of an AVX instruction (crate::cpu::avx)
+struct Avx<'a>(&'a Decoded);
+impl avx::Machine for Avx<'_> {
+    type Fault = Fault;
+    unsafe fn raise(&mut self, e: avx::Exception) -> Fault {
+        match e {
+            avx::Exception::InvalidOpcode => Fault::ud(),
+            avx::Exception::DeviceNotAvailable => fault(7),
+            avx::Exception::GeneralProtection => Fault::gp(),
+            avx::Exception::SimdFloatingPoint => simd_fault(simd_fp::Unmasked),
+        }
+    }
+    unsafe fn read(&mut self, bytes: u8, aligned: bool) -> Result<u128, Fault> {
+        let (a, stack) = address(self.0);
+        if aligned {
+            alignment(a, stack, 16)?;
+        }
+        if bytes == 16 {
+            memory::read128(a, stack)
+        }
+        else {
+            memory::read(a, bytes * 8, stack).map(|v| v as u128)
+        }
+    }
+    unsafe fn write(&mut self, bytes: u8, value: u128, aligned: bool) -> Result<(), Fault> {
+        let (a, stack) = address(self.0);
+        if aligned {
+            alignment(a, stack, 16)?;
+        }
+        if bytes == 16 {
+            memory::write128(a, value, stack)
+        }
+        else {
+            memory::write(a, bytes * 8, value as u64, stack)
+        }
+    }
+    /// (as MASKMOVDQU: the selected bytes writable first)
+    unsafe fn write_masked(&mut self, value: u128, mask: u16) -> Result<(), Fault> {
+        let d = self.0;
+        let seg = d.prefixes.segment.unwrap_or(3);
+        let base = if seg >= 4 { state::read_segment_base(seg as usize) } else { 0 };
+        let off = state::read_gpr(7);
+        let off = if d.address_size == 32 { off as u32 as u64 } else { off };
+        let a = off.wrapping_add(base);
+        for i in 0..16 {
+            if mask >> i & 1 != 0 {
+                memory::probe_write(a.wrapping_add(i), 8, false)?;
+            }
+        }
+        for i in 0..16 {
+            if mask >> i & 1 != 0 {
+                memory::write(a.wrapping_add(i), 8, (value >> (i * 8)) as u64, false)?;
+            }
+        }
+        Ok(())
+    }
+    unsafe fn gpr(&mut self, r: u8) -> u64 { state::read_gpr(r as usize) }
+    unsafe fn set_gpr(&mut self, r: u8, value: u64, wide: bool) {
+        state::write_gpr(r as usize, value, if wide { 64 } else { 32 });
+    }
+    unsafe fn set_flags(&mut self, flags: u32) {
+        state::write_flags64(state::read_flags64() & !0x8D5 | flags as u64);
+    }
+}
 pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
+    if let Some(v) = d.vex {
+        let mut machine = Avx(d);
+        avx::check(&mut machine)?;
+        let i = avx::Instruction {
+            key: d.opcode,
+            reg: d.reg.unwrap_or(0),
+            vvvv: v.vvvv,
+            rm: d.rm_register,
+            l: v.l,
+            w: v.w,
+            imm8: d.immediate.map_or(0, |i| i.value as u8),
+            long: true,
+        };
+        avx::execute(&mut machine, &i)?;
+        state::write_rip(d.next.0);
+        return Ok(true);
+    }
     if x87(d)? {
         state::write_rip(d.next.0);
         return Ok(true);

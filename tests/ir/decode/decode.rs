@@ -727,7 +727,7 @@ fn vex_or_les_lds_prefixes_and_fields() {
         assert_eq!((les.encoding.opcode, les.vex), (0xC4, None));
         assert_eq!(les.length, if mode32 { 6 } else { 4 });
         assert_eq!(d(&[0xC5, 0x00], mode32).encoding.opcode, 0xC5);
-        // a register one: VEX (VZEROUPPER, VZEROALL, rows without semantics yet)
+        // a register one: VEX (VZEROUPPER; VZEROALL, without semantics yet)
         for (bytes, name) in [
             (&[0xC5, 0xF8, 0x77][..], "VEX_Vzeroupper"),
             (&[0xC5, 0xFC, 0x77], "VEX_Vzeroall"),
@@ -738,8 +738,10 @@ fn vex_or_les_lds_prefixes_and_fields() {
         ] {
             let i = d(bytes, mode32);
             assert_eq!(form(i.encoding), name, "{bytes:02X?}");
-            assert!(
-                i.early_ud && i.baseline_ud && i.vex.is_some(),
+            assert!(i.vex.is_some(), "{bytes:02X?}");
+            assert_eq!(
+                (i.early_ud, i.baseline_ud),
+                (i.encoding.unimplemented, i.encoding.unimplemented),
                 "{bytes:02X?}"
             );
             assert_eq!(i.length as usize, bytes.len(), "{bytes:02X?}");
@@ -923,14 +925,19 @@ fn vex_rows_decode_from_their_own_encodings() {
                         Err(e) => panic!("{} {b:02X?} {e:?}", form(row)),
                     }
                 }
-                // without the features or the semantics: #UD after the ModRM byte
+                // without the features or the semantics: #UD after the ModRM
+                // byte (a row with its semantics decodes in full)
                 for (features, all) in [(0, true), (ALL, false)] {
                     TEST_FEATURES.with(|f| f.set(features));
                     TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(all));
                     let i = d(&bytes, mode32);
+                    assert_eq!(i.encoding.id, row.id);
+                    if features == ALL && !row.unimplemented {
+                        assert!(!i.early_ud && i.length as usize == bytes.len());
+                        continue;
+                    }
                     assert!(i.early_ud && i.baseline_ud && i.ea.is_none() && i.immediate.is_none());
                     assert_eq!(i.length as usize, head);
-                    assert_eq!(i.encoding.id, row.id);
                 }
                 count += 1;
             }

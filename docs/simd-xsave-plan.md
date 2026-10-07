@@ -663,13 +663,23 @@ x86-64-v3 通用寄存器指令的模板要点：
     负例和 CPUID 用例，以及 TZCNT/LZCNT 回退为 BSF/BSR 的用例，要固定一个与 v86 CPU 配置一致的
     QEMU CPU 型号。
   - QEMU 对 VEX 编码的 SIMD 指令也检查 CR0.EM，而 SDM 的异常类型表只对传统 SSE 列出 CR0.EM。
-    以硬件结果为准，登记后再决定是否加入 `QEMU_DEVIATIONS`。
+    以硬件结果为准，登记后再决定是否加入 `QEMU_DEVIATIONS`。P5 第一部分确认 QEMU 10.2 给出
+    #UD，v86 按 SDM 不检查；`tests/x64/avx.mjs` 已登记，仍待硬件判定。
+  - P5 第一部分新发现（QEMU 10.2，均在 `tests/x64/avx.mjs` 登记）：
+    - VMOVSS/VMOVSD（VEX.LIG）在 VEX.L=1 时按 256 位执行：寄存器之间时目的寄存器的 255:128 位
+      取自第一源（VEX.vvvv），VMOVSD 从内存加载时保留原值，只有 VMOVSS 从内存加载时清零。
+      SDM 的操作是 VEX.128 的，这些位应清零。
+    - 非 64 位模式下 VZEROUPPER 也清零 YMM8–15 的高半（`gen_VZEROUPPER` 遍历 `CPU_NB_REGS`）。
+      SDM 规定只修改 YMM0–7（3.2 节）。
+    - VLDMXCSR 不检查 MXCSR 的保留位，不产生 #GP(0)，并把该值载入 MXCSR。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
   特权指令、XSETBV 和 CPL0 下的 XSAVE；其余 x86-64-v3 指令在 Rosetta 2 下是否可用，要先探测。
 - 规范允许多种结果的情形，一律按允许结果集或 postcondition 判定，并集中登记：
   - DPPS 的部分 NaN 传播、RCP/RSQRT 的近似值（第 8 节）；
+  - XSAVE 写入的 XSTATE_BV：分量处于初始配置时 XINUSE 仍可为 1（SDM Vol. 1 13.6）。v86 按模式
+    判定（非 64 位模式只看 YMM0–7 的高半），QEMU 不跟踪，始终为 1；
   - 开启对齐检查时，XSAVE/FXSAVE 未对齐报 #AC 还是 #GP；
   - CR4.OSFXSR=0 时，FXSAVE 是否写 XMM/MXCSR 区；
   - VMASKMOV 被屏蔽 lane 的 A/D 位；
@@ -1508,3 +1518,76 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `decode_rules.mjs`、`tests/x64/xsave.mjs`、`tests/smp/xstate_lifecycle.mjs`、kvm-unit-tests 和
   `linux_boot.mjs` 的 runner）设置 `cpu_features_unreleased`，运行通过且没有警告。`api-tests` 和
   `kvm-unit-test` 通过；`tests/api/reset.js` 有一次在负载约 20 时超时，重跑通过。
+
+### P5 第一部分：共享的 AVX 执行器，数据搬运与逻辑形式（2026-10-07）
+
+- **范围**：P5 的 296 个 VEX.128/VEX.LIG 形式中的 70 个（47 个助记符），即数据搬运、逻辑运算、
+  VZEROUPPER、VLDMXCSR/VSTMXCSR：VMOVUPS/UPD/APS/APD、VMOVDQA/DQU、VLDDQU、VMOVNTDQA、
+  VMOVNTPS/PD/DQ、VMOVSS/SD、VMOVHLPS/LHPS/LPS/LPD/HPS/HPD、VMOVSLDUP/SHDUP/DDUP、VMOVD/VMOVQ、
+  VUNPCKLPS/LPD/HPS/HPD、VANDPS/PD、VANDNPS/PD、VORPS/PD、VXORPS/PD、VPAND/VPANDN/VPOR/VPXOR、
+  VMOVMSKPS/PD、VPMOVMSKB、VMASKMOVDQU。整数、浮点和 AVX 新增的 128 位形式在后续部分接入
+  同一个执行器。
+- **共享执行器**（`src/rust/cpu/avx.rs`）：32 位解释器、IR 的 helper 和 x64 引擎共用一份 VEX
+  语义。
+  - 引擎负责解码（`decode_rules::vex_row` 选中的行存在、有语义、接受这些 VEX 字段），并通过
+    `Machine` trait 提供访存、通用寄存器、EFLAGS 和异常交付。XMM、YMM 高半、MXCSR、CR0/CR4/XCR0
+    在各引擎中是同一份状态。
+  - 语义复用 legacy 形式的值级函数（`ir::simd` 的 `PackedOp`、`TransferOp` 等），`legacy(key)`
+    把 VEX 键换成对应 legacy 形式的目录键。操作数按 VEX 组织：VEX.vvvv 是第一源；VEX.128 的
+    目的寄存器清零 255:128 位，寄存器之间的 VMOVSS/VMOVSD 也清零；所有输入先读后写，任意别名
+    都正确。
+- **异常与顺序**：
+  - `check` 先判 #UD（CR4.OSXSAVE=0，或 XCR0[2:1]≠11b），再判 #NM（CR0.TS）。CR0.EM 和
+    CR4.OSFXSR 不影响 VEX 形式。
+  - 按 SDM Vol. 3 6.9 的优先级：先取完指令的全部字节，再判这两类异常，最后检查操作数的段并
+    访存。新增的 `modrm::resolve_offset` 只取 SIB 和位移，不检查段。
+  - 只有 VMOVAPS/APD、VMOVDQA、VMOVNTPS/PD/DQ 和 VMOVNTDQA 要求 16 字节对齐（#GP(0)）。
+    VLDMXCSR 遇到保留位时 #GP(0)。
+  - VMASKMOVDQU 沿用各引擎 MASKMOVDQU 的做法：32 位引擎先检查整个 16 字节可写，x64 引擎只探测
+    被选中的字节。
+- **各执行路径**：
+  - 32 位解释器（`cpu/vex.rs`）：取完字节后调用 `check`，再算地址并执行。实模式和 V86 模式下
+    仍是 LES/LDS 的 #UD。
+  - x64 引擎（`x64/vector.rs`）：对 `Decoded.vex` 调用同一个执行器（`Avx` machine，地址、
+    canonical 检查和对齐沿用 SSE 的函数）。page tier 把 VEX 形式作为 step 执行。
+  - IR regions：`ir::frontend::avx` 把每个 AVX 形式降低为 CPU helper `ir_avx_continue`（CpuReload
+    ABI，参数为键、打包的操作数字段、偏移和段），helper 之后 region 继续执行。IR 解码器不知道
+    模式，总把寄存器形式的 C4/C5 解成 VEX，所以 helper 在实模式和 V86 模式下 #UD。有访存时按
+    ContinuationContext 判断能否继续。覆盖报告的新类别为 `CpuAvxHelper`。`ir_avx_calls` 统计调用
+    次数，供测试使用（state layout 中登记为 debug）。
+  - Tier-0 用解释器 step 执行 VEX 形式，热点模板在第五部分。
+  - 无 Wasm SIMD 的可移植构建中，regions 本来就不生成向量 IR，含 AVX 形式的 region 被拒绝，
+    这些指令由解释器执行（Tier-0 仍 step 它们）。
+  - 生成：`gen/vex_table.js` 的 `AVX_128` 列出已有语义的助记符（VEX.128 与 VEX.LIG 形式），其余
+    行仍为 unimplemented（#UD）。IR 解码测试改为：有语义的行完整解码。
+- **测试**（`make avx-tests`、`make ir-avx-tests`）：
+  - `tests/rust/avx_model.mjs`：按 SDM 写的模型和形式表，两边的测试共用。
+  - `tests/rust/avx.mjs`（32 位：解释器、Tier-0、regions；release、debug 和无 SIMD 构建）：
+    - 每个形式 32 例：寄存器的各种别名组合、不对齐的内存操作数、两种 VEX 前缀，VEX.W（WIG，
+      以及非 64 位模式下的 WIG32）和 VEX.L（LIG）取随机值。XRSTOR 载入全部 XMM 和 YMM 高半，
+      XSAVE 读回，检查目的寄存器的高半清零、其他寄存器不变。
+    - legacy SSE 与 VEX 的混合链（legacy 保留高半）；CR0.EM 和无 CR4.OSFXSR 不影响 VEX；页末的窄
+      操作数不访问之后的字节。
+    - 异常：无 AVX 能力、无 CR4.OSXSAVE、XCR0=3 时 #UD（先于 #NM），CR0.TS 时 #NM，对齐和 VLDMXCSR
+      保留位的 #GP(0)，VEX.L1 和多余 VEX.vvvv 的 #UD，#PF 无副作用。
+    - 热运行确认 Tier-0 step 了 VEX 形式、regions 调用了 AVX helper。region 编译是异步的，热运行
+      要等到编译后的 VEX 代码实际运行。共 1892 项。
+  - `tests/x64/avx.mjs`：64 位模式（XMM8–15、VEX.R/X/B、SIB 寻址、W1 的 64 位通用寄存器形式）和
+    兼容模式下的全部形式共 476 例，对照 QEMU 和模型。50 个异常用例：#UD、#NM、对齐的 #GP、
+    非 canonical 地址的 #GP/#SS、CR0.EM、VLDMXCSR 保留位。兼容模式下 VZEROUPPER 只清 YMM0–7，
+    YMM8–15 的高半经过兼容模式后不变。解释执行、page tier 和兼容模式 JIT 三种配置都通过。QEMU 的
+    偏差见 11.1 节。
+  - IR：`tests/ir/semantics/avx.rs`（lift、CFG、降低与发射）和 `tests/ir/differential/avx.mjs`。
+    90 个 fixture，前面有 region 持有的 XMM 值或通用寄存器值，后面有读取结果的 PADDD；配置包括
+    MMIO、跨页 #PF、空段、CR0/CR4/XCR0 和实模式。1227 项比较，debug 和 release 都通过。
+  - 植入 7 个错误，全部被发现：不清零高半、兼容模式的 VZEROUPPER 清 16 个寄存器、不检查 XCR0、
+    VMOVSS 不合并第一源、非 64 位模式把 W1 当作 64 位、IR helper 的 vvvv 字段、VMASKMOVDQU 的
+    地址。其中 W1 一项起初漏过：两个测试都只用 W0 编码 VMOVD。模型为 WIG32 形式加上 `wig32`
+    标记，非 64 位模式下随机取 VEX.W 之后被发现。
+- **回归**：`p5a-batch` 的 55 个目标（P4b 第四部分的 53 个加上 `avx-tests`、`ir-avx-tests`）中
+  49 个通过。`avx-tests` 在无 SIMD 构建上超时：测试要求 regions 调用 AVX helper，而该构建的
+  regions 不处理 XMM 状态。测试改为只在有 Wasm SIMD 时要求这一点，重跑通过（x64 部分的 debug
+  和 release 也通过）。其余 5 个（`state-layout-check`、`platform-contract-tests`、
+  `x64-decode-tests`、`x64-opcode-matrix-tests`、`smp-tests`）仍是另一个会话的
+  `src/rust/cpu/mmio_ram.rs` 所致：只含本部分改动的工作树中 state layout 检查通过（新增的
+  `CALLS` 已登记），这些目标其余的命令直接运行，全部通过。

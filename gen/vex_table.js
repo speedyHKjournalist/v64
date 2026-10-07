@@ -1,8 +1,8 @@
 // The VEX rows of the opcode table (gen/x86_table.js): one per VEX form of
 // gen/isa_forms.json, whose decode facts (map, pp, opcode, ModRM.reg group,
 // VEX.L, VEX.W, VEX.vvvv, register/memory forms, immediates) come from
-// iced-x86 through tools/isa_forms. Their semantics come in later phases of
-// docs/simd-xsave-plan.md.
+// iced-x86 through tools/isa_forms. Their semantics come in phases of
+// docs/simd-xsave-plan.md (AVX_128).
 //
 // A VEX row's key is 0xC4_MM_PP_OO: the map (1: 0F, 2: 0F38, 3: 0F3A), VEX.pp
 // (0: none, 1: 66, 2: F3, 3: F2) and the opcode byte. Its `vex` lists which
@@ -50,6 +50,20 @@ export function vex_accepts(row, { l, w, long, memory, group })
     return long || !v.long;
 }
 
+// The VEX forms that have their semantics (crate::cpu::avx), by phase of
+// docs/simd-xsave-plan.md; the others are #UD (unimplemented). AVX: the
+// VEX.128 and VEX.LIG forms of these instructions.
+const AVX_128 = new Set([
+    // P5 part 1: data movement, logic, VZEROUPPER, VLDMXCSR and VSTMXCSR
+    "VMOVUPS", "VMOVUPD", "VMOVAPS", "VMOVAPD", "VMOVDQA", "VMOVDQU", "VLDDQU", "VMOVNTDQA",
+    "VMOVNTPS", "VMOVNTPD", "VMOVNTDQ", "VMOVSS", "VMOVSD", "VMOVHLPS", "VMOVLHPS", "VMOVLPS",
+    "VMOVLPD", "VMOVHPS", "VMOVHPD", "VMOVSLDUP", "VMOVSHDUP", "VMOVDDUP", "VMOVD", "VMOVQ",
+    "VUNPCKLPS", "VUNPCKLPD", "VUNPCKHPS", "VUNPCKHPD", "VANDPS", "VANDPD", "VANDNPS", "VANDNPD",
+    "VORPS", "VORPD", "VXORPS", "VXORPD", "VPAND", "VPANDN", "VPOR", "VPXOR", "VMOVMSKPS",
+    "VMOVMSKPD", "VPMOVMSKB", "VMASKMOVDQU", "VZEROUPPER", "VLDMXCSR", "VSTMXCSR",
+]);
+const implemented = form => form.isa[0] === "AVX" && form.l !== "L1" && AVX_128.has(form.mnemonic);
+
 function row(form)
 {
     const ops = form.operands;
@@ -77,7 +91,7 @@ function row(form)
         form: form.id,
         custom: 1,
         skip: 1,
-        unimplemented: 1,
+        unimplemented: implemented(form) ? 0 : 1,
     };
 }
 

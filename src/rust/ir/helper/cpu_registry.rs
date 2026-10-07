@@ -96,7 +96,8 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_outs"
         | "ir_x87_reg_continue"
         | "ir_x87_reg"
-        | "ir_crc32_mem_continue" => 4,
+        | "ir_crc32_mem_continue"
+        | "ir_avx_continue" => 4,
         "ir_mmx_mem"
         | "ir_sse_fp_mem_continue"
         | "ir_sse_fp_mem"
@@ -120,6 +121,7 @@ fn abi(name: &str) -> HelperAbi {
                 | "ir_sse_fp_reg_continue"
                 | "ir_sse_fp_mem_continue"
                 | "ir_crc32_mem_continue"
+                | "ir_avx_continue"
         )
     {
         HelperAbi::CpuReload

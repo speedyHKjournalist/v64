@@ -214,6 +214,8 @@ export const STATICS = {
         // the running activation and its entry state; never across a host yield
         ACTIVE: "scratch", T0_CONTROL: "scratch", T0_CS: "scratch",
     },
+    // (calls of the AVX helper, for tests)
+    "ir/runtime/avx.rs": { CALLS: "debug" },
     "ir/runtime/diagnostics.rs": Object.fromEntries([
         "ADMISSION", "CALIBRATION", "CALLS", "CELLS", "CHAIN", "CLOCK", "COMPILER", "COMPILER_BENCHMARK", "COMPILER_BUCKETS",
         "COMPILE_CONTEXT", "CONTROL_EXITS", "CURRENT", "DEPTH", "DISCOVERY", "HELPER_EXITS", "HOT", "HOT_REPLACEMENTS",

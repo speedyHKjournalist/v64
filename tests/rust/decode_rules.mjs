@@ -183,9 +183,11 @@ try
     await expect_undefined(three_byte);
 
     // VEX (C4/C5 with a register ModRM byte in protected mode): #UD until the
-    // semantics come, with and without the features; so are 66/F2/F3/LOCK
-    // before VEX, VEX.vvvv other than 1111b where it is no operand, the
-    // reserved maps and opcodes without rows
+    // semantics come, with and without the features, and the AVX forms that
+    // have them (VZEROUPPER) while the AVX state is off (CR4.OSXSAVE, as here;
+    // tests/rust/avx.mjs); so are 66/F2/F3/LOCK before VEX, VEX.vvvv other
+    // than 1111b where it is no operand, the reserved maps and opcodes
+    // without rows
     const vex = [
         [0xC5, 0xF8, 0x77], [0xC4, 0xE1, 0x7C, 0x77],                 // vzeroupper, vzeroall
         [0xC4, 0xE2, 0x79, 0x18, 0x00], [0xC4, 0xE2, 0x78, 0xF2, 0xC1], // vbroadcastss xmm0, [eax]; andn
