@@ -2016,25 +2016,61 @@ impl avx::Machine for Avx<'_> {
         }
         Ok(())
     }
-    unsafe fn read_lanes(&mut self, size: u8, selected: u8) -> Result<u128, Fault> {
+    unsafe fn read256(&mut self, aligned: bool) -> Result<(u128, u128), Fault> {
         let (a, stack) = address(self.0);
-        let mut v = 0;
-        for n in 0..16 / size {
+        if aligned {
+            alignment(a, stack, 32)?;
+        }
+        let low = memory::read128(a, stack)?;
+        Ok((low, memory::read128(a.wrapping_add(16), stack)?))
+    }
+    unsafe fn write256(&mut self, value: (u128, u128), aligned: bool) -> Result<(), Fault> {
+        let (a, stack) = address(self.0);
+        if aligned {
+            alignment(a, stack, 32)?;
+        }
+        memory::probe_write(a, 128, stack)?;
+        memory::probe_write(a.wrapping_add(16), 128, stack)?;
+        memory::write128(a, value.0, stack)?;
+        memory::write128(a.wrapping_add(16), value.1, stack)
+    }
+    unsafe fn read_lanes(
+        &mut self,
+        size: u8,
+        count: u8,
+        selected: u8,
+    ) -> Result<(u128, u128), Fault> {
+        let (a, stack) = address(self.0);
+        let mut v = (0, 0);
+        for n in 0..count {
             if selected >> n & 1 != 0 {
-                let lane = memory::read(a.wrapping_add((n * size) as u64), size * 8, stack)?;
-                v |= (lane as u128) << (n * size * 8);
+                let lane =
+                    memory::read(a.wrapping_add((n * size) as u64), size * 8, stack)? as u128;
+                let offset = n as u32 * size as u32;
+                if offset < 16 {
+                    v.0 |= lane << (offset * 8);
+                }
+                else {
+                    v.1 |= lane << ((offset - 16) * 8);
+                }
             }
         }
         Ok(v)
     }
-    unsafe fn write_lanes(&mut self, size: u8, value: u128, selected: u8) -> Result<(), Fault> {
+    unsafe fn write_lanes(
+        &mut self,
+        size: u8,
+        count: u8,
+        value: (u128, u128),
+        selected: u8,
+    ) -> Result<(), Fault> {
         let (a, stack) = address(self.0);
-        let lanes = (0..16 / size).filter(|n| selected >> n & 1 != 0);
+        let lanes = (0..count).filter(|n| selected >> n & 1 != 0);
         for n in lanes.clone() {
             memory::probe_write(a.wrapping_add((n * size) as u64), size * 8, stack)?;
         }
         for n in lanes {
-            let lane = (value >> (n * size * 8)) as u64;
+            let lane = avx::lane256(value, n as u32 * size as u32, size as u32);
             memory::write(a.wrapping_add((n * size) as u64), size * 8, lane, stack)?;
         }
         Ok(())
@@ -2056,7 +2092,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
             reg: d.reg.unwrap_or(0),
             vvvv: v.vvvv,
             rm: d.rm_register,
-            l: v.l,
+            // (a VEX.256 form: not a VEX.LIG one's VEX.L)
+            l: v.l && d.encoding.vex & crate::decode_rules::vex::L1 != 0,
             w: v.w,
             imm8: d.immediate.map_or(0, |i| i.value as u8),
             long: true,

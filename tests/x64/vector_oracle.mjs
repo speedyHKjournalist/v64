@@ -77,6 +77,12 @@ for(const [suffix, size, selections] of [["ps", 4, [[0, 1], [0, 2], [3]]], ["pd"
         fault(`vmaskmov${suffix} load ${what}`, `${AVX}\nvmaskmov${suffix} xmm8,xmm9,[0x600FF8]`, undefined, undefined, mask);
         fault(`vmaskmov${suffix} store ${what}`, `${AVX}\nvmaskmov${suffix} [0x600FF8],xmm9,xmm8`, undefined, undefined, mask);
     }
+// VEX.256 (P6): 32 bytes across into the absent page, the load a #PF and the
+// store one without a partial write; the aligned moves need 32-byte alignment
+fault("cross-page VEX.256 load #PF", `${AVX}\nvmovdqu ymm8,[0x600FF0]`);
+fault("cross-page VEX.256 store no partial write", `${AVX}\nvmovdqu [0x600FF0],ymm8`);
+fault("VEX.256 aligned load at 16 bytes #GP", `${AVX}\nvmovaps ymm8,[0x600FD0]`);
+fault("VEX.256 aligned store at 16 bytes #GP", `${AVX}\nvmovntdq [0x600FD0],ymm8`);
 fault("invalid MXCSR high bits","mov dword [0x510800],0xFFFFFFFF\nldmxcsr [0x510800]");
 for(const [name,encoding] of [["MOVDQ2Q memory","0xF2,0x0F,0xD6,0x00"],["MOVQ2DQ memory","0xF3,0x0F,0xD6,0x00"],["MOVNTPS register","0x0F,0x2B,0xC0"],["MOVLPD register","0x66,0x0F,0x12,0xC0"],["MOVLPS store register","0x0F,0x13,0xC0"],["MOVMSKPS memory","0x0F,0x50,0x00"],["PEXTRW memory","0x66,0x0F,0xC5,0x00,0"],["MASKMOVDQU memory","0x66,0x0F,0xF7,0x00"],["LDDQU register","0xF2,0x0F,0xF0,0xC0"]]) fault("invalid SIMD form "+name,"db "+encoding);
 
@@ -109,6 +115,9 @@ const specification = new Map([
     ["vmaskmovps load lanes 3 across into an absent page", {vector:14,mxcsr:0x1F80,unchanged:true,error_code:0,cr2:0x601004}],
     ["vmaskmovps store lanes 0,2 across into an absent page", {vector:14,mxcsr:0x1F80,unchanged:true,error_code:2,cr2:0x601000,memory:true}],
     ["vmaskmovpd store lanes 0,1 across into an absent page", {vector:14,mxcsr:0x1F80,unchanged:true,error_code:2,cr2:0x601000,memory:true}],
+    // A VEX.256 store faulting on its high half writes nothing (SDM vol. 3
+    // 6.5); QEMU 10.2 stores the low half first
+    ["cross-page VEX.256 store no partial write", {vector:14,mxcsr:0x1F80,unchanged:true,error_code:2,cr2:0x601000,memory:true}],
 ]);
 const selected = process.env.X64_VECTOR_FILTER ? cases.filter(x=>x.name.includes(process.env.X64_VECTOR_FILTER)) : cases;
 assert.ok(selected.length);

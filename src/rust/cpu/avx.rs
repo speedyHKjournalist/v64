@@ -13,7 +13,8 @@
 //! with VEX's operands: VEX.vvvv is the first source, a VEX.128 form zeroes
 //! bits 255:128 of its destination register (VMOVSS/VMOVSD between registers
 //! too), and every input is read before the destination is written, so any of
-//! the operands may be the same register.
+//! the operands may be the same register. A VEX.256 form (execute256) runs
+//! them on each 128-bit half where it works lane by lane.
 use crate::cpu::cpu::{self, reg128, CR0_TS, CR4_OSXSAVE, MXCSR_MASK};
 use crate::cpu::global_pointers as gp;
 use crate::cpu::{simd_fp, simd_int};
@@ -30,6 +31,8 @@ pub struct Instruction {
     pub vvvv: u8,
     /// ModRM.rm (with VEX.B) of a register form; None: the memory operand
     pub rm: Option<u8>,
+    /// A VEX.256 form: VEX.L1 of a row that has one (a VEX.LIG form's VEX.L
+    /// is not this)
     pub l: bool,
     pub w: bool,
     pub imm8: u8,
@@ -63,19 +66,31 @@ pub trait Machine {
     unsafe fn read(&mut self, bytes: u8, aligned: bool) -> Result<u128, Self::Fault>;
     /// The low `bytes` of `value` to the memory operand
     unsafe fn write(&mut self, bytes: u8, value: u128, aligned: bool) -> Result<(), Self::Fault>;
+    /// A VEX.256 form's 32-byte memory operand: its low and high halves;
+    /// `aligned`: #GP(0) unless the operand is aligned to 32 bytes
+    unsafe fn read256(&mut self, aligned: bool) -> Result<(u128, u128), Self::Fault>;
+    /// ... `value` to it, nothing unless all of it can be written
+    unsafe fn write256(&mut self, value: (u128, u128), aligned: bool) -> Result<(), Self::Fault>;
     /// VMASKMOVDQU: the bytes of `value` whose bit in `mask` is set, to
     /// (E/R)DI in DS or the segment prefix's
     unsafe fn write_masked(&mut self, value: u128, mask: u16) -> Result<(), Self::Fault>;
-    /// VMASKMOVPS/PD: the lanes of `size` bytes (4, 8) of the memory operand
-    /// whose bit in `selected` is set, the others zero; only they are
+    /// VMASKMOVPS/PD: the `count` lanes of `size` bytes (4, 8) of the memory
+    /// operand whose bit in `selected` is set, the others zero, as a value's
+    /// low and high halves (bytes 16 to 31: a VEX.256 form's); only they are
     /// accessed (no fault for another)
-    unsafe fn read_lanes(&mut self, size: u8, selected: u8) -> Result<u128, Self::Fault>;
+    unsafe fn read_lanes(
+        &mut self,
+        size: u8,
+        count: u8,
+        selected: u8,
+    ) -> Result<(u128, u128), Self::Fault>;
     /// VMASKMOVPS/PD: the selected lanes of `value` to the memory operand,
     /// none unless every one can be written
     unsafe fn write_lanes(
         &mut self,
         size: u8,
-        value: u128,
+        count: u8,
+        value: (u128, u128),
         selected: u8,
     ) -> Result<(), Self::Fault>;
     unsafe fn gpr(&mut self, r: u8) -> u64;
@@ -118,6 +133,29 @@ unsafe fn set_xmm(r: u8, value: u128) {
     cpu::write_xmm_reg128(r as i32, reg128::of_bits(value));
     *gp::ymm_hi.add(r as usize) = reg128::of_bits(0);
 }
+/// YMM register `r`: bits 127:0 and 255:128
+unsafe fn ymm(r: u8) -> (u128, u128) { (xmm(r), (*gp::ymm_hi.add(r as usize)).bits()) }
+/// A VEX.256 destination register
+unsafe fn set_ymm(r: u8, (low, high): (u128, u128)) {
+    cpu::write_xmm_reg128(r as i32, reg128::of_bits(low));
+    *gp::ymm_hi.add(r as usize) = reg128::of_bits(high);
+}
+/// A VEX.256 form's r/m operand: a register, or 32 bytes of memory
+unsafe fn source256<M: Machine>(
+    m: &mut M,
+    i: &Instruction,
+    aligned: bool,
+) -> Result<(u128, u128), M::Fault> {
+    match i.rm {
+        Some(r) => Ok(ymm(r)),
+        None => m.read256(aligned),
+    }
+}
+/// The lane at byte `offset` of `size` bytes of a 256-bit value
+pub fn lane256(v: (u128, u128), offset: u32, size: u32) -> u64 {
+    let half = if offset < 16 { v.0 } else { v.1 };
+    (half >> (offset % 16 * 8)) as u64 & (u64::MAX >> (64 - size * 8))
+}
 /// The r/m operand: a register, or `bytes` of memory
 unsafe fn source<M: Machine>(
     m: &mut M,
@@ -152,9 +190,16 @@ fn sign_mask(v: u128, lane: u32) -> u64 {
         mask | ((v >> (n * lane * 8 + lane * 8 - 1)) as u64 & 1) << n
     })
 }
+/// ... of a 256-bit value's lanes
+fn sign_mask256(v: (u128, u128), lane: u32) -> u64 {
+    sign_mask(v.0, lane) | sign_mask(v.1, lane) << (16 / lane)
+}
 
 /// Execute `i` (after `check`)
 pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fault> {
+    if i.l {
+        return execute256(m, i);
+    }
     const LOW: u128 = u64::MAX as u128;
     let (map, pp, op) = (i.key >> 16 & 0xFF, i.key >> 8 & 3, i.key as u8);
     // (the general-purpose operands of VEX.W1 forms, in 64-bit mode)
@@ -408,15 +453,15 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
         (2, 1, 0x2C | 0x2D) => {
             let size = if op == 0x2C { 4 } else { 8 };
             let selected = sign_mask(xmm(i.vvvv), size as u32) as u8;
-            let v = m.read_lanes(size, selected)?;
-            set_xmm(i.reg, v);
+            let v = m.read_lanes(size, 16 / size, selected)?;
+            set_xmm(i.reg, v.0);
         },
         // VMASKMOVPS, VMASKMOVPD m128, xmm, xmm: ModRM.reg's lanes that
         // VEX.vvvv's sign bits select
         (2, 1, 0x2E | 0x2F) => {
             let size = if op == 0x2E { 4 } else { 8 };
             let selected = sign_mask(xmm(i.vvvv), size as u32) as u8;
-            m.write_lanes(size, xmm(i.reg), selected)?;
+            m.write_lanes(size, 16 / size, (xmm(i.reg), 0), selected)?;
         },
         // VSHUFPS, VSHUFPD: the low lanes from the first source, the high
         // ones from the second, as imm8 selects
@@ -641,6 +686,221 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
     Ok(())
 }
 
+/// Execute VEX.256 form `i` (Instruction::l): the forms that work lane by
+/// lane run their VEX.128 semantics on each 128-bit half, with a 32-byte
+/// memory operand
+unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fault> {
+    let (map, pp, op) = (i.key >> 16 & 0xFF, i.key >> 8 & 3, i.key as u8);
+    match (map, pp, op) {
+        // VMOVUPS, VMOVUPD, VMOVAPS, VMOVAPD, VMOVDQA, VMOVDQU, VLDDQU, the
+        // aligned ones #GP(0) unless 32-byte aligned
+        (1, 0 | 1, 0x10 | 0x28) | (1, 1 | 2, 0x6F) | (1, 3, 0xF0) => {
+            let aligned = op == 0x28 || op == 0x6F && pp == 1;
+            let v = source256(m, i, aligned)?;
+            set_ymm(i.reg, v);
+        },
+        // their stores, and VMOVNTPS, VMOVNTPD, VMOVNTDQ
+        (1, 0 | 1, 0x11 | 0x29 | 0x2B) | (1, 1 | 2, 0x7F) | (1, 1, 0xE7) => {
+            let aligned = matches!(op, 0x29 | 0x2B | 0xE7) || op == 0x7F && pp == 1;
+            let v = ymm(i.reg);
+            match i.rm {
+                Some(r) => set_ymm(r, v),
+                None => m.write256(v, aligned)?,
+            }
+        },
+        // VMOVSLDUP, VMOVSHDUP, VMOVDDUP: in each half (VMOVDDUP from 32
+        // bytes of memory, as the others)
+        (1, 2, 0x12 | 0x16) | (1, 3, 0x12) => {
+            let v = source256(m, i, false)?;
+            let t = TransferOp::from_encoding(legacy(i.key)).unwrap();
+            let f = |v: u128| u128::from_le_bytes(t.apply([0; 16], v.to_le_bytes()));
+            set_ymm(i.reg, (f(v.0), f(v.1)));
+        },
+        // VUNPCKLPS, VUNPCKLPD, VUNPCKHPS, VUNPCKHPD, VANDPS, VANDPD, VANDNPS,
+        // VANDNPD, VORPS, VORPD, VXORPS, VXORPD: in each half
+        (1, 0 | 1, 0x14 | 0x15 | 0x54..=0x57) => {
+            let b = source256(m, i, false)?;
+            let p = PackedOp::from_encoding(legacy(i.key)).unwrap();
+            let a = ymm(i.vvvv);
+            set_ymm(i.reg, (packed(p, a.0, b.0), packed(p, a.1, b.1)));
+        },
+        // VSHUFPS (imm8 for each half), VSHUFPD (imm8[1:0] for the low
+        // half, imm8[3:2] for the high one)
+        (1, 0 | 1, 0xC6) => {
+            let b = source256(m, i, false)?;
+            let shuffle = ShuffleOp::from_encoding(legacy(i.key)).unwrap();
+            let a = ymm(i.vvvv);
+            let high = if pp == 1 { i.imm8 >> 2 } else { i.imm8 };
+            set_ymm(
+                i.reg,
+                (
+                    bytes(|b| shuffle.apply(a.0.to_le_bytes(), b, i.imm8), b.0),
+                    bytes(|b| shuffle.apply(a.1.to_le_bytes(), b, high), b.1),
+                ),
+            );
+        },
+        // VBLENDPS (imm8[3:0] for the low half's dwords, imm8[7:4] for the
+        // high one's), VBLENDPD (imm8[1:0], imm8[3:2])
+        (3, 1, 0x0C | 0x0D) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let high = i.imm8 >> if op == 0x0C { 4 } else { 2 };
+            set_ymm(
+                i.reg,
+                (
+                    bytes(
+                        |b| simd_int::sse4_imm(op, a.0.to_le_bytes(), b, i.imm8),
+                        b.0,
+                    ),
+                    bytes(|b| simd_int::sse4_imm(op, a.1.to_le_bytes(), b, high), b.1),
+                ),
+            );
+        },
+        // VBLENDVPS, VBLENDVPD: the mask register is imm8[7:4] (bit 7
+        // ignored outside 64-bit mode)
+        (3, 1, 0x4A | 0x4B) => {
+            let b = source256(m, i, false)?;
+            let selector = ymm(i.imm8 >> 4 & if i.long { 15 } else { 7 });
+            let a = ymm(i.vvvv);
+            let legacy = if op == 0x4A { 0x14 } else { 0x15 };
+            let blend = |a: u128, b: u128, s: u128| {
+                bytes(
+                    |b| simd_int::sse4(legacy, a.to_le_bytes(), b, s.to_le_bytes()),
+                    b,
+                )
+            };
+            set_ymm(
+                i.reg,
+                (blend(a.0, b.0, selector.0), blend(a.1, b.1, selector.1)),
+            );
+        },
+        // VPERMILPS, VPERMILPD by the second source's lanes: in each half
+        (2, 1, 0x0C | 0x0D) => {
+            let index = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let f = |a: u128, index: u128| {
+                if op == 0x0C {
+                    permute(a, 4, |n| (index >> (32 * n)) as u32 & 3)
+                }
+                else {
+                    permute(a, 8, |n| (index >> (64 * n + 1)) as u32 & 1)
+                }
+            };
+            set_ymm(i.reg, (f(a.0, index.0), f(a.1, index.1)));
+        },
+        // ... by imm8: VPERMILPS the same for each half, VPERMILPD imm8[1:0]
+        // for the low half and imm8[3:2] for the high one
+        (3, 1, 0x04 | 0x05) => {
+            let v = source256(m, i, false)?;
+            let f = |v: u128, imm8: u8| {
+                if op == 0x04 {
+                    permute(v, 4, |n| (imm8 >> (2 * n)) as u32 & 3)
+                }
+                else {
+                    permute(v, 8, |n| (imm8 >> n) as u32 & 1)
+                }
+            };
+            let high = if op == 0x05 { i.imm8 >> 2 } else { i.imm8 };
+            set_ymm(i.reg, (f(v.0, i.imm8), f(v.1, high)));
+        },
+        // VBROADCASTSS ymm, m32; VBROADCASTSD ymm, m64; VBROADCASTF128 ymm,
+        // m128: in each lane
+        (2, 1, 0x18..=0x1A) => {
+            let v = match op {
+                0x18 => m.read(4, false)? * 0x1_0000_0001_0000_0001_0000_0001,
+                0x19 => m.read(8, false)? * 0x1_0000_0000_0000_0001,
+                _ => m.read(16, false)?,
+            };
+            set_ymm(i.reg, (v, v));
+        },
+        // VINSERTF128: the first source with half imm8[0] from xmm/m128
+        (3, 1, 0x18) => {
+            let v = source(m, i, 16, false)?;
+            let a = ymm(i.vvvv);
+            set_ymm(i.reg, if i.imm8 & 1 == 0 { (v, a.1) } else { (a.0, v) });
+        },
+        // VEXTRACTF128: half imm8[0] to an XMM register (bits 255:128 of
+        // its YMM register zeroed) or to m128
+        (3, 1, 0x19) => {
+            let a = ymm(i.reg);
+            let v = if i.imm8 & 1 == 0 { a.0 } else { a.1 };
+            match i.rm {
+                Some(r) => set_xmm(r, v),
+                None => m.write(16, v, false)?,
+            }
+        },
+        // VPERM2F128: each half one of the sources' halves (imm8[1:0] for the
+        // low half, imm8[5:4] for the high one) or zero (imm8[3], imm8[7])
+        (3, 1, 0x06) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let select = |control: u8| {
+                if control & 8 != 0 {
+                    0
+                }
+                else {
+                    [a.0, a.1, b.0, b.1][(control & 3) as usize]
+                }
+            };
+            set_ymm(i.reg, (select(i.imm8), select(i.imm8 >> 4)));
+        },
+        // VZEROALL: YMM0-YMM7, in 64-bit mode YMM0-YMM15
+        (1, 0, 0x77) => {
+            for r in 0..if i.long { 16 } else { 8 } {
+                set_ymm(r, (0, 0));
+            }
+        },
+        // VPTEST: ZF and CF over both halves
+        (2, 1, 0x17) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.reg);
+            let low = simd_int::ptest(a.0.to_le_bytes(), b.0.to_le_bytes());
+            let high = simd_int::ptest(a.1.to_le_bytes(), b.1.to_le_bytes());
+            m.set_flags(((low.0 && high.0) as u32) << 6 | (low.1 && high.1) as u32);
+        },
+        // VTESTPS, VTESTPD: ZF and CF of all lanes' sign bits, AF, OF, PF,
+        // SF cleared
+        (2, 1, 0x0E | 0x0F) => {
+            let b = source256(m, i, false)?;
+            let signs: u128 = if op == 0x0E {
+                0x8000_0000_8000_0000_8000_0000_8000_0000
+            }
+            else {
+                0x8000_0000_0000_0000_8000_0000_0000_0000
+            };
+            let a = ymm(i.reg);
+            let zf = (a.0 & b.0 | a.1 & b.1) & signs == 0;
+            let cf = (!a.0 & b.0 | !a.1 & b.1) & signs == 0;
+            m.set_flags((zf as u32) << 6 | cf as u32);
+        },
+        // VMOVMSKPS, VMOVMSKPD: all lanes' sign bits
+        (1, 0 | 1, 0x50) => {
+            let lane = if pp == 0 { 4 } else { 8 };
+            m.set_gpr(i.reg, sign_mask256(ymm(i.rm.unwrap()), lane), i.long && i.w);
+        },
+        // VMASKMOVPS, VMASKMOVPD ymm, ymm, m256: the lanes of memory the
+        // first source's sign bits select, the others zero
+        (2, 1, 0x2C | 0x2D) => {
+            let size = if op == 0x2C { 4 } else { 8 };
+            let selected = sign_mask256(ymm(i.vvvv), size as u32) as u8;
+            let v = m.read_lanes(size, 32 / size, selected)?;
+            set_ymm(i.reg, v);
+        },
+        // VMASKMOVPS, VMASKMOVPD m256, ymm, ymm: ModRM.reg's lanes that
+        // VEX.vvvv's sign bits select
+        (2, 1, 0x2E | 0x2F) => {
+            let size = if op == 0x2E { 4 } else { 8 };
+            let selected = sign_mask256(ymm(i.vvvv), size as u32) as u8;
+            m.write_lanes(size, 32 / size, ymm(i.reg), selected)?;
+        },
+        _ => {
+            dbg_assert!(false, "VEX.256 form {:x} without semantics", i.key);
+            return Err(m.raise(Exception::InvalidOpcode));
+        },
+    }
+    Ok(())
+}
+
 /// The 32-bit interpreter's and the IR helper's side: `address` is the
 /// memory operand's linear address (VMASKMOVDQU's destination), which the
 /// caller computes after `check`
@@ -685,6 +945,26 @@ impl Machine for Interpreter {
             _ => unreachable!(),
         }
     }
+    unsafe fn read256(&mut self, aligned: bool) -> Result<(u128, u128), ()> {
+        let a = self.address;
+        if aligned && a & 31 != 0 {
+            cpu::trigger_gp(0);
+            return Err(());
+        }
+        let low = cpu::safe_read128s(a)?.bits();
+        Ok((low, cpu::safe_read128s(a.wrapping_add(16))?.bits()))
+    }
+    unsafe fn write256(&mut self, value: (u128, u128), aligned: bool) -> Result<(), ()> {
+        let a = self.address;
+        if aligned && a & 31 != 0 {
+            cpu::trigger_gp(0);
+            return Err(());
+        }
+        cpu::writable_or_pagefault(a, 32)?;
+        cpu::safe_write128(a, reg128::of_bits(value.0)).unwrap();
+        cpu::safe_write128(a.wrapping_add(16), reg128::of_bits(value.1)).unwrap();
+        Ok(())
+    }
     /// (as MASKMOVDQU: the whole range writable first, whatever the mask)
     unsafe fn write_masked(&mut self, value: u128, mask: u16) -> Result<(), ()> {
         let a = self.address;
@@ -696,9 +976,9 @@ impl Machine for Interpreter {
         }
         Ok(())
     }
-    unsafe fn read_lanes(&mut self, size: u8, selected: u8) -> Result<u128, ()> {
-        let mut v = 0;
-        for n in 0..16 / size {
+    unsafe fn read_lanes(&mut self, size: u8, count: u8, selected: u8) -> Result<(u128, u128), ()> {
+        let mut v = (0, 0);
+        for n in 0..count {
             if selected >> n & 1 != 0 {
                 let a = self.address.wrapping_add((n * size) as i32);
                 let lane = if size == 4 {
@@ -707,26 +987,36 @@ impl Machine for Interpreter {
                 else {
                     cpu::safe_read64s(a)? as u128
                 };
-                v |= lane << (n * size * 8);
+                let offset = n as u32 * size as u32;
+                if offset < 16 {
+                    v.0 |= lane << (offset * 8);
+                }
+                else {
+                    v.1 |= lane << ((offset - 16) * 8);
+                }
             }
         }
         Ok(v)
     }
-    unsafe fn write_lanes(&mut self, size: u8, value: u128, selected: u8) -> Result<(), ()> {
-        let lanes = (0..16 / size).filter(|n| selected >> n & 1 != 0);
+    unsafe fn write_lanes(
+        &mut self,
+        size: u8,
+        count: u8,
+        value: (u128, u128),
+        selected: u8,
+    ) -> Result<(), ()> {
+        let lanes = (0..count).filter(|n| selected >> n & 1 != 0);
         for n in lanes.clone() {
             cpu::writable_or_pagefault(self.address.wrapping_add((n * size) as i32), size as i32)?;
         }
         for n in lanes {
-            let (a, lane) = (
-                self.address.wrapping_add((n * size) as i32),
-                value >> (n * size * 8),
-            );
+            let a = self.address.wrapping_add((n * size) as i32);
+            let lane = lane256(value, n as u32 * size as u32, size as u32);
             if size == 4 {
                 cpu::safe_write32(a, lane as i32).unwrap();
             }
             else {
-                cpu::safe_write64(a, lane as u64).unwrap();
+                cpu::safe_write64(a, lane).unwrap();
             }
         }
         Ok(())

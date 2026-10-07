@@ -90,7 +90,19 @@ const AVX_128 = new Set([
     // P5 part 4: AVX's own 128-bit forms
     "VBROADCASTSS", "VPERMILPS", "VPERMILPD", "VTESTPS", "VTESTPD", "VMASKMOVPS", "VMASKMOVPD",
 ]);
-const implemented = form => form.isa[0] === "AVX" && form.l !== "L1" && AVX_128.has(form.mnemonic);
+// AVX: the VEX.256 forms of these instructions
+const AVX_256 = new Set([
+    // P6 part 1: data movement, logic, shuffles, the cross-lane forms,
+    // tests and masks
+    "VMOVUPS", "VMOVUPD", "VMOVAPS", "VMOVAPD", "VMOVDQA", "VMOVDQU", "VLDDQU", "VMOVNTPS",
+    "VMOVNTPD", "VMOVNTDQ", "VMOVSLDUP", "VMOVSHDUP", "VMOVDDUP", "VUNPCKLPS", "VUNPCKLPD",
+    "VUNPCKHPS", "VUNPCKHPD", "VANDPS", "VANDPD", "VANDNPS", "VANDNPD", "VORPS", "VORPD",
+    "VXORPS", "VXORPD", "VSHUFPS", "VSHUFPD", "VBLENDPS", "VBLENDPD", "VBLENDVPS", "VBLENDVPD",
+    "VPERMILPS", "VPERMILPD", "VBROADCASTSS", "VBROADCASTSD", "VBROADCASTF128", "VINSERTF128",
+    "VEXTRACTF128", "VPERM2F128", "VZEROALL", "VPTEST", "VTESTPS", "VTESTPD", "VMOVMSKPS",
+    "VMOVMSKPD", "VMASKMOVPS", "VMASKMOVPD",
+]);
+const implemented = form => form.isa[0] === "AVX" && (form.l === "L1" ? AVX_256 : AVX_128).has(form.mnemonic);
 
 function row(form)
 {

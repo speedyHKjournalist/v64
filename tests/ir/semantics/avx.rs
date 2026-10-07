@@ -188,6 +188,14 @@ fn avx_fixtures() {
         (&[0xC5, 0xE9, 0xC4], 1, Some(6), 1, &[3]),          // vpinsrw xmm1, xmm2, esi, 3
         (&[0xC5, 0xF9, 0xC5], 1, Some(2), 1, &[1]),          // vpextrw ecx, xmm2, 1
         (&[0xC5, 0xF8, 0x50], 3, Some(4), 1, &[]),           // vmovmskps ebx, xmm4
+        // (VEX.256, P6)
+        (&[0xC5, 0xEC, 0x57], 1, Some(3), 1, &[]),           // vxorps ymm1, ymm2, ymm3
+        (&[0xC5, 0xFC, 0x10], 4, None, 4, &[]),              // vmovups ymm4, [m]
+        (&[0xC5, 0xFE, 0x7F], 5, None, 1, &[]),              // vmovdqu [m], ymm5
+        (&[0xC4, 0xE3, 0x6D, 0x06], 1, Some(3), 1, &[0x31]), // vperm2f128 ymm1, ymm2, ymm3, 0x31
+        (&[0xC4, 0xE3, 0x7D, 0x19], 2, Some(1), 1, &[1]),    // vextractf128 xmm1, ymm2, 1
+        (&[0xC4, 0xE2, 0x6D, 0x2C], 6, None, 6, &[]),        // vmaskmovps ymm6, ymm2, [m]
+        (&[0xC5, 0xFC, 0x77], 0, Some(0), 1, &[]),           // vzeroall (no ModRM)
     ];
     let mut cases = Vec::new();
     for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {

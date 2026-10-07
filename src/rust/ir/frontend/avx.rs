@@ -90,7 +90,8 @@ pub fn supports(i: &DecodedInstruction) -> bool {
     i.vex.is_some() && i.encoding.vex & vex::GPR == 0
 }
 /// ir_avx_continue's `operands`: ModRM.reg (bits 2:0), VEX.vvvv (6:4),
-/// ModRM.rm (10:8), a memory operand (11), VEX.L (12), VEX.W (13), imm8 (23:16)
+/// ModRM.rm (10:8), a memory operand (11), a VEX.256 form (12: VEX.L of a
+/// row that is not VEX.LIG), VEX.W (13), imm8 (23:16)
 pub fn operands(i: &DecodedInstruction) -> u32 {
     let v = i.vex.unwrap();
     let modrm = i.modrm.unwrap_or(0) as u32;
@@ -98,7 +99,7 @@ pub fn operands(i: &DecodedInstruction) -> u32 {
         | (v.vvvv as u32 & 7) << 4
         | (modrm & 7) << 8
         | (i.ea.is_some() as u32) << 11
-        | (v.l as u32) << 12
+        | ((v.l && i.encoding.vex & vex::L1 != 0) as u32) << 12
         | (v.w as u32) << 13
         | (i.immediate.unwrap_or(0) & 255) << 16
 }

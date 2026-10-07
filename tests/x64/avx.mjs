@@ -83,12 +83,12 @@ const GPR64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9
 const GPR32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
 // general-purpose operands and address registers (not RAX, RDX: XRSTOR/XSAVE's; not RSP)
 const OPERANDS = [[1, 9, 14, 6, 11], [1, 3, 6, 7, 5]];
-const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract", "maskstore"];
+const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract", "maskstore", "extract128"];
 // the kinds with VEX.vvvv (the immediate shifts: the destination) and with imm8
-const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "maskload", "maskstore"];
+const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "maskload", "maskstore", "insert128"];
 const has_vvvv = c => VVVV.includes(c.f.kind) || ["scalar", "scalar_st"].includes(c.f.kind) && !c.memory ||
     c.f.kind === "fp" && ["three", "from_gpr"].includes(c.f.operands);
-const IMMEDIATE = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr"];
+const IMMEDIATE = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr", "insert128", "extract128"];
 // explicit lengths of VPCMPESTRx: within, beyond, negative, beyond 32 bits (with VEX.W1)
 const LENGTHS = [0n, 3n, 8n, 9n, 16n, 17n, -1n, -7n, -16n, 0x7FFFFFFFn, -0x80000000n, 0x100000005n, -0x100000002n, 0x8000000000000000n];
 
@@ -99,7 +99,7 @@ for(const long of [true, false])
     const regs = long ? 16 : 8;
     for(const f of FORMS.filter(f => long || !f.long))
     {
-        const count = f.kind === "zero_upper" ? 2 : 4;
+        const count = f.kind.startsWith("zero_") ? 2 : 4;
         for(let i = 0; i < count; i++)
         {
             const n = cases.length;
@@ -113,7 +113,12 @@ for(const long of [true, false])
             if(memory)
             {
                 // [base + index << scale + disp]: the operand at `at` of the samples (or of the case's destination)
-                const at = f.aligned ? 16 * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) : (n * 7) % 33;
+                // (a VEX.256 store within its 48 bytes: at 16 at most; the
+                // aligned ones' operands 32-byte aligned: a destination at
+                // n * 48 + 16 * (n & 1), a sample at 32 * (n & 1))
+                const store = STORE_KINDS.includes(f.kind);
+                const at = f.aligned ? (f.l && !store ? 32 : 16) * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) :
+                    f.l && store ? (n * 7) % 17 : (n * 7) % 33;
                 // (VPCMPxSTRx: not RCX, which holds ones before)
                 const index = f.kind === "pcmpstr" ? gprs[1] : gprs[(n + 1) % 3];
                 c.memory = {base: gprs[3 + n % 2], index: i === count - 1 ? index : undefined, scale: n % 4, at, disp: -0x40 + n};
@@ -194,9 +199,9 @@ const code = (c, n) => {
     // VSQRTSS with VEX.L1 and stops on VROUNDSS's, an assertion of
     // gen_VROUNDSS; tests/rust/avx.mjs has their VEX.L1 cases)
     const fields = {map: f.map || 1, pp: f.pp, w: f.w === undefined || f.wig32 && !c.long ? n & 1 : f.w,
-        l: f.lig && f.kind !== "fp" ? n >> 1 & 1 : 0, three: !!(n & 2), vvvv};
+        l: f.l ?? (f.lig && f.kind !== "fp" ? n >> 1 & 1 : 0), three: !!(n & 2), vvvv};
     // (a fault, unexpected, is recorded and the instruction skipped)
-    const instruction = f.kind === "zero_upper" ? encode(fields, f.op) : encode(fields, f.op, reg, rm, mem, imm8);
+    const instruction = f.kind.startsWith("zero_") ? encode(fields, f.op) : encode(fields, f.op, reg, rm, mem, imm8);
     lines.push(`mov dword [${CASE}],${(CASE_FAULTS - FAULTS) / 16 + n}`, `mov dword [${SKIP}],${instruction.length}`);
     lines.push(`db ${instruction.join(",")}`);
     if(["to_gpr"].includes(f.kind) || ["gpr_store", "extract"].includes(f.kind) && !c.memory || f.operands === "to_gpr")
@@ -441,7 +446,7 @@ reserved_mxcsr: dd 0x10000
 default_mxcsr: dd 0x1F80
 align 64
 areas: db ${AREAS.flatMap(a => Array.from(a)).join(",")}
-align 16
+align 32
 samples: db ${Array.from(samples).join(",")}
 `));
 
@@ -473,12 +478,15 @@ const check = (result, label) => {
     });
     // VZEROUPPER in compatibility mode zeroes YMM0-7's upper halves, and
     // YMM8-15's are kept through the compatibility-mode block (QEMU 10.2
-    // zeroes all 16 in every mode: CPU_NB_REGS in gen_VZEROUPPER)
+    // zeroes all 16 in every mode: CPU_NB_REGS in gen_VZEROUPPER); VZEROALL
+    // there zeroes YMM0-7 and keeps XMM8-15 too (QEMU zeroes all 16)
     const kept = result.subarray(RESULTS - OUT - 2 * AREA, RESULTS - OUT - AREA);
     const zeroed = result.subarray(RESULTS - OUT - AREA, RESULTS - OUT);
     assert.ok(zeroed.subarray(576, 704).every(b => b === 0), `${label}: VZEROUPPER in compatibility mode: YMM0-7 upper halves`);
     assert.equal(hex(kept.subarray(704, 832)), hex(label === "QEMU" ? new Uint8Array(128) : AREAS[0].subarray(704, 832)),
         `${label}: YMM8-15 upper halves kept through compatibility mode`);
+    assert.equal(hex(kept.subarray(288, 416)), hex(label === "QEMU" ? new Uint8Array(128) : AREAS[0].subarray(288, 416)),
+        `${label}: XMM8-15 kept through compatibility mode (VZEROALL)`);
     FAULT_CASES.forEach(([vector, what, , , , qemu], n) => {
         const deviation = label === "QEMU" && qemu !== undefined;
         assert.equal(result.readUInt32LE(FAULTS - OUT + n * 16), deviation ? qemu : vector, `${label}: ${what}: vector`);
@@ -490,6 +498,14 @@ const check = (result, label) => {
 const comparable = buffer => {
     const copy = Buffer.from(buffer);
     cases.forEach((c, n) => {
+        // (compatibility mode: XSAVE writes neither XMM8-15 nor YMM8-15's
+        // upper halves, which hold what memory held: with the JIT enabled,
+        // the power-on heap header at 0x5FFEA8, tests/x64/initial_ram.mjs)
+        if(!c.long)
+        {
+            copy.fill(0, RESULTS - OUT + n * AREA + 288, RESULTS - OUT + n * AREA + 416);
+            copy.fill(0, RESULTS - OUT + n * AREA + 704, RESULTS - OUT + (n + 1) * AREA);
+        }
         if(qemu_lig(c, n)) copy.fill(0, RESULTS - OUT + n * AREA + 576, RESULTS - OUT + (n + 1) * AREA);
         if(approximate(c)) copy.fill(0, RESULTS - OUT + n * AREA + 160 + 16 * c.d, RESULTS - OUT + n * AREA + 176 + 16 * c.d);
         if(qemu_w1(c) || qemu_is4(c))
@@ -499,6 +515,7 @@ const comparable = buffer => {
         }
     });
     copy.fill(0, RESULTS - OUT - 2 * AREA + 704, RESULTS - OUT - AREA);
+    copy.fill(0, RESULTS - OUT - 2 * AREA + 288, RESULTS - OUT - 2 * AREA + 416);
     // (between the stores and the XSAVE areas: the IDT and the stack, with fault frames)
     copy.fill(0, STORES - OUT + cases.length * SPAN, RESULTS - OUT - 2 * AREA);
     // (XSTATE_BV: XINUSE may be 1 for a component in its initial

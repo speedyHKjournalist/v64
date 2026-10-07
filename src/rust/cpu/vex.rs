@@ -75,7 +75,8 @@ pub unsafe fn run(first: u8, byte1: u8) {
         reg: modrm.map_or(0, |m| m >> 3 & 7),
         vvvv: v.vvvv,
         rm: modrm.filter(|m| *m >= 0xC0).map(|m| m & 7),
-        l: v.l,
+        // (a VEX.256 form: not a VEX.LIG one's VEX.L)
+        l: v.l && row.vex & crate::decode_rules::vex::L1 != 0,
         w: v.w,
         imm8,
         long: false,

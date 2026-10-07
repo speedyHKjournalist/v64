@@ -1,4 +1,4 @@
-// The AVX forms (VEX.128 and VEX.LIG) of tests/rust/avx.mjs and
+// The AVX forms (VEX.128, VEX.LIG and VEX.256) of tests/rust/avx.mjs and
 // tests/x64/avx.mjs and their semantics, written from the SDM's operation
 // sections independently of src/rust/cpu/avx.rs. Registers and memory
 // operands are BigInts, lane 0 in the low bits. The forms that have legacy
@@ -16,7 +16,7 @@ export const big = b => b.reduceRight((v, x) => v << 8n | BigInt(x), 0n);
 export const le = (v, n = 16) => Uint8Array.from({ length: n }, (_, i) => Number(v >> BigInt(8 * i) & 255n));
 export const mask = bits => (1n << BigInt(bits)) - 1n;
 export const LOW = mask(64);
-export const lanes = (v, bits) => Array.from({ length: 128 / bits }, (_, i) => v >> BigInt(i * bits) & mask(bits));
+export const lanes = (v, bits, width = 128) => Array.from({ length: width / bits }, (_, i) => v >> BigInt(i * bits) & mask(bits));
 export const join = (values, bits) => values.reduceRight((v, x) => v << BigInt(bits) | x, 0n);
 
 const unpack = (bits, high) => (a, b) => {
@@ -24,7 +24,14 @@ const unpack = (bits, high) => (a, b) => {
     const start = high ? x.length / 2 : 0;
     return join(x.slice(start, start + x.length / 2).flatMap((v, i) => [v, y[start + i]]), bits);
 };
-const signs = bits => v => join(lanes(v, bits).map(l => l >> BigInt(bits - 1)), 1);
+const signs = (bits, width = 128) => v => join(lanes(v, bits, width).map(l => l >> BigInt(bits - 1)), 1);
+// VEX.256: a 256-bit value's halves, and f (of a VEX.128 form) on each
+// (operands BigInts, then imm8, a Number: `high` the high half's imm8)
+const low128 = v => v & mask(128), high128 = v => v >> 128n;
+const halves = (f, high = imm8 => imm8) => (...operands) => {
+    const imm8 = typeof operands.at(-1) === "number" ? [operands.pop()] : [];
+    return join([f(...operands.map(low128), ...imm8), f(...operands.map(high128), ...imm8.map(high))], 128);
+};
 // the other models' operands: 32-bit words, bytes
 const words = v => Array.from({ length: 4 }, (_, i) => Number(v >> BigInt(32 * i) & 0xFFFFFFFFn));
 const from_words = w => w.reduceRight((v, x) => v << 32n | BigInt(x >>> 0), 0n);
@@ -84,7 +91,7 @@ const EXTEND = ["bw", "bd", "bq", "wd", "wq", "dq"];
  *              register d = f(m)) or "from_gpr" (d = v with lane 0 from the register
  *              or memory m); `scalar`, `double` as the legacy form's
  */
-export const FORMS = [
+const FORMS_128 = [
     // full-width loads and stores
     { name: "vmovups", pp: 0, op: 0x10, kind: "load" }, { name: "vmovupd", pp: 1, op: 0x10, kind: "load" },
     { name: "vmovaps", pp: 0, op: 0x28, kind: "load", aligned: true }, { name: "vmovapd", pp: 1, op: 0x28, kind: "load", aligned: true },
@@ -216,9 +223,56 @@ export const FORMS = [
     { name: "vmaskmovpd", map: 2, pp: 1, op: 0x2F, kind: "maskstore", lane: 8, memory: true, w: 0 },
 ];
 
+// P6 part 1: the VEX.256 forms (`l`: 1) of data movement, logic, shuffles,
+// the cross-lane forms, tests and masks. The lane-wise ones are their VEX.128
+// forms on each half (`halves`), with 32-byte memory operands (the aligned
+// ones aligned to 32 bytes). Kinds of their own:
+//   insert128   d = v with its half imm8[0] from m (xmm or m128)
+//   extract128  m (an XMM register, bits 255:128 zeroed, or m128) = d's half imm8[0]
+//   zero_all    VZEROALL
+const by_name = (name, op) => FORMS_128.find(f => f.name === name && (op === undefined || f.op === op));
+const wide = (f, extra = {}) => ({ ...f, l: 1, bytes: 32, ...extra });
+const FORMS_256 = [
+    // full-width loads and stores
+    ...FORMS_128.filter(f => ["load", "store"].includes(f.kind) && !f.map && f.bytes === undefined && !f.f &&
+        [0x10, 0x11, 0x28, 0x29, 0x2B, 0x6F, 0x7F, 0xE7, 0xF0].includes(f.op)).map(f => wide(f)),
+    // duplicates, in each half (VMOVDDUP from 32 bytes too)
+    ...["vmovsldup", "vmovshdup", "vmovddup"].map(name => wide(by_name(name), { f: halves(by_name(name).f) })),
+    // unpacks and logic of PS and PD, in each half
+    ...FORMS_128.filter(f => f.kind === "binary" && !f.map && f.pp <= 1 && [0x14, 0x15, 0x54, 0x55, 0x56, 0x57].includes(f.op))
+        .map(f => wide(f, { f: halves(f.f) })),
+    // VSHUFPS (imm8 for each half), VSHUFPD (imm8[3:2] for the high one)
+    ...FORMS_128.filter(f => f.op === 0xC6).map(f => wide(f, { f: halves(f.f, f.pp ? imm8 => imm8 >> 2 : undefined) })),
+    // VBLENDPS (imm8[7:4] for the high half), VBLENDPD (imm8[3:2])
+    ...FORMS_128.filter(f => f.map === 3 && (f.op === 0x0C || f.op === 0x0D))
+        .map(f => wide(f, { f: halves(f.f, imm8 => imm8 >> (f.op === 0x0C ? 4 : 2)) })),
+    // VBLENDVPS, VBLENDVPD: the mask register's halves
+    ...FORMS_128.filter(f => f.kind === "blendv" && f.legacy).map(f => wide(f)),
+    // VPERMILPS, VPERMILPD by a vector (in each half) and by imm8 (VPERMILPD: imm8[3:2] for the high half)
+    ...FORMS_128.filter(f => f.name === "vpermilps" || f.name === "vpermilpd")
+        .map(f => wide(f, { f: halves(f.f, f.op === 0x05 ? imm8 => imm8 >> 2 : undefined) })),
+    // VBROADCASTSS ymm, m32; VBROADCASTSD ymm, m64; VBROADCASTF128 ymm, m128
+    { name: "vbroadcastss", map: 2, pp: 1, op: 0x18, kind: "load", memory: true, bytes: 4, w: 0, l: 1, f: v => join(Array(8).fill(v), 32) },
+    { name: "vbroadcastsd", map: 2, pp: 1, op: 0x19, kind: "load", memory: true, bytes: 8, w: 0, l: 1, f: v => join(Array(4).fill(v), 64) },
+    { name: "vbroadcastf128", map: 2, pp: 1, op: 0x1A, kind: "load", memory: true, bytes: 16, w: 0, l: 1, f: v => join([v, v], 128) },
+    { name: "vinsertf128", map: 3, pp: 1, op: 0x18, kind: "insert128", bytes: 16, w: 0, l: 1 },
+    { name: "vextractf128", map: 3, pp: 1, op: 0x19, kind: "extract128", bytes: 16, w: 0, l: 1 },
+    // VPERM2F128: each half one of the sources' halves (imm8[1:0], imm8[5:4]) or zero (imm8[3], imm8[7])
+    { name: "vperm2f128", map: 3, pp: 1, op: 0x06, kind: "binary_imm", bytes: 32, w: 0, l: 1,
+        f: (a, b, imm8) => join([imm8, imm8 >> 4].map(c => c & 8 ? 0n : [low128(a), high128(a), low128(b), high128(b)][c & 3]), 128) },
+    { name: "vzeroall", pp: 0, op: 0x77, kind: "zero_all", l: 1 },
+    // the tests and sign masks over all 256 bits
+    wide(by_name("vptest")), wide(by_name("vtestps")), wide(by_name("vtestpd")),
+    { ...by_name("vmovmskps"), l: 1, f: signs(32, 256) }, { ...by_name("vmovmskpd"), l: 1, f: signs(64, 256) },
+    // VMASKMOVPS, VMASKMOVPD: 8 and 4 lanes
+    ...FORMS_128.filter(f => f.kind === "maskload" || f.kind === "maskstore").map(f => ({ ...f, l: 1 })),
+];
+export const FORMS = [...FORMS_128, ...FORMS_256];
+
 /** The memory operand's size of form `f` */
 export const memory_bytes = f => f.bytes ?? f.size ?? (["store64", "low", "high"].includes(f.kind) ? 8 :
-    f.kind === "gpr_load" || f.kind === "gpr_store" ? (f.w ? 8 : 4) : f.kind === "insertps" ? 4 : 16);
+    f.kind === "gpr_load" || f.kind === "gpr_store" ? (f.w ? 8 : 4) : f.kind === "insertps" ? 4 :
+    ["maskload", "maskstore"].includes(f.kind) && f.l ? 32 : 16);
 
 /**
  * Executes form `f` on `s`: x[r] and h[r], XMM r and bits 255:128 of YMM r
@@ -232,19 +286,22 @@ export const memory_bytes = f => f.bytes ?? f.size ?? (["store64", "low", "high"
 export function execute(f, s, { d, v, m, imm8, long })
 {
     const memory = m === undefined;
-    const source = bytes => memory ? s.load(bytes) : s.x[m];
-    const write = (r, value) => { s.x[r] = value & mask(128); s.h[r] = 0n; };
+    // (a VEX.256 form's registers: both halves; its lane-wise memory operand 32 bytes)
+    const ymm = f.l === 1, width = ymm ? 256 : 128, full = ymm ? 32 : 16;
+    const reg = r => ymm ? s.x[r] | s.h[r] << 128n : s.x[r];
+    const source = bytes => memory ? s.load(bytes) : reg(m);
+    const write = (r, value) => { s.x[r] = value & mask(128); s.h[r] = ymm ? value >> 128n & mask(128) : 0n; };
     switch(f.kind)
     {
         case "load": write(d, (f.f || (x => x))(source(memory_bytes(f)))); break;
         case "store":
         {
-            const value = (f.f || (x => x))(s.x[d]);
+            const value = (f.f || (x => x))(reg(d));
             if(memory) s.store(memory_bytes(f), value);
             else write(m, value);
             break;
         }
-        case "binary": write(d, f.f(s.x[v], source(16))); break;
+        case "binary": write(d, f.f(reg(v), source(full))); break;
         case "scalar":
         {
             const low = mask(f.bytes * 8);
@@ -262,7 +319,7 @@ export function execute(f, s, { d, v, m, imm8, long })
         case "high": write(d, s.x[v] & LOW | (memory ? s.load(8) : s.x[m] & LOW) << 64n); break;
         case "store64": s.store(8, f.op === 0x13 ? s.x[d] & LOW : s.x[d] >> 64n); break;
         // (the general-purpose register: ModRM.reg, d here; VPEXTRW: word imm8[2:0])
-        case "to_gpr": s.set_gpr(d, f.imm ? extract(le(s.x[m]), 2, imm8) : f.f(s.x[m]), long && f.w === 1 ? 64 : 32); break;
+        case "to_gpr": s.set_gpr(d, f.imm ? extract(le(s.x[m]), 2, imm8) : f.f(reg(m)), long && f.w === 1 ? 64 : 32); break;
         case "gpr_load":
         {
             const bits = long && f.w === 1 ? 64 : 32;
@@ -277,6 +334,21 @@ export function execute(f, s, { d, v, m, imm8, long })
             break;
         }
         case "zero_upper": s.h.fill(0n, 0, long ? 16 : 8); break;
+        case "zero_all": s.x.fill(0n, 0, long ? 16 : 8); s.h.fill(0n, 0, long ? 16 : 8); break;
+        case "insert128":
+        {
+            const value = memory ? s.load(16) : s.x[m], a = reg(v);
+            write(d, imm8 & 1 ? low128(a) | value << 128n : value | high128(a) << 128n);
+            break;
+        }
+        case "extract128":
+        {
+            const value = imm8 & 1 ? high128(reg(d)) : low128(reg(d));
+            // (an XMM register: bits 255:128 of its YMM register zeroed)
+            if(memory) s.store(16, value);
+            else { s.x[m] = value; s.h[m] = 0n; }
+            break;
+        }
         case "ldmxcsr": s.mxcsr = Number(s.load(4)); break;
         case "stmxcsr": s.store(4, BigInt(s.mxcsr)); break;
         case "maskmov":
@@ -285,12 +357,14 @@ export function execute(f, s, { d, v, m, imm8, long })
             s.masked(s.x[d], selected);
             break;
         }
-        case "load_imm": write(d, f.f(source(16), imm8)); break;
-        case "binary_imm": write(d, f.f(s.x[v], source(16), imm8)); break;
+        case "load_imm": write(d, f.f(source(full), imm8)); break;
+        case "binary_imm": write(d, f.f(reg(v), source(full), imm8)); break;
         case "shift_imm": write(v, f.f(s.x[m], imm8)); break;
         case "ptest":
         {
-            const { zf, cf } = ptest(le(s.x[d]), le(source(16)));
+            // (VEX.256: over all 256 bits)
+            const a = reg(d), b = source(full);
+            const { zf, cf } = ymm ? { zf: (a & b) === 0n, cf: (~a & b & mask(256)) === 0n } : ptest(le(a), le(b));
             s.flags = (zf ? 0x40 : 0) | (cf ? 1 : 0);
             break;
         }
@@ -313,12 +387,18 @@ export function execute(f, s, { d, v, m, imm8, long })
             write(d, big(insertps(le(s.x[v]), value, imm8)));
             break;
         }
-        case "blendv": write(d, big(sse4_38(f.legacy ?? 0x10, le(s.x[v]), le(source(16)), le(s.x[imm8 >> 4 & (long ? 15 : 7)])))); break;
+        case "blendv":
+        {
+            const blend = (a, b, selector) => big(sse4_38(f.legacy ?? 0x10, le(a), le(b), le(selector)));
+            const selector = reg(imm8 >> 4 & (long ? 15 : 7));
+            write(d, ymm ? halves(blend)(reg(v), source(full), selector) : blend(s.x[v], source(16), selector));
+            break;
+        }
         case "vtest":
         {
             const bits = f.lane * 8;
-            const signs = join(lanes(mask(128), bits).map(() => 1n << BigInt(bits - 1)), bits);
-            const a = s.x[d], b = source(16);
+            const signs = join(lanes(mask(width), bits, width).map(() => 1n << BigInt(bits - 1)), bits);
+            const a = reg(d), b = source(full);
             s.flags = ((a & b & signs) === 0n ? 0x40 : 0) | ((~a & b & signs) === 0n ? 1 : 0);
             break;
         }
@@ -326,9 +406,9 @@ export function execute(f, s, { d, v, m, imm8, long })
         {
             // (each selected lane on its own: s.load_at, s.store_at)
             const bits = f.lane * 8;
-            const selected = lanes(s.x[v], bits).map(x => x >> BigInt(bits - 1));
+            const selected = lanes(reg(v), bits, width).map(x => x >> BigInt(bits - 1));
             if(f.kind === "maskload") write(d, join(selected.map((on, n) => on ? s.load_at(n * f.lane, f.lane) : 0n), bits));
-            else selected.forEach((on, n) => { if(on) s.store_at(n * f.lane, f.lane, lanes(s.x[d], bits)[n]); });
+            else selected.forEach((on, n) => { if(on) s.store_at(n * f.lane, f.lane, lanes(reg(d), bits, width)[n]); });
             break;
         }
         case "fp":

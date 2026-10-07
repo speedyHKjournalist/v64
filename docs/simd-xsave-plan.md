@@ -683,6 +683,11 @@ x86-64-v3 通用寄存器指令的模板要点：
     VMASKMOVPS/PD 加载时读取整个 16 字节操作数，所以未选中的 lane 在缺页上也会 #PF，CR2 为
     页边界；存储时逐个 lane 写入，后面的 lane 故障时，前面的 lane 已经写出。SDM 规定未选中的
     lane 不产生故障；故障指令应恢复到执行前的状态（Vol. 3 6.5），不能留下部分存储。
+  - P6 第一部分新发现（QEMU 10.2）：
+    - 非 64 位模式下 VZEROALL 也清零 YMM8–15，与 VZEROUPPER 相同；SDM 规定只修改 YMM0–7。已在
+      `tests/x64/avx.mjs` 登记。
+    - 32 字节存储的高半区落在缺页上时，低半区已经写出。SDM 规定故障指令不留下部分存储。
+      `tests/x64/vector_oracle.mjs` 对这一例按 SDM 单独判定。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
@@ -1863,3 +1868,56 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **回归**：`p6-batch` 的 55 个目标中 50 个通过。另外 5 个仍因另一个会话未完成的 `mmio_ram.rs`（state
   layout 预检查）失败，它们其余的 12 条命令直接运行，全部通过；只含本部分改动的工作树中 state layout
   检查通过（新增的 `INTERPRETED_VEX` 已归类）。
+
+### P6 第一部分：VEX.256 的数据搬运、逻辑、洗牌、跨半区、测试与掩码形式（2026-10-07）
+
+- **范围**：AVX 的 94 个 VEX.256 形式中的 59 个（47 个助记符）：VMOVUPS/UPD/APS/APD/DQA/DQU、VLDDQU、
+  VMOVNTPS/PD/DQ；VMOVSLDUP/SHDUP/DDUP；VUNPCKL/HPS/PD；VAND/ANDN/OR/XOR PS/PD；VSHUFPS/PD；
+  VBLENDPS/PD；VBLENDVPS/PD；VPERMILPS/PD；VBROADCASTSS/SD/F128；VINSERTF128、VEXTRACTF128、
+  VPERM2F128；VZEROALL；VPTEST、VTESTPS/PD；VMOVMSKPS/PD；VMASKMOVPS/PD（`gen/vex_table.js` 的
+  `AVX_256`）。浮点运算与转换的 35 个在第二部分。
+- **做法**：
+  - 共享执行器的 `execute256`：按半区工作的形式在两个 128 位半区上各执行一次 VEX.128 的语义；
+    imm8 中高半区另有位段的形式按 SDM 取（VSHUFPD、VBLENDPD 与 VPERMILPD 的 imm8[3:2]，VBLENDPS 的
+    imm8[7:4]）。跨半区的形式（广播、VINSERTF128、VEXTRACTF128、VPERM2F128、VZEROALL）以及
+    VPTEST/VTESTPS/PD 与 VMOVMSKPS/PD 的 256 位结果单独实现。
+  - `Instruction::l` 改为表示“VEX.256 形式”：各引擎（32 位解释器、IR helper 的 `operands`、x64）只在
+    编码行有 `vex::L1` 时置位，VEX.LIG 形式的 VEX.L 不再传入。执行器缺少某个 VEX.256 形式时触发
+    断言并产生 #UD，不会悄悄按 128 位执行。
+  - `Machine` 增加 32 字节的 `read256`/`write256`：对齐形式要求 32 字节对齐，否则 #GP(0)；存储先
+    检查整个 32 字节都可写，故障时不写任何字节。`read_lanes`/`write_lanes` 增加 lane 数参数
+    （VEX.256 时 8 个 PS lane、4 个 PD lane）。
+  - VZEROALL 在 64 位模式清零 YMM0–15，其他模式只清零 YMM0–7；VEXTRACTF128 写 XMM 寄存器时清零其
+    255:128 位。
+  - Tier-0、page tier 与 regions 遇到 VEX.256 形式时走解释器单步或 `ir_avx_continue`；原生模板留到
+    第三部分。
+- **测试**：
+  - `tests/rust/avx_model.mjs` 新增 57 个 VEX.256 形式（另有 VMOVMSKPS/PD 的 W1 两行由同一模型
+    覆盖）：按半区的形式用 VEX.128 的模型逐半区组合，跨半区的按 SDM 单独实现。
+  - `tests/rust/avx.mjs`：326 个形式，三个 arm 上 11072 项（无 Wasm SIMD 的构建 11071 项）。新增用例：
+    - 页末的 32 字节操作数；VPTEST、VBROADCASTSD/F128、VINSERTF128/VEXTRACTF128 的窄操作数不越界
+      访问。
+    - VMASKMOVPS/PD ymm 跨入缺页：未选中的 lane 不访问；选中时 #PF，不写任何 lane。
+    - 32 字节加载与存储跨入缺页：#PF，不写任何字节。
+    - 对齐到 16 字节但未对齐到 32 字节的对齐形式：#GP(0)。
+    - 用例可以设置 YMM 寄存器的上半部分（`uppers`）。
+  - `tests/x64/avx.mjs`：2672 例，三种配置下都与 QEMU 和模型一致。兼容模式下 VZEROALL 只清零
+    YMM0–7，XMM8–15 保持不变（QEMU 清零全部 16 个，已登记为偏差）。比较兼容模式的 XSAVE 区域时，
+    略去 XSAVE 在该模式不写的 XMM8–15 与 YMM8–15 上半部分。用例增多后，这些区域延伸到
+    0x5FFEA8；开启 JIT 时，那里有开机时堆分配器留下的头部（`tests/x64/initial_ram.mjs`，另一会话
+    正在修复）。
+  - `tests/x64/vector_oracle.mjs` 新增 4 个 VEX.256 故障用例：32 字节加载与存储跨入缺页，以及只对齐到
+    16 字节的对齐加载与存储（#GP(0)）。跨页存储按 SDM 单独判定（见 11.1 节）。共 974 例，解释执行与
+    Tier-0 下都通过。
+  - IR 差分测试新增 7 个 VEX.256 fixture（`ir_avx_continue`，含 32 字节内存操作数与 VZEROALL），
+    共 5412 例。
+- **变异测试**：植入 17 个错误，全部被检出：
+  - VSHUFPD 与 VPERMILPD 的高半区用 imm8[1:0]，VBLENDPS 的高半区用 imm8[5:2]；
+  - 32 字节对齐只按 16 字节检查；存储前不检查整个 32 字节可写；
+  - VPERM2F128 忽略清零位；VEXTRACTF128 写寄存器时不清零上半部分；VZEROALL 保留 XMM 部分；
+  - VTESTPS 的 ZF 不看高半区；VMOVMSKPD ymm 高半区的移位；VMASKMOV ymm 的 lane 数；`lane256` 总取
+    低半区；VBROADCASTSD 按 32 位而不是 64 位间距复制；VINSERTF128 的 imm8[0] 取反；VEX.LIG 形式传入 VEX.L；
+  - x64 的 32 字节对齐与存储前对高 16 字节的检查。这两个最初存活，`vector_oracle.mjs` 加入 VEX.256
+    故障用例后被检出。
+- **回归**：`p6p1-batch` 的 55 个目标中 50 个通过。另外 5 个仍因另一会话未完成的 `mmio_ram.rs`
+  失败，它们的 12 条命令直接运行，全部通过。
