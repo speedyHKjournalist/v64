@@ -20,8 +20,11 @@ import {long_mode_guest} from "./guest_builder.mjs";
 import {FORMS, big, execute, le, mask, memory_bytes} from "../rust/avx_model.mjs";
 
 const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, COUNTER = OUT + 0x88, MATCH = OUT + 0xC0, FAULTS = OUT + 0x100;
-// a case's general-purpose result, its memory destination (48 bytes) and its XSAVE area
-const GPR_OUT = OUT + 0x1000, STORES = OUT + 0x4000, RESULTS = OUT + 0x10000;
+// a case's general-purpose result, its memory destination (48 bytes) and its
+// XSAVE area (up to 4096 cases; RESULTS beyond the IDT, the stack and
+// 0x3FFEA0, which held a heap allocator's header at power-on with the JIT
+// enabled: tests/x64/initial_ram.mjs)
+const GPR_OUT = OUT + 0x1000, STORES = OUT + 0x20000, RESULTS = OUT + 0x110000;
 const SPAN = 48, AREA = 832;
 // (compatibility-mode code is compiled only after a while)
 const IDT = 0x380000, ROUNDS = 400, COMPAT_ROUNDS = 4000;
@@ -77,7 +80,12 @@ const GPR64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9
 const GPR32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
 // general-purpose operands and address registers (not RAX, RDX: XRSTOR/XSAVE's; not RSP)
 const OPERANDS = [[1, 9, 14, 6, 11], [1, 3, 6, 7, 5]];
-const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr"];
+const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract"];
+// the kinds with VEX.vvvv (the immediate shifts: the destination) and with imm8
+const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv"];
+const IMMEDIATE = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr"];
+// explicit lengths of VPCMPESTRx: within, beyond, negative, beyond 32 bits (with VEX.W1)
+const LENGTHS = [0n, 3n, 8n, 9n, 16n, 17n, -1n, -7n, -16n, 0x7FFFFFFFn, -0x80000000n, 0x100000005n, -0x100000002n, 0x8000000000000000n];
 
 // the cases: {long, f, k (register file), d, v, m, memory {base, index, scale, at}, gpr}
 const cases = [];
@@ -95,11 +103,15 @@ for(const long of [true, false])
             const d = (n * 5 + (long ? 3 : 0)) % regs, v = i & 1 ? d : (d + 7) % regs, m = i & 1 ? (v + 1) % regs : d;
             const gprs = OPERANDS[long ? 0 : 1];
             const c = {long, f, k: n % 8, d, v, m: memory ? undefined : m, gpr: gprs[n % 3], n};
+            // (every imm8 over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored in compatibility mode)
+            c.imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
             if(memory)
             {
                 // [base + index << scale + disp]: the operand at `at` of the samples (or of the case's destination)
                 const at = f.aligned ? 16 * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) : (n * 7) % 33;
-                c.memory = {base: gprs[3 + n % 2], index: i === count - 1 ? gprs[(n + 1) % 3] : undefined, scale: n % 4, at, disp: -0x40 + n};
+                // (VPCMPxSTRx: not RCX, which holds ones before)
+                const index = f.kind === "pcmpstr" ? gprs[1] : gprs[(n + 1) % 3];
+                c.memory = {base: gprs[3 + n % 2], index: i === count - 1 ? index : undefined, scale: n % 4, at, disp: -0x40 + n};
             }
             cases.push(c);
         }
@@ -136,15 +148,38 @@ const code = (c, n) => {
         case "maskmov":
             lines.push(`mov ${c.long ? "rdi" : "edi"},${STORES + n * SPAN + 5}`);
             break;
+        case "shift_imm": reg = f.group; break;
+        case "extract": case "insert":
+            if(c.memory) break;
+            rm = c.gpr;
+            c.value = BigInt(random()) << 32n | BigInt(random());
+            lines.push(`mov ${R[c.gpr]},${f.kind === "insert" ? "0x" + (c.long ? c.value : c.value & 0xFFFFFFFFn).toString(16) : -1}`);
+            break;
+        case "ptest":
+            // (OF, SF, AF set by 0x7F + 1, CF by STC)
+            lines.push("mov al,0x7F", "add al,1", "stc");
+            break;
+        case "pcmpstr":
+        {
+            const value = x => "0x" + BigInt.asUintN(c.long ? 64 : 32, x).toString(16);
+            c.lengths = [LENGTHS[n % LENGTHS.length], LENGTHS[(n * 5 + 2) % LENGTHS.length]];
+            lines.push("mov al,0x7F", "add al,1", "stc", `mov ${R[0]},${value(c.lengths[0])}`, `mov ${R[2]},${value(c.lengths[1])}`, `mov ${R[1]},-1`);
+            break;
+        }
     }
-    const vvvv = ["binary", "low", "high"].includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !c.memory ? c.v : 0;
+    if(f.kind === "to_gpr" && f.imm) lines.push(`mov ${R[c.gpr]},-1`);
+    const vvvv = f.kind === "shift_imm" ? c.d : VVVV.includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !c.memory ? c.v : 0;
+    const imm8 = IMMEDIATE.includes(f.kind) || f.imm ? c.imm8 : undefined;
     // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode)
     const fields = {map: f.map || 1, pp: f.pp, w: f.w === undefined || f.wig32 && !c.long ? n & 1 : f.w, l: f.lig ? n >> 1 & 1 : 0, three: !!(n & 2), vvvv};
-    lines.push(`db ${(f.kind === "zero_upper" ? encode(fields, f.op) : encode(fields, f.op, reg, rm, mem)).join(",")}`);
-    if(["to_gpr"].includes(f.kind) || ["gpr_store"].includes(f.kind) && !c.memory)
+    lines.push(`db ${(f.kind === "zero_upper" ? encode(fields, f.op) : encode(fields, f.op, reg, rm, mem, imm8)).join(",")}`);
+    if(["to_gpr"].includes(f.kind) || ["gpr_store", "extract"].includes(f.kind) && !c.memory)
     {
         lines.push(`mov [${GPR_OUT + n * 16}],${R[c.gpr]}`);
     }
+    if(f.kind === "pcmpstr") lines.push(`mov [${GPR_OUT + n * 16}],${R[1]}`);
+    // (the flags: OF, SF, ZF, AF, PF, CF)
+    if(["ptest", "pcmpstr"].includes(f.kind)) lines.push(c.long ? "pushfq\npop rax" : "pushfd\npop eax", "and eax,0x8D5", `mov [${GPR_OUT + n * 16 + 8}],eax`);
     lines.push("mov eax,6", "xor edx,edx", `xsave [${RESULTS + n * AREA}]`);
     return lines.join("\n");
 };
@@ -156,6 +191,12 @@ const block = long => cases.map((c, n) => c.long === long ? code(c, n) : "").fil
 // come from the first source (VEX.vvvv), VMOVSD from memory keeps them
 // (VMOVSS from memory zeroes them). Against QEMU, any of these.
 const qemu_lig = (c, n) => c.f.lig && (n >> 1 & 1) === 1;
+// VPCMPESTRx with VEX.W1: QEMU 10.2 takes the lengths from EAX and EDX, as
+// for REX.W (tests/x64/sse4.mjs), not from RAX and RDX
+const qemu_w1 = c => c.f.kind === "pcmpstr" && c.f.w === 1;
+// VPBLENDVB outside 64-bit mode: the mask register is imm8[6:4] (SDM vol. 2A,
+// 2.3, the /is4 operand); QEMU 10.2 takes imm8[7:4]
+const qemu_is4 = c => c.f.kind === "blendv" && !c.long && c.imm8 & 0x80;
 // The model: each case's XSAVE area (the registers it can reach), its
 // general-purpose result and its memory destination (`qemu`: QEMU's
 // deviations for qemu_lig, "kept" or "first source")
@@ -165,21 +206,26 @@ const expected_case = (c, n, qemu = undefined) => {
         x: Array.from({length: 16}, (_, r) => big(area.subarray(160 + 16 * r, 176 + 16 * r))),
         h: Array.from({length: 16}, (_, r) => big(area.subarray(576 + 16 * r, 592 + 16 * r))),
         mxcsr: area[24] | area[25] << 8,
-        gpr_out: new Uint8Array(16),
+        // (VPCMPxSTRM leave RCX: ones)
+        gpr_out: c.f.kind === "pcmpstr" ? Uint8Array.from({length: 16}, (_, i) => i < (c.long ? 8 : 4) ? 255 : 0) : new Uint8Array(16),
         dest: new Uint8Array(SPAN),
     };
+    Object.defineProperty(s, "flags", {set: value => s.gpr_out.set(u32(value), 8)});
     const at = c.memory?.at ?? 0;
     s.load = bytes => big(samples.subarray(at, at + bytes));
     s.store = (bytes, v) => s.dest.set(le(v, bytes), at);
     s.masked = (value, selected) => le(value).forEach((b, i) => { if(selected[i]) s.dest[5 + i] = b; });
-    s.gpr = () => c.long ? c.value : c.value & 0xFFFFFFFFn;
+    s.gpr = r => {
+        const value = c.f.kind === "pcmpstr" ? c.lengths[r === 0 ? 0 : 1] : c.value;
+        return BigInt.asUintN(c.long ? 64 : 32, value);
+    };
     // (32-bit results zero-extended in 64-bit mode; in compatibility mode a 32-bit store)
     s.set_gpr = (r, value) => s.gpr_out.set(le(value, c.long ? 8 : 4));
-    const o = {d: c.d, v: c.v, m: c.m, long: c.long};
+    const o = {d: c.d, v: c.f.kind === "shift_imm" ? c.d : c.v, m: c.m, imm8: c.imm8, long: c.long};
     if(c.f.kind === "to_gpr") Object.assign(o, {d: c.gpr});
-    if((c.f.kind === "gpr_load" || c.f.kind === "gpr_store") && !c.memory) o.m = c.gpr;
+    if(["gpr_load", "gpr_store", "extract", "insert"].includes(c.f.kind) && !c.memory) o.m = c.gpr;
     const upper = [...s.h];
-    execute(c.f, s, o);
+    execute(qemu === "W0" ? {...c.f, w: 0} : c.f, s, o);
     if(qemu === "kept") s.h = upper;
     if(qemu === "first source" && !c.memory) s.h[c.f.op === 0x10 ? c.d : c.m] = upper[c.v];
     const out = new Uint8Array(AREA);
@@ -356,11 +402,13 @@ samples: db ${Array.from(samples).join(",")}
 `));
 
 const length = RESULTS - OUT + cases.length * AREA;
+assert.ok(cases.length <= 4096 && STORES + cases.length * SPAN <= IDT);
 const check = (result, label) => {
     // the model first: QEMU is a reference, not the specification
     cases.forEach((c, n) => {
-        const e = expected_case(c, n);
+        const e = expected_case(c, n, label === "QEMU" && qemu_w1(c) ? "W0" : undefined);
         const what = `${label}: ${c.long ? "64-bit" : "compatibility"} ${c.f.name} (${c.f.op.toString(16)}) case ${n}`;
+        if(label === "QEMU" && qemu_is4(c)) return;
         const area = result.subarray(RESULTS - OUT + n * AREA, RESULTS - OUT + (n + 1) * AREA);
         const deviation = label === "QEMU" && qemu_lig(c, n) &&
             ["kept", "first source"].some(qemu => xsave_bytes(area, c.long).equals(xsave_bytes(expected_case(c, n, qemu).area, c.long)));
@@ -388,8 +436,15 @@ const comparable = buffer => {
     const copy = Buffer.from(buffer);
     cases.forEach((c, n) => {
         if(qemu_lig(c, n)) copy.fill(0, RESULTS - OUT + n * AREA + 576, RESULTS - OUT + (n + 1) * AREA);
+        if(qemu_w1(c) || qemu_is4(c))
+        {
+            copy.fill(0, RESULTS - OUT + n * AREA, RESULTS - OUT + (n + 1) * AREA);
+            copy.fill(0, GPR_OUT - OUT + n * 16, GPR_OUT - OUT + n * 16 + 16);
+        }
     });
     copy.fill(0, RESULTS - OUT - 2 * AREA + 704, RESULTS - OUT - AREA);
+    // (between the stores and the XSAVE areas: the IDT and the stack, with fault frames)
+    copy.fill(0, STORES - OUT + cases.length * SPAN, RESULTS - OUT - 2 * AREA);
     // (XSTATE_BV: XINUSE may be 1 for a component in its initial
     // configuration, SDM vol. 1, 13.6, and QEMU does not track it: after
     // VZEROUPPER, the YMM state is initial for v86)

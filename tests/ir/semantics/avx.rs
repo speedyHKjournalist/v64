@@ -62,7 +62,8 @@ fn avx_forms_in_a_cfg() {
 
 /// Fixtures for tests/ir/differential/avx.mjs: AVX forms (register, memory
 /// load and store, general-purpose operands, VZEROUPPER, VLDMXCSR/VSTMXCSR,
-/// VMASKMOVDQU) in 16- and 32-bit code, alone, after PADDD XMM2, XMM3 (an
+/// VMASKMOVDQU; flags, VEX.vvvv as the destination, imm8[7:4] as a register,
+/// ECX and XMM0 written by VPCMPxSTRx) in 16- and 32-bit code, alone, after PADDD XMM2, XMM3 (an
 /// XMM value the region holds) or INC ESI, INC EAX (general-purpose ones),
 /// then PADDD XMM7 with the destination (the helper's result reloaded)
 #[test]
@@ -76,26 +77,37 @@ fn avx_fixtures() {
     std::fs::create_dir_all("build/ir-avx").unwrap();
     TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1 | SSE4_2 | XSAVE | AVX));
     // (the VEX prefix and opcode, ModRM.reg, the r/m register or memory, the
-    // XMM destination the suffix reads)
-    let forms: &[(&[u8], u8, Option<u8>, u8)] = &[
-        (&[0xC5, 0xE8, 0x57], 1, Some(3), 1), // vxorps xmm1, xmm2, xmm3
-        (&[0xC5, 0xF8, 0x10], 4, None, 4),    // vmovups xmm4, [m]
-        (&[0xC5, 0xFA, 0x7F], 5, None, 1),    // vmovdqu [m], xmm5
-        (&[0xC5, 0xF8, 0x29], 3, None, 1),    // vmovaps [m], xmm3
-        (&[0xC5, 0xC2, 0x10], 6, Some(0), 6), // vmovss xmm6, xmm7, xmm0
-        (&[0xC5, 0xE8, 0x16], 1, None, 1),    // vmovhps xmm1, xmm2, [m]
-        (&[0xC4, 0xE2, 0x79, 0x2A], 2, None, 2), // vmovntdqa xmm2, [m]
-        (&[0xC5, 0xF9, 0x7E], 2, Some(1), 1), // vmovd ecx, xmm2
-        (&[0xC5, 0xF9, 0x6E], 3, Some(6), 3), // vmovd xmm3, esi
-        (&[0xC5, 0xF9, 0x6E], 0, None, 0),    // vmovd xmm0, [m]
-        (&[0xC5, 0xF9, 0xD7], 0, Some(1), 1), // vpmovmskb eax, xmm1
-        (&[0xC5, 0xF8, 0x77], 0, Some(0), 1), // vzeroupper (no ModRM)
-        (&[0xC5, 0xF8, 0xAE], 2, None, 1),    // vldmxcsr [m]
-        (&[0xC5, 0xF8, 0xAE], 3, None, 1),    // vstmxcsr [m]
-        (&[0xC5, 0xF9, 0xF7], 1, Some(2), 1), // vmaskmovdqu xmm1, xmm2
+    // XMM destination the suffix reads, imm8)
+    #[rustfmt::skip]
+    let forms: &[(&[u8], u8, Option<u8>, u8, &[u8])] = &[
+        (&[0xC5, 0xE8, 0x57], 1, Some(3), 1, &[]),           // vxorps xmm1, xmm2, xmm3
+        (&[0xC5, 0xF8, 0x10], 4, None, 4, &[]),              // vmovups xmm4, [m]
+        (&[0xC5, 0xFA, 0x7F], 5, None, 1, &[]),              // vmovdqu [m], xmm5
+        (&[0xC5, 0xF8, 0x29], 3, None, 1, &[]),              // vmovaps [m], xmm3
+        (&[0xC5, 0xC2, 0x10], 6, Some(0), 6, &[]),           // vmovss xmm6, xmm7, xmm0
+        (&[0xC5, 0xE8, 0x16], 1, None, 1, &[]),              // vmovhps xmm1, xmm2, [m]
+        (&[0xC4, 0xE2, 0x79, 0x2A], 2, None, 2, &[]),        // vmovntdqa xmm2, [m]
+        (&[0xC5, 0xF9, 0x7E], 2, Some(1), 1, &[]),           // vmovd ecx, xmm2
+        (&[0xC5, 0xF9, 0x6E], 3, Some(6), 3, &[]),           // vmovd xmm3, esi
+        (&[0xC5, 0xF9, 0x6E], 0, None, 0, &[]),              // vmovd xmm0, [m]
+        (&[0xC5, 0xF9, 0xD7], 0, Some(1), 1, &[]),           // vpmovmskb eax, xmm1
+        (&[0xC5, 0xF8, 0x77], 0, Some(0), 1, &[]),           // vzeroupper (no ModRM)
+        (&[0xC5, 0xF8, 0xAE], 2, None, 1, &[]),              // vldmxcsr [m]
+        (&[0xC5, 0xF8, 0xAE], 3, None, 1, &[]),              // vstmxcsr [m]
+        (&[0xC5, 0xF9, 0xF7], 1, Some(2), 1, &[]),           // vmaskmovdqu xmm1, xmm2
+        (&[0xC5, 0xE9, 0x74], 1, Some(3), 1, &[]),           // vpcmpeqb xmm1, xmm2, xmm3
+        (&[0xC4, 0xE2, 0x51, 0x00], 4, None, 4, &[]),        // vpshufb xmm4, xmm5, [m]
+        (&[0xC4, 0xE2, 0x79, 0x17], 1, Some(2), 1, &[]),     // vptest xmm1, xmm2 (flags)
+        (&[0xC4, 0xE3, 0x79, 0x16], 2, Some(1), 1, &[3]),    // vpextrd ecx, xmm2, 3
+        (&[0xC4, 0xE3, 0x79, 0x15], 2, None, 1, &[1]),       // vpextrw [m], xmm2, 1
+        (&[0xC4, 0xE3, 0x59, 0x20], 3, Some(6), 3, &[5]),    // vpinsrb xmm3, xmm4, esi, 5
+        (&[0xC5, 0xD1, 0x73], 3, Some(6), 5, &[3]),          // vpsrldq xmm5, xmm6, 3
+        (&[0xC4, 0xE3, 0x71, 0x4C], 0, Some(2), 0, &[0x30]), // vpblendvb xmm0, xmm1, xmm2, xmm3
+        (&[0xC4, 0xE3, 0x79, 0x63], 1, None, 1, &[0x0C]),    // vpcmpistri xmm1, [m], 0x0C
+        (&[0xC4, 0xE3, 0x79, 0x60], 2, None, 0, &[0x40]),    // vpcmpestrm xmm2, [m], 0x40
     ];
     let mut cases = Vec::new();
-    for (form, &(head, reg, rm, destination)) in forms.iter().enumerate() {
+    for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {
         for mode in [false, true] {
             for prefix in 0..3 {
                 let mut bytes = vec![];
@@ -123,6 +135,7 @@ fn avx_fixtures() {
                         },
                     }
                 }
+                bytes.extend_from_slice(imm8);
                 // paddd xmm7, the destination
                 bytes.extend([0x66, 0x0F, 0xFE, 0xF8 | destination]);
                 count += 1;

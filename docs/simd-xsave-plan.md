@@ -672,6 +672,10 @@ x86-64-v3 通用寄存器指令的模板要点：
     - 非 64 位模式下 VZEROUPPER 也清零 YMM8–15 的高半（`gen_VZEROUPPER` 遍历 `CPU_NB_REGS`）。
       SDM 规定只修改 YMM0–7（3.2 节）。
     - VLDMXCSR 不检查 MXCSR 的保留位，不产生 #GP(0)，并把该值载入 MXCSR。
+  - P5 第二部分新发现（QEMU 10.2，`tests/x64/avx.mjs` 登记）：
+    - VPCMPESTRx 的 VEX.W1 形式与 legacy 的 REX.W 一样被忽略，长度仍取 EAX/EDX。
+    - 非 64 位模式下 VPBLENDVB 的掩码寄存器取 imm8[7:4]；SDM（Vol. 2A 2.3 的 /is4）规定只用
+      imm8[6:4]。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
@@ -1591,3 +1595,42 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `x64-decode-tests`、`x64-opcode-matrix-tests`、`smp-tests`）仍是另一个会话的
   `src/rust/cpu/mmio_ram.rs` 所致：只含本部分改动的工作树中 state layout 检查通过（新增的
   `CALLS` 已登记），这些目标其余的命令直接运行，全部通过。
+
+### P5 第二部分：整数形式（2026-10-07）
+
+- **范围**：再接入 139 个 VEX.128 形式（共 209 个），都是已有 legacy 语义的整数和类整数形式：
+  - 66 0F 的打包整数运算：解包、打包、比较、按 xmm/m128 移位、算术、逻辑（`PackedOp`）。
+  - 按 imm8 移位的 VPSRLW/D/Q、VPSRAW/D、VPSLLW/D/Q、VPSRLDQ、VPSLLDQ：目的是 VEX.vvvv，源是
+    r/m 寄存器（没有内存形式）。
+  - VPSHUFD/HW/LW、VSHUFPS/PD（`ShuffleOp`），VPINSRW、VPEXTRW（C5）。
+  - SSSE3 全部 XMM 形式（`simd_int::ssse3`）和 VPALIGNR。
+  - SSE4.1/4.2：VPTEST、VPMOVSX/ZX（按扩展宽度访存）、VPMULDQ、VPCMPEQQ/GTQ、VPACKUSDW、
+    VPMIN/VPMAX、VPMULLD、VPHMINPOSUW、VBLENDPS/PD、VPBLENDW、VMPSADBW、VPEXTRB/W/D/Q、
+    VEXTRACTPS、VPINSRB/D/Q、VINSERTPS。
+  - VPBLENDVB：掩码寄存器由 imm8[7:4] 给出，非 64 位模式下只用 imm8[6:4]。
+  - VPCMPESTRx/VPCMPISTRx：64 位模式的 VEX.W1 形式长度取 RAX/RDX；ECX 零扩展；xSTRM 写 XMM0
+    并清零其高半。
+- 都在共享执行器中实现，复用 `simd_int`、`ir::simd` 的值级函数。IR、Tier-0、x64 和 page tier
+  的路径不变（第一部分的 helper、step）。剩余的 87 个 VEX.128 形式是浮点（第三部分）和 AVX 新增
+  的 128 位形式（第四部分）。
+- **测试**：
+  - `tests/rust/avx_model.mjs` 新增这些形式，语义由已有的独立模型给出（`packed_model.mjs`、
+    `shuffle_model.mjs`、`ssse3_model.mjs`、`sse4_model.mjs`），按 VEX 的操作数组织；新增 kind：
+    `load_imm`、`binary_imm`、`shift_imm`、`ptest`、`extract`、`insert`、`insertps`、`blendv`、
+    `pcmpstr`。
+  - `tests/rust/avx.mjs`：每个形式 32 例，imm8 在各例间轮换；VPTEST 和 VPCMPxSTRx 检查标志（之前
+    置位 OF、SF、AF、CF），VPCMPESTRx 的显式长度含负数和极值；页末的窄操作数加入 VPMOVSXBQ、
+    VPMOVZXDQ、VPINSRB、VINSERTPS、VPEXTRB、VPEXTRW；新增 #UD：VPBLENDVB 的 VEX.W1、按 imm8
+    移位的内存形式、VPEXTRW（C5）的内存形式、VPSHUFD 的 VEX.vvvv。共 188 个形式、6030 项。
+  - `tests/x64/avx.mjs`：1548 例（含 W1 的 64 位形式，长度超过 32 位的 VPCMPESTRx）。用例数增加后
+    结果区彼此重叠，改了内存布局；VPCMPxSTRx 的内存操作数不再用 RCX 作 index（它先被置为全 1）。
+  - IR fixture 增加 10 个形式：标志、通用寄存器结果、VEX.vvvv 作目的、imm8[7:4] 作寄存器、
+    VPCMPxSTRx 写 ECX/XMM0；区域与解释器对比 2013 项。
+  - 植入 7 个错误，全部被发现：按 imm8 移位写到 ModRM.reg、非 64 位模式下 is4 用 4 位、VPCMPESTRx
+    忽略 VEX.W1、VPINSRB 不截断通用寄存器、VPTEST 的 ZF/CF 对调、VPEXTRW（C5）的 imm8 只用 2 位、
+    VPMOVSX/ZX 按 16 字节访存（由页末用例发现）。
+- **发现的旁支问题**：启用 JIT 时，客体物理地址 0x3FFEA0 处有 8 字节非零数据
+  （0x0020000A00400010），即使客体只运行整数循环；解释执行时没有。起初以为是 page tier 的写入，
+  单独立项调查后查明是开机时 RAM 就不为零：客体 RAM 分配在 Tier-0 编译器刚释放的堆块上，残留了
+  分配器的块头（修复与 `tests/x64/initial_ram.mjs` 由那个会话提交）。`tests/x64/avx.mjs` 的
+  原始内存对比不覆盖这段地址。

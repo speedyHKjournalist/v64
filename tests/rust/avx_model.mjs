@@ -1,7 +1,13 @@
 // The AVX forms (VEX.128 and VEX.LIG) of tests/rust/avx.mjs and
 // tests/x64/avx.mjs and their semantics, written from the SDM's operation
 // sections independently of src/rust/cpu/avx.rs. Registers and memory
-// operands are BigInts, lane 0 in the low bits.
+// operands are BigInts, lane 0 in the low bits. The forms that have legacy
+// SSE counterparts use those forms' models (packed_model.mjs,
+// shuffle_model.mjs, ssse3_model.mjs, sse4_model.mjs) with VEX's operands.
+import { packed, packedImmediate } from "../ir/differential/packed_model.mjs";
+import { shuffle } from "../ir/differential/shuffle_model.mjs";
+import { model as ssse3 } from "./ssse3_model.mjs";
+import { compare_strings, extract, insert, insertps, ptest, sse4_38, sse4_3a } from "./sse4_model.mjs";
 
 export const big = b => b.reduceRight((v, x) => v << 8n | BigInt(x), 0n);
 export const le = (v, n = 16) => Uint8Array.from({ length: n }, (_, i) => Number(v >> BigInt(8 * i) & 255n));
@@ -16,6 +22,26 @@ const unpack = (bits, high) => (a, b) => {
     return join(x.slice(start, start + x.length / 2).flatMap((v, i) => [v, y[start + i]]), bits);
 };
 const signs = bits => v => join(lanes(v, bits).map(l => l >> BigInt(bits - 1)), 1);
+// the other models' operands: 32-bit words, bytes
+const words = v => Array.from({ length: 4 }, (_, i) => Number(v >> BigInt(32 * i) & 0xFFFFFFFFn));
+const from_words = w => w.reduceRight((v, x) => v << 32n | BigInt(x >>> 0), 0n);
+const ZERO = new Uint8Array(16);
+// the packed integer operations of 66 0F
+const PACKED = {
+    0x60: "vpunpcklbw", 0x61: "vpunpcklwd", 0x62: "vpunpckldq", 0x63: "vpacksswb", 0x64: "vpcmpgtb", 0x65: "vpcmpgtw",
+    0x66: "vpcmpgtd", 0x67: "vpackuswb", 0x68: "vpunpckhbw", 0x69: "vpunpckhwd", 0x6A: "vpunpckhdq", 0x6B: "vpackssdw",
+    0x6C: "vpunpcklqdq", 0x6D: "vpunpckhqdq", 0x74: "vpcmpeqb", 0x75: "vpcmpeqw", 0x76: "vpcmpeqd", 0xD1: "vpsrlw",
+    0xD2: "vpsrld", 0xD3: "vpsrlq", 0xD4: "vpaddq", 0xD5: "vpmullw", 0xD8: "vpsubusb", 0xD9: "vpsubusw", 0xDA: "vpminub",
+    0xDC: "vpaddusb", 0xDD: "vpaddusw", 0xDE: "vpmaxub", 0xE0: "vpavgb", 0xE1: "vpsraw", 0xE2: "vpsrad", 0xE3: "vpavgw",
+    0xE4: "vpmulhuw", 0xE5: "vpmulhw", 0xE8: "vpsubsb", 0xE9: "vpsubsw", 0xEA: "vpminsw", 0xEC: "vpaddsb", 0xED: "vpaddsw",
+    0xEE: "vpmaxsw", 0xF1: "vpsllw", 0xF2: "vpslld", 0xF3: "vpsllq", 0xF4: "vpmuludq", 0xF5: "vpmaddwd", 0xF6: "vpsadbw",
+    0xF8: "vpsubb", 0xF9: "vpsubw", 0xFA: "vpsubd", 0xFB: "vpsubq", 0xFC: "vpaddb", 0xFD: "vpaddw", 0xFE: "vpaddd",
+};
+const SSSE3 = { 0x00: "vpshufb", 0x01: "vphaddw", 0x02: "vphaddd", 0x03: "vphaddsw", 0x04: "vpmaddubsw", 0x05: "vphsubw",
+    0x06: "vphsubd", 0x07: "vphsubsw", 0x08: "vpsignb", 0x09: "vpsignw", 0x0A: "vpsignd", 0x0B: "vpmulhrsw" };
+const SSE4 = { 0x28: "vpmuldq", 0x29: "vpcmpeqq", 0x2B: "vpackusdw", 0x37: "vpcmpgtq", 0x38: "vpminsb", 0x39: "vpminsd",
+    0x3A: "vpminuw", 0x3B: "vpminud", 0x3C: "vpmaxsb", 0x3D: "vpmaxsd", 0x3E: "vpmaxuw", 0x3F: "vpmaxud", 0x40: "vpmulld" };
+const EXTEND = ["bw", "bd", "bq", "wd", "wq", "dq"];
 
 /**
  * The forms: name, map (1: 0F, 2: 0F38, 3: 0F3A; 1 if absent), pp (0, 1:
@@ -38,6 +64,14 @@ const signs = bits => v => join(lanes(v, bits).map(l => l >> BigInt(bits - 1)), 
  *   gpr_store  VMOVD/VMOVQ r/m, xmm: m = d's low dword or quadword
  *   zero_upper VZEROUPPER
  *   ldmxcsr, stmxcsr, maskmov (VMASKMOVDQU: [rDI] = d's bytes the r/m register selects)
+ *   load_imm, binary_imm   load and binary with imm8 (f's last argument)
+ *   shift_imm  v = f(m register, imm8): VEX.vvvv is the destination
+ *   ptest      the flags of d and m
+ *   extract    m (a general-purpose register, or memory) = d's element imm8 of `size` bytes
+ *   insert     d = v with element imm8 of `size` bytes from m (a general-purpose register's low bytes, or memory)
+ *   insertps   d = v with m's dword imm8[7:6] (or the m32) in dword imm8[5:4], dwords imm8[3:0] zeroed
+ *   blendv     d = v's or m's bytes, as the sign of the register imm8[7:4]'s bytes selects
+ *   pcmpstr    PCMPxSTRx of d and m: ECX (the index) or XMM0 (the mask), and the flags
  */
 export const FORMS = [
     // full-width loads and stores
@@ -89,19 +123,63 @@ export const FORMS = [
     { name: "vldmxcsr", pp: 0, op: 0xAE, group: 2, kind: "ldmxcsr", memory: true, bytes: 4 },
     { name: "vstmxcsr", pp: 0, op: 0xAE, group: 3, kind: "stmxcsr", memory: true, bytes: 4 },
     { name: "vmaskmovdqu", pp: 1, op: 0xF7, kind: "maskmov", register: true },
+
+    // P5 part 2: the integer forms
+    ...Object.entries(PACKED).map(([op, name]) => ({ name, pp: 1, op: +op, kind: "binary",
+        f: (a, b) => from_words(packed(0x660F00 | +op, words(a), words(b))) })),
+    ...[[0x71, 2, "vpsrlw"], [0x71, 4, "vpsraw"], [0x71, 6, "vpsllw"], [0x72, 2, "vpsrld"], [0x72, 4, "vpsrad"], [0x72, 6, "vpslld"],
+        [0x73, 2, "vpsrlq"], [0x73, 3, "vpsrldq"], [0x73, 6, "vpsllq"], [0x73, 7, "vpslldq"]].map(([op, group, name]) =>
+        ({ name, pp: 1, op, group, kind: "shift_imm", register: true, f: (v, imm8) => from_words(packedImmediate(0x660F00 | op, group, imm8, words(v))) })),
+    ...[[1, 0x660F70, "vpshufd"], [2, 0xF30F70, "vpshufhw"], [3, 0xF20F70, "vpshuflw"]].map(([pp, key, name]) =>
+        ({ name, pp, op: 0x70, kind: "load_imm", f: (v, imm8) => from_words(shuffle(key, imm8, [0, 0, 0, 0], words(v))) })),
+    ...[[0, 0x0FC6, "vshufps"], [1, 0x660FC6, "vshufpd"]].map(([pp, key, name]) =>
+        ({ name, pp, op: 0xC6, kind: "binary_imm", f: (a, b, imm8) => from_words(shuffle(key, imm8, words(a), words(b))) })),
+    { name: "vpinsrw", pp: 1, op: 0xC4, kind: "insert", size: 2, w: 0, wig32: true },
+    { name: "vpinsrw", pp: 1, op: 0xC4, kind: "insert", size: 2, w: 1, long: true },
+    { name: "vpextrw", pp: 1, op: 0xC5, kind: "to_gpr", register: true, w: 0, wig32: true, imm: true },
+    { name: "vpextrw", pp: 1, op: 0xC5, kind: "to_gpr", register: true, w: 1, long: true, imm: true },
+    ...Object.entries(SSSE3).map(([op, name]) => ({ name, map: 2, pp: 1, op: +op, kind: "binary", f: (a, b) => big(ssse3(+op, le(a), le(b))) })),
+    ...[[0x1C, "vpabsb"], [0x1D, "vpabsw"], [0x1E, "vpabsd"]].map(([op, name]) =>
+        ({ name, map: 2, pp: 1, op, kind: "load", f: v => big(ssse3(op, ZERO, le(v))) })),
+    { name: "vpalignr", map: 3, pp: 1, op: 0x0F, kind: "binary_imm", f: (a, b, imm8) => big(ssse3(0x0F, le(a), le(b), imm8)) },
+    { name: "vptest", map: 2, pp: 1, op: 0x17, kind: "ptest" },
+    ...EXTEND.flatMap((suffix, i) => [[0x20 + i, "vpmovsx" + suffix], [0x30 + i, "vpmovzx" + suffix]]).map(([op, name]) =>
+        ({ name, map: 2, pp: 1, op, kind: "load", bytes: [8, 4, 2, 8, 4, 8][op & 7], f: v => big(sse4_38(op, ZERO, le(v), ZERO)) })),
+    ...Object.entries(SSE4).map(([op, name]) => ({ name, map: 2, pp: 1, op: +op, kind: "binary", f: (a, b) => big(sse4_38(+op, le(a), le(b), ZERO)) })),
+    { name: "vphminposuw", map: 2, pp: 1, op: 0x41, kind: "load", f: v => big(sse4_38(0x41, ZERO, le(v), ZERO)) },
+    ...[[0x0C, "vblendps"], [0x0D, "vblendpd"], [0x0E, "vpblendw"], [0x42, "vmpsadbw"]].map(([op, name]) =>
+        ({ name, map: 3, pp: 1, op, kind: "binary_imm", f: (a, b, imm8) => big(sse4_3a(op, le(a), le(b), imm8)) })),
+    // (W1: a 64-bit general-purpose register, and VPEXTRQ/VPINSRQ, in 64-bit mode)
+    ...[[0x14, 1, "vpextrb"], [0x15, 2, "vpextrw"], [0x16, 4, "vpextrd"], [0x17, 4, "vextractps"]].flatMap(([op, size, name]) => [
+        { name, map: 3, pp: 1, op, kind: "extract", size, w: 0, wig32: true },
+        { name: op === 0x16 ? "vpextrq" : name, map: 3, pp: 1, op, kind: "extract", size: op === 0x16 ? 8 : size, w: 1, long: true },
+    ]),
+    ...[[0x20, 1, "vpinsrb"], [0x22, 4, "vpinsrd"]].flatMap(([op, size, name]) => [
+        { name, map: 3, pp: 1, op, kind: "insert", size, w: 0, wig32: true },
+        { name: op === 0x22 ? "vpinsrq" : name, map: 3, pp: 1, op, kind: "insert", size: op === 0x22 ? 8 : size, w: 1, long: true },
+    ]),
+    { name: "vinsertps", map: 3, pp: 1, op: 0x21, kind: "insertps" },
+    { name: "vpblendvb", map: 3, pp: 1, op: 0x4C, kind: "blendv", w: 0 },
+    ...[[0x60, "vpcmpestrm"], [0x61, "vpcmpestri"]].flatMap(([op, name]) => [
+        { name, map: 3, pp: 1, op, kind: "pcmpstr", w: 0, wig32: true },
+        { name: name + "64", map: 3, pp: 1, op, kind: "pcmpstr", w: 1, long: true },
+    ]),
+    { name: "vpcmpistrm", map: 3, pp: 1, op: 0x62, kind: "pcmpstr" }, { name: "vpcmpistri", map: 3, pp: 1, op: 0x63, kind: "pcmpstr" },
 ];
 
 /** The memory operand's size of form `f` */
-export const memory_bytes = f => f.bytes ?? (["store64", "low", "high"].includes(f.kind) ? 8 : f.kind === "gpr_load" || f.kind === "gpr_store" ? (f.w ? 8 : 4) : 16);
+export const memory_bytes = f => f.bytes ?? f.size ?? (["store64", "low", "high"].includes(f.kind) ? 8 :
+    f.kind === "gpr_load" || f.kind === "gpr_store" ? (f.w ? 8 : 4) : f.kind === "insertps" ? 4 : 16);
 
 /**
  * Executes form `f` on `s`: x[r] and h[r], XMM r and bits 255:128 of YMM r
- * (BigInts), mxcsr; s.load(bytes) and s.store(bytes, value) access the
- * memory operand, s.masked(value, selected) VMASKMOVDQU's, s.gpr(r) and
- * s.set_gpr(r, value, bits) the general-purpose registers. `o`: d, v (VEX.vvvv),
- * m (the r/m register; undefined for memory), `long` (64-bit mode).
+ * (BigInts), mxcsr, flags (OF, SF, ZF, AF, PF, CF, for the forms that set
+ * them); s.load(bytes) and s.store(bytes, value) access the memory operand,
+ * s.masked(value, selected) VMASKMOVDQU's, s.gpr(r) and s.set_gpr(r, value,
+ * bits) the general-purpose registers. `o`: d, v (VEX.vvvv), m (the r/m
+ * register; undefined for memory), imm8, `long` (64-bit mode).
  */
-export function execute(f, s, { d, v, m, long })
+export function execute(f, s, { d, v, m, imm8, long })
 {
     const memory = m === undefined;
     const source = bytes => memory ? s.load(bytes) : s.x[m];
@@ -133,8 +211,8 @@ export function execute(f, s, { d, v, m, long })
         case "low": write(d, s.x[v] & ~LOW | (memory ? s.load(8) : s.x[m] >> 64n)); break;
         case "high": write(d, s.x[v] & LOW | (memory ? s.load(8) : s.x[m] & LOW) << 64n); break;
         case "store64": s.store(8, f.op === 0x13 ? s.x[d] & LOW : s.x[d] >> 64n); break;
-        // (the general-purpose register: ModRM.reg, d here)
-        case "to_gpr": s.set_gpr(d, f.f(s.x[m]), long && f.w === 1 ? 64 : 32); break;
+        // (the general-purpose register: ModRM.reg, d here; VPEXTRW: word imm8[2:0])
+        case "to_gpr": s.set_gpr(d, f.imm ? extract(le(s.x[m]), 2, imm8) : f.f(s.x[m]), long && f.w === 1 ? 64 : 32); break;
         case "gpr_load":
         {
             const bits = long && f.w === 1 ? 64 : 32;
@@ -155,6 +233,47 @@ export function execute(f, s, { d, v, m, long })
         {
             const selected = le(s.x[m]).map(b => b >> 7);
             s.masked(s.x[d], selected);
+            break;
+        }
+        case "load_imm": write(d, f.f(source(16), imm8)); break;
+        case "binary_imm": write(d, f.f(s.x[v], source(16), imm8)); break;
+        case "shift_imm": write(v, f.f(s.x[m], imm8)); break;
+        case "ptest":
+        {
+            const { zf, cf } = ptest(le(s.x[d]), le(source(16)));
+            s.flags = (zf ? 0x40 : 0) | (cf ? 1 : 0);
+            break;
+        }
+        case "extract":
+        {
+            const value = extract(le(s.x[d]), f.size, imm8);
+            if(memory) s.store(f.size, value);
+            else s.set_gpr(m, value, long && f.w === 1 ? 64 : 32);
+            break;
+        }
+        case "insert":
+        {
+            const value = memory ? s.load(f.size) : s.gpr(m) & mask(8 * f.size);
+            write(d, big(insert(le(s.x[v]), f.size, value, imm8)));
+            break;
+        }
+        case "insertps":
+        {
+            const value = memory ? s.load(4) : s.x[m] >> BigInt(32 * (imm8 >> 6)) & mask(32);
+            write(d, big(insertps(le(s.x[v]), value, imm8)));
+            break;
+        }
+        case "blendv": write(d, big(sse4_38(0x10, le(s.x[v]), le(source(16)), le(s.x[imm8 >> 4 & (long ? 15 : 7)])))); break;
+        case "pcmpstr":
+        {
+            // (the explicit lengths: EAX and EDX, or RAX and RDX with VEX.W1, signed)
+            const bits = long && f.w === 1 ? 64 : 32;
+            const length = r => BigInt.asIntN(bits, s.gpr(r));
+            const explicit = f.op < 0x62;
+            const r = compare_strings(imm8, le(s.x[d]), le(source(16)), explicit ? length(0) : undefined, explicit ? length(2) : undefined);
+            if(f.op & 1) s.set_gpr(1, BigInt(r.index), 32);
+            else write(0, big(r.mask));
+            s.flags = (r.cf ? 1 : 0) | (r.zf ? 0x40 : 0) | (r.sf ? 0x80 : 0) | (r.of ? 0x800 : 0);
             break;
         }
         default: throw new Error(`kind ${f.kind}`);

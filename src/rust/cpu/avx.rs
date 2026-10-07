@@ -16,7 +16,8 @@
 //! the operands may be the same register.
 use crate::cpu::cpu::{self, reg128, CR0_TS, CR4_OSXSAVE, MXCSR_MASK};
 use crate::cpu::global_pointers as gp;
-use crate::ir::simd::{PackedOp, TransferOp};
+use crate::cpu::simd_int;
+use crate::ir::simd::{PackedOp, ShuffleOp, TransferOp};
 
 /// A decoded VEX instruction
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +121,12 @@ unsafe fn source<M: Machine>(
 fn packed(op: PackedOp, a: u128, b: u128) -> u128 {
     u128::from_le_bytes(op.apply(a.to_le_bytes(), b.to_le_bytes()))
 }
+/// A function of byte vectors on 128-bit values
+fn bytes(f: impl FnOnce([u8; 16]) -> [u8; 16], v: u128) -> u128 {
+    u128::from_le_bytes(f(v.to_le_bytes()))
+}
+/// The low `bytes` bytes
+fn low(bytes: u32) -> u128 { u128::MAX >> (128 - 8 * bytes) }
 /// The sign bits of `v`'s lanes of `lane` bytes
 fn sign_mask(v: u128, lane: u32) -> u64 {
     (0..16 / lane).fold(0, |mask, n| {
@@ -196,12 +203,206 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
             );
         },
         // VUNPCKLPS, VUNPCKLPD, VUNPCKHPS, VUNPCKHPD; VANDPS, VANDPD,
-        // VANDNPS, VANDNPD, VORPS, VORPD, VXORPS, VXORPD; VPAND, VPANDN,
-        // VPOR, VPXOR
-        (1, 0 | 1, 0x14 | 0x15 | 0x54..=0x57) | (1, 1, 0xDB | 0xDF | 0xEB | 0xEF) => {
+        // VANDNPS, VANDNPD, VORPS, VORPD, VXORPS, VXORPD; the packed integer
+        // operations of 66 0F: unpacks, packs, compares, shifts by xmm/m128
+        // (the count in its low quadword), arithmetic and logic
+        (1, 0 | 1, 0x14 | 0x15 | 0x54..=0x57)
+        | (
+            1,
+            1,
+            0x60..=0x6D
+            | 0x74..=0x76
+            | 0xD1..=0xD5
+            | 0xD8..=0xDF
+            | 0xE0..=0xE5
+            | 0xE8..=0xEF
+            | 0xF1..=0xF6
+            | 0xF8..=0xFE,
+        ) => {
             let b = source(m, i, 16, false)?;
             let p = PackedOp::from_encoding(legacy(i.key)).unwrap();
             set_xmm(i.reg, packed(p, xmm(i.vvvv), b));
+        },
+        // VPSRLW/VPSRAW/VPSLLW, VPSRLD/VPSRAD/VPSLLD, VPSRLQ/VPSRLDQ/VPSLLQ/
+        // VPSLLDQ by imm8: VEX.vvvv is the destination, the r/m register the
+        // source
+        (1, 1, 0x71..=0x73) => {
+            let (v, count) = (xmm(i.rm.unwrap()), i.imm8 as u32);
+            let r = match (op, i.reg & 7) {
+                (0x73, 3) => {
+                    if count < 16 {
+                        v >> (8 * count)
+                    }
+                    else {
+                        0
+                    }
+                },
+                (0x73, 7) => {
+                    if count < 16 {
+                        v << (8 * count)
+                    }
+                    else {
+                        0
+                    }
+                },
+                (_, group) => {
+                    let id = [0xD1, 0xE1, 0xF1][(group / 2 - 1) as usize] + (op as u32 - 0x71);
+                    packed(PackedOp::from_id(id).unwrap(), v, count as u128)
+                },
+            };
+            set_xmm(i.vvvv, r);
+        },
+        // VSHUFPS, VSHUFPD: the low lanes from the first source, the high
+        // ones from the second, as imm8 selects
+        (1, 0 | 1, 0xC6) => {
+            let b = source(m, i, 16, false)?;
+            let shuffle = ShuffleOp::from_encoding(legacy(i.key)).unwrap();
+            let a = xmm(i.vvvv).to_le_bytes();
+            set_xmm(i.reg, bytes(|b| shuffle.apply(a, b, i.imm8), b));
+        },
+        // VPSHUFD, VPSHUFHW, VPSHUFLW: the source's lanes as imm8 selects
+        (1, 1..=3, 0x70) => {
+            let v = source(m, i, 16, false)?;
+            let shuffle = ShuffleOp::from_encoding(legacy(i.key)).unwrap();
+            set_xmm(i.reg, bytes(|v| shuffle.apply([0; 16], v, i.imm8), v));
+        },
+        // VPINSRW: a general-purpose register's low word or an m16 into the
+        // first source's word imm8[2:0]
+        (1, 1, 0xC4) => {
+            let value = match i.rm {
+                Some(r) => m.gpr(r) as u128 & 0xFFFF,
+                None => m.read(2, false)?,
+            };
+            let at = (i.imm8 as u32 & 7) * 16;
+            set_xmm(i.reg, xmm(i.vvvv) & !(0xFFFF << at) | value << at);
+        },
+        // VPEXTRW (C5): word imm8[2:0] to a general-purpose register
+        (1, 1, 0xC5) => {
+            let v = xmm(i.rm.unwrap()) >> ((i.imm8 as u32 & 7) * 16) & 0xFFFF;
+            m.set_gpr(i.reg, v as u64, wide);
+        },
+        // SSSE3: VPSHUFB, VPHADDW/D/SW, VPMADDUBSW, VPHSUBW/D/SW,
+        // VPSIGNB/W/D, VPMULHRSW; VPABSB/W/D (of the source alone)
+        (2, 1, 0x00..=0x0B | 0x1C..=0x1E) => {
+            let b = source(m, i, 16, false)?;
+            let a = xmm(i.vvvv).to_le_bytes();
+            set_xmm(i.reg, bytes(|b| simd_int::ssse3(op, a, b), b));
+        },
+        // VPTEST: ZF and CF
+        (2, 1, 0x17) => {
+            let b = source(m, i, 16, false)?;
+            let (zf, cf) = simd_int::ptest(xmm(i.reg).to_le_bytes(), b.to_le_bytes());
+            m.set_flags((zf as u32) << 6 | cf as u32);
+        },
+        // VPMOVSX*, VPMOVZX*: the source's low lanes extended (from memory,
+        // those bytes only)
+        (2, 1, 0x20..=0x25 | 0x30..=0x35) => {
+            let b = source(m, i, [8, 4, 2, 8, 4, 8][(op & 7) as usize], false)?;
+            set_xmm(i.reg, bytes(|b| simd_int::sse4(op, [0; 16], b, [0; 16]), b));
+        },
+        // VPMULDQ, VPCMPEQQ, VPACKUSDW, VPCMPGTQ, VPMINSB/SD/UW/UD,
+        // VPMAXSB/SD/UW/UD, VPMULLD; VPHMINPOSUW (of the source alone)
+        (2, 1, 0x28 | 0x29 | 0x2B | 0x37..=0x41) => {
+            let b = source(m, i, 16, false)?;
+            let a = xmm(i.vvvv).to_le_bytes();
+            set_xmm(i.reg, bytes(|b| simd_int::sse4(op, a, b, [0; 16]), b));
+        },
+        // VBLENDPS, VBLENDPD, VPBLENDW, VMPSADBW
+        (3, 1, 0x0C..=0x0E | 0x42) => {
+            let b = source(m, i, 16, false)?;
+            let a = xmm(i.vvvv).to_le_bytes();
+            set_xmm(i.reg, bytes(|b| simd_int::sse4_imm(op, a, b, i.imm8), b));
+        },
+        // VPALIGNR
+        (3, 1, 0x0F) => {
+            let b = source(m, i, 16, false)?;
+            let a = xmm(i.vvvv).to_le_bytes();
+            set_xmm(i.reg, bytes(|b| simd_int::palignr(a, b, i.imm8), b));
+        },
+        // VPEXTRB, VPEXTRW, VPEXTRD/VPEXTRQ, VEXTRACTPS: an element to a
+        // general-purpose register (zero-extended) or memory
+        (3, 1, 0x14..=0x17) => {
+            let size = match op {
+                0x14 => 1,
+                0x15 => 2,
+                0x16 if wide => 8,
+                _ => 4,
+            };
+            let v = xmm(i.reg) >> ((i.imm8 as u32 & (16 / size - 1)) * size * 8) & low(size);
+            match i.rm {
+                Some(r) => m.set_gpr(r, v as u64, wide),
+                None => m.write(size as u8, v, false)?,
+            }
+        },
+        // VPINSRB, VPINSRD/VPINSRQ: a general-purpose register's low bytes or
+        // memory into the first source's element imm8
+        (3, 1, 0x20 | 0x22) => {
+            let size = if op == 0x20 {
+                1
+            }
+            else if wide {
+                8
+            }
+            else {
+                4
+            };
+            let value = match i.rm {
+                Some(r) => m.gpr(r) as u128 & low(size),
+                None => m.read(size as u8, false)?,
+            };
+            let at = (i.imm8 as u32 & (16 / size - 1)) * size * 8;
+            set_xmm(i.reg, xmm(i.vvvv) & !(low(size) << at) | value << at);
+        },
+        // VINSERTPS: the source register's dword imm8[7:6], or the m32
+        (3, 1, 0x21) => {
+            let value = match i.rm {
+                Some(r) => (xmm(r) >> ((i.imm8 >> 6) * 32)) as u32,
+                None => m.read(4, false)? as u32,
+            };
+            let a = xmm(i.vvvv).to_le_bytes();
+            set_xmm(
+                i.reg,
+                u128::from_le_bytes(simd_int::insertps(a, value, i.imm8)),
+            );
+        },
+        // VPBLENDVB: the mask register is imm8[7:4] (bit 7 ignored outside
+        // 64-bit mode)
+        (3, 1, 0x4C) => {
+            let b = source(m, i, 16, false)?;
+            let selector = xmm(i.imm8 >> 4 & if i.long { 15 } else { 7 }).to_le_bytes();
+            let a = xmm(i.vvvv).to_le_bytes();
+            set_xmm(i.reg, bytes(|b| simd_int::sse4(0x10, a, b, selector), b));
+        },
+        // VPCMPESTRM, VPCMPESTRI, VPCMPISTRM, VPCMPISTRI: the explicit
+        // lengths in EAX and EDX (RAX and RDX with VEX.W1 in 64-bit mode); the
+        // index to ECX (zero-extended) or the mask to XMM0
+        (3, 1, 0x60..=0x63) => {
+            let b = source(m, i, 16, false)?;
+            let length = |m: &mut M, r| {
+                let v = m.gpr(r);
+                if wide {
+                    v as i64
+                }
+                else {
+                    v as i32 as i64
+                }
+            };
+            let (la, lb) =
+                if op < 0x62 { (Some(length(m, 0)), Some(length(m, 2))) } else { (None, None) };
+            let r = simd_int::compare_strings(
+                i.imm8,
+                xmm(i.reg).to_le_bytes(),
+                b.to_le_bytes(),
+                la,
+                lb,
+            );
+            if op & 1 != 0 {
+                m.set_gpr(1, r.index as u64, false);
+            }
+            else {
+                set_xmm(0, u128::from_le_bytes(r.xmm0));
+            }
+            m.set_flags(r.flags as u32);
         },
         // VMOVMSKPS, VMOVMSKPD, VPMOVMSKB: the lanes' sign bits
         (1, 0 | 1, 0x50) | (1, 1, 0xD7) => {

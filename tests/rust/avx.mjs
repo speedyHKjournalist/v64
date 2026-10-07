@@ -87,14 +87,17 @@ function initial(n, c)
         mxcsr: mxcsr_of(n),
         src: c.source || SOURCES.subarray(n * SPAN, (n + 1) * SPAN),
         dest: Uint8Array.from(c.destination || DESTINATIONS.subarray(n * SPAN, (n + 1) * SPAN)),
-        out: new Uint8Array(16),
+        out: Uint8Array.from(c.out_before || new Uint8Array(16)),
     };
     const at = c.at ?? 0;
     s.load = size => big(s.src.subarray(at, at + size));
     s.store = (size, v) => s.dest.set(le(v, size), at);
     s.masked = (value, selected) => le(value).forEach((b, i) => { if(selected[i]) s.dest[at + i] = b; });
-    s.gpr = () => BigInt(c.gpr);
+    s.gpr = r => BigInt(c.gpr_values?.[r] ?? c.gpr);
+    // (ECX of VPCMPESTRI/VPCMPISTRI and the general-purpose destinations: out[0..4])
     s.set_gpr = (r, value) => s.out.set(le(value & mask(32), 4));
+    // (the flags: out[4..8], those that set them)
+    Object.defineProperty(s, "flags", { set: value => s.out.set(le(BigInt(value), 4), 4) });
     return s;
 }
 /** Case `n`'s XRSTOR area: MXCSR, XMM0-7 and YMM_Hi128 0-7 in use */
@@ -125,7 +128,7 @@ async function run(vm, program, warm, interpreter, label, until = () => true)
     while(word(vm, 0x600) !== 0xCAFE || warm && !interpreter && (compiled_activations(e) === start || !until(vm)))
     {
         assert(performance.now() < deadline, `program/JIT timeout (${label}: ${program.length} bytes, done ${word(vm, 0x600) === 0xCAFE}, ` +
-            `compiled ${compiled_activations(e) - start}, ${until(vm) ? "" : "not "}ready)`);
+            `compiled ${compiled_activations(e) - start}, ${until(vm) ? "" : "not "}ready, last fault ${word(vm, FAULT)} at ${word(vm, FAULT + 4).toString(16)})`);
         await sleep(1);
     }
     if(warm) await sleep(20);
@@ -318,8 +321,16 @@ async function expect_fault(setup, faulting, vector, { epilogue = [], before = (
 }
 const word_of = (a, at) => new DataView(a.buffer, a.byteOffset).getUint32(at, true);
 
-// the kinds of forms (avx_model.mjs) whose memory operand is a destination
-const STORES = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr"];
+// the kinds of forms (avx_model.mjs) whose memory operand is a destination,
+// and those with VEX.vvvv
+const STORES = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract"];
+const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "shift_imm"];
+// flags before an instruction that sets them: OF, SF, AF (0x7F + 1) and CF (STC)
+const FLAGS_BEFORE = [0xB0, 0x7F, 0x04, 0x01, 0xF9];
+/** EFLAGS' OSZAPC to `a` (EAX changes) */
+const store_flags = a => [0x9C, 0x58, 0x25, ...u32(0x8D5), 0xA3, ...u32(a)];
+// explicit lengths of VPCMPESTRx (EAX, EDX): within, beyond, negative, the extremes
+const LENGTHS = [0, 1, 3, 7, 8, 9, 15, 16, 17, -1, -5, -16, -17, 0x7FFFFFFF, -0x80000000];
 /** Case `n` of form `f`: registers that alias in every combination, the
  * memory operand from n/2 on (unaligned but for the aligned moves), the
  * general-purpose registers set before and stored after */
@@ -328,13 +339,16 @@ function form_case(f, n)
     const [d, v, m] = regs(n);
     const memory = f.memory || !f.register && n >= CASES / 2;
     const at = f.aligned ? 16 * (n & 1) : n % 17;
-    const vvvv = ["binary", "low", "high"].includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !memory ? v : 0;
+    // (the immediate shifts: VEX.vvvv is the destination)
+    const vvvv = f.kind === "shift_imm" ? d : VVVV.includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !memory ? v : 0;
+    // (every imm8 in turn over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored)
+    const imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
     const store = STORES.includes(f.kind);
     const address = memory ? (store ? DEST : SOURCE) + n * SPAN + at : undefined;
     const r = GPRS[n % 7];
     const c = { n, at, pre: [], post: [] };
     let [reg, rm] = [d, m];
-    const o = { d, v, m: memory ? undefined : m, long: false };
+    const o = { d, v: f.kind === "shift_imm" ? d : v, m: memory ? undefined : m, imm8, long: false };
     switch(f.kind)
     {
         case "to_gpr":
@@ -342,6 +356,30 @@ function form_case(f, n)
             c.pre = mov_r32(r, 0xDEADBEEF);
             c.post = store_r32(r, OUT + n * 16);
             break;
+        case "shift_imm": reg = f.group; break;
+        case "extract": case "insert":
+            rm = r;
+            if(memory) break;
+            o.m = r;
+            c.gpr = gpr_of(n);
+            c.pre = mov_r32(r, f.kind === "insert" ? c.gpr : 0xDEADBEEF);
+            if(f.kind === "extract") c.post = store_r32(r, OUT + n * 16);
+            break;
+        case "ptest":
+            c.pre = FLAGS_BEFORE;
+            c.post = store_flags(OUT + n * 16 + 4);
+            break;
+        case "pcmpstr":
+        {
+            // (EAX and EDX: the explicit lengths; ECX ones; the flags set)
+            const [la, lb] = [LENGTHS[n % LENGTHS.length], LENGTHS[(n * 7 + 3) % LENGTHS.length]];
+            c.gpr_values = { 0: la >>> 0, 2: lb >>> 0 };
+            // (VPCMPxSTRM leave ECX)
+            c.out_before = Uint8Array.of(255, 255, 255, 255, ...new Array(12).fill(0));
+            c.pre = [...FLAGS_BEFORE, ...mov_r32(0, la >>> 0), ...mov_r32(2, lb >>> 0), ...mov_r32(1, -1 >>> 0)];
+            c.post = [...store_r32(1, OUT + n * 16), ...store_flags(OUT + n * 16 + 4)];
+            break;
+        }
         case "gpr_load": case "gpr_store":
             rm = r;
             if(memory) break;
@@ -362,7 +400,8 @@ function form_case(f, n)
     }
     // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode)
     const fields = { map: f.map || 1, pp: f.pp, w: f.w === undefined || f.wig32 ? n & 1 : f.w, l: f.lig ? n >> 2 & 1 : 0, three: !!(n & 2), vvvv };
-    c.code = f.kind === "zero_upper" ? vex(fields, f.op) : vex(fields, f.op, reg, rm, address);
+    const immediate = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr"].includes(f.kind) || f.imm ? imm8 : undefined;
+    c.code = f.kind === "zero_upper" ? vex(fields, f.op) : vex(fields, f.op, reg, rm, address, immediate);
     c.model = s => execute(f, s, o);
     return c;
 }
@@ -445,7 +484,9 @@ try
     ]);
     // narrow operands at the end of a page: no access beyond them
     const form = (pp, op, kind) => FORMS.find(f => f.pp === pp && f.op === op && f.kind === kind && (f.map || 1) === 1);
-    for(const [label, f, d, v] of [
+    // (the form of a name, not one of the 64-bit mode's)
+    const named = (name, kind) => FORMS.find(f => f.name === name && !f.long && (kind === undefined || f.kind === kind));
+    for(const [label, f, d, v, imm8] of [
         ["vmovss xmm1, [m32]", form(2, 0x10, "scalar"), 1], ["vmovsd xmm2, [m64]", form(3, 0x10, "scalar"), 2],
         ["vmovlps xmm3, xmm4, [m64]", form(0, 0x12, "low"), 3, 4], ["vmovhpd xmm5, xmm6, [m64]", form(1, 0x16, "high"), 5, 6],
         ["vmovddup xmm7, [m64]", form(3, 0x12, "load"), 7], ["vmovq xmm0, [m64]", form(2, 0x7E, "load"), 0],
@@ -453,14 +494,17 @@ try
         ["vmovss [m32], xmm1", form(2, 0x11, "scalar_st"), 1], ["vmovhps [m64], xmm2", form(0, 0x17, "store64"), 2],
         ["vmovq [m64], xmm3", form(1, 0xD6, "store"), 3], ["vstmxcsr [m32]", form(0, 0xAE, "stmxcsr"), 3],
         ["vmovd [m32], xmm4", form(1, 0x7E, "gpr_store"), 4],
+        ["vpmovsxbq xmm1, [m16]", named("vpmovsxbq"), 1], ["vpmovzxdq xmm7, [m64]", named("vpmovzxdq"), 7],
+        ["vpinsrb xmm2, xmm3, [m8], 1", named("vpinsrb"), 2, 3, 1], ["vinsertps xmm5, xmm6, [m32], 0x10", named("vinsertps"), 5, 6, 0x10],
+        ["vpextrb [m8], xmm4, 2", named("vpextrb"), 4, undefined, 2], ["vpextrw [m16], xmm3, 5", named("vpextrw", "extract"), 3, undefined, 5],
     ])
     {
         const at = SPAN - memory_bytes(f), store = STORES.includes(f.kind);
         // (VLDMXCSR: a valid value)
         const source = Uint8Array.from(SOURCES.subarray(0, SPAN));
         if(f.kind === "ldmxcsr") source.set(u32(0x7F80), at);
-        const c = { n: 0, at, source, code: vex({ pp: f.pp, vvvv: v ?? 0 }, f.op, d, undefined, ABSENT - SPAN + at),
-            model: s => execute(f, s, { d, v, long: false }) };
+        const c = { n: 0, at, source, code: vex({ map: f.map || 1, pp: f.pp, vvvv: v ?? 0 }, f.op, d, undefined, ABSENT - SPAN + at, imm8),
+            model: s => execute(f, s, { d, v, imm8, long: false }) };
         await check_cases(label + " at a page end", [{ ...c, [store ? "destination_at" : "source_at"]: ABSENT - SPAN }], { before: vm => pages(vm, ABSENT, false) });
     }
     for(const vm of machines) pages(vm, ABSENT, true);
@@ -497,6 +541,10 @@ try
         await expect_fault([], vex({ l: 1 }, 0xAE, 2, undefined, SOURCE), 6, { label: "vldmxcsr with VEX.L1" });
         await expect_fault([], vex({ pp: 0, vvvv: 3 }, 0x28, 1, 2), 6, { label: "vmovaps with VEX.vvvv 3" });
         await expect_fault([], vex({ three: true, vvvv: 1 }, 0x77), 6, { label: "vzeroupper with VEX.vvvv 1" });
+        await expect_fault([], vex({ map: 3, pp: 1, w: 1, vvvv: 2 }, 0x4C, 1, 3, undefined, 0x40), 6, { label: "vpblendvb with VEX.W1" });
+        await expect_fault([], vex({ pp: 1, vvvv: 2 }, 0x73, 3, undefined, SOURCE, 3), 6, { label: "vpsrldq with a memory operand" });
+        await expect_fault([], vex({ pp: 1 }, 0xC5, 1, undefined, SOURCE, 1), 6, { label: "vpextrw (C5) with a memory operand" });
+        await expect_fault([], vex({ pp: 1, vvvv: 3 }, 0x70, 1, 2, undefined, 0x1B), 6, { label: "vpshufd with VEX.vvvv 3" });
         await expect_fault([], vex({}, 0xAE, 2, undefined, SOURCE + 4), 13, { error_code: 0, before: vm => vm.write_memory(Uint8Array.from(u32(0x10000)), SOURCE + 4), label: "vldmxcsr with a reserved bit" });
     }
     // #PF: a load from and a store to an absent page, nothing written; the
@@ -511,7 +559,7 @@ try
         await expect_fault(mov_r32(7, ABSENT - 8), vex({ pp: 1 }, 0xF7, 1, 2), 14, { before: absent, cr2: ABSENT, error_code: 2, memory, label: "vmaskmovdqu across into an absent page" });
         for(const vm of machines) pages(vm, ABSENT, true);
     }
-    console.log("PASS: #GP(0) for misaligned aligned moves and VLDMXCSR's reserved bits, #UD for VEX.L1 and VEX.vvvv where invalid, #PF without effect");
+    console.log("PASS: #GP(0) for misaligned aligned moves and VLDMXCSR's reserved bits, #UD for VEX.L1, VEX.W1, VEX.vvvv and memory operands where invalid, #PF without effect");
     console.log(`PASS: ${checks} AVX checks on 3 arms`);
 }
 finally
