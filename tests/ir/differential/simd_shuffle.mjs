@@ -7,7 +7,7 @@ const cases=JSON.parse(fs.readFileSync("build/ir-simd-shuffle/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-simd-shuffle/${i}-${opt}.wasm`))));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 for(const release of [false,true]){
- const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+ const vm=new V86({graphics_adapter: "bochs_vga", wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false,cpu_features:["SSSE3","SSE4.1","SSE4.2"]});
  try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8,words=new Uint32Array(e.memory.buffer),xmm=new Uint32Array(e.memory.buffer,832,32);
     const v=new DataView(mem.buffer,mem.byteOffset),set32=(a,n)=>v.setUint32(a,n,true),get32=a=>v.getUint32(a,true);

@@ -297,14 +297,13 @@ pub fn xmm_register_operands(
             | 0x660F381C..=0x660F381E
             | 0x660F3A0F
             // SSE4.1/SSE4.2 between two XMM registers (not BLENDV: XMM0;
-            // PTEST: FLAGS; PEXTR*/PINSR*: a GPR)
+            // PTEST: FLAGS; PEXTR*/PINSR*: a GPR; the PackedOp and ShuffleOp
+            // forms are native)
             | 0x660F3820..=0x660F3825
             | 0x660F3828
-            | 0x660F3829
-            | 0x660F382B
             | 0x660F3830..=0x660F3835
-            | 0x660F3837..=0x660F3841
-            | 0x660F3A08..=0x660F3A0E
+            | 0x660F3841
+            | 0x660F3A08..=0x660F3A0B
             | 0x660F3A21
             | 0x660F3A40..=0x660F3A42
     ) {

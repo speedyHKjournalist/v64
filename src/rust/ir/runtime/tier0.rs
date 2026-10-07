@@ -111,14 +111,19 @@ pub fn sse_fp_operands() -> u32 { (&raw const T0_SSE_FP) as u32 }
 #[no_mangle]
 pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
     use crate::cpu::simd_fp;
+    SSE_FP_CALLS[(key as usize).wrapping_mul(0x9E37_79B9) >> 24 & 255] += 1;
     let [destination, source] = T0_SSE_FP.0;
-    let result = match key as u8 {
-        0x52 | 0x53 => Ok(simd_fp::reciprocal(key, destination, source)),
-        0x2E | 0x2F => simd_fp::compare_flags(key, destination, source).map(u128::from),
-        0x2A | 0x2C | 0x2D | 0x5A | 0x5B | 0xE6 => {
-            simd_fp::convert(key, false, destination, source)
+    let result = match key {
+        // ROUNDPS/PD/SS/SD (SSE4.1)
+        0x660F3A08..=0x660F3A0B => simd_fp::round(key, destination, source, imm8 as u8),
+        _ => match key as u8 {
+            0x52 | 0x53 => Ok(simd_fp::reciprocal(key, destination, source)),
+            0x2E | 0x2F => simd_fp::compare_flags(key, destination, source).map(u128::from),
+            0x2A | 0x2C | 0x2D | 0x5A | 0x5B | 0xE6 => {
+                simd_fp::convert(key, false, destination, source)
+            },
+            _ => simd_fp::arithmetic(key, destination, source, imm8 as u8),
         },
-        _ => simd_fp::arithmetic(key, destination, source, imm8 as u8),
     };
     match result {
         Ok(result) => {
@@ -128,6 +133,41 @@ pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
         Err(simd_fp::Unmasked) => 1,
     }
 }
+
+/// PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI (`op`: the 66 0F 3A byte) with
+/// imm8 on T0_SSE_FP (destination, source), the explicit forms' lengths `a`
+/// and `b` (cpu::simd_int::compare_strings): xSTRM's mask replaces the
+/// destination; returns the index | EFLAGS (CF, ZF, SF, OF) << 8. For the
+/// templates of Tier-0 and the x64 page tier.
+pub unsafe fn pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
+    let [destination, source] = T0_SSE_FP.0;
+    let explicit = op & 2 == 0;
+    let result = crate::cpu::simd_int::compare_strings(
+        imm8 as u8,
+        destination.to_le_bytes(),
+        source.to_le_bytes(),
+        explicit.then_some(a),
+        explicit.then_some(b),
+    );
+    T0_SSE_FP.0[0] = u128::from_le_bytes(result.xmm0);
+    result.index | (result.flags as u32) << 8
+}
+#[no_mangle]
+pub unsafe fn ir_t0_pcmpstr(op: u32, imm8: u32, eax: i32, edx: i32) -> u32 {
+    pcmpstr(op, imm8, eax as i64, edx as i64)
+}
+
+/// ir_t0_sse_fp's calls by a hash of the catalogue key (a diagnostic of
+/// refused native floating point, see ir_t0_sse_fp_calls)
+static mut SSE_FP_CALLS: [u32; 256] = [0; 256];
+/// The exact-path calls of the form whose catalogue key is `key` (shared
+/// with the keys of the same hash)
+#[no_mangle]
+pub unsafe fn ir_t0_sse_fp_calls(key: u32) -> u32 {
+    SSE_FP_CALLS[(key as usize).wrapping_mul(0x9E37_79B9) >> 24 & 255]
+}
+#[no_mangle]
+pub unsafe fn ir_t0_sse_fp_calls_reset() { SSE_FP_CALLS = [0; 256]; }
 
 /// Interpreter steps by their first two instruction bytes (a diagnostic of
 /// missing templates, see tests/bench/run.mjs --fallbacks).

@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
 import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
-import { compare_strings, crc32, extract, get, insert, insertps, ptest, set, sse4_38, sse4_3a } from "./sse4_model.mjs";
+import { Fp, compare_strings, crc32, extract, get, insert, insertps, ptest, round_lane, set, sse4_38, sse4_3a } from "./sse4_model.mjs";
 
 const candidate = process.argv[2] || "build/v86.wasm";
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
@@ -103,6 +103,10 @@ const IMMEDIATE = [[0x0C, "blendps"], [0x0D, "blendpd"], [0x0E, "pblendw"], [0x2
 const EXTRACT = [[0x14, "pextrb", 1], [0x15, "pextrw", 2], [0x16, "pextrd", 4], [0x17, "extractps", 4]];
 const INSERT = [[0x20, "pinsrb", 1], [0x22, "pinsrd", 4]];
 const GPRS = [0, 1, 2, 3, 5, 6, 7]; // (not ESP)
+// The forms with Tier-0 templates (P4b part 4): one Wasm SIMD operation (66 0F
+// 38) and the blends with imm8 (66 0F 3A)
+const TEMPLATED_38 = [0x29, 0x2B, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40];
+const TEMPLATED_3A = [0x0C, 0x0D, 0x0E];
 // PCMPESTRM, PCMPESTRI, PCMPISTRM, PCMPISTRI
 const STRINGS = [[0x60, "pcmpestrm"], [0x61, "pcmpestri"], [0x62, "pcmpistrm"], [0x63, "pcmpistri"]];
 /** CRC32 r32, r/m8 (F2 0F 38 F0), r/m16 (66 F2 0F 38 F1), r/m32 (F2 0F 38 F1) */
@@ -115,7 +119,7 @@ const popcnt_form = (bytes, reg, rm, address) => [...bytes === 2 ? [0x66] : [], 
 const FLAGS_BEFORE = [[[0xB0, 0x7F, 0x04, 0x01, 0xF9], 0x891], [[0x31, 0xC0], 0x44]];
 
 const machines = [];
-async function run(vm, program, warm, interpreter)
+async function run(vm, program, warm, interpreter, label)
 {
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
     if(warm) cpu.jit_clear_cache();
@@ -129,7 +133,7 @@ async function run(vm, program, warm, interpreter)
     const deadline = performance.now() + 20000;
     while(word(vm, 0x600) !== 0xCAFE || warm && !interpreter && compiled_activations(e) === start)
     {
-        assert(performance.now() < deadline, "program/JIT timeout");
+        assert(performance.now() < deadline, `program/JIT timeout (${label}: ${program.length} bytes, done ${word(vm, 0x600) === 0xCAFE}, compiled ${compiled_activations(e) - start})`);
         await sleep(1);
     }
     if(warm) await sleep(20);
@@ -174,7 +178,7 @@ async function run_all(program, before = () => {}, set = machines, read = () => 
             before(vm);
             vm.write_memory(new Uint8Array(16), FAULT);
             vm.write_memory(Uint8Array.of(warm ? 0 : 1), 0x604);
-            await run(vm, loop([...PROLOGUE, ...program]), warm, vm === set[0]);
+            await run(vm, loop([...PROLOGUE, ...program]), warm, vm === set[0], `machine ${i} ${warm ? "hot" : "one round"}`);
             results.push({ label: `machine ${i} ${warm ? "hot" : "one round"}`, data: read(vm) });
         }
     }
@@ -213,6 +217,17 @@ async function create_machines(options = {})
         await vm.stop();
     }
     return set;
+}
+/** Tier-0 (machine 1) ran a template for the form under test, whose
+ * interpreter steps are keyed by its first two bytes, 66 0F; or stepped it
+ * each round. A build without Wasm SIMD has no SIMD templates: its MOVDQU
+ * (F3 0F) steps too. Reset the counts before the run (ir_t0_steps_reset). */
+function tier0_ran(name, templated, count)
+{
+    const t0_steps = machines[1].v86.cpu.wm.exports["ir_t0_steps"];
+    const steps = t0_steps(0x0F66);
+    if(templated && t0_steps(0x0FF3) < count / 2) assert.ok(steps < count / 2, `${name}: Tier-0 template (${steps} steps)`);
+    else assert.ok(steps >= count, `${name}: Tier-0 steps (${steps})`);
 }
 /** `faulting` raises `vector` at its first byte after `prologue` (the
  * handler skips it) in every run, and OUT holds `out` afterwards */
@@ -310,7 +325,9 @@ try
             program.push(...encode(0x38, op, dst, src, memory ? address : undefined));
             program.push(...STORE, ...absolute(dst, OUT + n * 16));
         }
+        for(const vm of machines) vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
         const result = await run_out(program, vm => { write_data(vm); vm.write_memory(new Uint8Array(CASES * 16), OUT); }, CASES * 16, name);
+        tier0_ran(name, TEMPLATED_38.includes(op), CASES);
         for(let n = 0; n < CASES; n++)
         {
             const dst = n & 7, src = n >> 3 & 7, memory = n >= CASES / 2;
@@ -325,7 +342,7 @@ try
         }
         cases += CASES;
     }
-    console.log(`PASS: ${cases} cases of ${BINARY.length} forms of 66 0F 38 (PMOVSX/PMOVZX, BLENDV, PMULDQ/PMULLD, PCMPEQQ/PCMPGTQ, PACKUSDW, PMIN/PMAX, PHMINPOSUW) match the model on 3 arms`);
+    console.log(`PASS: ${cases} cases of ${BINARY.length} forms of 66 0F 38 (PMOVSX/PMOVZX, BLENDV, PMULDQ/PMULLD, PCMPEQQ/PCMPGTQ, PACKUSDW, PMIN/PMAX, PHMINPOSUW) match the model on 3 arms; Tier-0 templates for ${TEMPLATED_38.length}`);
     checks += cases;
 
     // PTEST: ZF and CF from the model, AF, OF, PF and SF cleared (set before)
@@ -367,7 +384,9 @@ try
             program.push(...encode(0x3A, op, dst, src, memory ? address : undefined, imm8));
             program.push(...STORE, ...absolute(dst, OUT + n * 16));
         }
+        for(const vm of machines) vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
         const result = await run_out(program, vm => { write_data(vm); vm.write_memory(new Uint8Array(count * 16), OUT); }, count * 16, name);
+        tier0_ran(name, TEMPLATED_3A.includes(op), count);
         for(let n = 0; n < count; n++)
         {
             const imm8 = n & 255, dst = n % 7 + 1, src = n % 5, memory = n >= 256;
@@ -431,6 +450,70 @@ try
     }
     console.log(`PASS: PEXTRB/PEXTRW/PEXTRD/EXTRACTPS and PINSRB/PINSRD with registers and memory, ${cases} cases in all`);
 
+    // ROUND: Tier-0 (machine 1) rounds finite lanes natively from the
+    // default MXCSR (PE clear: set natively when reported), without the
+    // exact helper (ir_t0_sse_fp_calls) or steps; a NaN lane takes the
+    // helper. Every imm8 mode (bits 4-7 are ignored), registers and memory.
+    {
+        const FINITE = [0.5, 1.5, 2.5, -0.5, -1.5, -2.5, 3.7, -2.3, 1e-40, -1e-40, 0, -0, 1e10, -7, 123.456, 0.25];
+        const NAN_LANES = [NaN, 1.5, -0.5, NaN];
+        const values = (double, list, n) => {
+            const v = new DataView(new ArrayBuffer(16));
+            for(let i = 0; i < (double ? 2 : 4); i++)
+            {
+                const x = list[(n * 3 + i * 5) % list.length];
+                if(double) v.setFloat64(i * 8, x === 1e-40 ? 1e-310 : x, true);
+                else v.setFloat32(i * 4, x, true);
+            }
+            return new Uint8Array(v.buffer);
+        };
+        const MXCSR_DEFAULT = MASK + 0x1000;
+        for(const [op, name, double, scalar] of [[0x0A, "roundss", false, true], [0x0B, "roundsd", true, true],
+            [0x08, "roundps", false, false], [0x09, "roundpd", true, false]])
+            for(const nan of [false, true])
+        {
+            const count = 64, program = [0x0F, 0xAE, 0x15, ...u32(MXCSR_DEFAULT)];
+            const imm8 = n => [0, 1, 2, 3, 4, 8, 9, 10, 11, 12][n % 10] | n * 16 & 0xF0;
+            const sources = new Uint8Array(count * 16);
+            for(let n = 0; n < count; n++) sources.set(values(double, nan && n % 2 ? NAN_LANES : FINITE, n), n * 16);
+            for(let n = 0; n < count; n++)
+            {
+                const dst = n % 8, src = (n + 3) % 8, memory = n >= count / 2;
+                program.push(...LOAD, ...absolute(dst, DEST + n * 16));
+                if(!memory) program.push(...LOAD, ...absolute(src, SOURCE + n * 16));
+                program.push(...encode(0x3A, op, dst, src, memory ? SOURCE + n * 16 : undefined, imm8(n)), ...STORE, ...absolute(dst, OUT + n * 16));
+            }
+            program.push(0x0F, 0xAE, 0x1D, ...u32(OUT + count * 16));
+            for(const vm of machines)
+            {
+                vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
+                vm.v86.cpu.wm.exports["ir_t0_sse_fp_calls_reset"]();
+            }
+            const label = `${name}${nan ? " with NaN lanes" : ""}`;
+            const result = await run_out(program, vm => {
+                write_data(vm);
+                vm.write_memory(sources, SOURCE);
+                vm.write_memory(Uint8Array.from(u32(0x1F80)), MXCSR_DEFAULT);
+                vm.write_memory(new Uint8Array(count * 16 + 16), OUT);
+            }, count * 16 + 16, label);
+            const fp = new Fp(0x1F80), size = double ? 8 : 4;
+            for(let n = 0; n < count; n++)
+            {
+                const expected = destinations.slice(n * 16, n * 16 + 16), source = sources.subarray(n * 16, n * 16 + 16);
+                for(let i = 0; i < (scalar ? 1 : 16 / size); i++) set(expected, size, i, round_lane(fp, get(source, size, i), double, imm8(n)));
+                assert.equal(hex(result.subarray(n * 16, n * 16 + 16)), hex(expected), `${label} ${n}, imm8 ${imm8(n).toString(16)}`);
+            }
+            assert.equal(new DataView(result.buffer, result.byteOffset).getUint32(count * 16, true), fp.finish().mxcsr, `${label}: MXCSR`);
+            const t0 = machines[1].v86.cpu.wm.exports;
+            const steps = t0["ir_t0_steps"](0x0F66), calls = t0["ir_t0_sse_fp_calls"](0x660F3A00 | op);
+            if(t0["ir_t0_steps"](0x0FF3) >= count / 2) assert.ok(steps >= count, `${label}: Tier-0 steps without Wasm SIMD (${steps})`);
+            else if(nan) assert.ok(calls >= count / 4 && steps < count / 2, `${label}: NaN lanes take the exact helper (${calls} calls, ${steps} steps)`);
+            else assert.ok(calls === 0 && steps < count / 2, `${label}: Tier-0 rounds natively (${calls} calls, ${steps} steps)`);
+            checks += count;
+        }
+        console.log("PASS: ROUNDSS/ROUNDSD/ROUNDPS/ROUNDPD in Tier-0 natively for finite lanes (PE set there), the exact helper for NaN lanes, every mode");
+    }
+
     // MOVNTDQA loads an aligned m128
     {
         const program = [];
@@ -461,6 +544,7 @@ try
             program.push(...encode(0x3A, op, dst, src, memory ? address : undefined, imm8));
             program.push(...store_r32(1, OUT + n * 32 + 16), ...STORE, ...absolute(0, OUT + n * 32), ...PUSHF_STORE(OUT + n * 32 + 20));
         }
+        for(const vm of machines) vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
         const result = await run_out(program, vm => {
             vm.write_memory(needles, DEST);
             vm.write_memory(haystacks, SOURCE);
@@ -468,6 +552,7 @@ try
             vm.write_memory(pattern, PATTERN);
             vm.write_memory(new Uint8Array(count * 32), OUT);
         }, count * 32, name);
+        tier0_ran(name, true, count);
         const view = new DataView(result.buffer, result.byteOffset);
         for(let n = 0; n < count; n++)
         {
@@ -492,7 +577,7 @@ try
         checks += count;
     }
     assert(reached.none > 50 && reached.all > 50 && reached.short > 50, `PCMPxSTRx data: ${JSON.stringify(reached)}`);
-    console.log("PASS: PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI, every imm8 from registers and unaligned memory: XMM0, ECX and the flags as the model");
+    console.log("PASS: PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI, every imm8 from registers and unaligned memory: XMM0, ECX and the flags as the model; Tier-0 templates");
 
     // CRC32 against the model: r/m8 (AH-BH too), r/m16 and r/m32 from
     // registers (the destination's too) and unaligned memory; the flags kept

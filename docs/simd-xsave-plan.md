@@ -781,6 +781,11 @@ P0 固定旧 profile 的启动、整数、x87、SSE、代码生成大小/时间�
 分别报告解释器、编译路径、helper 占比、Wasm 大小与无 SIMD 构建。性能比较使用相同工作量，
 不预设双 v128 实现的 AVX2 必然比 SSE 快两倍。
 
+待改进（P4b 第四部分登记）：regions 中 ROUND 和 PCMPxSTRx 仍走完整 reload 的 SSE helper，比
+Tier-0 的模板慢（14 节 P4b 第四部分的分层数据）。ROUND 的寄存器形式可沿用 regions 已有的原生
+FP 准入（`NativeFp`）；PCMPxSTRI 不写 XMM，可改用只 reload 标量状态的 helper，或者为纯 helper
+增加按值传递 v128 的 ABI。
+
 ### 12.3 最终验收
 
 - [ ] 机器可读 forms 清单完整，所有目标形式具有实现和独立测试归属，无未解释缺口。
@@ -1407,3 +1412,68 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `gen/state_layout.js`。在只含本部分改动的工作树中，state layout 检查通过；这些目标其余的
   命令（`cpu_features`、`cpu_contract`、`profile_options`、`cargo test x64::`、`simd_corpus`、
   iced-x86 oracle、opcode 矩阵、`core_swap` 的两种模式）直接运行，全部通过。
+
+### P4b 第四部分：SSE4 热点形式的原生模板（2026-10-07）
+
+- **范围**：5.1 节热点清单中 SSE4 的四个形式 PMINUD、ROUNDSS、ROUNDSD、PCMPISTRI，以及与它们
+  同类、代价低的形式，在 Tier-0 和 x64 page tier 上改为原生模板；regions 中 SSE4.1 的整数和
+  blend 形式改为原生 HIR。4.1 节 M1 的开放前提（热点形式有原生模板）至此满足。
+- **Tier-0**（`ir/tier0/simd.rs` 的 `sse4`）：
+  - 一条 Wasm SIMD 运算即可完成的 12 个形式：PCMPEQQ、PACKUSDW、PCMPGTQ、PMINSB/SD/UW/UD、
+    PMAXSB/SD/UW/UD、PMULLD。BLENDPS/BLENDPD/PBLENDW 按 imm8 作为 shuffle。m128 的对齐检查
+    与 SSE2 形式相同。
+  - ROUND 用 Wasm 的 nearest/floor/ceil/trunc。以下情形拒绝原生执行：NaN lane（payload 不确定，
+    SNaN 还要置 IE）、MXCSR.DAZ、imm8[2] 时 MXCSR.RC 不是就近，以及要报告 PE（imm8[3]=0）且
+    PE 未屏蔽时出现不精确的 lane。被拒绝的指令经 `ir_t0_sse_fp`（新增 ROUND 分派）精确执行。
+    PE 由模板自己置位，所以 PE 尚未置位时也走原生路径；floor/ceil 常用的 imm8 9–11 本来就不
+    报告 PE。
+  - PCMPxSTRx：操作数写入 `ir_t0_sse_fp` 的操作数块，调用纯函数 `ir_t0_pcmpstr`（EAX/EDX 作为
+    参数），再由模板写 ECX 或 XMM0 以及 EFLAGS。
+  - 诊断：新增 `ir_t0_sse_fp_calls`，按 key 统计精确路径的调用次数。
+- **page tier**（`x64/pagegen.rs`）：同样的 12 个形式和三个 blend 用 `Vpacked`。ROUND 用
+  `Vround`，拒绝条件同上，被拒绝时在解释器中重试。PCMPxSTRx 用 `Vstrings`，经
+  `x64_page_pcmpstr`（REX.W 时长度取 RAX/RDX），写 RCX（零扩展）或 XMM0，标志经
+  `flags_begin`/`flags_end` 更新。
+- **regions**：12 个形式成为 `PackedOp`，id 取 66 0F 38 的字节。`from_encoding` 只从 66 0F 38 的
+  键映射这些 id，否则 66 0F 28/29/2B（MOVAPD、MOVNTPD）会被误认为它们。三个 blend 成为
+  `ShuffleOp`。寄存器形式是原生 HIR；内存形式先检查对齐，再走原生读取或
+  `ir_xmm_binary`/`ir_xmm_shuffle`。ROUND 和 PCMPxSTRx 仍走 SSE helper（见“性能”）。
+- **`compare_strings` 提速**：先把两个串的元素取到数组，再只做聚合需要的比较：equal any 对字节
+  用 256 位集合，ranges 只遍历两端都有效的区间对，equal each 只比对角线，equal ordered 遇到
+  不匹配就停。语义不变，模型测试、nasm 和 x64 测试全部通过。
+- **性能**：`tests/bench` 新增三个微基准 712.sse4.int、713.sse4.round、714.sse4.strings。新的
+  `cpu_features` 字段由 runner 传给 V86。与第三部分的构建交错比较（M1 Pro，
+  `build/simd-xsave/p4b4-bench-sse4.json`）：
+  - warm：712 从 34 到 1977 MIPS（x58），713 从 43 到 959 MIPS（x22），714 从 15 到 59 MIPS
+    （x4）；cold 分别为 x7.8、x5.7、x1.7。
+  - 按层（第三次运行，MIPS）：714 解释器 16、只用 Tier-0 82、只用 regions 26、默认 60；713 为
+    22、920、58、约 1000–1150；712 为 20、1700–3200、900、1900。
+  - regions 中 ROUND 和 PCMPxSTRx 仍走完整 reload 的 SSE helper，比 Tier-0 的模板慢。默认配置
+    下 714 的热循环被提升到 regions，所以比只用 Tier-0 慢（60 对 82）。改进方向记入 12.2 节。
+- **测试**：
+  - `tests/rust/sse4.mjs` 在 Tier-0 机器上检查模板确实执行（`ir_t0_steps`）：12 个形式、三个
+    blend 和 PCMPxSTRx。新增 ROUND 测试：从默认 MXCSR（PE 未置位）出发，有限值在 Tier-0
+    原生执行（`ir_t0_sse_fp_calls` 为 0，几乎没有 step），NaN lane 走精确 helper；结果和最终
+    MXCSR 都与模型一致，覆盖全部模式和 imm8 的保留位。共 8020 项。
+  - `tests/x64/sse4.mjs` 新增 64 例 ROUND，MXCSR 取三种非就近的舍入方式和 DAZ（page tier 重试
+    这些情形），共 1291 例。hot loop 中的 PMINUD 等、ROUND（含置 PE 的 ROUNDPS）、PCMPISTRI
+    （不对齐的内存操作数）和 PCMPESTRM 都在 page tier 原生执行：240 万条指令，24 次 step。
+  - IR：`simd_integer` fixture 加入 12 个形式（共 57024 种场景），`simd_shuffle` 加入三个
+    blend（共 65792 种）；独立的 JS 模型（`packed_model.mjs`、`shuffle_model.mjs`）相应扩展。
+    `mir_value` 的 PackedOp 测试覆盖全部 69 个运算的寄存器和内存路径。
+  - `tests/x64/sse4.mjs` 新增一个编译执行的循环：DAZ 下的 ROUNDPD 和 imm8 4、MXCSR.RC 向下的
+    ROUNDPD，每轮结果累加，并检查 page tier 确实重试了它们（`x64_page_stat(2)`）。
+  - 故意植入 16 个错误，全部被发现：Tier-0 的 PMINUD 按有符号比较、BLENDPS 漏掉 imm8 bit 3、
+    ROUND 的 floor 与 ceil 对调、不置 PE、不拒绝 NaN（由 `sse_fp.mjs` 的 SNaN 用例发现）、
+    PCMPxSTRx 的标志移位错、ECX 写成 EDX；page tier 的 PMINUD、ROUNDPD 的舍入方式、不拒绝 DAZ、
+    不拒绝 MXCSR.RC、忽略 REX.W；regions 的 PMINUD 的 Wasm 运算码、PBLENDW 的 lane；
+    `compare_strings` 的 equal any 集合。
+  - 由此发现并修正了两个测试问题。（1）完整的 x64 测试中，靠后的 ROUND 用例并不总是以编译
+    代码执行：重试之后，运行时会在解释器中继续一段，所以不拒绝 DAZ 的错误起初漏过了。上面的
+    循环把每轮结果累加，补上了这个漏洞。（2）regions 的错误必须先用 `cargo test` 重新生成
+    fixture（`make ir-simd-integer-tests`），只重建 runtime 的 wasm 不会把错误带进被测代码。
+- **回归**：`p4b4-batch` 的 53 个目标中 48 个通过。另外 5 个（`state-layout-check`、
+  `platform-contract-tests`、`x64-decode-tests`、`x64-opcode-matrix-tests`、`smp-tests`）与第三
+  部分一样，在另一个会话尚未完成的 `src/rust/cpu/mmio_ram.rs` 改动处失败。在只含本部分改动的
+  工作树中 state layout 检查通过（新增的 `SSE_FP_CALLS` 已登记）；这些目标其余的命令直接运行，
+  全部通过。

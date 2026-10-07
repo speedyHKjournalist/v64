@@ -338,57 +338,78 @@ pub fn compare_strings(
     let words = imm8 & 1 != 0;
     let signed = imm8 & 2 != 0;
     let n = if words { 8 } else { 16 };
-    let element = |v: &[u8; 16], i: usize| -> i32 {
-        match (words, signed) {
-            (true, true) => i16::from_le_bytes([v[2 * i], v[2 * i + 1]]) as i32,
-            (true, false) => u16::from_le_bytes([v[2 * i], v[2 * i + 1]]) as i32,
-            (false, true) => v[i] as i8 as i32,
-            (false, false) => v[i] as i32,
-        }
-    };
-    let length = |v: &[u8; 16], explicit: Option<i64>| match explicit {
-        Some(l) => l.unsigned_abs().min(n as u64) as usize,
-        None => (0..n).find(|&i| element(v, i) == 0).unwrap_or(n),
-    };
-    let (valid_a, valid_b) = (length(&a, la), length(&b, lb));
-    let aggregation = imm8 >> 2 & 3;
-    // BoolRes of element j of b and element i of a; with an invalid element
-    // the value SDM table 4-7 forces
-    let compare = |j: usize, i: usize| -> bool {
-        if i >= valid_a || j >= valid_b {
-            return match aggregation {
-                2 => i >= valid_a && j >= valid_b,
-                3 => i >= valid_a,
-                _ => false,
+    // the elements, once
+    let elements = |v: &[u8; 16]| {
+        let mut e = [0i32; 16];
+        for (i, x) in e.iter_mut().enumerate().take(n) {
+            *x = match (words, signed) {
+                (true, true) => i16::from_le_bytes([v[2 * i], v[2 * i + 1]]) as i32,
+                (true, false) => u16::from_le_bytes([v[2 * i], v[2 * i + 1]]) as i32,
+                (false, true) => v[i] as i8 as i32,
+                (false, false) => v[i] as i32,
             };
         }
-        let (x, y) = (element(&a, i), element(&b, j));
-        if aggregation != 1 {
-            x == y
-        }
-        else if i % 2 == 0 {
-            y >= x
-        }
-        else {
-            y <= x
-        }
+        e
     };
+    let (ea, eb) = (elements(&a), elements(&b));
+    let length = |e: &[i32; 16], explicit: Option<i64>| match explicit {
+        Some(l) => l.unsigned_abs().min(n as u64) as usize,
+        None => e[..n].iter().position(|&x| x == 0).unwrap_or(n),
+    };
+    let (valid_a, valid_b) = (length(&ea, la), length(&eb, lb));
+    let mask = |count: usize| ((1u32 << count) - 1) as u16;
+    // IntRes1, a bit per element j of b, with the values SDM table 4-7 forces
+    // for invalid elements: equal any and ranges false, equal each true when
+    // both are invalid, equal ordered true for an invalid element of a (else
+    // false for one of b). Only the comparisons an aggregation needs.
     let mut intres1 = 0u16;
-    for j in 0..n {
-        let r = match aggregation {
-            0 => (0..n).any(|i| compare(j, i)),
-            1 => (0..n)
-                .step_by(2)
-                .any(|i| compare(j, i) && compare(j, i + 1)),
-            2 => compare(j, j),
-            _ => (0..n - j).all(|k| compare(j + k, k)),
-        };
-        intres1 |= (r as u16) << j;
+    match imm8 >> 2 & 3 {
+        // equal any: a set of a's valid elements
+        0 if !words => {
+            let mut set = [0u64; 4];
+            for &x in &ea[..valid_a] {
+                set[(x as u8 >> 6) as usize] |= 1 << (x as u8 & 63);
+            }
+            for (j, &y) in eb[..valid_b].iter().enumerate() {
+                intres1 |= ((set[(y as u8 >> 6) as usize] >> (y as u8 & 63) & 1) as u16) << j;
+            }
+        },
+        0 => {
+            for (j, y) in eb[..valid_b].iter().enumerate() {
+                intres1 |= (ea[..valid_a].contains(y) as u16) << j;
+            }
+        },
+        // ranges: the valid pairs of a, lower and upper bounds
+        1 => {
+            for (j, &y) in eb[..valid_b].iter().enumerate() {
+                let hit = (0..valid_a / 2).any(|k| y >= ea[2 * k] && y <= ea[2 * k + 1]);
+                intres1 |= (hit as u16) << j;
+            }
+        },
+        // equal each
+        2 => {
+            for j in 0..n {
+                let hit = if j < valid_a && j < valid_b {
+                    ea[j] == eb[j]
+                }
+                else {
+                    j >= valid_a && j >= valid_b
+                };
+                intres1 |= (hit as u16) << j;
+            }
+        },
+        // equal ordered: a found at element j of b
+        _ => {
+            for j in 0..n {
+                let hit = (0..(n - j).min(valid_a)).all(|k| j + k < valid_b && ea[k] == eb[j + k]);
+                intres1 |= (hit as u16) << j;
+            }
+        },
     }
     let mask = match imm8 >> 4 & 3 {
-        1 => !intres1 & (u16::MAX >> (16 - n)),
+        1 => !intres1 & mask(n),
         // (masked: only the valid elements of b)
-        3 => intres1 ^ ((1u32 << valid_b) - 1) as u16,
+        3 => intres1 ^ mask(valid_b),
         _ => intres1,
     };
     let index = if mask == 0 {

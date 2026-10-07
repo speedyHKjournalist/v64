@@ -1285,6 +1285,13 @@ pub fn x64_page_shift(a: u64, count: u32, flags: u32, kind: u32) -> u64 {
     r & 0xFFFF_FFFF | f << 32
 }
 
+/// PCMPESTRx/PCMPISTRx for generated code (ir::runtime::tier0::pcmpstr on
+/// its operand block): the lengths RAX/RDX, or EAX/EDX sign-extended
+#[no_mangle]
+pub unsafe fn x64_page_pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
+    crate::ir::runtime::tier0::pcmpstr(op, imm8, a, b)
+}
+
 /// RDTSC for generated code (the privilege check is inline).
 #[no_mangle]
 pub unsafe fn x64_page_rdtsc() -> u64 { cpu::read_tsc() }

@@ -25,11 +25,24 @@ fn emit_pair(bytes: &[u8], mode: bool, pc: u32, name: &str) {
 }
 #[test]
 fn simd_shuffle_fixtures() {
+    use crate::cpu::features::{SSE4_1, SSSE3, TEST_FEATURES};
     std::fs::create_dir_all("build/ir-simd-shuffle").unwrap();
+    // (BLENDPS/BLENDPD/PBLENDW: tests/ir/differential/simd_shuffle.mjs runs
+    // these on a machine with SSE4.1)
+    TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1));
     let mut cases = Vec::new();
     for mode in [false, true] {
         for asize in [16, 32] {
-            for op in [0x660F70u32, 0xF20F70, 0xF30F70, 0x0FC6, 0x660FC6] {
+            for op in [
+                0x660F70u32,
+                0xF20F70,
+                0xF30F70,
+                0x0FC6,
+                0x660FC6,
+                0x660F3A0C,
+                0x660F3A0D,
+                0x660F3A0E,
+            ] {
                 for register in 0..8u8 {
                     for operand in 0..15u8 {
                         for immediate in 0..=255u8 {
@@ -46,11 +59,16 @@ fn simd_shuffle_fixtures() {
                             if segment >= 0 {
                                 bytes.push([0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65][segment as usize]);
                             }
-                            if op > 65535 {
-                                bytes.push((op >> 16) as u8);
+                            if op > 0xFFFFFF {
+                                bytes.extend([(op >> 24) as u8, 0x0F, (op >> 8) as u8]);
+                            }
+                            else {
+                                if op > 65535 {
+                                    bytes.push((op >> 16) as u8);
+                                }
+                                bytes.push(0x0F);
                             }
                             bytes.extend([
-                                0x0F,
                                 op as u8,
                                 register << 3
                                     | if operand < 8 {
@@ -85,6 +103,7 @@ fn simd_shuffle_fixtures() {
         format!("[{}]", cases.join(",")),
     )
     .unwrap();
+    TEST_FEATURES.with(|f| f.set(0));
     let chain = [
         0x66, 0x0F, 0x70, 0xC1, 0x1B, 0xF3, 0x0F, 0x70, 0xC8, 0x4E, 0x0F, 0xC6, 0x16, 0xE4, 0xF2,
         0x0F, 0x70, 0xDA, 0x1B, 0x66, 0x0F, 0xC6, 0xD3, 3, 0x0F, 0x11, 0x17,
@@ -112,7 +131,11 @@ fn simd_shuffle_contracts() {
         .unwrap_err()
         .0
         .contains("destination/state mismatch"));
-    assert!(ShuffleOp::from_id(5).is_none());
+    assert!(ShuffleOp::from_id(8).is_none());
+    assert_eq!(
+        ShuffleOp::BlendSingles.apply([1; 16], [2; 16], 0b0101),
+        [2, 2, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1]
+    );
     for bytes in [vec![0xF0, 0x66, 0x0F, 0x70, 0xC0, 0]] {
         assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }

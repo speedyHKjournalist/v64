@@ -30,7 +30,10 @@ fn emit_pair(bytes: &[u8], mode: bool, pc: u32, name: &str) {
 }
 #[test]
 fn simd_integer_fixtures() {
+    use crate::cpu::features::{SSE4_1, SSE4_2, SSSE3, TEST_FEATURES};
     std::fs::create_dir_all("build/ir-simd-integer").unwrap();
+    // (tests/ir/differential/simd_integer.mjs runs these on a machine with SSE4)
+    TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1 | SSE4_2));
     let mut cases = Vec::new();
     for mode in [false, true] {
         for asize in [16, 32] {
@@ -104,6 +107,19 @@ fn simd_integer_fixtures() {
                 0x660f55u32,
                 0x660f56u32,
                 0x660f57u32,
+                // SSE4.1 and SSE4.2 (66 0F 38 xx)
+                0x660F3829u32,
+                0x660F382Bu32,
+                0x660F3837u32,
+                0x660F3838u32,
+                0x660F3839u32,
+                0x660F383Au32,
+                0x660F383Bu32,
+                0x660F383Cu32,
+                0x660F383Du32,
+                0x660F383Eu32,
+                0x660F383Fu32,
+                0x660F3840u32,
             ] {
                 let store = false;
                 let width = if matches!(op, 0x0F14 | 0x660F14) { 8 } else { 16 };
@@ -117,11 +133,16 @@ fn simd_integer_fixtures() {
                         if segment >= 0 {
                             bytes.push([0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65][segment as usize]);
                         }
-                        if op > 65535 {
-                            bytes.push((op >> 16) as u8);
+                        if op > 0xFFFFFF {
+                            bytes.extend([(op >> 24) as u8, 0x0F, (op >> 8) as u8]);
+                        }
+                        else {
+                            if op > 65535 {
+                                bytes.push((op >> 16) as u8);
+                            }
+                            bytes.push(0x0F);
                         }
                         bytes.extend([
-                            0x0F,
                             op as u8,
                             (register << 3)
                                 | if operand < 8 {
@@ -149,6 +170,7 @@ fn simd_integer_fixtures() {
         format!("[{}]", cases.join(",")),
     )
     .unwrap();
+    TEST_FEATURES.with(|f| f.set(0));
 }
 
 #[test]
@@ -183,6 +205,12 @@ fn simd_integer_contracts() {
         .0
         .contains("destination/state mismatch"));
     assert!(PackedOp::from_id(0x1FC).is_none());
+    // the SSE4 ids are 66 0F 38 bytes: as 66 0F bytes, MOVAPD and MOVNTPD
+    for op in [0x660F28, 0x660F29, 0x660F2B, 0x660F38] {
+        assert!(PackedOp::from_encoding(op).is_none(), "{op:X}");
+    }
+    assert_eq!(PackedOp::from_encoding(0x660F383B), Some(PackedOp::MinU32));
+    assert!(PackedOp::from_encoding(0x660F3841).is_none(), "PHMINPOSUW");
     assert!(
         PackedOp::from_encoding(0x0FFC).is_none(),
         "MMX is a distinct state model"

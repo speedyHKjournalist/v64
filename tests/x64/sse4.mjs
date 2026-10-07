@@ -17,6 +17,8 @@ import {long_mode_guest} from "./guest_builder.mjs";
 import {Fp, compare_strings, crc32, dot_product, extract, get, insert, insertps, ptest, round_lane, set, sse4_38, sse4_3a} from "../rust/sse4_model.mjs";
 
 const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, MATCH = OUT + 0xC0, FAULTS = OUT + 0x100, RESULTS = OUT + 0x1000;
+// the MXCSR settings of the ROUND and DPP cases (default, RC down, up, toward zero; DAZ)
+const MXCSR_VALUES = [0x1F80, 0x3F80, 0x5F80, 0x7F80, 0x1FC0];
 // (compatibility-mode code is compiled only after a while)
 const IDT = 0x380000, ROUNDS = 400, COMPAT_ROUNDS = 20000;
 
@@ -119,6 +121,18 @@ for(const long of [true, false])
         const n = cases.length;
         cases.push({long, kind: "round", name, op, double, scalar, memory, dst: base + n % 8, src: memory ? undefined : base + (n + 3) % 8,
             a: n % 16, b: double ? 19 + (n & 1) : 16 + n % 3, imm8, offset: 0});
+        cases.push({long, kind: "mxcsr", name: name + " MXCSR"});
+    }
+    // ROUND from other MXCSR settings, which the page tier retries in the
+    // interpreter: MXCSR.RC for imm8[2], DAZ with denormal lanes
+    for(const [name, op, double, scalar] of [["roundss", 0x0A, false, true], ["roundpd", 0x09, true, false]])
+        for(const [mxcsr, imm8s, b] of [[0x3F80, [4, 12, 1], double ? 19 : 16], [0x5F80, [4], double ? 19 : 17],
+            [0x7F80, [12], double ? 20 : 16], [0x1FC0, [1, 2, 10], double ? 20 : 17]])
+            for(const imm8 of imm8s)
+    {
+        const n = cases.length;
+        cases.push({long, kind: "round", name, op, double, scalar, memory: n % 2 === 0, dst: base + n % 8, src: n % 2 === 0 ? undefined : base + (n + 3) % 8,
+            a: n % 16, b, imm8, offset: 0, mxcsr});
         cases.push({long, kind: "mxcsr", name: name + " MXCSR"});
     }
     // (QEMU 10.2 propagates SSE NaNs as the x87 does, the larger significand
@@ -250,7 +264,7 @@ const code = (c, n) => {
         {
             // (a scalar ROUND's memory operand: its lane)
             const width = c.scalar ? c.double ? "qword " : "dword " : "";
-            lines.push("ldmxcsr [mxcsr_default]", `movdqu ${x(c.dst)},${at(c.a)}`);
+            lines.push(`ldmxcsr [mxcsr_values + ${4 * MXCSR_VALUES.indexOf(c.mxcsr ?? 0x1F80)}]`, `movdqu ${x(c.dst)},${at(c.a)}`);
             if(!c.memory) lines.push(`movdqu ${x(c.src)},${at(c.b)}`);
             lines.push(`${c.name} ${x(c.dst)},${c.memory ? width + at(c.b) : x(c.src)},${c.imm8}`, `movdqu [${out}],${x(c.dst)}`);
             lines.push(`stmxcsr [${out + 16}]`, `mov dword [${out + 20}],0`, `mov dword [${out + 24}],0`, `mov dword [${out + 28}],0`);
@@ -403,7 +417,7 @@ iretq
 align 8
 idtr: dw 511
 dq ${IDT}
-mxcsr_default: dd 0x1F80
+mxcsr_values: dd ${MXCSR_VALUES.join(",")}
 align 16
 samples: db ${Array.from(samples).join(",")}
 `));
@@ -456,7 +470,7 @@ const scalar_result = c => {
 };
 const floating = (c) => {
     if(c.kind === "dot") return dot_product(0x1F80, sample(c.a), sample(c.b), c.imm8, c.double);
-    const fp = new Fp(0x1F80), result = Uint8Array.from(sample(c.a)), size = c.double ? 8 : 4;
+    const fp = new Fp(c.mxcsr ?? 0x1F80), result = Uint8Array.from(sample(c.a)), size = c.double ? 8 : 4;
     for(let i = 0; i < (c.scalar ? 1 : 16 / size); i++) set(result, size, i, round_lane(fp, get(sample(c.b), size, i), c.double, c.imm8));
     return {result, mxcsr: fp.finish().mxcsr};
 };
@@ -581,4 +595,148 @@ for(const [label, options, compat] of [["interpreted", {}, false],
     if(options.disable_jit === false) assert.ok(page > 1000, `${label}: compiled 64-bit code ran (${page})`);
     if(compat) assert.ok(tier0.activations > 0 && tier0.page_functions > 0, `${label}: compiled compatibility-mode code ran ${JSON.stringify(tier0)}`);
     console.log(`PASS (${label}): ${cases.length} SSE4 cases in 64-bit and compatibility mode, ${FAULT_CASES.length} faults, as QEMU and the SDM model`);
+}
+
+// The page tier has templates for the SSE4.1 forms of one Wasm SIMD operation,
+// the blends with imm8 (register and aligned memory sources), ROUND and
+// PCMPxSTRx: a hot loop of them runs without steps (x64_page_stat(4)),
+// ROUNDPS setting PE. (R15 counts: PCMPISTRI writes ECX.)
+const ITERATIONS = 100000;
+const hot = assemble("sse4-hot", long_mode_guest(`
+mov rax,cr4
+or eax,3 << 9
+mov cr4,rax
+movdqu xmm9,[hot_samples]
+mov r15d,${ITERATIONS}
+.loop:
+movdqu xmm8,[hot_samples + 16]
+pminud xmm8,xmm9
+pmaxsd xmm8,[hot_samples + 32]
+movdqu xmm10,[hot_samples + 48]
+pcmpgtq xmm10,xmm8
+movdqu xmm11,[hot_samples + 64]
+pmulld xmm11,xmm8
+pblendw xmm11,[hot_samples + 80],0xA5
+movdqu xmm12,[hot_samples + 96]
+blendps xmm12,xmm10,5
+packusdw xmm12,xmm11
+movdqu xmm13,[hot_samples + 112]
+roundsd xmm13,xmm13,9
+movdqu xmm14,[hot_samples + 128]
+roundss xmm14,[hot_samples + 132],10
+roundps xmm15,[hot_samples + 128],0
+movdqu xmm1,[hot_samples + 160]
+pcmpistri xmm1,[hot_samples + 147],0x0C
+movdqu xmm2,[hot_samples + 144]
+mov eax,3
+mov edx,-17
+pcmpestrm xmm2,xmm1,0x40
+dec r15d
+jnz .loop
+movdqu [${OUT + 16}],xmm8
+movdqu [${OUT + 32}],xmm10
+movdqu [${OUT + 48}],xmm11
+movdqu [${OUT + 64}],xmm12
+movdqu [${OUT + 80}],xmm13
+movdqu [${OUT + 96}],xmm14
+movdqu [${OUT + 112}],xmm15
+stmxcsr [${OUT + 128}]
+mov [${OUT + 132}],ecx
+movdqu [${OUT + 144}],xmm0
+`, `
+align 16
+hot_samples: db ${[...samples.subarray(0, 112), ...sample(19), ...sample(16), ...sample(21), ...sample(22), ...new Uint8Array(16)].join(",")}
+`));
+{
+    let steps, retired;
+    const result = await actual(hot, {length: 160, timeout: 60000,
+        options: {cpu_features: ["SSSE3", "SSE4.1", "SSE4.2"], disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true},
+        inspect: emulator => {
+            steps = emulator.v86.cpu.wm.exports.x64_page_stat(4);
+            retired = emulator.v86.cpu.wm.exports.x64_page_stat(1);
+        }});
+    const xmm8 = sse4_38(0x3D, sse4_38(0x3B, sample(1), sample(0)), sample(2));
+    const xmm10 = sse4_38(0x37, sample(3), xmm8);
+    const xmm11 = sse4_3a(0x0E, sse4_38(0x40, sample(4), xmm8), sample(5), 0xA5);
+    const xmm12 = sse4_38(0x2B, sse4_3a(0x0C, sample(6), xmm10, 5), xmm11);
+    const fp = new Fp(0x1F80);
+    const rounded = (destination, source, double, lanes, imm8) => {
+        const result = Uint8Array.from(destination), size = double ? 8 : 4;
+        for(let i = 0; i < lanes; i++) set(result, size, i, round_lane(fp, get(source, size, i), double, imm8));
+        return result;
+    };
+    const xmm13 = rounded(sample(19), sample(19), true, 1, 9);
+    const xmm14 = rounded(sample(16), sample(16).subarray(4), false, 1, 10);
+    const xmm15 = rounded(new Uint8Array(16), sample(16), false, 4, 0);
+    for(const [register, value, at] of [[8, xmm8, 16], [10, xmm10, 32], [11, xmm11, 48], [12, xmm12, 64], [13, xmm13, 80], [14, xmm14, 96], [15, xmm15, 112]])
+    {
+        assert.equal(hex(result.subarray(at, at + 16)), hex(value), `hot loop: XMM${register}`);
+    }
+    assert.equal(result.readUInt32LE(128), fp.finish().mxcsr, "hot loop: MXCSR (PE from ROUNDPS)");
+    // (the haystack at hot_samples + 147: sample 21 from byte 3, then sample 22)
+    const haystack = Uint8Array.from([...sample(21).subarray(3), ...sample(22).subarray(0, 3)]);
+    assert.equal(result.readUInt32LE(132), compare_strings(0x0C, sample(22), haystack).index, "hot loop: PCMPISTRI's ECX");
+    assert.equal(hex(result.subarray(144, 160)), hex(compare_strings(0x40, sample(21), sample(22), 3n, -17n).mask), "hot loop: PCMPESTRM's XMM0");
+    assert.ok(retired > ITERATIONS * 20 && steps < ITERATIONS / 10, `page tier templates: ${retired} retired, ${steps} steps`);
+    console.log(`PASS (x64 page tier): SSE4.1 and SSE4.2 templates, ROUND and PCMPxSTRx included (${retired} instructions retired natively, ${steps} steps)`);
+}
+
+// The page tier's ROUND refuses MXCSR.DAZ and, for imm8[2], MXCSR.RC other
+// than nearest (a retry each: the runtime interprets it): in a compiled loop,
+// a denormal lane rounds up to 0 with DAZ (1 without) and imm8 4 rounds down.
+// The results of every round are summed: an execution the page tier got wrong
+// shows even when the last round ran in the interpreter.
+{
+    const DAZ_ITERATIONS = 2000;
+    const refusals = assemble("sse4-refusals", long_mode_guest(`
+mov rax,cr4
+or eax,3 << 9
+mov cr4,rax
+xorpd xmm4,xmm4
+xorpd xmm5,xmm5
+mov r15d,${DAZ_ITERATIONS}
+.loop:
+ldmxcsr [mxcsr_daz]
+movdqu xmm1,[values]
+roundpd xmm2,xmm1,2
+addpd xmm4,xmm2
+ldmxcsr [mxcsr_down]
+roundpd xmm3,xmm1,4
+addpd xmm5,xmm3
+dec r15d
+jnz .loop
+ldmxcsr [mxcsr_default]
+movdqu [${OUT + 16}],xmm4
+movdqu [${OUT + 32}],xmm5
+`, `
+align 16
+values: dq 1e-310, -2.5
+mxcsr_daz: dd 0x1FC0
+mxcsr_down: dd 0x3F80
+mxcsr_default: dd 0x1F80
+`));
+    let retries;
+    const result = await actual(refusals, {length: 48, timeout: 60000,
+        options: {cpu_features: ["SSSE3", "SSE4.1", "SSE4.2"], disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true},
+        setup: emulator => assert.ok(emulator.v86.cpu.wm.exports.ir_auto_set_page_threshold(1)),
+        inspect: emulator => { retries = emulator.v86.cpu.wm.exports.x64_page_stat(2); }});
+    const view = new DataView(new ArrayBuffer(16));
+    view.setFloat64(0, 1e-310, true);
+    view.setFloat64(8, -2.5, true);
+    const values = new Uint8Array(view.buffer);
+    // (the sums of small integers: exact)
+    const summed = (mxcsr, imm8) => {
+        const fp = new Fp(mxcsr), out = new DataView(new ArrayBuffer(16));
+        for(let i = 0; i < 2; i++)
+        {
+            const lane = new DataView(new ArrayBuffer(8));
+            lane.setBigUint64(0, round_lane(fp, get(values, 8, i), true, imm8), true);
+            out.setFloat64(i * 8, lane.getFloat64(0, true) * DAZ_ITERATIONS, true);
+        }
+        return new Uint8Array(out.buffer);
+    };
+    assert.equal(hex(result.subarray(16, 32)), hex(summed(0x1FC0, 2)), "ROUNDPD with DAZ, summed");
+    assert.equal(hex(result.subarray(32, 48)), hex(summed(0x3F80, 4)), "ROUNDPD with MXCSR.RC down, summed");
+    assert.ok(retries > DAZ_ITERATIONS, `page tier: the refused ROUNDs are retried (${retries} retries)`);
+    console.log(`PASS (x64 page tier): ROUND refuses DAZ and MXCSR.RC (${retries} retries)`);
 }

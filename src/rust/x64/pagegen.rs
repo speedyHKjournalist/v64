@@ -378,6 +378,29 @@ enum Op {
         dst: u8,
         src: Xmm,
     },
+    /// PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI (SSE4.2; `op` the 66 0F 3A
+    /// byte) through x64_page_pcmpstr on the operand block; the lengths are
+    /// RAX/RDX with REX.W (`wide`), else EAX/EDX. RCX (ECX, zero-extended)
+    /// or XMM0, and the arithmetic flags. An m128 needs no alignment.
+    Vstrings {
+        op: u8,
+        imm8: u8,
+        wide: bool,
+        dst: u8,
+        src: Xmm,
+    },
+    /// ROUNDPS/ROUNDPD/ROUNDSS/ROUNDSD (SSE4.1) with Wasm SIMD, as
+    /// ir::tier0::simd's Round: retried in the interpreter for a NaN lane,
+    /// MXCSR.DAZ, MXCSR.RC other than nearest with imm8[2], and an inexact
+    /// lane whose PE is reported and unmasked; PE is set here. Memory: a
+    /// scalar form's lane, or an aligned m128.
+    Vround {
+        double: bool,
+        scalar: bool,
+        imm8: u8,
+        dst: u8,
+        src: Xmm,
+    },
     /// PSRLW/D/Q PSRAW/D PSLLW/D/Q xmm, imm8 (`kind` is the ModRM reg), and
     /// PSRLDQ/PSLLDQ (`bits` 128)
     VshiftImm {
@@ -511,6 +534,37 @@ fn shuffle_lanes(op: u32, imm: u32) -> [u8; 16] {
         } as u8;
     }
     lanes
+}
+
+/// SSE4.1/SSE4.2 forms of one Wasm SIMD operation over (destination,
+/// source), as ir::tier0::simd's: the hot PMINUD and its siblings, and the
+/// blends with imm8 (`imm8`) as shuffles
+fn sse4_packed(opcode: u32, imm8: Option<u64>) -> Option<Packed> {
+    let blend = |size: u8, mask: u64| {
+        let mut lanes = [0; 16];
+        for (k, lane) in lanes.iter_mut().enumerate() {
+            *lane = k as u8 + if mask >> (k as u8 / size) & 1 != 0 { 16 } else { 0 };
+        }
+        Packed::Shuffle(lanes)
+    };
+    Some(match opcode {
+        0x660F3829 => Packed::Binary(0xD6), // pcmpeqq: i64x2.eq
+        0x660F382B => Packed::Pack(0x86),   // packusdw: i16x8.narrow_i32x4_u
+        0x660F3837 => Packed::Binary(0xD9), // pcmpgtq: i64x2.gt_s
+        0x660F3838 => Packed::Binary(0x76), // pminsb: i8x16.min_s
+        0x660F3839 => Packed::Binary(0xB6), // pminsd: i32x4.min_s
+        0x660F383A => Packed::Binary(0x97), // pminuw: i16x8.min_u
+        0x660F383B => Packed::Binary(0xB7), // pminud: i32x4.min_u
+        0x660F383C => Packed::Binary(0x78), // pmaxsb: i8x16.max_s
+        0x660F383D => Packed::Binary(0xB8), // pmaxsd: i32x4.max_s
+        0x660F383E => Packed::Binary(0x99), // pmaxuw: i16x8.max_u
+        0x660F383F => Packed::Binary(0xB9), // pmaxud: i32x4.max_u
+        0x660F3840 => Packed::Binary(0xB5), // pmulld: i32x4.mul
+        0x660F3A0C => blend(4, imm8? & 0xF),
+        0x660F3A0D => blend(8, imm8? & 3),
+        0x660F3A0E => blend(2, imm8? & 0xFF),
+        _ => return None,
+    })
 }
 
 /// PALIGNR xmm, xmm/m128, imm8 (simd_int::palignr_lanes)
@@ -1163,6 +1217,25 @@ fn sse(d: &Decoded) -> Option<Op> {
             dst: register,
             src: xmm_rm()?,
         },
+        0x660F3A60..=0x660F3A63 => Op::Vstrings {
+            op: d.opcode as u8,
+            imm8: d.immediate?.value as u8,
+            wide: d.prefixes.w(),
+            dst: register,
+            src: xmm_rm()?,
+        },
+        0x660F3A08..=0x660F3A0B => Op::Vround {
+            double: d.opcode & 1 != 0,
+            scalar: d.opcode & 2 != 0,
+            imm8: d.immediate?.value as u8,
+            dst: register,
+            src: xmm_rm()?,
+        },
+        op if matches!(op >> 8, 0x660F38 | 0x660F3A) => Op::Vpacked {
+            op: sse4_packed(op, d.immediate.map(|i| i.value))?,
+            dst: register,
+            src: xmm_rm()?,
+        },
         _ => return None,
     })
 }
@@ -1234,7 +1307,7 @@ fn effects(op: &Op) -> (u32, u32) {
         },
         Op::CompareExchange { .. } => (0, ZF),
         Op::Sahf => (0, SF | ZF | AF | PF | CF),
-        Op::Vcompare { .. } => (0, ARITH),
+        Op::Vcompare { .. } | Op::Vstrings { .. } => (0, ARITH),
         Op::Step => (ARITH, ARITH),
         // (RCX = 0 leaves EFLAGS as they were)
         Op::RepCompare { .. } => (ARITH, ARITH),
@@ -4211,6 +4284,91 @@ impl Emitter {
                 self.b.simd_memory(0x0B, 0);
             },
             Op::Vcompare { double, dst, src } => self.vcompare(inst, start, double, dst, src),
+            Op::Vround {
+                double,
+                scalar,
+                imm8,
+                dst,
+                src,
+            } => self.vround(inst, start, double, scalar, imm8, dst, src),
+            Op::Vstrings {
+                op,
+                imm8,
+                wide,
+                dst,
+                src,
+            } => {
+                self.sse_check(start);
+                // the source first (a fault leaves nothing written); an
+                // unaligned m128 is fine (the SDM's exception type 4 note)
+                match src {
+                    Xmm::Reg(s) => {
+                        self.c32(Self::xmm(s) as i32);
+                        self.b.simd_memory(0x00, 0);
+                    },
+                    Xmm::Mem(a) => {
+                        self.vector_address(&a, 128, false, false, inst);
+                        self.gi(HOST);
+                        let scratch = self.b.set_new_local();
+                        self.b.get_local(&scratch);
+                        self.b.guest_load_v128(&scratch);
+                        self.b.free_local(scratch);
+                    },
+                }
+                let source = self.b.set_new_local_v128();
+                let operands = crate::ir::runtime::tier0::sse_fp_operands() as i32;
+                self.c32(operands + 16);
+                self.b.get_local_v128(&source);
+                self.b.simd_memory(0x0B, 0);
+                self.c32(operands);
+                self.c32(Self::xmm(dst) as i32);
+                self.b.simd_memory(0x00, 0);
+                self.b.simd_memory(0x0B, 0);
+                self.c32(op as i32);
+                self.c32(imm8 as i32);
+                for r in [0, 2] {
+                    self.g(r);
+                    if !wide {
+                        self.b.wrap_i64_to_i32();
+                        self.b.extend_signed_i32_to_i64();
+                    }
+                }
+                self.b.call_signature(
+                    "x64_page_pcmpstr",
+                    Signature::new(
+                        &[WasmType::I32, WasmType::I32, WasmType::I64, WasmType::I64],
+                        &[WasmType::I32],
+                    ),
+                );
+                let result = self.b.set_new_local();
+                if op & 1 != 0 {
+                    self.b.get_local(&result);
+                    self.c32(0xFF);
+                    self.b.and_i32();
+                    self.b.extend_unsigned_i32_to_i64();
+                    self.set_reg(
+                        Reg {
+                            index: 1,
+                            high: false,
+                        },
+                        32,
+                    );
+                }
+                else {
+                    self.c32(Self::xmm(0) as i32);
+                    self.c32(operands);
+                    self.b.simd_memory(0x00, 0);
+                    self.b.simd_memory(0x0B, 0);
+                }
+                self.flags_begin(ARITH);
+                self.b.get_local(&result);
+                self.c32(8);
+                self.b.shr_u_i32();
+                self.flags_end(false);
+                self.written(ARITH);
+                self.b.free_local(result);
+                self.b.free_local_v128(source);
+            },
             Op::Invlpg { address } => {
                 // CPL > 0 is #GP (retried)
                 self.c32(gp::cpl as i32);
@@ -4970,6 +5128,108 @@ impl Emitter {
     /// COMISS/UCOMISS/COMISD/UCOMISD. With no NaN or denormal operand the
     /// interpreter changes no MXCSR bit and sets ZF (equal) or CF (less),
     /// clearing the other arithmetic flags; anything else is retried.
+    fn vround(
+        &mut self,
+        inst: &Inst,
+        start: u64,
+        double: bool,
+        scalar: bool,
+        imm8: u8,
+        dst: u8,
+        src: Xmm,
+    ) {
+        self.sse_check(start);
+        // (DAZ, or MXCSR.RC other than nearest for imm8[2])
+        self.b.load_fixed_i32(gp::mxcsr as u32);
+        self.c32(0x40 | if imm8 & 4 != 0 { 0x6000 } else { 0 });
+        self.b.and_i32();
+        self.b.if_void();
+        self.leave_to(self.f().retry, start);
+        self.b.block_end();
+        let bits = if double { 64 } else { 32 };
+        match (scalar, src) {
+            (true, Xmm::Mem(a)) => {
+                self.vector_address(&a, bits, false, false, inst);
+                self.gi(HOST);
+                self.load_bits(bits, 0);
+                self.b.simd(0x12); // i64x2.splat: the lane in the low one
+            },
+            _ => self.vector_source(src, inst),
+        }
+        let source = self.b.set_new_local_v128();
+        let mode = if imm8 & 4 != 0 { 0 } else { imm8 & 3 };
+        self.b.get_local_v128(&source);
+        self.b.simd(match (double, mode) {
+            (false, 0) => 0x6A, // f32x4.nearest
+            (false, 1) => 0x68, // f32x4.floor
+            (false, 2) => 0x67, // f32x4.ceil
+            (false, _) => 0x69, // f32x4.trunc
+            (true, 0) => 0x94,  // f64x2.nearest
+            (true, 1) => 0x75,  // f64x2.floor
+            (true, 2) => 0x74,  // f64x2.ceil
+            (true, _) => 0x7A,  // f64x2.trunc
+        });
+        let rounded = self.b.set_new_local_v128();
+        // per lane: a NaN (x != x), an inexact result (r != x); the lanes
+        // that count: all, or the low one
+        let ne = if double { 0x48 } else { 0x42 };
+        let any = |b: &mut WasmBuilder, x: &WasmLocalV128, y: &WasmLocalV128| {
+            b.get_local_v128(x);
+            b.get_local_v128(y);
+            b.simd(ne);
+            if scalar {
+                b.simd_lane(0x1B, 0); // i32x4.extract_lane
+            }
+            else {
+                b.simd(0x53); // v128.any_true
+            }
+        };
+        any(&mut self.b, &rounded, &source);
+        let inexact = self.b.set_new_local();
+        any(&mut self.b, &source, &source);
+        if imm8 & 8 == 0 {
+            // (PE reported and unmasked: PM, MXCSR bit 12, clear)
+            self.b.get_local(&inexact);
+            self.b.load_fixed_i32(gp::mxcsr as u32);
+            self.c32(0x1000);
+            self.b.and_i32();
+            self.b.eqz_i32();
+            self.b.and_i32();
+            self.b.or_i32();
+        }
+        self.b.if_void();
+        self.leave_to(self.f().retry, start);
+        self.b.block_end();
+        if imm8 & 8 == 0 {
+            self.b.get_local(&inexact);
+            self.b.if_void();
+            self.c32(gp::mxcsr as i32);
+            self.b.load_fixed_i32(gp::mxcsr as u32);
+            self.c32(0x20);
+            self.b.or_i32();
+            self.b.store_aligned_i32(0);
+            self.b.block_end();
+        }
+        if scalar {
+            self.b.get_local_v128(&rounded);
+            if double {
+                self.b.simd_lane(0x1D, 0); // i64x2.extract_lane
+            }
+            else {
+                self.b.simd_lane(0x1B, 0); // i32x4.extract_lane
+                self.b.extend_unsigned_i32_to_i64();
+            }
+            self.xmm_store(dst, 0, bits, true);
+        }
+        else {
+            self.c32(Self::xmm(dst) as i32);
+            self.b.get_local_v128(&rounded);
+            self.b.simd_memory(0x0B, 0);
+        }
+        self.b.free_local(inexact);
+        self.b.free_local_v128(rounded);
+        self.b.free_local_v128(source);
+    }
     fn vcompare(&mut self, inst: &Inst, start: u64, double: bool, dst: u8, src: Xmm) {
         self.sse_check(start);
         let bits = if double { 64 } else { 32 };

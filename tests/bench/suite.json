@@ -43,6 +43,9 @@
     {"name": "708.pages", "category": "micro", "source": "m_pages.asm", "iterations": 1400, "about": "control flow crossing a 4 KiB code page every step" },
     {"name": "709.smc", "category": "micro", "source": "m_smc.asm", "iterations": 520, "about": "self-modifying code every 64 calls" },
     {"name": "710.string", "category": "micro", "source": "m_string.asm", "iterations": 5900, "about": "REP MOVSD/STOSD/MOVSB/SCASB/CMPSD" },
-    {"name": "711.x87", "category": "micro", "source": "m_x87.asm", "iterations": 1100, "about": "x87 register-stack arithmetic" }
+    {"name": "711.x87", "category": "micro", "source": "m_x87.asm", "iterations": 1100, "about": "x87 register-stack arithmetic" },
+    {"name": "712.sse4.int", "category": "sse4", "source": "m_sse4int.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.1 PMINUD/PMAXSD/PMULLD/PCMPGTQ/PBLENDW/BLENDPS/PACKUSDW" },
+    {"name": "713.sse4.round", "category": "sse4", "source": "m_sse4round.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.1 ROUNDSD/ROUNDSS/ROUNDPD over finite values" },
+    {"name": "714.sse4.strings", "category": "sse4", "source": "m_sse4strings.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.2 PCMPISTRI strlen and first-vowel search" }
   ]
 }

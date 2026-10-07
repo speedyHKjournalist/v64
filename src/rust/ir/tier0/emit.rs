@@ -406,9 +406,9 @@ impl Form {
             // Helpers over the lazy state, and dynamic counts (no FLAGS
             // change for a zero count).
             Form::ShiftHelper { .. } | Form::DoubleShift { .. } => true,
-            Form::X87Flags { .. } | Form::Simd(simd::Simd::CompareFlags { .. }) | Form::Lahf => {
-                true
-            },
+            Form::X87Flags { .. }
+            | Form::Simd(simd::Simd::CompareFlags { .. } | simd::Simd::Strings { .. })
+            | Form::Lahf => true,
             _ => false,
         }
     }
