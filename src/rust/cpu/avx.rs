@@ -16,7 +16,7 @@
 //! the operands may be the same register.
 use crate::cpu::cpu::{self, reg128, CR0_TS, CR4_OSXSAVE, MXCSR_MASK};
 use crate::cpu::global_pointers as gp;
-use crate::cpu::simd_int;
+use crate::cpu::{simd_fp, simd_int};
 use crate::ir::simd::{PackedOp, ShuffleOp, TransferOp};
 
 /// A decoded VEX instruction
@@ -251,6 +251,95 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
                 },
             };
             set_xmm(i.vvvv, r);
+        },
+        // VSQRT, VADD, VMUL, VSUB, VMIN, VDIV, VMAX PS/PD/SS/SD, VHADDPS/PD,
+        // VHSUBPS/PD, VADDSUBPS/PD; VCMP* with 32 predicates: a scalar
+        // form's other lanes from the first source (VSQRTPS/PD: one source)
+        (1, 0..=3, 0x51 | 0x58 | 0x59 | 0x5C..=0x5F | 0xC2) | (1, 1 | 3, 0x7C | 0x7D | 0xD0) => {
+            let scalar = pp >= 2 && !matches!(op, 0x7C | 0x7D | 0xD0);
+            let bytes = match (scalar, pp) {
+                (false, _) => 16,
+                (true, 2) => 4,
+                _ => 8,
+            };
+            let b = source(m, i, bytes, false)?;
+            let r = if op == 0xC2 {
+                simd_fp::compare(legacy(i.key), xmm(i.vvvv), b, i.imm8)
+            }
+            else {
+                simd_fp::arithmetic(legacy(i.key), xmm(i.vvvv), b, 0)
+            };
+            let r = r.map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r);
+        },
+        // VRSQRTPS/SS, VRCPPS/SS: no exceptions
+        (1, 0 | 2, 0x52 | 0x53) => {
+            let b = source(m, i, if pp == 2 { 4 } else { 16 }, false)?;
+            set_xmm(i.reg, simd_fp::reciprocal(legacy(i.key), xmm(i.vvvv), b));
+        },
+        // VUCOMISS/SD, VCOMISS/SD: ZF, PF and CF
+        (1, 0 | 1, 0x2E | 0x2F) => {
+            let b = source(m, i, if pp == 0 { 4 } else { 8 }, false)?;
+            let flags = simd_fp::compare_flags(legacy(i.key), xmm(i.reg), b)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            m.set_flags(flags);
+        },
+        // VCVTSI2SS/SD: from a general-purpose register or memory (64 bits
+        // with VEX.W1 in 64-bit mode) into the first source's low lane
+        (1, 2 | 3, 0x2A) => {
+            let value = match i.rm {
+                Some(r) => m.gpr(r),
+                None => m.read(if wide { 8 } else { 4 }, false)? as u64,
+            };
+            let value = if wide { value } else { value & 0xFFFF_FFFF };
+            let r = simd_fp::convert(legacy(i.key), wide, xmm(i.vvvv), value as u128)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r);
+        },
+        // VCVTSS2SI, VCVTTSS2SI, VCVTSD2SI, VCVTTSD2SI: to a general-purpose
+        // register (64-bit with VEX.W1 in 64-bit mode)
+        (1, 2 | 3, 0x2C | 0x2D) => {
+            let b = source(m, i, if pp == 2 { 4 } else { 8 }, false)?;
+            let r = simd_fp::convert(legacy(i.key), wide, 0, b)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            m.set_gpr(i.reg, r as u64, wide);
+        },
+        // VCVTPS2PD (m64), VCVTPD2PS, VCVTSS2SD (m32), VCVTSD2SS (m64);
+        // VCVTDQ2PS, VCVTPS2DQ, VCVTTPS2DQ; VCVTTPD2DQ, VCVTDQ2PD (m64),
+        // VCVTPD2DQ: a scalar form's other lanes from the first source
+        (1, 0..=3, 0x5A) | (1, 0..=2, 0x5B) | (1, 1..=3, 0xE6) => {
+            let bytes = match (op, pp) {
+                (0x5A, 0) | (0x5A, 3) | (0xE6, 2) => 8,
+                (0x5A, 2) => 4,
+                _ => 16,
+            };
+            let b = source(m, i, bytes, false)?;
+            let r = simd_fp::convert(legacy(i.key), false, xmm(i.vvvv), b)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r);
+        },
+        // VROUNDPS/PD (one source), VROUNDSS/SD
+        (3, 1, 0x08..=0x0B) => {
+            let b = source(m, i, [16, 16, 4, 8][(op - 8) as usize], false)?;
+            let r = simd_fp::round(legacy(i.key), xmm(i.vvvv), b, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r);
+        },
+        // VDPPS, VDPPD
+        (3, 1, 0x40 | 0x41) => {
+            let b = source(m, i, 16, false)?;
+            let r = simd_fp::dot_product(op == 0x41, xmm(i.vvvv), b, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r);
+        },
+        // VBLENDVPS, VBLENDVPD: the mask register is imm8[7:4] (bit 7
+        // ignored outside 64-bit mode)
+        (3, 1, 0x4A | 0x4B) => {
+            let b = source(m, i, 16, false)?;
+            let selector = xmm(i.imm8 >> 4 & if i.long { 15 } else { 7 }).to_le_bytes();
+            let a = xmm(i.vvvv).to_le_bytes();
+            let legacy = if op == 0x4A { 0x14 } else { 0x15 };
+            set_xmm(i.reg, bytes(|b| simd_int::sse4(legacy, a, b, selector), b));
         },
         // VSHUFPS, VSHUFPD: the low lanes from the first source, the high
         // ones from the second, as imm8 selects

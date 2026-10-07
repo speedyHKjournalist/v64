@@ -4,10 +4,13 @@
 // operands are BigInts, lane 0 in the low bits. The forms that have legacy
 // SSE counterparts use those forms' models (packed_model.mjs,
 // shuffle_model.mjs, ssse3_model.mjs, sse4_model.mjs) with VEX's operands.
+import assert from "node:assert/strict";
 import { packed, packedImmediate } from "../ir/differential/packed_model.mjs";
 import { shuffle } from "../ir/differential/shuffle_model.mjs";
 import { model as ssse3 } from "./ssse3_model.mjs";
 import { compare_strings, extract, insert, insertps, ptest, sse4_38, sse4_3a } from "./sse4_model.mjs";
+import { FORMS as SSE_FP, expect } from "./sse_fp_cases.mjs";
+import { Fp } from "./sse_fp_model.mjs";
 
 export const big = b => b.reduceRight((v, x) => v << 8n | BigInt(x), 0n);
 export const le = (v, n = 16) => Uint8Array.from({ length: n }, (_, i) => Number(v >> BigInt(8 * i) & 255n));
@@ -72,6 +75,11 @@ const EXTEND = ["bw", "bd", "bq", "wd", "wq", "dq"];
  *   insertps   d = v with m's dword imm8[7:6] (or the m32) in dword imm8[5:4], dwords imm8[3:0] zeroed
  *   blendv     d = v's or m's bytes, as the sign of the register imm8[7:4]'s bytes selects
  *   pcmpstr    PCMPxSTRx of d and m: ECX (the index) or XMM0 (the mask), and the flags
+ *   fp         the floating-point form `legacy` of tests/rust/sse_fp_cases.mjs (its
+ *              model, MXCSR's flags after) with `operands`: "two" (d = f(m)),
+ *              "three" (d = f(v, m)), "comi" (the flags of d and m), "to_gpr" (the
+ *              register d = f(m)) or "from_gpr" (d = v with lane 0 from the register
+ *              or memory m); `scalar`, `double` as the legacy form's
  */
 export const FORMS = [
     // full-width loads and stores
@@ -165,6 +173,27 @@ export const FORMS = [
         { name: name + "64", map: 3, pp: 1, op, kind: "pcmpstr", w: 1, long: true },
     ]),
     { name: "vpcmpistrm", map: 3, pp: 1, op: 0x62, kind: "pcmpstr" }, { name: "vpcmpistri", map: 3, pp: 1, op: 0x63, kind: "pcmpstr" },
+
+    // P5 part 3: the floating-point forms
+    ...SSE_FP.filter(form => !["from_mmx", "to_mmx"].includes(form.kind)).flatMap(form => {
+        const pp = { "": 0, 102: 1, 243: 2, 242: 3 }[form.prefix.join()];
+        const scalar = !!form.scalar || ["comi", "to_gpr", "from_gpr"].includes(form.kind);
+        const two = ["from_dwords", "to_dwords"].includes(form.kind) ||
+            !form.scalar && (form.op === "sqrt" || ["reciprocal", "widen", "narrow", "round"].includes(form.kind));
+        const operands = ["comi", "to_gpr", "from_gpr"].includes(form.kind) ? form.kind : two ? "two" : "three";
+        const double = form.double ?? form.kind === "narrow";
+        // (the memory operand: a scalar's lane, an integer's dword, CVTPS2PD's and CVTDQ2PD's quadword)
+        const bytes = form.kind === "from_gpr" ? 4 : scalar ? (double ? 8 : 4) :
+            form.kind === "widen" || form.kind === "from_dwords" && double ? 8 : 16;
+        // (the scalar forms are VEX.LIG)
+        const vex = { name: "v" + form.name, map: form.map === 0x3A ? 3 : 1, pp, op: form.code, kind: "fp", legacy: form, operands, bytes, lig: scalar };
+        // (the general-purpose forms: W0 32-bit integers, W1 64-bit ones in 64-bit mode)
+        if(operands === "to_gpr" || operands === "from_gpr")
+            return [{ ...vex, w: 0, wig32: true }, { ...vex, w: 1, long: true, bytes: operands === "from_gpr" ? 8 : bytes }];
+        return [vex];
+    }),
+    { name: "vblendvps", map: 3, pp: 1, op: 0x4A, kind: "blendv", legacy: 0x14, w: 0 },
+    { name: "vblendvpd", map: 3, pp: 1, op: 0x4B, kind: "blendv", legacy: 0x15, w: 0 },
 ];
 
 /** The memory operand's size of form `f` */
@@ -263,7 +292,38 @@ export function execute(f, s, { d, v, m, imm8, long })
             write(d, big(insertps(le(s.x[v]), value, imm8)));
             break;
         }
-        case "blendv": write(d, big(sse4_38(0x10, le(s.x[v]), le(source(16)), le(s.x[imm8 >> 4 & (long ? 15 : 7)])))); break;
+        case "blendv": write(d, big(sse4_38(f.legacy ?? 0x10, le(s.x[v]), le(source(16)), le(s.x[imm8 >> 4 & (long ? 15 : 7)])))); break;
+        case "fp":
+        {
+            const form = f.legacy, double = form.double ?? false;
+            if(f.operands === "to_gpr" || f.operands === "from_gpr")
+            {
+                // (32-bit integers, 64-bit with VEX.W1 in 64-bit mode)
+                const bits = long && f.w === 1 ? 64 : 32;
+                const fp = new Fp(s.mxcsr);
+                if(f.operands === "to_gpr")
+                {
+                    const x = memory ? s.load(f.bytes) : s.x[m] & mask(double ? 64 : 32);
+                    s.set_gpr(d, BigInt.asUintN(bits, fp.to_integer(x, double, bits, form.truncate)), bits);
+                }
+                else
+                {
+                    const n = BigInt.asIntN(bits, memory ? s.load(bits / 8) : s.gpr(m));
+                    const lane = mask(double ? 64 : 32);
+                    write(d, s.x[v] & ~lane | fp.from_integer(n, double));
+                }
+                s.mxcsr = fp.finish().mxcsr;
+                break;
+            }
+            const a = f.operands === "two" ? 0n : f.operands === "comi" ? s.x[d] : s.x[v];
+            // (VCMP*: the 32 predicates of imm8[4:0])
+            const r = expect(form, s.mxcsr, a, source(f.bytes), form.kind === "compare" ? imm8 & 31 : imm8);
+            assert(!r.fault, `${f.name}: an unmasked exception`);
+            s.mxcsr = r.after;
+            if(f.operands === "comi") s.flags = Number(r.result);
+            else write(d, r.result);
+            break;
+        }
         case "pcmpstr":
         {
             // (the explicit lengths: EAX and EDX, or RAX and RDX with VEX.W1, signed)

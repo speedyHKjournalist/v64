@@ -1544,13 +1544,17 @@ sse4-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-deb
 	TEST_RELEASE_BUILD=1 node tests/x64/sse4.mjs
 
 # AVX (docs/simd-xsave-plan.md P5-P6): the 32-bit engines against a model of
-# the SDM (with Wasm SIMD, debug, and without SIMD), the x64 engine and
-# compatibility mode against QEMU and the model
+# the SDM (with Wasm SIMD, debug, and without SIMD; floating point with every
+# MXCSR setting in avx_fp.mjs), the x64 engine and compatibility mode against
+# QEMU and the model
 .PHONY: avx-tests
 avx-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
 	node tests/rust/avx.mjs
 	node tests/rust/avx.mjs build/v86-debug.wasm
 	node tests/rust/avx.mjs build/v86-fallback.wasm
+	node tests/rust/avx_fp.mjs
+	node tests/rust/avx_fp.mjs build/v86-debug.wasm
+	node tests/rust/avx_fp.mjs build/v86-fallback.wasm
 	node tests/x64/avx.mjs
 	TEST_RELEASE_BUILD=1 node tests/x64/avx.mjs
 

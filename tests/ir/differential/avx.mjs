@@ -4,7 +4,8 @@
 // the region holds (XMM2, or ESI and EAX) and before one that reads the VEX
 // form's result; the upper halves of the YMM registers and XCR0's checks
 // (#UD without CR4.OSXSAVE or with XCR0 3, #NM with CR0.TS, CR0.EM ignored);
-// MMIO, #PF across into an absent page, #GP for a null segment, a misaligned
+// MXCSR (#XM from the floating-point forms, DAZ, FZ, rounding); MMIO, #PF
+// across into an absent page, #GP for a null segment, a misaligned
 // VMOVAPS/VMOVNTDQA operand or VLDMXCSR's reserved bits; real mode, where C4
 // and C5 are LES and LDS (#UD with a register operand).
 import assert from "node:assert/strict";
@@ -84,7 +85,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,osxsave=true,xcr0=7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,real=false}={}){
+        function reset(i,{task=0,osxsave=true,xcr0=7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,real=false,mxcsr=0x1F80}={}){
             const [bytes,mode]=cases[i];
             const s=SAMPLES[sample];
             e.ir_test_set_cr0(real?cr0&~0x80000001:(cr0|0x10000)&~12|task);
@@ -106,7 +107,7 @@ for(const release of [false,true]){
             cpu.reg_xmm32s.set(s.xmm);
             ymm.fill(0);
             ymm.set(s.ymm);
-            cpu.mxcsr[0]=0x1F80;
+            cpu.mxcsr[0]=mxcsr;
             cpu.instruction_pointer[0]=PC;
             cpu.in_hlt[0]=0;
             linear32[664>>2]=100;
@@ -188,6 +189,10 @@ for(const release of [false,true]){
             }
             if(!mode) {
                 compare(i,()=>reset(i,{real:true,sample:4}),"real mode"); comparisons++;
+            }
+            // MXCSR: every exception unmasked (#XM from floating-point forms), DAZ and FZ, rounding down
+            for(const mxcsr of [0,0x9FC0,0x3F80]) {
+                compare(i,()=>reset(i,{sample:2,mxcsr}),`MXCSR ${mxcsr.toString(16)}`); comparisons++;
             }
         }
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} AVX cases in regions as in the interpreter: register, memory, general-purpose and state forms, MMIO, faults, CR0/CR4/XCR0, real mode`);

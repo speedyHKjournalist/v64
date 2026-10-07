@@ -242,15 +242,18 @@ impl Fp {
         self.lane(de, qnan);
         self.output(result, double)
     }
-    /// One lane of CMPPS/CMPPD/CMPSS/CMPSD's predicates 0-7 (and COMISS/
-    /// UCOMISS: 1 and 0): a QNaN is invalid for the signaling ones
+    /// One lane of CMPPS/CMPPD/CMPSS/CMPSD's predicate 0-7, of VCMP*'s 0-31
+    /// (imm8[3:0] the relation, imm8[4] swapping quiet and signaling; and
+    /// COMISS/UCOMISS: 1 and 0): a QNaN is invalid for the signaling ones
     pub unsafe fn compare(&mut self, a: u64, b: u64, double: bool, predicate: u8) -> bool {
         let mut de = 0;
         let a = self.input(a, double, &mut de);
         let b = self.input(b, double, &mut de);
         let unordered = nan(a, double) || nan(b, double);
-        if snan(a, double) || snan(b, double) || unordered && matches!(predicate & 7, 1 | 2 | 5 | 6)
-        {
+        // (the signaling predicates: 1, 2, 5 and 6 of each eight, the others
+        // with imm8[4])
+        let signaling = matches!(predicate & 7, 1 | 2 | 5 | 6) != (predicate & 16 != 0);
+        if snan(a, double) || snan(b, double) || unordered && signaling {
             self.flags |= IE;
         }
         self.lane(de, unordered);
@@ -269,15 +272,20 @@ impl Fp {
                 f32::from_bits(a as u32) < f32::from_bits(b as u32),
             )
         };
+        if unordered {
+            // UNORD, NEQ_U, NLT_U, NLE_U, EQ_U, NGE_U, NGT_U, TRUE
+            return matches!(predicate & 15, 3..=6 | 8..=10 | 15);
+        }
+        // (ordered: imm8[2:0] decides; 8-15 are 0-7's other unordered results)
         match predicate & 7 {
             0 => eq,
             1 => lt,
             2 => lt || eq,
-            3 => unordered,
+            3 => false,
             4 => !eq,
             5 => !lt,
             6 => !(lt || eq),
-            _ => !unordered,
+            _ => true,
         }
     }
     /// A floating-point source of a conversion: DAZ, and the denormal operand
@@ -426,6 +434,20 @@ pub unsafe fn arithmetic(
     source: u128,
     imm8: u8,
 ) -> Result<u128, Unmasked> {
+    // (legacy CMP: imm8[2:0], its other bits ignored)
+    operate(op, destination, source, imm8 & 7)
+}
+/// VCMPPS/VCMPPD/VCMPSS/VCMPSD (VEX.0F C2): `arithmetic`'s CMP with the 32
+/// predicates of imm8[4:0]
+pub unsafe fn compare(
+    op: u32,
+    destination: u128,
+    source: u128,
+    imm8: u8,
+) -> Result<u128, Unmasked> {
+    operate(op, destination, source, imm8 & 31)
+}
+unsafe fn operate(op: u32, destination: u128, source: u128, imm8: u8) -> Result<u128, Unmasked> {
     let code = op as u8;
     let (double, scalar) =
         if matches!(code, 0x7C | 0x7D | 0xD0) { (op >> 16 == 0x66, false) } else { shape(op) };

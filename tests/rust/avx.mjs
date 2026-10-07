@@ -73,7 +73,8 @@ const XMM = random_bytes(0x5EED1234, MAX_CASES * 128), YMMH = random_bytes(0x0BA
 const SOURCES = random_bytes(0x13579BDF, MAX_CASES * SPAN), DESTINATIONS = random_bytes(0x2468ACE1, MAX_CASES * SPAN);
 const MXCSRS = random_bytes(0x600DF00D, MAX_CASES * 2);
 const GPR_VALUES = random_bytes(0xFEEDFACE, MAX_CASES * 4);
-const mxcsr_of = n => MXCSRS[2 * n] | MXCSRS[2 * n + 1] << 8;
+// (exceptions masked: the floating-point forms' cases run without faults, tests/rust/avx_fp.mjs has those)
+const mxcsr_of = n => MXCSRS[2 * n] | MXCSRS[2 * n + 1] << 8 | 0x1F80;
 const gpr_of = n => new DataView(GPR_VALUES.buffer).getUint32(4 * n, true);
 /** The state of case `n` (`c`) before its instruction: XMM0-7 (x), their
  * upper halves (h), MXCSR, the memory at its source (read-only here) and
@@ -325,6 +326,9 @@ const word_of = (a, at) => new DataView(a.buffer, a.byteOffset).getUint32(at, tr
 // and those with VEX.vvvv
 const STORES = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract"];
 const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "shift_imm"];
+/** The form has VEX.vvvv (the immediate shifts: the destination) */
+const has_vvvv = (f, memory) => VVVV.includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !memory ||
+    f.kind === "fp" && ["three", "from_gpr"].includes(f.operands);
 // flags before an instruction that sets them: OF, SF, AF (0x7F + 1) and CF (STC)
 const FLAGS_BEFORE = [0xB0, 0x7F, 0x04, 0x01, 0xF9];
 /** EFLAGS' OSZAPC to `a` (EAX changes) */
@@ -340,7 +344,7 @@ function form_case(f, n)
     const memory = f.memory || !f.register && n >= CASES / 2;
     const at = f.aligned ? 16 * (n & 1) : n % 17;
     // (the immediate shifts: VEX.vvvv is the destination)
-    const vvvv = f.kind === "shift_imm" ? d : VVVV.includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !memory ? v : 0;
+    const vvvv = f.kind === "shift_imm" ? d : has_vvvv(f, memory) ? v : 0;
     // (every imm8 in turn over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored)
     const imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
     const store = STORES.includes(f.kind);
@@ -368,6 +372,25 @@ function form_case(f, n)
         case "ptest":
             c.pre = FLAGS_BEFORE;
             c.post = store_flags(OUT + n * 16 + 4);
+            break;
+        case "fp":
+            if(f.operands === "comi")
+            {
+                c.pre = FLAGS_BEFORE;
+                c.post = store_flags(OUT + n * 16 + 4);
+            }
+            else if(f.operands === "to_gpr")
+            {
+                reg = o.d = r;
+                c.pre = mov_r32(r, 0xDEADBEEF);
+                c.post = store_r32(r, OUT + n * 16);
+            }
+            else if(f.operands === "from_gpr" && !memory)
+            {
+                rm = o.m = r;
+                c.gpr = gpr_of(n);
+                c.pre = mov_r32(r, c.gpr);
+            }
             break;
         case "pcmpstr":
         {
@@ -400,7 +423,8 @@ function form_case(f, n)
     }
     // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode)
     const fields = { map: f.map || 1, pp: f.pp, w: f.w === undefined || f.wig32 ? n & 1 : f.w, l: f.lig ? n >> 2 & 1 : 0, three: !!(n & 2), vvvv };
-    const immediate = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr"].includes(f.kind) || f.imm ? imm8 : undefined;
+    const immediate = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr"].includes(f.kind) ||
+        f.imm || f.legacy?.imm8 ? imm8 : undefined;
     c.code = f.kind === "zero_upper" ? vex(fields, f.op) : vex(fields, f.op, reg, rm, address, immediate);
     c.model = s => execute(f, s, o);
     return c;
@@ -497,6 +521,9 @@ try
         ["vpmovsxbq xmm1, [m16]", named("vpmovsxbq"), 1], ["vpmovzxdq xmm7, [m64]", named("vpmovzxdq"), 7],
         ["vpinsrb xmm2, xmm3, [m8], 1", named("vpinsrb"), 2, 3, 1], ["vinsertps xmm5, xmm6, [m32], 0x10", named("vinsertps"), 5, 6, 0x10],
         ["vpextrb [m8], xmm4, 2", named("vpextrb"), 4, undefined, 2], ["vpextrw [m16], xmm3, 5", named("vpextrw", "extract"), 3, undefined, 5],
+        ["vaddss xmm1, xmm2, [m32]", named("vaddss"), 1, 2], ["vcvtsd2ss xmm3, xmm4, [m64]", named("vcvtsd2ss"), 3, 4],
+        ["vcvtps2pd xmm5, [m64]", named("vcvtps2pd"), 5], ["vroundsd xmm6, xmm7, [m64], 1", named("vroundsd"), 6, 7, 1],
+        ["vcomiss xmm0, [m32]", named("vcomiss"), 0],
     ])
     {
         const at = SPAN - memory_bytes(f), store = STORES.includes(f.kind);
@@ -505,6 +532,8 @@ try
         if(f.kind === "ldmxcsr") source.set(u32(0x7F80), at);
         const c = { n: 0, at, source, code: vex({ map: f.map || 1, pp: f.pp, vvvv: v ?? 0 }, f.op, d, undefined, ABSENT - SPAN + at, imm8),
             model: s => execute(f, s, { d, v, imm8, long: false }) };
+        // (VCOMISS: the flags)
+        if(f.operands === "comi") Object.assign(c, { pre: FLAGS_BEFORE, post: store_flags(OUT + 4) });
         await check_cases(label + " at a page end", [{ ...c, [store ? "destination_at" : "source_at"]: ABSENT - SPAN }], { before: vm => pages(vm, ABSENT, false) });
     }
     for(const vm of machines) pages(vm, ABSENT, true);

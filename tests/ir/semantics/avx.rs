@@ -63,7 +63,8 @@ fn avx_forms_in_a_cfg() {
 /// Fixtures for tests/ir/differential/avx.mjs: AVX forms (register, memory
 /// load and store, general-purpose operands, VZEROUPPER, VLDMXCSR/VSTMXCSR,
 /// VMASKMOVDQU; flags, VEX.vvvv as the destination, imm8[7:4] as a register,
-/// ECX and XMM0 written by VPCMPxSTRx) in 16- and 32-bit code, alone, after PADDD XMM2, XMM3 (an
+/// ECX and XMM0 written by VPCMPxSTRx; floating point with MXCSR) in 16-
+/// and 32-bit code, alone, after PADDD XMM2, XMM3 (an
 /// XMM value the region holds) or INC ESI, INC EAX (general-purpose ones),
 /// then PADDD XMM7 with the destination (the helper's result reloaded)
 #[test]
@@ -105,6 +106,16 @@ fn avx_fixtures() {
         (&[0xC4, 0xE3, 0x71, 0x4C], 0, Some(2), 0, &[0x30]), // vpblendvb xmm0, xmm1, xmm2, xmm3
         (&[0xC4, 0xE3, 0x79, 0x63], 1, None, 1, &[0x0C]),    // vpcmpistri xmm1, [m], 0x0C
         (&[0xC4, 0xE3, 0x79, 0x60], 2, None, 0, &[0x40]),    // vpcmpestrm xmm2, [m], 0x40
+        (&[0xC5, 0xEB, 0x58], 1, Some(3), 1, &[]),           // vaddsd xmm1, xmm2, xmm3
+        (&[0xC5, 0xF8, 0x51], 4, None, 4, &[]),              // vsqrtps xmm4, [m]
+        (&[0xC5, 0xF9, 0x2F], 1, Some(2), 1, &[]),           // vcomisd xmm1, xmm2 (flags)
+        (&[0xC5, 0xFB, 0x2C], 1, Some(2), 1, &[]),           // vcvttsd2si ecx, xmm2
+        (&[0xC5, 0xDB, 0x2A], 3, Some(6), 3, &[]),           // vcvtsi2sd xmm3, xmm4, esi
+        (&[0xC5, 0xC8, 0xC2], 5, None, 5, &[0x1D]),          // vcmpps xmm5, xmm6, [m], GE_OQ
+        (&[0xC4, 0xE3, 0x69, 0x0B], 1, None, 1, &[4]),       // vroundsd xmm1, xmm2, [m], 4
+        (&[0xC4, 0xE3, 0x61, 0x40], 2, Some(4), 2, &[0xF1]), // vdpps xmm2, xmm3, xmm4, 0xF1
+        (&[0xC4, 0xE3, 0x71, 0x4B], 0, None, 0, &[0x20]),    // vblendvpd xmm0, xmm1, [m], xmm2
+        (&[0xC5, 0xF9, 0x5A], 6, Some(7), 6, &[]),           // vcvtpd2ps xmm6, xmm7
     ];
     let mut cases = Vec::new();
     for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {

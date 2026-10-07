@@ -676,6 +676,9 @@ x86-64-v3 通用寄存器指令的模板要点：
     - VPCMPESTRx 的 VEX.W1 形式与 legacy 的 REX.W 一样被忽略，长度仍取 EAX/EDX。
     - 非 64 位模式下 VPBLENDVB 的掩码寄存器取 imm8[7:4]；SDM（Vol. 2A 2.3 的 /is4）规定只用
       imm8[6:4]。
+  - P5 第三部分新发现（QEMU 10.2）：VEX.L=1 的 VSQRTSS（VEX.LIG）产生 #UD；VROUNDSS 则使 QEMU
+    自身中止（emit.c.inc 中 `gen_VROUNDSS` 的断言 `!s->vex_l`）。`tests/x64/avx.mjs` 对浮点的
+    LIG 形式只用 VEX.L=0，VEX.L=1 由 32 位测试对照模型检查。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
@@ -1634,3 +1637,43 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   单独立项调查后查明是开机时 RAM 就不为零：客体 RAM 分配在 Tier-0 编译器刚释放的堆块上，残留了
   分配器的块头（修复与 `tests/x64/initial_ram.mjs` 由那个会话提交）。`tests/x64/avx.mjs` 的
   原始内存对比不覆盖这段地址。
+
+### P5 第三部分：浮点形式（2026-10-07）
+
+- **范围**：再接入 76 个形式（共 285 个）：
+  - VSQRT/VADD/VMUL/VSUB/VMIN/VDIV/VMAX 的 PS/PD/SS/SD，VHADD/VHSUB、VADDSUB 的 PS/PD，VRCPPS/SS、
+    VRSQRTPS/SS；
+  - VCMPPS/PD/SS/SD 的 32 个谓词，VCOMISS/SD、VUCOMISS/SD；
+  - 转换：VCVTSI2SS/SD 和 VCVT(T)SS2SI/SD2SI（64 位模式下 VEX.W1 用 64 位整数），VCVTPS2PD、
+    VCVTPD2PS、VCVTSS2SD、VCVTSD2SS、VCVTDQ2PS、VCVT(T)PS2DQ、VCVTDQ2PD、VCVT(T)PD2DQ；
+  - VROUNDPS/PD/SS/SD、VDPPS/VDPPD、VBLENDVPS/VBLENDVPD（掩码寄存器同 VPBLENDVB）。
+- 语义沿用 `simd_fp` 的精确实现（P4a）：标量形式的其余 lane 取自第一源，未屏蔽的异常为 #XM
+  （无 CR4.OSXMMEXCPT 时 #UD），目的寄存器不变。
+- **32 个比较谓词**：`Fp::compare` 改为接受 imm8[4:0]。imm8[3:0] 决定关系（有序时只看 imm8[2:0]，
+  所以已有的快速路径对全部谓词都正确），imm8[4] 交换 quiet 与 signaling。`simd_fp::compare` 是
+  VEX 的入口；legacy 的 `arithmetic` 只取 imm8[2:0]，忽略其他位。
+- 剩下 11 个 AVX 新增的 128 位形式（VBROADCASTSS、VPERMILPS/PD、VTESTPS/PD、VMASKMOVPS/PD）
+  在第四部分。
+- **测试**：
+  - `tests/rust/sse_fp.mjs` 的形式表、特殊值、MXCSR 设置与按模型求期望值的部分移到
+    `tests/rust/sse_fp_cases.mjs`，供 legacy 与 VEX 两个测试共用。`sse_fp_model.mjs` 改用 SDM
+    CMPPD 表 3-1 写成的 32 项谓词表 `PREDICATES`。legacy CMP 的用例在 imm8[7:3] 也置位，检查它们
+    被忽略。
+  - 新增 `tests/rust/avx_fp.mjs`：68 个 VEX 浮点形式（legacy 形式去掉 MMX 的六个），目的为 XMM2、
+    第一源为 XMM1、第二源为 XMM0 或内存，VCMP* 覆盖 32 个谓词；11 种 MXCSR 设置，#XM 与 #UD 两种
+    异常交付。三个 arm 上 117920 例。
+  - `tests/rust/avx_model.mjs` 由 `sse_fp_cases.mjs` 生成浮点形式（kind `fp`，按操作数分为单源、
+    双源、标志、到/从通用寄存器）。`tests/rust/avx.mjs` 中 MXCSR 的异常位总是屏蔽：258 个形式、
+    8270 项；页末的窄操作数加入 VADDSS、VCVTSD2SS、VCVTPS2PD、VROUNDSD、VCOMISS。
+  - `tests/x64/avx.mjs`：2132 例。VRCPPS 等近似指令与 QEMU 按误差比较（各自在 1.5×2⁻¹² 之内，
+    彼此相差不超过 2⁻¹⁰，特殊值精确）。每个用例都记录意外的异常并跳过，不再因 QEMU 的 #UD 卡住。
+  - IR fixture 增加 10 个浮点形式，差分配置增加三种 MXCSR（全部不屏蔽、DAZ 与 FZ、向下舍入）：
+    3429 项比较。
+  - 植入 11 个错误，全部被发现：转换忽略 VEX.W1、VCOMIS 操作数对调、VROUNDSS 的其余 lane 取自
+    目的、VDPPS 当作双精度、VBLENDVPS/PD 对调、标量运算的第一源取 ModRM.reg、无序时的谓词表、
+    imm8[4] 不交换 signaling、VEX 只取 imm8[2:0]、legacy CMP 不忽略 imm8[7:3]、标量形式按 16 字节
+    访存（由页末用例发现）。
+- **回归**：`p5c-batch` 的 55 个目标中 50 个通过，`avx-tests` 含新的 `avx_fp.mjs`（三种构建），
+  `sse-fp-tests` 跑的是重构后的 `sse_fp.mjs`。另外 5 个仍是另一个会话的 `mmio_ram.rs` 所致，
+  它们其余的命令直接运行，全部通过。第二部分回归中 `sse-fault-tests` 在 debug 构建的 regions
+  arm 上失败过一次（MOVDQ2Q 的 #UD 报在下一条指令），单独重跑三次和这次回归都通过，暂按偶发处理。

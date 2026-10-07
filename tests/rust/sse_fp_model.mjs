@@ -93,6 +93,23 @@ export function round(sign, m, e, sticky, f, rc)
 }
 
 /** One SSE instruction's MXCSR: its controls, and the flags of its lanes */
+/**
+ * The comparison predicates of CMPPS/CMPPD/CMPSS/CMPSD (0-7, imm8[2:0]) and
+ * VCMPPS/VCMPPD/VCMPSS/VCMPSD (0-31, imm8[4:0]), SDM vol. 2A, CMPPD, Table
+ * 3-1: [name, the result when (less, equal, greater, unordered), whether a
+ * QNaN operand signals an invalid operation]
+ */
+export const PREDICATES = [
+    ["EQ_OQ", [0, 1, 0, 0], 0], ["LT_OS", [1, 0, 0, 0], 1], ["LE_OS", [1, 1, 0, 0], 1], ["UNORD_Q", [0, 0, 0, 1], 0],
+    ["NEQ_UQ", [1, 0, 1, 1], 0], ["NLT_US", [0, 1, 1, 1], 1], ["NLE_US", [0, 0, 1, 1], 1], ["ORD_Q", [1, 1, 1, 0], 0],
+    ["EQ_UQ", [0, 1, 0, 1], 0], ["NGE_US", [1, 0, 0, 1], 1], ["NGT_US", [1, 1, 0, 1], 1], ["FALSE_OQ", [0, 0, 0, 0], 0],
+    ["NEQ_OQ", [1, 0, 1, 0], 0], ["GE_OS", [0, 1, 1, 0], 1], ["GT_OS", [0, 0, 1, 0], 1], ["TRUE_UQ", [1, 1, 1, 1], 0],
+    ["EQ_OS", [0, 1, 0, 0], 1], ["LT_OQ", [1, 0, 0, 0], 0], ["LE_OQ", [1, 1, 0, 0], 0], ["UNORD_S", [0, 0, 0, 1], 1],
+    ["NEQ_US", [1, 0, 1, 1], 1], ["NLT_UQ", [0, 1, 1, 1], 0], ["NLE_UQ", [0, 0, 1, 1], 0], ["ORD_S", [1, 1, 1, 0], 1],
+    ["EQ_US", [0, 1, 0, 1], 1], ["NGE_UQ", [1, 0, 0, 1], 0], ["NGT_UQ", [1, 1, 0, 1], 0], ["FALSE_OS", [0, 0, 0, 0], 1],
+    ["NEQ_OS", [1, 0, 1, 0], 1], ["GE_OQ", [0, 1, 1, 0], 0], ["GT_OQ", [0, 0, 1, 0], 0], ["TRUE_US", [1, 1, 1, 1], 1],
+];
+
 export class Fp
 {
     constructor(mxcsr)
@@ -209,26 +226,17 @@ export class Fp
         }
         throw new Error(op);
     }
-    /** CMPPS/CMPPD/CMPSS/CMPSD predicate 0-7 of a and b (COMI: 1; UCOMI: 0) */
+    /** CMPPS/CMPPD/CMPSS/CMPSD predicate 0-7 of a and b, VCMP*'s 0-31 (PREDICATES; COMI: 1; UCOMI: 0) */
     compare(a0, b0, double, predicate)
     {
         const ia = this.input(a0, double), ib = this.input(b0, double);
         const a = ia.x, b = ib.x;
         const unordered = is_nan(a, double) || is_nan(b, double);
-        if(is_snan(a, double) || is_snan(b, double) || unordered && [1, 2, 5, 6].includes(predicate & 7)) this.flags |= IE;
+        const [, truth, signaling] = PREDICATES[predicate];
+        if(is_snan(a, double) || is_snan(b, double) || unordered && signaling) this.flags |= IE;
         if(!unordered) this.flags |= ia.de | ib.de;
         const c = unordered ? undefined : compare(a, b, double);
-        switch(predicate & 7)
-        {
-            case 0: return c === 0;
-            case 1: return c < 0;
-            case 2: return c <= 0;
-            case 3: return unordered;
-            case 4: return c !== 0;
-            case 5: return unordered || c >= 0;
-            case 6: return unordered || c > 0;
-            default: return !unordered;
-        }
+        return truth[unordered ? 3 : c < 0 ? 0 : c === 0 ? 1 : 2] === 1;
     }
     /** A signed integer (BigInt) to the format */
     from_integer(n, double)
