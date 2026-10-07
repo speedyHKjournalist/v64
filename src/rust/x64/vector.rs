@@ -2016,6 +2016,29 @@ impl avx::Machine for Avx<'_> {
         }
         Ok(())
     }
+    unsafe fn read_lanes(&mut self, size: u8, selected: u8) -> Result<u128, Fault> {
+        let (a, stack) = address(self.0);
+        let mut v = 0;
+        for n in 0..16 / size {
+            if selected >> n & 1 != 0 {
+                let lane = memory::read(a.wrapping_add((n * size) as u64), size * 8, stack)?;
+                v |= (lane as u128) << (n * size * 8);
+            }
+        }
+        Ok(v)
+    }
+    unsafe fn write_lanes(&mut self, size: u8, value: u128, selected: u8) -> Result<(), Fault> {
+        let (a, stack) = address(self.0);
+        let lanes = (0..16 / size).filter(|n| selected >> n & 1 != 0);
+        for n in lanes.clone() {
+            memory::probe_write(a.wrapping_add((n * size) as u64), size * 8, stack)?;
+        }
+        for n in lanes {
+            let lane = (value >> (n * size * 8)) as u64;
+            memory::write(a.wrapping_add((n * size) as u64), size * 8, lane, stack)?;
+        }
+        Ok(())
+    }
     unsafe fn gpr(&mut self, r: u8) -> u64 { state::read_gpr(r as usize) }
     unsafe fn set_gpr(&mut self, r: u8, value: u64, wide: bool) {
         state::write_gpr(r as usize, value, if wide { 64 } else { 32 });

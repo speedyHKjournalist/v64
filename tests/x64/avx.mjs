@@ -83,9 +83,9 @@ const GPR64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9
 const GPR32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
 // general-purpose operands and address registers (not RAX, RDX: XRSTOR/XSAVE's; not RSP)
 const OPERANDS = [[1, 9, 14, 6, 11], [1, 3, 6, 7, 5]];
-const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract"];
+const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract", "maskstore"];
 // the kinds with VEX.vvvv (the immediate shifts: the destination) and with imm8
-const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv"];
+const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "maskload", "maskstore"];
 const has_vvvv = c => VVVV.includes(c.f.kind) || ["scalar", "scalar_st"].includes(c.f.kind) && !c.memory ||
     c.f.kind === "fp" && ["three", "from_gpr"].includes(c.f.operands);
 const IMMEDIATE = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr"];
@@ -160,7 +160,7 @@ const code = (c, n) => {
             c.value = BigInt(random()) << 32n | BigInt(random());
             lines.push(`mov ${R[c.gpr]},${f.kind === "insert" ? "0x" + (c.long ? c.value : c.value & 0xFFFFFFFFn).toString(16) : -1}`);
             break;
-        case "ptest":
+        case "ptest": case "vtest":
             // (OF, SF, AF set by 0x7F + 1, CF by STC)
             lines.push("mov al,0x7F", "add al,1", "stc");
             break;
@@ -205,7 +205,7 @@ const code = (c, n) => {
     }
     if(f.kind === "pcmpstr") lines.push(`mov [${GPR_OUT + n * 16}],${R[1]}`);
     // (the flags: OF, SF, ZF, AF, PF, CF)
-    if(["ptest", "pcmpstr"].includes(f.kind) || f.operands === "comi") lines.push(c.long ? "pushfq\npop rax" : "pushfd\npop eax", "and eax,0x8D5", `mov [${GPR_OUT + n * 16 + 8}],eax`);
+    if(["ptest", "vtest", "pcmpstr"].includes(f.kind) || f.operands === "comi") lines.push(c.long ? "pushfq\npop rax" : "pushfd\npop eax", "and eax,0x8D5", `mov [${GPR_OUT + n * 16 + 8}],eax`);
     lines.push("mov eax,6", "xor edx,edx", `xsave [${RESULTS + n * AREA}]`);
     return lines.join("\n");
 };
@@ -256,6 +256,8 @@ const expected_case = (c, n, qemu = undefined) => {
     const at = c.memory?.at ?? 0;
     s.load = bytes => big(samples.subarray(at, at + bytes));
     s.store = (bytes, v) => s.dest.set(le(v, bytes), at);
+    s.load_at = (offset, bytes) => big(samples.subarray(at + offset, at + offset + bytes));
+    s.store_at = (offset, bytes, v) => s.dest.set(le(v, bytes), at + offset);
     s.masked = (value, selected) => le(value).forEach((b, i) => { if(selected[i]) s.dest[5 + i] = b; });
     s.gpr = r => {
         const value = c.f.kind === "pcmpstr" ? c.lengths[r === 0 ? 0 : 1] : c.value;

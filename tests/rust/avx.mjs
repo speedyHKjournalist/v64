@@ -93,6 +93,10 @@ function initial(n, c)
     const at = c.at ?? 0;
     s.load = size => big(s.src.subarray(at, at + size));
     s.store = (size, v) => s.dest.set(le(v, size), at);
+    s.load_at = (offset, size) => big(s.src.subarray(at + offset, at + offset + size));
+    s.store_at = (offset, size, v) => s.dest.set(le(v, size), at + offset);
+    // (registers the case sets: c.registers)
+    for(const [r, value] of Object.entries(c.registers || {})) s.x[r] = value;
     s.masked = (value, selected) => le(value).forEach((b, i) => { if(selected[i]) s.dest[at + i] = b; });
     s.gpr = r => BigInt(c.gpr_values?.[r] ?? c.gpr);
     // (ECX of VPCMPESTRI/VPCMPISTRI and the general-purpose destinations: out[0..4])
@@ -101,12 +105,14 @@ function initial(n, c)
     Object.defineProperty(s, "flags", { set: value => s.out.set(le(BigInt(value), 4), 4) });
     return s;
 }
-/** Case `n`'s XRSTOR area: MXCSR, XMM0-7 and YMM_Hi128 0-7 in use */
-function area(n)
+/** Case `n`'s XRSTOR area: MXCSR, XMM0-7 (those of `registers` instead)
+ * and YMM_Hi128 0-7 in use */
+function area(n, registers = {})
 {
     const a = new Uint8Array(832);
     a.set(u32(mxcsr_of(n)), 24);
     a.set(XMM.subarray(n * 128, n * 128 + 128), 160);
+    for(const [r, value] of Object.entries(registers)) a.set(le(value), 160 + 16 * r);
     a[512] = 6;
     a.set(YMMH.subarray(n * 128, n * 128 + 128), 576);
     return a;
@@ -234,7 +240,7 @@ async function check_cases(name, cases, { before = () => {} } = {})
     const write = vm => {
         for(const c of cases)
         {
-            vm.write_memory(area(c.n), area_in(c.n));
+            vm.write_memory(area(c.n, c.registers), area_in(c.n));
             vm.write_memory(new Uint8Array(832), area_out(c.n));
             vm.write_memory(c.source || SOURCES.subarray(c.n * SPAN, (c.n + 1) * SPAN), c.source_at ?? SOURCE + c.n * SPAN);
             vm.write_memory(c.destination || DESTINATIONS.subarray(c.n * SPAN, (c.n + 1) * SPAN), c.destination_at ?? DEST + c.n * SPAN);
@@ -297,17 +303,17 @@ const CASES = 32;
  * XRSTOR of case 0's registers and `setup`, before `epilogue` and XSAVE:
  * the registers (but YMM_Hi128 with `keep_upper` false), MXCSR and the
  * memory at `memory` are unchanged */
-async function expect_fault(setup, faulting, vector, { epilogue = [], before = () => {}, cr2, error_code, label, memory, keep_upper = true } = {})
+async function expect_fault(setup, faulting, vector, { epilogue = [], before = () => {}, cr2, error_code, label, memory, keep_upper = true, registers = {} } = {})
 {
     const at = CODE + PROLOGUE.length + xrstor(0).length + setup.length;
     const results = await run_all([...xrstor(area_in(0)), ...setup, ...faulting, ...epilogue, ...xsave(area_out(0))], vm => {
         vm.write_memory(Uint8Array.from(u32(faulting.length)), SKIP);
-        vm.write_memory(area(0), area_in(0));
+        vm.write_memory(area(0, registers), area_in(0));
         before(vm);
     }, machines, vm => ({ fault: [0, 4, 8, 12].map(o => word(vm, FAULT + o)), area: bytes(vm, area_out(0), 832),
         memory: memory && bytes(vm, memory[0], memory[1].length) }));
     const name = label || hex(faulting);
-    const initial_area = area(0);
+    const initial_area = area(0, registers);
     for(const { label: run, data } of results)
     {
         assert.deepEqual(data.fault.slice(0, 2), [vector, at], `${name} (${run}): vector, EIP`);
@@ -324,8 +330,8 @@ const word_of = (a, at) => new DataView(a.buffer, a.byteOffset).getUint32(at, tr
 
 // the kinds of forms (avx_model.mjs) whose memory operand is a destination,
 // and those with VEX.vvvv
-const STORES = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract"];
-const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "shift_imm"];
+const STORES = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract", "maskstore"];
+const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "shift_imm", "maskload", "maskstore"];
 /** The form has VEX.vvvv (the immediate shifts: the destination) */
 const has_vvvv = (f, memory) => VVVV.includes(f.kind) || ["scalar", "scalar_st"].includes(f.kind) && !memory ||
     f.kind === "fp" && ["three", "from_gpr"].includes(f.operands);
@@ -369,7 +375,7 @@ function form_case(f, n)
             c.pre = mov_r32(r, f.kind === "insert" ? c.gpr : 0xDEADBEEF);
             if(f.kind === "extract") c.post = store_r32(r, OUT + n * 16);
             break;
-        case "ptest":
+        case "ptest": case "vtest":
             c.pre = FLAGS_BEFORE;
             c.post = store_flags(OUT + n * 16 + 4);
             break;
@@ -523,7 +529,7 @@ try
         ["vpextrb [m8], xmm4, 2", named("vpextrb"), 4, undefined, 2], ["vpextrw [m16], xmm3, 5", named("vpextrw", "extract"), 3, undefined, 5],
         ["vaddss xmm1, xmm2, [m32]", named("vaddss"), 1, 2], ["vcvtsd2ss xmm3, xmm4, [m64]", named("vcvtsd2ss"), 3, 4],
         ["vcvtps2pd xmm5, [m64]", named("vcvtps2pd"), 5], ["vroundsd xmm6, xmm7, [m64], 1", named("vroundsd"), 6, 7, 1],
-        ["vcomiss xmm0, [m32]", named("vcomiss"), 0],
+        ["vcomiss xmm0, [m32]", named("vcomiss"), 0], ["vbroadcastss xmm2, [m32]", named("vbroadcastss"), 2],
     ])
     {
         const at = SPAN - memory_bytes(f), store = STORES.includes(f.kind);
@@ -536,8 +542,44 @@ try
         if(f.operands === "comi") Object.assign(c, { pre: FLAGS_BEFORE, post: store_flags(OUT + 4) });
         await check_cases(label + " at a page end", [{ ...c, [store ? "destination_at" : "source_at"]: ABSENT - SPAN }], { before: vm => pages(vm, ABSENT, false) });
     }
+    // VMASKMOVPS/PD across into an absent page: the unselected lanes there
+    // are not accessed (no fault), the selected ones before it are
+    {
+        // (the low quadword's lanes selected: those of VMASKMOVPS 0 and 1, VMASKMOVPD 0)
+        const low_lanes = big(Uint8Array.from({ length: 16 }, (_, i) => i < 8 ? 0x80 : 0));
+        for(const op of [0x2C, 0x2D, 0x2E, 0x2F])
+        {
+            const f = FORMS.find(f => f.map === 2 && f.op === op);
+            const store = f.kind === "maskstore";
+            const c = { n: 0, at: SPAN - 8, registers: { 2: low_lanes }, code: vex({ map: 2, pp: 1, vvvv: 2 }, op, 1, undefined, ABSENT - 8),
+                model: s => execute(f, s, { d: 1, v: 2, long: false }) };
+            await check_cases(`${f.name} across into an absent page (the lanes there not selected)`, [{ ...c, [store ? "destination_at" : "source_at"]: ABSENT - SPAN }],
+                { before: vm => pages(vm, ABSENT, false) });
+        }
+    }
     for(const vm of machines) pages(vm, ABSENT, true);
-    console.log("PASS: legacy SSE keeps the upper halves, VEX zeroes them; CR0.EM and CR4.OSFXSR ignored; narrow operands at a page end");
+    // VMASKMOVPS/PD set the accessed (and, storing, the dirty) bit of the
+    // pages their selected lanes are on; the SDM leaves those of pages with
+    // only unselected lanes to the implementation: v86 does not set them
+    {
+        const low_lanes = big(Uint8Array.from({ length: 16 }, (_, i) => i < 8 ? 0x80 : 0));
+        const pte = (vm, page) => word(vm, 0x13000 + (page >>> 12) * 4);
+        for(const op of [0x2C, 0x2E])
+        {
+            const program = [...xrstor(area_in(0)), ...vex({ map: 2, pp: 1, vvvv: 2 }, op, 1, undefined, ABSENT - 8), ...xsave(area_out(0))];
+            const results = await run_all(program, vm => {
+                vm.write_memory(area(0, { 2: low_lanes }), area_in(0));
+                pages(vm, ABSENT - 0x1000, true);
+                pages(vm, ABSENT, true);
+            }, machines, vm => [pte(vm, ABSENT - 0x1000) & 0x60, pte(vm, ABSENT) & 0x60]);
+            for(const { label, data } of results)
+            {
+                assert.deepEqual(data, [op === 0x2E ? 0x60 : 0x20, 0], `vmaskmovps ${op === 0x2E ? "store" : "load"} (${label}): accessed/dirty bits of the selected lanes' page and the other`);
+            }
+            checks++;
+        }
+    }
+    console.log("PASS: legacy SSE keeps the upper halves, VEX zeroes them; CR0.EM and CR4.OSFXSR ignored; narrow operands and VMASKMOV's unselected lanes at a page end (no access, no accessed bit)");
 
     // #UD without CR4.OSXSAVE or with XCR0 3 (before #NM), #NM with CR0.TS
     for(const [label, form] of [
@@ -586,6 +628,15 @@ try
         await expect_fault([], vex({ pp: 2 }, 0x7F, 1, undefined, ABSENT - 8), 14, { before: absent, cr2: ABSENT, error_code: 2, memory, label: "vmovdqu store across into an absent page" });
         await expect_fault([], vex({ pp: 1 }, 0xD6, 1, undefined, ABSENT - 4), 14, { before: absent, cr2: ABSENT, error_code: 2, memory, label: "vmovq store across into an absent page" });
         await expect_fault(mov_r32(7, ABSENT - 8), vex({ pp: 1 }, 0xF7, 1, 2), 14, { before: absent, cr2: ABSENT, error_code: 2, memory, label: "vmaskmovdqu across into an absent page" });
+        // VMASKMOVPS/PD: a selected lane on the absent page faults, nothing
+        // written (the lanes before it selected too: PS 0, 1 and 3, PD 0 and 1)
+        const both = big(Uint8Array.from({ length: 16 }, (_, i) => i === 3 || i === 7 || i === 15 ? 0x80 : 0));
+        await expect_fault([], vex({ map: 2, pp: 1, vvvv: 2 }, 0x2C, 1, undefined, ABSENT - 8), 14, { before: absent, cr2: ABSENT + 4, error_code: 0,
+            registers: { 2: both }, label: "vmaskmovps load, lane 3 on an absent page" });
+        await expect_fault([], vex({ map: 2, pp: 1, vvvv: 2 }, 0x2E, 1, undefined, ABSENT - 8), 14, { before: absent, cr2: ABSENT + 4, error_code: 2, memory,
+            registers: { 2: both }, label: "vmaskmovps store, lane 3 on an absent page" });
+        await expect_fault([], vex({ map: 2, pp: 1, vvvv: 2 }, 0x2F, 1, undefined, ABSENT - 8), 14, { before: absent, cr2: ABSENT, error_code: 2, memory,
+            registers: { 2: both }, label: "vmaskmovpd store, lane 1 on an absent page" });
         for(const vm of machines) pages(vm, ABSENT, true);
     }
     console.log("PASS: #GP(0) for misaligned aligned moves and VLDMXCSR's reserved bits, #UD for VEX.L1, VEX.W1, VEX.vvvv and memory operands where invalid, #PF without effect");

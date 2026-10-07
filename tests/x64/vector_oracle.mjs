@@ -64,6 +64,19 @@ fault("cross-page vector load #PF","movdqu xmm8,[0x600FF8]");
 fault("cross-page vector store no partial write","movdqu [0x600FF8],xmm8");
 fault("cross-page FXSAVE no partial write","fxsave64 [0x600F00]");
 fault("cross-page FXRSTOR no partial state","fxrstor64 [0x600F00]");
+// VMASKMOVPS/PD across into the absent page: lanes there that the mask
+// (XMM9's sign bits) does not select are not accessed; a selected one faults
+// before any lane is stored (docs/simd-xsave-plan.md 8)
+const AVX = "mov rax,cr4\nbts rax,18\nmov cr4,rax\nxor ecx,ecx\nmov eax,7\nxor edx,edx\nxsetbv";
+for(const [suffix, size, selections] of [["ps", 4, [[0, 1], [0, 2], [3]]], ["pd", 8, [[0], [0, 1]]]])
+    for(const lanes of selections)
+    {
+        // (the dwords of XMM9 with the sign bit of a selected lane)
+        const mask = [0, 1, 2, 3].map(i => lanes.includes(i / (size / 4) | 0) && (size === 4 || i & 1) ? 0x80000000 : 0);
+        const what = `lanes ${lanes.join(",")} across into an absent page`;
+        fault(`vmaskmov${suffix} load ${what}`, `${AVX}\nvmaskmov${suffix} xmm8,xmm9,[0x600FF8]`, undefined, undefined, mask);
+        fault(`vmaskmov${suffix} store ${what}`, `${AVX}\nvmaskmov${suffix} [0x600FF8],xmm9,xmm8`, undefined, undefined, mask);
+    }
 fault("invalid MXCSR high bits","mov dword [0x510800],0xFFFFFFFF\nldmxcsr [0x510800]");
 for(const [name,encoding] of [["MOVDQ2Q memory","0xF2,0x0F,0xD6,0x00"],["MOVQ2DQ memory","0xF3,0x0F,0xD6,0x00"],["MOVNTPS register","0x0F,0x2B,0xC0"],["MOVLPD register","0x66,0x0F,0x12,0xC0"],["MOVLPS store register","0x0F,0x13,0xC0"],["MOVMSKPS memory","0x0F,0x50,0x00"],["PEXTRW memory","0x66,0x0F,0xC5,0x00,0"],["MASKMOVDQU memory","0x66,0x0F,0xF7,0x00"],["LDDQU register","0xF2,0x0F,0xF0,0xC0"]]) fault("invalid SIMD form "+name,"db "+encoding);
 
@@ -86,6 +99,16 @@ const specification = new Map([
     // are exempt). QEMU 10.2 does not check, and page-faults on the crossing.
     ["unaligned MOVSLDUP #GP", {vector:13,mxcsr:0x1F80,unchanged:true}],
     ["unaligned MOVSHDUP #GP", {vector:13,mxcsr:0x1F80,unchanged:true}],
+    // VMASKMOVPS/PD access only the selected lanes (SDM: no fault for a lane
+    // whose mask bit is 0) and, faulting, store none (a fault restores the
+    // state before the instruction, SDM vol. 3 6.5). QEMU 10.2 loads the
+    // whole operand (a fault for unselected lanes, CR2 at the page boundary)
+    // and stores lane by lane (those before the faulting one written).
+    ["vmaskmovps load lanes 0,1 across into an absent page", {vector:0,mxcsr:0x1F80,result:[0x44332211,0x88776655,0,0]}],
+    ["vmaskmovpd load lanes 0 across into an absent page", {vector:0,mxcsr:0x1F80,result:[0x44332211,0x88776655,0,0]}],
+    ["vmaskmovps load lanes 3 across into an absent page", {vector:14,mxcsr:0x1F80,unchanged:true,error_code:0,cr2:0x601004}],
+    ["vmaskmovps store lanes 0,2 across into an absent page", {vector:14,mxcsr:0x1F80,unchanged:true,error_code:2,cr2:0x601000,memory:true}],
+    ["vmaskmovpd store lanes 0,1 across into an absent page", {vector:14,mxcsr:0x1F80,unchanged:true,error_code:2,cr2:0x601000,memory:true}],
 ]);
 const selected = process.env.X64_VECTOR_FILTER ? cases.filter(x=>x.name.includes(process.env.X64_VECTOR_FILTER)) : cases;
 assert.ok(selected.length);
@@ -230,7 +253,9 @@ if(!process.env.X64_ORACLE_ONLY)
 {
     const received=await actual(directory,{length,timeout:60000,
         options: {disable_jit:!process.env.X64_JIT,experimental_smp_jit:true,
-            ir_tier0:process.env.X64_JIT === "tier0",ir_sync_publication:true},
+            ir_tier0:process.env.X64_JIT === "tier0",ir_sync_publication:true,
+            // (the VMASKMOV cases)
+            cpu_features:["SSSE3","SSE4.1","SSE4.2","XSAVE","AVX"],cpu_features_unreleased:true},
         inspect: emulator => {
             if(process.env.X64_JIT)
             {
@@ -252,6 +277,10 @@ if(!process.env.X64_ORACLE_ONLY)
             (spec.result || selected[n].a).forEach((v,i)=>value.writeUInt32LE(v,i*4));
             assert.deepEqual(a.subarray(0,16),value,selected[n].name+" destination commit");
             if(spec.zero_xmm9) assert.deepEqual(a.subarray(16,32),Buffer.alloc(16),selected[n].name+" data pointer");
+            if(spec.error_code !== undefined) assert.equal(a.readUInt32LE(88),spec.error_code,selected[n].name+" error code");
+            if(spec.cr2 !== undefined) assert.equal(a.readUInt32LE(96),spec.cr2,selected[n].name+" CR2");
+            // (nothing stored: the sentinel at 0x600FF0)
+            if(spec.memory) assert.equal(a.subarray(104,120).toString("hex"),"88776655443322111122334455667788",selected[n].name+" memory");
             continue;
         }
         if(!e.equals(a)) failures.push({case:n,name:selected[n].name,expected:e.toString("hex"),actual:a.toString("hex"),offsets:Array.from({length:128},(_,i)=>i).filter(i=>e[i]!==a[i])});

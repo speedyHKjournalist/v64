@@ -87,6 +87,8 @@ const AVX_128 = new Set([
     "VCVTSS2SD", "VCVTSD2SS", "VCVTDQ2PS", "VCVTPS2DQ", "VCVTTPS2DQ", "VCVTDQ2PD", "VCVTPD2DQ",
     "VCVTTPD2DQ", "VROUNDPS", "VROUNDPD", "VROUNDSS", "VROUNDSD", "VDPPS", "VDPPD", "VBLENDVPS",
     "VBLENDVPD",
+    // P5 part 4: AVX's own 128-bit forms
+    "VBROADCASTSS", "VPERMILPS", "VPERMILPD", "VTESTPS", "VTESTPD", "VMASKMOVPS", "VMASKMOVPD",
 ]);
 const implemented = form => form.isa[0] === "AVX" && form.l !== "L1" && AVX_128.has(form.mnemonic);
 

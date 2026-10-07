@@ -75,6 +75,9 @@ const EXTEND = ["bw", "bd", "bq", "wd", "wq", "dq"];
  *   insertps   d = v with m's dword imm8[7:6] (or the m32) in dword imm8[5:4], dwords imm8[3:0] zeroed
  *   blendv     d = v's or m's bytes, as the sign of the register imm8[7:4]'s bytes selects
  *   pcmpstr    PCMPxSTRx of d and m: ECX (the index) or XMM0 (the mask), and the flags
+ *   vtest      ZF and CF of the sign bits of d's and m's lanes of `lane` bytes
+ *   maskload   d = m's lanes the sign bits of v's select, the others zero
+ *   maskstore  m's lanes the sign bits of v's select = d's
  *   fp         the floating-point form `legacy` of tests/rust/sse_fp_cases.mjs (its
  *              model, MXCSR's flags after) with `operands`: "two" (d = f(m)),
  *              "three" (d = f(v, m)), "comi" (the flags of d and m), "to_gpr" (the
@@ -194,6 +197,23 @@ export const FORMS = [
     }),
     { name: "vblendvps", map: 3, pp: 1, op: 0x4A, kind: "blendv", legacy: 0x14, w: 0 },
     { name: "vblendvpd", map: 3, pp: 1, op: 0x4B, kind: "blendv", legacy: 0x15, w: 0 },
+
+    // P5 part 4: AVX's own 128-bit forms
+    { name: "vbroadcastss", map: 2, pp: 1, op: 0x18, kind: "load", memory: true, bytes: 4, w: 0, f: v => join([v, v, v, v], 32) },
+    { name: "vpermilps", map: 2, pp: 1, op: 0x0C, kind: "binary", w: 0,
+        f: (a, b) => join(lanes(b, 32).map(x => lanes(a, 32)[Number(x & 3n)]), 32) },
+    { name: "vpermilpd", map: 2, pp: 1, op: 0x0D, kind: "binary", w: 0,
+        f: (a, b) => join(lanes(b, 64).map(x => lanes(a, 64)[Number(x >> 1n & 1n)]), 64) },
+    { name: "vpermilps", map: 3, pp: 1, op: 0x04, kind: "load_imm", w: 0,
+        f: (v, imm8) => join([0, 1, 2, 3].map(n => lanes(v, 32)[imm8 >> 2 * n & 3]), 32) },
+    { name: "vpermilpd", map: 3, pp: 1, op: 0x05, kind: "load_imm", w: 0,
+        f: (v, imm8) => join([0, 1].map(n => lanes(v, 64)[imm8 >> n & 1]), 64) },
+    { name: "vtestps", map: 2, pp: 1, op: 0x0E, kind: "vtest", lane: 4, w: 0 },
+    { name: "vtestpd", map: 2, pp: 1, op: 0x0F, kind: "vtest", lane: 8, w: 0 },
+    { name: "vmaskmovps", map: 2, pp: 1, op: 0x2C, kind: "maskload", lane: 4, memory: true, w: 0 },
+    { name: "vmaskmovpd", map: 2, pp: 1, op: 0x2D, kind: "maskload", lane: 8, memory: true, w: 0 },
+    { name: "vmaskmovps", map: 2, pp: 1, op: 0x2E, kind: "maskstore", lane: 4, memory: true, w: 0 },
+    { name: "vmaskmovpd", map: 2, pp: 1, op: 0x2F, kind: "maskstore", lane: 8, memory: true, w: 0 },
 ];
 
 /** The memory operand's size of form `f` */
@@ -203,7 +223,8 @@ export const memory_bytes = f => f.bytes ?? f.size ?? (["store64", "low", "high"
 /**
  * Executes form `f` on `s`: x[r] and h[r], XMM r and bits 255:128 of YMM r
  * (BigInts), mxcsr, flags (OF, SF, ZF, AF, PF, CF, for the forms that set
- * them); s.load(bytes) and s.store(bytes, value) access the memory operand,
+ * them); s.load(bytes) and s.store(bytes, value) access the memory operand
+ * (s.load_at and s.store_at an element at an offset in it),
  * s.masked(value, selected) VMASKMOVDQU's, s.gpr(r) and s.set_gpr(r, value,
  * bits) the general-purpose registers. `o`: d, v (VEX.vvvv), m (the r/m
  * register; undefined for memory), imm8, `long` (64-bit mode).
@@ -293,6 +314,23 @@ export function execute(f, s, { d, v, m, imm8, long })
             break;
         }
         case "blendv": write(d, big(sse4_38(f.legacy ?? 0x10, le(s.x[v]), le(source(16)), le(s.x[imm8 >> 4 & (long ? 15 : 7)])))); break;
+        case "vtest":
+        {
+            const bits = f.lane * 8;
+            const signs = join(lanes(mask(128), bits).map(() => 1n << BigInt(bits - 1)), bits);
+            const a = s.x[d], b = source(16);
+            s.flags = ((a & b & signs) === 0n ? 0x40 : 0) | ((~a & b & signs) === 0n ? 1 : 0);
+            break;
+        }
+        case "maskload": case "maskstore":
+        {
+            // (each selected lane on its own: s.load_at, s.store_at)
+            const bits = f.lane * 8;
+            const selected = lanes(s.x[v], bits).map(x => x >> BigInt(bits - 1));
+            if(f.kind === "maskload") write(d, join(selected.map((on, n) => on ? s.load_at(n * f.lane, f.lane) : 0n), bits));
+            else selected.forEach((on, n) => { if(on) s.store_at(n * f.lane, f.lane, lanes(s.x[d], bits)[n]); });
+            break;
+        }
         case "fp":
         {
             const form = f.legacy, double = form.double ?? false;

@@ -66,6 +66,18 @@ pub trait Machine {
     /// VMASKMOVDQU: the bytes of `value` whose bit in `mask` is set, to
     /// (E/R)DI in DS or the segment prefix's
     unsafe fn write_masked(&mut self, value: u128, mask: u16) -> Result<(), Self::Fault>;
+    /// VMASKMOVPS/PD: the lanes of `size` bytes (4, 8) of the memory operand
+    /// whose bit in `selected` is set, the others zero; only they are
+    /// accessed (no fault for another)
+    unsafe fn read_lanes(&mut self, size: u8, selected: u8) -> Result<u128, Self::Fault>;
+    /// VMASKMOVPS/PD: the selected lanes of `value` to the memory operand,
+    /// none unless every one can be written
+    unsafe fn write_lanes(
+        &mut self,
+        size: u8,
+        value: u128,
+        selected: u8,
+    ) -> Result<(), Self::Fault>;
     unsafe fn gpr(&mut self, r: u8) -> u64;
     /// The low 32 bits of `value` (zero-extended in 64-bit mode), or all 64
     /// with `wide`
@@ -127,6 +139,13 @@ fn bytes(f: impl FnOnce([u8; 16]) -> [u8; 16], v: u128) -> u128 {
 }
 /// The low `bytes` bytes
 fn low(bytes: u32) -> u128 { u128::MAX >> (128 - 8 * bytes) }
+/// VPERMILPS, VPERMILPD: the lanes of `v` (`size` 4 or 8 bytes) at the
+/// indices of `index`
+fn permute(v: u128, size: u32, index: impl Fn(u32) -> u32) -> u128 {
+    (0..16 / size).fold(0, |r, n| {
+        r | (v >> (index(n) * size * 8) & low(size)) << (n * size * 8)
+    })
+}
 /// The sign bits of `v`'s lanes of `lane` bytes
 fn sign_mask(v: u128, lane: u32) -> u64 {
     (0..16 / lane).fold(0, |mask, n| {
@@ -340,6 +359,64 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
             let a = xmm(i.vvvv).to_le_bytes();
             let legacy = if op == 0x4A { 0x14 } else { 0x15 };
             set_xmm(i.reg, bytes(|b| simd_int::sse4(legacy, a, b, selector), b));
+        },
+        // VBROADCASTSS xmm, m32: in each lane
+        (2, 1, 0x18) => {
+            let v = m.read(4, false)?;
+            set_xmm(i.reg, v * 0x1_0000_0001_0000_0001_0000_0001);
+        },
+        // VPERMILPS, VPERMILPD: the first source's lanes at the indices of
+        // the second's lanes (bits 1:0 of each dword, bit 1 of each quadword)
+        (2, 1, 0x0C | 0x0D) => {
+            let index = source(m, i, 16, false)?;
+            let a = xmm(i.vvvv);
+            let r = if op == 0x0C {
+                permute(a, 4, |n| (index >> (32 * n)) as u32 & 3)
+            }
+            else {
+                permute(a, 8, |n| (index >> (64 * n + 1)) as u32 & 1)
+            };
+            set_xmm(i.reg, r);
+        },
+        // ... and at the indices of imm8 (two bits per dword, one per quadword)
+        (3, 1, 0x04 | 0x05) => {
+            let v = source(m, i, 16, false)?;
+            let r = if op == 0x04 {
+                permute(v, 4, |n| (i.imm8 >> (2 * n)) as u32 & 3)
+            }
+            else {
+                permute(v, 8, |n| (i.imm8 >> n) as u32 & 1)
+            };
+            set_xmm(i.reg, r);
+        },
+        // VTESTPS, VTESTPD: ZF and CF of the lanes' sign bits, AF, OF, PF,
+        // SF cleared
+        (2, 1, 0x0E | 0x0F) => {
+            let b = source(m, i, 16, false)?;
+            let signs: u128 = if op == 0x0E {
+                0x8000_0000_8000_0000_8000_0000_8000_0000
+            }
+            else {
+                0x8000_0000_0000_0000_8000_0000_0000_0000
+            };
+            let a = xmm(i.reg);
+            let (zf, cf) = (a & b & signs == 0, !a & b & signs == 0);
+            m.set_flags((zf as u32) << 6 | cf as u32);
+        },
+        // VMASKMOVPS, VMASKMOVPD xmm, xmm, m128: the lanes of memory the
+        // first source's sign bits select, the others zero
+        (2, 1, 0x2C | 0x2D) => {
+            let size = if op == 0x2C { 4 } else { 8 };
+            let selected = sign_mask(xmm(i.vvvv), size as u32) as u8;
+            let v = m.read_lanes(size, selected)?;
+            set_xmm(i.reg, v);
+        },
+        // VMASKMOVPS, VMASKMOVPD m128, xmm, xmm: ModRM.reg's lanes that
+        // VEX.vvvv's sign bits select
+        (2, 1, 0x2E | 0x2F) => {
+            let size = if op == 0x2E { 4 } else { 8 };
+            let selected = sign_mask(xmm(i.vvvv), size as u32) as u8;
+            m.write_lanes(size, xmm(i.reg), selected)?;
         },
         // VSHUFPS, VSHUFPD: the low lanes from the first source, the high
         // ones from the second, as imm8 selects
@@ -615,6 +692,41 @@ impl Machine for Interpreter {
         for n in 0..16 {
             if mask >> n & 1 != 0 {
                 cpu::safe_write8(a.wrapping_add(n), (value >> (n * 8)) as u8 as i32).unwrap();
+            }
+        }
+        Ok(())
+    }
+    unsafe fn read_lanes(&mut self, size: u8, selected: u8) -> Result<u128, ()> {
+        let mut v = 0;
+        for n in 0..16 / size {
+            if selected >> n & 1 != 0 {
+                let a = self.address.wrapping_add((n * size) as i32);
+                let lane = if size == 4 {
+                    cpu::safe_read32s(a)? as u32 as u128
+                }
+                else {
+                    cpu::safe_read64s(a)? as u128
+                };
+                v |= lane << (n * size * 8);
+            }
+        }
+        Ok(v)
+    }
+    unsafe fn write_lanes(&mut self, size: u8, value: u128, selected: u8) -> Result<(), ()> {
+        let lanes = (0..16 / size).filter(|n| selected >> n & 1 != 0);
+        for n in lanes.clone() {
+            cpu::writable_or_pagefault(self.address.wrapping_add((n * size) as i32), size as i32)?;
+        }
+        for n in lanes {
+            let (a, lane) = (
+                self.address.wrapping_add((n * size) as i32),
+                value >> (n * size * 8),
+            );
+            if size == 4 {
+                cpu::safe_write32(a, lane as i32).unwrap();
+            }
+            else {
+                cpu::safe_write64(a, lane as u64).unwrap();
             }
         }
         Ok(())

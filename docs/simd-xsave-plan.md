@@ -679,6 +679,10 @@ x86-64-v3 通用寄存器指令的模板要点：
   - P5 第三部分新发现（QEMU 10.2）：VEX.L=1 的 VSQRTSS（VEX.LIG）产生 #UD；VROUNDSS 则使 QEMU
     自身中止（emit.c.inc 中 `gen_VROUNDSS` 的断言 `!s->vex_l`）。`tests/x64/avx.mjs` 对浮点的
     LIG 形式只用 VEX.L=0，VEX.L=1 由 32 位测试对照模型检查。
+  - P5 第四部分新发现（QEMU 10.2，`tests/x64/vector_oracle.mjs` 对这几例按 SDM 单独判定）：
+    VMASKMOVPS/PD 加载时读取整个 16 字节操作数，所以未选中的 lane 在缺页上也会 #PF，CR2 为
+    页边界；存储时逐个 lane 写入，后面的 lane 故障时，前面的 lane 已经写出。SDM 规定未选中的
+    lane 不产生故障；故障指令应恢复到执行前的状态（Vol. 3 6.5），不能留下部分存储。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
@@ -1677,3 +1681,38 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `sse-fp-tests` 跑的是重构后的 `sse_fp.mjs`。另外 5 个仍是另一个会话的 `mmio_ram.rs` 所致，
   它们其余的命令直接运行，全部通过。第二部分回归中 `sse-fault-tests` 在 debug 构建的 regions
   arm 上失败过一次（MOVDQ2Q 的 #UD 报在下一条指令），单独重跑三次和这次回归都通过，暂按偶发处理。
+
+### P5 第四部分：AVX 新增的 128 位形式（2026-10-07）
+
+- **范围**：最后 11 个形式，P5 的 296 个 VEX.128/VEX.LIG 形式至此全部接入（VEX.L=1 的形式在 P6）：
+  - VBROADCASTSS xmm, m32；
+  - VPERMILPS/PD：按第二源每个 dword 的 bit 1:0（每个 qword 的 bit 1）或按 imm8 选取第一源的 lane；
+  - VTESTPS/PD：只看各 lane 的符号位，ZF、CF 的定义同 PTEST，AF、OF、PF、SF 清零；
+  - VMASKMOVPS/PD 的加载与存储。
+- **VMASKMOV**：`Machine` 增加 `read_lanes`/`write_lanes`，按掩码（VEX.vvvv 各 lane 的符号位）
+  逐 lane 访存。
+  - 未选中的 lane 不访问：不产生故障，不置 A/D 位，加载时为零。这符合第 8 节“v86 固定一种
+    行为（建议不设置）”。
+  - 存储先对每个选中的 lane 做写检查，全部通过后才写，故障时内存不变。
+  - 32 位解释器与 regions（`ir_avx_continue`）用 `safe_read32s/64s` 与 `writable_or_pagefault`，
+    x64 用 `memory::read` 与 `probe_write`。
+- **测试**：
+  - `tests/rust/avx.mjs`：269 个形式，三个 arm 上 8637 项。
+    - 页末窄操作数的用例加入 VBROADCASTSS。
+    - VMASKMOVPS/PD 的四个形式跨入缺页：那里的 lane 未选中时不产生故障，结果与模型一致。
+    - 选中缺页上的 lane 时报告 #PF，CR2 为该 lane 的地址，存储不写任何 lane。用例同时选中
+      缺页之前的 lane（PS 的 lane 0、1，PD 的 lane 0）。
+    - 加载与存储只置选中 lane 所在页的 A 位（存储还有 D 位），另一页的 A/D 位不变。
+  - `tests/x64/avx.mjs`：2220 例，三种配置。
+  - `tests/x64/vector_oracle.mjs` 新增 10 例 VMASKMOV 跨页，解释执行与 tier0 各跑一遍。QEMU 10.2
+    的两处差异（11.1 节）由其中 5 例按 SDM 单独判定，含 CR2、错误码和“不留部分存储”。这个
+    oracle 的 v86 配置因此打开 AVX 等能力，其余用例的结果不变。
+  - IR fixture 增加 6 个形式，共 4047 项比较。
+  - 植入 11 个错误，全部被发现：VBROADCASTSS 读 16 字节（页末用例）、VPERMILPS 的两个源对调、
+    VPERMILPD 取每个 qword 的 bit 0、VPERMILPS 的 imm8 字段错位、VTESTPD 用 PS 的符号位、
+    VMASKMOV 加载读全部 lane、存储的掩码取自 ModRM.reg、存储不先做写检查（缺页用例发现部分
+    写入）、VMASKMOVPD 的 lane 间距按 4 字节；x64 引擎的存储不先检查和加载读全部 lane（都由
+    `vector_oracle.mjs` 的跨页用例发现）。
+- **回归**：`p5d-batch` 的 55 个目标中 50 个通过。另外 5 个仍是另一个会话的 `mmio_ram.rs` 所致
+  （state layout 预检查），它们其余的命令直接运行，全部通过；只含本部分改动的工作树中 state
+  layout 检查通过。

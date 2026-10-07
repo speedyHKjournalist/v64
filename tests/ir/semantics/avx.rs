@@ -116,6 +116,12 @@ fn avx_fixtures() {
         (&[0xC4, 0xE3, 0x61, 0x40], 2, Some(4), 2, &[0xF1]), // vdpps xmm2, xmm3, xmm4, 0xF1
         (&[0xC4, 0xE3, 0x71, 0x4B], 0, None, 0, &[0x20]),    // vblendvpd xmm0, xmm1, [m], xmm2
         (&[0xC5, 0xF9, 0x5A], 6, Some(7), 6, &[]),           // vcvtpd2ps xmm6, xmm7
+        (&[0xC4, 0xE2, 0x79, 0x18], 1, None, 1, &[]),        // vbroadcastss xmm1, [m]
+        (&[0xC4, 0xE2, 0x69, 0x0C], 3, Some(4), 3, &[]),     // vpermilps xmm3, xmm2, xmm4
+        (&[0xC4, 0xE3, 0x79, 0x05], 5, None, 5, &[2]),       // vpermilpd xmm5, [m], 2
+        (&[0xC4, 0xE2, 0x79, 0x0E], 1, Some(2), 1, &[]),     // vtestps xmm1, xmm2 (flags)
+        (&[0xC4, 0xE2, 0x69, 0x2C], 6, None, 6, &[]),        // vmaskmovps xmm6, xmm2, [m]
+        (&[0xC4, 0xE2, 0x69, 0x2F], 7, None, 1, &[]),        // vmaskmovpd [m], xmm2, xmm7
     ];
     let mut cases = Vec::new();
     for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {
