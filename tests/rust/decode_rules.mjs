@@ -163,21 +163,21 @@ try
         (vm, run) => assert.equal(word(vm, OUT), 42, `F3 IMUL (${run})`));
     console.log(`PASS: ${undefined_forms.length} undefined mandatory prefixes raise #UD, F3 IMUL ignores the prefix`);
 
-    // The three-byte maps decode in all three decoders. SSSE3 (P3) and the
-    // implemented SSE4 forms (P4b) are #UD without their feature; every other
-    // encoding is #UD until its semantics come (docs/simd-xsave-plan.md),
-    // whether or not the machine has its CPUID feature; so are F2/F3 at the
-    // SSSE3 opcodes and an opcode byte without rows
-    const ssse3 = [
+    // The three-byte maps decode in all three decoders. SSSE3 (P3) and SSE4
+    // (P4b) are #UD without their feature; every other encoding is #UD until
+    // its semantics come (docs/simd-xsave-plan.md), whether or not the
+    // machine has its CPUID feature; so are F2/F3 at the SSSE3 opcodes, F3 at
+    // CRC32's and an opcode byte without rows
+    const featured_forms = [
         [0x66, 0x0F, 0x38, 0x00, 0xC1], [0x0F, 0x38, 0x00, 0xC1],                  // pshufb
         [0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], [0x0F, 0x3A, 0x0F, 0xC1, 0x08],      // palignr
-    ];
-    await expect_undefined(ssse3);
-    const three_byte = [
-        [0xF3, 0x0F, 0x38, 0x00, 0xC1], [0x66, 0xF2, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], // pshufb, palignr
         [0x66, 0x0F, 0x3A, 0x62, 0x00, 0x04], [0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x0C], // pcmpistrm, pcmpistri
         [0xF2, 0x0F, 0x38, 0xF1, 0xC1], [0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],      // crc32
-        [0x0F, 0x38, 0xF0, 0x00], [0xF3, 0x0F, 0x38, 0xF0, 0x00],                  // movbe
+    ];
+    await expect_undefined(featured_forms);
+    const three_byte = [
+        [0xF3, 0x0F, 0x38, 0x00, 0xC1], [0x66, 0xF2, 0x0F, 0x3A, 0x0F, 0xC1, 0x08], // pshufb, palignr
+        [0x0F, 0x38, 0xF0, 0x00], [0xF3, 0x0F, 0x38, 0xF0, 0x00],                  // movbe, F3 at crc32
         [0x0F, 0x38, 0x10, 0xC1], [0x0F, 0x38, 0xFF, 0xC1], [0x0F, 0x3A, 0xFF, 0xC1, 0x00], // no row
     ];
     await expect_undefined(three_byte);
@@ -217,7 +217,7 @@ try
     {
         for(const vm of featured) await vm.destroy();
     }
-    console.log(`PASS: ${ssse3.length} SSSE3 encodings raise #UD without SSSE3; ${three_byte.length} three-byte map and ${vex.length} VEX encodings with and without their features; ` +
+    console.log(`PASS: ${featured_forms.length} SSSE3 and SSE4.2 encodings raise #UD without their features; ${three_byte.length} three-byte map and ${vex.length} VEX encodings with and without their features; ` +
         "LES/LDS with a memory operand; F3 0F BC/BD are BSF/BSR without BMI1/LZCNT and #UD with them until P10");
 }
 finally

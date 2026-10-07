@@ -304,6 +304,150 @@ pub fn palignr_lanes(imm8: u8, n: usize) -> ([u8; 16], bool) {
     (lanes, zero)
 }
 
+/// What PCMPESTRI/PCMPESTRM/PCMPISTRI/PCMPISTRM (66 0F 3A 60-63) produce
+/// (`compare_strings`)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StringCompare {
+    /// IntRes2: a bit per element of the second operand
+    pub mask: u16,
+    /// xSTRI's ECX: the lowest (imm8[6] clear) or highest set bit of `mask`,
+    /// else the number of elements
+    pub index: u32,
+    /// xSTRM's XMM0: `mask` (imm8[6] clear) or a byte or word mask of it
+    pub xmm0: [u8; 16],
+    /// EFLAGS: CF (mask not zero), ZF (the second operand shorter than
+    /// the register), SF (the first operand shorter), OF (mask bit 0); AF and
+    /// PF clear
+    pub flags: i32,
+}
+
+/// PCMPxSTRx (SDM Vol. 2, 4.1): compare the strings `a` (xmm1) and `b`
+/// (xmm2/m128) as imm8 says: its elements (bits 1:0: unsigned or signed
+/// bytes or words), the aggregation (3:2: equal any, ranges, equal each,
+/// equal ordered), the polarity (5:4) and the output (6). The explicit
+/// lengths `la` and `lb` (EAX and EDX, RAX and RDX with REX.W) count in
+/// absolute value, at most the elements of a register; without them
+/// (PCMPISTRx) a string ends before its first zero element.
+pub fn compare_strings(
+    imm8: u8,
+    a: [u8; 16],
+    b: [u8; 16],
+    la: Option<i64>,
+    lb: Option<i64>,
+) -> StringCompare {
+    let words = imm8 & 1 != 0;
+    let signed = imm8 & 2 != 0;
+    let n = if words { 8 } else { 16 };
+    let element = |v: &[u8; 16], i: usize| -> i32 {
+        match (words, signed) {
+            (true, true) => i16::from_le_bytes([v[2 * i], v[2 * i + 1]]) as i32,
+            (true, false) => u16::from_le_bytes([v[2 * i], v[2 * i + 1]]) as i32,
+            (false, true) => v[i] as i8 as i32,
+            (false, false) => v[i] as i32,
+        }
+    };
+    let length = |v: &[u8; 16], explicit: Option<i64>| match explicit {
+        Some(l) => l.unsigned_abs().min(n as u64) as usize,
+        None => (0..n).find(|&i| element(v, i) == 0).unwrap_or(n),
+    };
+    let (valid_a, valid_b) = (length(&a, la), length(&b, lb));
+    let aggregation = imm8 >> 2 & 3;
+    // BoolRes of element j of b and element i of a; with an invalid element
+    // the value SDM table 4-7 forces
+    let compare = |j: usize, i: usize| -> bool {
+        if i >= valid_a || j >= valid_b {
+            return match aggregation {
+                2 => i >= valid_a && j >= valid_b,
+                3 => i >= valid_a,
+                _ => false,
+            };
+        }
+        let (x, y) = (element(&a, i), element(&b, j));
+        if aggregation != 1 {
+            x == y
+        }
+        else if i % 2 == 0 {
+            y >= x
+        }
+        else {
+            y <= x
+        }
+    };
+    let mut intres1 = 0u16;
+    for j in 0..n {
+        let r = match aggregation {
+            0 => (0..n).any(|i| compare(j, i)),
+            1 => (0..n)
+                .step_by(2)
+                .any(|i| compare(j, i) && compare(j, i + 1)),
+            2 => compare(j, j),
+            _ => (0..n - j).all(|k| compare(j + k, k)),
+        };
+        intres1 |= (r as u16) << j;
+    }
+    let mask = match imm8 >> 4 & 3 {
+        1 => !intres1 & (u16::MAX >> (16 - n)),
+        // (masked: only the valid elements of b)
+        3 => intres1 ^ ((1u32 << valid_b) - 1) as u16,
+        _ => intres1,
+    };
+    let index = if mask == 0 {
+        n as u32
+    }
+    else if imm8 & 0x40 != 0 {
+        15 - mask.leading_zeros()
+    }
+    else {
+        mask.trailing_zeros()
+    };
+    let mut xmm0 = [0; 16];
+    if imm8 & 0x40 != 0 {
+        let size = 16 / n;
+        for i in 0..n {
+            if mask >> i & 1 != 0 {
+                xmm0[i * size..(i + 1) * size].fill(0xFF);
+            }
+        }
+    }
+    else {
+        xmm0[..2].copy_from_slice(&mask.to_le_bytes());
+    }
+    let flags = (mask != 0) as i32
+        | ((valid_b < n) as i32) << 6
+        | ((valid_a < n) as i32) << 7
+        | ((mask & 1) as i32) << 11;
+    StringCompare {
+        mask,
+        index,
+        xmm0,
+        flags,
+    }
+}
+
+/// CRC32 (SSE4.2, F2 0F 38 F0/F1; general-purpose registers only): `crc`
+/// updated with the low `bytes` bytes of `value`, least significant first,
+/// by CRC-32C (the polynomial 11EDC6F41H, bit-reflected)
+pub fn crc32c(crc: u32, value: u64, bytes: u32) -> u32 {
+    const TABLE: [u32; 256] = {
+        let mut table = [0; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut k = 0;
+            while k < 8 {
+                c = if c & 1 != 0 { c >> 1 ^ 0x82F6_3B78 } else { c >> 1 };
+                k += 1;
+            }
+            table[i] = c;
+            i += 1;
+        }
+        table
+    };
+    (0..bytes).fold(crc, |crc, i| {
+        TABLE[(crc ^ (value >> (8 * i)) as u32) as u8 as usize] ^ crc >> 8
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +739,69 @@ mod tests {
             (unsigned(&r, 4, 0), unsigned(&r, 4, 1), unsigned(&r, 4, 3)),
             (0, 0x07060504, 0)
         );
+    }
+    #[test]
+    fn crc32c_check_value_and_widths() {
+        // the check value of CRC-32C, "123456789": from all ones, inverted after
+        let crc = b"123456789"
+            .iter()
+            .fold(!0, |crc, &b| crc32c(crc, b as u64, 1));
+        assert_eq!(!crc, 0xE306_9283);
+        // wider operands: their bytes, least significant first; only `bytes` of them
+        let bytewise = b"12345678"
+            .iter()
+            .fold(!0, |crc, &b| crc32c(crc, b as u64, 1));
+        assert_eq!(crc32c(!0, u64::from_le_bytes(*b"12345678"), 8), bytewise);
+        assert_eq!(
+            crc32c(5, 0xFFFF_0000_1234, 2),
+            crc32c(crc32c(5, 0x34, 1), 0x12, 1)
+        );
+    }
+    #[test]
+    fn compare_strings_examples() {
+        let s = |text: &[u8]| -> [u8; 16] {
+            let mut v = [0; 16];
+            v[..text.len()].copy_from_slice(text);
+            v
+        };
+        // equal any: the vowels of "hello world"; both strings end early
+        let r = compare_strings(0x00, s(b"aeiou"), s(b"hello world"), None, None);
+        assert_eq!((r.mask, r.index, r.flags), (0x92, 1, 0xC1));
+        // ... as a byte mask (PCMPxSTRM, imm8[6])
+        let r = compare_strings(0x40, s(b"aeiou"), s(b"hello world"), None, None);
+        assert_eq!(r.xmm0, s(b"\0\xFF\0\0\xFF\0\0\xFF"));
+        // ranges: the lower-case letters
+        let r = compare_strings(0x04, s(b"az"), s(b"Hello1"), None, None);
+        assert_eq!(r.mask, 0x1E);
+        // equal ordered: "lo" at 3; a needle running off the end of a full
+        // haystack matches there, but not past the end of a shorter one
+        let r = compare_strings(0x0C, s(b"lo"), s(b"hello world"), None, None);
+        assert_eq!((r.mask, r.index), (0x08, 3));
+        let r = compare_strings(0x0C, s(b"bcd"), *b"aaaaaaaaaaaaaaab", None, None);
+        assert_eq!(r.mask, 0x8000);
+        let r = compare_strings(0x0C, s(b"bcd"), s(b"aaaab"), None, None);
+        assert_eq!(r.mask, 0);
+        // equal each, masked negative: the first difference (strcmp), the
+        // elements after both strings equal
+        let r = compare_strings(0x38, s(b"abcd"), s(b"abxd"), None, None);
+        assert_eq!((r.mask, r.index, r.flags & 1), (0xFFF4, 2, 1));
+        // signed words, explicit lengths: absolute values, at most 8
+        let w = |words: &[i16]| -> [u8; 16] {
+            let mut v = [0; 16];
+            for (i, x) in words.iter().enumerate() {
+                v[2 * i..2 * i + 2].copy_from_slice(&x.to_le_bytes());
+            }
+            v
+        };
+        let r = compare_strings(0x03, w(&[-1, 5, 9]), w(&[5, -1, 7, 9]), Some(-2), Some(3));
+        assert_eq!((r.mask, r.flags), (0b011, 0xC1 | 0x800));
+        let r = compare_strings(0x03, w(&[-1, 5]), w(&[5]), Some(i64::MIN), Some(100));
+        // (both saturate to 8 elements, the zero words valid too: they match;
+        // no ZF or SF)
+        assert_eq!((r.mask, r.flags & 0xC0), (0xFF, 0));
+        // no match: the index is the element count
+        let r = compare_strings(0x01, w(&[3]), w(&[4]), None, None);
+        assert_eq!((r.mask, r.index), (0, 8));
     }
     #[test]
     fn palignr_every_shift() {

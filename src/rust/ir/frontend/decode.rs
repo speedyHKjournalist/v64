@@ -71,14 +71,15 @@ pub struct Encoding {
 impl Encoding {
     /// A legacy SSE m128 operand of this form, read or written with `bytes`,
     /// must be 16-byte aligned (#GP(0), SDM vol. 2, Table 2-21): of every XMM
-    /// form accessing 16 bytes but MOVUPS, MOVUPD, MOVDQU and LDDQU, and of
-    /// UNPCKLPS/UNPCKLPD, which read its low quadword
+    /// form accessing 16 bytes but MOVUPS, MOVUPD, MOVDQU, LDDQU and PCMPxSTRx,
+    /// and of UNPCKLPS/UNPCKLPD, which read its low quadword
     pub fn aligned_m128(&self, bytes: u8) -> bool {
         self.sse
             && !self.mmx
             && !matches!(
                 self.opcode,
-                0x0F10 | 0x660F10 | 0xF30F6F | 0x0F11 | 0x660F11 | 0xF30F7F | 0xF20FF0
+                0x0F10 | 0x660F10 | 0xF30F6F | 0x0F11 | 0x660F11 | 0xF30F7F | 0xF20FF0 | 0x660F3A60
+                    ..=0x660F3A63
             )
             && (bytes == 16 || matches!(self.opcode, 0x0F14 | 0x660F14))
     }

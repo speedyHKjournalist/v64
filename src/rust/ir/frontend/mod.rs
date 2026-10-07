@@ -1,6 +1,7 @@
 pub(crate) use crate::decode;
 mod bits;
 mod control;
+mod crc32;
 mod exchange;
 mod far_control;
 pub mod integer;

@@ -535,12 +535,9 @@ fn three_byte_maps_decode_and_stay_undefined_until_implemented() {
     for features in [0, ALL] {
         TEST_FEATURES.with(|f| f.set(features));
         for (bytes, key) in [
-            (&[0x66, 0x0F, 0x3A, 0x61, 0xC1][..], 0x660F3A61), // pcmpestri (no imm8 read)
-            (&[0x66, 0x0F, 0x3A, 0x60, 0xC1], 0x660F3A60),     // pcmpestrm (no imm8 read)
-            (&[0x0F, 0x38, 0xF1, 0x04], 0x0F38F1),             // movbe (no SIB read)
-            (&[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1], 0xF20F38F1), // crc32 r32, r/m16
-            (&[0x0F, 0x38, 0xF0, 0x00], 0x0F38F0),             // movbe
-            (&[0x66, 0x0F, 0x38, 0xF1, 0x00], 0x0F38F1),       // movbe m16 (66: operand size)
+            (&[0x0F, 0x38, 0xF1, 0x04][..], 0x0F38F1), // movbe (no SIB read)
+            (&[0x0F, 0x38, 0xF0, 0x00], 0x0F38F0),     // movbe
+            (&[0x66, 0x0F, 0x38, 0xF1, 0x00], 0x0F38F1), // movbe m16 (66: operand size)
         ] {
             let i = d(bytes, true);
             assert!(
@@ -581,6 +578,75 @@ fn three_byte_maps_decode_and_stay_undefined_until_implemented() {
             decode(&[0x66, 0x0F, 0x38], GuestEip(0), LinearAddress(0), true),
             Err(DecodeStop::Incomplete { .. })
         ));
+    }
+    TEST_FEATURES.with(|f| f.set(0));
+}
+
+#[test]
+fn sse42_rows_decode_with_their_feature() {
+    use crate::cpu::features::{SSE4_1, SSE4_2, SSSE3, TEST_FEATURES};
+    for features in [SSSE3 | SSE4_1, SSSE3 | SSE4_1 | SSE4_2] {
+        TEST_FEATURES.with(|f| f.set(features));
+        for mode32 in [false, true] {
+            let w32 = if mode32 { 32 } else { 16 };
+            // (the operand size: CRC32's source; none for PCMPxSTRx, whose 66 is mandatory)
+            for (bytes, key, memory, imm8, operand_size) in [
+                (
+                    &[0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x0C][..],
+                    0x660F3A63,
+                    false,
+                    Some(0x0C),
+                    None,
+                ), // pcmpistri
+                (
+                    &[0x66, 0x0F, 0x3A, 0x60, 0x07, 0x40],
+                    0x660F3A60,
+                    true,
+                    Some(0x40),
+                    None,
+                ), // pcmpestrm [..]
+                (
+                    &[0xF2, 0x0F, 0x38, 0xF0, 0xC1],
+                    0xF20F38F0,
+                    false,
+                    None,
+                    Some(w32),
+                ), // crc32 r32, r/m8
+                (
+                    &[0xF2, 0x0F, 0x38, 0xF1, 0x07],
+                    0xF20F38F1,
+                    true,
+                    None,
+                    Some(w32),
+                ), // crc32 r32, [..]
+                // (66 is the operand size)
+                (
+                    &[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],
+                    0xF20F38F1,
+                    false,
+                    None,
+                    Some(48 - w32),
+                ),
+            ] {
+                let i = d(bytes, mode32);
+                assert_eq!(i.encoding.opcode, key, "{bytes:02X?}");
+                if features & SSE4_2 == 0 {
+                    // #UD right after the ModRM byte: no EA, no immediate
+                    assert!(i.early_ud && i.baseline_ud && i.ea.is_none() && i.immediate.is_none());
+                    assert_eq!(i.length as usize, bytes.len() - imm8.map_or(0, |_| 1));
+                    continue;
+                }
+                assert!(!i.early_ud && !i.baseline_ud, "{bytes:02X?}");
+                assert_eq!(
+                    (i.length as usize, i.ea.is_some(), i.immediate),
+                    (bytes.len(), memory, imm8),
+                    "{bytes:02X?}"
+                );
+                assert!(operand_size.is_none_or(|size| i.operand_size == size));
+            }
+            // F3 selects no CRC32
+            assert!(d(&[0xF3, 0x0F, 0x38, 0xF1, 0xC1], mode32).early_ud);
+        }
     }
     TEST_FEATURES.with(|f| f.set(0));
 }

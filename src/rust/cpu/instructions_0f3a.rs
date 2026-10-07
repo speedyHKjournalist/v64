@@ -3,6 +3,7 @@
 //! semantics are in crate::cpu::simd_int, shared with the IR and x64 engines.
 
 use crate::cpu::cpu::*;
+use crate::cpu::global_pointers::{flags, flags_changed};
 use crate::cpu::simd_int;
 use crate::cpu::sse_instr::{sse_fp_dot_product, sse_fp_round};
 
@@ -181,6 +182,45 @@ pub unsafe fn instr_660F3A41_reg(r1: i32, r2: i32, imm: i32) {
 }
 pub unsafe fn instr_660F3A41_mem(addr: i32, r: i32, imm: i32) {
     instr_660F3A41(return_on_pagefault!(safe_read128s_aligned(addr)), r, imm);
+}
+
+/// PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI (66 0F 3A 60-63 by `op`): the
+/// strings of XMM `r` and `source` compared as imm8 says (simd_int::
+/// compare_strings), the explicit forms' lengths in EAX and EDX. The index
+/// goes to ECX or the mask to XMM0; CF, ZF, SF and OF are set, AF and PF
+/// cleared. The memory operand need not be aligned (SDM, exception type 4).
+pub unsafe fn pcmpstr(op: u8, source: reg128, r: i32, imm8: i32) {
+    let explicit = op & 2 == 0;
+    let length = |register| explicit.then(|| read_reg32(register) as i64);
+    let result = simd_int::compare_strings(
+        imm8 as u8,
+        read_xmm128s(r).u8,
+        source.u8,
+        length(EAX),
+        length(EDX),
+    );
+    if op & 1 != 0 {
+        write_reg32(ECX, result.index as i32);
+    }
+    else {
+        write_xmm_reg128(0, reg128 { u8: result.xmm0 });
+    }
+    *flags_changed = 0;
+    *flags = *flags & !FLAGS_ALL | result.flags;
+}
+macro_rules! pcmpstr {
+    ($($op:literal $reg:ident $mem:ident;)*) => {$(
+        pub unsafe fn $reg(r1: i32, r2: i32, imm: i32) { pcmpstr($op, read_xmm128s(r1), r2, imm) }
+        pub unsafe fn $mem(addr: i32, r: i32, imm: i32) {
+            pcmpstr($op, return_on_pagefault!(safe_read128s(addr)), r, imm)
+        }
+    )*};
+}
+pcmpstr! {
+    0x60 instr_660F3A60_reg instr_660F3A60_mem; // pcmpestrm
+    0x61 instr_660F3A61_reg instr_660F3A61_mem; // pcmpestri
+    0x62 instr_660F3A62_reg instr_660F3A62_mem; // pcmpistrm
+    0x63 instr_660F3A63_reg instr_660F3A63_mem; // pcmpistri
 }
 
 /// ROUNDPS/PD/SS/SD of the XMM `source` register's value (the IR helper):

@@ -145,6 +145,11 @@ pub const OPERATIONS: &[(u32, u32)] = &[
     (0x660F3A40, 16),
     (0x660F3A41, 16),
     (0x660F3A42, 16),
+    // (PCMPxSTRx: EAX and EDX in, ECX or XMM0 and the flags out)
+    (0x660F3A60, 16),
+    (0x660F3A61, 16),
+    (0x660F3A62, 16),
+    (0x660F3A63, 16),
 ];
 pub fn supports(i: &DecodedInstruction) -> bool {
     OPERATIONS.iter().any(|&(op, _)| op == i.encoding.opcode)

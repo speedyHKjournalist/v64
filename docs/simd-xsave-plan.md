@@ -1337,3 +1337,73 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `x64-differential-tests`、`x64-page-tier-tests`、`nasmtests`、`nasmtests-force-jit`、`kvm-unit-test`、
   `smp-tests`、`api-tests`、`expect-tests`、`cpu-optimization-tests`、`cpu-plan-tests`、`jitpagingtests`、
   `platform-contract-tests`、rustfmt、state layout、isa-forms 检查和 eslint 全部通过。
+
+### P4b 第三部分：PCMPxSTRx、CRC32 与 POPCNT 审计（2026-10-07）
+
+- **范围**：PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI（66 0F 3A 60–63）和 CRC32（F2 0F 38 F0/F1；
+  66 选择 r/m16，64 位模式下 REX.W 选择 r64），SSE4.2 至此完整（PCMPGTQ 在第一部分）。
+  POPCNT 只做审计。与 CRC32 共用 0F 38 F0/F1 的 MOVBE 仍 #UD（P10）。
+- **语义**：`cpu/simd_int.rs` 新增 `compare_strings` 和 `crc32c`，三个引擎共用。
+  - `compare_strings` 按 SDM 第 2 卷 4.1 节：imm8[1:0] 选元素格式；四种聚合，无效元素按
+    表 4-7 强制取值；四种极性（masked negative 只翻转 b 的有效元素）；xSTRI 取最低或最高
+    置位位的下标，没有置位时为元素个数；xSTRM 输出位掩码或字节/字掩码。显式长度取绝对值，
+    最多为元素个数（i64::MIN 也正确）；隐式长度到第一个零元素为止。
+  - `crc32c` 用查表实现 CRC-32C（多项式 11EDC6F41H，反射形式 82F63B78H），低字节在前。
+  - 单元测试：CRC-32C 校验值（"123456789" 得 0xE3069283）、各种聚合的例子，以及 equal
+    ordered 在满 16 字节的 haystack 末尾部分匹配、masked negative 求第一个差异（strcmp）、
+    带符号字和显式长度。
+- **解释器**：`instructions_0f3a.rs` 的 `pcmpstr`：EAX/EDX 为显式长度，结果写 ECX 或 XMM0，
+  置 CF、ZF、SF、OF，清 AF、PF；m128 不要求对齐（SDM 异常类型 4 的注）。
+  `instructions_0f38.rs` 的 CRC32：目的总是 r32，不改标志，不做 CR0.TS、CR0.EM、CR4.OSFXSR
+  检查。
+- **IR**：PCMPxSTRx 经 SSE helper 执行；`Encoding::aligned_m128` 和 fixture 的 `aligned_m128`
+  都把它们排除在对齐要求之外。它们读 EAX/EDX、写 ECX/XMM0 和标志，不在
+  `xmm_register_operands` 中。CRC32 新增 `ir/frontend/crc32.rs` 和 `ir/runtime/crc32.rs`：
+  寄存器形式用 `ir_crc32_reg_continue`（标量 reload，不失效代码），内存形式用
+  `ir_crc32_mem_continue`（完整 reload，与 SSE 内存形式一样检查 continuation context）。两者都
+  让 region 继续执行，CRC32 循环不会在每条指令处退出 region。lowering 类别为
+  `CpuCrc32Helper`，测试为 `make ir-crc32-tests`。Tier-0 逐条解释。
+- **x64**：`vector.rs` 执行 PCMPxSTRx：长度取 EAX/EDX，有 REX.W 时取 RAX/RDX；写 ECX 时 RCX
+  零扩展。`execute.rs` 执行 CRC32：r/m8（有 REX 时可用 SIL/DIL，无 REX 时为 AH–BH）、
+  r/m16/32/64，结果零扩展到目的寄存器（r32 和 REX.W 的 r64），不改标志（`flag_free`）。
+- **POPCNT 审计**：CPUID.1:ECX[23] 始终报告（v86 的基础能力），与 `cpu_features` 中的
+  SSE4.2 无关；16/32/64 位形式和标志（清 OF、SF、AF、CF、PF，源为零时置 ZF）都正确，没有
+  XMM 状态检查。IR 的原生 lowering 已由 bits 测试覆盖。代码未改动，新增测试。
+- **测试**：
+  - `tests/rust/sse4.mjs`：
+    - 没有任何 SSE4 时，PCMPxSTRx 和 CRC32 #UD，POPCNT 可用且 CPUID 报告它。新增只有
+      SSE4.1 的机器：CPUID 只报告 SSE4.1，PCMPGTQ、PCMPxSTRx、CRC32 #UD，SSE4.1 形式正常执行。
+    - PCMPxSTRx 四个形式各 512 例：全部 imm8（含保留的 bit 7），寄存器源和不对齐的内存源，
+      操作数可与 XMM0 重合。显式长度共 21 种，含 0、负数、-2^31 和超出元素数的值。断言数据
+      覆盖了无匹配、全匹配和两个串都提前结束的情形。
+    - CRC32 三种宽度各 128 例：含 AH–BH、源与目的同一寄存器、不对齐内存，检查两种标志状态都
+      保持不变。POPCNT r16/r32 各 64 例。
+    - 异常：PCMPxSTRx 的不对齐 m128 不产生 #GP；CR0.TS 时 #NM，CR0.EM 或没有 OSFXSR 时 #UD；
+      LOCK、F2、F3 #UD。隐式长度的串在第一个字节就结束，仍读整个 m128，跨入不存在的页时 #PF。
+      CRC32、POPCNT 不受 CR0.TS、CR0.EM、OSFXSR 影响；LOCK #UD，F3 0F 38 F0/F1 #UD，CRC32
+      跨页 #PF。
+    - 共 7508 项，三个构建都通过。
+  - `tests/x64/sse4.mjs`：共 1227 例、22 个故障（第二部分为 924 例、12 个故障）。新增：
+    PCMPxSTRx 有无 REX.W（`o64`），RCX 预置全 1 以检查零扩展；CRC32 的 REX.W、AH、SIL、
+    r9d,r10w、r9,r10 等形式；POPCNT 16/32/64 位。故障表新增不产生故障的项：不对齐的
+    PCMPxSTRx，以及 CR0.TS/EM 下的 CRC32 和 POPCNT。
+  - QEMU 差异：QEMU 10.2 的 `gen_PCMPESTRx` 只把 8 位立即数传给 helper，而 helper 靠 bit 8
+    判断 REX.W，于是 REX.W 形式仍用 EAX/EDX。SDM 规定用 RAX/RDX。已登记：对 QEMU 按 32 位
+    长度检查，v86 与 QEMU 比较时略去这些结果槽；v86 按 SDM 与模型比较。
+  - nasm：70 个新测试（PCMPxSTRx 40 个，CRC32 30 个），QEMU fixture 全部通过，共 16499 个。
+  - IR：SSE helper 差分包含 PCMPxSTRx（每个构建 179820 例）。CRC32 差分每个构建 696 例：
+    寄存器/内存源对照模型、MMIO、跨页 #PF、恰好到页尾、空段 #GP，以及 CR0.TS/EM、OSFXSR
+    不起作用。
+  - 解码：x64 和 IR 解码器新增有无 SSE4.2 时的解码测试，`decode_rules.mjs` 把 PCMPISTRx 和
+    CRC32 移到“没有能力时 #UD”的列表。
+  - 故意植入 8 个错误，全部被发现：解释器 PCMPESTRx 交换 EAX/EDX、regions 的 PCMPxSTRx 内存
+    源要求对齐、regions 的 CRC32 字节寄存器按 32 位读、regions 的 CRC32 m16 读 4 字节（只有
+    “恰好到页尾”的用例发现）、frontend 把 CRC32 F1 的宽度固定为 32、x64 忽略 REX.W、x64 CRC32
+    F0 按操作数宽度读、x64 的 xSTRI 只写 CX。
+- **回归**：`p4b3-batch` 共 53 个目标（第二部分的目标加 `ir-crc32-tests`），48 个通过。另外
+  5 个（`state-layout-check`、`platform-contract-tests`、`x64-decode-tests`、
+  `x64-opcode-matrix-tests`、`smp-tests`）在前置的 state layout 检查处失败。原因是另一个会话
+  正在修改 `src/rust/cpu/mmio_ram.rs`：它新增了 `cfg(test)` 静态变量，但没有登记到
+  `gen/state_layout.js`。在只含本部分改动的工作树中，state layout 检查通过；这些目标其余的
+  命令（`cpu_features`、`cpu_contract`、`profile_options`、`cargo test x64::`、`simd_corpus`、
+  iced-x86 oracle、opcode 矩阵、`core_swap` 的两种模式）直接运行，全部通过。

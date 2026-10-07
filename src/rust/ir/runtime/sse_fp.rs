@@ -423,6 +423,9 @@ pub unsafe fn ir_sse_fp_reg_continue(
         0x660F3A20 => sem3a::instr_660F3A20_reg(source, destination, immediate),
         0x660F3A21 => sem3a::instr_660F3A21_reg(source, destination, immediate),
         0x660F3A22 => sem3a::instr_660F3A22_reg(source, destination, immediate),
+        0x660F3A60..=0x660F3A63 => {
+            sem3a::pcmpstr(op as u8, cpu::read_xmm128s(source), destination, immediate)
+        },
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
     finish(true)
@@ -826,6 +829,9 @@ unsafe fn memory(
             sem3a::instr_660F3A21(cpu::safe_read32s(addr)? as u32, destination, immediate)
         },
         0x660F3A22 => sem3a::insert(destination, 4, cpu::safe_read32s(addr)? as u32, immediate),
+        0x660F3A60..=0x660F3A63 => {
+            sem3a::pcmpstr(op as u8, cpu::safe_read128s(addr)?, destination, immediate)
+        },
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
     Ok(())

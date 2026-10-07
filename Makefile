@@ -1372,6 +1372,11 @@ ir-sse-fp-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-rel
 	cargo test ir::sse_fp_tests
 	node tests/ir/differential/sse_fp.mjs
 
+.PHONY: ir-crc32-tests
+ir-crc32-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::crc32_tests
+	node tests/ir/differential/crc32.mjs
+
 .PHONY: ir-mmx-tests
 ir-mmx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::mmx_tests

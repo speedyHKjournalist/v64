@@ -5,12 +5,16 @@
 // with register and memory sources, against QEMU and the SDM model of
 // tests/rust/sse4_model.mjs; PTEST's flags; #GP(0) for a misaligned m128
 // (none for narrow operands), #NM with CR0.TS, #UD with CR0.EM, F3 or
-// MOVNTDQA from a register. Interpreted, with the x64 page tier, and with
-// compatibility-mode code compiled. Both blocks loop so that they become hot.
+// MOVNTDQA from a register. SSE4.2: PCMPxSTRx (lengths in EAX/EDX, or RAX/RDX
+// with REX.W; the index to ECX, zero-extended; an unaligned m128), CRC32 (REX.W,
+// AH and SIL, the destination zero-extended, the flags kept) and POPCNT, all
+// without XMM state checks but PCMPxSTRx's. Interpreted, with the x64 page
+// tier, and with compatibility-mode code compiled. Both blocks loop so that
+// they become hot.
 import assert from "node:assert/strict";
 import {assemble, reference, actual} from "./guest_runner.mjs";
 import {long_mode_guest} from "./guest_builder.mjs";
-import {Fp, dot_product, extract, get, insert, insertps, ptest, round_lane, set, sse4_38, sse4_3a} from "../rust/sse4_model.mjs";
+import {Fp, compare_strings, crc32, dot_product, extract, get, insert, insertps, ptest, round_lane, set, sse4_38, sse4_3a} from "../rust/sse4_model.mjs";
 
 const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, MATCH = OUT + 0xC0, FAULTS = OUT + 0x100, RESULTS = OUT + 0x1000;
 // (compatibility-mode code is compiled only after a while)
@@ -18,7 +22,7 @@ const IDT = 0x380000, ROUNDS = 400, COMPAT_ROUNDS = 20000;
 
 // 16 sample vectors: random bytes and lanes of edge values; then fractional,
 // halfway, tiny and special floating-point values (16-18 single, 19-20 double)
-const samples = new Uint8Array(21 * 16);
+const samples = new Uint8Array(26 * 16);
 {
     const view = new DataView(samples.buffer);
     let seed = 0x2468ACE1;
@@ -45,6 +49,12 @@ const samples = new Uint8Array(21 * 16);
     [[2.5, -0.5], [1e-310, -1234.5678]].forEach((values, n) => values.forEach((v, i) => view.setFloat64((19 + n) * 16 + i * 8, v, true)));
     // (an SNaN in the last single lane)
     view.setUint32(18 * 16 + 12, 0x7F800001, true);
+    // strings (21-24): a haystack, a needle, ranges, words of either sign (a
+    // zero element in each but the haystack); 25 pads the unaligned reads
+    samples.set([0x61, 0x62, 0x63, 0x61, 0x62, 0x63, 0x64, 0x62, 0x63, 0x7A, 0x41, 0x80, 0xFF, 0x62, 0x63, 0x61], 21 * 16);
+    samples.set([0x62, 0x63, 0x00, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D], 22 * 16);
+    samples.set([0x61, 0x63, 0x7A, 0x7A, 0x80, 0x81, 0x41, 0x5A, 0x00, 0x00, 0x30, 0x39, 0x01, 0x02, 0x03, 0x04], 23 * 16);
+    [0x0061, 0x8000, 0x0062, 0xFFFF, 0x7FFF, 0x0000, 0x0061, 0x0063].forEach((v, i) => view.setUint16(24 * 16 + i * 2, v, true));
 }
 const sample = i => samples.subarray(i * 16, i * 16 + 16);
 const hex = b => Buffer.from(b).toString("hex");
@@ -123,6 +133,55 @@ for(const long of [true, false])
         cases.push({long, kind: "dot", name, op, double, memory, dst: base + n % 8, src: memory ? undefined : base + (n + 3) % 8, a, b, imm8, offset: 0});
         cases.push({long, kind: "mxcsr", name: name + " MXCSR"});
     }
+    // PCMPxSTRx: XMM0 (preset) in its slot, RCX/ECX (ones before) and the
+    // flags in the next; explicit lengths in RAX/RDX with REX.W (o64), else
+    // EAX/EDX (the low halves: other lengths)
+    const lengths = [[5n, 3n], [-4n, 17n], [0x100000003n, -0x100000002n], [0xFFFFFFFFn, 0x80000000n], [-0x8000000000000000n, 7n]];
+    for(const [name, op] of [["pcmpestrm", 0x60], ["pcmpestri", 0x61], ["pcmpistrm", 0x62], ["pcmpistri", 0x63]])
+        for(const memory of [false, true])
+            for(const [imm8, a, b] of [[0x00, 22, 21], [0x0C, 22, 21], [0x04, 23, 21], [0x48, 21, 22], [0x3B, 24, 24], [0x75, 24, 23], [0x18, 21, 21]])
+                for(const w of long && op < 0x62 ? [false, true] : [false])
+    {
+        const n = cases.length;
+        const [la, lb] = lengths[n % lengths.length];
+        cases.push({long, kind: "pcmpstr", name, op, memory, w, dst: base + n % 8, src: memory ? undefined : base + (n + 3) % 8, a, b, imm8, la, lb,
+            offset: memory ? n % 16 : 0});
+        cases.push({long, kind: "registers", name: name + " RCX, flags"});
+    }
+    // CRC32 and POPCNT: [instruction, destination, its value before, the
+    // source's register and its value (or a memory operand), the operation's
+    // width]; the destination and the flags (set before) in the slot
+    const ONES = 0xFFFFFFFF00000000n;
+    const scalar = long ? [
+        ["crc32 eax,byte [samples + 3]", "rax", ONES | 0x12345678n, undefined, 0n, 8],
+        ["crc32 rax,byte [samples + 17]", "rax", ONES, undefined, 0n, 8],
+        ["crc32 eax,word [samples + 33]", "rax", ONES | 0xFFFFFFFFn, undefined, 0n, 16],
+        ["crc32 eax,dword [samples + 50]", "rax", ONES | 0x80000001n, undefined, 0n, 32],
+        ["crc32 rax,qword [samples + 67]", "rax", ONES | 0x1n, undefined, 0n, 64],
+        ["crc32 eax,ah", "rax", ONES | 0x0000C300n, undefined, 0n, 8],
+        ["crc32 eax,sil", "rax", ONES | 0x5A5A5A5An, "rsi", 0x1234567890ABCDEFn, 8],
+        ["crc32 r9d,r10w", "r9", ONES | 0xDEADBEEFn, "r10", 0xFEDCBA9876543210n, 16],
+        ["crc32 r9,r10", "r9", ONES | 0xDEADBEEFn, "r10", 0xFEDCBA9876543210n, 64],
+        ["crc32 r11d,ecx", "r11", ONES, "rcx", 0xFFFFFFFF00000000n, 32],
+        ["popcnt ax,cx", "rax", ONES | 0x12345678n, "rcx", 0xFFFF0000FFFFFFFFn, 16],
+        ["popcnt eax,ecx", "rax", ONES, "rcx", 0xFFFFFFFF00000000n, 32],
+        ["popcnt rax,rcx", "rax", 0n, "rcx", 0x8000000000000001n, 64],
+        ["popcnt r10,qword [samples + 160]", "r10", ONES, undefined, 0n, 64],
+        ["popcnt r10w,word [samples + 177]", "r10", ONES, undefined, 0n, 16],
+    ] : [
+        ["crc32 eax,byte [samples + 5]", "eax", 0x12345678n, undefined, 0n, 8],
+        ["crc32 eax,word [samples + 37]", "eax", 0xFFFFFFFFn, undefined, 0n, 16],
+        ["crc32 eax,dword [samples + 71]", "eax", 0n, undefined, 0n, 32],
+        ["crc32 eax,dh", "eax", 0x87654321n, "edx", 0x0000A500n, 8],
+        ["crc32 eax,cx", "eax", 0x87654321n, "ecx", 0x12345678n, 16],
+        ["crc32 ebx,ebx", "ebx", 0x55AA55AAn, undefined, 0n, 32],
+        ["popcnt ax,word [samples + 177]", "eax", 0xFFFFFFFFn, undefined, 0n, 16],
+        ["popcnt ecx,eax", "ecx", 0n, "eax", 0n, 32],
+    ];
+    for(const [instruction, dst, before, src, value, width] of scalar)
+    {
+        cases.push({long, kind: "scalar", name: instruction, instruction, dst, before, src, value, width});
+    }
 }
 // (X64_SSE4_FILTER=text: only the cases whose name has it, for debugging)
 if(process.env.X64_SSE4_FILTER)
@@ -197,8 +256,30 @@ const code = (c, n) => {
             lines.push(`stmxcsr [${out + 16}]`, `mov dword [${out + 20}],0`, `mov dword [${out + 24}],0`, `mov dword [${out + 28}],0`);
             break;
         }
+        case "pcmpstr":
+        {
+            const [ax, dx, cx] = c.long ? ["rax", "rdx", "rcx"] : ["eax", "edx", "ecx"];
+            const value = v => "0x" + BigInt.asUintN(c.long ? 64 : 32, v).toString(16);
+            // (ECX counts the rounds)
+            lines.push(`push ${cx}`, `movdqu xmm0,${at(5)}`, `movdqu ${x(c.dst)},${at(c.a)}`);
+            if(!c.memory) lines.push(`movdqu ${x(c.src)},${at(c.b)}`);
+            // (OF, SF, AF set by 0x7F + 1, CF by STC)
+            lines.push("mov al,0x7F", "add al,1", "stc", `mov ${ax},${value(c.la)}`, `mov ${dx},${value(c.lb)}`, `mov ${cx},-1`);
+            lines.push(`${c.w ? "o64 " : ""}${c.name} ${x(c.dst)},${c.memory ? at(c.b, c.offset) : x(c.src)},${c.imm8}`);
+            lines.push(`mov [${out + 16}],${cx}`, ...c.long ? [] : [`mov dword [${out + 20}],0`]);
+            lines.push(c.long ? "pushfq\npop rax" : "pushfd\npop eax", "and eax,0x8D5", `mov [${out + 24}],eax`, `mov dword [${out + 28}],0`);
+            lines.push(`movdqu [${out}],xmm0`, `pop ${cx}`);
+            break;
+        }
+        case "scalar":
+            lines.push(c.long ? "push rcx" : "push ecx", "mov al,0x7F", "add al,1", "stc");
+            if(c.src) lines.push(`mov ${c.src},0x${c.value.toString(16)}`);
+            lines.push(`mov ${c.dst},0x${c.before.toString(16)}`, c.instruction, `mov [${out}],${c.dst}`, ...c.long ? [] : [`mov dword [${out + 4}],0`]);
+            lines.push(c.long ? "pushfq\npop rax" : "pushfd\npop eax", "and eax,0x8D5", `mov [${out + 8}],eax`, `mov dword [${out + 12}],0`);
+            lines.push(c.long ? "pop rcx" : "pop ecx");
+            break;
         // (written by the case before)
-        case "mxcsr":
+        case "mxcsr": case "registers":
             break;
     }
     return lines.join("\n");
@@ -221,11 +302,23 @@ const FAULT_CASES = [
     [6, "F2 pextrb eax,xmm1", false, "db 0xF2, 0x66, 0x0F, 0x3A, 0x14, 0xC8, 1"],
     [6, "movntdqa xmm1,xmm2", true, "db 0x66, 0x0F, 0x38, 0x2A, 0xCA"],
     [6, "movntdqa xmm3,xmm4", false, "db 0x66, 0x0F, 0x38, 0x2A, 0xDC"],
+    // (0: no fault. PCMPxSTRx: an m128 without alignment, SDM exception type
+    // 4 note; CRC32 and POPCNT have no XMM state checks)
+    [0, "pcmpistri xmm8,[misaligned]", true, "pcmpistri xmm8,[samples + 3],0x0C"],
+    [0, "pcmpestrm xmm1,[misaligned]", false, "pcmpestrm xmm1,[samples + 9],0x40"],
+    [7, "pcmpestri xmm1,xmm2 with CR0.TS", false, "pcmpestri xmm1,xmm2,0"],
+    [6, "pcmpistrm xmm9,xmm10 with CR0.EM", true, "pcmpistrm xmm9,xmm10,0x40"],
+    [0, "crc32 eax,ecx with CR0.TS", true, "crc32 eax,ecx"],
+    [0, "crc32 rax,byte [x] with CR0.EM", true, "crc32 rax,byte [samples]"],
+    [0, "crc32 eax,byte [x] with CR0.EM", false, "crc32 eax,byte [samples]"],
+    [0, "popcnt eax,ecx with CR0.TS", false, "popcnt eax,ecx"],
+    [6, "lock crc32 eax,ecx", true, "db 0xF0, 0xF2, 0x0F, 0x38, 0xF1, 0xC1"],
+    [6, "F3 0F 38 F0", false, "db 0xF3, 0x0F, 0x38, 0xF0, 0xC1"],
 ];
 const SET_CR0 = (bits, long) => long ? `mov rax,cr0\nor eax,${bits}\nmov cr0,rax` : `mov eax,cr0\nor eax,${bits}\nmov cr0,eax`;
 const CLEAR_CR0 = long => long ? "mov rax,cr0\nand eax,~12\nmov cr0,rax" : "mov eax,cr0\nand eax,~12\nmov cr0,eax";
 const faults = long => FAULT_CASES.map(([vector, what, in_long, instruction], n) => in_long !== long ? "" : `
-${vector === 7 ? SET_CR0(8, long) : vector === 6 && what.includes("CR0.EM") ? SET_CR0(4, long) : ""}
+${what.includes("CR0.TS") ? SET_CR0(8, long) : what.includes("CR0.EM") ? SET_CR0(4, long) : ""}
 mov dword [${CASE}],${n}
 mov dword [${SKIP}],fault_end${n} - fault${n}
 fault${n}: ${instruction}
@@ -316,18 +409,79 @@ samples: db ${Array.from(samples).join(",")}
 `));
 
 const length = RESULTS - OUT + cases.length * 16;
+// PCMPxSTRx by the model: XMM0 preset, then the destination and a register
+// source. REX.W: the lengths in RAX and RDX (SDM); QEMU 10.2 does not pass
+// REX.W to its helpers (target/i386/tcg/emit.c.inc, gen_PCMPESTRx) and takes
+// EAX and EDX, a deviation (`qemu`)
+const strings = (c, qemu = false) => {
+    const registers = [];
+    registers[0] = sample(5);
+    registers[c.dst] = sample(c.a);
+    if(!c.memory) registers[c.src] = sample(c.b);
+    const b = c.memory ? samples.subarray(c.b * 16 + c.offset, c.b * 16 + c.offset + 16) : registers[c.src];
+    const explicit = c.op < 0x62, width = c.w && !qemu ? 64 : 32;
+    const r = compare_strings(c.imm8, registers[c.dst], b, explicit ? BigInt.asIntN(width, c.la) : undefined, explicit ? BigInt.asIntN(width, c.lb) : undefined);
+    return {...r, xmm0: c.op & 1 ? registers[0] : r.mask};
+};
+// a register operand's name: its register, the bits' position and number
+const register = name => {
+    let m;
+    if((m = /^r(\d+)([dwb]?)$/.exec(name))) return {key: "r" + m[1], shift: 0n, bits: {"": 64, d: 32, w: 16, b: 8}[m[2]]};
+    if((m = /^([abcd])([hl])$/.exec(name))) return {key: m[1], shift: m[2] === "h" ? 8n : 0n, bits: 8};
+    if((m = /^(si|di|bp|sp)l$/.exec(name))) return {key: m[1], shift: 0n, bits: 8};
+    if((m = /^([re]?)([abcd])x$/.exec(name))) return {key: m[2], shift: 0n, bits: {r: 64, e: 32, "": 16}[m[1]]};
+    if((m = /^([re]?)(si|di|bp|sp)$/.exec(name))) return {key: m[2], shift: 0n, bits: {r: 64, e: 32, "": 16}[m[1]]};
+    throw new Error(`register ${name}`);
+};
+// CRC32 and POPCNT by the model: the destination register afterwards, the flags
+const scalar_result = c => {
+    const [, mnemonic, d, s] = /^(\S+) ([^,]+),(.+)$/.exec(c.instruction);
+    const registers = {};
+    if(c.src) registers[register(c.src).key] = c.value;
+    registers[register(c.dst).key] = c.before;
+    const memory = /\[samples \+ (\d+)\]/.exec(s);
+    let source;
+    if(memory) source = get(samples.subarray(+memory[1]), c.width / 8, 0);
+    else
+    {
+        const r = register(s);
+        source = registers[r.key] >> r.shift & (1n << BigInt(r.bits)) - 1n;
+    }
+    const old = registers[register(d).key];
+    if(mnemonic === "crc32") return {value: crc32(old & 0xFFFFFFFFn, source, c.width / 8), flags: 0x891};
+    const ones = BigInt(source.toString(2).split("1").length - 1);
+    // (a 16-bit destination keeps the rest; a 32-bit one is zero-extended in 64-bit mode)
+    const value = register(d).bits === 16 ? old & ~0xFFFFn | ones : ones;
+    return {value: c.long ? value : value & 0xFFFFFFFFn, flags: source === 0n ? 0x40 : 0};
+};
 const floating = (c) => {
     if(c.kind === "dot") return dot_product(0x1F80, sample(c.a), sample(c.b), c.imm8, c.double);
     const fp = new Fp(0x1F80), result = Uint8Array.from(sample(c.a)), size = c.double ? 8 : 4;
     for(let i = 0; i < (c.scalar ? 1 : 16 / size); i++) set(result, size, i, round_lane(fp, get(sample(c.b), size, i), c.double, c.imm8));
     return {result, mxcsr: fp.finish().mxcsr};
 };
-const expected_result = (c, n) => {
+const expected_result = (c, n, qemu) => {
     const result = new Uint8Array(16);
     switch(c.kind)
     {
         case "round": case "dot":
             return floating(c).result;
+        case "pcmpstr":
+            return strings(c, qemu).xmm0;
+        case "registers":
+        {
+            const c0 = cases[n - 1], r = strings(c0, qemu);
+            set(result, 8, 0, c0.op & 1 ? BigInt(r.index) : c0.long ? 0xFFFFFFFFFFFFFFFFn : 0xFFFFFFFFn);
+            set(result, 4, 2, BigInt((r.cf ? 1 : 0) | (r.zf ? 0x40 : 0) | (r.sf ? 0x80 : 0) | (r.of ? 0x800 : 0)));
+            return result;
+        }
+        case "scalar":
+        {
+            const {value, flags} = scalar_result(c);
+            set(result, 8, 0, value);
+            set(result, 4, 2, BigInt(flags));
+            return result;
+        }
         case "mxcsr":
             set(result, 4, 0, BigInt(floating(cases[n - 1]).mxcsr));
             return result;
@@ -378,18 +532,21 @@ const check = (result, label) => {
     // the model first: QEMU is a reference, not the specification
     cases.forEach((c, n) => {
         const value = Uint8Array.from(result.subarray(RESULTS - OUT + n * 16, RESULTS - OUT + n * 16 + 16));
-        assert.equal(hex(value), hex(expected_result(c, n)),
-            `${label}: ${c.long ? "64-bit" : "compatibility"} ${c.name} xmm${c.dst}, ${c.memory ? "[mem]" : c.src === undefined ? "r" : "xmm" + c.src} imm8=${c.imm8}`);
+        assert.equal(hex(value), hex(expected_result(c, n, label === "QEMU")),
+            `${label}: ${c.long ? "64-bit" : "compatibility"} ${["scalar", "registers", "mxcsr"].includes(c.kind) ? c.name : `${c.name} xmm${c.dst}, ${c.memory ? "[mem]" : c.src === undefined ? "r" : "xmm" + c.src} imm8=${c.imm8}`}`);
     });
     FAULT_CASES.forEach(([vector, what, , , qemu], n) => {
         const deviation = label === "QEMU" && qemu !== undefined;
         assert.equal(result.readUInt32LE(FAULTS - OUT + n * 16), deviation ? qemu : vector, `${label}: ${what}: vector`);
-        assert.equal(result[MATCH - OUT + n], deviation && qemu === 0 ? 0 : 1, `${label}: ${what}: RIP`);
+        assert.equal(result[MATCH - OUT + n], deviation && qemu === 0 || vector === 0 ? 0 : 1, `${label}: ${what}: RIP`);
     });
 };
-// v86 against QEMU, but for the fault records where QEMU deviates
+// v86 against QEMU, but for the fault records and the REX.W PCMPESTRx results where QEMU deviates
 const comparable = buffer => {
     const copy = Buffer.from(buffer);
+    cases.forEach((c, n) => {
+        if(c.kind === "pcmpstr" && c.w) copy.fill(0, RESULTS - OUT + n * 16, RESULTS - OUT + n * 16 + 32);
+    });
     FAULT_CASES.forEach(([, , , , qemu], n) => {
         if(qemu === undefined) return;
         copy.fill(0, FAULTS - OUT + n * 16, FAULTS - OUT + n * 16 + 16);

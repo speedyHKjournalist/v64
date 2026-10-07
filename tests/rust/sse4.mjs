@@ -7,13 +7,18 @@
 // flags of PTEST and the exceptions: #UD without the feature, with CR0.EM,
 // without CR4.OSFXSR, with LOCK or an F2/F3 prefix and for MOVNTDQA from a
 // register, #NM with CR0.TS, #GP(0) for a misaligned m128 (none for the
-// narrow operands) and #PF, each without effect. Every case runs in the
+// narrow operands) and #PF, each without effect. SSE4.2: PCMPESTRI/M and
+// PCMPISTRI/M for every imm8 (ECX or XMM0 and the flags; explicit lengths
+// zero, negative, the most negative, beyond the register; an unaligned m128;
+// the whole m128 read though a string ends early), CRC32 from 8-, 16- and
+// 32-bit registers (AH-BH too) and memory (flags kept, no XMM state checks),
+// and POPCNT, which has its own CPUID bit. Every case runs in the
 // interpreter, then hot under Tier-0 and the region tiers.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
 import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
-import { extract, get, insert, insertps, ptest, set, sse4_38, sse4_3a } from "./sse4_model.mjs";
+import { compare_strings, crc32, extract, get, insert, insertps, ptest, set, sse4_38, sse4_3a } from "./sse4_model.mjs";
 
 const candidate = process.argv[2] || "build/v86.wasm";
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
@@ -51,6 +56,26 @@ const make_data = seed => {
     return a;
 };
 const destinations = make_data(0x5EED1234), sources = make_data(0x0BADC0DE), masks = make_data(0x13579BDF);
+// Strings for PCMPxSTRx: a small alphabet (so that elements match and fall in
+// ranges), bytes of either sign and words; a zero element ends an implicit
+// string (none in a fifth of them)
+const make_strings = seed => {
+    const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return seed >>> 0; };
+    const a = new Uint8Array(512 * 16);
+    const alphabets = [[0x61, 0x62, 0x63, 0x64], [0x41, 0x61, 0x7F, 0x80, 0xFF, 0x01], [0x61, 0x62]];
+    for(let n = 0; n < 512; n++)
+    {
+        const alphabet = alphabets[n % 3], end = random() % 20;
+        for(let i = 0; i < 16; i++) a[n * 16 + i] = alphabet[random() % alphabet.length];
+        // (as words: the end in either byte of an element, or both)
+        if(end < 16) a[n * 16 + end] = 0;
+        if(end < 16 && n % 4 === 0) a[n * 16 + (end ^ 1)] = 0;
+    }
+    return a;
+};
+const needles = make_strings(0x600DF00D), haystacks = make_strings(0xFEEDFACE);
+// explicit lengths (EAX, EDX): within, at and beyond the elements, negative, the extremes
+const LENGTHS = [0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 100, -1, -2, -7, -8, -9, -16, -17, 0x7FFFFFFF, -0x80000000, -0x7FFFFFFF];
 
 const LOAD = [0xF3, 0x0F, 0x6F], STORE = [0xF3, 0x0F, 0x7F];
 const absolute = (r, a) => [0x05 | r << 3, ...u32(a)];
@@ -78,6 +103,16 @@ const IMMEDIATE = [[0x0C, "blendps"], [0x0D, "blendpd"], [0x0E, "pblendw"], [0x2
 const EXTRACT = [[0x14, "pextrb", 1], [0x15, "pextrw", 2], [0x16, "pextrd", 4], [0x17, "extractps", 4]];
 const INSERT = [[0x20, "pinsrb", 1], [0x22, "pinsrd", 4]];
 const GPRS = [0, 1, 2, 3, 5, 6, 7]; // (not ESP)
+// PCMPESTRM, PCMPESTRI, PCMPISTRM, PCMPISTRI
+const STRINGS = [[0x60, "pcmpestrm"], [0x61, "pcmpestri"], [0x62, "pcmpistrm"], [0x63, "pcmpistri"]];
+/** CRC32 r32, r/m8 (F2 0F 38 F0), r/m16 (66 F2 0F 38 F1), r/m32 (F2 0F 38 F1) */
+const crc32_form = (bytes, reg, rm, address) => [...bytes === 2 ? [0x66] : [], 0xF2, 0x0F, 0x38, bytes === 1 ? 0xF0 : 0xF1,
+    ...(address === undefined ? [0xC0 | reg << 3 | rm] : absolute(reg, address))];
+/** POPCNT r16/r32, r/m16/r/m32 */
+const popcnt_form = (bytes, reg, rm, address) => [...bytes === 2 ? [0x66] : [], 0xF3, 0x0F, 0xB8,
+    ...(address === undefined ? [0xC0 | reg << 3 | rm] : absolute(reg, address))];
+// flags before: OF, SF, AF, CF (0x7F + 1, STC) or ZF, PF (XOR EAX, EAX)
+const FLAGS_BEFORE = [[[0xB0, 0x7F, 0x04, 0x01, 0xF9], 0x891], [[0x31, 0xC0], 0x44]];
 
 const machines = [];
 async function run(vm, program, warm, interpreter)
@@ -221,13 +256,38 @@ try
     {
         await expect_fault([], encode(0x38, op, 1, undefined, SOURCE, undefined), 6, { label: `${name} without SSE4` });
     }
-    for(const [op, name] of [...IMMEDIATE, ...EXTRACT, ...INSERT, [0x08, "roundps"], [0x0B, "roundsd"], [0x40, "dpps"], [0x41, "dppd"]])
+    for(const [op, name] of [...IMMEDIATE, ...EXTRACT, ...INSERT, [0x08, "roundps"], [0x0B, "roundsd"], [0x40, "dpps"], [0x41, "dppd"], ...STRINGS])
     {
         await expect_fault([], encode(0x3A, op, 1, 2, undefined, 0), 6, { label: `${name} without SSE4` });
     }
+    for(const bytes of [1, 2, 4]) await expect_fault([], crc32_form(bytes, 1, 2), 6, { label: `crc32 (${bytes}) without SSE4.2` });
+    // POPCNT has a CPUID bit of its own (always set), not SSE4.2's
+    {
+        const program = [...CPUID, 0xB8, ...u32(0xF0F00001), ...popcnt_form(4, 1, 0), 0x89, 0x0D, ...u32(OUT + 4)];
+        const results = await run_all(program, () => {}, machines, vm => [word(vm, OUT), word(vm, OUT + 4), word(vm, FAULT)]);
+        for(const { label, data: [ecx, count, fault] } of results)
+        {
+            assert.deepEqual([ecx >>> 23 & 1, count, fault], [1, 9, 0], `CPUID.1:ECX.POPCNT and POPCNT without SSE4.2 (${label})`);
+        }
+    }
     for(const vm of machines) await vm.destroy();
     machines.length = 0;
-    console.log("PASS: without SSE4.1/SSE4.2, CPUID reports neither and every form is #UD");
+    console.log("PASS: without SSE4.1/SSE4.2, CPUID reports neither and every form is #UD; POPCNT is there");
+
+    // With SSE4.1 but not SSE4.2: PCMPGTQ, PCMPxSTRx and CRC32 are #UD, the SSE4.1 forms are not
+    machines.push(...await create_machines({ cpu_features: ["SSSE3", "SSE4.1"] }));
+    await run_all(CPUID);
+    for(const vm of machines) assert.equal(word(vm, OUT) >>> 19 & 3, 1, "CPUID.1:ECX.SSE4_1/SSE4_2");
+    await expect_fault([], encode(0x38, 0x37, 1, 2), 6, { label: "pcmpgtq without SSE4.2" });
+    for(const [op, name] of STRINGS) await expect_fault([], encode(0x3A, op, 1, 2, undefined, 0x0C), 6, { label: `${name} without SSE4.2` });
+    for(const bytes of [1, 2, 4]) await expect_fault([], crc32_form(bytes, 1, 2), 6, { label: `crc32 (${bytes}) without SSE4.2` });
+    {
+        const results = await run_all([...encode(0x38, 0x3B, 1, 2), ...encode(0x3A, 0x0E, 1, 2, undefined, 3)], () => {}, machines, vm => word(vm, FAULT));
+        for(const { label, data } of results) assert.equal(data, 0, `PMINUD and PBLENDW with SSE4.1 only (${label})`);
+    }
+    for(const vm of machines) await vm.destroy();
+    machines.length = 0;
+    console.log("PASS: with SSE4.1 only, CPUID reports it; PCMPGTQ, PCMPxSTRx and CRC32 are #UD, the SSE4.1 forms run");
 
     machines.push(...await create_machines({ cpu_features: ["SSSE3", "SSE4.1", "SSE4.2"] }));
     await run_all(CPUID);
@@ -380,6 +440,135 @@ try
         checks++;
     }
 
+    // PCMPxSTRx against the model, every imm8 (bit 7 is reserved) from
+    // registers and from an unaligned m128. XMM0 holds a pattern, then the
+    // needle and the haystack are loaded (they may be XMM0 or the same
+    // register). Out: XMM0, ECX (DEADBEEF before) and the flags.
+    const PATTERN = OUT + 0x8000, pattern = Uint8Array.from({ length: 16 }, (_, i) => 0xC0 + i);
+    // (the data must reach no match, all elements matching, and both strings ending early)
+    const reached = { none: 0, all: 0, short: 0 };
+    for(const [op, name] of STRINGS)
+    {
+        const count = 512, program = [];
+        const operands = n => ({ imm8: n & 255, dst: n % 8, src: (n * 3 + 1) % 8, memory: n >= 256,
+            la: LENGTHS[n % LENGTHS.length], lb: LENGTHS[(n * 7 + 3) % LENGTHS.length], address: MASK + n * 32 + (n & 15) });
+        for(let n = 0; n < count; n++)
+        {
+            const { imm8, dst, src, memory, la, lb, address } = operands(n);
+            program.push(...LOAD, ...absolute(0, PATTERN), ...LOAD, ...absolute(dst, DEST + n * 16));
+            if(!memory) program.push(...LOAD, ...absolute(src, SOURCE + n * 16));
+            program.push(...FLAGS_BEFORE[n & 1][0], ...mov_r32(0, la), ...mov_r32(2, lb), ...mov_r32(1, 0xDEADBEEF));
+            program.push(...encode(0x3A, op, dst, src, memory ? address : undefined, imm8));
+            program.push(...store_r32(1, OUT + n * 32 + 16), ...STORE, ...absolute(0, OUT + n * 32), ...PUSHF_STORE(OUT + n * 32 + 20));
+        }
+        const result = await run_out(program, vm => {
+            vm.write_memory(needles, DEST);
+            vm.write_memory(haystacks, SOURCE);
+            for(let n = 256; n < count; n++) vm.write_memory(haystacks.subarray(n * 16, n * 16 + 16), operands(n).address);
+            vm.write_memory(pattern, PATTERN);
+            vm.write_memory(new Uint8Array(count * 32), OUT);
+        }, count * 32, name);
+        const view = new DataView(result.buffer, result.byteOffset);
+        for(let n = 0; n < count; n++)
+        {
+            const { imm8, dst, src, memory, la, lb } = operands(n);
+            const registers = [pattern];
+            registers[dst] = needles.slice(n * 16, n * 16 + 16);
+            if(!memory) registers[src] = haystacks.slice(n * 16, n * 16 + 16);
+            const explicit = op < 0x62;
+            const r = compare_strings(imm8, registers[dst], memory ? haystacks.slice(n * 16, n * 16 + 16) : registers[src],
+                explicit ? BigInt(la) : undefined, explicit ? BigInt(lb) : undefined);
+            const index = op & 1;
+            const label = `${name} xmm${dst}, ${memory ? "[mem]" : "xmm" + src}, ${imm8.toString(16)} (eax ${la}, edx ${lb})`;
+            assert.equal(hex(result.subarray(n * 32, n * 32 + 16)), hex(index ? registers[0] : r.mask), `${label}: XMM0`);
+            assert.equal(view.getUint32(n * 32 + 16, true), index ? r.index : 0xDEADBEEF, `${label}: ECX`);
+            const flags = (r.cf ? 1 : 0) | (r.zf ? 0x40 : 0) | (r.sf ? 0x80 : 0) | (r.of ? 0x800 : 0);
+            assert.equal(view.getUint32(n * 32 + 20, true) & 0x8D5, flags, `${label}: flags`);
+            reached.none += r.intres2 === 0;
+            reached.all += r.intres2 === (imm8 & 1 ? 0xFF : 0xFFFF);
+            reached.short += r.zf && r.sf;
+        }
+        cases += count;
+        checks += count;
+    }
+    assert(reached.none > 50 && reached.all > 50 && reached.short > 50, `PCMPxSTRx data: ${JSON.stringify(reached)}`);
+    console.log("PASS: PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI, every imm8 from registers and unaligned memory: XMM0, ECX and the flags as the model");
+
+    // CRC32 against the model: r/m8 (AH-BH too), r/m16 and r/m32 from
+    // registers (the destination's too) and unaligned memory; the flags kept
+    for(const bytes of [1, 2, 4])
+    {
+        const count = 128, program = [];
+        const operands = n => {
+            const memory = n >= count / 2, rm = n % 8;
+            return { memory, dst: GPRS[n % 7], rm: bytes > 1 && rm === 4 ? 5 : rm,
+                crc: [0, 0xFFFFFFFF, 0x12345678, 0x80000001][n % 4] ^ Number(get(destinations.subarray(n * 16), 4, 0)) * (n % 5 === 0 ? 0 : 1),
+                value: Number(get(sources.subarray(n * 16), 4, 0)), address: SOURCE + n * 16 + (n & 7) };
+        };
+        for(let n = 0; n < count; n++)
+        {
+            const { memory, dst, rm, crc, value, address } = operands(n);
+            program.push(...FLAGS_BEFORE[n & 1][0]);
+            // (the source's register, then the destination: the destination wins if they are one)
+            if(!memory) program.push(...mov_r32(bytes === 1 ? rm & 3 : rm, value));
+            program.push(...mov_r32(dst, crc), ...crc32_form(bytes, dst, rm, memory ? address : undefined));
+            program.push(...store_r32(dst, OUT + n * 16), ...PUSHF_STORE(OUT + n * 16 + 4));
+        }
+        const result = await run_out(program, vm => { write_data(vm); vm.write_memory(new Uint8Array(count * 16), OUT); }, count * 16, `crc32 (${bytes})`);
+        const view = new DataView(result.buffer, result.byteOffset);
+        for(let n = 0; n < count; n++)
+        {
+            const { memory, dst, rm, crc, value } = operands(n);
+            const registers = [];
+            if(!memory) registers[bytes === 1 ? rm & 3 : rm] = value >>> 0;
+            registers[dst] = crc >>> 0;
+            let source;
+            if(memory) source = Number(get(sources.subarray(n * 16 + (n & 7)), bytes, 0));
+            else if(bytes === 1) source = registers[rm & 3] >>> (rm & 4 ? 8 : 0) & 0xFF;
+            else source = registers[rm] & (bytes === 2 ? 0xFFFF : -1);
+            const expected = Number(crc32(BigInt(registers[dst]), BigInt(source >>> 0), bytes));
+            const label = `crc32 r${dst}, ${memory ? "[mem]" : "r" + rm} (${bytes}) crc ${registers[dst].toString(16)} value ${(source >>> 0).toString(16)}`;
+            assert.equal(view.getUint32(n * 16, true), expected, label);
+            assert.equal(view.getUint32(n * 16 + 4, true) & 0x8D5, FLAGS_BEFORE[n & 1][1], `${label}: flags kept`);
+        }
+        cases += count;
+        checks += count;
+    }
+    console.log("PASS: CRC32 r32, r/m8 (AH-BH too), r/m16 and r/m32 from registers and memory as the CRC-32C model, the flags kept");
+
+    // POPCNT r16/r32 from registers and memory: OF, SF, AF, CF and PF cleared,
+    // ZF for a zero source; r16 keeps the upper half
+    for(const bytes of [2, 4])
+    {
+        const count = 64, program = [];
+        const VALUES = [0, 1, 0xFFFFFFFF, 0x80000000, 0x00010000, 0x8000, 0xFFFF0000, 0x5555AAAA];
+        const operands = n => ({ memory: n >= count / 2, dst: GPRS[n % 7], src: GPRS[(n + 3) % 7], address: SOURCE + n * 16 + (n & 7),
+            value: n % 16 < 8 ? VALUES[n % 8] : Number(get(sources.subarray(n * 16), 4, 0)) });
+        for(let n = 0; n < count; n++)
+        {
+            const { memory, dst, src, address, value } = operands(n);
+            program.push(...FLAGS_BEFORE[n & 1][0]);
+            if(memory) program.push(0xC7, 0x05, ...u32(address), ...u32(value));
+            else program.push(...mov_r32(src, value));
+            program.push(...mov_r32(dst, 0xDEADBEEF), ...popcnt_form(bytes, dst, src, memory ? address : undefined));
+            program.push(...store_r32(dst, OUT + n * 16), ...PUSHF_STORE(OUT + n * 16 + 4));
+        }
+        const result = await run_out(program, vm => { write_data(vm); vm.write_memory(new Uint8Array(count * 16), OUT); }, count * 16, `popcnt (${bytes})`);
+        const view = new DataView(result.buffer, result.byteOffset);
+        for(let n = 0; n < count; n++)
+        {
+            const { value } = operands(n);
+            const source = bytes === 2 ? value & 0xFFFF : value >>> 0;
+            const ones = source.toString(2).split("1").length - 1;
+            const label = `popcnt (${bytes}) of ${source.toString(16)}`;
+            assert.equal(view.getUint32(n * 16, true), bytes === 2 ? (0xDEAD0000 | ones) >>> 0 : ones, label);
+            assert.equal(view.getUint32(n * 16 + 4, true) & 0x8D5, source === 0 ? 0x40 : 0, `${label}: flags`);
+        }
+        cases += count;
+        checks += count;
+    }
+    console.log("PASS: POPCNT r16/r32 from registers and memory, its flags");
+
     // Faults: the destination keeps its value
     const keep = r => [...LOAD, ...absolute(r, DEST)];
     const kept = r => [...STORE, ...absolute(r, OUT)];
@@ -395,6 +584,9 @@ try
         ["pmovzxbw", encode(0x38, 0x30, 6, undefined, SOURCE + 8), false],
         ["pinsrd", encode(0x3A, 0x22, 6, undefined, SOURCE + 1, 1), false],
         ["insertps", encode(0x3A, 0x21, 6, undefined, SOURCE + 3, 0x10), false],
+        // (PCMPxSTRx: an m128 without alignment, SDM exception type 4 note)
+        ["pcmpistri", encode(0x3A, 0x63, 6, undefined, SOURCE + 3, 0x0C), false],
+        ["pcmpestrm", encode(0x3A, 0x60, 6, undefined, SOURCE + 9, 0x40), false],
     ];
     for(const [name, form, aligned] of samples)
     {
@@ -417,21 +609,50 @@ try
     // LOCK, F2 and F3 are #UD; so is MOVNTDQA from a register
     for(const prefix of [0xF0, 0xF2, 0xF3])
     {
-        for(const form of [encode(0x38, 0x3B, 6, 1), encode(0x3A, 0x0E, 6, 1, undefined, 3), encode(0x3A, 0x16, 1, 2, undefined, 1)])
+        for(const form of [encode(0x38, 0x3B, 6, 1), encode(0x3A, 0x0E, 6, 1, undefined, 3), encode(0x3A, 0x16, 1, 2, undefined, 1),
+            encode(0x3A, 0x63, 6, 1, undefined, 0x0C)])
         {
             await expect_fault(keep(6), [prefix, ...form], 6, { epilogue: kept(6), before, label: `${prefix.toString(16)} ${hex(form)}`, out });
             checks++;
         }
     }
     await expect_fault(keep(6), encode(0x38, 0x2A, 6, 1), 6, { epilogue: kept(6), before, label: "movntdqa xmm6, xmm1", out });
+    // CRC32 and POPCNT have no XMM state: CR0.TS, CR0.EM and CR4.OSFXSR do
+    // not matter. LOCK is #UD, so is F3 at CRC32's opcodes.
+    for(const [name, form] of [["crc32 ecx, byte [mem]", crc32_form(1, 1, 0, SOURCE + 1)], ["crc32 ecx, edx", crc32_form(4, 1, 2)],
+        ["crc32 ecx, word [mem]", crc32_form(2, 1, 0, SOURCE + 3)], ["popcnt ecx, word [mem]", popcnt_form(2, 1, 0, SOURCE + 3)],
+        ["popcnt ecx, edx", popcnt_form(4, 1, 2)]])
+    {
+        for(const [setup, undo, what] of [[SET_CR0(8), CLTS, "CR0.TS"], [SET_CR0(4), CLEAR_CR0(4), "CR0.EM"], [NO_OSFXSR, OSFXSR, "no CR4.OSFXSR"]])
+        {
+            const results = await run_all([...setup, ...form, ...undo], before, machines, vm => word(vm, FAULT));
+            for(const { label, data } of results) assert.equal(data, 0, `${name} with ${what} (${label}): no fault`);
+            checks++;
+        }
+        await expect_fault([], [0xF0, ...form], 6, { before, label: `lock ${name}` });
+        checks++;
+    }
+    for(const op of [0xF0, 0xF1])
+    {
+        await expect_fault([], [0xF3, 0x0F, 0x38, op, 0xC1], 6, { before, label: `F3 0F 38 ${op.toString(16)} (not CRC32)` });
+        checks++;
+    }
     // #PF: a load from and a store to an absent page, nothing written
     const absent = vm => { before(vm); vm.write_memory(new Uint8Array(16).fill(0xEE), ABSENT - 16); pages(vm, ABSENT, false); };
     await expect_fault(keep(6), encode(0x38, 0x32, 6, undefined, ABSENT - 1), 14, { epilogue: kept(6), before: absent, cr2: ABSENT, error_code: 0, label: "pmovzxbq across into an absent page", out });
     await expect_fault(keep(6), encode(0x3A, 0x16, 6, undefined, ABSENT - 2, 3), 14, { epilogue: kept(6), before: absent, cr2: ABSENT, error_code: 2,
         label: "pextrd across into an absent page", memory: [ABSENT - 16, new Uint8Array(16).fill(0xEE)] });
+    // PCMPISTRI reads all of its m128 though the string ends at its first
+    // byte; a CRC32 operand across into the page. ECX keeps its value.
+    const ecx = [...u32(0x12345678), ...new Array(12).fill(0)];
+    await expect_fault(mov_r32(1, 0x12345678), encode(0x3A, 0x63, 6, undefined, ABSENT - 4, 0x0C), 14, { epilogue: store_r32(1, OUT),
+        before: vm => { absent(vm); vm.write_memory(new Uint8Array(4), ABSENT - 4); }, cr2: ABSENT, error_code: 0,
+        label: "pcmpistri across into an absent page", out: ecx });
+    await expect_fault(mov_r32(1, 0x12345678), crc32_form(4, 1, 0, ABSENT - 2), 14, { epilogue: store_r32(1, OUT), before: absent, cr2: ABSENT,
+        error_code: 0, label: "crc32 across into an absent page", out: ecx });
     for(const vm of machines) pages(vm, ABSENT, true);
-    checks += 3;
-    console.log("PASS: #GP(0) for misaligned m128 operands (none for narrow ones), #NM, #UD (EM, OSFXSR, LOCK, F2/F3, MOVNTDQA register) and #PF, without effect");
+    checks += 5;
+    console.log("PASS: #GP(0) for misaligned m128 operands (none for narrow ones or PCMPxSTRx), #NM, #UD (EM, OSFXSR, LOCK, F2/F3, MOVNTDQA register) and #PF, without effect; CRC32 and POPCNT without XMM checks");
     console.log(`PASS: ${checks} SSE4 checks on 3 arms`);
 }
 finally

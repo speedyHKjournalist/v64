@@ -1801,6 +1801,7 @@ unsafe fn ssse3(d: &Decoded) -> Result<bool, Fault> {
 /// SSE4.1 and SSE4.2 forms with 66 (0F 38 and 0F 3A), with the semantics of
 /// crate::cpu::simd_int and simd_fp (ROUND, DPPS/DPPD). REX.W selects PEXTRQ and PINSRQ; a
 /// register destination of PEXTRB/PEXTRW/PEXTRD/EXTRACTPS is zero-extended.
+/// PCMPESTRx take their lengths from EAX and EDX (RAX and RDX with REX.W).
 unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
     let base = d.base_opcode();
     if d.opcode >> 24 != 0x66 {
@@ -1861,6 +1862,34 @@ unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
                 simd_fp::dot_product(base == 0x0F3A41, xmm(r), v, imm)
                     .map_err(|e| simd_fault(e))?,
             );
+        },
+        // PCMPESTRM, PCMPESTRI, PCMPISTRM, PCMPISTRI: the index to ECX (RCX
+        // zero-extended) or the mask to XMM0, and the flags; the m128 needs no
+        // alignment (SDM, exception type 4)
+        0x0F3A60..=0x0F3A63 => {
+            guard(true)?;
+            let v = source(d, 128, false, false)?;
+            let explicit = base & 2 == 0;
+            let length = |r: usize| {
+                let value = state::read_gpr(r);
+                explicit.then(|| {
+                    if d.prefixes.w() {
+                        value as i64
+                    }
+                    else {
+                        value as i32 as i64
+                    }
+                })
+            };
+            let result =
+                simd_int::compare_strings(imm, vector(xmm(r)), vector(v), length(0), length(2));
+            if base & 1 != 0 {
+                state::write_gpr(1, result.index as u64, 32);
+            }
+            else {
+                put_xmm(0, u128::from_le_bytes(result.xmm0));
+            }
+            state::write_flags64(state::read_flags64() & !0x8D5 | result.flags as u64);
         },
         0x0F3A0C..=0x0F3A0E | 0x0F3A42 => {
             guard(true)?;

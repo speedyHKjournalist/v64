@@ -900,7 +900,7 @@ for(let i = 0; i < 8; i++)
         encodings.push(ssse3(0x0F3800 | byte), ssse3(0x660F3800 | byte));
     }
     encodings.push(ssse3(0x0F3A0F, { imm8: 1 }), ssse3(0x660F3A0F, { imm8: 1 })); // palignr
-    // SSE4.1 and SSE4.2 (P4b): XMM forms with 66; PCMPxSTRx (part 3) still #UD
+    // SSE4.1 and SSE4.2 (P4b): XMM forms with 66
     const sse4 = (opcode, feature, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, feature, ...extra });
     for(const byte of [0x10, 0x14, 0x15, 0x17, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2B,
         0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41])
@@ -913,15 +913,16 @@ for(let i = 0; i < 8; i++)
         encodings.push(sse4(0x660F3A00 | byte, SSE4_1, { imm8: 1 }));
     }
     encodings.push(sse4(0x660F3837, SSE4_2)); // pcmpgtq
-    for(const byte of [0x60, 0x61, 0x62, 0x63]) encodings.push(vector(0x660F3A00 | byte, SSE4_2, { imm8: 1 })); // pcmp[ei]str[im]
-    // MOVBE (memory only; 66 is the operand size) and CRC32 share 0F 38 F0/F1,
-    // where F2 selects CRC32 and F3 is #UD
-    const integer = { e: 1, custom: 1, skip: 1, refining: "rep", unimplemented: 1 };
+    for(const byte of [0x60, 0x61, 0x62, 0x63]) encodings.push(sse4(0x660F3A00 | byte, SSE4_2, { imm8: 1 })); // pcmp[ei]str[im]
+    // MOVBE (memory only; 66 is the operand size; P10) and CRC32 share 0F 38
+    // F0/F1, where F2 selects CRC32 (66 F2 0F 38 F1: r/m16) and F3 is #UD
+    const movbe = { e: 1, custom: 1, skip: 1, refining: "rep", unimplemented: 1, os: 1, reg_ud: 1, feature: "MOVBE" };
+    const crc32 = { e: 1, custom: 1, refining: "rep", feature: SSE4_2 };
     encodings.push(
-        { ...integer, opcode: 0x0F38F0, os: 1, reg_ud: 1, feature: "MOVBE" },
-        { ...integer, opcode: 0x0F38F1, os: 1, reg_ud: 1, feature: "MOVBE" },
-        { ...integer, opcode: 0xF20F38F0, feature: SSE4_2 },
-        { ...integer, opcode: 0xF20F38F1, os: 1, feature: SSE4_2 },
+        { ...movbe, opcode: 0x0F38F0 },
+        { ...movbe, opcode: 0x0F38F1 },
+        { ...crc32, opcode: 0xF20F38F0 },
+        { ...crc32, opcode: 0xF20F38F1, os: 1 },
     );
 }
 

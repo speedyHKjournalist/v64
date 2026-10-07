@@ -138,3 +138,25 @@ pub unsafe fn instr_660F382A_mem(addr: i32, r: i32) {
     // movntdqa xmm, m128
     write_xmm_reg128(r, return_on_pagefault!(safe_read128s_aligned(addr)));
 }
+
+/// CRC32 r32, r/m8 (F2 0F 38 F0), r/m16 (66 F2 0F 38 F1), r/m32 (F2 0F 38
+/// F1): the low `bytes` of `value` into the CRC-32C in `r` (simd_int::crc32c);
+/// no flags, no XMM state checks
+pub unsafe fn crc32(r: i32, value: u32, bytes: u32) {
+    write_reg32(
+        r,
+        simd_int::crc32c(read_reg32(r) as u32, value as u64, bytes) as i32,
+    );
+}
+pub unsafe fn instr_F20F38F0_reg(r1: i32, r: i32) { crc32(r, read_reg8(r1) as u32, 1) }
+pub unsafe fn instr_F20F38F0_mem(addr: i32, r: i32) {
+    crc32(r, return_on_pagefault!(safe_read8(addr)) as u32, 1)
+}
+pub unsafe fn instr16_F20F38F1_reg(r1: i32, r: i32) { crc32(r, read_reg16(r1) as u32, 2) }
+pub unsafe fn instr16_F20F38F1_mem(addr: i32, r: i32) {
+    crc32(r, return_on_pagefault!(safe_read16(addr)) as u32, 2)
+}
+pub unsafe fn instr32_F20F38F1_reg(r1: i32, r: i32) { crc32(r, read_reg32(r1) as u32, 4) }
+pub unsafe fn instr32_F20F38F1_mem(addr: i32, r: i32) {
+    crc32(r, return_on_pagefault!(safe_read32s(addr)) as u32, 4)
+}

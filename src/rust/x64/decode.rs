@@ -753,10 +753,7 @@ mod tests {
             ] {
                 let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
                 for bytes in [
-                    &[0x66, 0x0F, 0x3A, 0x61, 0xC1][..],
-                    &[0x66, 0x0F, 0x3A, 0x60, 0xC1],
-                    &[0x0F, 0x38, 0xF1, 0x04],
-                    &[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],
+                    &[0x0F, 0x38, 0xF1, 0x04][..],
                     &[0x0F, 0x38, 0xF0, 0x00],
                     &[0xF3, 0x0F, 0x38, 0xF0, 0x00],
                 ] {
@@ -838,6 +835,79 @@ mod tests {
                 assert_eq!(
                     (d.opcode, d.reg, d.rm_register),
                     (0x660F3800, Some(8), Some(9))
+                );
+            }
+        }
+        TEST_FEATURES.with(|f| f.set(0));
+    }
+    #[test]
+    fn sse42_forms_decode_with_their_feature() {
+        use crate::cpu::features::{SSE4_1, SSE4_2, SSSE3, TEST_FEATURES};
+        for features in [SSSE3 | SSE4_1, SSSE3 | SSE4_1 | SSE4_2] {
+            TEST_FEATURES.with(|f| f.set(features));
+            for mode in [
+                ExecutionMode::Long64,
+                ExecutionMode::Compatibility32,
+                ExecutionMode::Protected16,
+            ] {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+                let w32 = if mode == ExecutionMode::Protected16 { 16 } else { 32 };
+                // (the operand size: CRC32's source; none for PCMPxSTRx, whose 66 is mandatory)
+                for (bytes, opcode, imm8, operand_size) in [
+                    (
+                        &[0x66, 0x0F, 0x3A, 0x61, 0xC1, 0x0C][..],
+                        0x660F3A61,
+                        Some(0x0C),
+                        None,
+                    ), // pcmpestri
+                    (
+                        &[0x66, 0x0F, 0x3A, 0x62, 0x00, 0x40],
+                        0x660F3A62,
+                        Some(0x40),
+                        None,
+                    ), // pcmpistrm [..]
+                    (&[0xF2, 0x0F, 0x38, 0xF0, 0xC1], 0xF20F38F0, None, Some(w32)), // crc32 r32, r/m8
+                    (&[0xF2, 0x0F, 0x38, 0xF1, 0x00], 0xF20F38F1, None, Some(w32)), // crc32 r32, r/m32 (16)
+                    // (66 is the operand size: CRC32 r32, r/m16, or r/m32 in 16-bit code)
+                    (
+                        &[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],
+                        0xF20F38F1,
+                        None,
+                        Some(48 - w32),
+                    ),
+                ] {
+                    if features & SSE4_2 == 0 {
+                        // #UD after the ModRM byte (and before the immediate)
+                        let n = if imm8.is_some() { bytes.len() - 1 } else { bytes.len() };
+                        assert_eq!(decode(&bytes[..n]).unwrap_err(), DecodeError::InvalidOpcode);
+                        continue;
+                    }
+                    let d = decode(bytes).unwrap();
+                    assert_eq!(
+                        (d.opcode, d.length as usize),
+                        (opcode, bytes.len()),
+                        "{bytes:02X?} {mode:?}"
+                    );
+                    assert!(operand_size.is_none_or(|size| d.operand_size == size));
+                    assert_eq!(d.immediate.map(|i| i.value as u8), imm8);
+                }
+                // F3 selects no CRC32 (nor, without a memory operand, MOVBE)
+                assert_eq!(
+                    decode(&[0xF3, 0x0F, 0x38, 0xF1, 0xC1]).unwrap_err(),
+                    DecodeError::InvalidOpcode
+                );
+            }
+            // REX.W: CRC32 r64, r/m64 and r64, r/m8; PCMPESTRI with RAX/RDX
+            if features & SSE4_2 != 0 {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), ExecutionMode::Long64);
+                let d = decode(&[0xF2, 0x48, 0x0F, 0x38, 0xF1, 0xC1]).unwrap();
+                assert_eq!((d.opcode, d.operand_size), (0xF20F38F1, 64));
+                let d = decode(&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0xC1]).unwrap();
+                assert_eq!((d.opcode, d.operand_size), (0xF20F38F0, 64));
+                let d = decode(&[0x66, 0x4D, 0x0F, 0x3A, 0x61, 0xC1, 0x0C]).unwrap();
+                assert_eq!(
+                    (d.opcode, d.reg, d.rm_register, d.prefixes.w()),
+                    (0x660F3A61, Some(8), Some(9), true)
                 );
             }
         }

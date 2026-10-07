@@ -70,9 +70,20 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_xgetbv_xsetbv"
         | "ir_xrstor"
         | "ir_xsave" => 2,
-        "ir_invalid_form" | "ir_arpl_mem" | "ir_movnti" | "ir_far_jump_mem" | "ir_lar_mem"
-        | "ir_lar_reg" | "ir_lsl_mem" | "ir_lsl_reg" | "ir_out" | "ir_out_continue"
-        | "ir_pop_segment" | "ir_ins_once" | "ir_outs_once" => 3,
+        "ir_invalid_form"
+        | "ir_arpl_mem"
+        | "ir_movnti"
+        | "ir_far_jump_mem"
+        | "ir_lar_mem"
+        | "ir_lar_reg"
+        | "ir_lsl_mem"
+        | "ir_lsl_reg"
+        | "ir_out"
+        | "ir_out_continue"
+        | "ir_pop_segment"
+        | "ir_ins_once"
+        | "ir_outs_once"
+        | "ir_crc32_reg_continue" => 3,
         "ir_reserved_form"
         | "ir_mmx_mask"
         | "ir_mmx_reg"
@@ -84,7 +95,8 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_ins"
         | "ir_outs"
         | "ir_x87_reg_continue"
-        | "ir_x87_reg" => 4,
+        | "ir_x87_reg"
+        | "ir_crc32_mem_continue" => 4,
         "ir_mmx_mem"
         | "ir_sse_fp_mem_continue"
         | "ir_sse_fp_mem"
@@ -104,7 +116,10 @@ fn abi(name: &str) -> HelperAbi {
     if scalar_reload(name)
         || matches!(
             name,
-            "ir_mmx_xmm_continue" | "ir_sse_fp_reg_continue" | "ir_sse_fp_mem_continue"
+            "ir_mmx_xmm_continue"
+                | "ir_sse_fp_reg_continue"
+                | "ir_sse_fp_mem_continue"
+                | "ir_crc32_mem_continue"
         )
     {
         HelperAbi::CpuReload
@@ -320,6 +335,7 @@ pub fn preserves_code_on_success(name: &str) -> bool {
             | "ir_mmx_reg_continue"
             | "ir_mmx_xmm_continue"
             | "ir_x87_reg_continue"
+            | "ir_crc32_reg_continue"
     )
 }
 
@@ -349,6 +365,7 @@ fn scalar_reload(name: &str) -> bool {
             name,
             "ir_x87_reg_continue"
                 | "ir_mmx_reg_continue"
+                | "ir_crc32_reg_continue"
                 | "ir_read_cr_continue"
                 | "ir_read_dr_continue"
                 | "ir_cpuid_continue"

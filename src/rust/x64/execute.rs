@@ -607,7 +607,7 @@ fn flag_free(op: u32, group: u8) -> bool {
     matches!(op, 0x88..=0x8B | 0x8D | 0xB0..=0xBF | 0xC6 | 0xC7 | 0xA0..=0xA3 | 0x63
         | 0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF | 0x86 | 0x87 | 0x90..=0x97 | 0x50..=0x5F | 0x68 | 0x6A
         | 0x8F | 0xC8 | 0xC9 | 0xE8 | 0xE9 | 0xEB | 0xC2 | 0xC3 | 0x98 | 0x99 | 0x0FC8..=0x0FCF
-        | 0x0F0D | 0x0F18..=0x0F1F | 0x0FC3)
+        | 0x0F0D | 0x0F18..=0x0F1F | 0x0FC3 | 0x0F38F0 | 0x0F38F1)
         || op == 0xFF && matches!(group, 2 | 4 | 6)
 }
 pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
@@ -1149,6 +1149,16 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let v = rm(d, w, false)?;
             set_register(d.reg.unwrap(), v.count_ones() as u64, w, rex);
             state::write_flags64(flags & !ARITH | if v == 0 { ZF } else { 0 });
+        },
+        // CRC32 r32/r64, r/m8 (F2 0F 38 F0) and r/m16/32/64 (F1): the CRC-32C
+        // in the low half of the destination, the rest zero; no flags
+        0x0F38F0 | 0x0F38F1 if d.opcode >> 24 == 0xF2 => {
+            let width = if op == 0x0F38F0 { 8 } else { w };
+            let v = rm(d, width, false)?;
+            let r = d.reg.unwrap();
+            let crc =
+                crate::cpu::simd_int::crc32c(register(r, 32, rex) as u32, v, width as u32 / 8);
+            set_register(r, crc as u64, 32, rex);
         },
         0x0FA4 | 0x0FA5 | 0x0FAC | 0x0FAD => {
             let count = (if op & 1 == 0 { imm } else { state::read_gpr(1) }) as u8
