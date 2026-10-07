@@ -2,19 +2,50 @@ use crate::ir::frontend::{
     decode::{GuestEip, LinearAddress},
     lift::{lift, lift_cpu},
 };
-/// AVX forms lift to the AVX helper (ir_avx_continue), the region going on
+/// AVX forms lift natively on the legacy SSE lifters (the AVX guard, the
+/// destination's bits 255:128 zeroed; VZEROUPPER: those of YMM0-YMM7), to
+/// the floating-point helper between XMM registers (ir_avx_fp_reg_continue:
+/// the AVX guard, the destination reloaded, its bits 255:128 zeroed) or to
+/// the AVX helper (ir_avx_continue), the region going on
 #[test]
 fn avx_forms_call_the_helper() {
     use crate::cpu::features::{ALL, TEST_FEATURES};
+    use crate::ir::hir::Op;
     TEST_FEATURES.with(|f| f.set(ALL));
-    for (bytes, memory) in [
+    // (the bytes, whether they have a memory operand, the helper, the
+    // registers whose bits 255:128 are zeroed)
+    let all: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7];
+    for (bytes, memory, helper, zeroed) in [
         // vxorps xmm1, xmm2, xmm3
-        (&[0xC5, 0xE8, 0x57, 0xCB][..], false),
+        (&[0xC5, 0xE8, 0x57, 0xCB][..], false, None, &[1u8][..]),
         // vmovups xmm4, [0x200000]
-        (&[0xC5, 0xF8, 0x10, 0x25, 0x00, 0x00, 0x20, 0x00], true),
+        (
+            &[0xC5, 0xF8, 0x10, 0x25, 0x00, 0x00, 0x20, 0x00],
+            true,
+            None,
+            &[4],
+        ),
+        // vpcmpeqq xmm2, xmm2, xmm5 (66 0F 38 29: not MOVAPS's store)
+        (&[0xC4, 0xE2, 0x69, 0x29, 0xD5], false, None, &[2]),
+        // vmovss xmm1, xmm2, xmm3 (11 /r: the destination is r/m)
+        (&[0xC5, 0xEA, 0x11, 0xD9], false, None, &[1]),
+        // vpsrlw xmm4, xmm5, 3 (the destination is VEX.vvvv)
+        (&[0xC5, 0xD9, 0x71, 0xD5, 0x03], false, None, &[4]),
+        // vpmovmskb eax, xmm1 (a general-purpose destination)
+        (&[0xC5, 0xF9, 0xD7, 0xC1], false, None, &[]),
+        // vpinsrw xmm1, xmm2, esi, 3
+        (&[0xC5, 0xE9, 0xC4, 0xCE, 0x03], false, None, &[1]),
+        // vaddsd xmm1, xmm2, xmm3
+        (
+            &[0xC5, 0xEB, 0x58, 0xCB],
+            false,
+            Some("ir_avx_fp_reg_continue"),
+            &[1],
+        ),
         // vzeroupper
-        (&[0xC5, 0xF8, 0x77], false),
+        (&[0xC5, 0xF8, 0x77], false, None, all),
     ] {
+        let native = helper != Some("ir_avx_continue");
         for mode in [false, true] {
             if memory && !mode {
                 continue;
@@ -22,10 +53,30 @@ fn avx_forms_call_the_helper() {
             assert!(lift(bytes, GuestEip(0x8000), LinearAddress(0x8000), mode).is_err());
             let r = lift_cpu(bytes, GuestEip(0x8000), LinearAddress(0x8000), mode)
                 .unwrap_or_else(|e| panic!("{bytes:02X?}: {e:?}"));
-            assert!(
-                r.helpers.iter().any(|h| h.name == "ir_avx_continue"),
+            assert_eq!(
+                r.helpers
+                    .iter()
+                    .map(|h| h.name.as_str())
+                    .collect::<Vec<_>>(),
+                helper.into_iter().collect::<Vec<_>>(),
                 "{bytes:02X?}"
             );
+            let ops = |f: fn(&Op) -> bool| r.instructions.iter().filter(|i| f(&i.op)).count();
+            assert_eq!(
+                ops(|op| matches!(op, Op::AvxCheck)),
+                native as usize,
+                "{bytes:02X?}"
+            );
+            let registers: Vec<u8> = r
+                .instructions
+                .iter()
+                .filter_map(|i| match i.op {
+                    Op::YmmZero { register } => Some(register),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(registers, zeroed, "{bytes:02X?}");
+            assert_eq!(ops(|op| matches!(op, Op::SseCheck)), 0, "{bytes:02X?}");
             let mut suffix = bytes.to_vec();
             suffix.push(0x90);
             assert!(lift_cpu(&suffix, GuestEip(0x8000), LinearAddress(0x8000), mode).is_ok());
@@ -39,17 +90,26 @@ fn avx_forms_in_a_cfg() {
     use crate::cpu::features::{ALL, TEST_FEATURES};
     use crate::ir::frontend::region::lift_cpu_cfg;
     TEST_FEATURES.with(|f| f.set(ALL));
-    // L: vxorps xmm1, xmm2, xmm3; vmovups xmm4, [0x200000]; dec ecx; jnz L
+    // L: vxorps xmm1, xmm2, xmm3; vmovups xmm4, [0x200000]; vaddsd xmm1,
+    // xmm2, xmm3; dec ecx; jnz L
     let bytes = [
-        0xC5, 0xE8, 0x57, 0xCB, 0xC5, 0xF8, 0x10, 0x25, 0x00, 0x00, 0x20, 0x00, 0x49, 0x75, 0xF1,
+        0xC5, 0xE8, 0x57, 0xCB, 0xC5, 0xF8, 0x10, 0x25, 0x00, 0x00, 0x20, 0x00, 0xC5, 0xEB, 0x58,
+        0xCB, 0x49, 0x75, 0xED,
     ];
     let r = lift_cpu_cfg(&bytes, GuestEip(0x8000), LinearAddress(0x8000), true, 128).unwrap();
     assert_eq!(
         r.helpers
             .iter()
-            .filter(|h| h.name == "ir_avx_continue")
+            .filter(|h| h.name == "ir_avx_fp_reg_continue")
             .count(),
-        2
+        1
+    );
+    assert_eq!(
+        r.instructions
+            .iter()
+            .filter(|i| matches!(i.op, crate::ir::hir::Op::YmmZero { .. }))
+            .count(),
+        3
     );
     let mut r = r;
     crate::ir::passes::run(&mut r, crate::ir::passes::PassConfig::default()).unwrap();
@@ -122,6 +182,12 @@ fn avx_fixtures() {
         (&[0xC4, 0xE2, 0x79, 0x0E], 1, Some(2), 1, &[]),     // vtestps xmm1, xmm2 (flags)
         (&[0xC4, 0xE2, 0x69, 0x2C], 6, None, 6, &[]),        // vmaskmovps xmm6, xmm2, [m]
         (&[0xC4, 0xE2, 0x69, 0x2F], 7, None, 1, &[]),        // vmaskmovpd [m], xmm2, xmm7
+        (&[0xC4, 0xE3, 0x71, 0x0C], 0, Some(0), 0, &[0x33]), // vblendps xmm0, xmm1, xmm0, 0x33
+        (&[0xC4, 0xE2, 0x69, 0x29], 2, Some(5), 2, &[]),     // vpcmpeqq xmm2, xmm2, xmm5
+        (&[0xC5, 0xEA, 0x11], 3, Some(1), 1, &[]),           // vmovss xmm1, xmm2, xmm3 (11 /r)
+        (&[0xC5, 0xE9, 0xC4], 1, Some(6), 1, &[3]),          // vpinsrw xmm1, xmm2, esi, 3
+        (&[0xC5, 0xF9, 0xC5], 1, Some(2), 1, &[1]),          // vpextrw ecx, xmm2, 1
+        (&[0xC5, 0xF8, 0x50], 3, Some(4), 1, &[]),           // vmovmskps ebx, xmm4
     ];
     let mut cases = Vec::new();
     for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {
@@ -158,7 +224,14 @@ fn avx_fixtures() {
                 count += 1;
                 let mut r = lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode)
                     .unwrap_or_else(|e| panic!("{bytes:02X?}: {e:?}"));
-                assert!(r.helpers.iter().any(|h| h.name == "ir_avx_continue"));
+                // (native, on a legacy lifter or the floating-point helper,
+                // or the AVX helper)
+                assert!(
+                    r.helpers.iter().any(|h| h.name == "ir_avx_continue")
+                        || r.instructions
+                            .iter()
+                            .any(|i| matches!(i.op, crate::ir::hir::Op::AvxCheck))
+                );
                 for opt in 0..2 {
                     if opt != 0 {
                         run(&mut r, PassConfig::default()).unwrap();

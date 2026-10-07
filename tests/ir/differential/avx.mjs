@@ -6,8 +6,9 @@
 // (#UD without CR4.OSXSAVE or with XCR0 3, #NM with CR0.TS, CR0.EM ignored);
 // MXCSR (#XM from the floating-point forms, DAZ, FZ, rounding); MMIO, #PF
 // across into an absent page, #GP for a null segment, a misaligned
-// VMOVAPS/VMOVNTDQA operand or VLDMXCSR's reserved bits; real mode, where C4
-// and C5 are LES and LDS (#UD with a register operand).
+// VMOVAPS/VMOVNTDQA operand or VLDMXCSR's reserved bits; real and
+// virtual-8086 mode, where C4 and C5 are LES and LDS (#UD with a register
+// operand).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
@@ -85,7 +86,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,osxsave=true,xcr0=7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,real=false,mxcsr=0x1F80}={}){
+        function reset(i,{task=0,osxsave=true,xcr0=7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,real=false,vm86=false,mxcsr=0x1F80}={}){
             const [bytes,mode]=cases[i];
             const s=SAMPLES[sample];
             e.ir_test_set_cr0(real?cr0&~0x80000001:(cr0|0x10000)&~12|task);
@@ -93,16 +94,18 @@ for(const release of [false,true]){
             linear32[XCR0>>2]=xcr0;linear32[XCR0+4>>2]=0;
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
-            cpu.segment_limits.fill(real?0xFFFF:0xFFFFFFFF,0,6);
+            // (virtual-8086 mode: real mode's segments at CPL 3)
+            const real_segments=real||vm86;
+            cpu.segment_limits.fill(real_segments?0xFFFF:0xFFFFFFFF,0,6);
             cpu.segment_is_null.fill(0,0,6);
-            cpu.sreg.set(real?[0,0,0,0,0,0]:[16,8,16,16,16,16]);
-            cpu.segment_access_bytes.set([0x93,0x9B,0x93,0x93,0x93,0x93]);
+            cpu.sreg.set(real_segments?[0,0,0,0,0,0]:[16,8,16,16,16,16]);
+            cpu.segment_access_bytes.set(vm86?[0xF3,0xFB,0xF3,0xF3,0xF3,0xF3]:[0x93,0x9B,0x93,0x93,0x93,0x93]);
             cpu.is_32[0]=+mode;
-            cpu.stack_size_32[0]=+!real;
-            linear32[612>>2]=0;
+            cpu.stack_size_32[0]=+!real_segments;
+            linear32[612>>2]=vm86?3:0;
             // (EDI: VMASKMOVDQU's destination, DI in 16-bit code)
             cpu.reg32.set([s.gpr[0],s.gpr[1],0x12345678,0x7FFFFFFF,STACK,0x55555555,s.gpr[2],mode?DATA+3:0xAAAA0000|DATA+3]);
-            cpu.flags[0]=0x8D7;
+            cpu.flags[0]=0x8D7|(vm86?0x20000:0);
             cpu.flags_changed[0]=0;
             cpu.reg_xmm32s.set(s.xmm);
             ymm.fill(0);
@@ -116,14 +119,21 @@ for(const release of [false,true]){
 
             desc(1,0,0x9B);desc(2,0,0x93);
             cpu.gdtr_offset[0]=0x3000;cpu.gdtr_size[0]=23;
+            // (virtual-8086 mode: a TSS with the ring 0 stack, 16:STACK)
+            if(vm86) {
+                desc(5,0x4000,0x89);cpu.gdtr_size[0]=47;
+                cpu.segment_offsets[6]=0x4000;cpu.segment_limits[6]=0x67;cpu.tss_size_32[0]=1;
+                set32(0x4004,STACK);set32(0x4008,16);
+            }
             cpu.idtr_offset[0]=real?0:0x2000;cpu.idtr_size[0]=real?0x3FF:0x7FF;
             for(const [vector,handler] of [[6,UD],[7,NM],[13,GP],[14,PF]]){
                 set32(0x2000+vector*8,8<<16|handler&65535);
                 set32(0x2004+vector*8,handler&0xFFFF0000|0x8E00);
             }
-            set32(0x12000,0x13003);
-            for(const page of [0,2,3,6,7,8,0x18,0x8F,0x90]){
-                set32(0x13000+page*4,page*4096|3);
+            // (user pages at CPL 3; the TSS's)
+            set32(0x12000,vm86?0x13007:0x13003);
+            for(const page of [0,2,3,4,6,7,8,0x18,0x8F,0x90]){
+                set32(0x13000+page*4,page*4096|(vm86?7:3));
             }
             e.full_clear_tlb();
             e.update_state_flags();
@@ -189,13 +199,14 @@ for(const release of [false,true]){
             }
             if(!mode) {
                 compare(i,()=>reset(i,{real:true,sample:4}),"real mode"); comparisons++;
+                compare(i,()=>reset(i,{vm86:true,sample:4}),"virtual-8086 mode"); comparisons++;
             }
             // MXCSR: every exception unmasked (#XM from floating-point forms), DAZ and FZ, rounding down
             for(const mxcsr of [0,0x9FC0,0x3F80]) {
                 compare(i,()=>reset(i,{sample:2,mxcsr}),`MXCSR ${mxcsr.toString(16)}`); comparisons++;
             }
         }
-        console.log(`PASS (${release?"release":"debug"}): ${comparisons} AVX cases in regions as in the interpreter: register, memory, general-purpose and state forms, MMIO, faults, CR0/CR4/XCR0, real mode`);
+        console.log(`PASS (${release?"release":"debug"}): ${comparisons} AVX cases in regions as in the interpreter: register, memory, general-purpose and state forms, MMIO, faults, CR0/CR4/XCR0, real and virtual-8086 mode`);
     } finally {
         await vm.destroy();
     }

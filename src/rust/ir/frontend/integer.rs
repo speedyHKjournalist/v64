@@ -7,8 +7,12 @@ pub struct IntegerBuilder {
     pub flags: FlagState,
     pub effect: ValueId,
     pub xmm: Vec<ValueId>,
+    /// The VEX form being lifted on a legacy lifter (see avx::VexLift)
+    pub vex: Option<super::avx::VexLift>,
 }
 impl IntegerBuilder {
+    /// The register read as `register`'s old value: a VEX form's first source
+    pub fn first(&self, register: u8) -> u8 { self.vex.map_or(register, |v| v.first) }
     pub fn new() -> Self {
         let mut region = Region::default();
         let block = region.block(true);
@@ -54,6 +58,7 @@ impl IntegerBuilder {
             effect,
             gpr,
             xmm: vec![],
+            vex: None,
             flags: FlagState {
                 arithmetic: bits,
                 system: flags,

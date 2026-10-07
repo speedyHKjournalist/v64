@@ -252,7 +252,12 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
                 (inst.state.is_some() || inst.commit.is_some())
                     && !matches!(
                         inst.op,
-                        Op::PollBudget | Op::SseCheck | Op::FpuCheck | Op::X87 { .. }
+                        Op::PollBudget
+                            | Op::SseCheck
+                            | Op::FpuCheck
+                            | Op::AvxCheck
+                            | Op::YmmZero { .. }
+                            | Op::X87 { .. }
                     )
                     && !transparent_helper(region, inst)
             })

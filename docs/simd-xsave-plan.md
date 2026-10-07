@@ -810,6 +810,11 @@ Tier-0 的模板慢（14 节 P4b 第四部分的分层数据）。ROUND 的寄�
 FP 准入（`NativeFp`）；PCMPxSTRI 不写 XMM，可改用只 reload 标量状态的 helper，或者为纯 helper
 增加按值传递 v128 的 ABI。
 
+待改进（P5 第六部分登记）：regions 中 VBROADCASTSS 与 VEX 浮点的内存形式走完整 reload 的
+`ir_avx_continue`，每条 VEX 指令各有一个 `AvxCheck`（读五个状态字段）和一个 `YmmZero`；只用 regions
+时 715.avx.matmul 比 601 慢 12 倍（14 节 P5 第六部分）。可把 VBROADCASTSS 原生化（加载后 splat，慢路径
+另设 TransferOp），浮点内存形式改用只 reload 必要状态的 helper，并合并 region 内重复的检查与清零。
+
 ### 12.3 最终验收
 
 - [ ] 机器可读 forms 清单完整，所有目标形式具有实现和独立测试归属，无未解释缺口。
@@ -1797,3 +1802,64 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **回归**：`p5f-batch`（含后续修正）的 55 个目标中 50 个通过。另外 5 个仍因另一个会话未完成的
   `mmio_ram.rs`（state layout 预检查）失败，它们其余的 12 条命令直接运行，全部通过；本部分不新增
   Rust static。
+
+### P5 第六部分：regions 中的 VEX 形式（2026-10-07）
+
+- **范围**：regions（IR 的 region 编译）中，VEX.128/VEX.LIG 形式凡有 legacy SSE lifter 的都原生执行：
+  搬运（VMOVAPS/UPS/DQA/DQU、VMOVSS/SD、VMOVQ/VMOVD、VMOVHPS/LPS 等）、逻辑、66 0F 与 SSE4.1 的
+  紧缩整数运算和比较、解包、洗牌（VPSHUFD/HW/LW、VSHUFPS/PD）、带 imm8 的混合、按立即数移位、
+  VPMOVMSKB/VMOVMSKPS/PD、VPEXTRW 与寄存器形式的 VPINSRW；VZEROUPPER 也原生执行（269 个形式中
+  119 个的全部用例不经 AVX helper）。XMM 寄存器之间的浮点形式走 `ir_avx_fp_reg_continue`（同
+  `ir_sse_fp_reg_continue`：只 reload 目的寄存器，MIR 的 `NativeFp` 原生执行 ADD/SUB/MUL/DIV）。
+  其余形式（浮点的内存形式、VLDMXCSR/VSTMXCSR、内存形式的 VPINSRW 等）仍走完整 reload 的
+  `ir_avx_continue`；legacy SSE 浮点的内存形式同样走完整 reload 的 helper。热点清单
+  中只有 VBLENDVPD（legacy 的 BLENDVPD 也走 helper）与内存形式的 VPSHUFB 仍经 helper。
+- **做法**：
+  - 新的 HIR 操作 `Op::AvxCheck`：VEX 守卫，`GlobalGuard` 要求 CR4.OSXSAVE、XCR0 的 SSE 与 AVX 位
+    和保护模式，排除 CR0.TS 与 EFLAGS.VM，失败时 `ir_avx_guard` 产生 #UD 或 #NM。`GlobalGuard`
+    为此推广为多个 required/forbidden 条件。
+  - `Op::YmmZero`：写目的寄存器之后清零其 255:128 位，状态图是指令之后的状态（不会出错），
+    MIR 的 `EffectPlan::ZeroState` 内联为两次 i64 存储。
+  - `IntegerBuilder::vex`（`VexLift`）：legacy lifter 读目的寄存器旧值之处改读 VEX.vvvv
+    （`IntegerBuilder::first`）；只有对齐搬运检查对齐。`frontend::avx::native` 选出 legacy 形式
+    及其 lifter（含 `simd_lane`），并给出写入的寄存器（存储操作码的寄存器形式写 r/m，按立即数
+    移位写 VEX.vvvv，符号掩码与 VPEXTRW 写通用寄存器）。第一源按编码行的 `vex::VVVV`（VEX.vvvv
+    是操作数）决定：有它的形式第一源是 VEX.vvvv（按立即数移位则是目的），没有的形式其 legacy
+    形式不读目的旧值（整个覆盖的除外）。
+  - `XmmLoad`/`XmmBinary`/`XmmShuffle`/`XmmTransferLoad` 增加 `first` 与 `vex`：慢路径（TLB 未命中、
+    MMIO）的 helper 由 `mir::memory::slow_register` 打包的参数得到第一源，VEX 形式还清零上半部分。
+- **修正**（都由改正后的 regions arm 等待条件发现，见“测试”）：
+  - `native` 判断存储形式时调用 `simd_moves::is_store`，它按操作码低字节匹配 0x11/0x29/0x7F，
+    PCMPEQQ（66 0F 38 29）也匹配上了，VPCMPEQQ 的上半清零因此落到 r/m 寄存器。现在只对
+    `simd_moves` 支持的形式调用它。
+  - 第一源原先按 legacy 键列表决定，漏了洗牌 lifter 上的 BLENDPS/BLENDPD/PBLENDW：VBLENDPS
+    读成了目的寄存器的旧值。现在按 `vex::VVVV`。
+- **测试**：
+  - `tests/ir/semantics/avx.rs`：几个代表形式的 helper、`AvxCheck` 个数与清零的寄存器（含
+    VPCMPEQQ、11 /r 的 VMOVSS、VPSRLW imm、VPMOVMSKB、VPINSRW、VZEROUPPER）；
+    `tests/ir/differential/avx.mjs` 新增 VBLENDPS（第一源不是目的）、VPCMPEQQ、11 /r 的 VMOVSS、
+    VPINSRW、VPEXTRW 与 VMOVMSKPS，16 位用例另在虚拟 8086 模式下各跑一遍（那里的 C4/C5 是 LES/LDS，
+    寄存器形式 #UD），共 4710 例（含 MMIO、故障、CR0/CR4/XCR0、实模式与虚拟 8086 模式）与解释器
+    一致。
+  - `tests/rust/avx.mjs` 的 regions arm 原先等 AVX helper 被调用够次数，原生形式不再调用 helper。
+    现在等到程序完整的一轮里没有解释执行任何 VEX 指令（`compiled_arms.mjs` 的 `vex_settled`，
+    `ir_interpreted_stat` 的新字段 6），并记录 regions 不经 helper 执行的形式；热点形式
+    （`REGIONS_NATIVE`）必须如此。只比较相邻两次轮询的写法不可靠：两次轮询之间模拟器可能没有
+    运行，VZEROUPPER 这样总走 helper 的形式也被算成原生。三个 arm 上 9246 项（无 Wasm SIMD 的
+    构建 9245）。
+  - `tests/rust/avx_fp.mjs` 仍等 helper 调用：它的程序是一长串没有循环的用例，regions 约 12 s 后
+    才开始编译其中一部分，60 s 内也编译不全；这些操作数（特殊值与内存形式）仍经 helper。
+- **性能**：只用 regions（`--ir-setup ir_auto_set_tier0=0`，负载约 3，五次中位数）时，715/716/717 的
+  耗时从 1959/3824/3254 ms 降到 957/1277/709 ms（快 2.0–4.6 倍），SSE 版 601/606/611 不变
+  （81/1124–1129/560 ms）。与 SSE 版相比，nbody 慢 13%，mandel 慢 26%，matmul 仍慢 12 倍：它的
+  循环每轮 4 条 VBROADCASTSS，走完整 reload 的 `ir_avx_continue`（legacy 没有这条指令）。默认
+  配置下这些基准只用 Tier-0（第五部分）。待改进（记入 12.2 节）：regions 中原生的 VBROADCASTSS、
+  浮点内存形式改用只 reload 必要状态的 helper、同一 region 内重复的 `AvxCheck` 与 `YmmZero`。
+- **变异测试**：植入 17 个错误，全部被发现：守卫的五个条件各去掉一个（EFLAGS.VM 那个先存活，差分测试
+  加入虚拟 8086 模式的用例后被发现）、`IntegerBuilder::first` 恒为目的、标量合并读目的、第一源不按
+  `vex::VVVV`、对齐全部不查或全部都查、按立即数移位与存储的寄存器形式写入的寄存器、`is_store` 不限于
+  `simd_moves`、VZEROUPPER 少清一个寄存器、慢路径打包的第一源、`NativeFp` 的第一源与
+  `ir_avx_fp_reg_continue` 的 pp 映射。
+- **回归**：`p6-batch` 的 55 个目标中 50 个通过。另外 5 个仍因另一个会话未完成的 `mmio_ram.rs`（state
+  layout 预检查）失败，它们其余的 12 条命令直接运行，全部通过；只含本部分改动的工作树中 state layout
+  检查通过（新增的 `INTERPRETED_VEX` 已归类）。

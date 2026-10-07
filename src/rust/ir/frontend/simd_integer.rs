@@ -16,13 +16,16 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     prepare(b, i, count);
     let operation = PackedOp::from_encoding(i.encoding.opcode).unwrap();
     let register = i.modrm.unwrap() >> 3 & 7;
-    let destination = b.xmm[register as usize];
+    let first = b.first(register);
+    let destination = b.xmm[first as usize];
     let value = if let Some(ea) = i.ea {
         let map = snapshot(b, i.instruction_pc, i.next_pc, count - 1);
         b.region.states[map.index()].resume = ResumeKind::BeforeInstruction;
         let offset = effective_offset(b, &ea);
         let address = segmented(b, offset, ea.segment, map);
-        let bytes = if matches!(i.encoding.opcode, 0x0F14 | 0x660F14) { 8 } else { 16 };
+        // (VUNPCKLPS/PD read an m128)
+        let bytes =
+            if matches!(i.encoding.opcode, 0x0F14 | 0x660F14) && b.vex.is_none() { 8 } else { 16 };
         super::simd_moves::check_alignment(b, i, address, bytes, map);
         let values = b.region.append(
             b.block,
@@ -30,6 +33,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 operation,
                 bytes,
                 register,
+                first,
+                vex: b.vex.is_some(),
             },
             vec![address, destination, b.effect],
             &[Type::V128, Type::Effect],

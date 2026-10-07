@@ -15,6 +15,7 @@ use crate::decode_rules::{vex_prefixes_ud, vex_row, vex_valid, Vex};
 /// virtual-8086 mode have no VEX: LES/LDS, whose register form is #UD. A
 /// 66/F2/F3 prefix is #UD here too, where LOCK was (decode_rules::lock_allowed).
 pub unsafe fn run(first: u8, byte1: u8) {
+    INTERPRETED_VEX = INTERPRETED_VEX.wrapping_add(1);
     if !*protected_mode || vm86_mode() || vex_prefixes_ud(*prefixes) {
         trigger_ud();
         return;

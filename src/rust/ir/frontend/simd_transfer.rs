@@ -13,7 +13,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     prepare(b, i, count);
     let operation = TransferOp::from_encoding(i.encoding.opcode).unwrap();
     let register = i.modrm.unwrap() >> 3 & 7;
-    let destination = b.xmm[register as usize];
+    let first = b.first(register);
+    let destination = b.xmm[first as usize];
     let value = if let Some(ea) = i.ea {
         let map = snapshot(b, i.instruction_pc, i.next_pc, count - 1);
         b.region.states[map.index()].resume = ResumeKind::BeforeInstruction;
@@ -25,6 +26,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             Op::XmmTransferLoad {
                 operation,
                 register,
+                first,
+                vex: b.vex.is_some(),
             },
             vec![address, destination, b.effect],
             &[Type::V128, Type::Effect],

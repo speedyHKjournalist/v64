@@ -38,8 +38,8 @@ pub fn supports(i: &DecodedInstruction) -> bool {
             | 0xF30F7F
     )
 }
-/// #GP(0) for a misaligned m128 operand of `bytes` (Encoding::aligned_m128),
-/// before the access and with its fault map
+/// #GP(0) for a misaligned m128 operand of `bytes` (Encoding::aligned_m128;
+/// VEX forms: VexLift::aligned), before the access and with its fault map
 pub fn check_alignment(
     b: &mut IntegerBuilder,
     i: &DecodedInstruction,
@@ -47,7 +47,11 @@ pub fn check_alignment(
     bytes: u8,
     map: crate::ir::ids::StateId,
 ) {
-    if i.encoding.aligned_m128(bytes) {
+    let aligned = match b.vex {
+        Some(v) => v.aligned && bytes == 16,
+        None => i.encoding.aligned_m128(bytes),
+    };
+    if aligned {
         b.effect = b.region.append(
             b.block,
             Op::AlignmentCheck { bytes: 16 },
@@ -85,7 +89,7 @@ pub fn prepare(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     b.region.states[guard.index()].resume = ResumeKind::BeforeInstruction;
     b.effect = b.region.append(
         b.block,
-        Op::SseCheck,
+        if b.vex.is_some() { Op::AvxCheck } else { Op::SseCheck },
         vec![b.effect],
         &[Type::Effect],
         Some(guard),
@@ -135,7 +139,11 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         else {
             let values = b.region.append(
                 b.block,
-                Op::XmmLoad { bytes, register },
+                Op::XmmLoad {
+                    bytes,
+                    register,
+                    vex: b.vex.is_some(),
+                },
                 vec![address, b.effect],
                 &[Type::V128, Type::Effect],
                 Some(map),
@@ -183,7 +191,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 vec![b.xmm[source as usize]],
                 if bytes == 4 { Type::I32 } else { Type::I64 },
             );
-            let old = b.xmm[destination as usize];
+            // (VMOVSS/VMOVSD: the other lanes from the first source)
+            let old = b.xmm[b.first(destination) as usize];
             let upper = if matches!(op, 0xF30F7E | 0x660FD6) {
                 b.node(
                     Op::VectorBinary(crate::ir::simd::PackedOp::Xor),

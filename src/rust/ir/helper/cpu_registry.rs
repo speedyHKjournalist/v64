@@ -109,7 +109,8 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_rep_outs"
         | "ir_rep_scas"
         | "ir_rep_stos"
-        | "ir_x87_mem" => 5,
+        | "ir_x87_mem"
+        | "ir_avx_fp_reg_continue" => 5,
         _ => return None,
     })
 }
@@ -122,6 +123,7 @@ fn abi(name: &str) -> HelperAbi {
                 | "ir_sse_fp_mem_continue"
                 | "ir_crc32_mem_continue"
                 | "ir_avx_continue"
+                | "ir_avx_fp_reg_continue"
         )
     {
         HelperAbi::CpuReload
@@ -240,8 +242,20 @@ pub fn xmm_register_operands(
             None
         }
     };
-    let op = constant(0)?;
-    if !matches!(
+    // (ir_avx_fp_reg_continue: the VEX forms of the same keys)
+    if !xmm_register_op(constant(0)?) {
+        return None;
+    }
+    let source = constant(1)?;
+    let destination = constant(2)?;
+    if source >= 8 || destination >= 8 {
+        return None;
+    }
+    Some((source as u8, destination as u8))
+}
+/// The keys of xmm_register_operands
+pub fn xmm_register_op(op: u32) -> bool {
+    matches!(
         op,
         0x0F51
             | 0x0F52
@@ -308,15 +322,7 @@ pub fn xmm_register_operands(
             | 0x660F3A08..=0x660F3A0B
             | 0x660F3A21
             | 0x660F3A40..=0x660F3A42
-    ) {
-        return None;
-    }
-    let source = constant(1)?;
-    let destination = constant(2)?;
-    if source >= 8 || destination >= 8 {
-        return None;
-    }
-    Some((source as u8, destination as u8))
+    )
 }
 
 /// Successful forms have no guest-memory/host observation or mapping writes.

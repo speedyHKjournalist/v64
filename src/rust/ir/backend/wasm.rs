@@ -1392,6 +1392,13 @@ impl Emitter<'_> {
     }
     fn planned_effect(&mut self, plan: &EffectPlan) {
         match plan {
+            EffectPlan::ZeroState { address, bytes, .. } => {
+                for offset in (0..*bytes as u32).step_by(8) {
+                    self.w.const_i32((address + offset) as i32);
+                    self.w.const_i64(0);
+                    self.w.store_aligned_i64(0);
+                }
+            },
             EffectPlan::Arithmetic(plan) => match plan {
                 ArithmeticPlan::Division(p) => self.divide(p),
                 ArithmeticPlan::CompareExchange(p) => self.compare_exchange8b(p),
@@ -1436,12 +1443,18 @@ impl Emitter<'_> {
                     self.w.load_fixed_i32(guard.address);
                     self.w.const_i32(guard.mask);
                     self.w.and_i32();
-                    if let Some((address, bits)) = guard.required {
+                    for &(address, bits) in &guard.required {
                         self.w.load_fixed_i32(address);
                         self.w.const_i32(bits);
                         self.w.and_i32();
                         self.w.const_i32(bits);
                         self.w.xor_i32();
+                        self.w.or_i32();
+                    }
+                    for &(address, bits) in &guard.forbidden {
+                        self.w.load_fixed_i32(address);
+                        self.w.const_i32(bits);
+                        self.w.and_i32();
                         self.w.or_i32();
                     }
                     self.w.if_void();
@@ -1577,7 +1590,8 @@ impl Emitter<'_> {
                     .expression
                     .clone()
             };
-            let left_steps = operand(destination);
+            // (a VEX form's first source: its destination's old value)
+            let left_steps = operand(fp.first.unwrap_or(destination));
             let right_steps = operand(source);
             self.value_steps(&left_steps);
             let left = self.w.set_new_local_v128();
@@ -1691,11 +1705,12 @@ impl Emitter<'_> {
             self.prepare_memory_call(plan.state);
             self.w.else_();
             self.diagnostic_begin(DiagnosticStage::StateWrite);
+            // (and a VEX form's first source)
+            let first = plan.xmm_first.unwrap_or(destination);
             for write in &self.mir.states[plan.state.index()].cpu.writes {
-                if write.address == Address::Absolute(gp::get_reg_xmm_offset(source as u32))
-                    || write.address
-                        == Address::Absolute(gp::get_reg_xmm_offset(destination as u32))
-                {
+                if [source, destination, first].iter().any(|&reg| {
+                    write.address == Address::Absolute(gp::get_reg_xmm_offset(reg as u32))
+                }) {
                     self.state_write(write);
                 }
             }

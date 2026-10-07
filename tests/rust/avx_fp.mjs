@@ -176,7 +176,8 @@ try
                         vm.write_memory(new Uint8Array(list.length * 32), OUT);
                         vm.write_memory(new Uint8Array(list.length * 4), FAULTS);
                         vm.write_memory(Uint8Array.of(warm ? 0 : 1), 0x604);
-                        // (the region tiers ran the VEX forms: wait for the AVX helper)
+                        // (the region tiers ran the VEX forms: wait for the AVX helpers,
+                        // which these operands go through, natively lifted forms too)
                         await run(vm, code, warm, vm === machines[0], vm => vm !== machines[2] || !simd(vm) || e.ir_avx_calls() >= list.length);
                         runs.push({ run: `machine ${m} ${warm ? "hot" : "one round"}`, out: Uint8Array.from(vm.read_memory(OUT, list.length * 32)),
                             faults: Uint8Array.from(vm.read_memory(FAULTS, list.length * 4)) });

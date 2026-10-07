@@ -168,7 +168,7 @@ export const STATICS = {
     "cpu/global_pointers.rs": { STATE_BLOCK: "core" },
     "cpu/apic.rs": { APICS: "core", APIC_AUX: "core", CURRENT_CORE: "machine", CORE_COUNT: "machine", CORE_EVENTS: "machine", NMI_PENDING: "machine", SMI_PENDING: "machine" },
     "cpu/cpu.rs": {
-        INTERPRETED: "debug", INTERPRETED_OFFSETS: "debug", INTERPRETED_PAGES: "debug", INTERPRETED_WATCH: "debug",
+        INTERPRETED: "debug", INTERPRETED_OFFSETS: "debug", INTERPRETED_PAGES: "debug", INTERPRETED_VEX: "debug", INTERPRETED_WATCH: "debug",
         INSTRUCTION_TRACE: "debug", INSTRUCTION_TRACE_NEXT: "debug", INSTRUCTION_TRACE_ENABLED: "debug",
         cpuid_level: "machine", debug_last_jump: "debug", jit_block_boundary: "scratch", core_yield: "scratch",
         jit_link_batch: "scratch", jit_link_batch_start: "scratch", jit_link_batch_limit: "scratch",

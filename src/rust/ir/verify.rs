@@ -397,6 +397,8 @@ pub fn verify(region: &Region) -> Result<()> {
                     operation,
                     bytes,
                     register,
+                    first,
+                    vex,
                 } => {
                     require(
                         *bytes == 16
@@ -410,6 +412,8 @@ pub fn verify(region: &Region) -> Result<()> {
                     )?;
                     require(
                         *register < 8
+                            && *first < 8
+                            && (*vex || first == register)
                             && args == [Type::LinearAddress, Type::V128]
                             && results == [Type::V128],
                         "XMM binary signature",
@@ -417,13 +421,30 @@ pub fn verify(region: &Region) -> Result<()> {
                     let map = &region.states[inst.state.unwrap().index()];
                     require(map.xmm.len() == 8, "XMM binary needs complete state")?;
                     require(
-                        inst.args[1] == map.xmm[*register as usize],
+                        inst.args[1] == map.xmm[*first as usize],
                         "XMM binary destination/state mismatch",
                     )?;
                 },
-                Op::XmmShuffle { register, .. } | Op::XmmTransferLoad { register, .. } => {
+                Op::XmmShuffle { .. } | Op::XmmTransferLoad { .. } => {
+                    let (register, first, vex) = match inst.op {
+                        Op::XmmShuffle {
+                            register,
+                            first,
+                            vex,
+                            ..
+                        } => (register, first, vex),
+                        Op::XmmTransferLoad {
+                            register,
+                            first,
+                            vex,
+                            ..
+                        } => (register, first, vex),
+                        _ => unreachable!(),
+                    };
                     require(
-                        *register < 8
+                        register < 8
+                            && first < 8
+                            && (vex || first == register)
                             && args == [Type::LinearAddress, Type::V128]
                             && results == [Type::V128],
                         "XMM shuffle signature",
@@ -431,7 +452,7 @@ pub fn verify(region: &Region) -> Result<()> {
                     let map = &region.states[inst.state.unwrap().index()];
                     require(map.xmm.len() == 8, "XMM shuffle needs complete state")?;
                     require(
-                        inst.args[1] == map.xmm[*register as usize],
+                        inst.args[1] == map.xmm[first as usize],
                         "XMM shuffle destination/state mismatch",
                     )?;
                 },
@@ -496,9 +517,13 @@ pub fn verify(region: &Region) -> Result<()> {
                         && results == [Type::V128],
                     "vector replace types/lane",
                 )?,
-                Op::SseCheck | Op::FpuCheck => {
+                Op::SseCheck | Op::FpuCheck | Op::AvxCheck => {
                     require(args.is_empty() && results.is_empty(), "FP guard signature")?
                 },
+                Op::YmmZero { register } => require(
+                    *register < 8 && args.is_empty() && results.is_empty(),
+                    "YMM zeroing signature",
+                )?,
                 Op::X87 { opcode, modrm } => {
                     let (inputs, outputs) = match crate::ir::x87::io(*opcode, *modrm) {
                         Some(crate::ir::x87::Io::Load { .. }) => (2, 0),
@@ -514,7 +539,9 @@ pub fn verify(region: &Region) -> Result<()> {
                         "x87 operation signature",
                     )?
                 },
-                Op::XmmLoad { bytes, register }
+                Op::XmmLoad {
+                    bytes, register, ..
+                }
                 | Op::XmmStore {
                     bytes, register, ..
                 } => {

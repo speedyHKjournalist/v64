@@ -3337,6 +3337,9 @@ static mut INTERPRETED_PAGES: [(u32, u32); 1024] = [(0, 0); 1024];
 /// the interpreter started at (ir_interpreted_stat fields 4 and 5).
 static mut INTERPRETED_WATCH: u32 = u32::MAX;
 static mut INTERPRETED_OFFSETS: [u32; 256] = [0; 256];
+/// VEX instructions the interpreter ran (cpu::vex::run; ir_interpreted_stat
+/// field 6)
+pub static mut INTERPRETED_VEX: u32 = 0;
 #[inline(always)]
 unsafe fn note_interpreted_page(eip: u32, steps: u32) {
     INTERPRETED = INTERPRETED.wrapping_add(steps);
@@ -3356,7 +3359,8 @@ unsafe fn note_interpreted_page(eip: u32, steps: u32) {
 }
 /// field 0: total interpreted instructions; 1/2: page and count of table
 /// slot `index`; 3: reset; 4: watch page `index` (a page number); 5: its
-/// interpreted instructions started in 16-byte chunk `index`.
+/// interpreted instructions started in 16-byte chunk `index`; 6: VEX
+/// instructions interpreted.
 #[no_mangle]
 pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
     match field {
@@ -3373,6 +3377,7 @@ pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
         3 => {
             INTERPRETED = 0;
             INTERPRETED_PAGES = [(0, 0); 1024];
+            INTERPRETED_VEX = 0;
             0
         },
         4 => {
@@ -3384,6 +3389,7 @@ pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
             let offsets = INTERPRETED_OFFSETS;
             offsets[index as usize]
         },
+        6 => INTERPRETED_VEX,
         _ => 0,
     }
 }

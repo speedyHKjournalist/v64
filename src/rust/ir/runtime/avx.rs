@@ -14,6 +14,53 @@ pub unsafe fn ir_avx_calls_reset() { CALLS = 0; }
 
 /// `key`: the row's catalogue key; `operands`: ir::frontend::avx::operands;
 /// `offset` and `segment`: the memory operand's (VMASKMOVDQU's destination)
+/// VEX floating point between XMM registers (the frontend's
+/// avx::fp_register): `op` the legacy form's key, XMM `destination` =
+/// op(XMM `first`, XMM `source`), the destination's bits 255:128 zeroed.
+/// Its CpuReload adapter reloads only the destination (as
+/// ir_sse_fp_reg_continue's: mir::call's NativeFp); after Op::AvxCheck.
+#[no_mangle]
+pub unsafe fn ir_avx_fp_reg_continue(
+    op: u32,
+    source: i32,
+    destination: i32,
+    first: i32,
+    immediate: i32,
+) -> u32 {
+    assert!([source, destination, first]
+        .iter()
+        .all(|r| (0..8).contains(r)));
+    CALLS += 1;
+    // (the VEX key of the legacy one: map 1, 2 or 3 and the prefix's pp)
+    let (map, prefix) = match op & 0xFF_FF00 {
+        0x0F_3800 => (2, op >> 24),
+        0x0F_3A00 => (3, op >> 24),
+        _ => (1, op >> 16),
+    };
+    let pp = match prefix {
+        0x66 => 1,
+        0xF3 => 2,
+        0xF2 => 3,
+        _ => 0,
+    };
+    let instruction = crate::cpu::avx::Instruction {
+        key: 0xC400_0000 | map << 16 | pp << 8 | op & 0xFF,
+        reg: destination as u8,
+        vvvv: first as u8,
+        rm: Some(source as u8),
+        l: false,
+        w: false,
+        imm8: immediate as u8,
+        long: false,
+    };
+    match crate::cpu::avx::execute(
+        &mut crate::cpu::avx::Interpreter { address: 0 },
+        &instruction,
+    ) {
+        Ok(()) => Outcome::Normal as u32,
+        Err(()) => Outcome::ControlTransferred as u32,
+    }
+}
 #[no_mangle]
 pub unsafe fn ir_avx_continue(key: u32, operands: u32, offset: u32, segment: u32) -> u32 {
     CALLS = CALLS.wrapping_add(1);

@@ -9,15 +9,16 @@
 // CR0.TS (after #UD); CR0.EM and CR4.OSFXSR do not matter; #PF has no
 // effect. Operands alias in every combination; VEX.W and VEX.L where they
 // are ignored, and both VEX prefixes. Every case runs in the interpreter,
-// then hot under Tier-0 (which steps VEX forms) and the region tiers (the
-// AVX helper, ir::runtime::avx).
+// then hot under Tier-0 (templates for the hot forms, steps for the others)
+// and the region tiers (natively on the legacy SSE lifters, or through the
+// AVX helpers, ir::runtime::avx).
 //
 // P5 part 1: the data movement and logic forms, VZEROUPPER, VLDMXCSR and
 // VSTMXCSR.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
-import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
+import { COMPILED_ARMS, compiled_activations, vex_settled } from "./compiled_arms.mjs";
 import { FORMS, big, execute, le, mask, memory_bytes } from "./avx_model.mjs";
 
 const candidate = process.argv[2] || "build/v86.wasm";
@@ -222,9 +223,16 @@ const TIER0_HOT = ["vmovsd", "vmovss", "vmovapd", "vmovaps", "vmovdqu", "vmovdqa
     "vpmovmskb", "vzeroupper", "vunpcklpd", "vunpckhpd", "vblendvpd", "vpshufb"];
 const TIER0_HOT_FP = ["vaddsd", "vmulsd", "vsubsd", "vdivsd", "vaddss", "vmulss", "vsubss", "vdivss", "vmulpd", "vcomisd",
     "vucomisd", "vcomiss", "vucomiss", "vcmpsd", "vcvttsd2si", "vcvtsd2ss", "vcvtsi2sd", "vcvtss2sd", "vcvtpd2ps"];
+// The hot forms the region tiers run without the AVX helpers (P5 part 6):
+// TIER0_HOT's but VBLENDVPD (BLENDVPD's helper) and VPSHUFB (from memory:
+// PSHUFB's helper)
+const REGIONS_NATIVE = TIER0_HOT.filter(name => !["vblendvpd", "vpshufb"].includes(name));
 /** The forms whose cases Tier-0 ran templates for (fewer steps than cases)
  * or stepped */
 const tier0_forms = { templated: new Set(), stepped: new Set() };
+/** The forms the region tiers ran without the AVX helpers (no calls in the
+ * hot run) or with them */
+const region_forms = { native: new Set(), helper: new Set() };
 /** VEX instructions stepped by Tier-0 (machine 1) since ir_t0_steps_reset:
  * keyed by their first two bytes, C4 or C5 and the next, or an address-size
  * or segment prefix and C4 or C5 */
@@ -269,6 +277,7 @@ async function check_cases(name, cases, { before = () => {}, form } = {})
         vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
         vm.v86.cpu.wm.exports["ir_avx_calls_reset"]();
     }
+    const settled = vex_settled(0x600);
     const results = await run_all(program, write, machines, vm => ({
         fault: word(vm, FAULT),
         cases: cases.map(c => ({
@@ -279,7 +288,7 @@ async function check_cases(name, cases, { before = () => {}, form } = {})
         tier0: vm === machines[1] ? tier0_vex_steps() : 0,
         avx_calls: vm.v86.cpu.wm.exports["ir_avx_calls"](),
     }), vm => vm === machines[1] ? tier0_rounds() >= cases.length :
-        vm === machines[2] && simd(vm) ? vm.v86.cpu.wm.exports["ir_avx_calls"]() >= cases.length : true);
+        vm === machines[2] && simd(vm) ? settled(vm) : true);
     // (the hot runs ran the VEX forms compiled: Tier-0 a template or steps,
     // the region tiers call the AVX helper, but in a build without Wasm
     // SIMD, which has neither Tier-0 SIMD templates nor regions with XMM state)
@@ -294,7 +303,7 @@ async function check_cases(name, cases, { before = () => {}, form } = {})
             tier0_forms.stepped.add(form.name);
         }
     }
-    if(simd(machines[2])) assert.ok(results[4].data.avx_calls >= cases.length, `${name}: ${results[4].data.avx_calls} AVX helper calls in regions`);
+    if(form && simd(machines[2])) region_forms[results[4].data.avx_calls ? "helper" : "native"].add(form.name);
     for(const { label, data } of results)
     {
         assert.equal(data.fault, 0, `${name} (${label}): no fault`);
@@ -507,8 +516,13 @@ try
     {
         for(const name of TIER0_HOT.filter(name => !only || only.includes(name))) assert.ok(tier0_forms.templated.has(name), `${name}: a Tier-0 template`);
     }
+    if(simd(machines[2]))
+    {
+        for(const name of REGIONS_NATIVE.filter(name => !only || only.includes(name))) assert.ok(region_forms.native.has(name), `${name}: natively in the region tiers`);
+    }
+    if(process.env.AVX_REGION_FORMS) console.log("regions without the AVX helpers:", [...region_forms.native].join(","), "\nwith them:", [...region_forms.helper].join(","));
     console.log(`PASS: ${FORMS.filter(f => !f.long).length} forms against the model, from registers and memory: bits 255:128 of register destinations zeroed; ` +
-        `Tier-0 templates for ${tier0_forms.templated.size} of them`);
+        `Tier-0 templates for ${tier0_forms.templated.size} of them, the region tiers without the AVX helpers for ${region_forms.native.size}`);
 
     // The floating-point hot forms run Tier-0 templates (or their exact path)
     // for ordinary operands: finite, normal and of moderate size
