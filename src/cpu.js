@@ -950,6 +950,19 @@ export function resolve_cpu_features(requested, x86_64, cpuid_level)
     return kept.reduce((set, name) => set | 1 << CPU_FEATURES[name]["bit"], 0);
 }
 
+/**
+ * The features of the setting cpu_features whose milestone is not released
+ * yet (docs/simd-xsave-plan.md 4.1): they are for tests and development, and
+ * their instructions may still be #UD
+ * @param {Array<string>|string|undefined} requested
+ * @return {Array<string>}
+ */
+export function unreleased_cpu_features(requested)
+{
+    const names = typeof requested === "string" ? CPU_FEATURE_PRESETS[requested] || [] : requested || [];
+    return names.filter(name => CPU_FEATURES[name] && !CPU_FEATURES[name]["released"]);
+}
+
 // Version 1 predates the x64 extension banks. Keep exact byte ranges for import.
 const CORE_STATE_RANGES_V1 = [[64, 108], [112, 552], [556, 620], [628, 652], [668, 716],
     [724, 812], [816, 960], [968, 1132], [1152, 1280]];
@@ -2732,9 +2745,17 @@ CPU.prototype.init = function(settings, device_bus)
     this.configure_extended_memory(settings.extended_memory_size || 0, settings.extended_memory_cache);
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
-    // The features of docs/simd-xsave-plan.md (src/cpu_features.js). Internal
-    // while in development: only tests set cpu_features.
+    // The features of docs/simd-xsave-plan.md (src/cpu_features.js): the
+    // released ones (SSSE3, SSE4.1, SSE4.2: the preset x86-64-v2), and for
+    // tests and development the others, which warn unless
+    // cpu_features_unreleased is set
     this.cpu_features = resolve_cpu_features(settings["cpu_features"], settings["cpu_type"] === "x86_64", settings.cpuid_level || 0x16);
+    const unreleased = unreleased_cpu_features(settings["cpu_features"]);
+    if(unreleased.length && !settings["cpu_features_unreleased"])
+    {
+        console.warn("cpu_features: " + unreleased.join(", ") + " not released yet (docs/simd-xsave-plan.md): " +
+            "for tests and development, their instructions may still be #UD");
+    }
     this.wm.exports["set_cpu_features"](this.cpu_features);
 
     this.acpi_enabled[0] = +this.platform.acpi;

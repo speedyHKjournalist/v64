@@ -208,7 +208,7 @@ try
     await run_all(loop([0xB9, ...u32(0x810000), ...bit_scans[0], 0xA3, ...u32(OUT), ...bit_scans[1], 0xA3, ...u32(OUT + 4)]), undefined, machines,
         (vm, run) => assert.deepEqual([word(vm, OUT), word(vm, OUT + 4)], [16, 23], `F3 BSF, F3 BSR (${run})`));
 
-    const featured = await create_machines({ cpu_type: "x86_64", cpu_features: "x86-64-v3" });
+    const featured = await create_machines({ cpu_type: "x86_64", cpu_features: "x86-64-v3", cpu_features_unreleased: true });
     try
     {
         await expect_undefined([...three_byte, ...vex, ...bit_scans], featured);

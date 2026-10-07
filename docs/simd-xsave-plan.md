@@ -212,6 +212,9 @@ P4a 的 FP 核心、oracle/fixture 升级也可从 P0 后独立推进。解码�
 每个里程碑开放能力位之前，5.1 节热点形式清单中属于该里程碑的形式，必须已在编译路径上有
 原生模板（12.2 节）。
 
+进度：M1 于 2026-10-07 开放（14 节“M1”）：公开选项 `cpu_features` 接受这三个能力，默认 CPU
+配置不变（Q1）。
+
 ## 5. P0–P1：清单、能力契约和解码
 
 ### 5.1 编码清单与生成检查
@@ -1477,3 +1480,31 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   部分一样，在另一个会话尚未完成的 `src/rust/cpu/mmio_ram.rs` 改动处失败。在只含本部分改动的
   工作树中 state layout 检查通过（新增的 `SSE_FP_CALLS` 已登记）；这些目标其余的命令直接运行，
   全部通过。
+
+### M1：开放 SSSE3、SSE4.1、SSE4.2（x86-64-v2）（2026-10-07）
+
+- **含义**：Q1 让新建 VM 的默认配置保持不变，所以“开放”指公开选项 `cpu_features` 接受这三个
+  能力（按名称，或用预设 `x86-64-v2`）；默认 CPUID 不变，`gen/cpu_features.js` 的 `open` 仍为空。
+- **公开与内部**：`gen/cpu_features.js` 新增 `RELEASED = ["M1"]`，生成的 `src/cpu_features.js` 为
+  每个能力记录 `released`。之后里程碑的能力（XSAVE、AVX……）仍然接受，但启动时会警告：它们只供
+  测试和开发，指令可能仍是 #UD。设置 `cpu_features_unreleased` 可以关掉警告（12.1 节的测试专用
+  feature mask）。`unreleased_cpu_features` 列出这些能力。本计划自己的测试都设置了这个选项；
+  `tests/devices/smm.js` 正由另一个会话修改，暂未设置，所以会警告。
+- **文档**：`v86.d.ts` 记录 `cpu_features`，只列已开放的能力和预设；`docs/x86-64.md` 说明用法以及
+  与 Q1 的关系。`starter.js` 和 CPU worker 传递 `cpu_features_unreleased`。
+- **CPU contract**：`tools/cpu_contract.mjs` 新增 `legacy-v2`、`x64-v2` 两个 profile（预设
+  `x86-64-v2`）。人工审核：原有四个 profile 不变；新 profile 与 `legacy-1`、`x64-1` 只差
+  CPUID.1:ECX 的 bit 9、19、20（0x180200），MSR 相同。`gen/cpu_features.js` 的检查改为：能力的位
+  只在它开放的 profile 和请求它的 profile 中置位。
+- **发布 gate**：`tools/release_gate.mjs` 新增 `R-SSE4`：`platform-contract-tests`、`ssse3-tests`、
+  `sse4-tests`、`sse3-tests`、`sse-fp-tests`、`sse-fault-tests`、`packed-simd-tests`、
+  `decode-rules-tests`、`x64-decode-tests`、`ir-sse-fp-tests`、`ir-crc32-tests`、
+  `ir-simd-integer-tests`、`ir-simd-shuffle-tests`，以及两种 `nasmtests`。这些目标在 P4b 第四部分
+  的回归中都已通过（state layout 的外部问题见那里）。
+- **留到 P12**：真实客体验收（11.3 节，如 glibc 的 `_sse42` 变体；Alpine x86_64 用 musl，
+  TinyCore 11 是 32 位 glibc），以及默认配置的决定（Q1）。
+- **测试**：`tests/x64/cpu_features.mjs` 检查只有 x86-64-v2 的能力是 released；contract 检查和
+  `gen/cpu_features.js --check` 通过。用到未开放能力的测试（`tests/rust/xsave.mjs`、
+  `decode_rules.mjs`、`tests/x64/xsave.mjs`、`tests/smp/xstate_lifecycle.mjs`、kvm-unit-tests 和
+  `linux_boot.mjs` 的 runner）设置 `cpu_features_unreleased`，运行通过且没有警告。`api-tests` 和
+  `kvm-unit-test` 通过；`tests/api/reset.js` 有一次在负载约 20 时超时，重跑通过。

@@ -85,6 +85,7 @@ const emulator = new V86({
     acpi: options.acpi,
     cpu_cores: options.cores,
     cpu_features: options.cpu_features,
+    cpu_features_unreleased: true,
     cpu_type: options.cpu_type,
     disable_jit: +process.env.DISABLE_JIT,
     log_level: 0,

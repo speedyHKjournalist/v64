@@ -48,6 +48,13 @@ const LEVELS = {
     "R-extended-memory": [
         ["extended-memory-tests"], ["x64-extended-guest-tests", true],
     ],
+    // SSSE3, SSE4.1 and SSE4.2 (docs/simd-xsave-plan.md M1: cpu_features
+    // "x86-64-v2"): every engine against SDM models, QEMU and gdb references
+    "R-SSE4": [
+        ["platform-contract-tests"], ["ssse3-tests"], ["sse4-tests"], ["sse3-tests"], ["sse-fp-tests"], ["sse-fault-tests"],
+        ["packed-simd-tests"], ["decode-rules-tests"], ["x64-decode-tests"], ["ir-sse-fp-tests"], ["ir-crc32-tests"],
+        ["ir-simd-integer-tests"], ["ir-simd-shuffle-tests"], ["nasmtests", true], ["nasmtests-force-jit", true],
+    ],
     // machine_type "q35": chipset, ACPI tables, AHCI (docs/q35.md, docs/ahci.md)
     "R-q35": [
         ["acpi-table-tests"], ["q35-device-tests"], ["q35-guest-tests", true], ["q35-hotplug-tests", true],

@@ -3,7 +3,8 @@
 /**
  * The CPU features of docs/simd-xsave-plan.md: bit in the machine's set
  * (src/rust/cpu/features.rs), required features, the lowest cpuid_level that
- * reports it and the CPU profiles that may have it
+ * reports it, the CPU profiles that may have it and whether its milestone is
+ * released (else it is for tests and development)
  */
 export const CPU_FEATURES = {
     "SSSE3": {
@@ -13,7 +14,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": true
     },
     "SSE4.1": {
         "bit": 1,
@@ -24,7 +26,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": true
     },
     "SSE4.2": {
         "bit": 2,
@@ -35,7 +38,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": true
     },
     "XSAVE": {
         "bit": 3,
@@ -44,7 +48,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "AVX": {
         "bit": 4,
@@ -56,7 +61,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "AVX2": {
         "bit": 5,
@@ -67,7 +73,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "FMA": {
         "bit": 6,
@@ -78,7 +85,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "F16C": {
         "bit": 7,
@@ -89,7 +97,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "BMI1": {
         "bit": 8,
@@ -98,7 +107,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "BMI2": {
         "bit": 9,
@@ -107,7 +117,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "LZCNT": {
         "bit": 10,
@@ -115,7 +126,8 @@ export const CPU_FEATURES = {
         "min_cpuid_level": 1,
         "profiles": [
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "MOVBE": {
         "bit": 11,
@@ -124,7 +136,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "XSAVEOPT": {
         "bit": 12,
@@ -135,7 +148,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "XSAVEC": {
         "bit": 13,
@@ -146,7 +160,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "XGETBV1": {
         "bit": 14,
@@ -157,7 +172,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     },
     "XSAVES": {
         "bit": 15,
@@ -168,7 +184,8 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86",
             "x86_64"
-        ]
+        ],
+        "released": false
     }
 };
 

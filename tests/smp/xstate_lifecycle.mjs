@@ -13,7 +13,7 @@ const FEATURES = ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"];
 async function machine(count, cpu_features)
 {
     const vm = new V86({ graphics_adapter: "bochs_vga", acpi: true, cpu_cores: count, memory_size: 16 << 20,
-        disable_jit: true, autostart: false, log_level: 0, cpu_features,
+        disable_jit: true, autostart: false, log_level: 0, cpu_features, cpu_features_unreleased: true,
         cpu_clock: { mode: "deterministic", instructions_per_ms: 100 }, cpu_schedule_seed: 42 });
     await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
     return vm;

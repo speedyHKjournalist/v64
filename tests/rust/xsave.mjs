@@ -183,7 +183,7 @@ try
     console.log("PASS: without XSAVE, CPUID reports none, CR4.OSXSAVE is reserved, XGETBV/XSETBV/XSAVE #UD");
 
     // XSAVE without AVX: XCR0 can have x87 and SSE state
-    machines.push(...await create_machines({ cpu_features: ["XSAVE"] }));
+    machines.push(...await create_machines({ cpu_features: ["XSAVE"], cpu_features_unreleased: true }));
     preamble = [...CLTS, ...OSXSAVE, ...xsetbv(1), ...NO_OSXSAVE];
     await run_all([...cpuid(1, 0, OUT), ...OSXSAVE, ...cpuid(1, 0, OUT + 16), ...cpuid(0xD, 0, OUT + 32),
         ...cpuid(0xD, 1, OUT + 48), ...cpuid(0xD, 2, OUT + 64), ...mov_ecx(0), ...XGETBV, ...store_eax(OUT + 80), ...store_edx(OUT + 84),
@@ -335,7 +335,7 @@ try
 
     // With AVX: XCR0 can enable YMM state, which XRSTOR loads and XSAVE stores
     // (no AVX instruction has semantics yet); CPUID's sizes follow XCR0
-    machines.push(...await create_machines({ cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"] }));
+    machines.push(...await create_machines({ cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], cpu_features_unreleased: true }));
     const ymm = Uint8Array.from({ length: 128 }, (_, i) => i * 13 + 1);
     await run_all([...OSXSAVE, ...cpuid(0xD, 0, OUT), ...cpuid(0xD, 2, OUT + 16), ...xsetbv(7), ...cpuid(0xD, 0, OUT + 32),
         ...mov_ebx(AREA), ...ALL, ...XRSTOR, ...mov_ebx(AREA2), ...ALL, ...XSAVE,

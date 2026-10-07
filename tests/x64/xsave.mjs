@@ -195,7 +195,7 @@ const setup = emulator => {
 for(const [label, options] of [["interpreted", {}],
     ["x64 page tier", {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true}]])
 {
-    const result = new Uint8Array(await actual(directory, {length: LENGTH, setup, options: {cpu_type: "x86_64", cpu_features: "x86-64-v3", ...options}}));
+    const result = new Uint8Array(await actual(directory, {length: LENGTH, setup, options: {cpu_type: "x86_64", cpu_features: "x86-64-v3", cpu_features_unreleased: true, ...options}}));
     const view = new DataView(result.buffer, result.byteOffset, result.length);
     const at = address => address - OUT;
     const area = address => result.subarray(at(address), at(address) + 832);

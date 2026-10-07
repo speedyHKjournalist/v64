@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // The CPU features of docs/simd-xsave-plan.md (src/cpu_features.js, setting
-// cpu_features, internal while in development): CPUID reports exactly the
-// requested features, a preset names a set, cpuid_level leaves out what it
-// cannot report together with what requires it, and an unknown feature, one
-// the profile cannot have or one without its requirements fails.
+// cpu_features): CPUID reports exactly the requested features, a preset names
+// a set, cpuid_level leaves out what it cannot report together with what
+// requires it, and an unknown feature, one the profile cannot have or one
+// without its requirements fails. Only M1's (x86-64-v2) are released: the
+// others are listed as unreleased (a warning unless cpu_features_unreleased).
 import assert from "node:assert/strict";
 import url from "node:url";
 import {assemble, actual} from "./guest_runner.mjs";
 
 const root = url.fileURLToPath(new URL("../../", import.meta.url));
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const {unreleased_cpu_features} = await import("../../src/cpu.js");
 
 const directory = assemble("cpu-features", `bits 32
 org 0x100000
@@ -48,13 +50,13 @@ const V3 = [...V2, "XSAVE", "AVX", "AVX2", "FMA", "F16C", "BMI1", "BMI2", "LZCNT
 for(const [options, expected, level] of [
     [{}, []],
     [{cpu_type: "x86_64"}, []],
-    [{cpu_features: [...V2, "BMI1", "BMI2", "MOVBE"]}, [...V2, "BMI1", "BMI2", "MOVBE"]],
+    [{cpu_features: [...V2, "BMI1", "BMI2", "MOVBE"], cpu_features_unreleased: true}, [...V2, "BMI1", "BMI2", "MOVBE"]],
     [{cpu_features: "x86-64-v2"}, V2],
-    [{cpu_type: "x86_64", cpu_features: "x86-64-v3"}, V3],
+    [{cpu_type: "x86_64", cpu_features: "x86-64-v3", cpu_features_unreleased: true}, V3],
     // leaf 0xD is out of reach: XSAVE goes, and AVX, AVX2, FMA, F16C with it
-    [{cpu_type: "x86_64", cpu_features: "x86-64-v3", cpuid_level: 7}, [...V2, "BMI1", "BMI2", "LZCNT", "MOVBE"], 7],
+    [{cpu_type: "x86_64", cpu_features: "x86-64-v3", cpu_features_unreleased: true, cpuid_level: 7}, [...V2, "BMI1", "BMI2", "LZCNT", "MOVBE"], 7],
     // the Windows NT setting: neither leaf 7 nor leaf 0xD
-    [{cpu_features: [...V2, "BMI1", "MOVBE"], cpuid_level: 2}, [...V2, "MOVBE"], 2],
+    [{cpu_features: [...V2, "BMI1", "MOVBE"], cpu_features_unreleased: true, cpuid_level: 2}, [...V2, "MOVBE"], 2],
 ])
 {
     const result = await actual(directory, {length: 20, options});
@@ -86,3 +88,15 @@ for(const [options, message] of [
     await emulator.destroy();
     console.log(`PASS ${JSON.stringify(options)} is refused`);
 }
+
+for(const [requested, expected] of [
+    [undefined, []],
+    ["x86-64-v2", []],
+    [["SSSE3", "SSE4.1", "SSE4.2"], []],
+    ["x86-64-v3", ["XSAVE", "AVX", "AVX2", "FMA", "F16C", "BMI1", "BMI2", "LZCNT", "MOVBE"]],
+    [["SSSE3", "XSAVE"], ["XSAVE"]],
+])
+{
+    assert.deepEqual(unreleased_cpu_features(requested), expected, JSON.stringify(requested));
+}
+console.log("PASS only the features of x86-64-v2 (M1) are released");
