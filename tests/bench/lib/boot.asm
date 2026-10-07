@@ -73,6 +73,24 @@ protected:
     mov eax, cr4
     or eax, 0x600
     mov cr4, eax
+    ; With XSAVE (CPUID.1:ECX bit 26): CR4.OSXSAVE and XCR0 with x87 and SSE
+    ; state, and AVX state with AVX (bit 28)
+    mov eax, 1
+    cpuid
+    bt ecx, 26
+    jnc .no_xsave
+    mov eax, cr4
+    or eax, 1 << 18
+    mov cr4, eax
+    mov eax, 3
+    bt ecx, 28
+    jnc .no_avx
+    mov eax, 7
+.no_avx:
+    xor ecx, ecx
+    xor edx, edx
+    xsetbv
+.no_xsave:
     fninit
     mov dword [0x500], 0xCAFE
     hlt

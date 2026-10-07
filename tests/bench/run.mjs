@@ -79,7 +79,7 @@ async function create(arm, bench) {
     const vm = new V86({
         graphics_adapter: "bochs_vga",
         wasm_path: arm.wasm, memory_size: 128 << 20,
-        ...bench.cpu_features ? { cpu_features: bench.cpu_features } : {},
+        ...bench.cpu_features ? { cpu_features: bench.cpu_features, cpu_features_unreleased: !!bench.cpu_features_unreleased } : {},
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });

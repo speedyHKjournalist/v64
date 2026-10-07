@@ -211,6 +211,20 @@ const pages = (vm, page, present) => {
     vm.write_memory(Uint8Array.from(u32(present ? page | 3 : 0)), 0x13000 + (page >>> 12) * 4);
     vm.v86.cpu.wm.exports["full_clear_tlb"]();
 };
+/** The rounds of a check_cases program that Tier-0 (machine 1) ran since
+ * ir_t0_steps_reset: it steps each case's XRSTOR and XSAVE (0F AE) */
+const tier0_rounds = () => machines[1].v86.cpu.wm.exports["ir_t0_steps"](0xAE0F) / 2;
+// The VEX forms of gen/isa_hot_forms.json, which have Tier-0 templates (P5
+// part 5): the others here, against every case; the floating-point ones with
+// ordinary operands (see TIER0_HOT_FP)
+const TIER0_HOT = ["vmovsd", "vmovss", "vmovapd", "vmovaps", "vmovdqu", "vmovdqa", "vmovq", "vmovd", "vxorpd", "vxorps",
+    "vandpd", "vandnpd", "vorpd", "vpand", "vpandn", "vpor", "vpxor", "vpcmpeqb", "vpcmpeqd", "vpcmpgtb", "vpaddb",
+    "vpmovmskb", "vzeroupper", "vunpcklpd", "vunpckhpd", "vblendvpd", "vpshufb"];
+const TIER0_HOT_FP = ["vaddsd", "vmulsd", "vsubsd", "vdivsd", "vaddss", "vmulss", "vsubss", "vdivss", "vmulpd", "vcomisd",
+    "vucomisd", "vcomiss", "vucomiss", "vcmpsd", "vcvttsd2si", "vcvtsd2ss", "vcvtsi2sd", "vcvtss2sd", "vcvtpd2ps"];
+/** The forms whose cases Tier-0 ran templates for (fewer steps than cases)
+ * or stepped */
+const tier0_forms = { templated: new Set(), stepped: new Set() };
 /** VEX instructions stepped by Tier-0 (machine 1) since ir_t0_steps_reset:
  * keyed by their first two bytes, C4 or C5 and the next, or an address-size
  * or segment prefix and C4 or C5 */
@@ -229,8 +243,10 @@ const simd = vm => vm.v86.cpu.wm.exports["ir_wasm_simd_supported"]() !== 0;
 /** Runs `cases` in one program: each loads its registers with XRSTOR, runs
  * its `code` between `pre` and `post` and stores its registers with XSAVE;
  * the registers, MXCSR, its destination memory and `out` must be as its
- * `model` says, in each run */
-async function check_cases(name, cases, { before = () => {} } = {})
+ * `model` says, in each run. Returns the VEX instructions Tier-0 stepped in
+ * its hot run; with the `form` under test, records whether Tier-0 ran a
+ * template for it (tier0_forms) */
+async function check_cases(name, cases, { before = () => {}, form } = {})
 {
     const program = [];
     for(const c of cases)
@@ -262,12 +278,22 @@ async function check_cases(name, cases, { before = () => {} } = {})
         })),
         tier0: vm === machines[1] ? tier0_vex_steps() : 0,
         avx_calls: vm.v86.cpu.wm.exports["ir_avx_calls"](),
-    }), vm => vm === machines[1] ? tier0_vex_steps() >= cases.length :
+    }), vm => vm === machines[1] ? tier0_rounds() >= cases.length :
         vm === machines[2] && simd(vm) ? vm.v86.cpu.wm.exports["ir_avx_calls"]() >= cases.length : true);
-    // (the hot runs ran the VEX forms compiled: Tier-0 steps them, the region
-    // tiers call the AVX helper, but in a build without Wasm SIMD, whose
-    // regions decline XMM state)
-    assert.ok(results[2].data.tier0 >= cases.length, `${name}: Tier-0 stepped ${results[2].data.tier0} VEX instructions`);
+    // (the hot runs ran the VEX forms compiled: Tier-0 a template or steps,
+    // the region tiers call the AVX helper, but in a build without Wasm
+    // SIMD, which has neither Tier-0 SIMD templates nor regions with XMM state)
+    const steps = results[2].data.tier0;
+    if(form)
+    {
+        // (a template retries some cases at most: floating-point lanes it refuses)
+        if(steps < cases.length / 2 && simd(machines[1])) tier0_forms.templated.add(form.name);
+        else
+        {
+            assert.ok(steps >= cases.length || form.kind === "fp", `${name}: Tier-0 stepped ${steps} VEX instructions`);
+            tier0_forms.stepped.add(form.name);
+        }
+    }
     if(simd(machines[2])) assert.ok(results[4].data.avx_calls >= cases.length, `${name}: ${results[4].data.avx_calls} AVX helper calls in regions`);
     for(const { label, data } of results)
     {
@@ -288,6 +314,7 @@ async function check_cases(name, cases, { before = () => {} } = {})
         });
     }
     checks += cases.length;
+    return steps;
 }
 /** Registers of case `n`: destination, first source and r/m, which alias in
  * every combination over 32 cases */
@@ -306,12 +333,16 @@ const CASES = 32;
 async function expect_fault(setup, faulting, vector, { epilogue = [], before = () => {}, cr2, error_code, label, memory, keep_upper = true, registers = {} } = {})
 {
     const at = CODE + PROLOGUE.length + xrstor(0).length + setup.length;
+    for(const vm of machines) vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
     const results = await run_all([...xrstor(area_in(0)), ...setup, ...faulting, ...epilogue, ...xsave(area_out(0))], vm => {
         vm.write_memory(Uint8Array.from(u32(faulting.length)), SKIP);
         vm.write_memory(area(0, registers), area_in(0));
         before(vm);
     }, machines, vm => ({ fault: [0, 4, 8, 12].map(o => word(vm, FAULT + o)), area: bytes(vm, area_out(0), 832),
-        memory: memory && bytes(vm, memory[0], memory[1].length) }));
+        memory: memory && bytes(vm, memory[0], memory[1].length) }),
+    // (Tier-0 steps XRSTOR: the faulting form runs as a template once the
+    // page has been compiled again with an entry after it)
+    vm => vm !== machines[1] || tier0_rounds() >= 300);
     const name = label || hex(faulting);
     const initial_area = area(0, registers);
     for(const { label: run, data } of results)
@@ -465,13 +496,85 @@ try
         for(const { label, data } of results) assert.equal(data >>> 27 & 3, 3, `CPUID.1:ECX.OSXSAVE and AVX (${label})`);
     }
 
-    // every form against the model
-    for(const f of FORMS.filter(f => !f.long))
+    // every form against the model (AVX_ONLY=name,...: those forms only)
+    const only = process.env.AVX_ONLY?.split(",");
+    for(const f of FORMS.filter(f => !f.long && (!only || only.includes(f.name))))
     {
         await check_cases(`${f.name} (${(f.map || 1) === 1 ? "" : (f.map === 2 ? "0F38 " : "0F3A ")}${f.op.toString(16)}${f.group === undefined ? "" : "/" + f.group})`,
-            Array.from({ length: f.kind === "zero_upper" || f.memory && f.kind.endsWith("mxcsr") ? 8 : CASES }, (_, n) => form_case(f, n)));
+            Array.from({ length: f.kind === "zero_upper" || f.memory && f.kind.endsWith("mxcsr") ? 8 : CASES }, (_, n) => form_case(f, n)), { form: f });
     }
-    console.log(`PASS: ${FORMS.filter(f => !f.long).length} forms against the model, from registers and memory: bits 255:128 of register destinations zeroed`);
+    if(simd(machines[1]))
+    {
+        for(const name of TIER0_HOT.filter(name => !only || only.includes(name))) assert.ok(tier0_forms.templated.has(name), `${name}: a Tier-0 template`);
+    }
+    console.log(`PASS: ${FORMS.filter(f => !f.long).length} forms against the model, from registers and memory: bits 255:128 of register destinations zeroed; ` +
+        `Tier-0 templates for ${tier0_forms.templated.size} of them`);
+
+    // The floating-point hot forms run Tier-0 templates (or their exact path)
+    // for ordinary operands: finite, normal and of moderate size
+    {
+        const values = [1.5, -2.25, 3000, -0.007, 1024, -1, 650, 0.125];
+        const vector = (double, k) => {
+            const b = new Uint8Array(16), view = new DataView(b.buffer);
+            for(let lane = 0; lane < (double ? 2 : 4); lane++)
+            {
+                const x = values[(k + lane * 3) % values.length];
+                if(double) view.setFloat64(8 * lane, x, true);
+                else view.setFloat32(4 * lane, x, true);
+            }
+            return b;
+        };
+        for(const f of FORMS.filter(f => !f.long && TIER0_HOT_FP.includes(f.name) && (!only || only.includes(f.name))))
+        {
+            const double = f.legacy.double ?? f.legacy.kind === "narrow";
+            const cases = Array.from({ length: CASES }, (_, n) => {
+                const c = form_case(f, n);
+                c.registers = Object.fromEntries(Array.from({ length: 8 }, (_, r) => [r, big(vector(double, n + r))]));
+                c.source = new Uint8Array(SPAN);
+                c.source.set(vector(double, n + 5).subarray(0, 16), c.at);
+                return c;
+            });
+            const steps = await check_cases(`${f.name} of ordinary operands`, cases);
+            if(simd(machines[1])) assert.ok(steps < CASES / 2, `${f.name}: a Tier-0 template (${steps} steps)`);
+        }
+    }
+    console.log(`PASS: Tier-0 templates for ${TIER0_HOT.length + TIER0_HOT_FP.length} hot forms`);
+
+    // An interpreted VEX instruction continues the interpreter's run as a
+    // legacy SSE one does: a round of a loop of VEX forms, interpreted until
+    // Tier-0 compiles its page again, dispatches as often as the same loop of
+    // their legacy forms (the instruction after each was a dispatch entry,
+    // where Tier-0 split its blocks: P5 part 5)
+    if(simd(machines[1]))
+    {
+        // (register forms: no retries) MOVAPS, PXOR, PADDB, PAND, POR,
+        // PCMPEQD, XORPS and MOVDQA; reg, the destination, r/m the source
+        const FORMS_BLOCKS = [[0, 0x28, 1, 2], [1, 0xEF, 3, 4], [1, 0xFC, 5, 6], [1, 0xDB, 7, 0], [1, 0xEB, 1, 3],
+            [1, 0x76, 2, 5], [0, 0x57, 4, 7], [1, 0x6F, 6, 1]];
+        const dispatches = vm => vm.v86.cpu.wm.exports["ir_auto_stat"](0);
+        const counts = {};
+        for(const as_vex of [false, true])
+        {
+            const body = [];
+            for(const [pp, op, reg, rm] of [...FORMS_BLOCKS, ...FORMS_BLOCKS])
+            {
+                // (the moves have one source: VEX.vvvv 1111b)
+                const first = op === 0x28 || op === 0x6F ? 0 : reg;
+                body.push(...as_vex ? vex({ pp, vvvv: first }, op, reg, rm) : [...pp ? [0x66] : [], 0x0F, op, 0xC0 | reg << 3 | rm]);
+            }
+            // ECX = 32; a loop of the body; DEC ECX; JNZ
+            const program = [...mov_r32(1, 32), ...body, 0x49, 0x75, -(body.length + 3) & 255];
+            let start;
+            const results = await run_all(program, vm => { start = dispatches(vm); }, [machines[0], machines[1]],
+                vm => dispatches(vm) - start);
+            // (machine 1's round after the program was written again)
+            counts[as_vex] = results[3].data;
+        }
+        assert.ok(counts[false] > 0 && counts[true] <= counts[false] + 8,
+            `dispatches in a round: ${counts[true]} with VEX forms, ${counts[false]} with their legacy forms`);
+        checks++;
+    }
+    console.log("PASS: a loop of VEX forms dispatches in the interpreter as the same loop of legacy SSE forms");
 
     // VMASKMOVDQU to [DI] with an address-size prefix (DI's address below
     // 64 KiB; EDI's upper half ignored)
@@ -606,7 +709,10 @@ try
         for(const f of FORMS.filter(f => f.aligned))
         {
             const store = f.kind === "store";
-            await expect_fault([], vex({ map: f.map || 1, pp: f.pp }, f.op, 1, undefined, store ? DEST + 4 : SOURCE + 8), 13,
+            // (first an ordinary access to the same page: Tier-0's template
+            // finds it in the TLB, where its alignment check decides)
+            const warm = store ? [0xA3, ...u32(DEST + 0x100)] : [0xA1, ...u32(SOURCE + 0x100)];
+            await expect_fault(warm, vex({ map: f.map || 1, pp: f.pp }, f.op, 1, undefined, store ? DEST + 4 : SOURCE + 8), 13,
                 { error_code: 0, before, memory, label: `${f.name} misaligned ${store ? "store" : "load"}` });
         }
         await expect_fault([], vex({ l: 1 }, 0xAE, 2, undefined, SOURCE), 6, { label: "vldmxcsr with VEX.L1" });

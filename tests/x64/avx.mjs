@@ -570,3 +570,210 @@ for(const [label, options, compat] of [["interpreted", {}, false],
     if(compat) assert.ok(tier0.activations > 0 && tier0.page_functions > 0, `${label}: compiled compatibility-mode code ran ${JSON.stringify(tier0)}`);
     console.log(`PASS (${label}): ${cases.length} AVX cases in 64-bit and compatibility mode, ${FAULT_CASES.length} faults, as QEMU and the model`);
 }
+
+// The page tier's templates for the hot VEX forms (P5 part 5): a hot loop of
+// them over ordinary values (finite, normal, of moderate size: no retries)
+// runs with almost no steps (x64_page_stat(4)), as QEMU. (Its stores are off
+// the code's page, which they would invalidate.) The results' bits
+// of every round are summed (R14, R13): an execution the page tier got wrong
+// shows even when the last round ran in the interpreter.
+{
+    const ITERATIONS = 20000;
+    const f64 = x => { const b = Buffer.alloc(8); b.writeDoubleLE(x); return [...b]; };
+    const hot_samples = [...f64(1.5), ...f64(-2.25), ...f64(3000), ...f64(0.125), ...f64(-7.75), ...f64(1024),
+        ...samples.subarray(0, 64)];
+    const hot = assemble("avx-hot", long_mode_guest(`
+mov rax,cr4
+or eax,3 << 9 | 1 << 18 ; OSFXSR, OSXMMEXCPT, OSXSAVE
+mov cr4,rax
+${XSETBV(7)}
+mov r15d,${ITERATIONS}
+xor r14d,r14d
+xor r13d,r13d
+.loop:
+vmovsd xmm1,[hot_samples]
+vmovsd xmm2,[hot_samples + 8]
+vaddsd xmm3,xmm1,xmm2
+vmulsd xmm4,xmm3,[hot_samples + 16]
+vsubsd xmm5,xmm4,xmm1
+vdivsd xmm6,xmm5,xmm2
+vmovq rax,xmm6
+add r14,rax
+vcomisd xmm6,xmm1
+setb al
+movzx eax,al
+add r13,rax
+vucomisd xmm1,[hot_samples + 24]
+seta al
+movzx eax,al
+add r13,rax
+vcmpsd xmm7,xmm1,xmm6,2
+vmovq rax,xmm7
+add r14,rax
+vcmpltpd xmm7,xmm3,[hot_samples + 32]
+vmovq rax,xmm7
+add r14,rax
+vcvttsd2si eax,xmm6
+add r13,rax
+vcvttsd2si rax,xmm4
+add r13,rax
+vcvtsi2sd xmm8,xmm1,r15
+vcvtsi2sd xmm9,xmm2,r15d
+vcvtsd2ss xmm10,xmm2,xmm6
+vcvtss2sd xmm11,xmm3,xmm10
+vmovq rax,xmm11
+add r14,rax
+vmulpd xmm12,xmm1,[hot_samples + 8]
+vaddss xmm12,xmm12,[hot_samples + 4]
+vmovq rax,xmm12
+add r14,rax
+vxorpd xmm12,xmm1,xmm2
+vandnpd xmm12,xmm12,xmm3
+vorpd xmm12,xmm12,[hot_samples + 40]
+vandpd xmm12,xmm12,xmm8
+vxorps xmm12,xmm12,xmm9
+vmovdqu xmm13,[hot_samples + 48]
+vpcmpeqb xmm14,xmm13,[hot_samples + 64]
+vpcmpgtb xmm15,xmm13,xmm14
+vpaddb xmm15,xmm15,xmm13
+vpcmpeqd xmm0,xmm15,xmm13
+vpxor xmm0,xmm0,xmm15
+vpand xmm0,xmm0,xmm12
+vpor xmm0,xmm0,xmm9
+vpandn xmm0,xmm0,xmm11
+vpmovmskb eax,xmm0
+add r13,rax
+vblendvpd xmm1,xmm12,xmm0,xmm15
+vunpcklpd xmm2,xmm1,xmm6
+vmovapd [${OUT + 0x400}],xmm2
+vmovdqa xmm3,[${OUT + 0x400}]
+vmovd eax,xmm3
+add r13,rax
+vmovq rax,xmm1
+add r14,rax
+vmovd xmm4,r13d
+vmovq xmm5,r14
+vpaddb xmm0,xmm0,xmm4
+vpaddb xmm0,xmm0,xmm5
+vzeroupper
+dec r15d
+jnz .loop
+mov [${OUT + 16}],r14
+mov [${OUT + 24}],r13
+stmxcsr [${OUT + 32}]
+${Array.from({length: 16}, (_, r) => `vmovdqu [${OUT + 48 + 16 * r}],xmm${r}`).join("\n")}
+`, `
+align 16
+hot_samples: db ${hot_samples.join(",")}
+`));
+    // (the guest runner's completion word is at OUT)
+    const length = 48 + 256;
+    const expected = await reference(hot, {length});
+    let steps, retired;
+    const result = await actual(hot, {length, timeout: 60000,
+        options: {...FEATURES, disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true},
+        inspect: emulator => {
+            steps = emulator.v86.cpu.wm.exports.x64_page_stat(4);
+            retired = emulator.v86.cpu.wm.exports.x64_page_stat(1);
+        }});
+    assert.equal(hex(result), hex(expected), "hot loop: the sums, MXCSR and XMM0-15 as QEMU");
+    assert.ok(retired > ITERATIONS * 50 && steps < ITERATIONS / 10, `page tier templates: ${retired} retired, ${steps} steps`);
+    console.log(`PASS (x64 page tier): the hot VEX forms' templates, as QEMU (${retired} instructions retired natively, ${steps} steps)`);
+}
+
+// The page tier's conversion and compare templates at the edges of what
+// they admit, legacy and VEX forms, as QEMU, in compiled loops whose results'
+// bits are summed every round (R14): one of admitted operands only (exact
+// results, so no flags: a 53-bit integer, the ends of the integer ranges,
+// equal operands of CMP's NLT and NLE), run natively with almost no steps;
+// then one loop each for an inexact conversion (PE, set natively) and for
+// operands the templates refuse (retried in the interpreter: IE), MXCSR
+// reset before each.
+{
+    const ITERATIONS = 20000;
+    const f64 = x => { const b = Buffer.alloc(8); b.writeDoubleLE(x); return [...b]; };
+    const edge_samples = [...f64(2147483647), ...f64(-2147483648), ...f64(-(2 ** 63)), ...f64(1.5), ...f64(2 ** -125),
+        ...f64(2147483648), ...f64(-2147483649)];
+    const loop = (n, body) => `mov r15d,${ITERATIONS}
+xor r14d,r14d
+ldmxcsr [edge_mxcsr]
+.loop${n}:
+${body}
+dec r15d
+jnz .loop${n}
+mov [${OUT + 16 + 16 * n}],r14
+stmxcsr [${OUT + 24 + 16 * n}]`;
+    const sum = (move, register) => `${move} rax,${register}\nadd r14,rax`;
+    const loops = [
+        // admitted: exact
+        [`mov rax,0x10000000000001
+vcvtsi2sd xmm1,xmm1,rax
+${sum("vmovq", "xmm1")}
+mov rax,0x20000000000000
+cvtsi2sd xmm2,rax
+${sum("movq", "xmm2")}
+mov eax,0xFFFFFF
+vcvtsi2ss xmm3,xmm3,eax
+vmovd eax,xmm3
+add r14,rax
+${[0, 8].map(at => `vmovsd xmm4,[edge_samples + ${at}]
+vcvttsd2si eax,xmm4
+add r14,rax
+cvtsd2si ebx,xmm4
+add r14,rbx`).join("\n")}
+vmovsd xmm4,[edge_samples + 16]
+vcvttsd2si rax,xmm4
+add r14,rax
+vmovsd xmm5,[edge_samples + 32]
+vcvtsd2ss xmm6,xmm6,xmm5
+vmovd eax,xmm6
+add r14,rax
+vmovsd xmm7,[edge_samples + 24]
+vcmpsd xmm8,xmm7,xmm7,5
+${sum("vmovq", "xmm8")}
+vcmpsd xmm8,xmm7,xmm7,6
+${sum("vmovq", "xmm8")}
+vcmpps xmm9,xmm7,xmm7,13
+${sum("vmovq", "xmm9")}
+movapd xmm10,xmm7
+cmpsd xmm10,xmm7,5
+${sum("movq", "xmm10")}
+movapd xmm11,xmm7
+cmppd xmm11,xmm7,6
+${sum("movq", "xmm11")}`, true],
+        // inexact: a 54-bit integer (PE)
+        [`mov rax,0x20000000000001
+vcvtsi2sd xmm1,xmm1,rax
+${sum("vmovq", "xmm1")}`, true],
+        // refused: beyond the 32-bit range (IE, the integer indefinite)
+        [`vmovsd xmm4,[edge_samples + 40]
+vcvttsd2si eax,xmm4
+add r14,rax`, false],
+        [`vmovsd xmm4,[edge_samples + 48]
+cvttsd2si eax,xmm4
+add r14,rax`, false],
+    ];
+    const edges = assemble("avx-edges", long_mode_guest(`
+mov rax,cr4
+or eax,3 << 9 | 1 << 18 ; OSFXSR, OSXMMEXCPT, OSXSAVE
+mov cr4,rax
+${XSETBV(7)}
+${loops.map(([body], n) => loop(n, body)).join("\n")}
+`, `
+align 16
+edge_samples: db ${edge_samples.join(",")}
+edge_mxcsr: dd 0x1F80
+`));
+    // (the guest runner's completion word is at OUT)
+    const length = 16 + 16 * loops.length;
+    const expected = await reference(edges, {length});
+    let steps;
+    const result = await actual(edges, {length, timeout: 60000,
+        options: {...FEATURES, disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true},
+        inspect: emulator => { steps = emulator.v86.cpu.wm.exports.x64_page_stat(4); }});
+    loops.forEach((_, n) => assert.equal(hex(result.subarray(16 + 16 * n, 32 + 16 * n)), hex(expected.subarray(16 + 16 * n, 32 + 16 * n)),
+        `edge loop ${n}: the sum and MXCSR as QEMU`));
+    // (the refused loops retry: those of the others are few)
+    assert.ok(steps < ITERATIONS * 2 + ITERATIONS / 10, `edge loops: ${steps} steps`);
+    console.log(`PASS (x64 page tier): conversion and compare templates at the edges, as QEMU (${steps} steps)`);
+}

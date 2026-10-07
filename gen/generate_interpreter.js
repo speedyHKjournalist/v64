@@ -349,6 +349,9 @@ function gen_instruction_body_after_fixed_g(encoding, size)
                 reg_args.push(imm_read);
             }
 
+            // (an interpreted VEX instruction continues the run, as a legacy
+            // SSE one: the instruction after it is no dispatch entry)
+            const vex_escape = !!encoding.vex_escape;
             return [].concat(
                 instruction_prefix,
                 {
@@ -357,7 +360,8 @@ function gen_instruction_body_after_fixed_g(encoding, size)
                         {
                             condition: "modrm_byte < 0xC0",
                             body: [].concat(
-                                gen_call(`${instruction_name}_mem`, mem_args)
+                                gen_call(`${instruction_name}_mem`, mem_args),
+                                vex_escape ? instruction_postfix : []
                             ),
                         }
                     ],
@@ -365,7 +369,7 @@ function gen_instruction_body_after_fixed_g(encoding, size)
                         body: [gen_call(`${instruction_name}_reg`, reg_args)],
                     },
                 },
-                instruction_postfix
+                vex_escape ? [] : instruction_postfix
             );
         }
     }

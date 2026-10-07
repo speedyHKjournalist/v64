@@ -1716,3 +1716,84 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **回归**：`p5d-batch` 的 55 个目标中 50 个通过。另外 5 个仍是另一个会话的 `mmio_ram.rs` 所致
   （state layout 预检查），它们其余的命令直接运行，全部通过；只含本部分改动的工作树中 state
   layout 检查通过。
+
+### P5 第五部分：AVX 热点形式在 Tier-0 和 page tier 的原生模板（2026-10-07）
+
+- **范围**：5.1 节热点清单中 AVX 的 VEX.128/VEX.LIG 形式在 Tier-0 和 x64 page tier 上改为原生模板，
+  同类且代价低的形式一并接入：
+  - 搬运：VMOVSD/SS（加载、存储、寄存器之间）、VMOVAPD/APS/UPD/UPS、VMOVDQA/DQU、VMOVNT*、
+    VMOVQ、VMOVD（64 位模式下 VEX.W1 为 VMOVQ r/m64）；page tier 另有 VLDMXCSR/VSTMXCSR；
+  - 逻辑与整数：VXORPD/PS、VANDPD/PS、VANDNPD/PS、VORPD/PS、VPXOR/VPAND/VPANDN/VPOR、66 0F 的
+    全部紧缩整数运算（VPCMPEQB/D、VPCMPGTB、VPADDB……）、VUNPCKL/HPS/PD、VSHUFPS/PD、
+    VPSHUFD/HW/LW、按立即数移位；Tier-0 另有 VPSHUFB、VPALIGNR、SSE4.1 的单运算形式、
+    VPMULDQ、VBROADCASTSS、VMOVHLPS/LHPS、VMOVLPS/HPS/LPD/HPD 的加载形式与
+    VMOVDDUP/SLDUP/SHDUP；
+  - 浮点：VADD/VMUL/VSUB/VDIV PS/PD/SS/SD；Tier-0 另有 VMIN/VMAX/VSQRT、VRCP/VRSQRT、
+    VROUNDxx、VPCMPxSTRx 与全部转换；VCOMISD/VUCOMISD/VCOMISS/VUCOMISS；VCMPPS/PD/SS/SD；
+  - VPMOVMSKB、VMOVMSKPS/PD，VBLENDVPS/PD、VPBLENDVB，VZEROUPPER；
+  - 标量转换 VCVTSI2SD/SS、VCVT(T)SD2SI/SS2SI、VCVTSD2SS、VCVTSS2SD（page tier 新增，legacy 同用）。
+- **做法**：VEX 形式沿用 legacy 形式的模板（`ir/tier0/simd.rs` 的 `classify_vex` 与 `Vex`，
+  `x64/pagegen.rs` 的 `vex`）：
+  - legacy 读目的寄存器之处改读 VEX.vvvv（第一源）；按立即数移位的源是 r/m 寄存器、目的是
+    VEX.vvvv；标量形式的其余 lane 来自第一源；
+  - 写目的寄存器后清零其 255:128 位。这一步在指令最后一次重试之后（模板最后才写目的），
+    直接写 CPU 状态，不进 Tier-0 的寄存器缓存。Tier-0 每块对每个寄存器只清一次
+    （`Page::ymm_zeroed`：块内没有别的代码写这些位，256 位形式是解释器单步，会结束块）；
+  - 只有 VMOVAPS/APD/DQA 与 VMOVNT* 检查对齐；
+  - 守卫：CR0.TS、CR4.OSXSAVE、XCR0 的 SSE 与 AVX 位；Tier-0 另查保护模式且非虚拟 8086
+    模式（IR 在各模式都把寄存器形式的 C4/C5 解成 VEX）。CR0.EM、CR4.OSFXSR 不影响。page tier
+    每条指令检查（同其 SSE 检查）。Tier-0 在页函数入口算一次（`simd::vex_fault`，只在页内有
+    VEX 模板时），每块只读这个局部变量：激活期间这些状态只能由解释器单步改变，而单步改了
+    CR0、CR4、模式或 EFLAGS.VM 就退出激活（`runtime::tier0::ir_t0_step` 的上下文为此加入 CR4；
+    XSETBV 经 admission barrier 推进 epoch，已在上下文中）；
+  - Tier-0 的精确路径（`ir_t0_sse_fp`）以 legacy 键执行，第一源作为目的。
+- **legacy 与 VEX 共用的新模板**：PMOVMSKB/MOVMSKPS/MOVMSKPD；CMPPS/PD/SS/SD（两操作数都不是
+  NaN 或非规格化数时，按 imm8[2:0] 的关系计算：有序时 32 个谓词只看这三位，且不产生异常；
+  否则 Tier-0 走精确路径，page tier 重试）；BLENDVPS/BLENDVPD/PBLENDVB；VZEROUPPER；Tier-0 的
+  PMULDQ。page tier 的标量转换在精确或仅不精确时原生执行并置 PE（MXCSR 须为就近舍入且全部
+  屏蔽），NaN、非规格化操作数、整数越界、单精度结果溢出或过小时重试。
+- **解释器中的 VEX 指令不再是块边界**：32 位解释器经 LES/LDS（C4/C5）的寄存器形式执行 VEX 指令，
+  而这两个操作码标为 block boundary，每条 VEX 指令都结束解释执行的一段，其后的指令成为派发入口。
+  Tier-0 编译时这些入口都成为块起点，循环被切成每条 VEX 指令一块，XMM 缓存和守卫在每条指令处
+  重来，AVX 基准因此比同一源码的 SSE 版慢约一倍。现在 `gen/x86_table.js` 给 C4/C5 标
+  `vex_escape`，生成的解释器只在内存形式（LES/LDS）之后调用 `after_block_boundary`。
+- regions 中的 VEX 形式仍走完整 reload 的 `ir_avx_continue`（legacy 的 SSE 浮点在 regions 中同样
+  走 helper，只有寄存器形式的 ADD/SUB/MUL/DIV 有 MIR 的 `NativeFp`）。原生的 regions 在下一部分。
+- **测试**：
+  - `tests/rust/avx.mjs`：269 个形式，三个 arm 上 9246（无 Wasm SIMD 的构建 9245） 项。
+    - 热点清单中的 46 个形式（`TIER0_HOT` 与浮点的 `TIER0_HOT_FP`，后者用普通操作数）必须由
+      Tier-0 模板执行；全部形式中有 170 个走模板。
+    - 故障用例等到 Tier-0 跑满 300 轮，此时页已按故障指令之后的入口重新编译，守卫与对齐检查
+      由模板执行；未对齐用例先访问一次所在页（未对齐故障不填 TLB，否则模板总是重试）。
+    - 解释器中的块边界：程序重写后的那一轮在 Tier-0 机器上基本是解释执行，16 条 VEX 形式的循环
+      跑 32 次，派发次数须与同一循环的 legacy 形式相同（`ir_auto_stat(0)`，修复后两者都是 39；
+      VEX 指令仍是块边界时为 551）。比较 Tier-0 编译出的块数的写法测不出这个错误：页在热运行中
+      编译时，这些入口未必已经记下。
+  - `tests/rust/sse4.mjs`：PBLENDVB、BLENDVPS/PD 与 PMULDQ 现在由 Tier-0 模板执行。
+  - `tests/ir/differential/tier0_fuzz.mjs` 新增 `s13`：VEX 形式与有新模板的 legacy 形式混合，
+    特殊值操作数、各种 MXCSR，比较 YMM 的上半部分；`ir-tier0-tests` 中跑 40 个程序。
+  - `tests/x64/avx.mjs`：page tier 的热循环（约 40 个 VEX 形式，20000 轮，普通操作数）与 QEMU
+    结果相同，原生执行超过每轮 50 条、单步少于 2000 次；边界循环：精确的转换与相等操作数的
+    比较原生执行，不精确的转换（置 PE）与拒绝的操作数（越界，重试后 IE）各一个循环，均与 QEMU
+    相同。
+- **基准**：`tests/bench` 新增 `avx` profile（`-mavx -mprefer-vector-width=128`）与 715.avx.matmul、
+  716.avx.nbody、717.avx.mandel（同 601/606/611 的源码与工作量）；`boot.asm` 在 CPUID 报告 XSAVE
+  时置 CR4.OSXSAVE 并设 XCR0（有 AVX 时为 7）。AVX 版执行的指令更少（matmul 4570 万条对 5790 万条），
+  所以按耗时比较，不按 MIPS：
+  - 修复块边界之前，AVX 版的耗时约为 SSE 版的两倍（715/716/717 为 567/478/684 MIPS）；
+  - 修复后（加上守卫每次激活算一次、上半部分每块清一次），负载约 4 时两轮各五次的中位数：
+    matmul 40.6–40.7 ms 对 SSE 39.6–40.0 ms（+2%），nbody 71.1–72.6 对 71.1–72.8（持平），mandel
+    141.2–142.6 对 143.3–143.6（-1%），都在 12.2 节的 5% 预算内；
+  - 只含 VEX 浮点的微基准与 legacy 版相差 2%（1386 对 1411 MIPS）。剩下的差别是每条写 XMM 的 VEX
+    指令（每块每个寄存器一次）清零上半部分的存储。
+- **变异测试**：模板植入 30 个错误，29 个被发现；剩下的 `pt_demote_tiny`（page tier 的 VCVTSD2SS
+  把结果恰为 FLT_MIN 的情形也拒绝）等价，拒绝只多一次重试。后续修正植入 8 个，7 个被发现：
+  VEX 的寄存器形式仍调用 `after_block_boundary`（派发次数）、单步上下文不含 CR4、块开始时
+  不重置 `ymm_zeroed`、每块只清第一个写到的寄存器（VZEROUPPER 的用例）、守卫不读入口算出的
+  条件、入口条件不查 XCR0 或 CR0.TS。剩下一个是上下文中的 XCR0：XSETBV 的 admission barrier
+  已推进 epoch，这个字段多余，已删去。
+- **未覆盖**：Tier-0 守卫中的实模式与虚拟 8086 模式条件没有 Tier-0 测试（那里的 C4/C5 寄存器形式
+  是 #UD 的 LES/LDS）。
+- **回归**：`p5f-batch`（含后续修正）的 55 个目标中 50 个通过。另外 5 个仍因另一个会话未完成的
+  `mmio_ram.rs`（state layout 预检查）失败，它们其余的 12 条命令直接运行，全部通过；本部分不新增
+  Rust static。

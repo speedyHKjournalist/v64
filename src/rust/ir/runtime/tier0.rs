@@ -6,8 +6,9 @@ pub const STEP_NEXT: i32 = 0;
 /// EIP moved (taken branch, delivered fault) within the same execution
 /// context: the page function may dispatch the new EIP itself.
 pub const STEP_DISPATCH: i32 = 1;
-/// The context changed (mode, privilege, paging, interrupt flag, halt) or a
-/// compiled code page was written: return to the CPU loop.
+/// The context changed (mode, privilege, paging, CR4, interrupt flag, halt),
+/// a compiled code page was written or an admission barrier passed (such as
+/// XSETBV's): return to the CPU loop.
 pub const STEP_EXIT: i32 = 2;
 
 #[derive(PartialEq, Eq)]
@@ -19,6 +20,9 @@ struct Context {
     control: i32,
     cr0: i32,
     cr3: i32,
+    // (the VEX state, which page functions check once per activation;
+    // XSETBV's admission barrier advances the epoch)
+    cr4: i32,
     state_flags: u32,
     epoch: u64,
 }
@@ -31,6 +35,7 @@ unsafe fn context() -> Context {
         control: *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM),
         cr0: *gp::cr,
         cr3: *gp::cr.add(3),
+        cr4: *gp::cr.add(4),
         // Flat segmentation: page functions may be specialized for it.
         state_flags: (*gp::state_flags).to_u32(),
         epoch: super::entry::continuation_epoch(),
@@ -119,6 +124,8 @@ pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
         _ => match key as u8 {
             0x52 | 0x53 => Ok(simd_fp::reciprocal(key, destination, source)),
             0x2E | 0x2F => simd_fp::compare_flags(key, destination, source).map(u128::from),
+            // (the predicate: imm8[2:0], VEX imm8[4:0])
+            0xC2 => simd_fp::compare(key, destination, source, imm8 as u8),
             0x2A | 0x2C | 0x2D | 0x5A | 0x5B | 0xE6 => {
                 simd_fp::convert(key, false, destination, source)
             },

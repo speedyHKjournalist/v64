@@ -37,8 +37,9 @@ const disp = () => random() % 28 * 4;                    // [ebx + disp8], 0..10
 const mem = r => [0x43 | r << 3, disp()];                 // modrm for [ebx + disp8]
 const rr = (r, m) => 0xC0 | r << 3 | m;
 
-// FUZZ_KIND=i0..i33 / s0..s11 restricts programs to one instruction kind
-// (s11: SSE floating point over special values, see fp_instruction).
+// FUZZ_KIND=i0..i33 / s0..s13 restricts programs to one instruction kind
+// (s11: SSE floating point over special values, see fp_instruction; s13: VEX
+// forms among legacy ones, see vex_instruction).
 const only = process.env.FUZZ_KIND || "";
 const straddle = process.env.FUZZ_STRADDLE === "1";
 function instruction() {
@@ -182,6 +183,44 @@ function tracking_instruction(x, y) {
         default: return [0x0F, 0x57, rr(x, x)];                                                   // XORPS x, x
     }
 }
+// s13: VEX forms (AVX, P5 part 5; their Tier-0 templates are the legacy ones
+// with a first source and bits 255:128 of the destination zeroed) among legacy
+// forms with templates (CMPPS, MOVMSKPS, PMOVMSKB, BLENDVPS...), over special
+// values. VEX.vvvv (z) is the first source; an immediate shift's destination.
+function vex_instruction(x, y) {
+    const z = random() & 7;
+    const c5 = (pp, vvvv = 0) => [0xC5, 0x80 | (~vvvv & 15) << 3 | pp];
+    const c4 = (map, pp, vvvv = 0) => [0xC4, 0xE0 | map, (~vvvv & 15) << 3 | pp];
+    const source = () => random() % 3 ? [rr(x, y)] : [0x43 | x << 3, disp()];
+    const legacy_source = aligned => random() % 3 ? [rr(x, y)] : [0x43 | x << 3, aligned ? disp() & ~15 : disp() & ~7];
+    switch(random() % 20) {
+        case 0: case 1: case 2: {                                                 // VSQRT VADD VMUL VSUB VMIN VDIV VMAX
+            const pp = random() & 3, op = pick([0x51, 0x58, 0x59, 0x5C, 0x5D, 0x5E, 0x5F]);
+            return [...c5(pp, op === 0x51 && pp < 2 ? 0 : z), op, ...source()];
+        }
+        case 3: return [...c5(pick([0, 1]), z), pick([0x54, 0x55, 0x56, 0x57, 0x14, 0x15]), ...source()]; // logic, unpacks
+        case 4: return [...c5(1, z), pick([0xFC, 0xFE, 0xEF, 0xDB, 0xDF, 0x74, 0x76, 0x64, 0xD5, 0xF6, 0x62, 0x6B, 0xD2, 0xE2]), ...source()];
+        case 5: return [...c5(random() & 3, z), 0xC2, ...source(), random() & 31];   // VCMPxx
+        case 6: return [...c5(pick([0, 1])), pick([0x2E, 0x2F]), rr(x, y)];          // V(U)COMIS*
+        case 7: return [...c5(pick([2, 3]), z), 0x10, rr(x, y)];                     // VMOVSS/SD xmm, xmm, xmm
+        case 8: return [...c5(pick([2, 3])), pick([0x10, 0x11]), 0x43 | x << 3, disp()]; // VMOVSS/SD with memory
+        case 9: return [...c5(pick([0, 1])), pick([0x28, 0x10, 0x11]), rr(x, y)];   // VMOVAPS/UPS
+        case 10: return [...c5(pick([0, 1, 1])), random() & 1 ? 0xD7 : 0x50, rr(reg(), y)]; // VPMOVMSKB, VMOVMSKPS/PD
+        case 11: return [...c4(3, 1, z), pick([0x4A, 0x4B, 0x4C]), ...source(), (random() & 7) << 4]; // VBLENDVPS/PD, VPBLENDVB
+        case 12: {                                                                    // VPSxx imm: VEX.vvvv the destination
+            const op = pick([0x71, 0x72, 0x73]);
+            return [...c5(1, x), op, rr(op === 0x73 ? pick([2, 3, 6, 7]) : pick([2, 4, 6]), y), random() & 63];
+        }
+        case 13: return [...c5(0), 0x77];                                             // VZEROUPPER
+        case 14: return [...c5(pick([2, 3]), z), 0x5A, ...source()];                 // VCVTSS2SD/SD2SS
+        case 15: return [...c5(pick([2, 3]), z), 0x2A, rr(x, reg())];                // VCVTSI2SS/SD
+        case 16: return [...c5(pick([2, 3])), pick([0x2C, 0x2D]), rr(reg(), y)];     // VCVT(T)SS2SI/SD2SI
+        case 17: return [...pick([[], [0x66], [0xF3], [0xF2]]), 0x0F, 0xC2, ...legacy_source(true), random() & 255]; // CMPxx
+        case 18: return [...pick([[], [0x66]]), 0x0F, 0x50, rr(reg(), y)];          // MOVMSKPS/PD
+        default: return random() & 1 ? [0x66, 0x0F, 0xD7, rr(reg(), y)]             // PMOVMSKB
+            : [0x66, 0x0F, 0x38, pick([0x10, 0x14, 0x15]), ...legacy_source(true)];   // PBLENDVB, BLENDVPS/PD
+    }
+}
 // Masked MXCSRs: defaults, PE set, all flags set, rounding modes, DAZ and FZ
 const FP_MXCSRS = [0x1F80, 0x1FA0, 0x1FBF, 0x3FA0, 0x5F80, 0x7FA0, 0x1FE0, 0x9FA0, 0x9FE0];
 function simd() {
@@ -209,6 +248,7 @@ function simd() {
         }
         case 11: return fp_instruction(x, y);
         case 12: return tracking_instruction(x, y);
+        case 13: return vex_instruction(x, y);
         default: return [0x66, 0x0F, 0x72, rr(pick([2, 4, 6]), x), random() & 63]; // PSxLD imm
     }
 }
@@ -257,7 +297,7 @@ function reset() {
     return out;
 }
 function program() {
-    const body = ["s11", "s12"].includes(only) ? reset() : [];
+    const body = ["s11", "s12", "s13"].includes(only) ? reset() : [];
     const mix = random() % 5;
     if(process.env.FUZZ_BODY) body.push(...process.env.FUZZ_BODY.match(/../g).map(h => parseInt(h, 16)));
     else
@@ -278,7 +318,8 @@ async function machine(tier0) {
     const vm = new V86({
         graphics_adapter: "bochs_vga",
         wasm_path: wasm, disable_jit: !tier0, memory_size: 128 << 20, // reference: the interpreter only
-        cpu_features: ["SSSE3"],
+        // (AVX for s13: CR4.OSXSAVE and XCR0 set in run)
+        cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], cpu_features_unreleased: true,
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });
@@ -306,13 +347,18 @@ async function run(m, code, init, page, split) {
     cpu.mem8.fill(0, STACK - 0x1000, STACK);
     // (FP programs reload MXCSR, interpreted, at the top: more iterations
     // let Tier-0 recompile the page with an entry after it)
-    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ["s11", "s12"].includes(only) ? 20 * ITERATIONS : ITERATIONS, true);
+    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ["s11", "s12", "s13"].includes(only) ? 20 * ITERATIONS : ITERATIONS, true);
     cpu.reg32.set(init.regs);
     cpu.reg32[3] = DATA; cpu.reg32[4] = STACK;
     cpu.flags[0] = 2; cpu.flags_changed[0] = 0; cpu.in_hlt[0] = 0;
     cpu.instruction_pointer[0] = base;
     e.fpu_discard_cache();
     new Uint32Array(cpu.reg_xmm32s.buffer, cpu.reg_xmm32s.byteOffset, 32).set(init.xmm);
+    // AVX: CR4.OSXSAVE, XCR0 7 and the YMM registers' upper halves (gp::xcr0
+    // and gp::ymm_hi, 1600 and 1616 bytes after the XMM registers)
+    cpu.cr[4] |= 1 << 18;
+    new Uint32Array(cpu.reg_xmm32s.buffer, cpu.reg_xmm32s.byteOffset + 1600, 2).set([7, 0]);
+    new Uint32Array(cpu.reg_xmm32s.buffer, cpu.reg_xmm32s.byteOffset + 1616, 32).set(init.ymm);
     cpu.mxcsr[0] = init.mxcsr;
     cpu.fpu_st.fill(0); cpu.fpu_stack_empty[0] = 255; cpu.fpu_stack_ptr[0] = 0;
     e.set_control_word(0x37F); cpu.fpu_status_word[0] = 0;
@@ -338,6 +384,7 @@ async function run(m, code, init, page, split) {
         data: Array.from(cpu.mem8.subarray(DATA, DATA + 256)),
         stack: Array.from(cpu.mem8.subarray(STACK - 64, STACK)),
         xmm: Array.from(new Uint32Array(cpu.reg_xmm32s.buffer, cpu.reg_xmm32s.byteOffset, 32), v => v >>> 0),
+        ymm: Array.from(new Uint32Array(cpu.reg_xmm32s.buffer, cpu.reg_xmm32s.byteOffset + 1616, 32), v => v >>> 0),
         mxcsr: cpu.mxcsr[0] >>> 0,
         count: new Uint32Array(e.memory.buffer)[664 >> 2] >>> 0,
         fpu: (e.fpu_sync_all(), [cpu.fpu_stack_ptr[0], cpu.fpu_stack_empty[0], cpu.fpu_status_word[0], ...Array.from(new Uint8Array(cpu.fpu_st.buffer, cpu.fpu_st.byteOffset, 128))]),
@@ -350,7 +397,7 @@ let failures = 0;
 for(let c = 0; c < cases; c++) {
     near_single = (random() & 1) === 1;
     const code = program();
-    const special = only === "s11", near = only === "s12";
+    const special = only === "s11" || only === "s13", near = only === "s12";
     const reset_state = (xmm, mxcsr) => [...xmm.flatMap(u32), ...u32(mxcsr)];
     const init = {
         regs: Array.from({ length: 8 }, () => random()),
@@ -361,6 +408,7 @@ for(let c = 0; c < cases; c++) {
             : near ? Array.from({ length: 8 }, near_words).flat()
             : Array.from({ length: 32 }, () => random() & 0xBFFFFFFF),
         mxcsr: special ? pick(FP_MXCSRS) : near ? 0x1FA0 : 0x1F80,
+        ymm: Array.from({ length: 32 }, () => random()),
     };
     if(special || near) init.data.push(...reset_state(init.xmm, init.mxcsr));
     const split = straddle ? 4 + random() % (code.length - 8) : 0;

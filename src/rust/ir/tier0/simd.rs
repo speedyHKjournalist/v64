@@ -8,9 +8,16 @@
 //! first syncs that slot from the f64 shadow cache, a write invalidates it and
 //! sets the exponent to 0xFFFF, and the form ends with
 //! cpu::transition_fpu_to_mmx (all tags valid, TOP 0).
+//!
+//! VEX forms (AVX, P5: VEX.128 and VEX.LIG) run on their legacy forms'
+//! templates (classify_vex, Vex): they read VEX.vvvv where the legacy form
+//! reads its destination, zero the destination's bits 255:128 (in the CPU
+//! state, not cached) with the write that ends the template, and check the
+//! alignment of the aligned moves only.
 use super::Page;
 use crate::cpu::{
-    cpu::CR0_EM, cpu::CR0_TS, cpu::CR4_OSFXSR, cpu::FLAGS_ALL, fpu, global_pointers as gp,
+    cpu::CR0_EM, cpu::CR0_TS, cpu::CR4_OSFXSR, cpu::CR4_OSXSAVE, cpu::FLAGS_ALL, cpu::FLAG_VM, fpu,
+    global_pointers as gp,
 };
 use crate::ir::helper::imports::signature;
 use crate::ir::{frontend::decode::DecodedInstruction, native_fp};
@@ -22,6 +29,46 @@ pub(super) const CLEAN_SS: u8 = 1;
 pub(super) const CLEAN_PS: u8 = 2;
 pub(super) const CLEAN_SD: u8 = 4;
 pub(super) const CLEAN_PD: u8 = 8;
+
+/// Push nonzero when VEX forms fault: #UD (no CR4.OSXSAVE, XCR0 without SSE
+/// and AVX state, real and virtual-8086 mode) or #NM (CR0.TS)
+pub(super) fn vex_fault(w: &mut WasmBuilder) {
+    w.load_fixed_i32(gp::cr as u32);
+    w.const_i32(CR0_TS);
+    w.and_i32();
+    w.load_fixed_i32(gp::cr as u32 + 4 * 4);
+    w.const_i32(CR4_OSXSAVE);
+    w.and_i32();
+    w.eqz_i32();
+    w.or_i32();
+    w.load_fixed_i32(gp::xcr0 as u32);
+    w.const_i32(6);
+    w.and_i32();
+    w.const_i32(6);
+    w.ne_i32();
+    w.or_i32();
+    w.load_fixed_u8(gp::protected_mode as u32);
+    w.eqz_i32();
+    w.or_i32();
+    w.load_fixed_i32(gp::flags as u32);
+    w.const_i32(FLAG_VM);
+    w.and_i32();
+    w.or_i32();
+}
+
+/// A VEX form on its legacy form's template (classify_vex): what cpu::avx
+/// does differently
+#[derive(Clone, Copy)]
+pub(super) struct Vex {
+    /// Read where the legacy form reads its destination: VEX.vvvv (the
+    /// first source), or the r/m register of a shift by imm8 (whose
+    /// destination is VEX.vvvv); None for the forms of one source
+    first: Option<u8>,
+    /// VMOVAPS/APD/DQA and VMOVNTPS/PD/DQ: the m128 must be 16-byte aligned
+    /// (the other VEX forms take any; VEX rows' Encoding::aligned_m128 is
+    /// false)
+    aligned: bool,
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Packed {
@@ -39,7 +86,8 @@ pub(super) enum Packed {
     /// Shift by the source's low quadword: (opcode, lane bits, arithmetic).
     Shift(u32, u32, bool),
     MulHigh(bool),
-    MulDwords,
+    /// PMULUDQ (false), PMULDQ (true): the even dwords' 64-bit products
+    MulDwords(bool),
     Sad,
 }
 
@@ -155,6 +203,31 @@ pub(super) enum Simd {
         scalar: bool,
         imm8: u8,
     },
+    /// PMOVMSKB/MOVMSKPS/MOVMSKPD r32, xmm: the sign bits of the `lane`-byte
+    /// lanes
+    MoveMask {
+        reg: u8,
+        lane: u8,
+    },
+    /// CMPPS/CMPPD/CMPSS/CMPSD with `predicate` (imm8[2:0], VEX imm8[4:0]):
+    /// natively for operands neither NaN nor denormal, which raise nothing
+    /// and whose result imm8[2:0] decides (simd_fp::Fp::compare); else the
+    /// exact path
+    CompareMask {
+        reg: u8,
+        double: bool,
+        scalar: bool,
+        predicate: u8,
+    },
+    /// BLENDVPS/BLENDVPD/PBLENDVB: the source's lanes of `lane` bytes whose
+    /// sign bit in XMM `mask` (XMM0, VEX imm8[6:4]) is set
+    Blendv {
+        reg: u8,
+        lane: u8,
+        mask: u8,
+    },
+    /// VZEROUPPER: bits 255:128 of YMM0-7 zeroed
+    Vzeroupper,
     Emms,
 }
 
@@ -209,7 +282,7 @@ fn packed(code: u8, mmx: bool) -> Option<Packed> {
         0xE3 => Packed::Binary(0x9B),
         0xE4 => Packed::MulHigh(false),
         0xE5 => Packed::MulHigh(true),
-        0xF4 => Packed::MulDwords,
+        0xF4 => Packed::MulDwords(false),
         0xF6 => Packed::Sad,
         0xD5 => Packed::Binary(0x95),
         0xF5 => Packed::Binary(0xBA),
@@ -318,10 +391,21 @@ fn palignr(imm8: u8, n: u32) -> Packed {
 
 /// SSE4.1/SSE4.2 forms of one Wasm SIMD operation over (destination,
 /// source), with an aligned m128 (the hot PMINUD and its siblings), the
-/// blends with imm8 as shuffles, ROUND (the hot ROUNDSS and ROUNDSD) and
-/// PCMPxSTRx (the hot PCMPISTRI)
-fn sse4(i: &DecodedInstruction) -> Option<Simd> {
-    let op = i.encoding.opcode;
+/// blends with imm8 as shuffles and BLENDVPS/BLENDVPD/PBLENDVB, ROUND (the
+/// hot ROUNDSS and ROUNDSD) and PCMPxSTRx (the hot PCMPISTRI); `op` is the
+/// catalogue key (a VEX form's legacy one)
+fn sse4(i: &DecodedInstruction, op: u32) -> Option<Simd> {
+    if let 0x660F3810 | 0x660F3814 | 0x660F3815 = op {
+        return Some(Simd::Blendv {
+            reg: i.modrm? >> 3 & 7,
+            lane: match op {
+                0x660F3810 => 1,
+                0x660F3814 => 4,
+                _ => 8,
+            },
+            mask: 0,
+        });
+    }
     if (0x660F3A60..=0x660F3A63).contains(&op) {
         return Some(Simd::Strings {
             reg: i.modrm? >> 3 & 7,
@@ -346,18 +430,19 @@ fn sse4(i: &DecodedInstruction) -> Option<Simd> {
     };
     Some(Simd::Packed {
         op: match op {
-            0x660F3829 => Packed::Binary(0xD6), // pcmpeqq: i64x2.eq
-            0x660F382B => Packed::Pack(0x86),   // packusdw: i16x8.narrow_i32x4_u
-            0x660F3837 => Packed::Binary(0xD9), // pcmpgtq: i64x2.gt_s
-            0x660F3838 => Packed::Binary(0x76), // pminsb: i8x16.min_s
-            0x660F3839 => Packed::Binary(0xB6), // pminsd: i32x4.min_s
-            0x660F383A => Packed::Binary(0x97), // pminuw: i16x8.min_u
-            0x660F383B => Packed::Binary(0xB7), // pminud: i32x4.min_u
-            0x660F383C => Packed::Binary(0x78), // pmaxsb: i8x16.max_s
-            0x660F383D => Packed::Binary(0xB8), // pmaxsd: i32x4.max_s
-            0x660F383E => Packed::Binary(0x99), // pmaxuw: i16x8.max_u
-            0x660F383F => Packed::Binary(0xB9), // pmaxud: i32x4.max_u
-            0x660F3840 => Packed::Binary(0xB5), // pmulld: i32x4.mul
+            0x660F3828 => Packed::MulDwords(true), // pmuldq
+            0x660F3829 => Packed::Binary(0xD6),    // pcmpeqq: i64x2.eq
+            0x660F382B => Packed::Pack(0x86),      // packusdw: i16x8.narrow_i32x4_u
+            0x660F3837 => Packed::Binary(0xD9),    // pcmpgtq: i64x2.gt_s
+            0x660F3838 => Packed::Binary(0x76),    // pminsb: i8x16.min_s
+            0x660F3839 => Packed::Binary(0xB6),    // pminsd: i32x4.min_s
+            0x660F383A => Packed::Binary(0x97),    // pminuw: i16x8.min_u
+            0x660F383B => Packed::Binary(0xB7),    // pminud: i32x4.min_u
+            0x660F383C => Packed::Binary(0x78),    // pmaxsb: i8x16.max_s
+            0x660F383D => Packed::Binary(0xB8),    // pmaxsd: i32x4.max_s
+            0x660F383E => Packed::Binary(0x99),    // pmaxuw: i16x8.max_u
+            0x660F383F => Packed::Binary(0xB9),    // pmaxud: i32x4.max_u
+            0x660F3840 => Packed::Binary(0xB5),    // pmulld: i32x4.mul
             0x660F3A0C => blend(4, i.immediate? & 0xF),
             0x660F3A0D => blend(8, i.immediate? & 3),
             0x660F3A0E => blend(2, i.immediate? & 0xFF),
@@ -369,9 +454,9 @@ fn sse4(i: &DecodedInstruction) -> Option<Simd> {
     })
 }
 
-/// PSHUFB and PALIGNR (SSSE3), the hot forms of 0F 38 and 0F 3A
-fn ssse3(i: &DecodedInstruction) -> Option<Simd> {
-    let op = i.encoding.opcode;
+/// PSHUFB and PALIGNR (SSSE3), the hot forms of 0F 38 and 0F 3A (`op`
+/// as sse4's)
+fn ssse3(i: &DecodedInstruction, op: u32) -> Option<Simd> {
     let mmx = op >> 24 == 0;
     let n = if mmx { 8 } else { 16 };
     Some(Simd::Packed {
@@ -395,10 +480,10 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
         && !i.prefixes.lock
         && !i.baseline_ud
     {
-        return ssse3(i);
+        return ssse3(i, op);
     }
     if matches!(op >> 8, 0x660F38 | 0x660F3A) {
-        return if i.prefixes.lock || i.baseline_ud { None } else { sse4(i) };
+        return if i.prefixes.lock || i.baseline_ud { None } else { sse4(i, op) };
     }
     if op & 0xFF00 != 0x0F00 || i.prefixes.lock || i.baseline_ud {
         return None;
@@ -519,6 +604,20 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
             reg,
             double: prefix == 0x66,
         },
+        0x0FC2 | 0x660FC2 | 0xF30FC2 | 0xF20FC2 => Simd::CompareMask {
+            reg,
+            double: matches!(prefix, 0x66 | 0xF2),
+            scalar: matches!(prefix, 0xF2 | 0xF3),
+            predicate: i.immediate? as u8 & 7,
+        },
+        0x660FD7 | 0x0F50 | 0x660F50 if !memory => Simd::MoveMask {
+            reg,
+            lane: match op {
+                0x660FD7 => 1,
+                0x0F50 => 4,
+                _ => 8,
+            },
+        },
         0x0F70 | 0x660F70 | 0xF20F70 | 0xF30F70 | 0x0FC6 | 0x660FC6 => {
             // Packed pushes (destination, source): one-operand shuffles
             // select from the source only.
@@ -599,7 +698,366 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
     })
 }
 
+/// The template of a VEX form (AVX, P5: VEX.128 and VEX.LIG; others step):
+/// its legacy form's, with what cpu::avx does differently (Vex)
+pub(super) fn classify_vex(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
+    use crate::decode_rules::vex;
+    if !cfg!(target_feature = "simd128") {
+        return None;
+    }
+    let v = i.vex?;
+    // (VEX.L1 of other than VEX.LIG rows: 256-bit forms)
+    if i.early_ud || i.baseline_ud || v.l && i.encoding.vex & (vex::L0 | vex::L1) != 0 {
+        return None;
+    }
+    let key = crate::cpu::avx::legacy(i.encoding.opcode);
+    let code = key as u8;
+    // VZEROUPPER (no ModRM byte)
+    if key == 0x0F77 {
+        return Some((
+            Simd::Vzeroupper,
+            Vex {
+                first: None,
+                aligned: false,
+            },
+        ));
+    }
+    let modrm = i.modrm?;
+    let (reg, rm, memory) = (modrm >> 3 & 7, modrm & 7, i.ea.is_some());
+    // (VEX.vvvv: XMM0-7 outside 64-bit mode)
+    let first = Some(v.vvvv & 7);
+    let one_source = Vex {
+        first: None,
+        aligned: false,
+    };
+    let two_sources = Vex {
+        first,
+        aligned: false,
+    };
+    let aligned = Vex {
+        first: None,
+        aligned: true,
+    };
+    let vector = |op: Packed| Simd::Packed {
+        op,
+        reg,
+        mmx: false,
+        source: 16,
+    };
+    let scalar_bytes = if v.pp == 2 { 4 } else { 8 };
+    Some(match (v.map, v.pp, code) {
+        // VMOVUPS VMOVUPD VMOVDQU, VMOVAPS VMOVAPD VMOVDQA
+        (1, 0 | 1, 0x10) | (1, 2, 0x6F) => (Simd::Load128 { reg }, one_source),
+        (1, 0 | 1, 0x28) | (1, 1, 0x6F) => (Simd::Load128 { reg }, aligned),
+        (1, 0 | 1, 0x11) | (1, 2, 0x7F) => (Simd::Store128 { reg }, one_source),
+        (1, 0 | 1, 0x29) | (1, 1, 0x7F) => (Simd::Store128 { reg }, aligned),
+        // VMOVNTPS VMOVNTPD VMOVNTDQ
+        (1, 0 | 1, 0x2B) | (1, 1, 0xE7) if memory => (Simd::Store128 { reg }, aligned),
+        // VMOVSS VMOVSD: between registers the other lanes from VEX.vvvv
+        (1, 2 | 3, 0x10) => (
+            Simd::LoadScalar {
+                reg,
+                bytes: scalar_bytes,
+            },
+            two_sources,
+        ),
+        (1, 2 | 3, 0x11) => (
+            Simd::StoreScalar {
+                reg,
+                bytes: scalar_bytes,
+            },
+            two_sources,
+        ),
+        // VMOVQ xmm, xmm/m64 and xmm/m64, xmm; VMOVD xmm, r/m32 and r/m32,
+        // xmm (VEX.W ignored)
+        (1, 2, 0x7E) => (Simd::LoadQuad { reg }, one_source),
+        (1, 1, 0xD6) => (Simd::StoreQuad { reg }, one_source),
+        (1, 1, 0x6E) => (Simd::MovdIn { reg, mmx: false }, one_source),
+        (1, 1, 0x7E) => (Simd::MovdOut { reg, mmx: false }, one_source),
+        // VANDPS/PD VANDNPS/PD VORPS/PD VXORPS/PD
+        (1, 0 | 1, 0x54..=0x57) => (
+            vector(match code {
+                0x54 => Packed::Binary(0x4E),
+                0x55 => Packed::AndNot,
+                0x56 => Packed::Binary(0x50),
+                _ => Packed::Binary(0x51),
+            }),
+            two_sources,
+        ),
+        // VUNPCKLPS/PD VUNPCKHPS/PD (an m128, as cpu::avx reads)
+        (1, 0 | 1, 0x14 | 0x15) => (
+            vector(Packed::Unpack(if v.pp == 1 { 8 } else { 4 }, code == 0x15)),
+            two_sources,
+        ),
+        // VSHUFPS VSHUFPD
+        (1, 0 | 1, 0xC6) => (
+            vector(Packed::Shuffle(shuffle_lanes(key, i.immediate?).0)),
+            two_sources,
+        ),
+        // VBROADCASTSS xmm, m32: the source's dword in each lane
+        (2, 1, 0x18) if memory => {
+            let lanes = std::array::from_fn(|k| 16 + k as u8 % 4);
+            (
+                Simd::Packed {
+                    op: Packed::Shuffle(lanes),
+                    reg,
+                    mmx: false,
+                    source: 4,
+                },
+                one_source,
+            )
+        },
+        // VMOVHLPS, VMOVLPS, VMOVLPD (the low quadword from the source's
+        // high one or m64) and VMOVLHPS, VMOVHPS, VMOVHPD (the high one from
+        // the source's low one or m64), the other from the first source
+        (1, 0 | 1, 0x12 | 0x16) => {
+            let (low, high, bytes) = match (code, memory) {
+                (0x12, false) => (24, 8, 16),
+                (0x12, true) => (16, 8, 8),
+                _ => (0, 16, 8),
+            };
+            let lanes = std::array::from_fn(|k| {
+                if k < 8 {
+                    low + k as u8
+                }
+                else {
+                    high + k as u8 - 8
+                }
+            });
+            (
+                Simd::Packed {
+                    op: Packed::Shuffle(lanes),
+                    reg,
+                    mmx: false,
+                    source: bytes,
+                },
+                two_sources,
+            )
+        },
+        // VMOVDDUP (m64), VMOVSLDUP, VMOVSHDUP: the source's lanes only
+        (1, 3, 0x12) | (1, 2, 0x12 | 0x16) => {
+            let lanes: [u8; 16] = std::array::from_fn(|k| {
+                let k = k as u8;
+                16 + match (v.pp, code) {
+                    (3, _) => k % 8,
+                    (_, 0x12) => k / 8 * 8 + k % 4,
+                    _ => k / 8 * 8 + 4 + k % 4,
+                }
+            });
+            (
+                Simd::Packed {
+                    op: Packed::Shuffle(lanes),
+                    reg,
+                    mmx: false,
+                    source: if v.pp == 3 { 8 } else { 16 },
+                },
+                one_source,
+            )
+        },
+        // VPSHUFD VPSHUFHW VPSHUFLW: lanes of the source only
+        (1, 1..=3, 0x70) => {
+            let (mut lanes, _) = shuffle_lanes(key, i.immediate?);
+            for lane in &mut lanes {
+                *lane += 16;
+            }
+            (vector(Packed::Shuffle(lanes)), one_source)
+        },
+        // the packed integer operations of 66 0F (cpu::avx)
+        (
+            1,
+            1,
+            0x60..=0x6D
+            | 0x74..=0x76
+            | 0xD1..=0xD5
+            | 0xD8..=0xDF
+            | 0xE0..=0xE5
+            | 0xE8..=0xEF
+            | 0xF1..=0xF6
+            | 0xF8..=0xFE,
+        ) => (vector(packed(code, false)?), two_sources),
+        // VPSRLx VPSRAx VPSLLx VPSRLDQ VPSLLDQ by imm8: VEX.vvvv the
+        // destination, the r/m register the source
+        (1, 1, 0x71..=0x73) if !memory => {
+            let kind = reg;
+            let bytes = matches!(kind, 3 | 7);
+            (
+                Simd::ShiftImmediate {
+                    reg: v.vvvv & 7,
+                    mmx: false,
+                    bits: if bytes { 128 } else { 16 << (code - 0x71) },
+                    kind,
+                    count: i.immediate? as u8,
+                },
+                Vex {
+                    first: Some(rm),
+                    aligned: false,
+                },
+            )
+        },
+        // VSQRT VADD VMUL VSUB VMIN VDIV VMAX PS/PD/SS/SD, VRSQRT VRCP PS/SS
+        // (a scalar form's other lanes from VEX.vvvv; VSQRT, VRSQRT and VRCP
+        // PS/PD: one_source source)
+        (1, 0..=3, 0x51 | 0x58 | 0x59 | 0x5C..=0x5F) | (1, 0 | 2, 0x52 | 0x53) => {
+            let scalar = v.pp >= 2;
+            (
+                Simd::Float {
+                    opcode: code,
+                    reg,
+                    double: v.pp & 1 != 0,
+                    scalar,
+                },
+                if scalar || !matches!(code, 0x51..=0x53) { two_sources } else { one_source },
+            )
+        },
+        // VCVTPS2PD VCVTPD2PS VCVTSS2SD VCVTSD2SS VCVTDQ2PS VCVTDQ2PD
+        (1, 0..=3, 0x5A) | (1, 0, 0x5B) | (1, 2, 0xE6) => {
+            let (opcode, source, result) = match key {
+                0x0F5A => (0x5F, 8, 16),
+                0x660F5A => (0x5E, 16, 16),
+                0xF20F5A => (0x5E, 8, 4),
+                0xF30F5A => (0x5F, 4, 8),
+                0x0F5B => (0xFA, 16, 16),
+                _ => (0xFE, 8, 16),
+            };
+            (
+                Simd::Convert {
+                    opcode,
+                    reg,
+                    source,
+                    result,
+                },
+                if result < 16 { two_sources } else { one_source },
+            )
+        },
+        // VCVT(T)PS2DQ VCVT(T)PD2DQ
+        (1, 1 | 2, 0x5B) | (1, 1 | 3, 0xE6) => (
+            Simd::ConvertInteger {
+                reg,
+                double: code == 0xE6,
+                truncate: matches!(key, 0xF30F5B | 0x660FE6),
+            },
+            one_source,
+        ),
+        // VCVTSI2SS VCVTSI2SD xmm, xmm, r/m32 (VEX.W ignored)
+        (1, 2 | 3, 0x2A) => (
+            Simd::ToScalar {
+                reg,
+                double: v.pp == 3,
+            },
+            two_sources,
+        ),
+        // VCVT(T)SS2SI VCVT(T)SD2SI r32 (VEX.W ignored)
+        (1, 2 | 3, 0x2C | 0x2D) => (
+            Simd::ToInteger {
+                reg,
+                double: v.pp == 3,
+                truncate: code == 0x2C,
+            },
+            one_source,
+        ),
+        // VUCOMISS/SD VCOMISS/SD
+        (1, 0 | 1, 0x2E | 0x2F) => (
+            Simd::CompareFlags {
+                reg,
+                double: v.pp == 1,
+            },
+            one_source,
+        ),
+        // VCMPPS/PD/SS/SD with imm8[4:0]
+        (1, 0..=3, 0xC2) => (
+            Simd::CompareMask {
+                reg,
+                double: v.pp & 1 != 0,
+                scalar: v.pp >= 2,
+                predicate: i.immediate? as u8 & 31,
+            },
+            two_sources,
+        ),
+        // VPMOVMSKB VMOVMSKPS VMOVMSKPD r32, xmm
+        (1, 1, 0xD7) | (1, 0 | 1, 0x50) if !memory => (
+            Simd::MoveMask {
+                reg,
+                lane: match (v.pp, code) {
+                    (_, 0xD7) => 1,
+                    (0, _) => 4,
+                    _ => 8,
+                },
+            },
+            one_source,
+        ),
+        // VROUNDPS/PD (one_source source), VROUNDSS/SD
+        (3, 1, 0x08..=0x0B) => (
+            Simd::Round {
+                reg,
+                double: code & 1 != 0,
+                scalar: code & 2 != 0,
+                imm8: i.immediate? as u8,
+            },
+            if code & 2 != 0 { two_sources } else { one_source },
+        ),
+        // VPCMPESTRM/I VPCMPISTRM/I (VEX.W ignored)
+        (3, 1, 0x60..=0x63) => (
+            Simd::Strings {
+                reg,
+                op: code,
+                imm8: i.immediate? as u8,
+            },
+            one_source,
+        ),
+        // VBLENDVPS VBLENDVPD VPBLENDVB: the mask register imm8[6:4]
+        (3, 1, 0x4A..=0x4C) => (
+            Simd::Blendv {
+                reg,
+                lane: [4, 8, 1][(code - 0x4A) as usize],
+                mask: i.immediate? as u8 >> 4 & 7,
+            },
+            two_sources,
+        ),
+        // VPSHUFB VPALIGNR, the SSE4.1 forms of one_source operation and the
+        // blends by imm8
+        (2 | 3, 1, _) => match sse4(i, key).or_else(|| ssse3(i, key))? {
+            form @ Simd::Packed { .. } => (form, two_sources),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
 impl Page {
+    /// The register read in place of the destination `reg` (Vex::first)
+    fn first(&self, reg: u8) -> u8 { self.vex.and_then(|v| v.first).unwrap_or(reg) }
+    /// Whether a `bytes`-wide memory operand must be 16-byte aligned (see
+    /// Encoding::aligned_m128, Vex::aligned)
+    fn m128_aligned(&self, i: &DecodedInstruction, bytes: u8) -> bool {
+        match self.vex {
+            Some(v) => v.aligned && bytes == 16,
+            None => aligned_m128(i, bytes),
+        }
+    }
+    /// The VEX guard: #UD and #NM (vex_fault) belong to the interpreter;
+    /// checked once per block (simd_checked bit 4), of the condition computed
+    /// on entry (Page::vex_fault)
+    fn vex_guard(&mut self) {
+        if self.simd_checked & 4 != 0 {
+            return;
+        }
+        let fault = self.vex_fault.as_ref().unwrap().unsafe_clone();
+        self.w.get_local(&fault);
+        self.retry_if();
+        self.simd_checked |= 4;
+    }
+    /// Zero bits 255:128 of YMM `r` (in the CPU state), once per block (see
+    /// ymm_zeroed: every template writes its destination at its top level)
+    fn ymm_zero(&mut self, r: u8) {
+        if self.ymm_zeroed & 1 << r != 0 {
+            return;
+        }
+        self.ymm_zeroed |= 1 << r;
+        self.w
+            .const_i32(unsafe { gp::ymm_hi.add(r as usize) } as i32);
+        self.w.simd_zero();
+        self.w.simd_memory(0x0B, 0); // v128.store
+    }
     /// #UD (CR0.EM, and for XMM forms no CR4.OSFXSR) and #NM (CR0.TS)
     /// belong to the interpreter; checked once per block (see simd_checked).
     fn simd_guard(&mut self, xmm: bool) {
@@ -644,6 +1102,8 @@ impl Page {
             self.xmm[r as usize] = Some(self.w.set_new_local_v128());
         }
     }
+    /// XMM `r` = `value`; a VEX form's bits 255:128 zeroed too (every
+    /// template writes its XMM destination last, after its retries)
     fn store_xmm(&mut self, r: u8, value: &WasmLocalV128) {
         self.xmm_clean[r as usize] = 0;
         self.w.get_local_v128(value);
@@ -652,16 +1112,20 @@ impl Page {
             None => self.xmm[r as usize] = Some(self.w.set_new_local_v128()),
         }
         self.xmm_dirty |= 1 << r;
+        if self.vex.is_some() {
+            self.ymm_zero(r);
+        }
     }
-    /// Store the low `bytes` of `value` into the low lane of XMM `r`.
+    /// Store the low `bytes` of `value` into the low lane of XMM `r`, the
+    /// other lanes those of `r` (a VEX form's: of its first source)
     fn store_xmm_low(&mut self, r: u8, value: &WasmLocalV128, bytes: u8) {
         if bytes == 16 {
             self.store_xmm(r, value);
             return;
         }
-        self.xmm_clean[r as usize] = 0;
-        self.xmm_cached(r);
-        let local = self.xmm[r as usize].as_ref().unwrap().unsafe_clone();
+        let base = self.first(r);
+        self.xmm_cached(base);
+        let local = self.xmm[base as usize].as_ref().unwrap().unsafe_clone();
         self.w.get_local_v128(value);
         self.w.get_local_v128(&local);
         let mut lanes = [0; 16];
@@ -669,8 +1133,9 @@ impl Page {
             *lane = if k < bytes as usize { k as u8 } else { 16 + k as u8 };
         }
         self.w.simd_shuffle(lanes);
-        self.w.set_local_v128(&local);
-        self.xmm_dirty |= 1 << r;
+        let merged = self.w.set_new_local_v128();
+        self.store_xmm(r, &merged);
+        self.w.free_local_v128(merged);
     }
     /// MMX `r` (cpu::read_mmx64s: sync the slot from the f64 cache first).
     fn load_mmx(&mut self, r: u8) {
@@ -807,7 +1272,7 @@ impl Page {
         match &i.ea {
             Some(ea) => {
                 self.linear(ea);
-                if aligned_m128(i, bytes) {
+                if self.m128_aligned(i, bytes) {
                     self.retry_unaligned();
                 }
                 self.load_vector(bytes);
@@ -861,13 +1326,16 @@ impl Page {
     ) {
         self.w.hint(false);
         self.w.if_void();
-        self.exact(i, destination, source);
+        self.exact(i, destination, source, i.immediate.unwrap_or(0));
     }
+    /// (a VEX form: its legacy form's key, with the first source as the
+    /// destination)
     fn exact(
         &mut self,
         i: &DecodedInstruction,
         destination: &WasmLocalV128,
         source: &WasmLocalV128,
+        imm8: u32,
     ) {
         let operands = crate::ir::runtime::tier0::sse_fp_operands();
         for (k, value) in [destination, source].into_iter().enumerate() {
@@ -875,8 +1343,12 @@ impl Page {
             self.w.get_local_v128(value);
             self.w.simd_memory(0x0B, 4); // v128.store
         }
-        self.w.const_i32(i.encoding.opcode as i32);
-        self.w.const_i32(i.immediate.unwrap_or(0) as i32);
+        let key = match i.vex {
+            Some(_) => crate::cpu::avx::legacy(i.encoding.opcode),
+            None => i.encoding.opcode,
+        };
+        self.w.const_i32(key as i32);
+        self.w.const_i32(imm8 as i32);
         self.w
             .call_signature("ir_t0_sse_fp", signature("ir_t0_sse_fp"));
         self.retry_if();
@@ -888,8 +1360,17 @@ impl Page {
         self.w.simd_memory(0x00, 4); // v128.load
     }
 
-    pub(super) fn simd(&mut self, form: Simd, i: &DecodedInstruction) {
-        self.simd_guard(!i.encoding.mmx);
+    /// The template of `form` (`vex`: a VEX form's, see classify_vex)
+    pub(super) fn simd(&mut self, form: Simd, i: &DecodedInstruction, vex: Option<Vex>) {
+        self.vex = vex;
+        match vex {
+            Some(_) => self.vex_guard(),
+            None => self.simd_guard(!i.encoding.mmx),
+        }
+        self.simd_form(form, i);
+        self.vex = None;
+    }
+    fn simd_form(&mut self, form: Simd, i: &DecodedInstruction) {
         let rm = i.modrm.unwrap_or(0) & 7;
         match form {
             Simd::Load128 { reg } => {
@@ -904,7 +1385,7 @@ impl Page {
             Simd::Store128 { reg } => {
                 if let Some(ea) = &i.ea {
                     self.linear(ea);
-                    if aligned_m128(i, 16) {
+                    if self.m128_aligned(i, 16) {
                         self.retry_unaligned();
                     }
                 }
@@ -1045,17 +1526,18 @@ impl Page {
             } => {
                 self.simd_source(i, mmx, source);
                 let src = self.w.set_new_local_v128();
+                let first = self.first(reg);
                 if mmx {
                     self.load_mmx(reg);
                 }
                 else {
-                    self.load_xmm(reg);
+                    self.load_xmm(first);
                 }
                 let dst = self.w.set_new_local_v128();
                 self.packed(op, &dst, &src, if mmx { 8 } else { 16 });
                 let result = self.w.set_new_local_v128();
                 let (destination, source) = (
-                    self.xmm_clean[reg as usize],
+                    self.xmm_clean[first as usize],
                     i.ea.is_none().then(|| self.xmm_clean[rm as usize]),
                 );
                 self.simd_result(reg, mmx, &result);
@@ -1066,7 +1548,7 @@ impl Page {
                     self.xmm_clean[reg as usize] = shuffled_clean(&lanes, destination, source);
                 }
                 if let (false, Packed::Binary(0x51), None) = (mmx, op, &i.ea) {
-                    if rm == reg {
+                    if rm == first {
                         // XORPS/XORPD/PXOR of a register with itself: zeros
                         self.xmm_clean[reg as usize] = CLEAN_SS | CLEAN_PS | CLEAN_SD | CLEAN_PD;
                     }
@@ -1083,7 +1565,7 @@ impl Page {
                     self.load_mmx(reg);
                 }
                 else {
-                    self.load_xmm(reg);
+                    self.load_xmm(self.first(reg));
                 }
                 let dst = self.w.set_new_local_v128();
                 let count = count as u32;
@@ -1146,7 +1628,8 @@ impl Page {
                 // Scalar forms compute (and NaN-check) only the low lane.
                 self.scalar_source(i, bytes);
                 let src = self.w.set_new_local_v128();
-                self.load_xmm(reg);
+                let first = self.first(reg);
+                self.load_xmm(first);
                 let dst = self.w.set_new_local_v128();
                 let base = if double { 0xF0 } else { 0xE4 };
                 match opcode {
@@ -1197,7 +1680,7 @@ impl Page {
                     let lanes = Self::clean_bits(double, scalar);
                     let clean = |r: u8| self.xmm_clean[r as usize] & lanes == lanes;
                     let source = i.ea.is_none().then_some(rm);
-                    let known = [clean(reg), source.is_some_and(clean)];
+                    let known = [clean(first), source.is_some_and(clean)];
                     // a cheap first test where it saves work (zeros fail it)
                     let unsure = native_fp::arithmetic_unsure(
                         &mut self.w,
@@ -1252,7 +1735,7 @@ impl Page {
                     self.w.set_local_v128(&result);
                     self.w.block_end();
                 }
-                let before = self.xmm_clean[reg as usize];
+                let before = self.xmm_clean[first as usize];
                 self.store_xmm_low(reg, &result, bytes);
                 for v in [src, dst, result] {
                     self.w.free_local_v128(v);
@@ -1286,7 +1769,7 @@ impl Page {
                 let source = i.ea.is_none().then_some(rm);
                 // (a scalar form keeps the destination's upper bytes)
                 if scalar {
-                    self.load_xmm(reg);
+                    self.load_xmm(self.first(reg));
                 }
                 else {
                     self.w.simd_zero();
@@ -1320,7 +1803,7 @@ impl Page {
                     self.w.set_local_v128(&v);
                     self.w.block_end();
                 }
-                let before = self.xmm_clean[reg as usize];
+                let before = self.xmm_clean[self.first(reg) as usize];
                 self.store_xmm_low(reg, &v, result);
                 for local in [v, x, destination] {
                     self.w.free_local_v128(local);
@@ -1373,7 +1856,7 @@ impl Page {
                 let v = self.w.set_new_local_v128();
                 if !double {
                     // (an inexact result sets PE)
-                    self.load_xmm(reg);
+                    self.load_xmm(self.first(reg));
                     let destination = self.w.set_new_local_v128();
                     self.mxcsr_refused();
                     self.exact_if(i, &destination, &integer);
@@ -1383,7 +1866,7 @@ impl Page {
                     self.w.free_local_v128(destination);
                 }
                 self.w.free_local_v128(integer);
-                let before = self.xmm_clean[reg as usize];
+                let before = self.xmm_clean[self.first(reg) as usize];
                 self.store_xmm_low(reg, &v, if double { 8 } else { 4 });
                 self.w.free_local_v128(v);
                 self.xmm_clean[reg as usize] =
@@ -1522,7 +2005,7 @@ impl Page {
                     self.simd_source(i, false, 16);
                 }
                 let source = self.w.set_new_local_v128();
-                self.load_xmm(reg);
+                self.load_xmm(self.first(reg));
                 let destination = self.w.set_new_local_v128();
                 let mode = if imm8 & 4 != 0 { 0 } else { imm8 & 3 };
                 self.w.get_local_v128(&source);
@@ -1662,6 +2145,106 @@ impl Page {
                 self.w.free_local_v128(src);
                 self.w.free_local_v128(dst);
             },
+            Simd::MoveMask { reg, lane } => {
+                // (register forms only)
+                self.load_xmm(rm);
+                self.w.simd(match lane {
+                    1 => 0x64, // i8x16.bitmask
+                    4 => 0xA4, // i32x4.bitmask
+                    _ => 0xC4, // i64x2.bitmask
+                });
+                self.write_reg(reg, 32);
+            },
+            Simd::CompareMask {
+                reg,
+                double,
+                scalar,
+                predicate,
+            } => {
+                let bytes = if !scalar {
+                    16
+                }
+                else if double {
+                    8
+                }
+                else {
+                    4
+                };
+                self.scalar_source(i, bytes);
+                let src = self.w.set_new_local_v128();
+                let first = self.first(reg);
+                self.load_xmm(first);
+                let dst = self.w.set_new_local_v128();
+                // the relation of imm8[2:0] for ordered operands: EQ, LT, LE,
+                // UNORD (false), NEQ, NLT (ge), NLE (gt), ORD (true)
+                match predicate & 7 {
+                    3 => self.w.simd_zero(),
+                    7 => {
+                        self.w.const_i32(-1);
+                        self.w.simd(0x11); // i32x4.splat
+                    },
+                    relation => {
+                        self.w.get_local_v128(&dst);
+                        self.w.get_local_v128(&src);
+                        // (f32x4/f64x2: eq ne lt gt le ge)
+                        let offset = [0, 2, 4, 0, 1, 5, 3][relation as usize];
+                        self.w.simd(if double { 0x47 } else { 0x41 } + offset);
+                    },
+                }
+                let result = self.w.set_new_local_v128();
+                let lanes = Self::clean_bits(double, scalar);
+                let source = i.ea.is_none().then_some(rm);
+                let clean = |r: u8| self.xmm_clean[r as usize] & lanes == lanes;
+                let known = [clean(first), source.is_some_and(clean)];
+                if known != [true, true] {
+                    // a NaN or denormal operand raises IE or DE, and a NaN
+                    // makes them unordered
+                    native_fp::operands_refused(
+                        &mut self.w,
+                        double,
+                        if scalar { native_fp::Lanes::Scalar } else { native_fp::Lanes::Packed },
+                        [&dst, &src],
+                        known,
+                    );
+                    self.w.hint(false);
+                    self.w.if_void();
+                    self.exact(i, &dst, &src, predicate as u32);
+                    self.exact_result();
+                    self.w.set_local_v128(&result);
+                    self.w.block_end();
+                }
+                self.store_xmm_low(reg, &result, bytes);
+                for v in [src, dst, result] {
+                    self.w.free_local_v128(v);
+                }
+            },
+            Simd::Blendv { reg, lane, mask } => {
+                self.simd_source(i, false, 16);
+                let src = self.w.set_new_local_v128();
+                self.load_xmm(self.first(reg));
+                let dst = self.w.set_new_local_v128();
+                // the source's lanes where the mask's lane is negative
+                self.w.get_local_v128(&src);
+                self.w.get_local_v128(&dst);
+                self.load_xmm(mask);
+                self.w.const_i32(lane as i32 * 8 - 1);
+                self.w.simd(match lane {
+                    1 => 0x6C, // i8x16.shr_s
+                    4 => 0xAC, // i32x4.shr_s
+                    _ => 0xCC, // i64x2.shr_s
+                });
+                self.w.simd(0x52); // v128.bitselect
+                let result = self.w.set_new_local_v128();
+                self.store_xmm(reg, &result);
+                for v in [src, dst, result] {
+                    self.w.free_local_v128(v);
+                }
+            },
+            Simd::Vzeroupper => {
+                for r in 0..8 {
+                    self.ymm_zero(r);
+                }
+            },
         }
     }
 
@@ -1696,13 +2279,14 @@ impl Page {
                 }
                 w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
             },
-            Packed::MulDwords => {
+            Packed::MulDwords(signed) => {
                 for v in [dst, src] {
                     w.get_local_v128(v);
                     w.simd_zero();
                     w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
                 }
-                w.simd(0xDE);
+                // i64x2.extmul_low_i32x4_s/u
+                w.simd(if signed { 0xDC } else { 0xDE });
             },
             Packed::Sad => {
                 // |dst - src| per byte, summed per quadword.

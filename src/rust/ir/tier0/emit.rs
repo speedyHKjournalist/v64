@@ -242,8 +242,8 @@ enum Form {
         cc: u8,
         r: u8,
     },
-    /// MMX/SSE/SSE2 (see simd).
-    Simd(simd::Simd),
+    /// MMX, SSE to SSE4.2 and VEX forms (see simd).
+    Simd(simd::Simd, Option<simd::Vex>),
     Imul {
         reg: u8,
         immediate: Option<u32>,
@@ -375,7 +375,7 @@ impl Form {
         use simd::Simd as S;
         match self {
             Form::Fnstsw | Form::X87Flags { .. } | Form::Fcmov { .. } => true,
-            Form::Simd(s) => matches!(
+            Form::Simd(s, _) => matches!(
                 s,
                 S::MmxLoad { .. }
                     | S::MmxStore { .. }
@@ -407,7 +407,7 @@ impl Form {
             // change for a zero count).
             Form::ShiftHelper { .. } | Form::DoubleShift { .. } => true,
             Form::X87Flags { .. }
-            | Form::Simd(simd::Simd::CompareFlags { .. } | simd::Simd::Strings { .. })
+            | Form::Simd(simd::Simd::CompareFlags { .. } | simd::Simd::Strings { .. }, _)
             | Form::Lahf => true,
             _ => false,
         }
@@ -453,7 +453,10 @@ pub fn templated(i: &DecodedInstruction) -> bool { classify(i).is_some() }
 fn classify(i: &DecodedInstruction) -> Option<Form> {
     // SSE selects forms by F2/F3/66 prefixes, so it precedes the REP check.
     if let Some(form) = simd::classify(i) {
-        return Some(Form::Simd(form));
+        return Some(Form::Simd(form, None));
+    }
+    if let Some((form, vex)) = simd::classify_vex(i) {
+        return Some(Form::Simd(form, Some(vex)));
     }
     // Invalid LOCK forms are rejected by the shared decoder. A valid locked
     // RMW stays inside one activation, including its guarded slow path.
@@ -841,9 +844,19 @@ struct Page {
     /// denormal in the block (simd::CLEAN_*; see native_fp)
     xmm_clean: [u8; 8],
     /// The SIMD task checks the block has made (simd::simd_guard): 1 those of
-    /// MMX forms, 2 also those of XMM forms. CR0 and CR4 change only in
-    /// interpreter steps, which leave the block.
+    /// MMX forms, 2 also those of XMM forms, 4 those of VEX forms
+    /// (simd::vex_guard). CR0 and CR4 change only in interpreter steps,
+    /// which leave the block.
     simd_checked: u8,
+    /// Nonzero when VEX forms fault (simd::vex_fault, computed on entry; a
+    /// page without VEX templates has none)
+    vex_fault: Option<WasmLocal>,
+    /// The YMM registers whose bits 255:128 the block has zeroed (simd::
+    /// ymm_zero); nothing else in a block writes them (the 256-bit forms are
+    /// interpreter steps, which leave it)
+    ymm_zeroed: u8,
+    /// The VEX form being emitted (simd::Page::simd)
+    vex: Option<simd::Vex>,
     /// x87 TOP/tags/VALID/DIRTY in function-wide locals while `x87_is_open`
     /// (then the CPU state is behind; see x87_open/x87_close).
     x87: X87Cache,
@@ -1629,6 +1642,7 @@ impl Page {
         }
         self.xmm_clean = [0; 8];
         self.simd_checked = 0;
+        self.ymm_zeroed = 0;
     }
     fn emit_flags(&mut self, flags: PendingFlags) {
         if flags.op1 {
@@ -2877,7 +2891,7 @@ impl Page {
                     }
                 }
             },
-            Form::Simd(form) => self.simd(form, i),
+            Form::Simd(form, vex) => self.simd(form, i, vex),
             Form::X87Flags { name, r } => {
                 self.x87_guard();
                 self.w.const_i32(r as i32);
@@ -3396,6 +3410,18 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
     let quotient = w.declare_zeroed_local_i64();
     let retired = w.declare_zeroed_local();
     let committed = w.declare_zeroed_local();
+    // The VEX guard's condition once per activation: a step changing CR0,
+    // CR4, XCR0 (XSETBV's admission barrier) or the mode leaves it
+    // (runtime::tier0::ir_t0_step)
+    let vex_fault = plan
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| simd::classify_vex(&i.decoded).is_some())
+        .then(|| {
+            simd::vex_fault(&mut w);
+            w.set_new_local()
+        });
 
     // offset holds the entry EIP.
     let span = plan.block_at.len() as u32;
@@ -3449,6 +3475,9 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         fp_mxcsr: None,
         xmm_clean: [0; 8],
         simd_checked: 0,
+        vex_fault,
+        ymm_zeroed: 0,
+        vex: None,
         x87: X87Cache {
             top: locals.pop().unwrap(),
             tags: locals.pop().unwrap(),
@@ -3579,6 +3608,7 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         x87_is_open,
         far_eip,
         eip,
+        vex_fault,
         ..
     } = p;
     for local in gpr.into_iter().chain([
@@ -3607,6 +3637,9 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         far_eip,
         eip,
     ]) {
+        w.free_local(local);
+    }
+    if let Some(local) = vex_fault {
         w.free_local(local);
     }
     w.free_local_i64(wide);

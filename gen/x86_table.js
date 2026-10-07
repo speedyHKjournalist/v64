@@ -65,6 +65,8 @@ const TESTS_ASSUME_INTEL = false;
 //   semantics come in later phases)
 // vex: a VEX row (gen/vex_table.js: key 0xC4_MM_PP_OO, the VEX fields it accepts)
 // block_boundary: may change eip in a way not handled by the jit
+// vex_escape: the register form is a VEX prefix (src/rust/cpu/vex.rs), whose
+//   instructions are no block boundary: only the memory form is
 // no_next_instruction: jit will stop analysing after instruction (e.g., unconditional jump, ret)
 const encodings = [
     { opcode: 0x06, os: 1, custom: 1 },
@@ -191,8 +193,8 @@ const encodings = [
     { opcode: 0xC2, custom: 1, block_boundary: 1, no_next_instruction: 1, os: 1, absolute_jump: 1, imm16: 1, skip: 1 }, // ret
     { opcode: 0xC3, custom: 1, block_boundary: 1, no_next_instruction: 1, os: 1, absolute_jump: 1, skip: 1 },
 
-    { opcode: 0xC4, block_boundary: 1, os: 1, e: 1, skip: 1 }, // les
-    { opcode: 0xC5, block_boundary: 1, os: 1, e: 1, skip: 1 }, // lds
+    { opcode: 0xC4, block_boundary: 1, vex_escape: 1, os: 1, e: 1, skip: 1 }, // les
+    { opcode: 0xC5, block_boundary: 1, vex_escape: 1, os: 1, e: 1, skip: 1 }, // lds
 
     { opcode: 0xC6, custom: 1, e: 1, fixed_g: 0, imm8: 1 },
     { opcode: 0xC7, custom: 1, os: 1, e: 1, fixed_g: 0, imm1632: 1 },

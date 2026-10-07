@@ -5,6 +5,7 @@
     "x87": "-O2 -march=i686 -mtune=pentium4 -mno-sse -mno-mmx -mfpmath=387 -fno-math-errno",
     "x87_i586": "-O2 -march=pentium -mfpmath=387 -fno-math-errno",
     "sse": "-O2 -march=pentium4 -msse2 -mfpmath=sse -fno-math-errno",
+    "avx": "-O2 -march=pentium4 -mavx -mprefer-vector-width=128 -mfpmath=sse -fno-math-errno",
     "mmx": "-O2 -march=pentium-mmx -mmmx -mfpmath=387"
   },
   "benchmarks": [
@@ -46,6 +47,9 @@
     {"name": "711.x87", "category": "micro", "source": "m_x87.asm", "iterations": 1100, "about": "x87 register-stack arithmetic" },
     {"name": "712.sse4.int", "category": "sse4", "source": "m_sse4int.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.1 PMINUD/PMAXSD/PMULLD/PCMPGTQ/PBLENDW/BLENDPS/PACKUSDW" },
     {"name": "713.sse4.round", "category": "sse4", "source": "m_sse4round.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.1 ROUNDSD/ROUNDSS/ROUNDPD over finite values" },
-    {"name": "714.sse4.strings", "category": "sse4", "source": "m_sse4strings.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.2 PCMPISTRI strlen and first-vowel search" }
+    {"name": "714.sse4.strings", "category": "sse4", "source": "m_sse4strings.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.2 PCMPISTRI strlen and first-vowel search" },
+    {"name": "715.avx.matmul", "category": "avx", "source": "matmul.c", "profile": "avx", "iterations": 740, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "601's source, AVX (VEX.128) code" },
+    {"name": "716.avx.nbody", "category": "avx", "source": "nbody.c", "profile": "avx", "iterations": 870, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "606's source, AVX scalar double code" },
+    {"name": "717.avx.mandel", "category": "avx", "source": "mandel.c", "profile": "avx", "iterations": 69, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "611's source, AVX code" }
   ]
 }

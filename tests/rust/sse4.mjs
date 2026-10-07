@@ -104,8 +104,9 @@ const EXTRACT = [[0x14, "pextrb", 1], [0x15, "pextrw", 2], [0x16, "pextrd", 4], 
 const INSERT = [[0x20, "pinsrb", 1], [0x22, "pinsrd", 4]];
 const GPRS = [0, 1, 2, 3, 5, 6, 7]; // (not ESP)
 // The forms with Tier-0 templates (P4b part 4): one Wasm SIMD operation (66 0F
-// 38) and the blends with imm8 (66 0F 3A)
-const TEMPLATED_38 = [0x29, 0x2B, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40];
+// 38) and the blends with imm8 (66 0F 3A); PBLENDVB, BLENDVPS, BLENDVPD and
+// PMULDQ (P5 part 5)
+const TEMPLATED_38 = [0x10, 0x14, 0x15, 0x28, 0x29, 0x2B, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40];
 const TEMPLATED_3A = [0x0C, 0x0D, 0x0E];
 // PCMPESTRM, PCMPESTRI, PCMPISTRM, PCMPISTRI
 const STRINGS = [[0x60, "pcmpestrm"], [0x61, "pcmpestri"], [0x62, "pcmpistrm"], [0x63, "pcmpistri"]];
