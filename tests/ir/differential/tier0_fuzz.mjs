@@ -3,7 +3,9 @@
 // run hot in a loop (so their page is compiled by the IR Tier-0 page tier) and
 // must leave exactly the interpreter's state: GPRs, EFLAGS (including the
 // rarely read AF/OF, captured by PUSHFD/LAHF inside the loop), memory, XMM and
-// x87 registers, and the retired-instruction count.
+// x87 registers, and the retired-instruction count. Each program must also
+// have entered Tier-0 code, and most of all programs' instructions must have
+// run in it: else the comparison proves nothing about Tier-0.
 //
 //   node tests/ir/differential/tier0_fuzz.mjs [cases=40] [seed=1] [wasm]
 // Needs build/bench/boot.bin (make bench-build): flat protected mode, paging.
@@ -22,7 +24,11 @@ const manifest = JSON.parse(fs.readFileSync("build/bench/manifest.json", "utf8")
 const boot = fs.readFileSync(manifest.boot);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-const CODE = 0x500000, DATA = 0x600000, STACK = 0x610000, ITERATIONS = 2500;
+// (Tier-0 compiles a page that got hot at the start of the next CPU frame, so
+// a program's first frame, at least ~100k instructions, runs interpreted; FP
+// programs also reload MXCSR, interpreted, at the top, and Tier-0 must
+// recompile the page with an entry after it)
+const CODE = 0x500000, DATA = 0x600000, STACK = 0x610000, ITERATIONS = 50000;
 const random = () => {
     seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0;
     return seed;
@@ -232,7 +238,11 @@ function vex_instruction(x, y) {
         case 7: return [...c5(pick([2, 3]), z), 0x10, rr(x, y)];                     // VMOVSS/SD xmm, xmm, xmm
         case 8: return [...c5(pick([2, 3])), pick([0x10, 0x11]), 0x43 | x << 3, disp()]; // VMOVSS/SD with memory
         case 9: return [...c5(pick([0, 1])), pick([0x28, 0x10, 0x11]), rr(x, y)];   // VMOVAPS/UPS
-        case 10: return [...c5(pick([0, 1, 1])), random() & 1 ? 0xD7 : 0x50, rr(reg(), y)]; // VPMOVMSKB, VMOVMSKPS/PD
+        case 10: {                                                                    // VPMOVMSKB, VMOVMSKPS/PD
+            // (VPMOVMSKB has no NP form: #UD would end the program early)
+            const pp = pick([0, 1, 1]), op = random() & 1 ? 0xD7 : 0x50;
+            return [...c5(op === 0xD7 ? 1 : pp), op, rr(reg(), y)];
+        }
         case 11: return [...c4(3, 1, z), pick([0x4A, 0x4B, 0x4C]), ...source(), (random() & 7) << 4]; // VBLENDVPS/PD, VPBLENDVB
         case 12: {                                                                    // VPSxx imm: VEX.vvvv the destination
             const op = pick([0x71, 0x72, 0x73]);
@@ -346,6 +356,9 @@ async function machine(tier0) {
     const vm = new V86({
         graphics_adapter: "bochs_vga",
         wasm_path: wasm, disable_jit: !tier0, memory_size: 128 << 20, // reference: the interpreter only
+        // (page functions are installed as they are compiled, not in a Promise
+        // continuation, which a whole program can run ahead of)
+        ir_sync_publication: true,
         // (AVX for s13: CR4.OSXSAVE and XCR0 set in run; BMI for b, with the
         // x86-64 profile's LZCNT)
         cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX", ...only === "b" ? ["BMI1", "BMI2", "LZCNT", "MOVBE"] : []],
@@ -375,10 +388,7 @@ async function run(m, code, init, page, split) {
     cpu.mem8.set(code, base);
     cpu.mem8.set(init.data, DATA);
     cpu.mem8.fill(0, STACK - 0x1000, STACK);
-    // (FP programs reload MXCSR, interpreted, at the top: more iterations
-    // let Tier-0 recompile the page with an entry after it; BMI programs run
-    // longer so that most of them runs compiled)
-    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ["s11", "s12", "s13", "b"].includes(only) ? 20 * ITERATIONS : ITERATIONS, true);
+    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ITERATIONS, true);
     cpu.reg32.set(init.regs);
     cpu.reg32[3] = DATA; cpu.reg32[4] = STACK;
     cpu.flags[0] = 2; cpu.flags_changed[0] = 0; cpu.in_hlt[0] = 0;
@@ -395,6 +405,9 @@ async function run(m, code, init, page, split) {
     e.set_control_word(0x37F); cpu.fpu_status_word[0] = 0;
     e.update_state_flags();
     new Uint32Array(e.memory.buffer)[664 >> 2] = 0;
+    // (page function activations, and the instructions that the interpreter
+    // loop ran outside page functions)
+    const entries = e.ir_t0_entries(), interpreted = e.ir_interpreted_stat(0, 0);
     vm.run();
     const end = performance.now() + 20000;
     while(!cpu.in_hlt[0]) {
@@ -408,6 +421,8 @@ async function run(m, code, init, page, split) {
         await sleep(0);
     }
     await vm.stop();
+    m.entries = (e.ir_t0_entries() - entries) >>> 0;
+    m.interpreted = (e.ir_interpreted_stat(0, 0) - interpreted) >>> 0;
     return {
         regs: Array.from(cpu.reg32, v => v >>> 0),
         eip: cpu.instruction_pointer[0] >>> 0,
@@ -424,7 +439,9 @@ async function run(m, code, init, page, split) {
 }
 
 const reference = await machine(false), tier0 = await machine(true);
-let failures = 0;
+// (instructions retired in all, and in page functions; the smallest share of
+// one program's in page functions)
+let failures = 0, uncompiled = 0, retired = 0, compiled = 0, least = 1;
 for(let c = 0; c < cases; c++) {
     near_single = (random() & 1) === 1;
     const code = program();
@@ -444,7 +461,16 @@ for(let c = 0; c < cases; c++) {
     if(special || near) init.data.push(...reset_state(init.xmm, init.mxcsr));
     const split = straddle ? 4 + random() % (code.length - 8) : 0;
     const expected = await run(reference, code, init, c, split), actual = await run(tier0, code, init, c, split);
-    if(process.env.FUZZ_DEBUG) console.log(`case ${c}: mxcsr ${expected.mxcsr.toString(16)} / ${actual.mxcsr.toString(16)} count ${expected.count} code ${Buffer.from(code).toString("hex")}`);
+    if(process.env.FUZZ_DEBUG) console.log(`case ${c}: mxcsr ${expected.mxcsr.toString(16)} / ${actual.mxcsr.toString(16)} count ${expected.count} ` +
+        `page function entries ${tier0.entries} interpreted ${tier0.interpreted} code ${Buffer.from(code).toString("hex")}`);
+    retired += actual.count;
+    compiled += actual.count - tier0.interpreted;
+    least = Math.min(least, 1 - tier0.interpreted / actual.count);
+    if(!tier0.entries) {
+        uncompiled++;
+        console.log(`case ${c}: no page function ran (${actual.count} instructions, eip ${actual.eip.toString(16)}, status ${actual.status.toString(16)})\n` +
+            `  code ${Buffer.from(code).toString("hex")}`);
+    }
     for(const key of Object.keys(expected)) {
         try { assert.deepEqual(actual[key], expected[key]); }
         catch{
@@ -455,8 +481,17 @@ for(let c = 0; c < cases; c++) {
     }
 }
 const pages = tier0.e.ir_t0_stat(0);
+// (instructions that page functions left to the interpreter, ir_t0_step)
+let stepped = 0;
+for(let key = 0; key < 0x10000; key++) stepped += tier0.e.ir_t0_steps(key) >>> 0;
 await reference.vm.destroy(); await tier0.vm.destroy();
 assert(pages > 0, "no Tier-0 page was compiled");
-if(failures) { console.log(`FAIL: ${failures}/${cases} cases differ`); process.exit(1); }
-console.log(`PASS: ${cases} random programs, Tier-0 (${pages} page compiles) matches the interpreter`);
+const percent = share => `${(100 * share).toFixed(1)}%`;
+const coverage = `${percent(compiled / retired)} of the instructions ran in page functions (${percent((compiled - stepped) / retired)} ` +
+    `templated), at least ${percent(least)} of each program's`;
+if(failures || uncompiled || compiled * 2 < retired) {
+    console.log(`FAIL: ${failures}/${cases} cases differ, no page function ran in ${uncompiled}; ${coverage}`);
+    process.exit(1);
+}
+console.log(`PASS: ${cases} random programs, Tier-0 (${pages} page compiles) matches the interpreter; ${coverage}`);
 process.exit(0);
