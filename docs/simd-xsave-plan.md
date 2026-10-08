@@ -214,6 +214,8 @@ P4a 的 FP 核心、oracle/fixture 升级也可从 P0 后独立推进。解码�
 
 进度：M1 于 2026-10-07 开放（14 节“M1”）：公开选项 `cpu_features` 接受这三个能力，默认 CPU
 配置不变（Q1）。M2、M3 于 2026-10-08 开放（14 节“M2、M3”）：`cpu_features` 另接受 XSAVE 与 AVX。
+M4、M5 于 2026-10-08 开放（14 节“M4、M5”）：`cpu_features` 另接受 AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE
+（`cpu_type: "x86_64"` 时有预设 `"x86-64-v3"`）以及 XSAVEOPT、XSAVEC、XGETBV1、XSAVES；默认 CPU 仍不变（Q1）。
 
 ## 5. P0–P1：清单、能力契约和解码
 
@@ -783,7 +785,11 @@ make bench-quick
 
 **计划新增** `ssse3-tests`、`sse41-tests`、`sse42-tests`、`xsave-tests`、`avx-tests`、
 `avx2-tests`、`bmi-tests`（含 LZCNT/TZCNT/MOVBE）、`fma-tests`、`f16c-tests`、`simd-xsave-tests`，
-并接入 CI；这些名称当前不是可依赖的已有目标。
+并接入 CI；这些名称当前不是可依赖的已有目标。实际（P12）：`ssse3-tests`、`sse4-tests`、`sse-fp-tests`、
+`sse-fault-tests`、`xsave-tests`、`avx-tests`（含 AVX2 与 gather）、`bmi-tests`、`fma-tests`（含 F16C）、
+`x64-glibc-tests`，及 IR 的 `ir-avx-tests`、`ir-bmi-tests` 等；发布等级见 `tools/release_gate.mjs`。CI 运行其中
+确定性的一组（`isa-forms-check`、`platform-contract-tests`、`decode-rules-tests`、`ir-avx-tests`、`ir-bmi-tests`
+与 BMI、FMA 的模型对拍）；x64 的 QEMU 对拍需要 QEMU 10.2，`avx-tests` 需要约一小时，留给发布门槛。
 CI 分为快速确定性语义/解码检查与较长的差分、浏览器、OS 集成任务，合并与发布分别设 gate。
 `make all-tests` 不能代替上述专项汇总。发布 gate 按 4.1 节的里程碑，在
 [`tools/release_gate.mjs`](../tools/release_gate.mjs) 中增加 `R-SSE4`、`R-XSAVE`、`R-AVX`、
@@ -883,7 +889,7 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
 
 | 编号 | 问题 | 建议 |
 | --- | --- | --- |
-| Q1 | 新建 VM 默认采用哪个 CPU 配置 | 留到 P12 决定。建议：新能力在新旧 profile 下都达到性能预算之前，默认保持旧配置，由用户显式开启 |
+| Q1 | 新建 VM 默认采用哪个 CPU 配置 | **已定（2026-10-08，P12）**：默认保持旧配置，由用户用 `cpu_features` 显式开启。x86-64-v3 下 libm 的 FMA 版本慢于 SSE2 版本（12.2 节），而改变默认会改变已有客体和快照看到的 CPU |
 | Q2 | SSE/AVX 浮点的精度策略 | **已定（2026-10-04）**：默认精确，用 7.4 节的快路径准入保住性能；性能预算按这一策略测量。P4a 达不到预算时再重新讨论。P4a 结果（2026-10-05）：全套基准中位数不变，SSE 浮点四项 x0.72–0.89（14 节），待复核 |
 | Q3 | 是否实现 XSAVES/XRSTORS | **已定（2026-10-04）**：实现，作为 M5 的最后一步，并对 Linux 的 XSAVES/XRSTORS 路径做完整验收 |
 | Q4 | 公开配置的 API 形态 | **P0 采纳建议**：能力位图，外加 `x86-64-v2` 这类预设级别；不满足依赖的组合直接报错 |
@@ -2643,3 +2649,24 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   对象缺少 PCIe 热插拔加入的 `absent`），与本计划无关，另行处理；这个目标的其余四个文件单独运行都通过。
   `tests/x64/avx.mjs` 在 debug 构建上起初失败：并行构建的一段只给了一个核，而 debug 构建断言并行执行至少有两个
   核；改为两个核（另一个核在 vCPU worker 中等待 SIPI）后 debug 与 release 都通过，未修正的构建上两者都失败。
+
+### M4、M5：开放 x86-64-v3 与 XSAVE 家族；Q1（2026-10-08）
+
+- **开放**：`gen/cpu_features.js` 的 `RELEASED` 包含 M1–M5，所有计划内能力都可直接用于 `cpu_features`，不再需要
+  `cpu_features_unreleased`：AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE（`cpu_type: "x86_64"` 时可用预设
+  `"x86-64-v3"`；32 位配置没有 LZCNT，Q7），以及 XSAVEOPT、XSAVEC、XGETBV1、XSAVES。`v86.d.ts`、
+  `docs/x86-64.md` 随之更新。
+- **CPU contract**：新增 `legacy-v3`（x86-64-v3 的能力去掉 LZCNT）、`x64-v3`、`legacy-xsaves`、`x64-xsaves`
+  四个配置，原有 10 个配置逐项核对未变。`x64-v3` 比 `x64-avx` 多出 CPUID.1:ECX 的 FMA、MOVBE、F16C，
+  CPUID.7:EBX 的 BMI1、AVX2、BMI2，CPUID.80000001h:ECX 的 LZCNT；`legacy-v3` 同样但没有 LZCNT；两个 xsaves
+  配置的 CPUID.(0DH,1):EAX 为 0FH，复位时 EBX 为 576。
+- **发布门槛**：`tools/release_gate.mjs` 增加 `R-x86-64-v3`（解码与能力、IR、x64 差分与 page tier、
+  `bmi-tests`、`fma-tests`、`avx-tests`、`x64-glibc-tests`）与 `R-XSAVE-ext`（`xsave-tests`、
+  `ir-fp-state-tests`、`kvm-unit-test-xsave`、`x64-glibc-tests`）。
+- **测试**：`tests/x64/cpu_features.mjs` 不再期望任何能力未开放；新增 x86-64-v3 预设不带
+  `cpu_features_unreleased`、32 位配置的 v3 能力集、XSAVE 家族（检查 CPUID.(0DH,1):EAX），以及
+  `cpuid_level` 为 7 时 XSAVE 家族随 XSAVE 一起隐藏。
+- **Q1 的结论**：新建 VM 的默认 CPU 不变，仍是 v86 一直以来的配置，本计划的能力由 `cpu_features` 显式开启。
+  已有客体和快照看到的 CPU 因此不变。依据是 12.2 节在新旧 profile 下的测量（P12 第一部分）：x86-64-v3 下
+  启动与 x86-64-v2 相同，glibc 的字符串函数持平或更快，但 libm 选用 `_fma` 版本后 exp、log、sin、pow
+  比 SSE2 版本慢 1.3–2.1 倍（FMA 在软件中精确计算），libm 密集的负载开放能力后会变慢。

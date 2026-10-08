@@ -64,10 +64,11 @@ export const FEATURES = [
     { name: "XSAVES", cpuid: [0xD, 1, "eax", 3], requires: ["XSAVEC"], milestone: "M5", phase: "P9" },
 ];
 
-// The milestones released to the public setting cpu_features (4.1): the
-// features of later ones are for tests and development (12.1) and warn
-// unless cpu_features_unreleased is set (src/cpu.js)
-export const RELEASED = ["M1", "M2", "M3"];
+// The milestones released to the public setting cpu_features (4.1): all of
+// them since P12; a feature of a later one would be for tests and
+// development (12.1) and warn unless cpu_features_unreleased is set
+// (src/cpu.js)
+export const RELEASED = ["M1", "M2", "M3", "M4", "M5"];
 
 const PROFILES = ["x86", "x86_64"];
 const REGISTERS = ["eax", "ebx", "ecx", "edx"];
@@ -180,6 +181,10 @@ const CONTRACT_PROFILES = {
     "legacy-v2": ["x86", PRESETS["x86-64-v2"]], "x64-v2": ["x86_64", PRESETS["x86-64-v2"]],
     "legacy-xsave": ["x86", ["XSAVE"]], "x64-xsave": ["x86_64", ["XSAVE"]],
     "legacy-avx": ["x86", [...PRESETS["x86-64-v2"], "XSAVE", "AVX"]], "x64-avx": ["x86_64", [...PRESETS["x86-64-v2"], "XSAVE", "AVX"]],
+    // (M4: the 32-bit profile has x86-64-v3's features but LZCNT, Q7; M5)
+    "legacy-v3": ["x86", PRESETS["x86-64-v3"].filter(f => f !== "LZCNT")], "x64-v3": ["x86_64", PRESETS["x86-64-v3"]],
+    "legacy-xsaves": ["x86", ["XSAVE", "XSAVEOPT", "XSAVEC", "XGETBV1", "XSAVES"]],
+    "x64-xsaves": ["x86_64", ["XSAVE", "XSAVEOPT", "XSAVEC", "XGETBV1", "XSAVES"]],
 };
 
 /** The features that are not always present, with their bit in the machine's set */

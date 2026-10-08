@@ -68,6 +68,22 @@ const LEVELS = {
         ["platform-contract-tests"], ["xsave-tests"], ["decode-rules-tests"], ["x64-decode-tests"], ["isa-forms-check"],
         ["ir-avx-tests"], ["x64-differential-tests"], ["x64-page-tier-tests"], ["avx-tests", true],
     ],
+    // x86-64-v3 (docs/simd-xsave-plan.md M4: cpu_features "x86-64-v3" with
+    // cpu_type "x86_64"; the 32-bit profile has its features but LZCNT):
+    // AVX2 with the gathers, BMI1/BMI2/LZCNT/TZCNT/MOVBE, FMA and F16C in
+    // every engine against SDM models and QEMU; glibc's x86-64-v3 code and
+    // the YMM state in a real guest
+    "R-x86-64-v3": [
+        ["platform-contract-tests"], ["decode-rules-tests"], ["x64-decode-tests"], ["isa-forms-check"], ["ir-avx-tests"],
+        ["ir-bmi-tests"], ["x64-differential-tests"], ["x64-page-tier-tests"], ["bmi-tests"], ["fma-tests"],
+        ["avx-tests", true], ["x64-glibc-tests", true],
+    ],
+    // the XSAVE family (M5: XSAVEOPT, XGETBV(1), XSAVEC, XSAVES and
+    // IA32_XSS): formats, the init and modified optimizations, the kernel's
+    // compacted format in a real guest
+    "R-XSAVE-ext": [
+        ["platform-contract-tests"], ["xsave-tests"], ["ir-fp-state-tests"], ["kvm-unit-test-xsave"], ["x64-glibc-tests", true],
+    ],
     // machine_type "q35": chipset, ACPI tables, AHCI (docs/q35.md, docs/ahci.md)
     "R-q35": [
         ["acpi-table-tests"], ["q35-device-tests"], ["q35-guest-tests", true], ["q35-hotplug-tests", true],

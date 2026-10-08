@@ -74,7 +74,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "FMA": {
         "bit": 6,
@@ -86,7 +86,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "F16C": {
         "bit": 7,
@@ -98,7 +98,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "BMI1": {
         "bit": 8,
@@ -108,7 +108,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "BMI2": {
         "bit": 9,
@@ -118,7 +118,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "LZCNT": {
         "bit": 10,
@@ -127,7 +127,7 @@ export const CPU_FEATURES = {
         "profiles": [
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "MOVBE": {
         "bit": 11,
@@ -137,7 +137,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "XSAVEOPT": {
         "bit": 12,
@@ -149,7 +149,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "XSAVEC": {
         "bit": 13,
@@ -161,7 +161,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "XGETBV1": {
         "bit": 14,
@@ -173,7 +173,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "XSAVES": {
         "bit": 15,
@@ -185,7 +185,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     }
 };
 
