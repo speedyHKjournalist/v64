@@ -67,7 +67,7 @@ export const FEATURES = [
 // The milestones released to the public setting cpu_features (4.1): the
 // features of later ones are for tests and development (12.1) and warn
 // unless cpu_features_unreleased is set (src/cpu.js)
-export const RELEASED = ["M1"];
+export const RELEASED = ["M1", "M2", "M3"];
 
 const PROFILES = ["x86", "x86_64"];
 const REGISTERS = ["eax", "ebx", "ecx", "edx"];
@@ -178,6 +178,8 @@ export const PRESETS = {
 const CONTRACT_PROFILES = {
     "legacy-1": ["x86", []], "legacy-4": ["x86", []], "x64-1": ["x86_64", []], "x64-4": ["x86_64", []],
     "legacy-v2": ["x86", PRESETS["x86-64-v2"]], "x64-v2": ["x86_64", PRESETS["x86-64-v2"]],
+    "legacy-xsave": ["x86", ["XSAVE"]], "x64-xsave": ["x86_64", ["XSAVE"]],
+    "legacy-avx": ["x86", [...PRESETS["x86-64-v2"], "XSAVE", "AVX"]], "x64-avx": ["x86_64", [...PRESETS["x86-64-v2"], "XSAVE", "AVX"]],
 };
 
 /** The features that are not always present, with their bit in the machine's set */

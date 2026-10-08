@@ -213,7 +213,7 @@ P4a 的 FP 核心、oracle/fixture 升级也可从 P0 后独立推进。解码�
 原生模板（12.2 节）。
 
 进度：M1 于 2026-10-07 开放（14 节“M1”）：公开选项 `cpu_features` 接受这三个能力，默认 CPU
-配置不变（Q1）。
+配置不变（Q1）。M2、M3 于 2026-10-08 开放（14 节“M2、M3”）：`cpu_features` 另接受 XSAVE 与 AVX。
 
 ## 5. P0–P1：清单、能力契约和解码
 
@@ -2020,3 +2020,30 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   （`p6p3-batch-a`、`p6p3-batch-b`），53 个通过，包括在主工作树中被另一会话的 `mmio_ram.rs` 阻塞的
   五个。另外两个（`api-tests`、`jitpagingtests`）需要不在 git 中的 `images/`，在主工作树中加入本部分
   后运行，都通过。
+
+### M2、M3：开放 XSAVE 与 AVX（2026-10-08）
+
+- **含义**：与 M1 相同，公开选项 `cpu_features` 现在接受 XSAVE（XSAVE/XRSTOR、XSETBV/XGETBV，x87 与
+  SSE 状态）和 AVX（VEX.128 与 VEX.256 的全部形式和 YMM 状态，需要 XSAVE 与 SSE4.2）。默认 CPU
+  配置不变（Q1）。`gen/cpu_features.js` 的 `RELEASED` 为 M1、M2、M3；之后里程碑的能力（AVX2、FMA 等）
+  仍会警告。
+- **前提**：P2（XSAVE）、P5 与 P6（AVX 的全部形式）已完成；5.1 节热点清单中属于 AVX 的形式在 Tier-0
+  和 page tier 上都有原生模板（P5 第五部分、P6 第三部分）。
+- **CPU contract**：新增四个 profile：`legacy-xsave`、`x64-xsave`（只请求 XSAVE）和 `legacy-avx`、
+  `x64-avx`（x86-64-v2 加 XSAVE 与 AVX）。人工审核结果：
+  - 原有六个 profile 不变；MSR 都相同。
+  - XSAVE 的 profile 与 `legacy-1`/`x64-1` 只差 CPUID.1:ECX 的 bit 26 和 leaf 0xD（EAX=3，即 x87 与
+    SSE；EBX=ECX=576）。
+  - AVX 的 profile 与 `legacy-v2`/`x64-v2` 只差 CPUID.1:ECX 的 bit 26、28 和 leaf 0xD（EAX=7；
+    EBX=576，即 XCR0 的复位值 1 对应的大小；ECX=832）。
+  - 探测时 CR4.OSXSAVE 为 0，所以 OSXSAVE（bit 27）都为 0。
+- **发布 gate**：`R-XSAVE` 包括 `platform-contract-tests`、`xsave-tests`、`kvm-unit-test-xsave`；`R-AVX`
+  包括 `platform-contract-tests`、`xsave-tests`、`decode-rules-tests`、`x64-decode-tests`、
+  `isa-forms-check`、`ir-avx-tests`、`x64-differential-tests`、`x64-page-tier-tests` 和长目标
+  `avx-tests`。
+- **文档**：`v86.d.ts`、`docs/x86-64.md`。
+- **留到 P12**：真实客体验收（11.3 节，如 Linux 用 XSAVE 保存 YMM 状态、glibc 的 AVX 变体），以及
+  默认配置的决定（Q1）。
+- **测试**：`tests/x64/cpu_features.mjs` 检查 M1–M3 的能力已开放，AVX2 等仍未开放；
+  `gen/cpu_features.js --check` 与 `tools/cpu_contract.mjs --check` 通过；`kvm-unit-test-xsave`
+  通过（只有 XSAVE 时 15 项，加上 AVX 时 17 项）。gate 的其他目标在 P6 第二、三部分的回归中都已通过。

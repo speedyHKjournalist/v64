@@ -55,6 +55,19 @@ const LEVELS = {
         ["packed-simd-tests"], ["decode-rules-tests"], ["x64-decode-tests"], ["ir-sse-fp-tests"], ["ir-crc32-tests"],
         ["ir-simd-integer-tests"], ["ir-simd-shuffle-tests"], ["nasmtests", true], ["nasmtests-force-jit", true],
     ],
+    // XSAVE with the x87 and SSE state (docs/simd-xsave-plan.md M2:
+    // cpu_features "XSAVE"): the codec, XSETBV/XGETBV, the state's lifecycle
+    // across reset, snapshots and core switches, kvm-unit-tests x86/xsave
+    "R-XSAVE": [
+        ["platform-contract-tests"], ["xsave-tests"], ["kvm-unit-test-xsave"],
+    ],
+    // AVX, VEX.128 and VEX.256 (docs/simd-xsave-plan.md M3: cpu_features
+    // "XSAVE" and "AVX"): every engine against SDM models and QEMU, the
+    // region tiers against the interpreter, the YMM state
+    "R-AVX": [
+        ["platform-contract-tests"], ["xsave-tests"], ["decode-rules-tests"], ["x64-decode-tests"], ["isa-forms-check"],
+        ["ir-avx-tests"], ["x64-differential-tests"], ["x64-page-tier-tests"], ["avx-tests", true],
+    ],
     // machine_type "q35": chipset, ACPI tables, AHCI (docs/q35.md, docs/ahci.md)
     "R-q35": [
         ["acpi-table-tests"], ["q35-device-tests"], ["q35-guest-tests", true], ["q35-hotplug-tests", true],

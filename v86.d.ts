@@ -739,12 +739,14 @@ export interface V86Options {
     /**
      * CPU features beyond the base profile, reported by CPUID: SSSE3, SSE4.1
      * and SSE4.2, by name or as the preset "x86-64-v2" (with
-     * cpu_type: "x86_64", what x86-64-v2 requires: RHEL 9, Windows 11 24H2).
+     * cpu_type: "x86_64", what x86-64-v2 requires: RHEL 9, Windows 11 24H2);
+     * XSAVE (XSAVE/XRSTOR, XSETBV/XGETBV with the x87 and SSE state) and AVX
+     * (the VEX.128 and VEX.256 forms and the YMM state).
      * A feature needs those it builds on (SSE4.1 needs SSSE3; SSE4.2 needs
-     * SSE4.1); other combinations fail at startup. Not set: the CPU v86
-     * always had. See [docs/x86-64.md](https://github.com/copy/v86/blob/master/docs/x86-64.md).
+     * SSE4.1; AVX needs XSAVE and SSE4.2); other combinations fail at startup.
+     * Not set: the CPU v86 always had. See [docs/x86-64.md](https://github.com/copy/v86/blob/master/docs/x86-64.md).
      */
-    cpu_features?: Array<"SSSE3" | "SSE4.1" | "SSE4.2"> | "x86-64-v2";
+    cpu_features?: Array<"SSSE3" | "SSE4.1" | "SSE4.2" | "XSAVE" | "AVX"> | "x86-64-v2";
 
     /**
      * Log level (for debug builds)

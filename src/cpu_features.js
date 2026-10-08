@@ -49,7 +49,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "AVX": {
         "bit": 4,
@@ -62,7 +62,7 @@ export const CPU_FEATURES = {
             "x86",
             "x86_64"
         ],
-        "released": false
+        "released": true
     },
     "AVX2": {
         "bit": 5,

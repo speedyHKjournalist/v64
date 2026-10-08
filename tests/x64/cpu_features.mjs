@@ -3,8 +3,9 @@
 // cpu_features): CPUID reports exactly the requested features, a preset names
 // a set, cpuid_level leaves out what it cannot report together with what
 // requires it, and an unknown feature, one the profile cannot have or one
-// without its requirements fails. Only M1's (x86-64-v2) are released: the
-// others are listed as unreleased (a warning unless cpu_features_unreleased).
+// without its requirements fails. Only those of M1 (x86-64-v2), M2 (XSAVE)
+// and M3 (AVX) are released: the others are listed as unreleased (a warning
+// unless cpu_features_unreleased).
 import assert from "node:assert/strict";
 import url from "node:url";
 import {assemble, actual} from "./guest_runner.mjs";
@@ -52,6 +53,8 @@ for(const [options, expected, level] of [
     [{cpu_type: "x86_64"}, []],
     [{cpu_features: [...V2, "BMI1", "BMI2", "MOVBE"], cpu_features_unreleased: true}, [...V2, "BMI1", "BMI2", "MOVBE"]],
     [{cpu_features: "x86-64-v2"}, V2],
+    [{cpu_features: ["XSAVE"]}, ["XSAVE"]],
+    [{cpu_type: "x86_64", cpu_features: [...V2, "XSAVE", "AVX"]}, [...V2, "XSAVE", "AVX"]],
     [{cpu_type: "x86_64", cpu_features: "x86-64-v3", cpu_features_unreleased: true}, V3],
     // leaf 0xD is out of reach: XSAVE goes, and AVX, AVX2, FMA, F16C with it
     [{cpu_type: "x86_64", cpu_features: "x86-64-v3", cpu_features_unreleased: true, cpuid_level: 7}, [...V2, "BMI1", "BMI2", "LZCNT", "MOVBE"], 7],
@@ -93,10 +96,12 @@ for(const [requested, expected] of [
     [undefined, []],
     ["x86-64-v2", []],
     [["SSSE3", "SSE4.1", "SSE4.2"], []],
-    ["x86-64-v3", ["XSAVE", "AVX", "AVX2", "FMA", "F16C", "BMI1", "BMI2", "LZCNT", "MOVBE"]],
-    [["SSSE3", "XSAVE"], ["XSAVE"]],
+    ["x86-64-v3", ["AVX2", "FMA", "F16C", "BMI1", "BMI2", "LZCNT", "MOVBE"]],
+    [["SSSE3", "XSAVE"], []],
+    [["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], []],
+    [["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX", "BMI1"], ["BMI1"]],
 ])
 {
     assert.deepEqual(unreleased_cpu_features(requested), expected, JSON.stringify(requested));
 }
-console.log("PASS only the features of x86-64-v2 (M1) are released");
+console.log("PASS only the features of M1 (x86-64-v2), M2 (XSAVE) and M3 (AVX) are released");
