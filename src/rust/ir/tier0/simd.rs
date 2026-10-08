@@ -241,6 +241,25 @@ pub(super) enum Simd {
     },
     /// VZEROALL: YMM0-7 zeroed (Tier-0 runs outside 64-bit mode)
     Vzeroall,
+    /// AVX2's packed integer forms (VEX.256, P7): `op` on each half of
+    /// VEX.vvvv and ymm/m256 (not the shifts by xmm/m128, whose count is
+    /// one 128-bit operand)
+    Packed256 {
+        op: Packed,
+        reg: u8,
+    },
+    /// VPMOVMSKB (`lane` 1), VMOVMSKPS (4), VMOVMSKPD (8) r32, ymm: the sign
+    /// bits of both halves
+    MoveMask256 {
+        reg: u8,
+        lane: u8,
+    },
+    /// VBROADCASTSS, VBROADCASTSD (AVX2: also from a register), VPBROADCASTB/W/D/Q
+    /// ymm: the element (`bytes`) in each lane of both halves
+    Broadcast256 {
+        reg: u8,
+        bytes: u8,
+    },
     Emms,
 }
 
@@ -810,15 +829,17 @@ pub(super) fn classify_vex(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
             vector(Packed::Shuffle(shuffle_lanes(key, i.immediate?).0)),
             two_sources,
         ),
-        // VBROADCASTSS xmm, m32: the source's dword in each lane
-        (2, 1, 0x18) if memory => {
-            let lanes = std::array::from_fn(|k| 16 + k as u8 % 4);
+        // VBROADCASTSS xmm, m32 (AVX2: also xmm), VPBROADCASTB/W/D/Q (AVX2):
+        // the source's element in each lane
+        (2, 1, 0x18 | 0x58 | 0x59 | 0x78 | 0x79) => {
+            let bytes = broadcast_bytes(code);
+            let lanes = std::array::from_fn(|k| 16 + k as u8 % bytes);
             (
                 Simd::Packed {
                     op: Packed::Shuffle(lanes),
                     reg,
                     mmx: false,
-                    source: 4,
+                    source: bytes,
                 },
                 one_source,
             )
@@ -1057,6 +1078,10 @@ fn classify_vex256(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
         return Some((Simd::Vzeroall, vex(false)));
     }
     let reg = i.modrm? >> 3 & 7;
+    let two_sources = Vex {
+        first: Some(v.vvvv & 7),
+        aligned: false,
+    };
     Some(match (v.map, v.pp, key as u8) {
         // VMOVUPS VMOVUPD VMOVDQU, VMOVAPS VMOVAPD VMOVDQA (aligned)
         (1, 0 | 1, 0x10) | (1, 2, 0x6F) => (Simd::Load256 { reg }, vex(false)),
@@ -1065,8 +1090,48 @@ fn classify_vex256(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
         (1, 0 | 1, 0x29) | (1, 1, 0x7F) => (Simd::Store256 { reg }, vex(true)),
         // VMOVNTPS VMOVNTPD VMOVNTDQ
         (1, 0 | 1, 0x2B) | (1, 1, 0xE7) if i.ea.is_some() => (Simd::Store256 { reg }, vex(true)),
+        // AVX2 (P7 part 3): VPMOVMSKB; VMOVMSKPS, VMOVMSKPD
+        (1, 1, 0xD7) | (1, 0 | 1, 0x50) if i.ea.is_none() => {
+            let lane = match (v.pp, key as u8) {
+                (_, 0xD7) => 1,
+                (0, _) => 4,
+                _ => 8,
+            };
+            (Simd::MoveMask256 { reg, lane }, vex(false))
+        },
+        // VBROADCASTSS, VBROADCASTSD, VPBROADCASTB/W/D/Q
+        (2, 1, 0x18 | 0x19 | 0x58 | 0x59 | 0x78 | 0x79) => (
+            Simd::Broadcast256 {
+                reg,
+                bytes: broadcast_bytes(key as u8),
+            },
+            vex(false),
+        ),
+        // the packed integer forms of 66 0F, VPSHUFB and SSE4.1's of one
+        // operation, on each half
+        (1, 1, code) => match packed(code, false)? {
+            Packed::Shift(..) => return None,
+            op => (Simd::Packed256 { op, reg }, two_sources),
+        },
+        (2, 1, 0x00 | 0x28 | 0x29 | 0x2B | 0x37..=0x40) => {
+            match sse4(i, key).or_else(|| ssse3(i, key))? {
+                Simd::Packed { op, .. } => (Simd::Packed256 { op, reg }, two_sources),
+                _ => return None,
+            }
+        },
         _ => return None,
     })
+}
+
+/// The element of VBROADCASTSS (18), VBROADCASTSD (19), VPBROADCASTD/Q (58,
+/// 59), VPBROADCASTB/W (78, 79)
+fn broadcast_bytes(code: u8) -> u8 {
+    match code {
+        0x78 => 1,
+        0x79 => 2,
+        0x18 | 0x58 => 4,
+        _ => 8,
+    }
 }
 
 impl Page {
@@ -2402,6 +2467,62 @@ impl Page {
                     self.store_xmm(r, &zero);
                 }
                 self.w.free_local_v128(zero);
+            },
+            Simd::Packed256 { op, reg } => {
+                // (both halves of both sources before the destination is
+                // written)
+                let source = match &i.ea {
+                    Some(ea) => {
+                        self.linear(ea);
+                        self.load_vector256()
+                    },
+                    None => {
+                        self.load_xmm(rm);
+                        let low = self.w.set_new_local_v128();
+                        self.load_ymm_high(rm);
+                        [low, self.w.set_new_local_v128()]
+                    },
+                };
+                let first = self.first(reg);
+                self.load_xmm(first);
+                let low = self.w.set_new_local_v128();
+                self.load_ymm_high(first);
+                let first = [low, self.w.set_new_local_v128()];
+                self.packed(op, &first[0], &source[0], 16);
+                let low = self.w.set_new_local_v128();
+                self.packed(op, &first[1], &source[1], 16);
+                let result = [low, self.w.set_new_local_v128()];
+                self.store_ymm(reg, &result[0], &result[1]);
+                for v in source.into_iter().chain(first).chain(result) {
+                    self.w.free_local_v128(v);
+                }
+            },
+            Simd::MoveMask256 { reg, lane } => {
+                let bitmask = match lane {
+                    1 => 0x64, // i8x16.bitmask
+                    4 => 0xA4, // i32x4.bitmask
+                    _ => 0xC4, // i64x2.bitmask
+                };
+                self.load_xmm(rm);
+                self.w.simd(bitmask);
+                self.load_ymm_high(rm);
+                self.w.simd(bitmask);
+                self.w.const_i32(16 / lane as i32);
+                self.w.shl_i32();
+                self.w.or_i32();
+                self.write_reg(reg, 32);
+            },
+            Simd::Broadcast256 { reg, bytes } => {
+                self.simd_source(i, false, bytes);
+                let element = self.w.set_new_local_v128();
+                self.w.get_local_v128(&element);
+                self.w.get_local_v128(&element);
+                self.w
+                    .simd_shuffle(std::array::from_fn(|k| k as u8 % bytes));
+                let value = self.w.set_new_local_v128();
+                self.store_ymm(reg, &value, &value);
+                self.w.free_local_v128(element);
+                self.w.free_local_v128(value);
             },
         }
     }

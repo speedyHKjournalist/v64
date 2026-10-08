@@ -624,7 +624,7 @@ for(const [label, options, compat] of [["interpreted", {}, false],
 }
 
 // The page tier's templates for the hot VEX forms (P5 part 5; the VEX.256
-// moves and VZEROALL, P6 part 3): a hot loop of
+// moves and VZEROALL, P6 part 3; AVX2's, P7 part 3): a hot loop of
 // them over ordinary values (finite, normal, of moderate size: no retries)
 // runs with almost no steps (x64_page_stat(4)), as QEMU. (Its stores are off
 // the code's page, which they would invalidate.) The results' bits
@@ -667,6 +667,27 @@ add r13,[${OUT + 0x520}]
 add r13,[${OUT + 0x530}]
 add r13,[${OUT + 0x548}]
 add r13,[${OUT + 0x558}]
+vpbroadcastb ymm8,[hot_ymm + 3]
+vpbroadcastd ymm9,[hot_ymm + 12]
+vpcmpeqb ymm10,ymm8,[hot_ymm + 32]
+vpcmpeqd ymm11,ymm9,ymm10
+vpaddb ymm12,ymm10,[hot_ymm]
+vpandn ymm12,ymm12,ymm8
+vpminub ymm12,ymm12,ymm9
+vpcmpgtb ymm13,ymm12,ymm8
+vpand ymm13,ymm13,ymm11
+vpminud ymm13,ymm13,[hot_ymm + 40]
+vpor ymm14,ymm13,ymm10
+vpxor ymm14,ymm14,ymm9
+vpmovmskb eax,ymm14
+add r13,rax
+vpmovmskb eax,ymm12
+add r13,rax
+vpbroadcastd xmm15,[hot_ymm + 8]
+vpbroadcastb xmm7,xmm14
+vpaddb xmm15,xmm15,xmm7
+vmovq rax,xmm15
+add r14,rax
 vmovsd xmm1,[hot_samples]
 vmovsd xmm2,[hot_samples + 8]
 vaddsd xmm3,xmm1,xmm2

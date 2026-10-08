@@ -438,6 +438,30 @@ enum Op {
     },
     /// VZEROALL: YMM0-15 zeroed
     Vzeroall,
+    /// AVX2's packed integer forms (VEX.256, P7): `op` on each half of
+    /// `first` (VEX.vvvv) and ymm/m256 (not the shifts by xmm/m128)
+    Vpacked256 {
+        op: Packed,
+        dst: u8,
+        first: u8,
+        src: Xmm,
+    },
+    /// VPMOVMSKB, VMOVMSKPS, VMOVMSKPD r32/r64, ymm: the sign bits of both
+    /// halves' `lane`-byte lanes, zero-extended
+    Vmovmsk256 {
+        dst: Reg,
+        src: u8,
+        lane: u8,
+    },
+    /// VBROADCASTSS/SD (AVX2: also from a register), VPBROADCASTB/W/D/Q: the
+    /// element (`bytes`) of memory or of a register's low lane in each lane
+    /// of an XMM register (bits 255:128 zeroed) or (`wide`) a YMM register
+    Vbroadcast {
+        bytes: u8,
+        dst: u8,
+        src: Xmm,
+        wide: bool,
+    },
     /// PMOVMSKB MOVMSKPS MOVMSKPD r32/r64, xmm (and their VEX forms): the
     /// sign bits of the `lane`-byte lanes, zero-extended
     Vmovmsk {
@@ -539,6 +563,8 @@ enum Packed {
     MulHigh(bool),
     MulDwords,
     Sad,
+    /// PANDN: NOT the destination, AND the source
+    AndNot,
 }
 /// 66 0F `code` packed integer forms.
 fn packed_op(code: u8) -> Option<Packed> {
@@ -1446,9 +1472,72 @@ fn vex256(d: &Decoded) -> Option<Op> {
         (1, 0 | 1, 0x29) | (1, 1, 0x7F) => (rm, register, true),
         // VMOVNTPS VMOVNTPD VMOVNTDQ
         (1, 0 | 1, 0x2B) | (1, 1, 0xE7) if memory => (rm, register, true),
+        // (the forms below emit Wasm SIMD: not in the build for engines
+        // without it)
+        _ if !cfg!(target_feature = "simd128") => return None,
+        // AVX2 (P7 part 3): VPMOVMSKB; VMOVMSKPS, VMOVMSKPD
+        (1, 1, 0xD7) | (1, 0 | 1, 0x50) if !memory => {
+            return Some(Op::Vmovmsk256 {
+                dst: Reg {
+                    index: d.reg?,
+                    high: false,
+                },
+                src: d.rm_register?,
+                lane: movmsk_lane(key),
+            })
+        },
+        // VBROADCASTSS, VBROADCASTSD, VPBROADCASTB/W/D/Q
+        (2, 1, 0x18 | 0x19 | 0x58 | 0x59 | 0x78 | 0x79) => {
+            return Some(Op::Vbroadcast {
+                bytes: broadcast_bytes(key as u8),
+                dst: d.reg?,
+                src: rm,
+                wide: true,
+            })
+        },
+        // the packed integer forms of 66 0F, VPSHUFB and SSE4.1's of one
+        // operation, on each half
+        (1, 1, code) => {
+            // (VPAND VPANDN VPOR VPXOR, whose VEX.128 forms are Op::Vlogic)
+            let op = match code {
+                0xDB => Packed::Binary(0x4E), // v128.and
+                0xDF => Packed::AndNot,
+                0xEB => Packed::Binary(0x50), // v128.or
+                0xEF => Packed::Binary(0x51), // v128.xor
+                _ => packed_op(code)?,
+            };
+            if let Packed::Shift(..) = op {
+                return None;
+            }
+            return Some(Op::Vpacked256 {
+                op,
+                dst: d.reg?,
+                first: v.vvvv,
+                src: rm,
+            });
+        },
+        (2, 1, 0x00 | 0x28 | 0x29 | 0x2B | 0x37..=0x40) => {
+            return Some(Op::Vpacked256 {
+                op: if key as u8 == 0 { Packed::Swizzle } else { sse4_packed(key, None)? },
+                dst: d.reg?,
+                first: v.vvvv,
+                src: rm,
+            })
+        },
         _ => return None,
     };
     Some(Op::Vmove256 { dst, src, aligned })
+}
+
+/// The element of VBROADCASTSS (18), VBROADCASTSD (19), VPBROADCASTD/Q (58,
+/// 59), VPBROADCASTB/W (78, 79)
+fn broadcast_bytes(code: u8) -> u8 {
+    match code {
+        0x78 => 1,
+        0x79 => 2,
+        0x18 | 0x58 => 4,
+        _ => 8,
+    }
 }
 
 /// The template of a VEX form (AVX, P5: VEX.128 and VEX.LIG in 64-bit
@@ -1591,6 +1680,13 @@ fn vex(d: &Decoded) -> Option<Op> {
         },
         // (the forms below emit Wasm SIMD: not in the build for engines without it)
         _ if !cfg!(target_feature = "simd128") => return None,
+        // VBROADCASTSS xmm, m32 (AVX2: also xmm), VPBROADCASTB/W/D/Q (AVX2)
+        (2, 1, 0x18 | 0x58 | 0x59 | 0x78 | 0x79) => Op::Vbroadcast {
+            bytes: broadcast_bytes(code),
+            dst: register,
+            src: xmm_rm()?,
+            wide: false,
+        },
         // VPSHUFD VPSHUFHW VPSHUFLW (the source's lanes), VSHUFPS VSHUFPD
         (1, 1..=3, 0x70) | (1, 0 | 1, 0xC6) => Op::Vpacked {
             op: Packed::Shuffle(shuffle_lanes(key, imm? as u32 & 0xFF)),
@@ -4806,6 +4902,108 @@ impl Emitter {
                     (Xmm::Mem(_), Xmm::Mem(_)) => unreachable!(),
                 }
             },
+            Op::Vpacked256 {
+                op,
+                dst,
+                first,
+                src,
+            } => {
+                self.vector_check(inst, start);
+                // (both halves of both sources before the destination is
+                // written)
+                let source = match src {
+                    Xmm::Reg(s) => [0, 16].map(|offset| {
+                        self.c32(Self::ymm(s, offset) as i32);
+                        self.b.simd_memory(0x00, 0);
+                        self.b.set_new_local_v128()
+                    }),
+                    Xmm::Mem(a) => {
+                        self.vector_address_bytes(&a, 32, false, false, inst);
+                        [0, 16].map(|offset| {
+                            self.gi(HOST);
+                            self.c32(offset);
+                            self.b.add_i32();
+                            let scratch = self.b.set_new_local();
+                            self.b.get_local(&scratch);
+                            self.b.guest_load_v128(&scratch);
+                            self.b.free_local(scratch);
+                            self.b.set_new_local_v128()
+                        })
+                    },
+                };
+                let first = [0, 16].map(|offset| {
+                    self.c32(Self::ymm(first, offset) as i32);
+                    self.b.simd_memory(0x00, 0);
+                    self.b.set_new_local_v128()
+                });
+                for (half, offset) in [0, 16].into_iter().enumerate() {
+                    self.c32(Self::ymm(dst, offset) as i32);
+                    self.packed(op, &first[half], &source[half]);
+                    self.b.simd_memory(0x0B, 0);
+                }
+                for v in source.into_iter().chain(first) {
+                    self.b.free_local_v128(v);
+                }
+            },
+            Op::Vmovmsk256 { dst, src, lane } => {
+                self.vector_check(inst, start);
+                let bitmask = match lane {
+                    1 => 0x64, // i8x16.bitmask
+                    4 => 0xA4, // i32x4.bitmask
+                    _ => 0xC4, // i64x2.bitmask
+                };
+                for offset in [0, 16] {
+                    self.c32(Self::ymm(src, offset) as i32);
+                    self.b.simd_memory(0x00, 0);
+                    self.b.simd(bitmask);
+                }
+                self.c32(16 / lane as i32);
+                self.b.shl_i32();
+                self.b.or_i32();
+                self.b.extend_unsigned_i32_to_i64();
+                self.set_reg(dst, 64);
+            },
+            Op::Vbroadcast {
+                bytes,
+                dst,
+                src,
+                wide,
+            } => {
+                self.vector_check(inst, start);
+                // (the element zero-extended to an i64)
+                match src {
+                    Xmm::Reg(s) => {
+                        self.c32(Self::xmm(s) as i32);
+                        self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
+                    },
+                    Xmm::Mem(a) => {
+                        self.vector_address_bytes(&a, bytes as u32, false, false, inst);
+                        self.gi(HOST);
+                        self.b.guest_load_i64_bits(8 * bytes as u32, 0);
+                    },
+                }
+                if bytes == 8 {
+                    self.b.simd(0x12); // i64x2.splat
+                }
+                else {
+                    self.b.wrap_i64_to_i32();
+                    self.b.simd(match bytes {
+                        1 => 0x0F, // i8x16.splat
+                        2 => 0x10, // i16x8.splat
+                        _ => 0x11, // i32x4.splat
+                    });
+                }
+                let value = self.b.set_new_local_v128();
+                for offset in if wide { &[0, 16][..] } else { &[0][..] } {
+                    self.c32(Self::ymm(dst, *offset) as i32);
+                    self.b.get_local_v128(&value);
+                    self.b.simd_memory(0x0B, 0);
+                }
+                self.b.free_local_v128(value);
+                if !wide {
+                    self.vex_upper(inst, dst);
+                }
+            },
             Op::Vzeroall => {
                 self.vector_check(inst, start);
                 for n in 0..16 {
@@ -5734,6 +5932,11 @@ impl Emitter {
                 w.simd_zero();
                 w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
                 w.free_local_v128(sums);
+            },
+            Packed::AndNot => {
+                w.get_local_v128(src);
+                w.get_local_v128(dst);
+                w.simd(0x4F); // v128.andnot
             },
             Packed::Shift(opcode, bits, arithmetic) => {
                 w.get_local_v128(src);

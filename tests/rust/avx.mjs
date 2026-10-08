@@ -222,17 +222,20 @@ const tier0_rounds = () => machines[1].v86.cpu.wm.exports["ir_t0_steps"](0xAE0F)
 // ordinary operands (see TIER0_HOT_FP)
 const TIER0_HOT = ["vmovsd", "vmovss", "vmovapd", "vmovaps", "vmovdqu", "vmovdqa", "vmovq", "vmovd", "vxorpd", "vxorps",
     "vandpd", "vandnpd", "vorpd", "vpand", "vpandn", "vpor", "vpxor", "vpcmpeqb", "vpcmpeqd", "vpcmpgtb", "vpaddb",
-    "vpmovmskb", "vzeroupper", "vunpcklpd", "vunpckhpd", "vblendvpd", "vpshufb"];
+    "vpmovmskb", "vzeroupper", "vunpcklpd", "vunpckhpd", "vblendvpd", "vpshufb", "vpbroadcastb", "vpbroadcastd"];
 // The VEX.256 ones (P6 part 3: the moves and VZEROALL; with the moves of
 // the other types): every form of the name templated
 const TIER0_HOT_256 = ["vmovdqu", "vmovdqa", "vmovntdq", "vzeroall", "vmovups", "vmovaps", "vmovupd", "vmovapd",
-    "vmovntps", "vmovntpd"].map(name => name + " ymm");
+    "vmovntps", "vmovntpd",
+    // (AVX2, P7 part 3)
+    "vpmovmskb", "vpcmpeqb", "vpcmpeqd", "vpaddb", "vpandn", "vpminub", "vpcmpgtb", "vpand", "vpminud", "vpor", "vpxor",
+    "vpbroadcastb", "vpbroadcastd"].map(name => name + " ymm");
 const TIER0_HOT_FP = ["vaddsd", "vmulsd", "vsubsd", "vdivsd", "vaddss", "vmulss", "vsubss", "vdivss", "vmulpd", "vcomisd",
     "vucomisd", "vcomiss", "vucomiss", "vcmpsd", "vcvttsd2si", "vcvtsd2ss", "vcvtsi2sd", "vcvtss2sd", "vcvtpd2ps"];
 // The hot forms the region tiers run without the AVX helpers (P5 part 6):
 // TIER0_HOT's but VBLENDVPD (BLENDVPD's helper) and VPSHUFB (from memory:
-// PSHUFB's helper)
-const REGIONS_NATIVE = TIER0_HOT.filter(name => !["vblendvpd", "vpshufb"].includes(name));
+// PSHUFB's helper) and AVX2's broadcasts (the AVX helper)
+const REGIONS_NATIVE = TIER0_HOT.filter(name => !["vblendvpd", "vpshufb", "vpbroadcastb", "vpbroadcastd"].includes(name));
 /** The forms whose cases Tier-0 ran templates for (fewer steps than cases)
  * or stepped, by name (" ymm": a VEX.256 form's) */
 const tier0_forms = { templated: new Set(), stepped: new Set() };

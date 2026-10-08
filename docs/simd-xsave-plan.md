@@ -2113,3 +2113,39 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **回归**：在只含本计划改动的工作树（P6、P7 第一部分与本部分）中运行 55 个目标（`p7b-batch-a`、
   `p7b-batch-b`）：`rustfmt` 起初因 `avx.rs` 未格式化失败，格式化后重跑通过；需要 `images/` 的
   `api-tests`、`jitpagingtests` 在主工作树中加入本部分后运行，通过；其余 52 个通过。
+
+### P7 第三部分：AVX2 热点形式在 Tier-0 和 page tier 的原生模板（2026-10-08）
+
+- **范围**：5.1 节热点清单中 AVX2 的形式：VPMOVMSKB r32, ymm；VPCMPEQB/D、VPADDB、VPANDN、VPMINUB、
+  VPCMPGTB、VPAND、VPMINUD、VPOR、VPXOR ymm；VPBROADCASTB/D 的 xmm 与 ymm 形式。同类的形式一并接入：
+  66 0F 的其他紧缩整数运算、VPSHUFB 与 SSE4.1 单运算形式的 ymm 版本（计数移位除外）；VMOVMSKPS/PD
+  ymm；VPBROADCASTW/Q，以及 VBROADCASTSS/SD（含 AVX2 的寄存器形式）。
+- **做法**：
+  - Tier-0：
+    - `Packed256` 在两个半区上各执行一次 VEX.128 的模板运算。第一源（VEX.vvvv）的两个半区分别来自
+      XMM 缓存和 CPU 状态中的上半部分；第二源是寄存器的两个半区，或在一次 32 字节检查之后做两次
+      v128 加载。
+    - `MoveMask256` 把两个半区的符号位拼成 32 位；`Broadcast256` 取出元素后复制到两个半区。
+    - VEX.128 的广播沿用洗牌模板，`source` 取元素宽度，寄存器形式取低位元素。
+    - 计数移位（`Packed::Shift`）的计数是一个 128 位操作数，仍由解释器单步执行。
+  - page tier：`Op::Vpacked256`、`Op::Vmovmsk256`，以及 `Op::Vbroadcast`（VEX.128 与 VEX.256）。
+    VPAND/VPANDN/VPOR/VPXOR 的 ymm 形式用 SIMD 实现，为此新增 `Packed::AndNot`：`v128.andnot` 的
+    操作数次序与 PANDN 相反。它们的 VEX.128 形式仍用 i64 的 `Op::Vlogic`。
+- **测试**：
+  - `tests/rust/avx.mjs`：TIER0_HOT_256 加入 13 个 AVX2 名字，TIER0_HOT 加入 VPBROADCASTB/D，这些名字
+    下的每个形式都必须由模板执行；regions 的热点清单不含 AVX2 的广播，它们在 regions 中走 AVX
+    helper。完整运行中，Tier-0 以模板执行的形式从 180 个增至 256 个，三个 arm 上 17315 项。
+  - `tests/x64/avx.mjs`：page tier 热点循环每轮加入 22 条 AVX2 指令，全部原生执行（共 2218022 条原生、
+    11 次单步），结果与 QEMU 一致。起初 VPAND/VPANDN/VPOR/VPXOR ymm 仍被单步执行，因为 page tier 的
+    `packed_op` 没有这几个逻辑运算；这是用 `x64_page_profile` 的单步统计找出来的。
+  - `tests/bench` 新增 719.avx2.scan：一个仿 strlen 的扫描，用到 13 种 AVX2 形式。第二部分的构建
+    （这些形式由 Tier-0 单步执行）为 2 MIPS，本部分为 1740 MIPS。718 在不同调用之间有约 15% 的差异，
+    而两个构建为它生成的代码相同（Tier-0 统计一致，wasm 都是 10402 字节），所以属于噪声。
+- **变异测试**：植入 12 个错误，全部被检出：
+  - Tier-0：高半区取低半区的第二源；第一源的上半部分取 XMM；VPMOVMSKB ymm 的高半区移位；广播按 4
+    字节复制；计数移位也按半区执行；VEX.128 广播的源宽度固定为 4。
+  - page tier：高半区取低半区的源；`AndNot` 的操作数次序；VPMOVMSKB ymm 的高半区移位；ymm 广播只写
+    低半区；xmm 广播不清零上半部分；VPOR 映射成 xor。
+- **回归**：在只含本计划改动的工作树（P6、P7 前两部分与本部分）中运行 55 个目标（`p7c-batch-a`、
+  `p7c-batch-b`），53 个通过；需要 `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本部分
+  后运行，通过。
