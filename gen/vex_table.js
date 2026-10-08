@@ -108,7 +108,25 @@ const AVX_256 = new Set([
     "VROUNDPD", "VDPPS", "VCVTDQ2PS", "VCVTPS2DQ", "VCVTTPS2DQ", "VCVTPS2PD", "VCVTDQ2PD",
     "VCVTPD2PS", "VCVTPD2DQ", "VCVTTPD2DQ",
 ]);
-const implemented = form => form.isa[0] === "AVX" && (form.l === "L1" ? AVX_256 : AVX_128).has(form.mnemonic);
+// AVX2: the VEX.256 forms of these instructions (P7 part 1: the packed
+// integer forms that work on each half)
+const AVX2_256 = new Set([
+    "VPUNPCKLBW", "VPUNPCKLWD", "VPUNPCKLDQ", "VPACKSSWB", "VPCMPGTB", "VPCMPGTW", "VPCMPGTD",
+    "VPACKUSWB", "VPUNPCKHBW", "VPUNPCKHWD", "VPUNPCKHDQ", "VPACKSSDW", "VPUNPCKLQDQ",
+    "VPUNPCKHQDQ", "VPSHUFD", "VPSHUFHW", "VPSHUFLW", "VPSRLW", "VPSRAW", "VPSLLW", "VPSRLD",
+    "VPSRAD", "VPSLLD", "VPSRLQ", "VPSRLDQ", "VPSLLQ", "VPSLLDQ", "VPCMPEQB", "VPCMPEQW",
+    "VPCMPEQD", "VPADDQ", "VPMULLW", "VPMOVMSKB", "VPSUBUSB", "VPSUBUSW", "VPMINUB", "VPAND",
+    "VPADDUSB", "VPADDUSW", "VPMAXUB", "VPANDN", "VPAVGB", "VPAVGW", "VPMULHUW", "VPMULHW",
+    "VPSUBSB", "VPSUBSW", "VPMINSW", "VPOR", "VPADDSB", "VPADDSW", "VPMAXSW", "VPXOR",
+    "VPMULUDQ", "VPMADDWD", "VPSADBW", "VPSUBB", "VPSUBW", "VPSUBD", "VPSUBQ", "VPADDB", "VPADDW",
+    "VPADDD", "VPSHUFB", "VPHADDW", "VPHADDD", "VPHADDSW", "VPMADDUBSW", "VPHSUBW", "VPHSUBD",
+    "VPHSUBSW", "VPSIGNB", "VPSIGNW", "VPSIGND", "VPMULHRSW", "VPABSB", "VPABSW", "VPABSD",
+    "VPMULDQ", "VPCMPEQQ", "VMOVNTDQA", "VPACKUSDW", "VPCMPGTQ", "VPMINSB", "VPMINSD", "VPMINUW",
+    "VPMINUD", "VPMAXSB", "VPMAXSD", "VPMAXUW", "VPMAXUD", "VPMULLD", "VPBLENDW", "VPALIGNR",
+    "VMPSADBW", "VPBLENDVB",
+]);
+const implemented = form => form.isa[0] === "AVX" && (form.l === "L1" ? AVX_256 : AVX_128).has(form.mnemonic) ||
+    form.isa[0] === "AVX2" && form.l === "L1" && AVX2_256.has(form.mnemonic);
 
 function row(form)
 {

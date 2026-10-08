@@ -2047,3 +2047,35 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **测试**：`tests/x64/cpu_features.mjs` 检查 M1–M3 的能力已开放，AVX2 等仍未开放；
   `gen/cpu_features.js --check` 与 `tools/cpu_contract.mjs --check` 通过；`kvm-unit-test-xsave`
   通过（只有 XSAVE 时 15 项，加上 AVX 时 17 项）。gate 的其他目标在 P6 第二、三部分的回归中都已通过。
+
+### P7 第一部分：AVX2 按半区执行的紧缩整数形式（2026-10-08）
+
+- **范围**：AVX2 的 172 个形式中的 105 个，即 VEX.128 整数形式（P5 第二部分）的 VEX.256 版本：66 0F 的
+  解包、打包、比较、算术与逻辑；按 xmm/m128 和按 imm8 的移位（含 VPSRLDQ/VPSLLDQ）；VPSHUFD/HW/LW；
+  VPMOVMSKB；SSSE3 的 VPSHUFB、水平加减、VPMADDUBSW、VPSIGN、VPMULHRSW、VPABS；SSE4.1 的 VPMULDQ、
+  VPCMPEQQ、VPACKUSDW、VPCMPGTQ、VPMIN/VPMAX、VPMULLD、VMOVNTDQA；VPBLENDW、VPALIGNR、VMPSADBW、
+  VPBLENDVB（`gen/vex_table.js` 的 `AVX2_256`）。跨半区的形式、AVX2 新增的指令和 gather 在后续部分。
+- **做法**：共享执行器的 `execute256` 在两个半区上各执行一次 VEX.128 的语义。按 xmm/m128 的移位
+  只读 16 字节的计数，两个半区用同一个计数（取低 64 位）；VMPSADBW 的高半区取 imm8[5:3]；VPBLENDW
+  两个半区用同一个 imm8；VPSHUFB 与 VPALIGNR 只在各自半区内取字节；VPMOVMSKB 取全部 32 个符号位；
+  VMOVNTDQA 要求 32 字节对齐。按 imm8 移位的逻辑提取为 `shift_imm`，供两种宽度共用。
+- **测试**：
+  - `tests/rust/avx_model.mjs` 从 VEX.128 形式派生 104 个 AVX2 形式（`isa: "AVX2"`）；`binary` 按
+    `f.bytes` 取源（计数移位为 16 字节），`shift_imm` 读整个寄存器。
+  - `tests/rust/avx.mjs`：开启 AVX 而不开启 AVX2 时，CPUID.7.0:EBX 不报告 AVX2，它的形式产生 #UD；
+    之后各机器开启 AVX2。共 465 个形式，三个 arm 上 15534 项；页末的窄操作数加入计数移位的 m128。
+  - `tests/x64/avx.mjs`：3784 例，三种配置下都与 QEMU 和模型一致（新增 832 例）。
+  - 按 xmm/m128 计数的移位（VEX.128 与 VEX.256）原先用随机数据作计数：低 64 位几乎总超过元素宽度，
+    结果总是 0 或全为符号位，用错计数的高 64 位也看不出来。现在两个测试都给它们小计数（低 64 位
+    在元素宽度以下和以上，高 64 位随机）：32 位测试按用例设置寄存器或内存，x64 测试从 `samples`
+    中预留的位置读取，寄存器形式先用 VMOVDQU 载入。
+  - IR 差分测试新增 9 个 AVX2 fixture，共 7338 例。
+  - `src/rust/x64/decode.rs` 的解码测试原先用 VPADDD ymm 检查“没有能力或语义时在 ModRM 之后 #UD”，
+    它现在有语义了，改用到 P11 才实现的 VFMADD132PS ymm。
+- **变异测试**：植入 12 个错误，全部被检出：66 0F 运算、SSSE3、SSE4.1 形式与 VPALIGNR 的高半区取低半区
+  的源；按 imm8 移位与 VPSHUFD 只算低半区；计数移位的高半区取计数的高 64 位（起初存活，上面的小计数
+  加入后被检出）；计数读 32 字节（页末用例发现）；VPMOVMSKB 按字取符号位；VMPSADBW 的高半区用
+  imm8[2:0]；VPBLENDVB 按 dword 选择；VMOVNTDQA 不检查 32 字节对齐。
+- **回归**：在只含本计划改动的工作树（P6 与本部分）中运行 55 个目标（`p7a-batch-a`、`p7a-batch-b`）：
+  `x64-decode-tests` 与 `ir-decoder-tests` 先因上面那个解码测试失败，修改后重跑通过；需要 `images/` 的
+  `api-tests`、`jitpagingtests` 在主工作树中加入本部分后运行，通过；其余 51 个通过。

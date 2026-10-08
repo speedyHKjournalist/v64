@@ -231,6 +231,14 @@ const FORMS_128 = [
 //   extract128  m (an XMM register, bits 255:128 zeroed, or m128) = d's half imm8[0]
 //   zero_all    VZEROALL
 const by_name = (name, op) => FORMS_128.find(f => f.name === name && (op === undefined || f.op === op));
+// (AVX2's packed integer forms that work on each half: their VEX.128 forms,
+// AVX's; the shifts by xmm/m128)
+const COUNT_SHIFTS = [0xD1, 0xD2, 0xD3, 0xE1, 0xE2, 0xF1, 0xF2, 0xF3];
+const avx2_halves = f => !f.long && f.pp === 1 && ((f.map ?? 1) === 1 && (f.kind === "binary" && !f.map &&
+    (f.op in PACKED || [0xDB, 0xDF, 0xEB, 0xEF].includes(f.op)) || f.kind === "shift_imm" || f.kind === "to_gpr" && f.op === 0xD7) ||
+    f.map === 2 && (f.kind === "binary" && (f.op <= 0x0B || [0x28, 0x29, 0x2B].includes(f.op) || f.op >= 0x37 && f.op <= 0x40) ||
+        f.kind === "load" && f.op >= 0x1C && f.op <= 0x1E || f.name === "vmovntdqa") ||
+    f.map === 3 && [0x0E, 0x0F, 0x42, 0x4C].includes(f.op)) || f.op === 0x70 && !f.map;
 const wide = (f, extra = {}) => ({ ...f, l: 1, bytes: 32, ...extra });
 const FORMS_256 = [
     // full-width loads and stores
@@ -271,6 +279,18 @@ const FORMS_256 = [
     // VCVTPS2PD and VCVTDQ2PD from xmm/m128
     ...FORMS_128.filter(f => f.kind === "fp" && !f.lig && f.name !== "vdppd").map(f => ({ ...f, l: 1,
         bytes: f.legacy.kind === "widen" || f.legacy.kind === "from_dwords" && f.legacy.double ? 16 : 32 })),
+    // P7 part 1 (AVX2, `isa`): the packed integer forms on each half. The
+    // shifts by xmm/m128 take one count (the low quadword of the 128-bit
+    // operand) for both halves; VMPSADBW takes imm8[5:3] for the high half;
+    // VPMOVMSKB the sign bits of all 32 bytes; VMOVNTDQA is 32-byte aligned
+    ...FORMS_128.filter(avx2_halves).map(f => {
+        const isa = { isa: "AVX2" };
+        if((f.map ?? 1) === 1 && COUNT_SHIFTS.includes(f.op))
+            return wide(f, { ...isa, bytes: 16, f: (a, b) => join([f.f(low128(a), low128(b)), f.f(high128(a), low128(b))], 128) });
+        if(f.kind === "to_gpr") return { ...f, ...isa, l: 1, f: signs(8, 256) };
+        if(f.kind === "blendv" || f.name === "vmovntdqa") return wide(f, isa);
+        return wide(f, { ...isa, f: halves(f.f, f.name === "vmpsadbw" ? imm8 => imm8 >> 3 : undefined) });
+    }),
 ];
 export const FORMS = [...FORMS_128, ...FORMS_256];
 
@@ -306,7 +326,7 @@ export function execute(f, s, { d, v, m, imm8, long })
             else write(m, value);
             break;
         }
-        case "binary": write(d, f.f(reg(v), source(full))); break;
+        case "binary": write(d, f.f(reg(v), source(f.bytes ?? full))); break;
         case "scalar":
         {
             const low = mask(f.bytes * 8);
@@ -364,7 +384,7 @@ export function execute(f, s, { d, v, m, imm8, long })
         }
         case "load_imm": write(d, f.f(source(full), imm8)); break;
         case "binary_imm": write(d, f.f(reg(v), source(full), imm8)); break;
-        case "shift_imm": write(v, f.f(s.x[m], imm8)); break;
+        case "shift_imm": write(v, f.f(reg(m), imm8)); break;
         case "ptest":
         {
             // (VEX.256: over all 256 bits)

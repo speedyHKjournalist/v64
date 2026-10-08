@@ -129,14 +129,14 @@ fn avx_forms_in_a_cfg() {
 /// then PADDD XMM7 with the destination (the helper's result reloaded)
 #[test]
 fn avx_fixtures() {
-    use crate::cpu::features::{AVX, SSE4_1, SSE4_2, SSSE3, TEST_FEATURES, XSAVE};
+    use crate::cpu::features::{AVX, AVX2, SSE4_1, SSE4_2, SSSE3, TEST_FEATURES, XSAVE};
     use crate::ir::{
         backend::wasm::emit_cpu,
         lowering::lower,
         passes::{run, PassConfig},
     };
     std::fs::create_dir_all("build/ir-avx").unwrap();
-    TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1 | SSE4_2 | XSAVE | AVX));
+    TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1 | SSE4_2 | XSAVE | AVX | AVX2));
     // (the VEX prefix and opcode, ModRM.reg, the r/m register or memory, the
     // XMM destination the suffix reads, imm8)
     #[rustfmt::skip]
@@ -206,6 +206,16 @@ fn avx_fixtures() {
         (&[0xC5, 0xFE, 0x5B], 4, None, 4, &[]),              // vcvttps2dq ymm4, [m]
         (&[0xC5, 0xFE, 0xE6], 1, None, 1, &[]),              // vcvtdq2pd ymm1, [m] (m128)
         (&[0xC5, 0xFD, 0x5A], 6, Some(7), 6, &[]),           // vcvtpd2ps xmm6, ymm7
+        // (AVX2, P7)
+        (&[0xC5, 0xED, 0xFE], 1, Some(3), 1, &[]),           // vpaddd ymm1, ymm2, ymm3
+        (&[0xC4, 0xE2, 0x55, 0x00], 4, None, 4, &[]),        // vpshufb ymm4, ymm5, [m]
+        (&[0xC5, 0xED, 0xD1], 1, Some(3), 1, &[]),           // vpsrlw ymm1, ymm2, xmm3
+        (&[0xC5, 0xD5, 0x73], 7, Some(6), 5, &[3]),          // vpslldq ymm5, ymm6, 3
+        (&[0xC5, 0xFD, 0xD7], 1, Some(2), 1, &[]),           // vpmovmskb ecx, ymm2
+        (&[0xC4, 0xE3, 0x75, 0x4C], 0, None, 0, &[0x20]),    // vpblendvb ymm0, ymm1, [m], ymm2
+        (&[0xC4, 0xE3, 0x65, 0x42], 2, Some(4), 2, &[0x2D]), // vmpsadbw ymm2, ymm3, ymm4, 0x2D
+        (&[0xC4, 0xE3, 0x6D, 0x0F], 1, None, 1, &[5]),       // vpalignr ymm1, ymm2, [m], 5
+        (&[0xC4, 0xE2, 0x7D, 0x2A], 3, None, 3, &[]),        // vmovntdqa ymm3, [m]
     ];
     let mut cases = Vec::new();
     for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {

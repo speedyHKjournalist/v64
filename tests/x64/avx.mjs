@@ -48,6 +48,12 @@ const AREAS = Array.from({length: 8}, () => {
 const samples = Uint8Array.from({length: 1024}, () => random());
 // (VLDMXCSR's operands: valid values at the last 64 bytes)
 for(let i = 960; i < 1024; i += 4) samples.set(u32(random() & 0xFFFF), i);
+// (the counts of the shifts by xmm/m128, at COUNTS: below and beyond the
+// elements' widths in the low quadword, which alone counts, random bits above
+// it; a register count is loaded from there first)
+const COUNTS = 512;
+[1, 7, 15, 16, 31, 32, 63, 65].forEach((count, k) => samples.set(le(BigInt(count), 8), COUNTS + 16 * k));
+const count_shift = f => !f.map && f.kind === "binary" && [0xD1, 0xD2, 0xD3, 0xE1, 0xE2, 0xF1, 0xF2, 0xF3].includes(f.op);
 
 /** A VEX instruction: fields map, pp, L, W, vvvv (4 bits) and the
  * three-byte prefix; ModRM's reg and r/m register `rm` or memory operand
@@ -108,6 +114,7 @@ for(const long of [true, false])
             const d = (n * 5 + (long ? 3 : 0)) % regs, v = i & 1 ? d : (d + 7) % regs, m = i & 1 ? (v + 1) % regs : d;
             const gprs = OPERANDS[long ? 0 : 1];
             const c = {long, f, k: n % 8, d, v, m: memory ? undefined : m, gpr: gprs[n % 3], n};
+            if(count_shift(f) && !memory) c.count_from = COUNTS + 16 * (n % 8);
             // (every imm8 over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored in compatibility mode)
             c.imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
             if(memory)
@@ -117,7 +124,7 @@ for(const long of [true, false])
                 // aligned ones' operands 32-byte aligned: a destination at
                 // n * 48 + 16 * (n & 1), a sample at 32 * (n & 1))
                 const store = STORE_KINDS.includes(f.kind);
-                const at = f.aligned ? (f.l && !store ? 32 : 16) * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) :
+                const at = count_shift(f) ? COUNTS + 16 * (n % 8) : f.aligned ? (f.l && !store ? 32 : 16) * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) :
                     f.l && store ? (n * 7) % 17 : (n * 7) % 33;
                 // (VPCMPxSTRx: not RCX, which holds ones before)
                 const index = f.kind === "pcmpstr" ? gprs[1] : gprs[(n + 1) % 3];
@@ -192,6 +199,7 @@ const code = (c, n) => {
         }
     }
     if(f.kind === "to_gpr" && f.imm) lines.push(`mov ${R[c.gpr]},-1`);
+    if(c.count_from !== undefined) lines.push(`vmovdqu xmm${c.m},[samples + ${c.count_from}]`);
     const vvvv = f.kind === "shift_imm" ? c.d : has_vvvv(c) ? c.v : 0;
     const imm8 = IMMEDIATE.includes(f.kind) || f.imm || f.legacy?.imm8 ? c.imm8 : undefined;
     // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode; VEX.L where
@@ -276,6 +284,8 @@ const expected_case = (c, n, qemu = undefined) => {
     const o = {d: c.d, v: c.f.kind === "shift_imm" ? c.d : c.v, m: c.m, imm8: c.imm8, long: c.long};
     if(c.f.kind === "to_gpr" || c.f.operands === "to_gpr") Object.assign(o, {d: c.gpr});
     if(["gpr_load", "gpr_store", "extract", "insert"].includes(c.f.kind) && !c.memory || c.f.operands === "from_gpr" && !c.memory) o.m = c.gpr;
+    // (a register count: loaded by VMOVDQU, bits 255:128 zeroed)
+    if(c.count_from !== undefined) [s.x[c.m], s.h[c.m]] = [big(samples.subarray(c.count_from, c.count_from + 16)), 0n];
     const upper = [...s.h];
     execute(qemu === "W0" ? {...c.f, w: 0} : c.f, s, o);
     if(qemu === "kept") s.h = upper;
@@ -572,7 +582,7 @@ if(process.env.X64_AVX_LIST)
     process.exit(0);
 }
 check(expected, "QEMU");
-const FEATURES = {cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], cpu_features_unreleased: true};
+const FEATURES = {cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX", "AVX2"], cpu_features_unreleased: true};
 for(const [label, options, compat] of [["interpreted", {}, false],
     ["x64 page tier", {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true}, false],
     ["x64 page tier + compatibility-mode JIT", {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true}, true]])

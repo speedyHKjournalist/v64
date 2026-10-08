@@ -475,6 +475,18 @@ function form_case(f, n)
         case "stmxcsr": reg = f.group; break;
         case "maskmov": c.pre = mov_r32(7, DEST + n * SPAN + at); break;
     }
+    // (the shifts by xmm/m128: a count below or beyond the element's width
+    // in the low quadword, which alone counts, and random bits above it)
+    if(!f.map && f.kind === "binary" && [0xD1, 0xD2, 0xD3, 0xE1, 0xE2, 0xF1, 0xF2, 0xF3].includes(f.op))
+    {
+        const count = BigInt(n * 5 % 70) | big(SOURCES.subarray(n * SPAN + 8, n * SPAN + 16)) << 64n;
+        if(memory)
+        {
+            c.source = Uint8Array.from(SOURCES.subarray(n * SPAN, (n + 1) * SPAN));
+            c.source.set(le(count), at);
+        }
+        else c.registers = { [m]: count };
+    }
     // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode; VEX.L where ignored, VEX.256 forms' 1)
     const fields = { map: f.map || 1, pp: f.pp, w: f.w === undefined || f.wig32 ? n & 1 : f.w, l: f.l ?? (f.lig ? n >> 2 & 1 : 0), three: !!(n & 2), vvvv };
     const immediate = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr", "insert128", "extract128"].includes(f.kind) ||
@@ -507,7 +519,27 @@ try
     machines.length = 0;
     console.log("PASS: without AVX, CPUID does not report it and VEX forms are #UD");
 
+    // With AVX but without AVX2: CPUID.7.0:EBX does not report it, and
+    // AVX2's forms (VEX.256 of the packed integer instructions) are #UD
     machines.push(...await create_machines({ cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], cpu_features_unreleased: true }));
+    {
+        const results = await run_all([0xB8, ...u32(7), 0x31, 0xC9, 0x0F, 0xA2, 0x89, 0x1D, ...u32(OUT)], () => {}, machines, vm => word(vm, OUT));
+        for(const { label, data } of results) assert.equal(data >>> 5 & 1, 0, `CPUID.7.0:EBX.AVX2 (${label})`);
+    }
+    for(const [label, form] of [["vpaddd ymm1, ymm2, ymm3", vex({ pp: 1, l: 1, vvvv: 2 }, 0xFE, 1, 3)],
+        ["vpshufb ymm1, ymm2, [mem]", vex({ map: 2, pp: 1, l: 1, vvvv: 2 }, 0x00, 1, undefined, SOURCE)],
+        ["vpsrlw ymm1, ymm2, 3", vex({ pp: 1, l: 1, vvvv: 1 }, 0x71, 2, 2, undefined, 3)], ["vpmovmskb ecx, ymm1", vex({ pp: 1, l: 1 }, 0xD7, 1, 1)]])
+    {
+        const results = await run_all(form, vm => vm.write_memory(Uint8Array.from(u32(form.length)), SKIP), machines,
+            vm => [0, 4].map(o => word(vm, FAULT + o)));
+        for(const { label: run, data } of results) assert.deepEqual(data, [6, CODE + PROLOGUE.length], `${label} without AVX2 (${run}): #UD`);
+        checks++;
+    }
+    for(const vm of machines) await vm.destroy();
+    machines.length = 0;
+    console.log("PASS: with AVX but without AVX2, CPUID does not report AVX2 and its forms are #UD");
+
+    machines.push(...await create_machines({ cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX", "AVX2"], cpu_features_unreleased: true }));
     {
         const results = await run_all([0xB8, ...u32(1), 0x0F, 0xA2, 0x89, 0x0D, ...u32(OUT)], () => {}, machines, vm => word(vm, OUT));
         for(const { label, data } of results) assert.equal(data >>> 27 & 3, 3, `CPUID.1:ECX.OSXSAVE and AVX (${label})`);
@@ -714,6 +746,8 @@ try
         ["vmovddup ymm3, [m256]", ymm("vmovddup"), 3], ["vptest ymm4, [m256]", ymm("vptest"), 4],
         ["vbroadcastsd ymm5, [m64]", ymm("vbroadcastsd"), 5], ["vbroadcastf128 ymm6, [m128]", ymm("vbroadcastf128"), 6],
         ["vinsertf128 ymm7, ymm0, [m128], 1", ymm("vinsertf128"), 7, 0, 1], ["vextractf128 [m128], ymm1, 1", ymm("vextractf128"), 1, undefined, 1],
+        // (AVX2: the count of a shift by xmm/m128)
+        ["vpsrlw ymm1, ymm2, [m128]", ymm("vpsrlw", "binary"), 1, 2], ["vpslld ymm3, ymm4, [m128]", ymm("vpslld", "binary"), 3, 4],
     ])
     {
         const at = SPAN - memory_bytes(f), store = STORES.includes(f.kind);

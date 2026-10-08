@@ -168,6 +168,32 @@ unsafe fn source<M: Machine>(
         None => m.read(bytes, aligned),
     }
 }
+/// The shifts by imm8 (`op` 71, 72 or 73, `group` its ModRM.reg) of 128
+/// bits: PSRLW/PSRAW/PSLLW, PSRLD/PSRAD/PSLLD, PSRLQ/PSRLDQ/PSLLQ/PSLLDQ
+fn shift_imm(op: u8, group: u8, v: u128, count: u32) -> u128 {
+    match (op, group) {
+        (0x73, 3) => {
+            if count < 16 {
+                v >> (8 * count)
+            }
+            else {
+                0
+            }
+        },
+        (0x73, 7) => {
+            if count < 16 {
+                v << (8 * count)
+            }
+            else {
+                0
+            }
+        },
+        (_, group) => {
+            let id = [0xD1, 0xE1, 0xF1][(group / 2 - 1) as usize] + (op as u32 - 0x71);
+            packed(PackedOp::from_id(id).unwrap(), v, count as u128)
+        },
+    }
+}
 fn packed(op: PackedOp, a: u128, b: u128) -> u128 {
     u128::from_le_bytes(op.apply(a.to_le_bytes(), b.to_le_bytes()))
 }
@@ -291,30 +317,8 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
         // VPSLLDQ by imm8: VEX.vvvv is the destination, the r/m register the
         // source
         (1, 1, 0x71..=0x73) => {
-            let (v, count) = (xmm(i.rm.unwrap()), i.imm8 as u32);
-            let r = match (op, i.reg & 7) {
-                (0x73, 3) => {
-                    if count < 16 {
-                        v >> (8 * count)
-                    }
-                    else {
-                        0
-                    }
-                },
-                (0x73, 7) => {
-                    if count < 16 {
-                        v << (8 * count)
-                    }
-                    else {
-                        0
-                    }
-                },
-                (_, group) => {
-                    let id = [0xD1, 0xE1, 0xF1][(group / 2 - 1) as usize] + (op as u32 - 0x71);
-                    packed(PackedOp::from_id(id).unwrap(), v, count as u128)
-                },
-            };
-            set_xmm(i.vvvv, r);
+            let v = xmm(i.rm.unwrap());
+            set_xmm(i.vvvv, shift_imm(op, i.reg & 7, v, i.imm8 as u32));
         },
         // VSQRT, VADD, VMUL, VSUB, VMIN, VDIV, VMAX PS/PD/SS/SD, VHADDPS/PD,
         // VHSUBPS/PD, VADDSUBPS/PD; VCMP* with 32 predicates: a scalar
@@ -740,11 +744,18 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
             );
         },
         // VBLENDPS (imm8[3:0] for the low half's dwords, imm8[7:4] for the
-        // high one's), VBLENDPD (imm8[1:0], imm8[3:2])
-        (3, 1, 0x0C | 0x0D) => {
+        // high one's), VBLENDPD (imm8[1:0], imm8[3:2]); AVX2: VPBLENDW (imm8
+        // for each half), VMPSADBW (imm8[2:0], imm8[5:3])
+        (3, 1, 0x0C..=0x0E | 0x42) => {
             let b = source256(m, i, false)?;
             let a = ymm(i.vvvv);
-            let high = i.imm8 >> if op == 0x0C { 4 } else { 2 };
+            let high = i.imm8
+                >> match op {
+                    0x0C => 4,
+                    0x0D => 2,
+                    0x0E => 0,
+                    _ => 3,
+                };
             set_ymm(
                 i.reg,
                 (
@@ -756,13 +767,13 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
                 ),
             );
         },
-        // VBLENDVPS, VBLENDVPD: the mask register is imm8[7:4] (bit 7
-        // ignored outside 64-bit mode)
-        (3, 1, 0x4A | 0x4B) => {
+        // VBLENDVPS, VBLENDVPD; AVX2: VPBLENDVB. The mask register is
+        // imm8[7:4] (bit 7 ignored outside 64-bit mode)
+        (3, 1, 0x4A..=0x4C) => {
             let b = source256(m, i, false)?;
             let selector = ymm(i.imm8 >> 4 & if i.long { 15 } else { 7 });
             let a = ymm(i.vvvv);
-            let legacy = if op == 0x4A { 0x14 } else { 0x15 };
+            let legacy = [0x14, 0x15, 0x10][(op - 0x4A) as usize];
             let blend = |a: u128, b: u128, s: u128| {
                 bytes(
                     |b| simd_int::sse4(legacy, a.to_le_bytes(), b, s.to_le_bytes()),
@@ -953,6 +964,80 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
             let size = if op == 0x2E { 4 } else { 8 };
             let selected = sign_mask256(ymm(i.vvvv), size as u32) as u8;
             m.write_lanes(size, 32 / size, ymm(i.reg), selected)?;
+        },
+        // AVX2 (P7 part 1): the packed integer forms on each half. 66 0F:
+        // unpacks, packs, compares, arithmetic and logic
+        (
+            1,
+            1,
+            0x60..=0x6D
+            | 0x74..=0x76
+            | 0xD4
+            | 0xD5
+            | 0xD8..=0xE0
+            | 0xE3..=0xE5
+            | 0xE8..=0xEF
+            | 0xF4..=0xF6
+            | 0xF8..=0xFE,
+        ) => {
+            let b = source256(m, i, false)?;
+            let p = PackedOp::from_encoding(legacy(i.key)).unwrap();
+            let a = ymm(i.vvvv);
+            set_ymm(i.reg, (packed(p, a.0, b.0), packed(p, a.1, b.1)));
+        },
+        // the shifts by xmm/m128: one count (its low quadword) for both
+        (1, 1, 0xD1..=0xD3 | 0xE1 | 0xE2 | 0xF1..=0xF3) => {
+            let count = source(m, i, 16, false)?;
+            let p = PackedOp::from_encoding(legacy(i.key)).unwrap();
+            let a = ymm(i.vvvv);
+            set_ymm(i.reg, (packed(p, a.0, count), packed(p, a.1, count)));
+        },
+        // the shifts by imm8 (VEX.vvvv the destination; VPSRLDQ, VPSLLDQ:
+        // within each half)
+        (1, 1, 0x71..=0x73) => {
+            let v = ymm(i.rm.unwrap());
+            let f = |v| shift_imm(op, i.reg & 7, v, i.imm8 as u32);
+            set_ymm(i.vvvv, (f(v.0), f(v.1)));
+        },
+        // VPSHUFD, VPSHUFHW, VPSHUFLW: each half's lanes as imm8 selects
+        (1, 1..=3, 0x70) => {
+            let v = source256(m, i, false)?;
+            let shuffle = ShuffleOp::from_encoding(legacy(i.key)).unwrap();
+            let f = |v| bytes(|v| shuffle.apply([0; 16], v, i.imm8), v);
+            set_ymm(i.reg, (f(v.0), f(v.1)));
+        },
+        // VPMOVMSKB: the sign bits of all 32 bytes
+        (1, 1, 0xD7) => {
+            m.set_gpr(i.reg, sign_mask256(ymm(i.rm.unwrap()), 1), i.long && i.w);
+        },
+        // VPSHUFB (indices within each half), VPHADDW/D/SW, VPMADDUBSW,
+        // VPHSUBW/D/SW, VPSIGNB/W/D, VPMULHRSW; VPABSB/W/D (of the source
+        // alone)
+        (2, 1, 0x00..=0x0B | 0x1C..=0x1E) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let f = |a: u128, b| bytes(|b| simd_int::ssse3(op, a.to_le_bytes(), b), b);
+            set_ymm(i.reg, (f(a.0, b.0), f(a.1, b.1)));
+        },
+        // VPMULDQ, VPCMPEQQ, VPACKUSDW, VPCMPGTQ, VPMINSB/SD/UW/UD,
+        // VPMAXSB/SD/UW/UD, VPMULLD
+        (2, 1, 0x28 | 0x29 | 0x2B | 0x37..=0x40) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let f = |a: u128, b| bytes(|b| simd_int::sse4(op, a.to_le_bytes(), b, [0; 16]), b);
+            set_ymm(i.reg, (f(a.0, b.0), f(a.1, b.1)));
+        },
+        // VMOVNTDQA: 32-byte aligned
+        (2, 1, 0x2A) => {
+            let v = source256(m, i, true)?;
+            set_ymm(i.reg, v);
+        },
+        // VPALIGNR: within each half
+        (3, 1, 0x0F) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let f = |a: u128, b| bytes(|b| simd_int::palignr(a.to_le_bytes(), b, i.imm8), b);
+            set_ymm(i.reg, (f(a.0, b.0), f(a.1, b.1)));
         },
         _ => {
             dbg_assert!(false, "VEX.256 form {:x} without semantics", i.key);

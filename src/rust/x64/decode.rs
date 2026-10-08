@@ -1085,10 +1085,11 @@ mod tests {
             DecodeError::InvalidOpcode
         );
         // without the features or the semantics: #UD after the ModRM byte
+        // (VFMADD132PS ymm, a form without semantics until P11)
         for (features, all) in [(0, true), (ALL, false)] {
             TEST_FEATURES.with(|f| f.set(features));
             TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(all));
-            let bytes = [0xC4, 0x01, 0x2D, 0xFE, 0x4C];
+            let bytes = [0xC4, 0x02, 0x2D, 0x98, 0x4C];
             assert_eq!(at(&bytes, Long64).unwrap_err(), DecodeError::InvalidOpcode);
             assert!(matches!(
                 at(&bytes[..4], Long64),
