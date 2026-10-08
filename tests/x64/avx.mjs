@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import {assemble, reference, actual} from "./guest_runner.mjs";
 import {long_mode_guest} from "./guest_builder.mjs";
+import {fileURLToPath} from "node:url";
 import {FORMS, big, execute, le, mask, memory_bytes} from "../rust/avx_model.mjs";
 
 const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, COUNTER = OUT + 0x88, MATCH = OUT + 0xC0, FAULTS = OUT + 0x100;
@@ -121,8 +122,11 @@ for(const long of [true, false])
             const c = {long, f, k: n % 8, d, v, m: memory ? undefined : m, gpr: gprs[n % 3], n};
             if(count_shift(f) && !memory) c.count_from = COUNTS + 16 * (n % 8);
             if(variable_shift(f) && !memory) c.count_from = VCOUNTS + 32 * (n % 8);
-            // (every imm8 over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored in compatibility mode)
-            c.imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
+            // (every imm8 over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored in compatibility mode;
+            // the shifts by imm8 and VPALIGNR mostly counts below the
+            // element's or the operand's size, beyond which the result is 0)
+            c.imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : f.kind === "shift_imm" ? (n * 7 + 1) % 20 :
+                f.name === "vpalignr" ? (n * 7 + 3) % 36 : n * 37 + 11 & 255;
             if(f.kind === "gather")
             {
                 // (destination, mask and indices distinct, #UD otherwise;
@@ -304,7 +308,7 @@ const expected_case = (c, n, qemu = undefined) => {
         gpr_out: c.f.kind === "pcmpstr" ? Uint8Array.from({length: 16}, (_, i) => i < (c.long ? 8 : 4) ? 255 : 0) : new Uint8Array(16),
         dest: new Uint8Array(SPAN),
     };
-    Object.defineProperty(s, "flags", {set: value => s.gpr_out.set(u32(value), 8)});
+    Object.defineProperty(s, "flags", {set: value => { s.gpr_out.set(u32(value), 8); }});
     const at = c.memory?.at ?? 0;
     s.load = bytes => big(samples.subarray(at, at + bytes));
     s.store = (bytes, v) => s.dest.set(le(v, bytes), at);
@@ -827,6 +831,58 @@ hot_ymm: db ${Array.from(samples.subarray(64, 160)).join(",")}
     assert.equal(hex(result), hex(expected), "hot loop: the sums, MXCSR and XMM0-15 as QEMU");
     assert.ok(retired > ITERATIONS * 50 && steps < ITERATIONS / 10, `page tier templates: ${retired} retired, ${steps} steps`);
     console.log(`PASS (x64 page tier): the hot VEX forms' templates, as QEMU (${retired} instructions retired natively, ${steps} steps)`);
+}
+
+// The parallel build (cores in workers) reaches guest memory through aligned
+// atomics: an unaligned read is served from a copy (x64::pages::BOUNCE), made
+// by the access cache's inline code or by x64_page_access, of the read's 16
+// or 32 bytes. A hot loop of unaligned 128- and 256-bit loads from a page
+// without code, which an aligned read puts in the access cache (unaligned
+// reads alone leave it out), compiled by the page tier of
+// build/v86-parallel.wasm on the bootstrap processor (two cores: the other
+// one waits for its SIPI in a vCPU worker), as QEMU (P12: the inline copy
+// took 8 bytes of a 32-byte read, and glibc's AVX2 memcpy garbled printf with
+// cores in workers).
+{
+    const ITERATIONS = 20000;
+    const data = Array.from({length: 96}, (_, i) => (i * 37 + 11) & 255);
+    const unaligned = assemble("avx-parallel-unaligned", long_mode_guest(`
+mov rax,cr4
+or eax,3 << 9 | 1 << 18 ; OSFXSR, OSXMMEXCPT, OSXSAVE
+mov cr4,rax
+${XSETBV(7)}
+mov r15d,${ITERATIONS}
+xor r14d,r14d
+vpxor xmm0,xmm0,xmm0
+vpxor xmm2,xmm2,xmm2
+.loop:
+add r14,[unaligned_data + 64]
+vmovdqu ymm1,[unaligned_data + 1]
+vpaddb ymm0,ymm0,ymm1
+vpaddb ymm0,ymm0,[unaligned_data + 35]
+vpcmpeqb ymm3,ymm1,[unaligned_data + 13]
+vpsubb ymm0,ymm0,ymm3
+vmovdqu xmm4,[unaligned_data + 5]
+vpaddb xmm2,xmm2,xmm4
+dec r15d
+jnz .loop
+vmovdqu [${OUT + 16}],ymm0
+vmovdqu [${OUT + 48}],xmm2
+mov [${OUT + 64}],r14
+`, `
+align 4096
+unaligned_data: db ${data.join(",")}
+`));
+    const length = 72;
+    const expected = await reference(unaligned, {length});
+    let retired;
+    const result = await actual(unaligned, {length, timeout: 120000,
+        options: {...FEATURES, disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true,
+            cpu_cores: 2, parallel: true, wasm_path: fileURLToPath(new URL("../../build/v86-parallel.wasm", import.meta.url))},
+        inspect: emulator => { retired = emulator.v86.cpu.wm.exports.x64_page_stat(1); }});
+    assert.equal(hex(result.subarray(16)), hex(expected.subarray(16)), "parallel build: unaligned 128- and 256-bit loads as QEMU");
+    assert.ok(retired > ITERATIONS * 5, `parallel build: compiled code ran (${retired} retired)`);
+    console.log(`PASS (x64 page tier, parallel build): unaligned VEX.128 and VEX.256 loads in compiled code, as QEMU (${retired} retired natively)`);
 }
 
 // The page tier's VEX.256 moves (P6 part 3) check the whole access in

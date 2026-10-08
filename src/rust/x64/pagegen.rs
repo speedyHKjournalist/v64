@@ -138,6 +138,8 @@ enum BmiOp {
     Sarx,
     Tzcnt,
     Lzcnt,
+    /// RORX by imm8 (no flags)
+    Rorx(u8),
 }
 #[derive(Clone, Copy, Debug)]
 enum Op {
@@ -459,13 +461,15 @@ enum Op {
     },
     /// PSRLW/D/Q PSRAW/D PSLLW/D/Q xmm, imm8 (`kind` is the ModRM reg), and
     /// PSRLDQ/PSLLDQ (`bits` 128): dst = src shifted (VEX: dst is VEX.vvvv,
-    /// src the r/m register; legacy: the same register)
+    /// src the r/m register; legacy: the same register); `wide`: AVX2's
+    /// VEX.256 forms, each half alike
     VshiftImm {
         dst: u8,
         src: u8,
         bits: u8,
         kind: u8,
         count: u8,
+        wide: bool,
     },
     /// VZEROUPPER: bits 255:128 of YMM0-15 zeroed
     Vzeroupper,
@@ -486,6 +490,22 @@ enum Op {
         dst: u8,
         first: u8,
         src: Xmm,
+    },
+    /// VINSERTF128, VINSERTI128: `first` (VEX.vvvv) with its `high` or low
+    /// half replaced by xmm/m128
+    Vinsert128 {
+        dst: u8,
+        first: u8,
+        src: Xmm,
+        high: bool,
+    },
+    /// VPERM2F128, VPERM2I128: each half of the destination is a half of
+    /// `first` (VEX.vvvv) or of ymm/m256, or zero, as imm8 selects
+    Vperm2 {
+        dst: u8,
+        first: u8,
+        src: Xmm,
+        imm8: u8,
     },
     /// VPMOVMSKB, VMOVMSKPS, VMOVMSKPD r32/r64, ymm: the sign bits of both
     /// halves' `lane`-byte lanes, zero-extended
@@ -1396,6 +1416,7 @@ fn sse(d: &Decoded) -> Option<Op> {
                 bits: if bytes { 128 } else { 16 << (code - 0x71) },
                 kind,
                 count: d.immediate?.value.min(255) as u8,
+                wide: false,
             }
         },
         op if op >> 8 == 0x660F => Op::Vpacked {
@@ -1552,6 +1573,57 @@ fn vex256(d: &Decoded) -> Option<Op> {
                 wide: true,
             })
         },
+        // AVX2's shifts by imm8 on each half (VEX.vvvv the destination, the
+        // r/m register the source), VPSHUFD/VPSHUFHW/VPSHUFLW and VPALIGNR
+        // on each half (P12: the kernel's SHA-256/512 code with AVX2)
+        (1, 1, code @ 0x71..=0x73) if !memory => {
+            let kind = d.modrm? >> 3 & 7;
+            let bytes = matches!(kind, 3 | 7) && code == 0x73;
+            if !(matches!(kind, 2 | 4 | 6) && !(code == 0x73 && kind == 4) || bytes) {
+                return None;
+            }
+            return Some(Op::VshiftImm {
+                dst: v.vvvv,
+                src: d.rm_register?,
+                bits: if bytes { 128 } else { 16 << (code - 0x71) },
+                kind,
+                count: d.immediate?.value.min(255) as u8,
+                wide: true,
+            });
+        },
+        (1, 1..=3, 0x70) => {
+            return Some(Op::Vpacked256 {
+                op: Packed::Shuffle(shuffle_lanes(key, d.immediate?.value as u32 & 0xFF)),
+                dst: d.reg?,
+                first: d.reg?,
+                src: rm,
+            })
+        },
+        (3, 1, 0x0F) => {
+            return Some(Op::Vpacked256 {
+                op: palignr(d.immediate?.value),
+                dst: d.reg?,
+                first: v.vvvv,
+                src: rm,
+            })
+        },
+        // VINSERTF128, VINSERTI128 (AVX2 for I), VPERM2F128, VPERM2I128
+        (3, 1, 0x18 | 0x38) => {
+            return Some(Op::Vinsert128 {
+                dst: d.reg?,
+                first: v.vvvv,
+                src: rm,
+                high: d.immediate?.value & 1 != 0,
+            })
+        },
+        (3, 1, 0x06 | 0x46) => {
+            return Some(Op::Vperm2 {
+                dst: d.reg?,
+                first: v.vvvv,
+                src: rm,
+                imm8: d.immediate?.value as u8,
+            })
+        },
         // the packed integer forms of 66 0F, VPSHUFB and SSE4.1's of one
         // operation, on each half
         (1, 1, code) => {
@@ -1625,6 +1697,7 @@ fn bmi(d: &Decoded) -> Option<Op> {
         0xC402_01F7 => (BmiOp::Shlx, dst),
         0xC402_02F7 => (BmiOp::Sarx, dst),
         0xC402_03F7 => (BmiOp::Shrx, dst),
+        0xC403_03F0 => (BmiOp::Rorx(d.immediate?.value as u8), dst),
         _ => return None,
     };
     Some(Op::Bmi {
@@ -1823,6 +1896,7 @@ fn vex(d: &Decoded) -> Option<Op> {
                 bits: if bytes { 128 } else { 16 << (code - 0x71) },
                 kind,
                 count: imm?.min(255) as u8,
+                wide: false,
             }
         },
         // VPMOVMSKB VMOVMSKPS VMOVMSKPD
@@ -1950,7 +2024,7 @@ fn effects(op: &Op) -> (u32, u32) {
         Op::Bt { .. } => (0, CF),
         Op::BitScan { .. } => (0, ZF),
         Op::Bmi {
-            op: BmiOp::Shlx | BmiOp::Shrx | BmiOp::Sarx,
+            op: BmiOp::Shlx | BmiOp::Shrx | BmiOp::Sarx | BmiOp::Rorx(_),
             ..
         } => (0, 0),
         Op::Bmi { .. } => (0, ARITH),
@@ -3181,7 +3255,8 @@ impl Emitter {
             c.push(op::OP_END);
             c.push(op::OP_ELSE);
             let bounce = unsafe { super::pages::bounce_address() } as i32;
-            // (sizes 2, 4, 8, 16: the first 8 bytes or fewer, then the rest)
+            // (sizes 2, 4, 8, 16, 32: the first 8 bytes or fewer, then the
+            // rest; 32: a VEX.256 load's)
             let copy = |c: &mut Vec<u8>, load: u8, store: u8, align: u8, offset: u32| {
                 i32c(c, bounce);
                 c.extend_from_slice(&[op::OP_GETLOCAL, 5, load, 0]);
@@ -3208,8 +3283,16 @@ impl Emitter {
             i32c(&mut c, 255);
             c.push(op::OP_I32AND);
             i32c(&mut c, 16);
-            c.extend_from_slice(&[op::OP_I32EQ, op::OP_IF, op::TYPE_VOID_BLOCK]);
+            c.extend_from_slice(&[op::OP_I32GEU, op::OP_IF, op::TYPE_VOID_BLOCK]);
             copy(&mut c, op::OP_I64LOAD, op::OP_I64STORE, 3, 8);
+            c.extend_from_slice(&[op::OP_END]);
+            c.extend_from_slice(&[op::OP_GETLOCAL, 1]);
+            i32c(&mut c, 255);
+            c.push(op::OP_I32AND);
+            i32c(&mut c, 32);
+            c.extend_from_slice(&[op::OP_I32EQ, op::OP_IF, op::TYPE_VOID_BLOCK]);
+            copy(&mut c, op::OP_I64LOAD, op::OP_I64STORE, 3, 16);
+            copy(&mut c, op::OP_I64LOAD, op::OP_I64STORE, 3, 24);
             c.extend_from_slice(&[op::OP_END, op::OP_END, op::OP_END]);
             c.extend_from_slice(&[0xFE, 0x03, 0x00]); // atomic.fence
             i32c(&mut c, bounce);
@@ -4753,6 +4836,27 @@ impl Emitter {
                 self.set_reg(dst, width);
             },
             Op::Bmi {
+                op: BmiOp::Rorx(count),
+                width,
+                dst,
+                src,
+                ..
+            } => {
+                // (the count modulo the operand size; no flags)
+                self.read(src, width, inst);
+                if width == 64 {
+                    self.c64(count as u64 & 63);
+                    self.b.rotr_i64();
+                }
+                else {
+                    self.b.wrap_i64_to_i32();
+                    self.c32(count as i32 & 31);
+                    self.b.rotr_i32();
+                    self.b.extend_unsigned_i32_to_i64();
+                }
+                self.set_reg(dst, width);
+            },
+            Op::Bmi {
                 op,
                 width,
                 dst,
@@ -5159,49 +5263,56 @@ impl Emitter {
                 bits,
                 kind,
                 count,
+                wide,
             } => {
                 self.vector_check(inst, start);
-                self.c32(Self::xmm(dst) as i32);
-                self.c32(Self::xmm(src) as i32);
-                self.b.simd_memory(0x00, 0);
-                let count = count as u32;
-                if bits == 128 {
-                    self.b.simd_zero();
-                    let mut lanes = [16; 16];
-                    for (k, lane) in lanes.iter_mut().enumerate() {
-                        let index = if kind == 3 {
-                            k as i32 + count as i32
+                // (a VEX.256 form: each half alike, the low one first; a
+                // half is read before the same half is written)
+                for offset in if wide { &[0, 16][..] } else { &[0][..] } {
+                    self.c32(Self::ymm(dst, *offset) as i32);
+                    self.c32(Self::ymm(src, *offset) as i32);
+                    self.b.simd_memory(0x00, 0);
+                    let count = count as u32;
+                    if bits == 128 {
+                        self.b.simd_zero();
+                        let mut lanes = [16; 16];
+                        for (k, lane) in lanes.iter_mut().enumerate() {
+                            let index = if kind == 3 {
+                                k as i32 + count as i32
+                            }
+                            else {
+                                k as i32 - count as i32
+                            };
+                            if (0..16).contains(&index) {
+                                *lane = index as u8;
+                            }
                         }
-                        else {
-                            k as i32 - count as i32
-                        };
-                        if (0..16).contains(&index) {
-                            *lane = index as u8;
-                        }
+                        self.b.simd_shuffle(lanes);
                     }
-                    self.b.simd_shuffle(lanes);
+                    else if count >= bits as u32 && kind != 4 {
+                        self.b.drop_();
+                        self.b.simd_zero();
+                    }
+                    else {
+                        self.c32(count.min(bits as u32 - 1) as i32);
+                        let base = match bits {
+                            16 => 0x8B,
+                            32 => 0xAB,
+                            _ => 0xCB,
+                        };
+                        self.b.simd(
+                            base + match kind {
+                                6 => 0,
+                                4 => 1,
+                                _ => 2,
+                            },
+                        );
+                    }
+                    self.b.simd_memory(0x0B, 0);
                 }
-                else if count >= bits as u32 && kind != 4 {
-                    self.b.drop_();
-                    self.b.simd_zero();
+                if !wide {
+                    self.vex_upper(inst, dst);
                 }
-                else {
-                    self.c32(count.min(bits as u32 - 1) as i32);
-                    let base = match bits {
-                        16 => 0x8B,
-                        32 => 0xAB,
-                        _ => 0xCB,
-                    };
-                    self.b.simd(
-                        base + match kind {
-                            6 => 0,
-                            4 => 1,
-                            _ => 2,
-                        },
-                    );
-                }
-                self.b.simd_memory(0x0B, 0);
-                self.vex_upper(inst, dst);
             },
             Op::Vcompare { double, dst, src } => self.vcompare(inst, start, double, dst, src),
             Op::Vround {
@@ -5287,6 +5398,80 @@ impl Emitter {
                     self.b.simd_memory(0x0B, 0);
                 }
                 for v in source.into_iter().chain(first) {
+                    self.b.free_local_v128(v);
+                }
+            },
+            Op::Vinsert128 {
+                dst,
+                first,
+                src,
+                high,
+            } => {
+                self.vector_check(inst, start);
+                // (the inserted 128 bits and the kept half before any write)
+                self.vector_source(src, inst);
+                let inserted = self.b.set_new_local_v128();
+                let (kept, replaced) = if high { (0, 16) } else { (16, 0) };
+                self.c32(Self::ymm(first, kept) as i32);
+                self.b.simd_memory(0x00, 0);
+                let other = self.b.set_new_local_v128();
+                self.c32(Self::ymm(dst, kept) as i32);
+                self.b.get_local_v128(&other);
+                self.b.simd_memory(0x0B, 0);
+                self.c32(Self::ymm(dst, replaced) as i32);
+                self.b.get_local_v128(&inserted);
+                self.b.simd_memory(0x0B, 0);
+                self.b.free_local_v128(other);
+                self.b.free_local_v128(inserted);
+            },
+            Op::Vperm2 {
+                dst,
+                first,
+                src,
+                imm8,
+            } => {
+                self.vector_check(inst, start);
+                // (the four halves, VEX.vvvv's then ymm/m256's, before any write)
+                let mut halves = Vec::new();
+                for offset in [0, 16] {
+                    self.c32(Self::ymm(first, offset) as i32);
+                    self.b.simd_memory(0x00, 0);
+                    halves.push(self.b.set_new_local_v128());
+                }
+                match src {
+                    Xmm::Reg(s) => {
+                        for offset in [0, 16] {
+                            self.c32(Self::ymm(s, offset) as i32);
+                            self.b.simd_memory(0x00, 0);
+                            halves.push(self.b.set_new_local_v128());
+                        }
+                    },
+                    Xmm::Mem(a) => {
+                        self.vector_address_bytes(&a, 32, false, false, inst);
+                        for offset in [0, 16] {
+                            self.gi(HOST);
+                            self.c32(offset);
+                            self.b.add_i32();
+                            let scratch = self.b.set_new_local();
+                            self.b.get_local(&scratch);
+                            self.b.guest_load_v128(&scratch);
+                            self.b.free_local(scratch);
+                            halves.push(self.b.set_new_local_v128());
+                        }
+                    },
+                }
+                for (k, offset) in [0, 16].into_iter().enumerate() {
+                    self.c32(Self::ymm(dst, offset) as i32);
+                    let selector = imm8 >> (4 * k) & 15;
+                    if selector & 8 != 0 {
+                        self.b.simd_zero();
+                    }
+                    else {
+                        self.b.get_local_v128(&halves[selector as usize & 3]);
+                    }
+                    self.b.simd_memory(0x0B, 0);
+                }
+                for v in halves {
                     self.b.free_local_v128(v);
                 }
             },

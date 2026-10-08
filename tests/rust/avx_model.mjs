@@ -5,7 +5,7 @@
 // SSE counterparts use those forms' models (packed_model.mjs,
 // shuffle_model.mjs, ssse3_model.mjs, sse4_model.mjs) with VEX's operands.
 import assert from "node:assert/strict";
-import { packed, packedImmediate } from "../ir/differential/packed_model.mjs";
+import { packed, packedImmediate as packed_immediate } from "../ir/differential/packed_model.mjs";
 import { shuffle } from "../ir/differential/shuffle_model.mjs";
 import { model as ssse3 } from "./ssse3_model.mjs";
 import { compare_strings, extract, insert, insertps, ptest, sse4_38, sse4_3a } from "./sse4_model.mjs";
@@ -161,7 +161,7 @@ const FORMS_128 = [
         f: (a, b) => from_words(packed(0x660F00 | +op, words(a), words(b))) })),
     ...[[0x71, 2, "vpsrlw"], [0x71, 4, "vpsraw"], [0x71, 6, "vpsllw"], [0x72, 2, "vpsrld"], [0x72, 4, "vpsrad"], [0x72, 6, "vpslld"],
         [0x73, 2, "vpsrlq"], [0x73, 3, "vpsrldq"], [0x73, 6, "vpsllq"], [0x73, 7, "vpslldq"]].map(([op, group, name]) =>
-        ({ name, pp: 1, op, group, kind: "shift_imm", register: true, f: (v, imm8) => from_words(packedImmediate(0x660F00 | op, group, imm8, words(v))) })),
+        ({ name, pp: 1, op, group, kind: "shift_imm", register: true, f: (v, imm8) => from_words(packed_immediate(0x660F00 | op, group, imm8, words(v))) })),
     ...[[1, 0x660F70, "vpshufd"], [2, 0xF30F70, "vpshufhw"], [3, 0xF20F70, "vpshuflw"]].map(([pp, key, name]) =>
         ({ name, pp, op: 0x70, kind: "load_imm", f: (v, imm8) => from_words(shuffle(key, imm8, [0, 0, 0, 0], words(v))) })),
     ...[[0, 0x0FC6, "vshufps"], [1, 0x660FC6, "vshufpd"]].map(([pp, key, name]) =>

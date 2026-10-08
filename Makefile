@@ -924,6 +924,7 @@ x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/vector_oracle.mjs
 	node tests/x64/native_oracle.mjs
 	node tests/x64/cache_oracle.mjs
+	node tests/x64/rep_strings.mjs
 
 # The x64 page tier (x64::pagegen/pages): QEMU and interpreter references,
 # and random programs compared with the interpreter.
@@ -963,6 +964,23 @@ x64-guest-tests: build/v86-debug.wasm
 	X64_JIT=1 X64_LINUX_SNAPSHOT=1 X64_LINUX_LIFECYCLE=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
 	X64_HIGH_MEMORY=134217728 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
 	X64_HIGH_MEMORY=134217728 X64_JIT=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+
+# The real-guest acceptance of docs/simd-xsave-plan.md 11.3 (P12): Alpine
+# x86_64 running glibc 2.39's x86-64-v3 code (ld.so's levels, glibc-hwcaps,
+# the IFUNC choices and their results as QEMU's) and the YMM registers across
+# context switches, page tier: x86-64-v3 with the XSAVE family on one core,
+# on two with snapshots and on two in vCPU workers, AVX alone, x86-64-v2, and
+# x86-64-v3 under noxsave
+X64_V3_FEATURES = SSSE3,SSE4.1,SSE4.2,XSAVE,AVX,AVX2,FMA,F16C,BMI1,BMI2,LZCNT,MOVBE,XSAVEOPT,XSAVEC,XGETBV1,XSAVES
+X64_LINUX_DEFAULT_CMDLINE = console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage
+.PHONY: x64-glibc-tests
+x64-glibc-tests: build/libv86.mjs build/v86.wasm build/v86-parallel.wasm build/vcpu-worker.js
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_LINUX_SNAPSHOT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_PARALLEL=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=SSSE3,SSE4.1,SSE4.2,XSAVE,AVX X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=SSSE3,SSE4.1,SSE4.2 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_CMDLINE="$(X64_LINUX_DEFAULT_CMDLINE) noxsave" X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
 
 x64-multicore-guest-tests: build/v86-debug.wasm
 	X64_CORES=4 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
@@ -1555,7 +1573,7 @@ sse4-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-deb
 # MXCSR setting in avx_fp.mjs), the x64 engine and compatibility mode against
 # QEMU and the model
 .PHONY: avx-tests
-avx-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+avx-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm build/v86-parallel.wasm build/vcpu-worker.js
 	node tests/rust/avx.mjs
 	node tests/rust/avx.mjs build/v86-debug.wasm
 	node tests/rust/avx.mjs build/v86-fallback.wasm

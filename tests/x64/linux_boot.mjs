@@ -8,6 +8,7 @@ import {createHash as create_hash} from "node:crypto";
 import {setTimeout as delay} from "node:timers/promises";
 import {setImmediate as set_immediate} from "node:timers";
 import {fileURLToPath} from "node:url";
+import {prepare_glibc, check_glibc, qemu_cpu, GLIBC_COMMAND} from "./linux_glibc.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const directory = root + "build/x64-linux/";
 // X64_LINUX_FLAVOR: "virt" (default, the virt kernel) or "lts" (the standard
@@ -41,7 +42,15 @@ for(const file of [kernel_file, initrd_file])
 // delivered as a ustar image on the IDE disk and unpacked by the guest shell.
 // Concurrent configurations get separate probe builds and result files.
 const cores = Number(process.env.X64_CORES || 1);
-const tag = `${+process.env.X64_LINUX_QEMU ? "qemu" : +process.env.X64_JIT ? "native" : "interpreter"}-${cores}c${process.env.X64_HIGH_MEMORY ? "-high" : ""}${flavor === "virt" ? "" : "-" + flavor}`;
+// X64_CPU_FEATURES: CPU features of docs/simd-xsave-plan.md, comma-separated
+// (e.g. XSAVE); X64_LINUX_GLIBC=1: also the glibc acceptance of plan 11.3
+// (tests/x64/linux_glibc.mjs), against a QEMU run with the same features
+const features = process.env.X64_CPU_FEATURES ? process.env.X64_CPU_FEATURES.split(",") : [];
+const glibc_test = !!+process.env.X64_LINUX_GLIBC;
+const tag_for = backend => `${backend}-${cores}c${process.env.X64_HIGH_MEMORY ? "-high" : ""}${flavor === "virt" ? "" : "-" + flavor}` +
+    (features.length ? "-" + create_hash("sha256").update(features.join(",")).digest("hex").slice(0, 8) : "") + (glibc_test ? "-glibc" : "") +
+    (/\bnoxsave\b/.test(process.env.X64_LINUX_CMDLINE || "") ? "-noxsave" : "");
+const tag = tag_for(+process.env.X64_LINUX_QEMU ? "qemu" : +process.env.X64_JIT ? "native" : "interpreter");
 const probe_directory = directory + `probe-${tag}/`;
 fs.mkdirSync(probe_directory, {recursive: true});
 function run(program, args)
@@ -62,8 +71,9 @@ for(const [bits, target, flags, emulation] of [
         "-fno-pic", "-fno-builtin", "-c", probe_source, "-o", probe_directory + `probe${bits}.o`]);
     run(lld, ["-flavor", "gnu", "-m", emulation, "-static", "-e", "_start", "-o", probe_directory + `linux_probe${bits}`, probe_directory + `probe${bits}.o`]);
 }
+const glibc = glibc_test ? await prepare_glibc(root, directory, probe_directory + "glibc/", lld) : null;
 run("bsdtar", ["--format", "ustar", "--no-xattrs", "--no-mac-metadata", "--uid", "0", "--gid", "0",
-    "-cf", probe_directory + "probe.tar", "-C", probe_directory, "linux_probe64", "linux_probe32"]);
+    "-cf", probe_directory + "probe.tar", "-C", probe_directory, "linux_probe64", "linux_probe32", ...(glibc ? ["-C", glibc.stage, "glibc"] : [])]);
 const probe_disk = fs.readFileSync(probe_directory + "probe.tar");
 // v86 runs also bring up virtio-net (Alpine virt has no NE2K driver) and echo
 // raw frames on the host (X64_PROBE_NET); the QEMU reference skips that round.
@@ -79,6 +89,7 @@ const extended_cache = Number(process.env.X64_EXTENDED_CACHE || 0);
 const memtest_mib = Number(process.env.X64_LINUX_MEMTEST || 0);
 const guest_command = net => (net ? "modprobe virtio_net 2>/dev/null; ifconfig eth0 up && " : "") +
     `tar -xf /dev/sda -C /tmp && /tmp/linux_probe64 ${net ? "net" : ""} && /tmp/linux_probe32 ${net ? "net" : ""}; ` +
+    (glibc_test ? GLIBC_COMMAND : "") +
     (memtest_mib ? `grep MemTotal /proc/meminfo; /tmp/linux_probe64 memtest ${memtest_mib} ${extended_first_pfn()}; ` : "") +
     "uname -m; cat /sys/devices/system/cpu/online; grep 'System RAM' /proc/iomem; echo X64_LINUX_BOOT_OK\n";
 function extended_first_pfn() { return (2 ** 32 + Number(process.env.X64_HIGH_MEMORY || 0)) / 4096; }
@@ -92,6 +103,10 @@ const cmdline = process.env.X64_LINUX_CMDLINE || "console=ttyS0,115200 earlyprin
     // (Alpine's live initramfs handles resume= before it loads disk drivers
     // for the root file system: load the IDE driver first, or /dev/sdb is missing)
     (sleep_cycles ? ",ata_piix resume=/dev/sdb" : "");
+// (with noxsave on the command line the kernel leaves CR4.OSXSAVE clear:
+// what needs XSAVE is not usable, and AVX instructions are #UD)
+const XSAVE_DEPENDENT = ["XSAVE", "AVX", "AVX2", "FMA", "F16C", "XSAVEOPT", "XSAVEC", "XGETBV1", "XSAVES"];
+const usable = /\bnoxsave\b/.test(cmdline) ? features.filter(name => !XSAVE_DEPENDENT.includes(name)) : features;
 const manifest = {source, iso_sha256: digest, kernel_sha256: hash(fs.readFileSync(directory + kernel_file)),
     initrd_sha256: hash(fs.readFileSync(directory + initrd_file)), cmdline,
     probe_tar_sha256: hash(probe_disk), probe64_sha256: hash(fs.readFileSync(probe_directory + "linux_probe64")),
@@ -115,11 +130,19 @@ function check_probes(text, net)
         if(high_memory || extended_memory) assert.ok(placed > 0, `${bits}-bit process received frames above 4 GiB`);
         else assert.equal(placed, 0, `${bits}-bit process: no RAM above 4 GiB exists`);
         if(net) assert.match(text, new RegExp(`X64_PROBE_NET arch=${bits} frames=16`), `${bits}-bit raw frames through eth0 (virtio-net) and back`);
+        // YMM fingerprints across context switches: twice as many threads as
+        // CPUs, 8 rounds of 5 steps (one of them a signal) each
+        const ymm = text.match(new RegExp(`X64_PROBE_YMM arch=${bits} avx=(\\d)(?: registers=(\\d+) threads=(\\d+) steps=(\\d+) signals=(\\d+) bad=(\\d+))?`));
+        assert.ok(ymm, `${bits}-bit YMM probe: ${text.match(new RegExp(`X64_PROBE_FAIL arch=${bits}[^\\r\\n]*`))?.[0] || "missing"}`);
+        if(usable.includes("AVX")) assert.deepEqual(ymm.slice(1).map(Number), [1, bits === 64 ? 16 : 8, 2 * cores, 80 * cores, 16 * cores, 0], `${bits}-bit YMM state across context switches`);
+        else assert.equal(ymm[1], "0", `${bits}-bit probe: no AVX without the feature`);
     }
 }
 if(+process.env.X64_LINUX_QEMU)
 {
-    const child = spawn("qemu-system-x86_64", ["-machine", `pc,accel=tcg${high_memory ? `,max-ram-below-4g=${(512 << 20) - high_memory}` : ""}`, "-cpu", "qemu64,phys-bits=36,-pdpe1gb", "-m", "512M",
+    // (with features: QEMU's CPU gets them, v86's vendor and model)
+    const qemu_model = features.length || glibc_test ? qemu_cpu(features) : "qemu64,phys-bits=36,-pdpe1gb";
+    const child = spawn("qemu-system-x86_64", ["-machine", `pc,accel=tcg${high_memory ? `,max-ram-below-4g=${(512 << 20) - high_memory}` : ""}`, "-cpu", qemu_model, "-m", "512M",
         "-display", "none", "-monitor", "none", "-serial", "stdio", "-no-reboot", "-no-shutdown",
         "-kernel", directory + kernel_file, "-initrd", directory + initrd_file, "-cdrom", directory + name, "-append", cmdline,
         "-drive", `file=${probe_directory}probe.tar,format=raw,if=ide,index=0,snapshot=on`,
@@ -148,6 +171,7 @@ if(+process.env.X64_LINUX_QEMU)
         assert.match(transcript, /\r?\nx86_64\r?\n/);
         check_probes(transcript, false);
         if(high_memory) assert.match(transcript, /\n\s*100000000-[0-9a-f]+ : System RAM/, "kernel owns RAM above 4 GiB");
+        if(glibc) console.log("X64_LINUX_GLIBC " + JSON.stringify(check_glibc(transcript, usable, glibc.libraries, null)));
         console.log("X64_LINUX_QEMU_PASS");
     }
     finally
@@ -157,6 +181,15 @@ if(+process.env.X64_LINUX_QEMU)
         fs.writeFileSync(directory + `${tag}.serial`, transcript);
     }
     process.exit(0);
+}
+// The glibc acceptance compares with QEMU under the same features: that run first
+let glibc_reference = null;
+// (X64_LINUX_GLIBC_TIMES=1: only the times, without the QEMU reference)
+if(glibc && !+process.env.X64_LINUX_GLIBC_TIMES)
+{
+    const reference = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {env: {...process.env, X64_LINUX_QEMU: "1"}, stdio: "inherit"});
+    assert.equal(reference.status, 0, "the QEMU reference run");
+    glibc_reference = fs.readFileSync(directory + tag_for("qemu") + ".serial", "utf8");
 }
 const {V86} = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const jit = !!+process.env.X64_JIT;
@@ -171,8 +204,9 @@ const emulator = new V86({
     ...(extended_memory ? {extended_memory_size: extended_memory} : {}),
     ...(extended_cache ? {extended_memory_cache: extended_cache} : {}),
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: true, log_level: 0, net_device: {type: "virtio"},
-    // X64_CPU_FEATURES: CPU features of docs/simd-xsave-plan.md, comma-separated (e.g. XSAVE)
-    ...(process.env.X64_CPU_FEATURES ? {cpu_features: process.env.X64_CPU_FEATURES.split(","), cpu_features_unreleased: true} : {}),
+    // (the x64 profile, as set_x64_test_capabilities below; LZCNT needs it)
+    cpu_type: "x86_64",
+    ...(features.length ? {cpu_features: features, cpu_features_unreleased: true} : {}),
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
     // X64_PARALLEL=1: the application processors run in vCPU workers
     ...(+process.env.X64_PARALLEL ? {parallel: true, wasm_path: root + "build/v86-parallel.wasm"} : {}),
@@ -260,6 +294,7 @@ try
         catch(error) { execution_error = error; emulator.stop(); return 100; }
     };
     emulator.run();
+    const started = performance.now();
     const deadline = performance.now() + Number(process.env.X64_LINUX_TIMEOUT || 300000);
     let next_report = performance.now() + 10000;
     while(performance.now() < deadline)
@@ -269,6 +304,8 @@ try
         if(serial.includes("Kernel panic") || serial.includes("not implemented")) throw new Error("Guest kernel reported a failure");
         if(/localhost login:/.test(serial) && !command_sent)
         {
+            // (the boot's wall time, for the boot budget of docs/simd-xsave-plan.md 12.2)
+            console.log("X64_LINUX_LOGIN_MS " + Math.round(performance.now() - started));
             emulator.serial0_send("root\n");
             command_sent = true;
         }
@@ -331,6 +368,7 @@ try
     assert.match(serial, /\r?\nx86_64\r?\n/, "uname confirms actual x86_64 userspace");
     check_probes(serial, true);
     assert.equal(echoed, 32, "the host echoed every probe frame");
+    if(glibc) console.log("X64_LINUX_GLIBC " + JSON.stringify(check_glibc(serial, usable, glibc.libraries, glibc_reference)));
     if(high_memory || extended_memory)
     {
         assert.match(serial, new RegExp(`\\n\\s*100000000-${(0x100000000 + high_memory + extended_memory - 1).toString(16)} : System RAM`),
@@ -474,7 +512,9 @@ try
     if(process.env.X64_STEP_PROFILE)
     {
         const get = cpu.wm.exports.x64_page_profile_get;
-        const name = key => (key & 0x10000 ? "rep " : "") + ["", "0F ", "0F38 ", "0F3A "][(key >> 8) & 3] + (key & 0xFF).toString(16).padStart(2, "0");
+        const name = key => (key & 0x10000 ? "rep " : "") + (key & 0x4000 ?
+            `VEX.${key & 0x1000 ? 256 : 128}.${["", "66.", "F3.", "F2."][(key >> 10) & 3]}` : "") +
+            ["", "0F ", "0F38 ", "0F3A "][(key >> 8) & 3] + (key & 0xFF).toString(16).padStart(2, "0");
         for(const [label, base] of [["X64_STEP_PROFILE", 0], ["X64_RETRY_PROFILE", 0x20000]])
         {
             const rows = [];

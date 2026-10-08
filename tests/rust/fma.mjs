@@ -290,13 +290,15 @@ try
                     assert.equal(actual.toString(16), c.result.toString(16), `${form.name} ordinary case ${n} (${run}): result`);
                 });
             }
-            // (a template steps the first executions at most)
+            // (a template steps the first executions at most; a build without
+            // Wasm SIMD has no SIMD templates)
             const is_templated = steps < list.length;
-            assert.equal(is_templated, !form.l, `${form.name}: Tier-0 ${is_templated ? "ran a template" : "stepped"} (${steps} steps, ${list.length} cases)`);
+            assert.equal(is_templated, !form.l && simd(machines[1]), `${form.name}: Tier-0 ${is_templated ? "ran a template" : "stepped"} (${steps} steps, ${list.length} cases)`);
             if(is_templated) templated++;
             else stepped++;
         }
-        console.log(`PASS: Tier-0 ran templates for the ${templated} VEX.128 and scalar FMA forms, stepped the ${stepped} VEX.256 ones`);
+        console.log(simd(machines[1]) ? `PASS: Tier-0 ran templates for the ${templated} VEX.128 and scalar FMA forms, stepped the ${stepped} VEX.256 ones` :
+            `PASS: Tier-0 stepped all ${stepped} FMA forms (no Wasm SIMD: no SIMD templates)`);
     }
 }
 finally

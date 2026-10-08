@@ -365,8 +365,9 @@ unsafe fn string(d: &Decoded, op: u32) -> Result<bool, Fault> {
 const BULK_BYTES: u64 = 4096;
 /// REP MOVS/STOS over RAM pages without data breakpoints: each chunk is the
 /// whole elements inside the current source and destination pages, copied
-/// in element order (so overlapping MOVS keeps its element semantics), and
-/// RCX/RSI/RDI then advance as if the elements ran one by one. None when the
+/// at once, or in element order when an element would read an earlier one's
+/// store (so overlapping MOVS keeps its element semantics), and RCX/RSI/RDI
+/// then advance as if the elements ran one by one. None when the
 /// first element needs the element path (a fault, device memory, an element
 /// crossing a page); a later chunk that cannot proceed just ends this step.
 unsafe fn bulk_string(
@@ -433,18 +434,55 @@ unsafe fn bulk_string(
             }
             break;
         };
-        for i in 0..n {
-            let step = if down { (i * size).wrapping_neg() } else { i * size };
-            let t = target.wrapping_add(step as u32) as usize as *mut u8;
-            if movs {
-                std::ptr::copy(
-                    from.wrapping_add(step as u32) as usize as *const u8,
-                    t,
-                    size as usize,
-                );
+        // (a backward chunk's lowest byte is below its first element)
+        let span = (n * size) as u32;
+        let low = |first: u32| {
+            if down {
+                first.wrapping_add(size as u32).wrapping_sub(span)
             }
             else {
-                std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), t, size as usize);
+                first
+            }
+        };
+        if movs {
+            // One copy, unless an element reads what an earlier one wrote: a
+            // forward move whose destination starts inside the source, a
+            // backward one whose source starts inside the destination (LZ
+            // backreferences; as cpu::string)
+            let interferes = if down {
+                from > target && from - target < span
+            }
+            else {
+                target > from && target - from < span
+            };
+            if interferes {
+                for i in 0..n {
+                    let step = if down { (i * size).wrapping_neg() } else { i * size };
+                    std::ptr::copy(
+                        from.wrapping_add(step as u32) as usize as *const u8,
+                        target.wrapping_add(step as u32) as usize as *mut u8,
+                        size as usize,
+                    );
+                }
+            }
+            else {
+                std::ptr::copy(
+                    low(from) as usize as *const u8,
+                    low(target) as usize as *mut u8,
+                    span as usize,
+                );
+            }
+        }
+        else {
+            // (every element stores the same value, in any order)
+            let t = low(target) as usize as *mut u8;
+            match size {
+                1 => std::ptr::write_bytes(t, value as u8, n as usize),
+                2 => (0..n as usize)
+                    .for_each(|i| (t as *mut u16).add(i).write_unaligned(value as u16)),
+                4 => (0..n as usize)
+                    .for_each(|i| (t as *mut u32).add(i).write_unaligned(value as u32)),
+                _ => (0..n as usize).for_each(|i| (t as *mut u64).add(i).write_unaligned(value)),
             }
         }
         if target_ram {

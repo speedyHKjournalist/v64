@@ -236,6 +236,10 @@ P0 同时产出“热点形式清单”。做法是反汇编目标客体中会�
 LZCNT、BLSR、SHLX/SARX/BZHI、VFMADD231SD/PD、PSHUFB、PALIGNR 和 XSAVE/XRSTOR。
 它用于 4.1 节的开放前提和 12.2 节的性能基准。
 
+P12 补充：真实客体中开放 AVX2 与 BMI2 后，Linux 内核的 SHA-256/512（`*_transform_rorx`，如校验模块签名）在
+启动中执行 RORX 与 AVX2 的 ymm 移位、VPALIGNR、VPSHUFD、VINSERTI128、VPERM2I128。它们不在取自 glibc 的这份
+清单中，起初在 page tier 单步执行，启动因此慢了 75%；P12 为它们补了模板（14 节 P12 第一部分）。
+
 ### 5.2 解码改造
 
 - 分离 `encoding family + map + opcode + pp`，不要继续靠 opcode 整数长度猜 mandatory prefix。
@@ -595,7 +599,9 @@ FMA 和 F16C 是 VEX 编码的 SIMD 指令，门控与 AVX 相同，并依赖 P4
 - **FMA 的快路径**：Wasm 没有确定性的融合乘加，relaxed-simd 的 `madd` 可能融合也可能不融合，
   禁止使用。单精度形式可以在 f64 中算出精确乘积，以“舍入到奇数”求和后再舍入回 f32，理论上
   能给出正确舍入（Boldo–Melquiond）；但必须先在 P0 用穷举和随机对拍验证，才能作为快路径。
-  双精度形式走 SoftFloat helper。
+  双精度形式走 SoftFloat helper。P12 实现了双精度与单精度的快路径（`simd_fp::fused_fast`，双精度用 Boldo 与
+  Melquiond 的 FMA 模拟），以主机硬件 FMA 对拍 4000 万例验证，其中有专门构造的离舍入中点很近的用例
+  （14 节 P12 第一部分）。
 - **FMA 的性能**：glibc libm 在 FMA 和 AVX2 都可用时，会把 exp、log、pow、sin、cos、tan、atan
   等改用 `_fma` 变体（`ifunc-fma.h`）。所以 FMA 属于热点形式，性能按 12.2 节在新 profile 下单独测。
 - **F16C**：VCVTPH2PS 把半精度转为单精度，结果精确。VCVTPS2PH 按 imm8[1:0] 选择舍入方式，
@@ -842,7 +848,13 @@ regions 中，VEX.256 形式都走完整 reload 的 `ir_avx_continue`。glibc �
 中 FMA 与 F16C 走完整 reload 的 `ir_avx_continue`，VEX.256 的 FMA 形式与 F16C 在 Tier-0 和 page tier
 中单步执行。
 
-### 12.3 最终验收
+P12 的测量（14 节 P12 第一部分）：x86-64-v3 下 Alpine 启动到登录与 x86-64-v2 相同；glibc 的字符串函数持平
+或更快（strlen 与 3936 字节的 memcpy 快约 30%）；libm 的 `_fma` 版本比 SSE2 版本慢 1.3–2.1 倍（exp 1.28、
+log 1.64、sin 2.06、pow 1.92），因为 FMA 在软件中精确计算，即使有快路径，每条仍约 20 ns，而 SSE2 的乘法和加法
+在编译代码中各约 1 ns。所以 libm 密集的负载在 x86-64-v3 下超出预算，默认 CPU 因此不变（Q1）。余下的选择：
+宿主支持 relaxed-simd 并且检测到它的 `madd` 确实融合时，用它做 FMA。这样结果仍然精确，各宿主之间也一致（不
+融合时走现有的精确路径），但 9.3 节目前禁止使用它，需要重新决定。测量中还发现 x64 解释器的 REP MOVS/STOS
+跨页时逐元素复制，开放 AVX 后 glibc 的 memcpy、memset 更常走到那里，已一并修正（14 节 P12 第一部分发现四）。
 
 - [ ] 机器可读 forms 清单完整，所有目标形式具有实现和独立测试归属，无未解释缺口。
 - [ ] SSSE3 MMX/XMM、SSE4.1/4.2、AVX/AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE 的
@@ -2494,3 +2506,140 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   的这一行随本阶段提交。另外 55 个通过；需要 `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本阶段后
   运行，通过。主分支其间多了 `d92705b7`（`tier0_fuzz.mjs` 的改进，不涉及本阶段的文件），加入本阶段后
   `make ir-tier0-tests` 也在主工作树中运行，通过。
+
+### P12 第一部分：Linux x86_64 真实客体验收，以及它发现的问题（2026-10-08）
+
+- **范围**：11.3 节的 Linux 部分：x86-64-v3 的整体验收（glibc 的级别、glibc-hwcaps、IFUNC 选中的实现及其结果），
+  YMM 状态在上下文切换、信号和迁移中的保持，OSXSAVE 关闭时的负例；以及验收中发现的四个问题（启动变慢、libm
+  变慢、vCPU worker 下的非对齐读取、REP MOVS/STOS 逐元素复制）的修正。
+- **验收方法**：
+  - `tests/x64/linux_glibc.mjs`（`linux_boot.mjs` 的 `X64_LINUX_GLIBC=1`）：P0 用过的 Ubuntu 24.04 glibc 2.39
+    （`libc6_2.39-0ubuntu8.9_amd64.deb`，按 SHA-256 固定，没有本地副本时从 Launchpad 下载）的 ld.so、libc 和
+    libm，连同 `linux_glibc_probe.c` 一起放进 Alpine x86_64（它本身用 musl），用 glibc 的 ld.so 以
+    `--library-path` 运行。探针链接这三个库和 `libhwprobe.so`（`linux_hwprobe.c`，基线构建在库目录，
+    `-march=x86-64-v3` 构建在 `glibc-hwcaps/x86-64-v3`；后者确实含 FMA 和 AVX2 指令，前者都没有，由测试检查
+    反汇编）。都用 clang 与 rust-lld 交叉构建，不需要 glibc 头文件。
+  - 探针报告：`ld.so --help` 的 x86-64-v2/v3/v4 是否 “supported, searched”；ld.so 装入的是哪个
+    `libhwprobe.so` 及其计算结果；64 个 IFUNC（libc 的字符串函数，libm 的 sin/cos/expf/fma 等，以及用
+    `dlvsym` 取得的 `__exp_finite` 等，它们指向 libm 内部分派的 exp/log/pow）选中的实现在库中的偏移；字符串
+    函数在长度 0–300、64 种对齐、字符串紧贴未映射页之前、重叠复制等用例上的结果散列；16 个 libm 函数在 4096 个
+    输入（含特殊值）上的结果散列；以及 exp、log、sin、pow、strlen、memchr、memcpy（3936 字节与 16 KiB，都不对齐
+    且跨页）和 memset（3936 字节）的耗时。
+  - 检查：主机用 `.eh_frame` 找到每个偏移所在的函数，反汇编判断它用 YMM（AVX2 版本）还是 FMA；有 AVX2、BMI1、
+    BMI2 和 LZCNT 时 21 个字符串函数必须是 AVX2 版本，有 FMA 时 18 个 libm 函数必须是 FMA 版本，没有 AVX2 时
+    任何 IFUNC 都不能选到用 YMM 或 FMA 的实现。同一个探针先在 QEMU 中以相同能力运行（`-cpu` 由能力列表生成，
+    厂商、family、model 与 v86 相同，使 glibc 的调优选择一致），v86 的 IFUNC 选择与全部结果散列必须与它相同。
+  - `linux_probe.c` 增加 `X64_PROBE_YMM`：内核开启 AVX 时，2 倍于 CPU 数的线程各在全部 YMM 寄存器（64 位 16 个，
+    兼容模式 8 个）放入指纹，在一条 asm 语句内依次经过系统调用、`sched_yield`、迁移到另一个 CPU、处理函数改写
+    YMM 的实时信号、被其他线程抢占的自旋，然后逐字节比较。32 位探针在兼容模式下同样运行。
+  - `linux_boot.mjs`：传 `cpu_type: "x86_64"`（LZCNT 只属于 x64 配置）；命令行有 `noxsave` 时按内核关闭
+    XSAVE 处理（依赖 XSAVE 的能力视为不可用）；记录启动到登录提示的时间（`X64_LINUX_LOGIN_MS`）；单步统计把
+    VEX 指令按 L、pp、map 和操作码分开（原先只记 C4/C5）。
+  - 新目标 `make x64-glibc-tests`：page tier 下 6 种配置：x86-64-v3 加 XSAVE 家族单核、双核并在探针运行中做
+    快照保存与恢复、双核并且第二个核在 vCPU worker 中（`X64_PARALLEL=1`，并行构建），只有 AVX，x86-64-v2，
+    以及 x86-64-v3 加 `noxsave`。
+- **客体结果**（page tier，release 构建；每种配置先在 QEMU 中以相同能力运行同一探针）：
+  - x86-64-v3 加 XSAVE 家族，单核：ld.so 报告 x86-64-v2、x86-64-v3 受支持（x86-64-v4 不受支持），装入
+    `glibc-hwcaps/x86-64-v3` 下的 `libhwprobe.so`；64 个 IFUNC 中 27 个选中 AVX2 版本、23 个选中 FMA 版本（检查
+    要求的 21 个与 18 个都在其中），选择与全部结果散列与 QEMU 相同；YMM 探针在 64 位（16 个寄存器）与兼容模式
+    （8 个）下各 2 个线程、80 步、16 次信号，没有一个字节改变。
+  - 同样能力，双核：64 位与 32 位探针运行中三次保存并恢复整机（V7 流、V6 缓冲、V7 流，各约 230 MB），结果同上，
+    YMM 探针各 4 个线程、160 步、32 次信号。
+  - 同样能力，双核，第二个核在 vCPU worker 中：结果同上（修正前 printf 的输出错乱，见发现三）。
+  - 只开 AVX（另有 SSSE3、SSE4.1/4.2 与 XSAVE）：ld.so 只报告 x86-64-v2，装入基线的 `libhwprobe.so`，没有 IFUNC
+    选中用 YMM 或 FMA 的实现，与 QEMU 相同；YMM 探针照常通过（它只用 AVX 的指令，信号处理函数用 VCMPPS 与
+    VXORPS 改写 YMM）。
+  - x86-64-v2：同样只有 x86-64-v2 与基线的库，YMM 探针报告没有 AVX。
+  - x86-64-v3 加 `noxsave`：内核不置 CR4.OSXSAVE，依赖 XSAVE 的能力都不可用，ld.so 只报告 x86-64-v2，IFUNC 的
+    选择与结果与同样命令行的 QEMU 相同，YMM 探针报告没有 AVX。
+  - QEMU 一侧：QEMU 10.2 以 `qemu64` 加能力位运行，需要另加 POPCNT、CX16、LAHF_LM，否则 glibc 不报告
+    x86-64-v2；用 v86 的厂商与 family/model 时，只有 XSAVE 而没有 XSAVEOPT 的 QEMU 客体内核在初始化 XSAVE 时
+    挂起，所以 QEMU 有 XSAVE 时总加上 XSAVEOPT（内核的上下文切换格式不影响探针看到的结果）。
+- **发现一：x86-64-v3 下 Linux 启动慢 75%**。启动到登录提示 x86-64-v2 为 24.9 s，x86-64-v3 为 43.5 s（只开 AVX
+  为 25.2 s）。单步统计显示 RORX 单步 1.2 亿次，其后是 ymm 的按立即数移位（0F 72、73）、VPALIGNR、VPSHUFD、
+  VINSERTI128、VPERM2I128：内核有 AVX2 和 BMI2 时选用 SHA-256/512 的 `*_transform_rorx` 实现（如校验模块签名），
+  这些形式在 page tier 没有模板。5.1 节的热点清单只取自 glibc，漏掉了内核的这条路径。page tier 现在为它们生成
+  模板：RORX（`BmiOp::Rorx`，不改标志），VPSRLW/D/Q、VPSRAW/D、VPSLLW/D/Q、VPSRLDQ/VPSLLDQ ymm, imm8（两半各自
+  移位），VPSHUFD/HW/LW ymm 与 VPALIGNR ymm（两半各自），VINSERTF128/I128（`Op::Vinsert128`），VPERM2F128/I128
+  （`Op::Vperm2`）。之后启动中不再有 VEX 指令单步；空闲机器上交替测两次，到登录提示 x86-64-v2 为 24.9 s、
+  24.8 s，x86-64-v3 加 XSAVE 家族为 24.4 s、24.8 s。
+- **发现二：x86-64-v3 下 libm 变慢**。glibc 选用 libm 的 `_fma` 版本后，每条 FMA 都调用 SoftFloat。P11 的构建中
+  只含 FMA 的循环为 25 MIPS（VADDSD 的同样循环为 994 MIPS）。`simd_fp::fused` 现在先走快路径
+  （`fused_fast`）：舍入方式为就近时，双精度用 Boldo 与 Melquiond 的方法（Dekker 精确乘积、TwoSum 精确加上
+  加数、低位部分按舍入到奇数相加，再就近舍入一次），要求操作数是规格化数且 |x|、|y| 在 2^±450、|z| 在 2^±900
+  之内，使所有中间值都是规格化数；单精度在双精度中精确相乘，按舍入到奇数相加后再舍入到单精度（结果过小或溢出时
+  不走快路径）。只可能出现精度异常：由 TwoSum 的余项精确判定，未屏蔽且不精确时交给精确路径产生 #XM。三个引擎都
+  经过这里。只含 FMA 的循环升到 41 MIPS；空 helper 时为 361 MIPS，剩下的时间是这一串相互依赖的浮点运算本身。
+  glibc 探针中每个函数取十次中最快的一次；空闲机器上 x86-64-v2、只开 AVX、x86-64-v3 轮流各测 4 次（已含发现四
+  的修正），中位数（ms）：
+
+  | | exp | log | sin | pow | strlen | memchr | memcpy | memcpy 16 KiB | memset |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | x86-64-v2 | 7.70 | 5.31 | 7.25 | 9.86 | 2.65 | 0.72 | 3.36 | 3.30 | 1.01 |
+  | 只开 AVX | 5.77 | 5.89 | 7.74 | 9.89 | 2.67 | 1.00 | 1.43 | 1.14 | 1.01 |
+  | x86-64-v3 | 9.86 | 8.68 | 14.91 | 18.96 | 1.93 | 0.95 | 2.28 | 1.23 | 1.03 |
+  | v3 比 v2 | 1.28 | 1.64 | 2.06 | 1.92 | 0.73 | 1.33 | 0.68 | 0.37 | 1.01 |
+
+  x86-64-v3 下 libm 的 `_fma` 版本仍慢 1.3–2.1 倍，超出 12.2 节的预算（见 12.2 节与 Q1）；字符串函数持平或更快
+  （16 KiB 的 memcpy 用 REP MOVSB）。memchr 每次落在约 0.65 ms 或约 1.1 ms 两档之一，三种配置都如此，它们的差别
+  在噪声以内。只测一次时各次差别很大（同一配置的 exp 从 12.6 到 23.9 ms），所以改为十次取最快、多次取中位数。
+  基准套件中 P12 的构建与 P11 的相比总分 1.002，旧 profile 的负载不受影响。
+- **发现三：vCPU worker 下 32 字节的非对齐读取只复制了 8 字节**。x86-64-v3 加并行 vCPU worker
+  （`X64_PARALLEL=1`，2 核）时 glibc 探针的 printf 输出错乱（格式串被原样打印、字符错位），后来连 `uname -m`
+  的输出也错；不开 worker、只用解释器或只开 x86-64-v2 时都正常。并行构建中客体内存经对齐的原子操作访问，非对齐
+  读取由访问缓存的内联代码复制到 `pages::BOUNCE` 再读。P6 第三部分把 BOUNCE 扩到 32 字节、慢路径也复制 32
+  字节，但生成代码中的内联复制只处理到 16 字节，32 字节的读取（VEX.256 的内存操作数）只复制前 8 字节，后 24
+  字节是上一次读取留下的。glibc 的 AVX2 memcpy、strchrnul 正是这样读取。内联复制现在按大小复制 8、16 或 32
+  字节。`tests/x64/avx.mjs` 增加并行构建下的热点循环（双核，另一个核在 vCPU worker 中等待 SIPI，循环由引导处理器
+  的编译代码执行）：先以对齐读取让数据页进入访问缓存（只有非对齐读取时它不进缓存，不会走到这段代码），再做
+  非对齐的 128 与 256 位读取，与 QEMU 比较；未修正的构建上它在 debug 与 release 下都失败。
+  `x64-glibc-tests` 的 vCPU worker 配置即上文的第三种。
+- **发现四：x64 解释器的 REP MOVS/STOS 逐元素复制**。只开 AVX 以及 x86-64-v3 加 `noxsave` 时，glibc 探针的
+  memcpy 比 x86-64-v2 慢约 20 倍（67–69 ms 对 3.3 ms；修正后只开 AVX 时为 1.4 ms，见发现二的表）。v86 的 CPUID
+  是 family 6 model 7，glibc 把 CPUID 报告 AVX 的这种处理器当作 Core i3/i5/i7，置 Fast_Unaligned_Copy，memcpy
+  因此改用 `__memmove_sse2_unaligned_erms`：2 KiB 以上用 REP MOVSB（AVX2 版本从 4 KiB 起；memset 的 ERMS 版本
+  从 2 KiB 起用 REP STOSB）。默认的 x64 配置没有 SSSE3，glibc 同样选这个版本。page tier 只在两个操作数都不跨页、
+  方向向前时内联整段复制，否则单步进入解释器的 `bulk_string`；后者按页分块，块内却对每个元素调用一次 memmove，
+  每字节约 8.5 ns。现在块内没有元素读到先前元素的写入时，整块一次复制（与 `cpu::string` 的判断相同：向前复制时
+  目的不在源的范围内开始，向后复制时源不在目的的范围内开始），STOS 一次填充；会读到时仍逐元素复制（LZ 式的
+  回引）。page tier 中跨页的 REP MOVSB，3936 字节从 33.8 µs 降到约 0.5 µs，16 KiB 从 138 µs 降到 1.3 µs，3936
+  字节的 REP STOSB 从 12.9 µs 降到 1 µs 以下。这不是本计划的指令，但开放 AVX 后 glibc 的 memcpy、memset 更常走到
+  这里（x86-64-v3 下 4 KiB 以上的复制也走这里），默认配置下 2 KiB 以上跨页的复制和填充同样变快。新测试
+  `tests/x64/rep_strings.mjs`（`x64-differential-tests`）与 QEMU 比较 452 例，解释执行与 page tier 各一遍：元素
+  宽度 1、2、4、8 字节，两个方向，一个元素到超过一页（解释器分几步完成），源与目的的距离取元素跨度附近的各个
+  值；操作数在 4 KiB 页中，各页映射到打乱次序的物理页，与进程的内存一样。
+- **快路径的验证**：`cargo test cpu::simd_fp::tests` 在主机上把 2000 万个双精度和 2000 万个单精度用例与硬件 FMA
+  （`mul_add`）逐位比较，精度异常与 Boldo–Muller 的精确误差（ErrFma）或精确的 TwoSum 比较；用例包括相消、
+  粘滞位，以及专门构造的离中点只差一点的和（x × RN(2^e / x) 与末位为 2^(e+1) 的加数相加；单精度用 3a 这样的
+  中点加远小于它的加数）。去掉舍入到奇数时两个测试立即失败（只用随机用例时不会失败，见下）。
+- **变异测试**：植入 26 个错误，全部检出：
+  - FMA 快路径（9 个）：舍入到奇数的方向反了；准入范围放宽到指数 ±1000；不精确只看第一次 TwoSum 的余项；
+    单精度不排除过小的结果；未屏蔽的精度异常不交给精确路径；不检查舍入方式；不置 PE；精确零的符号；取反
+    乘积时改成取反加数。
+  - page tier（11 个）：ymm 按立即数移位只处理低半、目的取 ModRM.reg、计数边界差一；VPALIGNR ymm 的两个源
+    对调；VPSHUFD ymm 的 imm8；VINSERT*128 的高低半对调、保留的一半取自目的；VPERM2*128 不清零、选错一半；
+    RORX 的方向与 64 位计数的掩码。
+  - REP MOVS/STOS 的整块复制（6 个）：不判断元素间的读写重叠；两个方向的判断对调；向前复制的目的落在源的最后
+    一个元素之内时漏判；向后复制时块的起点算错；STOSQ 只写低 32 位；STOSW 少写第一个元素。都由
+    `tests/x64/rep_strings.mjs` 检出。
+  - 第一轮 VPALIGNR 源对调的变异存活：`tests/x64/avx.mjs` 的 imm8 取 n × 37 + 11，VPALIGNR 的 imm8 多数不小于
+    32（结果全零），按立即数移位的计数也多数超过元素宽度。现在 `tests/x64/avx.mjs` 与 `tests/rust/avx.mjs`
+    给移位以 0–19 的计数，给 VPALIGNR 以 0–35 的 imm8，之后检出；新增的计数边界变异也由它检出。
+- **其他**：`tests/x64/xsave.mjs` 的 page tier 一遍只执行一次，page tier 不会编译这些代码；page tier 没有
+  XSAVE 家族的模板（它们单步进入 x64 解释器，即解释执行一遍测的代码），真实客体中内核用 XSAVES/XRSTORS 做的
+  上下文切换走的正是这条单步路径，所以不另加循环。
+  - 无 `simd128` 的构建（`build/v86-fallback.wasm`）上，`tests/rust/bmi.mjs` 与 `tests/rust/fma.mjs` 的全部用例
+    通过；后者末尾按 Tier-0 模板集合计数的检查原先假定有 SIMD 模板，现在没有 Wasm SIMD 时期望全部单步。
+  - eslint：本计划的测试中有两处 setter 返回值（`tests/rust/avx.mjs`、`tests/x64/avx.mjs`）、一个驼峰的导入名
+    （`tests/rust/avx_model.mjs`）和一个文件末尾的空行（`tests/rust/sse_fp_cases.mjs`），一并修正。仓库中其他
+    几处 eslint 错误不属于本计划，另行处理。
+- **回归**：在只含本计划改动的工作树（P11 的提交 `8d72c755` 加本阶段）中运行两轮。本阶段中途（`p12-batch-a`、
+  `p12-batch-b`）：P11 的 58 个目标加 `x64-glibc-tests`，除需要 `images/` 的 `api-tests`、`jitpagingtests` 外都
+  通过，只有 `x64-glibc-tests` 只开 AVX 的一种挂在 QEMU 一侧（见客体结果中 QEMU 的一条），改后通过。全部修正
+  之后（`p12-final-a`、`p12-final-b1`、`p12-final-b2`、`p12-final-c`）：同样这些目标，加上 `v86-parallel.wasm`、
+  `vcpu-worker.js` 的构建以及 `highmem-tests`、`x64-multicore-tests`（REP MOVS/STOS 的修改涉及它们），
+  `api-tests`、`jitpagingtests` 用主工作树 `images/` 的副本在同一工作树中运行，共 63 个，除 `highmem-tests` 外
+  都通过。`highmem-tests` 停在 `tests/smp/virtio_high_dma.mjs`：它在 P11 的提交上同样失败（测试替身的 PCI
+  对象缺少 PCIe 热插拔加入的 `absent`），与本计划无关，另行处理；这个目标的其余四个文件单独运行都通过。
+  `tests/x64/avx.mjs` 在 debug 构建上起初失败：并行构建的一段只给了一个核，而 debug 构建断言并行执行至少有两个
+  核；改为两个核（另一个核在 vCPU worker 中等待 SIPI）后 debug 与 release 都通过，未修正的构建上两者都失败。

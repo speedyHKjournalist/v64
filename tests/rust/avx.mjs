@@ -104,7 +104,7 @@ function initial(n, c)
     // (ECX of VPCMPESTRI/VPCMPISTRI and the general-purpose destinations: out[0..4])
     s.set_gpr = (r, value) => s.out.set(le(value & mask(32), 4));
     // (the flags: out[4..8], those that set them)
-    Object.defineProperty(s, "flags", { set: value => s.out.set(le(BigInt(value), 4), 4) });
+    Object.defineProperty(s, "flags", { set: value => { s.out.set(le(BigInt(value), 4), 4); } });
     return s;
 }
 /** Case `n`'s XRSTOR area: MXCSR, XMM0-7 (those of `registers` instead)
@@ -425,8 +425,11 @@ function form_case(f, n)
     const at = f.aligned ? 16 * (n & 1) : n % 17;
     // (the immediate shifts: VEX.vvvv is the destination)
     const vvvv = f.kind === "shift_imm" ? d : has_vvvv(f, memory) ? v : 0;
-    // (every imm8 in turn over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored)
-    const imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
+    // (every imm8 in turn over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored;
+    // the shifts by imm8 and VPALIGNR mostly counts below the element's or the
+    // operand's size, beyond which the result is 0)
+    const imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : f.kind === "shift_imm" ? (n * 7 + 1) % 20 :
+        f.name === "vpalignr" ? (n * 7 + 3) % 36 : n * 37 + 11 & 255;
     const store = STORES.includes(f.kind);
     const address = memory ? (store ? DEST : SOURCE) + n * SPAN + at : undefined;
     const r = GPRS[n % 7];

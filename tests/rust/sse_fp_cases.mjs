@@ -273,4 +273,3 @@ export function expect(form, mxcsr, a, b, imm8, width = 128)
     const { mxcsr: after, fault } = fp.finish();
     return { result, after, fault };
 }
-

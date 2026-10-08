@@ -645,35 +645,154 @@ pub unsafe fn fused<const N: usize>(
     else {
         4
     };
+    // (the operands of lane `i` of half `h` in the order x × y + z, and the
+    // negations of the product and the addend)
+    let operands = |h: usize, i: usize| {
+        let (a, b, c) = (
+            lane(destination[h], i, double),
+            lane(second[h], i, double),
+            lane(third[h], i, double),
+        );
+        let (x, y, z) = match op >> 4 {
+            9 => (a, c, b),
+            0xA => (b, a, c),
+            _ => (b, c, a),
+        };
+        let even = i % 2 == 0;
+        let negations = match operation {
+            6 => (false, even),
+            7 => (false, !even),
+            8 | 9 => (false, false),
+            0xA | 0xB => (false, true),
+            0xC | 0xD => (true, false),
+            _ => (true, true),
+        };
+        (x, y, z, negations)
+    };
+    // The fast path (fused_fast) with rounding to nearest: when every lane
+    // takes it, only the precision exception can arise, and it is masked or
+    // the result exact (else the exact path raises it)
+    let mxcsr = *gp::mxcsr as u32;
+    if mxcsr & 0x6000 == 0 {
+        let mut result = destination;
+        let mut inexact = false;
+        let sign = sign_mask(double);
+        'fast: {
+            for h in 0..N {
+                for i in 0..lanes {
+                    let (x, y, z, (negate_product, negate_addend)) = operands(h, i);
+                    let x = if negate_product { x ^ sign } else { x };
+                    let z = if negate_addend { z ^ sign } else { z };
+                    let Some((v, lane_inexact)) = fused_fast(x, y, z, double)
+                    else {
+                        break 'fast;
+                    };
+                    inexact |= lane_inexact;
+                    result[h] = set_lane(result[h], i, double, v);
+                }
+            }
+            if inexact && mxcsr & (PE << 7) == 0 {
+                break 'fast;
+            }
+            if inexact {
+                *gp::mxcsr |= PE as i32;
+            }
+            return Ok(result);
+        }
+    }
     let mut fp = Fp::new();
     let mut result = destination;
     for h in 0..N {
         for i in 0..lanes {
-            let (a, b, c) = (
-                lane(destination[h], i, double),
-                lane(second[h], i, double),
-                lane(third[h], i, double),
-            );
-            let (x, y, z) = match op >> 4 {
-                9 => (a, c, b),
-                0xA => (b, a, c),
-                _ => (b, c, a),
-            };
-            let even = i % 2 == 0;
-            let (negate_product, negate_addend) = match operation {
-                6 => (false, even),
-                7 => (false, !even),
-                8 | 9 => (false, false),
-                0xA | 0xB => (false, true),
-                0xC | 0xD => (true, false),
-                _ => (true, true),
-            };
+            let (x, y, z, (negate_product, negate_addend)) = operands(h, i);
             let v = fp.fused(x, y, z, double, negate_product, negate_addend);
             result[h] = set_lane(result[h], i, double, v);
         }
     }
     fp.finish()?;
     Ok(result)
+}
+
+/// `a` + `b` and its rounding error (Knuth's TwoSum: exact in rounding to
+/// nearest without overflow)
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let b_part = s - a;
+    (s, (a - (s - b_part)) + (b - b_part))
+}
+/// `a` × `b` and its rounding error (Dekker's product with Veltkamp's split:
+/// exact when no intermediate overflows or underflows)
+fn two_product(a: f64, b: f64) -> (f64, f64) {
+    let split = |v: f64| {
+        let c = 134217729.0 * v;
+        let high = c - (c - v);
+        (high, v - high)
+    };
+    let p = a * b;
+    let ((ah, al), (bh, bl)) = (split(a), split(b));
+    (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+}
+/// `s` + `error` (TwoSum's result and error) rounded to odd in double
+/// precision: `s`, or its neighbour on the error's side when the sum is not
+/// exact and `s` is even (no underflow: `s` is not zero then)
+fn round_to_odd(s: f64, error: f64) -> f64 {
+    if error == 0.0 || s.to_bits() & 1 == 1 {
+        s
+    }
+    else if (error > 0.0) == (s > 0.0) {
+        f64::from_bits(s.to_bits() + 1)
+    }
+    else {
+        f64::from_bits(s.to_bits() - 1)
+    }
+}
+/// One FMA lane (`x` × `y` + `z`, signs already applied) with host
+/// arithmetic, rounded to nearest; None where the exact path (Fp::fused)
+/// decides. Double precision: Boldo and Melquiond's emulation ("Emulation of
+/// a FMA and correctly rounded sums: proved algorithms using rounding to
+/// odd", IEEE Transactions on Computers 57(4), 2008): the exact product as two
+/// doubles, the addend added to its high part exactly, the low parts summed
+/// rounding to odd, then one rounding to nearest. It needs every
+/// intermediate value normal, so the operands must be normal with |x| and |y|
+/// within 2^±450 and |z| within 2^±900: the exact result is then zero or at
+/// least 2^-1006, never tiny, and far from overflow. Single precision: the
+/// product is exact in double precision, the sum is rounded to odd there and
+/// then to single precision (RN24(RO53(v)) = RN24(v)); a result that is tiny
+/// or overflows takes the exact path. Returns the result and whether it is
+/// inexact.
+pub fn fused_fast(x: u64, y: u64, z: u64, double: bool) -> Option<(u64, bool)> {
+    if double {
+        let exponent = |v: u64| (v >> 52 & 0x7FF) as i32 - 1023;
+        if !(-450..=450).contains(&exponent(x))
+            || !(-450..=450).contains(&exponent(y))
+            || !(-900..=900).contains(&exponent(z))
+        {
+            return None;
+        }
+        let (high, low) = two_product(f64::from_bits(x), f64::from_bits(y));
+        let (t_high, t_low) = two_sum(f64::from_bits(z), high);
+        let (s, error) = two_sum(t_low, low);
+        let (r, last) = two_sum(t_high, round_to_odd(s, error));
+        Some((r.to_bits(), error != 0.0 || last != 0.0))
+    }
+    else {
+        // (normal operands: an exponent field other than 0 and 255)
+        let normal = |v: u64| (1..255).contains(&(v >> 23 & 0xFF));
+        if !normal(x) || !normal(y) || !normal(z) {
+            return None;
+        }
+        let single = |v: u64| f32::from_bits(v as u32) as f64;
+        let (s, error) = two_sum(single(x) * single(y), single(z));
+        let v = round_to_odd(s, error);
+        let r = v as f32;
+        if v == 0.0 {
+            return Some((0, false));
+        }
+        if !(r.abs() > f32::MIN_POSITIVE && r.is_finite()) {
+            return None;
+        }
+        Some((r.to_bits() as u64, error != 0.0 || r as f64 != v))
+    }
 }
 
 /// VCVTPH2PS (F16C): the `count` (4 or 8) half-precision values in the low
@@ -1089,4 +1208,244 @@ pub unsafe fn convert(
     }
     fp.finish()?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fused_fast, two_sum};
+
+    /// xorshift64
+    struct Random(u64);
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn range(&mut self, low: i32, high: i32) -> i32 {
+            low + (self.next() % (high - low + 1) as u64) as i32
+        }
+    }
+    fn double(sign: u64, exponent: i32, mantissa: u64) -> u64 {
+        sign << 63 | ((exponent + 1023) as u64) << 52 | mantissa & ((1 << 52) - 1)
+    }
+    /// Whether `a` × `x` + `y` differs from its rounding `r` (the host's
+    /// fused multiply-add): the exact error as r2 + r3 (Boldo and Muller,
+    /// "Exact and approximated error of the FMA", IEEE Transactions on
+    /// Computers 60(2), 2011, ErrFma)
+    fn fma_inexact(a: f64, x: f64, y: f64, r: f64) -> bool {
+        let u1 = a * x;
+        let u2 = a.mul_add(x, -u1);
+        let (alpha1, alpha2) = two_sum(y, u2);
+        let (beta1, beta2) = two_sum(u1, alpha1);
+        let gamma = (beta1 - r) + beta2;
+        gamma + alpha2 != 0.0
+    }
+
+    /// The fast path against the host's FMA: double precision operands in
+    /// its whole range, with cancellation (the addend near minus the
+    /// product), sticky bits (an addend below the product's last bit),
+    /// mantissas of few or many bits, and sums just off a midpoint between
+    /// two doubles, where only the rounding to odd gets the last bit right:
+    /// x × RN(2^e / x) is 2^e within a relative 2^-53, added to an addend
+    /// whose last bit is 2^(e+1)
+    #[test]
+    fn fused_fast_double() {
+        let mut random = Random(0x9E37_79B9_7F4A_7C15);
+        let mut taken = 0;
+        for n in 0..20_000_000u64 {
+            let mantissa = |random: &mut Random| match random.next() % 4 {
+                0 => random.next() >> (random.next() % 52),
+                1 => !(random.next() >> (random.next() % 52)),
+                _ => random.next(),
+            };
+            let (ex, ey) = (random.range(-450, 450), random.range(-450, 450));
+            let x = double(random.next() & 1, ex, mantissa(&mut random));
+            let y = double(random.next() & 1, ey, mantissa(&mut random));
+            let product = f64::from_bits(x) * f64::from_bits(y);
+            let (x, y) = if n % 5 == 4 {
+                let x = double(
+                    random.next() & 1,
+                    random.range(-200, 200),
+                    mantissa(&mut random),
+                );
+                (
+                    x,
+                    (f64::from_bits(double(random.next() & 1, ey.clamp(-200, 200), 0))
+                        / f64::from_bits(x))
+                    .to_bits(),
+                )
+            }
+            else {
+                (x, y)
+            };
+            let z = match n % 5 {
+                4 => double(
+                    random.next() & 1,
+                    ey.clamp(-200, 200) + 53,
+                    mantissa(&mut random),
+                ),
+                // (near minus the product: its low bits changed)
+                0 => (-product).to_bits() ^ random.next() >> random.range(12, 63),
+                // (below the product's last bit, or around it)
+                1 => double(
+                    random.next() & 1,
+                    ex + ey + random.range(-110, 2),
+                    mantissa(&mut random),
+                ),
+                2 => double(
+                    random.next() & 1,
+                    (ex + ey + random.range(-60, 60)).clamp(-900, 900),
+                    mantissa(&mut random),
+                ),
+                _ => double(
+                    random.next() & 1,
+                    random.range(-900, 900),
+                    mantissa(&mut random),
+                ),
+            };
+            let Some((r, inexact)) = fused_fast(x, y, z, true)
+            else {
+                continue;
+            };
+            taken += 1;
+            let (a, b, c) = (f64::from_bits(x), f64::from_bits(y), f64::from_bits(z));
+            let expected = a.mul_add(b, c);
+            assert_eq!(r, expected.to_bits(), "{x:016x} × {y:016x} + {z:016x}");
+            assert_eq!(
+                inexact,
+                fma_inexact(a, b, c, expected),
+                "inexact: {x:016x} × {y:016x} + {z:016x}"
+            );
+        }
+        assert!(taken > 19_000_000, "{taken} cases took the fast path");
+    }
+
+    /// Single precision against the host's FMA, every exponent
+    #[test]
+    fn fused_fast_single() {
+        let mut random = Random(0x0123_4567_89AB_CDEF);
+        let mut taken = 0;
+        for n in 0..20_000_000u64 {
+            let single = |random: &mut Random, exponent: i32| {
+                (random.next() & 1) << 31
+                    | ((exponent.clamp(-126, 127) + 127) as u64) << 23
+                    | random.next() & 0x7F_FFFF
+            };
+            let (ex, ey) = (random.range(-126, 127), random.range(-126, 127));
+            let (x, y) = (single(&mut random, ex), single(&mut random, ey));
+            // (n % 3 == 2: 3a for an odd 24-bit a is a midpoint between two
+            // singles, plus an addend far below it, of either sign)
+            let (x, y) = if n % 3 == 2 {
+                let a = (1 << 23 | random.next() % (11184810 - (1 << 23))) | 1;
+                let exponent = random.range(-60, 60);
+                let a = (a as f32 * 2f32.powi(exponent)).to_bits() as u64;
+                (
+                    a,
+                    (3.0f32 * 2f32.powi(random.range(-30, 30))).to_bits() as u64,
+                )
+            }
+            else {
+                (x, y)
+            };
+            let product = f32::from_bits(x as u32) as f64 * f32::from_bits(y as u32) as f64;
+            let z = match n % 3 {
+                0 => {
+                    ((-(product as f32)).to_bits() ^ (random.next() as u32 >> random.range(9, 31)))
+                        as u64
+                },
+                1 => {
+                    let exponent = ex + ey + random.range(-50, 30);
+                    single(&mut random, exponent)
+                },
+                _ => {
+                    let exponent =
+                        (product.abs().log2().floor() as i32 - random.range(26, 60)).max(-126);
+                    single(&mut random, exponent)
+                },
+            };
+            let Some((r, inexact)) = fused_fast(x, y, z, false)
+            else {
+                continue;
+            };
+            taken += 1;
+            let (a, b, c) = (
+                f32::from_bits(x as u32),
+                f32::from_bits(y as u32),
+                f32::from_bits(z as u32),
+            );
+            let expected = a.mul_add(b, c);
+            assert_eq!(r, expected.to_bits() as u64, "{x:08x} × {y:08x} + {z:08x}");
+            // (the product is exact in double precision)
+            let (s, error) = two_sum(a as f64 * b as f64, c as f64);
+            assert_eq!(
+                inexact,
+                error != 0.0 || s as f32 as f64 != s,
+                "inexact: {x:08x} × {y:08x} + {z:08x}"
+            );
+        }
+        assert!(taken > 5_000_000, "{taken} cases took the fast path");
+    }
+
+    /// Outside its range the fast path declines: zeros, denormals,
+    /// infinities, NaNs, large and small exponents
+    #[test]
+    fn fused_fast_declines() {
+        let one = 1.0f64.to_bits();
+        for v in [
+            0,
+            1 << 63,
+            1,
+            0x7FF0_0000_0000_0000,
+            0x7FF8_0000_0000_0000,
+            double(0, 451, 0),
+            double(0, -451, 0),
+        ] {
+            assert_eq!(fused_fast(v, one, one, true), None, "{v:016x}");
+            assert_eq!(fused_fast(one, v, one, true), None, "{v:016x}");
+        }
+        for v in [
+            0,
+            1 << 63,
+            1,
+            0x7FF0_0000_0000_0000,
+            double(0, 901, 0),
+            double(0, -901, 0),
+        ] {
+            assert_eq!(fused_fast(one, one, v, true), None, "{v:016x}");
+        }
+        let one = 1.0f32.to_bits() as u64;
+        for v in [0, 1 << 31, 1, 0x7F80_0000, 0x7FC0_0000] {
+            assert_eq!(fused_fast(v, one, one, false), None, "{v:08x}");
+            assert_eq!(fused_fast(one, one, v, false), None, "{v:08x}");
+        }
+        // (tiny or overflowing single results)
+        let tiny = f32::MIN_POSITIVE.to_bits() as u64;
+        assert_eq!(
+            fused_fast(
+                tiny,
+                (0.5f32).to_bits() as u64,
+                (0.0001f32 * f32::MIN_POSITIVE).to_bits() as u64,
+                false
+            ),
+            None
+        );
+        let max = f32::MAX.to_bits() as u64;
+        assert_eq!(fused_fast(max, (2.0f32).to_bits() as u64, one, false), None);
+        // (an exact zero: +0 in rounding to nearest)
+        assert_eq!(
+            fused_fast(one, one, (-1.0f32).to_bits() as u64, false),
+            Some((0, false))
+        );
+        assert_eq!(
+            fused_fast(
+                1.0f64.to_bits(),
+                1.0f64.to_bits(),
+                (-1.0f64).to_bits(),
+                true
+            ),
+            Some((0, false))
+        );
+    }
 }
