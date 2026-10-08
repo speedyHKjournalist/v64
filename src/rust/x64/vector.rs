@@ -2132,7 +2132,49 @@ impl avx::Machine for Avx<'_> {
         state::write_flags64(state::read_flags64() & !0x8D5 | flags as u64);
     }
 }
+/// The x64 engine's operands of a BMI1 or BMI2 instruction (cpu::bmi)
+struct Bmi<'a>(&'a Decoded);
+impl crate::cpu::bmi::Machine for Bmi<'_> {
+    type Fault = Fault;
+    unsafe fn source(&mut self, bits: u32) -> Result<u64, Fault> {
+        match self.0.rm_register {
+            Some(r) => Ok(state::read_gpr(r as usize) & u64::MAX >> (64 - bits)),
+            None => {
+                let (a, stack) = address(self.0);
+                memory::read(a, bits as u8, stack)
+            },
+        }
+    }
+    unsafe fn gpr(&mut self, r: u8) -> u64 { state::read_gpr(r as usize) }
+    unsafe fn set_gpr(&mut self, r: u8, value: u64, bits: u32) {
+        state::write_gpr(r as usize, value, bits as u8);
+    }
+    unsafe fn set_flags(&mut self, flags: u32) {
+        state::write_flags64(state::read_flags64() & !0x8D5 | flags as u64);
+    }
+}
 pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
+    // BMI1 and BMI2 (exception type 13): general-purpose registers, without
+    // the AVX state's requirements; 64-bit operands with VEX.W1 in 64-bit
+    // mode, otherwise 32-bit
+    if let Some(v) = d
+        .vex
+        .filter(|_| d.encoding.vex & crate::decode_rules::vex::GPR != 0)
+    {
+        use crate::cpu::bmi;
+        let long = d.mode.is_long();
+        let group = d.modrm.map_or(0, |m| m >> 3 & 7);
+        let i = bmi::Instruction {
+            op: bmi::Vex::of(d.opcode, group).ok_or(Fault::ud())?,
+            reg: d.reg.unwrap_or(0),
+            vvvv: v.vvvv & if long { 15 } else { 7 },
+            bits: if long && v.w { 64 } else { 32 },
+            imm8: d.immediate.map_or(0, |i| i.value as u8),
+        };
+        bmi::execute(&mut Bmi(d), &i)?;
+        state::write_rip(d.next.0);
+        return Ok(true);
+    }
     if let Some(v) = d.vex {
         let mut machine = Avx(d);
         avx::check(&mut machine)?;

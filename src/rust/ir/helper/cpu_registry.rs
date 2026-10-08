@@ -73,7 +73,8 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_xsave"
         | "ir_xsavec"
         | "ir_xsaveopt"
-        | "ir_xsaves" => 2,
+        | "ir_xsaves"
+        | "ir_bmi_reg_continue" => 2,
         "ir_invalid_form"
         | "ir_arpl_mem"
         | "ir_movnti"
@@ -101,6 +102,7 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_x87_reg_continue"
         | "ir_x87_reg"
         | "ir_crc32_mem_continue"
+        | "ir_bmi_mem_continue"
         | "ir_avx_continue" => 4,
         "ir_mmx_mem"
         | "ir_sse_fp_mem_continue"
@@ -126,6 +128,7 @@ fn abi(name: &str) -> HelperAbi {
                 | "ir_sse_fp_reg_continue"
                 | "ir_sse_fp_mem_continue"
                 | "ir_crc32_mem_continue"
+                | "ir_bmi_mem_continue"
                 | "ir_avx_continue"
                 | "ir_avx_fp_reg_continue"
         )
@@ -347,6 +350,7 @@ pub fn preserves_code_on_success(name: &str) -> bool {
             | "ir_mmx_xmm_continue"
             | "ir_x87_reg_continue"
             | "ir_crc32_reg_continue"
+            | "ir_bmi_reg_continue"
     )
 }
 
@@ -377,6 +381,7 @@ fn scalar_reload(name: &str) -> bool {
             "ir_x87_reg_continue"
                 | "ir_mmx_reg_continue"
                 | "ir_crc32_reg_continue"
+                | "ir_bmi_reg_continue"
                 | "ir_read_cr_continue"
                 | "ir_read_dr_continue"
                 | "ir_cpuid_continue"

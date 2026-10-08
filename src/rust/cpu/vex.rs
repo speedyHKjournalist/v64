@@ -69,6 +69,30 @@ pub unsafe fn run(first: u8, byte1: u8) {
     else {
         0
     };
+    // BMI1 and BMI2 (exception type 13): general-purpose registers, without
+    // the AVX state's requirements; 32-bit operands outside 64-bit mode
+    if row.vex & crate::decode_rules::vex::GPR != 0 {
+        let reg = modrm.map_or(0, |m| m >> 3 & 7);
+        let address = match memory {
+            Some((offset, segment)) => {
+                return_on_pagefault!(get_seg_prefix(segment)).wrapping_add(offset)
+            },
+            None => 0,
+        };
+        let i = crate::cpu::bmi::Instruction {
+            op: crate::cpu::bmi::Vex::of(row.opcode, reg).unwrap(),
+            reg,
+            vvvv: v.vvvv,
+            bits: 32,
+            imm8,
+        };
+        let mut machine = crate::cpu::bmi::Interpreter {
+            rm: modrm.filter(|m| *m >= 0xC0).map(|m| m & 7),
+            address,
+        };
+        let _ = crate::cpu::bmi::execute(&mut machine, &i);
+        return;
+    }
     let mut machine = avx::Interpreter { address: 0 };
     if avx::check(&mut machine).is_err() {
         return;

@@ -447,8 +447,8 @@ const encodings = [
     { opcode: 0x0FBC, os: 1, e: 1, mask_flags: of | sf | af | pf | cf, custom: 1 }, // bsf
     { opcode: 0x0FBD, os: 1, e: 1, mask_flags: of | sf | af | pf | cf, custom: 1 },
     // tzcnt, lzcnt: without the feature F3 is ignored (bsf, bsr)
-    { opcode: 0xF30FBC, os: 1, e: 1, custom: 1, skip: 1, feature: "BMI1", unimplemented: 1 },
-    { opcode: 0xF30FBD, os: 1, e: 1, custom: 1, skip: 1, feature: "LZCNT", unimplemented: 1 },
+    { opcode: 0xF30FBC, os: 1, e: 1, custom: 1, skip: 1, feature: "BMI1" },
+    { opcode: 0xF30FBD, os: 1, e: 1, custom: 1, skip: 1, feature: "LZCNT" },
 
     // note: overflow flag only undefined if shift is > 1
     { opcode: 0x0FA4, os: 1, e: 1, custom: 1, imm8: 1, mask_flags: af | of }, // shld
@@ -923,7 +923,7 @@ for(let i = 0; i < 8; i++)
     for(const byte of [0x60, 0x61, 0x62, 0x63]) encodings.push(sse4(0x660F3A00 | byte, SSE4_2, { imm8: 1 })); // pcmp[ei]str[im]
     // MOVBE (memory only; 66 is the operand size; P10) and CRC32 share 0F 38
     // F0/F1, where F2 selects CRC32 (66 F2 0F 38 F1: r/m16) and F3 is #UD
-    const movbe = { e: 1, custom: 1, skip: 1, refining: "rep", unimplemented: 1, os: 1, reg_ud: 1, feature: "MOVBE" };
+    const movbe = { e: 1, custom: 1, skip: 1, refining: "rep", os: 1, reg_ud: 1, feature: "MOVBE" };
     const crc32 = { e: 1, custom: 1, refining: "rep", feature: SSE4_2 };
     encodings.push(
         { ...movbe, opcode: 0x0F38F0 },

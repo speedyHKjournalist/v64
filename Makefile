@@ -39,6 +39,7 @@ ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit
 	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 s10 s11 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
 	FUZZ_KIND=s12 node tests/ir/differential/tier0_fuzz.mjs 40 2
 	FUZZ_KIND=s13 node tests/ir/differential/tier0_fuzz.mjs 40 2
+	FUZZ_KIND=b node tests/ir/differential/tier0_fuzz.mjs 40 2
 	node tests/ir/differential/sse_fp_tracking.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/tier0_fetch_fault.mjs
 
@@ -1383,6 +1384,11 @@ ir-avx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-releas
 	cargo test ir::avx_tests
 	node tests/ir/differential/avx.mjs
 
+.PHONY: ir-bmi-tests
+ir-bmi-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::bmi_tests
+	node tests/ir/differential/bmi.mjs
+
 .PHONY: ir-mmx-tests
 ir-mmx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::mmx_tests
@@ -1558,6 +1564,17 @@ avx-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debu
 	node tests/rust/avx_fp.mjs build/v86-fallback.wasm
 	node tests/x64/avx.mjs
 	TEST_RELEASE_BUILD=1 node tests/x64/avx.mjs
+
+# BMI1, BMI2, TZCNT, LZCNT and MOVBE (docs/simd-xsave-plan.md P10): the
+# 32-bit engines against a bit-level model of the SDM (release and debug
+# builds), the x64 engine (interpreted, page tier, compatibility-mode Tier-0)
+# against QEMU and the model
+.PHONY: bmi-tests
+bmi-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+	node tests/rust/bmi.mjs
+	node tests/rust/bmi.mjs build/v86-debug.wasm
+	node tests/x64/bmi.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/bmi.mjs
 
 # The legacy SSE exception conditions in the 32-bit engines (docs/simd-xsave-plan.md
 # 3.3, P4a): CR4.OSFXSR for XMM forms only, 16-byte alignment, their order

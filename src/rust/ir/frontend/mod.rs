@@ -1,6 +1,7 @@
 pub(crate) use crate::decode;
 mod avx;
 mod bits;
+mod bmi;
 mod control;
 mod crc32;
 mod exchange;

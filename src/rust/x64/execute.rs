@@ -1136,6 +1136,19 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             }
             state::write_flags64(flags & !CF | ((old >> bit) & CF));
         },
+        // TZCNT and LZCNT (F3 0F BC/BD: rows of their features; BSF and BSR
+        // without): the operand's size for 0, CF
+        0x0FBC | 0x0FBD if d.opcode >> 16 == 0xF3 => {
+            let v = rm(d, w, false)?;
+            let (value, arithmetic) = if op == 0x0FBD {
+                crate::cpu::bmi::lzcnt(v, w as u32)
+            }
+            else {
+                crate::cpu::bmi::tzcnt(v, w as u32)
+            };
+            set_register(d.reg.unwrap(), value, w, rex);
+            state::write_flags64(flags & !ARITH | arithmetic as u64);
+        },
         0x0FBC | 0x0FBD => {
             let v = rm(d, w, false)?;
             if v == 0 {
@@ -1151,6 +1164,16 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             let v = rm(d, w, false)?;
             set_register(d.reg.unwrap(), v.count_ones() as u64, w, rex);
             state::write_flags64(flags & !ARITH | if v == 0 { ZF } else { 0 });
+        },
+        // MOVBE (0F 38 F0: load, F1: store; memory only): one access of the
+        // operand size, its bytes reversed
+        0x0F38F0 if d.opcode == 0x0F38F0 => {
+            let v = crate::cpu::bmi::byte_swap(rm(d, w, false)?, w as u32);
+            set_register(d.reg.unwrap(), v, w, rex);
+        },
+        0x0F38F1 if d.opcode == 0x0F38F1 => {
+            let v = register(d.reg.unwrap(), w, rex);
+            put_rm(d, w, crate::cpu::bmi::byte_swap(v, w as u32))?;
         },
         // CRC32 r32/r64, r/m8 (F2 0F 38 F0) and r/m16/32/64 (F1): the CRC-32C
         // in the low half of the destination, the rest zero; no flags

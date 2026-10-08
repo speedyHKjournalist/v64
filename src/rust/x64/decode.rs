@@ -742,7 +742,7 @@ mod tests {
         }
     }
     #[test]
-    fn three_byte_maps_are_undefined_after_modrm_until_implemented() {
+    fn three_byte_maps_are_undefined_after_modrm_without_their_features() {
         use crate::cpu::features::{ALL, TEST_FEATURES};
         for features in [0, ALL] {
             TEST_FEATURES.with(|f| f.set(features));
@@ -752,11 +752,20 @@ mod tests {
                 ExecutionMode::Protected32,
             ] {
                 let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+                // with MOVBE (P10) its forms decode, their memory operands
+                // whole; F3 at MOVBE/CRC32 stays #UD
+                if features != 0 {
+                    assert_eq!(decode(&[0x0F, 0x38, 0xF1, 0x04, 0x24]).unwrap().opcode, 0x0F38F1);
+                    assert_eq!(decode(&[0x0F, 0x38, 0xF0, 0x00]).unwrap().opcode, 0x0F38F0);
+                }
                 for bytes in [
                     &[0x0F, 0x38, 0xF1, 0x04][..],
                     &[0x0F, 0x38, 0xF0, 0x00],
                     &[0xF3, 0x0F, 0x38, 0xF0, 0x00],
                 ] {
+                    if features != 0 && bytes[0] != 0xF3 {
+                        continue;
+                    }
                     assert_eq!(
                         decode(bytes).unwrap_err(),
                         DecodeError::InvalidOpcode,

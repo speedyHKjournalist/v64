@@ -182,11 +182,11 @@ try
     ];
     await expect_undefined(three_byte);
 
-    // VEX (C4/C5 with a register ModRM byte in protected mode): #UD until the
-    // semantics come, with and without the features, and the AVX forms that
-    // have them (VZEROUPPER) while the AVX state is off (CR4.OSXSAVE, as here;
-    // tests/rust/avx.mjs); so are 66/F2/F3/LOCK before VEX, VEX.vvvv other
-    // than 1111b where it is no operand, the reserved maps and opcodes
+    // VEX (C4/C5 with a register ModRM byte in protected mode): #UD without
+    // the features, and with them the AVX forms while the AVX state is off
+    // (CR4.OSXSAVE, as here; tests/rust/avx.mjs), but ANDN (BMI1, P10: no AVX
+    // state, tests/rust/bmi.mjs); so are 66/F2/F3/LOCK before VEX, VEX.vvvv
+    // other than 1111b where it is no operand, the reserved maps and opcodes
     // without rows
     const vex = [
         [0xC5, 0xF8, 0x77], [0xC4, 0xE1, 0x7C, 0x77],                 // vzeroupper, vzeroall
@@ -206,21 +206,26 @@ try
         assert.equal(word(vm, OUT + 8), 0x12345678, `LDS (${run})`);
     });
     // TZCNT and LZCNT without their features: BSF and BSR
-    const bit_scans = [[0xF3, 0x0F, 0xBC, 0xC1], [0xF3, 0x0F, 0xBD, 0xC1]];
-    await run_all(loop([0xB9, ...u32(0x810000), ...bit_scans[0], 0xA3, ...u32(OUT), ...bit_scans[1], 0xA3, ...u32(OUT + 4)]), undefined, machines,
+    const bit_scans = loop([0xB9, ...u32(0x810000), 0xF3, 0x0F, 0xBC, 0xC1, 0xA3, ...u32(OUT), 0xF3, 0x0F, 0xBD, 0xC1, 0xA3, ...u32(OUT + 4)]);
+    await run_all(bit_scans, undefined, machines,
         (vm, run) => assert.deepEqual([word(vm, OUT), word(vm, OUT + 4)], [16, 23], `F3 BSF, F3 BSR (${run})`));
 
+    // With the features (P10): TZCNT and LZCNT; MOVBE and ANDN run
+    // (tests/rust/bmi.mjs), the other forms stay #UD
     const featured = await create_machines({ cpu_type: "x86_64", cpu_features: "x86-64-v3", cpu_features_unreleased: true });
     try
     {
-        await expect_undefined([...three_byte, ...vex, ...bit_scans], featured);
+        const runs = [[0x0F, 0x38, 0xF0, 0x00], [0xC4, 0xE2, 0x78, 0xF2, 0xC1]].map(form => form.join());
+        await expect_undefined([...three_byte, ...vex].filter(form => !runs.includes(form.join())), featured);
+        await run_all(bit_scans, undefined, featured,
+            (vm, run) => assert.deepEqual([word(vm, OUT), word(vm, OUT + 4)], [16, 8], `TZCNT, LZCNT (${run})`));
     }
     finally
     {
         for(const vm of featured) await vm.destroy();
     }
-    console.log(`PASS: ${featured_forms.length} SSSE3 and SSE4.2 encodings raise #UD without their features; ${three_byte.length} three-byte map and ${vex.length} VEX encodings with and without their features; ` +
-        "LES/LDS with a memory operand; F3 0F BC/BD are BSF/BSR without BMI1/LZCNT and #UD with them until P10");
+    console.log(`PASS: ${featured_forms.length} SSSE3 and SSE4.2 encodings raise #UD without their features; ${three_byte.length} three-byte map and ${vex.length} VEX encodings without their features, all but MOVBE and ANDN also with them; ` +
+        "LES/LDS with a memory operand; F3 0F BC/BD are BSF/BSR without BMI1/LZCNT and TZCNT/LZCNT with them");
 }
 finally
 {

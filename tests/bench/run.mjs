@@ -74,12 +74,14 @@ function load_pe(file) {
     return { entry, parts };
 }
 
-// (a benchmark's cpu_features: the optional CPU features its guest uses)
+// (a benchmark's cpu_features: the optional CPU features its guest uses;
+// cpu_type: the x86-64 profile for its own ones, such as LZCNT)
 async function create(arm, bench) {
     const vm = new V86({
         graphics_adapter: "bochs_vga",
         wasm_path: arm.wasm, memory_size: 128 << 20,
         ...bench.cpu_features ? { cpu_features: bench.cpu_features, cpu_features_unreleased: !!bench.cpu_features_unreleased } : {},
+        ...bench.cpu_type ? { cpu_type: bench.cpu_type } : {},
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });

@@ -39,7 +39,7 @@ const rr = (r, m) => 0xC0 | r << 3 | m;
 
 // FUZZ_KIND=i0..i33 / s0..s13 restricts programs to one instruction kind
 // (s11: SSE floating point over special values, see fp_instruction; s13: VEX
-// forms among legacy ones, see vex_instruction).
+// forms among legacy ones, see vex_instruction; b: BMI, see bmi_instruction).
 const only = process.env.FUZZ_KIND || "";
 const straddle = process.env.FUZZ_STRADDLE === "1";
 function instruction() {
@@ -83,6 +83,33 @@ function instruction() {
             const signed = random() & 1;
             return [0xB9, ...u32(random() | 0x10000), 0x31, 0xD2, 0xF7, rr(6 + signed, 1)];
         }
+    }
+}
+// b: BMI1 and BMI2's VEX forms, TZCNT, LZCNT and MOVBE (P10; Tier-0 has
+// templates for the hot ones of plan 5.1 and steps the others) on registers
+// and [ebx + disp8]
+function bmi_instruction() {
+    // (then a SETcc m8 half the time: a condition right after the flags,
+    // mostly of CF)
+    const setcc = random() & 1 ? [0x0F, 0x90 | (random() & 1 ? pick([2, 3, 6, 7]) : random() % 16), 0x43, disp()] : [];
+    return [...bmi_form(), ...setcc];
+}
+function bmi_form() {
+    const r = reg(), v = reg(), m = reg();
+    const rm = field => random() % 3 ? [rr(field, m)] : [0x43 | field << 3, disp()];
+    const vex = (map, pp, op, field, vvvv) => [0xC4, 0xE0 | map, (~vvvv & 15) << 3 | pp, op, ...rm(field)];
+    switch(random() % 10) {
+        case 0: return vex(2, 0, 0xF2, r, v);                                        // ANDN
+        case 1: return vex(2, 0, 0xF3, 1 + random() % 3, v);                         // BLSR/BLSMSK/BLSI
+        case 2: return [0xB8 | v, ...u32(random() % 40), ...vex(2, 0, 0xF5, r, v)];  // BZHI (index 0-39)
+        case 3: return vex(2, 1 + random() % 3, 0xF7, r, v);                         // SHLX/SARX/SHRX
+        case 4: return [...random() & 1 ? [0xB8 | m, 0, 0, 0, 0] : [], 0xF3, 0x0F, pick([0xBC, 0xBD]), rr(r, m)]; // TZCNT/LZCNT (of 0: CF)
+        case 5: return [...random() & 1 ? [] : [0xF3, 0x0F, pick([0xBC, 0xBD]), 0x43 | r << 3, disp()], 0x66, 0xF3, 0x0F, pick([0xBC, 0xBD]), ...rm(r)]; // (memory, 16-bit)
+        case 6: return [...pick([[], [0x66]]), 0x0F, 0x38, pick([0xF0, 0xF1]), 0x43 | r << 3, disp()]; // MOVBE
+        case 7: return [0xB8 | v, ...u32(random() & 0xFF0F), ...vex(2, 0, 0xF7, r, v)]; // BEXTR
+        case 8: return vex(2, pick([2, 3]), 0xF5, r, v);                             // PEXT/PDEP
+        default: return random() & 1 ? vex(2, 3, 0xF6, r, v)                         // MULX
+            : [0xC4, 0xE3, 0x7B, 0xF0, ...rm(r), random() & 255];                  // RORX
     }
 }
 // SSE floating point (docs/simd-xsave-plan.md 7.4): the arithmetic forms,
@@ -306,7 +333,8 @@ function program() {
         const vector = only ? only.startsWith("s") : !(mix && random() % 5);
         const float = only ? only === "x" : random() % 7 === 0;
         // Single-kind programs still interleave PUSHFD/LAHF to expose FLAGS.
-        body.push(...(only && only !== "s12" && k % 4 === 3 ? [0x9C, 0x8F, 0x43, disp()] : float ? x87() : vector ? simd() : instruction()));
+        body.push(...(only && only !== "s12" && k % 4 === 3 ? [0x9C, 0x8F, 0x43, disp()] : only === "b" ? bmi_instruction() :
+            float ? x87() : vector ? simd() : instruction()));
     }
     // DEC DWORD [ebx + 124]; JNZ top; HLT
     const tail = [0xFF, 0x4B, 124];
@@ -318,8 +346,10 @@ async function machine(tier0) {
     const vm = new V86({
         graphics_adapter: "bochs_vga",
         wasm_path: wasm, disable_jit: !tier0, memory_size: 128 << 20, // reference: the interpreter only
-        // (AVX for s13: CR4.OSXSAVE and XCR0 set in run)
-        cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], cpu_features_unreleased: true,
+        // (AVX for s13: CR4.OSXSAVE and XCR0 set in run; BMI for b, with the
+        // x86-64 profile's LZCNT)
+        cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX", ...only === "b" ? ["BMI1", "BMI2", "LZCNT", "MOVBE"] : []],
+        ...only === "b" ? { cpu_type: "x86_64" } : {}, cpu_features_unreleased: true,
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });
@@ -346,8 +376,9 @@ async function run(m, code, init, page, split) {
     cpu.mem8.set(init.data, DATA);
     cpu.mem8.fill(0, STACK - 0x1000, STACK);
     // (FP programs reload MXCSR, interpreted, at the top: more iterations
-    // let Tier-0 recompile the page with an entry after it)
-    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ["s11", "s12", "s13"].includes(only) ? 20 * ITERATIONS : ITERATIONS, true);
+    // let Tier-0 recompile the page with an entry after it; BMI programs run
+    // longer so that most of them runs compiled)
+    new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ["s11", "s12", "s13", "b"].includes(only) ? 20 * ITERATIONS : ITERATIONS, true);
     cpu.reg32.set(init.regs);
     cpu.reg32[3] = DATA; cpu.reg32[4] = STACK;
     cpu.flags[0] = 2; cpu.flags_changed[0] = 0; cpu.in_hlt[0] = 0;

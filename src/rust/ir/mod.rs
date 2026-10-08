@@ -235,6 +235,10 @@ mod crc32_tests;
 mod avx_tests;
 
 #[cfg(test)]
+#[path = "../../../tests/ir/semantics/bmi.rs"]
+mod bmi_tests;
+
+#[cfg(test)]
 #[path = "../../../tests/ir/semantics/mmx.rs"]
 mod mmx_tests;
 

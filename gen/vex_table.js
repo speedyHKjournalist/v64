@@ -143,7 +143,9 @@ const AVX2_128 = new Set([
     ...GATHERS,
 ]);
 const implemented = form => form.isa[0] === "AVX" && (form.l === "L1" ? AVX_256 : AVX_128).has(form.mnemonic) ||
-    form.isa[0] === "AVX2" && (form.l === "L1" ? AVX2_256 : AVX2_128).has(form.mnemonic);
+    form.isa[0] === "AVX2" && (form.l === "L1" ? AVX2_256 : AVX2_128).has(form.mnemonic) ||
+    // (P10: every BMI1 and BMI2 form)
+    form.isa[0] === "BMI1" || form.isa[0] === "BMI2";
 
 function row(form)
 {

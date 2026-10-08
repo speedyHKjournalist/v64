@@ -18,7 +18,9 @@ const xmm_integer = new Set([0x660f60,0x660f61,0x660f62,0x660f68,0x660f69,0x660f
 function lowering(encoding, operand) {
     const op = encoding.opcode, g = encoding.fixed_g;
     // VEX: the AVX forms through the shared executor (crate::cpu::avx)
-    if(encoding.vex) return encoding.vex.gpr ? "Pending" : "CpuAvxHelper";
+    if(encoding.vex) return encoding.vex.gpr ? "CpuBmiHelper" : "CpuAvxHelper";
+    // TZCNT, LZCNT and MOVBE (P10): the BMI helpers too
+    if([0xF30FBC, 0xF30FBD, 0x0F38F0, 0x0F38F1].includes(op)) return "CpuBmiHelper";
     if(mmx.has(op) || [0xF71,0xF72,0xF73].includes(op) && operand === "reg") return "CpuMmxHelper";
     // PSHUFB and PALIGNR between registers are native; their aligned memory forms use the helper
     if([0x660F3800, 0x660F3A0F].includes(op) && operand === "reg") return "CpuSimdHIR";
@@ -98,6 +100,7 @@ function lowering_tests(encoding, operand) {
     else if(category === "CpuSseFpHelper") suite = "sse_fp";
     else if(category === "CpuCrc32Helper") suite = "crc32";
     else if(category === "CpuAvxHelper") suite = "avx";
+    else if(category === "CpuBmiHelper") suite = "bmi";
     else if(category === "CpuFpStateHelper") suite = "fp_state";
     else if([0xC4,0xC5,0x0FB2,0x0FB4,0x0FB5].includes(op) && operand === "reg") suite = "far_control";
     else if(category === "CpuSimdHIR") suite = op===0x660FF7 ? "simd_masked" : xmm_lane.has(op) ? "simd_lane" : xmm_transfer.has(op) ? "simd_transfer" : xmm_moves.has(op) ? "simd_moves" : xmm_immediate.has(op) ? "simd_immediate" : xmm_shuffle.has(op) ? "simd_shuffle" : "simd_integer";

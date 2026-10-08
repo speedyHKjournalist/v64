@@ -691,6 +691,8 @@ x86-64-v3 通用寄存器指令的模板要点：
   - P6 第二部分新发现（QEMU 10.2）：RCPPS/RSQRTPS（包括 VEX 形式）对非规格化的源给出精确的倒数
     或倒数平方根（不小于 2^63）；SDM 把非规格化的源当作 0.0，结果为 ±∞，v86 与模型都按此实现
     （P4a）。VEX.128 形式也有这一差别，只是用例增多后才遇到；`tests/x64/avx.mjs` 按偏差登记。
+  - P10 新发现（QEMU 10.2）：VEX.vvvv 不是 1111b 的 RORX 不产生 #UD（SDM 规定没有该操作数时 VEX.vvvv
+    必须为 1111b）。`tests/x64/bmi.mjs` 按偏差登记。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
@@ -826,6 +828,10 @@ FP 准入（`NativeFp`）；PCMPxSTRI 不写 XMM，可改用只 reload 标量状
 待改进（P6 登记）：VEX.256 的浮点形式在 Tier-0 中由解释器单步执行，在 page tier 中走 step；在
 regions 中，VEX.256 形式都走完整 reload 的 `ir_avx_continue`。glibc 的 AVX（非 AVX2）热点只有搬运
 与 VZEROALL，这些形式不在热点清单中；用 `-mprefer-vector-width=256` 编译的浮点代码会受影响。
+
+待改进（P10 登记）：regions 中 BMI1/BMI2、TZCNT/LZCNT 与 MOVBE 走 `ir_bmi_reg_continue`/`ir_bmi_mem_continue`
+（寄存器形式只 reload 标量状态）；Tier-0 和 page tier 有热点形式的模板，MULX、PDEP、PEXT、BEXTR、RORX
+与 16 位形式在这两层仍单步执行。
 
 ### 12.3 最终验收
 
@@ -2301,3 +2307,102 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   `ir-fusion-tests` 起初失败：`xstate.rs` 的单元测试里有一个赋值之后不再读取，在 `-D warnings` 下编译失败；
   删去后通过。另外 52 个通过；需要 `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本阶段后
   运行，通过。
+
+### P10 第一部分：BMI1、BMI2、TZCNT/LZCNT 与 MOVBE 的语义（2026-10-08）
+
+- **范围**：9.2 节的全部形式：BMI1 的 ANDN、BEXTR、BLSI、BLSMSK、BLSR（VEX 编码）与 TZCNT，BMI2 的
+  BZHI、MULX、PDEP、PEXT、RORX、SARX、SHLX、SHRX，LZCNT（只在 x64 配置开放），以及只有内存形式的
+  MOVBE（`0F 38 F0/F1`）。能力位在 P1e 已有，仍需 `cpu_features_unreleased`，随 M4 开放。
+- **做法**：
+  - `cpu/bmi.rs` 给出三个引擎共用的结果与标志，按 SDM 各指令的 Operation 实现。SDM 未定义的标志由 v86
+    固定一种取值：AF 为 0，PF 取结果低字节的奇偶，SF 或 OF 未定义时（BEXTR、TZCNT、LZCNT）分别取结果的
+    符号和 0。`execute` 先读 r/m 操作数，故障因此发生在任何寄存器改变之前。MULX 先写 VEX.vvvv（低半），
+    再写 ModRM.reg（高半），两者是同一个寄存器时高半有效。
+  - 32 位解释器：VEX 的 GPR 行（`vex::GPR`）属于异常类型 13，不做 AVX 状态检查；非 64 位模式下操作数
+    恒为 32 位，VEX.W 被忽略。`F3 0F BC/BD` 带能力位的两行是 TZCNT/LZCNT，没有能力时仍按 BSF/BSR 执行。
+    MOVBE 按操作数宽度做一次访问，寄存器形式 #UD。写入标志后清零 `flags_changed`。
+  - IR：新的 lowering 类别 `CpuBmiHelper`，由 `ir_bmi_reg_continue` 和 `ir_bmi_mem_continue` 执行
+    （CpuReload；寄存器形式只 reload 标量状态）。实模式和虚拟 8086 模式下 C4 是 LES，VEX 形式在 helper 中
+    #UD。
+  - x64 引擎（只执行 64 位模式；兼容模式由 32 位解释器执行）：VEX.W1 选 64 位操作数，32 位结果零扩展。
+    page tier 原先把 `F3 0F BC/BD` 都当作 BSF/BSR 编译，现在带能力位的这两行改为 step（模板见第二部分）。
+- **测试**：
+  - `tests/rust/bmi_model.mjs`：独立的 BigInt 位级模型。
+  - `tests/rust/bmi.mjs`（三个 arm 上 1534 项）：每个 VEX 形式 96 例，覆盖寄存器与内存操作数、边界值与
+    随机值、目的与源的别名、MULX 的 EDX。标志检查 SDM 定义的位和 v86 对未定义位的取值，不修改标志的形式
+    检查标志保持不变。TZCNT/LZCNT 与 MOVBE 各测 16 位和 32 位。#UD：VEX.L1、无操作数时 VEX.vvvv 不是
+    1111b、VEX 前有 66/F2/F3/LOCK、寄存器形式的 MOVBE。CR4.OSXSAVE 清零或 CR0.TS 置位时不产生 #UD/#NM。
+    #PF 无副作用，MOVBE 的存储跨入缺页时不写任何字节。没有能力时 CPUID 不报告，TZCNT/LZCNT 为 BSF/BSR，
+    VEX 形式和 MOVBE #UD。
+  - `tests/x64/bmi.mjs`：598 例，覆盖 64 位模式和兼容模式（兼容模式含 VEX.W1 的寄存器形式），与模型和
+    QEMU 比较，QEMU 只比较 SDM 定义的标志；另有 10 个故障用例。BEXTR 和 BZHI 在每种宽度下覆盖全部控制值和
+    索引值。用例循环执行（64 位 200 轮，兼容模式 2000 轮），在解释器、page tier、page tier 加兼容模式的
+    Tier-0 下各运行一遍，并断言编译后的代码确实执行了（第二部分加入断言和第三遍：原先 page tier 一遍
+    没有检查这一点）。QEMU 10.2 对 VEX.vvvv 不是 1111b 的 RORX 不产生 #UD，登记为偏差。
+  - IR：`tests/ir/semantics/bmi.rs` 检查各形式调用对应的 helper、只能用 CPU ABI 编译、没有能力时不调用，
+    并生成 236 个 fixture。`tests/ir/differential/bmi.mjs` 用这些 fixture（优化前后）共 3908 例，与解释器
+    和模型比较：寄存器与内存操作数、MMIO、跨入缺页、恰好到页尾、空段 #GP、CR0.TS/EM 与 CR4.OSXSAVE 无
+    影响、实模式与虚拟 8086 模式。测试还断言 region 本身执行到哪里；否则 region 在入口退出、由解释器补完
+    剩余指令，也能通过比较。
+  - `tests/rust/decode_rules.mjs`：x86-64-v3 配置下 TZCNT/LZCNT 执行，MOVBE 和 ANDN 不再 #UD。IR 与 x64
+    解码器的单元测试原先断言 MOVBE、TZCNT、LZCNT 在实现之前于 ModRM 之后 #UD，现改为：没有能力时如此，
+    有能力时完整解码（包括内存操作数的 SIB 字节）。回归批次中这两个单元测试失败，修正后通过。
+  - 新目标 `make bmi-tests`、`make ir-bmi-tests`。
+- **变异测试**：植入 33 个错误，31 个被检出：
+  - 共用语义（17 个）：ANDN 的操作数次序；BEXTR 起点等于操作数宽度；BLSI 的 CF；BZHI 的 CF 与索引
+    只取低 8 位；MULX 的写入次序与 EDX；PDEP、PEXT 的位次序；RORX 的回绕；SARX 改为逻辑移位；SHLX 的计数
+    模；TZCNT 对 0 的结果；LZCNT 的宽度；计数指令的 CF；PF 的计算范围；没有清零 `flags_changed`。
+  - 32 位解释器（5 个）：BMI 也做 AVX 状态检查；16 位 TZCNT 按 32 位计数；LZCNT 的内存形式执行成
+    TZCNT；16 位 MOVBE 加载写满 32 位；MOVBE 存储不交换字节。
+  - IR（5 个）：不检查实模式/虚拟 8086 模式；操作数宽度恒为 32；VEX.vvvv 只取两位；内存形式不加段基址；
+    VEX 形式不进入 BMI helper。
+  - x64（6 个）：兼容模式下 VEX.W1 选 64 位；CF 没有清除；BMI 也做 AVX 状态检查；TZCNT 不清除旧标志；
+    MOVBE 存储不交换字节；page tier 把 TZCNT 编译成 BSF。
+  - 两个存活：BEXTR 起点等于操作数宽度的变异只在 64 位时有区别，x64 测试原先没有“起点 64、长度非零”的
+    用例；补上之后（并让 BEXTR、BZHI 在每种宽度下取遍控制值和索引值）检出。兼容模式下 VEX.W1 的变异是等价
+    的：x64 引擎只执行 64 位模式，`vector.rs` 中的模式判断恒为真；新增的兼容模式 W1 用例检查 32 位解释器
+    忽略 VEX.W1。
+- **回归**：与第二部分一起进行，见第二部分。
+
+### P10 第二部分：BMI 热点形式在 Tier-0 和 page tier 的原生模板（2026-10-08）
+
+- **范围**：5.1 节热点清单中 P10 的形式：TZCNT、LZCNT（r32、r64）、SHRX/SARX/SHLX r32、BLSMSK
+  r32/r64、BZHI r32/r64、ANDN、BLSR r64，以及 MOVBE r32/r64 的加载。同类的形式一并接入：BLSI、上述形式
+  的另一种宽度、MOVBE 存储。MULX、PDEP、PEXT、BEXTR、RORX 与 16 位形式仍单步执行。
+- **做法**：
+  - Tier-0（32 位操作数）：`Form::Bmi`、`Form::Movbe`。标志沿用逻辑运算的惰性记录（SF、ZF、PF 由结果
+    计算，AF、OF 清零），CF 另行写入，这些形式也不再作为可融合的逻辑运算（ANDN 的 CF 为 0，仍可融合）。
+    VEX 形式在实模式和虚拟 8086 模式下重试，由解释器产生 #UD（每块检查一次）。Tier-0 只编译 32 位代码，
+    所以这个检查只在代码段为 32 位的实模式下起作用；16 位代码由 region 执行，helper 自己检查模式。
+  - page tier（64 位模式）：`Op::Bmi`、`Op::Movbe`。ANDN 直接用 AND 的标志。其余形式立即计算需要的
+    SF/ZF/PF，CF 总是立即计算；其余标志留作 AND 的惰性记录（两个操作数都是结果），这样惰性计算出的值与
+    `cpu::bmi::logic_flags` 相同。page tier 的标志活跃性只是估计，退出、单步或其他代码读取尚在记录中的
+    标志时会重新计算，所以记录必须给出正确的值。BSWAP 与 MOVBE 共用 `byte_swap`。
+- **测试**：
+  - `tests/rust/bmi.mjs`：在 Tier-0 机器上统计每个形式的单步次数，断言模板集合恰好是上述 11 个形式（16 位
+    形式和其他形式单步执行）。新增虚拟 8086 模式和 32 位代码段的实模式：循环先在编译代码中运行，然后落到
+    ANDN（#UD）或 TZCNT（执行）。共 1538 项。
+  - `tests/ir/differential/tier0_fuzz.mjs` 新增 `b` 类：BMI 形式，一半后接 SETcc（多为读 CF 的条件），
+    TZCNT/LZCNT 有一半先把源寄存器清零；程序循环 20 倍于默认的次数。`make ir-tier0-tests` 中运行
+    40 例，另外跑过 300 例和跨页的 100 例。
+  - `tests/x64/bmi.mjs`：page tier 的热点循环。每轮把结果累加到 R14；在每条指令之后立即用 PUSHFQ 取出
+    SDM 定义的标志累加到 R13；三个函数以 BMI 指令结束，它们的标志在 RET 之后仍在惰性记录中，由调用者读取。
+    294 万条指令原生执行，结果与 QEMU 一致。循环中另有从内存读的 CRC32（与 MOVBE 共用 `0F 38 F0/F1`），
+    它在 page tier 中单步执行，每轮三次。
+  - 基准 720.bmi.bits（逐个处理字中的置位比特，以及 LZCNT/SHLX/BZHI/BLSMSK/ANDN/SARX/SHRX、MOVBE 加载）：
+    第一部分的构建 48 MIPS，本部分 1426 MIPS。基准新增 `cpu_type` 字段（LZCNT 需要 x86-64 配置）。
+- **变异测试**：植入 22 个错误，全部检出或确认等价：
+  - Tier-0（12 个）：VEX 形式不检查模式；ANDN 不取反；BLSR 与 BLSMSK 的运算对调；BLSI 的 CF；BZHI 的界限
+    与 CF；写 CF 后仍把这些形式当作可融合的逻辑运算；MOVBE 存储不交换字节；TZCNT 用 clz；SARX 改为逻辑
+    移位；16 位形式也走 32 位模板；不写逻辑标志。
+  - page tier（10 个）：ANDN 不取反；BZHI 的界限；BLSI 的 CF；CF 留在惰性记录中；SF 取第 63 位；32 位
+    计数按 64 位计算；32 位移位按 64 位计算；MOVBE 存储不交换字节；16 位 TZCNT 走模板；CRC32 的内存形式
+    被当作 MOVBE。
+  - 第一轮有两个存活。“仍当作可融合的逻辑运算”只在 CF 为 1 时可见，fuzz 的源操作数很少为零，程序也常在
+    编译好的页面装入之前就结束（Tier-0 的编译是异步的，阈值为 5 万条指令）。fuzz 改为先清零源寄存器、
+    条件多读 CF、循环 20 倍后，40 个程序中有 23 个检出。“CRC32 被当作 MOVBE”是等价变异：CRC32 带 F2
+    前缀，page tier 在分类之前就让它单步执行，这个判断只是防御性的。
+- **回归**：在只含本计划改动的工作树（P8、P9 与本阶段合并）中运行 57 个目标（`p10-batch-a`、`p10-batch-b`，
+  即 P9 的 55 个加上 `bmi-tests`、`ir-bmi-tests`）。`x64-decode-tests` 和 `ir-decoder-tests` 起初失败：两个解码器的
+  单元测试仍断言 MOVBE、TZCNT、LZCNT 在 ModRM 之后 #UD（见第一部分），修正后重跑通过。另外 53 个通过；需要
+  `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本阶段后运行，通过。

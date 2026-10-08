@@ -3726,6 +3726,39 @@ pub unsafe fn instr32_0FAD_reg(r1: i32, r: i32) {
         shrd32(read_reg32(r1), read_reg32(r), read_reg8(CL) & 31),
     );
 }
+// TZCNT and LZCNT (F3 0F BC/BD, whose rows need BMI1 and LZCNT: BSF and BSR
+// without): the operand's trailing or leading zeros, its size for 0 (CF)
+unsafe fn count(r: i32, value: i32, bits: u32, leading: bool) {
+    let (result, arithmetic) = if leading {
+        crate::cpu::bmi::lzcnt(value as u32 as u64, bits)
+    }
+    else {
+        crate::cpu::bmi::tzcnt(value as u32 as u64, bits)
+    };
+    if bits == 16 {
+        write_reg16(r, result as i32);
+    }
+    else {
+        write_reg32(r, result as i32);
+    }
+    crate::cpu::bmi::set_flags(arithmetic);
+}
+pub unsafe fn instr16_F30FBC_mem(addr: i32, r: i32) {
+    count(r, return_on_pagefault!(safe_read16(addr)), 16, false)
+}
+pub unsafe fn instr16_F30FBC_reg(r1: i32, r: i32) { count(r, read_reg16(r1), 16, false) }
+pub unsafe fn instr32_F30FBC_mem(addr: i32, r: i32) {
+    count(r, return_on_pagefault!(safe_read32s(addr)), 32, false)
+}
+pub unsafe fn instr32_F30FBC_reg(r1: i32, r: i32) { count(r, read_reg32(r1), 32, false) }
+pub unsafe fn instr16_F30FBD_mem(addr: i32, r: i32) {
+    count(r, return_on_pagefault!(safe_read16(addr)), 16, true)
+}
+pub unsafe fn instr16_F30FBD_reg(r1: i32, r: i32) { count(r, read_reg16(r1), 16, true) }
+pub unsafe fn instr32_F30FBD_mem(addr: i32, r: i32) {
+    count(r, return_on_pagefault!(safe_read32s(addr)), 32, true)
+}
+pub unsafe fn instr32_F30FBD_reg(r1: i32, r: i32) { count(r, read_reg32(r1), 32, true) }
 #[no_mangle]
 pub unsafe fn instr_0FAE_0_reg(_r: i32) { trigger_ud(); }
 #[no_mangle]

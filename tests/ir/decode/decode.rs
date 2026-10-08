@@ -530,23 +530,28 @@ fn lock_requires_a_supported_memory_destination() {
 }
 
 #[test]
-fn three_byte_maps_decode_and_stay_undefined_until_implemented() {
+fn three_byte_maps_decode_and_stay_undefined_without_their_features() {
     use crate::cpu::features::{ALL, TEST_FEATURES};
     for features in [0, ALL] {
         TEST_FEATURES.with(|f| f.set(features));
         for (bytes, key) in [
-            (&[0x0F, 0x38, 0xF1, 0x04][..], 0x0F38F1), // movbe (no SIB read)
-            (&[0x0F, 0x38, 0xF0, 0x00], 0x0F38F0),     // movbe
-            (&[0x66, 0x0F, 0x38, 0xF1, 0x00], 0x0F38F1), // movbe m16 (66: operand size)
+            (&[0x0F, 0x38, 0xF1, 0x04, 0x24][..], 0x0F38F1), // movbe [esp]
+            (&[0x0F, 0x38, 0xF0, 0x00], 0x0F38F0),           // movbe
+            (&[0x66, 0x0F, 0x38, 0xF1, 0x00], 0x0F38F1),     // movbe m16 (66: operand size)
         ] {
+            // without MOVBE #UD after the ModRM byte (no SIB read); with it
+            // (P10) the whole memory operand
             let i = d(bytes, true);
-            assert!(
-                i.early_ud && i.baseline_ud && i.ea.is_none() && i.immediate.is_none(),
+            let length = if features == 0 && bytes[3] == 0x04 { bytes.len() - 1 } else { bytes.len() };
+            assert_eq!(
+                (i.early_ud, i.baseline_ud, i.ea.is_none()),
+                (features == 0, features == 0, features == 0),
                 "{bytes:02X?}"
             );
+            assert!(i.immediate.is_none(), "{bytes:02X?}");
             assert_eq!(
                 (i.encoding.opcode, i.length as usize),
-                (key, bytes.len()),
+                (key, length),
                 "{bytes:02X?}"
             );
         }
@@ -1000,9 +1005,9 @@ fn tzcnt_and_lzcnt_are_bsf_and_bsr_without_their_features() {
                 bytes.extend([0x0F, byte, 0x04, 0x24]);
                 let i = d(&bytes, true);
                 if features & feature != 0 {
-                    // (semantics in P10: #UD after the ModRM byte)
+                    // (TZCNT and LZCNT, P10)
                     assert_eq!(i.encoding.opcode, 0xF30F00 | byte as u32);
-                    assert!(i.early_ud && i.length as usize == bytes.len() - 1);
+                    assert!(!i.early_ud && i.length as usize == bytes.len());
                 }
                 else {
                     assert_eq!(i.encoding.opcode, 0x0F00 | byte as u32);

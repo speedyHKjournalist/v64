@@ -273,6 +273,18 @@ fn lift_inner(
             }
             continue;
         }
+        if super::bmi::supports(&i) {
+            if !cpu {
+                return Err(CompileError::Unsupported("BMI requires CPU ABI"));
+            }
+            super::bmi::lift(&mut b, &i, count);
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+                return Ok(b.region);
+            }
+            continue;
+        }
         if super::crc32::supports(&i) {
             if !cpu {
                 return Err(CompileError::Unsupported("CRC32 requires CPU ABI"));

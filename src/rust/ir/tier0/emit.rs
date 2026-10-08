@@ -15,8 +15,8 @@
 //! interpreter's exact behavior.
 use super::analysis::{self, Instruction, PagePlan, Unit};
 use crate::cpu::cpu::{
-    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_ZERO, TLB_GLOBAL,
-    TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY, TLB_VALID,
+    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_VM, FLAG_ZERO,
+    TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY, TLB_VALID,
 };
 use crate::cpu::global_pointers as gp;
 use crate::ir::backend::wasm::x87::{x87_native, X87Cache, X87Words};
@@ -116,7 +116,23 @@ pub const FORM_NAMES: &[&str] = &[
     "JmpIndirect",
     "CallIndirect",
     "Lahf",
+    "Bmi",
+    "Movbe",
 ];
+/// Form::Bmi's operations
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BmiOp {
+    Andn,
+    Blsr,
+    Blsmsk,
+    Blsi,
+    Bzhi,
+    Shlx,
+    Shrx,
+    Sarx,
+    Tzcnt,
+    Lzcnt,
+}
 /// Shift/rotate count operand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Count {
@@ -194,6 +210,18 @@ enum Form {
     /// BSF/BSR: reg = helper(reg, rm).
     BitScan {
         reverse: bool,
+        reg: u8,
+    },
+    /// BMI1 and BMI2's VEX forms, TZCNT and LZCNT (cpu::bmi): reg (ModRM.reg;
+    /// VEX.vvvv for BLSR, BLSMSK and BLSI) = op(r/m, VEX.vvvv)
+    Bmi {
+        op: BmiOp,
+        reg: u8,
+        vvvv: u8,
+    },
+    /// MOVBE r32, m32 (`load`) or m32, r32: the bytes reversed
+    Movbe {
+        load: bool,
         reg: u8,
     },
     /// BT/BTS/BTR/BTC on a register operand.
@@ -333,6 +361,8 @@ impl Form {
             Form::JmpIndirect { .. } => 38,
             Form::CallIndirect { .. } => 39,
             Form::Lahf => 40,
+            Form::Bmi { .. } => 41,
+            Form::Movbe { .. } => 42,
         }
     }
     /// Whether the template can retry() (else no retry tail is emitted).
@@ -353,6 +383,10 @@ impl Form {
                     | Form::Carry { .. }
                     | Form::DoubleShift { .. }
                     | Form::BitScan { .. }
+                    | Form::Bmi {
+                        op: BmiOp::Tzcnt | BmiOp::Lzcnt,
+                        ..
+                    }
                     | Form::BitTest { .. }
                     | Form::MulWide { .. }
                     | Form::Xadd { .. }
@@ -446,6 +480,60 @@ fn relative_target(i: &DecodedInstruction) -> Option<u32> {
     }
 }
 
+/// BMI1 and BMI2's VEX forms, TZCNT, LZCNT and MOVBE on 32-bit operands:
+/// the hot forms of plan 5.1 and their siblings (MULX, PDEP, PEXT, BEXTR,
+/// RORX and the 16-bit forms are interpreted)
+fn bmi(i: &DecodedInstruction) -> Option<Form> {
+    if i.baseline_ud || i.prefixes.lock {
+        return None;
+    }
+    let reg = i.modrm? >> 3 & 7;
+    if let Some(v) = i.vex {
+        if i.encoding.vex & crate::decode_rules::vex::GPR == 0 {
+            return None;
+        }
+        let vvvv = v.vvvv & 7;
+        let (op, reg) = match i.encoding.opcode {
+            0xC402_00F2 => (BmiOp::Andn, reg),
+            0xC402_00F3 => (
+                match reg {
+                    1 => BmiOp::Blsr,
+                    2 => BmiOp::Blsmsk,
+                    3 => BmiOp::Blsi,
+                    _ => return None,
+                },
+                vvvv,
+            ),
+            0xC402_00F5 => (BmiOp::Bzhi, reg),
+            0xC402_01F7 => (BmiOp::Shlx, reg),
+            0xC402_02F7 => (BmiOp::Sarx, reg),
+            0xC402_03F7 => (BmiOp::Shrx, reg),
+            _ => return None,
+        };
+        return Some(Form::Bmi { op, reg, vvvv });
+    }
+    if i.operand_size != 32 {
+        return None;
+    }
+    Some(match i.encoding.opcode {
+        0xF30FBC => Form::Bmi {
+            op: BmiOp::Tzcnt,
+            reg,
+            vvvv: 0,
+        },
+        0xF30FBD => Form::Bmi {
+            op: BmiOp::Lzcnt,
+            reg,
+            vvvv: 0,
+        },
+        0x0F38F0 | 0x0F38F1 if i.ea.is_some() => Form::Movbe {
+            load: i.encoding.opcode == 0x0F38F0,
+            reg,
+        },
+        _ => return None,
+    })
+}
+
 /// Whether the instruction has a template (others end their block).
 pub fn templated(i: &DecodedInstruction) -> bool { classify(i).is_some() }
 
@@ -457,6 +545,10 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
     }
     if let Some((form, vex)) = simd::classify_vex(i) {
         return Some(Form::Simd(form, Some(vex)));
+    }
+    // (TZCNT and LZCNT: F3 selects them)
+    if let Some(form) = bmi(i) {
+        return Some(form);
     }
     // Invalid LOCK forms are rejected by the shared decoder. A valid locked
     // RMW stays inside one activation, including its guarded slow path.
@@ -1270,6 +1362,131 @@ impl Page {
         self.w.const_i32(offset as i32);
         self.w.set_local(&self.offset);
         self.w.br(self.step);
+    }
+    /// BMI1 and BMI2's VEX forms: C4 is LES in real and virtual-8086 mode,
+    /// whose #UD belongs to the interpreter; checked once per block
+    /// (simd_checked bit 3)
+    fn vex_mode_guard(&mut self) {
+        if self.simd_checked & 8 != 0 {
+            return;
+        }
+        self.w.load_fixed_u8(gp::protected_mode as u32);
+        self.w.eqz_i32();
+        self.w.load_fixed_i32(gp::flags as u32);
+        self.w.const_i32(FLAG_VM);
+        self.w.and_i32();
+        self.w.or_i32();
+        self.retry_if();
+        self.simd_checked |= 8;
+    }
+    /// Reverse the bytes of the i32 on the stack (MOVBE)
+    fn byte_swap(&mut self) {
+        self.w.set_local(&self.tmp);
+        // rotl(x & 0x00FF00FF, 24) | rotl(x & 0xFF00FF00, 8)
+        self.w.get_local(&self.tmp);
+        self.w.const_i32(0x00FF_00FF);
+        self.w.and_i32();
+        self.w.const_i32(24);
+        self.w.rotl_i32();
+        self.w.get_local(&self.tmp);
+        self.w.const_i32(0xFF00_FF00u32 as i32);
+        self.w.and_i32();
+        self.w.const_i32(8);
+        self.w.rotl_i32();
+        self.w.or_i32();
+    }
+    /// Form::Bmi but the shifts, of the source in fa: the result (fr) to
+    /// `reg`, and cpu::bmi::logic_flags: SF, ZF and PF of the result
+    /// (lazily), AF and OF clear, and CF: ANDN 0 (a logic producer); the
+    /// source is not 0 (BLSI); the index is beyond 31 (BZHI); the source
+    /// is 0 (the others)
+    fn bmi(&mut self, op: BmiOp, reg: u8, vvvv: u8) {
+        let (fa, fb, fr) = (
+            self.fa.unsafe_clone(),
+            self.fb.unsafe_clone(),
+            self.fr.unsafe_clone(),
+        );
+        match op {
+            BmiOp::Andn => {
+                self.read_reg(vvvv, 32);
+                self.w.const_i32(-1);
+                self.w.xor_i32();
+                self.w.get_local(&fa);
+                self.w.and_i32();
+            },
+            BmiOp::Blsr | BmiOp::Blsmsk => {
+                self.w.get_local(&fa);
+                self.w.const_i32(1);
+                self.w.sub_i32();
+                self.w.get_local(&fa);
+                if op == BmiOp::Blsr {
+                    self.w.and_i32();
+                }
+                else {
+                    self.w.xor_i32();
+                }
+            },
+            BmiOp::Blsi => {
+                self.w.const_i32(0);
+                self.w.get_local(&fa);
+                self.w.sub_i32();
+                self.w.get_local(&fa);
+                self.w.and_i32();
+            },
+            BmiOp::Bzhi => {
+                // fa AND (1 << n) - 1 for an index n (VEX.vvvv[7:0]) below
+                // 32, else fa
+                self.read_reg(vvvv, 32);
+                self.w.const_i32(0xFF);
+                self.w.and_i32();
+                self.w.set_local(&fb);
+                self.w.get_local(&fa);
+                self.w.const_i32(1);
+                self.w.get_local(&fb);
+                self.w.shl_i32();
+                self.w.const_i32(1);
+                self.w.sub_i32();
+                self.w.and_i32();
+                self.w.get_local(&fa);
+                self.w.get_local(&fb);
+                self.w.const_i32(32);
+                self.w.ltu_i32();
+                self.w.select();
+            },
+            // (Wasm's count of 0 is 32, as theirs)
+            BmiOp::Tzcnt => {
+                self.w.get_local(&fa);
+                self.w.ctz_i32();
+            },
+            _ => {
+                self.w.get_local(&fa);
+                self.w.clz_i32();
+            },
+        }
+        self.w.set_local(&fr);
+        self.w.get_local(&fr);
+        self.write_reg(reg, 32);
+        self.flags_logic(32);
+        if op != BmiOp::Andn {
+            match op {
+                BmiOp::Blsi => {
+                    self.w.get_local(&fa);
+                    self.w.const_i32(0);
+                    self.w.ne_i32();
+                },
+                BmiOp::Bzhi => {
+                    self.w.get_local(&fb);
+                    self.w.const_i32(31);
+                    self.w.gtu_i32();
+                },
+                _ => {
+                    self.w.get_local(&fa);
+                    self.w.eqz_i32();
+                },
+            }
+            self.pend_word(FLAG_CARRY);
+            self.known = Known::None;
+        }
     }
     /// retry() if the condition on the stack is nonzero.
     fn retry_if(&mut self) {
@@ -2905,6 +3122,42 @@ impl Page {
                 self.w.const_i32(r as i32);
                 self.w
                     .call_signature("fpu_fcmovcc", Signature::new(&[WasmType::I32; 2], &[]));
+            },
+            Form::Bmi { op, reg, vvvv } => {
+                if i.vex.is_some() {
+                    self.vex_mode_guard();
+                }
+                // the source fa
+                self.read_rm(i, 32, false);
+                self.w.set_local(&fa);
+                if matches!(op, BmiOp::Shlx | BmiOp::Shrx | BmiOp::Sarx) {
+                    // (Wasm takes the count modulo 32, as these; no flags)
+                    self.w.get_local(&fa);
+                    self.read_reg(vvvv, 32);
+                    match op {
+                        BmiOp::Shlx => self.w.shl_i32(),
+                        BmiOp::Shrx => self.w.shr_u_i32(),
+                        _ => self.w.shr_s_i32(),
+                    }
+                    self.write_reg(reg, 32);
+                }
+                else {
+                    self.bmi(op, reg, vvvv);
+                }
+            },
+            Form::Movbe { load, reg } => {
+                if load {
+                    self.read_rm(i, 32, false);
+                    self.byte_swap();
+                    self.write_reg(reg, 32);
+                }
+                else {
+                    self.prepare_rm(i);
+                    self.read_reg(reg, 32);
+                    self.byte_swap();
+                    self.w.set_local(&value);
+                    self.write_rm(i, 32, &value);
+                }
             },
             Form::Lahf => {
                 // The lazy FLAGS are in memory (touches_flags_memory).

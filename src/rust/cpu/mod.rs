@@ -1,6 +1,7 @@
 pub mod apic;
 pub mod arith;
 pub mod avx;
+pub mod bmi;
 pub mod call_indirect;
 pub mod context;
 pub mod cpu;

@@ -125,6 +125,20 @@ enum Xmm {
     Reg(u8),
     Mem(AddressExpr),
 }
+/// Op::Bmi's operations
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BmiOp {
+    Andn,
+    Blsr,
+    Blsmsk,
+    Blsi,
+    Bzhi,
+    Shlx,
+    Shrx,
+    Sarx,
+    Tzcnt,
+    Lzcnt,
+}
 #[derive(Clone, Copy, Debug)]
 enum Op {
     /// ADD OR ADC SBB AND SUB XOR CMP (x86 /digit order)
@@ -276,6 +290,24 @@ enum Op {
     Bswap {
         width: u8,
         reg: u8,
+    },
+    /// BMI1 and BMI2's VEX forms, TZCNT and LZCNT on 32- and 64-bit
+    /// operands (cpu::bmi): `dst` = `op`(`src`, `other`), where `other` is
+    /// VEX.vvvv (ANDN's first source, BZHI's index, the shifts' count); the
+    /// destination of BLSR, BLSMSK and BLSI is VEX.vvvv
+    Bmi {
+        op: BmiOp,
+        width: u8,
+        dst: Reg,
+        src: Opnd,
+        other: Reg,
+    },
+    /// MOVBE r, m (`load`) or m, r: one access, its bytes reversed
+    Movbe {
+        load: bool,
+        width: u8,
+        reg: Reg,
+        mem: AddressExpr,
     },
     /// CMC CLC STC CLD STD by opcode
     Flag {
@@ -1023,7 +1055,23 @@ fn classify(d: &Decoded) -> Op {
                 dst: rm(w)?,
                 index: Opnd::Imm(imm?),
             },
-            0x0FBC | 0x0FBD => Op::BitScan {
+            // (TZCNT and LZCNT, F3 0F BC/BD with their features: a step)
+            // TZCNT and LZCNT (F3 0F BC/BD with their features; 16-bit: a step)
+            0x0FBC | 0x0FBD if d.opcode >> 16 == 0xF3 && w != 16 => Op::Bmi {
+                op: if op == 0x0FBC { BmiOp::Tzcnt } else { BmiOp::Lzcnt },
+                width: w,
+                dst: reg(d.reg?, w),
+                src: rm(w)?,
+                other: reg(0, w),
+            },
+            // MOVBE (not CRC32: F2 0F 38 F0/F1; memory only; 16-bit: a step)
+            0x0F38F0 | 0x0F38F1 if d.opcode == op && memory && w != 16 => Op::Movbe {
+                load: op == 0x0F38F0,
+                width: w,
+                reg: reg(d.reg?, w),
+                mem: d.address?,
+            },
+            0x0FBC | 0x0FBD if d.opcode >> 16 != 0xF3 => Op::BitScan {
                 reverse: op == 0x0FBD,
                 width: w,
                 dst: reg(d.reg?, w),
@@ -1540,6 +1588,45 @@ fn broadcast_bytes(code: u8) -> u8 {
     }
 }
 
+/// BMI1 and BMI2's VEX forms (exception type 13: no AVX state; VEX.W1 for
+/// 64-bit operands): the hot ones of plan 5.1 and their siblings (MULX,
+/// PDEP, PEXT, BEXTR and RORX step)
+fn bmi(d: &Decoded) -> Option<Op> {
+    let v = d.vex?;
+    let width = if v.w { 64 } else { 32 };
+    let group = d.modrm? >> 3 & 7;
+    let dst = register(d.reg?, width, true);
+    let other = register(v.vvvv, width, true);
+    let src = match d.rm_register {
+        Some(r) => Opnd::Reg(register(r, width, true)),
+        None => Opnd::Mem(d.address?),
+    };
+    let (op, dst) = match d.opcode {
+        0xC402_00F2 => (BmiOp::Andn, dst),
+        0xC402_00F3 => (
+            match group {
+                1 => BmiOp::Blsr,
+                2 => BmiOp::Blsmsk,
+                3 => BmiOp::Blsi,
+                _ => return None,
+            },
+            other,
+        ),
+        0xC402_00F5 => (BmiOp::Bzhi, dst),
+        0xC402_01F7 => (BmiOp::Shlx, dst),
+        0xC402_02F7 => (BmiOp::Sarx, dst),
+        0xC402_03F7 => (BmiOp::Shrx, dst),
+        _ => return None,
+    };
+    Some(Op::Bmi {
+        op,
+        width,
+        dst,
+        src,
+        other,
+    })
+}
+
 /// The template of a VEX form (AVX, P5: VEX.128 and VEX.LIG in 64-bit
 /// mode; others step) on the SSE ones, as x64::vector's Avx executes it (see
 /// Op::Vmove): VEX.vvvv the first source
@@ -1548,6 +1635,9 @@ fn vex(d: &Decoded) -> Option<Op> {
     let v = d.vex?;
     if d.encoding.unimplemented {
         return None;
+    }
+    if d.encoding.vex & vex::GPR != 0 {
+        return bmi(d);
     }
     // (VEX.L1 of other than VEX.LIG rows: the 256-bit forms)
     if v.l && d.encoding.vex & (vex::L0 | vex::L1) != 0 {
@@ -1840,6 +1930,11 @@ fn effects(op: &Op) -> (u32, u32) {
         Op::Imul { .. } | Op::MulWide { .. } => (0, CF | OF),
         Op::Bt { .. } => (0, CF),
         Op::BitScan { .. } => (0, ZF),
+        Op::Bmi {
+            op: BmiOp::Shlx | BmiOp::Shrx | BmiOp::Sarx,
+            ..
+        } => (0, 0),
+        Op::Bmi { .. } => (0, ARITH),
         Op::Jcc { cc, .. } | Op::Cmov { cc, .. } | Op::Setcc { cc, .. } => (cond_reads(cc), 0),
         Op::Pushf => (ARITH, 0),
         Op::Flag { opcode: 0xF5 } => (CF, CF),
@@ -3364,6 +3459,73 @@ impl Emitter {
         self.host_store(width as u32 / 8, inst.d.start.0);
         self.si(HOST);
     }
+    /// Reverse the bytes of the i64 on the stack: all 8 (`width` 64), or
+    /// its low 4 (zero-extended)
+    fn byte_swap(&mut self, width: u8) {
+        if width == 64 {
+            self.s(TV);
+            self.g(TV);
+            self.c64(8);
+            self.b.shr_u_i64();
+            self.c64(0x00FF_00FF_00FF_00FF);
+            self.b.and_i64();
+            self.g(TV);
+            self.c64(0x00FF_00FF_00FF_00FF);
+            self.b.and_i64();
+            self.c64(8);
+            self.b.shl_i64();
+            self.b.or_i64();
+            self.s(TV);
+            self.g(TV);
+            self.c64(16);
+            self.b.shr_u_i64();
+            self.c64(0x0000_FFFF_0000_FFFF);
+            self.b.and_i64();
+            self.g(TV);
+            self.c64(0x0000_FFFF_0000_FFFF);
+            self.b.and_i64();
+            self.c64(16);
+            self.b.shl_i64();
+            self.b.or_i64();
+            self.c64(32);
+            self.b.op(op::OP_I64ROTL);
+        }
+        else {
+            self.b.wrap_i64_to_i32();
+            self.si(COND);
+            // rotl(x & 0x00FF00FF, 24) | rotl(x & 0xFF00FF00, 8)
+            self.gi(COND);
+            self.c32(0x00FF_00FF);
+            self.b.and_i32();
+            self.c32(24);
+            self.b.rotl_i32();
+            self.gi(COND);
+            self.c32(0xFF00_FF00u32 as i32);
+            self.b.and_i32();
+            self.c32(8);
+            self.b.rotl_i32();
+            self.b.or_i32();
+            self.b.extend_unsigned_i32_to_i64();
+        }
+    }
+    /// The flags of BLSR, BLSMSK, BLSI, BZHI, TZCNT and LZCNT
+    /// (cpu::bmi::logic_flags): SF, ZF and PF of TR (masked), AF and OF
+    /// clear, CF the i32 that `carry` pushes. CF is computed now; the other
+    /// flags not needed now become an AND record of TR with itself, which
+    /// gives them their values (AND's CF, 0, is not pending).
+    fn bmi_flags(&mut self, width: u8, need: u32, inst: &Inst, carry: impl FnOnce(&mut Self)) {
+        self.flags_begin(need | CF);
+        let mut first = true;
+        self.szp(TR, need, width, &mut first);
+        carry(self);
+        self.join(&mut first);
+        self.flags_end(first);
+        self.g(TR);
+        self.s(TA);
+        self.g(TR);
+        self.s(TB);
+        self.record(4, width, ARITH, need | CF, inst);
+    }
     fn mask_to(&mut self, width: u8) {
         if width < 64 {
             self.c64(mask(width));
@@ -4449,54 +4611,172 @@ impl Emitter {
                 self.written(ARITH);
             },
             Op::Bswap { width, reg } => {
-                let r = reg as usize;
-                if width == 64 {
-                    self.g(r);
-                    self.c64(8);
-                    self.b.shr_u_i64();
-                    self.c64(0x00FF_00FF_00FF_00FF);
-                    self.b.and_i64();
-                    self.g(r);
-                    self.c64(0x00FF_00FF_00FF_00FF);
-                    self.b.and_i64();
-                    self.c64(8);
-                    self.b.shl_i64();
-                    self.b.or_i64();
-                    self.s(TV);
-                    self.g(TV);
-                    self.c64(16);
-                    self.b.shr_u_i64();
-                    self.c64(0x0000_FFFF_0000_FFFF);
-                    self.b.and_i64();
-                    self.g(TV);
-                    self.c64(0x0000_FFFF_0000_FFFF);
-                    self.b.and_i64();
-                    self.c64(16);
-                    self.b.shl_i64();
-                    self.b.or_i64();
-                    self.c64(32);
-                    self.b.op(op::OP_I64ROTL);
-                    self.s(r);
+                self.g(reg as usize);
+                self.byte_swap(width);
+                self.s(reg as usize);
+            },
+            Op::Movbe {
+                load,
+                width,
+                reg,
+                mem,
+            } => {
+                if load {
+                    self.read(Opnd::Mem(mem), width, inst);
+                    self.byte_swap(width);
+                    self.set_reg(reg, width);
                 }
                 else {
-                    self.g(r);
-                    self.b.wrap_i64_to_i32();
-                    self.si(COND);
-                    // rotl(x & 0x00FF00FF, 24) | rotl(x & 0xFF00FF00, 8)
-                    self.gi(COND);
-                    self.c32(0x00FF_00FF);
-                    self.b.and_i32();
-                    self.c32(24);
-                    self.b.rotl_i32();
-                    self.gi(COND);
-                    self.c32(0xFF00_FF00u32 as i32);
-                    self.b.and_i32();
-                    self.c32(8);
-                    self.b.rotl_i32();
-                    self.b.or_i32();
-                    self.b.extend_unsigned_i32_to_i64();
-                    self.s(r);
+                    self.prepare_store(&mem, width, inst);
+                    self.gi(HOST);
+                    self.get_reg(reg, width);
+                    self.byte_swap(width);
+                    self.store(width);
                 }
+            },
+            Op::Bmi {
+                op: BmiOp::Andn,
+                width,
+                dst,
+                src,
+                other,
+            } => {
+                // AND's flags, of NOT VEX.vvvv (TA) and the source (TB)
+                self.read(src, width, inst);
+                self.s(TB);
+                self.get_reg(other, width);
+                self.c64(mask(width));
+                self.b.xor_i64();
+                self.s(TA);
+                self.g(TA);
+                self.g(TB);
+                self.b.and_i64();
+                self.s(TR);
+                self.g(TR);
+                self.set_reg(dst, width);
+                self.alu_flags(4, width, need);
+                self.record(4, width, ARITH, need, inst);
+            },
+            Op::Bmi {
+                op: op @ (BmiOp::Shlx | BmiOp::Shrx | BmiOp::Sarx),
+                width,
+                dst,
+                src,
+                other,
+            } => {
+                // (Wasm takes the count modulo the operand size, as these)
+                self.read(src, width, inst);
+                if width == 64 {
+                    self.get_reg(other, 64);
+                    match op {
+                        BmiOp::Shlx => self.b.shl_i64(),
+                        BmiOp::Shrx => self.b.shr_u_i64(),
+                        _ => self.b.shr_s_i64(),
+                    }
+                }
+                else {
+                    self.b.wrap_i64_to_i32();
+                    self.get_reg(other, 32);
+                    self.b.wrap_i64_to_i32();
+                    match op {
+                        BmiOp::Shlx => self.b.shl_i32(),
+                        BmiOp::Shrx => self.b.shr_u_i32(),
+                        _ => self.b.shr_s_i32(),
+                    }
+                    self.b.extend_unsigned_i32_to_i64();
+                }
+                self.set_reg(dst, width);
+            },
+            Op::Bmi {
+                op,
+                width,
+                dst,
+                src,
+                other,
+            } => {
+                // the source TA; BZHI's index TB
+                self.read(src, width, inst);
+                self.s(TA);
+                match op {
+                    BmiOp::Blsr | BmiOp::Blsmsk => {
+                        self.g(TA);
+                        self.c64(1);
+                        self.b.sub_i64();
+                        self.g(TA);
+                        if op == BmiOp::Blsr {
+                            self.b.and_i64();
+                        }
+                        else {
+                            self.b.xor_i64();
+                        }
+                        self.mask_to(width);
+                    },
+                    BmiOp::Blsi => {
+                        self.c64(0);
+                        self.g(TA);
+                        self.b.sub_i64();
+                        self.g(TA);
+                        self.b.and_i64();
+                    },
+                    BmiOp::Bzhi => {
+                        // TA AND (1 << n) - 1 for an index n below the
+                        // operand size, else TA
+                        self.get_reg(other, width);
+                        self.c64(0xFF);
+                        self.b.and_i64();
+                        self.s(TB);
+                        self.g(TA);
+                        self.c64(1);
+                        self.g(TB);
+                        self.b.shl_i64();
+                        self.c64(1);
+                        self.b.sub_i64();
+                        self.b.and_i64();
+                        self.g(TA);
+                        self.g(TB);
+                        self.c64(width as u64);
+                        self.b.ltu_i64();
+                        self.b.select();
+                    },
+                    // (Wasm's count of a zero operand is its size, as theirs)
+                    _ if width == 64 => {
+                        self.g(TA);
+                        if op == BmiOp::Tzcnt {
+                            self.b.ctz_i64();
+                        }
+                        else {
+                            self.b.clz_i64();
+                        }
+                    },
+                    _ => {
+                        self.g(TA);
+                        self.b.wrap_i64_to_i32();
+                        if op == BmiOp::Tzcnt {
+                            self.b.ctz_i32();
+                        }
+                        else {
+                            self.b.clz_i32();
+                        }
+                        self.b.extend_unsigned_i32_to_i64();
+                    },
+                }
+                self.s(TR);
+                self.g(TR);
+                self.set_reg(dst, width);
+                self.bmi_flags(width, need, inst, |e| match op {
+                    // CF: the source is not 0 (BLSI), the index is beyond
+                    // the operand size (BZHI), else the source is 0
+                    BmiOp::Blsi => {
+                        e.is_zero(TA);
+                        e.b.eqz_i32();
+                    },
+                    BmiOp::Bzhi => {
+                        e.g(TB);
+                        e.c64(width as u64 - 1);
+                        e.b.gtu_i64();
+                    },
+                    _ => e.is_zero(TA),
+                });
             },
             Op::Flag { opcode } => {
                 self.materialize_if(inst.flags_read);

@@ -148,6 +148,28 @@ pub unsafe fn crc32(r: i32, value: u32, bytes: u32) {
         simd_int::crc32c(read_reg32(r) as u32, value as u64, bytes) as i32,
     );
 }
+// MOVBE (0F 38 F0: load, F1: store; memory only): one access of the operand
+// size, its bytes reversed
+pub unsafe fn instr16_0F38F0_mem(addr: i32, r: i32) {
+    let value = return_on_pagefault!(safe_read16(addr)) as u64;
+    write_reg16(r, crate::cpu::bmi::byte_swap(value, 16) as i32);
+}
+pub unsafe fn instr32_0F38F0_mem(addr: i32, r: i32) {
+    let value = return_on_pagefault!(safe_read32s(addr)) as u32 as u64;
+    write_reg32(r, crate::cpu::bmi::byte_swap(value, 32) as i32);
+}
+pub unsafe fn instr16_0F38F1_mem(addr: i32, r: i32) {
+    let value = crate::cpu::bmi::byte_swap(read_reg16(r) as u64, 16) as i32;
+    return_on_pagefault!(safe_write16(addr, value));
+}
+pub unsafe fn instr32_0F38F1_mem(addr: i32, r: i32) {
+    let value = crate::cpu::bmi::byte_swap(read_reg32(r) as u32 as u64, 32) as i32;
+    return_on_pagefault!(safe_write32(addr, value));
+}
+pub unsafe fn instr16_0F38F0_reg(_r1: i32, _r: i32) { trigger_ud() }
+pub unsafe fn instr32_0F38F0_reg(_r1: i32, _r: i32) { trigger_ud() }
+pub unsafe fn instr16_0F38F1_reg(_r1: i32, _r: i32) { trigger_ud() }
+pub unsafe fn instr32_0F38F1_reg(_r1: i32, _r: i32) { trigger_ud() }
 pub unsafe fn instr_F20F38F0_reg(r1: i32, r: i32) { crc32(r, read_reg8(r1) as u32, 1) }
 pub unsafe fn instr_F20F38F0_mem(addr: i32, r: i32) {
     crc32(r, return_on_pagefault!(safe_read8(addr)) as u32, 1)
