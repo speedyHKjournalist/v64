@@ -124,9 +124,21 @@ const AVX2_256 = new Set([
     "VPMULDQ", "VPCMPEQQ", "VMOVNTDQA", "VPACKUSDW", "VPCMPGTQ", "VPMINSB", "VPMINSD", "VPMINUW",
     "VPMINUD", "VPMAXSB", "VPMAXSD", "VPMAXUW", "VPMAXUD", "VPMULLD", "VPBLENDW", "VPALIGNR",
     "VMPSADBW", "VPBLENDVB",
+    // P7 part 2: the cross-lane forms, broadcasts, extensions, the
+    // variable shifts, VPBLENDD and the masked moves
+    "VPERMD", "VPERMPS", "VPERMQ", "VPERMPD", "VPERM2I128", "VINSERTI128", "VEXTRACTI128",
+    "VPBLENDD", "VPBROADCASTB", "VPBROADCASTW", "VPBROADCASTD", "VPBROADCASTQ", "VBROADCASTI128",
+    "VBROADCASTSS", "VBROADCASTSD", "VPMOVSXBW", "VPMOVSXBD", "VPMOVSXBQ", "VPMOVSXWD", "VPMOVSXWQ",
+    "VPMOVSXDQ", "VPMOVZXBW", "VPMOVZXBD", "VPMOVZXBQ", "VPMOVZXWD", "VPMOVZXWQ", "VPMOVZXDQ",
+    "VPSRLVD", "VPSRLVQ", "VPSRAVD", "VPSLLVD", "VPSLLVQ", "VPMASKMOVD", "VPMASKMOVQ",
+]);
+// AVX2's own VEX.128 forms (P7 part 2)
+const AVX2_128 = new Set([
+    "VPBLENDD", "VPBROADCASTB", "VPBROADCASTW", "VPBROADCASTD", "VPBROADCASTQ", "VBROADCASTSS",
+    "VPSRLVD", "VPSRLVQ", "VPSRAVD", "VPSLLVD", "VPSLLVQ", "VPMASKMOVD", "VPMASKMOVQ",
 ]);
 const implemented = form => form.isa[0] === "AVX" && (form.l === "L1" ? AVX_256 : AVX_128).has(form.mnemonic) ||
-    form.isa[0] === "AVX2" && form.l === "L1" && AVX2_256.has(form.mnemonic);
+    form.isa[0] === "AVX2" && (form.l === "L1" ? AVX2_256 : AVX2_128).has(form.mnemonic);
 
 function row(form)
 {

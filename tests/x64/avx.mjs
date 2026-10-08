@@ -21,12 +21,12 @@ import {FORMS, big, execute, le, mask, memory_bytes} from "../rust/avx_model.mjs
 
 const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, COUNTER = OUT + 0x88, MATCH = OUT + 0xC0, FAULTS = OUT + 0x100;
 // a case's general-purpose result, its memory destination (48 bytes) and its
-// XSAVE area (up to 4096 cases; RESULTS beyond the IDT, the stack and
+// XSAVE area (up to 5120 cases; RESULTS beyond the IDT, the stack and
 // 0x3FFEA0, which held a heap allocator's header at power-on with the JIT
 // enabled: tests/x64/initial_ram.mjs)
-const GPR_OUT = OUT + 0x1000, STORES = OUT + 0x21000, RESULTS = OUT + 0x110000;
+const GPR_OUT = OUT + 0x1000, STORES = OUT + 0x29000, RESULTS = OUT + 0x110000;
 // a case's fault record ([vector, RIP] as the fault cases'): none expected
-const CASE_FAULTS = OUT + 0x11000;
+const CASE_FAULTS = OUT + 0x15000;
 const SPAN = 48, AREA = 832;
 // (compatibility-mode code is compiled only after a while)
 const IDT = 0x380000, ROUNDS = 400, COMPAT_ROUNDS = 4000;
@@ -54,6 +54,11 @@ for(let i = 960; i < 1024; i += 4) samples.set(u32(random() & 0xFFFF), i);
 const COUNTS = 512;
 [1, 7, 15, 16, 31, 32, 63, 65].forEach((count, k) => samples.set(le(BigInt(count), 8), COUNTS + 16 * k));
 const count_shift = f => !f.map && f.kind === "binary" && [0xD1, 0xD2, 0xD3, 0xE1, 0xE2, 0xF1, 0xF2, 0xF3].includes(f.op);
+// (the variable shifts' counts, at VCOUNTS: 32 bytes each, quadwords below
+// and beyond 64, as dwords those and zeros)
+const VCOUNTS = 640;
+for(let k = 0; k < 8; k++) for(let e = 0; e < 4; e++) samples.set(le(BigInt((k * 7 + e * 13) % 72), 8), VCOUNTS + 32 * k + 8 * e);
+const variable_shift = f => f.map === 2 && f.op >= 0x45 && f.op <= 0x47 && f.kind === "binary";
 
 /** A VEX instruction: fields map, pp, L, W, vvvv (4 bits) and the
  * three-byte prefix; ModRM's reg and r/m register `rm` or memory operand
@@ -115,6 +120,7 @@ for(const long of [true, false])
             const gprs = OPERANDS[long ? 0 : 1];
             const c = {long, f, k: n % 8, d, v, m: memory ? undefined : m, gpr: gprs[n % 3], n};
             if(count_shift(f) && !memory) c.count_from = COUNTS + 16 * (n % 8);
+            if(variable_shift(f) && !memory) c.count_from = VCOUNTS + 32 * (n % 8);
             // (every imm8 over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored in compatibility mode)
             c.imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
             if(memory)
@@ -124,7 +130,8 @@ for(const long of [true, false])
                 // aligned ones' operands 32-byte aligned: a destination at
                 // n * 48 + 16 * (n & 1), a sample at 32 * (n & 1))
                 const store = STORE_KINDS.includes(f.kind);
-                const at = count_shift(f) ? COUNTS + 16 * (n % 8) : f.aligned ? (f.l && !store ? 32 : 16) * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) :
+                const at = count_shift(f) ? COUNTS + 16 * (n % 8) : variable_shift(f) ? VCOUNTS + 32 * (n % 8) :
+                    f.aligned ? (f.l && !store ? 32 : 16) * (n & 1) : f.kind === "ldmxcsr" ? 960 + 4 * (n % 16) :
                     f.l && store ? (n * 7) % 17 : (n * 7) % 33;
                 // (VPCMPxSTRx: not RCX, which holds ones before)
                 const index = f.kind === "pcmpstr" ? gprs[1] : gprs[(n + 1) % 3];
@@ -199,7 +206,7 @@ const code = (c, n) => {
         }
     }
     if(f.kind === "to_gpr" && f.imm) lines.push(`mov ${R[c.gpr]},-1`);
-    if(c.count_from !== undefined) lines.push(`vmovdqu xmm${c.m},[samples + ${c.count_from}]`);
+    if(c.count_from !== undefined) lines.push(`vmovdqu ${f.l ? "ymm" : "xmm"}${c.m},[samples + ${c.count_from}]`);
     const vvvv = f.kind === "shift_imm" ? c.d : has_vvvv(c) ? c.v : 0;
     const imm8 = IMMEDIATE.includes(f.kind) || f.imm || f.legacy?.imm8 ? c.imm8 : undefined;
     // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode; VEX.L where
@@ -284,8 +291,10 @@ const expected_case = (c, n, qemu = undefined) => {
     const o = {d: c.d, v: c.f.kind === "shift_imm" ? c.d : c.v, m: c.m, imm8: c.imm8, long: c.long};
     if(c.f.kind === "to_gpr" || c.f.operands === "to_gpr") Object.assign(o, {d: c.gpr});
     if(["gpr_load", "gpr_store", "extract", "insert"].includes(c.f.kind) && !c.memory || c.f.operands === "from_gpr" && !c.memory) o.m = c.gpr;
-    // (a register count: loaded by VMOVDQU, bits 255:128 zeroed)
-    if(c.count_from !== undefined) [s.x[c.m], s.h[c.m]] = [big(samples.subarray(c.count_from, c.count_from + 16)), 0n];
+    // (a register count: loaded by VMOVDQU, bits 255:128 zeroed but by a
+    // VEX.256 form's)
+    if(c.count_from !== undefined) [s.x[c.m], s.h[c.m]] = [big(samples.subarray(c.count_from, c.count_from + 16)),
+        c.f.l ? big(samples.subarray(c.count_from + 16, c.count_from + 32)) : 0n];
     const upper = [...s.h];
     execute(qemu === "W0" ? {...c.f, w: 0} : c.f, s, o);
     if(qemu === "kept") s.h = upper;
@@ -470,7 +479,7 @@ samples: db ${Array.from(samples).join(",")}
 `));
 
 const length = RESULTS - OUT + cases.length * AREA;
-assert.ok(cases.length <= 4096 && STORES + cases.length * SPAN <= IDT && GPR_OUT + cases.length * 16 <= CASE_FAULTS && CASE_FAULTS + cases.length * 16 <= STORES);
+assert.ok(cases.length <= 5120 && STORES + cases.length * SPAN <= IDT && GPR_OUT + cases.length * 16 <= CASE_FAULTS && CASE_FAULTS + cases.length * 16 <= STORES);
 const check = (result, label) => {
     // the model first: QEMU is a reference, not the specification
     cases.forEach((c, n) => {

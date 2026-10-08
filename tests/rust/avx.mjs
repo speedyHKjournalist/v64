@@ -487,6 +487,23 @@ function form_case(f, n)
         }
         else c.registers = { [m]: count };
     }
+    // (the variable shifts: each element's count below or beyond the
+    // element's width; as dwords, the qwords' counts and zeros)
+    if(f.map === 2 && f.op >= 0x45 && f.op <= 0x47 && f.kind === "binary")
+    {
+        let counts = 0n;
+        for(let k = 0; k < 4; k++) counts |= BigInt((n * 7 + k * 13) % 72) << BigInt(64 * k);
+        if(memory)
+        {
+            c.source = Uint8Array.from(SOURCES.subarray(n * SPAN, (n + 1) * SPAN));
+            c.source.set(le(counts, f.l ? 32 : 16), at);
+        }
+        else
+        {
+            c.registers = { [m]: counts & mask(128) };
+            if(f.l) c.uppers = { [m]: counts >> 128n };
+        }
+    }
     // (VEX.W where ignored: WIG, WIG32 outside 64-bit mode; VEX.L where ignored, VEX.256 forms' 1)
     const fields = { map: f.map || 1, pp: f.pp, w: f.w === undefined || f.wig32 ? n & 1 : f.w, l: f.l ?? (f.lig ? n >> 2 & 1 : 0), three: !!(n & 2), vvvv };
     const immediate = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr", "insert128", "extract128"].includes(f.kind) ||
@@ -528,7 +545,10 @@ try
     }
     for(const [label, form] of [["vpaddd ymm1, ymm2, ymm3", vex({ pp: 1, l: 1, vvvv: 2 }, 0xFE, 1, 3)],
         ["vpshufb ymm1, ymm2, [mem]", vex({ map: 2, pp: 1, l: 1, vvvv: 2 }, 0x00, 1, undefined, SOURCE)],
-        ["vpsrlw ymm1, ymm2, 3", vex({ pp: 1, l: 1, vvvv: 1 }, 0x71, 2, 2, undefined, 3)], ["vpmovmskb ecx, ymm1", vex({ pp: 1, l: 1 }, 0xD7, 1, 1)]])
+        ["vpsrlw ymm1, ymm2, 3", vex({ pp: 1, l: 1, vvvv: 1 }, 0x71, 2, 2, undefined, 3)], ["vpmovmskb ecx, ymm1", vex({ pp: 1, l: 1 }, 0xD7, 1, 1)],
+        ["vpbroadcastb xmm1, xmm2", vex({ map: 2, pp: 1 }, 0x78, 1, 2)], ["vpsllvd xmm1, xmm2, xmm3", vex({ map: 2, pp: 1, vvvv: 2 }, 0x47, 1, 3)],
+        ["vpermq ymm1, ymm2, 0x1B", vex({ map: 3, pp: 1, l: 1, w: 1 }, 0x00, 1, 2, undefined, 0x1B)],
+        ["vbroadcastss xmm1, xmm2", vex({ map: 2, pp: 1 }, 0x18, 1, 2)]])
     {
         const results = await run_all(form, vm => vm.write_memory(Uint8Array.from(u32(form.length)), SKIP), machines,
             vm => [0, 4].map(o => word(vm, FAULT + o)));
@@ -746,8 +766,12 @@ try
         ["vmovddup ymm3, [m256]", ymm("vmovddup"), 3], ["vptest ymm4, [m256]", ymm("vptest"), 4],
         ["vbroadcastsd ymm5, [m64]", ymm("vbroadcastsd"), 5], ["vbroadcastf128 ymm6, [m128]", ymm("vbroadcastf128"), 6],
         ["vinsertf128 ymm7, ymm0, [m128], 1", ymm("vinsertf128"), 7, 0, 1], ["vextractf128 [m128], ymm1, 1", ymm("vextractf128"), 1, undefined, 1],
-        // (AVX2: the count of a shift by xmm/m128)
+        // (AVX2: the count of a shift by xmm/m128; the elements of
+        // broadcasts and extensions, VBROADCASTI128's m128)
         ["vpsrlw ymm1, ymm2, [m128]", ymm("vpsrlw", "binary"), 1, 2], ["vpslld ymm3, ymm4, [m128]", ymm("vpslld", "binary"), 3, 4],
+        ["vpbroadcastb xmm1, [m8]", named("vpbroadcastb"), 1], ["vpbroadcastw ymm2, [m16]", ymm("vpbroadcastw"), 2],
+        ["vpbroadcastq ymm3, [m64]", ymm("vpbroadcastq"), 3], ["vbroadcasti128 ymm4, [m128]", ymm("vbroadcasti128"), 4],
+        ["vpmovsxbq ymm5, [m32]", ymm("vpmovsxbq"), 5], ["vpmovzxwq ymm6, [m64]", ymm("vpmovzxwq"), 6], ["vpmovzxbw ymm7, [m128]", ymm("vpmovzxbw"), 7],
     ])
     {
         const at = SPAN - memory_bytes(f), store = STORES.includes(f.kind);
@@ -765,11 +789,12 @@ try
     {
         // (the low quadword's lanes selected: those of VMASKMOVPS 0 and 1, VMASKMOVPD 0)
         const low_lanes = big(Uint8Array.from({ length: 16 }, (_, i) => i < 8 ? 0x80 : 0));
-        for(const op of [0x2C, 0x2D, 0x2E, 0x2F])
+        // (AVX2: VPMASKMOVD and VPMASKMOVQ, VEX.W1, as VMASKMOVPS and VMASKMOVPD)
+        for(const [op, w] of [[0x2C, 0], [0x2D, 0], [0x2E, 0], [0x2F, 0], [0x8C, 0], [0x8C, 1], [0x8E, 0], [0x8E, 1]])
         {
-            const f = FORMS.find(f => f.map === 2 && f.op === op);
+            const f = FORMS.find(f => f.map === 2 && f.op === op && f.w === w && !f.l);
             const store = f.kind === "maskstore";
-            const c = { n: 0, at: SPAN - 8, registers: { 2: low_lanes }, code: vex({ map: 2, pp: 1, vvvv: 2 }, op, 1, undefined, ABSENT - 8),
+            const c = { n: 0, at: SPAN - 8, registers: { 2: low_lanes }, code: vex({ map: 2, pp: 1, w, vvvv: 2 }, op, 1, undefined, ABSENT - 8),
                 model: s => execute(f, s, { d: 1, v: 2, long: false }) };
             await check_cases(`${f.name} across into an absent page (the lanes there not selected)`, [{ ...c, [store ? "destination_at" : "source_at"]: ABSENT - SPAN }],
                 { before: vm => pages(vm, ABSENT, false) });
@@ -777,12 +802,12 @@ try
         // (VEX.256: the 32-byte operand's high half on the absent page; the
         // low half's lanes selected, the high half's not)
         const low_half = big(Uint8Array.from({ length: 16 }, (_, i) => i % 4 === 3 ? 0x80 : 0));
-        for(const op of [0x2C, 0x2D, 0x2E, 0x2F])
+        for(const [op, w] of [[0x2C, 0], [0x2D, 0], [0x2E, 0], [0x2F, 0], [0x8C, 0], [0x8C, 1], [0x8E, 0], [0x8E, 1]])
         {
-            const f = FORMS.find(f => f.map === 2 && f.op === op && f.l === 1);
+            const f = FORMS.find(f => f.map === 2 && f.op === op && f.w === w && f.l === 1);
             const store = f.kind === "maskstore";
             const c = { n: 0, at: SPAN - 16, registers: { 2: low_half }, uppers: { 2: 0n },
-                code: vex({ map: 2, pp: 1, l: 1, vvvv: 2 }, op, 1, undefined, ABSENT - 16),
+                code: vex({ map: 2, pp: 1, l: 1, w, vvvv: 2 }, op, 1, undefined, ABSENT - 16),
                 model: s => execute(f, s, { d: 1, v: 2, long: false }) };
             await check_cases(`${f.name} ymm across into an absent page (the lanes there not selected)`,
                 [{ ...c, [store ? "destination_at" : "source_at"]: ABSENT - SPAN }], { before: vm => pages(vm, ABSENT, false) });

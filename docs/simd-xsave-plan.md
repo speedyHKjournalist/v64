@@ -2079,3 +2079,37 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **回归**：在只含本计划改动的工作树（P6 与本部分）中运行 55 个目标（`p7a-batch-a`、`p7a-batch-b`）：
   `x64-decode-tests` 与 `ir-decoder-tests` 先因上面那个解码测试失败，修改后重跑通过；需要 `images/` 的
   `api-tests`、`jitpagingtests` 在主工作树中加入本部分后运行，通过；其余 51 个通过。
+
+### P7 第二部分：AVX2 的跨半区形式、广播、扩展、可变移位与掩码搬运（2026-10-08）
+
+- **范围**：AVX2 其余 51 个非 gather 形式，至此 172 个中只剩 16 个 gather（P8）：VPERMD、VPERMPS、VPERMQ、
+  VPERMPD、VPERM2I128、VINSERTI128、VEXTRACTI128；VPBLENDD（xmm/ymm）；VPBROADCASTB/W/D/Q
+  （xmm/ymm，源为 XMM 寄存器或内存）、VBROADCASTI128，以及 VBROADCASTSS/SD 的寄存器形式；VPMOVSX/ZX
+  的 ymm 形式；VPSRLVD/Q、VPSRAVD、VPSLLVD/Q（xmm/ymm）；VPMASKMOVD/Q（xmm/ymm，加载与存储）。
+- **做法**：
+  - VEX.128 的 AVX2 形式进入 `execute`，VEX.256 的进入 `execute256`。广播取内存的元素或 r/m 寄存器的
+    最低元素（`element`、`splat`）。VPERMD/PS 按 VEX.vvvv 各 dword 的低 3 位、VPERMQ/PD 按 imm8 的
+    两位一组跨半区取元素（`permute256`）。VPERM2I128、VINSERTI128、VEXTRACTI128 与 F128 形式共用
+    分支。VPBLENDD 的 ymm 形式高半区取 imm8[7:4]。
+  - VPMOVSX/ZX 的 ymm 形式从 xmm/m128（m64、m32）扩展到 256 位：低半区由源的前一半元素扩展，高半区由
+    后一半扩展；内存只读取这些字节。
+  - 可变移位（`shift_variable`）：每个元素按第二源同一元素的无符号计数移位；逻辑移位的计数达到元素宽度
+    时结果为 0，VPSRAVD 为符号位。VEX.W1 为 qword。
+  - VPMASKMOVD/Q 与 VMASKMOVPS/PD 共用分支，lane 宽度由 VEX.W 决定。
+- **测试**：
+  - `tests/rust/avx_model.mjs`：AVX2 共 159 个形式（VEX.128 15 个，VEX.256 144 个）；VPERM2F128 与
+    VPERM2I128 共用 `vperm2`。
+  - `tests/rust/avx.mjs`：520 个形式，三个 arm 上 17315 项；无 AVX2 时的 #UD 用例加入 VPBROADCASTB、
+    VPSLLVD、VPERMQ 与 VBROADCASTSS 的寄存器形式；页末的窄操作数加入 VPBROADCASTB/W/Q、
+    VBROADCASTI128 与 VPMOVSX/ZX 的 m32、m64、m128；VPMASKMOVD/Q 与 VMASKMOVPS/PD 一样检查跨入缺页时
+    未选中的 lane 不访问。可变移位与计数移位一样使用小计数（每个元素在宽度以下和以上）。
+  - `tests/x64/avx.mjs`：4224 例，三种配置下都与 QEMU 和模型一致；每例结果区扩到可容纳 5120 例。
+  - IR 差分测试新增 16 个 fixture，共 8856 例。
+- **变异测试**：植入 13 个错误，全部被检出：VPBROADCASTW 按字节复制；寄存器形式的广播不截取最低元素；
+  VPBLENDD ymm 的高半区用 imm8[3:0]；VPSLLVD/Q 不截断元素；VPSRAVD 的计数上限为 30；VPSRLVQ 的计数上限
+  按 32；VPERMD 的索引只取两位；VPERMQ 的 imm8 每个元素取一位；VPMOVSX/ZX ymm 的高半区重复低半区，
+  或读取 16 字节（页末用例发现）；VPMASKMOVQ ymm 按 dword 选择，VPMASKMOVD/Q xmm 存储按 dword 选择；
+  VBROADCASTI128 当作元素广播。
+- **回归**：在只含本计划改动的工作树（P6、P7 第一部分与本部分）中运行 55 个目标（`p7b-batch-a`、
+  `p7b-batch-b`）：`rustfmt` 起初因 `avx.rs` 未格式化失败，格式化后重跑通过；需要 `images/` 的
+  `api-tests`、`jitpagingtests` 在主工作树中加入本部分后运行，通过；其余 52 个通过。

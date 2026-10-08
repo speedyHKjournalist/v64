@@ -194,6 +194,75 @@ fn shift_imm(op: u8, group: u8, v: u128, count: u32) -> u128 {
         },
     }
 }
+/// The element size of VBROADCASTSS/SD (18, 19), VPBROADCASTD/Q (58, 59) and
+/// VPBROADCASTB/W (78, 79)
+fn broadcast_size(op: u8) -> u32 {
+    match op {
+        0x78 => 1,
+        0x79 => 2,
+        0x18 | 0x58 => 4,
+        _ => 8,
+    }
+}
+/// `v` (`size` bytes) in each lane of 128 bits
+fn splat(v: u128, size: u32) -> u128 {
+    let mut r = v;
+    let mut bits = size * 8;
+    while bits < 128 {
+        r |= r << bits;
+        bits *= 2;
+    }
+    r
+}
+/// A broadcast's element: `size` bytes of memory, or the low lane of the r/m
+/// register
+unsafe fn element<M: Machine>(m: &mut M, i: &Instruction, size: u32) -> Result<u128, M::Fault> {
+    Ok(match i.rm {
+        Some(r) => xmm(r) & u128::MAX >> (128 - 8 * size),
+        None => m.read(size as u8, false)?,
+    })
+}
+/// VPBLENDD of 128 bits: dword n from `b` where bit n of `select` is set,
+/// else from `a`
+fn blend_dwords(a: u128, b: u128, select: u8) -> u128 {
+    let mut mask = 0;
+    for n in 0..4 {
+        if select >> n & 1 != 0 {
+            mask |= 0xFFFF_FFFF << (32 * n);
+        }
+    }
+    a & !mask | b & mask
+}
+/// VPSRLVD/Q (45), VPSRAVD (46), VPSLLVD/Q (47) of 128 bits: each element of
+/// `a` (`qword`: quadwords, else dwords) shifted by the unsigned count in the
+/// same element of `b`; from the element's width on, the logical shifts give
+/// 0, VPSRAVD the sign
+fn shift_variable(op: u8, qword: bool, a: u128, b: u128) -> u128 {
+    let bits = if qword { 64 } else { 32 };
+    let mask = u128::MAX >> (128 - bits);
+    let mut r = 0;
+    for at in (0..128).step_by(bits as usize) {
+        let (x, count) = (a >> at & mask, b >> at & mask);
+        let v = match op {
+            0x45 if count < bits as u128 => x >> count,
+            0x47 if count < bits as u128 => x << count & mask,
+            0x46 => (x as u32 as i32 >> count.min(31)) as u32 as u128,
+            _ => 0,
+        };
+        r |= v << at;
+    }
+    r
+}
+/// The lanes of `v` (`size` 4 or 8 bytes) at the indices `index(n)` of the
+/// result's lane n, over 256 bits (VPERMD/PS/Q/PD)
+fn permute256(v: (u128, u128), size: u32, index: impl Fn(u32) -> u32) -> (u128, u128) {
+    let mut r = [0; 2];
+    for n in 0..32 / size {
+        let at = n * size * 8;
+        r[(at / 128) as usize] |= (lane256(v, size * index(n), size) as u128) << (at % 128);
+    }
+    (r[0], r[1])
+}
 fn packed(op: PackedOp, a: u128, b: u128) -> u128 {
     u128::from_le_bytes(op.apply(a.to_le_bytes(), b.to_le_bytes()))
 }
@@ -409,10 +478,25 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
             let legacy = if op == 0x4A { 0x14 } else { 0x15 };
             set_xmm(i.reg, bytes(|b| simd_int::sse4(legacy, a, b, selector), b));
         },
-        // VBROADCASTSS xmm, m32: in each lane
-        (2, 1, 0x18) => {
-            let v = m.read(4, false)?;
-            set_xmm(i.reg, v * 0x1_0000_0001_0000_0001_0000_0001);
+        // VBROADCASTSS xmm, m32 (AVX2: also xmm); VPBROADCASTB, VPBROADCASTW,
+        // VPBROADCASTD, VPBROADCASTQ (AVX2): an element of memory or of the
+        // r/m register's low lane in each lane
+        (2, 1, 0x18 | 0x58 | 0x59 | 0x78 | 0x79) => {
+            let size = broadcast_size(op);
+            let v = element(m, i, size)?;
+            set_xmm(i.reg, splat(v, size));
+        },
+        // VPSRLVD/Q, VPSRAVD, VPSLLVD/Q (AVX2; VEX.W1: quadwords): each
+        // element by the count in the same element of the second source
+        (2, 1, 0x45..=0x47) => {
+            let b = source(m, i, 16, false)?;
+            set_xmm(i.reg, shift_variable(op, i.w, xmm(i.vvvv), b));
+        },
+        // VPBLENDD (AVX2): the dwords imm8 selects from the second source,
+        // the others from the first
+        (3, 1, 0x02) => {
+            let b = source(m, i, 16, false)?;
+            set_xmm(i.reg, blend_dwords(xmm(i.vvvv), b, i.imm8));
         },
         // VPERMILPS, VPERMILPD: the first source's lanes at the indices of
         // the second's lanes (bits 1:0 of each dword, bit 1 of each quadword)
@@ -452,18 +536,19 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
             let (zf, cf) = (a & b & signs == 0, !a & b & signs == 0);
             m.set_flags((zf as u32) << 6 | cf as u32);
         },
-        // VMASKMOVPS, VMASKMOVPD xmm, xmm, m128: the lanes of memory the
-        // first source's sign bits select, the others zero
-        (2, 1, 0x2C | 0x2D) => {
-            let size = if op == 0x2C { 4 } else { 8 };
+        // VMASKMOVPS, VMASKMOVPD; AVX2: VPMASKMOVD, VPMASKMOVQ (VEX.W1)
+        // xmm, xmm, m128: the lanes of memory the first source's sign bits
+        // select, the others zero
+        (2, 1, 0x2C | 0x2D | 0x8C) => {
+            let size = if op == 0x2C || op == 0x8C && !i.w { 4 } else { 8 };
             let selected = sign_mask(xmm(i.vvvv), size as u32) as u8;
             let v = m.read_lanes(size, 16 / size, selected)?;
             set_xmm(i.reg, v.0);
         },
-        // VMASKMOVPS, VMASKMOVPD m128, xmm, xmm: ModRM.reg's lanes that
-        // VEX.vvvv's sign bits select
-        (2, 1, 0x2E | 0x2F) => {
-            let size = if op == 0x2E { 4 } else { 8 };
+        // ... m128, xmm, xmm: ModRM.reg's lanes that VEX.vvvv's sign bits
+        // select
+        (2, 1, 0x2E | 0x2F | 0x8E) => {
+            let size = if op == 0x2E || op == 0x8E && !i.w { 4 } else { 8 };
             let selected = sign_mask(xmm(i.vvvv), size as u32) as u8;
             m.write_lanes(size, 16 / size, (xmm(i.reg), 0), selected)?;
         },
@@ -814,25 +899,29 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
             let high = if op == 0x05 { i.imm8 >> 2 } else { i.imm8 };
             set_ymm(i.reg, (f(v.0, i.imm8), f(v.1, high)));
         },
-        // VBROADCASTSS ymm, m32; VBROADCASTSD ymm, m64; VBROADCASTF128 ymm,
-        // m128: in each lane
-        (2, 1, 0x18..=0x1A) => {
-            let v = match op {
-                0x18 => m.read(4, false)? * 0x1_0000_0001_0000_0001_0000_0001,
-                0x19 => m.read(8, false)? * 0x1_0000_0000_0000_0001,
-                _ => m.read(16, false)?,
+        // VBROADCASTSS ymm, m32; VBROADCASTSD ymm, m64 (AVX2: also from an
+        // XMM register); VPBROADCASTB/W/D/Q (AVX2): an element in each lane;
+        // VBROADCASTF128, VBROADCASTI128 (AVX2): m128 in each half
+        (2, 1, 0x18..=0x1A | 0x58..=0x5A | 0x78 | 0x79) => {
+            let v = if op == 0x1A || op == 0x5A {
+                m.read(16, false)?
+            }
+            else {
+                let size = broadcast_size(op);
+                splat(element(m, i, size)?, size)
             };
             set_ymm(i.reg, (v, v));
         },
-        // VINSERTF128: the first source with half imm8[0] from xmm/m128
-        (3, 1, 0x18) => {
+        // VINSERTF128, VINSERTI128 (AVX2): the first source with half
+        // imm8[0] from xmm/m128
+        (3, 1, 0x18 | 0x38) => {
             let v = source(m, i, 16, false)?;
             let a = ymm(i.vvvv);
             set_ymm(i.reg, if i.imm8 & 1 == 0 { (v, a.1) } else { (a.0, v) });
         },
-        // VEXTRACTF128: half imm8[0] to an XMM register (bits 255:128 of
-        // its YMM register zeroed) or to m128
-        (3, 1, 0x19) => {
+        // VEXTRACTF128, VEXTRACTI128 (AVX2): half imm8[0] to an XMM
+        // register (bits 255:128 of its YMM register zeroed) or to m128
+        (3, 1, 0x19 | 0x39) => {
             let a = ymm(i.reg);
             let v = if i.imm8 & 1 == 0 { a.0 } else { a.1 };
             match i.rm {
@@ -840,9 +929,10 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
                 None => m.write(16, v, false)?,
             }
         },
-        // VPERM2F128: each half one of the sources' halves (imm8[1:0] for the
-        // low half, imm8[5:4] for the high one) or zero (imm8[3], imm8[7])
-        (3, 1, 0x06) => {
+        // VPERM2F128, VPERM2I128 (AVX2): each half one of the sources'
+        // halves (imm8[1:0] for the low half, imm8[5:4] for the high one) or
+        // zero (imm8[3], imm8[7])
+        (3, 1, 0x06 | 0x46) => {
             let b = source256(m, i, false)?;
             let a = ymm(i.vvvv);
             let select = |control: u8| {
@@ -950,18 +1040,19 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
                 .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
             set_xmm(i.reg, r.0);
         },
-        // VMASKMOVPS, VMASKMOVPD ymm, ymm, m256: the lanes of memory the
-        // first source's sign bits select, the others zero
-        (2, 1, 0x2C | 0x2D) => {
-            let size = if op == 0x2C { 4 } else { 8 };
+        // VMASKMOVPS, VMASKMOVPD; AVX2: VPMASKMOVD, VPMASKMOVQ (VEX.W1)
+        // ymm, ymm, m256: the lanes of memory the first source's sign bits
+        // select, the others zero
+        (2, 1, 0x2C | 0x2D | 0x8C) => {
+            let size = if op == 0x2C || op == 0x8C && !i.w { 4 } else { 8 };
             let selected = sign_mask256(ymm(i.vvvv), size as u32) as u8;
             let v = m.read_lanes(size, 32 / size, selected)?;
             set_ymm(i.reg, v);
         },
-        // VMASKMOVPS, VMASKMOVPD m256, ymm, ymm: ModRM.reg's lanes that
-        // VEX.vvvv's sign bits select
-        (2, 1, 0x2E | 0x2F) => {
-            let size = if op == 0x2E { 4 } else { 8 };
+        // ... m256, ymm, ymm: ModRM.reg's lanes that VEX.vvvv's sign bits
+        // select
+        (2, 1, 0x2E | 0x2F | 0x8E) => {
+            let size = if op == 0x2E || op == 0x8E && !i.w { 4 } else { 8 };
             let selected = sign_mask256(ymm(i.vvvv), size as u32) as u8;
             m.write_lanes(size, 32 / size, ymm(i.reg), selected)?;
         },
@@ -1038,6 +1129,50 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
             let a = ymm(i.vvvv);
             let f = |a: u128, b| bytes(|b| simd_int::palignr(a.to_le_bytes(), b, i.imm8), b);
             set_ymm(i.reg, (f(a.0, b.0), f(a.1, b.1)));
+        },
+        // AVX2 (P7 part 2): VPERMD, VPERMPS: the dwords of the second source
+        // at the indices in the first's (bits 2:0 of each)
+        (2, 1, 0x16 | 0x36) => {
+            let data = source256(m, i, false)?;
+            let index = ymm(i.vvvv);
+            set_ymm(
+                i.reg,
+                permute256(data, 4, |n| lane256(index, 4 * n, 4) as u32 & 7),
+            );
+        },
+        // VPERMQ, VPERMPD: the source's quadwords at the indices of imm8
+        // (two bits each)
+        (3, 1, 0x00 | 0x01) => {
+            let v = source256(m, i, false)?;
+            set_ymm(i.reg, permute256(v, 8, |n| (i.imm8 >> (2 * n)) as u32 & 3));
+        },
+        // VPBLENDD: imm8[3:0] for the low half's dwords, imm8[7:4] for the
+        // high one's
+        (3, 1, 0x02) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            set_ymm(
+                i.reg,
+                (
+                    blend_dwords(a.0, b.0, i.imm8),
+                    blend_dwords(a.1, b.1, i.imm8 >> 4),
+                ),
+            );
+        },
+        // VPSRLVD/Q, VPSRAVD, VPSLLVD/Q (VEX.W1: quadwords)
+        (2, 1, 0x45..=0x47) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let f = |a, b| shift_variable(op, i.w, a, b);
+            set_ymm(i.reg, (f(a.0, b.0), f(a.1, b.1)));
+        },
+        // VPMOVSX*, VPMOVZX*: the source's lanes extended over 256 bits (from
+        // memory, those bytes only)
+        (2, 1, 0x20..=0x25 | 0x30..=0x35) => {
+            let half = [8, 4, 2, 8, 4, 8][(op & 7) as usize];
+            let b = source(m, i, 2 * half, false)?;
+            let f = |b: u128| bytes(|b| simd_int::sse4(op, [0; 16], b, [0; 16]), b);
+            set_ymm(i.reg, (f(b), f(b >> (8 * half))));
         },
         _ => {
             dbg_assert!(false, "VEX.256 form {:x} without semantics", i.key);

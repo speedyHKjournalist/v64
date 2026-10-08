@@ -216,6 +216,21 @@ fn avx_fixtures() {
         (&[0xC4, 0xE3, 0x65, 0x42], 2, Some(4), 2, &[0x2D]), // vmpsadbw ymm2, ymm3, ymm4, 0x2D
         (&[0xC4, 0xE3, 0x6D, 0x0F], 1, None, 1, &[5]),       // vpalignr ymm1, ymm2, [m], 5
         (&[0xC4, 0xE2, 0x7D, 0x2A], 3, None, 3, &[]),        // vmovntdqa ymm3, [m]
+        (&[0xC4, 0xE2, 0x6D, 0x36], 1, Some(3), 1, &[]),     // vpermd ymm1, ymm2, ymm3
+        (&[0xC4, 0xE3, 0xFD, 0x00], 4, None, 4, &[0x1B]),    // vpermq ymm4, [m], 0x1B
+        (&[0xC4, 0xE3, 0x6D, 0x46], 1, Some(3), 1, &[0x31]), // vperm2i128 ymm1, ymm2, ymm3, 0x31
+        (&[0xC4, 0xE3, 0x6D, 0x38], 1, None, 1, &[1]),       // vinserti128 ymm1, ymm2, [m], 1
+        (&[0xC4, 0xE3, 0x7D, 0x39], 2, Some(1), 1, &[1]),    // vextracti128 xmm1, ymm2, 1
+        (&[0xC4, 0xE2, 0x79, 0x78], 1, Some(2), 1, &[]),     // vpbroadcastb xmm1, xmm2
+        (&[0xC4, 0xE2, 0x7D, 0x59], 5, None, 5, &[]),        // vpbroadcastq ymm5, [m]
+        (&[0xC4, 0xE2, 0x7D, 0x5A], 6, None, 6, &[]),        // vbroadcasti128 ymm6, [m]
+        (&[0xC4, 0xE2, 0x7D, 0x20], 2, Some(3), 2, &[]),     // vpmovsxbw ymm2, xmm3
+        (&[0xC4, 0xE2, 0x69, 0x47], 1, Some(3), 1, &[]),     // vpsllvd xmm1, xmm2, xmm3
+        (&[0xC4, 0xE2, 0xED, 0x45], 4, None, 4, &[]),        // vpsrlvq ymm4, ymm2, [m]
+        (&[0xC4, 0xE2, 0x6D, 0x46], 1, Some(3), 1, &[]),     // vpsravd ymm1, ymm2, ymm3
+        (&[0xC4, 0xE3, 0x6D, 0x02], 1, Some(3), 1, &[0x5A]), // vpblendd ymm1, ymm2, ymm3, 0x5A
+        (&[0xC4, 0xE2, 0x6D, 0x8C], 6, None, 6, &[]),        // vpmaskmovd ymm6, ymm2, [m]
+        (&[0xC4, 0xE2, 0xE9, 0x8E], 7, None, 1, &[]),        // vpmaskmovq [m], xmm2, xmm7
     ];
     let mut cases = Vec::new();
     for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {

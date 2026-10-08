@@ -17,6 +17,14 @@ export const le = (v, n = 16) => Uint8Array.from({ length: n }, (_, i) => Number
 export const mask = bits => (1n << BigInt(bits)) - 1n;
 export const LOW = mask(64);
 export const lanes = (v, bits, width = 128) => Array.from({ length: width / bits }, (_, i) => v >> BigInt(i * bits) & mask(bits));
+// AVX2: an element (`size` bytes) in each lane of `width` bits; the variable
+// shifts (VPSRLVD/Q 45, VPSRAVD 46, VPSLLVD/Q 47) of `bits`-wide elements
+const splat = (v, size, width) => join(Array(width / (8 * size)).fill(v & mask(8 * size)), 8 * size);
+const variable_shift = (op, bits, a, b, width = 128) => join(lanes(a, bits, width).map((x, n) => {
+    const count = lanes(b, bits, width)[n], wide = count >= BigInt(bits);
+    if(op === 0x46) return BigInt.asUintN(bits, BigInt.asIntN(bits, x) >> (wide ? BigInt(bits - 1) : count));
+    return wide ? 0n : op === 0x45 ? x >> count : x << count & mask(bits);
+}), bits);
 export const join = (values, bits) => values.reduceRight((v, x) => v << BigInt(bits) | x, 0n);
 
 const unpack = (bits, high) => (a, b) => {
@@ -52,6 +60,8 @@ const SSSE3 = { 0x00: "vpshufb", 0x01: "vphaddw", 0x02: "vphaddd", 0x03: "vphadd
 const SSE4 = { 0x28: "vpmuldq", 0x29: "vpcmpeqq", 0x2B: "vpackusdw", 0x37: "vpcmpgtq", 0x38: "vpminsb", 0x39: "vpminsd",
     0x3A: "vpminuw", 0x3B: "vpminud", 0x3C: "vpmaxsb", 0x3D: "vpmaxsd", 0x3E: "vpmaxuw", 0x3F: "vpmaxud", 0x40: "vpmulld" };
 const EXTEND = ["bw", "bd", "bq", "wd", "wq", "dq"];
+// VPBROADCASTB/W/D/Q (AVX2): opcode, element size
+const BROADCASTS = [[0x78, 1, "vpbroadcastb"], [0x79, 2, "vpbroadcastw"], [0x58, 4, "vpbroadcastd"], [0x59, 8, "vpbroadcastq"]];
 
 /**
  * The forms: name, map (1: 0F, 2: 0F38, 3: 0F3A; 1 if absent), pp (0, 1:
@@ -221,6 +231,16 @@ const FORMS_128 = [
     { name: "vmaskmovpd", map: 2, pp: 1, op: 0x2D, kind: "maskload", lane: 8, memory: true, w: 0 },
     { name: "vmaskmovps", map: 2, pp: 1, op: 0x2E, kind: "maskstore", lane: 4, memory: true, w: 0 },
     { name: "vmaskmovpd", map: 2, pp: 1, op: 0x2F, kind: "maskstore", lane: 8, memory: true, w: 0 },
+
+    // P7 part 2: AVX2's own VEX.128 forms (`isa`)
+    ...BROADCASTS.map(([op, size, name]) => ({ name, map: 2, pp: 1, op, kind: "load", bytes: size, w: 0, isa: "AVX2", f: v => splat(v, size, 128) })),
+    { name: "vbroadcastss", map: 2, pp: 1, op: 0x18, kind: "load", register: true, w: 0, isa: "AVX2", f: v => splat(v, 4, 128) },
+    { name: "vpblendd", map: 3, pp: 1, op: 0x02, kind: "binary_imm", w: 0, isa: "AVX2",
+        f: (a, b, imm8) => join(lanes(a, 32).map((x, n) => imm8 >> n & 1 ? lanes(b, 32)[n] : x), 32) },
+    ...[[0x45, 0, "vpsrlvd"], [0x45, 1, "vpsrlvq"], [0x46, 0, "vpsravd"], [0x47, 0, "vpsllvd"], [0x47, 1, "vpsllvq"]].map(([op, w, name]) =>
+        ({ name, map: 2, pp: 1, op, kind: "binary", w, isa: "AVX2", f: (a, b) => variable_shift(op, w ? 64 : 32, a, b) })),
+    ...[[0x8C, "maskload"], [0x8E, "maskstore"]].flatMap(([op, kind]) => [0, 1].map(w =>
+        ({ name: w ? "vpmaskmovq" : "vpmaskmovd", map: 2, pp: 1, op, kind, lane: w ? 8 : 4, memory: true, w, isa: "AVX2" }))),
 ];
 
 // P6 part 1: the VEX.256 forms (`l`: 1) of data movement, logic, shuffles,
@@ -240,6 +260,10 @@ const avx2_halves = f => !f.long && f.pp === 1 && ((f.map ?? 1) === 1 && (f.kind
         f.kind === "load" && f.op >= 0x1C && f.op <= 0x1E || f.name === "vmovntdqa") ||
     f.map === 3 && [0x0E, 0x0F, 0x42, 0x4C].includes(f.op)) || f.op === 0x70 && !f.map;
 const wide = (f, extra = {}) => ({ ...f, l: 1, bytes: 32, ...extra });
+// VPERM2F128 (AVX), VPERM2I128 (AVX2): each half one of the sources' halves
+// (imm8[1:0], imm8[5:4]) or zero (imm8[3], imm8[7])
+const vperm2 = (op, name, extra = {}) => ({ name, map: 3, pp: 1, op, kind: "binary_imm", bytes: 32, w: 0, l: 1, ...extra,
+    f: (a, b, imm8) => join([imm8, imm8 >> 4].map(c => c & 8 ? 0n : [low128(a), high128(a), low128(b), high128(b)][c & 3]), 128) });
 const FORMS_256 = [
     // full-width loads and stores
     ...FORMS_128.filter(f => ["load", "store"].includes(f.kind) && !f.map && f.bytes === undefined && !f.f &&
@@ -266,8 +290,7 @@ const FORMS_256 = [
     { name: "vinsertf128", map: 3, pp: 1, op: 0x18, kind: "insert128", bytes: 16, w: 0, l: 1 },
     { name: "vextractf128", map: 3, pp: 1, op: 0x19, kind: "extract128", bytes: 16, w: 0, l: 1 },
     // VPERM2F128: each half one of the sources' halves (imm8[1:0], imm8[5:4]) or zero (imm8[3], imm8[7])
-    { name: "vperm2f128", map: 3, pp: 1, op: 0x06, kind: "binary_imm", bytes: 32, w: 0, l: 1,
-        f: (a, b, imm8) => join([imm8, imm8 >> 4].map(c => c & 8 ? 0n : [low128(a), high128(a), low128(b), high128(b)][c & 3]), 128) },
+    vperm2(0x06, "vperm2f128"),
     { name: "vzeroall", pp: 0, op: 0x77, kind: "zero_all", l: 1 },
     // the tests and sign masks over all 256 bits
     wide(by_name("vptest")), wide(by_name("vtestps")), wide(by_name("vtestpd")),
@@ -291,6 +314,31 @@ const FORMS_256 = [
         if(f.kind === "blendv" || f.name === "vmovntdqa") return wide(f, isa);
         return wide(f, { ...isa, f: halves(f.f, f.name === "vmpsadbw" ? imm8 => imm8 >> 3 : undefined) });
     }),
+    // P7 part 2 (AVX2): broadcasts (an element from xmm/m, VBROADCASTI128
+    // from m128), the extensions from xmm/m128 (m64, m32) over 256 bits,
+    // VPERMD/PS (indices in VEX.vvvv), VPERMQ/PD (imm8), VPERM2I128,
+    // VINSERTI128, VEXTRACTI128, VPBLENDD (imm8[7:4] for the high half),
+    // the variable shifts and VPMASKMOVD/Q
+    ...BROADCASTS.map(([op, size, name]) => ({ name, map: 2, pp: 1, op, kind: "load", bytes: size, w: 0, l: 1, isa: "AVX2", f: v => splat(v, size, 256) })),
+    { name: "vbroadcastss", map: 2, pp: 1, op: 0x18, kind: "load", register: true, w: 0, l: 1, isa: "AVX2", f: v => splat(v, 4, 256) },
+    { name: "vbroadcastsd", map: 2, pp: 1, op: 0x19, kind: "load", register: true, w: 0, l: 1, isa: "AVX2", f: v => splat(v, 8, 256) },
+    { name: "vbroadcasti128", map: 2, pp: 1, op: 0x5A, kind: "load", memory: true, bytes: 16, w: 0, l: 1, isa: "AVX2", f: v => join([v, v], 128) },
+    ...EXTEND.flatMap((suffix, i) => [[0x20 + i, "vpmovsx" + suffix], [0x30 + i, "vpmovzx" + suffix]]).map(([op, name]) => {
+        const half = [8, 4, 2, 8, 4, 8][op & 7], f128 = by_name(name).f;
+        return { name, map: 2, pp: 1, op, kind: "load", bytes: 2 * half, w: 0, l: 1, isa: "AVX2",
+            f: v => join([f128(v & mask(8 * half)), f128(v >> BigInt(8 * half) & mask(8 * half))], 128) };
+    }),
+    ...[[0x36, "vpermd"], [0x16, "vpermps"]].map(([op, name]) => ({ name, map: 2, pp: 1, op, kind: "binary", w: 0, l: 1, bytes: 32, isa: "AVX2",
+        f: (a, b) => join(lanes(a, 32, 256).map(i => lanes(b, 32, 256)[Number(i & 7n)]), 32) })),
+    ...[[0x00, "vpermq"], [0x01, "vpermpd"]].map(([op, name]) => ({ name, map: 3, pp: 1, op, kind: "load_imm", w: 1, l: 1, bytes: 32, isa: "AVX2",
+        f: (v, imm8) => join([0, 1, 2, 3].map(n => lanes(v, 64, 256)[imm8 >> 2 * n & 3]), 64) })),
+    vperm2(0x46, "vperm2i128", { isa: "AVX2" }),
+    { name: "vinserti128", map: 3, pp: 1, op: 0x38, kind: "insert128", bytes: 16, w: 0, l: 1, isa: "AVX2" },
+    { name: "vextracti128", map: 3, pp: 1, op: 0x39, kind: "extract128", bytes: 16, w: 0, l: 1, isa: "AVX2" },
+    wide(by_name("vpblendd"), { isa: "AVX2", f: halves(by_name("vpblendd").f, imm8 => imm8 >> 4) }),
+    ...FORMS_128.filter(f => f.isa === "AVX2" && f.map === 2 && f.op >= 0x45 && f.op <= 0x47)
+        .map(f => wide(f, { f: (a, b) => variable_shift(f.op, f.w ? 64 : 32, a, b, 256) })),
+    ...FORMS_128.filter(f => f.isa === "AVX2" && (f.kind === "maskload" || f.kind === "maskstore")).map(f => ({ ...f, l: 1 })),
 ];
 export const FORMS = [...FORMS_128, ...FORMS_256];
 
