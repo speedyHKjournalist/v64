@@ -688,6 +688,9 @@ x86-64-v3 通用寄存器指令的模板要点：
       `tests/x64/avx.mjs` 登记。
     - 32 字节存储的高半区落在缺页上时，低半区已经写出。SDM 规定故障指令不留下部分存储。
       `tests/x64/vector_oracle.mjs` 对这一例按 SDM 单独判定。
+  - P6 第二部分新发现（QEMU 10.2）：RCPPS/RSQRTPS（包括 VEX 形式）对非规格化的源给出精确的倒数
+    或倒数平方根（不小于 2^63）；SDM 把非规格化的源当作 0.0，结果为 ±∞，v86 与模型都按此实现
+    （P4a）。VEX.128 形式也有这一差别，只是用例增多后才遇到；`tests/x64/avx.mjs` 按偏差登记。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
@@ -1921,3 +1924,50 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
     故障用例后被检出。
 - **回归**：`p6p1-batch` 的 55 个目标中 50 个通过。另外 5 个仍因另一会话未完成的 `mmio_ram.rs`
   失败，它们的 12 条命令直接运行，全部通过。
+
+### P6 第二部分：VEX.256 的浮点运算与转换（2026-10-08）
+
+- **范围**：其余 35 个 VEX.256 形式，AVX 的 94 个 VEX.256 形式至此全部接入：VSQRT、VADD、VMUL、VSUB、
+  VMIN、VDIV、VMAX 的 PS/PD；VHADDPS/PD、VHSUBPS/PD、VADDSUBPS/PD；VCMPPS/PD（32 个谓词）；
+  VRSQRTPS、VRCPPS；VROUNDPS/PD；VDPPS；VCVTDQ2PS、VCVTPS2DQ、VCVTTPS2DQ、VCVTPS2PD、VCVTDQ2PD、
+  VCVTPD2PS、VCVTPD2DQ、VCVTTPD2DQ。标量形式是 VEX.LIG，VDPPD 没有 VEX.256 形式（VEX.L=1 时 #UD）。
+- **做法**：
+  - `simd_fp` 的 `operate` 与 `round` 推广到 N 个半区（const generic）。VEX.256 形式的两个半区共用
+    一个异常上下文（`arithmetic256`、`round256`），SDM 11.5.3 的顺序作用于全部 8 个（PD：4 个）lane：
+    任一 lane 有未屏蔽的计算前异常时，整条指令只记录计算前的标志。分别对两个半区调用 VEX.128 的
+    实现做不到这一点。快路径（`fast_half`）逐半区判断，两个半区都满足条件时才走快路径。
+  - `convert256`：VCVTDQ2PS/VCVTPS2DQ/VCVTTPS2DQ 转换八个 lane；VCVTPS2PD、VCVTDQ2PD 把 XMM 源
+    （m128）的四个 lane 扩展为四个双精度；VCVTPD2PS、VCVTPD2DQ、VCVTTPD2DQ 把四个双精度收窄为
+    XMM 结果，并清零 YMM 的上半部分。三类转换都只用一个异常上下文。
+  - VHADD/VHSUB 在每个半区内取相邻 lane 对；VDPPS 在两个半区各做一次点积，先算低半区（它的未屏蔽
+    异常在高半区运算之前产生故障）；VRCPPS/VRSQRTPS 没有异常，逐半区计算。
+  - Tier-0、page tier 与 regions 遇到这些形式时仍走解释器单步或 `ir_avx_continue`。
+- **测试**：
+  - `tests/rust/sse_fp_cases.mjs` 的模型增加宽度参数：VEX.256 的 lane 数加倍，HADD/HSUB 在每个
+    半区内取对，VDPPS 依次计算两个半区（低半区有未屏蔽异常时停止），转换按源和目的的宽度计数。
+  - `tests/rust/avx_model.mjs` 从 VEX.128 的浮点形式派生出 35 个 VEX.256 形式（标量形式与 VDPPD
+    除外）。`tests/rust/avx.mjs`：361 个形式，三个 arm 上 12193 项。定向用例：VADDPS ymm 在
+    MXCSR 0x1F00（只开放 IE）下执行，低半区的 lane 不精确（PE，已屏蔽），高半区有一个 SNaN lane →
+    #XM，MXCSR 只记录 IE（0x1F01），XMM 与 YMM 上半部分不变。
+  - `tests/rust/avx_fp.mjs`：35 个 VEX.256 形式加入精确用例，检查 256 位结果与 MXCSR。共 142560 例
+    （68 个 VEX.128/VEX.LIG 形式、35 个 VEX.256 形式，寄存器与内存源，11 种 MXCSR 设置），三个 arm
+    都与模型一致；未屏蔽异常的 #XM 与 #UD（CR4.OSXMMEXCPT=0）两项也覆盖 VEX.256 形式。
+  - `tests/x64/avx.mjs`：2952 例，三种配置下都与 QEMU 和模型一致。VRCPPS/VRSQRTPS ymm 的近似值
+    按误差比较两个半区。QEMU 对非规格化的源给出精确的倒数（见 11.1 节），按偏差登记。
+  - IR fixture 增加 10 个 VEX.256 浮点形式（含 m128 源的 VCVTDQ2PD 与收窄的 VCVTPD2PS），差分
+    测试共 6432 例。
+- **变异测试**：植入 16 个错误，全部被检出（都由 `avx_fp.mjs` 的精确用例发现）：
+  - 两个半区各用一个异常上下文（VADDPS 与 VROUNDPD）；VCMPPS ymm 只取 imm8[2:0]；
+  - 高半区 VHADDPS 的输入次序颠倒；快路径只算低半区，或只算第一个 lane；
+  - VRCPPS 的高半区读低半区的源；VROUNDPS ymm 不按 imm8 舍入（总按 MXCSR）；
+  - VDPPS 的高半区读低半区的第二源，或先算高半区（在全部异常都不屏蔽时被发现）；
+  - 转换总从低半区取元素；VCVTPS2DQ、VCVTPD2DQ 截断；转换不记录异常；VCVTDQ2PD ymm 只转两个
+    lane；收窄的转换保留 YMM 的上半部分。
+- **另行修正**（49e08ed5，回归中发现）：regions 中 MMX 的寄存器 helper 对每个形式都只做 MMX 的
+  检查（CR0.EM，然后 CR0.TS）。MOVDQ2Q 与 MOVQ2DQ 涉及 XMM 寄存器，解释器按 legacy SSE 形式检查，
+  没有 CR4.OSFXSR 时产生 #UD；region 却执行了它们，再报告下一条指令的 #UD。
+  `tests/rust/sse_faults.mjs` 只有在冷启动的那一轮之前，覆盖它们的 region 恰好已经编译好时才失败
+  （负载下 4 次中 1 次）。MMX 的 IR 差分测试现在对每个寄存器用例另在 OSFXSR 清零时各跑一次。
+- **回归**：`p6p2-batch-a`、`p6p2-batch-b` 的 55 个目标中 50 个通过。另外 5 个仍因另一会话未完成的
+  `mmio_ram.rs` 失败，它们的 12 条命令直接运行，全部通过。第一次批次与变异测试、其他构建同时运行，
+  负载过高，ssse3、sse3、ir-tier0 超时（单独重跑通过），也正是那次运行暴露了上面 MOVDQ2Q 的问题。

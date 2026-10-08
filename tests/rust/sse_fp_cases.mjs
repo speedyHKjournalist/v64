@@ -26,8 +26,8 @@ const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 
 const pick = list => list[random() % list.length];
 const random_value = double => double ? BigInt(random()) << 32n | BigInt(random()) : BigInt(random());
 
-export const lanes_of = (v, double) => {
-    const n = double ? 2 : 4, bits = double ? 64n : 32n, mask = (1n << bits) - 1n;
+export const lanes_of = (v, double, width = 128) => {
+    const n = width / (double ? 64 : 32), bits = double ? 64n : 32n, mask = (1n << bits) - 1n;
     return Array.from({ length: n }, (_, i) => v >> BigInt(i) * bits & mask);
 };
 export const of_lanes = (lanes, double) => lanes.reduce((v, x, i) => v | x << BigInt(i) * (double ? 64n : 32n), 0n);
@@ -140,15 +140,17 @@ export function cases(form)
     });
     return out;
 }
-export function expect(form, mxcsr, a, b, imm8)
+export function expect(form, mxcsr, a, b, imm8, width = 128)
 {
+    // (`width` 256: a VEX.256 form, its lanes with one exception context)
+    const wide = width === 256, half = (v, h) => v >> BigInt(128 * h) & ((1n << 128n) - 1n);
     const fp = new model.Fp(mxcsr);
     let result;
     switch(form.kind)
     {
         case "binary": case "compare":
         {
-            const la = lanes_of(a, form.double), lb = lanes_of(b, form.double);
+            const la = lanes_of(a, form.double, width), lb = lanes_of(b, form.double, width);
             const n = form.scalar ? 1 : la.length;
             const all = form.double ? 0xFFFFFFFFFFFFFFFFn : 0xFFFFFFFFn;
             for(let i = 0; i < n; i++)
@@ -159,15 +161,19 @@ export function expect(form, mxcsr, a, b, imm8)
         }
         case "horizontal": case "addsub":
         {
-            const la = lanes_of(a, form.double), lb = lanes_of(b, form.double), n = la.length;
+            // (HADD/HSUB: their pairs within each half)
             const r = [];
-            for(let i = 0; i < n; i++)
+            for(let h = 0; h < width / 128; h++)
             {
-                if(form.kind === "addsub") r.push(fp.binary(i % 2 ? "add" : "sub", la[i], lb[i], form.double));
-                else
+                const la = lanes_of(half(a, h), form.double), lb = lanes_of(half(b, h), form.double), n = la.length;
+                for(let i = 0; i < n; i++)
                 {
-                    const v = i < n / 2 ? la : lb, base = i % (n / 2) * 2;
-                    r.push(fp.binary(form.op, v[base], v[base + 1], form.double));
+                    if(form.kind === "addsub") r.push(fp.binary(i % 2 ? "add" : "sub", la[i], lb[i], form.double));
+                    else
+                    {
+                        const v = i < n / 2 ? la : lb, base = i % (n / 2) * 2;
+                        r.push(fp.binary(form.op, v[base], v[base + 1], form.double));
+                    }
                 }
             }
             result = of_lanes(r, form.double);
@@ -175,16 +181,20 @@ export function expect(form, mxcsr, a, b, imm8)
         }
         case "round":
         {
-            const la = lanes_of(a, form.double), lb = lanes_of(b, form.double);
+            const la = lanes_of(a, form.double, width), lb = lanes_of(b, form.double, width);
             for(let i = 0; i < (form.scalar ? 1 : la.length); i++) la[i] = round_lane(fp, lb[i], form.double, imm8);
             result = of_lanes(la, form.double);
             break;
         }
         case "dot":
         {
-            // (each operation with its own exceptions, see the model)
-            const r = dot_product(mxcsr, bytes128(a), bytes128(b), imm8, form.double);
-            return { result: r.result.reduceRight((v, x) => v << 8n | BigInt(x), 0n), after: r.mxcsr, fault: r.fault };
+            // (each operation with its own exceptions, see the model; VEX.256:
+            // each half's in turn, an unmasked exception before the high one)
+            const value = r => r.result.reduceRight((v, x) => v << 8n | BigInt(x), 0n);
+            const low = dot_product(mxcsr, bytes128(half(a, 0)), bytes128(half(b, 0)), imm8, form.double);
+            if(!wide || low.fault) return { result: value(low), after: low.mxcsr, fault: low.fault };
+            const high = dot_product(low.mxcsr, bytes128(half(a, 1)), bytes128(half(b, 1)), imm8, form.double);
+            return { result: value(low) | value(high) << 128n, after: high.mxcsr, fault: high.fault };
         }
         case "comi":
         {
@@ -202,17 +212,18 @@ export function expect(form, mxcsr, a, b, imm8)
         }
         case "reciprocal":
         {
-            const la = lanes_of(a, false), lb = lanes_of(b, false);
+            const la = lanes_of(a, false, width), lb = lanes_of(b, false, width);
             if(!form.scalar) la.fill(0n);
-            for(let i = 0; i < (form.scalar ? 1 : 4); i++) la[i] = model.reciprocal(lb[i], form.square_root);
+            for(let i = 0; i < (form.scalar ? 1 : la.length); i++) la[i] = model.reciprocal(lb[i], form.square_root);
             result = of_lanes(la, false);
             break;
         }
         case "widen": case "narrow":
         {
             const from_double = form.kind === "narrow";
-            const lb = lanes_of(b, from_double);
-            const n = form.scalar ? 1 : 2;
+            // (VEX.256: four lanes, of an XMM source or into an XMM result)
+            const lb = lanes_of(b, from_double, wide && from_double ? 256 : 128);
+            const n = form.scalar ? 1 : wide ? 4 : 2;
             const converted = Array.from({ length: n }, (_, i) => fp.convert(lb[i], from_double));
             if(form.scalar)
             {
@@ -225,15 +236,15 @@ export function expect(form, mxcsr, a, b, imm8)
         }
         case "from_dwords":
         {
-            const n = form.double ? 2 : 4;
-            const ints = lanes_of(b, false).map(x => BigInt.asIntN(32, x)).slice(0, n);
+            const n = (form.double ? 2 : 4) * (wide ? 2 : 1);
+            const ints = lanes_of(b, false, wide && !form.double ? 256 : 128).map(x => BigInt.asIntN(32, x)).slice(0, n);
             result = of_lanes(ints.map(x => fp.from_integer(x, form.double)), form.double);
             break;
         }
         case "to_dwords":
         {
-            const lb = lanes_of(b, form.double);
-            const ints = lb.slice(0, form.double ? 2 : 4).map(x => BigInt.asUintN(32, fp.to_integer(x, form.double, 32, form.truncate)));
+            const lb = lanes_of(b, form.double, width);
+            const ints = lb.slice(0, (form.double ? 2 : 4) * (wide ? 2 : 1)).map(x => BigInt.asUintN(32, fp.to_integer(x, form.double, 32, form.truncate)));
             result = of_lanes(ints, false);
             break;
         }

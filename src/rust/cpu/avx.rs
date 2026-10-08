@@ -878,6 +878,67 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
             let lane = if pp == 0 { 4 } else { 8 };
             m.set_gpr(i.reg, sign_mask256(ymm(i.rm.unwrap()), lane), i.long && i.w);
         },
+        // VSQRT, VADD, VMUL, VSUB, VMIN, VDIV, VMAX PS/PD, VHADDPS/PD,
+        // VHSUBPS/PD, VADDSUBPS/PD, VCMPPS/PD with 32 predicates: the lanes of
+        // both halves with one exception context (VSQRTPS/PD: one source)
+        (1, 0 | 1, 0x51 | 0x58 | 0x59 | 0x5C..=0x5F | 0xC2) | (1, 1 | 3, 0x7C | 0x7D | 0xD0) => {
+            let b = source256(m, i, false)?;
+            let r = simd_fp::arithmetic256(legacy(i.key), ymm(i.vvvv), b, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_ymm(i.reg, r);
+        },
+        // VRSQRTPS, VRCPPS: no exceptions
+        (1, 0, 0x52 | 0x53) => {
+            let b = source256(m, i, false)?;
+            let key = legacy(i.key);
+            set_ymm(
+                i.reg,
+                (
+                    simd_fp::reciprocal(key, 0, b.0),
+                    simd_fp::reciprocal(key, 0, b.1),
+                ),
+            );
+        },
+        // VROUNDPS, VROUNDPD
+        (3, 1, 0x08 | 0x09) => {
+            let b = source256(m, i, false)?;
+            let r = simd_fp::round256(legacy(i.key), b, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_ymm(i.reg, r);
+        },
+        // VDPPS: in each half, the low one first (its unmasked exception
+        // faults before the high one's operations)
+        (3, 1, 0x40) => {
+            let b = source256(m, i, false)?;
+            let a = ymm(i.vvvv);
+            let low = simd_fp::dot_product(false, a.0, b.0, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            let high = simd_fp::dot_product(false, a.1, b.1, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_ymm(i.reg, (low, high));
+        },
+        // VCVTDQ2PS, VCVTPS2DQ, VCVTTPS2DQ: eight lanes
+        (1, 0..=2, 0x5B) => {
+            let b = source256(m, i, false)?;
+            let r = simd_fp::convert256(legacy(i.key), b)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_ymm(i.reg, r);
+        },
+        // VCVTPS2PD, VCVTDQ2PD: xmm/m128's four lanes into four doubles
+        (1, 0, 0x5A) | (1, 2, 0xE6) => {
+            let b = source(m, i, 16, false)?;
+            let r = simd_fp::convert256(legacy(i.key), (b, 0))
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_ymm(i.reg, r);
+        },
+        // VCVTPD2PS, VCVTPD2DQ, VCVTTPD2DQ: ymm/m256's four doubles into an
+        // XMM register (bits 255:128 of its YMM register zeroed)
+        (1, 1, 0x5A) | (1, 1 | 3, 0xE6) => {
+            let b = source256(m, i, false)?;
+            let r = simd_fp::convert256(legacy(i.key), b)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r.0);
+        },
         // VMASKMOVPS, VMASKMOVPD ymm, ymm, m256: the lanes of memory the
         // first source's sign bits select, the others zero
         (2, 1, 0x2C | 0x2D) => {

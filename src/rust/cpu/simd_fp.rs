@@ -6,7 +6,8 @@
 //! code runs natively only where that gives the same results and flags.
 //!
 //! Operands and results are the bits of 128-bit registers (lane 0 in the low
-//! bits); the engines read the operands and write the results.
+//! bits), a VEX.256 form's the two halves of 256-bit ones; the engines read
+//! the operands and write the results.
 //!
 //! The order of exceptions follows SDM Vol. 1, 11.5.3: pre-computation
 //! exceptions (invalid operation, denormal operand, divide by zero) of all
@@ -435,7 +436,7 @@ pub unsafe fn arithmetic(
     imm8: u8,
 ) -> Result<u128, Unmasked> {
     // (legacy CMP: imm8[2:0], its other bits ignored)
-    operate(op, destination, source, imm8 & 7)
+    operate(op, [destination], [source], imm8 & 7).map(|[r]| r)
 }
 /// VCMPPS/VCMPPD/VCMPSS/VCMPSD (VEX.0F C2): `arithmetic`'s CMP with the 32
 /// predicates of imm8[4:0]
@@ -445,9 +446,65 @@ pub unsafe fn compare(
     source: u128,
     imm8: u8,
 ) -> Result<u128, Unmasked> {
-    operate(op, destination, source, imm8 & 31)
+    operate(op, [destination], [source], imm8 & 31).map(|[r]| r)
 }
-unsafe fn operate(op: u32, destination: u128, source: u128, imm8: u8) -> Result<u128, Unmasked> {
+/// The VEX.256 forms of `arithmetic` (VCMPPS/PD: `compare`'s): the lanes of
+/// both halves (HADD/HSUB's pairs within each) with one exception context,
+/// the halves of the new destination
+pub unsafe fn arithmetic256(
+    op: u32,
+    destination: (u128, u128),
+    source: (u128, u128),
+    imm8: u8,
+) -> Result<(u128, u128), Unmasked> {
+    operate(
+        op,
+        [destination.0, destination.1],
+        [source.0, source.1],
+        imm8 & 31,
+    )
+    .map(|[low, high]| (low, high))
+}
+/// One half's `lanes` natively (fast_lane), or None when one is not
+unsafe fn fast_half(
+    code: u8,
+    destination: u128,
+    source: u128,
+    double: bool,
+    lanes: usize,
+    imm8: u8,
+) -> Option<u128> {
+    // (lanes as arrays: u128 shifts are slow in Wasm)
+    if double {
+        let (d, s): ([u64; 2], [u64; 2]) = (
+            std::mem::transmute(destination),
+            std::mem::transmute(source),
+        );
+        let mut r = d;
+        for i in 0..lanes {
+            r[i] = fast_lane(code, d[i], s[i], true, imm8)?;
+        }
+        Some(std::mem::transmute(r))
+    }
+    else {
+        let (d, s): ([u32; 4], [u32; 4]) = (
+            std::mem::transmute(destination),
+            std::mem::transmute(source),
+        );
+        let mut r = d;
+        for i in 0..lanes {
+            r[i] = fast_lane(code, d[i] as u64, s[i] as u64, false, imm8)? as u32;
+        }
+        Some(std::mem::transmute(r))
+    }
+}
+/// `arithmetic` of N halves (a VEX.256 form: 2) with one exception context
+unsafe fn operate<const N: usize>(
+    op: u32,
+    destination: [u128; N],
+    source: [u128; N],
+    imm8: u8,
+) -> Result<[u128; N], Unmasked> {
     let code = op as u8;
     let (double, scalar) =
         if matches!(code, 0x7C | 0x7D | 0xD0) { (op >> 16 == 0x66, false) } else { shape(op) };
@@ -463,64 +520,46 @@ unsafe fn operate(op: u32, destination: u128, source: u128, imm8: u8) -> Result<
     // (MIN, MAX and CMP do not round: their fast path needs no MXCSR condition)
     let admitted = *gp::mxcsr as u32 & 0xFFE0 == 0x1FA0 || matches!(code, 0x5D | 0x5F | 0xC2);
     if admitted && matches!(code, 0x51 | 0x58 | 0x59 | 0x5C..=0x5F | 0xC2) {
-        // (lanes as arrays: u128 shifts are slow in Wasm)
-        if double {
-            let (d, s): ([u64; 2], [u64; 2]) = (
-                std::mem::transmute(destination),
-                std::mem::transmute(source),
-            );
-            let mut r = d;
-            if (0..lanes).all(|i| {
-                fast_lane(code, d[i], s[i], true, imm8)
-                    .map(|v| r[i] = v)
-                    .is_some()
-            }) {
-                return Ok(std::mem::transmute(r));
-            }
-        }
-        else {
-            let (d, s): ([u32; 4], [u32; 4]) = (
-                std::mem::transmute(destination),
-                std::mem::transmute(source),
-            );
-            let mut r = d;
-            if (0..lanes).all(|i| {
-                fast_lane(code, d[i] as u64, s[i] as u64, false, imm8)
-                    .map(|v| r[i] = v as u32)
-                    .is_some()
-            }) {
-                return Ok(std::mem::transmute(r));
-            }
+        let mut r = destination;
+        if (0..N).all(|h| {
+            fast_half(code, destination[h], source[h], double, lanes, imm8)
+                .map(|v| r[h] = v)
+                .is_some()
+        }) {
+            return Ok(r);
         }
     }
     let mut fp = Fp::new();
     let mut result = destination;
-    for i in 0..lanes {
-        let (a, b) = (lane(destination, i, double), lane(source, i, double));
-        let v = match code {
-            0xC2 => {
-                if fp.compare(a, b, double, imm8) {
-                    lane_mask(double) as u64
-                }
-                else {
-                    0
-                }
-            },
-            0xD0 => fp.binary(if i % 2 == 0 { 0x5C } else { 0x58 }, a, b, double),
-            0x7C | 0x7D => {
-                let half = lanes / 2;
-                let input = if i < half { destination } else { source };
-                let base = i % half * 2;
-                fp.binary(
-                    if code == 0x7C { 0x58 } else { 0x5C },
-                    lane(input, base, double),
-                    lane(input, base + 1, double),
-                    double,
-                )
-            },
-            _ => fp.binary(code, a, b, double),
-        };
-        result = set_lane(result, i, double, v);
+    for h in 0..N {
+        let (destination, source) = (destination[h], source[h]);
+        for i in 0..lanes {
+            let (a, b) = (lane(destination, i, double), lane(source, i, double));
+            let v = match code {
+                0xC2 => {
+                    if fp.compare(a, b, double, imm8) {
+                        lane_mask(double) as u64
+                    }
+                    else {
+                        0
+                    }
+                },
+                0xD0 => fp.binary(if i % 2 == 0 { 0x5C } else { 0x58 }, a, b, double),
+                0x7C | 0x7D => {
+                    let half = lanes / 2;
+                    let input = if i < half { destination } else { source };
+                    let base = i % half * 2;
+                    fp.binary(
+                        if code == 0x7C { 0x58 } else { 0x5C },
+                        lane(input, base, double),
+                        lane(input, base + 1, double),
+                        double,
+                    )
+                },
+                _ => fp.binary(code, a, b, double),
+            };
+            result[h] = set_lane(result[h], i, double, v);
+        }
     }
     fp.finish()?;
     Ok(result)
@@ -532,30 +571,45 @@ unsafe fn operate(op: u32, destination: u128, source: u128, imm8: u8) -> Result<
 /// does; imm8[3] suppresses the precision exception. DAZ applies, the
 /// denormal operand exception does not (SDM); an SNaN is an invalid operation.
 pub unsafe fn round(op: u32, destination: u128, source: u128, imm8: u8) -> Result<u128, Unmasked> {
+    round_halves(op, [destination], [source], imm8).map(|[r]| r)
+}
+/// VROUNDPS/VROUNDPD with VEX.256 (`op` the legacy form's key): both halves
+/// of `source` with one exception context
+pub unsafe fn round256(op: u32, source: (u128, u128), imm8: u8) -> Result<(u128, u128), Unmasked> {
+    round_halves(op, [0, 0], [source.0, source.1], imm8).map(|[low, high]| (low, high))
+}
+unsafe fn round_halves<const N: usize>(
+    op: u32,
+    destination: [u128; N],
+    source: [u128; N],
+    imm8: u8,
+) -> Result<[u128; N], Unmasked> {
     let double = op & 1 != 0;
     let scalar = op & 0xFF >= 0x0A;
     let mut fp = Fp::new();
     let rounding = if imm8 & 4 != 0 { fp.rounding() } else { ROUNDING[(imm8 & 3) as usize] };
     let exact = imm8 & 8 == 0;
     let mut result = destination;
-    for i in 0..if scalar {
-        1
-    }
-    else if double {
-        2
-    }
-    else {
-        4
-    } {
-        let v = fp.convert_input(lane(source, i, double), double, true);
-        let r = if double {
-            f64_roundToInt(v, rounding, exact)
+    for h in 0..N {
+        for i in 0..if scalar {
+            1
+        }
+        else if double {
+            2
         }
         else {
-            f32_roundToInt(v as u32, rounding, exact) as u64
-        };
-        fp.convert_lane();
-        result = set_lane(result, i, double, r);
+            4
+        } {
+            let v = fp.convert_input(lane(source[h], i, double), double, true);
+            let r = if double {
+                f64_roundToInt(v, rounding, exact)
+            }
+            else {
+                f32_roundToInt(v as u32, rounding, exact) as u64
+            };
+            fp.convert_lane();
+            result[h] = set_lane(result[h], i, double, r);
+        }
     }
     fp.finish()?;
     Ok(result)
@@ -697,6 +751,79 @@ pub fn reciprocal(op: u32, destination: u128, source: u128) -> u128 {
         result = set_lane(result, i, false, bits as u64);
     }
     result
+}
+
+/// The VEX.256 conversions (the legacy forms' keys) with one exception
+/// context: VCVTDQ2PS (0F 5B), VCVTPS2DQ (66 0F 5B) and VCVTTPS2DQ (F3 0F 5B)
+/// of eight lanes; VCVTPS2PD (0F 5A) and VCVTDQ2PD (F3 0F E6) of an XMM
+/// source's four into four doubles; VCVTPD2PS (66 0F 5A), VCVTPD2DQ (F2 0F E6)
+/// and VCVTTPD2DQ (66 0F E6) of four doubles into an XMM result (the high
+/// half zero)
+pub unsafe fn convert256(op: u32, source: (u128, u128)) -> Result<(u128, u128), Unmasked> {
+    let element = |i: usize, bytes: usize| {
+        let offset = i * bytes;
+        let half = if offset < 16 { source.0 } else { source.1 };
+        (half >> (offset % 16 * 8)) as u64 & (u64::MAX >> (64 - bytes * 8))
+    };
+    let mut out = [0u128; 2];
+    let mut put = |i: usize, bytes: usize, v: u64| {
+        let offset = i * bytes;
+        out[offset / 16] |= (v as u128 & (u128::MAX >> (128 - bytes * 8))) << (offset % 16 * 8);
+    };
+    let mut fp = Fp::new();
+    match op {
+        0x0F5B => {
+            for i in 0..8 {
+                let v = i32_to_f32(element(i, 4) as u32 as i32) as u64;
+                fp.convert_lane();
+                put(i, 4, fp.convert_output(v, false));
+            }
+        },
+        0x660F5B | 0xF30F5B => {
+            let rounding = if op == 0xF30F5B { 1 } else { fp.rounding() };
+            for i in 0..8 {
+                let value = fp.convert_input(element(i, 4), false, true);
+                let n = f32_to_i32(value as u32, rounding, true);
+                fp.convert_lane();
+                put(i, 4, n as u32 as u64);
+            }
+        },
+        0xF30FE6 => {
+            for i in 0..4 {
+                let v = i32_to_f64(element(i, 4) as u32 as i32);
+                fp.convert_lane();
+                put(i, 8, fp.convert_output(v, true));
+            }
+        },
+        0x0F5A => {
+            for i in 0..4 {
+                let value = fp.convert_input(element(i, 4), false, false);
+                let v = f32_to_f64(value as u32);
+                fp.lane(0, nan(value, false));
+                put(i, 8, fp.convert_output(v, true));
+            }
+        },
+        0x660F5A => {
+            for i in 0..4 {
+                let value = fp.convert_input(element(i, 8), true, false);
+                let v = f64_to_f32(value) as u64;
+                fp.lane(0, nan(value, true));
+                put(i, 4, fp.convert_output(v, false));
+            }
+        },
+        0x660FE6 | 0xF20FE6 => {
+            let rounding = if op == 0x660FE6 { 1 } else { fp.rounding() };
+            for i in 0..4 {
+                let value = fp.convert_input(element(i, 8), true, true);
+                let n = f64_to_i32(value, rounding, true);
+                fp.convert_lane();
+                put(i, 4, n as u32 as u64);
+            }
+        },
+        _ => unreachable!("not a VEX.256 conversion"),
+    }
+    fp.finish()?;
+    Ok((out[0], out[1]))
 }
 
 /// The conversions (catalogue keys): the new XMM destination, or for those

@@ -266,6 +266,11 @@ const FORMS_256 = [
     { ...by_name("vmovmskps"), l: 1, f: signs(32, 256) }, { ...by_name("vmovmskpd"), l: 1, f: signs(64, 256) },
     // VMASKMOVPS, VMASKMOVPD: 8 and 4 lanes
     ...FORMS_128.filter(f => f.kind === "maskload" || f.kind === "maskstore").map(f => ({ ...f, l: 1 })),
+    // P6 part 2: the packed floating-point forms but VDPPD, over all lanes
+    // with one exception context (sse_fp_cases.mjs's expect at width 256);
+    // VCVTPS2PD and VCVTDQ2PD from xmm/m128
+    ...FORMS_128.filter(f => f.kind === "fp" && !f.lig && f.name !== "vdppd").map(f => ({ ...f, l: 1,
+        bytes: f.legacy.kind === "widen" || f.legacy.kind === "from_dwords" && f.legacy.double ? 16 : 32 })),
 ];
 export const FORMS = [...FORMS_128, ...FORMS_256];
 
@@ -433,9 +438,9 @@ export function execute(f, s, { d, v, m, imm8, long })
                 s.mxcsr = fp.finish().mxcsr;
                 break;
             }
-            const a = f.operands === "two" ? 0n : f.operands === "comi" ? s.x[d] : s.x[v];
-            // (VCMP*: the 32 predicates of imm8[4:0])
-            const r = expect(form, s.mxcsr, a, source(f.bytes), form.kind === "compare" ? imm8 & 31 : imm8);
+            const a = f.operands === "two" ? 0n : f.operands === "comi" ? s.x[d] : reg(v);
+            // (VCMP*: the 32 predicates of imm8[4:0]; VEX.256: all lanes)
+            const r = expect(form, s.mxcsr, a, source(f.bytes), form.kind === "compare" ? imm8 & 31 : imm8, width);
             assert(!r.fault, `${f.name}: an unmasked exception`);
             s.mxcsr = r.after;
             if(f.operands === "comi") s.flags = Number(r.result);

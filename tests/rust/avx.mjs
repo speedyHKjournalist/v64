@@ -540,7 +540,7 @@ try
             }
             return b;
         };
-        for(const f of FORMS.filter(f => !f.long && TIER0_HOT_FP.includes(f.name) && (!only || only.includes(f.name))))
+        for(const f of FORMS.filter(f => !f.long && !f.l && TIER0_HOT_FP.includes(f.name) && (!only || only.includes(f.name))))
         {
             const double = f.legacy.double ?? f.legacy.kind === "narrow";
             const cases = Array.from({ length: CASES }, (_, n) => {
@@ -792,7 +792,35 @@ try
             registers: { 2: lanes_3_5[0] }, uppers: { 2: lanes_3_5[1] }, label: "vmaskmovps ymm store, lane 5 on an absent page" });
         for(const vm of machines) pages(vm, ABSENT, true);
     }
-    console.log("PASS: #GP(0) for misaligned aligned moves and VLDMXCSR's reserved bits, #UD for VEX.L1, VEX.W1, VEX.vvvv and memory operands where invalid, #PF without effect");
+    // VEX.256 floating point: all lanes in one exception context (SDM Vol. 1,
+    // 11.5.3). VADDPS ymm2, ymm1, ymm0 with only IE unmasked: the low half's
+    // sums are inexact (PE, masked), the high half has an SNaN (IE): #XM
+    // before any post-computation flag, MXCSR gets IE alone, YMM2 unchanged
+    {
+        const join32 = l => l.reduceRight((v, x) => v << 32n | x, 0n);
+        const one = 0x3F800000n, tiny = 0x30800000n, snan = 0x7F800001n;
+        const registers = { 1: join32([one, one, one, one]), 0: join32([tiny, tiny, tiny, tiny]) };
+        const uppers = { 1: join32([one, one, one, one]), 0: join32([snan, one, one, one]) };
+        const mxcsr = 0x1F80 & ~0x80;
+        const initial = area(0, registers, uppers);
+        initial.set(u32(mxcsr), 24);
+        const at = CODE + PROLOGUE.length + xrstor(0).length;
+        const faulting = vex({ pp: 0, l: 1, vvvv: 1 }, 0x58, 2, 0);
+        const results = await run_all([...xrstor(area_in(0)), ...faulting, ...xsave(area_out(0))], vm => {
+            vm.write_memory(Uint8Array.from(u32(faulting.length)), SKIP);
+            vm.write_memory(initial, area_in(0));
+        }, machines, vm => ({ fault: [0, 4].map(o => word(vm, FAULT + o)), area: bytes(vm, area_out(0), 832) }),
+        vm => vm !== machines[1] || tier0_rounds() >= 300);
+        for(const { label, data } of results)
+        {
+            assert.deepEqual(data.fault, [19, at], `vaddps ymm, an SNaN in the high half (${label}): #XM`);
+            assert.equal(word_of(data.area, 24), mxcsr | 1, `vaddps ymm, an SNaN in the high half (${label}): MXCSR gets IE alone`);
+            assert.equal(hex(data.area.subarray(160, 288)), hex(initial.subarray(160, 288)), `vaddps ymm (${label}): XMM registers kept`);
+            assert.equal(hex(data.area.subarray(576, 704)), hex(initial.subarray(576, 704)), `vaddps ymm (${label}): YMM_Hi128 kept`);
+        }
+        checks++;
+    }
+    console.log("PASS: #GP(0) for misaligned aligned moves and VLDMXCSR's reserved bits, #UD for VEX.L1, VEX.W1, VEX.vvvv and memory operands where invalid, #PF without effect; one exception context for a VEX.256 floating-point form's lanes");
     console.log(`PASS: ${checks} AVX checks on 3 arms`);
 }
 finally

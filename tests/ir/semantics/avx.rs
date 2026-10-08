@@ -196,6 +196,16 @@ fn avx_fixtures() {
         (&[0xC4, 0xE3, 0x7D, 0x19], 2, Some(1), 1, &[1]),    // vextractf128 xmm1, ymm2, 1
         (&[0xC4, 0xE2, 0x6D, 0x2C], 6, None, 6, &[]),        // vmaskmovps ymm6, ymm2, [m]
         (&[0xC5, 0xFC, 0x77], 0, Some(0), 1, &[]),           // vzeroall (no ModRM)
+        (&[0xC5, 0xEC, 0x58], 1, Some(3), 1, &[]),           // vaddps ymm1, ymm2, ymm3
+        (&[0xC5, 0xCD, 0x5E], 5, None, 5, &[]),              // vdivpd ymm5, ymm6, [m]
+        (&[0xC5, 0xCC, 0xC2], 5, None, 5, &[0x1D]),          // vcmpps ymm5, ymm6, [m], GE_OQ
+        (&[0xC5, 0xDF, 0x7C], 3, Some(5), 3, &[]),           // vhaddps ymm3, ymm4, ymm5
+        (&[0xC5, 0xFC, 0x53], 1, Some(2), 1, &[]),           // vrcpps ymm1, ymm2
+        (&[0xC4, 0xE3, 0x7D, 0x09], 1, None, 1, &[4]),       // vroundpd ymm1, [m], 4
+        (&[0xC4, 0xE3, 0x65, 0x40], 2, Some(4), 2, &[0xF1]), // vdpps ymm2, ymm3, ymm4, 0xF1
+        (&[0xC5, 0xFE, 0x5B], 4, None, 4, &[]),              // vcvttps2dq ymm4, [m]
+        (&[0xC5, 0xFE, 0xE6], 1, None, 1, &[]),              // vcvtdq2pd ymm1, [m] (m128)
+        (&[0xC5, 0xFD, 0x5A], 6, Some(7), 6, &[]),           // vcvtpd2ps xmm6, ymm7
     ];
     let mut cases = Vec::new();
     for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {

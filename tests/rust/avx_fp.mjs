@@ -27,6 +27,9 @@ const BEFORE = 0x5A5A5A5A_A5A5A5A5_12345678_9ABCDEF0n;
 const ldmxcsr = a => [0x0F, 0xAE, 0x15, ...u32(a)], stmxcsr = a => [0x0F, 0xAE, 0x1D, ...u32(a)];
 const movdqu_load = (r, a) => [0xF3, 0x0F, 0x6F, 0x05 | r << 3, ...u32(a)];
 const movdqu_store = (r, a) => [0xF3, 0x0F, 0x7F, 0x05 | r << 3, ...u32(a)];
+// (VEX.256 VMOVDQU)
+const vmovdqu_load = (r, a) => [0xC5, 0xFE, 0x6F, 0x05 | r << 3, ...u32(a)];
+const vmovdqu_store = (r, a) => [0xC5, 0xFE, 0x7F, 0x05 | r << 3, ...u32(a)];
 const store_eax = a => [0xA3, ...u32(a)];
 const OSXSAVE = 1 << 18;
 const xsetbv = value => [0xB9, ...u32(0), 0xB8, ...u32(value), 0xBA, ...u32(0), 0x0F, 0x01, 0xD1];
@@ -40,6 +43,24 @@ const VEX_FORMS = FORMS.filter(form => !["from_mmx", "to_mmx"].includes(form.kin
     const operands = ["comi", "to_gpr", "from_gpr"].includes(form.kind) ? form.kind : two ? "two" : "three";
     return { ...form, name: "v" + form.name, operands, pp: { "": 0, 102: 1, 243: 2, 242: 3 }[form.prefix.join()], vex_map: form.map === 0x3A ? 3 : 1 };
 });
+// P6 part 2: the VEX.256 forms, of the packed ones but VDPPD
+const VEX256_FORMS = VEX_FORMS.filter(f => !f.scalar && ["two", "three"].includes(f.operands) && f.name !== "vdppd")
+    .map(f => ({ ...f, name: f.name + " ymm", l: 1 }));
+const BEFORE256 = BEFORE | BEFORE << 128n;
+/** A VEX.256 form's cases: two of its VEX.128 form's in one (the second in
+ * the high half; VCVTPS2PD's and VCVTDQ2PD's XMM source: the first's), the
+ * model over all lanes with one exception context */
+function cases256(form)
+{
+    const list = cases(form);
+    const xmm_source = form.kind === "widen" || form.kind === "from_dwords" && form.double;
+    return Array.from({ length: list.length >> 1 }, (_, k) => {
+        const [c, d] = [list[2 * k], list[2 * k + 1]];
+        const a = c.a | d.a << 128n, b = xmm_source ? c.b : c.b | d.b << 128n;
+        const imm8 = form.kind === "compare" ? (k * 5 + 3) & 31 : c.imm8;
+        return { mxcsr: c.mxcsr, a, b, imm8, ...expect(form, c.mxcsr, a, b, imm8, 256) };
+    });
+}
 /** The instruction: destination XMM2 (ECX; XMM1 for VCOMIS), VEX.vvvv XMM1,
  * r/m XMM0 (EAX) or [source]; both VEX prefixes (`three`) */
 function instruction(form, memory, source, imm8, three)
@@ -48,7 +69,7 @@ function instruction(form, memory, source, imm8, three)
     const vvvv = ["three", "from_gpr"].includes(form.operands) ? 1 : 0;
     const modrm = memory ? [0x05 | reg << 3, ...u32(source)] : [0xC0 | reg << 3 | 0];
     const tail = [form.code, ...modrm, ...(form.imm8 ? [imm8] : [])];
-    const fields = (~vvvv & 15) << 3 | form.pp;
+    const fields = (~vvvv & 15) << 3 | (form.l ? 4 : 0) | form.pp;
     if(form.vex_map === 1 && !three) return [0xC5, 0x80 | fields, ...tail];
     return [0xC4, 0xE0 | form.vex_map, fields, ...tail];
 }
@@ -70,6 +91,26 @@ function program(form, memory, list)
         if(form.operands === "comi") p.push(0x9C, 0x58, ...store_eax(OUT + n * 32));
         else if(form.operands === "to_gpr") p.push(0x89, 0x0D, ...u32(OUT + n * 32));
         else p.push(...movdqu_store(2, OUT + n * 32));
+    });
+    return p;
+}
+
+/** A VEX.256 form's program: YMM1 the first source, YMM2 the destination's
+ * value before, YMM0 or [source] the second source; 128 bytes of data and 64
+ * of results per case */
+function program256(form, memory, list)
+{
+    const p = [];
+    list.forEach((c, n) => {
+        const base = DATA + n * 128;
+        p.push(0xC7, 0x05, ...u32(CASE), ...u32(n));
+        p.push(...ldmxcsr(base + 64));
+        p.push(...vmovdqu_load(1, base), ...vmovdqu_load(2, base + 96));
+        if(!memory) p.push(...vmovdqu_load(0, base + 32));
+        const vex = instruction(form, memory, base + 32, c.imm8, n & 1);
+        p.push(0xC7, 0x05, ...u32(SKIP), ...u32(vex.length), ...vex);
+        p.push(...stmxcsr(OUT + n * 64 + 32));
+        p.push(...vmovdqu_store(2, OUT + n * 64));
     });
     return p;
 }
@@ -141,18 +182,29 @@ try
         // unmasked exceptions are #UD); XCR0 7; CR0.TS clear
         const cr4 = [0x0F, 0x20, 0xE0, 0x0D, ...u32(OSXSAVE | (xmm_exceptions ? 0x600 : 0x200)), ...(xmm_exceptions ? [] : [0x25, ...u32(~0x400 >>> 0)]), 0x0F, 0x22, 0xE0];
         const prologue = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), 0x0F, 0x06, ...cr4, ...xsetbv(7)];
-        for(const form of xmm_exceptions ? VEX_FORMS : VEX_FORMS.filter(f => f.kind === "binary" && !f.double))
+        for(const form of xmm_exceptions ? [...VEX_FORMS, ...VEX256_FORMS] : VEX_FORMS.filter(f => f.kind === "binary" && !f.double))
         {
             // (AVX_FP_ONLY=name: one form, for debugging)
             if(process.env.AVX_FP_ONLY && form.name !== process.env.AVX_FP_ONLY) continue;
+            // (a VEX.256 form: 128 bytes of data and 64 of results per case)
+            const [stride, out_stride] = form.l ? [128, 64] : [64, 32];
             for(const memory of [false, true])
             {
                 // (VCMP*: the 32 predicates)
-                const list = cases(form).map((c, n) => form.kind !== "compare" ? c :
+                const list = form.l ? cases256(form) : cases(form).map((c, n) => form.kind !== "compare" ? c :
                     { ...c, imm8: (n * 5 + 3) & 31, ...expect(form, c.mxcsr, c.a, c.b, (n * 5 + 3) & 31) });
-                const code = loop([...prologue, ...program(form, memory, list)]);
-                const data = new Uint8Array(list.length * 64);
+                const code = loop([...prologue, ...(form.l ? program256 : program)(form, memory, list)]);
+                const data = new Uint8Array(list.length * stride);
+                const bytes = (v, n) => Uint8Array.from({ length: n }, (_, i) => Number(v >> BigInt(8 * i) & 0xFFn));
                 list.forEach((c, n) => {
+                    if(form.l)
+                    {
+                        data.set(bytes(c.a, 32), n * 128);
+                        data.set(bytes(c.b, 32), n * 128 + 32);
+                        data.set(u32(c.mxcsr), n * 128 + 64);
+                        data.set(bytes(BEFORE256, 32), n * 128 + 96);
+                        return;
+                    }
                     data.set(bytes128(c.a), n * 64);
                     data.set(bytes128(c.b), n * 64 + 16);
                     data.set(u32(c.mxcsr), n * 64 + 32);
@@ -173,13 +225,13 @@ try
                     for(const warm of [true, false])
                     {
                         vm.write_memory(data, DATA);
-                        vm.write_memory(new Uint8Array(list.length * 32), OUT);
+                        vm.write_memory(new Uint8Array(list.length * out_stride), OUT);
                         vm.write_memory(new Uint8Array(list.length * 4), FAULTS);
                         vm.write_memory(Uint8Array.of(warm ? 0 : 1), 0x604);
                         // (the region tiers ran the VEX forms: wait for the AVX helpers,
                         // which these operands go through, natively lifted forms too)
                         await run(vm, code, warm, vm === machines[0], vm => vm !== machines[2] || !simd(vm) || e.ir_avx_calls() >= list.length);
-                        runs.push({ run: `machine ${m} ${warm ? "hot" : "one round"}`, out: Uint8Array.from(vm.read_memory(OUT, list.length * 32)),
+                        runs.push({ run: `machine ${m} ${warm ? "hot" : "one round"}`, out: Uint8Array.from(vm.read_memory(OUT, list.length * out_stride)),
                             faults: Uint8Array.from(vm.read_memory(FAULTS, list.length * 4)) });
                     }
                 }
@@ -191,6 +243,14 @@ try
                         const label = `${form.name}${memory ? " [mem]" : ""} case ${n} on ${run}: mxcsr ${c.mxcsr.toString(16)} a ${c.a.toString(16)} b ${c.b.toString(16)}${form.imm8 ? " imm8 " + c.imm8 : ""}`;
                         const vector = faults.getUint32(n * 4, true);
                         assert.equal(vector, c.fault ? xmm_exceptions ? 19 : 6 : 0, label + ": fault");
+                        if(form.l)
+                        {
+                            // (all 256 bits; a faulting instruction leaves them alone)
+                            assert.equal(view.getUint32(n * 64 + 32, true), c.after, label + ": MXCSR");
+                            const actual = [0, 1, 2, 3].reduce((v, q) => v | view.getBigUint64(n * 64 + 8 * q, true) << BigInt(64 * q), 0n);
+                            assert.equal(actual.toString(16), (c.fault ? BEFORE256 : c.result).toString(16), label + ": result");
+                            return;
+                        }
                         assert.equal(view.getUint32(n * 32 + 16, true), c.after, label + ": MXCSR");
                         // a faulting instruction leaves its destination alone
                         let actual, expected;
@@ -217,7 +277,7 @@ try
         }
         console.log(`PASS: ${xmm_exceptions ? "all forms, unmasked exceptions as #XM" : "unmasked exceptions as #UD without CR4.OSXMMEXCPT"}`);
     }
-    console.log(`PASS: ${total} exact AVX floating-point cases (${VEX_FORMS.length} forms, register and memory sources, ${MXCSRS.length} MXCSR settings) match the model on 3 arms`);
+    console.log(`PASS: ${total} exact AVX floating-point cases (${VEX_FORMS.length} VEX.128 and VEX.LIG forms, ${VEX256_FORMS.length} VEX.256 ones, register and memory sources, ${MXCSRS.length} MXCSR settings) match the model on 3 arms`);
 }
 finally
 {

@@ -227,7 +227,9 @@ const qemu_lig = (c, n) => c.f.lig && c.f.kind !== "fp" && (n >> 1 & 1) === 1;
 const qemu_w1 = c => c.f.kind === "pcmpstr" && c.f.w === 1;
 // VRCPPS, VRSQRTPS, VRCPSS, VRSQRTSS: approximations within 1.5 * 2^-12 of
 // the exact result (SDM): QEMU's and the model's lanes within 2^-10 of each
-// other, the special values (NaN, infinite, zero, denormal) exact
+// other, the special values (NaN, infinite, zero, denormal) exact. QEMU 10.2
+// computes a denormal source's (exact) reciprocal or reciprocal square root,
+// 2^63 or more; the SDM takes the source as 0.0 and returns ±∞ (the model's)
 const approximate = c => c.f.legacy?.kind === "reciprocal";
 const close = (q, m) => {
     for(let i = 0; i < 16; i += 4)
@@ -235,6 +237,7 @@ const close = (q, m) => {
         const [x, y] = [q.readUInt32LE(i), m.readUInt32LE(i)];
         const normal = v => (v >>> 23 & 255) !== 0 && (v >>> 23 & 255) !== 255;
         if(x === y) continue;
+        if((y & 0x7FFFFFFF) === 0x7F800000 && !((x ^ y) >>> 31) && normal(x) && (x >>> 23 & 255) >= 127 + 63) continue;
         if(!normal(x) || !normal(y) || (x ^ y) >>> 31) return false;
         const [fx, fy] = [q.readFloatLE(i), m.readFloatLE(i)];
         if(Math.abs(fx - fy) > Math.abs(fy) * 2 ** -10) return false;
@@ -464,12 +467,15 @@ const check = (result, label) => {
             ["kept", "first source"].some(qemu => xsave_bytes(area, c.long).equals(xsave_bytes(expected_case(c, n, qemu).area, c.long)));
         if(label === "QEMU" && approximate(c))
         {
-            // (the destination within the error, the rest exactly)
-            const at = 160 + 16 * c.d;
+            // (the destination within the error, the rest exactly; VEX.256:
+            // its upper half in the YMM_Hi128 component too)
             const [q, m] = [Buffer.from(area), Buffer.from(e.area)];
-            assert.ok(close(q.subarray(at, at + 16), m.subarray(at, at + 16)), `${what}: an approximation within the error`);
-            q.fill(0, at, at + 16);
-            m.fill(0, at, at + 16);
+            for(const at of c.f.l ? [160 + 16 * c.d, 576 + 16 * c.d] : [160 + 16 * c.d])
+            {
+                assert.ok(close(q.subarray(at, at + 16), m.subarray(at, at + 16)), `${what}: an approximation within the error`);
+                q.fill(0, at, at + 16);
+                m.fill(0, at, at + 16);
+            }
             assert.equal(hex(xsave_bytes(q, c.long)), hex(xsave_bytes(m, c.long)), `${what}: registers`);
         }
         else if(!deviation) assert.equal(hex(xsave_bytes(area, c.long)), hex(xsave_bytes(e.area, c.long)), `${what}: registers`);
@@ -507,7 +513,11 @@ const comparable = buffer => {
             copy.fill(0, RESULTS - OUT + n * AREA + 704, RESULTS - OUT + (n + 1) * AREA);
         }
         if(qemu_lig(c, n)) copy.fill(0, RESULTS - OUT + n * AREA + 576, RESULTS - OUT + (n + 1) * AREA);
-        if(approximate(c)) copy.fill(0, RESULTS - OUT + n * AREA + 160 + 16 * c.d, RESULTS - OUT + n * AREA + 176 + 16 * c.d);
+        if(approximate(c))
+        {
+            copy.fill(0, RESULTS - OUT + n * AREA + 160 + 16 * c.d, RESULTS - OUT + n * AREA + 176 + 16 * c.d);
+            if(c.f.l) copy.fill(0, RESULTS - OUT + n * AREA + 576 + 16 * c.d, RESULTS - OUT + n * AREA + 592 + 16 * c.d);
+        }
         if(qemu_w1(c) || qemu_is4(c))
         {
             copy.fill(0, RESULTS - OUT + n * AREA, RESULTS - OUT + (n + 1) * AREA);
