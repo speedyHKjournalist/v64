@@ -755,7 +755,10 @@ mod tests {
                 // with MOVBE (P10) its forms decode, their memory operands
                 // whole; F3 at MOVBE/CRC32 stays #UD
                 if features != 0 {
-                    assert_eq!(decode(&[0x0F, 0x38, 0xF1, 0x04, 0x24]).unwrap().opcode, 0x0F38F1);
+                    assert_eq!(
+                        decode(&[0x0F, 0x38, 0xF1, 0x04, 0x24]).unwrap().opcode,
+                        0x0F38F1
+                    );
                     assert_eq!(decode(&[0x0F, 0x38, 0xF0, 0x00]).unwrap().opcode, 0x0F38F0);
                 }
                 for bytes in [
@@ -1093,9 +1096,9 @@ mod tests {
             at(&[0x67, 0xC4, 0xE2, 0x61, 0x90, 0x14, 0x88], Compatibility32).unwrap_err(),
             DecodeError::InvalidOpcode
         );
-        // without the features or the semantics: #UD after the ModRM byte
-        // (VFMADD132PS ymm, a form without semantics until P11)
-        for (features, all) in [(0, true), (ALL, false)] {
+        // without the features: #UD after the ModRM byte (VFMADD132PS ymm;
+        // since P11 every row has its semantics)
+        for (features, all) in [(0, true)] {
             TEST_FEATURES.with(|f| f.set(features));
             TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(all));
             let bytes = [0xC4, 0x02, 0x2D, 0x98, 0x4C];

@@ -835,6 +835,46 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
             let mask = sign_mask(xmm(i.rm.unwrap()), 1);
             m.write_masked(xmm(i.reg), mask as u16)?;
         },
+        // FMA (P11): VFMADD/VFMSUB/VFNMADD/VFNMSUB 132/213/231 PS/PD/SS/SD,
+        // VFMADDSUB/VFMSUBADD 132/213/231 PS/PD, rounded once
+        // (simd_fp::fused); a scalar form's other lanes are the destination's
+        (2, 1, 0x96..=0x9F | 0xA6..=0xAF | 0xB6..=0xBF) => {
+            let scalar = op & 0xF >= 9 && op & 1 == 1;
+            let c = source(
+                m,
+                i,
+                if !scalar {
+                    16
+                }
+                else if i.w {
+                    8
+                }
+                else {
+                    4
+                },
+                false,
+            )?;
+            let [r] = simd_fp::fused(op, i.w, [xmm(i.reg)], [xmm(i.vvvv)], [c])
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r);
+        },
+        // F16C (P11): VCVTPH2PS xmm, xmm/m64
+        (2, 1, 0x13) => {
+            let v = source(m, i, 8, false)?;
+            let (r, _) =
+                simd_fp::half_to_single(v, 4).map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_xmm(i.reg, r);
+        },
+        // VCVTPS2PH xmm/m64, xmm, imm8 (a register destination's other bits
+        // zeroed)
+        (3, 1, 0x1D) => {
+            let r = simd_fp::single_to_half((xmm(i.reg), 0), 4, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            match i.rm {
+                Some(rm) => set_xmm(rm, r),
+                None => m.write(8, r, false)?,
+            }
+        },
         _ => {
             dbg_assert!(false, "VEX form {:x} without semantics", i.key);
             return Err(m.raise(Exception::InvalidOpcode));
@@ -1243,6 +1283,33 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
             let b = source(m, i, 2 * half, false)?;
             let f = |b: u128| bytes(|b| simd_int::sse4(op, [0; 16], b, [0; 16]), b);
             set_ymm(i.reg, (f(b), f(b >> (8 * half))));
+        },
+        // FMA's packed forms (P11) on all eight or four lanes, one exception
+        // context
+        (2, 1, 0x96..=0x98 | 0x9A | 0x9C | 0x9E | 0xA6..=0xA8 | 0xAA | 0xAC | 0xAE)
+        | (2, 1, 0xB6..=0xB8 | 0xBA | 0xBC | 0xBE) => {
+            let c = source256(m, i, false)?;
+            let (a, b) = (ymm(i.reg), ymm(i.vvvv));
+            let [low, high] = simd_fp::fused(op, i.w, [a.0, a.1], [b.0, b.1], [c.0, c.1])
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_ymm(i.reg, (low, high));
+        },
+        // F16C (P11): VCVTPH2PS ymm, xmm/m128
+        (2, 1, 0x13) => {
+            let v = source(m, i, 16, false)?;
+            let r =
+                simd_fp::half_to_single(v, 8).map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            set_ymm(i.reg, r);
+        },
+        // VCVTPS2PH xmm/m128, ymm, imm8 (a register destination's bits
+        // 255:128 zeroed)
+        (3, 1, 0x1D) => {
+            let r = simd_fp::single_to_half(ymm(i.reg), 8, i.imm8)
+                .map_err(|_| m.raise(Exception::SimdFloatingPoint))?;
+            match i.rm {
+                Some(rm) => set_xmm(rm, r),
+                None => m.write(16, r, false)?,
+            }
         },
         _ => {
             dbg_assert!(false, "VEX.256 form {:x} without semantics", i.key);

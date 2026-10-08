@@ -13,6 +13,8 @@ export function format(double)
 {
     return double ? { bits: 64, p: 53, ebits: 11 } : { bits: 32, p: 24, ebits: 8 };
 }
+/** binary16 (F16C's half precision) */
+export const HALF = { bits: 16, p: 11, ebits: 5 };
 const mask = n => (1n << BigInt(n)) - 1n;
 const bias = f => (1 << (f.ebits - 1)) - 1;
 const max_exponent = f => (1 << f.ebits) - 1;
@@ -225,6 +227,85 @@ export class Fp
             }
         }
         throw new Error(op);
+    }
+    /**
+     * One lane of FMA (SDM Vol. 1, 14.5.2, Table 14-17): x * y (negated if
+     * `negate_product`) + z (negated if `negate_addend`), the exact sum
+     * rounded once. NaN operands: the first of x, y, z, quieted and not
+     * negated; IE for an SNaN, and for 0 * inf only without a NaN addend.
+     */
+    fused(x0, y0, z0, double, negate_product, negate_addend)
+    {
+        const f = format(double);
+        const ix = this.input(x0, double), iy = this.input(y0, double), iz = this.input(z0, double);
+        const de = ix.de | iy.de | iz.de;
+        const operands = [ix.x, iy.x, iz.x];
+        if(operands.some(v => is_snan(v, double))) this.flags |= IE;
+        const nan = operands.find(v => is_nan(v, double));
+        if(nan !== undefined) return quiet(nan, f);
+        const [x, y, z] = operands;
+        const invalid = () => { this.flags |= IE; return indefinite(double); };
+        const sp = parts(x, f).sign ^ parts(y, f).sign ^ (negate_product ? 1 : 0);
+        const sz = parts(z, f).sign ^ (negate_addend ? 1 : 0);
+        const infinite_product = is_inf(x, double) || is_inf(y, double);
+        const zero_product = is_zero(x, double) || is_zero(y, double);
+        if(infinite_product && zero_product) return invalid();
+        if(infinite_product)
+        {
+            if(is_inf(z, double) && sz !== sp) return invalid();
+            this.flags |= de;
+            return infinity(sp, f);
+        }
+        this.flags |= de;
+        if(is_inf(z, double)) return infinity(sz, f);
+        // the exact sum: the product's m * 2^e and the addend's on a common exponent
+        const product = zero_product ? { m: 0n, e: 0 } : (() => { const a = value(x, f), b = value(y, f); return { m: a.m * b.m, e: a.e + b.e }; })();
+        const addend = is_zero(z, double) ? { m: 0n, e: 0 } : value(z, f);
+        const e = Math.min(product.e, addend.e);
+        const sum = (sp ? -1n : 1n) * (product.m << BigInt(product.e - e)) + (sz ? -1n : 1n) * (addend.m << BigInt(addend.e - e));
+        if(sum === 0n)
+        {
+            // an exact zero: the zeros' sign when both are zeros of one sign, else -0 only when rounding down
+            const both_zero = zero_product && is_zero(z, double);
+            return zero(both_zero && sp === sz ? sp : this.rc === 1 ? 1 : 0, f);
+        }
+        return this.deliver(round(sum < 0n ? 1 : 0, sum < 0n ? -sum : sum, e, false, f, this.rc), double);
+    }
+    /** VCVTPH2PS: a half (BigInt bits) to single precision, exactly: no DAZ, no DE; IE for an SNaN */
+    half_to_single(h)
+    {
+        const to = format(false);
+        const q = parts(h, HALF);
+        if(q.exponent === max_exponent(HALF) && q.fraction !== 0n)
+        {
+            if((h >> BigInt(HALF.p - 2) & 1n) === 0n) this.flags |= IE;
+            return quiet(zero(q.sign, to) | mask(to.ebits) << BigInt(to.p - 1) | q.fraction << BigInt(to.p - HALF.p), to);
+        }
+        if(q.exponent === max_exponent(HALF)) return infinity(q.sign, to);
+        if(q.exponent === 0 && q.fraction === 0n) return zero(q.sign, to);
+        const v = value(h, HALF);
+        return round(q.sign, v.m, v.e, false, to, 0).bits;
+    }
+    /** VCVTPS2PH: a single to a half by `rc`: DAZ and DE; FZ does not apply,
+     * an unmasked underflow is any tiny result */
+    single_to_half(x0, rc)
+    {
+        const from = format(false);
+        const { x, de } = this.input(x0, false);
+        const q = parts(x, from);
+        if(is_nan(x, false))
+        {
+            if(is_snan(x, false)) this.flags |= IE;
+            return quiet(zero(q.sign, HALF) | mask(HALF.ebits) << BigInt(HALF.p - 1) | q.fraction >> BigInt(from.p - HALF.p), HALF);
+        }
+        this.flags |= de;
+        if(is_inf(x, false)) return infinity(q.sign, HALF);
+        if(is_zero(x, false)) return zero(q.sign, HALF);
+        const v = value(x, from);
+        const r = round(q.sign, v.m, v.e, false, HALF, rc);
+        if(r.tiny && !this.um_masked) r.flags |= UE;
+        this.flags |= r.flags;
+        return r.bits;
     }
     /** CMPPS/CMPPD/CMPSS/CMPSD predicate 0-7 of a and b, VCMP*'s 0-31 (PREDICATES; COMI: 1; UCOMI: 0) */
     compare(a0, b0, double, predicate)

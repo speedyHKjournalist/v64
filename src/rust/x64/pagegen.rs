@@ -302,6 +302,15 @@ enum Op {
         src: Opnd,
         other: Reg,
     },
+    /// FMA's VEX.128 and scalar forms (P11) through
+    /// runtime::tier0::ir_t0_fma (`op` the opcode byte, `double` VEX.W1)
+    Vfused {
+        op: u8,
+        double: bool,
+        dst: u8,
+        first: u8,
+        src: Xmm,
+    },
     /// MOVBE r, m (`load`) or m, r: one access, its bytes reversed
     Movbe {
         load: bool,
@@ -1681,6 +1690,16 @@ fn vex(d: &Decoded) -> Option<Op> {
             upper: None,
         })
     };
+    // FMA (P11): the VEX.128 and scalar forms
+    if v.map == 2 && v.pp == 1 && matches!(code, 0x96..=0x9F | 0xA6..=0xAF | 0xB6..=0xBF) {
+        return Some(Op::Vfused {
+            op: code,
+            double: v.w,
+            dst: register,
+            first,
+            src: xmm_rm()?,
+        });
+    }
     Some(match (v.map, v.pp, code) {
         // VMOVUPS VMOVUPD VMOVDQU, VMOVAPS VMOVAPD VMOVDQA (aligned)
         (1, 0 | 1, 0x10) | (1, 2, 0x6F) => move_128(false, false)?,
@@ -4614,6 +4633,52 @@ impl Emitter {
                 self.g(reg as usize);
                 self.byte_swap(width);
                 self.s(reg as usize);
+            },
+            Op::Vfused {
+                op,
+                double,
+                dst,
+                first,
+                src,
+            } => {
+                // the r/m operand (a scalar form's 32 or 64 bits), the
+                // destination and the first source to the operand block, then
+                // ir_t0_fma; an unmasked exception retries (the interpreter
+                // raises #XM)
+                self.vector_check(inst, start);
+                let scalar = op & 0xF >= 9 && op & 1 == 1;
+                let operands = crate::ir::runtime::tier0::sse_fp_operands() as i32;
+                self.c32(operands + 32);
+                match src {
+                    Xmm::Mem(a) if scalar => {
+                        let bits = if double { 64 } else { 32 };
+                        self.vector_address(&a, bits, false, false, inst);
+                        self.gi(HOST);
+                        self.load_bits(bits, 0);
+                        self.b.simd(0x12); // i64x2.splat
+                    },
+                    _ => self.vector_source(src, inst),
+                }
+                self.b.simd_memory(0x0B, 4); // v128.store
+                for (k, r) in [dst, first].into_iter().enumerate() {
+                    self.c32(operands + 16 * k as i32);
+                    self.c32(Self::xmm(r) as i32);
+                    self.b.simd_memory(0x00, 0);
+                    self.b.simd_memory(0x0B, 4);
+                }
+                self.c32(op as i32 | (double as i32) << 8);
+                self.b.call_signature(
+                    "ir_t0_fma",
+                    Signature::new(&[WasmType::I32], &[WasmType::I32]),
+                );
+                self.b.if_void();
+                self.leave_to(self.f().retry, start);
+                self.b.block_end();
+                self.c32(Self::xmm(dst) as i32);
+                self.c32(operands);
+                self.b.simd_memory(0x00, 4);
+                self.b.simd_memory(0x0B, 0);
+                self.vex_upper(inst, dst);
             },
             Op::Movbe {
                 load,

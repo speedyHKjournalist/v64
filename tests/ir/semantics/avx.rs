@@ -130,14 +130,14 @@ fn avx_forms_in_a_cfg() {
 /// gathers with a VSIB operand
 #[test]
 fn avx_fixtures() {
-    use crate::cpu::features::{AVX, AVX2, SSE4_1, SSE4_2, SSSE3, TEST_FEATURES, XSAVE};
+    use crate::cpu::features::{AVX, AVX2, F16C, FMA, SSE4_1, SSE4_2, SSSE3, TEST_FEATURES, XSAVE};
     use crate::ir::{
         backend::wasm::emit_cpu,
         lowering::lower,
         passes::{run, PassConfig},
     };
     std::fs::create_dir_all("build/ir-avx").unwrap();
-    TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1 | SSE4_2 | XSAVE | AVX | AVX2));
+    TEST_FEATURES.with(|f| f.set(SSSE3 | SSE4_1 | SSE4_2 | XSAVE | AVX | AVX2 | FMA | F16C));
     // (the VEX prefix and opcode, ModRM.reg, the r/m register or memory, the
     // XMM destination the suffix reads, imm8)
     #[rustfmt::skip]
@@ -232,6 +232,14 @@ fn avx_fixtures() {
         (&[0xC4, 0xE3, 0x6D, 0x02], 1, Some(3), 1, &[0x5A]), // vpblendd ymm1, ymm2, ymm3, 0x5A
         (&[0xC4, 0xE2, 0x6D, 0x8C], 6, None, 6, &[]),        // vpmaskmovd ymm6, ymm2, [m]
         (&[0xC4, 0xE2, 0xE9, 0x8E], 7, None, 1, &[]),        // vpmaskmovq [m], xmm2, xmm7
+        // (FMA and F16C, P11)
+        (&[0xC4, 0xE2, 0x69, 0x98], 1, Some(3), 1, &[]),     // vfmadd132ps xmm1, xmm2, xmm3
+        (&[0xC4, 0xE2, 0xE9, 0xA9], 4, None, 4, &[]),        // vfmadd213sd xmm4, xmm2, [m]
+        (&[0xC4, 0xE2, 0x55, 0xBE], 6, Some(7), 6, &[]),     // vfnmsub231ps ymm6, ymm5, ymm7
+        (&[0xC4, 0xE2, 0xD1, 0x96], 2, None, 2, &[]),        // vfmaddsub132pd xmm2, xmm5, [m]
+        (&[0xC4, 0xE2, 0x7D, 0x13], 1, None, 1, &[]),        // vcvtph2ps ymm1, [m] (m128)
+        (&[0xC4, 0xE3, 0x79, 0x1D], 3, None, 1, &[0x04]),    // vcvtps2ph [m], xmm3, 4
+        (&[0xC4, 0xE3, 0x7D, 0x1D], 2, Some(5), 5, &[0x01]), // vcvtps2ph xmm5, ymm2, 1
     ];
     // (P8: the gathers, ModRM.reg, the indices' register and scale (log2),
     // the indices' size; a VSIB operand without a base, disp32 0x6000)

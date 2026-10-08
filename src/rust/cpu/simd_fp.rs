@@ -44,6 +44,13 @@ extern "C" {
     fn f64_to_i64(a: u64, rounding: u8, exact: bool) -> i64;
     fn f32_roundToInt(a: u32, rounding: u8, exact: bool) -> u32;
     fn f64_roundToInt(a: u64, rounding: u8, exact: bool) -> u64;
+    fn f32_mulAdd(a: u32, b: u32, c: u32) -> u32;
+    fn f64_mulAdd(a: u64, b: u64, c: u64) -> u64;
+    // (float16_t is a struct of one u16: clang passes and returns it in an
+    // i32 whose upper bits it does not define, so these take and give u32,
+    // masked here; with u16 Rust would assume a zero-extended value)
+    fn f16_to_f32(a: u32) -> u32;
+    fn f32_to_f16(a: u32) -> u32;
     static mut softfloat_roundingMode: u8;
     static mut softfloat_exceptionFlags: u8;
 }
@@ -287,6 +294,53 @@ impl Fp {
             5 => !lt,
             6 => !(lt || eq),
             _ => true,
+        }
+    }
+    /// One lane of FMA (SDM Vol. 1, 14.5.2): `x` × `y`, negated if
+    /// `negate_product`, plus `z`, negated if `negate_addend`, rounded once.
+    /// A NaN operand gives the first of x, y and z quieted, and IE for an
+    /// SNaN; with a QNaN addend 0 × ∞ gives that NaN without IE (SoftFloat's
+    /// 8086-SSE rules give the default NaN with IE), so NaN operands are
+    /// handled here, unnegated. Otherwise SoftFloat: 0 × ∞ and ∞ − ∞ are
+    /// invalid operations (the default NaN).
+    pub unsafe fn fused(
+        &mut self,
+        x: u64,
+        y: u64,
+        z: u64,
+        double: bool,
+        negate_product: bool,
+        negate_addend: bool,
+    ) -> u64 {
+        let mut de = 0;
+        let x = self.input(x, double, &mut de);
+        let y = self.input(y, double, &mut de);
+        let z = self.input(z, double, &mut de);
+        if let Some(&first) = [x, y, z].iter().find(|&&v| nan(v, double)) {
+            if snan(x, double) || snan(y, double) || snan(z, double) {
+                self.flags |= IE;
+            }
+            self.lane(de, true);
+            return first | if double { 1 << 51 } else { 1 << 22 };
+        }
+        let x = if negate_product { x ^ sign_mask(double) } else { x };
+        let z = if negate_addend { z ^ sign_mask(double) } else { z };
+        let result = if double {
+            f64_mulAdd(x, y, z)
+        }
+        else {
+            f32_mulAdd(x as u32, y as u32, z as u32) as u64
+        };
+        self.lane(de, false);
+        self.output(result, double)
+    }
+    /// A half-precision result (VCVTPS2PH): FZ does not apply, a tiny result
+    /// is a half denormal (SDM); unmasked, the underflow exception is a tiny
+    /// result even when exact
+    fn half_output(&mut self, v: u16) {
+        let denormal = v & 0x7C00 == 0 && v & 0x03FF != 0;
+        if (self.underflow || denormal) && self.mxcsr & UM == 0 {
+            self.flags |= UE;
         }
     }
     /// A floating-point source of a conversion: DAZ, and the denormal operand
@@ -563,6 +617,105 @@ unsafe fn operate<const N: usize>(
     }
     fp.finish()?;
     Ok(result)
+}
+
+/// The FMA forms (VEX.66.0F38 96-9F, A6-AF, B6-BF; `op` the opcode byte) of
+/// DEST (also the first source), SRC2 (VEX.vvvv) and SRC3 (r/m) in halves of
+/// 128 bits (a VEX.256 form: two) with one exception context; `double`:
+/// VEX.W1 (PD, SD). The low nibble is the operation (6 ADDSUB: even lanes
+/// subtract, 7 SUBADD: odd lanes subtract, 8/9 ADD, A/B SUB, C/D NADD (the
+/// product negated), E/F NSUB; scalar from 9 when odd), the high one the
+/// order: 9 (132) DEST × SRC3 + SRC2, A (213) SRC2 × DEST + SRC3, B (231)
+/// SRC2 × SRC3 + DEST. A scalar form's other lanes are DEST's.
+pub unsafe fn fused<const N: usize>(
+    op: u8,
+    double: bool,
+    destination: [u128; N],
+    second: [u128; N],
+    third: [u128; N],
+) -> Result<[u128; N], Unmasked> {
+    let operation = op & 0xF;
+    let scalar = operation >= 9 && operation & 1 == 1;
+    let lanes = if scalar {
+        1
+    }
+    else if double {
+        2
+    }
+    else {
+        4
+    };
+    let mut fp = Fp::new();
+    let mut result = destination;
+    for h in 0..N {
+        for i in 0..lanes {
+            let (a, b, c) = (
+                lane(destination[h], i, double),
+                lane(second[h], i, double),
+                lane(third[h], i, double),
+            );
+            let (x, y, z) = match op >> 4 {
+                9 => (a, c, b),
+                0xA => (b, a, c),
+                _ => (b, c, a),
+            };
+            let even = i % 2 == 0;
+            let (negate_product, negate_addend) = match operation {
+                6 => (false, even),
+                7 => (false, !even),
+                8 | 9 => (false, false),
+                0xA | 0xB => (false, true),
+                0xC | 0xD => (true, false),
+                _ => (true, true),
+            };
+            let v = fp.fused(x, y, z, double, negate_product, negate_addend);
+            result[h] = set_lane(result[h], i, double, v);
+        }
+    }
+    fp.finish()?;
+    Ok(result)
+}
+
+/// VCVTPH2PS (F16C): the `count` (4 or 8) half-precision values in the low
+/// bits of `source` as single-precision values, in halves of 128 bits. The
+/// result is exact; DAZ does not apply and there is no denormal operand
+/// exception (SDM); an SNaN is an invalid operation (quieted).
+pub unsafe fn half_to_single(source: u128, count: usize) -> Result<(u128, u128), Unmasked> {
+    let mut fp = Fp::new();
+    let mut out = [0u128; 2];
+    for i in 0..count {
+        let v = f16_to_f32((source >> (16 * i)) as u16 as u32);
+        fp.convert_lane();
+        out[i / 4] |= (v as u128) << (32 * (i % 4));
+    }
+    fp.finish()?;
+    Ok((out[0], out[1]))
+}
+/// VCVTPS2PH (F16C): the `count` (4 or 8) single-precision values of
+/// `source` (halves of 128 bits) as half-precision values in the low bits of
+/// the result, rounded as imm8[1:0] says or, with imm8[2], as MXCSR.RC does.
+/// DAZ applies to the sources; FZ does not (half_output).
+pub unsafe fn single_to_half(
+    source: (u128, u128),
+    count: usize,
+    imm8: u8,
+) -> Result<u128, Unmasked> {
+    let mut fp = Fp::new();
+    if imm8 & 4 == 0 {
+        softfloat_roundingMode = ROUNDING[(imm8 & 3) as usize];
+    }
+    let mut out = 0u128;
+    for i in 0..count {
+        let half = if i < 4 { source.0 } else { source.1 };
+        let mut de = 0;
+        let value = fp.input((half >> (32 * (i % 4))) as u32 as u64, false, &mut de);
+        let v = (f32_to_f16(value as u32) & 0xFFFF) as u16;
+        fp.lane(de, nan(value, false));
+        fp.half_output(v);
+        out |= (v as u128) << (16 * i);
+    }
+    fp.finish()?;
+    Ok(out)
 }
 
 /// ROUNDPS/ROUNDPD/ROUNDSS/ROUNDSD (66 0F 3A 08-0B by `op`'s low byte): each

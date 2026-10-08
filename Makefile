@@ -1576,6 +1576,17 @@ bmi-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debu
 	node tests/x64/bmi.mjs
 	TEST_RELEASE_BUILD=1 node tests/x64/bmi.mjs
 
+# FMA and F16C (docs/simd-xsave-plan.md P11): the 32-bit engines against the
+# exact model of tests/rust/sse_fp_model.mjs (release and debug builds), the
+# x64 engine (interpreted, page tier, compatibility-mode Tier-0) against QEMU
+# and the model
+.PHONY: fma-tests
+fma-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+	node tests/rust/fma.mjs
+	node tests/rust/fma.mjs build/v86-debug.wasm
+	node tests/x64/fma.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/fma.mjs
+
 # The legacy SSE exception conditions in the 32-bit engines (docs/simd-xsave-plan.md
 # 3.3, P4a): CR4.OSFXSR for XMM forms only, 16-byte alignment, their order
 .PHONY: sse-fault-tests

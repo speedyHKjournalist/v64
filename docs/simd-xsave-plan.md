@@ -693,6 +693,10 @@ x86-64-v3 通用寄存器指令的模板要点：
     （P4a）。VEX.128 形式也有这一差别，只是用例增多后才遇到；`tests/x64/avx.mjs` 按偏差登记。
   - P10 新发现（QEMU 10.2）：VEX.vvvv 不是 1111b 的 RORX 不产生 #UD（SDM 规定没有该操作数时 VEX.vvvv
     必须为 1111b）。`tests/x64/bmi.mjs` 按偏差登记。
+  - P11 新发现（QEMU 10.2，`tests/x64/fma.mjs` 按 SDM 判定）：VCVTPH2PS 对非规格化的半精度数报 DE，并在
+    DAZ 下把它转为零（SDM 规定 DAZ 不起作用，也不报 DE）；VCVTPS2PH 在 FZ 下把过小的结果清零（SDM 规定
+    FZ 不起作用，结果是半精度非规格化数）；未屏蔽的 SIMD 浮点异常不引发 #XM。FMA 的 NaN 优先次序、
+    0 × ∞ 加 QNaN 不报 IE 等规则与模型一致。
 - Apple Silicon 上可运行 QEMU oracle；没有原生 x86 参考时明确记录缺口，发布前在
   具备相应能力的 x86 测试环境补足需要硬件判定的案例。macOS 15 及以上版本的 Rosetta 2 支持
   AVX/AVX2（CPUID 不报告），可作为用户态整数语义的第三方交叉参考。它不是真值，也测不了
@@ -832,6 +836,11 @@ regions 中，VEX.256 形式都走完整 reload 的 `ir_avx_continue`。glibc �
 待改进（P10 登记）：regions 中 BMI1/BMI2、TZCNT/LZCNT 与 MOVBE 走 `ir_bmi_reg_continue`/`ir_bmi_mem_continue`
 （寄存器形式只 reload 标量状态）；Tier-0 和 page tier 有热点形式的模板，MULX、PDEP、PEXT、BEXTR、RORX
 与 16 位形式在这两层仍单步执行。
+
+待改进（P11 登记）：FMA 在 Tier-0 和 page tier 的模板调用 SoftFloat 的 helper（`ir_t0_fma`），
+721.fma.poly 为 63 MIPS（单步执行时 17 MIPS）；单精度的“舍入到奇数”快路径要先按 9.3 节验证。regions
+中 FMA 与 F16C 走完整 reload 的 `ir_avx_continue`，VEX.256 的 FMA 形式与 F16C 在 Tier-0 和 page tier
+中单步执行。
 
 ### 12.3 最终验收
 
@@ -2406,3 +2415,82 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   即 P9 的 55 个加上 `bmi-tests`、`ir-bmi-tests`）。`x64-decode-tests` 和 `ir-decoder-tests` 起初失败：两个解码器的
   单元测试仍断言 MOVBE、TZCNT、LZCNT 在 ModRM 之后 #UD（见第一部分），修正后重跑通过。另外 53 个通过；需要
   `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本阶段后运行，通过。
+
+### P11 第一部分：FMA 与 F16C 的语义（2026-10-08）
+
+- **范围**：9.3 节的全部形式。FMA 共 96 个：VFMADD、VFMSUB、VFNMADD、VFNMSUB 的 132/213/231 形式（PS、PD 的
+  VEX.128 与 VEX.256，SS、SD），以及 VFMADDSUB、VFMSUBADD 的 132/213/231 形式（PS、PD 的两种宽度）。F16C 共
+  4 个：VCVTPH2PS、VCVTPS2PH 的 VEX.128 与 VEX.256 形式。能力位在 P1e 已有，仍需 `cpu_features_unreleased`，
+  随 M4 开放。至此每个 VEX 行都有语义。
+- **做法**：
+  - `cpu/simd_fp.rs` 的 `Fp::fused`：一个通道 x × y + z，只舍入一次（SoftFloat 的 `f32_mulAdd`/`f64_mulAdd`）。
+    有 NaN 操作数时不进 SoftFloat：结果是 x、y、z 中第一个 NaN，静默化、不取反，SNaN 报 IE。0 × ∞ 加
+    QNaN 得到该 QNaN 且不报 IE（SDM Vol. 1 14.5.2；SoftFloat 的 8086-SSE 规则给出默认 NaN 并报 IE）。
+    其余情况先对非 NaN 操作数取反，再交给 SoftFloat：0 × ∞ 与 ∞ − ∞ 是无效运算。输入按 DAZ 处理并报 DE
+    （QNaN 操作数或无效运算优先于 DE），输出按 FZ 与 UE 的规则处理，与其他 SSE 浮点运算相同。
+  - `simd_fp::fused`：132 为 DEST × SRC3 + SRC2，213 为 SRC2 × DEST + SRC3，231 为 SRC2 × SRC3 + DEST，
+    NaN 的优先次序按这三个式子中的 x、y、z（与 QEMU 一致）。ADDSUB 的偶数通道相减，SUBADD 的奇数通道相减。
+    整条指令共用一个异常上下文；标量形式的其余通道取自 DEST。
+  - F16C：`half_to_single` 精确转换，不受 DAZ 影响、不报 DE，SNaN 报 IE。`single_to_half` 按 imm8[1:0]
+    舍入，imm8[2] 置位时用 MXCSR.RC；输入按 DAZ 处理并报 DE；FZ 不起作用，过小的结果给出半精度非规格化数，
+    UE 未屏蔽时任何过小的结果都报 UE。
+  - SoftFloat 的 `float16_t` 是只有一个 u16 的结构体。clang 用 i32 传递和返回它，高位不定义；Rust 若声明为
+    u16，会假定高位已零扩展，结果一个通道的高位溢入了下一个通道（`fma.mjs` 发现）。现在声明为 u32 并显式
+    屏蔽。
+  - `cpu/avx.rs`：FMA 的 VEX.128/VEX.LIG 与 VEX.256 形式；VCVTPH2PS 从 m64/m128 读取，VCVTPS2PH 写入内存时
+    只写 8 或 16 字节，写寄存器时清零其余位。`gen/vex_table.js` 打开 FMA 与 F16C 的行。IR 与 x64 引擎通过
+    共用执行器得到这些形式。x64 解码器的测试原先用 VFMADD132PS ymm 作为“没有语义的形式”，这一项已不存在，
+    删去。
+- **测试**：
+  - `tests/rust/sse_fp_model.mjs` 增加 `fused`（精确求和后舍入一次）与半精度转换；`tests/rust/fma_cases.mjs`
+    给出形式、特殊三元组（两三个操作数带不同载荷的 NaN；0 × ∞ 加 QNaN、SNaN 或数；有符号零；上溢、下溢、
+    非规格化数）以及暴露乘积舍入误差的用例（只舍入一次时结果是误差本身，分两次舍入则为 0）。
+  - `tests/rust/fma.mjs`：96 个 FMA 形式与 4 个 F16C 形式，寄存器与内存源，11 种 MXCSR，三个 arm 上共
+    42636 例；没有能力时 CPUID 不报告、各形式 #UD。
+  - `tests/x64/fma.mjs`：1228 例，64 位模式（XMM0–15、别名、内存操作数）与兼容模式，与 QEMU 和模型比较，
+    包括全部异常未屏蔽时的 #XM。QEMU 10.2 与模型在 FMA 的全部规则上一致；与 SDM 不一致之处登记为偏差：
+    VCVTPH2PS 对非规格化半精度数报 DE，且在 DAZ 下转为零；VCVTPS2PH 在 FZ 下把过小的结果清零；未屏蔽的
+    异常不引发 #XM。这些用例只按 SDM 判定。
+  - IR：AVX fixture 增加 7 个 FMA/F16C 形式，差分共 10038 例。
+  - 新目标 `make fma-tests`。
+- **变异测试**：植入 21 个错误，全部检出：
+  - FMA 的语义（12 个）：NaN 的优先次序反向；不检查加数的 NaN；SNaN 不报 IE；NaN 不静默化；NaN 结果随
+    加数取反；132、213 的操作数次序（各一个）；ADDSUB/SUBADD 的奇偶通道对调；VFNMADD 取反加数而不是乘积；
+    VFMADD132SS/SD 按紧缩形式执行；加数不按 DAZ 处理；结果不经 FZ 与 UE 的处理。
+  - F16C（5 个）：VCVTPH2PS 对非规格化半精度数报 DE；VCVTPS2PH 不用 imm8[1:0] 的舍入方式；UE 未屏蔽时
+    过小的结果不报 UE；输入不按 DAZ 处理；`f32_to_f16` 的返回值不屏蔽高位。
+  - `cpu/avx.rs`（4 个）：标量形式内存操作数的宽度对调；VCVTPS2PH 的 xmm 形式写 16 字节；VCVTPH2PS 的
+    ymm 形式只读 8 字节；VEX.256 FMA 高半的第一个操作数取自低半。
+- **回归**：与第二部分一起进行，见第二部分。
+
+### P11 第二部分：FMA 在 Tier-0 和 page tier 的模板（2026-10-08）
+
+- **范围**：FMA 的 VEX.128 与标量形式（60 个），其中有 5.1 节热点清单的 VFMADD213SD（libm 中 297 处）、
+  VFMADD132SD（182 处）、VFMADD231SD、VFMSUB132SD、VFMADD132PD、VFMADD213PD、VFMSUB231SD、VFMADD213SS。
+  VEX.256 形式仍单步执行。
+- **做法**：按 9.3 节，双精度走 SoftFloat 的精确路径：模板把目的、第一源与 r/m 操作数写入精确路径的操作数
+  块（`T0_SSE_FP` 扩为三个槽），调用 `ir_t0_fma`（`simd_fp::fused`）。未屏蔽的异常使指令重试，由解释器
+  产生 #XM。Tier-0 是 `Simd::Fused`，page tier 是 `Op::Vfused`。单精度的“舍入到奇数”快路径需要先在 P0
+  验证，没有做。
+- **测试**：`tests/rust/fma.mjs` 在 Tier-0 机器上以普通操作数运行每个形式，统计单步次数：60 个形式走模板，
+  36 个 VEX.256 形式单步。`tests/x64/fma.mjs` 增加 page tier 热点循环：53.8 万条指令原生执行、12 次单步，
+  结果与 QEMU 一致。它的逐例用例改为循环执行（64 位 400 轮，兼容模式 4000 轮），在解释器、page tier、
+  page tier 加兼容模式的 Tier-0 下各运行一遍，并断言编译后的代码确实执行了：原先只执行一遍，page tier
+  从未编译这些用例（一个页面要先解释执行 2000 条指令才编译）。两个测试的 VEX.128 用例中，目的寄存器的高半
+  先置为非零值。
+- **基准** 721.fma.poly（多项式的 Horner 求值，用 VFMADD213SD/VFMADD132SD/VFMADD231SD）：第一部分的构建
+  17 MIPS，本部分 63 MIPS（x3.67）。每条 FMA 仍调用 SoftFloat 的 `f64_mulAdd`；与 SSE2 的乘法加加法相比
+  是否拖慢 libm 的 `_fma` 变体，由 P12 的性能预算判定。
+- **变异测试**：植入 12 个错误，全部检出：
+  - Tier-0（6 个）：目的与第一源写入操作数块的次序对调；标量形式内存操作数的宽度对调；未屏蔽的异常不重试；
+    不传 VEX.W；不清零 YMM 高半；分类时漏掉 231 形式（由模板集合的统计检出）。
+  - `ir_t0_fma`（1 个）：不取 VEX.W。
+  - page tier（5 个）：操作数块的次序；标量内存操作数的宽度；不重试；不传 VEX.W；不清零 YMM 高半。
+  - 第一轮 page tier 的“不重试”和“不清零高半”存活：逐例用例当时只执行一遍，page tier 从未编译它们，
+    编译后执行的只有热点循环，而热点循环既没有异常，也不检查高半。逐例用例改为循环执行（见上）之后检出。
+- **回归**：在只含本计划改动的工作树（P10 的提交 `2b8b4d0d` 加本阶段）中运行 58 个目标（`p11-batch-a`、
+  `p11-batch-b`，即 P10 的 57 个加上 `fma-tests`）。`rustfmt` 起初失败：本阶段的几处长表达式，以及 P10 修正解码
+  测试时加入的一行（P10 的回归批次在这一修正之前就跑过了 `rustfmt`）；格式化后通过，`tests/ir/decode/decode.rs`
+  的这一行随本阶段提交。另外 55 个通过；需要 `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本阶段后
+  运行，通过。主分支其间多了 `d92705b7`（`tier0_fuzz.mjs` 的改进，不涉及本阶段的文件），加入本阶段后
+  `make ir-tier0-tests` 也在主工作树中运行，通过。

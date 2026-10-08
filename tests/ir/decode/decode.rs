@@ -542,7 +542,8 @@ fn three_byte_maps_decode_and_stay_undefined_without_their_features() {
             // without MOVBE #UD after the ModRM byte (no SIB read); with it
             // (P10) the whole memory operand
             let i = d(bytes, true);
-            let length = if features == 0 && bytes[3] == 0x04 { bytes.len() - 1 } else { bytes.len() };
+            let length =
+                if features == 0 && bytes[3] == 0x04 { bytes.len() - 1 } else { bytes.len() };
             assert_eq!(
                 (i.early_ud, i.baseline_ud, i.ea.is_none()),
                 (features == 0, features == 0, features == 0),

@@ -260,6 +260,14 @@ pub(super) enum Simd {
         reg: u8,
         bytes: u8,
     },
+    /// FMA's VEX.128 and scalar forms (P11): runtime::tier0::ir_t0_fma on
+    /// the destination, the first source and the r/m operand (`op` the
+    /// opcode byte, `double` VEX.W1)
+    Fused {
+        op: u8,
+        double: bool,
+        reg: u8,
+    },
     Emms,
 }
 
@@ -773,6 +781,17 @@ pub(super) fn classify_vex(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
         first: None,
         aligned: true,
     };
+    // FMA (P11): the VEX.128 and scalar forms
+    if v.map == 2 && v.pp == 1 && matches!(code, 0x96..=0x9F | 0xA6..=0xAF | 0xB6..=0xBF) {
+        return Some((
+            Simd::Fused {
+                op: code,
+                double: v.w,
+                reg,
+            },
+            two_sources,
+        ));
+    }
     let vector = |op: Packed| Simd::Packed {
         op,
         reg,
@@ -1541,6 +1560,43 @@ impl Page {
     fn simd_form(&mut self, form: Simd, i: &DecodedInstruction) {
         let rm = i.modrm.unwrap_or(0) & 7;
         match form {
+            Simd::Fused { op, double, reg } => {
+                // (the r/m operand first: its access may retry; a scalar
+                // form's 32 or 64 bits)
+                let scalar = op & 0xF >= 9 && op & 1 == 1;
+                self.simd_source(
+                    i,
+                    false,
+                    if !scalar {
+                        16
+                    }
+                    else if double {
+                        8
+                    }
+                    else {
+                        4
+                    },
+                );
+                let third = self.w.set_new_local_v128();
+                let operands = crate::ir::runtime::tier0::sse_fp_operands();
+                for (k, r) in [reg, self.first(reg)].into_iter().enumerate() {
+                    self.w.const_i32((operands + 16 * k as u32) as i32);
+                    self.load_xmm(r);
+                    self.w.simd_memory(0x0B, 4); // v128.store
+                }
+                self.w.const_i32((operands + 32) as i32);
+                self.w.get_local_v128(&third);
+                self.w.simd_memory(0x0B, 4);
+                self.w.const_i32(op as i32 | (double as i32) << 8);
+                self.w.call_signature("ir_t0_fma", signature("ir_t0_fma"));
+                self.retry_if();
+                self.w.const_i32(operands as i32);
+                self.w.simd_memory(0x00, 4); // v128.load
+                let result = self.w.set_new_local_v128();
+                self.store_xmm(reg, &result);
+                self.w.free_local_v128(third);
+                self.w.free_local_v128(result);
+            },
             Simd::Load128 { reg } => {
                 self.simd_source(i, false, 16);
                 let v = self.w.set_new_local_v128();

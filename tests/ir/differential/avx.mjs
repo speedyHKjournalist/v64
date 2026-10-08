@@ -41,7 +41,7 @@ for(const release of [false,true]){
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
-        cpu_features:["SSSE3","SSE4.1","SSE4.2","XSAVE","AVX","AVX2"],cpu_features_unreleased:true,
+        cpu_features:["SSSE3","SSE4.1","SSE4.2","XSAVE","AVX","AVX2","FMA","F16C"],cpu_features_unreleased:true,
     });
     try {
         await new Promise(resolve=>vm.add_listener("emulator-loaded",resolve));

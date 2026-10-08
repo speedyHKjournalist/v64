@@ -99,10 +99,11 @@ pub unsafe fn ir_t0_condition(cc: u32) -> u32 {
 }
 
 /// The operands of ir_t0_sse_fp: the destination (replaced by the result)
-/// and the source, written by the page function.
+/// and the source, written by the page function (ir_t0_fma's: the
+/// destination, the first source and the third)
 #[repr(C, align(16))]
-pub struct SseFpOperands(pub [u128; 2]);
-pub static mut T0_SSE_FP: SseFpOperands = SseFpOperands([0; 2]);
+pub struct SseFpOperands(pub [u128; 3]);
+pub static mut T0_SSE_FP: SseFpOperands = SseFpOperands([0; 3]);
 /// Address of T0_SSE_FP for generated code
 pub fn sse_fp_operands() -> u32 { (&raw const T0_SSE_FP) as u32 }
 
@@ -117,7 +118,7 @@ pub fn sse_fp_operands() -> u32 { (&raw const T0_SSE_FP) as u32 }
 pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
     use crate::cpu::simd_fp;
     SSE_FP_CALLS[(key as usize).wrapping_mul(0x9E37_79B9) >> 24 & 255] += 1;
-    let [destination, source] = T0_SSE_FP.0;
+    let [destination, source, _] = T0_SSE_FP.0;
     let result = match key {
         // ROUNDPS/PD/SS/SD (SSE4.1)
         0x660F3A08..=0x660F3A0B => simd_fp::round(key, destination, source, imm8 as u8),
@@ -141,13 +142,31 @@ pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
     }
 }
 
+/// FMA's VEX.128 and scalar forms exactly (cpu::simd_fp::fused), for the
+/// templates of Tier-0 and the x64 page tier, on T0_SSE_FP (the destination,
+/// the first source and the r/m operand): `op` is the opcode byte, bit 8
+/// VEX.W. The result replaces the destination and MXCSR's flags are
+/// updated. 1 if the instruction faults: only MXCSR's flags are set, as the
+/// interpreter, which delivers the fault, sets them again; else 0.
+#[no_mangle]
+pub unsafe fn ir_t0_fma(op: u32) -> u32 {
+    let [destination, first, third] = T0_SSE_FP.0;
+    match crate::cpu::simd_fp::fused(op as u8, op & 0x100 != 0, [destination], [first], [third]) {
+        Ok([result]) => {
+            T0_SSE_FP.0[0] = result;
+            0
+        },
+        Err(crate::cpu::simd_fp::Unmasked) => 1,
+    }
+}
+
 /// PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI (`op`: the 66 0F 3A byte) with
 /// imm8 on T0_SSE_FP (destination, source), the explicit forms' lengths `a`
 /// and `b` (cpu::simd_int::compare_strings): xSTRM's mask replaces the
 /// destination; returns the index | EFLAGS (CF, ZF, SF, OF) << 8. For the
 /// templates of Tier-0 and the x64 page tier.
 pub unsafe fn pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
-    let [destination, source] = T0_SSE_FP.0;
+    let [destination, source, _] = T0_SSE_FP.0;
     let explicit = op & 2 == 0;
     let result = crate::cpu::simd_int::compare_strings(
         imm8 as u8,
