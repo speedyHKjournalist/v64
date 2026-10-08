@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import url from "node:url";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash as create_hash } from "node:crypto";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 process.on("unhandledRejection", exn => { throw exn; });
@@ -41,7 +41,7 @@ const ISO_SHA256 = "6cd1a38ae05cf96a5d0cbb2ddd6c630834babfeca1ecc5d1f05ec0b06b88
 const KERNEL = "boot/vmlinuz-virt";
 const INITRD = "boot/initramfs-virt";
 
-const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
+const sha256 = bytes => create_hash("sha256").update(bytes).digest("hex");
 fs.mkdirSync(DIRECTORY, { recursive: true });
 if(!fs.existsSync(DIRECTORY + ISO))
 {

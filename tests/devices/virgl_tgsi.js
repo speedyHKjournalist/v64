@@ -10,11 +10,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import url from "node:url";
-import { createRequire } from "node:module";
+import { createRequire as create_require } from "node:module";
 import { spawnSync } from "node:child_process";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
-const require = createRequire(import.meta.url);
+const require = create_require(import.meta.url);
 const IR = require("../../src/browser/glbridge/shader_ir/dxbc_frontend.js");
 const W = require("../../src/browser/glbridge/shader_ir/wgsl_emitter.js");
 const { parse_tgsi } = await import("../../src/graphics_adapters/virtio_gpu/tgsi.js");
@@ -66,9 +66,9 @@ for(const [name, program] of programs)
         const result = tgsi_to_vgpu10(program, { outputs: link.inputs, flip_y, halfz });
         assert.deepEqual(result.problems, [], name);
         const p = IR.decode(result.tokens);
-        const vertexInputs = {};
-        for(const input of p.inputs) if(!input.name) vertexInputs[input.index] = "f32";
-        const wgsl = W.emit(p, { vertexInputs, varyings: link.varyings });
+        const vertex_inputs = {};
+        for(const input of p.inputs) if(!input.name) vertex_inputs[input.index] = "f32";
+        const wgsl = W.emit(p, { vertexInputs: vertex_inputs, varyings: link.varyings });
         assert.deepEqual(wgsl.warnings, [], name);
         validate(name + (flip_y ? "-flip" : ""), wgsl.code);
         // the position: Y flipped, Z into [0, 1], or as it is

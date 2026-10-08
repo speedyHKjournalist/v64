@@ -8,6 +8,7 @@
 //   type 2: a JSON note (what made the trace)
 
 import fs from "node:fs";
+import { setImmediate as set_immediate } from "node:timers";
 
 const MAGIC = "V86GTRC1";
 export const TRACE_BATCH = 1;
@@ -73,7 +74,7 @@ export function create_trace_renderer(file, note)
             }
             const seq = message["seq"];
             // later, as a renderer would answer
-            setImmediate(() => {
+            set_immediate(() => {
                 for(const answer of answers) to_device(answer);
                 to_device({ "type": "done", "seq": seq });
             });

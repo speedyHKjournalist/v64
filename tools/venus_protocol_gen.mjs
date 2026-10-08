@@ -16,7 +16,6 @@
 // replies decoded: what the driver does) for tests that play the driver.
 //
 // usage: tools/venus_protocol_gen.mjs <venus-protocol dir> <vulkan_core.h> [out.js] [--guest guest.js]
-"use strict";
 
 import fs from "node:fs";
 import path from "node:path";
