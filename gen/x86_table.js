@@ -471,7 +471,7 @@ const encodings = [
     // (XSAVE and XRSTOR check CR4.OSXSAVE and CR0.TS before their operand)
     { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 4, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1 }, // xsave (mem)
     { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 5, skip: 1, custom: 1, custom_modrm_resolve: 1 }, // lfence (reg, only 0), xrstor (mem)
-    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 6, skip: 1, block_boundary: 1 }, // mfence (reg, only 0), xsaveopt (mem, not implemented)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 6, skip: 1, block_boundary: 1, custom_modrm_resolve: 1 }, // mfence (reg, only 0), xsaveopt (mem: XSAVEOPT, checked by its handler)
     { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 7, skip: 1, block_boundary: 1 }, // sfence (reg, only 0), clflush (mem)
 
     { opcode: 0x0FAF, os: 1, e: 1, mask_flags: TESTS_ASSUME_INTEL ? af | zf : sf | zf | af | pf, custom: 1 }, // imul
@@ -479,6 +479,11 @@ const encodings = [
     { opcode: 0x0FB0, e: 1 }, // cmxchg
     { opcode: 0x0FB1, os: 1, e: 1, custom: 1 },
     { opcode: 0x0FC7, e: 1, fixed_g: 1, os: 1, reg_ud: 1, custom: 1 }, // cmpxchg8b (memory)
+    // (XSAVEC, XSAVES and XRSTORS: XSAVE's checks and their order, then CPL 0
+    // for the last two; 66, F2 and F3 #UD in their handlers)
+    { opcode: 0x0FC7, e: 1, fixed_g: 3, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1, feature: "XSAVES" }, // xrstors (memory)
+    { opcode: 0x0FC7, e: 1, fixed_g: 4, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1, feature: "XSAVEC" }, // xsavec (memory)
+    { opcode: 0x0FC7, e: 1, fixed_g: 5, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1, feature: "XSAVES" }, // xsaves (memory)
     { opcode: 0x0FC7, e: 1, fixed_g: 6, os: 1, mem_ud: 1, skip: 1 }, // rdrand
 
     { opcode: 0x0FB2, block_boundary: 1, os: 1, e: 1, skip: 1 }, // lss

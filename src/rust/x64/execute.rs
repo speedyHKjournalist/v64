@@ -1035,6 +1035,8 @@ pub unsafe fn execute(d: &Decoded) -> Result<(), Fault> {
             }
             state::write_flags64(f);
         },
+        // XRSTORS, XSAVEC, XSAVES (the decoder required their features)
+        0x0FC7 if (3..=5).contains(&group) => crate::x64::vector::compacted_state(d, group)?,
         0x0FC7 if group == 6 => {
             // RDRAND is NFx: an F2/F3 prefix is #UD
             if d.prefixes.rep.is_some() {

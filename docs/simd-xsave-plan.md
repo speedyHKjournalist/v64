@@ -2224,3 +2224,80 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **回归**：在只含本计划改动的工作树（P7 三个部分与本部分）中运行 55 个目标（`p8-batch-a`、
   `p8-batch-b`），53 个通过；需要 `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本部分
   后运行，通过。
+
+### P9：XSAVE 家族扩展（2026-10-08）
+
+- **范围**：XSAVEOPT（`0F AE /6`，内存形式）、XGETBV(1)、XSAVEC（`0F C7 /4`）、XSAVES（`0F C7 /5`）与
+  XRSTORS（`0F C7 /3`），以及 IA32_XSS（MSR 0DA0H）。各自的能力位（CPUID.(EAX=0DH,ECX=1):EAX[0..3]）
+  在 P1e 已有；它们仍需 `cpu_features_unreleased`，到 M5 开放。64 位模式下带 REX.W 为各自的 64 位形式。
+- **做法**（`cpu/xstate.rs`，三个执行路径共用；语义取自 SDM 各指令的 Operation）：
+  - XSAVEOPT：标准格式。只存储使用中的分量（init 优化），MXCSR 与 MXCSR_MASK 在 RFBM[1] 或 RFBM[2]
+    时总是存储，XSTATE_BV 的规则与 XSAVE 相同。没有实现 modified 优化（SDM 允许不做）。
+  - XGETBV(1)：XCR0 AND XINUSE。XINUSE 沿用 P2 的精确计算：MXCSR 不计入，XMM8–15 只在 64 位模式计入；
+    x87 的初始配置要求 ST0–ST7 为零，所以 FNINIT 之后 x87 仍算使用中。
+  - XSAVEC：压缩格式。存储使用中的分量；MXCSR 不是 1F80H 时也存储 SSE 状态。MXCSR 与 MXCSR_MASK 只随
+    SSE 状态存储。XSTATE_BV 为实际存储的分量，XCOMP_BV 为 RFBM 加上第 63 位；头部的其他字节和
+    464–511 字节不写。本实现唯一的扩展分量是 YMM_Hi128（256 字节，不要求 64 字节对齐），所以它在压缩
+    格式中的偏移与标准格式相同，都是 576。
+  - XRSTOR 接受压缩格式（`header_form`），条件是有 XSAVEC，并且 XCOMP_BV[62:0] 在 XCR0 之内、XSTATE_BV
+    在 XCOMP_BV 之内、头部 16–63 字节为零，否则 #GP(0)。压缩格式只在载入 SSE 状态时载入 MXCSR，初始化
+    SSE 状态时把 MXCSR 置为 1F80H。标准格式的规则不变。
+  - XSAVES 与 XSAVEC 相同，只是 RFBM 为 (XCR0 OR IA32_XSS) AND EDX:EAX。XRSTORS 只接受压缩格式，
+    XCOMP_BV 须在 XCR0 OR IA32_XSS 之内。两者在 #UD、#NM 之后、操作数的段检查之前检查 CPL，CPL > 0 时
+    #GP(0)。
+  - IA32_XSS 只在有 XSAVES 时存在。本实现没有 supervisor 分量，所以只接受写入 0，其他值 #GP(0)。它属于
+    各模式共用的模型 MSR 表。没有 XSAVES 时，长模式下读写 #GP(0)；32 位配置沿用 v86 对未知 MSR 的旧约定，
+    读为 0、写入忽略。
+  - CPUID.(EAX=0DH,ECX=1)：有 XSAVEC 时，EBX 为 XCR0 OR IA32_XSS 所含分量的压缩格式大小（576 或 832）；
+    ECX、EDX（支持的 IA32_XSS 位）为 0。
+  - 解码：XSAVEC、XSAVES、XRSTORS 的行带各自的能力位，寄存器形式 #UD。0F AE /6 与 MFENCE 共用一行，
+    XSAVEOPT 的能力在它的处理函数中检查。66、F2、F3 前缀在处理函数中 #UD。IR 由 `fp_state` 的 helper
+    （`ir_xsaveopt`、`ir_xsavec`、`ir_xsaves`、`ir_xrstors`）执行。`coverage` 原先把 0F AE /6 的内存
+    形式当作 #UD 处理，并且排在 `fp_state` 之前，所以 regions 中的 XSAVEOPT 都是 #UD；现已改正（见下）。
+- **测试**：
+  - `tests/rust/xsave.mjs`（三个 arm 上 154 项）：
+    - 测试框架有两处修正。一是每个检查在热运行（编译代码）和冷运行之后各做一次，这是 P4b 第一部分记下的
+      待办。二是每轮先清除故障记录，热运行在一轮结束时停止，热运行的结果因此来自编译代码的最后一轮，
+      而不是早先解释执行的某一轮。
+    - 新的分节使用同时具有四个能力的机器。每轮保持 XCR0 为 7、CR4.OSXSAVE 置位（由 preamble 每轮写入
+      相同的值）。如果程序每轮改变 XCR0，编译 arm 上的这些指令始终由解释器执行（下面的变异测试暴露了
+      这一点）。
+    - 内容：CPUID.0xD.1；XGETBV(1) 的各种情形；XSAVEOPT 的 init 优化、MXCSR 与部分请求；XSAVEC 存储的
+      分量、MXCSR 强制存储 SSE 状态、头部；压缩格式 XRSTOR 的往返、MXCSR 的两条规则；头部的各个 #GP；
+      XSAVES 与 XSAVEC 结果相同；XRSTORS 与 XRSTOR 各自恢复 XSAVES 的区域；IA32_XSS 的读写；四条指令的
+      #UD（缺 OSXSAVE 时在 #NM 之前）、#NM、未对齐 #GP、前缀 #UD、寄存器形式 #UD，以及头部所在页缺页时
+      #PF 且不写任何字节。没有相应能力时各指令 #UD。
+  - `tests/x64/xsave.mjs`：第二个 guest 覆盖 XSAVEOPT64/XSAVEOPT、XGETBV(1)（XMM8 只在 64 位模式计入）、
+    XSAVEC64/XSAVEC、XSAVES64/XSAVES、XRSTOR64 与 XRSTORS64 恢复压缩区域、IA32_XSS，以及 CPL 3 下
+    XSAVES64 和 XRSTORS64 的 #GP(0)：这个 guest 自带含用户段与 TSS 的 GDT，把前 4 MiB 设为用户可访问，
+    用 IRETQ 进入 ring 3，再经 DPL 3 的中断门返回。主 guest 加入缺少能力时的 #UD，以及长模式下读写
+    不存在的 IA32_XSS 时的 #GP。解释执行和 page tier 各跑一遍。
+  - IR fp_state 差分：新增 XSAVEOPT、XRSTORS、XSAVEC、XSAVES 的 fixture，共 736 例。XCR0 改为 3，EAX 请求
+    x87 和 SSE（原先 RFBM 为 0，XSAVE 家族实际上不搬运数据）。新增 SSE 状态为初始配置的用例：XSAVEOPT、
+    XSAVEC、XSAVES 跳过 SSE 状态，XSAVE 写入 SSE 状态。新增 CPL 3 的用例（用户页和带 ring-0 栈的 TSS）：
+    XSAVES、XRSTORS 为 #GP(0)，并且晚于 #NM；XSAVEC 正常执行。
+  - IR coverage 差分不再把 XSAVEOPT 的内存形式当作 coverage 形式；`gen/ir_semantics.js` 把它与 0F C7 /3–/5
+    的内存形式归入 `CpuFpStateHelper`。
+  - `cargo test cpu::xstate`：压缩格式头部的各项规则。
+- **客体**：Alpine x86_64（virt 内核，单核，page tier）在两组能力下都启动到 shell，并通过 64 位和 32 位
+  探针。工作树只含 P7 第一部分，所以没有打开 AVX2。
+  - `SSSE3,SSE4.1,SSE4.2,XSAVE,AVX,XSAVEOPT,XSAVEC,XGETBV1,XSAVES`：内核报告 "Enabled xstate features
+    0x7, context size is 832 bytes, using 'compacted' format"。按内核 `XSTATE_XSAVE` 的 alternatives，
+    上下文切换使用 XSAVES/XRSTORS；探针收发的实时信号，其信号帧仍用标准格式的 XSAVE/XRSTOR。
+  - `SSSE3,SSE4.1,SSE4.2,XSAVE,AVX,XSAVEOPT`：报告 'standard' format，上下文切换使用 XSAVEOPT。
+- **变异测试**：植入 34 个错误，全部被检出。第一轮有两个存活：regions 中 XSAVEOPT 不检查能力，以及
+  regions 把 XSAVEOPT 分派成 XSAVE。原因是程序每轮执行 XSETBV，编译 arm 实际上没有执行这些指令；
+  调整分节后两者都被检出。按指令分：
+  - XSAVEOPT 与 XGETBV(1)（13 个）：不做 init 优化；MXCSR 只随使用中的分量存储；XGETBV(1) 不与 XCR0
+    相与、不检查能力、64 位模式之外也计入 XMM8–15；三个执行路径各自不检查能力、各自分派成 XSAVE；
+    coverage 的分组；未对齐时不 #GP。
+  - XSAVEC 与压缩格式的 XRSTOR（15 个）：MXCSR 不是 1F80H 时不强制存储 SSE 状态；不做 init 优化；多写
+    头部字节；XCOMP_BV 缺第 63 位；XSTATE_BV 写成 RFBM；载入 MXCSR 的规则；初始化 SSE 状态时不置
+    1F80H；去掉 XCOMP_BV 在 XCR0 之内、XSTATE_BV 在 XCOMP_BV 之内、头部保留字节为零这三项检查；不检查
+    XSAVEC 能力；CPUID.(0DH,1).EBX 为 0；三个执行路径各自不拒绝前缀。
+  - XSAVES、XRSTORS 与 IA32_XSS（6 个）：三个执行路径各自不检查 CPL；XRSTORS 接受标准格式；IA32_XSS
+    接受非零值；没有 XSAVES 时 IA32_XSS 仍然存在。
+- **回归**：在只含本计划改动的工作树（P7、P8 与本阶段合并）中运行 55 个目标（`p9-batch-a`、`p9-batch-b`）。
+  `ir-fusion-tests` 起初失败：`xstate.rs` 的单元测试里有一个赋值之后不再读取，在 `-D warnings` 下编译失败；
+  删去后通过。另外 52 个通过；需要 `images/` 的 `api-tests`、`jitpagingtests` 在主工作树中加入本阶段后
+  运行，通过。

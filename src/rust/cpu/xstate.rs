@@ -18,6 +18,11 @@ pub const YMM: u64 = 1 << 2;
 /// The XSAVE header and the YMM_Hi128 component in the standard format
 pub const HEADER: u32 = 512;
 pub const YMM_OFFSET: u32 = 576;
+/// XCOMP_BV's bit 63: the compacted form (XSAVEC, XSAVES). Its extended
+/// region holds the components of XCOMP_BV[62:0] in order from 576, so with
+/// YMM_Hi128 the only extended component here (its size 256, no 64-byte
+/// alignment: CPUID.(EAX=0DH,ECX=2)) it is at the standard offset.
+pub const COMPACTED: u64 = 1 << 63;
 /// The standard-format area with every component of this implementation
 pub const AREA_SIZE: usize = 832;
 
@@ -43,6 +48,9 @@ pub fn standard_size(mask: u64) -> u32 {
         576
     }
 }
+
+/// The size of a compacted-form area holding the components `mask`
+pub fn compacted_size(mask: u64) -> u32 { standard_size(mask) }
 
 /// The XSAVE-managed registers
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -227,12 +235,25 @@ pub fn in_use(r: &Registers, format: Format) -> u64 {
         | (r.ymm_hi[..n].iter().any(|x| *x != 0) as u64) * YMM
 }
 
-/// XRSTOR's checks of the header (standard form): Err is #GP(0). The
-/// compacted form needs XSAVEC, which this implementation does not have.
-pub fn header_valid(header: &[u8; 64], xcr0: u64) -> bool {
-    let xstate_bv = u64::from_le_bytes(header[0..8].try_into().unwrap());
-    // (bytes 23:8: XCOMP_BV, whose bit 63 asks for the compacted form, and 8 reserved bytes)
-    xstate_bv & !xcr0 == 0 && header[8..24].iter().all(|&b| b == 0)
+/// XRSTOR's checks of the header (otherwise #GP(0)): Some(false) for a
+/// valid standard form (XSTATE_BV within `allowed`, XCR0; bytes 23:8, XCOMP_BV
+/// and 8 reserved bytes, zero), Some(true) for a valid compacted one
+/// (XCOMP_BV[63], which needs XSAVEC; XCOMP_BV[62:0] within `allowed`,
+/// XSTATE_BV within XCOMP_BV, bytes 63:16 zero)
+pub fn header_form(header: &[u8; 64], allowed: u64) -> Option<bool> {
+    let at = |offset: usize| u64::from_le_bytes(header[offset..offset + 8].try_into().unwrap());
+    let (xstate_bv, xcomp_bv) = (at(0), at(8));
+    if xcomp_bv & COMPACTED == 0 {
+        (xstate_bv & !allowed == 0 && header[8..24].iter().all(|&b| b == 0)).then_some(false)
+    }
+    else {
+        let format = xcomp_bv & !COMPACTED;
+        (features::has(features::XSAVEC)
+            && format & !allowed == 0
+            && xstate_bv & !format == 0
+            && header[16..].iter().all(|&b| b == 0))
+        .then_some(true)
+    }
 }
 
 /// An XSETBV of `value` into XCR `index` is valid (otherwise #GP(0)): XCR0
@@ -273,18 +294,25 @@ pub unsafe fn cpuid(leaf: u32, subleaf: u32, registers: &mut [u32; 4]) {
                 (supported >> 32) as u32,
             ]
         },
+        // (with the compacted form: the size of an area of XCR0 and
+        // IA32_XSS's components; IA32_XSS supports none, ECX and EDX)
+        (0xD, 1) if features::has(features::XSAVEC) => {
+            registers[1] = compacted_size(*gp::xcr0 | *gp::xss)
+        },
         (0xD, 2) if supported & YMM != 0 => *registers = [256, YMM_OFFSET, 0, 0],
         _ => {},
     }
 }
 
-/// XGETBV: XCR `index`, or None for #GP(0)
-pub unsafe fn xgetbv(index: u32) -> Option<u64> {
-    if index == 0 {
-        Some(*gp::xcr0)
-    }
-    else {
-        None
+/// XGETBV: XCR `index` (1: XCR0 AND XINUSE, with XGETBV1; `long`: the
+/// registers of 64-bit mode count), or None for #GP(0)
+pub unsafe fn xgetbv(index: u32, long: bool) -> Option<u64> {
+    match index {
+        0 => Some(*gp::xcr0),
+        1 if features::has(features::XGETBV1) => {
+            Some(*gp::xcr0 & in_use(&registers(), Format { wide: false, long }))
+        },
+        _ => None,
     }
 }
 /// XSETBV: false for #GP(0), which also comes for CPL > 0 (the caller's)
@@ -414,39 +442,119 @@ fn mxcsr_valid(area: &[u8; AREA_SIZE]) -> bool {
 
 /// XSAVE of the components `rfbm` (XCR0 AND EDX:EAX)
 pub unsafe fn xsave<A: Area>(m: &mut A, rfbm: u64, format: Format) -> Result<(), A::Fault> {
+    save_standard(m, rfbm, format, false)
+}
+/// XSAVEOPT: XSAVE's but for the components in their initial configuration
+/// (XINUSE), which it does not store (the init optimization). It has no
+/// modified optimization (the SDM lets XSAVEOPT also skip components
+/// unmodified since an XRSTOR from the same area; not doing so is allowed).
+pub unsafe fn xsaveopt<A: Area>(m: &mut A, rfbm: u64, format: Format) -> Result<(), A::Fault> {
+    save_standard(m, rfbm, format, true)
+}
+/// The standard form's save: the components `rfbm`, or with
+/// `init_optimization` those of them in use; MXCSR and MXCSR_MASK with
+/// RFBM[1] or RFBM[2] (whatever XINUSE says); XSTATE_BV's bits of `rfbm`
+/// from XINUSE, the others kept, and no other header byte
+unsafe fn save_standard<A: Area>(
+    m: &mut A,
+    rfbm: u64,
+    format: Format,
+    init_optimization: bool,
+) -> Result<(), A::Fault> {
     let with_mxcsr = rfbm & (SSE | YMM) != 0;
     let r = registers();
+    let in_use = in_use(&r, format);
+    let saved = if init_optimization { rfbm & in_use } else { rfbm };
     m.check(HEADER, 8, false)?;
     m.check(HEADER, 8, true)?;
     let mut old = [0; 8];
     m.read(HEADER, &mut old);
     write_fields(
         m,
-        &encode(&r, rfbm, with_mxcsr, format),
-        &fields(rfbm, with_mxcsr, format),
+        &encode(&r, saved, with_mxcsr, format),
+        &fields(saved, with_mxcsr, format),
     )?;
-    let xstate_bv = u64::from_le_bytes(old) & !rfbm | in_use(&r, format) & rfbm;
+    let xstate_bv = u64::from_le_bytes(old) & !rfbm | in_use & rfbm;
     m.write(HEADER, &xstate_bv.to_le_bytes());
     Ok(())
 }
-/// XRSTOR of the components `rfbm` (standard form)
+/// XSAVEC of the components `rfbm`: the compacted form. It stores the
+/// components in use (the init optimization), and SSE state also when MXCSR
+/// is not 1F80H (MXCSR, part of SSE state, does not count in XINUSE[1]);
+/// MXCSR and MXCSR_MASK with SSE state only. XSTATE_BV: the components
+/// stored; XCOMP_BV: `rfbm` with bit 63. No other header byte, nor bytes
+/// 464-511.
+pub unsafe fn xsavec<A: Area>(m: &mut A, rfbm: u64, format: Format) -> Result<(), A::Fault> {
+    let r = registers();
+    let mut saved = rfbm & in_use(&r, format);
+    if rfbm & SSE != 0 && r.mxcsr != 0x1F80 {
+        saved |= SSE;
+    }
+    let with_mxcsr = saved & SSE != 0;
+    m.check(HEADER, 16, true)?;
+    write_fields(
+        m,
+        &encode(&r, saved, with_mxcsr, format),
+        &fields(saved, with_mxcsr, format),
+    )?;
+    m.write(HEADER, &saved.to_le_bytes());
+    m.write(HEADER + 8, &(rfbm | COMPACTED).to_le_bytes());
+    Ok(())
+}
+/// XSAVES of the components `rfbm` ((XCR0 OR IA32_XSS) AND EDX:EAX; CPL 0
+/// checked): XSAVEC's (no modified optimization, which the SDM allows XSAVES
+/// too)
+pub unsafe fn xsaves<A: Area>(m: &mut A, rfbm: u64, format: Format) -> Result<(), A::Fault> {
+    xsavec(m, rfbm, format)
+}
+/// XRSTORS of the components `rfbm` ((XCR0 OR IA32_XSS) AND EDX:EAX; CPL 0
+/// checked): the compacted form only (#GP(0) for the standard form), its
+/// XCOMP_BV within XCR0 OR IA32_XSS
+pub unsafe fn xrstors<A: Area>(m: &mut A, rfbm: u64, format: Format) -> Result<(), A::Fault> {
+    let mut area = [0; AREA_SIZE];
+    read_fields(m, &mut area, &[(HEADER, 64)])?;
+    let header = area[HEADER as usize..][..64].try_into().unwrap();
+    if header_form(header, *gp::xcr0 | *gp::xss) != Some(true) {
+        return Err(m.gp());
+    }
+    restore(m, &mut area, rfbm, true, format)
+}
+/// XRSTOR of the components `rfbm`, from either form
 pub unsafe fn xrstor<A: Area>(m: &mut A, rfbm: u64, format: Format) -> Result<(), A::Fault> {
     let mut area = [0; AREA_SIZE];
     read_fields(m, &mut area, &[(HEADER, 64)])?;
-    if !header_valid(area[HEADER as usize..][..64].try_into().unwrap(), *gp::xcr0) {
+    let Some(compacted) = header_form(area[HEADER as usize..][..64].try_into().unwrap(), *gp::xcr0)
+    else {
         return Err(m.gp());
-    }
+    };
+    restore(m, &mut area, rfbm, compacted, format)
+}
+/// The components `rfbm` from `area`, whose header was read and checked:
+/// those XSTATE_BV marks loaded, the others initialized. MXCSR: the standard
+/// form loads it with RFBM[1] or RFBM[2] whatever XSTATE_BV says; the
+/// compacted form with SSE state only, and initializes it to 1F80H with SSE
+/// state. Reserved MXCSR bits loaded are #GP(0), before any state changes.
+unsafe fn restore<A: Area>(
+    m: &mut A,
+    area: &mut [u8; AREA_SIZE],
+    rfbm: u64,
+    compacted: bool,
+    format: Format,
+) -> Result<(), A::Fault> {
     let xstate_bv = u64::from_le_bytes(area[HEADER as usize..][..8].try_into().unwrap());
     let (load, init) = (rfbm & xstate_bv, rfbm & !xstate_bv);
-    // (MXCSR comes from memory whatever XSTATE_BV says)
-    let with_mxcsr = rfbm & (SSE | YMM) != 0;
-    read_fields(m, &mut area, &fields(load, with_mxcsr, format))?;
-    if with_mxcsr && !mxcsr_valid(&area) {
+    let with_mxcsr = if compacted { load & SSE != 0 } else { rfbm & (SSE | YMM) != 0 };
+    read_fields(m, area, &fields(load, with_mxcsr, format))?;
+    if with_mxcsr && !mxcsr_valid(area) {
         return Err(m.gp());
     }
     let mut r = registers();
-    decode(&mut r, &area, load, init, with_mxcsr, format);
-    set_registers(&r, load | init, with_mxcsr, format);
+    decode(&mut r, area, load, init, with_mxcsr, format);
+    let initial_mxcsr = compacted && init & SSE != 0;
+    if initial_mxcsr {
+        r.mxcsr = 0x1F80;
+    }
+    set_registers(&r, load | init, with_mxcsr || initial_mxcsr, format);
     Ok(())
 }
 /// FXSAVE: the x87 and SSE state with MXCSR (bytes 288-511 only in 64-bit
@@ -488,6 +596,26 @@ pub unsafe fn usable(nm: bool) -> bool {
 }
 /// XCR0 AND EDX:EAX: the components an instruction asks for (RFBM)
 pub unsafe fn requested(edx: u32, eax: u32) -> u64 { *gp::xcr0 & ((edx as u64) << 32 | eax as u64) }
+/// XSAVES and XRSTORS's RFBM: (XCR0 OR IA32_XSS) AND EDX:EAX
+pub unsafe fn requested_supervisor(edx: u32, eax: u32) -> u64 {
+    (*gp::xcr0 | *gp::xss) & ((edx as u64) << 32 | eax as u64)
+}
+/// The IA32_XSS bits this machine supports: no supervisor state component
+pub const XSS_SUPPORTED: u64 = 0;
+/// IA32_XSS (MSR 0DA0H, with XSAVES): None for an absent MSR
+pub unsafe fn read_xss() -> Option<u64> { features::has(features::XSAVES).then(|| *gp::xss) }
+/// WRMSR to IA32_XSS: None for an absent MSR, Some(false) for unsupported
+/// bits (#GP(0))
+pub unsafe fn write_xss(value: u64) -> Option<bool> {
+    if !features::has(features::XSAVES) {
+        return None;
+    }
+    if value & !XSS_SUPPORTED != 0 {
+        return Some(false);
+    }
+    *gp::xss = value;
+    Some(true)
+}
 
 /// The 32-bit engines (the interpreter, also in compatibility mode, and the
 /// IR's helpers): a linear address, faults delivered as they come
@@ -543,6 +671,42 @@ pub unsafe fn xsave_32(addr: i32) -> bool {
     }
     let (edx, eax) = eax_edx();
     xsave(&mut Linear(addr), requested(edx, eax), NARROW).is_ok()
+}
+/// XSAVEOPT at `addr` (usable() checked), like xsave_32
+pub unsafe fn xsaveopt_32(addr: i32) -> bool {
+    if addr & 63 != 0 {
+        cpu::trigger_gp(0);
+        return false;
+    }
+    let (edx, eax) = eax_edx();
+    xsaveopt(&mut Linear(addr), requested(edx, eax), NARROW).is_ok()
+}
+/// XSAVEC at `addr` (usable() checked), like xsave_32
+pub unsafe fn xsavec_32(addr: i32) -> bool {
+    if addr & 63 != 0 {
+        cpu::trigger_gp(0);
+        return false;
+    }
+    let (edx, eax) = eax_edx();
+    xsavec(&mut Linear(addr), requested(edx, eax), NARROW).is_ok()
+}
+/// XSAVES at `addr` (usable() and CPL 0 checked), like xsave_32
+pub unsafe fn xsaves_32(addr: i32) -> bool {
+    if addr & 63 != 0 {
+        cpu::trigger_gp(0);
+        return false;
+    }
+    let (edx, eax) = eax_edx();
+    xsaves(&mut Linear(addr), requested_supervisor(edx, eax), NARROW).is_ok()
+}
+/// XRSTORS from `addr` (usable() and CPL 0 checked), like xsave_32
+pub unsafe fn xrstors_32(addr: i32) -> bool {
+    if addr & 63 != 0 {
+        cpu::trigger_gp(0);
+        return false;
+    }
+    let (edx, eax) = eax_edx();
+    xrstors(&mut Linear(addr), requested_supervisor(edx, eax), NARROW).is_ok()
 }
 /// XRSTOR from `addr` (usable() checked), like xsave_32
 pub unsafe fn xrstor_32(addr: i32) -> bool {
@@ -771,18 +935,51 @@ mod tests {
 
         let mut header = [0; 64];
         header[0] = 3;
-        assert!(header_valid(&header, 3) && !header_valid(&header, 1));
+        assert!(header_form(&header, 3) == Some(false) && header_form(&header, 1).is_none());
         header[15] = 0x80;
-        assert!(!header_valid(&header, 3), "the compacted form needs XSAVEC");
+        assert!(
+            header_form(&header, 3).is_none(),
+            "the compacted form needs XSAVEC"
+        );
         header[15] = 0;
         header[23] = 1;
-        assert!(!header_valid(&header, 3));
+        assert!(header_form(&header, 3).is_none());
         header[23] = 0;
         header[24] = 1;
-        assert!(
-            header_valid(&header, 3),
+        assert_eq!(
+            header_form(&header, 3),
+            Some(false),
             "bytes 63:24 are not checked by the standard form"
         );
+        // the compacted form: XCOMP_BV within XCR0, XSTATE_BV within XCOMP_BV,
+        // bytes 63:16 zero
+        use crate::cpu::features::XSAVEC;
+        TEST_FEATURES.with(|f| f.set(XSAVE | XSAVEC));
+        let compacted = |xstate_bv: u64, xcomp_bv: u64, byte: Option<usize>| {
+            let mut h = [0; 64];
+            h[..8].copy_from_slice(&xstate_bv.to_le_bytes());
+            h[8..16].copy_from_slice(&xcomp_bv.to_le_bytes());
+            if let Some(at) = byte {
+                h[at] = 1;
+            }
+            header_form(&h, 7)
+        };
+        assert_eq!(compacted(5, COMPACTED | 7, None), Some(true));
+        assert_eq!(compacted(0, COMPACTED, None), Some(true));
+        assert_eq!(
+            compacted(4, COMPACTED | 3, None),
+            None,
+            "XSTATE_BV beyond XCOMP_BV"
+        );
+        assert_eq!(
+            compacted(1, COMPACTED | 9, None),
+            None,
+            "XCOMP_BV beyond XCR0"
+        );
+        assert_eq!(compacted(1, COMPACTED | 1, Some(16)), None, "bytes 63:16");
+        assert_eq!(compacted(1, COMPACTED | 1, Some(63)), None, "bytes 63:16");
+        assert_eq!(compacted(0, 1, None), None, "XCOMP_BV without bit 63");
+        TEST_FEATURES.with(|f| f.set(0));
 
         use crate::cpu::features::{ALL, AVX, SSE4_1, SSE4_2, SSSE3, TEST_FEATURES, XSAVE};
         for (features, all) in [

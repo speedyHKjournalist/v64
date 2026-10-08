@@ -5,6 +5,8 @@ import {V86} from "../../../build/libv86.mjs";
 const cases=JSON.parse(fs.readFileSync("build/ir-fp-state/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-fp-state/${i}-${opt}.wasm`))));
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+// (the state layout: XCR0)
+const XCR0=2432;
 
 for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
     let log_observer=null;
@@ -21,6 +23,7 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
+        cpu_features:["XSAVE","XSAVEOPT","XSAVEC","XSAVES"],cpu_features_unreleased:true,
     });
     try {
         await new Promise(resolve=>vm.add_listener("emulator-loaded",resolve));
@@ -83,12 +86,16 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,badMxcsr: bad_mxcsr=false,osxsave=true}={}){
+        // (user: CPL 3, user pages and a TSS with the ring-0 stack, 16:STACK;
+        // sseInit: SSE state in its initial configuration)
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,badMxcsr: bad_mxcsr=false,osxsave=true,user=false,sseInit: sse_init=false}={}){
             const [bytes,mode,group]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             // Ordinary helper execution (debug warnings have their own
-            // dispatcher regression); XSAVE enabled, XCR0 x87 (its reset value)
+            // dispatcher regression); XSAVE enabled, XCR0 x87 and SSE, which
+            // EAX requests (RFBM 3)
             cpu.cr[4]=cr4|512|(osxsave?1<<18:0);
+            linear32[XCR0>>2]=3;linear32[XCR0+4>>2]=0;
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -97,8 +104,8 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
             cpu.segment_access_bytes.set([0x93,0x9B,0x93,0x93,0x93,0x93]);
             cpu.is_32[0]=+mode;
             cpu.stack_size_32[0]=1;
-            linear32[612>>2]=0;
-            cpu.reg32.set([0x12345678,0xFEDCBA98,0x89ABCDEF,0x7FFFFFFF,STACK,0x55555555,0x10203040,0xAABBCCDD]);
+            linear32[612>>2]=user?3:0;
+            cpu.reg32.set([0x1234567B,0xFEDCBA98,0x89ABCDEF,0x7FFFFFFF,STACK,0x55555555,0x10203040,0xAABBCCDD]);
             cpu.flags[0]=flags;
             cpu.flags_changed[0]=0;
             linear32[104>>2]=0x76543210;
@@ -110,14 +117,19 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
 
             desc(1,0,0x9B);desc(2,0,0x93);
             cpu.gdtr_offset[0]=0x3000;cpu.gdtr_size[0]=23;
+            if(user) {
+                desc(5,0x4000,0x89);cpu.gdtr_size[0]=47;
+                cpu.segment_offsets[6]=0x4000;cpu.segment_limits[6]=0x67;cpu.tss_size_32[0]=1;
+                set32(0x4004,STACK);set32(0x4008,16);
+            }
             cpu.idtr_offset[0]=0x2000;cpu.idtr_size[0]=0x7FF;
             for(const [vector,handler] of [[6,UD],[7,NM],[13,GP],[14,PF]]){
                 set32(0x2000+vector*8,8<<16|handler&65535);
                 set32(0x2004+vector*8,handler&0xFFFF0000|0x8E00);
             }
-            set32(0x12000,0x13003);
-            for(const page of [0,2,3,6,7,8,0x18,0x8F,0x90]){
-                set32(0x13000+page*4,page*4096|3);
+            set32(0x12000,user?0x13007:0x13003);
+            for(const page of [0,2,3,4,6,7,8,0x18,0x8F,0x90]){
+                set32(0x13000+page*4,page*4096|(user?7:3));
             }
             e.full_clear_tlb();
             e.update_state_flags();
@@ -132,10 +144,12 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
             e.instr_0FAE_0_mem(DATA);
             mem.copyWithin(DATA+delta,DATA,DATA+288);
             if(group===2) set32(DATA+delta,0x5F80);
+            // (XRSTORS: the compacted form, XCOMP_BV[63])
+            if(group===11) set32(DATA+delta+524,0x80000000);
             if(bad_mxcsr) set32(DATA+delta+(group===1?24:0),0x10000);
             e.ir_test_x87_seed(); linear8[816]=empty; linear8[1032]=top;
-            cpu.reg_xmm32s.fill(0x76543210);
-            cpu.mxcsr[0]=0x3F80;
+            cpu.reg_xmm32s.fill(sse_init?0:0x76543210);
+            cpu.mxcsr[0]=sse_init?0x1F80:0x3F80;
             cpu.segment_offsets[3]=delta;
             cpu.segment_is_null[3]=+null_segment;
             if(mmio) { set32(0x13000+6*4,0xA0003);set32(0x13000+7*4,0xA1003); }
@@ -173,7 +187,9 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
                 const expected=compare(i,()=>reset(i,{mmio,delta}),before+1);
                 assert.equal(expected.ip,PC+cases[i][0].length); comparisons++;
             }
-            // (a misaligned XSAVE area is #GP: the header crosses instead)
+            // (a misaligned XSAVE area is #GP: the header crosses instead;
+            // groups 4-6: XSAVE, XRSTOR, XSAVEOPT; 11-13: XRSTORS, XSAVEC,
+            // XSAVES)
             const delta=group<2?0xF00:group>=4?0xFC0:0xFFF;
             assert.equal(compare(i,()=>reset(i,{delta,pageFault:true}),before).ip,PF); comparisons++;
             assert.equal(compare(i,()=>reset(i,{nullSegment:true}),before).ip,GP); comparisons++;
@@ -188,6 +204,20 @@ for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
             // XSAVE and XRSTOR without CR4.OSXSAVE: #UD before #NM and the segment
             if(group>=4&&!dirty) for(const task of [0,8]) {
                 assert.equal(compare(i,()=>reset(i,{task,nullSegment:true,osxsave:false}),101).ip,UD); comparisons++;
+            }
+            // the XSAVE family's stores with SSE state initial
+            if([4,6,12,13].includes(group)) {
+                assert.equal(compare(i,()=>reset(i,{sseInit:true}),before+1).ip,PC+cases[i][0].length); comparisons++;
+            }
+            // CPL 3: XRSTORS and XSAVES #GP(0) after #NM, before the segment;
+            // XSAVEC runs
+            if(group>=11) {
+                const supervisor=group!==12;
+                assert.equal(compare(i,()=>reset(i,{user:true}),before+Number(!supervisor)).ip,supervisor?GP:PC+cases[i][0].length); comparisons++;
+                if(supervisor&&!dirty) {
+                    assert.equal(compare(i,()=>reset(i,{user:true,task:8,nullSegment:true}),101).ip,NM); comparisons++;
+                    assert.equal(compare(i,()=>reset(i,{user:true,nullSegment:true}),101).ip,GP); comparisons++;
+                }
             }
         }
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} FP state transfers, dirty XMM recovery, MXCSR validation, MMIO, cross-page #PF and #NM/#UD priority cases`);

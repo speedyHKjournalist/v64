@@ -69,7 +69,11 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_write_dr"
         | "ir_xgetbv_xsetbv"
         | "ir_xrstor"
-        | "ir_xsave" => 2,
+        | "ir_xrstors"
+        | "ir_xsave"
+        | "ir_xsavec"
+        | "ir_xsaveopt"
+        | "ir_xsaves" => 2,
         "ir_invalid_form"
         | "ir_arpl_mem"
         | "ir_movnti"

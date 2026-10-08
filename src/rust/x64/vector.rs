@@ -1294,8 +1294,8 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
         memory::probe_read(a, 8, s)?;
         return Ok(true); // CLFLUSH: guest caches share the coherent RAM image.
     }
-    // (XSAVEOPT: #UD)
-    if group == 6 {
+    // (XSAVEOPT: CPUID.(EAX=0DH,ECX=1):EAX[0])
+    if group == 6 && !crate::cpu::features::has(crate::cpu::features::XSAVEOPT) {
         return Ok(false);
     }
     // XSAVE and XRSTOR: #UD without CR4.OSXSAVE before #NM
@@ -1332,9 +1332,41 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
         0 => xstate::fxsave(area, format)?,
         1 => xstate::fxrstor(area, format)?,
         4 => xstate::xsave(area, rfbm(), format)?,
+        6 => xstate::xsaveopt(area, rfbm(), format)?,
         _ => xstate::xrstor(area, rfbm(), format)?,
     }
     Ok(true)
+}
+/// XRSTORS (0F C7 /3), XSAVEC (/4) and XSAVES (/5) on memory, without a
+/// mandatory prefix: XSAVE's checks and their order (#UD without
+/// CR4.OSXSAVE, #NM, #GP(0) unless aligned to 64 bytes), and #GP(0) for CPL
+/// > 0 before the operand for XRSTORS and XSAVES; the 64-bit forms with REX.W
+pub(super) unsafe fn compacted_state(d: &Decoded, group: u8) -> Result<(), Fault> {
+    if d.rm_register.is_some() || d.prefixes.operand || d.prefixes.rep.is_some() {
+        return Err(Fault::ud());
+    }
+    if !xstate::enabled() {
+        return Err(Fault::ud());
+    }
+    if state::read_cr(0) & 8 != 0 {
+        return Err(fault(7));
+    }
+    if group != 4 && *gp::cpl != 0 {
+        return Err(Fault::gp());
+    }
+    let (a, s) = address(d);
+    alignment(a, s, 64)?;
+    let format = xstate::Format {
+        wide: d.prefixes.w(),
+        long: d.mode.is_long(),
+    };
+    let area = &mut Area { a, stack: s };
+    let (edx, eax) = (state::read_gpr(2) as u32, state::read_gpr(0) as u32);
+    match group {
+        3 => xstate::xrstors(area, xstate::requested_supervisor(edx, eax), format),
+        4 => xstate::xsavec(area, xstate::requested(edx, eax), format),
+        _ => xstate::xsaves(area, xstate::requested_supervisor(edx, eax), format),
+    }
 }
 unsafe fn x87_environment(d: &Decoded, restore: bool, registers: bool) -> Result<(), Fault> {
     let (a, s) = address(d);

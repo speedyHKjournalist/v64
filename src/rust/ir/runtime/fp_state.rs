@@ -50,6 +50,57 @@ pub unsafe fn ir_xsave(offset: u32, segment: u32) -> u32 {
     };
     finish(xstate::xsave_32(addr))
 }
+/// XSAVEOPT: #UD without its feature, then XSAVE's checks
+#[no_mangle]
+pub unsafe fn ir_xsaveopt(offset: u32, segment: u32) -> u32 {
+    if !crate::cpu::features::has(crate::cpu::features::XSAVEOPT) {
+        cpu::trigger_ud();
+        return finish(false);
+    }
+    let Ok(addr) = xstate_address(offset, segment)
+    else {
+        return finish(false);
+    };
+    finish(xstate::xsaveopt_32(addr))
+}
+/// XSAVEC (the decoder required its feature)
+#[no_mangle]
+pub unsafe fn ir_xsavec(offset: u32, segment: u32) -> u32 {
+    let Ok(addr) = xstate_address(offset, segment)
+    else {
+        return finish(false);
+    };
+    finish(xstate::xsavec_32(addr))
+}
+/// XSAVES and XRSTORS: XSAVE's checks, then #GP(0) for CPL > 0 before the
+/// segment (cpu::instructions_0f::compacted_state)
+unsafe fn supervisor_address(offset: u32, segment: u32) -> Result<i32, ()> {
+    assert!(segment < 6);
+    if !xstate::usable(true) {
+        return Err(());
+    }
+    if *gp::cpl != 0 {
+        cpu::trigger_gp(0);
+        return Err(());
+    }
+    Ok(offset.wrapping_add(cpu::get_seg(segment as i32)? as u32) as i32)
+}
+#[no_mangle]
+pub unsafe fn ir_xsaves(offset: u32, segment: u32) -> u32 {
+    let Ok(addr) = supervisor_address(offset, segment)
+    else {
+        return finish(false);
+    };
+    finish(xstate::xsaves_32(addr))
+}
+#[no_mangle]
+pub unsafe fn ir_xrstors(offset: u32, segment: u32) -> u32 {
+    let Ok(addr) = supervisor_address(offset, segment)
+    else {
+        return finish(false);
+    };
+    finish(xstate::xrstors_32(addr))
+}
 #[no_mangle]
 pub unsafe fn ir_xrstor(offset: u32, segment: u32) -> u32 {
     let Ok(addr) = xstate_address(offset, segment)

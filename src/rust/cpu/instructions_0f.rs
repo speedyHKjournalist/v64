@@ -251,7 +251,7 @@ pub unsafe fn xgetbv_xsetbv(r: i32) -> bool {
         return false;
     }
     if r == 0 {
-        let Some(value) = crate::cpu::xstate::xgetbv(read_reg32(ECX) as u32)
+        let Some(value) = crate::cpu::xstate::xgetbv(read_reg32(ECX) as u32, false)
         else {
             trigger_gp(0);
             return false;
@@ -1476,6 +1476,7 @@ unsafe fn read_model_msr(index: u32) -> Option<u64> {
         0x2FF => *x64_mtrr_def_type,
         0x200..=0x20F => *x64_mtrr_var.add((index - 0x200) as usize),
         0x277 => *x64_pat,
+        0xDA0 => crate::cpu::xstate::read_xss()?,
         0x179 => MCG_CAP,
         0x17A => *x64_mcg_status,
         0x17B => *x64_mcg_ctl,
@@ -1503,6 +1504,10 @@ unsafe fn write_model_msr(index: u32, value: u64) -> Option<Result<(), ()>> {
             .all(|&t| memory_type(t as u64) || t == 7),
         0x17A => value & !7 == 0,
         0x17B => true,
+        // IA32_XSS (with XSAVES): the value stored by write_xss
+        0xDA0 => {
+            return crate::cpu::xstate::write_xss(value).map(|valid| valid.then_some(()).ok_or(()))
+        },
         // IA32_MCi_CTL takes any enable mask; status, address and misc only clear
         _ if bank => index & 3 == 0 || value == 0,
         _ if fixed.is_some() => value.to_le_bytes().iter().all(|&t| memory_type(t as u64)),
@@ -3777,10 +3782,55 @@ pub unsafe fn instr_0FAE_6_reg(_r: i32) {
     // mfence
 }
 #[no_mangle]
-pub unsafe fn instr_0FAE_6_mem(_addr: i32) {
-    // xsaveopt
-    undefined_instruction();
+pub unsafe fn instr_0FAE_6_mem(modrm_byte: i32) {
+    // xsaveopt: XSAVE's checks and their order, with its feature
+    if !crate::cpu::features::has(crate::cpu::features::XSAVEOPT) {
+        trigger_ud();
+        return;
+    }
+    if crate::cpu::xstate::usable(true) {
+        crate::cpu::xstate::xsaveopt_32(return_on_pagefault!(modrm_resolve(modrm_byte)));
+    }
 }
+/// XRSTORS (0F C7 /3), XSAVEC (/4) and XSAVES (/5), whose rows need their
+/// features: no mandatory prefix, then XSAVE's checks and their order, with
+/// #GP(0) for CPL > 0 before the operand for XRSTORS and XSAVES. False if a
+/// fault was delivered.
+unsafe fn compacted_state(modrm_byte: i32, group: i32) -> bool {
+    use crate::prefix::{PREFIX_66, PREFIX_F2, PREFIX_F3};
+    if *prefixes & (PREFIX_66 | PREFIX_F2 | PREFIX_F3) != 0 {
+        trigger_ud();
+        return false;
+    }
+    if !crate::cpu::xstate::usable(true) {
+        return false;
+    }
+    if group != 4 && *cpl != 0 {
+        trigger_gp(0);
+        return false;
+    }
+    let Ok(addr) = modrm_resolve(modrm_byte)
+    else {
+        return false;
+    };
+    match group {
+        3 => crate::cpu::xstate::xrstors_32(addr),
+        4 => crate::cpu::xstate::xsavec_32(addr),
+        _ => crate::cpu::xstate::xsaves_32(addr),
+    }
+}
+#[no_mangle]
+pub unsafe fn instr_0FC7_3_mem(modrm_byte: i32) { compacted_state(modrm_byte, 3); }
+#[no_mangle]
+pub unsafe fn instr_0FC7_3_reg(_r: i32) { trigger_ud(); }
+#[no_mangle]
+pub unsafe fn instr_0FC7_4_mem(modrm_byte: i32) { compacted_state(modrm_byte, 4); }
+#[no_mangle]
+pub unsafe fn instr_0FC7_4_reg(_r: i32) { trigger_ud(); }
+#[no_mangle]
+pub unsafe fn instr_0FC7_5_mem(modrm_byte: i32) { compacted_state(modrm_byte, 5); }
+#[no_mangle]
+pub unsafe fn instr_0FC7_5_reg(_r: i32) { trigger_ud(); }
 #[no_mangle]
 pub unsafe fn instr_0FAE_7_reg(_r: i32) {
     // sfence

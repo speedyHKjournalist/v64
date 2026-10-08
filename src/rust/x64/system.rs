@@ -776,13 +776,13 @@ unsafe fn descriptor_instruction(d: &Decoded) -> Result<(), Fault> {
 }
 
 /// XGETBV and XSETBV (cpu::xstate): #UD without CR4.OSXSAVE, then #GP(0)
-unsafe fn xgetbv_xsetbv(set: bool) -> Result<(), Fault> {
+unsafe fn xgetbv_xsetbv(set: bool, long: bool) -> Result<(), Fault> {
     if !xstate::enabled() {
         return Err(Fault::ud());
     }
     let index = state::read_gpr(1) as u32;
     if !set {
-        let value = xstate::xgetbv(index).ok_or(Fault::gp())?;
+        let value = xstate::xgetbv(index, long).ok_or(Fault::gp())?;
         state::write_gpr(0, value & 0xFFFF_FFFF, 32);
         state::write_gpr(2, value >> 32, 32);
         return Ok(());
@@ -797,7 +797,7 @@ unsafe fn table_instruction(d: &Decoded) -> Result<(), Fault> {
     let modrm = d.modrm.ok_or(Fault::ud())?;
     // XGETBV, XSETBV: without a mandatory prefix
     if matches!(modrm, 0xD0 | 0xD1) && !d.prefixes.operand && d.prefixes.rep.is_none() {
-        return xgetbv_xsetbv(modrm == 0xD1);
+        return xgetbv_xsetbv(modrm == 0xD1, d.mode.is_long());
     }
     // Register forms outside SMSW/LMSW/SWAPGS/RDTSCP belong to extensions
     // this profile lacks (VMX, SVM, MONITOR, SMAP, ...): #UD before any
