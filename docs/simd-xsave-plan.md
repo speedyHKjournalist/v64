@@ -862,23 +862,37 @@ log 1.64、sin 2.06、pow 1.92），因为 FMA 在软件中精确计算，即使
 融合时走现有的精确路径），但 9.3 节目前禁止使用它，需要重新决定。测量中还发现 x64 解释器的 REP MOVS/STOS
 跨页时逐元素复制，开放 AVX 后 glibc 的 memcpy、memset 更常走到那里，已一并修正（14 节 P12 第一部分发现四）。
 
-- [ ] 机器可读 forms 清单完整，所有目标形式具有实现和独立测试归属，无未解释缺口。
-- [ ] SSSE3 MMX/XMM、SSE4.1/4.2、AVX/AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE 的
-  全部合法编码、模式和操作数形式完成。
-- [ ] x64 配置通过 x86-64-v3 检测：glibc 报告 x86-64-v3 受支持，要求 v3 的用户态正常运行。
-- [ ] 能力关闭时（包括 32 位配置中的 LZCNT），TZCNT/LZCNT 按 BSF/BSR 执行，与开放时的行为分别通过测试。
-- [ ] 基础 XSAVE 及计划内家族扩展逐项完成；未实现的其他状态组件不被公布。
-- [ ] CR0/CR4/XCR0/CPUID 的能力检查和故障顺序在各引擎一致，并符合独立规范测试。
-- [ ] FP 舍入、NaN、MXCSR 和未屏蔽异常正确，近似指令按误差要求验收。
-- [ ] 普通访存、mask fault suppression、gather 部分完成/重启与 xstate 故障分别通过。
-- [ ] 32 位解释器/Tier-0/regions、64 位解释器/page tier 及无 simd128 构建通过。
-- [ ] 新旧快照、reset/INIT/SIPI、每核状态和 parallel Worker 生命周期通过。
-- [ ] Linux、Windows x64/WOW64 的实际 SIMD 上下文切换探针通过。
-- [ ] 强制前缀和未列出前缀的规则在三个解码器中一致，兼容模式双引擎差分无分歧。
-- [ ] SMI/RSM、`cpuid_level` 降级和所有 CR0/CR4/XCR0 写入方的 JIT 门控测试通过。
-- [ ] 热点形式在编译路径上有原生模板，新旧 profile 下的性能预算都达标。
-- [ ] 11.1 节的 QEMU 偏差逐条登记，并由硬件或 SDM 模型判定。
-- [ ] CPU contract、公开配置与文档一致，既有客体回归和性能预算达标。
+（P12 结束时的状态，依据见 14 节各阶段的记录。）
+
+- [x] 机器可读 forms 清单完整，所有目标形式具有实现和独立测试归属，无未解释缺口。
+  （814 个形式全部实现，`isa-forms-check`、`ir-coverage-tests` 检查；P11 后每个 VEX 行都有语义。）
+- [x] SSSE3 MMX/XMM、SSE4.1/4.2、AVX/AVX2、FMA、F16C、BMI1、BMI2、LZCNT、MOVBE 的
+  全部合法编码、模式和操作数形式完成。（P3–P11。）
+- [x] x64 配置通过 x86-64-v3 检测：glibc 报告 x86-64-v3 受支持，要求 v3 的用户态正常运行。
+  （P12：glibc 2.39 的 ld.so 报告 v3 受支持并装入 `glibc-hwcaps/x86-64-v3` 下以 `-march=x86-64-v3` 构建的库；
+  glibc 的 v3 代码路径与 QEMU 结果相同。没有运行整套要求 v3 的发行版。）
+- [x] 能力关闭时（包括 32 位配置中的 LZCNT），TZCNT/LZCNT 按 BSF/BSR 执行，与开放时的行为分别通过测试。（P10。）
+- [x] 基础 XSAVE 及计划内家族扩展逐项完成；未实现的其他状态组件不被公布。（P2、P9；CPU contract。）
+- [x] CR0/CR4/XCR0/CPUID 的能力检查和故障顺序在各引擎一致，并符合独立规范测试。（P1–P11。）
+- [x] FP 舍入、NaN、MXCSR 和未屏蔽异常正确，近似指令按误差要求验收。（P4a–P11；P12 的 FMA 快路径另有主机
+  硬件 FMA 的对拍。）
+- [x] 普通访存、mask fault suppression、gather 部分完成/重启与 xstate 故障分别通过。（P2、P5、P6、P8、P9。）
+- [x] 32 位解释器/Tier-0/regions、64 位解释器/page tier 及无 simd128 构建通过。（`avx-tests` 也在
+  `v86-fallback.wasm` 上运行；P12 中 BMI、FMA 的模型测试同样在其上通过。）
+- [x] 新旧快照、reset/INIT/SIPI、每核状态和 parallel Worker 生命周期通过。（P2 的 `xstate_lifecycle`；P12：
+  Linux 探针运行中保存恢复、双核与 vCPU worker 的真实客体，Windows 探针 AVX 部分中的快照。）
+- [x] Linux、Windows x64/WOW64 的实际 SIMD 上下文切换探针通过。（P12。）
+- [x] 强制前缀和未列出前缀的规则在三个解码器中一致，兼容模式双引擎差分无分歧。（P1；`x64-differential-tests`。）
+- [x] SMI/RSM、`cpuid_level` 降级和所有 CR0/CR4/XCR0 写入方的 JIT 门控测试通过。（P2、P5；`cpu_features.mjs`。）
+- [ ] 热点形式在编译路径上有原生模板，新旧 profile 下的性能预算都达标。（模板齐全，包括 P12 补上的内核
+  SHA-2 形式；旧 profile 不受影响，新 profile 的启动与字符串函数达标，但 libm 的 FMA 版本慢 1.3–2.1 倍，见 12.2
+  节，未达标。）
+- [x] 11.1 节的 QEMU 偏差逐条登记，并由硬件或 SDM 模型判定。
+- [x] CPU contract、公开配置与文档一致，既有客体回归和性能预算达标。（旧 profile 的基准与客体回归不变；新
+  profile 的 libm 见上一项。）
+
+P12 之后，除新 profile 下 libm 的性能预算外各项均已满足，所以本项目还不标为“完整实现”：
+功能与正确性完整，FMA 的性能需要 12.2 节所述的决定。
 
 达到以上条件才能将本项目标为“完整实现”；仅完成到某一阶段时，按已验收的 ISA 和
 XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指令占位称为全部完成。
@@ -2670,3 +2684,27 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   已有客体和快照看到的 CPU 因此不变。依据是 12.2 节在新旧 profile 下的测量（P12 第一部分）：x86-64-v3 下
   启动与 x86-64-v2 相同，glibc 的字符串函数持平或更快，但 libm 选用 `_fma` 版本后 exp、log、sin、pow
   比 SSE2 版本慢 1.3–2.1 倍（FMA 在软件中精确计算），libm 密集的负载开放能力后会变慢。
+
+### P12 第二部分：Windows 8.1 x64 真实客体验收（2026-10-08）
+
+- **范围**：11.3 节的 Windows 部分：64 位与 WOW64 的 AVX 程序，线程与异常上下文中的 YMM 状态，多核，以及快照
+  恢复。用用户的 Windows 8.1 Pro x64 映像（只读打开，客体的写入留在内存中）。
+- **方法**：
+  - `tests/x64/windows_probe.c`（64 位与 WOW64 两个构建，不用 CRT）增加 AVX 部分：CPUID 报告 OSXSAVE 与 AVX
+    且 XGETBV(0) 含 SSE 与 AVX 状态时，2 倍于处理器数的线程在全部 YMM 寄存器（64 位 16 个，WOW64 8 个）放入
+    指纹，每轮依次：直接存回；迁移到另一个处理器后自旋（期间被其他线程抢占）；执行 UD2，由向量化异常处理函数
+    跳过后自旋。全部在一条 asm 语句中完成，之后逐字节比较。64 位探针还在一个线程带着指纹自旋时挂起它，用
+    `GetThreadContext`（`CONTEXT_XSTATE`，`InitializeContext`/`SetXStateFeaturesMask`/`LocateXStateFeature`，
+    运行时取得）读出它的 XMM 与 YMM 高半并比较。有 AVX2、FMA 时，ymm 上的 VPADDD、VPMULLD、VFMADD231PD 与标量
+    结果比较（操作数位数少，结果精确）。结果多一行 `X64_WIN_AVX`。
+  - `tests/x64/windows_boot.mjs`：`WIN_CPU_FEATURES` 给出 `cpu_features`（`cpu_type: "x86_64"`）；
+    `WIN_PROBE_SNAPSHOT=1` 在每个探针的 AVX 部分开始后保存并就地恢复整机一次。没有 AVX 能力时探针必须报告
+    `avx=0`。
+- **结果**（page tier，release 构建，x86-64-v3 加 XSAVE 家族时探针线程数为 2N，每个线程 8 轮 × 3 步）：
+  - x86-64-v3 加 XSAVE 家族，2 核，AVX 部分开始后各做一次快照保存与恢复（每次约 1.6 GB）：64 位探针 96 步、
+    32 次异常、`GetThreadContext` 读出的 XMM 与 YMM 高半正确，WOW64 探针 96 步、32 次异常，YMM 无一改变，
+    ymm 上的 AVX2、FMA 运算正确；原有的拓扑、绑核与 4 GiB 以上分配检查照常通过。
+  - 同样能力，1 核：两个探针各 48 步、16 次异常，结果同上。
+  - 不开放能力，2 核：两个探针报告 `avx=0`，其余检查通过。
+  - 在最终构建（含第一部分发现三、发现四的修正，后者改变了 Windows 内核大量使用的 REP MOVS/STOS 路径）上重跑
+    第一种配置：桌面在 260 s 出现，两个探针各 96 步、32 次异常，结果同上；映像文件的大小与修改时间不变。

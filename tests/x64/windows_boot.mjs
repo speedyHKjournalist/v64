@@ -38,6 +38,10 @@
 // (WIN_LAUNCHER_ADMIN=1: elevated, through UAC once, so they are too).
 // WIN_NO_PROBE=1: no qualification probe (its Run dialog takes the focus from
 // full-screen programs), and no signing in again unless a password box shows.
+// WIN_CPU_FEATURES=<features>: cpu_features (cpu_type x86_64), e.g. the
+// x86-64-v3 set; the probes then check the YMM state (X64_WIN_AVX, see
+// windows_probe.c); WIN_PROBE_SNAPSHOT=1: the machine saved and restored in
+// place once each probe's AVX part has started.
 // "savestate <file>": the machine saved to <file>.state, with what the guest
 // wrote to its disks (<file>.hda.ovl, <file>.hdb.ovl) and the harness's own
 // (<file>.json); WIN_STATE_LOAD=<file> starts from there instead of booting
@@ -156,6 +160,7 @@ const vm = new V86({
     // the browser does by default
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: !+process.env.WIN_ASYNC_PUBLICATION,
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
+    ...(process.env.WIN_CPU_FEATURES ? {cpu_type: "x86_64", cpu_features: process.env.WIN_CPU_FEATURES.split(",")} : {}),
     // WIN_PARALLEL=1: the application processors run in vCPU workers
     // (WIN_PARALLEL_WASM: another build of it)
     ...(+process.env.WIN_PARALLEL ? {parallel: true, wasm_path: process.env.WIN_PARALLEL_WASM || root + "build/v86-parallel.wasm"} : {}),
@@ -635,6 +640,7 @@ function host_window()
     host_last = sample;
 }
 const port_counts = new Map();
+const snapshots_taken = [];
 const result_text = name => { const bytes = read_fat16(tools.bytes, name); return bytes ? Buffer.from(bytes).toString("ascii") : ""; };
 
 try
@@ -1079,11 +1085,25 @@ try
         for(const arch of [64, 32])
         {
             const text = result_text(`RESULT${arch}.TXT`);
+            // WIN_PROBE_SNAPSHOT: once the AVX part runs (threads with their
+            // YMM fingerprints), save and restore the machine in place
+            if(+process.env.WIN_PROBE_SNAPSHOT && text.includes(`X64_WIN_AVX_START arch=${arch}`) && !snapshots_taken.includes(arch))
+            {
+                snapshots_taken.push(arch);
+                await vm.stop();
+                const state = await vm.save_state();
+                await vm.restore_state(state);
+                vm.run();
+                event("probe-snapshot", {arch, bytes: state.byteLength});
+            }
             const match = text.match(/X64_WIN_DONE arch=(\d+) processors=(\d+) packages=(\d+) cores=(\d+) smt_cores=(\d+) progress=(\d+) failures=(\d+) apic_ids=(\w+) high_block=(\w+) checks=([\d,]+)\r?\n/);
             if(match && !report.results[arch])
             {
+                const avx = text.match(/X64_WIN_AVX arch=\d+ avx=(\d)(?: avx2=(\d) fma=(\d) threads=(\d+) steps=(\d+) faults=(\d+) xstate=(\d+) compute_bad=(\d+) bad=(\d+))?/);
                 report.results[arch] = {processors: +match[2], packages: +match[3], cores: +match[4], smt_cores: +match[5],
-                    progress: +match[6], failures: +match[7], apic_ids: match[8], high_block: match[9], text};
+                    progress: +match[6], failures: +match[7], apic_ids: match[8], high_block: match[9],
+                    avx: avx && (avx[2] === undefined ? {avx: 0} : {avx: 1, avx2: +avx[2], fma: +avx[3], threads: +avx[4], steps: +avx[5],
+                        faults: +avx[6], xstate: +avx[7], compute_bad: +avx[8], bad: +avx[9]}), text};
                 event("probe", {arch, result: report.results[arch]});
                 probe_sent = performance.now() + 2000;
             }
@@ -1174,6 +1194,17 @@ try
         assert.equal(r.packages, 1); assert.equal(r.cores, cores); assert.equal(r.smt_cores, 0);
         assert.equal(r.progress, cores * 64);
         if(arch === 64) assert.ok(BigInt("0x" + r.high_block) >> 32n > 0n, "x64 top-down allocation above 4 GiB");
+        // the YMM state (docs/simd-xsave-plan.md 11.3): 8 rounds of 3 steps
+        // (one migrates, one faults) on 2N threads; x64 GetThreadContext
+        const features = (process.env.WIN_CPU_FEATURES || "").split(",");
+        assert.ok(r.avx, `probe ${arch}: AVX line`);
+        if(features.includes("AVX"))
+        {
+            assert.deepEqual(r.avx, {avx: 1, avx2: +features.includes("AVX2"), fma: +features.includes("FMA"), threads: 2 * cores,
+                steps: 48 * cores, faults: 16 * cores, xstate: arch === 64 ? 1 : 0, compute_bad: 0, bad: 0}, `probe ${arch}: YMM state`);
+            if(+process.env.WIN_PROBE_SNAPSHOT) assert.ok(snapshots_taken.includes(arch), `probe ${arch}: snapshot during the AVX part`);
+        }
+        else assert.equal(r.avx.avx, 0, `probe ${arch}: no AVX without the feature`);
     }
     if(process.env.WIN_STOP_AT_DESKTOP) assert.ok(report.desktop_s, "desktop reached");
     if(process.env.WIN_IDLE) assert.ok(report.cpuload, "CPULOAD.EXE completed");
