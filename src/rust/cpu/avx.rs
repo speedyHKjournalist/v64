@@ -39,6 +39,16 @@ pub struct Instruction {
     /// 64-bit mode: XMM8-XMM15, and the 64-bit general-purpose operands of
     /// the VEX.W1 forms
     pub long: bool,
+    /// A gather's VSIB memory operand (whose address is then that of its
+    /// base and displacement)
+    pub vsib: Option<Vsib>,
+}
+/// A VSIB memory operand's indices: their vector register and the scale
+/// (log2)
+#[derive(Clone, Copy, Debug)]
+pub struct Vsib {
+    pub index: u8,
+    pub scale: u8,
 }
 
 /// An exception the executor raises
@@ -93,6 +103,10 @@ pub trait Machine {
         value: (u128, u128),
         selected: u8,
     ) -> Result<(), Self::Fault>;
+    /// A gather's element: `bytes` (4, 8) at the memory operand's address
+    /// plus `offset` (the element's sign-extended, scaled index), with the
+    /// address size's wraparound
+    unsafe fn gather(&mut self, offset: u64, bytes: u8) -> Result<u64, Self::Fault>;
     unsafe fn gpr(&mut self, r: u8) -> u64;
     /// The low 32 bits of `value` (zero-extended in 64-bit mode), or all 64
     /// with `wide`
@@ -262,6 +276,58 @@ fn permute256(v: (u128, u128), size: u32, index: impl Fn(u32) -> u32) -> (u128, 
         r[(at / 128) as usize] |= (lane256(v, size * index(n), size) as u128) << (at % 128);
     }
     (r[0], r[1])
+}
+/// VPGATHERDD/DQ/QD/QQ, VGATHERDPS/DPD/QPS/QPD (90 to 93; VEX.W1: quadword
+/// data; 91 and 93: quadword indices). As the SDM's operation: the mask
+/// (VEX.vvvv) first, each element all ones or zero by its sign and zero
+/// beyond the elements; then each element in turn, loaded into the
+/// destination if selected, its mask cleared (a fault leaves the elements
+/// before it done, so the instruction restarts with the rest); last, the
+/// destination zero beyond the elements
+unsafe fn gather<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fault> {
+    let vsib = i.vsib.unwrap();
+    let data = if i.w { 8 } else { 4 };
+    let index_size = if i.key & 1 != 0 { 8 } else { 4 };
+    let count = if i.l { 32 } else { 16 } / data.max(index_size);
+    let bytes = |v: (u128, u128)| {
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(&v.0.to_le_bytes());
+        b[16..].copy_from_slice(&v.1.to_le_bytes());
+        b
+    };
+    let halves = |b: &[u8; 32]| {
+        (
+            u128::from_le_bytes(b[..16].try_into().unwrap()),
+            u128::from_le_bytes(b[16..].try_into().unwrap()),
+        )
+    };
+    let (mut mask, mut destination, index) = (
+        bytes(ymm(i.vvvv)),
+        bytes(ymm(i.reg)),
+        bytes(ymm(vsib.index)),
+    );
+    for n in 0..count {
+        let sign = mask[(n + 1) * data - 1] >> 7;
+        mask[n * data..(n + 1) * data].fill(if sign != 0 { 0xFF } else { 0 });
+    }
+    mask[count * data..].fill(0);
+    set_ymm(i.vvvv, halves(&mask));
+    for n in 0..count {
+        if mask[n * data] != 0 {
+            let mut raw = [0u8; 8];
+            raw[..index_size].copy_from_slice(&index[n * index_size..(n + 1) * index_size]);
+            let raw = u64::from_le_bytes(raw);
+            let element = if index_size == 4 { raw as u32 as i32 as i64 as u64 } else { raw };
+            let value = m.gather(element.wrapping_shl(vsib.scale as u32), data as u8)?;
+            destination[n * data..(n + 1) * data].copy_from_slice(&value.to_le_bytes()[..data]);
+            set_ymm(i.reg, halves(&destination));
+        }
+        mask[n * data..(n + 1) * data].fill(0);
+        set_ymm(i.vvvv, halves(&mask));
+    }
+    destination[count * data..].fill(0);
+    set_ymm(i.reg, halves(&destination));
+    Ok(())
 }
 fn packed(op: PackedOp, a: u128, b: u128) -> u128 {
     u128::from_le_bytes(op.apply(a.to_le_bytes(), b.to_le_bytes()))
@@ -486,6 +552,8 @@ pub unsafe fn execute<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::F
             let v = element(m, i, size)?;
             set_xmm(i.reg, splat(v, size));
         },
+        // VPGATHERDD/DQ/QD/QQ, VGATHERDPS/DPD/QPS/QPD (AVX2, P8)
+        (2, 1, 0x90..=0x93) => gather(m, i)?,
         // VPSRLVD/Q, VPSRAVD, VPSLLVD/Q (AVX2; VEX.W1: quadwords): each
         // element by the count in the same element of the second source
         (2, 1, 0x45..=0x47) => {
@@ -1130,6 +1198,8 @@ unsafe fn execute256<M: Machine>(m: &mut M, i: &Instruction) -> Result<(), M::Fa
             let f = |a: u128, b| bytes(|b| simd_int::palignr(a.to_le_bytes(), b, i.imm8), b);
             set_ymm(i.reg, (f(a.0, b.0), f(a.1, b.1)));
         },
+        // VPGATHERDD/DQ/QD/QQ, VGATHERDPS/DPD/QPS/QPD (AVX2, P8)
+        (2, 1, 0x90..=0x93) => gather(m, i)?,
         // AVX2 (P7 part 2): VPERMD, VPERMPS: the dwords of the second source
         // at the indices in the first's (bits 2:0 of each)
         (2, 1, 0x16 | 0x36) => {
@@ -1190,6 +1260,15 @@ pub struct Interpreter {
 }
 impl Machine for Interpreter {
     type Fault = ();
+    /// (32-bit addressing: the offset wraps at 32 bits, so does the linear
+    /// address with the segment's base)
+    unsafe fn gather(&mut self, offset: u64, bytes: u8) -> Result<u64, ()> {
+        let a = self.address.wrapping_add(offset as i32);
+        Ok(match bytes {
+            4 => cpu::safe_read32s(a)? as u32 as u64,
+            _ => cpu::safe_read64s(a)?,
+        })
+    }
     unsafe fn raise(&mut self, e: Exception) {
         match e {
             Exception::InvalidOpcode => cpu::trigger_ud(),

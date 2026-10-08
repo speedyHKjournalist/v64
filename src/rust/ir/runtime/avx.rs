@@ -52,6 +52,7 @@ pub unsafe fn ir_avx_fp_reg_continue(
         w: false,
         imm8: immediate as u8,
         long: false,
+        vsib: None,
     };
     match crate::cpu::avx::execute(
         &mut crate::cpu::avx::Interpreter { address: 0 },
@@ -93,6 +94,10 @@ pub unsafe fn ir_avx_continue(key: u32, operands: u32, offset: u32, segment: u32
         w: operands >> 13 & 1 != 0,
         imm8: (operands >> 16) as u8,
         long: false,
+        vsib: (operands >> 29 & 1 != 0).then(|| avx::Vsib {
+            index: (operands >> 24 & 7) as u8,
+            scale: (operands >> 27 & 3) as u8,
+        }),
     };
     if avx::execute(&mut machine, &i).is_err() {
         return Outcome::ControlTransferred as u32;

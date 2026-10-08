@@ -126,7 +126,8 @@ fn avx_forms_in_a_cfg() {
 /// ECX and XMM0 written by VPCMPxSTRx; floating point with MXCSR) in 16-
 /// and 32-bit code, alone, after PADDD XMM2, XMM3 (an
 /// XMM value the region holds) or INC ESI, INC EAX (general-purpose ones),
-/// then PADDD XMM7 with the destination (the helper's result reloaded)
+/// then PADDD XMM7 with the destination (the helper's result reloaded); the
+/// gathers with a VSIB operand
 #[test]
 fn avx_fixtures() {
     use crate::cpu::features::{AVX, AVX2, SSE4_1, SSE4_2, SSSE3, TEST_FEATURES, XSAVE};
@@ -232,8 +233,22 @@ fn avx_fixtures() {
         (&[0xC4, 0xE2, 0x6D, 0x8C], 6, None, 6, &[]),        // vpmaskmovd ymm6, ymm2, [m]
         (&[0xC4, 0xE2, 0xE9, 0x8E], 7, None, 1, &[]),        // vpmaskmovq [m], xmm2, xmm7
     ];
+    // (P8: the gathers, ModRM.reg, the indices' register and scale (log2),
+    // the indices' size; a VSIB operand without a base, disp32 0x6000)
+    let gathers: &[(&[u8], u8, u8, u8, u8)] = &[
+        (&[0xC4, 0xE2, 0x69, 0x90], 1, 3, 2, 4), // vpgatherdd xmm1, [xmm3*4 + m], xmm2
+        (&[0xC4, 0xE2, 0xCD, 0x91], 4, 5, 3, 8), // vpgatherqq ymm4, [ymm5*8 + m], ymm6
+        (&[0xC4, 0xE2, 0xF5, 0x92], 0, 7, 0, 4), // vgatherdpd ymm0, [xmm7*1 + m], ymm1
+        (&[0xC4, 0xE2, 0x65, 0x93], 2, 6, 1, 8), // vgatherqps xmm2, [ymm6*2 + m], xmm3
+    ];
+    let forms = forms
+        .iter()
+        .map(|&(head, reg, rm, destination, imm8)| (head, reg, rm, destination, imm8, None))
+        .chain(gathers.iter().map(|&(head, reg, index, scale, size)| {
+            (head, reg, None, reg, &[][..], Some((index, scale, size)))
+        }));
     let mut cases = Vec::new();
-    for (form, &(head, reg, rm, destination, imm8)) in forms.iter().enumerate() {
+    for (form, (head, reg, rm, destination, imm8, vsib)) in forms.enumerate() {
         for mode in [false, true] {
             for prefix in 0..3 {
                 let mut bytes = vec![];
@@ -246,16 +261,24 @@ fn avx_fixtures() {
                     },
                     _ => count -= 1,
                 }
+                // (gathers have no 16-bit addressing)
+                if vsib.is_some() && !mode {
+                    bytes.push(0x67);
+                }
                 bytes.extend_from_slice(head);
                 let memory = rm.is_none();
                 if head[head.len() - 1] != 0x77 {
-                    match rm {
-                        Some(r) => bytes.push(0xC0 | reg << 3 | r),
-                        None if mode => {
+                    match (rm, vsib) {
+                        (Some(r), _) => bytes.push(0xC0 | reg << 3 | r),
+                        (None, Some((index, scale, _))) => {
+                            bytes.extend([reg << 3 | 4, scale << 6 | index << 3 | 5]);
+                            bytes.extend(0x6000u32.to_le_bytes());
+                        },
+                        (None, None) if mode => {
                             bytes.push(reg << 3 | 5);
                             bytes.extend(0x6000u32.to_le_bytes());
                         },
-                        None => {
+                        (None, None) => {
                             bytes.push(reg << 3 | 6);
                             bytes.extend(0x6000u16.to_le_bytes());
                         },
@@ -290,7 +313,15 @@ fn avx_fixtures() {
                     )
                     .unwrap();
                 }
-                cases.push(format!("[{bytes:?},{mode},{count},{memory},{form}]"));
+                // (a gather's indices: their register and size; its mask
+                // register, data size, scale and element count)
+                let vsib = vsib.map_or("null".into(), |(index, scale, size)| {
+                    let (mask, data) =
+                        (!head[2] >> 3 & 15, if head[2] & 0x80 != 0 { 8 } else { 4 });
+                    let count = if head[2] & 4 != 0 { 32 } else { 16 } / size.max(data);
+                    format!("[{index},{size},{mask},{data},{scale},{count}]")
+                });
+                cases.push(format!("[{bytes:?},{mode},{count},{memory},{form},{vsib}]"));
             }
         }
     }

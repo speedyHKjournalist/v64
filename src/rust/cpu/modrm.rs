@@ -81,6 +81,27 @@ pub unsafe fn resolve_offset(modrm: i32) -> OrPageFault<(i32, i32)> {
         form.segment as i32,
     ))
 }
+/// A VSIB memory operand (the gathers; 32-bit addressing: 16-bit is #UD):
+/// the offset of its base and displacement, its segment, and its SIB
+/// byte's index field (a vector register) and scale (log2)
+pub unsafe fn resolve_offset_vsib(modrm: i32) -> OrPageFault<(i32, i32, u8, u8)> {
+    let sib = read_imm8()? as u8;
+    // (the base and displacement of the same SIB without an index)
+    let form = crate::decode_rules::address_form(modrm as u8, 32, Some(sib & !0x38 | 0x20));
+    let base = form.base.map_or(0, |r| read_reg32(r as i32));
+    let displacement = match form.displacement_bytes {
+        0 => 0,
+        1 => read_imm8s()?,
+        4 => read_imm32s()?,
+        _ => unreachable!(),
+    };
+    Ok((
+        base.wrapping_add(displacement),
+        form.segment as i32,
+        sib >> 3 & 7,
+        sib >> 6,
+    ))
+}
 pub unsafe fn resolve_modrm16(m: i32) -> OrPageFault<i32> { resolve(m, 16) }
 pub unsafe fn resolve_modrm32(m: i32) -> OrPageFault<i32> { resolve(m, 32) }
 pub unsafe fn resolve_modrm32_(m: i32) -> OrPageFault<i32> { resolve(m, 32) }

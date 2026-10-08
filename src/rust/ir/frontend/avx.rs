@@ -102,6 +102,10 @@ pub fn operands(i: &DecodedInstruction) -> u32 {
         | ((v.l && i.encoding.vex & vex::L1 != 0) as u32) << 12
         | (v.w as u32) << 13
         | (i.immediate.unwrap_or(0) & 255) << 16
+        // (a gather's VSIB indices: their vector register and scale)
+        | i.ea
+            .filter(|_| i.encoding.vex & vex::VSIB != 0)
+            .map_or(0, |ea| 1 << 29 | (ea.index.unwrap() as u32) << 24 | (ea.scale as u32) << 27)
 }
 /// ir_avx_fp_reg_continue's VEX forms: between XMM registers, of the legacy
 /// keys whose helper reloads only its destination
@@ -224,6 +228,14 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let key = b.constant(i.encoding.opcode, Type::I32);
     let operands = b.constant(operands(i), Type::I32);
     let (offset, segment) = if let Some(ea) = i.ea {
+        // (a VSIB operand: its base and displacement, the helper adding each
+        // element's index)
+        let ea = if i.encoding.vex & vex::VSIB != 0 {
+            super::decode::EffectiveAddress { index: None, ..ea }
+        }
+        else {
+            ea
+        };
         (
             effective_offset(b, &ea),
             b.constant(ea.segment as u32, Type::I32),

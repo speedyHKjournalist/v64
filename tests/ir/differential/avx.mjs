@@ -8,7 +8,9 @@
 // across into an absent page, #GP for a null segment, a misaligned
 // VMOVAPS/VMOVNTDQA operand or VLDMXCSR's reserved bits; real and
 // virtual-8086 mode, where C4 and C5 are LES and LDS (#UD with a register
-// operand).
+// operand). The gathers' small indices put elements on either side of the
+// page end: each element's MMIO read once, the progress before a fault kept
+// (P8).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
@@ -110,6 +112,11 @@ for(const release of [false,true]){
             cpu.reg_xmm32s.set(s.xmm);
             ymm.fill(0);
             ymm.set(s.ymm);
+            if(cases[i][5]) {
+                const index=cases[i][5][0], lanes=gather_indices(i,s);
+                cpu.reg_xmm32s.set(lanes.slice(0,4),index*4);
+                ymm.set(lanes.slice(4),index*4);
+            }
             cpu.mxcsr[0]=mxcsr;
             cpu.instruction_pointer[0]=PC;
             cpu.in_hlt[0]=0;
@@ -147,6 +154,35 @@ for(const release of [false,true]){
             e.full_clear_tlb();
         }
 
+        // The elements a gather selects (cases[i][5]: indices' register and
+        // size, mask register, data size, scale, count) with sample `s`
+        function gather_selected(i,s){
+            const [,,mask,data,,count]=cases[i][5];
+            const dwords=[...s.xmm.slice(mask*4,mask*4+4),...s.ymm.slice(mask*4,mask*4+4)];
+            return Array.from({length:count},(_,n)=>n).filter(n=>dwords[(n+1)*data/4-1]>>>31);
+        }
+        // Its indices (dwords): 0 to 11, a quadword's high half random; the
+        // first two selected elements alias
+        function gather_indices(i,s){
+            const size=cases[i][5][1], selected=gather_selected(i,s);
+            const lanes=s.xmm.slice(0,8).map((x,k)=>size===8&&k&1?x:(x>>>0)%12);
+            if(selected.length>1) lanes[selected[1]*size/4]=lanes[selected[0]*size/4];
+            return lanes;
+        }
+        // The MMIO reads of a gather (cases[i][5]: indices' register and
+        // size, mask register, data size, scale, count) at DS's base `delta`,
+        // pages 6 and 7 MMIO: each selected element's once, in element order
+        // (a quadword as two dwords, the low first)
+        function gather_reads(i,s,delta){
+            const [,size,,data,scale]=cases[i][5], lanes=gather_indices(i,s);
+            const reads=[];
+            for(const n of gather_selected(i,s)){
+                const linear=delta+DATA+(lanes[n*size/4]<<scale)>>>0;
+                for(let k=0;k<data;k+=4) reads.push(["read32",0xA0000+linear-DATA+k]);
+            }
+            return reads;
+        }
+
         // (the case's remaining instructions, one step each, until one faults)
         function interpreter(i){
             while(true){
@@ -181,7 +217,11 @@ for(const release of [false,true]){
             if(completed.ip!==end) assert.equal(completed.ip,GP,`AVX case ${i}: completes or #GP`);
             if(memory) {
                 for(const mmio of [false,true]) {
-                    compare(i,()=>reset(i,{mmio,delta:0xFF0,sample:2}),"MMIO/page end"); comparisons++;
+                    const result=compare(i,()=>reset(i,{mmio,delta:0xFF0,sample:2}),"MMIO/page end"); comparisons++;
+                    // (aligned elements: scale 4 or 8)
+                    if(mmio&&cases[i][5]&&cases[i][5][4]>=2) {
+                        assert.deepEqual(result.events.map(([kind,a])=>[kind,a]),gather_reads(i,SAMPLES[2],0xFF0),`AVX case ${i}: a gather's MMIO reads`);
+                    }
                 }
                 compare(i,()=>reset(i,{delta:0xFF8,pageFault:true}),"across into an absent page"); comparisons++;
                 assert.equal(compare(i,()=>reset(i,{nullSegment:true}),"null segment").ip,GP); comparisons++;

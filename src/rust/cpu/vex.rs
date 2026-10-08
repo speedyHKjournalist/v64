@@ -6,7 +6,7 @@
 use crate::cpu::avx;
 use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
-use crate::cpu::modrm::resolve_offset;
+use crate::cpu::modrm::{resolve_offset, resolve_offset_vsib};
 use crate::decode::ImmediateKind;
 use crate::decode_rules::{vex_prefixes_ud, vex_row, vex_valid, Vex};
 
@@ -46,7 +46,20 @@ pub unsafe fn run(first: u8, byte1: u8) {
     // The instruction's remaining bytes, then the AVX state (#UD, #NM), then
     // the operand's segment (SDM vol. 3, 6.9: the faults of fetching and
     // decoding an instruction come before those of executing it)
+    let mut vsib = None;
     let memory = match modrm {
+        Some(m) if m < 0xC0 && row.vex & crate::decode_rules::vex::VSIB != 0 => {
+            let (offset, segment, index, scale) =
+                return_on_pagefault!(resolve_offset_vsib(m as i32));
+            // (a gather's destination, indices and mask in three registers)
+            let reg = m >> 3 & 7;
+            if reg == index || v.vvvv == index || reg == v.vvvv {
+                trigger_ud();
+                return;
+            }
+            vsib = Some(avx::Vsib { index, scale });
+            Some((offset, segment))
+        },
         Some(m) if m < 0xC0 => Some(return_on_pagefault!(resolve_offset(m as i32))),
         _ => None,
     };
@@ -80,6 +93,7 @@ pub unsafe fn run(first: u8, byte1: u8) {
         w: v.w,
         imm8,
         long: false,
+        vsib,
     };
     let _ = avx::execute(&mut machine, &i);
 }

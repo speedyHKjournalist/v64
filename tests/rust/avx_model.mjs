@@ -60,6 +60,10 @@ const SSSE3 = { 0x00: "vpshufb", 0x01: "vphaddw", 0x02: "vphaddd", 0x03: "vphadd
 const SSE4 = { 0x28: "vpmuldq", 0x29: "vpcmpeqq", 0x2B: "vpackusdw", 0x37: "vpcmpgtq", 0x38: "vpminsb", 0x39: "vpminsd",
     0x3A: "vpminuw", 0x3B: "vpminud", 0x3C: "vpmaxsb", 0x3D: "vpmaxsd", 0x3E: "vpmaxuw", 0x3F: "vpmaxud", 0x40: "vpmulld" };
 const EXTEND = ["bw", "bd", "bq", "wd", "wq", "dq"];
+// The gathers (AVX2, P8): opcode, VEX.W, name, element and index sizes
+const GATHERS = [[0x90, 0, "vpgatherdd", 4, 4], [0x90, 1, "vpgatherdq", 8, 4], [0x91, 0, "vpgatherqd", 4, 8],
+    [0x91, 1, "vpgatherqq", 8, 8], [0x92, 0, "vgatherdps", 4, 4], [0x92, 1, "vgatherdpd", 8, 4], [0x93, 0, "vgatherqps", 4, 8],
+    [0x93, 1, "vgatherqpd", 8, 8]];
 // VPBROADCASTB/W/D/Q (AVX2): opcode, element size
 const BROADCASTS = [[0x78, 1, "vpbroadcastb"], [0x79, 2, "vpbroadcastw"], [0x58, 4, "vpbroadcastd"], [0x59, 8, "vpbroadcastq"]];
 
@@ -241,6 +245,8 @@ const FORMS_128 = [
         ({ name, map: 2, pp: 1, op, kind: "binary", w, isa: "AVX2", f: (a, b) => variable_shift(op, w ? 64 : 32, a, b) })),
     ...[[0x8C, "maskload"], [0x8E, "maskstore"]].flatMap(([op, kind]) => [0, 1].map(w =>
         ({ name: w ? "vpmaskmovq" : "vpmaskmovd", map: 2, pp: 1, op, kind, lane: w ? 8 : 4, memory: true, w, isa: "AVX2" }))),
+    // P8: the gathers (`data`, `index`: the element and index sizes)
+    ...GATHERS.map(([op, w, name, data, index]) => ({ name, map: 2, pp: 1, op, w, kind: "gather", data, index, memory: true, isa: "AVX2" })),
 ];
 
 // P6 part 1: the VEX.256 forms (`l`: 1) of data movement, logic, shuffles,
@@ -339,6 +345,8 @@ const FORMS_256 = [
     ...FORMS_128.filter(f => f.isa === "AVX2" && f.map === 2 && f.op >= 0x45 && f.op <= 0x47)
         .map(f => wide(f, { f: (a, b) => variable_shift(f.op, f.w ? 64 : 32, a, b, 256) })),
     ...FORMS_128.filter(f => f.isa === "AVX2" && (f.kind === "maskload" || f.kind === "maskstore")).map(f => ({ ...f, l: 1 })),
+    // P8: the gathers' VEX.256 forms
+    ...FORMS_128.filter(f => f.kind === "gather").map(f => ({ ...f, l: 1 })),
 ];
 export const FORMS = [...FORMS_128, ...FORMS_256];
 
@@ -356,7 +364,7 @@ export const memory_bytes = f => f.bytes ?? f.size ?? (["store64", "low", "high"
  * bits) the general-purpose registers. `o`: d, v (VEX.vvvv), m (the r/m
  * register; undefined for memory), imm8, `long` (64-bit mode).
  */
-export function execute(f, s, { d, v, m, imm8, long })
+export function execute(f, s, { d, v, m, imm8, long, index, scale })
 {
     const memory = m === undefined;
     // (a VEX.256 form's registers: both halves; its lane-wise memory operand 32 bytes)
@@ -473,6 +481,26 @@ export function execute(f, s, { d, v, m, imm8, long })
             const signs = join(lanes(mask(width), bits, width).map(() => 1n << BigInt(bits - 1)), bits);
             const a = reg(d), b = source(full);
             s.flags = ((a & b & signs) === 0n ? 0x40 : 0) | ((~a & b & signs) === 0n ? 1 : 0);
+            break;
+        }
+        // a gather (`index`, the indices' register, and `scale`): the
+        // selected elements from the memory operand's address plus each
+        // element's sign-extended, scaled index (32-bit addressing outside
+        // 64-bit mode wraps), the mask cleared
+        case "gather":
+        {
+            const count = (ymm ? 32 : 16) / Math.max(f.data, f.index), bits = 8 * f.data;
+            const selected = lanes(reg(v), bits, 256).slice(0, count).map(x => x >> BigInt(bits - 1) & 1n);
+            const values = lanes(reg(d), bits, 256).slice(0, count);
+            const indices = lanes(reg(index), 8 * f.index, 256);
+            for(let n = 0; n < count; n++)
+            {
+                if(!selected[n]) continue;
+                const offset = BigInt.asIntN(long ? 64 : 32, BigInt.asIntN(8 * f.index, indices[n]) << BigInt(scale));
+                values[n] = s.load_at(Number(offset), f.data);
+            }
+            write(d, join(values, bits));
+            write(v, 0n);
             break;
         }
         case "maskload": case "maskstore":

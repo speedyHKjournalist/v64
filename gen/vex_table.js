@@ -108,6 +108,8 @@ const AVX_256 = new Set([
     "VROUNDPD", "VDPPS", "VCVTDQ2PS", "VCVTPS2DQ", "VCVTTPS2DQ", "VCVTPS2PD", "VCVTDQ2PD",
     "VCVTPD2PS", "VCVTPD2DQ", "VCVTTPD2DQ",
 ]);
+const GATHERS = ["VPGATHERDD", "VPGATHERDQ", "VPGATHERQD", "VPGATHERQQ", "VGATHERDPS", "VGATHERDPD",
+    "VGATHERQPS", "VGATHERQPD"];
 // AVX2: the VEX.256 forms of these instructions (P7 part 1: the packed
 // integer forms that work on each half)
 const AVX2_256 = new Set([
@@ -131,11 +133,14 @@ const AVX2_256 = new Set([
     "VBROADCASTSS", "VBROADCASTSD", "VPMOVSXBW", "VPMOVSXBD", "VPMOVSXBQ", "VPMOVSXWD", "VPMOVSXWQ",
     "VPMOVSXDQ", "VPMOVZXBW", "VPMOVZXBD", "VPMOVZXBQ", "VPMOVZXWD", "VPMOVZXWQ", "VPMOVZXDQ",
     "VPSRLVD", "VPSRLVQ", "VPSRAVD", "VPSLLVD", "VPSLLVQ", "VPMASKMOVD", "VPMASKMOVQ",
+    // P8: the gathers
+    ...GATHERS,
 ]);
-// AVX2's own VEX.128 forms (P7 part 2)
+// AVX2's own VEX.128 forms (P7 part 2, P8)
 const AVX2_128 = new Set([
     "VPBLENDD", "VPBROADCASTB", "VPBROADCASTW", "VPBROADCASTD", "VPBROADCASTQ", "VBROADCASTSS",
     "VPSRLVD", "VPSRLVQ", "VPSRAVD", "VPSLLVD", "VPSLLVQ", "VPMASKMOVD", "VPMASKMOVQ",
+    ...GATHERS,
 ]);
 const implemented = form => form.isa[0] === "AVX" && (form.l === "L1" ? AVX_256 : AVX_128).has(form.mnemonic) ||
     form.isa[0] === "AVX2" && (form.l === "L1" ? AVX2_256 : AVX2_128).has(form.mnemonic);

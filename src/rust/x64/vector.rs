@@ -1964,6 +1964,23 @@ unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
 struct Avx<'a>(&'a Decoded);
 impl avx::Machine for Avx<'_> {
     type Fault = Fault;
+    /// (the address without its index, plus `offset`, wrapped to the
+    /// address size; FS and GS bases)
+    unsafe fn gather(&mut self, offset: u64, bytes: u8) -> Result<u64, Fault> {
+        let mut a = self.0.address.unwrap();
+        a.index = None;
+        a.displacement = a.displacement.wrapping_add(offset as i64);
+        let mut regs = [0; 16];
+        for (r, value) in regs.iter_mut().enumerate() {
+            *value = state::read_gpr(r);
+        }
+        let base = if a.segment >= 4 { state::read_segment_base(a.segment as usize) } else { 0 };
+        memory::read(
+            a.offset(&regs, self.0.next).wrapping_add(base),
+            bytes * 8,
+            a.segment == 2,
+        )
+    }
     unsafe fn raise(&mut self, e: avx::Exception) -> Fault {
         match e {
             avx::Exception::InvalidOpcode => Fault::ud(),
@@ -2097,6 +2114,15 @@ pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
             w: v.w,
             imm8: d.immediate.map_or(0, |i| i.value as u8),
             long: true,
+            // (a gather's VSIB operand: the address's index is its vector
+            // register)
+            vsib: (d.encoding.vex & crate::decode_rules::vex::VSIB != 0).then(|| {
+                let a = d.address.unwrap();
+                avx::Vsib {
+                    index: a.index.unwrap(),
+                    scale: a.scale,
+                }
+            }),
         };
         avx::execute(&mut machine, &i)?;
         state::write_rip(d.next.0);

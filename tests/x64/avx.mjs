@@ -13,7 +13,7 @@
 // that they become hot.
 //
 // P5 part 1: the data movement and logic forms, VZEROUPPER, VLDMXCSR and
-// VSTMXCSR.
+// VSTMXCSR. P8: the gathers (VSIB: index registers 8-15 through VEX.X).
 import assert from "node:assert/strict";
 import {assemble, reference, actual} from "./guest_runner.mjs";
 import {long_mode_guest} from "./guest_builder.mjs";
@@ -96,7 +96,7 @@ const GPR32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
 const OPERANDS = [[1, 9, 14, 6, 11], [1, 3, 6, 7, 5]];
 const STORE_KINDS = ["store", "scalar_st", "store64", "gpr_store", "stmxcsr", "extract", "maskstore", "extract128"];
 // the kinds with VEX.vvvv (the immediate shifts: the destination) and with imm8
-const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "maskload", "maskstore", "insert128"];
+const VVVV = ["binary", "low", "high", "binary_imm", "insert", "insertps", "blendv", "maskload", "maskstore", "insert128", "gather"];
 const has_vvvv = c => VVVV.includes(c.f.kind) || ["scalar", "scalar_st"].includes(c.f.kind) && !c.memory ||
     c.f.kind === "fp" && ["three", "from_gpr"].includes(c.f.operands);
 const IMMEDIATE = ["load_imm", "binary_imm", "shift_imm", "extract", "insert", "insertps", "blendv", "pcmpstr", "insert128", "extract128"];
@@ -123,7 +123,25 @@ for(const long of [true, false])
             if(variable_shift(f) && !memory) c.count_from = VCOUNTS + 32 * (n % 8);
             // (every imm8 over the forms' cases; VPBLENDVB: the mask register in imm8[7:4], imm8[7] ignored in compatibility mode)
             c.imm8 = f.kind === "blendv" ? (n * 5 + 3) % 16 << 4 | n * 7 & 15 : n * 37 + 11 & 255;
-            if(memory)
+            if(f.kind === "gather")
+            {
+                // (destination, mask and indices distinct, #UD otherwise;
+                // each index within 256 bytes either side of `at`, a
+                // quadword's high half outside 64-bit mode random: address
+                // size 32 ignores it; beyond the elements, random)
+                [c.v, c.vsib] = [(d + 3) % regs, (d + 5) % regs];
+                const scale = n % 4, elements = (f.l ? 32 : 16) / Math.max(f.data, f.index);
+                const low = Math.ceil(-256 / 2 ** scale), high = Math.floor((255 - f.data) / 2 ** scale);
+                c.indices = 0n;
+                for(let e = 0; e < 32 / f.index; e++)
+                {
+                    const value = e >= elements ? BigInt(random()) :
+                        BigInt(low + random() % (high - low + 1)) + (f.index === 8 && !long && e & 1 ? BigInt(random()) << 32n : 0n);
+                    c.indices |= BigInt.asUintN(8 * f.index, value) << BigInt(8 * f.index * e);
+                }
+                c.memory = {base: gprs[3 + n % 2], scale, at: 256 + n % 8, disp: -0x40 + n};
+            }
+            else if(memory)
             {
                 // [base + index << scale + disp]: the operand at `at` of the samples (or of the case's destination)
                 // (a VEX.256 store within its 48 bytes: at 16 at most; the
@@ -197,6 +215,13 @@ const code = (c, n) => {
                 lines.push(`mov ${R[c.gpr]},0x${(c.long ? c.value : c.value & 0xFFFFFFFFn).toString(16)}`);
             }
             break;
+        case "gather":
+            // (the indices: 32 bytes jumped over; ..@ labels keep the
+            // block's local labels in scope)
+            lines.push(`jmp ..@gather_${n}_load`, `..@gather_${n}: dq ${[0, 1, 2, 3].map(k => "0x" + (c.indices >> BigInt(64 * k) & mask(64)).toString(16)).join(",")}`,
+                `..@gather_${n}_load:`, `vmovdqu ymm${c.vsib},[..@gather_${n}]`);
+            mem.index = c.vsib;
+            break;
         case "pcmpstr":
         {
             const value = x => "0x" + BigInt.asUintN(c.long ? 64 : 32, x).toString(16);
@@ -262,6 +287,10 @@ const close = (q, m) => {
 // VPBLENDVB outside 64-bit mode: the mask register is imm8[6:4] (SDM vol. 2A,
 // 2.3, the /is4 operand); QEMU 10.2 takes imm8[7:4]
 const qemu_is4 = c => c.f.kind === "blendv" && !c.long && c.imm8 & 0x80;
+// A gather with quadword indices outside 64-bit mode: address size 32 wraps
+// each element's address at 4 GiB, a quadword index's high half ignored;
+// QEMU 10.2 adds the indices at 64 bits (and faults)
+const qemu_vsib32 = c => c.f.kind === "gather" && !c.long && c.f.index === 8;
 // The model: each case's XSAVE area (the registers it can reach), its
 // general-purpose result and its memory destination (`qemu`: QEMU's
 // deviations for qemu_lig, "kept" or "first source")
@@ -288,13 +317,15 @@ const expected_case = (c, n, qemu = undefined) => {
     };
     // (32-bit results zero-extended in 64-bit mode; in compatibility mode a 32-bit store)
     s.set_gpr = (r, value) => s.gpr_out.set(le(value, c.long ? 8 : 4));
-    const o = {d: c.d, v: c.f.kind === "shift_imm" ? c.d : c.v, m: c.m, imm8: c.imm8, long: c.long};
+    const o = {d: c.d, v: c.f.kind === "shift_imm" ? c.d : c.v, m: c.m, imm8: c.imm8, long: c.long, index: c.vsib, scale: c.memory?.scale};
     if(c.f.kind === "to_gpr" || c.f.operands === "to_gpr") Object.assign(o, {d: c.gpr});
     if(["gpr_load", "gpr_store", "extract", "insert"].includes(c.f.kind) && !c.memory || c.f.operands === "from_gpr" && !c.memory) o.m = c.gpr;
     // (a register count: loaded by VMOVDQU, bits 255:128 zeroed but by a
     // VEX.256 form's)
     if(c.count_from !== undefined) [s.x[c.m], s.h[c.m]] = [big(samples.subarray(c.count_from, c.count_from + 16)),
         c.f.l ? big(samples.subarray(c.count_from + 16, c.count_from + 32)) : 0n];
+    // (a gather's indices: loaded by VMOVDQU)
+    if(c.vsib !== undefined) [s.x[c.vsib], s.h[c.vsib]] = [c.indices & mask(128), c.indices >> 128n];
     const upper = [...s.h];
     execute(qemu === "W0" ? {...c.f, w: 0} : c.f, s, o);
     if(qemu === "kept") s.h = upper;
@@ -346,6 +377,11 @@ for(const long of [true, false])
         FAULT_CASES.push([13, "vmovups xmm1,[non-canonical]", long, "", "mov rbx,0x0000800000000000\nvmovups xmm1,[rbx]"]);
         // (QEMU 10.2 raises #GP(0) for a non-canonical stack address too: tests/x64/system_oracle.mjs)
         FAULT_CASES.push([12, "vmovdqu [rbp non-canonical],xmm1", long, "", "mov rbp,0x0000800000000000\nvmovdqu [rbp],xmm1", 13]);
+        // (a gather: the selected element's address, its first)
+        FAULT_CASES.push([13, "vpgatherdd xmm1,[non-canonical]", long, "",
+            "mov rbx,0x0000800000000000\nvpcmpeqd xmm3,xmm3,xmm3\nvpxor xmm2,xmm2,xmm2\nvpgatherdd xmm1,[rbx+xmm2*4],xmm3"]);
+        FAULT_CASES.push([12, "vpgatherqq ymm1,[rbp non-canonical]", long, "",
+            "mov rbp,0x0000800000000000\nvpcmpeqd ymm3,ymm3,ymm3\nvpxor xmm2,xmm2,xmm2\nvpgatherqq ymm1,[rbp+ymm2*8],ymm3", 13]);
     }
 }
 const SET_CR0 = (bits, long) => long ? `mov rax,cr0\nor eax,${bits}\nmov cr0,rax` : `mov eax,cr0\nor eax,${bits}\nmov cr0,eax`;
@@ -360,8 +396,8 @@ const faults = long => FAULT_CASES.map(([, what, in_long, setup, instruction], n
     if(setup.includes("ts")) before.push(SET_CR0(8, long));
     if(setup.includes("em")) before.push(SET_CR0(4, long));
     if(setup.includes("mxcsr")) after.push("ldmxcsr [default_mxcsr]");
-    // (a setup instruction before the faulting one: its address)
-    const [prefix, last] = instruction.includes("\n") ? instruction.split("\n") : ["", instruction];
+    // (setup instructions before the faulting one: its address)
+    const lines = instruction.split("\n"), last = lines.pop(), prefix = lines.join("\n");
     return `
 ${before.join("\n")}
 ${prefix}
@@ -388,6 +424,9 @@ mov rax,HIGH+stack_fault
 call set_gate
 mov ebx,13
 mov rax,HIGH+gp
+call set_gate
+mov ebx,14
+mov rax,HIGH+page_fault
 call set_gate
 lidt [rel idtr]
 mov rax,cr4
@@ -458,6 +497,10 @@ jmp record
 gp:
 add rsp,8
 mov ecx,13
+jmp record
+page_fault:
+add rsp,8
+mov ecx,14
 record:
 mov edx,[${CASE}]
 shl edx,4
@@ -485,7 +528,7 @@ const check = (result, label) => {
     cases.forEach((c, n) => {
         const e = expected_case(c, n, label === "QEMU" && qemu_w1(c) ? "W0" : undefined);
         const what = `${label}: ${c.long ? "64-bit" : "compatibility"} ${c.f.name} (${c.f.op.toString(16)}) case ${n}`;
-        if(label === "QEMU" && qemu_is4(c)) return;
+        if(label === "QEMU" && (qemu_is4(c) || qemu_vsib32(c))) return;
         const area = result.subarray(RESULTS - OUT + n * AREA, RESULTS - OUT + (n + 1) * AREA);
         assert.equal(result.readUInt32LE(CASE_FAULTS - OUT + n * 16), 0, `${what}: no fault`);
         const deviation = label === "QEMU" && qemu_lig(c, n) &&
@@ -543,14 +586,20 @@ const comparable = buffer => {
             copy.fill(0, RESULTS - OUT + n * AREA + 160 + 16 * c.d, RESULTS - OUT + n * AREA + 176 + 16 * c.d);
             if(c.f.l) copy.fill(0, RESULTS - OUT + n * AREA + 576 + 16 * c.d, RESULTS - OUT + n * AREA + 592 + 16 * c.d);
         }
-        if(qemu_w1(c) || qemu_is4(c))
+        if(qemu_w1(c) || qemu_is4(c) || qemu_vsib32(c))
         {
             copy.fill(0, RESULTS - OUT + n * AREA, RESULTS - OUT + (n + 1) * AREA);
             copy.fill(0, GPR_OUT - OUT + n * 16, GPR_OUT - OUT + n * 16 + 16);
         }
+        // (QEMU's fault there)
+        if(qemu_vsib32(c)) copy.fill(0, CASE_FAULTS - OUT + n * 16, CASE_FAULTS - OUT + n * 16 + 16);
     });
     copy.fill(0, RESULTS - OUT - 2 * AREA + 704, RESULTS - OUT - AREA);
     copy.fill(0, RESULTS - OUT - 2 * AREA + 288, RESULTS - OUT - 2 * AREA + 416);
+    // (and XMM0-7 and YMM0-7's upper halves there: the last
+    // compatibility-mode case's, a gather where QEMU deviates, qemu_vsib32)
+    copy.fill(0, RESULTS - OUT - 2 * AREA + 160, RESULTS - OUT - 2 * AREA + 288);
+    copy.fill(0, RESULTS - OUT - 2 * AREA + 576, RESULTS - OUT - 2 * AREA + 704);
     // (between the stores and the XSAVE areas: the IDT and the stack, with fault frames)
     copy.fill(0, STORES - OUT + cases.length * SPAN, RESULTS - OUT - 2 * AREA);
     // (XSTATE_BV: XINUSE may be 1 for a component in its initial

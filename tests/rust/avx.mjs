@@ -390,6 +390,28 @@ const FLAGS_BEFORE = [0xB0, 0x7F, 0x04, 0x01, 0xF9];
 const store_flags = a => [0x9C, 0x58, 0x25, ...u32(0x8D5), 0xA3, ...u32(a)];
 // explicit lengths of VPCMPESTRx (EAX, EDX): within, beyond, negative, the extremes
 const LENGTHS = [0, 1, 3, 7, 8, 9, 15, 16, 17, -1, -5, -16, -17, 0x7FFFFFFF, -0x80000000];
+/** Case `n` of gather `f`: VSIB [EBX + index << scale], EBX the source's
+ * middle (negative indices too), every element within the source; the
+ * destination, mask and index registers distinct; quadword indices beyond
+ * 32 bits in odd elements, which 32-bit addressing drops; random masks */
+function gather_case(f, n)
+{
+    const [d, v, index] = [n & 7, n + 3 & 7, n + 5 & 7], scale = n & 3, at = 24;
+    const count = (f.l ? 32 : 16) / Math.max(f.data, f.index);
+    const low = -(at >> scale), high = SPAN - at - f.data >> scale;
+    let indices = 0n;
+    for(let k = 0; k < count; k++)
+    {
+        const value = BigInt(low + (n * 7 + k * 5) % (high - low + 1)) + (f.index === 8 && k & 1 ? 1n << 40n : 0n);
+        indices |= BigInt.asUintN(8 * f.index, value) << BigInt(8 * f.index * k);
+    }
+    const c = { n, at, registers: { [index]: indices & mask(128) }, pre: mov_r32(3, SOURCE + n * SPAN + at), post: [],
+        code: [...vex({ map: 2, pp: 1, l: f.l ?? 0, w: f.w, vvvv: v }, f.op), d << 3 | 4, scale << 6 | index << 3 | 3] };
+    // (indices beyond the low 128 bits: the others random)
+    if(count * f.index > 16) c.uppers = { [index]: indices >> 128n };
+    c.model = s => execute(f, s, { d, v, index, scale, long: false });
+    return c;
+}
 /** A form's name, " ymm" added for a VEX.256 one */
 const form_key = f => f.name + (f.l ? " ymm" : "");
 /** Case `n` of form `f`: registers that alias in every combination, the
@@ -397,6 +419,7 @@ const form_key = f => f.name + (f.l ? " ymm" : "");
  * general-purpose registers set before and stored after */
 function form_case(f, n)
 {
+    if(f.kind === "gather") return gather_case(f, n);
     const [d, v, m] = regs(n);
     const memory = f.memory || !f.register && n >= CASES / 2;
     const at = f.aligned ? 16 * (n & 1) : n % 17;
@@ -838,7 +861,114 @@ try
             checks++;
         }
     }
-    console.log("PASS: legacy SSE keeps the upper halves, VEX zeroes them; CR0.EM and CR4.OSFXSR ignored; narrow operands and VMASKMOV's unselected lanes at a page end (no access, no accessed bit)");
+    // A gather faulting on element k (#PF at the instruction, CR2 the
+    // element's address): the elements before it done (loaded if selected,
+    // their mask cleared), the rest's mask normalized (all ones or zero by
+    // its sign) and the destination's kept, the mask beyond the elements
+    // zero (the SDM's operation). The guest then maps the page and runs the
+    // gather again, which completes the rest: the result of one uninterrupted
+    // gather. (Element 0 not selected; scale 1, base EBX, which XSAVE's
+    // address needs too.)
+    {
+        const PTE = 0x13000 + (ABSENT >>> 12) * 4;
+        const pte = value => [0xC7, 0x05, ...u32(PTE), ...u32(value), 0x0F, 0x01, 0x3D, ...u32(ABSENT)];
+        const [d, v, index] = [1, 2, 3];
+        for(const f of FORMS.filter(f => f.kind === "gather"))
+        {
+            const count = (f.l ? 32 : 16) / Math.max(f.data, f.index), k = count > 2 ? 2 : 1, bits = BigInt(8 * f.data);
+            let indices = 0n, selection = 0n;
+            for(let j = 0; j < count; j++)
+            {
+                indices |= BigInt(j < k ? 8 * j : 64 + 8 * j) << BigInt(8 * f.index * j);
+                if(j) selection |= 1n << bits * BigInt(j + 1) - 1n;
+            }
+            const source = Uint8Array.from(DESTINATIONS.subarray(0, 128));
+            const c = { n: 0, at: 0, source, registers: { [index]: indices & mask(128), [v]: selection & mask(128) },
+                uppers: { [index]: indices >> 128n, [v]: selection >> 128n } };
+            const gather = [...vex({ map: 2, pp: 1, l: f.l ?? 0, w: f.w, vvvv: v }, f.op), d << 3 | 4, index << 3 | 3];
+            const prefix = [...xrstor(area_in(0)), ...mov_r32(3, ABSENT - 64)];
+            const program = [...prefix, ...gather, ...xsave(area_out(1)), ...pte(ABSENT | 3),
+                ...mov_r32(3, ABSENT - 64), ...gather, ...xsave(area_out(0)), ...pte(0)];
+            const results = await run_all(program, vm => {
+                vm.write_memory(Uint8Array.from(u32(gather.length)), SKIP);
+                vm.write_memory(area(0, c.registers, c.uppers), area_in(0));
+                vm.write_memory(source, ABSENT - 64);
+                pages(vm, ABSENT, false);
+            }, machines, vm => ({ fault: [0, 4, 8, 12].map(o => word(vm, FAULT + o)), partial: bytes(vm, area_out(1), 832), done: bytes(vm, area_out(0), 832) }));
+            // the expected states
+            const whole = initial(0, c);
+            execute(f, whole, { d, v, index, scale: 0, long: false });
+            const partial = initial(0, c);
+            const elements = (value, size) => Array.from({ length: 256 / size }, (_, j) => value >> BigInt(size * j) & mask(size));
+            const dest = elements(partial.x[d] | partial.h[d] << 128n, Number(bits));
+            const masks = elements(partial.x[v] | partial.h[v] << 128n, Number(bits)).map((x, j) =>
+                j >= count ? 0n : x >> bits - 1n ? mask(Number(bits)) : 0n);
+            for(let j = 0; j < k; j++)
+            {
+                if(masks[j]) dest[j] = big(source.subarray(8 * j, 8 * j + f.data));
+                masks[j] = 0n;
+            }
+            const join_all = list => list.reduceRight((value, x) => value << bits | x, 0n);
+            const [partial_dest, partial_mask] = [join_all(dest), join_all(masks)];
+            const name = `${f.name}${f.l ? " ymm" : ""} faulting on element ${k}`;
+            for(const { label, data } of results)
+            {
+                assert.deepEqual(data.fault.slice(0, 3), [14, CODE + PROLOGUE.length + prefix.length, ABSENT + 8 * k], `${name} (${label}): #PF, EIP, CR2`);
+                for(const [r, value, what, area_bytes] of [[d, partial_dest, "destination", data.partial], [v, partial_mask, "mask", data.partial],
+                    [d, whole.x[d] | whole.h[d] << 128n, "destination after the restart", data.done], [v, whole.x[v] | whole.h[v] << 128n, "mask after the restart", data.done]])
+                {
+                    assert.equal(hex(area_bytes.subarray(160 + 16 * r, 176 + 16 * r)), hex(le(value & mask(128))), `${name} (${label}): ${what}, bits 127:0`);
+                    assert.equal(hex(area_bytes.subarray(576 + 16 * r, 592 + 16 * r)), hex(le(value >> 128n)), `${name} (${label}): ${what}, bits 255:128`);
+                }
+            }
+            checks++;
+        }
+        for(const vm of machines) pages(vm, ABSENT, true);
+    }
+    // A gather's segment: an override's (FS, its base 0x10000) for every
+    // element, at the base (EBX) plus the element's scaled index (within 120
+    // bytes either side); every third element not selected. A third of the
+    // forms, each width and size in turn
+    {
+        const FS_BASE = 0x10000, [d, v, index] = [4, 5, 6], source = Uint8Array.from(SOURCES.subarray(0, 256));
+        const saved = machines.map(vm => ["segment_offsets", "segment_limits", "segment_is_null"].map(name => vm.v86.cpu[name][4]));
+        const segment = (vm, values) => ["segment_offsets", "segment_limits", "segment_is_null"].forEach((name, i) => { vm.v86.cpu[name][4] = values[i]; });
+        for(const [n, f] of FORMS.filter(f => f.kind === "gather").entries())
+        {
+            if(n % 3) continue;
+            const scale = n & 3, count = (f.l ? 32 : 16) / Math.max(f.data, f.index);
+            let indices = 0n, selection = 0n;
+            for(let j = 0; j < 32 / f.index; j++)
+            {
+                const offset = (n * 37 + j * 53) % 241 - 120;
+                indices |= BigInt.asUintN(8 * f.index, BigInt(Math.trunc(offset / 2 ** scale))) << BigInt(8 * f.index * j);
+            }
+            for(let j = 0; j < count; j++) if(j % 3 !== 1) selection |= 1n << BigInt(8 * f.data * (j + 1) - 1);
+            const c = { n: 0, at: 128, source, registers: { [index]: indices & mask(128), [v]: selection & mask(128) },
+                uppers: { [index]: indices >> 128n, [v]: selection >> 128n } };
+            const gather = [0x64, ...vex({ map: 2, pp: 1, l: f.l ?? 0, w: f.w, vvvv: v }, f.op), d << 3 | 4, scale << 6 | index << 3 | 3];
+            const program = [...xrstor(area_in(0)), ...mov_r32(3, SOURCE + 128 - FS_BASE), ...gather, ...xsave(area_out(0))];
+            const results = await run_all(program, vm => {
+                vm.write_memory(area(0, c.registers, c.uppers), area_in(0));
+                vm.write_memory(source, SOURCE);
+                segment(vm, [FS_BASE, -1, 0]);
+            }, machines, vm => bytes(vm, area_out(0), 832));
+            const s = initial(0, c);
+            execute(f, s, { d, v, index, scale, long: false });
+            const name = `${f.name}${f.l ? " ymm" : ""} with FS's base`;
+            for(const { label, data } of results)
+            {
+                for(const r of [d, v])
+                {
+                    assert.equal(hex(data.subarray(160 + 16 * r, 176 + 16 * r)), hex(le(s.x[r])), `${name} (${label}): XMM${r}`);
+                    assert.equal(hex(data.subarray(576 + 16 * r, 592 + 16 * r)), hex(le(s.h[r])), `${name} (${label}): YMM${r}'s upper half`);
+                }
+            }
+            checks++;
+        }
+        machines.forEach((vm, i) => segment(vm, saved[i]));
+    }
+    console.log("PASS: legacy SSE keeps the upper halves, VEX zeroes them; CR0.EM and CR4.OSFXSR ignored; narrow operands and VMASKMOV's unselected lanes at a page end (no access, no accessed bit); gathers faulting on an element, then restarted; gathers with FS's base");
 
     // #UD without CR4.OSXSAVE or with XCR0 3 (before #NM), #NM with CR0.TS
     for(const [label, form] of [
@@ -880,6 +1010,14 @@ try
         await expect_fault([], vex({ pp: 1, vvvv: 2 }, 0x73, 3, undefined, SOURCE, 3), 6, { label: "vpsrldq with a memory operand" });
         await expect_fault([], vex({ pp: 1 }, 0xC5, 1, undefined, SOURCE, 1), 6, { label: "vpextrw (C5) with a memory operand" });
         await expect_fault([], vex({ pp: 1, vvvv: 3 }, 0x70, 1, 2, undefined, 0x1B), 6, { label: "vpshufd with VEX.vvvv 3" });
+        // (gathers: the destination, mask and indices in three registers;
+        // 32-bit addressing)
+        for(const [label, prefix, vvvv, index] of [["the indices the destination", [], 2, 1], ["the mask the destination", [], 1, 3],
+            ["the indices the mask", [], 2, 2], ["16-bit addressing", [0x67], 2, 3]])
+        {
+            await expect_fault(mov_r32(3, SOURCE), [...prefix, ...vex({ map: 2, pp: 1, vvvv }, 0x90), 1 << 3 | 4, 2 << 6 | index << 3 | 3], 6,
+                { label: `vpgatherdd with ${label}` });
+        }
         await expect_fault([], vex({}, 0xAE, 2, undefined, SOURCE + 4), 13, { error_code: 0, before: vm => vm.write_memory(Uint8Array.from(u32(0x10000)), SOURCE + 4), label: "vldmxcsr with a reserved bit" });
     }
     // #PF: a load from and a store to an absent page, nothing written; the
@@ -941,7 +1079,7 @@ try
         }
         checks++;
     }
-    console.log("PASS: #GP(0) for misaligned aligned moves and VLDMXCSR's reserved bits, #UD for VEX.L1, VEX.W1, VEX.vvvv and memory operands where invalid, #PF without effect; one exception context for a VEX.256 floating-point form's lanes");
+    console.log("PASS: #GP(0) for misaligned aligned moves and VLDMXCSR's reserved bits, #UD for VEX.L1, VEX.W1, VEX.vvvv, memory operands where invalid and gathers' register overlaps and 16-bit addressing, #PF without effect; one exception context for a VEX.256 floating-point form's lanes");
     console.log(`PASS: ${checks} AVX checks on 3 arms`);
 }
 finally
