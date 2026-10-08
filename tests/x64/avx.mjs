@@ -313,6 +313,12 @@ for(const long of [true, false])
     FAULT_CASES.push([13, "vmovntdq [misaligned],xmm2", long, "", `vmovntdq [${STORES + 4}],xmm2`]);
     FAULT_CASES.push([13, "vmovntdqa xmm3,[misaligned]", long, "", "vmovntdqa xmm3,[samples + 4]"]);
     FAULT_CASES.push([0, "vmovups xmm1,[misaligned]", long, "", "vmovups xmm1,[samples + 8]"]);
+    // (VEX.256: the aligned moves need 32-byte alignment; samples and
+    // STORES are 32-byte aligned)
+    FAULT_CASES.push([13, "vmovaps ymm1,[16-byte aligned]", long, "", "vmovaps ymm1,[samples + 16]"]);
+    FAULT_CASES.push([13, "vmovntdq [16-byte aligned],ymm2", long, "", `vmovntdq [${STORES + 16}],ymm2`]);
+    FAULT_CASES.push([13, "vmovdqa [16-byte aligned],ymm3", long, "", `vmovdqa [${STORES + 48}],ymm3`]);
+    FAULT_CASES.push([0, "vmovdqu ymm1,[misaligned]", long, "", "vmovdqu ymm1,[samples + 8]"]);
     // (QEMU 10.2 does not check MXCSR's reserved bits: no fault, and MXCSR
     // takes the value until the next LDMXCSR)
     FAULT_CASES.push([13, "vldmxcsr with a reserved bit", long, "mxcsr", "vldmxcsr [reserved_mxcsr]", 0]);
@@ -598,7 +604,8 @@ for(const [label, options, compat] of [["interpreted", {}, false],
     console.log(`PASS (${label}): ${cases.length} AVX cases in 64-bit and compatibility mode, ${FAULT_CASES.length} faults, as QEMU and the model`);
 }
 
-// The page tier's templates for the hot VEX forms (P5 part 5): a hot loop of
+// The page tier's templates for the hot VEX forms (P5 part 5; the VEX.256
+// moves and VZEROALL, P6 part 3): a hot loop of
 // them over ordinary values (finite, normal, of moderate size: no retries)
 // runs with almost no steps (x64_page_stat(4)), as QEMU. (Its stores are off
 // the code's page, which they would invalidate.) The results' bits
@@ -618,6 +625,29 @@ mov r15d,${ITERATIONS}
 xor r14d,r14d
 xor r13d,r13d
 .loop:
+vmovdqu ymm8,[hot_ymm + 8]
+vmovdqa ymm9,[hot_ymm + 32]
+vmovups ymm10,ymm8
+vmovaps ymm11,ymm9
+vmovupd [${OUT + 0x488}],ymm10
+vmovapd [${OUT + 0x4C0}],ymm11
+vmovntdq [${OUT + 0x4E0}],ymm8
+vmovntps [${OUT + 0x500}],ymm9
+vmovdqu ymm12,[${OUT + 0x488}]
+vmovntpd [${OUT + 0x560}],ymm12
+vxorps xmm12,xmm12,xmm9
+vmovdqu [${OUT + 0x520}],ymm12
+vzeroall
+vmovdqu [${OUT + 0x540}],ymm11
+add r14,[${OUT + 0x498}]
+add r14,[${OUT + 0x4D8}]
+add r14,[${OUT + 0x4F0}]
+add r14,[${OUT + 0x518}]
+add r14,[${OUT + 0x578}]
+add r13,[${OUT + 0x520}]
+add r13,[${OUT + 0x530}]
+add r13,[${OUT + 0x548}]
+add r13,[${OUT + 0x558}]
 vmovsd xmm1,[hot_samples]
 vmovsd xmm2,[hot_samples + 8]
 vaddsd xmm3,xmm1,xmm2
@@ -692,6 +722,8 @@ ${Array.from({length: 16}, (_, r) => `vmovdqu [${OUT + 48 + 16 * r}],xmm${r}`).j
 `, `
 align 16
 hot_samples: db ${hot_samples.join(",")}
+align 32
+hot_ymm: db ${Array.from(samples.subarray(64, 160)).join(",")}
 `));
     // (the guest runner's completion word is at OUT)
     const length = 48 + 256;
@@ -706,6 +738,120 @@ hot_samples: db ${hot_samples.join(",")}
     assert.equal(hex(result), hex(expected), "hot loop: the sums, MXCSR and XMM0-15 as QEMU");
     assert.ok(retired > ITERATIONS * 50 && steps < ITERATIONS / 10, `page tier templates: ${retired} retired, ${steps} steps`);
     console.log(`PASS (x64 page tier): the hot VEX forms' templates, as QEMU (${retired} instructions retired natively, ${steps} steps)`);
+}
+
+// The page tier's VEX.256 moves (P6 part 3) check the whole access in
+// compiled code: a hot loop's aligned moves and 32-byte stores run without
+// faults but in three rounds, a thousand apart: one stores across into an
+// absent page (#PF, nothing written), one takes a 16-byte aligned address
+// for VMOVAPS ymm, one for VMOVDQA ymm (#GP(0) each). The handlers count the
+// faults and skip the 4-byte instruction. (After a retry the runtime
+// interprets for a while: single faulting instructions, such as FAULT_CASES,
+// and the instructions after one in a round do not run as page-tier code.
+// The stores are off the code's page, which they would invalidate.) As QEMU,
+// but for the crossing store's low half, which QEMU 10.2 writes (11.1)
+{
+    const FAULT_ROUNDS = 20000, PATTERN = "0x1122334455667788";
+    const fault_loop = assemble("avx-fault-loop", long_mode_guest(`
+mov ebx,13
+mov rax,HIGH+gp
+call set_gate
+mov ebx,14
+mov rax,HIGH+pf
+call set_gate
+lidt [rel idtr]
+mov rax,cr4
+or eax,3 << 9 | 1 << 18 ; OSFXSR, OSXMMEXCPT, OSXSAVE
+mov cr4,rax
+${XSETBV(7)}
+; (the 2 MiB page at 0x600000 absent)
+mov qword [0x202000 + 3 * 8],0
+mov rax,cr3
+mov cr3,rax
+mov rax,${PATTERN}
+mov [0x5FFFF0],rax
+mov [0x5FFFF8],rax
+vmovdqu ymm2,[aligned]
+mov r15d,${FAULT_ROUNDS}
+xor r14d,r14d
+xor r13d,r13d
+xor r12d,r12d
+.loop:
+lea rbx,[aligned]
+mov edx,${OUT + 0x800}
+mov esi,0x5FFF00
+cmp r15d,3001
+jne .misaligned_load
+mov esi,0x5FFFF0
+.misaligned_load:
+cmp r15d,2001
+jne .misaligned_store
+lea rbx,[aligned + 16]
+.misaligned_store:
+cmp r15d,1001
+jne .go
+mov edx,${OUT + 0x810}
+.go:
+vmovaps ymm1,[rbx]
+vmovdqa [rdx],ymm2
+vmovdqu [rsi],ymm2
+add r13,[${OUT + 0x808}]
+dec r15d
+jnz .loop
+mov [${OUT + 16}],r14
+mov [${OUT + 24}],r13
+mov [${OUT + 32}],r12
+mov rax,[0x5FFFF0]
+mov [${OUT + 40}],rax
+mov rax,[0x5FFFF8]
+mov [${OUT + 48}],rax
+vmovdqu [${OUT + 64}],ymm1
+`, `
+set_gate:
+mov rdi,rbx
+shl rdi,4
+add rdi,${IDT}
+mov [rdi],ax
+mov word [rdi + 2],0x18
+mov word [rdi + 4],0x8E00
+shr rax,16
+mov [rdi + 6],ax
+shr rax,16
+mov [rdi + 8],eax
+mov dword [rdi + 12],0
+ret
+gp:
+add rsp,8
+inc r14
+add qword [rsp],4
+iretq
+pf:
+add rsp,8
+inc r12
+mov rax,cr2
+mov [${OUT + 56}],rax
+add qword [rsp],4
+iretq
+align 8
+idtr: dw 511
+dq ${IDT}
+align 32
+aligned: db ${Array.from(samples.subarray(160, 256)).join(",")}
+`));
+    const length = 96;
+    const expected = await reference(fault_loop, {length});
+    let retired;
+    const result = await actual(fault_loop, {length, timeout: 60000,
+        options: {...FEATURES, disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true},
+        inspect: emulator => { retired = emulator.v86.cpu.wm.exports.x64_page_stat(1); }});
+    const pattern = BigInt(PATTERN);
+    assert.deepEqual([16, 32, 56].map(at => result.readBigUInt64LE(at)), [2n, 1n, 0x600000n], "#GP twice, #PF once at 0x600000");
+    assert.deepEqual([40, 48].map(at => result.readBigUInt64LE(at)), [pattern, pattern], "the crossing store wrote nothing");
+    // (QEMU: its low half written)
+    for(const b of [result, expected]) b.fill(0, 40, 56);
+    assert.equal(hex(result), hex(expected), "the fault counts, CR2, the sums and YMM1 as QEMU");
+    assert.ok(retired > FAULT_ROUNDS * 8, `the loop ran as page-tier code (${retired} instructions retired natively)`);
+    console.log(`PASS (x64 page tier): VEX.256 alignment and cross-page faults in compiled code, as QEMU (${retired} retired natively)`);
 }
 
 // The page tier's conversion and compare templates at the edges of what

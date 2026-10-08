@@ -852,8 +852,8 @@ struct Page {
     /// page without VEX templates has none)
     vex_fault: Option<WasmLocal>,
     /// The YMM registers whose bits 255:128 the block has zeroed (simd::
-    /// ymm_zero); nothing else in a block writes them (the 256-bit forms are
-    /// interpreter steps, which leave it)
+    /// ymm_zero) and not written since (simd::store_ymm, a VEX.256 move's;
+    /// the other 256-bit forms are interpreter steps, which leave the block)
     ymm_zeroed: u8,
     /// The VEX form being emitted (simd::Page::simd)
     vex: Option<simd::Vex>,

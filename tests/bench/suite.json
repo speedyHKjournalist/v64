@@ -50,6 +50,7 @@
     {"name": "714.sse4.strings", "category": "sse4", "source": "m_sse4strings.asm", "iterations": 100, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2"], "about": "SSE4.2 PCMPISTRI strlen and first-vowel search" },
     {"name": "715.avx.matmul", "category": "avx", "source": "matmul.c", "profile": "avx", "iterations": 740, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "601's source, AVX (VEX.128) code" },
     {"name": "716.avx.nbody", "category": "avx", "source": "nbody.c", "profile": "avx", "iterations": 870, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "606's source, AVX scalar double code" },
-    {"name": "717.avx.mandel", "category": "avx", "source": "mandel.c", "profile": "avx", "iterations": 69, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "611's source, AVX code" }
+    {"name": "717.avx.mandel", "category": "avx", "source": "mandel.c", "profile": "avx", "iterations": 69, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "611's source, AVX code" },
+    {"name": "718.avx.ymm", "category": "avx", "source": "m_avx256.asm", "iterations": 600, "cpu_features": ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX"], "cpu_features_unreleased": true, "about": "VEX.256 moves: VMOVDQA/VMOVDQU/VMOVNTDQ/VMOVUPS ymm" }
   ]
 }

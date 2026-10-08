@@ -156,9 +156,10 @@ pub const COUNT_FULL_FLUSHES: usize = 11;
 pub const COUNT_WALKS: usize = 12;
 pub const COUNT_COMPAT_FILLS: usize = 13;
 pub const COUNT_COMPAT_REFILLS: usize = 14;
+/// (32 bytes: a VEX.256 load's)
 #[repr(C, align(16))]
-struct Bounce([u8; 16]);
-static mut BOUNCE: Bounce = Bounce([0; 16]);
+struct Bounce([u8; 32]);
+static mut BOUNCE: Bounce = Bounce([0; 32]);
 /// (generated code copies unaligned reads there itself: pagegen)
 pub unsafe fn bounce_address() -> u32 { &raw mut BOUNCE as u32 }
 /// x64_page_timing: milliseconds inside page function calls and in execute

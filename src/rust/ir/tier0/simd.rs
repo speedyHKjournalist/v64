@@ -13,7 +13,9 @@
 //! templates (classify_vex, Vex): they read VEX.vvvv where the legacy form
 //! reads its destination, zero the destination's bits 255:128 (in the CPU
 //! state, not cached) with the write that ends the template, and check the
-//! alignment of the aligned moves only.
+//! alignment of the aligned moves only. Of the VEX.256 forms (P6), the moves
+//! and VZEROALL have templates of their own (classify_vex256); the others
+//! are interpreter steps.
 use super::Page;
 use crate::cpu::{
     cpu::CR0_EM, cpu::CR0_TS, cpu::CR4_OSFXSR, cpu::CR4_OSXSAVE, cpu::FLAGS_ALL, cpu::FLAG_VM, fpu,
@@ -64,9 +66,9 @@ pub(super) struct Vex {
     /// first source), or the r/m register of a shift by imm8 (whose
     /// destination is VEX.vvvv); None for the forms of one source
     first: Option<u8>,
-    /// VMOVAPS/APD/DQA and VMOVNTPS/PD/DQ: the m128 must be 16-byte aligned
-    /// (the other VEX forms take any; VEX rows' Encoding::aligned_m128 is
-    /// false)
+    /// VMOVAPS/APD/DQA and VMOVNTPS/PD/DQ: the m128 must be 16-byte aligned,
+    /// the m256 32-byte aligned (the other VEX forms take any; VEX rows'
+    /// Encoding::aligned_m128 is false)
     aligned: bool,
 }
 
@@ -228,6 +230,17 @@ pub(super) enum Simd {
     },
     /// VZEROUPPER: bits 255:128 of YMM0-7 zeroed
     Vzeroupper,
+    /// VMOVUPS/UPD/DQU, VMOVAPS/APD/DQA ymm, ymm/m256 (VEX.256): bits
+    /// 255:128 from the source's
+    Load256 {
+        reg: u8,
+    },
+    /// The same, ymm/m256, ymm; VMOVNTPS/PD/DQ m256, ymm
+    Store256 {
+        reg: u8,
+    },
+    /// VZEROALL: YMM0-7 zeroed (Tier-0 runs outside 64-bit mode)
+    Vzeroall,
     Emms,
 }
 
@@ -706,9 +719,12 @@ pub(super) fn classify_vex(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
         return None;
     }
     let v = i.vex?;
-    // (VEX.L1 of other than VEX.LIG rows: 256-bit forms)
-    if i.early_ud || i.baseline_ud || v.l && i.encoding.vex & (vex::L0 | vex::L1) != 0 {
+    if i.early_ud || i.baseline_ud {
         return None;
+    }
+    // (VEX.L1 of other than VEX.LIG rows: 256-bit forms)
+    if v.l && i.encoding.vex & (vex::L0 | vex::L1) != 0 {
+        return classify_vex256(i);
     }
     let key = crate::cpu::avx::legacy(i.encoding.opcode);
     let code = key as u8;
@@ -1023,6 +1039,36 @@ pub(super) fn classify_vex(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
     })
 }
 
+/// The template of a VEX.256 form (P6): the moves and VZEROALL, the hot
+/// forms of AVX's 256-bit ones; the others step
+fn classify_vex256(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
+    use crate::decode_rules::vex;
+    let v = i.vex?;
+    if i.encoding.vex & vex::L1 == 0 {
+        return None;
+    }
+    let key = crate::cpu::avx::legacy(i.encoding.opcode);
+    let vex = |aligned| Vex {
+        first: None,
+        aligned,
+    };
+    // VZEROALL (no ModRM byte)
+    if key == 0x0F77 {
+        return Some((Simd::Vzeroall, vex(false)));
+    }
+    let reg = i.modrm? >> 3 & 7;
+    Some(match (v.map, v.pp, key as u8) {
+        // VMOVUPS VMOVUPD VMOVDQU, VMOVAPS VMOVAPD VMOVDQA (aligned)
+        (1, 0 | 1, 0x10) | (1, 2, 0x6F) => (Simd::Load256 { reg }, vex(false)),
+        (1, 0 | 1, 0x28) | (1, 1, 0x6F) => (Simd::Load256 { reg }, vex(true)),
+        (1, 0 | 1, 0x11) | (1, 2, 0x7F) => (Simd::Store256 { reg }, vex(false)),
+        (1, 0 | 1, 0x29) | (1, 1, 0x7F) => (Simd::Store256 { reg }, vex(true)),
+        // VMOVNTPS VMOVNTPD VMOVNTDQ
+        (1, 0 | 1, 0x2B) | (1, 1, 0xE7) if i.ea.is_some() => (Simd::Store256 { reg }, vex(true)),
+        _ => return None,
+    })
+}
+
 impl Page {
     /// The register read in place of the destination `reg` (Vex::first)
     fn first(&self, reg: u8) -> u8 { self.vex.and_then(|v| v.first).unwrap_or(reg) }
@@ -1105,6 +1151,13 @@ impl Page {
     /// XMM `r` = `value`; a VEX form's bits 255:128 zeroed too (every
     /// template writes its XMM destination last, after its retries)
     fn store_xmm(&mut self, r: u8, value: &WasmLocalV128) {
+        self.cache_xmm(r, value);
+        if self.vex.is_some() {
+            self.ymm_zero(r);
+        }
+    }
+    /// XMM `r` = `value` in the block's register cache
+    fn cache_xmm(&mut self, r: u8, value: &WasmLocalV128) {
         self.xmm_clean[r as usize] = 0;
         self.w.get_local_v128(value);
         match &self.xmm[r as usize] {
@@ -1112,9 +1165,23 @@ impl Page {
             None => self.xmm[r as usize] = Some(self.w.set_new_local_v128()),
         }
         self.xmm_dirty |= 1 << r;
-        if self.vex.is_some() {
-            self.ymm_zero(r);
-        }
+    }
+    /// YMM `r` = (`low`, `high`) (VEX.256, written last): bits 255:128 in the
+    /// CPU state, where the block's next VEX.128 write to `r` zeroes them
+    /// again (ymm_zeroed)
+    fn store_ymm(&mut self, r: u8, low: &WasmLocalV128, high: &WasmLocalV128) {
+        self.cache_xmm(r, low);
+        self.w
+            .const_i32(unsafe { gp::ymm_hi.add(r as usize) } as i32);
+        self.w.get_local_v128(high);
+        self.w.simd_memory(0x0B, 0); // v128.store
+        self.ymm_zeroed &= !(1 << r);
+    }
+    /// Push bits 255:128 of YMM `r` (from the CPU state)
+    fn load_ymm_high(&mut self, r: u8) {
+        self.w
+            .const_i32(unsafe { gp::ymm_hi.add(r as usize) } as i32);
+        self.w.simd_memory(0x00, 0); // v128.load
     }
     /// Store the low `bytes` of `value` into the low lane of XMM `r`, the
     /// other lanes those of `r` (a VEX form's: of its first source)
@@ -1260,11 +1327,47 @@ impl Page {
     }
     /// retry() unless the linear address (Page::addr) is 16-byte aligned:
     /// the interpreter raises #GP(0)
-    fn retry_unaligned(&mut self) {
+    fn retry_unaligned(&mut self) { self.retry_misaligned(16) }
+    /// retry() unless the linear address is `bytes`-aligned
+    fn retry_misaligned(&mut self, bytes: i32) {
         self.w.get_local(&self.addr);
-        self.w.const_i32(15);
+        self.w.const_i32(bytes - 1);
         self.w.and_i32();
         self.retry_if();
+    }
+    /// The 32 bytes at addr (VEX.256) in two locals, the low and high
+    /// halves: one ordinary RAM page, else retry
+    fn load_vector256(&mut self) -> [WasmLocalV128; 2] {
+        self.tlb_miss(32, false);
+        self.retry_if();
+        self.host_address();
+        let low = self.w.set_new_local();
+        self.w.get_local(&low);
+        self.w.const_i32(16);
+        self.w.add_i32();
+        let high = self.w.set_new_local();
+        [low, high].map(|address| {
+            // (guest_load_v128 tees the address into its scratch local)
+            self.w.get_local(&address);
+            self.w.guest_load_v128(&address);
+            self.w.free_local(address);
+            self.w.set_new_local_v128()
+        })
+    }
+    /// Store `halves` (VEX.256) at addr: one writable RAM page without code
+    /// (both halves checked before either is written), else retry
+    fn store_vector256(&mut self, halves: &[WasmLocalV128; 2]) {
+        self.tlb_miss(32, true);
+        self.retry_if();
+        self.host_address();
+        let address = self.w.set_new_local();
+        self.w.guest_store_v128(&address, &halves[0]);
+        self.w.get_local(&address);
+        self.w.const_i32(16);
+        self.w.add_i32();
+        self.w.set_local(&address);
+        self.w.guest_store_v128(&address, &halves[1]);
+        self.w.free_local(address);
     }
     /// Push the r/m operand: an MMX/XMM register or `bytes` of memory (with
     /// the alignment of aligned_m128).
@@ -2244,6 +2347,61 @@ impl Page {
                 for r in 0..8 {
                     self.ymm_zero(r);
                 }
+            },
+            Simd::Load256 { reg } => {
+                // (both halves read before the destination is written)
+                let halves = match &i.ea {
+                    Some(ea) => {
+                        self.linear(ea);
+                        if self.vex.is_some_and(|v| v.aligned) {
+                            self.retry_misaligned(32);
+                        }
+                        self.load_vector256()
+                    },
+                    None => {
+                        self.load_xmm(rm);
+                        let low = self.w.set_new_local_v128();
+                        self.load_ymm_high(rm);
+                        [low, self.w.set_new_local_v128()]
+                    },
+                };
+                self.store_ymm(reg, &halves[0], &halves[1]);
+                if i.ea.is_none() {
+                    self.xmm_clean[reg as usize] = self.xmm_clean[rm as usize];
+                }
+                for v in halves {
+                    self.w.free_local_v128(v);
+                }
+            },
+            Simd::Store256 { reg } => {
+                self.load_xmm(reg);
+                let low = self.w.set_new_local_v128();
+                self.load_ymm_high(reg);
+                let halves = [low, self.w.set_new_local_v128()];
+                match &i.ea {
+                    Some(ea) => {
+                        self.linear(ea);
+                        if self.vex.is_some_and(|v| v.aligned) {
+                            self.retry_misaligned(32);
+                        }
+                        self.store_vector256(&halves);
+                    },
+                    None => {
+                        self.store_ymm(rm, &halves[0], &halves[1]);
+                        self.xmm_clean[rm as usize] = self.xmm_clean[reg as usize];
+                    },
+                }
+                for v in halves {
+                    self.w.free_local_v128(v);
+                }
+            },
+            Simd::Vzeroall => {
+                self.w.simd_zero();
+                let zero = self.w.set_new_local_v128();
+                for r in 0..8 {
+                    self.store_xmm(r, &zero);
+                }
+                self.w.free_local_v128(zero);
             },
         }
     }

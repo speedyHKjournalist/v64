@@ -223,6 +223,10 @@ const tier0_rounds = () => machines[1].v86.cpu.wm.exports["ir_t0_steps"](0xAE0F)
 const TIER0_HOT = ["vmovsd", "vmovss", "vmovapd", "vmovaps", "vmovdqu", "vmovdqa", "vmovq", "vmovd", "vxorpd", "vxorps",
     "vandpd", "vandnpd", "vorpd", "vpand", "vpandn", "vpor", "vpxor", "vpcmpeqb", "vpcmpeqd", "vpcmpgtb", "vpaddb",
     "vpmovmskb", "vzeroupper", "vunpcklpd", "vunpckhpd", "vblendvpd", "vpshufb"];
+// The VEX.256 ones (P6 part 3: the moves and VZEROALL; with the moves of
+// the other types): every form of the name templated
+const TIER0_HOT_256 = ["vmovdqu", "vmovdqa", "vmovntdq", "vzeroall", "vmovups", "vmovaps", "vmovupd", "vmovapd",
+    "vmovntps", "vmovntpd"].map(name => name + " ymm");
 const TIER0_HOT_FP = ["vaddsd", "vmulsd", "vsubsd", "vdivsd", "vaddss", "vmulss", "vsubss", "vdivss", "vmulpd", "vcomisd",
     "vucomisd", "vcomiss", "vucomiss", "vcmpsd", "vcvttsd2si", "vcvtsd2ss", "vcvtsi2sd", "vcvtss2sd", "vcvtpd2ps"];
 // The hot forms the region tiers run without the AVX helpers (P5 part 6):
@@ -230,7 +234,7 @@ const TIER0_HOT_FP = ["vaddsd", "vmulsd", "vsubsd", "vdivsd", "vaddss", "vmulss"
 // PSHUFB's helper)
 const REGIONS_NATIVE = TIER0_HOT.filter(name => !["vblendvpd", "vpshufb"].includes(name));
 /** The forms whose cases Tier-0 ran templates for (fewer steps than cases)
- * or stepped */
+ * or stepped, by name (" ymm": a VEX.256 form's) */
 const tier0_forms = { templated: new Set(), stepped: new Set() };
 /** The forms the region tiers ran without the AVX helpers (no calls in the
  * hot run) or with them */
@@ -298,14 +302,14 @@ async function check_cases(name, cases, { before = () => {}, form } = {})
     if(form)
     {
         // (a template retries some cases at most: floating-point lanes it refuses)
-        if(steps < cases.length / 2 && simd(machines[1])) tier0_forms.templated.add(form.name);
+        if(steps < cases.length / 2 && simd(machines[1])) tier0_forms.templated.add(form_key(form));
         else
         {
             assert.ok(steps >= cases.length || form.kind === "fp", `${name}: Tier-0 stepped ${steps} VEX instructions`);
-            tier0_forms.stepped.add(form.name);
+            tier0_forms.stepped.add(form_key(form));
         }
     }
-    if(form && simd(machines[2])) region_forms[results[4].data.avx_calls ? "helper" : "native"].add(form.name);
+    if(form && simd(machines[2])) region_forms[results[4].data.avx_calls ? "helper" : "native"].add(form_key(form));
     for(const { label, data } of results)
     {
         assert.equal(data.fault, 0, `${name} (${label}): no fault`);
@@ -383,6 +387,8 @@ const FLAGS_BEFORE = [0xB0, 0x7F, 0x04, 0x01, 0xF9];
 const store_flags = a => [0x9C, 0x58, 0x25, ...u32(0x8D5), 0xA3, ...u32(a)];
 // explicit lengths of VPCMPESTRx (EAX, EDX): within, beyond, negative, the extremes
 const LENGTHS = [0, 1, 3, 7, 8, 9, 15, 16, 17, -1, -5, -16, -17, 0x7FFFFFFF, -0x80000000];
+/** A form's name, " ymm" added for a VEX.256 one */
+const form_key = f => f.name + (f.l ? " ymm" : "");
 /** Case `n` of form `f`: registers that alias in every combination, the
  * memory operand from n/2 on (unaligned but for the aligned moves), the
  * general-purpose registers set before and stored after */
@@ -517,6 +523,10 @@ try
     if(simd(machines[1]))
     {
         for(const name of TIER0_HOT.filter(name => !only || only.includes(name))) assert.ok(tier0_forms.templated.has(name), `${name}: a Tier-0 template`);
+        for(const name of TIER0_HOT_256.filter(name => !only || only.includes(name.slice(0, -4))))
+        {
+            assert.ok(tier0_forms.templated.has(name) && !tier0_forms.stepped.has(name), `${name}: Tier-0 templates`);
+        }
     }
     if(simd(machines[2]))
     {
@@ -554,7 +564,56 @@ try
             if(simd(machines[1])) assert.ok(steps < CASES / 2, `${f.name}: a Tier-0 template (${steps} steps)`);
         }
     }
-    console.log(`PASS: Tier-0 templates for ${TIER0_HOT.length + TIER0_HOT_FP.length} hot forms`);
+    // VEX.256 moves among VEX.128 forms in one block (P6 part 3): a VEX.128
+    // write zeroes bits 255:128 again after a VEX.256 move wrote them
+    // (Tier-0 zeroes a register's once per block, Page::ymm_zeroed), the
+    // halves between registers and memory, VZEROALL
+    {
+        const cases = [];
+        for(let n = 0; n < 8; n++)
+        {
+            // (32-byte aligned: SPAN is 48)
+            const at = 16 * (n & 1), source = SOURCE + n * SPAN + at, destination = DEST + n * SPAN + at;
+            const load = (pp, op, reg) => vex({ pp, l: 1 }, op, reg, undefined, source);
+            cases.push({ n, at, code: n < 4 ? [
+                ...load(2, 0x6F, 1), // vmovdqu ymm1, [m256]
+                ...vex({ vvvv: 1 }, 0x57, 1, 1), // vxorps xmm1, xmm1, xmm1
+                ...load(0, 0x10, 1), // vmovups ymm1, [m256]
+                ...vex({ pp: 1, vvvv: 1 }, 0xEF, 1, 1), // vpxor xmm1, xmm1, xmm1
+                ...load(0, 0x28, 2), // vmovaps ymm2, [m256]
+                ...vex({ l: 1 }, 0x28, 3, 2), // vmovaps ymm3, ymm2
+                ...vex({ l: 1 }, 0x11, 2, 4), // vmovups ymm4, ymm2 (11 /r)
+                ...vex({ pp: 1, l: 1 }, 0x7F, 3, undefined, destination), // vmovdqa [m256], ymm3
+                ...vex({ pp: 1, vvvv: 5 }, 0xEF, 5, 4), // vpxor xmm5, xmm5, xmm4
+            ] : [
+                ...load(2, 0x6F, 6), // vmovdqu ymm6, [m256]
+                ...vex({ l: 1 }, 0x77), // vzeroall
+                ...load(1, 0x6F, 7), // vmovdqa ymm7, [m256]
+                ...vex({ pp: 2, l: 1 }, 0x7F, 7, 0), // vmovdqu ymm0, ymm7 (7F /r)
+                ...vex({ vvvv: 7 }, 0x57, 7, 7), // vxorps xmm7, xmm7, xmm7
+                ...vex({ pp: 1, l: 1 }, 0xE7, 0, undefined, destination), // vmovntdq [m256], ymm0
+            ], model: s => {
+                const [low, high] = [s.load_at(0, 16), s.load_at(16, 16)];
+                if(n < 4)
+                {
+                    [s.x[1], s.h[1]] = [0n, 0n];
+                    for(const r of [2, 3, 4]) [s.x[r], s.h[r]] = [low, high];
+                    [s.x[5], s.h[5]] = [s.x[5] ^ low, 0n];
+                }
+                else
+                {
+                    s.x.fill(0n);
+                    s.h.fill(0n);
+                    [s.x[0], s.h[0]] = [low, high];
+                }
+                s.store_at(0, 16, low);
+                s.store_at(16, 16, high);
+            } });
+        }
+        const steps = await check_cases("VEX.256 moves and VEX.128 forms in a block", cases);
+        if(simd(machines[1])) assert.ok(steps < cases.length / 2, `VEX.256 moves in a block: Tier-0 templates (${steps} steps)`);
+    }
+    console.log(`PASS: Tier-0 templates for ${TIER0_HOT.length + TIER0_HOT_FP.length + TIER0_HOT_256.length} hot forms, VEX.256 moves among VEX.128 forms in a block`);
 
     // An interpreted VEX instruction continues the interpreter's run as a
     // legacy SSE one does: a round of a loop of VEX forms, interpreted until

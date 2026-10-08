@@ -823,6 +823,10 @@ FP 准入（`NativeFp`）；PCMPxSTRI 不写 XMM，可改用只 reload 标量状
 时 715.avx.matmul 比 601 慢 12 倍（14 节 P5 第六部分）。可把 VBROADCASTSS 原生化（加载后 splat，慢路径
 另设 TransferOp），浮点内存形式改用只 reload 必要状态的 helper，并合并 region 内重复的检查与清零。
 
+待改进（P6 登记）：VEX.256 的浮点形式在 Tier-0 中由解释器单步执行，在 page tier 中走 step；在
+regions 中，VEX.256 形式都走完整 reload 的 `ir_avx_continue`。glibc 的 AVX（非 AVX2）热点只有搬运
+与 VZEROALL，这些形式不在热点清单中；用 `-mprefer-vector-width=256` 编译的浮点代码会受影响。
+
 ### 12.3 最终验收
 
 - [ ] 机器可读 forms 清单完整，所有目标形式具有实现和独立测试归属，无未解释缺口。
@@ -1971,3 +1975,48 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
 - **回归**：`p6p2-batch-a`、`p6p2-batch-b` 的 55 个目标中 50 个通过。另外 5 个仍因另一会话未完成的
   `mmio_ram.rs` 失败，它们的 12 条命令直接运行，全部通过。第一次批次与变异测试、其他构建同时运行，
   负载过高，ssse3、sse3、ir-tier0 超时（单独重跑通过），也正是那次运行暴露了上面 MOVDQ2Q 的问题。
+
+### P6 第三部分：VEX.256 热点形式在 Tier-0 和 page tier 的原生模板（2026-10-08）
+
+- **范围**：5.1 节热点清单中属于 AVX 的 VEX.256 形式只有搬运与 VZEROALL：VMOVDQU ymm 的加载与存储、
+  VMOVDQA ymm 的加载与存储、VMOVNTDQ m256、VZEROALL；其余 256 位热点形式属于 AVX2。它们和同类的
+  VMOVUPS/UPD/APS/APD ymm、VMOVNTPS/PD m256 一起，在 Tier-0 和 x64 page tier 上改为原生模板。
+  其他 VEX.256 形式在 Tier-0 中仍由解释器单步执行，在 page tier 中仍走 step。
+- **做法**：
+  - Tier-0（`classify_vex256`）：先一次检查整个 32 字节的访问（`tlb_miss(32)`：同一页内的普通 RAM，
+    存储还要求可写且页内没有代码），再做两次 v128 访问。对齐形式要求 32 字节对齐，否则重试，由
+    解释器产生 #GP(0)。加载读完两个半区才写目的寄存器；存储在检查通过之后才写，不会留下部分写入。
+    上半部分直接写 CPU 状态（`store_ymm`），并把该寄存器从 `Page::ymm_zeroed` 中去掉，块内之后的
+    VEX.128 写入会再次清零它。VZEROALL 清零 XMM0–7 及其上半部分（Tier-0 不运行 64 位模式的代码）。
+  - page tier（`vex256`、`Op::Vmove256`、`Op::Vzeroall`）：先一次查找整个 32 字节的访问
+    （`vector_address_bytes`），再按 64 位读写 XMM 与 YMM_Hi128 的状态；VZEROALL 清零 YMM0–15。
+    多核（cores in workers）构建中，未对齐的读取先复制到 `pages::BOUNCE` 再读，这个缓冲区从
+    16 字节扩为 32 字节。
+- **测试**：
+  - `tests/rust/avx.mjs`：Tier-0 与 regions 的统计在形式名后加 " ymm"，区分 VEX.256 形式；这 10 个
+    名字下的每个形式都必须由模板执行，不能单步。新增定向用例（8 例）：同一块内 VEX.256 搬运与
+    VEX.128 形式交替，检查 VEX.256 搬运之后的 VEX.128 写入再次清零上半部分、寄存器之间和内存之间
+    两个半区的搬运，以及 VZEROALL。三个 arm 都与模型一致，Tier-0 以模板执行。
+  - `tests/x64/avx.mjs`：page tier 的热点循环每轮加入 22 条这些形式与读回检查，全部原生执行
+    （共 1797950 条原生、83 次单步）。故障用例加入只对齐到 16 字节的 VMOVAPS/VMOVNTDQ/VMOVDQA ymm
+    （#GP(0)）与未对齐的 VMOVDQU ymm（不产生故障）；两种模式共 58 个故障用例，与 QEMU 一致。
+  - 新增 page tier 的故障热循环：前面各轮都不出故障，循环由 page tier 编译执行；在相隔一千轮的
+    三轮中，分别有一次 32 字节存储跨入缺页（#PF，不写任何字节）、一次只对齐到 16 字节的
+    VMOVAPS ymm 加载和一次 VMOVDQA ymm 存储（各 #GP(0)）。处理程序计数并跳过该指令。结果与 QEMU
+    一致，只有跨页存储的低半区除外（QEMU 10.2 会写出它，见 11.1 节）。重试之后运行时会解释执行
+    一段时间，所以只执行一次的故障指令（如 FAULT_CASES）以及同一轮中故障之后的指令，都不在 page
+    tier 编译的代码中执行；三个故障因此分在不同的轮次。
+  - `tests/bench` 新增微基准 718.avx.ymm：4 KiB 表上 VMOVDQA/VMOVDQU ymm 的加载、VMOVNTDQ 与 VMOVDQU ymm
+    的存储、寄存器之间的 VMOVUPS ymm，以及对低半区做 VEX.128 的 VPXOR、每轮一次 VZEROUPPER。
+    第二部分的构建（Tier-0 单步执行这些形式）为 23 MIPS，本部分为 1288 MIPS（约 56 倍；负载约 8）。
+- **变异测试**：植入 15 个错误，全部被检出：
+  - Tier-0（9 个）：VEX.256 写入之后不清 `ymm_zeroed` 位；加载或存储只按 16 字节检查对齐；加载或
+    存储只检查 16 字节的 TLB 范围（跨页时不重试）；存储的高半区写成低半区；VZEROALL 不清上半部分；
+    寄存器形式的加载从目的寄存器取上半部分；未对齐形式也检查对齐（每次重试，模板检查发现）。
+  - page tier（6 个）：VZEROALL 只清 8 个寄存器；存储两次写低半区；寄存器之间只复制 16 字节；加载
+    的上半部分取低半区；只按 16 字节检查对齐，或只查找 16 字节的访问。最后两个起初存活：故障用例
+    不在编译的代码中执行，加入上面的故障热循环后被检出。
+- **回归**：在只含本计划改动的工作树（第二部分与 MMX 修正之上加本部分）中运行 55 个目标
+  （`p6p3-batch-a`、`p6p3-batch-b`），53 个通过，包括在主工作树中被另一会话的 `mmio_ram.rs` 阻塞的
+  五个。另外两个（`api-tests`、`jitpagingtests`）需要不在 git 中的 `images/`，在主工作树中加入本部分
+  后运行，都通过。

@@ -428,6 +428,16 @@ enum Op {
     },
     /// VZEROUPPER: bits 255:128 of YMM0-15 zeroed
     Vzeroupper,
+    /// VMOVUPS/UPD/DQU, VMOVAPS/APD/DQA (`aligned`: 32-byte) and
+    /// VMOVNTPS/PD/DQ with VEX.256: all 32 bytes (a store's operand checked
+    /// whole before it is written)
+    Vmove256 {
+        dst: Xmm,
+        src: Xmm,
+        aligned: bool,
+    },
+    /// VZEROALL: YMM0-15 zeroed
+    Vzeroall,
     /// PMOVMSKB MOVMSKPS MOVMSKPD r32/r64, xmm (and their VEX forms): the
     /// sign bits of the `lane`-byte lanes, zero-extended
     Vmovmsk {
@@ -1410,15 +1420,49 @@ fn conversion(d: &Decoded, key: u32, wide: bool) -> Option<Convert> {
     })
 }
 
+/// The template of a VEX.256 form (P6): the moves and VZEROALL, the hot
+/// forms of AVX's 256-bit ones; the others step
+fn vex256(d: &Decoded) -> Option<Op> {
+    use crate::decode_rules::vex;
+    let v = d.vex?;
+    if d.encoding.vex & vex::L1 == 0 {
+        return None;
+    }
+    let key = crate::cpu::avx::legacy(d.opcode);
+    if key == 0x0F77 {
+        return Some(Op::Vzeroall);
+    }
+    let register = Xmm::Reg(d.reg?);
+    let rm = match d.rm_register {
+        Some(r) => Xmm::Reg(r),
+        None => Xmm::Mem(d.address?),
+    };
+    let memory = d.rm_register.is_none();
+    let (dst, src, aligned) = match (v.map, v.pp, key as u8) {
+        // VMOVUPS VMOVUPD VMOVDQU, VMOVAPS VMOVAPD VMOVDQA (aligned)
+        (1, 0 | 1, 0x10) | (1, 2, 0x6F) => (register, rm, false),
+        (1, 0 | 1, 0x28) | (1, 1, 0x6F) => (register, rm, true),
+        (1, 0 | 1, 0x11) | (1, 2, 0x7F) => (rm, register, false),
+        (1, 0 | 1, 0x29) | (1, 1, 0x7F) => (rm, register, true),
+        // VMOVNTPS VMOVNTPD VMOVNTDQ
+        (1, 0 | 1, 0x2B) | (1, 1, 0xE7) if memory => (rm, register, true),
+        _ => return None,
+    };
+    Some(Op::Vmove256 { dst, src, aligned })
+}
+
 /// The template of a VEX form (AVX, P5: VEX.128 and VEX.LIG in 64-bit
 /// mode; others step) on the SSE ones, as x64::vector's Avx executes it (see
 /// Op::Vmove): VEX.vvvv the first source
 fn vex(d: &Decoded) -> Option<Op> {
     use crate::decode_rules::vex;
     let v = d.vex?;
-    // (VEX.L1 of other than VEX.LIG rows: the 256-bit forms)
-    if d.encoding.unimplemented || v.l && d.encoding.vex & (vex::L0 | vex::L1) != 0 {
+    if d.encoding.unimplemented {
         return None;
+    }
+    // (VEX.L1 of other than VEX.LIG rows: the 256-bit forms)
+    if v.l && d.encoding.vex & (vex::L0 | vex::L1) != 0 {
+        return vex256(d);
     }
     let key = crate::cpu::avx::legacy(d.opcode);
     let code = key as u8;
@@ -4733,6 +4777,46 @@ impl Emitter {
                     self.ymm_zero(n);
                 }
             },
+            Op::Vmove256 { dst, src, aligned } => {
+                self.vector_check(inst, start);
+                match (dst, src) {
+                    (Xmm::Reg(d), Xmm::Reg(s)) => {
+                        for offset in [0, 8, 16, 24] {
+                            self.ymm_load(s, offset);
+                            self.ymm_store(d, offset);
+                        }
+                    },
+                    // (the access checked: no fault after the first write)
+                    (Xmm::Reg(d), Xmm::Mem(a)) => {
+                        self.vector_address_bytes(&a, 32, aligned, false, inst);
+                        for offset in [0, 8, 16, 24] {
+                            self.gi(HOST);
+                            self.load_bits(64, offset);
+                            self.ymm_store(d, offset);
+                        }
+                    },
+                    (Xmm::Mem(a), Xmm::Reg(s)) => {
+                        self.vector_address_bytes(&a, 32, aligned, true, inst);
+                        for offset in [0, 8, 16, 24] {
+                            self.gi(HOST);
+                            self.ymm_load(s, offset);
+                            self.b.guest_store_i64_bits(64, offset);
+                        }
+                    },
+                    (Xmm::Mem(_), Xmm::Mem(_)) => unreachable!(),
+                }
+            },
+            Op::Vzeroall => {
+                self.vector_check(inst, start);
+                for n in 0..16 {
+                    for half in 0..2 {
+                        self.c32((Self::xmm(n) + half * 8) as i32);
+                        self.c64(0);
+                        self.b.store_aligned_i64(0);
+                    }
+                    self.ymm_zero(n);
+                }
+            },
             Op::Vmovmsk { dst, src, lane } => {
                 self.vector_check(inst, start);
                 self.c32(Self::xmm(src) as i32);
@@ -5093,6 +5177,28 @@ impl Emitter {
         self.b.if_void();
         self.leave_to(self.f().retry, start);
         self.b.block_end();
+    }
+    /// The address of the 64 bits at `offset` (0, 8, 16, 24) of YMM
+    /// register `n`
+    fn ymm(n: u8, offset: u32) -> u32 {
+        if offset < 16 {
+            Self::xmm(n) + offset
+        }
+        else {
+            unsafe { gp::ymm_hi.add(n as usize) as u32 + offset - 16 }
+        }
+    }
+    /// Push the 64 bits at `offset` of YMM register `n`
+    fn ymm_load(&mut self, n: u8, offset: u32) {
+        self.c32(Self::ymm(n, offset) as i32);
+        self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
+    }
+    /// The 64 bits at `offset` of YMM register `n` = the i64 on the stack
+    fn ymm_store(&mut self, n: u8, offset: u32) {
+        self.s(TA);
+        self.c32(Self::ymm(n, offset) as i32);
+        self.g(TA);
+        self.b.store_aligned_i64(0);
     }
     /// Zero bits 255:128 of YMM register `n`
     fn ymm_zero(&mut self, n: u8) {
@@ -6207,18 +6313,30 @@ impl Emitter {
         write: bool,
         inst: &Inst,
     ) {
+        self.vector_address_bytes(a, bits as u32 / 8, aligned, write, inst)
+    }
+    /// vector_address of a `bytes` operand (aligned: an m256 32-byte, the
+    /// others 16-byte)
+    fn vector_address_bytes(
+        &mut self,
+        a: &AddressExpr,
+        bytes: u32,
+        aligned: bool,
+        write: bool,
+        inst: &Inst,
+    ) {
         self.address(a, inst.d.next.0, true);
         self.s(ADDR);
         if aligned {
             self.g(ADDR);
             self.b.wrap_i64_to_i32();
-            self.c32(15);
+            self.c32(if bytes == 32 { 31 } else { 15 });
             self.b.and_i32();
             self.b.if_void();
             self.leave_to(self.f().retry, inst.d.start.0);
             self.b.block_end();
         }
-        self.host(bits as u32 / 8, write, inst.d.start.0);
+        self.host(bytes, write, inst.d.start.0);
         self.si(HOST);
     }
 
