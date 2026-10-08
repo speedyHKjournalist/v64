@@ -84,10 +84,10 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0,osfxsr=true}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4|512;
+            cpu.cr[4]=osfxsr?cr4|512:cr4&~512;
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -198,6 +198,13 @@ for(const release of [false,true]){
             if(!dirty) for(const task of [4,8,12]) {
                 const expected=compare(i,()=>reset(i,{task,nullSegment:true}),101);
                 assert.equal(expected.ip,task===8?NM:UD); comparisons++;
+            }
+            // Without CR4.OSFXSR the MMX forms run; MOVDQ2Q and MOVQ2DQ name
+            // an XMM register: #UD, as the legacy SSE forms (before #NM)
+            if(!dirty) for(const task of [0,8]) {
+                const xmm=opcode===0xF20FD6||opcode===0xF30FD6;
+                const expected=compare(i,()=>reset(i,{task,osfxsr:false,sample:4}),xmm||task?101:102);
+                assert.equal(expected.ip,xmm?UD:task?NM:PC+cases[i][0].length); comparisons++;
             }
         }
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} MMX arithmetic/shift/transfer, x87 alias/TOP/tags, dirty XMM, masked stores, MMIO and page faults and #NM/#UD priority cases`);

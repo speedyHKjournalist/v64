@@ -15,7 +15,15 @@ unsafe fn finish(success: bool) -> u32 {
 }
 unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
     assert!((0..8).contains(&source) && (0..8).contains(&destination));
-    if !cpu::task_switch_test_mmx() {
+    // (MOVDQ2Q and MOVQ2DQ name an XMM register: the checks of a legacy SSE
+    // form, #UD without CR4.OSFXSR too, as gen/x86_table.js mmx_form has it)
+    let available = if matches!(op, 0xF20FD6 | 0xF30FD6) {
+        cpu::task_switch_test_xmm()
+    }
+    else {
+        cpu::task_switch_test_mmx()
+    };
+    if !available {
         return finish(false);
     }
     fpu::fpu_cache_barrier();
