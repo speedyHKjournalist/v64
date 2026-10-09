@@ -22,6 +22,7 @@ import { ACPI_LOADER_FILE, ACPI_RSDP_FILE, ACPI_TABLES_FILE, build_acpi_tables, 
 import { ACPI_PM_BASE_DEFAULT, MACHINE_LAYOUT_VERSION, Platform, check_platform, create_platform } from "./platform.js";
 import { CORE_STATE_RANGES, INIT_PRESERVED, STATE_OFFSETS } from "./state_layout.js";
 import { CPU_FEATURES, CPU_FEATURE_PRESETS } from "./cpu_features.js";
+import { build_jit_defaults, set_jit_switches } from "./jit_switches.js";
 import { ParallelMachine } from "./parallel/machine.js";
 import { ExtendedStore } from "./extended_memory.js";
 import { COMMAND_RELOAD, COMMAND_RESET } from "./parallel/control.js";
@@ -2776,6 +2777,10 @@ CPU.prototype.init = function(settings, device_bus)
     if(settings.parallel && deterministic) throw new Error("parallel: deterministic time needs cooperative cores");
     const interpreted = deterministic || multicore && !settings.experimental_smp_jit;
     this.configure_jit_backend(interpreted ? Object.assign({}, settings, { disable_jit: true }) : settings);
+    // The JIT switches (src/jit_switches.js): the build's JIT_DEFAULTS, then
+    // the setting jit_switches
+    set_jit_switches(this.wm.exports, this.wasm_memory, build_jit_defaults(this.wm.exports, this.wasm_memory), "JIT_DEFAULTS");
+    set_jit_switches(this.wm.exports, this.wasm_memory, settings["jit_switches"]);
     // The x86-64 CPU profile (CPUID long mode, NX, SYSCALL, CX16, ...) is
     // opt-in while x64 support is experimental
     this.wm.exports["set_x64_test_capabilities"](settings["cpu_type"] === "x86_64");

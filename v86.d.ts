@@ -823,6 +823,12 @@ export interface V86Options {
         /** REP helper iteration limit; integer 1..4096, default 64. */
         rep_iterations?: number;
     };
+    /**
+     * JIT switches by name (src/rust/jit_switches.rs; docs/jit-unification-plan.md), as
+     * { x64_outline: 0 } or "x64_outline=0,ir_fusion=1", applied after the other JIT settings.
+     * An unknown name, or a value the JIT refuses, fails the construction.
+     */
+    jit_switches?: { [name: string]: number | boolean } | string;
     /** Use approximate f64 x87 add/sub/mul/div (default true). False selects compatible arithmetic. */
     x87_fast_math?: boolean;
     /** Cache bounded register-only x87 regions in Wasm f64 locals (default true, requires x87_fast_math). */

@@ -367,6 +367,7 @@ pub unsafe fn copy_machine_configuration() {
     cpuid_level = *machine(&raw mut cpuid_level);
     X64_COMPAT_JIT = *machine(&raw mut X64_COMPAT_JIT);
     crate::cpu::instructions_0f::copy_cpu_profile();
+    crate::jit_switches::copy_from_machine();
 }
 
 pub static mut tlb_data: [i32; 0x100000] = [0; 0x100000];

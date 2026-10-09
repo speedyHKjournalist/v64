@@ -82,6 +82,8 @@ const steps = [
         skip: feeds_core || full ? null : "nothing that feeds build/v86.wasm changed" },
     { name: "ir-tier0-tests", command: ["make", "ir-tier0-tests"], skip: ir_tests ? null : "no IR or shared JIT change" },
     { name: "x64-page-tier-tests", command: ["make", "x64-page-tier-tests"], skip: x64_tests ? null : "no x64 or shared JIT change" },
+    { name: "jit-switch-tests", command: ["make", "jit-switch-tests"],
+        skip: full || any(/jit_switches\.(rs|js|mjs)$/, /^tests\/api\/jit-switches\.js$/) ? null : "the switch registry did not change" },
 ];
 if(full)
 {

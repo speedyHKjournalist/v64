@@ -2604,6 +2604,17 @@ pub fn x64_page_set_block_count(enabled: bool) { unsafe { BLOCK_COUNT = enabled 
 static mut OUTLINE_ACCESS: bool = true;
 #[no_mangle]
 pub fn x64_page_set_outline(enabled: bool) { unsafe { OUTLINE_ACCESS = enabled } }
+/// The values of the three switches above (crate::jit_switches)
+pub fn switch_value(name: &str) -> Option<u32> {
+    unsafe {
+        Some(match name {
+            "x64_bucket_dispatch" => BUCKET_DISPATCH as u32,
+            "x64_block_count" => BLOCK_COUNT as u32,
+            "x64_outline" => OUTLINE_ACCESS as u32,
+            _ => return None,
+        })
+    }
+}
 
 impl Emitter {
     fn emit(

@@ -229,7 +229,7 @@ export const STATICS = {
     "ir/runtime/rep.rs": { LAST_RESULT: "scratch" },
     "ir/runtime/schedule.rs": {
         DIRECT_T2: "machine", FORCED: "machine", HEAT: "machine", HEAT_STEPS: "machine", HEAT_STEPS_PER_VISIT: "machine",
-        PAGE_HEAT: "machine", SCHEDULER: "machine", T0_RANGES: "machine", TIER0: "machine", RESERVED: "machine",
+        PAGE_HEAT: "machine", SCHEDULER: "machine", T0_RANGES: "machine", T0_CLUSTERS: "machine", TIER0: "machine", RESERVED: "machine",
     },
     "ir/runtime/tier0.rs": {
         COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine",
@@ -239,6 +239,8 @@ export const STATICS = {
         T0_SSE_FP: "scratch", SSE_FP_CALLS: "debug", FMA_CALLS: "debug",
     },
     "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
+    // the JIT switches set on this instance, the machine's ones a vCPU worker applied, the names
+    "jit_switches.rs": { EXPLICIT: "machine", COPIED: "machine", NAMES: "machine" },
     // the parallel runtime: where this instance's statics are and whether
     // cores run in workers, then machine-wide words reached through machine():
     // wake-ups, yield flags, the locks of locked operations and the code

@@ -19,6 +19,7 @@ mod decode_rules;
 mod gen;
 mod ir;
 mod jit;
+mod jit_switches;
 mod leb;
 mod page;
 mod prefix;

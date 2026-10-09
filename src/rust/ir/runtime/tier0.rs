@@ -328,6 +328,8 @@ pub enum Link {
 static mut T0_LINK: Link = Link::Iterative;
 static mut T0_TAIL_CALLS: bool = false;
 pub fn t0_link() -> Link { unsafe { T0_LINK } }
+/// Whether the engine has Wasm tail calls (ir_t0_set_tail_calls, src/cpu.js)
+pub fn tail_calls() -> bool { unsafe { T0_TAIL_CALLS } }
 /// Whether the host engine validates Wasm tail calls and passes its
 /// function table to generated modules as ("e", "t"). Tail linking is not
 /// the default: in V8 a cross-instance return_call_indirect costs more than

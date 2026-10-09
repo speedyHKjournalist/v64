@@ -116,7 +116,7 @@ CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js display.js graphics_adapter.js ps2.js rtc.js uart.js parallel.js vmware.js \
-	   acpi.js acpi_tables.js platform.js q35.js ahci.js pcie_root_port.js hpet.js smbus.js ich9_tco.js state_layout.js cpu_features.js iso9660.js \
+	   acpi.js acpi_tables.js platform.js q35.js ahci.js pcie_root_port.js hpet.js smbus.js ich9_tco.js state_layout.js cpu_features.js jit_switches.js iso9660.js \
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   virtio_devices.js \
 	   bus.js log.js cpu.js \
@@ -137,7 +137,19 @@ GRAPHICS_ADAPTER_COMMON=src/cjs.js src/const.js src/lib.js src/log.js src/bus.js
 	src/graphics_adapters/machine.js src/graphics_adapters/vga_core.js src/graphics_adapters/renderer_protocol.js
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
-	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/interpreter0f38.rs src/rust/gen/interpreter0f3a.rs
+	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/interpreter0f38.rs src/rust/gen/interpreter0f3a.rs \
+	   build/jit-defaults
+
+# Build-time defaults of the JIT switches (src/rust/jit_switches.rs), for A/B
+# builds: JIT_DEFAULTS="x64_outline=0,ir_fusion=1" make build/v86.wasm. The
+# stamp changes with the value, which rebuilds the Wasm modules.
+export JIT_DEFAULTS
+build/jit-defaults: FORCE
+	@mkdir -p build
+	@if [ ! -e $@ ] || [ "$$(cat $@)" != "$(JIT_DEFAULTS)" ]; then printf '%s' "$(JIT_DEFAULTS)" > $@; fi
+
+.PHONY: FORCE
+FORCE:
 
 CORE_FILES:=$(addprefix src/,$(CORE_FILES))
 LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
@@ -590,6 +602,7 @@ performance-recording-tests: build/performance-recording-test
 
 api-tests: build/v86-debug.wasm
 	./tests/api/clean-shutdown.js
+	./tests/api/jit-switches.js
 	./tests/api/destroy-during-init.js
 	./tests/api/state.js
 	./tests/api/sb16-state.js
@@ -904,6 +917,11 @@ jit-gate:
 
 jit-gate-full:
 	node tools/jit_gate.mjs --full $(JIT_GATE_ARGS)
+
+# The JIT switch registry (src/rust/jit_switches.rs, src/jit_switches.js)
+.PHONY: jit-switch-tests
+jit-switch-tests: build/v86-debug.wasm
+	./tests/api/jit-switches.js
 
 # build/v86.wasm of a base revision (default HEAD) against the working tree's,
 # function by function (docs/arm64-virt-android16-plan.md P0.7)

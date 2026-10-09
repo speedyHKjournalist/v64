@@ -381,9 +381,18 @@ pub(super) fn tier0() -> bool { unsafe { TIER0 } }
 /// XP boot, neighbors rarely are the pages execution chains to (chains -5%)
 /// while code grew 38% and boot slowed 7%; only page-crossing loops gain.
 static mut T0_RANGES: bool = false;
+/// Recompile a page function with the neighbors and partners its links go to
+/// (want_range, want_partner). The switch ir_t0_clusters turns these
+/// multi-page functions off, to measure what they bring
+/// (docs/jit-unification-plan.md P0.13).
+static mut T0_CLUSTERS: bool = true;
+pub(crate) fn set_t0_clusters(enabled: bool) { unsafe { T0_CLUSTERS = enabled } }
 /// Frequent links from the page function of the page at `base` to the
 /// page of `target` (not a neighbor): recompile it with that page.
 pub(super) fn want_partner(base: u32, target: u32, cs_base: u32, default_32: bool) {
+    if !unsafe { T0_CLUSTERS } {
+        return;
+    }
     SCHEDULER.try_lock().unwrap().pages.want_partner(
         PageKey {
             base,
@@ -396,6 +405,9 @@ pub(super) fn want_partner(base: u32, target: u32, cs_base: u32, default_32: boo
 /// Frequent links from the page function of the page at `base` to a
 /// neighbor page: recompile it with its neighbors (see tier0::range).
 pub(super) fn want_range(base: u32, cs_base: u32, default_32: bool) {
+    if !unsafe { T0_CLUSTERS } {
+        return;
+    }
     SCHEDULER.try_lock().unwrap().pages.want_range(PageKey {
         base,
         cs_base,
@@ -467,6 +479,25 @@ pub unsafe fn ir_auto_set_tier0(enabled: u32) -> bool {
     s.page_threshold = if TIER0 { 50_000 } else { 512 };
     s.pages.set_tier0(TIER0);
     true
+}
+/// The values of this module's switches (crate::jit_switches)
+pub unsafe fn switch_value(name: &str) -> Option<u32> {
+    let s = SCHEDULER.try_lock().ok()?;
+    Some(match name {
+        "ir_tier0" => TIER0 as u32,
+        "ir_page_mode" => s.page_mode as u32,
+        "ir_page_threshold" => s.page_threshold,
+        "ir_t0_ranges" => T0_RANGES as u32,
+        "ir_t0_clusters" => T0_CLUSTERS as u32,
+        "ir_hot_filter" => s.hot_filter as u32,
+        "ir_hot_capacity" => s.hot_capacity as u32,
+        "ir_heat_steps" => HEAT_STEPS_PER_VISIT,
+        "ir_direct_tier2" => DIRECT_T2 as u32,
+        "ir_idle_mode" => s.idle_mode as u32,
+        "ir_idle_sync_ms" => s.sync_after as u32,
+        "ir_resident_promotion" => s.resident_promotion as u32,
+        _ => return None,
+    })
 }
 unsafe fn cold() -> bool { !cache::busy() && jit::ir_cache_quiescent() }
 /// Grow the Wasm heap once for the compiler's working set: every later

@@ -944,6 +944,19 @@ pub fn x64_page_set_enabled(enabled: bool) {
         reset();
     }
 }
+
+/// The values of x64_page_set_enabled, x64_page_set_chaining and
+/// x64_page_set_recompile_misses (crate::jit_switches)
+pub fn switch_value(name: &str) -> Option<u32> {
+    unsafe {
+        Some(match name {
+            "x64_page" => rt().enabled as u32,
+            "x64_chaining" => CHAINING as u32,
+            "x64_recompile_misses" => RECOMPILE_MISSES,
+            _ => return None,
+        })
+    }
+}
 #[no_mangle]
 pub fn x64_page_stat(field: u32) -> f64 {
     let r = rt();

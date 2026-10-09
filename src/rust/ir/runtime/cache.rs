@@ -1217,6 +1217,21 @@ pub fn dirty_page(page: u32) {
     }
 }
 unsafe fn cold() -> bool { !busy() && jit::ir_cache_quiescent() }
+/// The values of this module's switches (crate::jit_switches)
+pub unsafe fn switch_value(name: &str) -> Option<u32> {
+    let cache = CACHE.try_lock().ok()?;
+    Some(match name {
+        "ir_cache_capacity" => cache.capacity as u32,
+        "ir_fast_validation" => cache.fast_validation as u32,
+        "ir_warm_chaining" => cache.warm_chaining as u32,
+        "ir_fusion" => cache.fusion_enabled as u32,
+        "ir_merged_validation" => MERGED_VALIDATION_ENABLED as u32,
+        "ir_missing_hint" => MISSING_HINT_ENABLED as u32,
+        "ir_poll_reuse" => POLL_REUSE_ENABLED as u32,
+        "ir_strict_validation" => STRICT_VALIDATION as u32,
+        _ => return None,
+    })
+}
 /// Diagnostic A/B switch; disabling restores full pre/post-fetch validation.
 #[no_mangle]
 pub unsafe fn ir_cache_set_fast_validation(enabled: u32) -> bool {

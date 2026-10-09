@@ -2,6 +2,7 @@ import { wasm_fallback_path } from "./wasm_paths.js";
 import { instantiate_v86, memory_import } from "../parallel/relocate.js";
 import { default_worker_url, parallel_unsupported_reason } from "../parallel/machine.js";
 import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
+import { get_jit_switches } from "../jit_switches.js";
 import { v86 } from "../main.js";
 import { LOG_CPU, LOG_VGA, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { get_rand_int, load_file, read_sized_string_from_mem } from "../lib.js";
@@ -436,6 +437,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings["cpu_type"] = this.cpu_type;
     settings["cpu_features"] = options["cpu_features"];
     settings["cpu_features_unreleased"] = options["cpu_features_unreleased"]; // (tests and development)
+    settings["jit_switches"] = options["jit_switches"]; // (src/jit_switches.js)
     settings.disable_jit = options.disable_jit;
     settings["jit_backend"] = options["jit_backend"];
     settings["ir_region_budget"] = options["ir_region_budget"];
@@ -991,6 +993,8 @@ V86.prototype.continue_init = async function(emulator, options)
             {
                 if(settings[key] !== undefined) worker_settings[key] = settings[key];
             }
+            // the JIT switches set on the machine (src/jit_switches.js)
+            worker_settings["jit_switches"] = get_jit_switches(this.v86.cpu.wm.exports, this.v86.cpu.wasm_memory, true);
             // (the same compiler policy as the machine's core, see CPU.prototype.init)
             worker_settings["disable_jit"] = !!settings.disable_jit || !settings.experimental_smp_jit;
             await this.v86.cpu.start_parallel({ bytes, settings: worker_settings,

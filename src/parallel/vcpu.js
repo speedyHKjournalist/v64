@@ -19,6 +19,7 @@ import { relocate } from "./relocate.js";
 import { PM_TIMER_TICKS_PER_MS, pm_timer_shared_max } from "../acpi.js";
 import { ExtendedStore } from "../extended_memory.js";
 import * as C from "./control.js";
+import { set_jit_switches } from "../jit_switches.js";
 
 const CORE_EVENT_INIT = 1;
 const CORE_EVENT_SIPI = 2;
@@ -156,6 +157,10 @@ export async function run_vcpu(init, post, handle)
     // crate::cpu::cpu::copy_machine_configuration)
     exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
+    // the machine's JIT switches (src/browser/starter.js), over what
+    // configure_jit_backend set; later changes arrive through
+    // crate::jit_switches::copy_from_machine
+    set_jit_switches(exports, memory, settings["jit_switches"], "jit_switches (from the machine)");
     cpu.mem8 = view(Uint8Array, memory, init.mem8, init.memory_size);
     cpu.mem32s = view(Uint32Array, memory, init.mem8, init.memory_size >> 2);
     exports["parallel_set_active"](true);
