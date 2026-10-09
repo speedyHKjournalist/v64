@@ -4,8 +4,8 @@
 //
 // make jit-gate, before each commit:
 //   git diff --check, state-layout-check, warning-free `cargo check` of the
-//   plain and the parallel build, rustfmt, eslint (when installed: ESLINT or
-//   node_modules/.bin/eslint), the region freeze (P7.6) and, when something
+//   plain and the parallel build, rustfmt, eslint (when installed: ESLINT,
+//   node_modules/.bin/eslint or npx's cache), the region freeze (P7.6) and, when something
 //   that feeds build/v86.wasm changed, core-split-check (ARM64 plan P0.7);
 //   then ir-tier0-tests when IR or shared JIT code changed and
 //   x64-page-tier-tests when x64 or shared JIT code changed. The changes are
@@ -23,6 +23,7 @@
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import url from "node:url";
 
@@ -65,7 +66,18 @@ const feeds_core = any(/^src\/rust\//, /^Cargo\.(toml|lock)$/, /^\.cargo\//, /^g
 const ir_tests = full || any(/^src\/rust\/ir\//, ...SHARED);
 const x64_tests = full || any(/^src\/rust\/x64\//, ...SHARED);
 
-const eslint = process.env.ESLINT || (fs.existsSync(path.join(ROOT, "node_modules/.bin/eslint")) ? path.join(ROOT, "node_modules/.bin/eslint") : null);
+// eslint: ESLINT, the project's node_modules, or the copy npx cached most
+// recently (~/.npm/_npx/*/node_modules/eslint)
+function find_eslint()
+{
+    if(process.env.ESLINT) return process.env.ESLINT;
+    const local = path.join(ROOT, "node_modules/.bin/eslint");
+    if(fs.existsSync(local)) return local;
+    const cache = path.join(os.homedir(), ".npm/_npx");
+    const copies = fs.existsSync(cache) ? fs.readdirSync(cache).map(d => path.join(cache, d, "node_modules/eslint/bin/eslint.js")).filter(f => fs.existsSync(f)) : [];
+    return copies.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] || null;
+}
+const eslint = find_eslint();
 const eslint_command = eslint && [...(eslint.endsWith(".js") ? ["node", eslint] : [eslint]), "src", "tests", "gen", "lib", "examples", "tools"];
 const warning_free = { RUSTFLAGS: "-D warnings" };
 const cargo_check = ["check", "--release", "--target", "wasm32-unknown-unknown"];

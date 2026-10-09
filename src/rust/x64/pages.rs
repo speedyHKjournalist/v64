@@ -11,6 +11,7 @@
 use super::{extended, jac, memory, pagegen, paging, physical, state};
 use crate::cpu::{apic, cpu, execution, global_pointers as gp};
 use crate::page::Page;
+use crate::step_profile;
 use std::collections::{HashMap, HashSet};
 
 mod js {
@@ -480,7 +481,7 @@ fn note_unserved(r: &mut Runtime, page: u32, offset: u16) -> bool {
         state.entry_count += 1;
         state.misses += 1;
         r.stats[ENTRIES] += 1;
-        if unsafe { (*(&raw const STEP_PROFILE)).is_some() } && !is_extended(page) {
+        if step_profile::enabled() && !is_extended(page) {
             unsafe { ACCESS_REFUSED[6 + late_entry_kind(page, offset)] += 1 };
         }
     }
@@ -593,10 +594,10 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     match exit {
         pagegen::EXIT_RETRY => {
             r.stats[RETRIES] += 1;
-            if (*(&raw const STEP_PROFILE)).is_some() && *gp::mxcsr & 0x20 == 0 {
+            if step_profile::enabled() && *gp::mxcsr & 0x20 == 0 {
                 ACCESS_REFUSED[5] += 1;
             }
-            profile_instruction(0x20000);
+            profile_instruction(true);
             // (native code resumes after the interpreted instruction: an
             // unserved entry, noted when the function steps there)
             cpu::run_long_instruction();
@@ -1120,14 +1121,18 @@ unsafe fn context() -> Context {
 /// with MXCSR.PE clear; then late entries (unserved offsets seen twice) by
 /// kind: after a call, 16-byte aligned, other.
 static mut ACCESS_REFUSED: [u64; 9] = [0; 9];
-/// Opt-in histogram of stepped instructions by opcode (x64_page_profile).
-static mut STEP_PROFILE: Option<Vec<u32>> = None;
+/// The step profile (crate::step_profile, the JIT switch step_profile): on,
+/// an empty one; off, dropped
 #[no_mangle]
-pub unsafe fn x64_page_profile(enabled: bool) { STEP_PROFILE = enabled.then(|| vec![0; 0x40000]); }
-/// Steps of opcode `key` (one-byte opcodes 0..255, 0F xx as 0x100 | xx,
-/// 0F 38/3A xx as 0x200/0x300 | xx; VEX forms as 0x4000 | L << 12 | pp << 10
-/// | map << 8 | opcode; +0x10000 with a REP prefix; retries at key +
-/// 0x20000), or with key >= 0x40000 the refused access counter key - 0x40000.
+pub unsafe fn x64_page_profile(enabled: bool) {
+    step_profile::set_enabled(false);
+    step_profile::set_enabled(enabled);
+}
+/// Steps of this tier by its earlier key (bits 0-17 of StepKey: one-byte
+/// opcodes 0..255, 0F xx as 0x100 | xx, 0F 38/3A xx as 0x200/0x300 | xx; VEX
+/// forms as 0x4000 | L << 12 | pp << 10 | map << 8 | opcode; +0x10000 with a
+/// REP prefix; retries at key + 0x20000), or with key >= 0x40000 the refused
+/// access counter key - 0x40000.
 #[no_mangle]
 pub unsafe fn x64_page_profile_get(key: u32) -> f64 {
     if key >= 0x40000 {
@@ -1136,21 +1141,19 @@ pub unsafe fn x64_page_profile_get(key: u32) -> f64 {
             .copied()
             .unwrap_or(0) as f64;
     }
-    (*(&raw const STEP_PROFILE))
-        .as_ref()
-        .map_or(0.0, |p| p.get(key as usize).copied().unwrap_or(0) as f64)
+    step_profile::x64_legacy_count(key) as f64
 }
 /// With the step profile: stepped instructions by RIP (x64_page_step_rips)
 static mut STEP_RIPS: Option<HashMap<u64, u32>> = None;
 unsafe fn profile_step() {
-    if (*(&raw const STEP_PROFILE)).is_none() {
+    if !step_profile::enabled() {
         return;
     }
     let rips = (*(&raw mut STEP_RIPS)).get_or_insert_with(HashMap::new);
     if rips.len() < 1 << 16 {
         *rips.entry(state::read_rip()).or_default() += 1;
     }
-    profile_instruction(0);
+    profile_instruction(false);
 }
 /// The `n`th most stepped RIP (sorted when n is 0) and its count; clears
 /// the histogram when `n` is past its end
@@ -1180,58 +1183,35 @@ pub unsafe fn x64_page_step_rip(n: u32, high: bool, count: bool) -> f64 {
         (rip & 0xFFFF_FFFF) as f64
     }
 }
-unsafe fn profile_instruction(base: usize) {
-    let Some(profile) = (*(&raw mut STEP_PROFILE)).as_mut()
-    else {
+/// A step (or with `retry`, a retried instruction) at RIP into the step
+/// profile: its bytes as far as they translate to RAM without side effects
+unsafe fn profile_instruction(retry: bool) {
+    if !step_profile::enabled() {
         return;
-    };
+    }
     let rip = state::read_rip();
     let mut bytes = [0u8; 15];
-    for (i, b) in bytes.iter_mut().enumerate() {
+    let mut n = 0;
+    while n < 15 {
         let Some(t) =
-            memory::snapshot_translation(rip.wrapping_add(i as u64), paging::Access::Execute)
+            memory::snapshot_translation(rip.wrapping_add(n as u64), paging::Access::Execute)
         else {
-            return;
+            break;
         };
         let Ok(page) = physical::ram_page(t.physical.0 & !4095)
         else {
-            return;
+            break;
         };
-        *b = *crate::cpu::memory::mem8.add((page.backing + (t.physical.0 & 4095) as u32) as usize);
+        bytes[n] =
+            *crate::cpu::memory::mem8.add((page.backing + (t.physical.0 & 4095) as u32) as usize);
+        n += 1;
     }
-    let mut at = 0;
-    let mut rep = 0;
-    while at < 14
-        && matches!(bytes[at], 0x26 | 0x2E | 0x36 | 0x3E | 0x40..=0x4F | 0x64..=0x67 | 0xF0 | 0xF2 | 0xF3)
-    {
-        if matches!(bytes[at], 0xF2 | 0xF3) {
-            rep = 0x10000;
-        }
-        at += 1;
-    }
-    let key = match (bytes[at], bytes[at + 1]) {
-        // (VEX: L, pp, map and opcode)
-        (0xC5, b) if at + 2 <= 14 => {
-            0x4000
-                | (b as usize >> 2 & 1) << 12
-                | (b as usize & 3) << 10
-                | 1 << 8
-                | bytes[at + 2] as usize
-        },
-        (0xC4, b) if at + 3 <= 14 => {
-            let c = bytes[at + 2] as usize;
-            0x4000
-                | (c >> 2 & 1) << 12
-                | (c & 3) << 10
-                | (b as usize & 3) << 8
-                | bytes[at + 3] as usize
-        },
-        (0x0F, 0x38) => 0x200 | bytes[(at + 2).min(14)] as usize,
-        (0x0F, 0x3A) => 0x300 | bytes[(at + 2).min(14)] as usize,
-        (0x0F, b) => 0x100 | b as usize,
-        (b, _) => b as usize,
-    };
-    profile[base + (key | rep)] += 1;
+    step_profile::note(step_profile::x86_key(
+        &bytes[..n],
+        state::mode(),
+        step_profile::Stepper::X64Page,
+        retry,
+    ));
 }
 
 #[no_mangle]

@@ -14,6 +14,7 @@
 
 use crate::cpu::cpu;
 use crate::ir::runtime::{cache, schedule, tier0};
+use crate::step_profile;
 use crate::x64::{pagegen, pages};
 
 pub struct Switch {
@@ -250,6 +251,17 @@ pub const SWITCHES: &[Switch] = &[
         default: 0,
         set: |v| unsafe { cache::ir_cache_set_strict_validation(v) },
         get: cache::switch_value,
+    },
+    // measurement: the step profile of both tiers (crate::step_profile)
+    Switch {
+        name: "step_profile",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { step_profile::set_enabled(on) })
+                .is_some()
+        },
+        get: |_| Some(step_profile::enabled() as u32),
     },
 ];
 

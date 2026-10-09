@@ -5,9 +5,12 @@
 // switches) and what the JITs did, with the definitions of cross-phase rule 3:
 // retired instructions are core_statistics_get(core, 0) (a REP instruction
 // counts once, a faulting one not at all); the x64 page tier's counters
-// (x64_page_stat), IR Tier-0's and the regions' (CPU.get_jit_info).
+// (x64_page_stat), IR Tier-0's and the regions' (CPU.get_jit_info); with the
+// JIT switch step_profile on, the 40 most stepped instructions (StepKey v1,
+// tools/step_profile.mjs).
 
 import { get_jit_switches } from "../../src/jit_switches.js";
+import { step_profile } from "../step_profile.mjs";
 
 // x64_page_stat(index), crate::x64::pages
 const X64_FIELDS = ["compiled", "native_retired", "retries", "unknown_exits", "steps", "invalidated", "entries",
@@ -37,14 +40,16 @@ export function jit_stats(emulator, extra = {})
         X64_FIELDS.forEach((name, index) => { x64[name] = exports["x64_page_stat"](index); });
         for(const [index, name] of Object.entries(X64_EXTRA)) x64[name] = exports["x64_page_stat"](Number(index));
     }
+    const switches = get_jit_switches(exports, cpu.wasm_memory);
     return {
         version: 1,
         ...extra,
-        switches: get_jit_switches(exports, cpu.wasm_memory),
+        switches,
         retired,
         retired_total: retired.reduce((sum, n) => sum + n, 0),
         x64,
         ir: cpu.get_jit_info()["ir"],
+        ...switches["step_profile"] ? { steps: step_profile(exports, 40) } : {},
     };
 }
 

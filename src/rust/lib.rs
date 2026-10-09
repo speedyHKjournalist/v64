@@ -28,6 +28,7 @@ mod prefix;
 mod simd_corpus;
 mod softfloat;
 mod state_flags;
+mod step_profile;
 mod wasmgen;
 mod x87_profiler;
 mod zstd;

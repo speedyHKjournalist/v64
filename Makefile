@@ -43,6 +43,7 @@ ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit
 	node tests/ir/differential/sse_fp_tracking.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/tier0_fetch_fault.mjs
 	node tests/ir/differential/tier0_irq_slow.mjs
+	node tests/ir/differential/tier0_step_profile.mjs
 
 .PHONY: glbridge test-glbridge
 glbridge:
@@ -994,6 +995,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	node tests/x64/frame_buffer.mjs
 	node tests/x64/compat_jit.mjs
 	node tests/x64/initial_ram.mjs
+	node tests/x64/step_profile.mjs
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=3 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs

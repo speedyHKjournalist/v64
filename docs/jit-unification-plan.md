@@ -1052,3 +1052,29 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - `tools/wasm_diff.mjs` 的函数配对改为先看代码：插入一个闭包会给其后的闭包重新编号，同名（含哈希）的
   `FnOnce::call_once` 换成别的闭包，原来按名字配对会把它们报成改变；改名的函数（`execute` 成为 `execute_any`）
   按相同代码配对。本次改动按函数比较：17 个函数改变（都在改动的路径上），3 个新增，1 个删除。
+
+**P0.5 StepKey v1 与单步存储，P0.8 的 `--fallbacks`，2026-10-09。**
+
+- `src/rust/step_profile.rs`：一个存储（键到次数的哈希表），Tier-0 的 `ir_t0_step` 与 x64 page tier 的单步、重试都记进去。
+  默认关，注册表开关 `step_profile`（P0.5 表中的 `STEP_PROFILE`）；关着时每次单步只多一次判断。导出
+  `step_profile_snapshot`、`step_profile_key`、`step_profile_count`、`step_profile_get`、`step_profile_reset`。
+- StepKey v1（u32）：opcode、opcode map、VEX 的 pp 与 L、F2/F3、66 与 REX.W 前缀、被 ModRM.reg 扩展的 opcode
+  （组与 x87）带 reg、重试位、模式（`x64::state::ExecutionMode` 的 7 种）、执行者（Tier-0、x64 page tier）、
+  ISA（x86 为 0，ARM64 计划附录 D 第 12 项）。第 0–17 位就是 x64 page tier 原来的键，
+  `x64_page_profile_get` 按它从同一存储求和，Windows 与 Linux 测试脚本不用改。完整布局见源文件，名字由
+  `tools/step_profile.mjs` 给出（`"prot32 tier0 0F A2"`）。
+- 字节读取：32 位与兼容模式下跨页的字节经 `translate_address_read_no_side_effects` 读取，只读 RAM。Tier-0
+  原来的两字节直方图 `ir_t0_steps`（测试在用，保持常开）在 EIP 位于页末字节时从下一个物理页读第二个字节，
+  已一并改正。
+- P0.8 的剩余项：`run.mjs --fallbacks` 不再在计时轮次里统计，而是计时之后多跑一轮不计时的、打开单步存储，
+  打印最常单步的 StepKey；`JIT_STATS=1` 的记录在开关打开时带上前 40 个键。
+- 测试：`tests/ir/differential/tier0_step_profile.mjs`（进 `ir-tier0-tests`；页末字节的 IN 后面接一个重新映射
+  的页）与 `tests/x64/step_profile.mjs`（进 `x64-page-tier-tests`；CPUID 与 REX.W CPUID 各自成键，旧接口
+  求和）；Rust 单元测试覆盖前缀、REX、VEX 与 LES/LDS 的区分、组 opcode。文档在 [profiling.md](profiling.md)。
+- R 级（bench，相对 P3.0b）：3 个 quick 会话几何均值 1.013，复测后 1.021。`--runs 7` 复测后 `541.recursion` 0.94、
+  `718.avx.ymm` 0.89 仍偏低，但它们每轮只有 9–24 ms，差一毫秒就是 5–10%；按 4 倍工作量（`--scale 4`，每轮
+  35–90 ms）复测为 1.01 与 1.00。`gate.mjs` 因此对每轮不到 40 ms 的项建议带 `--scale 4` 复测，`--retest` 也可以
+  重复给出（后给的文件覆盖先给的）。
+- `make jit-gate` 现在也会在 npx 的缓存里找 eslint（`~/.npm/_npx/*/node_modules/eslint`），不设 `ESLINT` 也会跑。
+- 观察：`712.sse4.int` 在两次比较里分别是 1.30× 与 2.31×，与改动无关，像是双峰（编译时机或缓存），留待 P0.1 的
+  基线测量里查明。

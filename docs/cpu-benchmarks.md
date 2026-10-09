@@ -17,10 +17,10 @@ node tests/bench/run.mjs --baseline build/older-ir.wasm   # reference arm: anoth
 node tests/bench/run.mjs --xp windowsxp.img --xp-runs 3   # add the XP boot benchmark
 node tests/bench/run.mjs --ir-setup ir_t0_set_ranges=1     # call IR exports after boot, on every arm
 node tests/bench/report.mjs build/bench/results-new.json build/bench/results-old.json
-node tests/bench/run.mjs --fallbacks                       # list the opcodes Tier-0 interprets
+node tests/bench/run.mjs --fallbacks                       # the instructions the JITs step (one more round, not timed)
 node tests/bench/run.mjs --switches-a ir_fusion=1 --switches-b ir_fusion=0   # two JIT configurations of one core
 node tests/bench/compare.mjs --switches-a x64_outline=0 --sessions 3 --level R  # sessions, then the gate
-node tests/bench/gate.mjs --level R --retest retest.json session1.json session2.json session3.json
+node tests/bench/gate.mjs --level R --retest retest.json session1.json session2.json session3.json  # --retest may repeat
 JIT_STATS=1 node tests/bench/run.mjs --filter 708   # add a JIT statistics record per benchmark and arm
 ```
 
@@ -61,9 +61,11 @@ session moves single benchmarks by 5–15% even between identical cores.
   thresholds (R: suite geometric mean ≥ 0.99, each ≥ 0.97; F: each `--target`
   ≥ 1.05, suite ≥ 1.00; S: the same-source members ≥ 1.00, each ≥ 0.85; D:
   suite ≥ 1.00, each ≥ 0.95). For R it prints the `--runs 7` retest of the
-  benchmarks below 0.97; `--retest file.json` puts the retest's ratios in
-  their place. `--aa` reports the noise of sessions that ran one core
-  against itself.
+  benchmarks below 0.97, with `--scale 4` when their runs last under 40 ms
+  (a millisecond is 5–10% of a quick run of the shortest ones);
+  `--retest file.json` puts the retest's ratios in their place (repeated,
+  the last file with a benchmark counts). `--aa` reports the noise of
+  sessions that ran one core against itself.
 - `tests/bench/compare.mjs` runs `--sessions` sessions of two JIT switch
   configurations (`--switches-a`, `--switches-b`) of one core and gates them;
   `--aa` measures the noise first.

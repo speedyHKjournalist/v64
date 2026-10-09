@@ -1222,3 +1222,5 @@ flowchart TD
   `codegen-units`。
 - 本机 `build/softfloat.o` 与 `build/zstddeclib.o` 只在源码变化时重建，可能出自旧 clang；比较脚本让两边链接同一份。
   P1.0 拆分核心时，ARM 核心的 C 目标文件同样要注意这一点。
+- 附录 D 第 12 项（2026-10-09）：JIT 计划 P0.5 的 StepKey v1 第 30–31 位是 ISA 字段，x86 为 0，A64 接入时用 1，
+  不必升级键的版本；第 28–29 位是单步的执行者（Tier-0、x64 page tier），A64 page tier 另取一个值。

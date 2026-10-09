@@ -56,8 +56,26 @@ pub unsafe fn ir_t0_step(expected_next: u32) -> i32 {
         return STEP_EXIT; // the fetch fault has been delivered
     };
     let opcode = *memory::mem8.add(physical as usize) as i32;
-    let key = opcode as usize | (*memory::mem8.add(physical as usize + 1) as usize) << 8;
+    let address = *gp::instruction_pointer as u32;
+    let second = if address & 0xFFF != 0xFFF {
+        *memory::mem8.add(physical as usize + 1)
+    }
+    else {
+        // (the next byte is on the next page: translated without side effects)
+        let mut bytes = [0; 15];
+        let n = crate::step_profile::read_legacy(address, physical, &mut bytes);
+        if n > 1 {
+            bytes[1]
+        }
+        else {
+            0
+        }
+    };
+    let key = opcode as usize | (second as usize) << 8;
     STEPS[key] = STEPS[key].wrapping_add(1);
+    if crate::step_profile::enabled() {
+        crate::step_profile::note_tier0(address, physical);
+    }
     *gp::instruction_pointer += 1;
     // The page function accounts for the retired instruction itself.
     crate::cpu::execution::begin_instruction();
@@ -210,8 +228,9 @@ pub unsafe fn ir_t0_fma_calls() -> u32 { FMA_CALLS }
 #[no_mangle]
 pub unsafe fn ir_t0_fma_calls_reset() { FMA_CALLS = 0; }
 
-/// Interpreter steps by their first two instruction bytes (a diagnostic of
-/// missing templates, see tests/bench/run.mjs --fallbacks).
+/// Interpreter steps by their first two instruction bytes, prefixes included
+/// (a diagnostic of missing templates that tests read; the step profile,
+/// crate::step_profile, decodes the instruction and covers the x64 page tier).
 static mut STEPS: [u32; 0x10000] = [0; 0x10000];
 #[no_mangle]
 pub unsafe fn ir_t0_steps(key: u32) -> u32 { STEPS[key as usize & 0xFFFF] }

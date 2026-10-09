@@ -10,7 +10,9 @@
 //            (the JIT switches of the arm and of the baseline, over
 //            JIT_SWITCHES; --switches-b without --baseline compares two
 //            configurations of one core, see tests/bench/compare.mjs)
-//        [--fallbacks]   (IR: print the instructions most often interpreted)
+//        [--fallbacks]   (print the instructions the JITs most often leave to
+//            the interpreter: the step profile of an extra round that is not
+//            timed, tools/step_profile.mjs)
 //
 // Build the suite first: node tools/bench/build.mjs (make bench-build).
 //
@@ -26,9 +28,10 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { spawnSync, execSync } from "node:child_process";
 import { V86 } from "../../build/libv86.mjs";
-import { parse_jit_switches } from "../../src/jit_switches.js";
+import { parse_jit_switches, set_jit_switches } from "../../src/jit_switches.js";
 import { jit_switches_from_env } from "../lib/jit_switches.mjs";
 import { jit_stats, jit_stats_enabled } from "../../tools/bench/jit_stats.mjs";
+import { step_profile } from "../../tools/step_profile.mjs";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 process.chdir(root);
@@ -160,7 +163,6 @@ for(const bench of manifest.benchmarks) {
                 for(const m of machines) { const s = await execute(m, image, iterations); note(m.arm, s); row.arms[m.arm.label].warmup_ms.push(s.ms); }
                 if(w >= 3 && machines.every(m => { const t = row.arms[m.arm.label].warmup_ms.slice(-2); return Math.abs(t[0] - t[1]) <= 0.05 * Math.min(...t); })) break;
             }
-            if(fallbacks) machines[0].e.ir_t0_steps_reset();
             for(let r = 0; r < runs; r++) for(const m of r % 2 ? [...machines].reverse() : machines) {
                 const s = await execute(m, image, iterations);
                 note(m.arm, s);
@@ -171,16 +173,23 @@ for(const bench of manifest.benchmarks) {
             {
                 for(const m of machines) row.arms[m.arm.label].jit_stats = jit_stats(m.vm, { script: "bench", benchmark: bench.name, arm: m.arm.label, wasm: m.arm.wasm });
             }
+            // (docs/jit-unification-plan.md P0.8: the step profile slows
+            // every step, so it runs in one more round, not timed)
+            if(fallbacks) {
+                const m = machines[0], memory = m.cpu.wasm_memory;
+                set_jit_switches(m.e, memory, { step_profile: 1 }, "--fallbacks");
+                m.e.step_profile_reset();
+                const s = await execute(m, image, iterations);
+                note(m.arm, s);
+                const steps = step_profile(m.e);
+                set_jit_switches(m.e, memory, { step_profile: 0 }, "--fallbacks");
+                row.arms[m.arm.label].steps = steps.slice(0, 40);
+                const share = steps.reduce((sum, r) => sum + r.count, 0) / s.instructions;
+                console.log(`  stepped ${(100 * share).toFixed(1)}%: ` + steps.slice(0, 8).map(r =>
+                    `${r.name} ${(100 * r.count / s.instructions).toFixed(1)}%`).join(", "));
+            }
         }
         finally {
-            if(fallbacks && machines[0]?.e.ir_t0_steps) {
-                const e = machines[0].e, total = row.arms.ir.instructions * runs, top = [];
-                for(let key = 0; key < 0x10000; key++) { const n = e.ir_t0_steps(key); if(n) top.push([n, key]); }
-                top.sort((a, b) => b[0] - a[0]);
-                const share = top.reduce((s, [n]) => s + n, 0) / total;
-                console.log(`  interpreted ${(100 * share).toFixed(1)}%: ` + top.slice(0, 8).map(([n, key]) =>
-                    `${(key & 255).toString(16).padStart(2, "0")} ${(key >> 8).toString(16).padStart(2, "0")} ${(100 * n / total).toFixed(1)}%`).join(", "));
-            }
             for(const m of machines) await m.vm.destroy();
         }
         const reference = row.arms.baseline;

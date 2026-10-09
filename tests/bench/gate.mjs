@@ -6,9 +6,10 @@
 // (baseline time / arm time; above 1 is faster) is judged:
 //
 //   --level R  the suite's geometric mean >= 0.99 and each benchmark >= 0.97.
-//              A benchmark below 0.97 is retested with --runs 7 (the command
-//              is printed); --retest file.json replaces its ratio by the
-//              retest's.
+//              A benchmark below 0.97 is retested with --runs 7, and at 4
+//              times the work when its runs last under 40 ms (the command is
+//              printed); --retest file.json replaces its ratio by the
+//              retest's (repeated: the last file with the benchmark).
 //   --level F  each --target benchmark >= 1.05 and the suite >= 1.00.
 //   --level S  the same-source members: int, memory and control benchmarks
 //              whose instruction and data ratios (x86-64 / i686, fields of
@@ -22,7 +23,7 @@
 // sessions are judged with a warning. Exit status 0 when the gate passes.
 //
 // Usage: tests/bench/gate.mjs --level R|F|S|D [--target name,...] [--arm ir]
-//        [--retest retest.json] [--json out.json] [--aa] session.json...
+//        [--retest retest.json]... [--json out.json] [--aa] session.json...
 
 import fs from "node:fs";
 
@@ -38,7 +39,10 @@ const SAME_SOURCE_EXCLUDED = new Set(["563.memops"]);
 const args = process.argv.slice(2);
 const value = name => { const i = args.indexOf(name); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
 const flag = name => { const i = args.indexOf(name); if(i >= 0) args.splice(i, 1); return i >= 0; };
-const level = value("--level"), arm = value("--arm") || "ir", retest_file = value("--retest"), json_file = value("--json");
+const level = value("--level"), arm = value("--arm") || "ir", json_file = value("--json");
+// (--retest may repeat: a later file's ratio replaces an earlier one's)
+const retest_files = [];
+for(let file; (file = value("--retest")) !== undefined;) retest_files.push(file);
 const targets = (value("--target") || "").split(",").filter(Boolean);
 const aa = flag("--aa");
 const files = args;
@@ -65,8 +69,9 @@ function collect(paths)
         {
             const a = r.arms?.[arm];
             if(r.error || !a || !(a.warm_ratio > 0)) continue;
-            if(!benchmarks.has(r.name)) benchmarks.set(r.name, { category: r.category, ratios: [], instruction_ratio: r.instruction_ratio, data_ratio: r.data_ratio });
+            if(!benchmarks.has(r.name)) benchmarks.set(r.name, { category: r.category, ratios: [], ms: [], instruction_ratio: r.instruction_ratio, data_ratio: r.data_ratio });
             benchmarks.get(r.name).ratios.push(a.warm_ratio);
+            if(a.warm > 0) benchmarks.get(r.name).ms.push(a.warm);
         }
     }
     return benchmarks;
@@ -95,7 +100,8 @@ if(aa)
 }
 
 const rules = LEVELS[level];
-const retest = retest_file ? collect([retest_file]) : new Map();
+const retest = new Map();
+for(const file of retest_files) for(const [name, b] of collect([file])) retest.set(name, b);
 let members = [...sessions.entries()];
 if(level === "S")
 {
@@ -127,7 +133,7 @@ for(const name of targets)
 if(level === "F" && !targets.length) problems.push("level F needs --target");
 
 const fewest = Math.min(...rows.map(r => r.sessions));
-console.log(`gate ${level} over ${files.length} session(s), arm "${arm}"${retest_file ? ", retest " + retest_file : ""}`);
+console.log(`gate ${level} over ${files.length} session(s), arm "${arm}"${retest_files.length ? ", retest " + retest_files.join(", ") : ""}`);
 if(fewest < 3) console.log(`warning: ${fewest} session(s) for some benchmarks; the thresholds hold for medians of 3 or more`);
 for(const r of rows)
 {
@@ -135,12 +141,17 @@ for(const r of rows)
     console.log(`  ${r.name.padEnd(18)} ${r.category.padEnd(8)} ${r.ratio.toFixed(3)}${r.retested ? " (retest)" : ""}${mark}`);
 }
 console.log(`geometric mean ${suite.toFixed(3)} (${rows.length} benchmarks)`);
-const retests = rules.retest ? below.filter(r => !r.retested).map(r => r.name.split(".")[0]) : [];
+const retests = rules.retest ? below.filter(r => !r.retested) : [];
 if(retests.length)
 {
     const session = JSON.parse(fs.readFileSync(files[0], "utf8"));
     const wasm = label => session.arms?.find(a => a.label === label)?.wasm;
-    console.log(`retest: node tests/bench/run.mjs --filter '^(${retests.join("|")})' --runs 7 --wasm ${wasm(arm)} --baseline ${wasm("baseline")} --out retest.json`);
+    // Runs of a few milliseconds are decided by a millisecond: a benchmark
+    // shorter than 40 ms per run is retested at 4 times the work (a 718.avx.ymm
+    // at 0.89 over 9 ms runs was 1.00 over 35 ms runs).
+    const short = retests.some(r => median(sessions.get(r.name).ms) < 40);
+    console.log(`retest: node tests/bench/run.mjs --filter '^(${retests.map(r => r.name.split(".")[0]).join("|")})' --runs 7` +
+        `${short ? " --scale 4" : ""} --wasm ${wasm(arm)} --baseline ${wasm("baseline")} --out retest.json`);
 }
 if(json_file) fs.writeFileSync(json_file, JSON.stringify({ level, arm, sessions: files, suite, rows, problems }, null, 1));
 console.log(problems.length ? "FAILED: " + problems.join("; ") : `gate ${level}: passed`);

@@ -242,6 +242,8 @@ export const STATICS = {
     "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
     // the JIT switches set on this instance, the machine's ones a vCPU worker applied, the names
     "jit_switches.rs": { EXPLICIT: "machine", COPIED: "machine", NAMES: "machine" },
+    // the step profile (docs/jit-unification-plan.md P0.5)
+    "step_profile.rs": { PROFILE: "debug", SNAPSHOT: "debug", X64_LEGACY: "debug", X64_LEGACY_STALE: "debug" },
     // the parallel runtime: where this instance's statics are and whether
     // cores run in workers, then machine-wide words reached through machine():
     // wake-ups, yield flags, the locks of locked operations and the code
@@ -275,7 +277,7 @@ export const STATICS = {
         LEGACY_TLB_CACHED: "cache", SLOT_PAGE: "cache", NEXT: "cache" },
     "x64/cache.rs": { CACHE: "cache" },
     // page functions and their bookkeeping; entries re-check the live translation
-    "x64/pages.rs": { RUNTIME: "machine", FAST: "machine", ACTIVE: "scratch", CODE_WRITES: "machine", STEPS: "debug", ACCESS_REFUSED: "debug", STEP_PROFILE: "debug",
+    "x64/pages.rs": { RUNTIME: "machine", FAST: "machine", ACTIVE: "scratch", CODE_WRITES: "machine", STEPS: "debug", ACCESS_REFUSED: "debug",
         // per core, tagged with that core's access cache epoch
         CODE_TLB: "cache", CHAIN: "cache",
         COUNTERS: "debug", CHAINING: "machine", LAST_UNSERVED: "cache", BOUNCE: "scratch", RECOMPILE_MISSES: "machine", TIMING: "debug", TIME_IN_CALLS: "debug", TIME_IN_EXECUTE: "debug", TIME_FIRST_CALLS: "debug", BYTES_COMPILED: "debug",
