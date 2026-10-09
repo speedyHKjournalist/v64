@@ -6312,9 +6312,6 @@ impl Emitter {
             },
         }
     }
-    /// COMISS/UCOMISS/COMISD/UCOMISD. With no NaN or denormal operand the
-    /// interpreter changes no MXCSR bit and sets ZF (equal) or CF (less),
-    /// clearing the other arithmetic flags; anything else is retried.
     /// ROUNDPS/PD/SS/SD (Op::Vround): x86tpl::ops::round on the page tier's
     /// operands, whose refused instructions retry
     fn vround(
@@ -6340,6 +6337,9 @@ impl Emitter {
         crate::x86tpl::ops::round(&mut operands, double, scalar, imm8);
         self.vex_upper(inst, dst);
     }
+    /// COMISS/UCOMISS/COMISD/UCOMISD. With no NaN or denormal operand the
+    /// interpreter changes no MXCSR bit and sets ZF (equal) or CF (less),
+    /// clearing the other arithmetic flags; anything else is retried.
     fn vcompare(&mut self, inst: &Inst, start: u64, double: bool, dst: u8, src: Xmm) {
         self.vector_check(inst, start);
         let bits = if double { 64 } else { 32 };
@@ -6406,9 +6406,9 @@ impl Emitter {
         self.si(FL);
         self.written(ARITH);
     }
-    /// CMPPS/PD/SS/SD (Op::Vcmp): imm8[2:0]'s relation (EQ, LT, LE, UNORD
-    /// false, NEQ, NLT ge, NLE gt, ORD true) over operands neither NaN nor
-    /// denormal; others are retried (they raise IE or DE, or are unordered)
+    /// CMPPS/CMPPD/CMPSS/CMPSD (Op::Vcmp): x86tpl::ops::compare_mask on the
+    /// page tier's operands, whose refused instructions retry (a NaN or
+    /// denormal operand raises IE or DE, or makes them unordered)
     #[allow(clippy::too_many_arguments)]
     fn vcmp(
         &mut self,
@@ -6422,81 +6422,15 @@ impl Emitter {
         src: Xmm,
     ) {
         self.vector_check(inst, start);
-        let bits = if !scalar {
-            128
-        }
-        else if double {
-            64
-        }
-        else {
-            32
+        let mut operands = pagegen_vec::Operands {
+            e: self,
+            inst,
+            start,
+            dst,
+            first,
+            src,
         };
-        match (scalar, src) {
-            (true, Xmm::Mem(a)) => {
-                self.vector_address(&a, bits, false, false, inst);
-                self.gi(HOST);
-                self.load_bits(bits, 0);
-                self.b.simd(0x12); // i64x2.splat: the lane in the low one
-            },
-            _ => self.vector_source(src, inst),
-        }
-        let b = self.b.set_new_local_v128();
-        self.c32(Self::xmm(first) as i32);
-        self.b.simd_memory(0x00, 0);
-        let a = self.b.set_new_local_v128();
-        crate::x86tpl::native_fp::operands_refused(
-            &mut self.b,
-            double,
-            if scalar {
-                crate::x86tpl::native_fp::Lanes::Scalar
-            }
-            else {
-                crate::x86tpl::native_fp::Lanes::Packed
-            },
-            [&a, &b],
-            [false, false],
-        );
-        self.b.if_void();
-        self.leave_to(self.f().retry, start);
-        self.b.block_end();
-        match predicate & 7 {
-            3 => self.b.simd_zero(),
-            7 => {
-                self.c32(-1);
-                self.b.simd(0x11); // i32x4.splat
-            },
-            relation => {
-                self.b.get_local_v128(&a);
-                self.b.get_local_v128(&b);
-                // (f32x4/f64x2: eq ne lt gt le ge)
-                let offset = [0, 2, 4, 0, 1, 5, 3][relation as usize];
-                self.b.simd(if double { 0x47 } else { 0x41 } + offset);
-            },
-        }
-        let r = self.b.set_new_local_v128();
-        if scalar {
-            if first != dst {
-                // (the other lanes from VEX.vvvv)
-                self.xmm_copy(first, dst);
-            }
-            self.b.get_local_v128(&r);
-            if double {
-                self.b.simd_lane(0x1D, 0); // i64x2.extract_lane
-            }
-            else {
-                self.b.simd_lane(0x1B, 0); // i32x4.extract_lane
-                self.b.extend_unsigned_i32_to_i64();
-            }
-            self.xmm_store(dst, 0, bits, true);
-        }
-        else {
-            self.c32(Self::xmm(dst) as i32);
-            self.b.get_local_v128(&r);
-            self.b.simd_memory(0x0B, 0);
-        }
-        for v in [a, b, r] {
-            self.b.free_local_v128(v);
-        }
+        crate::x86tpl::ops::compare_mask(&mut operands, double, scalar, predicate);
         self.vex_upper(inst, dst);
     }
     /// Retry if the float in local `v` (`double` or single precision bits)
