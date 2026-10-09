@@ -82,7 +82,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "x64_cvt",
-        default: 0,
+        default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_cvt).is_some(),
         get: pagegen::switch_value,
     },

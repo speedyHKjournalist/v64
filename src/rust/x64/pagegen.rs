@@ -2622,8 +2622,8 @@ static mut OUTLINE_ACCESS: bool = true;
 pub fn x64_page_set_outline(enabled: bool) { unsafe { OUTLINE_ACCESS = enabled } }
 /// The values of the three switches above (crate::jit_switches)
 /// The packed conversions (Op::Vcvt) as x86tpl::ops templates, else steps
-/// (docs/jit-unification-plan.md P2.5). x64_page_set_cvt.
-static mut CVT: bool = false;
+/// (docs/jit-unification-plan.md P2.5, on since P2.8). x64_page_set_cvt.
+static mut CVT: bool = true;
 #[no_mangle]
 pub fn x64_page_set_cvt(enabled: bool) { unsafe { CVT = enabled } }
 
