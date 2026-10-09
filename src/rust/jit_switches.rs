@@ -385,6 +385,26 @@ pub const SWITCHES: &[Switch] = &[
         },
         get: |_| Some(tier0::feature_value(tier0::T0_POP_ESP)),
     },
+    Switch {
+        name: "t0_rep_blocks",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_REP_BLOCKS, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_REP_BLOCKS)),
+    },
+    Switch {
+        name: "t0_rep_movs_stos",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_REP_MOVS_STOS, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_REP_MOVS_STOS)),
+    },
     // measurement: the executions of what Tier-0 compiles from now on, by
     // template kind (ir::runtime::tier0::kind_profile)
     Switch {

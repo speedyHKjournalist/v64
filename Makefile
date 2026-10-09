@@ -57,6 +57,8 @@ ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit
 	JIT_SWITCHES=t0_vec_store_slow=1 FUZZ_KIND=v node tests/ir/differential/tier0_fuzz.mjs 40 2
 	JIT_SWITCHES=t0_cli=1 FUZZ_KIND=c node tests/ir/differential/tier0_fuzz.mjs 40 2
 	JIT_SWITCHES=t0_pop_esp=1 FUZZ_KIND=p node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_rep_blocks=1,t0_rep_movs_stos=1 FUZZ_KIND=r node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_rep_blocks=1,t0_rep_movs_stos=0 FUZZ_KIND=r node tests/ir/differential/tier0_fuzz.mjs 20 3
 	# (the same with P3.7's templates off: the steps they replaced)
 	for kind in j g e d o a m v c p; do JIT_SWITCHES=t0_jecxz=0,t0_sreg_read=0,t0_xchg_mem=0,t0_cld_std=0,t0_pop_rm=0,t0_pusha=0,t0_sreg_load=0,t0_vec_store_slow=0,t0_cli=0,t0_pop_esp=0 FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
 	node tests/ir/differential/sse_fp_tracking.mjs build/v86-ir-runtime.wasm
@@ -65,6 +67,7 @@ ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit
 	node tests/ir/differential/tier0_step_profile.mjs
 	node tests/ir/differential/tier0_mode_ledger.mjs
 	node tests/ir/differential/tier0_kind_profile.mjs
+	node tests/ir/differential/tier0_rep_fault.mjs
 
 .PHONY: glbridge test-glbridge
 glbridge:

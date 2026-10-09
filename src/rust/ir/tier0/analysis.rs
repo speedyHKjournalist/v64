@@ -8,6 +8,7 @@
 //! belongs to one block, except where a branch enters the middle of another
 //! instruction (a different decoding of the same bytes).
 use crate::ir::frontend::decode::{decode, DecodedInstruction, Flow, GuestEip, LinearAddress};
+use crate::ir::runtime::tier0::T0_REP_BLOCKS;
 use std::collections::BTreeSet;
 
 pub const PAGE: usize = 4096;
@@ -145,6 +146,16 @@ fn ends_block(i: &DecodedInstruction, features: u32) -> bool {
         || i.encoding.block_boundary
         || !matches!(i.flow, Flow::Next | Flow::Boundary)
         || !super::emit::templated(i, features)
+        || features & T0_REP_BLOCKS != 0 && rep_string(i)
+}
+/// A string instruction with a REP or REPNE prefix (the encodings F2xx and
+/// F3xx of gen/x86_table.js, which end their block): with t0_rep_blocks
+/// (docs/jit-unification-plan.md P3.1a) also the start of one, so that the
+/// interpreter's page-sized steps of it dispatch back to it (the
+/// interpreter leaves EIP on it until the count is done)
+pub fn rep_string(i: &DecodedInstruction) -> bool {
+    matches!(i.encoding.opcode >> 8, 0xF2 | 0xF3)
+        && matches!(i.encoding.opcode & 0xFF, 0x6C..=0x6F | 0xA4..=0xA7 | 0xAA..=0xAF)
 }
 
 pub fn analyze(
@@ -206,6 +217,11 @@ pub fn analyze(
                 }
                 break;
             };
+            // (P3.1a: a REP string instruction starts a block)
+            if at != start && features & T0_REP_BLOCKS != 0 && rep_string(&decoded) {
+                pending.insert(at);
+                break;
+            }
             if at == start {
                 leader[start] = true;
                 leaders += 1;

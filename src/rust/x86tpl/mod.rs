@@ -9,5 +9,6 @@
 pub mod mmx;
 pub mod native_fp;
 pub mod ops;
+pub mod string;
 pub mod vec;
 pub mod x87;

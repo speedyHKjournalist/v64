@@ -38,8 +38,8 @@ const X87_RUNS: bool = true;
 use super::CompileEnv;
 use crate::ir::runtime::entry::{CpuEntryKey, ExitKind};
 use crate::ir::runtime::tier0::{
-    Link, T0_CLD_STD, T0_CLI, T0_JECXZ, T0_POP_ESP, T0_POP_RM, T0_PUSHA, T0_SREG_LOAD,
-    T0_SREG_READ, T0_XCHG_MEM,
+    Link, T0_CLD_STD, T0_CLI, T0_JECXZ, T0_POP_ESP, T0_POP_RM, T0_PUSHA, T0_REP_MOVS_STOS,
+    T0_SREG_LOAD, T0_SREG_READ, T0_XCHG_MEM,
 };
 use crate::state_flags::CachedStateFlags;
 use crate::wasmgen::wasm_builder::{
@@ -55,6 +55,7 @@ pub(crate) fn simd_template(i: &DecodedInstruction) -> bool {
 
 /// ir_t0_step results (see runtime::tier0).
 const STEP_EXIT: i32 = 2;
+const ES: u8 = 0;
 const CS: u8 = 1;
 const SS: u8 = 2;
 const DS: u8 = 3;
@@ -144,6 +145,7 @@ pub const FORM_NAMES: &[&str] = &[
     "Popa",
     "MovToSreg",
     "Cli",
+    "RepMovsStos",
 ];
 /// The template-kind profile's keys (runtime::tier0::kind_profile, the
 /// switch t0_kind_profile; docs/jit-unification-plan.md P3.0a): a Form kind
@@ -383,6 +385,13 @@ enum Form {
     },
     /// CLI (P3.7(c), T0_CLI)
     Cli,
+    /// REP MOVS (`movs`) or REP STOS of `size`-byte elements with a 32-bit
+    /// address size (P3.1b, T0_REP_MOVS_STOS): at once when it stays in a
+    /// page per operand, else the interpreter
+    RepMovsStos {
+        movs: bool,
+        size: u8,
+    },
     /// PUSHAD and POPAD whose 32 bytes are in one page (P3.7, T0_PUSHA)
     Pusha,
     Popa,
@@ -460,6 +469,7 @@ impl Form {
             Form::Popa => 50,
             Form::MovToSreg { .. } => 51,
             Form::Cli => 52,
+            Form::RepMovsStos { .. } => 53,
         }
     }
     /// Whether the template can retry() (else no retry tail is emitted).
@@ -570,6 +580,7 @@ impl Form {
                     | Form::PopRm { .. }
                     | Form::Pusha
                     | Form::Popa
+                    | Form::RepMovsStos { .. }
                     | Form::Leave
                     | Form::Call { .. }
                     | Form::Ret { .. }
@@ -658,6 +669,30 @@ fn classify(i: &DecodedInstruction, features: u32) -> Option<Form> {
     // (TZCNT and LZCNT: F3 selects them)
     if let Some(form) = bmi(i) {
         return Some(form);
+    }
+    // (P3.1b: REP MOVS/STOS, the encodings F3A4, F3A5, F3AA and F3AB; not
+    // with cores in workers)
+    if features & T0_REP_MOVS_STOS != 0
+        && i.address_size == 32
+        && !i.baseline_ud
+        && !crate::parallel::active()
+    {
+        let size = |byte: bool| if byte { 1 } else { i.operand_size / 8 };
+        match i.encoding.opcode {
+            0xF3A4 | 0xF3A5 => {
+                return Some(Form::RepMovsStos {
+                    movs: true,
+                    size: size(i.encoding.opcode == 0xF3A4),
+                })
+            },
+            0xF3AA | 0xF3AB => {
+                return Some(Form::RepMovsStos {
+                    movs: false,
+                    size: size(i.encoding.opcode == 0xF3AA),
+                })
+            },
+            _ => {},
+        }
     }
     // Invalid LOCK forms are rejected by the shared decoder. A valid locked
     // RMW stays inside one activation, including its guarded slow path.
@@ -3543,6 +3578,99 @@ impl Page {
                 self.w.const_i32(32);
                 self.w.sub_i32();
                 self.set_gpr(4);
+            },
+            Form::RepMovsStos { movs, size } => {
+                // As cpu::string's REP MOVS/STOS when it is done at once:
+                // DF clear, each operand within one page of plain RAM (no
+                // compiled code under the destination), MOVS's ranges not
+                // overlapping forward, STOS's element one byte repeated;
+                // else the interpreter, which does a page and leaves EIP
+                // here (P3.1a's block)
+                let (length, destination, source) = (fa, fb, fr);
+                let shift = size.trailing_zeros() as i32;
+                self.w.get_local(&self.gpr[1]);
+                self.w.if_void();
+                self.w.load_fixed_i32(gp::flags as u32);
+                self.w.const_i32(FLAG_DIRECTION);
+                self.w.and_i32();
+                self.retry_if();
+                self.w.get_local(&self.gpr[1]);
+                self.w.const_i32(4096 >> shift);
+                self.w.gtu_i32();
+                self.retry_if();
+                self.w.get_local(&self.gpr[1]);
+                self.w.const_i32(shift);
+                self.w.shl_i32();
+                self.w.set_local(&length);
+                // ES:EDI, then (MOVS) the source segment's ESI: host
+                // addresses of plain RAM pages holding the whole range
+                let operands: &[(u8, u8, bool, &WasmLocal)] = if movs {
+                    &[
+                        (7, ES, true, &destination),
+                        (6, i.prefixes.segment.unwrap_or(DS), false, &source),
+                    ]
+                }
+                else {
+                    &[(7, ES, true, &destination)]
+                };
+                for &(register, segment, write, host) in operands {
+                    self.linear(&EffectiveAddress {
+                        base: Some(register),
+                        index: None,
+                        scale: 0,
+                        displacement: 0,
+                        address_size: 32,
+                        segment,
+                    });
+                    self.tlb_miss(1, write);
+                    self.retry_if();
+                    self.w.get_local(&self.addr);
+                    self.w.const_i32(0xFFF);
+                    self.w.and_i32();
+                    self.w.get_local(&length);
+                    self.w.add_i32();
+                    self.w.const_i32(0x1000);
+                    self.w.gtu_i32();
+                    self.retry_if();
+                    self.host_address();
+                    self.w.set_local(host);
+                }
+                if movs {
+                    crate::x86tpl::string::overlaps_forward(
+                        &mut self.w,
+                        &destination,
+                        &source,
+                        &length,
+                    );
+                    self.retry_if();
+                    self.w.get_local(&destination);
+                    self.w.get_local(&source);
+                    self.w.get_local(&length);
+                    crate::x86tpl::string::memory_copy(&mut self.w);
+                    self.w.get_local(&self.gpr[6]);
+                    self.w.get_local(&length);
+                    self.w.add_i32();
+                    self.set_gpr(6);
+                }
+                else {
+                    self.read_reg(0, size * 8);
+                    self.w.set_local(&value);
+                    // (the byte above, whether it is not the whole element)
+                    crate::x86tpl::string::fill_byte(&mut self.w, size, &value);
+                    self.retry_if();
+                    self.w.set_local(&value);
+                    self.w.get_local(&destination);
+                    self.w.get_local(&value);
+                    self.w.get_local(&length);
+                    crate::x86tpl::string::memory_fill(&mut self.w);
+                }
+                self.w.get_local(&self.gpr[7]);
+                self.w.get_local(&length);
+                self.w.add_i32();
+                self.set_gpr(7);
+                self.w.const_i32(0);
+                self.set_gpr(1);
+                self.w.block_end();
             },
             Form::Cli => {
                 // As instr_FA_without_fault outside virtual-8086 mode: IF

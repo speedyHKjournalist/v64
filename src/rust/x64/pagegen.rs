@@ -7207,10 +7207,7 @@ impl Emitter {
             self.gi(HOST);
             self.gi(SRC);
             self.gi(COND);
-            self.b.op(0xFC);
-            self.b.op(10);
-            self.b.op(0);
-            self.b.op(0);
+            crate::x86tpl::string::memory_copy(&mut self.b);
             self.b.guest_fence();
         }
         else {
@@ -7223,9 +7220,7 @@ impl Emitter {
             self.g(0);
             self.b.wrap_i64_to_i32();
             self.gi(COND);
-            self.b.op(0xFC);
-            self.b.op(11);
-            self.b.op(0);
+            crate::x86tpl::string::memory_fill(&mut self.b);
             self.b.guest_fence();
         }
         self.gi(COND);

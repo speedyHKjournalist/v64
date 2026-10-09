@@ -48,7 +48,8 @@ const rr = (r, m) => 0xC0 | r << 3 | m;
 // FUZZ_KIND=i0..i33 / s0..s13 restricts programs to one instruction kind
 // (s11: SSE floating point over special values, see fp_instruction; s13: VEX
 // forms among legacy ones, see vex_instruction; b: BMI, see bmi_instruction;
-// j, g, e, d, o, a, m, v, c, p: P3.7's templates, see p37_instruction).
+// j, g, e, d, o, a, m, v, c, p: P3.7's templates, r: P3.1's, see
+// p37_instruction).
 const only = process.env.FUZZ_KIND || "";
 const straddle = process.env.FUZZ_STRADDLE === "1";
 function instruction() {
@@ -110,6 +111,11 @@ function instruction() {
 //   refuses (the bytes there are compared)
 // c (t0_cli): CLI (IF is clear in these programs: PUSHFD shows it)
 // p (t0_pop_esp): POP [ESP] and POP [ESP + 4]
+// r (t0_rep_blocks, t0_rep_movs_stos; P3.1t): REP MOVS and STOS of bytes,
+//   words and dwords between ESI and EDI in DATA: apart, overlapping
+//   forward and backward, with DF set, ECX 0, across the end of DATA's
+//   page, with a 16-bit address size or a DS override, STOS of a repeated
+//   byte and of other values
 // m (t0_sreg_load): MOV ES/FS/GS from r16 and m16 with the flat data
 //   selector, a null one or 0x18 (based at 4 KiB, added to the GDT for
 //   it), then a load through the segment; MOV DS with the flat selector;
@@ -140,6 +146,27 @@ function p37_instruction() {
             case 1: return [0x68, ...u32(random()), 0x8F, 0x43, disp()];          // PUSH imm32; POP m32
             case 2: return [0xFF, 0x73, disp(), 0x8F, 0x43, disp()];              // PUSH m32; POP m32
             default: return [0x50 | r, 0x50 | r, 0x8F, 0x44, 0x24, 0x00, 0x58 | r]; // POP [esp] (a step)
+        }
+        case "r": {
+            const size = pick([1, 2, 4]), movs = random() & 1;
+            const op = [...size === 2 ? [0x66] : [], (movs ? 0xA4 : 0xAA) | (size > 1 ? 1 : 0)];
+            const lea = (register, offset) => [0x8D, 0x83 | register << 3, ...u32(offset)]; // LEA r32, [EBX + offset]
+            const count = n => [0xB9, ...u32(n)];                                 // MOV ECX, n
+            // (stores stay below DATA + 120, the loop counter at 124: at
+            // most 56 bytes from a destination at most 60)
+            const n = random() % (56 / size + 1);
+            const a = random() % 120, b = random() % 61;
+            const rep = (prefix = [], stos = false) => [0xF3, ...prefix, ...stos ? [...size === 2 ? [0x66] : [], 0xAA | (size > 1 ? 1 : 0)] : op];
+            switch(random() % 8) {
+                case 0: return [...lea(6, a), ...lea(7, b), ...count(n), ...rep()];       // apart or overlapping
+                case 1: { const s = random() % 48; return [...lea(6, s), ...lea(7, s + size * (1 + random() % 3)), ...count(n), ...rep()]; } // forward overlap
+                case 2: return [...lea(6, 60 + a % 40), ...lea(7, 60 + b % 40), ...count(n), 0xFD, ...rep(), 0xFC]; // DF set: downward
+                case 3: return [...lea(6, a), ...lea(7, b), ...count(0), ...rep()];       // ECX 0
+                case 4: return [...lea(6, a), ...lea(7, 0xFF0 - 2 * (random() & 7)), ...count(4 + random() % 8), ...rep()]; // across the page end
+                case 5: return [0xB8, ...u32(pick([0, 0x41414141, 0xFFFFFFFF, random()])), ...lea(7, b), ...count(n), ...rep([], true)]; // STOS values
+                case 6: return [...lea(6, a), ...lea(7, b), ...count(0x10000), 0x67, ...rep()]; // 16-bit address size: CX 0
+                default: return [...lea(6, a), ...lea(7, b), ...count(n), ...rep([0x3E])]; // a DS override
+            }
         }
         case "v": {
             const x = random() & 7;
@@ -419,7 +446,7 @@ function program() {
         const float = only ? only === "x" : random() % 7 === 0;
         // Single-kind programs still interleave PUSHFD/LAHF to expose FLAGS.
         body.push(...(only && only !== "s12" && k % 4 === 3 ? [0x9C, 0x8F, 0x43, disp()] : only === "b" ? bmi_instruction() :
-            ["j", "g", "e", "d", "o", "a", "m", "v", "c", "p"].includes(only) ? p37_instruction() :
+            ["j", "g", "e", "d", "o", "a", "m", "v", "c", "p", "r"].includes(only) ? p37_instruction() :
             float ? x87() : vector ? simd() : instruction()));
     }
     // DEC DWORD [ebx + 124]; JNZ top; HLT
@@ -472,7 +499,7 @@ async function run(m, code, init, page, split) {
     const base = split ? CODE + page * 0x2000 + 0x1000 - split : CODE + page * 0x1000;
     cpu.mem8.set(code, base);
     cpu.mem8.set(init.data, DATA);
-    if(only === "v") cpu.mem8.fill(0, DATA + 0xFF0, DATA + 0x1010);
+    if(only === "v" || only === "r") cpu.mem8.fill(0, DATA + 0xFF0, DATA + 0x1010);
     if(only === "m") cpu.mem8[(cpu.gdtr_offset[0] >>> 0) + 29] &= ~1;
     cpu.mem8.fill(0, STACK - 0x1000, STACK);
     new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).setUint32(DATA + 124, ITERATIONS, true);
@@ -523,7 +550,7 @@ async function run(m, code, init, page, split) {
         fpu: (e.fpu_sync_all(), [cpu.fpu_stack_ptr[0], cpu.fpu_stack_empty[0], cpu.fpu_status_word[0], ...Array.from(new Uint8Array(cpu.fpu_st.buffer, cpu.fpu_st.byteOffset, 128))]),
         status: new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).getUint32(0x608, true),
         // (v: the bytes across the end of DATA's page)
-        ...only === "v" ? { page_end: Array.from(cpu.mem8.subarray(DATA + 0xFF0, DATA + 0x1010)) } : {},
+        ...only === "v" || only === "r" ? { page_end: Array.from(cpu.mem8.subarray(DATA + 0xFF0, DATA + 0x1010)) } : {},
         // (m: the descriptor at 0x18, whose accessed bit its first load sets)
         ...only === "m" ? { descriptor: Array.from(cpu.mem8.subarray((cpu.gdtr_offset[0] >>> 0) + 24, (cpu.gdtr_offset[0] >>> 0) + 32)) } : {},
     };

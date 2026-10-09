@@ -510,6 +510,11 @@ pub const T0_VEC_STORE_SLOW: u32 = 1 << 7;
 pub const T0_CLI: u32 = 1 << 8;
 /// t0_pop_esp (P3.7(c)): POP m32 whose address uses ESP
 pub const T0_POP_ESP: u32 = 1 << 9;
+/// t0_rep_blocks (P3.1a): each REP string instruction a block of its own
+pub const T0_REP_BLOCKS: u32 = 1 << 10;
+/// t0_rep_movs_stos (P3.1b): REP MOVS and STOS within a page as one bulk
+/// copy or fill
+pub const T0_REP_MOVS_STOS: u32 = 1 << 11;
 /// The value of the switch whose feature bit is `bit`
 pub fn feature_value(bit: u32) -> u32 { (features() & bit != 0) as u32 }
 pub unsafe fn set_feature(bit: u32, on: bool) {
