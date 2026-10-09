@@ -282,11 +282,11 @@ pub const SWITCHES: &[Switch] = &[
         get: |_| Some(execution::ledger_on() as u32),
     },
     // Tier-0's template changes of P3 (docs/jit-unification-plan.md P3.7),
-    // each off until its A/B flips it; page functions compiled before a
-    // change keep their code
+    // each off until its A/B flips it (P3.7(a)'s six: on, after their A/B as
+    // a group); page functions compiled before a change keep their code
     Switch {
         name: "t0_jecxz",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_JECXZ, on) })
@@ -296,7 +296,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_sreg_read",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_SREG_READ, on) })
@@ -306,7 +306,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_xchg_mem",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_XCHG_MEM, on) })
@@ -316,7 +316,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_cld_std",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_CLD_STD, on) })
@@ -326,7 +326,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_pop_rm",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_POP_RM, on) })
@@ -336,7 +336,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_pusha",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_PUSHA, on) })

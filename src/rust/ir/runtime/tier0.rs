@@ -442,8 +442,10 @@ pub unsafe fn ir_relaxed_fma() -> u32 { RELAXED_FMA as u32 }
 /// Tier-0's feature switches (docs/jit-unification-plan.md P3.0a): one bit
 /// of CompileEnv::features per t0_* switch of jit_switches, which P3's
 /// template changes add, each off until its A/B flips the default. Page
-/// functions compiled before a change keep the code they have.
-static mut T0_FEATURES: u32 = 0;
+/// functions compiled before a change keep the code they have. (The initial
+/// value is the switches' defaults: P3.7(a)'s are on.)
+static mut T0_FEATURES: u32 =
+    T0_JECXZ | T0_SREG_READ | T0_XCHG_MEM | T0_CLD_STD | T0_POP_RM | T0_PUSHA;
 pub fn features() -> u32 { unsafe { T0_FEATURES } }
 /// t0_jecxz (P3.7): JECXZ and JCXZ as a template, not a step
 pub const T0_JECXZ: u32 = 1 << 0;
