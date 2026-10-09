@@ -6,6 +6,31 @@ For debugging networking, packet logging is available in the UI in both debug
 and release builds. The resulting `traffic.hex` file can be loaded in Wireshark
 using file -> import from hex -> tick direction indication, timestamp %s.%f.
 
+## Units: retired instructions and the step share s
+
+Every instruction count in measurements and gates is a count of **retired
+instructions** (docs/jit-unification-plan.md, cross-phase rule 3): the
+growth of `core_statistics_get(core, 0)`, where a REP instruction counts once
+and a faulting one not at all. `instruction_counter` is only a budget
+counter: Tier-0 steps and REP elements move it differently, and the x64
+page tier adds whole blocks at their entry (`x64_block_count`, on by
+default), an upper bound when a block is left early. Count long-mode work
+with the mode ledger or with `x64_block_count=0` (compiled in: set it before
+the code is compiled). MIPS is retired instructions per wall-clock
+microsecond.
+
+**The step share s** is the share of retired instructions that compiled code
+left to the interpreter one at a time, from the mode ledger (below):
+
+    s = (tier0_step + page_step + page_retry) / (sum of all ways)
+
+over one mode (s of Long64, of Compat32, ...) or over all of them (s_total),
+always named with its scope and measured, never estimated. Instructions the
+interpreter runs outside compiled code (cold code, pages not compiled yet)
+are not steps. A step costs the host far more than a compiled instruction,
+so s understates the host time steps take; host time is measured with
+profiles (`WIN_CPU_PROFILE`, `--profile-from`).
+
 ## The step profile: what compiled code leaves to the interpreter
 
 IR Tier-0 and the x64 page tier interpret some instructions one at a time

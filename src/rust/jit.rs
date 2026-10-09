@@ -276,9 +276,23 @@ pub fn wait_pages_published(pages: impl Iterator<Item = Page> + Clone, ms: f64) 
 
 pub fn ir_cache_quiescent() -> bool { JIT_STATE.try_lock().is_ok() }
 
+/// The fewest free table slots since the last jit_wasm_table_free_low_reset
+/// (docs/jit-unification-plan.md P0.10): IR and the x64 page tier both take
+/// theirs from this table
+static mut TABLE_FREE_LOW: u32 = WASM_TABLE_SIZE - 1;
+#[no_mangle]
+pub fn jit_wasm_table_free_low() -> u32 { unsafe { TABLE_FREE_LOW } }
+#[no_mangle]
+pub fn jit_wasm_table_free_low_reset() {
+    unsafe { TABLE_FREE_LOW = get_jit_state().wasm_table_index_free_list.len() as u32 }
+}
+
 pub fn ir_reserve_slot(id: u64, pages: HashSet<Page>) -> Option<u32> {
     let mut ctx = get_jit_state();
     let index = ctx.wasm_table_index_free_list.pop()?;
+    unsafe {
+        TABLE_FREE_LOW = TABLE_FREE_LOW.min(ctx.wasm_table_index_free_list.len() as u32);
+    }
     for &page in &pages {
         ir_page_count(&mut ctx.ir_page_counts, page, 1);
     }

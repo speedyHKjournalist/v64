@@ -77,6 +77,9 @@ export function jit_stats(emulator, extra = {})
         retired_total: retired.reduce((sum, n) => sum + n, 0),
         x64,
         ir: cpu.get_jit_info()["ir"],
+        // (the Wasm table both tiers take their slots from: free now and at
+        // the fewest, P0.10)
+        table: exports["jit_wasm_table_free_low"] ? { free: exports["jit_get_wasm_table_index_free_list_count"](), free_low: exports["jit_wasm_table_free_low"]() } : null,
         ...switches["step_profile"] ? { steps: step_profile(exports, 40) } : {},
         ...switches["mode_ledger"] ? { ledger: mode_ledger(exports) } : {},
     };

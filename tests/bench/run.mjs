@@ -187,10 +187,12 @@ for(const bench of manifest.benchmarks) {
     const iterations = Math.max(1, Math.round(bench.iterations * scale));
     const row = { name: bench.name, category: bench.category, about: bench.about, iterations, arms: {} };
     for(const arm of arms) row.arms[arm.label] = { cold_ms: [], warm_ms: [], warmup_ms: [], checksum: null, instructions: null };
+    // (the x64 page tier counts instructions per block, an upper bound that
+    // depends on where blocks were left: only its checksums must repeat)
     const note = (arm, sample) => {
-        const r = row.arms[arm.label];
+        const r = row.arms[arm.label], exact = arm.isa !== "x86_64" || arm.interpreted;
         r.checksum ??= sample.checksum; r.instructions ??= sample.instructions;
-        if(r.checksum !== sample.checksum || r.instructions !== sample.instructions)
+        if(r.checksum !== sample.checksum || exact && r.instructions !== sample.instructions)
             errors.push(`${bench.name}/${arm.label}: nondeterministic result ${sample.checksum}/${sample.instructions}`);
     };
     try {

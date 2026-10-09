@@ -14,7 +14,10 @@
 // overlay, i.e. every sector the guest wrote, is saved), WIN_OVERLAY_LOAD=<file>
 // (boot with such an overlay: the state after Windows installed the drivers
 // for this machine; the image itself is never written), WIN_IDLE=1 (after the
-// desktop: host and in-guest CPU load of the idle desktop, see host_window). While it runs, a line written to
+// desktop: host and in-guest CPU load of the idle desktop, see host_window),
+// WIN_CPULOAD32=<rounds> (after the desktop: the timed WOW64 workload
+// tests/x64/windows_cpuload32.c as LOAD32.EXE, an X64_WIN_CPULOAD32 line with
+// each round's time; docs/jit-unification-plan.md P0.12). While it runs, a line written to
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
 // "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
@@ -72,6 +75,10 @@ import {fileURLToPath} from "node:url";
 import {MemoryDisk, ReadOnlyOverlayDisk, make_fat16, read_fat16} from "../smp/disk_fixture.mjs";
 import {jit_switches_from_env} from "../lib/jit_switches.mjs";
 import {jit_stats_enabled, print_jit_stats} from "../../tools/bench/jit_stats.mjs";
+import {CPU_FEATURE_PRESETS} from "../../src/cpu_features.js";
+// WIN_CPU_FEATURES: feature names, comma separated, or a preset ("x86-64-v3")
+const win_cpu_features = process.env.WIN_CPU_FEATURES ?
+    CPU_FEATURE_PRESETS[process.env.WIN_CPU_FEATURES] || process.env.WIN_CPU_FEATURES.split(",") : null;
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const image_path = path.resolve(process.env.WIN_IMAGE || path.join(root, "../retro-gaming-site/windows8/windows8.img"));
@@ -93,7 +100,8 @@ function build(compiler, entry, output, source = "tests/x64/windows_probe.c")
 const probe64 = build("x86_64-w64-mingw32-gcc", "entry", path.join(out, "PROBE64.EXE"));
 const probe32 = build("i686-w64-mingw32-gcc", "_entry@0", path.join(out, "PROBE32.EXE"));
 const cpuload = build("x86_64-w64-mingw32-gcc", "entry", path.join(out, "CPULOAD.EXE"), "tests/x64/windows_cpuload.c");
-const tools = new MemoryDisk(make_fat16({"PROBE64.EXE": probe64, "PROBE32.EXE": probe32, "CPULOAD.EXE": cpuload}));
+const cpuload32 = build("i686-w64-mingw32-gcc", "_entry@0", path.join(out, "LOAD32.EXE"), "tests/x64/windows_cpuload32.c");
+const tools = new MemoryDisk(make_fat16({"PROBE64.EXE": probe64, "PROBE32.EXE": probe32, "CPULOAD.EXE": cpuload, "LOAD32.EXE": cpuload32}));
 const source = new ReadOnlyOverlayDisk(image_path);
 // WIN_HDB=<image>: that disk (e.g. retro-gaming-site/game/3dmark06.img) in
 // place of the tools disk, never written either (its writes stay in memory)
@@ -164,7 +172,7 @@ const vm = new V86({
     // the browser does by default
     disable_jit: !jit, experimental_smp_jit: jit, ir_sync_publication: !+process.env.WIN_ASYNC_PUBLICATION,
     ...(process.env.X64_IR_TIER0 === "0" ? {ir_tier0: false} : {}),
-    ...(process.env.WIN_CPU_FEATURES ? {cpu_type: "x86_64", cpu_features: process.env.WIN_CPU_FEATURES.split(",")} : {}),
+    ...(win_cpu_features ? {cpu_type: "x86_64", cpu_features: win_cpu_features} : {}),
     // WIN_PARALLEL=1: the application processors run in vCPU workers
     // (WIN_PARALLEL_WASM: another build of it)
     ...(+process.env.WIN_PARALLEL ? {parallel: true, wasm_path: process.env.WIN_PARALLEL_WASM || root + "build/v86-parallel.wasm"} : {}),
@@ -935,6 +943,7 @@ try
         }
     };
     let idle_at = 0, idle_sent = false, next_host_window = 0;
+    let load32_at = 0, load32_sent = false;
     while(performance.now() < deadline)
     {
         await delay(200);
@@ -1078,7 +1087,7 @@ try
                 if(password_box_visible() || !process.env.WIN_NO_PROBE && performance.now() - last_sign_in > 180000) await sign_in();
                 probe_sent = performance.now() + 20000;
             }
-            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP && !process.env.WIN_IDLE && !process.env.WIN_NO_PROBE)
+            else if(!process.env.WIN_OVERLAY_SAVE && !process.env.WIN_STOP_AT_DESKTOP && !process.env.WIN_IDLE && !process.env.WIN_CPULOAD32 && !process.env.WIN_NO_PROBE)
             {
                 const arch = report.results[64] ? 32 : 64;
                 const started = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\probe${arch}.exe %d:\\probe${arch}.exe`);
@@ -1136,6 +1145,7 @@ try
             if(process.env.WIN_SETUP && !process.env.WIN_OVERLAY_SAVE) break;
             if(process.env.WIN_OVERLAY_SAVE) shutdown_at = performance.now() + 30000;
             else if(process.env.WIN_IDLE) idle_at = performance.now() + 1000 * +(process.env.WIN_IDLE_SETTLE_S || 20);
+            else if(process.env.WIN_CPULOAD32) load32_at = performance.now() + 1000 * +(process.env.WIN_IDLE_SETTLE_S || 20);
             else if(process.env.WIN_DESKTOP_TEST)
             {
                 // desktop responsiveness: open programs one after another
@@ -1157,6 +1167,26 @@ try
             next_host_window = performance.now() + 10000;
             idle_sent = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\cpuload.exe %d:\\cpuload.exe ${+process.env.WIN_IDLE_ROUNDS || 6}`);
             if(!idle_sent) idle_at = performance.now() + 20000;
+        }
+        if(load32_at && performance.now() >= load32_at && !load32_sent)
+        {
+            load32_sent = await run_command(`cmd /c for %d in (d e f g h) do @if exist %d:\\load32.exe %d:\\load32.exe ${+process.env.WIN_CPULOAD32 || 5}`);
+            if(!load32_sent) load32_at = performance.now() + 20000;
+        }
+        if(load32_sent)
+        {
+            const load = result_text("LOAD32.TXT");
+            if(load.includes("CPULOAD32_DONE"))
+            {
+                const rounds = [...load.matchAll(/round (\d+) ms=(\d+) checksum=([0-9a-f]+)/g)].map(m => ({ms: +m[2], checksum: m[3]}));
+                // (the median and the fastest leave out the first round, which
+                // also compiles; the fastest is what the gate compares: a
+                // fresh desktop's background work slows other rounds)
+                const warm = rounds.slice(1).map(r => r.ms).sort((a, b) => a - b);
+                report.cpuload32 = {wow64: /wow64=1/.test(load), rounds, median_ms: warm[warm.length >> 1] ?? rounds[0]?.ms, min_ms: warm[0] ?? rounds[0]?.ms};
+                console.log("X64_WIN_CPULOAD32 " + JSON.stringify(report.cpuload32));
+                break;
+            }
         }
         if(idle_sent && performance.now() >= next_host_window)
         {
@@ -1191,7 +1221,7 @@ try
         assert.ok(!shutdown_deadline || performance.now() < shutdown_deadline, "the guest powered off");
     }
     // (the probes run in plain qualification runs, not in setup sessions)
-    for(const arch of process.env.WIN_STOP_AT_DESKTOP || process.env.WIN_IDLE || process.env.WIN_SETUP || process.env.WIN_HDB ? [] : [64, 32])
+    for(const arch of process.env.WIN_STOP_AT_DESKTOP || process.env.WIN_IDLE || process.env.WIN_CPULOAD32 || process.env.WIN_SETUP || process.env.WIN_HDB ? [] : [64, 32])
     {
         const r = report.results[arch];
         assert.ok(r, `probe ${arch} completed`);
@@ -1202,7 +1232,7 @@ try
         if(arch === 64) assert.ok(BigInt("0x" + r.high_block) >> 32n > 0n, "x64 top-down allocation above 4 GiB");
         // the YMM state (docs/simd-xsave-plan.md 11.3): 8 rounds of 3 steps
         // (one migrates, one faults) on 2N threads; x64 GetThreadContext
-        const features = (process.env.WIN_CPU_FEATURES || "").split(",");
+        const features = win_cpu_features || [];
         assert.ok(r.avx, `probe ${arch}: AVX line`);
         if(features.includes("AVX"))
         {
@@ -1214,6 +1244,7 @@ try
     }
     if(process.env.WIN_STOP_AT_DESKTOP) assert.ok(report.desktop_s, "desktop reached");
     if(process.env.WIN_IDLE) assert.ok(report.cpuload, "CPULOAD.EXE completed");
+    if(process.env.WIN_CPULOAD32) assert.ok(report.cpuload32?.wow64 && report.cpuload32.rounds.length, "LOAD32.EXE (CPULOAD32) completed under WOW64");
     report.passed = true;
     console.log("X64_WIN_PASS " + JSON.stringify(report.results));
 }

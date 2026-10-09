@@ -146,12 +146,15 @@ if(retests.length)
 {
     const session = JSON.parse(fs.readFileSync(files[0], "utf8"));
     const wasm = label => session.arms?.find(a => a.label === label)?.wasm;
+    // (two configurations of one core, tests/bench/compare.mjs: their switches)
+    const switches = label => Object.entries(session.arms?.find(a => a.label === label)?.switches || {}).map(([k, v]) => `${k}=${v}`).join(",");
+    const configured = [["--switches-a", switches(arm)], ["--switches-b", switches("baseline")]].filter(([, v]) => v).map(([f, v]) => ` ${f} ${v}`).join("");
     // Runs of a few milliseconds are decided by a millisecond: a benchmark
     // shorter than 40 ms per run is retested at 4 times the work (a 718.avx.ymm
     // at 0.89 over 9 ms runs was 1.00 over 35 ms runs).
     const short = retests.some(r => median(sessions.get(r.name).ms) < 40);
     console.log(`retest: node tests/bench/run.mjs --filter '^(${retests.map(r => r.name.split(".")[0]).join("|")})' --runs 7` +
-        `${short ? " --scale 4" : ""} --wasm ${wasm(arm)} --baseline ${wasm("baseline")} --out retest.json`);
+        `${short ? " --scale 4" : ""} --wasm ${wasm(arm)} --baseline ${wasm("baseline")}${configured} --out retest.json`);
 }
 if(json_file) fs.writeFileSync(json_file, JSON.stringify({ level, arm, sessions: files, suite, rows, problems }, null, 1));
 console.log(problems.length ? "FAILED: " + problems.join("; ") : `gate ${level}: passed`);

@@ -239,7 +239,7 @@ export const STATICS = {
         // the operands of one ir_t0_sse_fp call
         T0_SSE_FP: "scratch", SSE_FP_CALLS: "debug", FMA_CALLS: "debug",
     },
-    "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
+    "jit.rs": { JIT_STATE: "machine", WATCHED: "machine", TABLE_FREE_LOW: "debug" },
     // the JIT switches set on this instance, the machine's ones a vCPU worker applied, the names
     "jit_switches.rs": { EXPLICIT: "machine", COPIED: "machine", NAMES: "machine" },
     // the step profile (docs/jit-unification-plan.md P0.5)
