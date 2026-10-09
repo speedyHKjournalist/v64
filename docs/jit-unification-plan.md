@@ -1298,3 +1298,8 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - replay-check 2605 条一致，叶子摘要不变。核心比较：9 个函数改变、9 个新增、15 个删除。SIMD/XSAVE 计划的套件（`ssse3-tests`
   到 `xsave-tests`，75 分钟）在 P2.4 上通过，P2.1–P2.3 的改动一并覆盖。R 级：bench 加复测后 1.014；XP 中位数 13.55 s 对
   13.07 s，比值 1.036。
+
+**P2.10 x86tpl 的导入规则，2026-10-10。** `tools/check_x86tpl_imports.mjs` 检查 `src/rust/x86tpl` 代码里每个 `crate::` 与
+`super::` 路径：不进 x64 page tier、Tier-0、IR 运行时、`jit.rs` 与 region 管线，`super::` 不出模块；`make jit-gate` 每次都跑，
+故意放进一个违规的路径时它报错。`docs/ir-design.md` 写了 x86tpl 与 `wasmgen::leaves`，`docs/x86-64.md` 写了 page tier 的打包
+转换。

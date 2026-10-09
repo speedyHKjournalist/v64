@@ -153,6 +153,15 @@ faults, and devices has been exhausted.
                                               / main-loop safepoint
 ```
 
+Tier-0, the region backend and the x64 page tier generate the x86 forms they
+share from one place, `src/rust/x86tpl` ([jit-unification-plan.md](jit-unification-plan.md)
+P2): leaf emitters that need only a `WasmBuilder` (`vec`, `mmx`, `x87`,
+`native_fp`), and templates over an engine's operands (`ops::VecOperands`: how
+the engine reads and writes registers and memory, retries, and runs a refused
+instruction exactly). x86tpl names none of the engines;
+`tools/check_x86tpl_imports.mjs` checks that in `make jit-gate`, and golden
+digests pin the leaves' output (`make jit-leaf-tests`).
+
 Tier-0 transfers within a page or cluster stay inside the generated function;
 for targets outside the cluster, a runtime linking loop looks up the next
 function. Page functions can also be packed in batches into a shared Wasm
@@ -167,6 +176,7 @@ Key code locations:
 |---|---|
 | Encoding catalogue and shared decoder | [gen/x86_table.js](../gen/x86_table.js), [frontend](../src/rust/ir/frontend/) |
 | Tier-0 analysis, templates, and multi-page functions | [tier0](../src/rust/ir/tier0/) |
+| x86 leaf templates every engine shares: packed operations, SSE arithmetic, conversions and their exact admission, MMX, the inlined x87 | [x86tpl](../src/rust/x86tpl/), with the ISA-neutral v128 leaves in [wasmgen/leaves.rs](../src/rust/wasmgen/leaves.rs) |
 | HIR, state, and optimization | [hir.rs](../src/rust/ir/hir.rs), [state.rs](../src/rust/ir/state.rs), [passes](../src/rust/ir/passes/) |
 | Lowering, MIR, and the Wasm backend | [lowering.rs](../src/rust/ir/lowering.rs), [mir.rs](../src/rust/ir/mir.rs), [backend/wasm](../src/rust/ir/backend/wasm/) |
 | Heat, compilation, admission, and caching | [schedule.rs](../src/rust/ir/runtime/schedule.rs), [compile.rs](../src/rust/ir/runtime/compile.rs), [cache.rs](../src/rust/ir/runtime/cache.rs) |
