@@ -5,6 +5,7 @@
 //! table and emitter before P2.3 replaced them, so the change kept every
 //! encoding's bytes, for every imm8.
 use super::*;
+use crate::wasmgen::wasm_builder::WasmLocalV128;
 use std::collections::BTreeMap;
 
 /// FNV-1a, 64-bit

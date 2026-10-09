@@ -71,6 +71,10 @@ impl VecOperands for Operands<'_> {
             },
         }
     }
+    fn register(&mut self, r: u8) {
+        self.e.c32(Emitter::xmm(r) as i32);
+        self.e.b.simd_memory(0x00, 0); // v128.load
+    }
     fn source_int(&mut self, _wide: bool) {
         unreachable!("the page tier converts integers in Op::Vconvert")
     }

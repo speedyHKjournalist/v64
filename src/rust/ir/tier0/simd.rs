@@ -1678,114 +1678,7 @@ impl Page {
                 double,
                 scalar,
                 imm8,
-            } => {
-                // Wasm's rounding of the lanes (a scalar form's low one into
-                // the destination): imm8[1:0]'s mode, or MXCSR.RC's with
-                // imm8[2], admitted to nearest only. Refused, to the exact
-                // helper: a NaN lane (its payload; an SNaN raises IE), DAZ,
-                // and an inexact lane while PE is reported (imm8[3] clear)
-                // and unmasked. Denormals need no DE (ROUND has none); a
-                // result is integral, never tiny. PE is set here.
-                let bytes = if double { 8 } else { 4 };
-                if scalar {
-                    self.scalar_source(i, bytes);
-                }
-                else {
-                    self.simd_source(i, false, 16);
-                }
-                let source = self.w.set_new_local_v128();
-                self.load_xmm(self.first(reg));
-                let destination = self.w.set_new_local_v128();
-                let mode = if imm8 & 4 != 0 { 0 } else { imm8 & 3 };
-                self.w.get_local_v128(&source);
-                self.w.simd(match (double, mode) {
-                    (false, 0) => 0x6A, // f32x4.nearest
-                    (false, 1) => 0x68, // f32x4.floor
-                    (false, 2) => 0x67, // f32x4.ceil
-                    (false, _) => 0x69, // f32x4.trunc
-                    (true, 0) => 0x94,  // f64x2.nearest
-                    (true, 1) => 0x75,  // f64x2.floor
-                    (true, 2) => 0x74,  // f64x2.ceil
-                    (true, _) => 0x7A,  // f64x2.trunc
-                });
-                let rounded = self.w.set_new_local_v128();
-                // per lane: a NaN (x != x), an inexact result (r != x); the
-                // lanes that count: all, or the low one
-                let ne = if double { 0x48 } else { 0x42 };
-                let any = |w: &mut WasmBuilder, a: &WasmLocalV128, b: &WasmLocalV128| {
-                    w.get_local_v128(a);
-                    w.get_local_v128(b);
-                    w.simd(ne);
-                    if scalar {
-                        w.simd_lane(0x1B, 0); // i32x4.extract_lane
-                    }
-                    else {
-                        w.simd(0x53); // v128.any_true
-                    }
-                };
-                any(&mut self.w, &rounded, &source);
-                let inexact = self.w.set_new_local();
-                self.w.load_fixed_i32(gp::mxcsr as u32);
-                let mxcsr = self.w.set_new_local();
-                any(&mut self.w, &source, &source);
-                self.w.get_local(&mxcsr);
-                self.w
-                    .const_i32(0x40 | if imm8 & 4 != 0 { 0x6000 } else { 0 });
-                self.w.and_i32();
-                self.w.or_i32();
-                if imm8 & 8 == 0 {
-                    // (PE unmasked: PM, MXCSR bit 12, clear)
-                    self.w.get_local(&inexact);
-                    self.w.get_local(&mxcsr);
-                    self.w.const_i32(0x1000);
-                    self.w.and_i32();
-                    self.w.eqz_i32();
-                    self.w.and_i32();
-                    self.w.or_i32();
-                }
-                let refused = self.w.set_new_local();
-                if scalar {
-                    self.w.get_local_v128(&rounded);
-                    self.w.get_local_v128(&destination);
-                    let mut lanes = [0; 16];
-                    for (k, lane) in lanes.iter_mut().enumerate() {
-                        *lane = if k < bytes as usize { k as u8 } else { 16 + k as u8 };
-                    }
-                    self.w.simd_shuffle(lanes);
-                }
-                else {
-                    self.w.get_local_v128(&rounded);
-                }
-                let v = self.w.set_new_local_v128();
-                if imm8 & 8 == 0 {
-                    // MXCSR.PE for an inexact lane (when not refused)
-                    self.w.get_local(&inexact);
-                    self.w.get_local(&refused);
-                    self.w.eqz_i32();
-                    self.w.and_i32();
-                    self.w.if_void();
-                    self.w.const_i32(gp::mxcsr as i32);
-                    self.w.get_local(&mxcsr);
-                    self.w.const_i32(0x20);
-                    self.w.or_i32();
-                    self.w.store_aligned_i32(0);
-                    self.w.block_end();
-                }
-                self.w.get_local(&refused);
-                self.exact_if(i, &destination, &source);
-                self.exact_result();
-                self.w.set_local_v128(&v);
-                self.w.block_end();
-                self.store_xmm_low(reg, &v, if scalar { bytes } else { 16 });
-                // (no lane facts: the exact path may produce a NaN)
-                self.xmm_clean[reg as usize] = 0;
-                for local in [refused, mxcsr, inexact] {
-                    self.w.free_local(local);
-                }
-                for v128 in [v, rounded, destination, source] {
-                    self.w.free_local_v128(v128);
-                }
-            },
+            } => ops::round(&mut Operands { page: self, i, reg }, double, scalar, imm8),
             Simd::CompareFlags { reg, double } => {
                 // flags = ZF (equal), CF (less), ZF|PF|CF (unordered); others clear.
                 self.scalar_source(i, if double { 8 } else { 4 });
@@ -1822,14 +1715,7 @@ impl Page {
                 self.w.free_local_v128(dst);
             },
             Simd::MoveMask { reg, lane } => {
-                // (register forms only)
-                self.load_xmm(rm);
-                self.w.simd(match lane {
-                    1 => 0x64, // i8x16.bitmask
-                    4 => 0xA4, // i32x4.bitmask
-                    _ => 0xC4, // i64x2.bitmask
-                });
-                self.write_reg(reg, 32);
+                ops::move_mask(&mut Operands { page: self, i, reg }, lane)
             },
             Simd::CompareMask {
                 reg,
@@ -1843,26 +1729,7 @@ impl Page {
                 predicate,
             ),
             Simd::Blendv { reg, lane, mask } => {
-                self.simd_source(i, false, 16);
-                let src = self.w.set_new_local_v128();
-                self.load_xmm(self.first(reg));
-                let dst = self.w.set_new_local_v128();
-                // the source's lanes where the mask's lane is negative
-                self.w.get_local_v128(&src);
-                self.w.get_local_v128(&dst);
-                self.load_xmm(mask);
-                self.w.const_i32(lane as i32 * 8 - 1);
-                self.w.simd(match lane {
-                    1 => 0x6C, // i8x16.shr_s
-                    4 => 0xAC, // i32x4.shr_s
-                    _ => 0xCC, // i64x2.shr_s
-                });
-                self.w.simd(0x52); // v128.bitselect
-                let result = self.w.set_new_local_v128();
-                self.store_xmm(reg, &result);
-                for v in [src, dst, result] {
-                    self.w.free_local_v128(v);
-                }
+                ops::blend_variable(&mut Operands { page: self, i, reg }, lane, mask)
             },
             Simd::Vzeroupper => {
                 for r in 0..8 {
@@ -2006,6 +1873,7 @@ impl VecOperands for Operands<'_, '_> {
             self.page.simd_source(self.i, false, bytes);
         }
     }
+    fn register(&mut self, r: u8) { self.page.load_xmm(r) }
     fn source_int(&mut self, wide: bool) {
         dbg_assert!(!wide, "Tier-0: 32-bit integers only");
         match &self.i.ea {

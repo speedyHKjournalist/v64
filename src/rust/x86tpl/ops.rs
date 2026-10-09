@@ -13,6 +13,7 @@ use super::vec::{
     clean_bits, compare_relation, conversion_inexact, convert_facts, convert_integer,
     float_arithmetic, float_claims, float_facts, integer_conversion_inexact, known_clean,
 };
+use crate::cpu::global_pointers as gp;
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
 
 /// An engine's register facts (Tier-0's Page::xmm_clean: the lanes known to
@@ -39,6 +40,9 @@ pub trait VecOperands {
     /// Push the integer r/m operand: an i32 (an i64 if `wide`), a register
     /// or memory
     fn source_int(&mut self, wide: bool);
+    /// Push XMM `r`, whole (another register the form names, such as
+    /// BLENDV's mask)
+    fn register(&mut self, r: u8);
     /// Write the low `bytes` of `value` to the destination, keeping the
     /// first source's other bytes (16: all of `value`)
     fn store_vec(&mut self, value: &WasmLocalV128, bytes: u8);
@@ -370,4 +374,149 @@ pub fn to_integer<T: VecOperands>(t: &mut T, double: bool, truncate: bool) {
     t.w().free_local_f64(x);
     t.w().free_local_v128(source);
     t.store_int(false);
+}
+
+/// PMOVMSKB (`lane` 1), MOVMSKPS (4) and MOVMSKPD (8) r32, xmm: the sign bits
+/// of the lanes (register forms only)
+pub fn move_mask<T: VecOperands>(t: &mut T, lane: u8) {
+    t.source(16, true);
+    t.w().simd(match lane {
+        1 => 0x64, // i8x16.bitmask
+        4 => 0xA4, // i32x4.bitmask
+        _ => 0xC4, // i64x2.bitmask
+    });
+    t.store_int(false);
+}
+
+/// BLENDVPS, BLENDVPD and PBLENDVB (`lane` 4, 8, 1): the source's lanes
+/// whose sign bit in XMM `mask` (XMM0, VEX imm8[7:4]) is set
+pub fn blend_variable<T: VecOperands>(t: &mut T, lane: u8, mask: u8) {
+    t.source(16, false);
+    let src = t.w().set_new_local_v128();
+    t.first();
+    let dst = t.w().set_new_local_v128();
+    // the source's lanes where the mask's lane is negative
+    t.w().get_local_v128(&src);
+    t.w().get_local_v128(&dst);
+    t.register(mask);
+    t.w().const_i32(lane as i32 * 8 - 1);
+    t.w().simd(match lane {
+        1 => 0x6C, // i8x16.shr_s
+        4 => 0xAC, // i32x4.shr_s
+        _ => 0xCC, // i64x2.shr_s
+    });
+    t.w().simd(0x52); // v128.bitselect
+    let result = t.w().set_new_local_v128();
+    t.store_vec(&result, 16);
+    for v in [src, dst, result] {
+        t.w().free_local_v128(v);
+    }
+}
+
+/// ROUNDPS, ROUNDPD, ROUNDSS and ROUNDSD with `imm8`: Wasm's rounding of the
+/// lanes (a scalar form's low one into the destination), imm8[1:0]'s mode,
+/// or MXCSR.RC's with imm8[2], admitted to nearest only. Refused: a NaN lane
+/// (its payload; an SNaN raises IE), DAZ, and an inexact lane while PE is
+/// reported (imm8[3] clear) and unmasked. Denormals need no DE (ROUND has
+/// none); a result is integral, never tiny. PE is set here, after the last
+/// refusal.
+pub fn round<T: VecOperands>(t: &mut T, double: bool, scalar: bool, imm8: u8) {
+    let bytes = if double { 8 } else { 4 };
+    if scalar {
+        t.source(bytes, true);
+    }
+    else {
+        t.source(16, false);
+    }
+    let source = t.w().set_new_local_v128();
+    t.first();
+    let destination = t.w().set_new_local_v128();
+    let mode = if imm8 & 4 != 0 { 0 } else { imm8 & 3 };
+    t.w().get_local_v128(&source);
+    t.w().simd(match (double, mode) {
+        (false, 0) => 0x6A, // f32x4.nearest
+        (false, 1) => 0x68, // f32x4.floor
+        (false, 2) => 0x67, // f32x4.ceil
+        (false, _) => 0x69, // f32x4.trunc
+        (true, 0) => 0x94,  // f64x2.nearest
+        (true, 1) => 0x75,  // f64x2.floor
+        (true, 2) => 0x74,  // f64x2.ceil
+        (true, _) => 0x7A,  // f64x2.trunc
+    });
+    let rounded = t.w().set_new_local_v128();
+    // per lane: a NaN (x != x), an inexact result (r != x); the lanes that
+    // count: all, or the low one
+    let ne = if double { 0x48 } else { 0x42 };
+    let any = |w: &mut WasmBuilder, a: &WasmLocalV128, b: &WasmLocalV128| {
+        w.get_local_v128(a);
+        w.get_local_v128(b);
+        w.simd(ne);
+        if scalar {
+            w.simd_lane(0x1B, 0); // i32x4.extract_lane
+        }
+        else {
+            w.simd(0x53); // v128.any_true
+        }
+    };
+    any(t.w(), &rounded, &source);
+    let inexact = t.w().set_new_local();
+    t.w().load_fixed_i32(gp::mxcsr as u32);
+    let mxcsr = t.w().set_new_local();
+    any(t.w(), &source, &source);
+    t.w().get_local(&mxcsr);
+    t.w()
+        .const_i32(0x40 | if imm8 & 4 != 0 { 0x6000 } else { 0 });
+    t.w().and_i32();
+    t.w().or_i32();
+    if imm8 & 8 == 0 {
+        // (PE unmasked: PM, MXCSR bit 12, clear)
+        t.w().get_local(&inexact);
+        t.w().get_local(&mxcsr);
+        t.w().const_i32(0x1000);
+        t.w().and_i32();
+        t.w().eqz_i32();
+        t.w().and_i32();
+        t.w().or_i32();
+    }
+    let refused = t.w().set_new_local();
+    if scalar {
+        t.w().get_local_v128(&rounded);
+        t.w().get_local_v128(&destination);
+        let mut lanes = [0; 16];
+        for (k, lane) in lanes.iter_mut().enumerate() {
+            *lane = if k < bytes as usize { k as u8 } else { 16 + k as u8 };
+        }
+        t.w().simd_shuffle(lanes);
+    }
+    else {
+        t.w().get_local_v128(&rounded);
+    }
+    let v = t.w().set_new_local_v128();
+    if imm8 & 8 == 0 {
+        // MXCSR.PE for an inexact lane (when not refused)
+        t.w().get_local(&inexact);
+        t.w().get_local(&refused);
+        t.w().eqz_i32();
+        t.w().and_i32();
+        t.w().if_void();
+        t.w().const_i32(gp::mxcsr as i32);
+        t.w().get_local(&mxcsr);
+        t.w().const_i32(0x20);
+        t.w().or_i32();
+        t.w().store_aligned_i32(0);
+        t.w().block_end();
+    }
+    t.w().get_local(&refused);
+    t.refused(&destination, &source, None, &v);
+    t.store_vec(&v, if scalar { bytes } else { 16 });
+    // (no lane facts: the exact path may produce a NaN)
+    if let Some(f) = t.facts() {
+        f.clean[f.reg as usize] = 0;
+    }
+    for local in [refused, mxcsr, inexact] {
+        t.w().free_local(local);
+    }
+    for v128 in [v, rounded, destination, source] {
+        t.w().free_local_v128(v128);
+    }
 }

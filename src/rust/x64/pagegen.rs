@@ -26,7 +26,7 @@ use super::state::{gpr_high_offset, gpr_low_offset, ExecutionMode, GuestIp};
 use crate::cpu::global_pointers as gp;
 use crate::wasmgen::leaves::{self, Shift};
 use crate::wasmgen::wasm_builder::{
-    Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType,
+    Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmType,
 };
 use crate::wasmgen::wasm_opcodes as op;
 use crate::x86tpl::vec::{self, Packed};
@@ -5591,15 +5591,15 @@ impl Emitter {
             },
             Op::Vmovmsk { dst, src, lane } => {
                 self.vector_check(inst, start);
-                self.c32(Self::xmm(src) as i32);
-                self.b.simd_memory(0x00, 0);
-                self.b.simd(match lane {
-                    1 => 0x64, // i8x16.bitmask
-                    4 => 0xA4, // i32x4.bitmask
-                    _ => 0xC4, // i64x2.bitmask
-                });
-                self.b.extend_unsigned_i32_to_i64();
-                self.set_reg(dst, 64);
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst: dst.index,
+                    first: dst.index,
+                    src: Xmm::Reg(src),
+                };
+                crate::x86tpl::ops::move_mask(&mut operands, lane);
             },
             Op::Vcmp {
                 double,
@@ -5617,24 +5617,15 @@ impl Emitter {
                 mask,
             } => {
                 self.vector_check(inst, start);
-                self.vector_source(src, inst);
-                let source = self.b.set_new_local_v128();
-                // the source's lanes where the mask's lane is negative
-                self.c32(Self::xmm(dst) as i32);
-                self.b.get_local_v128(&source);
-                self.c32(Self::xmm(first) as i32);
-                self.b.simd_memory(0x00, 0);
-                self.c32(Self::xmm(mask) as i32);
-                self.b.simd_memory(0x00, 0);
-                self.c32(lane as i32 * 8 - 1);
-                self.b.simd(match lane {
-                    1 => 0x6C, // i8x16.shr_s
-                    4 => 0xAC, // i32x4.shr_s
-                    _ => 0xCC, // i64x2.shr_s
-                });
-                self.b.simd(0x52); // v128.bitselect
-                self.b.simd_memory(0x0B, 0);
-                self.b.free_local_v128(source);
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst,
+                    first,
+                    src,
+                };
+                crate::x86tpl::ops::blend_variable(&mut operands, lane, mask);
                 self.vex_upper(inst, dst);
             },
             Op::Vcvt { op, dst, src } => self.vcvt(inst, start, op, dst, src),
@@ -6456,6 +6447,8 @@ impl Emitter {
     /// COMISS/UCOMISS/COMISD/UCOMISD. With no NaN or denormal operand the
     /// interpreter changes no MXCSR bit and sets ZF (equal) or CF (less),
     /// clearing the other arithmetic flags; anything else is retried.
+    /// ROUNDPS/PD/SS/SD (Op::Vround): x86tpl::ops::round on the page tier's
+    /// operands, whose refused instructions retry
     fn vround(
         &mut self,
         inst: &Inst,
@@ -6468,101 +6461,16 @@ impl Emitter {
         src: Xmm,
     ) {
         self.vector_check(inst, start);
-        // (DAZ, or MXCSR.RC other than nearest for imm8[2])
-        self.b.load_fixed_i32(gp::mxcsr as u32);
-        self.c32(0x40 | if imm8 & 4 != 0 { 0x6000 } else { 0 });
-        self.b.and_i32();
-        self.b.if_void();
-        self.leave_to(self.f().retry, start);
-        self.b.block_end();
-        let bits = if double { 64 } else { 32 };
-        match (scalar, src) {
-            (true, Xmm::Mem(a)) => {
-                self.vector_address(&a, bits, false, false, inst);
-                self.gi(HOST);
-                self.load_bits(bits, 0);
-                self.b.simd(0x12); // i64x2.splat: the lane in the low one
-            },
-            _ => self.vector_source(src, inst),
-        }
-        let source = self.b.set_new_local_v128();
-        let mode = if imm8 & 4 != 0 { 0 } else { imm8 & 3 };
-        self.b.get_local_v128(&source);
-        self.b.simd(match (double, mode) {
-            (false, 0) => 0x6A, // f32x4.nearest
-            (false, 1) => 0x68, // f32x4.floor
-            (false, 2) => 0x67, // f32x4.ceil
-            (false, _) => 0x69, // f32x4.trunc
-            (true, 0) => 0x94,  // f64x2.nearest
-            (true, 1) => 0x75,  // f64x2.floor
-            (true, 2) => 0x74,  // f64x2.ceil
-            (true, _) => 0x7A,  // f64x2.trunc
-        });
-        let rounded = self.b.set_new_local_v128();
-        // per lane: a NaN (x != x), an inexact result (r != x); the lanes
-        // that count: all, or the low one
-        let ne = if double { 0x48 } else { 0x42 };
-        let any = |b: &mut WasmBuilder, x: &WasmLocalV128, y: &WasmLocalV128| {
-            b.get_local_v128(x);
-            b.get_local_v128(y);
-            b.simd(ne);
-            if scalar {
-                b.simd_lane(0x1B, 0); // i32x4.extract_lane
-            }
-            else {
-                b.simd(0x53); // v128.any_true
-            }
+        let mut operands = pagegen_vec::Operands {
+            e: self,
+            inst,
+            start,
+            dst,
+            first,
+            src,
         };
-        any(&mut self.b, &rounded, &source);
-        let inexact = self.b.set_new_local();
-        any(&mut self.b, &source, &source);
-        if imm8 & 8 == 0 {
-            // (PE reported and unmasked: PM, MXCSR bit 12, clear)
-            self.b.get_local(&inexact);
-            self.b.load_fixed_i32(gp::mxcsr as u32);
-            self.c32(0x1000);
-            self.b.and_i32();
-            self.b.eqz_i32();
-            self.b.and_i32();
-            self.b.or_i32();
-        }
-        self.b.if_void();
-        self.leave_to(self.f().retry, start);
-        self.b.block_end();
-        if imm8 & 8 == 0 {
-            self.b.get_local(&inexact);
-            self.b.if_void();
-            self.c32(gp::mxcsr as i32);
-            self.b.load_fixed_i32(gp::mxcsr as u32);
-            self.c32(0x20);
-            self.b.or_i32();
-            self.b.store_aligned_i32(0);
-            self.b.block_end();
-        }
-        if scalar {
-            if first != dst {
-                // (the other lanes from VEX.vvvv)
-                self.xmm_copy(first, dst);
-            }
-            self.b.get_local_v128(&rounded);
-            if double {
-                self.b.simd_lane(0x1D, 0); // i64x2.extract_lane
-            }
-            else {
-                self.b.simd_lane(0x1B, 0); // i32x4.extract_lane
-                self.b.extend_unsigned_i32_to_i64();
-            }
-            self.xmm_store(dst, 0, bits, true);
-        }
-        else {
-            self.c32(Self::xmm(dst) as i32);
-            self.b.get_local_v128(&rounded);
-            self.b.simd_memory(0x0B, 0);
-        }
+        crate::x86tpl::ops::round(&mut operands, double, scalar, imm8);
         self.vex_upper(inst, dst);
-        self.b.free_local(inexact);
-        self.b.free_local_v128(rounded);
-        self.b.free_local_v128(source);
     }
     fn vcompare(&mut self, inst: &Inst, start: u64, double: bool, dst: u8, src: Xmm) {
         self.vector_check(inst, start);
