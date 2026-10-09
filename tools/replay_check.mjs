@@ -14,10 +14,12 @@
 //   worktree build/core-split/base (shared with core_split_check.mjs), the
 //   working tree its own; --base-wasm and --new-wasm take built ones instead.
 // - Exit 1 when a record's bytes differ, unless --allow-changes (a change
-//   meant to alter generated code reports which records it changed).
+//   meant to alter generated code reports which records it changed);
+//   --allow-changes x64 (or tier0; comma-separated) allows only that
+//   engine's: the other must still give the same bytes.
 //
 // Usage: tools/replay_check.mjs [--base REV] [--base-wasm f] [--new-wasm f]
-//        [--records file.t0r ...] [--allow-changes]
+//        [--records file.t0r ...] [--allow-changes [tier0,x64]]
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -137,7 +139,12 @@ if(!base["ir_t0_replay"] || !next["ir_t0_replay"])
     console.log(`replay-check: ${!base["ir_t0_replay"] ? "the base" : "the working tree"} has no replay (ir-test-hooks before P2.0): skipped`);
     process.exit(0);
 }
-let differ = 0, total = 0;
+// (the engines whose changes are allowed: --allow-changes alone, every one)
+const allow_at = args.indexOf("--allow-changes");
+const allow_list = allow_at >= 0 && args[allow_at + 1] && !args[allow_at + 1].startsWith("--") ? args[allow_at + 1].split(",") : null;
+const allowed = engine => allow_at >= 0 && (!allow_list || allow_list.includes(engine.name));
+for(const name of allow_list || []) if(!ENGINES.some(e => e.name === name)) throw new Error(`--allow-changes: no engine ${name}`);
+let differ = 0, total = 0, blocking = 0;
 for(const engine of ENGINES)
 {
     const sources = [["corpus", (base[engine.prefix + "record_corpus"](), records_of(base, engine))],
@@ -158,13 +165,19 @@ for(const engine of ENGINES)
         }
         total += records.length;
         differ += changed;
+        if(!allowed(engine)) blocking += changed;
         console.log(`replay-check ${engine.name} ${name}: ${records.length} records, ${changed} differ, ${refused} compile in neither` +
             (examples.length ? "\n  " + examples.join("\n  ") : ""));
     }
 }
-if(differ && !args.includes("--allow-changes"))
+if(blocking)
 {
-    console.log(`replay-check: ${differ} of ${total} records give other bytes`);
+    console.log(`replay-check: ${differ} of ${total} records give other bytes` + (blocking < differ ? `, ${blocking} where no change is allowed` : ""));
     process.exit(1);
+}
+if(differ)
+{
+    console.log(`replay-check: ${differ} of ${total} records give other bytes, allowed (--allow-changes ${allow_list ? allow_list.join(",") : ""})`);
+    process.exit(0);
 }
 console.log(`replay-check: ${total - differ} of ${total} records give the same bytes`);

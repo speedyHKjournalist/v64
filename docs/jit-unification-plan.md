@@ -1303,3 +1303,22 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 `super::` 路径：不进 x64 page tier、Tier-0、IR 运行时、`jit.rs` 与 region 管线，`super::` 不出模块；`make jit-gate` 每次都跑，
 故意放进一个违规的路径时它报错。`docs/ir-design.md` 写了 x86tpl 与 `wasmgen::leaves`，`docs/x86-64.md` 写了 page tier 的打包
 转换。
+
+**P2.5 page tier 的打包转换（`x64_cvt`），2026-10-10。**
+
+- 长模式的 CVTPS2PD、CVTPD2PS、CVTDQ2PS、CVTDQ2PD、CVT(T)PS2DQ、CVT(T)PD2DQ 成为 `Op::Vcvt`：`x86tpl::ops` 的 `convert` 与
+  `convert_to_integers`，用 page tier 的适配器 `x64/pagegen_vec.rs`（XMM 在 CPU 状态里，内存经访问缓存，传统 SSE 的 m128 要求
+  对齐，被拒绝的指令重试，i32 结果显式扩展）。标量的 CVTSI2SS/SD、CVT(T)SS2SI/SD2SI、CVTSS2SD/CVTSD2SS 早已是原生的
+  `Op::Vconvert`。开关 `x64_cvt`（注册表；`CompileEnv::cvt` 与 X6R1 记录的第 6 位，合成语料按开着编译）关着时，解码器把它们
+  仍当作单步，生成代码不变。`vector_oracle.mjs` 加了 MXCSR.PE 置位的寄存器与内存用例和 `X64_STEP_PROFILE` 输出，
+  `guest_runner.mjs` 读 `JIT_SWITCHES`。
+- 第二部分：Windows 运行时 MXCSR.PE 是清零的，而它用到的转换多半精确，没有东西会置 PE。照 Tier-0 的条件（要求 PE 已置位）
+  CVTPD2PS 与 CVTDQ2PS 每次都重试，Win8.1 启动里打包转换的单步只少了 58%。`VecOperands` 因此加上计划说的另一处差别
+  `detects_inexact`：page tier 不要求 PE（`native_fp::mxcsr_refused_any_pe`），模板自己判断结果是否精确
+  （`vec::conversion_inexact`、`vec::integer_conversion_inexact`），在最后一个重试点之后置 PE（`native_fp::inexact_pe`）。这时还
+  剩 CVTDQ2PS 的 58 万次重试：Windows 运行时的 MXCSR 不在这个条件接受的状态里，而 CVTDQ2PS 除 PE 外不产生异常，精确的结果
+  在任何 MXCSR 下都对，所以只在结果不精确且不是就近舍入或 PE 未屏蔽时拒绝（`native_fp::rounding_refused`）。之后启动里打包
+  转换的单步与重试都是 0（关着时 454 万）。Tier-0 不变：replay-check 的 Tier-0 记录一致，x64 语料里的转换记录按预期改变，
+  `REPLAY_ALLOW_CHANGES=x64` 让本地门禁只放行 page tier 的改动（`replay_check.mjs --allow-changes x64`）。
+- 验证：`vector_oracle.mjs` 的 350 个转换用例在开关开、关时都与 QEMU 一致，MXCSR 也一致；x86-64 bench（开对关）的校验和与
+  解释器一致。R 级（开关关着，与 P2.4 比较）：bench 加复测后 1.030，XP 中位数 13.31 s 对 13.05 s，比值 1.020。

@@ -52,6 +52,38 @@ pub fn mxcsr_refused(w: &mut WasmBuilder) {
     w.ne_i32();
 }
 
+/// mxcsr_refused with PE either way: for an engine that finds inexact
+/// results itself and sets PE (inexact_pe; the page tier)
+pub fn mxcsr_refused_any_pe(w: &mut WasmBuilder) {
+    w.load_fixed_i32(gp::mxcsr as u32);
+    w.const_i32(0xFFC0);
+    w.and_i32();
+    w.const_i32(0x1F80);
+    w.ne_i32();
+}
+
+/// Push i32 nonzero unless MXCSR rounds to nearest with PE masked: what an
+/// inexact result of an operation that raises nothing else needs
+pub fn rounding_refused(w: &mut WasmBuilder) {
+    w.load_fixed_i32(gp::mxcsr as u32);
+    w.const_i32(0x7000);
+    w.and_i32();
+    w.const_i32(0x1000);
+    w.ne_i32();
+}
+
+/// Set MXCSR.PE if the i32 on the stack is nonzero: an inexact result, every
+/// exception masked (mxcsr_refused_any_pe)
+pub fn inexact_pe(w: &mut WasmBuilder) {
+    w.if_void();
+    w.const_i32(gp::mxcsr as i32);
+    w.load_fixed_i32(gp::mxcsr as u32);
+    w.const_i32(0x20);
+    w.or_i32();
+    w.store_aligned_i32(0);
+    w.block_end();
+}
+
 /// v128.const with `v` in every 32-bit lane
 fn splat32(w: &mut WasmBuilder, v: u32) {
     let mut bytes = [0; 16];

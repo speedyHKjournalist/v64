@@ -9,7 +9,9 @@
 //   import rule of src/rust/x86tpl (P2.10) and, when something
 //   that feeds build/v86.wasm changed, core-split-check (ARM64 plan P0.7);
 //   when IR, x64 or shared JIT code changed, replay-check (P2.0: the
-//   generated code byte for byte, tools/replay_check.mjs) and the leaf
+//   generated code byte for byte, tools/replay_check.mjs; REPLAY_ALLOW_CHANGES=x64
+//   for a change meant to alter the page tier's code, which Tier-0's must
+//   not follow) and the leaf
 //   digests (P2.1: jit-leaf-tests, tests/x86tpl); then
 //   ir-tier0-tests when IR or shared JIT code changed and
 //   x64-page-tier-tests when x64 or shared JIT code changed. The changes are
@@ -102,7 +104,8 @@ const steps = [
         skip: feeds_core || full ? null : "nothing that feeds build/v86.wasm changed" },
     // (P2.0: the base's and the working tree's generated code, byte for
     // byte, for the synthetic corpus and the recordings in build/replay)
-    { name: "replay-check (P2.0)", command: ["node", "tools/replay_check.mjs", ...(base ? ["--base", base] : []), ...replay_records],
+    { name: "replay-check (P2.0)", command: ["node", "tools/replay_check.mjs", ...(base ? ["--base", base] : []), ...replay_records,
+        ...(process.env.REPLAY_ALLOW_CHANGES ? ["--allow-changes", process.env.REPLAY_ALLOW_CHANGES] : [])],
         skip: ir_tests || x64_tests ? null : "no IR, x64 or shared JIT change" },
     { name: "leaf digests (P2.1)", command: ["make", "jit-leaf-tests"],
         skip: ir_tests || x64_tests ? null : "no IR, x64 or shared JIT change" },

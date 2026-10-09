@@ -394,6 +394,63 @@ pub fn convert_integer(w: &mut WasmBuilder, double: bool, truncate: bool) -> Was
     out_of_range
 }
 
+/// Push i32 nonzero if a lane of the conversion `opcode` (ops::convert: 0x5E
+/// f64 to f32, 0xFA i32 to f32; the others are exact) of `x` into `v` is
+/// inexact, for the lanes it admitted: the low one if `scalar`
+pub fn conversion_inexact(
+    w: &mut WasmBuilder,
+    opcode: u32,
+    scalar: bool,
+    x: &WasmLocalV128,
+    v: &WasmLocalV128,
+) {
+    if opcode == 0x5E {
+        // f32 back to f64 differs
+        w.get_local_v128(v);
+        w.simd(0x5F); // f64x2.promote_low_f32x4
+        w.get_local_v128(x);
+        w.simd(0x48); // f64x2.ne
+    }
+    else {
+        // the f32 back to i32 differs, or the f32 is 2^31 (trunc_sat
+        // saturates it to i32::MAX)
+        w.get_local_v128(v);
+        w.simd(0xF8); // i32x4.trunc_sat_f32x4_s
+        w.get_local_v128(x);
+        w.simd(0x38); // i32x4.ne
+        w.get_local_v128(v);
+        leaves::splat_i32(w, 0x4F000000);
+        w.simd(0x41); // f32x4.eq
+        w.simd(0x50); // v128.or
+    }
+    if scalar {
+        w.simd_lane(0x1B, 0); // i32x4.extract_lane
+    }
+    else {
+        w.simd(0x53); // v128.any_true
+    }
+}
+
+/// Push i32 nonzero if a lane of `x` is not integral after CVT(T)PS2DQ's or
+/// CVT(T)PD2DQ's rounding (to nearest, or `truncate`): an inexact result
+pub fn integer_conversion_inexact(
+    w: &mut WasmBuilder,
+    double: bool,
+    truncate: bool,
+    x: &WasmLocalV128,
+) {
+    w.get_local_v128(x);
+    w.simd(match (double, truncate) {
+        (false, false) => 0x6A, // f32x4.nearest
+        (false, true) => 0x69,  // f32x4.trunc
+        (true, false) => 0x94,  // f64x2.nearest
+        (true, true) => 0x7A,   // f64x2.trunc
+    });
+    w.get_local_v128(x);
+    w.simd(if double { 0x48 } else { 0x42 }); // f64x2.ne, f32x4.ne
+    w.simd(0x53); // v128.any_true
+}
+
 /// PSRLx/PSRAx/PSLLx (`bits` 16, 32 or 64: the lane width) and PSRLDQ/PSLLDQ
 /// (128: bytes) of `value` by imm8 `count`, `kind` the ModRM reg (2 PSRL, 4
 /// PSRA, 6 PSLL, 3 PSRLDQ, 7 PSLLDQ): push the result

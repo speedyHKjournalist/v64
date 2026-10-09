@@ -3,8 +3,9 @@
 //! state, memory operands through the access cache (vector_address, which
 //! retries an aligned form's misaligned address), and no exact path: a
 //! refused instruction retries in the interpreter, which leaves the CPU as
-//! the templates found it (they write after their last retry point). The
-//! page tier keeps no register facts. Integer results are i64 here: store_int
+//! the templates found it (they write after their last retry point). MXCSR.PE
+//! may be clear: the templates set it for an inexact result. The page tier
+//! keeps no register facts. Integer results are i64 here: store_int
 //! extends a template's i32 explicitly.
 use super::{Emitter, Inst, Reg, Xmm, HOST};
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
@@ -103,8 +104,9 @@ impl VecOperands for Operands<'_> {
         self.e.set_reg(r, if wide { 64 } else { 32 });
     }
     fn retry_if(&mut self) { self.e.retry_if(self.start) }
-    fn mxcsr_refused(&mut self) { native_fp::mxcsr_refused(&mut self.e.b) }
+    fn mxcsr_refused(&mut self) { native_fp::mxcsr_refused_any_pe(&mut self.e.b) }
     fn in_place(&self) -> bool { false }
+    fn detects_inexact(&self) -> bool { true }
     fn exact_open(&mut self, _: &WasmLocalV128, _: &WasmLocalV128, _: Option<u32>) {
         unreachable!("the page tier retries refused instructions")
     }

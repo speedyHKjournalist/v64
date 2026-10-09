@@ -10,8 +10,8 @@
 //! first write (store_vec, store_int), so a retry finds the CPU as it was.
 use super::native_fp::{self, Lanes};
 use super::vec::{
-    clean_bits, compare_relation, convert_facts, convert_integer, float_arithmetic, float_claims,
-    float_facts, known_clean,
+    clean_bits, compare_relation, conversion_inexact, convert_facts, convert_integer,
+    float_arithmetic, float_claims, float_facts, integer_conversion_inexact, known_clean,
 };
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
 
@@ -54,6 +54,10 @@ pub trait VecOperands {
     /// Whether a refused instruction runs exactly in place (exact_open);
     /// else it retries
     fn in_place(&self) -> bool;
+    /// Whether MXCSR.PE may be clear (mxcsr_refused admits it): the
+    /// templates then set PE for an inexact result themselves. Else
+    /// mxcsr_refused wants PE set, and an inexact result changes nothing.
+    fn detects_inexact(&self) -> bool { false }
     /// If the i32 on the stack is nonzero, open a block that runs the
     /// instruction exactly on (`destination`, `source`) with `imm8` (None:
     /// the instruction's own); a fault retries
@@ -231,10 +235,28 @@ pub fn convert<T: VecOperands>(t: &mut T, opcode: u32, source: u8, result: u8) {
     }
     // (an admitted result is a fact: convert_facts)
     t.retry_if();
-    if matches!(opcode, 0x5E | 0xFA) {
+    if opcode == 0xFA && t.detects_inexact() {
+        // CVTDQ2PS raises nothing but PE: an exact result is right in every
+        // MXCSR state, an inexact one needs rounding to nearest and PE
+        // masked, and sets PE
+        conversion_inexact(t.w(), opcode, scalar, &x, &v);
+        let inexact = t.w().set_new_local();
+        t.w().get_local(&inexact);
+        native_fp::rounding_refused(t.w());
+        t.w().and_i32();
+        t.retry_if();
+        t.w().get_local(&inexact);
+        native_fp::inexact_pe(t.w());
+        t.w().free_local(inexact);
+    }
+    else if matches!(opcode, 0x5E | 0xFA) {
         // (CVTDQ2PS: only PE)
         t.mxcsr_refused();
         t.refused(&destination, &x, None, &v);
+        if t.detects_inexact() {
+            conversion_inexact(t.w(), opcode, scalar, &x, &v);
+            native_fp::inexact_pe(t.w());
+        }
     }
     let before = first_facts(t);
     t.store_vec(&v, result);
@@ -259,6 +281,10 @@ pub fn convert_to_integers<T: VecOperands>(t: &mut T, double: bool, truncate: bo
     t.mxcsr_refused();
     t.w().or_i32();
     t.refused(&v, &x, None, &v);
+    if t.detects_inexact() {
+        integer_conversion_inexact(t.w(), double, truncate, &x);
+        native_fp::inexact_pe(t.w());
+    }
     t.w().free_local(out_of_range);
     t.store_vec(&v, 16);
     t.w().free_local_v128(v);
