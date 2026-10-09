@@ -38,7 +38,7 @@ const X87_RUNS: bool = true;
 use super::CompileEnv;
 use crate::ir::runtime::entry::{CpuEntryKey, ExitKind};
 use crate::ir::runtime::tier0::{
-    Link, T0_CLD_STD, T0_JECXZ, T0_POP_RM, T0_PUSHA, T0_SREG_READ, T0_XCHG_MEM,
+    Link, T0_CLD_STD, T0_JECXZ, T0_POP_RM, T0_PUSHA, T0_SREG_LOAD, T0_SREG_READ, T0_XCHG_MEM,
 };
 use crate::state_flags::CachedStateFlags;
 use crate::wasmgen::wasm_builder::{
@@ -141,6 +141,7 @@ pub const FORM_NAMES: &[&str] = &[
     "PopRm",
     "Pusha",
     "Popa",
+    "MovToSreg",
 ];
 /// The template-kind profile's keys (runtime::tier0::kind_profile, the
 /// switch t0_kind_profile; docs/jit-unification-plan.md P3.0a): a Form kind
@@ -378,6 +379,11 @@ enum Form {
     /// PUSHAD and POPAD whose 32 bytes are in one page (P3.7, T0_PUSHA)
     Pusha,
     Popa,
+    /// MOV ES/DS/FS/GS, r/m16 (P3.7(b), T0_SREG_LOAD): ir_t0_load_seg, or
+    /// the interpreter when it refuses
+    MovToSreg {
+        seg: u8,
+    },
     Call {
         target: u32,
     },
@@ -445,6 +451,7 @@ impl Form {
             Form::PopRm => 48,
             Form::Pusha => 49,
             Form::Popa => 50,
+            Form::MovToSreg { .. } => 51,
         }
     }
     /// Whether the template can retry() (else no retry tail is emitted).
@@ -972,6 +979,9 @@ fn classify(i: &DecodedInstruction, features: u32) -> Option<Form> {
                 .is_some_and(|ea| ea.base != Some(4) && ea.index != Some(4)) =>
         {
             Form::PopRm
+        },
+        0x8E if features & T0_SREG_LOAD != 0 && matches!(reg, 0 | 3 | 4 | 5) => {
+            Form::MovToSreg { seg: reg }
         },
         0x60 if features & T0_PUSHA != 0 && v == 32 => Form::Pusha,
         0x61 if features & T0_PUSHA != 0 && v == 32 => Form::Popa,
@@ -3512,6 +3522,15 @@ impl Page {
                 self.w.const_i32(32);
                 self.w.sub_i32();
                 self.set_gpr(4);
+            },
+            Form::MovToSreg { seg } => {
+                self.read_rm(i, 16, false);
+                self.w.set_local(&value);
+                self.w.const_i32(seg as i32);
+                self.w.get_local(&value);
+                self.w
+                    .call_signature("ir_t0_load_seg", signature("ir_t0_load_seg"));
+                self.retry_if();
             },
             Form::Popa => {
                 // As popa32: EDI, ESI, EBP, (ESP skipped), EBX, EDX, ECX and

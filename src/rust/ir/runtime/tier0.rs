@@ -207,6 +207,13 @@ pub unsafe fn pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
     T0_SSE_FP.0[0] = u128::from_le_bytes(result.xmm0);
     result.index | (result.flags as u32) << 8
 }
+/// MOV ES/DS/FS/GS (P3.7(b)): cpu::switch_seg_without_fault; 1 = refused,
+/// nothing changed (the page function leaves the instruction to the
+/// interpreter)
+#[no_mangle]
+pub unsafe fn ir_t0_load_seg(reg: u32, selector: u32) -> u32 {
+    !cpu::switch_seg_without_fault(reg as i32, selector as i32 & 0xFFFF) as u32
+}
 #[no_mangle]
 pub unsafe fn ir_t0_pcmpstr(op: u32, imm8: u32, eax: i32, edx: i32) -> u32 {
     pcmpstr(op, imm8, eax as i64, edx as i64)
@@ -459,6 +466,8 @@ pub const T0_CLD_STD: u32 = 1 << 3;
 pub const T0_POP_RM: u32 = 1 << 4;
 /// t0_pusha (P3.7): PUSHAD and POPAD
 pub const T0_PUSHA: u32 = 1 << 5;
+/// t0_sreg_load (P3.7(b)): MOV ES/DS/FS/GS, r/m16 through ir_t0_load_seg
+pub const T0_SREG_LOAD: u32 = 1 << 6;
 /// The value of the switch whose feature bit is `bit`
 pub fn feature_value(bit: u32) -> u32 { (features() & bit != 0) as u32 }
 pub unsafe fn set_feature(bit: u32, on: bool) {

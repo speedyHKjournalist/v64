@@ -2956,6 +2956,97 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
     true
 }
 
+/// switch_seg for ES, DS, FS or GS in legacy protected mode when it raises
+/// nothing and leaves the state flags as they are (Tier-0's MOV Sreg
+/// template, docs/jit-unification-plan.md P3.7(b)). false, with nothing
+/// changed: a fault, a descriptor that does not translate without one, an
+/// accessed bit to set on a page with compiled code or a device, or a DS
+/// whose load changes flat segmentation (then the interpreter runs the
+/// instruction, as switch_seg)
+pub unsafe fn switch_seg_without_fault(reg: i32, selector_raw: i32) -> bool {
+    dbg_assert!(reg == ES || reg == DS || reg == FS || reg == GS);
+    if !*protected_mode
+        || vm86_mode()
+        || crate::x64::state::efer() & crate::x64::state::EFER_LMA != 0
+    {
+        return false;
+    }
+    let selector = SegmentSelector::of_u16(selector_raw as u16);
+    let flat = has_flat_segmentation();
+    if selector.is_null() {
+        // (a null DS is not flat segmentation)
+        if reg == DS && flat {
+            return false;
+        }
+        *sreg.offset(reg as isize) = selector_raw as u16;
+        *segment_is_null.offset(reg as isize) = true;
+        update_state_flags();
+        return true;
+    }
+    // lookup_segment_selector's read, a system access, must not fault
+    let (table, limit) = if selector.is_gdt() {
+        (*gdtr_offset as u32, *gdtr_size as u32)
+    }
+    else {
+        (
+            *segment_offsets.offset(LDTR as isize) as u32,
+            *segment_limits.offset(LDTR as isize) as u32,
+        )
+    };
+    if selector.descriptor_offset() as u32 + 7 > limit {
+        return false;
+    }
+    let address = table.wrapping_add(selector.descriptor_offset() as u32);
+    for byte in [address, address.wrapping_add(7)] {
+        if translate_address(byte as i32, false, false, false).is_err() {
+            return false;
+        }
+    }
+    let Ok(Ok((mut descriptor, descriptor_address))) = lookup_segment_selector(selector)
+    else {
+        return false;
+    };
+    if descriptor.is_system()
+        || !descriptor.is_readable()
+        || (!descriptor.is_conforming_executable()
+            && (selector.rpl() > descriptor.dpl() || *cpl > descriptor.dpl()))
+        || !descriptor.is_present()
+    {
+        return false;
+    }
+    if reg == DS
+        && flat
+            != (*segment_offsets.offset(SS as isize) == 0
+                && descriptor.base() as u32 == 0
+                && *segment_offsets.offset(CS as isize) == 0)
+    {
+        return false;
+    }
+    if !descriptor.accessed() {
+        let Ok(physical) = translate_address(descriptor_address as i32 + 5, true, false, false)
+        else {
+            return false;
+        };
+        if crate::jit::jit_page_has_code(crate::page::Page::page_of(physical))
+            || memory::may_interrupt(physical)
+        {
+            return false;
+        }
+        descriptor = descriptor.set_accessed();
+        if write_descriptor_access_byte(descriptor_address, descriptor.access_byte()).is_err() {
+            dbg_assert!(false, "a translated accessed-bit write faulted");
+            return false;
+        }
+    }
+    *segment_is_null.offset(reg as isize) = false;
+    *segment_limits.offset(reg as isize) = descriptor.effective_limit();
+    crate::x64::state::write_segment_base(reg as usize, descriptor.base() as u32 as u64);
+    *segment_access_bytes.offset(reg as isize) = descriptor.access_byte();
+    *sreg.offset(reg as isize) = selector_raw as u16;
+    update_state_flags();
+    true
+}
+
 pub unsafe fn load_tr(selector: i32) { let _ = load_tr_checked(selector); }
 
 // Explicit read-fault status for terminal IR callers. load_tr keeps

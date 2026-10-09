@@ -344,6 +344,16 @@ pub const SWITCHES: &[Switch] = &[
         },
         get: |_| Some(tier0::feature_value(tier0::T0_PUSHA)),
     },
+    Switch {
+        name: "t0_sreg_load",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_SREG_LOAD, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_SREG_LOAD)),
+    },
     // measurement: the executions of what Tier-0 compiles from now on, by
     // template kind (ir::runtime::tier0::kind_profile)
     Switch {
