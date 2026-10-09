@@ -22,7 +22,7 @@ all: build/cpu-worker.js build/v86_all.js build/libv86.js build/libv86.mjs build
 all-debug: build/cpu-worker.js build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm glbridge
 browser: build/cpu-worker.js build/v86_all.js
 
-# CPU benchmark suite (tests/bench): IR vs legacy, see docs/cpu-benchmarks.md.
+# CPU benchmark suite (tests/bench): one IR core against another, see docs/cpu-benchmarks.md.
 .PHONY: bench-build bench bench-quick bench-same-source ir-tier0-tests
 bench-build:
 	node tools/bench/build.mjs
@@ -988,7 +988,6 @@ x64-system-tests: build/v86-debug.wasm
 x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/integer_oracle.mjs
 	node tests/x64/vector_oracle.mjs
-	node tests/x64/native_oracle.mjs
 	node tests/x64/cache_oracle.mjs
 	node tests/x64/rep_strings.mjs
 

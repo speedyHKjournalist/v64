@@ -1163,3 +1163,37 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
   747.5 MIPS（平坦环 3 占 94%）。冷启动用 `windows98/windows98hdd.img`（游戏用的 512 MB 系统盘会重启进 MS-DOS 模式
   并等待按键）：6.6、6.7 s 到 800×600×16，第三次 60 s 都停在实模式（97%），原因未查。`idle_mode` 打开时《红色警戒 2》
   148.6 MIPS，比默认低 7%：待决问题 6 维持默认关。
+
+**P0.10 长模式基线与单步占比 s，2026-10-09（`287cfeb0` 的核心，`mode_ledger` 与 `step_profile` 打开）。**
+
+- Win8.1 首次启动到桌面：退役 320.5 亿条，账本之和与之相等。Long64 98.4%，s = 0.08%（page tier 单步 2331 万、重试
+  38 万），解释 0.09%；Legacy32（启动早期，平坦）3.87 亿条，Tier-0 原生 99%，s = 0.27%；Prot16 1.31 亿条，其中
+  1.22 亿由 region 执行；实模式 441 万；Compat32 只有 3.2 万条（启动时 WOW64 几乎不跑）。s_total = 0.08%，低于 M5 的
+  3% 条件，所以 M5 不设"启动 MIPS ≥ 1.15×"的目标。
+- 单步前几名（StepKey）：`66 0F 5A`/`0F 5A`（CVTSS2SD、CVTSD2SS，190 万与 186 万）、`REX.W 8B`（168 万：不带重试位，
+  多半是函数被从它不服务的偏移进入后逐条单步）、`0F 5B`（CVTDQ2PS，156 万）、`REX.W 0F 07`（SYSRETQ，141 万）、`0F 05`（SYSCALL，141 万）、
+  `REX.W 89`（72 万）、`ED`（IN，70 万）、`8B`（69 万）、`REX.W CF`（IRETQ，69 万）。这与 P2（CVT*）、P4.7/P4.8
+  （SYSCALL/SYSRETQ/IRETQ）、P4.11（端口 I/O）的排序一致。
+- Wasm 表：空闲槽最少 4867（共 11999），峰值用 7132；两侧驱逐都是 0。x64 page tier 一共编译 16151 个函数。
+- XP（所有者的配置）到桌面：退役 19.78 亿条，平坦 Legacy32 95.4%（Tier-0 原生 17.97 亿，s = 0.42%，解释 4.3%），
+  实模式 4.6%（几乎全由 region 执行：BIOS），V86、Prot16 与非平坦 32 位都在 13 万条以下；s_total = 0.40%。表最多用
+  237 个槽。Tier-0 单步前几名：`66 0F B6`（16 位 MOVZX r16, r/m8，216 万，缺模板）、`FA`/`FB`（CLI/STI，111 万与
+  92 万）、`0F C7 /1`（CMPXCHG8B，39 万）、`0F 2B`（MOVNTPS，28 万）、`F3 A5`（REP MOVSD，26 万）、`9D`/`9C`
+  （POPF/PUSHF，25 万与 23 万）、`F3 AB`（REP STOSD，16 万）。
+- 3DMark06 一项仍待补（见 P0.1 的记录）。实测表写进 [x86-64.md](x86-64.md)。
+
+**P1 清理，2026-10-09（P0.1 的基线之后）。**
+
+- P1.1：删除 `x64/cache.rs` 与 `x64/compiler.rs`（共 1519 行）、`jit_clear_cache` 里对 `x64_native_reset` 的调用、
+  `tests/x64/native_oracle.mjs` 及其 Makefile 行、`gen/state_layout.js` 的登记。这些代码早已没有调用方，链接器本来就
+  丢掉了它们，`v86.wasm` 里只少了 4 个导出（`x64_native_*`），改变的函数只有 `jit_clear_cache_js`。
+- P1.2：删除 JS 胶水（`cpu.js` 的 `wide_native_functions` 与 `publish_wide_native`、`starter.js` 与 `vcpu.js` 的
+  导入和 worker 里的发布函数）。M1 之前构建的核心仍导入 `x64_native_discard`，所以 starter、vcpu worker 与 zstd
+  worker 的导入表里保留一个空函数桩；`m1base.wasm` 在新的 JS 下照常运行。
+- P1.3：改正过时的注释与文档：`x64/pages.rs`（函数只按代码所在的 RAM 后备页作键，位置无关）、`ir/tier0/emit.rs`
+  （退出与回退时还要写回 FLAGS、XMM 与 x87 缓存）、`ir/runtime/cache.rs`（容量的注释与 899 槽）、`schedule.rs`
+  （`idle_mode` 默认关）、`x86-64.md`（8/16 位按 CL 移位走辅助函数调用，不是单步）、`Makefile`（bench 不再是
+  "IR 对 legacy"）、`x64/pagegen.rs` 的 `vfp`（不要求 PE 已置位，不精确时自己置 PE）。
+- 验收：`grep -rn 'x64_native\|wide_native\|native_oracle\|x64::cache\|x64::compiler' src tests Makefile tools gen`
+  只剩空函数桩；`build/v86.wasm` 没有 `x64_native_*` 的导入与导出；`make jit-gate`、`x64-differential-tests`、
+  `nasmtests-force-jit`（16499/16499）、`jitpagingtests`、`multicore-parallel-tests` 通过。

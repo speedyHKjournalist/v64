@@ -226,9 +226,9 @@ export function V86(options)
         "microtick": () => cpu ? cpu.clock.now() : v86.microtick(),
         "get_rand_int": function() { return get_rand_int(); },
         "stop_idling": function() { return cpu.stop_idling(); },
-        "x64_native_publish": (token, pointer, length) => cpu.publish_wide_native(token, pointer, length),
-        "x64_native_execute": (token, budget) => cpu.wide_native_functions.get(token)?.(budget) || 0,
-        "x64_native_discard": () => cpu.wide_native_functions.clear(),
+        // (cores built before the wide-native path was removed import it:
+        // the M1 baselines, docs/jit-unification-plan.md P1.2)
+        "x64_native_discard": () => {},
         "x64_page_publish": (id, slot, pointer, length) => cpu.x64_page_publish(id, slot, pointer, length),
 
         "io_port_read8": function(addr) { return cpu.io.port_read8(addr); },
@@ -1075,7 +1075,7 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                         "mmap_read8", "mmap_read32",
                         "mmap_write8", "mmap_write16", "mmap_write32", "mmap_write64", "mmap_write128",
                         "ir_codegen_finalize", "jit_clear_func",
-                        "x64_native_publish", "x64_native_execute", "x64_native_discard", "x64_page_publish",
+                        "x64_native_discard", "x64_page_publish",
                         "extended_load", "extended_store",
                     ].map(f => [f, () => console.error("zstd worker unexpectedly called " + f)]));
 

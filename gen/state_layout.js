@@ -275,7 +275,6 @@ export const STATICS = {
     // are released at the next safe point; aperture slots are remapped on demand
     "x64/extended.rs": { EXTENDED: "machine", LOCK: "machine", DEPTH: "scratch", RELEASE_PENDING: "cache",
         LEGACY_TLB_CACHED: "cache", SLOT_PAGE: "cache", NEXT: "cache" },
-    "x64/cache.rs": { CACHE: "cache" },
     // page functions and their bookkeeping; entries re-check the live translation
     "x64/pages.rs": { RUNTIME: "machine", FAST: "machine", ACTIVE: "scratch", CODE_WRITES: "machine", STEPS: "debug", ACCESS_REFUSED: "debug",
         // per core, tagged with that core's access cache epoch

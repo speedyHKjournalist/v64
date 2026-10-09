@@ -330,7 +330,9 @@ pub unsafe fn idle(budget: f64) -> f64 {
     s.idle_ms += end - start;
     end - start
 }
-/// Startup/cold-point policy: compile during guest idle windows (default).
+/// Startup/cold-point policy: compile during guest idle windows (off by
+/// default: the JIT switch ir_idle_mode; docs/jit-unification-plan.md open
+/// question 6).
 #[no_mangle]
 pub unsafe fn ir_auto_set_idle_mode(enabled: u32, sync_after_ms: u32) -> bool {
     if enabled > 1 || !(1..=10_000).contains(&sync_after_ms) || !cold() {

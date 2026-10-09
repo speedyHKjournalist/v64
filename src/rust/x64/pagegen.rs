@@ -6022,14 +6022,14 @@ impl Emitter {
         self.b.block_end();
     }
     /// SSE ADD/MUL/SUB/DIV natively when the result is exactly what the
-    /// interpreter (SoftFloat, crate::x64::vector) produces without changing
-    /// MXCSR: round to nearest, every exception masked, and PE already set
-    /// (FTZ and DAZ may be set: they affect none of the operands and results
-    /// admitted here) (so an inexact result changes nothing); operands finite
-    /// and normal or zero; a divisor that is not zero; and a result that is
-    /// normal above the smallest binade (no underflow, whichever way
-    /// tininess is detected) or an exact zero. Otherwise the instruction is
-    /// retried in the interpreter; no lane is written before all passed.
+    /// interpreter (SoftFloat, crate::x64::vector) produces: round to
+    /// nearest and every exception masked (FTZ and DAZ may be set: they
+    /// affect none of the operands and results admitted here); operands
+    /// finite and normal or zero; a divisor that is not zero; and a result
+    /// that is normal above the smallest binade (no underflow, whichever way
+    /// tininess is detected) or an exact zero. An inexact result sets PE
+    /// itself (INX). Otherwise the instruction is retried in the
+    /// interpreter; no lane is written before all passed.
     fn vfp(
         &mut self,
         inst: &Inst,

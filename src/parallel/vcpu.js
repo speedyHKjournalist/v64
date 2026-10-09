@@ -93,9 +93,8 @@ export async function run_vcpu(init, post, handle)
         "microtick": () => cpu ? cpu.clock.now() : now(),
         "get_rand_int": () => Math.random() * 0x100000000 | 0,
         "stop_idling": () => {},
-        "x64_native_publish": (token, pointer, length) => cpu.publish_wide_native(token, pointer, length),
-        "x64_native_execute": (token, budget) => cpu.wide_native_functions.get(token)?.(budget) || 0,
-        "x64_native_discard": () => cpu.wide_native_functions.clear(),
+        // (cores built before the wide-native path was removed import it)
+        "x64_native_discard": () => {},
         "x64_page_publish": (id, slot, pointer, length) => cpu.x64_page_publish(id, slot, pointer, length),
         "io_port_read8": port => request(C.OP_IN8, port),
         "io_port_read16": port => request(C.OP_IN16, port),
@@ -139,20 +138,6 @@ export async function run_vcpu(init, post, handle)
     cpu.configure_jit_backend(settings);
     // no event loop in this worker: install generated code synchronously
     cpu.ir_sync_publication = true;
-    cpu.publish_wide_native = (token, pointer, length) =>
-    {
-        const bytes = new Uint8Array(memory.buffer, pointer >>> 0, length >>> 0).slice();
-        try
-        {
-            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes),
-                { "e": { "m": memory, "x64_native_guard": exports["x64_native_guard"] } });
-            if(exports["x64_native_ready"](token, true)) cpu.wide_native_functions.set(token, instance.exports["f"]);
-        }
-        catch(e)
-        {
-            exports["x64_native_ready"](token, false);
-        }
-    };
     // (the CPU profile, CPUID level and x64 capabilities, is the machine's:
     // crate::cpu::cpu::copy_machine_configuration)
     exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);

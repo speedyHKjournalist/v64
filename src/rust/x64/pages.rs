@@ -2,9 +2,10 @@
 //! compile, publication into the shared Wasm table, entry, the helpers that
 //! generated code calls, and invalidation.
 //!
-//! A function is keyed by its linear code page and that page's current RAM
-//! backing page. Entry translates RIP for execution first, so a function only
-//! runs while its page maps to the bytes it was compiled from; writes to the
+//! A function is keyed by the RAM backing page of its code alone, and is
+//! position independent: every linear page that maps to that backing page
+//! runs it. Entry translates RIP for execution first, so a function only runs
+//! while its page maps to the bytes it was compiled from; writes to the
 //! backing page (CPU, DMA, host) retire it through jit::jit_dirty_page.
 //! Code in extended RAM has keys from extended::CODE_KEY_BASE on (the
 //! extended page, whichever frame holds it); extended.rs watches its writes.

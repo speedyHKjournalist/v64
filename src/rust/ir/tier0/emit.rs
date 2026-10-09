@@ -1,11 +1,12 @@
 //! One Wasm function per code page: an entry guard, then a dispatch loop that
 //! branches (br_table over the page offset) to the code of each basic block.
 //!
-//! The eight GPRs live in Wasm locals for the whole activation and are written
-//! back at every exit and before every interpreter fallback. Everything else
-//! (lazy FLAGS, segments, FPU/SSE state) stays in CPU memory with exactly the
-//! interpreter's representation, so a fallback or an exit never needs to
-//! materialize more than the GPRs, EIP and the retired-instruction count.
+//! The eight GPRs live in Wasm locals for the whole activation. The last
+//! FLAGS producers' lazy stores, XMM registers a template keeps in locals and
+//! the x87 register cache can be pending as well. All of them are written
+//! back, in exactly the interpreter's representation, at every exit and
+//! before every interpreter fallback, together with EIP and the retired-
+//! instruction count; segments and the rest of the CPU state stay in memory.
 //!
 //! Templates cover the most frequent integer forms. Each checks everything it
 //! needs (segment usable, 32-bit stack, ...) before its first state change;

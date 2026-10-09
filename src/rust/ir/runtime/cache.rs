@@ -582,9 +582,11 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     promotion_threshold: 256,
     promotion_cursor: promotion::Cursor::new(),
     promotion_stats: [0; 4],
-    // At the default heat threshold an XP boot keeps ~1000 regions hot; 256
-    // resident owners evict and recompile them. 768 leaves 131 of the 899
-    // table slots unused.
+    // At the default heat threshold an XP boot once kept ~1000 regions hot
+    // and 256 resident owners evicted and recompiled them; at 768, 256 or
+    // 512 the XP desktop boot now evicts none (2026-10-09). The slots come
+    // from the shared table (jit::WASM_TABLE_SIZE), which Tier-0 and the x64
+    // page tier use too.
     capacity: 768,
     evictions: 0,
     published: BTreeMap::new(),

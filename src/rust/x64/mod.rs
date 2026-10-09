@@ -1,7 +1,5 @@
 //! Wide architectural state and shared decode foundations. The public CPU
 //! profile only advertises long mode after execution and OS gates pass.
-pub mod cache;
-pub mod compiler;
 pub mod debug;
 pub mod decode;
 pub mod execute;

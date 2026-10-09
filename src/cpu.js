@@ -83,7 +83,6 @@ export function CPU(bus, wm, stop_idling)
     this.wm = wm;
     this.clock = new MachineClock({ now: v86.microtick });
     this.execution_epoch = 0;
-    this.wide_native_functions = new Map();
     this.in_cpu = false;
     this.reset_pending = false;
     this.scheduler_quantum = 4096;
@@ -494,20 +493,6 @@ CPU.prototype.extended_page_bytes = function(address, count, write)
 CPU.prototype.clear_stats = function()
 {
     this.wm.exports["profiler_init"]();
-};
-
-CPU.prototype.publish_wide_native = function(token, pointer, length)
-{
-    const epoch = this.execution_epoch;
-    const bytes = new Uint8Array(this.wasm_memory.buffer, pointer >>> 0, length >>> 0).slice();
-    const exports = this.wm.exports;
-    WebAssembly.instantiate(bytes, { "e": { "m": this.wasm_memory,
-        "x64_native_guard": exports["x64_native_guard"] } }).then(result => {
-        if(epoch === this.execution_epoch && exports["x64_native_ready"](token, true))
-            this.wide_native_functions.set(token, result.instance.exports["f"]);
-    }, () => {
-        if(epoch === this.execution_epoch) exports["x64_native_ready"](token, false);
-    });
 };
 
 // x64 page functions (src/rust/x64/pages.rs). Installed synchronously when
