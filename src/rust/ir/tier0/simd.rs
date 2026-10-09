@@ -479,21 +479,11 @@ fn legacy_form(i: &DecodedInstruction) -> Option<Simd> {
                 _ => 8,
             },
         },
-        0x0F70 | 0x660F70 | 0xF20F70 | 0xF30F70 | 0x0FC6 | 0x660FC6 => {
-            // Packed pushes (destination, source): one-operand shuffles
-            // select from the source only.
-            let (mut lanes, two) = shuffle_lanes(op, i.immediate?);
-            if !two {
-                for lane in &mut lanes {
-                    *lane += 16;
-                }
-            }
-            Simd::Packed {
-                op: Packed::Shuffle(lanes),
-                reg,
-                mmx: op == 0x0F70,
-                source: source_bytes(op),
-            }
+        0x0F70 | 0x660F70 | 0xF20F70 | 0xF30F70 | 0x0FC6 | 0x660FC6 => Simd::Packed {
+            op: vec::shuffle(op, i.immediate?),
+            reg,
+            mmx: op == 0x0F70,
+            source: source_bytes(op),
         },
         0x0F14 => Simd::Packed {
             op: Packed::Unpack(4, false),

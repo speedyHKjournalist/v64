@@ -1,9 +1,9 @@
-//! Golden digests of the page tier's own leaf emitters (x64/pagegen.rs; see
-//! tests/x86tpl/leaf_digests.rs for Tier-0's and the method). P2.3 replaces
-//! them with x86tpl's, of the same output, and this test goes with them. The
-//! grid of `packed` is every value pagegen's classifiers produce: packed_op
-//! of every code, the shuffles of every imm8, PALIGNR's and the SSE4 forms'
-//! of every imm8, and the operations sse() and vex() name directly.
+//! Golden digests of the page tier's leaf emission (x64/pagegen.rs; see
+//! tests/x86tpl/leaf_digests.rs for Tier-0's and the method): its own
+//! immediate shift, and x86tpl's packed operations as pagegen classifies
+//! them, keyed by encoding. That digest is the one of pagegen's own Packed
+//! table and emitter before P2.3 replaced them, so the change kept every
+//! encoding's bytes, for every imm8.
 use super::*;
 use std::collections::BTreeMap;
 
@@ -52,43 +52,65 @@ impl Grid {
     }
 }
 
-/// Every Packed value the classifiers produce
-fn packed_values() -> Vec<Packed> {
-    let mut values: Vec<Packed> = (0..=255u8).filter_map(packed_op).collect();
-    for op in [0x660F70, 0xF20F70, 0xF30F70, 0x0FC6, 0x660FC6] {
-        values.extend((0..256).map(|imm| Packed::Shuffle(shuffle_lanes(op, imm))));
-    }
-    values.extend((0..256).map(palignr));
-    values.extend((0x660F3800..=0x660F38FF).filter_map(|op| sse4_packed(op, None)));
-    for op in 0x660F3A00..=0x660F3AFF {
-        values.extend((0..256).filter_map(|imm| sse4_packed(op, Some(imm))));
-    }
-    values.extend([
-        Packed::Swizzle,
-        Packed::AndNot,
-        Packed::Binary(0x4E),
-        Packed::Binary(0x50),
-        Packed::Binary(0x51),
-        Packed::Unpack(4, false),
-        Packed::Unpack(4, true),
-        Packed::Unpack(8, false),
-        Packed::Unpack(8, true),
+/// The packed operations pagegen's classifiers give each encoding (key):
+/// the 66 0F codes of packed_op, VPAND/VPANDN/VPOR/VPXOR (VEX.256), the
+/// shuffles, PALIGNR and the SSE4 forms with every imm8, PSHUFB and the
+/// VEX unpacks. Keyed by encoding rather than by value, so that the digest
+/// survives P2.3's change of type (x86tpl's Packed) when the bytes do.
+fn packed_by_encoding() -> Vec<(String, Packed)> {
+    // (66 0F DB DF EB EF: Op::Vlogic in sse(), "logic" below for VEX.256)
+    let mut forms: Vec<(String, Packed)> = (0..=255u8)
+        .filter(|code| !matches!(code, 0xDB | 0xDF | 0xEB | 0xEF))
+        .filter_map(|code| vec::packed_op(code, false).map(|op| (format!("66 0F {code:02X}"), op)))
+        .collect();
+    forms.extend([
+        ("logic DB".to_string(), Packed::Binary(0x4E)),
+        ("logic DF".to_string(), Packed::AndNot),
+        ("logic EB".to_string(), Packed::Binary(0x50)),
+        ("logic EF".to_string(), Packed::Binary(0x51)),
+        ("pshufb".to_string(), Packed::Swizzle(0x8F)),
     ]);
-    values
+    for (double, high) in [(false, false), (false, true), (true, false), (true, true)] {
+        forms.push((
+            format!("unpack {double} {high}"),
+            Packed::Unpack(if double { 8 } else { 4 }, high),
+        ));
+    }
+    for op in [0x660F70, 0xF20F70, 0xF30F70, 0x0FC6, 0x660FC6] {
+        for imm in 0..256 {
+            forms.push((format!("shuffle {op:X} {imm}"), vec::shuffle(op, imm)));
+        }
+    }
+    for imm in 0..256 {
+        forms.push((format!("palignr {imm}"), palignr(imm)));
+    }
+    for op in 0x660F3800..=0x660F38FF {
+        forms.extend(sse4_packed(op, None).map(|p| (format!("sse4 {op:X}"), p)));
+    }
+    for op in 0x660F3A00..=0x660F3AFF {
+        for imm in 0..256 {
+            forms.extend(sse4_packed(op, Some(imm)).map(|p| (format!("sse4 {op:X} {imm}"), p)));
+        }
+    }
+    forms
+}
+
+#[test]
+fn pagegen_packed_by_encoding() {
+    let mut grid = Grid::default();
+    for (key, op) in packed_by_encoding() {
+        grid.emit(key, |w, [a, b]| vec::packed(w, op, a, b, 16));
+    }
+    let (points, digest) = grid.digest();
+    println!("    packed by encoding: {points}, 0x{digest:016X}");
+    assert_eq!((points, digest), (2378, 0x8E4D380DE01AA2A4));
 }
 
 /// (name, grid points, digest)
-const GOLDEN: [(&str, usize, u64); 2] = [
-    ("packed", 1372, 0xC7A7364F0E382A18),
-    ("shift_immediate", 8192, 0x43F6712CA35E8767),
-];
+const GOLDEN: [(&str, usize, u64); 1] = [("shift_immediate", 8192, 0x43F6712CA35E8767)];
 
 #[test]
 fn pagegen_leaf_digests() {
-    let mut packed_grid = Grid::default();
-    for op in packed_values() {
-        packed_grid.emit(format!("{op:?}"), |w, [a, b]| packed(w, op, a, b));
-    }
     let mut shift = Grid::default();
     for bits in [16u8, 32, 64, 128] {
         for kind in 0..8u8 {
@@ -100,7 +122,7 @@ fn pagegen_leaf_digests() {
             }
         }
     }
-    let actual: Vec<(&str, usize, u64)> = [("packed", packed_grid), ("shift_immediate", shift)]
+    let actual: Vec<(&str, usize, u64)> = [("shift_immediate", shift)]
         .iter()
         .map(|(name, grid)| {
             let (points, digest) = grid.digest();

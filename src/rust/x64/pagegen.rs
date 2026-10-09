@@ -24,10 +24,12 @@ use super::decode::{self, AddressBase, AddressExpr, ByteRegister, Decoded};
 use super::jac;
 use super::state::{gpr_high_offset, gpr_low_offset, ExecutionMode, GuestIp};
 use crate::cpu::global_pointers as gp;
+use crate::wasmgen::leaves::{self, Shift};
 use crate::wasmgen::wasm_builder::{
     Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType,
 };
 use crate::wasmgen::wasm_opcodes as op;
+use crate::x86tpl::vec::{self, Packed};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// x64_pagegen_size_stats: Wasm bytes emitted per template kind (count,
@@ -606,142 +608,14 @@ enum Convert {
     Precision { double: bool, src: Xmm },
 }
 
-/// Packed operations of Op::Vpacked (Wasm SIMD opcodes).
-#[derive(Clone, Copy, Debug)]
-enum Packed {
-    /// i8x16.shuffle over (destination, source)
-    Shuffle([u8; 16]),
-    /// i8x16.shuffle over (destination, zero)
-    ShuffleZero([u8; 16]),
-    /// PSHUFB: the destination's bytes by the source's indices (bit 7 selects zero)
-    Swizzle,
-    Binary(u32),
-    /// element bytes, high halves
-    Unpack(u8, bool),
-    Pack(u32),
-    /// Shift by the source's low quadword: (opcode, lane bits, arithmetic).
-    Shift(u32, u32, bool),
-    MulHigh(bool),
-    MulDwords,
-    Sad,
-    /// PANDN: NOT the destination, AND the source
-    AndNot,
-}
-/// 66 0F `code` packed integer forms.
-fn packed_op(code: u8) -> Option<Packed> {
-    Some(match code {
-        0xFC => Packed::Binary(0x6E),
-        0xFD => Packed::Binary(0x8E),
-        0xFE => Packed::Binary(0xAE),
-        0xD4 => Packed::Binary(0xCE),
-        0xF8 => Packed::Binary(0x71),
-        0xF9 => Packed::Binary(0x91),
-        0xFA => Packed::Binary(0xB1),
-        0xFB => Packed::Binary(0xD1),
-        0xEC => Packed::Binary(0x6F),
-        0xED => Packed::Binary(0x8F),
-        0xDC => Packed::Binary(0x70),
-        0xDD => Packed::Binary(0x90),
-        0xE8 => Packed::Binary(0x72),
-        0xE9 => Packed::Binary(0x92),
-        0xD8 => Packed::Binary(0x73),
-        0xD9 => Packed::Binary(0x93),
-        0x64 => Packed::Binary(0x27),
-        0x65 => Packed::Binary(0x31),
-        0x66 => Packed::Binary(0x3B),
-        0x74 => Packed::Binary(0x23),
-        0x75 => Packed::Binary(0x2D),
-        0x76 => Packed::Binary(0x37),
-        0xDA => Packed::Binary(0x77),
-        0xDE => Packed::Binary(0x79),
-        0xEA => Packed::Binary(0x96),
-        0xEE => Packed::Binary(0x98),
-        0xE0 => Packed::Binary(0x7B),
-        0xE3 => Packed::Binary(0x9B),
-        0xE4 => Packed::MulHigh(false),
-        0xE5 => Packed::MulHigh(true),
-        0xF4 => Packed::MulDwords,
-        0xF6 => Packed::Sad,
-        0xD5 => Packed::Binary(0x95),
-        0xF5 => Packed::Binary(0xBA),
-        0x60 => Packed::Unpack(1, false),
-        0x61 => Packed::Unpack(2, false),
-        0x62 => Packed::Unpack(4, false),
-        0x68 => Packed::Unpack(1, true),
-        0x69 => Packed::Unpack(2, true),
-        0x6A => Packed::Unpack(4, true),
-        0x6C => Packed::Unpack(8, false),
-        0x6D => Packed::Unpack(8, true),
-        0x63 => Packed::Pack(0x65),
-        0x67 => Packed::Pack(0x66),
-        0x6B => Packed::Pack(0x85),
-        0xD1 => Packed::Shift(0x8D, 16, false),
-        0xD2 => Packed::Shift(0xAD, 32, false),
-        0xD3 => Packed::Shift(0xCD, 64, false),
-        0xE1 => Packed::Shift(0x8C, 16, true),
-        0xE2 => Packed::Shift(0xAC, 32, true),
-        0xF1 => Packed::Shift(0x8B, 16, false),
-        0xF2 => Packed::Shift(0xAB, 32, false),
-        0xF3 => Packed::Shift(0xCB, 64, false),
-        _ => return None,
-    })
-}
-/// Lanes of PSHUFD/PSHUFLW/PSHUFHW/SHUFPS/SHUFPD over (destination, source)
-/// for i8x16.shuffle.
-fn shuffle_lanes(op: u32, imm: u32) -> [u8; 16] {
-    let mut lanes = [0; 16];
-    for i in 0..16u32 {
-        lanes[i as usize] = match op {
-            0x660F70 => 16 + ((imm >> (2 * (i / 4)) & 3) * 4 + i % 4),
-            0xF20F70 if i < 8 => 16 + ((imm >> (2 * (i / 2)) & 3) * 2 + i % 2),
-            0xF30F70 if i >= 8 => 16 + (8 + (imm >> (2 * ((i - 8) / 2)) & 3) * 2 + i % 2),
-            0xF20F70 | 0xF30F70 => 16 + i,
-            0x0FC6 => (imm >> (2 * (i / 4)) & 3) * 4 + i % 4 + if i >= 8 { 16 } else { 0 },
-            0x660FC6 => (imm >> (i / 8) & 1) * 8 + i % 8 + if i >= 8 { 16 } else { 0 },
-            _ => unreachable!(),
-        } as u8;
-    }
-    lanes
-}
-
-/// SSE4.1/SSE4.2 forms of one Wasm SIMD operation over (destination,
-/// source), as ir::tier0::simd's: the hot PMINUD and its siblings, and the
-/// blends with imm8 (`imm8`) as shuffles
+/// x86tpl's packed SSE4 forms but PMULDQ, which this tier steps (its
+/// template is Tier-0's alone so far)
 fn sse4_packed(opcode: u32, imm8: Option<u64>) -> Option<Packed> {
-    let blend = |size: u8, mask: u64| {
-        let mut lanes = [0; 16];
-        for (k, lane) in lanes.iter_mut().enumerate() {
-            *lane = k as u8 + if mask >> (k as u8 / size) & 1 != 0 { 16 } else { 0 };
-        }
-        Packed::Shuffle(lanes)
-    };
-    Some(match opcode {
-        0x660F3829 => Packed::Binary(0xD6), // pcmpeqq: i64x2.eq
-        0x660F382B => Packed::Pack(0x86),   // packusdw: i16x8.narrow_i32x4_u
-        0x660F3837 => Packed::Binary(0xD9), // pcmpgtq: i64x2.gt_s
-        0x660F3838 => Packed::Binary(0x76), // pminsb: i8x16.min_s
-        0x660F3839 => Packed::Binary(0xB6), // pminsd: i32x4.min_s
-        0x660F383A => Packed::Binary(0x97), // pminuw: i16x8.min_u
-        0x660F383B => Packed::Binary(0xB7), // pminud: i32x4.min_u
-        0x660F383C => Packed::Binary(0x78), // pmaxsb: i8x16.max_s
-        0x660F383D => Packed::Binary(0xB8), // pmaxsd: i32x4.max_s
-        0x660F383E => Packed::Binary(0x99), // pmaxuw: i16x8.max_u
-        0x660F383F => Packed::Binary(0xB9), // pmaxud: i32x4.max_u
-        0x660F3840 => Packed::Binary(0xB5), // pmulld: i32x4.mul
-        0x660F3A0C => blend(4, imm8? & 0xF),
-        0x660F3A0D => blend(8, imm8? & 3),
-        0x660F3A0E => blend(2, imm8? & 0xFF),
-        _ => return None,
-    })
+    vec::sse4_packed(opcode, imm8.map(|imm| imm as u32)).filter(|_| opcode != 0x660F3828)
 }
 
-/// PALIGNR xmm, xmm/m128, imm8 (simd_int::palignr_lanes)
-fn palignr(imm8: u64) -> Packed {
-    match crate::cpu::simd_int::palignr_lanes(imm8.min(255) as u8, 16) {
-        (lanes, true) => Packed::ShuffleZero(lanes),
-        (lanes, false) => Packed::Shuffle(lanes),
-    }
-}
+/// PALIGNR xmm, xmm/m128, imm8 (x86tpl::vec::palignr)
+fn palignr(imm8: u64) -> Packed { vec::palignr(imm8.min(255) as u8, 16) }
 
 fn register(encoded: u8, width: u8, rex: bool) -> Reg {
     if width == 8 {
@@ -1383,7 +1257,7 @@ fn sse(d: &Decoded) -> Option<Op> {
         // (the forms below emit Wasm SIMD: not in the build for engines without it)
         _ if !cfg!(target_feature = "simd128") => return None,
         0x660F70 | 0xF20F70 | 0xF30F70 | 0x0FC6 | 0x660FC6 => Op::Vpacked {
-            op: Packed::Shuffle(shuffle_lanes(d.opcode, d.immediate?.value as u32 & 0xFF)),
+            op: vec::shuffle(d.opcode, d.immediate?.value as u32 & 0xFF),
             dst: register,
             first: register,
             src: xmm_rm()?,
@@ -1431,14 +1305,14 @@ fn sse(d: &Decoded) -> Option<Op> {
             }
         },
         op if op >> 8 == 0x660F => Op::Vpacked {
-            op: packed_op(op as u8)?,
+            op: vec::packed_op(op as u8, false)?,
             dst: register,
             first: register,
             src: xmm_rm()?,
         },
         // PSHUFB, PALIGNR (SSSE3)
         0x660F3800 => Op::Vpacked {
-            op: Packed::Swizzle,
+            op: Packed::Swizzle(0x8F),
             dst: register,
             first: register,
             src: xmm_rm()?,
@@ -1604,7 +1478,7 @@ fn vex256(d: &Decoded) -> Option<Op> {
         },
         (1, 1..=3, 0x70) => {
             return Some(Op::Vpacked256 {
-                op: Packed::Shuffle(shuffle_lanes(key, d.immediate?.value as u32 & 0xFF)),
+                op: vec::shuffle(key, d.immediate?.value as u32 & 0xFF),
                 dst: d.reg?,
                 first: d.reg?,
                 src: rm,
@@ -1638,14 +1512,8 @@ fn vex256(d: &Decoded) -> Option<Op> {
         // the packed integer forms of 66 0F, VPSHUFB and SSE4.1's of one
         // operation, on each half
         (1, 1, code) => {
-            // (VPAND VPANDN VPOR VPXOR, whose VEX.128 forms are Op::Vlogic)
-            let op = match code {
-                0xDB => Packed::Binary(0x4E), // v128.and
-                0xDF => Packed::AndNot,
-                0xEB => Packed::Binary(0x50), // v128.or
-                0xEF => Packed::Binary(0x51), // v128.xor
-                _ => packed_op(code)?,
-            };
+            // (with VPAND VPANDN VPOR VPXOR, whose VEX.128 forms are Op::Vlogic)
+            let op = vec::packed_op(code, false)?;
             if let Packed::Shift(..) = op {
                 return None;
             }
@@ -1658,7 +1526,7 @@ fn vex256(d: &Decoded) -> Option<Op> {
         },
         (2, 1, 0x00 | 0x28 | 0x29 | 0x2B | 0x37..=0x40) => {
             return Some(Op::Vpacked256 {
-                op: if key as u8 == 0 { Packed::Swizzle } else { sse4_packed(key, None)? },
+                op: if key as u8 == 0 { Packed::Swizzle(0x8F) } else { sse4_packed(key, None)? },
                 dst: d.reg?,
                 first: v.vvvv,
                 src: rm,
@@ -1882,7 +1750,7 @@ fn vex(d: &Decoded) -> Option<Op> {
         },
         // VPSHUFD VPSHUFHW VPSHUFLW (the source's lanes), VSHUFPS VSHUFPD
         (1, 1..=3, 0x70) | (1, 0 | 1, 0xC6) => Op::Vpacked {
-            op: Packed::Shuffle(shuffle_lanes(key, imm? as u32 & 0xFF)),
+            op: vec::shuffle(key, imm? as u32 & 0xFF),
             dst: register,
             first: if code == 0x70 { register } else { first },
             src: xmm_rm()?,
@@ -1930,7 +1798,7 @@ fn vex(d: &Decoded) -> Option<Op> {
         },
         // the packed integer operations of 66 0F
         (1, 1, _) => Op::Vpacked {
-            op: packed_op(code)?,
+            op: vec::packed_op(code, false)?,
             dst: register,
             first,
             src: xmm_rm()?,
@@ -1962,7 +1830,7 @@ fn vex(d: &Decoded) -> Option<Op> {
         },
         // VPSHUFB VPALIGNR, the SSE4.1 forms of one operation, the blends by imm8
         (2, 1, 0x00) => Op::Vpacked {
-            op: Packed::Swizzle,
+            op: Packed::Swizzle(0x8F),
             dst: register,
             first,
             src: xmm_rm()?,
@@ -5400,7 +5268,7 @@ impl Emitter {
                 self.b.simd_memory(0x00, 0);
                 let destination = self.b.set_new_local_v128();
                 self.c32(Self::xmm(dst) as i32);
-                packed(&mut self.b, op, &destination, &source);
+                vec::packed(&mut self.b, op, &destination, &source, 16);
                 self.b.simd_memory(0x0B, 0);
                 self.b.free_local_v128(source);
                 self.b.free_local_v128(destination);
@@ -5508,7 +5376,7 @@ impl Emitter {
                 });
                 for (half, offset) in [0, 16].into_iter().enumerate() {
                     self.c32(Self::ymm(dst, offset) as i32);
-                    packed(&mut self.b, op, &first[half], &source[half]);
+                    vec::packed(&mut self.b, op, &first[half], &source[half], 16);
                     self.b.simd_memory(0x0B, 0);
                 }
                 for v in source.into_iter().chain(first) {
@@ -7848,115 +7716,9 @@ impl Emitter {
     }
 }
 
-// Leaves (docs/jit-unification-plan.md P2.1): emitters that need nothing of
-// the emitter but the builder. P2.3 replaces them with x86tpl's (the same
-// output); tests/x86tpl/pagegen_leaf_digests.rs pins it until then.
-
-/// Push op(dst, src) (ir::tier0::simd::packed on XMM registers)
-fn packed(w: &mut WasmBuilder, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128) {
-    match op {
-        Packed::ShuffleZero(lanes) => {
-            w.get_local_v128(dst);
-            w.simd_zero();
-            w.simd_shuffle(lanes);
-        },
-        Packed::Swizzle => {
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.const_i32(0x8F);
-            w.simd(0x0F); // i8x16.splat
-            w.simd(0x4E); // v128.and
-            w.simd(0x0E); // i8x16.swizzle
-        },
-        Packed::MulHigh(signed) => {
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(if signed { 0xBC } else { 0xBE });
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(if signed { 0xBD } else { 0xBF });
-            w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
-        },
-        Packed::MulDwords => {
-            for v in [dst, src] {
-                w.get_local_v128(v);
-                w.simd_zero();
-                w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
-            }
-            w.simd(0xDE);
-        },
-        Packed::Sad => {
-            // |dst - src| per byte, summed per quadword.
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(0x79);
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(0x77);
-            w.simd(0x71);
-            w.simd(0x7D);
-            w.simd(0x7F);
-            let sums = w.set_new_local_v128();
-            w.get_local_v128(&sums);
-            w.get_local_v128(&sums);
-            w.get_local_v128(&sums);
-            w.simd_shuffle([4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
-            w.simd(0xAE);
-            w.simd_zero();
-            w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
-            w.free_local_v128(sums);
-        },
-        Packed::AndNot => {
-            w.get_local_v128(src);
-            w.get_local_v128(dst);
-            w.simd(0x4F); // v128.andnot
-        },
-        Packed::Shift(opcode, bits, arithmetic) => {
-            w.get_local_v128(src);
-            w.simd_lane(0x1D, 0);
-            let count = w.set_new_local_i64();
-            w.get_local_i64(&count);
-            w.const_i64((bits - 1) as i64);
-            w.gtu_i64();
-            w.if_v128();
-            if arithmetic {
-                w.get_local_v128(dst);
-                w.const_i32((bits - 1) as i32);
-                w.simd(opcode);
-            }
-            else {
-                w.simd_zero();
-            }
-            w.else_();
-            w.get_local_v128(dst);
-            w.get_local_i64(&count);
-            w.wrap_i64_to_i32();
-            w.simd(opcode);
-            w.block_end();
-            w.free_local_i64(count);
-        },
-        _ => {
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            match op {
-                Packed::Shuffle(lanes) => w.simd_shuffle(lanes),
-                Packed::Binary(opcode) => w.simd(opcode),
-                Packed::Pack(opcode) => w.simd(opcode),
-                Packed::Unpack(width, high) => {
-                    let mut lanes = [0; 16];
-                    for k in 0..16u8 {
-                        let element = k / (width * 2);
-                        let side = k / width % 2;
-                        lanes[k as usize] =
-                            (if high { 8 } else { 0 }) + element * width + k % width + side * 16;
-                    }
-                    w.simd_shuffle(lanes);
-                },
-                _ => unreachable!(),
-            }
-        },
-    }
-}
+// The immediate shifts of the v128 on the stack (Tier-0's take a local:
+// x86tpl::vec::shift_immediate); tests/x86tpl/pagegen_leaf_digests.rs pins
+// the output.
 
 /// PSRLx/PSRAx/PSLLx (`bits` 16, 32 or 64: the lane width) and PSRLDQ/PSLLDQ
 /// (128: bytes) by imm8 `count` of the v128 on the stack, `kind` the ModRM
@@ -7965,33 +7727,19 @@ fn shift_immediate(w: &mut WasmBuilder, bits: u8, kind: u8, count: u8) {
     let count = count as u32;
     if bits == 128 {
         w.simd_zero();
-        let mut lanes = [16; 16];
-        for (k, lane) in lanes.iter_mut().enumerate() {
-            let index = if kind == 3 { k as i32 + count as i32 } else { k as i32 - count as i32 };
-            if (0..16).contains(&index) {
-                *lane = index as u8;
-            }
-        }
-        w.simd_shuffle(lanes);
+        w.simd_shuffle(leaves::byte_shift_lanes(count, kind == 3));
     }
     else if count >= bits as u32 && kind != 4 {
         w.drop_();
         w.simd_zero();
     }
     else {
-        w.const_i32(count.min(bits as u32 - 1) as i32);
-        let base = match bits {
-            16 => 0x8B,
-            32 => 0xAB,
-            _ => 0xCB,
+        let shift = match kind {
+            6 => Shift::Left,
+            4 => Shift::Arithmetic,
+            _ => Shift::Logical,
         };
-        w.simd(
-            base + match kind {
-                6 => 0,
-                4 => 1,
-                _ => 2,
-            },
-        );
+        leaves::shift_lanes(w, bits, shift, count.min(bits as u32 - 1));
     }
 }
 

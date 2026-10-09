@@ -1273,3 +1273,15 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
   模板成为第二个使用者时再加。
 - replay-check 2605 条一致，叶子摘要不变。核心比较：8 个函数改变、8 个新增、8 个删除。R 级：bench 加复测后 1.023；XP
   中位数 13.33 s 对 13.08 s，比值 1.019。
+
+**P2.3 pagegen 改用 `x86tpl::vec`，2026-10-09。**
+
+- pagegen 删除自己的 `Packed`、`packed_op`、`shuffle_lanes` 与 `packed` 发射：分类到 x86tpl 的 `Packed`（`vec::packed_op`；
+  新的 `vec::shuffle`，Tier-0 的 `classify` 也改用它；`vec::palignr`；`vec::sse4_packed`，其中 PMULDQ 照旧交给解释器），按
+  16 字节用 `vec::packed` 发射；立即数移位改用 `wasmgen::leaves`。
+- 验证：`pagegen_leaf_digests.rs` 按编码给 pagegen 的打包运算取键（每个 66 0F 码，各 imm8 的 shuffle、PALIGNR 与 SSE4 形式，
+  PSHUFB，VEX 的逻辑与 unpack 形式，共 2378 个）。改动之前用 pagegen 自己的表与发射算出摘要，改动之后经 x86tpl 得到同一个，
+  所以每个编码、每个 imm8 的字节都没变；replay-check 2605 条一致。核心比较：6 个函数改变、3 个新增、4 个删除。
+- R 级：bench 加复测后 1.013。XP 第一次 ABBAAB 的比值 0.983，另两次 0.999、0.998，三次会话的中位数 0.998，通过。XP 桌面
+  时间是双峰的（约 13.07 s 与 13.32 s，两组都出现在两个 arm 里），3 次里的中位数会落在任一组；这次改动不影响 32 位的
+  生成代码与运行路径。

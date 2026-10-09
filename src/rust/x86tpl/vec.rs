@@ -16,8 +16,7 @@ pub const CLEAN_PS: u8 = 2;
 pub const CLEAN_SD: u8 = 4;
 pub const CLEAN_PD: u8 = 8;
 
-#[derive(Clone, Copy)]
-#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, Debug)]
 pub enum Packed {
     /// i8x16.shuffle over (destination, source)
     Shuffle([u8; 16]),
@@ -119,6 +118,19 @@ pub fn shuffle_lanes(op: u32, imm: u32) -> ([u8; 16], bool) {
         };
     }
     (lanes, matches!(op, 0x0FC6 | 0x660FC6))
+}
+
+/// The shuffle of PSHUFW/PSHUFD/PSHUFLW/PSHUFHW/SHUFPS/SHUFPD with `imm` over
+/// (destination, source) (shuffle_lanes; the one-operand forms select from
+/// the source only)
+pub fn shuffle(op: u32, imm: u32) -> Packed {
+    let (mut lanes, two) = shuffle_lanes(op, imm);
+    if !two {
+        for lane in &mut lanes {
+            *lane += 16;
+        }
+    }
+    Packed::Shuffle(lanes)
 }
 
 impl Packed {
