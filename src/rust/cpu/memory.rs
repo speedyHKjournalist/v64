@@ -93,6 +93,19 @@ fn low_ram_hole(addr: u32) -> bool {
         }
 }
 
+/// Memory-mapped I/O whose accesses may raise or unmask an interrupt: what
+/// lies above RAM (the APIC, the IOAPIC, HPET, PCI memory BARs), except a
+/// device's plain memory (mmio_ram), SMRAM and the extended RAM aperture.
+/// Compiled code leaves an access there to the interpreter, which delivers
+/// the interrupt at the instruction boundary (docs/jit-unification-plan.md
+/// P3.0b). The legacy VGA window below 1 MiB raises none.
+pub unsafe fn may_interrupt(addr: u32) -> bool {
+    addr >= *memory_size
+        && !aperture::contains(addr)
+        && smram_ram(addr, 1, false).is_none()
+        && mmio_ram::read_host(addr, 1).is_none()
+}
+
 #[inline]
 fn mapped_width(addr: u32, bytes: u32) -> bool {
     in_mapped_range(addr)

@@ -55,6 +55,12 @@ struct ExecutionState {
     // callback inside that window must not deliver an IRQ; the dispatch
     // loop polls again at the instruction boundary.
     defer_irqs: bool,
+    // handle_irqs was called while defer_irqs held (hold_irqs)
+    irq_noted: bool,
+    // A held access of compiled code made an interrupt deliverable: the code
+    // leaves at the next instruction boundary it reaches, without linking,
+    // and is delivered there (deliver_held_irqs)
+    irq_exit: bool,
 }
 
 impl ExecutionState {
@@ -68,6 +74,8 @@ impl ExecutionState {
             retired: 0,
             rep_elements: 0,
             defer_irqs: false,
+            irq_noted: false,
+            irq_exit: false,
         }
     }
 
@@ -131,6 +139,59 @@ pub unsafe fn set_irq_deferral(enabled: bool) { execution_state.defer_irqs = ena
 
 #[inline(always)]
 pub unsafe fn irqs_deferred() -> bool { execution_state.defer_irqs }
+
+/// IRQ deferral for the helpers compiled code calls in the middle of an
+/// instruction whose state is still in Wasm locals
+/// (docs/jit-unification-plan.md P3.0b: IR Tier-0's memory slow paths and
+/// steps; the x64 page tier's system helpers, P4.7-P4.11, and P7's 32-bit
+/// page functions are meant to share it). A device access can raise or
+/// unmask an interrupt (an APIC or IOAPIC write, a device's callback), and
+/// delivering it there pushes a stale EIP and ESP that the code then
+/// overwrites. While `access` runs, handle_irqs only notes that it was
+/// called. Then, if an interrupt is deliverable, irq_exit_requested() holds:
+/// the code stops linking and leaves at the next instruction boundary it
+/// reaches (a step, a page exit, a poll), where deliver_held_irqs delivers it.
+#[inline(always)]
+pub unsafe fn hold_irqs<T>(access: impl FnOnce() -> T) -> T {
+    let outer = execution_state.defer_irqs;
+    execution_state.defer_irqs = true;
+    let result = access();
+    execution_state.defer_irqs = outer;
+    if !outer && execution_state.irq_noted {
+        execution_state.irq_noted = false;
+        if crate::cpu::cpu::irq_deliverable() {
+            execution_state.irq_exit = true;
+        }
+    }
+    result
+}
+
+/// Whether compiled code must leave at its next instruction boundary for an
+/// interrupt to be delivered (hold_irqs)
+#[inline(always)]
+pub unsafe fn irq_exit_requested() -> bool { execution_state.irq_exit }
+
+/// At an instruction boundary, with the CPU state written back: deliver the
+/// interrupt a held access made deliverable. True if one was due.
+#[inline(always)]
+pub unsafe fn deliver_held_irqs() -> bool {
+    if !execution_state.irq_exit {
+        return false;
+    }
+    crate::cpu::cpu::handle_irqs();
+    true
+}
+
+/// handle_irqs while delivery is held: the hold's end looks again
+#[inline(always)]
+pub unsafe fn note_held_irq() { execution_state.irq_noted = true; }
+
+/// handle_irqs outside a hold delivers what is deliverable: nothing is owed
+#[inline(always)]
+pub unsafe fn held_irqs_served() {
+    execution_state.irq_noted = false;
+    execution_state.irq_exit = false;
+}
 
 /// This mode uses the bounded interpreter and never a JIT/IR dispatch path.
 #[no_mangle]

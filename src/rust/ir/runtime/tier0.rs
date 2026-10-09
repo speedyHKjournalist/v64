@@ -61,14 +61,21 @@ pub unsafe fn ir_t0_step(expected_next: u32) -> i32 {
     *gp::instruction_pointer += 1;
     // The page function accounts for the retired instruction itself.
     crate::cpu::execution::begin_instruction();
-    cpu::run_instruction(opcode | (*gp::is_32 as i32) << 8);
+    held(|| cpu::run_instruction(opcode | (*gp::is_32 as i32) << 8));
     crate::cpu::execution::finish_instruction();
     crate::cpu::execution::note_jit_interpreted(
         (*gp::instruction_counter)
             .wrapping_sub(counter_before)
             .wrapping_add(1),
     );
-    if *gp::in_hlt || cpu::core_yield || crate::cpu::apic::has_core_events() || context() != before
+    // An interrupt this instruction or an earlier held access of the
+    // activation made deliverable is delivered at this boundary, and the
+    // page function leaves.
+    if crate::cpu::execution::deliver_held_irqs()
+        || *gp::in_hlt
+        || cpu::core_yield
+        || crate::cpu::apic::has_core_events()
+        || context() != before
     {
         STEP_EXIT
     }
@@ -249,29 +256,72 @@ pub unsafe fn ir_t0_stat(field: u32) -> u32 {
     values.get(field as usize).map_or(0, |v| *v as u32)
 }
 
-/// Whether an access of `bytes` at linear `address` would translate, without
-/// any side effect (no A/D bits, TLB fill or fault delivery).
-unsafe fn probe(address: u32, bytes: u32, write: bool) -> bool {
+/// P3.0b's emergency switch (ir_t0_irq_deferral, on by default). On, page
+/// functions leave accesses to devices that may interrupt to ir_t0_step,
+/// which delivers the interrupt after the instruction, and hold delivery in
+/// the other slow-path accesses and in steps (held). Off, as before: a
+/// device access in a slow path can deliver an interrupt in the middle of
+/// the instruction, with the GPRs and EIP still in the page function's
+/// locals.
+static mut T0_IRQ_DEFERRAL: bool = true;
+pub fn irq_deferral() -> bool { unsafe { T0_IRQ_DEFERRAL } }
+pub unsafe fn set_irq_deferral(on: bool) { T0_IRQ_DEFERRAL = on; }
+/// Run a device access or an interpreted instruction of a page function
+/// with interrupt delivery held (cpu::execution::hold_irqs): a deliverable
+/// one is delivered at the next instruction boundary, where the page
+/// function leaves (ir_t0_step, cache::execute).
+#[inline(always)]
+unsafe fn held<T>(access: impl FnOnce() -> T) -> T {
+    if T0_IRQ_DEFERRAL {
+        crate::cpu::execution::hold_irqs(access)
+    }
+    else {
+        access()
+    }
+}
+
+/// The physical addresses of the first and the last byte of an access of
+/// `bytes` at linear `address` if it would translate, without any side
+/// effect (no A/D bits, TLB fill or fault delivery).
+unsafe fn probe(address: u32, bytes: u32, write: bool) -> Option<[u32; 2]> {
     let user = *gp::cpl == 3;
-    let translates = |a: u32| cpu::translate_address(a as i32, write, user, false).is_ok();
-    translates(address)
-        && ((address & 0xFFF) + bytes <= 0x1000 || translates((address | 0xFFF) + 1))
+    let translate = |a: u32| cpu::translate_address(a as i32, write, user, false).ok();
+    let first = translate(address)?;
+    let last = address.wrapping_add(bytes - 1);
+    let last = if (address & 0xFFF) + bytes <= 0x1000 {
+        first.wrapping_add(bytes - 1)
+    }
+    else {
+        translate(last)?
+    };
+    Some([first, last])
+}
+/// probe, None also for an access the interpreter must make: it reaches a
+/// device that may raise or unmask an interrupt (memory::may_interrupt), so
+/// that ir_t0_step delivers it at the instruction boundary (P3.0b)
+unsafe fn probe_ram(address: u32, bytes: u32, write: bool) -> Option<[u32; 2]> {
+    let physical = probe(address, bytes, write)?;
+    if T0_IRQ_DEFERRAL && physical.iter().any(|&p| memory::may_interrupt(p)) {
+        return None;
+    }
+    Some(physical)
 }
 /// Tier-0 read outside the TLB fast path (TLB miss, MMIO, page crossing):
-/// `1 << 32` if the access would fault (nothing happened; the page function
-/// leaves the instruction to the interpreter), else the value, read with all
+/// `1 << 32` if the interpreter must make it (nothing happened; the page
+/// function leaves the instruction to ir_t0_step): the access would fault,
+/// or it reaches a device that may interrupt. Else the value, read with all
 /// of the interpreter's effects. `write` probes write permission for RMW.
 #[no_mangle]
 pub unsafe fn ir_t0_read_slow(address: u32, bytes: u32, write: u32) -> u64 {
-    if !probe(address, bytes, write != 0) {
+    if probe_ram(address, bytes, write != 0).is_none() {
         return 1 << 32;
     }
     let a = address as i32;
-    let value = match bytes {
+    let value = held(|| match bytes {
         1 => cpu::safe_read8(a),
         2 => cpu::safe_read16(a),
         _ => cpu::safe_read32s(a),
-    };
+    });
     match value {
         Ok(v) => v as u32 as u64,
         Err(()) => {
@@ -281,34 +331,31 @@ pub unsafe fn ir_t0_read_slow(address: u32, bytes: u32, write: u32) -> u64 {
     }
 }
 /// Tier-0 store outside the fast path: 1 if the interpreter must run the
-/// instruction instead (nothing written): the store would fault, or IR code
-/// lies on a page it writes (the interpreter then invalidates that code and
-/// the page function's step exits). Else the value is written: 0.
+/// instruction instead (nothing written): the store would fault, it reaches
+/// a device that may interrupt, or IR code lies on a page it writes (the
+/// interpreter then invalidates that code and the page function's step
+/// exits). Else the value is written: 0.
 #[no_mangle]
 pub unsafe fn ir_t0_write_slow(address: u32, value: u32, bytes: u32) -> u32 {
-    if !probe(address, bytes, true) {
+    let Some(physical) = probe_ram(address, bytes, true)
+    else {
         return 1;
-    }
-    let user = *gp::cpl == 3;
-    let last = address.wrapping_add(bytes - 1);
-    for a in [address, last] {
-        let Ok(physical) = cpu::translate_address(a as i32, true, user, false)
-        else {
-            return 1;
-        };
-        if crate::jit::jit_page_has_code(crate::page::Page::page_of(physical)) {
-            return 1;
-        }
+    };
+    if physical
+        .iter()
+        .any(|&p| crate::jit::jit_page_has_code(crate::page::Page::page_of(p)))
+    {
+        return 1;
     }
     // A page-crossing store goes through memory::write8, which dirties the
     // page unconditionally and so advances the continuation epoch, but the
-    // loop above found no IR code on either page: nothing is invalidated.
+    // check above found no IR code on either page: nothing is invalidated.
     let a = address as i32;
-    let written = match bytes {
+    let written = held(|| match bytes {
         1 => cpu::safe_write8(a, value as i32),
         2 => cpu::safe_write16(a, value as i32),
         _ => cpu::safe_write32(a, value as i32),
-    };
+    });
     dbg_assert!(written.is_ok(), "tier-0 probe accepted a faulting write");
     0
 }

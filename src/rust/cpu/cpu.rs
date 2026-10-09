@@ -3958,6 +3958,7 @@ static mut jit_link_batch_limit: u32 = LOOP_COUNTER as u32;
 pub unsafe fn ir_link_budget_available() -> bool {
     jit_link_batch
         && !core_yield
+        && !crate::cpu::execution::irq_exit_requested()
         && !apic::has_core_events()
         && (*instruction_counter).wrapping_sub(jit_link_batch_start) < jit_link_batch_limit
 }
@@ -4876,9 +4877,14 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 
 #[no_mangle]
 pub unsafe fn handle_irqs() {
-    if crate::cpu::exceptions::delivering() || crate::cpu::execution::irqs_deferred() {
+    if crate::cpu::execution::irqs_deferred() {
+        crate::cpu::execution::note_held_irq();
         return;
     }
+    if crate::cpu::exceptions::delivering() {
+        return;
+    }
+    crate::cpu::execution::held_irqs_served();
     let core = apic::current_core() as u32;
     let shutdown = crate::cpu::exceptions::exception_shutdown(core);
     if shutdown == 2 {
@@ -4911,6 +4917,18 @@ pub unsafe fn handle_irqs() {
             }
         }
     }
+}
+
+/// Whether handle_irqs would deliver an interrupt now, without its effects
+/// (nothing is acknowledged)
+pub unsafe fn irq_deliverable() -> bool {
+    if crate::cpu::smm::smi_deliverable() || *acpi_enabled && !*nmi_blocked && apic::nmi_pending() {
+        return true;
+    }
+    *flags & FLAG_INTERRUPT != 0
+        && *interrupt_shadow == 0
+        && (apic::routed_pic_pending(apic::current_core() as u32)
+            || *acpi_enabled && apic::has_pending_irq())
 }
 
 unsafe fn pic_call_irq(interrupt_nr: u8) {

@@ -1028,3 +1028,27 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - 注册表变更本身的 R 级（bench）：quick 会话加复测后几何均值 1.001，通过。
 - 一次 quick 会话里单项会因噪声偏离 5–15%（例如 `719.avx2.scan` 0.84，复测 1.00），所以门禁一律看多次会话的
   中位数与复测。
+
+**P3.0b Tier-0 慢路径的 IRQ 投递，2026-10-09。**
+
+- 问题：页函数的 GPR 与 EIP 在 Wasm 局部变量里。慢路径访存（`ir_t0_read_slow`、`ir_t0_write_slow`）写 APIC、
+  IOAPIC 或设备的 MMIO 时，`handle_irqs` 在指令中途投递中断：中断帧用内存里过时的 EIP 与 ESP 构建，IF 被清，
+  向量留在 ISR 里；页函数随后照常执行，出口时用局部变量覆盖 EIP，处理程序没有运行，也就没有 EOI。
+- 修复：
+  - `memory::may_interrupt`：RAM 之上的 MMIO（APIC、IOAPIC、HPET、PCI 内存 BAR），不含设备的普通内存
+    （`mmio_ram`）、SMRAM 与扩展内存窗口。慢路径的探测遇到它时把指令交给 `ir_t0_step`：解释器执行，中断在
+    指令边界投递，页函数随即退出（与 x64 page tier 拒绝设备内存的做法一致）。传统 VGA 窗口不产生中断，仍在
+    慢路径里访问，速度不变。
+  - `execution::hold_irqs`：期间 `handle_irqs` 只记下调用；结束时若有可投递的中断（`cpu::irq_deliverable`，
+    无副作用），`irq_exit_requested()` 成立：IR 不再链接（`ir_link_budget_available`），活动在下一个指令边界
+    离开，由 `cache::execute` 投递（`deliver_held_irqs`）。慢路径的其余访问与 `ir_t0_step` 都在它里面执行，
+    `ir_t0_step` 在指令之后投递并以 STEP_EXIT 退出。P4.7–P4.11 的 x64 辅助函数与 P7 的 32 位页函数用同一组
+    函数。`slice_budget` 不变。
+  - 紧急开关 `ir_t0_irq_deferral`（注册表，默认 1），关掉即恢复旧行为。
+  - 顺带：探测返回物理地址，慢路径写入的代码页检查不再把两个地址各翻译一次。
+- 测试：`tests/ir/differential/tier0_irq_slow.mjs`（ACPI 打开，进 `ir-tier0-tests`）：热循环经 ICR 给自己发 IPI，
+  再在 TPR 挡住时发一个并降低 TPR；每个中断须在使它可投递的那条 APIC 写之后到达。与解释器逐项一致（4 万个
+  中断）；开关关掉时只到 16001 个，栈上留下 12 字节的中断帧，说明测试能看到原来的错误。
+- `tools/wasm_diff.mjs` 的函数配对改为先看代码：插入一个闭包会给其后的闭包重新编号，同名（含哈希）的
+  `FnOnce::call_once` 换成别的闭包，原来按名字配对会把它们报成改变；改名的函数（`execute` 成为 `execute_any`）
+  按相同代码配对。本次改动按函数比较：17 个函数改变（都在改动的路径上），3 个新增，1 个删除。

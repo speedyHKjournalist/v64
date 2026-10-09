@@ -8,11 +8,14 @@
 //! materialize more than the GPRs, EIP and the retired-instruction count.
 //!
 //! Templates cover the most frequent integer forms. Each checks everything it
-//! needs (segment usable, TLB entry valid for the access, access inside one
-//! page, no code or MMIO page for stores, 32-bit stack) before its first
-//! state change; any failed check runs the whole instruction through
-//! `ir_t0_step` instead, so faults, MMIO, code writes and rare cases keep the
-//! interpreter's exact behavior.
+//! needs (segment usable, 32-bit stack, ...) before its first state change;
+//! any failed check runs the whole instruction through `ir_t0_step` instead,
+//! so faults and rare cases keep the interpreter's exact behavior. An access
+//! off the TLB fast path (a TLB miss, MMIO, a page crossing, a store to a page
+//! with code) calls `ir_t0_read_slow` or `ir_t0_write_slow`: they access with
+//! all of the interpreter's effects, interrupt delivery held to the next
+//! instruction boundary (runtime::tier0::held), or leave the instruction to
+//! `ir_t0_step` as well (it would fault, or it stores to a page with IR code).
 use super::analysis::{self, Instruction, PagePlan, Unit};
 use crate::cpu::cpu::{
     FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_VM, FLAG_ZERO,
@@ -1603,8 +1606,10 @@ impl Page {
         }
         self.w.block_end();
     }
-    /// Store `value` of `size` at addr. A code-page store completes and
-    /// raises `written` (checked after the instruction).
+    /// Store `value` of `size` at addr. Off the fast path, ir_t0_write_slow
+    /// stores it (MMIO with interrupt delivery held), or the instruction is
+    /// retried in the interpreter: the store would fault, or IR code lies on
+    /// a page it writes.
     fn write_mem(&mut self, size: u8, value: &WasmLocal) {
         let bytes = size as u32 / 8;
         self.tlb_miss(bytes, true);

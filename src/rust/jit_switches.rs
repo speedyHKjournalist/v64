@@ -133,6 +133,16 @@ pub const SWITCHES: &[Switch] = &[
         },
     },
     Switch {
+        name: "ir_t0_irq_deferral",
+        default: 1,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_irq_deferral(on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::irq_deferral() as u32),
+    },
+    Switch {
         name: "ir_relaxed_fma",
         default: 0,
         set: |v| unsafe { tier0::ir_set_relaxed_fma(v) },

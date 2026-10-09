@@ -233,6 +233,7 @@ export const STATICS = {
     },
     "ir/runtime/tier0.rs": {
         COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine",
+        T0_IRQ_DEFERRAL: "machine",
         // (the host's relaxed multiply-adds: whether they fuse, whether FMA uses them)
         RELAXED_FMA_FUSED: "machine", RELAXED_FMA: "machine",
         // the operands of one ir_t0_sse_fp call

@@ -270,7 +270,13 @@ function same(a, b)
     return a.length === b.length && Buffer.compare(Buffer.from(a.buffer, a.byteOffset, a.length), Buffer.from(b.buffer, b.byteOffset, b.length)) === 0;
 }
 
-// pairs of [old, new] functions, and the ones left over on each side
+// pairs of [old, new] functions, and the ones left over on each side. Code
+// decides before names do: a closure's mangled name names whichever closure
+// has its number, so inserting one renames the others (FnOnce::call_once
+// with the same hash, other code). In order: the same name and code; the
+// same name without the Rust hash and the same code; the same name; the only
+// function of its name without the hash on both sides; then a renamed
+// function: the same code under another name.
 function match_functions(old_functions, new_functions, equal)
 {
     const pairs = [];
@@ -278,14 +284,15 @@ function match_functions(old_functions, new_functions, equal)
     const pair = (a, b) => { pairs.push([a, b]); left_old.delete(a); left_new.delete(b); };
 
     const by_name = new Map(new_functions.map(f => [f.name, f]));
-    if(by_name.size === new_functions.length)
-    {
-        for(const f of old_functions)
+    const unique = by_name.size === new_functions.length;
+    const same_name = only_equal => {
+        if(!unique) return;
+        for(const f of [...left_old])
         {
             const g = by_name.get(f.name);
-            if(g && left_new.has(g)) pair(f, g);
+            if(g && left_new.has(g) && (!only_equal || equal(f, g))) pair(f, g);
         }
-    }
+    };
     const group = functions => {
         const groups = new Map();
         for(const f of functions)
@@ -296,21 +303,30 @@ function match_functions(old_functions, new_functions, equal)
         }
         return groups;
     };
-    const old_groups = group(left_old), new_groups = group(left_new);
-    for(const [key, olds] of old_groups)
+
+    same_name(true);
+    let new_groups = group(left_new);
+    for(const [key, olds] of group(left_old))
     {
         const news = new_groups.get(key);
         if(!news) continue;
-        if(olds.length === 1 && news.length === 1)
-        {
-            pair(olds[0], news[0]);
-            continue;
-        }
         for(const f of olds)
         {
             const g = news.find(g => left_new.has(g) && equal(f, g));
             if(g) pair(f, g);
         }
+    }
+    same_name(false);
+    new_groups = group(left_new);
+    for(const [key, olds] of group(left_old))
+    {
+        const news = new_groups.get(key);
+        if(olds.length === 1 && news?.length === 1) pair(olds[0], news[0]);
+    }
+    for(const f of [...left_old])
+    {
+        const g = [...left_new].find(g => equal(f, g));
+        if(g) pair(f, g);
     }
     return { pairs, removed: [...left_old], added: [...left_new] };
 }

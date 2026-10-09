@@ -2377,7 +2377,19 @@ pub unsafe fn ir_cache_link_target() -> u64 {
 
 /// Called by the CPU loop before it interprets.
 /// No request means no IR entry; compilation policy/tier promotion remain separate.
+#[inline(always)]
 pub unsafe fn execute() -> bool {
+    let executed = execute_any();
+    // A device access of a page function made an interrupt deliverable
+    // (tier0::held): the activation stopped linking and left at this
+    // instruction boundary, where it is delivered (which, as an interpreted
+    // instruction, reads descriptor tables and writes the stack).
+    if crate::cpu::execution::deliver_held_irqs() {
+        ir_admission_barrier();
+    }
+    executed
+}
+unsafe fn execute_any() -> bool {
     if diag::enabled() {
         return execute_mode::<true>();
     }

@@ -76,7 +76,12 @@ helpers, and the runtime publication machinery.
    permissions, the mapping, and code-page conditions; page-crossing accesses,
    MMIO, code writes, and anything else that fails a guard take a slow path or
    go to the interpreter. Load reuse, store-to-load forwarding, and loop
-   caching hold only within what has been proven.
+   caching hold only within what has been proven. Interrupts arrive only at
+   instruction boundaries: Tier-0 leaves accesses to devices that can
+   interrupt (the APIC, the IOAPIC, PCI memory BARs) to the single-step
+   helper, and holds delivery during its other slow-path accesses and single
+   steps until the next boundary, where the activation leaves
+   (`cpu::execution::hold_irqs`).
 4. **Compilation and execution are both budgeted.** Region size, optimization
    work, compile timing, and execution batches are all bounded. Safepoints hand
    control back to the CPU main loop so that interrupts, devices, and pauses
