@@ -23,7 +23,7 @@ all-debug: build/cpu-worker.js build/libv86-debug.js build/libv86-debug.mjs buil
 browser: build/cpu-worker.js build/v86_all.js
 
 # CPU benchmark suite (tests/bench): IR vs legacy, see docs/cpu-benchmarks.md.
-.PHONY: bench-build bench bench-quick ir-tier0-tests
+.PHONY: bench-build bench bench-quick bench-same-source ir-tier0-tests
 bench-build:
 	node tools/bench/build.mjs
 
@@ -32,6 +32,13 @@ bench: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 
 bench-quick: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 	node tests/bench/run.mjs --quick $(BENCH_ARGS)
+
+# The same C sources as i686 code on Tier-0 and as x86-64 code on the x64
+# page tier, alternating in one session, then the S gate
+# (docs/jit-unification-plan.md P0.4, cross-phase rule 2)
+bench-same-source: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
+	node tests/bench/run.mjs --same-source --quick --out build/bench/same-source.json $(BENCH_ARGS)
+	node tests/bench/gate.mjs --level S build/bench/same-source.json
 
 # Tier-0 page functions against the interpreter on random programs.
 ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin

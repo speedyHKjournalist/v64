@@ -1094,3 +1094,24 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - R 级（相对 P0.5，规则 7 因改动 `cycle_internal`、`run_cpu_slice` 而加测 XP）：bench 3 个 quick 会话几何均值 1.006，
   `701`、`707`、`712` 按 `--runs 7 --scale 4` 复测为 0.995、1.005、0.990，复测后 1.008；XP 桌面（所有者的配置，
   `IR_SYNC_DISK=1`，ABBAAB）中位数 13.93 s 对 13.78 s，比值 1.011。
+
+**P0.2、P0.2b、P0.3、P0.4：x86-64 与兼容模式 bench，同源对比，2026-10-09。**
+
+- P0.2：`tests/bench/lib/long_mode.asm` 是 multiboot 内核，进入 64 位模式，前 1 GiB 用 2 MiB 页恒等映射
+  （`-DLARGE_PAGES=0`：前 64 MiB 用 4 KiB 页，`run.mjs --small-pages`），开 x87/SSE，CPUID 报告时开 XSAVE 与 AVX，
+  装 64 位异常桩，在 64 位模式里停机；`crt0_64.asm` 是 Win64 入口，参数块与 i686 相同（故障 RIP 是 `0x60C` 的 qword）。
+- P0.2b：`-DCOMPAT=1`（`long_mode_compat.bin`）停在 32 位代码段（兼容模式），`run.mjs --isa compat32` 在那里
+  运行 i686 镜像。首次测得兼容模式下 Tier-0 与传统模式速度相当（`560.hash` 3359 对 3280 MIPS），但
+  `710.string` 只有 2 MIPS（传统模式 31 MIPS）：REP 串指令在兼容模式没有模板，P3.1d 的条件项据此判断。
+- P0.3：`suite.json` 的 `profiles64`（调优 nocona；int 档 `-mgeneral-regs-only -fno-tree-vectorize`），
+  `tools/bench/build.mjs` 用 `x86_64-w64-mingw32-gcc` 把 25 个 C 基准编成 PE32+（`build/bench/x86_64/`，
+  清单里的 `image64`），`616.fcompare`、`625.mmx` 与 nasm 微基准不在其中。`bench.h` 与 `rt.c` 的长度改为
+  `size_t`（i686 上就是 `unsigned int`）：46 个 i686 镜像装入的字节与改动前逐字节相同，`boot.bin` 不变。
+- P0.4：`run.mjs --isa x86_64|compat32`，PE32+ 装载（基址在 4 GiB 以下），`--interpreter`（与被测 arm
+  同 ISA、不开 JIT 的参考 arm，校验和须一致），`--same-source`（被测 arm 是 x86-64 版，基准是同一源码的
+  i686 版）与 `make bench-same-source`（之后跑 S 级门禁）。同源模式的每行还有 `instruction_ratio`（再跑一轮的
+  退役指令数，x86-64 那一轮用关闭块计数的新机器）、`data_ratio`（可写段大小，两边都没有时为 1）与
+  x86-64 的单步占比。校验和只在同一 ISA 的 arm 之间比较。
+- 试跑（一次 quick 会话，GCC 16.1）：指令数比 502 0.94、541 1.15、557 1.11、560 0.98、561 0.99、562 0.36，
+  `505.chase` 数据量比 1.69，与审查时的数据（GCC 13）接近；S 门禁成员的速度比约 0.4–0.55，与审查时一样不
+  通过。正式的同源基线随 P0.10 记录。
