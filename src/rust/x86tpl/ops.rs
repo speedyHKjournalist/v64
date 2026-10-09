@@ -15,6 +15,7 @@ use super::vec::{
     Packed,
 };
 use crate::cpu::global_pointers as gp;
+use crate::ir::helper::imports::signature;
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
 
 /// An engine's register facts (Tier-0's Page::xmm_clean: the lanes known to
@@ -62,6 +63,14 @@ pub trait VecOperands {
     fn store256_rm(&mut self, halves: &[WasmLocalV128; 2], aligned: bool);
     /// Zero bits 255:128 of YMM `r`
     fn zero_upper(&mut self, r: u8);
+    /// Push the destination register's value (FMA reads it)
+    fn destination(&mut self);
+    /// Whether the host's relaxed multiply-adds fuse (FMA natively,
+    /// native_fp::fused)
+    fn relaxed_fma(&self) -> bool;
+    /// The address of the exact helpers' operand block
+    /// (runtime::tier0::T0_SSE_FP, pinned when compilations replay)
+    fn sse_fp_operands(&self) -> u32;
     /// XMM `r` = `value`, bits 255:128 zeroed (a VEX form's write)
     fn store_register(&mut self, r: u8, value: &WasmLocalV128);
     /// Write the low `bytes` of `value` to the destination, keeping the
@@ -74,14 +83,16 @@ pub trait VecOperands {
     /// nonzero
     fn retry_if(&mut self);
     /// Push i32 nonzero if MXCSR refuses native results
-    /// (native_fp::mxcsr_refused)
+    /// (native_fp::mxcsr_refused: PE set; the templates that find inexact
+    /// results themselves, where detects_inexact, ask
+    /// native_fp::mxcsr_refused_any_pe instead)
     fn mxcsr_refused(&mut self);
     /// Whether a refused instruction runs exactly in place (exact_open);
     /// else it retries
     fn in_place(&self) -> bool;
-    /// Whether MXCSR.PE may be clear (mxcsr_refused admits it): the
-    /// templates then set PE for an inexact result themselves. Else
-    /// mxcsr_refused wants PE set, and an inexact result changes nothing.
+    /// Whether the conversion templates may run with MXCSR.PE clear and set
+    /// it for an inexact result themselves (the page tier); else they ask
+    /// mxcsr_refused, which wants PE set
     fn detects_inexact(&self) -> bool { false }
     /// If the i32 on the stack is nonzero, open a block that runs the
     /// instruction exactly on (`destination`, `source`) with `imm8` (None:
@@ -276,7 +287,12 @@ pub fn convert<T: VecOperands>(t: &mut T, opcode: u32, source: u8, result: u8) {
     }
     else if matches!(opcode, 0x5E | 0xFA) {
         // (CVTDQ2PS: only PE)
-        t.mxcsr_refused();
+        if t.detects_inexact() {
+            native_fp::mxcsr_refused_any_pe(t.w());
+        }
+        else {
+            t.mxcsr_refused();
+        }
         t.refused(&destination, &x, None, &v);
         if t.detects_inexact() {
             conversion_inexact(t.w(), opcode, scalar, &x, &v);
@@ -303,7 +319,12 @@ pub fn convert_to_integers<T: VecOperands>(t: &mut T, double: bool, truncate: bo
     let v = t.w().set_new_local_v128();
     // a NaN or out-of-range lane raises IE; an inexact one PE
     t.w().get_local(&out_of_range);
-    t.mxcsr_refused();
+    if t.detects_inexact() {
+        native_fp::mxcsr_refused_any_pe(t.w());
+    }
+    else {
+        t.mxcsr_refused();
+    }
     t.w().or_i32();
     t.refused(&v, &x, None, &v);
     if t.detects_inexact() {
@@ -660,4 +681,83 @@ pub fn broadcast<T: VecOperands>(t: &mut T, bytes: u8, wide: bool) {
     }
     t.w().free_local_v128(element);
     t.w().free_local_v128(value);
+}
+
+/// FMA's VEX.128 and scalar forms (`op` the opcode byte, `double` VEX.W1):
+/// natively where the host's relaxed multiply-adds fuse
+/// (native_fp::fused), a scalar form's other lanes the destination's; the
+/// exact helper runtime::tier0::ir_t0_fma in place where a lane or MXCSR is
+/// refused, or always without fusing multiply-adds (its fault retries)
+pub fn fused<T: VecOperands>(t: &mut T, op: u8, double: bool) {
+    // (the r/m operand first: its access may retry; a scalar form's 32 or
+    // 64 bits)
+    let scalar = op & 0xF >= 9 && op & 1 == 1;
+    t.source(
+        if !scalar {
+            16
+        }
+        else if double {
+            8
+        }
+        else {
+            4
+        },
+        false,
+    );
+    let third = t.w().set_new_local_v128();
+    // (both registers read before the branch)
+    let native = t.relaxed_fma().then(|| {
+        t.destination();
+        let d = t.w().set_new_local_v128();
+        t.first();
+        let f = t.w().set_new_local_v128();
+        let r = native_fp::fused(t.w(), op, double, scalar, [&d, &f, &third]);
+        t.mxcsr_refused();
+        t.w().or_i32();
+        let refused = t.w().set_new_local();
+        if scalar {
+            let bytes = if double { 8 } else { 4 };
+            t.w().get_local_v128(&r);
+            t.w().get_local_v128(&d);
+            let mut lanes = [0; 16];
+            for (k, lane) in lanes.iter_mut().enumerate() {
+                *lane = if k < bytes { k as u8 } else { 16 + k as u8 };
+            }
+            t.w().simd_shuffle(lanes);
+            t.w().set_local_v128(&r);
+        }
+        t.w().get_local(&refused);
+        t.w().free_local(refused);
+        t.w().free_local_v128(d);
+        t.w().free_local_v128(f);
+        t.w().hint(false);
+        t.w().if_void();
+        r
+    });
+    let operands = t.sse_fp_operands();
+    t.w().const_i32(operands as i32);
+    t.destination();
+    t.w().simd_memory(0x0B, 4); // v128.store
+    t.w().const_i32((operands + 16) as i32);
+    t.first();
+    t.w().simd_memory(0x0B, 4);
+    t.w().const_i32((operands + 32) as i32);
+    t.w().get_local_v128(&third);
+    t.w().simd_memory(0x0B, 4);
+    t.w().const_i32(op as i32 | (double as i32) << 8);
+    t.w().call_signature("ir_t0_fma", signature("ir_t0_fma"));
+    t.retry_if();
+    t.w().const_i32(operands as i32);
+    t.w().simd_memory(0x00, 4); // v128.load
+    let result = match native {
+        Some(r) => {
+            t.w().set_local_v128(&r);
+            t.w().block_end();
+            r
+        },
+        None => t.w().set_new_local_v128(),
+    };
+    t.store_vec(&result, 16);
+    t.w().free_local_v128(third);
+    t.w().free_local_v128(result);
 }

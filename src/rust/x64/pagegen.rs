@@ -2184,6 +2184,8 @@ pub struct CompileEnv {
     pub relaxed_fma: bool,
     /// The packed conversions as templates (x64_page_set_cvt)
     pub cvt: bool,
+    /// The exact helpers' operand block (runtime::tier0::T0_SSE_FP: FMA)
+    pub sse_fp_operands: u32,
     /// Cores in workers: the kick a page function polls (cpu::core_yield),
     /// the code publication counters (parallel::code::pending_addresses)
     /// and the bounce buffer of unaligned accesses (pages::bounce_address)
@@ -2202,6 +2204,7 @@ impl CompileEnv {
                 chaining,
                 relaxed_fma: crate::ir::runtime::tier0::relaxed_fma(),
                 cvt: CVT,
+                sse_fp_operands: crate::ir::runtime::tier0::sse_fp_operands(),
                 core_yield: &raw const crate::cpu::cpu::core_yield as u32,
                 pending: if cfg!(feature = "parallel") {
                     crate::parallel::code::pending_addresses()
@@ -2229,6 +2232,7 @@ impl CompileEnv {
             chaining,
             relaxed_fma,
             cvt,
+            sse_fp_operands: 0x0000_0E00,
             core_yield: 0x0000_0D00,
             pending: [0x0000_0D10, 0x0000_0D14, 0x0000_0D18, 0x0000_0D1C],
             bounce: 0x0000_0C00,
@@ -4758,88 +4762,16 @@ impl Emitter {
                 first,
                 src,
             } => {
-                // the r/m operand (a scalar form's 32 or 64 bits), the
-                // destination and the first source to the operand block, then
-                // ir_t0_fma; an unmasked exception retries (the interpreter
-                // raises #XM)
                 self.vector_check(inst, start);
-                let scalar = op & 0xF >= 9 && op & 1 == 1;
-                let operands = crate::ir::runtime::tier0::sse_fp_operands() as i32;
-                match src {
-                    Xmm::Mem(a) if scalar => {
-                        let bits = if double { 64 } else { 32 };
-                        self.vector_address(&a, bits, false, false, inst);
-                        self.gi(HOST);
-                        self.load_bits(bits, 0);
-                        self.b.simd(0x12); // i64x2.splat
-                    },
-                    _ => self.vector_source(src, inst),
-                }
-                let third = self.b.set_new_local_v128();
-                // natively where the host's relaxed multiply-adds fuse
-                // (native_fp::fused; a scalar form's other lanes the
-                // destination's), else (a lane or MXCSR refused) exactly
-                let native = self.env.relaxed_fma;
-                if native {
-                    let [d, f] = [dst, first].map(|r| {
-                        self.c32(Self::xmm(r) as i32);
-                        self.b.simd_memory(0x00, 0);
-                        self.b.set_new_local_v128()
-                    });
-                    let r = crate::x86tpl::native_fp::fused(
-                        &mut self.b,
-                        op,
-                        double,
-                        scalar,
-                        [&d, &f, &third],
-                    );
-                    crate::x86tpl::native_fp::mxcsr_refused(&mut self.b);
-                    self.b.or_i32();
-                    self.b.eqz_i32();
-                    self.b.hint(true);
-                    self.b.if_void();
-                    self.c32(Self::xmm(dst) as i32);
-                    self.b.get_local_v128(&r);
-                    if scalar {
-                        let bytes = if double { 8 } else { 4 };
-                        self.b.get_local_v128(&d);
-                        let mut lanes = [0; 16];
-                        for (k, lane) in lanes.iter_mut().enumerate() {
-                            *lane = if k < bytes { k as u8 } else { 16 + k as u8 };
-                        }
-                        self.b.simd_shuffle(lanes);
-                    }
-                    self.b.simd_memory(0x0B, 0); // v128.store
-                    self.b.else_();
-                    for local in [d, f, r] {
-                        self.b.free_local_v128(local);
-                    }
-                }
-                self.c32(operands + 32);
-                self.b.get_local_v128(&third);
-                self.b.simd_memory(0x0B, 4); // v128.store
-                self.b.free_local_v128(third);
-                for (k, r) in [dst, first].into_iter().enumerate() {
-                    self.c32(operands + 16 * k as i32);
-                    self.c32(Self::xmm(r) as i32);
-                    self.b.simd_memory(0x00, 0);
-                    self.b.simd_memory(0x0B, 4);
-                }
-                self.c32(op as i32 | (double as i32) << 8);
-                self.b.call_signature(
-                    "ir_t0_fma",
-                    Signature::new(&[WasmType::I32], &[WasmType::I32]),
-                );
-                self.b.if_void();
-                self.leave_to(self.f().retry, start);
-                self.b.block_end();
-                self.c32(Self::xmm(dst) as i32);
-                self.c32(operands);
-                self.b.simd_memory(0x00, 4);
-                self.b.simd_memory(0x0B, 0);
-                if native {
-                    self.b.block_end();
-                }
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst,
+                    first,
+                    src,
+                };
+                crate::x86tpl::ops::fused(&mut operands, op, double);
                 self.vex_upper(inst, dst);
             },
             Op::Movbe {

@@ -1315,80 +1315,7 @@ impl Page {
         let rm = i.modrm.unwrap_or(0) & 7;
         match form {
             Simd::Fused { op, double, reg } => {
-                // (the r/m operand first: its access may retry; a scalar
-                // form's 32 or 64 bits)
-                let scalar = op & 0xF >= 9 && op & 1 == 1;
-                self.simd_source(
-                    i,
-                    false,
-                    if !scalar {
-                        16
-                    }
-                    else if double {
-                        8
-                    }
-                    else {
-                        4
-                    },
-                );
-                let third = self.w.set_new_local_v128();
-                // natively where the host's relaxed multiply-adds fuse
-                // (native_fp::fused): the result, a scalar form's other lanes
-                // the destination's; the exact path if a lane or MXCSR is
-                // refused. (Both registers are cached before the branch.)
-                let native = self.env.relaxed_fma.then(|| {
-                    self.load_xmm(reg);
-                    let d = self.w.set_new_local_v128();
-                    self.load_xmm(self.first(reg));
-                    let f = self.w.set_new_local_v128();
-                    let r = native_fp::fused(&mut self.w, op, double, scalar, [&d, &f, &third]);
-                    self.mxcsr_refused();
-                    self.w.or_i32();
-                    let refused = self.w.set_new_local();
-                    if scalar {
-                        let bytes = if double { 8 } else { 4 };
-                        self.w.get_local_v128(&r);
-                        self.w.get_local_v128(&d);
-                        let mut lanes = [0; 16];
-                        for (k, lane) in lanes.iter_mut().enumerate() {
-                            *lane = if k < bytes { k as u8 } else { 16 + k as u8 };
-                        }
-                        self.w.simd_shuffle(lanes);
-                        self.w.set_local_v128(&r);
-                    }
-                    self.w.get_local(&refused);
-                    self.w.free_local(refused);
-                    self.w.free_local_v128(d);
-                    self.w.free_local_v128(f);
-                    self.w.hint(false);
-                    self.w.if_void();
-                    r
-                });
-                let operands = self.env.sse_fp_operands;
-                for (k, r) in [reg, self.first(reg)].into_iter().enumerate() {
-                    self.w.const_i32((operands + 16 * k as u32) as i32);
-                    self.load_xmm(r);
-                    self.w.simd_memory(0x0B, 4); // v128.store
-                }
-                self.w.const_i32((operands + 32) as i32);
-                self.w.get_local_v128(&third);
-                self.w.simd_memory(0x0B, 4);
-                self.w.const_i32(op as i32 | (double as i32) << 8);
-                self.w.call_signature("ir_t0_fma", signature("ir_t0_fma"));
-                self.retry_if();
-                self.w.const_i32(operands as i32);
-                self.w.simd_memory(0x00, 4); // v128.load
-                let result = match native {
-                    Some(r) => {
-                        self.w.set_local_v128(&r);
-                        self.w.block_end();
-                        r
-                    },
-                    None => self.w.set_new_local_v128(),
-                };
-                self.store_xmm(reg, &result);
-                self.w.free_local_v128(third);
-                self.w.free_local_v128(result);
+                ops::fused(&mut Operands { page: self, i, reg }, op, double)
             },
             Simd::Load128 { reg } => {
                 self.simd_source(i, false, 16);
@@ -1816,6 +1743,9 @@ impl VecOperands for Operands<'_, '_> {
         }
     }
     fn zero_upper(&mut self, r: u8) { self.page.ymm_zero(r) }
+    fn destination(&mut self) { self.page.load_xmm(self.reg) }
+    fn relaxed_fma(&self) -> bool { self.page.env.relaxed_fma }
+    fn sse_fp_operands(&self) -> u32 { self.page.env.sse_fp_operands }
     fn store_register(&mut self, r: u8, value: &WasmLocalV128) { self.page.store_xmm(r, value) }
     fn source_int(&mut self, wide: bool) {
         dbg_assert!(!wide, "Tier-0: 32-bit integers only");

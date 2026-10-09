@@ -139,6 +139,12 @@ impl VecOperands for Operands<'_> {
         }
     }
     fn zero_upper(&mut self, r: u8) { self.e.ymm_zero(r) }
+    fn destination(&mut self) {
+        self.e.c32(Emitter::xmm(self.dst) as i32);
+        self.e.b.simd_memory(0x00, 0); // v128.load
+    }
+    fn relaxed_fma(&self) -> bool { self.e.env.relaxed_fma }
+    fn sse_fp_operands(&self) -> u32 { self.e.env.sse_fp_operands }
     fn store_register(&mut self, r: u8, value: &WasmLocalV128) {
         self.e.c32(Emitter::xmm(r) as i32);
         self.e.b.get_local_v128(value);
@@ -178,7 +184,7 @@ impl VecOperands for Operands<'_> {
         self.e.set_reg(r, if wide { 64 } else { 32 });
     }
     fn retry_if(&mut self) { self.e.retry_if(self.start) }
-    fn mxcsr_refused(&mut self) { native_fp::mxcsr_refused_any_pe(&mut self.e.b) }
+    fn mxcsr_refused(&mut self) { native_fp::mxcsr_refused(&mut self.e.b) }
     fn in_place(&self) -> bool { false }
     fn detects_inexact(&self) -> bool { true }
     fn exact_open(&mut self, _: &WasmLocalV128, _: &WasmLocalV128, _: Option<u32>) {
