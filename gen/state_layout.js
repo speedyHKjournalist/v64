@@ -289,7 +289,7 @@ export const STATICS = {
     // some entry maps the VGA frame buffer
     "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache" },
     "x64/execute.rs": { DECODE_CACHE: "cache" },
-    "x64/pagegen.rs": { SIZE_STATS: "debug", OUTLINE_ACCESS: "machine", BLOCK_COUNT: "machine", BUCKET_DISPATCH: "machine" },
+    "x64/pagegen.rs": { SIZE_STATS: "debug", OUTLINE_ACCESS: "machine", BLOCK_COUNT: "machine", BUCKET_DISPATCH: "machine", CVT: "machine" },
     "x64/replay.rs": { RECORDS: "debug", INPUT: "debug", OUTPUT: "debug" },
     "x64/debug.rs": { PENDING: "scratch" },
     "x64/system.rs": { FAULT_LOG: "debug", FAULT_NEXT: "debug", USER_TRACE: "debug", USER_TRACE_NEXT: "debug", USER_TRACE_ENABLED: "debug" },

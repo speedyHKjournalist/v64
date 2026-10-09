@@ -553,6 +553,14 @@ enum Op {
         src: Xmm,
         mask: u8,
     },
+    /// The packed conversions of x86tpl::ops (P2.5, switch x64_cvt; the
+    /// decoder steps them while it is off): CVTPS2PD, CVTPD2PS, CVTDQ2PS,
+    /// CVTDQ2PD, CVT(T)PS2DQ and CVT(T)PD2DQ
+    Vcvt {
+        op: Cvt,
+        dst: u8,
+        src: Xmm,
+    },
     /// The scalar conversions (see Emitter::vconvert): retried unless exact
     /// or only inexact, MXCSR to nearest with every exception masked
     Vconvert {
@@ -589,6 +597,16 @@ enum Op {
     Rdtscp,
     /// Interpreted in place by x64_page_step.
     Step,
+}
+
+/// Op::Vcvt's conversions
+#[derive(Clone, Copy, Debug)]
+enum Cvt {
+    /// One Wasm operation (x86tpl::ops::convert): its opcode, the bytes of
+    /// the source and of the result
+    Convert { opcode: u32, source: u8, result: u8 },
+    /// CVT(T)PS2DQ and CVT(T)PD2DQ (x86tpl::ops::convert_to_integers)
+    Integers { double: bool, truncate: bool },
 }
 
 /// The scalar conversions of Op::Vconvert
@@ -1256,6 +1274,31 @@ fn sse(d: &Decoded) -> Option<Op> {
         },
         // (the forms below emit Wasm SIMD: not in the build for engines without it)
         _ if !cfg!(target_feature = "simd128") => return None,
+        0x0F5A | 0x660F5A | 0x0F5B | 0xF30FE6 => {
+            let (opcode, source) = match d.opcode {
+                0x0F5A => (0x5F, 8),    // CVTPS2PD: f64x2.promote_low_f32x4
+                0x660F5A => (0x5E, 16), // CVTPD2PS: f32x4.demote_f64x2_zero
+                0x0F5B => (0xFA, 16),   // CVTDQ2PS: f32x4.convert_i32x4_s
+                _ => (0xFE, 8),         // CVTDQ2PD: f64x2.convert_low_i32x4_s
+            };
+            Op::Vcvt {
+                op: Cvt::Convert {
+                    opcode,
+                    source,
+                    result: 16,
+                },
+                dst: register,
+                src: xmm_rm()?,
+            }
+        },
+        0x660F5B | 0xF30F5B | 0x660FE6 | 0xF20FE6 => Op::Vcvt {
+            op: Cvt::Integers {
+                double: d.opcode & 0xFF == 0xE6,
+                truncate: matches!(d.opcode, 0xF30F5B | 0x660FE6),
+            },
+            dst: register,
+            src: xmm_rm()?,
+        },
         0x660F70 | 0xF20F70 | 0xF30F70 | 0x0FC6 | 0x660FC6 => Op::Vpacked {
             op: vec::shuffle(d.opcode, d.immediate?.value as u32 & 0xFF),
             dst: register,
@@ -2094,10 +2137,12 @@ struct Decoder<'a> {
     next: &'a [u8],
     page: u64,
     cache: HashMap<u16, Option<(Decoded, Op)>, std::hash::BuildHasherDefault<OffsetHasher>>,
+    /// The templates of x64_cvt (CompileEnv::cvt): else they are steps
+    cvt: bool,
 }
 impl Decoder<'_> {
     fn at(&mut self, offset: u16) -> Option<(Decoded, Op)> {
-        let (bytes, next, page) = (self.bytes, self.next, self.page);
+        let (bytes, next, page, cvt) = (self.bytes, self.next, self.page, self.cvt);
         *self.cache.entry(offset).or_insert_with(|| {
             let d =
                 decode::decode_with(GuestIp(page + offset as u64), ExecutionMode::Long64, |i| {
@@ -2111,7 +2156,11 @@ impl Decoder<'_> {
             if offset as usize + d.length as usize > PAGE + 8 {
                 return None;
             }
-            Some((d, classify(&d)))
+            let op = match classify(&d) {
+                Op::Vcvt { .. } if !cvt => Op::Step,
+                op => op,
+            };
+            Some((d, op))
         })
     }
 }
@@ -2133,6 +2182,8 @@ pub struct CompileEnv {
     pub chaining: bool,
     /// FMA through the host's relaxed multiply-adds (tier0::relaxed_fma)
     pub relaxed_fma: bool,
+    /// The packed conversions as templates (x64_page_set_cvt)
+    pub cvt: bool,
     /// Cores in workers: the kick a page function polls (cpu::core_yield),
     /// the code publication counters (parallel::code::pending_addresses)
     /// and the bounce buffer of unaligned accesses (pages::bounce_address)
@@ -2150,6 +2201,7 @@ impl CompileEnv {
                 outline: OUTLINE_ACCESS,
                 chaining,
                 relaxed_fma: crate::ir::runtime::tier0::relaxed_fma(),
+                cvt: CVT,
                 core_yield: &raw const crate::cpu::cpu::core_yield as u32,
                 pending: if cfg!(feature = "parallel") {
                     crate::parallel::code::pending_addresses()
@@ -2168,6 +2220,7 @@ impl CompileEnv {
         outline: bool,
         chaining: bool,
         relaxed_fma: bool,
+        cvt: bool,
     ) -> CompileEnv {
         CompileEnv {
             bucket_dispatch,
@@ -2175,6 +2228,7 @@ impl CompileEnv {
             outline,
             chaining,
             relaxed_fma,
+            cvt,
             core_yield: 0x0000_0D00,
             pending: [0x0000_0D10, 0x0000_0D14, 0x0000_0D18, 0x0000_0D1C],
             bounce: 0x0000_0C00,
@@ -2220,6 +2274,7 @@ pub fn compile_with(
         next,
         page,
         cache: HashMap::default(),
+        cvt: env.cvt,
     };
     // Discover block starts: entries, in-page branch targets, return
     // addresses, and the instruction after every step (steps continue by
@@ -2566,9 +2621,16 @@ static mut OUTLINE_ACCESS: bool = true;
 #[no_mangle]
 pub fn x64_page_set_outline(enabled: bool) { unsafe { OUTLINE_ACCESS = enabled } }
 /// The values of the three switches above (crate::jit_switches)
+/// The packed conversions (Op::Vcvt) as x86tpl::ops templates, else steps
+/// (docs/jit-unification-plan.md P2.5). x64_page_set_cvt.
+static mut CVT: bool = false;
+#[no_mangle]
+pub fn x64_page_set_cvt(enabled: bool) { unsafe { CVT = enabled } }
+
 pub fn switch_value(name: &str) -> Option<u32> {
     unsafe {
         Some(match name {
+            "x64_cvt" => CVT as u32,
             "x64_bucket_dispatch" => BUCKET_DISPATCH as u32,
             "x64_block_count" => BLOCK_COUNT as u32,
             "x64_outline" => OUTLINE_ACCESS as u32,
@@ -5575,6 +5637,7 @@ impl Emitter {
                 self.b.free_local_v128(source);
                 self.vex_upper(inst, dst);
             },
+            Op::Vcvt { op, dst, src } => self.vcvt(inst, start, op, dst, src),
             Op::Vconvert {
                 convert,
                 dst,
@@ -6699,6 +6762,30 @@ impl Emitter {
         self.b.store_aligned_i32(0);
         self.b.block_end();
     }
+    /// The packed conversions (Op::Vcvt): x86tpl::ops on the page tier's
+    /// operands (pagegen_vec), whose refused instructions retry
+    fn vcvt(&mut self, inst: &Inst, start: u64, op: Cvt, dst: u8, src: Xmm) {
+        self.vector_check(inst, start);
+        let mut operands = pagegen_vec::Operands {
+            e: self,
+            inst,
+            start,
+            dst,
+            first: dst,
+            src,
+        };
+        match op {
+            Cvt::Convert {
+                opcode,
+                source,
+                result,
+            } => crate::x86tpl::ops::convert(&mut operands, opcode, source, result),
+            Cvt::Integers { double, truncate } => {
+                crate::x86tpl::ops::convert_to_integers(&mut operands, double, truncate)
+            },
+        }
+        self.vex_upper(inst, dst);
+    }
     /// The scalar conversions (Op::Vconvert) natively when they are exact or
     /// only inexact (PE set here), with MXCSR to nearest and every exception
     /// masked; else retried, as for a NaN or denormal operand, a value out of
@@ -7742,6 +7829,9 @@ fn shift_immediate(w: &mut WasmBuilder, bits: u8, kind: u8, count: u8) {
         leaves::shift_lanes(w, bits, shift, count.min(bits as u32 - 1));
     }
 }
+
+#[path = "pagegen_vec.rs"]
+mod pagegen_vec;
 
 #[cfg(test)]
 #[path = "../../../tests/x86tpl/pagegen_leaf_digests.rs"]

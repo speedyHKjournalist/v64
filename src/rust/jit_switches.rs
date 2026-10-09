@@ -81,6 +81,12 @@ pub const SWITCHES: &[Switch] = &[
         get: pagegen::switch_value,
     },
     Switch {
+        name: "x64_cvt",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_cvt).is_some(),
+        get: pagegen::switch_value,
+    },
+    Switch {
         name: "x64_compat_jit",
         default: 1,
         set: |v| {

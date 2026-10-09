@@ -1009,6 +1009,7 @@ x64-differential-tests: build/v86-debug.wasm
 x64-page-tier-tests: build/v86-debug.wasm
 	X64_JIT=1 node tests/x64/integer_oracle.mjs
 	X64_JIT=tier0 node tests/x64/vector_oracle.mjs
+	JIT_SWITCHES=x64_cvt=1 X64_JIT=1 X64_VECTOR_FILTER=cvt node tests/x64/vector_oracle.mjs
 	X64_JIT=1 node tests/x64/system_oracle.mjs
 	X64_JIT=1 X64_IR_TIER0=0 node tests/x64/system_oracle.mjs
 	node tests/x64/page_system.mjs
