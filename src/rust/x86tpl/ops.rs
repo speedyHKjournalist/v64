@@ -11,7 +11,8 @@
 use super::native_fp::{self, Lanes};
 use super::vec::{
     clean_bits, compare_relation, conversion_inexact, convert_facts, convert_integer,
-    float_arithmetic, float_claims, float_facts, integer_conversion_inexact, known_clean,
+    float_arithmetic, float_claims, float_facts, integer_conversion_inexact, known_clean, packed,
+    Packed,
 };
 use crate::cpu::global_pointers as gp;
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
@@ -43,6 +44,26 @@ pub trait VecOperands {
     /// Push XMM `r`, whole (another register the form names, such as
     /// BLENDV's mask)
     fn register(&mut self, r: u8);
+    /// The XMM/YMM registers there are: 8 outside 64-bit mode, else 16
+    fn registers(&self) -> u8;
+    /// Whether the r/m operand is memory
+    fn memory(&self) -> bool;
+    /// Push bits 255:128 of the first source (VEX.256)
+    fn first_high(&mut self);
+    /// Push bits 255:128 of the r/m register (VEX.256 register forms)
+    fn source_high(&mut self);
+    /// The m256 r/m operand's halves in two locals, low and high (VEX.256;
+    /// `aligned`: 32-byte aligned, else a retry)
+    fn source256(&mut self, aligned: bool) -> [WasmLocalV128; 2];
+    /// Write YMM destination = (`low`, `high`)
+    fn store256(&mut self, low: &WasmLocalV128, high: &WasmLocalV128);
+    /// Write `halves` to the r/m operand: the m256 (`aligned`: 32-byte, else
+    /// a retry, before anything is written) or the YMM register
+    fn store256_rm(&mut self, halves: &[WasmLocalV128; 2], aligned: bool);
+    /// Zero bits 255:128 of YMM `r`
+    fn zero_upper(&mut self, r: u8);
+    /// XMM `r` = `value`, bits 255:128 zeroed (a VEX form's write)
+    fn store_register(&mut self, r: u8, value: &WasmLocalV128);
     /// Write the low `bytes` of `value` to the destination, keeping the
     /// first source's other bytes (16: all of `value`)
     fn store_vec(&mut self, value: &WasmLocalV128, bytes: u8);
@@ -519,4 +540,124 @@ pub fn round<T: VecOperands>(t: &mut T, double: bool, scalar: bool, imm8: u8) {
     for v128 in [v, rounded, destination, source] {
         t.w().free_local_v128(v128);
     }
+}
+
+/// VZEROUPPER: bits 255:128 of every YMM register zeroed
+pub fn zero_upper<T: VecOperands>(t: &mut T) {
+    for r in 0..t.registers() {
+        t.zero_upper(r);
+    }
+}
+
+/// VZEROALL: every YMM register zeroed
+pub fn zero_all<T: VecOperands>(t: &mut T) {
+    t.w().simd_zero();
+    let zero = t.w().set_new_local_v128();
+    for r in 0..t.registers() {
+        t.store_register(r, &zero);
+    }
+    t.w().free_local_v128(zero);
+}
+
+/// The r/m operand of a VEX.256 form in two locals, low and high (both
+/// halves read before anything is written)
+fn source256<T: VecOperands>(t: &mut T, aligned: bool) -> [WasmLocalV128; 2] {
+    if t.memory() {
+        return t.source256(aligned);
+    }
+    t.source(16, true);
+    let low = t.w().set_new_local_v128();
+    t.source_high();
+    [low, t.w().set_new_local_v128()]
+}
+
+/// VMOVUPS/UPD/DQU and VMOVAPS/APD/DQA ymm, ymm/m256 (`aligned`: the A forms)
+pub fn load256<T: VecOperands>(t: &mut T, aligned: bool) {
+    let memory = t.memory();
+    let halves = source256(t, aligned);
+    t.store256(&halves[0], &halves[1]);
+    if let Some(f) = t.facts().filter(|_| !memory) {
+        // (a register's lanes keep their facts)
+        if let Some(source) = f.source {
+            f.clean[f.reg as usize] = f.clean[source as usize];
+        }
+    }
+    for v in halves {
+        t.w().free_local_v128(v);
+    }
+}
+
+/// VMOVUPS/UPD/DQU, VMOVAPS/APD/DQA and VMOVNTPS/PD/DQ ymm/m256, ymm
+/// (`aligned`: the A and NT forms)
+pub fn store256<T: VecOperands>(t: &mut T, aligned: bool) {
+    let memory = t.memory();
+    t.first();
+    let low = t.w().set_new_local_v128();
+    t.first_high();
+    let halves = [low, t.w().set_new_local_v128()];
+    t.store256_rm(&halves, aligned);
+    if let Some(f) = t.facts().filter(|_| !memory) {
+        if let Some(source) = f.source {
+            f.clean[source as usize] = f.clean[f.reg as usize];
+        }
+    }
+    for v in halves {
+        t.w().free_local_v128(v);
+    }
+}
+
+/// The packed integer operations of AVX2 (VEX.256): `op` on each half of
+/// the first source and the r/m operand
+pub fn packed256<T: VecOperands>(t: &mut T, op: Packed) {
+    // (both halves of both sources before the destination is written)
+    let source = source256(t, false);
+    t.first();
+    let low = t.w().set_new_local_v128();
+    t.first_high();
+    let first = [low, t.w().set_new_local_v128()];
+    packed(t.w(), op, &first[0], &source[0], 16);
+    let low = t.w().set_new_local_v128();
+    packed(t.w(), op, &first[1], &source[1], 16);
+    let result = [low, t.w().set_new_local_v128()];
+    t.store256(&result[0], &result[1]);
+    for v in source.into_iter().chain(first).chain(result) {
+        t.w().free_local_v128(v);
+    }
+}
+
+/// VPMOVMSKB (`lane` 1), VMOVMSKPS (4) and VMOVMSKPD (8) r32, ymm: the sign
+/// bits of both halves (register forms only)
+pub fn move_mask256<T: VecOperands>(t: &mut T, lane: u8) {
+    let bitmask = match lane {
+        1 => 0x64, // i8x16.bitmask
+        4 => 0xA4, // i32x4.bitmask
+        _ => 0xC4, // i64x2.bitmask
+    };
+    t.source(16, true);
+    t.w().simd(bitmask);
+    t.source_high();
+    t.w().simd(bitmask);
+    t.w().const_i32(16 / lane as i32);
+    t.w().shl_i32();
+    t.w().or_i32();
+    t.store_int(false);
+}
+
+/// VBROADCASTSS, VBROADCASTSD and VPBROADCASTB/W/D/Q: the element (`bytes`)
+/// in every lane, of both halves (`wide`, VEX.256) or of the low one
+pub fn broadcast<T: VecOperands>(t: &mut T, bytes: u8, wide: bool) {
+    t.source(bytes, false);
+    let element = t.w().set_new_local_v128();
+    t.w().get_local_v128(&element);
+    t.w().get_local_v128(&element);
+    t.w().simd_shuffle(std::array::from_fn(|k| k as u8 % bytes));
+    let value = t.w().set_new_local_v128();
+    if wide {
+        t.store256(&value, &value);
+    }
+    else {
+        t.store_vec(&value, 16);
+    }
+    t.w().free_local_v128(element);
+    t.w().free_local_v128(value);
 }

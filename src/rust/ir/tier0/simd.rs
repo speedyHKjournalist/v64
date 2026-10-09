@@ -1731,121 +1731,30 @@ impl Page {
             Simd::Blendv { reg, lane, mask } => {
                 ops::blend_variable(&mut Operands { page: self, i, reg }, lane, mask)
             },
-            Simd::Vzeroupper => {
-                for r in 0..8 {
-                    self.ymm_zero(r);
-                }
-            },
+            Simd::Vzeroupper => ops::zero_upper(&mut Operands {
+                page: self,
+                i,
+                reg: 0,
+            }),
             Simd::Load256 { reg } => {
-                // (both halves read before the destination is written)
-                let halves = match &i.ea {
-                    Some(ea) => {
-                        self.linear(ea);
-                        if self.vex.is_some_and(|v| v.aligned) {
-                            self.retry_misaligned(32);
-                        }
-                        self.load_vector256()
-                    },
-                    None => {
-                        self.load_xmm(rm);
-                        let low = self.w.set_new_local_v128();
-                        self.load_ymm_high(rm);
-                        [low, self.w.set_new_local_v128()]
-                    },
-                };
-                self.store_ymm(reg, &halves[0], &halves[1]);
-                if i.ea.is_none() {
-                    self.xmm_clean[reg as usize] = self.xmm_clean[rm as usize];
-                }
-                for v in halves {
-                    self.w.free_local_v128(v);
-                }
+                let aligned = self.vex.is_some_and(|v| v.aligned);
+                ops::load256(&mut Operands { page: self, i, reg }, aligned)
             },
             Simd::Store256 { reg } => {
-                self.load_xmm(reg);
-                let low = self.w.set_new_local_v128();
-                self.load_ymm_high(reg);
-                let halves = [low, self.w.set_new_local_v128()];
-                match &i.ea {
-                    Some(ea) => {
-                        self.linear(ea);
-                        if self.vex.is_some_and(|v| v.aligned) {
-                            self.retry_misaligned(32);
-                        }
-                        self.store_vector256(&halves);
-                    },
-                    None => {
-                        self.store_ymm(rm, &halves[0], &halves[1]);
-                        self.xmm_clean[rm as usize] = self.xmm_clean[reg as usize];
-                    },
-                }
-                for v in halves {
-                    self.w.free_local_v128(v);
-                }
+                let aligned = self.vex.is_some_and(|v| v.aligned);
+                ops::store256(&mut Operands { page: self, i, reg }, aligned)
             },
-            Simd::Vzeroall => {
-                self.w.simd_zero();
-                let zero = self.w.set_new_local_v128();
-                for r in 0..8 {
-                    self.store_xmm(r, &zero);
-                }
-                self.w.free_local_v128(zero);
-            },
-            Simd::Packed256 { op, reg } => {
-                // (both halves of both sources before the destination is
-                // written)
-                let source = match &i.ea {
-                    Some(ea) => {
-                        self.linear(ea);
-                        self.load_vector256()
-                    },
-                    None => {
-                        self.load_xmm(rm);
-                        let low = self.w.set_new_local_v128();
-                        self.load_ymm_high(rm);
-                        [low, self.w.set_new_local_v128()]
-                    },
-                };
-                let first = self.first(reg);
-                self.load_xmm(first);
-                let low = self.w.set_new_local_v128();
-                self.load_ymm_high(first);
-                let first = [low, self.w.set_new_local_v128()];
-                packed(&mut self.w, op, &first[0], &source[0], 16);
-                let low = self.w.set_new_local_v128();
-                packed(&mut self.w, op, &first[1], &source[1], 16);
-                let result = [low, self.w.set_new_local_v128()];
-                self.store_ymm(reg, &result[0], &result[1]);
-                for v in source.into_iter().chain(first).chain(result) {
-                    self.w.free_local_v128(v);
-                }
-            },
+            Simd::Vzeroall => ops::zero_all(&mut Operands {
+                page: self,
+                i,
+                reg: 0,
+            }),
+            Simd::Packed256 { op, reg } => ops::packed256(&mut Operands { page: self, i, reg }, op),
             Simd::MoveMask256 { reg, lane } => {
-                let bitmask = match lane {
-                    1 => 0x64, // i8x16.bitmask
-                    4 => 0xA4, // i32x4.bitmask
-                    _ => 0xC4, // i64x2.bitmask
-                };
-                self.load_xmm(rm);
-                self.w.simd(bitmask);
-                self.load_ymm_high(rm);
-                self.w.simd(bitmask);
-                self.w.const_i32(16 / lane as i32);
-                self.w.shl_i32();
-                self.w.or_i32();
-                self.write_reg(reg, 32);
+                ops::move_mask256(&mut Operands { page: self, i, reg }, lane)
             },
             Simd::Broadcast256 { reg, bytes } => {
-                self.simd_source(i, false, bytes);
-                let element = self.w.set_new_local_v128();
-                self.w.get_local_v128(&element);
-                self.w.get_local_v128(&element);
-                self.w
-                    .simd_shuffle(std::array::from_fn(|k| k as u8 % bytes));
-                let value = self.w.set_new_local_v128();
-                self.store_ymm(reg, &value, &value);
-                self.w.free_local_v128(element);
-                self.w.free_local_v128(value);
+                ops::broadcast(&mut Operands { page: self, i, reg }, bytes, true)
             },
         }
     }
@@ -1874,6 +1783,40 @@ impl VecOperands for Operands<'_, '_> {
         }
     }
     fn register(&mut self, r: u8) { self.page.load_xmm(r) }
+    fn registers(&self) -> u8 { 8 }
+    fn memory(&self) -> bool { self.i.ea.is_some() }
+    fn first_high(&mut self) {
+        let first = self.page.first(self.reg);
+        self.page.load_ymm_high(first);
+    }
+    fn source_high(&mut self) { self.page.load_ymm_high(self.i.modrm.unwrap_or(0) & 7) }
+    fn source256(&mut self, aligned: bool) -> [WasmLocalV128; 2] {
+        self.page.linear(self.i.ea.as_ref().unwrap());
+        if aligned {
+            self.page.retry_misaligned(32);
+        }
+        self.page.load_vector256()
+    }
+    fn store256(&mut self, low: &WasmLocalV128, high: &WasmLocalV128) {
+        self.page.store_ymm(self.reg, low, high);
+    }
+    fn store256_rm(&mut self, halves: &[WasmLocalV128; 2], aligned: bool) {
+        match &self.i.ea {
+            Some(ea) => {
+                self.page.linear(ea);
+                if aligned {
+                    self.page.retry_misaligned(32);
+                }
+                self.page.store_vector256(halves);
+            },
+            None => {
+                let rm = self.i.modrm.unwrap_or(0) & 7;
+                self.page.store_ymm(rm, &halves[0], &halves[1]);
+            },
+        }
+    }
+    fn zero_upper(&mut self, r: u8) { self.page.ymm_zero(r) }
+    fn store_register(&mut self, r: u8, value: &WasmLocalV128) { self.page.store_xmm(r, value) }
     fn source_int(&mut self, wide: bool) {
         dbg_assert!(!wide, "Tier-0: 32-bit integers only");
         match &self.i.ea {

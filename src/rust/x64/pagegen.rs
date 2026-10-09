@@ -5369,37 +5369,37 @@ impl Emitter {
             } => self.vround(inst, start, double, scalar, imm8, dst, first, src),
             Op::Vzeroupper => {
                 self.vector_check(inst, start);
-                for n in 0..16 {
-                    self.ymm_zero(n);
-                }
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst: 0,
+                    first: 0,
+                    src: Xmm::Reg(0),
+                };
+                crate::x86tpl::ops::zero_upper(&mut operands);
             },
             Op::Vmove256 { dst, src, aligned } => {
                 self.vector_check(inst, start);
-                match (dst, src) {
-                    (Xmm::Reg(d), Xmm::Reg(s)) => {
-                        for offset in [0, 8, 16, 24] {
-                            self.ymm_load(s, offset);
-                            self.ymm_store(d, offset);
-                        }
-                    },
-                    // (the access checked: no fault after the first write)
-                    (Xmm::Reg(d), Xmm::Mem(a)) => {
-                        self.vector_address_bytes(&a, 32, aligned, false, inst);
-                        for offset in [0, 8, 16, 24] {
-                            self.gi(HOST);
-                            self.load_bits(64, offset);
-                            self.ymm_store(d, offset);
-                        }
-                    },
-                    (Xmm::Mem(a), Xmm::Reg(s)) => {
-                        self.vector_address_bytes(&a, 32, aligned, true, inst);
-                        for offset in [0, 8, 16, 24] {
-                            self.gi(HOST);
-                            self.ymm_load(s, offset);
-                            self.b.guest_store_i64_bits(64, offset);
-                        }
-                    },
+                // (a register destination loads, a memory one stores)
+                let (dst, first, src, load) = match (dst, src) {
+                    (Xmm::Reg(d), src) => (d, d, src, true),
+                    (Xmm::Mem(a), Xmm::Reg(s)) => (s, s, Xmm::Mem(a), false),
                     (Xmm::Mem(_), Xmm::Mem(_)) => unreachable!(),
+                };
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst,
+                    first,
+                    src,
+                };
+                if load {
+                    crate::x86tpl::ops::load256(&mut operands, aligned);
+                }
+                else {
+                    crate::x86tpl::ops::store256(&mut operands, aligned);
                 }
             },
             Op::Vpacked256 {
@@ -5409,41 +5409,15 @@ impl Emitter {
                 src,
             } => {
                 self.vector_check(inst, start);
-                // (both halves of both sources before the destination is
-                // written)
-                let source = match src {
-                    Xmm::Reg(s) => [0, 16].map(|offset| {
-                        self.c32(Self::ymm(s, offset) as i32);
-                        self.b.simd_memory(0x00, 0);
-                        self.b.set_new_local_v128()
-                    }),
-                    Xmm::Mem(a) => {
-                        self.vector_address_bytes(&a, 32, false, false, inst);
-                        [0, 16].map(|offset| {
-                            self.gi(HOST);
-                            self.c32(offset);
-                            self.b.add_i32();
-                            let scratch = self.b.set_new_local();
-                            self.b.get_local(&scratch);
-                            self.b.guest_load_v128(&scratch);
-                            self.b.free_local(scratch);
-                            self.b.set_new_local_v128()
-                        })
-                    },
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst,
+                    first,
+                    src,
                 };
-                let first = [0, 16].map(|offset| {
-                    self.c32(Self::ymm(first, offset) as i32);
-                    self.b.simd_memory(0x00, 0);
-                    self.b.set_new_local_v128()
-                });
-                for (half, offset) in [0, 16].into_iter().enumerate() {
-                    self.c32(Self::ymm(dst, offset) as i32);
-                    vec::packed(&mut self.b, op, &first[half], &source[half], 16);
-                    self.b.simd_memory(0x0B, 0);
-                }
-                for v in source.into_iter().chain(first) {
-                    self.b.free_local_v128(v);
-                }
+                crate::x86tpl::ops::packed256(&mut operands, op);
             },
             Op::Vinsert128 {
                 dst,
@@ -5521,21 +5495,15 @@ impl Emitter {
             },
             Op::Vmovmsk256 { dst, src, lane } => {
                 self.vector_check(inst, start);
-                let bitmask = match lane {
-                    1 => 0x64, // i8x16.bitmask
-                    4 => 0xA4, // i32x4.bitmask
-                    _ => 0xC4, // i64x2.bitmask
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst: dst.index,
+                    first: dst.index,
+                    src: Xmm::Reg(src),
                 };
-                for offset in [0, 16] {
-                    self.c32(Self::ymm(src, offset) as i32);
-                    self.b.simd_memory(0x00, 0);
-                    self.b.simd(bitmask);
-                }
-                self.c32(16 / lane as i32);
-                self.b.shl_i32();
-                self.b.or_i32();
-                self.b.extend_unsigned_i32_to_i64();
-                self.set_reg(dst, 64);
+                crate::x86tpl::ops::move_mask256(&mut operands, lane);
             },
             Op::Vbroadcast {
                 bytes,
@@ -5544,50 +5512,30 @@ impl Emitter {
                 wide,
             } => {
                 self.vector_check(inst, start);
-                // (the element zero-extended to an i64)
-                match src {
-                    Xmm::Reg(s) => {
-                        self.c32(Self::xmm(s) as i32);
-                        self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
-                    },
-                    Xmm::Mem(a) => {
-                        self.vector_address_bytes(&a, bytes as u32, false, false, inst);
-                        self.gi(HOST);
-                        self.b.guest_load_i64_bits(8 * bytes as u32, 0);
-                    },
-                }
-                if bytes == 8 {
-                    self.b.simd(0x12); // i64x2.splat
-                }
-                else {
-                    self.b.wrap_i64_to_i32();
-                    self.b.simd(match bytes {
-                        1 => 0x0F, // i8x16.splat
-                        2 => 0x10, // i16x8.splat
-                        _ => 0x11, // i32x4.splat
-                    });
-                }
-                let value = self.b.set_new_local_v128();
-                for offset in if wide { &[0, 16][..] } else { &[0][..] } {
-                    self.c32(Self::ymm(dst, *offset) as i32);
-                    self.b.get_local_v128(&value);
-                    self.b.simd_memory(0x0B, 0);
-                }
-                self.b.free_local_v128(value);
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst,
+                    first: dst,
+                    src,
+                };
+                crate::x86tpl::ops::broadcast(&mut operands, bytes, wide);
                 if !wide {
                     self.vex_upper(inst, dst);
                 }
             },
             Op::Vzeroall => {
                 self.vector_check(inst, start);
-                for n in 0..16 {
-                    for half in 0..2 {
-                        self.c32((Self::xmm(n) + half * 8) as i32);
-                        self.c64(0);
-                        self.b.store_aligned_i64(0);
-                    }
-                    self.ymm_zero(n);
-                }
+                let mut operands = pagegen_vec::Operands {
+                    e: self,
+                    inst,
+                    start,
+                    dst: 0,
+                    first: 0,
+                    src: Xmm::Reg(0),
+                };
+                crate::x86tpl::ops::zero_all(&mut operands);
             },
             Op::Vmovmsk { dst, src, lane } => {
                 self.vector_check(inst, start);
@@ -5951,18 +5899,6 @@ impl Emitter {
         else {
             unsafe { gp::ymm_hi.add(n as usize) as u32 + offset - 16 }
         }
-    }
-    /// Push the 64 bits at `offset` of YMM register `n`
-    fn ymm_load(&mut self, n: u8, offset: u32) {
-        self.c32(Self::ymm(n, offset) as i32);
-        self.b.memory_op(op::OP_I64LOAD, op::MEM_ALIGN64, 0);
-    }
-    /// The 64 bits at `offset` of YMM register `n` = the i64 on the stack
-    fn ymm_store(&mut self, n: u8, offset: u32) {
-        self.s(TA);
-        self.c32(Self::ymm(n, offset) as i32);
-        self.g(TA);
-        self.b.store_aligned_i64(0);
     }
     /// Zero bits 255:128 of YMM register `n`
     fn ymm_zero(&mut self, n: u8) {
