@@ -57,6 +57,10 @@ pub enum Stepper {
 
 /// StepKeys and how often they were stepped; None while the profile is off
 static mut PROFILE: Option<HashMap<u32, u32>> = None;
+/// A sample of each Tier-0 key: the last stepped instruction's linear
+/// address and first 8 bytes (step_profile_sample: what the key's steps
+/// were, such as a template's refused access)
+static mut SAMPLES: Option<HashMap<u32, (u32, [u8; 8])>> = None;
 /// The profile sorted by count, most stepped first (step_profile_snapshot)
 static mut SNAPSHOT: Vec<(u32, u32)> = Vec::new();
 /// The x64 page tier's earlier keys summed from the profile
@@ -72,6 +76,7 @@ pub fn enabled() -> bool { unsafe { (*(&raw const PROFILE)).is_some() } }
 pub unsafe fn set_enabled(on: bool) {
     if on != enabled() {
         PROFILE = on.then(HashMap::new);
+        SAMPLES = None;
         X64_LEGACY_STALE = true;
     }
 }
@@ -81,6 +86,7 @@ pub unsafe fn step_profile_reset() {
     if let Some(profile) = (*(&raw mut PROFILE)).as_mut() {
         profile.clear();
     }
+    SAMPLES = None;
     X64_LEGACY_STALE = true;
 }
 
@@ -270,12 +276,37 @@ pub unsafe fn read_legacy(address: u32, physical: u32, bytes: &mut [u8; 15]) -> 
 pub unsafe fn note_tier0(address: u32, physical: u32) {
     let mut bytes = [0; 15];
     let n = read_legacy(address, physical, &mut bytes);
-    note(x86_key(
+    let key = x86_key(
         &bytes[..n],
         crate::x64::state::mode(),
         Stepper::Tier0,
         false,
-    ));
+    );
+    note(key);
+    let mut first = [0; 8];
+    first.copy_from_slice(&bytes[..8]);
+    (*(&raw mut SAMPLES))
+        .get_or_insert_with(HashMap::new)
+        .insert(key, (address, first));
+}
+/// The sample of the snapshot's entry `index` (Tier-0 keys): 0, the linear
+/// address; 1 and 2, the instruction's bytes 0-3 and 4-7 (little-endian);
+/// 0 without one
+#[no_mangle]
+pub unsafe fn step_profile_sample(index: u32, which: u32) -> u32 {
+    let Some(&(key, _)) = (&*(&raw const SNAPSHOT)).get(index as usize)
+    else {
+        return 0;
+    };
+    let Some(&(address, bytes)) = (*(&raw const SAMPLES)).as_ref().and_then(|s| s.get(&key))
+    else {
+        return 0;
+    };
+    match which {
+        0 => address,
+        1 => u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+        _ => u32::from_le_bytes(bytes[4..].try_into().unwrap()),
+    }
 }
 
 #[cfg(test)]

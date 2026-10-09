@@ -53,6 +53,11 @@ which also names keys (`"prot32 tier0 0F A2"`). The exports:
 `step_profile_snapshot()` sorts it and returns the number of keys,
 `step_profile_key(i)` and `step_profile_count(i)` read entry `i`,
 `step_profile_get(key)` one key, `step_profile_reset()` empties it.
+For Tier-0's keys it also keeps a sample, the last stepped instruction's
+linear address and first 8 bytes (`step_profile_sample(i, 0)`, and its
+bytes in words 1 and 2): what a key's steps were, such as a template's
+refused access or a page function entered in another state, which
+`step_profile()` adds to its rows as `sample`.
 
 - `tests/bench/run.mjs --fallbacks` turns it on for one more round of each
   benchmark, which is not timed, and prints the most stepped keys.

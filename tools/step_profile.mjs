@@ -70,7 +70,16 @@ export function step_profile(exports, limit = Infinity)
     for(let i = 0; i < Math.min(size, limit); i++)
     {
         const key = exports["step_profile_key"](i) >>> 0;
-        rows.push({ key, count: exports["step_profile_count"](i) >>> 0, name: step_key_name(key) });
+        const row = { key, count: exports["step_profile_count"](i) >>> 0, name: step_key_name(key) };
+        // (Tier-0 keys: the last stepped instruction, its address and bytes)
+        const address = exports["step_profile_sample"]?.(i, 0) >>> 0;
+        if(address)
+        {
+            const word = n => exports["step_profile_sample"](i, n) >>> 0;
+            const bytes = [word(1), word(2)].flatMap(w => [0, 8, 16, 24].map(s => (w >>> s & 255).toString(16).padStart(2, "0")));
+            row.sample = { address: address.toString(16), bytes: bytes.join(" ") };
+        }
+        rows.push(row);
     }
     return rows;
 }
