@@ -355,6 +355,36 @@ pub const SWITCHES: &[Switch] = &[
         },
         get: |_| Some(tier0::feature_value(tier0::T0_SREG_LOAD)),
     },
+    Switch {
+        name: "t0_vec_store_slow",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_VEC_STORE_SLOW, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_VEC_STORE_SLOW)),
+    },
+    Switch {
+        name: "t0_cli",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_CLI, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_CLI)),
+    },
+    Switch {
+        name: "t0_pop_esp",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_POP_ESP, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_POP_ESP)),
+    },
     // measurement: the executions of what Tier-0 compiles from now on, by
     // template kind (ir::runtime::tier0::kind_profile)
     Switch {

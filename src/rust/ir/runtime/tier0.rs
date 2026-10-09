@@ -389,6 +389,32 @@ pub unsafe fn ir_t0_write_slow(address: u32, value: u32, bytes: u32) -> u32 {
     0
 }
 
+/// A Tier-0 vector store of `bytes` (4, 8 or 16; the value in `lo` and
+/// `hi`) outside the fast path (P3.7(c), T0_VEC_STORE_SLOW): as
+/// ir_t0_write_slow, 1 if the interpreter must run the instruction (nothing
+/// written), else 0
+#[no_mangle]
+pub unsafe fn ir_t0_write_slow_wide(address: u32, lo: u64, hi: u64, bytes: u32) -> u32 {
+    let Some(physical) = probe_ram(address, bytes, true)
+    else {
+        return 1;
+    };
+    if physical
+        .iter()
+        .any(|&p| crate::jit::jit_page_has_code(crate::page::Page::page_of(p)))
+    {
+        return 1;
+    }
+    let a = address as i32;
+    let written = held(|| match bytes {
+        4 => cpu::safe_write32(a, lo as i32),
+        8 => cpu::safe_write64(a, lo),
+        _ => cpu::safe_write128(a, cpu::reg128 { u64: [lo, hi] }),
+    });
+    dbg_assert!(written.is_ok(), "tier-0 probe accepted a faulting write");
+    0
+}
+
 /// How a page function leaving its page continues in the next page's
 /// function: by returning to the loop in t0_execute (Iterative), by a
 /// nested call (Nested, ir_t0_chain), or by a Wasm tail call from the page
@@ -468,6 +494,14 @@ pub const T0_POP_RM: u32 = 1 << 4;
 pub const T0_PUSHA: u32 = 1 << 5;
 /// t0_sreg_load (P3.7(b)): MOV ES/DS/FS/GS, r/m16 through ir_t0_load_seg
 pub const T0_SREG_LOAD: u32 = 1 << 6;
+/// t0_vec_store_slow (P3.7(c)): vector stores off the fast path (device
+/// memory such as the frame buffer, a page crossing) through
+/// ir_t0_write_slow_wide instead of the interpreter
+pub const T0_VEC_STORE_SLOW: u32 = 1 << 7;
+/// t0_cli (P3.7(c)): CLI as a template
+pub const T0_CLI: u32 = 1 << 8;
+/// t0_pop_esp (P3.7(c)): POP m32 whose address uses ESP
+pub const T0_POP_ESP: u32 = 1 << 9;
 /// The value of the switch whose feature bit is `bit`
 pub fn feature_value(bit: u32) -> u32 { (features() & bit != 0) as u32 }
 pub unsafe fn set_feature(bit: u32, on: bool) {

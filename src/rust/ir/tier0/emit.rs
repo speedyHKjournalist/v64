@@ -19,9 +19,9 @@
 //! `ir_t0_step` as well (it would fault, or it stores to a page with IR code).
 use super::analysis::{self, Instruction, PagePlan, Unit};
 use crate::cpu::cpu::{
-    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB,
-    FLAG_VM, FLAG_ZERO, TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY,
-    TLB_VALID,
+    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_DIRECTION, FLAG_INTERRUPT, FLAG_OVERFLOW, FLAG_SIGN,
+    FLAG_SUB, FLAG_VM, FLAG_ZERO, TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER,
+    TLB_READONLY, TLB_VALID,
 };
 use crate::cpu::global_pointers as gp;
 use crate::ir::frontend::decode::{DecodedInstruction, EffectiveAddress, Flow};
@@ -38,7 +38,8 @@ const X87_RUNS: bool = true;
 use super::CompileEnv;
 use crate::ir::runtime::entry::{CpuEntryKey, ExitKind};
 use crate::ir::runtime::tier0::{
-    Link, T0_CLD_STD, T0_JECXZ, T0_POP_RM, T0_PUSHA, T0_SREG_LOAD, T0_SREG_READ, T0_XCHG_MEM,
+    Link, T0_CLD_STD, T0_CLI, T0_JECXZ, T0_POP_ESP, T0_POP_RM, T0_PUSHA, T0_SREG_LOAD,
+    T0_SREG_READ, T0_XCHG_MEM,
 };
 use crate::state_flags::CachedStateFlags;
 use crate::wasmgen::wasm_builder::{
@@ -142,6 +143,7 @@ pub const FORM_NAMES: &[&str] = &[
     "Pusha",
     "Popa",
     "MovToSreg",
+    "Cli",
 ];
 /// The template-kind profile's keys (runtime::tier0::kind_profile, the
 /// switch t0_kind_profile; docs/jit-unification-plan.md P3.0a): a Form kind
@@ -374,8 +376,13 @@ enum Form {
     Direction {
         set: bool,
     },
-    /// POP m32 whose address does not use ESP (P3.7, T0_POP_RM)
-    PopRm,
+    /// POP m32 (P3.7, T0_POP_RM), an address that uses ESP (`esp`: the base)
+    /// with T0_POP_ESP (P3.7(c))
+    PopRm {
+        esp: bool,
+    },
+    /// CLI (P3.7(c), T0_CLI)
+    Cli,
     /// PUSHAD and POPAD whose 32 bytes are in one page (P3.7, T0_PUSHA)
     Pusha,
     Popa,
@@ -448,10 +455,11 @@ impl Form {
             Form::PushSreg { .. } => 45,
             Form::XchgMem { .. } => 46,
             Form::Direction { .. } => 47,
-            Form::PopRm => 48,
+            Form::PopRm { .. } => 48,
             Form::Pusha => 49,
             Form::Popa => 50,
             Form::MovToSreg { .. } => 51,
+            Form::Cli => 52,
         }
     }
     /// Whether the template can retry() (else no retry tail is emitted).
@@ -535,7 +543,8 @@ impl Form {
             Form::X87Flags { .. }
             | Form::Simd(simd::Simd::CompareFlags { .. } | simd::Simd::Strings { .. }, _)
             | Form::Lahf
-            | Form::Direction { .. } => true,
+            | Form::Direction { .. }
+            | Form::Cli => true,
             _ => false,
         }
     }
@@ -558,7 +567,7 @@ impl Form {
                 Form::Push { .. }
                     | Form::Pop { .. }
                     | Form::PushSreg { .. }
-                    | Form::PopRm
+                    | Form::PopRm { .. }
                     | Form::Pusha
                     | Form::Popa
                     | Form::Leave
@@ -974,12 +983,15 @@ fn classify(i: &DecodedInstruction, features: u32) -> Option<Form> {
         0x8F if features & T0_POP_RM != 0
             && reg == 0
             && v == 32
-            && i.ea
-                .as_ref()
-                .is_some_and(|ea| ea.base != Some(4) && ea.index != Some(4)) =>
+            && i.ea.as_ref().is_some_and(|ea| {
+                ea.index != Some(4) && (ea.base != Some(4) || features & T0_POP_ESP != 0)
+            }) =>
         {
-            Form::PopRm
+            Form::PopRm {
+                esp: i.ea.as_ref().is_some_and(|ea| ea.base == Some(4)),
+            }
         },
+        0xFA if features & T0_CLI != 0 => Form::Cli,
         0x8E if features & T0_SREG_LOAD != 0 && matches!(reg, 0 | 3 | 4 | 5) => {
             Form::MovToSreg { seg: reg }
         },
@@ -3481,13 +3493,22 @@ impl Page {
                 }
                 self.w.store_aligned_i32(0);
             },
-            Form::PopRm => {
-                // As instr32_8F_0_mem: the value at ESP, stored to an address
-                // that does not use ESP, then ESP + 4
+            Form::PopRm { esp } => {
+                // As instr32_8F_0_mem: the value at ESP, stored to the
+                // address computed with ESP + 4, then ESP + 4
                 self.stack_address(0);
                 self.read_mem(32, false);
                 self.w.set_local(&fb);
-                self.prepare_rm(i);
+                match &i.ea {
+                    Some(ea) if esp => {
+                        let after = EffectiveAddress {
+                            displacement: ea.displacement.wrapping_add(4),
+                            ..ea.clone()
+                        };
+                        self.linear(&after);
+                    },
+                    _ => self.prepare_rm(i),
+                }
                 self.write_mem(32, &fb);
                 self.w.get_local(&self.gpr[4]);
                 self.w.const_i32(4);
@@ -3522,6 +3543,30 @@ impl Page {
                 self.w.const_i32(32);
                 self.w.sub_i32();
                 self.set_gpr(4);
+            },
+            Form::Cli => {
+                // As instr_FA_without_fault outside virtual-8086 mode: IF
+                // cleared in real mode or when IOPL >= CPL, else #GP (the
+                // interpreter)
+                self.w.load_fixed_i32(gp::flags as u32);
+                self.w.const_i32(FLAG_VM);
+                self.w.and_i32();
+                self.retry_if();
+                self.w.load_fixed_u8(gp::protected_mode as u32);
+                self.w.load_fixed_i32(gp::flags as u32);
+                self.w.const_i32(12);
+                self.w.shr_u_i32();
+                self.w.const_i32(3);
+                self.w.and_i32();
+                self.w.load_fixed_u8(gp::cpl as u32);
+                self.w.ltu_i32();
+                self.w.and_i32();
+                self.retry_if();
+                self.w.const_i32(gp::flags as i32);
+                self.w.load_fixed_i32(gp::flags as u32);
+                self.w.const_i32(!FLAG_INTERRUPT);
+                self.w.and_i32();
+                self.w.store_aligned_i32(0);
             },
             Form::MovToSreg { seg } => {
                 self.read_rm(i, 16, false);

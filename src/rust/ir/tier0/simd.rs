@@ -1150,7 +1150,30 @@ impl Page {
     /// else retry: the interpreter handles MMIO and code writes).
     fn store_vector(&mut self, bytes: u8, value: &WasmLocalV128) {
         self.tlb_miss(bytes as u32, true);
+        if self.env.features & crate::ir::runtime::tier0::T0_VEC_STORE_SLOW != 0 {
+            // (P3.7(c): off the fast path, ir_t0_write_slow_wide stores it
+            // or the instruction is retried)
+            self.w.hint(false);
+            self.w.if_void();
+            self.w.get_local(&self.addr);
+            self.w.get_local_v128(value);
+            self.w.simd_lane(0x1D, 0); // i64x2.extract_lane
+            self.w.get_local_v128(value);
+            self.w.simd_lane(0x1D, 1);
+            self.w.const_i32(bytes as i32);
+            self.w
+                .call_signature("ir_t0_write_slow_wide", signature("ir_t0_write_slow_wide"));
+            self.retry_if();
+            self.w.else_();
+            self.store_vector_fast(bytes, value);
+            self.w.block_end();
+            return;
+        }
         self.retry_if();
+        self.store_vector_fast(bytes, value);
+    }
+    /// The store of store_vector on the fast path (the TLB entry in host)
+    fn store_vector_fast(&mut self, bytes: u8, value: &WasmLocalV128) {
         self.host_address();
         if WasmBuilder::ATOMIC_GUEST_MEMORY && bytes == 16 {
             let address = self.w.set_new_local();

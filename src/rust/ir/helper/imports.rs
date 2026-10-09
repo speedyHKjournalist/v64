@@ -85,6 +85,7 @@ imports! {
     "ir_t0_x87": [I32,I32,I32] -> [I64], X87, "tier-0 ir_x87_op: compile-time form and transfer kind, no f64 mirroring";
     "ir_t0_sse_fp": [I32,I32] -> [I32], Check, "tier-0: exact SSE floating point on its operand block; MXCSR flags; 1 = would fault, nothing changed";
     "ir_t0_fma": [I32] -> [I32], Check, "tier-0 and the x64 page tier: exact FMA (VEX.128 and scalar) on ir_t0_sse_fp's operand block; MXCSR flags; 1 = would fault, nothing changed";
+    "ir_t0_write_slow_wide": [I32,I64,I64,I32] -> [I32], Check, "tier-0: a vector store of 4, 8 or 16 bytes off the fast path (P3.7(c)): probes, then writes with interpreter effects; 1 = would fault or refused (nothing written)";
     "ir_t0_load_seg": [I32,I32] -> [I32], Check, "tier-0: MOV ES/DS/FS/GS (P3.7(b)): the segment load when it raises nothing and keeps the state flags; 1 = refused, nothing changed";
     "ir_t0_pcmpstr": [I32,I32,I32,I32] -> [I32], Pure, "tier-0: PCMPxSTRx on ir_t0_sse_fp's operand block, EAX and EDX in; index | EFLAGS << 8 out, xSTRM's mask in the block; no CPU state";
     "ir_x87_op": [I32,I32,I32,I32] -> [I64], X87, "x87 stack/status/control and f64 shadow cache only; operand words in, stored words out; no fault, exit, GPR/FLAGS or memory access";
