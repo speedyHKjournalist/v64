@@ -239,6 +239,9 @@ export const STATICS = {
         // the operands of one ir_t0_sse_fp call
         T0_SSE_FP: "scratch", SSE_FP_CALLS: "debug", FMA_CALLS: "debug",
     },
+    // the compile records and the replay buffers of the byte-identity check
+    // (ir-test-hooks; docs/jit-unification-plan.md P2.0)
+    "ir/tier0/replay.rs": { RECORDS: "debug", INPUT: "debug", OUTPUT: "debug" },
     "jit.rs": { JIT_STATE: "machine", WATCHED: "machine", TABLE_FREE_LOW: "debug" },
     // the JIT switches set on this instance, the machine's ones a vCPU worker applied, the names
     "jit_switches.rs": { EXPLICIT: "machine", COPIED: "machine", NAMES: "machine" },
@@ -287,6 +290,7 @@ export const STATICS = {
     "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache" },
     "x64/execute.rs": { DECODE_CACHE: "cache" },
     "x64/pagegen.rs": { SIZE_STATS: "debug", OUTLINE_ACCESS: "machine", BLOCK_COUNT: "machine", BUCKET_DISPATCH: "machine" },
+    "x64/replay.rs": { RECORDS: "debug", INPUT: "debug", OUTPUT: "debug" },
     "x64/debug.rs": { PENDING: "scratch" },
     "x64/system.rs": { FAULT_LOG: "debug", FAULT_NEXT: "debug", USER_TRACE: "debug", USER_TRACE_NEXT: "debug", USER_TRACE_ENABLED: "debug" },
     "x64/profile.rs": { PERIOD: "debug", COUNTDOWN: "debug", SAMPLES: "debug" },

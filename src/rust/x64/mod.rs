@@ -11,6 +11,8 @@ pub mod pages;
 pub mod paging;
 pub mod physical;
 pub mod profile;
+#[cfg(feature = "ir-test-hooks")]
+pub mod replay;
 pub mod state;
 pub mod system;
 pub mod vector;

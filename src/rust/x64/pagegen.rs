@@ -1232,6 +1232,17 @@ fn classify(d: &Decoded) -> Op {
 }
 
 /// SSE data movement and bitwise templates (x64::vector semantics).
+/// Whether the SSE templates (sse) take the instruction at the start of
+/// `bytes`, and its length: the forms x64::replay's corpus covers
+#[cfg(feature = "ir-test-hooks")]
+pub(crate) fn sse_template(bytes: &[u8]) -> Option<usize> {
+    let d = decode::decode_with(GuestIp(0x40_0000), ExecutionMode::Long64, |i| {
+        bytes.get(i as usize).copied().ok_or(())
+    })
+    .ok()?;
+    sse(&d).map(|_| d.length as usize)
+}
+
 fn sse(d: &Decoded) -> Option<Op> {
     let xmm_rm = || -> Option<Xmm> {
         match d.rm_register {
@@ -2237,6 +2248,72 @@ impl Decoder<'_> {
     }
 }
 
+/// Everything besides the page's bytes, entries and name that a page
+/// function's bytes depend on (docs/jit-unification-plan.md P2.0):
+/// compile_with reads nothing else, so a recorded compilation replays to the
+/// same bytes in another build (x64::replay), which pins the addresses below
+/// to fixed pseudo values (cross-phase rule 4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CompileEnv {
+    /// x64_page_set_bucket_dispatch, x64_page_set_block_count,
+    /// x64_page_set_outline
+    pub bucket_dispatch: bool,
+    pub block_count: bool,
+    pub outline: bool,
+    /// Leaving the page, tail-call the function serving the new page when
+    /// the chaining table (pages::CHAIN) has it
+    pub chaining: bool,
+    /// FMA through the host's relaxed multiply-adds (tier0::relaxed_fma)
+    pub relaxed_fma: bool,
+    /// Cores in workers: the kick a page function polls (cpu::core_yield),
+    /// the code publication counters (parallel::code::pending_addresses)
+    /// and the bounce buffer of unaligned accesses (pages::bounce_address)
+    pub core_yield: u32,
+    pub pending: [u32; 4],
+    pub bounce: u32,
+}
+impl CompileEnv {
+    /// The running instance's, chaining or not
+    pub fn current(chaining: bool) -> CompileEnv {
+        unsafe {
+            CompileEnv {
+                bucket_dispatch: BUCKET_DISPATCH,
+                block_count: BLOCK_COUNT,
+                outline: OUTLINE_ACCESS,
+                chaining,
+                relaxed_fma: crate::ir::runtime::tier0::relaxed_fma(),
+                core_yield: &raw const crate::cpu::cpu::core_yield as u32,
+                pending: if cfg!(feature = "parallel") {
+                    crate::parallel::code::pending_addresses()
+                }
+                else {
+                    [0; 4]
+                },
+                bounce: super::pages::bounce_address(),
+            }
+        }
+    }
+    /// Replay's: the recorded switches, fixed pseudo addresses
+    pub fn replay(
+        bucket_dispatch: bool,
+        block_count: bool,
+        outline: bool,
+        chaining: bool,
+        relaxed_fma: bool,
+    ) -> CompileEnv {
+        CompileEnv {
+            bucket_dispatch,
+            block_count,
+            outline,
+            chaining,
+            relaxed_fma,
+            core_yield: 0x0000_0D00,
+            pending: [0x0000_0D10, 0x0000_0D14, 0x0000_0D18, 0x0000_0D1C],
+            bounce: 0x0000_0C00,
+        }
+    }
+}
+
 /// Compile a page of long-mode code (the bytes of its RAM backing page) for
 /// the block starts `entries`. The function is position independent: it runs
 /// wherever the page is mapped (gp::x64_page_linear), so every mapping of the
@@ -2250,6 +2327,20 @@ pub fn compile(
     next: &[u8],
     entries: &[u16],
     chaining: bool,
+    name: String,
+) -> Option<Compiled> {
+    let env = CompileEnv::current(chaining);
+    #[cfg(feature = "ir-test-hooks")]
+    super::replay::record(&env, bytes, next, entries, &name);
+    compile_with(&env, bytes, next, entries, name)
+}
+
+/// compile in `env`
+pub fn compile_with(
+    env: &CompileEnv,
+    bytes: &[u8],
+    next: &[u8],
+    entries: &[u16],
     name: String,
 ) -> Option<Compiled> {
     let page = 0;
@@ -2494,7 +2585,7 @@ pub fn compile(
         .flat_map(|b| &b.insts)
         .filter(|i| !matches!(i.op, Op::Step))
         .count();
-    let bytes = Emitter::emit(&blocks, &index, chaining, name);
+    let bytes = Emitter::emit(&blocks, &index, env, name);
     Some(Compiled {
         bytes,
         served,
@@ -2585,6 +2676,8 @@ struct Emitter {
     access: Option<u32>,
     /// the compare-exchange loop of a locked instruction (read_dst)
     lock_loop: Option<Label>,
+    /// what else the bytes depend on
+    env: CompileEnv,
 }
 /// Dispatch through a table of 16-byte buckets and compares instead of a
 /// page-sized table (x64_page_set_bucket_dispatch).
@@ -2620,7 +2713,7 @@ impl Emitter {
     fn emit(
         blocks: &[Block],
         index: &BTreeMap<u16, usize>,
-        chaining: bool,
+        env: &CompileEnv,
         name: String,
     ) -> Vec<u8> {
         let mut b = WasmBuilder::new();
@@ -2641,6 +2734,7 @@ impl Emitter {
             current: 0,
             access: None,
             lock_loop: None,
+            env: *env,
         };
         let mark = e.b.body_len();
         e.prologue();
@@ -2666,7 +2760,7 @@ impl Emitter {
         if cfg!(feature = "parallel") {
             // (cores in workers: another core kicked this one, e.g. with an
             // IPI; see parallel::kick)
-            e.c32(&raw const crate::cpu::cpu::core_yield as i32);
+            e.c32(e.env.core_yield as i32);
             e.b.guest_load_u8(0);
             e.b.or_i32();
         }
@@ -2690,7 +2784,7 @@ impl Emitter {
             e.c32(4095);
             e.b.and_i32();
         };
-        if unsafe { BUCKET_DISPATCH } {
+        if e.env.bucket_dispatch {
             // Two levels: a table over 16-byte buckets of the page, then the
             // block starts in the bucket (a page-sized table is most of a
             // small function and slow to compile)
@@ -2757,7 +2851,7 @@ impl Emitter {
         e.set_exit(EXIT_RETRY);
         e.b.br(exit);
         e.b.block_end(); // leave
-        if chaining {
+        if e.env.chaining {
             e.chain();
         }
         e.b.block_end(); // exit
@@ -2889,7 +2983,7 @@ impl Emitter {
     /// Count one native instruction, unless blocks count theirs at entry
     /// (BLOCK_COUNT).
     fn retired(&mut self) {
-        if unsafe { BLOCK_COUNT } {
+        if self.env.block_count {
             return;
         }
         self.gi(N);
@@ -2933,8 +3027,7 @@ impl Emitter {
         if cfg!(feature = "parallel") {
             // (cores in workers: not while code publications or invalidations
             // of other cores wait for this one, see parallel::code::poll)
-            let [publish, publish_seen, invalidate, invalidate_seen] =
-                unsafe { crate::parallel::code::pending_addresses() };
+            let [publish, publish_seen, invalidate, invalidate_seen] = self.env.pending;
             for (next, seen) in [(publish, publish_seen), (invalidate, invalidate_seen)] {
                 self.c32(next as i32);
                 self.b.guest_load_i32(0);
@@ -2944,7 +3037,7 @@ impl Emitter {
                 self.b.and_i32();
             }
             // nor when another core kicked this one
-            self.c32(&raw const crate::cpu::cpu::core_yield as i32);
+            self.c32(self.env.core_yield as i32);
             self.b.guest_load_u8(0);
             self.b.eqz_i32();
             self.b.and_i32();
@@ -3020,7 +3113,7 @@ impl Emitter {
     /// Continue at the address in RIP (checked by dispatch).
     fn dispatch(&mut self) { self.b.br(self.f().dispatch); }
     fn block(&mut self, block: &Block, index: &BTreeMap<u16, usize>) {
-        if unsafe { BLOCK_COUNT } {
+        if self.env.block_count {
             // (a block left early, by a retry or a step, counts the rest of
             // its instructions too: N bounds activations and feeds statistics)
             let native = block
@@ -3265,7 +3358,7 @@ impl Emitter {
             write_leb_u32(&mut c, slow);
             c.push(op::OP_END);
             c.push(op::OP_ELSE);
-            let bounce = unsafe { super::pages::bounce_address() } as i32;
+            let bounce = self.env.bounce as i32;
             // (sizes 2, 4, 8, 16, 32: the first 8 bytes or fewer, then the
             // rest; 32: a VEX.256 load's)
             let copy = |c: &mut Vec<u8>, load: u8, store: u8, align: u8, offset: u32| {
@@ -3330,7 +3423,7 @@ impl Emitter {
     /// ADDR (else a retry). With cores in workers it may be unaligned:
     /// store() and load_any() handle that.
     fn host_store(&mut self, size: u32, start: u64) {
-        if WasmBuilder::ATOMIC_GUEST_MEMORY && unsafe { OUTLINE_ACCESS } && size > 1 {
+        if WasmBuilder::ATOMIC_GUEST_MEMORY && self.env.outline && size > 1 {
             self.host_kind(size, 0x300, start, self.f().retry)
         }
         else {
@@ -3344,7 +3437,7 @@ impl Emitter {
     /// hosts accepted: 0x200; outlined lookups only)
     fn host_kind(&mut self, size: u32, bits: u32, start: u64, fallback: Label) {
         let write = bits & 0x100 != 0;
-        if unsafe { OUTLINE_ACCESS } {
+        if self.env.outline {
             let f = self.access_function();
             self.g(ADDR);
             self.c32((size | bits) as i32);
@@ -4756,7 +4849,7 @@ impl Emitter {
                 // natively where the host's relaxed multiply-adds fuse
                 // (native_fp::fused; a scalar form's other lanes the
                 // destination's), else (a lane or MXCSR refused) exactly
-                let native = crate::ir::runtime::tier0::relaxed_fma();
+                let native = self.env.relaxed_fma;
                 if native {
                     let [d, f] = [dst, first].map(|r| {
                         self.c32(Self::xmm(r) as i32);

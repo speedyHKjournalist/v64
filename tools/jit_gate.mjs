@@ -7,7 +7,9 @@
 //   plain and the parallel build, rustfmt, eslint (when installed: ESLINT,
 //   node_modules/.bin/eslint or npx's cache), the region freeze (P7.6) and, when something
 //   that feeds build/v86.wasm changed, core-split-check (ARM64 plan P0.7);
-//   then ir-tier0-tests when IR or shared JIT code changed and
+//   when IR, x64 or shared JIT code changed, replay-check (P2.0: the
+//   generated code byte for byte, tools/replay_check.mjs); then
+//   ir-tier0-tests when IR or shared JIT code changed and
 //   x64-page-tier-tests when x64 or shared JIT code changed. The changes are
 //   the uncommitted ones, or without any the last commit's, or those since
 //   --base REV.
@@ -80,6 +82,9 @@ function find_eslint()
 const eslint = find_eslint();
 const eslint_command = eslint && [...(eslint.endsWith(".js") ? ["node", eslint] : [eslint]), "src", "tests", "gen", "lib", "examples", "tools"];
 const warning_free = { RUSTFLAGS: "-D warnings" };
+// recordings of real compilations (tools/replay_record.mjs), when made
+const replay_dir = path.join(ROOT, "build/replay");
+const replay_records = fs.existsSync(replay_dir) ? fs.readdirSync(replay_dir).filter(f => /\.(t0r|x6r)$/.test(f)).flatMap(f => ["--records", path.join("build/replay", f)]) : [];
 const cargo_check = ["check", "--release", "--target", "wasm32-unknown-unknown"];
 
 const steps = [
@@ -92,6 +97,10 @@ const steps = [
     { name: "region freeze (P7.6)", command: ["node", "tools/check_region_freeze.mjs", ...(base ? ["--base", base] : [])] },
     { name: "core-split-check (ARM64 plan P0.7)", command: ["node", "tools/core_split_check.mjs", ...(base ? ["--base", base] : [])],
         skip: feeds_core || full ? null : "nothing that feeds build/v86.wasm changed" },
+    // (P2.0: the base's and the working tree's generated code, byte for
+    // byte, for the synthetic corpus and the recordings in build/replay)
+    { name: "replay-check (P2.0)", command: ["node", "tools/replay_check.mjs", ...(base ? ["--base", base] : []), ...replay_records],
+        skip: ir_tests || x64_tests ? null : "no IR, x64 or shared JIT change" },
     { name: "ir-tier0-tests", command: ["make", "ir-tier0-tests"], skip: ir_tests ? null : "no IR or shared JIT change" },
     { name: "x64-page-tier-tests", command: ["make", "x64-page-tier-tests"], skip: x64_tests ? null : "no x64 or shared JIT change" },
     { name: "jit-switch-tests", command: ["make", "jit-switch-tests"],

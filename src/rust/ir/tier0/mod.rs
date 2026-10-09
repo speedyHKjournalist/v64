@@ -4,6 +4,8 @@
 //! returning to the CPU loop.
 pub mod analysis;
 pub mod emit;
+#[cfg(feature = "ir-test-hooks")]
+pub mod replay;
 
 use crate::ir::{
     backend::wasm::Artifact,
@@ -12,8 +14,62 @@ use crate::ir::{
     runtime::{
         compile::{CompileRequest, CompiledArtifact, ImmutableCodeSnapshot, Tier},
         entry::{CpuEntryKey, EntryContract},
+        tier0::Link,
     },
 };
+use crate::state_flags::CachedStateFlags;
+
+/// Everything besides the request, the code snapshot and the entries that a
+/// page function's bytes depend on (docs/jit-unification-plan.md P2.0):
+/// compile_page_with reads nothing else, so a recorded compilation replays
+/// to the same bytes in another build (tier0::replay), which pins the
+/// addresses below to fixed pseudo values (cross-phase rule 4). The build's
+/// own constants (the CPU state block's fixed addresses, the parallel
+/// build's shared memory) are the same in every build of one feature set.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CompileEnv {
+    /// The CPU's state flags when compiling: flat 32-bit code of the page's
+    /// mode is specialized for (the function checks it on entry)
+    pub state_flags: CachedStateFlags,
+    /// Host address of guest physical 0 (cpu::memory::mem8): the covered
+    /// pages' host addresses, which entering a page checks
+    pub mem8: u32,
+    /// Where generated code stores the exit kind (entry::exit_kind_address;
+    /// None: it calls ir_request_link and ir_request_poll_exit)
+    pub exit_kind: Option<u32>,
+    /// The operand block of ir_t0_sse_fp and ir_t0_fma
+    pub sse_fp_operands: u32,
+    /// How a page function continues in the next page's (tier0::t0_link)
+    pub link: Link,
+    /// FMA through the host's relaxed multiply-adds (tier0::relaxed_fma)
+    pub relaxed_fma: bool,
+}
+impl CompileEnv {
+    /// The running instance's
+    pub fn current() -> CompileEnv {
+        use crate::ir::runtime::{entry, tier0};
+        CompileEnv {
+            state_flags: unsafe { *crate::cpu::global_pointers::state_flags },
+            mem8: unsafe { crate::cpu::memory::mem8 as u32 },
+            exit_kind: entry::exit_kind_address(),
+            sse_fp_operands: tier0::sse_fp_operands(),
+            link: tier0::t0_link(),
+            relaxed_fma: tier0::relaxed_fma(),
+        }
+    }
+    /// Replay's: the recorded state flags, link mode and relaxed FMA, and
+    /// fixed pseudo addresses
+    pub fn replay(state_flags: CachedStateFlags, link: Link, relaxed_fma: bool) -> CompileEnv {
+        CompileEnv {
+            state_flags,
+            mem8: 0x0100_0000,
+            exit_kind: Some(0x0000_0F00),
+            sse_fp_operands: 0x0000_0E00,
+            link,
+            relaxed_fma,
+        }
+    }
+}
 
 /// The pages a page function for `entries` covers: the primary page plus
 /// the previous and/or next page when its code jumps or falls into them
@@ -112,6 +168,20 @@ pub fn compile_page(
     // of pages this one calls often (a cluster function).
     extra: &[u32],
 ) -> Result<CompiledArtifact, CompileError> {
+    let env = CompileEnv::current();
+    #[cfg(feature = "ir-test-hooks")]
+    replay::record(&env, origin, snapshot, entries, extra);
+    compile_page_with(&env, origin, snapshot, entries, extra)
+}
+
+/// compile_page in `env`
+pub fn compile_page_with(
+    env: &CompileEnv,
+    origin: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryKey],
+    extra: &[u32],
+) -> Result<CompiledArtifact, CompileError> {
     let pages = snapshot.mappings.len();
     let Some(first) = snapshot.mappings.first().map(|m| m.linear)
     else {
@@ -197,16 +267,15 @@ pub fn compile_page(
         .collect();
     // Specialize for the current state when it is flat 32-bit code of this
     // page's mode; the page function checks it on entry.
-    let state = unsafe { *crate::cpu::global_pointers::state_flags };
+    let state = env.state_flags;
     let flat =
         state.has_flat_segmentation() && state.ssize_32() && state.is_32() == origin.default_32;
-    let mem8 = unsafe { crate::cpu::memory::mem8 as u32 };
     let hosts: Vec<u32> = snapshot
         .mappings
         .iter()
-        .map(|m| mem8.wrapping_add(m.physical.0))
+        .map(|m| env.mem8.wrapping_add(m.physical.0))
         .collect();
-    let code = emit::emit_page(&plan, &served, flat, &hosts);
+    let code = emit::emit_page(&plan, &served, flat, &hosts, env);
     super::runtime::tier0::note_compiled(
         code.instructions,
         code.templated,

@@ -1524,7 +1524,7 @@ impl Page {
         source: &WasmLocalV128,
         imm8: u32,
     ) {
-        let operands = crate::ir::runtime::tier0::sse_fp_operands();
+        let operands = self.env.sse_fp_operands;
         for (k, value) in [destination, source].into_iter().enumerate() {
             self.w.const_i32((operands + 16 * k as u32) as i32);
             self.w.get_local_v128(value);
@@ -1542,8 +1542,7 @@ impl Page {
     }
     /// Push the result of exact_if's path
     fn exact_result(&mut self) {
-        self.w
-            .const_i32(crate::ir::runtime::tier0::sse_fp_operands() as i32);
+        self.w.const_i32(self.env.sse_fp_operands as i32);
         self.w.simd_memory(0x00, 4); // v128.load
     }
 
@@ -1582,7 +1581,7 @@ impl Page {
                 // (native_fp::fused): the result, a scalar form's other lanes
                 // the destination's; the exact path if a lane or MXCSR is
                 // refused. (Both registers are cached before the branch.)
-                let native = crate::ir::runtime::tier0::relaxed_fma().then(|| {
+                let native = self.env.relaxed_fma.then(|| {
                     self.load_xmm(reg);
                     let d = self.w.set_new_local_v128();
                     self.load_xmm(self.first(reg));
@@ -1610,7 +1609,7 @@ impl Page {
                     self.w.if_void();
                     r
                 });
-                let operands = crate::ir::runtime::tier0::sse_fp_operands();
+                let operands = self.env.sse_fp_operands;
                 for (k, r) in [reg, self.first(reg)].into_iter().enumerate() {
                     self.w.const_i32((operands + 16 * k as u32) as i32);
                     self.load_xmm(r);
@@ -2196,7 +2195,7 @@ impl Page {
                 let source = self.w.set_new_local_v128();
                 self.load_xmm(reg);
                 let destination = self.w.set_new_local_v128();
-                let operands = crate::ir::runtime::tier0::sse_fp_operands();
+                let operands = self.env.sse_fp_operands;
                 for (k, value) in [&destination, &source].into_iter().enumerate() {
                     self.w.const_i32((operands + 16 * k as u32) as i32);
                     self.w.get_local_v128(value);

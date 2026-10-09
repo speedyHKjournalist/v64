@@ -1228,3 +1228,23 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
   失败 2 次，`985f518d` 上 30 次失败 0 次，差别不显著（Fisher 精确检验 p ≈ 0.5）。M1 对这台 32 位 Linux 客户机生效的改动
   只有 P3.0b 的 Tier-0 慢路径中断延迟；留作待查，再复现时先用 `ir_t0_irq_deferral=0` 对照。
 - 本地标签 `vM1`（跨阶段规则 10）打在这次提交上。
+
+### M2（进行中）
+
+**P2.0 字节一致性工具：记录与重放，2026-10-09。**
+
+- 编译环境显式化：Tier-0 的 `CompileEnv`（`ir/tier0/mod.rs`）收拢编译读到的全部外部输入：状态标志、`mem8`、`exit_kind`、
+  `ir_t0_sse_fp` 操作数块的地址、链接方式（迭代、嵌套、尾调用）与 relaxed FMA；`compile_page` 取当前环境后调用
+  `compile_page_with`，emit 与 simd 只读 `env`。pagegen 的 `CompileEnv` 同理：桶分派、块计数、外置访存、链接、relaxed FMA，
+  以及嵌入代码的 `core_yield`、`pending` 字与 bounce 缓冲区的地址；`compile` 调用 `compile_with`。
+- `ir-test-hooks` 特性（测试核心）下，`ir/tier0/replay.rs` 与 `x64/replay.rs` 记录每次编译的输入（"T0R1"、"X6R1"：环境标志、
+  代码页与映射、入口），重放时把嵌入的宿主地址换成固定的伪地址（规则 4），输出生成的模块。合成语料是 `simd::classify`/
+  `classify_vex` 与 pagegen `sse()` 接受的全部形式：Tier-0 869 个，x64 1530 个。
+- `tools/replay_check.mjs`（`make replay-check`）在 `build/core-split/base` 构建基准 commit 的测试核心，两边重放语料与
+  `build/replay` 里的记录并逐字节比较；`tools/replay_record.mjs`（`make replay-record`）从 bench 录下真实编译（本机 Tier-0 112 条、
+  x64 94 条）。bench 的机器代码移到 `tests/bench/machine.mjs`，`run.mjs` 与录制工具共用。`make jit-gate` 在 IR、x64 或共享 JIT
+  代码改动时跑 replay-check；基准还没有重放钩子时跳过（P2.0 自己就是这样）。新加的静态量登记为 debug。
+- 自检：同一核心重放一致；故意改动 emit 的一个字节，全部记录报差异，改回后一致。
+- 核心比较：84 个函数改变，都在编译路径上（Tier-0 `Page` 的方法因结构体多了 `env` 而改变，pagegen 的 `Emitter`、
+  `pages::compile`、`schedule::visit`）。R 级（与同一工作树构建的 `94ccc9c8` 比较）：bench 3 个 quick 会话几何均值 0.991，
+  `531`、`620`、`701`、`707`、`720` 按 `--runs 7 --scale 4` 复测后 1.005；XP 桌面（ABBAAB）中位数 13.30 s 对 13.08 s，比值 1.017。

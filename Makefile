@@ -23,7 +23,7 @@ all-debug: build/cpu-worker.js build/libv86-debug.js build/libv86-debug.mjs buil
 browser: build/cpu-worker.js build/v86_all.js
 
 # CPU benchmark suite (tests/bench): one IR core against another, see docs/cpu-benchmarks.md.
-.PHONY: bench-build bench bench-quick bench-same-source ir-tier0-tests
+.PHONY: bench-build bench bench-quick bench-same-source ir-tier0-tests replay-check replay-record
 bench-build:
 	node tools/bench/build.mjs
 
@@ -935,6 +935,14 @@ jit-switch-tests: build/v86-debug.wasm
 
 # build/v86.wasm of a base revision (default HEAD) against the working tree's,
 # function by function (docs/arm64-virt-android16-plan.md P0.7)
+# The generated code of both JITs, byte for byte, against a base
+# (docs/jit-unification-plan.md P2.0): REPLAY_ARGS, e.g. --base REV;
+# replay-record saves recordings of the benchmarks' compilations
+replay-check: build/v86-ir-test-release.wasm
+	node tools/replay_check.mjs $(REPLAY_ARGS) $(foreach f,$(wildcard build/replay/*.t0r build/replay/*.x6r),--records $(f))
+replay-record: build/v86-ir-test-release.wasm build/libv86.mjs bench-build
+	node tools/replay_record.mjs
+
 core-split-check:
 	node tools/core_split_check.mjs $(CORE_SPLIT_ARGS)
 

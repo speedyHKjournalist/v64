@@ -34,12 +34,20 @@ mod simd;
 mod x87run;
 /// Register-only x87 runs (A/B switch).
 const X87_RUNS: bool = true;
-use crate::ir::runtime::entry::{exit_kind_address, CpuEntryKey, ExitKind};
-use crate::ir::runtime::tier0::{t0_link, Link};
+use super::CompileEnv;
+use crate::ir::runtime::entry::{CpuEntryKey, ExitKind};
+use crate::ir::runtime::tier0::Link;
 use crate::state_flags::CachedStateFlags;
 use crate::wasmgen::wasm_builder::{
     Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType,
 };
+
+/// Whether the SIMD templates take `i` (simd::classify, and its VEX forms):
+/// the forms tier0::replay's corpus covers
+#[cfg(feature = "ir-test-hooks")]
+pub(crate) fn simd_template(i: &DecodedInstruction) -> bool {
+    simd::classify(i).is_some() || simd::classify_vex(i).is_some()
+}
 
 /// ir_t0_step results (see runtime::tier0).
 const STEP_EXIT: i32 = 2;
@@ -905,6 +913,8 @@ struct Page {
     /// Host address of each covered page when compiled (mem8 + physical):
     /// entering another page checks its current translation against it.
     hosts: Vec<u32>,
+    /// What else the bytes depend on (tier0::CompileEnv)
+    env: CompileEnv,
     /// Page index of the block being emitted.
     current_page: u32,
     /// Enclosing layout levels, innermost last (see emit_units).
@@ -1055,7 +1065,7 @@ impl Page {
     /// The CPU's exit request (see runtime::entry), stored directly when
     /// the generated code runs in this instance.
     fn request_exit(&mut self, kind: ExitKind) {
-        match exit_kind_address() {
+        match self.env.exit_kind {
             Some(address) => {
                 self.w.const_i32(address as i32);
                 self.w.const_i32(kind as i32);
@@ -3582,7 +3592,13 @@ fn emit_units(
     p.levels.pop();
 }
 
-pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[u32]) -> Emitted {
+pub fn emit_page(
+    plan: &PagePlan,
+    entries: &[CpuEntryKey],
+    flat: bool,
+    hosts: &[u32],
+    env: &CompileEnv,
+) -> Emitted {
     let page_linear = plan.slots.pages[0];
     let runs = plan.slots.runs();
     let mut w = WasmBuilder::new();
@@ -3722,6 +3738,7 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         starts: plan.blocks.iter().map(|b| b.start).collect(),
         span: plan.block_at.len() as u32,
         hosts: hosts.to_vec(),
+        env: *env,
         current_page: 0,
         levels: vec![],
         exit: exit_link,
@@ -3812,7 +3829,7 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
     p.push_exit_eip();
     p.w.store_aligned_i32(0);
     // Continue in the page function serving the target, if any.
-    match t0_link() {
+    match p.env.link {
         Link::Tail => {
             p.w.call_signature("ir_t0_link", signature("ir_t0_link"));
             p.w.tee_local(&p.tmp);
