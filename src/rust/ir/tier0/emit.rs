@@ -131,6 +131,25 @@ pub const FORM_NAMES: &[&str] = &[
     "Bmi",
     "Movbe",
 ];
+/// The template-kind profile's keys (runtime::tier0::kind_profile, the
+/// switch t0_kind_profile; docs/jit-unification-plan.md P3.0a): a Form kind
+/// (FORM_NAMES), FORM_NAMES.len() for a step, and from X87_KEYS an x87
+/// instruction's opcode (D8-DF), templated or not, with its ModRM byte: a
+/// register form's whole byte, a memory form's reg field (as reg << 3,
+/// below 0xC0)
+pub const PROFILE_KEYS: usize = X87_KEYS + 8 * 256;
+pub const X87_KEYS: usize = 64;
+/// The profile key of `i`, templated as `form` or (None) stepped
+fn profile_key(form: Option<Form>, i: &DecodedInstruction) -> usize {
+    let op = i.encoding.opcode;
+    match i.modrm {
+        Some(modrm) if (0xD8..=0xDF).contains(&op) => {
+            let low = if modrm >= 0xC0 { modrm } else { modrm & 0x38 };
+            X87_KEYS + ((op as usize & 7) << 8) + low as usize
+        },
+        _ => form.map_or(FORM_NAMES.len(), Form::kind),
+    }
+}
 /// Form::Bmi's operations
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BmiOp {
@@ -3345,10 +3364,28 @@ impl Page {
         }
     }
 
+    /// The template-kind profile (CompileEnv::kind_profile): one more
+    /// execution of profile key `key`
+    fn profile(&mut self, key: usize) {
+        let Some(table) = self.env.kind_profile
+        else {
+            return;
+        };
+        let address = table + 8 * key as u32;
+        self.w.const_i32(address as i32);
+        self.w.const_i32(address as i32);
+        self.w.load_unaligned_i64(0);
+        self.w.const_i64(1);
+        self.w.add_i64();
+        self.w.store_unaligned_i64(0);
+    }
+
     /// One instruction: a template (whose rare cases leave for the
     /// interpreter) or an interpreter fallback.
     fn instruction(&mut self, i: &Instruction, templated: &mut usize) {
-        let Some(form) = classify(&i.decoded)
+        let form = classify(&i.decoded);
+        self.profile(profile_key(form, &i.decoded));
+        let Some(form) = form
         else {
             self.fallback(i);
             self.known = Known::None;
@@ -3542,6 +3579,10 @@ fn emit_units(
                         let done = p.w.block_void();
                         let slow = p.w.block_void();
                         p.x87_run(&run, slow);
+                        for i in &insts[j..j + run.length] {
+                            let form = classify(&i.decoded);
+                            p.profile(profile_key(form, &i.decoded));
+                        }
                         p.w.br(done);
                         p.w.block_end();
                         for i in &insts[j..j + run.length] {

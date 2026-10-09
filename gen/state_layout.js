@@ -238,6 +238,9 @@ export const STATICS = {
         RELAXED_FMA_FUSED: "machine", RELAXED_FMA: "machine",
         // the operands of one ir_t0_sse_fp call
         T0_SSE_FP: "scratch", SSE_FP_CALLS: "debug", FMA_CALLS: "debug",
+        // Tier-0's feature switches (docs/jit-unification-plan.md P3.0a); the
+        // template-kind profile, its switch and the names of its kinds
+        T0_FEATURES: "machine", KIND_PROFILE: "debug", KIND_PROFILE_ON: "machine", FORM_NAMES_TEXT: "debug",
     },
     // the compile records and the replay buffers of the byte-identity check
     // (ir-test-hooks; docs/jit-unification-plan.md P2.0)

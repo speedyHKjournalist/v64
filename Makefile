@@ -52,6 +52,7 @@ ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit
 	node tests/ir/differential/tier0_irq_slow.mjs
 	node tests/ir/differential/tier0_step_profile.mjs
 	node tests/ir/differential/tier0_mode_ledger.mjs
+	node tests/ir/differential/tier0_kind_profile.mjs
 
 .PHONY: glbridge test-glbridge
 glbridge:
@@ -314,6 +315,21 @@ build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86.wasm
 	@if [ "$(WASM_OPT)" != "false" ]; then $(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86.wasm -o build/v86.wasm; fi
 	BLOCK_SIZE=K ls -l build/v86.wasm
+
+# An A/B arm (docs/jit-unification-plan.md P3.0a, docs/profiling.md): the
+# release core with build-time switch defaults, beside the others in
+# build/bench/arms, for the measurements whose processes take one setting
+# (tools/owner_perf.mjs --arms, XP, Windows 8.1 and Windows 98):
+#   make jit-arm ARM=t0-kinds JIT_DEFAULTS="t0_kind_profile=1"
+# Its own cargo target directory leaves build/v86.wasm as it is.
+.PHONY: jit-arm
+jit-arm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	@test -n "$(ARM)" || { echo "jit-arm: name the arm, ARM=name"; exit 1; }
+	mkdir -p build/bench/arms
+	CARGO_TARGET_DIR=build/arm-target cargo rustc --release $(CARGO_FLAGS)
+	cp build/arm-target/wasm32-unknown-unknown/release/v86.wasm build/bench/arms/$(ARM).wasm
+	@if [ "$(WASM_OPT)" != "false" ]; then $(WASM_OPT) && wasm-opt -O2 --strip-debug build/bench/arms/$(ARM).wasm -o build/bench/arms/$(ARM).wasm; fi
+	@echo "build/bench/arms/$(ARM).wasm: JIT_DEFAULTS=\"$(JIT_DEFAULTS)\""
 
 build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/

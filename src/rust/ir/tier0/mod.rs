@@ -43,6 +43,14 @@ pub struct CompileEnv {
     pub link: Link,
     /// FMA through the host's relaxed multiply-adds (tier0::relaxed_fma)
     pub relaxed_fma: bool,
+    /// Tier-0's feature switches, the t0_* of jit_switches
+    /// (tier0::features; docs/jit-unification-plan.md P3.0a): the template
+    /// changes of P3, each off until its A/B flips the default
+    pub features: u32,
+    /// The counters of the template-kind profile (tier0::kind_profile, the
+    /// switch t0_kind_profile): each instruction adds one to its key's
+    /// (emit::profile_key). None: off
+    pub kind_profile: Option<u32>,
 }
 impl CompileEnv {
     /// The running instance's
@@ -55,11 +63,19 @@ impl CompileEnv {
             sse_fp_operands: tier0::sse_fp_operands(),
             link: tier0::t0_link(),
             relaxed_fma: tier0::relaxed_fma(),
+            features: tier0::features(),
+            kind_profile: tier0::kind_profile(),
         }
     }
-    /// Replay's: the recorded state flags, link mode and relaxed FMA, and
-    /// fixed pseudo addresses
-    pub fn replay(state_flags: CachedStateFlags, link: Link, relaxed_fma: bool) -> CompileEnv {
+    /// Replay's: the recorded state flags, link mode, relaxed FMA, features
+    /// and whether the kind profile counts, and fixed pseudo addresses
+    pub fn replay(
+        state_flags: CachedStateFlags,
+        link: Link,
+        relaxed_fma: bool,
+        features: u32,
+        kind_profile: bool,
+    ) -> CompileEnv {
         CompileEnv {
             state_flags,
             mem8: 0x0100_0000,
@@ -67,6 +83,8 @@ impl CompileEnv {
             sse_fp_operands: 0x0000_0E00,
             link,
             relaxed_fma,
+            features,
+            kind_profile: kind_profile.then_some(0x0000_A000),
         }
     }
 }

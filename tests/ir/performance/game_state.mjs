@@ -20,7 +20,8 @@
 // waits counts as idle): real, vm86, prot16 and prot32 (".flat" with flat
 // segments) by ring. --ledger adds the mode ledger (the JIT switch
 // mode_ledger, docs/profiling.md): the retired instructions by mode and how
-// they ran. JIT_SWITCHES applies (tests/lib/jit_switches.mjs).
+// they ran. JIT_SWITCHES applies (tests/lib/jit_switches.mjs); JIT_STATS=1
+// prints the JIT statistics record at the end (tools/bench/jit_stats.mjs).
 //
 // Memory and VRAM sizes come from the state. Graphics: an infinitely fast
 // null renderer (batches acknowledged; D9WG queries, readbacks and the
@@ -32,7 +33,7 @@ import inspector from "node:inspector";
 import { createRequire as create_require } from "node:module";
 import { V86 } from "../../../build/libv86.mjs";
 import { STATE_OFFSETS } from "../../../src/state_layout.js";
-import { mode_ledger } from "../../../tools/bench/jit_stats.mjs";
+import { jit_stats_enabled, mode_ledger, print_jit_stats } from "../../../tools/bench/jit_stats.mjs";
 import { jit_switches_from_env } from "../../lib/jit_switches.mjs";
 const { createV86GLDevice: create_v86gl_device } = create_require(import.meta.url)("../../../src/browser/glbridge/v86gl_device.js");
 
@@ -272,5 +273,7 @@ console.log(JSON.stringify({ event: "summary", seconds, second_half: { mips: +me
     ...mode_ms.size ? { modes: shares(mode_ms), modes_second_half: shares(mode_ms_late) } : {},
     ...!raw ? { desktop_s } : {},
     ...with_ledger ? { ledger: mode_ledger(e) } : {} }));
+// (tools/bench/jit_stats.mjs, docs/jit-unification-plan.md P0.7)
+if(jit_stats_enabled()) print_jit_stats(vm, { script: "game_state", wasm: option("wasm", "build/v86-ir-runtime.wasm"), state: state_path || null, seconds });
 await vm.destroy();
 process.exit(0);

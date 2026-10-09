@@ -281,6 +281,18 @@ pub const SWITCHES: &[Switch] = &[
         },
         get: |_| Some(execution::ledger_on() as u32),
     },
+    // measurement: the executions of what Tier-0 compiles from now on, by
+    // template kind (ir::runtime::tier0::kind_profile)
+    Switch {
+        name: "t0_kind_profile",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_kind_profile(on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::kind_profile_on() as u32),
+    },
 ];
 
 const COUNT: usize = SWITCHES.len();

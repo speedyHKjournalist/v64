@@ -1420,3 +1420,29 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - R 级（相对 M2 的核心）：bench 3 个会话几何均值 1.028；XP 桌面（ABBAAB）M2 13.57、13.06、13.29 s，P2.11 13.06、13.55、13.30 s，
   中位数 13.29 对 13.30 s；x86-64 bench 1.000；Win8.1 桌面（ABBA）M2 172、171 s，P2.11 170、189 s。189 s 那次不是变慢：四次启动
   到 167 s 时都已原生执行 303–315 亿条指令，单步与重试的比例相同，那一次在桌面出现之前多做了客户机的工作（183 s 时 329 亿条）。
+
+**P3.0a Tier-0 的特性开关、A/B 臂与按模板种类的统计，2026-10-10。**
+
+- 特性开关：Tier-0 的 `CompileEnv` 加 `features`，每个 `t0_*` 开关一位（`ir::runtime::tier0::features`、`set_feature`）。
+  P3 的模板改动各占一位，默认关，按 A/B 翻转；编译只经 `env` 读它。重放记录末尾加 features 与"计数是否打开"两项（5 字节）：
+  没有这两项的旧记录按关处理，P3.0a 之前的构建读到它们时忽略，所以 replay-check 照旧能和更早的基线比较。
+- 按模板种类的统计：测量开关 `t0_kind_profile`（默认关）。打开后，Tier-0 编译的每条指令先给自己的键加一：Form 种类
+  （`FORM_NAMES`，留给解释器的记作 `Step`），x87 指令不论有无模板都按操作码与 ModRM 计（寄存器形式按整个 ModRM 字节，内存形式
+  按 reg 字段）。x87 run 的快速路径跑完时计它的指令。计数表的地址进 `CompileEnv`，重放时固定为伪地址。导出
+  `ir_t0_kind_profile(key, high)`、`ir_t0_kind_profile_keys`、`ir_t0_form_names(_length)` 与 `ir_t0_kind_profile_reset`；
+  `tools/bench/jit_stats.mjs` 的 `kind_profile()` 给键命名并排序，开关打开时 `JIT_STATS=1` 的记录带前 60 项；
+  `game_state.mjs`（Win98 存档）也写这条记录。已有的 `ir_t0_template_stat` 数的是编译了多少，这里数的是执行了多少。
+- A/B 臂：`make jit-arm ARM=名字 JIT_DEFAULTS="..."` 用单独的 cargo 目标目录构建带构建期默认值的 release 核心，放进
+  `build/bench/arms`，`build/v86.wasm` 不受影响。`owner_perf.mjs --arms`、`windows_boot.mjs` 的 `WASM_PATH` 与 bench 的
+  `--baseline` 都直接用它；同一进程里的 bench 仍可用 `--switches-a/-b`。写进 [profiling.md](profiling.md)。
+- 测试：`tests/ir/differential/tier0_kind_profile.mjs`（`ir-tier0-tests`）。热循环里有整数模板、单步的 CPUID、三条寄存器 x87
+  组成的 run、单条 x87、x87 内存形式与 FSQRT；计数之和等于模式账本里 Tier-0 的 `tier0_native` 与 `tier0_step`（23 万条，
+  一条不差），循环里每条指令在页编译之后的每次迭代各计一次（前约 9000 次迭代在页编译之前由解释器执行；从循环中间进入的那次
+  迭代只计后半段）。
+- 门禁：`make jit-gate`（相对 P2.11）：开关关着时 Tier-0 与 x64 的重放记录全部字节一致；`ir-tier0-tests`、
+  `x64-page-tier-tests` 与 `jit-switch-tests` 通过。
+- R 级（相对 P2.11 的核心）：bench 3 个会话加复测几何均值 1.004；XP 桌面（ABBAAB）P2.11 13.59、13.06、13.07 s，P3.0a 13.10、
+  13.35、13.10 s，中位数 13.07 对 13.10 s；Win8.1 桌面 P2.11 174、170 s，P3.0a 176、168 s（P3.0a 另有一次启动在 46 s 时
+  V8 后台编译 Wasm 函数时报 "Fatal process out of memory: Zone" 退出：当时宿主 4 GB 交换区用了 3.1 GB，两个核心里没有哪个
+  函数变大，同一核心的另外两次都正常，按偶发处理）。
+- 修正：XP 的大内存里名字表的地址高于 2 GiB，`kind_profile()` 读地址要 `>>> 0`。

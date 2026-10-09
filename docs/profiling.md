@@ -86,6 +86,51 @@ reads it as `{ mode: { way: retired } }`, flat 32-bit code under
 `mode_ledger_reset()` empties it. The count is per Wasm instance: with cores
 in workers, each worker has its own.
 
+## The template-kind profile: what Tier-0's code executes
+
+The step profile counts what Tier-0 leaves to the interpreter; the JIT
+switch `t0_kind_profile` (off by default) counts what its code executes, by
+template kind. While it is on, Tier-0 compiles a 64-bit count into every
+instruction of the page functions it compiles, keyed by its `Form` kind
+(`Alu`, `MovToReg`, `Jcc`, `X87`, `Simd`, ...; `Step` for an instruction left
+to the interpreter) or, for x87 instructions, templated or not, by opcode
+and ModRM byte: a register form by its whole byte (`x87 D9 FA` is FSQRT), a
+memory form by its reg field (`x87 DD /3 m` is FSTP m64). An x87 run that takes its fast path
+counts its instructions when it completes. Page functions compiled before
+the switch was turned on do not count, so set it with the machine
+(`JIT_SWITCHES=t0_kind_profile=1`); the counts cost time, so time nothing
+with it on. It is P3's measure for ranking Tier-0's template changes
+([jit-unification-plan.md](jit-unification-plan.md) P3.0a and cross-phase
+rule 11), together with the step profile.
+
+`kind_profile(exports, memory)` in [`tools/bench/jit_stats.mjs`](../tools/bench/jit_stats.mjs)
+reads it, most executed first; `JIT_STATS=1` records carry the 60 largest
+while it is on (`tests/bench/run.mjs`, `tests/ir/performance/xp_boot.mjs`,
+`tests/ir/performance/game_state.mjs` for Windows 98 states,
+`tests/x64/windows_boot.mjs`). The exports: `ir_t0_kind_profile(key, high)`
+(a count's low or high 32 bits), `ir_t0_kind_profile_keys()`,
+`ir_t0_form_names()` and `ir_t0_form_names_length()` (the kinds' names, one
+per line), `ir_t0_kind_profile_reset()`. Each Wasm instance counts in its
+own table.
+
+## A/B arms: one core per setting
+
+`tests/bench/run.mjs` compares two settings of one core in one process
+(`--switches-a`, `--switches-b`). The whole-machine measurements take one
+setting per process, so an A/B there compares two cores: build the second
+with the setting as its build-time default (`JIT_DEFAULTS`, the switch
+registry's defaults) next to the others in `build/bench/arms`,
+
+    make jit-arm ARM=t0-kinds JIT_DEFAULTS="t0_kind_profile=1"
+
+(its own cargo target directory, so `build/v86.wasm` stays as it is), and
+give both to the runner: `tools/owner_perf.mjs --arms
+build/v86.wasm,build/bench/arms/t0-kinds.wasm` (XP, Windows 8.1, CPULOAD32,
+Windows 98 states and boot, sessions alternating the arms),
+`tests/x64/windows_boot.mjs` with `WASM_PATH`, or `tests/bench/run.mjs
+--wasm ... --baseline ...`. `tests/bench/gate.mjs` judges the results by
+the levels of the plan's cross-phase rule 2.
+
 ## Windows guests in node (tests/x64/windows_boot.mjs)
 
 The Windows harness can measure a running program from a saved state, so a

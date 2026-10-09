@@ -11,7 +11,9 @@
 //! 1 nested, 2 tail); the request's pc, linear and default_32; the mappings
 //! (count, then linear and physical each) and their bytes (4096 each); the
 //! entries (count u16, then pc, linear, default_32 each); the extra block
-//! starts (count u16, then each).
+//! starts (count u16, then each); since P3.0a, Tier-0's features (u32) and
+//! whether the kind profile counts (u8). Records without the last two have
+//! neither, and builds before them ignore the bytes.
 
 use super::{compile_page_with, CompileEnv};
 use crate::ir::frontend::decode::{decode, GuestEip, LinearAddress, PhysicalAddress};
@@ -71,6 +73,8 @@ fn encode(
     for &x in extra {
         u32(&mut r, x);
     }
+    u32(&mut r, env.features);
+    r.push(env.kind_profile.is_some() as u8);
     r
 }
 
@@ -105,7 +109,6 @@ pub fn replay(record: &[u8]) -> Option<Vec<u8>> {
         2 => Link::Tail,
         _ => return None,
     };
-    let env = CompileEnv::replay(state_flags, link, flags & 2 != 0);
     let (pc, linear, default_32) = (r.u32()?, r.u32()?, r.u8()? != 0);
     let mut mappings = Vec::new();
     for _ in 0..r.u8()? {
@@ -127,6 +130,10 @@ pub fn replay(record: &[u8]) -> Option<Vec<u8>> {
     for _ in 0..r.u16()? {
         extra.push(r.u32()?);
     }
+    // (absent before P3.0a)
+    let features = r.u32().unwrap_or(0);
+    let kind_profile = r.u8().unwrap_or(0) != 0;
+    let env = CompileEnv::replay(state_flags, link, flags & 2 != 0, features, kind_profile);
     let origin = CompileRequest {
         key: PublicationKey {
             job: 0,
@@ -234,7 +241,13 @@ const BASE: u32 = 0x40_0000;
 /// forms without one leave in the next instruction's place.
 pub fn corpus() -> Vec<Vec<u8>> {
     let mut records = Vec::new();
-    let env = CompileEnv::replay(CachedStateFlags::of_u32(FLAT_32), Link::Iterative, false);
+    let env = CompileEnv::replay(
+        CachedStateFlags::of_u32(FLAT_32),
+        Link::Iterative,
+        false,
+        0,
+        false,
+    );
     let mut seen = std::collections::HashSet::new();
     let mut take = |instruction: Vec<u8>| {
         let Ok(decoded) = decode(&instruction, GuestEip(BASE), LinearAddress(BASE), true)

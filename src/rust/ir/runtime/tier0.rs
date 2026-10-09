@@ -1,5 +1,6 @@
 //! Runtime support for Tier-0 page functions (ir::tier0).
 use crate::cpu::{cpu, global_pointers as gp, memory};
+use crate::ir::tier0::emit;
 
 /// The instruction fell through to the expected next instruction.
 pub const STEP_NEXT: i32 = 0;
@@ -437,6 +438,63 @@ pub unsafe fn ir_set_relaxed_fma(on: u32) -> bool {
 }
 #[no_mangle]
 pub unsafe fn ir_relaxed_fma() -> u32 { RELAXED_FMA as u32 }
+
+/// Tier-0's feature switches (docs/jit-unification-plan.md P3.0a): one bit
+/// of CompileEnv::features per t0_* switch of jit_switches, which P3's
+/// template changes add, each off until its A/B flips the default. Page
+/// functions compiled before a change keep the code they have.
+static mut T0_FEATURES: u32 = 0;
+pub fn features() -> u32 { unsafe { T0_FEATURES } }
+pub unsafe fn set_feature(bit: u32, on: bool) {
+    if on {
+        T0_FEATURES |= bit;
+    }
+    else {
+        T0_FEATURES &= !bit;
+    }
+}
+
+/// The template-kind profile (the switch t0_kind_profile, a measurement for
+/// P3's ranking): while it is on, Tier-0 compiles a count into every
+/// instruction, by emit::profile_key: its Form kind, a step, or an x87
+/// opcode with its ModRM byte. Only page functions compiled while it was
+/// on count; a vCPU worker counts in its own table.
+static mut KIND_PROFILE: [u64; emit::PROFILE_KEYS] = [0; emit::PROFILE_KEYS];
+static mut KIND_PROFILE_ON: bool = false;
+/// The counters' address while the profile is on (CompileEnv::kind_profile)
+pub fn kind_profile() -> Option<u32> {
+    unsafe { KIND_PROFILE_ON.then(|| (&raw const KIND_PROFILE) as u32) }
+}
+pub unsafe fn set_kind_profile(on: bool) { KIND_PROFILE_ON = on; }
+pub fn kind_profile_on() -> bool { unsafe { KIND_PROFILE_ON } }
+/// The count of profile key `key`: its low 32 bits, or (`high`) its high
+#[no_mangle]
+pub unsafe fn ir_t0_kind_profile(key: u32, high: u32) -> u32 {
+    let table = &*(&raw const KIND_PROFILE);
+    let count = table.get(key as usize).copied().unwrap_or(0);
+    (if high != 0 { count >> 32 } else { count }) as u32
+}
+#[no_mangle]
+pub unsafe fn ir_t0_kind_profile_reset() { *(&raw mut KIND_PROFILE) = [0; emit::PROFILE_KEYS]; }
+/// The number of profile keys (emit::profile_key)
+#[no_mangle]
+pub fn ir_t0_kind_profile_keys() -> u32 { emit::PROFILE_KEYS as u32 }
+/// The names of the Form kinds by index, one per line, then the steps' row
+/// (emit::FORM_NAMES; the text's address and length)
+static mut FORM_NAMES_TEXT: Option<String> = None;
+unsafe fn form_names_text() -> &'static str {
+    (*(&raw mut FORM_NAMES_TEXT)).get_or_insert_with(|| {
+        emit::FORM_NAMES
+            .iter()
+            .chain(std::iter::once(&"Step"))
+            .map(|name| format!("{}\n", name))
+            .collect()
+    })
+}
+#[no_mangle]
+pub unsafe fn ir_t0_form_names() -> u32 { form_names_text().as_ptr() as u32 }
+#[no_mangle]
+pub unsafe fn ir_t0_form_names_length() -> u32 { form_names_text().len() as u32 }
 /// A/B switch: 0 iterative, 1 nested, 2 tail (if supported).
 #[no_mangle]
 pub unsafe fn ir_t0_set_link_mode(mode: u32) -> bool {
