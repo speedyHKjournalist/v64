@@ -19,8 +19,9 @@
 //! `ir_t0_step` as well (it would fault, or it stores to a page with IR code).
 use super::analysis::{self, Instruction, PagePlan, Unit};
 use crate::cpu::cpu::{
-    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_VM, FLAG_ZERO,
-    TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY, TLB_VALID,
+    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_DIRECTION, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB,
+    FLAG_VM, FLAG_ZERO, TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY,
+    TLB_VALID,
 };
 use crate::cpu::global_pointers as gp;
 use crate::ir::frontend::decode::{DecodedInstruction, EffectiveAddress, Flow};
@@ -36,7 +37,9 @@ mod x87run;
 const X87_RUNS: bool = true;
 use super::CompileEnv;
 use crate::ir::runtime::entry::{CpuEntryKey, ExitKind};
-use crate::ir::runtime::tier0::Link;
+use crate::ir::runtime::tier0::{
+    Link, T0_CLD_STD, T0_JECXZ, T0_POP_RM, T0_PUSHA, T0_SREG_READ, T0_XCHG_MEM,
+};
 use crate::state_flags::CachedStateFlags;
 use crate::wasmgen::wasm_builder::{
     Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType,
@@ -130,6 +133,14 @@ pub const FORM_NAMES: &[&str] = &[
     "Lahf",
     "Bmi",
     "Movbe",
+    "Jecxz",
+    "MovFromSreg",
+    "PushSreg",
+    "XchgMem",
+    "Direction",
+    "PopRm",
+    "Pusha",
+    "Popa",
 ];
 /// The template-kind profile's keys (runtime::tier0::kind_profile, the
 /// switch t0_kind_profile; docs/jit-unification-plan.md P3.0a): a Form kind
@@ -335,6 +346,38 @@ enum Form {
         cc: u8,
         target: u32,
     },
+    /// JECXZ, or JCXZ with a 16-bit address size (`cx`): P3.7, the feature
+    /// T0_JECXZ
+    Jecxz {
+        target: u32,
+        cx: bool,
+    },
+    /// MOV r/m, Sreg (P3.7, T0_SREG_READ): the selector, zero-extended into
+    /// a 32-bit register, 16 bits into memory or a 16-bit register
+    MovFromSreg {
+        seg: u8,
+        size: u8,
+    },
+    /// PUSH ES/CS/SS/DS/FS/GS with a 32-bit operand (P3.7, T0_SREG_READ):
+    /// ESP - 4 with only the low 16 bits written, as
+    /// cpu::misc_instr::push32_sreg
+    PushSreg {
+        seg: u8,
+    },
+    /// XCHG r/m, r with a memory operand (P3.7, T0_XCHG_MEM)
+    XchgMem {
+        size: u8,
+        reg: u8,
+    },
+    /// CLD and STD (P3.7, T0_CLD_STD)
+    Direction {
+        set: bool,
+    },
+    /// POP m32 whose address does not use ESP (P3.7, T0_POP_RM)
+    PopRm,
+    /// PUSHAD and POPAD whose 32 bytes are in one page (P3.7, T0_PUSHA)
+    Pusha,
+    Popa,
     Call {
         target: u32,
     },
@@ -394,6 +437,14 @@ impl Form {
             Form::Lahf => 40,
             Form::Bmi { .. } => 41,
             Form::Movbe { .. } => 42,
+            Form::Jecxz { .. } => 43,
+            Form::MovFromSreg { .. } => 44,
+            Form::PushSreg { .. } => 45,
+            Form::XchgMem { .. } => 46,
+            Form::Direction { .. } => 47,
+            Form::PopRm => 48,
+            Form::Pusha => 49,
+            Form::Popa => 50,
         }
     }
     /// Whether the template can retry() (else no retry tail is emitted).
@@ -431,6 +482,9 @@ impl Form {
                     | Form::Cmov { .. }
                     | Form::Jmp { .. }
                     | Form::Jcc { .. }
+                    | Form::Jecxz { .. }
+                    | Form::MovFromSreg { .. }
+                    | Form::Direction { .. }
                     | Form::Lahf
             )
     }
@@ -473,7 +527,8 @@ impl Form {
             Form::ShiftHelper { .. } | Form::DoubleShift { .. } => true,
             Form::X87Flags { .. }
             | Form::Simd(simd::Simd::CompareFlags { .. } | simd::Simd::Strings { .. }, _)
-            | Form::Lahf => true,
+            | Form::Lahf
+            | Form::Direction { .. } => true,
             _ => false,
         }
     }
@@ -482,6 +537,7 @@ impl Form {
             self,
             Form::Jmp { .. }
                 | Form::Jcc { .. }
+                | Form::Jecxz { .. }
                 | Form::Call { .. }
                 | Form::Ret { .. }
                 | Form::JmpIndirect
@@ -494,6 +550,10 @@ impl Form {
                 self,
                 Form::Push { .. }
                     | Form::Pop { .. }
+                    | Form::PushSreg { .. }
+                    | Form::PopRm
+                    | Form::Pusha
+                    | Form::Popa
                     | Form::Leave
                     | Form::Call { .. }
                     | Form::Ret { .. }
@@ -565,11 +625,13 @@ fn bmi(i: &DecodedInstruction) -> Option<Form> {
     })
 }
 
-/// Whether the instruction has a template (others end their block).
-pub fn templated(i: &DecodedInstruction) -> bool { classify(i).is_some() }
+/// Whether the instruction has a template with Tier-0's `features`
+/// (CompileEnv::features; others end their block).
+pub fn templated(i: &DecodedInstruction, features: u32) -> bool { classify(i, features).is_some() }
 
-/// The template for `i`, or None for an interpreter fallback.
-fn classify(i: &DecodedInstruction) -> Option<Form> {
+/// The template for `i` with Tier-0's `features`, or None for an
+/// interpreter fallback.
+fn classify(i: &DecodedInstruction, features: u32) -> Option<Form> {
     // SSE selects forms by F2/F3/66 prefixes, so it precedes the REP check.
     if let Some(form) = simd::classify(i) {
         return Some(Form::Simd(form, None));
@@ -876,6 +938,43 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
             cc: (op & 15) as u8,
             target: relative_target(i)?,
         },
+        0xE3 if features & T0_JECXZ != 0 => Form::Jecxz {
+            target: relative_target(i)?,
+            cx: i.address_size == 16,
+        },
+        // (ModRM.reg above GS is #UD)
+        0x8C if features & T0_SREG_READ != 0 && reg <= 5 => Form::MovFromSreg {
+            seg: reg,
+            size: if i.ea.is_some() { 16 } else { v },
+        },
+        0x06 | 0x0E | 0x16 | 0x1E | 0x0FA0 | 0x0FA8 if features & T0_SREG_READ != 0 && v == 32 => {
+            Form::PushSreg {
+                seg: match op {
+                    0x06 => 0,
+                    0x0E => 1,
+                    0x16 => 2,
+                    0x1E => 3,
+                    0x0FA0 => 4,
+                    _ => 5,
+                },
+            }
+        },
+        0x86 | 0x87 if features & T0_XCHG_MEM != 0 && i.ea.is_some() => Form::XchgMem {
+            size: if op == 0x86 { 8 } else { v },
+            reg,
+        },
+        0xFC | 0xFD if features & T0_CLD_STD != 0 => Form::Direction { set: op == 0xFD },
+        0x8F if features & T0_POP_RM != 0
+            && reg == 0
+            && v == 32
+            && i.ea
+                .as_ref()
+                .is_some_and(|ea| ea.base != Some(4) && ea.index != Some(4)) =>
+        {
+            Form::PopRm
+        },
+        0x60 if features & T0_PUSHA != 0 && v == 32 => Form::Pusha,
+        0x61 if features & T0_PUSHA != 0 && v == 32 => Form::Popa,
         0xE8 => Form::Call {
             target: relative_target(i)?,
         },
@@ -3323,6 +3422,129 @@ impl Page {
                 self.w.block_end();
                 self.goto_linear(self.cs_base.wrapping_add(i.next_pc.0));
             },
+            Form::Jecxz { target, cx } => {
+                self.flush();
+                self.read_reg(1, if cx { 16 } else { 32 });
+                self.w.eqz_i32();
+                self.leave_block();
+                self.w.if_void();
+                self.goto_linear(self.cs_base.wrapping_add(target));
+                self.w.block_end();
+                self.goto_linear(self.cs_base.wrapping_add(i.next_pc.0));
+            },
+            Form::MovFromSreg { seg, size } => {
+                self.prepare_rm(i);
+                self.w.load_fixed_u16(gp::sreg as u32 + 2 * seg as u32);
+                self.w.set_local(&value);
+                self.write_rm(i, size, &value);
+            },
+            Form::PushSreg { seg } => {
+                self.w.load_fixed_u16(gp::sreg as u32 + 2 * seg as u32);
+                self.w.set_local(&value);
+                self.stack_address(-4);
+                self.write_mem(16, &value);
+                self.w.get_local(&self.gpr[4]);
+                self.w.const_i32(4);
+                self.w.sub_i32();
+                self.set_gpr(4);
+            },
+            Form::XchgMem { size, reg } => {
+                // As cpu::arith::xchg*: rm = reg, then reg = old rm
+                self.read_rm(i, size, true);
+                self.w.set_local(&fa);
+                self.read_reg(reg, size);
+                self.w.set_local(&fb);
+                self.write_rm(i, size, &fb);
+                self.w.get_local(&fa);
+                self.write_reg(reg, size);
+            },
+            Form::Direction { set } => {
+                self.w.const_i32(gp::flags as i32);
+                self.w.load_fixed_i32(gp::flags as u32);
+                if set {
+                    self.w.const_i32(FLAG_DIRECTION);
+                    self.w.or_i32();
+                }
+                else {
+                    self.w.const_i32(!FLAG_DIRECTION);
+                    self.w.and_i32();
+                }
+                self.w.store_aligned_i32(0);
+            },
+            Form::PopRm => {
+                // As instr32_8F_0_mem: the value at ESP, stored to an address
+                // that does not use ESP, then ESP + 4
+                self.stack_address(0);
+                self.read_mem(32, false);
+                self.w.set_local(&fb);
+                self.prepare_rm(i);
+                self.write_mem(32, &fb);
+                self.w.get_local(&self.gpr[4]);
+                self.w.const_i32(4);
+                self.w.add_i32();
+                self.set_gpr(4);
+            },
+            Form::Pusha => {
+                // As pusha32: EAX, ECX, EDX, EBX, the original ESP, EBP, ESI
+                // and EDI below ESP, all in one page (else the interpreter):
+                // the first store's translation stands for the others, so
+                // they all happen or none
+                self.stack_address(-32);
+                self.w.get_local(&self.addr);
+                self.w.const_i32(0xFFF);
+                self.w.and_i32();
+                self.w.const_i32(0x1000 - 32);
+                self.w.gtu_i32();
+                self.retry_if();
+                let base = fa.unsafe_clone();
+                self.w.get_local(&self.addr);
+                self.w.set_local(&base);
+                for r in 0..8u8 {
+                    self.w.get_local(&base);
+                    self.w.const_i32(28 - 4 * r as i32);
+                    self.w.add_i32();
+                    self.w.set_local(&self.addr);
+                    self.w.get_local(&self.gpr[r as usize]);
+                    self.w.set_local(&value);
+                    self.write_mem(32, &value);
+                }
+                self.w.get_local(&self.gpr[4]);
+                self.w.const_i32(32);
+                self.w.sub_i32();
+                self.set_gpr(4);
+            },
+            Form::Popa => {
+                // As popa32: EDI, ESI, EBP, (ESP skipped), EBX, EDX, ECX and
+                // EAX from ESP up, all read before any register is written
+                self.stack_address(0);
+                self.w.get_local(&self.addr);
+                self.w.const_i32(0xFFF);
+                self.w.and_i32();
+                self.w.const_i32(0x1000 - 32);
+                self.w.gtu_i32();
+                self.retry_if();
+                let base = fa.unsafe_clone();
+                self.w.get_local(&self.addr);
+                self.w.set_local(&base);
+                let mut values = vec![];
+                for r in (0..8u8).rev().filter(|&r| r != 4) {
+                    self.w.get_local(&base);
+                    self.w.const_i32(28 - 4 * r as i32);
+                    self.w.add_i32();
+                    self.w.set_local(&self.addr);
+                    self.read_mem(32, false);
+                    values.push((r, self.w.set_new_local()));
+                }
+                for (r, local) in values {
+                    self.w.get_local(&local);
+                    self.set_gpr(r as usize);
+                    self.w.free_local(local);
+                }
+                self.w.get_local(&self.gpr[4]);
+                self.w.const_i32(32);
+                self.w.add_i32();
+                self.set_gpr(4);
+            },
             Form::Call { target } => {
                 self.w.const_i32(i.next_pc.0 as i32);
                 self.w.set_local(&value);
@@ -3383,7 +3605,7 @@ impl Page {
     /// One instruction: a template (whose rare cases leave for the
     /// interpreter) or an interpreter fallback.
     fn instruction(&mut self, i: &Instruction, templated: &mut usize) {
-        let form = classify(&i.decoded);
+        let form = classify(&i.decoded, self.env.features);
         self.profile(profile_key(form, &i.decoded));
         let Some(form) = form
         else {
@@ -3580,7 +3802,7 @@ fn emit_units(
                         let slow = p.w.block_void();
                         p.x87_run(&run, slow);
                         for i in &insts[j..j + run.length] {
-                            let form = classify(&i.decoded);
+                            let form = classify(&i.decoded, p.env.features);
                             p.profile(profile_key(form, &i.decoded));
                         }
                         p.w.br(done);
@@ -3599,7 +3821,7 @@ fn emit_units(
                     j += 1;
                     *instructions += 1;
                     // An interpreted instruction leaves the block too (see fallback).
-                    let control = classify(&i.decoded).map_or(true, Form::control);
+                    let control = classify(&i.decoded, p.env.features).map_or(true, Form::control);
                     p.instruction(i, templated);
                     ended = control;
                 }

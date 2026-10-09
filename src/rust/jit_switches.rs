@@ -281,6 +281,69 @@ pub const SWITCHES: &[Switch] = &[
         },
         get: |_| Some(execution::ledger_on() as u32),
     },
+    // Tier-0's template changes of P3 (docs/jit-unification-plan.md P3.7),
+    // each off until its A/B flips it; page functions compiled before a
+    // change keep their code
+    Switch {
+        name: "t0_jecxz",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_JECXZ, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_JECXZ)),
+    },
+    Switch {
+        name: "t0_sreg_read",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_SREG_READ, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_SREG_READ)),
+    },
+    Switch {
+        name: "t0_xchg_mem",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_XCHG_MEM, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_XCHG_MEM)),
+    },
+    Switch {
+        name: "t0_cld_std",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_CLD_STD, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_CLD_STD)),
+    },
+    Switch {
+        name: "t0_pop_rm",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_POP_RM, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_POP_RM)),
+    },
+    Switch {
+        name: "t0_pusha",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { tier0::set_feature(tier0::T0_PUSHA, on) })
+                .is_some()
+        },
+        get: |_| Some(tier0::feature_value(tier0::T0_PUSHA)),
+    },
     // measurement: the executions of what Tier-0 compiles from now on, by
     // template kind (ir::runtime::tier0::kind_profile)
     Switch {

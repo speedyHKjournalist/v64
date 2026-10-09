@@ -445,6 +445,20 @@ pub unsafe fn ir_relaxed_fma() -> u32 { RELAXED_FMA as u32 }
 /// functions compiled before a change keep the code they have.
 static mut T0_FEATURES: u32 = 0;
 pub fn features() -> u32 { unsafe { T0_FEATURES } }
+/// t0_jecxz (P3.7): JECXZ and JCXZ as a template, not a step
+pub const T0_JECXZ: u32 = 1 << 0;
+/// t0_sreg_read (P3.7): MOV r/m, Sreg and PUSH Sreg
+pub const T0_SREG_READ: u32 = 1 << 1;
+/// t0_xchg_mem (P3.7): XCHG with a memory operand
+pub const T0_XCHG_MEM: u32 = 1 << 2;
+/// t0_cld_std (P3.7): CLD and STD
+pub const T0_CLD_STD: u32 = 1 << 3;
+/// t0_pop_rm (P3.7): POP m32
+pub const T0_POP_RM: u32 = 1 << 4;
+/// t0_pusha (P3.7): PUSHAD and POPAD
+pub const T0_PUSHA: u32 = 1 << 5;
+/// The value of the switch whose feature bit is `bit`
+pub fn feature_value(bit: u32) -> u32 { (features() & bit != 0) as u32 }
 pub unsafe fn set_feature(bit: u32, on: bool) {
     if on {
         T0_FEATURES |= bit;

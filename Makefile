@@ -47,6 +47,12 @@ ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit
 	FUZZ_KIND=s12 node tests/ir/differential/tier0_fuzz.mjs 40 2
 	FUZZ_KIND=s13 node tests/ir/differential/tier0_fuzz.mjs 40 2
 	FUZZ_KIND=b node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_jecxz=1 FUZZ_KIND=j node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_sreg_read=1 FUZZ_KIND=g node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_xchg_mem=1 FUZZ_KIND=e node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_cld_std=1 FUZZ_KIND=d node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_pop_rm=1 FUZZ_KIND=o node tests/ir/differential/tier0_fuzz.mjs 40 2
+	JIT_SWITCHES=t0_pusha=1 FUZZ_KIND=a node tests/ir/differential/tier0_fuzz.mjs 40 2
 	node tests/ir/differential/sse_fp_tracking.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/tier0_fetch_fault.mjs
 	node tests/ir/differential/tier0_irq_slow.mjs

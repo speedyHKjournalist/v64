@@ -12,10 +12,12 @@
 // FUZZ_STRADDLE=1 places each program across a page boundary and compiles
 // Tier-0 page functions with their neighbor pages (ir_t0_set_ranges).
 // Debugging: FUZZ_DEBUG=1 prints each case's MXCSR and code, FUZZ_BODY=<hex>
-// replaces the random instructions.
+// replaces the random instructions. JIT_SWITCHES applies to the Tier-0
+// machine (tests/lib/jit_switches.mjs): P3's template switches.
 import fs from "node:fs";
 import assert from "node:assert/strict";
 import { V86 } from "../../../build/libv86.mjs";
+import { jit_switches_from_env } from "../../lib/jit_switches.mjs";
 
 const cases = Number(process.argv[2] || 40);
 let seed = Number(process.argv[3] || 1) >>> 0;
@@ -45,7 +47,8 @@ const rr = (r, m) => 0xC0 | r << 3 | m;
 
 // FUZZ_KIND=i0..i33 / s0..s13 restricts programs to one instruction kind
 // (s11: SSE floating point over special values, see fp_instruction; s13: VEX
-// forms among legacy ones, see vex_instruction; b: BMI, see bmi_instruction).
+// forms among legacy ones, see vex_instruction; b: BMI, see bmi_instruction;
+// j, g, e, d, o, a: P3.7's templates, see p37_instruction).
 const only = process.env.FUZZ_KIND || "";
 const straddle = process.env.FUZZ_STRADDLE === "1";
 function instruction() {
@@ -89,6 +92,47 @@ function instruction() {
             const signed = random() & 1;
             return [0xB9, ...u32(random() | 0x10000), 0x31, 0xD2, 0xF7, rr(6 + signed, 1)];
         }
+    }
+}
+// P3.7's templates (docs/jit-unification-plan.md), one kind per switch,
+// among integer instructions:
+// j (t0_jecxz): JECXZ and JCXZ over the instruction after them, taken and
+//   not: ECX is often zero, or CX zero with the rest of ECX not
+// g (t0_sreg_read): MOV r32/r16/m16, Sreg; PUSH Sreg then POP r32 (the
+//   push writes 16 bits of the slot)
+// e (t0_xchg_mem): XCHG [ebx + disp8] with r32, r16 and r8
+// d (t0_cld_std): CLD and STD
+// o (t0_pop_rm): POP m32 after PUSH r32/imm32/m32; POP [esp + disp8]
+//   stays a step (its address uses ESP)
+// a (t0_pusha): PUSHAD, an instruction, POPAD
+function p37_instruction() {
+    if(random() % 3 === 0) return instruction();
+    const r = reg(), seg = random() % 6;
+    switch(only) {
+        case "j": switch(random() % 4) {
+            case 0: return random() & 1 ? [0x31, 0xC9] : [0xB9, ...u32(random() & 0xFFFF0000)]; // ECX 0, CX 0
+            case 1: { const next = instruction(); return [0x67, 0xE3, next.length, ...next]; }   // JCXZ over it
+            default: { const next = instruction(); return [0xE3, next.length, ...next]; }       // JECXZ over it
+        }
+        case "g": switch(random() % 4) {
+            case 0: return [0x8C, rr(seg, r)];                                    // MOV r32, Sreg
+            case 1: return [0x66, 0x8C, rr(seg, r)];                              // MOV r16, Sreg
+            case 2: return [0x8C, 0x43 | seg << 3, disp()];                       // MOV m16, Sreg
+            default: return [...pick([[0x06], [0x0E], [0x16], [0x1E], [0x0F, 0xA0], [0x0F, 0xA8]]), 0x58 | r]; // PUSH Sreg; POP r32
+        }
+        case "e": switch(random() % 3) {
+            case 0: return [0x87, ...mem(r)];                                     // XCHG m32, r32
+            case 1: return [0x66, 0x87, ...mem(r)];                               // XCHG m16, r16
+            default: return [0x86, 0x43 | pick(BYTE_REGS) << 3, disp()];          // XCHG m8, r8
+        }
+        case "d": return [pick([0xFC, 0xFD])];                                    // CLD, STD
+        case "o": switch(random() % 4) {
+            case 0: return [0x50 | r, 0x8F, 0x43, disp()];                        // PUSH r32; POP m32
+            case 1: return [0x68, ...u32(random()), 0x8F, 0x43, disp()];          // PUSH imm32; POP m32
+            case 2: return [0xFF, 0x73, disp(), 0x8F, 0x43, disp()];              // PUSH m32; POP m32
+            default: return [0x50 | r, 0x50 | r, 0x8F, 0x44, 0x24, 0x00, 0x58 | r]; // POP [esp] (a step)
+        }
+        default: return [0x60, ...instruction(), 0x61];                          // PUSHAD; ...; POPAD
     }
 }
 // b: BMI1 and BMI2's VEX forms, TZCNT, LZCNT and MOVBE (P10; Tier-0 has
@@ -344,6 +388,7 @@ function program() {
         const float = only ? only === "x" : random() % 7 === 0;
         // Single-kind programs still interleave PUSHFD/LAHF to expose FLAGS.
         body.push(...(only && only !== "s12" && k % 4 === 3 ? [0x9C, 0x8F, 0x43, disp()] : only === "b" ? bmi_instruction() :
+            ["j", "g", "e", "d", "o", "a"].includes(only) ? p37_instruction() :
             float ? x87() : vector ? simd() : instruction()));
     }
     // DEC DWORD [ebx + 124]; JNZ top; HLT
@@ -363,6 +408,7 @@ async function machine(tier0) {
         // x86-64 profile's LZCNT)
         cpu_features: ["SSSE3", "SSE4.1", "SSE4.2", "XSAVE", "AVX", ...only === "b" ? ["BMI1", "BMI2", "LZCNT", "MOVBE"] : []],
         ...only === "b" ? { cpu_type: "x86_64" } : {}, cpu_features_unreleased: true,
+        ...tier0 ? { jit_switches: jit_switches_from_env() } : {},
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });

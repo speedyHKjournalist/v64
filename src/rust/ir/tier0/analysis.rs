@@ -92,6 +92,9 @@ pub struct PagePlan {
     /// other code: jump targets, and falling (or an instruction running)
     /// off the end of the analyzed pages.
     pub jumps: Vec<u32>,
+    /// Tier-0's features the plan was made for (CompileEnv::features: they
+    /// decide which instructions have templates)
+    pub features: u32,
 }
 
 /// Direct successors of the block-ending instruction at `offset`, as linear
@@ -119,7 +122,7 @@ fn successors(i: &DecodedInstruction, offset: usize, slots: &Slots) -> Vec<u32> 
 /// instruction's fall-through), as function offsets.
 fn block_targets(plan: &PagePlan, b: &Block, only_ends: bool) -> Vec<usize> {
     let last = b.instructions.last().unwrap();
-    if only_ends && !ends_block(&last.decoded) {
+    if only_ends && !ends_block(&last.decoded, plan.features) {
         return vec![];
     }
     let mut targets = successors(&last.decoded, last.offset as usize, &plan.slots);
@@ -137,11 +140,11 @@ fn block_targets(plan: &PagePlan, b: &Block, only_ends: bool) -> Vec<usize> {
 }
 /// Control transfers, boundary encodings, and instructions without a
 /// template: those run in the interpreter and continue by dispatch.
-fn ends_block(i: &DecodedInstruction) -> bool {
+fn ends_block(i: &DecodedInstruction, features: u32) -> bool {
     i.baseline_ud
         || i.encoding.block_boundary
         || !matches!(i.flow, Flow::Next | Flow::Boundary)
-        || !super::emit::templated(i)
+        || !super::emit::templated(i, features)
 }
 
 pub fn analyze(
@@ -151,6 +154,8 @@ pub fn analyze(
     entries: &[usize],
     // Block starts in this range are decoded first (the budget favors them).
     prefer: std::ops::Range<usize>,
+    // Tier-0's features (CompileEnv::features)
+    features: u32,
 ) -> PagePlan {
     let size = bytes.len();
     debug_assert!(size == slots.span());
@@ -208,7 +213,7 @@ pub fn analyze(
             decoded_at[at] = true;
             total += 1;
             let length = decoded.length as usize;
-            if ends_block(&decoded) {
+            if ends_block(&decoded, features) {
                 let call = matches!(decoded.flow, Flow::Relative { call: true, .. });
                 let mut targets = successors(&decoded, at, &slots);
                 let calls = call as usize;
@@ -253,7 +258,7 @@ pub fn analyze(
         let run_end = slots.run_end(start);
         while let Some(decoded) = decode_at(at) {
             let length = decoded.length as usize;
-            let last = ends_block(&decoded);
+            let last = ends_block(&decoded, features);
             instructions.push(Instruction {
                 offset: at as u16,
                 decoded,
@@ -292,6 +297,7 @@ pub fn analyze(
         return_site,
         external,
         jumps,
+        features,
     }
 }
 

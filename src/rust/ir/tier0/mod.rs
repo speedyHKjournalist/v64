@@ -14,7 +14,7 @@ use crate::ir::{
     runtime::{
         compile::{CompileRequest, CompiledArtifact, ImmutableCodeSnapshot, Tier},
         entry::{CpuEntryKey, EntryContract},
-        tier0::Link,
+        tier0::{features, Link},
     },
 };
 use crate::state_flags::CachedStateFlags;
@@ -112,7 +112,14 @@ pub fn range(
         .map(|e| (e.linear.0 & 4095) as usize)
         .collect();
     let slots = analysis::Slots::new(vec![base], origin.cpu_entry().cs_base());
-    let plan = analysis::analyze(&primary.bytes, slots, origin.default_32, &offsets, 0..4096);
+    let plan = analysis::analyze(
+        &primary.bytes,
+        slots,
+        origin.default_32,
+        &offsets,
+        0..4096,
+        features(),
+    );
     let into = |page: u32| plan.jumps.iter().any(|&t| t & !4095 == page);
     let before = into(base.wrapping_sub(4096)) && code_page(base.wrapping_sub(4096));
     let after = into(base.wrapping_add(4096)) && code_page(base.wrapping_add(4096));
@@ -139,7 +146,14 @@ pub fn continues(
         vec![base, base.wrapping_add(4096)],
         origin.cpu_entry().cs_base(),
     );
-    let plan = analysis::analyze(&snapshot.bytes, slots, origin.default_32, &offsets, 0..4096);
+    let plan = analysis::analyze(
+        &snapshot.bytes,
+        slots,
+        origin.default_32,
+        &offsets,
+        0..4096,
+        features(),
+    );
     plan.jumps
         .iter()
         .any(|&t| t & !4095 == base.wrapping_add(8192))
@@ -167,7 +181,14 @@ pub fn runs_on(
         return false;
     }
     let slots = analysis::Slots::new(vec![base], cs_base);
-    let plan = analysis::analyze(&snapshot.bytes, slots, default_32, &offsets, 0..4096);
+    let plan = analysis::analyze(
+        &snapshot.bytes,
+        slots,
+        default_32,
+        &offsets,
+        0..4096,
+        features(),
+    );
     plan.jumps
         .iter()
         .any(|&t| t & !4095 == base.wrapping_add(4096))
@@ -252,6 +273,7 @@ pub fn compile_page_with(
                 .map(|e| (e.linear.0 & 4095) as usize)
                 .collect::<Vec<_>>(),
             0..analysis::PAGE,
+            env.features,
         );
         offsets.extend(
             alone
@@ -267,6 +289,7 @@ pub fn compile_page_with(
         origin.default_32,
         &offsets,
         own..own + analysis::PAGE,
+        env.features,
     );
     let served: Vec<CpuEntryKey> = entries
         .iter()
