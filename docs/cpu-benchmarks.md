@@ -18,6 +18,10 @@ node tests/bench/run.mjs --xp windowsxp.img --xp-runs 3   # add the XP boot benc
 node tests/bench/run.mjs --ir-setup ir_t0_set_ranges=1     # call IR exports after boot, on every arm
 node tests/bench/report.mjs build/bench/results-new.json build/bench/results-old.json
 node tests/bench/run.mjs --fallbacks                       # list the opcodes Tier-0 interprets
+node tests/bench/run.mjs --switches-a ir_fusion=1 --switches-b ir_fusion=0   # two JIT configurations of one core
+node tests/bench/compare.mjs --switches-a x64_outline=0 --sessions 3 --level R  # sessions, then the gate
+node tests/bench/gate.mjs --level R --retest retest.json session1.json session2.json session3.json
+JIT_STATS=1 node tests/bench/run.mjs --filter 708   # add a JIT statistics record per benchmark and arm
 ```
 
 `BENCH_ARGS` passes options through the make targets. Results are written to
@@ -45,6 +49,32 @@ the geometric mean of the ratios, reported overall and per category, for warm
 and cold runs separately. Result files recorded before IR became the only
 backend carry a `legacy` arm instead; `report.mjs` uses it as their reference. MIPS are retired guest
 instructions per second (a REP string instruction counts once).
+
+## Gates and comparisons
+
+The gates of [jit-unification-plan.md](jit-unification-plan.md) (cross-phase
+rule 2) judge the medians of several sessions, never one session: a quick
+session moves single benchmarks by 5–15% even between identical cores.
+
+- `tests/bench/gate.mjs --level R|F|S|D session.json...` takes each
+  benchmark's median warm ratio over the sessions and applies the level's
+  thresholds (R: suite geometric mean ≥ 0.99, each ≥ 0.97; F: each `--target`
+  ≥ 1.05, suite ≥ 1.00; S: the same-source members ≥ 1.00, each ≥ 0.85; D:
+  suite ≥ 1.00, each ≥ 0.95). For R it prints the `--runs 7` retest of the
+  benchmarks below 0.97; `--retest file.json` puts the retest's ratios in
+  their place. `--aa` reports the noise of sessions that ran one core
+  against itself.
+- `tests/bench/compare.mjs` runs `--sessions` sessions of two JIT switch
+  configurations (`--switches-a`, `--switches-b`) of one core and gates them;
+  `--aa` measures the noise first.
+- JIT switches (`src/rust/jit_switches.rs`) are set by name: the runner's
+  `--switches-a/--switches-b`, the environment's `JIT_SWITCHES=name=value,...`
+  for every arm, and the V86 option `jit_switches`. `JIT_DEFAULTS=... make`
+  builds a core with other defaults.
+- `JIT_STATS=1` adds a record of `tools/bench/jit_stats.mjs` to each
+  benchmark's arm: the switches, the retired instructions (the counter of
+  `core_statistics_get`), the x64 page tier's and IR's counters. The XP boot
+  script prints the same record as a `JIT_STATS` line.
 
 ## Benchmarks
 

@@ -1,0 +1,55 @@
+// One JIT statistics record for the measuring scripts
+// (docs/jit-unification-plan.md P0.7): tests/bench/run.mjs,
+// tests/ir/performance/xp_boot.mjs and tests/x64/windows_boot.mjs write the
+// same record with JIT_STATS=1. It says what ran (the core file, the JIT
+// switches) and what the JITs did, with the definitions of cross-phase rule 3:
+// retired instructions are core_statistics_get(core, 0) (a REP instruction
+// counts once, a faulting one not at all); the x64 page tier's counters
+// (x64_page_stat), IR Tier-0's and the regions' (CPU.get_jit_info).
+
+import { get_jit_switches } from "../../src/jit_switches.js";
+
+// x64_page_stat(index), crate::x64::pages
+const X64_FIELDS = ["compiled", "native_retired", "retries", "unknown_exits", "steps", "invalidated", "entries",
+    "compile_failures", "recompiles", "instructions_compiled", "templated", "evictions", "ready_functions"];
+const X64_EXTRA = { 21: "pages_compiled", 24: "bytes_compiled", 20: "ms_in_calls", 22: "ms_in_execute" };
+
+/** Whether the scripts write records: JIT_STATS=1 */
+export function jit_stats_enabled(env = process.env)
+{
+    return env["JIT_STATS"] === "1";
+}
+
+/**
+ * The record of an emulator (a V86 or its cpu) now; `extra` adds the script's
+ * own fields (the core file, what it measured, the workload)
+ */
+export function jit_stats(emulator, extra = {})
+{
+    const cpu = emulator.v86 ? emulator.v86.cpu : emulator;
+    const exports = cpu.wm.exports;
+    const cores = Math.max(1, cpu.cores?.length || 0);
+    const retired = Array.from({ length: cores }, (_, core) => exports["core_statistics_get"](core, 0));
+    let x64 = null;
+    if(exports["x64_page_stat"])
+    {
+        x64 = {};
+        X64_FIELDS.forEach((name, index) => { x64[name] = exports["x64_page_stat"](index); });
+        for(const [index, name] of Object.entries(X64_EXTRA)) x64[name] = exports["x64_page_stat"](Number(index));
+    }
+    return {
+        version: 1,
+        ...extra,
+        switches: get_jit_switches(exports, cpu.wasm_memory),
+        retired,
+        retired_total: retired.reduce((sum, n) => sum + n, 0),
+        x64,
+        ir: cpu.get_jit_info()["ir"],
+    };
+}
+
+/** Prints the record as one line: JIT_STATS {...} */
+export function print_jit_stats(emulator, extra = {})
+{
+    console.log("JIT_STATS " + JSON.stringify(jit_stats(emulator, extra)));
+}

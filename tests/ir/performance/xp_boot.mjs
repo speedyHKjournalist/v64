@@ -2,6 +2,8 @@ import fs from "node:fs";
 import assert from "node:assert/strict";
 import { createRequire as create_require } from "node:module";
 import { V86 } from "../../../build/libv86.mjs";
+import { jit_switches_from_env } from "../../lib/jit_switches.mjs";
+import { jit_stats_enabled, print_jit_stats } from "../../../tools/bench/jit_stats.mjs";
 // The guest's v86gl driver finds its device; no renderer answers
 const { createV86GLDevice: create_v86gl_device } = create_require(import.meta.url)("../../../src/browser/glbridge/v86gl_device.js");
 
@@ -72,6 +74,8 @@ const vm = new V86({
     virtio_devices: [create_v86gl_device({ remote: false, post() {}, listen() {} })],
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
     net_device: { type: "ne2k" }, autostart: false,
+    // (JIT_SWITCHES, tests/lib/jit_switches.mjs)
+    ...Object.keys(jit_switches_from_env()).length ? { jit_switches: jit_switches_from_env() } : {},
 });
 let started, previous, count, total = 0;
 vm.add_listener("screen-set-size", size => {
@@ -205,6 +209,8 @@ try {
         kinds.sort((a, b) => b[1] - a[1]);
         console.log(JSON.stringify({event:"tier0_bytes", kinds: kinds.map(([k, b, n]) => `${k}:${b}/${n}=${(b / n).toFixed(0)}`)}));
     }
+    // (tools/bench/jit_stats.mjs, docs/jit-unification-plan.md P0.7)
+    if(jit_stats_enabled()) print_jit_stats(vm, { script: "xp_boot", wasm, target, milestone, ms: performance.now() - started });
     console.log(JSON.stringify({event:"result", target, completed:target === "time" || !!milestone,
         ms:performance.now()-started, instructions:total, milestone, jit:vm.get_jit_info(),
         // Accumulate wrapping counters per interval; long boots can exceed 2^32.

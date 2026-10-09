@@ -70,6 +70,8 @@ import {spawnSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {fileURLToPath} from "node:url";
 import {MemoryDisk, ReadOnlyOverlayDisk, make_fat16, read_fat16} from "../smp/disk_fixture.mjs";
+import {jit_switches_from_env} from "../lib/jit_switches.mjs";
+import {jit_stats_enabled, print_jit_stats} from "../../tools/bench/jit_stats.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const image_path = path.resolve(process.env.WIN_IMAGE || path.join(root, "../retro-gaming-site/windows8/windows8.img"));
@@ -148,6 +150,8 @@ const vm = new V86({
     acpi: true, cpu_cores: cores, net_device: {type: "ne2k"}, autostart: false, log_level: 0,
     // WIN_QEMU_COMPATIBLE=1: devices where QEMU, which the image was installed with, had them
     qemu_compatible: !!+process.env.WIN_QEMU_COMPATIBLE,
+    // JIT_SWITCHES (tests/lib/jit_switches.mjs)
+    ...(Object.keys(jit_switches_from_env()).length ? {jit_switches: jit_switches_from_env()} : {}),
     ...(process.env.WIN_MACHINE ? {machine_type: process.env.WIN_MACHINE, hpet: !!+process.env.WIN_HPET,
         pcie_root_ports: +process.env.WIN_ROOT_PORTS || 0, smbus: !!+process.env.WIN_SMBUS} : {}),
     ...(process.env.WIN_PCIE_DEVICE ? {virtio_devices: [{"name": "hotplug", "device_id": 0x1044, "subsystem_device_id": 4,
@@ -1113,6 +1117,8 @@ try
         {
             report.desktop_s = elapsed();
             event("desktop");
+            // (tools/bench/jit_stats.mjs, docs/jit-unification-plan.md P0.7)
+            if(jit_stats_enabled()) print_jit_stats(vm, {script: "windows_boot", wasm: process.env.WASM_PATH || null, desktop_s: report.desktop_s, cores});
             for(let attempt = 0; process.env.WIN_LAUNCHER && !launcher_ready && attempt < 4; attempt++)
             {
                 if(process.env.WIN_LAUNCHER_ADMIN) await run_admin(process.env.WIN_LAUNCHER);

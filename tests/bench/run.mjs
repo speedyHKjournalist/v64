@@ -6,6 +6,10 @@
 //        [--wasm build/v86-ir-runtime.wasm] [--baseline other.wasm]
 //        [--xp image.img] [--xp-runs 3] [--out file.json] [--quick]
 //        [--ir-setup "export=value,..."]   (calls on every arm after boot)
+//        [--switches-a "name=value,..."] [--switches-b "name=value,..."]
+//            (the JIT switches of the arm and of the baseline, over
+//            JIT_SWITCHES; --switches-b without --baseline compares two
+//            configurations of one core, see tests/bench/compare.mjs)
 //        [--fallbacks]   (IR: print the instructions most often interpreted)
 //
 // Build the suite first: node tools/bench/build.mjs (make bench-build).
@@ -22,6 +26,9 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { spawnSync, execSync } from "node:child_process";
 import { V86 } from "../../build/libv86.mjs";
+import { parse_jit_switches } from "../../src/jit_switches.js";
+import { jit_switches_from_env } from "../lib/jit_switches.mjs";
+import { jit_stats, jit_stats_enabled } from "../../tools/bench/jit_stats.mjs";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 process.chdir(root);
@@ -47,9 +54,10 @@ assert(Number.isInteger(runs) && runs >= 1 && Number.isInteger(cold_runs) && col
 
 const manifest = JSON.parse(fs.readFileSync("build/bench/manifest.json", "utf8"));
 const boot = fs.readFileSync(manifest.boot);
+const switches = name => ({ ...jit_switches_from_env(), ...parse_jit_switches(option(name)) });
 const arms = [
-    { label: "ir", wasm },
-    ...baseline ? [{ label: "baseline", wasm: baseline }] : [],
+    { label: "ir", wasm, switches: switches("switches-a") },
+    ...baseline || option("switches-b") ? [{ label: "baseline", wasm: baseline || wasm, switches: switches("switches-b") }] : [],
 ];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
@@ -84,6 +92,7 @@ async function create(arm, bench) {
         ...bench.cpu_type ? { cpu_type: bench.cpu_type } : {},
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
+        ...Object.keys(arm.switches).length ? { jit_switches: arm.switches } : {},
     });
     await new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); });
     const cpu = vm.v86.cpu;
@@ -156,6 +165,11 @@ for(const bench of manifest.benchmarks) {
                 const s = await execute(m, image, iterations);
                 note(m.arm, s);
                 row.arms[m.arm.label].warm_ms.push(s.ms);
+            }
+            // (tools/bench/jit_stats.mjs, docs/jit-unification-plan.md P0.7)
+            if(jit_stats_enabled())
+            {
+                for(const m of machines) row.arms[m.arm.label].jit_stats = jit_stats(m.vm, { script: "bench", benchmark: bench.name, arm: m.arm.label, wasm: m.arm.wasm });
             }
         }
         finally {

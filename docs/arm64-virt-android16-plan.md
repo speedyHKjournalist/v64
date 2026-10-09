@@ -1210,3 +1210,15 @@ flowchart TD
 19. （已写入）第 550 行（P6.3b）：标量与向量的乘加（FMADD 族、FMLA/FMLS）在宿主融合时用 relaxed 乘加，探测与准入
     条件同 x86 的 `native_fp::fused`，另要求 FPCR 的 RMode 为 RN、FZ 为 0 且 FPSR.IXC 已置位（本计划待决问题 12）；
     JIT 计划跨阶段规则 8 的 FMA 一条同时注明 A64 用同一个探测。
+
+## 附录 E：实施记录
+
+实施在 `jit` 分支上与 JIT 计划一起进行，详细记录在 JIT 计划附录 C。
+
+- A0，P0.7（2026-10-09）：`tools/wasm_diff.mjs` 与 `make core-split-check` 已落地，并进入 JIT 计划的 `make jit-gate`。
+  同一 commit 在两个目录各构建一次，`v86.wasm` 逐字节一致。按函数比较会把移位与真正的改变分开：调用目标比较
+  函数名，静态数据移动时把数据区内的地址换成占位。一处无关的小改动（多一个导出函数）报 0 个改变、1 个新增。
+  但在 16 个代码生成单元下，加入一个模块会让上百个无关函数改变，所以 P1.0 之前要先定 JIT 计划 P0.14 的
+  `codegen-units`。
+- 本机 `build/softfloat.o` 与 `build/zstddeclib.o` 只在源码变化时重建，可能出自旧 clang；比较脚本让两边链接同一份。
+  P1.0 拆分核心时，ARM 核心的 C 目标文件同样要注意这一点。

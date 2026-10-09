@@ -356,7 +356,7 @@ region 管线与 ir/runtime 在 M11 删除；在此之前 region 冻结，它的
 | P0.10 | 用新工具记录长模式基线和单步占比 s：bench x86_64（page tier 与纯解释器校验和一致）、XP、Win8.1、3DMark06；同时记录 Wasm 表空闲槽最小值和两侧驱逐数 | 同上 | 仅测量时启用 | S |
 | P0.11 | 文档：[cpu-benchmarks.md](cpu-benchmarks.md)、[profiling.md](profiling.md)（StepKey、统计单位、s 的唯一定义）、[x86-64.md](x86-64.md) 实测表 | `docs/` | 无 | S |
 | P0.12 | **CPULOAD32**：用 `i686-w64-mingw32-gcc` 构建 32 位版 CPU 负载程序，作为 WOW64 的计时负载；M1 记录 Tier-0 下的基线，M4 再记录一次 | `tests/x64/windows_boot.mjs:94` | 无 | S |
-| P0.13 | **Tier-0 多页函数的贡献**：为邻页（range）与伙伴页（partner）重编译加一个总开关（邻页已有 `ir_t0_set_ranges`，伙伴页没有），测 `708.pages`、`502.codebloat` 与 XP 桌面的差异；结果决定 P7.3b 是否需要 | `ir/runtime/cache.rs:986-1131`、`ir/runtime/schedule.rs:386-404` | `t0_clusters` | S |
+| P0.13 | **Tier-0 多页函数的贡献**：为邻页（range）与伙伴页（partner）重编译加一个总开关 `ir_t0_clusters`（开关注册表，默认开；`ir_t0_set_ranges` 不是这个开关，它让所有页都按邻页编译），测 `708.pages`、`502.codebloat` 与 XP 桌面的差异；结果决定 P7.3b 是否需要 | `ir/runtime/cache.rs:986-1131`、`ir/runtime/schedule.rs:386-404` | `ir_t0_clusters` | S |
 | P0.14 | **codegen-units**：`[profile.release]` 没有设置，取默认的 16 个代码生成单元。核心拆分评审实测，这时一处无关的小改动也会改变约 12 个 x86/IR 函数；`codegen-units = 1` 时这类变化消失，代码段小 4.6%，性能未知。用 P0.8 的工具对 `codegen-units = 1` 跑一次 R 级（bench、XP 与 Win8.1 桌面），同时记录 release 构建时间。通过则在 M1 改为默认，规则 12 的按函数比较不再把无关变化报成改动；不通过则保持 16，记录数据，按函数比较照常报告这类变化，相应的 PR 照跑 R 级 | `Cargo.toml:31-35` | 构建期 | S |
 | P0.15 | **Win98 工作负载**：把 `tests/ir/performance/game_state.mjs` 扩展到 Win98（Win98 存档里没有 9p 文件系统与 v86gl 设备，二者改为可选），增加不带存档的冷启动，并在每个约 1 ms 的执行片（`TIME_PER_FRAME`，`cpu.rs:76`）结束时采样 CPU 模式（实模式、V86、Prot16、Legacy32 与特权级），作为 P0.6 合入前的近似；固定一组存档（《暗黑破坏神》《红色警戒 2》《主题医院》，再按测量补上 16 位或 V86 占比高的）与冷启动到桌面，记录 3 次会话的 MIPS 与按模式的时间占比；`tools/owner_perf.mjs` 加入这些项 | `tests/ir/performance/game_state.mjs:148-158`；retro-gaming-site 的 `windows98/states/`、`app.js` | 无 | S |
 
@@ -954,3 +954,77 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 | SSE 浮点与 SIMD/XSAVE | `src/rust/cpu/simd_fp.rs`（精确核心）、`src/rust/ir/native_fp.rs`（原生准入，含 FMA 的 `fused`）、`src/cpu.js` 的 `relaxed_fma_fused` 探测、`src/cpu_features.js`（`x86-64-v2`、`x86-64-v3` 预设） |
 | 基准与测试 | `tests/bench/`（`same_source.mjs` 与 `tools/bench/build64.mjs` 由 P0.2–P0.4 新写）、`tests/ir/differential/tier0_fuzz.mjs`、`tests/x64/page_fuzz.mjs`、`tests/x64/windows_boot.mjs`、`tests/ir/performance/xp_boot.mjs` |
 | 门禁 | 本地：`Makefile` 的 `jit-gate` 与 `jit-gate-full`（P0.9）；GitHub 上的 `.github/workflows/ci.yml`、`ir-core.yml` 暂不处理（待决问题 1） |
+
+## 附录 C：实施记录
+
+实施从 `985f518d` 之后的 `jit` 分支开始，按里程碑记录做了什么、测得什么。
+
+### M1（进行中）
+
+**本地门禁与核心比较（P0.9、P7.6；ARM64 计划 P0.7），2026-10-09。**
+
+- `tools/wasm_diff.mjs` 按段比较两个 wasm，code 段再按函数比较。函数先按 name 段的名字对齐（再按去掉
+  Rust 哈希与 LLVM 数字后缀的名字，最后按相同的函数体）；字节不同的函数再解码比较：调用目标换成函数名，
+  类型索引换成签名，数据段或 global 段变化时，落在静态数据区里的常量与访存偏移换成占位。这样相等的函数
+  记为"只是移位"，其余才算改变。自定义段与数据段（含 panic 位置数据）单列。
+- `make core-split-check`（`tools/core_split_check.mjs`）在 `build/core-split/base` 工作树里构建基准 commit
+  （默认 HEAD），与工作树的 `build/v86.wasm` 比较，并给出体积与 compile、instantiate 时间（5 次的中位数）。
+  没有改动喂给 x86 核心时要求逐字节一致。两点实测发现：
+  - Makefile 只在源码变化时重建 `build/softfloat.o` 与 `build/zstddeclib.o`，本机的是 2 月用旧 clang 编的，
+    与新编的不同（全部 `extF80M_*`、`HUF_*`、`ZSTD_*` 函数都变）。所以基准工作树改用工作树的这两个目标文件，
+    `lib/` 有改动时两边各自构建。
+  - cargo 不跟踪经 `-C link-args` 传入的目标文件，换了它们也不重新链接；脚本此时删除该 crate 的 fingerprint。
+  - 同一 commit 在两个目录各构建一次：逐字节一致。
+- `make jit-gate`（提交前）与 `make jit-gate-full`（里程碑出口），由 `tools/jit_gate.mjs` 实现：`git diff --check`、
+  `state-layout-check`、两种 `cargo check -D warnings`、rustfmt、eslint（设了 `ESLINT` 时）、region 冻结检查、
+  `core-split-check`，再按改动的路径跑 `ir-tier0-tests`、`x64-page-tier-tests` 与 `jit-switch-tests`；完整档再加
+  `make ir-core-tests`（`ir-core.yml` 的全部步骤，工作流本身不改）与全部发布级别的 `--quick`。发布门禁新增
+  R-IR 级别（`ir-core-tests`）。快速档在本机约 3 分钟。
+- `tools/check_region_freeze.mjs`（P7.6）：基准（与 master 的 merge base）之后触及冻结路径的提交须写
+  `region-fix-only`；未提交的改动须设 `REGION_FIX_ONLY=1`。
+- 顺带修复：`gen/state_layout.js` 漏登记 `cpu/mmio_ram.rs` 的测试静态量 `TEST_TABLE`，master 上的
+  `state-layout-check` 因此失败。
+
+**开关注册表（跨阶段规则 1），2026-10-09。**
+
+- `src/rust/jit_switches.rs` 登记 29 个开关：x64 page tier 7 个，IR 的 Tier-0、调度器与缓存 22 个（含 P0.13 新增的
+  `ir_t0_clusters`）。导出 `jit_switch_count`、`jit_switch`、`jit_set_switch`、`jit_switch_explicit` 与名字表。
+  旧的设置函数保留为别名，`jit_switch` 读到的总是实际值；region 专属设置随 region 冻结，不纳入；尾调用是宿主能力，
+  不是开关。按表中顺序应用（`ir_tier0` 会重设 `ir_page_threshold`，所以在它前面）。
+- `src/jit_switches.js` 按名字读写；V86 选项 `jit_switches`（对象或 `"name=value,..."`）在 `configure_jit_backend`
+  之后、构建期默认值 `JIT_DEFAULTS` 之后应用，未知名字或被拒绝的值使构造失败。`JIT_DEFAULTS` 经
+  `build/jit-defaults` 戳在值变化时重建全部 wasm。
+- vCPU worker：starter 把机器上经注册表设置的值传给 worker，worker 在自己的 `configure_jit_backend` 之后应用；
+  之后机器上的改动由 `copy_from_machine` 在每个执行片开始时跟进（每个改动只应用一次）。
+- 测试：`tests/api/jit-switches.js`（`make jit-switch-tests`，也在 `api-tests` 里）检查全部默认值、往返、拒绝、
+  别名与选项；`tests/lib/jit_switches.mjs` 读取 `JIT_SWITCHES`；`tests/parallel/lifecycle.mjs` 已接入，带开关运行
+  通过，worker 收到的正是机器上设置的值。
+- R 级（bench）：与 HEAD 比较，quick 一次会话 warm 0.992、cold 0.984；低于 0.97 的 4 项用 `--runs 7` 复测都是 1.00。
+  XP 与 Win8.1 桌面部分随 P0.1 的基线一起测。
+
+**观察：16 个代码生成单元下的无关改变。** 加入注册表模块后，`core-split-check` 报出 143 个函数改变，其中多数与
+注册表无关（`main_loop`、`t0_execute`、pagegen 的 `Emitter::emit`、解释器的指令函数等）：模块划分变了，内联
+决定随之改变。按函数比较因此需要 P0.14，它提前做。
+
+**P0.14 codegen-units：改为 1，2026-10-09。** 同一源码（注册表之后）分别以 1 与 16 个代码生成单元构建：
+`v86.wasm` 5,421,741 对 5,612,468 字节（小 3.4%），release 构建 42 s 对约 37 s。R 级全部通过：
+
+- bench：quick 一次会话 warm 1.008、cold 1.006；`gate.mjs` 列出的低于 0.97 的项用 `--runs 7` 复测后，几何均值 1.010，
+  没有低于 0.97 的项；`720.bmi.bits` 稳定快 1.27×。
+- XP（所有者的配置，`IR_SYNC_DISK=1`，到 800×600×32）：3 次交替会话的中位数 13.20 s 对 12.94 s，快 2%。
+- Win8.1（单核、release 打包、首次启动到桌面）：171 s 对 166 s，快 3%。
+
+`Cargo.toml` 的 `[profile.release]` 因此设 `codegen-units = 1`，`core-split-check` 的按函数比较从此不会把无关变化
+报成改动。
+
+**测量工具（P0.7、P0.8，P0.4 的一部分），2026-10-09。**
+
+- `tools/bench/jit_stats.mjs`：同一份 JIT 统计记录（开关、按规则 3 的退役指令、x64 page tier 与 IR 的计数器），
+  `JIT_STATS=1` 时由 `tests/bench/run.mjs`（每个基准、每个 arm）、`xp_boot.mjs` 与 `windows_boot.mjs`（到桌面时）写出。
+- `tests/bench/gate.mjs`：按 R、F、S、D 的阈值判定多个会话（单项取中位数，再取几何均值），R 级给出复测命令并接受
+  复测文件；`--aa` 报告噪声。`tests/bench/compare.mjs`：同一核心两种开关配置的多个会话，再交给 `gate.mjs`。
+- `run.mjs` 增加 `--switches-a`、`--switches-b`（P0.4 的每 arm 开关）；三个脚本都读取 `JIT_SWITCHES`。用法写进
+  [cpu-benchmarks.md](cpu-benchmarks.md)。
+- 注册表变更本身的 R 级（bench）：quick 会话加复测后几何均值 1.001，通过。
+- 一次 quick 会话里单项会因噪声偏离 5–15%（例如 `719.avx2.scan` 0.84，复测 1.00），所以门禁一律看多次会话的
+  中位数与复测。
