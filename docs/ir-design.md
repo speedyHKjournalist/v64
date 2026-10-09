@@ -132,6 +132,11 @@ faults, and devices has been exhausted.
                  +--------------------+--------------------+
                                       |
                       +---------------v----------------+
+                      | x86tpl: x86 leaves + templates |
+                      | shared with the x64 page tier  |
+                      +---------------+----------------+
+                                      |
+                      +---------------v----------------+
                       | Wasm emission / WasmBuilder    |
                       +---------------+----------------+
                                       |
