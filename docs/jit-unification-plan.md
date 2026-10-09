@@ -219,7 +219,7 @@ region 管线与 ir/runtime 在 M11 删除；在此之前 region 冻结，它的
 | `jitrt` | 表槽、写监视与失效、发布、容量、热度、链接表与访问缓存的数据结构、单步/退出 ABI、指标 | 源码共享。x86 核心里是 `X86Page`，以及 M11 删除 region 之前的 `IrRuntime`；ARM 核心里只有 `A64Page` | 只能引用 `std`、`crate::page`、`crate::wasmgen`、`crate::leb`；不得出现 `feature = "aarch64"`，ISA 差异经 `jitrt::host::Env` 或泛型参数传入；本地门禁检查 |
 | `pagegen/frame.rs` | 页函数骨架：分派、结构化环路、预算、退出、链接探针、访存查找的发射（冷页外置 / 热页内联）、块发现、活跃性不动点 | 源码共享：x86 page 客户端（三种模式）、A64 | 不含任何 ISA 语义；不得出现 `feature = "aarch64"` |
 | `wasmgen` 叶子 | v128/f64 通用发射函数 | 源码共享：x86tpl、A64 NEON | 无 ISA 依赖 |
-| `x86tpl` | x86 专用叶子：Packed 表、SSE 浮点（含 P2.4 移入的精确准入 `native_fp`）、SIMD/XSAVE 计划的 VEX、AVX2、FMA 与 BMI 模板（P2.11）、MMX、CVT、x87（words、值检查、缓存与 run 规划）、REP 串 | 只在 x86 核心：pagegen；删除前的 Tier-0 与 region（P2.2 的 x87、P2.4 的浮点准入） | 不得引用 `x64`、`ir::tier0`、`ir::runtime`、`jit`、region 后端 |
+| `x86tpl` | x86 专用叶子：Packed 表、SSE 浮点（含 P2.4 移入的精确准入 `native_fp`）、SIMD/XSAVE 计划的 VEX、AVX2 与 FMA 模板（P2.11）、MMX、CVT、x87（words、值检查、缓存与 run 规划）、REP 串 | 只在 x86 核心：pagegen；删除前的 Tier-0 与 region（P2.2 的 x87、P2.4 的浮点准入） | 不得引用 `x64`、`ir::tier0`、`ir::runtime`、`jit`、region 后端 |
 | 各 ISA 模块 | 解码、flags 物化、单步上下文、访存路径的选择（jac 或 32 位 TLB）、系统指令 | 本 ISA。x86 模块挂 `cfg(not(feature = "aarch64"))`，A64 模块挂 `cfg(feature = "aarch64")` | 留在 ISA 侧，不进入共享层 |
 | `lib.rs` | 按特性选择编进核心的模块；选定 `jit.rs`、`parallel.rs` 中 ISA 挂钩点的实现；导出 ISA 标记（ARM64 计划 P1.0） | 两个核心 | 共享代码里只有它和 `src/rust/aarch64/` 可以写 `feature = "aarch64"`（规则 12） |
 | `jit.rs` | x86 组合根：热路径组合函数、宿主环境、注册顺序 | x86 客户端。J1a 之前表槽与写监视也供 ARM 核心使用，ISA 相关的 5 处是挂钩点（ARM64 计划 P1.0）；J1a 之后中立部分在 jitrt，`jit.rs` 只编进 x86 核心 | J1a 之后可引用 `crate::cpu`；在此之前对 x86 模块的引用都放在挂钩点的 x86 实现里 |
@@ -1380,3 +1380,43 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - P2.11 不在里程碑表的任何一行里。它是 P2 的最后一项，M2 的测量在它之前已经做完，所以列进 M3（表已改），按重放与相对 `vM2`
   的 R 级验收。
 - 本地标签 `vM2` 打在这次提交上。
+
+### M3（进行中）
+
+**P2.11 SIMD/XSAVE 计划的模板并成一份，2026-10-10。**
+
+- 第一部分：`x86tpl::ops` 的 `move_mask`、`blend_variable` 与 `round` 是 Tier-0 的 PMOVMSKB/MOVMSKPS/MOVMSKPD、
+  BLENDVPS/BLENDVPD/PBLENDVB 与 ROUNDPS/PD/SS/SD 模板（新钩子 `register`：BLENDV 的掩码寄存器）。page tier 的 `Op::Vmovmsk`、
+  `Op::Vblendv` 与 `vround` 改用它们：ROUND 的拒绝条件（NaN、DAZ、imm8[2] 时的 MXCSR.RC、PE 未屏蔽时的不精确）由 page tier
+  的适配器变成写入之前的重试。x64 语料 18 条记录按预期改变；`sse4-tests` 的 1291 个用例在各引擎上与 QEMU、SDM 模型一致。
+- 第二部分：VEX.256 的形式。`zero_upper`、`zero_all`、`load256`、`store256`、`packed256`、`move_mask256` 与 `broadcast`
+  （VZEROUPPER、VZEROALL、256 位搬运、AVX2 的打包运算、ymm 的 VPMOVMSKB/VMOVMSKPS/VMOVMSKPD、广播），新钩子 `registers`
+  （64 位模式外 8 个，64 位模式里 16 个）、`memory`、`first_high`、`source_high`、`source256`、`store256`、`store256_rm`、
+  `zero_upper` 与 `store_register`。page tier 删除自己的 `ymm_load`、`ymm_store`；它的内存源按操作数的实际字节数读取（广播
+  的 1、2 字节元素需要）。重放全部一致（x64 语料没有 VEX.256 形式）；`tests/x64/avx.mjs` 的 4352 个 AVX 用例在 page tier
+  上（单独，以及与兼容模式 JIT 一起）与 QEMU、模型一致，模板、并行构建、对齐与跨页用例也一致；`ir-avx-tests` 通过。
+- 第三部分：FMA 的 VEX.128 与标量形式（`ops::fused`）。宿主的 relaxed 乘加融合时原生执行（`native_fp::fused`），某个 lane
+  或 MXCSR 被拒绝时就地调用精确 helper `ir_t0_fma`，宿主不融合时一律调用它；新钩子 `destination`、`relaxed_fma`、
+  `sse_fp_operands`。page tier 的 `CompileEnv` 因此带上操作数块的地址（重放时固定，与 Tier-0 一样），它的代码以前嵌入这个
+  地址却没有记录。`VecOperands::mxcsr_refused` 在每个引擎都要求 PE 已置位，转换模板在 `detects_inexact` 时自己用
+  `native_fp::mxcsr_refused_any_pe`：否则 page tier 的 `mxcsr_refused` 不要求 PE，`fused` 遇到不精确的原生结果会漏置 PE。
+  重放全部一致；`fma-tests` 的 1428 个 FMA 与 F16C 用例在各引擎上与模型、QEMU 一致，page tier 的两条路径（原生、精确
+  helper）都覆盖。
+- 第四部分：CMPPS/CMPPD/CMPSS/CMPSD。page tier 的 `vcmp` 改用 Tier-0 从 P2.4 起用的 `ops::compare_mask`（NaN 或非规格化
+  操作数时重试）。x64 语料 48 条比较记录按预期改变；`vector_oracle.mjs` 的比较用例与 QEMU 一致。
+- SSSE3 早已共用：P2.2、P2.3 起两个引擎都用 `x86tpl::vec` 的 Packed 表、`palignr` 与 `shuffle`。
+- 留在各引擎里的：
+  - PCMPxSTRx：运算本身已经是一个函数 `ir::runtime::tier0::pcmpstr`，`x64_page_pcmpstr` 也调用它；两边只差读 EAX/EDX 还是
+    RAX/RDX，以及写 ECX 或 XMM0 与 EFLAGS。
+  - COMISS/UCOMISS/COMISD/UCOMISD：Tier-0 用 `vec::compare_flags`，page tier 在标量里比较；差别在 EFLAGS 的写法（Tier-0 的
+    惰性标志，page tier 按活跃度写的 FL）。
+  - BMI 与 MOVBE：通用寄存器上的整数运算，Tier-0 用 i32 与惰性标志，page tier 用 i64 与按活跃度的标志；`VecOperands`
+    没有通用寄存器与 EFLAGS 的钩子。
+  - page tier 的这些版本都已支持 32 位操作数，P7 的 32 位模式直接用它们，Tier-0 的版本随 P7.5 删除，"32 位与 Long64 用同
+    一份"的目标不受影响。上面目标架构表里 x86tpl 一行因此去掉了 BMI。
+- 门禁：每一部分 `make jit-gate`；合到 `jit` 后相对 `vM2` 再跑一次（`--base vM2`）：Tier-0 的 981 条重放记录字节一致，x64 语料
+  66 条按预期改变（MOVMSK 18 条、比较 48 条）。SIMD/XSAVE 计划的套件（`make ssse3-tests sse4-tests sse-fp-tests sse-fault-tests
+  avx-tests ir-avx-tests fma-tests bmi-tests ir-bmi-tests ir-crc32-tests xsave-tests`）在同一份代码上通过。
+- R 级（相对 M2 的核心）：bench 3 个会话几何均值 1.028；XP 桌面（ABBAAB）M2 13.57、13.06、13.29 s，P2.11 13.06、13.55、13.30 s，
+  中位数 13.29 对 13.30 s；x86-64 bench 1.000；Win8.1 桌面（ABBA）M2 172、171 s，P2.11 170、189 s。189 s 那次不是变慢：四次启动
+  到 167 s 时都已原生执行 303–315 亿条指令，单步与重试的比例相同，那一次在桌面出现之前多做了客户机的工作（183 s 时 329 亿条）。
