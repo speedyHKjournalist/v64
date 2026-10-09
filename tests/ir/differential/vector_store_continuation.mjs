@@ -52,6 +52,9 @@ try {
         for(const scenario of ["hot", "unaligned", "last_range", "cold", "cross_page", "readonly",
             "second_page_fault", "later_fault", "current_alias", "peer_alias", "mmio", "callback", "mask_zero"]) {
             if(scenario === "mask_zero" && name !== "maskmovdqu") continue;
+            // (MOVNTPS needs 16-byte alignment since ed38f186: a misaligned one
+            // is #GP, and an aligned one never crosses a page)
+            if(name === "movntps" && ["unaligned", "cross_page", "second_page_fault"].includes(scenario)) continue;
             const address = scenario === "unaligned" ? DATA + 1
                 : scenario === "last_range" ? (DATA & ~4095) + 4096 - width
                 : ["cross_page", "second_page_fault"].includes(scenario) ? (DATA & ~4095) + 4095

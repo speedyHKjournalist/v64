@@ -15,8 +15,12 @@ for(const family of families) {
         const semantic=list.filter(x=>/^ir_(sse_fp|mmx)/.test(x.name));
         if(semantic.length)semantic_modules++;
         for(const {name} of list)imports[name]=(imports[name]||0)+1;
+        // (PSHUFB and PALIGNR, SSSE3's integer shuffles among the sse-fp cases since the SIMD/XSAVE
+        // plan's P3, compile their register forms natively: no adapter to keep)
+        const code=manifest[i][0],shuffle=[[0x0F,0x38,0x00],[0x0F,0x3A,0x0F]]
+            .some(s=>code.some((_,k)=>s.every((b,j)=>code[k+j]===b)));
         if(family.startsWith("simd-"))assert.equal(semantic.length,0,`${family}/${i} acquired an arithmetic helper`);
-        else assert(semantic.length>0,`${family}/${i} lost its audited baseline semantic adapter`);
+        else if(!(family==="sse-fp"&&shuffle))assert(semantic.length>0,`${family}/${i} lost its audited baseline semantic adapter`);
     }
     report.families[family]={modules,semanticModules: semantic_modules,averageBytes:Math.round(total_bytes/modules),imports};
 }

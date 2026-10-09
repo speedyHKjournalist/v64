@@ -39,7 +39,8 @@ try {
         e.ir_auto_config(0,2,4,192,128,8);cpu.jit_clear_cache();e.ir_cache_collect();
         cpu.in_hlt[0]=0;cpu.flags[0]=2;cpu.flags_changed[0]=0;cpu.segment_offsets.fill(0,0,6);cpu.segment_is_null.fill(0,0,6);
         cpu.is_32[0]=cpu.stack_size_32[0]=1;cpu.reg32.fill(0);cpu.reg32[4]=0x90000;cpu.instruction_pointer[0]=PC;words()[664>>2]=0;
-        e.ir_test_set_cr0(cpu.cr[0]&~12);e.update_state_flags();vm.write_memory(Uint8Array.from(bytes),PC);
+        // (CR4.OSFXSR: SSE forms are #UD without it since the SIMD/XSAVE plan's P4a)
+        e.ir_test_set_cr0(cpu.cr[0]&~12);cpu.cr[4]|=0x200;e.update_state_flags();vm.write_memory(Uint8Array.from(bytes),PC);
     }
     prepare([0x40,0xEB,0xFD]);const published=e.ir_auto_stat(4),hits=e.ir_cache_stat(2);
     e.ir_auto_config(1,2,4,192,128,8);vm.run();await until(()=>e.ir_auto_stat(4)>published&&e.ir_cache_stat(2)>hits,"portable scalar IR");await vm.stop();

@@ -959,7 +959,7 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 
 实施从 `985f518d` 之后的 `jit` 分支开始，按里程碑记录做了什么、测得什么。
 
-### M1（进行中）
+### M1
 
 **本地门禁与核心比较（P0.9、P7.6；ARM64 计划 P0.7），2026-10-09。**
 
@@ -1180,7 +1180,9 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
   237 个槽。Tier-0 单步前几名：`66 0F B6`（16 位 MOVZX r16, r/m8，216 万，缺模板）、`FA`/`FB`（CLI/STI，111 万与
   92 万）、`0F C7 /1`（CMPXCHG8B，39 万）、`0F 2B`（MOVNTPS，28 万）、`F3 A5`（REP MOVSD，26 万）、`9D`/`9C`
   （POPF/PUSHF，25 万与 23 万）、`F3 AB`（REP STOSD，16 万）。
-- 3DMark06 一项仍待补（见 P0.1 的记录）。实测表写进 [x86-64.md](x86-64.md)。
+- 3DMark06 一项挪到 P4.0：从 Win8.1 的菜单存档跑 GT2 要 Chrome 渲染器加脚本化的启动（旧会话的脚本已不在），
+  3DMark06 本来就只记录不判定，而 P4.0 统计 #NM、FXSAVE 等也要在 GT2 下测，两件事一起做。XP 上的 3DMark06 同样
+  随 P4.0。实测表写进 [x86-64.md](x86-64.md)。
 
 **P1 清理，2026-10-09（P0.1 的基线之后）。**
 
@@ -1197,3 +1199,32 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - 验收：`grep -rn 'x64_native\|wide_native\|native_oracle\|x64::cache\|x64::compiler' src tests Makefile tools gen`
   只剩空函数桩；`build/v86.wasm` 没有 `x64_native_*` 的导入与导出；`make jit-gate`、`x64-differential-tests`、
   `nasmtests-force-jit`（16499/16499）、`jitpagingtests`、`multicore-parallel-tests` 通过。
+
+**M1 出口：相对起点 `985f518d` 的 R 级，2026-10-09（`94ccc9c8`，开关全为默认）。**
+
+- bench：3 个 quick 会话几何均值 0.989；`502`、`719`、`720` 按 `--runs 7 --scale 4` 复测为 1.000、0.988、0.942，
+  复测后几何均值 0.997。`720.bmi.bits` 再按 8 倍工作量测 3 次：0.97、0.99、1.00，中位数 0.99，通过；它在 quick
+  会话里每轮只有 5–10 ms，结果是双峰的（P0.1 记录）。
+- XP 桌面（ABBAAB）：起点 13.08 s、M1 13.12 s，比值 0.997。
+- Win8.1 桌面（ABBA）：起点 187、172 s，M1 174、182 s，中位数比值 1.008。
+- 出口套件（`94ccc9c8` 加下面四处测试修正）：`make jit-gate-full` 的快速档、`ir-tier0-tests`、`x64-page-tier-tests` 与
+  `jit-switch-tests` 通过，`ir-core-tests` 通过；发布门禁各级 `--quick` 的 61 个目标通过（`multicore-clock-tests` 与
+  `ir-core-tests` 修正后重跑）；`api-tests` 除下面的 `state.js` 外通过；另跑的 `ir-cache-tests`、`ir-auto-tests` 与
+  `multicore-coherence/atomic/memory-order-tests` 通过。
+- 起点就已失败、这次修正的四个测试（在 `985f518d` 上同样失败，与 M1 的改动无关）：
+  - `tests/ir/differential/vector_store_continuation.mjs`：SIMD/XSAVE 计划 P4a 第二部分（`ed38f186`）起，地址不按 16 字节
+    对齐的 MOVNTPS 产生 #GP，测试的 unaligned、cross_page 与 second_page_fault 三个场景仍按存储完成判定。MOVNTPS 不再跑
+    这三个场景（对齐的 16 字节存储不会跨页），其余 564 次比较通过。
+  - `tests/ir/differential/fallback.mjs`（`ir-portable-tests`）：同一提交起 CR4.OSFXSR 清零时 SSE 指令 #UD，测试准备状态时
+    没有置它，PADDD 循环跑进了 BIOS 的 #UD 处理程序。准备状态时置 OSFXSR 后照原样通过。这个失败原先被它前面
+    `encode_worker_options` 的失败遮住（`graphics_adapter` 成为必填，`13efbef9`），`3dab585f` 修了那一处才露出来。
+  - `tests/ir/differential/helper_audit.mjs`（`ir-helper-audit`）：SIMD/XSAVE 计划 P3（`cb257e18`）把 PSHUFB 与 PALIGNR 加进了
+    sse-fp 的样例，它们的寄存器形式由 region 原生编译，不调用精确 helper，审计却要求 sse-fp 的每个模块都有。这两种 SSSE3 整数
+    重排不再要求。
+  - `tests/smp/clock.mjs`（`multicore-clock-tests`）：Q35 的工作（`f403ba9a`）之后 `ACPI` 的构造读 `cpu.platform`，测试的
+    模拟 CPU 没有它，改用 `create_platform({ acpi: true })` 建的平台。
+- `tests/api/state.js` 偶发失败，原因未查明：恢复"sync cdrom"的存档后约 0.5 s，客户机内核 panic，init 在 write 系统调用
+  返回时被信号 3 杀死（"Attempted to kill init! exitcode=0x00000003"），两次失败的寄存器与位置相同。`94ccc9c8` 上 30 次
+  失败 2 次，`985f518d` 上 30 次失败 0 次，差别不显著（Fisher 精确检验 p ≈ 0.5）。M1 对这台 32 位 Linux 客户机生效的改动
+  只有 P3.0b 的 Tier-0 慢路径中断延迟；留作待查，再复现时先用 `ir_t0_irq_deferral=0` 对照。
+- 本地标签 `vM1`（跨阶段规则 10）打在这次提交上。
