@@ -86,12 +86,16 @@ try {
         configure();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state());boundaries++;
     }
     console.log(`PASS: ${boundaries} page/address16 boundaries and ${remaps} MMIO-driven selector-page remaps`);
-    const caught=f=>{try {f();return false;} catch(err){assert(err instanceof WebAssembly.RuntimeError);return true;}};
+    // Both faults are ordinary #PFs, without a host trap. The accessed-bit store
+    // is a supervisor write, so under CR0.WP the read-only GDT page faults with
+    // error code 3 and CR2 at the access byte. The load commits nothing: the
+    // segment register, the access byte and every GPR but ESP keep their values.
     let descriptor_faults=0;
     for(const [c,i] of selected) if(c[5]===8&&c[3]!==0x8C&&c[4]!==4) for(const opt of [0,1]) for(const write_fault of [false,true]){
         const configure=()=>{reset(i,0x1000);mem.copyWithin(0x5000,0x3000,0x3050);cpu.gdtr_offset[0]=0x5000;cpu.gdtr_size[0]=0x10FF;set32(0x6000,0xFFFF);set32(0x6004,0x00CF9200);set32(0x13000+6*4,write_fault?0x6001:0);windows.push([0x5000,0x1100]);e.full_clear_tlb();};
-        configure();const trapped=caught(()=>instances[i][opt].exports.f(0)),actual=state();assert.equal(trapped,write_fault);assert.equal(actual.cr2,write_fault?0x6005:0x6000);assert.equal(actual.ip,HANDLER);assert.equal(words[664>>2],101);
-        configure();e.ir_test_step();assert.equal(caught(()=>e.ir_test_step()),write_fault);assert.deepEqual(actual,state());descriptor_faults++;
+        configure();instances[i][opt].exports.f(0);const actual=state();assert.equal(actual.cr2,write_fault?0x6005:0x6000);assert.equal(get32(STACK-16),write_fault?3:0);assert.equal(actual.ip,HANDLER);assert.equal(words[664>>2],101);
+        configure();e.ir_test_step();const old=state();e.ir_test_step();assert.deepEqual(actual,state());
+        assert.equal(actual.sreg[destination(c)],old.sreg[destination(c)]);assert.equal(mem[0x6005],0x92);assert.deepEqual(actual.regs.filter((_,r)=>r!==4),old.regs.filter((_,r)=>r!==4));descriptor_faults++;
     }
     console.log(`PASS: ${descriptor_faults} descriptor read/accessed-bit #PF cases with old GPR preservation`);
     let real=0;

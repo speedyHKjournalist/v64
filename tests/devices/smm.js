@@ -76,6 +76,18 @@ const ram32 = address => (cpu.mem8[address] | cpu.mem8[address + 1] << 8 | cpu.m
 const ram64 = address => BigInt(ram32(address)) | BigInt(ram32(address + 4)) << 32n;
 const MCH_SMRAM = 0x9D, MCH_ESMRAMC = 0x9E, MCH_EXT_TSEG_MBYTES = 0x50;
 
+// One instruction (the handler's RSM, after an SMI the slice takes first). A
+// slice ends before its first instruction when the IR scheduler submits a
+// compile at its start (src/rust/cpu/cpu.rs run_cpu_slice), so that the host
+// can install the code: then the next slice runs it. (After a boot a code page
+// may just have reached its threshold.)
+function step()
+{
+    if(cpu.run_cpu_slice(1)) return;
+    assert.equal(cpu.get_jit_info().ir?.pending, 1, "the slice yielded to a compile");
+    assert.equal(cpu.run_cpu_slice(1), 1, "the next slice runs the instruction");
+}
+
 test("SeaBIOS's SMM setup: SMBASE relocated to 0xA0000, SMI_EN.APMC_EN, SMRAM closed with G_SMRAME", () => {
     assert.equal(smbase(), 0xA0000);
     assert.ok(!in_smm());
@@ -128,7 +140,7 @@ test("an SMI in SMM is latched, not nested", () => {
     assert.equal(cpu.instruction_pointer[0] >>> 0, 0xA8000, "the handler did not restart");
 });
 // (one instruction: the RSM)
-cpu.run_cpu_slice(1);
+step();
 test("RSM: out of SMM, the state back (registers, EFLAGS, CR0), SMBASE kept", () => {
     assert.ok(!in_smm());
     assert.equal(cpu.reg32[3] >>> 0, 0x12345678, "EBX");
@@ -142,7 +154,7 @@ test("RSM: out of SMM, the state back (registers, EFLAGS, CR0), SMBASE kept", ()
 });
 cpu.reg32[3] = 0x87654321;
 // the latched SMI at the start of the slice, then its handler's RSM
-cpu.run_cpu_slice(1);
+step();
 test("the latched SMI is taken after RSM", () => {
     assert.ok(!smi_pending());
     assert.ok(!in_smm(), "(and its handler returned)");
@@ -156,11 +168,11 @@ test("SMIs from the local APIC: an IPI to self, an MSI (delivery mode SMI)", () 
     cpu.write32(0xFEE00300, 2 << 8 | 1 << 18);
     assert.ok(in_smm(), "IPI");
     assert.equal(cpu.instruction_pointer[0] >>> 0, 0xA8000);
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm());
     assert.ok(cpu.apic_msi(0xFEE00000, 2 << 8), "MSI accepted");
     assert.ok(in_smm(), "MSI");
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm());
     assert.equal(cpu.instruction_pointer[0], before.eip);
 });
@@ -169,17 +181,17 @@ test("SMIs from the local APIC: an IPI to self, an MSI (delivery mode SMI)", () 
 cpu.smi();
 cpu.smi();
 const in_smm_state = await emulator.save_state();
-cpu.run_cpu_slice(1);
-cpu.run_cpu_slice(1);
+step();
+step();
 assert.ok(!in_smm() && !smi_pending());
 await emulator.restore_state(in_smm_state);
 test("snapshot in SMM: SMM and the latched SMI come back", () => {
     assert.ok(in_smm());
     assert.ok(smi_pending());
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm(), "RSM");
     assert.ok(smi_pending());
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm() && !smi_pending(), "the latched SMI, and its RSM");
     assert.equal(cpu.instruction_pointer[0], before.eip);
 });
@@ -219,7 +231,7 @@ test("TSEG (T_EN, 1 MiB): outside SMM all ones and writes dropped, in SMM RAM", 
     cpu.write32(base, 0xCAFEF00D);
     cpu.write16(base - 1, 0xA5A5);
     assert.equal(ram32(base), 0xCAFEF0A5, "written in SMM");
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm());
     assert.equal(cpu.read32s(base) >>> 0, 0xFFFFFFFF, "hidden again");
 });
@@ -259,7 +271,7 @@ test("H_SMRAME: SMBASE in high SMRAM, the save area and the handler through it",
     assert.equal(ram32(0xAFFDC), 0x13579BDF, "EBX in the save area, in the RAM of 0xA0000");
     assert.equal(ram32(0xAFEF8), HIGH_SMRAM, "SMBASE in the save area");
     // (the RSM, fetched from high SMRAM)
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm());
     assert.equal(cpu.instruction_pointer[0], before.eip);
     assert.equal(cpu.reg32[3] >>> 0, 0x13579BDF);
@@ -275,7 +287,7 @@ test("D_CLS: in SMM, data accesses to the VGA window, instruction fetches to com
     cpu.smi();
     assert.ok(in_smm());
     assert.notEqual(cpu.read32s(0xA8000) & 0xFFFF, 0xAA0F, "data: the VGA window");
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm(), "the handler's RSM came from SMRAM");
     assert.equal(cpu.instruction_pointer[0], before.eip);
     pci().config_write(0, MCH_SMRAM, 1, 0x0A);
@@ -286,19 +298,19 @@ test("auto HALT restart (0x7F02): RSM halts again after an SMI in HLT, unless th
     assert.ok(in_smm());
     assert.ok(!cpu.in_hlt[0], "the handler runs");
     assert.equal(ram32(0xAFF00), 0x00010000, "auto HALT restart set, I/O instruction restart (0x7F00) clear");
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm());
     assert.ok(cpu.in_hlt[0], "halted again");
     assert.equal(cpu.instruction_pointer[0], before.eip);
     cpu.smi();
     assert.equal(ram32(0xAFF00), 0x00010000);
     cpu.mem8[0xAFF02] = 0;
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm() && !cpu.in_hlt[0], "cleared by the handler: on after the HLT");
     cpu.smi();
     assert.equal(ram32(0xAFF00), 0, "an SMI outside HLT: clear");
     cpu.mem8[0xAFF02] = 1;
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm() && !cpu.in_hlt[0], "set by the handler without HLT: ignored");
     assert.equal(cpu.instruction_pointer[0], before.eip);
 });
@@ -370,7 +382,7 @@ test("x86-64: an SMI saves the full registers in the 64-bit layout", () => {
     // the handler changes the low byte of RBX's high half
     cpu.mem8[area + 0x7FE4] = 0x5A;
 });
-cpu.run_cpu_slice(1);
+step();
 test("x86-64: RSM restores the 64-bit registers (and what the handler changed)", () => {
     assert.ok(!in_smm());
     assert.equal(cpu.instruction_pointer[0], wide.eip);
@@ -387,7 +399,7 @@ test("x86-64: the auto HALT restart byte (0x7EC9)", () => {
     assert.ok(in_smm());
     assert.equal(cpu.mem8[0xA8000 + 0x7EC9], 1, "auto HALT restart");
     assert.equal(cpu.mem8[0xA8000 + 0x7EC8], 0, "I/O instruction restart");
-    cpu.run_cpu_slice(1);
+    step();
     assert.ok(!in_smm() && cpu.in_hlt[0], "halted again");
     cpu.in_hlt[0] = 0;
 });
@@ -409,7 +421,7 @@ cpu = emulator.v86.cpu;
         assert.equal(cpu.cr[4], 0);
         assert.deepEqual(Array.from(xcr0), [3, 0]);
     });
-    cpu.run_cpu_slice(1);
+    step();
     test("XSAVE: RSM restores CR4.OSXSAVE; XCR0 stays", () => {
         assert.ok(!in_smm());
         assert.equal(cpu.cr[4] & 1 << 18, 1 << 18);
@@ -420,7 +432,7 @@ cpu = emulator.v86.cpu;
         cpu.smi();
         assert.ok(in_smm());
         cpu.mem8[0xAFF14 + 2] |= 1 << 6; // CR4 in the 32-bit save area: bit 22
-        cpu.run_cpu_slice(1);
+        step();
         assert.equal(cpu.last_reset && cpu.last_reset.count, resets + 1);
         assert.equal(cpu.last_reset.reason, "triple-fault");
     });

@@ -54,15 +54,32 @@ struct Table {
     taken: [Vec<u64>; MAX_REGIONS],
 }
 
-static mut TABLE: Table = Table {
+const NEW_TABLE: Table = Table {
     regions: [EMPTY; MAX_REGIONS],
     count: 0,
     pixels: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
     taken: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
 };
 
+#[cfg(not(test))]
+static mut TABLE: Table = NEW_TABLE;
+
+#[cfg(test)]
+thread_local! {
+    /// cargo test: the table of the test thread (the tests run in parallel)
+    static TEST_TABLE: std::cell::UnsafeCell<Table> =
+        const { std::cell::UnsafeCell::new(NEW_TABLE) };
+}
+
 #[inline(always)]
-fn table() -> &'static mut Table { unsafe { &mut *parallel::machine(&raw mut TABLE) } }
+fn table() -> &'static mut Table {
+    #[cfg(test)]
+    return TEST_TABLE.with(|table| unsafe { &mut *table.get() });
+    #[cfg(not(test))]
+    unsafe {
+        &mut *parallel::machine(&raw mut TABLE)
+    }
+}
 
 /// The mapped region that contains all of [address, address + bytes)
 #[inline]

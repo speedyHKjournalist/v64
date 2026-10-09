@@ -3,6 +3,9 @@ import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const cases = JSON.parse(fs.readFileSync("build/ir-far-control/cases.json"));
 const modules = cases.map((_, i) => [0, 1].map(opt => new WebAssembly.Module(fs.readFileSync(`build/ir-far-control/${i}-${opt}.wasm`))));
+// The control reference interprets with do_task_switch pinned at 90f90481
+// (build_control_reference.py); see task-old-pf below.
+const pinned_task_switch = /control-reference/.test(process.argv[2] || "");
 const vm = new V86({graphics_adapter: "bochs_vga", wasm_path: process.argv[2] || "build/v86-ir-test.wasm", memory_size: 32 << 20,
     bios: {buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard: true, disable_mouse: true, disable_speaker: true, net_device: {type: "none"}, autostart: false});
@@ -114,14 +117,19 @@ try {
             task:Buffer.from(mem.slice(0x4000,0x4100)),nextTask:Buffer.from(mem.slice(0x5000,0x5100)),gdt:Buffer.from(mem.slice(0x3000,0x3040)),tss32:cpu.tss_size_32[0]};
     }
     let comparisons = 0;
-    function compare(i, options = {}, retired = 2) {
-        reset(i, options); e.ir_test_step(); let abort=false;
+    // trap: the reference interpreter traps after delivering the fault the IR
+    // delivers. partial: state it has written by then, which the IR must leave
+    // as reset() set it.
+    function compare(i, options = {}, retired = 2, {trap = false, partial = []} = {}) {
+        reset(i, options); const initial = state(); e.ir_test_step(); let abort=false;
         try {e.ir_test_step();} catch(error){assert(error instanceof WebAssembly.RuntimeError);abort=true;}
+        assert.equal(abort,trap,`reference abort ${i} ${JSON.stringify(options)}`);
         const expected = state();
+        for(const field of partial) expected[field] = initial[field];
         for(const opt of [0, 1]) {
             reset(i, options);let actual_abort=false;
             try {instances[i][opt].exports.f(0);} catch(error){assert(error instanceof WebAssembly.RuntimeError);actual_abort=true;}
-            assert.equal(actual_abort,abort,`abort ${i} ${JSON.stringify(options)}`);
+            assert.equal(actual_abort,false,`abort ${i} ${JSON.stringify(options)}`);
             assert.equal(w[664 >> 2], 100 + retired, `retirement ${i} ${JSON.stringify(options)}`);
             assert.deepEqual(state(), expected, `state ${i} opt=${opt} ${JSON.stringify(options)}`);
             comparisons++;
@@ -155,10 +163,20 @@ try {
             const actual=compare(i,{scenario});assert.equal(actual.sreg[6],0x18);assert.equal(actual.ip,0xA000);assert(actual.cr[0]&8);
             if(["call","jump"].includes(name)) {
                 const vm=compare(i,{scenario:"task-vm"});assert.equal(vm.cpl,3);assert(vm.flags&0x20000);
-                // Pinned baseline aborts after delivering these multi-access faults.
-                for(const fault of ["task-old-pf","task-new-pf"])compare(i,{scenario:fault},1);
+                // The control reference keeps do_task_switch pinned: it is the only
+                // independent oracle for the task switches above. Since 0128f9ab,
+                // do_task_switch_checked (the IR's and today's interpreter's) checks
+                // and reads everything before it commits, so a page fault on either
+                // TSS is a clean #PF in the old task. The pinned body delivers the
+                // same #PF, then traps at its unwrap(). For the old TSS that is
+                // before any state change; for the new TSS it has already saved the
+                // old task and flipped the busy bits.
+                const old_pf=compare(i,{scenario:"task-old-pf"},1,{trap:pinned_task_switch});
+                const new_pf=compare(i,{scenario:"task-new-pf"},1,{trap:pinned_task_switch,partial:pinned_task_switch?["task","gdt"]:[]});
+                assert.equal(old_pf.cr[2],0x4000);assert.equal(new_pf.cr[2],name==="call"?0x5000:0x501C);
+                for(const fault of [old_pf,new_pf]){assert.equal(fault.ip,HANDLER);assert.equal(fault.sreg[6],0x28);}
             }
         }
     }
-    console.log(`PASS: ${comparisons} system-mode comparisons: VM86, outer IRET, call/task gates, task call/jump/return, frame faults and baseline partial-state aborts`);
+    console.log(`PASS: ${comparisons} system-mode comparisons: VM86, outer IRET, call/task gates, task call/jump/return, frame faults and task #PFs before the commit point${pinned_task_switch?" (the pinned do_task_switch traps on those)":""}`);
 } finally { await vm.destroy(); }
