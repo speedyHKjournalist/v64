@@ -15,6 +15,7 @@ use super::*;
 use crate::cpu::features::{ALL, TEST_FEATURES};
 use crate::ir::frontend::decode::{decode, GuestEip, LinearAddress};
 use crate::ir::native_fp::Lanes;
+use crate::x86tpl::mmx;
 use std::collections::BTreeMap;
 
 /// FNV-1a, 64-bit
@@ -163,11 +164,11 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
     assert!(forms.len() > 10_000, "{} forms", forms.len());
     let mut mmx = Grid::default();
     for r in 0..8u8 {
-        mmx.emit(format!("load {r}"), |w, _| load_mmx(w, r));
-        mmx.emit(format!("store {r}"), |w, [a, ..]| store_mmx(w, r, a));
-        mmx.emit(format!("invalidate {r}"), |w, _| mmx_invalidate(w, r));
+        mmx.emit(format!("load {r}"), |w, _| mmx::load(w, r));
+        mmx.emit(format!("store {r}"), |w, [a, ..]| mmx::store(w, r, a));
+        mmx.emit(format!("invalidate {r}"), |w, _| mmx::invalidate(w, r));
     }
-    mmx.emit("transition".into(), |w, _| mmx_transition(w));
+    mmx.emit("transition".into(), |w, _| mmx::transition(w));
 
     let (mut packed_grid, mut shift, mut float, mut relation, mut flags, mut convert, mut exact): (
         Grid,

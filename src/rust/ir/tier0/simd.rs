@@ -18,19 +18,20 @@
 //! are interpreter steps.
 use super::Page;
 use crate::cpu::{
-    cpu::CR0_EM, cpu::CR0_TS, cpu::CR4_OSFXSR, cpu::CR4_OSXSAVE, cpu::FLAGS_ALL, cpu::FLAG_VM, fpu,
+    cpu::CR0_EM, cpu::CR0_TS, cpu::CR4_OSFXSR, cpu::CR4_OSXSAVE, cpu::FLAGS_ALL, cpu::FLAG_VM,
     global_pointers as gp,
 };
 use crate::ir::helper::imports::signature;
-use crate::ir::{frontend::decode::DecodedInstruction, native_fp};
-use crate::wasmgen::wasm_builder::{Signature, WasmBuilder, WasmLocal, WasmLocalV128, WasmType};
 
-/// Page::xmm_clean: lanes known to be neither NaN nor denormal, as single
-/// precision (the low lane, all lanes) or double precision.
-pub(super) const CLEAN_SS: u8 = 1;
-pub(super) const CLEAN_PS: u8 = 2;
-pub(super) const CLEAN_SD: u8 = 4;
-pub(super) const CLEAN_PD: u8 = 8;
+use crate::ir::{frontend::decode::DecodedInstruction, native_fp};
+use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
+use crate::x86tpl::mmx;
+use crate::x86tpl::vec::{
+    self, clean_bits, compare_flags, compare_relation, convert_integer, float_arithmetic,
+    float_claims, float_facts, known_clean, operand_facts, packed, packed_op, palignr,
+    shift_immediate, shuffle_lanes, shuffled_clean, sse_fp_call, sse_fp_result, Packed, CLEAN_PD,
+    CLEAN_PS, CLEAN_SD, CLEAN_SS,
+};
 
 /// Push nonzero when VEX forms fault: #UD (no CR4.OSXSAVE, XCR0 without SSE
 /// and AVX state, real and virtual-8086 mode) or #NM (CR0.TS)
@@ -70,28 +71,6 @@ pub(super) struct Vex {
     /// the m256 32-byte aligned (the other VEX forms take any; VEX rows'
     /// Encoding::aligned_m128 is false)
     aligned: bool,
-}
-
-#[derive(Clone, Copy)]
-#[cfg_attr(test, derive(Debug))]
-pub(super) enum Packed {
-    /// i8x16.shuffle over (destination, source)
-    Shuffle([u8; 16]),
-    /// i8x16.shuffle over (destination, zero)
-    ShuffleZero([u8; 16]),
-    /// PSHUFB: the destination's bytes by the source's indices, masked
-    /// (bit 7 selects zero)
-    Swizzle(u8),
-    Binary(u32),
-    AndNot,
-    Unpack(u8, bool),
-    Pack(u32),
-    /// Shift by the source's low quadword: (opcode, lane bits, arithmetic).
-    Shift(u32, u32, bool),
-    MulHigh(bool),
-    /// PMULUDQ (false), PMULDQ (true): the even dwords' 64-bit products
-    MulDwords(bool),
-    Sad,
 }
 
 #[derive(Clone, Copy)]
@@ -290,146 +269,6 @@ fn source_bytes(op: u32) -> u8 {
     }
 }
 
-/// Packed integer and logic operations (Wasm SIMD opcodes).
-fn packed_op(code: u8, mmx: bool) -> Option<Packed> {
-    Some(match code {
-        0xFC => Packed::Binary(0x6E),
-        0xFD => Packed::Binary(0x8E),
-        0xFE => Packed::Binary(0xAE),
-        0xD4 => Packed::Binary(0xCE),
-        0xF8 => Packed::Binary(0x71),
-        0xF9 => Packed::Binary(0x91),
-        0xFA => Packed::Binary(0xB1),
-        0xFB => Packed::Binary(0xD1),
-        0xEC => Packed::Binary(0x6F),
-        0xED => Packed::Binary(0x8F),
-        0xDC => Packed::Binary(0x70),
-        0xDD => Packed::Binary(0x90),
-        0xE8 => Packed::Binary(0x72),
-        0xE9 => Packed::Binary(0x92),
-        0xD8 => Packed::Binary(0x73),
-        0xD9 => Packed::Binary(0x93),
-        0x64 => Packed::Binary(0x27),
-        0x65 => Packed::Binary(0x31),
-        0x66 => Packed::Binary(0x3B),
-        0x74 => Packed::Binary(0x23),
-        0x75 => Packed::Binary(0x2D),
-        0x76 => Packed::Binary(0x37),
-        0xDA => Packed::Binary(0x77),
-        0xDE => Packed::Binary(0x79),
-        0xEA => Packed::Binary(0x96),
-        0xEE => Packed::Binary(0x98),
-        0xE0 => Packed::Binary(0x7B),
-        0xE3 => Packed::Binary(0x9B),
-        0xE4 => Packed::MulHigh(false),
-        0xE5 => Packed::MulHigh(true),
-        0xF4 => Packed::MulDwords(false),
-        0xF6 => Packed::Sad,
-        0xD5 => Packed::Binary(0x95),
-        0xF5 => Packed::Binary(0xBA),
-        0xDB => Packed::Binary(0x4E),
-        0xDF => Packed::AndNot,
-        0xEB => Packed::Binary(0x50),
-        0xEF => Packed::Binary(0x51),
-        0x60 => Packed::Unpack(1, false),
-        0x61 => Packed::Unpack(2, false),
-        0x62 => Packed::Unpack(4, false),
-        0x68 => Packed::Unpack(1, true),
-        0x69 => Packed::Unpack(2, true),
-        0x6A => Packed::Unpack(4, true),
-        0x6C if !mmx => Packed::Unpack(8, false),
-        0x6D if !mmx => Packed::Unpack(8, true),
-        0x63 => Packed::Pack(0x65),
-        0x67 => Packed::Pack(0x66),
-        0x6B => Packed::Pack(0x85),
-        0xD1 => Packed::Shift(0x8D, 16, false),
-        0xD2 => Packed::Shift(0xAD, 32, false),
-        0xD3 => Packed::Shift(0xCD, 64, false),
-        0xE1 => Packed::Shift(0x8C, 16, true),
-        0xE2 => Packed::Shift(0xAC, 32, true),
-        0xF1 => Packed::Shift(0x8B, 16, false),
-        0xF2 => Packed::Shift(0xAB, 32, false),
-        0xF3 => Packed::Shift(0xCB, 64, false),
-        _ => return None,
-    })
-}
-
-/// Shuffle lanes of PSHUFW/PSHUFD/PSHUFLW/PSHUFHW/SHUFPS/SHUFPD over
-/// (first, source); `two`: the first operand is the destination, else the
-/// source itself.
-fn shuffle_lanes(op: u32, imm: u32) -> ([u8; 16], bool) {
-    let mut lanes = [0; 16];
-    for i in 0..16u32 {
-        lanes[i as usize] = match op {
-            0x0F70 => ((imm >> (2 * (i / 2 % 4)) & 3) * 2 + i % 2) as u8,
-            0x660F70 => ((imm >> (2 * (i / 4)) & 3) * 4 + i % 4) as u8,
-            0xF20F70 if i < 8 => ((imm >> (2 * (i / 2)) & 3) * 2 + i % 2) as u8,
-            0xF30F70 if i >= 8 => (8 + (imm >> (2 * ((i - 8) / 2)) & 3) * 2 + i % 2) as u8,
-            0x0FC6 => ((imm >> (2 * (i / 4)) & 3) * 4 + i % 4 + if i >= 8 { 16 } else { 0 }) as u8,
-            0x660FC6 => ((imm >> (i / 8) & 1) * 8 + i % 8 + if i >= 8 { 16 } else { 0 }) as u8,
-            _ => i as u8,
-        };
-    }
-    (lanes, matches!(op, 0x0FC6 | 0x660FC6))
-}
-
-impl Packed {
-    /// The byte lanes of a shuffle over (destination, source)
-    fn lanes(self, bytes: u8) -> Option<[u8; 16]> {
-        match self {
-            Packed::Shuffle(lanes) => Some(lanes),
-            Packed::Unpack(width, high) => {
-                let mut lanes = [0; 16];
-                let half = bytes / 2;
-                for k in 0..bytes {
-                    let element = k / (width * 2);
-                    let side = k / width % 2;
-                    lanes[k as usize] =
-                        (if high { half } else { 0 }) + element * width + k % width + side * 16;
-                }
-                Some(lanes)
-            },
-            _ => None,
-        }
-    }
-}
-
-/// Page::xmm_clean of a byte shuffle of the destination's and the source's
-/// lanes (`source`: None for memory), given theirs: whole lanes moved keep
-/// their state
-fn shuffled_clean(lanes: &[u8; 16], destination: u8, source: Option<u8>) -> u8 {
-    let mut clean = 0;
-    for (size, packed, scalar) in [(4, CLEAN_PS, CLEAN_SS), (8, CLEAN_PD, CLEAN_SD)] {
-        let group_clean = |g: usize| {
-            let first = lanes[g * size] as usize;
-            if first % size != 0 || (0..size).any(|k| lanes[g * size + k] as usize != first + k) {
-                return false;
-            }
-            let (bits, lane) = match (first < 16, source) {
-                (true, _) => (destination, first / size),
-                (false, Some(source)) => (source, (first - 16) / size),
-                (false, None) => return false,
-            };
-            bits & packed != 0 || lane == 0 && bits & scalar != 0
-        };
-        if (0..16 / size).all(group_clean) {
-            clean |= packed | scalar;
-        }
-        else if group_clean(0) {
-            clean |= scalar;
-        }
-    }
-    clean
-}
-
-/// PALIGNR with `imm8` on `n`-byte operands (simd_int::palignr_lanes)
-fn palignr(imm8: u8, n: u32) -> Packed {
-    match crate::cpu::simd_int::palignr_lanes(imm8, n as usize) {
-        (lanes, true) => Packed::ShuffleZero(lanes),
-        (lanes, false) => Packed::Shuffle(lanes),
-    }
-}
-
 /// SSE4.1/SSE4.2 forms of one Wasm SIMD operation over (destination,
 /// source), with an aligned m128 (the hot PMINUD and its siblings), the
 /// blends with imm8 as shuffles and BLENDVPS/BLENDVPD/PBLENDVB, ROUND (the
@@ -462,33 +301,8 @@ fn sse4(i: &DecodedInstruction, op: u32) -> Option<Simd> {
             imm8: i.immediate? as u8,
         });
     }
-    let blend = |size: u8, mask: u32| {
-        let mut lanes = [0; 16];
-        for (k, lane) in lanes.iter_mut().enumerate() {
-            *lane = k as u8 + if mask >> (k as u8 / size) & 1 != 0 { 16 } else { 0 };
-        }
-        Packed::Shuffle(lanes)
-    };
     Some(Simd::Packed {
-        op: match op {
-            0x660F3828 => Packed::MulDwords(true), // pmuldq
-            0x660F3829 => Packed::Binary(0xD6),    // pcmpeqq: i64x2.eq
-            0x660F382B => Packed::Pack(0x86),      // packusdw: i16x8.narrow_i32x4_u
-            0x660F3837 => Packed::Binary(0xD9),    // pcmpgtq: i64x2.gt_s
-            0x660F3838 => Packed::Binary(0x76),    // pminsb: i8x16.min_s
-            0x660F3839 => Packed::Binary(0xB6),    // pminsd: i32x4.min_s
-            0x660F383A => Packed::Binary(0x97),    // pminuw: i16x8.min_u
-            0x660F383B => Packed::Binary(0xB7),    // pminud: i32x4.min_u
-            0x660F383C => Packed::Binary(0x78),    // pmaxsb: i8x16.max_s
-            0x660F383D => Packed::Binary(0xB8),    // pmaxsd: i32x4.max_s
-            0x660F383E => Packed::Binary(0x99),    // pmaxuw: i16x8.max_u
-            0x660F383F => Packed::Binary(0xB9),    // pmaxud: i32x4.max_u
-            0x660F3840 => Packed::Binary(0xB5),    // pmulld: i32x4.mul
-            0x660F3A0C => blend(4, i.immediate? & 0xF),
-            0x660F3A0D => blend(8, i.immediate? & 3),
-            0x660F3A0E => blend(2, i.immediate? & 0xFF),
-            _ => return None,
-        },
+        op: vec::sse4_packed(op, i.immediate)?,
         reg: i.modrm? >> 3 & 7,
         mmx: false,
         source: 16,
@@ -1430,14 +1244,14 @@ impl Page {
                 }
                 self.load_vector(bytes);
             },
-            None if mmx => load_mmx(&mut self.w, i.modrm.unwrap() & 7),
+            None if mmx => mmx::load(&mut self.w, i.modrm.unwrap() & 7),
             None => self.load_xmm_bytes(i.modrm.unwrap() & 7, bytes),
         }
     }
     fn simd_result(&mut self, reg: u8, mmx: bool, value: &WasmLocalV128) {
         if mmx {
-            store_mmx(&mut self.w, reg, value);
-            mmx_transition(&mut self.w);
+            mmx::store(&mut self.w, reg, value);
+            mmx::transition(&mut self.w);
         }
         else {
             self.store_xmm(reg, value);
@@ -1673,11 +1487,11 @@ impl Page {
                 if let Some(ea) = &i.ea {
                     self.linear(ea);
                 }
-                load_mmx(&mut self.w, reg);
+                mmx::load(&mut self.w, reg);
                 let v = self.w.set_new_local_v128();
                 if i.ea.is_some() {
                     self.store_vector(8, &v);
-                    mmx_transition(&mut self.w);
+                    mmx::transition(&mut self.w);
                 }
                 else {
                     self.simd_result(rm, true, &v);
@@ -1706,7 +1520,7 @@ impl Page {
                     self.linear(ea);
                 }
                 if mmx {
-                    load_mmx(&mut self.w, reg);
+                    mmx::load(&mut self.w, reg);
                 }
                 else {
                     self.load_xmm(reg);
@@ -1722,7 +1536,7 @@ impl Page {
                     },
                 }
                 if mmx {
-                    mmx_transition(&mut self.w);
+                    mmx::transition(&mut self.w);
                 }
             },
             Simd::Emms => {
@@ -1741,7 +1555,7 @@ impl Page {
                 let src = self.w.set_new_local_v128();
                 let first = self.first(reg);
                 if mmx {
-                    load_mmx(&mut self.w, reg);
+                    mmx::load(&mut self.w, reg);
                 }
                 else {
                     self.load_xmm(first);
@@ -1775,7 +1589,7 @@ impl Page {
                 count,
             } => {
                 if mmx {
-                    load_mmx(&mut self.w, reg);
+                    mmx::load(&mut self.w, reg);
                 }
                 else {
                     self.load_xmm(self.first(reg));
@@ -2464,451 +2278,6 @@ impl Page {
         }
     }
 }
-
-// Leaves (docs/jit-unification-plan.md P2.1): the emitters that need nothing
-// of the page but the builder and their operands' locals, and the register
-// facts as functions of xmm_clean. P2.2 moves them into x86tpl, where the page
-// tier uses them too; tests/x86tpl/leaf_digests.rs pins their output.
-
-/// Push MMX `r` (cpu::read_mmx64s: sync the slot from the f64 cache first)
-fn load_mmx(w: &mut WasmBuilder, r: u8) {
-    let [_, _, dirty] = fpu::x87_cache_addresses();
-    w.load_fixed_i32(dirty);
-    w.const_i32(1 << r);
-    w.and_i32();
-    w.hint(false);
-    w.if_void();
-    w.const_i32(r as i32);
-    w.call_signature("fpu_sync_slot", Signature::new(&[WasmType::I32], &[]));
-    w.block_end();
-    w.const_i32(gp::get_reg_mmx_offset(r as u32) as i32);
-    w.simd_memory(0x5D, 0);
-}
-/// cpu::write_mmx_reg64 of the low quadword of `value`
-fn store_mmx(w: &mut WasmBuilder, r: u8, value: &WasmLocalV128) {
-    mmx_invalidate(w, r);
-    let address = gp::get_reg_mmx_offset(r as u32);
-    w.const_i32(address as i32);
-    w.get_local_v128(value);
-    w.simd_lane(0x1D, 0);
-    w.store_unaligned_i64(0);
-    w.const_i32(address as i32 + 8);
-    w.const_i32(0xFFFF);
-    w.store_unaligned_u16(0);
-}
-/// fpu_invalidate_slot(r)
-fn mmx_invalidate(w: &mut WasmBuilder, r: u8) {
-    let [_, valid, dirty] = fpu::x87_cache_addresses();
-    for address in [valid, dirty] {
-        w.const_i32(address as i32);
-        w.load_fixed_i32(address);
-        w.const_i32(!(1 << r));
-        w.and_i32();
-        w.store_aligned_i32(0);
-    }
-}
-/// cpu::transition_fpu_to_mmx: all tags valid, TOP 0
-fn mmx_transition(w: &mut WasmBuilder) {
-    for address in [gp::fpu_stack_empty as u32, gp::fpu_stack_ptr as u32] {
-        w.const_i32(address as i32);
-        w.const_i32(0);
-        w.store_u8(0);
-    }
-}
-/// Push op(dst, src) on `bytes`-wide registers (8: MMX, low quadword).
-fn packed(w: &mut WasmBuilder, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128, bytes: u8) {
-    match op {
-        Packed::ShuffleZero(lanes) => {
-            w.get_local_v128(dst);
-            w.simd_zero();
-            w.simd_shuffle(lanes);
-        },
-        Packed::Swizzle(mask) => {
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.const_i32(mask as i32);
-            w.simd(0x0F); // i8x16.splat
-            w.simd(0x4E); // v128.and
-            w.simd(0x0E); // i8x16.swizzle
-        },
-        Packed::MulHigh(signed) => {
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(if signed { 0xBC } else { 0xBE });
-            if bytes == 16 {
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(if signed { 0xBD } else { 0xBF });
-            }
-            else {
-                w.simd_zero();
-            }
-            w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
-        },
-        Packed::MulDwords(signed) => {
-            for v in [dst, src] {
-                w.get_local_v128(v);
-                w.simd_zero();
-                w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
-            }
-            // i64x2.extmul_low_i32x4_s/u
-            w.simd(if signed { 0xDC } else { 0xDE });
-        },
-        Packed::Sad => {
-            // |dst - src| per byte, summed per quadword.
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(0x79);
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(0x77);
-            w.simd(0x71);
-            w.simd(0x7D);
-            w.simd(0x7F);
-            let sums = w.set_new_local_v128();
-            w.get_local_v128(&sums);
-            w.get_local_v128(&sums);
-            w.get_local_v128(&sums);
-            w.simd_shuffle([4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
-            w.simd(0xAE);
-            w.simd_zero();
-            w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
-            w.free_local_v128(sums);
-        },
-        Packed::Shift(opcode, bits, arithmetic) => {
-            w.get_local_v128(src);
-            w.simd_lane(0x1D, 0);
-            let count = w.set_new_local_i64();
-            w.get_local_i64(&count);
-            w.const_i64((bits - 1) as i64);
-            w.gtu_i64();
-            w.if_v128();
-            if arithmetic {
-                w.get_local_v128(dst);
-                w.const_i32((bits - 1) as i32);
-                w.simd(opcode);
-            }
-            else {
-                w.simd_zero();
-            }
-            w.else_();
-            w.get_local_v128(dst);
-            w.get_local_i64(&count);
-            w.wrap_i64_to_i32();
-            w.simd(opcode);
-            w.block_end();
-            w.free_local_i64(count);
-        },
-        _ => {
-            if let Packed::AndNot = op {
-                w.get_local_v128(src);
-                w.get_local_v128(dst);
-            }
-            else {
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-            }
-            match op {
-                Packed::Shuffle(lanes) => w.simd_shuffle(lanes),
-                Packed::Binary(opcode) => w.simd(opcode),
-                Packed::AndNot => w.simd(0x4F),
-                Packed::Pack(opcode) => {
-                    w.simd(opcode);
-                    if bytes == 8 {
-                        w.simd_zero();
-                        w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
-                    }
-                },
-                Packed::Unpack(..) => w.simd_shuffle(op.lanes(bytes).unwrap()),
-                _ => unreachable!(),
-            }
-        },
-    }
-}
-
-/// CVT(T)PS2DQ/CVT(T)PD2DQ of the vector on the stack, rounded to nearest
-/// (or truncated): push the integer vector and return an i32 local,
-/// nonzero if a lane was out of the i32 range (or NaN)
-fn convert_integer(w: &mut WasmBuilder, double: bool, truncate: bool) -> WasmLocal {
-    let input = w.set_new_local_v128();
-    if truncate {
-        w.get_local_v128(&input);
-        w.simd(if double { 0x7A } else { 0x69 });
-    }
-    else {
-        // (admitted only with MXCSR.RC to nearest)
-        w.get_local_v128(&input);
-        w.simd(if double { 0x94 } else { 0x6A }); // nearest
-    }
-    let rounded = w.set_new_local_v128();
-    w.get_local_v128(&rounded);
-    if double {
-        w.const_i64(0xC1E0000000000000u64 as i64);
-        w.simd(0x12);
-    }
-    else {
-        w.const_i32(0xCF000000u32 as i32);
-        w.simd(0x11);
-    }
-    w.simd(if double { 0x4C } else { 0x46 });
-    w.get_local_v128(&rounded);
-    if double {
-        w.const_i64(0x41E0000000000000);
-        w.simd(0x12);
-    }
-    else {
-        w.const_i32(0x4F000000);
-        w.simd(0x11);
-    }
-    w.simd(if double { 0x49 } else { 0x43 });
-    w.simd(0x4E);
-    if double {
-        w.simd_zero();
-        w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
-    }
-    let valid = w.set_new_local_v128();
-    // (the lanes that exist: 0 and 1 for double precision)
-    w.get_local_v128(&valid);
-    w.simd(0xA4); // i32x4.bitmask
-    w.const_i32(if double { 3 } else { 15 });
-    w.and_i32();
-    w.const_i32(if double { 3 } else { 15 });
-    w.ne_i32();
-    let out_of_range = w.set_new_local();
-    w.get_local_v128(&rounded);
-    w.simd(if double { 0xFC } else { 0xF8 });
-    w.const_i32(i32::MIN);
-    w.simd(0x11);
-    w.get_local_v128(&valid);
-    w.simd(0x52);
-    if double {
-        w.simd_zero();
-        w.simd_shuffle([0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]);
-    }
-    w.free_local_v128(input);
-    w.free_local_v128(rounded);
-    w.free_local_v128(valid);
-    out_of_range
-}
-
-/// PSRLx/PSRAx/PSLLx (`bits` 16, 32 or 64: the lane width) and PSRLDQ/PSLLDQ
-/// (128: bytes) of `value` by imm8 `count`, `kind` the ModRM reg (2 PSRL, 4
-/// PSRA, 6 PSLL, 3 PSRLDQ, 7 PSLLDQ): push the result
-fn shift_immediate(w: &mut WasmBuilder, value: &WasmLocalV128, bits: u8, kind: u8, count: u8) {
-    let count = count as u32;
-    if bits == 128 {
-        w.get_local_v128(value);
-        w.simd_zero();
-        let mut lanes = [16; 16];
-        for (k, lane) in lanes.iter_mut().enumerate() {
-            let index = if kind == 3 { k as i32 + count as i32 } else { k as i32 - count as i32 };
-            if (0..16).contains(&index) {
-                *lane = index as u8;
-            }
-        }
-        w.simd_shuffle(lanes);
-    }
-    else if count >= bits as u32 && kind != 4 {
-        w.simd_zero();
-    }
-    else {
-        w.get_local_v128(value);
-        w.const_i32(count.min(bits as u32 - 1) as i32);
-        let base = match bits {
-            16 => 0x8B,
-            32 => 0xAB,
-            _ => 0xCB,
-        };
-        w.simd(
-            base + match kind {
-                6 => 0,
-                4 => 1,
-                _ => 2,
-            },
-        );
-    }
-}
-
-/// The native operation of SQRT (`opcode` 0x51), RSQRT (0x52), RCP (0x53),
-/// ADD (0x58), MUL (0x59), SUB (0x5C), MIN (0x5D), DIV (0x5E) and MAX (0x5F)
-/// on (`dst`, `src`), PS or PD (scalar forms use the low lane): push it
-fn float_arithmetic(
-    w: &mut WasmBuilder,
-    opcode: u8,
-    double: bool,
-    dst: &WasmLocalV128,
-    src: &WasmLocalV128,
-) {
-    let base = if double { 0xF0 } else { 0xE4 };
-    match opcode {
-        0x51 => {
-            w.get_local_v128(src);
-            w.simd(base - 1); // sqrt
-        },
-        0x52 | 0x53 => {
-            // rsqrt/rcp as the interpreter computes them: 1 / sqrt(x), 1 / x.
-            w.const_i32(0x3F800000);
-            w.simd(0x11); // i32x4.splat of 1.0f
-            w.get_local_v128(src);
-            if opcode == 0x52 {
-                w.simd(0xE3);
-            }
-            w.simd(0xE7);
-        },
-        0x5D | 0x5F => {
-            // dst where dst < src (> for max), else src (NaNs, zeros).
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(if double { 0x49 } else { 0x43 } + (opcode == 0x5F) as u32);
-            w.simd(0x52);
-        },
-        _ => {
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            w.simd(
-                base + match opcode {
-                    0x58 => 0,
-                    0x5C => 1,
-                    0x59 => 2,
-                    _ => 3,
-                },
-            );
-        },
-    }
-}
-
-/// CMPPS/CMPPD/CMPSS/CMPSD's relation of imm8[2:0] (`predicate`) for ordered
-/// operands (`dst`, `src`): EQ, LT, LE, UNORD (false), NEQ, NLT (ge), NLE
-/// (gt), ORD (true); push the mask
-fn compare_relation(
-    w: &mut WasmBuilder,
-    double: bool,
-    predicate: u8,
-    dst: &WasmLocalV128,
-    src: &WasmLocalV128,
-) {
-    match predicate & 7 {
-        3 => w.simd_zero(),
-        7 => {
-            w.const_i32(-1);
-            w.simd(0x11); // i32x4.splat
-        },
-        relation => {
-            w.get_local_v128(dst);
-            w.get_local_v128(src);
-            // (f32x4/f64x2: eq ne lt gt le ge)
-            let offset = [0, 2, 4, 0, 1, 5, 3][relation as usize];
-            w.simd(if double { 0x47 } else { 0x41 } + offset);
-        },
-    }
-}
-
-/// COMISS/COMISD and UCOMISS/UCOMISD of the low lanes of (`dst`, `src`),
-/// both ordered (operands_refused takes the others): or ZF (equal) and CF
-/// (less) into the i32 on the stack
-fn compare_flags(w: &mut WasmBuilder, double: bool, dst: &WasmLocalV128, src: &WasmLocalV128) {
-    let base = if double { 0x47 } else { 0x41 };
-    for (compare, flag) in [(0, 0x40), (2, 1)] {
-        w.get_local_v128(dst);
-        w.get_local_v128(src);
-        w.simd(base + compare);
-        w.simd_lane(0x1B, 0);
-        w.const_i32(flag);
-        w.and_i32();
-        w.or_i32();
-    }
-}
-
-/// Call runtime::tier0::ir_t0_sse_fp, the exact path of a refused
-/// instruction: (`destination`, `source`) into its operand block at
-/// `operands` (Page::env.sse_fp_operands), the form `key` (a catalogue key:
-/// a VEX form's legacy one) with `imm8`. Push its i32, nonzero if the
-/// instruction faults; the result is sse_fp_result's.
-fn sse_fp_call(
-    w: &mut WasmBuilder,
-    operands: u32,
-    key: u32,
-    imm8: u32,
-    destination: &WasmLocalV128,
-    source: &WasmLocalV128,
-) {
-    for (k, value) in [destination, source].into_iter().enumerate() {
-        w.const_i32((operands + 16 * k as u32) as i32);
-        w.get_local_v128(value);
-        w.simd_memory(0x0B, 4); // v128.store
-    }
-    w.const_i32(key as i32);
-    w.const_i32(imm8 as i32);
-    w.call_signature("ir_t0_sse_fp", signature("ir_t0_sse_fp"));
-}
-/// Push the result of sse_fp_call
-fn sse_fp_result(w: &mut WasmBuilder, operands: u32) {
-    w.const_i32(operands as i32);
-    w.simd_memory(0x00, 4); // v128.load
-}
-
-/// The Page::xmm_clean bit of a lane format: the low lane or all lanes,
-/// single or double precision (all lanes clean implies the low lane)
-fn clean_bits(double: bool, scalar: bool) -> u8 {
-    match (double, scalar) {
-        (false, true) => CLEAN_SS,
-        (false, false) => CLEAN_PS | CLEAN_SS,
-        (true, true) => CLEAN_SD,
-        (true, false) => CLEAN_PD | CLEAN_SD,
-    }
-}
-/// Whether XMM `first` and `source` (None: memory) are known to hold `lanes`
-/// clean (Page::xmm_clean): native_fp's `known` operands
-fn known_clean(clean: &[u8; 8], lanes: u8, first: u8, source: Option<u8>) -> [bool; 2] {
-    let holds = |r: u8| clean[r as usize] & lanes == lanes;
-    [holds(first), source.is_some_and(holds)]
-}
-/// Whether an SSE arithmetic form (Simd::Float, not RSQRT or RCP) leaves
-/// facts that hold only for admitted operands (float_facts): a clean result
-/// (all but ADD and SUB), or a source register found clean. Its refused
-/// operands then retry, as the exact path would not make the facts true.
-fn float_claims(opcode: u8, source: Option<u8>, known: [bool; 2]) -> bool {
-    !matches!(opcode, 0x58 | 0x5C) || source.is_some() && !known[1]
-}
-/// Page::xmm_clean after an admitted SSE arithmetic form (Simd::Float) wrote
-/// XMM `reg`, of operands that passed native_fp::arithmetic_refused: a source
-/// register (None: memory) is clean, and so is the result of all but ADD and
-/// SUB, whose clean operands can cancel to a denormal; a scalar result keeps
-/// the other lanes of the first source (its facts `before` the write).
-/// RSQRT and RCP check only their operand and leave nothing.
-fn float_facts(
-    clean: &mut [u8; 8],
-    opcode: u8,
-    double: bool,
-    scalar: bool,
-    reg: u8,
-    source: Option<u8>,
-    before: u8,
-) {
-    if matches!(opcode, 0x52 | 0x53) {
-        return;
-    }
-    // (see native_fp::arithmetic_refused)
-    let lanes = clean_bits(double, scalar);
-    if let Some(source) = source.filter(|&r| r != reg) {
-        clean[source as usize] |= lanes;
-    }
-    if !matches!(opcode, 0x58 | 0x5C) {
-        // a scalar result keeps the destination's other lanes
-        clean[reg as usize] = lanes | if scalar { before & clean_bits(double, false) } else { 0 };
-    }
-}
-/// Page::xmm_clean after native_fp::operands_refused admitted XMM `first`
-/// and `source` (None: memory) in `lanes`
-fn operand_facts(clean: &mut [u8; 8], lanes: u8, first: u8, source: Option<u8>) {
-    clean[first as usize] |= lanes;
-    if let Some(source) = source {
-        clean[source as usize] |= lanes;
-    }
-}
-
 #[cfg(test)]
 #[path = "../../../../tests/x86tpl/leaf_digests.rs"]
 mod leaf_digests;

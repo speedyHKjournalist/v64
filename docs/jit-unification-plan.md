@@ -1262,3 +1262,14 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
   `make jit-leaf-tests` 跑这两个测试（主机上约 0.2 s），`make jit-gate` 在 IR、x64 或共享 JIT 代码改动时跑它。
 - replay-check 第一次真正比较：2605 条记录全部字节一致。核心比较：8 个函数改变、6 个新增、4 个删除，都在编译路径上。
   R 级：bench 3 个会话加复测后几何均值 1.010；XP 中位数 13.30 s 对 13.07 s，比值 1.017。
+
+**P2.2 `src/rust/x86tpl` 与 `wasmgen::leaves`，2026-10-09。**
+
+- `x86tpl::vec`：Packed 表（`Packed`、`packed_op`、`shuffle_lanes`、`palignr`，以及 Tier-0 的 `sse4` 改用的新 `sse4_packed`）、
+  寄存器事实与 P2.1 的叶子；`x86tpl::mmx`：读、写、失效、转换；`x86tpl::x87`：`X87Words`、`X87Cache`、`x87_native` 及其辅助
+  函数，从 region 后端（`ir/backend/wasm/x87.rs`，冻结的豁免文件）移来，region 后端只留它的适配器。Tier-0 改用它们。
+- `wasmgen::leaves`：ISA 中立的 v128 叶子：`interleave_lanes`（PUNPCKL/H，A64 的 ZIP1/2）、`byte_shift_lanes`（PSRLDQ/PSLLDQ，
+  A64 带零寄存器的 EXT）、`shift_lanes`（范围内的常数移位）、`splat_i32`；x86tpl 建在它们之上。f64 的中立叶子等 A64 的浮点
+  模板成为第二个使用者时再加。
+- replay-check 2605 条一致，叶子摘要不变。核心比较：8 个函数改变、8 个新增、8 个删除。R 级：bench 加复测后 1.023；XP
+  中位数 13.33 s 对 13.08 s，比值 1.019。

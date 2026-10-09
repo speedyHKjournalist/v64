@@ -23,10 +23,10 @@ use crate::cpu::cpu::{
     TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY, TLB_VALID,
 };
 use crate::cpu::global_pointers as gp;
-use crate::ir::backend::wasm::x87::{x87_native, X87Cache, X87Words};
 use crate::ir::frontend::decode::{DecodedInstruction, EffectiveAddress, Flow};
 use crate::ir::helper::imports::signature;
 use crate::ir::x87::Io;
+use crate::x86tpl::x87::{x87_native, X87Cache, X87Words};
 
 #[path = "simd.rs"]
 mod simd;
@@ -947,7 +947,7 @@ struct Page {
     /// which sets flags it ignores
     fp_mxcsr: Option<WasmLocal>,
     /// Per XMM register, the floating-point lanes known to be neither NaN nor
-    /// denormal in the block (simd::CLEAN_*; see native_fp)
+    /// denormal in the block (x86tpl::vec::CLEAN_*; see native_fp)
     xmm_clean: [u8; 8],
     /// The SIMD task checks the block has made (simd::simd_guard): 1 those of
     /// MMX forms, 2 also those of XMM forms, 4 those of VEX forms
@@ -3071,7 +3071,7 @@ impl Page {
                         self.retry_if();
                     },
                 }
-                // The inlined f64 form (backend::wasm::x87) where it applies,
+                // The inlined f64 form (x86tpl::x87) where it applies,
                 // else ir_t0_x87 from unchanged state.
                 let done = self.w.block_void();
                 if let Some(native) = crate::ir::x87::native(opcode, modrm) {

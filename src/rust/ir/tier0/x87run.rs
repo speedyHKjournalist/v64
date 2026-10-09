@@ -3,7 +3,7 @@
 //! known relative to the TOP at the run's start: one guard checks that every
 //! slot read holds an exact cached f64 and every slot pushed is empty, then
 //! the run computes in f64 locals and commits once. The results are exactly
-//! those of the per-form native path (backend::wasm::x87), which runs the
+//! those of the per-form native path (x86tpl::x87), which runs the
 //! instructions one by one when the guard fails.
 use super::{Instruction, Page};
 use crate::cpu::{fpu, global_pointers as gp};

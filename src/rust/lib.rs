@@ -30,5 +30,6 @@ mod softfloat;
 mod state_flags;
 mod step_profile;
 mod wasmgen;
+mod x86tpl;
 mod x87_profiler;
 mod zstd;
