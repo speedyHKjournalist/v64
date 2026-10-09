@@ -88,6 +88,10 @@ const LEVELS = {
     "R-q35": [
         ["acpi-table-tests"], ["q35-device-tests"], ["q35-guest-tests", true], ["q35-hotplug-tests", true],
     ],
+    // the IR tests of .github/workflows/ir-core.yml, run here (docs/jit-unification-plan.md P0.9)
+    "R-IR": [
+        ["ir-core-tests"],
+    ],
 };
 
 const args = process.argv.slice(2);

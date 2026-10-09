@@ -198,7 +198,7 @@ export const STATICS = {
     "cpu/smm.rs": { SMRAM_CONTROL: "machine", TSEG: "machine", TSEG_SEEN: "cache" },
     "cpu/memory.rs": { mem8: "machine", ram_fast_limit: "machine" },
     // device memory regions (frame buffers) and where they are mapped
-    "cpu/mmio_ram.rs": { TABLE: "machine" },
+    "cpu/mmio_ram.rs": { TABLE: "machine", TEST_TABLE: "debug" },
     "cpu/pic.rs": { PIC: "machine" },
     // SoftFloat's state around one SSE instruction (saved and restored)
     "cpu/simd_fp.rs": { softfloat_roundingMode: "scratch", softfloat_exceptionFlags: "scratch" },

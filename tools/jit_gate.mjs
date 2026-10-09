@@ -1,0 +1,118 @@
+#!/usr/bin/env node
+// The local gates of docs/jit-unification-plan.md (P0.9; the GitHub CI is left
+// alone for now, open question 1):
+//
+// make jit-gate, before each commit:
+//   git diff --check, state-layout-check, warning-free `cargo check` of the
+//   plain and the parallel build, rustfmt, eslint (when installed: ESLINT or
+//   node_modules/.bin/eslint), the region freeze (P7.6) and, when something
+//   that feeds build/v86.wasm changed, core-split-check (ARM64 plan P0.7);
+//   then ir-tier0-tests when IR or shared JIT code changed and
+//   x64-page-tier-tests when x64 or shared JIT code changed. The changes are
+//   the uncommitted ones, or without any the last commit's, or those since
+//   --base REV.
+// make jit-gate-full, at a milestone's exit and before a default flips:
+//   the same with both test targets, then ir-core-tests (the targets of
+//   .github/workflows/ir-core.yml) and every level of the release gate with
+//   --quick.
+//
+// Performance is not gated automatically (open question 2): the R, F, S and D
+// conditions are measured with tests/bench/gate.mjs where a change needs them.
+//
+// Usage: tools/jit_gate.mjs [--full] [--base REV] [--keep-going]
+
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import url from "node:url";
+
+const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "..");
+const args = process.argv.slice(2);
+const full = args.includes("--full"), keep_going = args.includes("--keep-going");
+const base_index = args.indexOf("--base");
+const base = base_index >= 0 ? args[base_index + 1] : null;
+
+function git(...git_args)
+{
+    const r = spawnSync("git", ["-C", ROOT, ...git_args], { encoding: "utf8" });
+    if(r.status !== 0) throw new Error("git " + git_args.join(" ") + ": " + r.stderr.trim());
+    return r.stdout.trim();
+}
+const lines = text => text.split("\n").filter(Boolean);
+
+let changed, compared_with;
+const untracked = lines(git("ls-files", "--others", "--exclude-standard"));
+if(base)
+{
+    changed = [...lines(git("diff", "--name-only", base)), ...untracked];
+    compared_with = base;
+}
+else
+{
+    changed = [...lines(git("diff", "--name-only", "HEAD")), ...untracked];
+    compared_with = "HEAD";
+    if(!changed.length)
+    {
+        changed = lines(git("diff", "--name-only", "HEAD~1", "HEAD"));
+        compared_with = "HEAD~1 (the last commit)";
+    }
+}
+const any = (...patterns) => changed.some(p => patterns.some(re => re.test(p)));
+
+// shared JIT code: both test targets
+const SHARED = [/^src\/rust\/(jit|jit_switches|lib|step_profile)\.rs$/, /^src\/rust\/(wasmgen|jitrt|x86tpl|cpu)\//, /^src\/cpu\.js$/, /^gen\//, /^Cargo\.(toml|lock)$/];
+const feeds_core = any(/^src\/rust\//, /^Cargo\.(toml|lock)$/, /^\.cargo\//, /^gen\//, /^lib\//, /^Makefile$/);
+const ir_tests = full || any(/^src\/rust\/ir\//, ...SHARED);
+const x64_tests = full || any(/^src\/rust\/x64\//, ...SHARED);
+
+const eslint = process.env.ESLINT || (fs.existsSync(path.join(ROOT, "node_modules/.bin/eslint")) ? path.join(ROOT, "node_modules/.bin/eslint") : null);
+const eslint_command = eslint && [...(eslint.endsWith(".js") ? ["node", eslint] : [eslint]), "src", "tests", "gen", "lib", "examples", "tools"];
+const warning_free = { RUSTFLAGS: "-D warnings" };
+const cargo_check = ["check", "--release", "--target", "wasm32-unknown-unknown"];
+
+const steps = [
+    { name: "git diff --check", command: ["git", "diff", "--check", base || "HEAD"] },
+    { name: "state-layout-check", command: ["make", "state-layout-check"] },
+    { name: "cargo check (warning-free)", command: ["cargo", ...cargo_check], env: warning_free },
+    { name: "cargo check --features parallel (warning-free)", command: ["cargo", ...cargo_check, "--features", "parallel"], env: warning_free },
+    { name: "rustfmt", command: ["make", "rustfmt"] },
+    { name: "eslint", command: eslint_command, skip: eslint ? null : "eslint not installed (set ESLINT to its bin/eslint.js)" },
+    { name: "region freeze (P7.6)", command: ["node", "tools/check_region_freeze.mjs", ...(base ? ["--base", base] : [])] },
+    { name: "core-split-check (ARM64 plan P0.7)", command: ["node", "tools/core_split_check.mjs", ...(base ? ["--base", base] : [])],
+        skip: feeds_core || full ? null : "nothing that feeds build/v86.wasm changed" },
+    { name: "ir-tier0-tests", command: ["make", "ir-tier0-tests"], skip: ir_tests ? null : "no IR or shared JIT change" },
+    { name: "x64-page-tier-tests", command: ["make", "x64-page-tier-tests"], skip: x64_tests ? null : "no x64 or shared JIT change" },
+];
+if(full)
+{
+    steps.push({ name: "ir-core-tests", command: ["make", "ir-core-tests"] });
+    steps.push({ name: "release gate, every level --quick", command: ["make", "platform-release-gate", "GATE_ARGS=--quick"] });
+}
+
+console.log(`[jit-gate] ${full ? "full" : "quick"}; ${changed.length} changed paths against ${compared_with}`);
+const results = [];
+let failed = false;
+for(const step of steps)
+{
+    if(step.skip || failed && !keep_going)
+    {
+        results.push({ name: step.name, status: step.skip ? "skipped: " + step.skip : "not run" });
+        continue;
+    }
+    console.log(`\n[jit-gate] ${step.name}: ${step.command.join(" ")}`);
+    const start = Date.now();
+    const r = spawnSync(step.command[0], step.command.slice(1), { cwd: ROOT, stdio: "inherit", env: { ...process.env, ...step.env } });
+    const seconds = ((Date.now() - start) / 1000).toFixed(1);
+    const ok = r.status === 0;
+    if(!ok) failed = true;
+    results.push({ name: step.name, status: (ok ? "ok" : "FAILED") + ` (${seconds} s)` });
+}
+
+console.log("\n[jit-gate] summary:");
+for(const { name, status } of results) console.log(`  ${name.padEnd(48)} ${status}`);
+if(failed)
+{
+    console.log("[jit-gate] FAILED");
+    process.exit(1);
+}
+console.log("[jit-gate] passed");

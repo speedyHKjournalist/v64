@@ -896,6 +896,44 @@ x64-extended-guest-tests: build/libv86.mjs build/v86.wasm
 platform-release-gate:
 	node tools/release_gate.mjs $(GATE_ARGS)
 
+# The local gates of docs/jit-unification-plan.md (P0.9, tools/jit_gate.mjs):
+# jit-gate before each commit, jit-gate-full at a milestone's exit
+.PHONY: jit-gate jit-gate-full core-split-check ir-core-tests
+jit-gate:
+	node tools/jit_gate.mjs $(JIT_GATE_ARGS)
+
+jit-gate-full:
+	node tools/jit_gate.mjs --full $(JIT_GATE_ARGS)
+
+# build/v86.wasm of a base revision (default HEAD) against the working tree's,
+# function by function (docs/arm64-virt-android16-plan.md P0.7)
+core-split-check:
+	node tools/core_split_check.mjs $(CORE_SPLIT_ARGS)
+
+# The steps of .github/workflows/ir-core.yml, run here (the release gate's
+# R-IR level; the workflow itself stays as it is)
+ir-core-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	$(MAKE) ir-x87-tests ir-control-reference-tests ir-sse-fp-tests ir-mmx-tests ir-coverage-tests
+	$(MAKE) ir-sti-tests ir-helper-reload-tests ir-mir-owned-tests ir09-completion-tests
+	env RUSTFLAGS="-D warnings" cargo test ir::mir::forwarding -- --nocapture
+	env RUSTFLAGS="-D warnings" cargo test
+	node tests/ir/wasm/run.mjs
+	node tests/rust/verify-wasmgen-dummy-output.js
+	node tests/ir/decode/oracle.mjs
+	tools/ir-licm-tests.sh
+	node tests/ir/differential/cfg.mjs
+	node tests/ir/differential/shifts.mjs
+	node tests/ir/differential/bits.mjs
+	node tests/ir/differential/multiply.mjs
+	node tests/ir/differential/ir10.mjs
+	tools/ir-forwarding-tests.sh
+	node tests/ir/differential/simd_integer.mjs
+	sh tools/ir-store-continuation-tests.sh
+	$(MAKE) ir-budget-batch-tests ir-entry-tests ir-live-tests ir-cache-tests ir-auto-tests ir-fusion-tests ir-diagnostic-tests
+	sh tools/ir13-smoke-tests.sh
+	$(MAKE) ir-decode-contract-tests ir-system-mode-tests ir-portable-tests
+	node tests/ir/differential/helper_audit.mjs
+
 .PHONY: acpi-sleep-tests platform-contract-tests multicore-state-tests extended-memory-tests x64-extended-guest-tests platform-release-gate
 
 .PHONY: state-layout state-layout-check smp-tests multicore-boot-tests multicore-boot-tests-release
