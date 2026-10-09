@@ -40,6 +40,27 @@ which also names keys (`"prot32 tier0 0F A2"`). The exports:
 - `ir_t0_steps(key)` is separate and always on: Tier-0's steps by their
   first two bytes, prefixes included, which tests read.
 
+## The mode ledger: retired instructions by mode and engine
+
+The JIT switch `mode_ledger` (off by default) counts retired instructions
+(the definition of `core_statistics_get(core, 0)`: a REP instruction once, a
+faulting one not at all) by mode (`x64::state::ExecutionMode`: real,
+virtual-8086, 16- and 32-bit protected, 16- and 32-bit compatibility,
+64-bit), by whether 32-bit code ran with flat segments, and by how they ran:
+`interpreted` (outside compiled code), `tier0_native`, `tier0_step`,
+`region_native`, `page_native`, `page_step` and `page_retry`. While it is on,
+its sum grows exactly as the retired count does
+(`tests/ir/differential/tier0_mode_ledger.mjs`, `tests/x64/mode_ledger.mjs`).
+Each count goes to the mode its run started in: an interpreted run of
+instructions, an activation of compiled code (which leaves when the mode
+changes) or one step.
+
+`mode_ledger(exports)` in [`tools/bench/jit_stats.mjs`](../tools/bench/jit_stats.mjs)
+reads it as `{ mode: { way: retired } }`, flat 32-bit code under
+`"<mode>.flat"`; `JIT_STATS=1` records carry it while it is on, and
+`mode_ledger_reset()` empties it. The count is per Wasm instance: with cores
+in workers, each worker has its own.
+
 ## Windows guests in node (tests/x64/windows_boot.mjs)
 
 The Windows harness can measure a running program from a saved state, so a

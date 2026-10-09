@@ -859,11 +859,15 @@ static mut T0_SLOTS: [bool; jit::WASM_TABLE_SIZE as usize] = [false; jit::WASM_T
 /// Run the function in table `slot` (either signature).
 #[inline(always)]
 unsafe fn call_slot(slot: u32) {
+    use crate::cpu::execution::{ledger_begin, ledger_end_native, Way};
+    let span = ledger_begin();
     if T0_SLOTS[slot as usize] {
         call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+        ledger_end_native(span, Way::Tier0Native);
     }
     else {
         call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+        ledger_end_native(span, Way::RegionNative);
     }
 }
 
@@ -950,6 +954,7 @@ unsafe fn t0_execute() -> bool {
     // from the EIP just stored to memory stalls (store-to-load into an
     // indirect call).
     let mut from = linear;
+    let span = crate::cpu::execution::ledger_begin();
     let mut linear = call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, 0) as u32;
     if t0_link() != Link::Nested {
         // Iterative linking (as the legacy JIT's jit_link_once): a page
@@ -973,6 +978,7 @@ unsafe fn t0_execute() -> bool {
             linear = call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, 1) as u32;
         }
     }
+    crate::cpu::execution::ledger_end_native(span, crate::cpu::execution::Way::Tier0Native);
     T0_LINKABLE = false;
     let poll_reuse = POLL_REUSE_ENABLED && super::entry::poll_exit();
     if !super::entry::link_requested() && !poll_reuse {

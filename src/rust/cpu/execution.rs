@@ -264,6 +264,128 @@ pub unsafe fn note_native_retired(steps: u32, accounted_before: u32) {
     (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].retired +=
         steps.saturating_sub(interpreted) as u64;
 }
+/// How retired instructions ran (the mode ledger)
+#[derive(Clone, Copy)]
+pub enum Way {
+    /// by the interpreter, outside compiled code
+    Interpreted = 0,
+    /// IR Tier-0's page functions, and the instructions they stepped
+    Tier0Native = 1,
+    Tier0Step = 2,
+    /// IR regions (Tier-1 and Tier-2)
+    RegionNative = 3,
+    /// the x64 page tier, the instructions it stepped and the ones it
+    /// retried in the interpreter after refusing an access
+    PageNative = 4,
+    PageStep = 5,
+    PageRetry = 6,
+}
+const WAYS: usize = 7;
+/// x64::state::ExecutionMode
+const MODES: usize = 7;
+/// The mode ledger (docs/jit-unification-plan.md P0.6, the JIT switch
+/// mode_ledger, off by default): retired instructions (cross-phase rule 3:
+/// what core_statistics_get(core, 0) counts) by mode, by whether 32-bit code
+/// ran with flat segments (index 1), and by Way. While it is on, its sum
+/// grows exactly as the retired count does.
+static mut LEDGER: Option<[[[u64; WAYS]; 2]; MODES]> = None;
+
+#[inline(always)]
+pub fn ledger_on() -> bool { unsafe { (*(&raw const LEDGER)).is_some() } }
+/// Off: the ledger is dropped; on: an empty one unless it was on
+pub unsafe fn set_ledger(on: bool) {
+    if on != ledger_on() {
+        LEDGER = on.then_some([[[0; WAYS]; 2]; MODES]);
+    }
+}
+#[no_mangle]
+pub unsafe fn mode_ledger_reset() {
+    if let Some(ledger) = (*(&raw mut LEDGER)).as_mut() {
+        *ledger = [[[0; WAYS]; 2]; MODES];
+    }
+}
+/// Retired instructions of mode `mode` (ExecutionMode), with flat 32-bit
+/// segments or not (`flat`), that ran the Way `way`
+#[no_mangle]
+pub unsafe fn mode_ledger_get(mode: u32, flat: u32, way: u32) -> f64 {
+    (*(&raw const LEDGER))
+        .as_ref()
+        .and_then(|l| l.get(mode as usize)?.get(flat as usize)?.get(way as usize))
+        .map_or(0.0, |&n| n as f64)
+}
+
+/// Retirements of one Way from one mode, while the ledger is on: begun before
+/// the instructions run, so that their mode is the row
+pub struct LedgerSpan {
+    mode: u8,
+    flat: u8,
+    retired: u64,
+    counter: u32,
+    dispatches: u32,
+}
+#[inline(always)]
+pub unsafe fn ledger_begin() -> Option<LedgerSpan> {
+    if ledger_on() {
+        Some(ledger_begin_now())
+    }
+    else {
+        None
+    }
+}
+#[cold]
+#[inline(never)]
+unsafe fn ledger_begin_now() -> LedgerSpan {
+    use crate::x64::state::ExecutionMode;
+    let mode = crate::x64::state::mode();
+    let flat = matches!(
+        mode,
+        ExecutionMode::Protected32 | ExecutionMode::Compatibility32
+    ) && crate::cpu::cpu::has_flat_segmentation();
+    LedgerSpan {
+        mode: mode as u8,
+        flat: flat as u8,
+        retired: retired_now(),
+        counter: *crate::cpu::global_pointers::instruction_counter,
+        dispatches: JIT_ACCOUNTED_DISPATCHES,
+    }
+}
+/// The current core's retired instructions so far, pending ones included
+unsafe fn retired_now() -> u64 {
+    (*crate::parallel::machine(&raw mut CORE_STATISTICS))[apic::current_core()].retired
+        + PENDING_RETIRED
+}
+unsafe fn ledger_add(span: &LedgerSpan, way: Way, retired: u64) {
+    if let Some(ledger) = (*(&raw mut LEDGER)).as_mut() {
+        ledger[span.mode as usize][span.flat as usize][way as usize] += retired;
+    }
+}
+/// Instructions retired one by one (finish_instruction) since the span began
+#[inline(always)]
+pub unsafe fn ledger_end(span: Option<LedgerSpan>, way: Way) {
+    if let Some(span) = span {
+        ledger_add(&span, way, retired_now() - span.retired);
+    }
+}
+/// Instructions compiled code retired since the span began, as
+/// note_native_retired counts them: the instruction counter's advance less
+/// the instructions it stepped (which their own spans count)
+#[inline(always)]
+pub unsafe fn ledger_end_native(span: Option<LedgerSpan>, way: Way) {
+    if let Some(span) = span {
+        let steps = (*crate::cpu::global_pointers::instruction_counter).wrapping_sub(span.counter);
+        let interpreted = JIT_ACCOUNTED_DISPATCHES.wrapping_sub(span.dispatches);
+        ledger_add(&span, way, steps.saturating_sub(interpreted) as u64);
+    }
+}
+/// `retired` instructions compiled code retired since the span began, counted
+/// by the caller
+#[inline(always)]
+pub unsafe fn ledger_end_count(span: Option<LedgerSpan>, way: Way, retired: u32) {
+    if let Some(span) = span {
+        ledger_add(&span, way, retired as u64);
+    }
+}
+
 #[no_mangle]
 pub unsafe fn core_statistics_reset() {
     PENDING_RETIRED = 0;

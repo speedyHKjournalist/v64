@@ -78,9 +78,11 @@ pub unsafe fn ir_t0_step(expected_next: u32) -> i32 {
     }
     *gp::instruction_pointer += 1;
     // The page function accounts for the retired instruction itself.
+    let span = crate::cpu::execution::ledger_begin();
     crate::cpu::execution::begin_instruction();
     held(|| cpu::run_instruction(opcode | (*gp::is_32 as i32) << 8));
     crate::cpu::execution::finish_instruction();
+    crate::cpu::execution::ledger_end(span, crate::cpu::execution::Way::Tier0Step);
     crate::cpu::execution::note_jit_interpreted(
         (*gp::instruction_counter)
             .wrapping_sub(counter_before)

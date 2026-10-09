@@ -12,7 +12,7 @@
 //! Values apply in the order of SWITCHES: ir_tier0 resets ir_page_mode and
 //! ir_page_threshold, so those follow it.
 
-use crate::cpu::cpu;
+use crate::cpu::{cpu, execution};
 use crate::ir::runtime::{cache, schedule, tier0};
 use crate::step_profile;
 use crate::x64::{pagegen, pages};
@@ -262,6 +262,18 @@ pub const SWITCHES: &[Switch] = &[
                 .is_some()
         },
         get: |_| Some(step_profile::enabled() as u32),
+    },
+    // measurement: retired instructions by mode and how they ran
+    // (crate::cpu::execution's mode ledger)
+    Switch {
+        name: "mode_ledger",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { execution::set_ledger(on) })
+                .is_some()
+        },
+        get: |_| Some(execution::ledger_on() as u32),
     },
 ];
 

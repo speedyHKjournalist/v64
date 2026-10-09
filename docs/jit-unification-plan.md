@@ -1078,3 +1078,19 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - `make jit-gate` 现在也会在 npx 的缓存里找 eslint（`~/.npm/_npx/*/node_modules/eslint`），不设 `ESLINT` 也会跑。
 - 观察：`712.sse4.int` 在两次比较里分别是 1.30× 与 2.31×，与改动无关，像是双峰（编译时机或缓存），留待 P0.1 的
   基线测量里查明。
+
+**P0.6 按模式统计（mode ledger），2026-10-09。**
+
+- `cpu/execution.rs` 的账本：退役指令（规则 3 的定义）按模式（`ExecutionMode` 的 7 种）、32 位代码是否平坦、执行方式
+  分格计数。执行方式 7 种：解释器（编译代码之外）、Tier-0 原生与单步、region 原生、x64 page tier 原生、单步与重试。
+  默认关，注册表开关 `mode_ledger`（P0.6 表中的 `MODE_LEDGER`）；关着时每段（一次解释、一次激活、一次单步）只多一次判断，
+  热路径上的新代码都是 `#[cold]`/`#[inline(never)]`（规则 7）。每一段按开始时的模式记账：编译代码在模式改变时退出，
+  解释段在模式改变后最多再跑到块尾。
+- 开着时账本之和与退役指令数逐条相等：`tests/ir/differential/tier0_mode_ledger.mjs`（实模式 BIOS、平坦与 DS 基址
+  0x1000 的 32 位代码、Tier-0 原生与单步，349602 条）与 `tests/x64/mode_ledger.mjs`（32 位准备代码、兼容模式里的一条
+  远跳转、64 位循环的原生与单步，102081 条）都检查这一点，所以没有漏记的退役点。
+- 读取：`tools/bench/jit_stats.mjs` 的 `mode_ledger()`；`JIT_STATS=1` 的记录在开关打开时带上账本。用法见
+  [profiling.md](profiling.md)。P0.15 的 Win98 工作负载用它跑一遍，随 P0.15 记录。
+- R 级（相对 P0.5，规则 7 因改动 `cycle_internal`、`run_cpu_slice` 而加测 XP）：bench 3 个 quick 会话几何均值 1.006，
+  `701`、`707`、`712` 按 `--runs 7 --scale 4` 复测为 0.995、1.005、0.990，复测后 1.008；XP 桌面（所有者的配置，
+  `IR_SYNC_DISK=1`，ABBAAB）中位数 13.93 s 对 13.78 s，比值 1.011。

@@ -7,7 +7,8 @@
 // counts once, a faulting one not at all); the x64 page tier's counters
 // (x64_page_stat), IR Tier-0's and the regions' (CPU.get_jit_info); with the
 // JIT switch step_profile on, the 40 most stepped instructions (StepKey v1,
-// tools/step_profile.mjs).
+// tools/step_profile.mjs); with mode_ledger on, the retired instructions by
+// mode and how they ran (mode_ledger below).
 
 import { get_jit_switches } from "../../src/jit_switches.js";
 import { step_profile } from "../step_profile.mjs";
@@ -16,6 +17,33 @@ import { step_profile } from "../step_profile.mjs";
 const X64_FIELDS = ["compiled", "native_retired", "retries", "unknown_exits", "steps", "invalidated", "entries",
     "compile_failures", "recompiles", "instructions_compiled", "templated", "evictions", "ready_functions"];
 const X64_EXTRA = { 21: "pages_compiled", 24: "bytes_compiled", 20: "ms_in_calls", 22: "ms_in_execute" };
+
+// cpu/execution.rs: x64::state::ExecutionMode and Way
+export const LEDGER_MODES = ["real", "vm86", "prot16", "prot32", "compat16", "compat32", "long64"];
+export const LEDGER_WAYS = ["interpreted", "tier0_native", "tier0_step", "region_native", "page_native", "page_step", "page_retry"];
+
+/**
+ * The mode ledger of a core's exports (docs/jit-unification-plan.md P0.6):
+ * { mode: { way: retired } }, 32-bit code with flat segments under
+ * "<mode>.flat", nonzero counts only; empty while the switch mode_ledger is off
+ */
+export function mode_ledger(exports)
+{
+    const ledger = {};
+    if(!exports["mode_ledger_get"]) return ledger;
+    LEDGER_MODES.forEach((mode, m) => {
+        for(const flat of [0, 1]) LEDGER_WAYS.forEach((way, w) => {
+            const n = exports["mode_ledger_get"](m, flat, w);
+            if(n) (ledger[mode + (flat ? ".flat" : "")] ??= {})[way] = n;
+        });
+    });
+    return ledger;
+}
+/** The sum of a mode_ledger() result */
+export function mode_ledger_total(ledger)
+{
+    return Object.values(ledger).reduce((sum, ways) => sum + Object.values(ways).reduce((a, b) => a + b, 0), 0);
+}
 
 /** Whether the scripts write records: JIT_STATS=1 */
 export function jit_stats_enabled(env = process.env)
@@ -50,6 +78,7 @@ export function jit_stats(emulator, extra = {})
         x64,
         ir: cpu.get_jit_info()["ir"],
         ...switches["step_profile"] ? { steps: step_profile(exports, 40) } : {},
+        ...switches["mode_ledger"] ? { ledger: mode_ledger(exports) } : {},
     };
 }
 

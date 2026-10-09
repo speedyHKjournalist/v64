@@ -181,7 +181,7 @@ export const STATICS = {
     },
     "cpu/exceptions.rs": { DELIVERING: "scratch", EXTERNAL: "scratch", SHUTDOWN: "core", BSP_RESET: "machine" },
     "cpu/context.rs": { CONTEXTS: "core" },
-    "cpu/execution.rs": { execution_state: "machine", CORE_STATISTICS: "core", JIT_ACCOUNTED_DISPATCHES: "scratch",
+    "cpu/execution.rs": { execution_state: "machine", CORE_STATISTICS: "core", JIT_ACCOUNTED_DISPATCHES: "scratch", LEDGER: "debug",
         // flushed into CORE_STATISTICS before every read, reset and core switch
         PENDING_RETIRED: "scratch", PENDING_REP_ELEMENTS: "scratch" },
     "cpu/fpu.rs": { X87_JIT_CACHE: "machine" },

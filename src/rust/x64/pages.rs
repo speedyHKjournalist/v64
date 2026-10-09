@@ -559,6 +559,7 @@ unsafe fn execute(slot: u32, budget: u32, rip: u64) -> Attempt {
 }
 unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     let before = *gp::instruction_counter;
+    let span = execution::ledger_begin();
     let core = apic::current_core();
     *gp::x64_jac_base = jac::base(core, *gp::cpl == 3);
     *gp::x64_jac_epoch = jac::epoch_bits(core);
@@ -587,6 +588,7 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     let native = native.wrapping_add(*gp::x64_page_chain);
     *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(native);
     execution::note_native_retired(native, execution::jit_dispatches());
+    execution::ledger_end_count(span, execution::Way::PageNative, native);
     let exit = *gp::x64_page_exit;
     let r = rt();
     r.stats[RETIRED] += native as u64;
@@ -600,7 +602,9 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
             profile_instruction(true);
             // (native code resumes after the interpreted instruction: an
             // unserved entry, noted when the function steps there)
+            let span = execution::ledger_begin();
             cpu::run_long_instruction();
+            execution::ledger_end(span, execution::Way::PageRetry);
         },
         pagegen::EXIT_UNKNOWN => r.stats[UNKNOWN] += 1,
         _ => {},
@@ -1221,7 +1225,9 @@ pub unsafe fn x64_page_step() -> i32 {
     let before = context();
     let writes = CODE_WRITES;
     ACTIVE = false;
+    let span = execution::ledger_begin();
     cpu::run_long_instruction();
+    execution::ledger_end(span, execution::Way::PageStep);
     ACTIVE = true;
     let flags = state::read_flags64();
     state::write_flags64(flags);

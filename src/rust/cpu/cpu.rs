@@ -3398,12 +3398,16 @@ pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
 pub unsafe fn cycle_internal() -> bool {
     if crate::x64::state::mode().is_long() {
         if !crate::ir::runtime::schedule::enabled() {
+            let span = crate::cpu::execution::ledger_begin();
             run_long_instruction();
+            crate::cpu::execution::ledger_end(span, crate::cpu::execution::Way::Interpreted);
             return false;
         }
         let attempt = crate::x64::pages::run(4096);
         if attempt.retired == 0 {
+            let span = crate::cpu::execution::ledger_begin();
             run_long_instruction();
+            crate::cpu::execution::ledger_end(span, crate::cpu::execution::Way::Interpreted);
         }
         return attempt.submitted;
     }
@@ -3451,12 +3455,14 @@ pub unsafe fn cycle_internal() -> bool {
     let initial_instruction_counter = *instruction_counter;
     let performance_sample =
         profiler::performance_chunk_start(false, initial_eip as u32, *cr.offset(3) as u32, *cpl);
+    let span = crate::cpu::execution::ledger_begin();
     if crate::ir::runtime::diagnostics::enabled() {
         jit_run_interpreted_diagnostic(phys_addr);
     }
     else {
         jit_run_interpreted(phys_addr, u32::MAX);
     }
+    crate::cpu::execution::ledger_end(span, crate::cpu::execution::Way::Interpreted);
     if ir_heat {
         crate::ir::runtime::schedule::note_interpreted(
             ir_entry,
@@ -3806,7 +3812,9 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
                 }
             };
             if attempt.retired == 0 {
+                let span = crate::cpu::execution::ledger_begin();
                 run_long_instruction();
+                crate::cpu::execution::ledger_end(span, crate::cpu::execution::Way::Interpreted);
             }
             remaining = remaining.saturating_sub(attempt.retired.max(1));
             if attempt.submitted {
@@ -3837,7 +3845,9 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
         }
         let entry = crate::ir::runtime::live::entry();
         if let Ok(phys_addr) = get_phys_eip() {
+            let span = crate::cpu::execution::ledger_begin();
             jit_run_interpreted(phys_addr, remaining);
+            crate::cpu::execution::ledger_end(span, crate::cpu::execution::Way::Interpreted);
             crate::ir::runtime::schedule::note_interpreted(
                 entry,
                 (*instruction_counter).wrapping_sub(count),
