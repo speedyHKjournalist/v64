@@ -599,11 +599,12 @@ FMA 和 F16C 是 VEX 编码的 SIMD 指令，门控与 AVX 相同，并依赖 P4
   MXCSR 包装处理（与 x64 `vector.rs` 的做法一致）。NaN 的来源选择、0×∞ 加 QNaN 时是否报 IE 等
   特殊值规则，按 SDM 在 SoftFloat 外层实现并逐条测试，不默认 SoftFloat 的 NaN 传播与 x86 一致。
 - **FMA 的快路径**：Wasm 没有确定性的融合乘加，relaxed-simd 的 `madd` 可能融合也可能不融合，
-  禁止使用。单精度形式可以在 f64 中算出精确乘积，以“舍入到奇数”求和后再舍入回 f32，理论上
-  能给出正确舍入（Boldo–Melquiond）；但必须先在 P0 用穷举和随机对拍验证，才能作为快路径。
-  双精度形式走 SoftFloat helper。P12 实现了双精度与单精度的快路径（`simd_fp::fused_fast`，双精度用 Boldo 与
-  Melquiond 的 FMA 模拟），以主机硬件 FMA 对拍 4000 万例验证，其中有专门构造的离舍入中点很近的用例
-  （14 节 P12 第一部分）。
+  由宿主选定（同一环境中固定）。起初禁止使用；P12 第三部分（用户同意）改为启动时检测，宿主确实融合时
+  Tier-0 与 page tier 用它计算 MXCSR 与操作数都准入的 lane，否则走以下的精确路径。单精度形式可以在 f64
+  中算出精确乘积，以“舍入到奇数”求和后再舍入回 f32，理论上能给出正确舍入（Boldo–Melquiond）；但必须先
+  在 P0 用穷举和随机对拍验证，才能作为快路径。双精度形式走 SoftFloat helper。P12 实现了双精度与单精度的
+  快路径（`simd_fp::fused_fast`，双精度用 Boldo 与 Melquiond 的 FMA 模拟），以主机硬件 FMA 对拍 4000 万例
+  验证，其中有专门构造的离舍入中点很近的用例（14 节 P12 第一部分）。
 - **FMA 的性能**：glibc libm 在 FMA 和 AVX2 都可用时，会把 exp、log、pow、sin、cos、tan、atan
   等改用 `_fma` 变体（`ifunc-fma.h`）。所以 FMA 属于热点形式，性能按 12.2 节在新 profile 下单独测。
 - **F16C**：VCVTPH2PS 把半精度转为单精度，结果精确。VCVTPS2PH 按 imm8[1:0] 选择舍入方式，
@@ -630,7 +631,9 @@ FMA 和 F16C 是 VEX 编码的 SIMD 指令，门控与 AVX 相同，并依赖 P4
 Wasm 快路径的已知陷阱，从 P0 起写进模板审查清单：
 
 - PMULHRSW 不能直接用 `i16x8.q15mulr_sat_s`：-32768×-32768 时 x86 得到 0x8000，Wasm 会饱和为 0x7FFF。
-- 禁用 relaxed-simd，它的结果因宿主而异。
+- relaxed-simd 的结果因宿主而异，一般禁用。例外是 FMA：只在启动时检测到 `relaxed_madd`/`relaxed_nmadd`
+  融合时使用，融合的乘加与 IEEE 754 的 fusedMultiplyAdd 一样只舍入一次（准入见 `native_fp::fused_refused`，
+  P12 第三部分）。
 - Wasm 浮点运算可能规范化 NaN，NaN 结果按现有做法回退。
 - `trunc_sat` 的饱和结果与 x86 的整数不定值（0x80000000）不同。
 - `pmin`/`pmax` 的操作数顺序要对应 x86 的规则：相等（含 ±0）或有 NaN 时返回第二操作数。
@@ -852,15 +855,17 @@ regions 中，VEX.256 形式都走完整 reload 的 `ir_avx_continue`。glibc �
 待改进（P11 登记）：FMA 在 Tier-0 和 page tier 的模板调用 SoftFloat 的 helper（`ir_t0_fma`），
 721.fma.poly 为 63 MIPS（单步执行时 17 MIPS）；单精度的“舍入到奇数”快路径要先按 9.3 节验证。regions
 中 FMA 与 F16C 走完整 reload 的 `ir_avx_continue`，VEX.256 的 FMA 形式与 F16C 在 Tier-0 和 page tier
-中单步执行。
+中单步执行。P12 第三部分：宿主的 relaxed 乘加融合时，Tier-0 与 page tier 的模板直接计算准入的 lane，
+721.fma.poly 为 678 MIPS（关掉时 67 MIPS）；regions、VEX.256 的 FMA 与 F16C 仍如上。
 
 P12 的测量（14 节 P12 第一部分）：x86-64-v3 下 Alpine 启动到登录与 x86-64-v2 相同；glibc 的字符串函数持平
 或更快（strlen 与 3936 字节的 memcpy 快约 30%）；libm 的 `_fma` 版本比 SSE2 版本慢 1.3–2.1 倍（exp 1.28、
 log 1.64、sin 2.06、pow 1.92），因为 FMA 在软件中精确计算，即使有快路径，每条仍约 20 ns，而 SSE2 的乘法和加法
-在编译代码中各约 1 ns。所以 libm 密集的负载在 x86-64-v3 下超出预算，默认 CPU 因此不变（Q1）。余下的选择：
-宿主支持 relaxed-simd 并且检测到它的 `madd` 确实融合时，用它做 FMA。这样结果仍然精确，各宿主之间也一致（不
-融合时走现有的精确路径），但 9.3 节目前禁止使用它，需要重新决定。测量中还发现 x64 解释器的 REP MOVS/STOS
-跨页时逐元素复制，开放 AVX 后 glibc 的 memcpy、memset 更常走到那里，已一并修正（14 节 P12 第一部分发现四）。
+在编译代码中各约 1 ns，libm 密集的负载因此超出预算。P12 第三部分（用户同意放开 9.3 节对 relaxed-simd 的
+禁令）在宿主的 relaxed 乘加融合时直接计算 FMA，结果仍精确、各宿主一致：之后 x86-64-v3 下 exp、log、sin、pow
+为 x86-64-v2 的 0.79、0.73、0.73、0.72 倍，预算达标；没有融合的 relaxed 乘加的宿主上仍是上述 1.3–2.1 倍。
+测量中还发现 x64 解释器的 REP MOVS/STOS 跨页时逐元素复制，开放 AVX 后 glibc 的 memcpy、memset 更常走到
+那里，已一并修正（14 节 P12 第一部分发现四）。
 
 （P12 结束时的状态，依据见 14 节各阶段的记录。）
 
@@ -884,15 +889,17 @@ log 1.64、sin 2.06、pow 1.92），因为 FMA 在软件中精确计算，即使
 - [x] Linux、Windows x64/WOW64 的实际 SIMD 上下文切换探针通过。（P12。）
 - [x] 强制前缀和未列出前缀的规则在三个解码器中一致，兼容模式双引擎差分无分歧。（P1；`x64-differential-tests`。）
 - [x] SMI/RSM、`cpuid_level` 降级和所有 CR0/CR4/XCR0 写入方的 JIT 门控测试通过。（P2、P5；`cpu_features.mjs`。）
-- [ ] 热点形式在编译路径上有原生模板，新旧 profile 下的性能预算都达标。（模板齐全，包括 P12 补上的内核
-  SHA-2 形式；旧 profile 不受影响，新 profile 的启动与字符串函数达标，但 libm 的 FMA 版本慢 1.3–2.1 倍，见 12.2
-  节，未达标。）
+- [x] 热点形式在编译路径上有原生模板，新旧 profile 下的性能预算都达标。（模板齐全，包括 P12 补上的内核
+  SHA-2 形式；旧 profile 不受影响；新 profile 的启动与字符串函数达标，libm 的 FMA 版本在宿主的 relaxed 乘加
+  融合时（P12 第三部分）快于 SSE2 版本。没有融合的 relaxed 乘加的宿主上，FMA 走精确的 helper，仍慢 1.3–2.1
+  倍，见 12.2 节。）
 - [x] 11.1 节的 QEMU 偏差逐条登记，并由硬件或 SDM 模型判定。
 - [x] CPU contract、公开配置与文档一致，既有客体回归和性能预算达标。（旧 profile 的基准与客体回归不变；新
   profile 的 libm 见上一项。）
 
-P12 之后，除新 profile 下 libm 的性能预算外各项均已满足，所以本项目还不标为“完整实现”：
-功能与正确性完整，FMA 的性能需要 12.2 节所述的决定。
+P12 之后，除新 profile 下 libm 的性能预算外各项均已满足；P12 第三部分用融合的 relaxed 乘加满足了这一项
+（前提是宿主的 relaxed 乘加融合，以启动时的检测为准；本机 ARM64 上的 V8 是如此），本项目据此标为
+“完整实现”。
 
 达到以上条件才能将本项目标为“完整实现”；仅完成到某一阶段时，按已验收的 ISA 和
 XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指令占位称为全部完成。
@@ -903,7 +910,7 @@ XSAVE 子能力报告进度，不将 AVX 基础、AVX2 普通算术或 XSAVE 指
 
 | 编号 | 问题 | 建议 |
 | --- | --- | --- |
-| Q1 | 新建 VM 默认采用哪个 CPU 配置 | **已定（2026-10-08，P12）**：默认保持旧配置，由用户用 `cpu_features` 显式开启。x86-64-v3 下 libm 的 FMA 版本慢于 SSE2 版本（12.2 节），而改变默认会改变已有客体和快照看到的 CPU |
+| Q1 | 新建 VM 默认采用哪个 CPU 配置 | **已定（2026-10-08，P12）**：默认保持旧配置，由用户用 `cpu_features` 显式开启。x86-64-v3 下 libm 的 FMA 版本慢于 SSE2 版本（12.2 节），而改变默认会改变已有客体和快照看到的 CPU。P12 第三部分之后，宿主的 relaxed 乘加融合时前一条理由不再成立，后一条仍在 |
 | Q2 | SSE/AVX 浮点的精度策略 | **已定（2026-10-04）**：默认精确，用 7.4 节的快路径准入保住性能；性能预算按这一策略测量。P4a 达不到预算时再重新讨论。P4a 结果（2026-10-05）：全套基准中位数不变，SSE 浮点四项 x0.72–0.89（14 节），待复核 |
 | Q3 | 是否实现 XSAVES/XRSTORS | **已定（2026-10-04）**：实现，作为 M5 的最后一步，并对 Linux 的 XSAVES/XRSTORS 路径做完整验收 |
 | Q4 | 公开配置的 API 形态 | **P0 采纳建议**：能力位图，外加 `x86-64-v2` 这类预设级别；不满足依赖的组合直接报错 |
@@ -2708,3 +2715,66 @@ OSFXSR 和对齐检查（3.3 节）是第二部分，单独提交。
   - 不开放能力，2 核：两个探针报告 `avx=0`，其余检查通过。
   - 在最终构建（含第一部分发现三、发现四的修正，后者改变了 Windows 内核大量使用的 REP MOVS/STOS 路径）上重跑
     第一种配置：桌面在 260 s 出现，两个探针各 96 步、32 次异常，结果同上；映像文件的大小与修改时间不变。
+
+### P12 第三部分：FMA 用融合的 relaxed-simd 乘加（2026-10-09）
+
+- **决定**：P12 第一部分测得 x86-64-v3 下 glibc libm 的 `_fma` 版本比 x86-64-v2 的 SSE2 版本慢 1.3–2.1 倍，
+  原因是每条 FMA 都在 helper 中精确计算（`ir_t0_fma`，即使走 `fused_fast` 也约 20 ns）。用户同意放开 9.3 节
+  对 relaxed-simd 的禁令：宿主的 `relaxed_madd`/`relaxed_nmadd` 确实融合时用它们计算 FMA。
+- **检测**：`cpu.js` 的 `relaxed_fma_fused` 在创建 CPU 时（vCPU worker 中各自）编译一个小模块，对
+  f32x4/f64x2 的 `relaxed_madd` 与 `relaxed_nmadd` 各算一次 (1 + ulp) × (1 + ulp) 加上只留下乘积最低位的加数：
+  只有融合的运算得到 2^-104（单精度 2^-46），不融合的得到 0。没有 relaxed-simd（模块不能通过验证）或不融合时
+  返回 false。结果经 `ir_relaxed_fma_fused` 交给 Rust（`runtime::tier0`）；`ir_set_relaxed_fma(0/1)` 是 A/B 开关
+  （1 只在检测到融合时接受），`ir_relaxed_fma()` 报告当前选择。检测对之后编译的代码有效：规范的 relaxed
+  运算在同一环境中全局固定为允许结果中的同一种（“each environment globally chooses a fixed projection for each
+  operator”）。本机（ARM64）的 Node 25 检测为融合。
+- **准入**（`native_fp::fused_refused`，与 7.4 节其他原生浮点的规则一致）：MXCSR 满足 `mxcsr_refused` 的条件
+  （所有异常屏蔽、就近舍入、无 DAZ/FZ、PE 已置），每个读到的 lane：三个操作数都不是非规格化数（DE），结果
+  有限（排除 IE、OE 和 NaN 的载荷；NaN 与无穷的操作数也由此排除），结果不 tiny（UE），除非是零因子与零加数
+  的精确零。这样的 lane 上融合乘加只舍入一次，结果与 `simd_fp::fused` 的精确结果相同，唯一可能的异常 PE 已
+  置。被拒绝时（或 MXCSR 不满足）走原来的 `ir_t0_fma`。
+- **生成代码**（`native_fp::fused`）：按 132/213/231 选出两个因子与加数；VFMSUB/VFNMSUB 把加数取反
+  （`f32x4/f64x2.neg`，精确），VFMADDSUB 取反偶数 lane、VFMSUBADD 取反奇数 lane（异或符号位）；VFNMADD/VFNMSUB
+  用 `relaxed_nmadd`。标量形式的其余 lane 取自目的寄存器原值（不是 vvvv），VEX.128 清零 YMM 高半照旧。
+  Tier-0（`Simd::Fused`）每个块只算一次 MXCSR 的条件；page tier（`Op::Vfused`）每条指令检查。两者在分支之前
+  读入寄存器（Tier-0 的寄存器缓存不能只在一个分支里建立）。regions 中 FMA 仍走 `ir_avx_continue`；VEX.256 的
+  FMA 形式仍单步执行。
+- **测试**：
+  - `tests/rust/fma.mjs`：主体的 42636 例中 MXCSR 为 0x1FA0 的那一组在 Tier-0 中经过原生准入（全部特殊三元组：
+    NaN 载荷、0 × ∞、有符号零、上溢、下溢、非规格化数，及暴露乘积舍入误差的用例），与精确模型逐位比较结果和
+    MXCSR。Tier-0 一节改为 PE 已置：开着时 60 个模板形式没有一次调用 `ir_t0_fma`（`ir_t0_fma_calls`），关掉后
+    每次都调用，两次结果相同。
+  - `tests/x64/fma.mjs`：屏蔽异常的 MXCSR 设置加入 0x1FA0，八个完整形式的全部特殊三元组在 page tier 中经过原生
+    准入，与模型和 QEMU 比较；热点循环（每轮 13 条 FMA，标量与打包，含 ADDSUB 与零因子零加数的上半 lane）
+    开着时 helper 只调用 2 次（PE 置位之前），关掉后 259038 次，和都与 QEMU 相同。
+  - `x64-glibc-tests`：glibc 的 `_fma` libm 在 4096 个输入（含特殊值）上的结果散列与 QEMU（硬件精确）相同。
+  - 变异测试：植入 16 个错误，全部检出（Tier-0 与生成代码的由 `tests/rust/fma.mjs`，page tier 的由
+    `tests/x64/fma.mjs` 中 MXCSR 为 0x1FA0 的用例）：
+    - 准入（4 个）：不拒绝非规格化的操作数；不拒绝 tiny 的结果；加数为零即豁免（不要求零因子）；不拒绝非有限的
+      结果。
+    - 生成代码（6 个）：132 的加数与第二个因子对调；231 的因子与加数顺序错；VFNMSUB 标量形式不取反加数；
+      双精度 VFMADDSUB/VFMSUBADD 的奇偶 lane 对调；单精度 ADDSUB 漏掉 lane 2；VFNMADD 当作 VFMADD。
+    - Tier-0（3 个）：标量形式不合并目的寄存器的其余 lane；不检查 MXCSR；准入与拒绝颠倒。
+    - page tier（3 个）：标量形式不合并；不检查 MXCSR；结果写入 VEX.vvvv 的寄存器。
+- **性能**：glibc 探针（P12 第一部分，`X64_LINUX_GLIBC_TIMES=1`）在 x86-64-v2、x86-64-v3、FMA 走 helper
+  （`X64_RELAXED_FMA=0`）的 x86-64-v3 之间轮流各测 4 次，中位数（ms）：
+
+  | | exp | log | sin | pow | strlen | memcpy | memcpy 16 KiB | memset |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | x86-64-v2 | 7.92 | 5.74 | 7.65 | 9.81 | 2.65 | 3.33 | 3.29 | 1.03 |
+  | x86-64-v3 | 6.25 | 4.17 | 5.56 | 7.05 | 1.98 | 2.32 | 1.06 | 1.10 |
+  | x86-64-v3，FMA 走 helper | 9.85 | 8.90 | 15.07 | 19.03 | 1.95 | 2.27 | 1.03 | 1.04 |
+  | v3 比 v2 | 0.79 | 0.73 | 0.73 | 0.72 | 0.75 | 0.70 | 0.32 | 1.07 |
+
+  三种配置启动到登录都是 22.7 s。FMA 走 helper 时的比值（exp 1.24、log 1.55、sin 1.97、pow 1.94）与 P12 第一部分
+  相符。sin 与 pow 每一轮都是 x86-64-v3 更快；exp 与 log 各有一轮相反（exp 各次波动较大，x86-64-v2 在 5.7 到
+  9.7 ms 之间；log 那一轮为 6.16 对 6.11 ms），看中位数。memset 的 1.07 来自 x86-64-v3 的两次受干扰的运行（1.47、
+  1.18 ms，同一轮的 strlen、memcpy 也偏慢）；字符串函数与 FMA 的路径无关，FMA 走 helper 的那组中 memset 为
+  1.04 ms，与 x86-64-v2 相同。memchr 仍在两档之间跳动，不列。721.fma.poly（32 位，Tier-0 的模板）为 678 MIPS，
+  FMA 走 helper 时 67 MIPS。
+- **回归**：在只含本计划改动的工作树（`60817b0e` 加本阶段）中运行与 P12 最后一轮相同的 63 个目标
+  （`rfma-final-a`、`rfma-final-b1`、`rfma-final-b2`）。`state-layout-check` 起初失败：三个新的 static 没有在
+  `gen/state_layout.js` 登记归属，依赖它的 `platform-contract-tests`、`x64-opcode-matrix-tests`、`smp-tests` 随之
+  失败；登记后这四个重跑通过（`rfma-final-c`）。其余全部通过，`highmem-tests` 也通过（`tests/smp/virtio_high_dma.mjs`
+  已在 `60817b0e` 修正）。`x64-glibc-tests` 六种配置中 glibc 的 `_fma` libm 在原生 FMA 下与 QEMU 结果相同（vCPU
+  worker 的配置中，各 worker 自己检测）。

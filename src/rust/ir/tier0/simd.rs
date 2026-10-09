@@ -1578,6 +1578,38 @@ impl Page {
                     },
                 );
                 let third = self.w.set_new_local_v128();
+                // natively where the host's relaxed multiply-adds fuse
+                // (native_fp::fused): the result, a scalar form's other lanes
+                // the destination's; the exact path if a lane or MXCSR is
+                // refused. (Both registers are cached before the branch.)
+                let native = crate::ir::runtime::tier0::relaxed_fma().then(|| {
+                    self.load_xmm(reg);
+                    let d = self.w.set_new_local_v128();
+                    self.load_xmm(self.first(reg));
+                    let f = self.w.set_new_local_v128();
+                    let r = native_fp::fused(&mut self.w, op, double, scalar, [&d, &f, &third]);
+                    self.mxcsr_refused();
+                    self.w.or_i32();
+                    let refused = self.w.set_new_local();
+                    if scalar {
+                        let bytes = if double { 8 } else { 4 };
+                        self.w.get_local_v128(&r);
+                        self.w.get_local_v128(&d);
+                        let mut lanes = [0; 16];
+                        for (k, lane) in lanes.iter_mut().enumerate() {
+                            *lane = if k < bytes { k as u8 } else { 16 + k as u8 };
+                        }
+                        self.w.simd_shuffle(lanes);
+                        self.w.set_local_v128(&r);
+                    }
+                    self.w.get_local(&refused);
+                    self.w.free_local(refused);
+                    self.w.free_local_v128(d);
+                    self.w.free_local_v128(f);
+                    self.w.hint(false);
+                    self.w.if_void();
+                    r
+                });
                 let operands = crate::ir::runtime::tier0::sse_fp_operands();
                 for (k, r) in [reg, self.first(reg)].into_iter().enumerate() {
                     self.w.const_i32((operands + 16 * k as u32) as i32);
@@ -1592,7 +1624,14 @@ impl Page {
                 self.retry_if();
                 self.w.const_i32(operands as i32);
                 self.w.simd_memory(0x00, 4); // v128.load
-                let result = self.w.set_new_local_v128();
+                let result = match native {
+                    Some(r) => {
+                        self.w.set_local_v128(&r);
+                        self.w.block_end();
+                        r
+                    },
+                    None => self.w.set_new_local_v128(),
+                };
                 self.store_xmm(reg, &result);
                 self.w.free_local_v128(third);
                 self.w.free_local_v128(result);

@@ -150,6 +150,7 @@ pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
 /// interpreter, which delivers the fault, sets them again; else 0.
 #[no_mangle]
 pub unsafe fn ir_t0_fma(op: u32) -> u32 {
+    FMA_CALLS = FMA_CALLS.wrapping_add(1);
     let [destination, first, third] = T0_SSE_FP.0;
     match crate::cpu::simd_fp::fused(op as u8, op & 0x100 != 0, [destination], [first], [third]) {
         Ok([result]) => {
@@ -194,6 +195,13 @@ pub unsafe fn ir_t0_sse_fp_calls(key: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_t0_sse_fp_calls_reset() { SSE_FP_CALLS = [0; 256]; }
+/// ir_t0_fma's calls: the FMA instructions the templates did not compute
+/// natively (see relaxed_fma)
+static mut FMA_CALLS: u32 = 0;
+#[no_mangle]
+pub unsafe fn ir_t0_fma_calls() -> u32 { FMA_CALLS }
+#[no_mangle]
+pub unsafe fn ir_t0_fma_calls_reset() { FMA_CALLS = 0; }
 
 /// Interpreter steps by their first two instruction bytes (a diagnostic of
 /// missing templates, see tests/bench/run.mjs --fallbacks).
@@ -335,6 +343,30 @@ pub unsafe fn ir_t0_set_tail_calls(supported: u32) -> bool {
     }
     true
 }
+/// Whether the host engine has Wasm relaxed SIMD and its multiply-adds fuse
+/// (cpu.js relaxed_fma_fused, at startup)
+static mut RELAXED_FMA_FUSED: bool = false;
+/// Whether Tier-0 and the x64 page tier compute FMA with them
+/// (native_fp::fused): where they fuse, unless switched off. Code compiled
+/// before a change keeps its path; both are exact.
+static mut RELAXED_FMA: bool = false;
+pub fn relaxed_fma() -> bool { unsafe { RELAXED_FMA } }
+#[no_mangle]
+pub unsafe fn ir_relaxed_fma_fused(fused: u32) {
+    RELAXED_FMA_FUSED = fused == 1;
+    RELAXED_FMA = RELAXED_FMA_FUSED;
+}
+/// A/B switch: 0 the exact helper, 1 relaxed multiply-adds (if they fuse)
+#[no_mangle]
+pub unsafe fn ir_set_relaxed_fma(on: u32) -> bool {
+    if on > 1 || on == 1 && !RELAXED_FMA_FUSED {
+        return false;
+    }
+    RELAXED_FMA = on == 1;
+    true
+}
+#[no_mangle]
+pub unsafe fn ir_relaxed_fma() -> u32 { RELAXED_FMA as u32 }
 /// A/B switch: 0 iterative, 1 nested, 2 tail (if supported).
 #[no_mangle]
 pub unsafe fn ir_t0_set_link_mode(mode: u32) -> bool {

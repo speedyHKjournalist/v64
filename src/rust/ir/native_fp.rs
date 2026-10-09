@@ -19,6 +19,11 @@
 //! checks; the `*_refused` functions leave MXCSR's condition to the caller
 //! (Tier-0 evaluates it once per block).
 //!
+//! FMA (`fused`) uses relaxed SIMD's multiply-adds, but only where the host
+//! fuses them (cpu.js checks at startup, see runtime::tier0::relaxed_fma):
+//! then they round once, as IEEE 754's fusedMultiplyAdd and x86's FMA, and
+//! the admitted lanes' results are exact and the same on every host.
+//!
 //! The checks build a mask of the admitted lanes with integer and float
 //! comparisons. Their constants have the same value in every 32-bit lane, so
 //! that each is one move of an immediate (arbitrary v128 constants cost a
@@ -322,6 +327,109 @@ pub fn arithmetic_refused(
         double,
         if scalar { Lanes::Scalar } else { Lanes::Packed },
     );
+}
+
+/// FMA of the factors `x`, `y` and the addend `z` with the native fused
+/// result `r` (see fused): push i32 nonzero to refuse a denormal operand
+/// (DE), a result that is NaN or infinite (IE, OE; also NaN and infinite
+/// operands, whose results are such) and a tiny result (UE) unless it is the
+/// exact zero of a zero factor and a zero addend. Rounded once, as
+/// cpu::simd_fp::fused; with mxcsr_refused's condition only PE (set) could
+/// be raised.
+pub fn fused_refused(
+    w: &mut WasmBuilder,
+    double: bool,
+    scalar: bool,
+    [x, y, z]: [&WasmLocalV128; 3],
+    r: &WasmLocalV128,
+) {
+    finite(w, r, double);
+    twice_less_one(w, x, double);
+    twice_less_one(w, y, double);
+    w.simd(0xB7); // i32x4.min_u
+    twice_less_one(w, z, double);
+    w.simd(0xB7);
+    denormal_of(w, double);
+    tiny(w, r, double);
+    zero(w, x, double);
+    zero(w, y, double);
+    w.simd(0x50); // v128.or
+    zero(w, z, double);
+    w.simd(0x4E); // v128.and
+    w.simd(0x4F); // v128.andnot: tiny, not the zero of zeros
+    w.simd(0x50); // or denormal
+    high_half(w, double, scalar);
+    w.simd(0x4F); // finite and not refused
+    refused(
+        w,
+        double,
+        if scalar { Lanes::Scalar } else { Lanes::Packed },
+    );
+}
+
+/// FMA (the 0F 38 opcode byte `op` of VFMADD/VFMSUB/VFNMADD/VFNMSUB
+/// 132/213/231 PS/PD/SS/SD and VFMADDSUB/VFMSUBADD) of the destination `d`,
+/// the first source `f` (VEX.vvvv) and the r/m operand `t` with the host's
+/// relaxed_madd/relaxed_nmadd, which must fuse (runtime::tier0::relaxed_fma):
+/// returns the native result (a scalar form's in its low lane) and pushes
+/// fused_refused's i32 (MXCSR's condition is the caller's).
+pub fn fused(
+    w: &mut WasmBuilder,
+    op: u8,
+    double: bool,
+    scalar: bool,
+    [d, f, t]: [&WasmLocalV128; 3],
+) -> WasmLocalV128 {
+    // the factors and the addend: 132 d * t + f, 213 f * d + t, 231 f * t + d
+    let [x, y, z] = match op >> 4 {
+        0x9 => [d, t, f],
+        0xA => [f, d, t],
+        _ => [f, t, d],
+    };
+    // a subtraction adds the negated addend (exact): VFMSUB and VFNMSUB in
+    // every lane, VFMADDSUB in the even ones, VFMSUBADD in the odd ones
+    let negated = match op & 0xF {
+        0xA | 0xB | 0xE | 0xF => {
+            w.get_local_v128(z);
+            w.simd(if double { 0xED } else { 0xE1 }); // neg
+            Some(w.set_new_local_v128())
+        },
+        k @ (6 | 7) => {
+            let sign: [u32; 4] = match (double, k == 6) {
+                (true, true) => [0, 0x8000_0000, 0, 0],
+                (true, false) => [0, 0, 0, 0x8000_0000],
+                (false, true) => [0x8000_0000, 0, 0x8000_0000, 0],
+                (false, false) => [0, 0x8000_0000, 0, 0x8000_0000],
+            };
+            let mut bytes = [0; 16];
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = (sign[i / 4] >> (i % 4 * 8)) as u8;
+            }
+            w.get_local_v128(z);
+            w.const_v128(bytes);
+            w.simd(0x51); // v128.xor
+            Some(w.set_new_local_v128())
+        },
+        _ => None,
+    };
+    let z = negated.as_ref().unwrap_or(z);
+    w.get_local_v128(x);
+    w.get_local_v128(y);
+    w.get_local_v128(z);
+    // relaxed_madd x * y + z, relaxed_nmadd -(x * y) + z (VFNMADD, VFNMSUB)
+    let negative = op & 0xF >= 0xC;
+    w.simd(match (double, negative) {
+        (false, false) => 0x105,
+        (false, true) => 0x106,
+        (true, false) => 0x107,
+        (true, true) => 0x108,
+    });
+    let r = w.set_new_local_v128();
+    fused_refused(w, double, scalar, [x, y, z], &r);
+    if let Some(local) = negated {
+        w.free_local_v128(local);
+    }
+    r
 }
 
 /// CVTPD2PS/CVTSD2SS of `x` with the native result `r`: push i32 nonzero to

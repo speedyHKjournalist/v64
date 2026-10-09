@@ -259,10 +259,17 @@ try
     }
     console.log(`PASS: ${total} exact FMA and F16C cases (${FMA_FORMS.length} FMA forms, ${F16C_FORMS.length} F16C forms, register and memory sources, ${MXCSRS.length} MXCSR settings) match the model on 3 arms`);
 
-    // Tier-0's templates (P11 part 2): the VEX.128 and scalar FMA forms
-    // (ir_t0_fma), on ordinary operands (no faults: a fault retries), run hot
-    // without steps (ir_t0_steps of C4 E2); the VEX.256 forms step
+    // Tier-0's templates (P11 part 2): the VEX.128 and scalar FMA forms on
+    // ordinary operands (no faults: a fault retries) run hot without steps
+    // (ir_t0_steps of C4 E2); the VEX.256 forms step. With PE set, where the
+    // host's relaxed multiply-adds fuse (ir_relaxed_fma), natively
+    // (native_fp::fused): no calls of the exact helper ir_t0_fma; with them
+    // switched off, through it. The same results either way.
+    const tier0 = machines[1].v86.cpu.wm.exports;
+    const relaxed = tier0.ir_relaxed_fma() === 1;
+    for(const native of relaxed ? [true, false] : [false])
     {
+        tier0.ir_set_relaxed_fma(+native);
         const cr4 = [0x0F, 0x20, 0xE0, 0x0D, ...u32(OSXSAVE | 0x600), 0x0F, 0x22, 0xE0];
         const prologue = [0x0F, 0x01, 0x1D, ...u32(DESCRIPTOR), 0x0F, 0x06, ...cr4, ...xsetbv(7)];
         const f64 = x => { const b = new DataView(new ArrayBuffer(8)); b.setFloat64(0, x, true); return b.getBigUint64(0, true); };
@@ -275,12 +282,14 @@ try
             const list = Array.from({ length: 16 }, (_, n) => {
                 const of = k => Array.from({ length: lanes }, (_, i) => value(n * 3 + k + i)).reduce((v, x, i) => v | x << BigInt(i * (form.double ? 64 : 32)), 0n);
                 const [a, b, c] = [of(0), of(1), of(2)];
-                return { mxcsr: 0x1F80, a, b, c, ...fma_expect(form, 0x1F80, a, b, c) };
+                return { mxcsr: 0x1FA0, a, b, c, ...fma_expect(form, 0x1FA0, a, b, c) };
             });
             const { code, data } = program(form, false, list);
             for(const vm of machines) vm.v86.cpu.wm.exports["ir_t0_steps_reset"]();
+            tier0.ir_t0_fma_calls_reset();
             const runs = await run_all(loop([...prologue, ...code]), data, list.length);
             const steps = machines[1].v86.cpu.wm.exports["ir_t0_steps"](0xE2C4);
+            const calls = tier0.ir_t0_fma_calls();
             for(const { run, out, faults } of runs)
             {
                 const view = new DataView(out.buffer);
@@ -294,12 +303,15 @@ try
             // Wasm SIMD has no SIMD templates)
             const is_templated = steps < list.length;
             assert.equal(is_templated, !form.l && simd(machines[1]), `${form.name}: Tier-0 ${is_templated ? "ran a template" : "stepped"} (${steps} steps, ${list.length} cases)`);
+            // (hot rounds of the template: natively, or each through the helper)
+            if(is_templated) assert.ok(native ? calls === 0 : calls > list.length, `${form.name}: ${calls} exact helper calls (${native ? "native" : "exact"} FMA)`);
             if(is_templated) templated++;
             else stepped++;
         }
-        console.log(simd(machines[1]) ? `PASS: Tier-0 ran templates for the ${templated} VEX.128 and scalar FMA forms, stepped the ${stepped} VEX.256 ones` :
+        console.log(simd(machines[1]) ? `PASS: Tier-0 ran templates for the ${templated} VEX.128 and scalar FMA forms (${native ? "native, relaxed multiply-adds" : "the exact helper"}), stepped the ${stepped} VEX.256 ones` :
             `PASS: Tier-0 stepped all ${stepped} FMA forms (no Wasm SIMD: no SIMD templates)`);
     }
+    tier0.ir_set_relaxed_fma(+relaxed);
 }
 finally
 {

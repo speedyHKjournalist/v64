@@ -4731,7 +4731,6 @@ impl Emitter {
                 self.vector_check(inst, start);
                 let scalar = op & 0xF >= 9 && op & 1 == 1;
                 let operands = crate::ir::runtime::tier0::sse_fp_operands() as i32;
-                self.c32(operands + 32);
                 match src {
                     Xmm::Mem(a) if scalar => {
                         let bits = if double { 64 } else { 32 };
@@ -4742,7 +4741,50 @@ impl Emitter {
                     },
                     _ => self.vector_source(src, inst),
                 }
+                let third = self.b.set_new_local_v128();
+                // natively where the host's relaxed multiply-adds fuse
+                // (native_fp::fused; a scalar form's other lanes the
+                // destination's), else (a lane or MXCSR refused) exactly
+                let native = crate::ir::runtime::tier0::relaxed_fma();
+                if native {
+                    let [d, f] = [dst, first].map(|r| {
+                        self.c32(Self::xmm(r) as i32);
+                        self.b.simd_memory(0x00, 0);
+                        self.b.set_new_local_v128()
+                    });
+                    let r = crate::ir::native_fp::fused(
+                        &mut self.b,
+                        op,
+                        double,
+                        scalar,
+                        [&d, &f, &third],
+                    );
+                    crate::ir::native_fp::mxcsr_refused(&mut self.b);
+                    self.b.or_i32();
+                    self.b.eqz_i32();
+                    self.b.hint(true);
+                    self.b.if_void();
+                    self.c32(Self::xmm(dst) as i32);
+                    self.b.get_local_v128(&r);
+                    if scalar {
+                        let bytes = if double { 8 } else { 4 };
+                        self.b.get_local_v128(&d);
+                        let mut lanes = [0; 16];
+                        for (k, lane) in lanes.iter_mut().enumerate() {
+                            *lane = if k < bytes { k as u8 } else { 16 + k as u8 };
+                        }
+                        self.b.simd_shuffle(lanes);
+                    }
+                    self.b.simd_memory(0x0B, 0); // v128.store
+                    self.b.else_();
+                    for local in [d, f, r] {
+                        self.b.free_local_v128(local);
+                    }
+                }
+                self.c32(operands + 32);
+                self.b.get_local_v128(&third);
                 self.b.simd_memory(0x0B, 4); // v128.store
+                self.b.free_local_v128(third);
                 for (k, r) in [dst, first].into_iter().enumerate() {
                     self.c32(operands + 16 * k as i32);
                     self.c32(Self::xmm(r) as i32);
@@ -4761,6 +4803,9 @@ impl Emitter {
                 self.c32(operands);
                 self.b.simd_memory(0x00, 4);
                 self.b.simd_memory(0x0B, 0);
+                if native {
+                    self.b.block_end();
+                }
                 self.vex_upper(inst, dst);
             },
             Op::Movbe {

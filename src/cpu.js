@@ -585,9 +585,55 @@ CPU.prototype.create_jit_imports = function()
         // (x64::pages CHAIN)
         this.wm.exports["x64_page_set_chaining"]?.(supported ? 1 : 0);
     }
+    // FMA with relaxed SIMD's multiply-adds where they fuse (ir::native_fp)
+    this.wm.exports["ir_relaxed_fma_fused"]?.(relaxed_fma_fused() ? 1 : 0);
 
     this.jit_imports = jit_imports;
 };
+
+let relaxed_fma_result;
+/**
+ * Whether the engine has Wasm relaxed SIMD and its f32x4/f64x2 relaxed_madd
+ * and relaxed_nmadd fuse, rounding once like x86's FMA (an engine may choose
+ * either, and keeps its choice). Each is given (1 + ulp) * (1 + ulp) and an
+ * addend that cancels all but the product's last bit, 2^-104 or 2^-46, which
+ * only a fused operation keeps.
+ * @return {boolean}
+ */
+function relaxed_fma_fused()
+{
+    if(relaxed_fma_result !== undefined) return relaxed_fma_result;
+    const leb = n => {
+        const out = [];
+        do { out.push(n > 127 ? n & 127 | 128 : n); n >>>= 7; } while(n);
+        return out;
+    };
+    const simd = op => [0xFD, ...leb(op)];
+    // v128.const of a double's 32-bit halves or a single in every lane
+    const lanes = (double, ...words) => [...simd(0x0C), ...(double ? [...words, ...words] : [words[0], words[0], words[0], words[0]])
+        .flatMap(w => [w & 255, w >>> 8 & 255, w >>> 16 & 255, w >>> 24 & 255])];
+    // op(a, a, c) === expected in every lane (i64x2/i32x4 eq, all_true)
+    const check = (op, double, a, c, expected) => [...lanes(double, ...a), ...lanes(double, ...a), ...lanes(double, ...c),
+        ...simd(op), ...lanes(double, ...expected), ...simd(double ? 0xD6 : 0x37), ...simd(double ? 0xC3 : 0xA3)];
+    const body = [0,
+        ...check(0x107, true, [1, 0x3FF00000], [2, 0xBFF00000], [0, 0x39700000]), // f64x2.relaxed_madd
+        ...check(0x108, true, [1, 0x3FF00000], [2, 0x3FF00000], [0, 0xB9700000]), 0x71, // f64x2.relaxed_nmadd, i32.and
+        ...check(0x105, false, [0x3F800001], [0xBF800002], [0x28800000]), 0x71, // f32x4.relaxed_madd
+        ...check(0x106, false, [0x3F800001], [0x3F800002], [0xA8800000]), 0x71, // f32x4.relaxed_nmadd
+        0x0B];
+    const code = [1, ...leb(body.length), ...body];
+    // (module (func (export "f") (result i32) ...))
+    const bytes = new Uint8Array([0, 0x61, 0x73, 0x6D, 1, 0, 0, 0, 1, 5, 1, 0x60, 0, 1, 0x7F, 3, 2, 1, 0, 7, 5, 1, 1, 0x66, 0, 0,
+        10, ...leb(code.length), ...code]);
+    relaxed_fma_result = false;
+    try
+    {
+        relaxed_fma_result = WebAssembly.validate(bytes) &&
+            new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports["f"]() === 1;
+    }
+    catch(e) {}
+    return relaxed_fma_result;
+}
 
 CPU.prototype.wasm_patch = function()
 {

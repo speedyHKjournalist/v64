@@ -29,8 +29,9 @@ const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, COUNTER = OUT + 0x88
 // compiles a page after 2000 visits, Tier-0 compatibility-mode code later)
 const ROUNDS = 400, COMPAT_ROUNDS = 4000;
 const SLOT = 48;
-// (MXCSR: exceptions masked; nearest, down and DAZ|FZ, up)
-const MASKED = [0x1F80, 0x3FA0, 0x9FE0 | 0x4000];
+// (MXCSR: exceptions masked; nearest, nearest with PE set (where native FMA
+// is admitted: ir::native_fp::fused), down and DAZ|FZ, up)
+const MASKED = [0x1F80, 0x1FA0, 0x3FA0, 0x9FE0 | 0x4000];
 const FULL = ["vfmadd132sd", "vfmadd213ss", "vfmadd231pd", "vfnmsub132ss", "vfmsub213sd", "vfnmadd231ps ymm", "vfmaddsub132ps", "vfmsubadd231pd ymm"];
 
 let seed = 0x0BADF00D;
@@ -285,7 +286,12 @@ for(const [label, options, compat] of [["interpreted", {}, false],
 // (VFMADD213SD, VFMADD132SD, VFMADD231SD, VFMSUB132SD, VFMSUB231SD,
 // VFMADD132PD, VFMADD213PD, VFMADD213SS) and siblings, register and memory
 // operands, on ordinary values (no exceptions), runs with almost no steps
-// (x64_page_stat(4)), the sums of every round as QEMU's.
+// (x64_page_stat(4)), the sums of every round as QEMU's. PE is set after the
+// first rounding: where the host's relaxed multiply-adds fuse
+// (ir_relaxed_fma), natively (ir::native_fp::fused: the exact helper
+// ir_t0_fma only before), and again with them switched off (every FMA
+// through the helper).
+for(const native of [true, false])
 {
     const ITERATIONS = 20000;
     const hot = assemble("fma-hot", long_mode_guest(`
@@ -346,14 +352,24 @@ s2: dd -0.375
 `));
     const length = 64;
     const expected = await reference(hot, {length});
-    let steps, retired;
+    let steps, retired, calls, relaxed;
     const result = await actual(hot, {length, timeout: 60000,
         options: {...FEATURES, disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true},
+        setup: emulator => {
+            const e = emulator.v86.cpu.wm.exports;
+            relaxed = e.ir_relaxed_fma() === 1 && native;
+            e.ir_set_relaxed_fma(+relaxed);
+            e.ir_t0_fma_calls_reset();
+        },
         inspect: emulator => {
             steps = emulator.v86.cpu.wm.exports.x64_page_stat(4);
             retired = emulator.v86.cpu.wm.exports.x64_page_stat(1);
+            calls = emulator.v86.cpu.wm.exports.ir_t0_fma_calls();
         }});
+    if(native && !relaxed) continue;
     assert.equal(Buffer.from(result.subarray(16, 64)).toString("hex"), Buffer.from(expected.subarray(16, 64)).toString("hex"), "hot loop: the sums as QEMU");
     assert.ok(retired > ITERATIONS * 20 && steps < ITERATIONS / 10, `page tier templates: ${retired} retired, ${steps} steps`);
-    console.log(`PASS (x64 page tier): the hot FMA forms' templates, as QEMU (${retired} instructions retired natively, ${steps} steps)`);
+    // (13 FMA instructions per iteration)
+    assert.ok(relaxed ? calls < ITERATIONS / 10 : calls > ITERATIONS * 10, `${calls} exact helper calls (${relaxed ? "native" : "exact"} FMA)`);
+    console.log(`PASS (x64 page tier): the hot FMA forms' templates (${relaxed ? "native, relaxed multiply-adds" : "the exact helper"}), as QEMU (${retired} instructions retired natively, ${steps} steps, ${calls} helper calls)`);
 }

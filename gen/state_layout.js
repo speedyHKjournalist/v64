@@ -233,8 +233,10 @@ export const STATICS = {
     },
     "ir/runtime/tier0.rs": {
         COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine",
+        // (the host's relaxed multiply-adds: whether they fuse, whether FMA uses them)
+        RELAXED_FMA_FUSED: "machine", RELAXED_FMA: "machine",
         // the operands of one ir_t0_sse_fp call
-        T0_SSE_FP: "scratch", SSE_FP_CALLS: "debug",
+        T0_SSE_FP: "scratch", SSE_FP_CALLS: "debug", FMA_CALLS: "debug",
     },
     "jit.rs": { JIT_STATE: "machine", WATCHED: "machine" },
     // the parallel runtime: where this instance's statics are and whether

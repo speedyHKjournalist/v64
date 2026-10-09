@@ -287,6 +287,9 @@ try
     if(process.env.X64_STEP_PROFILE) cpu.wm.exports.x64_page_profile(1);
     // compiled 32-bit code in compatibility mode (the probe's i386 process)
     if(process.env.X64_COMPAT_JIT) cpu.wm.exports.x64_set_compat_jit(process.env.X64_COMPAT_JIT !== "0");
+    // X64_RELAXED_FMA=0: FMA through the exact helper, not relaxed SIMD's
+    // fused multiply-adds (an A/B switch for the timings)
+    if(process.env.X64_RELAXED_FMA === "0") cpu.wm.exports.ir_set_relaxed_fma(0);
     const run_cores = cpu.run_cores.bind(cpu);
     cpu.run_cores = () => {
         rounds++;
