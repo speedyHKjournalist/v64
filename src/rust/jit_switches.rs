@@ -283,7 +283,8 @@ pub const SWITCHES: &[Switch] = &[
     },
     // Tier-0's template changes of P3 (docs/jit-unification-plan.md P3.7),
     // each off until its A/B flips it (P3.7(a)'s six: on, after their A/B as
-    // a group); page functions compiled before a change keep their code
+    // a group; P3.7(b)'s t0_sreg_load: on); page functions compiled before a
+    // change keep their code
     Switch {
         name: "t0_jecxz",
         default: 1,
@@ -346,7 +347,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_sreg_load",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_SREG_LOAD, on) })

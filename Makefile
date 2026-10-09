@@ -54,8 +54,8 @@ ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit
 	JIT_SWITCHES=t0_pop_rm=1 FUZZ_KIND=o node tests/ir/differential/tier0_fuzz.mjs 40 2
 	JIT_SWITCHES=t0_pusha=1 FUZZ_KIND=a node tests/ir/differential/tier0_fuzz.mjs 40 2
 	JIT_SWITCHES=t0_sreg_load=1 FUZZ_KIND=m node tests/ir/differential/tier0_fuzz.mjs 40 2
-	# (the same with P3.7(a)'s templates off: the steps they replaced)
-	for kind in j g e d o a; do JIT_SWITCHES=t0_jecxz=0,t0_sreg_read=0,t0_xchg_mem=0,t0_cld_std=0,t0_pop_rm=0,t0_pusha=0 FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
+	# (the same with P3.7's templates off: the steps they replaced)
+	for kind in j g e d o a m; do JIT_SWITCHES=t0_jecxz=0,t0_sreg_read=0,t0_xchg_mem=0,t0_cld_std=0,t0_pop_rm=0,t0_pusha=0,t0_sreg_load=0 FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
 	node tests/ir/differential/sse_fp_tracking.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/tier0_fetch_fault.mjs
 	node tests/ir/differential/tier0_irq_slow.mjs
