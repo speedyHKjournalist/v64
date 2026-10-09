@@ -585,6 +585,26 @@ pub fn float_facts(
         clean[reg as usize] = lanes | if scalar { before & clean_bits(double, false) } else { 0 };
     }
 }
+/// The register facts after a conversion of one Wasm operation
+/// (ops::convert, `opcode`) wrote XMM `reg`: an admitted result is neither
+/// NaN nor denormal (integers convert to normals or zeros), a scalar one
+/// keeps the first source's other lanes (its facts `before` the write), and
+/// the source register of CVTPS2PD and CVTSS2SD passed operands_refused
+pub fn convert_facts(
+    clean: &mut [u8; 8],
+    opcode: u32,
+    scalar: bool,
+    reg: u8,
+    source: Option<u8>,
+    before: u8,
+) {
+    let double = matches!(opcode, 0x5F | 0xFE);
+    let lanes = clean_bits(double, scalar);
+    clean[reg as usize] = lanes | if scalar { before & clean_bits(double, false) } else { 0 };
+    if let (0x5F, Some(source)) = (opcode, source.filter(|&r| r != reg)) {
+        clean[source as usize] |= CLEAN_SS;
+    }
+}
 /// The register facts after native_fp::operands_refused admitted XMM `first`
 /// and `source` (None: memory) in `lanes`
 pub fn operand_facts(clean: &mut [u8; 8], lanes: u8, first: u8, source: Option<u8>) {

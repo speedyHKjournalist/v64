@@ -23,15 +23,15 @@ use crate::cpu::{
 };
 use crate::ir::helper::imports::signature;
 
-use crate::ir::{frontend::decode::DecodedInstruction, native_fp};
+use crate::ir::frontend::decode::DecodedInstruction;
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
-use crate::x86tpl::mmx;
+use crate::x86tpl::ops::{self, Facts, VecOperands};
 use crate::x86tpl::vec::{
-    self, clean_bits, compare_flags, compare_relation, convert_integer, float_arithmetic,
-    float_claims, float_facts, known_clean, operand_facts, packed, packed_op, palignr,
+    self, clean_bits, compare_flags, known_clean, operand_facts, packed, packed_op, palignr,
     shift_immediate, shuffle_lanes, shuffled_clean, sse_fp_call, sse_fp_result, Packed, CLEAN_PD,
     CLEAN_PS, CLEAN_SD, CLEAN_SS,
 };
+use crate::x86tpl::{mmx, native_fp};
 
 /// Push nonzero when VEX forms fault: #UD (no CR4.OSXSAVE, XCR0 without SSE
 /// and AVX state, real and virtual-8086 mode) or #NM (CR0.TS)
@@ -1596,275 +1596,26 @@ impl Page {
                 reg,
                 double,
                 scalar,
-            } => {
-                let bytes = if !scalar {
-                    16
-                }
-                else if double {
-                    8
-                }
-                else {
-                    4
-                };
-                // Scalar forms compute (and NaN-check) only the low lane.
-                self.scalar_source(i, bytes);
-                let src = self.w.set_new_local_v128();
-                let first = self.first(reg);
-                self.load_xmm(first);
-                let dst = self.w.set_new_local_v128();
-                float_arithmetic(&mut self.w, opcode, double, &dst, &src);
-                let result = self.w.set_new_local_v128();
-                // only where the native result is cpu::simd_fp's, MXCSR too;
-                // else the exact path
-                if matches!(opcode, 0x52 | 0x53) {
-                    native_fp::reciprocal_refused(&mut self.w, opcode, scalar, &src, &result);
-                }
-                else {
-                    let lanes = clean_bits(double, scalar);
-                    let source = i.ea.is_none().then_some(rm);
-                    let known = known_clean(&self.xmm_clean, lanes, first, source);
-                    // a cheap first test where it saves work (zeros fail it)
-                    let unsure = native_fp::arithmetic_unsure(
-                        &mut self.w,
-                        opcode,
-                        double,
-                        scalar,
-                        [&dst, &src],
-                        known,
-                        &result,
-                    );
-                    if unsure {
-                        // (no hint: zero-heavy data takes this path every time)
-                        self.w.if_void();
-                    }
-                    native_fp::arithmetic_refused(
-                        &mut self.w,
-                        opcode,
-                        double,
-                        scalar,
-                        [&dst, &src],
-                        known,
-                        &result,
-                    );
-                    // (facts for xmm_clean, see exact_if: a clean result or
-                    // a source register found clean)
-                    if float_claims(opcode, source, known) {
-                        self.retry_if();
-                    }
-                    else {
-                        self.exact_if(i, &dst, &src);
-                        self.exact_result();
-                        self.w.set_local_v128(&result);
-                        self.w.block_end();
-                    }
-                    if unsure {
-                        self.w.block_end();
-                    }
-                    if !matches!(opcode, 0x5D | 0x5F) {
-                        // (a second exact run after refused lanes is harmless)
-                        self.mxcsr_refused();
-                        self.exact_if(i, &dst, &src);
-                        self.exact_result();
-                        self.w.set_local_v128(&result);
-                        self.w.block_end();
-                    }
-                }
-                if matches!(opcode, 0x52 | 0x53) {
-                    self.exact_if(i, &dst, &src);
-                    self.exact_result();
-                    self.w.set_local_v128(&result);
-                    self.w.block_end();
-                }
-                let before = self.xmm_clean[first as usize];
-                self.store_xmm_low(reg, &result, bytes);
-                for v in [src, dst, result] {
-                    self.w.free_local_v128(v);
-                }
-                let source = i.ea.is_none().then_some(rm);
-                float_facts(
-                    &mut self.xmm_clean,
-                    opcode,
-                    double,
-                    scalar,
-                    reg,
-                    source,
-                    before,
-                );
-            },
+            } => ops::float(&mut Operands { page: self, i, reg }, opcode, double, scalar),
             Simd::Convert {
                 opcode,
                 reg,
                 source,
                 result,
-            } => {
-                self.simd_source(i, false, source);
-                let x = self.w.set_new_local_v128();
-                self.w.get_local_v128(&x);
-                self.w.simd(opcode);
-                let v = self.w.set_new_local_v128();
-                // (the scalar forms CVTSS2SD and CVTSD2SS write less than 16 bytes)
-                let scalar = result < 16;
-                let source = i.ea.is_none().then_some(rm);
-                // (a scalar form keeps the destination's upper bytes)
-                if scalar {
-                    self.load_xmm(self.first(reg));
-                }
-                else {
-                    self.w.simd_zero();
-                }
-                let destination = self.w.set_new_local_v128();
-                match opcode {
-                    // f32 to f64: exact
-                    0x5F => native_fp::operands_refused(
-                        &mut self.w,
-                        false,
-                        if scalar { native_fp::Lanes::Scalar } else { native_fp::Lanes::LowPair },
-                        [&x, &x],
-                        [
-                            source.is_some_and(|r| {
-                                let lanes = clean_bits(false, scalar);
-                                self.xmm_clean[r as usize] & lanes == lanes
-                            }),
-                            true,
-                        ],
-                    ),
-                    0x5E => native_fp::narrowing_refused(&mut self.w, scalar, &x, &v),
-                    _ => self.w.const_i32(0),
-                }
-                // (facts for xmm_clean: a clean result, see exact_if)
-                self.retry_if();
-                if matches!(opcode, 0x5E | 0xFA) {
-                    // (CVTDQ2PS: only PE)
-                    self.mxcsr_refused();
-                    self.exact_if(i, &destination, &x);
-                    self.exact_result();
-                    self.w.set_local_v128(&v);
-                    self.w.block_end();
-                }
-                let before = self.xmm_clean[self.first(reg) as usize];
-                self.store_xmm_low(reg, &v, result);
-                for local in [v, x, destination] {
-                    self.w.free_local_v128(local);
-                }
-                // admitted results are neither NaN nor denormal (integers
-                // convert to normals or zeros)
-                let double = matches!(opcode, 0x5F | 0xFE);
-                let lanes = clean_bits(double, scalar);
-                self.xmm_clean[reg as usize] =
-                    lanes | if scalar { before & clean_bits(double, false) } else { 0 };
-                if let (0x5F, Some(source)) = (opcode, source.filter(|&r| r != reg)) {
-                    self.xmm_clean[source as usize] |= CLEAN_SS;
-                }
-            },
+            } => ops::convert(&mut Operands { page: self, i, reg }, opcode, source, result),
             Simd::ConvertInteger {
                 reg,
                 double,
                 truncate,
-            } => {
-                self.simd_source(i, false, 16);
-                let x = self.w.set_new_local_v128();
-                self.w.get_local_v128(&x);
-                let out_of_range = convert_integer(&mut self.w, double, truncate);
-                let v = self.w.set_new_local_v128();
-                // a NaN or out-of-range lane raises IE; an inexact one PE
-                self.w.get_local(&out_of_range);
-                self.mxcsr_refused();
-                self.w.or_i32();
-                self.exact_if(i, &v, &x);
-                self.exact_result();
-                self.w.set_local_v128(&v);
-                self.w.block_end();
-                self.w.free_local(out_of_range);
-                self.store_xmm(reg, &v);
-                self.w.free_local_v128(v);
-                self.w.free_local_v128(x);
-            },
+            } => ops::convert_to_integers(&mut Operands { page: self, i, reg }, double, truncate),
             Simd::ToScalar { reg, double } => {
-                match &i.ea {
-                    Some(ea) => {
-                        self.linear(ea);
-                        self.read_mem(32, false);
-                    },
-                    None => self.read_reg(rm, 32),
-                }
-                self.w.simd(0x11); // i32x4.splat
-                let integer = self.w.set_new_local_v128();
-                self.w.get_local_v128(&integer);
-                self.w.simd(if double { 0xFE } else { 0xFA });
-                let v = self.w.set_new_local_v128();
-                if !double {
-                    // (an inexact result sets PE)
-                    self.load_xmm(self.first(reg));
-                    let destination = self.w.set_new_local_v128();
-                    self.mxcsr_refused();
-                    self.exact_if(i, &destination, &integer);
-                    self.exact_result();
-                    self.w.set_local_v128(&v);
-                    self.w.block_end();
-                    self.w.free_local_v128(destination);
-                }
-                self.w.free_local_v128(integer);
-                let before = self.xmm_clean[self.first(reg) as usize];
-                self.store_xmm_low(reg, &v, if double { 8 } else { 4 });
-                self.w.free_local_v128(v);
-                self.xmm_clean[reg as usize] =
-                    clean_bits(double, true) | before & clean_bits(double, false);
+                ops::from_integer(&mut Operands { page: self, i, reg }, double)
             },
             Simd::ToInteger {
                 reg,
                 double,
                 truncate,
-            } => {
-                self.scalar_source(i, if double { 8 } else { 4 });
-                let source = self.w.set_new_local_v128();
-                self.w.get_local_v128(&source);
-                if double {
-                    self.w.simd_lane(0x21, 0); // f64x2.extract_lane
-                }
-                else {
-                    self.w.simd_lane(0x1F, 0); // f32x4.extract_lane
-                    self.w.promote_f32_to_f64();
-                }
-                let x = self.w.set_new_local_f64();
-                // sse_convert(_with_truncation)_f64_to_i32: round (MXCSR.RC
-                // or toward zero), then 0x80000000 outside the i32 range.
-                if truncate {
-                    self.w.get_local_f64(&x);
-                    self.w.round_f64(3);
-                }
-                else {
-                    // (admitted only with MXCSR.RC to nearest)
-                    self.w.get_local_f64(&x);
-                    self.w.round_f64(0);
-                }
-                self.w.set_local_f64(&x);
-                // a NaN or out-of-range value raises IE; an inexact one PE
-                self.w.get_local_f64(&x);
-                self.w.const_f64(-2147483648.0);
-                self.w.ge_f64();
-                self.w.get_local_f64(&x);
-                self.w.const_f64(2147483648.0);
-                self.w.compare_f64(1);
-                self.w.and_i32();
-                self.w.eqz_i32();
-                self.mxcsr_refused();
-                self.w.or_i32();
-                let value = self.w.declare_zeroed_local();
-                self.exact_if(i, &source, &source);
-                self.exact_result();
-                self.w.simd_lane(0x1B, 0); // i32x4.extract_lane
-                self.w.set_local(&value);
-                self.w.else_();
-                self.w.get_local_f64(&x);
-                self.w.trunc_f64_to_i32();
-                self.w.set_local(&value);
-                self.w.block_end();
-                self.w.get_local(&value);
-                self.w.free_local(value);
-                self.w.free_local_f64(x);
-                self.w.free_local_v128(source);
-                self.write_reg(reg, 32);
-            },
+            } => ops::to_integer(&mut Operands { page: self, i, reg }, double, truncate),
             Simd::Strings { reg, op, imm8 } => {
                 // (an m128 without alignment: the SDM's exception type 4 note)
                 self.simd_source(i, false, 16);
@@ -2085,48 +1836,12 @@ impl Page {
                 double,
                 scalar,
                 predicate,
-            } => {
-                let bytes = if !scalar {
-                    16
-                }
-                else if double {
-                    8
-                }
-                else {
-                    4
-                };
-                self.scalar_source(i, bytes);
-                let src = self.w.set_new_local_v128();
-                let first = self.first(reg);
-                self.load_xmm(first);
-                let dst = self.w.set_new_local_v128();
-                compare_relation(&mut self.w, double, predicate, &dst, &src);
-                let result = self.w.set_new_local_v128();
-                let lanes = clean_bits(double, scalar);
-                let source = i.ea.is_none().then_some(rm);
-                let known = known_clean(&self.xmm_clean, lanes, first, source);
-                if known != [true, true] {
-                    // a NaN or denormal operand raises IE or DE, and a NaN
-                    // makes them unordered
-                    native_fp::operands_refused(
-                        &mut self.w,
-                        double,
-                        if scalar { native_fp::Lanes::Scalar } else { native_fp::Lanes::Packed },
-                        [&dst, &src],
-                        known,
-                    );
-                    self.w.hint(false);
-                    self.w.if_void();
-                    self.exact(i, &dst, &src, predicate as u32);
-                    self.exact_result();
-                    self.w.set_local_v128(&result);
-                    self.w.block_end();
-                }
-                self.store_xmm_low(reg, &result, bytes);
-                for v in [src, dst, result] {
-                    self.w.free_local_v128(v);
-                }
-            },
+            } => ops::compare_mask(
+                &mut Operands { page: self, i, reg },
+                double,
+                scalar,
+                predicate,
+            ),
             Simd::Blendv { reg, lane, mask } => {
                 self.simd_source(i, false, 16);
                 let src = self.w.set_new_local_v128();
@@ -2268,6 +1983,71 @@ impl Page {
         }
     }
 }
+/// Tier-0's operands for the x86tpl::ops templates: instruction `i` and its
+/// destination `reg` in the page's block (refused instructions run
+/// ir_t0_sse_fp in place; the facts are xmm_clean)
+struct Operands<'p, 'i> {
+    page: &'p mut Page,
+    i: &'i DecodedInstruction,
+    reg: u8,
+}
+
+impl VecOperands for Operands<'_, '_> {
+    fn w(&mut self) -> &mut WasmBuilder { &mut self.page.w }
+    fn first(&mut self) {
+        let first = self.page.first(self.reg);
+        self.page.load_xmm(first);
+    }
+    fn source(&mut self, bytes: u8, whole: bool) {
+        if whole {
+            self.page.scalar_source(self.i, bytes);
+        }
+        else {
+            self.page.simd_source(self.i, false, bytes);
+        }
+    }
+    fn source_int(&mut self, wide: bool) {
+        dbg_assert!(!wide, "Tier-0: 32-bit integers only");
+        match &self.i.ea {
+            Some(ea) => {
+                self.page.linear(ea);
+                self.page.read_mem(32, false);
+            },
+            None => self.page.read_reg(self.i.modrm.unwrap_or(0) & 7, 32),
+        }
+    }
+    fn store_vec(&mut self, value: &WasmLocalV128, bytes: u8) {
+        self.page.store_xmm_low(self.reg, value, bytes);
+    }
+    fn store_int(&mut self, wide: bool) {
+        dbg_assert!(!wide, "Tier-0: 32-bit integers only");
+        self.page.write_reg(self.reg, 32);
+    }
+    fn retry_if(&mut self) { self.page.retry_if() }
+    fn mxcsr_refused(&mut self) { self.page.mxcsr_refused() }
+    fn in_place(&self) -> bool { true }
+    fn exact_open(
+        &mut self,
+        destination: &WasmLocalV128,
+        source: &WasmLocalV128,
+        imm8: Option<u32>,
+    ) {
+        self.page.w.hint(false);
+        self.page.w.if_void();
+        let imm8 = imm8.unwrap_or(self.i.immediate.unwrap_or(0));
+        self.page.exact(self.i, destination, source, imm8);
+    }
+    fn exact_result(&mut self) { self.page.exact_result() }
+    fn facts(&mut self) -> Option<Facts<'_>> {
+        Some(Facts {
+            first: self.page.first(self.reg),
+            source: self.i.ea.is_none().then_some(self.i.modrm.unwrap_or(0) & 7),
+            reg: self.reg,
+            clean: &mut self.page.xmm_clean,
+        })
+    }
+}
+
 #[cfg(test)]
 #[path = "../../../../tests/x86tpl/leaf_digests.rs"]
 mod leaf_digests;

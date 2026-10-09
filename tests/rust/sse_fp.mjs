@@ -9,7 +9,7 @@
 // include zeros, denormals, the normal extremes, infinities, QNaNs and SNaNs
 // and results that overflow, underflow or are inexact. Every case runs in the
 // interpreter, then hot under Tier-0 and the region tiers, whose native paths
-// (ir::native_fp) must be refused exactly where they would differ.
+// (x86tpl::native_fp) must be refused exactly where they would differ.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";

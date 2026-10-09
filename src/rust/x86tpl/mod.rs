@@ -7,5 +7,7 @@
 //! Imports: nothing of x64, ir::tier0, ir::runtime, jit or the region
 //! backend (P2.10 checks it).
 pub mod mmx;
+pub mod native_fp;
+pub mod ops;
 pub mod vec;
 pub mod x87;

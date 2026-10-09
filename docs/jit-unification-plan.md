@@ -1285,3 +1285,16 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - R 级：bench 加复测后 1.013。XP 第一次 ABBAAB 的比值 0.983，另两次 0.999、0.998，三次会话的中位数 0.998，通过。XP 桌面
   时间是双峰的（约 13.07 s 与 13.32 s，两组都出现在两个 arm 里），3 次里的中位数会落在任一组；这次改动不影响 32 位的
   生成代码与运行路径。
+
+**P2.4 `VecOperands` 与共用的 SSE 模板，`native_fp` 移进 x86tpl，2026-10-10。**
+
+- `x86tpl::ops`：SSE 运算（`float`）、CMPPS…CMPSD（`compare_mask`）与转换（`convert`、`convert_to_integers`、`from_integer`、
+  `to_integer`）的模板，建在引擎的 `VecOperands` 上：操作数（`first`、`source`、`source_int`）、写回（`store_vec`、`store_int`，
+  都在最后一个重试点之后）、重试、MXCSR 的条件，以及计划点名的两处差别：被拒绝的指令去哪里（`in_place`：Tier-0 原地打开
+  `ir_t0_sse_fp` 的精确路径，page tier 重试），寄存器事实（Tier-0 的 `xmm_clean`，经 `Facts`）。Tier-0 的六个分支改为这些模板
+  加它的 `Operands` 适配器；转换的事实成为 `vec::convert_facts`（摘要测试新加一项）。另一处差别（MXCSR.PE 未置位时 page tier
+  自己判断不精确）随 P2.5 的第一个使用者加入。
+- `native_fp` 从 `ir/` 移到 `x86tpl`，region 后端的引用跟着改（冻结的 region 文件只在注释里提到它）。
+- replay-check 2605 条一致，叶子摘要不变。核心比较：9 个函数改变、9 个新增、15 个删除。SIMD/XSAVE 计划的套件（`ssse3-tests`
+  到 `xsave-tests`，75 分钟）在 P2.4 上通过，P2.1–P2.3 的改动一并覆盖。R 级：bench 加复测后 1.014；XP 中位数 13.55 s 对
+  13.07 s，比值 1.036。

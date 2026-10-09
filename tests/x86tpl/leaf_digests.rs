@@ -14,8 +14,9 @@
 use super::*;
 use crate::cpu::features::{ALL, TEST_FEATURES};
 use crate::ir::frontend::decode::{decode, GuestEip, LinearAddress};
-use crate::ir::native_fp::Lanes;
 use crate::x86tpl::mmx;
+use crate::x86tpl::native_fp::Lanes;
+use crate::x86tpl::vec::*;
 use std::collections::BTreeMap;
 
 /// FNV-1a, 64-bit
@@ -253,7 +254,7 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
     // native_fp, the admission (P2.4 moves it into x86tpl)
     let mut admission = Grid::default();
     admission.emit("mxcsr".into(), |w, _| {
-        crate::ir::native_fp::mxcsr_refused(w)
+        crate::x86tpl::native_fp::mxcsr_refused(w)
     });
     let known_values = [[false, false], [false, true], [true, false], [true, true]];
     for opcode in [0x51u8, 0x58, 0x59, 0x5C, 0x5D, 0x5E, 0x5F] {
@@ -263,7 +264,7 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
                     let key = format!("{opcode:02X} {double} {scalar} {known:?}");
                     // (and whether it was unsure: an i32 at the end)
                     admission.emit(format!("unsure {key}"), |w, [a, b, r]| {
-                        let unsure = crate::ir::native_fp::arithmetic_unsure(
+                        let unsure = crate::x86tpl::native_fp::arithmetic_unsure(
                             w,
                             opcode,
                             double,
@@ -275,7 +276,7 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
                         w.const_i32(unsure as i32);
                     });
                     admission.emit(format!("refused {key}"), |w, [a, b, r]| {
-                        crate::ir::native_fp::arithmetic_refused(
+                        crate::x86tpl::native_fp::arithmetic_refused(
                             w,
                             opcode,
                             double,
@@ -293,7 +294,9 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
         for scalar in [false, true] {
             admission.emit(
                 format!("reciprocal {opcode:02X} {scalar}"),
-                |w, [x, r, _]| crate::ir::native_fp::reciprocal_refused(w, opcode, scalar, x, r),
+                |w, [x, r, _]| {
+                    crate::x86tpl::native_fp::reciprocal_refused(w, opcode, scalar, x, r)
+                },
             );
         }
     }
@@ -307,7 +310,7 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
                 admission.emit(
                     format!("operands {double} {name} {known:?}"),
                     |w, [x, y, _]| {
-                        crate::ir::native_fp::operands_refused(w, double, lanes, [x, y], known)
+                        crate::x86tpl::native_fp::operands_refused(w, double, lanes, [x, y], known)
                     },
                 );
             }
@@ -318,7 +321,7 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
                 |w, [x, y, z]| {
                     w.simd_zero();
                     let r = w.set_new_local_v128();
-                    crate::ir::native_fp::fused_refused(w, double, scalar, [x, y, z], &r);
+                    crate::x86tpl::native_fp::fused_refused(w, double, scalar, [x, y, z], &r);
                     w.free_local_v128(r);
                 },
             );
@@ -326,7 +329,7 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
                 admission.emit(
                     format!("fused {op:02X} {double} {scalar}"),
                     |w, [d, f, t]| {
-                        let r = crate::ir::native_fp::fused(w, op, double, scalar, [d, f, t]);
+                        let r = crate::x86tpl::native_fp::fused(w, op, double, scalar, [d, f, t]);
                         w.free_local_v128(r);
                     },
                 );
@@ -335,7 +338,7 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
     }
     for scalar in [false, true] {
         admission.emit(format!("narrowing {scalar}"), |w, [x, r, _]| {
-            crate::ir::native_fp::narrowing_refused(w, scalar, x, r)
+            crate::x86tpl::native_fp::narrowing_refused(w, scalar, x, r)
         });
     }
 
@@ -404,6 +407,28 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
         (shuffled.len() as u32).to_le_bytes().to_vec(),
     );
 
+    // (P2.4's convert_facts: a digest of its own, the others' unchanged)
+    let mut conversions = Fnv::new();
+    for opcode in [0x5Fu32, 0x5E, 0xFA, 0xFE] {
+        for scalar in [false, true] {
+            for reg in 0..2u8 {
+                for source in sources {
+                    for before in 0..16u8 {
+                        for (s0, s1) in (0..16u8).flat_map(|a| (0..16u8).map(move |b| (a, b))) {
+                            let mut clean = [s0, s1, s0 ^ s1, 0, 0, 0, 0, 0];
+                            convert_facts(&mut clean, opcode, scalar, reg, source, before);
+                            conversions.bytes(&clean);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut convert_grid = Grid::default();
+    convert_grid
+        .0
+        .insert("convert_facts".into(), conversions.0.to_le_bytes().to_vec());
+
     vec![
         ("mmx", mmx),
         ("packed", packed_grid),
@@ -415,11 +440,12 @@ fn leaf_grids() -> Vec<(&'static str, Grid)> {
         ("sse_fp_call", exact),
         ("native_fp", admission),
         ("facts", facts),
+        ("convert_facts", convert_grid),
     ]
 }
 
 /// (name, grid points, digest)
-const GOLDEN: [(&str, usize, u64); 10] = [
+const GOLDEN: [(&str, usize, u64); 11] = [
     ("mmx", 25, 0x9F55885E0F2B44C9),
     ("packed", 1703, 0x8DCC7F8E8A23DCB1),
     ("shift_immediate", 2560, 0x7F89662ACDFABC17),
@@ -430,6 +456,7 @@ const GOLDEN: [(&str, usize, u64); 10] = [
     ("sse_fp_call", 1201, 0x37F5908AFB347F22),
     ("native_fp", 379, 0xF5F21E48CC3FB9C2),
     ("facts", 2, 0xF3373D413E50BAA7),
+    ("convert_facts", 1, 0x410C35834A7C5FBB),
 ];
 
 #[test]

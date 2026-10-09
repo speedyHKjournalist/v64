@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // What Tier-0 knows about XMM registers within a block (ir::tier0 simd.rs,
 // Page::xmm_clean: lanes neither NaN nor denormal, whose checks native SSE
-// floating point then skips, see ir::native_fp). Each sequence makes a wrong
+// floating point then skips, see x86tpl::native_fp). Each sequence makes a wrong
 // fact visible: a consumer skips the check of a denormal, and MXCSR.DE is
 // missing. The sequences run hot, each iteration starting with LDMXCSR and
 // MOVAPS of every register (so that a later iteration does not set the flag),

@@ -4724,14 +4724,14 @@ impl Emitter {
                         self.b.simd_memory(0x00, 0);
                         self.b.set_new_local_v128()
                     });
-                    let r = crate::ir::native_fp::fused(
+                    let r = crate::x86tpl::native_fp::fused(
                         &mut self.b,
                         op,
                         double,
                         scalar,
                         [&d, &f, &third],
                     );
-                    crate::ir::native_fp::mxcsr_refused(&mut self.b);
+                    crate::x86tpl::native_fp::mxcsr_refused(&mut self.b);
                     self.b.or_i32();
                     self.b.eqz_i32();
                     self.b.hint(true);
@@ -6605,14 +6605,14 @@ impl Emitter {
         self.c32(Self::xmm(first) as i32);
         self.b.simd_memory(0x00, 0);
         let a = self.b.set_new_local_v128();
-        crate::ir::native_fp::operands_refused(
+        crate::x86tpl::native_fp::operands_refused(
             &mut self.b,
             double,
             if scalar {
-                crate::ir::native_fp::Lanes::Scalar
+                crate::x86tpl::native_fp::Lanes::Scalar
             }
             else {
-                crate::ir::native_fp::Lanes::Packed
+                crate::x86tpl::native_fp::Lanes::Packed
             },
             [&a, &b],
             [false, false],

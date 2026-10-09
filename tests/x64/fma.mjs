@@ -30,7 +30,7 @@ const OUT = 0x300000, CASE = OUT + 0x80, SKIP = OUT + 0x84, COUNTER = OUT + 0x88
 const ROUNDS = 400, COMPAT_ROUNDS = 4000;
 const SLOT = 48;
 // (MXCSR: exceptions masked; nearest, nearest with PE set (where native FMA
-// is admitted: ir::native_fp::fused), down and DAZ|FZ, up)
+// is admitted: x86tpl::native_fp::fused), down and DAZ|FZ, up)
 const MASKED = [0x1F80, 0x1FA0, 0x3FA0, 0x9FE0 | 0x4000];
 const FULL = ["vfmadd132sd", "vfmadd213ss", "vfmadd231pd", "vfnmsub132ss", "vfmsub213sd", "vfnmadd231ps ymm", "vfmaddsub132ps", "vfmsubadd231pd ymm"];
 
@@ -288,7 +288,7 @@ for(const [label, options, compat] of [["interpreted", {}, false],
 // operands, on ordinary values (no exceptions), runs with almost no steps
 // (x64_page_stat(4)), the sums of every round as QEMU's. PE is set after the
 // first rounding: where the host's relaxed multiply-adds fuse
-// (ir_relaxed_fma), natively (ir::native_fp::fused: the exact helper
+// (ir_relaxed_fma), natively (x86tpl::native_fp::fused: the exact helper
 // ir_t0_fma only before), and again with them switched off (every FMA
 // through the helper).
 for(const native of [true, false])

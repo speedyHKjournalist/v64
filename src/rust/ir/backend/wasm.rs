@@ -1602,14 +1602,14 @@ impl Emitter<'_> {
             self.w.simd(fp.opcode);
             let result = self.w.set_new_local_v128();
             // Scalar and ordinary SIMD add/sub/mul/div have the same IEEE
-            // result bits as cpu::simd_fp where ir::native_fp admits them
+            // result bits as cpu::simd_fp where x86tpl::native_fp admits them
             // (MXCSR at its defaults with PE set; no denormal operand, no NaN
             // or infinite result, no inexact tiny product or quotient), and
             // then leave MXCSR as it is. Only lane zero of a scalar form is
             // evaluated: upper lanes may hold anything. Keep task faults,
             // debug observers and refused lanes before architectural writes.
             self.sse_task_observation();
-            crate::ir::native_fp::arithmetic_refused(
+            crate::x86tpl::native_fp::arithmetic_refused(
                 &mut self.w,
                 fp.operation,
                 fp.double,
@@ -1619,7 +1619,7 @@ impl Emitter<'_> {
                 &result,
             );
             self.w.or_i32();
-            crate::ir::native_fp::mxcsr_refused(&mut self.w);
+            crate::x86tpl::native_fp::mxcsr_refused(&mut self.w);
             self.w.or_i32();
             self.w.eqz_i32();
             self.w.if_void();

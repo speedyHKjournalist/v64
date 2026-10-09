@@ -1,0 +1,347 @@
+//! Vector templates that every x86 engine instantiates alike
+//! (docs/jit-unification-plan.md P2.4): the SSE arithmetic, the masked
+//! compares and the conversions, over an engine's VecOperands. Their
+//! admission is native_fp's. What differs between the engines is a property
+//! of the operands: where a refused instruction goes (in_place: Tier-0 runs
+//! runtime::tier0::ir_t0_sse_fp where it stands, the page tier retries in the
+//! interpreter), and the register facts that Tier-0 keeps (facts).
+//!
+//! A template reads its operands and passes every retry point before its
+//! first write (store_vec, store_int), so a retry finds the CPU as it was.
+use super::native_fp::{self, Lanes};
+use super::vec::{
+    clean_bits, compare_relation, convert_facts, convert_integer, float_arithmetic, float_claims,
+    float_facts, known_clean,
+};
+use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
+
+/// An engine's register facts (Tier-0's Page::xmm_clean: the lanes known to
+/// be neither NaN nor denormal) and the instruction's registers
+pub struct Facts<'a> {
+    pub clean: &'a mut [u8; 8],
+    /// The destination
+    pub reg: u8,
+    /// The first source: the destination, or VEX.vvvv
+    pub first: u8,
+    /// The r/m register (None: memory)
+    pub source: Option<u8>,
+}
+
+/// One instruction's operands in an engine (see the module comment)
+pub trait VecOperands {
+    fn w(&mut self) -> &mut WasmBuilder;
+    /// Push the first source register (the destination, or VEX.vvvv)
+    fn first(&mut self);
+    /// Push the r/m operand: `bytes` of memory, zero-extended (an aligned
+    /// m128 checked), or an XMM register, its low `bytes` zero-extended, or
+    /// `whole` (the forms that use only the low lane)
+    fn source(&mut self, bytes: u8, whole: bool);
+    /// Push the integer r/m operand: an i32 (an i64 if `wide`), a register
+    /// or memory
+    fn source_int(&mut self, wide: bool);
+    /// Write the low `bytes` of `value` to the destination, keeping the
+    /// first source's other bytes (16: all of `value`)
+    fn store_vec(&mut self, value: &WasmLocalV128, bytes: u8);
+    /// Write the integer on the stack, an i32 (an i64 if `wide`), to the
+    /// destination register
+    fn store_int(&mut self, wide: bool);
+    /// Retry the instruction in the interpreter if the i32 on the stack is
+    /// nonzero
+    fn retry_if(&mut self);
+    /// Push i32 nonzero if MXCSR refuses native results
+    /// (native_fp::mxcsr_refused)
+    fn mxcsr_refused(&mut self);
+    /// Whether a refused instruction runs exactly in place (exact_open);
+    /// else it retries
+    fn in_place(&self) -> bool;
+    /// If the i32 on the stack is nonzero, open a block that runs the
+    /// instruction exactly on (`destination`, `source`) with `imm8` (None:
+    /// the instruction's own); a fault retries
+    fn exact_open(
+        &mut self,
+        destination: &WasmLocalV128,
+        source: &WasmLocalV128,
+        imm8: Option<u32>,
+    );
+    /// Push the v128 result of exact_open's run
+    fn exact_result(&mut self);
+    /// The register facts, if the engine keeps them
+    fn facts(&mut self) -> Option<Facts<'_>> { None }
+
+    /// Refuse the instruction if the i32 on the stack is nonzero: `result`
+    /// is the exact one (in place), or it retries
+    fn refused(
+        &mut self,
+        destination: &WasmLocalV128,
+        source: &WasmLocalV128,
+        imm8: Option<u32>,
+        result: &WasmLocalV128,
+    ) {
+        if self.in_place() {
+            self.exact_open(destination, source, imm8);
+            self.exact_result();
+            self.w().set_local_v128(result);
+            self.w().block_end();
+        }
+        else {
+            self.retry_if();
+        }
+    }
+}
+
+/// Whether the first source and the r/m register are known to hold `lanes`
+/// clean (nothing is known without facts)
+fn known<T: VecOperands>(t: &mut T, lanes: u8) -> [bool; 2] {
+    t.facts().map_or([false; 2], |f| {
+        known_clean(f.clean, lanes, f.first, f.source)
+    })
+}
+/// The first source's facts, read before the destination is written
+fn first_facts<T: VecOperands>(t: &mut T) -> u8 {
+    t.facts().map_or(0, |f| f.clean[f.first as usize])
+}
+
+/// The bytes a form reads and writes: 16 packed, else the low lane
+fn lane_bytes(double: bool, scalar: bool) -> u8 {
+    match (scalar, double) {
+        (false, _) => 16,
+        (true, true) => 8,
+        (true, false) => 4,
+    }
+}
+
+/// SQRT (`opcode` 0x51), RSQRT (0x52), RCP (0x53), ADD (0x58), MUL (0x59),
+/// SUB (0x5C), MIN (0x5D), DIV (0x5E) and MAX (0x5F), PS, PD, SS and SD:
+/// natively only where the result is cpu::simd_fp's, MXCSR too
+pub fn float<T: VecOperands>(t: &mut T, opcode: u8, double: bool, scalar: bool) {
+    let bytes = lane_bytes(double, scalar);
+    // Scalar forms compute (and NaN-check) only the low lane.
+    t.source(bytes, true);
+    let src = t.w().set_new_local_v128();
+    t.first();
+    let dst = t.w().set_new_local_v128();
+    float_arithmetic(t.w(), opcode, double, &dst, &src);
+    let result = t.w().set_new_local_v128();
+    if matches!(opcode, 0x52 | 0x53) {
+        native_fp::reciprocal_refused(t.w(), opcode, scalar, &src, &result);
+    }
+    else {
+        let lanes = clean_bits(double, scalar);
+        let source = t.facts().and_then(|f| f.source);
+        let known = known(t, lanes);
+        // a cheap first test where it saves work (zeros fail it)
+        let unsure = native_fp::arithmetic_unsure(
+            t.w(),
+            opcode,
+            double,
+            scalar,
+            [&dst, &src],
+            known,
+            &result,
+        );
+        if unsure {
+            // (no hint: zero-heavy data takes this path every time)
+            t.w().if_void();
+        }
+        native_fp::arithmetic_refused(t.w(), opcode, double, scalar, [&dst, &src], known, &result);
+        // (the facts of an admitted form hold only for admitted operands:
+        // float_claims)
+        if float_claims(opcode, source, known) {
+            t.retry_if();
+        }
+        else {
+            t.refused(&dst, &src, None, &result);
+        }
+        if unsure {
+            t.w().block_end();
+        }
+        if !matches!(opcode, 0x5D | 0x5F) {
+            // (a second exact run after refused lanes is harmless)
+            t.mxcsr_refused();
+            t.refused(&dst, &src, None, &result);
+        }
+    }
+    if matches!(opcode, 0x52 | 0x53) {
+        t.refused(&dst, &src, None, &result);
+    }
+    let before = first_facts(t);
+    t.store_vec(&result, bytes);
+    for v in [src, dst, result] {
+        t.w().free_local_v128(v);
+    }
+    if let Some(f) = t.facts() {
+        float_facts(f.clean, opcode, double, scalar, f.reg, f.source, before);
+    }
+}
+
+/// CMPPS, CMPPD, CMPSS and CMPSD with `predicate` (imm8[2:0], VEX
+/// imm8[4:0]): natively for operands neither NaN nor denormal, which raise
+/// nothing and whose result imm8[2:0] decides (simd_fp::Fp::compare)
+pub fn compare_mask<T: VecOperands>(t: &mut T, double: bool, scalar: bool, predicate: u8) {
+    let bytes = lane_bytes(double, scalar);
+    t.source(bytes, true);
+    let src = t.w().set_new_local_v128();
+    t.first();
+    let dst = t.w().set_new_local_v128();
+    compare_relation(t.w(), double, predicate, &dst, &src);
+    let result = t.w().set_new_local_v128();
+    let known = known(t, clean_bits(double, scalar));
+    if known != [true, true] {
+        // a NaN or denormal operand raises IE or DE, and a NaN makes them
+        // unordered
+        let lanes = if scalar { Lanes::Scalar } else { Lanes::Packed };
+        native_fp::operands_refused(t.w(), double, lanes, [&dst, &src], known);
+        t.refused(&dst, &src, Some(predicate as u32), &result);
+    }
+    t.store_vec(&result, bytes);
+    for v in [src, dst, result] {
+        t.w().free_local_v128(v);
+    }
+}
+
+/// The conversions of one Wasm operation (`opcode`: f64x2.promote_low_f32x4
+/// 0x5F, f32x4.demote_f64x2_zero 0x5E, f32x4.convert_i32x4_s 0xFA,
+/// f64x2.convert_low_i32x4_s 0xFE) from `source` bytes to `result` bytes:
+/// CVTPS2PD, CVTSS2SD, CVTPD2PS, CVTSD2SS, CVTDQ2PS and CVTDQ2PD
+pub fn convert<T: VecOperands>(t: &mut T, opcode: u32, source: u8, result: u8) {
+    t.source(source, false);
+    let x = t.w().set_new_local_v128();
+    t.w().get_local_v128(&x);
+    t.w().simd(opcode);
+    let v = t.w().set_new_local_v128();
+    // (the scalar forms CVTSS2SD and CVTSD2SS write less than 16 bytes and
+    // keep the destination's upper bytes)
+    let scalar = result < 16;
+    if scalar {
+        t.first();
+    }
+    else {
+        t.w().simd_zero();
+    }
+    let destination = t.w().set_new_local_v128();
+    match opcode {
+        // f32 to f64: exact
+        0x5F => {
+            let lanes = if scalar { Lanes::Scalar } else { Lanes::LowPair };
+            let known = known(t, clean_bits(false, scalar))[1];
+            native_fp::operands_refused(t.w(), false, lanes, [&x, &x], [known, true]);
+        },
+        0x5E => native_fp::narrowing_refused(t.w(), scalar, &x, &v),
+        _ => t.w().const_i32(0),
+    }
+    // (an admitted result is a fact: convert_facts)
+    t.retry_if();
+    if matches!(opcode, 0x5E | 0xFA) {
+        // (CVTDQ2PS: only PE)
+        t.mxcsr_refused();
+        t.refused(&destination, &x, None, &v);
+    }
+    let before = first_facts(t);
+    t.store_vec(&v, result);
+    for local in [v, x, destination] {
+        t.w().free_local_v128(local);
+    }
+    if let Some(f) = t.facts() {
+        convert_facts(f.clean, opcode, scalar, f.reg, f.source, before);
+    }
+}
+
+/// CVT(T)PS2DQ and CVT(T)PD2DQ: natively unless a lane is NaN, out of the
+/// i32 range or, with MXCSR's condition, inexact
+pub fn convert_to_integers<T: VecOperands>(t: &mut T, double: bool, truncate: bool) {
+    t.source(16, false);
+    let x = t.w().set_new_local_v128();
+    t.w().get_local_v128(&x);
+    let out_of_range = convert_integer(t.w(), double, truncate);
+    let v = t.w().set_new_local_v128();
+    // a NaN or out-of-range lane raises IE; an inexact one PE
+    t.w().get_local(&out_of_range);
+    t.mxcsr_refused();
+    t.w().or_i32();
+    t.refused(&v, &x, None, &v);
+    t.w().free_local(out_of_range);
+    t.store_vec(&v, 16);
+    t.w().free_local_v128(v);
+    t.w().free_local_v128(x);
+}
+
+/// CVTSI2SS and CVTSI2SD xmm, r/m32
+pub fn from_integer<T: VecOperands>(t: &mut T, double: bool) {
+    t.source_int(false);
+    t.w().simd(0x11); // i32x4.splat
+    let integer = t.w().set_new_local_v128();
+    t.w().get_local_v128(&integer);
+    t.w().simd(if double { 0xFE } else { 0xFA });
+    let v = t.w().set_new_local_v128();
+    if !double {
+        // (an inexact result sets PE)
+        t.first();
+        let destination = t.w().set_new_local_v128();
+        t.mxcsr_refused();
+        t.refused(&destination, &integer, None, &v);
+        t.w().free_local_v128(destination);
+    }
+    t.w().free_local_v128(integer);
+    let before = first_facts(t);
+    t.store_vec(&v, lane_bytes(double, true));
+    t.w().free_local_v128(v);
+    if let Some(f) = t.facts() {
+        // (the result lane is clean, the others the first source's)
+        f.clean[f.reg as usize] = clean_bits(double, true) | before & clean_bits(double, false);
+    }
+}
+
+/// CVT(T)SS2SI and CVT(T)SD2SI r32, xmm/m: sse_convert(_with_truncation)_
+/// f64_to_i32 natively, unless the value is NaN, out of the i32 range or,
+/// with MXCSR's condition, inexact
+pub fn to_integer<T: VecOperands>(t: &mut T, double: bool, truncate: bool) {
+    t.source(lane_bytes(double, true), true);
+    let source = t.w().set_new_local_v128();
+    t.w().get_local_v128(&source);
+    if double {
+        t.w().simd_lane(0x21, 0); // f64x2.extract_lane
+    }
+    else {
+        t.w().simd_lane(0x1F, 0); // f32x4.extract_lane
+        t.w().promote_f32_to_f64();
+    }
+    let x = t.w().set_new_local_f64();
+    // round (MXCSR.RC, admitted to nearest only, or toward zero), then
+    // 0x80000000 outside the i32 range
+    t.w().get_local_f64(&x);
+    t.w().round_f64(if truncate { 3 } else { 0 });
+    t.w().set_local_f64(&x);
+    // a NaN or out-of-range value raises IE; an inexact one PE
+    t.w().get_local_f64(&x);
+    t.w().const_f64(-2147483648.0);
+    t.w().ge_f64();
+    t.w().get_local_f64(&x);
+    t.w().const_f64(2147483648.0);
+    t.w().compare_f64(1);
+    t.w().and_i32();
+    t.w().eqz_i32();
+    t.mxcsr_refused();
+    t.w().or_i32();
+    if t.in_place() {
+        let value = t.w().declare_zeroed_local();
+        t.exact_open(&source, &source, None);
+        t.exact_result();
+        t.w().simd_lane(0x1B, 0); // i32x4.extract_lane
+        t.w().set_local(&value);
+        t.w().else_();
+        t.w().get_local_f64(&x);
+        t.w().trunc_f64_to_i32();
+        t.w().set_local(&value);
+        t.w().block_end();
+        t.w().get_local(&value);
+        t.w().free_local(value);
+    }
+    else {
+        t.retry_if();
+        t.w().get_local_f64(&x);
+        t.w().trunc_f64_to_i32();
+    }
+    t.w().free_local_f64(x);
+    t.w().free_local_v128(source);
+    t.store_int(false);
+}

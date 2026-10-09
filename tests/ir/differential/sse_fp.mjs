@@ -202,7 +202,7 @@ for(const release of [false,true]){
         // whose result (rather than an input) introduces a NaN. Compare full
         // XMM/MXCSR/x87/FLAGS state, without canonicalising NaN bits. With PE
         // set, the native path is refused exactly where a flag other than PE
-        // could change (ir::native_fp): another rounding mode, a denormal
+        // could change (x86tpl::native_fp): another rounding mode, a denormal
         // operand, a NaN or infinite result, an inexact tiny product or quotient.
         let result_guard_cases=0;
         const pairs32 = [[0x7F800000n,0x3F800000n], [0xFF800000n,0xBF800000n],
