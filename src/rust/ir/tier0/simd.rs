@@ -23,7 +23,7 @@ use crate::cpu::{
 };
 use crate::ir::helper::imports::signature;
 use crate::ir::{frontend::decode::DecodedInstruction, native_fp};
-use crate::wasmgen::wasm_builder::{Signature, WasmBuilder, WasmLocalV128, WasmType};
+use crate::wasmgen::wasm_builder::{Signature, WasmBuilder, WasmLocal, WasmLocalV128, WasmType};
 
 /// Page::xmm_clean: lanes known to be neither NaN nor denormal, as single
 /// precision (the low lane, all lanes) or double precision.
@@ -73,6 +73,7 @@ pub(super) struct Vex {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
 pub(super) enum Packed {
     /// i8x16.shuffle over (destination, source)
     Shuffle([u8; 16]),
@@ -290,7 +291,7 @@ fn source_bytes(op: u32) -> u8 {
 }
 
 /// Packed integer and logic operations (Wasm SIMD opcodes).
-fn packed(code: u8, mmx: bool) -> Option<Packed> {
+fn packed_op(code: u8, mmx: bool) -> Option<Packed> {
     Some(match code {
         0xFC => Packed::Binary(0x6E),
         0xFD => Packed::Binary(0x8E),
@@ -515,6 +516,12 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
     if !cfg!(target_feature = "simd128") {
         return None;
     }
+    legacy_form(i)
+}
+
+/// classify without its simd128 condition (tests/x86tpl/leaf_digests.rs
+/// classifies on the host)
+fn legacy_form(i: &DecodedInstruction) -> Option<Simd> {
     let op = i.encoding.opcode;
     if matches!(op, 0x0F3800 | 0x660F3800 | 0x0F3A0F | 0x660F3A0F)
         && !i.prefixes.lock
@@ -729,7 +736,7 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
             source: 16,
         },
         _ if prefix == 0 || prefix == 0x66 => Simd::Packed {
-            op: packed(code, prefix == 0)?,
+            op: packed_op(code, prefix == 0)?,
             reg,
             mmx: prefix == 0,
             source: source_bytes(op),
@@ -741,10 +748,15 @@ pub(super) fn classify(i: &DecodedInstruction) -> Option<Simd> {
 /// The template of a VEX form (AVX, P5: VEX.128 and VEX.LIG; others step):
 /// its legacy form's, with what cpu::avx does differently (Vex)
 pub(super) fn classify_vex(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
-    use crate::decode_rules::vex;
     if !cfg!(target_feature = "simd128") {
         return None;
     }
+    vex_form(i)
+}
+
+/// classify_vex without its simd128 condition (see legacy_form)
+fn vex_form(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
+    use crate::decode_rules::vex;
     let v = i.vex?;
     if i.early_ud || i.baseline_ud {
         return None;
@@ -930,7 +942,7 @@ pub(super) fn classify_vex(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
             | 0xE8..=0xEF
             | 0xF1..=0xF6
             | 0xF8..=0xFE,
-        ) => (vector(packed(code, false)?), two_sources),
+        ) => (vector(packed_op(code, false)?), two_sources),
         // VPSRLx VPSRAx VPSLLx VPSRLDQ VPSLLDQ by imm8: VEX.vvvv the
         // destination, the r/m register the source
         (1, 1, 0x71..=0x73) if !memory => {
@@ -1128,7 +1140,7 @@ fn classify_vex256(i: &DecodedInstruction) -> Option<(Simd, Vex)> {
         ),
         // the packed integer forms of 66 0F, VPSHUFB and SSE4.1's of one
         // operation, on each half
-        (1, 1, code) => match packed(code, false)? {
+        (1, 1, code) => match packed_op(code, false)? {
             Packed::Shift(..) => return None,
             op => (Simd::Packed256 { op, reg }, two_sources),
         },
@@ -1288,52 +1300,6 @@ impl Page {
         self.store_xmm(r, &merged);
         self.w.free_local_v128(merged);
     }
-    /// MMX `r` (cpu::read_mmx64s: sync the slot from the f64 cache first).
-    fn load_mmx(&mut self, r: u8) {
-        let [_, _, dirty] = fpu::x87_cache_addresses();
-        self.w.load_fixed_i32(dirty);
-        self.w.const_i32(1 << r);
-        self.w.and_i32();
-        self.w.hint(false);
-        self.w.if_void();
-        self.w.const_i32(r as i32);
-        self.w
-            .call_signature("fpu_sync_slot", Signature::new(&[WasmType::I32], &[]));
-        self.w.block_end();
-        self.w.const_i32(gp::get_reg_mmx_offset(r as u32) as i32);
-        self.w.simd_memory(0x5D, 0);
-    }
-    /// cpu::write_mmx_reg64 of the low quadword of `value`.
-    fn store_mmx(&mut self, r: u8, value: &WasmLocalV128) {
-        self.mmx_invalidate(r);
-        let address = gp::get_reg_mmx_offset(r as u32);
-        self.w.const_i32(address as i32);
-        self.w.get_local_v128(value);
-        self.w.simd_lane(0x1D, 0);
-        self.w.store_unaligned_i64(0);
-        self.w.const_i32(address as i32 + 8);
-        self.w.const_i32(0xFFFF);
-        self.w.store_unaligned_u16(0);
-    }
-    /// fpu_invalidate_slot(r).
-    fn mmx_invalidate(&mut self, r: u8) {
-        let [_, valid, dirty] = fpu::x87_cache_addresses();
-        for address in [valid, dirty] {
-            self.w.const_i32(address as i32);
-            self.w.load_fixed_i32(address);
-            self.w.const_i32(!(1 << r));
-            self.w.and_i32();
-            self.w.store_aligned_i32(0);
-        }
-    }
-    /// cpu::transition_fpu_to_mmx: all tags valid, TOP 0.
-    fn mmx_transition(&mut self) {
-        for address in [gp::fpu_stack_empty as u32, gp::fpu_stack_ptr as u32] {
-            self.w.const_i32(address as i32);
-            self.w.const_i32(0);
-            self.w.store_u8(0);
-        }
-    }
     /// Push `bytes` (zero-extended) at addr: one ordinary RAM page, else retry.
     fn load_vector(&mut self, bytes: u8) {
         self.tlb_miss(bytes as u32, false);
@@ -1464,27 +1430,17 @@ impl Page {
                 }
                 self.load_vector(bytes);
             },
-            None if mmx => self.load_mmx(i.modrm.unwrap() & 7),
+            None if mmx => load_mmx(&mut self.w, i.modrm.unwrap() & 7),
             None => self.load_xmm_bytes(i.modrm.unwrap() & 7, bytes),
         }
     }
     fn simd_result(&mut self, reg: u8, mmx: bool, value: &WasmLocalV128) {
         if mmx {
-            self.store_mmx(reg, value);
-            self.mmx_transition();
+            store_mmx(&mut self.w, reg, value);
+            mmx_transition(&mut self.w);
         }
         else {
             self.store_xmm(reg, value);
-        }
-    }
-    /// The Page::xmm_clean bit of a lane format: the low lane or all lanes,
-    /// single or double precision (all lanes clean implies the low lane)
-    fn clean_bits(double: bool, scalar: bool) -> u8 {
-        match (double, scalar) {
-            (false, true) => CLEAN_SS,
-            (false, false) => CLEAN_PS | CLEAN_SS,
-            (true, true) => CLEAN_SD,
-            (true, false) => CLEAN_PD | CLEAN_SD,
         }
     }
     /// Push native_fp::mxcsr_refused, evaluated once per block (see fp_mxcsr)
@@ -1524,27 +1480,22 @@ impl Page {
         source: &WasmLocalV128,
         imm8: u32,
     ) {
-        let operands = self.env.sse_fp_operands;
-        for (k, value) in [destination, source].into_iter().enumerate() {
-            self.w.const_i32((operands + 16 * k as u32) as i32);
-            self.w.get_local_v128(value);
-            self.w.simd_memory(0x0B, 4); // v128.store
-        }
         let key = match i.vex {
             Some(_) => crate::cpu::avx::legacy(i.encoding.opcode),
             None => i.encoding.opcode,
         };
-        self.w.const_i32(key as i32);
-        self.w.const_i32(imm8 as i32);
-        self.w
-            .call_signature("ir_t0_sse_fp", signature("ir_t0_sse_fp"));
+        sse_fp_call(
+            &mut self.w,
+            self.env.sse_fp_operands,
+            key,
+            imm8,
+            destination,
+            source,
+        );
         self.retry_if();
     }
     /// Push the result of exact_if's path
-    fn exact_result(&mut self) {
-        self.w.const_i32(self.env.sse_fp_operands as i32);
-        self.w.simd_memory(0x00, 4); // v128.load
-    }
+    fn exact_result(&mut self) { sse_fp_result(&mut self.w, self.env.sse_fp_operands) }
 
     /// The template of `form` (`vex`: a VEX form's, see classify_vex)
     pub(super) fn simd(&mut self, form: Simd, i: &DecodedInstruction, vex: Option<Vex>) {
@@ -1722,11 +1673,11 @@ impl Page {
                 if let Some(ea) = &i.ea {
                     self.linear(ea);
                 }
-                self.load_mmx(reg);
+                load_mmx(&mut self.w, reg);
                 let v = self.w.set_new_local_v128();
                 if i.ea.is_some() {
                     self.store_vector(8, &v);
-                    self.mmx_transition();
+                    mmx_transition(&mut self.w);
                 }
                 else {
                     self.simd_result(rm, true, &v);
@@ -1755,7 +1706,7 @@ impl Page {
                     self.linear(ea);
                 }
                 if mmx {
-                    self.load_mmx(reg);
+                    load_mmx(&mut self.w, reg);
                 }
                 else {
                     self.load_xmm(reg);
@@ -1771,7 +1722,7 @@ impl Page {
                     },
                 }
                 if mmx {
-                    self.mmx_transition();
+                    mmx_transition(&mut self.w);
                 }
             },
             Simd::Emms => {
@@ -1790,13 +1741,13 @@ impl Page {
                 let src = self.w.set_new_local_v128();
                 let first = self.first(reg);
                 if mmx {
-                    self.load_mmx(reg);
+                    load_mmx(&mut self.w, reg);
                 }
                 else {
                     self.load_xmm(first);
                 }
                 let dst = self.w.set_new_local_v128();
-                self.packed(op, &dst, &src, if mmx { 8 } else { 16 });
+                packed(&mut self.w, op, &dst, &src, if mmx { 8 } else { 16 });
                 let result = self.w.set_new_local_v128();
                 let (destination, source) = (
                     self.xmm_clean[first as usize],
@@ -1824,49 +1775,13 @@ impl Page {
                 count,
             } => {
                 if mmx {
-                    self.load_mmx(reg);
+                    load_mmx(&mut self.w, reg);
                 }
                 else {
                     self.load_xmm(self.first(reg));
                 }
                 let dst = self.w.set_new_local_v128();
-                let count = count as u32;
-                if bits == 128 {
-                    self.w.get_local_v128(&dst);
-                    self.w.simd_zero();
-                    let mut lanes = [16; 16];
-                    for (k, lane) in lanes.iter_mut().enumerate() {
-                        let index = if kind == 3 {
-                            k as i32 + count as i32
-                        }
-                        else {
-                            k as i32 - count as i32
-                        };
-                        if (0..16).contains(&index) {
-                            *lane = index as u8;
-                        }
-                    }
-                    self.w.simd_shuffle(lanes);
-                }
-                else if count >= bits as u32 && kind != 4 {
-                    self.w.simd_zero();
-                }
-                else {
-                    self.w.get_local_v128(&dst);
-                    self.w.const_i32(count.min(bits as u32 - 1) as i32);
-                    let base = match bits {
-                        16 => 0x8B,
-                        32 => 0xAB,
-                        _ => 0xCB,
-                    };
-                    self.w.simd(
-                        base + match kind {
-                            6 => 0,
-                            4 => 1,
-                            _ => 2,
-                        },
-                    );
-                }
+                shift_immediate(&mut self.w, &dst, bits, kind, count);
                 let result = self.w.set_new_local_v128();
                 self.simd_result(reg, mmx, &result);
                 self.w.free_local_v128(dst);
@@ -1893,45 +1808,7 @@ impl Page {
                 let first = self.first(reg);
                 self.load_xmm(first);
                 let dst = self.w.set_new_local_v128();
-                let base = if double { 0xF0 } else { 0xE4 };
-                match opcode {
-                    0x51 => {
-                        self.w.get_local_v128(&src);
-                        self.w.simd(base - 1); // sqrt
-                    },
-                    0x52 | 0x53 => {
-                        // rsqrt/rcp as the interpreter computes them: 1 / sqrt(x), 1 / x.
-                        self.w.const_i32(0x3F800000);
-                        self.w.simd(0x11); // i32x4.splat of 1.0f
-                        self.w.get_local_v128(&src);
-                        if opcode == 0x52 {
-                            self.w.simd(0xE3);
-                        }
-                        self.w.simd(0xE7);
-                    },
-                    0x5D | 0x5F => {
-                        // dst where dst < src (> for max), else src (NaNs, zeros).
-                        self.w.get_local_v128(&dst);
-                        self.w.get_local_v128(&src);
-                        self.w.get_local_v128(&dst);
-                        self.w.get_local_v128(&src);
-                        self.w
-                            .simd(if double { 0x49 } else { 0x43 } + (opcode == 0x5F) as u32);
-                        self.w.simd(0x52);
-                    },
-                    _ => {
-                        self.w.get_local_v128(&dst);
-                        self.w.get_local_v128(&src);
-                        self.w.simd(
-                            base + match opcode {
-                                0x58 => 0,
-                                0x5C => 1,
-                                0x59 => 2,
-                                _ => 3,
-                            },
-                        );
-                    },
-                }
+                float_arithmetic(&mut self.w, opcode, double, &dst, &src);
                 let result = self.w.set_new_local_v128();
                 // only where the native result is cpu::simd_fp's, MXCSR too;
                 // else the exact path
@@ -1939,10 +1816,9 @@ impl Page {
                     native_fp::reciprocal_refused(&mut self.w, opcode, scalar, &src, &result);
                 }
                 else {
-                    let lanes = Self::clean_bits(double, scalar);
-                    let clean = |r: u8| self.xmm_clean[r as usize] & lanes == lanes;
+                    let lanes = clean_bits(double, scalar);
                     let source = i.ea.is_none().then_some(rm);
-                    let known = [clean(first), source.is_some_and(clean)];
+                    let known = known_clean(&self.xmm_clean, lanes, first, source);
                     // a cheap first test where it saves work (zeros fail it)
                     let unsure = native_fp::arithmetic_unsure(
                         &mut self.w,
@@ -1968,9 +1844,7 @@ impl Page {
                     );
                     // (facts for xmm_clean, see exact_if: a clean result or
                     // a source register found clean)
-                    let claims =
-                        !matches!(opcode, 0x58 | 0x5C) || source.is_some_and(|r| !clean(r));
-                    if claims {
+                    if float_claims(opcode, source, known) {
                         self.retry_if();
                     }
                     else {
@@ -2002,18 +1876,16 @@ impl Page {
                 for v in [src, dst, result] {
                     self.w.free_local_v128(v);
                 }
-                if !matches!(opcode, 0x52 | 0x53) {
-                    // (see native_fp::arithmetic_refused)
-                    let lanes = Self::clean_bits(double, scalar);
-                    if let Some(source) = i.ea.is_none().then_some(rm).filter(|&r| r != reg) {
-                        self.xmm_clean[source as usize] |= lanes;
-                    }
-                    if !matches!(opcode, 0x58 | 0x5C) {
-                        // a scalar result keeps the destination's other lanes
-                        self.xmm_clean[reg as usize] = lanes
-                            | if scalar { before & Self::clean_bits(double, false) } else { 0 };
-                    }
-                }
+                let source = i.ea.is_none().then_some(rm);
+                float_facts(
+                    &mut self.xmm_clean,
+                    opcode,
+                    double,
+                    scalar,
+                    reg,
+                    source,
+                    before,
+                );
             },
             Simd::Convert {
                 opcode,
@@ -2046,7 +1918,7 @@ impl Page {
                         [&x, &x],
                         [
                             source.is_some_and(|r| {
-                                let lanes = Self::clean_bits(false, scalar);
+                                let lanes = clean_bits(false, scalar);
                                 self.xmm_clean[r as usize] & lanes == lanes
                             }),
                             true,
@@ -2073,9 +1945,9 @@ impl Page {
                 // admitted results are neither NaN nor denormal (integers
                 // convert to normals or zeros)
                 let double = matches!(opcode, 0x5F | 0xFE);
-                let lanes = Self::clean_bits(double, scalar);
+                let lanes = clean_bits(double, scalar);
                 self.xmm_clean[reg as usize] =
-                    lanes | if scalar { before & Self::clean_bits(double, false) } else { 0 };
+                    lanes | if scalar { before & clean_bits(double, false) } else { 0 };
                 if let (0x5F, Some(source)) = (opcode, source.filter(|&r| r != reg)) {
                     self.xmm_clean[source as usize] |= CLEAN_SS;
                 }
@@ -2088,7 +1960,7 @@ impl Page {
                 self.simd_source(i, false, 16);
                 let x = self.w.set_new_local_v128();
                 self.w.get_local_v128(&x);
-                let out_of_range = self.convert_integer(double, truncate);
+                let out_of_range = convert_integer(&mut self.w, double, truncate);
                 let v = self.w.set_new_local_v128();
                 // a NaN or out-of-range lane raises IE; an inexact one PE
                 self.w.get_local(&out_of_range);
@@ -2132,7 +2004,7 @@ impl Page {
                 self.store_xmm_low(reg, &v, if double { 8 } else { 4 });
                 self.w.free_local_v128(v);
                 self.xmm_clean[reg as usize] =
-                    Self::clean_bits(double, true) | before & Self::clean_bits(double, false);
+                    clean_bits(double, true) | before & clean_bits(double, false);
             },
             Simd::ToInteger {
                 reg,
@@ -2367,10 +2239,9 @@ impl Page {
                 let dst = self.w.set_new_local_v128();
                 // (a NaN or denormal operand raises IE or DE; ordered ones
                 // leave PF clear)
-                let lanes = Self::clean_bits(double, true);
+                let lanes = clean_bits(double, true);
                 let source = i.ea.is_none().then_some(rm);
-                let clean = |r: u8| self.xmm_clean[r as usize] & lanes == lanes;
-                let known = [clean(reg), source.is_some_and(clean)];
+                let known = known_clean(&self.xmm_clean, lanes, reg, source);
                 if known != [true, true] {
                     native_fp::operands_refused(
                         &mut self.w,
@@ -2381,24 +2252,12 @@ impl Page {
                     );
                     self.retry_if();
                 }
-                self.xmm_clean[reg as usize] |= lanes;
-                if let Some(source) = source {
-                    self.xmm_clean[source as usize] |= lanes;
-                }
-                let base = if double { 0x47 } else { 0x41 };
+                operand_facts(&mut self.xmm_clean, lanes, reg, source);
                 self.w.const_i32(gp::flags as i32);
                 self.w.load_fixed_i32(gp::flags as u32);
                 self.w.const_i32(!FLAGS_ALL);
                 self.w.and_i32();
-                for (compare, flag) in [(0, 0x40), (2, 1)] {
-                    self.w.get_local_v128(&dst);
-                    self.w.get_local_v128(&src);
-                    self.w.simd(base + compare);
-                    self.w.simd_lane(0x1B, 0);
-                    self.w.const_i32(flag);
-                    self.w.and_i32();
-                    self.w.or_i32();
-                }
+                compare_flags(&mut self.w, double, &dst, &src);
                 self.w.store_aligned_i32(0);
                 self.w.const_i32(gp::flags_changed as i32);
                 self.w.const_i32(0);
@@ -2437,27 +2296,11 @@ impl Page {
                 let first = self.first(reg);
                 self.load_xmm(first);
                 let dst = self.w.set_new_local_v128();
-                // the relation of imm8[2:0] for ordered operands: EQ, LT, LE,
-                // UNORD (false), NEQ, NLT (ge), NLE (gt), ORD (true)
-                match predicate & 7 {
-                    3 => self.w.simd_zero(),
-                    7 => {
-                        self.w.const_i32(-1);
-                        self.w.simd(0x11); // i32x4.splat
-                    },
-                    relation => {
-                        self.w.get_local_v128(&dst);
-                        self.w.get_local_v128(&src);
-                        // (f32x4/f64x2: eq ne lt gt le ge)
-                        let offset = [0, 2, 4, 0, 1, 5, 3][relation as usize];
-                        self.w.simd(if double { 0x47 } else { 0x41 } + offset);
-                    },
-                }
+                compare_relation(&mut self.w, double, predicate, &dst, &src);
                 let result = self.w.set_new_local_v128();
-                let lanes = Self::clean_bits(double, scalar);
+                let lanes = clean_bits(double, scalar);
                 let source = i.ea.is_none().then_some(rm);
-                let clean = |r: u8| self.xmm_clean[r as usize] & lanes == lanes;
-                let known = [clean(first), source.is_some_and(clean)];
+                let known = known_clean(&self.xmm_clean, lanes, first, source);
                 if known != [true, true] {
                     // a NaN or denormal operand raises IE or DE, and a NaN
                     // makes them unordered
@@ -2582,9 +2425,9 @@ impl Page {
                 let low = self.w.set_new_local_v128();
                 self.load_ymm_high(first);
                 let first = [low, self.w.set_new_local_v128()];
-                self.packed(op, &first[0], &source[0], 16);
+                packed(&mut self.w, op, &first[0], &source[0], 16);
                 let low = self.w.set_new_local_v128();
-                self.packed(op, &first[1], &source[1], 16);
+                packed(&mut self.w, op, &first[1], &source[1], 16);
                 let result = [low, self.w.set_new_local_v128()];
                 self.store_ymm(reg, &result[0], &result[1]);
                 for v in source.into_iter().chain(first).chain(result) {
@@ -2620,188 +2463,452 @@ impl Page {
             },
         }
     }
+}
 
-    /// Push op(dst, src) on `bytes`-wide registers (8: MMX, low quadword).
-    fn packed(&mut self, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128, bytes: u8) {
-        let w = &mut self.w;
-        match op {
-            Packed::ShuffleZero(lanes) => {
-                w.get_local_v128(dst);
-                w.simd_zero();
-                w.simd_shuffle(lanes);
-            },
-            Packed::Swizzle(mask) => {
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.const_i32(mask as i32);
-                w.simd(0x0F); // i8x16.splat
-                w.simd(0x4E); // v128.and
-                w.simd(0x0E); // i8x16.swizzle
-            },
-            Packed::MulHigh(signed) => {
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(if signed { 0xBC } else { 0xBE });
-                if bytes == 16 {
-                    w.get_local_v128(dst);
-                    w.get_local_v128(src);
-                    w.simd(if signed { 0xBD } else { 0xBF });
-                }
-                else {
-                    w.simd_zero();
-                }
-                w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
-            },
-            Packed::MulDwords(signed) => {
-                for v in [dst, src] {
-                    w.get_local_v128(v);
-                    w.simd_zero();
-                    w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
-                }
-                // i64x2.extmul_low_i32x4_s/u
-                w.simd(if signed { 0xDC } else { 0xDE });
-            },
-            Packed::Sad => {
-                // |dst - src| per byte, summed per quadword.
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(0x79);
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(0x77);
-                w.simd(0x71);
-                w.simd(0x7D);
-                w.simd(0x7F);
-                let sums = w.set_new_local_v128();
-                w.get_local_v128(&sums);
-                w.get_local_v128(&sums);
-                w.get_local_v128(&sums);
-                w.simd_shuffle([4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
-                w.simd(0xAE);
-                w.simd_zero();
-                w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
-                w.free_local_v128(sums);
-            },
-            Packed::Shift(opcode, bits, arithmetic) => {
-                w.get_local_v128(src);
-                w.simd_lane(0x1D, 0);
-                let count = w.set_new_local_i64();
-                w.get_local_i64(&count);
-                w.const_i64((bits - 1) as i64);
-                w.gtu_i64();
-                w.if_v128();
-                if arithmetic {
-                    w.get_local_v128(dst);
-                    w.const_i32((bits - 1) as i32);
-                    w.simd(opcode);
-                }
-                else {
-                    w.simd_zero();
-                }
-                w.else_();
-                w.get_local_v128(dst);
-                w.get_local_i64(&count);
-                w.wrap_i64_to_i32();
-                w.simd(opcode);
-                w.block_end();
-                w.free_local_i64(count);
-            },
-            _ => {
-                if let Packed::AndNot = op {
-                    w.get_local_v128(src);
-                    w.get_local_v128(dst);
-                }
-                else {
-                    w.get_local_v128(dst);
-                    w.get_local_v128(src);
-                }
-                match op {
-                    Packed::Shuffle(lanes) => w.simd_shuffle(lanes),
-                    Packed::Binary(opcode) => w.simd(opcode),
-                    Packed::AndNot => w.simd(0x4F),
-                    Packed::Pack(opcode) => {
-                        w.simd(opcode);
-                        if bytes == 8 {
-                            w.simd_zero();
-                            w.simd_shuffle([
-                                0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23,
-                            ]);
-                        }
-                    },
-                    Packed::Unpack(..) => w.simd_shuffle(op.lanes(bytes).unwrap()),
-                    _ => unreachable!(),
-                }
-            },
-        }
-    }
+// Leaves (docs/jit-unification-plan.md P2.1): the emitters that need nothing
+// of the page but the builder and their operands' locals, and the register
+// facts as functions of xmm_clean. P2.2 moves them into x86tpl, where the page
+// tier uses them too; tests/x86tpl/leaf_digests.rs pins their output.
 
-    /// CVT(T)PS2DQ/CVT(T)PD2DQ of the vector on the stack, rounded to nearest
-    /// (or truncated): push the integer vector and return an i32 local,
-    /// nonzero if a lane was out of the i32 range (or NaN)
-    fn convert_integer(
-        &mut self,
-        double: bool,
-        truncate: bool,
-    ) -> crate::wasmgen::wasm_builder::WasmLocal {
-        let w = &mut self.w;
-        let input = w.set_new_local_v128();
-        if truncate {
-            w.get_local_v128(&input);
-            w.simd(if double { 0x7A } else { 0x69 });
-        }
-        else {
-            // (admitted only with MXCSR.RC to nearest)
-            w.get_local_v128(&input);
-            w.simd(if double { 0x94 } else { 0x6A }); // nearest
-        }
-        let rounded = w.set_new_local_v128();
-        w.get_local_v128(&rounded);
-        if double {
-            w.const_i64(0xC1E0000000000000u64 as i64);
-            w.simd(0x12);
-        }
-        else {
-            w.const_i32(0xCF000000u32 as i32);
-            w.simd(0x11);
-        }
-        w.simd(if double { 0x4C } else { 0x46 });
-        w.get_local_v128(&rounded);
-        if double {
-            w.const_i64(0x41E0000000000000);
-            w.simd(0x12);
-        }
-        else {
-            w.const_i32(0x4F000000);
-            w.simd(0x11);
-        }
-        w.simd(if double { 0x49 } else { 0x43 });
-        w.simd(0x4E);
-        if double {
-            w.simd_zero();
-            w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
-        }
-        let valid = w.set_new_local_v128();
-        // (the lanes that exist: 0 and 1 for double precision)
-        w.get_local_v128(&valid);
-        w.simd(0xA4); // i32x4.bitmask
-        w.const_i32(if double { 3 } else { 15 });
+/// Push MMX `r` (cpu::read_mmx64s: sync the slot from the f64 cache first)
+fn load_mmx(w: &mut WasmBuilder, r: u8) {
+    let [_, _, dirty] = fpu::x87_cache_addresses();
+    w.load_fixed_i32(dirty);
+    w.const_i32(1 << r);
+    w.and_i32();
+    w.hint(false);
+    w.if_void();
+    w.const_i32(r as i32);
+    w.call_signature("fpu_sync_slot", Signature::new(&[WasmType::I32], &[]));
+    w.block_end();
+    w.const_i32(gp::get_reg_mmx_offset(r as u32) as i32);
+    w.simd_memory(0x5D, 0);
+}
+/// cpu::write_mmx_reg64 of the low quadword of `value`
+fn store_mmx(w: &mut WasmBuilder, r: u8, value: &WasmLocalV128) {
+    mmx_invalidate(w, r);
+    let address = gp::get_reg_mmx_offset(r as u32);
+    w.const_i32(address as i32);
+    w.get_local_v128(value);
+    w.simd_lane(0x1D, 0);
+    w.store_unaligned_i64(0);
+    w.const_i32(address as i32 + 8);
+    w.const_i32(0xFFFF);
+    w.store_unaligned_u16(0);
+}
+/// fpu_invalidate_slot(r)
+fn mmx_invalidate(w: &mut WasmBuilder, r: u8) {
+    let [_, valid, dirty] = fpu::x87_cache_addresses();
+    for address in [valid, dirty] {
+        w.const_i32(address as i32);
+        w.load_fixed_i32(address);
+        w.const_i32(!(1 << r));
         w.and_i32();
-        w.const_i32(if double { 3 } else { 15 });
-        w.ne_i32();
-        let out_of_range = w.set_new_local();
-        w.get_local_v128(&rounded);
-        w.simd(if double { 0xFC } else { 0xF8 });
-        w.const_i32(i32::MIN);
-        w.simd(0x11);
-        w.get_local_v128(&valid);
-        w.simd(0x52);
-        if double {
-            w.simd_zero();
-            w.simd_shuffle([0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]);
-        }
-        w.free_local_v128(input);
-        w.free_local_v128(rounded);
-        w.free_local_v128(valid);
-        out_of_range
+        w.store_aligned_i32(0);
     }
 }
+/// cpu::transition_fpu_to_mmx: all tags valid, TOP 0
+fn mmx_transition(w: &mut WasmBuilder) {
+    for address in [gp::fpu_stack_empty as u32, gp::fpu_stack_ptr as u32] {
+        w.const_i32(address as i32);
+        w.const_i32(0);
+        w.store_u8(0);
+    }
+}
+/// Push op(dst, src) on `bytes`-wide registers (8: MMX, low quadword).
+fn packed(w: &mut WasmBuilder, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128, bytes: u8) {
+    match op {
+        Packed::ShuffleZero(lanes) => {
+            w.get_local_v128(dst);
+            w.simd_zero();
+            w.simd_shuffle(lanes);
+        },
+        Packed::Swizzle(mask) => {
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.const_i32(mask as i32);
+            w.simd(0x0F); // i8x16.splat
+            w.simd(0x4E); // v128.and
+            w.simd(0x0E); // i8x16.swizzle
+        },
+        Packed::MulHigh(signed) => {
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(if signed { 0xBC } else { 0xBE });
+            if bytes == 16 {
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+                w.simd(if signed { 0xBD } else { 0xBF });
+            }
+            else {
+                w.simd_zero();
+            }
+            w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
+        },
+        Packed::MulDwords(signed) => {
+            for v in [dst, src] {
+                w.get_local_v128(v);
+                w.simd_zero();
+                w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
+            }
+            // i64x2.extmul_low_i32x4_s/u
+            w.simd(if signed { 0xDC } else { 0xDE });
+        },
+        Packed::Sad => {
+            // |dst - src| per byte, summed per quadword.
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(0x79);
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(0x77);
+            w.simd(0x71);
+            w.simd(0x7D);
+            w.simd(0x7F);
+            let sums = w.set_new_local_v128();
+            w.get_local_v128(&sums);
+            w.get_local_v128(&sums);
+            w.get_local_v128(&sums);
+            w.simd_shuffle([4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
+            w.simd(0xAE);
+            w.simd_zero();
+            w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
+            w.free_local_v128(sums);
+        },
+        Packed::Shift(opcode, bits, arithmetic) => {
+            w.get_local_v128(src);
+            w.simd_lane(0x1D, 0);
+            let count = w.set_new_local_i64();
+            w.get_local_i64(&count);
+            w.const_i64((bits - 1) as i64);
+            w.gtu_i64();
+            w.if_v128();
+            if arithmetic {
+                w.get_local_v128(dst);
+                w.const_i32((bits - 1) as i32);
+                w.simd(opcode);
+            }
+            else {
+                w.simd_zero();
+            }
+            w.else_();
+            w.get_local_v128(dst);
+            w.get_local_i64(&count);
+            w.wrap_i64_to_i32();
+            w.simd(opcode);
+            w.block_end();
+            w.free_local_i64(count);
+        },
+        _ => {
+            if let Packed::AndNot = op {
+                w.get_local_v128(src);
+                w.get_local_v128(dst);
+            }
+            else {
+                w.get_local_v128(dst);
+                w.get_local_v128(src);
+            }
+            match op {
+                Packed::Shuffle(lanes) => w.simd_shuffle(lanes),
+                Packed::Binary(opcode) => w.simd(opcode),
+                Packed::AndNot => w.simd(0x4F),
+                Packed::Pack(opcode) => {
+                    w.simd(opcode);
+                    if bytes == 8 {
+                        w.simd_zero();
+                        w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
+                    }
+                },
+                Packed::Unpack(..) => w.simd_shuffle(op.lanes(bytes).unwrap()),
+                _ => unreachable!(),
+            }
+        },
+    }
+}
+
+/// CVT(T)PS2DQ/CVT(T)PD2DQ of the vector on the stack, rounded to nearest
+/// (or truncated): push the integer vector and return an i32 local,
+/// nonzero if a lane was out of the i32 range (or NaN)
+fn convert_integer(w: &mut WasmBuilder, double: bool, truncate: bool) -> WasmLocal {
+    let input = w.set_new_local_v128();
+    if truncate {
+        w.get_local_v128(&input);
+        w.simd(if double { 0x7A } else { 0x69 });
+    }
+    else {
+        // (admitted only with MXCSR.RC to nearest)
+        w.get_local_v128(&input);
+        w.simd(if double { 0x94 } else { 0x6A }); // nearest
+    }
+    let rounded = w.set_new_local_v128();
+    w.get_local_v128(&rounded);
+    if double {
+        w.const_i64(0xC1E0000000000000u64 as i64);
+        w.simd(0x12);
+    }
+    else {
+        w.const_i32(0xCF000000u32 as i32);
+        w.simd(0x11);
+    }
+    w.simd(if double { 0x4C } else { 0x46 });
+    w.get_local_v128(&rounded);
+    if double {
+        w.const_i64(0x41E0000000000000);
+        w.simd(0x12);
+    }
+    else {
+        w.const_i32(0x4F000000);
+        w.simd(0x11);
+    }
+    w.simd(if double { 0x49 } else { 0x43 });
+    w.simd(0x4E);
+    if double {
+        w.simd_zero();
+        w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
+    }
+    let valid = w.set_new_local_v128();
+    // (the lanes that exist: 0 and 1 for double precision)
+    w.get_local_v128(&valid);
+    w.simd(0xA4); // i32x4.bitmask
+    w.const_i32(if double { 3 } else { 15 });
+    w.and_i32();
+    w.const_i32(if double { 3 } else { 15 });
+    w.ne_i32();
+    let out_of_range = w.set_new_local();
+    w.get_local_v128(&rounded);
+    w.simd(if double { 0xFC } else { 0xF8 });
+    w.const_i32(i32::MIN);
+    w.simd(0x11);
+    w.get_local_v128(&valid);
+    w.simd(0x52);
+    if double {
+        w.simd_zero();
+        w.simd_shuffle([0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]);
+    }
+    w.free_local_v128(input);
+    w.free_local_v128(rounded);
+    w.free_local_v128(valid);
+    out_of_range
+}
+
+/// PSRLx/PSRAx/PSLLx (`bits` 16, 32 or 64: the lane width) and PSRLDQ/PSLLDQ
+/// (128: bytes) of `value` by imm8 `count`, `kind` the ModRM reg (2 PSRL, 4
+/// PSRA, 6 PSLL, 3 PSRLDQ, 7 PSLLDQ): push the result
+fn shift_immediate(w: &mut WasmBuilder, value: &WasmLocalV128, bits: u8, kind: u8, count: u8) {
+    let count = count as u32;
+    if bits == 128 {
+        w.get_local_v128(value);
+        w.simd_zero();
+        let mut lanes = [16; 16];
+        for (k, lane) in lanes.iter_mut().enumerate() {
+            let index = if kind == 3 { k as i32 + count as i32 } else { k as i32 - count as i32 };
+            if (0..16).contains(&index) {
+                *lane = index as u8;
+            }
+        }
+        w.simd_shuffle(lanes);
+    }
+    else if count >= bits as u32 && kind != 4 {
+        w.simd_zero();
+    }
+    else {
+        w.get_local_v128(value);
+        w.const_i32(count.min(bits as u32 - 1) as i32);
+        let base = match bits {
+            16 => 0x8B,
+            32 => 0xAB,
+            _ => 0xCB,
+        };
+        w.simd(
+            base + match kind {
+                6 => 0,
+                4 => 1,
+                _ => 2,
+            },
+        );
+    }
+}
+
+/// The native operation of SQRT (`opcode` 0x51), RSQRT (0x52), RCP (0x53),
+/// ADD (0x58), MUL (0x59), SUB (0x5C), MIN (0x5D), DIV (0x5E) and MAX (0x5F)
+/// on (`dst`, `src`), PS or PD (scalar forms use the low lane): push it
+fn float_arithmetic(
+    w: &mut WasmBuilder,
+    opcode: u8,
+    double: bool,
+    dst: &WasmLocalV128,
+    src: &WasmLocalV128,
+) {
+    let base = if double { 0xF0 } else { 0xE4 };
+    match opcode {
+        0x51 => {
+            w.get_local_v128(src);
+            w.simd(base - 1); // sqrt
+        },
+        0x52 | 0x53 => {
+            // rsqrt/rcp as the interpreter computes them: 1 / sqrt(x), 1 / x.
+            w.const_i32(0x3F800000);
+            w.simd(0x11); // i32x4.splat of 1.0f
+            w.get_local_v128(src);
+            if opcode == 0x52 {
+                w.simd(0xE3);
+            }
+            w.simd(0xE7);
+        },
+        0x5D | 0x5F => {
+            // dst where dst < src (> for max), else src (NaNs, zeros).
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(if double { 0x49 } else { 0x43 } + (opcode == 0x5F) as u32);
+            w.simd(0x52);
+        },
+        _ => {
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(
+                base + match opcode {
+                    0x58 => 0,
+                    0x5C => 1,
+                    0x59 => 2,
+                    _ => 3,
+                },
+            );
+        },
+    }
+}
+
+/// CMPPS/CMPPD/CMPSS/CMPSD's relation of imm8[2:0] (`predicate`) for ordered
+/// operands (`dst`, `src`): EQ, LT, LE, UNORD (false), NEQ, NLT (ge), NLE
+/// (gt), ORD (true); push the mask
+fn compare_relation(
+    w: &mut WasmBuilder,
+    double: bool,
+    predicate: u8,
+    dst: &WasmLocalV128,
+    src: &WasmLocalV128,
+) {
+    match predicate & 7 {
+        3 => w.simd_zero(),
+        7 => {
+            w.const_i32(-1);
+            w.simd(0x11); // i32x4.splat
+        },
+        relation => {
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            // (f32x4/f64x2: eq ne lt gt le ge)
+            let offset = [0, 2, 4, 0, 1, 5, 3][relation as usize];
+            w.simd(if double { 0x47 } else { 0x41 } + offset);
+        },
+    }
+}
+
+/// COMISS/COMISD and UCOMISS/UCOMISD of the low lanes of (`dst`, `src`),
+/// both ordered (operands_refused takes the others): or ZF (equal) and CF
+/// (less) into the i32 on the stack
+fn compare_flags(w: &mut WasmBuilder, double: bool, dst: &WasmLocalV128, src: &WasmLocalV128) {
+    let base = if double { 0x47 } else { 0x41 };
+    for (compare, flag) in [(0, 0x40), (2, 1)] {
+        w.get_local_v128(dst);
+        w.get_local_v128(src);
+        w.simd(base + compare);
+        w.simd_lane(0x1B, 0);
+        w.const_i32(flag);
+        w.and_i32();
+        w.or_i32();
+    }
+}
+
+/// Call runtime::tier0::ir_t0_sse_fp, the exact path of a refused
+/// instruction: (`destination`, `source`) into its operand block at
+/// `operands` (Page::env.sse_fp_operands), the form `key` (a catalogue key:
+/// a VEX form's legacy one) with `imm8`. Push its i32, nonzero if the
+/// instruction faults; the result is sse_fp_result's.
+fn sse_fp_call(
+    w: &mut WasmBuilder,
+    operands: u32,
+    key: u32,
+    imm8: u32,
+    destination: &WasmLocalV128,
+    source: &WasmLocalV128,
+) {
+    for (k, value) in [destination, source].into_iter().enumerate() {
+        w.const_i32((operands + 16 * k as u32) as i32);
+        w.get_local_v128(value);
+        w.simd_memory(0x0B, 4); // v128.store
+    }
+    w.const_i32(key as i32);
+    w.const_i32(imm8 as i32);
+    w.call_signature("ir_t0_sse_fp", signature("ir_t0_sse_fp"));
+}
+/// Push the result of sse_fp_call
+fn sse_fp_result(w: &mut WasmBuilder, operands: u32) {
+    w.const_i32(operands as i32);
+    w.simd_memory(0x00, 4); // v128.load
+}
+
+/// The Page::xmm_clean bit of a lane format: the low lane or all lanes,
+/// single or double precision (all lanes clean implies the low lane)
+fn clean_bits(double: bool, scalar: bool) -> u8 {
+    match (double, scalar) {
+        (false, true) => CLEAN_SS,
+        (false, false) => CLEAN_PS | CLEAN_SS,
+        (true, true) => CLEAN_SD,
+        (true, false) => CLEAN_PD | CLEAN_SD,
+    }
+}
+/// Whether XMM `first` and `source` (None: memory) are known to hold `lanes`
+/// clean (Page::xmm_clean): native_fp's `known` operands
+fn known_clean(clean: &[u8; 8], lanes: u8, first: u8, source: Option<u8>) -> [bool; 2] {
+    let holds = |r: u8| clean[r as usize] & lanes == lanes;
+    [holds(first), source.is_some_and(holds)]
+}
+/// Whether an SSE arithmetic form (Simd::Float, not RSQRT or RCP) leaves
+/// facts that hold only for admitted operands (float_facts): a clean result
+/// (all but ADD and SUB), or a source register found clean. Its refused
+/// operands then retry, as the exact path would not make the facts true.
+fn float_claims(opcode: u8, source: Option<u8>, known: [bool; 2]) -> bool {
+    !matches!(opcode, 0x58 | 0x5C) || source.is_some() && !known[1]
+}
+/// Page::xmm_clean after an admitted SSE arithmetic form (Simd::Float) wrote
+/// XMM `reg`, of operands that passed native_fp::arithmetic_refused: a source
+/// register (None: memory) is clean, and so is the result of all but ADD and
+/// SUB, whose clean operands can cancel to a denormal; a scalar result keeps
+/// the other lanes of the first source (its facts `before` the write).
+/// RSQRT and RCP check only their operand and leave nothing.
+fn float_facts(
+    clean: &mut [u8; 8],
+    opcode: u8,
+    double: bool,
+    scalar: bool,
+    reg: u8,
+    source: Option<u8>,
+    before: u8,
+) {
+    if matches!(opcode, 0x52 | 0x53) {
+        return;
+    }
+    // (see native_fp::arithmetic_refused)
+    let lanes = clean_bits(double, scalar);
+    if let Some(source) = source.filter(|&r| r != reg) {
+        clean[source as usize] |= lanes;
+    }
+    if !matches!(opcode, 0x58 | 0x5C) {
+        // a scalar result keeps the destination's other lanes
+        clean[reg as usize] = lanes | if scalar { before & clean_bits(double, false) } else { 0 };
+    }
+}
+/// Page::xmm_clean after native_fp::operands_refused admitted XMM `first`
+/// and `source` (None: memory) in `lanes`
+fn operand_facts(clean: &mut [u8; 8], lanes: u8, first: u8, source: Option<u8>) {
+    clean[first as usize] |= lanes;
+    if let Some(source) = source {
+        clean[source as usize] |= lanes;
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/x86tpl/leaf_digests.rs"]
+mod leaf_digests;

@@ -1248,3 +1248,17 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
 - 核心比较：84 个函数改变，都在编译路径上（Tier-0 `Page` 的方法因结构体多了 `env` 而改变，pagegen 的 `Emitter`、
   `pages::compile`、`schedule::visit`）。R 级（与同一工作树构建的 `94ccc9c8` 比较）：bench 3 个 quick 会话几何均值 0.991，
   `531`、`620`、`701`、`707`、`720` 按 `--runs 7 --scale 4` 复测后 1.005；XP 桌面（ABBAAB）中位数 13.30 s 对 13.08 s，比值 1.017。
+
+**P2.1 叶子改为自由函数，黄金摘要，2026-10-09。**
+
+- Tier-0 的 SIMD 模板里只需要构建器与操作数局部变量的部分改成接收 `&mut WasmBuilder` 的自由函数：MMX 的读、写、失效与
+  转换；`packed`（分类函数改名 `packed_op`）；立即数移位；`Simd::Float` 的 SSE 运算；CMPxx 的关系与 COMISS/UCOMISS 的标志；
+  CVT(T)PS2DQ/PD2DQ 的转换；`ir_t0_sse_fp` 的调用与取结果。寄存器事实（`xmm_clean`）成为纯函数：`clean_bits`、`known_clean`、
+  `float_claims`、`float_facts`、`operand_facts`。pagegen 自己的 `packed` 与立即数移位也成为自由函数，由 P2.3 换掉。
+- `tests/x86tpl/leaf_digests.rs`：每个叶子在其参数的穷举网格上的输出各算一个 FNV-1a 摘要，按参数描述排序，所以与分类函数
+  如何得到这些值无关。网格：Tier-0 分类函数在主机上对全部编码（三张 opcode 表配各强制前缀、VEX 的各 map/W/L/pp、寄存器与
+  内存形式、全部 imm8，全部特性打开）给出的值，为此 `classify`/`classify_vex` 拆出不查 simd128 的 `legacy_form`/`vex_form`；
+  其余参数取全部取值；`native_fp` 的准入；事实函数取全部输入。`tests/x86tpl/pagegen_leaf_digests.rs` 是 pagegen 的两个。
+  `make jit-leaf-tests` 跑这两个测试（主机上约 0.2 s），`make jit-gate` 在 IR、x64 或共享 JIT 代码改动时跑它。
+- replay-check 第一次真正比较：2605 条记录全部字节一致。核心比较：8 个函数改变、6 个新增、4 个删除，都在编译路径上。
+  R 级：bench 3 个会话加复测后几何均值 1.010；XP 中位数 13.30 s 对 13.07 s，比值 1.017。

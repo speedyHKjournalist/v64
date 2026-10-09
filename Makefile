@@ -928,6 +928,11 @@ jit-gate:
 jit-gate-full:
 	node tools/jit_gate.mjs --full $(JIT_GATE_ARGS)
 
+# Golden digests of the x86 leaf emitters (P2.1, tests/x86tpl)
+.PHONY: jit-leaf-tests
+jit-leaf-tests:
+	env RUSTFLAGS="-D warnings" cargo test --lib leaf_digests
+
 # The JIT switch registry (src/rust/jit_switches.rs, src/jit_switches.js)
 .PHONY: jit-switch-tests
 jit-switch-tests: build/v86-debug.wasm

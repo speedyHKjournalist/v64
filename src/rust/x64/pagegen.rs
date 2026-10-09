@@ -5400,7 +5400,7 @@ impl Emitter {
                 self.b.simd_memory(0x00, 0);
                 let destination = self.b.set_new_local_v128();
                 self.c32(Self::xmm(dst) as i32);
-                self.packed(op, &destination, &source);
+                packed(&mut self.b, op, &destination, &source);
                 self.b.simd_memory(0x0B, 0);
                 self.b.free_local_v128(source);
                 self.b.free_local_v128(destination);
@@ -5421,42 +5421,7 @@ impl Emitter {
                     self.c32(Self::ymm(dst, *offset) as i32);
                     self.c32(Self::ymm(src, *offset) as i32);
                     self.b.simd_memory(0x00, 0);
-                    let count = count as u32;
-                    if bits == 128 {
-                        self.b.simd_zero();
-                        let mut lanes = [16; 16];
-                        for (k, lane) in lanes.iter_mut().enumerate() {
-                            let index = if kind == 3 {
-                                k as i32 + count as i32
-                            }
-                            else {
-                                k as i32 - count as i32
-                            };
-                            if (0..16).contains(&index) {
-                                *lane = index as u8;
-                            }
-                        }
-                        self.b.simd_shuffle(lanes);
-                    }
-                    else if count >= bits as u32 && kind != 4 {
-                        self.b.drop_();
-                        self.b.simd_zero();
-                    }
-                    else {
-                        self.c32(count.min(bits as u32 - 1) as i32);
-                        let base = match bits {
-                            16 => 0x8B,
-                            32 => 0xAB,
-                            _ => 0xCB,
-                        };
-                        self.b.simd(
-                            base + match kind {
-                                6 => 0,
-                                4 => 1,
-                                _ => 2,
-                            },
-                        );
-                    }
+                    shift_immediate(&mut self.b, bits, kind, count);
                     self.b.simd_memory(0x0B, 0);
                 }
                 if !wide {
@@ -5543,7 +5508,7 @@ impl Emitter {
                 });
                 for (half, offset) in [0, 16].into_iter().enumerate() {
                     self.c32(Self::ymm(dst, offset) as i32);
-                    self.packed(op, &first[half], &source[half]);
+                    packed(&mut self.b, op, &first[half], &source[half]);
                     self.b.simd_memory(0x0B, 0);
                 }
                 for v in source.into_iter().chain(first) {
@@ -6554,114 +6519,6 @@ impl Emitter {
                 self.b.get_local(&scratch);
                 self.b.guest_load_v128(&scratch);
                 self.b.free_local(scratch);
-            },
-        }
-    }
-    /// Push op(dst, src) (ir::tier0::simd::Page::packed on XMM registers).
-    fn packed(&mut self, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128) {
-        let w = &mut self.b;
-        match op {
-            Packed::ShuffleZero(lanes) => {
-                w.get_local_v128(dst);
-                w.simd_zero();
-                w.simd_shuffle(lanes);
-            },
-            Packed::Swizzle => {
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.const_i32(0x8F);
-                w.simd(0x0F); // i8x16.splat
-                w.simd(0x4E); // v128.and
-                w.simd(0x0E); // i8x16.swizzle
-            },
-            Packed::MulHigh(signed) => {
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(if signed { 0xBC } else { 0xBE });
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(if signed { 0xBD } else { 0xBF });
-                w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
-            },
-            Packed::MulDwords => {
-                for v in [dst, src] {
-                    w.get_local_v128(v);
-                    w.simd_zero();
-                    w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
-                }
-                w.simd(0xDE);
-            },
-            Packed::Sad => {
-                // |dst - src| per byte, summed per quadword.
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(0x79);
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                w.simd(0x77);
-                w.simd(0x71);
-                w.simd(0x7D);
-                w.simd(0x7F);
-                let sums = w.set_new_local_v128();
-                w.get_local_v128(&sums);
-                w.get_local_v128(&sums);
-                w.get_local_v128(&sums);
-                w.simd_shuffle([4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
-                w.simd(0xAE);
-                w.simd_zero();
-                w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
-                w.free_local_v128(sums);
-            },
-            Packed::AndNot => {
-                w.get_local_v128(src);
-                w.get_local_v128(dst);
-                w.simd(0x4F); // v128.andnot
-            },
-            Packed::Shift(opcode, bits, arithmetic) => {
-                w.get_local_v128(src);
-                w.simd_lane(0x1D, 0);
-                let count = w.set_new_local_i64();
-                w.get_local_i64(&count);
-                w.const_i64((bits - 1) as i64);
-                w.gtu_i64();
-                w.if_v128();
-                if arithmetic {
-                    w.get_local_v128(dst);
-                    w.const_i32((bits - 1) as i32);
-                    w.simd(opcode);
-                }
-                else {
-                    w.simd_zero();
-                }
-                w.else_();
-                w.get_local_v128(dst);
-                w.get_local_i64(&count);
-                w.wrap_i64_to_i32();
-                w.simd(opcode);
-                w.block_end();
-                w.free_local_i64(count);
-            },
-            _ => {
-                w.get_local_v128(dst);
-                w.get_local_v128(src);
-                match op {
-                    Packed::Shuffle(lanes) => w.simd_shuffle(lanes),
-                    Packed::Binary(opcode) => w.simd(opcode),
-                    Packed::Pack(opcode) => w.simd(opcode),
-                    Packed::Unpack(width, high) => {
-                        let mut lanes = [0; 16];
-                        for k in 0..16u8 {
-                            let element = k / (width * 2);
-                            let side = k / width % 2;
-                            lanes[k as usize] = (if high { 8 } else { 0 })
-                                + element * width
-                                + k % width
-                                + side * 16;
-                        }
-                        w.simd_shuffle(lanes);
-                    },
-                    _ => unreachable!(),
-                }
             },
         }
     }
@@ -7990,3 +7847,154 @@ impl Emitter {
         self.written(ZF);
     }
 }
+
+// Leaves (docs/jit-unification-plan.md P2.1): emitters that need nothing of
+// the emitter but the builder. P2.3 replaces them with x86tpl's (the same
+// output); tests/x86tpl/pagegen_leaf_digests.rs pins it until then.
+
+/// Push op(dst, src) (ir::tier0::simd::packed on XMM registers)
+fn packed(w: &mut WasmBuilder, op: Packed, dst: &WasmLocalV128, src: &WasmLocalV128) {
+    match op {
+        Packed::ShuffleZero(lanes) => {
+            w.get_local_v128(dst);
+            w.simd_zero();
+            w.simd_shuffle(lanes);
+        },
+        Packed::Swizzle => {
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.const_i32(0x8F);
+            w.simd(0x0F); // i8x16.splat
+            w.simd(0x4E); // v128.and
+            w.simd(0x0E); // i8x16.swizzle
+        },
+        Packed::MulHigh(signed) => {
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(if signed { 0xBC } else { 0xBE });
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(if signed { 0xBD } else { 0xBF });
+            w.simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
+        },
+        Packed::MulDwords => {
+            for v in [dst, src] {
+                w.get_local_v128(v);
+                w.simd_zero();
+                w.simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
+            }
+            w.simd(0xDE);
+        },
+        Packed::Sad => {
+            // |dst - src| per byte, summed per quadword.
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(0x79);
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            w.simd(0x77);
+            w.simd(0x71);
+            w.simd(0x7D);
+            w.simd(0x7F);
+            let sums = w.set_new_local_v128();
+            w.get_local_v128(&sums);
+            w.get_local_v128(&sums);
+            w.get_local_v128(&sums);
+            w.simd_shuffle([4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
+            w.simd(0xAE);
+            w.simd_zero();
+            w.simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
+            w.free_local_v128(sums);
+        },
+        Packed::AndNot => {
+            w.get_local_v128(src);
+            w.get_local_v128(dst);
+            w.simd(0x4F); // v128.andnot
+        },
+        Packed::Shift(opcode, bits, arithmetic) => {
+            w.get_local_v128(src);
+            w.simd_lane(0x1D, 0);
+            let count = w.set_new_local_i64();
+            w.get_local_i64(&count);
+            w.const_i64((bits - 1) as i64);
+            w.gtu_i64();
+            w.if_v128();
+            if arithmetic {
+                w.get_local_v128(dst);
+                w.const_i32((bits - 1) as i32);
+                w.simd(opcode);
+            }
+            else {
+                w.simd_zero();
+            }
+            w.else_();
+            w.get_local_v128(dst);
+            w.get_local_i64(&count);
+            w.wrap_i64_to_i32();
+            w.simd(opcode);
+            w.block_end();
+            w.free_local_i64(count);
+        },
+        _ => {
+            w.get_local_v128(dst);
+            w.get_local_v128(src);
+            match op {
+                Packed::Shuffle(lanes) => w.simd_shuffle(lanes),
+                Packed::Binary(opcode) => w.simd(opcode),
+                Packed::Pack(opcode) => w.simd(opcode),
+                Packed::Unpack(width, high) => {
+                    let mut lanes = [0; 16];
+                    for k in 0..16u8 {
+                        let element = k / (width * 2);
+                        let side = k / width % 2;
+                        lanes[k as usize] =
+                            (if high { 8 } else { 0 }) + element * width + k % width + side * 16;
+                    }
+                    w.simd_shuffle(lanes);
+                },
+                _ => unreachable!(),
+            }
+        },
+    }
+}
+
+/// PSRLx/PSRAx/PSLLx (`bits` 16, 32 or 64: the lane width) and PSRLDQ/PSLLDQ
+/// (128: bytes) by imm8 `count` of the v128 on the stack, `kind` the ModRM
+/// reg (2 PSRL, 4 PSRA, 6 PSLL, 3 PSRLDQ, 7 PSLLDQ): replace it by the result
+fn shift_immediate(w: &mut WasmBuilder, bits: u8, kind: u8, count: u8) {
+    let count = count as u32;
+    if bits == 128 {
+        w.simd_zero();
+        let mut lanes = [16; 16];
+        for (k, lane) in lanes.iter_mut().enumerate() {
+            let index = if kind == 3 { k as i32 + count as i32 } else { k as i32 - count as i32 };
+            if (0..16).contains(&index) {
+                *lane = index as u8;
+            }
+        }
+        w.simd_shuffle(lanes);
+    }
+    else if count >= bits as u32 && kind != 4 {
+        w.drop_();
+        w.simd_zero();
+    }
+    else {
+        w.const_i32(count.min(bits as u32 - 1) as i32);
+        let base = match bits {
+            16 => 0x8B,
+            32 => 0xAB,
+            _ => 0xCB,
+        };
+        w.simd(
+            base + match kind {
+                6 => 0,
+                4 => 1,
+                _ => 2,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../tests/x86tpl/pagegen_leaf_digests.rs"]
+mod pagegen_leaf_digests;

@@ -8,7 +8,8 @@
 //   node_modules/.bin/eslint or npx's cache), the region freeze (P7.6) and, when something
 //   that feeds build/v86.wasm changed, core-split-check (ARM64 plan P0.7);
 //   when IR, x64 or shared JIT code changed, replay-check (P2.0: the
-//   generated code byte for byte, tools/replay_check.mjs); then
+//   generated code byte for byte, tools/replay_check.mjs) and the leaf
+//   digests (P2.1: jit-leaf-tests, tests/x86tpl); then
 //   ir-tier0-tests when IR or shared JIT code changed and
 //   x64-page-tier-tests when x64 or shared JIT code changed. The changes are
 //   the uncommitted ones, or without any the last commit's, or those since
@@ -100,6 +101,8 @@ const steps = [
     // (P2.0: the base's and the working tree's generated code, byte for
     // byte, for the synthetic corpus and the recordings in build/replay)
     { name: "replay-check (P2.0)", command: ["node", "tools/replay_check.mjs", ...(base ? ["--base", base] : []), ...replay_records],
+        skip: ir_tests || x64_tests ? null : "no IR, x64 or shared JIT change" },
+    { name: "leaf digests (P2.1)", command: ["make", "jit-leaf-tests"],
         skip: ir_tests || x64_tests ? null : "no IR, x64 or shared JIT change" },
     { name: "ir-tier0-tests", command: ["make", "ir-tier0-tests"], skip: ir_tests ? null : "no IR or shared JIT change" },
     { name: "x64-page-tier-tests", command: ["make", "x64-page-tier-tests"], skip: x64_tests ? null : "no x64 or shared JIT change" },
