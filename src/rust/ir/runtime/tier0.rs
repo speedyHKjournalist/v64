@@ -477,8 +477,16 @@ pub unsafe fn ir_relaxed_fma() -> u32 { RELAXED_FMA as u32 }
 /// template changes add, each off until its A/B flips the default. Page
 /// functions compiled before a change keep the code they have. (The initial
 /// value is the switches' defaults: P3.7's are on.)
-static mut T0_FEATURES: u32 =
-    T0_JECXZ | T0_SREG_READ | T0_XCHG_MEM | T0_CLD_STD | T0_POP_RM | T0_PUSHA | T0_SREG_LOAD;
+static mut T0_FEATURES: u32 = T0_JECXZ
+    | T0_SREG_READ
+    | T0_XCHG_MEM
+    | T0_CLD_STD
+    | T0_POP_RM
+    | T0_PUSHA
+    | T0_SREG_LOAD
+    | T0_VEC_STORE_SLOW
+    | T0_CLI
+    | T0_POP_ESP;
 pub fn features() -> u32 { unsafe { T0_FEATURES } }
 /// t0_jecxz (P3.7): JECXZ and JCXZ as a template, not a step
 pub const T0_JECXZ: u32 = 1 << 0;
