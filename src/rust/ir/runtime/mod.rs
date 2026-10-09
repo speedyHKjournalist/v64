@@ -43,6 +43,10 @@ pub mod fp_state;
 mod continuation;
 mod sse_fp;
 
+mod avx;
+mod bmi;
+mod crc32;
+
 mod mmx;
 
 mod coverage;

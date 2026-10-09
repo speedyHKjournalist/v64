@@ -13,6 +13,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     prepare(b, i, count);
     let register = (i.modrm.unwrap() & 7) as usize;
     let destination = b.xmm[register];
+    // (a VEX form's destination is VEX.vvvv)
+    let target = b.first(register as u8) as usize;
     let immediate = i.immediate.unwrap() as u8;
     let zero = b.node(
         Op::VectorBinary(PackedOp::Xor),
@@ -55,5 +57,5 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             Type::V128,
         )
     };
-    b.xmm[register] = value;
+    b.xmm[target] = value;
 }

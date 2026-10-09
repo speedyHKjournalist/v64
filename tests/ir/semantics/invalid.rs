@@ -11,7 +11,9 @@ use crate::ir::{
 fn invalid_form_fixtures() {
     std::fs::create_dir_all("build/ir-invalid").unwrap();
     let mut cases = Vec::new();
-    for e in encodings() {
+    // (a VEX row's reg_ud/mem_ud say which forms other rows of its key have:
+    // decode::tests)
+    for e in encodings().iter().filter(|e| e.vex == 0) {
         for mode in [false, true] {
             for memory in [false, true] {
                 if !(if memory { e.mem_ud } else { e.reg_ud }) || memory && (!e.e || e.ignore_mod) {

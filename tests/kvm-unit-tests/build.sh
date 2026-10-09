@@ -19,8 +19,9 @@ mkdir -p "$out"
 out="$(cd "$out"; pwd)"
 cd "$out"
 
-# the test code must not use SSE/MMX
-flags="-std=gnu11 -mno-sse -mno-sse2 -mno-mmx"
+# the test code must not use SSE/MMX; warnings clang has about the library
+# (lib/pci.c's constants) and x86/xsave.c's printf formats are not errors
+flags="-std=gnu11 -mno-sse -mno-sse2 -mno-mmx -Wno-error=format -Wno-error=constant-conversion"
 
 if [ "$(uname -s)" = Darwin ]
 then

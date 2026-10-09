@@ -95,10 +95,12 @@ fn segment_access_and_invalid_forms() {
     for bytes in [&[0x8C, 0xF0][..], &[0x8E, 0xC8][..], &[0x8E, 0xF0][..]] {
         assert!(lift_cpu(bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }
-    for bytes in [&[0xC4, 0xC0][..], &[0x0F, 0xB2, 0xC0][..]] {
+    for bytes in [&[0x0F, 0xB2, 0xC0][..], &[0x0F, 0xB5, 0xC0]] {
         let r = lift_cpu(bytes, GuestEip(0), LinearAddress(0), true).unwrap();
         assert_eq!(r.helpers[0].name, "ir_far_control_ud");
     }
+    // LES/LDS with a register ModRM byte start a VEX prefix (decode::tests)
+    assert!(lift_cpu(&[0xC4, 0xC0], GuestEip(0), LinearAddress(0), true).is_err());
     for bytes in [&[0x8C, 0xD8][..], &[0x8E, 0xD8][..], &[0xC5, 0x06][..]] {
         assert!(lift(bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }

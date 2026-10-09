@@ -54,19 +54,29 @@ pub enum Op {
     },
     VectorBinary(super::simd::PackedOp),
     VectorShuffle([u8; 16]),
+    /// The XMM memory ops of VEX forms (`vex`) zero their destination's bits
+    /// 255:128 in their CPU slow completions (Op::YmmZero follows the fast
+    /// path); `first` is the register read as the destination's old value
+    /// (VEX.vvvv; legacy forms: `register`).
     XmmTransferLoad {
         operation: super::simd::TransferOp,
         register: u8,
+        first: u8,
+        vex: bool,
     },
     XmmShuffle {
         operation: super::simd::ShuffleOp,
         immediate: u8,
         register: u8,
+        first: u8,
+        vex: bool,
     },
     XmmBinary {
         operation: super::simd::PackedOp,
         bytes: u8,
         register: u8,
+        first: u8,
+        vex: bool,
     },
     VectorExtract {
         bits: u8,
@@ -80,6 +90,16 @@ pub enum Op {
     SseCheck,
     /// x87 #NM for CR0.EM or CR0.TS, before EA resolution.
     FpuCheck,
+    /// VEX forms: #UD in real and virtual-8086 mode, without CR4.OSXSAVE or
+    /// with XCR0 lacking SSE or AVX state, then #NM for CR0.TS, before EA
+    /// resolution.
+    AvxCheck,
+    /// A VEX.128 destination's bits 255:128 zeroed (CPU state: the region
+    /// keeps no SSA value of them), after the instruction's faults: its
+    /// state map is the one after the instruction (it never faults).
+    YmmZero {
+        register: u8,
+    },
     /// One x87 stack/control operation on CPU-owned FPU state (see ir::x87).
     /// Memory operands are loaded/stored by ordinary guest-memory ops; this
     /// never faults, exits, or observes GPRs, FLAGS or guest memory.
@@ -91,6 +111,7 @@ pub enum Op {
     XmmLoad {
         bytes: u8,
         register: u8,
+        vex: bool,
     },
     /// Terminal store; its CPU slow path retains callback/fault authority.
     XmmStore {
@@ -143,6 +164,11 @@ pub enum Op {
         bytes: u16,
         write: bool,
     },
+    /// #GP(0) unless the linear address is a multiple of `bytes` (a legacy
+    /// SSE m128 operand, Encoding::aligned_m128)
+    AlignmentCheck {
+        bytes: u8,
+    },
     CallHelper(HelperId),
     RmwLoad {
         bytes: u8,
@@ -168,6 +194,7 @@ impl Op {
                 | Self::GuestStore { .. }
                 | Self::PartialStore { .. }
                 | Self::GuestCheck { .. }
+                | Self::AlignmentCheck { .. }
                 | Self::CallHelper(_)
                 | Self::Divide { .. }
                 | Self::RmwLoad { .. }
@@ -175,6 +202,8 @@ impl Op {
                 | Self::CompareExchange8B { .. }
                 | Self::SseCheck
                 | Self::FpuCheck
+                | Self::AvxCheck
+                | Self::YmmZero { .. }
                 | Self::X87 { .. }
                 | Self::XmmLoad { .. }
                 | Self::XmmBinary { .. }

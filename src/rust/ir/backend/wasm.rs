@@ -91,39 +91,6 @@ fn required_epoch_polls(mir: &MirRegion) -> Vec<bool> {
     }
     required
 }
-/// CPU adapters whose task guard can log before the interpreter finishes
-/// decoding operands. Constant non-SSE invalid/reserved forms do not observe
-/// this warning; unknown hand-built arguments conservatively retain the guard.
-fn debug_sse_call(mir: &MirRegion, plan: &CallPlan) -> bool {
-    let name = mir.helpers[plan.helper.index()]
-        .as_ref()
-        .unwrap()
-        .name
-        .as_str();
-    if name.starts_with("ir_sse_fp_")
-        || name.starts_with("ir_mmx_")
-        || matches!(name, "ir_ldmxcsr" | "ir_stmxcsr")
-    {
-        return true;
-    }
-    let argument = match name {
-        "ir_invalid_form" => 0,
-        "ir_reserved_form" => 1,
-        _ => return false,
-    };
-    mir.values
-        .iter()
-        .flatten()
-        .find(|value| value.result == plan.args[argument])
-        .and_then(|value| match value.steps.as_slice() {
-            [Step::I32(n)] => Some(if argument == 0 { *n == 2 } else { *n != 0 }),
-            _ => None,
-        })
-        .unwrap_or(true)
-}
-fn debug_sse_effect(plan: &EffectPlan) -> bool {
-    matches!(plan, EffectPlan::Check { call, .. } if call.name == "ir_sse_guard")
-}
 enum Local {
     I32(WasmLocal),
     I64(WasmLocalI64),
@@ -153,7 +120,6 @@ struct Emitter<'a> {
     fused_epoch: Option<(WasmLocal, WasmLocalI64)>,
     epoch_polls: Vec<bool>,
     diagnostic: Option<(WasmLocal, WasmLocal)>,
-    debug_sse_observer: bool,
     batch_polls: bool,
     budget_batch_blocks: u32,
 }
@@ -1426,6 +1392,13 @@ impl Emitter<'_> {
     }
     fn planned_effect(&mut self, plan: &EffectPlan) {
         match plan {
+            EffectPlan::ZeroState { address, bytes, .. } => {
+                for offset in (0..*bytes as u32).step_by(8) {
+                    self.w.const_i32((address + offset) as i32);
+                    self.w.const_i64(0);
+                    self.w.store_aligned_i64(0);
+                }
+            },
             EffectPlan::Arithmetic(plan) => match plan {
                 ArithmeticPlan::Division(p) => self.divide(p),
                 ArithmeticPlan::CompareExchange(p) => self.compare_exchange8b(p),
@@ -1453,18 +1426,37 @@ impl Emitter<'_> {
             },
             EffectPlan::Check {
                 guard,
+                misaligned,
                 before,
                 call,
                 success,
                 fault,
             } => {
-                if cfg!(debug_assertions) && self.cpu && debug_sse_effect(plan) {
-                    self.defer_debug_sse(*before);
+                if let Some((address, mask)) = misaligned {
+                    self.get(*address);
+                    self.w.const_i32(*mask);
+                    self.w.and_i32();
+                    self.w.hint(false);
+                    self.w.if_void();
                 }
                 if let Some(guard) = guard {
                     self.w.load_fixed_i32(guard.address);
                     self.w.const_i32(guard.mask);
                     self.w.and_i32();
+                    for &(address, bits) in &guard.required {
+                        self.w.load_fixed_i32(address);
+                        self.w.const_i32(bits);
+                        self.w.and_i32();
+                        self.w.const_i32(bits);
+                        self.w.xor_i32();
+                        self.w.or_i32();
+                    }
+                    for &(address, bits) in &guard.forbidden {
+                        self.w.load_fixed_i32(address);
+                        self.w.const_i32(bits);
+                        self.w.and_i32();
+                        self.w.or_i32();
+                    }
                     self.w.if_void();
                 }
                 self.prepare_memory_call(*before);
@@ -1489,6 +1481,9 @@ impl Emitter<'_> {
                 }
                 self.w.free_local(outcome);
                 if guard.is_some() {
+                    self.w.block_end();
+                }
+                if misaligned.is_some() {
                     self.w.block_end();
                 }
             },
@@ -1544,52 +1539,26 @@ impl Emitter<'_> {
             },
         }
     }
-    /// Nonzero when SSE task checking can fault or observe the host. A debug
-    /// OSFXSR warning is an observer even when CR0 permits the instruction.
+    /// Push i32 nonzero when an SSE register helper may fault: CR0.EM, CR0.TS
+    /// or no CR4.OSFXSR (#UD, #NM), an unmasked MXCSR exception (#XM or #UD,
+    /// cpu::simd_fp)
     fn sse_task_observation(&mut self) {
         self.w.load_fixed_i32(gp::cr as u32);
         self.w.const_i32(12);
         self.w.and_i32();
-        if cfg!(debug_assertions) {
-            self.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
-            self.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
-            self.w.and_i32();
-            self.w.eqz_i32();
-            self.w.or_i32();
-        }
-    }
-    fn defer_debug_sse(&mut self, state: StateId) {
-        if cfg!(debug_assertions) && self.cpu {
-            // Commit only the completed prefix and return at the opcode. No
-            // observer or retirement may precede the interpreter's own decode.
-            // The pre-STI guard and diagnostic entry rejection keep this from
-            // unwinding an already-active indivisible interrupt shadow.
-            self.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
-            self.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
-            self.w.and_i32();
-            self.w.eqz_i32();
-            if let Some(depth) = &self.interrupt_shadow {
-                self.w.get_local(depth);
-                self.w.eqz_i32();
-                self.w.and_i32();
-            }
-            self.w.if_void();
-            self.state(state);
-            self.admission_barrier();
-            self.diagnostic_exit(DiagnosticExit::HelperYield);
-            self.return_to_cpu();
-            self.w.block_end();
-        }
+        self.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
+        self.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
+        self.w.and_i32();
+        self.w.eqz_i32();
+        self.w.or_i32();
+        self.w.load_fixed_i32(gp::mxcsr as u32);
+        self.w.const_i32(0x1F80);
+        self.w.and_i32();
+        self.w.const_i32(0x1F80);
+        self.w.ne_i32();
+        self.w.or_i32();
     }
     fn planned_call(&mut self, id: InstId, plan: &CallPlan) {
-        if cfg!(debug_assertions) && self.cpu {
-            let call = self.mir.helpers[plan.helper.index()].as_ref().unwrap();
-            if debug_sse_call(self.mir, plan)
-                || call.starts_interrupt_shadow && self.debug_sse_observer
-            {
-                self.defer_debug_sse(plan.state);
-            }
-        }
         if self.cpu
             && self.mir.helpers[plan.helper.index()].as_ref().unwrap().name
                 == "ir_sti_finish_continue"
@@ -1621,7 +1590,8 @@ impl Emitter<'_> {
                     .expression
                     .clone()
             };
-            let left_steps = operand(destination);
+            // (a VEX form's first source: its destination's old value)
+            let left_steps = operand(fp.first.unwrap_or(destination));
             let right_steps = operand(source);
             self.value_steps(&left_steps);
             let left = self.w.set_new_local_v128();
@@ -1632,24 +1602,24 @@ impl Emitter<'_> {
             self.w.simd(fp.opcode);
             let result = self.w.set_new_local_v128();
             // Scalar and ordinary SIMD add/sub/mul/div have the same IEEE
-            // result bits except for the permitted choice of NaN payload/sign.
-            // Test the result once: result != result detects every NaN lane,
-            // including invalid operations with non-NaN operands. Signed zero,
-            // subnormals, infinities and overflow remain exact, not fast-math.
-            // These baseline arithmetic forms do not update MXCSR. Keep task
-            // faults, debug observers and scalar NaNs before architectural writes.
+            // result bits as cpu::simd_fp where ir::native_fp admits them
+            // (MXCSR at its defaults with PE set; no denormal operand, no NaN
+            // or infinite result, no inexact tiny product or quotient), and
+            // then leave MXCSR as it is. Only lane zero of a scalar form is
+            // evaluated: upper lanes may hold anything. Keep task faults,
+            // debug observers and refused lanes before architectural writes.
             self.sse_task_observation();
-            self.w.get_local_v128(&result);
-            self.w.get_local_v128(&result);
-            self.w.simd(if fp.double { 0x48 } else { 0x42 }); // f64x2.ne / f32x4.ne
-            if fp.scalar {
-                // Only lane zero is architecturally evaluated. Upper lanes may
-                // contain signalling NaNs and must neither reject nor change.
-                self.w.simd_lane(0x1B, 0); // i32x4.extract_lane (low mask word)
-            }
-            else {
-                self.w.simd(0x53);
-            } // v128.any_true
+            crate::ir::native_fp::arithmetic_refused(
+                &mut self.w,
+                fp.operation,
+                fp.double,
+                fp.scalar,
+                [&left, &right],
+                [false, false],
+                &result,
+            );
+            self.w.or_i32();
+            crate::ir::native_fp::mxcsr_refused(&mut self.w);
             self.w.or_i32();
             self.w.eqz_i32();
             self.w.if_void();
@@ -1727,19 +1697,20 @@ impl Emitter<'_> {
             self.w.block_end();
         }
         else if let Some((source, destination)) = selective {
-            // Faults and debug OSFXSR logging must see the entire precise
-            // state. The ordinary register path synchronizes only operands.
+            // Faults must see the entire precise state. The ordinary register
+            // path synchronizes only operands.
             self.sse_task_observation();
             self.w.if_void();
             self.admission_barrier();
             self.prepare_memory_call(plan.state);
             self.w.else_();
             self.diagnostic_begin(DiagnosticStage::StateWrite);
+            // (and a VEX form's first source)
+            let first = plan.xmm_first.unwrap_or(destination);
             for write in &self.mir.states[plan.state.index()].cpu.writes {
-                if write.address == Address::Absolute(gp::get_reg_xmm_offset(source as u32))
-                    || write.address
-                        == Address::Absolute(gp::get_reg_xmm_offset(destination as u32))
-                {
+                if [source, destination, first].iter().any(|&reg| {
+                    write.address == Address::Absolute(gp::get_reg_xmm_offset(reg as u32))
+                }) {
                     self.state_write(write);
                 }
             }
@@ -2396,37 +2367,9 @@ fn emit_inner_with_batches(
             Vec::new()
         },
         diagnostic: None,
-        debug_sse_observer: cfg!(debug_assertions)
-            && cpu
-            && (mir.effects.iter().flatten().any(debug_sse_effect)
-                || mir
-                    .calls
-                    .iter()
-                    .flatten()
-                    .any(|plan| debug_sse_call(mir, plan))),
         batch_polls,
         budget_batch_blocks: 0,
     };
-    if e.debug_sse_observer {
-        // Debug OSFXSR warnings are host observers before operand/immediate
-        // decoding. Decline before ir_enter, state materialization or STI.
-        // Diagnostic imports could clear OSFXSR after a later guard, even
-        // inside an indivisible shadow, so that debug combination always
-        // defers before invoking its first diagnostic observer. The existing
-        // zero-step cache rule retires the owner and permits interpretation.
-        if diag::enabled() {
-            e.w.const_i32(1);
-        }
-        else {
-            e.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
-            e.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
-            e.w.and_i32();
-            e.w.eqz_i32();
-        }
-        e.w.if_void();
-        e.w.return_();
-        e.w.block_end();
-    }
     // Diagnostic policy is fixed at compilation; changing it invalidates all
     // artifacts. Ordinary builds emit no diagnostic instructions/imports.
     if entry.is_some() && diag::enabled() {

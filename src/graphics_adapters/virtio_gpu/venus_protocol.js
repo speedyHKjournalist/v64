@@ -167,7 +167,7 @@ VenusWriter.prototype.u64 = function(v)
     const at = this.room(8);
     v = v || 0;
     // (~0ULL, VK_WHOLE_SIZE: 2**64 as a number)
-    if(v >= 18446744073709551615)
+    if(v >= 2 ** 64)
     {
         this.view.setUint32(at, 0xFFFFFFFF, true);
         this.view.setUint32(at + 4, 0xFFFFFFFF, true);

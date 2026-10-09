@@ -40,12 +40,32 @@ pub fn allocate_memory(size: u32) -> u32 {
     };
     dbg_log!("Allocate memory size={}m", size >> 20);
     let layout = alloc::Layout::from_size_align(size as usize, 0x1000).unwrap();
-    let ptr = unsafe { alloc::alloc(layout) as u32 };
+    // RAM reads as zero at power-on. The pages the heap grows by are zero,
+    // but below its current end the allocator may return chunks freed
+    // before, their headers still in them: with Tier-0, the 16 chunks of
+    // 2 MiB of ir::runtime::schedule's reserve_compiler_heap
+    // (0x0020000A00400010 at guest 0x3FFEA0, ...). Only that part is cleared
+    // (alloc_zeroed would commit every page of the guest's RAM up front).
+    let heap_end = heap_end();
+    let ptr = unsafe { alloc::alloc(layout) };
+    if !ptr.is_null() && (ptr as u64) < heap_end {
+        let reused = (heap_end - ptr as u64).min(size as u64);
+        unsafe { ptr::write_bytes(ptr, 0, reused as usize) };
+    }
     unsafe {
-        mem8 = ptr as *mut u8;
+        mem8 = ptr;
         ram_fast_limit = size;
     };
-    ptr
+    ptr as u32
+}
+
+/// The end of the memory the heap has used (the wasm memory's size): the
+/// pages above it are zero
+fn heap_end() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    return (std::arch::wasm32::memory_size(0) as u64) << 16;
+    #[cfg(not(target_arch = "wasm32"))]
+    return u64::MAX;
 }
 
 #[no_mangle]

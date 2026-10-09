@@ -156,9 +156,10 @@ pub const COUNT_FULL_FLUSHES: usize = 11;
 pub const COUNT_WALKS: usize = 12;
 pub const COUNT_COMPAT_FILLS: usize = 13;
 pub const COUNT_COMPAT_REFILLS: usize = 14;
+/// (32 bytes: a VEX.256 load's)
 #[repr(C, align(16))]
-struct Bounce([u8; 16]);
-static mut BOUNCE: Bounce = Bounce([0; 16]);
+struct Bounce([u8; 32]);
+static mut BOUNCE: Bounce = Bounce([0; 32]);
 /// (generated code copies unaligned reads there itself: pagegen)
 pub unsafe fn bounce_address() -> u32 { &raw mut BOUNCE as u32 }
 /// x64_page_timing: milliseconds inside page function calls and in execute
@@ -1111,9 +1112,9 @@ static mut STEP_PROFILE: Option<Vec<u32>> = None;
 #[no_mangle]
 pub unsafe fn x64_page_profile(enabled: bool) { STEP_PROFILE = enabled.then(|| vec![0; 0x40000]); }
 /// Steps of opcode `key` (one-byte opcodes 0..255, 0F xx as 0x100 | xx,
-/// 0F 38/3A xx as 0x200/0x300 | xx; +0x10000 with a REP prefix; retries at
-/// key + 0x20000), or with key >= 0x40000 the refused access counter
-/// key - 0x40000.
+/// 0F 38/3A xx as 0x200/0x300 | xx; VEX forms as 0x4000 | L << 12 | pp << 10
+/// | map << 8 | opcode; +0x10000 with a REP prefix; retries at key +
+/// 0x20000), or with key >= 0x40000 the refused access counter key - 0x40000.
 #[no_mangle]
 pub unsafe fn x64_page_profile_get(key: u32) -> f64 {
     if key >= 0x40000 {
@@ -1196,6 +1197,22 @@ unsafe fn profile_instruction(base: usize) {
         at += 1;
     }
     let key = match (bytes[at], bytes[at + 1]) {
+        // (VEX: L, pp, map and opcode)
+        (0xC5, b) if at + 2 <= 14 => {
+            0x4000
+                | (b as usize >> 2 & 1) << 12
+                | (b as usize & 3) << 10
+                | 1 << 8
+                | bytes[at + 2] as usize
+        },
+        (0xC4, b) if at + 3 <= 14 => {
+            let c = bytes[at + 2] as usize;
+            0x4000
+                | (c >> 2 & 1) << 12
+                | (c & 3) << 10
+                | (b as usize & 3) << 8
+                | bytes[at + 3] as usize
+        },
         (0x0F, 0x38) => 0x200 | bytes[(at + 2).min(14)] as usize,
         (0x0F, 0x3A) => 0x300 | bytes[(at + 2).min(14)] as usize,
         (0x0F, b) => 0x100 | b as usize,
@@ -1283,6 +1300,13 @@ pub fn x64_page_shift(a: u64, count: u32, flags: u32, kind: u32) -> u64 {
         flags as u64,
     );
     r & 0xFFFF_FFFF | f << 32
+}
+
+/// PCMPESTRx/PCMPISTRx for generated code (ir::runtime::tier0::pcmpstr on
+/// its operand block): the lengths RAX/RDX, or EAX/EDX sign-extended
+#[no_mangle]
+pub unsafe fn x64_page_pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
+    crate::ir::runtime::tier0::pcmpstr(op, imm8, a, b)
 }
 
 /// RDTSC for generated code (the privilege check is inline).

@@ -9,11 +9,15 @@ use crate::ir::{
 };
 #[test]
 fn fp_state_fixtures() {
+    use crate::cpu::features::{TEST_FEATURES, XSAVE, XSAVEC, XSAVEOPT, XSAVES};
     std::fs::create_dir_all("build/ir-fp-state").unwrap();
+    TEST_FEATURES.with(|f| f.set(XSAVE | XSAVEOPT | XSAVEC | XSAVES));
     let mut cases = Vec::new();
     for mode in [false, true] {
         for address32 in [false, true] {
-            for group in 0u8..4 {
+            // FXSAVE, FXRSTOR, LDMXCSR, STMXCSR, XSAVE, XRSTOR, XSAVEOPT (0F
+            // AE); XRSTORS, XSAVEC, XSAVES (0F C7 /3, /4, /5: groups 11-13)
+            for group in (0u8..7).chain(11..14) {
                 for dirty in [false, true] {
                     let mut bytes = vec![0x46];
                     if dirty {
@@ -24,8 +28,8 @@ fn fp_state_fixtures() {
                     }
                     bytes.extend_from_slice(&[
                         0x0F,
-                        0xAE,
-                        group << 3 | if address32 { 5 } else { 6 },
+                        if group < 8 { 0xAE } else { 0xC7 },
+                        (group & 7) << 3 | if address32 { 5 } else { 6 },
                     ]);
                     bytes.extend_from_slice(
                         &0x6000u32.to_le_bytes()[..if address32 { 4 } else { 2 }],
@@ -65,4 +69,5 @@ fn fp_state_fixtures() {
         format!("[{}]", cases.join(",")),
     )
     .unwrap();
+    TEST_FEATURES.with(|f| f.set(0));
 }

@@ -18,9 +18,10 @@ fn far_control_fixtures() {
             for address32 in [false, true] {
                 for name in [
                     "call", "jump", "call_mem", "jump_mem", "call_ud", "jump_ud", "ret", "ret_imm",
-                    "int3", "int", "into", "iret", "les_ud", "lds_ud", "lss_ud", "lfs_ud",
-                    "lgs_ud",
+                    "int3", "int", "into", "iret", "lss_ud", "lfs_ud", "lgs_ud",
                 ] {
+                    // (the register forms of LES and LDS start a VEX prefix:
+                    // decode::tests, tests/ir/decode/vex_modes.mjs)
                     let mut bytes = vec![0x46];
                     if mode != (width == 32) {
                         bytes.push(0x66);
@@ -48,8 +49,6 @@ fn far_control_fixtures() {
                             0xFF,
                             if name == "call_ud" { 0xD8 } else { 0xE8 },
                         ]),
-                        "les_ud" => bytes.extend_from_slice(&[0xC4, 0xC0]),
-                        "lds_ud" => bytes.extend_from_slice(&[0xC5, 0xC0]),
                         "lss_ud" => bytes.extend_from_slice(&[0x0F, 0xB2, 0xC0]),
                         "lfs_ud" => bytes.extend_from_slice(&[0x0F, 0xB4, 0xC0]),
                         "lgs_ud" => bytes.extend_from_slice(&[0x0F, 0xB5, 0xC0]),

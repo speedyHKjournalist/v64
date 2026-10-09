@@ -177,7 +177,9 @@ fn stale_effect_plans_and_cpu_import_shadowing_are_rejected() {
                 10 => call.name = "ir_memory_check",
                 _ => unreachable!(),
             },
-            EffectPlan::Arithmetic(_) | EffectPlan::X87 { .. } => unreachable!(),
+            EffectPlan::Arithmetic(_) | EffectPlan::X87 { .. } | EffectPlan::ZeroState { .. } => {
+                unreachable!()
+            },
         }
         assert!(m.finish().is_err(), "mutation {mutation}");
     }

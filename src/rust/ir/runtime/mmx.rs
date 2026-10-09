@@ -1,5 +1,8 @@
 //! Checked MMX adapters preserve x87 aliasing and tag transitions on completion.
-use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem};
+use crate::cpu::{
+    cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
+    instructions_0f3a as sem3a,
+};
 use crate::ir::helper::Outcome;
 unsafe fn finish(success: bool) -> u32 {
     if success {
@@ -12,14 +15,15 @@ unsafe fn finish(success: bool) -> u32 {
 }
 unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
     assert!((0..8).contains(&source) && (0..8).contains(&destination));
-    // The baseline debug guard logs through a host import when OSFXSR is off.
-    // That observer may change code, context or XMMs. Revoke certificates before
-    // it runs and retain CPU-owned post-state via a terminal success below.
-    let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
-    if observes {
-        super::entry::ir_admission_barrier();
+    // (MOVDQ2Q and MOVQ2DQ name an XMM register: the checks of a legacy SSE
+    // form, #UD without CR4.OSFXSR too, as gen/x86_table.js mmx_form has it)
+    let available = if matches!(op, 0xF20FD6 | 0xF30FD6) {
+        cpu::task_switch_test_xmm()
     }
-    if !cpu::task_switch_test_mmx() {
+    else {
+        cpu::task_switch_test_mmx()
+    };
+    if !available {
         return finish(false);
     }
     fpu::fpu_cache_barrier();
@@ -104,16 +108,15 @@ unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u3
         0x0FD7 => cpu::write_reg32(destination, sem::instr_0FD7(source)),
         0xF20FD6 => sem::instr_F20FD6_reg(source, destination),
         0xF30FD6 => sem::instr_F30FD6_reg(source, destination),
+        0x0F3800..=0x0F380B | 0x0F381C..=0x0F381E => {
+            sem38::ssse3_mmx(op as u8, cpu::read_mmx64s(source), destination)
+        },
+        0x0F3A0F => sem3a::instr_0F3A0F(cpu::read_mmx64s(source), destination, immediate),
         _ => unreachable!("unregistered MMX operation"),
     }
     // All register semantics preserve the execution context. Retirement stays
     // with the generated continuation, and canonical F80 holds MMX/x87 aliases.
-    if observes {
-        finish(true)
-    }
-    else {
-        Outcome::Normal as u32
-    }
+    Outcome::Normal as u32
 }
 #[no_mangle]
 pub unsafe fn ir_mmx_reg_continue(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
@@ -214,6 +217,10 @@ unsafe fn memory(
             cpu::safe_write64(addr, cpu::read_mmx64s(destination))?;
             cpu::transition_fpu_to_mmx();
         },
+        0x0F3800..=0x0F380B | 0x0F381C..=0x0F381E => {
+            sem38::ssse3_mmx(op as u8, cpu::safe_read64s(addr)?, destination)
+        },
+        0x0F3A0F => sem3a::instr_0F3A0F(cpu::safe_read64s(addr)?, destination, immediate),
         _ => unreachable!("unregistered MMX operation"),
     }
     Ok(())

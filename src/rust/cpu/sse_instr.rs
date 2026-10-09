@@ -1,5 +1,6 @@
 use crate::cpu::cpu::*;
-use crate::cpu::global_pointers::mxcsr;
+use crate::cpu::global_pointers::{flags, flags_changed, mxcsr};
+use crate::cpu::simd_fp;
 
 pub unsafe fn mov_r_m64(addr: i32, r: i32) {
     // mov* m64, mm
@@ -21,6 +22,11 @@ pub unsafe fn mov_r_m128(addr: i32, r: i32) {
     // mov* m128, xmm
     let data = read_xmm128s(r);
     return_on_pagefault!(safe_write128(addr, data));
+}
+/// MOVAPS/MOVAPD/MOVDQA/MOVNT* m128, xmm: #GP(0) unless 16-byte aligned
+pub unsafe fn mov_r_m128_aligned(addr: i32, r: i32) {
+    return_on_pagefault!(aligned16(addr));
+    mov_r_m128(addr, r);
 }
 pub unsafe fn mov_rm_r128(source: reg128, r: i32) {
     // mov* xmm, xmm/m128
@@ -413,6 +419,85 @@ pub unsafe fn sse_integer_round(f: f64) -> f64 {
     else {
         return f.ceil();
     };
+}
+
+/// SQRT/ADD/MUL/SUB/MIN/DIV/MAX, CMP, HADD/HSUB and ADDSUB (simd_fp::arithmetic,
+/// `op` the catalogue key) of XMM r and `source` into XMM r: false after an
+/// unmasked exception (XMM r unchanged)
+pub unsafe fn sse_fp_arithmetic(op: u32, r: i32, source: u128, imm8: i32) -> bool {
+    match simd_fp::arithmetic(op, read_xmm128s(r).bits(), source, imm8 as u8) {
+        Ok(v) => {
+            write_xmm_reg128(r, reg128::of_bits(v));
+            true
+        },
+        Err(simd_fp::Unmasked) => {
+            trigger_simd_fp();
+            false
+        },
+    }
+}
+/// ROUNDPS/PD/SS/SD (simd_fp::round, `op` the catalogue key) of `source`
+/// into XMM r: false after an unmasked exception (XMM r unchanged)
+pub unsafe fn sse_fp_round(op: u32, r: i32, source: u128, imm8: i32) -> bool {
+    match simd_fp::round(op, read_xmm128s(r).bits(), source, imm8 as u8) {
+        Ok(v) => {
+            write_xmm_reg128(r, reg128::of_bits(v));
+            true
+        },
+        Err(simd_fp::Unmasked) => {
+            trigger_simd_fp();
+            false
+        },
+    }
+}
+/// DPPS/DPPD (simd_fp::dot_product) of XMM r and `source`: false after an
+/// unmasked exception (XMM r unchanged)
+pub unsafe fn sse_fp_dot_product(double: bool, r: i32, source: u128, imm8: i32) -> bool {
+    match simd_fp::dot_product(double, read_xmm128s(r).bits(), source, imm8 as u8) {
+        Ok(v) => {
+            write_xmm_reg128(r, reg128::of_bits(v));
+            true
+        },
+        Err(simd_fp::Unmasked) => {
+            trigger_simd_fp();
+            false
+        },
+    }
+}
+/// COMISS/UCOMISS/COMISD/UCOMISD of XMM r and `source`: ZF, PF and CF (the
+/// other arithmetic flags cleared), or false after an unmasked exception
+pub unsafe fn sse_fp_compare_flags(op: u32, r: i32, source: u128) -> bool {
+    match simd_fp::compare_flags(op, read_xmm128s(r).bits(), source) {
+        Ok(result) => {
+            *flags_changed = 0;
+            *flags = *flags & !FLAGS_ALL | result as i32;
+            true
+        },
+        Err(simd_fp::Unmasked) => {
+            trigger_simd_fp();
+            false
+        },
+    }
+}
+/// RCPPS/RCPSS/RSQRTPS/RSQRTSS of `source` into XMM r (no exceptions)
+pub unsafe fn sse_fp_reciprocal(op: u32, r: i32, source: u128) -> bool {
+    write_xmm_reg128(
+        r,
+        reg128::of_bits(simd_fp::reciprocal(op, read_xmm128s(r).bits(), source)),
+    );
+    true
+}
+/// A conversion (simd_fp::convert) of `source` for XMM r (the destination
+/// that XMM results merge into): the result, or None after an unmasked
+/// exception
+pub unsafe fn sse_fp_convert(op: u32, r: i32, source: u128) -> Option<u128> {
+    match simd_fp::convert(op, false, read_xmm128s(r).bits(), source) {
+        Ok(v) => Some(v),
+        Err(simd_fp::Unmasked) => {
+            trigger_simd_fp();
+            None
+        },
+    }
 }
 
 #[cfg(test)]

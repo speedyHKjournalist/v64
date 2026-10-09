@@ -737,6 +737,24 @@ export interface V86Options {
     cpu_type?: "x86" | "x86_64";
 
     /**
+     * CPU features beyond the base profile, reported by CPUID: SSSE3, SSE4.1
+     * and SSE4.2, by name or as the preset "x86-64-v2" (with
+     * cpu_type: "x86_64", what x86-64-v2 requires: RHEL 9, Windows 11 24H2);
+     * XSAVE (XSAVE/XRSTOR, XSETBV/XGETBV with the x87 and SSE state) and AVX
+     * (the VEX.128 and VEX.256 forms and the YMM state); AVX2, FMA, F16C,
+     * BMI1, BMI2, LZCNT and MOVBE, or with cpu_type: "x86_64" the preset
+     * "x86-64-v3" (what RHEL 10 requires; LZCNT only with cpu_type:
+     * "x86_64"); XSAVEOPT, XSAVEC, XGETBV1 and XSAVES (the XSAVE family:
+     * Linux then saves the state in the compacted format).
+     * A feature needs those it builds on (SSE4.1 needs SSSE3; SSE4.2 needs
+     * SSE4.1; AVX needs XSAVE and SSE4.2; AVX2, FMA and F16C need AVX; the
+     * XSAVE family needs XSAVE, XSAVES needs XSAVEC); other combinations fail
+     * at startup. Not set: the CPU v86 always had. See [docs/x86-64.md](https://github.com/copy/v86/blob/master/docs/x86-64.md).
+     */
+    cpu_features?: Array<"SSSE3" | "SSE4.1" | "SSE4.2" | "XSAVE" | "AVX" | "AVX2" | "FMA" | "F16C" | "BMI1" | "BMI2" |
+        "LZCNT" | "MOVBE" | "XSAVEOPT" | "XSAVEC" | "XGETBV1" | "XSAVES"> | "x86-64-v2" | "x86-64-v3";
+
+    /**
      * Log level (for debug builds)
      * @default LogLevel.LOG_NONE
      */

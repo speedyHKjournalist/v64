@@ -70,8 +70,83 @@ fn opcode_map(path: &str) {
     println!("opcode map: {} rows, {} valid per iced-x86 and the CPUID profile; {} rows of undefined/unadvertised opcodes decoded for executor #UD", rows.len(), valid, decoded_undefined);
     assert_eq!(failures, 0, "long-mode opcode map validity/length differs from iced-x86");
 }
+/// The features of the plan (docs/simd-xsave-plan.md) and the baseline's:
+/// iced-x86 forms that need others are #UD
+fn plan_feature(feature: CpuidFeature) -> bool {
+    use CpuidFeature::*;
+    advertised(feature)
+        || matches!(feature, SSSE3 | SSE4_1 | SSE4_2 | AVX | AVX2 | FMA | F16C | BMI1 | BMI2 | LZCNT | MOVBE)
+}
+/// The bytes after each entry of the SIMD corpus (tests/decode/simd_corpus.rs FILLER)
+const FILLER: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x08];
+/// The SIMD decode corpus (tests/decode/simd_corpus.rs): VEX and legacy SIMD
+/// encodings in 16-, 32- and 64-bit mode, decoded by the x64 decoder with
+/// every feature as if all rows had semantics. Validity, length and VEX form
+/// must match iced-x86, except where the SDM and iced-x86 differ (counted).
+fn simd_corpus(path: &str) {
+    let Ok(data) = std::fs::read(path) else { return; };
+    let names: Vec<String> =
+        serde_json::from_slice(&std::fs::read("build/x64-decode/simd-forms.json").unwrap()).unwrap();
+    let (mut at, mut rows, mut valid, mut vvvv_top) = (0, 0, 0, 0);
+    let mut differences: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    while at < data.len() {
+        let (bits, n) = (data[at] as u32, data[at + 1] as usize);
+        let bytes = &data[at + 2..at + 2 + n];
+        let ok = data[at + 2 + n] == 1;
+        let length = data[at + 3 + n] as usize;
+        let form = u16::from_le_bytes([data[at + 4 + n], data[at + 5 + n]]);
+        at += 6 + n;
+        rows += 1;
+        let mut full = bytes.to_vec();
+        full.extend(FILLER);
+        let decode = |b: &[u8]| Decoder::with_ip(bits, b, 0x1000, DecoderOptions::NONE).decode();
+        let i = decode(&full);
+        let expected = !i.is_invalid() && i.cpuid_features().iter().all(|&f| plan_feature(f));
+        let name = |form: u16| if form == 0xFFFF { "-".to_string() } else { names[form as usize].clone() };
+        // the opcode, after the legacy prefixes and REX
+        let start = bytes
+            .iter()
+            .position(|&b| !(matches!(b, 0x26 | 0x2E | 0x36 | 0x3E | 0x64..=0x67 | 0xF0 | 0xF2 | 0xF3) || bits == 64 && b & 0xF0 == 0x40))
+            .unwrap();
+        let problem = if ok == expected {
+            if ok && (length != i.len() || form != 0xFFFF && name(form) != format!("{:?}", i.code())) {
+                Some(format!("v86 {} length {length}, iced {:?} length {}", name(form), i.code(), i.len()))
+            } else {
+                None
+            }
+        } else if ok && bits != 64 && bytes[start] == 0xC4 && bytes[start + 2] & 0x40 == 0 && {
+            // SDM 2.3.5.6: outside 64-bit mode the three-byte prefix's top
+            // VEX.vvvv bit is ignored; iced-x86 requires it to be 1
+            let mut set = full.clone();
+            set[start + 2] |= 0x40;
+            let j = decode(&set);
+            !j.is_invalid() && j.len() == length && format!("{:?}", j.code()) == name(form)
+        } {
+            vvvv_top += 1;
+            None
+        } else {
+            Some(format!("v86 {} ({}), iced {} ({:?} {:?})", if ok { "valid" } else { "#UD" }, name(form),
+                if expected { "valid" } else { "#UD" }, i.code(), i.cpuid_features()))
+        };
+        valid += ok as usize;
+        if let Some(problem) = problem {
+            let key = format!("{bits}-bit {:02X?}", &bytes[..(start + 4).min(bytes.len())]);
+            differences.entry(key).or_insert((0, problem)).0 += 1;
+        }
+    }
+    for (key, (count, problem)) in differences.iter().take(40) {
+        println!("DIFF {key}: {problem} x{count}");
+    }
+    println!(
+        "SIMD corpus: {rows} VEX and legacy SIMD encodings in 16/32/64-bit mode, {valid} valid; \
+         {vvvv_top} differ from iced-x86 by SDM 2.3.5.6 (the top VEX.vvvv bit outside 64-bit mode)"
+    );
+    assert!(differences.is_empty(), "{} groups of SIMD encodings differ from iced-x86", differences.len());
+    println!("PASS: the SIMD decode corpus agrees with iced-x86 1.21.0 in validity, length and VEX form");
+}
 fn main() {
     opcode_map("build/x64-decode/opcodes.json");
+    simd_corpus("build/x64-decode/simd.bin");
     let path = std::env::args()
         .nth(1)
         .unwrap_or("build/x64-decode/corpus.json".into());

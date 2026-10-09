@@ -35,6 +35,11 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             4 => "ir_smsw_reg",
             6 => "ir_lmsw_reg",
             7 if i.modrm == Some(0xF9) => "ir_rdtscp",
+            2 if matches!(i.modrm, Some(0xD0 | 0xD1))
+                && !(i.prefixes.operand || i.prefixes.rep || i.prefixes.repne) =>
+            {
+                "ir_xgetbv_xsetbv"
+            },
             _ => "ir_descriptor_ud",
         };
         call(b, name, vec![reg, width], map, true);

@@ -395,9 +395,11 @@ pub fn compile_cpu_fused_regions(
                 || crate::ir::helper::cpu_registry::checked_scalar_continuation(&helper.name)
                 || helper.name == "ir_sti_finish_continue"
                 || helper.effects.is_pure()
-                || helper.name == "ir_sse_fp_reg_continue"
-                    && crate::ir::helper::cpu_registry::xmm_register_operands(&region, &inst.args)
-                        .is_some())
+                || matches!(
+                    helper.name.as_str(),
+                    "ir_sse_fp_reg_continue" | "ir_avx_fp_reg_continue"
+                ) && crate::ir::helper::cpu_registry::xmm_register_operands(&region, &inst.args)
+                    .is_some())
         })
     {
         return Err(CompileError::Unsupported(

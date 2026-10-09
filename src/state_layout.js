@@ -107,6 +107,9 @@ export const STATE_OFFSETS = {
     x64_mcg_status: 2280,
     x64_mcg_ctl: 2288,
     x64_mc_banks: 2296,
+    xcr0: 2432,
+    xss: 2440,
+    ymm_hi: 2448,
 };
 
 /**
@@ -127,4 +130,22 @@ export const CORE_STATE_RANGES = [
     [1752, 1788],
     [1856, 1864],
     [2056, 2424],
+    [2432, 2704],
+];
+
+/** [offset, size] of the core state that INIT keeps (the rest takes its reset value) */
+export const INIT_PRESERVED = [
+    [816, 1],
+    [824, 4],
+    [832, 128],
+    [1032, 1],
+    [1036, 2],
+    [1040, 2],
+    [1044, 20],
+    [1152, 128],
+    [1456, 128],
+    [1768, 16],
+    [1860, 4],
+    [2056, 368],
+    [2432, 272],
 ];

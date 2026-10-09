@@ -16,8 +16,9 @@ unsafe fn address(offset: u32, segment: u32) -> Result<i32, ()> {
 }
 #[no_mangle]
 pub unsafe fn ir_reserved_form(behavior: u32, sse: u32, offset: u32, segment: u32) -> u32 {
-    assert!(behavior <= 4 && sse <= 1);
-    if sse != 0 && !cpu::task_switch_test_mmx() {
+    // (`sse`: the task checks of an MMX form, 1, or of an XMM form, 2)
+    assert!(behavior <= 4 && sse <= 2);
+    if sse == 1 && !cpu::task_switch_test_mmx() || sse == 2 && !cpu::task_switch_test_xmm() {
         return finish(false);
     }
     // Even no-op and explicit-UD memory forms resolve the segment in the baseline.

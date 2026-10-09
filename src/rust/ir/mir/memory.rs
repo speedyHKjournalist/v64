@@ -165,7 +165,11 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
                 trap_after_fault: inst.trap_after_fault,
             },
         ),
-        Op::XmmLoad { bytes, register } => (
+        Op::XmmLoad {
+            bytes,
+            register,
+            vex,
+        } => (
             bytes,
             false,
             NativeMemory::VectorLoad {
@@ -174,7 +178,11 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
             },
             RuntimeCall::i32(
                 "ir_xmm_load",
-                vec![Value(inst.args[0]), I32(register as i32), I32(bytes as i32)],
+                vec![
+                    Value(inst.args[0]),
+                    I32(slow_register(register, register, vex)),
+                    I32(bytes as i32),
+                ],
                 WasmType::I32,
             ),
             SlowResult::CpuExit { accepted: [2, 4] },
@@ -200,6 +208,8 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
             operation,
             immediate,
             register,
+            first,
+            vex,
         } => (
             16,
             false,
@@ -214,7 +224,7 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
                 "ir_xmm_shuffle",
                 vec![
                     Value(inst.args[0]),
-                    I32(register as i32),
+                    I32(slow_register(register, first, vex)),
                     I32(operation as i32),
                     I32(immediate as i32),
                 ],
@@ -225,6 +235,8 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
         Op::XmmTransferLoad {
             operation,
             register,
+            first,
+            vex,
         } => (
             operation.bytes(),
             false,
@@ -239,7 +251,7 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
                 "ir_xmm_transfer_load",
                 vec![
                     Value(inst.args[0]),
-                    I32(register as i32),
+                    I32(slow_register(register, first, vex)),
                     I32(operation as i32),
                 ],
                 WasmType::I32,
@@ -250,6 +262,8 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
             operation,
             bytes,
             register,
+            first,
+            vex,
         } => (
             bytes,
             false,
@@ -264,7 +278,7 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
                 "ir_xmm_binary",
                 vec![
                     Value(inst.args[0]),
-                    I32(register as i32),
+                    I32(slow_register(register, first, vex)),
                     I32(operation as i32),
                     I32(bytes as i32),
                 ],
@@ -346,4 +360,11 @@ pub fn verify(region: &Region, plans: &[Option<MemoryPlan>]) -> Result<(), Compi
         }
     }
     Ok(())
+}
+
+/// The register argument of the XMM ops' CPU slow completions
+/// (runtime::simd): the destination (bits 2:0), the register read as its
+/// old value (6:4) and a VEX form (8), whose bits 255:128 are zeroed
+fn slow_register(register: u8, first: u8, vex: bool) -> i32 {
+    register as i32 | (first as i32) << 4 | (vex as i32) << 8
 }

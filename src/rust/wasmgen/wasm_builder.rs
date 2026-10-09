@@ -626,6 +626,11 @@ impl WasmBuilder {
         self.simd(0x0C);
         self.instruction_body.extend_from_slice(&[0; 16]);
     }
+    /// v128.const
+    pub fn const_v128(&mut self, bytes: [u8; 16]) {
+        self.simd(0x0C);
+        self.instruction_body.extend_from_slice(&bytes);
+    }
     pub fn if_v128(&mut self) {
         self.open_block();
         self.instruction_body.push(op::OP_IF);
@@ -768,6 +773,7 @@ impl WasmBuilder {
 
     pub fn rotl_i32(&mut self) { self.instruction_body.push(op::OP_I32ROTL); }
     pub fn rotr_i32(&mut self) { self.instruction_body.push(op::OP_I32ROTR); }
+    pub fn rotr_i64(&mut self) { self.instruction_body.push(op::OP_I64ROTR); }
 
     pub fn shl_i32(&mut self) { self.instruction_body.push(op::OP_I32SHL); }
     pub fn shl_i64(&mut self) { self.instruction_body.push(op::OP_I64SHL); }

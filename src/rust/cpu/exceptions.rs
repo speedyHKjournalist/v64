@@ -64,13 +64,7 @@ pub unsafe fn fault(vector: i32, code: Option<i32>) {
     let old = DELIVERING;
     let action = escalation(old.unwrap_or(Class::Benign), class(vector));
     if action == Action::Shutdown {
-        let core = apic::current_core();
-        (*crate::parallel::machine(&raw mut SHUTDOWN))[core] = if *nmi_blocked { 2 } else { 1 };
-        if core == 0 {
-            BSP_RESET = true;
-        }
-        *in_hlt = true;
-        cpu::request_core_yield();
+        shutdown();
         return;
     }
     let code = if EXTERNAL && matches!(vector, 10..=13) { code.map(|code| code | 1) } else { code };
@@ -78,6 +72,17 @@ pub unsafe fn fault(vector: i32, code: Option<i32>) {
     DELIVERING = Some(class(vector));
     cpu::deliver_interrupt(vector, false, code);
     DELIVERING = old;
+}
+/// The shutdown state: a triple fault, or RSM to invalid state; the
+/// chipset resets the machine for the BSP
+pub unsafe fn shutdown() {
+    let core = apic::current_core();
+    (*crate::parallel::machine(&raw mut SHUTDOWN))[core] = if *nmi_blocked { 2 } else { 1 };
+    if core == 0 {
+        BSP_RESET = true;
+    }
+    *in_hlt = true;
+    cpu::request_core_yield();
 }
 #[no_mangle]
 pub unsafe fn exception_shutdown(core: u32) -> u32 {

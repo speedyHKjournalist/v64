@@ -110,8 +110,9 @@ fn lift_inner(
         offset += i.length as usize;
         count += 1;
         if cfg!(debug_assertions)
-            && (i.debug_prefix_assert
-                || i.encoding.opcode == 0x0FAE && i.encoding.group == 2 && i.ea.is_none())
+            && i.encoding.opcode == 0x0FAE
+            && i.encoding.group == 2
+            && i.ea.is_none()
         {
             return Err(CompileError::Unsupported("baseline debug prefix assertion"));
         }
@@ -137,8 +138,22 @@ fn lift_inner(
             }
             let state = snapshot(&mut b, i.instruction_pc, i.next_pc, count - 1);
             b.region.states[state.index()].resume = crate::ir::state::ResumeKind::BeforeInstruction;
+            // (an early #UD comes before the task-switch guard)
             let guard = b.constant(
-                if i.encoding.sse { 2 } else { i.encoding.task_switch_test as u32 },
+                if i.early_ud {
+                    0
+                }
+                else if i.encoding.sse {
+                    if i.encoding.mmx {
+                        2
+                    }
+                    else {
+                        3
+                    }
+                }
+                else {
+                    i.encoding.task_switch_test as u32
+                },
                 Type::I32,
             );
             let (offset, segment) = if let Some(ea) = i.ea {
@@ -173,6 +188,18 @@ fn lift_inner(
                 ));
             }
             super::sti::lift(&mut b, &i, count);
+            continue;
+        }
+        if super::avx::supports(&i) {
+            if !cpu {
+                return Err(CompileError::Unsupported("AVX requires CPU ABI"));
+            }
+            super::avx::lift(&mut b, &i, count);
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+                return Ok(b.region);
+            }
             continue;
         }
         let op = i.encoding.opcode;
@@ -243,6 +270,30 @@ fn lift_inner(
             if offset == bytes.len() {
                 let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
                 b.region.terminate(b.block, Terminator::Exit(map));
+            }
+            continue;
+        }
+        if super::bmi::supports(&i) {
+            if !cpu {
+                return Err(CompileError::Unsupported("BMI requires CPU ABI"));
+            }
+            super::bmi::lift(&mut b, &i, count);
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+                return Ok(b.region);
+            }
+            continue;
+        }
+        if super::crc32::supports(&i) {
+            if !cpu {
+                return Err(CompileError::Unsupported("CRC32 requires CPU ABI"));
+            }
+            super::crc32::lift(&mut b, &i, count);
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+                return Ok(b.region);
             }
             continue;
         }

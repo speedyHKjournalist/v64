@@ -15,10 +15,16 @@ pub struct Observation {
     pub values: StateId,
     pub count: StateId,
 }
+/// The inline test of a Check: the call runs if any `mask` bit of the word
+/// at `address` is set, or any bit of `required.1` at `required.0` is clear
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlobalGuard {
     pub address: u32,
     pub mask: i32,
+    /// (address, bits): the guard fails unless all bits are set
+    pub required: Vec<(u32, i32)>,
+    /// (address, bits): the guard fails if any is set
+    pub forbidden: Vec<(u32, i32)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EffectPlan {
@@ -34,6 +40,8 @@ pub enum EffectPlan {
     },
     Check {
         guard: Option<GlobalGuard>,
+        /// The call runs if the value (an address) has any of these bits set
+        misaligned: Option<(ValueId, i32)>,
         before: StateId,
         call: RuntimeCall,
         success: Option<i32>,
@@ -45,6 +53,13 @@ pub enum EffectPlan {
         value: ValueId,
         observe: Observation,
         commit: StateId,
+        call: RuntimeCall,
+    },
+    /// Zero `bytes` of CPU state at `address` (Op::YmmZero), inline: `call`
+    /// is the runtime's equivalent, never emitted
+    ZeroState {
+        address: u32,
+        bytes: u8,
         call: RuntimeCall,
     },
     /// Continuing x87 operation. `call` is the canonical fallback; loaded
@@ -63,6 +78,7 @@ impl EffectPlan {
             Self::Address { call, .. }
             | Self::Check { call, .. }
             | Self::RmwCommit { call, .. }
+            | Self::ZeroState { call, .. }
             | Self::X87 { call, .. } => call,
         }
     }
@@ -91,6 +107,7 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
         },
         Op::GuestCheck { bytes, write } => EffectPlan::Check {
             guard: None,
+            misaligned: None,
             before: inst.state.unwrap(),
             call: RuntimeCall::i32(
                 "ir_memory_check",
@@ -100,20 +117,67 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
             success: Some(0),
             fault: 2,
         },
+        // (XMM forms: CR0.EM and CR0.TS clear, CR4.OSFXSR set)
+        // (the address is the call's argument: a use for allocation)
+        Op::AlignmentCheck { bytes } => EffectPlan::Check {
+            guard: None,
+            misaligned: Some((inst.args[0], bytes as i32 - 1)),
+            before: inst.state.unwrap(),
+            call: RuntimeCall::i32(
+                "ir_alignment_fault",
+                vec![Value(inst.args[0])],
+                WasmType::I32,
+            ),
+            success: None,
+            fault: 2,
+        },
         Op::SseCheck => EffectPlan::Check {
+            misaligned: None,
             guard: Some(GlobalGuard {
                 address: gp::cr as u32,
                 mask: 12,
+                required: vec![(unsafe { gp::cr.add(4) } as u32, crate::cpu::cpu::CR4_OSFXSR)],
+                forbidden: vec![],
             }),
             before: inst.state.unwrap(),
             call: RuntimeCall::i32("ir_sse_guard", vec![], WasmType::I32),
             success: None,
             fault: 2,
         },
+        // (VEX forms: protected mode but virtual-8086 mode, CR4.OSXSAVE,
+        // XCR0 with SSE and AVX state, and CR0.TS clear)
+        Op::AvxCheck => EffectPlan::Check {
+            misaligned: None,
+            guard: Some(GlobalGuard {
+                address: gp::cr as u32,
+                mask: crate::cpu::cpu::CR0_TS,
+                required: vec![
+                    (
+                        unsafe { gp::cr.add(4) } as u32,
+                        crate::cpu::cpu::CR4_OSXSAVE,
+                    ),
+                    (gp::xcr0 as u32, 6),
+                    (gp::protected_mode as u32, 1),
+                ],
+                forbidden: vec![(gp::flags as u32, crate::cpu::cpu::FLAG_VM)],
+            }),
+            before: inst.state.unwrap(),
+            call: RuntimeCall::i32("ir_avx_guard", vec![], WasmType::I32),
+            success: None,
+            fault: 2,
+        },
+        Op::YmmZero { register } => EffectPlan::ZeroState {
+            address: unsafe { gp::ymm_hi.add(register as usize) } as u32,
+            bytes: 16,
+            call: RuntimeCall::i32("ir_ymm_zero", vec![I32(register as i32)], WasmType::I32),
+        },
         Op::FpuCheck => EffectPlan::Check {
+            misaligned: None,
             guard: Some(GlobalGuard {
                 address: gp::cr as u32,
                 mask: 12,
+                required: vec![],
+                forbidden: vec![],
             }),
             before: inst.state.unwrap(),
             call: RuntimeCall::i32("ir_fpu_guard", vec![], WasmType::I32),

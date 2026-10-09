@@ -1,4 +1,6 @@
-//! Explicit packed XMM integer semantics. IDs are the canonical 66 0F opcode byte.
+//! Explicit packed XMM integer semantics. IDs are the canonical 66 0F opcode
+//! byte, except PSHUFB's (66 0F 38 00), which takes the unused 00, and the
+//! SSE4.1/SSE4.2 forms', which are their 66 0F 38 byte (PackedOp::sse4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[repr(u8)]
 pub enum PackedOp {
@@ -60,6 +62,21 @@ pub enum PackedOp {
     AndNot = 0xDF,
     Or = 0xEB,
     Xor = 0xEF,
+    /// PSHUFB (SSSE3)
+    ShuffleBytes = 0x00,
+    /// SSE4.1 and SSE4.2 (66 0F 38 xx, crate::cpu::simd_int::sse4)
+    Eq64 = 0x29,
+    PackS32U16 = 0x2B,
+    GtS64 = 0x37,
+    MinS8 = 0x38,
+    MinS32 = 0x39,
+    MinU16 = 0x3A,
+    MinU32 = 0x3B,
+    MaxS8 = 0x3C,
+    MaxS32 = 0x3D,
+    MaxU16 = 0x3E,
+    MaxU32 = 0x3F,
+    MulLow32 = 0x40,
 }
 impl PackedOp {
     pub fn from_id(id: u32) -> Option<Self> {
@@ -122,9 +139,25 @@ impl PackedOp {
             0xDF => Self::AndNot,
             0xEB => Self::Or,
             0xEF => Self::Xor,
+            0x00 => Self::ShuffleBytes,
+            0x29 => Self::Eq64,
+            0x2B => Self::PackS32U16,
+            0x37 => Self::GtS64,
+            0x38 => Self::MinS8,
+            0x39 => Self::MinS32,
+            0x3A => Self::MinU16,
+            0x3B => Self::MinU32,
+            0x3C => Self::MaxS8,
+            0x3D => Self::MaxS32,
+            0x3E => Self::MaxU16,
+            0x3F => Self::MaxU32,
+            0x40 => Self::MulLow32,
             _ => return None,
         })
     }
+    /// An SSE4.1/SSE4.2 form (its id is a 66 0F 38 byte; as a 66 0F byte, it
+    /// is another instruction, MOVAPD for instance)
+    pub fn sse4(self) -> bool { (self as u8) >= 0x29 && (self as u8) <= 0x40 }
     pub fn from_encoding(op: u32) -> Option<Self> {
         match op {
             0x0F14 => Some(Self::UnpackLow32),
@@ -135,7 +168,11 @@ impl PackedOp {
             0x0F55 | 0x660F55 => Some(Self::AndNot),
             0x0F56 | 0x660F56 => Some(Self::Or),
             0x0F57 | 0x660F57 => Some(Self::Xor),
-            _ if op >> 8 == 0x660F => Self::from_id(op & 255),
+            0x660F3800 => Some(Self::ShuffleBytes),
+            _ if op >> 8 == 0x660F38 => Self::from_id(op & 255).filter(|p| p.sse4()),
+            _ if op >> 8 == 0x660F && op & 255 != 0 => {
+                Self::from_id(op & 255).filter(|p| !p.sse4())
+            },
             _ => None,
         }
     }
@@ -178,6 +215,18 @@ impl PackedOp {
             Self::AndNot => 0x4F,
             Self::Or => 0x50,
             Self::Xor => 0x51,
+            Self::Eq64 => 0xD6,
+            Self::PackS32U16 => 0x86,
+            Self::GtS64 => 0xD9,
+            Self::MinS8 => 0x76,
+            Self::MinS32 => 0xB6,
+            Self::MinU16 => 0x97,
+            Self::MinU32 => 0xB7,
+            Self::MaxS8 => 0x78,
+            Self::MaxS32 => 0xB8,
+            Self::MaxU16 => 0x99,
+            Self::MaxU32 => 0xB9,
+            Self::MulLow32 => 0xB5,
             _ => return None,
         })
     }
@@ -213,6 +262,12 @@ impl PackedOp {
     /// CPU slow completion: destination is sampled after the entire source read.
     pub fn apply(self, destination: [u8; 16], source: [u8; 16]) -> [u8; 16] {
         use PackedOp::*;
+        if self == ShuffleBytes {
+            return crate::cpu::simd_int::ssse3(0x00, destination, source);
+        }
+        if self.sse4() {
+            return crate::cpu::simd_int::sse4(self as u8, destination, source, [0; 16]);
+        }
         fn lane(v: &[u8; 16], bytes: usize, index: usize) -> u64 {
             let mut value = [0; 8];
             value[..bytes].copy_from_slice(&v[index * bytes..(index + 1) * bytes]);
@@ -355,6 +410,10 @@ pub enum ShuffleOp {
     HighWords = 2,
     Singles = 3,
     Doubles = 4,
+    /// BLENDPS, BLENDPD, PBLENDW (SSE4.1): imm8 selects the source's lanes
+    BlendSingles = 5,
+    BlendDoubles = 6,
+    BlendWords = 7,
 }
 impl ShuffleOp {
     pub fn from_id(id: u32) -> Option<Self> {
@@ -364,11 +423,17 @@ impl ShuffleOp {
             2 => Self::HighWords,
             3 => Self::Singles,
             4 => Self::Doubles,
+            5 => Self::BlendSingles,
+            6 => Self::BlendDoubles,
+            7 => Self::BlendWords,
             _ => return None,
         })
     }
     pub fn from_encoding(op: u32) -> Option<Self> {
         Some(match op {
+            0x660F3A0C => Self::BlendSingles,
+            0x660F3A0D => Self::BlendDoubles,
+            0x660F3A0E => Self::BlendWords,
             0x660F70 => Self::Dwords,
             0xF20F70 => Self::LowWords,
             0xF30F70 => Self::HighWords,
@@ -396,6 +461,14 @@ impl ShuffleOp {
                 },
                 Self::Doubles => {
                     (if byte < 8 { 0 } else { 16 }) + ((immediate >> (byte / 8)) & 1) * 8 + byte % 8
+                },
+                Self::BlendSingles | Self::BlendDoubles | Self::BlendWords => {
+                    let size = match self {
+                        Self::BlendSingles => 4,
+                        Self::BlendDoubles => 8,
+                        _ => 2,
+                    };
+                    byte + if immediate >> (byte / size) & 1 != 0 { 16 } else { 0 }
                 },
             };
         }

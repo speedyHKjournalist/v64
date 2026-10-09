@@ -18,7 +18,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let rm = i.modrm.unwrap() & 7;
     let lane = (i.immediate.unwrap_or(0) & 7) as u8;
     if i.encoding.opcode == 0x660FC4 {
-        let old = b.xmm[register as usize];
+        // (VPINSRW's other words: from VEX.vvvv)
+        let old = b.xmm[b.first(register) as usize];
         let value = if let Some(ea) = i.ea {
             let map = snapshot(b, i.instruction_pc, i.next_pc, count - 1);
             b.region.states[map.index()].resume = ResumeKind::BeforeInstruction;

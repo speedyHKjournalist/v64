@@ -48,6 +48,60 @@ unsafe fn resolve(modrm: i32, size: u8) -> OrPageFault<i32> {
             0
         }))
 }
+/// A memory operand's offset and segment (its default; get_seg_prefix applies
+/// a prefix), its SIB and displacement bytes fetched, its segment not yet
+/// checked: VEX instructions check the AVX state in between (cpu::vex)
+pub unsafe fn resolve_offset(modrm: i32) -> OrPageFault<(i32, i32)> {
+    let size = if is_asize_32() { 32 } else { 16 };
+    let sib = if size == 32 && modrm & 7 == 4 { Some(read_imm8()? as u8) } else { None };
+    let form = crate::decode_rules::address_form(modrm as u8, size, sib);
+    let register = |r: u8| {
+        if size == 16 {
+            read_reg16(r as i32)
+        }
+        else {
+            read_reg32(r as i32)
+        }
+    };
+    let base = form.base.map_or(0, register);
+    let index = form
+        .index
+        .map_or(0, register)
+        .wrapping_shl(form.scale as u32);
+    let displacement = match form.displacement_bytes {
+        0 => 0,
+        1 => read_imm8s()?,
+        2 => read_imm16()?,
+        4 => read_imm32s()?,
+        _ => unreachable!(),
+    };
+    let offset = base.wrapping_add(index).wrapping_add(displacement);
+    Ok((
+        if size == 16 { offset & 65535 } else { offset },
+        form.segment as i32,
+    ))
+}
+/// A VSIB memory operand (the gathers; 32-bit addressing: 16-bit is #UD):
+/// the offset of its base and displacement, its segment, and its SIB
+/// byte's index field (a vector register) and scale (log2)
+pub unsafe fn resolve_offset_vsib(modrm: i32) -> OrPageFault<(i32, i32, u8, u8)> {
+    let sib = read_imm8()? as u8;
+    // (the base and displacement of the same SIB without an index)
+    let form = crate::decode_rules::address_form(modrm as u8, 32, Some(sib & !0x38 | 0x20));
+    let base = form.base.map_or(0, |r| read_reg32(r as i32));
+    let displacement = match form.displacement_bytes {
+        0 => 0,
+        1 => read_imm8s()?,
+        4 => read_imm32s()?,
+        _ => unreachable!(),
+    };
+    Ok((
+        base.wrapping_add(displacement),
+        form.segment as i32,
+        sib >> 3 & 7,
+        sib >> 6,
+    ))
+}
 pub unsafe fn resolve_modrm16(m: i32) -> OrPageFault<i32> { resolve(m, 16) }
 pub unsafe fn resolve_modrm32(m: i32) -> OrPageFault<i32> { resolve(m, 32) }
 pub unsafe fn resolve_modrm32_(m: i32) -> OrPageFault<i32> { resolve(m, 32) }

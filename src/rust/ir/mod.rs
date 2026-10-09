@@ -30,6 +30,7 @@ pub mod lowering;
 #[path = "../../../tests/ir/semantics/memory.rs"]
 mod memory_tests;
 pub mod mir;
+pub mod native_fp;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/page_bench.rs"]
 mod page_bench_tests;
@@ -224,6 +225,18 @@ mod fp_state_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/sse_fp.rs"]
 mod sse_fp_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/crc32.rs"]
+mod crc32_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/avx.rs"]
+mod avx_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/bmi.rs"]
+mod bmi_tests;
 
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/mmx.rs"]

@@ -66,10 +66,29 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_str_mem"
         | "ir_str_reg"
         | "ir_write_cr"
-        | "ir_write_dr" => 2,
-        "ir_invalid_form" | "ir_arpl_mem" | "ir_movnti" | "ir_far_jump_mem" | "ir_lar_mem"
-        | "ir_lar_reg" | "ir_lsl_mem" | "ir_lsl_reg" | "ir_out" | "ir_out_continue"
-        | "ir_pop_segment" | "ir_ins_once" | "ir_outs_once" => 3,
+        | "ir_write_dr"
+        | "ir_xgetbv_xsetbv"
+        | "ir_xrstor"
+        | "ir_xrstors"
+        | "ir_xsave"
+        | "ir_xsavec"
+        | "ir_xsaveopt"
+        | "ir_xsaves"
+        | "ir_bmi_reg_continue" => 2,
+        "ir_invalid_form"
+        | "ir_arpl_mem"
+        | "ir_movnti"
+        | "ir_far_jump_mem"
+        | "ir_lar_mem"
+        | "ir_lar_reg"
+        | "ir_lsl_mem"
+        | "ir_lsl_reg"
+        | "ir_out"
+        | "ir_out_continue"
+        | "ir_pop_segment"
+        | "ir_ins_once"
+        | "ir_outs_once"
+        | "ir_crc32_reg_continue" => 3,
         "ir_reserved_form"
         | "ir_mmx_mask"
         | "ir_mmx_reg"
@@ -81,7 +100,10 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_ins"
         | "ir_outs"
         | "ir_x87_reg_continue"
-        | "ir_x87_reg" => 4,
+        | "ir_x87_reg"
+        | "ir_crc32_mem_continue"
+        | "ir_bmi_mem_continue"
+        | "ir_avx_continue" => 4,
         "ir_mmx_mem"
         | "ir_sse_fp_mem_continue"
         | "ir_sse_fp_mem"
@@ -93,7 +115,8 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_rep_outs"
         | "ir_rep_scas"
         | "ir_rep_stos"
-        | "ir_x87_mem" => 5,
+        | "ir_x87_mem"
+        | "ir_avx_fp_reg_continue" => 5,
         _ => return None,
     })
 }
@@ -101,7 +124,13 @@ fn abi(name: &str) -> HelperAbi {
     if scalar_reload(name)
         || matches!(
             name,
-            "ir_mmx_xmm_continue" | "ir_sse_fp_reg_continue" | "ir_sse_fp_mem_continue"
+            "ir_mmx_xmm_continue"
+                | "ir_sse_fp_reg_continue"
+                | "ir_sse_fp_mem_continue"
+                | "ir_crc32_mem_continue"
+                | "ir_bmi_mem_continue"
+                | "ir_avx_continue"
+                | "ir_avx_fp_reg_continue"
         )
     {
         HelperAbi::CpuReload
@@ -197,9 +226,12 @@ pub fn validate(d: &HelperDescriptor) -> Result<(), &'static str> {
 }
 
 /// Audited register-only SSE arithmetic/conversion forms. They read only the
-/// two XMM operands and MXCSR/x87 backing, modify only the destination XMM and
-/// FP backing, and cannot call host observers after the CR0 task guard succeeds.
-/// Integer/FLAGS conversions and every memory form retain the full contract.
+/// two XMM operands and MXCSR/x87 backing, modify only the destination XMM,
+/// MXCSR's flags and FP backing, and cannot call host observers or fault after
+/// the CR0 task guard succeeds unless MXCSR unmasks an exception (the backend's
+/// sse_task_observation takes the full-state path for both). Integer/FLAGS
+/// conversions and every memory form retain the full contract. The SSSE3 and
+/// listed SSE4 XMM forms read and write only the XMM operands.
 pub fn xmm_register_operands(
     region: &crate::ir::hir::Region,
     args: &[crate::ir::ids::ValueId],
@@ -217,8 +249,20 @@ pub fn xmm_register_operands(
             None
         }
     };
-    let op = constant(0)?;
-    if !matches!(
+    // (ir_avx_fp_reg_continue: the VEX forms of the same keys)
+    if !xmm_register_op(constant(0)?) {
+        return None;
+    }
+    let source = constant(1)?;
+    let destination = constant(2)?;
+    if source >= 8 || destination >= 8 {
+        return None;
+    }
+    Some((source as u8, destination as u8))
+}
+/// The keys of xmm_register_operands
+pub fn xmm_register_op(op: u32) -> bool {
+    matches!(
         op,
         0x0F51
             | 0x0F52
@@ -272,15 +316,20 @@ pub fn xmm_register_operands(
             | 0xF30F5F
             | 0xF30FC2
             | 0xF30FE6
-    ) {
-        return None;
-    }
-    let source = constant(1)?;
-    let destination = constant(2)?;
-    if source >= 8 || destination >= 8 {
-        return None;
-    }
-    Some((source as u8, destination as u8))
+            | 0x660F3800..=0x660F380B
+            | 0x660F381C..=0x660F381E
+            | 0x660F3A0F
+            // SSE4.1/SSE4.2 between two XMM registers (not BLENDV: XMM0;
+            // PTEST: FLAGS; PEXTR*/PINSR*: a GPR; the PackedOp and ShuffleOp
+            // forms are native)
+            | 0x660F3820..=0x660F3825
+            | 0x660F3828
+            | 0x660F3830..=0x660F3835
+            | 0x660F3841
+            | 0x660F3A08..=0x660F3A0B
+            | 0x660F3A21
+            | 0x660F3A40..=0x660F3A42
+    )
 }
 
 /// Successful forms have no guest-memory/host observation or mapping writes.
@@ -300,6 +349,8 @@ pub fn preserves_code_on_success(name: &str) -> bool {
             | "ir_mmx_reg_continue"
             | "ir_mmx_xmm_continue"
             | "ir_x87_reg_continue"
+            | "ir_crc32_reg_continue"
+            | "ir_bmi_reg_continue"
     )
 }
 
@@ -329,6 +380,8 @@ fn scalar_reload(name: &str) -> bool {
             name,
             "ir_x87_reg_continue"
                 | "ir_mmx_reg_continue"
+                | "ir_crc32_reg_continue"
+                | "ir_bmi_reg_continue"
                 | "ir_read_cr_continue"
                 | "ir_read_dr_continue"
                 | "ir_cpuid_continue"

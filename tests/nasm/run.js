@@ -364,6 +364,10 @@ else {
         cpu.reboot_internal();
         cpu.reset_memory();
         cpu.load_multiboot(fs.readFileSync(TEST_DIR + current_test.img_name).buffer);
+        // SSE enabled by the OS (CR4.OSFXSR and OSXMMEXCPT), as the QEMU
+        // oracle's stub does (qemu_oracle.js): the BIOS and the multiboot
+        // entry leave CR4 as it is
+        cpu.cr[4] |= 0x600;
 
         test_timeout = setTimeout(() => {
             console.error("Test " + test.img_name + " timed out after " + (SINGLE_TEST_TIMEOUT / 1000) + " seconds.");
@@ -387,6 +391,9 @@ else {
         disable_jit: +process.env.DISABLE_JIT,
         // the references are hardware results: exact x87 arithmetic and flags
         x87_fast_math: false,
+        // the generated tests include the forms of docs/simd-xsave-plan.md
+        // that are implemented so far
+        cpu_features: ["SSSE3", "SSE4.1", "SSE4.2"],
         ...FORCE_JIT ? { ir_region_budget: { hot_threshold: 1, promotion_threshold: 1 } } : {},
         log_level: 0,
     });

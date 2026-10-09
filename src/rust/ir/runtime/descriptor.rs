@@ -136,6 +136,15 @@ pub unsafe fn ir_rdtscp(reg: u32, width: u32) -> u32 {
     }
     commit()
 }
+/// XGETBV and XSETBV (0F 01 D0, D1) without a mandatory prefix
+#[no_mangle]
+pub unsafe fn ir_xgetbv_xsetbv(reg: u32, width: u32) -> u32 {
+    valid(width);
+    if !instructions_0f::xgetbv_xsetbv(reg as i32) {
+        return fault();
+    }
+    commit()
+}
 #[no_mangle]
 pub unsafe fn ir_descriptor_ud(reg: u32, width: u32) -> u32 {
     valid(width);

@@ -1346,20 +1346,30 @@ pub unsafe fn instr32_C3() {
     *instruction_pointer = cs + ip;
 }
 
+// The register forms of LES and LDS are VEX prefixes in protected mode
+// (crate::cpu::vex), #UD in real and virtual-8086 mode
 #[no_mangle]
-pub unsafe fn instr16_C4_reg(_unused1: i32, _unused2: i32) { trigger_ud(); }
+pub unsafe fn instr16_C4_reg(rm: i32, reg: i32) {
+    crate::cpu::vex::run(0xC4, (0xC0 | reg << 3 | rm) as u8);
+}
 #[no_mangle]
 pub unsafe fn instr16_C4_mem(addr: i32, r: i32) { lss16(addr, r, ES); }
 #[no_mangle]
-pub unsafe fn instr32_C4_reg(_unused1: i32, _unused2: i32) { trigger_ud(); }
+pub unsafe fn instr32_C4_reg(rm: i32, reg: i32) {
+    crate::cpu::vex::run(0xC4, (0xC0 | reg << 3 | rm) as u8);
+}
 #[no_mangle]
 pub unsafe fn instr32_C4_mem(addr: i32, r: i32) { lss32(addr, r, ES); }
 #[no_mangle]
-pub unsafe fn instr16_C5_reg(_unused1: i32, _unused2: i32) { trigger_ud(); }
+pub unsafe fn instr16_C5_reg(rm: i32, reg: i32) {
+    crate::cpu::vex::run(0xC5, (0xC0 | reg << 3 | rm) as u8);
+}
 #[no_mangle]
 pub unsafe fn instr16_C5_mem(addr: i32, r: i32) { lss16(addr, r, DS); }
 #[no_mangle]
-pub unsafe fn instr32_C5_reg(_unused1: i32, _unused2: i32) { trigger_ud(); }
+pub unsafe fn instr32_C5_reg(rm: i32, reg: i32) {
+    crate::cpu::vex::run(0xC5, (0xC0 | reg << 3 | rm) as u8);
+}
 #[no_mangle]
 pub unsafe fn instr32_C5_mem(addr: i32, r: i32) { lss32(addr, r, DS); }
 
@@ -2155,15 +2165,13 @@ pub unsafe fn instr_F1() {
 }
 
 pub unsafe fn instr_F2() {
-    // repnz
-    dbg_assert!(*prefixes & prefix::PREFIX_MASK_REP == 0);
+    // repnz (after F3, the last of the two counts: decode_rules::apply_prefix)
     *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0xF2).unwrap();
     run_prefix_instruction();
     *prefixes = 0;
 }
 pub unsafe fn instr_F3() {
-    // repz
-    dbg_assert!(*prefixes & prefix::PREFIX_MASK_REP == 0);
+    // repz (after F2, the last of the two counts)
     *prefixes = crate::decode_rules::apply_prefix(*prefixes, 0xF3).unwrap();
     run_prefix_instruction();
     *prefixes = 0;

@@ -86,7 +86,13 @@ pub struct Delivery {
 /// decision in the emitter; memory operands and conversions keep their helpers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeFp {
+    /// The register read as the destination's old value: a VEX form's
+    /// first source (ir_avx_fp_reg_continue), else the destination
+    pub first: Option<u8>,
     pub opcode: u32,
+    /// The guest operation (0F 58 ADD, 59 MUL, 5C SUB, 5E DIV), for
+    /// ir::native_fp's admission
+    pub operation: u8,
     pub double: bool,
     pub scalar: bool,
 }
@@ -110,7 +116,9 @@ impl NativeFp {
             _ => return None,
         };
         Some(Self {
+            first: None,
             opcode: if double { 0xF0 } else { 0xE4 } + operation,
+            operation: opcode as u8,
             double,
             scalar,
         })
@@ -127,6 +135,9 @@ pub struct CallPlan {
     pub staged: Vec<ResultSlot>,
     pub reload: Vec<(ValueId, super::value::Reading)>,
     pub xmm_observation: Option<(u8, u8)>,
+    /// With xmm_observation, a VEX form's first source
+    /// (ir_avx_fp_reg_continue): an operand too
+    pub xmm_first: Option<u8>,
     /// Non-NaN-result arithmetic; active NaN lanes retain scalar helper semantics.
     pub native_fp: Option<NativeFp>,
     pub delivery: Option<Delivery>,
@@ -144,7 +155,8 @@ pub fn lower(
     };
     let call = helpers[helper.index()].as_ref()?;
     let state = inst.state.unwrap();
-    let xmm_observation = if call.cpu_reload && call.name == "ir_sse_fp_reg_continue" {
+    let vex = call.name == "ir_avx_fp_reg_continue";
+    let xmm_observation = if call.cpu_reload && (vex || call.name == "ir_sse_fp_reg_continue") {
         crate::ir::helper::cpu_registry::xmm_register_operands(region, &inst.args).filter(|&(_, destination)| {
             // Hand-built HIR may use every ABI result. Restrict narrowing to
             // calls whose only live data result is the audited destination.
@@ -160,19 +172,30 @@ pub fn lower(
     else {
         None
     };
-    let native_fp = xmm_observation.and_then(|_| {
+    let constant = |n: usize| {
         let crate::ir::hir::Definition::Instruction(id, 0) =
-            region.values[inst.args[0].index()].definition
+            region.values[inst.args.get(n)?.index()].definition
         else {
             return None;
         };
         match region.instructions[id.index()].op {
-            Op::Const(opcode) => NativeFp::from_guest(opcode),
+            Op::Const(value) => Some(value),
             _ => None,
         }
+    };
+    // (a VEX form whose first source is unknown has no selective call)
+    let xmm_first =
+        if vex { constant(3).filter(|&first| first < 8) } else { None }.map(|first| first as u8);
+    let xmm_observation = xmm_observation.filter(|_| !vex || xmm_first.is_some());
+    let native_fp = xmm_observation.and_then(|_| {
+        Some(NativeFp {
+            first: xmm_first,
+            ..NativeFp::from_guest(constant(0)?)?
+        })
     });
     Some(CallPlan {
         xmm_observation,
+        xmm_first,
         native_fp,
         helper,
         state,

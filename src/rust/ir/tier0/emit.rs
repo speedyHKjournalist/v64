@@ -15,8 +15,8 @@
 //! interpreter's exact behavior.
 use super::analysis::{self, Instruction, PagePlan, Unit};
 use crate::cpu::cpu::{
-    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_ZERO, TLB_GLOBAL,
-    TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY, TLB_VALID,
+    FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_SUB, FLAG_VM, FLAG_ZERO,
+    TLB_GLOBAL, TLB_HAS_CODE, TLB_IA32E_DATA, TLB_NO_USER, TLB_READONLY, TLB_VALID,
 };
 use crate::cpu::global_pointers as gp;
 use crate::ir::backend::wasm::x87::{x87_native, X87Cache, X87Words};
@@ -116,7 +116,23 @@ pub const FORM_NAMES: &[&str] = &[
     "JmpIndirect",
     "CallIndirect",
     "Lahf",
+    "Bmi",
+    "Movbe",
 ];
+/// Form::Bmi's operations
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BmiOp {
+    Andn,
+    Blsr,
+    Blsmsk,
+    Blsi,
+    Bzhi,
+    Shlx,
+    Shrx,
+    Sarx,
+    Tzcnt,
+    Lzcnt,
+}
 /// Shift/rotate count operand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Count {
@@ -196,6 +212,18 @@ enum Form {
         reverse: bool,
         reg: u8,
     },
+    /// BMI1 and BMI2's VEX forms, TZCNT and LZCNT (cpu::bmi): reg (ModRM.reg;
+    /// VEX.vvvv for BLSR, BLSMSK and BLSI) = op(r/m, VEX.vvvv)
+    Bmi {
+        op: BmiOp,
+        reg: u8,
+        vvvv: u8,
+    },
+    /// MOVBE r32, m32 (`load`) or m32, r32: the bytes reversed
+    Movbe {
+        load: bool,
+        reg: u8,
+    },
     /// BT/BTS/BTR/BTC on a register operand.
     BitTest {
         op: u8,
@@ -242,8 +270,8 @@ enum Form {
         cc: u8,
         r: u8,
     },
-    /// MMX/SSE/SSE2 (see simd).
-    Simd(simd::Simd),
+    /// MMX, SSE to SSE4.2 and VEX forms (see simd).
+    Simd(simd::Simd, Option<simd::Vex>),
     Imul {
         reg: u8,
         immediate: Option<u32>,
@@ -333,6 +361,8 @@ impl Form {
             Form::JmpIndirect { .. } => 38,
             Form::CallIndirect { .. } => 39,
             Form::Lahf => 40,
+            Form::Bmi { .. } => 41,
+            Form::Movbe { .. } => 42,
         }
     }
     /// Whether the template can retry() (else no retry tail is emitted).
@@ -353,6 +383,10 @@ impl Form {
                     | Form::Carry { .. }
                     | Form::DoubleShift { .. }
                     | Form::BitScan { .. }
+                    | Form::Bmi {
+                        op: BmiOp::Tzcnt | BmiOp::Lzcnt,
+                        ..
+                    }
                     | Form::BitTest { .. }
                     | Form::MulWide { .. }
                     | Form::Xadd { .. }
@@ -375,7 +409,7 @@ impl Form {
         use simd::Simd as S;
         match self {
             Form::Fnstsw | Form::X87Flags { .. } | Form::Fcmov { .. } => true,
-            Form::Simd(s) => matches!(
+            Form::Simd(s, _) => matches!(
                 s,
                 S::MmxLoad { .. }
                     | S::MmxStore { .. }
@@ -406,9 +440,9 @@ impl Form {
             // Helpers over the lazy state, and dynamic counts (no FLAGS
             // change for a zero count).
             Form::ShiftHelper { .. } | Form::DoubleShift { .. } => true,
-            Form::X87Flags { .. } | Form::Simd(simd::Simd::CompareFlags { .. }) | Form::Lahf => {
-                true
-            },
+            Form::X87Flags { .. }
+            | Form::Simd(simd::Simd::CompareFlags { .. } | simd::Simd::Strings { .. }, _)
+            | Form::Lahf => true,
             _ => false,
         }
     }
@@ -446,6 +480,60 @@ fn relative_target(i: &DecodedInstruction) -> Option<u32> {
     }
 }
 
+/// BMI1 and BMI2's VEX forms, TZCNT, LZCNT and MOVBE on 32-bit operands:
+/// the hot forms of plan 5.1 and their siblings (MULX, PDEP, PEXT, BEXTR,
+/// RORX and the 16-bit forms are interpreted)
+fn bmi(i: &DecodedInstruction) -> Option<Form> {
+    if i.baseline_ud || i.prefixes.lock {
+        return None;
+    }
+    let reg = i.modrm? >> 3 & 7;
+    if let Some(v) = i.vex {
+        if i.encoding.vex & crate::decode_rules::vex::GPR == 0 {
+            return None;
+        }
+        let vvvv = v.vvvv & 7;
+        let (op, reg) = match i.encoding.opcode {
+            0xC402_00F2 => (BmiOp::Andn, reg),
+            0xC402_00F3 => (
+                match reg {
+                    1 => BmiOp::Blsr,
+                    2 => BmiOp::Blsmsk,
+                    3 => BmiOp::Blsi,
+                    _ => return None,
+                },
+                vvvv,
+            ),
+            0xC402_00F5 => (BmiOp::Bzhi, reg),
+            0xC402_01F7 => (BmiOp::Shlx, reg),
+            0xC402_02F7 => (BmiOp::Sarx, reg),
+            0xC402_03F7 => (BmiOp::Shrx, reg),
+            _ => return None,
+        };
+        return Some(Form::Bmi { op, reg, vvvv });
+    }
+    if i.operand_size != 32 {
+        return None;
+    }
+    Some(match i.encoding.opcode {
+        0xF30FBC => Form::Bmi {
+            op: BmiOp::Tzcnt,
+            reg,
+            vvvv: 0,
+        },
+        0xF30FBD => Form::Bmi {
+            op: BmiOp::Lzcnt,
+            reg,
+            vvvv: 0,
+        },
+        0x0F38F0 | 0x0F38F1 if i.ea.is_some() => Form::Movbe {
+            load: i.encoding.opcode == 0x0F38F0,
+            reg,
+        },
+        _ => return None,
+    })
+}
+
 /// Whether the instruction has a template (others end their block).
 pub fn templated(i: &DecodedInstruction) -> bool { classify(i).is_some() }
 
@@ -453,7 +541,14 @@ pub fn templated(i: &DecodedInstruction) -> bool { classify(i).is_some() }
 fn classify(i: &DecodedInstruction) -> Option<Form> {
     // SSE selects forms by F2/F3/66 prefixes, so it precedes the REP check.
     if let Some(form) = simd::classify(i) {
-        return Some(Form::Simd(form));
+        return Some(Form::Simd(form, None));
+    }
+    if let Some((form, vex)) = simd::classify_vex(i) {
+        return Some(Form::Simd(form, Some(vex)));
+    }
+    // (TZCNT and LZCNT: F3 selects them)
+    if let Some(form) = bmi(i) {
+        return Some(form);
     }
     // Invalid LOCK forms are rejected by the shared decoder. A valid locked
     // RMW stays inside one activation, including its guarded slow path.
@@ -833,6 +928,27 @@ struct Page {
     /// interpreter step, see xmm_store).
     xmm: [Option<WasmLocalV128>; 8],
     xmm_dirty: u8,
+    /// native_fp::mxcsr_refused, once evaluated in the block: MXCSR changes
+    /// only in interpreter steps, which leave the block, and ir_t0_sse_fp,
+    /// which sets flags it ignores
+    fp_mxcsr: Option<WasmLocal>,
+    /// Per XMM register, the floating-point lanes known to be neither NaN nor
+    /// denormal in the block (simd::CLEAN_*; see native_fp)
+    xmm_clean: [u8; 8],
+    /// The SIMD task checks the block has made (simd::simd_guard): 1 those of
+    /// MMX forms, 2 also those of XMM forms, 4 those of VEX forms
+    /// (simd::vex_guard). CR0 and CR4 change only in interpreter steps,
+    /// which leave the block.
+    simd_checked: u8,
+    /// Nonzero when VEX forms fault (simd::vex_fault, computed on entry; a
+    /// page without VEX templates has none)
+    vex_fault: Option<WasmLocal>,
+    /// The YMM registers whose bits 255:128 the block has zeroed (simd::
+    /// ymm_zero) and not written since (simd::store_ymm, a VEX.256 move's;
+    /// the other 256-bit forms are interpreter steps, which leave the block)
+    ymm_zeroed: u8,
+    /// The VEX form being emitted (simd::Page::simd)
+    vex: Option<simd::Vex>,
     /// x87 TOP/tags/VALID/DIRTY in function-wide locals while `x87_is_open`
     /// (then the CPU state is behind; see x87_open/x87_close).
     x87: X87Cache,
@@ -1247,6 +1363,131 @@ impl Page {
         self.w.set_local(&self.offset);
         self.w.br(self.step);
     }
+    /// BMI1 and BMI2's VEX forms: C4 is LES in real and virtual-8086 mode,
+    /// whose #UD belongs to the interpreter; checked once per block
+    /// (simd_checked bit 3)
+    fn vex_mode_guard(&mut self) {
+        if self.simd_checked & 8 != 0 {
+            return;
+        }
+        self.w.load_fixed_u8(gp::protected_mode as u32);
+        self.w.eqz_i32();
+        self.w.load_fixed_i32(gp::flags as u32);
+        self.w.const_i32(FLAG_VM);
+        self.w.and_i32();
+        self.w.or_i32();
+        self.retry_if();
+        self.simd_checked |= 8;
+    }
+    /// Reverse the bytes of the i32 on the stack (MOVBE)
+    fn byte_swap(&mut self) {
+        self.w.set_local(&self.tmp);
+        // rotl(x & 0x00FF00FF, 24) | rotl(x & 0xFF00FF00, 8)
+        self.w.get_local(&self.tmp);
+        self.w.const_i32(0x00FF_00FF);
+        self.w.and_i32();
+        self.w.const_i32(24);
+        self.w.rotl_i32();
+        self.w.get_local(&self.tmp);
+        self.w.const_i32(0xFF00_FF00u32 as i32);
+        self.w.and_i32();
+        self.w.const_i32(8);
+        self.w.rotl_i32();
+        self.w.or_i32();
+    }
+    /// Form::Bmi but the shifts, of the source in fa: the result (fr) to
+    /// `reg`, and cpu::bmi::logic_flags: SF, ZF and PF of the result
+    /// (lazily), AF and OF clear, and CF: ANDN 0 (a logic producer); the
+    /// source is not 0 (BLSI); the index is beyond 31 (BZHI); the source
+    /// is 0 (the others)
+    fn bmi(&mut self, op: BmiOp, reg: u8, vvvv: u8) {
+        let (fa, fb, fr) = (
+            self.fa.unsafe_clone(),
+            self.fb.unsafe_clone(),
+            self.fr.unsafe_clone(),
+        );
+        match op {
+            BmiOp::Andn => {
+                self.read_reg(vvvv, 32);
+                self.w.const_i32(-1);
+                self.w.xor_i32();
+                self.w.get_local(&fa);
+                self.w.and_i32();
+            },
+            BmiOp::Blsr | BmiOp::Blsmsk => {
+                self.w.get_local(&fa);
+                self.w.const_i32(1);
+                self.w.sub_i32();
+                self.w.get_local(&fa);
+                if op == BmiOp::Blsr {
+                    self.w.and_i32();
+                }
+                else {
+                    self.w.xor_i32();
+                }
+            },
+            BmiOp::Blsi => {
+                self.w.const_i32(0);
+                self.w.get_local(&fa);
+                self.w.sub_i32();
+                self.w.get_local(&fa);
+                self.w.and_i32();
+            },
+            BmiOp::Bzhi => {
+                // fa AND (1 << n) - 1 for an index n (VEX.vvvv[7:0]) below
+                // 32, else fa
+                self.read_reg(vvvv, 32);
+                self.w.const_i32(0xFF);
+                self.w.and_i32();
+                self.w.set_local(&fb);
+                self.w.get_local(&fa);
+                self.w.const_i32(1);
+                self.w.get_local(&fb);
+                self.w.shl_i32();
+                self.w.const_i32(1);
+                self.w.sub_i32();
+                self.w.and_i32();
+                self.w.get_local(&fa);
+                self.w.get_local(&fb);
+                self.w.const_i32(32);
+                self.w.ltu_i32();
+                self.w.select();
+            },
+            // (Wasm's count of 0 is 32, as theirs)
+            BmiOp::Tzcnt => {
+                self.w.get_local(&fa);
+                self.w.ctz_i32();
+            },
+            _ => {
+                self.w.get_local(&fa);
+                self.w.clz_i32();
+            },
+        }
+        self.w.set_local(&fr);
+        self.w.get_local(&fr);
+        self.write_reg(reg, 32);
+        self.flags_logic(32);
+        if op != BmiOp::Andn {
+            match op {
+                BmiOp::Blsi => {
+                    self.w.get_local(&fa);
+                    self.w.const_i32(0);
+                    self.w.ne_i32();
+                },
+                BmiOp::Bzhi => {
+                    self.w.get_local(&fb);
+                    self.w.const_i32(31);
+                    self.w.gtu_i32();
+                },
+                _ => {
+                    self.w.get_local(&fa);
+                    self.w.eqz_i32();
+                },
+            }
+            self.pend_word(FLAG_CARRY);
+            self.known = Known::None;
+        }
+    }
     /// retry() if the condition on the stack is nonzero.
     fn retry_if(&mut self) {
         self.w.hint(false);
@@ -1613,6 +1854,12 @@ impl Page {
         for local in self.xmm.iter_mut().filter_map(Option::take) {
             self.w.free_local_v128(local);
         }
+        if let Some(local) = self.fp_mxcsr.take() {
+            self.w.free_local(local);
+        }
+        self.xmm_clean = [0; 8];
+        self.simd_checked = 0;
+        self.ymm_zeroed = 0;
     }
     fn emit_flags(&mut self, flags: PendingFlags) {
         if flags.op1 {
@@ -1794,13 +2041,18 @@ impl Page {
         true
     }
     /// x87 forms fault (#NM) when CR0.EM or CR0.TS is set: the interpreter
-    /// runs them then.
+    /// runs them then. (The condition of MMX forms, once per block: see
+    /// simd_checked.)
     fn x87_guard(&mut self) {
+        if self.simd_checked & 1 != 0 {
+            return;
+        }
         self.w.load_fixed_i32(gp::cr as u32);
         self.w
             .const_i32(crate::cpu::cpu::CR0_EM | crate::cpu::cpu::CR0_TS);
         self.w.and_i32();
         self.retry_if();
+        self.simd_checked |= 1;
     }
     /// Push a shift count (already masked for immediates, CL & 31).
     fn count(&mut self, count: Count) {
@@ -2856,7 +3108,7 @@ impl Page {
                     }
                 }
             },
-            Form::Simd(form) => self.simd(form, i),
+            Form::Simd(form, vex) => self.simd(form, i, vex),
             Form::X87Flags { name, r } => {
                 self.x87_guard();
                 self.w.const_i32(r as i32);
@@ -2870,6 +3122,42 @@ impl Page {
                 self.w.const_i32(r as i32);
                 self.w
                     .call_signature("fpu_fcmovcc", Signature::new(&[WasmType::I32; 2], &[]));
+            },
+            Form::Bmi { op, reg, vvvv } => {
+                if i.vex.is_some() {
+                    self.vex_mode_guard();
+                }
+                // the source fa
+                self.read_rm(i, 32, false);
+                self.w.set_local(&fa);
+                if matches!(op, BmiOp::Shlx | BmiOp::Shrx | BmiOp::Sarx) {
+                    // (Wasm takes the count modulo 32, as these; no flags)
+                    self.w.get_local(&fa);
+                    self.read_reg(vvvv, 32);
+                    match op {
+                        BmiOp::Shlx => self.w.shl_i32(),
+                        BmiOp::Shrx => self.w.shr_u_i32(),
+                        _ => self.w.shr_s_i32(),
+                    }
+                    self.write_reg(reg, 32);
+                }
+                else {
+                    self.bmi(op, reg, vvvv);
+                }
+            },
+            Form::Movbe { load, reg } => {
+                if load {
+                    self.read_rm(i, 32, false);
+                    self.byte_swap();
+                    self.write_reg(reg, 32);
+                }
+                else {
+                    self.prepare_rm(i);
+                    self.read_reg(reg, 32);
+                    self.byte_swap();
+                    self.w.set_local(&value);
+                    self.write_rm(i, 32, &value);
+                }
             },
             Form::Lahf => {
                 // The lazy FLAGS are in memory (touches_flags_memory).
@@ -3375,6 +3663,18 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
     let quotient = w.declare_zeroed_local_i64();
     let retired = w.declare_zeroed_local();
     let committed = w.declare_zeroed_local();
+    // The VEX guard's condition once per activation: a step changing CR0,
+    // CR4, XCR0 (XSETBV's admission barrier) or the mode leaves it
+    // (runtime::tier0::ir_t0_step)
+    let vex_fault = plan
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| simd::classify_vex(&i.decoded).is_some())
+        .then(|| {
+            simd::vex_fault(&mut w);
+            w.set_new_local()
+        });
 
     // offset holds the entry EIP.
     let span = plan.block_at.len() as u32;
@@ -3425,6 +3725,12 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         flags: PendingFlags::default(),
         xmm: Default::default(),
         xmm_dirty: 0,
+        fp_mxcsr: None,
+        xmm_clean: [0; 8],
+        simd_checked: 0,
+        vex_fault,
+        ymm_zeroed: 0,
+        vex: None,
         x87: X87Cache {
             top: locals.pop().unwrap(),
             tags: locals.pop().unwrap(),
@@ -3555,6 +3861,7 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         x87_is_open,
         far_eip,
         eip,
+        vex_fault,
         ..
     } = p;
     for local in gpr.into_iter().chain([
@@ -3583,6 +3890,9 @@ pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[
         far_eip,
         eip,
     ]) {
+        w.free_local(local);
+    }
+    if let Some(local) = vex_fault {
         w.free_local(local);
     }
     w.free_local_i64(wide);

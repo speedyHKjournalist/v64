@@ -13,6 +13,19 @@ const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
 const machines = [], DATA = 0x200000, OUT = 0x210000, CODE = 0x100000;
 const word = (vm, a) => new DataView(Uint8Array.from(vm.read_memory(a, 4)).buffer).getUint32(0, true);
 const labels = [];
+// SSE enabled (CR4.OSFXSR, OSXMMEXCPT: the BIOS leaves them clear)
+const ENABLE_SSE = [0x0F,0x20,0xE0,0x0D,...u32(0x600),0x0F,0x22,0xE0];
+/** An m128 operand, which must be 16-byte aligned (#GP(0)); MMX forms and
+ * the narrow SSE operands need no alignment */
+function aligned_m128({ mmx, op, prefix }) {
+    const p = prefix[0] ?? 0;
+    // (MOVLPS/MOVHPS/MOVLPD/MOVHPD and MOVDDUP: an m64; MOVSLDUP, MOVSHDUP: an m128)
+    if([0x12, 0x13, 0x16, 0x17].includes(op)) return p === 0xF3;
+    if(p === 0x66) return ![0x2A, 0x2E, 0x2F, 0x6E, 0xC4].includes(op); // m64, m64, m32, m16
+    if(p === 0xF2) return [0x70, 0x7C, 0x7D, 0xE6].includes(op);
+    if(p === 0xF3) return [0x70, 0x5B].includes(op);
+    return !mmx && ![0x5A, 0x2A, 0x2C, 0x2D, 0x2E, 0x2F].includes(op); // m64 and m32 sources
+}
 const ops = [0xE4,0xE5,0xF4,0xF6,0xFC,0xFD,0xFE,0xD4,0xF8,0xF9,0xFA,0xFB,0xEC,0xED,0xDC,0xDD,
     0xE8,0xE9,0xD8,0xD9,0x64,0x65,0x66,0x74,0x75,0x76,0xDA,0xDE,0xEA,0xEE,
     0xE0,0xE3,0xD5,0xF5,0xDB,0xDF,0xEB,0xEF,0x60,0x61,0x62,0x68,0x69,0x6A,
@@ -104,7 +117,9 @@ try {
             shift ? counts[i % counts.length] : patterns[i % 4], true);
         const width = output_width || (target_gpr ? 4 : mmx ? 8 : 16);
         view.setUint32(8000, 0x1F80 | rounding_mode << 13, true);
-        const program = [0x0F,0xAE,0x15,...u32(DATA + 8000)], total = group || shuffle ? 256 : 96;
+        const program = [...ENABLE_SSE,0x0F,0xAE,0x15,...u32(DATA + 8000)], total = group || shuffle ? 256 : 96;
+        // (misaligned and page-crossing operands where alignment is not required)
+        const offsets = aligned_m128({ mmx, op, prefix }) ? [0,16,4064,4080] : [0,1,4092,4095];
         for(let n = 0; n < total; n++) {
             const src = n >> 3 & (source_gpr ? 3 : 7), dst = n & (target_gpr ? 3 : 7), memory = memory_only || !register_only && !group && n >= 64;
             const source = DATA + ((n >> 3) * 16);
@@ -117,7 +132,7 @@ try {
             if(masked_store) program.push(0xBF,...u32(OUT + n * 32));
             program.push(0xF9, ...prefix, 0x0F, op,
                 group ? 0xC0 | group << 3 | dst : reverse ? 0xC0 | src << 3 | dst : memory ? 0x05 | dst << 3 : 0xC0 | dst << 3 | src,
-                ...(memory ? u32(memory_store ? OUT + n * 32 : DATA + [0,1,4092,4095][n & 3]) : []),
+                ...(memory ? u32(memory_store ? OUT + n * 32 : DATA + offsets[n & 3]) : []),
                 ...(group || shuffle ? [n] : []));
             if(!masked_store && !memory_store) program.push(...(target_gpr ? [0x89] : store), 0x05 | dst << 3, ...u32(OUT + n * 32));
             program.push(0x9C, 0x58, 0xA3, ...u32(OUT + n * 32 + 16));

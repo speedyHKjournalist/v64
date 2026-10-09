@@ -9,10 +9,43 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
 COMMIT = "90f90481d438317a14f8f68c2a81e3d28ae0a11c"
+# FXSAVE and FXRSTOR are not pinned any more. The SIMD/XSAVE plan's P2
+# (8c6ccc8c, docs/simd-xsave-plan.md section 14) replaced both bodies on purpose
+# with the XSAVE-area codec in src/rust/cpu/xstate.rs, which the interpreter
+# and the IR's adapters share. A misaligned operand now raises #GP(0) (the old
+# bodies only had a dbg_assert), every field is checked for page faults before
+# any byte moves, fields move in 8-byte and single-byte pieces, and FXRSTOR
+# reads the whole area before it checks MXCSR. Against the old bodies,
+# fp_state.mjs fails in its MMIO cases: they store FOP, FIP and FCS as write8,
+# write8, write32, write8, write8, the codec as two write32s. The codec is
+# tested by `cargo test cpu::xstate` and `make xsave-tests`, and
+# `make ir-fp-state-tests` compares the IR's adapters with the interpreter.
+#
+# do_task_switch stays pinned, although 0128f9ab deliberately rewrote
+# do_task_switch_checked, which the IR calls: it now checks both TSSs and reads
+# the new one before it commits, and it delivers #GP/#TS/#NP/#PF where the old
+# body panics. On every task switch the old body completes, the two still
+# agree, and system_modes.mjs has no other independent oracle for task
+# switches; unpinned, its reference runs would compare do_task_switch_checked
+# with itself. Two of its scenarios take a page fault on a TSS. There the old
+# body delivers the same #PF and then panics in unwrap(), so the test expects
+# the reference to trap and the IR to complete. For the new TSS it also
+# expects the IR to leave alone the old-task save and the busy bits that the
+# old body writes first.
 SOURCES = {
-    "src/rust/cpu/misc_instr.rs": ["fxsave", "fxrstor"],
     "src/rust/cpu/cpu.rs": ["iret", "call_interrupt_vector", "far_jump", "far_return", "do_task_switch", "safe_read_write16"],
     "src/rust/cpu/fpu.rs": ["fpu_frstor32", "fpu_fsave32"],
+}
+# Edits that let a pinned body compile against today's helpers without changing
+# what it does; each `before` occurs exactly once in the body. Since 8d7a3927,
+# lookup_segment_selector returns descriptor addresses as u64 (IA-32e tables
+# can lie above 4 GiB). Outside long mode that is the 32-bit linear address the
+# old body computed as i32, and do_task_switch_checked casts it the same way.
+ADAPTATIONS = {
+    "do_task_switch": [
+        ("safe_write64(tr_descriptor_address, ", "safe_write64(tr_descriptor_address as i32, "),
+        ("safe_write64(descriptor_address, ", "safe_write64(descriptor_address as i32, "),
+    ],
 }
 
 def function_span(text, name):
@@ -39,9 +72,12 @@ with tempfile.TemporaryDirectory(prefix="control-reference-", dir=ROOT / "build"
         for name in names:
             a, b = function_span(old, name)
             body = old[a:b]
+            body_hashes[name] = hashlib.sha256(body.encode()).hexdigest()
+            for before, after in ADAPTATIONS.get(name, []):
+                assert body.count(before) == 1, (name, before)
+                body = body.replace(before, after)
             a, b = function_span(current, name)
             current = current[:a] + body + current[b:]
-            body_hashes[name] = hashlib.sha256(body.encode()).hexdigest()
         (stage / source).write_text(current)
     target = ROOT / "build/control-reference-target"
     hashes = {}
@@ -57,6 +93,6 @@ with tempfile.TemporaryDirectory(prefix="control-reference-", dir=ROOT / "build"
         shutil.copy2(target / "wasm32-unknown-unknown" / ("release" if release else "debug") / "v86.wasm", output)
         hashes["release" if release else "debug"] = hashlib.sha256(output.read_bytes()).hexdigest()
     (ROOT / "build/control-reference.json").write_text(json.dumps({
-        "commit": COMMIT, "body_sha256": body_hashes, "wasm_sha256": hashes,
-        "scope": "Interpreter control, FSAVE/FRSTOR, FXSAVE/FXRSTOR and word RMW bodies pinned; checked IR adapters and other CPU code from working tree",
+        "commit": COMMIT, "body_sha256": body_hashes, "adaptations": ADAPTATIONS, "wasm_sha256": hashes,
+        "scope": "Interpreter control, FSAVE/FRSTOR and word RMW bodies pinned; FXSAVE/FXRSTOR (cpu/xstate.rs since SIMD/XSAVE P2), checked IR adapters and other CPU code from working tree",
     }, indent=2) + "\n")

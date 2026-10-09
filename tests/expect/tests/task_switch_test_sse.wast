@@ -12,18 +12,10 @@
   (func $f (export "f") (type $t3) (param $p0 i32)
     (local $l1 i32) (local $l2 i32) (local $l3 v128) (local $l4 v128) (local $l5 i32) (local $l6 i32) (local $l7 v128) (local $l8 v128)
     (if $I0
-      (i32.eqz
-        (i32.and
-          (i32.load
-            (i32.const 596))
-          (i32.const 512)))
-      (then
-        (return)))
-    (if $I1
       (local.get $p0)
       (then
         (return)))
-    (if $I2
+    (if $I1
       (i32.eqz
         (call $e.ir_enter_checked
           (i32.const 4096)
@@ -35,7 +27,7 @@
       (i32.const 0))
     (local.set $l2
       (i32.const 256))
-    (if $I3
+    (if $I2
       (local.get $p0)
       (then
         (return)))
@@ -47,7 +39,7 @@
         (i32.const 848)))
     (local.set $l5
       (i32.const 0))
-    (if $I4
+    (if $I3
       (i32.lt_u
         (local.get $l2)
         (i32.const 2))
@@ -84,46 +76,18 @@
       (i32.sub
         (local.get $l2)
         (i32.const 2)))
-    (if $I5
-      (i32.eqz
+    (if $I4
+      (i32.or
         (i32.and
           (i32.load
-            (i32.const 596))
+            (i32.const 580))
+          (i32.const 12))
+        (i32.xor
+          (i32.and
+            (i32.load
+              (i32.const 596))
+            (i32.const 512))
           (i32.const 512)))
-      (then
-        (i32.store
-          (i32.const 560)
-          (i32.add
-            (i32.load
-              (i32.const 740))
-            (i32.const 4096)))
-        (i32.store
-          (i32.const 556)
-          (i32.add
-            (i32.const 4096)
-            (i32.load
-              (i32.const 740))))
-        (i32.store
-          (i32.const 664)
-          (i32.add
-            (i32.sub
-              (i32.add
-                (i32.const 0)
-                (local.get $l5))
-              (local.get $l1))
-            (i32.load
-              (i32.const 664))))
-        (local.set $l1
-          (i32.add
-            (i32.const 0)
-            (local.get $l5)))
-        (call $e.ir_admission_barrier)
-        (return)))
-    (if $I6
-      (i32.and
-        (i32.load
-          (i32.const 580))
-        (i32.const 12))
       (then
         (i32.store
           (i32.const 560)
@@ -160,7 +124,7 @@
         (call $e.ir_admission_barrier)
         (local.set $l6
           (call $e.ir_sse_guard))
-        (if $I7
+        (if $I5
           (i32.ne
             (local.get $l6)
             (i32.const 2))
@@ -213,13 +177,13 @@
         (i32.const 4101)))
     (local.set $l6
       (call $e.ir_hlt))
-    (if $I8
+    (if $I6
       (i32.eq
         (local.get $l6)
         (i32.const 2))
       (then
         (return)))
-    (if $I9
+    (if $I7
       (i32.eq
         (local.get $l6)
         (i32.const 4))

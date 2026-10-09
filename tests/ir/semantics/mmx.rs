@@ -11,7 +11,10 @@ use crate::ir::{
 };
 #[test]
 fn mmx_fixtures() {
+    use crate::cpu::features::{SSSE3, TEST_FEATURES};
     std::fs::create_dir_all("build/ir-mmx").unwrap();
+    // (tests/ir/differential/mmx.mjs runs these on a machine with SSSE3)
+    TEST_FEATURES.with(|f| f.set(SSSE3));
     let mut cases = Vec::new();
     for &(key, width, forms) in OPERATIONS {
         let opcode = key & 0xFFFFFF;
@@ -30,10 +33,15 @@ fn mmx_fixtures() {
                         if mode != address32 {
                             bytes.push(0x67);
                         }
-                        if opcode > 0xFFFF {
-                            bytes.push((opcode >> 16) as u8);
+                        if matches!(opcode >> 8, 0x0F38 | 0x0F3A) {
+                            bytes.extend_from_slice(&[0x0F, (opcode >> 8) as u8, opcode as u8]);
                         }
-                        bytes.extend_from_slice(&[0x0F, opcode as u8]);
+                        else {
+                            if opcode > 0xFFFF {
+                                bytes.push((opcode >> 16) as u8);
+                            }
+                            bytes.extend_from_slice(&[0x0F, opcode as u8]);
+                        }
                         if forms != 4 {
                             let group = if key >> 24 != 0 { (key >> 24) as u8 } else { 1 };
                             bytes.push(
@@ -56,7 +64,7 @@ fn mmx_fixtures() {
                                 &0x6000u32.to_le_bytes()[..if address32 { 4 } else { 2 }],
                             );
                         }
-                        if key >> 24 != 0 || [0x0F70, 0x0FC4, 0x0FC5].contains(&opcode) {
+                        if key >> 24 != 0 || [0x0F70, 0x0FC4, 0x0FC5, 0x0F3A0F].contains(&opcode) {
                             bytes.push(
                                 [0, 1, 15, 16, 31, 32, 63, 255][usize::from(mode) * 4
                                     + usize::from(address32) * 2
@@ -120,6 +128,7 @@ fn mmx_fixtures() {
         }
     }
     std::fs::write("build/ir-mmx/cases.json", format!("[{}]", cases.join(","))).unwrap();
+    TEST_FEATURES.with(|f| f.set(0));
 }
 
 #[test]

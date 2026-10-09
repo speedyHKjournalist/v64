@@ -74,10 +74,14 @@ function load_pe(file) {
     return { entry, parts };
 }
 
-async function create(arm) {
+// (a benchmark's cpu_features: the optional CPU features its guest uses;
+// cpu_type: the x86-64 profile for its own ones, such as LZCNT)
+async function create(arm, bench) {
     const vm = new V86({
         graphics_adapter: "bochs_vga",
         wasm_path: arm.wasm, memory_size: 128 << 20,
+        ...bench.cpu_features ? { cpu_features: bench.cpu_features, cpu_features_unreleased: !!bench.cpu_features_unreleased } : {},
+        ...bench.cpu_type ? { cpu_type: bench.cpu_type } : {},
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });
@@ -135,13 +139,13 @@ for(const bench of manifest.benchmarks) {
     };
     try {
         for(let c = 0; c < cold_runs; c++) for(const arm of c % 2 ? [...arms].reverse() : arms) {
-            const machine = await create(arm);
+            const machine = await create(arm, bench);
             try { const s = await execute(machine, image, iterations); note(arm, s); row.arms[arm.label].cold_ms.push(s.ms); }
             finally { await machine.vm.destroy(); }
         }
         const machines = [];
         try {
-            for(const arm of arms) machines.push(await create(arm));
+            for(const arm of arms) machines.push(await create(arm, bench));
             // Warm up until two consecutive runs of every arm agree within 5%.
             for(let w = 0; w < 30; w++) {
                 for(const m of machines) { const s = await execute(m, image, iterations); note(m.arm, s); row.arms[m.arm.label].warmup_ms.push(s.ms); }

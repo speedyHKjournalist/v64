@@ -5,13 +5,12 @@ use super::{
     memory::{self, Fault},
     state,
 };
-use crate::cpu::{cpu, global_pointers as gp};
+use crate::cpu::{cpu, global_pointers as gp, xstate};
 
 const PE: u64 = 1;
 const PG: u64 = 1 << 31;
 const PAE: u64 = 1 << 5;
 const CR0_VALID: u64 = 0xE005_003F;
-const CR4_VALID: u64 = 0x7FF; // no VMX, PCID, XSAVE, LA57, SMEP or SMAP in v1
 /// The bits of CR0 and CR4 that translations depend on: PE, WP, PG; PSE, PAE, PGE
 const TRANSLATION_CR0: u64 = PE | 1 << 16 | PG;
 const TRANSLATION_CR4: u64 = 1 << 4 | PAE | 1 << 7;
@@ -53,7 +52,9 @@ impl ControlState {
                 self.cr3 = value & !0xFE7;
             },
             4 => {
-                if value & !CR4_VALID != 0 || self.efer & EFER_LMA != 0 && value & PAE == 0 {
+                if value & !(cpu::cr4_valid_bits() as u64) != 0
+                    || self.efer & EFER_LMA != 0 && value & PAE == 0
+                {
                     return Err(Fault::gp());
                 }
                 self.cr4 = value;
@@ -774,11 +775,33 @@ unsafe fn descriptor_instruction(d: &Decoded) -> Result<(), Fault> {
     Ok(())
 }
 
+/// XGETBV and XSETBV (cpu::xstate): #UD without CR4.OSXSAVE, then #GP(0)
+unsafe fn xgetbv_xsetbv(set: bool, long: bool) -> Result<(), Fault> {
+    if !xstate::enabled() {
+        return Err(Fault::ud());
+    }
+    let index = state::read_gpr(1) as u32;
+    if !set {
+        let value = xstate::xgetbv(index, long).ok_or(Fault::gp())?;
+        state::write_gpr(0, value & 0xFFFF_FFFF, 32);
+        state::write_gpr(2, value >> 32, 32);
+        return Ok(());
+    }
+    let value = state::read_gpr(2) << 32 | state::read_gpr(0) & 0xFFFF_FFFF;
+    if *gp::cpl != 0 || !xstate::xsetbv(index, value) {
+        return Err(Fault::gp());
+    }
+    Ok(())
+}
 unsafe fn table_instruction(d: &Decoded) -> Result<(), Fault> {
     let modrm = d.modrm.ok_or(Fault::ud())?;
+    // XGETBV, XSETBV: without a mandatory prefix
+    if matches!(modrm, 0xD0 | 0xD1) && !d.prefixes.operand && d.prefixes.rep.is_none() {
+        return xgetbv_xsetbv(modrm == 0xD1, d.mode.is_long());
+    }
     // Register forms outside SMSW/LMSW/SWAPGS/RDTSCP belong to extensions
-    // this profile lacks (VMX, SVM, MONITOR, XSAVE, SMAP, ...): #UD before
-    // any privilege check. So is /5 on memory (RSTORSSP).
+    // this profile lacks (VMX, SVM, MONITOR, SMAP, ...): #UD before any
+    // privilege check. So is /5 on memory (RSTORSSP).
     let group = modrm >> 3 & 7;
     if modrm >= 0xC0 && !matches!(group, 4 | 6) && !matches!(modrm, 0xF8 | 0xF9)
         || modrm < 0xC0 && group == 5

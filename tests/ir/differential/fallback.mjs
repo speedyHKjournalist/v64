@@ -9,7 +9,8 @@ for(const [primary,expected] of [
     ["/v86-ir-runtime-fallback.wasm","/v86-ir-runtime-fallback.wasm"],
 ])assert.equal(wasm_fallback_path(primary),expected);
 globalThis.location={href:"https://example.test/demo/"};
-assert.equal(encode_worker_options({wasm_path:"custom.wasm",wasm_fallback_path:"portable.wasm"}).wasm_fallback_path,"https://example.test/demo/portable.wasm");
+// The encoder sees options new V86() has validated: graphics_adapter is required.
+assert.equal(encode_worker_options({graphics_adapter:"bochs_vga",wasm_path:"custom.wasm",wasm_fallback_path:"portable.wasm"}).wasm_fallback_path,"https://example.test/demo/portable.wasm");
 const primary=fs.readFileSync("build/v86-ir-test.wasm");
 const instantiate=WebAssembly.instantiate;let primary_rejected=0;
 // Exercise the loader's capability-rejection path even on SIMD-capable CI hosts.

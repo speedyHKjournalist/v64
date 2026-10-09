@@ -14,7 +14,7 @@ import { CPU } from "../cpu.js";
 import { MachineClock } from "../machine_clock.js";
 import { WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { view } from "../lib.js";
-import { CORE_STATE_RANGES, STATE_OFFSETS } from "../state_layout.js";
+import { CORE_STATE_RANGES, INIT_PRESERVED } from "../state_layout.js";
 import { relocate } from "./relocate.js";
 import { PM_TIMER_TICKS_PER_MS, pm_timer_shared_max } from "../acpi.js";
 import { ExtendedStore } from "../extended_memory.js";
@@ -22,8 +22,6 @@ import * as C from "./control.js";
 
 const CORE_EVENT_INIT = 1;
 const CORE_EVENT_SIPI = 2;
-const INIT_PRESERVED = [[STATE_OFFSETS.x64_pat, 8],
-    [STATE_OFFSETS.x64_mtrr_def_type, STATE_OFFSETS.x64_mc_banks + 128 - STATE_OFFSETS.x64_mtrr_def_type]];
 
 /**
  * @param {Object} init from ParallelMachine.start

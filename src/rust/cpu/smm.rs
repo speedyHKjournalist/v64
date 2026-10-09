@@ -545,6 +545,13 @@ pub unsafe fn rsm() {
     let area = save_area(*smbase, false).unwrap();
     dbg_log!("RSM: leave SMM, SMBASE {:x}", *smbase);
     let map_64 = *smm_state & SMM_MAP_64 != 0;
+    // invalid state in the save area: shutdown (SDM Vol. 3C 32.13 "RSM")
+    let cr4 = area.read32(if map_64 { 0x7F48 } else { 0x7F14 });
+    if cr4 & !cr4_valid_bits() != 0 {
+        dbg_log!("RSM: invalid CR4 {:x}: shutdown", cr4);
+        crate::cpu::exceptions::shutdown();
+        return;
+    }
     // auto HALT restart: back to HLT, if the SMI came there and the handler
     // left the field set
     let halt = *smm_state & SMM_HALTED != 0

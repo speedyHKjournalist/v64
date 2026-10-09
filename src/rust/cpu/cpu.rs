@@ -64,6 +64,12 @@ pub union reg128 {
     pub f64: [f64; 2],
 }
 
+impl reg128 {
+    /// The register's 128 bits (lane 0 in the low bits)
+    pub fn bits(self) -> u128 { unsafe { std::mem::transmute(self) } }
+    pub fn of_bits(bits: u128) -> reg128 { unsafe { std::mem::transmute(bits) } }
+}
+
 pub const INTERPRETER_ITERATION_LIMIT: u32 = 100_001;
 
 // How often, in milliseconds, to yield to the browser for rendering and running events
@@ -175,7 +181,19 @@ pub const CR4_PAE: i32 = 1 << 5;
 pub const CR4_PGE: i32 = 1 << 7;
 pub const CR4_OSFXSR: i32 = 1 << 9;
 pub const CR4_OSXMMEXCPT: i32 = 1 << 10;
+pub const CR4_OSXSAVE: i32 = 1 << 18;
 pub const CR4_SMEP: i32 = 1 << 20;
+/// The CR4 bits MOV to CR4 (legacy and x64) and RSM accept, those of the
+/// features this CPU has: VME through OSXMMEXCPT, OSXSAVE with XSAVE
+pub fn cr4_valid_bits() -> u32 {
+    0x7FF
+        | if crate::cpu::features::has(crate::cpu::features::XSAVE) {
+            CR4_OSXSAVE as u32
+        }
+        else {
+            0
+        }
+}
 
 pub const TSR_BACKLINK: i32 = 0x00;
 pub const TSR_CR3: i32 = 0x1C;
@@ -3319,6 +3337,9 @@ static mut INTERPRETED_PAGES: [(u32, u32); 1024] = [(0, 0); 1024];
 /// the interpreter started at (ir_interpreted_stat fields 4 and 5).
 static mut INTERPRETED_WATCH: u32 = u32::MAX;
 static mut INTERPRETED_OFFSETS: [u32; 256] = [0; 256];
+/// VEX instructions the interpreter ran (cpu::vex::run; ir_interpreted_stat
+/// field 6)
+pub static mut INTERPRETED_VEX: u32 = 0;
 #[inline(always)]
 unsafe fn note_interpreted_page(eip: u32, steps: u32) {
     INTERPRETED = INTERPRETED.wrapping_add(steps);
@@ -3338,7 +3359,8 @@ unsafe fn note_interpreted_page(eip: u32, steps: u32) {
 }
 /// field 0: total interpreted instructions; 1/2: page and count of table
 /// slot `index`; 3: reset; 4: watch page `index` (a page number); 5: its
-/// interpreted instructions started in 16-byte chunk `index`.
+/// interpreted instructions started in 16-byte chunk `index`; 6: VEX
+/// instructions interpreted.
 #[no_mangle]
 pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
     match field {
@@ -3355,6 +3377,7 @@ pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
         3 => {
             INTERPRETED = 0;
             INTERPRETED_PAGES = [(0, 0); 1024];
+            INTERPRETED_VEX = 0;
             0
         },
         4 => {
@@ -3366,6 +3389,7 @@ pub unsafe fn ir_interpreted_stat(field: u32, index: u32) -> u32 {
             let offsets = INTERPRETED_OFFSETS;
             offsets[index as usize]
         },
+        6 => INTERPRETED_VEX,
         _ => 0,
     }
 }
@@ -4021,6 +4045,25 @@ pub unsafe fn trigger_gp(code: i32) {
     crate::cpu::exceptions::fault(CPU_EXCEPTION_GP, Some(code));
 }
 
+/// An unmasked SIMD floating-point exception (cpu/simd_fp.rs): #XM, or #UD
+/// without CR4.OSXMMEXCPT
+#[inline(never)]
+pub unsafe fn trigger_simd_fp() {
+    if *cr.offset(4) & CR4_OSXMMEXCPT == 0 {
+        trigger_ud();
+        return;
+    }
+    crate::cpu::execution::mark_fault();
+    dbg_log!("#xm");
+    *instruction_pointer = *previous_ip;
+    if DEBUG {
+        if js::cpu_exception_hook(CPU_EXCEPTION_XM) {
+            return;
+        }
+    }
+    crate::cpu::exceptions::fault(CPU_EXCEPTION_XM, None);
+}
+
 #[cold]
 pub unsafe fn virt_boundary_read16(low: u32, high: u32) -> i32 {
     dbg_assert!(low & 0xFFF == 0xFFF);
@@ -4163,6 +4206,21 @@ pub unsafe fn safe_read64s(addr: i32) -> OrPageFault<u64> {
     else {
         Ok(memory::read64s(translate_address_read(addr)?) as u64)
     }
+}
+
+/// The m128 operand of a legacy SSE form other than MOVUPS, MOVUPD, MOVDQU
+/// and LDDQU (exception type 4, SDM vol. 2 table 2-21): #GP(0) unless
+/// 16-byte aligned, whatever the segment, before any page fault
+pub unsafe fn aligned16(addr: i32) -> OrPageFault<()> {
+    if addr & 15 != 0 {
+        trigger_gp(0);
+        return Err(());
+    }
+    Ok(())
+}
+pub unsafe fn safe_read128s_aligned(addr: i32) -> OrPageFault<reg128> {
+    aligned16(addr)?;
+    safe_read128s(addr)
 }
 
 pub unsafe fn safe_read128s(addr: i32) -> OrPageFault<reg128> {
@@ -4583,40 +4641,32 @@ pub unsafe fn task_switch_test() -> bool {
     };
 }
 
+/// RC, DAZ, FZ and the exception masks apply through cpu::simd_fp
 pub unsafe fn set_mxcsr(new_mxcsr: i32) {
     dbg_assert!(new_mxcsr & !MXCSR_MASK == 0); // checked by caller
-
-    if *mxcsr & MXCSR_DAZ == 0 && new_mxcsr & MXCSR_DAZ != 0 {
-        dbg_log!("Warning: Unimplemented MXCSR bit: Denormals Are Zero");
-    }
-    if *mxcsr & MXCSR_FZ == 0 && new_mxcsr & MXCSR_FZ != 0 {
-        dbg_log!("Warning: Unimplemented MXCSR bit: Flush To Zero");
-    }
-
-    let rounding_mode = new_mxcsr >> MXCSR_RC_SHIFT & 3;
-    if *mxcsr >> MXCSR_RC_SHIFT & 3 == 0 && rounding_mode != 0 {
-        dbg_log!(
-            "Warning: Unimplemented MXCSR rounding mode: {}",
-            rounding_mode
-        );
-    }
-
-    let exception_mask = new_mxcsr >> 7 & 0b111111;
-    if *mxcsr >> 7 & 0b111111 != exception_mask && exception_mask != 0b111111 {
-        dbg_log!(
-            "Warning: Unimplemented MXCSR exception mask: 0b{:b}",
-            exception_mask
-        );
-    }
-
     *mxcsr = new_mxcsr;
 }
 
+/// The checks of an MMX form (gen/x86_table.js mmx_form): #UD with CR0.EM,
+/// then #NM with CR0.TS
 pub unsafe fn task_switch_test_mmx() -> bool {
-    if *cr.offset(4) & CR4_OSFXSR == 0 {
-        dbg_log!("Warning: Unimplemented task switch test with cr4.osfxsr=0");
-    }
     if 0 != *cr & CR0_EM {
+        trigger_ud();
+        return false;
+    }
+    else if 0 != *cr & CR0_TS {
+        trigger_nm();
+        return false;
+    }
+    else {
+        return true;
+    };
+}
+
+/// The checks of a legacy SSE XMM form: #UD with CR0.EM or without
+/// CR4.OSFXSR, then #NM with CR0.TS
+pub unsafe fn task_switch_test_xmm() -> bool {
+    if 0 != *cr & CR0_EM || 0 == *cr.offset(4) & CR4_OSFXSR {
         trigger_ud();
         return false;
     }
@@ -4996,6 +5046,7 @@ pub fn reset_interrupt_controllers() {
 #[no_mangle]
 pub unsafe fn reset_cpu() {
     crate::x64::state::reset_extension();
+    crate::cpu::xstate::reset();
     crate::cpu::fpu::fpu_discard_cache();
     for i in 0..8 {
         *segment_is_null.offset(i) = false;

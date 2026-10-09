@@ -2,7 +2,7 @@ CLOSURE_DIR=closure-compiler
 CLOSURE=$(CLOSURE_DIR)/compiler.jar
 NASM_TEST_DIR=./tests/nasm
 
-INSTRUCTION_TABLES=src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
+INSTRUCTION_TABLES=src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/interpreter0f38.rs src/rust/gen/interpreter0f3a.rs
 
 # Only the dependencies common to the generators
 GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_ir_decoder.js gen/ir_semantics.js gen/state_layout.js, $(wildcard gen/*.js))
@@ -34,9 +34,13 @@ bench-quick: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 	node tests/bench/run.mjs --quick $(BENCH_ARGS)
 
 # Tier-0 page functions against the interpreter on random programs.
-ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
+ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin
 	node tests/ir/differential/tier0_fuzz.mjs 60 1
-	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
+	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 s10 s11 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
+	FUZZ_KIND=s12 node tests/ir/differential/tier0_fuzz.mjs 40 2
+	FUZZ_KIND=s13 node tests/ir/differential/tier0_fuzz.mjs 40 2
+	FUZZ_KIND=b node tests/ir/differential/tier0_fuzz.mjs 40 2
+	node tests/ir/differential/sse_fp_tracking.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/tier0_fetch_fault.mjs
 
 .PHONY: glbridge test-glbridge
@@ -112,7 +116,7 @@ CARGO_FLAGS_PARALLEL=$(CARGO_FLAGS) -C target-feature=+atomics \
 
 CORE_FILES=cjs.js const.js io.js machine_clock.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js display.js graphics_adapter.js ps2.js rtc.js uart.js parallel.js vmware.js \
-	   acpi.js acpi_tables.js platform.js q35.js ahci.js pcie_root_port.js hpet.js smbus.js ich9_tco.js state_layout.js iso9660.js \
+	   acpi.js acpi_tables.js platform.js q35.js ahci.js pcie_root_port.js hpet.js smbus.js ich9_tco.js state_layout.js cpu_features.js iso9660.js \
 	   state.js state_io.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   virtio_devices.js \
 	   bus.js log.js cpu.js \
@@ -133,7 +137,7 @@ GRAPHICS_ADAPTER_COMMON=src/cjs.js src/const.js src/lib.js src/log.js src/bus.js
 	src/graphics_adapters/machine.js src/graphics_adapters/vga_core.js src/graphics_adapters/renderer_protocol.js
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
-	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs
+	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/interpreter0f38.rs src/rust/gen/interpreter0f3a.rs
 
 CORE_FILES:=$(addprefix src/,$(CORE_FILES))
 LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
@@ -276,6 +280,10 @@ src/rust/gen/interpreter.rs: $(INTERPRETER_DEPENDENCIES)
 	./gen/generate_interpreter.js --output-dir build/ --table interpreter
 src/rust/gen/interpreter0f.rs: $(INTERPRETER_DEPENDENCIES)
 	./gen/generate_interpreter.js --output-dir build/ --table interpreter0f
+src/rust/gen/interpreter0f38.rs: $(INTERPRETER_DEPENDENCIES)
+	./gen/generate_interpreter.js --output-dir build/ --table interpreter0f38
+src/rust/gen/interpreter0f3a.rs: $(INTERPRETER_DEPENDENCIES)
+	./gen/generate_interpreter.js --output-dir build/ --table interpreter0f3a
 
 build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
@@ -423,6 +431,14 @@ kvm-unit-test: build/v86-debug.wasm
 	tests/kvm-unit-tests/run.mjs $(KVM_UNIT_TESTS)/taskswitch.flat
 	tests/kvm-unit-tests/run.mjs --expect-pass 11 $(KVM_UNIT_TESTS)/taskswitch2.flat
 	tests/kvm-unit-tests/run.mjs --expect-pass 127 $(KVM_UNIT_TESTS)/realmode.flat
+
+# x86/xsave.flat without XSAVE, with it (XCR0 x87, SSE) and with AVX too (YMM),
+# in the x86_64 build (whose exception tables ASM_TRY fills with .quad)
+kvm-unit-test-xsave: build/v86-debug.wasm
+	tests/kvm-unit-tests/build.sh x86_64 x86/xsave.flat
+	tests/kvm-unit-tests/run.mjs --cpu-type x86_64 --expect-pass 4 build/kvm-unit-tests/x86_64/x86/xsave.flat
+	tests/kvm-unit-tests/run.mjs --cpu-type x86_64 --expect-pass 15 --cpu-features XSAVE build/kvm-unit-tests/x86_64/x86/xsave.flat
+	tests/kvm-unit-tests/run.mjs --cpu-type x86_64 --expect-pass 17 --cpu-features SSSE3,SSE4.1,SSE4.2,XSAVE,AVX build/kvm-unit-tests/x86_64/x86/xsave.flat
 
 kvm-unit-test-release: build/libv86.mjs build/v86.wasm
 	tests/kvm-unit-tests/build.sh i386 x86/realmode.flat x86/taskswitch.flat x86/taskswitch2.flat
@@ -851,8 +867,10 @@ acpi-sleep-tests: build/v86-debug.wasm images/linux4.iso
 # firmware tables (the ACPICA part needs iasl/acpiexec)
 platform-contract-tests: build/v86-debug.wasm build/libv86.mjs build/v86.wasm
 	node gen/state_layout.js --check
+	node gen/cpu_features.js --check
 	node tools/cpu_contract.mjs --check
 	node tests/x64/profile_options.mjs
+	node tests/x64/cpu_features.mjs
 	node tests/smp/topology.mjs
 	node tests/devices/acpi_tables.js
 
@@ -887,6 +905,7 @@ platform-release-gate:
 # Alpine ISO on first use and run for several minutes on the interpreter.
 x64-decode-tests: state-layout-check
 	cargo test x64::
+	cargo test simd_corpus -- --nocapture
 	CARGO_TARGET_DIR=build/x64-oracle-target cargo run --manifest-path tests/x64/oracle/Cargo.toml --release
 
 x64-system-tests: build/v86-debug.wasm
@@ -905,6 +924,7 @@ x64-differential-tests: build/v86-debug.wasm
 	node tests/x64/vector_oracle.mjs
 	node tests/x64/native_oracle.mjs
 	node tests/x64/cache_oracle.mjs
+	node tests/x64/rep_strings.mjs
 
 # The x64 page tier (x64::pagegen/pages): QEMU and interpreter references,
 # and random programs compared with the interpreter.
@@ -916,6 +936,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	node tests/x64/page_system.mjs
 	node tests/x64/frame_buffer.mjs
 	node tests/x64/compat_jit.mjs
+	node tests/x64/initial_ram.mjs
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=3 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
@@ -944,6 +965,23 @@ x64-guest-tests: build/v86-debug.wasm
 	X64_JIT=1 X64_LINUX_SNAPSHOT=1 X64_LINUX_LIFECYCLE=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
 	X64_HIGH_MEMORY=134217728 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
 	X64_HIGH_MEMORY=134217728 X64_JIT=1 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+
+# The real-guest acceptance of docs/simd-xsave-plan.md 11.3 (P12): Alpine
+# x86_64 running glibc 2.39's x86-64-v3 code (ld.so's levels, glibc-hwcaps,
+# the IFUNC choices and their results as QEMU's) and the YMM registers across
+# context switches, page tier: x86-64-v3 with the XSAVE family on one core,
+# on two with snapshots and on two in vCPU workers, AVX alone, x86-64-v2, and
+# x86-64-v3 under noxsave
+X64_V3_FEATURES = SSSE3,SSE4.1,SSE4.2,XSAVE,AVX,AVX2,FMA,F16C,BMI1,BMI2,LZCNT,MOVBE,XSAVEOPT,XSAVEC,XGETBV1,XSAVES
+X64_LINUX_DEFAULT_CMDLINE = console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 loglevel=7 nokaslr panic=-1 modules=loop,squashfs,sd-mod,usb-storage
+.PHONY: x64-glibc-tests
+x64-glibc-tests: build/libv86.mjs build/v86.wasm build/v86-parallel.wasm build/vcpu-worker.js
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_LINUX_SNAPSHOT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_CORES=2 X64_PARALLEL=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=SSSE3,SSE4.1,SSE4.2,XSAVE,AVX X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=SSSE3,SSE4.1,SSE4.2 X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
+	TEST_RELEASE_BUILD=1 X64_JIT=1 X64_LINUX_GLIBC=1 X64_CPU_FEATURES=$(X64_V3_FEATURES) X64_LINUX_CMDLINE="$(X64_LINUX_DEFAULT_CMDLINE) noxsave" X64_LINUX_TIMEOUT=1800000 node tests/x64/linux_boot.mjs
 
 x64-multicore-guest-tests: build/v86-debug.wasm
 	X64_CORES=4 X64_LINUX_QEMU=1 X64_LINUX_TIMEOUT=180000 node tests/x64/linux_boot.mjs
@@ -1253,8 +1291,8 @@ build/v86-ir-runtime.wasm: build/v86.wasm
 
 .PHONY: ir-cache-tests
 ir-cache-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cache-test-release.wasm build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin
-	node tests/ir/differential/fp_debug_deferral.mjs build/v86-ir-cache-test.wasm
-	node tests/ir/differential/fp_debug_deferral.mjs build/v86-ir-cache-test-release.wasm --release
+	node tests/ir/differential/sse_task_faults.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/sse_task_faults.mjs build/v86-ir-cache-test-release.wasm --release
 	node tests/ir/differential/cache.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/cache.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/cache.mjs build/v86-ir-runtime.wasm
@@ -1355,6 +1393,21 @@ ir-sse-fp-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-rel
 	cargo test ir::sse_fp_tests
 	node tests/ir/differential/sse_fp.mjs
 
+.PHONY: ir-crc32-tests
+ir-crc32-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::crc32_tests
+	node tests/ir/differential/crc32.mjs
+
+.PHONY: ir-avx-tests
+ir-avx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::avx_tests
+	node tests/ir/differential/avx.mjs
+
+.PHONY: ir-bmi-tests
+ir-bmi-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::bmi_tests
+	node tests/ir/differential/bmi.mjs
+
 .PHONY: ir-mmx-tests
 ir-mmx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::mmx_tests
@@ -1450,3 +1503,115 @@ multicore-linux-jit-tests-release: build/smp/affinity_probe build/libv86.mjs bui
 	TEST_RELEASE_BUILD=1 SMP_JIT_MODE=region node tests/smp/linux_topology.mjs
 
 .PHONY: multicore-linux-jit-tests multicore-linux-jit-tests-release
+
+# SSSE3 to x86-64-v3 and XSAVE (docs/simd-xsave-plan.md). gen/isa_forms.json
+# lists the target instruction forms, generated from the pinned iced-x86 like
+# the x64 decode oracle; gen/cpu_features.js holds the CPUID features of the
+# plan and their dependencies.
+isa-forms:
+	CARGO_TARGET_DIR=build/isa-forms-target cargo run --release --manifest-path tools/isa_forms/Cargo.toml -- gen/isa_forms.json
+
+isa-forms-check:
+	CARGO_TARGET_DIR=build/isa-forms-target cargo run --release --manifest-path tools/isa_forms/Cargo.toml -- --check gen/isa_forms.json
+	node gen/cpu_features.js --check
+
+# gen/isa_hot_forms.json: the forms the x86-64 glibc uses (plan 5.1), from
+# the unpacked libc6 package named in that file
+ISA_GLIBC ?= build/simd-xsave/p0-baseline/glibc/root/usr/lib/x86_64-linux-gnu
+isa-hot-forms:
+	CARGO_TARGET_DIR=build/isa-forms-target cargo run --release --manifest-path tools/isa_forms/Cargo.toml -- --hot gen/isa_hot_forms.json $(ISA_GLIBC)/libc.so.6 $(ISA_GLIBC)/libm.so.6 $(ISA_GLIBC)/ld-linux-x86-64.so.2
+
+# The decode rules of the plan (5.2) on the 32-bit interpreter and both IR
+# code generators: mandatory prefixes, F2/F3 order, #UD for unlisted prefixes
+decode-rules-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-ir-test.wasm build/v86-ir-test-release.wasm
+	node tests/rust/decode_rules.mjs
+	node tests/rust/decode_rules.mjs build/v86-debug.wasm
+	node tests/ir/decode/vex_modes.mjs
+	node tests/ir/decode/vex_modes.mjs build/v86-ir-test-release.wasm
+
+# The XSAVE feature set (docs/simd-xsave-plan.md P2): the 32-bit engines,
+# the x64 engine and compatibility mode, snapshots, INIT and reset
+xsave-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+	node tests/rust/xsave.mjs
+	node tests/rust/xsave.mjs build/v86-debug.wasm
+	node tests/x64/xsave.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/xsave.mjs
+	node tests/smp/xstate_lifecycle.mjs
+	TEST_RELEASE_BUILD=1 node tests/smp/xstate_lifecycle.mjs
+
+# SSSE3 (docs/simd-xsave-plan.md P3): the 32-bit engines against a model of
+# the SDM (with Wasm SIMD, debug, and without SIMD), the x64 engine against
+# QEMU and the model
+ssse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/ssse3.mjs
+	node tests/rust/ssse3.mjs build/v86-debug.wasm
+	node tests/rust/ssse3.mjs build/v86-fallback.wasm
+	node tests/x64/ssse3.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/ssse3.mjs
+
+# Exact SSE floating point in the 32-bit engines against an independent model
+# (docs/simd-xsave-plan.md 7.4, P4a), and what Tier-0 knows about registers.
+.PHONY: sse-fp-tests
+sse-fp-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/sse_fp.mjs
+	node tests/rust/sse_fp.mjs build/v86-fallback.wasm
+	node tests/rust/sse_fp.mjs build/v86-debug.wasm
+	node tests/ir/differential/sse_fp_tracking.mjs
+
+# SSE4.1 and SSE4.2 (docs/simd-xsave-plan.md P4b): the 32-bit engines against a
+# model of the SDM (with Wasm SIMD, debug, and without SIMD), the x64 engine
+# against QEMU and the model
+.PHONY: sse4-tests
+sse4-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/sse4.mjs
+	node tests/rust/sse4.mjs build/v86-debug.wasm
+	node tests/rust/sse4.mjs build/v86-fallback.wasm
+	node tests/x64/sse4.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/sse4.mjs
+
+# AVX (docs/simd-xsave-plan.md P5-P6): the 32-bit engines against a model of
+# the SDM (with Wasm SIMD, debug, and without SIMD; floating point with every
+# MXCSR setting in avx_fp.mjs), the x64 engine and compatibility mode against
+# QEMU and the model
+.PHONY: avx-tests
+avx-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm build/v86-parallel.wasm build/vcpu-worker.js
+	node tests/rust/avx.mjs
+	node tests/rust/avx.mjs build/v86-debug.wasm
+	node tests/rust/avx.mjs build/v86-fallback.wasm
+	node tests/rust/avx_fp.mjs
+	node tests/rust/avx_fp.mjs build/v86-debug.wasm
+	node tests/rust/avx_fp.mjs build/v86-fallback.wasm
+	node tests/x64/avx.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/avx.mjs
+
+# BMI1, BMI2, TZCNT, LZCNT and MOVBE (docs/simd-xsave-plan.md P10): the
+# 32-bit engines against a bit-level model of the SDM (release and debug
+# builds), the x64 engine (interpreted, page tier, compatibility-mode Tier-0)
+# against QEMU and the model
+.PHONY: bmi-tests
+bmi-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+	node tests/rust/bmi.mjs
+	node tests/rust/bmi.mjs build/v86-debug.wasm
+	node tests/x64/bmi.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/bmi.mjs
+
+# FMA and F16C (docs/simd-xsave-plan.md P11): the 32-bit engines against the
+# exact model of tests/rust/sse_fp_model.mjs (release and debug builds), the
+# x64 engine (interpreted, page tier, compatibility-mode Tier-0) against QEMU
+# and the model
+.PHONY: fma-tests
+fma-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm
+	node tests/rust/fma.mjs
+	node tests/rust/fma.mjs build/v86-debug.wasm
+	node tests/x64/fma.mjs
+	TEST_RELEASE_BUILD=1 node tests/x64/fma.mjs
+
+# The legacy SSE exception conditions in the 32-bit engines (docs/simd-xsave-plan.md
+# 3.3, P4a): CR4.OSFXSR for XMM forms only, 16-byte alignment, their order
+.PHONY: sse-fault-tests
+sse-fault-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-debug.wasm build/v86-fallback.wasm
+	node tests/rust/sse_faults.mjs
+	node tests/rust/sse_faults.mjs build/v86-fallback.wasm
+	node tests/rust/sse_faults.mjs build/v86-debug.wasm
+
+.PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests xsave-tests ssse3-tests

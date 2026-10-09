@@ -36,7 +36,7 @@ pub(super) fn call_abi(
     state: StateId,
     abi: HelperAbi,
 ) {
-    let selective = (name == "ir_sse_fp_reg_continue")
+    let selective = matches!(name, "ir_sse_fp_reg_continue" | "ir_avx_fp_reg_continue")
         .then(|| cpu_registry::xmm_register_operands(&b.region, &args))
         .flatten();
     let terminal = matches!(abi, HelperAbi::CpuExit | HelperAbi::CpuRep);

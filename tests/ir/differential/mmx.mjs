@@ -9,19 +9,15 @@ const continuation_modules=continuation_cases.map((_,i)=>new WebAssembly.Module(
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
-    let log_observer=null;
     const wasm_path=(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
         graphics_adapter: "bochs_vga",
-        wasm_fn:async imports=>{
-            const original=imports.env.log_from_wasm;
-            imports.env.log_from_wasm=(...args)=>log_observer?log_observer():original(...args);
-            return (await WebAssembly.instantiate(fs.readFileSync(wasm_path),imports)).instance.exports;
-        },
+        wasm_fn:async imports=>(await WebAssembly.instantiate(fs.readFileSync(wasm_path),imports)).instance.exports,
         memory_size:32<<20,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
+        cpu_features:["SSSE3"], // (the fixtures include the SSSE3 forms)
     });
     try {
         await new Promise(resolve=>vm.add_listener("emulator-loaded",resolve));
@@ -88,10 +84,10 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0,osfxsr=true}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4|512; // Ordinary continuation excludes the debug OSFXSR observer.
+            cpu.cr[4]=osfxsr?cr4|512:cr4&~512;
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -203,6 +199,13 @@ for(const release of [false,true]){
                 const expected=compare(i,()=>reset(i,{task,nullSegment:true}),101);
                 assert.equal(expected.ip,task===8?NM:UD); comparisons++;
             }
+            // Without CR4.OSFXSR the MMX forms run; MOVDQ2Q and MOVQ2DQ name
+            // an XMM register: #UD, as the legacy SSE forms (before #NM)
+            if(!dirty) for(const task of [0,8]) {
+                const xmm=opcode===0xF20FD6||opcode===0xF30FD6;
+                const expected=compare(i,()=>reset(i,{task,osfxsr:false,sample:4}),xmm||task?101:102);
+                assert.equal(expected.ip,xmm?UD:task?NM:PC+cases[i][0].length); comparisons++;
+            }
         }
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} MMX arithmetic/shift/transfer, x87 alias/TOP/tags, dirty XMM, masked stores, MMIO and page faults and #NM/#UD priority cases`);
 
@@ -244,49 +247,6 @@ for(const release of [false,true]){
         }
         console.log(`PASS (${release?"release":"debug"}): ${continuations} MMX successor/loop/exact-budget comparisons, GPR/XMM/F80 alias and EMMS, 16/32-bit, late #UD/#PF, #NM and count wrap`);
 
-        if(!release) {
-            let observers=0;
-            for(let i=0;i<continuation_cases.length;i++) {
-                const [name,bytes,mode,cfg,opt]=continuation_cases[i];
-                if(!["gpr","xmm"].includes(name)||!mode||cfg) continue;
-                const after=name==="gpr"?4:8;
-                let calls=0;
-                const configure=()=>{
-                    reset(0);cpu.mem8.set(bytes,PC);cpu.is_32[0]=1;cpu.cr[4]|=512;
-                    e.update_state_flags();calls=0;
-                    log_observer=()=>{
-                        calls++;
-                        if(name==="xmm")assert.equal(cpu.reg_xmm32s[4],0,"dirty XMM must be materialized before the observer");
-                        cpu.reg_xmm32s[4]=0x13579BDF;
-                        cpu.reg32[3]=0x12345678;
-                        cpu.segment_offsets[3]=123;
-                        cpu.mem8[PC+after]=0x90;
-                    };
-                };
-                configure();e.ir_test_step();cpu.cr[4]&=~512;e.ir_test_step();
-                const expected=state();assert.equal(calls,1);
-                let links=0;
-                const wrapped={...imports,ir_request_link:()=>{links++;}};
-                for(const helper of ["ir_mmx_reg_continue","ir_mmx_xmm_continue"]) {
-                    wrapped[helper]=(...args)=>{cpu.cr[4]&=~512;return e[helper](...args);};
-                }
-                const entry_module=new WebAssembly.Module(fs.readFileSync(`build/ir-mmx-continuation/${i}-entry.wasm`));
-                const instance=new WebAssembly.Instance(entry_module,{e:wrapped});
-                configure();
-                const epoch_address=e.ir_admission_epoch_address();
-                const epoch=new DataView(e.memory.buffer).getBigUint64(epoch_address,true);
-                instance.exports.f(0);
-                assert.equal(calls,1,`debug MMX observer ${name}/${opt} runs once`);
-                assert.equal(links,0,"CpuReload invalidation cannot request normal chaining");
-                assert.equal(linear32[664>>2],102,"completed prefix retires once");
-                assert.equal(cpu.instruction_pointer[0],PC+after,"observer prevents suffix execution");
-                assert.equal(cpu.segment_offsets[3],123);
-                assert(new DataView(e.memory.buffer).getBigUint64(epoch_address,true)>epoch,"observer revokes code admission before the callback");
-                assert.deepEqual(state(),expected,`debug MMX observer ${name}/${opt} preserves CPU-owned post-state`);
-                log_observer=null;observers++;
-            }
-            console.log(`PASS (debug): ${observers} OSFXSR logging observers preserve dirty XMM/GPR/context, code revocation and exact partial retirement`);
-        }
 
     } finally {
         await vm.destroy();

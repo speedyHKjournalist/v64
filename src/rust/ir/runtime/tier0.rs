@@ -6,8 +6,9 @@ pub const STEP_NEXT: i32 = 0;
 /// EIP moved (taken branch, delivered fault) within the same execution
 /// context: the page function may dispatch the new EIP itself.
 pub const STEP_DISPATCH: i32 = 1;
-/// The context changed (mode, privilege, paging, interrupt flag, halt) or a
-/// compiled code page was written: return to the CPU loop.
+/// The context changed (mode, privilege, paging, CR4, interrupt flag, halt),
+/// a compiled code page was written or an admission barrier passed (such as
+/// XSETBV's): return to the CPU loop.
 pub const STEP_EXIT: i32 = 2;
 
 #[derive(PartialEq, Eq)]
@@ -19,6 +20,9 @@ struct Context {
     control: i32,
     cr0: i32,
     cr3: i32,
+    // (the VEX state, which page functions check once per activation;
+    // XSETBV's admission barrier advances the epoch)
+    cr4: i32,
     state_flags: u32,
     epoch: u64,
 }
@@ -31,6 +35,7 @@ unsafe fn context() -> Context {
         control: *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM),
         cr0: *gp::cr,
         cr3: *gp::cr.add(3),
+        cr4: *gp::cr.add(4),
         // Flat segmentation: page functions may be specialized for it.
         state_flags: (*gp::state_flags).to_u32(),
         epoch: super::entry::continuation_epoch(),
@@ -92,6 +97,111 @@ pub unsafe fn ir_t0_condition(cc: u32) -> u32 {
     };
     (base != (cc & 1 != 0)) as u32
 }
+
+/// The operands of ir_t0_sse_fp: the destination (replaced by the result)
+/// and the source, written by the page function (ir_t0_fma's: the
+/// destination, the first source and the third)
+#[repr(C, align(16))]
+pub struct SseFpOperands(pub [u128; 3]);
+pub static mut T0_SSE_FP: SseFpOperands = SseFpOperands([0; 3]);
+/// Address of T0_SSE_FP for generated code
+pub fn sse_fp_operands() -> u32 { (&raw const T0_SSE_FP) as u32 }
+
+/// SSE floating point exactly (cpu::simd_fp), for the native templates'
+/// refused instructions, on T0_SSE_FP: `key` is the catalogue key and
+/// `imm8` CMPPS' predicate; the result (for conversions to an integer and
+/// COMISS, the integer or the EFLAGS bits) replaces the destination and
+/// MXCSR's flags are updated. 1 if the instruction faults: only MXCSR's
+/// flags are set, as the interpreter, which delivers the fault, sets them
+/// again; else 0.
+#[no_mangle]
+pub unsafe fn ir_t0_sse_fp(key: u32, imm8: u32) -> u32 {
+    use crate::cpu::simd_fp;
+    SSE_FP_CALLS[(key as usize).wrapping_mul(0x9E37_79B9) >> 24 & 255] += 1;
+    let [destination, source, _] = T0_SSE_FP.0;
+    let result = match key {
+        // ROUNDPS/PD/SS/SD (SSE4.1)
+        0x660F3A08..=0x660F3A0B => simd_fp::round(key, destination, source, imm8 as u8),
+        _ => match key as u8 {
+            0x52 | 0x53 => Ok(simd_fp::reciprocal(key, destination, source)),
+            0x2E | 0x2F => simd_fp::compare_flags(key, destination, source).map(u128::from),
+            // (the predicate: imm8[2:0], VEX imm8[4:0])
+            0xC2 => simd_fp::compare(key, destination, source, imm8 as u8),
+            0x2A | 0x2C | 0x2D | 0x5A | 0x5B | 0xE6 => {
+                simd_fp::convert(key, false, destination, source)
+            },
+            _ => simd_fp::arithmetic(key, destination, source, imm8 as u8),
+        },
+    };
+    match result {
+        Ok(result) => {
+            T0_SSE_FP.0[0] = result;
+            0
+        },
+        Err(simd_fp::Unmasked) => 1,
+    }
+}
+
+/// FMA's VEX.128 and scalar forms exactly (cpu::simd_fp::fused), for the
+/// templates of Tier-0 and the x64 page tier, on T0_SSE_FP (the destination,
+/// the first source and the r/m operand): `op` is the opcode byte, bit 8
+/// VEX.W. The result replaces the destination and MXCSR's flags are
+/// updated. 1 if the instruction faults: only MXCSR's flags are set, as the
+/// interpreter, which delivers the fault, sets them again; else 0.
+#[no_mangle]
+pub unsafe fn ir_t0_fma(op: u32) -> u32 {
+    FMA_CALLS = FMA_CALLS.wrapping_add(1);
+    let [destination, first, third] = T0_SSE_FP.0;
+    match crate::cpu::simd_fp::fused(op as u8, op & 0x100 != 0, [destination], [first], [third]) {
+        Ok([result]) => {
+            T0_SSE_FP.0[0] = result;
+            0
+        },
+        Err(crate::cpu::simd_fp::Unmasked) => 1,
+    }
+}
+
+/// PCMPESTRM/PCMPESTRI/PCMPISTRM/PCMPISTRI (`op`: the 66 0F 3A byte) with
+/// imm8 on T0_SSE_FP (destination, source), the explicit forms' lengths `a`
+/// and `b` (cpu::simd_int::compare_strings): xSTRM's mask replaces the
+/// destination; returns the index | EFLAGS (CF, ZF, SF, OF) << 8. For the
+/// templates of Tier-0 and the x64 page tier.
+pub unsafe fn pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
+    let [destination, source, _] = T0_SSE_FP.0;
+    let explicit = op & 2 == 0;
+    let result = crate::cpu::simd_int::compare_strings(
+        imm8 as u8,
+        destination.to_le_bytes(),
+        source.to_le_bytes(),
+        explicit.then_some(a),
+        explicit.then_some(b),
+    );
+    T0_SSE_FP.0[0] = u128::from_le_bytes(result.xmm0);
+    result.index | (result.flags as u32) << 8
+}
+#[no_mangle]
+pub unsafe fn ir_t0_pcmpstr(op: u32, imm8: u32, eax: i32, edx: i32) -> u32 {
+    pcmpstr(op, imm8, eax as i64, edx as i64)
+}
+
+/// ir_t0_sse_fp's calls by a hash of the catalogue key (a diagnostic of
+/// refused native floating point, see ir_t0_sse_fp_calls)
+static mut SSE_FP_CALLS: [u32; 256] = [0; 256];
+/// The exact-path calls of the form whose catalogue key is `key` (shared
+/// with the keys of the same hash)
+#[no_mangle]
+pub unsafe fn ir_t0_sse_fp_calls(key: u32) -> u32 {
+    SSE_FP_CALLS[(key as usize).wrapping_mul(0x9E37_79B9) >> 24 & 255]
+}
+#[no_mangle]
+pub unsafe fn ir_t0_sse_fp_calls_reset() { SSE_FP_CALLS = [0; 256]; }
+/// ir_t0_fma's calls: the FMA instructions the templates did not compute
+/// natively (see relaxed_fma)
+static mut FMA_CALLS: u32 = 0;
+#[no_mangle]
+pub unsafe fn ir_t0_fma_calls() -> u32 { FMA_CALLS }
+#[no_mangle]
+pub unsafe fn ir_t0_fma_calls_reset() { FMA_CALLS = 0; }
 
 /// Interpreter steps by their first two instruction bytes (a diagnostic of
 /// missing templates, see tests/bench/run.mjs --fallbacks).
@@ -233,6 +343,30 @@ pub unsafe fn ir_t0_set_tail_calls(supported: u32) -> bool {
     }
     true
 }
+/// Whether the host engine has Wasm relaxed SIMD and its multiply-adds fuse
+/// (cpu.js relaxed_fma_fused, at startup)
+static mut RELAXED_FMA_FUSED: bool = false;
+/// Whether Tier-0 and the x64 page tier compute FMA with them
+/// (native_fp::fused): where they fuse, unless switched off. Code compiled
+/// before a change keeps its path; both are exact.
+static mut RELAXED_FMA: bool = false;
+pub fn relaxed_fma() -> bool { unsafe { RELAXED_FMA } }
+#[no_mangle]
+pub unsafe fn ir_relaxed_fma_fused(fused: u32) {
+    RELAXED_FMA_FUSED = fused == 1;
+    RELAXED_FMA = RELAXED_FMA_FUSED;
+}
+/// A/B switch: 0 the exact helper, 1 relaxed multiply-adds (if they fuse)
+#[no_mangle]
+pub unsafe fn ir_set_relaxed_fma(on: u32) -> bool {
+    if on > 1 || on == 1 && !RELAXED_FMA_FUSED {
+        return false;
+    }
+    RELAXED_FMA = on == 1;
+    true
+}
+#[no_mangle]
+pub unsafe fn ir_relaxed_fma() -> u32 { RELAXED_FMA as u32 }
 /// A/B switch: 0 iterative, 1 nested, 2 tail (if supported).
 #[no_mangle]
 pub unsafe fn ir_t0_set_link_mode(mode: u32) -> bool {

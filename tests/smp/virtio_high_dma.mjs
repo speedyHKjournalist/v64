@@ -13,7 +13,8 @@ const bytes = new Map();
 const accesses = [];
 const cpu = {
     io: { register_read() {}, register_write() {} },
-    devices: { pci: { register_device() {}, raise_irq() {}, lower_irq() {} } },
+    // (absent: src/pci.js's functions off the bus, by pci_id; this one never is)
+    devices: { pci: { absent: [], register_device() {}, raise_irq() {}, lower_irq() {} } },
     validate_physical_range(address, length)
     {
         if(!Number.isSafeInteger(address) || !Number.isSafeInteger(length) ||

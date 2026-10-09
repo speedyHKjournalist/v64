@@ -925,6 +925,7 @@ fn plan_references(data: &MirData, id: InstId) -> (Vec<ValueId>, Vec<ValueId>, V
                 states.push(c.before);
             },
             EffectPlan::X87 { outputs, .. } => defs.extend(outputs),
+            EffectPlan::ZeroState { .. } => (),
         }
     }
     if let Some(c) = &data.calls[id.index()] {
@@ -1108,8 +1109,9 @@ pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<CpuDemand,
             // observation writes that state elision can remove.
             if let Some(call) = &data.calls[id.index()] {
                 if let Some((source, destination)) = call.xmm_observation {
+                    let first = call.xmm_first.unwrap_or(destination);
                     for write in &data.states[call.state.index()].cpu.writes {
-                        if [source, destination].iter().any(|&reg| {
+                        if [source, destination, first].iter().any(|&reg| {
                             write.address
                                 == super::value::Address::Absolute(
                                     crate::cpu::global_pointers::get_reg_xmm_offset(reg as u32),
@@ -1340,6 +1342,7 @@ pub(super) fn backing_sync(
                             | super::effect::EffectPlan::Check { .. }
                             | super::effect::EffectPlan::RmwCommit { .. }
                             | super::effect::EffectPlan::X87 { .. }
+                            | super::effect::EffectPlan::ZeroState { .. }
                             | super::effect::EffectPlan::Arithmetic(
                                 super::arithmetic::ArithmeticPlan::Division(_)
                             )

@@ -71,8 +71,11 @@ imports! {
     "ir_pop_address": [I32,I32,I32] -> [I64], Packed, "segment/null check; fault also unwinds temporary SP";
     "ir_memory_read": [I32,I32] -> [I64], Packed, "translation, A/D bits and device read; high32=0 or 2";
     "ir_memory_check": [I32,I32,I32] -> [I32], Check, "translation preflight; no device read; returns 0 or 2";
-    "ir_sse_guard": [] -> [I32], Check, "reads CR0 TS/EM; returns 0 or CPU-owned fault 2";
+    "ir_alignment_fault": [I32] -> [I32], Check, "raises #GP(0) for a misaligned legacy SSE m128 operand (the address); returns CPU-owned fault 2";
+    "ir_sse_guard": [] -> [I32], Check, "reads CR0 TS/EM and CR4.OSFXSR (XMM forms); returns 0 or CPU-owned fault 2";
     "ir_fpu_guard": [] -> [I32], Check, "reads CR0 TS/EM; x87 #NM; returns 0 or CPU-owned fault 2";
+    "ir_avx_guard": [] -> [I32], Check, "reads the mode, CR4.OSXSAVE, XCR0 and CR0.TS (VEX forms); returns 0 or CPU-owned fault 2";
+    "ir_ymm_zero": [I32] -> [I32], Check, "zeroes bits 255:128 of a YMM register (Op::YmmZero, emitted inline); returns 0";
     "ir_t0_step": [I32] -> [I32], Pure, "tier-0 fallback: interprets one instruction at EIP (all CPU effects, faults, devices); returns 0 next, 1 dispatch, 2 exit";
     "ir_t0_link": [] -> [I32], Entry, "tier-0: table index of the page function serving the written-back EIP (caller tail-calls it) or -1; no guest state change";
     "ir_t0_chain": [I32] -> [I32], Entry, "tier-0: runs the page function serving the written-back EIP nested (returns 1) or declines (0); caller returns";
@@ -80,6 +83,9 @@ imports! {
     "ir_t0_write_slow": [I32,I32,I32] -> [I32], Check, "tier-0: probes, then writes with interpreter effects; 1 = would fault (nothing written), 2 = wrote watched code";
     "ir_t0_condition": [I32] -> [I32], Pure, "tier-0: Jcc condition over lazy FLAGS; no writes";
     "ir_t0_x87": [I32,I32,I32] -> [I64], X87, "tier-0 ir_x87_op: compile-time form and transfer kind, no f64 mirroring";
+    "ir_t0_sse_fp": [I32,I32] -> [I32], Check, "tier-0: exact SSE floating point on its operand block; MXCSR flags; 1 = would fault, nothing changed";
+    "ir_t0_fma": [I32] -> [I32], Check, "tier-0 and the x64 page tier: exact FMA (VEX.128 and scalar) on ir_t0_sse_fp's operand block; MXCSR flags; 1 = would fault, nothing changed";
+    "ir_t0_pcmpstr": [I32,I32,I32,I32] -> [I32], Pure, "tier-0: PCMPxSTRx on ir_t0_sse_fp's operand block, EAX and EDX in; index | EFLAGS << 8 out, xSTRM's mask in the block; no CPU state";
     "ir_x87_op": [I32,I32,I32,I32] -> [I64], X87, "x87 stack/status/control and f64 shadow cache only; operand words in, stored words out; no fault, exit, GPR/FLAGS or memory access";
     "ir_memory_write": [I32,I32,I32] -> [I32], CpuExit, "ordered write, callbacks, code invalidation; returns 2 or 4; caller retires";
     "ir_memory_write_unmasked_word": [I32,I32,I32] -> [I32], CpuExit, "ENTER16 MMIO compatibility; returns 2 or 4; caller retires";
@@ -158,6 +164,7 @@ pub(crate) fn verify(data: &MirData) -> Result<(), CompileError> {
             EffectPlan::Arithmetic(ArithmeticPlan::Division(_)) => Protocol::Fault,
             EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(_)) => Protocol::CpuExit,
             EffectPlan::X87 { .. } => Protocol::X87,
+            EffectPlan::ZeroState { .. } => Protocol::Check,
         };
         check(p.call(), &data.value_types, protocol)?;
     }

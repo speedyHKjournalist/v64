@@ -116,13 +116,21 @@ pub struct Decoded {
     pub immediate: Option<Immediate>,
     pub extra_immediate: Option<u16>,
     pub bytes: [u8; 15],
+    /// The VEX prefix (decode_rules::is_vex); `opcode` is its key
+    pub vex: Option<crate::decode_rules::Vex>,
 }
 impl Decoded {
     /// Remove the catalog's mandatory/repeat prefix key while retaining the
     /// 0F opcode map. Executors still inspect `opcode` to distinguish SIMD
     /// variants and `prefixes` for architectural REP/operand semantics.
     pub fn base_opcode(&self) -> u32 {
-        if self.opcode & 0xFF00 == 0x0F00 {
+        if self.vex.is_some() {
+            self.opcode
+        }
+        else if matches!(self.opcode >> 8 & 0xFFFF, 0x0F38 | 0x0F3A) {
+            self.opcode & 0xFF_FFFF
+        }
+        else if self.opcode & 0xFF00 == 0x0F00 {
             self.opcode & 0xFFFF
         }
         else {
@@ -157,6 +165,16 @@ where
         self.bytes[self.length as usize] = byte;
         self.length += 1;
         Ok(byte)
+    }
+    /// The next byte, which the instruction includes whatever it is
+    fn peek(&mut self) -> Result<u8, DecodeError<E>> {
+        if self.length == 15 {
+            return Err(DecodeError::TooLong);
+        }
+        (self.fetch)(self.length).map_err(|error| DecodeError::Fetch {
+            offset: self.length,
+            error,
+        })
     }
     fn integer(&mut self, bytes: u8) -> Result<u64, DecodeError<E>> {
         let mut value = 0;
@@ -194,8 +212,6 @@ fn invalid_long_opcode(opcode: u32) -> bool {
             | 0x62
             | 0x82
             | 0x9A
-            | 0xC4
-            | 0xC5
             | 0xCE
             | 0xD4
             | 0xD5
@@ -204,10 +220,6 @@ fn invalid_long_opcode(opcode: u32) -> bool {
             | 0x0F24
             | 0x0F26
     )
-}
-/// 0F opcodes whose 66/F2/F3 prefix is part of the opcode.
-fn mandatory_prefix_map(opcode: u32) -> bool {
-    matches!(opcode, 0x0F10..=0x0F17 | 0x0F28..=0x0F2F | 0x0F50..=0x0F7F | 0x0FC2..=0x0FC6 | 0x0FD0..=0x0FFE | 0x0FAE)
 }
 fn operand_size(mode: ExecutionMode, prefixes: PrefixState, opcode: u32, modrm: Option<u8>) -> u8 {
     if !mode.is_long() {
@@ -353,45 +365,82 @@ where
             break b;
         }
     };
-    let base_opcode = if first == 0x0F { 0x0F00 | c.byte()? as u32 } else { first as u32 };
+    // C4/C5: a VEX prefix in 64-bit mode, and with a register ModRM byte in
+    // protected and compatibility mode (decode_rules::is_vex). Real and
+    // virtual-8086 mode have no VEX: LES/LDS, whose register form is #UD.
+    if (first == 0xC4 || first == 0xC5)
+        && !matches!(mode, ExecutionMode::Real | ExecutionMode::Vm86)
+        && crate::decode_rules::is_vex(c.peek()?, mode.is_long())
+    {
+        return decode_vex(c, start, mode, prefixes, first);
+    }
+    // 0F 38 and 0F 3A lead to the three-byte maps (key 0x0F38xx, 0x0F3Axx)
+    let base_opcode = if first == 0x0F {
+        let second = c.byte()?;
+        if second == 0x38 || second == 0x3A {
+            0x0F0000 | (second as u32) << 8 | c.byte()? as u32
+        }
+        else {
+            0x0F00 | second as u32
+        }
+    }
+    else {
+        first as u32
+    };
     if mode.is_long() && invalid_long_opcode(base_opcode) {
         return Err(DecodeError::InvalidOpcode);
     }
     if !mode.is_long() && matches!(base_opcode, 0x0F05 | 0x0F07) {
         return Err(DecodeError::InvalidOpcode);
     }
-    let mut opcode = base_opcode;
-    let shift = if first == 0x0F { 16 } else { 8 };
-    // Match the existing profile's mandatory-prefix precedence; ordinary REP
-    // instructions retain the last repeat prefix in the shared state.
-    for prefix in [
-        if prefixes.operand && first == 0x0F { Some(0x66) } else { None },
-        prefixes.rep,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let candidate = (prefix as u32) << shift | base_opcode;
-        if !candidates(candidate).is_empty() {
-            opcode = candidate;
-            break;
+    // The 66/F2/F3 variants of the opcode in the shared catalogue, chosen by
+    // the rule all three decoders share (decode_rules::mandatory_variant): a
+    // refining prefix without a row of its own, a row whose CPUID feature is
+    // absent or an unimplemented row is #UD after the ModRM byte, as in the
+    // 32-bit interpreter.
+    use crate::prefix::{PREFIX_66, PREFIX_F2, PREFIX_F3};
+    let shift = if base_opcode > 0xFFFF {
+        24
+    }
+    else if first == 0x0F {
+        16
+    }
+    else {
+        8
+    };
+    let variants = [(0x66u32, PREFIX_66), (0xF2, PREFIX_F2), (0xF3, PREFIX_F3)];
+    let mut available = 0;
+    let mut refining = candidates(base_opcode)
+        .iter()
+        .fold(0, |m, row| m | row.refining);
+    let mut family = candidates(base_opcode).first();
+    for (prefix, mask) in variants {
+        if prefix != 0x66 || first == 0x0F {
+            let rows = candidates(prefix << shift | base_opcode);
+            refining |= rows.iter().fold(0, |m, row| m | row.refining);
+            family = family.or(rows.first());
+            if rows.iter().any(Encoding::exists) {
+                available |= mask;
+            }
         }
     }
-    // SSE/MMX maps: the mandatory prefix selects the instruction, and a
-    // 66/F2/F3 prefix without an entry of its own is #UD, never the
-    // unprefixed form (SDM Vol.2A §2.1.1, instruction tables).
-    if mode.is_long() && first == 0x0F && mandatory_prefix_map(base_opcode) {
-        let keyed = opcode != base_opcode;
-        let rep_selected = keyed
-            && prefixes
-                .rep
-                .is_some_and(|p| opcode == (p as u32) << shift | base_opcode);
-        if prefixes.rep.is_some() && !rep_selected || prefixes.operand && !keyed {
-            return Err(DecodeError::InvalidOpcode);
-        }
-    }
+    let flags = if prefixes.operand { PREFIX_66 } else { 0 }
+        | match prefixes.rep {
+            Some(0xF2) => PREFIX_F2,
+            Some(0xF3) => PREFIX_F3,
+            _ => 0,
+        };
+    use crate::decode_rules::Variant;
+    let variant = crate::decode_rules::mandatory_variant(flags, available, refining);
+    let opcode = match variant {
+        Variant::Prefixed(selected) => {
+            let prefix = variants.iter().find(|v| v.1 == selected).unwrap().0;
+            prefix << shift | base_opcode
+        },
+        Variant::Plain | Variant::Undefined => base_opcode,
+    };
     let rows = candidates(opcode);
-    let first_row = rows.first().ok_or(DecodeError::UnknownOpcode(opcode))?;
+    let first_row = family.ok_or(DecodeError::UnknownOpcode(opcode))?;
     // ModRM-taking forms the shared catalog lists without one: the 0F0D
     // prefetch hint, the reserved-NOP hints 0F1A/0F1B (MPX space, NOPs
     // without MPX) and UD1/UD0 (whose length bounds the #UD encoding).
@@ -402,6 +451,9 @@ where
         .iter()
         .find(|row| row.group < 0 || modrm.is_some_and(|m| (m >> 3 & 7) as i8 == row.group))
         .ok_or(DecodeError::InvalidOpcode)?;
+    if variant == Variant::Undefined || !row.exists() || !row.implemented() {
+        return Err(DecodeError::InvalidOpcode);
+    }
     if prefixes.lock && !crate::decode_rules::lock_allowed(base_opcode, modrm) {
         return Err(DecodeError::InvalidOpcode);
     }
@@ -483,16 +535,7 @@ where
     };
     let extra_immediate =
         if row.extra_bytes != 0 { Some(c.integer(row.extra_bytes)? as u16) } else { None };
-    let next_value = start.0.wrapping_add(c.length as u64);
-    let next = GuestIp(if mode.is_long() {
-        next_value
-    }
-    else if mode.operand_default() == 16 {
-        next_value as u16 as u64
-    }
-    else {
-        next_value as u32 as u64
-    });
+    let next = next_ip(start, c.length, mode);
     Ok(Decoded {
         encoding: row,
         opcode,
@@ -518,6 +561,113 @@ where
         immediate,
         extra_immediate,
         bytes: c.bytes,
+        vex: None,
+    })
+}
+
+fn next_ip(start: GuestIp, length: u8, mode: ExecutionMode) -> GuestIp {
+    let next = start.0.wrapping_add(length as u64);
+    GuestIp(if mode.is_long() {
+        next
+    }
+    else if mode.operand_default() == 16 {
+        next as u16 as u64
+    }
+    else {
+        next as u32 as u64
+    })
+}
+
+/// A VEX instruction: `first` (C4 or C5) and its prefixes are read. #UD (the
+/// order the 32-bit interpreter and IR decoder share): a 66/F2/F3/LOCK/REX
+/// prefix at the first VEX byte, a key without rows at the opcode byte, and
+/// after the ModRM byte when no row accepts the VEX fields
+/// (decode_rules::vex_row, vex_valid), the row's feature is absent or its
+/// semantics come later. Gathers whose destination, index and mask registers
+/// are not distinct are #UD after the SIB byte.
+fn decode_vex<F, E>(
+    mut c: Cursor<F>,
+    start: GuestIp,
+    mode: ExecutionMode,
+    prefixes: PrefixState,
+    first: u8,
+) -> Result<Decoded, DecodeError<E>>
+where
+    F: FnMut(u8) -> Result<u8, E>,
+{
+    use crate::decode_rules::{vex, vex_row, vex_valid, Vex};
+    let long = mode.is_long();
+    let byte1 = c.byte()?;
+    if prefixes.operand || prefixes.rep.is_some() || prefixes.lock || prefixes.rex.is_some() {
+        return Err(DecodeError::InvalidOpcode);
+    }
+    let v = if first == 0xC4 { Vex::three(byte1, c.byte()?, long) } else { Vex::two(byte1, long) };
+    let key = v.key(c.byte()?);
+    let rows = candidates(key);
+    let family = rows.first().ok_or(DecodeError::UnknownOpcode(key))?;
+    let modrm = if family.fetch_modrm { Some(c.byte()?) } else { None };
+    let address_size = if !prefixes.address {
+        mode.address_default()
+    }
+    else if long {
+        32
+    }
+    else {
+        48 - mode.address_default()
+    };
+    let row = vex_row(rows, v, modrm, long)
+        .filter(|row| row.exists() && row.implemented() && vex_valid(row, v, modrm, address_size))
+        .ok_or(DecodeError::InvalidOpcode)?;
+    // VEX.R, X and B extend the ModRM and SIB fields as REX does
+    let extended = PrefixState {
+        rex: Some(0x40 | (v.r as u8) << 2 | (v.x as u8) << 1 | v.b as u8),
+        ..prefixes
+    };
+    let modrm_at = c.length as usize - 1;
+    let mut address = match modrm {
+        Some(m) if m < 0xC0 => Some(address(&mut c, m, address_size, extended, mode)?),
+        _ => None,
+    };
+    if let (Some(a), true) = (address.as_mut(), row.vex & vex::VSIB != 0) {
+        // (a VSIB index names a vector register, xmm4/ymm4 included)
+        a.index = Some((c.bytes[modrm_at + 1] >> 3 & 7) | extended.x());
+    }
+    let immediate = match row.immediate {
+        ImmediateKind::None => None,
+        ImmediateKind::Byte => Some(Immediate {
+            value: c.integer(1)?,
+            encoded_bytes: 1,
+            sign_extended: false,
+        }),
+        _ => unreachable!("VEX rows have no other immediates"),
+    };
+    let reg = modrm.map(|m| (m >> 3 & 7) | extended.r());
+    if row.vex & vex::UNIQUE != 0 {
+        let (index, mask) = (address.and_then(|a| a.index), v.vvvv);
+        if reg == index || Some(mask) == index || reg == Some(mask) {
+            return Err(DecodeError::InvalidOpcode);
+        }
+    }
+    Ok(Decoded {
+        encoding: row,
+        opcode: key,
+        prefixes,
+        mode,
+        // general-purpose operands: 64-bit with W1 rows in 64-bit mode
+        operand_size: if long && row.vex & vex::W1 != 0 { 64 } else { 32 },
+        address_size,
+        length: c.length,
+        start,
+        next: next_ip(start, c.length, mode),
+        modrm,
+        reg,
+        rm_register: modrm.filter(|m| *m >= 0xC0).map(|m| (m & 7) | extended.b()),
+        opcode_register: None,
+        address,
+        immediate,
+        extra_immediate: None,
+        bytes: c.bytes,
+        vex: Some(v),
     })
 }
 
@@ -538,6 +688,504 @@ mod tests {
         assert_eq!(d(&[0x0F, 0x07]).base_opcode(), 0x0F07);
         assert_eq!(d(&[0x0F, 0x01, 0xF9]).modrm, Some(0xF9));
         assert_eq!(d(&[0xF3, 0x48, 0x0F, 0xB8, 0xC1]).base_opcode(), 0x0FB8);
+    }
+    #[test]
+    fn mandatory_prefixes_follow_the_shared_rule_in_every_mode() {
+        for mode in [
+            ExecutionMode::Long64,
+            ExecutionMode::Compatibility32,
+            ExecutionMode::Protected32,
+        ] {
+            let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+            // 66 with F3/F2 is an operand-size prefix (iced-x86, XED): MOVSS/MOVSD
+            assert_eq!(
+                decode(&[0x66, 0xF3, 0x0F, 0x10, 0xC1]).unwrap().opcode,
+                0xF30F10
+            );
+            assert_eq!(
+                decode(&[0xF3, 0x66, 0x0F, 0x10, 0xC1]).unwrap().opcode,
+                0xF30F10
+            );
+            assert_eq!(
+                decode(&[0x66, 0xF2, 0x0F, 0x10, 0xC1]).unwrap().opcode,
+                0xF20F10
+            );
+            // of F2 and F3 the last one counts
+            assert_eq!(
+                decode(&[0xF2, 0xF3, 0x0F, 0x10, 0xC1]).unwrap().opcode,
+                0xF30F10
+            );
+            assert_eq!(
+                decode(&[0xF3, 0xF2, 0x0F, 0x10, 0xC1]).unwrap().opcode,
+                0xF20F10
+            );
+            // a mandatory prefix without a row is #UD in every mode, after ModRM
+            for bytes in [
+                &[0xF3, 0x0F, 0x2B, 0x00][..],
+                &[0x66, 0x0F, 0xC3, 0x00],
+                &[0xF2, 0x0F, 0x77],
+            ] {
+                assert_eq!(
+                    decode(bytes).unwrap_err(),
+                    DecodeError::InvalidOpcode,
+                    "{bytes:02X?} {mode:?}"
+                );
+                if bytes.len() == 4 {
+                    assert!(matches!(
+                        decode(&bytes[..3]),
+                        Err(DecodeError::Fetch { offset: 3, .. })
+                    ));
+                }
+            }
+            // outside the SSE maps F2/F3 are repeat prefixes
+            assert_eq!(decode(&[0xF3, 0x0F, 0xAF, 0xC1]).unwrap().opcode, 0x0FAF);
+        }
+    }
+    #[test]
+    fn three_byte_maps_are_undefined_after_modrm_without_their_features() {
+        use crate::cpu::features::{ALL, TEST_FEATURES};
+        for features in [0, ALL] {
+            TEST_FEATURES.with(|f| f.set(features));
+            for mode in [
+                ExecutionMode::Long64,
+                ExecutionMode::Compatibility32,
+                ExecutionMode::Protected32,
+            ] {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+                // with MOVBE (P10) its forms decode, their memory operands
+                // whole; F3 at MOVBE/CRC32 stays #UD
+                if features != 0 {
+                    assert_eq!(
+                        decode(&[0x0F, 0x38, 0xF1, 0x04, 0x24]).unwrap().opcode,
+                        0x0F38F1
+                    );
+                    assert_eq!(decode(&[0x0F, 0x38, 0xF0, 0x00]).unwrap().opcode, 0x0F38F0);
+                }
+                for bytes in [
+                    &[0x0F, 0x38, 0xF1, 0x04][..],
+                    &[0x0F, 0x38, 0xF0, 0x00],
+                    &[0xF3, 0x0F, 0x38, 0xF0, 0x00],
+                ] {
+                    if features != 0 && bytes[0] != 0xF3 {
+                        continue;
+                    }
+                    assert_eq!(
+                        decode(bytes).unwrap_err(),
+                        DecodeError::InvalidOpcode,
+                        "{bytes:02X?} {mode:?}"
+                    );
+                    // ... after the ModRM byte, which is fetched first
+                    let n = bytes.len() - 1;
+                    assert!(
+                        matches!(decode(&bytes[..n]), Err(DecodeError::Fetch { offset, .. }) if offset as usize == n)
+                    );
+                }
+                assert!(matches!(
+                    decode(&[0x0F, 0x38, 0xFF, 0xC1]),
+                    Err(DecodeError::UnknownOpcode(0x0F38FF))
+                ));
+            }
+        }
+        TEST_FEATURES.with(|f| f.set(0));
+    }
+    #[test]
+    fn ssse3_forms_decode_with_their_feature() {
+        use crate::cpu::features::{SSSE3, TEST_FEATURES};
+        for features in [0, SSSE3] {
+            TEST_FEATURES.with(|f| f.set(features));
+            for mode in [
+                ExecutionMode::Long64,
+                ExecutionMode::Compatibility32,
+                ExecutionMode::Protected16,
+            ] {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+                for (bytes, opcode, imm8) in [
+                    (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], 0x660F3800, None), // pshufb xmm
+                    (&[0x0F, 0x38, 0x1E, 0x08], 0x0F381E, None),             // pabsd mm, [..]
+                    (
+                        &[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x83],
+                        0x660F3A0F,
+                        Some(0x83),
+                    ), // palignr
+                    (&[0x0F, 0x3A, 0x0F, 0xC1, 0xFF], 0x0F3A0F, Some(0xFF)),
+                ] {
+                    if features == 0 {
+                        // #UD after the ModRM byte (and before the immediate)
+                        let n = if imm8.is_some() { bytes.len() - 1 } else { bytes.len() };
+                        assert_eq!(decode(&bytes[..n]).unwrap_err(), DecodeError::InvalidOpcode);
+                        continue;
+                    }
+                    let d = decode(bytes).unwrap();
+                    assert_eq!(
+                        (d.opcode, d.length as usize),
+                        (opcode, bytes.len()),
+                        "{bytes:02X?}"
+                    );
+                    assert_eq!(d.immediate.map(|i| i.value as u8), imm8);
+                    assert!(matches!(
+                        decode(&bytes[..bytes.len() - 1]),
+                        Err(DecodeError::Fetch { .. })
+                    ));
+                }
+                // F2/F3 select no SSSE3 form: #UD, also with 66 (decode_rules::mandatory_variant)
+                for bytes in [
+                    &[0xF3, 0x0F, 0x38, 0x00, 0xC1][..],
+                    &[0x66, 0xF2, 0x0F, 0x38, 0x00, 0xC1],
+                    &[0xF3, 0x0F, 0x3A, 0x0F, 0xC1],
+                ] {
+                    assert_eq!(decode(bytes).unwrap_err(), DecodeError::InvalidOpcode);
+                }
+            }
+            // REX.R and REX.B reach XMM8-15
+            if features != 0 {
+                let d = decode(
+                    &[0x66, 0x45, 0x0F, 0x38, 0x00, 0xC1],
+                    GuestIp(0x1000),
+                    ExecutionMode::Long64,
+                )
+                .unwrap();
+                assert_eq!(
+                    (d.opcode, d.reg, d.rm_register),
+                    (0x660F3800, Some(8), Some(9))
+                );
+            }
+        }
+        TEST_FEATURES.with(|f| f.set(0));
+    }
+    #[test]
+    fn sse42_forms_decode_with_their_feature() {
+        use crate::cpu::features::{SSE4_1, SSE4_2, SSSE3, TEST_FEATURES};
+        for features in [SSSE3 | SSE4_1, SSSE3 | SSE4_1 | SSE4_2] {
+            TEST_FEATURES.with(|f| f.set(features));
+            for mode in [
+                ExecutionMode::Long64,
+                ExecutionMode::Compatibility32,
+                ExecutionMode::Protected16,
+            ] {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), mode);
+                let w32 = if mode == ExecutionMode::Protected16 { 16 } else { 32 };
+                // (the operand size: CRC32's source; none for PCMPxSTRx, whose 66 is mandatory)
+                for (bytes, opcode, imm8, operand_size) in [
+                    (
+                        &[0x66, 0x0F, 0x3A, 0x61, 0xC1, 0x0C][..],
+                        0x660F3A61,
+                        Some(0x0C),
+                        None,
+                    ), // pcmpestri
+                    (
+                        &[0x66, 0x0F, 0x3A, 0x62, 0x00, 0x40],
+                        0x660F3A62,
+                        Some(0x40),
+                        None,
+                    ), // pcmpistrm [..]
+                    (&[0xF2, 0x0F, 0x38, 0xF0, 0xC1], 0xF20F38F0, None, Some(w32)), // crc32 r32, r/m8
+                    (&[0xF2, 0x0F, 0x38, 0xF1, 0x00], 0xF20F38F1, None, Some(w32)), // crc32 r32, r/m32 (16)
+                    // (66 is the operand size: CRC32 r32, r/m16, or r/m32 in 16-bit code)
+                    (
+                        &[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0xC1],
+                        0xF20F38F1,
+                        None,
+                        Some(48 - w32),
+                    ),
+                ] {
+                    if features & SSE4_2 == 0 {
+                        // #UD after the ModRM byte (and before the immediate)
+                        let n = if imm8.is_some() { bytes.len() - 1 } else { bytes.len() };
+                        assert_eq!(decode(&bytes[..n]).unwrap_err(), DecodeError::InvalidOpcode);
+                        continue;
+                    }
+                    let d = decode(bytes).unwrap();
+                    assert_eq!(
+                        (d.opcode, d.length as usize),
+                        (opcode, bytes.len()),
+                        "{bytes:02X?} {mode:?}"
+                    );
+                    assert!(operand_size.is_none_or(|size| d.operand_size == size));
+                    assert_eq!(d.immediate.map(|i| i.value as u8), imm8);
+                }
+                // F3 selects no CRC32 (nor, without a memory operand, MOVBE)
+                assert_eq!(
+                    decode(&[0xF3, 0x0F, 0x38, 0xF1, 0xC1]).unwrap_err(),
+                    DecodeError::InvalidOpcode
+                );
+            }
+            // REX.W: CRC32 r64, r/m64 and r64, r/m8; PCMPESTRI with RAX/RDX
+            if features & SSE4_2 != 0 {
+                let decode = |bytes: &[u8]| decode(bytes, GuestIp(0x1000), ExecutionMode::Long64);
+                let d = decode(&[0xF2, 0x48, 0x0F, 0x38, 0xF1, 0xC1]).unwrap();
+                assert_eq!((d.opcode, d.operand_size), (0xF20F38F1, 64));
+                let d = decode(&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0xC1]).unwrap();
+                assert_eq!((d.opcode, d.operand_size), (0xF20F38F0, 64));
+                let d = decode(&[0x66, 0x4D, 0x0F, 0x3A, 0x61, 0xC1, 0x0C]).unwrap();
+                assert_eq!(
+                    (d.opcode, d.reg, d.rm_register, d.prefixes.w()),
+                    (0x660F3A61, Some(8), Some(9), true)
+                );
+            }
+        }
+        TEST_FEATURES.with(|f| f.set(0));
+    }
+    #[test]
+    fn vex_by_mode_prefixes_and_fields() {
+        use crate::cpu::features::{ALL, TEST_FEATURES};
+        use crate::decode::{form, TEST_DECODE_UNIMPLEMENTED};
+        use ExecutionMode::*;
+        TEST_FEATURES.with(|f| f.set(ALL));
+        TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(true));
+        let at = |bytes: &[u8], mode| decode(bytes, GuestIp(0x1000), mode);
+        // C4/C5 with a register ModRM byte: VEX, except in real and
+        // virtual-8086 mode (LES/LDS, whose register form is #UD)
+        for mode in [
+            Long64,
+            Compatibility32,
+            Compatibility16,
+            Protected32,
+            Protected16,
+        ] {
+            let v = at(&[0xC5, 0xF8, 0x77], mode).unwrap();
+            assert_eq!(
+                (form(v.encoding), v.length, v.opcode),
+                ("VEX_Vzeroupper", 3, 0xC4010077)
+            );
+            assert_eq!(v.base_opcode(), 0xC4010077);
+        }
+        for mode in [Real, Vm86] {
+            let lds = at(&[0xC5, 0xF8, 0x77], mode).unwrap();
+            assert!(lds.opcode == 0xC5 && lds.vex.is_none() && lds.length == 2);
+        }
+        // a memory ModRM byte: LES/LDS outside 64-bit mode (where it is
+        // VEX, here with a reserved map)
+        assert_eq!(
+            at(&[0xC4, 0x00, 0x78, 0x77], Compatibility32)
+                .unwrap()
+                .opcode,
+            0xC4
+        );
+        assert_eq!(
+            at(&[0xC4, 0x00, 0x78, 0x77], Long64).unwrap_err(),
+            DecodeError::UnknownOpcode(0xC4000077)
+        );
+        // 66, F2, F3, LOCK and REX before VEX: #UD at the first VEX byte; a
+        // REX followed by another prefix is not in effect
+        for prefix in [0x66, 0xF2, 0xF3, 0xF0, 0x40, 0x4F] {
+            let bytes = [prefix, 0xC4, 0xE1, 0x7C, 0x77];
+            let mut seen = Vec::new();
+            let result = decode_with(GuestIp(0), Long64, |offset| {
+                seen.push(offset);
+                bytes.get(offset as usize).copied().ok_or(())
+            });
+            assert_eq!(result.unwrap_err(), DecodeError::InvalidOpcode);
+            assert_eq!(seen.iter().max(), Some(&2));
+        }
+        assert_eq!(
+            form(
+                at(&[0x48, 0x2E, 0xC5, 0xF8, 0x77], Long64)
+                    .unwrap()
+                    .encoding
+            ),
+            "VEX_Vzeroupper"
+        );
+        // VPADDD ymm9, ymm10, [r12+r13*2+0x10]: R, X, B and all of VEX.vvvv
+        let v = at(&[0xC4, 0x01, 0x2D, 0xFE, 0x4C, 0x6C, 0x10], Long64).unwrap();
+        assert_eq!(
+            (form(v.encoding), v.length, v.reg),
+            ("VEX_Vpaddd_ymm_ymm_ymmm256", 7, Some(9))
+        );
+        let a = v.address.unwrap();
+        assert_eq!(
+            (a.base, a.index, a.scale, a.displacement),
+            (AddressBase::Register(12), Some(13), 1, 0x10)
+        );
+        assert_eq!(v.vex.unwrap().vvvv, 10);
+        // ... and the same bytes in compatibility mode are LES eax, [ecx]
+        let les = at(&[0xC4, 0x01, 0x2D, 0xFE], Compatibility32).unwrap();
+        assert!(les.opcode == 0xC4 && les.length == 2);
+        // W1: 64-bit operands in 64-bit mode, ignored outside it
+        for (bytes, long, compat) in [
+            (
+                &[0xC4, 0xE1, 0xF9, 0x6E, 0xC8][..],
+                "VEX_Vmovq_xmm_rm64",
+                "VEX_Vmovd_xmm_rm32",
+            ),
+            (
+                &[0xC4, 0xE2, 0xF0, 0xF2, 0xC1],
+                "VEX_Andn_r64_r64_rm64",
+                "VEX_Andn_r32_r32_rm32",
+            ),
+            (
+                &[0xC4, 0xE2, 0xB0, 0xF2, 0xC1],
+                "VEX_Andn_r64_r64_rm64",
+                "VEX_Andn_r32_r32_rm32",
+            ),
+        ] {
+            let (l, c) = (
+                at(bytes, Long64).unwrap(),
+                at(bytes, Compatibility32).unwrap(),
+            );
+            assert_eq!((form(l.encoding), l.operand_size), (long, 64));
+            assert_eq!((form(c.encoding), c.operand_size), (compat, 32));
+        }
+        // ANDN's VEX.vvvv names r9 in 64-bit mode, ecx outside it
+        let andn = at(&[0xC4, 0xE2, 0xB0, 0xF2, 0xC1], Long64).unwrap();
+        assert_eq!(andn.vex.unwrap().vvvv, 9);
+        let andn = at(&[0xC4, 0xE2, 0xB0, 0xF2, 0xC1], Compatibility32).unwrap();
+        assert_eq!(andn.vex.unwrap().vvvv, 1);
+        // VEX.vvvv must be 1111b where it is not an operand; outside 64-bit
+        // mode the three-byte prefix's top bit is ignored (SDM 2.3.5.6)
+        for mode in [Long64, Compatibility32] {
+            assert_eq!(
+                at(&[0xC5, 0xF0, 0x77], mode).unwrap_err(),
+                DecodeError::InvalidOpcode
+            );
+            assert_eq!(
+                at(&[0xC4, 0xE1, 0x74, 0x77], mode).unwrap_err(),
+                DecodeError::InvalidOpcode
+            );
+        }
+        assert_eq!(
+            at(&[0xC4, 0xE1, 0x3C, 0x77], Long64).unwrap_err(),
+            DecodeError::InvalidOpcode
+        );
+        assert_eq!(
+            form(
+                at(&[0xC4, 0xE1, 0x3C, 0x77], Compatibility32)
+                    .unwrap()
+                    .encoding
+            ),
+            "VEX_Vzeroall"
+        );
+        // reserved maps and opcodes without rows: after the opcode byte
+        let mut seen = Vec::new();
+        let result = decode_with(GuestIp(0), Long64, |offset| {
+            seen.push(offset);
+            [0xC4, 0xE4, 0x78, 0x77, 0xC0]
+                .get(offset as usize)
+                .copied()
+                .ok_or(())
+        });
+        assert_eq!(result.unwrap_err(), DecodeError::UnknownOpcode(0xC4040077));
+        assert_eq!(seen.iter().max(), Some(&3));
+        assert_eq!(
+            at(&[0xC5, 0xF8, 0x00], Long64).unwrap_err(),
+            DecodeError::UnknownOpcode(0xC4010000)
+        );
+        // VPGATHERDD xmm2, [rax+xmm9*4], xmm3; the index may not be the
+        // destination or mask register
+        let g = at(&[0xC4, 0xA2, 0x61, 0x90, 0x14, 0x88], Long64).unwrap();
+        assert_eq!(
+            (form(g.encoding), g.address.unwrap().index),
+            ("VEX_Vpgatherdd_xmm_vm32x_xmm", Some(9))
+        );
+        assert_eq!(
+            at(&[0xC4, 0xE2, 0x61, 0x90, 0x14, 0x98], Long64).unwrap_err(),
+            DecodeError::InvalidOpcode
+        );
+        assert_eq!(
+            at(&[0xC4, 0xE2, 0x61, 0x90, 0x14, 0xA0], Long64)
+                .unwrap()
+                .address
+                .unwrap()
+                .index,
+            Some(4)
+        );
+        assert_eq!(
+            at(&[0xC4, 0xE2, 0x61, 0x90, 0x10], Long64).unwrap_err(),
+            DecodeError::InvalidOpcode
+        );
+        assert_eq!(
+            at(&[0x67, 0xC4, 0xE2, 0x61, 0x90, 0x14, 0x88], Compatibility32).unwrap_err(),
+            DecodeError::InvalidOpcode
+        );
+        // without the features: #UD after the ModRM byte (VFMADD132PS ymm;
+        // since P11 every row has its semantics)
+        for (features, all) in [(0, true)] {
+            TEST_FEATURES.with(|f| f.set(features));
+            TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(all));
+            let bytes = [0xC4, 0x02, 0x2D, 0x98, 0x4C];
+            assert_eq!(at(&bytes, Long64).unwrap_err(), DecodeError::InvalidOpcode);
+            assert!(matches!(
+                at(&bytes[..4], Long64),
+                Err(DecodeError::Fetch { offset: 4, .. })
+            ));
+        }
+        TEST_FEATURES.with(|f| f.set(0));
+        TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(false));
+    }
+    #[test]
+    fn vex_rows_decode_from_their_own_encodings_in_every_mode() {
+        use crate::cpu::features::{ALL, TEST_FEATURES};
+        use crate::decode::{encodings, form, TEST_DECODE_UNIMPLEMENTED};
+        use crate::decode_rules::vex;
+        TEST_FEATURES.with(|f| f.set(ALL));
+        TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(true));
+        let mut count = 0;
+        for row in encodings().iter().filter(|e| e.vex != 0) {
+            let (map, pp) = ((row.opcode >> 16) as u8, (row.opcode >> 8 & 3) as u8);
+            let (l, w) = (row.vex & vex::L1 != 0, row.vex & vex::W1 != 0);
+            let vvvv = if row.vex & vex::VVVV != 0 { 3 } else { 0 };
+            let group = if row.group >= 0 { row.group as u8 } else { 2 };
+            let vsib = row.vex & vex::VSIB != 0;
+            let mut operands = Vec::new();
+            if row.fetch_modrm && !row.reg_ud {
+                operands.push(vec![0xC0 | group << 3 | 1]);
+            }
+            if row.fetch_modrm && !row.mem_ud {
+                operands.push(if vsib {
+                    vec![0x44 | group << 3, 0x08, 0x10]
+                }
+                else {
+                    vec![0x40 | group << 3, 0x10]
+                });
+            }
+            if !row.fetch_modrm {
+                operands.push(vec![]);
+            }
+            for mode in [
+                ExecutionMode::Long64,
+                ExecutionMode::Compatibility32,
+                ExecutionMode::Protected16,
+            ] {
+                if row.vex & vex::LONG != 0 && !mode.is_long()
+                    || vsib && mode == ExecutionMode::Protected16
+                {
+                    continue;
+                }
+                for operand in &operands {
+                    let mut bytes = vec![
+                        0xC4,
+                        0xE0 | map,
+                        (w as u8) << 7 | (!vvvv & 15) << 3 | (l as u8) << 2 | pp,
+                        row.opcode as u8,
+                    ];
+                    bytes.extend(operand);
+                    if row.immediate == ImmediateKind::Byte {
+                        bytes.push(0x5A);
+                    }
+                    let d = decode(&bytes, GuestIp(0x1000), mode)
+                        .unwrap_or_else(|e| panic!("{} {bytes:02X?} {mode:?} {e:?}", form(row)));
+                    assert_eq!(
+                        (form(d.encoding), d.length as usize),
+                        (form(row), bytes.len()),
+                        "{bytes:02X?} {mode:?}"
+                    );
+                    assert_eq!(
+                        d.address.is_some(),
+                        operand.first().is_some_and(|&m| m < 0xC0)
+                    );
+                    assert_eq!(
+                        d.immediate.map(|i| i.value),
+                        (row.immediate == ImmediateKind::Byte).then_some(0x5A)
+                    );
+                    if vsib {
+                        assert_eq!(d.address.unwrap().index, Some(1));
+                    }
+                    count += 1;
+                }
+            }
+        }
+        TEST_FEATURES.with(|f| f.set(0));
+        TEST_DECODE_UNIMPLEMENTED.with(|t| t.set(false));
+        assert!(count > 2000, "{count}");
     }
     #[test]
     fn prefetchw_consumes_the_complete_address_without_reading_data() {
@@ -673,7 +1321,8 @@ mod tests {
         });
         assert_eq!(result.unwrap_err(), DecodeError::InvalidOpcode);
         assert_eq!(seen, vec![0, 1, 2]);
-        for byte in [0x06, 0x60, 0x62, 0x82, 0x9A, 0xC4, 0xC5, 0xCE, 0xD4, 0xEA] {
+        // (C4 and C5 are VEX prefixes in 64-bit mode)
+        for byte in [0x06, 0x60, 0x62, 0x82, 0x9A, 0xCE, 0xD4, 0xEA] {
             assert!(matches!(
                 decode(&[byte], GuestIp(0), ExecutionMode::Long64),
                 Err(DecodeError::InvalidOpcode)

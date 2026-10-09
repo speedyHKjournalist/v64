@@ -1,5 +1,7 @@
 // http://ref.x86asm.net/coder32.html
 
+import { VEX_ROWS, is_vex_key } from "./vex_table.js";
+
 const zf = 1 << 6;
 const of = 1 << 11;
 const cf = 1 << 0;
@@ -52,7 +54,19 @@ const TESTS_ASSUME_INTEL = false;
 // prefix: is a prefix instruction
 // imm8, imm8s, imm16, imm1632, immaddr, extra_imm8, extra_imm16: one or two immediate bytes follows the instruction
 // custom: will callback jit to generate custom code
+// refining: 66/F2/F3 select instructions, as in the SSE maps (sse implies it): a
+//   prefix without a row of its own is #UD (decode_rules::mandatory_variant);
+//   "rep": only F2/F3 do, and 66 is an operand-size prefix (MOVBE, CRC32)
+// escape: 0F 38 and 0F 3A lead to the three-byte maps (opcode 0x0F38xx and
+//   0x0F3Axx, a mandatory prefix in bits 24-31)
+// feature: the CPUID feature (gen/cpu_features.js) without which the row does
+//   not exist: its encoding is #UD, or runs the row a prefix does not select
+// unimplemented: #UD even with the feature (docs/simd-xsave-plan.md: the
+//   semantics come in later phases)
+// vex: a VEX row (gen/vex_table.js: key 0xC4_MM_PP_OO, the VEX fields it accepts)
 // block_boundary: may change eip in a way not handled by the jit
+// vex_escape: the register form is a VEX prefix (src/rust/cpu/vex.rs), whose
+//   instructions are no block boundary: only the memory form is
 // no_next_instruction: jit will stop analysing after instruction (e.g., unconditional jump, ret)
 const encodings = [
     { opcode: 0x06, os: 1, custom: 1 },
@@ -179,8 +193,8 @@ const encodings = [
     { opcode: 0xC2, custom: 1, block_boundary: 1, no_next_instruction: 1, os: 1, absolute_jump: 1, imm16: 1, skip: 1 }, // ret
     { opcode: 0xC3, custom: 1, block_boundary: 1, no_next_instruction: 1, os: 1, absolute_jump: 1, skip: 1 },
 
-    { opcode: 0xC4, block_boundary: 1, os: 1, e: 1, skip: 1 }, // les
-    { opcode: 0xC5, block_boundary: 1, os: 1, e: 1, skip: 1 }, // lds
+    { opcode: 0xC4, block_boundary: 1, vex_escape: 1, os: 1, e: 1, skip: 1 }, // les
+    { opcode: 0xC5, block_boundary: 1, vex_escape: 1, os: 1, e: 1, skip: 1 }, // lds
 
     { opcode: 0xC6, custom: 1, e: 1, fixed_g: 0, imm8: 1 },
     { opcode: 0xC7, custom: 1, os: 1, e: 1, fixed_g: 0, imm1632: 1 },
@@ -402,10 +416,10 @@ const encodings = [
     { opcode: 0x0F36, skip: 1, block_boundary: 1 }, // ud
     { opcode: 0x0F37, skip: 1, block_boundary: 1 }, // getsec
 
-    // ssse3+
-    { opcode: 0x0F38, skip: 1, block_boundary: 1 },
+    // the three-byte maps
+    { opcode: 0x0F38, escape: 1, skip: 1 },
     { opcode: 0x0F39, skip: 1, block_boundary: 1 },
-    { opcode: 0x0F3A, skip: 1, block_boundary: 1 },
+    { opcode: 0x0F3A, escape: 1, skip: 1 },
     { opcode: 0x0F3B, skip: 1, block_boundary: 1 },
     { opcode: 0x0F3C, skip: 1, block_boundary: 1 },
     { opcode: 0x0F3D, skip: 1, block_boundary: 1 },
@@ -432,6 +446,9 @@ const encodings = [
 
     { opcode: 0x0FBC, os: 1, e: 1, mask_flags: of | sf | af | pf | cf, custom: 1 }, // bsf
     { opcode: 0x0FBD, os: 1, e: 1, mask_flags: of | sf | af | pf | cf, custom: 1 },
+    // tzcnt, lzcnt: without the feature F3 is ignored (bsf, bsr)
+    { opcode: 0xF30FBC, os: 1, e: 1, custom: 1, skip: 1, feature: "BMI1" },
+    { opcode: 0xF30FBD, os: 1, e: 1, custom: 1, skip: 1, feature: "LZCNT" },
 
     // note: overflow flag only undefined if shift is > 1
     { opcode: 0x0FA4, os: 1, e: 1, custom: 1, imm8: 1, mask_flags: af | of }, // shld
@@ -444,21 +461,29 @@ const encodings = [
 
     { opcode: 0x0FAA, block_boundary: 1, skip: 1 }, // rsm
 
-    { opcode: 0x0FAE, e: 1, fixed_g: 0, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxsave
-    { opcode: 0x0FAE, e: 1, fixed_g: 1, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxrstor
-    { opcode: 0x0FAE, e: 1, fixed_g: 2, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // ldmxcsr
-    { opcode: 0x0FAE, e: 1, fixed_g: 3, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // stmxcsr
+    // 66, F2 and F3 select other instructions (CLFLUSHOPT, RDFSBASE, PTWRITE,
+    // INCSSP, UMONITOR, ...), none of which this CPU has
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 0, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxsave
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 1, reg_ud: 1, task_switch_test: 1, skip: 1, block_boundary: 1 }, // fxrstor
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 2, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // ldmxcsr
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 3, reg_ud: 1, sse: 1, skip: 1, block_boundary: 1 }, // stmxcsr
 
-    { opcode: 0x0FAE, e: 1, fixed_g: 4, reg_ud: 1, skip: 1, block_boundary: 1 }, // xsave (mem, not implemented)
-    { opcode: 0x0FAE, e: 1, fixed_g: 5, skip: 1, custom: 1 }, // lfence (reg, only 0), xrstor (mem, not implemented)
-    { opcode: 0x0FAE, e: 1, fixed_g: 6, skip: 1, block_boundary: 1 }, // mfence (reg, only 0), xsaveopt (mem, not implemented)
-    { opcode: 0x0FAE, e: 1, fixed_g: 7, skip: 1, block_boundary: 1 }, // sfence (reg, only 0), clflush (mem)
+    // (XSAVE and XRSTOR check CR4.OSXSAVE and CR0.TS before their operand)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 4, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1 }, // xsave (mem)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 5, skip: 1, custom: 1, custom_modrm_resolve: 1 }, // lfence (reg, only 0), xrstor (mem)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 6, skip: 1, block_boundary: 1, custom_modrm_resolve: 1 }, // mfence (reg, only 0), xsaveopt (mem: XSAVEOPT, checked by its handler)
+    { opcode: 0x0FAE, refining: 1, e: 1, fixed_g: 7, skip: 1, block_boundary: 1 }, // sfence (reg, only 0), clflush (mem)
 
     { opcode: 0x0FAF, os: 1, e: 1, mask_flags: TESTS_ASSUME_INTEL ? af | zf : sf | zf | af | pf, custom: 1 }, // imul
 
     { opcode: 0x0FB0, e: 1 }, // cmxchg
     { opcode: 0x0FB1, os: 1, e: 1, custom: 1 },
     { opcode: 0x0FC7, e: 1, fixed_g: 1, os: 1, reg_ud: 1, custom: 1 }, // cmpxchg8b (memory)
+    // (XSAVEC, XSAVES and XRSTORS: XSAVE's checks and their order, then CPL 0
+    // for the last two; 66, F2 and F3 #UD in their handlers)
+    { opcode: 0x0FC7, e: 1, fixed_g: 3, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1, feature: "XSAVES" }, // xrstors (memory)
+    { opcode: 0x0FC7, e: 1, fixed_g: 4, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1, feature: "XSAVEC" }, // xsavec (memory)
+    { opcode: 0x0FC7, e: 1, fixed_g: 5, reg_ud: 1, skip: 1, block_boundary: 1, custom_modrm_resolve: 1, feature: "XSAVES" }, // xsaves (memory)
     { opcode: 0x0FC7, e: 1, fixed_g: 6, os: 1, mem_ud: 1, skip: 1 }, // rdrand
 
     { opcode: 0x0FB2, block_boundary: 1, os: 1, e: 1, skip: 1 }, // lss
@@ -670,11 +695,11 @@ const encodings = [
     { sse: 1, opcode: 0x0F77, custom: 1, skip: 1 }, // emms (skip as it breaks gdb printing of float registers)
 
     // vmx instructions
-    { opcode: 0x0F78, skip: 1, block_boundary: 1 },
-    { opcode: 0x0F79, skip: 1, block_boundary: 1 },
+    { opcode: 0x0F78, skip: 1, block_boundary: 1, refining: 1 },
+    { opcode: 0x0F79, skip: 1, block_boundary: 1, refining: 1 },
 
-    { opcode: 0x0F7A, skip: 1, block_boundary: 1 }, // ud
-    { opcode: 0x0F7B, skip: 1, block_boundary: 1 }, // ud
+    { opcode: 0x0F7A, skip: 1, block_boundary: 1, refining: 1 }, // ud
+    { opcode: 0x0F7B, skip: 1, block_boundary: 1, refining: 1 }, // ud
 
     { sse: 1, opcode: 0x660F7C, e: 1, custom: 1 }, // sse3
     { sse: 1, opcode: 0xF20F7C, e: 1, custom: 1 }, // sse3
@@ -696,7 +721,7 @@ const encodings = [
     { sse: 1, opcode: 0xF20FC2, e: 1, imm8: 1, custom: 1 },
     { sse: 1, opcode: 0xF30FC2, e: 1, imm8: 1, custom: 1 },
 
-    { opcode: 0x0FC3, e: 1, custom: 1, reg_ud: 1 }, // movnti: Uses normal registers, hence not marked as sse
+    { opcode: 0x0FC3, e: 1, custom: 1, reg_ud: 1, refining: 1 }, // movnti: Uses normal registers, hence not marked as sse
 
     { sse: 1, opcode: 0x0FC4, e: 1, imm8: 1, custom: 1 },
     { sse: 1, opcode: 0x660FC4, e: 1, imm8: 1, custom: 1 },
@@ -868,11 +893,93 @@ for(let i = 0; i < 8; i++)
     ]);
 }
 
+// The three-byte maps 0F 38 and 0F 3A: every legacy form in
+// gen/isa_forms.json (checked by gen/cpu_features.js). The rows marked
+// unimplemented get their semantics in later phases of
+// docs/simd-xsave-plan.md.
+{
+    const SSSE3 = "SSSE3", SSE4_1 = "SSE4.1", SSE4_2 = "SSE4.2";
+    const vector = (opcode, feature, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, skip: 1, feature, unimplemented: 1, ...extra });
+    // SSSE3 (P3): an MMX form without prefix and an XMM form with 66
+    const ssse3 = (opcode, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, feature: SSSE3, ...extra });
+    for(const byte of [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x1C, 0x1D, 0x1E])
+    {
+        encodings.push(ssse3(0x0F3800 | byte), ssse3(0x660F3800 | byte));
+    }
+    encodings.push(ssse3(0x0F3A0F, { imm8: 1 }), ssse3(0x660F3A0F, { imm8: 1 })); // palignr
+    // SSE4.1 and SSE4.2 (P4b): XMM forms with 66
+    const sse4 = (opcode, feature, extra = {}) => ({ opcode, e: 1, sse: 1, custom: 1, feature, ...extra });
+    for(const byte of [0x10, 0x14, 0x15, 0x17, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2B,
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41])
+    {
+        encodings.push(sse4(0x660F3800 | byte, SSE4_1));
+    }
+    encodings.push(sse4(0x660F382A, SSE4_1, { reg_ud: 1 })); // movntdqa
+    for(const byte of [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x14, 0x15, 0x16, 0x17, 0x20, 0x21, 0x22, 0x40, 0x41, 0x42])
+    {
+        encodings.push(sse4(0x660F3A00 | byte, SSE4_1, { imm8: 1 }));
+    }
+    encodings.push(sse4(0x660F3837, SSE4_2)); // pcmpgtq
+    for(const byte of [0x60, 0x61, 0x62, 0x63]) encodings.push(sse4(0x660F3A00 | byte, SSE4_2, { imm8: 1 })); // pcmp[ei]str[im]
+    // MOVBE (memory only; 66 is the operand size; P10) and CRC32 share 0F 38
+    // F0/F1, where F2 selects CRC32 (66 F2 0F 38 F1: r/m16) and F3 is #UD
+    const movbe = { e: 1, custom: 1, skip: 1, refining: "rep", os: 1, reg_ud: 1, feature: "MOVBE" };
+    const crc32 = { e: 1, custom: 1, refining: "rep", feature: SSE4_2 };
+    encodings.push(
+        { ...movbe, opcode: 0x0F38F0 },
+        { ...movbe, opcode: 0x0F38F1 },
+        { ...crc32, opcode: 0xF20F38F0 },
+        { ...crc32, opcode: 0xF20F38F1, os: 1 },
+    );
+}
+
+/** The opcode map of a key: "", "0F", "0F38", "0F3A", or "VEX0F", "VEX0F38", "VEX0F3A" */
+export function opcode_map(opcode)
+{
+    if(is_vex_key(opcode)) return "VEX" + ["", "0F", "0F38", "0F3A"][opcode >>> 16 & 0xFF];
+    if((opcode >>> 8 & 0xFFFF) === 0x0F38) return "0F38";
+    if((opcode >>> 8 & 0xFFFF) === 0x0F3A) return "0F3A";
+    return (opcode >>> 8 & 0xFF) === 0x0F ? "0F" : "";
+}
+/** The mandatory prefix of a key (0x66, 0xF2, 0xF3, or 0; VEX.pp is part of a VEX key) */
+export function opcode_prefix(opcode)
+{
+    if(is_vex_key(opcode)) return 0;
+    const map = opcode_map(opcode);
+    return map === "0F38" || map === "0F3A" ? opcode >>> 24 : map === "0F" ? opcode >>> 16 & 0xFF : opcode >>> 8 & 0xFF;
+}
+/** The key without its prefix: the opcode byte with the bytes of its map */
+export function opcode_family(opcode)
+{
+    if(is_vex_key(opcode)) return opcode;
+    const map = opcode_map(opcode);
+    return opcode & (map === "0F38" || map === "0F3A" ? 0xFFFFFF : map === "0F" ? 0xFFFF : 0xFF);
+}
+
+/**
+ * Whether an SSE row is an MMX form, whose register operands are all MMX
+ * registers: no mandatory prefix, and the MMX instructions, their SSE
+ * extensions (0F 70, C4, C5, D0-FF) or the SSSE3 MMX forms. MMX forms raise
+ * #UD for CR0.EM and #NM for CR0.TS; the others, the XMM forms, also #UD
+ * when CR4.OSFXSR is clear (SDM vol. 2, 2.5).
+ */
+export function mmx_form(opcode)
+{
+    if(is_vex_key(opcode) || opcode_prefix(opcode) !== 0) return false;
+    const map = opcode_map(opcode), byte = opcode & 0xFF;
+    return map === "0F38" || map === "0F3A" ||
+        map === "0F" && (byte >= 0x60 && byte <= 0x7F || byte === 0xC4 || byte === 0xC5 || byte >= 0xD0);
+}
+
+const MAP_ORDER = { "": 0, "0F": 1, "0F38": 2, "0F3A": 3 };
 encodings.sort((e1, e2) => {
-    let o1 = (e1.opcode & 0xFF00) === 0x0F00 ? e1.opcode & 0xFFFF : e1.opcode & 0xFF;
-    let o2 = (e2.opcode & 0xFF00) === 0x0F00 ? e2.opcode & 0xFFFF : e2.opcode & 0xFF;
+    const o1 = MAP_ORDER[opcode_map(e1.opcode)] << 8 | e1.opcode & 0xFF;
+    const o2 = MAP_ORDER[opcode_map(e2.opcode)] << 8 | e2.opcode & 0xFF;
     return o1 - o2 || e1.fixed_g - e2.fixed_g;
 });
+
+// (the VEX rows come sorted)
+encodings.push(...VEX_ROWS);
 
 const result = Object.freeze(encodings.map(entry => Object.freeze(entry)));
 export default result;

@@ -74,6 +74,7 @@ fn rep_fixtures() {
 }
 #[test]
 fn rep_contract_and_progress_maps() {
+    // F3 F2 and F2 F3: the last of the two counts (decode_rules::apply_prefix)
     for bytes in [
         &[0xF3, 0xA4][..],
         &[0xF2, 0x6C][..],
@@ -81,12 +82,6 @@ fn rep_contract_and_progress_maps() {
         &[0xF2, 0xF3, 0xA6][..],
     ] {
         assert!(lift(bytes, GuestEip(0), LinearAddress(0), true).is_err());
-        if cfg!(debug_assertions) && bytes.len() == 3 {
-            assert!(
-                lift_cpu_with_rep_budget(bytes, GuestEip(0), LinearAddress(0), true, 3).is_err()
-            );
-            continue;
-        }
         let r = lift_cpu_with_rep_budget(bytes, GuestEip(0), LinearAddress(0), true, 3).unwrap();
         verify(&r).unwrap();
         let call = r

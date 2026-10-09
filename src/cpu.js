@@ -20,7 +20,8 @@ import { SB16 } from "./sb16.js";
 import { ACPI, acpi_system_states_file } from "./acpi.js";
 import { ACPI_LOADER_FILE, ACPI_RSDP_FILE, ACPI_TABLES_FILE, build_acpi_tables, locate_acpi_tables } from "./acpi_tables.js";
 import { ACPI_PM_BASE_DEFAULT, MACHINE_LAYOUT_VERSION, Platform, check_platform, create_platform } from "./platform.js";
-import { CORE_STATE_RANGES, STATE_OFFSETS } from "./state_layout.js";
+import { CORE_STATE_RANGES, INIT_PRESERVED, STATE_OFFSETS } from "./state_layout.js";
+import { CPU_FEATURES, CPU_FEATURE_PRESETS } from "./cpu_features.js";
 import { ParallelMachine } from "./parallel/machine.js";
 import { ExtendedStore } from "./extended_memory.js";
 import { COMMAND_RELOAD, COMMAND_RESET } from "./parallel/control.js";
@@ -584,9 +585,55 @@ CPU.prototype.create_jit_imports = function()
         // (x64::pages CHAIN)
         this.wm.exports["x64_page_set_chaining"]?.(supported ? 1 : 0);
     }
+    // FMA with relaxed SIMD's multiply-adds where they fuse (ir::native_fp)
+    this.wm.exports["ir_relaxed_fma_fused"]?.(relaxed_fma_fused() ? 1 : 0);
 
     this.jit_imports = jit_imports;
 };
+
+let relaxed_fma_result;
+/**
+ * Whether the engine has Wasm relaxed SIMD and its f32x4/f64x2 relaxed_madd
+ * and relaxed_nmadd fuse, rounding once like x86's FMA (an engine may choose
+ * either, and keeps its choice). Each is given (1 + ulp) * (1 + ulp) and an
+ * addend that cancels all but the product's last bit, 2^-104 or 2^-46, which
+ * only a fused operation keeps.
+ * @return {boolean}
+ */
+function relaxed_fma_fused()
+{
+    if(relaxed_fma_result !== undefined) return relaxed_fma_result;
+    const leb = n => {
+        const out = [];
+        do { out.push(n > 127 ? n & 127 | 128 : n); n >>>= 7; } while(n);
+        return out;
+    };
+    const simd = op => [0xFD, ...leb(op)];
+    // v128.const of a double's 32-bit halves or a single in every lane
+    const lanes = (double, ...words) => [...simd(0x0C), ...(double ? [...words, ...words] : [words[0], words[0], words[0], words[0]])
+        .flatMap(w => [w & 255, w >>> 8 & 255, w >>> 16 & 255, w >>> 24 & 255])];
+    // op(a, a, c) === expected in every lane (i64x2/i32x4 eq, all_true)
+    const check = (op, double, a, c, expected) => [...lanes(double, ...a), ...lanes(double, ...a), ...lanes(double, ...c),
+        ...simd(op), ...lanes(double, ...expected), ...simd(double ? 0xD6 : 0x37), ...simd(double ? 0xC3 : 0xA3)];
+    const body = [0,
+        ...check(0x107, true, [1, 0x3FF00000], [2, 0xBFF00000], [0, 0x39700000]), // f64x2.relaxed_madd
+        ...check(0x108, true, [1, 0x3FF00000], [2, 0x3FF00000], [0, 0xB9700000]), 0x71, // f64x2.relaxed_nmadd, i32.and
+        ...check(0x105, false, [0x3F800001], [0xBF800002], [0x28800000]), 0x71, // f32x4.relaxed_madd
+        ...check(0x106, false, [0x3F800001], [0x3F800002], [0xA8800000]), 0x71, // f32x4.relaxed_nmadd
+        0x0B];
+    const code = [1, ...leb(body.length), ...body];
+    // (module (func (export "f") (result i32) ...))
+    const bytes = new Uint8Array([0, 0x61, 0x73, 0x6D, 1, 0, 0, 0, 1, 5, 1, 0x60, 0, 1, 0x7F, 3, 2, 1, 0, 7, 5, 1, 1, 0x66, 0, 0,
+        10, ...leb(code.length), ...code]);
+    relaxed_fma_result = false;
+    try
+    {
+        relaxed_fma_result = WebAssembly.validate(bytes) &&
+            new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports["f"]() === 1;
+    }
+    catch(e) {}
+    return relaxed_fma_result;
+}
 
 CPU.prototype.wasm_patch = function()
 {
@@ -861,6 +908,8 @@ CPU.prototype.get_state = function(skip_memory = false)
     state[104] = this.devices.smbus;
     // the root ports' hot plug slots
     state[105] = (this.devices.pcie_root_ports || []).map(port => port.get_state());
+    // the CPU features (settings cpu_features, CPU_FEATURES)
+    state[106] = this.cpu_features;
     return state;
 };
 
@@ -905,10 +954,60 @@ CPU.prototype.validate_physical_state = function(state)
         throw new Error("Invalid physical memory map in snapshot");
 };
 
-// [offset, size] of core state that survives INIT
-const INIT_PRESERVED = [[STATE_OFFSETS.x64_pat, 8],
-    [STATE_OFFSETS.x64_mtrr_def_type, STATE_OFFSETS.x64_mc_banks + 128 - STATE_OFFSETS.x64_mtrr_def_type],
-    [STATE_OFFSETS.smbase, 4]];
+/**
+ * The feature set (src/rust/cpu/features.rs) of the setting cpu_features: an
+ * array of the names of src/cpu_features.js, or the name of a preset. A
+ * feature that cpuid_level cannot report is left out, with the features that
+ * require it (docs/simd-xsave-plan.md 6.1); an unknown feature, one the CPU
+ * profile cannot have or one without its requirements is an error.
+ * @param {Array<string>|string|undefined} requested
+ * @param {boolean} x86_64
+ * @param {number} cpuid_level
+ * @return {number}
+ */
+export function resolve_cpu_features(requested, x86_64, cpuid_level)
+{
+    if(requested === undefined)
+    {
+        return 0;
+    }
+    const names = typeof requested === "string" ? CPU_FEATURE_PRESETS[requested] : requested;
+    if(!Array.isArray(names))
+    {
+        throw new Error("cpu_features: unknown preset " + JSON.stringify(requested));
+    }
+    const profile = x86_64 ? "x86_64" : "x86";
+    for(const name of names)
+    {
+        const feature = CPU_FEATURES[name];
+        if(!feature) throw new Error("cpu_features: unknown feature " + JSON.stringify(name));
+        if(!feature["profiles"].includes(profile)) throw new Error("cpu_features: " + name + " needs cpu_type: \"x86_64\"");
+        for(const required of feature["requires"])
+        {
+            if(!names.includes(required)) throw new Error("cpu_features: " + name + " requires " + required);
+        }
+    }
+    let kept = names.filter(name => CPU_FEATURES[name]["min_cpuid_level"] <= cpuid_level);
+    for(let count = -1; count !== kept.length;)
+    {
+        count = kept.length;
+        kept = kept.filter(name => CPU_FEATURES[name]["requires"].every(required => kept.includes(required)));
+    }
+    return kept.reduce((set, name) => set | 1 << CPU_FEATURES[name]["bit"], 0);
+}
+
+/**
+ * The features of the setting cpu_features whose milestone is not released
+ * yet (docs/simd-xsave-plan.md 4.1): they are for tests and development, and
+ * their instructions may still be #UD
+ * @param {Array<string>|string|undefined} requested
+ * @return {Array<string>}
+ */
+export function unreleased_cpu_features(requested)
+{
+    const names = typeof requested === "string" ? CPU_FEATURE_PRESETS[requested] || [] : requested || [];
+    return names.filter(name => CPU_FEATURES[name] && !CPU_FEATURES[name]["released"]);
+}
 
 // Version 1 predates the x64 extension banks. Keep exact byte ranges for import.
 const CORE_STATE_RANGES_V1 = [[64, 108], [112, 552], [556, 620], [628, 652], [668, 716],
@@ -997,6 +1096,11 @@ CPU.prototype.set_machine_core_state = function(state)
             {
                 // (SMBASE's reset value)
                 new DataView(bytes.buffer).setUint32(STATE_OFFSETS.smbase - start, 0x30000, true);
+            }
+            if(start <= STATE_OFFSETS.xcr0 && end >= STATE_OFFSETS.xcr0 + 8)
+            {
+                // (XCR0's reset value: x87 state only)
+                new DataView(bytes.buffer).setUint32(STATE_OFFSETS.xcr0 - start, 1, true);
             }
             return bytes;
         });
@@ -1105,6 +1209,15 @@ CPU.prototype.validate_state = function(state)
         throw new Error("Invalid snapshot RAM size");
     if((state[98] || 0) !== this.extended_pages)
         throw new Error("Snapshot extended RAM size differs from this machine's");
+    // The guest has seen these in CPUID and may use them (snapshots from
+    // before them have none)
+    const features = state[106] || 0;
+    if(features !== this.cpu_features)
+    {
+        const names = mask => Object.keys(CPU_FEATURES).filter(name => mask & 1 << CPU_FEATURES[name].bit).join(" ") || "none";
+        throw new Error("The snapshot is from a machine with the CPU features " + names(features) +
+            " (cpu_features), this one has " + names(this.cpu_features));
+    }
 };
 
 CPU.prototype.set_state = function(state, skip_memory = false)
@@ -1257,9 +1370,10 @@ CPU.prototype.set_state = function(state, skip_memory = false)
     this.fpu_dp_selector[0] = state[74];
     this.fpu_opcode[0] = state[75];
 
-    if(state[86] !== undefined) this.last_result = state[86];
-    if(state[87] !== undefined) this.fpu_status_word = state[87];
-    if(state[88] !== undefined) this.mxcsr = state[88];
+    // (into the views of the Wasm memory, which must not be replaced)
+    if(state[86] !== undefined) this.last_result[0] = state[86][0];
+    if(state[87] !== undefined) this.fpu_status_word[0] = state[87][0];
+    if(state[88] !== undefined) this.mxcsr[0] = state[88][0];
 
     if(!skip_memory)
     {
@@ -1296,6 +1410,7 @@ CPU.prototype.set_state = function(state, skip_memory = false)
         for(const [start, end] of CORE_STATE_RANGES) if(start >= 1360) bytes.fill(0, this.state_base + start, this.state_base + end);
         new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.x64_pat, 2).fill(0x00070406);
         new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.smbase, 1)[0] = 0x30000;
+        new Uint32Array(this.wasm_memory.buffer, this.state_base + STATE_OFFSETS.xcr0, 2).set([1, 0]);
         this.with_wide_state_buffer(new Uint32Array(0), (pointer, count) => this.wm.exports["x64_tlb_snapshot_restore"](0, pointer, count));
         this.wm.exports["exception_restore"](0, 0);
         this.cores[0].slices = this.cores[0].steps = 0;
@@ -1436,9 +1551,10 @@ CPU.prototype.take_core_events = function(core)
         dbg_log("core " + core + ": INIT", LOG_CPU);
         this.apic_init_core(core);
         this.wm.exports["context_reset"](core);
-        // INIT leaves the PAT, the MTRRs and the machine-check banks alone
-        // (SDM Vol.3A, "Processor States Following Power-up, Reset, or INIT");
-        // everything else takes its reset value
+        // INIT leaves the x87, SSE and XSAVE state, the PAT, the MTRRs, the
+        // machine-check banks and SMBASE alone (SDM Vol.3A, "Processor States
+        // Following Power-up, Reset, or INIT"; INIT_PRESERVED); everything
+        // else takes its reset value
         const next = this.core_reset_state.map(bytes => bytes.slice());
         const current = core === this.active_core ? this.save_core_state() : state.saved;
         if(current) for(const [offset, size] of INIT_PRESERVED)
@@ -2675,6 +2791,18 @@ CPU.prototype.init = function(settings, device_bus)
     this.configure_extended_memory(settings.extended_memory_size || 0, settings.extended_memory_cache);
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
+    // The features of docs/simd-xsave-plan.md (src/cpu_features.js): the
+    // released ones (SSSE3, SSE4.1, SSE4.2: the preset x86-64-v2), and for
+    // tests and development the others, which warn unless
+    // cpu_features_unreleased is set
+    this.cpu_features = resolve_cpu_features(settings["cpu_features"], settings["cpu_type"] === "x86_64", settings.cpuid_level || 0x16);
+    const unreleased = unreleased_cpu_features(settings["cpu_features"]);
+    if(unreleased.length && !settings["cpu_features_unreleased"])
+    {
+        console.warn("cpu_features: " + unreleased.join(", ") + " not released yet (docs/simd-xsave-plan.md): " +
+            "for tests and development, their instructions may still be #UD");
+    }
+    this.wm.exports["set_cpu_features"](this.cpu_features);
 
     this.acpi_enabled[0] = +this.platform.acpi;
 

@@ -7,30 +7,13 @@ use super::{
     memory::{self, Fault},
     state,
 };
-use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem};
+use crate::cpu::{
+    avx, cpu, fpu, global_pointers as gp, instructions_0f as sem, instructions_0f38 as sem38,
+    instructions_0f3a as sem3a, simd_fp, simd_int, xstate,
+};
 use crate::softfloat::F80;
 
 extern "C" {
-    fn f32_add(a: u32, b: u32) -> u32;
-    fn f32_sub(a: u32, b: u32) -> u32;
-    fn f32_mul(a: u32, b: u32) -> u32;
-    fn f32_div(a: u32, b: u32) -> u32;
-    fn f32_sqrt(a: u32) -> u32;
-    fn f64_add(a: u64, b: u64) -> u64;
-    fn f64_sub(a: u64, b: u64) -> u64;
-    fn f64_mul(a: u64, b: u64) -> u64;
-    fn f64_div(a: u64, b: u64) -> u64;
-    fn f64_sqrt(a: u64) -> u64;
-    fn f32_to_f64(a: u32) -> u64;
-    fn f64_to_f32(a: u64) -> u32;
-    fn i32_to_f32(a: i32) -> u32;
-    fn i32_to_f64(a: i32) -> u64;
-    fn i64_to_f32(a: i64) -> u32;
-    fn i64_to_f64(a: i64) -> u64;
-    fn f32_to_i32(a: u32, rounding: u8, exact: bool) -> i32;
-    fn f32_to_i64(a: u32, rounding: u8, exact: bool) -> i64;
-    fn f64_to_i32(a: u64, rounding: u8, exact: bool) -> i32;
-    fn f64_to_i64(a: u64, rounding: u8, exact: bool) -> i64;
     fn extF80M_to_i32(a: *const F80, rounding: u8, exact: bool) -> i32;
     fn extF80M_to_i64(a: *const F80, rounding: u8, exact: bool) -> i64;
     fn extF80M_to_f32(a: *const F80) -> i32;
@@ -130,188 +113,9 @@ unsafe fn gpr_store(d: &Decoded, width: u8, v: u64) -> Result<(), Fault> {
         memory::write(a, width, v, s)
     }
 }
-fn nan(v: u64, double: bool) -> bool {
-    if double {
-        v & 0x7FFF_FFFF_FFFF_FFFF > 0x7FF0_0000_0000_0000
-    }
-    else {
-        v as u32 & 0x7FFF_FFFF > 0x7F80_0000
-    }
-}
-fn snan(v: u64, double: bool) -> bool {
-    nan(v, double) && v & if double { 1 << 51 } else { 1 << 22 } == 0
-}
-fn denormal(v: u64, double: bool) -> bool {
-    if double {
-        v & 0x7FF0_0000_0000_0000 == 0 && v & 0x000F_FFFF_FFFF_FFFF != 0
-    }
-    else {
-        v & 0x7F80_0000 == 0 && v & 0x007F_FFFF != 0
-    }
-}
-fn sign_mask(double: bool) -> u64 {
-    if double {
-        1 << 63
-    }
-    else {
-        1 << 31
-    }
-}
-struct Fp {
-    mxcsr: u32,
-    extra: u32,
-    old_rounding: u8,
-    old_flags: u8,
-}
-impl Fp {
-    unsafe fn new() -> Self {
-        let mxcsr = *gp::mxcsr as u32;
-        let fp = Self {
-            mxcsr,
-            extra: 0,
-            old_rounding: softfloat_roundingMode,
-            old_flags: softfloat_exceptionFlags,
-        };
-        softfloat_roundingMode = [0, 2, 3, 1][(mxcsr >> 13 & 3) as usize];
-        softfloat_exceptionFlags = 0;
-        fp
-    }
-    fn input(&mut self, v: u64, double: bool) -> u64 {
-        if denormal(v, double) {
-            if self.mxcsr & 0x40 != 0 {
-                return v & sign_mask(double);
-            }
-            self.extra |= 2;
-        }
-        v
-    }
-    fn output(&mut self, v: u64, double: bool) -> u64 {
-        if self.mxcsr & 0x8000 != 0 && denormal(v, double) {
-            self.extra |= 0x30;
-            v & sign_mask(double)
-        }
-        else {
-            v
-        }
-    }
-    unsafe fn binary(&mut self, op: u8, a: u64, b: u64, double: bool) -> u64 {
-        let previous = self.extra;
-        let a = if op == 0x51 { 0 } else { self.input(a, double) };
-        let b = self.input(b, double);
-        // Invalid/NaN processing takes priority over the denormal operand
-        // condition in this lane; earlier packed lanes keep their flags.
-        if nan(a, double)
-            || nan(b, double)
-            || op == 0x51 && b & sign_mask(double) != 0 && b & !sign_mask(double) != 0
-        {
-            self.extra = self.extra & !2 | previous & 2;
-        }
-        let out = if op == 0x5D || op == 0x5F {
-            if nan(a, double) || nan(b, double) {
-                self.extra |= 1;
-                b
-            }
-            else {
-                let less = if double {
-                    f64::from_bits(a) < f64::from_bits(b)
-                }
-                else {
-                    f32::from_bits(a as u32) < f32::from_bits(b as u32)
-                };
-                let greater = if double {
-                    f64::from_bits(a) > f64::from_bits(b)
-                }
-                else {
-                    f32::from_bits(a as u32) > f32::from_bits(b as u32)
-                };
-                if if op == 0x5D { less } else { greater } {
-                    a
-                }
-                else {
-                    b
-                }
-            }
-        }
-        else if double {
-            match op {
-                0x58 => f64_add(a, b),
-                0x59 => f64_mul(a, b),
-                0x5C => f64_sub(a, b),
-                0x5E => f64_div(a, b),
-                0x51 => f64_sqrt(b),
-                _ => unreachable!(),
-            }
-        }
-        else {
-            let (a, b) = (a as u32, b as u32);
-            (match op {
-                0x58 => f32_add(a, b),
-                0x59 => f32_mul(a, b),
-                0x5C => f32_sub(a, b),
-                0x5E => f32_div(a, b),
-                0x51 => f32_sqrt(b),
-                _ => unreachable!(),
-            }) as u64
-        };
-        self.output(out, double)
-    }
-    fn compare(&mut self, a: u64, b: u64, double: bool, predicate: u8) -> bool {
-        let previous = self.extra;
-        let a = self.input(a, double);
-        let b = self.input(b, double);
-        let unordered = nan(a, double) || nan(b, double);
-        if unordered {
-            self.extra = self.extra & !2 | previous & 2;
-        }
-        if snan(a, double) || snan(b, double) || unordered && matches!(predicate & 7, 1 | 2 | 5 | 6)
-        {
-            self.extra |= 1;
-        }
-        let (eq, lt) = if unordered {
-            (false, false)
-        }
-        else if double {
-            (
-                f64::from_bits(a) == f64::from_bits(b),
-                f64::from_bits(a) < f64::from_bits(b),
-            )
-        }
-        else {
-            (
-                f32::from_bits(a as u32) == f32::from_bits(b as u32),
-                f32::from_bits(a as u32) < f32::from_bits(b as u32),
-            )
-        };
-        match predicate & 7 {
-            0 => eq,
-            1 => lt,
-            2 => lt || eq,
-            3 => unordered,
-            4 => !eq,
-            5 => !lt,
-            6 => !(lt || eq),
-            7 => !unordered,
-            _ => unreachable!(),
-        }
-    }
-    unsafe fn finish(self) -> Result<(), Fault> {
-        let sf = softfloat_exceptionFlags as u32;
-        let flags = self.extra
-            | (sf & 1) << 5
-            | (sf & 2) << 3
-            | (sf & 4) << 1
-            | (sf & 8) >> 1
-            | (sf & 16) >> 4;
-        softfloat_roundingMode = self.old_rounding;
-        softfloat_exceptionFlags = self.old_flags;
-        *gp::mxcsr |= flags as i32;
-        if flags & !(self.mxcsr >> 7) & 63 != 0 {
-            Err(fault(if state::read_cr(4) & 0x400 != 0 { 19 } else { 6 }))
-        }
-        else {
-            Ok(())
-        }
-    }
+/// An unmasked SIMD floating-point exception: #XM, or #UD without CR4.OSXMMEXCPT
+unsafe fn simd_fault(_: simd_fp::Unmasked) -> Fault {
+    fault(if state::read_cr(4) & 0x400 != 0 { 19 } else { 6 })
 }
 unsafe fn arithmetic(d: &Decoded) -> Result<bool, Fault> {
     let op = d.base_opcode() as u8;
@@ -336,86 +140,13 @@ unsafe fn arithmetic(d: &Decoded) -> Result<bool, Fault> {
     let width = if double { 64 } else { 32 };
     let src = source(d, if scalar { width } else { 128 }, !scalar, false)?;
     let r = d.reg.unwrap();
-    let dst = xmm(r);
-    let mut result = dst;
-    let lane = |v: u128, i: usize| {
-        (v >> (width as usize * i)) as u64 & if double { u64::MAX } else { u32::MAX as u64 }
-    };
-    let mut fp = Fp::new();
     if matches!(op, 0x2E | 0x2F) {
-        let a = lane(dst, 0);
-        let b = lane(src, 0);
-        let unordered = nan(a, double) || nan(b, double);
-        let eq = fp.compare(a, b, double, if op == 0x2F { 1 } else { 0 });
-        let lt = if !unordered { fp.compare(a, b, double, 1) } else { false };
-        let flags = if unordered {
-            0x45
-        }
-        else if lt {
-            1
-        }
-        else if if op == 0x2F {
-            lane(dst, 0) == lane(src, 0) || fp.compare(a, b, double, 0)
-        }
-        else {
-            eq
-        } {
-            0x40
-        }
-        else {
-            0
-        };
-        fp.finish()?;
-        state::write_flags64(state::read_flags64() & !0x8D5 | flags);
+        let flags = simd_fp::compare_flags(d.opcode, xmm(r), src).map_err(|e| simd_fault(e))?;
+        state::write_flags64(state::read_flags64() & !0x8D5 | flags as u64);
         return Ok(true);
     }
-    let lanes = if scalar { 1 } else { 128 / width };
-    for i in 0..lanes as usize {
-        let v = if op == 0xC2 {
-            if fp.compare(
-                lane(dst, i),
-                lane(src, i),
-                double,
-                d.immediate.unwrap().value as u8,
-            ) {
-                if double {
-                    u64::MAX
-                }
-                else {
-                    u32::MAX as u64
-                }
-            }
-            else {
-                0
-            }
-        }
-        else if op == 0xD0 {
-            fp.binary(
-                if i % 2 == 0 { 0x5C } else { 0x58 },
-                lane(dst, i),
-                lane(src, i),
-                double,
-            )
-        }
-        else if matches!(op, 0x7C | 0x7D) {
-            let half = lanes as usize / 2;
-            let input = if i < half { dst } else { src };
-            let base = (i % half) * 2;
-            fp.binary(
-                if op == 0x7C { 0x58 } else { 0x5C },
-                lane(input, base),
-                lane(input, base + 1),
-                double,
-            )
-        }
-        else {
-            fp.binary(op, lane(dst, i), lane(src, i), double)
-        };
-        let shift = i * width as usize;
-        let mask = if double { u64::MAX as u128 } else { u32::MAX as u128 };
-        result = (result & !(mask << shift)) | (v as u128 & mask) << shift;
-    }
-    fp.finish()?;
+    let imm8 = d.immediate.map_or(0, |i| i.value as u8);
+    let result = simd_fp::arithmetic(d.opcode, xmm(r), src, imm8).map_err(|e| simd_fault(e))?;
     put_xmm(r, result);
     Ok(true)
 }
@@ -475,52 +206,8 @@ unsafe fn conversion(d: &Decoded) -> Result<bool, Fault> {
     else {
         source(d, size, size == 128, low == 0x2A)?
     };
-    let mut fp = Fp::new();
-    let mut result = if op == 0x0F2A || scalar && !matches!(low, 0x2C | 0x2D) { xmm(r) } else { 0 };
-    if low == 0x2A {
-        let lanes = if scalar { 1 } else { 2 };
-        let double = matches!(p, 0x66 | 0xF2);
-        let width = if double { 64 } else { 32 };
-        for i in 0..lanes {
-            let value = if scalar && wide { src as i64 } else { (src >> (i * 32)) as i32 as i64 };
-            let v = if double { i64_to_f64(value) } else { i64_to_f32(value) as u64 };
-            let v = fp.output(v, double);
-            let mask = if double { u64::MAX as u128 } else { u32::MAX as u128 };
-            result = result & !(mask << (i * width)) | (v as u128) << (i * width);
-        }
-        fp.finish()?;
-        put_xmm(r, result);
-        if !scalar {
-            cpu::transition_fpu_to_mmx();
-        }
-        return Ok(true);
-    }
+    let result = simd_fp::convert(op, wide, xmm(r), src).map_err(|e| simd_fault(e))?;
     if matches!(low, 0x2C | 0x2D) {
-        let double = matches!(p, 0x66 | 0xF2);
-        let width = if double { 64 } else { 32 };
-        let rounding = if low == 0x2C { 1 } else { softfloat_roundingMode };
-        for i in 0..if scalar { 1 } else { 2 } {
-            let value = fp.input((src >> (i * width)) as u64, double);
-            let v = if scalar && wide {
-                if double {
-                    f64_to_i64(value, rounding, true)
-                }
-                else {
-                    f32_to_i64(value as u32, rounding, true)
-                }
-            }
-            else {
-                (if double {
-                    f64_to_i32(value, rounding, true)
-                }
-                else {
-                    f32_to_i32(value as u32, rounding, true)
-                }) as i64
-            };
-            result |= if scalar { v as u64 as u128 } else { (v as u32 as u128) << (i * 32) };
-        }
-        fp.extra &= !2; // FP-to-integer conversions do not signal #D.
-        fp.finish()?;
         if scalar {
             state::write_gpr(r as usize, result as u64, if wide { 64 } else { 32 });
         }
@@ -530,48 +217,10 @@ unsafe fn conversion(d: &Decoded) -> Result<bool, Fault> {
         }
         return Ok(true);
     }
-    if low == 0x5A {
-        let from_double = matches!(p, 0x66 | 0xF2);
-        let from_width = if from_double { 64 } else { 32 };
-        let to_width = 96 - from_width;
-        for i in 0..if scalar { 1 } else { 2 } {
-            let value = fp.input((src >> (i * from_width)) as u64, from_double);
-            let v = if from_double { f64_to_f32(value) as u64 } else { f32_to_f64(value as u32) };
-            let v = fp.output(v, !from_double);
-            let mask = if from_double { u32::MAX as u128 } else { u64::MAX as u128 };
-            result = result & !(mask << (i * to_width)) | (v as u128) << (i * to_width);
-        }
-    }
-    else {
-        let to_float = op == 0x0F5B || op == 0xF30FE6;
-        let double = low == 0xE6;
-        let count = if double { 2 } else { 4 };
-        let width = if double { 64 } else { 32 };
-        for i in 0..count {
-            if to_float {
-                let n = (src >> (i * 32)) as i32;
-                let v = if double { i32_to_f64(n) } else { i32_to_f32(n) as u64 };
-                result |= (fp.output(v, double) as u128) << (i * width);
-            }
-            else {
-                let n = fp.input((src >> (i * width)) as u64, double);
-                let rounding =
-                    if matches!(op, 0xF30F5B | 0x660FE6) { 1 } else { softfloat_roundingMode };
-                let v = if double {
-                    f64_to_i32(n, rounding, true)
-                }
-                else {
-                    f32_to_i32(n as u32, rounding, true)
-                };
-                result |= (v as u32 as u128) << (i * 32);
-            }
-        }
-    }
-    if matches!(op, 0x660F5B | 0xF30F5B | 0x660FE6 | 0xF20FE6) {
-        fp.extra &= !2;
-    }
-    fp.finish()?;
     put_xmm(r, result);
+    if low == 0x2A && !scalar {
+        cpu::transition_fpu_to_mmx();
+    }
     Ok(true)
 }
 
@@ -1322,8 +971,10 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
             )?;
         },
         0xF30F12 | 0xF30F16 => {
+            // MOVSLDUP/MOVSHDUP: an aligned m128 (SDM exception type 4; QEMU
+            // too), unlike MOVDDUP's m64
             guard(true)?;
-            let v = source(d, 128, false, false)?;
+            let v = source(d, 128, true, false)?;
             let first = if b == 0x12 { 0 } else { 32 };
             let lo = (v >> first) & u32::MAX as u128;
             let hi = (v >> (first + 64)) & u32::MAX as u128;
@@ -1481,36 +1132,7 @@ unsafe fn moves(d: &Decoded) -> Result<bool, Fault> {
             guard(true)?;
             let scalar = p == 0xF3;
             let src = source(d, if scalar { 32 } else { 128 }, !scalar, false)?;
-            let mut out = if scalar { xmm(r) } else { 0 };
-            for i in 0..if scalar { 1 } else { 4 } {
-                let v = (src >> (i * 32)) as u32;
-                let sign = v & 0x8000_0000;
-                let a = f32::from_bits(v);
-                let bits = if nan(v as u64, false) {
-                    v | 0x400000
-                }
-                else if v & 0x7F80_0000 == 0 {
-                    sign | 0x7F800000
-                }
-                else if b == 0x52 && sign != 0 {
-                    0xFFC00000
-                }
-                else if v & 0x7FFF_FFFF == 0x7F800000 {
-                    sign
-                }
-                else {
-                    let n = if b == 0x52 { 1.0 / a.sqrt() } else { 1.0 / a };
-                    let bits = n.to_bits();
-                    if denormal(bits as u64, false) {
-                        bits & 0x8000_0000
-                    }
-                    else {
-                        bits
-                    }
-                };
-                out = out & !((u32::MAX as u128) << (i * 32)) | (bits as u128) << (i * 32);
-            }
-            put_xmm(r, out);
+            put_xmm(r, simd_fp::reciprocal(d.opcode, xmm(r), src));
         },
         _ => return Ok(false),
     }
@@ -1611,6 +1233,53 @@ unsafe fn bytes_write(a: u64, data: &[u8], stack: bool) -> Result<(), Fault> {
 fn u16_at(v: &[u8], at: usize) -> u16 { u16::from_le_bytes(v[at..at + 2].try_into().unwrap()) }
 fn u32_at(v: &[u8], at: usize) -> u32 { u32::from_le_bytes(v[at..at + 4].try_into().unwrap()) }
 fn u64_at(v: &[u8], at: usize) -> u64 { u64::from_le_bytes(v[at..at + 8].try_into().unwrap()) }
+/// An XSAVE or FXSAVE area at a checked linear address (cpu::xstate::Area)
+struct Area {
+    a: u64,
+    stack: bool,
+}
+impl xstate::Area for Area {
+    type Fault = Fault;
+    unsafe fn check(&mut self, offset: u32, length: u32, write: bool) -> Result<(), Fault> {
+        // (a field is shorter than a page: its first byte and, when it
+        // crosses into the next page, that page's first byte cover it, which
+        // a page fault reports in CR2)
+        let first = self.a.wrapping_add(offset as u64);
+        let last = first.wrapping_add(length as u64 - 1);
+        let next = (last >> 12 != first >> 12).then_some(last & !0xFFF);
+        for at in std::iter::once(first).chain(next) {
+            if write {
+                memory::probe_write(at, 8, self.stack)?;
+            }
+            else {
+                memory::probe_read(at, 8, self.stack)?;
+            }
+        }
+        Ok(())
+    }
+    unsafe fn read(&mut self, offset: u32, bytes: &mut [u8]) {
+        let value = memory::read(
+            self.a.wrapping_add(offset as u64),
+            bytes.len() as u8 * 8,
+            self.stack,
+        )
+        .unwrap();
+        bytes.copy_from_slice(&value.to_le_bytes()[..bytes.len()]);
+    }
+    unsafe fn write(&mut self, offset: u32, bytes: &[u8]) {
+        let mut value = [0; 8];
+        value[..bytes.len()].copy_from_slice(bytes);
+        let at = self.a.wrapping_add(offset as u64);
+        memory::write(
+            at,
+            bytes.len() as u8 * 8,
+            u64::from_le_bytes(value),
+            self.stack,
+        )
+        .unwrap();
+    }
+    unsafe fn gp(&mut self) -> Fault { Fault::gp() }
+}
 unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
     if d.base_opcode() != 0x0FAE {
         return Ok(false);
@@ -1625,14 +1294,19 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
         memory::probe_read(a, 8, s)?;
         return Ok(true); // CLFLUSH: guest caches share the coherent RAM image.
     }
-    if group > 3 {
+    // (XSAVEOPT: CPUID.(EAX=0DH,ECX=1):EAX[0])
+    if group == 6 && !crate::cpu::features::has(crate::cpu::features::XSAVEOPT) {
         return Ok(false);
+    }
+    // XSAVE and XRSTOR: #UD without CR4.OSXSAVE before #NM
+    if group >= 4 && !xstate::enabled() {
+        return Err(Fault::ud());
     }
     if state::read_cr(0) & 8 != 0 {
         return Err(fault(7));
     }
     let (a, s) = address(d);
-    if group >= 2 {
+    if group == 2 || group == 3 {
         guard(true)?;
         if group == 2 {
             let v = memory::read(a, 32, s)? as u32;
@@ -1646,74 +1320,53 @@ unsafe fn fxstate(d: &Decoded) -> Result<bool, Fault> {
         }
         return Ok(true);
     }
-    alignment(a, s, 16)?;
-    fpu::fpu_cache_barrier();
-    if group == 0 {
-        let mut out = vec![0u8; 512];
-        out[0..2].copy_from_slice(&(*gp::fpu_control_word).to_le_bytes());
-        out[2..4].copy_from_slice(&fpu::fpu_load_status_word().to_le_bytes());
-        out[4] = !*gp::fpu_stack_empty;
-        out[6..8].copy_from_slice(&(*gp::fpu_opcode as u16).to_le_bytes());
-        out[8..12].copy_from_slice(&(*gp::fpu_ip as u32).to_le_bytes());
-        out[16..20].copy_from_slice(&(*gp::fpu_dp as u32).to_le_bytes());
-        if d.prefixes.w() {
-            out[12..16].copy_from_slice(&(*gp::x64_fpu_ip_hi).to_le_bytes());
-            out[20..24].copy_from_slice(&(*gp::x64_fpu_dp_hi).to_le_bytes());
-        }
-        else {
-            out[12..14].copy_from_slice(&(*gp::fpu_ip_selector as u16).to_le_bytes());
-            out[20..22].copy_from_slice(&(*gp::fpu_dp_selector as u16).to_le_bytes());
-        }
-        if state::read_cr(4) & 0x200 != 0 {
-            out[24..28].copy_from_slice(&(*gp::mxcsr as u32).to_le_bytes());
-            out[28..32].copy_from_slice(&(cpu::MXCSR_MASK as u32).to_le_bytes());
-            for i in 0..16 {
-                out[160 + i * 16..176 + i * 16].copy_from_slice(&xmm(i as u8).to_le_bytes());
-            }
-        }
-        for i in 0..8 {
-            let value = *gp::fpu_st.add((i + *gp::fpu_stack_ptr as usize) & 7);
-            out[32 + i * 16..40 + i * 16].copy_from_slice(&value.mantissa.to_le_bytes());
-            out[40 + i * 16..42 + i * 16].copy_from_slice(&value.sign_exponent.to_le_bytes());
-        }
-        bytes_write(a, &out, s)?;
-    }
-    else {
-        let data = bytes_read(a, 512, s)?;
-        let mxcsr = u32_at(&data, 24);
-        if state::read_cr(4) & 0x200 != 0 && mxcsr & !(cpu::MXCSR_MASK as u32) != 0 {
-            return Err(Fault::gp());
-        }
-        fpu::set_control_word(u16_at(&data, 0));
-        fpu::fpu_set_status_word(u16_at(&data, 2));
-        *gp::fpu_stack_empty = !data[4];
-        *gp::fpu_opcode = (u16_at(&data, 6) & 0x7FF) as i32;
-        *gp::fpu_ip = u32_at(&data, 8) as i32;
-        *gp::fpu_dp = u32_at(&data, 16) as i32;
-        *gp::x64_fpu_ip_hi = if d.prefixes.w() { u32_at(&data, 12) } else { 0 };
-        *gp::x64_fpu_dp_hi = if d.prefixes.w() { u32_at(&data, 20) } else { 0 };
-        *gp::fpu_ip_selector = if d.prefixes.w() { 0 } else { u16_at(&data, 12) as i32 };
-        *gp::fpu_dp_selector = if d.prefixes.w() { 0 } else { u16_at(&data, 20) as i32 };
-        for i in 0..8 {
-            fpu::fpu_write_st(
-                ((i + *gp::fpu_stack_ptr as usize) & 7) as i32,
-                F80 {
-                    mantissa: u64_at(&data, 32 + i * 16),
-                    sign_exponent: u16_at(&data, 40 + i * 16),
-                },
-            );
-        }
-        if state::read_cr(4) & 0x200 != 0 {
-            *gp::mxcsr = mxcsr as i32;
-            for i in 0..16 {
-                put_xmm(
-                    i as u8,
-                    u128::from_le_bytes(data[160 + i * 16..176 + i * 16].try_into().unwrap()),
-                );
-            }
-        }
+    alignment(a, s, if group >= 4 { 64 } else { 16 })?;
+    // the 64-bit format with REX.W; XMM8-15 and YMM8-15 in 64-bit mode
+    let format = xstate::Format {
+        wide: d.prefixes.w(),
+        long: d.mode.is_long(),
+    };
+    let area = &mut Area { a, stack: s };
+    let rfbm = || xstate::requested(state::read_gpr(2) as u32, state::read_gpr(0) as u32);
+    match group {
+        0 => xstate::fxsave(area, format)?,
+        1 => xstate::fxrstor(area, format)?,
+        4 => xstate::xsave(area, rfbm(), format)?,
+        6 => xstate::xsaveopt(area, rfbm(), format)?,
+        _ => xstate::xrstor(area, rfbm(), format)?,
     }
     Ok(true)
+}
+/// XRSTORS (0F C7 /3), XSAVEC (/4) and XSAVES (/5) on memory, without a
+/// mandatory prefix: XSAVE's checks and their order (#UD without
+/// CR4.OSXSAVE, #NM, #GP(0) unless aligned to 64 bytes), and #GP(0) for CPL
+/// > 0 before the operand for XRSTORS and XSAVES; the 64-bit forms with REX.W
+pub(super) unsafe fn compacted_state(d: &Decoded, group: u8) -> Result<(), Fault> {
+    if d.rm_register.is_some() || d.prefixes.operand || d.prefixes.rep.is_some() {
+        return Err(Fault::ud());
+    }
+    if !xstate::enabled() {
+        return Err(Fault::ud());
+    }
+    if state::read_cr(0) & 8 != 0 {
+        return Err(fault(7));
+    }
+    if group != 4 && *gp::cpl != 0 {
+        return Err(Fault::gp());
+    }
+    let (a, s) = address(d);
+    alignment(a, s, 64)?;
+    let format = xstate::Format {
+        wide: d.prefixes.w(),
+        long: d.mode.is_long(),
+    };
+    let area = &mut Area { a, stack: s };
+    let (edx, eax) = (state::read_gpr(2) as u32, state::read_gpr(0) as u32);
+    match group {
+        3 => xstate::xrstors(area, xstate::requested_supervisor(edx, eax), format),
+        4 => xstate::xsavec(area, xstate::requested(edx, eax), format),
+        _ => xstate::xsaves(area, xstate::requested_supervisor(edx, eax), format),
+    }
 }
 unsafe fn x87_environment(d: &Decoded, restore: bool, registers: bool) -> Result<(), Fault> {
     let (a, s) = address(d);
@@ -2143,8 +1796,420 @@ unsafe fn x87(d: &Decoded) -> Result<bool, Fault> {
 
 /// Returns false only for instructions outside this semantic family. A true
 /// result commits RIP; exceptions leave the faulting RIP and destination intact.
+/// SSSE3 (0F 38 and PALIGNR, 0F 3A 0F): the MMX forms without prefix, the
+/// XMM forms with 66. The semantics are crate::cpu::simd_int's.
+unsafe fn ssse3(d: &Decoded) -> Result<bool, Fault> {
+    let base = d.base_opcode();
+    if !matches!(base, 0x0F3800..=0x0F380B | 0x0F381C..=0x0F381E | 0x0F3A0F)
+        || !matches!(d.opcode >> 24, 0 | 0x66)
+    {
+        return Ok(false);
+    }
+    let xmm = d.opcode >> 24 == 0x66;
+    let r = d.reg.unwrap_or(0);
+    let imm = d.immediate.map_or(0, |i| i.value as i32);
+    guard(xmm)?;
+    if xmm {
+        let v = std::mem::transmute(source(d, 128, true, false)?);
+        if base == 0x0F3A0F {
+            sem3a::instr_660F3A0F(v, r as i32, imm);
+        }
+        else {
+            sem38::ssse3_xmm(base as u8, v, r as i32);
+        }
+    }
+    else {
+        let v = source(d, 64, false, true)? as u64;
+        if base == 0x0F3A0F {
+            sem3a::instr_0F3A0F(v, (r & 7) as i32, imm);
+        }
+        else {
+            sem38::ssse3_mmx(base as u8, v, (r & 7) as i32);
+        }
+    }
+    Ok(true)
+}
+
+/// SSE4.1 and SSE4.2 forms with 66 (0F 38 and 0F 3A), with the semantics of
+/// crate::cpu::simd_int and simd_fp (ROUND, DPPS/DPPD). REX.W selects PEXTRQ and PINSRQ; a
+/// register destination of PEXTRB/PEXTRW/PEXTRD/EXTRACTPS is zero-extended.
+/// PCMPESTRx take their lengths from EAX and EDX (RAX and RDX with REX.W).
+unsafe fn sse4(d: &Decoded) -> Result<bool, Fault> {
+    let base = d.base_opcode();
+    if d.opcode >> 24 != 0x66 {
+        return Ok(false);
+    }
+    let r = d.reg.unwrap_or(0);
+    let imm = d.immediate.map_or(0, |i| i.value as u8);
+    let vector = |v: u128| v.to_le_bytes();
+    match base {
+        0x0F3810
+        | 0x0F3814
+        | 0x0F3815
+        | 0x0F3820..=0x0F3825
+        | 0x0F3828
+        | 0x0F3829
+        | 0x0F382B
+        | 0x0F3830..=0x0F3835
+        | 0x0F3837..=0x0F3841 => {
+            guard(true)?;
+            let op = base as u8;
+            let bytes = sem38::sse4_source_bytes(op);
+            let v = source(d, bytes * 8, bytes == 16, false)?;
+            let result = simd_int::sse4(op, vector(xmm(r)), vector(v), vector(xmm(0)));
+            put_xmm(r, u128::from_le_bytes(result));
+        },
+        0x0F3817 => {
+            guard(true)?;
+            let v = source(d, 128, true, false)?;
+            let (zero, carry) = simd_int::ptest(vector(xmm(r)), vector(v));
+            state::write_flags64(
+                state::read_flags64() & !0x8D5 | (zero as u64) << 6 | carry as u64,
+            );
+        },
+        0x0F382A => {
+            guard(true)?;
+            if d.rm_register.is_some() {
+                return Err(Fault::ud());
+            }
+            put_xmm(r, source(d, 128, true, false)?);
+        },
+        0x0F3A08..=0x0F3A0B => {
+            guard(true)?;
+            let v = match base {
+                0x0F3A0A => source(d, 32, false, false)?,
+                0x0F3A0B => source(d, 64, false, false)?,
+                _ => source(d, 128, true, false)?,
+            };
+            put_xmm(
+                r,
+                simd_fp::round(base, xmm(r), v, imm).map_err(|e| simd_fault(e))?,
+            );
+        },
+        0x0F3A40 | 0x0F3A41 => {
+            guard(true)?;
+            let v = source(d, 128, true, false)?;
+            put_xmm(
+                r,
+                simd_fp::dot_product(base == 0x0F3A41, xmm(r), v, imm)
+                    .map_err(|e| simd_fault(e))?,
+            );
+        },
+        // PCMPESTRM, PCMPESTRI, PCMPISTRM, PCMPISTRI: the index to ECX (RCX
+        // zero-extended) or the mask to XMM0, and the flags; the m128 needs no
+        // alignment (SDM, exception type 4)
+        0x0F3A60..=0x0F3A63 => {
+            guard(true)?;
+            let v = source(d, 128, false, false)?;
+            let explicit = base & 2 == 0;
+            let length = |r: usize| {
+                let value = state::read_gpr(r);
+                explicit.then(|| {
+                    if d.prefixes.w() {
+                        value as i64
+                    }
+                    else {
+                        value as i32 as i64
+                    }
+                })
+            };
+            let result =
+                simd_int::compare_strings(imm, vector(xmm(r)), vector(v), length(0), length(2));
+            if base & 1 != 0 {
+                state::write_gpr(1, result.index as u64, 32);
+            }
+            else {
+                put_xmm(0, u128::from_le_bytes(result.xmm0));
+            }
+            state::write_flags64(state::read_flags64() & !0x8D5 | result.flags as u64);
+        },
+        0x0F3A0C..=0x0F3A0E | 0x0F3A42 => {
+            guard(true)?;
+            let v = source(d, 128, true, false)?;
+            put_xmm(
+                r,
+                u128::from_le_bytes(simd_int::sse4_imm(
+                    base as u8,
+                    vector(xmm(r)),
+                    vector(v),
+                    imm,
+                )),
+            );
+        },
+        // PEXTRB, PEXTRW, PEXTRD/PEXTRQ, EXTRACTPS
+        0x0F3A14..=0x0F3A17 => {
+            guard(true)?;
+            let bytes = match base {
+                0x0F3A14 => 1,
+                0x0F3A15 => 2,
+                0x0F3A16 if d.prefixes.w() => 8,
+                _ => 4,
+            };
+            let at = (imm as u32 & (16 / bytes - 1)) * bytes * 8;
+            let value = (xmm(r) >> at) as u64 & (u64::MAX >> (64 - bytes * 8));
+            if let Some(rm) = d.rm_register {
+                state::write_gpr(rm as usize, value, if bytes == 8 { 64 } else { 32 });
+            }
+            else {
+                let (a, stack) = address(d);
+                memory::write(a, bytes as u8 * 8, value, stack)?;
+            }
+        },
+        // PINSRB, INSERTPS, PINSRD/PINSRQ
+        0x0F3A20..=0x0F3A22 => {
+            guard(true)?;
+            if base == 0x0F3A21 {
+                let value = match d.rm_register {
+                    Some(rm) => (xmm(rm) >> ((imm >> 6 & 3) * 32)) as u32,
+                    None => source(d, 32, false, false)? as u32,
+                };
+                put_xmm(
+                    r,
+                    u128::from_le_bytes(simd_int::insertps(vector(xmm(r)), value, imm)),
+                );
+            }
+            else {
+                let bytes = if base == 0x0F3A20 {
+                    1
+                }
+                else if d.prefixes.w() {
+                    8
+                }
+                else {
+                    4
+                };
+                let value =
+                    gpr_source(d, bytes as u8 * 8)? as u128 & (u128::MAX >> (128 - bytes * 8));
+                let at = (imm as u32 & (16 / bytes - 1)) * bytes * 8;
+                put_xmm(
+                    r,
+                    xmm(r) & !((u128::MAX >> (128 - bytes * 8)) << at) | value << at,
+                );
+            }
+        },
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// The x64 engine's side of an AVX instruction (crate::cpu::avx)
+struct Avx<'a>(&'a Decoded);
+impl avx::Machine for Avx<'_> {
+    type Fault = Fault;
+    /// (the address without its index, plus `offset`, wrapped to the
+    /// address size; FS and GS bases)
+    unsafe fn gather(&mut self, offset: u64, bytes: u8) -> Result<u64, Fault> {
+        let mut a = self.0.address.unwrap();
+        a.index = None;
+        a.displacement = a.displacement.wrapping_add(offset as i64);
+        let mut regs = [0; 16];
+        for (r, value) in regs.iter_mut().enumerate() {
+            *value = state::read_gpr(r);
+        }
+        let base = if a.segment >= 4 { state::read_segment_base(a.segment as usize) } else { 0 };
+        memory::read(
+            a.offset(&regs, self.0.next).wrapping_add(base),
+            bytes * 8,
+            a.segment == 2,
+        )
+    }
+    unsafe fn raise(&mut self, e: avx::Exception) -> Fault {
+        match e {
+            avx::Exception::InvalidOpcode => Fault::ud(),
+            avx::Exception::DeviceNotAvailable => fault(7),
+            avx::Exception::GeneralProtection => Fault::gp(),
+            avx::Exception::SimdFloatingPoint => simd_fault(simd_fp::Unmasked),
+        }
+    }
+    unsafe fn read(&mut self, bytes: u8, aligned: bool) -> Result<u128, Fault> {
+        let (a, stack) = address(self.0);
+        if aligned {
+            alignment(a, stack, 16)?;
+        }
+        if bytes == 16 {
+            memory::read128(a, stack)
+        }
+        else {
+            memory::read(a, bytes * 8, stack).map(|v| v as u128)
+        }
+    }
+    unsafe fn write(&mut self, bytes: u8, value: u128, aligned: bool) -> Result<(), Fault> {
+        let (a, stack) = address(self.0);
+        if aligned {
+            alignment(a, stack, 16)?;
+        }
+        if bytes == 16 {
+            memory::write128(a, value, stack)
+        }
+        else {
+            memory::write(a, bytes * 8, value as u64, stack)
+        }
+    }
+    /// (as MASKMOVDQU: the selected bytes writable first)
+    unsafe fn write_masked(&mut self, value: u128, mask: u16) -> Result<(), Fault> {
+        let d = self.0;
+        let seg = d.prefixes.segment.unwrap_or(3);
+        let base = if seg >= 4 { state::read_segment_base(seg as usize) } else { 0 };
+        let off = state::read_gpr(7);
+        let off = if d.address_size == 32 { off as u32 as u64 } else { off };
+        let a = off.wrapping_add(base);
+        for i in 0..16 {
+            if mask >> i & 1 != 0 {
+                memory::probe_write(a.wrapping_add(i), 8, false)?;
+            }
+        }
+        for i in 0..16 {
+            if mask >> i & 1 != 0 {
+                memory::write(a.wrapping_add(i), 8, (value >> (i * 8)) as u64, false)?;
+            }
+        }
+        Ok(())
+    }
+    unsafe fn read256(&mut self, aligned: bool) -> Result<(u128, u128), Fault> {
+        let (a, stack) = address(self.0);
+        if aligned {
+            alignment(a, stack, 32)?;
+        }
+        let low = memory::read128(a, stack)?;
+        Ok((low, memory::read128(a.wrapping_add(16), stack)?))
+    }
+    unsafe fn write256(&mut self, value: (u128, u128), aligned: bool) -> Result<(), Fault> {
+        let (a, stack) = address(self.0);
+        if aligned {
+            alignment(a, stack, 32)?;
+        }
+        memory::probe_write(a, 128, stack)?;
+        memory::probe_write(a.wrapping_add(16), 128, stack)?;
+        memory::write128(a, value.0, stack)?;
+        memory::write128(a.wrapping_add(16), value.1, stack)
+    }
+    unsafe fn read_lanes(
+        &mut self,
+        size: u8,
+        count: u8,
+        selected: u8,
+    ) -> Result<(u128, u128), Fault> {
+        let (a, stack) = address(self.0);
+        let mut v = (0, 0);
+        for n in 0..count {
+            if selected >> n & 1 != 0 {
+                let lane =
+                    memory::read(a.wrapping_add((n * size) as u64), size * 8, stack)? as u128;
+                let offset = n as u32 * size as u32;
+                if offset < 16 {
+                    v.0 |= lane << (offset * 8);
+                }
+                else {
+                    v.1 |= lane << ((offset - 16) * 8);
+                }
+            }
+        }
+        Ok(v)
+    }
+    unsafe fn write_lanes(
+        &mut self,
+        size: u8,
+        count: u8,
+        value: (u128, u128),
+        selected: u8,
+    ) -> Result<(), Fault> {
+        let (a, stack) = address(self.0);
+        let lanes = (0..count).filter(|n| selected >> n & 1 != 0);
+        for n in lanes.clone() {
+            memory::probe_write(a.wrapping_add((n * size) as u64), size * 8, stack)?;
+        }
+        for n in lanes {
+            let lane = avx::lane256(value, n as u32 * size as u32, size as u32);
+            memory::write(a.wrapping_add((n * size) as u64), size * 8, lane, stack)?;
+        }
+        Ok(())
+    }
+    unsafe fn gpr(&mut self, r: u8) -> u64 { state::read_gpr(r as usize) }
+    unsafe fn set_gpr(&mut self, r: u8, value: u64, wide: bool) {
+        state::write_gpr(r as usize, value, if wide { 64 } else { 32 });
+    }
+    unsafe fn set_flags(&mut self, flags: u32) {
+        state::write_flags64(state::read_flags64() & !0x8D5 | flags as u64);
+    }
+}
+/// The x64 engine's operands of a BMI1 or BMI2 instruction (cpu::bmi)
+struct Bmi<'a>(&'a Decoded);
+impl crate::cpu::bmi::Machine for Bmi<'_> {
+    type Fault = Fault;
+    unsafe fn source(&mut self, bits: u32) -> Result<u64, Fault> {
+        match self.0.rm_register {
+            Some(r) => Ok(state::read_gpr(r as usize) & u64::MAX >> (64 - bits)),
+            None => {
+                let (a, stack) = address(self.0);
+                memory::read(a, bits as u8, stack)
+            },
+        }
+    }
+    unsafe fn gpr(&mut self, r: u8) -> u64 { state::read_gpr(r as usize) }
+    unsafe fn set_gpr(&mut self, r: u8, value: u64, bits: u32) {
+        state::write_gpr(r as usize, value, bits as u8);
+    }
+    unsafe fn set_flags(&mut self, flags: u32) {
+        state::write_flags64(state::read_flags64() & !0x8D5 | flags as u64);
+    }
+}
 pub unsafe fn execute(d: &Decoded) -> Result<bool, Fault> {
+    // BMI1 and BMI2 (exception type 13): general-purpose registers, without
+    // the AVX state's requirements; 64-bit operands with VEX.W1 in 64-bit
+    // mode, otherwise 32-bit
+    if let Some(v) = d
+        .vex
+        .filter(|_| d.encoding.vex & crate::decode_rules::vex::GPR != 0)
+    {
+        use crate::cpu::bmi;
+        let long = d.mode.is_long();
+        let group = d.modrm.map_or(0, |m| m >> 3 & 7);
+        let i = bmi::Instruction {
+            op: bmi::Vex::of(d.opcode, group).ok_or(Fault::ud())?,
+            reg: d.reg.unwrap_or(0),
+            vvvv: v.vvvv & if long { 15 } else { 7 },
+            bits: if long && v.w { 64 } else { 32 },
+            imm8: d.immediate.map_or(0, |i| i.value as u8),
+        };
+        bmi::execute(&mut Bmi(d), &i)?;
+        state::write_rip(d.next.0);
+        return Ok(true);
+    }
+    if let Some(v) = d.vex {
+        let mut machine = Avx(d);
+        avx::check(&mut machine)?;
+        let i = avx::Instruction {
+            key: d.opcode,
+            reg: d.reg.unwrap_or(0),
+            vvvv: v.vvvv,
+            rm: d.rm_register,
+            // (a VEX.256 form: not a VEX.LIG one's VEX.L)
+            l: v.l && d.encoding.vex & crate::decode_rules::vex::L1 != 0,
+            w: v.w,
+            imm8: d.immediate.map_or(0, |i| i.value as u8),
+            long: true,
+            // (a gather's VSIB operand: the address's index is its vector
+            // register)
+            vsib: (d.encoding.vex & crate::decode_rules::vex::VSIB != 0).then(|| {
+                let a = d.address.unwrap();
+                avx::Vsib {
+                    index: a.index.unwrap(),
+                    scale: a.scale,
+                }
+            }),
+        };
+        avx::execute(&mut machine, &i)?;
+        state::write_rip(d.next.0);
+        return Ok(true);
+    }
     if x87(d)? {
+        state::write_rip(d.next.0);
+        return Ok(true);
+    }
+    if matches!(d.base_opcode() >> 8, 0x0F38 | 0x0F3A) {
+        if !ssse3(d)? && !sse4(d)? {
+            return Ok(false);
+        }
         state::write_rip(d.next.0);
         return Ok(true);
     }

@@ -78,6 +78,7 @@ pub fn lower_draft_limited(
                     | Op::GuestStore { .. }
                     | Op::PartialStore { .. }
                     | Op::GuestCheck { .. }
+                    | Op::AlignmentCheck { .. }
                     | Op::SegmentAddress { .. }
                     | Op::PopAddress { .. }
                     | Op::RmwLoad { .. }
@@ -85,6 +86,7 @@ pub fn lower_draft_limited(
                     | Op::CompareExchange8B { .. }
                     | Op::SseCheck
                     | Op::FpuCheck
+                    | Op::AvxCheck
                     | Op::XmmLoad { .. }
                     | Op::XmmBinary { .. }
                     | Op::XmmShuffle { .. }

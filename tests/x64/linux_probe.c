@@ -7,9 +7,11 @@
  * (how many frames lie above 4 GiB, from /proc/self/pagemap). A second line
  * (X64_PROBE_XC) covers the multicore matrix: /sys topology, thread
  * migration, signals to threads on other CPUs, cross-modifying code
- * executed on another CPU, and an O_DIRECT read of the disk. With the
- * argument "net", raw Ethernet frames (EtherType 88B5) go out through eth0 (virtio-net)
- * and must come back unchanged from the host's echo (X64_PROBE_NET). No libc. */
+ * executed on another CPU, and an O_DIRECT read of the disk. A third line
+ * (X64_PROBE_YMM) checks the YMM registers across context switches when the
+ * kernel enabled AVX. With the argument "net", raw Ethernet frames (EtherType
+ * 88B5) go out through eth0 (virtio-net) and must come back unchanged from
+ * the host's echo (X64_PROBE_NET). No libc. */
 #if defined(__x86_64__)
 typedef long word;
 enum { SYS_read = 0, SYS_write = 1, SYS_open = 2, SYS_close = 3, SYS_lseek = 8, SYS_mmap = 9,
@@ -266,6 +268,118 @@ static void matrix(void)
     out(" signals="); number(signals); out(" smc_rounds="); number(SMC_ROUNDS); out(" direct_io=1\n");
 }
 
+/* YMM state across the kernel's context switches (X64_PROBE_YMM,
+ * docs/simd-xsave-plan.md 11.3): when the kernel enabled AVX
+ * (CPUID.1:ECX.OSXSAVE and AVX, XCR0 bits 1 and 2), twice as many threads as
+ * CPUs each hold a fingerprint in every YMM register (16 in 64-bit mode, 8 in
+ * compatibility mode) across a system call, sched_yield, a migration to
+ * another CPU, a signal whose handler overwrites them all, and a spin during
+ * which the other threads preempt it. Every step loads the registers, makes
+ * the call and spins in one asm statement, then stores them for the check. */
+#if defined(__x86_64__)
+#define YMM_REGS 16
+#define YMM_ASM(load, store) \
+    load(0) load(1) load(2) load(3) load(4) load(5) load(6) load(7) load(8) load(9) load(10) load(11) load(12) load(13) load(14) load(15) \
+    "syscall\n" "1: dec %[spin]\n" "jnz 1b\n" \
+    store(0) store(1) store(2) store(3) store(4) store(5) store(6) store(7) store(8) store(9) store(10) store(11) store(12) store(13) store(14) store(15)
+#define YMM_LOAD(n) "vmovdqu " #n "*32(%[in]),%%ymm" #n "\n"
+#define YMM_STORE(n) "vmovdqu %%ymm" #n "," #n "*32(%[out])\n"
+static word ymm_step(const void *in, void *out, word n, word a, word b, word c, word spin)
+{
+    word r;
+    __asm__ volatile(YMM_ASM(YMM_LOAD, YMM_STORE)
+        : "=a"(r), [spin] "+r"(spin) : "a"(n), "D"(a), "S"(b), "d"(c), [in] "r"(in), [out] "r"(out)
+        : "rcx", "r11", "memory", "cc", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+          "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+    return r;
+}
+/* (AVX, not AVX2: VCMPPS with the always-true predicate, VXORPS) */
+#define YMM_CLOBBER "vcmpps $15,%%ymm0,%%ymm0,%%ymm0\nvcmpps $15,%%ymm8,%%ymm8,%%ymm8\nvcmpps $15,%%ymm15,%%ymm15,%%ymm15\n" \
+    "vxorps %%ymm3,%%ymm3,%%ymm3\nvxorps %%ymm12,%%ymm12,%%ymm12\n"
+#else
+#define YMM_REGS 8
+#define YMM_ASM(load, store) \
+    load(0) load(1) load(2) load(3) load(4) load(5) load(6) load(7) \
+    "int $0x80\n" "1: decl %[spin]\n" "jnz 1b\n" \
+    store(0) store(1) store(2) store(3) store(4) store(5) store(6) store(7)
+#define YMM_LOAD(n) "vmovdqu " #n "*32(%[in]),%%ymm" #n "\n"
+#define YMM_STORE(n) "vmovdqu %%ymm" #n "," #n "*32(%[out])\n"
+static word ymm_step(const void *in, void *out, word n, word a, word b, word c, word spin)
+{
+    word r;
+    __asm__ volatile(YMM_ASM(YMM_LOAD, YMM_STORE)
+        : "=a"(r), [spin] "+m"(spin) : "a"(n), "b"(a), "c"(b), "d"(c), [in] "S"(in), [out] "D"(out)
+        : "memory", "cc", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7");
+    return r;
+}
+#define YMM_CLOBBER "vcmpps $15,%%ymm0,%%ymm0,%%ymm0\nvcmpps $15,%%ymm5,%%ymm5,%%ymm5\nvxorps %%ymm3,%%ymm3,%%ymm3\n"
+#endif
+#define YMM_THREADS (2 * THREADS)
+#define YMM_ROUNDS 8
+#define YMM_SPIN 100000
+static unsigned char ymm_in[YMM_THREADS][YMM_REGS * 32] __attribute__((aligned(32)));
+static unsigned char ymm_out[YMM_THREADS][YMM_REGS * 32] __attribute__((aligned(32)));
+static volatile unsigned ymm_bad, ymm_steps, ymm_done, ymm_handled;
+static volatile word ymm_tids[YMM_THREADS];
+static char ymm_stacks[YMM_THREADS][16384] __attribute__((aligned(16)));
+static unsigned ymm_threads;
+static int avx_enabled(void)
+{
+    unsigned a = 1, b, c = 0, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    if(!(c >> 27 & 1) || !(c >> 28 & 1)) return 0;
+    unsigned lo, hi;
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    return (lo & 6) == 6;
+}
+static void ymm_signal(int sig, void *info, void *context)
+{
+    (void)sig; (void)info; (void)context;
+    __asm__ volatile(YMM_CLOBBER ::: "memory");
+    __asm__ volatile("lock addl $1,%0" : "+m"(ymm_handled) :: "memory", "cc");
+}
+static void ymm_worker(word id)
+{
+    ymm_tids[id] = S(SYS_gettid, 0, 0, 0);
+    word tgid = S(SYS_getpid, 0, 0, 0);
+    for(unsigned round = 0; round < YMM_ROUNDS; round++)
+    {
+        for(unsigned kind = 0; kind < 5; kind++)
+        {
+            unsigned char *in = ymm_in[id], *out = ymm_out[id];
+            for(int i = 0; i < YMM_REGS * 32; i++) { in[i] = (unsigned char)(id * 37 + round * 11 + kind * 5 + i * 3 + (i >> 5)); out[i] = 0; }
+            unsigned long mask = 1ul << ((id + round + kind) % cpus);
+            switch(kind)
+            {
+            case 0: ymm_step(in, out, SYS_getpid, 0, 0, 0, 1); break;
+            case 1: ymm_step(in, out, SYS_sched_yield, 0, 0, 0, 1); break;
+            case 2: check(ymm_step(in, out, SYS_sched_setaffinity, 0, sizeof(mask), (word)&mask, 1), "ymm migration"); break;
+            case 3: check(ymm_step(in, out, SYS_tgkill, tgid, ymm_tids[id], 41, 1), "ymm tgkill"); break;
+            default: ymm_step(in, out, SYS_getpid, 0, 0, 0, YMM_SPIN); break;
+            }
+            for(int i = 0; i < YMM_REGS * 32; i++)
+                if(out[i] != in[i]) { __asm__ volatile("lock addl $1,%0" : "+m"(ymm_bad) :: "memory", "cc"); break; }
+            __asm__ volatile("lock addl $1,%0" : "+m"(ymm_steps) :: "memory", "cc");
+        }
+    }
+    __asm__ volatile("lock addl $1,%0" : "+m"(ymm_done) :: "memory", "cc");
+}
+static void ymm_matrix(void)
+{
+    if(!avx_enabled()) { out("X64_PROBE_YMM arch=" ARCH " avx=0\n"); return; }
+    struct { void *handler; unsigned long flags; void *restorer; unsigned long mask[2]; } action =
+        {(void *)ymm_signal, 0x04000004, (void *)signal_return, {0, 0}};
+    check(sc(SYS_rt_sigaction, 41, (word)&action, 0, 8, 0, 0), "sigaction ymm");
+    ymm_threads = 2 * cpus;
+    for(unsigned id = 0; id < ymm_threads; id++)
+        check(spawn(ymm_worker, id, ymm_stacks[id] + sizeof(ymm_stacks[id]), 0x00050F00), "clone ymm");
+    while(ymm_done != ymm_threads) S(SYS_sched_yield, 0, 0, 0);
+    if(ymm_handled != ymm_threads * YMM_ROUNDS) die("ymm signals");
+    out("X64_PROBE_YMM arch=" ARCH " avx=1 registers="); number(YMM_REGS); out(" threads="); number(ymm_threads);
+    out(" steps="); number(ymm_steps); out(" signals="); number(ymm_handled); out(" bad="); number(ymm_bad); out("\n");
+    if(ymm_bad) die("ymm fingerprint");
+}
+
 /* AF_PACKET socket on eth0: send frames, receive the host's echoes */
 #define NET_FRAMES 16
 static void network(void)
@@ -478,6 +592,7 @@ void entry(word *stack)
     out(" cpu_checks="); for(unsigned id = 0; id < cpus; id++) { if(id) out(","); number(bound[id] - 1); }
     out(" fault=page child=7 tlb_stale="); number(stale); out(" entry="); out(entry_path); out(" high_pages="); number(high_pages); out("\n");
     matrix();
+    ymm_matrix();
     if(stack[0] >= 2 && same((const char *)stack[2], "net")) network();
     S(SYS_exit_group, 0, 0, 0);
     for(;;);

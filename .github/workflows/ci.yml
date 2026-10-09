@@ -87,6 +87,18 @@ jobs:
       - name: Run rust-test
         run: make rust-test
 
+      # docs/simd-xsave-plan.md 11.4: the deterministic checks (forms catalogue,
+      # CPU contract and feature resolution, decode rules, the IR helpers
+      # against the interpreter); the x64 oracles need QEMU 10.2 and avx-tests
+      # takes an hour, so they stay with tools/release_gate.mjs
+      - name: SIMD/XSAVE checks
+        run: make isa-forms-check platform-contract-tests decode-rules-tests ir-avx-tests ir-bmi-tests
+
+      - name: SIMD/XSAVE semantics against the models
+        run: |
+          node tests/rust/bmi.mjs
+          node tests/rust/fma.mjs
+
       - name: Fetch image cache
         uses: actions/cache@v5
         id: cache-images

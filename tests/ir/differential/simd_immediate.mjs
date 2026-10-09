@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {run_sse_fixture} from "./debug_sse_fixture.mjs";
+import {run_sse_fixture} from "./sse_fixture.mjs";
 import fs from "node:fs";
 import {packedImmediate as packed_immediate} from "./packed_model.mjs";
 import {V86} from "../../../build/libv86.mjs";
@@ -58,7 +58,7 @@ for(const release of [false,true]){
             const {expected,counts}=compare(i,()=>reset(i,{task,cpl}),{fault:true});
             assert.equal(expected.ip,task&4?UD:NM);assert(counts.every(([n,g])=>n===0&&g===1));tasks++;
         }
-        for(const option of [{osfxsr:false},{real:true},{vm86:true,cpl:3}]){compare(i,()=>reset(i,option));modes++;}
+        for(const option of [{osfxsr:false},{real:true},{vm86:true,cpl:3}]){compare(i,()=>reset(i,option),{fault:option.osfxsr===false});modes++;}
     }
     console.log(`PASS (${release?"release":"debug"}): ${randomized} randomized immediate vectors, ${tasks} EM/TS guards and ${modes} OSFXSR/real/VM86 cases`);
     const physical=a=>a>=0xA2000?0x3000+(a&4095):BASE+a-0xA0000;

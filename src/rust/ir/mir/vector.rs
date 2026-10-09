@@ -28,6 +28,11 @@ pub enum PackedPlan {
         opcode: u32,
         reverse: bool,
     },
+    /// i8x16.swizzle of the destination by the source's bytes, masked first
+    /// (PSHUFB: bit 7 selects zero, the low four bits the byte)
+    Swizzle {
+        mask: u8,
+    },
 }
 pub fn lower(operation: PackedOp) -> PackedPlan {
     use PackedOp::*;
@@ -65,6 +70,7 @@ pub fn lower(operation: PackedOp) -> PackedPlan {
             add: 0xAE,
             pack: [0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19],
         },
+        ShuffleBytes => PackedPlan::Swizzle { mask: 0x8F },
         _ => PackedPlan::Binary {
             opcode: operation.wasm_opcode().unwrap(),
             reverse: operation == AndNot,

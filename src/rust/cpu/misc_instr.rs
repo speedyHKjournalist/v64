@@ -1,7 +1,4 @@
 use crate::cpu::cpu::*;
-use crate::cpu::fpu::{
-    fpu_load_m80, fpu_load_status_word, fpu_set_status_word, fpu_store_m80, set_control_word,
-};
 use crate::cpu::global_pointers::*;
 use crate::paging::OrPageFault;
 
@@ -365,74 +362,11 @@ pub unsafe fn setcc_mem(condition: bool, addr: i32) {
 }
 
 pub unsafe fn fxsave(addr: i32) { fxsave_checked(addr); }
-
-pub unsafe fn fxsave_checked(addr: i32) -> bool {
-    crate::cpu::fpu::fpu_sync_all();
-    dbg_assert!(addr & 0xF == 0, "TODO: #gp");
-    return_on_pagefault!(writable_or_pagefault(addr, 288), false);
-
-    safe_write16(addr + 0, (*fpu_control_word).into()).unwrap();
-    safe_write16(addr + 2, fpu_load_status_word().into()).unwrap();
-    safe_write8(addr + 4, !*fpu_stack_empty as i32 & 0xFF).unwrap();
-    safe_write16(addr + 6, *fpu_opcode).unwrap();
-    safe_write32(addr + 8, *fpu_ip).unwrap();
-    safe_write16(addr + 12, *fpu_ip_selector).unwrap();
-    safe_write32(addr + 16, *fpu_dp).unwrap();
-    safe_write16(addr + 20, *fpu_dp_selector).unwrap();
-
-    safe_write32(addr + 24, *mxcsr).unwrap();
-    safe_write32(addr + 28, MXCSR_MASK).unwrap();
-
-    for i in 0..8 {
-        let reg_index = i + *fpu_stack_ptr as i32 & 7;
-        fpu_store_m80(addr + 32 + (i << 4), *fpu_st.offset(reg_index as isize));
-    }
-
-    // If the OSFXSR bit in control register CR4 is not set, the FXSAVE
-    // instruction may not save these registers. This behavior is
-    // implementation dependent.
-    for i in 0..8 {
-        safe_write128(addr + 160 + (i << 4), *reg_xmm.offset(i as isize)).unwrap();
-    }
-
-    true
-}
+/// false: a fault was delivered (cpu::xstate::fxsave)
+pub unsafe fn fxsave_checked(addr: i32) -> bool { crate::cpu::xstate::fxsave_32(addr) }
 pub unsafe fn fxrstor(addr: i32) { fxrstor_checked(addr); }
-
-pub unsafe fn fxrstor_checked(addr: i32) -> bool {
-    dbg_assert!(addr & 0xF == 0, "TODO: #gp");
-    return_on_pagefault!(readable_or_pagefault(addr, 288), false);
-
-    let new_mxcsr = safe_read32s(addr + 24).unwrap();
-
-    if 0 != new_mxcsr & !MXCSR_MASK {
-        dbg_log!("#gp Invalid mxcsr bits");
-        trigger_gp(0);
-        return false;
-    }
-
-    set_control_word(safe_read16(addr + 0).unwrap() as u16);
-    fpu_set_status_word(safe_read16(addr + 2).unwrap() as u16);
-    *fpu_stack_empty = !safe_read8(addr + 4).unwrap() as u8;
-    *fpu_opcode = safe_read16(addr + 6).unwrap();
-    *fpu_ip = safe_read32s(addr + 8).unwrap();
-    *fpu_ip_selector = safe_read16(addr + 12).unwrap();
-    *fpu_dp = safe_read32s(addr + 16).unwrap();
-    *fpu_dp_selector = safe_read16(addr + 20).unwrap();
-
-    set_mxcsr(new_mxcsr);
-
-    for i in 0..8 {
-        let reg_index = *fpu_stack_ptr as i32 + i & 7;
-        crate::cpu::fpu::fpu_write_st(reg_index, fpu_load_m80(addr + 32 + (i << 4)).unwrap());
-    }
-
-    for i in 0..8 {
-        *reg_xmm.offset(i as isize) = safe_read128s(addr + 160 + (i << 4)).unwrap();
-    }
-
-    true
-}
+/// false: a fault was delivered (cpu::xstate::fxrstor)
+pub unsafe fn fxrstor_checked(addr: i32) -> bool { crate::cpu::xstate::fxrstor_32(addr) }
 
 pub unsafe fn xchg8(data: i32, r8: i32) -> i32 {
     let tmp = read_reg8(r8);
