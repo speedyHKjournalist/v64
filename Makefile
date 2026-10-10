@@ -1064,6 +1064,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	node tests/x64/step_events.mjs
 	node tests/x64/accounting.mjs
 	node tests/x64/xmm_state.mjs
+	node tests/x64/kept_translations.mjs
 	node tests/x64/mode_ledger.mjs
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs

@@ -176,6 +176,23 @@ while it is on (`tests/bench/run.mjs`, `tests/ir/performance/xp_boot.mjs`,
 per line), `ir_t0_kind_profile_reset()`. Each Wasm instance counts in its
 own table.
 
+## The code of a page function: tools/page_code.mjs
+
+What a page function costs is easiest to see in the host code V8 makes of
+it. [`tools/page_code.mjs`](../tools/page_code.mjs) runs a benchmark on the
+test core (`build/v86-ir-test-release.wasm`, ir-test-hooks), records what the
+x64 page tier (or with `--isa i686` Tier-0) compiles, takes the last record
+whose page holds the given instruction bytes and replays it at
+`tools/replay_check.mjs`' fixed pseudo addresses:
+
+    node tools/page_code.mjs 560.hash "c1 c8 06" --switches x64_i32_ops=1 --machine
+
+prints the ARM64 (or x64) code of TurboFan (`node --no-liftoff
+--print-wasm-code`); without `--machine` it prints the module's Wasm, and
+`--save` keeps the module. M5's code quality steps (jit-unification-plan.md
+P4.20–P4.23) came from comparing this for the page tier and Tier-0 on the
+same-source benchmarks.
+
 ## A/B arms: one core per setting
 
 `tests/bench/run.mjs` compares two settings of one core in one process

@@ -3550,6 +3550,12 @@ impl Emitter {
         self.si(FK);
         self.load_pair(gp::instruction_pointer as u32, gp::x64_rip_hi as u32);
         self.s(RIP);
+        // (P4.21: the step may have retired access cache entries without a
+        // new epoch, a 4 KiB INVLPG among them: the kept translations go)
+        for (tag, _) in self.lookup_kept.iter().flatten() {
+            self.b.const_i64(0);
+            self.b.set_local_i64(tag);
+        }
         self.b.br(self.f().dispatch);
     }
     /// Count one native instruction, unless blocks count theirs at entry
@@ -4311,13 +4317,17 @@ impl Emitter {
     /// cache entry of the operand's first byte is a hit when its tag is
     /// that of the last byte's page (an operand crossing pages misses: the
     /// two pages have different entries), and the host is its delta plus
-    /// the address. An RSP-based operand first tries the translation of its
-    /// kind the function found last (lookup_kept; a hit in the access cache
-    /// replaces it): those stay valid while the function runs, as entries
-    /// retire only by what leaves it (steps, exits) and between runs, but
-    /// by INVLPG, which forgets them (Op::Invlpg). (Other operands would
-    /// gain less than a miss costs: two of them alternating between pages
-    /// miss every time, as LZ77's matching loop does.)
+    /// the address. An operand `[register + displacement]` (a stack
+    /// operation's too) first tries the translation of its kind that its
+    /// base register's operands found last (lookup_kept, a hit when both
+    /// the operand's last byte and its first are in that page; a hit in the
+    /// access cache replaces it): those stay valid while the function runs,
+    /// as entries retire only between runs, by what leaves the function
+    /// (exits) and by what it may run in between: INVLPG (Op::Invlpg) and
+    /// steps (step_code), after which it forgets them. (Not indexed
+    /// operands: two that alternate between pages, as LZ77's matching loop
+    /// reads its input, would miss every time, and a miss costs more than
+    /// a hit saves.)
     fn host_fast(
         &mut self,
         size: u32,
@@ -4362,6 +4372,18 @@ impl Emitter {
             self.b
                 .get_local_i64(&self.lookup_kept[k].as_ref().unwrap().0);
             self.b.eq_i64();
+            if size > 1 && !aligned {
+                // (and the first byte in that page too: unlike an access
+                // cache entry, the kept translation is not the first byte's
+                // page's by its place)
+                self.g(ADDR);
+                self.b.wrap_i64_to_i32();
+                self.c32(4095);
+                self.b.and_i32();
+                self.c32((4096 - size) as i32);
+                self.b.leu_i32();
+                self.b.and_i32();
+            }
             aligned_check(self);
             self.b.hint(true);
             self.b.if_i32();
