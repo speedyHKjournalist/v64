@@ -70,6 +70,61 @@ refused access or a page function entered in another state, which
 - `ir_t0_steps(key)` is separate and always on: Tier-0's steps by their
   first two bytes, prefixes included, which tests read.
 
+### Events
+
+While it is on, the store also counts events that are not steps, under the
+stepper `event` (StepKey bits 28-29 = 2): bits 0-7 are the event, 8-15 its
+detail, 25-27 the mode, the rest 0 (`step_profile::event` lists them,
+`tools/step_profile.mjs` names them, as in `"long64 event exit retry"`).
+
+| Event | Detail | Counted |
+| --- | --- | --- |
+| `miss` | `disabled`, `no-code`, `cold`, `compiling`, `compile`, `recompile`, `unserved` | each time the x64 page tier did not run a function at RIP (`compile`, `recompile`: it compiled instead; `unserved`: it ran one entered at an offset it does not serve) |
+| `exit` | `retry`, `unknown`, `step`, `budget`, `leave` | why a page function of the x64 page tier returned |
+| `step-exit` | `halt`, `yield`, `shadow`, `core-event`, `code-write`, `irq`, `nmi`, `barrier`, `chainable` | why a step ended its activation (`x64_page_step`); `chainable`: only the CPL, CS, CR3, the epoch, IF, IOPL or AC changed, after which P4.3's STEP_CHAIN may continue; `barrier`: the mode, CR0, CR4, EFER, DR7, TF, VM or RF changed |
+| `step-context` | `cpl` ... `epoch` | each part of the context such a step changed |
+| `starved` | | a long-mode frame while IR Tier-0 had pages ready to compile (WOW64's code waits for a compatibility-mode slice; P4.6) |
+| `frame` | | each CPU frame (`main_loop`), `starved`'s denominator |
+| `#NM`, `CLTS`, `CR0.TS` | | #NM delivered, CLTS, a MOV to CR0 (or LMSW) that changed TS: lazy FPU switching |
+| `fxstate` | `FXSAVE`, `FXRSTOR`, `XSAVE`, `XRSTOR` | the instructions (XSAVE: XSAVE, XSAVEOPT, XSAVEC, XSAVES; XRSTOR: XRSTOR, XRSTORS) |
+| `hpet-read` | | reads of the HPET's registers (one per 32-bit access, a byte read each byte) |
+| `pm-timer-read` | | reads of the ACPI PM timer (offset 8 of the PM block) |
+
+The instruction and device events count in every tier (the interpreter's
+code counts them); `miss`, `exit`, `step-exit` and `step-context` are the
+x64 page tier's. `tests/x64/step_events.mjs` checks them on
+`tests/x64/system_bench.mjs`'s guests. The Windows probe prints
+QueryPerformanceFrequency (`qpf` in `X64_WIN_BEGIN`; the harness's report
+names the source: 14318180 Hz the HPET, 3579545 Hz the PM timer, else the TSC).
+
+### What one event costs: tests/x64/system_bench.mjs
+
+`system_bench.mjs` times a long-mode loop of one event against the same loop
+with a NOP, by the guest's RDTSC (v86's TSC counts host nanoseconds; the
+loop's page is compiled in a first, untimed pass): steps that continue
+(CPUID, POPFQ), a step that ends its activation (POPFQ toggling AC: less
+POPFQ, what the exit adds), a retry (a load crossing a page), IRETQ,
+SYSCALL with SYSRETQ, IN from port 80h, an HPET read, FXSAVE with FXRSTOR,
+MOV CR3, MOV CR0 setting TS with CLTS, lazy FPU switching (TS, #NM, CLTS,
+IRETQ), RDTSC; and per instruction, code outside compiled code:
+interpreted with the x64 page tier off, and cold (every instruction a miss).
+With `--events` it prints each guest's StepKeys and events per iteration
+instead. Release build, 2026-10-10, Apple M1 Pro, ns per event (runs differ
+by up to about 15%):
+
+| CPUID | POPFQ | POPFQ, AC toggled | retry | IRETQ | SYSCALL+SYSRETQ | IN | HPET read | FXSAVE+FXRSTOR | MOV CR3 | CR0.TS+CLTS | #NM round trip | RDTSC |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 66 | 86 | 147 | 149 | 206 | 362 | 174 | 325 | 3892 | 180 | 219 | 880 | 52 |
+
+Per instruction: interpreted 52 ns, cold (a miss each) 70 ns.
+`tools/bench/step_rank.mjs` ranks a workload's classes with these costs
+(docs/jit-unification-plan.md P4.1).
+
+```sh
+TEST_RELEASE_BUILD=1 node tests/x64/system_bench.mjs [iterations] [rounds] [event...]
+TEST_RELEASE_BUILD=1 node tests/x64/system_bench.mjs --events [iterations] [event...]
+```
+
 ## The mode ledger: retired instructions by mode and engine
 
 The JIT switch `mode_ledger` (off by default) counts retired instructions

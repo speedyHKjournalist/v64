@@ -20,7 +20,10 @@
 // each round's time; docs/jit-unification-plan.md P0.12). While it runs, a line written to
 // <out>/command.txt is executed: "key <scancodes hex>", "type <text>",
 // "run <command line>", "enter", "space", "password", "shot", "rips",
-// "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "runadmin
+// "trace on|off" (WIN_USER_TRACE=1 enables it from the start), "jitstats
+// <phase>" (a JIT_STATS record, tools/bench/jit_stats.mjs, named <phase>;
+// with JIT_STATS=1 the harness also writes one at the desktop and one at
+// the end, phases "desktop" and "end"), "runadmin
 // <cmd /c line>" (elevated through PowerShell, Alt+Y for UAC), "wait <s>",
 // "launch <command line>" (run by the launcher with cmd /c, see WIN_LAUNCHER),
 // "display <width> <height> [index]" (V86.set_display_size), "mouse <dx> <dy>",
@@ -869,6 +872,7 @@ try
             event("snapshot", {bytes: state.byteLength});
         }
         else if(verb === "rips") next_samples = 0;
+        else if(verb === "jitstats") print_jit_stats(vm, {script: "windows_boot", phase: argument || "command", s: elapsed(), wasm: process.env.WASM_PATH || null, cores});
         // PCI Express hot plug (WIN_PCIE_DEVICE)
         else if(verb === "pcieattach") await vm.attach_pcie_device(+argument);
         else if(verb === "pciedetach")
@@ -1113,7 +1117,13 @@ try
             if(match && !report.results[arch])
             {
                 const avx = text.match(/X64_WIN_AVX arch=\d+ avx=(\d)(?: avx2=(\d) fma=(\d) threads=(\d+) steps=(\d+) faults=(\d+) xstate=(\d+) compute_bad=(\d+) bad=(\d+))?/);
-                report.results[arch] = {processors: +match[2], packages: +match[3], cores: +match[4], smt_cores: +match[5],
+                // (QueryPerformanceFrequency: the HPET's 14318180 Hz, the ACPI
+                // PM timer's 3579545 Hz, else the TSC; docs/jit-unification-plan.md
+                // open question 4)
+                const qpf = text.match(/X64_WIN_BEGIN arch=\d+ processors=\d+ architecture=\d+ qpf=(\w+)/);
+                report.results[arch] = {qpf: qpf ? parseInt(qpf[1], 16) : null,
+                    qpc_source: qpf ? {14318180: "hpet", 3579545: "acpi-pm-timer"}[parseInt(qpf[1], 16)] ?? "tsc" : null,
+                    processors: +match[2], packages: +match[3], cores: +match[4], smt_cores: +match[5],
                     progress: +match[6], failures: +match[7], apic_ids: match[8], high_block: match[9],
                     avx: avx && (avx[2] === undefined ? {avx: 0} : {avx: 1, avx2: +avx[2], fma: +avx[3], threads: +avx[4], steps: +avx[5],
                         faults: +avx[6], xstate: +avx[7], compute_bad: +avx[8], bad: +avx[9]}), text};
@@ -1127,7 +1137,7 @@ try
             report.desktop_s = elapsed();
             event("desktop");
             // (tools/bench/jit_stats.mjs, docs/jit-unification-plan.md P0.7)
-            if(jit_stats_enabled()) print_jit_stats(vm, {script: "windows_boot", wasm: process.env.WASM_PATH || null, desktop_s: report.desktop_s, cores});
+            if(jit_stats_enabled()) print_jit_stats(vm, {script: "windows_boot", phase: "desktop", wasm: process.env.WASM_PATH || null, desktop_s: report.desktop_s, cores});
             for(let attempt = 0; process.env.WIN_LAUNCHER && !launcher_ready && attempt < 4; attempt++)
             {
                 if(process.env.WIN_LAUNCHER_ADMIN) await run_admin(process.env.WIN_LAUNCHER);
@@ -1263,6 +1273,7 @@ finally
         remote_renderer.close();
     }
     if(profiler) await profile_window();
+    if(cpu && jit_stats_enabled()) print_jit_stats(vm, {script: "windows_boot", phase: "end", s: elapsed(), wasm: process.env.WASM_PATH || null, desktop_s: report.desktop_s ?? null, cores});
     if(cpu && process.env.WIN_SIZE_STATS) cpu.wm.exports.x64_pagegen_size_dump();
     // WIN_DUMP_OVERLAY=<file>: the sectors written so far (no shutdown: what
     // the guest had flushed), e.g. to read setupapi.dev.log

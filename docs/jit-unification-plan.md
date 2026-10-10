@@ -1570,9 +1570,55 @@ v86gl 设备）。每个约 1 ms 的执行片（`TIME_PER_FRAME`）结束时记�
   `multicore-statistics-tests` 失败：多核时解释器每次只做 256 个元素好让别的核运行，REP 模板接着把剩下的一次做完、也没有计数，
   CPU 0 的 1000 个 REP 元素只记了 256。P3.1b 本来就规定只在单核用（多核是条件项 P3.1d），改为只在一个核时编译，并经
   `ir_t0_note_rep` 把元素计入核的统计；`core_statistics.mjs` 加单核的 Tier-0 一遍（`SMP_CORES=1`）。上面的测量用的是修正前的
-  核心，它们都是单核，修正只多了每条 REP 一次统计调用。浏览器测试：`cpu-worker-tests` 与 `display-browser-tests` 的 24 项全部
+  核心，它们都是单核，修正只多了每条 REP 一次统计调用。（补记：P4.0 的 R 级对比发现这次调用让 `563.memops` 慢了约 6%：
+  修正前的核心 `cb64a416` 对 `vM3` 4 个会话都是 0.94；相对 vM2 仍约 4.0×，其余 benchmark 不变。）浏览器测试：`cpu-worker-tests` 与 `display-browser-tests` 的 24 项全部
   通过。
 - M1 存档（规则 6）：M1 的核心在 shell 循环中途存的档，M3 的核心恢复后照常运行。
 - 文档：[ir-design.md](ir-design.md) 的架构图与 Tier-0 一节写了特性开关与 P3 的模板，[x86-64.md](x86-64.md) 加 M3 的实测表，
   [profiling.md](profiling.md) 写了按模板种类的统计、A/B 臂与步进剖析的样本。
 - 本地标签 `vM3` 打在这次提交上。
+
+### M4
+
+**P4.0 埋点与单事件微基准，2026-10-10。**
+
+- 事件计数放进步进剖析的同一个存储（P0.5，不另开表），步进器字段取 2（`event`）：低 8 位是事件，8–15 位是细分，25–27 位是
+  模式（[profiling.md](profiling.md) 的事件表）。
+  - `miss`：x64 page tier 没有在 RIP 运行函数的原因（关闭、无代码页、冷、编译中、这次编译、重编译、未服务的入口）；`exit`：页函数
+    返回的原因（重试、未知、单步、预算、离开）；`step-exit`：单步结束激活的原因（HLT、让出、中断影子、核心事件、代码写入、IRQ、
+    NMI、屏障、可链接），`step-context` 给出这次单步改变的上下文各项。"可链接"指只改了 P4.3 允许继续的 {CPL, CS, CR3, epoch, IF,
+    IOPL, AC}。
+  - `starved` 与 `frame`：IR Tier-0 有就绪的页、却没有用掉编译额度的帧（只有长模式以外的切片会用，P4.6 的条件），以及全部帧数
+    作分母。
+  - 待决问题 4、5：#NM、CLTS、改变 TS 的 MOV CR0（及 LMSW）、FXSAVE/FXRSTOR 与 XSAVE 系列、HPET 寄存器读、ACPI PM 计时器读。
+    这些在解释器的实现里计数，哪一层执行都算。PROBE64 打印 QueryPerformanceFrequency（`X64_WIN_BEGIN` 的 `qpf`），
+    `windows_boot.mjs` 的报告给出来源（14318180 Hz 是 HPET，3579545 Hz 是 PM 计时器，其他是 TSC）。
+- `tests/x64/system_bench.mjs`：基于 `guest_builder` 的长模式循环，一个事件重复 N 次，与 NOP 循环相减。用客户机自己的 RDTSC
+  计时（v86 的 TSC 是宿主纳秒）；测试运行器自己驱动核心，机器时钟原本一直停着，基准里把它恢复。第一遍不计时，先把页编译好。
+  发布构建、M1 Pro，每个事件的纳秒数（3 轮中位数；两次完整运行之间最多差约 15%）：
+
+  | CPUID | POPFQ | POPFQ 翻转 AC | 重试（跨页读） | IRETQ | SYSCALL+SYSRETQ | IN | HPET 读 | FXSAVE+FXRSTOR | MOV CR3 | 置 TS+CLTS | 惰性 FPU 往返 | RDTSC |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | 66 | 86 | 147 | 149 | 206 | 362 | 174 | 325 | 3892 | 180 | 219 | 880 | 52 |
+
+  每条指令：关掉 page tier 解释执行 52 ns；冷代码（每条都是未命中）70 ns，即一次未命中约多 18 ns（P4.5c 能省的部分）。
+  - `--events` 打印每个循环每次迭代的键：CPUID、POPFQ、IN、IRETQ 是继续执行的单步，不退出；跨页读与 HPET 读各一次重试退出；
+    SYSCALL、SYSRETQ、MOV CR3、翻转 AC 的 POPFQ 各一次"可链接"的单步退出（P4.3 的对象）：一次退出比继续执行的单步多约 60 ns；
+    MOV CR0 与 CLTS 各一次屏障退出（CR0 变了）；惰性 FPU 往返（置 TS、#NM、CLTS、IRETQ）每次约 3 次单步退出，IRETQ 恢复的 RF
+    还让下一条指令在解释器里执行（`miss disabled`）。
+  - FXSAVE+FXRSTOR 每对 3.9 µs，约是一次单步的 30 倍：现在的实现用 Vec 加逐字节访问，正是 P4.4 要换掉的。
+- `tests/x64/step_events.mjs`（加进 `x64-page-tier-tests`）在这些客户机上核对计数：FXSAVE/FXRSTOR、CLTS、CR0.TS、#NM、HPET 读
+  与执行次数完全相等，PM 计时器读（直接读设备）也相等；重试、可链接与屏障退出不少于计时那一遍的次数；CPUID、IN 的单步不退出；
+  冷启动有 `miss cold` 与 `miss compile`；有帧计数。
+- 中途修正：改变 TS 的 MOV CR0 原来在合法性检查之前计数，会把触发 #GP 的写也算上，改为写入成功后再计；XSAVES 经 XSAVEC 实现，
+  两处都计数会算两次，只留 XSAVEC 的。
+- R 级（对 `vM3`，开关全为默认）：重放 2701 条记录全部一致；bench 3 个会话加复测几何均值 1.002，x86-64 bench 1.002；XP 桌面
+  ABBAAB 中位数 13.08 对 13.07 s；Win8.1 ABBABA 在 152 s 时原生执行 vM3 277、293、276 亿条，P4.0 277、279、294 亿条，中位数
+  之比 1.005。
+  - 第一次对比用错了基线：`build/bench/arms/m3.wasm` 是 `cb64a416` 时构建的，缺 P3.1b 的修正（见 M3 出口的补记），
+    `563.memops` 因此显示 0.94；改用从 `vM3` 标签构建的核心重测。
+  - bench 的 `--quick` 只有一次冷运行、顺序固定，冷分数显示 0.78；交替顺序跑 3 次冷运行（5 个 benchmark）时 P4.0 对 vM3 为
+    1.001，vM3 对它自己的副本 1.022，所以那是顺序造成的，不是变慢。
+- Win8.1 桌面与 3DMark06 GT2 下的计数（待决问题 4、5，以及 P4.6 的饥饿帧）与 P4.1 的排名用同一组运行，记在 P4.1。
+  XP 上的 3DMark06（M1 时挪到这里）没有可用的存档：2026-10-03 在浏览器里做的 `3dmark06_xp.bin` 已经不在了，要重做一个
+  （所有者的 XP 配置加 driver.iso 的 `d3d9.dll`）才能测；它只记录不判定，不影响 M4 的任何决定，留到有存档时补测。

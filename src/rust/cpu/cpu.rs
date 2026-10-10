@@ -3196,6 +3196,9 @@ pub unsafe fn set_cr0(cr0: i32) -> bool {
         trigger_gp(0);
         return false;
     }
+    if (old_cr0 ^ cr0) & CR0_TS != 0 {
+        crate::step_profile::note_event(crate::step_profile::event::CR0_TS, 0);
+    }
 
     *cr = cr0;
     *cr |= CR0_ET;

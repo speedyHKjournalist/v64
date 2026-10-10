@@ -221,6 +221,8 @@ impl Pages {
         }
         false
     }
+    /// Whether pages wait in the ready queue (take_ready may still drop some)
+    pub fn has_ready(&self) -> bool { !self.ready.is_empty() }
     /// Next page whose heat justifies a (re)compilation, with its entries in
     /// descending heat order (the first is the primary entry).
     pub fn take_ready(&mut self) -> Option<(PageKey, Vec<CpuEntryKey>)> {

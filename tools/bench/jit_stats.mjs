@@ -6,8 +6,9 @@
 // retired instructions are core_statistics_get(core, 0) (a REP instruction
 // counts once, a faulting one not at all); the x64 page tier's counters
 // (x64_page_stat), IR Tier-0's and the regions' (CPU.get_jit_info); with the
-// JIT switch step_profile on, the 40 most stepped instructions (StepKey v1,
-// tools/step_profile.mjs); with mode_ledger on, the retired instructions by
+// JIT switch step_profile on, the 40 most stepped instructions and events
+// (StepKey v1, tools/step_profile.mjs; JIT_STATS_STEPS=<n> keeps n); the host
+// milliseconds each core ran (runtime_ms); with mode_ledger on, the retired instructions by
 // mode and how they ran (mode_ledger below); with t0_kind_profile on, the
 // executions of Tier-0's code by template kind (kind_profile below).
 
@@ -17,7 +18,8 @@ import { step_profile } from "../step_profile.mjs";
 // x64_page_stat(index), crate::x64::pages
 const X64_FIELDS = ["compiled", "native_retired", "retries", "unknown_exits", "steps", "invalidated", "entries",
     "compile_failures", "recompiles", "instructions_compiled", "templated", "evictions", "ready_functions"];
-const X64_EXTRA = { 21: "pages_compiled", 24: "bytes_compiled", 20: "ms_in_calls", 22: "ms_in_execute" };
+const X64_EXTRA = { 21: "pages_compiled", 24: "bytes_compiled", 20: "ms_in_calls", 22: "ms_in_execute", 13: "activations",
+    14: "invlpg", 26: "cr0_writes", 27: "cr3_writes", 28: "cr4_writes", 29: "full_flushes", 30: "walks" };
 
 // cpu/execution.rs: x64::state::ExecutionMode and Way
 export const LEDGER_MODES = ["real", "vm86", "prot16", "prot32", "compat16", "compat32", "long64"];
@@ -93,6 +95,7 @@ export function jit_stats(emulator, extra = {})
     const exports = cpu.wm.exports;
     const cores = Math.max(1, cpu.cores?.length || 0);
     const retired = Array.from({ length: cores }, (_, core) => exports["core_statistics_get"](core, 0));
+    const runtime_ms = Array.from({ length: cores }, (_, core) => exports["core_statistics_get"](core, 4));
     let x64 = null;
     if(exports["x64_page_stat"])
     {
@@ -107,12 +110,13 @@ export function jit_stats(emulator, extra = {})
         switches,
         retired,
         retired_total: retired.reduce((sum, n) => sum + n, 0),
+        runtime_ms,
         x64,
         ir: cpu.get_jit_info()["ir"],
         // (the Wasm table both tiers take their slots from: free now and at
         // the fewest, P0.10)
         table: exports["jit_wasm_table_free_low"] ? { free: exports["jit_get_wasm_table_index_free_list_count"](), free_low: exports["jit_wasm_table_free_low"]() } : null,
-        ...switches["step_profile"] ? { steps: step_profile(exports, 40) } : {},
+        ...switches["step_profile"] ? { steps: step_profile(exports, Number(process.env["JIT_STATS_STEPS"] || 40)) } : {},
         ...switches["mode_ledger"] ? { ledger: mode_ledger(exports) } : {},
         ...switches["t0_kind_profile"] ? { kinds: kind_profile(exports, cpu.wasm_memory, 60) } : {},
     };

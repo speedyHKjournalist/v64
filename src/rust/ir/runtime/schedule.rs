@@ -286,6 +286,16 @@ pub fn ir_auto_optimization_stat(field: u32) -> u32 {
 }
 pub fn begin_frame(now: f64) {
     let mut s = SCHEDULER.try_lock().unwrap();
+    // (the step profile, docs/jit-unification-plan.md P4.0: frames, and
+    // those that ended with Tier-0 pages ready but no compile credit used,
+    // which only a slice outside 64-bit mode spends: WOW64's code waited)
+    if crate::step_profile::enabled() {
+        use crate::step_profile::{event, note_event};
+        if s.credit && s.pages.has_ready() {
+            unsafe { note_event(event::STARVED, 0) };
+        }
+        unsafe { note_event(event::FRAME, 0) };
+    }
     s.credit = true;
     s.scan_credit = true;
     s.interpreted_ready = None;

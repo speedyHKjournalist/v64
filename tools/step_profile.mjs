@@ -5,7 +5,24 @@
 // slows every step, so measure in rounds that are not timed.
 
 export const MODES = ["real", "vm86", "prot16", "prot32", "compat16", "compat32", "long64"];
-export const STEPPERS = ["tier0", "x64page"];
+export const STEPPERS = ["tier0", "x64page", "event"];
+// Events that are not steps (stepper "event", docs/jit-unification-plan.md
+// P4.0; src/rust/step_profile.rs's event module): the event, then names of
+// its details by number
+export const EVENTS = {
+    1: ["miss", [null, "disabled", "no-code", "cold", "compiling", "compile", "recompile", "unserved"]],
+    2: ["exit", [null, "retry", "unknown", "step", "budget", "leave"]],
+    3: ["step-exit", [null, "halt", "yield", "shadow", "core-event", "code-write", "irq", "nmi", "barrier", "chainable"]],
+    4: ["step-context", [null, "cpl", "cs", "mode", "cr0", "cr3", "cr4", "efer", "if", "tf", "ac", "vm", "rf", "iopl", "dr7", "epoch"]],
+    5: ["starved", []],
+    6: ["#NM", []],
+    7: ["CLTS", []],
+    8: ["CR0.TS", []],
+    9: ["fxstate", ["FXSAVE", "FXRSTOR", "XSAVE", "XRSTOR"]],
+    10: ["hpet-read", []],
+    11: ["pm-timer-read", []],
+    12: ["frame", []],
+};
 const MAPS = ["", "0F", "0F38", "0F3A"];
 const PP = ["", "66", "F3", "F2"];
 
@@ -41,10 +58,16 @@ export function step_key({ opcode, map = 0, vex = false, vex_pp = 0, vex_l = fal
         (repne ? 1 << 23 : 0) | (rex_w ? 1 << 24 : 0) | mode_index << 25 | stepper_index << 28 | isa << 30) >>> 0;
 }
 
-/** "prot32 tier0 0F A2", "long64 x64page retry F3 66 VEX.256.66.0F38 18 /2" */
+/** "prot32 tier0 0F A2", "long64 x64page retry F3 66 VEX.256.66.0F38 18 /2", "long64 event exit leave" */
 export function step_key_name(key)
 {
     const f = step_key_fields(key);
+    if(f.stepper === "event")
+    {
+        const [name, details] = EVENTS[key & 0xFF] ?? ["event " + (key & 0xFF), []];
+        const detail = key >>> 8 & 0xFF;
+        return [f.mode, "event", name, ...details[detail] ? [details[detail]] : detail ? [String(detail)] : []].join(" ");
+    }
     const hex = n => n.toString(16).toUpperCase().padStart(2, "0");
     const parts = [f.mode, f.stepper];
     if(f.isa) parts.push("isa" + f.isa);

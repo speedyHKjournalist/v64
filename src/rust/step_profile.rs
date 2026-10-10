@@ -27,6 +27,11 @@
 //!
 //! Bits 13 and 15 are 0. Bits 0-17 alone are the x64 page tier's earlier key,
 //! which x64_page_profile_get still reads (x64::pages).
+//!
+//! Events that are not steps share the store (docs/jit-unification-plan.md
+//! P4.0) with the stepper Event: bits 0-7 the event (the `event` module),
+//! 8-15 its detail, 25-27 the mode; note_event counts them while the profile
+//! is on.
 
 use crate::x64::state::ExecutionMode;
 use std::collections::HashMap;
@@ -48,11 +53,87 @@ pub const ISA_SHIFT: u32 = 30;
 /// The bits of the x64 page tier's earlier key
 pub const X64_LEGACY_BITS: u32 = 0x3_5FFF;
 
-/// Who stepped the instruction
+/// Who stepped the instruction (Event: not a step, see `event`)
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stepper {
     Tier0 = 0,
     X64Page = 1,
+    Event = 2,
+}
+
+/// Events counted in the step profile's store (P4.0), with their details;
+/// tools/step_profile.mjs names them
+pub mod event {
+    /// The x64 page tier did not run a function at RIP: MISS_*
+    pub const MISS: u32 = 1;
+    pub const MISS_DISABLED: u32 = 1;
+    pub const MISS_NO_CODE: u32 = 2;
+    pub const MISS_COLD: u32 = 3;
+    pub const MISS_COMPILING: u32 = 4;
+    /// (attempts that compile: the page got hot, an unserved offset is due)
+    pub const MISS_COMPILE: u32 = 5;
+    pub const MISS_RECOMPILE: u32 = 6;
+    /// a function entered at an offset it does not serve, which steps to its
+    /// next block start
+    pub const MISS_UNSERVED: u32 = 7;
+    /// Why a page function returned: EXIT_*
+    pub const EXIT: u32 = 2;
+    pub const EXIT_RETRY: u32 = 1;
+    pub const EXIT_UNKNOWN: u32 = 2;
+    /// a step ended the activation (STEP_EXIT says why)
+    pub const EXIT_STEP: u32 = 3;
+    pub const EXIT_BUDGET: u32 = 4;
+    /// it left the code it serves (a target outside, not chained)
+    pub const EXIT_LEAVE: u32 = 5;
+    /// Why a step ended its activation (x64::pages::x64_page_step): the
+    /// first of STEP_EXIT_*; CHAINABLE: only the CPL, CS, CR3, the epoch, IF,
+    /// IOPL or AC changed (P4.3's STEP_CHAIN could continue)
+    pub const STEP_EXIT: u32 = 3;
+    pub const STEP_EXIT_HALT: u32 = 1;
+    pub const STEP_EXIT_YIELD: u32 = 2;
+    pub const STEP_EXIT_SHADOW: u32 = 3;
+    pub const STEP_EXIT_CORE_EVENT: u32 = 4;
+    pub const STEP_EXIT_CODE_WRITE: u32 = 5;
+    pub const STEP_EXIT_IRQ: u32 = 6;
+    pub const STEP_EXIT_NMI: u32 = 7;
+    /// the mode, CR0, CR4, EFER, DR7, TF, VM or RF changed
+    pub const STEP_EXIT_BARRIER: u32 = 8;
+    pub const STEP_EXIT_CHAINABLE: u32 = 9;
+    /// Each part of a step's context that changed: STEP_CONTEXT_*
+    pub const STEP_CONTEXT: u32 = 4;
+    pub const STEP_CONTEXT_CPL: u32 = 1;
+    pub const STEP_CONTEXT_CS: u32 = 2;
+    pub const STEP_CONTEXT_MODE: u32 = 3;
+    pub const STEP_CONTEXT_CR0: u32 = 4;
+    pub const STEP_CONTEXT_CR3: u32 = 5;
+    pub const STEP_CONTEXT_CR4: u32 = 6;
+    pub const STEP_CONTEXT_EFER: u32 = 7;
+    pub const STEP_CONTEXT_IF: u32 = 8;
+    pub const STEP_CONTEXT_TF: u32 = 9;
+    pub const STEP_CONTEXT_AC: u32 = 10;
+    pub const STEP_CONTEXT_VM: u32 = 11;
+    pub const STEP_CONTEXT_RF: u32 = 12;
+    pub const STEP_CONTEXT_IOPL: u32 = 13;
+    pub const STEP_CONTEXT_DR7: u32 = 14;
+    pub const STEP_CONTEXT_EPOCH: u32 = 15;
+    /// A long-mode frame while IR Tier-0 had pages ready to compile (WOW64's
+    /// code waits for a compatibility-mode slice: P4.6)
+    pub const STARVED: u32 = 5;
+    /// #NM delivered; CLTS; a MOV to CR0 that changed TS (the plan's open
+    /// question 5: lazy FPU switching)
+    pub const NM: u32 = 6;
+    pub const CLTS: u32 = 7;
+    pub const CR0_TS: u32 = 8;
+    /// FXSAVE (detail 0), FXRSTOR (1), the XSAVE family (2) and XRSTOR (3)
+    pub const FXSTATE: u32 = 9;
+    /// A read of the HPET's registers; of the ACPI PM timer (open question 4:
+    /// what QueryPerformanceCounter reads)
+    pub const HPET_READ: u32 = 10;
+    pub const PM_TIMER_READ: u32 = 11;
+    /// A CPU frame began (STARVED's denominator)
+    pub const FRAME: u32 = 12;
+    // (src/hpet.js and src/acpi.js pass these numbers)
+    const _: () = assert!(HPET_READ == 10 && PM_TIMER_READ == 11);
 }
 
 /// StepKeys and how often they were stepped; None while the profile is off
@@ -89,6 +170,21 @@ pub unsafe fn step_profile_reset() {
     SAMPLES = None;
     X64_LEGACY_STALE = true;
 }
+
+/// Count `event` with `detail` (the `event` module) while the profile is on
+pub unsafe fn note_event(event: u32, detail: u32) {
+    if enabled() {
+        note(
+            (Stepper::Event as u32) << STEPPER_SHIFT
+                | (crate::x64::state::mode() as u32) << MODE_SHIFT
+                | (detail & 255) << 8
+                | event & 255,
+        );
+    }
+}
+/// note_event for devices in JS (the HPET, the ACPI PM timer)
+#[no_mangle]
+pub unsafe fn step_profile_note_event(event: u32, detail: u32) { note_event(event, detail) }
 
 pub unsafe fn note(key: u32) {
     if let Some(profile) = (*(&raw mut PROFILE)).as_mut() {

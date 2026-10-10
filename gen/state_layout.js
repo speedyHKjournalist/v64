@@ -286,8 +286,9 @@ export const STATICS = {
         // per core, tagged with that core's access cache epoch
         CODE_TLB: "cache", CHAIN: "cache",
         COUNTERS: "debug", CHAINING: "machine", LAST_UNSERVED: "cache", BOUNCE: "scratch", RECOMPILE_MISSES: "machine", TIMING: "debug", TIME_IN_CALLS: "debug", TIME_IN_EXECUTE: "debug", TIME_FIRST_CALLS: "debug", BYTES_COMPILED: "debug",
-        // (step profile: stepped instructions by RIP)
-        STEP_RIPS: "debug", SORTED: "debug" },
+        // (step profile: stepped instructions by RIP; whether the last
+        // activation ended in a step, for its exit event)
+        STEP_RIPS: "debug", SORTED: "debug", STEP_EXITED: "debug" },
     // derived from each core's x64 TLB (flushed with it); FRAME_BUFFER_WRITES:
     // some entry maps the VGA frame buffer
     "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache" },

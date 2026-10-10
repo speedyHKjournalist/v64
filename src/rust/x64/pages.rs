@@ -12,7 +12,7 @@
 use super::{extended, jac, memory, pagegen, paging, physical, state};
 use crate::cpu::{apic, cpu, execution, global_pointers as gp};
 use crate::page::Page;
-use crate::step_profile;
+use crate::step_profile::{self, event};
 use std::collections::{HashMap, HashSet};
 
 mod js {
@@ -383,16 +383,19 @@ unsafe fn release_dead(r: &mut Runtime) {
 /// retired (native instructions and interpreted steps).
 pub unsafe fn run(budget: u32) -> Attempt {
     if budget == 0 || !allowed() {
+        step_profile::note_event(event::MISS, event::MISS_DISABLED);
         return miss();
     }
     let rip = state::read_rip();
     let Some((page, global)) = code_page(rip)
     else {
+        step_profile::note_event(event::MISS, event::MISS_NO_CODE);
         return miss();
     };
     let offset = (rip & 4095) as u16;
     let r = rt();
     if !r.enabled {
+        step_profile::note_event(event::MISS, event::MISS_DISABLED);
         return miss();
     }
     if !r.releases.is_empty() {
@@ -434,8 +437,10 @@ pub unsafe fn run(budget: u32) -> Attempt {
                 let state = r.pages.entry(page).or_default();
                 if recompile_due(state) {
                     state.misses = 0;
+                    step_profile::note_event(event::MISS, event::MISS_RECOMPILE);
                     return compile(page);
                 }
+                step_profile::note_event(event::MISS, event::MISS_UNSERVED);
                 // Meanwhile the function steps from here to its next block
                 // start (pagegen: unserved dispatch) and notes the entry.
                 r.clock += 1;
@@ -446,6 +451,7 @@ pub unsafe fn run(budget: u32) -> Attempt {
                 }
                 return execute(slot, budget, rip);
             }
+            step_profile::note_event(event::MISS, event::MISS_COMPILING);
             miss()
         },
         _ => {
@@ -460,8 +466,10 @@ pub unsafe fn run(budget: u32) -> Attempt {
                     state.entries[offset as usize / 64] |= 1 << (offset % 64);
                     state.entry_count = 1;
                 }
+                step_profile::note_event(event::MISS, event::MISS_COMPILE);
                 return compile(page);
             }
+            step_profile::note_event(event::MISS, event::MISS_COLD);
             miss()
         },
     }
@@ -576,6 +584,7 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     }
     ACTIVE = true;
     COUNTERS[COUNT_ACTIVATIONS] += 1;
+    STEP_EXITED = false;
     let t_call = if TIMING { time::microtick() } else { 0.0 };
     let native = call_indirect1_ret(
         (slot + cpu::WASM_TABLE_OFFSET) as i32,
@@ -591,6 +600,18 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     execution::note_native_retired(native, execution::jit_dispatches());
     execution::ledger_end_count(span, execution::Way::PageNative, native);
     let exit = *gp::x64_page_exit;
+    if step_profile::enabled() {
+        step_profile::note_event(
+            event::EXIT,
+            match exit {
+                pagegen::EXIT_RETRY => event::EXIT_RETRY,
+                pagegen::EXIT_UNKNOWN => event::EXIT_UNKNOWN,
+                _ if STEP_EXITED => event::EXIT_STEP,
+                _ if native >= budget.min(u16::MAX as u32) => event::EXIT_BUDGET,
+                _ => event::EXIT_LEAVE,
+            },
+        );
+    }
     let r = rt();
     r.stats[RETIRED] += native as u64;
     r.last_rip = state::read_rip();
@@ -1232,20 +1253,84 @@ pub unsafe fn x64_page_step() -> i32 {
     ACTIVE = true;
     let flags = state::read_flags64();
     state::write_flags64(flags);
-    if *gp::in_hlt
-        || cpu::core_yield
-        || *gp::interrupt_shadow != 0
-        || apic::has_core_events()
-        || CODE_WRITES != writes
-        || context() != before
-        || *gp::flags & 0x200 != 0
-            && (apic::has_pending_irq() || apic::routed_pic_pending(apic::current_core() as u32))
-        || apic::nmi_pending()
+    let after = context();
+    let exit = if *gp::in_hlt {
+        event::STEP_EXIT_HALT
+    }
+    else if cpu::core_yield {
+        event::STEP_EXIT_YIELD
+    }
+    else if *gp::interrupt_shadow != 0 {
+        event::STEP_EXIT_SHADOW
+    }
+    else if apic::has_core_events() {
+        event::STEP_EXIT_CORE_EVENT
+    }
+    else if CODE_WRITES != writes {
+        event::STEP_EXIT_CODE_WRITE
+    }
+    else if after != before {
+        if step_profile::enabled() {
+            note_context_changes(&before, &after)
+        }
+        else {
+            event::STEP_EXIT_BARRIER
+        }
+    }
+    else if *gp::flags & 0x200 != 0
+        && (apic::has_pending_irq() || apic::routed_pic_pending(apic::current_core() as u32))
     {
-        pagegen::STEP_EXIT
+        event::STEP_EXIT_IRQ
+    }
+    else if apic::nmi_pending() {
+        event::STEP_EXIT_NMI
     }
     else {
-        pagegen::STEP_CONTINUE
+        return pagegen::STEP_CONTINUE;
+    };
+    STEP_EXITED = true;
+    step_profile::note_event(event::STEP_EXIT, exit);
+    pagegen::STEP_EXIT
+}
+
+/// Whether the last activation ended in a step that left (its exit's reason
+/// for the step profile, P4.0)
+static mut STEP_EXITED: bool = false;
+
+/// The parts of a step's context that changed, each a STEP_CONTEXT event:
+/// STEP_EXIT_CHAINABLE if only those P4.3's STEP_CHAIN may continue after
+/// did (the CPL, CS, CR3, the epoch, IF, IOPL, AC), else STEP_EXIT_BARRIER
+unsafe fn note_context_changes(before: &Context, after: &Context) -> u32 {
+    let control = before.control ^ after.control;
+    let changes = [
+        (before.cpl != after.cpl, event::STEP_CONTEXT_CPL, true),
+        (before.cs != after.cs, event::STEP_CONTEXT_CS, true),
+        (before.long != after.long, event::STEP_CONTEXT_MODE, false),
+        (before.cr0 != after.cr0, event::STEP_CONTEXT_CR0, false),
+        (before.cr3 != after.cr3, event::STEP_CONTEXT_CR3, true),
+        (before.cr4 != after.cr4, event::STEP_CONTEXT_CR4, false),
+        (before.efer != after.efer, event::STEP_CONTEXT_EFER, false),
+        (control & 0x200 != 0, event::STEP_CONTEXT_IF, true),
+        (control & 0x100 != 0, event::STEP_CONTEXT_TF, false),
+        (control & 0x40000 != 0, event::STEP_CONTEXT_AC, true),
+        (control & 0x20000 != 0, event::STEP_CONTEXT_VM, false),
+        (control & 0x10000 != 0, event::STEP_CONTEXT_RF, false),
+        (control & 0x3000 != 0, event::STEP_CONTEXT_IOPL, true),
+        (before.dr7 != after.dr7, event::STEP_CONTEXT_DR7, false),
+        (before.epoch != after.epoch, event::STEP_CONTEXT_EPOCH, true),
+    ];
+    let mut chainable = true;
+    for (changed, part, chain) in changes {
+        if changed {
+            step_profile::note_event(event::STEP_CONTEXT, part);
+            chainable &= chain;
+        }
+    }
+    if chainable {
+        event::STEP_EXIT_CHAINABLE
+    }
+    else {
+        event::STEP_EXIT_BARRIER
     }
 }
 
