@@ -486,7 +486,9 @@ static mut T0_FEATURES: u32 = T0_JECXZ
     | T0_SREG_LOAD
     | T0_VEC_STORE_SLOW
     | T0_CLI
-    | T0_POP_ESP;
+    | T0_POP_ESP
+    | T0_REP_BLOCKS
+    | T0_REP_MOVS_STOS;
 pub fn features() -> u32 { unsafe { T0_FEATURES } }
 /// t0_jecxz (P3.7): JECXZ and JCXZ as a template, not a step
 pub const T0_JECXZ: u32 = 1 << 0;

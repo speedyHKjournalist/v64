@@ -283,8 +283,8 @@ pub const SWITCHES: &[Switch] = &[
     },
     // Tier-0's template changes of P3 (docs/jit-unification-plan.md P3.7),
     // each off until its A/B flips it (P3.7(a)'s six: on, after their A/B as
-    // a group; P3.7(b)'s t0_sreg_load and P3.7(c)'s three: on); page
-    // functions compiled before a change keep their code
+    // a group; P3.7(b)'s t0_sreg_load, P3.7(c)'s three and P3.1's two: on);
+    // page functions compiled before a change keep their code
     Switch {
         name: "t0_jecxz",
         default: 1,
@@ -387,7 +387,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_rep_blocks",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_REP_BLOCKS, on) })
@@ -397,7 +397,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "t0_rep_movs_stos",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { tier0::set_feature(tier0::T0_REP_MOVS_STOS, on) })
