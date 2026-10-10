@@ -82,6 +82,15 @@ pub fn in_mapped_range(addr: u32) -> bool {
                 || unsafe { crate::cpu::smm::in_tseg(addr) })
 }
 
+/// Whether `addr` is in a page of guest RAM in mem8: decoded by the low bus,
+/// or RAM relocated above 4 GiB, whose backing is a hole of the low bus
+/// (in_mapped_range) yet plain RAM to IA-32e mode's fetches
+/// (crate::x64::physical::ram_page)
+pub fn is_ram_backing(addr: u32) -> bool {
+    !in_mapped_range(addr)
+        || addr < unsafe { *memory_size } && unsafe { crate::x64::physical::is_low_ram_hole(addr) }
+}
+
 /// RAM that the low bus does not decode: relocated above 4 GiB, or TSEG
 /// outside SMM (crate::cpu::smm)
 #[inline]

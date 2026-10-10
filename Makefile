@@ -1039,6 +1039,15 @@ x64-differential-tests: build/v86-debug.wasm
 
 # The x64 page tier (x64::pagegen/pages): QEMU and interpreter references,
 # and random programs compared with the interpreter.
+# WOW64 (IA-32e compatibility mode) code under the JIT, docs/jit-unification-plan.md
+# M4's gate set: compiled 32-bit code with remapped and patched pages, and
+# pages compiled from long-mode frames (x64_long_visit). On the owner's Windows
+# 8.1 image the set adds PROBE32 (tests/x64/windows_boot.mjs) and CPULOAD32
+# (WIN_CPULOAD32, tools/owner_perf.mjs).
+x64-wow64-tests: build/v86-debug.wasm
+	node tests/x64/compat_jit.mjs
+	node tests/x64/long_visit.mjs
+
 x64-page-tier-tests: build/v86-debug.wasm
 	X64_JIT=1 node tests/x64/integer_oracle.mjs
 	X64_JIT=tier0 node tests/x64/vector_oracle.mjs
@@ -1110,7 +1119,7 @@ x64-guest-interpreter-tests: build/v86-debug.wasm
 	X64_CORES=2 X64_LINUX_TIMEOUT=7200000 node tests/x64/linux_boot.mjs
 	X64_CORES=4 X64_LINUX_TIMEOUT=14400000 node tests/x64/linux_boot.mjs
 
-.PHONY: x64-decode-tests x64-system-tests x64-differential-tests x64-page-tier-tests x64-opcode-matrix-tests highmem-tests x64-multicore-tests x64-guest-tests x64-multicore-guest-tests x64-guest-interpreter-tests
+.PHONY: x64-decode-tests x64-system-tests x64-differential-tests x64-page-tier-tests x64-wow64-tests x64-opcode-matrix-tests highmem-tests x64-multicore-tests x64-guest-tests x64-multicore-guest-tests x64-guest-interpreter-tests
 
 ir-decoder-tests: ir-generated-check
 	cargo test decode::tests -- --nocapture

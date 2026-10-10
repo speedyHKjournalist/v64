@@ -116,7 +116,10 @@ by up to about 15%):
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 66 | 86 | 147 | 149 | 206 | 362 | 174 | 325 | 3892 | 180 | 219 | 880 | 52 |
 
-Per instruction: interpreted 52 ns, cold (a miss each) 70 ns.
+Per instruction: interpreted 52 ns, cold (a miss each) 70 ns. These are the
+costs before M4 (P4.1 ranked with them); with P4.5's switches (on since) a cold
+instruction costs about 58 ns and an STI window (`sti`: STI, NOP in its shadow,
+CLI) 8 ns instead of 96.
 `tools/bench/step_rank.mjs` ranks a workload's classes with these costs
 (docs/jit-unification-plan.md P4.1).
 
@@ -217,6 +220,14 @@ scene is profiled again and again without booting:
   means some path translates although the TLB could answer.
 - `WIN_SHOT_MS`: the screenshot interval (a 1280x1024 PNG every 2 s costs the
   host a few per cent).
+- JIT statistics records (`JIT_STATS=1`, tools/bench/jit_stats.mjs): one at the
+  desktop and one at the end (`phase` "desktop", "end"), and one for each
+  `jitstats <phase>` line in `command.txt`; `JIT_STATS_STEPS=<n>` keeps n step
+  profile rows. Each carries the cores' host runtime (`runtime_ms`).
+  `tools/bench/step_rank.mjs <counts log> <time log>` ranks what 64-bit code
+  leaves compiled code for from two runs of one workload, the step profile on
+  in the first (`--counts-window`/`--time-window t120,t210`: the difference of
+  two records; docs/jit-unification-plan.md P4.1).
 
 Use the release build (`TEST_RELEASE_BUILD=1`): the source tree runs the debug
 wasm. Runs from one state differ by about 10% in frames per second; compare

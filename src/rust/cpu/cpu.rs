@@ -2671,8 +2671,9 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
     else if DISABLE_EIP_TRANSLATION_OPTIMISATION || 0 != eip & !0xFFF ^ *last_virt_eip {
         return read_imm8_uncached(eip);
     }
-    // cached pages are plain RAM (see cache_fetch_page)
-    dbg_assert!(!memory::in_mapped_range((*eip_phys ^ eip) as u32));
+    // cached pages are plain RAM (see cache_fetch_page; in compatibility
+    // mode also relocated RAM, ia32e_phys_eip)
+    dbg_assert!(memory::is_ram_backing((*eip_phys ^ eip) as u32));
     let data8 = *memory::mem8.offset((*eip_phys ^ eip) as isize) as i32;
     *instruction_pointer = eip + 1;
     return Ok(data8);
