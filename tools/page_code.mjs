@@ -120,7 +120,7 @@ const e = machine.e;
 if(!e[prefix + "record_start"]) throw new Error("build/v86-ir-test-release.wasm has no replay hooks (ir-test-hooks)");
 e[prefix + "record_start"]();
 for(let run = 0; run < 2; run++) await execute(machine, load_pe(isa === "x86_64" ? bench.image64 : bench.image), Math.max(1, Math.round(bench.iterations / 8)));
-const needle = Uint8Array.from(hex.match(/../g).map(h => parseInt(h, 16)));
+const needle = Uint8Array.from(hex.replace(/\s+/g, "").match(/../g).map(h => parseInt(h, 16)));
 const holds = record => { outer: for(let i = 0; i + needle.length <= record.length; i++) { for(let j = 0; j < needle.length; j++) if(record[i + j] !== needle[j]) continue outer; return true; } return false; };
 let module;
 for(let i = 0, n = e[prefix + "record_count"](); i < n; i++)

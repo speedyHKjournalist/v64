@@ -5023,6 +5023,10 @@ impl Emitter {
 
 impl Emitter {
     fn instruction(&mut self, inst: &Inst, index: &BTreeMap<u16, usize>) {
+        // (an access cache lookup takes a kept translation by the base
+        // register of this instruction's operand, P4.21: set by address(),
+        // stack() and the string instructions, never left from another)
+        self.lookup_base = None;
         // (XMM locals, P4.17: the registers this instruction uses, loaded
         // now, in code every path runs; other vector code finds memory current)
         if self.env.xmm_locals {
@@ -5538,6 +5542,7 @@ impl Emitter {
                 self.set_reg(dst, 64);
             },
             Op::Leave => {
+                self.lookup_base = Some(5);
                 self.g(5);
                 self.s(ADDR);
                 self.host(8, false, start);
@@ -8554,12 +8559,14 @@ impl Emitter {
         let size = width as u64 / 8;
         if !rep {
             if movs {
+                self.lookup_base = Some(6);
                 self.g(6);
                 self.s(ADDR);
                 self.host(size as u32, false, start);
                 self.load(width);
                 self.s(TV);
             }
+            self.lookup_base = Some(7);
             self.g(7);
             self.s(ADDR);
             self.host(size as u32, true, start);
@@ -8626,10 +8633,12 @@ impl Emitter {
             self.step_if(start);
         }
         if movs {
+            self.lookup_base = Some(6);
             self.g(6);
             self.s(ADDR);
             self.host_or(1, false, start, self.f().step);
             self.si(SRC);
+            self.lookup_base = Some(7);
             self.g(7);
             self.s(ADDR);
             self.host_or(1, true, start, self.f().step);
@@ -8655,6 +8664,7 @@ impl Emitter {
             self.b.guest_fence();
         }
         else {
+            self.lookup_base = Some(7);
             self.g(7);
             self.s(ADDR);
             self.host_or(1, true, start, self.f().step);
@@ -8777,11 +8787,13 @@ impl Emitter {
             self.step_if(start);
         }
         if !scan {
+            self.lookup_base = Some(6);
             self.g(6);
             self.s(ADDR);
             self.host_or(1, false, start, self.f().step);
             self.si(SRC);
         }
+        self.lookup_base = Some(7);
         self.g(7);
         self.s(ADDR);
         self.host_or(1, false, start, self.f().step);

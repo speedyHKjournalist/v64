@@ -40,8 +40,10 @@ struct Core {
     /// read supervisor, read user, write supervisor, write user: entries()
     /// each (slot)
     tables: [Entry; 4 * MAX_ENTRIES],
-    /// Never 0, so zeroed entries never match.
-    epoch: u64,
+    /// The epoch, which is never 0 (so zeroed entries never match), less
+    /// one: a zeroed Core is the initial state, and the statics take no
+    /// room in the module's data (4096 entries a table, P4.15, are 2 MiB)
+    epoch_less_one: u64,
     /// 2 MiB linear regions (hashed to 1024 bits) with entries that came
     /// from a large page since the last flush: INVLPG in such a region
     /// flushes the core, anywhere else it retires one page's entries.
@@ -58,11 +60,14 @@ const EMPTY: Entry = Entry {
 static mut JAC: [Core; 8] = [const {
     Core {
         tables: [EMPTY; 4 * MAX_ENTRIES],
-        epoch: 1,
+        epoch_less_one: 0,
         large: [0; LARGE_WORDS],
         global: [0; 4 * MAX_ENTRIES / 64],
     }
 }; 8];
+impl Core {
+    fn epoch(&self) -> u64 { self.epoch_less_one + 1 }
+}
 /// The entry of linear page `page` in table `kind` (0-3, see Core::tables)
 fn slot(kind: usize, page: u64) -> usize {
     let n = entries();
@@ -93,15 +98,15 @@ pub unsafe fn base(core: usize, user: bool) -> u32 {
     std::ptr::addr_of!(JAC[core].tables[user as usize * entries()]) as u32
 }
 /// Tag bits for entries of `core` in its current epoch.
-pub unsafe fn epoch_bits(core: usize) -> u64 { JAC[core].epoch << EPOCH_SHIFT }
+pub unsafe fn epoch_bits(core: usize) -> u64 { JAC[core].epoch() << EPOCH_SHIFT }
 
 pub unsafe fn flush(core: usize) {
     let c = &mut JAC[core];
-    c.epoch += 1;
+    c.epoch_less_one += 1;
     c.large = [0; LARGE_WORDS];
-    if c.epoch == EPOCH_LIMIT {
+    if c.epoch() == EPOCH_LIMIT {
         c.tables.fill(EMPTY);
-        c.epoch = 1;
+        c.epoch_less_one = 0;
     }
 }
 /// MOV CR3 on `core`: only the entries of global translations stay.
@@ -126,7 +131,7 @@ pub unsafe fn invlpg(core: usize, address: u64) {
         return;
     }
     let page = address >> 12;
-    let tag = page | c.epoch << EPOCH_SHIFT;
+    let tag = page | c.epoch() << EPOCH_SHIFT;
     for kind in 0..4 {
         let entry = &mut c.tables[slot(kind, page)];
         if entry.tag == tag {
@@ -198,16 +203,17 @@ pub unsafe fn fill(
         c.large[word] |= bit;
     }
     let index = slot(write as usize * 2 + user as usize, page);
+    let epoch = c.epoch();
     let entry = &mut c.tables[index];
     // (P4.15: a live entry of another page in this epoch is a conflict)
     use super::pages::{COUNTERS, COUNT_JAC_CONFLICTS, COUNT_JAC_FILLS};
     COUNTERS[COUNT_JAC_FILLS] += 1;
-    if entry.tag >> EPOCH_SHIFT == c.epoch && entry.tag != page | c.epoch << EPOCH_SHIFT {
+    if entry.tag >> EPOCH_SHIFT == epoch && entry.tag != page | epoch << EPOCH_SHIFT {
         COUNTERS[COUNT_JAC_CONFLICTS] += 1;
     }
     let host = (memory::mem8 as u32).wrapping_add(backing);
     *entry = Entry {
-        tag: page | c.epoch << EPOCH_SHIFT,
+        tag: page | epoch << EPOCH_SHIFT,
         host,
         delta: host.wrapping_sub((page << 12) as u32),
     };
@@ -279,7 +285,7 @@ mod tests {
             for _ in 0..EPOCH_LIMIT {
                 flush(3);
             }
-            assert_ne!(JAC[3].epoch, 0);
+            assert_ne!(JAC[3].epoch(), 0);
             assert_eq!(JAC[3].tables[slot(3, page)].tag & !(!0 << EPOCH_SHIFT), 0);
         }
     }
