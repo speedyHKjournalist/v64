@@ -886,6 +886,7 @@ PARALLEL_ABI_SUITES=tests/smp/ap_startup.mjs tests/smp/core_swap.mjs tests/smp/a
 	tests/smp/exception_lifecycle.mjs tests/smp/topology.mjs tests/x64/multicore.mjs
 multicore-parallel-tests: build/v86-parallel.wasm build/smp/core_swap.bin build/smp/ap_startup.bin images/linux4.iso
 	node tests/parallel/relocation.mjs
+	node tests/x64/unaligned_parallel.mjs
 	for t in $(PARALLEL_ABI_SUITES); do V86_WASM=build/v86-parallel.wasm node $$t || exit 1; done
 	LITMUS_MODES=cooperative,cooperative-jit,parallel,parallel-jit LITMUS_CORES=2,4,8 LITMUS_ROUNDS=20000 node tests/parallel/litmus.mjs
 	node tests/parallel/lifecycle.mjs
@@ -1062,6 +1063,7 @@ x64-page-tier-tests: build/v86-debug.wasm
 	node tests/x64/step_profile.mjs
 	node tests/x64/step_events.mjs
 	node tests/x64/accounting.mjs
+	node tests/x64/xmm_state.mjs
 	node tests/x64/mode_ledger.mjs
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
