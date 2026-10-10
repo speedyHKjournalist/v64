@@ -295,8 +295,9 @@ export const STATICS = {
         // interpreted heat of a page without a function, valid while the
         // runtime's functions are unchanged (P4.5b); the P4.5 switches
         HEAT_BATCH: "machine", BATCH_HEAT: "machine", MISS_RUN: "machine",
-        // pages' execution counters and x64_hot_inline (P4.14)
-        HOT_COUNTS: "machine", HOT_INLINE: "machine" },
+        // page functions' execution counters, their free cells, and the
+        // switches x64_hot_inline and x64_hot_count (P4.14)
+        HOT_COUNTS: "machine", HOT_FREE: "machine", HOT_NEXT: "machine", HOT_INLINE: "machine", HOT_COUNT: "machine" },
     // derived from each core's x64 TLB (flushed with it); FRAME_BUFFER_WRITES:
     // some entry maps the VGA frame buffer
     "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache", ENTRIES: "machine" },
