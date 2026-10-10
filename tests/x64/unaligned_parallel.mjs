@@ -36,7 +36,7 @@ const runs = [];
 for(const [label, options] of [
     ["interpreter", { disable_jit: true }],
     ["outlined", { wasm_path: parallel, disable_jit: false, ir_sync_publication: true, jit_switches: { x64_hot_inline: 0 } }],
-    ["hot inline", { wasm_path: parallel, disable_jit: false, ir_sync_publication: true, jit_switches: { x64_hot_inline: 1 } }],
+    ["hot inline", { wasm_path: parallel, disable_jit: false, ir_sync_publication: true, jit_switches: { x64_hot_inline: 1, x64_hot_count: 4096 } }],
 ])
 {
     let memory, retries, native, hot;

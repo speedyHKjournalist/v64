@@ -108,6 +108,21 @@ pub const SWITCHES: &[Switch] = &[
         get: pages::switch_value,
     },
     Switch {
+        // (the execution count of a cold page function that recompiles its
+        // page with inline lookups: long after V8 optimized the cold one,
+        // so that only pages that stay hot pay for a new function that
+        // starts over in Liftoff; docs/jit-unification-plan.md appendix C, M5)
+        name: "x64_hot_count",
+        default: 1 << 22,
+        set: |v| {
+            v >= 1 && {
+                unsafe { pages::set_hot_count(v) };
+                true
+            }
+        },
+        get: pages::switch_value,
+    },
+    Switch {
         name: "x64_bucket_dispatch",
         default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_bucket_dispatch).is_some(),
@@ -134,7 +149,8 @@ pub const SWITCHES: &[Switch] = &[
     Switch {
         name: "x64_loops",
         default: 0,
-        set: |v| flag(v).map(pagegen::x64_page_set_loops).is_some(),
+        // (2: only in compiles with inline lookups, P4.14's hot recompiles)
+        set: pagegen::set_loops,
         get: pagegen::switch_value,
     },
     Switch {

@@ -2615,7 +2615,7 @@ impl CompileEnv {
                 cvt: CVT,
                 sti_shadow: STI_SHADOW,
                 jac_entries: jac::entries() as u32,
-                loops: LOOPS,
+                loops: LOOPS == 1 || LOOPS == 2 && !outline,
                 xmm_locals: XMM_LOCALS,
                 sse_fast_check: SSE_FAST_CHECK,
                 i32_ops: I32_OPS,
@@ -3147,11 +3147,19 @@ static mut STI_SHADOW: bool = true;
 #[no_mangle]
 pub fn x64_page_set_sti_shadow(enabled: bool) { unsafe { STI_SHADOW = enabled } }
 /// Loops of a page function's block graph as Wasm loops whose back edges
-/// skip the page dispatch (docs/jit-unification-plan.md P4.16).
-/// x64_page_set_loops.
-static mut LOOPS: bool = false;
+/// skip the page dispatch (docs/jit-unification-plan.md P4.16): 1 in every
+/// compile, 2 only with inline lookups (hot recompiles, x64_hot_inline;
+/// loops cost TurboFan an eighth more time, which cold code that V8 seldom
+/// optimizes need not pay). x64_page_set_loops sets 0 or 1.
+static mut LOOPS: u32 = 0;
 #[no_mangle]
-pub fn x64_page_set_loops(enabled: bool) { unsafe { LOOPS = enabled } }
+pub fn x64_page_set_loops(enabled: bool) { unsafe { LOOPS = enabled as u32 } }
+pub fn set_loops(mode: u32) -> bool {
+    mode <= 2 && {
+        unsafe { LOOPS = mode };
+        true
+    }
+}
 /// XMM registers in v128 locals within a block: loaded at the first
 /// instruction that uses them, written back before anything that leaves the
 /// block or reads them from memory (docs/jit-unification-plan.md P4.17).
@@ -3208,7 +3216,7 @@ pub fn switch_value(name: &str) -> Option<u32> {
         Some(match name {
             "x64_cvt" => CVT as u32,
             "x64_sti_shadow" => STI_SHADOW as u32,
-            "x64_loops" => LOOPS as u32,
+            "x64_loops" => LOOPS,
             "x64_xmm_locals" => XMM_LOCALS as u32,
             "x64_sse_fast_check" => SSE_FAST_CHECK as u32,
             "x64_i32_ops" => I32_OPS as u32,

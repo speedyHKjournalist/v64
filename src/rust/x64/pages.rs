@@ -62,9 +62,9 @@ struct Function {
     /// the source page's bytes (hash) when compiled: with cores in workers,
     /// checked again after the page is published (crate::parallel::code)
     source: u64,
-    /// compiled with outlined access lookups and the page's execution
-    /// counter (a cold compile with x64_hot_inline, P4.14)
-    counted: bool,
+    /// compiled with outlined access lookups and an execution counter, the
+    /// HOT_COUNTS cell (a cold compile with x64_hot_inline, P4.14)
+    counter: Option<u32>,
 }
 fn bit(set: &[u64; 64], offset: u16) -> bool { set[offset as usize / 64] >> (offset % 64) & 1 != 0 }
 struct PageState {
@@ -113,6 +113,8 @@ struct Runtime {
     pages: PageMap<PageState>,
     /// slots of dead functions, released at the next cold point
     releases: Vec<(u32, u64)>,
+    /// their HOT_COUNTS cells, free again at the same point
+    released_counters: Vec<u32>,
     next_id: u64,
     clock: u64,
     last_rip: u64,
@@ -211,6 +213,7 @@ fn rt() -> &'static mut Runtime {
             by_page: PageMap::default(),
             pages: PageMap::default(),
             releases: Vec::new(),
+            released_counters: Vec::new(),
             next_id: 1,
             clock: 0,
             last_rip: 0,
@@ -418,6 +421,7 @@ unsafe fn release_dead(r: &mut Runtime) {
     for (slot, id) in r.releases.drain(..) {
         crate::jit::ir_release_slot(slot, id);
     }
+    (*(&raw mut HOT_FREE)).extend(r.released_counters.drain(..));
 }
 
 /// Run published code at RIP for up to `budget` instructions, or note the
@@ -477,7 +481,10 @@ pub unsafe fn run(budget: u32) -> Attempt {
                 && bit(&r.functions[i].served, offset) =>
         {
             // (its code ran often: its recompile with inline lookups)
-            if r.functions[i].counted && HOT_COUNTS[hot_slot(page)] >= HOT_INLINE_COUNT {
+            if r.functions[i]
+                .counter
+                .is_some_and(|c| HOT_COUNTS[c as usize] >= HOT_COUNT)
+            {
                 r.stats[HOT_RECOMPILES] += 1;
                 return compile_mode(page, true);
             }
@@ -550,18 +557,34 @@ pub unsafe fn run(budget: u32) -> Attempt {
     }
 }
 
-/// Pages' execution counters, by hot_slot (P4.14): incremented by cold
-/// (outlined) page functions at each entry and dispatch; run() recompiles a
-/// function's page with inline lookups once its counter reaches
-/// HOT_INLINE_COUNT. Pages sharing a slot share a counter.
-static mut HOT_COUNTS: [u32; HOT_SLOTS] = [0; HOT_SLOTS];
-const HOT_SLOTS: usize = 8192;
-const HOT_INLINE_COUNT: u32 = 4096;
-fn hot_slot(page: u32) -> usize { (page as usize ^ (page as usize >> 13)) & (HOT_SLOTS - 1) }
-/// The JIT switch x64_hot_inline (P4.14)
+/// Execution counters of cold (outlined) page functions (P4.14), a cell
+/// each: the function increments its cell at each entry and dispatch
+/// (pagegen Emitter::head), and run() recompiles its page with inline
+/// lookups once the cell reaches HOT_COUNT. A cell is free again once its
+/// function is released (release_dead): no code increments it then. Cells
+/// for every live function and as many retired ones not yet released; a
+/// compile that finds none free is not counted (it stays cold).
+static mut HOT_COUNTS: [u32; HOT_CELLS] = [0; HOT_CELLS];
+const HOT_CELLS: usize = MAX_FUNCTIONS + 1024;
+static mut HOT_FREE: Vec<u32> = Vec::new();
+/// cells never handed out: HOT_NEXT..HOT_CELLS
+static mut HOT_NEXT: u32 = 0;
+unsafe fn take_counter() -> Option<u32> {
+    let cell = (*(&raw mut HOT_FREE)).pop().or_else(|| {
+        (HOT_NEXT < HOT_CELLS as u32).then(|| {
+            HOT_NEXT += 1;
+            HOT_NEXT - 1
+        })
+    })?;
+    HOT_COUNTS[cell as usize] = 0;
+    Some(cell)
+}
+/// The JIT switches x64_hot_inline and x64_hot_count (P4.14)
 static mut HOT_INLINE: bool = false;
+static mut HOT_COUNT: u32 = 1 << 22;
 #[no_mangle]
 pub unsafe fn x64_page_set_hot_inline(enabled: bool) { HOT_INLINE = enabled; }
+pub unsafe fn set_hot_count(count: u32) { HOT_COUNT = count; }
 
 /// Interpreted execution's heat, batched (docs/jit-unification-plan.md
 /// P4.5b; jitrt takes it over in P5): instructions run outside compiled
@@ -842,10 +865,7 @@ unsafe fn compile_mode(page: u32, hot: bool) -> Attempt {
     }
     let recompile = state.compiles > 1 || hot;
     let outline = pagegen::outline_access() && !state.hot;
-    let counted = outline && HOT_INLINE;
-    if counted {
-        HOT_COUNTS[hot_slot(page)] = 0;
-    }
+    let counter = if outline && HOT_INLINE { take_counter() } else { None };
     // (a recompile serves the unserved offsets seen once so far too: each
     // would otherwise count towards the next recompile)
     let mut entries: Vec<u16> = (0..4096u16)
@@ -876,10 +896,11 @@ unsafe fn compile_mode(page: u32, hot: bool) -> Attempt {
         &entries,
         chaining(),
         outline,
-        counted.then(|| &raw const HOT_COUNTS[hot_slot(page)] as u32),
+        counter.map(|c| &raw const HOT_COUNTS[c as usize] as u32),
         name,
     )
     else {
+        (*(&raw mut HOT_FREE)).extend(counter);
         rt().stats[FAILED] += 1;
         return miss();
     };
@@ -915,6 +936,7 @@ unsafe fn compile_mode(page: u32, hot: bool) -> Attempt {
         if is_extended(page) { HashSet::new() } else { HashSet::from([Page::page_of(page << 12)]) };
     let Some(slot) = crate::jit::ir_reserve_slot(id, watched)
     else {
+        (*(&raw mut HOT_FREE)).extend(counter);
         rt().stats[FAILED] += 1;
         return miss();
     };
@@ -939,7 +961,7 @@ unsafe fn compile_mode(page: u32, hot: bool) -> Attempt {
                 served: [0; 64],
                 last_used: 0,
                 source: 0,
-                counted: false,
+                counter: None,
             });
             r.functions.len() - 1
         },
@@ -953,7 +975,7 @@ unsafe fn compile_mode(page: u32, hot: bool) -> Attempt {
         served: code.served,
         last_used: r.clock,
         source: source_hash(&bytes),
-        counted,
+        counter,
     };
     r.by_page.insert(page, index);
     r.generation = r.generation.wrapping_add(1);
@@ -1013,6 +1035,7 @@ fn retire_with(r: &mut Runtime, index: usize, unchain: bool) {
     }
     f.phase = Phase::Dead;
     let (page, slot, id) = (f.page, f.slot, f.id);
+    r.released_counters.extend(f.counter.take());
     r.generation = r.generation.wrapping_add(1);
     if unchain {
         unsafe { unchain_slot(slot) };
@@ -1194,6 +1217,7 @@ pub fn switch_value(name: &str) -> Option<u32> {
             "x64_heat_batch" => BATCH_HEAT as u32,
             "x64_miss_run" => MISS_RUN as u32,
             "x64_hot_inline" => HOT_INLINE as u32,
+            "x64_hot_count" => HOT_COUNT,
             _ => return None,
         })
     }

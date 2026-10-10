@@ -549,7 +549,7 @@ function stats()
 {
     const ex = cpu.wm.exports;
     const tier = ex.x64_page_stat ? Object.fromEntries([["compiled", 0], ["native", 1], ["retries", 2], ["unknown", 3], ["steps", 4], ["invalidated", 5],
-        ["failed", 7], ["recompiled", 8], ["evicted", 11], ["live", 12], ["activations", 13], ["invlpg", 14], ["cr_writes", 15], ["access_misses", 16], ["lfb_fills", 17], ["cr3_keep_global", 18], ["jac_large_flush", 19], ["unaligned_reads", 25], ["distinct", 21], ["ms_in_calls", 20], ["ms_in_execute", 22], ["ms_first_calls", 23], ["bytes_compiled", 24], ["cr0_writes", 26], ["cr3_writes", 27], ["cr4_writes", 28], ["full_flushes", 29], ["walks", 30], ["compat_fills", 31], ["compat_refills", 32]]
+        ["failed", 7], ["recompiled", 8], ["evicted", 11], ["live", 12], ["activations", 13], ["invlpg", 14], ["cr_writes", 15], ["access_misses", 16], ["lfb_fills", 17], ["cr3_keep_global", 18], ["jac_large_flush", 19], ["unaligned_reads", 25], ["distinct", 21], ["ms_in_calls", 20], ["ms_in_execute", 22], ["ms_first_calls", 23], ["bytes_compiled", 24], ["cr0_writes", 26], ["cr3_writes", 27], ["cr4_writes", 28], ["full_flushes", 29], ["walks", 30], ["compat_fills", 31], ["compat_refills", 32], ["hot_recompiles", 33], ["jac_fills", 34], ["jac_conflicts", 35]]
         .map(([name, i]) => [name, ex.x64_page_stat(i)])) : null;
     const d = cpu.get_diagnostics();
     return {page_tier: tier, cores: d.cores.map(core => ({state: core.state, ip: core.linear_ip, cs: core.cs, retired: core.retired_instructions, halted: core.halted})),
@@ -739,6 +739,15 @@ try
                     new Uint8Array(cpu.wasm_memory.buffer, pointer >>> 0, length >>> 0));
             return publish(id, slot, pointer, length);
         };
+    }
+    // WIN_RECORD=<file>: the inputs of the page tier's compilations, saved at
+    // the end as tools/replay_record.mjs saves them (a test core's replay
+    // hooks: WASM_PATH=build/v86-ir-test-release.wasm), e.g. to replay a
+    // boot's pages under other JIT switches
+    if(process.env.WIN_RECORD)
+    {
+        if(!cpu.wm.exports.x64_page_record_start) throw new Error("WIN_RECORD: the core has no replay hooks (WASM_PATH=build/v86-ir-test-release.wasm)");
+        cpu.wm.exports.x64_page_record_start();
     }
     if(process.env.X64_COMPAT_JIT) cpu.wm.exports.x64_set_compat_jit(process.env.X64_COMPAT_JIT !== "0");
     // WIN_LPT_STATUS=<hex>: the status register of the unconnected LPT1
@@ -1275,6 +1284,18 @@ finally
     if(profiler) await profile_window();
     if(cpu && jit_stats_enabled()) print_jit_stats(vm, {script: "windows_boot", phase: "end", s: elapsed(), wasm: process.env.WASM_PATH || null, desktop_s: report.desktop_s ?? null, cores});
     if(cpu && process.env.WIN_SIZE_STATS) cpu.wm.exports.x64_pagegen_size_dump();
+    if(cpu && process.env.WIN_RECORD)
+    {
+        const e = cpu.wm.exports, chunks = [];
+        for(let i = 0, n = e.x64_page_record_count(); i < n; i++)
+        {
+            const length = Buffer.alloc(4);
+            length.writeUInt32LE(e.x64_page_record_length(i));
+            chunks.push(length, Buffer.from(new Uint8Array(cpu.wasm_memory.buffer, e.x64_page_record_address(i) >>> 0, e.x64_page_record_length(i))));
+        }
+        fs.writeFileSync(process.env.WIN_RECORD, Buffer.concat(chunks));
+        console.log(`X64_WIN_RECORD ${chunks.length / 2} records`);
+    }
     // WIN_DUMP_OVERLAY=<file>: the sectors written so far (no shutdown: what
     // the guest had flushed), e.g. to read setupapi.dev.log
     if(process.env.WIN_DUMP_OVERLAY) save_overlay(process.env.WIN_DUMP_OVERLAY);

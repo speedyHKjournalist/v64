@@ -21,9 +21,10 @@ const ARMS = {
     miss_run: {x64_miss_run: 1},
     both: {x64_heat_batch: 1, x64_miss_run: 1},
     sti_shadow: {x64_sti_shadow: 1},
-    hot_inline: {x64_hot_inline: 1},
+    // (the short guests reach a lower count than the default)
+    hot_inline: {x64_hot_inline: 1, x64_hot_count: 4096},
     loops: {x64_loops: 1},
-    all: {x64_hot_inline: 1, x64_loops: 1, x64_jac_entries: 2048},
+    all: {x64_hot_inline: 1, x64_hot_count: 4096, x64_loops: 1, x64_jac_entries: 2048},
 };
 const results = {};
 // (x64_hot_inline: pages recompiled with inline lookups, P4.14)

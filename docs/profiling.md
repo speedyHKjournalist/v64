@@ -193,6 +193,23 @@ prints the ARM64 (or x64) code of TurboFan (`node --no-liftoff
 P4.20–P4.23) came from comparing this for the page tier and Tier-0 on the
 same-source benchmarks.
 
+What the code costs V8 to compile matters as much while Windows boots: a
+page function first runs as Liftoff code, and only the ones V8 finds hot are
+compiled again by TurboFan, on background threads. When that work grows,
+functions stay longer in Liftoff code, and the guest runs slower although
+each function is better code. [`tools/compile_cost.mjs`](../tools/compile_cost.mjs)
+measures it per JIT switch: the records of real compilations
+(`tools/replay_record.mjs` for the benchmarks; for a Windows boot
+`WIN_RECORD=<file>` of `tests/x64/windows_boot.mjs` with
+`WASM_PATH=build/v86-ir-test-release.wasm`) are replayed with each switch's
+bits set, and each configuration's modules are compiled on one thread with
+Liftoff and with TurboFan:
+
+    node tools/compile_cost.mjs build/bench/win.x6r --stride 8
+
+The V8 flag `--trace-wasm-compilation-times` (one line per compiled
+function, both tiers) shows the same in a running boot.
+
 ## A/B arms: one core per setting
 
 `tests/bench/run.mjs` compares two settings of one core in one process

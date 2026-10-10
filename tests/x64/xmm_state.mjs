@@ -19,7 +19,7 @@ import { with_jit_switches } from "../lib/jit_switches.mjs";
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const RESULTS = 0x300200, PROGRESS = 0x300100, FAULTS = 0x300320, STEPS = 0x300310, IDT = 0x380000;
 const SOURCE = 0x5F0000, TARGET = 0x480000, ITERATIONS = 0x2000, PASSES = 64;
-const M5 = "x64_xmm_locals=1,x64_hot_inline=1,x64_loops=1,x64_sse_fast_check=1,x64_i32_ops=1,x64_fast_lookup=1";
+const M5 = "x64_xmm_locals=1,x64_hot_inline=1,x64_hot_count=4096,x64_loops=1,x64_sse_fast_check=1,x64_i32_ops=1,x64_fast_lookup=1";
 
 const gate = (vector, label) => `
 lea rax, [rel ${label}]
