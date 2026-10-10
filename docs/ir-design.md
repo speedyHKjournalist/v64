@@ -17,6 +17,13 @@ merged into this one; the coverage catalogue and raw measurement data are kept.
   optimization pipeline. Jumps, calls, and returns within a page are dispatched
   inside the same function where possible; frequent cross-page transfers can
   produce a multi-page function of up to 6 code pages, contiguous or not.
+  Its templates grow behind feature switches (`t0_*` in the switch registry,
+  `CompileEnv::features`; [jit-unification-plan.md](jit-unification-plan.md)
+  P3): REP MOVS/STOS within a page as one bulk copy or fill (one core),
+  segment register reads and loads, JECXZ, CLD/STD, CLI, XCHG with memory,
+  POP m32, PUSHAD/POPAD, and vector stores to device memory through a slow
+  path; the template-kind profile (`t0_kind_profile`) and the step profile's
+  samples ([profiling.md](profiling.md)) show what is left to the interpreter.
 - **Tier-1/2 region compilation**: lifts x86 instructions into an explicit
   intermediate representation, then optimizes it and lowers it to Wasm. Tier-1
   uses cheap canonicalization and state pruning; Tier-2 adds cross-block value
@@ -120,7 +127,7 @@ faults, and devices has been exhausted.
    +-------------v----------------+       +----------------v-----------------+
    | Tier-0: page / multi-page    |       | Tier-1 / Tier-2: region compiler |
    | CFG discovery + templates    |       | CFG -> typed SSA HIR             |
-   | integer / x87 / SSE / MMX    |       | effects + StateMaps + helpers    |
+   | integer, x87, SSE, MMX, REP  |       | effects + StateMaps + helpers    |
    | local state cache            |       +----------------+-----------------+
    | br_table / structured loops  |                        |
    +-------------+----------------+       +----------------v-----------------+
