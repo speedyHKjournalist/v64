@@ -8,6 +8,8 @@ import { setImmediate as set_immediate } from "node:timers";
 
 const { V86 } = await import(+process.env.TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const modes = process.env.SMP_MODES?.split(",") || ["interpreter", "tier0", "region"];
+// SMP_CORES=1: CPU 0's program alone (Tier-0's REP template runs on one core
+// only: its elements must count the same)
 assert.ok(modes.every(mode => ["interpreter", "tier0", "region"].includes(mode)));
 const fields = ["retired_instructions", "rep_elements", "faults", "halt_count", "runtime_ms"];
 const specifications = [
@@ -15,6 +17,9 @@ const specifications = [
     { loops: 2085, elements: 0, destination: 0x44000, fault: "none" },
     { loops: 2122, elements: 10, destination: 0x4FFB, fault: "pf" },
 ];
+specifications.length = Number(process.env.SMP_CORES || specifications.length);
+// (alone, CPU 0 loops long enough for Tier-0 to compile its page)
+if(specifications.length === 1) specifications[0].loops = 1 << 18;
 const u32 = value => [value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24];
 
 function guest(core)
@@ -140,9 +145,12 @@ for(const mode of modes)
             per_core_hits[core] += (hits() - before) >>> 0;
             return result;
         };
+        const hits_before = hits();
         cpu.clock.resume();
         const rounds = await halted(cpu, mode);
         cpu.clock.pause();
+        // (one core does not run through run_cpu_slice: all hits are its)
+        if(specifications.length === 1) per_core_hits[0] = (hits() - hits_before) >>> 0;
         const original = statistics(cpu);
         for(let core = 0; core < specifications.length; core++)
         {
@@ -166,7 +174,7 @@ for(const mode of modes)
             if(mode !== "interpreter") assert.ok(per_core_hits[core] > 0, `${mode} CPU ${core}: compiled code really executed`);
         }
         assert.ok(cpu.mem8.slice(0x40000, 0x40000 + 1000).every(byte => byte === 0x5A), "completed REP committed all 1000 stores");
-        assert.deepEqual(Array.from(cpu.mem8.slice(0x4FFB, 0x5001)), [0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0]);
+        if(specifications.length > 2) assert.deepEqual(Array.from(cpu.mem8.slice(0x4FFB, 0x5001)), [0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0]);
         if(mode === "interpreter")
         {
             assert.equal(ex.ir_t0_entries(), 0);
@@ -175,6 +183,12 @@ for(const mode of modes)
                 "REP continuation and fault dispatches must not inflate architectural retirement");
         }
         if(mode === "region") assert.equal(ex.ir_t0_entries(), 0, "region arm never used Tier-0");
+        if(specifications.length === 1)
+        {
+            // (the snapshot checks below are about separate cores)
+            console.log(`${mode}, one core: exact statistics passed ${JSON.stringify({ per_core_hits, counters: original })}`);
+            continue;
+        }
 
         const saved = await emulator.save_state();
         cpu.switch_core(1);

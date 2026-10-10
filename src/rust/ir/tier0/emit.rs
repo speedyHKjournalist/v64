@@ -670,12 +670,14 @@ fn classify(i: &DecodedInstruction, features: u32) -> Option<Form> {
     if let Some(form) = bmi(i) {
         return Some(form);
     }
-    // (P3.1b: REP MOVS/STOS, the encodings F3A4, F3A5, F3AA and F3AB; not
-    // with cores in workers)
+    // (P3.1b: REP MOVS/STOS, the encodings F3A4, F3A5, F3AA and F3AB, on
+    // one core: with several, the interpreter does at most 256 elements per
+    // step so that the others run, which P3.1d's t0_rep_smp would keep)
     if features & T0_REP_MOVS_STOS != 0
         && i.address_size == 32
         && !i.baseline_ud
         && !crate::parallel::active()
+        && crate::cpu::apic::core_count() == 1
     {
         let size = |byte: bool| if byte { 1 } else { i.operand_size / 8 };
         match i.encoding.opcode {
@@ -3647,6 +3649,7 @@ impl Page {
                     self.w.get_local(&source);
                     self.w.get_local(&length);
                     crate::x86tpl::string::memory_copy(&mut self.w);
+                    self.note_rep();
                     self.w.get_local(&self.gpr[6]);
                     self.w.get_local(&length);
                     self.w.add_i32();
@@ -3663,6 +3666,7 @@ impl Page {
                     self.w.get_local(&value);
                     self.w.get_local(&length);
                     crate::x86tpl::string::memory_fill(&mut self.w);
+                    self.note_rep();
                 }
                 self.w.get_local(&self.gpr[7]);
                 self.w.get_local(&length);
@@ -3778,6 +3782,13 @@ impl Page {
         }
     }
 
+    /// ECX's elements of a REP template into the core's statistics
+    /// (runtime::tier0::ir_t0_note_rep), as the interpreter counts them
+    fn note_rep(&mut self) {
+        self.w.get_local(&self.gpr[1]);
+        self.w
+            .call_signature("ir_t0_note_rep", signature("ir_t0_note_rep"));
+    }
     /// The template-kind profile (CompileEnv::kind_profile): one more
     /// execution of profile key `key`
     fn profile(&mut self, key: usize) {

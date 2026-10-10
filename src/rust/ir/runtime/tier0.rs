@@ -207,6 +207,10 @@ pub unsafe fn pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
     T0_SSE_FP.0[0] = u128::from_le_bytes(result.xmm0);
     result.index | (result.flags as u32) << 8
 }
+/// The elements a REP template did (P3.1b), into the core's statistics as
+/// the interpreter counts them
+#[no_mangle]
+pub unsafe fn ir_t0_note_rep(elements: u32) { crate::cpu::execution::note_jit_rep(elements) }
 /// MOV ES/DS/FS/GS (P3.7(b)): cpu::switch_seg_without_fault; 1 = refused,
 /// nothing changed (the page function leaves the instruction to the
 /// interpreter)

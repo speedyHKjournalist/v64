@@ -862,6 +862,7 @@ multicore-memory-order-tests-release: build/libv86.mjs build/v86.wasm
 
 multicore-statistics-tests: build/v86-debug.wasm
 	node tests/smp/core_statistics.mjs
+	SMP_CORES=1 SMP_MODES=tier0 node tests/smp/core_statistics.mjs
 
 multicore-statistics-tests-release: build/libv86.mjs build/v86.wasm
 	TEST_RELEASE_BUILD=1 node tests/smp/core_statistics.mjs
