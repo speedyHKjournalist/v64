@@ -367,7 +367,7 @@ impl Unit {
             Unit::Loop { units, .. } => units.iter().for_each(|u| u.blocks(out)),
         }
     }
-    fn first(&self) -> u32 {
+    pub fn first(&self) -> u32 {
         match self {
             Unit::Block(k) => *k,
             Unit::Loop { header, .. } => *header,
@@ -419,10 +419,11 @@ pub fn layout(plan: &PagePlan) -> Vec<Unit> {
     }
     layout
 }
-/// Loop dispatch table bounds: per loop, and for all loops of a function.
-const MAX_LOOP_TABLE: usize = 1024;
-const MAX_LOOP_TABLES: usize = 8192;
-fn visit_loops(units: &[Unit], f: &mut dyn FnMut(&Unit)) {
+/// Loop dispatch table bounds: per loop, and for all loops of a function
+/// (the x64 page tier's loops too: pagegen::layout)
+pub(crate) const MAX_LOOP_TABLE: usize = 1024;
+pub(crate) const MAX_LOOP_TABLES: usize = 8192;
+pub(crate) fn visit_loops(units: &[Unit], f: &mut dyn FnMut(&Unit)) {
     for unit in units {
         if let Unit::Loop { units, .. } = unit {
             f(unit);
@@ -431,7 +432,7 @@ fn visit_loops(units: &[Unit], f: &mut dyn FnMut(&Unit)) {
     }
 }
 /// Replace the loops matching `wide` by their units (in address order).
-fn flatten(units: &mut Vec<Unit>, wide: &dyn Fn(&Unit) -> bool) {
+pub(crate) fn flatten(units: &mut Vec<Unit>, wide: &dyn Fn(&Unit) -> bool) {
     let mut out = Vec::with_capacity(units.len());
     for unit in std::mem::take(units) {
         let flat = matches!(unit, Unit::Loop { .. }) && wide(&unit);
@@ -459,7 +460,7 @@ fn flatten(units: &mut Vec<Unit>, wide: &dyn Fn(&Unit) -> bool) {
 }
 
 /// Units of `members` (sorted), ignoring edges into `header`.
-fn units(members: &[u32], successors: &[Vec<u32>], header: Option<u32>) -> Vec<Unit> {
+pub(crate) fn units(members: &[u32], successors: &[Vec<u32>], header: Option<u32>) -> Vec<Unit> {
     let n = successors.len();
     let mut member = vec![false; n];
     for &k in members {

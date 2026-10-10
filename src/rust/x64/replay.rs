@@ -7,9 +7,13 @@
 //!
 //! A record, little-endian: "X6R1"; flags (bit 0: the recording build's
 //! parallel memory, then bucket dispatch, block counts, outlined accesses,
-//! chaining, relaxed FMA, the conversion templates); the entries (count u16, then each offset u16);
-//! the next page's first bytes (count u16, then them); the page (4096
-//! bytes); the function's name (length u16, then it).
+//! chaining, relaxed FMA, the conversion templates, the STI shadow); the
+//! entries (count u16, then each offset u16); the next page's first bytes
+//! (count u16, then them); the page (4096 bytes); the function's name
+//! (length u16, then it); a trailer that older records lack (u8: the
+//! execution counter, loops, XMM locals, the fast SSE checks, 32-bit
+//! operations in i32, the fast lookups, the chained GPRs, EFLAGS by what
+//! observes them; u16: the access cache's entries).
 
 use super::pagegen::{compile_with, CompileEnv};
 use crate::wasmgen::wasm_builder::WasmBuilder;
@@ -42,6 +46,22 @@ fn encode(env: &CompileEnv, bytes: &[u8], next: &[u8], entries: &[u16], name: &s
     r.extend_from_slice(bytes);
     r.extend_from_slice(&(name.len() as u16).to_le_bytes());
     r.extend_from_slice(name.as_bytes());
+    // (a trailer, absent from older records: the execution counter, P4.14;
+    // loops, P4.16; XMM locals, P4.17; the fast SSE checks, P4.18; 32-bit
+    // operations in i32, P4.20; the fast lookups, P4.21; the chained
+    // GPRs, P4.22; EFLAGS by what observes them, P4.23; the access cache's
+    // entries, P4.15)
+    r.push(
+        env.counter.is_some() as u8
+            | (env.loops as u8) << 1
+            | (env.xmm_locals as u8) << 2
+            | (env.sse_fast_check as u8) << 3
+            | (env.i32_ops as u8) << 4
+            | (env.fast_lookup as u8) << 5
+            | (env.fast_chain as u8) << 6
+            | (env.exit_flags as u8) << 7,
+    );
+    r.extend_from_slice(&(env.jac_entries as u16).to_le_bytes());
     r
 }
 
@@ -66,7 +86,6 @@ pub fn replay(record: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let bit = |n: u8| flags & 1 << n != 0;
-    let env = CompileEnv::replay(bit(1), bit(2), bit(3), bit(4), bit(5), bit(6), bit(7));
     let mut entries = Vec::new();
     for _ in 0..r.u16()? {
         entries.push(r.u16()?);
@@ -76,6 +95,36 @@ pub fn replay(record: &[u8]) -> Option<Vec<u8>> {
     let bytes = r.bytes(4096)?.to_vec();
     let count = r.u16()? as usize;
     let name = String::from_utf8(r.bytes(count)?.to_vec()).ok()?;
+    let trailer = r.bytes(1).map_or(0, |b| b[0]);
+    let (counting, loops, xmm_locals, sse_fast_check, i32_ops, fast_lookup, fast_chain) = (
+        trailer & 1 != 0,
+        trailer & 2 != 0,
+        trailer & 4 != 0,
+        trailer & 8 != 0,
+        trailer & 16 != 0,
+        trailer & 32 != 0,
+        trailer & 64 != 0,
+    );
+    let exit_flags = trailer & 128 != 0;
+    let jac_entries = r.u16().map_or(1024, u32::from);
+    let env = CompileEnv::replay(
+        bit(1),
+        bit(2),
+        bit(3),
+        bit(4),
+        bit(5),
+        bit(6),
+        bit(7),
+        counting,
+        jac_entries,
+        loops,
+        xmm_locals,
+        sse_fast_check,
+        i32_ops,
+        fast_lookup,
+        fast_chain,
+        exit_flags,
+    );
     compile_with(&env, &bytes, &next, &entries, name).map(|compiled| compiled.bytes)
 }
 
@@ -143,7 +192,10 @@ pub unsafe fn x64_page_replay_output() -> u32 { (*(&raw const OUTPUT)).as_ptr() 
 /// opcode groups), and an immediate byte.
 pub fn corpus() -> Vec<Vec<u8>> {
     // (the templates of every switch, so that their bytes are pinned)
-    let env = CompileEnv::replay(true, true, true, false, false, true, false);
+    let env = CompileEnv::replay(
+        true, true, true, false, false, true, false, false, 1024, false, false, true, false, false,
+        false, false,
+    );
     let mut records = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut take = |instruction: Vec<u8>| {

@@ -100,6 +100,7 @@ export const STATE_OFFSETS = {
     x64_page_lazy_b: 1840,
     smm_state: 1856,
     smbase: 1860,
+    x64_chain_gprs: 1864,
     ir_tlb_base: 2048,
     x64_mtrr_def_type: 2056,
     x64_mtrr_fixed: 2064,

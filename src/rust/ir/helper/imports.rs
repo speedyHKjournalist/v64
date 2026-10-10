@@ -83,7 +83,7 @@ imports! {
     "ir_t0_write_slow": [I32,I32,I32] -> [I32], Check, "tier-0: probes, then writes with interpreter effects; 1 = would fault (nothing written), 2 = wrote watched code";
     "ir_t0_condition": [I32] -> [I32], Pure, "tier-0: Jcc condition over lazy FLAGS; no writes";
     "ir_t0_x87": [I32,I32,I32] -> [I64], X87, "tier-0 ir_x87_op: compile-time form and transfer kind, no f64 mirroring";
-    "ir_t0_sse_fp": [I32,I32] -> [I32], Check, "tier-0: exact SSE floating point on its operand block; MXCSR flags; 1 = would fault, nothing changed";
+    "ir_t0_sse_fp": [I32,I32] -> [I32], Check, "tier-0 and the x64 page tier (x64_sse_fast_check): exact SSE floating point on its operand block; MXCSR flags; 1 = would fault, nothing changed";
     "ir_t0_fma": [I32] -> [I32], Check, "tier-0 and the x64 page tier: exact FMA (VEX.128 and scalar) on ir_t0_sse_fp's operand block; MXCSR flags; 1 = would fault, nothing changed";
     "ir_t0_write_slow_wide": [I32,I64,I64,I32] -> [I32], Check, "tier-0: a vector store of 4, 8 or 16 bytes off the fast path (P3.7(c)): probes, then writes with interpreter effects; 1 = would fault or refused (nothing written)";
     "ir_t0_note_rep": [I32] -> [], Pure, "tier-0: the elements a REP template did (P3.1b), into the core's statistics; no guest state";

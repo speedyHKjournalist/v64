@@ -62,6 +62,41 @@ pub fn mxcsr_refused_any_pe(w: &mut WasmBuilder) {
     w.ne_i32();
 }
 
+/// mxcsr_refused with DAZ either way: for the templates that refuse every
+/// denormal operand, which DAZ then cannot change (the page tier's
+/// arithmetic and FMA, P4.18; FZ is mxcsr_refused's)
+pub fn mxcsr_refused_any_daz(w: &mut WasmBuilder) {
+    w.load_fixed_i32(gp::mxcsr as u32);
+    w.const_i32(0xFFA0);
+    w.and_i32();
+    w.const_i32(0x1FA0);
+    w.ne_i32();
+}
+/// Push i32 nonzero unless every exception is masked and MXCSR rounds to
+/// nearest (DAZ, FZ and the flags either way)
+pub fn masked_nearest_refused(w: &mut WasmBuilder) {
+    w.load_fixed_i32(gp::mxcsr as u32);
+    w.const_i32(0x7F80);
+    w.and_i32();
+    w.const_i32(0x1F80);
+    w.ne_i32();
+}
+/// Push i32 1 if MXCSR.FZ is set, else 0
+pub fn flush_to_zero(w: &mut WasmBuilder) {
+    w.load_fixed_i32(gp::mxcsr as u32);
+    w.const_i32(15);
+    w.shr_u_i32();
+    w.const_i32(1);
+    w.and_i32();
+}
+/// Push i32 nonzero if MXCSR.PE is clear
+pub fn precision_clear(w: &mut WasmBuilder) {
+    w.load_fixed_i32(gp::mxcsr as u32);
+    w.const_i32(0x20);
+    w.and_i32();
+    w.eqz_i32();
+}
+
 /// Push i32 nonzero unless MXCSR rounds to nearest with PE masked: what an
 /// inexact result of an operation that raises nothing else needs
 pub fn rounding_refused(w: &mut WasmBuilder) {
@@ -82,6 +117,266 @@ pub fn inexact_pe(w: &mut WasmBuilder) {
     w.or_i32();
     w.store_aligned_i32(0);
     w.block_end();
+}
+
+/// Push i32 nonzero if a lane read of the mask on the stack is set (a
+/// scalar form's: lane 0)
+fn any_lane(w: &mut WasmBuilder, scalar: bool) {
+    if scalar {
+        w.simd_lane(0x1B, 0); // i32x4.extract_lane
+    }
+    else {
+        w.simd(0x53); // v128.any_true
+    }
+}
+/// f64x2.splat of `v`
+fn splat64(w: &mut WasmBuilder, v: f64) {
+    w.const_f64(v);
+    w.simd(0x14); // f64x2.splat
+}
+/// Push the mask of the f64x2 lanes of `x` that Dekker's splitting cannot
+/// take: not zero and outside 2^-450..2^451, where the split could overflow
+/// or the error terms lose bits to underflow
+fn outside_dekker(w: &mut WasmBuilder, x: &WasmLocalV128) {
+    w.get_local_v128(x);
+    w.simd(0xEC); // f64x2.abs
+    splat64(w, f64::from_bits((0x3FF - 450) << 52));
+    w.simd(0x49); // f64x2.lt
+    w.get_local_v128(x);
+    w.simd_zero();
+    w.simd(0x48); // f64x2.ne
+    w.simd(0x4E); // v128.and
+    w.get_local_v128(x);
+    w.simd(0xEC);
+    splat64(w, f64::from_bits((0x3FF + 451) << 52));
+    w.simd(0x4C); // f64x2.ge
+    w.simd(0x50); // v128.or
+}
+/// Dekker's split of the f64x2 lanes of `v`: (hi, lo), hi = c - (c - v)
+/// with c = v * (2^27 + 1), lo = v - hi
+fn split(w: &mut WasmBuilder, v: &WasmLocalV128) -> (WasmLocalV128, WasmLocalV128) {
+    w.get_local_v128(v);
+    splat64(w, 134217729.0);
+    w.simd(0xF2); // f64x2.mul
+    let c = w.set_new_local_v128();
+    w.get_local_v128(&c);
+    w.get_local_v128(&c);
+    w.get_local_v128(v);
+    w.simd(0xF1); // f64x2.sub
+    w.simd(0xF1);
+    let hi = w.set_new_local_v128();
+    w.get_local_v128(v);
+    w.get_local_v128(&hi);
+    w.simd(0xF1);
+    let lo = w.set_new_local_v128();
+    w.free_local_v128(c);
+    (hi, lo)
+}
+/// Push the mask of the f64x2 lanes where `p` is not exactly `a` * `b`
+/// (Dekker's TwoProduct: its error term is not zero)
+fn product_error(w: &mut WasmBuilder, a: &WasmLocalV128, b: &WasmLocalV128, p: &WasmLocalV128) {
+    let (ah, al) = split(w, a);
+    let (bh, bl) = split(w, b);
+    // ((ah * bh - p) + ah * bl + al * bh) + al * bl
+    for (k, (x, y)) in [(&ah, &bh), (&ah, &bl), (&al, &bh), (&al, &bl)]
+        .into_iter()
+        .enumerate()
+    {
+        w.get_local_v128(x);
+        w.get_local_v128(y);
+        w.simd(0xF2); // f64x2.mul
+        if k == 0 {
+            w.get_local_v128(p);
+            w.simd(0xF1); // f64x2.sub
+        }
+        else {
+            w.simd(0xF0); // f64x2.add
+        }
+    }
+    w.simd_zero();
+    w.simd(0x48); // f64x2.ne
+    for v in [ah, al, bh, bl] {
+        w.free_local_v128(v);
+    }
+}
+/// Push the mask of the f64x2 lanes where `s` is not exactly `x` + `y`
+/// (TwoSum: bb = s - x, its error (x - (s - bb)) + (y - bb) is not zero)
+fn sum_error(w: &mut WasmBuilder, x: &WasmLocalV128, y: &WasmLocalV128, s: &WasmLocalV128) {
+    w.get_local_v128(s);
+    w.get_local_v128(x);
+    w.simd(0xF1); // f64x2.sub
+    let bb = w.set_new_local_v128();
+    w.get_local_v128(x);
+    w.get_local_v128(s);
+    w.get_local_v128(&bb);
+    w.simd(0xF1);
+    w.simd(0xF1);
+    w.get_local_v128(y);
+    w.get_local_v128(&bb);
+    w.simd(0xF1);
+    w.simd(0xF0); // f64x2.add
+    w.simd_zero();
+    w.simd(0x48); // f64x2.ne
+    w.free_local_v128(bb);
+}
+
+/// Push i32 nonzero if a lane read of `r` is tiny and not zero: what MXCSR.FZ
+/// would flush (the exact sum or difference of normal operands that
+/// arithmetic_refused admits without FZ)
+pub fn flushed(w: &mut WasmBuilder, double: bool, scalar: bool, r: &WasmLocalV128) {
+    tiny(w, r, double);
+    zero(w, r, double);
+    w.simd(0x4F); // v128.andnot
+    high_half(w, double, scalar);
+    if scalar {
+        w.simd_lane(0x1B, double as u8); // i32x4.extract_lane
+    }
+    else {
+        w.simd(0x53); // v128.any_true
+    }
+}
+
+/// Whether `inexact` takes the operation (`op` as there) at all: all but
+/// double precision SQRT
+pub fn inexact_decides(op: u8, double: bool) -> bool { !(double && op == 0x51) }
+/// For an engine that sets PE itself (the page tier, P4.18), where
+/// inexact_decides: push i32 nonzero where `inexact` cannot decide whether
+/// the result `r` of ADD (0x58), MUL (0x59), SUB (0x5C), DIV (0x5E) or
+/// single precision SQRT (0x51, of `b`) of `a` and `b` is exact, in a lane
+/// read: double precision MUL and DIV of an operand or result
+/// outside_dekker. False: nothing pushed (it decides every lane).
+pub fn inexact_undecided(
+    w: &mut WasmBuilder,
+    op: u8,
+    double: bool,
+    scalar: bool,
+    [a, b]: [&WasmLocalV128; 2],
+    r: &WasmLocalV128,
+) -> bool {
+    match (double, op) {
+        (true, 0x59 | 0x5E) => {
+            for (k, x) in [a, b, r].into_iter().enumerate() {
+                outside_dekker(w, x);
+                if k > 0 {
+                    w.simd(0x50); // v128.or
+                }
+            }
+            any_lane(w, scalar);
+        },
+        _ => return false,
+    }
+    true
+}
+
+/// For an engine that sets PE itself (the page tier, P4.18): with the lanes
+/// admitted (arithmetic_refused), MXCSR to nearest and every exception
+/// masked, and inexact_undecided clear, push i32 nonzero if the result `r`
+/// of SQRT (0x51, of `b`; inexact_decides: single precision), ADD (0x58),
+/// MUL (0x59), SUB (0x5C) or DIV (0x5E) of `a` and `b` is inexact in a lane
+/// read. Single precision: each
+/// operation is exact in double precision but a sum, whose error TwoSum
+/// gives. Double: TwoSum, and Dekker's TwoProduct for MUL (and DIV: the
+/// product of quotient and divisor is the dividend).
+pub fn inexact(
+    w: &mut WasmBuilder,
+    op: u8,
+    double: bool,
+    scalar: bool,
+    [a, b]: [&WasmLocalV128; 2],
+    r: &WasmLocalV128,
+) {
+    if double {
+        match op {
+            0x58 | 0x5C => {
+                let negated = (op == 0x5C).then(|| {
+                    w.get_local_v128(b);
+                    w.simd(0xED); // f64x2.neg
+                    w.set_new_local_v128()
+                });
+                sum_error(w, a, negated.as_ref().unwrap_or(b), r);
+                if let Some(local) = negated {
+                    w.free_local_v128(local);
+                }
+            },
+            0x59 => product_error(w, a, b, r),
+            _ => {
+                dbg_assert!(op == 0x5E, "double SQRT: not inexact_decides");
+                w.get_local_v128(r);
+                w.get_local_v128(b);
+                w.simd(0xF2); // f64x2.mul
+                let p = w.set_new_local_v128();
+                product_error(w, r, b, &p);
+                w.get_local_v128(&p);
+                w.get_local_v128(a);
+                w.simd(0x48); // f64x2.ne
+                w.simd(0x50); // v128.or
+                w.free_local_v128(p);
+            },
+        }
+        any_lane(w, scalar);
+        return;
+    }
+    // single precision: lanes 0 and 1, then 2 and 3, in double precision
+    for half in 0..if scalar { 1 } else { 2 } {
+        let promote = |w: &mut WasmBuilder, x: &WasmLocalV128| {
+            w.get_local_v128(x);
+            if half == 1 {
+                w.get_local_v128(x);
+                w.simd_shuffle([8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15]);
+            }
+            w.simd(0x5F); // f64x2.promote_low_f32x4
+            w.set_new_local_v128()
+        };
+        let (x, y, s) = (promote(w, a), promote(w, b), promote(w, r));
+        match op {
+            0x58 | 0x5C => {
+                if op == 0x5C {
+                    w.get_local_v128(&y);
+                    w.simd(0xED); // f64x2.neg
+                    w.set_local_v128(&y);
+                }
+                w.get_local_v128(&x);
+                w.get_local_v128(&y);
+                w.simd(0xF0); // f64x2.add
+                let sum = w.set_new_local_v128();
+                sum_error(w, &x, &y, &sum);
+                w.get_local_v128(&sum);
+                w.get_local_v128(&s);
+                w.simd(0x48); // f64x2.ne
+                w.simd(0x50); // v128.or
+                w.free_local_v128(sum);
+            },
+            // x * y, s * y and s * s are exact (48 significant bits)
+            0x59 => {
+                w.get_local_v128(&x);
+                w.get_local_v128(&y);
+                w.simd(0xF2); // f64x2.mul
+                w.get_local_v128(&s);
+                w.simd(0x48); // f64x2.ne
+            },
+            0x5E => {
+                w.get_local_v128(&s);
+                w.get_local_v128(&y);
+                w.simd(0xF2);
+                w.get_local_v128(&x);
+                w.simd(0x48);
+            },
+            _ => {
+                w.get_local_v128(&s);
+                w.get_local_v128(&s);
+                w.simd(0xF2);
+                w.get_local_v128(&y);
+                w.simd(0x48);
+            },
+        }
+        if half == 1 {
+            w.simd(0x50); // v128.or
+        }
+        for v in [x, y, s] {
+            w.free_local_v128(v);
+        }
+    }
+    any_lane(w, scalar);
 }
 
 /// v128.const with `v` in every 32-bit lane

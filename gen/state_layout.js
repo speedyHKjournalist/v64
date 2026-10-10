@@ -139,6 +139,7 @@ export const STATE_FIELDS = [
     { name: "x64_page_lazy_kind", offset: 1824, rust: "u32", size: 4, owner: "scratch", note: "lazy EFLAGS record a page function tail-called with (0: flags are materialized)" },
     { name: "x64_page_lazy_a", offset: 1832, rust: "u64", size: 8, owner: "scratch", note: "its first operand" },
     { name: "x64_page_lazy_b", offset: 1840, rust: "u64", size: 8, owner: "scratch", note: "its second operand" },
+    { name: "x64_chain_gprs", offset: 1864, rust: "u64", count: 16, size: 128, owner: "scratch", note: "the GPRs a page function tail-calls with (x64_fast_chain)" },
     // System management mode (src/rust/cpu/smm.rs). Its own per-core range, so
     // that snapshots from before it restore it to its reset value.
     { name: "smm_state", offset: 1856, rust: "u32", size: 4, owner: "core", note: "bit 0: in SMM; bit 1: NMIs were blocked at the SMI; bit 2: the state is in the 64-bit save map" },
@@ -293,13 +294,17 @@ export const STATICS = {
         STEP_RIPS: "debug", SORTED: "debug", STEP_EXITED: "debug",
         // interpreted heat of a page without a function, valid while the
         // runtime's functions are unchanged (P4.5b); the P4.5 switches
-        HEAT_BATCH: "machine", BATCH_HEAT: "machine", MISS_RUN: "machine" },
+        HEAT_BATCH: "machine", BATCH_HEAT: "machine", MISS_RUN: "machine",
+        // pages' execution counters and x64_hot_inline (P4.14)
+        HOT_COUNTS: "machine", HOT_INLINE: "machine" },
     // derived from each core's x64 TLB (flushed with it); FRAME_BUFFER_WRITES:
     // some entry maps the VGA frame buffer
-    "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache" },
+    "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache", ENTRIES: "machine" },
     "x64/execute.rs": { DECODE_CACHE: "cache" },
     "x64/pagegen.rs": { SIZE_STATS: "debug", OUTLINE_ACCESS: "machine", BLOCK_COUNT: "machine", BUCKET_DISPATCH: "machine", CVT: "machine",
-        STI_SHADOW: "machine" },
+        STI_SHADOW: "machine", LOOPS: "machine", XMM_LOCALS: "machine",
+        SSE_FAST_CHECK: "machine", I32_OPS: "machine", FAST_LOOKUP: "machine", FAST_CHAIN: "machine",
+        EXIT_FLAGS: "machine" },
     "x64/replay.rs": { RECORDS: "debug", INPUT: "debug", OUTPUT: "debug" },
     "x64/debug.rs": { PENDING: "scratch" },
     "x64/system.rs": { FAULT_LOG: "debug", FAULT_NEXT: "debug", USER_TRACE: "debug", USER_TRACE_NEXT: "debug", USER_TRACE_ENABLED: "debug" },

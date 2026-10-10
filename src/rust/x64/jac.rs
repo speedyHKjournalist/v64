@@ -11,11 +11,16 @@
 use super::physical;
 use crate::cpu::memory;
 
-pub const ENTRIES: usize = 1024;
+/// Entries per table: the JIT switch x64_jac_entries (P4.15), 1024, 2048
+/// or 4096. The four tables (read supervisor, read user, write supervisor,
+/// write user) lie one after another, entries() apart, in room for
+/// MAX_ENTRIES each.
+pub const MAX_ENTRIES: usize = 4096;
+static mut ENTRIES: usize = 1024;
+pub fn entries() -> usize { unsafe { ENTRIES } }
 pub const ENTRY_BYTES: u32 = 16;
-pub const TABLE_BYTES: u32 = ENTRIES as u32 * ENTRY_BYTES;
 /// Write tables follow the two read tables (supervisor, user).
-pub const WRITE_OFFSET: u32 = 2 * TABLE_BYTES;
+pub fn write_offset() -> u32 { 2 * entries() as u32 * ENTRY_BYTES }
 /// Tag bits above the largest linear page number of a canonical address.
 pub const EPOCH_SHIFT: u32 = 52;
 const EPOCH_LIMIT: u64 = 1 << (64 - EPOCH_SHIFT);
@@ -25,34 +30,57 @@ const EPOCH_LIMIT: u64 = 1 << (64 - EPOCH_SHIFT);
 struct Entry {
     tag: u64,
     host: u32,
-    /// GLOBAL: from a global translation (kept by MOV CR3)
-    flags: u32,
+    /// host minus the low 32 bits of the page's linear address: what an
+    /// address's low 32 bits add to (inline lookups with x64_fast_lookup,
+    /// docs/jit-unification-plan.md P4.21)
+    delta: u32,
 }
-const GLOBAL: u32 = 1;
 #[repr(C, align(16))]
 struct Core {
-    /// read supervisor, read user, write supervisor, write user
-    tables: [[Entry; ENTRIES]; 4],
+    /// read supervisor, read user, write supervisor, write user: entries()
+    /// each (slot)
+    tables: [Entry; 4 * MAX_ENTRIES],
     /// Never 0, so zeroed entries never match.
     epoch: u64,
     /// 2 MiB linear regions (hashed to 1024 bits) with entries that came
     /// from a large page since the last flush: INVLPG in such a region
     /// flushes the core, anywhere else it retires one page's entries.
     large: [u64; LARGE_WORDS],
+    /// per entry of `tables`: from a global translation (kept by MOV CR3)
+    global: [u64; 4 * MAX_ENTRIES / 64],
 }
 const LARGE_WORDS: usize = 16;
 const EMPTY: Entry = Entry {
     tag: 0,
     host: 0,
-    flags: 0,
+    delta: 0,
 };
 static mut JAC: [Core; 8] = [const {
     Core {
-        tables: [[EMPTY; ENTRIES]; 4],
+        tables: [EMPTY; 4 * MAX_ENTRIES],
         epoch: 1,
         large: [0; LARGE_WORDS],
+        global: [0; 4 * MAX_ENTRIES / 64],
     }
 }; 8];
+/// The entry of linear page `page` in table `kind` (0-3, see Core::tables)
+fn slot(kind: usize, page: u64) -> usize {
+    let n = entries();
+    kind * n + (page as usize & (n - 1))
+}
+/// x64_jac_entries: every table emptied (the page tier recompiles with the
+/// new mask: pages::reset)
+pub unsafe fn set_entries(n: usize) -> bool {
+    if !matches!(n, 1024 | 2048 | 4096) {
+        return false;
+    }
+    ENTRIES = n;
+    for core in 0..8 {
+        JAC[core].tables.fill(EMPTY);
+        flush(core);
+    }
+    true
+}
 /// Some write entry maps the VGA frame buffer (see retire_frame_buffer_writes).
 static mut FRAME_BUFFER_WRITES: bool = false;
 fn region_bit(address: u64) -> (usize, u64) {
@@ -62,7 +90,7 @@ fn region_bit(address: u64) -> (usize, u64) {
 
 /// Read table base of `core` for the given privilege (host address).
 pub unsafe fn base(core: usize, user: bool) -> u32 {
-    std::ptr::addr_of!(JAC[core].tables[user as usize]) as u32
+    std::ptr::addr_of!(JAC[core].tables[user as usize * entries()]) as u32
 }
 /// Tag bits for entries of `core` in its current epoch.
 pub unsafe fn epoch_bits(core: usize) -> u64 { JAC[core].epoch << EPOCH_SHIFT }
@@ -72,18 +100,17 @@ pub unsafe fn flush(core: usize) {
     c.epoch += 1;
     c.large = [0; LARGE_WORDS];
     if c.epoch == EPOCH_LIMIT {
-        c.tables = [[EMPTY; ENTRIES]; 4];
+        c.tables.fill(EMPTY);
         c.epoch = 1;
     }
 }
 /// MOV CR3 on `core`: only the entries of global translations stay.
 pub unsafe fn flush_nonglobal(core: usize) {
+    let n = entries();
     let c = &mut JAC[core];
-    for table in c.tables.iter_mut() {
-        for entry in table.iter_mut() {
-            if entry.flags & GLOBAL == 0 {
-                entry.tag = 0;
-            }
+    for (i, entry) in c.tables[..4 * n].iter_mut().enumerate() {
+        if c.global[i / 64] >> (i % 64) & 1 == 0 {
+            entry.tag = 0;
         }
     }
 }
@@ -100,8 +127,8 @@ pub unsafe fn invlpg(core: usize, address: u64) {
     }
     let page = address >> 12;
     let tag = page | c.epoch << EPOCH_SHIFT;
-    for table in c.tables.iter_mut() {
-        let entry = &mut table[page as usize & (ENTRIES - 1)];
+    for kind in 0..4 {
+        let entry = &mut c.tables[slot(kind, page)];
         if entry.tag == tag {
             entry.tag = 0;
         }
@@ -115,13 +142,11 @@ pub unsafe fn retire_writes_to(backing: u32) {
 /// The same for a page at host address `host` (an extended RAM frame)
 pub unsafe fn retire_writes_to_host(host: u32) { retire_writes(|entry| entry.host == host); }
 unsafe fn retire_writes(retire: impl Fn(&Entry) -> bool) {
+    let n = entries();
     for core in 0..crate::cpu::apic::core_count().clamp(1, 8) {
-        let c = &mut JAC[core];
-        for table in c.tables[2..].iter_mut() {
-            for entry in table.iter_mut() {
-                if entry.tag != 0 && retire(entry) {
-                    entry.tag = 0;
-                }
+        for entry in JAC[core].tables[2 * n..4 * n].iter_mut() {
+            if entry.tag != 0 && retire(entry) {
+                entry.tag = 0;
             }
         }
     }
@@ -131,11 +156,10 @@ unsafe fn retire_writes(retire: impl Fn(&Entry) -> bool) {
 /// instance's) has entries; its read entries and chaining stay valid.
 pub unsafe fn retire_writes_on(core: usize, backing: u32) {
     let host = (memory::mem8 as u32).wrapping_add(backing);
-    for table in JAC[core].tables[2..].iter_mut() {
-        for entry in table.iter_mut() {
-            if entry.tag != 0 && entry.host == host {
-                entry.tag = 0;
-            }
+    let n = entries();
+    for entry in JAC[core].tables[2 * n..4 * n].iter_mut() {
+        if entry.tag != 0 && entry.host == host {
+            entry.tag = 0;
         }
     }
 }
@@ -173,11 +197,27 @@ pub unsafe fn fill(
         let (word, bit) = region_bit(address);
         c.large[word] |= bit;
     }
-    c.tables[write as usize * 2 + user as usize][page as usize & (ENTRIES - 1)] = Entry {
+    let index = slot(write as usize * 2 + user as usize, page);
+    let entry = &mut c.tables[index];
+    // (P4.15: a live entry of another page in this epoch is a conflict)
+    use super::pages::{COUNTERS, COUNT_JAC_CONFLICTS, COUNT_JAC_FILLS};
+    COUNTERS[COUNT_JAC_FILLS] += 1;
+    if entry.tag >> EPOCH_SHIFT == c.epoch && entry.tag != page | c.epoch << EPOCH_SHIFT {
+        COUNTERS[COUNT_JAC_CONFLICTS] += 1;
+    }
+    let host = (memory::mem8 as u32).wrapping_add(backing);
+    *entry = Entry {
         tag: page | c.epoch << EPOCH_SHIFT,
-        host: (memory::mem8 as u32).wrapping_add(backing),
-        flags: if global { GLOBAL } else { 0 },
+        host,
+        delta: host.wrapping_sub((page << 12) as u32),
     };
+    let (word, bit) = (index / 64, 1u64 << (index % 64));
+    if global {
+        c.global[word] |= bit;
+    }
+    else {
+        c.global[word] &= !bit;
+    }
 }
 
 /// The backing (relative to mem8) of the device memory page (a frame buffer,
@@ -229,7 +269,7 @@ mod tests {
             assert_ne!(before, 0);
             fill(3, true, true, 0xFFFF_8000_1234_5678, 0x5000, false, false);
             let page = 0xFFFF_8000_1234_5678u64 >> 12;
-            let e = JAC[3].tables[3][page as usize & (ENTRIES - 1)];
+            let e = JAC[3].tables[slot(3, page)];
             assert_eq!(e.tag, page | before);
             // the largest canonical page number stays below the epoch bits
             assert_eq!((u64::MAX >> 12) >> EPOCH_SHIFT, 0);
@@ -240,10 +280,7 @@ mod tests {
                 flush(3);
             }
             assert_ne!(JAC[3].epoch, 0);
-            assert_eq!(
-                JAC[3].tables[3][page as usize & (ENTRIES - 1)].tag & !(!0 << EPOCH_SHIFT),
-                0
-            );
+            assert_eq!(JAC[3].tables[slot(3, page)].tag & !(!0 << EPOCH_SHIFT), 0);
         }
     }
 }

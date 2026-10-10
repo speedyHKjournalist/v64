@@ -603,7 +603,7 @@ pub fn clean_bits(double: bool, scalar: bool) -> u8 {
 }
 /// Whether XMM `first` and `source` (None: memory) are known to hold `lanes`
 /// clean (the register facts): native_fp's `known` operands
-pub fn known_clean(clean: &[u8; 8], lanes: u8, first: u8, source: Option<u8>) -> [bool; 2] {
+pub fn known_clean(clean: &[u8], lanes: u8, first: u8, source: Option<u8>) -> [bool; 2] {
     let holds = |r: u8| clean[r as usize] & lanes == lanes;
     [holds(first), source.is_some_and(holds)]
 }
@@ -621,7 +621,7 @@ pub fn float_claims(opcode: u8, source: Option<u8>, known: [bool; 2]) -> bool {
 /// the other lanes of the first source (its facts `before` the write).
 /// RSQRT and RCP check only their operand and leave nothing.
 pub fn float_facts(
-    clean: &mut [u8; 8],
+    clean: &mut [u8],
     opcode: u8,
     double: bool,
     scalar: bool,
@@ -648,7 +648,7 @@ pub fn float_facts(
 /// keeps the first source's other lanes (its facts `before` the write), and
 /// the source register of CVTPS2PD and CVTSS2SD passed operands_refused
 pub fn convert_facts(
-    clean: &mut [u8; 8],
+    clean: &mut [u8],
     opcode: u32,
     scalar: bool,
     reg: u8,
@@ -664,7 +664,7 @@ pub fn convert_facts(
 }
 /// The register facts after native_fp::operands_refused admitted XMM `first`
 /// and `source` (None: memory) in `lanes`
-pub fn operand_facts(clean: &mut [u8; 8], lanes: u8, first: u8, source: Option<u8>) {
+pub fn operand_facts(clean: &mut [u8], lanes: u8, first: u8, source: Option<u8>) {
     clean[first as usize] |= lanes;
     if let Some(source) = source {
         clean[source as usize] |= lanes;

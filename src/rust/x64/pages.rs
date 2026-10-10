@@ -62,6 +62,9 @@ struct Function {
     /// the source page's bytes (hash) when compiled: with cores in workers,
     /// checked again after the page is published (crate::parallel::code)
     source: u64,
+    /// compiled with outlined access lookups and the page's execution
+    /// counter (a cold compile with x64_hot_inline, P4.14)
+    counted: bool,
 }
 fn bit(set: &[u64; 64], offset: u16) -> bool { set[offset as usize / 64] >> (offset % 64) & 1 != 0 }
 struct PageState {
@@ -72,6 +75,9 @@ struct PageState {
     entry_count: u32,
     misses: u32,
     compiles: u32,
+    /// its code ran often: compiled with inline access lookups from then on
+    /// (x64_hot_inline, P4.14; not a compile of its own, no backoff)
+    hot: bool,
 }
 impl Default for PageState {
     fn default() -> Self {
@@ -82,6 +88,7 @@ impl Default for PageState {
             entry_count: 0,
             misses: 0,
             compiles: 0,
+            hot: false,
         }
     }
 }
@@ -110,7 +117,7 @@ struct Runtime {
     clock: u64,
     last_rip: u64,
     enabled: bool,
-    stats: [u64; 12],
+    stats: [u64; 13],
     /// Changes whenever a function is registered or retired (HeatBatch)
     generation: u32,
 }
@@ -132,13 +139,15 @@ const RECOMPILED: usize = 8;
 const INSTRUCTIONS: usize = 9;
 const TEMPLATED: usize = 10;
 const EVICTED: usize = 11;
+/// recompiles of hot pages with inline lookups (x64_page_stat 33, P4.14)
+const HOT_RECOMPILES: usize = 12;
 
 /// Event counters for profiling (x64_page_stat 13..19, 25): activations of
 /// page functions, INVLPG, control register writes, access cache misses
 /// (x64_page_access calls), access cache fills of the VGA frame buffer, MOV
 /// CR3 keeping global translations, INVLPG flushing a large-page region,
 /// unaligned reads served from BOUNCE.
-pub static mut COUNTERS: [u64; 15] = [0; 15];
+pub static mut COUNTERS: [u64; 17] = [0; 17];
 pub const COUNT_ACTIVATIONS: usize = 0;
 pub const COUNT_INVLPG: usize = 1;
 pub const COUNT_CR_WRITES: usize = 2;
@@ -160,6 +169,10 @@ pub const COUNT_FULL_FLUSHES: usize = 11;
 pub const COUNT_WALKS: usize = 12;
 pub const COUNT_COMPAT_FILLS: usize = 13;
 pub const COUNT_COMPAT_REFILLS: usize = 14;
+/// Access cache fills, and those that replaced another page's live entry
+/// (a conflict in the direct-mapped table; P4.15)
+pub const COUNT_JAC_FILLS: usize = 15;
+pub const COUNT_JAC_CONFLICTS: usize = 16;
 /// (32 bytes: a VEX.256 load's)
 #[repr(C, align(16))]
 struct Bounce([u8; 32]);
@@ -202,7 +215,7 @@ fn rt() -> &'static mut Runtime {
             clock: 0,
             last_rip: 0,
             enabled: true,
-            stats: [0; 12],
+            stats: [0; 13],
             generation: 0,
         })
     }
@@ -463,6 +476,11 @@ pub unsafe fn run(budget: u32) -> Attempt {
                 && r.functions[i].phase == Phase::Ready
                 && bit(&r.functions[i].served, offset) =>
         {
+            // (its code ran often: its recompile with inline lookups)
+            if r.functions[i].counted && HOT_COUNTS[hot_slot(page)] >= HOT_INLINE_COUNT {
+                r.stats[HOT_RECOMPILES] += 1;
+                return compile_mode(page, true);
+            }
             r.clock += 1;
             r.functions[i].last_used = r.clock;
             let slot = r.functions[i].slot;
@@ -531,6 +549,19 @@ pub unsafe fn run(budget: u32) -> Attempt {
         },
     }
 }
+
+/// Pages' execution counters, by hot_slot (P4.14): incremented by cold
+/// (outlined) page functions at each entry and dispatch; run() recompiles a
+/// function's page with inline lookups once its counter reaches
+/// HOT_INLINE_COUNT. Pages sharing a slot share a counter.
+static mut HOT_COUNTS: [u32; HOT_SLOTS] = [0; HOT_SLOTS];
+const HOT_SLOTS: usize = 8192;
+const HOT_INLINE_COUNT: u32 = 4096;
+fn hot_slot(page: u32) -> usize { (page as usize ^ (page as usize >> 13)) & (HOT_SLOTS - 1) }
+/// The JIT switch x64_hot_inline (P4.14)
+static mut HOT_INLINE: bool = false;
+#[no_mangle]
+pub unsafe fn x64_page_set_hot_inline(enabled: bool) { HOT_INLINE = enabled; }
 
 /// Interpreted execution's heat, batched (docs/jit-unification-plan.md
 /// P4.5b; jitrt takes it over in P5): instructions run outside compiled
@@ -797,11 +828,24 @@ unsafe fn execute_inner(slot: u32, budget: u32, rip: u64) -> Attempt {
     }
 }
 
-unsafe fn compile(page: u32) -> Attempt {
+unsafe fn compile(page: u32) -> Attempt { compile_mode(page, false) }
+/// compile(page), or with `hot` its recompile with inline access lookups
+/// (P4.14), which is no compile of its own: no backoff
+unsafe fn compile_mode(page: u32, hot: bool) -> Attempt {
     let r = rt();
     let state = r.pages.entry(page).or_default();
-    state.compiles += 1;
-    let recompile = state.compiles > 1;
+    if hot {
+        state.hot = true;
+    }
+    else {
+        state.compiles += 1;
+    }
+    let recompile = state.compiles > 1 || hot;
+    let outline = pagegen::outline_access() && !state.hot;
+    let counted = outline && HOT_INLINE;
+    if counted {
+        HOT_COUNTS[hot_slot(page)] = 0;
+    }
     // (a recompile serves the unserved offsets seen once so far too: each
     // would otherwise count towards the next recompile)
     let mut entries: Vec<u16> = (0..4096u16)
@@ -831,6 +875,8 @@ unsafe fn compile(page: u32) -> Attempt {
         next.as_ref().map_or(&[][..], |b| &b[..]),
         &entries,
         chaining(),
+        outline,
+        counted.then(|| &raw const HOT_COUNTS[hot_slot(page)] as u32),
         name,
     )
     else {
@@ -893,6 +939,7 @@ unsafe fn compile(page: u32) -> Attempt {
                 served: [0; 64],
                 last_used: 0,
                 source: 0,
+                counted: false,
             });
             r.functions.len() - 1
         },
@@ -906,6 +953,7 @@ unsafe fn compile(page: u32) -> Attempt {
         served: code.served,
         last_used: r.clock,
         source: source_hash(&bytes),
+        counted,
     };
     r.by_page.insert(page, index);
     r.generation = r.generation.wrapping_add(1);
@@ -1145,6 +1193,7 @@ pub fn switch_value(name: &str) -> Option<u32> {
             "x64_recompile_misses" => RECOMPILE_MISSES,
             "x64_heat_batch" => BATCH_HEAT as u32,
             "x64_miss_run" => MISS_RUN as u32,
+            "x64_hot_inline" => HOT_INLINE as u32,
             _ => return None,
         })
     }
@@ -1166,6 +1215,8 @@ pub fn x64_page_stat(field: u32) -> f64 {
         23 => unsafe { TIME_FIRST_CALLS },
         25 => unsafe { COUNTERS[COUNT_UNALIGNED_READS] as f64 },
         f @ 26..=32 => unsafe { COUNTERS[f as usize - 26 + COUNT_CR0_WRITES] as f64 },
+        33 => r.stats[HOT_RECOMPILES] as f64,
+        f @ 34..=35 => unsafe { COUNTERS[f as usize - 34 + COUNT_JAC_FILLS] as f64 },
         24 => unsafe { BYTES_COMPILED as f64 },
         // pages compiled at least once (while tracked)
         21 => r.pages.values().filter(|state| state.compiles != 0).count() as f64,

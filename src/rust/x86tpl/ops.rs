@@ -18,10 +18,11 @@ use crate::cpu::global_pointers as gp;
 use crate::ir::helper::imports::signature;
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalV128};
 
-/// An engine's register facts (Tier-0's Page::xmm_clean: the lanes known to
-/// be neither NaN nor denormal) and the instruction's registers
+/// An engine's register facts (Tier-0's Page::xmm_clean, the page tier's
+/// Emitter::xmm_clean: per register, the lanes known to be neither NaN nor
+/// denormal) and the instruction's registers
 pub struct Facts<'a> {
-    pub clean: &'a mut [u8; 8],
+    pub clean: &'a mut [u8],
     /// The destination
     pub reg: u8,
     /// The first source: the destination, or VEX.vvvv
@@ -154,6 +155,9 @@ fn lane_bytes(double: bool, scalar: bool) -> u8 {
 /// SUB (0x5C), MIN (0x5D), DIV (0x5E) and MAX (0x5F), PS, PD, SS and SD:
 /// natively only where the result is cpu::simd_fp's, MXCSR too
 pub fn float<T: VecOperands>(t: &mut T, opcode: u8, double: bool, scalar: bool) {
+    if t.detects_inexact() && matches!(opcode, 0x51 | 0x58 | 0x59 | 0x5C | 0x5E) {
+        return float_inexact(t, opcode, double, scalar);
+    }
     let bytes = lane_bytes(double, scalar);
     // Scalar forms compute (and NaN-check) only the low lane.
     t.source(bytes, true);
@@ -185,8 +189,9 @@ pub fn float<T: VecOperands>(t: &mut T, opcode: u8, double: bool, scalar: bool) 
         }
         native_fp::arithmetic_refused(t.w(), opcode, double, scalar, [&dst, &src], known, &result);
         // (the facts of an admitted form hold only for admitted operands:
-        // float_claims)
-        if float_claims(opcode, source, known) {
+        // float_claims; an engine without facts claims nothing)
+        let claims = t.facts().is_some() && float_claims(opcode, source, known);
+        if claims {
             t.retry_if();
         }
         else {
@@ -204,6 +209,97 @@ pub fn float<T: VecOperands>(t: &mut T, opcode: u8, double: bool, scalar: bool) 
     if matches!(opcode, 0x52 | 0x53) {
         t.refused(&dst, &src, None, &result);
     }
+    let before = first_facts(t);
+    t.store_vec(&result, bytes);
+    for v in [src, dst, result] {
+        t.w().free_local_v128(v);
+    }
+    if let Some(f) = t.facts() {
+        float_facts(f.clean, opcode, double, scalar, f.reg, f.source, before);
+    }
+}
+
+/// float's SQRT, ADD, MUL, SUB and DIV for an engine that sets PE itself
+/// (detects_inexact: the page tier, docs/jit-unification-plan.md P4.18),
+/// where MXCSR.PE may be clear and DAZ or FZ set. With mxcsr_refused's
+/// condition an admitted result is final, as for Tier-0. Else (rarely),
+/// with every exception masked and rounding to nearest: FZ refuses a sum or
+/// difference it would flush, and with PE clear an inexact result sets PE
+/// (native_fp::inexact). Refused lanes, any other MXCSR and what
+/// native_fp::inexact cannot decide take the engine's refused path (in
+/// place: the exact helper).
+fn float_inexact<T: VecOperands>(t: &mut T, opcode: u8, double: bool, scalar: bool) {
+    let bytes = lane_bytes(double, scalar);
+    t.source(bytes, true);
+    let src = t.w().set_new_local_v128();
+    t.first();
+    let dst = t.w().set_new_local_v128();
+    float_arithmetic(t.w(), opcode, double, &dst, &src);
+    let result = t.w().set_new_local_v128();
+    let lanes = clean_bits(double, scalar);
+    let source = t.facts().and_then(|f| f.source);
+    let known = known(t, lanes);
+    // (facts that hold only for admitted operands retry the refused ones:
+    // float_claims)
+    let claims = t.facts().is_some() && float_claims(opcode, source, known);
+    t.w().const_i32(0);
+    let refused = t.w().set_new_local();
+    let unsure =
+        native_fp::arithmetic_unsure(t.w(), opcode, double, scalar, [&dst, &src], known, &result);
+    if unsure {
+        t.w().if_void();
+    }
+    native_fp::arithmetic_refused(t.w(), opcode, double, scalar, [&dst, &src], known, &result);
+    if claims {
+        t.retry_if();
+    }
+    else {
+        t.w().set_local(&refused);
+    }
+    if unsure {
+        t.w().block_end();
+    }
+    t.mxcsr_refused();
+    t.w().hint(false);
+    t.w().if_void();
+    t.w().get_local(&refused);
+    t.w().eqz_i32();
+    t.w().if_void();
+    native_fp::masked_nearest_refused(t.w());
+    if matches!(opcode, 0x58 | 0x5C) {
+        native_fp::flush_to_zero(t.w());
+        native_fp::flushed(t.w(), double, scalar, &result);
+        t.w().and_i32();
+        t.w().or_i32();
+    }
+    t.w().tee_local(&refused);
+    t.w().eqz_i32();
+    t.w().if_void();
+    native_fp::precision_clear(t.w());
+    t.w().if_void();
+    if native_fp::inexact_decides(opcode, double) {
+        if native_fp::inexact_undecided(t.w(), opcode, double, scalar, [&dst, &src], &result) {
+            t.w().tee_local(&refused);
+            t.w().eqz_i32();
+            t.w().if_void();
+        }
+        native_fp::inexact(t.w(), opcode, double, scalar, [&dst, &src], &result);
+        native_fp::inexact_pe(t.w());
+        if double && matches!(opcode, 0x59 | 0x5E) {
+            t.w().block_end();
+        }
+    }
+    else {
+        t.w().const_i32(1);
+        t.w().set_local(&refused);
+    }
+    t.w().block_end();
+    t.w().block_end();
+    t.w().block_end();
+    t.w().block_end();
+    t.w().get_local(&refused);
+    t.refused(&dst, &src, None, &result);
+    t.w().free_local(refused);
     let before = first_facts(t);
     t.store_vec(&result, bytes);
     for v in [src, dst, result] {

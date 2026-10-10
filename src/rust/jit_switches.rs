@@ -83,6 +83,30 @@ pub const SWITCHES: &[Switch] = &[
         },
         get: pages::switch_value,
     },
+    // (docs/jit-unification-plan.md P4.15: the access cache's entries per
+    // table; the page tier recompiles)
+    Switch {
+        name: "x64_jac_entries",
+        default: 1024,
+        set: |v| unsafe {
+            crate::x64::jac::set_entries(v as usize) && {
+                pages::reset();
+                true
+            }
+        },
+        get: |_| Some(crate::x64::jac::entries() as u32),
+    },
+    // (docs/jit-unification-plan.md P4.14)
+    Switch {
+        name: "x64_hot_inline",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { pages::x64_page_set_hot_inline(on) })
+                .is_some()
+        },
+        get: pages::switch_value,
+    },
     Switch {
         name: "x64_bucket_dispatch",
         default: 1,
@@ -105,6 +129,61 @@ pub const SWITCHES: &[Switch] = &[
         name: "x64_cvt",
         default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_cvt).is_some(),
+        get: pagegen::switch_value,
+    },
+    Switch {
+        name: "x64_loops",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_loops).is_some(),
+        get: pagegen::switch_value,
+    },
+    Switch {
+        name: "x64_xmm_locals",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_xmm_locals).is_some(),
+        get: pagegen::switch_value,
+    },
+    // (docs/jit-unification-plan.md P4.23)
+    Switch {
+        name: "x64_exit_flags",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_exit_flags).is_some(),
+        get: pagegen::switch_value,
+    },
+    // (docs/jit-unification-plan.md P4.22; functions of either kind must
+    // not chain to each other)
+    Switch {
+        name: "x64_fast_chain",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| {
+                    pagegen::x64_page_set_fast_chain(on);
+                    pages::reset();
+                })
+                .is_some()
+        },
+        get: pagegen::switch_value,
+    },
+    // (docs/jit-unification-plan.md P4.21)
+    Switch {
+        name: "x64_fast_lookup",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_fast_lookup).is_some(),
+        get: pagegen::switch_value,
+    },
+    // (docs/jit-unification-plan.md P4.20)
+    Switch {
+        name: "x64_i32_ops",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_i32_ops).is_some(),
+        get: pagegen::switch_value,
+    },
+    // (docs/jit-unification-plan.md P4.18)
+    Switch {
+        name: "x64_sse_fast_check",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_sse_fast_check).is_some(),
         get: pagegen::switch_value,
     },
     Switch {
