@@ -15,7 +15,7 @@ export const EVENTS = {
     2: ["exit", [null, "retry", "unknown", "step", "budget", "leave"]],
     3: ["step-exit", [null, "halt", "yield", "shadow", "core-event", "code-write", "irq", "nmi", "barrier", "chainable"]],
     4: ["step-context", [null, "cpl", "cs", "mode", "cr0", "cr3", "cr4", "efer", "if", "tf", "ac", "vm", "rf", "iopl", "dr7", "epoch"]],
-    5: ["starved", []],
+    5: ["starved", [null, "pending", "other-cr3", "this-cr3"]],
     6: ["#NM", []],
     7: ["CLTS", []],
     8: ["CR0.TS", []],

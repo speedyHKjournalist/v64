@@ -3886,6 +3886,11 @@ pub unsafe fn run_cpu_slice(budget: u32) -> u32 {
     jit_link_batch_limit = budget;
     jit_link_batch = true;
     let native = crate::ir::runtime::schedule::enabled();
+    // (P4.6, as in do_many_cycles_native)
+    if crate::x64::state::mode().is_long() && crate::ir::runtime::schedule::long_visit() {
+        jit_link_batch = false;
+        return (*instruction_counter).wrapping_sub(before);
+    }
     while remaining != 0 && !*in_hlt && !core_yield {
         // (as in do_many_cycles_native: extended RAM frames held by access
         // caches are released between entries)
@@ -4076,6 +4081,10 @@ pub unsafe fn do_many_cycles_native() -> bool {
     jit_link_batch_start = initial_instruction_counter;
     jit_link_batch_limit = LOOP_COUNTER as u32;
     *slice_budget = LOOP_COUNTER as u32;
+    // (P4.6: a batch running 64-bit code compiles WOW64's waiting pages)
+    if crate::x64::state::mode().is_long() && crate::ir::runtime::schedule::long_visit() {
+        return true;
+    }
     jit_link_batch = true;
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
         && !*in_hlt
@@ -4087,6 +4096,14 @@ pub unsafe fn do_many_cycles_native() -> bool {
         // two loads when nothing is new, nothing in the normal build)
         crate::parallel::code::poll();
         crate::x64::extended::safe_point();
+        // (P4.6: an address space switch in 64-bit code)
+        if crate::ir::runtime::schedule::LONG_VISIT_AGAIN
+            && crate::x64::state::mode().is_long()
+            && crate::ir::runtime::schedule::long_visit()
+        {
+            publication_yield = true;
+            break;
+        }
         if cycle_internal() {
             publication_yield = true;
             break;

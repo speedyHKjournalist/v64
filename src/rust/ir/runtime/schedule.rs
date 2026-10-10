@@ -12,7 +12,13 @@ use super::{
     region,
 };
 use crate::{cpu::global_pointers as gp, ir::backend::wasm::StateLayout, jit};
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+};
 // Larger heat sets remain an explicit experiment: they retain more recurrent
 // PCs but regressed XP by increasing compilation/cache pressure.
 const MAX_HOT_CAPACITY: usize = 512;
@@ -184,7 +190,11 @@ fn rebuild_hot_index(s: &mut Scheduler) {
     s.cursor = 0;
     s.replacement = 0;
 }
-pub fn enabled() -> bool { SCHEDULER.try_lock().unwrap().config.enabled }
+/// Whether the IR scheduler compiles (config.enabled): a lock-free mirror,
+/// read by every long-mode instruction outside compiled code
+/// (docs/jit-unification-plan.md P4.5a), written only with config
+static ENABLED: AtomicBool = AtomicBool::new(false);
+pub fn enabled() -> bool { ENABLED.load(Ordering::Relaxed) }
 /// Startup-only mirror for cold scheduling, never an execution certificate.
 /// Keeping it under this existing guard makes the default-off scan cost zero
 /// additional cache locks. Reset/configuration preserve the chosen policy.
@@ -292,7 +302,18 @@ pub fn begin_frame(now: f64) {
     if crate::step_profile::enabled() {
         use crate::step_profile::{event, note_event};
         if s.credit && s.pages.has_ready() {
-            unsafe { note_event(event::STARVED, 0) };
+            // (why: a compile pending; no page queued from compatibility
+            // mode under the current CR3; else one was)
+            let detail = if s.pending.is_some() {
+                1
+            }
+            else if !s.pages.ready_in(unsafe { crate::x64::state::read_cr(3) }) {
+                2
+            }
+            else {
+                3
+            };
+            unsafe { note_event(event::STARVED, detail) };
         }
         unsafe { note_event(event::FRAME, 0) };
     }
@@ -548,6 +569,7 @@ pub unsafe fn ir_auto_config(
     }
     let pending = {
         let mut s = SCHEDULER.try_lock().unwrap();
+        ENABLED.store(enabled != 0, Ordering::Relaxed);
         s.config = Config {
             enabled: enabled != 0,
             threshold,
@@ -864,6 +886,59 @@ fn failed(
 /// True only when this call submitted a new module to the asynchronous host
 /// installer. The CPU may hand off once at this cold point; an existing pending
 /// Promise returns false, so delayed/failed compilation never stalls the guest.
+/// A frame running 64-bit code compiles a Tier-0 page that waits in the
+/// queue from compatibility mode (WOW64) under the current CR3, with the
+/// state flags it was queued with; else WOW64's code waits for a frame with
+/// a compatibility-mode slice (docs/jit-unification-plan.md P4.6, the JIT
+/// switch x64_long_visit). The code snapshot translates at the current CPL,
+/// which only matters with CR4.SMEP (then the CPL must be the queued one).
+/// One per frame, from its compile credit, tried when a frame starts in
+/// 64-bit code and after each MOV CR3 in it; the function is published by
+/// the next compatibility-mode slice. True when the caller yields (as visit).
+pub unsafe fn long_visit() -> bool {
+    LONG_VISIT_AGAIN = false;
+    if !LONG_VISIT || !TIER0 || !cold() {
+        return false;
+    }
+    let work = {
+        let mut s = SCHEDULER.try_lock().unwrap();
+        if !s.config.enabled
+            || s.pending.is_some()
+            || !s.credit
+            || !s.page_mode
+            || !s.pages.has_ready()
+            || !FORCED && s.idle_mode && s.frame_start - s.last_idle < s.sync_after
+        {
+            return false;
+        }
+        let smep = crate::x64::state::read_cr(4) & 1 << 20 != 0;
+        let Some(work) = s
+            .pages
+            .take_ready_if(crate::x64::state::read_cr(3), *gp::cpl, !smep)
+        else {
+            return false;
+        };
+        s.credit = false;
+        s.work += 1;
+        work
+    };
+    let (key, entries, state_flags) = work;
+    yields(compile_page_in(key, entries, 1, Some(state_flags)))
+}
+static mut LONG_VISIT: bool = false;
+/// A MOV CR3 in 64-bit code (another address space): long_visit tries
+/// again at the dispatcher's next turn in this frame (long_visit_again)
+pub static mut LONG_VISIT_AGAIN: bool = false;
+#[no_mangle]
+pub unsafe fn x64_set_long_visit(enabled: bool) { LONG_VISIT = enabled; }
+/// A MOV to CR3 (x64::system::write_cr): queued pages of the new address
+/// space may compile in this frame
+pub unsafe fn long_visit_cr3() {
+    if LONG_VISIT {
+        LONG_VISIT_AGAIN = true;
+    }
+}
+pub fn long_visit_enabled() -> bool { unsafe { LONG_VISIT } }
 pub unsafe fn visit() -> bool {
     {
         let mut s = SCHEDULER.try_lock().unwrap();
@@ -1290,6 +1365,15 @@ unsafe fn compile_selected(
 fn yields(submitted: bool) -> bool { submitted && SCHEDULER.try_lock().unwrap().pending.is_some() }
 /// Compile one whole code page with its observed entries and submit it.
 unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bool {
+    compile_page_in(key, entries, tier, None)
+}
+/// compile_page with the state flags the code runs with (None: the live ones)
+unsafe fn compile_page_in(
+    key: PageKey,
+    entries: Vec<CpuEntryKey>,
+    tier: u32,
+    state_flags: Option<crate::state_flags::CachedStateFlags>,
+) -> bool {
     let (config, opt_level, disabled, debug) = {
         let s = SCHEDULER.try_lock().unwrap();
         (s.config, s.opt_level, s.passes_disabled, s.debug)
@@ -1421,7 +1505,7 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     let compile_clock = CompileScope::new(0);
     let started = crate::profiler::performance_codegen_start();
     let compiled = if TIER0 && tier == 1 {
-        crate::ir::tier0::compile_page(&request, &snapshot, &entries, &extra)
+        crate::ir::tier0::compile_page(&request, &snapshot, &entries, &extra, state_flags)
     }
     else {
         compile_cpu_page(&request, &snapshot, &entries, &ir_config)

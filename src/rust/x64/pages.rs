@@ -111,6 +111,8 @@ struct Runtime {
     last_rip: u64,
     enabled: bool,
     stats: [u64; 12],
+    /// Changes whenever a function is registered or retired (HeatBatch)
+    generation: u32,
 }
 static mut RUNTIME: Option<Runtime> = None;
 /// Hot path lookup: backing page number and function index + 1, validated
@@ -201,6 +203,7 @@ fn rt() -> &'static mut Runtime {
             last_rip: 0,
             enabled: true,
             stats: [0; 12],
+            generation: 0,
         })
     }
 }
@@ -433,6 +436,16 @@ pub unsafe fn run(budget: u32) -> Attempt {
     r.last_rip = rip;
     // Far transfers (not the next few bytes) start blocks.
     let far = !(last < rip && rip - last <= 15);
+    // a page without a function, as at the last miss: its heat goes to the
+    // batch (P4.5b)
+    if HEAT_BATCH.holds(page, r.generation) && HEAT_BATCH.count < HEAT_BATCH_LIMIT {
+        if far {
+            note_entry(r, page, offset);
+        }
+        HEAT_BATCH.count += 1;
+        step_profile::note_event(event::MISS, event::MISS_COLD);
+        return miss_run(r, page, budget, rip);
+    }
     let (fast_page, fast_index) = FAST[fast_slot(page)];
     let index = if fast_page == page && fast_index != 0 {
         Some(fast_index as usize - 1)
@@ -486,8 +499,17 @@ pub unsafe fn run(budget: u32) -> Attempt {
             if far {
                 note_entry(r, page, offset);
             }
+            // (the batch: its count is this page's, or another page's to add first)
+            let mut heat = 1;
+            if HEAT_BATCH.holds(page, r.generation) {
+                heat += HEAT_BATCH.count;
+            }
+            else {
+                flush_heat(r);
+            }
+            HEAT_BATCH = HeatBatch::NONE;
             let state = r.pages.entry(page).or_default();
-            state.heat += 1;
+            state.heat += heat;
             if state.heat >= HOT << backoff(state.compiles) {
                 state.heat = 0;
                 if state.entry_count == 0 {
@@ -497,9 +519,118 @@ pub unsafe fn run(budget: u32) -> Attempt {
                 step_profile::note_event(event::MISS, event::MISS_COMPILE);
                 return compile(page);
             }
+            if BATCH_HEAT {
+                HEAT_BATCH = HeatBatch {
+                    page,
+                    count: 0,
+                    generation: r.generation,
+                };
+            }
             step_profile::note_event(event::MISS, event::MISS_COLD);
-            miss()
+            miss_run(r, page, budget, rip)
         },
+    }
+}
+
+/// Interpreted execution's heat, batched (docs/jit-unification-plan.md
+/// P4.5b; jitrt takes it over in P5): instructions run outside compiled
+/// code on a code page without a function, not yet added to the page's
+/// PageState. While the runtime's functions are unchanged (`generation`)
+/// a miss on that page needs neither the function nor the page lookup; it
+/// is added at the next miss of another page, and at HEAT_BATCH_LIMIT.
+#[derive(Clone, Copy)]
+pub struct HeatBatch {
+    page: u32,
+    count: u32,
+    generation: u32,
+}
+impl HeatBatch {
+    const NONE: HeatBatch = HeatBatch {
+        page: u32::MAX,
+        count: 0,
+        generation: 0,
+    };
+    fn holds(self, page: u32, generation: u32) -> bool {
+        self.page == page && self.generation == generation
+    }
+}
+const HEAT_BATCH_LIMIT: u32 = 256;
+static mut HEAT_BATCH: HeatBatch = HeatBatch::NONE;
+/// The JIT switches x64_heat_batch (P4.5b) and x64_miss_run (P4.5c)
+static mut BATCH_HEAT: bool = false;
+static mut MISS_RUN: bool = false;
+/// Instructions a miss run interprets at most
+const MISS_RUN_LIMIT: u32 = 64;
+#[no_mangle]
+pub unsafe fn x64_page_set_heat_batch(enabled: bool) {
+    flush_heat(rt());
+    HEAT_BATCH = HeatBatch::NONE;
+    BATCH_HEAT = enabled;
+}
+#[no_mangle]
+pub unsafe fn x64_page_set_miss_run(enabled: bool) { MISS_RUN = enabled; }
+/// The batch's heat to its page (whose compile waits for its next miss)
+unsafe fn flush_heat(r: &mut Runtime) {
+    let b = HEAT_BATCH;
+    if b.count != 0 && b.generation == r.generation {
+        r.pages.entry(b.page).or_default().heat += b.count;
+    }
+    HEAT_BATCH.count = 0;
+}
+
+/// A miss on code page `page` (at `rip`, which has no function): the
+/// interpreter runs the instruction there, and with x64_miss_run (P4.5c)
+/// the ones after it on the same linear page, without returning to run():
+/// until another page, RIP unchanged (HLT, a REP instruction's batch, a
+/// fault restarting it), a change of mode or CPL, a yield or core event,
+/// `budget` or MISS_RUN_LIMIT; far transfers within the page are noted as
+/// entries on the way, as run() notes them. Without the switch the caller
+/// interprets the one instruction (retired 0). Each further instruction is
+/// heat for the page, counted in the batch (or directly without
+/// x64_heat_batch); its compile waits for the next miss.
+unsafe fn miss_run(r: &mut Runtime, page: u32, budget: u32, rip: u64) -> Attempt {
+    if !MISS_RUN {
+        return miss();
+    }
+    let (linear, cpl) = (rip >> 12, *gp::cpl);
+    let limit = budget.min(MISS_RUN_LIMIT);
+    let span = execution::ledger_begin();
+    let (mut n, mut at) = (0, rip);
+    loop {
+        crate::x64::extended::safe_point();
+        *gp::previous_ip = *gp::instruction_pointer;
+        cpu::run_long_instruction();
+        n += 1;
+        let next = state::read_rip();
+        if n >= limit
+            || next >> 12 != linear
+            || next == at
+            || *gp::cpl != cpl
+            || !state::mode().is_long()
+            || *gp::in_hlt
+            || cpu::core_yield
+            || apic::has_core_events()
+        {
+            break;
+        }
+        // (far transfers start blocks, as in run())
+        if !(at < next && next - at <= 15) {
+            note_entry(r, page, (next & 4095) as u16);
+        }
+        at = next;
+        if HEAT_BATCH.holds(page, r.generation) {
+            HEAT_BATCH.count += 1;
+        }
+        else {
+            r.pages.entry(page).or_default().heat += 1;
+        }
+    }
+    // (the next miss compares its RIP with the last instruction run here)
+    r.last_rip = at;
+    execution::ledger_end(span, execution::Way::Interpreted);
+    Attempt {
+        retired: n,
+        submitted: false,
     }
 }
 
@@ -777,6 +908,7 @@ unsafe fn compile(page: u32) -> Attempt {
         source: source_hash(&bytes),
     };
     r.by_page.insert(page, index);
+    r.generation = r.generation.wrapping_add(1);
     FAST[fast_slot(page)] = (page, index as u32 + 1);
     r.stats[COMPILED] += 1;
     unsafe { BYTES_COMPILED += code.bytes.len() as u64 };
@@ -833,6 +965,7 @@ fn retire_with(r: &mut Runtime, index: usize, unchain: bool) {
     }
     f.phase = Phase::Dead;
     let (page, slot, id) = (f.page, f.slot, f.id);
+    r.generation = r.generation.wrapping_add(1);
     if unchain {
         unsafe { unchain_slot(slot) };
     }
@@ -987,8 +1120,10 @@ pub fn reset() {
     }
     r.pages.clear();
     r.last_rip = 0;
+    r.generation = r.generation.wrapping_add(1);
     unsafe {
         CODE_WRITES += 1;
+        HEAT_BATCH = HeatBatch::NONE;
     }
 }
 
@@ -1008,6 +1143,8 @@ pub fn switch_value(name: &str) -> Option<u32> {
             "x64_page" => rt().enabled as u32,
             "x64_chaining" => CHAINING as u32,
             "x64_recompile_misses" => RECOMPILE_MISSES,
+            "x64_heat_batch" => BATCH_HEAT as u32,
+            "x64_miss_run" => MISS_RUN as u32,
             _ => return None,
         })
     }
@@ -1426,6 +1563,15 @@ pub unsafe fn x64_page_pcmpstr(op: u32, imm8: u32, a: i64, b: i64) -> u32 {
 #[no_mangle]
 pub unsafe fn x64_page_rdtsc() -> u64 { cpu::read_tsc() }
 
+/// STI's interrupt shadow ended in compiled code (pagegen: End::Shadow,
+/// x64_sti_shadow): 1 if an interrupt is deliverable under `flags` (the
+/// function leaves for the dispatcher, which takes it)
+#[no_mangle]
+pub unsafe fn x64_page_irq_window(flags: i32) -> i32 {
+    (flags & 0x200 != 0
+        && (apic::has_pending_irq() || apic::routed_pic_pending(apic::current_core() as u32)))
+        as i32
+}
 /// MOV r64, CR8 for generated code (CPL 0 is checked inline).
 #[no_mangle]
 pub unsafe fn x64_page_cr8() -> u64 { state::read_cr(8) }

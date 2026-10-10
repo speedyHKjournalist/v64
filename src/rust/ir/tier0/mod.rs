@@ -206,8 +206,14 @@ pub fn compile_page(
     // Block starts of the other pages (linear addresses), such as the entries
     // of pages this one calls often (a cluster function).
     extra: &[u32],
+    // The state flags the code runs with, when not the live ones (a page
+    // queued in compatibility mode, compiled from a long-mode frame: P4.6)
+    state_flags: Option<CachedStateFlags>,
 ) -> Result<CompiledArtifact, CompileError> {
-    let env = CompileEnv::current();
+    let mut env = CompileEnv::current();
+    if let Some(flags) = state_flags {
+        env.state_flags = flags;
+    }
     #[cfg(feature = "ir-test-hooks")]
     replay::record(&env, origin, snapshot, entries, extra);
     compile_page_with(&env, origin, snapshot, entries, extra)

@@ -333,6 +333,9 @@ enum Op {
     /// STI ends the activation: the next instruction runs in the interrupt
     /// shadow in the interpreter.
     Sti,
+    /// STI with the instruction in its shadow compiled after it in its block
+    /// (x64_sti_shadow), which ends in End::Shadow.
+    StiShadowed,
     Swapgs,
     Rdtsc,
     /// DIV/IDIV r/m32/64 whose quotient fits (else retried: #DE or a wide
@@ -1908,6 +1911,39 @@ fn cond_reads(cc: u8) -> u32 {
 }
 fn shift_count(width: u8, count: u8) -> u8 { count & if width == 64 { 63 } else { 31 } }
 /// (read, written) EFLAGS arithmetic bits.
+/// Whether the instruction at `next`, in STI's interrupt shadow, compiles
+/// into STI's block (x64_sti_shadow): it decodes within the page, is no
+/// control transfer, step, STI or REP string instruction (block boundaries),
+/// and the instruction after it starts a block (a discovery cut short may
+/// not have reached STI) or is on the next page
+fn shadowed(decoder: &mut Decoder, next: u16, starts: &BTreeSet<u16>) -> bool {
+    if next as usize >= PAGE {
+        return false;
+    }
+    let Some((d, op)) = decoder.at(next)
+    else {
+        return false;
+    };
+    let after = next as usize + d.length as usize;
+    after <= PAGE
+        && (after == PAGE || starts.contains(&(after as u16)))
+        && !(cfg!(feature = "parallel") && locked_rmw(&d, &op) && !lockable(&op))
+        && !matches!(
+            op,
+            Op::Jcc { .. }
+                | Op::Step
+                | Op::Jmp { .. }
+                | Op::Call { .. }
+                | Op::CallIndirect { .. }
+                | Op::Ret { .. }
+                | Op::JmpIndirect { .. }
+                | Op::Sti
+                | Op::StiShadowed
+                | Op::Movs { rep: true, .. }
+                | Op::Stos { rep: true, .. }
+                | Op::RepCompare { .. }
+        )
+}
 fn effects(op: &Op) -> (u32, u32) {
     match *op {
         Op::Alu { code: 2 | 3, .. } => (CF, ARITH),
@@ -2043,6 +2079,9 @@ enum End {
     /// Step the instruction at this offset in place: it continues into the
     /// next page (or does not decode), so the interpreter fetches it.
     StepAt(u16),
+    /// STI's shadow ended (Op::StiShadowed): leave for a deliverable
+    /// interrupt, else continue at this offset.
+    Shadow(u16),
 }
 struct Block {
     start: u16,
@@ -2184,6 +2223,8 @@ pub struct CompileEnv {
     pub relaxed_fma: bool,
     /// The packed conversions as templates (x64_page_set_cvt)
     pub cvt: bool,
+    /// x64_page_set_sti_shadow (Op::StiShadowed)
+    pub sti_shadow: bool,
     /// The exact helpers' operand block (runtime::tier0::T0_SSE_FP: FMA)
     pub sse_fp_operands: u32,
     /// Cores in workers: the kick a page function polls (cpu::core_yield),
@@ -2204,6 +2245,7 @@ impl CompileEnv {
                 chaining,
                 relaxed_fma: crate::ir::runtime::tier0::relaxed_fma(),
                 cvt: CVT,
+                sti_shadow: STI_SHADOW,
                 sse_fp_operands: crate::ir::runtime::tier0::sse_fp_operands(),
                 core_yield: &raw const crate::cpu::cpu::core_yield as u32,
                 pending: if cfg!(feature = "parallel") {
@@ -2224,6 +2266,7 @@ impl CompileEnv {
         chaining: bool,
         relaxed_fma: bool,
         cvt: bool,
+        sti_shadow: bool,
     ) -> CompileEnv {
         CompileEnv {
             bucket_dispatch,
@@ -2232,6 +2275,7 @@ impl CompileEnv {
             chaining,
             relaxed_fma,
             cvt,
+            sti_shadow,
             sse_fp_operands: 0x0000_0E00,
             core_yield: 0x0000_0D00,
             pending: [0x0000_0D10, 0x0000_0D14, 0x0000_0D18, 0x0000_0D1C],
@@ -2372,12 +2416,14 @@ pub fn compile_with(
     for &start in &starts {
         let mut insts = Vec::new();
         let mut o = start;
+        // (the instruction at o is in STI's shadow: Op::StiShadowed)
+        let mut after_sti = false;
         let end = loop {
             if o as usize >= PAGE {
                 // (past the page end after a straddling instruction)
                 break End::Next(o);
             }
-            if o != start && starts.contains(&o) {
+            if o != start && starts.contains(&o) && !after_sti {
                 break End::Next(o);
             }
             if total >= MAX_INSTRUCTIONS {
@@ -2410,8 +2456,19 @@ pub fn compile_with(
                 straddle,
                 locked: locked && !matches!(op, Op::Step),
             });
+            if after_sti {
+                break End::Shadow(next);
+            }
             match op {
                 Op::Jcc { .. } | Op::Step => break End::Next(next),
+                Op::Sti
+                    if env.sti_shadow
+                        && total + 1 < MAX_INSTRUCTIONS
+                        && shadowed(&mut decoder, next, &starts) =>
+                {
+                    insts.last_mut().unwrap().op = Op::StiShadowed;
+                    after_sti = true;
+                },
                 Op::Jmp { .. }
                 | Op::Call { .. }
                 | Op::CallIndirect { .. }
@@ -2478,7 +2535,7 @@ pub fn compile_with(
             (End::Retry(_) | End::StepAt(_), _) => 0,
             (End::Next(_), Some(Op::Step)) => 0,
             (End::Next(o), Some(Op::Jcc { target: t, .. })) => live(o) | target(t),
-            (End::Next(o), _) => live(o),
+            (End::Next(o), _) | (End::Shadow(o), _) => live(o),
             (End::Stop, Some(Op::Jmp { target: t }))
             | (End::Stop, Some(Op::Call { target: t })) => target(t),
             (End::Stop, _) => 0,
@@ -2630,11 +2687,18 @@ pub fn x64_page_set_outline(enabled: bool) { unsafe { OUTLINE_ACCESS = enabled }
 static mut CVT: bool = true;
 #[no_mangle]
 pub fn x64_page_set_cvt(enabled: bool) { unsafe { CVT = enabled } }
+/// STI and the instruction in its shadow compiled together, then a check
+/// for a deliverable interrupt (docs/jit-unification-plan.md P4.5d), else
+/// STI leaves the function. x64_page_set_sti_shadow.
+static mut STI_SHADOW: bool = false;
+#[no_mangle]
+pub fn x64_page_set_sti_shadow(enabled: bool) { unsafe { STI_SHADOW = enabled } }
 
 pub fn switch_value(name: &str) -> Option<u32> {
     unsafe {
         Some(match name {
             "x64_cvt" => CVT as u32,
+            "x64_sti_shadow" => STI_SHADOW as u32,
             "x64_bucket_dispatch" => BUCKET_DISPATCH as u32,
             "x64_block_count" => BLOCK_COUNT as u32,
             "x64_outline" => OUTLINE_ACCESS as u32,
@@ -3073,6 +3137,21 @@ impl Emitter {
                 if !block.insts.last().is_some_and(|i| matches!(i.op, Op::Step))
                     && index.get(&o) != Some(&(self.current + 1))
                 {
+                    self.goto(o as u64, index);
+                }
+            },
+            End::Shadow(o) => {
+                // (with IF set and an interrupt deliverable, the dispatcher
+                // takes it: pages::x64_page_irq_window)
+                self.gi(FL);
+                self.b.call_signature(
+                    "x64_page_irq_window",
+                    Signature::new(&[WasmType::I32], &[WasmType::I32]),
+                );
+                self.b.if_void();
+                self.leave_to(self.f().exit, o as u64);
+                self.b.block_end();
+                if index.get(&o) != Some(&(self.current + 1)) {
                     self.goto(o as u64, index);
                 }
             },
@@ -4986,7 +5065,7 @@ impl Emitter {
                 self.si(FL);
                 self.written(inst.writes);
             },
-            Op::Cli | Op::Sti => {
+            Op::Cli | Op::Sti | Op::StiShadowed => {
                 // #GP unless CPL <= IOPL
                 self.c32(gp::cpl as i32);
                 self.b.load_u8(0);
@@ -5003,6 +5082,12 @@ impl Emitter {
                 if matches!(inst.op, Op::Cli) {
                     self.c32(!0x200);
                     self.b.and_i32();
+                    self.si(FL);
+                }
+                else if matches!(inst.op, Op::StiShadowed) {
+                    // (the shadow instruction follows; End::Shadow checks)
+                    self.c32(0x200);
+                    self.b.or_i32();
                     self.si(FL);
                 }
                 else {
@@ -7541,3 +7626,51 @@ mod pagegen_vec;
 #[cfg(test)]
 #[path = "../../../tests/x86tpl/pagegen_leaf_digests.rs"]
 mod pagegen_leaf_digests;
+
+/// STI and the instruction in its shadow compiled together (x64_sti_shadow,
+/// docs/jit-unification-plan.md P4.5d)
+#[cfg(test)]
+mod sti_shadow_tests {
+    use super::{compile_with, CompileEnv, PAGE};
+
+    fn compiled(page: &[u8], sti_shadow: bool) -> Vec<u8> {
+        let env = CompileEnv::replay(true, true, true, false, false, true, sti_shadow);
+        compile_with(&env, page, &[], &[0], "sti".into())
+            .expect("compiled")
+            .bytes
+    }
+    fn imports_irq_window(bytes: &[u8]) -> bool {
+        bytes.windows(19).any(|w| w == b"x64_page_irq_window")
+    }
+
+    #[test]
+    fn sti_and_its_shadow_compile_together() {
+        // STI; NOP; CLI; RET
+        let mut page = vec![0xCC; PAGE];
+        page[..4].copy_from_slice(&[0xFB, 0x90, 0xFA, 0xC3]);
+        assert!(imports_irq_window(&compiled(&page, true)));
+        assert!(!imports_irq_window(&compiled(&page, false)));
+    }
+
+    #[test]
+    fn a_discovery_cut_short_before_sti_keeps_it_apart() {
+        // 20 JZ to 20 runs of 160 NOPs and RET; the first run (discovered
+        // last, after the decoding limit) ends in STI; NOP; CLI; RET, so
+        // the CLI after the shadow is no block start
+        let mut page = vec![0xCC; PAGE];
+        let target = |k: usize| 0x100 + k * 0xA8;
+        for k in 0..20 {
+            let at = k * 6;
+            let rel = (target(k) as i32 - (at as i32 + 6)).to_le_bytes();
+            page[at..at + 6].copy_from_slice(&[0x0F, 0x84, rel[0], rel[1], rel[2], rel[3]]);
+        }
+        page[120] = 0xC3;
+        for k in 0..20 {
+            page[target(k)..target(k) + 160].fill(0x90);
+            page[target(k) + 160] = 0xC3;
+        }
+        page[target(0) + 160..target(0) + 164].copy_from_slice(&[0xFB, 0x90, 0xFA, 0xC3]);
+        // (it compiled into End::Shadow at a non-start, which panicked)
+        assert!(!imports_irq_window(&compiled(&page, true)));
+    }
+}

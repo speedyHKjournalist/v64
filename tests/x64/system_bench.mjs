@@ -8,8 +8,9 @@
 // SYSCALL with SYSRETQ, port I/O (IN from port 80h), an HPET register read
 // (MMIO), FXSAVE with FXRSTOR, MOV CR3, a TS write to CR0 with CLTS (both end
 // the activation: CR0 changed), lazy FPU switching (TS set, #NM, CLTS,
-// IRETQ), RDTSC (a helper call); and per instruction, code outside compiled
-// code: interpreted, and cold (misses). P4.1 ranks the exits with these costs.
+// IRETQ), RDTSC (a helper call), an interrupt window (STI, an instruction in
+// its shadow, CLI); and per instruction, code outside compiled code:
+// interpreted, and cold (misses). P4.1 ranks the exits with these costs.
 //
 //   node tests/x64/system_bench.mjs [iterations=400000] [rounds=3] [event...]
 //   node tests/x64/system_bench.mjs --events [iterations=20000] [event...]
@@ -115,6 +116,9 @@ mov rsi,0xFED000F0`,
     // (#NM at FNOP, the handler clears TS and returns to it)
     nm: {setup: NM_IDT, loop: "mov rax,cr0\nor eax,8\nmov cr0,rax\nfnop", handlers: "nm_handler:\nclts\niretq", scale: 0.5},
     rdtsc: {loop: "rdtsc"},
+    // (an interrupt window: STI, NOP in its shadow, CLI; the PICs masked,
+    // the guest has no IDT)
+    sti: {setup: "mov al,0xFF\nout 0x21,al\nout 0xA1,al", loop: "sti\nnop\ncli"},
     // Instructions outside compiled code, ns per instruction: interpreted
     // with the x64 page tier off (its run() returns at once), and code that
     // stays cold: COLD_PAGES pages run once, each a loop of 1801
@@ -195,12 +199,15 @@ bench_done:`, event.handlers || "");
 const JIT = {disable_jit: false, experimental_smp_jit: true, ir_sync_publication: true};
 
 /** Run event `name`'s guest: the loop's nanoseconds; with `profile`, also
- * the step profile (after `inspect`, which gets the emulator) */
-export async function run(name, n, {profile = false, inspect} = {})
+ * the step profile (after `inspect`, which gets the emulator); `switches`:
+ * JIT switches for this run */
+export async function run(name, n, {profile = false, inspect, switches = {}} = {})
 {
     const directory = assemble(`system-bench-${name}`, guest(name, n));
     let records;
-    const result = await actual(directory, {length: 16, timeout: 300000, options: {...JIT, ...EVENTS[name].options},
+    const options = {...JIT, ...EVENTS[name].options};
+    options.jit_switches = {...options.jit_switches, ...switches};
+    const result = await actual(directory, {length: 16, timeout: 300000, options,
         setup: emulator => {
             const cpu = emulator.v86.cpu;
             // (the runner steps the cores itself: the machine clock, and with

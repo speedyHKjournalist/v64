@@ -97,6 +97,10 @@ for(const c of CLASSES)
     }
     else c.count = c.events.reduce((sum, [name, detail]) => sum + event(name, detail), 0);
 }
+// (x64_miss_run interprets several instructions a miss: with the mode
+// ledger, the class is its 64-bit instructions run outside compiled code)
+const outside = counted.ledger?.long64?.interpreted;
+if(outside !== undefined) CLASSES.find(c => c.task === "P4.5c").count = outside;
 const others = rows.filter(r => page_step(r) && !claimed.has(r));
 CLASSES.push({task: "-", name: "other steps of the x64 page tier", count: others.reduce((sum, r) => sum + r.count, 0), cost: costs.cpuid});
 const tier0 = rows.filter(r => r.f.stepper === "tier0");
@@ -118,7 +122,7 @@ for(const c of [...CLASSES].sort((a, b) => b.ms - a.ms))
         `${c.ms.toFixed(0).padStart(9)} ${percent(c.share).padStart(7)}${c.share >= 0.005 ? "  >= 0.5%" : ""}`);
 }
 console.log("other steps, most first: " + others.slice(0, 15).map(r => `${r.name.replace(/^long64 x64page /, "")} ${Math.round(r.count * scale)}`).join(", "));
-const frames = event("frame"), starved = event("starved");
+const frames = event("frame"), starved = ["", "pending", "other-cr3", "this-cr3"].reduce((sum, d) => sum + event("starved", d), 0);
 console.log(`P4.6: starved frames ${starved} of ${frames} (${frames ? percent(starved / frames) : "-"}; the condition is >= 1%)`);
 console.log(`open question 4: HPET reads ${Math.round(event("hpet-read") * scale)}, PM timer reads ${Math.round(event("pm-timer-read") * scale)}; ` +
     `open question 5: #NM ${Math.round(event("#NM") * scale)}, CLTS ${Math.round(event("CLTS") * scale)}, CR0.TS writes ${Math.round(event("CR0.TS") * scale)}, ` +

@@ -30,7 +30,8 @@ fn encode(env: &CompileEnv, bytes: &[u8], next: &[u8], entries: &[u16], name: &s
             | (env.outline as u8) << 3
             | (env.chaining as u8) << 4
             | (env.relaxed_fma as u8) << 5
-            | (env.cvt as u8) << 6,
+            | (env.cvt as u8) << 6
+            | (env.sti_shadow as u8) << 7,
     );
     r.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for &e in entries {
@@ -65,7 +66,7 @@ pub fn replay(record: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let bit = |n: u8| flags & 1 << n != 0;
-    let env = CompileEnv::replay(bit(1), bit(2), bit(3), bit(4), bit(5), bit(6));
+    let env = CompileEnv::replay(bit(1), bit(2), bit(3), bit(4), bit(5), bit(6), bit(7));
     let mut entries = Vec::new();
     for _ in 0..r.u16()? {
         entries.push(r.u16()?);
@@ -142,7 +143,7 @@ pub unsafe fn x64_page_replay_output() -> u32 { (*(&raw const OUTPUT)).as_ptr() 
 /// opcode groups), and an immediate byte.
 pub fn corpus() -> Vec<Vec<u8>> {
     // (the templates of every switch, so that their bytes are pinned)
-    let env = CompileEnv::replay(true, true, true, false, false, true);
+    let env = CompileEnv::replay(true, true, true, false, false, true, false);
     let mut records = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut take = |instruction: Vec<u8>| {

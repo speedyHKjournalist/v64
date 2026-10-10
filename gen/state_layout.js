@@ -230,6 +230,8 @@ export const STATICS = {
     "ir/runtime/schedule.rs": {
         DIRECT_T2: "machine", FORCED: "machine", HEAT: "machine", HEAT_STEPS: "machine", HEAT_STEPS_PER_VISIT: "machine",
         PAGE_HEAT: "machine", SCHEDULER: "machine", T0_RANGES: "machine", T0_CLUSTERS: "machine", TIER0: "machine", RESERVED: "machine",
+        // config.enabled's lock-free mirror (P4.5a); x64_long_visit (P4.6)
+        ENABLED: "machine", LONG_VISIT: "machine", LONG_VISIT_AGAIN: "cache",
     },
     "ir/runtime/tier0.rs": {
         COMPILED: "machine", STEPS: "debug", T0_LINK: "machine", T0_TAIL_CALLS: "machine", TEMPLATES: "machine",
@@ -288,12 +290,16 @@ export const STATICS = {
         COUNTERS: "debug", CHAINING: "machine", LAST_UNSERVED: "cache", BOUNCE: "scratch", RECOMPILE_MISSES: "machine", TIMING: "debug", TIME_IN_CALLS: "debug", TIME_IN_EXECUTE: "debug", TIME_FIRST_CALLS: "debug", BYTES_COMPILED: "debug",
         // (step profile: stepped instructions by RIP; whether the last
         // activation ended in a step, for its exit event)
-        STEP_RIPS: "debug", SORTED: "debug", STEP_EXITED: "debug" },
+        STEP_RIPS: "debug", SORTED: "debug", STEP_EXITED: "debug",
+        // interpreted heat of a page without a function, valid while the
+        // runtime's functions are unchanged (P4.5b); the P4.5 switches
+        HEAT_BATCH: "machine", BATCH_HEAT: "machine", MISS_RUN: "machine" },
     // derived from each core's x64 TLB (flushed with it); FRAME_BUFFER_WRITES:
     // some entry maps the VGA frame buffer
     "x64/jac.rs": { JAC: "cache", FRAME_BUFFER_WRITES: "cache" },
     "x64/execute.rs": { DECODE_CACHE: "cache" },
-    "x64/pagegen.rs": { SIZE_STATS: "debug", OUTLINE_ACCESS: "machine", BLOCK_COUNT: "machine", BUCKET_DISPATCH: "machine", CVT: "machine" },
+    "x64/pagegen.rs": { SIZE_STATS: "debug", OUTLINE_ACCESS: "machine", BLOCK_COUNT: "machine", BUCKET_DISPATCH: "machine", CVT: "machine",
+        STI_SHADOW: "machine" },
     "x64/replay.rs": { RECORDS: "debug", INPUT: "debug", OUTPUT: "debug" },
     "x64/debug.rs": { PENDING: "scratch" },
     "x64/system.rs": { FAULT_LOG: "debug", FAULT_NEXT: "debug", USER_TRACE: "debug", USER_TRACE_NEXT: "debug", USER_TRACE_ENABLED: "debug" },

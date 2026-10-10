@@ -126,7 +126,9 @@ pub mod event {
     pub const STEP_CONTEXT_DR7: u32 = 14;
     pub const STEP_CONTEXT_EPOCH: u32 = 15;
     /// A long-mode frame while IR Tier-0 had pages ready to compile (WOW64's
-    /// code waits for a compatibility-mode slice: P4.6)
+    /// code waits for a compatibility-mode slice: P4.6); detail 1: a compile
+    /// was pending, 2: none was queued from compatibility mode under the
+    /// current CR3, 3: one was
     pub const STARVED: u32 = 5;
     /// #NM delivered; CLTS; a MOV to CR0 that changed TS (the plan's open
     /// question 5: lazy FPU switching)

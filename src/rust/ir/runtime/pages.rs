@@ -5,6 +5,7 @@
 //! with the enlarged entry set. This table only selects work: admission
 //! authority stays in the cache's exact-key publication records.
 use super::entry::CpuEntryKey;
+use crate::state_flags::CachedStateFlags;
 use std::collections::{BTreeMap, VecDeque};
 
 /// Primary plus aliases; the page lifter accepts CfgLimits::PAGE.entries.
@@ -64,6 +65,28 @@ struct Page {
     /// Pages (linear bases) this page's function often links to, with an
     /// entry each (the link target): compiled into its function (a cluster).
     partners: Vec<(u32, u32)>,
+    /// Where the page was queued from IA-32e compatibility mode (P4.6)
+    context: Option<QueuedContext>,
+}
+/// The address space, privilege and state flags of code queued in IA-32e
+/// compatibility mode (WOW64): a long-mode frame may compile it in that
+/// context (docs/jit-unification-plan.md P4.6, Pages::take_ready_if)
+#[derive(Clone, Copy)]
+pub(super) struct QueuedContext {
+    pub cr3: u64,
+    pub cpl: u8,
+    pub state_flags: CachedStateFlags,
+}
+/// The live context, in compatibility mode
+fn queued_context() -> Option<QueuedContext> {
+    use crate::x64::state;
+    unsafe {
+        (state::efer() & state::EFER_LMA != 0 && !state::mode().is_long()).then(|| QueuedContext {
+            cr3: state::read_cr(3),
+            cpl: *crate::cpu::global_pointers::cpl,
+            state_flags: *crate::cpu::global_pointers::state_flags,
+        })
+    }
 }
 pub(super) struct Pages {
     pages: Vec<Page>,
@@ -143,6 +166,7 @@ impl Pages {
             range_pending: false,
             range_only: false,
             partners: Vec::new(),
+            context: None,
         };
         if self.pages.len() < CAPACITY {
             self.pages.push(page);
@@ -216,6 +240,7 @@ impl Pages {
         let needed = threshold.saturating_mul(1 << shift);
         if page.visits >= needed && !page.queued && page.attempts < MAX_ATTEMPTS {
             page.queued = true;
+            page.context = queued_context();
             let key = page.key;
             self.ready.push_back(key);
         }
@@ -223,46 +248,84 @@ impl Pages {
     }
     /// Whether pages wait in the ready queue (take_ready may still drop some)
     pub fn has_ready(&self) -> bool { !self.ready.is_empty() }
+    /// Whether a page waits that was queued in compatibility mode under `cr3`
+    pub fn ready_in(&self, cr3: u64) -> bool {
+        self.ready.iter().any(|key| {
+            self.index
+                .get(key)
+                .and_then(|&i| self.pages[i].context)
+                .is_some_and(|c| c.cr3 == cr3)
+        })
+    }
     /// Next page whose heat justifies a (re)compilation, with its entries in
     /// descending heat order (the first is the primary entry).
     pub fn take_ready(&mut self) -> Option<(PageKey, Vec<CpuEntryKey>)> {
         while let Some(key) = self.ready.pop_front() {
-            let Some(&i) = self.index.get(&key)
-            else {
-                continue;
-            };
-            let page = &mut self.pages[i];
-            page.queued = false;
-            let range = std::mem::take(&mut page.range_pending);
-            if page.failed || page.attempts >= MAX_ATTEMPTS || page.entries.is_empty() && !range {
-                continue;
+            if let Some(work) = self.take(key) {
+                return Some(work);
             }
-            page.range_only = page.entries.is_empty();
-            if page.served.is_empty() {
-                self.first += 1;
-            }
-            else {
-                self.again += 1;
-            }
-            page.attempts += 1;
-            page.visits = 0;
-            let mut entries = page.entries.clone();
-            entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.linear.0.cmp(&b.0.linear.0)));
-            let mut keys: Vec<CpuEntryKey> = entries.into_iter().map(|(e, _)| e).collect();
-            // Seeds first: other served entries are found from them.
-            for served in page.seeds.iter().chain(&page.served) {
-                if keys.len() < self.max_entries && !keys.contains(served) {
-                    keys.push(*served);
-                }
-            }
-            // A range or partner request for a page whose function was
-            // retired: its entries earn heat again first.
-            if keys.is_empty() {
-                continue;
-            }
-            return Some((key, keys));
         }
         None
+    }
+    /// take_ready's next page among those queued in compatibility mode under
+    /// `cr3` (at privilege `cpl` unless `any_cpl`), with the state flags they
+    /// were queued with (P4.6: a long-mode frame compiles it); the other
+    /// pages keep their places in the queue and their attempts.
+    pub fn take_ready_if(
+        &mut self,
+        cr3: u64,
+        cpl: u8,
+        any_cpl: bool,
+    ) -> Option<(PageKey, Vec<CpuEntryKey>, CachedStateFlags)> {
+        let (pages, index) = (&self.pages, &self.index);
+        let context = |key: &PageKey| {
+            index
+                .get(key)
+                .and_then(|&i| pages[i].context)
+                .filter(|c| c.cr3 == cr3 && (any_cpl || c.cpl == cpl))
+        };
+        let position = self.ready.iter().position(|key| context(key).is_some())?;
+        let key = self.ready.remove(position)?;
+        let flags = context(&key)?.state_flags;
+        self.take(key).map(|(key, entries)| (key, entries, flags))
+    }
+    /// The page `key`, taken from the queue: its entries to compile, or None
+    /// when it has nothing left to compile
+    fn take(&mut self, key: PageKey) -> Option<(PageKey, Vec<CpuEntryKey>)> {
+        let Some(&i) = self.index.get(&key)
+        else {
+            return None;
+        };
+        let page = &mut self.pages[i];
+        page.queued = false;
+        let range = std::mem::take(&mut page.range_pending);
+        if page.failed || page.attempts >= MAX_ATTEMPTS || page.entries.is_empty() && !range {
+            return None;
+        }
+        page.range_only = page.entries.is_empty();
+        if page.served.is_empty() {
+            self.first += 1;
+        }
+        else {
+            self.again += 1;
+        }
+        page.attempts += 1;
+        page.visits = 0;
+        let mut entries = page.entries.clone();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.linear.0.cmp(&b.0.linear.0)));
+        let mut keys: Vec<CpuEntryKey> = entries.into_iter().map(|(e, _)| e).collect();
+        // Seeds first: other served entries are found from them.
+        for served in page.seeds.iter().chain(&page.served) {
+            if keys.len() < self.max_entries && !keys.contains(served) {
+                keys.push(*served);
+            }
+        }
+        // A range or partner request for a page whose function was
+        // retired: its entries earn heat again first.
+        if keys.is_empty() {
+            return None;
+        }
+        Some((key, keys))
     }
     /// Record the entries a compiled page function serves, or that the page
     /// cannot be compiled at all (its entries then use region compilation).
@@ -326,6 +389,7 @@ impl Pages {
         page.range_pending = true;
         if !page.queued {
             page.queued = true;
+            page.context = queued_context();
             self.ready.push_back(key);
         }
         true
@@ -354,6 +418,7 @@ impl Pages {
         page.range_pending = true;
         if !page.queued {
             page.queued = true;
+            page.context = queued_context();
             self.ready.push_back(key);
         }
         true

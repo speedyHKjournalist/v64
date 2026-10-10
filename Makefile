@@ -1048,9 +1048,11 @@ x64-page-tier-tests: build/v86-debug.wasm
 	node tests/x64/page_system.mjs
 	node tests/x64/frame_buffer.mjs
 	node tests/x64/compat_jit.mjs
+	node tests/x64/long_visit.mjs
 	node tests/x64/initial_ram.mjs
 	node tests/x64/step_profile.mjs
 	node tests/x64/step_events.mjs
+	node tests/x64/accounting.mjs
 	node tests/x64/mode_ledger.mjs
 	PAGE_FUZZ_SEED=1 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs
 	PAGE_FUZZ_SEED=2 PAGE_FUZZ_GUESTS=4 node tests/x64/page_fuzz.mjs

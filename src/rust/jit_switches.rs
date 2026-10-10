@@ -62,6 +62,27 @@ pub const SWITCHES: &[Switch] = &[
         },
         get: pages::switch_value,
     },
+    // (docs/jit-unification-plan.md P4.5b, P4.5c)
+    Switch {
+        name: "x64_heat_batch",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { pages::x64_page_set_heat_batch(on) })
+                .is_some()
+        },
+        get: pages::switch_value,
+    },
+    Switch {
+        name: "x64_miss_run",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { pages::x64_page_set_miss_run(on) })
+                .is_some()
+        },
+        get: pages::switch_value,
+    },
     Switch {
         name: "x64_bucket_dispatch",
         default: 1,
@@ -85,6 +106,23 @@ pub const SWITCHES: &[Switch] = &[
         default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_cvt).is_some(),
         get: pagegen::switch_value,
+    },
+    Switch {
+        name: "x64_sti_shadow",
+        default: 0,
+        set: |v| flag(v).map(pagegen::x64_page_set_sti_shadow).is_some(),
+        get: pagegen::switch_value,
+    },
+    // (docs/jit-unification-plan.md P4.6)
+    Switch {
+        name: "x64_long_visit",
+        default: 0,
+        set: |v| {
+            flag(v)
+                .map(|on| unsafe { crate::ir::runtime::schedule::x64_set_long_visit(on) })
+                .is_some()
+        },
+        get: |_| Some(crate::ir::runtime::schedule::long_visit_enabled() as u32),
     },
     Switch {
         name: "x64_compat_jit",
