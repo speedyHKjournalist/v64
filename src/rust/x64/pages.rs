@@ -237,6 +237,32 @@ pub unsafe fn allowed() -> bool {
         && !crate::cpu::smm::smi_deliverable()
 }
 
+/// Why run() ran no function although there may be one (a MISS event of
+/// the step profile): what allowed() refused, in its order
+unsafe fn disallowed(budget: u32) -> u32 {
+    if budget == 0 {
+        event::MISS_DISABLED
+    }
+    else if *gp::in_hlt {
+        event::MISS_HALT
+    }
+    else if *gp::interrupt_shadow != 0 {
+        event::MISS_SHADOW
+    }
+    else if *gp::flags as u64 & (0x100 | 0x10000) != 0 {
+        event::MISS_TRAP_FLAGS
+    }
+    else if state::read_dr(7) & 255 != 0 {
+        event::MISS_BREAKPOINTS
+    }
+    else if apic::has_core_events() || apic::nmi_pending() || crate::cpu::smm::smi_deliverable() {
+        event::MISS_EVENTS
+    }
+    else {
+        event::MISS_DISABLED
+    }
+}
+
 /// Per core: the last code page translation (access cache epoch | user,
 /// linear page, key). An x64 TLB invalidation changes the epoch.
 static mut CODE_TLB: [(u64, u64, u32, bool); 8] = [(0, 0, 0, false); 8];
@@ -383,7 +409,9 @@ unsafe fn release_dead(r: &mut Runtime) {
 /// retired (native instructions and interpreted steps).
 pub unsafe fn run(budget: u32) -> Attempt {
     if budget == 0 || !allowed() {
-        step_profile::note_event(event::MISS, event::MISS_DISABLED);
+        if step_profile::enabled() {
+            step_profile::note_event(event::MISS, disallowed(budget));
+        }
         return miss();
     }
     let rip = state::read_rip();

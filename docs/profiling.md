@@ -79,7 +79,7 @@ detail, 25-27 the mode, the rest 0 (`step_profile::event` lists them,
 
 | Event | Detail | Counted |
 | --- | --- | --- |
-| `miss` | `disabled`, `no-code`, `cold`, `compiling`, `compile`, `recompile`, `unserved` | each time the x64 page tier did not run a function at RIP (`compile`, `recompile`: it compiled instead; `unserved`: it ran one entered at an offset it does not serve) |
+| `miss` | `disabled`, `no-code`, `cold`, `compiling`, `compile`, `recompile`, `unserved`, `shadow`, `trap-flags`, `breakpoints`, `events`, `halt` | each time the x64 page tier did not run a function at RIP (`compile`, `recompile`: it compiled instead; `unserved`: it ran one entered at an offset it does not serve; `shadow` ... `halt`: what it may not run code in: an interrupt shadow, TF or RF, DR7 breakpoints, core events or an NMI or SMI pending, HLT; `disabled`: the tier or the IR scheduler off) |
 | `exit` | `retry`, `unknown`, `step`, `budget`, `leave` | why a page function of the x64 page tier returned |
 | `step-exit` | `halt`, `yield`, `shadow`, `core-event`, `code-write`, `irq`, `nmi`, `barrier`, `chainable` | why a step ended its activation (`x64_page_step`); `chainable`: only the CPL, CS, CR3, the epoch, IF, IOPL or AC changed, after which P4.3's STEP_CHAIN may continue; `barrier`: the mode, CR0, CR4, EFER, DR7, TF, VM or RF changed |
 | `step-context` | `cpl` ... `epoch` | each part of the context such a step changed |

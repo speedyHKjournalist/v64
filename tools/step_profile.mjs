@@ -10,7 +10,8 @@ export const STEPPERS = ["tier0", "x64page", "event"];
 // P4.0; src/rust/step_profile.rs's event module): the event, then names of
 // its details by number
 export const EVENTS = {
-    1: ["miss", [null, "disabled", "no-code", "cold", "compiling", "compile", "recompile", "unserved"]],
+    1: ["miss", [null, "disabled", "no-code", "cold", "compiling", "compile", "recompile", "unserved", "shadow", "trap-flags",
+        "breakpoints", "events", "halt"]],
     2: ["exit", [null, "retry", "unknown", "step", "budget", "leave"]],
     3: ["step-exit", [null, "halt", "yield", "shadow", "core-event", "code-write", "irq", "nmi", "barrier", "chainable"]],
     4: ["step-context", [null, "cpl", "cs", "mode", "cr0", "cr3", "cr4", "efer", "if", "tf", "ac", "vm", "rf", "iopl", "dr7", "epoch"]],

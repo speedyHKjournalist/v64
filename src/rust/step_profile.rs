@@ -76,6 +76,15 @@ pub mod event {
     /// a function entered at an offset it does not serve, which steps to its
     /// next block start
     pub const MISS_UNSERVED: u32 = 7;
+    /// (not allowed, x64::pages::allowed: MISS_DISABLED is the tier or the
+    /// IR scheduler off, deterministic execution or no budget) an interrupt
+    /// shadow; TF or RF; DR7 breakpoints; core events, an NMI or an SMI
+    /// pending; HLT
+    pub const MISS_SHADOW: u32 = 8;
+    pub const MISS_TRAP_FLAGS: u32 = 9;
+    pub const MISS_BREAKPOINTS: u32 = 10;
+    pub const MISS_EVENTS: u32 = 11;
+    pub const MISS_HALT: u32 = 12;
     /// Why a page function returned: EXIT_*
     pub const EXIT: u32 = 2;
     pub const EXIT_RETRY: u32 = 1;
