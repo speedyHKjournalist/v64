@@ -557,8 +557,8 @@ impl HeatBatch {
 const HEAT_BATCH_LIMIT: u32 = 256;
 static mut HEAT_BATCH: HeatBatch = HeatBatch::NONE;
 /// The JIT switches x64_heat_batch (P4.5b) and x64_miss_run (P4.5c)
-static mut BATCH_HEAT: bool = false;
-static mut MISS_RUN: bool = false;
+static mut BATCH_HEAT: bool = true;
+static mut MISS_RUN: bool = true;
 /// Instructions a miss run interprets at most
 const MISS_RUN_LIMIT: u32 = 64;
 #[no_mangle]

@@ -65,7 +65,7 @@ pub const SWITCHES: &[Switch] = &[
     // (docs/jit-unification-plan.md P4.5b, P4.5c)
     Switch {
         name: "x64_heat_batch",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { pages::x64_page_set_heat_batch(on) })
@@ -75,7 +75,7 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "x64_miss_run",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { pages::x64_page_set_miss_run(on) })
@@ -109,14 +109,14 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "x64_sti_shadow",
-        default: 0,
+        default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_sti_shadow).is_some(),
         get: pagegen::switch_value,
     },
     // (docs/jit-unification-plan.md P4.6)
     Switch {
         name: "x64_long_visit",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { crate::ir::runtime::schedule::x64_set_long_visit(on) })

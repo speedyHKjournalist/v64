@@ -925,7 +925,7 @@ pub unsafe fn long_visit() -> bool {
     let (key, entries, state_flags) = work;
     yields(compile_page_in(key, entries, 1, Some(state_flags)))
 }
-static mut LONG_VISIT: bool = false;
+static mut LONG_VISIT: bool = true;
 /// A MOV CR3 in 64-bit code (another address space): long_visit tries
 /// again at the dispatcher's next turn in this frame (long_visit_again)
 pub static mut LONG_VISIT_AGAIN: bool = false;

@@ -2688,9 +2688,9 @@ static mut CVT: bool = true;
 #[no_mangle]
 pub fn x64_page_set_cvt(enabled: bool) { unsafe { CVT = enabled } }
 /// STI and the instruction in its shadow compiled together, then a check
-/// for a deliverable interrupt (docs/jit-unification-plan.md P4.5d), else
-/// STI leaves the function. x64_page_set_sti_shadow.
-static mut STI_SHADOW: bool = false;
+/// for a deliverable interrupt (docs/jit-unification-plan.md P4.5d, on since
+/// its F gate), else STI leaves the function. x64_page_set_sti_shadow.
+static mut STI_SHADOW: bool = true;
 #[no_mangle]
 pub fn x64_page_set_sti_shadow(enabled: bool) { unsafe { STI_SHADOW = enabled } }
 
