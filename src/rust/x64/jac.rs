@@ -16,7 +16,7 @@ use crate::cpu::memory;
 /// write user) lie one after another, entries() apart, in room for
 /// MAX_ENTRIES each.
 pub const MAX_ENTRIES: usize = 4096;
-static mut ENTRIES: usize = 1024;
+static mut ENTRIES: usize = 2048;
 pub fn entries() -> usize { unsafe { ENTRIES } }
 pub const ENTRY_BYTES: u32 = 16;
 /// Write tables follow the two read tables (supervisor, user).

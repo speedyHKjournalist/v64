@@ -3148,10 +3148,11 @@ static mut STI_SHADOW: bool = true;
 pub fn x64_page_set_sti_shadow(enabled: bool) { unsafe { STI_SHADOW = enabled } }
 /// Loops of a page function's block graph as Wasm loops whose back edges
 /// skip the page dispatch (docs/jit-unification-plan.md P4.16): 1 in every
-/// compile, 2 only with inline lookups (hot recompiles, x64_hot_inline;
-/// loops cost TurboFan an eighth more time, which cold code that V8 seldom
-/// optimizes need not pay). x64_page_set_loops sets 0 or 1.
-static mut LOOPS: u32 = 0;
+/// compile, 2 (the default since M5) only with inline lookups (hot
+/// recompiles, x64_hot_inline; loops cost TurboFan an eighth more time,
+/// which cold code that V8 seldom optimizes need not pay).
+/// x64_page_set_loops sets 0 or 1.
+static mut LOOPS: u32 = 2;
 #[no_mangle]
 pub fn x64_page_set_loops(enabled: bool) { unsafe { LOOPS = enabled as u32 } }
 pub fn set_loops(mode: u32) -> bool {
@@ -3164,7 +3165,7 @@ pub fn set_loops(mode: u32) -> bool {
 /// instruction that uses them, written back before anything that leaves the
 /// block or reads them from memory (docs/jit-unification-plan.md P4.17).
 /// x64_page_set_xmm_locals.
-static mut XMM_LOCALS: bool = false;
+static mut XMM_LOCALS: bool = true;
 #[no_mangle]
 pub fn x64_page_set_xmm_locals(enabled: bool) { unsafe { XMM_LOCALS = enabled } }
 /// SSE arithmetic (Op::Vfp, with SQRT, MIN, MAX, RSQRT and RCP) through
@@ -3172,7 +3173,7 @@ pub fn x64_page_set_xmm_locals(enabled: bool) { unsafe { XMM_LOCALS = enabled } 
 /// v128 masks, refused instructions exact in place (ir_t0_sse_fp, also for
 /// CMPPS and kin), MXCSR's condition and the SSE check once per block
 /// (docs/jit-unification-plan.md P4.18). x64_page_set_sse_fast_check.
-static mut SSE_FAST_CHECK: bool = false;
+static mut SSE_FAST_CHECK: bool = true;
 #[no_mangle]
 pub fn x64_page_set_sse_fast_check(enabled: bool) { unsafe { SSE_FAST_CHECK = enabled } }
 /// 32-bit integer operations in i32 (docs/jit-unification-plan.md P4.20):
@@ -3180,14 +3181,14 @@ pub fn x64_page_set_sse_fast_check(enabled: bool) { unsafe { SSE_FAST_CHECK = en
 /// is an i32 one, its result zero-extended. Engines then emit one 32-bit
 /// instruction where masks around a 64-bit one cost three more (V8 does not
 /// narrow those). x64_page_set_i32_ops.
-static mut I32_OPS: bool = false;
+static mut I32_OPS: bool = true;
 #[no_mangle]
 pub fn x64_page_set_i32_ops(enabled: bool) { unsafe { I32_OPS = enabled } }
 /// Inline access cache lookups that compare the tag of the operand's last
 /// byte (a page crossing misses, no offset compare) and add the entry's host
 /// delta to the address (jac::Entry::delta), as QEMU's softmmu does
 /// (docs/jit-unification-plan.md P4.21). x64_page_set_fast_lookup.
-static mut FAST_LOOKUP: bool = false;
+static mut FAST_LOOKUP: bool = true;
 #[no_mangle]
 pub fn x64_page_set_fast_lookup(enabled: bool) { unsafe { FAST_LOOKUP = enabled } }
 /// A chaining page function passes the GPRs on in gp::x64_chain_gprs, 64
@@ -3207,7 +3208,7 @@ const CHAINED_GPRS: i32 = 1 << 31;
 /// instruction before they are written again, or a way out of the function
 /// (Inst::exit_live), not every time (docs/jit-unification-plan.md P4.23).
 /// x64_page_set_exit_flags.
-static mut EXIT_FLAGS: bool = false;
+static mut EXIT_FLAGS: bool = true;
 #[no_mangle]
 pub fn x64_page_set_exit_flags(enabled: bool) { unsafe { EXIT_FLAGS = enabled } }
 

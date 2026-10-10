@@ -87,7 +87,7 @@ pub const SWITCHES: &[Switch] = &[
     // table; the page tier recompiles)
     Switch {
         name: "x64_jac_entries",
-        default: 1024,
+        default: 2048,
         set: |v| unsafe {
             crate::x64::jac::set_entries(v as usize) && {
                 pages::reset();
@@ -99,7 +99,7 @@ pub const SWITCHES: &[Switch] = &[
     // (docs/jit-unification-plan.md P4.14)
     Switch {
         name: "x64_hot_inline",
-        default: 0,
+        default: 1,
         set: |v| {
             flag(v)
                 .map(|on| unsafe { pages::x64_page_set_hot_inline(on) })
@@ -148,21 +148,21 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         name: "x64_loops",
-        default: 0,
+        default: 2,
         // (2: only in compiles with inline lookups, P4.14's hot recompiles)
         set: pagegen::set_loops,
         get: pagegen::switch_value,
     },
     Switch {
         name: "x64_xmm_locals",
-        default: 0,
+        default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_xmm_locals).is_some(),
         get: pagegen::switch_value,
     },
     // (docs/jit-unification-plan.md P4.23)
     Switch {
         name: "x64_exit_flags",
-        default: 0,
+        default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_exit_flags).is_some(),
         get: pagegen::switch_value,
     },
@@ -184,21 +184,21 @@ pub const SWITCHES: &[Switch] = &[
     // (docs/jit-unification-plan.md P4.21)
     Switch {
         name: "x64_fast_lookup",
-        default: 0,
+        default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_fast_lookup).is_some(),
         get: pagegen::switch_value,
     },
     // (docs/jit-unification-plan.md P4.20)
     Switch {
         name: "x64_i32_ops",
-        default: 0,
+        default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_i32_ops).is_some(),
         get: pagegen::switch_value,
     },
     // (docs/jit-unification-plan.md P4.18)
     Switch {
         name: "x64_sse_fast_check",
-        default: 0,
+        default: 1,
         set: |v| flag(v).map(pagegen::x64_page_set_sse_fast_check).is_some(),
         get: pagegen::switch_value,
     },

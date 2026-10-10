@@ -580,7 +580,7 @@ unsafe fn take_counter() -> Option<u32> {
     Some(cell)
 }
 /// The JIT switches x64_hot_inline and x64_hot_count (P4.14)
-static mut HOT_INLINE: bool = false;
+static mut HOT_INLINE: bool = true;
 static mut HOT_COUNT: u32 = 1 << 22;
 #[no_mangle]
 pub unsafe fn x64_page_set_hot_inline(enabled: bool) { HOT_INLINE = enabled; }
