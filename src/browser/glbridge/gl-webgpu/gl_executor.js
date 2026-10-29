@@ -380,6 +380,9 @@
     const DEPTH_MODE_FORMATS = { [GL.LUMINANCE]: "LUMINANCE", [GL.INTENSITY]: "INTENSITY",
         [GL.ALPHA]: "ALPHA" };
 
+    const ARB_TEXTURE_TARGETS = { "1D": GL.TEXTURE_1D, "2D": GL.TEXTURE_2D, "3D": GL.TEXTURE_3D,
+        Cube: GL.TEXTURE_CUBE_MAP };
+
     // the draw buffers that include the window's front buffer
     const FRONT_BUFFERS = new Set([GL.FRONT, GL.FRONT_AND_BACK, GL.FRONT_LEFT, GL.LEFT]);
 
@@ -3121,6 +3124,18 @@
             copies += "    out.color" + i + " = out.color0;\n";
         }
         return wgsl.replace(field, fields).replace("    return out;\n", copies + "    return out;\n");
+    }
+
+    // A fragment program's texture bindings, by the targets its instructions name
+    function arbProgramTextures(fragment) {
+        return fragment.compiled.reflection.textures.map(entry => ({
+            unit: entry.unit,
+            textureBinding: entry.unit * 2,
+            samplerBinding: entry.unit * 2 + 1,
+            target: entry.target === "CUBE" ? "Cube" : entry.target,
+            shadow: false,
+            arbTarget: true,
+        }));
     }
 
     // The part of a window rectangle inside a read source
@@ -8012,33 +8027,90 @@ ${fragmentCode}`;
             }
             if (vertexOn && !fragmentOn)
                 return this.arbVertexFixedFragmentShaders(vertex);
-            if (!vertexOn && fragmentOn) {
-                this.refuse("draw", "a fixed vertex stage paired with an ARB " +
-                    "fragment program is not implemented", {}, 0);
-                return null;
-            }
+            if (!vertexOn && fragmentOn)
+                return this.arbFragmentFixedVertexShaders(fragment);
+            // Both stages read one state block, so each is compiled with the
+            // pair's fields, in the one layout (review S2-51: each declared
+            // only its own, and the fragment program read the vertex
+            // program's fields)
             const stateFields = [...new Set([
                 ...vertex.compiled.reflection.stateFields,
                 ...fragment.compiled.reflection.stateFields])];
+            const compiledVertex = this.arbVariant(vertex, stateFields);
+            const compiledFragment = this.arbVariant(fragment, stateFields);
+            if (!compiledVertex || !compiledFragment) return null;
             const targets = this.colorTargetCount();
             return {
                 kind: "arb",
-                key: "arb" + pairKey(vertex.compiled, fragment.compiled, vertex.compiled.wgsl,
-                    fragment.compiled.wgsl) + (targets > 1 ? "x" + targets : ""),
-                wgslVertex: vertex.compiled.wgsl,
-                wgslFragment: broadcastColor(fragment.compiled.wgsl, targets),
+                key: "arb" + pairKey(compiledVertex, compiledFragment, compiledVertex.wgsl,
+                    compiledFragment.wgsl) + (targets > 1 ? "x" + targets : ""),
+                wgslVertex: compiledVertex.wgsl,
+                wgslFragment: broadcastColor(compiledFragment.wgsl, targets),
                 stateFields,
                 stateFloats: stateLayout.buildLayout(stateFields).floats,
                 uniformBytes: arbProgram.MAX_PROGRAM_PARAMETERS * 4 * 4 * 2,
                 colorTargets: targets,
                 arbVertex: vertex, arbFragment: fragment,
-                textures: fragment.compiled.reflection.textures.map(entry => ({
-                    unit: entry.unit,
-                    textureBinding: entry.unit * 2,
-                    samplerBinding: entry.unit * 2 + 1,
-                    target: entry.target === "CUBE" ? "Cube" : entry.target,
-                    shadow: false,
-                })),
+                textures: arbProgramTextures(fragment),
+            };
+        },
+
+        // A program compiled to declare `stateFields`, its pair's layout
+        arbVariant(program, stateFields) {
+            const key = "state=" + stateFields.join(",");
+            program.variants = program.variants || new Map();
+            let compiled = program.variants.get(key);
+            if (!compiled) {
+                compiled = arbProgram.compileARBProgram(program.source, { forceStateFields: stateFields });
+                if (!compiled.ok) {
+                    this.refuse("draw", "an ARB program variant failed to compile", { log: compiled.log },
+                        GL.INVALID_OPERATION);
+                    return null;
+                }
+                program.variants.set(key, compiled);
+            }
+            return compiled;
+        },
+
+        // The enabled ARB fragment program a fixed vertex stage feeds, or null
+        fixedVertexFragmentProgram() {
+            const s = this.current;
+            if (!s.enabled.has(GL.FRAGMENT_PROGRAM_ARB) || s.enabled.has(GL.VERTEX_PROGRAM_ARB)) return null;
+            const fragment = this.arbProgramFor(GL.FRAGMENT_PROGRAM_ARB);
+            return fragment && fragment.compiled && fragment.compiled.ok ? fragment : null;
+        },
+
+        /*
+         * A fixed vertex stage before an ARB fragment program (review D-18:
+         * refused, so a WineD3D-style program drew nothing). The fixed stage
+         * writes the program's interface (fixedFunctionSignature's
+         * arbFragment) and both declare the one state layout.
+         */
+        arbFragmentFixedVertexShaders(fragment) {
+            const signature = this.fixedFunctionSignature(this.currentVariant());
+            signature.extraStateFields = fragment.compiled.reflection.stateFields.slice();
+            const fixedKey = fixedFunction.signatureKey(signature);
+            let fixed = this.ffCache && this.ffCache.get(fixedKey);
+            if (!fixed) {
+                fixed = fixedFunction.generate(signature);
+                this.ffCache = this.ffCache || new Map();
+                this.ffCache.set(fixedKey, fixed);
+            }
+            const compiledFragment = this.arbVariant(fragment, fixed.stateFields);
+            if (!compiledFragment) return null;
+            const targets = this.colorTargetCount();
+            return {
+                kind: "arb",
+                key: "ff-arb-fp:" + pairKey(fixed, compiledFragment, fixed.wgslVertex, compiledFragment.wgsl) +
+                    (targets > 1 ? "x" + targets : ""),
+                wgslVertex: fixed.wgslVertex,
+                wgslFragment: broadcastColor(compiledFragment.wgsl, targets),
+                stateFields: fixed.stateFields,
+                stateFloats: fixed.stateFloats,
+                uniformBytes: arbProgram.MAX_PROGRAM_PARAMETERS * 4 * 4 * 2,
+                colorTargets: targets,
+                arbVertex: null, arbFragment: fragment,
+                textures: arbProgramTextures(fragment),
             };
         },
 
@@ -8164,10 +8236,24 @@ ${fragmentCode}`;
         fixedFunctionSignature(variant) {
             const s = this.current;
             const colorSum = s.enabled.has(GL.COLOR_SUM);
+            // before an ARB fragment program the fixed vertex stage feeds the
+            // program's inputs: every texture coordinate it reads, whatever
+            // the texture enables (review D-18)
+            const fragmentProgram = this.fixedVertexFragmentProgram();
+            const programCoords = fragmentProgram &&
+                new Set(fragmentProgram.compiled.reflection.fragmentTexCoords || []);
 
             const texture = [];
             for (let unit = 0; unit < MAX_TEXTURE_UNITS; ++unit) {
                 const state = s.textureUnits[unit];
+                if (programCoords) {
+                    texture.push(programCoords.has(unit) ? {
+                        enabled: true, target: "3D", shadow: false, format: "RGBA",
+                        matrix: !isIdentity(this.textureMatrixOf(unit)), lodBias: false, border: null,
+                        texGen: state.texGen.map(gen => gen.enabled ? (TEXGEN_MODE_NAMES[gen.mode] || "EYE") : null),
+                        env: { mode: "MODULATE" } } : { enabled: false });
+                    continue;
+                }
                 const target = this.effectiveTarget(state);
                 if (!target) { texture.push({ enabled: false }); continue; }
                 const object = this.textureObjectFor(unit, target.enumValue);
@@ -8207,7 +8293,7 @@ ${fragmentCode}`;
                     color: true,
                     secondaryColor: s.enabled.has(GL.COLOR_SUM) ||
                         s.lightModel.colorControl === GL.SEPARATE_SPECULAR_COLOR,
-                    fogCoord: s.enabled.has(GL.FOG) &&
+                    fogCoord: (s.enabled.has(GL.FOG) || !!fragmentProgram) &&
                         s.fog.coordSource === GL.FOG_COORD,
                     texCoord: Array.from({ length: MAX_TEXTURE_COORDS },
                         (unused, unit) => texture[unit] && texture[unit].enabled ?
@@ -8234,8 +8320,10 @@ ${fragmentCode}`;
                         spot: light.spotCutoff !== 180,
                     })),
                 },
+                // (the program's fragment.fogcoord: computed whatever FOG says)
+                ...(fragmentProgram ? { varyingInterface: "arb", arbFragment: true } : {}),
                 fog: {
-                    enabled: s.enabled.has(GL.FOG),
+                    enabled: s.enabled.has(GL.FOG) || !!fragmentProgram,
                     mode: s.fog.mode === GL.EXP ? "exp" :
                         (s.fog.mode === GL.EXP2 ? "exp2" : "linear"),
                     coordSource: s.fog.coordSource === GL.FOG_COORD ?
@@ -8693,8 +8781,11 @@ ${fragmentCode}`;
             if (shaders.kind === "ff" || shaders.kind === "arb") {
                 for (const item of shaders.textures) {
                     const unitState = this.current.textureUnits[item.unit];
-                    const target = this.effectiveTarget(unitState);
-                    const object = target ?
+                    // a fragment program samples the target its instruction
+                    // names, whatever is enabled (review S2-52)
+                    const target = item.arbTarget ? { enumValue: ARB_TEXTURE_TARGETS[item.target] } :
+                        this.effectiveTarget(unitState);
+                    const object = target && target.enumValue ?
                         this.textureObjectFor(item.unit, target.enumValue) : null;
                     entries.push({ binding: item.textureBinding,
                                    resource: this.textureViewFor(object, item) });
@@ -8979,11 +9070,11 @@ ${fragmentCode}`;
          * fragment program's parameters -- silently, since nothing about the
          * draw is invalid.
          */
-        writeARBProgramParameters(program) {
+        writeARBProgramParameters(program, target) {
             const count = arbProgram.MAX_PROGRAM_PARAMETERS * 4;
             const floats = program.parameterScratch ||
                 (program.parameterScratch = new Float32Array(count * 2));
-            floats.set(program.env.subarray(0, count), 0);
+            floats.set(this.arbEnvironment(target), 0);
             floats.set(program.local.subarray(0, count), count);
             return this.writeUniformSnapshot("arb:" + this.resourceId(program),
                 new Uint8Array(floats.buffer));
@@ -9003,7 +9094,8 @@ ${fragmentCode}`;
                 if (!program || !program.env || !program.local)
                     return this.refuse("draw", "ARB parameter storage is missing",
                         { stage }, GL.INVALID_OPERATION);
-                const slice = this.writeARBProgramParameters(program);
+                const slice = this.writeARBProgramParameters(program,
+                    stage === "vertex" ? GL.VERTEX_PROGRAM_ARB : GL.FRAGMENT_PROGRAM_ARB);
                 if (!slice) return null;
                 slices[binding] = slice;
             }
@@ -11074,8 +11166,10 @@ struct Params { value : vec4<f32>, }
             // float one carries glProgramEnvParameters4fvEXT's whole run.
             const count = doublePrecision ? 1 :
                 Math.max(1, view.getUint32(offset + F.count, true));
-            const program = this.arbProgramFor(target);
-            if (!program)
+            // environment parameters are the context's, one set a target,
+            // set whether or not a program is bound (review S2-46)
+            const program = kind === PROGRAM_PARAMETER_ENV ? null : this.arbProgramFor(target);
+            if (kind !== PROGRAM_PARAMETER_ENV && !program)
                 return this.refuse("glProgramParameterARB",
                     "no ARB program is bound", { target },
                     GL.INVALID_OPERATION);
@@ -11086,12 +11180,21 @@ struct Params { value : vec4<f32>, }
                     { index, count }, GL.INVALID_VALUE);
             if (16 + count * 4 * stride > size)
                 throw new GLStreamError("ARB parameter record is truncated");
-            const storage = arbParameterStorage(program, kind);
+            const storage = program ? arbParameterStorage(program, kind) : this.arbEnvironment(target);
             for (let i = 0; i < count * 4; ++i) {
                 const at = offset + 16 + i * stride;
                 storage[index * 4 + i] = doublePrecision ?
                     view.getFloat64(at, true) : view.getFloat32(at, true);
             }
+        },
+
+        // a target's environment parameters (ARB_vertex_program 2.14.1)
+        arbEnvironment(target) {
+            const s = this.current;
+            s.arbEnvironment = s.arbEnvironment || new Map();
+            let env = s.arbEnvironment.get(target);
+            if (!env) s.arbEnvironment.set(target, env = new Float32Array(arbProgram.MAX_PROGRAM_PARAMETERS * 4));
+            return env;
         },
 
         queryProgramivARB(target, pname) {
@@ -11148,14 +11251,15 @@ struct Params { value : vec4<f32>, }
             const kind = view.getUint32(offset + F.parameter_kind, true);
             const target = view.getUint32(offset + F.target, true);
             const index = view.getUint32(offset + F.index, true);
-            const program = this.arbProgramFor(target);
+            const env = kind === PROGRAM_PARAMETER_ENV;
+            const program = env ? null : this.arbProgramFor(target);
             const stride = doublePrecision ? 8 : 4;
-            if (!program || index >= arbProgram.MAX_PROGRAM_PARAMETERS ||
+            if ((!env && !program) || index >= arbProgram.MAX_PROGRAM_PARAMETERS ||
                     24 + 4 * stride > size) {
                 view.setUint32(offset + F.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            const storage = arbParameterStorage(program, kind);
+            const storage = env ? this.arbEnvironment(target) : arbParameterStorage(program, kind);
             view.setUint32(offset + F.status, SYNC_STATUS_OK, true);
             for (let c = 0; c < 4; ++c) {
                 const at = offset + 24 + c * stride;

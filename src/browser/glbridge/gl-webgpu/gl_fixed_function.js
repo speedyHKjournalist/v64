@@ -114,6 +114,9 @@
             // texture coordinates at 3+n. A fixed fragment stage paired with
             // one must consume that ABI instead of our compact internal one.
             varyingInterface: s.varyingInterface === "arb" ? "arb" : "packed",
+            // the vertex stage before an ARB fragment program, which reads
+            // every interface slot (gl_arb_program.js FSIn)
+            arbFragment: !!s.arbFragment,
             extraStateFields: Array.from(new Set(s.extraStateFields || [])).sort(),
             attributes: {
                 position: { components: (attributes.position &&
@@ -311,7 +314,7 @@
                 return entry;
             };
             layout.color = fixed("color", 4, 0, { flat: sig.flatShading });
-            if (sig.colorSum || sig.lighting.enabled && sig.lighting.separateSpecular)
+            if (sig.arbFragment || sig.colorSum || sig.lighting.enabled && sig.lighting.separateSpecular)
                 layout.secondary = fixed("secondary", 3, 1,
                     { flat: sig.flatShading });
             for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
@@ -322,7 +325,7 @@
                 layout.texCoord.push(fixed("texCoord" + i,
                     textureCoordComponents(sig.texture[i]), 3 + i));
             }
-            if (sig.fog.enabled) layout.fog = fixed("fog", 1, 2);
+            if (sig.fog.enabled || sig.arbFragment) layout.fog = fixed("fog", 1, 2);
             slots.sort((a, b) => a - b);
             layout.slotIndices = slots;
             layout.packedSlots = slots.length;

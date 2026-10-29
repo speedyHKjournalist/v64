@@ -324,6 +324,7 @@
 
     class Parser {
         constructor(source) {
+            this.text = source;
             this.tokens = lex(source);
             this.pos = 0;
             this.target = null;
@@ -477,14 +478,16 @@
                     continue;
                 }
                 if (this.at("[")) {
-                    this.next();
-                    let inner = "";
+                    // the text between the brackets as written: the lexer
+                    // reads 0..4 as two numbers and a.x-1 as a and -1
+                    // (review S2-48)
+                    const open = this.next();
                     while (!this.at("]")) {
                         const token = this.next();
                         if (token.type === "eof")
                             throw new ARBError("unterminated '['", token.line);
-                        inner += String(token.value);
                     }
+                    const inner = this.text.slice(open.at + 1, this.peek().at).replace(/\s+/g, "");
                     this.expect("]");
                     text += "[" + inner + "]";
                     continue;
@@ -558,6 +561,15 @@
                     }
                     return { kind: "binding", path: item.path };
                 });
+                // program.local[0..4]: one register a parameter (S2-48)
+                entries = entries.flatMap(entry => {
+                    const range = entry.kind === "binding" && /^(.*)\[(\d+)\.\.(\d+)\]$/.exec(entry.path);
+                    if (!range) return [entry];
+                    const out = [];
+                    for (let i = +range[2]; i <= +range[3]; ++i)
+                        out.push({ kind: "binding", path: range[1] + "[" + i + "]" });
+                    return out;
+                });
             }
             this.params.set(name, { arraySize, entries });
         }
@@ -628,6 +640,22 @@
             this.instructions.push(instruction);
         }
 
+        /*
+         * A constant written in an instruction, `MUL r, r, 2.0;` or
+         * `MOV r, {0, 0, 0, 1};`, as an anonymous PARAM (review S2-48: the
+         * parser wanted a name). A scalar stands for all four components; a
+         * short vector is filled out with 0 and a w of 1.
+         */
+        inlineConstant() {
+            const item = this.paramItem();
+            const values = item.kind === "vector" ? item.values.slice() :
+                [item.value, item.value, item.value, item.value];
+            while (values.length < 4) values.push(values.length === 3 ? 1 : 0);
+            const name = "$constant" + this.params.size;
+            this.params.set(name, { arraySize: 0, entries: [{ kind: "constant", values }] });
+            return name;
+        }
+
         // (each operand keeps where it starts: the generator's errors about
         // it report that position)
         destination() {
@@ -646,7 +674,8 @@
             }
             if (this.accept("|")) absolute = true;
             const at = this.peek().at;
-            const name = this.bindingPath(true);
+            const name = this.at("{") || this.peek().type === "number" ?
+                this.inlineConstant() : this.bindingPath(true);
             let swizzle = null;
             if (this.accept(".")) {
                 const token = this.next();
@@ -677,6 +706,7 @@
             this.stateFields = new Set();
             this.constants = [];          // local PARAM constants, inlined
             this.paramArrays = new Map();
+            this.registerArrays = new Map();   // relative addressing, by array name
             this.usedAttributes = new Map();
             this.usedResults = new Set();
             this.textureUnits = new Map();  // unit -> target
@@ -808,6 +838,7 @@
                 out.push("    var " + safe(name) + " = vec4<f32>(0.0);");
             for (const name of this.parsed.addresses)
                 out.push("    var " + safe(name) + " = vec4<i32>(0);");
+            for (const declaration of this.registerArrays.values()) out.push("    " + declaration);
             for (const line of body) out.push("    " + line);
             if (this.parsed.options.has("ARB_position_invariant")) {
                 // The option says the program does not write result.position
@@ -972,9 +1003,19 @@
             if (indexed && this.parsed.params.has(indexed[1])) {
                 const registers = this.paramRegisters(indexed[1]);
                 const index = /^\s*(\d+)\s*$/.exec(indexed[2]);
-                if (!index)
-                    throw new ARBError("a PARAM array needs a constant index; '" +
-                        indexed[2] + "' is not one", 0);
+                if (!index) {
+                    // relative addressing, A0.x + k (review S2-48): the
+                    // registers as an array the address register indexes,
+                    // out of range reading as zero
+                    const relative = addressIndex(indexed[2]);
+                    this.usesAddress = true;
+                    const array = safe(indexed[1]) + "_registers";
+                    if (!this.registerArrays.has(array))
+                        this.registerArrays.set(array, "var " + array + " = array<vec4<f32>, " +
+                            (registers.length + 1) + ">(" + registers.join(", ") + ", vec4<f32>(0.0));");
+                    return array + "[select(" + registers.length + ", " + relative + ", " + relative +
+                        " >= 0 && " + relative + " < " + registers.length + ")]";
+                }
                 const at = parseInt(index[1], 10);
                 if (at >= registers.length)
                     throw new ARBError("PARAM " + indexed[1] + "[" + at +
@@ -1046,14 +1087,8 @@
             }
             // Relative addressing: A0.x + k. WGSL indexes uniform arrays
             // dynamically, so this maps straight across.
-            const relative = /^([A-Za-z_$][A-Za-z0-9_$]*)\.([xyzw])\s*(?:\+\s*(\d+))?$/
-                .exec(text.trim());
-            if (!relative)
-                throw new ARBError("unsupported parameter index '" + text + "'", 0);
             this.usesAddress = true;
-            const offset = relative[3] ? " + " + relative[3] : "";
-            return "clamp(" + safe(relative[1]) + "." + relative[2] + offset +
-                ", 0, " + (MAX_PROGRAM_PARAMETERS - 1) + ")";
+            return "clamp(" + addressIndex(text) + ", 0, " + (MAX_PROGRAM_PARAMETERS - 1) + ")";
         }
 
         /* Flattens a PARAM declaration into the registers it occupies. */
@@ -1193,6 +1228,15 @@
     }
 
     /* GL writes masks in xyzw or rgba; the generator only speaks xyzw. */
+    // `A0.x`, `A0.x+3`, `A0.x-1` as a WGSL integer expression
+    function addressIndex(text) {
+        const relative = /^([A-Za-z_$][A-Za-z0-9_$]*)\.([xyzw])(?:([+-])(\d+))?$/.exec(text.replace(/\s+/g, ""));
+        if (!relative)
+            throw new ARBError("unsupported parameter index '" + text + "'", 0);
+        return "(" + safe(relative[1]) + "." + relative[2] + (relative[3] ? " " + relative[3] + " " +
+            relative[4] : "") + ")";
+    }
+
     function normalizeMask(text) {
         return String(text).replace(/[rgba]/g,
             ch => "xyzw"["rgba".indexOf(ch)]);
@@ -1267,6 +1311,9 @@
                 attributes: [...generator.usedAttributes.values()],
                 textures: [...generator.textureUnits.entries()].map(
                     ([unit, target]) => ({ unit, target })),
+                // the texture coordinates a fragment program reads
+                fragmentTexCoords: [...generator.usedResults].filter(name => name.startsWith("in_texcoord"))
+                    .map(name => Number(name.slice(11))).sort((a, b) => a - b),
                 usesKill: generator.usesKill,
                 usesAddress: generator.usesAddress,
                 usesEnv: generator.envUsed,

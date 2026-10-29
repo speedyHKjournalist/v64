@@ -89,6 +89,22 @@ END`, "fixed_fragment_outputs", {
         "the mixed stages use a byte-identical GLState layout");
 });
 
+test("constants in instructions, ranges and relative addressing assemble (review S2-48)", () => {
+    const fragment = compile("!!ARBfp1.0\nTEMP t;\nMUL t, fragment.color, 2.0;\n" +
+        "MAD_SAT t, t, {0.5, 0.25}, -1.0;\nPOW t.x, 0.25, 0.5;\nMOV result.color, t;\nEND\n", "inline_constants");
+    assert.match(fragment.wgsl, /vec4<f32>\(2(\.0)?, 2(\.0)?, 2(\.0)?, 2(\.0)?\)/, "a scalar is all four components");
+    assert.match(fragment.wgsl, /vec4<f32>\(0\.5, 0\.25, 0(\.0)?, 1(\.0)?\)/, "a short vector is filled with 0 and 1");
+    const vertex = compile(TRANSFORM.replace("MOV result.color, vertex.color;",
+        "PARAM arr[5] = { program.local[0..4] };\nADDRESS a;\nARL a.x, program.env[0].x;\n" +
+        "MOV result.color, arr[a.x-1];\nMOV result.color.secondary, program.env[a.x+2];"), "relative");
+    assert.match(vertex.wgsl, /arbParams\.local\[4\]/, "the range is five registers");
+    assert.match(vertex.wgsl, /\(arb_a\.x - 1\)/, "a negative offset");
+    assert.match(vertex.wgsl, /clamp\(\(arb_a\.x \+ 2\), 0, /);
+    assert.ok(vertex.reflection.stateFields.length >= 1);
+    assert.deepStrictEqual(compile("!!ARBfp1.0\nMOV result.color, fragment.texcoord[3];\nEND\n", "texcoords")
+        .reflection.fragmentTexCoords, [3]);
+});
+
 test("a write mask writes only the components it names", () => {
     const result = compile(`!!ARBvp1.0
 TEMP r0;

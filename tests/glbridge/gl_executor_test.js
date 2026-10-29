@@ -2264,6 +2264,24 @@ function boundARBProgram(executor, stream) {
         .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1);
 }
 
+test("an ARB program pair declares one state layout (review S2-51)", () => {
+    const { executor, log } = newExecutor();
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).names(GLFN.GEN_PROGRAMS_ARB, [1, 2])
+        .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1)
+        .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nPARAM mvp[4] = { state.matrix.mvp };\n" +
+            "DP4 result.position.x, mvp[0], vertex.position;\nDP4 result.position.y, mvp[1], vertex.position;\n" +
+            "DP4 result.position.z, mvp[2], vertex.position;\nDP4 result.position.w, mvp[3], vertex.position;\nEND\n")
+        .call("BIND_PROGRAM_ARB", GL.FRAGMENT_PROGRAM_ARB, 2)
+        .programStringARB(GL.FRAGMENT_PROGRAM_ARB, "!!ARBfp1.0\nMOV result.color, state.fog.color;\nEND\n")
+        .call("ENABLE", GL.VERTEX_PROGRAM_ARB).call("ENABLE", GL.FRAGMENT_PROGRAM_ARB);
+    run(executor, immediateTriangle(stream));
+    const pipeline = log.draws[0].pipeline.descriptor;
+    const state = code => /struct GLState \{[^}]*\}/.exec(code)[0];
+    assert.strictEqual(state(pipeline.vertex.module.code), state(pipeline.fragment.module.code),
+        "the fragment program reads the fog colour where the block has it");
+    assert.match(state(pipeline.fragment.module.code), /mvp/);
+});
+
 test("ARB immediate mode binds every shader-read vertex attribute", () => {
     const { executor, log } = newExecutor();
     const stream = boundARBProgram(executor,
@@ -2618,8 +2636,10 @@ test("glProgramEnvParameter4fv lands in env, not in local", () => {
     run(executor, stream);
 
     const program = executor.current.shareGroup.arbPrograms.get(1);
-    assert.deepStrictEqual([...program.env.subarray(12, 16)],
+    assert.deepStrictEqual([...executor.arbEnvironment(GL.VERTEX_PROGRAM_ARB).subarray(12, 16)],
         [0.25, 0.5, 0.75, 1]);
+    assert.deepStrictEqual([...executor.arbEnvironment(GL.FRAGMENT_PROGRAM_ARB).subarray(12, 16)],
+        [0, 0, 0, 0], "each target has its own environment (review S2-46)");
     assert.deepStrictEqual([...program.local.subarray(8, 12)], [9, 8, 7, 6]);
     assert.deepStrictEqual([...program.local.subarray(12, 16)], [0, 0, 0, 0],
         "the env write must not have gone to local as well");
@@ -2633,8 +2653,7 @@ test("glProgramEnvParameters4fv writes the whole run", () => {
         new GLStream().makeCurrent(1, 0, 0, 64, 64))
         .programStringARB(GL.VERTEX_PROGRAM_ARB, ARB_VERTEX_PROGRAM)
         .programParameterARB(ARB_PARAMETER_ENV, GL.VERTEX_PROGRAM_ARB, 1, values));
-    const program = executor.current.shareGroup.arbPrograms.get(1);
-    assert.deepStrictEqual([...program.env.subarray(4, 16)], values,
+    assert.deepStrictEqual([...executor.arbEnvironment(GL.VERTEX_PROGRAM_ARB).subarray(4, 16)], values,
         "the count word is honoured, not ignored after the first parameter");
 });
 
@@ -2646,9 +2665,12 @@ test("an env parameter set before the program compiles is accepted", () => {
             [1, 2, 3, 4]));
     assert.deepStrictEqual(log.refusals || [], [],
         "ARB environment parameters are context state, not program state");
-    assert.deepStrictEqual(
-        [...executor.current.shareGroup.arbPrograms.get(1).env.subarray(0, 4)],
+    assert.deepStrictEqual([...executor.arbEnvironment(GL.VERTEX_PROGRAM_ARB).subarray(0, 4)],
         [1, 2, 3, 4]);
+    // and with no program bound at all
+    run(executor, new GLStream().call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 0)
+        .programParameterARB(ARB_PARAMETER_ENV, GL.VERTEX_PROGRAM_ARB, 1, [5, 6, 7, 8]));
+    assert.deepStrictEqual([...executor.arbEnvironment(GL.VERTEX_PROGRAM_ARB).subarray(4, 8)], [5, 6, 7, 8]);
 });
 
 test("glGetProgramEnvParameterfv reads back what was written", () => {
