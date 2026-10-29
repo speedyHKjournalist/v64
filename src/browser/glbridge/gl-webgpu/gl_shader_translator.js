@@ -5244,7 +5244,8 @@
             if (fs.usage.usesFragColor && fs.usage.usesFragData)
                 throw new GLSLError("a fragment shader may write gl_FragColor " +
                     "or gl_FragData, not both", 0);
-            let colorTargets = 1;
+            // gl_FragColor goes to every draw buffer (GL 2.1 section 3.11.2)
+            let colorTargets = Math.max(1, variant.colorTargets || 1);
             if (fs.usage.usesFragData) {
                 colorTargets = fs.usage.fragDataDynamic ? MAX_DRAW_BUFFERS :
                     Math.max(1, fs.usage.fragDataMax + 1);

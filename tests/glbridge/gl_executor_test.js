@@ -1209,6 +1209,95 @@ test("a depth texture without comparison samples as black instead of losing the 
     assert.strictEqual(log.draws.length, 1);
 });
 
+// A framebuffer object with two colour textures, both draw buffers
+function twoDrawBuffers() {
+    const FRAMEBUFFER = 0x8D40;
+    const s = new GLStream().makeCurrent(1, 0, 0, 64, 64).names(GLFN.GEN_TEXTURES, [5, 6]);
+    for (const name of [5, 6])
+        s.call("BIND_TEXTURE", GL.TEXTURE_2D, name)
+            .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 16, 16, GL.RGBA, GL.UNSIGNED_BYTE, null);
+    return s.names(GLFN.GEN_FRAMEBUFFERS, [3]).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3)
+        .call("FRAMEBUFFER_TEXTURE", FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 5, 0, 0)
+        .call("FRAMEBUFFER_TEXTURE", FRAMEBUFFER, GL.COLOR_ATTACHMENT0 + 1, GL.TEXTURE_2D, 6, 0, 0)
+        .names(GLFN.DRAW_BUFFERS, [GL.COLOR_ATTACHMENT0, GL.COLOR_ATTACHMENT0 + 1]);
+}
+function glslProgram(stream, fragment) {
+    return stream.call("CREATE_PROGRAM", 1).call("CREATE_SHADER", 10, GL.VERTEX_SHADER)
+        .call("CREATE_SHADER", 11, GL.FRAGMENT_SHADER)
+        .shaderSource(10, "void main(void) { gl_Position = gl_Vertex; }\n")
+        .shaderSource(11, fragment).call("COMPILE_SHADER", 10).call("COMPILE_SHADER", 11)
+        .call("ATTACH_SHADER", 1, 10).call("ATTACH_SHADER", 1, 11)
+        .call("LINK_PROGRAM", 1).call("USE_PROGRAM", 1);
+}
+
+test("one colour output goes to every draw buffer; an unwritten one keeps its contents (review S1-2f)", () => {
+    const targets = draw => draw.pipeline.descriptor.fragment.targets.map(t => t.writeMask);
+    let { executor, log } = newExecutor();
+    let stream = glslProgram(twoDrawBuffers(), "void main(void) { gl_FragColor = vec4(1.0); }\n");
+    run(executor, immediateTriangle(stream));
+    assert.deepStrictEqual(targets(log.draws[0]), [0xF, 0xF]);
+    assert.match(log.draws[0].pipeline.descriptor.fragment.module.code, /@location\(1\)/);
+
+    ({ executor, log } = newExecutor());
+    stream = twoDrawBuffers().call("BIND_PROGRAM_ARB", GL.FRAGMENT_PROGRAM_ARB, 4)
+        .programStringARB(GL.FRAGMENT_PROGRAM_ARB, "!!ARBfp1.0\nMOV result.color, fragment.color;\nEND\n")
+        .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 5)
+        .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nMOV result.position, vertex.position;\n" +
+            "MOV result.color, vertex.color;\nEND\n")
+        .call("ENABLE", GL.FRAGMENT_PROGRAM_ARB).call("ENABLE", GL.VERTEX_PROGRAM_ARB);
+    run(executor, immediateTriangle(stream));
+    assert.deepStrictEqual(targets(log.draws[0]), [0xF, 0xF]);
+    assert.match(log.draws[0].pipeline.descriptor.fragment.module.code, /out\.color1 = out\.color0;/);
+
+    ({ executor, log } = newExecutor());
+    stream = glslProgram(twoDrawBuffers(), "void main(void) { gl_FragData[0] = vec4(1.0); }\n");
+    run(executor, immediateTriangle(stream));
+    assert.deepStrictEqual(targets(log.draws[0]), [0xF, 0], "gl_FragData[1] is not written");
+});
+
+test("generic attribute 0 is the vertex in immediate mode (review S1-2h)", () => {
+    const { executor, log } = newExecutor();
+    const name = "position\0";
+    const bind = new Uint8Array(12 + name.length);
+    new DataView(bind.buffer).setUint32(0, 1, true);
+    new DataView(bind.buffer).setUint32(8, name.length, true);
+    for (let i = 0; i < name.length; ++i) bind[12 + i] = name.charCodeAt(i) & 0xff;
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("CREATE_PROGRAM", 1).call("CREATE_SHADER", 10, GL.VERTEX_SHADER)
+        .call("CREATE_SHADER", 11, GL.FRAGMENT_SHADER)
+        .shaderSource(10, "attribute vec4 position;\nattribute vec4 tint;\nvarying vec4 c;\n" +
+            "void main(void) { c = tint; gl_Position = position; }\n")
+        .shaderSource(11, "varying vec4 c;\nvoid main(void) { gl_FragColor = c; }\n")
+        .call("COMPILE_SHADER", 10).call("COMPILE_SHADER", 11)
+        .call("ATTACH_SHADER", 1, 10).call("ATTACH_SHADER", 1, 11)
+        .record(GLFN.BIND_ATTRIB_LOCATION, bind)
+        .call("LINK_PROGRAM", 1).call("USE_PROGRAM", 1)
+        .call("BEGIN", GL.TRIANGLES);
+    for (const [x, y] of [[-1, -1], [1, -1], [0, 1]])
+        stream.call("VERTEX_ATTRIB4F", 1, 1, 0, 0, 1).call("VERTEX_ATTRIB4F", 0, x, y, 0, 1);
+    run(executor, stream.call("END"));
+    assert.strictEqual(log.draws.length, 1);
+    assert.strictEqual(log.draws[0].count, 3, "each glVertexAttrib(0) issued a vertex");
+    const locations = log.draws[0].pipeline.descriptor.vertex.buffers
+        .flatMap(buffer => buffer.attributes.map(a => a.shaderLocation));
+    assert.strictEqual(locations.filter(l => l === 0).length, 1, "location 0 once: " + locations);
+});
+
+test("a 32-bit float target is not blended without float32-blendable (review S1-2k)", () => {
+    const { executor, log } = newExecutor();
+    const FRAMEBUFFER = 0x8D40;
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).names(GLFN.GEN_TEXTURES, [5])
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 5)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA32F_ARB, 16, 16, GL.RGBA, GL.FLOAT, null)
+        .names(GLFN.GEN_FRAMEBUFFERS, [3]).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3)
+        .call("FRAMEBUFFER_TEXTURE", FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 5, 0, 0)
+        .call("ENABLE", GL.BLEND);
+    run(executor, immediateTriangle(stream));
+    const target = log.draws[0].pipeline.descriptor.fragment.targets[0];
+    assert.strictEqual(target.format, "rgba32float");
+    assert.strictEqual(target.blend, undefined);
+});
+
 test("MIN and MAX blending set WebGPU's factors to one (review S1-2b)", () => {
     const { executor, log } = newExecutor();
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)

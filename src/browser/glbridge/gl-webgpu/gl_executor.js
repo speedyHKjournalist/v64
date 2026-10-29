@@ -2771,6 +2771,10 @@
             if (index >= MAX_VERTEX_ATTRIBS)
                 return this.refuse("glVertexAttrib4f", "index out of range",
                     { index }, GL.INVALID_VALUE);
+            // attribute 0 is the vertex: inside glBegin it issues one (GL 2.1
+            // section 2.7)
+            if (index === 0 && this.current.immediate)
+                return this.immediateVertex(a[1], a[2], a[3], a[4]);
             this.current.genericAttribs[index].value.set([a[1], a[2], a[3], a[4]]);
         });
 
@@ -3050,6 +3054,24 @@
         let key = keys.get(second);
         if (key === undefined) keys.set(second, key = codeKey(vertex, fragment));
         return key;
+    }
+
+    /*
+     * An ARB fragment program's result.color goes to every draw buffer
+     * (ARB_draw_buffers without its option, review S1-2f): its one colour
+     * output, color0, is copied to the others.
+     */
+    function broadcastColor(wgsl, targets) {
+        if (targets <= 1) return wgsl;
+        const field = "    @location(0) color0 : vec4<f32>,\n";
+        if (!wgsl.includes(field) || !wgsl.includes("    return out;\n"))
+            throw new Error("the fragment stage has no single colour output to broadcast");
+        let fields = field, copies = "";
+        for (let i = 1; i < targets; ++i) {
+            fields += "    @location(" + i + ") color" + i + " : vec4<f32>,\n";
+            copies += "    out.color" + i + " = out.color0;\n";
+        }
+        return wgsl.replace(field, fields).replace("    return out;\n", copies + "    return out;\n");
     }
 
     function reversedDepthRange(s) {
@@ -5843,8 +5865,11 @@
                     if (unit >= 0 && unit < MAX_TEXTURE_COORDS)
                         used.texCoord[unit] = true;
                 } else if (source.indexOf("generic") === 0) {
+                    // attribute 0 aliases the position, which every
+                    // immediate vertex carries at its location (review
+                    // S1-2h: both were laid out at location 0)
                     const index = Number(source.substring(7));
-                    if (index >= 0 && index < MAX_VERTEX_ATTRIBS &&
+                    if (index > 0 && index < MAX_VERTEX_ATTRIBS &&
                             !used.generic.some(item =>
                                 item.location === entry.location)) {
                         used.generic.push({
@@ -7696,15 +7721,17 @@ ${fragmentCode}`;
             const stateFields = [...new Set([
                 ...vertex.compiled.reflection.stateFields,
                 ...fragment.compiled.reflection.stateFields])];
+            const targets = this.colorTargetCount();
             return {
                 kind: "arb",
-                key: "arb" + pairKey(vertex.compiled, fragment.compiled, vertex.compiled.wgsl, fragment.compiled.wgsl),
+                key: "arb" + pairKey(vertex.compiled, fragment.compiled, vertex.compiled.wgsl,
+                    fragment.compiled.wgsl) + (targets > 1 ? "x" + targets : ""),
                 wgslVertex: vertex.compiled.wgsl,
-                wgslFragment: fragment.compiled.wgsl,
+                wgslFragment: broadcastColor(fragment.compiled.wgsl, targets),
                 stateFields,
                 stateFloats: stateLayout.buildLayout(stateFields).floats,
                 uniformBytes: arbProgram.MAX_PROGRAM_PARAMETERS * 4 * 4 * 2,
-                colorTargets: 1,
+                colorTargets: targets,
                 arbVertex: vertex, arbFragment: fragment,
                 textures: fragment.compiled.reflection.textures.map(entry => ({
                     unit: entry.unit,
@@ -8019,13 +8046,15 @@ ${fragmentCode}`;
                     offset: a.offset,
                 })),
             }));
-            const colorTargets = (targets ? targets.color : [null]).map(target =>
+            // a draw buffer the shader writes no output for keeps its
+            // contents (WebGPU requires a zero write mask there)
+            const outputs = shaders.colorTargets || 1;
+            const colorTargets = (targets ? targets.color : [null]).map((target, i) =>
                 target ? {
                     format: target.format,
-                    blend: s.enabled.has(GL.BLEND) &&
-                        !s.enabled.has(GL.COLOR_LOGIC_OP) ?
-                        gpuBlendState(s) : undefined,
-                    writeMask: (s.colorMask[0] ? 1 : 0) | (s.colorMask[1] ? 2 : 0) |
+                    blend: s.enabled.has(GL.BLEND) && !s.enabled.has(GL.COLOR_LOGIC_OP) &&
+                        this.blendable(target.format) ? gpuBlendState(s) : undefined,
+                    writeMask: i >= outputs ? 0 : (s.colorMask[0] ? 1 : 0) | (s.colorMask[1] ? 2 : 0) |
                         (s.colorMask[2] ? 4 : 0) | (s.colorMask[3] ? 8 : 0),
                 } : null);
 
@@ -8083,6 +8112,16 @@ ${fragmentCode}`;
             pipeline.glActiveBindings = activeShaderBindings(
                 shaders.wgslVertex, shaders.wgslFragment);
             return pipeline;
+        },
+
+        // 32-bit float targets blend only with float32-blendable; without it
+        // the draw replaces (review S1-2k: the pipeline was rejected)
+        blendable(format) {
+            if (!/^(r|rg|rgba)32float$/.test(format) ||
+                    (this.deviceFeatures && this.deviceFeatures.float32Blendable)) return true;
+            this.warnOnce("float32-blend", "this device cannot blend into 32-bit float " +
+                "colour buffers: those draws are not blended", { format });
+            return false;
         },
 
         shaderModule(wgsl) {
@@ -10084,7 +10123,8 @@ ${outputWrites}
 }`;
             const colorTargets = targets.color.map(target => target ? {
                 format: target.format,
-                blend: s.enabled.has(GL.BLEND) ? gpuBlendState(s) : undefined,
+                blend: s.enabled.has(GL.BLEND) && this.blendable(target.format) ?
+                    gpuBlendState(s) : undefined,
                 writeMask: (s.colorMask[0] ? 1 : 0) | (s.colorMask[1] ? 2 : 0) |
                     (s.colorMask[2] ? 4 : 0) | (s.colorMask[3] ? 8 : 0),
             } : null);
