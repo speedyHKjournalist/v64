@@ -134,6 +134,8 @@ const MUTATIONS = {
             "            s.current.rasterValid = valid;\n", "            s.current.rasterValid = cw !== 0;\n"],
         ["a disabled clip plane below an enabled one clips", G + "gl_executor.js",
             "                else snapshot.clipPlanes[i].set(PASSING_PLANE);", "                else snapshot.clipPlanes[i].set(s.clipPlanes[i]);"],
+        ["pipelines keyed by program name", G + "gl_executor.js",
+            'kind: "program", key: "p" + entry.codeKey,', 'kind: "program", key: "p" + program.name + "|" + key,'],
         ["CONSTANT_ALPHA blends with the constant's RGB", G + "gl_executor.js",
             "return usesAlpha && !usesColor ? { r: a, g: a, b: a, a } : { r, g, b, a };", "return { r, g, b, a };"],
     ] },

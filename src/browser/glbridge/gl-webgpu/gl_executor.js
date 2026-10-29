@@ -2946,6 +2946,28 @@
     const DEPTH_CONVERSION = "clip.z = (clip.z + clip.w) * 0.5;";
     const PASSING_PLANE = [0, 0, 0, 1];
 
+    /*
+     * A shader pair's pipelines are keyed by its code: identical code shares
+     * them, and nothing else can (review S1-4: a program name -- the same
+     * number in another share group or process, or an ARB program given a
+     * new string -- found the first program's pipeline). The length rides
+     * along with the hash to make a collision a non-event.
+     */
+    function codeKey(vertex, fragment) {
+        const text = vertex + "\n---\n" + fragment;
+        return translator.hashString(text).toString(16) + ":" + text.length;
+    }
+
+    // codeKey once per pair of compiled objects (the ARB paths ask every draw)
+    const codeKeys = new WeakMap();
+    function pairKey(first, second, vertex, fragment) {
+        let keys = codeKeys.get(first);
+        if (!keys) codeKeys.set(first, keys = new Map());
+        let key = keys.get(second);
+        if (key === undefined) keys.set(second, key = codeKey(vertex, fragment));
+        return key;
+    }
+
     function reversedDepthRange(s) {
         return s.depthRange.near > s.depthRange.far;
     }
@@ -7402,7 +7424,7 @@ ${fragmentCode}`;
                 ...fragment.compiled.reflection.stateFields])];
             return {
                 kind: "arb",
-                key: "arb" + vertex.name + ":" + fragment.name,
+                key: "arb" + pairKey(vertex.compiled, fragment.compiled, vertex.compiled.wgsl, fragment.compiled.wgsl),
                 wgslVertex: vertex.compiled.wgsl,
                 wgslFragment: fragment.compiled.wgsl,
                 stateFields,
@@ -7466,7 +7488,7 @@ ${fragmentCode}`;
 
             return {
                 kind: "arb",
-                key: "arb-vp-ff:" + vertex.name + ":" + variantKey,
+                key: "arb-vp-ff:" + pairKey(compiledVertex, fixed, compiledVertex.wgsl, fixed.wgslFragment),
                 wgslVertex: compiledVertex.wgsl,
                 wgslFragment: fixed.wgslFragment,
                 stateFields: fixed.stateFields,
@@ -7499,8 +7521,9 @@ ${fragmentCode}`;
                     entry = { link, key };
                     program.variants.set(key, entry);
                 }
+                if (!entry.codeKey) entry.codeKey = codeKey(entry.link.wgslVertex, entry.link.wgslFragment);
                 return {
-                    kind: "program", key: "p" + program.name + "|" + key,
+                    kind: "program", key: "p" + entry.codeKey,
                     program,
                     wgslVertex: entry.link.wgslVertex,
                     wgslFragment: entry.link.wgslFragment,
