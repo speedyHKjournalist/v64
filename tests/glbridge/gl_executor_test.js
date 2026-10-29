@@ -1836,10 +1836,15 @@ test("an ARB vertex program drives the fixed multitexture fragment stage", () =>
             ARB_MULTITEXTURE_VERTEX_PROGRAM)
         .call("ENABLE", GL.VERTEX_PROGRAM_ARB)
         .call("SHADE_MODEL", GL.FLAT)
+        // (a complete texture on each unit: an incomplete one disables it)
         .call("ACTIVE_TEXTURE", GL.TEXTURE0)
         .call("ENABLE", GL.TEXTURE_2D)
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 31)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255]))
         .call("ACTIVE_TEXTURE", GL.TEXTURE0 + 1)
         .call("ENABLE", GL.TEXTURE_2D)
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 32)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([0, 255, 0, 255]))
         .drawElements(GL.TRIANGLES, new Uint16Array([0, 1, 2]),
             GL.UNSIGNED_SHORT, {
                 vertex: block(vertices, 4),

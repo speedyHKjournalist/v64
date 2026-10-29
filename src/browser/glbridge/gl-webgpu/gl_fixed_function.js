@@ -94,6 +94,8 @@
                 shadow: !!t.shadow,
                 format: t.format || "RGBA",
                 matrix: !!t.matrix,
+                // a LOD bias other than zero (the value is state, textureLodBias)
+                lodBias: !!t.lodBias,
                 texGen: (t.texGen || [null, null, null, null]).slice(0, 4),
                 env: normalizeEnv(t.env),
             } : { enabled: false });
@@ -213,6 +215,7 @@
         for (const t of sig.texture) {
             if (!t.enabled) continue;
             if (t.matrix) fields.add("textureMatrix");
+            if (t.lodBias && !t.shadow) fields.add("textureLodBias");
             if (t.texGen && t.texGen.some(m => m === "OBJECT" || m === "EYE"))
                 fields.add("texGenPlanes");
             if (t.env.mode === "BLEND" ||
@@ -972,18 +975,20 @@
                 xy + " / max(" + q + ", 1e-8), " + xyz +
                 ".z / max(" + q + ", 1e-8)))";
         }
+        // GL_TEXTURE_LOD_BIAS (the texture's and the unit's, as state)
+        const sample = (coordinates) => unit.lodBias ?
+            "textureSampleBias(t" + i + ", s" + i + ", " + coordinates + ", glState.textureLodBias[" + (i >> 2) + "]." +
+                "xyzw"[i & 3] + ")" :
+            "textureSample(t" + i + ", s" + i + ", " + coordinates + ")";
         switch (unit.target) {
         case "1D":
-            return "textureSample(t" + i + ", s" + i + ", vec2<f32>((" +
-                coord + ").x / max(" + q + ", 1e-8), 0.5))";
+            return sample("vec2<f32>((" + coord + ").x / max(" + q + ", 1e-8), 0.5)");
         case "3D":
-            return "textureSample(t" + i + ", s" + i + ", " + xyz +
-                " / max(" + q + ", 1e-8))";
+            return sample(xyz + " / max(" + q + ", 1e-8)");
         case "Cube":
-            return "textureSample(t" + i + ", s" + i + ", " + xyz + ")";
+            return sample(xyz);
         default:
-            return "textureSample(t" + i + ", s" + i + ", " + xy +
-                " / max(" + q + ", 1e-8))";
+            return sample(xy + " / max(" + q + ", 1e-8)");
         }
     }
 

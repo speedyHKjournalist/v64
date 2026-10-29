@@ -269,6 +269,16 @@
                   off = writeVec4(o, off, s.texEnvColor[i]);
               return off;
           } },
+        /* Each unit's LOD bias: the unit's TEXTURE_FILTER_CONTROL bias plus
+         * its texture's TEXTURE_LOD_BIAS, four units a vec4. */
+        { id: "textureLodBias", wgsl: "textureLodBias",
+          type: "array<vec4<f32>, " + MAX_TEXTURE_UNITS / 4 + ">",
+          floats: MAX_TEXTURE_UNITS,
+          write: (s, o, off) => {
+              for (let i = 0; i < MAX_TEXTURE_UNITS; i += 4)
+                  off = writeVec4(o, off, s.textureLodBias.subarray(i, i + 4));
+              return off;
+          } },
         /* Object/eye linear planes: 4 coordinates (S,T,R,Q) x 8 units, each a
          * pair of vec4 (object plane, eye plane). Flat array so the fixed
          * function generator can index it with a constant. */

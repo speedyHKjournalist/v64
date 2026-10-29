@@ -7559,6 +7559,13 @@ ${fragmentCode}`;
             };
         },
 
+        // GL 1.4's LOD bias of a unit: its TEXTURE_FILTER_CONTROL bias plus its
+        // texture's TEXTURE_LOD_BIAS, within what WGSL's bias takes (review S3)
+        textureLodBias(unit, object) {
+            const bias = this.current.textureUnits[unit].lodBias + (object ? object.sampler.lodBias : 0);
+            return clamp(bias, -16, 15.99);
+        },
+
         fixedFunctionSignature(variant) {
             const s = this.current;
             const colorSum = s.enabled.has(GL.COLOR_SUM);
@@ -7570,13 +7577,18 @@ ${fragmentCode}`;
                 if (!target) { texture.push({ enabled: false }); continue; }
                 const object = this.textureObjectFor(unit, target.enumValue);
                 const complete = this.textureIsComplete(object);
+                // GL 2.1 section 3.8.16: a unit whose texture is incomplete is
+                // as if texturing were disabled on it (review S2-21: level 0
+                // was sampled under a mipmap filter)
+                if (!complete) { texture.push({ enabled: false }); continue; }
                 texture.push({
                     enabled: true,
                     target: target.kind,
                     shadow: !!(object && object.sampler.compareMode ===
                         GL.COMPARE_R_TO_TEXTURE),
-                    format: complete && object ? object.baseFormat : "RGBA",
+                    format: object.baseFormat,
                     matrix: !isIdentity(this.textureMatrixOf(unit)),
+                    lodBias: this.textureLodBias(unit, object) !== 0,
                     texGen: state.texGen.map(gen => gen.enabled ?
                         (TEXGEN_MODE_NAMES[gen.mode] || "EYE") : null),
                     env: this.texEnvSignature(state.env),
@@ -8294,6 +8306,7 @@ ${fragmentCode}`;
                 fog: { color: new Float32Array(4), density: 1, start: 0, end: 1 },
                 texEnvColor: Array.from({ length: MAX_TEXTURE_UNITS },
                     () => new Float32Array(4)),
+                textureLodBias: new Float32Array(MAX_TEXTURE_UNITS),
                 texGen: Array.from({ length: MAX_TEXTURE_UNITS }, () =>
                     Array.from({ length: 4 }, () => ({
                         objectPlane: new Float32Array(4),
@@ -8423,6 +8436,9 @@ ${fragmentCode}`;
 
             for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
                 snapshot.texEnvColor[i].set(s.textureUnits[i].env.color);
+                const target = this.effectiveTarget(s.textureUnits[i]);
+                snapshot.textureLodBias[i] = this.textureLodBias(i,
+                    target ? this.textureObjectFor(i, target.enumValue) : null);
                 for (let c = 0; c < 4; ++c) {
                     snapshot.texGen[i][c].objectPlane.set(
                         s.textureUnits[i].texGen[c].objectPlane);

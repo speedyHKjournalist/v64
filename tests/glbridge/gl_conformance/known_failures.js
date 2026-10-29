@@ -9,11 +9,6 @@ globalThis.GLConformanceKnownFailures = {
         "CLAMP",
         "CLAMP_TO_BORDER",
     ] },
-    mipmap: { reason: "S2-21 completeness, S3 LOD bias", tiles: [
-        "TEXTURE_LOD_BIAS 1 at 16px: green",
-        "TexEnv FILTER_CONTROL LOD_BIAS 2 at 16px: blue",
-        "incomplete (mip filter, 1 level): untextured (0.2,0.8,0.4)",
-    ] },
     tex_formats_unpack: { reason: "S2-22: BGRA with packed _REV types swaps red and blue", tiles: [
         "BGRA 8_8_8_8_REV",
         "RGB 3_3_2",
