@@ -51,6 +51,9 @@
 
     const shaderPipeline = global.D3D9ShaderPipeline ||
         (typeof require === "function" ? require("./d3d9_shader_pipeline.js") : null);
+    // The protocol's opcodes, constants and payload layouts (d9wg_protocol.js)
+    const D9WG = global.D9WGProtocol ||
+        (typeof require === "function" ? require("./d9wg_protocol.js") : null);
     if (!shaderPipeline)
         throw new Error("d3d9_executor.js requires d3d9_shader_pipeline.js to " +
             "be loaded first");
@@ -96,124 +99,127 @@
         } catch (error) { return null; }
     })();
 
-    const D9WG_MAGIC = 0x47573944; // "D9WG"
-    const D9WG_VERSION_MAJOR = 1;
-    const D9WG_VERSION_MINOR = 7;
+    const D9WG_MAGIC = D9WG.C.D9WG_MAGIC; // "D9WG"
+    const D9WG_VERSION_MAJOR = D9WG.C.D9WG_VERSION_MAJOR;
+    const D9WG_VERSION_MINOR = D9WG.C.D9WG_VERSION_MINOR;
     // The oldest guest proxy this host still decodes. 1.3 payloads are simply
     // shorter than 1.4 ones; see the version check in executeBatch().
-    const D9WG_VERSION_MIN_MINOR = 3;
+    const D9WG_VERSION_MIN_MINOR = D9WG.MIN_MINOR;
+    // Per opcode, the shortest payload a supported guest sends (its struct
+    // without the fields later minors added): shorter is a stream error
+    const D9WG_MIN_PAYLOAD = Object.fromEntries(Object.keys(D9WG.COMMANDS)
+        .map(name => [D9WG.OP[name], D9WG.minBytes(D9WG.commandStruct(D9WG.OP[name]))]));
     const D9WG_DMA_BYTES = 16 * 1024 * 1024;
-    const D9WG_RESPONSE_REGION_BYTES = 4 * 1024 * 1024;
+    const D9WG_RESPONSE_REGION_BYTES = D9WG.C.D9WG_RESPONSE_REGION_BYTES;
     const D9WG_RESPONSE_REGION_OFFSET =
         D9WG_DMA_BYTES - D9WG_RESPONSE_REGION_BYTES;
-    const D9WG_QUERY_REGION_BYTES = 16 * 1024;
+    const D9WG_QUERY_REGION_BYTES = D9WG.C.D9WG_QUERY_REGION_BYTES;
     // Liveness counter the guest watches while it spins on a readback; see the
     // comment on D9WG_HEARTBEAT_OFFSET in d3d9_protocol.h.
-    const D9WG_HEARTBEAT_BYTES = 16;
-    const D9WG_HEARTBEAT_OFFSET =
-        D9WG_RESPONSE_REGION_BYTES - D9WG_HEARTBEAT_BYTES;
-    const D9WG_RESPONSE_OK = 1;
-    const D9WG_RESPONSE_FAILED = 2;
-    const D9WG_BATCH_HEADER_BYTES = 32;
-    const D9WG_COMMAND_HEADER_BYTES = 16;
-    const D9WG_BATCH_FLAG_PRESENT = 1 << 0;
-    const D9WG_FEATURE_SHADER_MODEL_2 = 1 << 0;
-    const D9WG_FEATURE_SHADER_MODEL_3 = 1 << 1;
+    const D9WG_HEARTBEAT_BYTES = D9WG.C.D9WG_HEARTBEAT_BYTES;
+    const D9WG_HEARTBEAT_OFFSET = D9WG.C.D9WG_HEARTBEAT_OFFSET;
+    const D9WG_RESPONSE_OK = D9WG.C.D9WG_RESPONSE_OK;
+    const D9WG_RESPONSE_FAILED = D9WG.C.D9WG_RESPONSE_FAILED;
+    const D9WG_BATCH_HEADER_BYTES = D9WG.STRUCTS.BatchHeader.size;
+    const D9WG_COMMAND_HEADER_BYTES = D9WG.STRUCTS.CommandHeader.size;
+    const D9WG_BATCH_FLAG_PRESENT = D9WG.C.D9WG_BATCH_FLAG_PRESENT;
+    const D9WG_FEATURE_SHADER_MODEL_2 = D9WG.C.D9WG_FEATURE_SHADER_MODEL_2;
+    const D9WG_FEATURE_SHADER_MODEL_3 = D9WG.C.D9WG_FEATURE_SHADER_MODEL_3;
 
-    const OP_HELLO = 1;
-    const OP_CREATE_DEVICE = 2;
-    const OP_RESET = 3;
-    const OP_PRESENT = 4;
-    const OP_CLEAR = 5;
-    const OP_BEGIN_SCENE = 6;
-    const OP_END_SCENE = 7;
-    const OP_CREATE_BUFFER = 0x100;
-    const OP_UPDATE_BUFFER = 0x101;
-    const OP_DESTROY_RESOURCE = 0x103;
-    const OP_STRETCH_RECT = 8;
-    const OP_COLOR_FILL = 9;
-    const OP_GUEST_LOG = 11;
-    const OP_READBACK_SURFACE = 12;
-    const OP_SESSION_END = 13;
+    const OP_HELLO = D9WG.OP.HELLO;
+    const OP_CREATE_DEVICE = D9WG.OP.CREATE_DEVICE;
+    const OP_RESET = D9WG.OP.RESET;
+    const OP_PRESENT = D9WG.OP.PRESENT;
+    const OP_CLEAR = D9WG.OP.CLEAR;
+    const OP_BEGIN_SCENE = D9WG.OP.BEGIN_SCENE;
+    const OP_END_SCENE = D9WG.OP.END_SCENE;
+    const OP_CREATE_BUFFER = D9WG.OP.CREATE_BUFFER;
+    const OP_UPDATE_BUFFER = D9WG.OP.UPDATE_BUFFER;
+    const OP_DESTROY_RESOURCE = D9WG.OP.DESTROY_RESOURCE;
+    const OP_STRETCH_RECT = D9WG.OP.STRETCH_RECT;
+    const OP_COLOR_FILL = D9WG.OP.COLOR_FILL;
+    const OP_GUEST_LOG = D9WG.OP.GUEST_LOG;
+    const OP_READBACK_SURFACE = D9WG.OP.READBACK_SURFACE;
+    const OP_SESSION_END = D9WG.OP.SESSION_END;
     const GUEST_LOG_SEVERITY_INFO = 0;
     const GUEST_LOG_SEVERITY_FAILED = 2;
-    const OP_CREATE_TEXTURE_2D = 0x110;
-    const OP_CREATE_TEXTURE_CUBE = 0x111;
-    const OP_CREATE_TEXTURE_VOLUME = 0x112;
-    const OP_UPDATE_TEXTURE = 0x113;
-    const OP_SET_SCISSOR_RECT = 0x205;
-    const OP_SET_RENDER_TARGET = 0x20F;
-    const OP_SET_DEPTH_STENCIL_SURFACE_LEVEL = 0x21E;
-    const OP_SET_PALETTE = 0x21F;
-    const OP_SET_CURRENT_TEXTURE_PALETTE = 0x220;
-    const OP_GENERATE_MIPS = 0x221;
-    const OP_SET_TEXTURE_LOD = 0x222;
-    const OP_SET_GAMMA_RAMP = 0x223;
-    const OP_CREATE_SWAP_CHAIN = 0x224;
-    const OP_DESTROY_SWAP_CHAIN = 0x225;
-    const OP_PRESENT_SWAP_CHAIN = 0x226;
+    const OP_CREATE_TEXTURE_2D = D9WG.OP.CREATE_TEXTURE_2D;
+    const OP_CREATE_TEXTURE_CUBE = D9WG.OP.CREATE_TEXTURE_CUBE;
+    const OP_CREATE_TEXTURE_VOLUME = D9WG.OP.CREATE_TEXTURE_VOLUME;
+    const OP_UPDATE_TEXTURE = D9WG.OP.UPDATE_TEXTURE;
+    const OP_SET_SCISSOR_RECT = D9WG.OP.SET_SCISSOR_RECT;
+    const OP_SET_RENDER_TARGET = D9WG.OP.SET_RENDER_TARGET;
+    const OP_SET_DEPTH_STENCIL_SURFACE_LEVEL = D9WG.OP.SET_DEPTH_STENCIL_SURFACE_LEVEL;
+    const OP_SET_PALETTE = D9WG.OP.SET_PALETTE;
+    const OP_SET_CURRENT_TEXTURE_PALETTE = D9WG.OP.SET_CURRENT_TEXTURE_PALETTE;
+    const OP_GENERATE_MIPS = D9WG.OP.GENERATE_MIPS;
+    const OP_SET_TEXTURE_LOD = D9WG.OP.SET_TEXTURE_LOD;
+    const OP_SET_GAMMA_RAMP = D9WG.OP.SET_GAMMA_RAMP;
+    const OP_CREATE_SWAP_CHAIN = D9WG.OP.CREATE_SWAP_CHAIN;
+    const OP_DESTROY_SWAP_CHAIN = D9WG.OP.DESTROY_SWAP_CHAIN;
+    const OP_PRESENT_SWAP_CHAIN = D9WG.OP.PRESENT_SWAP_CHAIN;
     // D9WGSetDepthStencilSurface.depth_texture_handle sentinel: the device's own
     // auto depth-stencil surface. It needs a value distinct from 0 because
     // SetDepthStencilSurface(NULL) -- which really does turn depth testing off
     // -- also has no texture handle, and an app that renders to a texture and
     // then restores the back buffer's depth surface must be able to say which
     // of the two it means.
-    const D9WG_AUTO_DEPTH_STENCIL_HANDLE = 0xFFFFFFFF;
-    const OP_CREATE_VERTEX_DECLARATION = 0x120;
-    const OP_CREATE_VERTEX_SHADER = 0x121;
-    const OP_CREATE_PIXEL_SHADER = 0x122;
-    const OP_CREATE_QUERY = 0x123;
-    const OP_SET_RENDER_STATE = 0x200;
-    const OP_SET_SAMPLER_STATE = 0x201;
-    const OP_SET_TEXTURE_STAGE_STATE = 0x202;
-    const OP_SET_TEXTURE = 0x203;
-    const OP_SET_VIEWPORT = 0x204;
-    const OP_SET_TRANSFORM = 0x206;
-    const OP_SET_MATERIAL = 0x207;
-    const OP_SET_LIGHT = 0x208;
-    const OP_LIGHT_ENABLE = 0x209;
-    const OP_SET_STREAM_SOURCE = 0x20A;
-    const OP_SET_STREAM_SOURCE_FREQ = 0x20B;
-    const OP_SET_INDICES = 0x20C;
-    const OP_SET_VERTEX_DECLARATION = 0x20D;
-    const OP_SET_FVF = 0x20E;
-    const OP_SET_CURSOR_PROPERTIES = 0x21A;
-    const OP_SET_CURSOR_POSITION = 0x21B;
-    const OP_SHOW_CURSOR = 0x21C;
-    const OP_WINDOW_STATE = 0x21D;
-    const D9WG_WINDOW_IS_WINDOW = 1 << 0;
-    const D9WG_WINDOW_VISIBLE = 1 << 1;
-    const D9WG_WINDOW_ICONIC = 1 << 2;
-    const D9WG_WINDOW_FOREGROUND = 1 << 3;
-    const D9WG_WINDOW_FULLSCREEN = 1 << 4;
-    const D9WG_WINDOW_NO_SURFACE = 1 << 5;
+    const D9WG_AUTO_DEPTH_STENCIL_HANDLE = D9WG.C.D9WG_AUTO_DEPTH_STENCIL_HANDLE;
+    const OP_CREATE_VERTEX_DECLARATION = D9WG.OP.CREATE_VERTEX_DECLARATION;
+    const OP_CREATE_VERTEX_SHADER = D9WG.OP.CREATE_VERTEX_SHADER;
+    const OP_CREATE_PIXEL_SHADER = D9WG.OP.CREATE_PIXEL_SHADER;
+    const OP_CREATE_QUERY = D9WG.OP.CREATE_QUERY;
+    const OP_SET_RENDER_STATE = D9WG.OP.SET_RENDER_STATE;
+    const OP_SET_SAMPLER_STATE = D9WG.OP.SET_SAMPLER_STATE;
+    const OP_SET_TEXTURE_STAGE_STATE = D9WG.OP.SET_TEXTURE_STAGE_STATE;
+    const OP_SET_TEXTURE = D9WG.OP.SET_TEXTURE;
+    const OP_SET_VIEWPORT = D9WG.OP.SET_VIEWPORT;
+    const OP_SET_TRANSFORM = D9WG.OP.SET_TRANSFORM;
+    const OP_SET_MATERIAL = D9WG.OP.SET_MATERIAL;
+    const OP_SET_LIGHT = D9WG.OP.SET_LIGHT;
+    const OP_LIGHT_ENABLE = D9WG.OP.LIGHT_ENABLE;
+    const OP_SET_STREAM_SOURCE = D9WG.OP.SET_STREAM_SOURCE;
+    const OP_SET_STREAM_SOURCE_FREQ = D9WG.OP.SET_STREAM_SOURCE_FREQ;
+    const OP_SET_INDICES = D9WG.OP.SET_INDICES;
+    const OP_SET_VERTEX_DECLARATION = D9WG.OP.SET_VERTEX_DECLARATION;
+    const OP_SET_FVF = D9WG.OP.SET_FVF;
+    const OP_SET_CURSOR_PROPERTIES = D9WG.OP.SET_CURSOR_PROPERTIES;
+    const OP_SET_CURSOR_POSITION = D9WG.OP.SET_CURSOR_POSITION;
+    const OP_SHOW_CURSOR = D9WG.OP.SHOW_CURSOR;
+    const OP_WINDOW_STATE = D9WG.OP.WINDOW_STATE;
+    const D9WG_WINDOW_IS_WINDOW = D9WG.C.D9WG_WINDOW_IS_WINDOW;
+    const D9WG_WINDOW_VISIBLE = D9WG.C.D9WG_WINDOW_VISIBLE;
+    const D9WG_WINDOW_ICONIC = D9WG.C.D9WG_WINDOW_ICONIC;
+    const D9WG_WINDOW_FOREGROUND = D9WG.C.D9WG_WINDOW_FOREGROUND;
+    const D9WG_WINDOW_FULLSCREEN = D9WG.C.D9WG_WINDOW_FULLSCREEN;
+    const D9WG_WINDOW_NO_SURFACE = D9WG.C.D9WG_WINDOW_NO_SURFACE;
     // Other windows cover all of it (d3d9_protocol.h): hidden as far as the
     // picture goes, though the window is up
-    const D9WG_WINDOW_OCCLUDED = 1 << 6;
+    const D9WG_WINDOW_OCCLUDED = D9WG.C.D9WG_WINDOW_OCCLUDED;
     // Other windows cover part of it: the parts that show follow the record
     // (D9WGWindowRegion in d3d9_protocol.h)
-    const D9WG_WINDOW_REGION = 1 << 7;
-    const D9WG_WINDOW_STATE_BYTES = 40;
-    const D9WG_WINDOW_REGION_MAX_RECTS = 32;
-    const OP_SET_VERTEX_SHADER = 0x211;
-    const OP_SET_PIXEL_SHADER = 0x212;
-    const OP_SET_VERTEX_SHADER_CONSTANT_F = 0x213;
-    const OP_SET_VERTEX_SHADER_CONSTANT_I = 0x214;
-    const OP_SET_VERTEX_SHADER_CONSTANT_B = 0x215;
-    const OP_SET_PIXEL_SHADER_CONSTANT_F = 0x216;
-    const OP_SET_PIXEL_SHADER_CONSTANT_I = 0x217;
-    const OP_SET_PIXEL_SHADER_CONSTANT_B = 0x218;
-    const OP_SET_CLIP_PLANE = 0x219;
-    const OP_DRAW_PRIMITIVE = 0x300;
-    const OP_DRAW_INDEXED_PRIMITIVE = 0x301;
-    const OP_DRAW_PRIMITIVE_UP = 0x302;
+    const D9WG_WINDOW_REGION = D9WG.C.D9WG_WINDOW_REGION;
+    const D9WG_WINDOW_STATE_BYTES = D9WG.STRUCTS.WindowState.size;
+    const D9WG_WINDOW_REGION_MAX_RECTS = D9WG.C.D9WG_WINDOW_REGION_MAX_RECTS;
+    const OP_SET_VERTEX_SHADER = D9WG.OP.SET_VERTEX_SHADER;
+    const OP_SET_PIXEL_SHADER = D9WG.OP.SET_PIXEL_SHADER;
+    const OP_SET_VERTEX_SHADER_CONSTANT_F = D9WG.OP.SET_VERTEX_SHADER_CONSTANT_F;
+    const OP_SET_VERTEX_SHADER_CONSTANT_I = D9WG.OP.SET_VERTEX_SHADER_CONSTANT_I;
+    const OP_SET_VERTEX_SHADER_CONSTANT_B = D9WG.OP.SET_VERTEX_SHADER_CONSTANT_B;
+    const OP_SET_PIXEL_SHADER_CONSTANT_F = D9WG.OP.SET_PIXEL_SHADER_CONSTANT_F;
+    const OP_SET_PIXEL_SHADER_CONSTANT_I = D9WG.OP.SET_PIXEL_SHADER_CONSTANT_I;
+    const OP_SET_PIXEL_SHADER_CONSTANT_B = D9WG.OP.SET_PIXEL_SHADER_CONSTANT_B;
+    const OP_SET_CLIP_PLANE = D9WG.OP.SET_CLIP_PLANE;
+    const OP_DRAW_PRIMITIVE = D9WG.OP.DRAW_PRIMITIVE;
+    const OP_DRAW_INDEXED_PRIMITIVE = D9WG.OP.DRAW_INDEXED_PRIMITIVE;
+    const OP_DRAW_PRIMITIVE_UP = D9WG.OP.DRAW_PRIMITIVE_UP;
 
     const D3DSTREAMSOURCE_INDEXEDDATA = 0x40000000;
     const D3DSTREAMSOURCE_INSTANCEDATA = 0x80000000;
     const D3DSTREAMSOURCE_FREQUENCY_MASK = 0x3fffffff;
-    const OP_DRAW_INDEXED_PRIMITIVE_UP = 0x303;
-    const OP_BEGIN_QUERY = 0x400;
-    const OP_END_QUERY = 0x401;
+    const OP_DRAW_INDEXED_PRIMITIVE_UP = D9WG.OP.DRAW_INDEXED_PRIMITIVE_UP;
+    const OP_BEGIN_QUERY = D9WG.OP.BEGIN_QUERY;
+    const OP_END_QUERY = D9WG.OP.END_QUERY;
 
     const RESOURCE_BUFFER_VERTEX = 1;
     const RESOURCE_BUFFER_INDEX = 2;
@@ -339,7 +345,7 @@
     // resolved through a palette, rather than expanded to RGBA on the CPU,
     // because DirectDraw blits P8 into P8 and a later palette change must
     // still change those pixels' colour.
-    const D9WG_USAGE_DDRAW_INDEXED = 0x80000000;
+    const D9WG_USAGE_DDRAW_INDEXED = D9WG.C.D9WG_USAGE_DDRAW_INDEXED;
     const D3DMULTISAMPLE_NONE = 0;
     const D3DMULTISAMPLE_4_SAMPLES = 4;
 
@@ -3610,11 +3616,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 ++this.stats.malformedBatches;
                 throw new D9WGStreamError("D9WG batch shorter than its header");
             }
-            const magic = view.getUint32(0, true);
-            const versionMajor = view.getUint16(4, true);
-            const versionMinor = view.getUint16(6, true);
-            const commandCount = view.getUint32(16, true);
-            const commandBytes = view.getUint32(20, true);
+            const magic = view.getUint32(D9WG.F.BatchHeader.magic, true);
+            const versionMajor = view.getUint16(D9WG.F.BatchHeader.version_major, true);
+            const versionMinor = view.getUint16(D9WG.F.BatchHeader.version_minor, true);
+            const commandCount = view.getUint32(D9WG.F.BatchHeader.command_count, true);
+            const commandBytes = view.getUint32(D9WG.F.BatchHeader.command_bytes, true);
             if (magic !== D9WG_MAGIC) {
                 ++this.stats.malformedBatches;
                 throw new D9WGStreamError("D9WG batch has the wrong magic");
@@ -3627,11 +3633,12 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // "unsupported D9WG version".
             //
             // What makes the range safe is that every field added since
-            // D9WG_VERSION_MIN_MINOR is length-gated at its decode site: an
-            // older payload is short, the field reads as its default, and the
-            // default is what that version meant. Adding a field that changes
-            // the meaning of existing bytes would need the major version, which
-            // is still an exact match.
+            // D9WG_VERSION_MIN_MINOR is listed in d9wg_protocol.js's
+            // ADDED_FIELDS and read through D9WG.has(): an older payload is
+            // short, the field reads as its default, and the default is what
+            // that version meant. Adding a field that changes the meaning of
+            // existing bytes would need the major version, which is still an
+            // exact match.
             if (versionMajor !== D9WG_VERSION_MAJOR ||
                     versionMinor < D9WG_VERSION_MIN_MINOR ||
                     versionMinor > D9WG_VERSION_MINOR) {
@@ -3643,24 +3650,20 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 throw new D9WGStreamError(
                     "D9WG batch command_bytes overruns the record");
             }
-            const sessionLow = view.getUint32(24, true);
-            const sessionHigh = view.getUint32(28, true);
+            const sessionLow = view.getUint32(D9WG.F.BatchHeader.session_id_low, true);
+            const sessionHigh = view.getUint32(D9WG.F.BatchHeader.session_id_high, true);
             const sessionKey = sessionHigh.toString(16).padStart(8, "0") +
                 sessionLow.toString(16).padStart(8, "0");
             this.switchSession(sessionKey);
             this.ownerSessions.add(sessionKey);
             ++this.stats.batches;
 
-            let offset = D9WG_BATCH_HEADER_BYTES;
             const end = D9WG_BATCH_HEADER_BYTES + commandBytes;
-            let decoded = 0;
-            while (offset + D9WG_COMMAND_HEADER_BYTES <= end) {
-                const opcode = view.getUint16(offset, true);
-                const size = view.getUint32(offset + 4, true);
-                if (size < D9WG_COMMAND_HEADER_BYTES || offset + size > end) {
-                    ++this.stats.malformedBatches;
-                    throw new D9WGStreamError("D9WG command size is invalid");
-                }
+            this.checkStream(view, end, commandCount);
+            let offset = D9WG_BATCH_HEADER_BYTES;
+            while (offset < end) {
+                const opcode = view.getUint16(offset + D9WG.F.CommandHeader.opcode, true);
+                const size = view.getUint32(offset + D9WG.F.CommandHeader.size, true);
                 const payloadOffset = offset + D9WG_COMMAND_HEADER_BYTES;
                 const payloadBytes = size - D9WG_COMMAND_HEADER_BYTES;
                 // One command's failure must not consume the rest of the
@@ -3705,7 +3708,6 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                         opcode > OP_DRAW_INDEXED_PRIMITIVE_UP)
                     ++this.commandSerial;
                 offset += size;
-                ++decoded;
                 ++this.stats.commands;
                 // Mid-batch, because one PCI batch can carry a whole 16 MiB
                 // arena's worth of draws -- checking only at the batch boundary
@@ -3713,12 +3715,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 if (this.frame && this.frame.ops.length >= this.flushThreshold)
                     this.finishFrame(false);
             }
-            if (decoded !== commandCount) {
-                ++this.stats.malformedBatches;
-                throw new D9WGStreamError("D9WG command_count does not match the decoded stream");
-            }
-
-            const present = (view.getUint32(12, true) & D9WG_BATCH_FLAG_PRESENT) !== 0;
+            const present = (view.getUint32(D9WG.F.BatchHeader.flags, true) & D9WG_BATCH_FLAG_PRESENT) !== 0;
             if (present) this.finishFrame(true);
             else if (this.flushRequested) this.finishFrame(false);
             this.flushRequested = false;
@@ -3730,8 +3727,40 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             }
         }
 
+        // The batch's structure, before any of it runs: the command sizes tile
+        // command_bytes exactly, the guest numbered the commands consecutively
+        // (the header's sequence: a size that points into the middle of a
+        // payload lands on a "header" whose sequence is not the next one),
+        // and their number is command_count. A batch that fails here runs
+        // none of its commands.
+        checkStream(view, end, commandCount) {
+            const fail = message => {
+                ++this.stats.malformedBatches;
+                throw new D9WGStreamError("D9WG " + message);
+            };
+            let offset = D9WG_BATCH_HEADER_BYTES, count = 0, first = 0;
+            while (offset < end) {
+                if (offset + D9WG_COMMAND_HEADER_BYTES > end) fail("command header overruns command_bytes");
+                const size = view.getUint32(offset + D9WG.F.CommandHeader.size, true);
+                if (size < D9WG_COMMAND_HEADER_BYTES || offset + size > end) fail("command size is invalid");
+                const sequence = view.getUint32(offset + D9WG.F.CommandHeader.sequence, true);
+                if (count === 0) first = sequence;
+                else if (sequence !== (first + count) >>> 0)
+                    fail("command " + count + " has sequence " + sequence + ", the batch's numbering expects " +
+                        ((first + count) >>> 0));
+                offset += size;
+                ++count;
+            }
+            if (count !== commandCount) fail("command_count does not match the decoded stream");
+        }
+
         dispatchCommand(opcode, bytes, view, offset, length, metadata) {
             const handler = this.handlers[opcode];
+            if (handler && length < D9WG_MIN_PAYLOAD[opcode]) {
+                ++this.stats.malformedBatches;
+                throw new D9WGStreamError("D9WG " + D9WG.OP_NAME[opcode] + " payload is " + length +
+                    " bytes, its struct needs " + D9WG_MIN_PAYLOAD[opcode]);
+            }
             if (!handler) {
                 // Skipped by its size (already advanced by the caller), and
                 // reported: a guest DLL newer than this host, or protocol drift
@@ -4045,10 +4074,10 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onHello(bytes, view, offset) {
-            void view.getUint32(offset, true); // guest_pointer_bits
-            const featureBits = view.getUint32(offset + 4, true);
-            const sessionLow = view.getUint32(offset + 8, true);
-            const sessionHigh = view.getUint32(offset + 12, true);
+            void view.getUint32(offset + D9WG.F.Hello.guest_pointer_bits, true); // guest_pointer_bits
+            const featureBits = view.getUint32(offset + D9WG.F.Hello.feature_bits, true);
+            const sessionLow = view.getUint32(offset + D9WG.F.Hello.session_id_low, true);
+            const sessionHigh = view.getUint32(offset + D9WG.F.Hello.session_id_high, true);
             // Keyed as a string, not `high * 2**32 + low`: a 64-bit id does not
             // survive a float64 above 2**53, and the low bits are exactly the
             // ones that distinguish two processes. The old arithmetic key made
@@ -4165,12 +4194,8 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSessionEnd(bytes, view, offset, length) {
-            if (length < 8) {
-                ++this.stats.malformedBatches;
-                throw new D9WGStreamError("D9WG SESSION_END payload is truncated");
-            }
-            const sessionLow = view.getUint32(offset, true);
-            const sessionHigh = view.getUint32(offset + 4, true);
+            const sessionLow = view.getUint32(offset + D9WG.F.SessionEnd.session_id_low, true);
+            const sessionHigh = view.getUint32(offset + D9WG.F.SessionEnd.session_id_high, true);
             const sessionKey = sessionHigh.toString(16).padStart(8, "0") +
                 sessionLow.toString(16).padStart(8, "0");
             if (this.sessionKey !== sessionKey) {
@@ -4204,19 +4229,15 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onCreateDevice(bytes, view, offset, length) {
-            if (length < 52) {
-                ++this.stats.malformedBatches;
-                throw new D9WGStreamError("D9WG CREATE_DEVICE payload is not protocol 1.3");
-            }
-            const handle = view.getUint32(offset, true);
-            const hwnd = view.getUint32(offset + 4, true);
-            const x = view.getInt32(offset + 8, true);
-            const y = view.getInt32(offset + 12, true);
-            const width = view.getUint32(offset + 16, true);
-            const height = view.getUint32(offset + 20, true);
-            const enableAutoDepth = view.getUint32(offset + 36, true);
-            const multisampleType = view.getUint32(offset + 44, true);
-            const multisampleQuality = view.getUint32(offset + 48, true);
+            const handle = view.getUint32(offset + D9WG.F.CreateDevice.device_handle, true);
+            const hwnd = view.getUint32(offset + D9WG.F.CreateDevice.hwnd, true);
+            const x = view.getInt32(offset + D9WG.F.CreateDevice.x, true);
+            const y = view.getInt32(offset + D9WG.F.CreateDevice.y, true);
+            const width = view.getUint32(offset + D9WG.F.CreateDevice.width, true);
+            const height = view.getUint32(offset + D9WG.F.CreateDevice.height, true);
+            const enableAutoDepth = view.getUint32(offset + D9WG.F.CreateDevice.enable_auto_depth_stencil, true);
+            const multisampleType = view.getUint32(offset + D9WG.F.CreateDevice.multisample_type, true);
+            const multisampleQuality = view.getUint32(offset + D9WG.F.CreateDevice.multisample_quality, true);
             // A frame left un-presented by a previous device -- typically a
             // process that exited mid-frame -- must not bleed into this one.
             // Its recorded ops reference that device's depth target and
@@ -4236,20 +4257,16 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onReset(bytes, view, offset, length) {
-            if (length < 56) {
-                ++this.stats.malformedBatches;
-                throw new D9WGStreamError("D9WG RESET payload is not protocol 1.3");
-            }
-            const oldHandle = view.getUint32(offset, true);
-            const newHandle = view.getUint32(offset + 4, true);
-            const hwnd = view.getUint32(offset + 8, true);
-            const x = view.getInt32(offset + 12, true);
-            const y = view.getInt32(offset + 16, true);
-            const width = view.getUint32(offset + 20, true);
-            const height = view.getUint32(offset + 24, true);
-            const enableAutoDepth = view.getUint32(offset + 40, true);
-            const multisampleType = view.getUint32(offset + 48, true);
-            const multisampleQuality = view.getUint32(offset + 52, true);
+            const oldHandle = view.getUint32(offset + D9WG.F.ResetDevice.old_device_handle, true);
+            const newHandle = view.getUint32(offset + D9WG.F.ResetDevice.new_device_handle, true);
+            const hwnd = view.getUint32(offset + D9WG.F.ResetDevice.hwnd, true);
+            const x = view.getInt32(offset + D9WG.F.ResetDevice.x, true);
+            const y = view.getInt32(offset + D9WG.F.ResetDevice.y, true);
+            const width = view.getUint32(offset + D9WG.F.ResetDevice.width, true);
+            const height = view.getUint32(offset + D9WG.F.ResetDevice.height, true);
+            const enableAutoDepth = view.getUint32(offset + D9WG.F.ResetDevice.enable_auto_depth_stencil, true);
+            const multisampleType = view.getUint32(offset + D9WG.F.ResetDevice.multisample_type, true);
+            const multisampleQuality = view.getUint32(offset + D9WG.F.ResetDevice.multisample_quality, true);
             const oldState = this.devices.get(oldHandle);
             if (oldState) {
                 this.retireGPUObject(oldState.depthTexture);
@@ -4581,13 +4598,13 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // every Present (d3d9_proxy.c has no window-move subclassing in
             // M1), so this is the live source of truth for canvas placement
             // rather than a separate UPDATE_SURFACE event.
-            const handle = view.getUint32(offset, true);
+            const handle = view.getUint32(offset + D9WG.F.Present.device_handle, true);
             const state = this.deviceState(handle);
-            const hwnd = view.getUint32(offset + 4, true);
-            const x = view.getInt32(offset + 8, true);
-            const y = view.getInt32(offset + 12, true);
-            let width = view.getUint32(offset + 16, true);
-            let height = view.getUint32(offset + 20, true);
+            const hwnd = view.getUint32(offset + D9WG.F.Present.hwnd, true);
+            const x = view.getInt32(offset + D9WG.F.Present.x, true);
+            const y = view.getInt32(offset + D9WG.F.Present.y, true);
+            let width = view.getUint32(offset + D9WG.F.Present.width, true);
+            let height = view.getUint32(offset + D9WG.F.Present.height, true);
             // The guest recomputes the client rect on every Present, and
             // GetClientRect is known to return an empty rect in fullscreen
             // (recorded as an open issue at M1). Letting a 0x0 report through
@@ -4613,12 +4630,12 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onBeginScene(bytes, view, offset) {
-            const handle = view.getUint32(offset, true);
+            const handle = view.getUint32(offset + D9WG.F.DeviceOnly.device_handle, true);
             this.deviceState(handle).inScene = true;
         }
 
         onEndScene(bytes, view, offset) {
-            const handle = view.getUint32(offset, true);
+            const handle = view.getUint32(offset + D9WG.F.DeviceOnly.device_handle, true);
             this.deviceState(handle).inScene = false;
         }
 
@@ -4655,10 +4672,9 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onCreateQuery(bytes, view, offset, length) {
-            if (length < 16) return;
-            const handle = view.getUint32(offset + 4, true);
-            const type = view.getUint32(offset + 8, true);
-            const responseOffset = view.getUint32(offset + 12, true);
+            const handle = view.getUint32(offset + D9WG.F.CreateQuery.resource_handle, true);
+            const type = view.getUint32(offset + D9WG.F.CreateQuery.query_type, true);
+            const responseOffset = view.getUint32(offset + D9WG.F.CreateQuery.response_offset, true);
             if (responseOffset + 16 > D9WG_QUERY_REGION_BYTES ||
                     (responseOffset & 15) !== 0) {
                 ++this.stats.queryFailures;
@@ -4670,11 +4686,10 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onBeginQuery(bytes, view, offset, length, metadata) {
-            if (length < 16) return;
-            const query = this.resources.get(view.getUint32(offset + 4, true));
+            const query = this.resources.get(view.getUint32(offset + D9WG.F.QueryIssue.resource_handle, true));
             if (!query || query.kind !== RESOURCE_QUERY) return;
-            const responseOffset = view.getUint32(offset + 8, true);
-            const requestId = view.getUint32(offset + 12, true);
+            const responseOffset = view.getUint32(offset + D9WG.F.QueryIssue.response_offset, true);
+            const requestId = view.getUint32(offset + D9WG.F.QueryIssue.request_id, true);
             if (responseOffset !== query.responseOffset) return;
             query.active = true;
             query.requestId = requestId;
@@ -4686,11 +4701,10 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onEndQuery(bytes, view, offset, length, metadata) {
-            if (length < 16) return;
-            const query = this.resources.get(view.getUint32(offset + 4, true));
+            const query = this.resources.get(view.getUint32(offset + D9WG.F.QueryIssue.resource_handle, true));
             if (!query || query.kind !== RESOURCE_QUERY) return;
-            const responseOffset = view.getUint32(offset + 8, true);
-            const requestId = view.getUint32(offset + 12, true);
+            const responseOffset = view.getUint32(offset + D9WG.F.QueryIssue.response_offset, true);
+            const requestId = view.getUint32(offset + D9WG.F.QueryIssue.request_id, true);
             if (responseOffset !== query.responseOffset) return;
             query.requestId = requestId;
             const resultMetadata = metadata || query.metadata || {};
@@ -4769,34 +4783,20 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
 
         async onReadbackSurface(bytes, view, offset, length, metadata) {
             ++this.stats.readbackRequests;
-            if (length < 48) {
-                // Same reasoning as above: the guest blocks on the answer, so
-                // a malformed request has to be answered, not dropped.
-                ++this.stats.renderTargetReadbackFailures;
-                this.warnOnce("readback-short-payload",
-                    "a readback command was too short to decode; the guest is " +
-                    "told it failed rather than left waiting", { length });
-                try {
-                    this.writeReadbackResponse(
-                        view.getUint32(offset + 40, true),
-                        view.getUint32(offset + 44, true), null,
-                        D9WG_RESPONSE_FAILED, metadata);
-                } catch (_) { ++this.stats.responseWriteFailures; }
-                return;
-            }
-            const deviceHandle = view.getUint32(offset, true);
-            const textureHandle = view.getUint32(offset + 4, true);
-            const level = view.getUint32(offset + 8, true);
-            const format = view.getUint32(offset + 12, true);
-            const width = view.getUint32(offset + 16, true);
-            const height = view.getUint32(offset + 20, true);
-            const firstRow = view.getUint32(offset + 24, true);
-            const rowCount = view.getUint32(offset + 28, true);
-            const destinationPitch = view.getUint32(offset + 32, true);
-            const destinationBytes = view.getUint32(offset + 36, true);
-            const responseOffset = view.getUint32(offset + 40, true);
-            const requestId = view.getUint32(offset + 44, true);
-            const face = length >= 52 ? view.getUint32(offset + 48, true) : 0;
+            const deviceHandle = view.getUint32(offset + D9WG.F.ReadbackSurface.device_handle, true);
+            const textureHandle = view.getUint32(offset + D9WG.F.ReadbackSurface.texture_handle, true);
+            const level = view.getUint32(offset + D9WG.F.ReadbackSurface.level, true);
+            const format = view.getUint32(offset + D9WG.F.ReadbackSurface.format, true);
+            const width = view.getUint32(offset + D9WG.F.ReadbackSurface.width, true);
+            const height = view.getUint32(offset + D9WG.F.ReadbackSurface.height, true);
+            const firstRow = view.getUint32(offset + D9WG.F.ReadbackSurface.first_row, true);
+            const rowCount = view.getUint32(offset + D9WG.F.ReadbackSurface.row_count, true);
+            const destinationPitch = view.getUint32(offset + D9WG.F.ReadbackSurface.destination_pitch, true);
+            const destinationBytes = view.getUint32(offset + D9WG.F.ReadbackSurface.destination_bytes, true);
+            const responseOffset = view.getUint32(offset + D9WG.F.ReadbackSurface.response_offset, true);
+            const requestId = view.getUint32(offset + D9WG.F.ReadbackSurface.request_id, true);
+            const face = D9WG.has(length, "ReadbackSurface", "face")
+                ? view.getUint32(offset + D9WG.F.ReadbackSurface.face, true) : 0;
             const fail = error => {
                 ++this.stats.renderTargetReadbackFailures;
                 try {
@@ -5011,11 +5011,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onClear(bytes, view, offset, length) {
-            const deviceHandle = view.getUint32(offset, true);
-            const flags = view.getUint32(offset + 4, true);
-            const color = view.getUint32(offset + 8, true);
-            const depth = view.getFloat32(offset + 12, true);
-            const stencil = view.getUint32(offset + 16, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.Clear.device_handle, true);
+            const flags = view.getUint32(offset + D9WG.F.Clear.clear_flags, true);
+            const color = view.getUint32(offset + D9WG.F.Clear.color, true);
+            const depth = view.getFloat32(offset + D9WG.F.Clear.depth, true);
+            const stencil = view.getUint32(offset + D9WG.F.Clear.stencil, true);
             const state = this.deviceState(deviceHandle);
             const clearsColor = (flags & D3DCLEAR_TARGET) !== 0;
             // A depth/stencil clear is only meaningful if the device
@@ -5039,7 +5039,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             const scissor = (state.renderStates.get(D3DRS_SCISSORTESTENABLE) || 0) !== 0 ?
                 state.scissorRect : null;
             const bounds = intersectRects(state.viewport, scissor, targets.width, targets.height);
-            const rectCount = view.getUint32(offset + 20, true);
+            const rectCount = view.getUint32(offset + D9WG.F.Clear.rect_count, true);
             if (24 + rectCount * 16 > length) {
                 ++this.stats.malformedBatches;
                 throw new D9WGStreamError("D9WG Clear rectangles overrun the command");
@@ -5054,7 +5054,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             };
             if (!rectCount) clip(0, 0, targets.width, targets.height);
             for (let index = 0; index < rectCount; ++index) {
-                const base = offset + 24 + index * 16;
+                const base = offset + D9WG.STRUCTS.Clear.size + index * 16;
                 clip(view.getInt32(base, true), view.getInt32(base + 4, true),
                     view.getInt32(base + 8, true), view.getInt32(base + 12, true));
             }
@@ -6193,10 +6193,10 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // ---- resources ----
 
         onCreateBuffer(bytes, view, offset) {
-            const handle = view.getUint32(offset + 4, true);
-            const kind = view.getUint32(offset + 8, true);
-            const byteCount = view.getUint32(offset + 12, true);
-            const format = view.getUint32(offset + 20, true); // index format, for INDEX kind
+            const handle = view.getUint32(offset + D9WG.F.CreateBuffer.resource_handle, true);
+            const kind = view.getUint32(offset + D9WG.F.CreateBuffer.resource_kind, true);
+            const byteCount = view.getUint32(offset + D9WG.F.CreateBuffer.byte_count, true);
+            const format = view.getUint32(offset + D9WG.F.CreateBuffer.fvf, true); // index format, for INDEX kind
             const usage = kind === RESOURCE_BUFFER_INDEX
                 ? BUFFER_USAGE_INDEX | BUFFER_USAGE_COPY_DST
                 : BUFFER_USAGE_VERTEX | BUFFER_USAGE_COPY_DST;
@@ -6224,11 +6224,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onUpdateBuffer(bytes, view, offset, length) {
-            const handle = view.getUint32(offset, true);
-            const destinationOffset = view.getUint32(offset + 4, true);
-            const byteCount = view.getUint32(offset + 8, true);
-            const dataOffset = view.getUint32(offset + 12, true);
-            const lockFlags = view.getUint32(offset + 16, true);
+            const handle = view.getUint32(offset + D9WG.F.UpdateBuffer.resource_handle, true);
+            const destinationOffset = view.getUint32(offset + D9WG.F.UpdateBuffer.destination_offset, true);
+            const byteCount = view.getUint32(offset + D9WG.F.UpdateBuffer.byte_count, true);
+            const dataOffset = view.getUint32(offset + D9WG.F.UpdateBuffer.data_offset, true);
+            const lockFlags = view.getUint32(offset + D9WG.F.UpdateBuffer.lock_flags, true);
             const resource = this.resources.get(handle);
             if (!resource || !byteCount) return;
             this.applyBufferUpdate(resource, destinationOffset, bytes, dataOffset,
@@ -6355,8 +6355,8 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onDestroyResource(bytes, view, offset) {
-            const handle = view.getUint32(offset, true);
-            const kind = view.getUint32(offset + 4, true);
+            const handle = view.getUint32(offset + D9WG.F.DestroyResource.resource_handle, true);
+            const kind = view.getUint32(offset + D9WG.F.DestroyResource.resource_kind, true);
             if (kind === 0) {
                 // Matches the D3D8 guest convention: DESTROY_RESOURCE with
                 // resource_kind 0 targets the device handle itself, emitted
@@ -6396,16 +6396,14 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onCreateTexture2D(bytes, view, offset, length) {
-            const handle = view.getUint32(offset + 4, true);
-            const width = view.getUint32(offset + 8, true);
-            const height = view.getUint32(offset + 12, true);
-            let levelCount = view.getUint32(offset + 16, true);
-            const format = view.getUint32(offset + 20, true);
-            const usage = view.getUint32(offset + 24, true);
-            const multisampleType = length >= 40
-                ? view.getUint32(offset + 32, true) : D3DMULTISAMPLE_NONE;
-            const multisampleQuality = length >= 40
-                ? view.getUint32(offset + 36, true) : 0;
+            const handle = view.getUint32(offset + D9WG.F.CreateTexture2D.resource_handle, true);
+            const width = view.getUint32(offset + D9WG.F.CreateTexture2D.width, true);
+            const height = view.getUint32(offset + D9WG.F.CreateTexture2D.height, true);
+            let levelCount = view.getUint32(offset + D9WG.F.CreateTexture2D.level_count, true);
+            const format = view.getUint32(offset + D9WG.F.CreateTexture2D.format, true);
+            const usage = view.getUint32(offset + D9WG.F.CreateTexture2D.usage, true);
+            const multisampleType = view.getUint32(offset + D9WG.F.CreateTexture2D.multisample_type, true);
+            const multisampleQuality = view.getUint32(offset + D9WG.F.CreateTexture2D.multisample_quality, true);
             // A render target or depth surface arrives as a CREATE_TEXTURE_2D
             // carrying the usage (see d3d9_protocol.h): the host needs a GPU
             // texture either way, and D3D9 reaches a texture's render target
@@ -6535,7 +6533,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // with different filtering behaves the way D3D9 says it should.
             this.resources.set(handle, {
                 kind: RESOURCE_TEXTURE_2D, textureType: "2d",
-                deviceHandle: view.getUint32(offset, true),
+                deviceHandle: view.getUint32(offset + D9WG.F.CreateTexture2D.device_handle, true),
                 gpuTexture, msaaTexture, gpuFormat, srgbFormat, format, usage,
                 width, height, sampleCount,
                 multisampleType, multisampleQuality,
@@ -6723,22 +6721,22 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onUpdateTexture(bytes, view, offset) {
-            const handle = view.getUint32(offset, true);
-            const level = view.getUint32(offset + 4, true);
-            const x = view.getUint32(offset + 8, true);
-            const y = view.getUint32(offset + 12, true);
+            const handle = view.getUint32(offset + D9WG.F.UpdateTexture.resource_handle, true);
+            const level = view.getUint32(offset + D9WG.F.UpdateTexture.level, true);
+            const x = view.getUint32(offset + D9WG.F.UpdateTexture.x, true);
+            const y = view.getUint32(offset + D9WG.F.UpdateTexture.y, true);
             // D9WGUpdateTexture.z is the cube face for a cube texture and the
             // slice for a volume texture; both land on the same WebGPU array
             // layer, which is why one field and one opcode serve both.
-            const z = view.getUint32(offset + 16, true);
-            const width = view.getUint32(offset + 20, true);
-            const height = view.getUint32(offset + 24, true);
-            const depth = Math.max(1, view.getUint32(offset + 28, true));
-            const rowPitch = view.getUint32(offset + 32, true);
-            const slicePitch = view.getUint32(offset + 36, true) ||
+            const z = view.getUint32(offset + D9WG.F.UpdateTexture.z, true);
+            const width = view.getUint32(offset + D9WG.F.UpdateTexture.width, true);
+            const height = view.getUint32(offset + D9WG.F.UpdateTexture.height, true);
+            const depth = Math.max(1, view.getUint32(offset + D9WG.F.UpdateTexture.depth, true));
+            const rowPitch = view.getUint32(offset + D9WG.F.UpdateTexture.row_pitch, true);
+            const slicePitch = view.getUint32(offset + D9WG.F.UpdateTexture.slice_pitch, true) ||
                 rowPitch * height;
-            const dataBytes = view.getUint32(offset + 40, true);
-            const dataOffset = view.getUint32(offset + 44, true);
+            const dataBytes = view.getUint32(offset + D9WG.F.UpdateTexture.data_bytes, true);
+            const dataOffset = view.getUint32(offset + D9WG.F.UpdateTexture.data_offset, true);
             const resource = this.resources.get(handle);
             if (!resource || !resource.gpuTexture) return;
             const source = new Uint8Array(bytes.buffer, bytes.byteOffset + dataOffset, dataBytes);
@@ -6872,11 +6870,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // Both views are kept: bind groups need the cube view, and a blit or an
         // upload addresses a single face, which only the layered 2D form can do.
         onCreateTextureCube(bytes, view, offset) {
-            const handle = view.getUint32(offset + 4, true);
-            const edge = view.getUint32(offset + 8, true);
-            const levelCount = Math.max(1, view.getUint32(offset + 12, true));
-            const format = view.getUint32(offset + 16, true);
-            const usage = view.getUint32(offset + 20, true);
+            const handle = view.getUint32(offset + D9WG.F.CreateTextureCube.resource_handle, true);
+            const edge = view.getUint32(offset + D9WG.F.CreateTextureCube.edge_length, true);
+            const levelCount = Math.max(1, view.getUint32(offset + D9WG.F.CreateTextureCube.level_count, true));
+            const format = view.getUint32(offset + D9WG.F.CreateTextureCube.format, true);
+            const usage = view.getUint32(offset + D9WG.F.CreateTextureCube.usage, true);
             const ddIndexed = (usage & D9WG_USAGE_DDRAW_INDEXED) !== 0 &&
                 isPalettizedFormat(format);
             const gpuFormat = ddIndexed ? "r8uint" : formatToGPU(format);
@@ -6908,7 +6906,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             ++this.stats.cubeTexturesCreated;
             this.resources.set(handle, {
                 kind: RESOURCE_TEXTURE_CUBE, textureType: "cube",
-                deviceHandle: view.getUint32(offset, true),
+                deviceHandle: view.getUint32(offset + D9WG.F.CreateTextureCube.device_handle, true),
                 gpuTexture, gpuFormat, srgbFormat,
                 format, usage, width: edge, height: edge, layerCount: 6,
                 gpuBytesPerTexel: ddIndexed ? 1 : gpuBytesPerTexel(format),
@@ -6926,14 +6924,13 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onCreateTextureVolume(bytes, view, offset, length) {
-            if (length < 40) return;
-            const handle = view.getUint32(offset + 4, true);
-            const width = view.getUint32(offset + 8, true);
-            const height = view.getUint32(offset + 12, true);
-            const depth = view.getUint32(offset + 16, true);
-            const levelCount = Math.max(1, view.getUint32(offset + 20, true));
-            const format = view.getUint32(offset + 24, true);
-            const usage = view.getUint32(offset + 28, true);
+            const handle = view.getUint32(offset + D9WG.F.CreateTextureVolume.resource_handle, true);
+            const width = view.getUint32(offset + D9WG.F.CreateTextureVolume.width, true);
+            const height = view.getUint32(offset + D9WG.F.CreateTextureVolume.height, true);
+            const depth = view.getUint32(offset + D9WG.F.CreateTextureVolume.depth, true);
+            const levelCount = Math.max(1, view.getUint32(offset + D9WG.F.CreateTextureVolume.level_count, true));
+            const format = view.getUint32(offset + D9WG.F.CreateTextureVolume.format, true);
+            const usage = view.getUint32(offset + D9WG.F.CreateTextureVolume.usage, true);
             const gpuFormat = formatToGPU(format);
             if (!gpuFormat || isCompressedFormat(format) ||
                     (isRenderableGPUFormat(gpuFormat) &&
@@ -6957,7 +6954,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             ++this.stats.volumeTexturesCreated;
             this.resources.set(handle, {
                 kind: RESOURCE_TEXTURE_VOLUME, textureType: "3d",
-                deviceHandle: view.getUint32(offset, true),
+                deviceHandle: view.getUint32(offset + D9WG.F.CreateTextureVolume.device_handle, true),
                 gpuTexture, gpuFormat, format, usage,
                 width, height, depth,
                 gpuBytesPerTexel: gpuBytesPerTexel(format),
@@ -6993,25 +6990,25 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetScissorRect(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
-            const left = view.getInt32(offset + 4, true);
-            const top = view.getInt32(offset + 8, true);
-            const right = view.getInt32(offset + 12, true);
-            const bottom = view.getInt32(offset + 16, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetScissorRect.device_handle, true));
+            const left = view.getInt32(offset + D9WG.F.SetScissorRect.left, true);
+            const top = view.getInt32(offset + D9WG.F.SetScissorRect.top, true);
+            const right = view.getInt32(offset + D9WG.F.SetScissorRect.right, true);
+            const bottom = view.getInt32(offset + D9WG.F.SetScissorRect.bottom, true);
             state.scissorRect = { x: Math.max(0, left), y: Math.max(0, top),
                 width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
         }
 
         onSetRenderTarget(bytes, view, offset, length) {
-            const state = this.deviceState(view.getUint32(offset, true));
-            const index = view.getUint32(offset + 4, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetRenderTarget.device_handle, true));
+            const index = view.getUint32(offset + D9WG.F.SetRenderTarget.target_index, true);
             if (index >= MAX_RENDER_TARGETS) return;
-            state.renderTargets[index] = view.getUint32(offset + 8, true);
-            state.renderTargetLevels[index] = view.getUint32(offset + 12, true);
+            state.renderTargets[index] = view.getUint32(offset + D9WG.F.SetRenderTarget.color_texture_handle, true);
+            state.renderTargetLevels[index] = view.getUint32(offset + D9WG.F.SetRenderTarget.color_level, true);
             // Protocol 1.4 added the cube face. Length-gated so a 1.3 payload
             // still decodes as "face 0", which is what a 2D target always is.
-            state.renderTargetFaces[index] = length >= 20
-                ? view.getUint32(offset + 16, true) : 0;
+            state.renderTargetFaces[index] = D9WG.has(length, "SetRenderTarget", "color_face")
+                ? view.getUint32(offset + D9WG.F.SetRenderTarget.color_face, true) : 0;
             ++this.stats.renderTargetBinds;
         }
 
@@ -7190,7 +7187,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
 
         onGenerateMips(bytes, view, offset) {
             const resource = this.resources.get(
-                view.getUint32(offset + 4, true));
+                view.getUint32(offset + D9WG.F.GenerateMips.resource_handle, true));
             if (!resource || !resource.autoGenerateMips) return;
             // An explicit call regenerates whether or not the host noticed a
             // write: the app may know something the write tracking cannot.
@@ -7201,14 +7198,14 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
 
         onSetTextureLOD(bytes, view, offset) {
             const resource = this.resources.get(
-                view.getUint32(offset + 4, true));
+                view.getUint32(offset + D9WG.F.SetTextureLOD.resource_handle, true));
             if (!resource) return;
             // Clamped against the chain that actually exists rather than
             // trusted: the guest clamps too, but a texture recreated at a
             // different level count between the two would otherwise leave a
             // lodMinClamp above lodMaxClamp, which WebGPU rejects outright.
             const levels = Math.max(1, resource.levelCount || 1);
-            resource.lod = Math.min(view.getUint32(offset + 8, true) >>> 0,
+            resource.lod = Math.min(view.getUint32(offset + D9WG.F.SetTextureLOD.lod, true) >>> 0,
                 levels - 1);
         }
 
@@ -7238,16 +7235,16 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // that hook the chain is refused and named rather than quietly
         // rendering nowhere.
         onCreateSwapChain(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.CreateSwapChain.device_handle, true));
             if (!state) return;
-            const handle = view.getUint32(offset + 4, true);
-            const backBufferHandle = view.getUint32(offset + 8, true);
+            const handle = view.getUint32(offset + D9WG.F.CreateSwapChain.swap_chain_handle, true);
+            const backBufferHandle = view.getUint32(offset + D9WG.F.CreateSwapChain.back_buffer_handle, true);
             const surface = {
-                hwnd: view.getUint32(offset + 12, true),
-                x: view.getInt32(offset + 16, true),
-                y: view.getInt32(offset + 20, true),
-                width: view.getUint32(offset + 24, true),
-                height: view.getUint32(offset + 28, true),
+                hwnd: view.getUint32(offset + D9WG.F.CreateSwapChain.hwnd, true),
+                x: view.getInt32(offset + D9WG.F.CreateSwapChain.x, true),
+                y: view.getInt32(offset + D9WG.F.CreateSwapChain.y, true),
+                width: view.getUint32(offset + D9WG.F.CreateSwapChain.width, true),
+                height: view.getUint32(offset + D9WG.F.CreateSwapChain.height, true),
                 swapChain: handle,
                 sessionKey: state.surface ? state.surface.sessionKey : null,
                 visible: true,
@@ -7293,9 +7290,9 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onDestroySwapChain(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.DestroySwapChain.device_handle, true));
             if (!state) return;
-            const handle = view.getUint32(offset + 4, true);
+            const handle = view.getUint32(offset + D9WG.F.DestroySwapChain.swap_chain_handle, true);
             const chain = state.swapChains.get(handle);
             if (!chain) return;
             state.swapChains.delete(handle);
@@ -7307,22 +7304,22 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onPresentSwapChain(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.PresentSwapChain.device_handle, true));
             if (!state) return;
-            const handle = view.getUint32(offset + 4, true);
+            const handle = view.getUint32(offset + D9WG.F.PresentSwapChain.swap_chain_handle, true);
             const chain = state.swapChains.get(handle);
             if (!chain) {
                 ++this.stats.swapChainPresentsDropped;
                 return;
             }
             // D9WGPresentSwapChain: device, chain, hwnd, x, y, width, height
-            const width = view.getUint32(offset + 20, true);
-            const height = view.getUint32(offset + 24, true);
+            const width = view.getUint32(offset + D9WG.F.PresentSwapChain.width, true);
+            const height = view.getUint32(offset + D9WG.F.PresentSwapChain.height, true);
             chain.surface = {
                 ...chain.surface,
-                hwnd: view.getUint32(offset + 8, true),
-                x: view.getInt32(offset + 12, true),
-                y: view.getInt32(offset + 16, true),
+                hwnd: view.getUint32(offset + D9WG.F.PresentSwapChain.hwnd, true),
+                x: view.getInt32(offset + D9WG.F.PresentSwapChain.x, true),
+                y: view.getInt32(offset + D9WG.F.PresentSwapChain.y, true),
                 // An empty client rect means the guest could not find the
                 // window; the last non-empty size is the better answer, for
                 // the same reason the implicit chain keeps its own.
@@ -7370,18 +7367,14 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetGammaRamp(bytes, view, offset, length) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetGammaRamp.device_handle, true));
             if (!state) return;
-            if (length < 16 + 768 * 2) {
-                ++this.stats.malformedCommands;
-                return;
-            }
             const values = new Float32Array(256 * 4);
             let identity = true;
             for (let index = 0; index < 256; ++index) {
                 for (let channel = 0; channel < 3; ++channel) {
                     const raw = view.getUint16(
-                        offset + 16 + (channel * 256 + index) * 2, true);
+                        offset + D9WG.F.SetGammaRamp.ramp + (channel * 256 + index) * 2, true);
                     values[index * 4 + channel] = raw / 65535;
                     // The identity ramp is entry = index * 257 (0x0000, 0x0101,
                     // ... 0xffff). Recognising it matters: a title that sets the
@@ -7510,10 +7503,10 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
         }
 
         onSetPalette(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const index = view.getUint32(offset + 4, true);
-            const entryCount = view.getUint32(offset + 8, true);
-            const dataOffset = view.getUint32(offset + 12, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetPalette.device_handle, true);
+            const index = view.getUint32(offset + D9WG.F.SetPalette.palette_index, true);
+            const entryCount = view.getUint32(offset + D9WG.F.SetPalette.entry_count, true);
+            const dataOffset = view.getUint32(offset + D9WG.F.SetPalette.data_offset, true);
             if (entryCount !== 256) return;
             const source = new Uint8Array(bytes.buffer,
                 bytes.byteOffset + dataOffset, 256 * 4);
@@ -7536,8 +7529,8 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
         }
 
         onSetCurrentTexturePalette(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const index = view.getUint32(offset + 4, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetCurrentTexturePalette.device_handle, true);
+            const index = view.getUint32(offset + D9WG.F.SetCurrentTexturePalette.palette_index, true);
             const state = this.deviceState(deviceHandle);
             if (state.currentPalette === index) return;
             state.currentPalette = index;
@@ -7546,9 +7539,9 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
         }
 
         onSetDepthStencilSurfaceLevel(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
-            const handle = view.getUint32(offset + 4, true);
-            const level = view.getUint32(offset + 8, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetDepthStencilSurfaceLevel.device_handle, true));
+            const handle = view.getUint32(offset + D9WG.F.SetDepthStencilSurfaceLevel.depth_texture_handle, true);
+            const level = view.getUint32(offset + D9WG.F.SetDepthStencilSurfaceLevel.depth_level, true);
             this.setDepthStencilSurface(state, handle, level);
         }
 
@@ -7808,30 +7801,30 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
         // Doing it eagerly is what produced "the host cannot address this
         // surface" -- the back buffer genuinely has no view yet at this point.
         onStretchRect(bytes, view, offset, length) {
-            const state = this.deviceState(view.getUint32(offset, true));
-            const sourceHandle = view.getUint32(offset + 4, true);
-            const sourceLevel = view.getUint32(offset + 8, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.StretchRect.device_handle, true));
+            const sourceHandle = view.getUint32(offset + D9WG.F.StretchRect.source_texture_handle, true);
+            const sourceLevel = view.getUint32(offset + D9WG.F.StretchRect.source_level, true);
             const sourceRect = {
-                left: view.getInt32(offset + 12, true),
-                top: view.getInt32(offset + 16, true),
-                right: view.getInt32(offset + 20, true),
-                bottom: view.getInt32(offset + 24, true),
+                left: view.getInt32(offset + D9WG.F.StretchRect.source_left, true),
+                top: view.getInt32(offset + D9WG.F.StretchRect.source_top, true),
+                right: view.getInt32(offset + D9WG.F.StretchRect.source_right, true),
+                bottom: view.getInt32(offset + D9WG.F.StretchRect.source_bottom, true),
             };
-            const destinationHandle = view.getUint32(offset + 28, true);
-            const destinationLevel = view.getUint32(offset + 32, true);
+            const destinationHandle = view.getUint32(offset + D9WG.F.StretchRect.destination_texture_handle, true);
+            const destinationLevel = view.getUint32(offset + D9WG.F.StretchRect.destination_level, true);
             const destinationRect = {
-                left: view.getInt32(offset + 36, true),
-                top: view.getInt32(offset + 40, true),
-                right: view.getInt32(offset + 44, true),
-                bottom: view.getInt32(offset + 48, true),
+                left: view.getInt32(offset + D9WG.F.StretchRect.destination_left, true),
+                top: view.getInt32(offset + D9WG.F.StretchRect.destination_top, true),
+                right: view.getInt32(offset + D9WG.F.StretchRect.destination_right, true),
+                bottom: view.getInt32(offset + D9WG.F.StretchRect.destination_bottom, true),
             };
-            const filterPoint = view.getUint32(offset + 52, true) !== 0;
+            const filterPoint = view.getUint32(offset + D9WG.F.StretchRect.filter_point, true) !== 0;
             // Protocol 1.4. Length-gated: a 1.3 payload has no faces, and a
             // 2D surface is always face 0 anyway.
-            const sourceFace = length >= 64
-                ? view.getUint32(offset + 56, true) : 0;
-            const destinationFace = length >= 64
-                ? view.getUint32(offset + 60, true) : 0;
+            const sourceFace = D9WG.has(length, "StretchRect", "source_face")
+                ? view.getUint32(offset + D9WG.F.StretchRect.source_face, true) : 0;
+            const destinationFace = D9WG.has(length, "StretchRect", "destination_face")
+                ? view.getUint32(offset + D9WG.F.StretchRect.destination_face, true) : 0;
 
             const source = sourceHandle ? this.resources.get(sourceHandle) : null;
             const destination = destinationHandle
@@ -8437,15 +8430,15 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // exact text, so each distinct message arrives once no matter how many
         // frames it repeats on.
         onGuestLog(bytes, view, offset, length, metadata) {
-            const severity = view.getUint32(offset, true);
-            const textBytes = view.getUint32(offset + 4, true);
+            const severity = view.getUint32(offset + D9WG.F.GuestLog.severity, true);
+            const textBytes = view.getUint32(offset + D9WG.F.GuestLog.text_bytes, true);
             if (8 + textBytes > length) {
                 ++this.stats.malformedBatches;
                 throw new D9WGStreamError("D9WG guest log text overruns the command");
             }
             let text = "";
             for (let index = 0; index < textBytes; ++index)
-                text += String.fromCharCode(bytes[offset + 8 + index]);
+                text += String.fromCharCode(bytes[offset + D9WG.STRUCTS.GuestLog.size + index]);
             ++this.stats.guestReports;
             (this.guestReports || (this.guestReports = [])).push(text);
             // A state restore replays the graphics journal, and with it every
@@ -8465,10 +8458,10 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onColorFill(bytes, view, offset, length) {
-            const resource = this.resources.get(view.getUint32(offset + 4, true));
-            const level = view.getUint32(offset + 8, true);
-            const color = view.getUint32(offset + 12, true);
-            const face = length >= 40 ? view.getUint32(offset + 32, true) : 0;
+            const resource = this.resources.get(view.getUint32(offset + D9WG.F.ColorFill.texture_handle, true));
+            const level = view.getUint32(offset + D9WG.F.ColorFill.level, true);
+            const color = view.getUint32(offset + D9WG.F.ColorFill.color, true);
+            const face = D9WG.has(length, "ColorFill", "face") ? view.getUint32(offset + D9WG.F.ColorFill.face, true) : 0;
             // The question is whether this texture can be an attachment, not
             // whether D3D9 called it a render target. An offscreen plain
             // surface in D3DPOOL_DEFAULT carries no D3DUSAGE_RENDERTARGET and
@@ -8493,10 +8486,10 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // which on a cube map is a six-layer view where the pass wants one.
             const targetView = this.targetViewFor(resource, level, false,
                 Math.min(face, (resource.layerCount || 1) - 1));
-            const left = view.getInt32(offset + 16, true);
-            const top = view.getInt32(offset + 20, true);
-            const right = view.getInt32(offset + 24, true);
-            const bottom = view.getInt32(offset + 28, true);
+            const left = view.getInt32(offset + D9WG.F.ColorFill.left, true);
+            const top = view.getInt32(offset + D9WG.F.ColorFill.top, true);
+            const right = view.getInt32(offset + D9WG.F.ColorFill.right, true);
+            const bottom = view.getInt32(offset + D9WG.F.ColorFill.bottom, true);
             const fullWidth = Math.max(1, resource.width >> level);
             const fullHeight = Math.max(1, resource.height >> level);
             const clippedLeft = Math.max(0, Math.min(fullWidth, left));
@@ -9025,30 +9018,30 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onCreateVertexDeclaration(bytes, view, offset, length) {
-            const handle = view.getUint32(offset + 4, true);
-            const count = view.getUint32(offset + 8, true);
-            const elements = this.decodeVertexElements(bytes, view, offset + 16, count);
+            const handle = view.getUint32(offset + D9WG.F.CreateVertexDeclaration.resource_handle, true);
+            const count = view.getUint32(offset + D9WG.F.CreateVertexDeclaration.element_count, true);
+            const elements = this.decodeVertexElements(bytes, view, offset + D9WG.STRUCTS.CreateVertexDeclaration.size, count);
             this.resources.set(handle,
                 { kind: RESOURCE_VERTEX_DECLARATION, elements });
         }
 
         onSetVertexDeclaration(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const declarationHandle = view.getUint32(offset + 4, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetVertexDeclaration.device_handle, true);
+            const declarationHandle = view.getUint32(offset + D9WG.F.SetVertexDeclaration.declaration_handle, true);
             const state = this.deviceState(deviceHandle);
             state.vertexDeclarationHandle = declarationHandle;
             state.fvfElements = null;
         }
 
         onSetFVF(bytes, view, offset, length) {
-            const deviceHandle = view.getUint32(offset, true);
-            const count = view.getUint32(offset + 8, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetFVF.device_handle, true);
+            const count = view.getUint32(offset + D9WG.F.SetFVF.element_count, true);
             const state = this.deviceState(deviceHandle);
-            state.fvfElements = this.decodeVertexElements(bytes, view, offset + 16, count);
+            state.fvfElements = this.decodeVertexElements(bytes, view, offset + D9WG.STRUCTS.SetFVF.size, count);
             // Kept only so a diagnostic can say which FVF produced a
             // declaration; nothing in the render path reads it, because the
             // guest already expanded it into the element shape above.
-            state.fvf = view.getUint32(offset + 4, true);
+            state.fvf = view.getUint32(offset + D9WG.F.SetFVF.fvf, true);
             state.vertexDeclarationHandle = 0;
         }
 
@@ -9063,9 +9056,9 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetRenderState(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const stateId = view.getUint32(offset + 4, true);
-            const value = view.getUint32(offset + 8, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetRenderState.device_handle, true);
+            const stateId = view.getUint32(offset + D9WG.F.SetRenderState.state, true);
+            const value = view.getUint32(offset + D9WG.F.SetRenderState.value, true);
             this.deviceState(deviceHandle).renderStates.set(stateId, value);
             this.noteUnreadState("renderState", CONSUMED_RENDER_STATES, stateId);
             if (stateId === D3DRS_SRGBWRITEENABLE && value !== 0) {
@@ -9114,17 +9107,17 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetTextureStageState(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const stage = view.getUint32(offset + 4, true);
-            const stateId = view.getUint32(offset + 8, true);
-            const value = view.getUint32(offset + 12, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetTextureStageState.device_handle, true);
+            const stage = view.getUint32(offset + D9WG.F.SetTextureStageState.stage, true);
+            const stateId = view.getUint32(offset + D9WG.F.SetTextureStageState.state, true);
+            const value = view.getUint32(offset + D9WG.F.SetTextureStageState.value, true);
             this.deviceState(deviceHandle).textureStageStates.set(stage * 64 + stateId, value);
         }
 
         onSetTexture(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const stage = view.getUint32(offset + 4, true);
-            const textureHandle = view.getUint32(offset + 8, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetTexture.device_handle, true);
+            const stage = view.getUint32(offset + D9WG.F.SetTexture.stage, true);
+            const textureHandle = view.getUint32(offset + D9WG.F.SetTexture.texture_handle, true);
             this.deviceState(deviceHandle).textures.set(stage, textureHandle);
         }
 
@@ -9135,55 +9128,55 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // lighting math. Real consumption is M2 (sampler variants, 4.4/12) and
         // M2/M3 (lighting) work.
         onSetSamplerState(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const sampler = view.getUint32(offset + 4, true);
-            const stateId = view.getUint32(offset + 8, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetSamplerState.device_handle, true);
+            const sampler = view.getUint32(offset + D9WG.F.SetSamplerState.sampler, true);
+            const stateId = view.getUint32(offset + D9WG.F.SetSamplerState.state, true);
             this.noteUnreadState("samplerState", CONSUMED_SAMPLER_STATES, stateId);
-            const value = view.getUint32(offset + 12, true);
+            const value = view.getUint32(offset + D9WG.F.SetSamplerState.value, true);
             this.deviceState(deviceHandle).samplerStates.set(sampler * 64 + stateId, value);
         }
 
         onSetMaterial(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetMaterial.device_handle, true);
             const readVec4 = base => [
                 view.getFloat32(base, true), view.getFloat32(base + 4, true),
                 view.getFloat32(base + 8, true), view.getFloat32(base + 12, true),
             ];
             this.deviceState(deviceHandle).material = {
-                diffuse: readVec4(offset + 4), ambient: readVec4(offset + 20),
-                specular: readVec4(offset + 36), emissive: readVec4(offset + 52),
-                power: view.getFloat32(offset + 68, true),
+                diffuse: readVec4(offset + D9WG.F.SetMaterial.diffuse), ambient: readVec4(offset + D9WG.F.SetMaterial.ambient),
+                specular: readVec4(offset + D9WG.F.SetMaterial.specular), emissive: readVec4(offset + D9WG.F.SetMaterial.emissive),
+                power: view.getFloat32(offset + D9WG.F.SetMaterial.power, true),
             };
         }
 
         onSetLight(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const index = view.getUint32(offset + 4, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetLight.device_handle, true);
+            const index = view.getUint32(offset + D9WG.F.SetLight.index, true);
             const readVec = (base, count) => {
                 const out = [];
                 for (let i = 0; i < count; ++i) out.push(view.getFloat32(base + i * 4, true));
                 return out;
             };
             this.deviceState(deviceHandle).lights.set(index, {
-                type: view.getUint32(offset + 8, true),
-                diffuse: readVec(offset + 12, 4), specular: readVec(offset + 28, 4),
-                ambient: readVec(offset + 44, 4), position: readVec(offset + 60, 3),
-                direction: readVec(offset + 72, 3), range: view.getFloat32(offset + 84, true),
-                falloff: view.getFloat32(offset + 88, true),
-                attenuation: readVec(offset + 92, 3),
-                theta: view.getFloat32(offset + 104, true), phi: view.getFloat32(offset + 108, true),
+                type: view.getUint32(offset + D9WG.F.SetLight.type, true),
+                diffuse: readVec(offset + D9WG.F.SetLight.diffuse, 4), specular: readVec(offset + D9WG.F.SetLight.specular, 4),
+                ambient: readVec(offset + D9WG.F.SetLight.ambient, 4), position: readVec(offset + D9WG.F.SetLight.position, 3),
+                direction: readVec(offset + D9WG.F.SetLight.direction, 3), range: view.getFloat32(offset + D9WG.F.SetLight.range, true),
+                falloff: view.getFloat32(offset + D9WG.F.SetLight.falloff, true),
+                attenuation: readVec(offset + D9WG.F.SetLight.attenuation, 3),
+                theta: view.getFloat32(offset + D9WG.F.SetLight.theta, true), phi: view.getFloat32(offset + D9WG.F.SetLight.phi, true),
             });
         }
 
         onLightEnable(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const index = view.getUint32(offset + 4, true);
-            const enable = view.getUint32(offset + 8, true) !== 0;
+            const deviceHandle = view.getUint32(offset + D9WG.F.LightEnable.device_handle, true);
+            const index = view.getUint32(offset + D9WG.F.LightEnable.index, true);
+            const enable = view.getUint32(offset + D9WG.F.LightEnable.enable, true) !== 0;
             this.deviceState(deviceHandle).lightEnabled.set(index, enable);
         }
 
         onSetViewport(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetViewport.device_handle, true);
             const state = this.deviceState(deviceHandle);
             // MinZ/MaxZ have been on the wire since M1 (D9WGSetViewport) and
             // used to be dropped here, with recordDraw hardcoding 0..1 into
@@ -9195,8 +9188,8 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // MinZ = MaxZ = 0 is legal ("draw on the near plane", HUDs and
             // first-person weapons); values outside 0 <= MinZ <= MaxZ <= 1
             // are the guest's SetViewport to refuse
-            let minZ = view.getFloat32(offset + 20, true);
-            let maxZ = view.getFloat32(offset + 24, true);
+            let minZ = view.getFloat32(offset + D9WG.F.SetViewport.min_z, true);
+            let maxZ = view.getFloat32(offset + D9WG.F.SetViewport.max_z, true);
             if (!(minZ >= 0 && minZ <= maxZ && maxZ <= 1)) {
                 this.protocolViolation("viewport-depth", "SetViewport depth range outside 0 <= MinZ <= MaxZ <= 1",
                     { minZ, maxZ });
@@ -9204,19 +9197,19 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 maxZ = Math.min(Math.max(maxZ || 0, minZ), 1);
             }
             state.viewport = {
-                x: view.getUint32(offset + 4, true),
-                y: view.getUint32(offset + 8, true),
-                width: view.getUint32(offset + 12, true),
-                height: view.getUint32(offset + 16, true),
+                x: view.getUint32(offset + D9WG.F.SetViewport.x, true),
+                y: view.getUint32(offset + D9WG.F.SetViewport.y, true),
+                width: view.getUint32(offset + D9WG.F.SetViewport.width, true),
+                height: view.getUint32(offset + D9WG.F.SetViewport.height, true),
                 minZ, maxZ,
             };
         }
 
         onSetTransform(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const transformState = view.getUint32(offset + 4, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetTransform.device_handle, true);
+            const transformState = view.getUint32(offset + D9WG.F.SetTransform.state, true);
             const matrix = new Float32Array(16);
-            for (let i = 0; i < 16; ++i) matrix[i] = view.getFloat32(offset + 8 + i * 4, true);
+            for (let i = 0; i < 16; ++i) matrix[i] = view.getFloat32(offset + D9WG.F.SetTransform.matrix + i * 4, true);
             // Stored exactly as D3D sent it (row-major, row-vector
             // convention). No transpose here -- see uniformBufferFor for why
             // none is needed anywhere on this path.
@@ -9230,24 +9223,23 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetClipPlane(bytes, view, offset, length) {
-            if (length < 24) return;
-            const state = this.deviceState(view.getUint32(offset, true));
-            const index = view.getUint32(offset + 4, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetClipPlane.device_handle, true));
+            const index = view.getUint32(offset + D9WG.F.SetClipPlane.index, true);
             if (index >= 6) return;
             state.clipPlanes[index] = [
-                view.getFloat32(offset + 8, true),
-                view.getFloat32(offset + 12, true),
-                view.getFloat32(offset + 16, true),
-                view.getFloat32(offset + 20, true),
+                view.getFloat32(offset + D9WG.F.SetClipPlane.plane, true),
+                view.getFloat32(offset + D9WG.F.SetClipPlane.plane + 4, true),
+                view.getFloat32(offset + D9WG.F.SetClipPlane.plane + 8, true),
+                view.getFloat32(offset + D9WG.F.SetClipPlane.plane + 12, true),
             ];
         }
 
         onSetStreamSource(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const stream = view.getUint32(offset + 4, true);
-            const bufferHandle = view.getUint32(offset + 8, true);
-            const stride = view.getUint32(offset + 12, true);
-            const offsetInBytes = view.getUint32(offset + 16, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetStreamSource.device_handle, true);
+            const stream = view.getUint32(offset + D9WG.F.SetStreamSource.stream, true);
+            const bufferHandle = view.getUint32(offset + D9WG.F.SetStreamSource.buffer_handle, true);
+            const stride = view.getUint32(offset + D9WG.F.SetStreamSource.stride, true);
+            const offsetInBytes = view.getUint32(offset + D9WG.F.SetStreamSource.offset_in_bytes, true);
             const state = this.deviceState(deviceHandle);
             const previous = state.streams.get(stream);
             state.streams.set(stream, { bufferHandle, stride, offsetInBytes,
@@ -9255,9 +9247,9 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetStreamSourceFreq(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const stream = view.getUint32(offset + 4, true);
-            const frequency = view.getUint32(offset + 8, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetStreamSourceFreq.device_handle, true);
+            const stream = view.getUint32(offset + D9WG.F.SetStreamSourceFreq.stream, true);
+            const frequency = view.getUint32(offset + D9WG.F.SetStreamSourceFreq.divider, true);
             const state = this.deviceState(deviceHandle);
             const previous = state.streams.get(stream) || {
                 bufferHandle: 0, stride: 0, offsetInBytes: 0,
@@ -9266,8 +9258,8 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetIndices(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const bufferHandle = view.getUint32(offset + 4, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.SetIndices.device_handle, true);
+            const bufferHandle = view.getUint32(offset + D9WG.F.SetIndices.buffer_handle, true);
             this.deviceState(deviceHandle).indexBufferHandle = bufferHandle;
         }
 
@@ -9373,13 +9365,13 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetVertexShader(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
-            state.vertexShaderHandle = view.getUint32(offset + 4, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShader.device_handle, true));
+            state.vertexShaderHandle = view.getUint32(offset + D9WG.F.SetShader.shader_handle, true);
         }
 
         onSetPixelShader(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
-            state.pixelShaderHandle = view.getUint32(offset + 4, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShader.device_handle, true));
+            state.pixelShaderHandle = view.getUint32(offset + D9WG.F.SetShader.shader_handle, true);
         }
 
         // Shared decode for all six SET_*_SHADER_CONSTANT_* opcodes: they use
@@ -9406,37 +9398,37 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetVertexShaderConstantF(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShaderConstantF.device_handle, true));
             this.applyConstants(bytes, view, offset, state.vsConstF, 4,
                 at => view.getFloat32(at, true));
         }
 
         onSetPixelShaderConstantF(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShaderConstantF.device_handle, true));
             this.applyConstants(bytes, view, offset, state.psConstF, 4,
                 at => view.getFloat32(at, true));
         }
 
         onSetVertexShaderConstantI(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShaderConstantF.device_handle, true));
             this.applyConstants(bytes, view, offset, state.vsConstI, 4,
                 at => view.getInt32(at, true));
         }
 
         onSetPixelShaderConstantI(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShaderConstantF.device_handle, true));
             this.applyConstants(bytes, view, offset, state.psConstI, 4,
                 at => view.getInt32(at, true));
         }
 
         onSetVertexShaderConstantB(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShaderConstantF.device_handle, true));
             this.applyConstants(bytes, view, offset, state.vsConstB, 1,
                 at => view.getUint32(at, true));
         }
 
         onSetPixelShaderConstantB(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.SetShaderConstantF.device_handle, true));
             this.applyConstants(bytes, view, offset, state.psConstB, 1,
                 at => view.getUint32(at, true));
         }
@@ -9449,17 +9441,17 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // cursor. Without this the pointer is invisible even though input
         // still works, which makes the game effectively unplayable.
         onSetCursorProperties(bytes, view, offset) {
-            const width = view.getUint32(offset + 12, true);
-            const height = view.getUint32(offset + 16, true);
-            const dataBytes = view.getUint32(offset + 20, true);
-            const dataOffset = view.getUint32(offset + 24, true);
+            const width = view.getUint32(offset + D9WG.F.SetCursorProperties.width, true);
+            const height = view.getUint32(offset + D9WG.F.SetCursorProperties.height, true);
+            const dataBytes = view.getUint32(offset + D9WG.F.SetCursorProperties.data_bytes, true);
+            const dataOffset = view.getUint32(offset + D9WG.F.SetCursorProperties.data_offset, true);
             if (!width || !height) return;
             if (dataOffset + dataBytes > bytes.byteLength) {
                 ++this.stats.malformedBatches;
                 throw new D9WGStreamError("D9WG cursor bitmap overruns the batch");
             }
-            this.cursor.hotspotX = view.getUint32(offset + 4, true);
-            this.cursor.hotspotY = view.getUint32(offset + 8, true);
+            this.cursor.hotspotX = view.getUint32(offset + D9WG.F.SetCursorProperties.hotspot_x, true);
+            this.cursor.hotspotY = view.getUint32(offset + D9WG.F.SetCursorProperties.hotspot_y, true);
             if (this.cursor.width !== width || this.cursor.height !== height ||
                     !this.cursor.texture) {
                 this.retireGPUObject(this.cursor.texture);
@@ -9488,12 +9480,12 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         }
 
         onSetCursorPosition(bytes, view, offset) {
-            this.cursor.x = view.getInt32(offset + 4, true);
-            this.cursor.y = view.getInt32(offset + 8, true);
+            this.cursor.x = view.getInt32(offset + D9WG.F.SetCursorPosition.x, true);
+            this.cursor.y = view.getInt32(offset + D9WG.F.SetCursorPosition.y, true);
         }
 
         onShowCursor(bytes, view, offset) {
-            this.cursor.visible = view.getUint32(offset + 4, true) !== 0;
+            this.cursor.visible = view.getUint32(offset + D9WG.F.ShowCursor.show, true) !== 0;
         }
 
         // Moves the overlay to match a WINDOW_STATE report.
@@ -9577,22 +9569,22 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // carry the geometry. d3d8_proxy.c sends this record on move/size/show
         // for exactly that reason.
         onWindowState(bytes, view, offset, length) {
-            const flags = view.getUint32(offset + 12, true);
-            const deviceHandle = view.getUint32(offset, true);
+            const flags = view.getUint32(offset + D9WG.F.WindowState.flags, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.WindowState.device_handle, true);
             const state = {
-                hwnd: view.getUint32(offset + 4, true),
-                foregroundHwnd: view.getUint32(offset + 8, true),
+                hwnd: view.getUint32(offset + D9WG.F.WindowState.hwnd, true),
+                foregroundHwnd: view.getUint32(offset + D9WG.F.WindowState.foreground_hwnd, true),
                 isWindow: (flags & D9WG_WINDOW_IS_WINDOW) !== 0,
                 visible: (flags & D9WG_WINDOW_VISIBLE) !== 0,
                 iconic: (flags & D9WG_WINDOW_ICONIC) !== 0,
                 foreground: (flags & D9WG_WINDOW_FOREGROUND) !== 0,
                 fullscreen: (flags & D9WG_WINDOW_FULLSCREEN) !== 0,
-                windowX: view.getInt32(offset + 16, true),
-                windowY: view.getInt32(offset + 20, true),
-                windowWidth: view.getUint32(offset + 24, true),
-                windowHeight: view.getUint32(offset + 28, true),
-                clientWidth: view.getUint32(offset + 32, true),
-                clientHeight: view.getUint32(offset + 36, true),
+                windowX: view.getInt32(offset + D9WG.F.WindowState.window_x, true),
+                windowY: view.getInt32(offset + D9WG.F.WindowState.window_y, true),
+                windowWidth: view.getUint32(offset + D9WG.F.WindowState.window_width, true),
+                windowHeight: view.getUint32(offset + D9WG.F.WindowState.window_height, true),
+                clientWidth: view.getUint32(offset + D9WG.F.WindowState.client_width, true),
+                clientHeight: view.getUint32(offset + D9WG.F.WindowState.client_height, true),
                 // "I have nothing to show", which is not the same claim as
                 // "my window is gone": the window may be up and taking input.
                 noSurface: (flags & D9WG_WINDOW_NO_SURFACE) !== 0,
@@ -12208,10 +12200,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
 
         onDrawPrimitive(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const primitiveType = view.getUint32(offset + 4, true);
-            const startVertex = view.getUint32(offset + 8, true);
-            const primitiveCount = view.getUint32(offset + 12, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.DrawPrimitive.device_handle, true);
+            const primitiveType = view.getUint32(offset + D9WG.F.DrawPrimitive.primitive_type, true);
+            const startVertex = view.getUint32(offset + D9WG.F.DrawPrimitive.start_vertex, true);
+            const primitiveCount = view.getUint32(offset + D9WG.F.DrawPrimitive.primitive_count, true);
             const state = this.deviceState(deviceHandle);
             const elements = this.currentElements(state);
             if (!elements) {
@@ -12250,11 +12242,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
 
         onDrawIndexedPrimitive(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const primitiveType = view.getUint32(offset + 4, true);
-            const baseVertexIndex = view.getInt32(offset + 8, true);
-            const startIndex = view.getUint32(offset + 20, true);
-            const primitiveCount = view.getUint32(offset + 24, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.DrawIndexedPrimitive.device_handle, true);
+            const primitiveType = view.getUint32(offset + D9WG.F.DrawIndexedPrimitive.primitive_type, true);
+            const baseVertexIndex = view.getInt32(offset + D9WG.F.DrawIndexedPrimitive.base_vertex_index, true);
+            const startIndex = view.getUint32(offset + D9WG.F.DrawIndexedPrimitive.start_index, true);
+            const primitiveCount = view.getUint32(offset + D9WG.F.DrawIndexedPrimitive.primitive_count, true);
             const state = this.deviceState(deviceHandle);
             const elements = this.currentElements(state);
             const ib = this.resources.get(state.indexBufferHandle);
@@ -12316,12 +12308,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
 
         onDrawPrimitiveUP(bytes, view, offset, length) {
-            const deviceHandle = view.getUint32(offset, true);
-            const primitiveType = view.getUint32(offset + 4, true);
-            const primitiveCount = view.getUint32(offset + 8, true);
-            const stride = view.getUint32(offset + 12, true);
-            const vertexBytes = view.getUint32(offset + 20, true);
-            const dataOffset = view.getUint32(offset + 24, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.DrawPrimitiveUP.device_handle, true);
+            const primitiveType = view.getUint32(offset + D9WG.F.DrawPrimitiveUP.primitive_type, true);
+            const primitiveCount = view.getUint32(offset + D9WG.F.DrawPrimitiveUP.primitive_count, true);
+            const stride = view.getUint32(offset + D9WG.F.DrawPrimitiveUP.stride, true);
+            const vertexBytes = view.getUint32(offset + D9WG.F.DrawPrimitiveUP.vertex_bytes, true);
+            const dataOffset = view.getUint32(offset + D9WG.F.DrawPrimitiveUP.vertex_data_offset, true);
             const state = this.deviceState(deviceHandle);
             const elements = this.currentElements(state);
             if (!elements) {
@@ -12364,21 +12356,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
 
         onDrawIndexedPrimitiveUP(bytes, view, offset) {
-            const deviceHandle = view.getUint32(offset, true);
-            const primitiveType = view.getUint32(offset + 4, true);
-            const primitiveCount = view.getUint32(offset + 16, true);
-            const indexFormatValue = view.getUint32(offset + 20, true);
+            const deviceHandle = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.device_handle, true);
+            const primitiveType = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.primitive_type, true);
+            const primitiveCount = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.primitive_count, true);
+            const indexFormatValue = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.index_format, true);
             // M1 never read `stride` out of this payload but referenced it
             // when recording the draw, so every DrawIndexedPrimitiveUP threw
             // a ReferenceError and took the whole batch down with it (the
             // batch's catch handler discarded the frame). War3's main menu
             // happens not to use this entry point, which is why it stayed
             // hidden.
-            const stride = view.getUint32(offset + 24, true);
-            const indexBytes = view.getUint32(offset + 32, true);
-            const vertexBytes = view.getUint32(offset + 36, true);
-            const indexDataOffset = view.getUint32(offset + 40, true);
-            const vertexDataOffset = view.getUint32(offset + 44, true);
+            const stride = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.stride, true);
+            const indexBytes = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.index_bytes, true);
+            const vertexBytes = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.vertex_bytes, true);
+            const indexDataOffset = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.index_data_offset, true);
+            const vertexDataOffset = view.getUint32(offset + D9WG.F.DrawIndexedPrimitiveUP.vertex_data_offset, true);
             const state = this.deviceState(deviceHandle);
             const elements = this.currentElements(state);
             if (!elements) {

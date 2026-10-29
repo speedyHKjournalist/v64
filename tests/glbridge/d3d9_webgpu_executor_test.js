@@ -1112,7 +1112,7 @@ await test("programmable vs+ps: modules, bindings and constants all line up", as
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.CREATE_VERTEX_DECLARATION, declarationPayload(0x301, elements)),
         command(OP.CREATE_VERTEX_SHADER, vs.payload, vs.blob, vs.blobOffsetField),
         command(OP.CREATE_PIXEL_SHADER, ps.payload, ps.blob, ps.blobOffsetField),
@@ -1195,7 +1195,7 @@ await test("SM1 sampler variants follow cube/2D/volume bindings without poisonin
         command(OP.SET_VERTEX_SHADER, u32(DEVICE, 0x40000001)),
         command(OP.SET_PIXEL_SHADER, u32(DEVICE, psHandle)),
         command(OP.CREATE_TEXTURE_CUBE, u32(DEVICE, 0x401, 4, 1, 21, 0, 1, 0)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x402, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x402, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.CREATE_TEXTURE_VOLUME, u32(DEVICE, 0x403, 4, 4, 4, 1, 21, 0, 1)),
     ]));
     for (const [handle, type] of [[0x401, "cube"], [0x402, "2d"],
@@ -1291,7 +1291,7 @@ await test("a programmable VS routes fixed-function stage n through oTn", async 
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.CREATE_VERTEX_DECLARATION, declarationPayload(0x301, elements)),
         command(OP.CREATE_VERTEX_SHADER, vs.payload, vs.blob, vs.blobOffsetField),
         command(OP.SET_VERTEX_DECLARATION, u32(DEVICE, 0x301)),
@@ -1519,7 +1519,7 @@ await test("independent sampler state drives the GPUSampler, not the texture", a
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -1555,8 +1555,8 @@ await test("ATI1N and ATI2N map to BC4 and BC5", async () => {
     const { executor, find } = makeExecutor();
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0xA01, 16, 16, 1, ATI1N, 0, 0)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0xA02, 16, 16, 1, ATI2N, 0, 0)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0xA01, 16, 16, 1, ATI1N, 0, 0, 0, 0)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0xA02, 16, 16, 1, ATI2N, 0, 0, 0, 0)),
     ]));
     await executor.idle();
     const formats = find("createTexture").map(call => call[1].format);
@@ -1578,7 +1578,7 @@ await test("a NULL render target allocates the cheapest renderable format",
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0xA03, 256, 256, 1, D3DFMT_NULL,
-                D3DUSAGE_RENDERTARGET, 0)),
+                D3DUSAGE_RENDERTARGET, 0, 0, 0)),
     ]));
     await executor.idle();
     const descriptor = find("createTexture")
@@ -1681,7 +1681,7 @@ await test("an additional swap chain gets its own configured canvas",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0)),
+            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0, 0, 0)),
         command(OP_CREATE_SWAP_CHAIN,
             u32(DEVICE, 0x77, 0x901, 0xBEEF, 12, 34, 256, 128)),
     ]));
@@ -1707,7 +1707,7 @@ await test("presenting an additional chain blits its back buffer to its canvas",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0)),
+            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0, 0, 0)),
         command(OP_CREATE_SWAP_CHAIN,
             u32(DEVICE, 0x77, 0x901, 0xBEEF, 12, 34, 256, 128)),
         command(OP_PRESENT_SWAP_CHAIN,
@@ -1738,7 +1738,7 @@ await test("an additional swap chain with no canvas hook is counted, not silent"
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0)),
+            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0, 0, 0)),
         command(OP_CREATE_SWAP_CHAIN,
             u32(DEVICE, 0x77, 0x901, 0xBEEF, 0, 0, 256, 128)),
         command(OP_PRESENT_SWAP_CHAIN,
@@ -1760,7 +1760,7 @@ await test("destroying an additional swap chain unconfigures and reports it",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0)),
+            u32(DEVICE, 0x901, 256, 128, 1, 21, D3DUSAGE_RENDERTARGET_BIT, 0, 0, 0)),
         command(OP_CREATE_SWAP_CHAIN,
             u32(DEVICE, 0x77, 0x901, 0xBEEF, 0, 0, 256, 128)),
         command(OP_DESTROY_SWAP_CHAIN, u32(DEVICE, 0x77)),
@@ -2057,7 +2057,7 @@ await test("D3DTADDRESS_MIRRORONCE mirrors the coordinate about zero",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2174,7 +2174,7 @@ await test("D3DSAMP_MAXMIPLEVEL becomes the sampler's LOD floor", async () => {
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         // Four levels, so a floor of 2 is inside the chain.
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2206,7 +2206,7 @@ await test("SetLOD reaches the host and combines with D3DSAMP_MAXMIPLEVEL",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2236,7 +2236,7 @@ await test("a SetLOD past the end of the chain is clamped, not passed through",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2269,7 +2269,7 @@ await test("D3DSAMP_MIPMAPLODBIAS becomes textureSampleBias in the cascade",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2298,7 +2298,7 @@ await test("a zero D3DSAMP_MIPMAPLODBIAS leaves the plain sample form alone",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2320,7 +2320,7 @@ await test("a second draw with the same sampler state reuses the cached sampler"
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2343,7 +2343,7 @@ await test("fixed-function BORDER sampler state reaches the generated shader",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -2820,7 +2820,7 @@ await test("alpha test becomes a discard in both fixed-function and translated s
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -3167,7 +3167,7 @@ await test("the stage-0 texture matrix transforms fixed-function texcoords", asy
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
         command(OP.SET_TEXTURE, u32(DEVICE, 0, 0x401, 0)),
@@ -3281,7 +3281,7 @@ await test("table fog with a translated VS uses fragment W instead of oFog",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.CREATE_VERTEX_DECLARATION, declarationPayload(0x301, elements)),
         command(OP.CREATE_VERTEX_SHADER, vs.payload, vs.blob, vs.blobOffsetField),
         command(OP.SET_VERTEX_DECLARATION, u32(DEVICE, 0x301)),
@@ -3320,7 +3320,7 @@ await test("vertex fog with a translated VS still consumes oFog", async () => {
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.CREATE_VERTEX_DECLARATION, declarationPayload(0x301, elements)),
         command(OP.CREATE_VERTEX_SHADER, vs.payload, vs.blob, vs.blobOffsetField),
         command(OP.SET_VERTEX_DECLARATION, u32(DEVICE, 0x301)),
@@ -3953,8 +3953,8 @@ await test("a multi-stage texture cascade generates one blend per stage",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x402, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x402, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x144, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.D3DCOLOR, DECLUSAGE.COLOR),
@@ -4009,7 +4009,7 @@ await test("D3DTSS_RESULTARG threads a stage result through the temp register",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD, 0)])),
@@ -4061,7 +4061,7 @@ await test("a trailing D3DTOP_BUMPENVMAP has nothing to displace and is reported
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD, 0)])),
@@ -4090,8 +4090,8 @@ await test("D3DTOP_BUMPENVMAP displaces the next stage through its matrix",
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
         // Stage 0 is the (du, dv) map, stage 1 the environment it displaces.
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 60, 0, 1)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x402, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 60, 0, 1, 0, 0)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x402, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD, 0)])),
@@ -4155,7 +4155,7 @@ for (const { name, op, pattern } of [
         await executor.submit(buildBatch([
             command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
             command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
-            command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+            command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
             command(OP.SET_FVF, fvfPayload(0x104, [
                 element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
                 element(0, 12, DECLTYPE.D3DCOLOR, DECLUSAGE.COLOR),
@@ -4189,7 +4189,7 @@ await test("the MODULATE*_ADD* family is refused as an alpha operation",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.D3DCOLOR, DECLUSAGE.COLOR),
@@ -4217,7 +4217,7 @@ await test("D3DTOP_PREMODULATE stays refused and is counted", async () => {
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.D3DCOLOR, DECLUSAGE.COLOR),
@@ -4243,7 +4243,7 @@ await test("a render target redirects the pass and keys its own pipeline",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         // A render target arrives as a CREATE_TEXTURE_2D carrying the usage.
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x501, 256, 256, 1, 21, D3DUSAGE_RENDERTARGET, 0)),
+            u32(DEVICE, 0x501, 256, 256, 1, 21, D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4308,9 +4308,43 @@ await test("a short pre-1.3 device payload is not decoded as 1.3", async () => {
     ]));
     await executor.idle();
     assert.match(executor.lastBatchFailure && executor.lastBatchFailure.message,
-        /CREATE_DEVICE payload is not protocol 1\.3/);
+        /CREATE_DEVICE payload is \d+ bytes, its struct needs 52/);
     assert.equal(executor.stats.malformedBatches, 1);
     assert.equal(executor.devices.size, 0);
+});
+
+await test("a batch whose command numbering breaks runs none of its commands", async () => {
+    const { executor } = makeExecutor();
+    const batch = buildBatch([
+        command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
+        command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
+    ]);
+    // the second command's header: sequence 2 -> 5
+    batch.writeUInt32LE(5, 32 + batch.readUInt32LE(32 + 4) + 8);
+    await executor.submit(batch);
+    await executor.idle();
+    assert.match(executor.lastBatchFailure && executor.lastBatchFailure.message,
+        /command 1 has sequence 5, the batch's numbering expects 2/);
+    assert.equal(executor.stats.malformedBatches, 1);
+    assert.equal(executor.devices.size, 0, "the device command before the break did not run");
+});
+
+await test("a command size that lands inside a payload fails the batch before it runs", async () => {
+    const { executor } = makeExecutor();
+    const batch = buildBatch([
+        command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
+        command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
+        command(OP.CREATE_BUFFER, createBufferPayload(0x202, 1, 96)),
+    ]);
+    // the second command claims 8 bytes more: the walk lands inside the third
+    const second = 32 + batch.readUInt32LE(32 + 4);
+    batch.writeUInt32LE(batch.readUInt32LE(second + 4) + 8, second + 4);
+    await executor.submit(batch);
+    await executor.idle();
+    assert.ok(executor.lastBatchFailure instanceof Error);
+    assert.match(executor.lastBatchFailure.message, /D9WG (command|command_count)/);
+    assert.equal(executor.devices.size, 0, "the device command before the bad size did not run");
+    assert.equal(executor.stats.commands, 0, "no command ran");
 });
 
 await test("a depth texture sampled by a pixel shader becomes a shadow map",
@@ -4324,7 +4358,7 @@ await test("a depth texture sampled by a pixel shader becomes a shadow map",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0x502, 1024, 1024, 1, D3DFMT_D24S8,
-                D3DUSAGE_DEPTHSTENCIL, 0)),
+                D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4372,7 +4406,7 @@ await test("a shadow map still bound as the depth attachment is not sampled",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0x502, 640, 480, 1, D3DFMT_D24S8,
-                D3DUSAGE_DEPTHSTENCIL, 0)),
+                D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4404,7 +4438,7 @@ await test("a depth texture on a fixed-function stage reads the white fallback",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0x502, 256, 256, 1, D3DFMT_D24S8,
-                D3DUSAGE_DEPTHSTENCIL, 0)),
+                D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
              element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD)])),
@@ -4498,7 +4532,7 @@ await test("Reset keeps the session's resources under their handles", async () =
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 60)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.RESET, reset),
     ]));
     await executor.idle();
@@ -4567,7 +4601,7 @@ await test("a D24S8 mip is used as the explicit depth attachment",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0x502, 2560, 1920, 4, D3DFMT_D24S8,
-                D3DUSAGE_DEPTHSTENCIL, 0)),
+                D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4614,7 +4648,7 @@ await test("an out-of-range depth mip is rejected at binding without invalidatin
         await executor.submit(buildBatch([
             command(OP.CREATE_DEVICE, createDevicePayload(640, 480, 0)),
             command(OP.CREATE_TEXTURE_2D,
-                u32(DEVICE, 0x503, 640, 480, 2, 75, 2, 0)),
+                u32(DEVICE, 0x503, 640, 480, 2, 75, 2, 0, 0, 0)),
             command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
             command(OP.SET_FVF, fvfPayload(0x2,
                 [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
@@ -4654,10 +4688,10 @@ await test("an oversized depth surface still depth-tests a smaller target",
         // full-size depth surface reused by a half-resolution HDR pass.
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0xC01, 640, 480, 1, D3DFMT_D24S8,
-                D3DUSAGE_DEPTHSTENCIL, 0)),
+                D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0xC02, 320, 240, 1, D3DFMT_A16B16G16R16F,
-                D3DUSAGE_RENDERTARGET, 0)),
+                D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4703,9 +4737,9 @@ await test("an uncleared oversized-depth pass is reported, a cleared one is not"
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480, 0)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xF01, 640, 480, 1, D3DFMT_D24S8, D3DUSAGE_DEPTHSTENCIL, 0)),
+            u32(DEVICE, 0xF01, 640, 480, 1, D3DFMT_D24S8, D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xF02, 320, 240, 1, D3DFMT_A8R8G8B8, D3DUSAGE_RENDERTARGET, 0)),
+            u32(DEVICE, 0xF02, 320, 240, 1, D3DFMT_A8R8G8B8, D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4766,7 +4800,7 @@ await test("an autogen texture allocates the chain and fills it after a write",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0xE01, 8, 8, 1, D3DFMT_A8R8G8B8,
-                D3DUSAGE_AUTOGENMIPMAP, 0)),
+                D3DUSAGE_AUTOGENMIPMAP, 0, 0, 0)),
         command(OP.UPDATE_TEXTURE, update, Buffer.alloc(256, 0x80), 44),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
@@ -4807,7 +4841,7 @@ await test("an untouched scratch texture is not an incomplete mip chain",
         // the first DirectDraw Blt fills it. A wholly untouched single-level
         // allocation is not evidence that the proxy lost a subresource write.
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xE10, 256, 256, 1, D3DFMT_X8R8G8B8, 0, 0)),
+            u32(DEVICE, 0xE10, 256, 256, 1, D3DFMT_X8R8G8B8, 0, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD, 0)])),
@@ -4843,7 +4877,7 @@ await test("a partially uploaded mip chain still reports missing levels",
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 60)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xE11, 4, 4, 3, D3DFMT_A8R8G8B8, 0, 0)),
+            u32(DEVICE, 0xE11, 4, 4, 3, D3DFMT_A8R8G8B8, 0, 0, 0, 0)),
         command(OP.UPDATE_TEXTURE, update, Buffer.alloc(64, 0x80), 44),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
@@ -4883,7 +4917,7 @@ await test("an autogen chain is regenerated only when level 0 changes",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         command(OP.CREATE_TEXTURE_2D,
             u32(DEVICE, 0xE02, 8, 8, 1, D3DFMT_A8R8G8B8,
-                D3DUSAGE_AUTOGENMIPMAP, 0)),
+                D3DUSAGE_AUTOGENMIPMAP, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4922,11 +4956,11 @@ await test("two depth surfaces of one size get separate substitutes",
         // substitute across both passes would let them depth-test against
         // each other's fragments.
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xD01, 640, 480, 1, D3DFMT_D24S8, D3DUSAGE_DEPTHSTENCIL, 0)),
+            u32(DEVICE, 0xD01, 640, 480, 1, D3DFMT_D24S8, D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xD02, 640, 480, 1, D3DFMT_D24S8, D3DUSAGE_DEPTHSTENCIL, 0)),
+            u32(DEVICE, 0xD02, 640, 480, 1, D3DFMT_D24S8, D3DUSAGE_DEPTHSTENCIL, 0, 0, 0)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xD03, 320, 240, 1, D3DFMT_A8R8G8B8, D3DUSAGE_RENDERTARGET, 0)),
+            u32(DEVICE, 0xD03, 320, 240, 1, D3DFMT_A8R8G8B8, D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -4979,7 +5013,7 @@ await test("packed 4:2:2 and RGBG formats expand two pixels per block",
         update.writeUInt32LE(4, 32); // row pitch
         update.writeUInt32LE(4, 40); // data bytes
         commands.push(command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, handle, 2, 1, 1, item.format, 0, 1)));
+            u32(DEVICE, handle, 2, 1, 1, item.format, 0, 1, 0, 0)));
         commands.push(command(OP.UPDATE_TEXTURE, update, source, 44));
     });
     await executor.submit(buildBatch(commands));
@@ -5027,7 +5061,7 @@ await test("INDEX16 and INDEX32 texture uploads preserve little-endian bytes",
         update.writeUInt32LE(source.length, 32);
         update.writeUInt32LE(source.length, 40);
         commands.push(command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, handle, 1, 1, 1, item.format, 0, 1)));
+            u32(DEVICE, handle, 1, 1, 1, item.format, 0, 1, 0, 0)));
         commands.push(command(OP.UPDATE_TEXTURE, update, source, 44));
     });
     await executor.submit(buildBatch(commands));
@@ -5071,7 +5105,7 @@ await test("a palette change repaints P8 textures without a re-upload",
         paletteCommand(0, entry => entry === 1 ? 0xffff0000 : 0xff000000),
         paletteCommand(1, entry => entry === 1 ? 0xff0000ff : 0xff000000),
         command(OP.SET_CURRENT_PALETTE, u32(DEVICE, 0)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0xA01, 2, 2, 1, D3DFMT_P8, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0xA01, 2, 2, 1, D3DFMT_P8, 0, 1, 0, 0)),
         command(OP.UPDATE_TEXTURE, update, indices, 44),
     ]));
     await executor.idle();
@@ -5108,7 +5142,7 @@ await test("FOURCC depth textures read the stored value, not a comparison",
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 96)),
         // INTZ is routinely created with usage 0 and then used as depth.
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0xB01, 256, 256, 1, D3DFMT_INTZ, 0, 0)),
+            u32(DEVICE, 0xB01, 256, 256, 1, D3DFMT_INTZ, 0, 0, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x2,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 12)),
@@ -5346,7 +5380,7 @@ await test("legacy D3D9 texture formats preserve colour and signed bump values",
         update.writeUInt32LE(source.length, 32); // source row pitch
         update.writeUInt32LE(source.length, 40);
         commands.push(command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, handle, 1, 1, 1, item.format, 0, 1)));
+            u32(DEVICE, handle, 1, 1, 1, item.format, 0, 1, 0, 0)));
         commands.push(command(OP.UPDATE_TEXTURE, update, source, 44));
     });
     await executor.submit(buildBatch(commands));
@@ -5373,7 +5407,7 @@ await test("HDR render targets use a blendable rgba16float attachment",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x76f, 320, 180, 1, 113, 1, 0)),
+            u32(DEVICE, 0x76f, 320, 180, 1, 113, 1, 0, 0, 0)),
         command(OP.SET_RENDER_TARGET, u32(DEVICE, 0, 0x76f, 0)),
         command(OP.CLEAR, u32(DEVICE, 1, 0xff102030, 0x3f800000, 0, 0)),
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
@@ -5399,7 +5433,7 @@ await test("FP32 textures use unfilterable bindings on baseline WebGPU",
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x780, 1, 60)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x781, 4, 4, 1, 114 /* R32F */, 0, 1)),
+            u32(DEVICE, 0x781, 4, 4, 1, 114 /* R32F */, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD, 0)])),
@@ -5450,11 +5484,11 @@ await test("signed textures reject render-target use but keep direct copies",
         // A stale or malformed guest must not make the host create an illegal
         // rgba8snorm RENDER_ATTACHMENT descriptor.
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x770, 4, 4, 1, 60, 1, 0)),
+            u32(DEVICE, 0x770, 4, 4, 1, 60, 1, 0, 0, 0)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x771, 4, 4, 1, 60, 0, 1)),
+            u32(DEVICE, 0x771, 4, 4, 1, 60, 0, 1, 0, 0)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x772, 4, 4, 1, 60, 0, 1)),
+            u32(DEVICE, 0x772, 4, 4, 1, 60, 0, 1, 0, 0)),
         command(0x8, stretch(4)),
         command(0x8, stretch(2)),
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
@@ -5488,7 +5522,7 @@ await test("R8G8B8 upload honours a padded source pitch", async () => {
     update.writeUInt32LE(source.length, 40);
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x750, 1, 2, 1, 20, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x750, 1, 2, 1, 20, 0, 1, 0, 0)),
         command(OP.UPDATE_TEXTURE, update, source, 44),
     ]));
     await executor.idle();
@@ -5516,7 +5550,7 @@ await test("DXT2 and DXT4 reuse BC2 and BC3 block storage", async () => {
         update.writeUInt32LE(16, 32);
         update.writeUInt32LE(16, 40);
         commands.push(command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, item.handle, 4, 4, 1, item.format, 0, 1)));
+            u32(DEVICE, item.handle, 4, 4, 1, item.format, 0, 1, 0, 0)));
         commands.push(command(OP.UPDATE_TEXTURE, update,
             Buffer.alloc(16, item.handle & 0xff), 44));
     });
@@ -5548,7 +5582,7 @@ await test("exhausting the debug preview budget never drops a game texture uploa
     payload.writeUInt32LE(64, 40);
     await executor.submit(buildBatch([
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x611, 4, 4, 1, 21, 0, 1)),
+            u32(DEVICE, 0x611, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.UPDATE_TEXTURE, payload, Buffer.alloc(64, 0x7f), 44),
     ]));
     await executor.idle();
@@ -5586,7 +5620,7 @@ await test("a texture updated after a recorded draw is renamed", async () => {
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 60)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x612, 4, 4, 1, 21, 0, 1)),
+            u32(DEVICE, 0x612, 4, 4, 1, 21, 0, 1, 0, 0)),
         upload(0x11),
         command(OP.SET_FVF, fvfPayload(0x102, elements)),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 20)),
@@ -5784,7 +5818,7 @@ await test("the device requests texture-compression-bc so DXT textures work",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x401, 16, 16, 1, 0x33545844 /* DXT3 */, 0, 1)),
+            u32(DEVICE, 0x401, 16, 16, 1, 0x33545844 /* DXT3 */, 0, 1, 0, 0)),
     ]));
     await executor.idle();
     const request = find("requestDevice").pop();
@@ -5813,7 +5847,7 @@ await test("a texture format the device refuses costs one texture, not the frame
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x401, 16, 16, 1, 0x31545844 /* DXT1 */, 0, 1)),
+            u32(DEVICE, 0x401, 16, 16, 1, 0x31545844 /* DXT1 */, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x104, [
             element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
             element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD, 0)])),
@@ -5854,7 +5888,7 @@ await test("StretchRect from the back buffer becomes a deferred blit", async () 
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x501, 256, 256, 1, 21, D3DUSAGE_RENDERTARGET, 0)),
+            u32(DEVICE, 0x501, 256, 256, 1, 21, D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.CLEAR, u32(DEVICE, 1, 0xff000000, 0, 0, 0)),
         // Source handle 0 == the back buffer.
         command(0x8, stretch(0, 0x501)),
@@ -5900,7 +5934,7 @@ await test("D3DSAMP_SRGBTEXTURE samples through an -srgb view", async () => {
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 240)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1, 0, 0)),
         ...draw([]),
         ...draw([command(OP.SET_SAMPLER_STATE,
             u32(DEVICE, 0, D3DSAMP_SRGBTEXTURE, 1))]),
@@ -6125,7 +6159,7 @@ await test("M4 ColorFill preserves pixels outside a partial rectangle", async ()
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x501, 64, 64, 1, 21, D3DUSAGE_RENDERTARGET, 0)),
+            u32(DEVICE, 0x501, 64, 64, 1, 21, D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.COLOR_FILL, payload),
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
     ], { present: true }));
@@ -6164,9 +6198,9 @@ await test("M4 target fills and copies retain D3D command order", async () => {
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x501, 64, 64, 1, 21, D3DUSAGE_RENDERTARGET, 0)),
+            u32(DEVICE, 0x501, 64, 64, 1, 21, D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x502, 64, 64, 1, 21, D3DUSAGE_RENDERTARGET, 0)),
+            u32(DEVICE, 0x502, 64, 64, 1, 21, D3DUSAGE_RENDERTARGET, 0, 0, 0)),
         command(OP.COLOR_FILL, fill),
         command(0x8, stretch),
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
@@ -6282,7 +6316,7 @@ await test("a DXT mip chain's sub-block levels upload as whole 4x4 blocks",
         .map(([index, size]) => level(index, size));
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
-        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, DXT1, 0, 1)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 8, 8, 4, DXT1, 0, 1, 0, 0)),
         ...uploads.map(upload =>
             command(OP.UPDATE_TEXTURE, upload.payload, upload.blob, upload.field)),
     ]));
@@ -6507,7 +6541,7 @@ await test("GPU render-target readback writes a converted D3D surface response",
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x901, 2, 1, 1, 21, 1, 0)),
+            u32(DEVICE, 0x901, 2, 1, 1, 21, 1, 0, 0, 0)),
     ], { versionMinor: 3 }));
     await executor.idle();
     // The physical texture is rgba8unorm. GetRenderTargetData must return
@@ -6820,7 +6854,7 @@ await test("vs_3_0 vertex texture fetch binds D3D vertex sampler 0 at 34/35",
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x906, 1, 48)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x907, 4, 4, 1, 21, 0, 1)),
+            u32(DEVICE, 0x907, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.CREATE_VERTEX_SHADER,
             vs.payload, vs.blob, vs.blobOffsetField),
         command(OP.SET_FVF, fvfPayload(0x2,
@@ -6856,7 +6890,7 @@ await test("programmable pixel samplers expose the complete s0 through s15 range
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(OP.CREATE_BUFFER, createBufferPayload(0x90b, 1, 60)),
         command(OP.CREATE_TEXTURE_2D,
-            u32(DEVICE, 0x90c, 4, 4, 1, 21, 0, 1)),
+            u32(DEVICE, 0x90c, 4, 4, 1, 21, 0, 1, 0, 0)),
         command(OP.SET_FVF, fvfPayload(0x102,
             [element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
              element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD)])),

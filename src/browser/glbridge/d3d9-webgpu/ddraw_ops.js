@@ -24,11 +24,13 @@
 (function(global) {
     "use strict";
 
-    const OP_DD_BLT = 0x500;
-    const OP_DD_SET_COLOR_KEY = 0x501;
-    const OP_DD_SET_SURFACE_PALETTE = 0x502;
-    const OP_DD_SET_DISPLAY_MODE = 0x503;
-    const OP_DD_UPDATE_OVERLAY = 0x504;
+    const D9WG = global.D9WGProtocol ||
+        (typeof require === "function" ? require("./d9wg_protocol.js") : null);
+    const OP_DD_BLT = D9WG.OP.DD_BLT;
+    const OP_DD_SET_COLOR_KEY = D9WG.OP.DD_SET_COLOR_KEY;
+    const OP_DD_SET_SURFACE_PALETTE = D9WG.OP.DD_SET_SURFACE_PALETTE;
+    const OP_DD_SET_DISPLAY_MODE = D9WG.OP.DD_SET_DISPLAY_MODE;
+    const OP_DD_UPDATE_OVERLAY = D9WG.OP.DD_UPDATE_OVERLAY;
 
     const DDBLT_KEY_SOURCE = 1 << 0;
     const DDBLT_KEY_DESTINATION = 1 << 1;
@@ -261,32 +263,28 @@ ${body.join("\n")}
     const ddrawOps = {
         // ---- 0x500 DD_BLT ----------------------------------------------
         onDDBlt(bytes, view, offset, length) {
-            if (length < 80) {
-                ++this.stats.malformedBatches;
-                return;
-            }
-            const state = this.deviceState(view.getUint32(offset, true));
-            const sourceHandle = view.getUint32(offset + 4, true);
-            const sourceLevel = view.getUint32(offset + 8, true);
-            const sourceFace = view.getUint32(offset + 12, true);
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.DDBlt.device_handle, true));
+            const sourceHandle = view.getUint32(offset + D9WG.F.DDBlt.source_handle, true);
+            const sourceLevel = view.getUint32(offset + D9WG.F.DDBlt.source_level, true);
+            const sourceFace = view.getUint32(offset + D9WG.F.DDBlt.source_face, true);
             const sourceRect = {
-                left: view.getInt32(offset + 16, true),
-                top: view.getInt32(offset + 20, true),
-                right: view.getInt32(offset + 24, true),
-                bottom: view.getInt32(offset + 28, true),
+                left: view.getInt32(offset + D9WG.F.DDBlt.source_rect, true),
+                top: view.getInt32(offset + D9WG.F.DDBlt.source_rect + 4, true),
+                right: view.getInt32(offset + D9WG.F.DDBlt.source_rect + 8, true),
+                bottom: view.getInt32(offset + D9WG.F.DDBlt.source_rect + 12, true),
             };
-            const destinationHandle = view.getUint32(offset + 32, true);
-            const destinationLevel = view.getUint32(offset + 36, true);
-            const destinationFace = view.getUint32(offset + 40, true);
-            const flags = view.getUint32(offset + 44, true);
+            const destinationHandle = view.getUint32(offset + D9WG.F.DDBlt.destination_handle, true);
+            const destinationLevel = view.getUint32(offset + D9WG.F.DDBlt.destination_level, true);
+            const destinationFace = view.getUint32(offset + D9WG.F.DDBlt.destination_face, true);
+            const flags = view.getUint32(offset + D9WG.F.DDBlt.flags, true);
             const destinationRect = {
-                left: view.getInt32(offset + 48, true),
-                top: view.getInt32(offset + 52, true),
-                right: view.getInt32(offset + 56, true),
-                bottom: view.getInt32(offset + 60, true),
+                left: view.getInt32(offset + D9WG.F.DDBlt.destination_rect, true),
+                top: view.getInt32(offset + D9WG.F.DDBlt.destination_rect + 4, true),
+                right: view.getInt32(offset + D9WG.F.DDBlt.destination_rect + 8, true),
+                bottom: view.getInt32(offset + D9WG.F.DDBlt.destination_rect + 12, true),
             };
-            const fillColor = view.getUint32(offset + 64, true);
-            const fillDepth = view.getFloat32(offset + 68, true);
+            const fillColor = view.getUint32(offset + D9WG.F.DDBlt.fill_color, true);
+            const fillDepth = view.getFloat32(offset + D9WG.F.DDBlt.fill_depth, true);
 
             this.stats.ddBlits = (this.stats.ddBlits || 0) + 1;
 
@@ -591,11 +589,11 @@ ${body.join("\n")}
 
         // ---- 0x501 DD_SET_COLOR_KEY ------------------------------------
         onDDSetColorKey(bytes, view, offset) {
-            const handle = view.getUint32(offset, true);
-            const kind = view.getUint32(offset + 4, true);
-            const low = view.getUint32(offset + 8, true);
-            const high = view.getUint32(offset + 12, true);
-            const present = view.getUint32(offset + 16, true) !== 0;
+            const handle = view.getUint32(offset + D9WG.F.DDSetColorKey.surface_handle, true);
+            const kind = view.getUint32(offset + D9WG.F.DDSetColorKey.key_kind, true);
+            const low = view.getUint32(offset + D9WG.F.DDSetColorKey.color_low, true);
+            const high = view.getUint32(offset + D9WG.F.DDSetColorKey.color_high, true);
+            const present = view.getUint32(offset + D9WG.F.DDSetColorKey.present, true) !== 0;
             const resource = this.resources.get(handle);
             if (!resource) return;
             if (!resource.ddColorKey) resource.ddColorKey = {};
@@ -606,8 +604,8 @@ ${body.join("\n")}
 
         // ---- 0x502 DD_SET_SURFACE_PALETTE ------------------------------
         onDDSetSurfacePalette(bytes, view, offset) {
-            const handle = view.getUint32(offset, true);
-            const paletteIndex = view.getUint32(offset + 4, true);
+            const handle = view.getUint32(offset + D9WG.F.DDSetSurfacePalette.surface_handle, true);
+            const paletteIndex = view.getUint32(offset + D9WG.F.DDSetSurfacePalette.palette_index, true);
             const resource = this.resources.get(handle);
             if (!resource) return;
             resource.ddPaletteIndex = paletteIndex;
@@ -620,13 +618,13 @@ ${body.join("\n")}
 
         // ---- 0x503 DD_SET_DISPLAY_MODE ---------------------------------
         onDDSetDisplayMode(bytes, view, offset) {
-            const state = this.deviceState(view.getUint32(offset, true));
-            const width = view.getUint32(offset + 4, true);
-            const height = view.getUint32(offset + 8, true);
-            const bitsPerPixel = view.getUint32(offset + 12, true);
-            const refreshRate = view.getUint32(offset + 16, true);
-            const cooperativeFlags = view.getUint32(offset + 20, true);
-            const guestModeChanged = view.getUint32(offset + 24, true) !== 0;
+            const state = this.deviceState(view.getUint32(offset + D9WG.F.DDSetDisplayMode.device_handle, true));
+            const width = view.getUint32(offset + D9WG.F.DDSetDisplayMode.width, true);
+            const height = view.getUint32(offset + D9WG.F.DDSetDisplayMode.height, true);
+            const bitsPerPixel = view.getUint32(offset + D9WG.F.DDSetDisplayMode.bits_per_pixel, true);
+            const refreshRate = view.getUint32(offset + D9WG.F.DDSetDisplayMode.refresh_rate, true);
+            const cooperativeFlags = view.getUint32(offset + D9WG.F.DDSetDisplayMode.cooperative_flags, true);
+            const guestModeChanged = view.getUint32(offset + D9WG.F.DDSetDisplayMode.guest_mode_changed, true) !== 0;
             state.ddDisplayMode = { width, height, bitsPerPixel, refreshRate,
                 cooperativeFlags, guestModeChanged };
             const exclusiveFullscreen =
@@ -686,18 +684,14 @@ ${body.join("\n")}
 
         // ---- 0x504 DD_UPDATE_OVERLAY ----------------------------------
         onDDUpdateOverlay(bytes, view, offset, length) {
-            if (length < 52) {
-                ++this.stats.malformedBatches;
-                return;
-            }
-            const surfaceHandle = view.getUint32(offset, true);
-            const overlayId = view.getUint32(offset + 4, true);
+            const surfaceHandle = view.getUint32(offset + D9WG.F.DDUpdateOverlay.surface_handle, true);
+            const overlayId = view.getUint32(offset + D9WG.F.DDUpdateOverlay.overlay_id, true);
             const resource = this.resources.get(surfaceHandle);
             if (!resource) return;
             const state = this.deviceState(resource.deviceHandle || 0);
             if (!state.ddOverlays) state.ddOverlays = new Map();
-            const flags = view.getUint32(offset + 40, true);
-            const destinationHandle = view.getUint32(offset + 48, true);
+            const flags = view.getUint32(offset + D9WG.F.DDUpdateOverlay.flags, true);
+            const destinationHandle = view.getUint32(offset + D9WG.F.DDUpdateOverlay.destination_handle, true);
             const old = state.ddOverlays.get(overlayId) || {};
             if (flags & DDOVER_HIDE) {
                 state.ddOverlays.delete(overlayId);
@@ -717,19 +711,19 @@ ${body.join("\n")}
                 surfaceHandle,
                 destinationHandle,
                 sourceRect: [
-                    view.getInt32(offset + 8, true),
-                    view.getInt32(offset + 12, true),
-                    view.getInt32(offset + 16, true),
-                    view.getInt32(offset + 20, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.source_rect, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.source_rect + 4, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.source_rect + 8, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.source_rect + 12, true),
                 ],
                 destinationRect: [
-                    view.getInt32(offset + 24, true),
-                    view.getInt32(offset + 28, true),
-                    view.getInt32(offset + 32, true),
-                    view.getInt32(offset + 36, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.destination_rect, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.destination_rect + 4, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.destination_rect + 8, true),
+                    view.getInt32(offset + D9WG.F.DDUpdateOverlay.destination_rect + 12, true),
                 ],
                 flags,
-                zOrder: view.getUint32(offset + 44, true),
+                zOrder: view.getUint32(offset + D9WG.F.DDUpdateOverlay.z_order, true),
                 visible: (flags & DDOVER_SHOW) ? true : !!old.visible,
                 // Snapshot the key at UpdateOverlay time. DuplicateSurface
                 // aliases share one texture handle but have independent COM

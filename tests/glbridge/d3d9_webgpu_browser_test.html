@@ -10,6 +10,7 @@ canvas { width: 640px; height: 480px; }
 <div id="result">RUNNING</div>
 <script src="../../src/browser/glbridge/webgpu_host.js"></script>
 <script src="../../src/browser/glbridge/d3d9-webgpu/d3d9_shader_pipeline.js"></script>
+<script src="../../src/browser/glbridge/d3d9-webgpu/d9wg_protocol.js"></script>
 <script src="../../src/browser/glbridge/d3d9-webgpu/d3d9_executor.js"></script>
 <script>
 (async () => {
@@ -413,9 +414,9 @@ canvas { width: 640px; height: 480px; }
         await executor.submit(batch([
             command(1, u32(32, 0, sessionLow, sessionHigh)),
             command(2, createDevice(deviceHandle, 640, 480)),
-            command(0x110, u32(deviceHandle, textureHandle, 16, 16, 1, 21, 0, 1)),
+            command(0x110, u32(deviceHandle, textureHandle, 16, 16, 1, 21, 0, 1, 0, 0)),
             command(0x110, u32(deviceHandle, dxtHandle, 4, 4, 1,
-                0x31545844 /* D3DFMT_DXT1 */, 0, 1)),
+                0x31545844 /* D3DFMT_DXT1 */, 0, 1, 0, 0)),
             command(0x113, u32(dxtHandle, 0, 0, 0, 0, 4, 4, 1, 8, 0,
                 dxtBlock.byteLength, 0), [{ offsetField: 44, data: dxtBlock }]),
             command(0x113, u32(textureHandle, 0, 0, 0, 0, 16, 16, 1,
@@ -486,7 +487,7 @@ canvas { width: 640px; height: 480px; }
             // generated lighting and cascade WGSL has to be seen by a real
             // browser and not only by naga.
             command(0x110, u32(deviceHandle, renderTargetHandle, 128, 128, 1, 21,
-                1 /* D3DUSAGE_RENDERTARGET */, 0)),
+                1 /* D3DUSAGE_RENDERTARGET */, 0, 0, 0)),
             // M4: both utility pipelines are generated dynamically, so they
             // need real Tint/WebGPU validation in addition to fake-device
             // unit tests. First fill a sub-rectangle, then clear another one.

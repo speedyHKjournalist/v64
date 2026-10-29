@@ -57,10 +57,11 @@
         view.setUint16(12, 1, true); view.setUint16(14, 7, true);
         view.setUint32(24, commands.length, true); view.setUint32(28, count, true);
         view.setUint32(32, session, true);
-        let offset = 40;
+        let offset = 40, sequence = 1;
         for (const cmd of payloads) {
             const size = (16 + cmd.bytes.length + 7) & ~7;
             view.setUint16(offset, cmd.op, true); view.setUint32(offset + 4, size, true);
+            view.setUint32(offset + 8, sequence++, true);
             bytes.set(cmd.bytes, offset + 16); offset += size;
         }
         return bytes;

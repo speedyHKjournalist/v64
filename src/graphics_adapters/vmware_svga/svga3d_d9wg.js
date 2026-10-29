@@ -1,84 +1,24 @@
 // D9WG batches, the renderer's input. The SVGA3D layer (svga3d.js) turns the
 // guest's legacy 3D commands into the protocol the D3D9 executor
 // (src/browser/glbridge/d3d9-webgpu/d3d9_executor.js) already runs for the
-// guest D3D9 proxy: glbridge/d3d9proxy/d3d9_protocol.h, version 1.7. A batch
+// guest D3D9 proxy, at the protocol's current version. A batch
 // is self-contained (inline data travels in it), so it can be recorded and
 // replayed without the guest.
 
-export const D9WG_MAGIC = 0x47573944;
-const VERSION_MAJOR = 1;
-const VERSION_MINOR = 7;
+import { dbg_assert } from "../../log.js";
+import { D9WG_MAGIC, D9WG_VERSION_MAJOR, D9WG_VERSION_MINOR, OP, KIND, PAYLOAD_BYTES } from "./d9wg_constants.js";
+
+// The opcodes, the resource kinds and every payload's size come from
+// src/browser/glbridge/d3d9-webgpu/d9wg_protocol.js (d9wg_constants.js is
+// generated from it); the fields of each command follow its struct there.
+export { D9WG_MAGIC, D9WG_BATCH_FLAG_PRESENT, OP, KIND } from "./d9wg_constants.js";
+
 const BATCH_HEADER_BYTES = 32;
 const COMMAND_HEADER_BYTES = 16;
-
-/** The batch flag that makes the executor submit the frame's GPU work */
-export const D9WG_BATCH_FLAG_PRESENT = 1;
 
 // Every batch carries this session: one guest device, one resource namespace
 const SESSION_LOW = 0x41475653;     // "SVGA"
 const SESSION_HIGH = 0;
-
-/** Opcodes (enum D9WGOpcode) */
-export const OP = {
-    CLEAR: 5,
-    STRETCH_RECT: 8,
-    COLOR_FILL: 9,
-    READBACK_SURFACE: 12,
-    CREATE_BUFFER: 0x100,
-    UPDATE_BUFFER: 0x101,
-    DESTROY_RESOURCE: 0x103,
-    CREATE_TEXTURE_2D: 0x110,
-    CREATE_TEXTURE_CUBE: 0x111,
-    CREATE_TEXTURE_VOLUME: 0x112,
-    UPDATE_TEXTURE: 0x113,
-    CREATE_VERTEX_DECLARATION: 0x120,
-    CREATE_VERTEX_SHADER: 0x121,
-    CREATE_PIXEL_SHADER: 0x122,
-    CREATE_QUERY: 0x123,
-    SET_RENDER_STATE: 0x200,
-    SET_SAMPLER_STATE: 0x201,
-    SET_TEXTURE_STAGE_STATE: 0x202,
-    SET_TEXTURE: 0x203,
-    SET_VIEWPORT: 0x204,
-    SET_SCISSOR_RECT: 0x205,
-    SET_TRANSFORM: 0x206,
-    SET_MATERIAL: 0x207,
-    SET_LIGHT: 0x208,
-    LIGHT_ENABLE: 0x209,
-    SET_STREAM_SOURCE: 0x20A,
-    SET_STREAM_SOURCE_FREQ: 0x20B,
-    SET_INDICES: 0x20C,
-    SET_VERTEX_DECLARATION: 0x20D,
-    SET_RENDER_TARGET: 0x20F,
-    SET_VERTEX_SHADER: 0x211,
-    SET_PIXEL_SHADER: 0x212,
-    SET_VERTEX_SHADER_CONSTANT_F: 0x213,
-    SET_VERTEX_SHADER_CONSTANT_I: 0x214,
-    SET_VERTEX_SHADER_CONSTANT_B: 0x215,
-    SET_PIXEL_SHADER_CONSTANT_F: 0x216,
-    SET_PIXEL_SHADER_CONSTANT_I: 0x217,
-    SET_PIXEL_SHADER_CONSTANT_B: 0x218,
-    SET_CLIP_PLANE: 0x219,
-    SET_DEPTH_STENCIL_SURFACE_LEVEL: 0x21E,
-    GENERATE_MIPS: 0x221,
-    DRAW_PRIMITIVE: 0x300,
-    DRAW_INDEXED_PRIMITIVE: 0x301,
-    BEGIN_QUERY: 0x400,
-    END_QUERY: 0x401,
-};
-
-/** D9WG resource kinds (D9WG_RESOURCE_*) */
-export const KIND = {
-    VERTEX_BUFFER: 1,
-    INDEX_BUFFER: 2,
-    TEXTURE_2D: 3,
-    TEXTURE_CUBE: 4,
-    TEXTURE_VOLUME: 5,
-    VERTEX_DECLARATION: 6,
-    VERTEX_SHADER: 7,
-    PIXEL_SHADER: 8,
-    QUERY: 9,
-};
 
 // (the response region's layout: ../renderer_protocol.js)
 
@@ -93,8 +33,9 @@ export function D9WGWriter()
     this.length = BATCH_HEADER_BYTES;
     this.count = 0;
     this.sequence = 0;
-    // the command being written: where its header is
+    // the command being written: where its header is, and its opcode
     this.command_at = -1;
+    this.opcode = 0;
     /** @type {?function()} called before each command: the other stream is sent first */
     this.before = null;
 }
@@ -132,6 +73,7 @@ D9WGWriter.prototype.begin = function(opcode)
     this.end();
     this.reserve(COMMAND_HEADER_BYTES);
     this.command_at = this.length;
+    this.opcode = opcode;
     const v = this.view, at = this.length;
     v.setUint16(at, opcode, true);
     v.setUint16(at + 2, 0, true);
@@ -147,6 +89,8 @@ D9WGWriter.prototype.begin = function(opcode)
 D9WGWriter.prototype.end = function()
 {
     if(this.command_at < 0) return;
+    dbg_assert(this.length - this.command_at - COMMAND_HEADER_BYTES >= PAYLOAD_BYTES[this.opcode],
+        "D9WG opcode 0x" + this.opcode.toString(16) + ": the payload is shorter than its struct");
     const padded = this.length + 7 & ~7;
     this.reserve(padded - this.length);
     this.bytes.fill(0, this.length, padded);
@@ -221,8 +165,8 @@ D9WGWriter.prototype.finish = function(frame_id, flags)
     this.end();
     const v = this.view;
     v.setUint32(0, D9WG_MAGIC, true);
-    v.setUint16(4, VERSION_MAJOR, true);
-    v.setUint16(6, VERSION_MINOR, true);
+    v.setUint16(4, D9WG_VERSION_MAJOR, true);
+    v.setUint16(6, D9WG_VERSION_MINOR, true);
     v.setUint32(8, frame_id >>> 0, true);
     v.setUint32(12, flags, true);
     v.setUint32(16, this.count, true);

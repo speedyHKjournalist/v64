@@ -717,6 +717,14 @@ game.exe
 
 ### 阶段 1：测试底座（约 2 周，可以与阶段 0 后半并行）
 
+> **状态（2026-10-29，分支 `refactor`）：大部分完成。**
+> - `bb6721f0`、`7007986f`、`b00d62aa`：
+>   - 共用的严格假 GPU（`tests/glbridge/webgpu_rules.js`），naga 必须存在；
+>   - 一致性页带已知失败表；
+>   - 变异实验 `make glbridge-mutations`，D3D9 12/12；
+>   - `make glbridge-gpu-tests`。
+> - 未做：CI 里跑 SwiftShader 真 GPU 页；从真实游戏录制轨迹。
+
 - **目标：** 测试能发现语义错误；变异实验从 2/12 提升到 ≥10/12。
 - **改动：**
   - **严格的假 GPU（一套共用）：**
@@ -735,6 +743,31 @@ game.exe
 - **验证：** 变异实验成为常设测试；故意回退阶段 0 的修复，应当失败。
 
 ### 阶段 2：协议单一来源（约 1–2 周）
+
+> **状态（2026-10-29，分支 `refactor`）：宿主完成；客体头文件随后在 retro-gaming-site 重新生成。**
+> - 单一来源是 `src/browser/glbridge/d3d9-webgpu/d9wg_protocol.js`：
+>   - 头文件的全部内容按顺序记录（`ITEMS`），结构体布局（`STRUCTS`、`F`）由它算出；
+>   - `COMMANDS` 给出每个 opcode 的载荷结构体；
+>   - `ADDED_FIELDS` 列出 1.3 之后加的字段，`minBytes`/`has` 由它得出。
+> - `tools/gen_d9wg_header.mjs` 生成：
+>   - 客体的 `d3d9_protocol.h`，每个结构体的 sizeof 和每个字段的 offsetof 都有断言（typedef 数组，C89 可用）；
+>   - `--svga` 生成 `src/graphics_adapters/vmware_svga/d9wg_constants.js`。
+> - 执行器：
+>   - 所有载荷字段经 `D9WG.F` 读取，字面偏移已删除；
+>   - 载荷长度在 `dispatchCommand` 统一按 schema 检查，各处理函数里的长度检查已删除；
+>   - 版本范围 1.3–1.7 真正测试：1.3 的短载荷把新增字段读成 0；
+>   - 批处理先整体检查结构（大小、`sequence` 连续、数量），通过后才执行任何命令。
+> - `svga3d_d9wg.js` 的 opcode、资源种类、版本来自生成文件；debug 构建断言每个载荷不短于其结构体。
+> - 测试：`tests/glbridge/d9wg_protocol_test.js`：
+>   - 生成的头文件能编译，改错一个偏移就编译失败；
+>   - 编解码往返；
+>   - 1.3 短载荷；
+>   - 执行器处理表与 `COMMANDS` 完全一致；
+>   - SVGA 生成文件是最新的。
+> - 未做：
+>   - 大多数测试编码器仍按顺序手写字段（性能测试已改用 `D9WG.encode`）；
+>   - `svga3d.js` 仍按顺序写字段，只检查长度；
+>   - 轨迹重放逐字节比较要等阶段 1 的轨迹。
 
 - **目标：** 协议漂移在构建时就失败。
 - **改动：**

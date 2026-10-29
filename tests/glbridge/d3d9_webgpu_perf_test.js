@@ -9,6 +9,7 @@
 const assert = require("node:assert/strict");
 const { errorScopes } = require("./fake_error_scopes.js");
 const { D3D9WebGPUExecutor } = require("../../src/browser/glbridge/d3d9-webgpu/d3d9_executor.js");
+const D9WG = require("../../src/browser/glbridge/d3d9-webgpu/d9wg_protocol.js");
 
 const DEVICE = 0x100002;
 const OP = {
@@ -60,7 +61,8 @@ function createDevice() {
 }
 
 function createBuffer(handle, bytes) {
-    return u32(DEVICE, handle, 1, bytes, 0, 0);
+    return Buffer.from(D9WG.encode("CreateBuffer", {
+        device_handle: DEVICE, resource_handle: handle, resource_kind: 1, byte_count: bytes }));
 }
 
 function fvf() {

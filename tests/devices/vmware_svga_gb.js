@@ -9,6 +9,7 @@
 
 import assert from "assert/strict";
 import url from "node:url";
+import { createRequire as create_require } from "node:module";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 process.on("unhandledRejection", exn => { throw exn; });
@@ -17,6 +18,7 @@ const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 const C = await import("../../src/graphics_adapters/vmware_svga/svga_constants.js");
 const { d9wg_commands, OP } = await import("../../src/graphics_adapters/vmware_svga/svga3d_d9wg.js");
+const D9WG = create_require(import.meta.url)("../../src/browser/glbridge/d3d9-webgpu/d9wg_protocol.js");
 
 const floppy = new Uint8Array(1474560);
 floppy.set([0xfa, 0xf4, 0xeb, 0xfd]);
@@ -33,27 +35,30 @@ function run_renderer()
 {
     for(const batch of queue.splice(0))
     {
-        for(const { opcode, view, at } of d9wg_commands(batch["bytes"]))
+        for(const { opcode, view, at, size } of d9wg_commands(batch["bytes"]))
         {
+            // every command is at least its struct, as the protocol describes it
+            const struct = D9WG.commandStruct(opcode);
+            assert.ok(struct && size >= D9WG.STRUCTS[struct].size, "D9WG opcode 0x" + opcode.toString(16) + " is " + size + " bytes");
             if(opcode === OP.READBACK_SURFACE)
             {
-                const texture = view.getUint32(at + 4, true), width = view.getUint32(at + 16, true);
-                const first = view.getUint32(at + 24, true), rows = view.getUint32(at + 28, true), pitch = view.getUint32(at + 32, true);
-                const id = view.getUint32(at + 44, true);
+                const r = D9WG.decode(struct, view, at);
+                const rows = r.row_count, pitch = r.destination_pitch;
                 const answer = new Uint8Array(16 + rows * pitch);
-                new DataView(answer.buffer).setUint32(0, id, true);
+                new DataView(answer.buffer).setUint32(0, r.request_id, true);
                 new DataView(answer.buffer).setUint32(4, rows * pitch, true);
                 new DataView(answer.buffer).setUint32(12, 1, true);
-                for(let r = 0; r < rows; r++) for(let x = 0; x < width; x++)
+                for(let y = 0; y < rows; y++) for(let x = 0; x < r.width; x++)
                 {
-                    answer.set([x, first + r, texture, 0x80], 16 + r * pitch + x * 4);
+                    answer.set([x, r.first_row + y, r.texture_handle, 0x80], 16 + y * pitch + x * 4);
                 }
-                to_device({ "type": "write", "offset": view.getUint32(at + 40, true), "bytes": answer });
+                to_device({ "type": "write", "offset": r.response_offset, "bytes": answer });
             }
             if(opcode === OP.END_QUERY)
             {
-                const answer = new Uint32Array([view.getUint32(at + 12, true), 42, 0, 1]);
-                to_device({ "type": "write", "offset": view.getUint32(at + 8, true), "bytes": new Uint8Array(answer.buffer) });
+                const q = D9WG.decode(struct, view, at);
+                const answer = new Uint32Array([q.request_id, 42, 0, 1]);
+                to_device({ "type": "write", "offset": q.response_offset, "bytes": new Uint8Array(answer.buffer) });
             }
         }
         to_device({ "type": "done", "seq": batch["seq"] });

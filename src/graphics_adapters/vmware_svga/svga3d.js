@@ -934,7 +934,7 @@ SVGA3D.prototype.destroy_surface = function(sid)
     if(surface.handle) w.begin(OP.DESTROY_RESOURCE).u32(surface.handle).u32(surface.kind);
     for(let role = 0; role < 3; role++)
     {
-        if(surface.roles[role]) w.begin(OP.DESTROY_RESOURCE).u32(surface.roles[role]).u32(role === ROLE_VERTEX ? KIND.VERTEX_BUFFER : KIND.INDEX_BUFFER);
+        if(surface.roles[role]) w.begin(OP.DESTROY_RESOURCE).u32(surface.roles[role]).u32(role === ROLE_VERTEX ? KIND.BUFFER_VERTEX : KIND.BUFFER_INDEX);
     }
 };
 
@@ -950,7 +950,7 @@ SVGA3D.prototype.buffer_role = function(surface, role)
     const handle = surface.roles[role] = this.next_handle++;
     const w = this.writer;
     const index = role !== ROLE_VERTEX;
-    w.begin(OP.CREATE_BUFFER).u32(UTILITY_DEVICE).u32(handle).u32(index ? KIND.INDEX_BUFFER : KIND.VERTEX_BUFFER)
+    w.begin(OP.CREATE_BUFFER).u32(UTILITY_DEVICE).u32(handle).u32(index ? KIND.BUFFER_INDEX : KIND.BUFFER_VERTEX)
         .u32(surface.data.length).u32(D3DUSAGE_DYNAMIC)
         .u32(role === ROLE_INDEX16 ? D3DFMT.INDEX16 : role === ROLE_INDEX32 ? D3DFMT.INDEX32 : 0).u32(0).u32(0);
     this.update_buffer(handle, 0, surface.data);
