@@ -820,8 +820,9 @@
             out.push("    clip.z = (clip.z + clip.w) * 0.5;");
             out.push("    clip.y = -clip.y;");
             out.push("    out.position = clip;");
-            out.push("    out.frontColor = frontColor;");
-            out.push("    out.frontSecondary = frontSecondary;");
+            // (colours are clamped to [0, 1] before they are interpolated)
+            out.push("    out.frontColor = saturate(frontColor);");
+            out.push("    out.frontSecondary = saturate(frontSecondary);");
             out.push("    out.fogCoord = fogCoordValue;");
             for (let i = 0; i < 8; ++i)
                 if (this.usedResults.has("texcoord" + i))

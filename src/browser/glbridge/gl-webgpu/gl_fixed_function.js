@@ -114,6 +114,8 @@
                 fogCoord: !!attributes.fogCoord,
                 texCoord,
             },
+            // GL_COLOR_SUM: the secondary colour added after texturing
+            colorSum: !!s.colorSum,
             lighting: {
                 enabled: !!lighting.enabled,
                 twoSide: !!lighting.twoSide,
@@ -279,7 +281,7 @@
                 return entry;
             };
             layout.color = fixed("color", 4, 0, { flat: sig.flatShading });
-            if (sig.lighting.enabled && sig.lighting.separateSpecular)
+            if (sig.colorSum || sig.lighting.enabled && sig.lighting.separateSpecular)
                 layout.secondary = fixed("secondary", 3, 1,
                     { flat: sig.flatShading });
             for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
@@ -303,7 +305,9 @@
         }
 
         layout.color = place("color", 4, { flat: sig.flatShading });
-        if (sig.lighting.enabled && sig.lighting.separateSpecular)
+        // the secondary colour: lighting's separate specular, or with
+        // COLOR_SUM unlit the vertex's own (GL 2.1 section 3.9; review S2-11)
+        if (sig.colorSum || sig.lighting.enabled && sig.lighting.separateSpecular)
             layout.secondary = place("secondary", 3, { flat: sig.flatShading });
         if (sig.lighting.enabled && sig.lighting.twoSide) {
             layout.backColor = place("backColor", 4, { flat: sig.flatShading });
@@ -498,11 +502,13 @@
         const lighting = sig.lighting;
         const primary = sig.attributes.color ? "vin.color" : "vec4<f32>(1.0)";
 
+        // Vertex colours are clamped to [0, 1] before they are interpolated
+        // (GL 2.1 section 2.14.6; review S2-17)
         if (!lighting.enabled) {
-            writeVarying(emit, layout.color, primary, 4);
+            writeVarying(emit, layout.color, "saturate(" + primary + ")", 4);
             if (layout.secondary) {
                 const s = sig.attributes.secondaryColor ?
-                    "vin.secondary.xyz" : "vec3<f32>(0.0)";
+                    "saturate(vin.secondary.xyz)" : "vec3<f32>(0.0)";
                 writeVarying(emit, layout.secondary, s, 3);
             }
             return;
@@ -611,9 +617,11 @@
             emit("    }");
         }
 
-        const alpha = track("diffuse") + ".a";
+        const alpha = "saturate(" + track("diffuse") + ".a)";
         const target = back ? layout.backColor : layout.color;
         const specTarget = back ? layout.backSecondary : layout.secondary;
+        // (lit without a separate specular, the secondary colour is zero)
+        if (specTarget && !lighting.separateSpecular) writeVarying(emit, specTarget, "vec3<f32>(0.0)", 3);
         if (lighting.separateSpecular && specTarget) {
             writeVarying(emit, target, "vec4<f32>(clamp(" + prefix +
                 "Color, vec3<f32>(0.0), vec3<f32>(1.0)), " + alpha + ")", 4);

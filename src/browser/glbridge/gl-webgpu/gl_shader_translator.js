@@ -1821,6 +1821,9 @@
      * gl_MultiTexCoord0 is 8), and so does every tool that ever debugged them.
      * Generic attributes are assigned around it; see assignAttributeLocations.
      */
+    // the vertex stage's colour outputs, which GL clamps
+    const COLOR_OUTPUTS = new Set(["gl_FrontColor", "gl_BackColor", "gl_FrontSecondaryColor", "gl_BackSecondaryColor"]);
+
     const COMPAT_ATTRIBUTE_LOCATIONS = {
         gl_Vertex: 0,
         gl_Normal: 2,
@@ -4819,7 +4822,10 @@
                 const source = entry.vsFront || entry.vsBack;
                 if (!source) return null;
                 if (!this.usage.varyings.has(source)) return null;
-                return { expr: safeName(source),
+                // the colours a vertex shader writes are clamped to [0, 1]
+                // before they are interpolated (GL 2.1 section 2.14.6; review
+                // S2-17)
+                return { expr: COLOR_OUTPUTS.has(source) ? "saturate(" + safeName(source) + ")" : safeName(source),
                          vector: componentCount(entry.type) > 1 };
             }
             if (!this.usage.varyings.has(entry.name)) return null;

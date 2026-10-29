@@ -2944,6 +2944,7 @@
      * line, which the variant rewrites.
      */
     const DEPTH_CONVERSION = "clip.z = (clip.z + clip.w) * 0.5;";
+    const PASSING_PLANE = [0, 0, 0, 1];
 
     function reversedDepthRange(s) {
         return s.depthRange.near > s.depthRange.far;
@@ -7532,6 +7533,7 @@ ${fragmentCode}`;
 
         fixedFunctionSignature(variant) {
             const s = this.current;
+            const colorSum = s.enabled.has(GL.COLOR_SUM);
 
             const texture = [];
             for (let unit = 0; unit < MAX_TEXTURE_UNITS; ++unit) {
@@ -7573,6 +7575,7 @@ ${fragmentCode}`;
                         (unused, unit) => texture[unit] && texture[unit].enabled ?
                             { components: 4 } : null),
                 },
+                colorSum,
                 lighting: {
                     enabled: s.enabled.has(GL.LIGHTING),
                     twoSide: s.lightModel.twoSide,
@@ -8399,8 +8402,13 @@ ${fragmentCode}`;
                         s.textureUnits[i].texGen[c].eyePlane);
                 }
             }
-            for (let i = 0; i < MAX_CLIP_PLANES; ++i)
-                snapshot.clipPlanes[i].set(s.clipPlanes[i]);
+            // the shaders test every plane below the highest enabled one, so
+            // a disabled one passes everything: 0x + 0y + 0z + 1w >= 0
+            // (review S2-10: plane 0 clipped while only plane 1 was enabled)
+            for (let i = 0; i < MAX_CLIP_PLANES; ++i) {
+                if (s.enabled.has(GL.CLIP_PLANE0 + i)) snapshot.clipPlanes[i].set(s.clipPlanes[i]);
+                else snapshot.clipPlanes[i].set(PASSING_PLANE);
+            }
 
             snapshot.depthRange.near = s.depthRange.near;
             snapshot.depthRange.far = s.depthRange.far;
@@ -9808,20 +9816,32 @@ struct Params { value : vec4<f32>, }
             // The raster position is transformed like a vertex; keeping it is
             // cheap and glWindowPos-based code depends on reading it back.
             const s = this.current;
-            const clip = transformPoint4(this.topOf(GL.PROJECTION),
-                transformPoint4(this.topOf(GL.MODELVIEW),
-                    new Float32Array([x, y, z, w]), new Float32Array(4)),
-                new Float32Array(4));
-            s.current.rasterValid = clip[3] !== 0;
-            if (!s.current.rasterValid) return;
-            const ndcX = clip[0] / clip[3], ndcY = clip[1] / clip[3];
-            const ndcZ = clip[2] / clip[3];
+            const eye = transformPoint4(this.topOf(GL.MODELVIEW),
+                new Float32Array([x, y, z, w]), new Float32Array(4));
+            const clip = transformPoint4(this.topOf(GL.PROJECTION), eye, new Float32Array(4));
+            // GL 2.1 section 2.13: a point outside the clip volume, or on the
+            // wrong side of an enabled user clip plane, leaves the raster
+            // position invalid and glDrawPixels and glBitmap draw nothing
+            // (review S2-15: only w = 0 did)
+            const cw = clip[3];
+            let valid = cw > 0 && Math.abs(clip[0]) <= cw && Math.abs(clip[1]) <= cw && Math.abs(clip[2]) <= cw;
+            for (let i = 0; valid && i < MAX_CLIP_PLANES; ++i) {
+                const plane = s.clipPlanes[i];
+                if (s.enabled.has(GL.CLIP_PLANE0 + i) &&
+                        plane[0] * eye[0] + plane[1] * eye[1] + plane[2] * eye[2] + plane[3] * eye[3] < 0)
+                    valid = false;
+            }
+            s.current.rasterValid = valid;
+            if (!valid) return;
+            const ndcX = clip[0] / cw, ndcY = clip[1] / cw;
+            const ndcZ = clip[2] / cw;
             s.current.rasterPos[0] = s.viewport.x +
                 (ndcX * 0.5 + 0.5) * s.viewport.width;
             s.current.rasterPos[1] = s.viewport.y +
                 (ndcY * 0.5 + 0.5) * s.viewport.height;
-            s.current.rasterPos[2] = clamp((ndcZ * 0.5 + 0.5), 0, 1);
-            s.current.rasterPos[3] = 1 / clip[3];
+            s.current.rasterPos[2] = s.depthRange.near +
+                (s.depthRange.far - s.depthRange.near) * (ndcZ * 0.5 + 0.5);
+            s.current.rasterPos[3] = 1 / cw;
         },
         /*
          * glProgramStringARB compiles immediately, the way the extension

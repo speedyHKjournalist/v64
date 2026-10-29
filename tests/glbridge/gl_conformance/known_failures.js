@@ -5,12 +5,6 @@
 // tile; a known failure that passes fails the run.
 "use strict";
 globalThis.GLConformanceKnownFailures = {
-    clip_planes: { reason: "S2-10: user clip planes", tiles: [
-        "plane1 keeps y<=10",
-    ] },
-    drawpixels_bitmap: { reason: "S2-15: an invalid raster position still draws", tiles: [
-        "invalid raster pos (x=-10, then moved): nothing",
-    ] },
     tex_wrap_border: { reason: "S3: CLAMP_TO_BORDER has no border colour", tiles: [
         "CLAMP",
         "CLAMP_TO_BORDER",
@@ -34,15 +28,6 @@ globalThis.GLConformanceKnownFailures = {
         "FRONT LINE (CCW quad outlined)",
     ] },
     polymode_point: "S1-2e: indexed or polygon-mode points have no corner buffer",
-    color_clamp_sum: { reason: "S2-11 COLOR_SUM, S2-17 vertex colour clamping", tiles: [
-        "R: 2->0 clamped first => mid 0.5; G: -1->1 => mid 0.5",
-        "COLOR_SUM primary+secondary",
-        "COLOR_SUM after texturing (prim*0.5+sec)",
-        "COLOR_SUM saturates at 1",
-    ] },
-    glsl_semantics: { reason: "S2-17: gl_FrontColor is not clamped", tiles: [
-        "VS writes gl_FrontColor 2.0/0.0: clamped before interpolation",
-    ] },
     arb_fragment_program: { reason: "S2-48: the ARB parser", tiles: [
         "LIT x>0: (1,.5,.0625,1)*.5",
         "LIT x<=0: z=0",
