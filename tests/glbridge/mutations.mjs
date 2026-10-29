@@ -124,7 +124,7 @@ const MUTATIONS = {
         ["a crossbar to a disabled unit still blends", G + "gl_fixed_function.js",
             "            return crossbar && !sig.texture[+crossbar[1]].enabled;", "            return false && crossbar;"],
         ["unlit vertex colours are not clamped", G + "gl_fixed_function.js",
-            'writeVarying(emit, layout.color, "saturate(" + primary + ")", 4);', 'writeVarying(emit, layout.color, primary, 4);'],
+            'writeVarying(emit, layout.color, "saturate(" + primary + ")", 4);', "writeVarying(emit, layout.color, primary, 4);"],
         ["COLOR_SUM unlit adds nothing", G + "gl_fixed_function.js",
             "        if (sig.colorSum || sig.lighting.enabled && sig.lighting.separateSpecular)\n            layout.secondary = place(",
             "        if (sig.lighting.enabled && sig.lighting.separateSpecular)\n            layout.secondary = place("],
