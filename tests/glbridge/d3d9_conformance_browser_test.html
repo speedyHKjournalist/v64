@@ -49,7 +49,18 @@
             ];
             const pixels = [];
             for (const probe of c.probes) {
-                const resource = executor.resources.get(rt + (probe.target || 0));
+                const resource = c.backBuffer ? { gpuTexture: executor.backBufferTexture }
+                    : executor.resources.get(rt + (probe.target || 0));
+                if (probe.row !== undefined) {
+                    // some pixel of the row has a red value strictly between
+                    const [low, high] = probe.someRedBetween;
+                    const reds = [];
+                    for (let x = 0; x < D3D9Conformance.W; ++x)
+                        reds.push((await read(resource.gpuTexture, x, probe.row))[0]);
+                    if (!reds.some(red => red > low && red < high))
+                        pixels.push("row " + probe.row + " has no red in (" + low + ", " + high + "): " + reds.join(","));
+                    continue;
+                }
                 const got = await read(resource.gpuTexture, probe.at[0], probe.at[1]);
                 const tolerance = probe.tolerance || 0;
                 if (!got.every((v, k) => Math.abs(v - probe.expect[k]) <= tolerance))

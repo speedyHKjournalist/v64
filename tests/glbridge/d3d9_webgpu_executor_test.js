@@ -1770,6 +1770,12 @@ await test("a multisampled target makes the pipeline declare its sample count",
     assert.equal(descriptor.multisample.count, 4);
     assert.equal(descriptor.multisample.mask, 0xffffffff,
         "the default D3DRS_MULTISAMPLEMASK writes every sample");
+    // ... and the pass draws into the multisampled back buffer, resolving into
+    // the one Present copies (S1-6: the multisampled texture was never used)
+    const msaa = executor.deviceState(DEVICE).backBufferMsaaTexture;
+    const attachment = find("beginRenderPass").pop()[1].colorAttachments[0];
+    assert.equal(attachment.view.texture, msaa, "the pass renders into the multisampled texture");
+    assert.equal(attachment.resolveTarget, executor.backBufferView, "and resolves into the back buffer");
 });
 
 await test("D3DRS_MULTISAMPLEMASK reaches the pipeline's sample mask",

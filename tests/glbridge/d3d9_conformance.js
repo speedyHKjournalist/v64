@@ -73,7 +73,7 @@
         return bytes;
     };
 
-    const OP = { CREATE_DEVICE: 2, PRESENT: 4, CLEAR: 5, BEGIN_SCENE: 6, END_SCENE: 7,
+    const OP = { CREATE_DEVICE: 2, PRESENT: 4, CLEAR: 5, BEGIN_SCENE: 6, END_SCENE: 7, COLOR_FILL: 9,
         CREATE_TEXTURE_2D: 0x110, CREATE_PIXEL_SHADER: 0x122,
         SET_RENDER_STATE: 0x200, SET_TEXTURE_STAGE_STATE: 0x202, SET_VIEWPORT: 0x204,
         SET_SCISSOR_RECT: 0x205, SET_FVF: 0x20E, SET_RENDER_TARGET: 0x20F,
@@ -81,7 +81,8 @@
     const RS = { ZENABLE: 7, SHADEMODE: 9, ZFUNC: 23, ALPHATESTENABLE: 15, ALPHAREF: 24, ALPHAFUNC: 25,
         ALPHABLENDENABLE: 27, SRCBLEND: 19, DESTBLEND: 20, CULLMODE: 22, FOGENABLE: 28,
         SPECULARENABLE: 29, FOGCOLOR: 34, FOGTABLEMODE: 35, TEXTUREFACTOR: 60, LIGHTING: 137,
-        FOGVERTEXMODE: 140, COLORWRITEENABLE: 168, BLENDOP: 171, SCISSORTESTENABLE: 174,
+        FOGVERTEXMODE: 140, MULTISAMPLEANTIALIAS: 161, COLORWRITEENABLE: 168, BLENDOP: 171,
+        SCISSORTESTENABLE: 174,
         DEPTHBIAS: 195 };
     const PT = { LINELIST: 2, TRIANGLELIST: 4 };
 
@@ -255,6 +256,29 @@
                   draw(d, quad(0, 0, 64, 64, 0.5, 0xFFFFFFFF))];
           },
           probes: [{ at: [32, 32], expect: [255, 0, 255] }] },
+        { name: "4x MSAA back buffer: a draw reaches the screen",
+          ref: "S1-6", msaa: 4, backBuffer: true,
+          body: d => [draw(d, quad(0, 0, 64, 64, 0.5, 0xFF00FF00))],
+          probes: [{ at: [32, 32], expect: [0, 255, 0] }] },
+        { name: "4x MSAA: a draw reaches the render target through the resolve",
+          ref: "S1-6", msaa: 4,
+          body: d => [draw(d, quad(0, 0, 64, 64, 0.5, 0xFFFF0000))],
+          probes: [{ at: [32, 32], expect: [255, 0, 0] }] },
+        { name: "4x MSAA: pixels on a triangle's edge are partly covered",
+          ref: "S1-6", msaa: 4,
+          body: d => [draw(d, [[0, 0, 0.5, 0xFFFF0000], [64, 0, 0.5, 0xFFFF0000], [0, 64, 0.5, 0xFFFF0000]])],
+          probes: [{ at: [8, 8], expect: [255, 0, 0] }, { at: [60, 60], expect: [0, 0, 0] },
+              { row: 32, someRedBetween: [32, 224] }] },
+        { name: "4x MSAA with MULTISAMPLEANTIALIAS off still writes the whole pixel",
+          ref: "S2-24", msaa: 4,
+          body: d => [rs(d, RS.MULTISAMPLEANTIALIAS, 0), draw(d, quad(0, 0, 64, 64, 0.5, 0xFFFF0000))],
+          probes: [{ at: [32, 32], expect: [255, 0, 0] }] },
+        { name: "4x MSAA: a ColorFill between draws survives the next pass",
+          ref: "S1-6", msaa: 4,
+          body: (d, rt) => [draw(d, quad(0, 0, 64, 64, 0.5, 0xFFFF0000)),
+              cmd(OP.COLOR_FILL, u32(d, rt, 0, 0xFF00FF00, 0, 0, 64, 64, 0)),
+              draw(d, quad(0, 0, 16, 16, 0.5, 0xFF0000FF))],
+          probes: [{ at: [32, 32], expect: [0, 255, 0] }, { at: [8, 8], expect: [0, 0, 255] }] },
     ];
 
     const KNOWN_FAILURES = {
@@ -269,11 +293,16 @@
     // The setup every case starts from: device `dev`, render target(s), full
     // viewport, a clear, lighting off, the pre-transformed FVF
     function prologue(dev, rt, c) {
+        // `msaa`: the device (so its auto depth) and the target multisampled
+        const samples = c.msaa || 0;
+        // `backBuffer`: draw into the device's implicit back buffer instead
         const commands = [
-            cmd(OP.CREATE_DEVICE, u32(dev, 0x1234, 0, 0, W, W, 22, 1, 0x20, 1, 75, 0, 0)),
-            cmd(OP.CREATE_TEXTURE_2D, u32(dev, rt, W, W, 1, 21, 1, 0, 0, 0)),
-            cmd(OP.SET_RENDER_TARGET, u32(dev, 0, rt, 0, 0)),
+            cmd(OP.CREATE_DEVICE, u32(dev, 0x1234, 0, 0, W, W, 22, 1, 0x20, 1, 75, samples, 0)),
         ];
+        if (!c.backBuffer) {
+            commands.push(cmd(OP.CREATE_TEXTURE_2D, u32(dev, rt, W, W, 1, 21, 1, 0, samples, 0)),
+                cmd(OP.SET_RENDER_TARGET, u32(dev, 0, rt, 0, 0)));
+        }
         if (c.mrt) {
             commands.push(cmd(OP.CREATE_TEXTURE_2D, u32(dev, rt + 1, W, W, 1, 21, 1, 0, 0, 0)),
                 cmd(OP.SET_RENDER_TARGET, u32(dev, 1, rt + 1, 0, 0)));
@@ -288,7 +317,7 @@
 
     function caseBatch(index, c) {
         const dev = 0x100002 + index * 0x10, rt = 0x200000 + index * 2;
-        return { dev, rt, bytes: batch(index + 1, [...prologue(dev, rt, c), ...c.body(dev),
+        return { dev, rt, bytes: batch(index + 1, [...prologue(dev, rt, c), ...c.body(dev, rt),
             cmd(OP.END_SCENE, u32(dev)), cmd(OP.PRESENT, u32(dev, 0x1234, 0, 0, W, W))], true) };
     }
 

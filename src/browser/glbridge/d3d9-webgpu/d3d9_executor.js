@@ -3229,7 +3229,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 readbackRequests: 0,
                 frameFlushes: 0,
                 unsupportedCommands: 0, malformedBatches: 0, batchesFailed: 0,
-                protocolViolations: 0,
+                protocolViolations: 0, msaaUnresolves: 0,
                 malformedCommands: 0, gammaRampUpdates: 0, fillModeDraws: 0,
                 swapChainsCreated: 0, swapChainsDestroyed: 0,
                 swapChainsRefused: 0, swapChainPresents: 0,
@@ -5230,16 +5230,14 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 openKey = null;
             };
             const beginPass = (targets, clearColor, clearDepthStencil) => {
+                if (!clearColor) this.unresolveStale(encoder, targets, swapView);
                 const descriptor = {
-                    colorAttachments: targets.colors.map(color => ({
-                        view: color.swapchain
-                            ? (color.format === this.swapchainSrgbFormat
-                                ? swapSrgbView : swapView)
-                            : color.view,
+                    colorAttachments: targets.colors.map(color => color && {
+                        ...this.colorAttachmentFor(color, swapView, swapSrgbView),
                         loadOp: clearColor ? "clear" : "load",
                         storeOp: "store",
                         ...(clearColor ? { clearValue: clearColor } : {}),
-                    })),
+                    }),
                 };
                 if (occlusionQuerySet)
                     descriptor.occlusionQuerySet = occlusionQuerySet;
@@ -5281,7 +5279,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // A blit op carries its own attachment views rather than a
             // target set, so it is not part of this check.
             const backBufferOps = frame.ops.filter(op => op.targets &&
-                op.targets.colors.some(color => color.swapchain));
+                op.targets.colors.some(color => color && color.swapchain));
             const mismatched = backBufferOps.find(op => op.targets.depthView &&
                 (op.targets.width !== backWidth ||
                  op.targets.height !== backHeight));
@@ -5295,6 +5293,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 frame.ops.length = 0;
             }
             for (const op of frame.ops) {
+                if (op.writes) op.writes.msaaStale = true;
                 if (op.kind === "query-begin") {
                     if (op.query.type === D3DQUERYTYPE_OCCLUSION) {
                         closePass();
@@ -7548,9 +7547,15 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                     if (index === 0) {
                         const format = wantsSRGB && this.swapchainSrgbFormat
                             ? this.swapchainSrgbFormat : this.format;
+                        // with MSAA the pass renders into the device's
+                        // multisampled back buffer and resolves into the
+                        // owned one (finishFrame's swapView)
                         colors.push({ view: null, format,
                             swapchain: true,
-                            sampleCount: state.sampleCount || 1 });
+                            sampleCount: state.sampleCount || 1,
+                            msaaView: format === this.format ? state.backBufferMsaaView
+                                : state.backBufferMsaaSrgbView,
+                            msaaOwner: state.backBufferMsaaView ? state : null });
                         width = this.backBufferWidthOf(state);
                         height = this.backBufferHeightOf(state);
                         key += "bb" + (format === this.format ? "" : "s") + ";";
@@ -7567,6 +7572,8 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                         "not know; draws into it are dropped rather than " +
                         "redirected to the back buffer", { index, handle });
                     if (index === 0) return null;
+                    // (the slot keeps its place: attachment N is oC#N)
+                    colors.push(null);
                     continue;
                 }
                 const resourceFormat = resource.gpuFormat ||
@@ -7579,6 +7586,7 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                         { index, handle, format: resource.format,
                             gpuFormat: resourceFormat });
                     if (index === 0) return null;
+                    colors.push(null);
                     continue;
                 }
                 const level = state.renderTargetLevels[index] || 0;
@@ -7592,10 +7600,15 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                     face);
                 if (face) ++this.stats.cubeFaceTargetBinds;
                 this.markTextureSubresourceWritten(resource, level, face);
+                // A multisampled target renders into its msaaTexture (one
+                // level, one layer) and resolves into the texture D3D reads
+                const msaaView = resource.msaaTexture ? this.msaaViewFor(resource, srgb) : null;
                 colors.push({ view: targetView,
                     format: srgb ? resource.srgbFormat : resourceFormat,
                     swapchain: false,
                     sampleCount: resource.sampleCount || 1,
+                    msaaView,
+                    msaaOwner: msaaView ? resource : null,
                     resource });
                 if (index === 0) {
                     width = Math.max(1, resource.width >> level);
@@ -7607,11 +7620,13 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                 key += handle + "." + level + "." + face +
                     (srgb ? "s" : "") + ";";
             }
+            while (colors.length && !colors[colors.length - 1]) colors.pop();
             if (!colors.length) return null;
 
             // Depth: an explicitly bound surface wins, then the device's auto
             // depth-stencil, and SetDepthStencilSurface(NULL) means neither.
             let depthView = null;
+            let depthSamples = 1;
             let depthWidth = 0;
             let depthHeight = 0;
             let substituteDepth = null;
@@ -7626,6 +7641,7 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                     // targets so both subresource paths have identical cache
                     // and descriptor semantics.
                     depthView = this.targetViewFor(resource, level, false);
+                    depthSamples = resource.sampleCount || 1;
                     depthWidth = Math.max(1, resource.width >> level);
                     depthHeight = Math.max(1, resource.height >> level);
                     key += "d" + state.depthTargetHandle + "." + level;
@@ -7643,6 +7659,7 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                 }
             } else if (!state.depthUnbound && state.depthView) {
                 depthView = state.depthView;
+                depthSamples = state.sampleCount || 1;
                 depthWidth = state.depthWidth;
                 depthHeight = state.depthHeight;
                 key += "dauto";
@@ -7696,26 +7713,34 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                 }
             }
             // WebGPU requires every attachment of a pass -- and the pipeline
-            // drawing into it -- to agree on the sample count, so slot 0 sets
-            // it and a disagreeing slot is named rather than left to fail
-            // pipeline creation with nothing pointing at the cause.
+            // drawing into it -- to agree on the sample count. D3D9 makes a
+            // disagreeing binding the application's error; slot 0 decides,
+            // and a disagreeing slot or depth surface is left out of the pass
+            // (and named) rather than making it invalid.
             const sampleCount = colors[0].sampleCount || 1;
             for (let index = 1; index < colors.length; ++index) {
-                if ((colors[index].sampleCount || 1) === sampleCount) continue;
+                if (!colors[index] || (colors[index].sampleCount || 1) === sampleCount) continue;
                 this.warnOnce("mrt-sample-count",
                     "the render target slots disagree about multisampling; " +
-                    "WebGPU needs one sample count for the whole pass, so " +
-                    "slot 0's is used", {
+                    "slot 0's sample count is used and the slot is left out", {
                         slot0: sampleCount,
                         slot: index,
                         slotSampleCount: colors[index].sampleCount || 1,
                     });
-                break;
+                colors[index] = null;
+                key += "!" + index;
+            }
+            if (depthView && depthSamples !== sampleCount) {
+                this.warnOnce("depth-sample-count",
+                    "the depth surface's multisample type differs from the " +
+                    "render target's; the pass runs without depth", { depthSamples, sampleCount });
+                depthView = null;
+                key += "!ds";
             }
             return { key: key + "x" + sampleCount, colors, depthView, width,
                 height, substituteDepth,
                 hasDepth: !!depthView, sampleCount,
-                formats: colors.map(color => color.format) };
+                formats: colors.map(color => color ? color.format : null) };
         }
 
         // StretchRect between two host-owned surfaces. A same-size, same-format
@@ -7813,7 +7838,7 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                 const frame = this.ensureFrame();
                 // The face is the copy's z origin: a cube map is a six-layer
                 // 2D texture, so "face 3" is layer 3 of one subresource range.
-                frame.ops.push({ kind: "copy",
+                frame.ops.push({ kind: "copy", writes: this.msaaOwnerOf(destination, state),
                     source: { texture: source.gpuTexture, mipLevel: sourceLevel,
                         origin: { x: sourceRect.left, y: sourceRect.top,
                             z: sourceFace } },
@@ -7851,6 +7876,7 @@ fn d9_ps_main(stage_in: D9GammaOutput) -> @location(0) vec4<f32> {
                 : this.backBufferHeightOf(state);
             const op = {
                 kind: "blit",
+                writes: this.msaaOwnerOf(destination, state),
                 sourceView: source
                     ? this.blitSourceView(source, sourceLevel, sourceFace) : null,
                 destinationView: destination
@@ -8090,6 +8116,87 @@ fn d9_ps_main(stage_in: D9BlitOutput) -> @location(0) vec4<f32> {
             return uniform;
         }
 
+        // A pass's colour attachment for one target of renderTargetsFor: a
+        // multisampled target renders into its multisampled texture and
+        // resolves, at the end of every pass, into the texture D3D reads
+        colorAttachmentFor(color, swapView, swapSrgbView) {
+            const resolved = color.swapchain
+                ? (color.format === this.swapchainSrgbFormat ? swapSrgbView : swapView)
+                : color.view;
+            return color.msaaView ? { view: color.msaaView, resolveTarget: resolved } : { view: resolved };
+        }
+
+        // What a write outside a render pass leaves stale: the multisampled
+        // texture behind `destination` (null: the back buffer of `state`)
+        msaaOwnerOf(destination, state) {
+            if (destination) return destination.msaaTexture ? destination : null;
+            return state.backBufferMsaaView ? state : null;
+        }
+
+        /*
+         * StretchRect, ColorFill and copies write a multisampled target's
+         * resolved texture. The next pass that loads the target would resolve
+         * its stale samples over that write, so before it the resolved image
+         * is drawn back into every sample.
+         */
+        unresolveStale(encoder, targets, swapView) {
+            for (const color of targets.colors) {
+                if (!color || !color.msaaOwner || !color.msaaOwner.msaaStale) continue;
+                color.msaaOwner.msaaStale = false;
+                const swapchain = color.swapchain;
+                const format = swapchain ? this.format : color.resource.gpuFormat;
+                const entry = this.unresolvePipelineFor(format, color.sampleCount);
+                const pass = encoder.beginRenderPass({ colorAttachments: [{
+                    view: swapchain ? color.msaaOwner.backBufferMsaaView : this.msaaViewFor(color.resource, false),
+                    loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 }, storeOp: "store" }] });
+                ++this.stats.renderPasses;
+                ++this.stats.msaaUnresolves;
+                pass.setPipeline(entry.pipeline);
+                pass.setBindGroup(0, this.device.createBindGroup({ layout: entry.layout, entries: [
+                    { binding: 0, resource: swapchain ? swapView : this.targetViewFor(color.resource, 0, false, 0) }] }));
+                pass.draw(3);
+                pass.end();
+            }
+        }
+
+        unresolvePipelineFor(format, sampleCount) {
+            const key = format + "x" + sampleCount;
+            this.unresolvePipelines = this.unresolvePipelines || new Map();
+            let entry = this.unresolvePipelines.get(key);
+            if (entry) return entry;
+            const module = this.moduleFor(`@group(0) @binding(0) var resolved: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    var positions = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    return vec4<f32>(positions[index], 0.0, 1.0);
+}
+@fragment
+fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return textureLoad(resolved, vec2<i32>(position.xy), 0);
+}
+`, "d3d9 msaa unresolve");
+            const layout = this.device.createBindGroupLayout({ entries: [{ binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } }] });
+            entry = { layout, pipeline: this.gpuErrors.scoped("msaa unresolve pipeline", () =>
+                this.device.createRenderPipeline({
+                    label: "D3D9 MSAA unresolve " + key,
+                    layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+                    vertex: { module, entryPoint: "vs" },
+                    fragment: { module, entryPoint: "fs", targets: [{ format }] },
+                    primitive: { topology: "triangle-list" },
+                    multisample: { count: sampleCount },
+                })).object };
+            this.unresolvePipelines.set(key, entry);
+            return entry;
+        }
+
+        msaaViewFor(resource, srgb) {
+            const key = srgb ? "msaaSrgbView" : "msaaView";
+            if (!resource[key])
+                resource[key] = resource.msaaTexture.createView(srgb ? { format: resource.srgbFormat } : {});
+            return resource[key];
+        }
+
         rectClearPipelineFor(targets, clearsColor, clearsDepth, clearsStencil) {
             // The key has to describe the *pass* this pipeline will be used
             // in, not just what the clear writes. WebGPU requires a pipeline's
@@ -8108,9 +8215,11 @@ fn d9_ps_main(stage_in: D9BlitOutput) -> @location(0) vec4<f32> {
             if (!this.rectClearPipelines) this.rectClearPipelines = new Map();
             let entry = this.rectClearPipelines.get(key);
             if (entry) return entry;
-            const colorFields = targets.formats.map((_, index) =>
+            const slots = targets.formats.map((format, index) => format ? index : -1)
+                .filter(index => index >= 0);
+            const colorFields = slots.map(index =>
                 "    @location(" + index + ") color" + index + ": vec4<f32>,");
-            const colorWrites = targets.formats.map((_, index) =>
+            const colorWrites = slots.map(index =>
                 "    result.color" + index + " = clear.color;");
             const depthField = clearsDepth
                 ? "    @builtin(frag_depth) depth: f32," : "";
@@ -8152,7 +8261,7 @@ ${depthWrite}
                     { bindGroupLayouts: [bindGroupLayout] }),
                 vertex: { module, entryPoint: "d9_vs_main" },
                 fragment: { module, entryPoint: "d9_ps_main",
-                    targets: targets.formats.map(format => ({ format,
+                    targets: targets.formats.map(format => format && ({ format,
                         writeMask: clearsColor ? 0xF : 0 })) },
                 primitive: { topology: "triangle-list" },
             };
@@ -8174,6 +8283,7 @@ ${depthWrite}
         }
 
         replayRectClear(encoder, op, swapView, swapSrgbView) {
+            this.unresolveStale(encoder, op.targets, swapView);
             const entry = this.rectClearPipelineFor(op.targets, op.clearsColor,
                 op.clearsDepth, op.clearsStencil);
             const uniform = this.device.createBuffer({ size: 32,
@@ -8187,13 +8297,10 @@ ${depthWrite}
                 entries: [{ binding: 0, resource: { buffer: uniform } }],
             });
             const descriptor = {
-                colorAttachments: op.targets.colors.map(color => ({
-                    view: color.swapchain
-                        ? (color.format === this.swapchainSrgbFormat
-                            ? swapSrgbView : swapView)
-                        : color.view,
+                colorAttachments: op.targets.colors.map(color => color && {
+                    ...this.colorAttachmentFor(color, swapView, swapSrgbView),
                     loadOp: "load", storeOp: "store",
-                })),
+                }),
             };
             if (op.targets.depthView) descriptor.depthStencilAttachment = {
                 view: op.targets.depthView,
@@ -8370,6 +8477,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 clippedRight === fullWidth && clippedBottom === fullHeight;
             const frame = this.ensureFrame();
             frame.ops.push({ kind: "color-fill", targetView,
+                writes: resource.msaaTexture ? resource : null,
                 format: formatToGPU(resource.format), rgba, isFull,
                 left: clippedLeft, top: clippedTop,
                 right: clippedRight, bottom: clippedBottom });
@@ -9796,15 +9904,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 // target failed validation.
                 sampleCount,
                 // D3DRS_MULTISAMPLEMASK maps straight onto WebGPU's
-                // multisample mask. D3DRS_MULTISAMPLEANTIALIAS turning
-                // antialiasing off for one draw has no WebGPU equivalent --
-                // the sample count is fixed for the whole pass -- so it is
-                // approximated by writing sample 0 only, which is what
-                // "no antialiasing" means for the pixels this draw covers.
-                sampleMask: sampleCount > 1
-                    ? (get(D3DRS_MULTISAMPLEANTIALIAS, 1) !== 0
-                        ? (get(D3DRS_MULTISAMPLEMASK, 0xffffffff) >>> 0)
-                        : 1)
+                // multisample mask. D3DRS_MULTISAMPLEANTIALIAS = FALSE makes
+                // D3D write every sample with the pixel's value; WebGPU's
+                // coverage is fixed for the pass, so every covered sample is
+                // written (deviation: the draw's edges stay antialiased).
+                // Writing sample 0 only would resolve to a quarter of it.
+                sampleMask: sampleCount > 1 && get(D3DRS_MULTISAMPLEANTIALIAS, 1) !== 0
+                    ? (get(D3DRS_MULTISAMPLEMASK, 0xffffffff) >>> 0)
                     : 0xffffffff,
                 // Only meaningful on a multisampled target -- with one sample
                 // there is no coverage to spread an alpha value over, and
@@ -10756,6 +10862,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 ? Math.max(...program.pixelReflection.colorOutputs) + 1 : 1;
             const colorTargets = (pipelineState.colorFormats || [this.format])
                 .map((format, index) => {
+                    if (!format) return null;
                     const target = { format, writeMask: index >= outputs ? 0
                         : index === 0 ? pipelineState.writeMask
                             : pipelineState.extraWriteMasks[index - 1] };
