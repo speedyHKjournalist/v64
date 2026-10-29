@@ -13,6 +13,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { errorScopes } = require("./fake_error_scopes.js");
 const { D3D9WebGPUExecutor } = require("../../src/browser/glbridge/d3d9-webgpu/d3d9_executor.js");
 const ddraw = require("../../src/browser/glbridge/d3d9-webgpu/ddraw_ops.js");
 ddraw.installDDrawOps(D3D9WebGPUExecutor);
@@ -258,6 +259,7 @@ function makeFakeWebGPU() {
     const device = {
         queue,
         lost: new Promise(() => {}),
+        ...errorScopes(),
         features: new Set(),
         createShaderModule(descriptor) {
             const module = { descriptor, code: descriptor.code,

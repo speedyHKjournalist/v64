@@ -7,6 +7,8 @@
 
 "use strict";
 
+const { errorScopes } = require("./fake_error_scopes.js");
+
 class FakeBuffer {
     constructor(descriptor) {
         this.descriptor = descriptor;
@@ -124,6 +126,7 @@ class FakeEncoder {
 class FakeDevice {
     constructor(log) {
         this.log = log;
+        Object.assign(this, errorScopes());
         this.features = new Set(["texture-compression-bc"]);
         this.limits = {
             maxTextureDimension2D: 8192, maxTextureDimension3D: 2048,

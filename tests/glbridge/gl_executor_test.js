@@ -15,6 +15,7 @@ const assert = require("assert");
 const { createFakeHost } = require("./gl_fake_gpu.js");
 const { GLStream, GL, GLFN } = require("./gl_stream_builder.js");
 const executorModule = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");
+const { GPUErrorLog } = require("../../src/browser/glbridge/webgpu_host.js");
 
 let passed = 0;
 const failures = [];
@@ -36,6 +37,10 @@ function test(name, fn) {
  * executor that never completes them at all.
  */
 const asyncTests = [];
+// Lets a chain of already-settled promises run to its end
+async function settle() {
+    for (let i = 0; i < 20; ++i) await Promise.resolve();
+}
 function asyncTest(name, fn) {
     asyncTests.push([name, fn]);
 }
@@ -48,6 +53,8 @@ function newExecutor(options) {
         // initialize() is async only because a real adapter request is; the
         // fake resolves immediately, so the tests drive it synchronously.
         executor.device = host.device;
+        executor.gpuErrors = GPUErrorLog.forDevice(host.device);
+        executor.gpuErrors.strict = true;
         executor.deviceFeatures = host.deviceFeatures;
         executor.limits = host.limits;
         executor.uniformCapacity = 1 << 20;
@@ -1254,7 +1261,7 @@ asyncTest("query slot exhaustion submits completed segments and resumes the same
     executor.endPass(); executor.ensurePass();
     executor.endQuery(GL.SAMPLES_PASSED);
     executor.flushFrame();
-    await Promise.resolve(); await Promise.resolve();
+    await Promise.resolve(); await settle();
     assert.deepStrictEqual(log.queryResolves.map(r => r.count), [2, 1]);
     assert.strictEqual(executor.queries.get(1).ready, true);
     assert.strictEqual(executor.queries.get(1).result, 0);
@@ -1273,7 +1280,7 @@ asyncTest("occlusion segments across passes are ORed, not overwritten", async ()
         const staging = findBuffer(log, "GL occlusion readback");
         const words = new Uint32Array(staging.storage);
         samples.forEach((sample, slot) => { words[slot * 2] = sample; });
-        await Promise.resolve(); await Promise.resolve();
+        await Promise.resolve(); await settle();
         assert.strictEqual(log.queryResolves[0].count, 2);
         const query = executor.queries.get(1);
         assert.strictEqual(query.ready, true);
@@ -1301,11 +1308,11 @@ asyncTest("query spanning submissions waits for every segment, even out of order
     assert.strictEqual(maps.length, 2);
     const query = executor.queries.get(1);
     maps[1]();
-    await Promise.resolve(); await Promise.resolve();
+    await Promise.resolve(); await settle();
     assert.strictEqual(query.ready, false, "the earlier submission is still pending");
     new Uint32Array(first.storage)[0] = 1;
     maps[0]();
-    await Promise.resolve(); await Promise.resolve();
+    await Promise.resolve(); await settle();
     assert.strictEqual(query.ready, true);
     assert.ok(query.result > 0);
 });
@@ -1335,8 +1342,7 @@ asyncTest("an occlusion query resolves and reports a visible result", async () =
     const staging = findBuffer(log, "GL occlusion readback");
     assert.ok(staging, "the resolved set is copied into a mappable buffer");
     new DataView(staging.storage).setUint32(0, 1, true);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
 
     const query = executor.queries.get(5);
     assert.strictEqual(query.ready, true,
@@ -1354,8 +1360,7 @@ asyncTest("a query the GPU says was fully occluded reports zero", async () => {
         .call("END_QUERY", GL.SAMPLES_PASSED));
     executor.flushFrame();
     findBuffer(log, "GL occlusion readback");   // left zeroed
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     const query = executor.queries.get(9);
     assert.strictEqual(query.ready, true, "an occluded query is still answered");
     assert.strictEqual(query.result, 0);
@@ -1377,9 +1382,7 @@ asyncTest("a failed occlusion readback falls back to visible", async () => {
             vertex: { size: 3, type: GL.FLOAT, data: new Uint8Array(36) } })
         .call("END_QUERY", GL.SAMPLES_PASSED));
     executor.flushFrame();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     const query = executor.queries.get(11);
     assert.strictEqual(query.ready, true);
     assert.ok(query.result > 0,
@@ -1403,7 +1406,7 @@ asyncTest("query slots are reused after each resolve", async () => {
         log.queryResolves.map(resolve => resolve.first), [0, 0],
         "a frame's queries start again at slot 0, or the set fills up and " +
         "later queries are refused");
-    await Promise.resolve();
+    await settle();
 });
 
 asyncTest("a late query readback cannot overwrite a reused Cube 2 query", async () => {
@@ -1439,8 +1442,7 @@ asyncTest("a late query readback cannot overwrite a reused Cube 2 query", async 
     // Complete generation one as occluded after generation two has already
     // reused the object. It must not make generation two ready with stale 0.
     mapResolvers[0]();
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     const query = executor.queries.get(7);
     assert.strictEqual(query.generation, 2);
     assert.strictEqual(query.ready, false,
@@ -1449,8 +1451,7 @@ asyncTest("a late query readback cannot overwrite a reused Cube 2 query", async 
     // The current generation remains authoritative and completes normally.
     new DataView(stagingBuffers[1].storage).setUint32(0, 1, true);
     mapResolvers[1]();
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     assert.strictEqual(query.ready, true);
     assert.ok(query.result > 0);
 });
@@ -1502,8 +1503,7 @@ asyncTest("glReadPixels writes the pixels and then the status word", async () =>
     assert.strictEqual(record.view.getUint32(28, true), 0,
         "the status must still read PENDING when the batch returns -- the " +
         "guest's single check was exactly this bug");
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     assert.strictEqual(record.view.getUint32(28, true), 1,
         "the mapping completes and the status becomes OK");
     assert.deepStrictEqual(writes.map(write => write.offset).slice(-2).sort(

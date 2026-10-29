@@ -42,8 +42,8 @@
     check(!bridge.failed, "graphics initialization succeeded");
     check(compositor.canvas === vga && container.querySelectorAll("canvas").length === 1,
         "the compositor owns the one screen canvas");
-    check(bridge.glExecutor.device === compositor.device && bridge.d3d9Executor.device === compositor.device &&
-        bridge.d3d8Executor.device === compositor.device, "all executors share the compositor's GPUDevice");
+    check(bridge.glExecutor.device === compositor.device && bridge.d3d9Executor.device === compositor.device,
+        "all executors share the compositor's GPUDevice");
     check(layers().every(layer => !layer.visible), "text-mode boot shows no window layer");
     const gpu = bridge.glExecutor.device;
     const errors = [];

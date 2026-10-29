@@ -3,7 +3,6 @@ const assert = require("node:assert/strict");
 const { GLStream, GL, GLFN } = require("./gl_stream_builder.js");
 const { createFakeHost } = require("./gl_fake_gpu.js");
 const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");
-const d8 = require("./d3d8_webgpu_executor_test.js");
 const d9 = require("./d3d9_webgpu_executor_test.js");
 const dd = require("./ddraw_webgpu_executor_test.js");
 require("../../src/browser/glbridge/v86_network_bridge.js");
@@ -22,15 +21,12 @@ async function fixture() {
     const { host, log } = createFakeHost();
     const gl = new GLWebGPUExecutor(null, { host });
     await gl.initialize();
-    const fake8 = d8.makeFakeWebGPU();
-    const direct8 = new d8.D3D8WebGPUExecutor({ width: 64, height: 64,
-        getContext: () => fake8.context }, { gpu: fake8.gpu });
     const direct9 = d9.makeExecutor();
     direct9.fake.device.queue.onSubmittedWorkDone = () => Promise.resolve();
     const bridge = global.installV86GLNetworkBridge(null, null, {
         compositor: new V86WebGPUCompositor({ width: 64, height: 64 }),
         managedState: true, glExecutor: gl,
-        d3d8Executor: direct8, d3d9Executor: direct9.executor,
+        d3d9Executor: direct9.executor,
     });
     let writes = 0;
     const send = (bytes, flags = 0) => bridge.pushPCIBatch({ bytes, flags,
@@ -45,7 +41,7 @@ async function fixture() {
         bridge.onPCIStateRestored(bytes);
         await bridge.finishStateRestore();
     };
-    return { bridge, gl, log, direct8, direct9, send, save, restore, writes: () => writes };
+    return { bridge, gl, log, direct9, send, save, restore, writes: () => writes };
 }
 
 const timeout = setTimeout(() => { throw new Error("checkpoint test timed out"); }, 15000);
@@ -56,18 +52,11 @@ const timeout = setTimeout(() => { throw new Error("checkpoint test timed out");
         .names(GLFN.DELETE_QUERIES, [8])
         .call("CLEAR_COLOR", 0.25, 0.5, 0.75, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
         .call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7).bytes());
-    const device8 = 0x100002, buffer8 = 0x100003;
-    const create8 = d8.u32Payload(device8, buffer8, 1, 16, 0, 0, 0, 0);
     const data8 = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-    const batch8 = d8.batch([
-        d8.command(1, d8.u32Payload(32, 0, 0xA0010001, 0x20260802)),
-        d8.command(2, d8.createDevicePayload(device8, 64, 64)),
-        d8.command(0x100, create8),
-        d8.command(0x101, d8.u32Payload(buffer8, 0, 16, 0, 0, 0), data8),
-        d8.command(5, d8.u32Payload(device8, 1, 0xff112233, 0x3f800000, 0, 0)),
-    ], 1);
-    batch8.writeUInt32LE(0, 12); // save while the frame is unfinished
-    await a.send(envelope(0xffe0, batch8));
+    // A d3d8.dll from before the translation layer: refused, not journaled
+    const journaled = a.bridge.graphicsJournal.count;
+    await a.send(envelope(0xffe0, new Uint8Array(32)));
+    assert.equal(a.bridge.graphicsJournal.count, journaled);
     const buffer9 = 0x201;
     const shader = d9.shaderCreatePayload(0x400, [0xffff0101, 1, 0x800f0000, 0x90e40000, 0xffff]);
     await a.send(envelope(0xffe1, d9.buildBatch([
@@ -93,7 +82,6 @@ const timeout = setTimeout(() => { throw new Error("checkpoint test timed out");
             sourceRect: [0, 0, 2, 2], destinationRect: [0, 0, 2, 2] })),
     ], { sessionLow: 2 })));
     const snapshot = await a.save();
-    assert.equal(a.direct8.frame, null, "save flushes unfinished D3D8 drawing");
     const queryState = a.gl.queries.get(7);
     assert.equal(queryState.ended, false);
     const expected9 = a.direct9.executor.sessionStates.get("0000000000000001");
@@ -104,7 +92,6 @@ const timeout = setTimeout(() => { throw new Error("checkpoint test timed out");
         assert.equal(b.gl.queries.has(7), true);
         assert.equal(b.gl.queries.has(8), false);
         assert.equal(b.gl.activeQuery.name, 7, "unfinished GL query survives");
-        assert.deepEqual(b.direct8.resources.get(buffer8).shadow.slice(0, 16), new Uint8Array(data8));
         const session = b.direct9.executor.sessionStates.get("0000000000000001");
         assert.deepEqual(session.resources.get(buffer9).shadow.slice(0, 16), new Uint8Array(data8));
         assert.ok(session.resources.has(0x400), "shader reconstructed");
@@ -119,13 +106,12 @@ const timeout = setTimeout(() => { throw new Error("checkpoint test timed out");
         assert.equal(b.gl.activeQuery, null);
         assert.equal(b.gl.queries.get(7).ready, true);
     }
-    // Roll back all four frontends after additional commands destroyed state.
+    // Roll back every frontend after additional commands destroyed state.
     a.send(new GLStream().names(GLFN.DELETE_QUERIES, [7]).bytes());
     await a.send(envelope(0xffe1, d9.buildBatch([
         d9.command(d9.OP.DESTROY_RESOURCE, d9.u32(buffer9)),
     ], { sessionLow: 1 })));
     const beforeWrites = a.writes();
-    a.direct9.executor.failed = new Error("discarded timeline failed");
     await a.restore(snapshot);
     assert.equal(a.writes(), beforeWrites, "replay never writes historical DMA responses");
     await checkRestored(a);
@@ -172,5 +158,5 @@ const timeout = setTimeout(() => { throw new Error("checkpoint test timed out");
     await q.restore(querySnapshot);
     assert.equal(q.writes(), queryWrites, "query replay cannot overwrite restored DMA responses");
 
-    console.log("graphics_checkpoint_test: four APIs, hot/cold restore, query continuation, DMA isolation and large batches passed");
+    console.log("graphics_checkpoint_test: GL, D3D9 and DDraw, hot/cold restore, query continuation, DMA isolation and large batches passed");
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => clearTimeout(timeout));

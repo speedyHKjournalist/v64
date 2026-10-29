@@ -1,8 +1,9 @@
 // v86 PCI DMA graphics router.
 //
-// OpenGL records are executed directly by gl-webgpu/gl_executor.js. D3D8 and
-// D3D9 keep their tagged envelopes on the same v86gl.sys transport, but there
-// is deliberately no GL4ES/WebGL decoder or fallback in this file.
+// OpenGL records are executed directly by gl-webgpu/gl_executor.js. D3D9
+// (which d3d8.dll and ddraw.dll also speak) keeps its tagged envelope on the
+// same v86gl.sys transport, but there is deliberately no GL4ES/WebGL decoder
+// or fallback in this file.
 
 (function(global) {
     "use strict";
@@ -10,6 +11,8 @@
     const GraphicsJournal = global.V86GraphicsJournal ||
         (typeof require === "function" ? require("./graphics_journal.js").GraphicsJournal : null);
     const V86GL_BRIDGE_VERSION = "gl-webgpu-only-v1-20260824";
+    // The retired D8WG renderer's envelope: a d3d8.dll from before D3D8 was
+    // translated onto D9WG. Refused, with a message.
     const CTRL_D3D8_BATCH = 0xFFE0;
     const CTRL_D3D9_BATCH = 0xFFE1;
     const EXTENDED_RECORD_SIZE = 0xFFFF;
@@ -56,20 +59,16 @@
                 throw new Error("the graphics bridge needs a compositor (webgpu_compositor.js)");
             const layer = name => this.compositor.createLayer(name).canvas;
             this.glCanvas = this.options.glCanvas || layer("gl");
-            this.d3d8Canvas = this.options.d3d8Canvas || layer("d3d8");
             this.d3d9Canvas = this.options.d3d9Canvas || layer("d3d9");
             this.screenCanvas = this.options.screenCanvas || this.compositor.canvas || null;
             this.destroyed = false;
             this.memoryGeneration = 0;
 
             this.glExecutor = null;
-            this.d3d8Executor = null;
             this.d3d9Executor = null;
             this.glSurface = this.emptySurface();
-            this.d3d8Surface = this.emptySurface();
             this.d3d9Surface = this.emptySurface();
             this.activeOwner = null;
-            this.d3d8OwnerSessionKey = null;
             this.d3d9OwnerSessionKey = null;
             this.d3d9SwapChainCanvases = new Map();
             this.d3d9SwapChainSurfaces = new Map();
@@ -93,7 +92,6 @@
 
             // Batches arrive through graphics_proxy.js
             this.installGLExecutor();
-            this.installD3D8Executor();
             this.installD3D9Executor();
         }
 
@@ -149,54 +147,6 @@
                     (metadata.batchAddress + offsetInBatch) >>> 0);
             };
             this.glExecutor = install(this.glCanvas, executorOptions);
-        }
-
-        installD3D8Executor() {
-            if (this.options.d3d8Executor) {
-                this.d3d8Executor = this.options.d3d8Executor;
-                return;
-            }
-            const install = this.options.installD3D8WebGPUExecutor ||
-                global.installD3D8WebGPUExecutor;
-            if (!this.d3d8Canvas || typeof install !== "function") return;
-            const opts = { ...(this.options.d3d8 || {}) };
-            if (!opts.host && this.layerHost(this.d3d8Canvas))
-                opts.host = this.layerHost(this.d3d8Canvas);
-            const userSurface = opts.onSurface;
-            const userPresent = opts.onPresent;
-            const userDestroy = opts.onDestroy;
-            opts.onSurface = (surface, reason) => {
-                const session = surface.sessionKey || null;
-                if (reason === "hide" || surface.visible === false) {
-                    if (!session || session === this.d3d8OwnerSessionKey) {
-                        this.d3d8Surface = { ...this.d3d8Surface, ...surface };
-                        if (this.activeOwner === "d3d8") this.hideLayers();
-                    }
-                } else {
-                    this.d3d8OwnerSessionKey = session;
-                    this.d3d8Surface = { ...this.d3d8Surface, ...surface };
-                    this.placeOwner("d3d8", false);
-                }
-                if (typeof userSurface === "function") userSurface(surface, reason);
-            };
-            opts.onPresent = (surface, stats) => {
-                this.d3d8OwnerSessionKey = surface.sessionKey || null;
-                this.d3d8Surface = { ...this.d3d8Surface, ...surface };
-                if (surface.visible === false) this.hideLayers();
-                else this.showOwner("d3d8");
-                if (typeof userPresent === "function") userPresent(surface, stats);
-            };
-            opts.onDestroy = (surface, reason) => {
-                const session = surface.sessionKey || null;
-                if (!session || session === this.d3d8OwnerSessionKey) {
-                    this.d3d8OwnerSessionKey = null;
-                    this.d3d8Surface = { ...this.d3d8Surface, ...surface,
-                        visible: false };
-                    if (this.activeOwner === "d3d8") this.hideLayers();
-                }
-                if (typeof userDestroy === "function") userDestroy(surface, reason);
-            };
-            this.d3d8Executor = install(this.d3d8Canvas, opts);
         }
 
         installD3D9Executor() {
@@ -313,6 +263,12 @@
             if (this.destroyed || this.failed) return;
             event.handled = true;
             const bytes = asBytes(event && event.bytes);
+            if (this.isEnvelope(bytes, CTRL_D3D8_BATCH)) {
+                if (!this.d8wgReported) console.error("[v86gl] a D8WG batch from a d3d8.dll that predates the " +
+                    "D3D9 translation layer; this host no longer renders D8WG, replace the guest's d3d8.dll");
+                this.d8wgReported = true;
+                return;
+            }
             if (this.restoringState) {
                 this.pendingBatches.push({ ...event, bytes: bytes.slice() });
                 return;
@@ -322,8 +278,6 @@
         }
 
         executePCIBatch(event, bytes) {
-            if (this.isEnvelope(bytes, CTRL_D3D8_BATCH))
-                return this.pushD3D8PCIBatch(event, bytes);
             if (this.isEnvelope(bytes, CTRL_D3D9_BATCH))
                 return this.pushD3D9PCIBatch(event, bytes);
             this.pushGLPCIBatch(event, bytes);
@@ -355,25 +309,6 @@
                 this.glExecutor.onSwapBuffers();
                 this.showOwner("gl");
             }
-        }
-
-        pushD3D8PCIBatch(event, bytes) {
-            if (!this.d3d8Executor ||
-                    typeof this.d3d8Executor.submit !== "function") {
-                console.error("[d3d8-webgpu] executor unavailable");
-                return;
-            }
-            const payloadBytes = u32(bytes, 4);
-            if (payloadBytes !== bytes.byteLength - 8) {
-                console.error("[d3d8-webgpu] malformed D8WG envelope");
-                return;
-            }
-            return this.d3d8Executor.submit(bytes.subarray(8), {
-                ...(event.replay ? { replay: true } : {}),
-                pciFrameId: event.frameId >>> 0,
-                submitCount: event.submitCount >>> 0,
-                descriptorCommandCount: event.commandCount >>> 0,
-            });
         }
 
         pushD3D9PCIBatch(event, bytes) {
@@ -419,8 +354,7 @@
             this.preparedCheckpoint = null;
             this.graphicsJournal.append(event, bytes);
             this.graphicsJournalBytes += JOURNAL_ENTRY_BYTES + bytes.byteLength;
-            if (!event.barrier && !this.isEnvelope(bytes, CTRL_D3D8_BATCH) &&
-                    !this.isEnvelope(bytes, CTRL_D3D9_BATCH))
+            if (!event.barrier && !this.isEnvelope(bytes, CTRL_D3D9_BATCH))
                 this.glJournalBytes += bytes.byteLength;
         }
 
@@ -467,8 +401,9 @@
                 const d3d8Bytes = view.getUint32(16, true);
                 if (header + glBytes + d3d8Bytes !== total)
                     throw new Error("graphics checkpoint lengths are invalid");
-                return { version, gl: bytes.slice(header, header + glBytes),
-                    d3d8: bytes.slice(header + glBytes), records: [] };
+                if (d3d8Bytes)
+                    throw new Error("graphics checkpoint holds state of the retired D8WG (D3D8) renderer");
+                return { version, gl: bytes.slice(header, header + glBytes), records: [] };
             }
             const legacyBytes = view.getUint32(12, true);
             if (legacyBytes > total - header)
@@ -503,7 +438,7 @@
         }
 
         async waitForIdle(flush, allowFailure = false) {
-            const executors = [this.glExecutor, this.d3d8Executor, this.d3d9Executor].filter(Boolean);
+            const executors = [this.glExecutor, this.d3d9Executor].filter(Boolean);
             for (const executor of executors) {
                 try {
                     if (executor.readyPromise) await executor.readyPromise;
@@ -515,7 +450,6 @@
             }
             if (flush) {
                 if (this.glExecutor && this.glExecutor.flushFrame) this.glExecutor.flushFrame();
-                if (this.d3d8Executor && this.d3d8Executor.finishFrame) this.d3d8Executor.finishFrame(false);
                 if (this.d3d9Executor && this.d3d9Executor.flushForCheckpoint)
                     this.d3d9Executor.flushForCheckpoint();
             }
@@ -525,10 +459,7 @@
                     else if (executor.idle) await executor.idle();
                     const queue = executor.device && executor.device.queue;
                     if (queue && queue.onSubmittedWorkDone) await queue.onSubmittedWorkDone();
-                    if (executor.failed) throw executor.failed;
                 } catch (error) {
-                    // Loading a good checkpoint must recover an executor that
-                    // failed while processing the timeline being discarded.
                     if (!allowFailure) throw error;
                 }
             }
@@ -537,12 +468,11 @@
         async waitForSubmittedBatches() {
             // Drain JS continuations/readbacks without inserting a GPU fence for
             // every transport batch. Checkpoint barriers still fence the GPU.
-            for (const executor of [this.glExecutor, this.d3d8Executor, this.d3d9Executor]) {
+            for (const executor of [this.glExecutor, this.d3d9Executor]) {
                 if (!executor) continue;
                 if (executor.checkpointIdle) await executor.checkpointIdle();
                 else if (executor.idle) await executor.idle();
                 else if (executor.work) await executor.work;
-                if (executor.failed) throw executor.failed;
             }
         }
 
@@ -579,7 +509,8 @@
 
         async restoreCheckpoint(checkpoint) {
             // Validate before discarding live resources. Version 1 can restore
-            // only the GL/D3D8 data that old writers actually saved.
+            // only the GL data that old writers saved; their D3D8 data belonged
+            // to the retired D8WG renderer and is refused.
             const parsed = checkpoint && checkpoint.byteLength ? this.parseCheckpoint(checkpoint) :
                 { version: 2, legacy: new Uint8Array(0), records: [] };
             await this.waitForIdle(false, true);
@@ -590,8 +521,6 @@
                 if (this.resetForStateRestore) await this.resetForStateRestore();
                 else {
                     if (this.glExecutor) this.glExecutor.resetForReplay();
-                    if (this.d3d8Executor && this.d3d8Executor.restoreState)
-                        await this.d3d8Executor.restoreState(new Uint8Array(0));
                     if (this.d3d9Executor && this.d3d9Executor.resetForReplay)
                         await this.d3d9Executor.resetForReplay();
                 }
@@ -608,8 +537,6 @@
                         this.glExecutor.onSwapBuffers();
                         this.glJournalBytes = legacy.gl.byteLength;
                     }
-                    if (this.d3d8Executor && this.d3d8Executor.restoreState)
-                        await this.d3d8Executor.restoreState(legacy.d3d8);
                 }
                 const records = parsed.version === 3 ? GraphicsJournal.records(parsed) : parsed.records;
                 for await (const record of records) {
@@ -664,13 +591,11 @@
         }
 
         ownerCanvas(owner) {
-            if (owner === "d3d8") return this.d3d8Canvas;
             if (owner === "d3d9") return this.d3d9Canvas;
             return this.glCanvas;
         }
 
         ownerSurface(owner) {
-            if (owner === "d3d8") return this.d3d8Surface;
             if (owner === "d3d9") return this.d3d9Surface;
             return this.glSurface;
         }
@@ -762,7 +687,7 @@
             if (this.destroyed || this.suspended) return;
             this.activeOwner = owner;
             const active = this.ownerCanvas(owner);
-            for (const canvas of [this.glCanvas, this.d3d8Canvas, this.d3d9Canvas]) {
+            for (const canvas of [this.glCanvas, this.d3d9Canvas]) {
                 if (canvas && canvas !== active)
                     this.placeLayer(canvas, 0, 0, 0, 0, false);
             }
@@ -776,7 +701,7 @@
         }
 
         hideLayers(includeSwapChains) {
-            for (const canvas of [this.glCanvas, this.d3d8Canvas, this.d3d9Canvas])
+            for (const canvas of [this.glCanvas, this.d3d9Canvas])
                 if (canvas) this.placeLayer(canvas, 0, 0, 0, 0, false);
             this.activeOwner = null;
             if (includeSwapChains) {

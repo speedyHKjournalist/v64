@@ -35,7 +35,7 @@ function fixture({ webgpu = true } = {}) {
     const options = { screenCanvas: screen,
         screenBackend: { set: value => backend.push(["set", value]), fallback: () => backend.push(["fallback"]) },
         onError: error => errors.push(error),
-        isGraphical: () => graphical, glExecutor: executor(), d3d8Executor: executor(), d3d9Executor: executor() };
+        isGraphical: () => graphical, glExecutor: executor(), d3d9Executor: executor() };
     options.d3d9Executor.shaderWorker = { terminate() { terminated++; } };
     return { emulator, options, screen, hosts, resets, backend, errors,
         setGraphical(value) { graphical = value; }, terminated: () => terminated };
@@ -54,7 +54,7 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     await bridge.ready;
     assert.ok(compositor.attached);
     assert.deepEqual(f.backend, [["set", compositor]], "the screen draws through the compositor once WebGPU is up");
-    assert.deepEqual(compositor.layers.map(layer => layer.name), ["gl", "d3d8", "d3d9"]);
+    assert.deepEqual(compositor.layers.map(layer => layer.name), ["gl", "d3d9"]);
     const gl = bridge.glCanvas.layer, d3d9 = bridge.d3d9Canvas.layer;
     assert.ok(compositor.layers.every(layer => !layer.visible), "boot shows only the guest desktop");
 
@@ -122,7 +122,7 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     let toHost = null;
     const channel = { remote: false, post: message => toDevice.push(message), listen: handler => { toHost = handler; } };
     const plugin = V86GraphicsProxy({ onError: p.options.onError, glExecutor: p.options.glExecutor,
-        d3d8Executor: p.options.d3d8Executor, d3d9Executor: p.options.d3d9Executor });
+        d3d9Executor: p.options.d3d9Executor });
     assert.equal(plugin.name, "v86gl");
     assert.ok(plugin.wants_screen);
     assert.equal(typeof plugin.create_device({ remote: false, post() {}, listen() {} }).notify, "function",
@@ -164,8 +164,7 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     const r = fixture();
     const toRemote = [];
     let fromRemote = null;
-    const remote = V86GraphicsProxy({ glExecutor: r.options.glExecutor, d3d8Executor: r.options.d3d8Executor,
-        d3d9Executor: r.options.d3d9Executor });
+    const remote = V86GraphicsProxy({ glExecutor: r.options.glExecutor, d3d9Executor: r.options.d3d9Executor });
     await remote.start({ emulator: r.emulator, channel: { remote: true, post: (m, transfer) => toRemote.push([m, transfer]),
         listen: handler => { fromRemote = handler; } }, screen: { canvas: r.screen, set_backend() {}, fallback() {}, is_graphical: () => true } });
     const order = [];
@@ -192,13 +191,20 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     await remote.idle();
     assert.ok(toRemote.some(([m]) => m.type === "done" && m.id === 2));
     assert.equal(remote.stats.graphics_pending, 0);
+    // A batch that fails loses only itself: acknowledged, renderer still available
+    remote.bridge.waitForSubmittedBatches = () => Promise.reject(new Error("a host bug"));
+    batch(3, 12);
+    await remote.idle();
+    assert.ok(toRemote.some(([m]) => m.type === "done" && m.id === 3));
+    assert.ok(!toRemote.some(([m]) => m.type === "available" && m.value === false),
+        "one failed batch does not take graphics away for the session");
     await remote.destroy();
 
     // Without WebGPU the device hears that nothing renders
     const q = fixture({ webgpu: false });
     const toFailedDevice = [];
     const failedPlugin = V86GraphicsProxy({ onError: q.options.onError, glExecutor: q.options.glExecutor,
-        d3d8Executor: q.options.d3d8Executor, d3d9Executor: q.options.d3d9Executor });
+        d3d9Executor: q.options.d3d9Executor });
     await failedPlugin.start({ emulator: q.emulator, channel: { remote: false, post: m => toFailedDevice.push(m), listen() {} },
         screen: { canvas: q.screen, set_backend() {}, fallback() {}, is_graphical: () => true } });
     assert.deepEqual(toFailedDevice.map(m => m.value), [true, false]);

@@ -9,7 +9,7 @@ const source = new URL("src/browser/glbridge/", root);
 const output = new URL("build/glbridge/", root);
 // Keep this order explicit: the existing modules bind dependencies at load time.
 const files = [
-    "webgpu_host.js", "d3d8-webgpu/d3d8_executor.js",
+    "webgpu_host.js",
     "d3d9-webgpu/d3d9_shader_pipeline.js", "d3d9-webgpu/d3d9_executor.js",
     "d3d9-webgpu/ddraw_ops.js", "gl-webgpu/gl_constants.js",
     "gl-webgpu/gl_wire.js", "gl-webgpu/gl_state_layout.js",
@@ -66,7 +66,8 @@ await mkdir(output, { recursive: true });
 const bundle = prefix + "(function(module, require) {\n" + [formats, ...contents].join("\n;\n") + "\n})();\n";
 await write_file(new URL("libv86-webgpu.js", output), bundle);
 await write_file(new URL("d3d9_shader_worker.js", output), prefix + worker);
-await write_file(new URL("d3d9_shader_pipeline.js", output), prefix + contents[2]);
+await write_file(new URL("d3d9_shader_pipeline.js", output),
+    prefix + contents[files.indexOf("d3d9-webgpu/d3d9_shader_pipeline.js")]);
 await write_file(new URL("graphics_journal_worker.js", output), prefix + journal_worker);
 await write_file(new URL("v86gl-device.js", output), prefix + device);
 // VX's SPIR-V to WGSL (naga, src/browser/glbridge/vx/naga): built with cargo

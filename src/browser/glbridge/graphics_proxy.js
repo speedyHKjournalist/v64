@@ -69,7 +69,7 @@
             }
             bridge.placeLayers();
         };
-        const executors = () => [bridge.glExecutor, bridge.d3d8Executor, bridge.d3d9Executor].filter(Boolean);
+        const executors = () => [bridge.glExecutor, bridge.d3d9Executor].filter(Boolean);
         let screenTaken = false;
         const attachHost = async () => {
             await compositor.attach(global.V86GPUHost.acquire(screen, options.hostOptions));
@@ -106,7 +106,7 @@
             await retireExecutors(executors());
             for (const handle of Array.from(bridge.d3d9SwapChainCanvases.keys()))
                 bridge.removeD3D9SwapChain(handle);
-            bridge.glExecutor = bridge.d3d8Executor = bridge.d3d9Executor = null;
+            bridge.glExecutor = bridge.d3d9Executor = null;
         };
         // A fresh device: nothing of the old timeline's GPU objects survives. The compositor moves with it and
         // the screen is drawn again from the device.
@@ -134,14 +134,12 @@
             bridge.glJournalBytes = 0;
             bridge.glJournalOverflow = false;
             if (!restoring) bridge.pendingBatches = [];
-            bridge.d3d8OwnerSessionKey = bridge.d3d9OwnerSessionKey = null;
+            bridge.d3d9OwnerSessionKey = null;
             bridge.glSurface = bridge.emptySurface();
-            bridge.d3d8Surface = bridge.emptySurface();
             bridge.d3d9Surface = bridge.emptySurface();
             bridge.failed = null;
             await replaceDevice();
             bridge.installGLExecutor();
-            bridge.installD3D8Executor();
             bridge.installD3D9Executor();
             try {
                 await attachHost();
@@ -243,13 +241,14 @@
             ++stats.graphics_batches;
             stats.graphics_bytes += message.bytes.byteLength;
             stats.graphics_peak_pending = Math.max(stats.graphics_peak_pending, ++stats.graphics_pending);
+            // A batch that fails is lost on its own; the renderer stays
+            // available (the executors report what failed)
             work = work.then(async () => {
                 if (batchEpoch !== epoch) return;
                 bridge.pushPCIBatch(event);
                 await bridge.waitForSubmittedBatches();
             }).catch(error => {
-                reportUnavailable(options, error);
-                setAvailable(false);
+                console.error("[v86gl] a graphics batch failed", error);
             }).then(() => {
                 --stats.graphics_pending;
                 if (batchEpoch === epoch) channel.post({ type: "done", id: message.id });

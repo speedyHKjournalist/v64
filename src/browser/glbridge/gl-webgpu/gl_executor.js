@@ -1714,6 +1714,9 @@
 
             this.pipelineCache = new Map();
             this.bindGroupCache = new Map();
+            // keys of bind groups WebGPU rejected; the cache itself is
+            // cleared every frame
+            this.rejectedBindGroups = new Set();
             this.convertedVertexCache = new Map();
             this.convertedVertexBytes = 0;
             this.uniformValueCache = new Map();
@@ -1762,7 +1765,10 @@
                 refusals: 0, refusalsByOp: Object.create(null),
                 expandedIndices: 0, dxtDecodes: 0,
                 nonUniformSamples: 0,
+                pipelinesRejected: 0, framesRejected: 0, hostErrors: 0,
             };
+            // Host exceptions, kept in strict mode for tests to assert on
+            this.hostErrors = [];
 
             this.surface = { hwnd: 0, x: 0, y: 0, width: 0, height: 0,
                              visible: false };
@@ -1784,7 +1790,11 @@
                 this.deviceFeatures = this.host.deviceFeatures ||
                     { bc: false };
                 this.limits = this.host.limits || {};
-                this.host.onDeviceLost(() => this.onDeviceLost());
+                this.gpuErrors = gpuHost.GPUErrorLog.forDevice(this.device);
+                if (this.options.strict) this.gpuErrors.strict = true;
+                // once: recovery runs initialize() again
+                if (!this.lossHandler)
+                    this.lossHandler = this.host.onDeviceLost(() => this.onDeviceLost());
                 this.uniformRing = this.device.createBuffer({
                     label: "GL uniform ring",
                     size: this.uniformCapacity,
@@ -1839,39 +1849,50 @@
         }
 
         onDeviceLost() {
-            this.uniformValueCache.clear();
-            // Every GPU object belonged to the old device. The GL state machine
-            // does not: it is plain JavaScript, so the resources rebuild from
-            // the shadow copies the next time each is used.
+            // Every GPU object belonged to the old device and may be neither
+            // used nor destroyed now. The GL state machine is plain
+            // JavaScript, so buffers and textures come back from their shadows.
             this.device = this.host.device;
-            this.pipelineCache.clear();
-            if (this.pixelPipelineCache) this.pixelPipelineCache.clear();
-            if (this.accumPipelineCache) this.accumPipelineCache.clear();
-            if (this.accumClearPipelineCache) this.accumClearPipelineCache.clear();
-            if (this.clearPipelineCache) this.clearPipelineCache.clear();
-            this.bindGroupCache.clear();
-            this.samplerCache.clear();
-            this.moduleCache.clear();
+            this.encoder = null;
+            this.pass = null;
+            this.passTarget = null;
+            this.recordedOps = 0;
+            this.pendingVertexBuffers = new WeakSet();
+            this.retired = [];
+            for (const cache of [this.pipelineCache, this.bindGroupCache, this.samplerCache,
+                    this.moduleCache, this.uniformValueCache, this.convertedVertexCache,
+                    this.indexExpansionCache, this.pixelPipelineCache, this.accumPipelineCache,
+                    this.accumClearPipelineCache, this.clearPipelineCache, this.colorCopyPipelines,
+                    this.mipmapPipelines, this.colorBlitPipelines]) {
+                if (cache) cache.clear();
+            }
+            this.rejectedBindGroups.clear();
+            this.convertedVertexBytes = 0;
+            for (const name of ["presentPipeline", "presentSampler", "pixelSampler",
+                    "activeOcclusionQuerySet", "polygonStippleTexture", "backBuffer",
+                    "depthTarget", "accumBuffer", "uniformRing", "vertexRing"])
+                this[name] = null;
             for (const group of this.shareGroups.values()) {
                 for (const texture of group.textures.values()) {
                     texture.gpuTexture = null;
                     texture.viewCache.clear();
                     texture.dirty = true;
                 }
-                for (const buffer of group.buffers.values()) {
-                    this.invalidateVertexConversions(buffer);
-                    buffer.gpuBuffer = null;
-                }
+                for (const buffer of group.buffers.values()) buffer.gpuBuffer = null;
+                for (const rb of group.renderbuffers.values()) rb.gpuTexture = null;
                 for (const program of group.programs.values())
                     program.variants.clear();
             }
-            this.backBuffer = null;
-            this.depthTarget = null;
-            this.accumBuffer = null;
-            this.uniformRing = null;
-            this.vertexRing = null;
             this.readyPromise = null;
-            return this.initialize();
+            return this.initialize().then(() => {
+                for (const group of this.shareGroups.values()) {
+                    for (const buffer of group.buffers.values())
+                        if (buffer.shadow) this.replaceBufferStorage(buffer);
+                    // (their contents were rendered on the lost device)
+                    for (const rb of group.renderbuffers.values())
+                        if (rb.gpuFormat) this.allocateRenderbuffer(rb);
+                }
+            });
         }
 
         /* ---- diagnostics ---- */
@@ -2231,7 +2252,16 @@
                             head: hexPreview(bytes, offset, size),
                         });
                     } else {
-                        throw error;
+                        // A host bug: this command is lost, nothing else is.
+                        // Not a GL error -- the application did nothing wrong.
+                        ++this.stats.hostErrors;
+                        if (this.options.strict) this.hostErrors.push(error);
+                        const key = "host:" + fn + ":" + String(error && error.message);
+                        if (!this.warned[key]) {
+                            this.warned[key] = true;
+                            console.error("[gl-webgpu] " + (constants.NAME_BY_OPCODE[fn] || "op" + fn) +
+                                " threw; the command is skipped", error);
+                        }
                     }
                 }
                 offset += size;
@@ -6522,14 +6552,28 @@
             this.uniformValueCache.clear();
             this.bindGroupCache.clear();
             const resolved = this.resolvePendingQueries();
+            let frameValid = Promise.resolve(true);
             if (this.encoder) {
-                this.device.queue.submit([this.encoder.finish()]);
+                // Encoding errors surface at finish(): a frame WebGPU refuses
+                // is reported, and its occlusion results are not believed
+                this.device.pushErrorScope("validation");
+                try {
+                    this.device.queue.submit([this.encoder.finish()]);
+                } finally {
+                    frameValid = this.device.popErrorScope().then(error => {
+                        if (error) {
+                            ++this.stats.framesRejected;
+                            this.gpuErrors.report("frame", error);
+                        }
+                        return !error;
+                    }, () => false);
+                }
                 this.encoder = null;
                 this.recordedOps = 0;
                 this.pendingVertexBuffers = new WeakSet();
                 this.releaseRetired();
             }
-            if (resolved) this.readQueryResults(resolved);
+            if (resolved) this.readQueryResults(resolved, frameValid);
         },
 
         /*
@@ -6578,11 +6622,12 @@
             return { queries: pending, resolveBuffer, staging, count: high };
         },
 
-        readQueryResults(resolved) {
+        readQueryResults(resolved, frameValid) {
             const { queries, resolveBuffer, staging } = resolved;
-            this.trackReadback(staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
+            this.trackReadback(Promise.all([staging.mapAsync(1 /* GPUMapMode.READ */), frameValid]).then(([, valid]) => {
                 const words = new Uint32Array(staging.getMappedRange().slice(0));
                 staging.unmap();
+                if (!valid) throw new Error("WebGPU rejected the frame");
                 for (const record of queries) {
                     const { query, slot, generation } = record;
                     // Query names are deliberately recycled every couple of
@@ -7398,7 +7443,7 @@ ${fragmentCode}`;
             ].join("|");
 
             let pipeline = this.pipelineCache.get(signature);
-            if (pipeline) return pipeline;
+            if (pipeline) return pipeline.glRejected ? null : pipeline;
 
             const vertexModule = this.shaderModule(shaders.wgslVertex);
             const fragmentModule = this.shaderModule(shaders.wgslFragment);
@@ -7463,13 +7508,16 @@ ${fragmentCode}`;
                 };
             }
 
-            try {
-                pipeline = this.device.createRenderPipeline(descriptor);
-            } catch (error) {
-                this.refuse("pipeline", "could not create the render pipeline",
-                    { message: String(error), signature }, GL.INVALID_OPERATION);
-                return null;
-            }
+            // A rejected pipeline stays cached, marked, so its draws are
+            // skipped instead of creating it again every frame
+            const created = this.gpuErrors.scoped("render pipeline",
+                () => this.device.createRenderPipeline(descriptor), { signature });
+            pipeline = created.object;
+            created.checked.then(error => {
+                if (!error) return;
+                pipeline.glRejected = error;
+                ++this.stats.pipelinesRejected;
+            });
             ++this.stats.pipelines;
             if (this.pipelineCache.size > 4096) this.pipelineCache.clear();
             this.pipelineCache.set(signature, pipeline);
@@ -7580,6 +7628,10 @@ ${fragmentCode}`;
                     GL.INVALID_OPERATION);
                 return null;
             }
+            if (groups.some(entry => !entry.group)) {
+                this.refuse("draw", "WebGPU rejected a bind group of this draw", { shader: shaders.key });
+                return null;
+            }
             return groups;
         },
 
@@ -7602,11 +7654,14 @@ ${fragmentCode}`;
                         [this.resourceId(r.buffer), r.offset || 0, r.size].join("/") :
                         this.resourceId(r));
                 }).join("|");
+            if (this.rejectedBindGroups.has(key)) return null;
             let group = this.bindGroupCache.get(key);
             if (!group) {
-                group = this.device.createBindGroup({
+                const created = this.gpuErrors.scoped("bind group", () => this.device.createBindGroup({
                     layout: pipeline.getBindGroupLayout(index), entries,
-                });
+                }));
+                created.checked.then(error => { if (error) this.rejectedBindGroups.add(key); });
+                group = created.object;
                 if (this.bindGroupCache.size >= 2048) this.bindGroupCache.clear();
                 this.bindGroupCache.set(key, group);
                 ++this.stats.bindGroups;
@@ -8576,6 +8631,10 @@ struct BlitParams {
                 internalFormat === GL.DEPTH24_STENCIL8;
             rb.gpuFormat = stencilFormat ? "depth24plus-stencil8" : storage.gpu;
             this.retire(rb.gpuTexture);
+            this.allocateRenderbuffer(rb);
+        },
+
+        allocateRenderbuffer(rb) {
             rb.gpuTexture = this.device.createTexture({
                 label: "GL renderbuffer " + rb.name,
                 size: { width: rb.width, height: rb.height, depthOrArrayLayers: 1 },

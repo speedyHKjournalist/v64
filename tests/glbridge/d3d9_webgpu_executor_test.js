@@ -14,6 +14,12 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { errorScopes } = require("./fake_error_scopes.js");
+
+// Lets a chain of already-settled promises run to its end
+async function settle() {
+    for (let i = 0; i < 20; ++i) await Promise.resolve();
+}
 const { D3D9WebGPUExecutor, buildFixedFunctionPixelShader } =
     require("../../src/browser/glbridge/d3d9-webgpu/d3d9_executor.js");
 const shaderPipeline = require("../../src/browser/glbridge/d3d9-webgpu/d3d9_shader_pipeline.js");
@@ -441,6 +447,7 @@ function makeFakeWebGPU(options) {
     const device = {
         queue,
         lost: new Promise(() => {}),
+        ...errorScopes(),
         // A real GPUDevice reports the features it was actually created with,
         // which is what the shared host reads to decide capability flags --
         // the adapter's list is only what *could* have been requested.
@@ -1460,7 +1467,7 @@ await test("a shader the translator refuses skips its draws and keeps the batch 
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
     ], { present: true }));
     await executor.idle();
-    assert.equal(executor.failed, null, "the batch must not fail as a whole");
+    assert.equal(executor.lastBatchFailure, null, "the batch must not fail as a whole");
     assert.equal(executor.stats.shaderTranslationFailures, 1);
     assert.equal(executor.stats.droppedDraws, 1, "only the shader-bound draw is skipped");
     assert.equal(executor.stats.drawsSkippedForBadShader, 1,
@@ -2530,8 +2537,8 @@ await test("DrawIndexedPrimitiveUP works (M1 threw a ReferenceError on every cal
 
     await executor.submit(built);
     await executor.idle();
-    assert.equal(executor.failed, null,
-        "DrawIndexedPrimitiveUP must not blow up the batch: " + executor.failed);
+    assert.equal(executor.lastBatchFailure, null,
+        "DrawIndexedPrimitiveUP must not blow up the batch: " + executor.lastBatchFailure);
     assert.equal(executor.stats.upDrawCalls, 1);
     assert.equal(executor.stats.droppedDraws, 0);
     const pass = fake.calls.filter(c => c[0] === "beginRenderPass").pop()[2];
@@ -3345,7 +3352,7 @@ await test("a malformed batch is rejected rather than half-executed", async () =
     batch.writeUInt32LE(0xffffffff, 20); // command_bytes past the record
     await executor.submit(batch);
     await executor.idle();
-    assert.ok(executor.failed, "an overrunning command_bytes must fail the batch");
+    assert.ok(executor.lastBatchFailure, "an overrunning command_bytes must fail the batch");
     assert.equal(executor.stats.malformedBatches, 1);
 });
 
@@ -3361,7 +3368,7 @@ await test("shader bytecode that overruns the batch is rejected", async () => {
     batch.writeUInt32LE(0x10000, commandOffset + 8);
     await executor.submit(batch);
     await executor.idle();
-    assert.ok(executor.failed, "an overrunning token count must fail the batch");
+    assert.ok(executor.lastBatchFailure, "an overrunning token count must fail the batch");
 });
 
 // ---- M3: fixed-function lighting and the texture-blending cascade ----
@@ -4245,7 +4252,7 @@ await test("a pre-1.3 batch is rejected before any command executes",
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
     ], { versionMinor: 2 }));
     await executor.idle();
-    assert.match(executor.failed && executor.failed.message,
+    assert.match(executor.lastBatchFailure && executor.lastBatchFailure.message,
         /unsupported D9WG version 1\.2/);
     assert.equal(executor.stats.malformedBatches, 1);
     assert.equal(executor.devices.size, 0,
@@ -4258,7 +4265,7 @@ await test("a short pre-1.3 device payload is not decoded as 1.3", async () => {
         command(OP.CREATE_DEVICE, Buffer.alloc(44)),
     ]));
     await executor.idle();
-    assert.match(executor.failed && executor.failed.message,
+    assert.match(executor.lastBatchFailure && executor.lastBatchFailure.message,
         /CREATE_DEVICE payload is not protocol 1\.3/);
     assert.equal(executor.stats.malformedBatches, 1);
     assert.equal(executor.devices.size, 0);
@@ -4398,7 +4405,7 @@ await test("one failing command does not discard the rest of its batch",
     await executor.idle();
 
     assert.equal(executor.stats.commandsFailed, 1);
-    assert.equal(executor.failed, null,
+    assert.equal(executor.lastBatchFailure, null,
         "one bad command is not a bad batch");
     assert.equal(executor.stats.droppedDraws, 0);
     const pass = fake.calls.filter(call => call[0] === "beginRenderPass").pop()[2];
@@ -4420,8 +4427,41 @@ await test("a framing error still fails the whole batch", async () => {
     // The per-command guard must not swallow this: a blob reaching past the
     // record means the byte layout itself is wrong, so nothing in the batch
     // can be trusted -- unlike a command that simply could not be carried out.
-    assert.ok(executor.failed, "a malformed stream must still fail the batch");
+    assert.ok(executor.lastBatchFailure, "a malformed stream must still fail the batch");
     assert.equal(executor.stats.commandsFailed, 0);
+});
+
+await test("a failed batch loses only itself, and answers the queries it dropped", async () => {
+    const { executor, find, fake } = makeExecutor();
+    const writes = [];
+    const metadata = { writeGuestMemory(offset, data) {
+        if (offset === HEARTBEAT_WRITE_OFFSET) return;
+        writes.push({ offset, data: Buffer.from(data) });
+    } };
+    const vs = shaderCreatePayload(0x40000016, VS_BYTECODE);
+    const broken = buildBatch([
+        command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
+        command(OP.CREATE_QUERY, u32(DEVICE, 0x930, 8, 0)),
+        command(OP.END_QUERY, u32(DEVICE, 0x930, 0, 77)),
+        command(OP.CREATE_VERTEX_SHADER, vs.payload, vs.blob, vs.blobOffsetField),
+    ]);
+    broken.writeUInt32LE(0x10000, broken.indexOf(vs.payload, 32) + 8);
+    await executor.submit(broken, metadata);
+    await executor.idle();
+    assert.equal(executor.stats.batchesFailed, 1);
+    // GetData polls this slot; the dropped query must not stay PENDING
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].data.readUInt32LE(0), 77);
+    assert.equal(writes[0].data.readUInt32LE(12), 2, "D9WG_RESPONSE_FAILED");
+
+    const submitsBefore = find("submit").length;
+    await executor.submit(buildBatch([
+        command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
+    ], { present: true }), metadata);
+    await executor.idle();
+    fake.completeSubmittedWork();
+    assert.equal(executor.stats.batchesFailed, 1, "the next batch runs");
+    assert.equal(find("submit").length, submitsBefore + 1);
 });
 
 await test("a D24S8 mip is used as the explicit depth attachment",
@@ -5666,7 +5706,7 @@ await test("the device requests texture-compression-bc so DXT textures work",
         "DXT3 must reach WebGPU as bc2-rgba-unorm");
     assert.equal(executor.stats.texturesRejected, 0);
     assert.equal(executor.stats.malformedBatches, 0);
-    assert.ok(!executor.failed, "a DXT texture must not fail the batch");
+    assert.ok(!executor.lastBatchFailure, "a DXT texture must not fail the batch");
 });
 
 await test("a texture format the device refuses costs one texture, not the frame",
@@ -5692,7 +5732,7 @@ await test("a texture format the device refuses costs one texture, not the frame
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
     ], { present: true }));
     await executor.idle();
-    assert.ok(!executor.failed, "the batch must survive one refused texture");
+    assert.ok(!executor.lastBatchFailure, "the batch must survive one refused texture");
     assert.equal(executor.stats.texturesRejected, 1);
     assert.equal(executor.stats.droppedDraws, 0,
         "the draw still renders, with the white fallback bound");
@@ -5730,7 +5770,7 @@ await test("StretchRect from the back buffer becomes a deferred blit", async () 
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
     ], { present: true }));
     await executor.idle();
-    assert.ok(!executor.failed, executor.failed && executor.failed.message);
+    assert.ok(!executor.lastBatchFailure, executor.lastBatchFailure && executor.lastBatchFailure.message);
     assert.equal(executor.stats.blitsSkipped, 0,
         "a back-buffer StretchRect must no longer be skipped");
     assert.equal(executor.stats.blits, 1);
@@ -6535,7 +6575,7 @@ await test("event queries complete only after the submitted GPU fence", async ()
     await executor.idle();
     assert.equal(writes.length, 0, "an event query is not an immediate CPU answer");
     fake.completeSubmittedWork();
-    await Promise.resolve();
+    await settle();
     assert.equal(writes.length, 1);
     assert.equal(writes[0].offset, 12 * 1024 * 1024);
     assert.equal(writes[0].data.readUInt32LE(0), 41);
@@ -6633,15 +6673,15 @@ await test("timestamp, frequency and disjoint query classes return real results"
         writes.push({ offset, data: Buffer.from(data) });
     } });
     await executor.idle();
-    await Promise.resolve();
-    assert.equal(writes.length, 1, "the GPU timestamp maps independently");
-    assert.equal(writes[0].data.readUInt32LE(0), 61);
-    assert.equal(writes[0].data.readUInt32LE(4), 1000);
+    await settle();
+    assert.equal(writes.length, 0, "every class waits for the GPU fence");
     fake.completeSubmittedWork();
-    await Promise.resolve();
+    await settle();
     assert.equal(writes.length, 3);
     const byRequest = new Map(writes.map(write =>
         [write.data.readUInt32LE(0), write.data]));
+    // nanoseconds of the host clock, once the GPU has passed the query
+    assert.ok(byRequest.get(61).readBigUInt64LE(4) > 0n);
     assert.equal(byRequest.get(62).readBigUInt64LE(4), 1000000000n);
     assert.equal(byRequest.get(63).readBigUInt64LE(4), 0n);
     assert.equal(executor.stats.timestampQueriesResolved, 1);

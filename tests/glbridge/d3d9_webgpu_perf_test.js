@@ -7,6 +7,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { errorScopes } = require("./fake_error_scopes.js");
 const { D3D9WebGPUExecutor } = require("../../src/browser/glbridge/d3d9-webgpu/d3d9_executor.js");
 
 const DEVICE = 0x100002;
@@ -135,6 +136,7 @@ function countingWebGPU() {
     };
     const device = {
         queue, lost: new Promise(() => {}),
+        ...errorScopes(),
         createBuffer(descriptor) { hit("createBuffer"); return new BufferObject(descriptor); },
         createTexture(descriptor) { hit("createTexture"); return new TextureObject(descriptor); },
         createShaderModule(descriptor) {

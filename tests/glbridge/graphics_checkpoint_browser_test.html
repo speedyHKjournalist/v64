@@ -47,13 +47,13 @@
         values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
         return bytes;
     };
-    const batch = (api, session, commands) => {
+    const batch = (session, commands) => {
         const payloads = commands.map(([op, values]) => ({ op, bytes: words(values) }));
         const count = payloads.reduce((size, cmd) => size + ((16 + cmd.bytes.length + 7) & ~7), 0);
         const bytes = new Uint8Array(40 + count), view = new DataView(bytes.buffer);
-        view.setUint16(0, api === 8 ? 0xffe0 : 0xffe1, true);
+        view.setUint16(0, 0xffe1, true);
         view.setUint16(2, 0xffff, true); view.setUint32(4, 32 + count, true);
-        view.setUint32(8, api === 8 ? 0x47573844 : 0x47573944, true);
+        view.setUint32(8, 0x47573944, true);
         view.setUint16(12, 1, true); view.setUint16(14, 7, true);
         view.setUint32(24, commands.length, true); view.setUint32(28, count, true);
         view.setUint32(32, session, true);
@@ -77,12 +77,10 @@
     const { GLStream, GL } = GLTestStream;
     send(emulator, new GLStream().makeCurrent(1, 0, 0, 64, 64)
         .call("CLEAR_COLOR", 1, 1, 1, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).bytes(), 1);
-    await sendD3D(emulator, batch(8, 8, [[1, [32, 0, 8, 0]],
-        [2, createDevice[1].slice(0, 11)], color(0xff0000ff)]));
-    await sendD3D(emulator, batch(9, 9, [createDevice,
+    await sendD3D(emulator, batch(9, [createDevice,
         [0x110, [2, 0x301, 64, 64, 1, 21, 1, 0, 0, 0]],
         [0x20f, [2, 0, 0x301, 0]], color(0xffff0000)]));
-    await sendD3D(emulator, batch(9, 10, [createDevice,
+    await sendD3D(emulator, batch(10, [createDevice,
         [0x110, [2, 0x302, 64, 64, 1, 21, 1, 0, 0, 0]],
         [0x500, [2, 0, 0, 0, 0, 0, 0, 0, 0x302, 0, 0, 16,
             0, 0, 64, 64, 0xff00ff00, 0, 0, 0]] ]));
@@ -107,14 +105,13 @@
     const verify = async label => {
         const bridge = emulator.graphics_proxy.bridge, device = bridge.glExecutor.device;
         check(await pixel(device, bridge.glExecutor.backBuffer) === "255,255,255,255", label + " GL rendered pixels");
-        check(await pixel(device, bridge.d3d8Executor.devices.get(2).backBuffer) === "0,0,255,255", label + " D3D8 unfinished back buffer");
         const sessions = bridge.d3d9Executor.sessionStates;
         check(await pixel(device, sessions.get("0000000000000009").resources.get(0x301).gpuTexture) === "255,0,0,255", label + " D3D9 render target");
         check(await pixel(device, sessions.get("000000000000000a").resources.get(0x302).gpuTexture) === "0,255,0,255", label + " DirectDraw color fill");
         check(emulator.read_memory(0x80000, 1)[0] === 42, label + " guest RAM");
     };
     await verify("before save");
-    // This tick used to expire the D3D8 canvas attachment mid-frame.
+    // This tick used to expire a canvas attachment mid-frame.
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const bridge = emulator.graphics_proxy.bridge;
     const execute = bridge.executePCIBatch.bind(bridge);
@@ -124,14 +121,14 @@
         if (event.replay) {
             await bridge.waitForIdle(false);
             await new Promise(requestAnimationFrame);
-            const canvases = new Set([bridge.glCanvas, bridge.d3d8Canvas, bridge.d3d9Canvas,
+            const canvases = new Set([bridge.glCanvas, bridge.d3d9Canvas,
                 ...bridge.d3d9SwapChainCanvases.values()]);
             check([...canvases].every(canvas => !shown(canvas)),
                 "historical GPU frame stays invisible across browser paint " + (++replayFrames));
         }
     };
     await emulator.restore_state(saved);
-    check(replayFrames >= 4, "visibility checked while replaying all four APIs");
+    check(replayFrames >= 3, "visibility checked while replaying every API");
     check(bridge.activeOwner && shown(bridge.ownerCanvas(bridge.activeOwner)),
         "only the final restored graphics surface becomes visible");
     check(!journal.compressor.worker, "restore terminates the discarded journal worker");

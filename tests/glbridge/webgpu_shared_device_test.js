@@ -3,7 +3,7 @@
 //
 // A GPUCanvasContext belongs to whichever device last called configure() on
 // it, and getCurrentTexture() then returns a texture only that device may use.
-// The page loads the D3D8, D3D9/DDraw and OpenGL executors whether or not the
+// The page loads the D3D9/DDraw and OpenGL executors whether or not the
 // guest uses them, and they all share #d3d_webgpu_canvas, so a backend that
 // acquires its own device does not merely waste one: it makes every other
 // backend's present pass fail validation with
@@ -18,6 +18,7 @@
 
 const assert = require("assert");
 const gpuHost = require("../../src/browser/glbridge/webgpu_host.js");
+const { errorScopes } = require("./fake_error_scopes.js");
 
 let passed = 0;
 const failures = [];
@@ -56,7 +57,7 @@ function makeFake() {
             createBindGroup: descriptor => ({ descriptor }),
             createRenderPipeline: descriptor => ({ descriptor,
                 getBindGroupLayout: () => ({}) }),
-            pushErrorScope() {}, popErrorScope: () => Promise.resolve(null),
+            ...errorScopes(),
         };
         log.devices.push(device);
         return device;
@@ -88,14 +89,12 @@ async function initAll() {
     const { gpu, canvas, log } = makeFake();
     gpuHost.reset(canvas);
     const built = [];
-    // Load order matches game.html: D3D8, then D3D9/DDraw, then OpenGL.
-    const d3d8 = require("../../src/browser/glbridge/d3d8-webgpu/d3d8_executor.js");
+    // Load order matches the bundle: D3D9/DDraw, then OpenGL.
     const d3d9 = require("../../src/browser/glbridge/d3d9-webgpu/d3d9_executor.js");
     const gl = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");
-    const a = new d3d8.D3D8WebGPUExecutor(canvas, { gpu });
     const b = new d3d9.D3D9WebGPUExecutor(canvas, { gpu });
     const c = new gl.GLWebGPUExecutor(canvas, { gpu, hostOptions: { gpu } });
-    for (const executor of [a, b, c]) {
+    for (const executor of [b, c]) {
         await executor.initialize();
         built.push(executor);
     }
@@ -104,11 +103,9 @@ async function initAll() {
 
 const checks = [];
 checks.push(initAll().then(({ built, log }) => {
-    const [d3d8, d3d9, gl] = built;
+    const [d3d9, gl] = built;
     test("every backend on one canvas ends up on one GPUDevice", () => {
-        assert.strictEqual(d3d9.device, d3d8.device,
-            "D3D9 and D3D8 must share the device that configured the canvas");
-        assert.strictEqual(gl.device, d3d8.device,
+        assert.strictEqual(gl.device, d3d9.device,
             "OpenGL's present pass uses the canvas texture; a second device " +
             "here is the swap-chain validation failure this test exists for");
     });
@@ -120,12 +117,12 @@ checks.push(initAll().then(({ built, log }) => {
     test("every canvas configure names the shared device", () => {
         assert.ok(log.configures.length >= 1, "the canvas must be configured");
         for (const descriptor of log.configures)
-            assert.strictEqual(descriptor.device, d3d8.device);
+            assert.strictEqual(descriptor.device, d3d9.device);
     });
     test("the shared device carries the union of requested features", () => {
-        // D3D8 alone used to request none, so whichever backend won the race
-        // decided whether DXT textures worked for all of them.
-        assert.ok(d3d8.device.features.has("texture-compression-bc"),
+        // One backend alone used to request none, so whichever backend won
+        // the race decided whether DXT textures worked for all of them.
+        assert.ok(d3d9.device.features.has("texture-compression-bc"),
             "BCn must survive regardless of which backend initialised first");
     });
     test("the swap-chain usages every backend needs are configured once", () => {

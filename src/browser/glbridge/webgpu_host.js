@@ -92,6 +92,81 @@
         return null;
     }
 
+    /*
+     * WebGPU validation errors are not exceptions. createRenderPipeline() and
+     * the other create calls always return an object; an invalid descriptor
+     * makes it an invalid object, every command buffer that uses it fails at
+     * submit, and the error itself arrives later: on an error scope, or as an
+     * uncapturederror event when no scope was open. A try/catch around a create
+     * call catches none of that.
+     *
+     * One log per device, because every executor on a shared device sees the
+     * same uncapturederror stream. Each distinct error is printed once and
+     * then at power-of-two counts, so a failure that repeats every frame stays
+     * visible without flooding the console. Strict mode (tests) also keeps
+     * every error, for a test to assert there were none.
+     */
+    const errorLogs = new WeakMap();
+
+    class GPUErrorLog {
+        constructor(device) {
+            this.device = device;
+            this.strict = false;
+            this.counts = new Map();
+            this.total = 0;
+            this.errors = [];
+            device.addEventListener("uncapturederror", event => {
+                // reported here instead, deduplicated
+                event.preventDefault();
+                this.report("uncaptured", event.error);
+            });
+        }
+
+        static forDevice(device) {
+            let log = errorLogs.get(device);
+            if (!log) {
+                log = new GPUErrorLog(device);
+                errorLogs.set(device, log);
+            }
+            return log;
+        }
+
+        /*
+         * Runs create() under a validation scope. The object comes back at once
+         * (WebGPU objects can be used before their validation finishes);
+         * `checked` settles with null, or with the error's message once it has
+         * been reported.
+         */
+        scoped(kind, create, details) {
+            this.device.pushErrorScope("validation");
+            let object, thrown = null;
+            try {
+                object = create();
+            } catch (error) {
+                thrown = error;
+            }
+            const checked = this.device.popErrorScope().then(error => {
+                if (!error) return null;
+                this.report(kind, error, details);
+                return String(error.message);
+            }, () => null);
+            if (thrown) throw thrown;
+            return { object, checked };
+        }
+
+        report(source, error, details) {
+            const message = String(error && error.message !== undefined ? error.message : error);
+            const key = source + ": " + message;
+            const count = (this.counts.get(key) || 0) + 1;
+            this.counts.set(key, count);
+            ++this.total;
+            if ((count & (count - 1)) === 0)
+                console.error("[webgpu] " + source + " rejected" + (count > 1 ? " (" + count + " times)" : "") +
+                    ": " + message, details || "");
+            if (this.strict) this.errors.push({ source, message, details });
+        }
+    }
+
     class V86GPUHost {
         constructor(canvas, options) {
             this.canvas = canvas;
@@ -143,6 +218,8 @@
                         requiredLimits,
                     });
                 }
+                this.errors = GPUErrorLog.forDevice(this.device);
+                this.errors.strict = !!this.options.strict;
                 this.deviceFeatures = this.featureFlags();
                 this.limits = this.device.limits || (this.adapter && this.adapter.limits) || {};
                 this.configureCanvas();
@@ -327,7 +404,7 @@
         hosts.delete(canvas);
     }
 
-    const api = { V86GPUHost, acquire, reset, DEFAULT_FEATURES, srgbSiblingOf };
+    const api = { V86GPUHost, GPUErrorLog, acquire, reset, DEFAULT_FEATURES, srgbSiblingOf };
     global.V86GPUHost = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
