@@ -292,7 +292,8 @@ const PS_UNSUPPORTED = [
 
 // vs_3_0: dcl_2d s0 / dcl_position v0 / dcl_position o0 /
 // texldl r0, v0, s0 / mov o0, r0. Vertex texture samplers live in D3D9's
-// 256..259 namespace and must not alias pixel sampler s0.
+// D3DVERTEXTEXTURESAMPLER0..3 = 257..260 namespace and must not alias pixel
+// sampler s0.
 const VS3_VERTEX_TEXTURE_FETCH = [
     VS(3, 0),
     instr(SIO.DCL, 2), dcl(0, 0, 2), dst(REG.SAMPLER, 0),
@@ -1683,6 +1684,9 @@ await test("presenting an additional chain blits its back buffer to its canvas",
     await executor.idle();
     assert.equal(executor.stats.swapChainPresents, 1);
     assert.equal(executor.stats.swapChainPresentsDropped, 0);
+    // D9WGPresentSwapChain's x, y, width, height (S2-17: read one field off)
+    const surface = executor.deviceState(DEVICE).swapChains.get(0x77).surface;
+    assert.deepEqual([surface.x, surface.y, surface.width, surface.height], [40, 50, 256, 128]);
     assert.equal(find("swapchain-getCurrentTexture").length, 1,
         "the chain's canvas is acquired inside the submitting task");
     // A blit, not a copy: the back buffer is an ordinary D3D texture whose
@@ -6736,13 +6740,17 @@ await test("vs_3_0 vertex texture fetch binds D3D vertex sampler 0 at 34/35",
             [element(0, 0, DECLTYPE.FLOAT4, DECLUSAGE.POSITION)])),
         command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x906, 16)),
         command(OP.SET_VERTEX_SHADER, u32(DEVICE, 0x40000906)),
-        command(OP.SET_TEXTURE, u32(DEVICE, 256, 0x907, 0)),
+        command(OP.SET_TEXTURE, u32(DEVICE, 257, 0x907, 0)),
         command(OP.DRAW_PRIMITIVE, drawPrimitivePayload(4, 0, 1)),
         command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 640, 480)),
     ], { present: true, versionMinor: 3 }));
     await executor.idle();
 
     assert.equal(executor.stats.droppedDraws, 0);
+    // vs s0 samples D3DVERTEXTEXTURESAMPLER0's texture, not a fallback
+    const texture = executor.resources.get(0x907).gpuTexture;
+    const fetched = find("createBindGroup").pop()[1].entries.find(entry => entry.binding === 34);
+    assert.equal(fetched.resource.texture, texture, "the bound texture, not a fallback");
     const layout = find("createBindGroupLayout").pop()[1];
     assert.ok(layout.entries.some(entry => entry.binding === 34 &&
         entry.visibility === 1));

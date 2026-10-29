@@ -488,6 +488,9 @@
             this.matrixRows = [];
             this.psColorInputs = new Set();    // ps v# registers touched
             this.colorOutputs = new Set();
+            // per destination component, the predicate a predicated
+            // instruction's store() is gated by
+            this.predicateGate = null;
             this.controlDepth = 0;             // >0 => inside if/loop
             this.nonUniformDepth = 0;          // >0 => implicit-LOD sampling illegal
             this.nonUniformFrames = [];        // open non-uniform regions
@@ -718,7 +721,7 @@
                 return "o_depthv";
             case REG_PREDICATE:
                 this.usesPredicate = true;
-                return "p0f";
+                return "p0";
             default:
                 throw new Error("unsupported destination register type " + dest.type);
             }
@@ -746,14 +749,17 @@
                     value = "clamp(" + value + ", vec4<f32>(0.0), vec4<f32>(1.0))";
             }
             this.emit("let " + name + " = " + value + ";");
-            if (dest.writeMask === 0xf) {
+            const gate = this.predicateGate;
+            if (dest.writeMask === 0xf && !gate) {
                 this.emit(target + " = " + name + ";");
                 return;
             }
             for (let i = 0; i < 4; ++i) {
                 if (!(dest.writeMask & (1 << i))) continue;
                 const component = WRITEMASK_NAMES[i];
-                this.emit(target + "." + component + " = " + name + "." + component + ";");
+                this.emit(target + "." + component + " = " + (gate
+                    ? "select(" + target + "." + component + ", " + name + "." + component + ", " + gate[i] + ")"
+                    : name + "." + component) + ";");
             }
         }
 
@@ -897,11 +903,27 @@
             const dest = instruction.dest;
             const sources = instruction.sources;
 
+            if (instruction.predicated && instruction.predicate && dest &&
+                    opcode !== OP.TEXKILL) {
+                // `(p0) mov r0, r1` -- predication gates each destination
+                // component by its own predicate component (the predicate's
+                // swizzle picks which), so the instruction runs and store()
+                // keeps the old value where the gate is false
+                this.usesPredicate = true;
+                const predicate = instruction.predicate;
+                const not = predicate.modifier === SRCMOD_NOT ? "!" : "";
+                this.predicateGate = [0, 1, 2, 3].map(i =>
+                    not + "p0." + SWIZZLE_CHARS[(predicate.swizzle >> (i * 2)) & 0x3]);
+                try {
+                    this.instruction(Object.assign({}, instruction, { predicated: false }));
+                } finally {
+                    this.predicateGate = null;
+                }
+                return;
+            }
             if (instruction.predicated && instruction.predicate) {
-                // `(p0.x) mov r0, r1` -- run the instruction, then keep the
-                // old value where the predicate is false. Doing it as a
-                // guarded block is simpler and matches the semantics for
-                // every opcode, including texture reads.
+                // texkill (whose operand is not written) runs under the
+                // predicate's first component
                 this.usesPredicate = true;
                 const predicate = instruction.predicate;
                 const component = SWIZZLE_CHARS[predicate.swizzle & 0x3];
@@ -1829,6 +1851,11 @@
 
             out.push("// translated from " + kind + " shader model " +
                 this.major + "." + this.minor);
+            // D3D leaves a derivative in non-uniform control flow undefined,
+            // and SM3 shaders sample inside data-dependent branches and loops
+            // all the time; Tint rejects those modules unless this is off
+            // (naga does not check it at all)
+            out.push("diagnostic(off, derivative_uniformity);");
             out.push("struct D9Constants {");
             out.push("    f: array<vec4<f32>, " + floatCount + ">,");
             out.push("    i: array<vec4<i32>, " + intCount + ">,");
@@ -1900,7 +1927,6 @@
             if (this.usesLoopCounter) out.push("var<private> aL: i32 = 0;");
             if (this.usesPredicate) {
                 out.push("var<private> p0: vec4<bool> = vec4<bool>(false);");
-                out.push("var<private> p0f: vec4<bool> = vec4<bool>(false);");
             }
 
             if (kind === "vertex") {

@@ -770,6 +770,8 @@
     const BUFFER_USAGE_MAP_READ = 0x1;
     const BUFFER_USAGE_QUERY_RESOLVE = 0x200;
     const MAP_MODE_READ = 0x1;
+    // SetTexture/SetSamplerState stage of vertex texture sampler s0 (s1..s3 follow)
+    const D3DVERTEXTEXTURESAMPLER0 = 257;
     // GPUQuerySet count limit (WebGPU spec, not an adapter limit)
     const MAX_QUERY_SET_COUNT = 4096;
     const TEXTURE_USAGE_COPY_SRC = 0x1;
@@ -3227,6 +3229,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 readbackRequests: 0,
                 frameFlushes: 0,
                 unsupportedCommands: 0, malformedBatches: 0, batchesFailed: 0,
+                protocolViolations: 0,
                 malformedCommands: 0, gammaRampUpdates: 0, fillModeDraws: 0,
                 swapChainsCreated: 0, swapChainsDestroyed: 0,
                 swapChainsRefused: 0, swapChainPresents: 0,
@@ -4397,6 +4400,15 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
 
         // One line per distinct condition, so a per-frame problem cannot flood
         // the console while still being reported the first time it happens.
+        // The guest sent what its own rules should have refused: a guest bug,
+        // reported (and kept for tests in strict mode); the host carries on
+        // with the nearest legal value
+        protocolViolation(key, message, details) {
+            ++this.stats.protocolViolations;
+            if (this.options.strict) this.hostErrors.push(new Error(message));
+            this.warnOnce("protocol-" + key, "guest protocol violation: " + message, details);
+        }
+
         warnOnce(key, message, details) {
             this.warned = this.warned || new Set();
             if (this.warned.has(key)) return;
@@ -4985,26 +4997,33 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             const g = ((color >>> 8) & 0xff) / 255;
             const b = (color & 0xff) / 255;
             const frame = this.ensureFrame();
+            // D3D9 clears only inside the viewport, and inside the scissor
+            // rect while the scissor test is on (Wine's d3d9 clear_test)
+            const scissor = (state.renderStates.get(D3DRS_SCISSORTESTENABLE) || 0) !== 0 ?
+                state.scissorRect : null;
+            const bounds = intersectRects(state.viewport, scissor, targets.width, targets.height);
             const rectCount = view.getUint32(offset + 20, true);
-            if (rectCount) {
-                if (24 + rectCount * 16 > length) {
-                    ++this.stats.malformedBatches;
-                    throw new D9WGStreamError("D9WG Clear rectangles overrun the command");
-                }
-                const rects = [];
-                for (let index = 0; index < rectCount; ++index) {
-                    const base = offset + 24 + index * 16;
-                    const left = Math.max(0, Math.min(targets.width,
-                        view.getInt32(base, true)));
-                    const top = Math.max(0, Math.min(targets.height,
-                        view.getInt32(base + 4, true)));
-                    const right = Math.max(left, Math.min(targets.width,
-                        view.getInt32(base + 8, true)));
-                    const bottom = Math.max(top, Math.min(targets.height,
-                        view.getInt32(base + 12, true)));
-                    if (right > left && bottom > top)
-                        rects.push({ left, top, right, bottom });
-                }
+            if (24 + rectCount * 16 > length) {
+                ++this.stats.malformedBatches;
+                throw new D9WGStreamError("D9WG Clear rectangles overrun the command");
+            }
+            const rects = [];
+            const clip = (left, top, right, bottom) => {
+                left = Math.max(left, bounds.x);
+                top = Math.max(top, bounds.y);
+                right = Math.min(right, bounds.x + bounds.width);
+                bottom = Math.min(bottom, bounds.y + bounds.height);
+                if (right > left && bottom > top) rects.push({ left, top, right, bottom });
+            };
+            if (!rectCount) clip(0, 0, targets.width, targets.height);
+            for (let index = 0; index < rectCount; ++index) {
+                const base = offset + 24 + index * 16;
+                clip(view.getInt32(base, true), view.getInt32(base + 4, true),
+                    view.getInt32(base + 8, true), view.getInt32(base + 12, true));
+            }
+            const whole = rects.length === 1 && rects[0].left === 0 && rects[0].top === 0 &&
+                rects[0].right === targets.width && rects[0].bottom === targets.height;
+            if (!whole) {
                 if (rects.length) {
                     frame.ops.push({ kind: "rect-clear", targets, clearsColor,
                         clearsDepth, clearsStencil, color: { r, g, b, a },
@@ -7260,12 +7279,14 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 ++this.stats.swapChainPresentsDropped;
                 return;
             }
-            const width = view.getUint32(offset + 16, true);
-            const height = view.getUint32(offset + 20, true);
+            // D9WGPresentSwapChain: device, chain, hwnd, x, y, width, height
+            const width = view.getUint32(offset + 20, true);
+            const height = view.getUint32(offset + 24, true);
             chain.surface = {
                 ...chain.surface,
                 hwnd: view.getUint32(offset + 8, true),
                 x: view.getInt32(offset + 12, true),
+                y: view.getInt32(offset + 16, true),
                 // An empty client rect means the guest could not find the
                 // window; the last non-empty size is the better answer, for
                 // the same reason the implicit chain keeps its own.
@@ -9026,17 +9047,23 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // so the object cannot collide in depth with the interface around
             // it, and discarding that puts the object at its natural depth --
             // where whatever the app expected to be in front of it no longer is.
-            const minZ = view.getFloat32(offset + 20, true);
-            const maxZ = view.getFloat32(offset + 24, true);
+            // MinZ = MaxZ = 0 is legal ("draw on the near plane", HUDs and
+            // first-person weapons); values outside 0 <= MinZ <= MaxZ <= 1
+            // are the guest's SetViewport to refuse
+            let minZ = view.getFloat32(offset + 20, true);
+            let maxZ = view.getFloat32(offset + 24, true);
+            if (!(minZ >= 0 && minZ <= maxZ && maxZ <= 1)) {
+                this.protocolViolation("viewport-depth", "SetViewport depth range outside 0 <= MinZ <= MaxZ <= 1",
+                    { minZ, maxZ });
+                minZ = Math.min(Math.max(minZ || 0, 0), 1);
+                maxZ = Math.min(Math.max(maxZ || 0, minZ), 1);
+            }
             state.viewport = {
                 x: view.getUint32(offset + 4, true),
                 y: view.getUint32(offset + 8, true),
                 width: view.getUint32(offset + 12, true),
                 height: view.getUint32(offset + 16, true),
-                // A device that never calls SetViewport, and any guest that
-                // sends zeros, still has to mean the D3D9 default range.
-                minZ: Number.isFinite(minZ) ? minZ : 0,
-                maxZ: Number.isFinite(maxZ) && maxZ !== 0 ? maxZ : 1,
+                minZ, maxZ,
             };
         }
 
@@ -9661,12 +9688,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 ? get(D3DRS_BLENDOPALPHA, 1) : rawColorOp;
             const alphaBlend = separateAlpha
                 ? resolveBlend(rawAlphaSrc, rawAlphaDst) : colorBlend;
-            const srcFactor = colorBlend.src || "src-alpha";
-            const dstFactor = colorBlend.dst || "one-minus-src-alpha";
             const blendOp = BLEND_OPS[rawColorOp] || "add";
-            const alphaSrcFactor = alphaBlend.src || "one";
-            const alphaDstFactor = alphaBlend.dst || "zero";
             const alphaBlendOp = BLEND_OPS[rawAlphaOp] || "add";
+            // D3DBLENDOP_MIN/MAX ignore the factors; WebGPU requires them
+            // to be ONE (D3D9's default DESTBLEND is ZERO)
+            const factorless = op => op === "min" || op === "max";
+            const srcFactor = factorless(blendOp) ? "one" : colorBlend.src || "src-alpha";
+            const dstFactor = factorless(blendOp) ? "one" : colorBlend.dst || "one-minus-src-alpha";
+            const alphaSrcFactor = factorless(alphaBlendOp) ? "one" : alphaBlend.src || "one";
+            const alphaDstFactor = factorless(alphaBlendOp) ? "one" : alphaBlend.dst || "zero";
             if (blendEnabled && (!colorBlend.valid || !alphaBlend.valid ||
                     !BLEND_OPS[rawColorOp] || !BLEND_OPS[rawAlphaOp])) {
                 ++this.stats.drawsWithUnmappedBlend;
@@ -10586,7 +10616,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             let vertexSamplerError = null;
             const vertexSamplers = vertexReflection
                 ? vertexReflection.samplers.map(sampler => {
-                    const stage = 256 + sampler.index;
+                    const stage = D3DVERTEXTEXTURESAMPLER0 + sampler.index;
                     const texture = this.resources.get(state.textures.get(stage));
                     const bound = texture ? (texture.textureType || "2d") : null;
                     if (bound && bound !== sampler.type)
@@ -10719,13 +10749,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             // D3DRS_COLORWRITEENABLE1/2/3 mask the extra MRT attachments; slot
             // 0 uses D3DRS_COLORWRITEENABLE. An attachment the fragment shader
             // does not write still needs an entry, or WebGPU rejects the
-            // pipeline against the pass.
+            // pipeline against the pass -- with a zero write mask, which is
+            // also what D3D leaves in it. The fixed-function stage writes
+            // location 0 only; a translated one 0 up to its highest oC#.
+            const outputs = program.pixelReflection && program.pixelReflection.colorOutputs.length
+                ? Math.max(...program.pixelReflection.colorOutputs) + 1 : 1;
             const colorTargets = (pipelineState.colorFormats || [this.format])
                 .map((format, index) => {
-                    const target = { format, writeMask: index === 0
-                        ? pipelineState.writeMask
-                        : (pipelineState.extraWriteMasks
-                            ? pipelineState.extraWriteMasks[index - 1] : 0xF) };
+                    const target = { format, writeMask: index >= outputs ? 0
+                        : index === 0 ? pipelineState.writeMask
+                            : pipelineState.extraWriteMasks[index - 1] };
                     if (pipelineState.blendEnabled &&
                             isBlendableGPUFormat(format, this.deviceFeatures)) {
                         target.blend = {
@@ -10750,6 +10783,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             const primitive = { topology,
                 cullMode: program.pointExpansion ? "none" : pipelineState.cullMode,
                 frontFace: "cw" };
+            const triangles = topology === "triangle-list" || topology === "triangle-strip";
             // WebGPU needs to know the restart-index width up front for an
             // indexed strip draw; it must be absent for every other topology.
             if (stripIndexFormat) primitive.stripIndexFormat = stripIndexFormat;
@@ -10785,8 +10819,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                         ? pipelineState.depthWrite : false,
                     depthCompare: pipelineState.depthEnabled
                         ? pipelineState.depthCompare : "always",
-                    depthBias: pipelineState.depthBias,
-                    depthBiasSlopeScale: pipelineState.depthBiasSlopeScale,
+                    // WebGPU allows no depth bias on point and line topologies
+                    // (deviation: D3D biases them too)
+                    depthBias: triangles ? pipelineState.depthBias : 0,
+                    depthBiasSlopeScale: triangles ? pipelineState.depthBiasSlopeScale : 0,
                     stencilFront: pipelineState.stencilEnabled
                         ? pipelineState.stencilFront : {},
                     stencilBack: pipelineState.stencilEnabled

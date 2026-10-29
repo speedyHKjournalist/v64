@@ -670,7 +670,7 @@ test("comment tokens (the D3DX/fxc signature blocks) are skipped", () => {
     assert.strictEqual(reflection.inputs.length, 1);
 });
 
-test("predicated instructions become guarded blocks", () => {
+test("setp writes the predicate that predication reads, per component", () => {
     const { wgsl, reflection } = compileOk([
         VS(2, 1),
         instruction(OP.DCL, { length: 2 }), dclToken(USAGE.POSITION), dst(REG.INPUT, 0),
@@ -679,12 +679,17 @@ test("predicated instructions become guarded blocks", () => {
         // dst + predicate token + one source == three tokens after the
         // instruction token, which is what the SM2.0 length field must say.
         instruction(OP.MOV, { length: 3, predicated: true }), dst(REG.TEMP, 0),
-            src(REG.PREDICATE, 0, { swizzle: swizzle("xxxx") }), src(REG.CONST, 1),
+            src(REG.PREDICATE, 0, { swizzle: swizzle("yxwz") }), src(REG.CONST, 1),
         instruction(OP.MOV, { length: 2 }), dst(REG.RASTOUT, 0), src(REG.TEMP, 0),
         END,
     ], "predicate");
-    assert.ok(wgsl.includes("var<private> p0: vec4<bool>"), "p0 was not declared");
-    assert.ok(wgsl.includes("if (p0.x) {"), "predicate did not guard the instruction:\n" + wgsl);
+    // (S2-9: setp used to write a p0f nothing read, so predication never ran)
+    assert.ok(!/\bp0f\b/.test(wgsl), "setp writes p0 itself:\n" + wgsl);
+    assert.match(wgsl, /\bp0(\.x)? = /, "setp assigns the predicate");
+    // r0.x is gated by p0.y, r0.y by p0.x, ... -- the predicate's swizzle
+    for (const [component, gate] of [["x", "y"], ["y", "x"], ["z", "w"], ["w", "z"]])
+        assert.match(wgsl, new RegExp("r0\\." + component + " = select\\(r0\\." + component +
+            ", [^,]+, p0\\." + gate + "\\);"), "r0." + component + " gated by p0." + gate + ":\n" + wgsl);
     assert.strictEqual(reflection.floatConstCount, 2);
 });
 

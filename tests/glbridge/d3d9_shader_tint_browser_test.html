@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D3D9 shaders under Tint</title>
+<pre id="result">RUNNING</pre>
+<script src="../../src/browser/glbridge/d3d9-webgpu/d3d9_shader_pipeline.js"></script>
+<script>
+// The translator's WGSL compiled by the browser's own compiler (Tint in
+// Chrome), which checks what naga does not: sampling in non-uniform control
+// flow (review S1-7). The shapes are the three an SM3 shader reaches it by.
+//   node tests/glbridge/gl_multipass_browser_runner.js d3d9_shader_tint_browser_test.html
+(async () => {
+    "use strict";
+    const P = D3D9ShaderPipeline, O = P.OP, REG = P.REGISTER;
+    const f = value => { const v = new DataView(new ArrayBuffer(4)); v.setFloat32(0, value, true); return v.getUint32(0, true); };
+    const typeBits = type => (((type & 0x7) << 28) | ((type & 0x18) << 8)) >>> 0;
+    const ins = (opcode, length, control = 0) => ((opcode & 0xffff) | (control << 16) | (length << 24)) >>> 0;
+    const dst = (type, index, mask = 0xf) => (0x80000000 | index | typeBits(type) | (mask << 16)) >>> 0;
+    const src = (type, index, swizzle = 0xe4) => (0x80000000 | index | typeBits(type) | (swizzle << 16)) >>> 0;
+    const X = 0x00;   // .xxxx
+    // ps_3_0: dcl_texcoord0 v0, dcl_2d s0, c0 = 0.5
+    const prologue = [0xFFFF0300,
+        ins(O.DCL, 2), 0x80000005, dst(REG.INPUT, 0),
+        ins(O.DCL, 2), 0x90000000, dst(REG.SAMPLER, 0),
+        ins(O.DEF, 5), dst(REG.CONST, 0), f(0.5), f(0.5), f(0.5), f(0.5),
+        ins(O.MOV, 2), dst(REG.TEMP, 0), src(REG.CONST, 0)];
+    const sample = [ins(O.TEX, 3), dst(REG.TEMP, 0), src(REG.INPUT, 0), src(REG.SAMPLER, 0)];
+    const epilogue = [ins(O.MOV, 2), dst(REG.COLOROUT, 0), src(REG.TEMP, 0)];
+    const SHAPES = {
+        "a sample inside `if p0.x`": [...prologue,
+            ins(O.SETP, 3, 1), dst(REG.PREDICATE, 0), src(REG.INPUT, 0), src(REG.CONST, 0),
+            ins(O.IF, 1), src(REG.PREDICATE, 0, X), ...sample, ins(O.ENDIF, 0),
+            ...epilogue, 0x0000FFFF],
+        "a sample after a data-dependent breakc in a rep": [...prologue,
+            ins(O.DEFI, 5), dst(REG.CONSTINT, 0), 4, 0, 0, 0,
+            ins(O.REP, 1), src(REG.CONSTINT, 0),
+            ins(O.BREAKC, 2, 1), src(REG.INPUT, 0, X), src(REG.CONST, 0, X),
+            ...sample, ins(O.ENDREP, 0),
+            ...epilogue, 0x0000FFFF],
+        "a subroutine that samples, called from an if_gt": [...prologue,
+            ins(O.IFC, 2, 1), src(REG.INPUT, 0, X), src(REG.CONST, 0, X),
+            ins(O.CALL, 1), src(REG.LABEL, 0), ins(O.ENDIF, 0),
+            ...epilogue, ins(O.RET, 0),
+            ins(O.LABEL, 1), src(REG.LABEL, 0), ...sample, ins(O.RET, 0),
+            0x0000FFFF],
+    };
+    const lines = [];
+    let failed = 0;
+    try {
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+        for (const [name, tokens] of Object.entries(SHAPES)) {
+            const translated = P.compileShader(new Uint32Array(tokens));
+            if (!translated.ok) {
+                ++failed;
+                lines.push("FAIL  " + name + ": the translator refused it: " + translated.error);
+                continue;
+            }
+            const module = device.createShaderModule({ code: translated.wgsl });
+            const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
+            if (errors.length) {
+                ++failed;
+                lines.push("FAIL  " + name + ": " + errors.map(m => m.message).join("; "));
+            } else {
+                lines.push("ok    " + name);
+            }
+        }
+        document.getElementById("result").textContent =
+            (failed ? "FAIL " + failed + " shape(s)\n" : "PASS\n") + lines.join("\n");
+    } catch (error) {
+        document.getElementById("result").textContent = "FAIL exception " + (error && error.stack) + "\n" + lines.join("\n");
+    }
+})();
+</script>
