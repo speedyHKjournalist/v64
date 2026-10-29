@@ -94,7 +94,7 @@ test("Android's options: those of tests/a64/android_boot.mjs (A64_ANDROID_BOOTLO
     assert.equal(o.cpu_cores, 4);
     assert.equal(o.memory_size, 1536 << 20);
     // (the bootloader: no kernel, initrd or command line of the page's)
-    assert.deepEqual(o.android, { device: "cf_arm64_only_phone", gpu_mode: "gfxstream", selinux: "enforcing", vendor_ramdisk: undefined });
+    assert.deepEqual(o.android, { device: "cf_arm64_only_phone", gpu_mode: "gfxstream", selinux: "enforcing", vendor_ramdisk: undefined, gles_version: undefined });
     assert.equal("kernel" in o || "initrd" in o, false);
     assert.equal(o.cmdline, undefined);
     assert.equal(o.virtio_transport, "pci");
@@ -129,7 +129,7 @@ test("Android 7.1's emulator image: the options of tests/a32/android_boot.mjs (A
     assert.equal(o.machine_type, "ranchu");
     assert.equal(o.cpu_cores, 2);
     assert.equal(o.memory_size, 1024 << 20);
-    assert.deepEqual(o.android, { device: "ranchu_25_armeabi_v7a", gpu_mode: "swiftshader", selinux: "enforcing", vendor_ramdisk: undefined });
+    assert.deepEqual(o.android, { device: "ranchu_25_armeabi_v7a", gpu_mode: "host", selinux: "enforcing", vendor_ramdisk: undefined, gles_version: "3.1" });
     assert.equal("kernel" in o || "initrd" in o, false);
     assert.equal(o.graphics_adapter, "none");
     assert.deepEqual(o.virtio_disks, [{ url: "disk.img", async: true, disk_option: "read_write" }]);
@@ -137,7 +137,7 @@ test("Android 7.1's emulator image: the options of tests/a32/android_boot.mjs (A
     assert.equal(o.net_device.relay_url, "fetch");
     assert.equal(o.virtio_transport, undefined);
     assert.equal(o.virtio_input, undefined);
-    assert.equal(o.a64_profile, undefined);
+    assert.equal(o.cpu_profile, undefined);
     assert.deepEqual(o.jit_switches, { a64_page: 1 });
     assert.deepEqual(check_config(c), []);
     // (its device model is ranchu's: Cuttlefish's on ranchu is refused, ranchu's on virt too)
@@ -150,6 +150,25 @@ test("Android 7.1's emulator image: the options of tests/a32/android_boot.mjs (A
     assert.equal(config.machine.type, "ranchu");
     assert.equal(config.android, null);
     assert.deepEqual(problems(config), []);
+    // (its GPU modes, docs/gles-proxy-plan.md E5: the host's GPU or the
+    // guest's CPU, "swiftshader" the guest's as before; not Cuttlefish's)
+    for(const gpu_mode of ["host", "guest", "swiftshader"])
+    {
+        const d = Object.assign({}, c, { android: Object.assign({}, c.android, { gpu_mode }) });
+        assert.deepEqual(problems(d), [], gpu_mode);
+        assert.equal(config_to_options(d, ENV).android.gpu_mode, gpu_mode);
+        assert.equal(fitted(d).config.android.gpu_mode, gpu_mode);
+    }
+    const gfxstream = Object.assign({}, c, { android: Object.assign({}, c.android, { gpu_mode: "gfxstream" }) });
+    assert.ok(problems(gfxstream).some(p => /android.gpu_mode/.test(p)), JSON.stringify(problems(gfxstream)));
+    ({ config, notes } = fitted(gfxstream));
+    assert.equal(config.android.gpu_mode, "guest");
+    assert.ok(notes.some(n => /Android's GPU: the guest's CPU \(ranchu_25_armeabi_v7a has no gfxstream\)/.test(n)), JSON.stringify(notes));
+    // (and Cuttlefish has neither)
+    const host = Object.assign(preset_config(preset("android16")), {});
+    host.android = Object.assign({}, host.android, { gpu_mode: "host" });
+    assert.ok(problems(host).some(p => /android.gpu_mode/.test(p)), JSON.stringify(problems(host)));
+    assert.equal(fitted(host).config.android.gpu_mode, "swiftshader");
 });
 
 test("arm32 and ranchu: what a choice implies", () =>

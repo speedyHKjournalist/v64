@@ -4,15 +4,19 @@
 //!
 //! What it changes on the way:
 //! - combined image samplers become an image and a sampler (split.rs)
-//! - NaN and infinity tests become bit tests (relational.rs: WGSL has none)
+//! - NaN and infinity tests become bit tests (relational.rs: WGSL has none);
+//!   negations of unsigned integers subtractions from zero, GLSL's `%` of
+//!   signed integers WGSL's (negate.rs)
 //! - samples of integer images become fetches (intsample.rs: WGSL samples
-//!   float textures only)
+//!   float textures only); samples of images clamped to the border choose
+//!   the border color outside the image (border.rs)
 //! - input attachments become textures read at the fragment's position
 //!   (subpass.rs)
 //! - matrices of laid out blocks naga cannot read (std140's 2-row ones, row
 //!   major ones) become arrays of vectors (layout.rs)
 //! - entry point inputs and outputs of matrices, arrays and structs at a
-//!   location become their vectors at consecutive locations (io.rs)
+//!   location become their vectors at consecutive locations (io.rs; a struct
+//!   output's members get their locations first, structio.rs)
 //! - an array image's size has its layer count (layers.rs: naga's SPIR-V
 //!   front end leaves it out)
 //! - outer products become matrices of columns, modf's and frexp's results
@@ -31,24 +35,42 @@
 //!   clip space has Y down, WebGPU's up)
 //! - a vertex shader's gl_PointSize is dropped (WGSL has none: WebGPU's
 //!   points are one pixel); a capturing draw's compute shader keeps it
+//! - gl_SampleMask and gl_SampleMaskIn, GLSL's int arrays, become WGSL's
+//!   u32 sample mask (samplemask.rs); centroid and sample interpolation
+//!   naga's front end drops are put back (sampling.rs)
+//! - a geometry shader becomes a compute shader (geometry.rs:
+//!   vx_translate_geometry), a vertex shader's capture of every output its
+//!   input (xfb.rs); so do the tessellation shaders (tessellation.rs:
+//!   vx_translate_tessellation)
 //!
 //! It answers in JSON: the WGSL, and per entry point the bindings it uses
 //! and their kind; the overrides (specialization constants) by id.
 
 extern crate alloc;
 
+mod atomics;
+mod counters;
+mod imagecubes;
 mod intsample;
 mod io;
 mod layers;
 mod layout;
 mod math;
+mod negate;
 mod relational;
 mod remap;
 mod blockarrays;
+mod border;
 mod cubes;
 mod fetches;
 mod depth;
+mod geometry;
+mod samplemask;
+mod sizes;
+mod tessellation;
+mod sampling;
 mod split;
+mod structio;
 mod subpass;
 mod switches;
 pub mod xfb;
@@ -77,6 +99,8 @@ pub struct Options {
     /// depths reversed): depth.rs
     pub drop_frag_depth: bool,
     pub reverse_depth: bool,
+    /// GL's clip space: a vertex shader's depth from -w to w made WebGPU's 0 to w (depth.rs; the GLES host)
+    pub gl_depth: bool,
     /// The address modes of the samplers of integer images (whose samples
     /// are fetches, intsample.rs), by their group and WGSL binding
     /// (`group << 16 | binding`): VkSamplerAddressMode u | v << 4 | w << 8;
@@ -252,11 +276,19 @@ fn validate(module: &naga::Module) -> Result<naga::valid::ModuleInfo, String> {
 /// `sampled`: the integer images it made fetches of)
 fn passes(words: &[u32], wraps: &[(u32, u32)], sampled: &mut Vec<u32>) -> Vec<u32> {
     let skip = std::env::var("VX_SKIP").unwrap_or_default();
-    let list: [(&str, fn(&[u32]) -> Vec<u32>); 7] = [("blockarrays", blockarrays::lower), ("split", split::split), ("coordinates", intsample::coordinate_types), ("subpass", subpass::lower),
-        ("relational", relational::lower), ("fetches", fetches::lower), ("layout", layout::lower)];
+    let list: [(&str, fn(&[u32]) -> Vec<u32>); 12] = [("blockarrays", blockarrays::lower), ("counters", counters::lower), ("imagecubes", imagecubes::lower), ("split", split::split), ("coordinates", intsample::coordinate_types), ("subpass", subpass::lower),
+        ("relational", relational::lower), ("fetches", fetches::lower), ("layout", layout::lower), ("atomics", atomics::values), ("structio", structio::lower),
+        ("negate", negate::lower)];
     let mut words = words.to_vec();
     for (name, pass) in list {
-        // (intsample after subpass)
+        // (clamp to border after split: the images' own loads, border.rs)
+        if name == "coordinates" && !skip.split(',').any(|s| s == "border") {
+            words = border::lower(&words, wraps);
+        }
+        // (intsample after subpass; sizes before it: the shader's own size queries, not intsample's)
+        if name == "relational" && !skip.split(',').any(|s| s == "sizes") {
+            words = sizes::lower(&words);
+        }
         if name == "relational" && !skip.split(',').any(|s| s == "intsample") {
             words = intsample::lower(&words, wraps, sampled);
         }
@@ -284,7 +316,7 @@ pub fn passes_for_debugging(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// SPIR-V (bytes) to the JSON answer
-pub fn translate(bytes: &[u8], options: &Options) -> Result<String, String> { translate_with(bytes, options, None) }
+pub fn translate(bytes: &[u8], options: &Options) -> Result<String, String> { translate_with(bytes, options, Mode::Shader) }
 
 /// What a capturing draw's compute shader needs (xfb.rs): the pipeline's
 /// vertex input and the group of its own resources
@@ -292,23 +324,154 @@ pub struct XfbInput {
     pub attributes: Vec<xfb::Attribute>,
     pub slots: Vec<xfb::Slot>,
     pub group: u32,
+    /// every output captured into buffer 0 as a geometry shader's input
+    /// record (geometry.rs) rather than those the SPIR-V decorates
+    pub all: bool,
+}
+
+/// What translate_with makes: a stage's shader, a capturing draw's compute
+/// shader, or a geometry shader's compute shader (its resources' group)
+enum Mode<'a> {
+    Shader,
+    Xfb(&'a XfbInput),
+    Geometry(u32),
+    Tessellation(tessellation::Stage, u32),
+}
+
+/// Struct members whose offsets are not WGSL's own layout's (std140's: a
+/// struct or array member 16-aligned, a struct's size rounded to 16) get a
+/// `@size` that puts the next one where the module says: naga's WGSL writer
+/// writes no layout attributes, and the shader would read the wrong bytes
+/// (or, in a uniform buffer, be refused). The structs are written in the
+/// type arena's order, the predeclared ones left out, as naga's writer does.
+fn explicit_layout(module: &naga::Module, wgsl: &mut String) {
+    let mut layouter = naga::proc::Layouter::default();
+    if layouter.update(module.to_ctx()).is_err() {
+        return;
+    }
+    let predeclared: Vec<naga::Handle<naga::Type>> = module.special_types.predeclared_types.values().copied().collect();
+    // a struct in an array whose stride is more than the struct's size (std140
+    // rounds a struct's size to 16): WGSL has no array stride, so the struct's
+    // own size becomes the stride
+    let mut spans: alloc::collections::BTreeMap<naga::Handle<naga::Type>, u32> = alloc::collections::BTreeMap::new();
+    for (_, ty) in module.types.iter() {
+        if let TypeInner::Array { base, stride, .. } = ty.inner {
+            if let TypeInner::Struct { span, .. } = module.types[base].inner {
+                if stride > span {
+                    spans.insert(base, stride);
+                }
+            }
+        }
+    }
+    // for each struct written: the member indices to give a size, and the sizes
+    let mut sizes: Vec<Vec<(usize, u32)>> = Vec::new();
+    for (handle, ty) in module.types.iter() {
+        let TypeInner::Struct { ref members, span } = ty.inner else { continue };
+        let span = spans.get(&handle).copied().unwrap_or(span);
+        if predeclared.contains(&handle) || Some(handle) == module.special_types.external_texture_params
+            || Some(handle) == module.special_types.external_texture_transfer_function {
+            continue;
+        }
+        let mut list = Vec::new();
+        let alignment = members.iter().map(|m| layouter[m.ty].alignment.round_up(1)).max().unwrap_or(1);
+        for (i, member) in members.iter().enumerate() {
+            let layout = layouter[member.ty];
+            let natural_end = member.offset + layout.size;
+            let next = members.get(i + 1).map(|n| n.offset);
+            let target_end = match next {
+                Some(offset) => {
+                    // (where the next member goes without a size: its alignment after this one's end)
+                    if layouter[members[i + 1].ty].alignment.round_up(natural_end) == offset { continue; }
+                    offset
+                }
+                None => {
+                    if span == (natural_end + alignment - 1) / alignment * alignment { continue; }
+                    span
+                }
+            };
+            if target_end > natural_end {
+                list.push((i, target_end - member.offset));
+            }
+        }
+        sizes.push(list);
+    }
+    if sizes.iter().all(|l| l.is_empty()) {
+        return;
+    }
+    // the written structs, in order: a line "struct name {", members a line each, "}"
+    let mut out = String::with_capacity(wgsl.len() + 64);
+    let mut which = 0usize;
+    let mut member: Option<usize> = None;
+    for line in wgsl.split_inclusive('\n') {
+        if member.is_none() && line.starts_with("struct ") && line.trim_end().ends_with('{') {
+            member = Some(0);
+            out.push_str(line);
+            continue;
+        }
+        if let Some(index) = member {
+            if line.trim_start().starts_with('}') {
+                member = None;
+                which += 1;
+                out.push_str(line);
+                continue;
+            }
+            if let Some(list) = sizes.get(which) {
+                if let Some(&(_, size)) = list.iter().find(|&&(i, _)| i == index) {
+                    let indent = line.len() - line.trim_start().len();
+                    out.push_str(&line[..indent]);
+                    out.push_str(&format!("@size({}) ", size));
+                    out.push_str(&line[indent..]);
+                    member = Some(index + 1);
+                    continue;
+                }
+            }
+            member = Some(index + 1);
+        }
+        out.push_str(line);
+    }
+    *wgsl = out;
 }
 
 /// The compute shader of a capturing draw (vx_translate_xfb), as JSON
-pub fn translate_xfb(bytes: &[u8], options: &Options, input: &XfbInput) -> Result<String, String> { translate_with(bytes, options, Some(input)) }
+pub fn translate_xfb(bytes: &[u8], options: &Options, input: &XfbInput) -> Result<String, String> { translate_with(bytes, options, Mode::Xfb(input)) }
 
-fn translate_with(bytes: &[u8], options: &Options, xfb_input: Option<&XfbInput>) -> Result<String, String> {
+/// The compute shader of a geometry shader (geometry.rs), its own resources in `group`, as JSON
+pub fn translate_geometry(bytes: &[u8], options: &Options, group: u32) -> Result<String, String> { translate_with(bytes, options, Mode::Geometry(group)) }
+
+/// The compute shader of a tessellation control (`control`) or evaluation shader (tessellation.rs), as JSON
+pub fn translate_tessellation(bytes: &[u8], options: &Options, control: bool, group: u32) -> Result<String, String> {
+    let stage = if control { tessellation::Stage::Control } else { tessellation::Stage::Evaluation };
+    translate_with(bytes, options, Mode::Tessellation(stage, group))
+}
+
+fn translate_with(bytes: &[u8], options: &Options, mode: Mode) -> Result<String, String> {
     if bytes.len() % 4 != 0 || bytes.len() < 20 {
         return Err(String::from("not SPIR-V: not whole words"));
     }
     let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let (words, geometry) = match mode {
+        Mode::Geometry(_) => {
+            let (words, g) = geometry::prepare(&words)?;
+            (words, Some(g))
+        },
+        _ => (words, None),
+    };
+    let (words, tess) = match mode {
+        Mode::Tessellation(stage, _) => {
+            let (words, t) = tessellation::prepare(&words, stage)?;
+            (words, Some(t))
+        },
+        _ => (words, None),
+    };
     let mut sampled = Vec::new();
     let words = passes(&words, &options.int_wraps, &mut sampled);
     // (transform feedback's: read by xfb::captures, naga refuses them)
     let data: Vec<u8> = xfb::strip(&words).iter().flat_map(|w| w.to_le_bytes()).collect();
     let spv = naga::front::spv::Options { adjust_coordinate_space: !options.keep_coordinate_space, strict_capabilities: false, block_ctx_dump_prefix: None };
     let mut module = naga::front::spv::parse_u8_slice(&data, &spv).map_err(|e| format!("SPIR-V: {:?}", e))?;
+    sampling::restore(&mut module, &sampling::read(&words));
     layers::lower(&mut module);
+    samplemask::lower(&mut module);
     cubes::lower(&mut module);
     math::lower(&mut module);
     switches::lower(&mut module);
@@ -316,14 +479,32 @@ fn translate_with(bytes: &[u8], options: &Options, xfb_input: Option<&XfbInput>)
     // (transform feedback: the compute shader of a capturing draw, xfb.rs)
     let mut appended = String::new();
     let mut capture_json = String::new();
-    if let Some(input) = xfb_input {
-        let (captures, strides) = xfb::captures(&words).ok_or("the vertex shader captures nothing")?;
-        appended = xfb::compute_shader(&mut module, &captures, strides, &input.attributes, &input.slots, input.group)?;
-        let mut buffers: Vec<u32> = captures.iter().map(|c| c.buffer).collect();
-        buffers.sort_unstable();
-        buffers.dedup();
+    let mut finished = None;
+    if let Mode::Xfb(input) = mode {
+        let (captures, strides, buffers) = if input.all {
+            (Vec::new(), [0; 4], vec![0])
+        }
+        else {
+            let (captures, strides) = xfb::captures(&words).ok_or("the vertex shader captures nothing")?;
+            let mut buffers: Vec<u32> = captures.iter().map(|c| c.buffer).collect();
+            buffers.sort_unstable();
+            buffers.dedup();
+            (captures, strides, buffers)
+        };
+        let (wgsl, strides) = xfb::compute_shader(&mut module, &captures, strides, &input.attributes, &input.slots, input.group, input.all)?;
+        appended = wgsl;
         capture_json = format!(",\"xfb\":{{\"strides\":[{},{},{},{}],\"buffers\":{:?},\"slots\":{:?}}}", strides[0], strides[1], strides[2], strides[3],
             buffers, { let mut s: Vec<u32> = input.attributes.iter().map(|a| a.slot).collect(); s.sort_unstable(); s.dedup(); s });
+    }
+    else if let (Mode::Geometry(group), Some(g)) = (&mode, &geometry) {
+        let f = geometry::finish(&mut module, g, *group)?;
+        capture_json = format!(",\"geometry\":{}", f.json);
+        finished = Some(f);
+    }
+    else if let (Mode::Tessellation(_, group), Some(t)) = (&mode, &tess) {
+        let f = tessellation::finish(&mut module, t, *group)?;
+        capture_json = format!(",\"tessellation\":{}", f.json);
+        appended = f.appended;
     }
     else if xfb::captures(&words).is_some() {
         capture_json = String::from(",\"captures\":true");
@@ -332,6 +513,9 @@ fn translate_with(bytes: &[u8], options: &Options, xfb_input: Option<&XfbInput>)
     io::flatten(&mut module)?;
     if options.drop_frag_depth {
         depth::drop_frag_depth(&mut module);
+    }
+    if options.gl_depth {
+        depth::gl_depth(&mut module);
     }
     if options.reverse_depth {
         depth::reverse_depth(&mut module);
@@ -356,6 +540,11 @@ fn translate_with(bytes: &[u8], options: &Options, xfb_input: Option<&XfbInput>)
     let info = validate(&module)?;
     let mut wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
         .map_err(|e| format!("WGSL: {:?}", e))?;
+    explicit_layout(&module, &mut wgsl);
+    if let Some(f) = &finished {
+        geometry::replace_stubs(&mut wgsl, f)?;
+        appended = f.appended.clone();
+    }
     wgsl.push_str(&appended);
 
     let mut layouter = naga::proc::Layouter::default();
@@ -363,6 +552,32 @@ fn translate_with(bytes: &[u8], options: &Options, xfb_input: Option<&XfbInput>)
     let mut json = String::from("{\"wgsl\":");
     json.push_str(&quote(&wgsl));
     json.push_str(",\"entries\":[");
+    // (a geometry or tessellation shader's compute entry point: the resources its function uses, and the group the caller gave)
+    let own_entry = if finished.is_some() { Some((geometry::MAIN, "vx_geometry")) } else {
+        match tess.as_ref().and_then(|t| t.stage) {
+            Some(tessellation::Stage::Control) => Some((tessellation::CONTROL_MAIN, "vx_tess_control")),
+            Some(tessellation::Stage::Evaluation) => Some((tessellation::EVALUATION_MAIN, "vx_tess_eval")),
+            None => None,
+        }
+    };
+    if let Some((main, entry_name)) = own_entry {
+        let (handle, _) = module.functions.iter().find(|(_, f)| f.name.as_deref() == Some(main)).ok_or("the shader's function is gone")?;
+        let uses = &info[handle];
+        json.push_str(&format!("{{\"name\":\"{}\",\"stage\":\"compute\",\"workgroup\":[64,1,1],\"flat\":false,\"bindings\":[", entry_name));
+        let mut first = true;
+        for (h, var) in module.global_variables.iter() {
+            let Some(binding) = var.binding else { continue };
+            if uses[h].is_empty() { continue; }
+            if !first { json.push(','); }
+            first = false;
+            let size = match var.space {
+                AddressSpace::Uniform | AddressSpace::Storage { .. } if laid => layouter[var.ty].size,
+                _ => 0,
+            };
+            json.push_str(&format!("[{},{},\"{}\",{}]", binding.group, binding.binding, kind(&module, var), size));
+        }
+        json.push_str("]}");
+    }
     for (index, entry) in module.entry_points.iter().enumerate() {
         if index > 0 { json.push(','); }
         let stage = match entry.stage {
@@ -461,9 +676,55 @@ pub unsafe extern "C" fn vx_translate_xfb(ptr: *const u8, len: usize, immediates
     let group = next();
     let attributes = (0..next()).map(|_| xfb::Attribute { location: next(), slot: next(), format: next(), offset: next() }).collect();
     let slots = (0..next()).map(|_| xfb::Slot { slot: next(), stride: next(), instance: next() != 0 }).collect();
-    let options = Options { immediates_group, immediates_binding, keep_coordinate_space: true, storage_uniforms, drop_frag_depth: false, reverse_depth: false,
+    let options = Options { immediates_group, immediates_binding, keep_coordinate_space: true, storage_uniforms, drop_frag_depth: false, reverse_depth: false, gl_depth: false,
         int_wraps: Vec::new() };
-    let answer = match translate_with(bytes, &options, Some(&XfbInput { attributes, slots, group })) {
+    // (the group's bit 31: every output captured, a geometry shader's input, XfbInput::all)
+    let (group, all) = (group & 0x7FFF_FFFF, group & 0x8000_0000 != 0);
+    let answer = match translate_with(bytes, &options, Mode::Xfb(&XfbInput { attributes, slots, group, all })) {
+        Ok(json) => json,
+        Err(error) => format!("{{\"error\":{}}}", quote(&error)),
+    };
+    let out = vx_alloc(answer.len() + 4);
+    core::ptr::copy_nonoverlapping((answer.len() as u32).to_le_bytes().as_ptr(), out, 4);
+    core::ptr::copy_nonoverlapping(answer.as_ptr(), out.add(4), answer.len());
+    out
+}
+
+/// The compute shader of the geometry shader in `ptr` (`len` bytes, its
+/// clip space kept), its own resources in `group` (geometry.rs)
+///
+/// # Safety
+/// as vx_translate's
+#[no_mangle]
+pub unsafe extern "C" fn vx_translate_geometry(ptr: *const u8, len: usize, group: u32, wraps: *const u32, wrap_count: usize) -> *mut u8 {
+    let bytes = core::slice::from_raw_parts(ptr, len);
+    let int_wraps = if wraps.is_null() || wrap_count == 0 { Vec::new() } else {
+        core::slice::from_raw_parts(wraps, wrap_count * 2).chunks_exact(2).map(|p| (p[0], p[1])).collect()
+    };
+    let options = Options { immediates_group: 0, immediates_binding: 0, keep_coordinate_space: true, storage_uniforms: Vec::new(), drop_frag_depth: false,
+        reverse_depth: false, gl_depth: false, int_wraps };
+    let answer = match translate_geometry(bytes, &options, group) {
+        Ok(json) => json,
+        Err(error) => format!("{{\"error\":{}}}", quote(&error)),
+    };
+    let out = vx_alloc(answer.len() + 4);
+    core::ptr::copy_nonoverlapping((answer.len() as u32).to_le_bytes().as_ptr(), out, 4);
+    core::ptr::copy_nonoverlapping(answer.as_ptr(), out.add(4), answer.len());
+    out
+}
+
+/// The compute shader of the tessellation control (`control` 1) or
+/// evaluation shader in `ptr` (`len` bytes), its own resources in `group`
+/// (tessellation.rs)
+///
+/// # Safety
+/// as vx_translate's
+#[no_mangle]
+pub unsafe extern "C" fn vx_translate_tessellation(ptr: *const u8, len: usize, control: u32, group: u32) -> *mut u8 {
+    let bytes = core::slice::from_raw_parts(ptr, len);
+    let options = Options { immediates_group: 0, immediates_binding: 0, keep_coordinate_space: true, storage_uniforms: Vec::new(), drop_frag_depth: false,
+        reverse_depth: false, gl_depth: false, int_wraps: Vec::new() };
+    let answer = match translate_tessellation(bytes, &options, control != 0, group) {
         Ok(json) => json,
         Err(error) => format!("{{\"error\":{}}}", quote(&error)),
     };
@@ -487,7 +748,7 @@ pub unsafe extern "C" fn vx_translate(ptr: *const u8, len: usize, immediates_gro
         core::slice::from_raw_parts(wraps, wrap_count * 2).chunks_exact(2).map(|p| (p[0], p[1])).collect()
     };
     let options = Options { immediates_group, immediates_binding, keep_coordinate_space: flags & 1 != 0, storage_uniforms,
-        drop_frag_depth: flags & 2 != 0, reverse_depth: flags & 4 != 0, int_wraps };
+        drop_frag_depth: flags & 2 != 0, reverse_depth: flags & 4 != 0, gl_depth: flags & 8 != 0, int_wraps };
     let answer = match translate(bytes, &options) {
         Ok(json) => json,
         Err(error) => format!("{{\"error\":{}}}", quote(&error)),

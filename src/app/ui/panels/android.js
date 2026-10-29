@@ -1,13 +1,14 @@
 // @ts-check
 // The settings dialog's Android panel (docs/android-images-plan.md I4.2):
-// v64's bootloader (the device model, the GPU mode, the vendor ramdisk and
+// v64's bootloader (the device model, the GPU mode, the GLES version an
+// emulator image gets on the host's GPU, the vendor ramdisk and
 // the debug one's file, SELinux), the display's size, and wiping the user data of the machine's
 // browser disk (Android formats userdata and metadata again at its next boot).
 
 import { h, confirm } from "../dom.js";
 import { image_picker } from "../image_picker.js";
 import { select_field } from "./system.js";
-import { ANDROID_DEVICES, ANDROID_GPU_MODES, ANDROID_VENDOR_RAMDISKS, ANDROID_SELINUX, ANDROID_DISPLAYS } from "../../vm_config.js";
+import { ANDROID_DEVICES, ANDROID_GPU_MODES, RANCHU_GPU_MODES, ANDROID_VENDOR_RAMDISKS, ANDROID_SELINUX, ANDROID_DISPLAYS, ANDROID_GLES_VERSIONS } from "../../vm_config.js";
 import { ANDROID_DEVICES as MODELS } from "../../../android/bootloader.js";
 import { wipe_android_data } from "../../android_import.js";
 import { disk_id } from "../../browser_disks.js";
@@ -20,6 +21,14 @@ const GPU = {
     swiftshader: "SwiftShader: the CPU draws (Android starts; its desktop needs a GPU)",
     venus: "Venus: the disk's own Venus driver (tools/a64_android.mjs puts it in odm), drawn by the graphics proxy",
     gfxstream: "gfxstream: the image's own drivers (official images), drawn by the graphics proxy",
+    host: "The host's GPU: the emulator's GLES drawn with this page's WebGPU (the CPU draws without WebGPU)",
+    guest: "The guest's CPU: Android draws its windows itself (slow)",
+};
+const GLES = {
+    "2.0": "GLES 2.0",
+    "3.0": "GLES 3.0",
+    "3.1": "GLES 3.1 (compute, storage buffers, images; the default)",
+    "3.2": "GLES 3.2 (advanced blending, border clamping; Android 7.1's GLES library refuses geometry and tessellation shaders)",
 };
 const RAMDISKS = {
     release: "The device's own (release: adb asks on the screen)",
@@ -60,8 +69,13 @@ export function android_panel(ctx)
     {
         return [
             h("p.note", null, "v64 boots the emulator image from the first hard disk: its kernel and ramdisk partitions, the emulator's command line; " +
-                "its system, cache and userdata partitions are the machine's virtio disks. The guest draws (no host GPU)."),
+                "its system, cache and userdata partitions are the machine's virtio disks."),
             select_field("Device model", models, a.device, value => set("device", value), v => DEVICES[v] || v),
+            // (the GPU mode, read at the boot: a suspended machine resumes with its own)
+            select_field("GPU", RANCHU_GPU_MODES, a.gpu_mode === "swiftshader" ? "guest" : a.gpu_mode, value => set("gpu_mode", value), v => GPU[v] || v),
+            // (the version the host's GPU announces: read at the boot, as the GPU mode)
+            select_field("GLES version", ANDROID_GLES_VERSIONS, a.gles_version, value => set("gles_version", value), v => GLES[v] || v,
+                a.gpu_mode === "host" ? {} : { disabled: true, title: "The host's GPU's: the guest's CPU draws GLES 2.0" }),
             h("div.field", null, wipe, " ", status),
         ];
     }

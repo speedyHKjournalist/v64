@@ -46,7 +46,7 @@ bench-same-source: bench-build build/v86.wasm build/libv86.mjs
 # hours (the SIMD suites, avx-tests and the like, stay with the release gate,
 # tools/release_gate.mjs)
 .PHONY: ci-tests
-ci-tests: rust-test test-glbridge app-check platform-contract-tests \
+ci-tests: rust-test test-glbridge app-check platform-contract-tests ios-tests gles-tests \
 	acpi-device-tests q35-device-tests jit-switch-tests \
 	cpu-optimization-tests flags-provenance-tests cpu-plan-tests jit-tiers-tests jit-disabled-tests mmx-fast-tests \
 	softfloat-fast-tests x87-fast-math-tests x87-fast-tests x87-jit-cache-tests \
@@ -157,7 +157,7 @@ CORE_FILES=cjs.js const.js io.js machine_clock.js machine_options.js main.js lib
 	   bus.js log.js cpu.js \
 	   elf.js kernel.js extended_memory.js \
 	   parallel/relocate.js parallel/control.js parallel/machine.js \
-	   arm/state_layout.js arm/cpu.js virt/platform.js virt/io.js virt/pl011.js virt/pl031.js virt/inflate.js virt/dtb.js virt/ranchu.js virt/goldfish.js virt/loader.js \
+	   arm/state_layout.js arm/cpu.js arm/backdoor_a32.js virt/platform.js virt/io.js virt/pl011.js virt/pl031.js virt/inflate.js virt/dtb.js virt/ranchu.js virt/goldfish.js virt/loader.js \
 	   android/bytes.js android/gpt.js android/avb.js android/bootimg.js android/bootconfig.js android/devices.js android/boot.js android/bootloader.js android/partition_buffer.js android/cpio.js android/ramdisk_overlay.js \
 	   image/sha256.js image/source.js image/overlay.js image/disk_image.js image/qcow2.js image/vhd.js image/vdi.js image/vmdk.js image/vhdx.js image/ova.js image/factory.js image/export.js image/qcow2_export.js
 LIB_FILES=9p.js filesystem.js marshall.js
@@ -187,7 +187,10 @@ USB_PLUGINS=build/v86-usb.js
 USB_COMMON=src/cjs.js src/const.js src/lib.js src/log.js src/device_machine.js
 # the TPM's (tpm: docs/tpm.md), with its module (bios/libtpms.wasm, tools/libtpms/build.sh) beside it
 TPM_PLUGINS=build/v86-tpm.js build/libtpms.wasm
-DEVICE_PLUGINS=$(GRAPHICS_ADAPTER_PLUGINS) $(NET_ADAPTER_PLUGINS) $(AUDIO_DEVICE_PLUGINS) $(USB_PLUGINS) $(TPM_PLUGINS)
+# the ranchu machine's GLES host (ranchu_gpu "host": docs/gles-proxy-plan.md)
+# the GLES host's, with its GLSL ES compiler (bios/glslang.wasm, tools/glslang/build.sh) beside it
+GLES_PLUGINS=build/v86-gles.js build/glslang.wasm
+DEVICE_PLUGINS=$(GRAPHICS_ADAPTER_PLUGINS) $(NET_ADAPTER_PLUGINS) $(AUDIO_DEVICE_PLUGINS) $(USB_PLUGINS) $(TPM_PLUGINS) $(GLES_PLUGINS)
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/interpreter0f38.rs src/rust/gen/interpreter0f3a.rs \
@@ -295,9 +298,20 @@ build/v86-tpm.js: $(CLOSURE) src/*.js src/tpm/*.js
 		--output_wrapper ';(function(){%output%}).call(this);' \
 		--js $(USB_COMMON) --js src/tpm/libtpms.js --js src/tpm/crb.js --js src/tpm/store.js --js src/tpm/plugin.js
 
+build/glslang.wasm: bios/glslang.wasm
+	mkdir -p build
+	cp bios/glslang.wasm $@
+
 build/libtpms.wasm: bios/libtpms.wasm
 	mkdir -p build
 	cp $< $@
+
+# (esbuild, not Closure: it bundles gl-webgpu's GLSL front end, CommonJS
+# scripts, for the shadow state's compiles and links)
+build/v86-gles.js: src/gles/*.js src/graphics_adapters/renderer_protocol.js src/device_machine.js \
+		src/browser/glbridge/gl-webgpu/gl_shader_translator.js src/browser/glbridge/gl-webgpu/gl_state_layout.js node_modules/.bin/esbuild
+	mkdir -p build
+	node_modules/.bin/esbuild src/gles/plugin.js --bundle --format=iife --target=es2020 --minify --legal-comments=none --outfile=$@
 
 device-plugins: $(DEVICE_PLUGINS)
 
@@ -316,7 +330,7 @@ build/libv86.js: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/arm
 		--js $(LIB_FILES)
 	ls -lh build/libv86.js
 
-build/libv86.mjs: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js lib/*.js src/browser/*.js
+build/libv86.mjs: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js src/android/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	-ls -lh build/libv86.js
 	java -jar $(CLOSURE) \
@@ -348,7 +362,7 @@ build/libv86-debug.js: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js s
 		--js $(LIB_FILES)
 	ls -lh build/libv86-debug.js
 
-build/libv86-debug.mjs: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js lib/*.js src/browser/*.js
+build/libv86-debug.mjs: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js src/android/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86-debug.mjs\
@@ -1025,7 +1039,7 @@ sse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-fal
 	node tests/rust/sse3.mjs build/v86-debug.wasm
 
 # Keep the worker's public option/event wire names stable across bundles.
-build/cpu-worker.js: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js src/browser/*.js lib/*.js
+build/cpu-worker.js: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js src/android/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
 		--compilation_level SIMPLE --jscomp_off=missingProperties \
@@ -1034,7 +1048,7 @@ build/cpu-worker.js: $(DEVICE_PLUGINS) $(CLOSURE) src/*.js src/parallel/*.js src
 
 # The vCPU workers of the host-parallel build (src/parallel/vcpu.js), paired
 # with v86-parallel.wasm: `parallel: true` loads both next to the bundles
-build/vcpu-worker.js: $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js src/browser/*.js lib/*.js
+build/vcpu-worker.js: $(CLOSURE) src/*.js src/parallel/*.js src/arm/*.js src/virt/*.js src/image/*.js src/android/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
 		--compilation_level SIMPLE --jscomp_off=missingProperties \
@@ -1067,6 +1081,10 @@ display-browser-tests: build/cpu-worker.js build/libv86.mjs build/libv86.js buil
 	node tests/glbridge/gl_multipass_browser_runner.js virtio_gpu_present_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js graphics_vga_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js svga_renderer_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js gles_executor_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js gles3_executor_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js gles_shader_browser_test.html
+	node tests/gles/chrome_renderer_test.mjs
 	node tests/glbridge/gl_multipass_browser_runner.js svga_dx_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js svga_share_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js svga_fixed_function_browser_test.html
@@ -1433,6 +1451,7 @@ a64-multicore-guest-tests: build/v86-arm64.wasm
 # (docs/aarch32-plan.md: profile v3's AArch32 EL0) the instructions against
 # QEMU's cortex-a35 one by one, the EL0 cases (exits, the debug registers),
 # the cases and random programs on the page tier against the interpreter,
+# v86's CONSTRAINED UNPREDICTABLE choices against their values (QEMU's differ),
 # the same C as A64, A32 and T32 (Q6.4's gate: 32-bit at most twice A64's
 # time), Alpine armv7's
 # programs on the 64-bit kernel against QEMU's output (the packages:
@@ -1443,6 +1462,7 @@ a32-tests: a32-system-tests build/v86-arm64.wasm
 	A64_AARCH32_DRIVER=debug A64_AARCH32_CASES=qdebug node tests/a64/aarch32_el0.mjs
 	node tests/a64/aarch32_page.mjs
 	for seed in 1 2 3; do node tests/a64/aarch32_page_fuzz.mjs --seed $$seed || exit 1; done
+	node tests/a64/aarch32_unpredictable.mjs
 	node tests/a64/aarch32_bench.mjs --scale 0.3
 	A64_PROFILE=v3 A64_WORKLOAD=aarch32 A64_CORES=1 node tests/a64/linux_boot.mjs
 	A64_PROFILE=v3 A64_WORKLOAD=aarch32 A64_JIT=1 A64_JIT_SWITCHES=a64_page_aarch32=1 A64_CORES=1 node tests/a64/linux_boot.mjs
@@ -2006,3 +2026,25 @@ sse-fault-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v8
 	node tests/rust/sse_faults.mjs build/v86-debug.wasm
 
 .PHONY: isa-forms isa-forms-check isa-hot-forms decode-rules-tests xsave-tests ssse3-tests
+
+# docs/iphone4-plan.md "测试": the iOS firmware tools on samples the tests
+# make themselves (made-up keys, no Apple files)
+.PHONY: ios-tests
+ios-tests:
+	node tests/ios/tools.mjs
+
+# docs/gles-proxy-plan.md "测试": the GLES host's protocol tables against the
+# pinned specs' shapes, the connection stream, renderControl, the shadow
+# state against GLES 2.0's rules, the batches (no guest, no page); the
+# plugin builds
+.PHONY: gles-tests
+gles-tests: build/v86-gles.js build/glslang.wasm
+	node tests/gles/protocol.mjs
+	node tests/gles/stream.mjs
+	node tests/gles/render_control.mjs
+	node tests/gles/shadow.mjs
+	node tests/gles/shadow3.mjs
+	node tests/gles/shadow31.mjs
+	node tests/gles/batch.mjs
+	node tests/gles/snapshot.mjs
+	node tests/gles/shader_corpus.mjs

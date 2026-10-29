@@ -992,6 +992,48 @@ export interface V86Options {
     ranchu_properties?: { [name: string]: string };
 
     /**
+     * machine_type "ranchu" only: the emulator image's GPU (docs/gles-proxy-plan.md).
+     * "guest": the guest renders (the kernel command line's qemu.gles=0);
+     * "host": its GL libraries send GLES over the pipe's "opengles" to the
+     * GLES host, the plugin build/v86-gles.js (qemu.gles=1 on the command
+     * line, ro.opengles.version in ranchu_properties). The android option
+     * sets it from the device model's gpu_mode.
+     * @default "guest"
+     */
+    ranchu_gpu?: "guest" | "host";
+
+    /**
+     * machine_type "ranchu", ranchu_gpu "host": the highest OpenGL ES version
+     * the GLES host announces (ANDROID_EMU_gles_max_version_*; the guest's
+     * contexts and ro.opengles.version follow it; docs/gles3-plan.md); an
+     * emulator image's android.gles_version where this is not given
+     * @default "3.0"
+     */
+    ranchu_gles_version?: "2.0" | "3.0" | "3.1" | "3.2";
+
+    /**
+     * The GLES host's GLSL ES compiler (glslang, ranchu_gpu "host")
+     * @default beside the bundle, glslang.wasm
+     */
+    gles_glslang_path?: string;
+
+    /**
+     * The GLES host's plugin file (ranchu_gpu "host", gles_backdoor)
+     * @default beside the bundle, v86-gles.js
+     */
+    ranchu_gpu_path?: string;
+
+    /**
+     * cpu_type "arm32" on machine_type "virt" only: the GLES backdoor of user
+     * code (docs/gles-proxy-plan.md "iOS 传输"): UDF #0x8664 at PL0 with r0's
+     * top half 0x8664 calls the GLES host's services ("opengles",
+     * "GLProcessPipe"), which the plugin build/v86-gles.js gives, drawn by
+     * the page's WebGPU renderer. Off: those UDFs are undefined instructions.
+     * @default false
+     */
+    gles_backdoor?: boolean;
+
+    /**
      * machine_type "q35" only: the number of ICH9 PCI Express root ports
      * (00:1c.0 and up, 0 to 6). Each is a PCI-to-PCI bridge whose secondary
      * bus can hold a device (pcie_root_port in the options of net_device,
@@ -1059,16 +1101,22 @@ export interface V86Options {
     cpu_type?: "x86" | "x86_64" | "arm64" | "arm32";
 
     /**
-     * The arm64 CPU's profile (cpu_type "arm64" only; see
+     * The CPU model: which CPU the guest sees. Each runs on one cpu_type
+     * (given alone, it picks cpu_type); the generic- ones are v86's own and
+     * each cpu_type's default. "generic-x86" (cpu_type "x86"),
+     * "generic-x86-64" ("x86_64"), "generic-arm64" ("arm64": Armv8.0-A with
+     * FEAT_PAN, 64-bit programs only), "generic-arm64-compat32" (that and
+     * AArch32 at EL0: a 64-bit kernel with COMPAT runs 32-bit Arm programs,
+     * armhf and armeabi-v7a; docs/aarch32-plan.md), "cortex-a15" ("arm32").
+     * "generic-arm64-v1.1" and "generic-arm64-v1" (generic-arm64 without
+     * FEAT_PAN; v1 the 4 KiB granule only) are for regression tests against
+     * QEMU. See
      * [docs/aarch64.md](https://github.com/speedyHKjournalist/v64/blob/master/docs/aarch64.md),
-     * "CPU profile"): "v2", Armv8.0-A with FEAT_PAN, 64-bit programs only;
-     * "v3", v2 and AArch32 at EL0: a 64-bit kernel with COMPAT runs 32-bit
-     * Arm programs (armhf, armeabi-v7a; docs/aarch32-plan.md); "v1.1" and
-     * "v1" are v2 without FEAT_PAN (v1: the 4 KiB granule only). A restored
-     * snapshot takes its own profile.
-     * @default "v2"
+     * "CPU profile". A restored snapshot takes its own model.
+     * @default the cpu_type's generic model ("cortex-a15" for "arm32")
      */
-    a64_profile?: "v1" | "v1.1" | "v2" | "v3";
+    cpu_profile?: "generic-x86" | "generic-x86-64" | "generic-arm64" | "generic-arm64-compat32" | "generic-arm64-v1" | "generic-arm64-v1.1" |
+        "cortex-a15";
 
     /**
      * CPU features beyond the base profile, reported by CPUID: SSSE3, SSE4.1

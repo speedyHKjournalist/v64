@@ -53,6 +53,8 @@ export const AUDIO_PLUGINS = { registry: "V86AudioDevices", option: "audio_devic
 export const USB_PLUGINS = { registry: "V86UsbControllers", option: "usb", dir: "usb", tag: "usb", entry: "./usb/plugin.js" };
 /** @const @type {PluginKind} the TPM 2.0 (docs/tpm.md): one plugin, "tpm" */
 export const TPM_PLUGINS = { registry: "V86TpmDevices", option: "tpm", dir: "tpm", tag: "tpm", entry: "./tpm/plugin.js" };
+/** @const @type {PluginKind} the GLES host of the ranchu machine (docs/gles-proxy-plan.md): one plugin, "gles" */
+export const GLES_PLUGINS = { registry: "V86GlesHosts", option: "ranchu_gpu", dir: "gles", tag: "gles", entry: "./gles/plugin.js" };
 
 /**
  * The TPM's module (build/libtpms.wasm) where tpm.wasm_path does not say:
@@ -64,6 +66,18 @@ export function default_tpm_wasm_path()
     if(BUNDLE_URL) return beside_bundle("libtpms.wasm");
     if(NODE && typeof __dirname === "string") return __dirname + "/libtpms.wasm";
     return "build/libtpms.wasm";
+}
+
+/**
+ * The GLES host's GLSL ES compiler (build/glslang.wasm, docs/gles3-plan.md)
+ * where gles_glslang_path does not say: beside the bundle, as the plugins
+ * @return {string}
+ */
+export function default_glslang_wasm_path()
+{
+    if(BUNDLE_URL) return beside_bundle("glslang.wasm");
+    if(NODE && typeof __dirname === "string") return __dirname + "/glslang.wasm";
+    return "build/glslang.wasm";
 }
 
 /** A plugin slot's snapshot entry: [tag, STATE_VERSION, name, device state] */

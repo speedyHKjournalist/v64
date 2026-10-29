@@ -198,6 +198,16 @@ export const RANCHU_25_ARMEABI_V7A = {
     ],
     // (no boot animation: the CPU draws it, which slows the first boot down)
     cmdline: { arm32: true, bootanim: false },
+    // the GPU modes (docs/gles-proxy-plan.md "Android 传输"): "guest" the
+    // CPU renders (qemu.gles=0); "host" the emulator's GL libraries send
+    // GLES to v64's GLES host (ranchu_gpu "host": qemu.gles=1, and
+    // ro.opengles.version the GLES version the host announces,
+    // ranchu_gpu_mode's). The low-RAM setting, the boot animation and the
+    // clock rate stay as "guest" has them until E3 measures them with host GLES.
+    gpu_modes: {
+        guest: { ranchu_gpu: "guest", gles: false, properties: {} },
+        host: { ranchu_gpu: "host", gles: true, properties: {} },
+    },
     // qemud's boot properties (src/virt/goldfish.js), beyond the machine's:
     // a low-RAM device (ActivityManager.isHighEndGfx false), so that
     // system_server draws its own windows with the CPU. Its GL would be the
@@ -240,3 +250,35 @@ export const RANCHU_25_ARMEABI_V7A = {
 
 /** The emulator images v64 boots, by API level and ABI */
 export const RANCHU_DEVICES = [RANCHU_25_ARMEABI_V7A];
+
+/** GLES versions as Android's ro.opengles.version (the major version << 16 | the minor) */
+export const GLES_VERSIONS = { "2.0": "131072", "3.0": "196608", "3.1": "196609", "3.2": "196610" };
+
+/**
+ * The GLES version a GLES host announces where nothing says: 3.1, the
+ * highest Android 7.1's library goes (3.2 is offered, of which the
+ * library passes on part: gpu-deviations.md G-68; docs/gles3-plan.md)
+ */
+export const DEFAULT_GLES_VERSION = "3.1";
+
+/**
+ * An emulator image's GPU mode: the VM config's android.gpu_mode, "guest"
+ * when it names none (or "swiftshader", the VM config's default, which is
+ * the guest's own rendering here as well); with the GLES host, the GLES
+ * version it announces (android.gles_version) as ro.opengles.version
+ * @param {!Object} device
+ * @param {string|undefined} gpu_mode
+ * @param {string=} gles_version GLES_VERSIONS', DEFAULT_GLES_VERSION unless given
+ * @return {{ranchu_gpu: string, gles: boolean, gles_version: (string|undefined), properties: !Object<string, string>}}
+ */
+export function ranchu_gpu_mode(device, gpu_mode, gles_version)
+{
+    const mode = !gpu_mode || gpu_mode === "swiftshader" ? "guest" : gpu_mode;
+    const m = device.gpu_modes[mode];
+    if(!m) throw new Error(`${device.id}: no GPU mode ${gpu_mode} (${Object.keys(device.gpu_modes).join(", ")})`);
+    if(!m.gles) return m;
+    const version = gles_version || DEFAULT_GLES_VERSION;
+    if(!GLES_VERSIONS[version]) throw new Error(`${device.id}: no GLES version ${version} (${Object.keys(GLES_VERSIONS).join(", ")})`);
+    return /** @type {{ranchu_gpu: string, gles: boolean, gles_version: (string|undefined), properties: !Object<string, string>}} */ (
+        Object.assign({}, m, { gles_version: version, properties: Object.assign({}, m.properties, { "ro.opengles.version": GLES_VERSIONS[version] }) }));
+}

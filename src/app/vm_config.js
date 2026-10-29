@@ -5,9 +5,10 @@
 // configuration (config_to_options, with the old page's rules of
 // src/browser/vm_options.js).
 
-import { A64_PROFILES, ARM_MACHINE_TYPES, CPU_TYPES, FIRMWARE_TYPES, MACHINE_TYPES, MAX_VRAM_SIZE, Q35_ROOT_PORTS_MAX, USB_PORTS, allowed_options,
+import { CPU_PROFILES, MACHINE_CPU_PROFILES, ARM_MACHINE_TYPES, CPU_TYPES, FIRMWARE_TYPES, MACHINE_TYPES, MAX_VRAM_SIZE, Q35_ROOT_PORTS_MAX, USB_PORTS, allowed_options,
     check_machine_options } from "../machine_options.js";
 import { ANDROID_DEVICES as ANDROID_DEVICE_MODELS } from "../android/bootloader.js";
+import { DEFAULT_GLES_VERSION, GLES_VERSIONS } from "../android/devices.js";
 import { DISK_OPTIONS, DISK_ERRORS, check_disk_options } from "../disk_options.js";
 import { DEFAULT_FORM, DEFAULT_MEMORY_SIZE, MAX_MEMORY_SIZE, MAX_HEAP_MEMORY_SIZE, MAX_ARRAY_BUFFER_SIZE_MB, DEFAULT_VGA_MEMORY_SIZE,
     DEFAULT_MTU, apply_form, settings_to_options } from "../browser/vm_options.js";
@@ -96,7 +97,7 @@ export const TPM_STATE_SIZE = 512 * 1024;
  *     when it is made or reset)
  * @property {{state: Image | null} | null} tpm a TPM 2.0 (docs/tpm.md); its state a browser disk made at the first
  *     power-on (null before)
- * @property {{type: string, cores: number, parallel: boolean, jit: boolean, profile: (string|null)}} cpu (profile: arm64's a64_profile, null the default)
+ * @property {{type: string, cores: number, parallel: boolean, jit: boolean, profile: (string|null)}} cpu (profile: the CPU model, cpu_profile; null the CPU type's default)
  * @property {{mb: number}} memory
  * @property {Disk[]} disks
  * @property {{image: Image | null, disk_error: "stop" | "report"}} cdrom
@@ -129,25 +130,31 @@ export const TPM_STATE_SIZE = 512 * 1024;
  * models of src/android/devices.js, its GPU modes (venus: Android's own
  * Venus driver, as tools/a64_android.mjs puts it in odm, with display.vulkan
  * "venus"; gfxstream: the image's own drivers, with display.vulkan
- * "gfxstream"), the vendor ramdisks (debug: Cuttlefish's
+ * "gfxstream"; an emulator image's own two, docs/gles-proxy-plan.md E5:
+ * host, its GLES drawn by the page's WebGPU, and guest, the CPU draws, as
+ * swiftshader does there), the vendor ramdisks (debug: Cuttlefish's
  * vendor_ramdisk-debug.img, a file of its own), SELinux's modes and the
  * display (device: the device model's, the screen zoomed to the window;
  * window: a display of the window's size, following it)
- * @typedef {{device: string, gpu_mode: "swiftshader" | "venus" | "gfxstream", vendor_ramdisk: "release" | "debug",
- *     debug_ramdisk: Image | null, selinux: "enforcing" | "permissive", display: "device" | "window"}} Android
+ * @typedef {{device: string, gpu_mode: "swiftshader" | "venus" | "gfxstream" | "host" | "guest", vendor_ramdisk: "release" | "debug",
+ *     debug_ramdisk: Image | null, selinux: "enforcing" | "permissive", display: "device" | "window", gles_version: string}} Android
  */
 /** the device models (src/android/devices.js): Cuttlefish's phone (arm64 on virt), the emulator images (ranchu) */
 export const ANDROID_DEVICES = Object.keys(ANDROID_DEVICE_MODELS);
 export const ANDROID_GPU_MODES = ["swiftshader", "venus", "gfxstream"];
+/** an emulator image's (the ranchu machine's): the host's GPU, the guest's CPU ("swiftshader" is "guest" there) */
+export const RANCHU_GPU_MODES = ["host", "guest"];
 /** display.vulkan: none, Venus contexts, gfxstream's */
 export const DISPLAY_VULKAN = ["none", "venus", "gfxstream"];
 export const ANDROID_VENDOR_RAMDISKS = ["release", "debug"];
 export const ANDROID_SELINUX = ["enforcing", "permissive"];
 export const ANDROID_DISPLAYS = ["device", "window"];
+/** the GLES version an emulator image announces on the host's GPU (docs/gles3-plan.md) */
+export const ANDROID_GLES_VERSIONS = Object.keys(GLES_VERSIONS);
 /** an android section's defaults
  * @type {Android} */
 export const ANDROID_DEFAULTS = { device: "cf_arm64_only_phone", gpu_mode: "swiftshader", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing",
-    display: "device" };
+    display: "device", gles_version: DEFAULT_GLES_VERSION };
 
 /**
  * The display an Android machine's virtio-gpu gets: its device model's
@@ -225,7 +232,7 @@ export function with_defaults(config)
     section("machine", { type: DEFAULT_FORM.machine_type, acpi: DEFAULT_FORM.acpi, hpet: false, smbus: false, pcie_root_ports: 0,
         boot_order: 0, fastboot: false, bootmenu: false, bios: null, vga_bios: null, firmware: "seabios", uefi_vars: null,
         secure_boot: false, secure_boot_keys: "microsoft" });
-    // (profile: arm64's a64_profile, null the library's default, v2)
+    // (profile: the CPU model, cpu_profile; null the CPU type's default)
     section("cpu", { type: DEFAULT_FORM.cpu_type, cores: 1, parallel: DEFAULT_FORM.parallel, jit: true, profile: null });
     section("memory", { mb: DEFAULT_MEMORY_SIZE });
     c.disks = Array.isArray(c.disks) ? c.disks.map(d => Object.assign({ disk_option: "read_only", disk_error: "stop" }, d)) : [];
@@ -412,8 +419,11 @@ export function validate_config(config)
     bool(cpu.jit, "cpu.jit");
     if(cpu.profile !== null && cpu.profile !== undefined)
     {
-        if(cpu.type !== "arm64") problem("cpu.profile", "is the arm64 CPU's");
-        else if(!A64_PROFILES.includes(cpu.profile)) problem("cpu.profile", "must be one of " + A64_PROFILES.join(", "));
+        const model = Object.prototype.hasOwnProperty.call(CPU_PROFILES, cpu.profile) ? CPU_PROFILES[cpu.profile] : null;
+        const only = MACHINE_CPU_PROFILES[machine.type]?.[cpu.type];
+        if(!model) problem("cpu.profile", "must be one of " + Object.keys(CPU_PROFILES).join(", "));
+        else if(model.cpu_type !== cpu.type) problem("cpu.profile", "is a CPU of type " + model.cpu_type + ", not " + cpu.type);
+        else if(only && !only.includes(cpu.profile)) problem("cpu.profile", "the " + machine.type + " machine takes " + only.join(", "));
     }
 
     int(config.memory.mb, "memory.mb", 16, MAX_MEMORY_SIZE);
@@ -526,7 +536,7 @@ export function validate_config(config)
         {
             problem("android", model.id + " boots on the " + model.machine + " machine with the " + model.cpu + " CPU");
         }
-        one_of(a.gpu_mode, ANDROID_GPU_MODES, "android.gpu_mode");
+        one_of(a.gpu_mode, model && model.machine === "ranchu" ? RANCHU_GPU_MODES.concat("swiftshader") : ANDROID_GPU_MODES, "android.gpu_mode");
         if(a.gpu_mode === "venus" && config.display.vulkan !== "venus") problem("android.gpu_mode", "Venus needs virtio-gpu's Venus (display.vulkan)");
         if(a.gpu_mode === "gfxstream" && config.display.vulkan !== "gfxstream") problem("android.gpu_mode", "gfxstream needs virtio-gpu's gfxstream (display.vulkan)");
         one_of(a.vendor_ramdisk, ANDROID_VENDOR_RAMDISKS, "android.vendor_ramdisk");
@@ -534,6 +544,7 @@ export function validate_config(config)
         if(a.debug_ramdisk !== null) check_image(a.debug_ramdisk, "android.debug_ramdisk", problems);
         one_of(a.selinux, ANDROID_SELINUX, "android.selinux");
         one_of(a.display, ANDROID_DISPLAYS, "android.display");
+        one_of(a.gles_version, ANDROID_GLES_VERSIONS, "android.gles_version");
         if(config.kernel && (config.kernel.bzimage || config.kernel.initrd || config.kernel.multiboot))
         {
             problem("kernel", "Android's kernel and initrd come from its disk's boot partitions: leave them out");
@@ -864,7 +875,7 @@ export function config_to_options(config, env)
         settings.cpu_cores = cpu.cores;
         settings.parallel = cpu.parallel;
         settings.cpu_type = cpu.type;
-        if(cpu.type === "arm64" && cpu.profile) settings.a64_profile = cpu.profile;
+        if(cpu.profile) settings.cpu_profile = cpu.profile;
         settings.machine_type = machine.type;
         if(machine.type === "q35")
         {
@@ -980,7 +991,9 @@ export function config_to_options(config, env)
     {
         const a = config.android;
         options.android = { device: a.device, gpu_mode: a.gpu_mode, selinux: a.selinux,
-            vendor_ramdisk: a.vendor_ramdisk === "debug" ? image(a.debug_ramdisk) : undefined };
+            vendor_ramdisk: a.vendor_ramdisk === "debug" ? image(a.debug_ramdisk) : undefined,
+            // (an emulator image on the host's GPU: the GLES version its host announces)
+            gles_version: a.gpu_mode === "host" ? a.gles_version : undefined };
         delete options.kernel;
         delete options.initrd;
         options.cmdline = config.kernel && config.kernel.cmdline || undefined;

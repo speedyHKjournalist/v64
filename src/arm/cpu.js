@@ -16,7 +16,7 @@ import { check_machine_options } from "../machine_options.js";
 import { CORE_STATE_RANGES, STATE_OFFSETS } from "./state_layout.js";
 import { VirtDeviceSpace } from "../virt/io.js";
 import {
-    A64_PROFILES, ARM32_PROFILE, VIRT_LAYOUT_VERSION, VIRT_MMIO, VIRT_MMIO_COUNT, VIRT_MMIO_SIZE, VIRT_PCIE_ECAM_HIGH, VIRT_PCIE_ECAM_SIZE,
+    A64_PROFILES, ARM32_PROFILES, VIRT_LAYOUT_VERSION, VIRT_MMIO, VIRT_MMIO_COUNT, VIRT_MMIO_SIZE, VIRT_PCIE_ECAM_HIGH, VIRT_PCIE_ECAM_SIZE,
     VIRT_PCIE_MMIO, VIRT_PCIE_MMIO_HIGH, VIRT_PCIE_MMIO_HIGH_SIZE, VIRT_PCIE_MMIO_SIZE, VIRT_RAM_BASE, virt_machine,
     VIRT_EXTENDED_RAM_BASE, VIRT_EXTENDED_RAM_END,
 } from "../virt/platform.js";
@@ -25,6 +25,7 @@ import { ExtendedStore } from "../extended_memory.js";
 import { PL011 } from "../virt/pl011.js";
 import { PL031 } from "../virt/pl031.js";
 import { GoldfishFb, GoldfishEvents, GoldfishBattery, GoldfishAudio, GoldfishPipe } from "../virt/goldfish.js";
+import { BackdoorA32, BACKDOOR_NOT_HANDLED } from "./backdoor_a32.js";
 import {
     RANCHU_DISPLAY, RANCHU_GOLDFISH_AUDIO, RANCHU_GOLDFISH_BATTERY, RANCHU_GOLDFISH_EVENTS, RANCHU_GOLDFISH_FB, RANCHU_GOLDFISH_PIPE,
     RANCHU_LAYOUT_VERSION, RANCHU_RTC, RANCHU_SPI, ranchu_framebuffer,
@@ -41,6 +42,7 @@ import { VirtioVsock } from "../virtio_vsock.js";
 import { VirtioSnd } from "../virtio_snd.js";
 import { DisplayHub } from "../display.js";
 import { GraphicsAdapter, graphics_adapter_of_state } from "../graphics_adapter.js";
+import { GLES_PLUGINS, PluginDevice, plugin_of_state } from "../device_plugin.js";
 import { ParallelMachine } from "../parallel/machine.js";
 import { COMMAND_RELOAD, COMMAND_RESET } from "../parallel/control.js";
 
@@ -193,12 +195,35 @@ A64CPU.prototype.imports = function()
     return {
         "a64_mmio_read": (owner, offset, width) => this.io.mmio_read(owner, offset, width),
         "a64_mmio_write": (owner, offset, width, value) => this.io.mmio_write(owner, offset, width, value),
+        "a32_backdoor": (r0, r1, r2, r3) => this.backdoor_call(r0, r1, r2, r3),
     };
+};
+
+/**
+ * (env.a32_backdoor) A GLES backdoor call of user code (src/arm/backdoor_a32.js):
+ * r0's answer, or BACKDOOR_NOT_HANDLED without the backdoor
+ * @return {number}
+ */
+A64CPU.prototype.backdoor_call = function(r0, r1, r2, r3)
+{
+    return this.devices.backdoor ? this.devices.backdoor.call(r0 >>> 0, r1 >>> 0, r2 >>> 0, r3 >>> 0) : BACKDOOR_NOT_HANDLED;
+};
+
+/**
+ * The physical address of a user address for a read or a write, as the
+ * running core translates it; -1: not mapped for that access
+ * @param {number} address
+ * @param {boolean} write
+ * @return {number}
+ */
+A64CPU.prototype.translate_user = function(address, write)
+{
+    return this.wm.exports["a32_backdoor_translate"](address >>> 0, write);
 };
 
 A64CPU.prototype.init = function(settings, device_bus)
 {
-    const machine_type = check_machine_options(settings).machine_type;
+    const { machine_type, cpu_profile } = check_machine_options(settings);
     if(machine_type !== "virt" && machine_type !== "ranchu")
     {
         throw new Error("The ARM CPU runs machine_type \"virt\" or \"ranchu\"");
@@ -210,15 +235,11 @@ A64CPU.prototype.init = function(settings, device_bus)
     this.cores = cores;
     // (cpu_type "arm32": AArch32 throughout, docs/aarch32-plan.md part 2)
     this.cpu_type = settings["cpu_type"] === "arm32" ? "arm32" : "arm64";
-    // the CPU profile (docs/arm64-virt-android16-plan.md, "CPU profile"):
-    // v2 (v1.1 and FEAT_PAN, the default since 2026-10-20), v1.1 (the 4, 16
-    // and 64 KiB granules, P8.6), or v1 (4 KiB only); arm32's own
-    const profile = settings["a64_profile"] || "v2";
-    if(!Object.prototype.hasOwnProperty.call(A64_PROFILES, profile))
-    {
-        throw new Error("a64_profile: " + Object.keys(A64_PROFILES).map(p => JSON.stringify(p)).join(", ") + ", got " + JSON.stringify(profile));
-    }
-    this.set_profile(this.cpu_type === "arm32" ? ARM32_PROFILE[0] : A64_PROFILES[profile][0]);
+    // the CPU model's profile (cpu_profile; docs/arm64-virt-android16-plan.md,
+    // "CPU profile"): generic-arm64 is v2 (v1.1 and FEAT_PAN, the default
+    // since 2026-10-20), -v1.1 the 4, 16 and 64 KiB granules (P8.6), -v1
+    // 4 KiB only, -compat32 v3 (AArch32 at EL0); arm32's own
+    this.set_profile((this.cpu_type === "arm32" ? ARM32_PROFILES : A64_PROFILES)[cpu_profile][0]);
     // the A64 page tier (J2): synchronous publication (tests), the JIT switches by name
     this.ir_sync_publication = settings["ir_sync_publication"] === true;
     set_jit_switches(this.wm.exports, this.wasm_memory, settings["jit_switches"]);
@@ -392,7 +413,8 @@ A64CPU.prototype.init = function(settings, device_bus)
     }
     // The ranchu machine's goldfish devices (src/virt/goldfish.js): the
     // framebuffer on a display hub of its own, the events, the battery, the
-    // audio output and the pipe with the boot properties
+    // audio output and the pipe with the boot properties, and with
+    // ranchu_gpu "host" the GLES host's services (src/gles/plugin.js)
     if(ranchu)
     {
         this.devices.display = new DisplayHub(device_bus, settings.screen);
@@ -405,9 +427,38 @@ A64CPU.prototype.init = function(settings, device_bus)
         this.devices["goldfish_events"] = new GoldfishEvents(this, device_bus, RANCHU_GOLDFISH_EVENTS, 32 + RANCHU_SPI.events);
         this.devices["goldfish_battery"] = new GoldfishBattery(this, RANCHU_GOLDFISH_BATTERY);
         this.devices["goldfish_audio"] = new GoldfishAudio(this, RANCHU_GOLDFISH_AUDIO, 32 + RANCHU_SPI.audio);
+        if(settings.gles_plugin)
+        {
+            this.devices.gles = new PluginDevice(/** @type {?} */ (this), GLES_PLUGINS, settings.gles_plugin, -1, {}, {
+                "display": { "width": display.width, "height": display.height, "dpi": display.dpi },
+                // (the page's renderer: graphics_adapter is "none" on ranchu, so the channel is the GLES host's)
+                "renderer": settings.graphics_adapter_renderer || null,
+                // (the posted frames the page read back: the framebuffer device shows them)
+                "present": (rgba, width, height) => this.devices["goldfish_fb"].present(rgba, width, height),
+                // (its plugin's prepare: glslang, docs/gles3-plan.md)
+                "prepared": settings.gles_prepared || null,
+                "max_version": settings.ranchu_gles_version || "2.0",
+            });
+        }
+        const gles = this.devices.gles;
         this.devices["goldfish_pipe"] = new GoldfishPipe(this, RANCHU_GOLDFISH_PIPE, 32 + RANCHU_SPI.pipe, Object.assign({
             "qemu.sf.lcd_density": String(display.dpi), "qemu.hw.mainkeys": "0",
-        }, settings.ranchu_properties));
+        }, settings.ranchu_properties), gles ? (name, wake, ...saved) => gles.device["service"](name, wake, ...saved) : undefined);
+    }
+    // arm32's GLES backdoor (gles_backdoor: docs/gles-proxy-plan.md "iOS 传输"):
+    // the GLES host's services for user code, no screen of its own (its
+    // posts are not shown; the test reads its pixels back)
+    if(settings.gles_backdoor && settings.gles_plugin)
+    {
+        this.devices.gles = this.devices.gles || new PluginDevice(/** @type {?} */ (this), GLES_PLUGINS, settings.gles_plugin, -1, {}, {
+            "display": { "width": 800, "height": 600, "dpi": 160 },
+            "renderer": settings.graphics_adapter_renderer || null,
+            "present": () => {},
+            "prepared": settings.gles_prepared || null,
+            "max_version": settings.ranchu_gles_version || "2.0",
+        });
+        const gles = this.devices.gles;
+        this.devices.backdoor = new BackdoorA32(this, (name, wake, ...saved) => gles.device["service"](name, wake, ...saved));
     }
     // the boot core starts at the kernel (P4.6: the device tree in x0, P4.2)
     this.booted = false;
@@ -1083,6 +1134,10 @@ A64CPU.prototype.get_state = function(skip_memory = false)
     state[12] = this.devices.graphics_adapter;
     // (a GICv2's own state: ranchu with arm32)
     state[13] = this.gic_v2 ? this.machine_state_bytes(2).slice() : null;
+    // the GLES host (ranchu_gpu "host"; a plugin's slot)
+    state[14] = this.devices.gles ? this.devices.gles.get_state() : null;
+    // the GLES backdoor's connections (gles_backdoor)
+    state[15] = this.devices.backdoor ? this.devices.backdoor.get_state() : null;
     // (the machine clock: the system counter goes on from where it was, as on x86, src/cpu.js)
     state[95] = this.clock.get_state();
     // extended RAM's pages (P8.5: its contents are records of the snapshot stream)
@@ -1119,7 +1174,7 @@ A64CPU.prototype.get_state = function(skip_memory = false)
  */
 A64CPU.prototype.set_profile = function(name)
 {
-    const entry = [...Object.values(A64_PROFILES), ARM32_PROFILE].find(p => p[0] === name);
+    const entry = [...Object.values(A64_PROFILES), ...Object.values(ARM32_PROFILES)].find(p => p[0] === name);
     dbg_assert(!!entry, "unknown profile " + name);
     this.profile = name;
     this.wm.exports["a64_set_granules"](entry[1]);
@@ -1137,7 +1192,7 @@ A64CPU.prototype.validate_state = function(state)
     }
     // (a snapshot of another profile restores as that profile, set_state)
     // (arm32's and arm64's profiles are of different CPUs)
-    const profiles = this.cpu_type === "arm32" ? [ARM32_PROFILE] : Object.values(A64_PROFILES);
+    const profiles = Object.values(this.cpu_type === "arm32" ? ARM32_PROFILES : A64_PROFILES);
     const layout = this.machine_type === "ranchu" ? RANCHU_LAYOUT_VERSION : VIRT_LAYOUT_VERSION;
     if(identity[1] !== layout || !profiles.some(p => p[0] === identity[2]))
     {
@@ -1171,6 +1226,14 @@ A64CPU.prototype.validate_state = function(state)
     {
         throw new Error("The snapshot is from a machine with graphics_adapter: \"" + graphics_adapter_of_state(state[12]) + "\", this one has \"none\"");
     }
+    if(this.devices.gles)
+    {
+        this.devices.gles.check_state(state[14]);
+    }
+    else if(plugin_of_state(GLES_PLUGINS, state[14]) !== null)
+    {
+        throw new Error("The snapshot is from a machine with ranchu_gpu \"host\", this one has \"guest\"");
+    }
 };
 
 A64CPU.prototype.set_state = function(state, skip_memory = false)
@@ -1200,6 +1263,9 @@ A64CPU.prototype.set_state = function(state, skip_memory = false)
     if(this.gic_v2 && state[13]) this.machine_state_bytes(2).set(state[13]);
     this.shared_spi_sources = new Map((state[11] || []).map(([intid, sources]) => [intid, new Set(sources)]));
     this.devices.graphics_adapter && this.devices.graphics_adapter.set_state(state[12]);
+    // (the backdoor's connections before the GLES host's state, as the pipe's channels)
+    if(this.devices.backdoor) this.devices.backdoor.set_state(state[15] || [1, []]);
+    this.devices.gles && this.devices.gles.set_state(state[14]);
     this.wm.exports["a64_restored"]();
     if(!skip_memory && state[77])
     {

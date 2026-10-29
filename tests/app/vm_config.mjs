@@ -287,8 +287,8 @@ const RULES = [
     ["input devices", c => { Object.assign(c, arm64()); c.virt.input = ["mouse"]; }, "virt.input"],
     ["console ports", c => { Object.assign(c, arm64()); c.virt.console_ports = 31; }, "virt.console_ports"],
     ["vsock", c => { Object.assign(c, arm64()); c.virt.vsock = 1; }, "virt.vsock"],
-    ["a profile on a PC", c => { c.cpu.profile = "v3"; }, "cpu.profile"],
-    ["an unknown profile", c => { Object.assign(c, arm64()); c.cpu.profile = "v9"; }, "cpu.profile"],
+    ["an arm64 model on a PC", c => { c.cpu.profile = "generic-arm64-compat32"; }, "cpu.profile"],
+    ["an unknown model", c => { Object.assign(c, arm64()); c.cpu.profile = "v3"; }, "cpu.profile"],
     ["a GPU slot without pci", c => { Object.assign(c, arm64()); c.virt.gpu_pci_slot = 2; }, "virt.gpu_pci_slot"],
     ["five virtio cards", c => { Object.assign(c, arm64()); c.network = Array(5).fill(c.network[0]); }, "network"],
     ["two cards served", c => { Object.assign(c, arm64()); c.network = [c.network[0], c.network[0]]; }, "network"],
@@ -307,6 +307,7 @@ const RULES = [
     ["Android's debug ramdisk's image", c => { Object.assign(c, arm64(), { android: android({ debug_ramdisk: { kind: "url", url: "" } }), disks: [disk()] }); },
         "android.debug_ramdisk"],
     ["Android's SELinux", c => { Object.assign(c, arm64(), { android: android({ selinux: "off" }), disks: [disk()] }); }, "android.selinux"],
+    ["Android's GLES version", c => { Object.assign(c, arm64(), { android: android({ gles_version: "3.3" }), disks: [disk()] }); }, "android.gles_version"],
     ["Android with a kernel", c => { Object.assign(c, arm64(), { android: android(), disks: [disk()], kernel: kernel({ bzimage: { kind: "url", url: "Image" } }) }); },
         "kernel"],
     ["Android with a CD", c => { Object.assign(c, arm64(), { android: android(), disks: [disk()] }); c.cdrom.image = { kind: "url", url: "a.iso" }; }, "cdrom.image"],
@@ -315,7 +316,8 @@ const RULES = [
 function disk(fields) { return Object.assign({ slot: "hda", image: { kind: "url", url: "a.img" }, disk_option: "read_only", disk_error: "stop" }, fields); }
 function floppy(fields) { return Object.assign({ slot: "fda", image: null, disk_option: "read_only" }, fields); }
 function kernel(fields) { return Object.assign({ bzimage: null, initrd: null, cmdline: null, multiboot: null, from_filesystem: false }, fields); }
-function android(fields) { return Object.assign({ device: "cf_arm64_only_phone", gpu_mode: "swiftshader", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device" }, fields); }
+function android(fields) { return Object.assign({ device: "cf_arm64_only_phone", gpu_mode: "swiftshader", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device",
+    gles_version: "3.1" }, fields); }
 /** A USB disk of the configuration */
 function usb_disk(id) { return { id, image: { kind: "empty", size: 1 << 20 }, disk_option: "read_only", disk_error: "stop", write_protected: false }; }
 /** The sections of a valid arm64 machine */
@@ -350,8 +352,16 @@ test("android: its defaults, a valid Android machine", () =>
 {
     assert.equal(new_config().android, null);
     assert.deepEqual(new_config({ android: { gpu_mode: "swiftshader" } }).android,
-        { device: "cf_arm64_only_phone", gpu_mode: "swiftshader", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device" });
+        { device: "cf_arm64_only_phone", gpu_mode: "swiftshader", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device",
+            gles_version: "3.1" });
     assert.deepEqual(validate_config(new_config(Object.assign(arm64(), { android: android(), disks: [disk()] }))), []);
+});
+
+test("android: the GLES version an emulator image's host announces, given only on the host's GPU", () =>
+{
+    const options = gpu_mode => config_to_options(new_config({ android: { device: "ranchu_25_armeabi_v7a", gpu_mode, gles_version: "3.2" } }), ENV).android;
+    assert.equal(options("host").gles_version, "3.2");
+    assert.equal(options("guest").gles_version, undefined);
 });
 
 test("a problem does not hide the others (only a bad CPU or machine type does)", () =>
@@ -462,11 +472,11 @@ test("config_to_options: the backends, arm64, a file not chosen yet", () =>
     assert.equal(o.memory_size, 1792 * 1024 * 1024);
     assert.equal(o.extended_memory_size, 256 * 1024 * 1024);
     assert.equal(o.acpi, false);
-    assert.equal(o.a64_profile, undefined, "the library's default profile");
+    assert.equal(o.cpu_profile, undefined, "the CPU type's default model");
     assert.deepEqual(check_config(a), []);
-    // (the profile with 32-bit programs: docs/aarch32-plan.md Q7.1)
-    a.cpu.profile = "v3";
-    assert.equal(config_to_options(a, ENV).a64_profile, "v3");
+    // (the model with 32-bit programs: docs/aarch32-plan.md Q7.1)
+    a.cpu.profile = "generic-arm64-compat32";
+    assert.equal(config_to_options(a, ENV).cpu_profile, "generic-arm64-compat32");
     assert.deepEqual(check_config(a), []);
     const f = new_config();
     f.disks = [disk({ image: { kind: "file", name: "c.img", size: 512, last_modified: 0 } })];

@@ -3,7 +3,7 @@ import { state_stream_server } from "./state_stream_transport.js";
 // in the worker; this side owns DOM adapters and asynchronous GPU execution.
 import { DISPLAY_SINK_REPLAY } from "../display.js";
 import { default_graphics_adapter_path } from "../graphics_adapter.js";
-import { default_plugin_path, default_tpm_wasm_path } from "../device_plugin.js";
+import { default_glslang_wasm_path, default_plugin_path, default_tpm_wasm_path } from "../device_plugin.js";
 import { is_arm, AUDIO_DEVICE_PLUGINS, NET_DEVICE_PLUGINS } from "../machine_options.js";
 
 /**
@@ -70,7 +70,7 @@ export function encode_worker_options(o, plugins = [], adapter_renderer = false)
         "cpu_clock": o.cpu_clock, "cpu_quantum": o.cpu_quantum, "cpu_schedule_seed": o.cpu_schedule_seed,
         "experimental_smp_jit": o.experimental_smp_jit, "disable_jit": o.disable_jit,
         "cpu_type": o["cpu_type"], "cpu_features": o["cpu_features"], "cpu_features_unreleased": o["cpu_features_unreleased"],
-        "jit_backend": o["jit_backend"], "ir_tier0": o["ir_tier0"], "jit_switches": o["jit_switches"], "a64_profile": o["a64_profile"],
+        "jit_backend": o["jit_backend"], "ir_tier0": o["ir_tier0"], "jit_switches": o["jit_switches"], "cpu_profile": o["cpu_profile"],
         "x87_fast_math": o["x87_fast_math"],
         "x87_jit_cache": o["x87_jit_cache"],
         "fastboot": o.fastboot, "bootmenu": o.bootmenu, "cmdline": o.cmdline,
@@ -111,6 +111,12 @@ export function encode_worker_options(o, plugins = [], adapter_renderer = false)
         // (docs/android-images-plan.md I2: the bootloader runs in the worker, beside the disk)
         "android": o.android && { "device": o.android.device, "gpu_mode": o.android.gpu_mode, "selinux": o.android.selinux,
             "vendor_ramdisk": file(o.android.vendor_ramdisk) },
+        // (the ranchu machine's GPU mode; the GLES host's plugin by an absolute URL, as the other plugins')
+        "ranchu_gpu": o.ranchu_gpu,
+        "ranchu_gpu_path": new URL(o.ranchu_gpu_path || default_plugin_path("gles"), location.href).href,
+        "gles_glslang_path": new URL(o.gles_glslang_path || default_glslang_wasm_path(), location.href).href,
+        "ranchu_gles_version": o.ranchu_gles_version,
+        "gles_backdoor": o.gles_backdoor,
         "virtio_disks": o.virtio_disks && o.virtio_disks.map(disk => Object.assign({}, file(disk), { "readonly": disk.readonly, "id": disk.id })),
         "virtio_rng": o.virtio_rng, "virtio_input": o.virtio_input, "virtio_transport": o.virtio_transport,
         "virtio_vsock": o.virtio_vsock, "virtio_sound": o.virtio_sound, "virtio_console_ports": o.virtio_console_ports, "virtio_gpu_pci_slot": o.virtio_gpu_pci_slot,

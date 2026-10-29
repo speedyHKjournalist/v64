@@ -28,7 +28,7 @@
     const stateLayout = (typeof require === "function" && typeof module !== "undefined") ?
         require("./gl_state_layout.js") : global.GLStateLayout;
 
-    const TRANSLATOR_REVISION = 1;
+    const TRANSLATOR_REVISION = 2;
 
     /* ================================================================== */
     /* Types                                                              */
@@ -100,6 +100,9 @@
         sampler3D: sampler("3D"), samplerCube: sampler("Cube"),
         sampler1DShadow: sampler("1D", true), sampler2DShadow: sampler("2D", true),
         sampler2DRect: sampler("2DRect"), sampler2DRectShadow: sampler("2DRect", true),
+        // GL_OES_EGL_image_external (GLSL ES): a 2D sampler of an EGL image,
+        // which the executor holds as an ordinary 2D texture
+        samplerExternalOES: { kind: "sampler", dim: "2D", shadow: false, name: "samplerExternalOES", external: true },
     };
 
     function sameType(a, b) {
@@ -163,6 +166,32 @@
             return t.name;
         default:
             throw new Error("no WGSL type for " + t.kind);
+        }
+    }
+
+    /* GLSL's == of two values of type t (already named, as each is read more
+     * than once) as one WGSL bool */
+    function equalityWGSL(a, b, t) {
+        switch (t.kind) {
+        case "vector":
+            return "all(" + a + " == " + b + ")";
+        case "matrix": {
+            const columns = [];
+            for (let c = 0; c < t.cols; ++c)
+                columns.push("all(" + a + "[" + c + "] == " + b + "[" + c + "])");
+            return "(" + columns.join(" && ") + ")";
+        }
+        case "array": {
+            const elements = [];
+            for (let i = 0; i < t.size; ++i)
+                elements.push(equalityWGSL(a + "[" + i + "]", b + "[" + i + "]", t.elem));
+            return "(" + elements.join(" && ") + ")";
+        }
+        case "struct":
+            return "(" + t.fields.map(f => equalityWGSL(a + "." + safeName(f.name),
+                b + "." + safeName(f.name), f.type)).join(" && ") + ")";
+        default:
+            return "(" + a + " == " + b + ")";
         }
     }
 
@@ -283,6 +312,12 @@
         "GL_EXT_gpu_shader4",
     ]);
 
+    /* GLSL ES 1.00's (options.es: OpenGL ES 2.0's shaders, src/gles/glsl_es.js) */
+    const ES_EXTENSIONS = new Set([
+        "GL_OES_standard_derivatives",
+        "GL_OES_EGL_image_external",
+    ]);
+
     class Preprocessor {
         constructor(stage, options) {
             this.stage = stage;
@@ -297,6 +332,17 @@
         defineBuiltins() {
             const objectMacro = (name, value) =>
                 this.macros.set(name, { params: null, body: ppTokenize(value) });
+            if (this.options.es) {
+                // GLSL ES 1.00, 3.4: GL_ES, and the fragment stage's highp
+                this.version = 100;
+                objectMacro("__VERSION__", "100");
+                objectMacro("GL_ES", "1");
+                if (this.stage === "fragment") objectMacro("GL_FRAGMENT_PRECISION_HIGH", "1");
+                for (const ext of ES_EXTENSIONS) objectMacro(ext, "1");
+                for (const [name, value] of Object.entries(this.options.defines || {}))
+                    objectMacro(name, String(value));
+                return;
+            }
             objectMacro("__VERSION__", "110");
             objectMacro("GL_ARB_texture_rectangle", "1");
             for (const [name, value] of Object.entries(this.options.defines || {}))
@@ -414,6 +460,8 @@
                 const v = /\s*(\d+)/.exec(rest);
                 if (!v) fail(this.line, "malformed #version");
                 this.version = parseInt(v[1], 10);
+                if (this.options.es && this.version !== 100)
+                    fail(this.line, "#version " + this.version + " is not supported: GLSL ES 1.00 is #version 100");
                 if (this.version > 120) {
                     // Refusing outright turns a shader we might still translate
                     // into a hard failure; the analyzer rejects what it really
@@ -429,11 +477,12 @@
                 const e = /\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_]+)/.exec(rest);
                 if (!e) fail(this.line, "malformed #extension");
                 const [, ext, behavior] = e;
+                const supported = this.options.es ? ES_EXTENSIONS : SUPPORTED_EXTENSIONS;
                 if (behavior === "require" && ext !== "all" &&
-                        !SUPPORTED_EXTENSIONS.has(ext))
+                        !supported.has(ext))
                     fail(this.line, "extension not supported: " + ext);
                 if (behavior === "enable" && ext !== "all" &&
-                        !SUPPORTED_EXTENSIONS.has(ext))
+                        !supported.has(ext))
                     this.warnings.push("extension not supported: " + ext);
                 this.extensions.set(ext, behavior);
                 return;
@@ -736,7 +785,7 @@
         "mat4x2", "mat4x3", "mat4x4",
         "sampler1D", "sampler2D", "sampler3D", "samplerCube",
         "sampler1DShadow", "sampler2DShadow",
-        "sampler2DRect", "sampler2DRectShadow",
+        "sampler2DRect", "sampler2DRectShadow", "samplerExternalOES",
         "lowp", "mediump", "highp", "precision",
     ]);
 
@@ -1940,6 +1989,25 @@
         gl_FragDepth: { type: F.float },
     };
 
+    /* GLSL ES 1.00 (7.4): its constants are OpenGL ES 2.0's limits, which the
+     * GLES host reports (src/gles/gles_caps.js); one draw buffer; no
+     * gl_FragDepth, no compatibility state but gl_DepthRange, no fixed-function
+     * attributes or varyings */
+    const ES_BUILTIN_CONSTANTS = {
+        gl_MaxVertexAttribs: { type: F.int, value: 16 },
+        gl_MaxVertexUniformVectors: { type: F.int, value: 256 },
+        gl_MaxVaryingVectors: { type: F.int, value: 15 },
+        gl_MaxVertexTextureImageUnits: { type: F.int, value: 16 },
+        gl_MaxCombinedTextureImageUnits: { type: F.int, value: 32 },
+        gl_MaxTextureImageUnits: { type: F.int, value: 16 },
+        gl_MaxFragmentUniformVectors: { type: F.int, value: 224 },
+        gl_MaxDrawBuffers: { type: F.int, value: 1 },
+    };
+    const ES_FRAGMENT_BUILTIN_OUTPUTS = {
+        gl_FragColor: { type: F.vec4 },
+        gl_FragData: { type: arrayOf(F.vec4, 1) },
+    };
+
     /* ================================================================== */
     /* Semantic analysis                                                  */
     /* ================================================================== */
@@ -2059,6 +2127,25 @@
 
         declareBuiltins() {
             const g = this.globalScope;
+            if (this.options.es) {
+                for (const [name, info] of Object.entries(ES_BUILTIN_CONSTANTS))
+                    g.names.set(name, { kind: "builtinConst", name, type: info.type,
+                                        value: info.value });
+                g.names.set("gl_DepthRange", { kind: "stateUniform", name: "gl_DepthRange",
+                                               type: STATE_UNIFORMS.gl_DepthRange.type,
+                                               info: STATE_UNIFORMS.gl_DepthRange });
+                const outputs = this.stage === "vertex" ? VERTEX_BUILTIN_OUTPUTS : ES_FRAGMENT_BUILTIN_OUTPUTS;
+                for (const [name, info] of Object.entries(outputs)) {
+                    if (name === "gl_ClipVertex") continue;
+                    g.names.set(name, { kind: "builtinOut", name, type: info.type, info });
+                }
+                if (this.stage === "fragment") {
+                    for (const [name, info] of Object.entries(FRAGMENT_BUILTIN_INPUTS))
+                        g.names.set(name, { kind: "builtinIn", name, type: info.type,
+                                            info });
+                }
+                return;
+            }
             for (const [name, info] of Object.entries(BUILTIN_CONSTANTS))
                 g.names.set(name, { kind: "builtinConst", name, type: info.type,
                                     value: info.value });
@@ -2184,7 +2271,9 @@
             const leafSamplers = [];
             collectSamplerLeaves(name, type, leafSamplers);
             if (leafSamplers.length) {
-                if (leafSamplers.length !== countLeaves(type))
+                // (an array of samplers is one leaf of arraySize elements)
+                const elements = leafSamplers.reduce((n, leaf) => n + Math.max(1, leaf.arraySize), 0);
+                if (elements !== countLeaves(type))
                     fail(line, "a struct mixing samplers with other members is " +
                         "not supported: " + name);
                 for (const leaf of leafSamplers) {
@@ -2537,8 +2626,10 @@
                         symbol.name + "' in a fragment shader");
                 break;
             case "param":
-                if (symbol.isConst || symbol.direction === "in")
-                    fail(node.line, "cannot assign to the input parameter '" +
+                // (an `in` parameter is the function's own copy: only a
+                // `const in` one is read-only)
+                if (symbol.isConst)
+                    fail(node.line, "cannot assign to the const parameter '" +
                         symbol.name + "'");
                 break;
             }
@@ -2604,10 +2695,14 @@
                 }
                 return T.bool;
             case "<<": case ">>": case "&": case "|": case "^":
+                if (this.options.es)
+                    fail(line, "'" + op + "' is reserved in GLSL ES 1.00");
                 if (baseOf(left) !== "int" || baseOf(right) !== "int")
                     fail(line, "'" + op + "' requires integer operands");
                 return componentCount(left) >= componentCount(right) ? left : right;
             case "%":
+                if (this.options.es)
+                    fail(line, "'%' is reserved in GLSL ES 1.00");
                 if (baseOf(left) !== "int" || baseOf(right) !== "int")
                     fail(line, "'%' requires integer operands in GLSL 1.20");
                 return componentCount(left) >= componentCount(right) ? left : right;
@@ -2686,6 +2781,8 @@
                     fail(node.line, "'!' requires a bool operand");
                 return T.bool;
             case "~":
+                if (this.options.es)
+                    fail(node.line, "'~' is reserved in GLSL ES 1.00");
                 if (baseOf(t) !== "int")
                     fail(node.line, "'~' requires an integer operand");
                 return t;
@@ -3182,6 +3279,14 @@
                     cursor = fieldOffset + this.structSizeBytes(field.type);
                     continue;
                 }
+                if (field.type.kind === "array" && field.type.elem.kind === "struct") {
+                    const elemSize = this.structSizeBytes(field.type.elem);
+                    for (let i = 0; i < field.type.size; ++i)
+                        this.placeStructLeaves(path + "[" + i + "]", expr + "[" + i + "]",
+                            field.type.elem, fieldOffset + i * elemSize);
+                    cursor = fieldOffset + elemSize * field.type.size;
+                    continue;
+                }
                 if (field.type.kind === "array") {
                     const storage = uniformArrayElementFor(field.type.elem);
                     if (!storage)
@@ -3219,6 +3324,8 @@
                 cursor = roundUp(cursor, 16);
                 if (field.type.kind === "struct")
                     cursor += this.structSizeBytes(field.type);
+                else if (field.type.kind === "array" && field.type.elem.kind === "struct")
+                    cursor += this.structSizeBytes(field.type.elem) * field.type.size;
                 else if (field.type.kind === "array") {
                     const storage = uniformArrayElementFor(field.type.elem);
                     cursor += storage.strideBytes * field.type.size;
@@ -3250,6 +3357,10 @@
                 if (field.type.kind === "struct") {
                     wgslType = this.declareStruct(field.type);
                     size = this.structSizeBytes(field.type);
+                } else if (field.type.kind === "array" && field.type.elem.kind === "struct") {
+                    wgslType = "array<" + this.declareStruct(field.type.elem) + ", " +
+                        field.type.size + ">";
+                    size = this.structSizeBytes(field.type.elem) * field.type.size;
                 } else if (field.type.kind === "array") {
                     const storage = uniformArrayElementFor(field.type.elem);
                     wgslType = "array<" + storage.wgsl + ", " + field.type.size + ">";
@@ -3299,7 +3410,11 @@
      * aliasing that made this layout famous is only safe when the two never
      * both appear, and here they can.
      */
-    function assignAttributeLocations(usage, bindings) {
+    /* Desktop GL's generic attributes fill from the top, below the
+     * compatibility ones' fixed slots; GLSL ES has none of those, so with
+     * `ascending` (options.es) they take the lowest free locations in
+     * declaration order, as ES drivers commonly do. */
+    function assignAttributeLocations(usage, bindings, ascending) {
         const used = new Set();
         const result = new Map();
         for (const [name, info] of usage.attributes) {
@@ -3322,6 +3437,20 @@
                     " is claimed twice (" + name + ")", 0);
             result.set(name, bound);
             used.add(bound);
+        }
+        if (ascending) {
+            for (const [name, info] of usage.attributes) {
+                if (info.isCompat || result.has(name)) continue;
+                const slots = attributeSlotCount(info.type);
+                let base = 0;
+                while (base + slots <= MAX_VERTEX_ATTRIBUTES && !slotsFree(used, base, slots)) ++base;
+                if (base + slots > MAX_VERTEX_ATTRIBUTES)
+                    throw new GLSLError("out of vertex attribute slots for '" +
+                        name + "'", 0);
+                for (let i = 0; i < slots; ++i) used.add(base + i);
+                result.set(name, base);
+            }
+            return result;
         }
         let next = MAX_VERTEX_ATTRIBUTES - 1;
         for (const [name, info] of usage.attributes) {
@@ -3551,6 +3680,10 @@
         generate() {
             this.emit("// generated by gl_shader_translator.js r" +
                 TRANSLATOR_REVISION + " (" + this.stage + ")");
+            // GL leaves derivatives in non-uniform control flow undefined and
+            // drivers compute them anyway; WGSL refuses the shader (Tint
+            // checks it, naga does not), as VX's and GX's shaders say too
+            this.emit("diagnostic(off, derivative_uniformity);");
             this.emit("");
             this.emitBindings();
             this.emitUserStructs();
@@ -4176,7 +4309,55 @@
             const right = this.genExpr(node.right, pre, node.right.convertTo);
             if (node.op === "^^")
                 return "((" + left + ") != (" + right + "))";
-            return "(" + left + " " + node.op + " " + right + ")";
+            return this.binaryText(node.op, left, node.left.convertTo || node.left.type,
+                right, node.right.convertTo || node.right.type, pre);
+        }
+
+        /*
+         * A binary operator where GLSL and WGSL differ:
+         *  - == and != of a vector, matrix, struct or array give one bool in
+         *    GLSL; WGSL compares vectors componentwise and the rest not at all
+         *  - &, | and ^ take a scalar beside a vector in GLSL, not in WGSL
+         *  - a shift's amount is unsigned in WGSL (a vector's, a vector)
+         */
+        binaryText(op, left, lt, right, rt, pre) {
+            if ((op === "==" || op === "!=") && lt.kind !== "scalar") {
+                let a = left, b = right;
+                if (lt.kind !== "vector") {
+                    // the operands are read more than once
+                    a = this.temp();
+                    b = this.temp();
+                    pre.push("let " + a + " = " + left + ";");
+                    pre.push("let " + b + " = " + right + ";");
+                }
+                const equal = equalityWGSL(a, b, lt);
+                return op === "==" ? equal : "(!" + equal + ")";
+            }
+            if (op === "<<" || op === ">>") {
+                const amount = lt.kind !== "vector" ? "u32(" + right + ")" :
+                    "vec" + lt.size + "<u32>(" + (rt.kind === "vector" ? right : "u32(" + right + ")") + ")";
+                return "(" + left + " " + op + " " + amount + ")";
+            }
+            if ((op === "&" || op === "|" || op === "^") && lt.kind !== rt.kind) {
+                if (lt.kind === "scalar") left = typeToWGSL(rt) + "(" + left + ")";
+                else right = typeToWGSL(lt) + "(" + right + ")";
+            }
+            // WGSL has a matrix beside a scalar for * only, and matrices
+            // divide by nothing: the rest is done column by column
+            const matrix = lt.kind === "matrix" ? lt : rt.kind === "matrix" ? rt : null;
+            if (matrix && (op === "+" || op === "-" || op === "/") &&
+                    (lt.kind === "scalar" || rt.kind === "scalar" || op === "/")) {
+                const a = this.temp(), b = this.temp();
+                pre.push("let " + a + " = " + left + ";");
+                pre.push("let " + b + " = " + right + ";");
+                const columns = [];
+                for (let c = 0; c < matrix.cols; ++c) {
+                    columns.push("(" + (lt.kind === "matrix" ? a + "[" + c + "]" : a) + " " + op + " " +
+                        (rt.kind === "matrix" ? b + "[" + c + "]" : b) + ")");
+                }
+                return typeToWGSL(matrix) + "(" + columns.join(", ") + ")";
+            }
+            return "(" + left + " " + op + " " + right + ")";
         }
 
         genUnary(node, pre, asStatement) {
@@ -4185,7 +4366,9 @@
                 const one = baseOf(node.type) === "int" ? "1" : "1.0";
                 const delta = node.op === "++" ? " + " : " - ";
                 const isVector = node.type.kind !== "scalar";
-                const rhs = isVector ?
+                const rhs = node.type.kind === "matrix" ?
+                    this.binaryText(delta.trim(), target.read, node.type, one, T.float, pre) :
+                    isVector ?
                     target.read + delta + typeToWGSL(node.type) + "(" + one + ")" :
                     target.read + delta + one;
                 if (node.prefix) {
@@ -4199,6 +4382,8 @@
             }
             const operand = this.genExpr(node.operand, pre);
             if (node.op === "+") return "(" + operand + ")";
+            // (WGSL negates no matrix)
+            if (node.op === "-" && node.type.kind === "matrix") return "(" + operand + " * -1.0)";
             return "(" + node.op + "(" + operand + "))";
         }
 
@@ -4269,7 +4454,8 @@
             } else {
                 const op = node.op.slice(0, -1);
                 const rhs = this.genExpr(node.value, pre, node.value.convertTo);
-                valueText = "(" + target.read + " " + op + " " + rhs + ")";
+                valueText = this.binaryText(op, target.read, node.target.type, rhs,
+                    node.value.convertTo || node.value.type, pre);
             }
             if (!target.components && asStatement)
                 return target.write + " = " + valueText;
@@ -4475,8 +4661,10 @@
          *  - the vertex stage has no implicit derivatives at all, so every
          *    lookup there is an explicit-level one
          *  - in non-uniform control flow textureSample's derivatives are
-         *    undefined, so the gradient is computed from the coordinate and
-         *    passed explicitly (plan section 4.10, strategy 2)
+         *    undefined, as in GL: with derivative_uniformity off (generate())
+         *    the lookup is the same as in uniform flow ("implicit", the
+         *    default); "grad" passes the coordinate's own derivatives (plan
+         *    section 4.10, strategy 2), "level0" samples level 0
          *
          * Both cases are counted, because an approximation nobody measures is
          * an approximation nobody can trust.
@@ -4488,16 +4676,17 @@
                     ", " + coord + ", 0.0)";
             }
             const uniform = this.inUniformControlFlow;
-            if (uniform) {
-                ++this.stats.uniformSamples;
+            if (uniform) ++this.stats.uniformSamples;
+            else ++this.stats.nonUniformSamples;
+            const strategy = this.options.nonUniformSampleStrategy || "implicit";
+            if (uniform || strategy === "implicit") {
                 return bias ?
                     "textureSampleBias(" + pair.texture + ", " + pair.sampler +
                         ", " + coord + ", " + bias + ")" :
                     "textureSample(" + pair.texture + ", " + pair.sampler +
                         ", " + coord + ")";
             }
-            ++this.stats.nonUniformSamples;
-            if (this.options.nonUniformSampleStrategy === "level0") {
+            if (strategy === "level0") {
                 ++this.stats.levelSamples;
                 return "textureSampleLevel(" + pair.texture + ", " + pair.sampler +
                     ", " + coord + ", 0.0)";
@@ -4511,12 +4700,14 @@
         emitCompareSample(pair, coord, ref, node) {
             const uniform = this.stage === "fragment" && this.inUniformControlFlow;
             void node;
-            if (uniform) {
-                ++this.stats.uniformSamples;
+            if (uniform) ++this.stats.uniformSamples;
+            else ++this.stats.nonUniformSamples;
+            // (implicit derivatives exist in the fragment stage only; see emitSample)
+            if (this.stage === "fragment" &&
+                    (uniform || (this.options.nonUniformSampleStrategy || "implicit") !== "level0")) {
                 return "textureSampleCompare(" + pair.texture + ", " +
                     pair.sampler + ", " + coord + ", " + ref + ")";
             }
-            ++this.stats.nonUniformSamples;
             return "textureSampleCompareLevel(" + pair.texture + ", " +
                 pair.sampler + ", " + coord + ", " + ref + ")";
         }
@@ -5008,7 +5199,7 @@
 
             /* ---- attributes ---- */
             const bindings = normalizeBindings(opts.bindAttribLocations);
-            const attributes = assignAttributeLocations(vs.usage, bindings);
+            const attributes = assignAttributeLocations(vs.usage, bindings, !!opts.es);
             if (variant.pointSprite) {
                 for (const [name, loc] of attributes) {
                     const info = vs.usage.attributes.get(name);
@@ -5068,7 +5259,7 @@
                 logicOp: variant.logicOp ? (variant.logicOp >>> 0) : 0,
                 pointCornerLocation: POINT_CORNER_LOCATION,
                 alphaTest: variant.alphaTest || null,
-                nonUniformSampleStrategy: opts.nonUniformSampleStrategy || "grad",
+                nonUniformSampleStrategy: opts.nonUniformSampleStrategy || "implicit",
             };
 
             const vsGen = new Generator("vertex", vs.ast, vs.usage, iface, genOptions);
@@ -5123,7 +5314,7 @@
             "o" + (variant.logicOp || 0).toString(16),
             variant.twoSided ? "2" : "-",
             variant.flatShading ? "f" : "-",
-            opts.nonUniformSampleStrategy || "grad",
+            opts.nonUniformSampleStrategy || "implicit",
         ].join("|");
     }
 
@@ -5178,6 +5369,7 @@
                 binding: s.binding,
                 dim: s.type.dim,
                 shadow: s.type.shadow,
+                external: !!s.type.external,
                 arraySize: s.arraySize,
                 bindingCount: 2 * Math.max(1, s.arraySize),
             });
@@ -5217,7 +5409,7 @@
         UniformBlockLayout, GLSLError,
         BASIC_TYPES, T, vec, mat, arrayOf, structType, typeToWGSL, sameType,
         COMPAT_ATTRIBUTE_LOCATIONS, COMPAT_ATTRIBUTE_TYPES,
-        STATE_UNIFORMS, BUILTIN_CONSTANTS,
+        STATE_UNIFORMS, BUILTIN_CONSTANTS, ES_BUILTIN_CONSTANTS,
         MAX_INTER_STAGE_SLOTS, MAX_VERTEX_ATTRIBUTES, POINT_CORNER_LOCATION,
         assignAttributeLocations, assignVaryings, hashString, safeName,
     };

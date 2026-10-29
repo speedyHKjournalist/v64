@@ -7,6 +7,7 @@
 // windows-nt.md, multicore.md, x86-64.md, gpu-devices.md, aarch64.md).
 
 import { new_config } from "./vm_config.js";
+import { DEFAULT_GLES_VERSION } from "../android/devices.js";
 import { fitted } from "./vm_model.js";
 
 /** @typedef {import("./vm_config.js").VMConfig} VMConfig */
@@ -162,7 +163,7 @@ export const PRESETS = [
         {
             c.cpu.type = "arm64";
             // (Alpine's kernel has COMPAT: armhf programs run too)
-            c.cpu.profile = "v3";
+            c.cpu.profile = "generic-arm64-compat32";
             c.machine.type = "virt";
             c.machine.acpi = false;
             c.cpu.cores = 4;
@@ -218,7 +219,8 @@ export const PRESETS = [
             c.network = [0, 1, 2].map(i => ({ device: "virtio", backend: i === 2 ? "fetch" : "none", relay_url: "", mtu: 1500, mac_address_translation: false }));
             c.virt = { transport: "pci", input: ["keyboard", "multitouch"], console_ports: 18, vsock: true, gpu_pci_slot: 2 };
             // (the bootloader: the disk's kernel and initrd, bootconfig with Venus's keys)
-            c.android = { device: "cf_arm64_only_phone", gpu_mode: "gfxstream", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device" };
+            c.android = { device: "cf_arm64_only_phone", gpu_mode: "gfxstream", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device",
+                gles_version: DEFAULT_GLES_VERSION };
         },
     },
     {
@@ -228,7 +230,7 @@ export const PRESETS = [
             "armeabi-v7a-25_r18.zip), made into a disk: its kernel, ramdisk, system, cache and userdata (docs/android-images-plan.md I6)",
         disk_mb: 4 * GB, disk_location: "browser", checklist: [],
         issues: ["Only with the page tier, in the CPU Worker", "The first boot takes about 7 minutes on 2 cores",
-            "The guest draws with the CPU (no host GPU): a slow desktop",
+            "The host's GPU draws through WebGPU (docs/gles-proxy-plan.md); without WebGPU the guest's CPU draws, slowly",
             "The guest's clock runs at a tenth of the host's, so that Android's timeouts suit this CPU", "No sound"],
         hardware: c =>
         {
@@ -240,7 +242,9 @@ export const PRESETS = [
             c.display.adapter = "none";
             c.sound.device = "none";
             c.network = [{ device: "virtio", backend: "fetch", relay_url: "", mtu: 1500, mac_address_translation: false }];
-            c.android = { device: "ranchu_25_armeabi_v7a", gpu_mode: "swiftshader", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device" };
+            // (the host's GPU draws its GLES: the CPU when the page has no WebGPU, src/app/ui/console.js)
+            c.android = { device: "ranchu_25_armeabi_v7a", gpu_mode: "host", vendor_ramdisk: "release", debug_ramdisk: null, selinux: "enforcing", display: "device",
+                gles_version: DEFAULT_GLES_VERSION };
         },
     },
     {

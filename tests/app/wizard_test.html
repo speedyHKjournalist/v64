@@ -406,6 +406,14 @@ const parts = {
         select_text(panel().querySelector("select[aria-label=CPU]"), "arm64");
         await until(() => /Machine: virt/.test(dialog.querySelector(".settings-notes").textContent), "the note");
         log("arm64: " + dialog.querySelector(".settings-notes").textContent);
+        // the CPU model: automatic and arm64's own (the regression-only ones left out), with what the chosen one is for
+        const models = () => Array.from(panel().querySelector("select[aria-label='CPU model']").options, o => o.textContent);
+        check(JSON.stringify(models()) === JSON.stringify(["Automatic (the system decides)", "Generic 64-bit ARM (recommended)",
+            "Generic 64-bit ARM that runs 32-bit programs"]), "arm64's CPU models: " + models());
+        check(/64-bit Linux, Android 16/.test(panel().textContent), "automatic: the default model's purpose");
+        select_text(panel().querySelector("select[aria-label='CPU model']"), "Generic 64-bit ARM that runs 32-bit");
+        await until(() => /32-bit programs too/.test(panel().textContent), "the model's purpose");
+        log("arm64's CPU models: " + models().join(", "));
         item("display").click();
         const adapters = Array.from(panel().querySelector("select[aria-label='Display adapter']").options, o => o.textContent);
         check(JSON.stringify(adapters) === JSON.stringify(["None (serial console only)", "virtio-gpu"]), "virt's display adapters: " + adapters);
@@ -418,6 +426,10 @@ const parts = {
         // back to x86, then two cores: ACPI on, fixed
         item("processor").click();
         select_text(panel().querySelector("select[aria-label=CPU]"), "x86 (32-bit");
+        await until(() => /CPU model: automatic/.test(dialog.querySelector(".settings-notes").textContent), "the CPU model's note");
+        check(JSON.stringify(models()) === JSON.stringify(["Automatic (the system decides)", "Generic 32-bit x86 (recommended)"]) &&
+            panel().querySelector("select[aria-label='CPU model']").selectedOptions[0].textContent.startsWith("Automatic"),
+            "x86: its CPU models, the arm64 one dropped: " + models());
         select_text(panel().querySelector("select[aria-label=Cores]"), "2");
         item("machine").click();
         const acpi2 = Array.from(panel().querySelectorAll("label.check")).find(l => /^ACPI/.test(l.textContent.trim())).querySelector("input");
@@ -629,7 +641,11 @@ const parts = {
         dialog.querySelector("li[data-item=android]").click();
         const panel = await until(() => dialog.querySelector(".settings-panel[aria-label=Android]"), "the Android panel");
         const wipe = Array.from(panel.querySelectorAll("button")).find(b => b.textContent === "Wipe user data…");
-        check(wipe && wipe.disabled && !panel.querySelector("select[aria-label=GPU]"), "the emulator image's panel: no wipe, no GPU");
+        // (no wipe; the GPU: the host's or the guest's CPU; the GLES version the host's GPU announces, 3.1 by default)
+        const gpu = panel.querySelector("select[aria-label=GPU]"), gles = panel.querySelector("select[aria-label='GLES version']");
+        const chosen = select => select && select.options[select.selectedIndex].textContent;
+        check(wipe && wipe.disabled && gpu && gpu.options.length === 2 && /host's GPU/.test(chosen(gpu)) && /^GLES 3\.1/.test(chosen(gles)),
+            "the emulator image's panel: no wipe; the GPU, the GLES version: " + chosen(gpu) + " / " + chosen(gles));
         const machine = dialog.querySelector("li[data-item=processor]");
         machine.click();
         const cpu = await until(() => dialog.querySelector(".settings-panel select[aria-label=CPU]"), "the CPU");
