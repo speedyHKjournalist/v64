@@ -1655,6 +1655,9 @@
             name, shaders: new Set(),
             linked: false, log: "",
             bindAttribLocations: new Map(),
+            // the locations the CPU side's shadow gave the guest (adoptLocation)
+            adoptedAttribLocations: new Map(),
+            ownByLocation: null,
             compiled: { vertex: null, fragment: null },
             link: null,                 // translator link result
             variants: new Map(),        // variant key -> {link, modules}
@@ -3508,6 +3511,14 @@
             const kind = view.getUint32(offset + protocol.F.QUERY_LOCATION.location_kind, true);
             const programName = view.getUint32(offset + protocol.F.QUERY_LOCATION.program, true);
             const nameLength = view.getUint32(offset + protocol.F.QUERY_LOCATION.name_length, true);
+            const status = view.getUint32(offset + protocol.F.QUERY_LOCATION.status, true);
+            if (status !== SYNC_STATUS_PENDING) {
+                // answered on the CPU side: the guest's location is that one
+                if (status === SYNC_STATUS_OK && 32 + nameLength <= size)
+                    this.adoptLocation(kind, programName, readCString(bytes, offset + 32, nameLength),
+                        view.getInt32(offset + protocol.F.QUERY_LOCATION.result, true));
+                return;
+            }
             if (32 + nameLength > size) {
                 view.setUint32(offset + protocol.F.QUERY_LOCATION.status, SYNC_STATUS_FAILED, true);
                 return;
@@ -3526,6 +3537,8 @@
 
         define("QUERY_UNIFORM", function(a, bytes, view, offset, size) {
             if (size < 32) throw new GLStreamError("query-uniform record is short");
+            // answered on the CPU side already (gl_shadow_glsl.js)
+            if (view.getUint32(offset + protocol.F.QUERY_UNIFORM.status, true) !== SYNC_STATUS_PENDING) return;
             const programName = view.getUint32(offset + protocol.F.QUERY_UNIFORM.program, true);
             const location = view.getInt32(offset + protocol.F.QUERY_UNIFORM.location, true);
             const valueKind = view.getUint32(offset + protocol.F.QUERY_UNIFORM.value_kind, true);
@@ -3544,6 +3557,8 @@
 
         define("QUERY_OBJECT_IV", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("query-object record is short");
+            // answered on the CPU side already (gl_shadow_glsl.js)
+            if (view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.status, true) !== SYNC_STATUS_PENDING) return;
             const kind = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.object_kind, true);
             const name = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.name, true);
             const pname = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.pname, true);
@@ -3564,6 +3579,8 @@
          */
         define("QUERY_OBJECT_LOG", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("query-log record is short");
+            // answered on the CPU side already (gl_shadow_glsl.js)
+            if (view.getUint32(offset + protocol.F.QUERY_OBJECT_LOG.status, true) !== SYNC_STATUS_PENDING) return;
             const kind = view.getUint32(offset + protocol.F.QUERY_OBJECT_LOG.object_kind, true);
             const name = view.getUint32(offset + protocol.F.QUERY_OBJECT_LOG.name, true);
             const capacity = view.getUint32(offset + protocol.F.QUERY_OBJECT_LOG.buf_size, true);
@@ -3586,6 +3603,8 @@
          */
         define("QUERY_ACTIVE", function(a, bytes, view, offset, size) {
             if (size < 40) throw new GLStreamError("query-active record is short");
+            // answered on the CPU side already (gl_shadow_glsl.js)
+            if (view.getUint32(offset + protocol.F.QUERY_ACTIVE.status, true) !== SYNC_STATUS_PENDING) return;
             const kind = view.getUint32(offset + protocol.F.QUERY_ACTIVE.active_kind, true);
             const programName = view.getUint32(offset + protocol.F.QUERY_ACTIVE.program, true);
             const index = view.getUint32(offset + protocol.F.QUERY_ACTIVE.index, true);
@@ -5046,6 +5065,7 @@
             program.linked = false;
             program.log = "";
             program.variants.clear();
+            program.adoptedAttribLocations.clear();
             program.compiled = { vertex: null, fragment: null };
             for (const shaderName of program.shaders) {
                 const shader = this.current.shareGroup.shaders.get(shaderName);
@@ -5091,18 +5111,28 @@
                     variant.colorTargets || 1].join("|");
         },
 
+        // The application's bindings, and over them the locations the guest
+        // was told for the attributes it asked about
+        attribBindings(program) {
+            return new Map([...program.bindAttribLocations, ...program.adoptedAttribLocations]);
+        },
+
         linkVariant(program, variant) {
+            const bindings = this.attribBindings(program);
             const options = {
-                bindAttribLocations: program.bindAttribLocations,
+                bindAttribLocations: bindings,
                 variant,
                 maxColorTargets: variant.colorTargets,
                 nonUniformSampleStrategy:
                     this.options.nonUniformSampleStrategy || "grad",
             };
+            // (the bindings are part of the key: a relink with others
+            // assigns other locations)
             const key = translator.hashString(
                 program.name + "|" + this.variantKeyFor(variant) + "|" +
                 (program.compiled.vertex.sourceHash >>> 0) + "|" +
-                (program.compiled.fragment.sourceHash >>> 0)).toString(16);
+                (program.compiled.fragment.sourceHash >>> 0) + "|" +
+                [...bindings].sort((x, y) => x[0] < y[0] ? -1 : 1).join(";")).toString(16);
             const cached = this.shaderCache.get(key);
             if (cached) {
                 ++this.stats.shaderCacheHits;
@@ -5124,7 +5154,8 @@
             program.uniformFloats = new Float32Array(program.uniformData.buffer);
             program.uniformInts = new Int32Array(program.uniformData.buffer);
             program.uniformByName.clear();
-            program.uniformByLocation.clear();
+            program.uniformByLocation = new Map();
+            program.ownByLocation = null;
             for (const uniform of reflection.uniforms) {
                 const count = Math.max(1, uniform.arraySize);
                 const location = this.nextUniformLocation;
@@ -5227,6 +5258,45 @@
                 }
             }
             ++program.serial;
+        },
+
+        /*
+         * The CPU side's shadow answered glGetUniformLocation or
+         * glGetAttribLocation (gl_shadow_glsl.js): the guest uses that
+         * location from now on, whatever this side assigned. A program's
+         * first adopted uniform location retires the ones assigned here
+         * (they may collide with the shadow's); an attribute at another
+         * location than this side's link gave it relinks the program with
+         * it bound there.
+         */
+        adoptLocation(kind, programName, name, location) {
+            const program = this.current.shareGroup.programs.get(programName);
+            if (!program || !program.linked || location < 0) return;
+            if (kind === LOCATION_KIND_ATTRIB) {
+                const attribute = program.link.reflection.attributes.find(a => a.name === name);
+                if (!attribute || attribute.location === location) return;
+                program.adoptedAttribLocations.set(name, location);
+                const link = this.linkVariant(program, {});
+                if (!link.ok) {
+                    this.warnOnce("adopt-attrib-" + programName + "-" + name,
+                        "the program cannot have an attribute where the guest was told it is", { name, location });
+                    program.adoptedAttribLocations.delete(name);
+                    return;
+                }
+                program.link = link;
+                program.variants.clear();
+                ++program.serial;
+                return;
+            }
+            const match = /^(.*)\[(\d+)\]$/.exec(name);
+            const mapped = program.uniformByName.get(match ? match[1] : name);
+            if (!mapped) return;
+            if (!program.ownByLocation) {
+                program.ownByLocation = program.uniformByLocation;
+                program.uniformByLocation = new Map();
+            }
+            const entry = program.ownByLocation.get(mapped.location + (match ? +match[2] : 0));
+            if (entry) program.uniformByLocation.set(location, entry);
         },
 
         /* ---- synchronous query answers ---- */

@@ -224,10 +224,28 @@ std::unique_ptr<glslang::TShader> code_shader(const Source& source, bool& ok)
     return shader;
 }
 
+// Desktop GLSL for the OpenGL 2.1 proxy (docs/opengl-webgpu-plan.md C4):
+// 1.10 and 1.20 with the compatibility profile's built-ins, 110 when a
+// shader says no #version, and desktop GL's rules for linking: a stage may be
+// several shaders, any number of stages may be missing. Its own limits.
+TBuiltInResource desktop_resources;
+
+std::unique_ptr<glslang::TShader> desktop_shader(const Source& source, bool& ok)
+{
+    auto shader = std::make_unique<glslang::TShader>(source.stage);
+    const char* text = source.text.c_str();
+    int length = static_cast<int>(source.text.size());
+    shader->setStringsWithLengths(&text, &length, 1);
+    shader->setEnvInput(glslang::EShSourceGlsl, source.stage, glslang::EShClientNone, 0);
+    ok = shader->parse(&desktop_resources, 110, ENoProfile, false, false, EShMsgDefault);
+    return shader;
+}
+
 void init()
 {
     if(initialized) return;
     glslang::InitializeProcess();
+    desktop_resources = *GetDefaultResources();
     resources = *GetDefaultResources();
     // GLSL ES 1.00's appendix A: everything a desktop GPU does
     resources.limits.nonInductiveForLoops = true;
@@ -309,6 +327,64 @@ int v86_glslang_link(const uint8_t* packed, uint32_t length, uint32_t flags)
         program.addShader(shaders.back().get());
     }
     (void)flags;
+    if(ok && !program.link(EShMsgDefault)) ok = false;
+    log += program.getInfoLog();
+    output = "{\"ok\":";
+    output += ok ? "true" : "false";
+    output += ",\"log\":";
+    json_string(output, log);
+    if(ok && program.buildReflection(CHECK_REFLECTION)) json_reflection(output, program);
+    output += '}';
+    return ok ? 1 : 0;
+}
+
+/** Desktop GLSL's limits, as v86_glslang_limits sets the ES ones */
+__attribute__((export_name("v86_glslang_desktop_limits")))
+void v86_glslang_desktop_limits(char* config)
+{
+    init();
+    DecodeResourceLimits(&desktop_resources, config);
+}
+
+/**
+ * A desktop shader: 1 if it compiles; the output is its info log. Desktop GL
+ * links a stage from any number of shaders, so a shader alone is only
+ * parsed (no main is fine; a missing function is the link's error).
+ */
+__attribute__((export_name("v86_glslang_desktop_compile")))
+int v86_glslang_desktop_compile(const uint8_t* packed, uint32_t length)
+{
+    init();
+    std::vector<Source> sources = unpack(packed, length);
+    output.clear();
+    if(sources.size() != 1) { output = "one shader expected"; return 0; }
+    bool ok;
+    auto shader = desktop_shader(sources[0], ok);
+    output = shader->getInfoLog();
+    return ok ? 1 : 0;
+}
+
+/**
+ * A desktop program: 1 if it links. The output is JSON as
+ * v86_glslang_link's: the log and, when it linked, the reflection.
+ */
+__attribute__((export_name("v86_glslang_desktop_link")))
+int v86_glslang_desktop_link(const uint8_t* packed, uint32_t length)
+{
+    init();
+    std::vector<Source> sources = unpack(packed, length);
+    output.clear();
+    std::vector<std::unique_ptr<glslang::TShader>> shaders;
+    glslang::TProgram program;
+    std::string log;
+    bool ok = !sources.empty();
+    for(const Source& source : sources)
+    {
+        bool compiled;
+        shaders.push_back(desktop_shader(source, compiled));
+        if(!compiled) { ok = false; log += shaders.back()->getInfoLog(); }
+        program.addShader(shaders.back().get());
+    }
     if(ok && !program.link(EShMsgDefault)) ok = false;
     log += program.getInfoLog();
     output = "{\"ok\":";

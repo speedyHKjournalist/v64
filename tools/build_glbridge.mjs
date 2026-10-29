@@ -12,7 +12,8 @@ const files = [
     "webgpu_host.js",
     "d3d9-webgpu/d3d9_shader_pipeline.js", "d3d9-webgpu/d9wg_protocol.js", "d3d9-webgpu/d3d9_executor.js",
     "d3d9-webgpu/ddraw_ops.js", "gl-webgpu/gl_protocol.js",
-    "gl-webgpu/gl_constants.js", "gl-webgpu/gl_caps.js", "gl-webgpu/gl_shadow.js", "gl-webgpu/gl_state_layout.js",
+    "gl-webgpu/gl_constants.js", "gl-webgpu/gl_caps.js", "gl-webgpu/gl_glslang.js", "gl-webgpu/gl_shadow.js",
+    "gl-webgpu/gl_shadow_glsl.js", "gl-webgpu/gl_state_layout.js",
     "gl-webgpu/gl_shader_translator.js", "gl-webgpu/gl_fixed_function.js",
     "gl-webgpu/gl_arb_program.js", "gl-webgpu/gl_executor.js",
     "graphics_journal.js", "v86_network_bridge.js", "webgpu_compositor.js", "v86gl_device.js", "graphics_proxy.js",
@@ -59,8 +60,9 @@ const worker = await read_file(new URL("d3d9-webgpu/d3d9_shader_worker.js", sour
 const journal_worker = await read_file(new URL("graphics_journal_worker.js", source), "utf8");
 // The device half alone, for the CPU worker (importScripts): the device and
 // the GL shadow it answers the guest's queries with
-const device = ["gl-webgpu/gl_protocol.js", "gl-webgpu/gl_constants.js", "gl-webgpu/gl_caps.js",
-    "gl-webgpu/gl_shadow.js", "v86gl_device.js"].map(file => contents[files.indexOf(file)]).join("\n;\n");
+const device = ["gl-webgpu/gl_protocol.js", "gl-webgpu/gl_constants.js", "gl-webgpu/gl_caps.js", "gl-webgpu/gl_glslang.js",
+    "gl-webgpu/gl_shadow.js", "gl-webgpu/gl_shadow_glsl.js", "v86gl_device.js"].map(file => contents[files.indexOf(file)])
+    .join("\n;\n");
 const revision = create_hash("sha256").update(contents.join("\n") + worker + journal_worker).digest("hex").slice(0, 20);
 const prefix = `globalThis.V86GL_BUILD_REVISION = ${JSON.stringify(revision)};\n`;
 await mkdir(output, { recursive: true });
@@ -72,6 +74,8 @@ await write_file(new URL("d3d9_shader_pipeline.js", output),
     prefix + contents[files.indexOf("d3d9-webgpu/d3d9_shader_pipeline.js")]);
 await write_file(new URL("graphics_journal_worker.js", output), prefix + journal_worker);
 await write_file(new URL("v86gl-device.js", output), prefix + device);
+// the GL shadow's GLSL front end (the GLES host's glslang, with its desktop entry points)
+await copy_file(new URL("bios/glslang.wasm", root), new URL("glslang.wasm", output));
 // VX's SPIR-V to WGSL (naga, src/browser/glbridge/vx/naga): built with cargo
 // (from its cache when it can), next to the bundle, which loads it when a
 // Venus context first makes a shader
@@ -83,6 +87,6 @@ if(built) await copy_file(new URL("build/wasm32-unknown-unknown/release/vx_naga.
 else console.warn("cargo failed: build/glbridge/vx_naga.wasm (Venus's shaders) is not built");
 await write_file(new URL("manifest.json", output), JSON.stringify({ revision, files: [
     "libv86-webgpu.js", "d3d9_shader_worker.js", "d3d9_shader_pipeline.js", "graphics_journal_worker.js",
-    "v86gl-device.js", ...(built ? ["vx_naga.wasm"] : []),
+    "v86gl-device.js", "glslang.wasm", ...(built ? ["vx_naga.wasm"] : []),
 ] }, null, 2) + "\n");
 console.log(`Built WebGPU graphics ${revision} in ${fileURLToPath(output)}`);

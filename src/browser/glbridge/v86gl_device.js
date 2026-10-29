@@ -20,6 +20,8 @@
 //                                             (gl_caps.js), for the GL shadow
 //   machine_reset {}                          the guest was reset: no GL context
 //                                             outlives it
+//   glslang    { module }                     glslang's WebAssembly.Module, for
+//                                             the GL shadow's GLSL answers
 //
 // The GL shadow (gl-webgpu/gl_shadow.js, when loaded) reads each GL batch in
 // guest memory before it is posted and answers the guest's synchronous
@@ -116,6 +118,15 @@
                     break;
                 case "machine_reset":
                     if (shadow) shadow.reset();
+                    break;
+                case "glslang":
+                    if (shadow && global.V86GLGlslang) {
+                        try {
+                            shadow.setGlslang(new global.V86GLGlslang.Glslang(message.module));
+                        } catch (error) {
+                            console.warn("[virtio-v86gl] glslang does not load: GLSL queries are the renderer's", error);
+                        }
+                    }
                     break;
                 case "available":
                     hostAvailable = !!message.value;

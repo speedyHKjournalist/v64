@@ -36,6 +36,17 @@
         return url.href;
     }
 
+    // glslang for the GL shadow's GLSL answers (build/glbridge/glslang.wasm):
+    // options.glslang is its bytes, a compiled module, or a URL
+    async function loadGlslang(options) {
+        let source = options.glslang;
+        if (source === undefined && bundleScript) source = new URL("glslang.wasm", bundleScript).href;
+        if (!source) return null;
+        if (source instanceof WebAssembly.Module) return source;
+        if (typeof source === "string") source = await (await fetch(source)).arrayBuffer();
+        return WebAssembly.compile(source);
+    }
+
     function reportUnavailable(options, error) {
         if (typeof options.onError === "function") options.onError(error);
         else console.error("[v86gl] graphics unavailable; VGA remains active", error);
@@ -216,6 +227,12 @@
             if (channel && gl && typeof gl.capabilities === "function")
                 channel.post({ type: "capabilities", value: gl.capabilities() });
         };
+        // The shadow's GLSL front end; until it arrives the executor answers
+        // those queries (in this thread's mode only)
+        const sendGlslang = () => loadGlslang(options).then(module => {
+            if (module && channel) channel.post({ type: "glslang", module });
+        }).catch(error => console.warn("[v86gl] glslang.wasm is not available: the GL shadow cannot answer GLSL " +
+            "queries", error));
 
         // The arena's owner is gone: a journaled pseudo-batch ends every
         // session it submitted, behind its last batch
@@ -308,10 +325,8 @@
                     else if (message.type === "released") onReleased();
                 });
                 setAvailable(true);
-                return bridge.ready.then(() => {
-                    sendCapabilities();
-                    setAvailable(!bridge.failed);
-                });
+                return Promise.all([bridge.ready.then(sendCapabilities), sendGlslang()])
+                    .then(() => setAvailable(!bridge.failed));
             },
             screen_changed() {
                 bridge.screenChanged();

@@ -545,6 +545,18 @@ class GLStream {
         return this.payloadView();
     }
 
+    /* {program, location, value_kind, status, value_count, data_size, reserved0, reserved1} then the values */
+    queryUniform(program, location, valueKind, capacity) {
+        const payload = new Uint8Array(32 + capacity);
+        const view = new DataView(payload.buffer);
+        view.setUint32(0, program, true);
+        view.setInt32(4, location, true);
+        view.setUint32(8, valueKind, true);
+        view.setUint32(20, capacity, true);
+        this.record(GLFN.QUERY_UNIFORM, payload);
+        return this.payloadView();
+    }
+
     uniformfv(location, components, count, values) {
         const payload = new Uint8Array(12 + values.length * 4);
         const view = new DataView(payload.buffer);

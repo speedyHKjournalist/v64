@@ -184,7 +184,15 @@ game.exe
 >   - 影子已经回答能力查询：`QUERY_INTEGER` 的上限和 host-capability 位、`QUERY_GL_STRING` 的厂商/版本/扩展串。能力来自 `gl_caps.js`：执行器和影子共用；页面在适配器就绪后发 `capabilities`；存进设备快照（版本 3），恢复时以快照里的为准。
 >   - 过渡规则：影子没回答的查询保持 PENDING，执行器照旧回答（只在本地模式能到达客体）；影子回答过的，执行器跳过。
 >   - `gl_sync_answers_test.js` 按查询种类登记：worker 模式下能力查询已与页面模式一致；`glGetError` 仍是已知失败，要等影子校验所有命令。
-> - 下一步依次：GLSL（C4，glslang 桌面入口）、FBO 完整性、ARB 程序、查询对象与 Finish 的异步等待、全部命令的校验（之后 `QUERY_ERROR` 才能搬过来）。
+> - C3 第二步 / C4 第一步：`gl_shadow_glsl.js`。
+>   - `bios/glslang.wasm` 重建，增加桌面入口（`v86_glslang_desktop_*`：1.10/1.20，无 `#version` 按 110；一个阶段可以由多个着色器组成，阶段可以缺）。GLES 的入口不变，`make gles-tests` 通过。
+>   - 页面把 glslang 模块发给设备（`glslang` 消息，模块随 bundle 发布为 `build/glbridge/glslang.wasm`）。
+>   - 影子回答 `QUERY_OBJECT_IV`（着色器、程序）、`QUERY_OBJECT_LOG`、`QUERY_ACTIVE`、`QUERY_LOCATION`、`QUERY_UNIFORM`。glslang 在需要回答时才运行，所以模块晚到也能补上之前的着色器。
+>   - uniform location = 程序名 × 4096 + 元素序号，重新链接和恢复快照后不变；内建 uniform 列为活动但 location 为 -1；没有绑定的属性取最高的空闲槽，避开 conventional 属性的别名槽。
+>   - 页面的执行器采用客体拿到的 location：已回答的 `QUERY_LOCATION` 记录就是映射；属性位置不同就带着它重新链接。顺带修了链接缓存键不含属性绑定的问题。
+>   - worker 模式下 GLSL 查询与页面模式一致（`gl_sync_answers_test.js`）。
+>   - 代码生成仍是手写翻译器：glslang 接受而翻译器不接受的程序，客体看到链接成功，页面画不出来（记日志）。这由 E0 决定。
+> - 下一步依次：FBO 完整性、ARB 程序、查询对象与 Finish 的异步等待、全部命令的校验（之后 `QUERY_ERROR` 才能搬过来）。
 
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；

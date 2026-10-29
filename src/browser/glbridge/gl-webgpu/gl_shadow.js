@@ -12,7 +12,12 @@
 // PENDING when the executor sees it, and the executor leaves it alone.
 //
 // Answered here so far: the capability queries (gl_caps.js, from the
-// capabilities the renderer sends once its adapter is up).
+// capabilities the renderer sends once its adapter is up), and with glslang
+// (gl_glslang.js) the shaders' and programs' (gl_shadow_glsl.js).
+//
+// The parts: this file walks the records and keeps the contexts and their
+// share groups; the others add handlers (GLShadow.install) and the state
+// they keep (GLShadow.parts), to snapshots too.
 
 (function(global) {
     "use strict";
@@ -25,22 +30,45 @@
     const PENDING = C.V86GL_SYNC_QUERY_STATUS_PENDING;
     const EXTENDED_RECORD_SIZE = C.V86GL_EXTENDED_RECORD_SIZE;
 
+    // record code -> method; the parts add theirs
+    const HANDLERS = new Map();
+    // { reset(shadow), group(group), getState(shadow), setState(shadow, state) } of each part
+    const PARTS = [];
+
     class GLShadow {
         constructor() {
             // gl_caps.js's capabilities object; none until the renderer sends it
             this.capabilities = null;
+            // gl_glslang.js's Glslang; none until the renderer sends the module
+            this.glslang = null;
             this.stats = { batches: 0, records: 0, answered: 0, malformed: 0 };
             this.reset();
+        }
+
+        // fn -> the method's name, for a part
+        static install(handlers) {
+            for (const [fn, method] of Object.entries(handlers)) HANDLERS.set(+fn, method);
+        }
+
+        static part(part) {
+            PARTS.push(part);
         }
 
         // A new owner of the arena, or a reset machine: no contexts
         reset() {
             this.contexts = new Map();
+            this.groups = new Map();
+            this.nextGroup = 1;
             this.current = null;
+            for (const part of PARTS) if (part.reset) part.reset(this);
         }
 
         setCapabilities(capabilities) {
             this.capabilities = capabilities;
+        }
+
+        setGlslang(glslang) {
+            this.glslang = glslang;
         }
 
         /*
@@ -74,13 +102,11 @@
         }
 
         dispatch(fn, bytes, view, offset, size) {
-            switch (fn) {
-            case CTRL.MAKE_CURRENT: return this.makeCurrent(view, offset, size);
-            case CTRL.RELEASE_CURRENT: this.current = null; return;
-            case CTRL.DESTROY_CONTEXT: return this.destroyContext(view, offset, size);
-            case GLFN.QUERY_INTEGER: return this.queryInteger(view, offset, size);
-            case GLFN.QUERY_GL_STRING: return this.queryString(bytes, view, offset, size);
-            }
+            const method = HANDLERS.get(fn);
+            if (!method) return;
+            // (a GL command needs a context; one without is the executor's to report)
+            if (fn < 0xFF00 && fn !== GLFN.QUERY_INTEGER && fn !== GLFN.QUERY_GL_STRING && !this.current) return;
+            this[method](bytes, view, offset, size);
         }
 
         // An older guest's MAKE_CURRENT stops short; the fields after read as 0
@@ -90,20 +116,37 @@
         }
 
         // Keyed as the executor keys them: by the guest's context id, or by
-        // the window for a guest too old to send one
-        makeCurrent(view, offset, size) {
+        // the window for a guest too old to send one. Objects belong to the
+        // share group: the guest's, or the context's own.
+        makeCurrent(bytes, view, offset, size) {
             const id = this.field("MAKE_CURRENT", "context_id", view, offset, size);
             const hwnd = this.field("MAKE_CURRENT", "hwnd", view, offset, size);
             const key = id ? "context:" + id : "hwnd:" + hwnd;
             let context = this.contexts.get(key);
             if (!context) {
-                context = { key, id, shareGroup: this.field("MAKE_CURRENT", "share_group", view, offset, size) };
-                this.contexts.set(key, context);
+                const shareGroup = this.field("MAKE_CURRENT", "share_group", view, offset, size);
+                context = this.createContext(key, id, shareGroup ? "guest:" + shareGroup : "private:" + this.nextGroup++);
             }
             this.current = context;
         }
 
-        destroyContext(view, offset, size) {
+        createContext(key, id, groupKey) {
+            let group = this.groups.get(groupKey);
+            if (!group) {
+                group = { key: groupKey };
+                for (const part of PARTS) if (part.group) part.group(group);
+                this.groups.set(groupKey, group);
+            }
+            const context = { key, id, group, program: 0 };
+            this.contexts.set(key, context);
+            return context;
+        }
+
+        releaseCurrent() {
+            this.current = null;
+        }
+
+        destroyContext(bytes, view, offset, size) {
             if (size < RECORDS.DESTROY_CONTEXT.size) {
                 this.reset();
                 return;
@@ -111,6 +154,9 @@
             const key = "context:" + view.getUint32(offset + F.DESTROY_CONTEXT.context_id, true);
             if (this.current && this.current.key === key) this.current = null;
             this.contexts.delete(key);
+            // a share group goes with its last context
+            for (const [groupKey, group] of this.groups)
+                if (![...this.contexts.values()].some(c => c.group === group)) this.groups.delete(groupKey);
         }
 
         // Whether a query record is still the guest's to have answered
@@ -118,7 +164,7 @@
             return size >= RECORDS[name].size && view.getUint32(offset + F[name].status, true) === PENDING;
         }
 
-        queryInteger(view, offset, size) {
+        queryInteger(bytes, view, offset, size) {
             if (!this.capabilities || !this.pending("QUERY_INTEGER", view, offset, size)) return;
             const value = glCaps.integer(this.capabilities, view.getUint32(offset + F.QUERY_INTEGER.pname, true));
             if (value === undefined) return;
@@ -144,11 +190,15 @@
         }
 
         getState() {
-            return {
+            const state = {
                 capabilities: this.capabilities,
-                contexts: [...this.contexts.values()].map(c => ({ key: c.key, id: c.id, shareGroup: c.shareGroup })),
+                nextGroup: this.nextGroup,
+                contexts: [...this.contexts.values()].map(c => ({ key: c.key, id: c.id, group: c.group.key,
+                    program: c.program })),
                 current: this.current ? this.current.key : null,
             };
+            for (const part of PARTS) if (part.getState) part.getState(this, state);
+            return state;
         }
 
         // A snapshot's capabilities stand: the guest was told those
@@ -156,10 +206,21 @@
             this.reset();
             if (!state) return;
             this.capabilities = state.capabilities || null;
-            for (const c of state.contexts || []) this.contexts.set(c.key, { ...c });
+            this.nextGroup = state.nextGroup || 1;
+            for (const c of state.contexts || [])
+                this.createContext(c.key, c.id, c.group || "private:" + c.key).program = c.program || 0;
             this.current = state.current ? this.contexts.get(state.current) || null : null;
+            for (const part of PARTS) if (part.setState) part.setState(this, state);
         }
     }
+
+    GLShadow.install({
+        [CTRL.MAKE_CURRENT]: "makeCurrent",
+        [CTRL.RELEASE_CURRENT]: "releaseCurrent",
+        [CTRL.DESTROY_CONTEXT]: "destroyContext",
+        [GLFN.QUERY_INTEGER]: "queryInteger",
+        [GLFN.QUERY_GL_STRING]: "queryString",
+    });
 
     const api = { GLShadow };
     global.V86GLShadow = api;

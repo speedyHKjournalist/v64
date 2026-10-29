@@ -14,7 +14,12 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+require("../../src/browser/glbridge/gl-webgpu/gl_glslang.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js");
+const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 require("../../src/browser/glbridge/v86_network_bridge.js");
 const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 const { createV86GLDevice } = require("../../src/browser/glbridge/v86gl_device.js");
@@ -59,7 +64,7 @@ async function guestAnswers(remote) {
     const { host } = createFakeHost();
     const executor = new GLWebGPUExecutor(null, { host });
     await executor.initialize();
-    const plugin = V86GraphicsProxy({ createBridge: () => {
+    const plugin = V86GraphicsProxy({ glslang: readFileSync(join(__dirname, "../../bios/glslang.wasm")), createBridge: () => {
         const bridge = global.installV86GLNetworkBridge(null, null, {
             compositor: new V86WebGPUCompositor({ width: 64, height: 64 }), glExecutor: executor, d3d9Executor: null });
         bridge.ready = Promise.resolve();
@@ -82,6 +87,15 @@ async function guestAnswers(remote) {
     stream.queryInteger(0x0D33);
     const capsAt = stream.length + 4 + 4;
     stream.queryInteger(0x76380001);
+    // a GLSL program: its link status and a uniform's location
+    stream.call("CREATE_SHADER", 1, 0x8B31).shaderSource(1, "uniform float gain; void main() { gl_Position = gl_Vertex * gain; }")
+        .call("COMPILE_SHADER", 1).call("CREATE_SHADER", 2, 0x8B30)
+        .shaderSource(2, "void main() { gl_FragColor = vec4(1.0); }").call("COMPILE_SHADER", 2)
+        .call("CREATE_PROGRAM", 5).call("ATTACH_SHADER", 5, 1).call("ATTACH_SHADER", 5, 2).call("LINK_PROGRAM", 5);
+    const linkAt = stream.length + 4 + P.F.QUERY_OBJECT_IV.status;
+    stream.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, 5, 0x8B82);
+    const locationAt = stream.length + 4 + P.F.QUERY_LOCATION.status;
+    stream.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, 5, "gain", 16);
     const bytes = stream.bytes();
     const header = new DataView(memory.buffer, ARENA, HEADER);
     header.setUint32(0, 0x324C4756, true);
@@ -100,6 +114,8 @@ async function guestAnswers(remote) {
             view.getUint32(stringAt + 4, true) - 1))),
         limit: answer(limitAt, () => view.getUint32(limitAt + 4, true)),
         caps: answer(capsAt, () => view.getUint32(capsAt + 4, true)),
+        linked: answer(linkAt, () => view.getUint32(linkAt + 4, true)),
+        location: answer(locationAt, () => view.getInt32(locationAt + 4, true)),
     };
 }
 
@@ -120,14 +136,17 @@ async function guestAnswers(remote) {
         }
     }
     // the same answers in both modes
-    for (const kind of ["string", "limit", "caps"])
+    for (const kind of ["string", "limit", "caps", "linked", "location"])
         if (results.page[kind] !== results.worker[kind])
             failures.push(kind + ": page " + JSON.stringify(results.page[kind]) + ", worker " + JSON.stringify(results.worker[kind]));
     if (results.page.string !== "Anthropic v86gl") failures.push("GL_VENDOR is " + JSON.stringify(results.page.string));
+    if (results.page.linked !== 1) failures.push("the program did not link: " + results.page.linked);
+    if (!(results.page.location >= 0)) failures.push("gain has no location: " + results.page.location);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;
         return;
     }
-    console.log("gl_sync_answers_test: both modes answer the capability queries alike; the worker mode's other losses are known (passed)");
+    console.log("gl_sync_answers_test: both modes answer the capability and GLSL queries alike; the worker mode's other " +
+        "losses are known (passed)");
 })();
