@@ -432,13 +432,16 @@
 
     /* The selected default pixel format is currently single-sampled, but ARB
      * sample coverage still has observable all-or-nothing coverage there. */
-    function sampleCoverageMask(state) {
+    // GL_SAMPLE_COVERAGE: value times the samples, as a mask of that many
+    function sampleCoverageMask(state, samples = 1) {
         if (!state.enabled.has(GL.MULTISAMPLE) ||
                 !state.enabled.has(GL.SAMPLE_COVERAGE))
             return 0xffffffff;
-        let covered = state.sampleCoverage.value > 0 ? 1 : 0;
-        if (state.sampleCoverage.invert) covered ^= 1;
-        return covered;
+        const all = samples >= 32 ? 0xffffffff : (1 << samples) - 1;
+        const count = samples === 1 ? (state.sampleCoverage.value > 0 ? 1 : 0) :
+            Math.round(clamp(state.sampleCoverage.value, 0, 1) * samples);
+        const covered = count >= 32 ? 0xffffffff : (1 << count) - 1;
+        return (state.sampleCoverage.invert ? ~covered & all : covered) >>> 0;
     }
 
     const ADDRESS_MODES = {
@@ -2151,6 +2154,7 @@
             const protocolId = payload.byteLength >= 24 ? view.getUint32(20, true) : 0;
             const protocolShareGroup = payload.byteLength >= 28 ?
                 view.getUint32(24, true) : 0;
+            const format = payload.byteLength >= 32 ? view.getUint32(28, true) : 0;
             const contextKey = protocolId ? "context:" + protocolId : "hwnd:" + hwnd;
 
             let context = this.contexts.get(contextKey);
@@ -2164,6 +2168,11 @@
                     this.shareGroups.set(groupKey, group);
                 }
                 context = createContextState(this.nextContextId++, group);
+                // a single-buffered window draws and reads its front buffer
+                if (format & protocol.C.V86GL_FORMAT_SINGLE_BUFFER) {
+                    context.drawBuffers = [GL.FRONT];
+                    context.readBuffer = GL.FRONT;
+                }
                 context.hwnd = hwnd;
                 context.protocolId = protocolId;
                 context.contextKey = contextKey;
@@ -2172,6 +2181,8 @@
                 this.framebuffers.set(context.id, new Map());
             }
             context.hwnd = hwnd;
+            context.samples = (format & protocol.C.V86GL_FORMAT_SAMPLES_MASK) >>>
+                protocol.C.V86GL_FORMAT_SAMPLES_SHIFT;
             this.current = context;
             if (width && height) {
                 if (!context.viewport.width) {
@@ -6803,15 +6814,21 @@
             const s = this.current;
             if (!s.drawFramebuffer) {
                 const view = this.ensureBackBuffer();
+                const samples = this.windowSamples();
+                const multisampled = samples > 1 ? this.ensureMultisampleTarget(samples) : null;
                 // glDrawBuffer(GL_NONE) writes no colour (review S2-28)
                 const none = s.drawBuffers.every(buffer => buffer === GL.NONE);
                 return {
-                    color: [none ? null : { view, format: this.backBufferFormat,
+                    // (readView, texture: the resolved picture, for reads and copies)
+                    color: [none ? null : { view: multisampled || view,
+                              resolveTarget: multisampled ? view : undefined, readView: view,
+                              format: this.backBufferFormat,
                               texture: this.backBuffer, mipLevel: 0,
                               origin: { x: 0, y: 0, z: 0 } }],
-                    depth: this.ensureDepthTarget(),
+                    depth: this.ensureDepthTarget(samples),
                     depthFormat: "depth24plus-stencil8",
                     width: this.backBufferWidth, height: this.backBufferHeight,
+                    sampleCount: samples,
                     isDefault: true,
                 };
             }
@@ -6887,24 +6904,57 @@
             return this.backBufferView;
         },
 
-        ensureDepthTarget() {
+        ensureDepthTarget(samples = 1) {
             const width = Math.max(1, this.backBufferWidth);
             const height = Math.max(1, this.backBufferHeight);
             if (this.depthTarget && this.depthWidth === width &&
-                    this.depthHeight === height)
+                    this.depthHeight === height && this.depthSamples === samples)
                 return this.depthTargetView;
             this.retire(this.depthTarget);
             this.depthTarget = this.device.createTexture({
                 label: "GL depth-stencil",
                 size: { width, height, depthOrArrayLayers: 1 },
                 format: "depth24plus-stencil8",
+                sampleCount: samples,
                 // (read back by glReadPixels: stencil copied, depth sampled)
-                usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_SRC | TEXTURE_USAGE_TEXTURE_BINDING,
+                usage: TEXTURE_USAGE_RENDER_ATTACHMENT | (samples > 1 ? 0 : TEXTURE_USAGE_COPY_SRC) |
+                    TEXTURE_USAGE_TEXTURE_BINDING,
             });
             this.depthTargetView = this.depthTarget.createView();
             this.depthWidth = width;
             this.depthHeight = height;
+            this.depthSamples = samples;
             return this.depthTargetView;
+        },
+
+        /*
+         * A multisampled window (its pixel format, WGL_ARB_multisample;
+         * review D-06) draws into this and resolves into the back buffer at
+         * the end of every pass, so presenting, reading and copying keep
+         * using the back buffer. 4 is the count WebGPU guarantees.
+         */
+        windowSamples() {
+            return this.current && this.current.samples > 1 ? 4 : 1;
+        },
+
+        ensureMultisampleTarget(samples) {
+            const width = Math.max(1, this.backBufferWidth);
+            const height = Math.max(1, this.backBufferHeight);
+            if (this.multisampleTarget && this.multisampleWidth === width &&
+                    this.multisampleHeight === height && this.multisampleFormat === this.backBufferFormat)
+                return this.multisampleView;
+            this.retire(this.multisampleTarget);
+            this.multisampleTarget = this.device.createTexture({
+                label: "GL multisampled colour",
+                size: { width, height, depthOrArrayLayers: 1 },
+                format: this.backBufferFormat, sampleCount: samples,
+                usage: TEXTURE_USAGE_RENDER_ATTACHMENT,
+            });
+            this.multisampleView = this.multisampleTarget.createView();
+            this.multisampleWidth = width;
+            this.multisampleHeight = height;
+            this.multisampleFormat = this.backBufferFormat;
+            return this.multisampleView;
         },
 
         /* ---- render pass management ----
@@ -6935,6 +6985,7 @@
             const encoder = this.ensureEncoder();
             const colorAttachments = targets.color.map(target => target ? {
                 view: target.view,
+                ...(target.resolveTarget ? { resolveTarget: target.resolveTarget } : {}),
                 loadOp: this.pendingClear && this.pendingClear.color ?
                     "clear" : "load",
                 clearValue: this.pendingClear && this.pendingClear.color ?
@@ -7177,6 +7228,7 @@
                 label: "GL masked/scissored clear",
                 colorAttachments: targets.color.map(target => target ? {
                     view: target.view, loadOp: "load", storeOp: "store",
+                    ...(target.resolveTarget ? { resolveTarget: target.resolveTarget } : {}),
                 } : null),
                 ...(targets.depth ? { depthStencilAttachment: {
                     view: targets.depth,
@@ -7201,7 +7253,7 @@
                 clearColor ? s.colorMask.map(v => v ? 1 : 0).join("") : "-",
                 clearDepth ? 1 : 0, clearStencil ?
                     (s.stencil.front.writeMask >>> 0) : 0,
-                [...s.clearColor], s.clearDepth].join("|");
+                [...s.clearColor], s.clearDepth, targets.sampleCount || 1].join("|");
             this.clearPipelineCache = this.clearPipelineCache || new Map();
             let pipeline = this.clearPipelineCache.get(key);
             if (pipeline) return pipeline;
@@ -7249,6 +7301,7 @@ ${fragmentCode}`;
                             (s.colorMask[3] ? 8 : 0) : 0,
                     } : null) },
                 primitive: { topology: "triangle-list" },
+                multisample: { count: targets.sampleCount || 1 },
             };
             if (targets.depthFormat) {
                 descriptor.depthStencil = {
@@ -8192,6 +8245,11 @@ ${fragmentCode}`;
             // POLYGON_OFFSET_FILL is for filled polygons, and WebGPU rejects a
             // depth bias on lines and points (review S1-2c)
             const quads = request.expandedPoints || request.linesExpanded;
+            // multisampling: the window's pixel format; alpha to coverage
+            // needs more than one sample, and only does anything with them
+            const samples = (targets && targets.sampleCount) || 1;
+            const alphaToCoverage = samples > 1 && s.enabled.has(GL.MULTISAMPLE) &&
+                s.enabled.has(GL.SAMPLE_ALPHA_TO_COVERAGE);
             const fillOffset = s.enabled.has(GL.POLYGON_OFFSET_FILL) &&
                 isPolygonPrimitive(request.mode) && !quads;
             // a point's or line's quad is not a face (review S2-18: it was culled)
@@ -8213,8 +8271,8 @@ ${fragmentCode}`;
                     (s.enabled.has(GL.BLEND) ? blendKey(s) : "off"),
                 s.colorMask.map(v => v ? 1 : 0).join(""),
                 fillOffset ? polygonOffsetKey(s) : "-",
-                s.enabled.has(GL.SAMPLE_ALPHA_TO_COVERAGE) ? "a2c" : "-",
-                sampleCoverageMask(s),
+                samples, alphaToCoverage ? "a2c" : "-",
+                sampleCoverageMask(s, samples),
                 targets ? targets.color.map(c => c ? c.format : "-").join(",") : "-",
                 targets ? (targets.depthFormat || "-") : "-",
                 s.enabled.has(GL.DEPTH_CLAMP) ? "clamp" : "-",
@@ -8264,11 +8322,9 @@ ${fragmentCode}`;
                         { unclippedDepth: true } : {}),
                 },
                 multisample: {
-                    count: 1,
-                    mask: sampleCoverageMask(s),
-                    // WebGPU validation only permits alpha-to-coverage on a
-                    // multisampled target. D-06 documents the current 1x path.
-                    alphaToCoverageEnabled: false,
+                    count: samples,
+                    mask: sampleCoverageMask(s, samples),
+                    alphaToCoverageEnabled: alphaToCoverage,
                 },
             };
             if (targets && targets.depthFormat) {
@@ -9196,9 +9252,10 @@ struct BlitParams {
             return pipeline;
         },
 
-        colorBlitPipeline(format) {
+        colorBlitPipeline(format, samples = 1) {
             this.colorBlitPipelines = this.colorBlitPipelines || new Map();
-            let pipeline = this.colorBlitPipelines.get(format);
+            const key = format + "|" + samples;
+            let pipeline = this.colorBlitPipelines.get(key);
             if (pipeline) return pipeline;
             const module = this.shaderModule(COLOR_BLIT_WGSL);
             try {
@@ -9208,19 +9265,21 @@ struct BlitParams {
                     fragment: { module, entryPoint: "fs_main",
                                 targets: [{ format }] },
                     primitive: { topology: "triangle-list" },
+                    multisample: { count: samples },
                 });
             } catch (error) {
                 this.refuse("glBlitFramebuffer", "blit target is not renderable",
                     { format, message: String(error) }, GL.INVALID_OPERATION);
                 return null;
             }
-            this.colorBlitPipelines.set(format, pipeline);
+            this.colorBlitPipelines.set(key, pipeline);
             return pipeline;
         },
 
         blitColorTexture(source, destination, sx0, sy0, sx1, sy1,
                 dx0, dy0, dx1, dy1, filter) {
-            const pipeline = this.colorBlitPipeline(destination.format);
+            // (a multisampled window is drawn into and resolved, as a pass)
+            const pipeline = this.colorBlitPipeline(destination.format, destination.resolveTarget ? 4 : 1);
             if (!pipeline) return false;
             const uniform = this.allocateUniform(32);
             if (!uniform) return false;
@@ -9244,8 +9303,8 @@ struct BlitParams {
             this.endPass();
             const pass = this.ensureEncoder().beginRenderPass({
                 label: "GL scaled colour blit",
-                colorAttachments: [{ view: destination.view,
-                    loadOp: "load", storeOp: "store" }],
+                colorAttachments: [{ view: destination.view, loadOp: "load", storeOp: "store",
+                    ...(destination.resolveTarget ? { resolveTarget: destination.resolveTarget } : {}) }],
             });
             pass.setPipeline(pipeline);
             pass.setBindGroup(0, this.device.createBindGroup({
@@ -9604,7 +9663,7 @@ struct BlitParams {
             const straight = sx1 >= sx0 && sy1 >= sy0 &&
                 dx1 >= dx0 && dy1 >= dy0;
             if (straight && width === dstWidth && height === dstHeight &&
-                    source.format === destination.format &&
+                    source.format === destination.format && !destination.resolveTarget &&
                     source.texture !== destination.texture) {
                 this.endPass();
                 this.ensureEncoder().copyTextureToTexture(
@@ -9806,7 +9865,14 @@ struct BlitParams {
         readDepthStencil(kind) {
             const s = this.current;
             if (!s.readFramebuffer) {
-                this.ensureDepthTarget();
+                const samples = this.windowSamples();
+                this.ensureDepthTarget(samples);
+                if (samples > 1) {
+                    // WebGPU resolves colour only: reading one sample is to do
+                    this.warnOnce("multisample-depth-read", "the depth and stencil of a " +
+                        "multisampled window cannot be read back", {});
+                    return null;
+                }
                 return { texture: this.depthTarget, format: "depth24plus-stencil8", mipLevel: 0, layer: 0,
                     width: this.depthWidth, height: this.depthHeight };
             }
@@ -10300,7 +10366,7 @@ struct BlitParams {
                 s.enabled.has(GL.BLEND) ? blendKey(s) : "off",
                 s.colorMask.map(v => v ? 1 : 0).join(""),
                 targets.color.map(c => c ? c.format : "-").join(","),
-                targets.depthFormat || "-"].join("|");
+                targets.depthFormat || "-", targets.sampleCount || 1].join("|");
             this.pixelPipelineCache = this.pixelPipelineCache || new Map();
             let pipeline = this.pixelPipelineCache.get(key);
             if (pipeline) return pipeline;
@@ -10356,7 +10422,7 @@ ${outputWrites}
                 }] },
                 fragment: { module, entryPoint: "fs_main", targets: colorTargets },
                 primitive: { topology: "triangle-list", cullMode: "none" },
-                multisample: { count: 1 },
+                multisample: { count: targets.sampleCount || 1 },
             };
             if (targets.depthFormat) {
                 descriptor.depthStencil = {
@@ -10392,9 +10458,11 @@ ${outputWrites}
                     GL.INVALID_OPERATION);
             const accum = this.ensureAccumBuffer(targets);
             const returning = op === RETURN;
-            const destination = returning ? targets.color[0].view : accum.nextView;
-            const targetFormat = returning ? targets.color[0].format : "rgba16float";
-            const pipeline = this.accumPipeline(op, targetFormat);
+            const color = targets.color[0];
+            const destination = returning ? color.view : accum.nextView;
+            const targetFormat = returning ? color.format : "rgba16float";
+            const samples = returning ? targets.sampleCount || 1 : 1;
+            const pipeline = this.accumPipeline(op, targetFormat, samples);
             if (!pipeline) return;
             const params = this.allocateUniform(16);
             if (!params) return;
@@ -10404,8 +10472,8 @@ ${outputWrites}
                 this.uniformStaging, params.offset, params.size);
             const pass = this.ensureEncoder().beginRenderPass({
                 label: "GL accumulation operation",
-                colorAttachments: [{ view: destination, loadOp: "load",
-                    storeOp: "store" }],
+                colorAttachments: [{ view: destination, loadOp: "load", storeOp: "store",
+                    ...(returning && color.resolveTarget ? { resolveTarget: color.resolveTarget } : {}) }],
             });
             this.applyAccumScissor(pass, targets);
             pass.setPipeline(pipeline);
@@ -10414,7 +10482,7 @@ ${outputWrites}
                 entries: [
                     { binding: 0, resource: accum.currentView },
                     { binding: 1, resource: returning ? this.fallbackView :
-                        targets.color[0].view },
+                        color.readView || color.view },
                     { binding: 2, resource: { buffer: params.buffer,
                         offset: params.offset, size: 16 } },
                 ],
@@ -10472,12 +10540,12 @@ ${outputWrites}
             }
         },
 
-        accumPipeline(op, targetFormat) {
+        accumPipeline(op, targetFormat, samples) {
             this.accumPipelineCache = this.accumPipelineCache || new Map();
             const returning = op === 0x0102;
             const mask = returning ? this.current.colorMask.map(v => v ? 1 : 0)
                 .join("") : "1111";
-            const key = op + "|" + targetFormat + "|" + mask;
+            const key = op + "|" + targetFormat + "|" + mask + "|" + samples;
             let pipeline = this.accumPipelineCache.get(key);
             if (pipeline) return pipeline;
             const expression = {
@@ -10517,6 +10585,7 @@ struct Params { value : vec4<f32>, }
                     fragment: { module, entryPoint: "fs_main",
                         targets: [{ format: targetFormat, writeMask }] },
                     primitive: { topology: "triangle-list" },
+                    multisample: { count: samples },
                 });
             } catch (error) {
                 this.refuse("glAccum", "could not create accumulation pipeline",

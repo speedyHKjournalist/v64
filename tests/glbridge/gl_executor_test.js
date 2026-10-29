@@ -1441,6 +1441,45 @@ test("drawing into the front buffer shows at glFlush; GL_NONE draws no colour (D
     assert.deepStrictEqual(log.draws.at(-1).pipeline.descriptor.fragment.targets, [null]);
 });
 
+test("a multisampled window draws into four samples and resolves into the back buffer (D-06)", () => {
+    const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+    const FOUR = 4 << P.C.V86GL_FORMAT_SAMPLES_SHIFT;
+    const { executor, log } = newExecutor();
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1, FOUR)
+        .call("ENABLE", GL.MULTISAMPLE).call("ENABLE", GL.SAMPLE_ALPHA_TO_COVERAGE);
+    immediateTriangle(stream);
+    // every other way of writing the window: a masked clear, pixels, an accumulation return
+    stream.call("ENABLE", GL.SCISSOR_TEST).call("SCISSOR", 0, 0, 8, 8).call("CLEAR", GL.COLOR_BUFFER_BIT)
+        .call("DISABLE", GL.SCISSOR_TEST)
+        .drawPixels(1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(4))
+        .call("ACCUM", 0x0101, 1).call("ACCUM", 0x0102, 1);   // LOAD, RETURN
+    run(executor, stream);
+    const labels = log.draws.map(d => d.pipeline.descriptor.label + ":" +
+        ((d.pipeline.descriptor.multisample || {}).count || 1));
+    for (const expected of ["GL clear pipeline:4", "GL pixel rectangle pipeline:4",
+            "GL accumulation pipeline:1", "GL accumulation pipeline:4"])
+        assert.ok(labels.includes(expected), expected + " in " + labels);
+    const draw = log.draws[0];
+    assert.strictEqual(draw.pipeline.descriptor.multisample.count, 4);
+    assert.strictEqual(draw.pipeline.descriptor.multisample.alphaToCoverageEnabled, true);
+    const attachment = draw.pass.descriptor.colorAttachments[0];
+    assert.strictEqual(attachment.view.sampleCount, 4);
+    assert.strictEqual(attachment.resolveTarget.texture, executor.backBuffer, "resolved into the back buffer");
+    assert.strictEqual(draw.pass.descriptor.depthStencilAttachment.view.sampleCount, 4);
+});
+
+test("a single-buffered window draws into its front buffer, shown at glFlush (D-08)", () => {
+    const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+    const { executor } = newExecutor();
+    let presents = 0;
+    executor.presentToCanvas = () => { ++presents; return true; };
+    run(executor, immediateTriangle(new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1,
+        P.C.V86GL_FORMAT_SINGLE_BUFFER)).call("FLUSH"));
+    assert.deepStrictEqual(executor.current.drawBuffers, [GL.FRONT]);
+    assert.strictEqual(executor.current.readBuffer, GL.FRONT);
+    assert.strictEqual(presents, 1);
+});
+
 test("MIN and MAX blending set WebGPU's factors to one (review S1-2b)", () => {
     const { executor, log } = newExecutor();
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)

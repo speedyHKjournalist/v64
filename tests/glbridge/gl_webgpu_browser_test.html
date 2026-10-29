@@ -43,12 +43,14 @@
         }
         record(C.GLFN[name], payload);
     }
-    function makeCurrent() {
-        const payload = new Uint8Array(20);
+    // format: the window's pixel format (V86GL_FORMAT_*)
+    function makeCurrent(format) {
+        const payload = new Uint8Array(32);
         const view = new DataView(payload.buffer);
         view.setUint32(0, 1, true);
         view.setUint32(12, 96, true);
         view.setUint32(16, 64, true);
+        view.setUint32(28, format, true);
         record(C.CTRL.MAKE_CURRENT, payload);
     }
     function drawPixels() {
@@ -73,44 +75,54 @@
         return bytes;
     }
 
-    makeCurrent();
-    call("CLEAR_COLOR", 0.08, 0.12, 0.2, 1);
-    call("CLEAR", GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
-    call("ENABLE", GL.COLOR_LOGIC_OP);
-    call("LOGIC_OP", GL.XOR);
-    call("BEGIN", GL.TRIANGLES);
-    call("COLOR4F", 1, 0.2, 0.1, 1);
-    call("VERTEX3F", -0.8, -0.7, 0);
-    call("VERTEX3F", 0.8, -0.7, 0);
-    call("VERTEX3F", 0, 0.8, 0);
-    call("END");
-    call("DISABLE", GL.COLOR_LOGIC_OP);
-    call("CLEAR_ACCUM", 0, 0, 0, 0);
-    call("CLEAR", GL.ACCUM_BUFFER_BIT);
-    call("ACCUM", 0x0101, 1); // GL_LOAD
-    call("ACCUM", 0x0103, 0.5); // GL_MULT
-    call("ACCUM", 0x0104, 0.1); // GL_ADD
-    call("ACCUM", 0x0102, 1); // GL_RETURN
-    call("WINDOW_POS3F", 6, 6, 0);
-    drawPixels();
+    // a plain window, then a multisampled one (D-06): the same frame, no
+    // validation error, and the multisampled one resolved into what is read
+    const runs = [];
+    for (const format of [0, 4 << GLProtocol.C.V86GL_FORMAT_SAMPLES_SHIFT]) {
+        records.length = 0;
+        makeCurrent(format);
+        call("CLEAR_COLOR", 0.08, 0.12, 0.2, 1);
+        call("CLEAR", GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+        call("ENABLE", GL.COLOR_LOGIC_OP);
+        call("LOGIC_OP", GL.XOR);
+        call("BEGIN", GL.TRIANGLES);
+        call("COLOR4F", 1, 0.2, 0.1, 1);
+        call("VERTEX3F", -0.8, -0.7, 0);
+        call("VERTEX3F", 0.8, -0.7, 0);
+        call("VERTEX3F", 0, 0.8, 0);
+        call("END");
+        call("DISABLE", GL.COLOR_LOGIC_OP);
+        call("CLEAR_ACCUM", 0, 0, 0, 0);
+        call("CLEAR", GL.ACCUM_BUFFER_BIT);
+        call("ACCUM", 0x0101, 1); // GL_LOAD
+        call("ACCUM", 0x0103, 0.5); // GL_MULT
+        call("ACCUM", 0x0104, 0.1); // GL_ADD
+        call("ACCUM", 0x0102, 1); // GL_RETURN
+        call("WINDOW_POS3F", 6, 6, 0);
+        drawPixels();
+        call("ENABLE", GL.SCISSOR_TEST);
+        call("SCISSOR", 80, 50, 8, 8);
+        call("CLEAR", GL.COLOR_BUFFER_BIT);
+        call("DISABLE", GL.SCISSOR_TEST);
 
-    const executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(
-        document.getElementById("gpu"));
-    await executor.initialize();
-    const errors = [];
-    executor.device.addEventListener("uncapturederror", event =>
-        errors.push(String(event.error && event.error.message || event.error)));
-    executor.device.pushErrorScope("validation");
-    executor.submit(concat(), {});
-    executor.onSwapBuffers();
-    await executor.device.queue.onSubmittedWorkDone();
-    const scoped = await executor.device.popErrorScope();
-    if (scoped) errors.push(scoped.message);
-    const stats = executor.getStats();
-    if (errors.length || stats.refusals || stats.draws !== 2)
-        throw new Error(JSON.stringify({ errors, stats }));
-    document.getElementById("result").textContent = "PASS " +
-        JSON.stringify({ draws: stats.draws, pipelines: stats.pipelines });
+        const executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(
+            document.getElementById("gpu"));
+        await executor.initialize();
+        const errors = [];
+        executor.device.addEventListener("uncapturederror", event =>
+            errors.push(String(event.error && event.error.message || event.error)));
+        executor.device.pushErrorScope("validation");
+        executor.submit(concat(), {});
+        executor.onSwapBuffers();
+        await executor.device.queue.onSubmittedWorkDone();
+        const scoped = await executor.device.popErrorScope();
+        if (scoped) errors.push(scoped.message);
+        const stats = executor.getStats();
+        if (errors.length || stats.refusals || stats.draws !== 2)
+            throw new Error(JSON.stringify({ format, errors, stats }));
+        runs.push({ format, draws: stats.draws, pipelines: stats.pipelines });
+    }
+    document.getElementById("result").textContent = "PASS " + JSON.stringify(runs);
     document.title = "PASS gl_webgpu_browser_test";
 })().catch(error => {
     document.getElementById("result").textContent = "FAIL " + error.stack;

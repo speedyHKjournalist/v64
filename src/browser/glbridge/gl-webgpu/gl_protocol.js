@@ -243,7 +243,8 @@
     const CONTROL = [
         // the context the commands that follow are for, and its window; an
         // older guest's payload may stop short (the fields after read as 0)
-        ["MAKE_CURRENT", 0xFFF0, "u:hwnd i:x i:y u:width u:height u:context_id u:share_group"],
+        // (format: its window's pixel format, V86GL_FORMAT_*)
+        ["MAKE_CURRENT", 0xFFF0, "u:hwnd i:x i:y u:width u:height u:context_id u:share_group u:format"],
         ["RELEASE_CURRENT", 0xFFF1],
         // one context; with no payload, every context (an older guest's
         // process teardown)
@@ -267,6 +268,9 @@
         ["V86GL_WINDOW_ICONIC", "(1u << 2)"],
         ["V86GL_WINDOW_OCCLUDED", "(1u << 6)"],
         ["V86GL_WINDOW_REGION", "(1u << 7)"],
+        ["V86GL_FORMAT_SINGLE_BUFFER", "(1u << 0)", "MAKE_CURRENT's format: no back buffer"],
+        ["V86GL_FORMAT_SAMPLES_SHIFT", 8, "and the samples per pixel (0 or 1: one) in bits 8-15"],
+        ["V86GL_FORMAT_SAMPLES_MASK", 0xFF00],
         ["V86GL_EXTENDED_RECORD_SIZE", 0xFFFF, "a record size of this is followed by a u32 size"],
         ["V86GL_READ_PIXELS_HEADER_SIZE", 32],
         ["V86GL_READ_PIXELS_STATUS_PENDING", 0],

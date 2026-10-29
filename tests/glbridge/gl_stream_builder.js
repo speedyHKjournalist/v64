@@ -92,9 +92,9 @@ class GLStream {
         return this.record(GLFN[name], payload);
     }
 
-    makeCurrent(hwnd, x, y, width, height, contextId, shareGroup) {
-        const extended = contextId !== undefined || shareGroup !== undefined;
-        const payload = new Uint8Array(extended ? 28 : 20);
+    makeCurrent(hwnd, x, y, width, height, contextId, shareGroup, format) {
+        const extended = contextId !== undefined || shareGroup !== undefined || format !== undefined;
+        const payload = new Uint8Array(format !== undefined ? 32 : extended ? 28 : 20);
         const view = new DataView(payload.buffer);
         view.setUint32(0, hwnd, true);
         view.setInt32(4, x, true);
@@ -105,6 +105,7 @@ class GLStream {
             view.setUint32(20, (contextId || 0) >>> 0, true);
             view.setUint32(24, (shareGroup || 0) >>> 0, true);
         }
+        if (format !== undefined) view.setUint32(28, format >>> 0, true);
         return this.record(constants.CTRL.MAKE_CURRENT, payload);
     }
 
