@@ -2,7 +2,7 @@
 
 依据：[`opengl-webgpu-review.md`](opengl-webgpu-review.md)（下文称“审查”，问题编号 S1-x、S2-x 均指它）。
 基线：v86 `e92fd4f0`（`ios6`），retro-gaming-site `43c4d1e`。日期 2026-10-29。
-状态：计划，尚未开始；本文尚未提交。
+状态：进行中（分支 `refactor`，两个仓库）。各阶段的状态写在阶段标题下面。
 
 ## 0. 已定的决定（2026-10-29）
 
@@ -106,6 +106,18 @@ game.exe
 
 ### 阶段 A：验收底座（约 2–3 周）
 
+> **状态（2026-10-29）：A1、A3、A5、A6 完成，A2、A4、A7 未做。**
+> - `bb6721f0`、`7007986f`、`b00d62aa`：
+>   - A1：参照场景与 Apple 金像入库（`tests/glbridge/gl_conformance/`），已知失败表按 tile 登记；
+>   - A3：校验型假 GPU、naga 必须存在、`run.cjs` 要求通过总结；
+>   - A5：`gl_sync_answers_test.js` 在两种模式下跑需要答案的命令；
+>   - A6：`make glbridge-mutations`，GL 21/22（存活的一个在已知有问题的 ARB 解析器后面）。
+> - 未做：
+>   - A2 Mesa 参照；
+>   - A4 客体 ABI 测试台（随 C2/F 做）；
+>   - A6 的 opcode 覆盖计数；
+>   - A7 真实程序轨迹（要在客体里录）。
+
 - **目标：** 审查里的每个已知问题都先变成一个会失败的测试，后续每一步都用它衡量。
 - **A1 参照场景入库。**
   - 把参照原型（共享笔记目录 `gl-review/oracle/`）移进 `tests/glbridge/gl_conformance/`：`scenes.js`、`to_stream.js`、`compare.js`、页面和 runner。
@@ -139,6 +151,8 @@ game.exe
 
 ### 阶段 B：共用宿主层（约 1–2 周，与 D3D 一起做）
 
+> **状态（2026-10-29）：错误捕获和失败策略完成**（与 D3D 阶段 0 同批，`a77b4c3a`、`fe54bbe6`）。资源注册表和 WebGPU 工具层的抽取留到阶段 D。
+
 - **目标：** 错误可见、失败不粘滞、设备丢失可恢复。这些在 GL 和 D3D 两条路径上是同一份代码。
 - **内容：**
   - **错误捕获：** 管线、bind group、着色器模块创建都包在 error scope 里，失败的对象不进缓存；设备注册 `uncapturederror`，按条去重上报；测试模式下任何校验错误都让测试失败。
@@ -152,6 +166,17 @@ game.exe
 ### 阶段 C：协议与 CPU 侧影子（本计划核心，约 5–7 周）
 
 - **目标：** 实现决定 1。同步答案在两种模式下都正确，而且不必等页面。
+> **C1 状态（2026-10-29）：完成。**
+> - 站点历史里从来没有 `gl_protocol.json`（审查的说法不对），所以单一来源按现有的表新写：`src/browser/glbridge/gl-webgpu/gl_protocol.js`。它包括：
+>   - 217 个 opcode 和控制记录；
+>   - 140 个平铺记录的参数表（原 `gl_wire.js`，已删除）；
+>   - 27 个手写记录的固定头部；
+>   - 两边共用的常量。
+> - `tools/gen_gl_protocol_header.mjs` 生成客体的 `gl_protocol.h`（每个头部的 sizeof/offsetof 断言）和 `gl_opcode_names.h`；站点的 Python 生成器删除，客体改为包含生成的头文件。
+> - 执行器经 `protocol.F` / `decodeRecord` 读这些头部。
+> - 测试：v86 `gl_protocol_test.js`；站点 `generated_headers_test.js`，`gl_protocol_consistency_test.js` 改为对照 schema。
+> - 其余 50 个手写记录的布局随影子接手它们时补进 schema。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

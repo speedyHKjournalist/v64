@@ -1,0 +1,123 @@
+#!/usr/bin/env node
+// gl_protocol.js, the one description of the OpenGL records
+// (docs/opengl-webgpu-plan.md C1): the guest header generated from it
+// compiles with every layout assert holding, records round-trip, and the
+// executor has a handler for every opcode.
+"use strict";
+
+const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
+const { mkdtempSync, readFileSync, rmSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
+const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+const constants = require("../../src/browser/glbridge/gl-webgpu/gl_constants.js");
+const executorModule = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");
+const { createFakeHost } = require("./gl_fake_gpu.js");
+
+const tests = [];
+const test = (name, fn) => tests.push({ name, fn });
+
+function generate() {
+    const dir = mkdtempSync(join(tmpdir(), "gl-protocol-"));
+    try {
+        const result = spawnSync(process.execPath, [join(__dirname, "../../tools/gen_gl_protocol_header.mjs"), dir],
+            { encoding: "utf8" });
+        assert.equal(result.status, 0, result.stderr);
+        return { protocol: readFileSync(join(dir, "gl_protocol.h"), "utf8"),
+            names: readFileSync(join(dir, "gl_opcode_names.h"), "utf8") };
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+// The guest DLL is a 32-bit mingw build; freestanding needs no libc headers
+function compile(source) {
+    const attempts = [
+        ["clang", ["--target=i686-pc-windows-gnu", "-ffreestanding", "-fsyntax-only", "-Wall", "-x", "c", "-"]],
+        ["i686-w64-mingw32-gcc", ["-fsyntax-only", "-Wall", "-x", "c", "-"]],
+        ["gcc", ["-m32", "-ffreestanding", "-fsyntax-only", "-Wall", "-x", "c", "-"]],
+    ];
+    for (const [compiler, args] of attempts) {
+        const result = spawnSync(compiler, args, { input: source, encoding: "utf8" });
+        if (result.error && result.error.code === "ENOENT") continue;
+        return { compiler, ok: result.status === 0, stderr: result.stderr };
+    }
+    throw new Error("no C compiler (clang, i686-w64-mingw32-gcc or gcc) to check the generated header with");
+}
+
+test("the generated headers compile, and a wrong offset assert fails the build", () => {
+    const { protocol, names } = generate();
+    const good = compile(protocol + names +
+        "\nconst char *check(void) { return v86gl_opcode_name(GLFN_BLIT_FRAMEBUFFER); }\n");
+    assert.ok(good.ok, good.compiler + ": " + good.stderr);
+    const line = "offsetof(V86GLRecordQueryLocation, status) == " + P.F.QUERY_LOCATION.status + " ?";
+    assert.ok(protocol.includes(line), line);
+    const bad = compile(protocol.replace(line, "offsetof(V86GLRecordQueryLocation, status) == " +
+        (P.F.QUERY_LOCATION.status + 4) + " ?"));
+    assert.ok(!bad.ok, bad.compiler + " accepted a wrong offset assert");
+});
+
+test("the header has every opcode and the name table every name", () => {
+    const { protocol, names } = generate();
+    assert.equal(P.OPCODES.length, 217);
+    for (const [name, value] of P.OPCODES) {
+        assert.ok(protocol.includes("    GLFN_" + name + " = " + value), name);
+        assert.ok(names.includes("[" + value + "] = \"" + name + "\""), name);
+    }
+    for (const [name] of P.DEFINES) assert.match(protocol, new RegExp("#define " + name + " "), name);
+});
+
+test("gl_constants.js takes the opcodes from the protocol", () => {
+    assert.equal(constants.GLFN, P.GLFN);
+    assert.equal(constants.CTRL, P.CTRL);
+    for (const [name, value] of P.OPCODES) assert.equal(constants.NAME_BY_OPCODE[value], name);
+});
+
+test("flat records and fixed headers round-trip", () => {
+    for (const [name, [, types]] of Object.entries(P.SIGNATURES)) {
+        const args = [...types].map((t, i) => t === "f" || t === "d" ? i + 0.5 : t === "i" ? -i - 1 : i + 7);
+        const bytes = P.encodeArgs(name, args);
+        assert.equal(bytes.length, P.payloadBytes(types), name);
+        const out = [];
+        assert.equal(P.decodeArgs(types, new DataView(bytes.buffer), 0, bytes.length, out), types.length);
+        assert.deepEqual(out, args, name);
+        if (types.length)
+            assert.equal(P.decodeArgs(types, new DataView(bytes.buffer), 0, bytes.length - 1, out), -1, name);
+    }
+    for (const [name, record] of Object.entries(P.RECORDS)) {
+        const values = {};
+        let k = 1;
+        for (const [field, f] of Object.entries(record.fields)) {
+            const v = () => f.type === "f" || f.type === "d" ? k++ + 0.25 : f.type === "i" ? -(k++) : k++;
+            values[field] = f.count === 1 ? v() : Array.from({ length: f.count }, v);
+        }
+        const bytes = P.encodeRecord(name, values);
+        assert.equal(bytes.length, record.size, name);
+        assert.deepEqual(P.decodeRecord(name, new DataView(bytes.buffer), 0), values, name);
+    }
+});
+
+test("the executor has a handler for every opcode", () => {
+    const { host } = createFakeHost();
+    const executor = new executorModule.GLWebGPUExecutor(null, { host });
+    const missing = P.OPCODES.filter(([, value]) => !executor.handlers[value]).map(([name]) => name);
+    assert.deepEqual(missing, []);
+    // and the flat ones decode through the protocol's argument list
+    for (const [name, [, types]] of Object.entries(P.SIGNATURES))
+        assert.equal(executor.handlers[P.GLFN[name]].signature || "", types, name);
+});
+
+(async () => {
+    for (const { name, fn } of tests) {
+        try {
+            await fn();
+            console.log("ok   " + name);
+        } catch (error) {
+            console.error("FAIL " + name + "\n" + (error && error.stack || error));
+            process.exitCode = 1;
+            return;
+        }
+    }
+    console.log(tests.length + " GL protocol tests passed");
+})();

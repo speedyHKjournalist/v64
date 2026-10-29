@@ -11,8 +11,8 @@ const output = new URL("build/glbridge/", root);
 const files = [
     "webgpu_host.js",
     "d3d9-webgpu/d3d9_shader_pipeline.js", "d3d9-webgpu/d9wg_protocol.js", "d3d9-webgpu/d3d9_executor.js",
-    "d3d9-webgpu/ddraw_ops.js", "gl-webgpu/gl_constants.js",
-    "gl-webgpu/gl_wire.js", "gl-webgpu/gl_state_layout.js",
+    "d3d9-webgpu/ddraw_ops.js", "gl-webgpu/gl_protocol.js",
+    "gl-webgpu/gl_constants.js", "gl-webgpu/gl_state_layout.js",
     "gl-webgpu/gl_shader_translator.js", "gl-webgpu/gl_fixed_function.js",
     "gl-webgpu/gl_arb_program.js", "gl-webgpu/gl_executor.js",
     "graphics_journal.js", "v86_network_bridge.js", "webgpu_compositor.js", "v86gl_device.js", "graphics_proxy.js",

@@ -8,7 +8,7 @@
 "use strict";
 
 const wire = typeof require === "function" ?
-    require("../../src/browser/glbridge/gl-webgpu/gl_wire.js") : globalThis.GLWireFormat;
+    require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js") : globalThis.GLProtocol;
 const constants = typeof require === "function" ?
     require("../../src/browser/glbridge/gl-webgpu/gl_constants.js") : globalThis.GLWGConstants;
 

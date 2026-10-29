@@ -32,7 +32,7 @@
 
     const nodeRequire = (typeof require === "function" &&
         typeof module !== "undefined") ? require : null;
-    const wire = nodeRequire ? nodeRequire("./gl_wire.js") : global.GLWireFormat;
+    const protocol = nodeRequire ? nodeRequire("./gl_protocol.js") : global.GLProtocol;
     const constants = nodeRequire ? nodeRequire("./gl_constants.js") :
         global.GLWGConstants;
     const stateLayout = nodeRequire ? nodeRequire("./gl_state_layout.js") :
@@ -56,7 +56,7 @@
     const WINDOW_OCCLUDED = 1 << 6;
     const WINDOW_REGION = 1 << 7;
     const WINDOW_REGION_MAX_RECTS = 32;
-    const SIGNATURES = wire.SIGNATURES;
+    const SIGNATURES = protocol.SIGNATURES;
 
     const EXECUTOR_REVISION = 1;
 
@@ -2306,7 +2306,7 @@
                 return;
             }
             if (handler.signature) {
-                const count = wire.decodeArgs(handler.signature, view, offset,
+                const count = protocol.decodeArgs(handler.signature, view, offset,
                     size, this.args);
                 if (count < 0) {
                     this.refuse("op" + fn, "payload too short for signature",
@@ -2948,63 +2948,40 @@
         });
 
         /*
-         * glTexImage*: {target, level, internalFormat, width, height, depth,
-         * border, format, type, dataSize} then dataSize bytes. The 1D and 2D
-         * forms omit the dimensions they do not have; all three are decoded
-         * through one function because everything after the header is identical.
+         * glTexImage*: the 1D, 2D and 3D headers (gl_protocol.js) differ only
+         * in the dimensions they have; everything after them is dataSize
+         * bytes of pixels, decoded by one function.
          */
         const texImage = dimensions => function(a, bytes, view, offset, size) {
-            const header = 4 * (7 + dimensions);
+            const name = "TEX_IMAGE_" + dimensions + "D";
+            const header = protocol.RECORDS[name].size;
             if (size < header)
                 throw new GLStreamError("glTexImage record is too short");
-            let at = offset;
-            const target = view.getUint32(at, true); at += 4;
-            const level = view.getInt32(at, true); at += 4;
-            const internalFormat = view.getUint32(at, true); at += 4;
-            const width = view.getInt32(at, true); at += 4;
-            const height = dimensions >= 2 ? view.getInt32(at, true) : 1;
-            if (dimensions >= 2) at += 4;
-            const depth = dimensions >= 3 ? view.getInt32(at, true) : 1;
-            if (dimensions >= 3) at += 4;
-            at += 4;                            // border
-            const format = view.getUint32(at, true); at += 4;
-            const type = view.getUint32(at, true); at += 4;
-            const dataSize = view.getUint32(at, true); at += 4;
-            const data = dataSize ?
-                bytes.subarray(at, at + dataSize) :
+            const r = protocol.decodeRecord(name, view, offset);
+            const data = r.data_size ?
+                bytes.subarray(offset + header, offset + header + r.data_size) :
                 null;
-            this.texImage(target, level, internalFormat, width, height, depth,
-                format, type, data, dataSize);
+            this.texImage(r.target, r.level, r.internalformat >>> 0, r.width,
+                dimensions >= 2 ? r.height : 1, dimensions >= 3 ? r.depth : 1,
+                r.format, r.type, data, r.data_size);
         };
         define("TEX_IMAGE_1D", texImage(1));
         define("TEX_IMAGE_2D", texImage(2));
         define("TEX_IMAGE_3D", texImage(3));
 
         const texSubImage = dimensions => function(a, bytes, view, offset, size) {
-            const header = 4 * (5 + dimensions * 2);
+            const name = "TEX_SUB_IMAGE_" + dimensions + "D";
+            const header = protocol.RECORDS[name].size;
             if (size < header)
                 throw new GLStreamError("glTexSubImage record is too short");
-            let at = offset;
-            const target = view.getUint32(at, true); at += 4;
-            const level = view.getInt32(at, true); at += 4;
-            const x = view.getInt32(at, true); at += 4;
-            const y = dimensions >= 2 ? view.getInt32(at, true) : 0;
-            if (dimensions >= 2) at += 4;
-            const z = dimensions >= 3 ? view.getInt32(at, true) : 0;
-            if (dimensions >= 3) at += 4;
-            const width = view.getInt32(at, true); at += 4;
-            const height = dimensions >= 2 ? view.getInt32(at, true) : 1;
-            if (dimensions >= 2) at += 4;
-            const depth = dimensions >= 3 ? view.getInt32(at, true) : 1;
-            if (dimensions >= 3) at += 4;
-            const format = view.getUint32(at, true); at += 4;
-            const type = view.getUint32(at, true); at += 4;
-            const dataSize = view.getUint32(at, true); at += 4;
-            const data = dataSize ?
-                bytes.subarray(at, at + dataSize) :
+            const r = protocol.decodeRecord(name, view, offset);
+            const data = r.data_size ?
+                bytes.subarray(offset + header, offset + header + r.data_size) :
                 null;
-            this.texSubImage(target, level, x, y, z, width, height, depth,
-                format, type, data, dataSize);
+            this.texSubImage(r.target, r.level, r.xoffset,
+                dimensions >= 2 ? r.yoffset : 0, dimensions >= 3 ? r.zoffset : 0,
+                r.width, dimensions >= 2 ? r.height : 1, dimensions >= 3 ? r.depth : 1,
+                r.format, r.type, data, r.data_size);
         };
         define("TEX_SUB_IMAGE_1D", texSubImage(1));
         define("TEX_SUB_IMAGE_2D", texSubImage(2));
@@ -3145,10 +3122,10 @@
          */
         define("BUFFER_DATA", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("glBufferData record is short");
-            const target = view.getUint32(offset, true);
-            const byteCount = view.getUint32(offset + 4, true);
-            const usage = view.getUint32(offset + 8, true);
-            const dataSize = Math.min(view.getUint32(offset + 12, true), size - 16);
+            const target = view.getUint32(offset + protocol.F.BUFFER_DATA.target, true);
+            const byteCount = view.getUint32(offset + protocol.F.BUFFER_DATA.size, true);
+            const usage = view.getUint32(offset + protocol.F.BUFFER_DATA.usage, true);
+            const dataSize = Math.min(view.getUint32(offset + protocol.F.BUFFER_DATA.data_size, true), size - 16);
             const data = dataSize ?
                 bytes.subarray(offset + 16,
                     offset + 16 + Math.min(dataSize, byteCount)) :
@@ -3158,9 +3135,9 @@
         /* {target, offset, size, data_size} then the contents. */
         define("BUFFER_SUB_DATA", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("glBufferSubData record is short");
-            const target = view.getUint32(offset, true);
-            const dstOffset = view.getUint32(offset + 4, true);
-            const byteCount = Math.min(view.getUint32(offset + 8, true), size - 16);
+            const target = view.getUint32(offset + protocol.F.BUFFER_SUB_DATA.target, true);
+            const dstOffset = view.getUint32(offset + protocol.F.BUFFER_SUB_DATA.offset, true);
+            const byteCount = Math.min(view.getUint32(offset + protocol.F.BUFFER_SUB_DATA.size, true), size - 16);
             const data = bytes.subarray(offset + 16,
                 offset + 16 + byteCount);
             this.bufferSubData(target, dstOffset, data);
@@ -3203,7 +3180,7 @@
         });
         define("VERTEX_ATTRIB_POINTER_VBO", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("attrib pointer record is short");
-            const index = view.getUint32(offset, true);
+            const index = view.getUint32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.index, true);
             if (index >= MAX_VERTEX_ATTRIBS)
                 return this.refuse("glVertexAttribPointer", "index out of range",
                     { index }, GL.INVALID_VALUE);
@@ -3215,11 +3192,11 @@
                 // VBO instead of the current constant colour used by models.
                 enabled: this.current.genericAttribs[index].enabled,
                 buffer: this.current.arrayBuffer,
-                size: view.getInt32(offset + 4, true),
-                type: view.getUint32(offset + 8, true),
-                normalized: view.getUint32(offset + 12, true) !== 0,
-                stride: view.getInt32(offset + 16, true),
-                offset: view.getUint32(offset + 20, true),
+                size: view.getInt32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.size, true),
+                type: view.getUint32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.type, true),
+                normalized: view.getUint32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.normalized, true) !== 0,
+                stride: view.getInt32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.stride, true),
+                offset: view.getUint32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.offset, true),
                 fromVBO: true,
             });
         });
@@ -3332,22 +3309,22 @@
 
     /* The guest observes these in the record it submitted, so the values are
      * part of the wire contract and not an internal detail. */
-    const SYNC_STATUS_PENDING = 0;
-    const SYNC_STATUS_OK = 1;
-    const SYNC_STATUS_FAILED = 2;
-    const READ_PIXELS_HEADER_SIZE = 32;
+    const SYNC_STATUS_PENDING = protocol.C.V86GL_SYNC_QUERY_STATUS_PENDING;
+    const SYNC_STATUS_OK = protocol.C.V86GL_SYNC_QUERY_STATUS_OK;
+    const SYNC_STATUS_FAILED = protocol.C.V86GL_SYNC_QUERY_STATUS_FAILED;
+    const READ_PIXELS_HEADER_SIZE = protocol.RECORDS.READ_PIXELS.size;
 
     /* openglproxy's V86GL_PROGRAM_PARAMETER_ENV / _LOCAL. */
-    const PROGRAM_PARAMETER_ENV = 1;
-    const PROGRAM_PARAMETER_LOCAL = 2;
+    const PROGRAM_PARAMETER_ENV = protocol.C.V86GL_PROGRAM_PARAMETER_ENV;
+    const PROGRAM_PARAMETER_LOCAL = protocol.C.V86GL_PROGRAM_PARAMETER_LOCAL;
 
     /*
      * V86GL_LOCATION_KIND_* and V86GL_ACTIVE_KIND_*. Uniform is 1 in both --
      * getting the pair the other way round is invisible until an application
      * asks for a uniform location and is handed an attribute's.
      */
-    const LOCATION_KIND_ATTRIB = 2;
-    const ACTIVE_KIND_ATTRIB = 2;
+    const LOCATION_KIND_ATTRIB = protocol.C.V86GL_LOCATION_KIND_ATTRIB;
+    const ACTIVE_KIND_ATTRIB = protocol.C.V86GL_ACTIVE_KIND_ATTRIB;
 
     /*
      * ARB program environment and local parameters are context state that the
@@ -3484,36 +3461,36 @@
             const state = this.current;
             const error = state ? state.error : GL.NO_ERROR;
             if (state) state.error = GL.NO_ERROR;
-            view.setUint32(offset, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 4, error, true);
+            view.setUint32(offset + protocol.F.QUERY_ERROR.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_ERROR.value, error, true);
         }, { needsContext: false });
 
         define("QUERY_INTEGER", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("query-integer record is short");
-            const pname = view.getUint32(offset, true);
+            const pname = view.getUint32(offset + protocol.F.QUERY_INTEGER.pname, true);
             const value = this.queryInteger(pname);
             if (value === null) {
-                view.setUint32(offset + 4, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_INTEGER.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            view.setUint32(offset + 4, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 8, value >>> 0, true);
+            view.setUint32(offset + protocol.F.QUERY_INTEGER.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_INTEGER.value, value >>> 0, true);
         }, { needsContext: false });
 
         define("QUERY_GL_STRING", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("query-string record is short");
-            const pname = view.getUint32(offset, true);
-            const capacity = view.getUint32(offset + 12, true);
+            const pname = view.getUint32(offset + protocol.F.QUERY_GL_STRING.name, true);
+            const capacity = view.getUint32(offset + protocol.F.QUERY_GL_STRING.data_size, true);
             const text = this.queryString(pname);
             if (text === null || 16 + capacity > size) {
-                view.setUint32(offset + 4, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_GL_STRING.status, SYNC_STATUS_FAILED, true);
                 return;
             }
             const encoded = [];
             for (let i = 0; i < text.length; ++i) encoded.push(text.charCodeAt(i) & 0xff);
             encoded.push(0);
-            view.setUint32(offset + 4, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 8, encoded.length, true);
+            view.setUint32(offset + protocol.F.QUERY_GL_STRING.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_GL_STRING.length, encoded.length, true);
             const limit = Math.min(encoded.length, capacity);
             for (let i = 0; i < limit; ++i)
                 bytes[offset + 16 + i] = encoded[i];
@@ -3521,37 +3498,37 @@
 
         define("QUERY_LOCATION", function(a, bytes, view, offset, size) {
             if (size < 32) throw new GLStreamError("query-location record is short");
-            const kind = view.getUint32(offset, true);
-            const programName = view.getUint32(offset + 4, true);
-            const nameLength = view.getUint32(offset + 28, true);
+            const kind = view.getUint32(offset + protocol.F.QUERY_LOCATION.location_kind, true);
+            const programName = view.getUint32(offset + protocol.F.QUERY_LOCATION.program, true);
+            const nameLength = view.getUint32(offset + protocol.F.QUERY_LOCATION.name_length, true);
             if (32 + nameLength > size) {
-                view.setUint32(offset + 12, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_LOCATION.status, SYNC_STATUS_FAILED, true);
                 return;
             }
             const name = readCString(bytes, offset + 32, nameLength);
             const info = this.queryLocation(kind, programName, name);
             if (!info) {
-                view.setUint32(offset + 12, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_LOCATION.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            view.setUint32(offset + 12, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 16, info.location >>> 0, true);
-            view.setUint32(offset + 20, info.type >>> 0, true);
-            view.setUint32(offset + 24, info.size >>> 0, true);
+            view.setUint32(offset + protocol.F.QUERY_LOCATION.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_LOCATION.result, info.location >>> 0, true);
+            view.setUint32(offset + protocol.F.QUERY_LOCATION.value_type, info.type >>> 0, true);
+            view.setUint32(offset + protocol.F.QUERY_LOCATION.value_count, info.size >>> 0, true);
         });
 
         define("QUERY_UNIFORM", function(a, bytes, view, offset, size) {
             if (size < 32) throw new GLStreamError("query-uniform record is short");
-            const programName = view.getUint32(offset, true);
-            const location = view.getInt32(offset + 4, true);
-            const valueKind = view.getUint32(offset + 8, true);
+            const programName = view.getUint32(offset + protocol.F.QUERY_UNIFORM.program, true);
+            const location = view.getInt32(offset + protocol.F.QUERY_UNIFORM.location, true);
+            const valueKind = view.getUint32(offset + protocol.F.QUERY_UNIFORM.value_kind, true);
             const values = this.readUniform(programName, location, valueKind);
             if (!values || !values.length || values.length > 16) {
-                view.setUint32(offset + 12, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_UNIFORM.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            view.setUint32(offset + 12, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 16, values.length, true);
+            view.setUint32(offset + protocol.F.QUERY_UNIFORM.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_UNIFORM.value_count, values.length, true);
             for (let i = 0; i < values.length; ++i) {
                 if (valueKind === 2) view.setInt32(offset + 32 + i * 4, values[i] | 0, true);
                 else view.setFloat32(offset + 32 + i * 4, values[i], true);
@@ -3560,16 +3537,16 @@
 
         define("QUERY_OBJECT_IV", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("query-object record is short");
-            const kind = view.getUint32(offset, true);
-            const name = view.getUint32(offset + 4, true);
-            const pname = view.getUint32(offset + 8, true);
+            const kind = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.object_kind, true);
+            const name = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.name, true);
+            const pname = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.pname, true);
             const value = this.queryObjectiv(kind, name, pname);
             if (value === null) {
-                view.setUint32(offset + 12, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_OBJECT_IV.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            view.setUint32(offset + 12, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 16, value >>> 0, true);
+            view.setUint32(offset + protocol.F.QUERY_OBJECT_IV.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_OBJECT_IV.value, value >>> 0, true);
         });
 
         /*
@@ -3580,16 +3557,16 @@
          */
         define("QUERY_OBJECT_LOG", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("query-log record is short");
-            const kind = view.getUint32(offset, true);
-            const name = view.getUint32(offset + 4, true);
-            const capacity = view.getUint32(offset + 8, true);
+            const kind = view.getUint32(offset + protocol.F.QUERY_OBJECT_LOG.object_kind, true);
+            const name = view.getUint32(offset + protocol.F.QUERY_OBJECT_LOG.name, true);
+            const capacity = view.getUint32(offset + protocol.F.QUERY_OBJECT_LOG.buf_size, true);
             const text = this.queryObjectLog(kind, name);
             if (text === null || 24 + capacity > size) {
-                view.setUint32(offset + 12, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_OBJECT_LOG.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            view.setUint32(offset + 12, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 16,
+            view.setUint32(offset + protocol.F.QUERY_OBJECT_LOG.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_OBJECT_LOG.length,
                 writeCString(bytes, offset + 24, capacity,
                     text), true);
         });
@@ -3602,29 +3579,29 @@
          */
         define("QUERY_ACTIVE", function(a, bytes, view, offset, size) {
             if (size < 40) throw new GLStreamError("query-active record is short");
-            const kind = view.getUint32(offset, true);
-            const programName = view.getUint32(offset + 4, true);
-            const index = view.getUint32(offset + 8, true);
-            const capacity = view.getUint32(offset + 12, true);
+            const kind = view.getUint32(offset + protocol.F.QUERY_ACTIVE.active_kind, true);
+            const programName = view.getUint32(offset + protocol.F.QUERY_ACTIVE.program, true);
+            const index = view.getUint32(offset + protocol.F.QUERY_ACTIVE.index, true);
+            const capacity = view.getUint32(offset + protocol.F.QUERY_ACTIVE.buf_size, true);
             const info = this.queryActive(kind, programName, index);
             if (!info || 40 + capacity > size) {
-                view.setUint32(offset + 16, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_ACTIVE.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            view.setUint32(offset + 16, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 20,
+            view.setUint32(offset + protocol.F.QUERY_ACTIVE.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_ACTIVE.length,
                 writeCString(bytes, offset + 40, capacity,
                     info.name), true);
-            view.setUint32(offset + 24, info.size >>> 0, true);
-            view.setUint32(offset + 28, info.type >>> 0, true);
+            view.setUint32(offset + protocol.F.QUERY_ACTIVE.size, info.size >>> 0, true);
+            view.setUint32(offset + protocol.F.QUERY_ACTIVE.type, info.type >>> 0, true);
         });
 
         define("CHECK_FRAMEBUFFER_STATUS", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("fbo-status record is short");
-            const target = view.getUint32(offset, true);
+            const target = view.getUint32(offset + protocol.F.CHECK_FRAMEBUFFER_STATUS.target, true);
             const status = this.checkFramebufferStatus(target);
-            view.setUint32(offset + 4, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 8, status >>> 0, true);
+            view.setUint32(offset + protocol.F.CHECK_FRAMEBUFFER_STATUS.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.CHECK_FRAMEBUFFER_STATUS.result, status >>> 0, true);
         });
 
         /* ---- ARB assembly programs ---- */
@@ -3656,8 +3633,8 @@
         });
         define("PROGRAM_STRING_ARB", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("ARB program record is short");
-            const target = view.getUint32(offset, true);
-            const length = view.getInt32(offset + 8, true);
+            const target = view.getUint32(offset + protocol.F.PROGRAM_STRING_ARB.target, true);
+            const length = view.getInt32(offset + protocol.F.PROGRAM_STRING_ARB.length, true);
             if (length < 0 || 16 + length > size)
                 throw new GLStreamError("ARB program record is truncated");
             const source = readCString(bytes, offset + 16, length);
@@ -3671,12 +3648,12 @@
         });
         define("QUERY_PROGRAM_IV_ARB", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("ARB query record is short");
-            const target = view.getUint32(offset, true);
-            const pname = view.getUint32(offset + 4, true);
+            const target = view.getUint32(offset + protocol.F.QUERY_PROGRAM_IV_ARB.target, true);
+            const pname = view.getUint32(offset + protocol.F.QUERY_PROGRAM_IV_ARB.pname, true);
             const value = this.queryProgramivARB(target, pname);
-            view.setUint32(offset + 8, value === null ?
+            view.setUint32(offset + protocol.F.QUERY_PROGRAM_IV_ARB.status, value === null ?
                 SYNC_STATUS_FAILED : SYNC_STATUS_OK, true);
-            if (value !== null) view.setUint32(offset + 12, value >>> 0, true);
+            if (value !== null) view.setUint32(offset + protocol.F.QUERY_PROGRAM_IV_ARB.value, value >>> 0, true);
         });
         define("QUERY_PROGRAM_PARAMETER_FV_ARB", function(a, bytes, view, offset, size) {
             this.queryProgramParameterARB(view, offset, size, false);
@@ -3693,17 +3670,17 @@
          */
         define("QUERY_PROGRAM_STRING_ARB", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("ARB string record is short");
-            const target = view.getUint32(offset, true);
-            const capacity = view.getUint32(offset + 16, true);
+            const target = view.getUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.target, true);
+            const capacity = view.getUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.data_size, true);
             const program = this.arbProgramFor(target);
             if (!program || 24 + capacity > size) {
-                view.setUint32(offset + 8, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.status, SYNC_STATUS_FAILED, true);
                 return;
             }
             const text = program.source;
             const written = Math.min(text.length, capacity);
-            view.setUint32(offset + 8, SYNC_STATUS_OK, true);
-            view.setUint32(offset + 12, written, true);
+            view.setUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.status, SYNC_STATUS_OK, true);
+            view.setUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.length, written, true);
             for (let i = 0; i < written; ++i)
                 bytes[offset + 24 + i] = text.charCodeAt(i) & 0xff;
         });
@@ -3890,10 +3867,10 @@
         });
         define("DRAW_ELEMENTS_DIRECT", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("direct draw record is short");
-            this.drawFromBuffers(view.getUint32(offset, true), 0,
-                view.getInt32(offset + 12, true), {
-                    type: view.getUint32(offset + 16, true),
-                    bufferOffset: view.getUint32(offset + 20, true),
+            this.drawFromBuffers(view.getUint32(offset + protocol.F.DRAW_ELEMENTS_DIRECT.mode, true), 0,
+                view.getInt32(offset + protocol.F.DRAW_ELEMENTS_DIRECT.count, true), {
+                    type: view.getUint32(offset + protocol.F.DRAW_ELEMENTS_DIRECT.type, true),
+                    bufferOffset: view.getUint32(offset + protocol.F.DRAW_ELEMENTS_DIRECT.offset, true),
                 });
         });
         define("DRAW_RANGE_ELEMENTS_DIRECT", function(a, bytes, view, offset, size) {
@@ -8881,18 +8858,19 @@ struct BlitParams {
             if (size < READ_PIXELS_HEADER_SIZE) {
                 throw new GLStreamError("glReadPixels record is too short");
             }
-            const x = view.getInt32(offset, true);
-            const y = view.getInt32(offset + 4, true);
-            const width = view.getInt32(offset + 8, true);
-            const height = view.getInt32(offset + 12, true);
-            const format = view.getUint32(offset + 16, true);
-            const type = view.getUint32(offset + 20, true);
-            const dataSize = view.getUint32(offset + 24, true);
-            view.setUint32(offset + 28, SYNC_STATUS_PENDING, true);
+            const F = protocol.F.READ_PIXELS;
+            const x = view.getInt32(offset + F.x, true);
+            const y = view.getInt32(offset + F.y, true);
+            const width = view.getInt32(offset + F.width, true);
+            const height = view.getInt32(offset + F.height, true);
+            const format = view.getUint32(offset + F.format, true);
+            const type = view.getUint32(offset + F.type, true);
+            const dataSize = view.getUint32(offset + F.data_size, true);
+            view.setUint32(offset + F.status, SYNC_STATUS_PENDING, true);
 
             const source = this.readAttachmentView();
             if (!source || width <= 0 || height <= 0) {
-                view.setUint32(offset + 28, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + F.status, SYNC_STATUS_FAILED, true);
                 return;
             }
             const bytesPerRow = alignUp(width * 4, 256);
@@ -8927,7 +8905,7 @@ struct BlitParams {
                         dataSize) {
                     bytes.set(out, recordOffset + READ_PIXELS_HEADER_SIZE);
                     new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-                        .setUint32(recordOffset + 28, SYNC_STATUS_OK, true);
+                        .setUint32(recordOffset + protocol.F.READ_PIXELS.status, SYNC_STATUS_OK, true);
                 }
                 if (typeof writeGuest === "function") {
                     const payload = new Uint8Array(4 + dataSize);
@@ -8938,7 +8916,7 @@ struct BlitParams {
                         metadata);
                     const status = new Uint8Array(4);
                     new DataView(status.buffer).setUint32(0, SYNC_STATUS_OK, true);
-                    writeGuest(recordOffset + 28, status, metadata);
+                    writeGuest(recordOffset + protocol.F.READ_PIXELS.status, status, metadata);
                 }
             }).catch(error => {
                 this.warnOnce("readback", "glReadPixels mapping failed",
@@ -9617,13 +9595,15 @@ struct Params { value : vec4<f32>, }
             const stride = doublePrecision ? 8 : 4;
             if (size < 16 + 4 * stride)
                 throw new GLStreamError("ARB parameter record is short");
-            const kind = view.getUint32(offset, true);
-            const target = view.getUint32(offset + 4, true);
-            const index = view.getUint32(offset + 8, true);
+            // the two records agree up to index
+            const F = protocol.F.PROGRAM_PARAMETER_FV_ARB;
+            const kind = view.getUint32(offset + F.parameter_kind, true);
+            const target = view.getUint32(offset + F.target, true);
+            const index = view.getUint32(offset + F.index, true);
             // The double-precision record carries exactly one parameter; the
             // float one carries glProgramEnvParameters4fvEXT's whole run.
             const count = doublePrecision ? 1 :
-                Math.max(1, view.getUint32(offset + 12, true));
+                Math.max(1, view.getUint32(offset + F.count, true));
             const program = this.arbProgramFor(target);
             if (!program)
                 return this.refuse("glProgramParameterARB",
@@ -9691,18 +9671,20 @@ struct Params { value : vec4<f32>, }
          * components at 24 -- the read-back twin of programParameterARB. */
         queryProgramParameterARB(view, offset, size, doublePrecision) {
             if (size < 24) throw new GLStreamError("ARB query record is short");
-            const kind = view.getUint32(offset, true);
-            const target = view.getUint32(offset + 4, true);
-            const index = view.getUint32(offset + 8, true);
+            // FV and DV share the header
+            const F = protocol.F.QUERY_PROGRAM_PARAMETER_FV_ARB;
+            const kind = view.getUint32(offset + F.parameter_kind, true);
+            const target = view.getUint32(offset + F.target, true);
+            const index = view.getUint32(offset + F.index, true);
             const program = this.arbProgramFor(target);
             const stride = doublePrecision ? 8 : 4;
             if (!program || index >= arbProgram.MAX_PROGRAM_PARAMETERS ||
                     24 + 4 * stride > size) {
-                view.setUint32(offset + 12, SYNC_STATUS_FAILED, true);
+                view.setUint32(offset + F.status, SYNC_STATUS_FAILED, true);
                 return;
             }
             const storage = arbParameterStorage(program, kind);
-            view.setUint32(offset + 12, SYNC_STATUS_OK, true);
+            view.setUint32(offset + F.status, SYNC_STATUS_OK, true);
             for (let c = 0; c < 4; ++c) {
                 const at = offset + 24 + c * stride;
                 if (doublePrecision) view.setFloat64(at, storage[index * 4 + c], true);
@@ -9836,9 +9818,10 @@ struct Params { value : vec4<f32>, }
             const limits = this.limits || {};
             const s = this.current;
             switch (pname) {
-            case 0x76380001: // private v86gl host-capability bitset
-                return 0x1 | 0x2 |
-                    (this.deviceFeatures.float32Filterable ? 0x4 : 0) | 0x8;
+            case protocol.C.V86GL_QUERY_HOST_CAPABILITIES:
+                return protocol.C.V86GL_HOST_CAP_WEBGL2 | protocol.C.V86GL_HOST_CAP_COLOR_BUFFER_FLOAT |
+                    (this.deviceFeatures.float32Filterable ? protocol.C.V86GL_HOST_CAP_TEXTURE_FLOAT_LINEAR : 0) |
+                    protocol.C.V86GL_HOST_CAP_ANISOTROPY;
             case GL.MAX_TEXTURE_SIZE:
                 return Math.min(16384, limits.maxTextureDimension2D || 8192);
             case GL.MAX_3D_TEXTURE_SIZE:

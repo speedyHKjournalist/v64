@@ -16,7 +16,7 @@ const path = require("path");
 
 const root = path.join(__dirname, "../src/browser/glbridge");
 const constants = require(path.join(root, "gl-webgpu", "gl_constants.js"));
-const wire = require(path.join(root, "gl-webgpu", "gl_wire.js"));
+const wire = require(path.join(root, "gl-webgpu", "gl_protocol.js"));
 const executorModule = require(path.join(root, "gl-webgpu", "gl_executor.js"));
 const { createFakeHost } = require(path.join(__dirname, "../tests/glbridge/gl_fake_gpu.js"));
 

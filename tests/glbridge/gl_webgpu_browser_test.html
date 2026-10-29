@@ -4,8 +4,8 @@
 <canvas id="gpu" width="96" height="64"></canvas>
 <pre id="result">RUNNING</pre>
 <script src="../../src/browser/glbridge/webgpu_host.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_protocol.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_constants.js"></script>
-<script src="../../src/browser/glbridge/gl-webgpu/gl_wire.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -28,8 +28,8 @@
         records.push(result);
     }
     function call(name, ...args) {
-        const types = GLWireFormat.SIGNATURES[name][1];
-        const payload = new Uint8Array(GLWireFormat.payloadBytes(types));
+        const types = GLProtocol.SIGNATURES[name][1];
+        const payload = new Uint8Array(GLProtocol.payloadBytes(types));
         const view = new DataView(payload.buffer);
         let at = 0;
         for (let i = 0; i < types.length; ++i) {
