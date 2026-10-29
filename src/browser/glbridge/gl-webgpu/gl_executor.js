@@ -377,6 +377,9 @@
     /* GL enum translation                                                */
     /* ================================================================== */
 
+    // the draw buffers that include the window's front buffer
+    const FRONT_BUFFERS = new Set([GL.FRONT, GL.FRONT_AND_BACK, GL.FRONT_LEFT, GL.LEFT]);
+
     // the widest aliased line drawn (ALIASED_LINE_WIDTH_RANGE)
     const MAX_LINE_WIDTH = 64;
 
@@ -3019,7 +3022,7 @@
 
         /* ---- frame boundaries ---- */
 
-        define("FLUSH", function() { this.flushFrame(); });
+        define("FLUSH", function() { this.flushFront(); });
         define("FINISH", function(a, bytes, view, offset, size, metadata) {
             return this.onFinish(bytes, view, offset, size, metadata);
         });
@@ -6800,8 +6803,10 @@
             const s = this.current;
             if (!s.drawFramebuffer) {
                 const view = this.ensureBackBuffer();
+                // glDrawBuffer(GL_NONE) writes no colour (review S2-28)
+                const none = s.drawBuffers.every(buffer => buffer === GL.NONE);
                 return {
-                    color: [{ view, format: this.backBufferFormat,
+                    color: [none ? null : { view, format: this.backBufferFormat,
                               texture: this.backBuffer, mipLevel: 0,
                               origin: { x: 0, y: 0, z: 0 } }],
                     depth: this.ensureDepthTarget(),
@@ -6924,6 +6929,9 @@
             }
             const targets = this.currentTargets();
             if (!targets) return null;
+            // drawing into the front buffer shows at the next glFlush (D-08)
+            if (targets.isDefault && this.current.drawBuffers.some(b => FRONT_BUFFERS.has(b)))
+                this.frontDrawn = true;
             const encoder = this.ensureEncoder();
             const colorAttachments = targets.color.map(target => target ? {
                 view: target.view,
@@ -9398,6 +9406,7 @@ struct BlitParams {
         },
 
         onSwapBuffers() {
+            this.frontDrawn = false;
             this.finishFrame(true);
         },
 
@@ -10031,8 +10040,20 @@ struct BlitParams {
 
         // glFinish returns once the GPU has done the work before it: the
         // guest waits for the status word
+        /*
+         * glFlush and glFinish: what was drawn into the front buffer of the
+         * window is shown (review D-08: only SwapBuffers presented). The
+         * front and back buffers share the one colour target, so this
+         * presents everything drawn since.
+         */
+        flushFront() {
+            if (!this.frontDrawn) return this.flushFrame();
+            this.frontDrawn = false;
+            this.finishFrame(true);
+        },
+
         onFinish(bytes, view, offset, size, metadata) {
-            this.flushFrame();
+            this.flushFront();
             if (size < 4) return;
             const answer = value => {
                 const status = new Uint8Array(4);

@@ -1429,6 +1429,18 @@ test("a 32-bit float target is not blended without float32-blendable (review S1-
     assert.strictEqual(target.blend, undefined);
 });
 
+test("drawing into the front buffer shows at glFlush; GL_NONE draws no colour (D-08, S2-28)", () => {
+    const { executor, log } = newExecutor();
+    let presents = 0;
+    executor.presentToCanvas = () => { ++presents; return true; };
+    run(executor, immediateTriangle(new GLStream().makeCurrent(1, 0, 0, 64, 64)).call("FLUSH"));
+    assert.strictEqual(presents, 0, "the back buffer waits for SwapBuffers");
+    run(executor, immediateTriangle(new GLStream().call("DRAW_BUFFER", GL.FRONT)).call("FLUSH").call("FLUSH"));
+    assert.strictEqual(presents, 1, "once, for what was drawn");
+    run(executor, immediateTriangle(new GLStream().call("DRAW_BUFFER", GL.NONE)));
+    assert.deepStrictEqual(log.draws.at(-1).pipeline.descriptor.fragment.targets, [null]);
+});
+
 test("MIN and MAX blending set WebGPU's factors to one (review S1-2b)", () => {
     const { executor, log } = newExecutor();
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
