@@ -2428,13 +2428,14 @@
                 "    let out_specular = vertex_specular;\n";
         }
 
-        // Fog distance is the clip-space w, which for a standard projection is
-        // the eye-space depth -- exactly D3DPRASTERCAPS_WFOG, which the guest
-        // advertises. D3DRS_RANGEFOGENABLE asks for true radial distance
-        // instead, which removes the "fog thins towards the screen edges"
-        // artefact of depth-based fog.
-        const fogDistance = signature.fogRange && signature.needsViewSpace
-            ? "length(position_view.xyz)" : "abs(result.position.w)";
+        // Vertex fog's distance is the camera-space depth |z| (wined3d's
+        // abs(ec_pos.z)); the clip-space w it used to be equals that only
+        // under a standard projection. D3DRS_RANGEFOGENABLE asks for true
+        // radial distance instead, which removes the "fog thins towards the
+        // screen edges" artefact of depth-based fog. (Table fog, per pixel,
+        // is the one that uses w: D3DPRASTERCAPS_WFOG.)
+        const fogDistance = !signature.needsViewSpace ? "abs(result.position.w)"
+            : signature.fogRange ? "length(position_view.xyz)" : "abs(position_view.z)";
         const fogFactor = fixedFogFactorExpression(signature.fogMode,
             "fog_distance");
         const fogBody = fogFactor
@@ -10517,7 +10518,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 signature.needsViewSpace = signature.positionType !== "screen" && (
                     !!signature.lighting ||
                     signature.pointScale ||
-                    (signature.fogRange && !!signature.fogMode) ||
+                    // (the vertex signature's fogMode is NONE under table fog)
+                    !!signature.fogMode ||
                     signature.coordStages.some(stage =>
                         stage.tciMode !== D3DTSS_TCI_PASSTHRU));
                 signature.flatShading = flatShading;

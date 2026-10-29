@@ -91,12 +91,16 @@
     function compareScene(scene, hw, sw, got, tol = 2) {
         const synth = synthetic(scene.name);
         const ref = synth || hw.rgba, alt = synth ? null : sw.rgba;
-        const result = { name: scene.name, problems: [], interior: 0, edge: 0, worst: 0 };
-        if (got.exception) result.problems.push("exception: " + got.exception.split("\n")[0]);
+        // problems: everything, as text; failedTiles: the labels of the tiles
+        // with interior failures; other: what is not a tile's (WebGPU errors,
+        // ReadPixels results)
+        const result = { name: scene.name, problems: [], failedTiles: [], other: [], interior: 0, edge: 0, worst: 0 };
+        const other = text => { result.problems.push(text); result.other.push(text); };
+        if (got.exception) other("exception: " + got.exception.split("\n")[0]);
         for (const message of got.validation || [])
-            result.problems.push("WebGPU: " + message.split("\n")[0]);
+            other("WebGPU: " + message.split("\n")[0]);
         if (!got.rgba || got.rgba.length !== ref.length) {
-            result.problems.push("no pixels read back");
+            other("no pixels read back");
             result.verdict = "FAIL";
             return result;
         }
@@ -112,7 +116,9 @@
                 const d = maxDiff(ref, got.rgba, (y * SIZE + x) * 4);
                 if (d > worst) { worst = d; wx = x; wy = y; }
             }
-            if (bad) result.problems.push("[" + tile.label + "] " + bad + " px, worst " + worst + " @" + wx + "," + wy +
+            if (!bad) continue;
+            result.failedTiles.push(tile.label);
+            result.problems.push("[" + tile.label + "] " + bad + " px, worst " + worst + " @" + wx + "," + wy +
                 ": ref " + pixel(ref, wx, wy) + " got " + pixel(got.rgba, wx, wy));
         }
         // glReadPixels results, byte for byte (floats decoded)
@@ -125,7 +131,7 @@
             let worst = R.length === G.length ? 0 : Infinity;
             for (let i = 0; i < Math.min(R.length, G.length); ++i) worst = Math.max(worst, Math.abs(R[i] - G[i]));
             if (worst > (isFloat ? 0.01 : tol))
-                result.problems.push("ReadPixels 0x" + e.format.toString(16) + "/0x" + e.type.toString(16) + " " +
+                other("ReadPixels 0x" + e.format.toString(16) + "/0x" + e.type.toString(16) + " " +
                     e.w + "x" + e.h + "@" + e.x + "," + e.y + ": ref " + R.slice(0, 8).map(v => +v.toFixed(3)) +
                     " got " + G.slice(0, 8).map(v => +v.toFixed(3)));
         });

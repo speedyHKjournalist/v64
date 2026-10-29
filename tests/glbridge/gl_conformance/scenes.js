@@ -859,6 +859,24 @@ scene("tex_wrap_border", {
     // NEAREST magnification of a 2x2 at exact texel boundary is ambiguous; skip
 });
 
+scene("tex_wrap_nearest", {
+    what: "4x1 texture of four colours, NEAREST, s from -1 to 2 in quarter steps: REPEAT tiles, MIRRORED_REPEAT reflects, CLAMP_TO_EDGE holds the edges",
+    spec: "GL 2.1 §3.8.7 (Table 3.19, REPEAT and MIRRORED_REPEAT)",
+}, s => {
+    s.ortho2d().op("Enable", "TEXTURE_2D").op("TexEnvi", "TEXTURE_ENV", "TEXTURE_ENV_MODE", "REPLACE");
+    s.op("GenTextures", [1]).op("BindTexture", "TEXTURE_2D", 1)
+        .op("TexImage2D", "TEXTURE_2D", 0, "RGBA", 4, 1, 0, "RGBA", "UNSIGNED_BYTE",
+            { u8: [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255] })
+        .op("TexParameteri", "TEXTURE_2D", "TEXTURE_MIN_FILTER", "NEAREST")
+        .op("TexParameteri", "TEXTURE_2D", "TEXTURE_MAG_FILTER", "NEAREST");
+    // each tile is one texel of s: the quarter centred at s = (k + 0.5) / 4
+    const wraps = ["REPEAT", "MIRRORED_REPEAT", "CLAMP_TO_EDGE"];
+    wraps.forEach((w, row) => {
+        s.op("TexParameteri", "TEXTURE_2D", "TEXTURE_WRAP_S", w);
+        [-0.875, -0.375, 1.125, 1.625].forEach((st, k) => s.tileQuad(row * 4 + k, w + " s=" + st, tc(st, 0.5)));
+    });
+});
+
 scene("mipmap", {
     what: "mip level selection NEAREST_MIPMAP_NEAREST at scale 1/2/4/8; BASE_LEVEL/MAX_LEVEL/LOD_BIAS/MIN_LOD; incomplete texture",
     spec: "GL 2.1 §3.8.8-3.8.10 (incomplete texture => unit disabled)",
@@ -1050,6 +1068,31 @@ void main() {
 const FS_STATE = "void main(){ gl_FragColor = vec4(gl_FrontLightModelProduct.sceneColor.rgb, 1.0) * 0.5 + gl_LightSource[0].diffuse * 0.5 + vec4(gl_Fog.color.rgb, 0.0) * 0.25; }";
 const VS_CLAMP = "varying vec4 v; void main(){ gl_FrontColor = vec4(gl_Vertex.x < 40.0 ? 2.0 : 0.0, 0.0, 0.0, 1.0); v = vec4(gl_Vertex.x < 40.0 ? 2.0 : 0.0); gl_Position = ftransform(); }";
 const FS_CLAMP = "uniform float u_which; varying vec4 v; void main(){ gl_FragColor = u_which < 0.5 ? gl_Color : vec4(clamp(v.x, 0.0, 1.0), 0.0, 0.0, 1.0); }";
+
+scene("glsl_texture2dproj_vec4", {
+    what: "texture2DProj with a vec4 coordinate divides by w, not z; with a vec3 by z",
+    spec: "GLSL 1.20 §8.7",
+}, s => {
+    s.ortho2d();
+    s.ops_(gridTex(1));
+    s.op("Program", 9, VS_PASS, "uniform sampler2D u_tex; uniform float u_case; void main(){ gl_FragColor = u_case < 0.5 ? " +
+        "texture2DProj(u_tex, vec4(1.25, 0.75, 0.3, 2.0)) : texture2DProj(u_tex, vec3(0.375, 0.875, 0.5)); }")
+        .op("UseProgram", 9).op("Uniform1i", "u_tex", 0);
+    s.op("Uniform1f", "u_case", 0).tileQuad(0, "vec4 (1.25,.75,.3,2) / w -> texel(2,1)");
+    s.op("Uniform1f", "u_case", 1).tileQuad(1, "vec3 (.375,.875,.5) / z -> texel(3,3)");
+    s.op("UseProgram", 0);
+});
+
+// (after glsl_texture2dproj_vec4, in another context, with the same name)
+scene("glsl_program_name_reuse", {
+    what: "a program named like one of an earlier context's draws with its own shaders",
+    spec: "GL 2.1 §2.15 (program objects belong to their share group)",
+}, s => {
+    s.ortho2d();
+    s.op("Program", 9, VS_PASS, "void main(){ gl_FragColor = vec4(0.0, 0.5, 1.0, 1.0); }").op("UseProgram", 9);
+    s.tileQuad(0, "program 9 of this context: (0, .5, 1)");
+    s.op("UseProgram", 0);
+});
 
 scene("glsl_semantics", {
     what: "GLSL 1.10/1.20: mod/fract/sign of negatives, gl_FragCoord origin, gl_FrontFacing, matrix*vector order, builtins, texture2DProj, discard, mat3(mat4), atan(y,x), int division, built-in state uniforms",

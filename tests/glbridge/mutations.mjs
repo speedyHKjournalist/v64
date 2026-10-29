@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+// Mutation testing for the D3D9 and GL executors: each mutation is a one-line
+// semantic bug (the reviews' experiments, docs/d3d-webgpu-review.md section 6
+// and docs/opengl-webgpu-review.md section 6). It is applied to a copy of the
+// tree, the Node suites and the real-GPU conformance pages run against it,
+// and a test that fails has killed it. A mutation that no longer matches the
+// source is reported, so the list follows the code.
+//
+//   node tests/glbridge/mutations.mjs [--node-only] [--only=d3d9|gl] [filter]
+//
+// Exits 1 when a family's kill rate is below its floor.
+import { cpSync as cp_sync, mkdtempSync as mkdtemp_sync, readFileSync as read_file_sync,
+    writeFileSync as write_file_sync, rmSync as rm_sync } from "node:fs";
+import { spawnSync as spawn_sync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const args = process.argv.slice(2);
+const node_only = args.includes("--node-only");
+const family = (args.find(a => a.startsWith("--only=")) || "").slice(7);
+const filter = args.find(a => !a.startsWith("--"));
+
+const D = "src/browser/glbridge/d3d9-webgpu/";
+const G = "src/browser/glbridge/gl-webgpu/";
+const MUTATIONS = {
+    d3d9: { floor: 10 / 12, node: ["d3d9_webgpu_executor_test.js", "d3d9_shader_pipeline_test.js",
+        "d3d9_shader_wgsl_validation_test.js", "ddraw_webgpu_executor_test.js", "ddraw_blit_wgsl_validation_test.js"],
+    pages: ["d3d9_conformance_browser_test.html"], list: [
+        ["cull CW/CCW swapped", D + "d3d9_executor.js",
+            'if (cullValue === D3DCULL_CW) cullMode = "front";\n                else if (cullValue === D3DCULL_CCW) cullMode = "back";',
+            'if (cullValue === D3DCULL_CW) cullMode = "back";\n                else if (cullValue === D3DCULL_CCW) cullMode = "front";'],
+        ["ZFUNC LESS <-> GREATER", D + "d3d9_executor.js", '"never", "less", "equal", "less-equal",\n        "greater",',
+            '"never", "greater", "equal", "less-equal",\n        "less",'],
+        ["BLEND SRCALPHA <-> INVSRCALPHA", D + "d3d9_executor.js",
+            '"src-alpha",            // D3DBLEND_SRCALPHA\n        "one-minus-src-alpha",  // D3DBLEND_INVSRCALPHA',
+            '"one-minus-src-alpha",  // D3DBLEND_SRCALPHA\n        "src-alpha",            // D3DBLEND_INVSRCALPHA'],
+        ["BLENDOP SUBTRACT <-> REVSUBTRACT", D + "d3d9_executor.js", 'undefined, "add", "subtract", "reverse-subtract",',
+            'undefined, "add", "reverse-subtract", "subtract",'],
+        ["MODULATE2X without the 2x", D + "d3d9_executor.js",
+            'case D3DTOP_MODULATE2X: return "((" + a1 + " * " + a2 + ") * 2.0)";',
+            'case D3DTOP_MODULATE2X: return "((" + a1 + " * " + a2 + ") * 1.0)";'],
+        ["address WRAP <-> MIRROR", D + "d3d9_executor.js", 'undefined, "repeat", "mirror-repeat", "clamp-to-edge",',
+            'undefined, "mirror-repeat", "repeat", "clamp-to-edge",'],
+        ["D3DCOLOR not BGRA-swizzled", D + "d3d9_executor.js",
+            '"in" + FF_LOCATION_COLOR0 + (signature.colorIsBGRA ? ".bgra" : "")',
+            '"in" + FF_LOCATION_COLOR0 + (signature.colorIsBGRA ? "" : "")'],
+        ["rcp(0) = 0 instead of FLT_MAX", D + "d3d9_shader_pipeline.js",
+            'out.push("fn d9_rcp(v: f32) -> f32 { return select(1.0 / v, " +\n                FLOAT_MAX + ", v == 0.0); }");',
+            'out.push("fn d9_rcp(v: f32) -> f32 { return select(1.0 / v, " +\n                "0.0" + ", v == 0.0); }");'],
+        ["linear fog uses START for END", D + "d3d9_executor.js", '"clamp((uniforms.fog_params.y - " + distance + ") / " +',
+            '"clamp((uniforms.fog_params.x - " + distance + ") / " +'],
+        ["lit() ignores the N.L > 0 gate", D + "d3d9_shader_pipeline.js", '"s.x > 0.0 && s.y > 0.0);");', '"s.y > 0.0);");'],
+        ["DDraw indexed colour key range exclusive", D + "ddraw_ops.js",
+            "if (index >= blit.key_low.x && index <= blit.key_high.x) {",
+            "if (index > blit.key_low.x && index < blit.key_high.x) {"],
+        ["DDraw RGB colour key range exclusive", D + "ddraw_ops.js",
+            "if (all(quantised >= blit.key_low.rgb) &&\n            all(quantised <= blit.key_high.rgb)) {",
+            "if (all(quantised > blit.key_low.rgb) &&\n            all(quantised < blit.key_high.rgb)) {"],
+    ] },
+    gl: { floor: 0.9, node: ["gl_executor_test.js", "gl_shader_translator_test.js", "gl_shader_wgsl_validation_test.js",
+        "gl_fixed_function_wgsl_test.js", "gl_arb_program_test.js", "graphics_checkpoint_test.js"],
+    pages: ["gl_conformance_browser_test.html", "gl_multipass_browser_test.html"], list: [
+        ["cull FRONT/BACK swapped", G + "gl_executor.js", 'return state.cullFace === GL.FRONT ? "front" : "back";',
+            'return state.cullFace === GL.FRONT ? "back" : "front";'],
+        ["depth GL_LESS -> less-equal", G + "gl_executor.js",
+            'const COMPARE_FUNCTIONS = {\n        [GL.NEVER]: "never", [GL.LESS]: "less",',
+            'const COMPARE_FUNCTIONS = {\n        [GL.NEVER]: "never", [GL.LESS]: "less-equal",'],
+        ["blend SRC_ALPHA <-> ONE_MINUS_SRC_ALPHA", G + "gl_executor.js",
+            '[GL.SRC_ALPHA]: "src-alpha", [GL.ONE_MINUS_SRC_ALPHA]: "one-minus-src-alpha",',
+            '[GL.SRC_ALPHA]: "one-minus-src-alpha", [GL.ONE_MINUS_SRC_ALPHA]: "src-alpha",'],
+        ["blend DST_COLOR <-> ONE_MINUS_DST_COLOR", G + "gl_executor.js",
+            '[GL.DST_COLOR]: "dst", [GL.ONE_MINUS_DST_COLOR]: "one-minus-dst",',
+            '[GL.DST_COLOR]: "one-minus-dst", [GL.ONE_MINUS_DST_COLOR]: "dst",'],
+        ["texenv MODULATE drops texture alpha", G + "gl_fixed_function.js", 'emit("    frag = frag * " + cs + ";");',
+            'emit("    frag = vec4<f32>(frag.rgb * " + cs + ".rgb, frag.a);");'],
+        ["fog mix operands inverted", G + "gl_fixed_function.js", 'emit("    frag = vec4<f32>(mix(glState.fogColor.rgb, frag.rgb, " +',
+            'emit("    frag = vec4<f32>(mix(frag.rgb, glState.fogColor.rgb, " +'],
+        ["alpha test GREATER -> >=", G + "gl_fixed_function.js", 'greater: ">", notequal', 'greater: ">=", notequal'],
+        ["polygon offset units sign", G + "gl_executor.js", "Math.round(s.polygonOffset.units) : 0,",
+            "-Math.round(s.polygonOffset.units) : 0,"],
+        ["packed indexed draw ignores min index", G + "gl_executor.js", "firstSourceVertex = min;", "firstSourceVertex = 0;"],
+        ["direct EBO ignores index offset", G + "gl_executor.js", "offset: indexInfo.bufferOffset, count,", "offset: 0, count,"],
+        ["viewport y top-left origin", G + "gl_executor.js", "const y = clamp(vp.y, 0, height);",
+            "const y = clamp(height - vp.y - vp.height, 0, height);"],
+        ["depth clear keyed on STENCIL bit", G + "gl_executor.js", "if (mask & GL.DEPTH_BUFFER_BIT) pending.depth = s.clearDepth;",
+            "if (mask & GL.STENCIL_BUFFER_BIT) pending.depth = s.clearDepth;"],
+        ["stencil INCR -> increment-wrap", G + "gl_executor.js", '[GL.INCR]: "increment-clamp"', '[GL.INCR]: "increment-wrap"'],
+        ["light quadratic attenuation uses d", G + "gl_fixed_function.js",
+            'l + ".quadraticAttenuation * dist * dist, 1e-8);");', 'l + ".quadraticAttenuation * dist, 1e-8);");'],
+        ["infinite-viewer half vector sign", G + "gl_fixed_function.js", "normalize(VP + vec3<f32>(0.0, 0.0, 1.0))",
+            "normalize(VP + vec3<f32>(0.0, 0.0, -1.0))"],
+        ["GLSL mod() -> WGSL %", G + "gl_shader_translator.js",
+            '"(" + args[0] + " - " + args[1] + " * floor(" + args[0] + " / " + args[1] + "))";',
+            '"(" + args[0] + " % " + args[1] + ")";'],
+        ["GLSL texture2DProj(vec4) divides by z", G + "gl_shader_translator.js",
+            'const wComponent = coordType.size === 4 ? "w" : "z";', 'const wComponent = coordType.size === 4 ? "z" : "z";'],
+        ["ARB LIT diffuse not clamped", G + "gl_arb_program.js", '"    let diffuse = max(v.x, 0.0);\\n" +',
+            '"    let diffuse = v.x;\\n" +'],
+        ["ARB LRP operands swapped", G + "gl_arb_program.js",
+            'emit: a => "mix(" + a[2] + ", " + a[1] + ", " + a[0] + ")" },', 'emit: a => "mix(" + a[1] + ", " + a[2] + ", " + a[0] + ")" },'],
+        ["texture wrap REPEAT -> mirror", G + "gl_executor.js", '[GL.REPEAT]: "repeat",', '[GL.REPEAT]: "mirror-repeat",'],
+        ["QUADS first triangle loses provoking", G + "gl_executor.js",
+            "// provoking vertex is the quad's last, so it leads both halves\n                out[w++] = b + 3; out[w++] = b; out[w++] = b + 1;",
+            "// provoking vertex is the quad's last, so it leads both halves\n                out[w++] = b; out[w++] = b + 1; out[w++] = b + 3;"],
+        ["normal matrix column swap", G + "gl_executor.js", "n[0] = c00 * det; n[1] = c01 * det; n[2] = c02 * det;",
+            "n[0] = c00 * det; n[1] = c02 * det; n[2] = c01 * det;"],
+    ] },
+};
+
+const copy = mkdtemp_sync(join(tmpdir(), "glbridge-mutations-"));
+let below_floor = false;
+try {
+    for(const part of ["src/browser/glbridge", "tests/glbridge"])
+        cp_sync(join(root, part), join(copy, part), { recursive: true });
+    const run = (file, isPage) => {
+        const result = isPage
+            ? spawn_sync(process.execPath, [join(copy, "tests/glbridge/gl_multipass_browser_runner.js"), file],
+                { encoding: "utf8", timeout: 600000, env: { ...process.env, GL_TIMEOUT_MS: "300000" } })
+            : spawn_sync(process.execPath, [join(copy, "tests/glbridge", file)], { encoding: "utf8", timeout: 300000 });
+        return result.status === 0;
+    };
+    for(const [name, set] of Object.entries(MUTATIONS)) {
+        if(family && family !== name) continue;
+        const suites = [...set.node.map(f => [f, false]), ...(node_only ? [] : set.pages.map(p => [p, true]))];
+        let killed = 0, applied = 0;
+        for(const [label, file, from, to] of set.list) {
+            if(filter && !label.includes(filter)) continue;
+            const path = join(copy, file);
+            const original = read_file_sync(path, "utf8");
+            const matches = original.split(from).length - 1;
+            if(matches !== 1) {
+                console.log("STALE    " + name + ": " + label + " (" + matches + " matches: update the mutation)");
+                continue;
+            }
+            write_file_sync(path, original.replace(from, to));
+            ++applied;
+            const killers = [];
+            try {
+                for(const [suite, isPage] of suites) if(!run(suite, isPage)) killers.push(suite);
+            } finally {
+                write_file_sync(path, original);
+            }
+            if(killers.length) ++killed;
+            console.log((killers.length ? "KILLED   " : "SURVIVED ") + name + ": " + label.padEnd(44) + killers.join(","));
+        }
+        const rate = applied ? killed / applied : 1;
+        console.log(name + ": " + killed + "/" + applied + " killed" + (filter ? "" : ", floor " + Math.round(set.floor * 100) + "%"));
+        if(!filter && rate < set.floor) below_floor = true;
+    }
+} finally {
+    rm_sync(copy, { recursive: true, force: true });
+}
+process.exitCode = below_floor ? 1 : 0;

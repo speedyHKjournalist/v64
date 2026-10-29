@@ -74,14 +74,15 @@
     };
 
     const OP = { CREATE_DEVICE: 2, PRESENT: 4, CLEAR: 5, BEGIN_SCENE: 6, END_SCENE: 7, COLOR_FILL: 9,
-        CREATE_TEXTURE_2D: 0x110, CREATE_PIXEL_SHADER: 0x122,
+        CREATE_TEXTURE_2D: 0x110, CREATE_VERTEX_SHADER: 0x121, CREATE_PIXEL_SHADER: 0x122,
+        SET_VERTEX_SHADER: 0x211, DD_BLT: 0x500, DD_SET_COLOR_KEY: 0x501,
         SET_RENDER_STATE: 0x200, SET_TEXTURE_STAGE_STATE: 0x202, SET_VIEWPORT: 0x204,
         SET_SCISSOR_RECT: 0x205, SET_FVF: 0x20E, SET_RENDER_TARGET: 0x20F,
         SET_PIXEL_SHADER: 0x212, DRAW_PRIMITIVE_UP: 0x302 };
     const RS = { ZENABLE: 7, SHADEMODE: 9, ZFUNC: 23, ALPHATESTENABLE: 15, ALPHAREF: 24, ALPHAFUNC: 25,
         ALPHABLENDENABLE: 27, SRCBLEND: 19, DESTBLEND: 20, CULLMODE: 22, FOGENABLE: 28,
         SPECULARENABLE: 29, FOGCOLOR: 34, FOGTABLEMODE: 35, TEXTUREFACTOR: 60, LIGHTING: 137,
-        FOGVERTEXMODE: 140, MULTISAMPLEANTIALIAS: 161, COLORWRITEENABLE: 168, BLENDOP: 171,
+        FOGVERTEXMODE: 140, FOGSTART: 36, FOGEND: 37, MULTISAMPLEANTIALIAS: 161, COLORWRITEENABLE: 168, BLENDOP: 171,
         SCISSORTESTENABLE: 174,
         DEPTHBIAS: 195 };
     const PT = { LINELIST: 2, TRIANGLELIST: 4 };
@@ -112,17 +113,35 @@
         return cmd(OP.DRAW_PRIMITIVE_UP, u32(dev, type, count, STRIDE, list.length, data.byteLength, 0, 0),
             [{ offsetField: 24, data }]);
     };
+    // FVF XYZ | DIFFUSE, stride 16: with the default identity transforms x
+    // and y are clip space, and z the camera-space distance fog reads
+    const drawXYZ = (dev, list) => {
+        const data = new Uint8Array(list.length * 16), view = new DataView(data.buffer);
+        list.forEach((v, i) => {
+            view.setFloat32(i * 16, v[0], true);
+            view.setFloat32(i * 16 + 4, v[1], true);
+            view.setFloat32(i * 16 + 8, v[2], true);
+            view.setUint32(i * 16 + 12, v[3] >>> 0, true);
+        });
+        return [cmd(OP.SET_FVF, cat([u32(dev, 0x42, 2, 0), element(0, 2, 0), element(12, 4, 10)])),
+            cmd(OP.DRAW_PRIMITIVE_UP, u32(dev, PT.TRIANGLELIST, list.length / 3, 16, list.length, data.byteLength, 0, 0),
+                [{ offsetField: 24, data }])];
+    };
+    const fullXYZ = (z, color) => [[-1, 1, z, color], [1, 1, z, color], [-1, -1, z, color],
+        [1, 1, z, color], [1, -1, z, color], [-1, -1, z, color]];
     const rs = (dev, state, value) => cmd(OP.SET_RENDER_STATE, u32(dev, state, value, 0));
     const tss = (dev, stage, state, value) => cmd(OP.SET_TEXTURE_STAGE_STATE, u32(dev, stage, state, value));
     const viewport = (dev, x, y, w, h, minZ = 0, maxZ = 1) =>
         cmd(OP.SET_VIEWPORT, u32(dev, x, y, w, h, f(minZ), f(maxZ), 0));
     const clear = (dev, flags, color, z = 1, rects = []) =>
         cmd(OP.CLEAR, cat([u32(dev, flags, color, f(z), 0, rects.length), ...rects.map(r => u32(...r))]));
-    const pixelShader = (dev, handle, tokens) => {
+    const shader = opcode => (dev, handle, tokens) => {
         const hash = global.D3D9ShaderPipeline.hashTokens(tokens);
-        return cmd(OP.CREATE_PIXEL_SHADER, u32(dev, handle, tokens.length, 0, hash.low, hash.high),
+        return cmd(opcode, u32(dev, handle, tokens.length, 0, hash.low, hash.high),
             [{ offsetField: 12, data: u32(...tokens) }]);
     };
+    const pixelShader = shader(OP.CREATE_PIXEL_SHADER);
+    const vertexShader = shader(OP.CREATE_VERTEX_SHADER);
 
     // A little SM2/3 assembler (the translator's own opcode and register numbers)
     const asm = (() => {
@@ -157,11 +176,11 @@
           body: d => [rs(d, RS.ALPHABLENDENABLE, 1), rs(d, RS.SRCBLEND, 5), rs(d, RS.DESTBLEND, 6),
               draw(d, quad(0, 0, 64, 64, 0.5, 0x80FF0000))],
           probes: [{ at: [32, 32], expect: [128, 0, 127], tolerance: 2 }] },
-        { name: "control: the same blend with ALPHAARG1 = DIFFUSE set explicitly",
+        { name: "SRCALPHA/INVSRCALPHA with ALPHAARG1 = DIFFUSE set explicitly (a quarter red over blue)",
           clear: 0xFF0000FF,
           body: d => [tss(d, 0, 4, 2), tss(d, 0, 5, 0), rs(d, RS.ALPHABLENDENABLE, 1), rs(d, RS.SRCBLEND, 5),
-              rs(d, RS.DESTBLEND, 6), draw(d, quad(0, 0, 64, 64, 0.5, 0x80FF0000))],
-          probes: [{ at: [32, 32], expect: [128, 0, 127], tolerance: 2 }] },
+              rs(d, RS.DESTBLEND, 6), draw(d, quad(0, 0, 64, 64, 0.5, 0x40FF0000))],
+          probes: [{ at: [32, 32], expect: [64, 0, 191], tolerance: 2 }] },
         { name: "D3DBLENDOP_REVSUBTRACT is dst - src",
           clear: 0xFF808080,
           body: d => [rs(d, RS.ALPHABLENDENABLE, 1), rs(d, RS.SRCBLEND, 2), rs(d, RS.DESTBLEND, 2),
@@ -256,6 +275,46 @@
                   draw(d, quad(0, 0, 64, 64, 0.5, 0xFFFFFFFF))];
           },
           probes: [{ at: [32, 32], expect: [255, 0, 255] }] },
+        { name: "rcp(0) is the largest float, not 0",
+          body: d => {
+              const { OP: O, REG, ins, dst, src, def } = asm;
+              const tokens = [0xFFFF0200,   // ps_2_0: min(rcp(0), 1) is white
+                  ...def(0, 0, 0, 0, 0), ...def(1, 1, 1, 1, 1),
+                  ins(O.RCP, 2), dst(REG.TEMP, 0), src(REG.CONST, 0, 0x00),
+                  ins(O.MIN, 3), dst(REG.TEMP, 0), src(REG.TEMP, 0), src(REG.CONST, 1),
+                  ins(O.MOV, 2), dst(REG.COLOROUT, 0), src(REG.TEMP, 0),
+                  0x0000FFFF];
+              return [pixelShader(d, 0x40000003, tokens), cmd(OP.SET_PIXEL_SHADER, u32(d, 0x40000003)),
+                  draw(d, quad(0, 0, 64, 64, 0.5, 0xFF000000))];
+          },
+          probes: [{ at: [32, 32], expect: [255, 255, 255] }] },
+        { name: "linear vertex fog: (END - d) / (END - START) of the vertex colour",
+          body: d => [rs(d, RS.FOGENABLE, 1), rs(d, RS.FOGCOLOR, 0x0000FF00), rs(d, RS.FOGVERTEXMODE, 3),
+              rs(d, RS.FOGSTART, f(0)), rs(d, RS.FOGEND, f(1)), ...drawXYZ(d, fullXYZ(0.25, 0xFFFF0000))],
+          probes: [{ at: [32, 32], expect: [191, 64, 0], tolerance: 2 }] },
+        { name: "lit: no specular when N.L is not positive",
+          body: d => {
+              const { OP: O, REG, ins, dst, src, def } = asm;
+              const D = 0x80000000;   // dcl_position
+              const tokens = [0xFFFE0200,   // vs_2_0: oD0 = lit(N.L -0.5, N.H 0.5, power 1).z
+                  ins(O.DCL, 2), D, dst(REG.INPUT, 0),
+                  ...def(0, -0.5, 0.5, 0, 1),
+                  ins(O.LIT, 2), dst(REG.TEMP, 0), src(REG.CONST, 0),
+                  ins(O.MOV, 2), dst(REG.RASTOUT, 0), src(REG.INPUT, 0),
+                  ins(O.MOV, 2), dst(REG.ATTROUT, 0), src(REG.TEMP, 0, 0xAA),
+                  0x0000FFFF];
+              return [vertexShader(d, 0x40000005, tokens), cmd(OP.SET_VERTEX_SHADER, u32(d, 0x40000005)),
+                  ...drawXYZ(d, fullXYZ(0.5, 0xFFFFFFFF))];
+          },
+          probes: [{ at: [32, 32], expect: [0, 0, 0] }] },
+        { name: "a DirectDraw source colour key keeps the destination where the source is the key colour",
+          body: (d, rt) => [
+              cmd(OP.CREATE_TEXTURE_2D, u32(d, rt + 1, W, W, 1, 22, 0, 0, 0, 0)),
+              cmd(OP.COLOR_FILL, u32(d, rt + 1, 0, 0xFF00FF00, 0, 0, 32, 64, 0)),
+              cmd(OP.COLOR_FILL, u32(d, rt + 1, 0, 0xFF0000FF, 32, 0, 64, 64, 0)),
+              cmd(OP.DD_SET_COLOR_KEY, u32(rt + 1, 0, 0x0000FF00, 0x0000FF00, 1, 0)),
+              cmd(OP.DD_BLT, u32(d, rt + 1, 0, 0, 0, 0, W, W, rt, 0, 0, 1, 0, 0, W, W, 0, 0, 0, 0))],
+          probes: [{ at: [16, 32], expect: [0, 0, 0] }, { at: [48, 32], expect: [0, 0, 255] }] },
         { name: "4x MSAA back buffer: a draw reaches the screen",
           ref: "S1-6", msaa: 4, backBuffer: true,
           body: d => [draw(d, quad(0, 0, 64, 64, 0.5, 0xFF00FF00))],

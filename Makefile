@@ -84,6 +84,22 @@ glbridge:
 test-glbridge:
 	node tests/glbridge/run.cjs
 
+# The graphics proxies on the real GPU (headless Chrome with WebGPU): the D3D9
+# and GL pixel conformance suites, Chrome's compiler on the D3D9 translator's
+# control flow, and the older browser pages
+GLBRIDGE_GPU_PAGES = d3d9_conformance_browser_test.html gl_conformance_browser_test.html \
+	d3d9_shader_tint_browser_test.html d3d9_webgpu_browser_test.html gl_webgpu_browser_test.html \
+	gl_multipass_browser_test.html d3d9_legacy_format_browser_test.html
+.PHONY: glbridge-gpu-tests glbridge-mutations
+glbridge-gpu-tests:
+	set -e; for page in $(GLBRIDGE_GPU_PAGES); do \
+		echo "$$page"; GL_TIMEOUT_MS=300000 node tests/glbridge/gl_multipass_browser_runner.js $$page > /dev/null; done
+
+# One-line semantic bugs the tests have to catch (slow: every mutation runs
+# the Node suites and the GPU pages)
+glbridge-mutations:
+	node tests/glbridge/mutations.mjs
+
 # Used for nodejs builds and in order to profile code.
 # `debug` gives identifiers a readable name, make sure it doesn't have any side effects.
 CLOSURE_READABLE=--formatting PRETTY_PRINT --debug

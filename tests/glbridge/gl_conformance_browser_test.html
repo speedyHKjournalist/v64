@@ -58,11 +58,20 @@
                 ...executor.gpuErrors.errors.slice(errorsBefore).map(e => e.source + ": " + e.message),
                 ...executor.hostErrors.slice(hostErrorsBefore).map(e => "host: " + e.message)];
             const result = GLConformanceCompare.compareScene(scene, hw[scene.name], sw[scene.name], got);
-            const reason = GLConformanceKnownFailures[scene.name];
-            if (reason && result.verdict === "PASS") {
+            const entry = GLConformanceKnownFailures[scene.name];
+            const reason = entry && (entry.reason || entry);
+            // a known scene: the whole of it (a string), or only its listed tiles
+            const unexpected = entry && entry.tiles ? [...result.other,
+                ...result.failedTiles.filter(tile => !entry.tiles.includes(tile)).map(tile => "[" + tile + "]")] : [];
+            const fixedTiles = entry && entry.tiles ? entry.tiles.filter(tile => !result.failedTiles.includes(tile)) : [];
+            if (entry && (result.verdict === "PASS" || fixedTiles.length)) {
                 ++failed;
-                lines.push("FIXED " + scene.name + " -- delete it from known_failures.js (" + reason + ")");
-            } else if (reason) {
+                lines.push("FIXED " + scene.name + " -- delete " + (fixedTiles.length && result.verdict !== "PASS"
+                    ? "tiles " + JSON.stringify(fixedTiles) : "it") + " from known_failures.js (" + reason + ")");
+            } else if (unexpected.length) {
+                ++failed;
+                lines.push("FAIL  " + scene.name + " (known: " + reason + ") also fails: " + unexpected.join("; "));
+            } else if (entry) {
                 ++known;
                 lines.push("known " + scene.name + " (" + reason + ")");
                 if (params.get("all")) for (const p of result.problems) lines.push("        " + p);
