@@ -59,7 +59,8 @@ pub fn a32_backdoor_translate(va: u32, write: bool) -> f64 {
     if crate::aarch64::cpu::sctlr() & crate::aarch64::cpu::SCTLR_M == 0 {
         return va as f64;
     }
-    match crate::aarch64::mmu::translate(va as u64, if write { Access::Write } else { Access::Read }, true, 1) {
+    let access = if write { Access::Write } else { Access::Read };
+    match crate::aarch64::mmu::translate(va as u64, access, true, 1) {
         Ok(t) if !t.device => t.pa as f64,
         _ => -1.0,
     }
