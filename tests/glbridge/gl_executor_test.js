@@ -1007,6 +1007,23 @@ test("pixel rectangles are clipped by the window, not the viewport; CopyPixels c
         [{ x: 60, y: 60, z: 0 }, { x: 0, y: 0, z: 0 }, { width: 4, height: 4, depthOrArrayLayers: 1 }]);
 });
 
+test("depth and stencil pixel rectangles write depth and stencil (D-15)", () => {
+    const { executor, log } = newExecutor();
+    run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64).call("COLOR4F", 0, 0, 1, 1)
+        .call("WINDOW_POS3F", 4, 4, 0)
+        .drawPixels(2, 2, GL.DEPTH_COMPONENT, GL.FLOAT, new Uint8Array(new Float32Array([0.25, 0.25, 0.5, 0.5]).buffer))
+        .call("STENCIL_MASK", 0x0f)
+        .drawPixels(2, 2, GL.STENCIL_INDEX, GL.UNSIGNED_BYTE, new Uint8Array([1, 2, 3, 4]))
+        .call("COPY_PIXELS", 0, 0, 8, 8, GL.DEPTH).call("COPY_PIXELS", 0, 0, 8, 8, GL.STENCIL));
+    const depth = log.draws.filter(d => d.pipeline.descriptor.label === "GL depth pixels");
+    assert.strictEqual(depth.length, 2, "drawn and copied");
+    assert.match(depth[0].pipeline.descriptor.fragment.module.code, /out\.depth = clamp\(value/);
+    const stencil = log.draws.filter(d => d.pipeline.descriptor.label === "GL stencil pixels");
+    assert.strictEqual(stencil.length, 18, "nine draws each: clear, then a bit at a time");
+    assert.deepStrictEqual(stencil.slice(0, 9).map(d => d.pipeline.descriptor.depthStencil.stencilWriteMask),
+        [0x0f, 1, 2, 4, 8, 0, 0, 0, 0], "under the stencil write mask");
+});
+
 test("glDrawPixels uploads a pixel rectangle and draws it at the raster position", () => {
     const { executor, log } = newExecutor();
     const pixels = new Uint8Array([

@@ -1555,6 +1555,8 @@
                 texCoord: Array.from({ length: MAX_TEXTURE_COORDS },
                     () => new Float32Array([0, 0, 0, 1])),
                 rasterPos: new Float32Array([0, 0, 0, 1]),
+                // the colour when the raster position was set (GL 2.1 2.13)
+                rasterColor: new Float32Array([1, 1, 1, 1]),
                 rasterValid: true,
             },
 
@@ -2807,6 +2809,7 @@
             // window coordinates and the position is always valid.
             const s = this.current;
             s.current.rasterPos.set([a[0], a[1], clamp(a[2], 0, 1), 1]);
+            s.current.rasterColor.set(s.current.color);
             s.current.rasterValid = true;
         });
         define("VERTEX_ATTRIB4F", function(a) {
@@ -9962,7 +9965,8 @@ struct BlitParams {
             }
             const target = this.device.createTexture({
                 label: "GL depth readback", size: { width: rect.width, height: rect.height, depthOrArrayLayers: 1 },
-                format: "r32float", usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_SRC,
+                format: "r32float", usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_SRC |
+                    TEXTURE_USAGE_TEXTURE_BINDING,
             });
             const origin = this.device.createBuffer({ label: "GL depth readback origin", size: 16,
                 usage: BUFFER_USAGE_UNIFORM | BUFFER_USAGE_COPY_DST });
@@ -10154,6 +10158,8 @@ struct BlitParams {
             if (20 + dataSize > size)
                 throw new GLStreamError("glDrawPixels data is truncated");
             const source = bytes.subarray(offset + 20, offset + 20 + dataSize);
+            if (format === GL.DEPTH_COMPONENT || format === GL.STENCIL_INDEX)
+                return this.drawPixelValues(format, source, width, height, type);
             const store = this.current.pixelStore;
             const rgba = convertPixels(source, 0, width, height, 1,
                 format, type, "RGBA", unpackState(store));
@@ -10164,6 +10170,200 @@ struct BlitParams {
             this.drawPixelRGBA(rgba, width, height,
                 this.current.current.rasterPos[0],
                 this.current.current.rasterPos[1], false);
+        },
+
+        /*
+         * glDrawPixels of DEPTH_COMPONENT or STENCIL_INDEX (review D-15: drawn
+         * as grey colour). Depth fragments carry the raster colour and go
+         * through the per-fragment operations; stencil indices are written,
+         * under the scissor and the stencil write mask only (GL 2.1 section
+         * 4.3.1). The values become a texture drawn like a pixel rectangle.
+         */
+        drawPixelValues(format, source, width, height, type) {
+            const unpack = unpackState(this.current.pixelStore);
+            const depth = format === GL.DEPTH_COMPONENT;
+            let pixels = null;
+            if (depth) {
+                const converted = convertPixelsForStorage(source, 0, width, height, 1, format, type,
+                    { gpu: "depth32float", depth: true, base: "DEPTH" }, unpack);
+                pixels = converted && converted.pixels;
+            } else {
+                const rgba = convertPixels(source, 0, width, height, 1, format, type, "RGBA", unpack);
+                if (rgba) {
+                    pixels = new Uint8Array(width * height);
+                    for (let i = 0; i < pixels.length; ++i) pixels[i] = rgba[i * 4];
+                }
+            }
+            if (!pixels)
+                return this.refuse("glDrawPixels", "unsupported or truncated pixel data",
+                    { width, height, format, type }, GL.INVALID_ENUM);
+            const texture = this.device.createTexture({
+                label: "GL " + (depth ? "depth" : "stencil") + " pixels",
+                size: { width, height, depthOrArrayLayers: 1 }, format: depth ? "r32float" : "r8uint",
+                usage: TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING,
+            });
+            this.device.queue.writeTexture({ texture }, pixels, { bytesPerRow: width * (depth ? 4 : 1),
+                rowsPerImage: height }, { width, height, depthOrArrayLayers: 1 });
+            this.drawValueTexture(depth ? "depth" : "stencil", texture, width, height,
+                this.current.current.rasterPos[0], this.current.current.rasterPos[1]);
+            this.retire(texture);
+        },
+
+        // glCopyPixels of DEPTH or STENCIL: the read buffer's values, drawn as above
+        copyPixelValues(kind, x, y, width, height) {
+            const source = this.readDepthStencil(kind);
+            if (!source) return;
+            const rect = clipToSource(source, x, y, width, height);
+            if (!rect.width || !rect.height) return;
+            this.endPass();
+            const encoder = this.ensureEncoder();
+            let texture;
+            if (kind === "depth") {
+                texture = this.depthToFloat(encoder, source, rect);
+            } else {
+                // the stencil aspect is copied whole, through a buffer
+                const bytesPerRow = alignUp(source.width, 256);
+                const staging = this.device.createBuffer({ label: "GL stencil copy",
+                    size: bytesPerRow * source.height, usage: BUFFER_USAGE_COPY_DST | BUFFER_USAGE_COPY_SRC });
+                encoder.copyTextureToBuffer({ texture: source.texture, mipLevel: source.mipLevel || 0,
+                    origin: { x: 0, y: 0, z: source.layer || 0 }, aspect: "stencil-only" },
+                { buffer: staging, bytesPerRow, rowsPerImage: source.height },
+                { width: source.width, height: source.height, depthOrArrayLayers: 1 });
+                texture = this.device.createTexture({ label: "GL stencil pixels",
+                    size: { width: rect.width, height: rect.height, depthOrArrayLayers: 1 }, format: "r8uint",
+                    usage: TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING });
+                encoder.copyBufferToTexture({ buffer: staging, offset: rect.y * bytesPerRow + rect.x,
+                    bytesPerRow, rowsPerImage: source.height }, { texture },
+                { width: rect.width, height: rect.height, depthOrArrayLayers: 1 });
+                this.retire(staging);
+            }
+            const raster = this.current.current.rasterPos;
+            this.drawValueTexture(kind, texture, rect.width, rect.height,
+                raster[0] + (rect.x - x) * this.current.pixelZoom.x, raster[1] + (rect.y - y) * this.current.pixelZoom.y);
+            this.retire(texture);
+        },
+
+        /*
+         * A texture of depths or stencil indices drawn at window (x, y): the
+         * depths with the raster colour, through one pipeline; the indices in
+         * nine draws -- clearing the covered stencil values, then setting each
+         * bit where the index has it, since WebGPU has no per-fragment
+         * stencil reference.
+         */
+        drawValueTexture(kind, texture, width, height, x, y) {
+            const s = this.current;
+            const pass = this.ensurePass();
+            if (!pass) return;
+            const targets = this.passTargets;
+            if (!targets.depthFormat || (kind === "stencil" && !formatHasStencil(targets.depthFormat))) {
+                this.warnOnce("pixel-values-buffer", "the framebuffer has no " + kind + " buffer to draw into", {});
+                return;
+            }
+            const window = { width: targets.width, height: targets.height };
+            const x1 = x + width * s.pixelZoom.x, y1 = y + height * s.pixelZoom.y;
+            const ndcX = value => value * 2 / window.width - 1;
+            const ndcY = value => 1 - value * 2 / window.height;
+            const vertices = new Float32Array([
+                ndcX(x), ndcY(y), 0, 1, 0, 0,   ndcX(x1), ndcY(y), 0, 1, 1, 0,
+                ndcX(x), ndcY(y1), 0, 1, 0, 1,  ndcX(x), ndcY(y1), 0, 1, 0, 1,
+                ndcX(x1), ndcY(y), 0, 1, 1, 0,  ndcX(x1), ndcY(y1), 0, 1, 1, 1,
+            ]);
+            const slice = this.uploadVertices(new Uint8Array(vertices.buffer));
+            if (!slice) return;
+            const view = texture.createView();
+            let color = null;
+            if (kind === "depth") {
+                color = this.allocateUniform(16);
+                if (!color) return;
+                new Float32Array(this.uniformStaging.buffer, color.offset, 4).set(s.current.rasterColor);
+                this.device.queue.writeBuffer(color.buffer, color.offset, this.uniformStaging, color.offset, 16);
+            }
+            for (const bit of kind === "depth" ? [0] : [-1, 0, 1, 2, 3, 4, 5, 6, 7]) {
+                const pipeline = this.valuePipeline(kind, bit);
+                if (!pipeline) return;
+                pass.setPipeline(pipeline);
+                this.applyPassState(pass);
+                pass.setViewport(0, 0, window.width, window.height, 0, 1);
+                if (kind === "stencil") pass.setStencilReference(bit < 0 ? 0 : 0xff);
+                pass.setVertexBuffer(0, slice.buffer, slice.offset);
+                pass.setBindGroup(0, this.device.createBindGroup({
+                    layout: pipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: view }].concat(color ? [{ binding: 1,
+                        resource: { buffer: color.buffer, offset: color.offset, size: 16 } }] : []),
+                }));
+                pass.draw(6, 1, 0, 0);
+                ++this.stats.draws;
+            }
+        },
+
+        valuePipeline(kind, bit) {
+            const s = this.current;
+            const targets = this.passTargets;
+            const depth = kind === "depth";
+            const colorMask = (s.colorMask[0] ? 1 : 0) | (s.colorMask[1] ? 2 : 0) |
+                (s.colorMask[2] ? 4 : 0) | (s.colorMask[3] ? 8 : 0);
+            const stencilMask = s.stencil.front.writeMask & 0xff;
+            const key = [kind, bit, targets.color.map(c => c ? c.format : "-").join(","), targets.depthFormat,
+                targets.sampleCount || 1, depth ? [s.enabled.has(GL.DEPTH_TEST) ? s.depthFunc : "off",
+                    s.depthMask ? 1 : 0, s.enabled.has(GL.STENCIL_TEST) ? stencilKey(s) : "off",
+                    s.enabled.has(GL.BLEND) ? blendKey(s) : "off", colorMask].join(",") : stencilMask].join("|");
+            this.valuePipelineCache = this.valuePipelineCache || new Map();
+            let pipeline = this.valuePipelineCache.get(key);
+            if (pipeline) return pipeline;
+            const outputs = targets.color.map((target, i) => target && depth ?
+                "    @location(" + i + ") color" + i + " : vec4<f32>," : "").join("\n");
+            const code = `
+struct VSIn { @location(0) position : vec4<f32>, @location(1) uv : vec2<f32>, }
+struct Varying { @builtin(position) position : vec4<f32>, @location(0) uv : vec2<f32>, }
+@vertex fn vs_main(v : VSIn) -> Varying {
+    var out : Varying; out.position = v.position; out.uv = v.uv; return out;
+}
+@group(0) @binding(0) var values : texture_2d<${depth ? "f32" : "u32"}>;
+${depth ? `struct Raster { color : vec4<f32>, }
+@group(0) @binding(1) var<uniform> raster : Raster;
+struct PixelOut {
+${outputs}
+    @builtin(frag_depth) depth : f32,
+}` : ""}
+@fragment fn fs_main(v : Varying) ${depth ? "-> PixelOut " : ""}{
+    let size = textureDimensions(values);
+    let texel = min(vec2<u32>(v.uv * vec2<f32>(size)), size - vec2<u32>(1u));
+    let value = textureLoad(values, texel, 0).r;
+${depth ? `    var out : PixelOut;
+    out.depth = clamp(value, 0.0, 1.0);
+${targets.color.map((target, i) => target ? "    out.color" + i + " = raster.color;" : "").join("\n")}
+    return out;` : bit < 0 ? "    _ = value;" : `    if (((value >> ${bit}u) & 1u) == 0u) { discard; }`}
+}`;
+            const stencilFace = { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "replace" };
+            const descriptor = {
+                label: "GL " + kind + " pixels", layout: "auto",
+                vertex: { module: this.shaderModule(code), entryPoint: "vs_main", buffers: [{
+                    arrayStride: 24, stepMode: "vertex", attributes: [
+                        { shaderLocation: 0, format: "float32x4", offset: 0 },
+                        { shaderLocation: 1, format: "float32x2", offset: 16 },
+                    ] }] },
+                fragment: { module: this.shaderModule(code), entryPoint: "fs_main",
+                    targets: targets.color.map(target => target ? { format: target.format,
+                        blend: depth && s.enabled.has(GL.BLEND) && this.blendable(target.format) ?
+                            gpuBlendState(s) : undefined,
+                        writeMask: depth ? colorMask : 0 } : null) },
+                primitive: { topology: "triangle-list", cullMode: "none" },
+                multisample: { count: targets.sampleCount || 1 },
+                depthStencil: depth ? {
+                    format: targets.depthFormat,
+                    depthWriteEnabled: s.enabled.has(GL.DEPTH_TEST) && s.depthMask,
+                    depthCompare: s.enabled.has(GL.DEPTH_TEST) ? COMPARE_FUNCTIONS[s.depthFunc] || "less" : "always",
+                    ...(formatHasStencil(targets.depthFormat) ? gpuStencilState(s) : {}),
+                } : {
+                    format: targets.depthFormat, depthWriteEnabled: false, depthCompare: "always",
+                    stencilFront: stencilFace, stencilBack: stencilFace, stencilReadMask: 0xff,
+                    stencilWriteMask: bit < 0 ? stencilMask : (1 << bit) & stencilMask,
+                },
+            };
+            pipeline = this.gpuErrors.scoped("pixel values pipeline",
+                () => this.device.createRenderPipeline(descriptor), { key }).object;
+            this.valuePipelineCache.set(key, pipeline);
+            return pipeline;
         },
 
         drawBitmap(bytes, view, offset, size) {
@@ -10195,10 +10395,10 @@ struct BlitParams {
         copyPixels(x, y, width, height, type) {
             if (width <= 0 || height <= 0 || !this.current.current.rasterValid)
                 return;
+            if (type === GL.DEPTH || type === GL.STENCIL)
+                return this.copyPixelValues(type === GL.DEPTH ? "depth" : "stencil", x, y, width, height);
             if (type !== GL.COLOR)
-                return this.refuse("glCopyPixels",
-                    "depth and stencil pixel copies need typed attachment copies",
-                    { type }, GL.INVALID_OPERATION);
+                return this.refuse("glCopyPixels", "unknown pixel type", { type }, GL.INVALID_ENUM);
             const source = this.readAttachmentView();
             if (!source) return this.refuse("glCopyPixels",
                 "no readable colour attachment", {},
@@ -10273,7 +10473,8 @@ struct BlitParams {
             const stride = alignUp(rowBytes, store.unpackAlignment || 1);
             const skip = store.unpackSkipPixels || 0;
             const rgba = new Uint8Array(width * height * 4);
-            const color = this.current.current.color;
+            // the colour latched with the raster position (review S2-15)
+            const color = this.current.current.rasterColor;
             for (let row = 0; row < height; ++row) {
                 const rowStart = (store.unpackSkipRows + row) * stride;
                 for (let x = 0; x < width; ++x) {
@@ -10653,6 +10854,8 @@ struct Params { value : vec4<f32>, }
             }
             s.current.rasterValid = valid;
             if (!valid) return;
+            // (the current colour, unlit: lighting the raster position is to do)
+            s.current.rasterColor.set(s.current.color);
             const ndcX = clip[0] / cw, ndcY = clip[1] / cw;
             const ndcZ = clip[2] / cw;
             s.current.rasterPos[0] = s.viewport.x +

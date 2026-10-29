@@ -1031,6 +1031,30 @@ loose("lines_width1", "GL_LINES width 1 (baseline)", "GL 2.1 §3.4.1", s => {
     s.tiles.push({ label: "horizontal + vertical 1px lines", x: 2, y: 18, w: 60, h: 44 });
 });
 
+scene("drawpixels_depth_stencil", {
+    what: "DrawPixels and CopyPixels of DEPTH_COMPONENT (the raster colour, depth tested) and of STENCIL_INDEX",
+    spec: "GL 2.1 §4.3.1 (DrawPixels), §4.3.3 (CopyPixels)",
+}, s => {
+    s.ortho2d().op("Enable", "DEPTH_TEST").op("DepthFunc", "LESS");
+    s.op("Color3f", 0, 0, 1).op("WindowPos2f", 4, 4)
+        .op("DrawPixels", 16, 16, "DEPTH_COMPONENT", "FLOAT", { f32: new Array(256).fill(0.25) });
+    s.op("Color3f", 1, 1, 0).op("WindowPos2f", 4, 40).op("CopyPixels", 4, 4, 16, 16, "DEPTH");
+    s.op("Color3f", 1, 0, 0);
+    s.rect(0, 0, 28, 28);   // depth 0.5: behind what the pixels wrote
+    s.rect(0, 36, 28, 64);
+    s.tiles.push({ label: "drawn depth 0.25 in the raster colour, in front", x: 0, y: 0, w: 28, h: 28 });
+    s.tiles.push({ label: "copied depth, in front", x: 0, y: 36, w: 28, h: 28 });
+    s.op("Disable", "DEPTH_TEST");
+    s.op("WindowPos2f", 36, 4).op("DrawPixels", 16, 16, "STENCIL_INDEX", "UNSIGNED_BYTE", { u8: new Array(256).fill(5) });
+    s.op("WindowPos2f", 40, 40).op("CopyPixels", 36, 4, 16, 16, "STENCIL");
+    s.op("Enable", "STENCIL_TEST").op("StencilFunc", "EQUAL", 5, 0xFF).op("Color3f", 0, 1, 0);
+    s.rect(32, 0, 64, 28);
+    s.rect(32, 36, 64, 64);
+    s.op("Disable", "STENCIL_TEST");
+    s.tiles.push({ label: "drawn stencil 5", x: 32, y: 0, w: 32, h: 28 });
+    s.tiles.push({ label: "copied stencil", x: 32, y: 36, w: 32, h: 28 });
+});
+
 scene("polygon_stipple", {
     what: "POLYGON_STIPPLE window-aligned pattern: first byte = bottom row, MSB = leftmost",
     spec: "GL 2.1 §3.5.6 (pattern origin at window (0,0))",
