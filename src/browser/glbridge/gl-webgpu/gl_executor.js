@@ -4304,7 +4304,7 @@
                 unit.texGen[cap - GL.TEXTURE_GEN_S].enabled = value;
                 return;
             case GL.POINT_SPRITE:
-                unit.env.pointSprite = value;
+                // the enable is global; COORD_REPLACE is the unit's (glTexEnv)
                 if (value) s.enabled.add(cap); else s.enabled.delete(cap);
                 return;
             default: break;
@@ -5415,6 +5415,7 @@
                     "o" + (variant.logicOp || 0).toString(16),
                     variant.twoSided ? "2" : "-",
                     variant.flatShading ? "f" : "-",
+                    variant.programPointSize ? "z" : "-",
                     variant.colorTargets || 1].join("|");
         },
 
@@ -6094,9 +6095,7 @@
             if (indexInfo && indexInfo.data) {
                 const indices = indexInfo.decoded ||
                     readIndices(indexInfo.type, indexInfo.data, count);
-                const expandIndexedPoints = mode === GL.POINTS &&
-                    (this.current.point.size !== 1 ||
-                        this.current.enabled.has(GL.POINT_SPRITE));
+                const expandIndexedPoints = mode === GL.POINTS && this.pointsExpand();
                 if (expandIndexedPoints) {
                     sourceIndices = indices;
                     packedVertexCount = count;
@@ -6325,8 +6324,7 @@
             const s = this.current;
             // wide indexed points gather, polygon modes read the vertices:
             // both from the CPU copy
-            if ((indexInfo && mode === GL.POINTS &&
-                    (s.point.size !== 1 || s.enabled.has(GL.POINT_SPRITE))) ||
+            if ((indexInfo && mode === GL.POINTS && this.pointsExpand()) ||
                     (isPolygonPrimitive(mode) && !this.polygonsFill()))
                 return this.drawFromShadowBuffers(mode, first, count, indexInfo,
                     this.wantedAttributes(this.currentProgramObject()));
@@ -6428,9 +6426,11 @@
                 }
                 const slice = this.uploadVertices(new Uint8Array(data.buffer));
                 if (!slice) return;
+                // a stride of zero repeats the one value for every vertex and
+                // instance (review S2-19: an instance-step buffer advanced
+                // per point once wide points made each point an instance)
                 buffers.push({ gpuBuffer: slice.buffer,
-                    baseOffset: slice.offset, stride: components * 4,
-                    stepMode: "instance", attributes });
+                    baseOffset: slice.offset, stride: 0, attributes });
             }
 
             if (!buffers.length)
@@ -7283,7 +7283,14 @@ ${fragmentCode}`;
                 return this.drawPolygonModes(request);
             let index = request.index;
             this.drawFace = request.face || null;
-            this.drawingPoints = request.mode === GL.POINTS;
+            let expandedPoints = request.mode === GL.POINTS && this.pointsExpand();
+            if (expandedPoints && index) {
+                // the draw paths gather wide indexed points; a corner buffer
+                // cannot step under an index
+                this.warnOnce("indexed-wide-points", "indexed points are drawn one pixel wide", {});
+                expandedPoints = false;
+            }
+            this.drawingExpandedPoints = expandedPoints;
             if (s.enabled.has(GL.STENCIL_TEST) && stencilMasksDiverge(s))
                 this.warnOnce("stencil-masks",
                     "the front and back stencil masks differ; WebGPU has one " +
@@ -7304,8 +7311,6 @@ ${fragmentCode}`;
              * sprites are implemented as an instanced six-vertex quad: the
              * application's attributes advance once per point, while this
              * extra corner attribute advances for the six quad vertices. */
-            const expandedPoints = request.mode === GL.POINTS && !index &&
-                (s.point.size !== 1 || s.enabled.has(GL.POINT_SPRITE));
             if (expandedPoints) {
                 const corners = new Float32Array([
                     -1, -1,  1, -1, -1,  1,
@@ -7486,6 +7491,19 @@ ${fragmentCode}`;
                         this.logicTargetViews[i] = fallbackView;
             }
             return true;
+        },
+
+        /*
+         * Whether points are drawn as quads: WebGPU rasterises one-pixel
+         * points only, and GL's size comes from POINT_SIZE, the distance
+         * attenuation and POINT_SIZE_MIN as well as sprites and a program's
+         * gl_PointSize (review S2-18: a size of 1 ignored the rest).
+         */
+        pointsExpand() {
+            const s = this.current, p = s.point;
+            return p.size !== 1 || s.enabled.has(GL.POINT_SPRITE) || p.sizeMin > 1 ||
+                p.attenuation[0] !== 1 || p.attenuation[1] !== 0 || p.attenuation[2] !== 0 ||
+                (s.enabled.has(GL.VERTEX_PROGRAM_POINT_SIZE) && !!this.currentProgramObject());
         },
 
         polygonsFill() {
@@ -7711,8 +7729,9 @@ ${fragmentCode}`;
                 alphaTest: s.enabled.has(GL.ALPHA_TEST) ?
                     (ALPHA_TEST_NAMES[s.alphaFunc.func] || "always") : "always",
                 clipPlaneCount,
-                pointSprite: this.drawingPoints &&
-                    (s.enabled.has(GL.POINT_SPRITE) || s.point.size !== 1),
+                pointSprite: !!this.drawingExpandedPoints,
+                // gl_PointSize counts only under VERTEX_PROGRAM_POINT_SIZE
+                programPointSize: s.enabled.has(GL.VERTEX_PROGRAM_POINT_SIZE),
                 pointCoordLowerLeft:
                     s.point.spriteCoordOrigin === GL.LOWER_LEFT,
                 polygonStipple: s.enabled.has(GL.POLYGON_STIPPLE),
@@ -8044,6 +8063,8 @@ ${fragmentCode}`;
             // depth bias on lines and points (review S1-2c)
             const fillOffset = s.enabled.has(GL.POLYGON_OFFSET_FILL) &&
                 isPolygonPrimitive(request.mode) && !request.expandedPoints;
+            // a point's quad is not a face (review S2-18: it was culled)
+            const cullMode = request.expandedPoints ? "none" : this.gpuCullMode(s);
             const layoutKey = request.buffers.map(b =>
                 b.stride + ":" + (b.stepMode || "vertex") + "@" + b.attributes.map(a =>
                     a.location + ":" + a.format + ":" + a.offset).join(",")).join("|");
@@ -8052,7 +8073,7 @@ ${fragmentCode}`;
                 layoutKey,
                 request.expandedPoints ? "triangle-list" : topology,
                 strip && index ? "u32" : "-",
-                this.gpuFrontFace(s), this.gpuCullMode(s),
+                this.gpuFrontFace(s), cullMode,
                 s.enabled.has(GL.DEPTH_TEST) ? s.depthFunc : "off",
                 s.depthMask ? 1 : 0,
                 s.enabled.has(GL.STENCIL_TEST) ? stencilKey(s) : "off",
@@ -8105,7 +8126,7 @@ ${fragmentCode}`;
                 primitive: {
                     topology: request.expandedPoints ? "triangle-list" : topology,
                     frontFace: this.gpuFrontFace(s),
-                    cullMode: this.gpuCullMode(s),
+                    cullMode,
                     ...(strip && index ? { stripIndexFormat: "uint32" } : {}),
                     ...(s.enabled.has(GL.DEPTH_CLAMP) &&
                         this.deviceFeatures.depthClipControl ?

@@ -639,6 +639,38 @@ test("culling both faces drops polygon draws", () => {
     assert.strictEqual(log.draws.length, 0);
 });
 
+test("points expand for attenuation, a minimum size or a program's size, and are not culled (S2-18)", () => {
+    let { executor, log } = newExecutor();
+    let stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("POINT_PARAMETERFV", GL.POINT_DISTANCE_ATTENUATION, 0, 1, 0)
+        .call("ENABLE", GL.CULL_FACE).call("CULL_FACE", GL.BACK)
+        .call("BEGIN", GL.POINTS).call("VERTEX3F", 0, 0, 0).call("END");
+    run(executor, stream);
+    assert.strictEqual(log.draws[0].count, 6, "a size-1 point with attenuation is a quad");
+    assert.strictEqual(log.draws[0].pipeline.descriptor.primitive.cullMode, "none");
+
+    // glEnable(GL_POINT_SPRITE) leaves the unit's COORD_REPLACE alone
+    run(executor, new GLStream().call("ENABLE", GL.POINT_SPRITE));
+    assert.strictEqual(executor.current.textureUnits[0].env.pointSprite, false);
+
+    const shader = "void main(void) { gl_PointSize = 5.0; gl_Position = gl_Vertex; }\n";
+    for (const programSize of [false, true]) {
+        ({ executor, log } = newExecutor());
+        stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).call("POINT_SIZE", 2)
+            .call("CREATE_PROGRAM", 1).call("CREATE_SHADER", 10, GL.VERTEX_SHADER)
+            .call("CREATE_SHADER", 11, GL.FRAGMENT_SHADER).shaderSource(10, shader)
+            .shaderSource(11, "void main(void) { gl_FragColor = vec4(1.0); }\n")
+            .call("COMPILE_SHADER", 10).call("COMPILE_SHADER", 11)
+            .call("ATTACH_SHADER", 1, 10).call("ATTACH_SHADER", 1, 11)
+            .call("LINK_PROGRAM", 1).call("USE_PROGRAM", 1);
+        if (programSize) stream.call("ENABLE", GL.VERTEX_PROGRAM_POINT_SIZE);
+        run(executor, stream.call("BEGIN", GL.POINTS).call("VERTEX3F", 0, 0, 0).call("END"));
+        const code = log.draws[0].pipeline.descriptor.vertex.module.code;
+        assert.strictEqual(/clamp\(gl_PointSize,/.test(code), programSize,
+            "gl_PointSize counts only under VERTEX_PROGRAM_POINT_SIZE");
+    }
+});
+
 test("wide points and point sprites expand to instanced quads", () => {
     const { executor, log } = newExecutor();
     const stream = new GLStream().makeCurrent(1, 0, 0, 320, 240)
@@ -2044,11 +2076,11 @@ test("glVertexAttribPointer does not re-enable Cube 2's constant model color", (
         false, "the VBO array view follows the generic attribute enable");
     assert.strictEqual(log.draws.length, 1);
     const buffers = log.draws[0].pipeline.descriptor.vertex.buffers;
-    const constant = buffers.find(buffer => buffer.stepMode === "instance" &&
+    const constant = buffers.find(buffer => buffer.arrayStride === 0 &&
         buffer.attributes.some(attribute =>
             attribute.shaderLocation === colorLocation));
-    assert.ok(constant, "disabled vcolor is supplied by a constant buffer");
-    assert.ok(!buffers.some(buffer => buffer.stepMode !== "instance" &&
+    assert.ok(constant, "disabled vcolor is supplied by a constant buffer (stride 0, review S2-19)");
+    assert.ok(!buffers.some(buffer => buffer.arrayStride !== 0 &&
         buffer.attributes.some(attribute =>
             attribute.shaderLocation === colorLocation)),
         "the stale color VBO is not read by the model draw");

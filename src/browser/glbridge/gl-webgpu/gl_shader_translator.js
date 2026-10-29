@@ -4759,7 +4759,8 @@
                 // Points are drawn as two triangles (plan 10.3), so the corner
                 // offset is applied in clip space -- before the Y flip, so the
                 // sign convention is still GL's.
-                const size = this.usage.builtinOutputs.has("gl_PointSize") ?
+                const size = this.options.programPointSize &&
+                    this.usage.builtinOutputs.has("gl_PointSize") ?
                     "gl_PointSize" : "glState.pointParams.x";
                 this.emit("let glPtSize = clamp(" + size +
                     ", glState.pointParams.y, glState.pointParams.z);");
@@ -5261,6 +5262,7 @@
             };
             const genOptions = {
                 pointSprite: !!variant.pointSprite,
+                programPointSize: !!variant.programPointSize,
                 pointCoordLowerLeft: !!variant.pointCoordLowerLeft,
                 polygonStipple: !!variant.polygonStipple,
                 logicOp: variant.logicOp ? (variant.logicOp >>> 0) : 0,
@@ -5316,11 +5318,13 @@
             "a" + (variant.alphaTest || "-"),
             "c" + (variant.clipPlaneCount || 0),
             variant.pointSprite ? "p" : "-",
+            variant.programPointSize ? "z" : "-",
             variant.pointCoordLowerLeft ? "l" : "u",
             variant.polygonStipple ? "s" : "-",
             "o" + (variant.logicOp || 0).toString(16),
             variant.twoSided ? "2" : "-",
             variant.flatShading ? "f" : "-",
+            "t" + (variant.colorTargets || 1),
             opts.nonUniformSampleStrategy || "implicit",
         ].join("|");
     }
