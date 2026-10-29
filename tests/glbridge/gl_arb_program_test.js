@@ -105,6 +105,33 @@ test("constants in instructions, ranges and relative addressing assemble (review
         .reflection.fragmentTexCoords, [3]);
 });
 
+test("SWZ, result.depth, fog options, shadow targets and the remaining state bindings (S2-48..S2-50, S3)", () => {
+    const swz = compile("!!ARBfp1.0\nTEMP t;\nSWZ t, fragment.color, x,-y,0,1;\nMOV result.color, t;\nEND\n", "swz");
+    assert.match(swz.wgsl, /vec4<f32>\(\(fin\.frontColor\)\.x, -\(\(fin\.frontColor\)\.y\), 0\.0, 1\.0\)/);
+    for (const [label, write] of [["depth_z", "MOV result.depth.z, fragment.color.x;"],
+        ["depth_whole", "MOV result.depth, fragment.color;"]])
+        assert.match(compile("!!ARBfp1.0\nMOV result.color, fragment.color;\n" + write + "\nEND\n", label).wgsl,
+            /@builtin\(frag_depth\)/, "result.depth (S2-49)");
+    const fog = compile("!!ARBfp1.0\nOPTION ARB_fog_exp2;\nMOV result.color, fragment.color;\nEND\n", "fog_exp2");
+    assert.match(fog.wgsl, /mix\(glState\.fogColor\.rgb, color0\.rgb/);
+    const shadow = compile("!!ARBfp1.0\nOPTION ARB_fragment_program_shadow;\n" +
+        "TXP result.color, fragment.texcoord[0], texture[0], SHADOW2D;\nEND\n", "shadow");
+    assert.match(shadow.wgsl, /texture_depth_2d/);
+    assert.match(shadow.wgsl, /sampler_comparison/);
+    assert.deepStrictEqual(shadow.reflection.textures, [{ unit: 0, target: "SHADOW2D" }]);
+    const bindings = compile(TRANSFORM.replace("MOV result.color, vertex.color;",
+        "PARAM t[4] = { state.matrix.texture[1] };\nPARAM m[4] = { state.matrix.modelview[0] };\n" +
+        "PARAM r[2] = { state.matrix.mvp.row[1..2] };\nTEMP a;\nADD a, t[0], m[1];\nADD a, a, r[1];\n" +
+        "ADD a, a, state.lightprod[0].back.diffuse;\nADD a, a, state.material.front.emission;\n" +
+        "ADD result.color, a, state.texgen.eye.s;"), "state_bindings");
+    assert.match(bindings.wgsl, /glState\.textureMatrix\[1\]/);
+    assert.match(bindings.wgsl, /glState\.modelview\[0\]\[1\], glState\.modelview\[1\]\[1\]/,
+        "modelview[0] is the matrix, m[1] its row 1 (it was read as row 0)");
+    assert.match(bindings.wgsl, /glState\.backLightProduct\[0\]\.diffuse/);
+    const lit = compile("!!ARBfp1.0\nTEMP t;\nLIT t, fragment.color;\nMOV result.color, t;\nEND\n", "lit");
+    assert.match(lit.wgsl, /select\(pow\(max\(v\.y, 0\.0\), exponent\), 1\.0, exponent == 0\.0\)/, "0^0 is 1");
+});
+
 test("a write mask writes only the components it names", () => {
     const result = compile(`!!ARBvp1.0
 TEMP r0;

@@ -3128,14 +3128,20 @@
 
     // A fragment program's texture bindings, by the targets its instructions name
     function arbProgramTextures(fragment) {
-        return fragment.compiled.reflection.textures.map(entry => ({
-            unit: entry.unit,
-            textureBinding: entry.unit * 2,
-            samplerBinding: entry.unit * 2 + 1,
-            target: entry.target === "CUBE" ? "Cube" : entry.target,
-            shadow: false,
-            arbTarget: true,
-        }));
+        return fragment.compiled.reflection.textures.map(entry => {
+            // SHADOW1D/2D (ARB_fragment_program_shadow): the 1D or 2D
+            // texture through a comparison sampler
+            const shadow = entry.target.startsWith("SHADOW");
+            const target = shadow ? entry.target.slice(6) : entry.target;
+            return {
+                unit: entry.unit,
+                textureBinding: entry.unit * 2,
+                samplerBinding: entry.unit * 2 + 1,
+                target: target === "CUBE" ? "Cube" : target,
+                shadow,
+                arbTarget: true,
+            };
+        });
     }
 
     // The part of a window rectangle inside a read source
@@ -7677,6 +7683,13 @@ ${fragmentCode}`;
          */
         pointsExpand() {
             const s = this.current, p = s.point;
+            if (s.enabled.has(GL.VERTEX_PROGRAM_ARB)) {
+                // the program's vertex stage has no corner input: its points
+                // are one pixel (S2-50: refused)
+                if (p.size !== 1 || s.enabled.has(GL.POINT_SPRITE))
+                    this.warnOnce("arb-wide-points", "points are one pixel under an ARB vertex program", {});
+                return false;
+            }
             return p.size !== 1 || s.enabled.has(GL.POINT_SPRITE) || p.sizeMin > 1 ||
                 p.attenuation[0] !== 1 || p.attenuation[1] !== 0 || p.attenuation[2] !== 0 ||
                 (s.enabled.has(GL.VERTEX_PROGRAM_POINT_SIZE) && !!this.currentProgramObject());
@@ -8116,12 +8129,13 @@ ${fragmentCode}`;
 
         arbVertexFixedFragmentShaders(vertex) {
             const variant = this.currentVariant();
-            if (variant.clipPlaneCount || variant.pointSprite) {
-                this.refuse("draw", "ARB vertex + fixed fragment does not yet " +
-                    "support clip planes or point sprites",
-                    { clipPlaneCount: variant.clipPlaneCount,
-                      pointSprite: variant.pointSprite }, 0);
-                return null;
+            if (variant.clipPlaneCount) {
+                // ARB_vertex_program leaves user clipping undefined unless the
+                // program is position-invariant; drawn unclipped (review
+                // S2-50: the draw was refused)
+                this.warnOnce("arb-clip-planes", "user clip planes are not applied under an " +
+                    "ARB vertex program", { clipPlaneCount: variant.clipPlaneCount });
+                variant.clipPlaneCount = 0;
             }
 
             const signature = this.fixedFunctionSignature(variant);

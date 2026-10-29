@@ -172,8 +172,11 @@
             "fn arbLit(v : vec4<f32>) -> vec4<f32> {\n" +
             "    // ARB's lighting helper: (1, max(x,0), x>0 ? pow(max(y,0), w) : 0, 1)\n" +
             "    let diffuse = max(v.x, 0.0);\n" +
-            "    let specular = select(0.0, pow(max(v.y, 0.0), clamp(v.w, -128.0, 128.0)),\n" +
-            "        v.x > 0.0);\n" +
+            // (an exponent of 0 gives 1, as the extensions' power does; WGSL's
+            // pow(0, 0) is NaN)
+            "    let exponent = clamp(v.w, -128.0, 128.0);\n" +
+            "    let power = select(pow(max(v.y, 0.0), exponent), 1.0, exponent == 0.0);\n" +
+            "    let specular = select(0.0, power, v.x > 0.0);\n" +
             "    return vec4<f32>(1.0, diffuse, specular, 1.0);\n" +
             "}",
         arbLog:
@@ -237,6 +240,10 @@
             vector: "glState.backMaterial.diffuse" },
         "material.back.specular": { field: "backMaterial",
             vector: "glState.backMaterial.specular" },
+        "material.back.emission": { field: "backMaterial",
+            vector: "glState.backMaterial.emission" },
+        "material.back.shininess": { field: "backMaterial",
+            vector: "vec4<f32>(glState.backMaterial.shininess, 0.0, 0.0, 1.0)" },
         "lightmodel.ambient": { field: "lightModelAmbient",
             vector: "glState.lightModelAmbient" },
         "lightmodel.scenecolor": { field: "frontSceneColor",
@@ -270,6 +277,10 @@
         { pattern: /^lightprod\[(\d+)\]\.(ambient|diffuse|specular)$/,
           field: "frontLightProduct",
           expr: (index, member) => "glState.frontLightProduct[" + index + "]." +
+              member },
+        { pattern: /^lightprod\[(\d+)\]\.back\.(ambient|diffuse|specular)$/,
+          field: "backLightProduct",
+          expr: (index, member) => "glState.backLightProduct[" + index + "]." +
               member },
         { pattern: /^texenv\[(\d+)\]\.color$/, field: "texEnvColor",
           expr: index => "glState.texEnvColor[" + index + "]" },
@@ -622,9 +633,10 @@
             }
             const sourceCount = info.sources;
             for (let i = 0; i < sourceCount; ++i) {
-                instruction.sources.push(this.source(info.extendedSwizzle));
+                instruction.sources.push(this.source());
                 if (i + 1 < sourceCount) this.expect(",");
             }
+            if (info.extendedSwizzle) instruction.extendedSwizzle = this.extendedSwizzle();
             if (info.texture) {
                 this.expect(",");
                 instruction.texture = this.bindingPath();       // texture[n]
@@ -666,7 +678,32 @@
             return { name, mask, line: this.line, at };
         }
 
-        source(extended) {
+        /*
+         * SWZ's four components after the source, `x,-y,0,1`: each a source
+         * component or 0 or 1, each with its own sign (review S2-48: read as
+         * a dotted swizzle).
+         */
+        extendedSwizzle() {
+            const components = [];
+            for (let i = 0; i < 4; ++i) {
+                this.expect(",");
+                let negate = false;
+                while (this.at("-") || this.at("+"))
+                    if (this.next().value === "-") negate = !negate;
+                const token = this.next();
+                let component = String(token.value);
+                if (token.type === "number" && token.value < 0) {
+                    negate = !negate;
+                    component = String(-token.value);
+                }
+                if (!/^(?:[01]|[xyzwrgba])$/.test(component))
+                    throw new ARBError("'" + component + "' is not an extended swizzle component", token.line);
+                components.push({ negate, component });
+            }
+            return components;
+        }
+
+        source() {
             let negate = false;
             let absolute = false;
             while (this.at("-") || this.at("+")) {
@@ -677,16 +714,7 @@
             const name = this.at("{") || this.peek().type === "number" ?
                 this.inlineConstant() : this.bindingPath(true);
             let swizzle = null;
-            if (this.accept(".")) {
-                const token = this.next();
-                swizzle = String(token.value);
-                if (extended) {
-                    // SWZ's extended swizzle allows 0 and 1 as components and a
-                    // sign per component, which arrives as several tokens.
-                    while (this.at(",") === false && this.peek().type !== "punct")
-                        swizzle += String(this.next().value);
-                }
-            }
+            if (this.accept(".")) swizzle = String(this.next().value);
             if (absolute) this.expect("|");
             return { name, swizzle, negate, absolute, line: this.line, at };
         }
@@ -748,6 +776,10 @@
             // module even when the stages read different pieces of GL state.
             for (const field of this.options.forceStateFields || [])
                 this.stateFields.add(field);
+            if (this.stage === "fragment" && this.fogMode()) {
+                this.stateFields.add("fogParams");
+                this.stateFields.add("fogColor");
+            }
 
             const out = [];
             out.push("// generated by gl_arb_program.js r" + ARB_REVISION +
@@ -788,7 +820,7 @@
                 out.push("@group(2) @binding(" + (unit * 2) + ") var t" + unit +
                     " : " + wgslTextureType(target) + ";");
                 out.push("@group(2) @binding(" + (unit * 2 + 1) + ") var s" +
-                    unit + " : sampler;");
+                    unit + " : " + (target.startsWith("SHADOW") ? "sampler_comparison" : "sampler") + ";");
             }
             if (this.textureUnits.size) out.push("");
             for (const helper of this.helpers) out.push(HELPERS[helper], "");
@@ -796,6 +828,13 @@
             if (this.stage === "vertex") this.emitVertexShell(out, body);
             else this.emitFragmentShell(out, body);
             return out.join("\n") + "\n";
+        }
+
+        // the OPTION ARB_fog_* a fragment program asks for, or null
+        fogMode() {
+            const options = this.parsed.options;
+            return options.has("ARB_fog_linear") ? "linear" : options.has("ARB_fog_exp") ? "exp" :
+                options.has("ARB_fog_exp2") ? "exp2" : null;
         }
 
         emitVertexShell(out, body) {
@@ -887,6 +926,17 @@
             for (const name of this.parsed.temporaries)
                 out.push("    var " + safe(name) + " = vec4<f32>(0.0);");
             for (const line of body) out.push("    " + line);
+            const fog = this.fogMode();
+            if (fog) {
+                // OPTION ARB_fog_*: the fixed fog after the program, from
+                // fragment.fogcoord (review S2-50: ignored)
+                const c = "fin.fogCoord.x";
+                const factor = fog === "linear" ? "(glState.fogParams.z - " + c + ") * glState.fogParams.w" :
+                    fog === "exp" ? "exp(-glState.fogParams.x * " + c + ")" :
+                        "exp(-(glState.fogParams.x * " + c + ") * (glState.fogParams.x * " + c + "))";
+                out.push("    color0 = vec4<f32>(mix(glState.fogColor.rgb, color0.rgb, clamp(" + factor +
+                    ", 0.0, 1.0)), color0.a);");
+            }
             out.push("    var out : FSOut;");
             out.push("    out.color0 = color0;");
             if (this.usedResults.has("depth"))
@@ -907,7 +957,14 @@
             }
 
             let value;
-            if (info.texture) {
+            if (instruction.extendedSwizzle) {
+                const source = this.sourceExpression(instruction.sources[0]);
+                value = "vec4<f32>(" + instruction.extendedSwizzle.map(({ negate, component }) => {
+                    const c = component === "0" ? "0.0" : component === "1" ? "1.0" :
+                        "(" + source + ")." + "xyzw"["xyzwrgba".indexOf(component) % 4];
+                    return negate ? "-(" + c + ")" : c;
+                }).join(", ") + ")";
+            } else if (info.texture) {
                 value = this.textureInstruction(instruction);
             } else if (info.address) {
                 const source = this.sourceExpression(instruction.sources[0]);
@@ -929,7 +986,11 @@
 
             const destination = this.resolveDestination(instruction.destination);
             const mask = instruction.destination.mask;
-            if (mask === "xyzw" || mask === "") {
+            if (destination.name === "depthValue") {
+                // result.depth is a scalar: its z component is the depth
+                // (review S2-49: .z and whole writes made invalid WGSL)
+                if (mask === "" || mask.includes("z")) lines.push("depthValue = (" + value + ").z;");
+            } else if (mask === "xyzw" || mask === "") {
                 lines.push(destination.name + " = " + value + ";");
             } else {
                 const temporary = "_a" + (this.temporary++);
@@ -946,6 +1007,15 @@
             const target = normalizeTextureTarget(instruction.textureTarget);
             this.textureUnits.set(unit, target);
             const source = this.sourceExpression(instruction.sources[0]);
+            if (target.startsWith("SHADOW")) {
+                // ARB_fragment_program_shadow: the comparison with r (after
+                // TXP's divide), as luminance
+                const s = "(" + source + ")";
+                const coords = instruction.info.texture === "proj" ? s + ".xyz / " + s + ".w" : s + ".xyz";
+                const compared = "textureSampleCompare(t" + unit + ", s" + unit + ", (" + coords + ").xy, (" +
+                    coords + ").z)";
+                return "vec4<f32>(vec3<f32>(" + compared + "), 1.0)";
+            }
             const coordinate = target === "CUBE" || target === "3D" ?
                 source + ".xyz" : source + ".xy";
             if (instruction.info.texture === "proj") {
@@ -1122,7 +1192,8 @@
         /* The matrix behind a state.matrix.* binding, or null if the path is
          * not a whole matrix. */
         stateMatrix(path) {
-            const binding = STATE_BINDINGS[path];
+            path = normalizeStatePath(path);
+            const binding = STATE_BINDINGS[path] || textureMatrixBinding(path);
             return binding && binding.matrix ? binding : null;
         }
 
@@ -1141,7 +1212,8 @@
         }
 
         resolveState(path) {
-            const direct = STATE_BINDINGS[path];
+            path = normalizeStatePath(path);
+            const direct = STATE_BINDINGS[path] || textureMatrixBinding(path);
             if (direct) {
                 this.stateFields.add(direct.field);
                 if (direct.vector) return direct.vector;
@@ -1151,12 +1223,12 @@
                     direct.matrix + "[1][0], " + direct.matrix + "[2][0], " +
                     direct.matrix + "[3][0])";
             }
-            const row = /^(matrix\.[a-z.]*?)(?:\.row\[(\d+)\]|\[(\d+)\])$/.exec(path);
+            const row = /^(matrix\..*?)\.row\[(\d+)\]$/.exec(path);
             if (row) {
-                const binding = STATE_BINDINGS[row[1]];
+                const binding = STATE_BINDINGS[row[1]] || textureMatrixBinding(row[1]);
                 if (binding && binding.matrix) {
                     this.stateFields.add(binding.field);
-                    const index = parseInt(row[2] !== undefined ? row[2] : row[3], 10);
+                    const index = parseInt(row[2], 10);
                     // ARB rows are the matrix's rows; WGSL indexes columns, so
                     // the row is gathered rather than indexed.
                     return "vec4<f32>(" + [0, 1, 2, 3].map(c =>
@@ -1228,6 +1300,29 @@
     }
 
     /* GL writes masks in xyzw or rgba; the generator only speaks xyzw. */
+    /*
+     * The spellings ARB_vertex_program allows for one binding, reduced to the
+     * table's (review S2-48): matrix.modelview[0] is the modelview (it was
+     * read as row 0), matrix.texture the unit's 0, lightprod and material
+     * name a face, texgen without an index is unit 0's.
+     */
+    function normalizeStatePath(path) {
+        return path
+            .replace(/^matrix\.modelview\[0\]/, "matrix.modelview")
+            .replace(/^matrix\.texture(?!\[)/, "matrix.texture[0]")
+            .replace(/^lightprod\[(\d+)\]\.front\./, "lightprod[$1].")
+            .replace(/^material\.front\./, "material.")
+            .replace(/^texgen\.(eye|object)\./, "texgen[0].$1.");
+    }
+
+    // state.matrix.texture[n], plain or transposed (WGSL has no inverse)
+    function textureMatrixBinding(path) {
+        const match = /^matrix\.texture\[(\d+)\](\.transpose)?$/.exec(path);
+        if (!match || +match[1] >= MAX_TEXTURE_UNITS) return null;
+        const matrix = "glState.textureMatrix[" + match[1] + "]";
+        return { field: "textureMatrix", matrix: match[2] ? "transpose(" + matrix + ")" : matrix };
+    }
+
     // `A0.x`, `A0.x+3`, `A0.x-1` as a WGSL integer expression
     function addressIndex(text) {
         const relative = /^([A-Za-z_$][A-Za-z0-9_$]*)\.([xyzw])(?:([+-])(\d+))?$/.exec(text.replace(/\s+/g, ""));
@@ -1256,6 +1351,7 @@
     }
 
     function wgslTextureType(target) {
+        if (target.startsWith("SHADOW")) return "texture_depth_2d";
         switch (target) {
         case "CUBE": return "texture_cube<f32>";
         case "3D": return "texture_3d<f32>";
@@ -1265,6 +1361,8 @@
 
     function normalizeTextureTarget(text) {
         const upper = String(text).toUpperCase();
+        if (upper.startsWith("SHADOW")) return upper.indexOf("RECT") >= 0 ? "SHADOWRECT" :
+            upper.indexOf("1D") >= 0 ? "SHADOW1D" : "SHADOW2D";
         if (upper.indexOf("CUBE") >= 0) return "CUBE";
         if (upper.indexOf("3D") >= 0) return "3D";
         if (upper.indexOf("1D") >= 0) return "1D";

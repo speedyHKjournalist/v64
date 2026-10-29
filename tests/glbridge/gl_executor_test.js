@@ -2264,6 +2264,20 @@ function boundARBProgram(executor, stream) {
         .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1);
 }
 
+test("an ARB vertex program draws with clip planes and wide points instead of refusing (S2-50)", () => {
+    const { executor, log } = newExecutor();
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).names(GLFN.GEN_PROGRAMS_ARB, [1])
+        .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1)
+        .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nMOV result.position, vertex.position;\n" +
+            "MOV result.color, vertex.color;\nEND\n")
+        .call("ENABLE", GL.VERTEX_PROGRAM_ARB).call("ENABLE", GL.CLIP_PLANE0).call("POINT_SIZE", 4);
+    immediateTriangle(stream);
+    immediatePolygons(stream, GL.POINTS, [[0, 0]]);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 2);
+    assert.strictEqual(log.draws[1].pipeline.descriptor.primitive.topology, "point-list");
+});
+
 test("an ARB program pair declares one state layout (review S2-51)", () => {
     const { executor, log } = newExecutor();
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).names(GLFN.GEN_PROGRAMS_ARB, [1, 2])
