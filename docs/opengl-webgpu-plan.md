@@ -316,6 +316,15 @@ game.exe
   - XP 的 GLSL 代码生成改为 glslang → SPIR-V → vx_naga，与 GLES 3.x 共用 SPIR-V 补丁和 naga 修复；
   - `gl_shader_translator.js` 在 XP 路径上退役。GLES 的 `gles_shadow.js` 在不走 glslang 的 ES 1.00 分支上仍用它，等 GLES 也全部改走 glslang 后整体删除，届时与 GLES 会话协调；
   - 不过门槛时，在手写翻译器里修 S2-40 和 S2-41 的代码生成部分。
+> **E2 状态（2026-10-29）：基本完成**（`10de312f`、`4abfc6b3`）。GL 参照场景里的 ARB 场景全部通过，已知失败表清空（58 个场景全过）。
+>
+> - 固定顶点 + ARB 片段程序（D-18）：固定阶段按程序的接口输出颜色、次颜色、雾坐标和程序读到的每个纹理坐标（不看纹理启用位），两个阶段共用一个状态布局；完整的程序对也按并集布局编译（S2-51）。
+> - 片段程序按指令写的目标采样，不看纹理启用位（S2-52）；环境参数按上下文、按目标保存，没绑程序也能设（S2-46，执行器一侧）。
+> - 解析器：指令里的标量和向量常量、`[a..b]` 区间、带正负偏移的相对寻址、SWZ 逗号语法、方括号内容按原文读取（S2-48）；`result.depth` 只写 z（S2-49）；补齐 `matrix.texture[n]`、`modelview[0]`、`.row[a..b]`、`lightprod[n].front/back`、`material.front.emission`、不带下标的 `texgen`。
+> - `OPTION ARB_fog_*` 在程序之后做固定雾；`SHADOW1D/2D` 目标做深度比较；LIT 的 0⁰ = 1。
+> - ARB 顶点程序下开着裁剪平面或宽点时照画（裁剪平面不生效、点为一像素，警告），不再拒绝。
+> - **未做：** `VERTEX_PROGRAM_TWO_SIDE`（顶点程序的背面颜色）、`VERTEX_PROGRAM_POINT_SIZE`（`result.pointsize`）、RECT 目标（宿主没有矩形纹理）、ARB 语料（WineD3D、cgc 输出）验证。
+
 - **E2 ARB 代码生成：**
   - 相对寻址（含负偏移）、内联标量和向量常量、`[a..b]` 区间、SWZ 逗号语法；
   - 缺失的状态绑定、`result.depth`；
