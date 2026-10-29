@@ -135,7 +135,10 @@ class FakeEncoder {
         }
         return new FakeRenderPass(descriptor, this.log, this.device);
     }
-    copyTextureToTexture(...args) { this.copies.push(["t2t", ...args]); }
+    copyTextureToTexture(...args) {
+        for (const problem of rules.textureCopyProblems(...args)) this.device.rejectWith(problem);
+        this.copies.push(["t2t", ...args]);
+    }
     copyTextureToBuffer(...args) { this.copies.push(["t2b", ...args]); }
     copyBufferToBuffer(...args) { this.copies.push(["b2b", ...args]); }
     resolveQuerySet(querySet, first, count, destination, offset) {

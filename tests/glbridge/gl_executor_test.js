@@ -963,6 +963,22 @@ test("GENERATE_MIPMAP follows a sub-image of the base level (S2-26)", () => {
     assert.deepStrictEqual(Array.from(level1.pixels), [200, 200, 200, 200]);
 });
 
+test("pixel rectangles are clipped by the window, not the viewport; CopyPixels clips its source (S2-16)", () => {
+    const { executor, log } = newExecutor();
+    run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64).call("VIEWPORT", 0, 0, 16, 16)
+        .call("WINDOW_POS3F", 40, 40, 0.5)
+        .drawPixels(2, 2, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(16)));
+    const draw = log.draws.at(-1);
+    assert.deepStrictEqual(draw.pass.viewport, [0, 0, 64, 64, 0, 1], "the whole window");
+    const corner = new Float32Array(draw.vertexBuffers[0].buffer.storage, draw.vertexBuffers[0].offset, 3);
+    assert.deepStrictEqual(Array.from(corner), [0.25, -0.25, 0.5], "window (40, 40) at depth 0.5");
+
+    run(executor, new GLStream().call("COPY_PIXELS", 60, 60, 8, 8, GL.COLOR));
+    const copy = log.encoders.flatMap(e => e.copies).filter(c => c[0] === "t2t").at(-1);
+    assert.deepStrictEqual([copy[1].origin, copy[2].origin, copy[3]],
+        [{ x: 60, y: 60, z: 0 }, { x: 0, y: 0, z: 0 }, { width: 4, height: 4, depthOrArrayLayers: 1 }]);
+});
+
 test("glDrawPixels uploads a pixel rectangle and draws it at the raster position", () => {
     const { executor, log } = newExecutor();
     const pixels = new Uint8Array([

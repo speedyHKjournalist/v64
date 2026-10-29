@@ -183,5 +183,25 @@ function bindGroupProblems(types, entries) {
     return problems;
 }
 
+/* copyTextureToTexture: both rectangles inside their subresources */
+function textureCopyProblems(source, destination, size) {
+    const problems = [];
+    const extent = [size.width, size.height || 1, size.depthOrArrayLayers || 1];
+    for (const [name, copy] of [["source", source], ["destination", destination]]) {
+        const d = copy.texture && copy.texture.descriptor;
+        if (!d || !d.size) continue;
+        const level = copy.mipLevel || 0, o = copy.origin || {};
+        const three = d.dimension === "3d";
+        const dims = [Math.max(1, d.size.width >> level), Math.max(1, (d.size.height || 1) >> level),
+            three ? Math.max(1, (d.size.depthOrArrayLayers || 1) >> level) : d.size.depthOrArrayLayers || 1];
+        const origin = [o.x || 0, o.y || 0, o.z || 0];
+        for (let i = 0; i < 3; ++i)
+            if (origin[i] < 0 || origin[i] + extent[i] > dims[i])
+                problems.push("the " + name + " of a texture copy is out of bounds: " + origin + " + " +
+                    extent + " in " + dims);
+    }
+    return problems;
+}
+
 module.exports = { renderPipelineProblems, attachmentProblems, passProblems, viewportProblems,
-    querySetProblems, bindGroupProblems, entryPoint };
+    querySetProblems, bindGroupProblems, textureCopyProblems, entryPoint };

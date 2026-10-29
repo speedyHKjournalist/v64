@@ -3074,6 +3074,13 @@
         return wgsl.replace(field, fields).replace("    return out;\n", copies + "    return out;\n");
     }
 
+    // The part of a window rectangle inside a read source
+    function clipToSource(source, x, y, width, height) {
+        const x0 = Math.max(0, x), y0 = Math.max(0, y);
+        const x1 = Math.min(source.width, x + width), y1 = Math.min(source.height, y + height);
+        return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
+    }
+
     function reversedDepthRange(s) {
         return s.depthRange.near > s.depthRange.far;
     }
@@ -9638,9 +9645,7 @@ struct BlitParams {
             }
             // only the part inside the source is read (review S1-2i: the copy
             // past its edge was refused, and the status said OK)
-            const x0 = Math.max(0, x), y0 = Math.max(0, y);
-            const x1 = Math.min(source.width, x + width), y1 = Math.min(source.height, y + height);
-            const rect = { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
+            const rect = clipToSource(source, x, y, width, height);
             const pack = this.packState();
             const recordOffset = offset;
             const finish = values => {
@@ -9993,9 +9998,15 @@ struct BlitParams {
                 format: source.format,
                 usage: TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING,
             });
-            this.ensureEncoder().copyTextureToTexture(
-                { texture: source.texture, origin: { x, y, z: 0 } },
-                { texture }, { width, height, depthOrArrayLayers: 1 });
+            // only the part inside the read buffer: the rest is undefined in
+            // GL (pixel ownership) and an invalid copy in WebGPU (review S2-16)
+            const rect = clipToSource(source, x, y, width, height);
+            if (rect.width && rect.height)
+                this.ensureEncoder().copyTextureToTexture(
+                    { texture: source.texture, mipLevel: source.mipLevel || 0,
+                      origin: { x: rect.x, y: rect.y, z: source.layer || 0 } },
+                    { texture, origin: { x: rect.x - x, y: rect.y - y, z: 0 } },
+                    { width: rect.width, height: rect.height, depthOrArrayLayers: 1 });
             this.drawPixelTexture(texture, texture.createView(), width, height,
                 this.current.current.rasterPos[0],
                 this.current.current.rasterPos[1], false);
@@ -10084,21 +10095,29 @@ struct BlitParams {
             this.retire(texture);
         },
 
+        /*
+         * A pixel rectangle is placed in window coordinates and clipped by
+         * the window and the scissor, not the viewport (review S2-16): the
+         * quad is drawn under a viewport of the whole target, at the raster
+         * position's window depth.
+         */
         drawPixelTexture(texture, textureView, width, height, x, y,
                 discardZeroAlpha) {
             const s = this.current;
-            const vp = s.viewport;
-            if (!vp.width || !vp.height) return;
+            const pass = this.ensurePass();
+            if (!pass) return;
+            const targets = this.passTargets;
+            const window = { width: targets ? targets.width : this.backBufferWidth,
+                height: targets ? targets.height : this.backBufferHeight };
+            if (!window.width || !window.height) return;
             const x0 = x, y0 = y;
             const x1 = x + width * s.pixelZoom.x;
             const y1 = y + height * s.pixelZoom.y;
-            const ndcX = value => (value - vp.x) * 2 / vp.width - 1;
+            const ndcX = value => value * 2 / window.width - 1;
             // The normal GL vertex path negates clip-space Y. Expressing the
             // window coordinate directly therefore uses the same negated map.
-            const ndcY = value => 1 - (value - vp.y) * 2 / vp.height;
-            const range = s.depthRange.far - s.depthRange.near;
-            const z = Math.abs(range) > 1e-12 ?
-                (s.current.rasterPos[2] - s.depthRange.near) / range : 0;
+            const ndcY = value => 1 - value * 2 / window.height;
+            const z = clamp(s.current.rasterPos[2], 0, 1);
             const vertices = new Float32Array([
                 ndcX(x0), ndcY(y0), z, 1, 0, 0,
                 ndcX(x1), ndcY(y0), z, 1, 1, 0,
@@ -10109,12 +10128,12 @@ struct BlitParams {
             ]);
             const slice = this.uploadVertices(new Uint8Array(vertices.buffer));
             if (!slice) return;
-            const pass = this.ensurePass();
-            if (!pass) return;
             const pipeline = this.pixelPipeline(discardZeroAlpha);
             if (!pipeline) return;
             pass.setPipeline(pipeline);
             this.applyPassState(pass);
+            // (the next draw sets GL's viewport again)
+            pass.setViewport(0, 0, window.width, window.height, 0, 1);
             pass.setVertexBuffer(0, slice.buffer, slice.offset);
             pass.setBindGroup(0, this.device.createBindGroup({
                 layout: pipeline.getBindGroupLayout(0),
