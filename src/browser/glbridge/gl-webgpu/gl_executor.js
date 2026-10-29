@@ -3555,7 +3555,7 @@
             }
         });
 
-        define("QUERY_OBJECT_IV", function(a, bytes, view, offset, size) {
+        define("QUERY_OBJECT_IV", function(a, bytes, view, offset, size, metadata) {
             if (size < 24) throw new GLStreamError("query-object record is short");
             // answered on the CPU side already (gl_shadow_glsl.js)
             if (view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.status, true) !== SYNC_STATUS_PENDING) return;
@@ -3563,6 +3563,16 @@
             const name = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.name, true);
             const pname = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.pname, true);
             const value = this.queryObjectiv(kind, name, pname);
+            // a query object's result is this side's: the guest waits for it
+            // in guest memory, in either mode
+            if (kind === protocol.C.V86GL_OBJECT_KIND_QUERY) {
+                const answer = new Uint8Array(8);
+                const out = new DataView(answer.buffer);
+                out.setUint32(0, value === null ? SYNC_STATUS_FAILED : SYNC_STATUS_OK, true);
+                out.setUint32(4, value === null ? 0 : value >>> 0, true);
+                return this.answerGuest(bytes, metadata, [[offset + protocol.F.QUERY_OBJECT_IV.value, answer.subarray(4)],
+                    [offset + protocol.F.QUERY_OBJECT_IV.status, answer.subarray(0, 4)]]);
+            }
             if (value === null) {
                 view.setUint32(offset + protocol.F.QUERY_OBJECT_IV.status, SYNC_STATUS_FAILED, true);
                 return;
@@ -9005,6 +9015,10 @@ struct BlitParams {
                 this.warnOnce("readback", "glReadPixels mapping failed",
                     { message: String(error) });
                 try { staging.destroy(); } catch (ignored) { /* already gone */ }
+                // the guest is told, rather than left waiting out its deadline (review S1-7)
+                const status = new Uint8Array(4);
+                new DataView(status.buffer).setUint32(0, SYNC_STATUS_FAILED, true);
+                this.answerGuest(bytes, metadata, [[recordOffset + protocol.F.READ_PIXELS.status, status]]);
             }));
         },
 
@@ -9094,30 +9108,59 @@ struct BlitParams {
          * all at once, so the batch resolves every pending query in one
          * readback rather than one per object.
          */
-        queryObjectBatch(bytes, view, offset, size) {
+        /*
+         * An answer only this side has, written into the guest's record both
+         * ways: into these bytes, which are guest memory in the page's mode,
+         * and through the bridge's writer, which reaches it from across the
+         * CPU worker's boundary. writes: [offset in bytes, data], the status
+         * word last -- the guest that observes it must see the rest.
+         */
+        answerGuest(bytes, metadata, writes) {
+            if (metadata && metadata.isMemoryValid && !metadata.isMemoryValid()) return;
+            for (const [at, data] of writes) if (at + data.length <= bytes.byteLength) bytes.set(data, at);
+            const writeGuest = this.options.writeGuestMemory;
+            if (typeof writeGuest === "function")
+                for (const [at, data] of writes) writeGuest(at, data, metadata);
+        },
+
+        // {count, kind, status, reserved} then {name, ready, result} each:
+        // the results resolved so far, the rest not ready (GL permits it)
+        queryObjectBatch(bytes, view, offset, size, metadata) {
             const headerSize = 16;
             const entrySize = 12;
             if (size < headerSize) throw new GLStreamError("query batch is short");
             const count = view.getUint32(offset, true);
+            const status = new Uint8Array(4);
             if (headerSize + count * entrySize > size) {
-                view.setUint32(offset + 8, SYNC_STATUS_FAILED, true);
-                return;
+                new DataView(status.buffer).setUint32(0, SYNC_STATUS_FAILED, true);
+                return this.answerGuest(bytes, metadata, [[offset + 8, status]]);
             }
-            // Results already resolved are answered immediately; the rest keep
-            // their last value, which GL permits for a query that is not ready.
+            const entries = new Uint8Array(count * entrySize);
+            const out = new DataView(entries.buffer);
             for (let i = 0; i < count; ++i) {
-                const at = offset + headerSize + i * entrySize;
-                const name = view.getUint32(at, true);
+                const name = view.getUint32(offset + headerSize + i * entrySize, true);
                 const query = this.queries.get(name);
-                view.setUint32(at + 4, query && query.ready ? 1 : 0, true);
-                view.setUint32(at + 8, query ? query.result >>> 0 : 0, true);
+                out.setUint32(i * entrySize, name, true);
+                out.setUint32(i * entrySize + 4, query && query.ready ? 1 : 0, true);
+                out.setUint32(i * entrySize + 8, query ? query.result >>> 0 : 0, true);
             }
-            view.setUint32(offset + 8, SYNC_STATUS_OK, true);
+            new DataView(status.buffer).setUint32(0, SYNC_STATUS_OK, true);
+            this.answerGuest(bytes, metadata, [[offset + headerSize, entries], [offset + 8, status]]);
         },
 
-        onFinish(bytes, view, offset, size) {
+        // glFinish returns once the GPU has done the work before it: the
+        // guest waits for the status word
+        onFinish(bytes, view, offset, size, metadata) {
             this.flushFrame();
-            if (size >= 4) view.setUint32(offset, SYNC_STATUS_OK, true);
+            if (size < 4) return;
+            const answer = value => {
+                const status = new Uint8Array(4);
+                new DataView(status.buffer).setUint32(0, value, true);
+                this.answerGuest(bytes, metadata, [[offset, status]]);
+            };
+            const done = this.device && this.device.queue.onSubmittedWorkDone ?
+                this.device.queue.onSubmittedWorkDone() : Promise.resolve();
+            this.trackReadback(done.then(() => answer(SYNC_STATUS_OK), () => answer(SYNC_STATUS_FAILED)));
         },
 
         /* ---- legacy pixel rectangles ---- */

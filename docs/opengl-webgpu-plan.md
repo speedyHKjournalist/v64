@@ -200,7 +200,14 @@ game.exe
 >   - 汇编器仍是 `gl_arb_program.js`（它的解析和检查），所以 CPU worker 的设备脚本带上了状态布局和翻译器（共 484 KB）。
 >   - 错误位置现在指向被拒绝的操作数，行号也对了：生成器的错误带上操作数的字符偏移，原来是整个解析结束的位置和 “line 0”。
 >   - 参数上限仍是 28（渲染器的容量）；顶点 96 的上限和执行器按目标共享的 env 留给 E2。
-> - 下一步依次：查询对象与 Finish 的异步等待、全部命令的校验（之后 `QUERY_ERROR` 才能搬过来）。
+> - C7 的一部分：只有页面能给的答案改为写进客体内存。
+>   - 执行器用 `answerGuest` 同时写两条路：本地模式下批处理就是客体内存；worker 模式下经 bridge 的 `writeGuestMemory` 写回。状态字最后写。
+>   - `glFinish`：在它之前的 GPU 工作完成（`onSubmittedWorkDone`）后写 OK。
+>   - 遮挡查询：`QUERY_OBJECT_BATCH` 和查询对象的 `QUERY_OBJECT_IV` 当场回答已有的结果。
+>   - `glReadPixels` 映射失败时写 FAILED（S1-7），客体不再等满 5 秒。
+>   - 客体（站点 `opengl32_proxy.c`）对这三种记录改用 `wait_for_host_status` 等状态字。着色器和程序的答案仍在请求返回时就有，所以不等。
+>   - 期限仍是挂钟 5 秒，以心跳为准的期限留到阶段 F。
+> - 下一步：全部命令的校验（之后 `QUERY_ERROR` 才能搬过来），以及 `QUERY_INTEGER` 的状态查询。
 
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；

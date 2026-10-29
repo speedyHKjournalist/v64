@@ -107,6 +107,12 @@ async function guestAnswers(remote) {
     stream.call("BIND_PROGRAM_ARB", 0x8804, 4).programStringARB(0x8804, "!!ARBfp1.0\nMOV result.color, nothing;\nEND\n");
     const arbAt = stream.length + 4 + 4;
     stream.queryInteger(0x864B);
+    // what only the renderer can answer, written into guest memory later:
+    // glFinish and the occlusion queries' results
+    const finishAt = stream.length + 4;
+    stream.record(P.GLFN.FINISH, new Uint8Array(4));
+    const batchAt = stream.length + 4 + 8;
+    stream.record(P.GLFN.QUERY_OBJECT_BATCH, new Uint8Array(new Uint32Array([0, P.C.V86GL_OBJECT_KIND_QUERY, 0, 0]).buffer));
     const bytes = stream.bytes();
     const header = new DataView(memory.buffer, ARENA, HEADER);
     header.setUint32(0, 0x324C4756, true);
@@ -129,6 +135,8 @@ async function guestAnswers(remote) {
         location: answer(locationAt, () => view.getInt32(locationAt + 4, true)),
         framebuffer: answer(fboAt, () => view.getUint32(fboAt + 4, true)),
         arb: answer(arbAt, () => view.getInt32(arbAt + 4, true)),
+        finish: answer(finishAt, () => "done"),
+        queries: answer(batchAt, () => "done"),
     };
 }
 
@@ -149,7 +157,7 @@ async function guestAnswers(remote) {
         }
     }
     // the same answers in both modes
-    for (const kind of ["string", "limit", "caps", "linked", "location", "framebuffer", "arb"])
+    for (const kind of ["string", "limit", "caps", "linked", "location", "framebuffer", "arb", "finish", "queries"])
         if (results.page[kind] !== results.worker[kind])
             failures.push(kind + ": page " + JSON.stringify(results.page[kind]) + ", worker " + JSON.stringify(results.worker[kind]));
     if (results.page.string !== "Anthropic v86gl") failures.push("GL_VENDOR is " + JSON.stringify(results.page.string));
@@ -162,6 +170,7 @@ async function guestAnswers(remote) {
         process.exitCode = 1;
         return;
     }
-    console.log("gl_sync_answers_test: both modes answer the capability, GLSL, framebuffer and ARB queries alike; the worker mode's other " +
+    console.log("gl_sync_answers_test: both modes answer the capability, GLSL, framebuffer, ARB, glFinish and query " +
+        "results alike; the worker mode's other " +
         "losses are known (passed)");
 })();
