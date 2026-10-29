@@ -100,6 +100,7 @@
                 matrix: !!t.matrix,
                 // a LOD bias other than zero (the value is state, textureLodBias)
                 lodBias: !!t.lodBias,
+                border: normalizeBorder(t.border),
                 texGen: (t.texGen || [null, null, null, null]).slice(0, 4),
                 env: normalizeEnv(t.env),
             } : { enabled: false });
@@ -152,6 +153,18 @@
             backFacing: !!s.backFacing,
             depthOffset: !!s.depthOffset,
         };
+    }
+
+    /*
+     * The axes that read GL's border colour (the colour is state,
+     * textureBorderColor): "border" for CLAMP_TO_BORDER, "clamp" for GL_CLAMP
+     * filtered linearly (which blends the border in at the edge); `linear`
+     * the filter, `compare` a shadow lookup's function. null for none.
+     */
+    function normalizeBorder(b) {
+        if (!b || !(b.s || b.t || b.r)) return null;
+        return { s: b.s || null, t: b.t || null, r: b.r || null, linear: !!b.linear,
+                 compare: b.compare || null };
     }
 
     function normalizeEnv(env) {
@@ -222,6 +235,7 @@
             if (!t.enabled) continue;
             if (t.matrix) fields.add("textureMatrix");
             if (t.lodBias && !t.shadow) fields.add("textureLodBias");
+            if (t.border) fields.add("textureBorderColor");
             if (t.texGen && t.texGen.some(m => m === "OBJECT" || m === "EYE"))
                 fields.add("texGenPlanes");
             if (t.env.mode === "BLEND" ||
@@ -845,7 +859,8 @@
             const unit = sig.texture[i];
             if (!unit.enabled) continue;
             emit("    let tex" + i + " = " +
-                sampleExpression(i, unit, layout.texCoord[i], sig) + ";");
+                borderedSample(i, unit, sampleExpression(i, unit, layout.texCoord[i], sig),
+                    textureCoordinates(unit, layout.texCoord[i], sig)) + ";");
         }
 
         for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
@@ -966,18 +981,67 @@
         }
     }
 
-    function sampleExpression(i, unit, entry, sig) {
-        const pointCoord = sig.pointSprite && unit.env.coordReplace;
-        // (s, t, r, q) from what the varying carries (packedTexCoord)
-        const v = pointCoord || !entry ? null : readVarying(entry);
-        let coord = "vec4<f32>(fin.pointCoord, 0.0, 1.0)";
-        if (!pointCoord) {
-            if (!entry) coord = "vec4<f32>(0.0, 0.0, 0.0, 1.0)";
-            else if (unit.shadow || unit.target === "3D") coord = v;
-            else if (unit.target === "1D") coord = "vec4<f32>((" + v + ").x, 0.0, 0.0, (" + v + ").y)";
-            else if (unit.target === "Cube") coord = "vec4<f32>(" + v + ", 1.0)";
-            else coord = "vec4<f32>((" + v + ").xy, 0.0, (" + v + ").z)";
+    /*
+     * GL's border colour (review D-03): WebGPU has no border addressing, so
+     * the sampler clamps to the edge and the colour is blended in by the
+     * fraction of the filter's footprint outside the texture, one factor an
+     * axis. For a bilinear footprint with at most one texel outside per axis
+     * that is exact: mix(border, edge sample, a_s * a_t). Measured on the
+     * view's first level, so the band of a minified mipmap is approximate.
+     */
+    function borderedSample(i, unit, sample, coordinates) {
+        const border = unit.border;
+        if (!border || unit.target === "Cube") return sample;
+        const size = unit.target === "1D" ? "vec3<f32>(f32(textureDimensions(t" + i + ")), 1.0, 1.0)" :
+            unit.target === "3D" ? "vec3<f32>(textureDimensions(t" + i + "))" :
+            "vec3<f32>(vec2<f32>(textureDimensions(t" + i + ")), 1.0)";
+        const factors = [];
+        ["s", "t", "r"].forEach((axis, k) => {
+            const mode = border[axis];
+            if (!mode) return;
+            const c = "(" + coordinates + ")." + "xyz"[k], n = "(" + size + ")." + "xyz"[k];
+            const u = mode === "clamp" ? "clamp(" + c + ", 0.0, 1.0) * " + n : c + " * " + n;
+            factors.push(border.linear ?
+                "clamp(min(" + u + " + 0.5, " + n + " - " + u + " + 0.5), 0.0, 1.0)" :
+                "select(0.0, 1.0, " + u + " >= 0.0 && " + u + " < " + n + ")");
+        });
+        let color = "glState.textureBorderColor[" + i + "]";
+        if (unit.shadow) {
+            // the border's depth goes through the same comparison as a texel
+            const ref = "(" + coordinates + ").z";
+            color = "vec4<f32>(" + compareExpression(border.compare, ref, color + ".x") + ")";
         }
+        return "mix(" + color + ", " + sample + ", " + factors.join(" * ") + ")";
+    }
+
+    // A depth comparison by name (the alpha test's names)
+    function compareExpression(func, ref, depth) {
+        const op = { less: "<", lequal: "<=", greater: ">", gequal: ">=", equal: "==", notequal: "!=" }[func];
+        if (func === "always") return "1.0";
+        if (!op) return "0.0";
+        return "select(0.0, 1.0, " + ref + " " + op + " " + depth + ")";
+    }
+
+    // The coordinates a lookup samples at, after the projective divide
+    function textureCoordinates(unit, entry, sig) {
+        const coord = textureCoordinate(unit, entry, sig);
+        return "(" + coord + ").xyz / max((" + coord + ").w, 1e-8)";
+    }
+
+    // (s, t, r, q) from what the varying carries (packedTexCoord)
+    function textureCoordinate(unit, entry, sig) {
+        const pointCoord = sig.pointSprite && unit.env.coordReplace;
+        const v = pointCoord || !entry ? null : readVarying(entry);
+        if (pointCoord) return "vec4<f32>(fin.pointCoord, 0.0, 1.0)";
+        if (!entry) return "vec4<f32>(0.0, 0.0, 0.0, 1.0)";
+        if (unit.shadow || unit.target === "3D") return v;
+        if (unit.target === "1D") return "vec4<f32>((" + v + ").x, 0.0, 0.0, (" + v + ").y)";
+        if (unit.target === "Cube") return "vec4<f32>(" + v + ", 1.0)";
+        return "vec4<f32>((" + v + ").xy, 0.0, (" + v + ").z)";
+    }
+
+    function sampleExpression(i, unit, entry, sig) {
+        const coord = textureCoordinate(unit, entry, sig);
         const q = "(" + coord + ").w";
         const xy = "(" + coord + ").xy";
         const xyz = "(" + coord + ").xyz";

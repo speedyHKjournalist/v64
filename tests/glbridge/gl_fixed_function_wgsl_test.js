@@ -337,6 +337,41 @@ test("point-sprite coordinate replacement samples gl_PointCoord", () => {
     "GL_COORD_REPLACE uses the generated point coordinate");
 });
 
+test("a border axis blends GL's border colour by the footprint outside the texture", () => {
+    const linear = generate(Object.assign(textured({ mode: "REPLACE" }), { _name: "border_linear" }, {
+        texture: [{ enabled: true, target: "2D", format: "RGBA", env: { mode: "REPLACE" },
+            border: { s: "border", t: "clamp", linear: true } }] }));
+    assert.ok(linear.stateFields.includes("textureBorderColor"));
+    assert.match(linear.wgslFragment, /mix\(glState\.textureBorderColor\[0\], textureSample\(t0, s0/);
+    // CLAMP clamps the coordinate first; CLAMP_TO_BORDER does not
+    assert.match(linear.wgslFragment, /clamp\(\(.*\)\.y, 0\.0, 1\.0\) \* /);
+    assert.match(linear.wgslFragment, /clamp\(min\(\(.*\)\.x \* /);
+    const nearest = generate(Object.assign(textured({ mode: "REPLACE" }), { _name: "border_nearest" }, {
+        texture: [{ enabled: true, target: "2D", format: "RGBA", env: { mode: "REPLACE" },
+            border: { s: "border", linear: false } }] }));
+    assert.match(nearest.wgslFragment, /select\(0\.0, 1\.0, .* >= 0\.0 && .* < /);
+    const shadow = generate(Object.assign(textured({ mode: "REPLACE" }, "DEPTH"), { _name: "border_shadow" }, {
+        attributes: { position: { components: 3 }, color: true, texCoord: [{ components: 4 }] },
+        texture: [{ enabled: true, target: "2D", shadow: true, format: "DEPTH", env: { mode: "REPLACE" },
+            border: { s: "border", t: "border", linear: true, compare: "lequal" } }] }));
+    assert.match(shadow.wgslFragment, /select\(0\.0, 1\.0, .*\.z <= glState\.textureBorderColor\[0\]\.x\)/,
+        "a shadow lookup compares the border's depth");
+    const none = generate(textured({ mode: "REPLACE" }));
+    assert.ok(!none.stateFields.includes("textureBorderColor"));
+});
+
+test("a polygon's back-face lines and offset points are variants of their own", () => {
+    const lit = { attributes: { position: { components: 3 }, normal: true, color: true },
+        lighting: { enabled: true, twoSide: true, lights: [{ enabled: true }] } };
+    const back = generate(Object.assign({ _name: "back_facing", backFacing: true }, lit));
+    assert.ok(!/front_facing/.test(back.wgslFragment), "no builtin to ask");
+    assert.match(back.wgslFragment, /select\(.*, false\)/);
+    const offset = generate(Object.assign({ _name: "depth_offset", depthOffset: true }, POSITION_ONLY));
+    assert.match(offset.wgslVertex, /@location\(6\) depthOffset : f32/);
+    assert.match(offset.wgslVertex, /clip\.z = \(clip\.z \+ clip\.w\) \* 0\.5;\n {4}clip\.z = clip\.z \+ vin\.depthOffset \* clip\.w;/);
+    assert.ok(offset.attributes.some(a => a.location === ff.DEPTH_OFFSET_LOCATION));
+});
+
 test("eight textured units still fit the varying budget", () => {
     const result = generate({
         _name: "eight_units",
@@ -363,6 +398,9 @@ test("every field that changes the code changes the key", () => {
         { attributes: base.attributes, polygonStipple: true },
         { attributes: base.attributes, flatShading: true },
         { attributes: base.attributes, colorTargets: 2 },
+        { attributes: base.attributes, backFacing: true },
+        { attributes: base.attributes, depthOffset: true },
+
         { attributes: base.attributes, lighting: { enabled: true,
             lights: [{ enabled: true }] } },
         { attributes: base.attributes, texture: [{ enabled: true, target: "2D",
@@ -371,6 +409,10 @@ test("every field that changes the code changes the key", () => {
     for (const variation of variations)
         assert.notStrictEqual(ff.signatureKey(variation), key,
             "a state that changes the shader must change the signature");
+    const unit = { enabled: true, target: "2D", env: { mode: "MODULATE" } };
+    assert.notStrictEqual(ff.signatureKey({ attributes: base.attributes, texture: [unit] }),
+        ff.signatureKey({ attributes: base.attributes, texture: [{ ...unit, border: { s: "border" } }] }),
+        "the border axes are part of the signature");
 });
 
 test("the same signature produces the same key regardless of field order", () => {

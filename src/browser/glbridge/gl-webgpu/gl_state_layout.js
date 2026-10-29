@@ -279,6 +279,16 @@
                   off = writeVec4(o, off, s.textureLodBias.subarray(i, i + 4));
               return off;
           } },
+        /* Each unit's texture border colour, in its base format's channels
+         * (GL 2.1 table 3.15: a LUMINANCE border is (R, R, R, 1)). */
+        { id: "textureBorderColor", wgsl: "textureBorderColor",
+          type: "array<vec4<f32>, " + MAX_TEXTURE_UNITS + ">",
+          floats: 4 * MAX_TEXTURE_UNITS,
+          write: (s, o, off) => {
+              for (let i = 0; i < MAX_TEXTURE_UNITS; ++i)
+                  off = writeVec4(o, off, s.textureBorderColor[i]);
+              return off;
+          } },
         /* Object/eye linear planes: 4 coordinates (S,T,R,Q) x 8 units, each a
          * pair of vec4 (object plane, eye plane). Flat array so the fixed
          * function generator can index it with a constant. */

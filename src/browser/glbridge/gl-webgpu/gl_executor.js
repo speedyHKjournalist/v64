@@ -7852,6 +7852,7 @@ ${fragmentCode}`;
                     format: object.baseFormat,
                     matrix: !isIdentity(this.textureMatrixOf(unit)),
                     lodBias: this.textureLodBias(unit, object) !== 0,
+                    border: textureBorder(object, target.kind),
                     texGen: state.texGen.map(gen => gen.enabled ?
                         (TEXGEN_MODE_NAMES[gen.mode] || "EYE") : null),
                     env: this.texEnvSignature(state.env),
@@ -8325,6 +8326,38 @@ ${fragmentCode}`;
         },
     });
 
+    /*
+     * Which axes of a texture read its border colour (the fixed pipeline's
+     * signature, normalizeBorder): CLAMP_TO_BORDER always, GL_CLAMP under a
+     * linear filter, where texels past the edge are the border's (GL 2.1
+     * section 3.8.8). The filter is the magnification one's.
+     */
+    function textureBorder(object, kind) {
+        if (!object || kind === "Cube") return null;
+        const sampler = object.sampler;
+        const linear = sampler.magFilter === GL.LINEAR;
+        const mode = wrap => wrap === GL.CLAMP_TO_BORDER ? "border" :
+            (wrap === GL.CLAMP && linear ? "clamp" : null);
+        const border = { s: mode(sampler.wrapS), t: kind === "1D" ? null : mode(sampler.wrapT),
+            r: kind === "3D" ? mode(sampler.wrapR) : null, linear,
+            compare: sampler.compareMode === GL.COMPARE_R_TO_TEXTURE ?
+                ALPHA_TEST_NAMES[sampler.compareFunc] || "lequal" : null };
+        return border.s || border.t || border.r ? border : null;
+    }
+
+    // GL 2.1 table 3.15: the border colour's channels as the base format keeps them
+    function borderInFormat(color, baseFormat) {
+        const [r, g, b, a] = color;
+        switch (baseFormat) {
+        case "ALPHA": return [0, 0, 0, a];
+        case "LUMINANCE": case "DEPTH": return [r, r, r, 1];
+        case "LUMINANCE_ALPHA": return [r, r, r, a];
+        case "INTENSITY": return [r, r, r, r];
+        case "RGB": return [r, g, b, 1];
+        default: return [r, g, b, a];
+        }
+    }
+
     function samplerTargetEnum(dim) {
         switch (dim) {
         case "1D": return GL.TEXTURE_1D;
@@ -8573,6 +8606,8 @@ ${fragmentCode}`;
                 texEnvColor: Array.from({ length: MAX_TEXTURE_UNITS },
                     () => new Float32Array(4)),
                 textureLodBias: new Float32Array(MAX_TEXTURE_UNITS),
+                textureBorderColor: Array.from({ length: MAX_TEXTURE_UNITS },
+                    () => new Float32Array(4)),
                 texGen: Array.from({ length: MAX_TEXTURE_UNITS }, () =>
                     Array.from({ length: 4 }, () => ({
                         objectPlane: new Float32Array(4),
@@ -8703,8 +8738,10 @@ ${fragmentCode}`;
             for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
                 snapshot.texEnvColor[i].set(s.textureUnits[i].env.color);
                 const target = this.effectiveTarget(s.textureUnits[i]);
-                snapshot.textureLodBias[i] = this.textureLodBias(i,
-                    target ? this.textureObjectFor(i, target.enumValue) : null);
+                const object = target ? this.textureObjectFor(i, target.enumValue) : null;
+                snapshot.textureLodBias[i] = this.textureLodBias(i, object);
+                snapshot.textureBorderColor[i].set(object ?
+                    borderInFormat(object.sampler.borderColor, object.baseFormat) : [0, 0, 0, 0]);
                 for (let c = 0; c < 4; ++c) {
                     snapshot.texGen[i][c].objectPlane.set(
                         s.textureUnits[i].texGen[c].objectPlane);

@@ -862,6 +862,27 @@ test("an incomplete texture samples as opaque black", () => {
         "a mipmapped filter with only level 0 is incomplete");
 });
 
+test("a texture's border axes are a signature, its border colour state in the base format's channels", () => {
+    const { executor } = newExecutor();
+    run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .names(GLFN.GEN_TEXTURES, [9]).call("BIND_TEXTURE", GL.TEXTURE_2D, 9)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_BORDER)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP)
+        .call("TEX_PARAMETERFV", GL.TEXTURE_2D, GL.TEXTURE_BORDER_COLOR, 4, 0.25, 0.5, 0.75, 0.5)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.LUMINANCE, 2, 2, GL.LUMINANCE, GL.UNSIGNED_BYTE, new Uint8Array(4))
+        .call("ENABLE", GL.TEXTURE_2D));
+    const unit = () => executor.fixedFunctionSignature(executor.currentVariant()).texture[0];
+    assert.deepStrictEqual(unit().border, { s: "border", t: "clamp", r: null, linear: true, compare: null });
+    const shaders = executor.resolveShaders();
+    assert.ok(shaders.stateFields.includes("textureBorderColor"));
+    assert.deepStrictEqual(Array.from(executor.stateSnapshot(shaders).textureBorderColor[0]), [0.25, 0.25, 0.25, 1],
+        "a LUMINANCE border is (R, R, R, 1)");
+    // GL_CLAMP under NEAREST is the edge's texel
+    run(executor, new GLStream().call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST));
+    assert.deepStrictEqual(unit().border, { s: "border", t: null, r: null, linear: false, compare: null });
+});
+
 test("glDrawPixels uploads a pixel rectangle and draws it at the raster position", () => {
     const { executor, log } = newExecutor();
     const pixels = new Uint8Array([

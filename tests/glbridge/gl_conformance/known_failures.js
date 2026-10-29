@@ -5,10 +5,6 @@
 // tile; a known failure that passes fails the run.
 "use strict";
 globalThis.GLConformanceKnownFailures = {
-    tex_wrap_border: { reason: "S3: CLAMP_TO_BORDER has no border colour", tiles: [
-        "CLAMP",
-        "CLAMP_TO_BORDER",
-    ] },
     arb_fragment_program: { reason: "S2-48: the ARB parser", tiles: [
         "LIT x>0: (1,.5,.0625,1)*.5",
         "LIT x<=0: z=0",
