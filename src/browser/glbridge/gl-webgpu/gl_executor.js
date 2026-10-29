@@ -4789,7 +4789,7 @@
             const kind = this.textureTargetKind(target);
             const face = CUBE_FACE_INDEX[target] || 0;
             const slot = this.levelSlot(texture, kind, level, face);
-            if (!slot || !slot.pixels)
+            if (!slot)
                 return this.refuse("glTexSubImage", "level has no storage",
                     { level, face }, GL.INVALID_OPERATION);
             if (slot.compressed)
@@ -4806,24 +4806,30 @@
             if (!converted)
                 return this.refuse("glTexSubImage", "unsupported pixel format",
                     { format, type }, GL.INVALID_ENUM);
-            // Patch the shadow copy; the GPU upload happens with the rest of
-            // the level so a run of subimage calls costs one writeTexture.
-            for (let sz = 0; sz < depth; ++sz) {
-                for (let sy = 0; sy < height; ++sy) {
-                    const bytesPerTexel = slot.bytesPerTexel || 4;
-                    const dstRow = (((z + sz) * slot.height + (y + sy)) *
-                        slot.width + x) * bytesPerTexel;
-                    const srcRow = ((sz * height + sy) * width) * bytesPerTexel;
-                    if (dstRow < 0 ||
-                            dstRow + width * bytesPerTexel > slot.pixels.length)
-                        continue;
-                    slot.pixels.set(
-                        converted.pixels.subarray(srcRow,
-                            srcRow + width * bytesPerTexel), dstRow);
+            if (x < 0 || y < 0 || z < 0 || x + width > slot.width || y + height > slot.height ||
+                    z + depth > (kind === "3D" ? slot.depth : 1))
+                return this.refuse("glTexSubImage", "the rectangle is outside the level",
+                    { x, y, z, width, height, depth }, GL.INVALID_VALUE);
+            // Patch the CPU copy when the level has one (GL 2.1 allows a
+            // TexImage with no data, review S2-20; a level rendered into has
+            // none, the GPU's texels being the newer, S2-25), and upload the
+            // rectangle alone
+            const bytesPerTexel = slot.bytesPerTexel || 4;
+            if (slot.pixels) {
+                for (let sz = 0; sz < depth; ++sz) {
+                    for (let sy = 0; sy < height; ++sy) {
+                        const dstRow = (((z + sz) * slot.height + (y + sy)) * slot.width + x) * bytesPerTexel;
+                        const srcRow = ((sz * height + sy) * width) * bytesPerTexel;
+                        slot.pixels.set(converted.pixels.subarray(srcRow, srcRow + width * bytesPerTexel), dstRow);
+                    }
                 }
             }
+            (texture.regions || (texture.regions = [])).push({ layer: kind === "Cube" ? face : 0, level,
+                x, y, z, width, height, depth, pixels: converted.pixels, bytesPerTexel });
             texture.dirty = true;
             ++this.stats.textureUploads;
+            // GENERATE_MIPMAP follows every change of the base level (review S2-26)
+            if (texture.generateMipmapHint && level === 0) this.generateMipmapFor(texture);
         },
 
         compressedTexImage(target, level, internalFormat, width, height, depth,
@@ -4881,7 +4887,7 @@
                     if (dst < 0 || dst + width * 4 > slot.pixels.length) continue;
                     slot.pixels.set(pixels.subarray(src, src + width * 4), dst);
                 }
-                texture.dirty = true;
+                this.markLevelUpload(texture, kind === "Cube" ? face : 0, level);
                 return;
             }
             if ((x & 3) || (y & 3))
@@ -4898,7 +4904,7 @@
                 slot.pixels.set(
                     data.subarray(src, src + srcBlocksPerRow * blockBytes), dst);
             }
-            texture.dirty = true;
+            this.markLevelUpload(texture, kind === "Cube" ? face : 0, level);
         },
 
         levelSlot(texture, kind, level, face) {
@@ -4914,9 +4920,18 @@
             texture.kind = kind;
             texture.baseFormat = slot.base;
             texture.gpuFormat = slot.gpuFormat;
+            if (texture.regions)
+                texture.regions = texture.regions.filter(r => r.layer !== layer || r.level !== level);
+            if (slot.pixels) this.markLevelUpload(texture, layer, level);
             texture.dirty = true;
             texture.viewCache.clear();
             this.invalidateBindGroups();
+        },
+
+        // A level whose CPU copy changed is uploaded whole at its next use
+        markLevelUpload(texture, layer, level) {
+            (texture.fullUploads || (texture.fullUploads = new Set())).add(layer + ":" + level);
+            texture.dirty = true;
         },
 
         /*
@@ -5047,14 +5062,32 @@
                 this.retire(oldTexture);
             }
 
+            // A new allocation takes every CPU copy; an existing one only
+            // the levels and rectangles that changed, so texels the GPU wrote
+            // (rendering, copies, mipmap generation) are not overwritten by
+            // an older CPU copy (review S2-25)
+            const full = texture.fullUploads || new Set();
             for (let layer = 0; layer < layers; ++layer) {
                 const list = texture.levels[layer] || [];
                 for (let level = 0; level < wanted.levelCount; ++level) {
                     const slot = list[level];
                     if (!slot || !slot.pixels) continue;
-                    this.writeTextureLevel(texture, slot, level, layer);
+                    if (shapeChanged || full.has(layer + ":" + level))
+                        this.writeTextureLevel(texture, slot, level, layer);
                 }
             }
+            for (const region of texture.regions || []) {
+                const slot = (texture.levels[region.layer] || [])[region.level];
+                if (!slot || region.level >= wanted.levelCount) continue;
+                if (slot.pixels && (shapeChanged || full.has(region.layer + ":" + region.level))) continue;
+                this.device.queue.writeTexture({ texture: texture.gpuTexture, mipLevel: region.level,
+                    origin: { x: region.x, y: region.y, z: texture.kind === "3D" ? region.z : region.layer } },
+                region.pixels, { offset: 0, bytesPerRow: region.width * region.bytesPerTexel,
+                    rowsPerImage: region.height },
+                { width: region.width, height: region.height, depthOrArrayLayers: region.depth });
+            }
+            texture.fullUploads = null;
+            texture.regions = null;
             texture.dirty = false;
             return texture.gpuTexture;
         },
@@ -5127,7 +5160,8 @@
                     };
                     list[level] = slot;
                     source = slot;
-                    if (!pixels) needsGPUGeneration = true;
+                    if (pixels) this.markLevelUpload(texture, layer, level);
+                    else needsGPUGeneration = true;
                 }
                 list.length = levels;
             }
@@ -6772,6 +6806,10 @@
                 if (!texture) return null;
                 const gpuTexture = this.ensureTextureUploaded(texture);
                 if (!gpuTexture) return null;
+                // what is drawn into it is the level's content from now on
+                const slot = this.levelSlot(texture, texture.kind, attachment.level,
+                    texture.kind === "Cube" ? attachment.layer : 0);
+                if (slot && !slot.compressed) slot.pixels = null;
                 return {
                     view: gpuTexture.createView({
                         baseMipLevel: attachment.level, mipLevelCount: 1,
@@ -9501,6 +9539,7 @@ struct BlitParams {
             });
             this.copyColorTexture(source, { view, format: storage.gpu },
                 x, y, 0, 0, width, height, "clear");
+            if (texture.generateMipmapHint && level === 0) this.generateMipmapFor(texture);
         },
 
         copyTexSubImage(target, level, xoffset, yoffset, zoffset, x, y, width,
@@ -9536,7 +9575,7 @@ struct BlitParams {
                 // The CPU copy is no longer authoritative after a framebuffer
                 // copy.  Mipmap generation below can continue entirely on GPU.
                 slot.pixels = null;
-                texture.dirty = false;
+                if (texture.generateMipmapHint && level === 0) this.generateMipmapFor(texture);
             }
         },
 

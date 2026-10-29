@@ -187,6 +187,15 @@ class GLStream {
         return this.record(GLFN.COMPRESSED_TEX_SUB_IMAGE_2D, payload);
     }
 
+    texSubImage2D(target, level, x, y, width, height, format, type, data) {
+        const header = wire.encodeRecord("TEX_SUB_IMAGE_2D", { target, level, xoffset: x, yoffset: y,
+            width, height, format, type, data_size: data.byteLength });
+        const payload = new Uint8Array(header.byteLength + data.byteLength);
+        payload.set(header);
+        payload.set(data, header.byteLength);
+        return this.record(GLFN.TEX_SUB_IMAGE_2D, payload);
+    }
+
     drawPixels(width, height, format, type, data) {
         const bytes = data || new Uint8Array(0);
         const payload = new Uint8Array(20 + bytes.byteLength);

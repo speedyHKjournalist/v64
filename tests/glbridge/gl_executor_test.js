@@ -876,6 +876,61 @@ test("a texture's border axes are a signature, its border colour state in the ba
     assert.deepStrictEqual(unit().border, { s: "border", t: null, r: null, linear: false, compare: null });
 });
 
+test("a sub-image uploads its rectangle; a level with no data or drawn into takes one (S2-20, S2-25)", () => {
+    const FRAMEBUFFER = 0x8D40;
+    const { executor, log } = newExecutor();
+    const texel = new Uint8Array([1, 2, 3, 4]);
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).names(GLFN.GEN_TEXTURES, [5, 6])
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 5)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, null)
+        .texSubImage2D(GL.TEXTURE_2D, 0, 1, 2, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, texel)
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 6)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+        .call("ENABLE", GL.TEXTURE_2D);
+    immediateTriangle(stream.call("BIND_TEXTURE", GL.TEXTURE_2D, 5));
+    run(executor, stream);
+    assert.deepStrictEqual(log.textureWrites.map(w => [w.destination.origin, w.size.width, w.size.height]),
+        [[{ x: 1, y: 2, z: 0 }, 1, 1]], "the NULL level's rectangle, no refusal");
+
+    // texture 6 has a CPU copy; it is drawn into, then one texel changes
+    log.textureWrites.length = 0;
+    const draw = new GLStream().call("DISABLE", GL.TEXTURE_2D).names(GLFN.GEN_FRAMEBUFFERS, [3])
+        .call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3)
+        .call("FRAMEBUFFER_TEXTURE", FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 6, 0, 0);
+    immediateTriangle(draw).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 0).call("BIND_TEXTURE", GL.TEXTURE_2D, 6)
+        .texSubImage2D(GL.TEXTURE_2D, 0, 3, 3, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, texel)
+        .call("ENABLE", GL.TEXTURE_2D);
+    run(executor, immediateTriangle(draw));
+    const writes = log.textureWrites.filter(w => w.destination.texture === executor.current.shareGroup.textures.get(6).gpuTexture);
+    assert.deepStrictEqual(writes.map(w => [w.size.width, w.size.height]), [[4, 4], [1, 1]],
+        "the level once when first used, then only the changed texel over what was drawn");
+    // its mipmaps come from what was drawn, on the GPU, not from the old CPU copy
+    run(executor, new GLStream().call("GENERATE_MIPMAP", GL.TEXTURE_2D));
+    assert.strictEqual(executor.current.shareGroup.textures.get(6).levels[0][1].pixels, null);
+
+    // a texture with its CPU copy, sampled, then changed by one texel
+    log.textureWrites.length = 0;
+    const update = new GLStream().names(GLFN.GEN_TEXTURES, [7]).call("BIND_TEXTURE", GL.TEXTURE_2D, 7)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64));
+    immediateTriangle(update).texSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, texel);
+    run(executor, immediateTriangle(update));
+    assert.deepStrictEqual(log.textureWrites.map(w => [w.size.width, w.size.height]), [[4, 4], [1, 1]]);
+});
+
+test("GENERATE_MIPMAP follows a sub-image of the base level (S2-26)", () => {
+    const { executor } = newExecutor();
+    run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64).names(GLFN.GEN_TEXTURES, [5])
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 5)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.GENERATE_MIPMAP, 1)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(16))
+        .texSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(16).fill(200)));
+    const level1 = executor.current.shareGroup.textures.get(5).levels[0][1];
+    assert.deepStrictEqual(Array.from(level1.pixels), [200, 200, 200, 200]);
+});
+
 test("glDrawPixels uploads a pixel rectangle and draws it at the raster position", () => {
     const { executor, log } = newExecutor();
     const pixels = new Uint8Array([
