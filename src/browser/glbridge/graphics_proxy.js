@@ -209,6 +209,21 @@
             channel.post({ type: "available", value });
         };
 
+        // The arena's owner is gone: a journaled pseudo-batch ends every
+        // session it submitted, behind its last batch
+        const onReleased = () => {
+            const batchEpoch = epoch;
+            const event = { bytes: global.V86GLNetworkBridge.ownerReleasedRecord(), released: true,
+                writeGuestMemory() {}, isMemoryValid: () => false };
+            if (!channel.remote) {
+                bridge.pushPCIBatch(event);
+                return;
+            }
+            work = work.then(() => {
+                if (batchEpoch === epoch) return bridge.pushPCIBatch(event);
+            }).catch(error => console.error("[v86gl] ending the owner's sessions failed", error));
+        };
+
         const onBatch = message => {
             const batchEpoch = epoch;
             const generation = message.generation;
@@ -282,6 +297,7 @@
                 });
                 channel.listen(message => {
                     if (message.type === "batch") onBatch(message);
+                    else if (message.type === "released") onReleased();
                 });
                 setAvailable(true);
                 return bridge.ready.then(() => setAvailable(!bridge.failed));

@@ -4441,6 +4441,39 @@ await test("a framing error still fails the whole batch", async () => {
     assert.equal(executor.stats.commandsFailed, 0);
 });
 
+await test("Reset keeps the session's resources under their handles", async () => {
+    // The guest no longer creates every buffer, texture and shader again under
+    // new handles after a Reset (review S1-9a: that leaked all of them)
+    const NEW_DEVICE = 0x100099;
+    const { executor, find } = makeExecutor();
+    const reset = u32(DEVICE, NEW_DEVICE, 0x1234, 0, 0, 800, 600, 22, 1, 0x20, 1, 75, 0, 0);
+    await executor.submit(buildBatch([
+        command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
+        command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 60)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x401, 4, 4, 1, 21, 0, 1)),
+        command(OP.RESET, reset),
+    ]));
+    await executor.idle();
+    const textures4x4 = () => find("createTexture").filter(call => call[1].size.width === 4).length;
+    const before = textures4x4();
+    assert.equal(executor.resources.get(0x401).deviceHandle, NEW_DEVICE, "the texture moves to the new device");
+    await executor.submit(buildBatch([
+        command(OP.SET_FVF, Buffer.concat([u32(NEW_DEVICE, 0x102, 2, 0),
+            element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
+            element(0, 12, DECLTYPE.FLOAT2, DECLUSAGE.TEXCOORD)])),
+        command(OP.SET_STREAM_SOURCE, u32(NEW_DEVICE, 0, 0x201, 20, 0, 0)),
+        command(OP.SET_TEXTURE, u32(NEW_DEVICE, 0, 0x401, 0)),
+        command(OP.DRAW_PRIMITIVE, u32(NEW_DEVICE, 4, 0, 1)),
+        command(OP.PRESENT, u32(NEW_DEVICE, 0x1234, 0, 0, 800, 600)),
+    ], { present: true }));
+    await executor.idle();
+    assert.equal(executor.stats.droppedDraws, 0, "a draw on the new device uses the old handles");
+    const group = find("createBindGroup").pop()[1];
+    assert.ok(group.entries.some(entry =>
+        entry.resource.texture === executor.resources.get(0x401).gpuTexture), "it samples the texture");
+    assert.equal(textures4x4(), before, "no texture was created again");
+});
+
 await test("a failed batch loses only itself, and answers the queries it dropped", async () => {
     const { executor, find, fake } = makeExecutor();
     const writes = [];

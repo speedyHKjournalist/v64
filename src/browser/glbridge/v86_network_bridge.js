@@ -15,6 +15,10 @@
     // translated onto D9WG. Refused, with a message.
     const CTRL_D3D8_BATCH = 0xFFE0;
     const CTRL_D3D9_BATCH = 0xFFE1;
+    // Not from the guest: v86gl_device.js saw the arena's owner release it,
+    // so every session submitted since the previous release is over. A
+    // record like a batch's so the journal replays it in order.
+    const CTRL_OWNER_RELEASED = 0xFFE2;
     const EXTENDED_RECORD_SIZE = 0xFFFF;
     const CHECKPOINT_MAGIC = 0x32534756; // "VGS2"
     const CHECKPOINT_VERSION = 2;
@@ -45,6 +49,14 @@
 
     function ownedBytes(value) {
         return asBytes(value).slice();
+    }
+
+    function ownerReleasedRecord() {
+        const bytes = new Uint8Array(8);
+        bytes[0] = CTRL_OWNER_RELEASED & 0xff;
+        bytes[1] = CTRL_OWNER_RELEASED >> 8;
+        bytes[2] = bytes[3] = 0xff;
+        return bytes;
     }
 
     class V86GLNetworkBridge {
@@ -278,6 +290,11 @@
         }
 
         executePCIBatch(event, bytes) {
+            if (this.isEnvelope(bytes, CTRL_OWNER_RELEASED)) {
+                for (const executor of [this.glExecutor, this.d3d9Executor])
+                    if (executor) executor.endOwnerSessions();
+                return;
+            }
             if (this.isEnvelope(bytes, CTRL_D3D9_BATCH))
                 return this.pushD3D9PCIBatch(event, bytes);
             this.pushGLPCIBatch(event, bytes);
@@ -731,6 +748,7 @@
         }
     }
     global.V86GL_BRIDGE_VERSION = V86GL_BRIDGE_VERSION;
+    global.V86GLNetworkBridge = { ownerReleasedRecord };
     global.installV86GLNetworkBridge = function(emulator, canvas, options) {
         return new V86GLNetworkBridge(emulator, canvas, options);
     };

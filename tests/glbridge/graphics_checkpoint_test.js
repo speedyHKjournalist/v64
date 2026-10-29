@@ -158,5 +158,28 @@ const timeout = setTimeout(() => { throw new Error("checkpoint test timed out");
     await q.restore(querySnapshot);
     assert.equal(q.writes(), queryWrites, "query replay cannot overwrite restored DMA responses");
 
-    console.log("graphics_checkpoint_test: GL, D3D9 and DDraw, hot/cold restore, query continuation, DMA isolation and large batches passed");
+    // The arena's owner exits or is killed: v86gl_device.js reports the
+    // release, and every session it submitted ends, in order and on replay
+    const r = await fixture();
+    r.send(new GLStream().makeCurrent(1, 0, 0, 64, 64).bytes());
+    await r.send(envelope(0xffe1, d9.buildBatch([
+        d9.command(d9.OP.CREATE_DEVICE, d9.createDevicePayload(64, 64)),
+        d9.command(d9.OP.CREATE_BUFFER, d9.createBufferPayload(0x201, 1, 96)),
+    ], { sessionLow: 7 })));
+    assert.ok(r.direct9.executor.sessionStates.has("0000000000000007") ||
+        r.direct9.executor.sessionKey === "0000000000000007");
+    assert.equal(r.gl.contexts.size, 1);
+    await r.bridge.pushPCIBatch({ bytes: global.V86GLNetworkBridge.ownerReleasedRecord(),
+        writeGuestMemory() {}, isMemoryValid: () => false });
+    const ended = executor => !executor.sessionStates.has("0000000000000007") &&
+        executor.sessionKey !== "0000000000000007";
+    assert.ok(ended(r.direct9.executor), "the owner's D3D9 session ended");
+    assert.equal(r.gl.contexts.size, 0, "the owner's GL contexts ended");
+    const releasedSnapshot = await r.save();
+    const s2 = await fixture();
+    await s2.restore(releasedSnapshot);
+    assert.ok(ended(s2.direct9.executor), "the release replays");
+    assert.equal(s2.gl.contexts.size, 0);
+
+    console.log("graphics_checkpoint_test: owner release, GL, D3D9 and DDraw, hot/cold restore, query continuation, DMA isolation and large batches passed");
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => clearTimeout(timeout));

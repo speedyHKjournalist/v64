@@ -10,6 +10,8 @@
 // Channel messages, device -> host:
 //   batch      { id, generation, frameId, flags, commandCount, descAddr,
 //                descLen, batchAddr, responseBase, submitCount, bytes }
+//   released   {}                             the process that mapped the arena
+//                                             let it go (it exited or was killed)
 // host -> device:
 //   write      { generation, offset, bytes }  readback into the arena
 //   done       { id }                         the batch no longer needs its capacity
@@ -101,6 +103,13 @@
                 }
                 case "available":
                     hostAvailable = !!message.value;
+                    // A renderer that is gone acknowledges nothing: answer the
+                    // descriptors left with the guest (NO_RENDERER) rather than
+                    // leave its driver waiting until it resets the queue
+                    if (!hostAvailable && inflight.size) {
+                        forgetInflight();
+                        if (dev) processQueue();
+                    }
                     break;
             }
         });
@@ -166,6 +175,10 @@
             if (address || high) return INVALID;
             if (op === UNREGISTER_ARENA) {
                 if (length || flags) return INVALID;
+                // v86gl.sys unmaps when its owner closes the device, which the
+                // kernel does for a killed process too: every session it
+                // submitted is over (review S1-10, GL S1-4)
+                if (arenaBytes) channel.post({ type: "released" });
                 releaseArena();
                 return OK;
             }

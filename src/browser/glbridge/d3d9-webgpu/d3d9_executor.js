@@ -3145,6 +3145,8 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             // tear down a benchmark process that is still rendering.
             this.sessionStates = new Map();
             this.sessionKey = null;
+            // the sessions submitted since the arena's owner last released it
+            this.ownerSessions = new Set();
             this.frame = null;             // { ops, transientBuffers, serial }
             this.frameSerial = 0;
             this.readyPromise = null;
@@ -3646,6 +3648,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             const sessionKey = sessionHigh.toString(16).padStart(8, "0") +
                 sessionLow.toString(16).padStart(8, "0");
             this.switchSession(sessionKey);
+            this.ownerSessions.add(sessionKey);
             ++this.stats.batches;
 
             let offset = D9WG_BATCH_HEADER_BYTES;
@@ -4177,6 +4180,21 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             ++this.stats.sessionsEnded;
         }
 
+        // The process that owned the DMA arena is gone (it unmapped it, or the
+        // kernel closed the device for it when it was killed): its sessions
+        // end as SESSION_END would have ended them (review S1-10)
+        endOwnerSessions() {
+            for (const key of this.ownerSessions) {
+                if (!this.sessionStates.has(key) && this.sessionKey !== key) continue;
+                this.switchSession(key);
+                this.releaseActiveSession("owner-released");
+                this.sessionStates.delete(key);
+                this.sessionKey = null;
+                ++this.stats.sessionsEnded;
+            }
+            this.ownerSessions.clear();
+        }
+
         onCreateDevice(bytes, view, offset, length) {
             if (length < 52) {
                 ++this.stats.malformedBatches;
@@ -4239,6 +4257,17 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             this.backBufferTextureWidth = 0;
             this.backBufferTextureHeight = 0;
             this.devices.delete(oldHandle);
+            // The session's resources and palettes survive the Reset under
+            // their handles (the guest no longer creates them again); what
+            // names the device moves to its new handle
+            for (const resource of this.resources.values())
+                if (resource.deviceHandle === oldHandle) resource.deviceHandle = newHandle;
+            for (const [key, palette] of Array.from(this.palettes || [])) {
+                const [device, index] = key.split(":");
+                if (Number(device) !== oldHandle) continue;
+                this.palettes.delete(key);
+                this.palettes.set(newHandle + ":" + index, palette);
+            }
             const state = this.deviceState(newHandle);
             state.viewport = { x: 0, y: 0, width, height, minZ: 0, maxZ: 1 };
             state.surface = { hwnd, x, y, width, height, visible: true,

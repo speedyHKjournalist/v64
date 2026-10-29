@@ -198,6 +198,12 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     assert.ok(toRemote.some(([m]) => m.type === "done" && m.id === 3));
     assert.ok(!toRemote.some(([m]) => m.type === "available" && m.value === false),
         "one failed batch does not take graphics away for the session");
+    // The arena's owner is gone: a record behind its batches ends its sessions
+    remote.bridge.waitForSubmittedBatches = () => Promise.resolve();
+    fromRemote({ type: "released" });
+    await remote.idle();
+    assert.ok(remote.lastEvent.released, "the release reaches the bridge in order");
+    assert.equal(remote.lastEvent.bytes[0] | remote.lastEvent.bytes[1] << 8, 0xffe2);
     await remote.destroy();
 
     // Without WebGPU the device hears that nothing renders

@@ -2079,6 +2079,17 @@
             }
         }
 
+        // The process that owned the DMA arena is gone (it unmapped it, or the
+        // kernel closed the device for it when it was killed): its contexts go
+        // as a payload-less DESTROY_CONTEXT would take them, and so do the
+        // pipelines cached by its program names (review S1-4)
+        endOwnerSessions() {
+            this.destroyContext(null);
+            this.pipelineCache.clear();
+            this.bindGroupCache.clear();
+            this.activeQuery = null;
+        }
+
         resetForReplay() {
             this.finishFrame(false);
             const release = object => {
