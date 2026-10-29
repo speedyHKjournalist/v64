@@ -47,7 +47,7 @@ function render() {
                     const [name, value, note] = entry;
                     const literal = value >= 0x100 ? "0x" + value.toString(16).toUpperCase() : String(value);
                     const line = "    D9WG_OP_" + name + " = " + literal + (name === last ? "" : ",");
-                    out.push(note ? line.padEnd(45) + "/* " + note + " */" : line);
+                    out.push(note ? (line.length < 45 ? line.padEnd(45) : line + " ") + "/* " + note + " */" : line);
                 }
             }
             out.push("};");
