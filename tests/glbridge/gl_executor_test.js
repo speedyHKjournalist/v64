@@ -66,15 +66,8 @@ function newExecutor(options) {
         executor.limits = host.limits;
         executor.uniformCapacity = 1 << 20;
         executor.vertexCapacity = 1 << 20;
-        executor.uniformRing = host.device.createBuffer({ size: executor.uniformCapacity });
-        executor.uniformStaging = new Uint8Array(executor.uniformCapacity);
-        executor.vertexRing = host.device.createBuffer({ size: executor.vertexCapacity });
-        executor.vertexStaging = new Uint8Array(executor.vertexCapacity);
-        executor.fallbackTexture = host.device.createTexture({
-            size: { width: 1, height: 1 }, format: "rgba8unorm" });
-        executor.fallbackView = executor.fallbackTexture.createView();
-        executor.fallbackSampler = host.device.createSampler({});
-        executor.fallbackComparisonSampler = host.device.createSampler({});
+        executor.createDeviceResources();
+        log.textureWrites.length = 0;   // the fallback texture's: not the test's
         executor.readyPromise = Promise.resolve(executor);
     };
     executor.initializeSync();
@@ -1181,6 +1174,49 @@ test("a program draw binds the sampler's unit, not the sampler's index", () => {
     const groups = log.bindGroups.filter(g =>
         g.descriptor.layout.index === 2);
     assert.ok(groups.length, "the texture group is created");
+});
+
+test("missing textures bind fallbacks of their binding's dimension and sample type (review S1-2a)", () => {
+    const { executor, log } = newExecutor();
+    const fragment = "uniform samplerCube cube;\nuniform sampler3D volume;\nuniform sampler2DShadow shadow;\n" +
+        "void main(void) {\n  gl_FragColor = textureCube(cube, vec3(1.0)) + texture3D(volume, vec3(0.5)) +\n" +
+        "    shadow2D(shadow, vec3(0.5)).rrrr;\n}\n";
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("CREATE_PROGRAM", 1).call("CREATE_SHADER", 10, GL.VERTEX_SHADER)
+        .call("CREATE_SHADER", 11, GL.FRAGMENT_SHADER)
+        .shaderSource(10, "void main(void) { gl_Position = gl_Vertex; }\n")
+        .shaderSource(11, fragment).call("COMPILE_SHADER", 10).call("COMPILE_SHADER", 11)
+        .call("ATTACH_SHADER", 1, 10).call("ATTACH_SHADER", 1, 11)
+        .call("LINK_PROGRAM", 1).call("USE_PROGRAM", 1);
+    immediateTriangle(stream);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 1);
+    const textures = log.bindGroups.find(group => group.descriptor.layout.index === 2).descriptor.entries
+        .map(entry => entry.resource).filter(resource => resource.texture);
+    assert.deepStrictEqual(textures.map(view => (view.options.dimension || "2d") + ":" + view.format).sort(),
+        ["2d:depth32float", "3d:rgba8unorm", "cube:rgba8unorm"]);
+});
+
+test("a depth texture without comparison samples as black instead of losing the frame (review S1-2j)", () => {
+    const { executor, log } = newExecutor();
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .names(GLFN.GEN_TEXTURES, [9]).call("BIND_TEXTURE", GL.TEXTURE_2D, 9)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.DEPTH_COMPONENT, 1, 1, GL.DEPTH_COMPONENT, GL.FLOAT, new Uint8Array(4))
+        .call("ENABLE", GL.TEXTURE_2D);
+    immediateTriangle(stream);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 1);
+});
+
+test("MIN and MAX blending set WebGPU's factors to one (review S1-2b)", () => {
+    const { executor, log } = newExecutor();
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("ENABLE", GL.BLEND).call("BLEND_EQUATION", GL.MIN);
+    immediateTriangle(stream);
+    run(executor, stream);
+    const blend = log.draws[0].pipeline.descriptor.fragment.targets[0].blend;
+    assert.deepStrictEqual(blend.color, { srcFactor: "one", dstFactor: "one", operation: "min" });
 });
 
 test("program bind groups omit resources used only by uncalled helpers", () => {
@@ -2572,7 +2608,7 @@ test("uniform snapshots reuse unchanged bytes without overwriting earlier draws"
 
 test("bind group cache keys include pipeline, resource identity and buffer offset", () => {
     const { executor, log, host } = newExecutor();
-    const descriptor = { vertex: { module: { code: "@group(1) @binding(0)" } } };
+    const descriptor = { vertex: { module: { code: "@group(1) @binding(0) var<uniform> state : State;" } } };
     const a = host.device.createRenderPipeline(descriptor);
     const b = host.device.createRenderPipeline(descriptor);
     const entries = offset => [{ binding: 0, resource: {

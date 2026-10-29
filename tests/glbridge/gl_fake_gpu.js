@@ -216,13 +216,16 @@ class FakeDevice {
                 const code = (descriptor.vertex && descriptor.vertex.module.code || "") +
                     "\n" + (descriptor.fragment &&
                         descriptor.fragment.module.code || "");
-                const bindings = new Set();
-                const expression = /@group\((\d+)\)\s+@binding\((\d+)\)/g;
-                for (const match of code.matchAll(expression))
-                    if (Number(match[1]) === index) bindings.add(Number(match[2]));
+                const bindings = new Set(), types = new Map();
+                const expression = /@group\((\d+)\)\s+@binding\((\d+)\)\s*var(?:<[^>]*>)?\s+\w+\s*:\s*([^;]+);/g;
+                for (const match of code.matchAll(expression)) {
+                    if (Number(match[1]) !== index) continue;
+                    bindings.add(Number(match[2]));
+                    types.set(Number(match[2]), match[3].trim());
+                }
                 if (!bindings.size)
                     throw new Error("no bind group layout at index " + index);
-                return { index, bindings };
+                return { index, bindings, types };
             },
         };
         const problems = rules.renderPipelineProblems(descriptor, this.features);
@@ -240,6 +243,9 @@ class FakeDevice {
                     throw new Error("binding " + entry.binding +
                         " is not declared by group " + descriptor.layout.index);
         }
+        if (descriptor.layout && descriptor.layout.types)
+            for (const problem of rules.bindGroupProblems(descriptor.layout.types, descriptor.entries))
+                this.rejectWith(problem);
         const group = { descriptor };
         this.log.bindGroups.push(group);
         return group;

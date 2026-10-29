@@ -162,5 +162,26 @@ function querySetProblems(descriptor) {
     return descriptor.count > 4096 ? ["a query set holds at most 4096 queries, not " + descriptor.count] : [];
 }
 
+/*
+ * A bind group's texture views against the WGSL types they are bound to:
+ * the view's dimension and whether it is depth (the GL review's S1-2a: a 2D
+ * colour fallback bound to a cube, 3D or depth binding lost the frame).
+ * `types` maps each binding of the group to its declared type.
+ */
+function bindGroupProblems(types, entries) {
+    const problems = [];
+    for (const entry of entries) {
+        const type = types.get(entry.binding), view = entry.resource;
+        const declared = type && /^texture_(depth_)?(2d|3d|cube)\b/.exec(type);
+        if (!declared || !view || !view.texture) continue;
+        const dimension = view.options.dimension || (view.texture.descriptor.dimension === "3d" ? "3d" : "2d");
+        if (dimension !== declared[2])
+            problems.push("binding " + entry.binding + ": a " + dimension + " view for a " + type);
+        if (/^depth/.test(view.format) !== !!declared[1])
+            problems.push("binding " + entry.binding + ": a " + view.format + " view for a " + type);
+    }
+    return problems;
+}
+
 module.exports = { renderPipelineProblems, attachmentProblems, passProblems, viewportProblems,
-    querySetProblems, entryPoint };
+    querySetProblems, bindGroupProblems, entryPoint };

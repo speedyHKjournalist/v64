@@ -1959,37 +1959,7 @@
                 // once: recovery runs initialize() again
                 if (!this.lossHandler)
                     this.lossHandler = this.host.onDeviceLost(() => this.onDeviceLost());
-                this.uniformRing = this.device.createBuffer({
-                    label: "GL uniform ring",
-                    size: this.uniformCapacity,
-                    usage: BUFFER_USAGE_UNIFORM | BUFFER_USAGE_COPY_DST,
-                });
-                this.uniformStaging = new Uint8Array(this.uniformCapacity);
-                this.vertexRing = this.device.createBuffer({
-                    label: "GL vertex ring",
-                    size: this.vertexCapacity,
-                    usage: BUFFER_USAGE_VERTEX | BUFFER_USAGE_INDEX |
-                        BUFFER_USAGE_COPY_DST,
-                });
-                this.vertexStaging = new Uint8Array(this.vertexCapacity);
-                this.fallbackTexture = this.device.createTexture({
-                    label: "GL incomplete-texture fallback",
-                    size: { width: 1, height: 1, depthOrArrayLayers: 1 },
-                    format: "rgba8unorm",
-                    usage: TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING,
-                });
-                // GL samples an incomplete texture as opaque black, not white:
-                // the D3D9 path's white fallback would make missing textures
-                // invisible instead of obvious.
-                this.device.queue.writeTexture({ texture: this.fallbackTexture },
-                    new Uint8Array([0, 0, 0, 255]),
-                    { bytesPerRow: 4, rowsPerImage: 1 },
-                    { width: 1, height: 1, depthOrArrayLayers: 1 });
-                this.fallbackView = this.fallbackTexture.createView();
-                this.fallbackSampler = this.device.createSampler({});
-                this.fallbackComparisonSampler = this.device.createSampler({
-                    compare: "less-equal",
-                });
+                this.createDeviceResources();
                 return this;
             })().catch(error => {
                 this.failed = error;
@@ -1997,6 +1967,42 @@
                 throw error;
             });
             return this.readyPromise;
+        }
+
+        // What every draw needs, on a new device (the tests' fake device too)
+        createDeviceResources() {
+            this.uniformRing = this.device.createBuffer({
+                label: "GL uniform ring",
+                size: this.uniformCapacity,
+                usage: BUFFER_USAGE_UNIFORM | BUFFER_USAGE_COPY_DST,
+            });
+            this.uniformStaging = new Uint8Array(this.uniformCapacity);
+            this.vertexRing = this.device.createBuffer({
+                label: "GL vertex ring",
+                size: this.vertexCapacity,
+                usage: BUFFER_USAGE_VERTEX | BUFFER_USAGE_INDEX |
+                    BUFFER_USAGE_COPY_DST,
+            });
+            this.vertexStaging = new Uint8Array(this.vertexCapacity);
+            this.fallbackTexture = this.device.createTexture({
+                label: "GL incomplete-texture fallback",
+                size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+                format: "rgba8unorm",
+                usage: TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING,
+            });
+            // GL samples an incomplete texture as opaque black, not white:
+            // the D3D9 path's white fallback would make missing textures
+            // invisible instead of obvious.
+            this.device.queue.writeTexture({ texture: this.fallbackTexture },
+                new Uint8Array([0, 0, 0, 255]),
+                { bytesPerRow: 4, rowsPerImage: 1 },
+                { width: 1, height: 1, depthOrArrayLayers: 1 });
+            this.fallbackView = this.fallbackTexture.createView();
+            this.fallbackViews = new Map([["2d", this.fallbackView]]);
+            this.fallbackSampler = this.device.createSampler({});
+            this.fallbackComparisonSampler = this.device.createSampler({
+                compare: "less-equal",
+            });
         }
 
         trackReadback(operation) {
@@ -8196,6 +8202,37 @@ ${fragmentCode}`;
             return id;
         },
 
+        /*
+         * An incomplete or missing texture samples as opaque black, through a
+         * view of the binding's dimension and sample type (review S1-2a: one
+         * 2D colour view was bound to cube, 3D and depth bindings, which
+         * lost the frame).
+         */
+        fallbackViewFor(item) {
+            const target = String(item.target || "2D").toUpperCase();
+            const dimension = target === "CUBE" ? "cube" : (target === "3D" ? "3d" : "2d");
+            const key = dimension + (item.shadow ? ":depth" : "");
+            let view = this.fallbackViews.get(key);
+            if (view) return view;
+            const layers = dimension === "cube" ? 6 : 1;
+            const texture = this.device.createTexture({
+                label: "GL incomplete-texture fallback " + key,
+                size: { width: 1, height: 1, depthOrArrayLayers: layers },
+                dimension: dimension === "3d" ? "3d" : "2d",
+                format: item.shadow ? "depth32float" : "rgba8unorm",
+                usage: TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING,
+            });
+            if (!item.shadow) {
+                const black = new Uint8Array(4 * layers);
+                for (let i = 3; i < black.length; i += 4) black[i] = 255;
+                this.device.queue.writeTexture({ texture }, black, { bytesPerRow: 4, rowsPerImage: 1 },
+                    { width: 1, height: 1, depthOrArrayLayers: layers });
+            }
+            view = texture.createView({ dimension });
+            this.fallbackViews.set(key, view);
+            return view;
+        },
+
         cachedBindGroup(pipeline, index, entries) {
             // Automatic layouts are pipeline-specific. Key by actual view /
             // sampler / GPUBuffer identity, never by a recyclable GL name.
@@ -8260,9 +8297,19 @@ ${fragmentCode}`;
         },
 
         textureViewFor(object, item) {
-            if (!object || !this.textureIsComplete(object)) return this.fallbackView;
+            if (!object || !this.textureIsComplete(object)) return this.fallbackViewFor(item);
+            const depth = /^depth/.test(object.gpuFormat);
+            if (depth !== !!item.shadow) {
+                // a depth texture through a sampler without comparison, or a
+                // colour one through a shadow sampler: WebGPU binds neither
+                // (review S1-2j); GL's results are undefined for the second
+                this.warnOnce("texture-sample-type", depth ? "a depth texture is sampled " +
+                    "without depth comparison, which is not implemented: it samples as black" :
+                    "a shadow sampler reads a colour texture", { format: object.gpuFormat });
+                return this.fallbackViewFor(item);
+            }
             const gpuTexture = this.ensureTextureUploaded(object);
-            if (!gpuTexture) return this.fallbackView;
+            if (!gpuTexture) return this.fallbackViewFor(item);
             const kind = item.target === "Cube" || object.kind === "Cube" ?
                 "cube" : (object.kind === "3D" ? "3d" : "2d");
             const key = kind + ":" + object.sampler.baseLevel + ":" +
@@ -8393,17 +8440,17 @@ ${fragmentCode}`;
 
     function gpuBlendState(s) {
         const b = s.blend;
+        // GL's MIN and MAX ignore the factors; WebGPU requires them to be ONE
+        // (review S1-2b: the default ONE, ZERO lost the frame)
+        const component = (src, dst, equation) => {
+            const operation = BLEND_EQUATIONS[equation] || "add";
+            const minMax = operation === "min" || operation === "max";
+            return { srcFactor: minMax ? "one" : BLEND_FACTORS[src] || "one",
+                     dstFactor: minMax ? "one" : BLEND_FACTORS[dst] || "zero", operation };
+        };
         return {
-            color: {
-                srcFactor: BLEND_FACTORS[b.srcRGB] || "one",
-                dstFactor: BLEND_FACTORS[b.dstRGB] || "zero",
-                operation: BLEND_EQUATIONS[b.equationRGB] || "add",
-            },
-            alpha: {
-                srcFactor: BLEND_FACTORS[b.srcAlpha] || "one",
-                dstFactor: BLEND_FACTORS[b.dstAlpha] || "zero",
-                operation: BLEND_EQUATIONS[b.equationAlpha] || "add",
-            },
+            color: component(b.srcRGB, b.dstRGB, b.equationRGB),
+            alpha: component(b.srcAlpha, b.dstAlpha, b.equationAlpha),
         };
     }
 
