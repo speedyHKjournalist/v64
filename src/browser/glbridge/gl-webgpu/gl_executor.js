@@ -3676,6 +3676,8 @@
         });
         define("QUERY_PROGRAM_IV_ARB", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("ARB query record is short");
+            // answered on the CPU side already (gl_shadow_arb.js)
+            if (view.getUint32(offset + protocol.F.QUERY_PROGRAM_IV_ARB.status, true) !== SYNC_STATUS_PENDING) return;
             const target = view.getUint32(offset + protocol.F.QUERY_PROGRAM_IV_ARB.target, true);
             const pname = view.getUint32(offset + protocol.F.QUERY_PROGRAM_IV_ARB.pname, true);
             const value = this.queryProgramivARB(target, pname);
@@ -3698,6 +3700,8 @@
          */
         define("QUERY_PROGRAM_STRING_ARB", function(a, bytes, view, offset, size) {
             if (size < 24) throw new GLStreamError("ARB string record is short");
+            // answered on the CPU side already (gl_shadow_arb.js)
+            if (view.getUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.status, true) !== SYNC_STATUS_PENDING) return;
             const target = view.getUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.target, true);
             const capacity = view.getUint32(offset + protocol.F.QUERY_PROGRAM_STRING_ARB.data_size, true);
             const program = this.arbProgramFor(target);
@@ -9752,6 +9756,8 @@ struct Params { value : vec4<f32>, }
             if (size < 24) throw new GLStreamError("ARB query record is short");
             // FV and DV share the header
             const F = protocol.F.QUERY_PROGRAM_PARAMETER_FV_ARB;
+            // answered on the CPU side already (gl_shadow_arb.js)
+            if (view.getUint32(offset + F.status, true) !== SYNC_STATUS_PENDING) return;
             const kind = view.getUint32(offset + F.parameter_kind, true);
             const target = view.getUint32(offset + F.target, true);
             const index = view.getUint32(offset + F.index, true);

@@ -603,7 +603,7 @@
                 throw new ARBError(opcode + " is fragment-program only", token.line);
 
             const instruction = { opcode, info, saturate, line: token.line,
-                                  sources: [] };
+                                  at: token.at, sources: [] };
             if (!info.kill) {
                 instruction.destination = this.destination();
                 this.expect(",");
@@ -628,11 +628,14 @@
             this.instructions.push(instruction);
         }
 
+        // (each operand keeps where it starts: the generator's errors about
+        // it report that position)
         destination() {
+            const at = this.peek().at;
             const name = this.bindingPath(true);
             let mask = "xyzw";
             if (this.accept(".")) mask = normalizeMask(this.expectIdent());
-            return { name, mask, line: this.line };
+            return { name, mask, line: this.line, at };
         }
 
         source(extended) {
@@ -642,6 +645,7 @@
                 if (this.next().value === "-") negate = !negate;
             }
             if (this.accept("|")) absolute = true;
+            const at = this.peek().at;
             const name = this.bindingPath(true);
             let swizzle = null;
             if (this.accept(".")) {
@@ -655,7 +659,7 @@
                 }
             }
             if (absolute) this.expect("|");
-            return { name, swizzle, negate, absolute, line: this.line };
+            return { name, swizzle, negate, absolute, line: this.line, at };
         }
     }
 
@@ -696,7 +700,7 @@
         generate() {
             const body = [];
             for (const instruction of this.parsed.instructions)
-                body.push(...this.instruction(instruction));
+                body.push(...this.located(instruction, () => this.instruction(instruction)));
 
             // WebGPU validates the inter-stage interface strictly. Desktop GL
             // leaves an unwritten ARB vertex result undefined, so when a
@@ -934,8 +938,21 @@
             return unit;
         }
 
+        // An error from fn without a position of its own is at `operand`
+        located(operand, fn) {
+            try {
+                return fn();
+            } catch (error) {
+                if (error instanceof ARBError && error.arbOffset < 0 && operand.at !== undefined) {
+                    error.arbOffset = operand.at;
+                    if (!error.arbLine) error.arbLine = operand.line;
+                }
+                throw error;
+            }
+        }
+
         sourceExpression(source) {
-            let text = this.resolveSource(source.name);
+            let text = this.located(source, () => this.resolveSource(source.name));
             if (source.swizzle) text = applySwizzle(text, source.swizzle);
             if (source.absolute) text = "abs(" + text + ")";
             if (source.negate) text = "(-(" + text + "))";
@@ -1134,6 +1151,10 @@
         }
 
         resolveDestination(destination) {
+            return this.located(destination, () => this.resolveDestinationName(destination));
+        }
+
+        resolveDestinationName(destination) {
             const name = destination.name;
             const alias = this.parsed.aliases.get(name);
             if (alias) return this.resolveDestination({ ...destination, name: alias });

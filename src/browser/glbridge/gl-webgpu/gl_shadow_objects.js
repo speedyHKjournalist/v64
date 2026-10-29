@@ -37,16 +37,6 @@
 
     const proto = GLShadow.prototype;
 
-    // A name list record (GEN_*, DELETE_*): the names, or null
-    proto.names = function(name, view, offset, size) {
-        if (size < RECORDS[name].size) return null;
-        const count = view.getUint32(offset + F[name].count, true);
-        if (RECORDS[name].size + count * 4 > size) return null;
-        const names = [];
-        for (let i = 0; i < count; ++i) names.push(view.getUint32(offset + RECORDS[name].size + i * 4, true));
-        return names;
-    };
-
     proto.textureObject = function(name) {
         const group = this.current.group;
         let texture = group.textures.get(name);

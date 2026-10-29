@@ -193,7 +193,14 @@ game.exe
 >   - worker 模式下 GLSL 查询与页面模式一致（`gl_sync_answers_test.js`）。
 >   - 代码生成仍是手写翻译器：glslang 接受而翻译器不接受的程序，客体看到链接成功，页面画不出来（记日志）。这由 E0 决定。
 > - C3 第三步：`gl_shadow_objects.js`，纹理、renderbuffer、framebuffer 对象和它们的绑定。`CHECK_FRAMEBUFFER_STATUS` 由影子按 EXT_framebuffer_object 的规则回答：尺寸不一致是 `INCOMPLETE_DIMENSIONS`（执行器原来报 `INCOMPLETE_ATTACHMENT`）；只有模板的格式不能作深度；深度和模板是两个不同的图像时报 `UNSUPPORTED`（WebGPU 只有一个深度模板附件）。删除纹理或 renderbuffer 时，从当前绑定的 FBO 上卸下。
-> - 下一步依次：ARB 程序、查询对象与 Finish 的异步等待、全部命令的校验（之后 `QUERY_ERROR` 才能搬过来）。
+> - C5：`gl_shadow_arb.js`，ARB 程序在影子里按扩展的规则处理：
+>   - 汇编失败时保留原来的程序（Mesa 的读法），设置错误位置和错误串；
+>   - env 参数属于上下文和目标，不绑定程序也能设置；local 参数属于程序对象；
+>   - 程序对象 0 是每个目标真正的默认程序。
+>   - 汇编器仍是 `gl_arb_program.js`（它的解析和检查），所以 CPU worker 的设备脚本带上了状态布局和翻译器（共 484 KB）。
+>   - 错误位置现在指向被拒绝的操作数，行号也对了：生成器的错误带上操作数的字符偏移，原来是整个解析结束的位置和 “line 0”。
+>   - 参数上限仍是 28（渲染器的容量）；顶点 96 的上限和执行器按目标共享的 env 留给 E2。
+> - 下一步依次：查询对象与 Finish 的异步等待、全部命令的校验（之后 `QUERY_ERROR` 才能搬过来）。
 
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；

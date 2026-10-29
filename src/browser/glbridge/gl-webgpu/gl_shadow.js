@@ -32,6 +32,9 @@
 
     // record code -> method; the parts add theirs
     const HANDLERS = new Map();
+    // glGetIntegerv and glGetString pnames the parts answer: pname -> method
+    // of the shadow, giving the value (undefined: not this side's yet)
+    const INTEGERS = new Map(), STRINGS = new Map();
     // { reset(shadow), group(group), context(context), getState(shadow, state), setState(shadow, state) }
     // of each part
     const PARTS = [];
@@ -49,6 +52,12 @@
         // fn -> the method's name, for a part
         static install(handlers) {
             for (const [fn, method] of Object.entries(handlers)) HANDLERS.set(+fn, method);
+        }
+
+        // pname -> the method's name, for a part's glGetIntegerv and glGetString
+        static queries({ integers, strings }) {
+            for (const [pname, method] of Object.entries(integers || {})) INTEGERS.set(+pname, method);
+            for (const [pname, method] of Object.entries(strings || {})) STRINGS.set(+pname, method);
         }
 
         static part(part) {
@@ -172,9 +181,37 @@
             return size >= RECORDS[name].size && view.getUint32(offset + F[name].status, true) === PENDING;
         }
 
+        answered(name, view, offset, status) {
+            view.setUint32(offset + F[name].status, status, true);
+            ++this.stats.answered;
+        }
+
+        // A name list record (GEN_*, DELETE_*, DRAW_BUFFERS): the names, or null
+        names(name, view, offset, size) {
+            if (size < RECORDS[name].size) return null;
+            const count = view.getUint32(offset + F[name].count, true);
+            if (RECORDS[name].size + count * 4 > size) return null;
+            const names = [];
+            for (let i = 0; i < count; ++i) names.push(view.getUint32(offset + RECORDS[name].size + i * 4, true));
+            return names;
+        }
+
+        // A capability, or a part's state (with a context)
+        integer(pname) {
+            const value = glCaps.integer(this.capabilities, pname);
+            const method = INTEGERS.get(pname);
+            return value !== undefined || !method || !this.current ? value : this[method](pname);
+        }
+
+        string(pname) {
+            const value = glCaps.string(this.capabilities, pname);
+            const method = STRINGS.get(pname);
+            return value !== undefined || !method || !this.current ? value : this[method](pname);
+        }
+
         queryInteger(bytes, view, offset, size) {
             if (!this.capabilities || !this.pending("QUERY_INTEGER", view, offset, size)) return;
-            const value = glCaps.integer(this.capabilities, view.getUint32(offset + F.QUERY_INTEGER.pname, true));
+            const value = this.integer(view.getUint32(offset + F.QUERY_INTEGER.pname, true));
             if (value === undefined) return;
             view.setUint32(offset + F.QUERY_INTEGER.value, value >>> 0, true);
             view.setUint32(offset + F.QUERY_INTEGER.status, OK, true);
@@ -185,7 +222,7 @@
         // text; length counts its terminator, which is written when it fits
         queryString(bytes, view, offset, size) {
             if (!this.capabilities || !this.pending("QUERY_GL_STRING", view, offset, size)) return;
-            const text = glCaps.string(this.capabilities, view.getUint32(offset + F.QUERY_GL_STRING.name, true));
+            const text = this.string(view.getUint32(offset + F.QUERY_GL_STRING.name, true));
             const capacity = view.getUint32(offset + F.QUERY_GL_STRING.data_size, true);
             const header = RECORDS.QUERY_GL_STRING.size;
             if (text === undefined || header + capacity > size) return;

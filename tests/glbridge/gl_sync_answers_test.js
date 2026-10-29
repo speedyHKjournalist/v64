@@ -18,6 +18,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_glslang.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
@@ -102,6 +103,10 @@ async function guestAnswers(remote) {
         .call("BIND_FRAMEBUFFER", 0x8D40, 3).call("FRAMEBUFFER_TEXTURE", 0x8D40, 0x8CE0, 0x0DE1, 7, 0, 0);
     const fboAt = stream.length + 4 + P.F.CHECK_FRAMEBUFFER_STATUS.status;
     stream.record(P.GLFN.CHECK_FRAMEBUFFER_STATUS, P.encodeRecord("CHECK_FRAMEBUFFER_STATUS", { target: 0x8D40 }));
+    // an ARB program that does not assemble: where it stopped
+    stream.call("BIND_PROGRAM_ARB", 0x8804, 4).programStringARB(0x8804, "!!ARBfp1.0\nMOV result.color, nothing;\nEND\n");
+    const arbAt = stream.length + 4 + 4;
+    stream.queryInteger(0x864B);
     const bytes = stream.bytes();
     const header = new DataView(memory.buffer, ARENA, HEADER);
     header.setUint32(0, 0x324C4756, true);
@@ -123,6 +128,7 @@ async function guestAnswers(remote) {
         linked: answer(linkAt, () => view.getUint32(linkAt + 4, true)),
         location: answer(locationAt, () => view.getInt32(locationAt + 4, true)),
         framebuffer: answer(fboAt, () => view.getUint32(fboAt + 4, true)),
+        arb: answer(arbAt, () => view.getInt32(arbAt + 4, true)),
     };
 }
 
@@ -143,18 +149,19 @@ async function guestAnswers(remote) {
         }
     }
     // the same answers in both modes
-    for (const kind of ["string", "limit", "caps", "linked", "location", "framebuffer"])
+    for (const kind of ["string", "limit", "caps", "linked", "location", "framebuffer", "arb"])
         if (results.page[kind] !== results.worker[kind])
             failures.push(kind + ": page " + JSON.stringify(results.page[kind]) + ", worker " + JSON.stringify(results.worker[kind]));
     if (results.page.string !== "Anthropic v86gl") failures.push("GL_VENDOR is " + JSON.stringify(results.page.string));
     if (results.page.linked !== 1) failures.push("the program did not link: " + results.page.linked);
     if (!(results.page.location >= 0)) failures.push("gain has no location: " + results.page.location);
     if (results.page.framebuffer !== 0x8CD5) failures.push("the framebuffer is " + results.page.framebuffer);
+    if (results.page.arb !== 29) failures.push("the ARB error position is " + results.page.arb);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;
         return;
     }
-    console.log("gl_sync_answers_test: both modes answer the capability, GLSL and framebuffer queries alike; the worker mode's other " +
+    console.log("gl_sync_answers_test: both modes answer the capability, GLSL, framebuffer and ARB queries alike; the worker mode's other " +
         "losses are known (passed)");
 })();

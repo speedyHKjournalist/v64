@@ -336,21 +336,11 @@
 
     /* ---- the answers ---- */
 
-    // A query record still the guest's to have answered, and the status to write
-    proto.pendingQuery = function(name, view, offset, size) {
-        return size >= RECORDS[name].size && view.getUint32(offset + F[name].status, true) === PENDING;
-    };
-
-    proto.answered = function(name, view, offset, status) {
-        view.setUint32(offset + F[name].status, status, true);
-        ++this.stats.answered;
-    };
-
     const maxLength = list => list.reduce((n, e) => Math.max(n, e.length + 1), 0);
 
     proto.queryObjectIv = function(bytes, view, offset, size) {
         const R = F.QUERY_OBJECT_IV;
-        if (!this.pendingQuery("QUERY_OBJECT_IV", view, offset, size)) return;
+        if (!this.pending("QUERY_OBJECT_IV", view, offset, size)) return;
         const kind = view.getUint32(offset + R.object_kind, true);
         const name = view.getUint32(offset + R.name, true);
         const pname = view.getUint32(offset + R.pname, true);
@@ -399,7 +389,7 @@
     // {object_kind, name, buf_size, status, length, data_size} then the text
     proto.queryObjectLog = function(bytes, view, offset, size) {
         const R = F.QUERY_OBJECT_LOG, header = RECORDS.QUERY_OBJECT_LOG.size;
-        if (!this.pendingQuery("QUERY_OBJECT_LOG", view, offset, size)) return;
+        if (!this.pending("QUERY_OBJECT_LOG", view, offset, size)) return;
         const kind = view.getUint32(offset + R.object_kind, true);
         const name = view.getUint32(offset + R.name, true);
         const capacity = view.getUint32(offset + R.buf_size, true);
@@ -423,7 +413,7 @@
     // {active_kind, program, index, buf_size, status, length, size, type, data_size, reserved} then the name
     proto.queryActive = function(bytes, view, offset, size) {
         const R = F.QUERY_ACTIVE, header = RECORDS.QUERY_ACTIVE.size;
-        if (!this.pendingQuery("QUERY_ACTIVE", view, offset, size)) return;
+        if (!this.pending("QUERY_ACTIVE", view, offset, size)) return;
         const program = this.current.group.programs.get(view.getUint32(offset + R.program, true));
         const linked = program ? this.linkedProgram(program) : undefined;
         if (linked === null) return;
@@ -442,7 +432,7 @@
     // {location_kind, program, guest_location, status, result, value_type, value_count, name_length} then the name
     proto.queryLocation = function(bytes, view, offset, size) {
         const R = F.QUERY_LOCATION, header = RECORDS.QUERY_LOCATION.size;
-        if (!this.pendingQuery("QUERY_LOCATION", view, offset, size)) return;
+        if (!this.pending("QUERY_LOCATION", view, offset, size)) return;
         const program = this.current.group.programs.get(view.getUint32(offset + R.program, true));
         const linked = program ? this.linkedProgram(program) : undefined;
         if (linked === null) return;
@@ -478,7 +468,7 @@
     // value_kind 1 floats, 2 ints
     proto.queryUniform = function(bytes, view, offset, size) {
         const R = F.QUERY_UNIFORM, header = RECORDS.QUERY_UNIFORM.size;
-        if (!this.pendingQuery("QUERY_UNIFORM", view, offset, size)) return;
+        if (!this.pending("QUERY_UNIFORM", view, offset, size)) return;
         const program = this.current.group.programs.get(view.getUint32(offset + R.program, true));
         const linked = program ? this.linkedProgram(program) : undefined;
         if (linked === null) return;
