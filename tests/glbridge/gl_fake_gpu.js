@@ -68,9 +68,11 @@ class FakeRenderPass {
     setBindGroup(index, group) { this.calls.push(["bindGroup", index, group]); }
     setVertexBuffer(slot, buffer, offset) {
         this.calls.push(["vertexBuffer", slot, buffer, offset]);
+        (this.vertexBuffers = this.vertexBuffers || [])[slot] = { buffer, offset };
     }
     setIndexBuffer(buffer, format, offset) {
         this.calls.push(["indexBuffer", buffer, format, offset]);
+        this.indexBuffer = { buffer, format, offset };
     }
     setViewport(...args) {
         this.viewport = args;
@@ -98,13 +100,16 @@ class FakeRenderPass {
     draw(count, instances, first) {
         this.checkOpen();
         this.log.draws.push({ pass: this, count, instances, first,
-                              pipeline: this.pipeline });
+                              pipeline: this.pipeline,
+                              vertexBuffers: (this.vertexBuffers || []).slice() });
         this.calls.push(["draw", count]);
     }
     drawIndexed(count, instances, firstIndex, baseVertex) {
         this.checkOpen();
         this.log.draws.push({ pass: this, count, instances, firstIndex,
-                              baseVertex, indexed: true, pipeline: this.pipeline });
+                              baseVertex, indexed: true, pipeline: this.pipeline,
+                              vertexBuffers: (this.vertexBuffers || []).slice(),
+                              indexBuffer: this.indexBuffer });
         this.calls.push(["drawIndexed", count]);
     }
     end() {

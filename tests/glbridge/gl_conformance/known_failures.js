@@ -9,14 +9,6 @@ globalThis.GLConformanceKnownFailures = {
         "CLAMP",
         "CLAMP_TO_BORDER",
     ] },
-    polymode_line: { reason: "S2-14: wireframe draws the triangulation's diagonal", tiles: [
-        "LINE mode outline",
-    ] },
-    polymode_front_line_back_fill: { reason: "S2-14: the front polygon mode is used for both faces", tiles: [
-        "BACK FILL (CW quad filled)",
-        "FRONT LINE (CCW quad outlined)",
-    ] },
-    polymode_point: "S1-2e: indexed or polygon-mode points have no corner buffer",
     arb_fragment_program: { reason: "S2-48: the ARB parser", tiles: [
         "LIT x>0: (1,.5,.0625,1)*.5",
         "LIT x<=0: z=0",

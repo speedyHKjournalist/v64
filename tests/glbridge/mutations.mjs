@@ -154,6 +154,18 @@ const MUTATIONS = {
             "        const rowBytes = (pack.rowLength || requestWidth) * groupBytes;"],
         ["CONSTANT_ALPHA blends with the constant's RGB", G + "gl_executor.js",
             "return usesAlpha && !usesColor ? { r: a, g: a, b: a, a } : { r, g, b, a };", "return { r, g, b, a };"],
+        ["polygon facing ignores glFrontFace", G + "gl_executor.js",
+            "        return (area >= 0) === (frontFace !== GL.CW);", "        return area >= 0;"],
+        ["edge flags are ignored", G + "gl_executor.js",
+            "                boundary.push(flagged ? flags[at(i)] : 1);", "                boundary.push(1);"],
+        ["polygon-mode lines are not culled", G + "gl_executor.js",
+            "                if (clip && culling && (isFront ? s.cullFace === GL.FRONT : s.cullFace === GL.BACK))",
+            "                if (false)"],
+        ["POLYGON_OFFSET_LINE drops the units", G + "gl_executor.js",
+            "            return (slope * s.polygonOffset.factor + r * s.polygonOffset.units) / range;",
+            "            return slope * s.polygonOffset.factor / range;"],
+        ["lines get POLYGON_OFFSET_FILL's depth bias", G + "gl_executor.js",
+            "                isPolygonPrimitive(request.mode) && !request.expandedPoints;", "                true;"],
     ] },
 };
 

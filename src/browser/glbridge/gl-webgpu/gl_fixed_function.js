@@ -32,6 +32,8 @@
     const MAX_LIGHTS = stateLayout.MAX_LIGHTS;
     const ATTR = translator.COMPAT_ATTRIBUTE_LOCATIONS;
     const POINT_CORNER_LOCATION = translator.POINT_CORNER_LOCATION;
+    // a slot no conventional attribute aliases (ARB_vertex_program 2.14.3)
+    const DEPTH_OFFSET_LOCATION = 6;
 
     /* ================================================================== */
     /* Signature                                                          */
@@ -64,6 +66,8 @@
      *   pointSprite: bool,
      *   flatShading: bool,
      *   colorTargets: 1..8,
+     *   backFacing: bool,     a back polygon's edges or vertices (glPolygonMode)
+     *   depthOffset: bool,    a per-vertex depth offset (POLYGON_OFFSET_LINE/POINT)
      * }
      */
 
@@ -145,6 +149,8 @@
             logicOp: s.logicOp ? (s.logicOp >>> 0) : 0,
             flatShading: !!s.flatShading,
             colorTargets: Math.max(1, Math.min(8, s.colorTargets || 1)),
+            backFacing: !!s.backFacing,
+            depthOffset: !!s.depthOffset,
         };
     }
 
@@ -403,6 +409,8 @@
         }
         if (sig.pointSprite)
             emit("    @location(" + POINT_CORNER_LOCATION + ") corner : vec2<f32>,");
+        if (sig.depthOffset)
+            emit("    @location(" + DEPTH_OFFSET_LOCATION + ") depthOffset : f32,");
         emit("}");
         emit("");
 
@@ -490,6 +498,9 @@
         // once, in clip space -- is what lets viewport, scissor, readback and
         // render-to-texture skip a conversion each (plan 4.3).
         emit("    clip.z = (clip.z + clip.w) * 0.5;");
+        // glPolygonOffset for a polygon drawn as lines or points, in units of
+        // the depth range (WebGPU's depth bias is for triangles only)
+        if (sig.depthOffset) emit("    clip.z = clip.z + vin.depthOffset * clip.w;");
         emit("    clip.y = -clip.y;");
         emit("    out.position = clip;");
         emit("    return out;");
@@ -790,7 +801,7 @@
 
         emit("struct FSIn {");
         emit("    @builtin(position) position : vec4<f32>,");
-        if (sig.lighting.enabled && sig.lighting.twoSide)
+        if (sig.lighting.enabled && sig.lighting.twoSide && !sig.backFacing)
             emit("    @builtin(front_facing) frontFacing : bool,");
         for (const i of layout.slotIndices) {
             const flat = layout.entries.some(e => e.slot === i && e.flat);
@@ -817,9 +828,12 @@
         if (sig.polygonStipple) emitPolygonStippleTest(emit, "fin.position");
 
         const colorRead = readVarying(layout.color);
+        // a polygon's lines and points are not faces to WebGPU: the executor
+        // says which side they came from
+        const facing = sig.backFacing ? "false" : "fin.frontFacing";
         if (sig.lighting.enabled && sig.lighting.twoSide && layout.backColor)
             emit("    let primary = select(" + readVarying(layout.backColor) +
-                ", " + colorRead + ", fin.frontFacing);");
+                ", " + colorRead + ", " + facing + ");");
         else
             emit("    let primary = " + colorRead + ";");
         emit("    var frag = primary;");
@@ -843,7 +857,7 @@
         if (layout.secondary) {
             const secondary = (sig.lighting.twoSide && layout.backSecondary) ?
                 "select(" + readVarying(layout.backSecondary) + ", " +
-                    readVarying(layout.secondary) + ", fin.frontFacing)" :
+                    readVarying(layout.secondary) + ", " + facing + ")" :
                 readVarying(layout.secondary);
             emit("    frag = vec4<f32>(clamp(frag.rgb + " + secondary +
                 ", vec3<f32>(0.0), vec3<f32>(1.0)), frag.a);");
@@ -1240,6 +1254,9 @@
         if (sig.pointSprite)
             attributes.push({ name: "corner", location: POINT_CORNER_LOCATION,
                               components: 2 });
+        if (sig.depthOffset)
+            attributes.push({ name: "depthOffset", location: DEPTH_OFFSET_LOCATION,
+                              components: 1 });
 
         const textures = [];
         let binding = 0;
@@ -1271,7 +1288,7 @@
         FIXED_FUNCTION_REVISION,
         generate, signatureKey, normalizeSignature, stateFieldsFor,
         allocateVaryings,
-        MAX_TEXTURE_UNITS, MAX_LIGHTS,
+        MAX_TEXTURE_UNITS, MAX_LIGHTS, DEPTH_OFFSET_LOCATION,
     };
     global.GLFixedFunction = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;

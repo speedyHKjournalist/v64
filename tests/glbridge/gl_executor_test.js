@@ -505,25 +505,135 @@ test("a reversed depth range draws with the flipped vertex stage and an ordered 
     assert.strictEqual(log.draws[2].pipeline, log.draws[0].pipeline, "an ordered range is the plain pipeline again");
 });
 
-test("glPolygonMode line and point rasterize triangle edges and vertices", () => {
-    const line = newExecutor();
-    let stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
-        .call("POLYGON_MODE", GL.FRONT_AND_BACK, GL.LINE);
-    immediateTriangle(stream);
-    run(line.executor, stream);
-    assert.strictEqual(line.log.draws[0].indexed, true);
-    assert.strictEqual(line.log.draws[0].count, 6);
-    assert.strictEqual(line.log.draws[0].pipeline.descriptor.primitive.topology,
-        "line-list");
+// The floats a draw's vertex buffer `slot` holds, `stride` floats a vertex
+function drawnVertices(draw, stride, slot) {
+    const entry = draw.vertexBuffers[slot || 0];
+    const data = new Float32Array(entry.buffer.storage, entry.offset, draw.count * stride);
+    return Array.from({ length: draw.count }, (_, i) => Array.from(data.subarray(i * stride, (i + 1) * stride)));
+}
+const QUAD_CCW = [[-1, -1], [0, -1], [0, 0], [-1, 0]];
+const QUAD_CW = [[0.25, 0.25], [0.25, 0.75], [0.75, 0.75], [0.75, 0.25]];
+function immediatePolygons(stream, mode, ...polygons) {
+    stream.call("BEGIN", mode).call("COLOR4F", 1, 1, 1, 1);
+    for (const polygon of polygons)
+        for (const [x, y] of polygon) stream.call("VERTEX3F", x, y, 0);
+    return stream.call("END");
+}
+const xy = vertices => vertices.map(v => [v[0], v[1]]);
 
-    const point = newExecutor();
+test("glPolygonMode LINE outlines each polygon, not its triangles (review S2-14)", () => {
+    const { executor, log } = newExecutor();
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("POLYGON_MODE", GL.FRONT_AND_BACK, GL.LINE);
+    immediatePolygons(stream, GL.QUADS, QUAD_CCW);
+    immediatePolygons(stream, GL.POLYGON, [[0, 0], [1, 0], [1, 1], [0.5, 1.5], [0, 1]]);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 2);
+    assert.strictEqual(log.draws[0].pipeline.descriptor.primitive.topology, "line-list");
+    assert.deepStrictEqual(xy(drawnVertices(log.draws[0], 8)), [
+        QUAD_CCW[0], QUAD_CCW[1], QUAD_CCW[1], QUAD_CCW[2],
+        QUAD_CCW[2], QUAD_CCW[3], QUAD_CCW[0], QUAD_CCW[3]],
+    "four edges, no diagonal; an edge of the provoking vertex ends at it");
+    assert.strictEqual(log.draws[1].count, 10, "a pentagon is five edges");
+});
+
+test("each polygon takes its own face's mode, and culling drops its lines", () => {
+    let { executor, log } = newExecutor();
+    let stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("POLYGON_MODE", GL.FRONT, GL.LINE).call("POLYGON_MODE", GL.BACK, GL.FILL);
+    immediatePolygons(stream, GL.QUADS, QUAD_CCW, QUAD_CW);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 2);
+    assert.strictEqual(log.draws[0].indexed, true);
+    assert.strictEqual(log.draws[0].count, 6, "the back quad is filled");
+    assert.strictEqual(log.draws[0].pipeline.descriptor.primitive.topology, "triangle-list");
+    const indices = new Uint32Array(log.draws[0].indexBuffer.buffer.storage, log.draws[0].indexBuffer.offset, 6);
+    assert.ok(Array.from(indices).every(i => i >= 4), "from the second quad's vertices");
+    assert.deepStrictEqual(xy(drawnVertices(log.draws[1], 8)).slice(0, 2), [QUAD_CCW[0], QUAD_CCW[1]],
+        "the front quad is outlined");
+    assert.strictEqual(log.draws[1].count, 8);
+
+    // glFrontFace(CW) turns them around
+    ({ executor, log } = newExecutor());
+    stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).call("FRONT_FACE", GL.CW)
+        .call("POLYGON_MODE", GL.FRONT, GL.LINE).call("POLYGON_MODE", GL.BACK, GL.FILL);
+    immediatePolygons(stream, GL.QUADS, QUAD_CCW, QUAD_CW);
+    run(executor, stream);
+    assert.strictEqual(log.draws[0].count, 6);
+    assert.ok(Array.from(new Uint32Array(log.draws[0].indexBuffer.buffer.storage,
+        log.draws[0].indexBuffer.offset, 6)).every(i => i < 4), "the first quad is filled");
+    assert.deepStrictEqual(xy(drawnVertices(log.draws[1], 8)).slice(0, 2), [QUAD_CW[0], QUAD_CW[1]]);
+
+    ({ executor, log } = newExecutor());
     stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
-        .call("POLYGON_MODE", GL.FRONT_AND_BACK, GL.POINT);
-    immediateTriangle(stream);
-    run(point.executor, stream);
-    assert.strictEqual(point.log.draws[0].count, 3);
-    assert.strictEqual(point.log.draws[0].pipeline.descriptor.primitive.topology,
-        "point-list");
+        .call("POLYGON_MODE", GL.FRONT_AND_BACK, GL.LINE)
+        .call("ENABLE", GL.CULL_FACE).call("CULL_FACE", GL.BACK);
+    immediatePolygons(stream, GL.QUADS, QUAD_CCW, QUAD_CW);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 1);
+    assert.strictEqual(log.draws[0].count, 8, "only the front quad's edges");
+
+    // lines and points are not polygons: culling both faces leaves them
+    ({ executor, log } = newExecutor());
+    stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("ENABLE", GL.CULL_FACE).call("CULL_FACE", GL.FRONT_AND_BACK);
+    immediatePolygons(stream, GL.LINES, [[0, 0], [1, 1]]);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 1);
+});
+
+test("an edge flag hides the edge its vertex starts, and the vertex in POINT mode", () => {
+    for (const [mode, count] of [[GL.LINE, 4], [GL.POINT, 2]]) {
+        const { executor, log } = newExecutor();
+        const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+            .call("POLYGON_MODE", GL.FRONT_AND_BACK, mode)
+            .call("BEGIN", GL.TRIANGLES)
+            .call("VERTEX3F", -1, -1, 0)
+            .call("EDGE_FLAG", 0).call("VERTEX3F", 1, -1, 0)
+            .call("EDGE_FLAG", 1).call("VERTEX3F", 0, 1, 0)
+            .call("END");
+        run(executor, stream);
+        assert.strictEqual(log.draws[0].count, count);
+        assert.ok(!xy(drawnVertices(log.draws[0], 8)).some(([x, y], i) =>
+            mode === GL.POINT ? x === 1 && y === -1 : i % 2 === 0 && x === 1),
+        "nothing starts at the flagged vertex");
+    }
+});
+
+test("polygon-mode points expand when wide; their lines carry the polygon offset", () => {
+    let { executor, log } = newExecutor();
+    let stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("POLYGON_MODE", GL.FRONT_AND_BACK, GL.POINT).call("POINT_SIZE", 3);
+    immediatePolygons(stream, GL.QUADS, QUAD_CCW);
+    run(executor, stream);
+    assert.strictEqual(log.draws[0].count, 6, "a six-vertex quad per point (review S1-2e)");
+    assert.strictEqual(log.draws[0].instances, 4);
+
+    ({ executor, log } = newExecutor());
+    stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("POLYGON_MODE", GL.FRONT_AND_BACK, GL.LINE)
+        .call("ENABLE", GL.POLYGON_OFFSET_LINE).call("ENABLE", GL.POLYGON_OFFSET_FILL)
+        .call("POLYGON_OFFSET", 0, 4);
+    immediatePolygons(stream, GL.QUADS, QUAD_CCW);
+    run(executor, stream);
+    const pipeline = log.draws[0].pipeline.descriptor;
+    assert.strictEqual(pipeline.depthStencil.depthBias, 0, "WebGPU biases triangles only (review S1-2c)");
+    assert.ok(pipeline.vertex.buffers[0].attributes.some(a => a.shaderLocation === 6));
+    assert.match(pipeline.vertex.module.code, /clip\.z = clip\.z \+ vin\.depthOffset \* clip\.w;/);
+    const offsets = drawnVertices(log.draws[0], 9).map(v => v[8]);
+    assert.ok(offsets.every(o => Math.abs(o - 4 * Math.pow(2, -24)) < 1e-12),
+        "units times the 24-bit depth's resolvable difference: " + offsets[0]);
+
+    // a filled polygon keeps the pipeline's bias
+    ({ executor, log } = newExecutor());
+    stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("ENABLE", GL.POLYGON_OFFSET_FILL).call("POLYGON_OFFSET", 1, 4);
+    immediatePolygons(stream, GL.QUADS, QUAD_CCW);
+    immediatePolygons(stream, GL.LINES, [[0, 0], [1, 1]]);
+    run(executor, stream);
+    assert.strictEqual(log.draws[0].pipeline.descriptor.depthStencil.depthBias, 4);
+    assert.strictEqual(log.draws[0].pipeline.descriptor.depthStencil.depthBiasSlopeScale, 1);
+    assert.strictEqual(log.draws[1].pipeline.descriptor.depthStencil.depthBias, 0);
 });
 
 test("culling both faces drops polygon draws", () => {

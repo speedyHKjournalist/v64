@@ -676,19 +676,79 @@
         return expandIndexArray(mode, input);
     }
 
-    function polygonRasterIndices(mode, count, source, rasterMode) {
-        const triangles = triangleListIndices(mode, count, source);
-        if (rasterMode === GL.POINT) return triangles;
-        if (rasterMode !== GL.LINE) return triangles;
-        const out = new Uint32Array(triangles.length * 2);
-        let at = 0;
-        for (let i = 0; i + 2 < triangles.length; i += 3) {
-            const a = triangles[i], b = triangles[i + 1], c = triangles[i + 2];
-            out[at++] = a; out[at++] = b;
-            out[at++] = b; out[at++] = c;
-            out[at++] = c; out[at++] = a;
+    /*
+     * The polygons a draw is made of (GL 2.1 section 2.6.1), as runs of
+     * vertex numbers: `vertices` from `starts[k]` to `starts[k + 1]` is
+     * polygon k, `provoking[k]` its flat-shading vertex (table 2.12), and
+     * `boundary[i]` whether vertex i starts a boundary edge -- its edge flag
+     * for independent triangles, quads and polygons, always for strips and
+     * fans (section 2.6.2). `source` is the application's index array.
+     */
+    function polygonFaces(mode, count, source, flags) {
+        const n = source ? source.length : count;
+        const at = source ? i => source[i] : i => i;
+        const flagged = !!flags && (mode === GL.TRIANGLES || mode === GL.QUADS ||
+            mode === GL.POLYGON);
+        const vertices = [], boundary = [], starts = [0], provoking = [];
+        const face = (list, last) => {
+            for (const i of list) {
+                vertices.push(at(i));
+                boundary.push(flagged ? flags[at(i)] : 1);
+            }
+            starts.push(vertices.length);
+            provoking.push(at(last));
+        };
+        switch (mode) {
+        case GL.TRIANGLES:
+            for (let i = 0; i + 2 < n; i += 3) face([i, i + 1, i + 2], i + 2);
+            break;
+        case GL.TRIANGLE_STRIP:
+            for (let i = 0; i + 2 < n; ++i)
+                face(i & 1 ? [i + 1, i, i + 2] : [i, i + 1, i + 2], i + 2);
+            break;
+        case GL.TRIANGLE_FAN:
+            for (let i = 0; i + 2 < n; ++i) face([0, i + 1, i + 2], i + 2);
+            break;
+        case GL.QUADS:
+            for (let b = 0; b + 3 < n; b += 4) face([b, b + 1, b + 2, b + 3], b + 3);
+            break;
+        case GL.QUAD_STRIP:
+            for (let b = 0; b + 3 < n; b += 2) face([b, b + 1, b + 3, b + 2], b + 3);
+            break;
+        case GL.POLYGON:
+            if (n >= 3) face(Array.from({ length: n }, (_, i) => i), 0);
+            break;
         }
-        return out;
+        return { vertices, boundary, starts, provoking };
+    }
+
+    /*
+     * Whether polygon k faces front: the sign of its window-space area (GL
+     * 2.1 section 3.5.1). `clip` holds each vertex's clip coordinates. With
+     * every vertex in front of the eye that is the area of the projected
+     * polygon (the viewport's positive scale keeps the sign); otherwise the
+     * homogeneous determinants, whose sign is the visible part's
+     * orientation.
+     */
+    function facesFront(clip, faces, k, frontFace) {
+        const from = faces.starts[k], to = faces.starts[k + 1], v = faces.vertices;
+        let area = 0;
+        if (v.slice(from, to).every(i => clip[i * 4 + 3] > 0)) {
+            for (let i = from; i < to; ++i) {
+                const a = v[i] * 4, b = v[i + 1 < to ? i + 1 : from] * 4;
+                area += clip[a] / clip[a + 3] * (clip[b + 1] / clip[b + 3]) -
+                    clip[b] / clip[b + 3] * (clip[a + 1] / clip[a + 3]);
+            }
+        } else {
+            const o = v[from] * 4;
+            for (let i = from + 1; i + 1 < to; ++i) {
+                const a = v[i] * 4, b = v[i + 1] * 4;
+                area += clip[o] * (clip[a + 1] * clip[b + 3] - clip[a + 3] * clip[b + 1]) -
+                    clip[o + 1] * (clip[a] * clip[b + 3] - clip[a + 3] * clip[b]) +
+                    clip[o + 3] * (clip[a] * clip[b + 1] - clip[a + 1] * clip[b]);
+            }
+        }
+        return (area >= 0) === (frontFace !== GL.CW);
     }
 
     /* ================================================================== */
@@ -2674,6 +2734,7 @@
             this.current.current.normal.set([a[0], a[1], a[2]]);
         });
         define("FOG_COORDF", function(a) { this.current.current.fogCoord = a[0]; });
+        define("EDGE_FLAG", function(a) { this.current.current.edgeFlag = a[0] !== 0; });
         define("TEX_COORD2F", function(a) {
             this.current.current.texCoord[this.current.clientActiveTexture]
                 .set([a[0], a[1], 0, 1]);
@@ -5745,6 +5806,8 @@
                         fogCoord: false,
                         texCoord: new Array(MAX_TEXTURE_COORDS).fill(false),
                         generic: [] },
+                // per vertex, once one is not set (glEdgeFlag)
+                edgeFlags: null,
             };
             const used = s.immediate.used;
             const program = this.currentProgramObject();
@@ -5855,6 +5918,14 @@
                 for (let c = 0; c < item.components; ++c)
                     data[at++] = value[c];
             }
+            if (!current.edgeFlag || batch.edgeFlags) {
+                if (!batch.edgeFlags || batch.edgeFlags.length <= batch.count) {
+                    const grown = new Uint8Array(Math.max(64, batch.count * 2)).fill(1);
+                    if (batch.edgeFlags) grown.set(batch.edgeFlags);
+                    batch.edgeFlags = grown;
+                }
+                batch.edgeFlags[batch.count] = current.edgeFlag ? 1 : 0;
+            }
             ++batch.count;
         },
 
@@ -5922,6 +5993,8 @@
                 this.issueDraw({
                     mode: batch.mode,
                     vertexCount: batch.count,
+                    cpu: { data: batch.data, stride: batch.stride, count: batch.count,
+                           layout: attributes, edgeFlags: batch.edgeFlags },
                     buffers: [{
                         gpuBuffer: slice.buffer,
                         baseOffset: slice.offset,
@@ -6085,7 +6158,8 @@
                     count, drawIndexInfo.decoded);
                 if (!index) return;
             }
-            this.issueDraw({ mode, vertexCount: count, buffers, index });
+            this.issueDraw({ mode, vertexCount: count, buffers, index,
+                cpu: { data: packed, stride, count: packedVertexCount, layout, edgeFlags: null } });
         },
 
         /* Which of the two aliased slots this attribute's array actually
@@ -6184,8 +6258,11 @@
         drawFromBuffers(mode, first, count, indexInfo) {
             if (count <= 0) return;
             const s = this.current;
-            if (indexInfo && mode === GL.POINTS &&
-                    (s.point.size !== 1 || s.enabled.has(GL.POINT_SPRITE)))
+            // wide indexed points gather, polygon modes read the vertices:
+            // both from the CPU copy
+            if ((indexInfo && mode === GL.POINTS &&
+                    (s.point.size !== 1 || s.enabled.has(GL.POINT_SPRITE))) ||
+                    (isPolygonPrimitive(mode) && !this.polygonsFill()))
                 return this.drawFromShadowBuffers(mode, first, count, indexInfo,
                     this.wantedAttributes(this.currentProgramObject()));
             const program = this.currentProgramObject();
@@ -6314,7 +6391,7 @@
                 // keep their widening/expansion path. Polygon line/point mode
                 // also needs a CPU source index array to build its edges.
                 const direct = (mode === GL.TRIANGLES || mode === GL.LINES ||
-                    mode === GL.POINTS) && this.effectivePolygonMode() === GL.FILL &&
+                    mode === GL.POINTS) && this.polygonsFill() &&
                     (indexInfo.type === GL.UNSIGNED_SHORT ||
                         indexInfo.type === GL.UNSIGNED_INT) &&
                     indexInfo.bufferOffset % elementBytes === 0 &&
@@ -7120,29 +7197,23 @@ ${fragmentCode}`;
 
         /* ---- the draw ---- */
 
+        /*
+         * request: { mode, vertexCount, firstVertex, buffers, index } and,
+         * from the immediate and client-array paths, `cpu`: the vertex data
+         * the buffer was uploaded from ({ data, stride, count, layout,
+         * edgeFlags }, in floats), which glPolygonMode needs.
+         */
         issueDraw(request) {
             const s = this.current;
             if (s.renderMode !== GL.RENDER) return;   // GL_SELECT/GL_FEEDBACK
-            if (s.enabled.has(GL.CULL_FACE) && s.cullFace === GL.FRONT_AND_BACK)
+            const polygons = isPolygonPrimitive(request.mode);
+            // culling is for polygons; lines and points are drawn
+            if (polygons && s.enabled.has(GL.CULL_FACE) && s.cullFace === GL.FRONT_AND_BACK)
                 return;
+            if (polygons && !request.rasterized && !this.polygonsFill())
+                return this.drawPolygonModes(request);
             let index = request.index;
-            if (isPolygonPrimitive(request.mode)) {
-                const rasterMode = this.effectivePolygonMode();
-                if (rasterMode === GL.LINE || rasterMode === GL.POINT) {
-                    const rasterIndices = polygonRasterIndices(request.mode,
-                        request.vertexCount, index && index.source, rasterMode);
-                    if (!rasterIndices.length) return;
-                    const slice = this.uploadVertices(new Uint8Array(
-                        rasterIndices.buffer, rasterIndices.byteOffset,
-                        rasterIndices.byteLength));
-                    if (!slice) return;
-                    index = { buffer: slice.buffer, offset: slice.offset,
-                        count: rasterIndices.length,
-                        format: "uint32", cpu: rasterIndices };
-                    request = { ...request,
-                        mode: rasterMode === GL.LINE ? GL.LINES : GL.POINTS };
-                }
-            }
+            this.drawFace = request.face || null;
             this.drawingPoints = request.mode === GL.POINTS;
             if (s.enabled.has(GL.STENCIL_TEST) && stencilMasksDiverge(s))
                 this.warnOnce("stencil-masks",
@@ -7348,20 +7419,208 @@ ${fragmentCode}`;
             return true;
         },
 
-        effectivePolygonMode() {
+        polygonsFill() {
+            const mode = this.current.polygonMode;
+            return mode.front === GL.FILL && mode.back === GL.FILL;
+        },
+
+        /*
+         * glPolygonMode LINE or POINT (GL 2.1 section 3.5.4). Each polygon's
+         * facing, from its window-space area, picks its mode and decides its
+         * culling; then it is drawn as that mode makes it: filled triangles,
+         * its boundary edges as lines, or its vertices as points (review
+         * S2-14: the triangulation's diagonals were drawn, the front mode
+         * served both faces, and lines were never culled -- WebGPU culls
+         * triangles only and has no facing for a line). Facing needs the
+         * positions, which the fixed pipeline's transform gives on the CPU; a
+         * vertex program or shader draws every polygon in the front mode,
+         * unculled (warned). Lines and points are gathered into vertex data of
+         * their own, which carries POLYGON_OFFSET_LINE/POINT's offset
+         * (WebGPU's depth bias is for triangles) and lets wide points expand
+         * without an index buffer (review S1-2e).
+         */
+        drawPolygonModes(request) {
             const s = this.current;
-            const front = s.polygonMode.front;
-            const back = s.polygonMode.back;
-            if (front === back) return front;
-            if (s.enabled.has(GL.CULL_FACE)) {
-                if (s.cullFace === GL.FRONT) return back;
-                if (s.cullFace === GL.BACK) return front;
+            const cpu = request.cpu;
+            const faces = polygonFaces(request.mode, request.vertexCount,
+                request.index && request.index.source, cpu && cpu.edgeFlags);
+            const front = s.polygonMode.front, back = s.polygonMode.back;
+            const culling = s.enabled.has(GL.CULL_FACE);
+            const fixedVertex = !this.currentProgramObject() &&
+                !s.enabled.has(GL.VERTEX_PROGRAM_ARB);
+            const clip = fixedVertex ? this.clipCoordinates(cpu) : null;
+            if (!clip && (front !== back || culling))
+                this.warnOnce("polygon-mode-facing", "the polygons' facing is " +
+                    "not known on the CPU under a vertex program: every polygon " +
+                    "is drawn in the front polygon mode, and not culled", { front, back });
+            const fill = [], groups = new Map();
+            for (let k = 0; k < faces.provoking.length; ++k) {
+                const isFront = !clip || facesFront(clip, faces, k, s.frontFace);
+                if (clip && culling && (isFront ? s.cullFace === GL.FRONT : s.cullFace === GL.BACK))
+                    continue;
+                const mode = isFront || !clip ? front : back;
+                const from = faces.starts[k], to = faces.starts[k + 1], n = to - from;
+                const v = faces.vertices, p = faces.provoking[k];
+                if (mode === GL.FILL) {
+                    // a fan from the provoking vertex keeps the winding and
+                    // leads with it, as expandIndices does
+                    let j = from;
+                    while (v[j] !== p) ++j;
+                    for (let i = 1; i + 1 < n; ++i)
+                        fill.push(p, v[from + (j - from + i) % n], v[from + (j - from + i + 1) % n]);
+                    continue;
+                }
+                const key = mode + (isFront ? "f" : "b");
+                let group = groups.get(key);
+                if (!group) groups.set(key, group = { mode, back: !isFront,
+                    vertices: [], provoking: [], offsets: [], offset: false });
+                const offset = this.polygonOffsetOf(mode, clip, faces, k);
+                if (offset !== null) group.offset = true;
+                for (let i = from; i < to; ++i) {
+                    if (!faces.boundary[i]) continue;
+                    if (mode === GL.LINE) {
+                        // a flat-shaded line takes its second vertex's colour
+                        const a = v[i], b = v[i + 1 < to ? i + 1 : from];
+                        group.vertices.push(...(a === p ? [b, a] : [a, b]));
+                        group.provoking.push(p, p);
+                        group.offsets.push(offset, offset);
+                    } else {
+                        group.vertices.push(v[i]);
+                        group.provoking.push(p);
+                        group.offsets.push(offset);
+                    }
+                }
             }
-            this.warnOnce("two-face-polygon-mode",
-                "front and back polygon modes differ without face culling; " +
-                "the front mode is used for both faces",
-                { front, back });
-            return front;
+            if (fill.length) {
+                const index = this.uploadIndexList(Uint32Array.from(fill));
+                if (index) this.issueDraw({ ...request, mode: GL.TRIANGLES,
+                    vertexCount: fill.length, index, rasterized: true });
+            }
+            try {
+                this.drawGroups(request, groups, cpu, fixedVertex);
+            } finally {
+                this.drawFace = null;   // the face variants are these draws' only
+            }
+        },
+
+        drawGroups(request, groups, cpu, fixedVertex) {
+            const s = this.current;
+            for (const group of groups.values()) {
+                if (!group.vertices.length) continue;
+                const mode = group.mode === GL.LINE ? GL.LINES : GL.POINTS;
+                const face = { back: group.back, depthOffset: group.offset && fixedVertex };
+                if (!cpu || request.buffers.length !== 1) {
+                    // no vertex data to gather: index the draw's own
+                    const index = this.uploadIndexList(Uint32Array.from(group.vertices));
+                    if (index) this.issueDraw({ ...request, mode, vertexCount: group.vertices.length,
+                        index, rasterized: true, face: { back: group.back } });
+                    continue;
+                }
+                const buffer = this.gatherVertices(cpu, request.buffers[0], group,
+                    fixedVertex && s.shadeModel === GL.FLAT, face.depthOffset);
+                if (buffer) this.issueDraw({ mode, vertexCount: group.vertices.length,
+                    firstVertex: 0, buffers: [buffer], index: null, rasterized: true, face });
+            }
+        },
+
+        uploadIndexList(indices) {
+            const slice = this.uploadVertices(new Uint8Array(indices.buffer));
+            return slice && { buffer: slice.buffer, offset: slice.offset,
+                count: indices.length, format: "uint32", cpu: indices };
+        },
+
+        // Each vertex's clip coordinates under the fixed pipeline's transform
+        clipCoordinates(cpu) {
+            const position = cpu && cpu.layout.find(a =>
+                a.location === translator.COMPAT_ATTRIBUTE_LOCATIONS.gl_Vertex);
+            if (!position) return null;
+            const m = multiply4(this.topOf(GL.PROJECTION), this.topOf(GL.MODELVIEW));
+            const out = new Float64Array(cpu.count * 4);
+            for (let v = 0; v < cpu.count; ++v) {
+                const at = v * cpu.stride + position.offsetFloats;
+                const p = [0, 0, 0, 1];
+                for (let c = 0; c < position.components; ++c) p[c] = cpu.data[at + c];
+                for (let r = 0; r < 4; ++r)
+                    out[v * 4 + r] = m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r] * p[3];
+            }
+            return out;
+        },
+
+        /*
+         * glPolygonOffset for polygon k drawn as lines or points, in units of
+         * the depth range: factor times its window-space depth slope plus
+         * units times the depth buffer's resolvable difference (GL 2.1
+         * section 3.5.5, m as max(|dz/dx|, |dz/dy|), the approximation
+         * WebGPU's depth bias also uses). null when not enabled.
+         */
+        polygonOffsetOf(mode, clip, faces, k) {
+            const s = this.current;
+            if (!s.enabled.has(mode === GL.LINE ? GL.POLYGON_OFFSET_LINE : GL.POLYGON_OFFSET_POINT))
+                return null;
+            if (!clip) {
+                this.warnOnce("polygon-offset-program", "POLYGON_OFFSET_LINE/POINT " +
+                    "is not applied under a vertex program", {});
+                return null;
+            }
+            const near = s.depthRange.near, far = s.depthRange.far;
+            const range = Math.abs(far - near);
+            if (!range) return 0;
+            const vp = s.viewport;
+            const points = [];
+            for (let i = faces.starts[k]; i < faces.starts[k + 1]; ++i) {
+                const c = faces.vertices[i] * 4, w = clip[c + 3];
+                if (!(w > 0)) return null;
+                points.push([clip[c] / w * vp.width / 2, clip[c + 1] / w * vp.height / 2,
+                    near + (far - near) * (clip[c + 2] / w + 1) / 2]);
+            }
+            let slope = 0, best = 0;
+            for (let i = 1; i + 1 < points.length; ++i) {
+                const [a, b, c] = [points[0], points[i], points[i + 1]];
+                const det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+                if (Math.abs(det) <= best) continue;
+                best = Math.abs(det);
+                const dzdx = ((b[2] - a[2]) * (c[1] - a[1]) - (c[2] - a[2]) * (b[1] - a[1])) / det;
+                const dzdy = ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])) / det;
+                slope = Math.max(Math.abs(dzdx), Math.abs(dzdy));
+            }
+            const targets = this.currentTargets();
+            const format = (targets && targets.depthFormat) || "depth24plus";
+            let r = Math.pow(2, -24);
+            if (format === "depth16unorm") r = Math.pow(2, -16);
+            else if (format.startsWith("depth32float")) {
+                const z = Math.max(...points.map(q => Math.abs(q[2])));
+                r = Math.pow(2, (z > 0 ? Math.floor(Math.log2(z)) : -126) - 23);
+            }
+            return (slope * s.polygonOffset.factor + r * s.polygonOffset.units) / range;
+        },
+
+        /*
+         * A group's lines or points as vertex data of their own. Under flat
+         * shading the fixed pipeline's colours and normal come from the
+         * polygon's provoking vertex (lit at each vertex's own position, so
+         * exact for directional lights without specular).
+         */
+        gatherVertices(cpu, source, group, flat, depthOffset) {
+            const stride = cpu.stride + (depthOffset ? 1 : 0);
+            const out = new Float32Array(group.vertices.length * stride);
+            const ATTR = translator.COMPAT_ATTRIBUTE_LOCATIONS;
+            const copied = flat ? cpu.layout.filter(a => a.location === ATTR.gl_Color ||
+                a.location === ATTR.gl_SecondaryColor || a.location === ATTR.gl_Normal) : [];
+            for (let i = 0; i < group.vertices.length; ++i) {
+                const v = group.vertices[i], at = i * stride;
+                out.set(cpu.data.subarray(v * cpu.stride, (v + 1) * cpu.stride), at);
+                for (const a of copied) {
+                    const from = group.provoking[i] * cpu.stride + a.offsetFloats;
+                    out.set(cpu.data.subarray(from, from + a.components), at + a.offsetFloats);
+                }
+                if (depthOffset) out[at + cpu.stride] = group.offsets[i] || 0;
+            }
+            const slice = this.uploadVertices(new Uint8Array(out.buffer));
+            if (!slice) return null;
+            return { gpuBuffer: slice.buffer, baseOffset: slice.offset, stride: stride * 4,
+                attributes: depthOffset ? source.attributes.concat([{
+                    location: fixedFunction.DEPTH_OFFSET_LOCATION, format: "float32",
+                    offset: cpu.stride * 4 }]) : source.attributes };
         },
     });
 
@@ -7656,6 +7915,8 @@ ${fragmentCode}`;
                 logicOp: variant.logicOp,
                 flatShading: variant.flatShading,
                 colorTargets: variant.colorTargets,
+                backFacing: !!(this.drawFace && this.drawFace.back),
+                depthOffset: !!(this.drawFace && this.drawFace.depthOffset),
             };
         },
 
@@ -7707,6 +7968,10 @@ ${fragmentCode}`;
             const shape = this.drawShape(request.mode);
             const topology = shape.topology;
             const strip = topology === "triangle-strip" || topology === "line-strip";
+            // POLYGON_OFFSET_FILL is for filled polygons, and WebGPU rejects a
+            // depth bias on lines and points (review S1-2c)
+            const fillOffset = s.enabled.has(GL.POLYGON_OFFSET_FILL) &&
+                isPolygonPrimitive(request.mode) && !request.expandedPoints;
             const layoutKey = request.buffers.map(b =>
                 b.stride + ":" + (b.stepMode || "vertex") + "@" + b.attributes.map(a =>
                     a.location + ":" + a.format + ":" + a.offset).join(",")).join("|");
@@ -7723,7 +7988,7 @@ ${fragmentCode}`;
                     "logic:" + s.logicOp.toString(16) :
                     (s.enabled.has(GL.BLEND) ? blendKey(s) : "off"),
                 s.colorMask.map(v => v ? 1 : 0).join(""),
-                polygonOffsetKey(s),
+                fillOffset ? polygonOffsetKey(s) : "-",
                 s.enabled.has(GL.SAMPLE_ALPHA_TO_COVERAGE) ? "a2c" : "-",
                 sampleCoverageMask(s),
                 targets ? targets.color.map(c => c ? c.format : "-").join(",") : "-",
@@ -7789,10 +8054,8 @@ ${fragmentCode}`;
                         (COMPARE_FUNCTIONS[s.depthFunc] || "less") : "always",
                     ...(targets.depthFormat.indexOf("stencil") >= 0 ?
                         gpuStencilState(s) : {}),
-                    depthBias: s.enabled.has(GL.POLYGON_OFFSET_FILL) ?
-                        Math.round(s.polygonOffset.units) : 0,
-                    depthBiasSlopeScale: s.enabled.has(GL.POLYGON_OFFSET_FILL) ?
-                        s.polygonOffset.factor : 0,
+                    depthBias: fillOffset ? Math.round(s.polygonOffset.units) : 0,
+                    depthBiasSlopeScale: fillOffset ? s.polygonOffset.factor : 0,
                 };
             }
 
@@ -8092,8 +8355,7 @@ ${fragmentCode}`;
     }
 
     function polygonOffsetKey(s) {
-        return s.enabled.has(GL.POLYGON_OFFSET_FILL) ?
-            s.polygonOffset.factor + ":" + s.polygonOffset.units : "-";
+        return s.polygonOffset.factor + ":" + s.polygonOffset.units;
     }
 
     function gpuBlendState(s) {

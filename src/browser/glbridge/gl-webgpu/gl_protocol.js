@@ -236,6 +236,7 @@
         ["COPY_TEX_SUB_IMAGE_3D", 215, "CopyTexSubImage3D", "uiiiiiiii"],
         ["QUERY_OBJECT_BATCH", 216],
         ["BLIT_FRAMEBUFFER", 217, "BlitFramebuffer", "iiiiiiiiuu"],
+        ["EDGE_FLAG", 218, "EdgeFlag", "u"],
     ];
 
     // Control records, outside the GLFN numbering: [name, code, layout]
