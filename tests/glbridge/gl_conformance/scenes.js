@@ -1004,6 +1004,27 @@ loose("lines_width3", "GL_LINES with LineWidth 3", "GL 2.1 §3.4.2", s => {
     s.op("Begin", "LINES").op("Vertex2f", 36, 54.5).op("Vertex2f", 62, 54.5).op("End");
     s.tiles.push({ label: "LineWidth 3 horizontal", x: 36, y: 50, w: 26, h: 10 });
 });
+scene("lines_wide_stipple", {
+    what: "wide lines widen along the minor axis; LineStipple restarts per GL_LINES segment and runs on through a strip",
+    spec: "GL 2.1 §3.4.2 (wide lines), §3.4.3 (stipple)",
+}, s => {
+    s.ortho2d().op("Color3f", 1, 1, 0).op("LineWidth", 3);
+    s.op("Begin", "LINES").op("Vertex2f", 2, 6.5).op("Vertex2f", 62, 6.5).op("End");
+    s.tiles.push({ label: "x-major width 3: rows 5-7", x: 8, y: 3, w: 48, h: 7 });
+    s.op("LineWidth", 4).op("Color3f", 0, 1, 1);
+    s.op("Begin", "LINES").op("Vertex2f", 8, 12).op("Vertex2f", 8, 62).op("End");
+    s.tiles.push({ label: "y-major width 4: columns 6-9", x: 4, y: 16, w: 8, h: 42 });
+    s.op("LineWidth", 1).op("Enable", "LINE_STIPPLE").op("LineStipple", 2, 0x0F0F).op("Color3f", 1, 0, 1);
+    s.op("Begin", "LINE_STRIP").op("Vertex2f", 16, 20.5).op("Vertex2f", 37, 20.5).op("Vertex2f", 62, 20.5).op("End");
+    s.tiles.push({ label: "stippled strip runs on", x: 18, y: 19, w: 42, h: 3 });
+    s.op("Begin", "LINES").op("Vertex2f", 16, 30.5).op("Vertex2f", 37, 30.5).op("Vertex2f", 37, 30.5)
+        .op("Vertex2f", 62, 30.5).op("End");
+    s.tiles.push({ label: "stippled segments restart", x: 18, y: 29, w: 42, h: 3 });
+    s.op("LineWidth", 3).op("LineStipple", 1, 0x00FF).op("Color3f", 0, 1, 0);
+    s.op("Begin", "LINES").op("Vertex2f", 16, 44.5).op("Vertex2f", 62, 44.5).op("End");
+    s.tiles.push({ label: "wide and stippled", x: 18, y: 41, w: 42, h: 7 });
+    s.op("Disable", "LINE_STIPPLE").op("LineWidth", 1);
+});
 loose("lines_width1", "GL_LINES width 1 (baseline)", "GL 2.1 §3.4.1", s => {
     s.op("Color3f", 1, 1, 0);
     s.op("Begin", "LINES").op("Vertex2f", 4, 20.5).op("Vertex2f", 60, 20.5).op("Vertex2f", 10.5, 30).op("Vertex2f", 10.5, 60).op("End");

@@ -593,6 +593,34 @@ test("an edge flag hides the edge its vertex starts, and the vertex in POINT mod
     }
 });
 
+test("wide lines are quads widened along the minor axis; stipple distances run on through a strip (D-04, D-16)", () => {
+    let { executor, log } = newExecutor();
+    let stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).call("LINE_WIDTH", 3)
+        .call("ENABLE", GL.CULL_FACE).call("CULL_FACE", GL.BACK);
+    immediatePolygons(stream, GL.LINES, [[-1, 0], [1, 0]]);
+    run(executor, stream);
+    const quad = log.draws[0];
+    assert.strictEqual(quad.pipeline.descriptor.primitive.topology, "triangle-list");
+    assert.strictEqual(quad.pipeline.descriptor.primitive.cullMode, "none");
+    assert.match(quad.pipeline.descriptor.vertex.module.code, /vin\.lineAttr\.y \* 2\.0 \* clip\.w/);
+    // position (4), colour (4), then the line attribute: x-major, so offset in y
+    assert.deepStrictEqual(drawnVertices(quad, 11).map(v => v.slice(8).map(x => x + 0)), [
+        [0, -1.5, 0], [0, 1.5, 0], [0, -1.5, 64], [0, 1.5, 0], [0, 1.5, 64], [0, -1.5, 64]]);
+
+    ({ executor, log } = newExecutor());
+    stream = new GLStream().makeCurrent(1, 0, 0, 64, 64).call("ENABLE", GL.LINE_STIPPLE)
+        .call("LINE_STIPPLE", 2, 0x0F0F);
+    immediatePolygons(stream, GL.LINE_STRIP, [[-1, 0], [0, 0], [0, 1]]);
+    immediatePolygons(stream, GL.LINES, [[-1, 0], [0, 0], [0, 0], [0, 1]]);
+    run(executor, stream);
+    assert.strictEqual(log.draws[0].pipeline.descriptor.primitive.topology, "line-list");
+    assert.match(log.draws[0].pipeline.descriptor.fragment.module.code, /stippleBit/);
+    assert.deepStrictEqual(drawnVertices(log.draws[0], 11).map(v => v[10]), [0, 32, 32, 64],
+        "the strip's second segment starts where the first ended");
+    assert.deepStrictEqual(drawnVertices(log.draws[1], 11).map(v => v[10]), [0, 32, 0, 32],
+        "independent segments restart");
+});
+
 test("polygon-mode points expand when wide; their lines carry the polygon offset", () => {
     let { executor, log } = newExecutor();
     let stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)

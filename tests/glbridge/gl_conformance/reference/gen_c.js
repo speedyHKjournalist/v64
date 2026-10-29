@@ -73,6 +73,7 @@ function emit(op) {
     case "PolygonOffset": case "PixelZoom": case "TexCoord2f": case "RasterPos2f": case "WindowPos2f": case "Vertex2f":
         return `gl${n}(${a.map(F).join(",")});`;
     case "LineWidth": case "PointSize": case "FogCoordf": return `gl${n}(${F(a[0])});`;
+    case "LineStipple": return `glLineStipple(${I(a[0])},${U(a[1])});`;
     case "Translatef": case "Scalef": case "Vertex3f": case "Color3f": case "Normal3f": case "SecondaryColor3f": case "RasterPos3f":
         return `gl${n}(${a.map(F).join(",")});`;
     case "Color4ub": return `glColor4ub(${a.join(",")});`;

@@ -370,6 +370,11 @@ test("a polygon's back-face lines and offset points are variants of their own", 
     assert.match(offset.wgslVertex, /@location\(6\) depthOffset : f32/);
     assert.match(offset.wgslVertex, /clip\.z = \(clip\.z \+ clip\.w\) \* 0\.5;\n {4}clip\.z = clip\.z \+ vin\.depthOffset \* clip\.w;/);
     assert.ok(offset.attributes.some(a => a.location === ff.DEPTH_OFFSET_LOCATION));
+    const line = generate(Object.assign({ _name: "wide_stippled_line", wideLine: true, lineStipple: true },
+        POSITION_ONLY));
+    assert.match(line.wgslVertex, /@location\(1\) lineAttr : vec3<f32>/);
+    assert.match(line.wgslFragment, /@interpolate\(linear\) lineDistance : f32/);
+    assert.ok(line.stateFields.includes("rasterParams") && line.stateFields.includes("viewportParams"));
 });
 
 test("eight textured units still fit the varying budget", () => {
@@ -400,6 +405,8 @@ test("every field that changes the code changes the key", () => {
         { attributes: base.attributes, colorTargets: 2 },
         { attributes: base.attributes, backFacing: true },
         { attributes: base.attributes, depthOffset: true },
+        { attributes: base.attributes, wideLine: true },
+        { attributes: base.attributes, lineStipple: true },
 
         { attributes: base.attributes, lighting: { enabled: true,
             lights: [{ enabled: true }] } },

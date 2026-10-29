@@ -32,8 +32,9 @@
     const MAX_LIGHTS = stateLayout.MAX_LIGHTS;
     const ATTR = translator.COMPAT_ATTRIBUTE_LOCATIONS;
     const POINT_CORNER_LOCATION = translator.POINT_CORNER_LOCATION;
-    // a slot no conventional attribute aliases (ARB_vertex_program 2.14.3)
+    // slots no conventional attribute aliases (ARB_vertex_program 2.14.3)
     const DEPTH_OFFSET_LOCATION = 6;
+    const LINE_ATTRIBUTE_LOCATION = 1;
 
     /* ================================================================== */
     /* Signature                                                          */
@@ -68,6 +69,8 @@
      *   colorTargets: 1..8,
      *   backFacing: bool,     a back polygon's edges or vertices (glPolygonMode)
      *   depthOffset: bool,    a per-vertex depth offset (POLYGON_OFFSET_LINE/POINT)
+     *   wideLine: bool,       a line's quad corner, offset in pixels (lineAttr.xy)
+     *   lineStipple: bool,    the distance along the line for the pattern (lineAttr.z)
      * }
      */
 
@@ -152,6 +155,8 @@
             colorTargets: Math.max(1, Math.min(8, s.colorTargets || 1)),
             backFacing: !!s.backFacing,
             depthOffset: !!s.depthOffset,
+            wideLine: !!s.wideLine,
+            lineStipple: !!s.lineStipple,
         };
     }
 
@@ -252,6 +257,8 @@
             fields.add("pointAttenuation");
             fields.add("viewportParams");
         }
+        if (sig.wideLine) fields.add("viewportParams");
+        if (sig.lineStipple) fields.add("rasterParams");
         if (sig.polygonStipple) fields.add("polygonStipple");
         return fields;
     }
@@ -293,7 +300,7 @@
 
         const layout = { entries, color: null, secondary: null, backColor: null,
                          backSecondary: null, fog: null, texCoord: [],
-                         clip: -1, pointCoord: -1 };
+                         clip: -1, pointCoord: -1, lineDistance: -1 };
 
         if (sig.varyingInterface === "arb") {
             const fixed = (name, components, slot, extra) => {
@@ -348,6 +355,7 @@
         let next = slots.length;
         if (sig.clipPlaneCount) layout.clip = next++;
         if (sig.pointSprite) layout.pointCoord = next++;
+        if (sig.lineStipple) layout.lineDistance = next++;
         layout.slotCount = next;
         layout.packedSlots = slots.length;
         layout.slotIndices = Array.from({ length: slots.length },
@@ -425,6 +433,8 @@
             emit("    @location(" + POINT_CORNER_LOCATION + ") corner : vec2<f32>,");
         if (sig.depthOffset)
             emit("    @location(" + DEPTH_OFFSET_LOCATION + ") depthOffset : f32,");
+        if (sig.wideLine || sig.lineStipple)
+            emit("    @location(" + LINE_ATTRIBUTE_LOCATION + ") lineAttr : vec3<f32>,");
         emit("}");
         emit("");
 
@@ -439,6 +449,8 @@
             emit("    @location(" + layout.clip + ") clipDist : vec4<f32>,");
         if (layout.pointCoord >= 0)
             emit("    @location(" + layout.pointCoord + ") pointCoord : vec2<f32>,");
+        if (layout.lineDistance >= 0)
+            emit("    @location(" + layout.lineDistance + ") @interpolate(linear) lineDistance : f32,");
         emit("}");
         emit("");
 
@@ -495,6 +507,13 @@
                     "vin.corner.y * 0.5 + 0.5);" :
                     "0.5 - vin.corner.y * 0.5);"));
         }
+
+        if (sig.wideLine) {
+            // a wide line's quad: the corner's offset from the line, in pixels
+            emit("    clip.x = clip.x + vin.lineAttr.x * 2.0 * clip.w / glState.viewportParams.z;");
+            emit("    clip.y = clip.y + vin.lineAttr.y * 2.0 * clip.w / glState.viewportParams.w;");
+        }
+        if (sig.lineStipple) emit("    out.lineDistance = vin.lineAttr.z;");
 
         if (sig.clipPlaneCount) {
             const parts = [];
@@ -826,6 +845,8 @@
             emit("    @location(" + layout.clip + ") clipDist : vec4<f32>,");
         if (layout.pointCoord >= 0)
             emit("    @location(" + layout.pointCoord + ") pointCoord : vec2<f32>,");
+        if (layout.lineDistance >= 0)
+            emit("    @location(" + layout.lineDistance + ") @interpolate(linear) lineDistance : f32,");
         emit("}");
         emit("");
 
@@ -840,6 +861,11 @@
         if (layout.clip >= 0)
             emit("    if (any(fin.clipDist < vec4<f32>(0.0))) { discard; }");
         if (sig.polygonStipple) emitPolygonStippleTest(emit, "fin.position");
+        if (sig.lineStipple) {
+            // GL 2.1 section 3.4.3: bit floor(s / factor) mod 16 of the pattern
+            emit("    let stippleBit = u32(floor(fin.lineDistance / glState.rasterParams.z)) % 16u;");
+            emit("    if (((u32(glState.rasterParams.y) >> stippleBit) & 1u) == 0u) { discard; }");
+        }
 
         const colorRead = readVarying(layout.color);
         // a polygon's lines and points are not faces to WebGPU: the executor
@@ -1321,6 +1347,9 @@
         if (sig.depthOffset)
             attributes.push({ name: "depthOffset", location: DEPTH_OFFSET_LOCATION,
                               components: 1 });
+        if (sig.wideLine || sig.lineStipple)
+            attributes.push({ name: "lineAttr", location: LINE_ATTRIBUTE_LOCATION,
+                              components: 3 });
 
         const textures = [];
         let binding = 0;
@@ -1352,7 +1381,7 @@
         FIXED_FUNCTION_REVISION,
         generate, signatureKey, normalizeSignature, stateFieldsFor,
         allocateVaryings,
-        MAX_TEXTURE_UNITS, MAX_LIGHTS, DEPTH_OFFSET_LOCATION,
+        MAX_TEXTURE_UNITS, MAX_LIGHTS, DEPTH_OFFSET_LOCATION, LINE_ATTRIBUTE_LOCATION,
     };
     global.GLFixedFunction = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;

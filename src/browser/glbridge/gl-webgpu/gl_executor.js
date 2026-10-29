@@ -377,6 +377,9 @@
     /* GL enum translation                                                */
     /* ================================================================== */
 
+    // the widest aliased line drawn (ALIASED_LINE_WIDTH_RANGE)
+    const MAX_LINE_WIDTH = 64;
+
     const COMPARE_FUNCTIONS = {
         [GL.NEVER]: "never", [GL.LESS]: "less", [GL.EQUAL]: "equal",
         [GL.LEQUAL]: "less-equal", [GL.GREATER]: "greater",
@@ -639,6 +642,32 @@
         case GL.LINE_LOOP: return count < 2 ? 0 : count + 1;
         default: return count;
         }
+    }
+
+    function isLinePrimitive(mode) {
+        return mode === GL.LINES || mode === GL.LINE_STRIP || mode === GL.LINE_LOOP;
+    }
+
+    /*
+     * A line draw's segments as vertex numbers: `a`, `b`, the flat-shading
+     * vertex (table 2.12: a segment's second, the loop's closing one its
+     * first) and whether the stipple counter restarts (each independent
+     * segment; a strip or loop runs on, GL 2.1 section 3.4.3).
+     */
+    function lineSegments(mode, count, source) {
+        const n = source ? source.length : count;
+        const at = source ? i => source[i] : i => i;
+        const out = [];
+        if (mode === GL.LINES) {
+            for (let i = 0; i + 1 < n; i += 2)
+                out.push({ a: at(i), b: at(i + 1), provoking: at(i + 1), restart: true });
+            return out;
+        }
+        for (let i = 0; i + 1 < n; ++i)
+            out.push({ a: at(i), b: at(i + 1), provoking: at(i + 1), restart: i === 0 });
+        if (mode === GL.LINE_LOOP && n > 1)
+            out.push({ a: at(n - 1), b: at(0), provoking: at(0), restart: false });
+        return out;
     }
 
     function isPolygonPrimitive(mode) {
@@ -7288,6 +7317,9 @@ ${fragmentCode}`;
                 return;
             if (polygons && !request.rasterized && !this.polygonsFill())
                 return this.drawPolygonModes(request);
+            if (isLinePrimitive(request.mode) && !request.linesExpanded &&
+                    (s.lineWidth >= 1.5 || s.enabled.has(GL.LINE_STIPPLE)))
+                return this.drawLines(request);
             let index = request.index;
             this.drawFace = request.face || null;
             let expandedPoints = request.mode === GL.POINTS && this.pointsExpand();
@@ -7610,10 +7642,80 @@ ${fragmentCode}`;
                         index, rasterized: true, face: { back: group.back } });
                     continue;
                 }
-                const buffer = this.gatherVertices(cpu, request.buffers[0], group,
-                    fixedVertex && s.shadeModel === GL.FLAT, face.depthOffset);
-                if (buffer) this.issueDraw({ mode, vertexCount: group.vertices.length,
-                    firstVertex: 0, buffers: [buffer], index: null, rasterized: true, face });
+                const gathered = this.gatherVertices(cpu, group.vertices,
+                    group.provoking, fixedVertex && s.shadeModel === GL.FLAT, face.depthOffset ?
+                        { location: fixedFunction.DEPTH_OFFSET_LOCATION, components: 1,
+                          value: i => [group.offsets[i] || 0] } : null);
+                if (gathered) this.issueDraw({ mode, vertexCount: group.vertices.length,
+                    firstVertex: 0, buffers: [gathered.buffer], index: null, rasterized: true, face,
+                    cpu: gathered.cpu });
+            }
+        },
+
+        /*
+         * Wide and stippled lines (review D-04, D-16; WebGPU draws one-pixel
+         * lines without a pattern). With the fixed pipeline's window
+         * positions on the CPU each segment becomes a quad widened along its
+         * minor axis, as GL 2.1 section 3.4.2 widens a non-antialiased line,
+         * and carries its distance along the major axis for the stipple
+         * pattern (section 3.4.3). Under a vertex program lines stay one
+         * pixel wide and solid (warned).
+         */
+        drawLines(request) {
+            const s = this.current;
+            const cpu = request.cpu;
+            const fixedVertex = !this.currentProgramObject() &&
+                !s.enabled.has(GL.VERTEX_PROGRAM_ARB);
+            const clip = fixedVertex && request.buffers.length === 1 ? this.clipCoordinates(cpu) : null;
+            if (!clip) {
+                this.warnOnce("wide-lines-program", "wide and stippled lines are drawn one " +
+                    "pixel wide and solid under a vertex program", { width: s.lineWidth });
+                return this.issueDraw({ ...request, linesExpanded: true });
+            }
+            const width = clamp(Math.round(s.lineWidth), 1, MAX_LINE_WIDTH);
+            const stipple = s.enabled.has(GL.LINE_STIPPLE);
+            const vp = s.viewport;
+            const vertices = [], provoking = [], attributes = [];
+            const push = (v, p, dx, dy, distance) => {
+                vertices.push(v); provoking.push(p); attributes.push([dx, dy, distance]);
+            };
+            let distance = 0;
+            for (const segment of lineSegments(request.mode, request.vertexCount,
+                    request.index && request.index.source)) {
+                if (segment.restart) distance = 0;
+                const a = segment.a * 4, b = segment.b * 4;
+                const visible = clip[a + 3] > 0 && clip[b + 3] > 0;
+                const dx = visible ? (clip[b] / clip[b + 3] - clip[a] / clip[a + 3]) * vp.width / 2 : 0;
+                const dy = visible ? (clip[b + 1] / clip[b + 3] - clip[a + 1] / clip[a + 3]) * vp.height / 2 : 0;
+                const xMajor = Math.abs(dx) >= Math.abs(dy);
+                const start = distance;
+                distance += xMajor ? Math.abs(dx) : Math.abs(dy);
+                const p = segment.provoking;
+                if (width === 1) {
+                    push(segment.a, p, 0, 0, start);
+                    push(segment.b, p, 0, 0, distance);
+                    continue;
+                }
+                const ox = xMajor ? 0 : width / 2, oy = xMajor ? width / 2 : 0;
+                // two triangles, each led under flat shading by its last
+                // vertex, the segment's end (expandFlat)
+                push(segment.a, p, -ox, -oy, start);
+                push(segment.a, p, ox, oy, start);
+                push(segment.b, p, -ox, -oy, distance);
+                push(segment.a, p, ox, oy, start);
+                push(segment.b, p, ox, oy, distance);
+                push(segment.b, p, -ox, -oy, distance);
+            }
+            if (!vertices.length) return;
+            const gathered = this.gatherVertices(cpu, vertices, provoking, s.shadeModel === GL.FLAT,
+                { location: fixedFunction.LINE_ATTRIBUTE_LOCATION, components: 3, value: i => attributes[i] });
+            if (!gathered) return;
+            try {
+                this.issueDraw({ mode: width > 1 ? GL.TRIANGLES : GL.LINES, vertexCount: vertices.length,
+                    firstVertex: 0, buffers: [gathered.buffer], index: null, rasterized: true, linesExpanded: true,
+                    face: { ...(request.face || {}), wideLine: width > 1, lineStipple: stipple } });
+            } finally {
+                this.drawFace = null;
             }
         },
 
@@ -7694,27 +7796,38 @@ ${fragmentCode}`;
          * polygon's provoking vertex (lit at each vertex's own position, so
          * exact for directional lights without specular).
          */
-        gatherVertices(cpu, source, group, flat, depthOffset) {
-            const stride = cpu.stride + (depthOffset ? 1 : 0);
-            const out = new Float32Array(group.vertices.length * stride);
+        /*
+         * `vertices` of the CPU data as vertex data of their own, each with
+         * the `extra` attribute's value ({ location, components, value(i) })
+         * appended. Returns the buffer and its CPU data (`cpu`'s shape).
+         */
+        gatherVertices(cpu, vertices, provoking, flat, extra) {
+            const added = extra ? extra.components : 0;
+            const stride = cpu.stride + added;
+            const out = new Float32Array(vertices.length * stride);
             const ATTR = translator.COMPAT_ATTRIBUTE_LOCATIONS;
             const copied = flat ? cpu.layout.filter(a => a.location === ATTR.gl_Color ||
                 a.location === ATTR.gl_SecondaryColor || a.location === ATTR.gl_Normal) : [];
-            for (let i = 0; i < group.vertices.length; ++i) {
-                const v = group.vertices[i], at = i * stride;
+            for (let i = 0; i < vertices.length; ++i) {
+                const v = vertices[i], at = i * stride;
                 out.set(cpu.data.subarray(v * cpu.stride, (v + 1) * cpu.stride), at);
                 for (const a of copied) {
-                    const from = group.provoking[i] * cpu.stride + a.offsetFloats;
+                    const from = provoking[i] * cpu.stride + a.offsetFloats;
                     out.set(cpu.data.subarray(from, from + a.components), at + a.offsetFloats);
                 }
-                if (depthOffset) out[at + cpu.stride] = group.offsets[i] || 0;
+                if (extra) out.set(extra.value(i), at + cpu.stride);
             }
             const slice = this.uploadVertices(new Uint8Array(out.buffer));
             if (!slice) return null;
-            return { gpuBuffer: slice.buffer, baseOffset: slice.offset, stride: stride * 4,
-                attributes: depthOffset ? source.attributes.concat([{
-                    location: fixedFunction.DEPTH_OFFSET_LOCATION, format: "float32",
-                    offset: cpu.stride * 4 }]) : source.attributes };
+            const layout = extra ? cpu.layout.concat([{ location: extra.location,
+                components: added, offsetFloats: cpu.stride }]) : cpu.layout;
+            return {
+                buffer: { gpuBuffer: slice.buffer, baseOffset: slice.offset, stride: stride * 4,
+                    attributes: layout.map(a => ({ location: a.location,
+                        format: "float32" + (a.components > 1 ? "x" + a.components : ""),
+                        offset: a.offsetFloats * 4 })) },
+                cpu: { data: out, stride, count: vertices.length, layout, edgeFlags: null },
+            };
         },
     });
 
@@ -8015,6 +8128,8 @@ ${fragmentCode}`;
                 colorTargets: variant.colorTargets,
                 backFacing: !!(this.drawFace && this.drawFace.back),
                 depthOffset: !!(this.drawFace && this.drawFace.depthOffset),
+                wideLine: !!(this.drawFace && this.drawFace.wideLine),
+                lineStipple: !!(this.drawFace && this.drawFace.lineStipple),
             };
         },
 
@@ -8068,10 +8183,11 @@ ${fragmentCode}`;
             const strip = topology === "triangle-strip" || topology === "line-strip";
             // POLYGON_OFFSET_FILL is for filled polygons, and WebGPU rejects a
             // depth bias on lines and points (review S1-2c)
+            const quads = request.expandedPoints || request.linesExpanded;
             const fillOffset = s.enabled.has(GL.POLYGON_OFFSET_FILL) &&
-                isPolygonPrimitive(request.mode) && !request.expandedPoints;
-            // a point's quad is not a face (review S2-18: it was culled)
-            const cullMode = request.expandedPoints ? "none" : this.gpuCullMode(s);
+                isPolygonPrimitive(request.mode) && !quads;
+            // a point's or line's quad is not a face (review S2-18: it was culled)
+            const cullMode = quads ? "none" : this.gpuCullMode(s);
             const layoutKey = request.buffers.map(b =>
                 b.stride + ":" + (b.stepMode || "vertex") + "@" + b.attributes.map(a =>
                     a.location + ":" + a.format + ":" + a.offset).join(",")).join("|");

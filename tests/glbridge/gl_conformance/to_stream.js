@@ -113,6 +113,7 @@
             case "PolygonOffset": st.call("POLYGON_OFFSET", a[0], a[1]); break;
             case "PixelZoom": st.call("PIXEL_ZOOM", a[0], a[1]); break;
             case "LineWidth": st.call("LINE_WIDTH", a[0]); break;
+            case "LineStipple": st.call("LINE_STIPPLE", a[0], a[1]); break;
             case "PointSize": st.call("POINT_SIZE", a[0]); break;
             case "FogCoordf": st.call("FOG_COORDF", a[0]); break;
             case "Translatef": st.call("TRANSLATEF", ...a); break;
