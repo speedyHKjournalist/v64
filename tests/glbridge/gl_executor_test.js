@@ -457,11 +457,20 @@ test("GL_QUADS expands to two triangles with GL's provoking vertex first", () =>
     // both triangles -- WGSL's @interpolate(flat) uses the first.
     assert.strictEqual(expanded[0], 3);
     assert.strictEqual(expanded[3], 3);
+    // GL 2.1 table 2.12: a fan's triangle i takes vertex i + 2, its last
     const fan = executorModule.expandIndices(GL.TRIANGLE_FAN, 5, 0);
     assert.strictEqual(fan.length, 9);
-    assert.strictEqual(fan[0], 1, "a fan's provoking vertex is not the centre");
+    assert.deepStrictEqual([...fan.subarray(0, 6)], [2, 0, 1, 3, 0, 2]);
     const loop = executorModule.expandIndices(GL.LINE_LOOP, 4, 0);
     assert.deepStrictEqual([...loop], [0, 1, 2, 3, 0]);
+    // under flat shading the others lead with theirs too: a triangle its
+    // last vertex (rotated, so the winding stays), a line its second, the
+    // loop's closing segment its first
+    const flat = (mode, count) => [...executorModule.expandIndices(mode, count, 0, true)];
+    assert.deepStrictEqual(flat(GL.TRIANGLES, 6), [2, 0, 1, 5, 3, 4]);
+    assert.deepStrictEqual(flat(GL.TRIANGLE_STRIP, 5), [2, 0, 1, 3, 2, 1, 4, 2, 3]);
+    assert.deepStrictEqual(flat(GL.LINES, 4), [1, 0, 3, 2]);
+    assert.deepStrictEqual(flat(GL.LINE_LOOP, 3), [1, 0, 2, 1, 0, 2]);
 });
 
 test("a GL_QUADS draw is issued as an indexed triangle list", () => {

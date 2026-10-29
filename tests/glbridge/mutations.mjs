@@ -104,8 +104,15 @@ const MUTATIONS = {
         ["QUADS first triangle loses provoking", G + "gl_executor.js",
             "// provoking vertex is the quad's last, so it leads both halves\n                out[w++] = b + 3; out[w++] = b; out[w++] = b + 1;",
             "// provoking vertex is the quad's last, so it leads both halves\n                out[w++] = b; out[w++] = b + 1; out[w++] = b + 3;"],
-        ["normal matrix column swap", G + "gl_executor.js", "n[0] = c00 * det; n[1] = c01 * det; n[2] = c02 * det;",
-            "n[0] = c00 * det; n[1] = c02 * det; n[2] = c01 * det;"],
+        ["normal matrix: one element the inverse's", G + "gl_executor.js",
+            "n[1] = (m02 * m21 - m01 * m22) * det;", "n[1] = c01 * det;"],
+        ["flat triangles lead with their first vertex", G + "gl_executor.js",
+            "out[w] = first + w + 2; out[w + 1] = first + w; out[w + 2] = first + w + 1;",
+            "out[w] = first + w; out[w + 1] = first + w + 1; out[w + 2] = first + w + 2;"],
+        ["QUAD_STRIP second half reversed", G + "gl_executor.js",
+            "out[w++] = b + 3; out[w++] = b + 2; out[w++] = b;", "out[w++] = b + 3; out[w++] = b + 1; out[w++] = b + 2;"],
+        ["CONSTANT_ALPHA blends with the constant's RGB", G + "gl_executor.js",
+            "return usesAlpha && !usesColor ? { r: a, g: a, b: a, a } : { r, g, b, a };", "return { r, g, b, a };"],
     ] },
 };
 

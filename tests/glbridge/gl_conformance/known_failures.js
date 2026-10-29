@@ -13,20 +13,6 @@ globalThis.GLConformanceKnownFailures = {
         "COLOR_MATERIAL latched diffuse (0.9,0.1,0.1) after disable",
         "COLOR_MATERIAL EMISSION color (0,0,0.5)",
     ] },
-    flat_provoking: { reason: "S2-5 provoking vertex; S2-4 QUAD_STRIP winding", tiles: [
-        "TRIANGLES (expect v2 blue)",
-        "TRIANGLE_STRIP (v2 blue, v3 yellow)",
-        "TRIANGLE_FAN (v2 blue, v3 yellow)",
-        "QUAD_STRIP (v3 yellow, v5 cyan)",
-        "TRIANGLES x2 (v2, v5)",
-        "TRIANGLES lit+COLOR_MATERIAL (v2)",
-    ] },
-    flat_lines: { reason: "S2-5: the provoking vertex of lines", tiles: [
-        "LINES y=8 (green)",
-        "LINE_STRIP 2nd seg (blue)",
-        "LINE_LOOP closing edge x=8 (red)",
-        "LINE_LOOP 3rd edge y=58 (yellow)",
-    ] },
     depth_range_reversed: "S1-2d: glDepthRange(n > f) is refused by WebGPU",
     clip_planes: { reason: "S2-10: user clip planes", tiles: [
         "plane1 keeps y<=10",
@@ -34,18 +20,8 @@ globalThis.GLConformanceKnownFailures = {
     texgen: { reason: "S2-12: the q coordinate is dropped", tiles: [
         "TexCoord4f q=2: (1.25,0.75,0,2)->(0.625,0.375)",
     ] },
-    blend: { reason: "S2-8: CONSTANT_ALPHA uses the constant's RGB", tiles: [
-        "CONSTANT_ALPHA",
-    ] },
     drawpixels_bitmap: { reason: "S2-15: an invalid raster position still draws", tiles: [
         "invalid raster pos (x=-10, then moved): nothing",
-    ] },
-    primitives: { reason: "S2-4: QUAD_STRIP winding", tiles: [
-        "QUAD_STRIP 2 quads",
-        "QUAD_STRIP (2nd)",
-    ] },
-    draw_elements: { reason: "S2-5: flat-shaded indexed triangles", tiles: [
-        "FLAT indexed TRIANGLES: last index of each tri (v2 blue, v0 red)",
     ] },
     tex_wrap_border: { reason: "S3: CLAMP_TO_BORDER has no border colour", tiles: [
         "CLAMP",
@@ -102,33 +78,9 @@ globalThis.GLConformanceKnownFailures = {
         "LIT in VP",
     ] },
     readpixels_formats: "S2-23: readback ignores format, type and pack state",
-    light_normal_matrix: { reason: "S2-1: the normal matrix is the inverse, not the inverse transpose", tiles: [
-        "Rotate(90,z), N=(1,0,0): eye N=(0,1,0) lit",
-        "Rotate(90,z), N=(-1,0,0): eye N=(0,-1,0) dark",
-        "Rotate(30,z), N=(1,0,0); L set under the rotation -> eye (0.5,0.866): N.L=.866 (inverse gives 0)",
-        "Rotate(30,z)*Scale(1,.25,1), N=(0.6,0.8,0.0)+z tilt, NORMALIZE",
-        "shear modelview, N=(0,0,1) unchanged; N=(1,0,0)->(1,-1,0)/sqrt2",
-        "SPHERE_MAP under Rotate(90,z), N=(0.6,0,0.8): eye N=(0,0.6,0.8) -> t=0.8",
-    ] },
-    light_integer_params: { reason: "S2-9: LIGHTIV divides every component", tiles: [
-        "Lightiv SPOT_CUTOFF 45, exp 2: P at 26.6deg inside",
-        "Lightiv CONSTANT_ATTENUATION 2",
-    ] },
     projective_texcoord: { reason: "S2-12: projective texture coordinates", tiles: [
         "q 1->4 across x: projective s/q",
         "uniform q=0.5",
-    ] },
-    strip_winding_cull: { reason: "S2-4: QUAD_STRIP winding", tiles: [
-        "QUAD_STRIP v0 bottom v1 top: CW = back, culled",
-        "QUAD_STRIP v0 left v1 right: CCW = front, drawn",
-        "QUAD_STRIP CCW, cull FRONT: culled",
-        "QUAD_STRIP CW, cull FRONT: drawn",
-        "two-sided CW QUAD_STRIP: back material both quads",
-    ] },
-    glsl_normal_matrix: { reason: "S2-1: gl_NormalMatrix", tiles: [
-        "Rotate(90,z): N(1,0,0) -> (0,1,0) => (128,255,128)",
-        "Rotate(30,z): N(1,0,0) -> (.866,.5,0)",
-        "shear x+=y: N(1,0,0) -> (1,-1,0)",
     ] },
     arb_fp_semantics: { reason: "S2-48/S2-51: ARB fragment programs", tiles: [
         "TXP (1.25,.75,0,2)->texel(2,1)",

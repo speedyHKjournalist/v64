@@ -349,14 +349,17 @@
             return n;
         }
         det = 1 / det;
-        // Column-major: column j holds the inverse-transpose's jth column,
-        // which is the jth row of the inverse -- hence the cofactor order.
-        n[0] = c00 * det; n[1] = c01 * det; n[2] = c02 * det;
-        n[3] = (m02 * m21 - m01 * m22) * det;
+        // The inverse transpose is the cofactor matrix over the determinant:
+        // element (r, c) is cofactor (r, c), stored column-major at c * 3 + r
+        // (review S2-1: these were the inverse's, the cofactors transposed)
+        n[0] = c00 * det;
+        n[1] = (m02 * m21 - m01 * m22) * det;
+        n[2] = (m01 * m12 - m02 * m11) * det;
+        n[3] = c01 * det;
         n[4] = (m00 * m22 - m02 * m20) * det;
-        n[5] = (m01 * m20 - m00 * m21) * det;
-        n[6] = (m01 * m12 - m02 * m11) * det;
-        n[7] = (m02 * m10 - m00 * m12) * det;
+        n[5] = (m02 * m10 - m00 * m12) * det;
+        n[6] = c02 * det;
+        n[7] = (m01 * m20 - m00 * m21) * det;
         n[8] = (m00 * m11 - m01 * m10) * det;
         return n;
     }
@@ -405,8 +408,9 @@
         [GL.ONE_MINUS_CONSTANT_COLOR]: "one-minus-constant",
         // WebGPU has no separate alpha blend constant: one setBlendConstant
         // covers both, so GL_CONSTANT_ALPHA maps to the same factor and the
-        // executor writes the constant's alpha into it. Exact for the usual
-        // case where a program sets one constant colour and uses both.
+        // colour factors get the constant's alpha in its RGB (blendConstant).
+        // Exact unless the colour factors use both CONSTANT_COLOR and
+        // CONSTANT_ALPHA at once.
         [GL.CONSTANT_ALPHA]: "constant",
         [GL.ONE_MINUS_CONSTANT_ALPHA]: "one-minus-constant",
         [GL.SRC_ALPHA_SATURATE]: "src-alpha-saturated",
@@ -457,32 +461,54 @@
         [GL.POLYGON]: "triangle-list",
     };
 
-    function needsIndexExpansion(mode) {
-        return mode === GL.TRIANGLE_FAN || mode === GL.QUADS ||
-            mode === GL.QUAD_STRIP || mode === GL.POLYGON ||
-            mode === GL.LINE_LOOP;
+    /*
+     * What a draw of `mode` becomes: WebGPU's topology, and whether its
+     * vertices go through an expanded index list -- the modes WebGPU does
+     * not have, and under flat shading the ones whose provoking vertex is
+     * not the first (GL 2.1 table 2.12: a triangle's is its last, a line's
+     * its second; review S2-5), since WGSL's flat interpolation takes the
+     * first.
+     */
+    function drawShape(mode, flat) {
+        switch (mode) {
+        case GL.TRIANGLE_FAN: case GL.QUADS: case GL.QUAD_STRIP: case GL.POLYGON:
+            return { expand: true, topology: "triangle-list" };
+        case GL.LINE_LOOP:
+            return { expand: true, topology: flat ? "line-list" : "line-strip" };
+        case GL.TRIANGLES: case GL.TRIANGLE_STRIP:
+            return flat ? { expand: true, topology: "triangle-list" } : { expand: false, topology: PRIMITIVE_TOPOLOGY[mode] };
+        case GL.LINES: case GL.LINE_STRIP:
+            return flat ? { expand: true, topology: "line-list" } : { expand: false, topology: PRIMITIVE_TOPOLOGY[mode] };
+        default:
+            return { expand: false, topology: PRIMITIVE_TOPOLOGY[mode] };
+        }
     }
 
     /*
      * Flat shading takes its colour from a primitive-specific vertex, and the
-     * table is not "the first one": a triangle fan uses the second vertex of
-     * each triangle and a quad uses the fourth. WGSL's @interpolate(flat)
-     * takes the first, so expansion puts GL's choice there. Getting this wrong
+     * table is not "the first one": a triangle fan's triangle uses its last
+     * vertex and a quad its fourth. WGSL's @interpolate(flat) takes the
+     * first, so expansion puts GL's choice there (rotating, which keeps the
+     * winding). Getting this wrong
      * shifts colours by one vertex on flat-shaded models only, which is why
      * gl_flat_shading_test.exe walks the whole table.
      */
-    function expandIndices(mode, count, base) {
+    function expandIndices(mode, count, base, flat) {
         const first = base || 0;
+        if (flat) {
+            const out = expandFlat(mode, count, first);
+            if (out) return out;
+        }
         switch (mode) {
         case GL.TRIANGLE_FAN: {
             if (count < 3) return new Uint32Array(0);
             const out = new Uint32Array((count - 2) * 3);
             let w = 0;
             for (let i = 0; i < count - 2; ++i) {
-                // provoking vertex i+1 leads
-                out[w++] = first + i + 1;
+                // triangle (0, i+1, i+2); its provoking vertex i+2 leads
                 out[w++] = first + i + 2;
                 out[w++] = first;
+                out[w++] = first + i + 1;
             }
             return out;
         }
@@ -505,9 +531,12 @@
             let w = 0;
             for (let q = 0; q < quads; ++q) {
                 const b = first + q * 2;
-                // GL's provoking vertex for quad-strip quad i is 2i + 2
+                // Quad q is the polygon (b, b+1, b+3, b+2), split on b..b+3
+                // with its winding kept (review S2-4: the second half was
+                // reversed); GL's provoking vertex for quad-strip quad i is
+                // 2i + 2 counting from one, b+3 here, and leads both halves
                 out[w++] = b + 3; out[w++] = b; out[w++] = b + 1;
-                out[w++] = b + 3; out[w++] = b + 1; out[w++] = b + 2;
+                out[w++] = b + 3; out[w++] = b + 2; out[w++] = b;
             }
             return out;
         }
@@ -538,16 +567,70 @@
         }
     }
 
+    /*
+     * Under flat shading: each primitive with GL's provoking vertex first. A
+     * triangle is rotated, which keeps its winding (a strip's odd triangles
+     * are (i+1, i, i+2), as GL orders them); a line is reversed.
+     */
+    function expandFlat(mode, count, first) {
+        switch (mode) {
+        case GL.TRIANGLES: {
+            const out = new Uint32Array(Math.floor(count / 3) * 3);
+            for (let w = 0; w < out.length; w += 3) {
+                out[w] = first + w + 2; out[w + 1] = first + w; out[w + 2] = first + w + 1;
+            }
+            return out;
+        }
+        case GL.TRIANGLE_STRIP: {
+            if (count < 3) return new Uint32Array(0);
+            const out = new Uint32Array((count - 2) * 3);
+            for (let i = 0, w = 0; i < count - 2; ++i) {
+                out[w++] = first + i + 2;
+                out[w++] = first + (i & 1 ? i + 1 : i);
+                out[w++] = first + (i & 1 ? i : i + 1);
+            }
+            return out;
+        }
+        case GL.LINES: {
+            const out = new Uint32Array(Math.floor(count / 2) * 2);
+            for (let w = 0; w < out.length; w += 2) {
+                out[w] = first + w + 1; out[w + 1] = first + w;
+            }
+            return out;
+        }
+        case GL.LINE_STRIP:
+        case GL.LINE_LOOP: {
+            if (count < 2) return new Uint32Array(0);
+            const segments = mode === GL.LINE_LOOP ? count : count - 1;
+            const out = new Uint32Array(segments * 2);
+            for (let i = 0; i < count - 1; ++i) {
+                out[i * 2] = first + i + 1; out[i * 2 + 1] = first + i;
+            }
+            // the loop's closing segment takes the first vertex's colour
+            if (mode === GL.LINE_LOOP) {
+                out[segments * 2 - 2] = first; out[segments * 2 - 1] = first + count - 1;
+            }
+            return out;
+        }
+        default:
+            return null;
+        }
+    }
+
     /* The same expansion applied to an existing index array. */
-    function expandIndexArray(mode, indices) {
+    function expandIndexArray(mode, indices, flat) {
         const count = indices.length;
-        const map = expandIndices(mode, count, 0);
+        const map = expandIndices(mode, count, 0, flat);
         const out = new Uint32Array(map.length);
         for (let i = 0; i < map.length; ++i) out[i] = indices[map[i]];
         return out;
     }
 
-    function expandedIndexCount(mode, count) {
+    function expandedIndexCount(mode, count, flat) {
+        if (flat) {
+            const flatOut = expandFlat(mode, count, 0);
+            if (flatOut) return flatOut.length;
+        }
         switch (mode) {
         case GL.TRIANGLE_FAN: return count < 3 ? 0 : (count - 2) * 3;
         case GL.QUADS: return Math.floor(count / 4) * 6;
@@ -2615,8 +2698,7 @@
         });
         define("LIGHT_MODELIV", function(a) {
             this.setLightModel(a[0] >>> 0,
-                [a[2] / 2147483647, a[3] / 2147483647,
-                 a[4] / 2147483647, a[5] / 2147483647], a[1] >>> 0);
+                integerParameters(a[0] >>> 0, [a[2], a[3], a[4], a[5]]), a[1] >>> 0);
         });
         define("LIGHTF", function(a) {
             this.setLight(a[0] >>> 0, a[1] >>> 0, [a[2]]);
@@ -2629,8 +2711,7 @@
         });
         define("LIGHTIV", function(a) {
             this.setLight(a[0] >>> 0, a[1] >>> 0,
-                [a[3] / 2147483647, a[4] / 2147483647,
-                 a[5] / 2147483647, a[6] / 2147483647]);
+                integerParameters(a[1] >>> 0, [a[3], a[4], a[5], a[6]]));
         });
         define("MATERIALF", function(a) {
             this.setMaterial(a[0] >>> 0, a[1] >>> 0, [a[2]]);
@@ -2643,8 +2724,7 @@
         });
         define("MATERIALIV", function(a) {
             this.setMaterial(a[0] >>> 0, a[1] >>> 0,
-                [a[3] / 2147483647, a[4] / 2147483647,
-                 a[5] / 2147483647, a[6] / 2147483647]);
+                integerParameters(a[1] >>> 0, [a[3], a[4], a[5], a[6]]));
         });
         define("COLOR_MATERIAL", function(a) {
             this.current.colorMaterial.face = a[0] >>> 0;
@@ -2854,6 +2934,19 @@
     }
 
     /* Reads a name array record: {count u32, names u32[count]}. */
+    /*
+     * glLightiv, glMaterialiv and glLightModeliv: a colour's integers map to
+     * [-1, 1] as GL 2.1's table 2.9 says, (2c + 1) / (2^32 - 1); a position,
+     * direction, exponent, cutoff, attenuation, shininess or mode is the
+     * integer itself (review S2-9: every component was divided).
+     */
+    const INTEGER_COLORS = new Set([GL.AMBIENT, GL.DIFFUSE, GL.SPECULAR, GL.EMISSION, GL.AMBIENT_AND_DIFFUSE,
+        GL.LIGHT_MODEL_AMBIENT]);
+
+    function integerParameters(pname, values) {
+        return INTEGER_COLORS.has(pname) ? values.map(c => (2 * c + 1) / 4294967295) : values;
+    }
+
     function readNameArray(view, offset, size) {
         if (size < 4) throw new GLStreamError("name array record is too short");
         const count = view.getUint32(offset, true);
@@ -6308,11 +6401,16 @@
          * cached because a Half-Life frame issues thousands of GL_QUADS draws
          * whose index pattern depends on nothing but the vertex count.
          */
+        // How the current state draws `mode` (drawShape)
+        drawShape(mode) {
+            return drawShape(mode, this.current.shadeModel === GL.FLAT);
+        },
+
         uploadIndices(mode, type, data, count, decoded) {
             const source = decoded || readIndices(type, data, count);
             let indices;
-            if (needsIndexExpansion(mode)) {
-                indices = expandIndexArray(mode, source);
+            if (this.drawShape(mode).expand) {
+                indices = expandIndexArray(mode, source, this.current.shadeModel === GL.FLAT);
                 ++this.stats.expandedIndices;
             } else {
                 indices = source;
@@ -6328,10 +6426,11 @@
 
         /* Draw with no index buffer still needs one when the mode expands. */
         expansionIndices(mode, count) {
-            const key = mode + ":" + count;
+            const flat = this.current.shadeModel === GL.FLAT;
+            const key = mode + ":" + count + (flat ? ":flat" : "");
             let cached = this.indexExpansionCache.get(key);
             if (!cached) {
-                cached = expandIndices(mode, count, 0);
+                cached = expandIndices(mode, count, 0, flat);
                 if (this.indexExpansionCache.size > 4096)
                     this.indexExpansionCache.clear();
                 this.indexExpansionCache.set(key, cached);
@@ -7019,7 +7118,7 @@ ${fragmentCode}`;
                 };
             }
 
-            if (!index && needsIndexExpansion(request.mode)) {
+            if (!index && this.drawShape(request.mode).expand) {
                 const expanded = this.expansionIndices(request.mode,
                     request.vertexCount);
                 if (!expanded.length) return;
@@ -7092,10 +7191,21 @@ ${fragmentCode}`;
             if (s.enabled.has(GL.STENCIL_TEST))
                 pass.setStencilReference(s.stencil.front.ref >>> 0);
             if (s.enabled.has(GL.BLEND))
-                pass.setBlendConstant({
-                    r: s.blend.color[0], g: s.blend.color[1],
-                    b: s.blend.color[2], a: s.blend.color[3],
-                });
+                pass.setBlendConstant(this.blendConstant(s.blend));
+        },
+
+        // The one constant WebGPU blends with: a colour factor of
+        // CONSTANT_ALPHA reads its RGB, so that is the alpha then (review
+        // S2-8). An alpha factor reads its alpha either way.
+        blendConstant(blend) {
+            const [r, g, b, a] = blend.color;
+            const rgb = [blend.srcRGB, blend.dstRGB];
+            const usesAlpha = rgb.some(f => f === GL.CONSTANT_ALPHA || f === GL.ONE_MINUS_CONSTANT_ALPHA);
+            const usesColor = rgb.some(f => f === GL.CONSTANT_COLOR || f === GL.ONE_MINUS_CONSTANT_COLOR);
+            if (usesAlpha && usesColor)
+                this.warnOnce("blend-constant", "the colour blend factors use both CONSTANT_COLOR and " +
+                    "CONSTANT_ALPHA; WebGPU has one constant, CONSTANT_ALPHA reads its RGB", { rgb });
+            return usesAlpha && !usesColor ? { r: a, g: a, b: a, a } : { r, g, b, a };
         },
 
         prepareLogicOpTargets() {
@@ -7496,7 +7606,8 @@ ${fragmentCode}`;
         ensurePipeline(shaders, request, index) {
             const s = this.current;
             const targets = this.passTargets;
-            const topology = PRIMITIVE_TOPOLOGY[request.mode];
+            const shape = this.drawShape(request.mode);
+            const topology = shape.topology;
             const strip = topology === "triangle-strip" || topology === "line-strip";
             const layoutKey = request.buffers.map(b =>
                 b.stride + ":" + (b.stepMode || "vertex") + "@" + b.attributes.map(a =>
@@ -7504,8 +7615,7 @@ ${fragmentCode}`;
             const signature = [
                 shaders.key,
                 layoutKey,
-                request.expandedPoints ? "triangle-list" :
-                    (needsIndexExpansion(request.mode) ? "triangle-list" : topology),
+                request.expandedPoints ? "triangle-list" : topology,
                 strip && index ? "u32" : "-",
                 this.gpuFrontFace(s), this.gpuCullMode(s),
                 s.enabled.has(GL.DEPTH_TEST) ? s.depthFunc : "off",
@@ -7554,10 +7664,7 @@ ${fragmentCode}`;
                 fragment: { module: fragmentModule, entryPoint: "fs_main",
                             targets: colorTargets },
                 primitive: {
-                    topology: request.expandedPoints ? "triangle-list" :
-                        (needsIndexExpansion(request.mode) ?
-                        (request.mode === GL.LINE_LOOP ? "line-strip" : "triangle-list") :
-                        topology),
+                    topology: request.expandedPoints ? "triangle-list" : topology,
                     frontFace: this.gpuFrontFace(s),
                     cullMode: this.gpuCullMode(s),
                     ...(strip && index ? { stripIndexFormat: "uint32" } : {}),
