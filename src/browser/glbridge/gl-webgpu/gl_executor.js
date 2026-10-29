@@ -377,6 +377,9 @@
     /* GL enum translation                                                */
     /* ================================================================== */
 
+    const DEPTH_MODE_FORMATS = { [GL.LUMINANCE]: "LUMINANCE", [GL.INTENSITY]: "INTENSITY",
+        [GL.ALPHA]: "ALPHA" };
+
     // the draw buffers that include the window's front buffer
     const FRONT_BUFFERS = new Set([GL.FRONT, GL.FRONT_AND_BACK, GL.FRONT_LEFT, GL.LEFT]);
 
@@ -5133,12 +5136,20 @@
                 const slot = (texture.levels[region.layer] || [])[region.level];
                 if (!slot || region.level >= wanted.levelCount) continue;
                 if (slot.pixels && (shapeChanged || full.has(region.layer + ":" + region.level))) continue;
+                if (texture.gpuFormat === "depth32float") {
+                    this.writeDepthTexels(texture.gpuTexture, region.level, region.layer, region.x, region.y,
+                        region.width, region.height, region.pixels);
+                    continue;
+                }
                 this.device.queue.writeTexture({ texture: texture.gpuTexture, mipLevel: region.level,
                     origin: { x: region.x, y: region.y, z: texture.kind === "3D" ? region.z : region.layer } },
                 region.pixels, { offset: 0, bytesPerRow: region.width * region.bytesPerTexel,
                     rowsPerImage: region.height },
                 { width: region.width, height: region.height, depthOrArrayLayers: region.depth });
             }
+            // (a depth texture's colour copy follows its writes, depthColorView)
+            if (shapeChanged || full.size || (texture.regions && texture.regions.length))
+                texture.depthGeneration = (texture.depthGeneration || 0) + 1;
             texture.fullUploads = null;
             texture.regions = null;
             texture.dirty = false;
@@ -5146,6 +5157,9 @@
         },
 
         writeTextureLevel(texture, slot, level, layer) {
+            if (texture.gpuFormat === "depth32float")
+                return this.writeDepthTexels(texture.gpuTexture, level, layer, 0, 0,
+                    slot.width, slot.height, slot.pixels);
             const bytesPerRow = slot.compressed ?
                 Math.ceil(slot.width / 4) * slot.blockBytes :
                 slot.width * (slot.bytesPerTexel || 4);
@@ -5166,6 +5180,49 @@
                     height: slot.compressed ? alignUp(slot.height, 4) : slot.height,
                     depthOrArrayLayers: texture.kind === "3D" ? slot.depth : 1,
                 });
+        },
+
+        /*
+         * depth32float takes no queue.writeTexture (WebGPU copies out of it
+         * only), so its texels -- f32 depths, rows from the bottom -- are
+         * drawn: a pass over the rectangle writes frag_depth from them.
+         * (Every depth texture with data failed to upload before.)
+         */
+        writeDepthTexels(gpuTexture, level, layer, x, y, width, height, pixels) {
+            const staging = this.device.createTexture({ label: "GL depth upload",
+                size: { width, height, depthOrArrayLayers: 1 }, format: "r32float",
+                usage: TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING });
+            this.device.queue.writeTexture({ texture: staging }, pixels,
+                { offset: 0, bytesPerRow: width * 4, rowsPerImage: height },
+                { width, height, depthOrArrayLayers: 1 });
+            if (!this.depthUploadPipeline) {
+                const module = this.shaderModule(DEPTH_UPLOAD_WGSL);
+                this.depthUploadPipeline = this.gpuErrors.scoped("depth upload", () =>
+                    this.device.createRenderPipeline({ label: "GL depth upload", layout: "auto",
+                        vertex: { module, entryPoint: "vs_main" },
+                        fragment: { module, entryPoint: "fs_main", targets: [] },
+                        primitive: { topology: "triangle-list" },
+                        depthStencil: { format: "depth32float", depthWriteEnabled: true,
+                            depthCompare: "always" } })).object;
+            }
+            const origin = this.allocateUniform(16);
+            if (!origin) return;
+            new Int32Array(this.uniformStaging.buffer, origin.offset, 4).set([x, y, 0, 0]);
+            this.device.queue.writeBuffer(origin.buffer, origin.offset, this.uniformStaging, origin.offset, 16);
+            this.endPass();
+            const pass = this.ensureEncoder().beginRenderPass({ label: "GL depth upload", colorAttachments: [],
+                depthStencilAttachment: { view: gpuTexture.createView({ dimension: "2d", baseMipLevel: level,
+                    mipLevelCount: 1, baseArrayLayer: layer, arrayLayerCount: 1 }),
+                depthLoadOp: "load", depthStoreOp: "store" } });
+            pass.setPipeline(this.depthUploadPipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({ layout: this.depthUploadPipeline.getBindGroupLayout(0),
+                entries: [{ binding: 0, resource: staging.createView() },
+                    { binding: 1, resource: { buffer: origin.buffer, offset: origin.offset, size: 16 } }] }));
+            pass.setViewport(x, y, width, height, 0, 1);
+            pass.setScissorRect(x, y, width, height);
+            pass.draw(3);
+            pass.end();
+            this.retire(staging);
         },
 
         /*
@@ -6871,6 +6928,7 @@
                 const slot = this.levelSlot(texture, texture.kind, attachment.level,
                     texture.kind === "Cube" ? attachment.layer : 0);
                 if (slot && !slot.compressed) slot.pixels = null;
+                texture.depthGeneration = (texture.depthGeneration || 0) + 1;
                 return {
                     view: gpuTexture.createView({
                         baseMipLevel: attachment.level, mipLevelCount: 1,
@@ -8123,7 +8181,9 @@ ${fragmentCode}`;
                     target: target.kind,
                     shadow: !!(object && object.sampler.compareMode ===
                         GL.COMPARE_R_TO_TEXTURE),
-                    format: object.baseFormat,
+                    // a depth texture is sampled as DEPTH_TEXTURE_MODE says
+                    format: object.baseFormat === "DEPTH" ?
+                        DEPTH_MODE_FORMATS[object.sampler.depthTextureMode] || "LUMINANCE" : object.baseFormat,
                     matrix: !isIdentity(this.textureMatrixOf(unit)),
                     lodBias: this.textureLodBias(unit, object) !== 0,
                     border: textureBorder(object, target.kind),
@@ -8491,6 +8551,88 @@ ${fragmentCode}`;
         },
 
         /*
+         * A depth texture sampled without comparison (review S1-2j: WebGPU
+         * binds depth only to depth bindings): a colour copy of its levels
+         * with DEPTH_TEXTURE_MODE applied, made again when the depth has
+         * changed. rgba32float where the device filters it, rgba16float
+         * elsewhere.
+         */
+        depthColorView(object, item) {
+            const gpuTexture = this.ensureTextureUploaded(object);
+            if (!gpuTexture || object.kind === "3D") return null;
+            const mode = object.sampler.depthTextureMode;
+            const format = this.deviceFeatures && this.deviceFeatures.float32Filterable ?
+                "rgba32float" : "rgba16float";
+            const layers = object.kind === "Cube" ? 6 : 1;
+            const stamp = object.depthGeneration + ":" + mode;
+            let copy = object.depthColor;
+            if (!copy || copy.source !== gpuTexture || copy.format !== format) {
+                if (copy) this.retire(copy.texture);
+                copy = object.depthColor = { source: gpuTexture, format, stamp: null, views: new Map(),
+                    texture: this.device.createTexture({ label: "GL depth texture as colour " + object.name,
+                        size: { width: object.gpuWidth, height: object.gpuHeight, depthOrArrayLayers: layers },
+                        mipLevelCount: object.gpuLevels, format,
+                        usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_TEXTURE_BINDING }) };
+            }
+            if (copy.stamp !== stamp) {
+                const pipeline = this.depthColorPipeline(format, mode);
+                if (!pipeline) return null;
+                this.endPass();
+                const encoder = this.ensureEncoder();
+                for (let level = 0; level < object.gpuLevels; ++level) {
+                    for (let layer = 0; layer < layers; ++layer) {
+                        const subresource = { dimension: "2d", baseMipLevel: level, mipLevelCount: 1,
+                            baseArrayLayer: layer, arrayLayerCount: 1 };
+                        const pass = encoder.beginRenderPass({ label: "GL depth texture as colour",
+                            colorAttachments: [{ view: copy.texture.createView(subresource),
+                                loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+                        pass.setPipeline(pipeline);
+                        pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
+                            entries: [{ binding: 0, resource: gpuTexture.createView({ ...subresource,
+                                aspect: "depth-only" }) }] }));
+                        pass.draw(3);
+                        pass.end();
+                    }
+                }
+                copy.stamp = stamp;
+            }
+            const kind = item.target === "Cube" || object.kind === "Cube" ? "cube" : "2d";
+            const base = clamp(object.sampler.baseLevel, 0, object.gpuLevels - 1);
+            const count = clamp(object.sampler.maxLevel - base + 1, 1, object.gpuLevels - base);
+            const key = kind + ":" + base + ":" + count;
+            if (!copy.views.has(key))
+                copy.views.set(key, copy.texture.createView({ dimension: kind, baseMipLevel: base, mipLevelCount: count }));
+            return copy.views.get(key);
+        },
+
+        depthColorPipeline(format, mode) {
+            this.depthColorPipelines = this.depthColorPipelines || new Map();
+            const key = format + "|" + mode;
+            let pipeline = this.depthColorPipelines.get(key);
+            if (pipeline) return pipeline;
+            // GL 2.1 section 3.8.14: the depth as LUMINANCE, INTENSITY or ALPHA
+            const value = mode === GL.INTENSITY ? "vec4<f32>(d)" : mode === GL.ALPHA ?
+                "vec4<f32>(0.0, 0.0, 0.0, d)" : "vec4<f32>(d, d, d, 1.0)";
+            const module = this.shaderModule(`
+@group(0) @binding(0) var depthTexture : texture_depth_2d;
+@vertex fn vs_main(@builtin(vertex_index) i : u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs_main(@builtin(position) p : vec4<f32>) -> @location(0) vec4<f32> {
+    let d = textureLoad(depthTexture, vec2<i32>(p.xy), 0);
+    return ${value};
+}`);
+            pipeline = this.gpuErrors.scoped("depth texture as colour",
+                () => this.device.createRenderPipeline({ label: "GL depth texture as colour", layout: "auto",
+                    vertex: { module, entryPoint: "vs_main" },
+                    fragment: { module, entryPoint: "fs_main", targets: [{ format }] },
+                    primitive: { topology: "triangle-list" } }), { key }).object;
+            this.depthColorPipelines.set(key, pipeline);
+            return pipeline;
+        },
+
+        /*
          * An incomplete or missing texture samples as opaque black, through a
          * view of the binding's dimension and sample type (review S1-2a: one
          * 2D colour view was bound to cube, 3D and depth bindings, which
@@ -8587,13 +8729,12 @@ ${fragmentCode}`;
         textureViewFor(object, item) {
             if (!object || !this.textureIsComplete(object)) return this.fallbackViewFor(item);
             const depth = /^depth/.test(object.gpuFormat);
-            if (depth !== !!item.shadow) {
-                // a depth texture through a sampler without comparison, or a
-                // colour one through a shadow sampler: WebGPU binds neither
-                // (review S1-2j); GL's results are undefined for the second
-                this.warnOnce("texture-sample-type", depth ? "a depth texture is sampled " +
-                    "without depth comparison, which is not implemented: it samples as black" :
-                    "a shadow sampler reads a colour texture", { format: object.gpuFormat });
+            if (depth && !item.shadow) return this.depthColorView(object, item) || this.fallbackViewFor(item);
+            if (!depth && item.shadow) {
+                // GL's results are undefined; WebGPU binds no colour texture
+                // to a comparison sampler
+                this.warnOnce("texture-sample-type", "a shadow sampler reads a colour texture",
+                    { format: object.gpuFormat });
                 return this.fallbackViewFor(item);
             }
             const gpuTexture = this.ensureTextureUploaded(object);
@@ -11037,6 +11178,17 @@ struct Params { value : vec4<f32>, }
      * vertex shader instead.
      */
     // depth24plus loaded into r32float, for glReadPixels (readRectangle)
+    const DEPTH_UPLOAD_WGSL = `
+@group(0) @binding(0) var depths : texture_2d<f32>;
+@group(0) @binding(1) var<uniform> origin : vec4<i32>;
+@vertex fn vs_main(@builtin(vertex_index) i : u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs_main(@builtin(position) p : vec4<f32>) -> @builtin(frag_depth) f32 {
+    return textureLoad(depths, vec2<i32>(p.xy) - origin.xy, 0).r;
+}`;
+
     const DEPTH_READ_WGSL = `
 @group(0) @binding(0) var depthTexture : texture_depth_2d;
 @group(0) @binding(1) var<uniform> origin : vec4<u32>;

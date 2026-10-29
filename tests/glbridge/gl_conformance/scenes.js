@@ -1031,6 +1031,25 @@ loose("lines_width1", "GL_LINES width 1 (baseline)", "GL 2.1 §3.4.1", s => {
     s.tiles.push({ label: "horizontal + vertical 1px lines", x: 2, y: 18, w: 60, h: 44 });
 });
 
+scene("tex_depth_as_colour", {
+    what: "a depth texture with TEXTURE_COMPARE_MODE NONE sampled as DEPTH_TEXTURE_MODE says: LUMINANCE, INTENSITY, ALPHA",
+    spec: "GL 2.1 §3.8.14 (texture comparison), table 3.15",
+}, s => {
+    s.ortho2d().op("Enable", "TEXTURE_2D").op("TexEnvi", "TEXTURE_ENV", "TEXTURE_ENV_MODE", "REPLACE");
+    s.op("GenTextures", [1]).op("BindTexture", "TEXTURE_2D", 1)
+        .op("TexImage2D", "TEXTURE_2D", 0, "DEPTH_COMPONENT", 2, 2, 0, "DEPTH_COMPONENT", "FLOAT",
+            { f32: [0.25, 0.5, 0.75, 1.0] })
+        .op("TexParameteri", "TEXTURE_2D", "TEXTURE_MIN_FILTER", "NEAREST")
+        .op("TexParameteri", "TEXTURE_2D", "TEXTURE_MAG_FILTER", "NEAREST");
+    s.op("Color4f", 1, 0, 1, 0.5);
+    ["LUMINANCE", "INTENSITY", "ALPHA"].forEach((mode, k) => {
+        s.op("TexParameteri", "TEXTURE_2D", "DEPTH_TEXTURE_MODE", mode);
+        const x = k * 21;
+        s.rect(x + 1, 2, x + 20, 62, i => [["TexCoord2f", [0, 1, 1, 0][i], [0, 0, 1, 1][i]]]);
+        s.tiles.push({ label: mode, x: x + 1, y: 2, w: 19, h: 60 });
+    });
+});
+
 scene("drawpixels_depth_stencil", {
     what: "DrawPixels and CopyPixels of DEPTH_COMPONENT (the raster colour, depth tested) and of STENCIL_INDEX",
     spec: "GL 2.1 §4.3.1 (DrawPixels), §4.3.3 (CopyPixels)",

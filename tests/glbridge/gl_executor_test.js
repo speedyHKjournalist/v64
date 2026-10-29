@@ -1345,16 +1345,30 @@ test("missing textures bind fallbacks of their binding's dimension and sample ty
         ["2d:depth32float", "3d:rgba8unorm", "cube:rgba8unorm"]);
 });
 
-test("a depth texture without comparison samples as black instead of losing the frame (review S1-2j)", () => {
+test("a depth texture without comparison is sampled through a colour copy (review S1-2j)", () => {
     const { executor, log } = newExecutor();
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)
         .names(GLFN.GEN_TEXTURES, [9]).call("BIND_TEXTURE", GL.TEXTURE_2D, 9)
         .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.DEPTH_TEXTURE_MODE, GL.INTENSITY)
         .texImage2D(GL.TEXTURE_2D, 0, GL.DEPTH_COMPONENT, 1, 1, GL.DEPTH_COMPONENT, GL.FLOAT, new Uint8Array(4))
         .call("ENABLE", GL.TEXTURE_2D);
     immediateTriangle(stream);
+    immediateTriangle(stream);
     run(executor, stream);
-    assert.strictEqual(log.draws.length, 1);
+    const copies = log.draws.filter(d => d.pipeline.descriptor.label === "GL depth texture as colour");
+    assert.strictEqual(copies.length, 1, "made once, for the unchanged depth");
+    assert.match(copies[0].pipeline.descriptor.fragment.module.code, /return vec4<f32>\(d\);/, "INTENSITY");
+    const draws = log.draws.filter(d => d.pipeline.descriptor.label === "GL pipeline");
+    assert.strictEqual(draws.length, 2);
+    const textures = log.bindGroups.filter(g => g.descriptor.layout.index === 2)
+        .flatMap(g => g.descriptor.entries.map(e => e.resource)).filter(r => r.texture);
+    assert.ok(textures.every(view => view.format === "rgba32float"), "the copy is bound");
+    assert.strictEqual(executor.fixedFunctionSignature(executor.currentVariant()).texture[0].format, "INTENSITY");
+    // a changed depth is copied again
+    run(executor, immediateTriangle(new GLStream().texSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1,
+        GL.DEPTH_COMPONENT, GL.FLOAT, new Uint8Array(new Float32Array([0.5]).buffer))));
+    assert.strictEqual(log.draws.filter(d => d.pipeline.descriptor.label === "GL depth texture as colour").length, 2);
 });
 
 // A framebuffer object with two colour textures, both draw buffers

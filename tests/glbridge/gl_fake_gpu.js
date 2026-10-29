@@ -177,6 +177,9 @@ class FakeDevice {
             writeTexture: (destination, data, layout, size) => {
                 const format = destination.texture &&
                     destination.texture.descriptor.format || "";
+                // (Chrome: "Cannot copy into the depth aspect")
+                if (/^depth(24plus|32float)/.test(format))
+                    this.rejectWith("writeTexture into the depth aspect of " + format);
                 if (/^bc\d-/.test(format)) {
                     if ((size.width & 3) || (size.height & 3))
                         throw new Error("compressed copies require whole 4x4 blocks");
