@@ -11,6 +11,7 @@
 
 "use strict";
 
+const { requireNaga } = require("./naga.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -18,16 +19,9 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { ddBlitShaderSource } = require("../../src/browser/glbridge/d3d9-webgpu/ddraw_ops.js");
 
-function findNaga() {
-    const probe = spawnSync("naga", ["--version"], { encoding: "utf8" });
-    return probe.status === 0 ? "naga" : null;
-}
 
-const naga = findNaga();
-if (!naga) {
-    console.log("SKIP: no `naga` binary (install with `cargo install naga-cli`)");
-    process.exit(0);
-}
+const naga = requireNaga("ddraw_blit_wgsl_validation_test");
+if (!naga) process.exit(0);
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ddraw-wgsl-"));
 let checked = 0;

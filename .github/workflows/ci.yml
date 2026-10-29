@@ -48,6 +48,19 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup component add rustfmt
 
+      # (naga: test-glbridge validates the WGSL the executors generate, and
+      # fails without it)
+      - name: Cache naga
+        id: naga
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/naga
+          key: naga-cli-30.0.0
+
+      - name: Install naga
+        if: steps.naga.outputs.cache-hit != 'true'
+        run: cargo install naga-cli --version 30.0.0 --locked
+
       # (nasm: the CPU tests' guest programs)
       - name: Install APT packages
         run: |

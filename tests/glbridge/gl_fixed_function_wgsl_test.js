@@ -10,6 +10,7 @@
 
 "use strict";
 
+const { requireNaga } = require("./naga.js");
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -17,15 +18,8 @@ const path = require("path");
 const { spawnSync, execFileSync } = require("child_process");
 const ff = require("../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js");
 
-function findNaga() {
-    if (process.env.GL_NAGA) return process.env.GL_NAGA;
-    if (spawnSync("naga", ["--version"], { encoding: "utf8" }).status === 0)
-        return "naga";
-    const cargo = path.join(os.homedir(), ".cargo", "bin", "naga");
-    return fs.existsSync(cargo) ? cargo : null;
-}
 
-const naga = findNaga();
+const naga = requireNaga("gl_fixed_function_wgsl_test");
 const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "glwg-ff-"));
 let passed = 0;
 const failures = [];

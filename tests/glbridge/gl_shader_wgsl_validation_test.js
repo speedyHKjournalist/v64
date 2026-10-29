@@ -20,6 +20,7 @@
 
 "use strict";
 
+const { requireNaga } = require("./naga.js");
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -27,20 +28,9 @@ const path = require("path");
 const { spawnSync, execFileSync } = require("child_process");
 const t = require("../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js");
 
-function findNaga() {
-    if (process.env.GL_NAGA) return process.env.GL_NAGA;
-    if (spawnSync("naga", ["--version"], { encoding: "utf8" }).status === 0)
-        return "naga";
-    const cargo = path.join(os.homedir(), ".cargo", "bin", "naga");
-    return fs.existsSync(cargo) ? cargo : null;
-}
 
-const naga = findNaga();
-if (!naga) {
-    console.log("SKIP: no `naga` binary (install with `cargo install naga-cli` " +
-        "or set GL_NAGA) -- WGSL validation not run");
-    process.exit(0);
-}
+const naga = requireNaga("gl_shader_wgsl_validation_test");
+if (!naga) process.exit(0);
 
 const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "glwg-wgsl-"));
 let passed = 0;

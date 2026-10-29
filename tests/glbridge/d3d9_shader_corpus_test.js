@@ -27,6 +27,7 @@
 
 "use strict";
 
+const { findNaga } = require("./naga.js");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -46,11 +47,6 @@ if (!fs.existsSync(directory)) {
     process.exit(1);
 }
 
-function findNaga() {
-    if (process.env.D9_NAGA) return process.env.D9_NAGA;
-    const probe = spawnSync("naga", ["--version"], { encoding: "utf8" });
-    return probe.status === 0 ? "naga" : null;
-}
 const naga = findNaga();
 
 const files = fs.readdirSync(directory)

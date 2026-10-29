@@ -18,6 +18,7 @@
 
 "use strict";
 
+const { requireNaga } = require("./naga.js");
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -25,18 +26,9 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 const pipeline = require("../../src/browser/glbridge/d3d9-webgpu/d3d9_shader_pipeline.js");
 
-function findNaga() {
-    if (process.env.D9_NAGA) return process.env.D9_NAGA;
-    const probe = spawnSync("naga", ["--version"], { encoding: "utf8" });
-    return probe.status === 0 ? "naga" : null;
-}
 
-const naga = findNaga();
-if (!naga) {
-    console.log("SKIP: no `naga` binary (install with `cargo install naga-cli` " +
-        "or set D9_NAGA) -- WGSL validation not run");
-    process.exit(0);
-}
+const naga = requireNaga("d3d9_shader_wgsl_validation_test");
+if (!naga) process.exit(0);
 
 // ---- the same little assembler the structural test uses ----
 
