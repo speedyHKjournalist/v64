@@ -132,7 +132,6 @@
     const OP_DESTROY_RESOURCE = 0x103;
     const OP_STRETCH_RECT = 8;
     const OP_COLOR_FILL = 9;
-    const OP_UPDATE_SURFACE = 10;
     const OP_GUEST_LOG = 11;
     const OP_READBACK_SURFACE = 12;
     const OP_SESSION_END = 13;
@@ -3686,13 +3685,16 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                     }
                 } catch (error) {
                     if (error instanceof D9WGStreamError) throw error;
+                    // A host bug: this command is lost, the rest of the batch
+                    // is not. Each distinct failure is reported (once per
+                    // opcode hid the second kind of error behind the first),
+                    // and kept for tests in strict mode.
                     ++this.stats.commandsFailed;
-                    this.warnOnce("command-failed-" + opcode,
+                    if (this.options.strict) this.hostErrors.push(error);
+                    const message = String(error && error.message ? error.message : error);
+                    this.warnOnce("command-failed-" + opcode + "-" + message,
                         "a command threw and was skipped; the rest of the " +
-                        "batch still executes, so this draw or state change " +
-                        "is lost but nothing behind it is", {
-                            opcode, message: String(error && error.message
-                                ? error.message : error) });
+                        "batch still executes", { opcode, message, error });
                 }
                 // Any command other than a draw may have moved something the
                 // constant block is built from. Draws are excluded because they
@@ -3730,10 +3732,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         dispatchCommand(opcode, bytes, view, offset, length, metadata) {
             const handler = this.handlers[opcode];
             if (!handler) {
-                // Per plan section 6.8: an unrecognized opcode is skipped by
-                // its size (already advanced by the caller), never treated
-                // as "executed" -- it simply never produces GPU state.
+                // Skipped by its size (already advanced by the caller), and
+                // reported: a guest DLL newer than this host, or protocol drift
                 ++this.stats.unsupportedCommands;
+                this.protocolViolation("opcode-" + opcode, "unknown D9WG opcode 0x" +
+                    opcode.toString(16) + " skipped", { opcode });
                 return;
             }
             return handler.call(this, bytes, view, offset, length, metadata);
@@ -3968,7 +3971,6 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 [OP_CREATE_TEXTURE_CUBE]: this.onCreateTextureCube,
                 [OP_CREATE_TEXTURE_VOLUME]: this.onCreateTextureVolume,
                 [OP_UPDATE_TEXTURE]: this.onUpdateTexture,
-                [OP_UPDATE_SURFACE]: this.onUpdateSurface,
                 [OP_READBACK_SURFACE]: this.onReadbackSurface,
                 [OP_SESSION_END]: this.onSessionEnd,
                 [OP_SET_SCISSOR_RECT]: this.onSetScissorRect,
@@ -4033,6 +4035,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             if (D3D9WebGPUExecutor.extensionHandlers)
                 Object.assign(this._handlers,
                     D3D9WebGPUExecutor.extensionHandlers);
+            // A name that is not a method (UPDATE_SURFACE pointed at one
+            // nobody wrote) used to make its opcode silently "unsupported"
+            for (const [opcode, handler] of Object.entries(this._handlers))
+                if (typeof handler !== "function")
+                    throw new Error("D9WG handler for opcode " + opcode + " is not a function");
             return this._handlers;
         }
 

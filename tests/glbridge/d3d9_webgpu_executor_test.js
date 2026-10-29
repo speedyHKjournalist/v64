@@ -4441,6 +4441,20 @@ await test("a framing error still fails the whole batch", async () => {
     assert.equal(executor.stats.commandsFailed, 0);
 });
 
+await test("an unknown opcode is skipped, counted and reported, not silent", async () => {
+    const { executor } = makeExecutor({ strict: true });
+    await executor.submit(buildBatch([
+        command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
+        command(0x7ff, u32(DEVICE)),
+        command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 36)),
+    ]));
+    await executor.idle();
+    assert.equal(executor.stats.unsupportedCommands, 1);
+    assert.equal(executor.stats.protocolViolations, 1);
+    assert.match(executor.hostErrors[0].message, /unknown D9WG opcode 0x7ff/);
+    assert.ok(executor.resources.has(0x201), "the commands behind it still run");
+});
+
 await test("Reset keeps the session's resources under their handles", async () => {
     // The guest no longer creates every buffer, texture and shader again under
     // new handles after a Reset (review S1-9a: that leaked all of them)

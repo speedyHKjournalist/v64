@@ -678,6 +678,19 @@ game.exe
 
 ### 阶段 0：止血，让错误可见（约 1–2 周）
 
+> **状态（2026-10-29，分支 `refactor`）：完成，客体部分尚未在 XP 中运行。**
+> - 宿主（v86）：
+>   - `a77b4c3a`：错误捕获、失败不粘滞、D8WG 退役；
+>   - `d579d206`：S1-5a/b/c、S1-7、S2-1、S2-7、S2-8、S2-9、S2-17；
+>   - `a79f7e23`：MSAA（S1-6、S2-24）；
+>   - `fe54bbe6`：arena 所有者释放即结束会话、Reset 保留资源。
+> - 客体（retro-gaming-site）：`fe324b4`，含 S1-2、S1-3、S1-9a/b、S1-10、S2-28、S2-29。
+> - 验收：
+>   - 真 GPU 一致性页 `tests/glbridge/d3d9_conformance_browser_test.html`，含已知失败表；
+>   - Tint 页 `d3d9_shader_tint_browser_test.html`。
+>   - 上述两页的每个新用例都在上一个提交上失败。
+> - 偏差：已登记在 `d3d9proxy/README.md` 的 “Deviations from D3D9”。
+
 - **目标：** 所有 S1 不再发生；任何 WebGPU 错误都能被看到、被计数、被测试断言。
 - **改动：**
   - **错误捕获：**
