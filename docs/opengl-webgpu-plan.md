@@ -177,6 +177,15 @@ game.exe
 > - 测试：v86 `gl_protocol_test.js`；站点 `generated_headers_test.js`，`gl_protocol_consistency_test.js` 改为对照 schema。
 > - 其余 50 个手写记录的布局随影子接手它们时补进 schema。
 
+> **C2/C3 状态（2026-10-29）：进行中。**
+> - C2：`v86gl.sys` 一次只允许一个进程映射 arena，所以“会话”就是一次 arena 注册；进程退出或被杀时内核关句柄，阶段 0 的 owner release 结束它的全部会话。影子在 owner release 和机器重置（页面发 `machine_reset`）时清空上下文；驱动超时后的队列重置不清空（进程还在）。
+> - C3 第一步：`gl-webgpu/gl_shadow.js` 已接入 `v86gl_device.js`。
+>   - 设备在 GL 批处理被复制之前，在客体内存里运行影子；CPU worker 的设备脚本（`build/glbridge/v86gl-device.js`）带上它。
+>   - 影子已经回答能力查询：`QUERY_INTEGER` 的上限和 host-capability 位、`QUERY_GL_STRING` 的厂商/版本/扩展串。能力来自 `gl_caps.js`：执行器和影子共用；页面在适配器就绪后发 `capabilities`；存进设备快照（版本 3），恢复时以快照里的为准。
+>   - 过渡规则：影子没回答的查询保持 PENDING，执行器照旧回答（只在本地模式能到达客体）；影子回答过的，执行器跳过。
+>   - `gl_sync_answers_test.js` 按查询种类登记：worker 模式下能力查询已与页面模式一致；`glGetError` 仍是已知失败，要等影子校验所有命令。
+> - 下一步依次：GLSL（C4，glslang 桌面入口）、FBO 完整性、ARB 程序、查询对象与 Finish 的异步等待、全部命令的校验（之后 `QUERY_ERROR` 才能搬过来）。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

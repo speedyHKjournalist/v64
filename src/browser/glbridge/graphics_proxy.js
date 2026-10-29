@@ -209,6 +209,14 @@
             channel.post({ type: "available", value });
         };
 
+        // What the GL executor's adapter backs, for the device's GL shadow
+        // (gl_caps.js); sent once the adapter is up
+        const sendCapabilities = () => {
+            const gl = bridge && !bridge.failed && bridge.glExecutor;
+            if (channel && gl && typeof gl.capabilities === "function")
+                channel.post({ type: "capabilities", value: gl.capabilities() });
+        };
+
         // The arena's owner is gone: a journaled pseudo-batch ends every
         // session it submitted, behind its last batch
         const onReleased = () => {
@@ -300,7 +308,10 @@
                     else if (message.type === "released") onReleased();
                 });
                 setAvailable(true);
-                return bridge.ready.then(() => setAvailable(!bridge.failed));
+                return bridge.ready.then(() => {
+                    sendCapabilities();
+                    setAvailable(!bridge.failed);
+                });
             },
             screen_changed() {
                 bridge.screenChanged();
@@ -330,7 +341,9 @@
             },
             async reset() {
                 ++epoch;
+                if (channel) channel.post({ type: "machine_reset" });
                 await bridge.reset();
+                sendCapabilities();
                 setAvailable(!bridge.failed);
             },
             async destroy() {

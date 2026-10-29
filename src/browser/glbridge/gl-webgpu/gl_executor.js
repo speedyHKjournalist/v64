@@ -33,6 +33,7 @@
     const nodeRequire = (typeof require === "function" &&
         typeof module !== "undefined") ? require : null;
     const protocol = nodeRequire ? nodeRequire("./gl_protocol.js") : global.GLProtocol;
+    const glCaps = nodeRequire ? nodeRequire("./gl_caps.js") : global.GLCaps;
     const constants = nodeRequire ? nodeRequire("./gl_constants.js") :
         global.GLWGConstants;
     const stateLayout = nodeRequire ? nodeRequire("./gl_state_layout.js") :
@@ -60,10 +61,10 @@
 
     const EXECUTOR_REVISION = 1;
 
-    const MAX_TEXTURE_UNITS = 8;
-    const MAX_TEXTURE_COORDS = 8;
-    const MAX_LIGHTS = 8;
-    const MAX_CLIP_PLANES = 6;
+    const MAX_TEXTURE_UNITS = glCaps.LIMITS.MAX_TEXTURE_UNITS;
+    const MAX_TEXTURE_COORDS = glCaps.LIMITS.MAX_TEXTURE_COORDS;
+    const MAX_LIGHTS = glCaps.LIMITS.MAX_LIGHTS;
+    const MAX_CLIP_PLANES = glCaps.LIMITS.MAX_CLIP_PLANES;
 
     // glPushAttrib/glPushClientAttrib masks.  Keep these local to the executor:
     // they are state-group selectors rather than wire opcodes, and spelling the
@@ -81,10 +82,10 @@
         SCISSOR: 0x00080000, MULTISAMPLE: 0x20000000,
     };
     const CLIENT_ATTRIB = { PIXEL_STORE: 0x00000001, VERTEX_ARRAY: 0x00000002 };
-    const MAX_VERTEX_ATTRIBS = 16;
-    const MAX_DRAW_BUFFERS = 8;
-    const MODELVIEW_STACK_DEPTH = 32;
-    const OTHER_STACK_DEPTH = 4;
+    const MAX_VERTEX_ATTRIBS = glCaps.LIMITS.MAX_VERTEX_ATTRIBS;
+    const MAX_DRAW_BUFFERS = glCaps.LIMITS.MAX_DRAW_BUFFERS;
+    const MODELVIEW_STACK_DEPTH = glCaps.LIMITS.MODELVIEW_STACK_DEPTH;
+    const OTHER_STACK_DEPTH = glCaps.LIMITS.OTHER_STACK_DEPTH;
     /* A guest process can flush object-deletion records after its final
      * DESTROY_CONTEXT record. destroyContext() has already retired every
      * object in the orphaned share group, so replaying those deletes has no
@@ -3452,8 +3453,10 @@
          *
          * These are answered in place, before the record's handler returns,
          * because the guest is blocked inside DeviceIoControl waiting for the
-         * status word. That is only possible because the authoritative GL
-         * state lives here: none of them touches the GPU (plan 4.8).
+         * status word. Across the CPU worker boundary these bytes are a copy
+         * and the answer never reaches the guest (review S1-1): they move to
+         * the CPU side's shadow (gl_shadow.js) one kind at a time, and a
+         * record the shadow answered is no longer PENDING here.
          */
 
         define("QUERY_ERROR", function(a, bytes, view, offset, size) {
@@ -3467,6 +3470,8 @@
 
         define("QUERY_INTEGER", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("query-integer record is short");
+            // answered on the CPU side already (gl_shadow.js)
+            if (view.getUint32(offset + protocol.F.QUERY_INTEGER.status, true) !== SYNC_STATUS_PENDING) return;
             const pname = view.getUint32(offset + protocol.F.QUERY_INTEGER.pname, true);
             const value = this.queryInteger(pname);
             if (value === null) {
@@ -3479,6 +3484,8 @@
 
         define("QUERY_GL_STRING", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("query-string record is short");
+            // answered on the CPU side already (gl_shadow.js)
+            if (view.getUint32(offset + protocol.F.QUERY_GL_STRING.status, true) !== SYNC_STATUS_PENDING) return;
             const pname = view.getUint32(offset + protocol.F.QUERY_GL_STRING.name, true);
             const capacity = view.getUint32(offset + protocol.F.QUERY_GL_STRING.data_size, true);
             const text = this.queryString(pname);
@@ -9757,54 +9764,17 @@ struct Params { value : vec4<f32>, }
      */
     Object.assign(GLWebGPUExecutor.prototype, {
 
-        extensionString() {
-            const list = [
-                "GL_ARB_multitexture", "GL_ARB_texture_env_add",
-                "GL_ARB_texture_env_combine", "GL_ARB_texture_env_dot3",
-                "GL_ARB_texture_env_crossbar", "GL_ARB_texture_cube_map",
-                "GL_ARB_texture_border_clamp", "GL_ARB_texture_mirrored_repeat",
-                "GL_ARB_texture_compression", "GL_SGI_color_matrix",
-                "GL_ARB_texture_non_power_of_two", "GL_ARB_depth_texture",
-                "GL_ARB_shadow", "GL_ARB_point_parameters", "GL_ARB_point_sprite",
-                "GL_ARB_transpose_matrix", "GL_ARB_window_pos",
-                "GL_ARB_vertex_buffer_object", "GL_ARB_occlusion_query",
-                "GL_ARB_multisample", "GL_ARB_shader_objects",
-                "GL_ARB_vertex_shader", "GL_ARB_fragment_shader",
-                "GL_ARB_shading_language_100", "GL_ARB_draw_buffers",
-                "GL_EXT_texture3D", "GL_EXT_texture_lod_bias",
-                "GL_EXT_texture_edge_clamp", "GL_EXT_blend_color",
-                "GL_EXT_blend_minmax", "GL_EXT_blend_subtract",
-                "GL_EXT_blend_func_separate", "GL_EXT_blend_equation_separate",
-                "GL_EXT_stencil_wrap", "GL_EXT_stencil_two_side",
-                "GL_EXT_secondary_color", "GL_EXT_fog_coord",
-                "GL_EXT_packed_pixels", "GL_EXT_rescale_normal",
-                "GL_EXT_separate_specular_color", "GL_EXT_bgra",
-                "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_blit",
-                "GL_EXT_paletted_texture", "GL_EXT_generate_mipmap",
-                "GL_SGIS_generate_mipmap", "GL_SGIS_texture_edge_clamp",
-                "GL_SGIS_texture_lod", "GL_NV_blend_square",
-            ];
-            // Only advertised when the adapter really has the BC formats: the
-            // CPU decode path keeps the picture right, but a guest that sees
-            // S3TC will hand us compressed data forever, and saying so honestly
-            // lets it choose.
-            if (this.deviceFeatures.bc)
-                list.push("GL_EXT_texture_compression_s3tc");
-            if (this.deviceFeatures.float32Filterable)
-                list.push("GL_ARB_texture_float", "GL_ARB_half_float_pixel");
-            if (this.deviceFeatures.depthClipControl)
-                list.push("GL_ARB_depth_clamp");
-            list.push("GL_EXT_texture_filter_anisotropic");
-            return list.join(" ");
+        // What the adapter backs, as gl_caps.js answers from it (the shadow
+        // is sent the same object)
+        capabilities() {
+            return glCaps.capabilities(this.limits, this.deviceFeatures);
         },
 
+
         queryString(pname) {
+            const capability = glCaps.string(this.capabilities(), pname);
+            if (capability !== undefined) return capability;
             switch (pname) {
-            case GL.VENDOR: return "Anthropic v86gl";
-            case GL.RENDERER: return "v86 WebGPU bridge";
-            case GL.VERSION: return "2.1 (v86gl/WebGPU)";
-            case GL.SHADING_LANGUAGE_VERSION: return "1.20";
-            case GL.EXTENSIONS: return this.extensionString();
             case GL.PROGRAM_ERROR_STRING_ARB:
                 // Empty after a successful ProgramString, which is what the
                 // extension specifies -- not null, which would leave the guest
@@ -9815,57 +9785,10 @@ struct Params { value : vec4<f32>, }
         },
 
         queryInteger(pname) {
-            const limits = this.limits || {};
+            const capability = glCaps.integer(this.capabilities(), pname);
+            if (capability !== undefined) return capability;
             const s = this.current;
             switch (pname) {
-            case protocol.C.V86GL_QUERY_HOST_CAPABILITIES:
-                return protocol.C.V86GL_HOST_CAP_WEBGL2 | protocol.C.V86GL_HOST_CAP_COLOR_BUFFER_FLOAT |
-                    (this.deviceFeatures.float32Filterable ? protocol.C.V86GL_HOST_CAP_TEXTURE_FLOAT_LINEAR : 0) |
-                    protocol.C.V86GL_HOST_CAP_ANISOTROPY;
-            case GL.MAX_TEXTURE_SIZE:
-                return Math.min(16384, limits.maxTextureDimension2D || 8192);
-            case GL.MAX_3D_TEXTURE_SIZE:
-                return Math.min(2048, limits.maxTextureDimension3D || 2048);
-            case GL.MAX_CUBE_MAP_TEXTURE_SIZE:
-                return Math.min(16384, limits.maxTextureDimension2D || 8192);
-            case GL.MAX_TEXTURE_UNITS: return MAX_TEXTURE_UNITS;
-            case GL.MAX_TEXTURE_COORDS: return MAX_TEXTURE_COORDS;
-            case GL.MAX_TEXTURE_IMAGE_UNITS: return 16;
-            case GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS: return 16;
-            case GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS: return 24;
-            case GL.MAX_VERTEX_ATTRIBS: return MAX_VERTEX_ATTRIBS;
-            case GL.MAX_VARYING_FLOATS:
-                return translator.MAX_INTER_STAGE_SLOTS * 4;
-            case GL.MAX_VERTEX_UNIFORM_COMPONENTS: return 1024;
-            case GL.MAX_FRAGMENT_UNIFORM_COMPONENTS: return 1024;
-            case GL.MAX_DRAW_BUFFERS:
-                return Math.min(MAX_DRAW_BUFFERS, limits.maxColorAttachments || 8);
-            case GL.MAX_COLOR_ATTACHMENTS:
-                return Math.min(MAX_DRAW_BUFFERS, limits.maxColorAttachments || 8);
-            case GL.MAX_RENDERBUFFER_SIZE:
-                return Math.min(16384, limits.maxTextureDimension2D || 8192);
-            case GL.MAX_LIGHTS: return MAX_LIGHTS;
-            case GL.MAX_CLIP_PLANES: return MAX_CLIP_PLANES;
-            case GL.MAX_MODELVIEW_STACK_DEPTH: return MODELVIEW_STACK_DEPTH;
-            case GL.MAX_PROJECTION_STACK_DEPTH: return OTHER_STACK_DEPTH;
-            case GL.MAX_TEXTURE_STACK_DEPTH: return OTHER_STACK_DEPTH;
-            case GL.MAX_TEXTURE_MAX_ANISOTROPY_EXT: return 16;
-            case GL.MAX_ELEMENTS_VERTICES: return 65536;
-            case GL.MAX_ELEMENTS_INDICES: return 65536;
-            case GL.SAMPLE_BUFFERS: return 0;
-            // GL_SAMPLES is zero when the selected framebuffer has no
-            // multisample buffer; one is the raster sample count, not the GL
-            // query value for this pixel format.
-            case GL.SAMPLES: return 0;
-            case GL.SUBPIXEL_BITS: return 8;
-            case GL.RED_BITS: case GL.GREEN_BITS:
-            case GL.BLUE_BITS: case GL.ALPHA_BITS: return 8;
-            case GL.DEPTH_BITS: return 24;
-            case GL.STENCIL_BITS: return 8;
-            case GL.MAX_VIEWPORT_DIMS:
-                return Math.min(16384, limits.maxTextureDimension2D || 8192);
-            case GL.NUM_COMPRESSED_TEXTURE_FORMATS:
-                return this.deviceFeatures.bc ? 4 : 0;
             case GL.PROGRAM_ERROR_POSITION_ARB:
                 // This is the glGetIntegerv spelling, which is the one the
                 // extension actually defines and the one the guest uses. It

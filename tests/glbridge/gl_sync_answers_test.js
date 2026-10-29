@@ -6,12 +6,15 @@
 // writes its answers into IS guest memory, and the CPU worker's (the site's
 // default), where the batch crosses to the renderer as a copy.
 //
-// The worker mode loses every answer today (docs/opengl-webgpu-review.md
-// S1-1; plan stage C moves the answers to the CPU side): it is a known
-// failure here, and this test fails once it passes, to be updated.
+// The worker mode loses the answers the executor writes (docs/opengl-webgpu-
+// review.md S1-1). Plan stage C moves them to the CPU side's shadow
+// (gl_shadow.js), which the device runs on the guest's memory before the
+// batch is copied, one kind at a time: the kinds it does not answer yet are
+// known failures here, and this test fails once one passes, to be updated.
 "use strict";
 
 const assert = require("node:assert/strict");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
 require("../../src/browser/glbridge/v86_network_bridge.js");
 const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 const { createV86GLDevice } = require("../../src/browser/glbridge/v86gl_device.js");
@@ -20,7 +23,8 @@ const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_ex
 const { createFakeHost } = require("./gl_fake_gpu.js");
 const { GLStream } = require("./gl_stream_builder.js");
 
-const KNOWN_FAILURES = { worker: "S1-1: the executor answers into a copy of the batch" };
+// mode -> query kind -> why it is not answered there yet
+const KNOWN_FAILURES = { worker: { error: "S1-1: glGetError needs the shadow to validate every command (C3)" } };
 
 const ARENA = 0x100000, ARENA_BYTES = 16 * 1024 * 1024, HEADER = 32;
 const SYNC_STATUS_OK = 1;
@@ -65,14 +69,19 @@ async function guestAnswers(remote) {
         screen: { canvas: {}, set_backend() {}, fallback() {}, is_graphical: () => true } });
 
     assert.equal(await request([1, ARENA, 0, ARENA_BYTES, 0, 0]), 0, "the arena registers");
-    // one batch: a context, then glGetError and glGetString(GL_VENDOR)
+    // one batch: a context, then glGetError, glGetString(GL_VENDOR) and two
+    // glGetIntegerv, a limit and the host-capability bits
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64);
     // (each record: a 4-byte header, then the payload; the status word is
-    // the payload's first for glGetError, its second for glGetString)
+    // the payload's first for glGetError, its second for the others)
     const errorAt = stream.length + 4;
     stream.queryError();
     const stringAt = stream.length + 4 + 4;
     stream.queryString(0x1F00, 64);
+    const limitAt = stream.length + 4 + 4;
+    stream.queryInteger(0x0D33);
+    const capsAt = stream.length + 4 + 4;
+    stream.queryInteger(0x76380001);
     const bytes = stream.bytes();
     const header = new DataView(memory.buffer, ARENA, HEADER);
     header.setUint32(0, 0x324C4756, true);
@@ -84,25 +93,41 @@ async function guestAnswers(remote) {
     assert.equal(await request([2, 0, 0, HEADER + bytes.byteLength, 0, 0]), 0, "the batch is taken");
     await plugin.idle();
     const view = new DataView(memory.buffer, ARENA + HEADER);
-    return { error: view.getUint32(errorAt, true), string: view.getUint32(stringAt, true) };
+    const answer = (at, value) => view.getUint32(at, true) === SYNC_STATUS_OK ? value() : "status " + view.getUint32(at, true);
+    return {
+        error: answer(errorAt, () => view.getUint32(errorAt + 4, true)),
+        string: answer(stringAt, () => String.fromCharCode(...new Uint8Array(memory.buffer, ARENA + HEADER + stringAt + 12,
+            view.getUint32(stringAt + 4, true) - 1))),
+        limit: answer(limitAt, () => view.getUint32(limitAt + 4, true)),
+        caps: answer(capsAt, () => view.getUint32(capsAt + 4, true)),
+    };
 }
 
 (async () => {
     const failures = [];
+    const results = {};
     for (const [mode, remote] of [["page", false], ["worker", true]]) {
-        const answers = await guestAnswers(remote);
-        const answered = answers.error === SYNC_STATUS_OK && answers.string === SYNC_STATUS_OK;
-        if (KNOWN_FAILURES[mode]) {
-            if (answered) failures.push(mode + " answers now: delete its known failure (" + KNOWN_FAILURES[mode] + ")");
-            else console.log("known " + mode + ": " + KNOWN_FAILURES[mode]);
-        } else if (!answered) {
-            failures.push(mode + ": the guest read status " + JSON.stringify(answers));
+        const answers = results[mode] = await guestAnswers(remote);
+        for (const [kind, value] of Object.entries(answers)) {
+            const answered = !(typeof value === "string" && value.startsWith("status "));
+            const known = (KNOWN_FAILURES[mode] || {})[kind];
+            if (known) {
+                if (answered) failures.push(mode + " answers " + kind + " now: delete its known failure (" + known + ")");
+                else console.log("known " + mode + " " + kind + ": " + known);
+            } else if (!answered) {
+                failures.push(mode + ": the guest read " + kind + " " + value);
+            }
         }
     }
+    // the same answers in both modes
+    for (const kind of ["string", "limit", "caps"])
+        if (results.page[kind] !== results.worker[kind])
+            failures.push(kind + ": page " + JSON.stringify(results.page[kind]) + ", worker " + JSON.stringify(results.worker[kind]));
+    if (results.page.string !== "Anthropic v86gl") failures.push("GL_VENDOR is " + JSON.stringify(results.page.string));
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;
         return;
     }
-    console.log("gl_sync_answers_test: the page mode answers the guest; the worker mode's loss is known (passed)");
+    console.log("gl_sync_answers_test: both modes answer the capability queries alike; the worker mode's other losses are known (passed)");
 })();

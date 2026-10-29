@@ -282,10 +282,10 @@ test("glGetIntegerv is answered without touching the GPU", () => {
 test("the extension string only advertises what the adapter backs", () => {
     const { executor } = newExecutor();
     run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64));
-    const withBC = executor.extensionString();
+    const withBC = executor.queryString(GL.EXTENSIONS);
     assert.ok(withBC.indexOf("GL_EXT_texture_compression_s3tc") >= 0);
     executor.deviceFeatures = { bc: false, float32Filterable: false };
-    const withoutBC = executor.extensionString();
+    const withoutBC = executor.queryString(GL.EXTENSIONS);
     assert.ok(withoutBC.indexOf("GL_EXT_texture_compression_s3tc") < 0,
         "S3TC is not advertised when the adapter has no BC formats");
     assert.ok(withoutBC.indexOf("GL_ARB_multitexture") >= 0);

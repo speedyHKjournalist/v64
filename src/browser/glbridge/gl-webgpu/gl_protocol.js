@@ -236,16 +236,21 @@
         ["BLIT_FRAMEBUFFER", 217, "BlitFramebuffer", "iiiiiiiiuu"],
     ];
 
-    // Control records, outside the GLFN numbering
-    const CTRL = {
-        MAKE_CURRENT: 0xFFF0,
-        RELEASE_CURRENT: 0xFFF1,
-        DESTROY_CONTEXT: 0xFFF2,
+    // Control records, outside the GLFN numbering: [name, code, layout]
+    const CONTROL = [
+        // the context the commands that follow are for, and its window; an
+        // older guest's payload may stop short (the fields after read as 0)
+        ["MAKE_CURRENT", 0xFFF0, "u:hwnd i:x i:y u:width u:height u:context_id u:share_group"],
+        ["RELEASE_CURRENT", 0xFFF1],
+        // one context; with no payload, every context (an older guest's
+        // process teardown)
+        ["DESTROY_CONTEXT", 0xFFF2, "u:context_id"],
         // What the guest's window manager says about the drawing window: shown,
         // minimised, covered by other windows entirely or in part (the parts
         // that show follow). See windowState() in gl_executor.js.
-        WINDOW_STATE: 0xFFF3,
-    };
+        ["WINDOW_STATE", 0xFFF3],
+    ];
+    const CTRL = Object.fromEntries(CONTROL.map(([name, code]) => [name, code]));
 
     // The constants of the protocol, as the guest header defines them
     // ([name, value, comment]; a string value is written as it is)
@@ -308,29 +313,31 @@
     const RECORDS = {};
     // name -> { field: offset }
     const F = {};
+    function describe(name, layout) {
+        if (RECORDS[name]) throw new Error("GL protocol: " + name + " is described twice");
+        const fields = {};
+        let offset = 0;
+        for (const word of layout.split(" ")) {
+            const [type, spec] = word.split(":");
+            const [, field, count] = spec.match(/^(\w+)(?:\[(\d+)\])?$/);
+            const n = count ? +count : 1;
+            // natural alignment, as a C compiler lays the struct out
+            offset = offset + BYTES[type] - 1 & ~(BYTES[type] - 1);
+            fields[field] = { type, offset, count: n, bytes: BYTES[type] * n };
+            offset += BYTES[type] * n;
+        }
+        RECORDS[name] = { size: offset, fields };
+        F[name] = Object.fromEntries(Object.entries(fields).map(([field, f]) => [field, f.offset]));
+    }
     for (const [name, opcode, glName, layout] of OPCODES) {
         if (GLFN[name] !== undefined || NAME_BY_OPCODE[opcode] !== undefined)
             throw new Error("GL protocol: " + name + " or opcode " + opcode + " is listed twice");
         GLFN[name] = opcode;
         NAME_BY_OPCODE[opcode] = name;
-        if (glName) {
-            SIGNATURES[name] = [glName, layout];
-        } else if (layout) {
-            const fields = {};
-            let offset = 0;
-            for (const word of layout.split(" ")) {
-                const [type, spec] = word.split(":");
-                const [, field, count] = spec.match(/^(\w+)(?:\[(\d+)\])?$/);
-                const n = count ? +count : 1;
-                // natural alignment, as a C compiler lays the struct out
-                offset = offset + BYTES[type] - 1 & ~(BYTES[type] - 1);
-                fields[field] = { type, offset, count: n, bytes: BYTES[type] * n };
-                offset += BYTES[type] * n;
-            }
-            RECORDS[name] = { size: offset, fields };
-            F[name] = Object.fromEntries(Object.entries(fields).map(([field, f]) => [field, f.offset]));
-        }
+        if (glName) SIGNATURES[name] = [glName, layout];
+        else if (layout) describe(name, layout);
     }
+    for (const [name, , layout] of CONTROL) if (layout) describe(name, layout);
 
     function payloadBytes(types) {
         let n = 0;
@@ -399,7 +406,7 @@
         return bytes;
     }
 
-    const api = { OPCODES, CTRL, DEFINES, C, BYTES, C_TYPES, GLFN, NAME_BY_OPCODE, SIGNATURES, RECORDS, F,
+    const api = { OPCODES, CONTROL, CTRL, DEFINES, C, BYTES, C_TYPES, GLFN, NAME_BY_OPCODE, SIGNATURES, RECORDS, F,
         payloadBytes, decodeArgs, decodeRecord, encodeRecord, encodeArgs };
     global.GLProtocol = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;

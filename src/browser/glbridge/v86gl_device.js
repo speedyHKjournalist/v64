@@ -16,6 +16,14 @@
 //   write      { generation, offset, bytes }  readback into the arena
 //   done       { id }                         the batch no longer needs its capacity
 //   available  { value }                      whether a renderer takes batches
+//   capabilities { value }                    what the renderer's adapter backs
+//                                             (gl_caps.js), for the GL shadow
+//   machine_reset {}                          the guest was reset: no GL context
+//                                             outlives it
+//
+// The GL shadow (gl-webgpu/gl_shadow.js, when loaded) reads each GL batch in
+// guest memory before it is posted and answers the guest's synchronous
+// queries there.
 
 (function(global) {
     "use strict";
@@ -23,7 +31,7 @@
     const MAGIC = 0x324C4756;
     // v86gl_pci.js's snapshots (state[92] before virtio_devices)
     const LEGACY_STATE_MAGIC = 0x56514731;
-    const STATE_VERSION = 2;
+    const STATE_VERSION = 3;
     const ARENA_BYTES = 16 * 1024 * 1024;
     const RESPONSE_AREA_BYTES = 4 * 1024 * 1024;
     const HEADER_BYTES = 32;
@@ -50,6 +58,7 @@
      */
     function createV86GLDevice(channel) {
         const remote = !!channel.remote;
+        const shadow = global.V86GLShadow ? new global.V86GLShadow.GLShadow() : null;
         let dev = null;
         let arenaAddress = 0;
         let arenaBytes = 0;
@@ -101,6 +110,13 @@
                     processQueue();
                     break;
                 }
+                case "capabilities":
+                    // (a restored snapshot's stand: the guest was told those)
+                    if (shadow && !shadow.capabilities) shadow.setCapabilities(message.value);
+                    break;
+                case "machine_reset":
+                    if (shadow) shadow.reset();
+                    break;
                 case "available":
                     hostAvailable = !!message.value;
                     // A renderer that is gone acknowledges nothing: answer the
@@ -180,6 +196,7 @@
                 // submitted is over (review S1-10, GL S1-4)
                 if (arenaBytes) channel.post({ type: "released" });
                 releaseArena();
+                if (shadow) shadow.reset();
                 return OK;
             }
             if (op !== SUBMIT || (flags & ~1)) return INVALID;
@@ -198,6 +215,12 @@
                     commandBytes !== length - HEADER_BYTES || (header.getUint32(8, true) & ~1))
                 return INVALID;
             if (!hostAvailable) return NO_RENDERER;
+
+            // A GL batch's answers, written into the guest's memory before
+            // it is copied (a D3D batch is one envelope record, 0xFFE1)
+            if (shadow && !(length >= HEADER_BYTES + 4 && (header.getUint16(HEADER_BYTES, true) & 0xFFF0) === 0xFFE0 &&
+                    header.getUint16(HEADER_BYTES + 2, true) === 0xFFFF))
+                shadow.process(raw.subarray(HEADER_BYTES));
 
             const id = ++nextBatch;
             // Across threads a copy the renderer owns; never the guest's memory
@@ -251,18 +274,28 @@
             busy() {
                 return inflight.size;
             },
+            // What the GL shadow did (tests)
+            shadow_stats() {
+                return shadow ? shadow.stats : null;
+            },
             reset() {
                 releaseArena();
                 lastFrameId = lastBytes = submitCount = 0;
                 forgetInflight();
+                // (not the shadow's contexts: this is also the driver's queue
+                // reset after a timeout, and the owner is still there; the
+                // renderer says when the machine was reset)
             },
             get_state() {
-                return [STATE_VERSION, arenaAddress, arenaBytes, lastFrameId, lastBytes, submitCount];
+                return [STATE_VERSION, arenaAddress, arenaBytes, lastFrameId, lastBytes, submitCount,
+                    shadow ? JSON.stringify(shadow.getState()) : ""];
             },
             set_state(state) {
-                if (!Array.isArray(state) || state[0] !== STATE_VERSION)
+                // version 2 has no shadow state: the renderer sends its capabilities again
+                if (!Array.isArray(state) || state[0] !== STATE_VERSION && state[0] !== 2)
                     throw new Error("Unsupported virtio-v86gl state in snapshot");
-                const [, address, bytes, frameId, last, count] = state;
+                const [, address, bytes, frameId, last, count, shadowState] = state;
+                if (shadow) shadow.setState(shadowState ? JSON.parse(shadowState) : null);
                 if (bytes && (bytes !== ARENA_BYTES || !dev.is_ram(address, bytes)))
                     throw new Error("Invalid virtio-v86gl arena in snapshot");
                 releaseArena();
@@ -277,7 +310,7 @@
             //  submit count, 0, graphics checkpoint]
             upgrade_state(slot) {
                 if (!Array.isArray(slot) || slot[0] !== LEGACY_STATE_MAGIC) return null;
-                return [slot[1], [STATE_VERSION, slot[2], slot[3], slot[4], slot[5], slot[6]], slot[8]];
+                return [slot[1], [2, slot[2], slot[3], slot[4], slot[5], slot[6]], slot[8]];
             },
         };
     }
