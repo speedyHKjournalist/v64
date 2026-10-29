@@ -32,7 +32,8 @@
 
     // record code -> method; the parts add theirs
     const HANDLERS = new Map();
-    // { reset(shadow), group(group), getState(shadow), setState(shadow, state) } of each part
+    // { reset(shadow), group(group), context(context), getState(shadow, state), setState(shadow, state) }
+    // of each part
     const PARTS = [];
 
     class GLShadow {
@@ -109,6 +110,12 @@
             this[method](bytes, view, offset, size);
         }
 
+        // A flat record's arguments, or null when it is short
+        args(name, view, offset, size) {
+            const out = [];
+            return protocol.decodeArgs(protocol.SIGNATURES[name][1], view, offset, size, out) < 0 ? null : out;
+        }
+
         // An older guest's MAKE_CURRENT stops short; the fields after read as 0
         field(name, field, view, offset, size) {
             const at = F[name][field];
@@ -138,6 +145,7 @@
                 this.groups.set(groupKey, group);
             }
             const context = { key, id, group, program: 0 };
+            for (const part of PARTS) if (part.context) part.context(context);
             this.contexts.set(key, context);
             return context;
         }

@@ -24,7 +24,7 @@
     const constants = global.GLWGConstants || require("./gl_constants.js");
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const { STAGE_OF_GL_TYPE } = global.V86GLGlslang || require("./gl_glslang.js");
-    const { GLFN, C, F, RECORDS, SIGNATURES } = protocol;
+    const { GLFN, C, F, RECORDS } = protocol;
     const GL = constants.GL;
 
     const OK = C.V86GL_SYNC_QUERY_STATUS_OK;
@@ -79,12 +79,6 @@
     }
 
     const proto = GLShadow.prototype;
-
-    // A flat record's arguments
-    proto.args = function(name, view, offset, size) {
-        const out = [];
-        return protocol.decodeArgs(SIGNATURES[name][1], view, offset, size, out) < 0 ? null : out;
-    };
 
     proto.createShader = function(bytes, view, offset, size) {
         const a = this.args("CREATE_SHADER", view, offset, size);

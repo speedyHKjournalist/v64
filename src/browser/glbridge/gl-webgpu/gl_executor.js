@@ -3624,6 +3624,8 @@
 
         define("CHECK_FRAMEBUFFER_STATUS", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("fbo-status record is short");
+            // answered on the CPU side already (gl_shadow_objects.js)
+            if (view.getUint32(offset + protocol.F.CHECK_FRAMEBUFFER_STATUS.status, true) !== SYNC_STATUS_PENDING) return;
             const target = view.getUint32(offset + protocol.F.CHECK_FRAMEBUFFER_STATUS.target, true);
             const status = this.checkFramebufferStatus(target);
             view.setUint32(offset + protocol.F.CHECK_FRAMEBUFFER_STATUS.status, SYNC_STATUS_OK, true);
