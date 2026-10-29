@@ -1480,6 +1480,19 @@ test("a single-buffered window draws into its front buffer, shown at glFlush (D-
     assert.strictEqual(presents, 1);
 });
 
+test("a copy into a luminance or RGB texture keeps only that format's components (S2-25)", () => {
+    const { executor, log } = newExecutor();
+    run(executor, immediateTriangle(new GLStream().makeCurrent(1, 0, 0, 64, 64))
+        .names(GLFN.GEN_TEXTURES, [5, 6]).call("BIND_TEXTURE", GL.TEXTURE_2D, 5)
+        .call("COPY_TEX_IMAGE_2D", GL.TEXTURE_2D, 0, GL.LUMINANCE, 0, 0, 4, 4, 0)
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 6)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGB, 4, 4, GL.RGB, GL.UNSIGNED_BYTE, new Uint8Array(48))
+        .call("COPY_TEX_SUB_IMAGE_2D", GL.TEXTURE_2D, 0, 0, 0, 0, 0, 2, 2));
+    const copies = log.modules.map(m => m.code).filter(code => /let c = textureLoad\(sourceTexture/.test(code));
+    assert.ok(copies.some(code => code.includes("return vec4<f32>(c.rrr, 1.0);")), "luminance from red");
+    assert.ok(copies.some(code => code.includes("return vec4<f32>(c.rgb, 1.0);")), "RGB with alpha 1");
+});
+
 test("MIN and MAX blending set WebGPU's factors to one (review S1-2b)", () => {
     const { executor, log } = newExecutor();
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)

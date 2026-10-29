@@ -233,6 +233,8 @@ const MUTATIONS = {
             "                    context.drawBuffers = [GL.FRONT];", "                    context.drawBuffers = [GL.BACK];"],
         ["accumulation returns into one sample of a multisampled window", G + "gl_executor.js",
             "            const samples = returning ? targets.sampleCount || 1 : 1;", "            const samples = 1;"],
+        ["a copy keeps components its texture's format has not", G + "gl_executor.js",
+            '    return ${COPY_COMPONENTS[base] || "c"};', "    return c;"],
         ["a missing texture binds the 2D colour fallback", G + "gl_executor.js",
             "            if (!object || !this.textureIsComplete(object)) return this.fallbackViewFor(item);",
             "            if (!object || !this.textureIsComplete(object)) return this.fallbackView;"],

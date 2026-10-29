@@ -285,14 +285,15 @@ checkProgramES("es_struct_with_struct_array",
 // These shaders bypass the GLSL translator, so exercise them directly too.
 // A syntax error here otherwise appears only when CopyTexImage, mipmap, or a
 // scaling framebuffer blit first runs on a real adapter.
-const executorSource = fs.readFileSync(path.join(__dirname, "../../src/browser/glbridge/gl-webgpu",
-    "gl_executor.js"), "utf8");
-for (const name of ["COLOR_COPY_WGSL", "MIPMAP_WGSL", "COLOR_BLIT_WGSL"]) {
-    const match = new RegExp("const\\s+" + name + "\\s*=\\s*`([\\s\\S]*?)`;" )
-        .exec(executorSource);
-    if (!match) failures.push([name, "shader constant is missing"]);
+const executorModule = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");
+const executorShaders = [["MIPMAP_WGSL", executorModule.MIPMAP_WGSL],
+    ["COLOR_BLIT_WGSL", executorModule.COLOR_BLIT_WGSL],
+    ...["RGBA", "RGB", "LUMINANCE", "LUMINANCE_ALPHA", "INTENSITY", "ALPHA"].map(base =>
+        ["colorCopyWGSL(" + base + ")", executorModule.colorCopyWGSL(base)])];
+for (const [name, code] of executorShaders) {
+    if (!code) failures.push([name, "shader is missing"]);
     else {
-        const error = validate(name, match[1]);
+        const error = validate(name, code);
         if (error) failures.push([name, error]);
         else ++passed;
     }

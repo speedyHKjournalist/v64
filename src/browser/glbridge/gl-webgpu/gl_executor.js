@@ -9142,7 +9142,14 @@ fn fs_main(inp : VSOut) -> @location(0) vec4<f32> {
 }
 `;
 
-    const COLOR_COPY_WGSL = `
+    // the copy into a base format keeps the components it has (GL 2.1 table
+    // 3.15: luminance and intensity from red); the rest read as 0 and 1
+    const COPY_COMPONENTS = {
+        RGB: "vec4<f32>(c.rgb, 1.0)", LUMINANCE: "vec4<f32>(c.rrr, 1.0)",
+        LUMINANCE_ALPHA: "vec4<f32>(c.rrr, c.a)", INTENSITY: "c.rrrr",
+        ALPHA: "vec4<f32>(0.0, 0.0, 0.0, c.a)",
+    };
+    const colorCopyWGSL = base => `
 struct CopyParams {
     sourceOrigin : vec2<i32>,
     destinationOrigin : vec2<i32>,
@@ -9156,7 +9163,8 @@ struct CopyParams {
 }
 @fragment fn fs_main(@builtin(position) p : vec4<f32>) -> @location(0) vec4<f32> {
     let source = params.sourceOrigin + vec2<i32>(p.xy) - params.destinationOrigin;
-    return textureLoad(sourceTexture, source, 0);
+    let c = textureLoad(sourceTexture, source, 0);
+    return ${COPY_COMPONENTS[base] || "c"};
 }
 `;
 
@@ -9208,11 +9216,12 @@ struct BlitParams {
 
     Object.assign(GLWebGPUExecutor.prototype, {
 
-        colorCopyPipeline(format) {
+        colorCopyPipeline(format, base) {
             this.colorCopyPipelines = this.colorCopyPipelines || new Map();
-            let pipeline = this.colorCopyPipelines.get(format);
+            const key = format + "|" + (COPY_COMPONENTS[base] ? base : "RGBA");
+            let pipeline = this.colorCopyPipelines.get(key);
             if (pipeline) return pipeline;
-            const module = this.shaderModule(COLOR_COPY_WGSL);
+            const module = this.shaderModule(colorCopyWGSL(base));
             try {
                 pipeline = this.device.createRenderPipeline({
                     label: "GL colour format copy", layout: "auto",
@@ -9226,7 +9235,7 @@ struct BlitParams {
                     { format, message: String(error) }, GL.INVALID_OPERATION);
                 return null;
             }
-            this.colorCopyPipelines.set(format, pipeline);
+            this.colorCopyPipelines.set(key, pipeline);
             return pipeline;
         },
 
@@ -9376,7 +9385,7 @@ struct BlitParams {
         copyColorTexture(source, destination, sourceX, sourceY,
                 destinationX, destinationY, width, height, loadOp) {
             if (!source || !destination || width <= 0 || height <= 0) return false;
-            const pipeline = this.colorCopyPipeline(destination.format);
+            const pipeline = this.colorCopyPipeline(destination.format, destination.base);
             if (!pipeline) return false;
             const uniform = this.allocateUniform(16);
             if (!uniform) return false;
@@ -9749,7 +9758,7 @@ struct BlitParams {
                 baseArrayLayer: CUBE_FACE_INDEX[target] || 0,
                 arrayLayerCount: 1,
             });
-            this.copyColorTexture(source, { view, format: storage.gpu },
+            this.copyColorTexture(source, { view, format: storage.gpu, base: storage.base },
                 x, y, 0, 0, width, height, "clear");
             if (texture.generateMipmapHint && level === 0) this.generateMipmapFor(texture);
         },
@@ -9782,7 +9791,7 @@ struct BlitParams {
                 baseArrayLayer: layer, arrayLayerCount: 1,
             });
             if (this.copyColorTexture(source,
-                    { view, format: slot.gpuFormat }, x, y,
+                    { view, format: slot.gpuFormat, base: slot.base }, x, y,
                     xoffset, yoffset, width, height, "load")) {
                 // The CPU copy is no longer authoritative after a framebuffer
                 // copy.  Mipmap generation below can continue entirely on GPU.
@@ -11066,6 +11075,7 @@ struct Params { value : vec4<f32>, }
         convertPixels, decodeDXT, storageFormatFor, readSourceTexel,
         applyBaseFormat, normalMatrixOf, multiply4, invert4, transpose4,
         createContextState, buildHandlerTable, activeShaderBindings,
+        colorCopyWGSL, MIPMAP_WGSL, COLOR_BLIT_WGSL,
         PRIMITIVE_TOPOLOGY, BLEND_FACTORS, COMPARE_FUNCTIONS,
         STENCIL_OPERATIONS, ADDRESS_MODES,
         GLWG_RESPONSE_REGION_BYTES, GLWG_QUERY_REGION_BYTES,
