@@ -39,7 +39,6 @@ globalThis.GLConformanceKnownFailures = {
         "LOG 8 -> (3, 1, 3, 1)/4",
         "LIT in VP",
     ] },
-    readpixels_formats: "S2-23: readback ignores format, type and pack state",
     arb_fp_semantics: { reason: "S2-48/S2-51: ARB fragment programs", tiles: [
         "TXP (1.25,.75,0,2)->texel(2,1)",
         "state.fog.color",

@@ -6711,7 +6711,8 @@
                 label: "GL depth-stencil",
                 size: { width, height, depthOrArrayLayers: 1 },
                 format: "depth24plus-stencil8",
-                usage: TEXTURE_USAGE_RENDER_ATTACHMENT,
+                // (read back by glReadPixels: stencil copied, depth sampled)
+                usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_SRC | TEXTURE_USAGE_TEXTURE_BINDING,
             });
             this.depthTargetView = this.depthTarget.createView();
             this.depthWidth = width;
@@ -9176,65 +9177,164 @@ struct BlitParams {
             const dataSize = view.getUint32(offset + F.data_size, true);
             view.setUint32(offset + F.status, SYNC_STATUS_PENDING, true);
 
-            const source = this.readAttachmentView();
-            if (!source || width <= 0 || height <= 0) {
+            const status = value => {
+                const word = new Uint8Array(4);
+                new DataView(word.buffer).setUint32(0, value, true);
+                return word;
+            };
+            // GL 2.1 section 4.3.2: colour from the read buffer, or with
+            // DEPTH_COMPONENT and STENCIL_INDEX the depth and stencil
+            // (review S2-23: always colour, in RGBA order of bytes)
+            const kind = format === GL.DEPTH_COMPONENT ? "depth" : format === GL.STENCIL_INDEX ? "stencil" : "color";
+            const source = kind === "color" ? this.readAttachmentView() : this.readDepthStencil(kind);
+            if (!source || width <= 0 || height <= 0 || !TYPE_BYTES[type]) {
                 view.setUint32(offset + F.status, SYNC_STATUS_FAILED, true);
                 return;
             }
-            const bytesPerRow = alignUp(width * 4, 256);
-            const staging = this.device.createBuffer({
-                label: "GL readback",
-                size: bytesPerRow * height,
-                usage: BUFFER_USAGE_COPY_DST | BUFFER_USAGE_MAP_READ,
-            });
-            this.endPass();
-            const encoder = this.ensureEncoder();
-            encoder.copyTextureToBuffer(
-                { texture: source.texture, origin: { x, y, z: 0 } },
-                { buffer: staging, bytesPerRow, rowsPerImage: height },
-                { width, height, depthOrArrayLayers: 1 });
-            this.flushFrame();
-
-            const writeGuest = this.options.writeGuestMemory;
+            // only the part inside the source is read (review S1-2i: the copy
+            // past its edge was refused, and the status said OK)
+            const x0 = Math.max(0, x), y0 = Math.max(0, y);
+            const x1 = Math.min(source.width, x + width), y1 = Math.min(source.height, y + height);
+            const rect = { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
+            const pack = this.packState();
             const recordOffset = offset;
-            this.trackReadback(staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
-                const mapped = new Uint8Array(staging.getMappedRange());
+            const finish = values => {
+                // over the caller's bytes, which the guest put in the record:
+                // GL leaves row padding and skipped pixels as they were
                 const out = new Uint8Array(dataSize);
-                const packed = packReadback(mapped, bytesPerRow, width, height,
-                    format, type, source.format, dataSize);
-                out.set(packed.subarray(0, dataSize));
-                staging.unmap();
-                staging.destroy();
-                if (metadata && metadata.isMemoryValid && !metadata.isMemoryValid()) return;
-                // Two ways home: the payload view when it aliases guest memory,
-                // and the bridge's writer when it does not. Doing both is
-                // harmless and makes the path work in either wiring.
-                if (bytes.byteLength >= recordOffset + READ_PIXELS_HEADER_SIZE +
-                        dataSize) {
-                    bytes.set(out, recordOffset + READ_PIXELS_HEADER_SIZE);
-                    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-                        .setUint32(recordOffset + protocol.F.READ_PIXELS.status, SYNC_STATUS_OK, true);
-                }
-                if (typeof writeGuest === "function") {
-                    const payload = new Uint8Array(4 + dataSize);
-                    payload.set(out, 4);
-                    // Status last: the guest observing OK must already see the
-                    // pixels, and memory is copied in increasing order.
-                    writeGuest(recordOffset + READ_PIXELS_HEADER_SIZE, out,
-                        metadata);
-                    const status = new Uint8Array(4);
-                    new DataView(status.buffer).setUint32(0, SYNC_STATUS_OK, true);
-                    writeGuest(recordOffset + protocol.F.READ_PIXELS.status, status, metadata);
-                }
-            }).catch(error => {
+                const at = recordOffset + READ_PIXELS_HEADER_SIZE;
+                out.set(bytes.subarray(at, Math.min(at + dataSize, bytes.length)));
+                packPixels(out, values, rect.width, rect.height, rect.x - x, rect.y - y, width, format, type, pack);
+                this.answerGuest(bytes, metadata, [[recordOffset + READ_PIXELS_HEADER_SIZE, out],
+                    [recordOffset + F.status, status(SYNC_STATUS_OK)]]);
+            };
+            if (!rect.width || !rect.height) return finish(null);
+            this.endPass();
+            const read = this.readRectangle(source, kind, rect);
+            this.flushFrame();
+            this.trackReadback(read().then(finish).catch(error => {
                 this.warnOnce("readback", "glReadPixels mapping failed",
                     { message: String(error) });
-                try { staging.destroy(); } catch (ignored) { /* already gone */ }
                 // the guest is told, rather than left waiting out its deadline (review S1-7)
-                const status = new Uint8Array(4);
-                new DataView(status.buffer).setUint32(0, SYNC_STATUS_FAILED, true);
-                this.answerGuest(bytes, metadata, [[recordOffset + protocol.F.READ_PIXELS.status, status]]);
+                this.answerGuest(bytes, metadata, [[recordOffset + F.status, status(SYNC_STATUS_FAILED)]]);
             }));
+        },
+
+        // The pack state as packPixels takes it
+        packState() {
+            const store = this.current.pixelStore;
+            return { alignment: store.packAlignment || 4, rowLength: store.packRowLength,
+                skipPixels: store.packSkipPixels, skipRows: store.packSkipRows, swapBytes: !!store.packSwapBytes };
+        },
+
+        // The read framebuffer's depth-stencil image
+        readDepthStencil(kind) {
+            const s = this.current;
+            if (!s.readFramebuffer) {
+                this.ensureDepthTarget();
+                return { texture: this.depthTarget, format: "depth24plus-stencil8", mipLevel: 0, layer: 0,
+                    width: this.depthWidth, height: this.depthHeight };
+            }
+            const fbo = this.framebuffers.get(s.id).get(s.readFramebuffer);
+            const record = fbo && (kind === "stencil" ? fbo.stencil || fbo.depth : fbo.depth || fbo.stencil);
+            const resolved = record && this.resolveAttachment(record);
+            if (!resolved) return null;
+            return { texture: resolved.texture, format: resolved.format, mipLevel: resolved.mipLevel,
+                layer: resolved.origin.z, width: Math.max(1, resolved.texture.width >> resolved.mipLevel),
+                height: Math.max(1, resolved.texture.height >> resolved.mipLevel) };
+        },
+
+        /*
+         * Encodes the copy of the rectangle, and returns what maps it once the
+         * frame is submitted: a Float32Array of RGBA a pixel (colour), of
+         * depths or of stencil values, row by row from the bottom. Depth in a
+         * depth24plus format cannot be copied, so a pass loads it into an
+         * r32float image first.
+         */
+        readRectangle(source, kind, rect) {
+            const encoder = this.ensureEncoder();
+            let texture = source.texture, aspect = "all", texelBytes, origin = { x: rect.x, y: rect.y, z: source.layer || 0 };
+            let mipLevel = source.mipLevel || 0;
+            if (kind === "stencil") {
+                aspect = "stencil-only";
+                texelBytes = 1;
+            } else if (kind === "depth" && (source.format === "depth32float" || source.format === "depth16unorm")) {
+                aspect = "depth-only";
+                texelBytes = source.format === "depth32float" ? 4 : 2;
+            } else if (kind === "depth") {
+                texture = this.depthToFloat(encoder, source, rect);
+                origin = { x: 0, y: 0, z: 0 };
+                mipLevel = 0;
+                texelBytes = 4;
+            } else {
+                texelBytes = source.format.startsWith("rgba32float") ? 16 : source.format.startsWith("rgba16float") ? 8 : 4;
+            }
+            // a depth or stencil copy has to take the whole image; the
+            // rectangle is picked out of it when unpacked
+            const whole = aspect !== "all";
+            const copy = whole ? { x: 0, y: 0, width: source.width, height: source.height } :
+                { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+            if (whole) origin = { x: 0, y: 0, z: origin.z };
+            const bytesPerRow = alignUp(copy.width * texelBytes, 256);
+            const staging = this.device.createBuffer({
+                label: "GL readback", size: bytesPerRow * copy.height,
+                usage: BUFFER_USAGE_COPY_DST | BUFFER_USAGE_MAP_READ,
+            });
+            encoder.copyTextureToBuffer({ texture, mipLevel, origin, aspect },
+                { buffer: staging, bytesPerRow, rowsPerImage: copy.height },
+                { width: copy.width, height: copy.height, depthOrArrayLayers: 1 });
+            if (texture !== source.texture) this.retire(texture);
+            const format = kind === "depth" ? (texelBytes === 2 ? "depth16" : "r32float") : kind === "stencil" ? "stencil8" :
+                source.format;
+            return () => staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
+                const mapped = new Uint8Array(staging.getMappedRange());
+                const skip = whole ? rect.y * bytesPerRow + rect.x * texelBytes : 0;
+                const values = unpackReadback(mapped.subarray(skip), bytesPerRow, rect.width, rect.height, format);
+                staging.unmap();
+                staging.destroy();
+                return values;
+            }, error => {
+                staging.destroy();
+                throw error;
+            });
+        },
+
+        // depth24plus's values, loaded into an r32float image of the rectangle
+        depthToFloat(encoder, source, rect) {
+            if (!this.depthReadPipeline) {
+                const module = this.device.createShaderModule({ label: "GL depth readback", code: DEPTH_READ_WGSL });
+                this.depthReadPipeline = this.device.createRenderPipeline({
+                    label: "GL depth readback", layout: "auto",
+                    vertex: { module, entryPoint: "vs_main" },
+                    fragment: { module, entryPoint: "fs_main", targets: [{ format: "r32float" }] },
+                    primitive: { topology: "triangle-list" },
+                });
+            }
+            const target = this.device.createTexture({
+                label: "GL depth readback", size: { width: rect.width, height: rect.height, depthOrArrayLayers: 1 },
+                format: "r32float", usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_SRC,
+            });
+            const origin = this.device.createBuffer({ label: "GL depth readback origin", size: 16,
+                usage: BUFFER_USAGE_UNIFORM | BUFFER_USAGE_COPY_DST });
+            this.device.queue.writeBuffer(origin, 0, new Uint32Array([rect.x, rect.y, 0, 0]));
+            const bindGroup = this.device.createBindGroup({
+                layout: this.depthReadPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: source.texture.createView({ dimension: "2d", aspect: "depth-only",
+                        baseMipLevel: source.mipLevel || 0, mipLevelCount: 1, baseArrayLayer: source.layer || 0,
+                        arrayLayerCount: 1 }) },
+                    { binding: 1, resource: { buffer: origin } },
+                ],
+            });
+            const pass = encoder.beginRenderPass({ label: "GL depth readback",
+                colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store",
+                    clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+            pass.setPipeline(this.depthReadPipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.draw(3);
+            pass.end();
+            this.retire(origin);
+            return target;
         },
 
         /* ---- occlusion queries ---- */
@@ -10053,44 +10153,143 @@ struct Params { value : vec4<f32>, }
      * so no vertical flip is involved -- which is the point of flipping in the
      * vertex shader instead.
      */
-    function packReadback(mapped, bytesPerRow, width, height, format, type,
-            sourceFormat, capacity) {
-        const bgra = sourceFormat.indexOf("bgra") === 0;
-        const components = SOURCE_COMPONENTS[format] || 4;
-        const out = new Uint8Array(capacity);
-        let dst = 0;
+    // depth24plus loaded into r32float, for glReadPixels (readRectangle)
+    const DEPTH_READ_WGSL = `
+@group(0) @binding(0) var depthTexture : texture_depth_2d;
+@group(0) @binding(1) var<uniform> origin : vec4<u32>;
+@vertex fn vs_main(@builtin(vertex_index) i : u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs_main(@builtin(position) p : vec4<f32>) -> @location(0) vec4<f32> {
+    let at = vec2<i32>(p.xy) + vec2<i32>(origin.xy);
+    return vec4<f32>(textureLoad(depthTexture, at, 0), 0.0, 0.0, 1.0);
+}`;
+
+    /*
+     * A mapped readback's texels as values: RGBA floats a pixel for colour
+     * (any of the formats a target has), a float for depth, an integer for
+     * stencil.
+     */
+    function unpackReadback(mapped, bytesPerRow, width, height, format) {
+        const view = new DataView(mapped.buffer, mapped.byteOffset, mapped.byteLength);
+        const scalar = format === "r32float" || format === "depth16" || format === "stencil8";
+        const values = new Float32Array(width * height * (scalar ? 1 : 4));
+        const bgra = format.startsWith("bgra");
+        let w = 0;
         for (let row = 0; row < height; ++row) {
-            let src = row * bytesPerRow;
-            for (let x = 0; x < width; ++x) {
-                const r = mapped[src + (bgra ? 2 : 0)];
-                const g = mapped[src + 1];
-                const b = mapped[src + (bgra ? 0 : 2)];
-                const a = mapped[src + 3];
-                if (type === GL.UNSIGNED_BYTE) {
-                    switch (format) {
-                    case GL.RGBA: out[dst] = r; out[dst+1] = g; out[dst+2] = b; out[dst+3] = a; break;
-                    case GL.BGRA: out[dst] = b; out[dst+1] = g; out[dst+2] = r; out[dst+3] = a; break;
-                    case GL.RGB: out[dst] = r; out[dst+1] = g; out[dst+2] = b; break;
-                    case GL.BGR: out[dst] = b; out[dst+1] = g; out[dst+2] = r; break;
-                    case GL.ALPHA: out[dst] = a; break;
-                    case GL.LUMINANCE: out[dst] = r; break;
-                    default: out[dst] = r; break;
-                    }
-                    dst += components;
-                } else if (type === GL.UNSIGNED_SHORT_5_6_5) {
-                    const packed = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-                    out[dst] = packed & 0xff;
-                    out[dst + 1] = packed >> 8;
-                    dst += 2;
-                } else {
-                    out[dst] = r; out[dst+1] = g; out[dst+2] = b; out[dst+3] = a;
-                    dst += 4;
+            const base = row * bytesPerRow;
+            for (let col = 0; col < width; ++col) {
+                switch (format) {
+                case "r32float": values[w++] = view.getFloat32(base + col * 4, true); break;
+                case "depth16": values[w++] = view.getUint16(base + col * 2, true) / 65535; break;
+                case "stencil8": values[w++] = mapped[base + col]; break;
+                case "rgba32float":
+                    for (let c = 0; c < 4; ++c) values[w++] = view.getFloat32(base + col * 16 + c * 4, true);
+                    break;
+                case "rgba16float":
+                    for (let c = 0; c < 4; ++c) values[w++] = halfToFloat(view.getUint16(base + col * 8 + c * 2, true));
+                    break;
+                default: {
+                    const at = base + col * 4;
+                    values[w++] = mapped[at + (bgra ? 2 : 0)] / 255;
+                    values[w++] = mapped[at + 1] / 255;
+                    values[w++] = mapped[at + (bgra ? 0 : 2)] / 255;
+                    values[w++] = mapped[at + 3] / 255;
                 }
-                src += 4;
-                if (dst >= capacity) return out;
+                }
             }
         }
-        return out;
+        return values;
+    }
+
+    // GL 2.1 table 3.5's bits of each packed type's fields, first component first
+    const PACKED_FIELDS = {
+        [GL.UNSIGNED_BYTE_3_3_2]: [[5, 3], [2, 3], [0, 2]],
+        [GL.UNSIGNED_BYTE_2_3_3_REV]: [[0, 3], [3, 3], [6, 2]],
+        [GL.UNSIGNED_SHORT_5_6_5]: [[11, 5], [5, 6], [0, 5]],
+        [GL.UNSIGNED_SHORT_5_6_5_REV]: [[0, 5], [5, 6], [11, 5]],
+        [GL.UNSIGNED_SHORT_4_4_4_4]: [[12, 4], [8, 4], [4, 4], [0, 4]],
+        [GL.UNSIGNED_SHORT_4_4_4_4_REV]: [[0, 4], [4, 4], [8, 4], [12, 4]],
+        [GL.UNSIGNED_SHORT_5_5_5_1]: [[11, 5], [6, 5], [1, 5], [0, 1]],
+        [GL.UNSIGNED_SHORT_1_5_5_5_REV]: [[0, 5], [5, 5], [10, 5], [15, 1]],
+        [GL.UNSIGNED_INT_8_8_8_8]: [[24, 8], [16, 8], [8, 8], [0, 8]],
+        [GL.UNSIGNED_INT_8_8_8_8_REV]: [[0, 8], [8, 8], [16, 8], [24, 8]],
+        [GL.UNSIGNED_INT_10_10_10_2]: [[22, 10], [12, 10], [2, 10], [0, 2]],
+        [GL.UNSIGNED_INT_2_10_10_10_REV]: [[0, 10], [10, 10], [20, 10], [30, 2]],
+    };
+
+    /*
+     * glReadPixels' packing (GL 2.1 sections 4.3.2 and 3.6.1, table 3.5):
+     * the format's components of each value (LUMINANCE is R + G + B), as
+     * `type` stores them, at the place the pack state gives (alignment, row
+     * length, skips, byte swapping). `values` covers the readable part of
+     * the request, (dx, dy) into it; outside it the bytes stay zero.
+     */
+    function packPixels(out, values, width, height, dx, dy, requestWidth, format, type, pack) {
+        if (!values) return;
+        const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+        const little = !pack.swapBytes;
+        const packed = PACKED_FIELDS[type];
+        const elementBytes = TYPE_BYTES[type];
+        const scalar = format === GL.DEPTH_COMPONENT || format === GL.STENCIL_INDEX;
+        const components = packed ? 1 : scalar ? 1 : SOURCE_COMPONENTS[format] || 4;
+        const groupBytes = packed ? elementBytes : components * elementBytes;
+        const rowBytes = alignUp((pack.rowLength || requestWidth) * groupBytes, pack.alignment || 4);
+        const start = (pack.skipRows || 0) * rowBytes + (pack.skipPixels || 0) * groupBytes;
+        const fixed = !(type === GL.FLOAT || type === GL.HALF_FLOAT);
+        const pick = (v, i) => {
+            if (scalar) return [v[i]];
+            const r = v[i * 4], g = v[i * 4 + 1], b = v[i * 4 + 2], a = v[i * 4 + 3];
+            const l = r + g + b;
+            switch (format) {
+            case GL.RED: return [r];
+            case GL.GREEN: return [g];
+            case GL.BLUE: return [b];
+            case GL.ALPHA: return [a];
+            case GL.LUMINANCE: return [l];
+            case GL.LUMINANCE_ALPHA: return [l, a];
+            case GL.RGB: return [r, g, b];
+            case GL.BGR: return [b, g, r];
+            case GL.BGRA: return [b, g, r, a];
+            case GL.ABGR_EXT: return [a, b, g, r];
+            default: return [r, g, b, a];
+            }
+        };
+        const store = (at, value) => {
+            // a stencil index is an integer; the rest are normalised
+            const c = format === GL.STENCIL_INDEX || !fixed ? value : clamp(value, 0, 1);
+            const n = format === GL.STENCIL_INDEX ? 1 : 0;
+            switch (type) {
+            case GL.UNSIGNED_BYTE: view.setUint8(at, n ? c & 0xff : Math.round(c * 255)); break;
+            case GL.BYTE: view.setInt8(at, n ? c : Math.round(c * 127)); break;
+            case GL.UNSIGNED_SHORT: view.setUint16(at, n ? c & 0xffff : Math.round(c * 65535), little); break;
+            case GL.SHORT: view.setInt16(at, n ? c : Math.round(c * 32767), little); break;
+            case GL.UNSIGNED_INT: view.setUint32(at, n ? c >>> 0 : Math.round(c * 4294967295), little); break;
+            case GL.INT: view.setInt32(at, n ? c : Math.round(c * 2147483647), little); break;
+            case GL.HALF_FLOAT: view.setUint16(at, floatToHalf(c), little); break;
+            default: view.setFloat32(at, c, little);
+            }
+        };
+        for (let row = 0; row < height; ++row) {
+            for (let col = 0; col < width; ++col) {
+                const at = start + (dy + row) * rowBytes + (dx + col) * groupBytes;
+                if (at + groupBytes > out.length) continue;
+                const v = pick(values, row * width + col);
+                if (packed) {
+                    let word = 0;
+                    packed.forEach(([shift, bits], k) => {
+                        const max = (1 << bits) - 1;
+                        word += Math.round(clamp(k < v.length ? v[k] : 1, 0, 1) * max) * Math.pow(2, shift);
+                    });
+                    if (elementBytes === 1) view.setUint8(at, word);
+                    else if (elementBytes === 2) view.setUint16(at, word, little);
+                    else view.setUint32(at, word >>> 0, little);
+                } else {
+                    v.forEach((value, k) => store(at + k * elementBytes, value));
+                }
+            }
+        }
     }
 
     /* ================================================================== */
