@@ -6,19 +6,9 @@
 "use strict";
 globalThis.GLConformanceKnownFailures = {
     texenv_crossbar_unit1_off: "S1-2g: a COMBINE crossbar source on a disabled unit is invalid WGSL",
-    light_basic: { reason: "S2-2: RESCALE_NORMAL uses the wrong length", tiles: [
-        "Scale 0.5, RESCALE_NORMAL",
-    ] },
-    light_twoside_colormaterial: { reason: "S2-13: COLOR_MATERIAL never latches into the material", tiles: [
-        "COLOR_MATERIAL latched diffuse (0.9,0.1,0.1) after disable",
-        "COLOR_MATERIAL EMISSION color (0,0,0.5)",
-    ] },
     depth_range_reversed: "S1-2d: glDepthRange(n > f) is refused by WebGPU",
     clip_planes: { reason: "S2-10: user clip planes", tiles: [
         "plane1 keeps y<=10",
-    ] },
-    texgen: { reason: "S2-12: the q coordinate is dropped", tiles: [
-        "TexCoord4f q=2: (1.25,0.75,0,2)->(0.625,0.375)",
     ] },
     drawpixels_bitmap: { reason: "S2-15: an invalid raster position still draws", tiles: [
         "invalid raster pos (x=-10, then moved): nothing",
@@ -78,10 +68,6 @@ globalThis.GLConformanceKnownFailures = {
         "LIT in VP",
     ] },
     readpixels_formats: "S2-23: readback ignores format, type and pack state",
-    projective_texcoord: { reason: "S2-12: projective texture coordinates", tiles: [
-        "q 1->4 across x: projective s/q",
-        "uniform q=0.5",
-    ] },
     arb_fp_semantics: { reason: "S2-48/S2-51: ARB fragment programs", tiles: [
         "TXP (1.25,.75,0,2)->texel(2,1)",
         "state.fog.color",

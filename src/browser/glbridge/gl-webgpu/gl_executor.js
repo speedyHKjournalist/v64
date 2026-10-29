@@ -2648,6 +2648,7 @@
         define("END", function() { this.endImmediate(); });
         define("COLOR4F", function(a) {
             this.current.current.color.set([a[0], a[1], a[2], a[3]]);
+            this.latchColorMaterial();
         });
         define("SECONDARY_COLOR3F", function(a) {
             this.current.current.secondaryColor.set([a[0], a[1], a[2], 1]);
@@ -2729,6 +2730,7 @@
         define("COLOR_MATERIAL", function(a) {
             this.current.colorMaterial.face = a[0] >>> 0;
             this.current.colorMaterial.mode = a[1] >>> 0;
+            this.latchColorMaterial();
         });
 
         /* ---- fog ---- */
@@ -4168,7 +4170,10 @@
                 if (value) s.enabled.add(cap); else s.enabled.delete(cap);
                 return;
             }
-            if (cap === GL.COLOR_MATERIAL) s.colorMaterial.enabled = value;
+            if (cap === GL.COLOR_MATERIAL) {
+                s.colorMaterial.enabled = value;
+                this.latchColorMaterial();
+            }
             if (value) s.enabled.add(cap); else s.enabled.delete(cap);
         },
 
@@ -4225,6 +4230,32 @@
                 this.refuse("glLight", "unknown parameter", { pname },
                     GL.INVALID_ENUM);
             }
+        },
+
+        /*
+         * GL 2.1 section 2.14.3: while COLOR_MATERIAL is enabled the
+         * parameters it names are the current colour -- set when it is
+         * enabled, when glColorMaterial changes them and on every glColor --
+         * and they keep the last one when it is disabled (review S2-13: the
+         * material never changed, so the colour was lost on disable).
+         */
+        latchColorMaterial() {
+            const s = this.current;
+            if (!s.colorMaterial.enabled) return;
+            const mode = s.colorMaterial.mode;
+            if (mode !== GL.AMBIENT_AND_DIFFUSE && !COLOR_MATERIAL_MODES[mode]) return;
+            const face = s.colorMaterial.face;
+            const color = s.current.color;
+            for (const material of [face !== GL.BACK && s.material.front, face !== GL.FRONT && s.material.back]) {
+                if (!material) continue;
+                if (mode === GL.AMBIENT_AND_DIFFUSE) {
+                    material.ambient.set(color);
+                    material.diffuse.set(color);
+                } else {
+                    material[COLOR_MATERIAL_MODES[mode].toLowerCase()].set(color);
+                }
+            }
+            this.derivedDirty = true;
         },
 
         setMaterial(face, pname, values) {

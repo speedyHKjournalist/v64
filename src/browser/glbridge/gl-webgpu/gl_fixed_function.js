@@ -332,13 +332,30 @@
         return layout;
     }
 
+    /*
+     * The coordinates a unit's varying carries: the ones its target reads
+     * and q, which the fragment stage divides by after interpolation (GL's
+     * projective lookup; review S2-12: q was dropped). A cube map ignores q.
+     * (s, q) for 1D, (s, t, q) for 2D, (s, t, r, q) for 3D and shadows.
+     */
     function textureCoordComponents(unit) {
         if (unit.shadow) return 4;
         switch (unit.target) {
-        case "1D": return 1;
-        case "3D": return 3;
+        case "1D": return 2;
+        case "3D": return 4;
         case "Cube": return 3;
-        default: return 2;
+        default: return 3;
+        }
+    }
+
+    // The vertex stage's vec4 coordinates as the varying carries them
+    function packedTexCoord(unit, tc) {
+        if (unit.shadow) return tc;
+        switch (unit.target) {
+        case "1D": return "vec2<f32>(" + tc + ".x, " + tc + ".w)";
+        case "3D": return tc;
+        case "Cube": return tc + ".xyz";
+        default: return "vec3<f32>(" + tc + ".xy, " + tc + ".w)";
         }
     }
 
@@ -410,11 +427,13 @@
             if (lighting.normalMode === "normalize")
                 emit("    eyeNormal = normalize(eyeNormal);");
             else if (lighting.normalMode === "rescale")
-                // GL_RESCALE_NORMAL scales by the inverse magnitude of the
-                // modelview's third column, which is exact only for a uniform
-                // scale -- the condition the extension documents.
+                // GL 2.1 section 2.11.3: the factor is one over the length of
+                // the inverse modelview's third row, which is the normal
+                // matrix's third column (review S2-2: the modelview's was
+                // used, off by the square of the scale). Exact for a uniform
+                // scale, the condition the extension documents.
                 emit("    eyeNormal = eyeNormal * inverseSqrt(max(dot(" +
-                    "glState.modelview[2].xyz, glState.modelview[2].xyz), 1e-8));");
+                    "glState.normalMatrix[2], glState.normalMatrix[2]), 1e-8));");
         } else if (lighting.enabled) {
             emit("    var eyeNormal = vec3<f32>(0.0, 0.0, 1.0);");
         }
@@ -722,10 +741,7 @@
             if (unit.matrix)
                 emit("    tc" + i + " = glState.textureMatrix[" + i + "] * tc" + i + ";");
 
-            const components = entry.components;
-            const expr = components === 4 ? "tc" + i :
-                "tc" + i + "." + swz(0, components);
-            writeVarying(emit, entry, expr, components);
+            writeVarying(emit, entry, packedTexCoord(unit, "tc" + i), entry.components);
         }
     }
 
@@ -927,14 +943,19 @@
 
     function sampleExpression(i, unit, entry, sig) {
         const pointCoord = sig.pointSprite && unit.env.coordReplace;
-        const coord = pointCoord ?
-            "vec4<f32>(fin.pointCoord, 0.0, 1.0)" : readVarying(entry);
-        const components = pointCoord ? 4 : (entry ? entry.components : 4);
-        const q = components >= 4 ? "(" + coord + ").w" : "1.0";
-        const xy = components >= 2 ? "(" + coord + ").xy" :
-            "vec2<f32>((" + coord + ").x, 0.0)";
-        const xyz = components >= 3 ? "(" + coord + ").xyz" :
-            "vec3<f32>(" + xy + ", 0.0)";
+        // (s, t, r, q) from what the varying carries (packedTexCoord)
+        const v = pointCoord || !entry ? null : readVarying(entry);
+        let coord = "vec4<f32>(fin.pointCoord, 0.0, 1.0)";
+        if (!pointCoord) {
+            if (!entry) coord = "vec4<f32>(0.0, 0.0, 0.0, 1.0)";
+            else if (unit.shadow || unit.target === "3D") coord = v;
+            else if (unit.target === "1D") coord = "vec4<f32>((" + v + ").x, 0.0, 0.0, (" + v + ").y)";
+            else if (unit.target === "Cube") coord = "vec4<f32>(" + v + ", 1.0)";
+            else coord = "vec4<f32>((" + v + ").xy, 0.0, (" + v + ").z)";
+        }
+        const q = "(" + coord + ").w";
+        const xy = "(" + coord + ").xy";
+        const xyz = "(" + coord + ").xyz";
         if (unit.shadow) {
             // A shadow lookup's reference is the third coordinate after the
             // projective divide, which is what GL's GL_COMPARE_R_TO_TEXTURE
