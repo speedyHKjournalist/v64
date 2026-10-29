@@ -8,6 +8,7 @@
 "use strict";
 
 const { errorScopes } = require("./fake_error_scopes.js");
+const rules = require("./webgpu_rules.js");
 
 class FakeBuffer {
     constructor(descriptor) {
@@ -33,7 +34,10 @@ class FakeTexture {
         this.views = [];
     }
     createView(options) {
-        const view = { texture: this, options: options || {} };
+        // (format and sample count: what a pass checks its attachments by)
+        const view = { texture: this, options: options || {},
+            format: options && options.format || this.descriptor.format,
+            sampleCount: this.descriptor.sampleCount || 1 };
         this.views.push(view);
         return view;
     }
@@ -41,8 +45,9 @@ class FakeTexture {
 }
 
 class FakeRenderPass {
-    constructor(descriptor, log) {
+    constructor(descriptor, log, device) {
         this.descriptor = descriptor;
+        this.device = device;
         this.log = log;
         this.ended = false;
         log.passes.push(this);
@@ -51,7 +56,15 @@ class FakeRenderPass {
     checkOpen() {
         if (this.ended) throw new Error("render pass is already ended");
     }
-    setPipeline(pipeline) { this.checkOpen(); this.pipeline = pipeline; this.calls.push(["pipeline", pipeline]); }
+    setPipeline(pipeline) {
+        this.checkOpen();
+        this.pipeline = pipeline;
+        this.calls.push(["pipeline", pipeline]);
+        if (pipeline.invalid) this.device.rejectWith("[Invalid RenderPipeline] is invalid due to a previous error");
+        else if (pipeline.descriptor)
+            for (const problem of rules.attachmentProblems(pipeline.descriptor, this.descriptor))
+                this.device.rejectWith(problem);
+    }
     setBindGroup(index, group) { this.calls.push(["bindGroup", index, group]); }
     setVertexBuffer(slot, buffer, offset) {
         this.calls.push(["vertexBuffer", slot, buffer, offset]);
@@ -59,7 +72,10 @@ class FakeRenderPass {
     setIndexBuffer(buffer, format, offset) {
         this.calls.push(["indexBuffer", buffer, format, offset]);
     }
-    setViewport(...args) { this.viewport = args; }
+    setViewport(...args) {
+        this.viewport = args;
+        for (const problem of rules.viewportProblems(...args)) this.device.rejectWith(problem);
+    }
     setScissorRect(...args) { this.scissor = args; }
     setStencilReference(value) { this.stencilReference = value; }
     setBlendConstant(value) { this.blendConstant = value; }
@@ -99,8 +115,9 @@ class FakeRenderPass {
 }
 
 class FakeEncoder {
-    constructor(log) { this.log = log; this.copies = []; }
+    constructor(log, device) { this.log = log; this.device = device; this.copies = []; }
     beginRenderPass(descriptor) {
+        for (const problem of rules.passProblems(descriptor)) this.device.rejectWith(problem);
         const attachment = descriptor.depthStencilAttachment;
         if (attachment) {
             const format = attachment.view && attachment.view.texture &&
@@ -111,7 +128,7 @@ class FakeEncoder {
                      "stencilClearValue" in attachment))
                 throw new Error("stencil operations require a stencil aspect");
         }
-        return new FakeRenderPass(descriptor, this.log);
+        return new FakeRenderPass(descriptor, this.log, this.device);
     }
     copyTextureToTexture(...args) { this.copies.push(["t2t", ...args]); }
     copyTextureToBuffer(...args) { this.copies.push(["t2b", ...args]); }
@@ -203,6 +220,11 @@ class FakeDevice {
                 return { index, bindings };
             },
         };
+        const problems = rules.renderPipelineProblems(descriptor, this.features);
+        if (problems.length) {
+            pipeline.invalid = true;
+            this.rejectWith(problems[0]);
+        }
         this.log.pipelines.push(pipeline);
         return pipeline;
     }
@@ -218,11 +240,12 @@ class FakeDevice {
         return group;
     }
     createCommandEncoder() {
-        const encoder = new FakeEncoder(this.log);
+        const encoder = new FakeEncoder(this.log, this);
         this.log.encoders.push(encoder);
         return encoder;
     }
     createQuerySet(descriptor) {
+        for (const problem of rules.querySetProblems(descriptor)) this.rejectWith(problem);
         const set = { descriptor };
         this.log.querySets.push(set);
         return set;

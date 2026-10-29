@@ -568,6 +568,22 @@ class GLStream {
     bytes() {
         return this.buffer.subarray(0, this.length);
     }
+
+    /* glReadPixels: {x, y, w, h, format, type, dataSize, status} then the
+     * destination bytes, pre-seeded the way the guest seeds them */
+    readPixels(x, y, width, height, format, type, dataSize, seed) {
+        const payload = new Uint8Array(32 + dataSize);
+        const view = new DataView(payload.buffer);
+        view.setInt32(0, x, true); view.setInt32(4, y, true);
+        view.setInt32(8, width, true); view.setInt32(12, height, true);
+        view.setUint32(16, format, true); view.setUint32(20, type, true);
+        view.setUint32(24, dataSize, true); view.setUint32(28, 0, true);
+        payload.fill(seed === undefined ? 0xCD : seed, 32);
+        this.record(GLFN.READ_PIXELS, payload);
+        return this.payloadView();
+    }
+
+    raw(opcode, bytes) { return this.record(opcode, bytes); }
 }
 
 if (typeof module !== "undefined" && module.exports)

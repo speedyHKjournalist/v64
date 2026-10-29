@@ -15,6 +15,7 @@
 
 const assert = require("node:assert/strict");
 const { errorScopes } = require("./fake_error_scopes.js");
+const rules = require("./webgpu_rules.js");
 
 // Lets a chain of already-settled promises run to its end
 async function settle() {
@@ -34,7 +35,7 @@ const OP = {
     CREATE_VERTEX_DECLARATION: 0x120,
     CREATE_VERTEX_SHADER: 0x121, CREATE_PIXEL_SHADER: 0x122,
     CREATE_QUERY: 0x123,
-    SET_RENDER_STATE: 0x200, SET_SAMPLER_STATE: 0x201,
+    SET_RENDER_STATE: 0x200, SET_SAMPLER_STATE: 0x201, SET_TEXTURE_STAGE_STATE: 0x202,
     SET_TEXTURE: 0x203, SET_VIEWPORT: 0x204, SET_TRANSFORM: 0x206,
     SET_MATERIAL: 0x207, SET_LIGHT: 0x208, LIGHT_ENABLE: 0x209,
     SET_STREAM_SOURCE: 0x20A, SET_STREAM_SOURCE_FREQ: 0x20B,
@@ -330,7 +331,10 @@ function makeFakeWebGPU(options) {
     class FakeTexture {
         constructor(descriptor) { this.descriptor = descriptor; }
         createView(descriptor) {
-            const view = { texture: this, descriptor: descriptor || null };
+            // (format and sample count: what a pass checks its attachments by)
+            const view = { texture: this, descriptor: descriptor || null,
+                format: descriptor && descriptor.format || this.descriptor.format,
+                sampleCount: this.descriptor.sampleCount || 1 };
             calls.push(["createView", this, descriptor || null, view]);
             return view;
         }
@@ -338,12 +342,19 @@ function makeFakeWebGPU(options) {
     }
     class FakePass {
         constructor(descriptor) { this.descriptor = descriptor; this.ops = []; }
-        setPipeline(p) { this.ops.push(["pipeline", p]); }
+        setPipeline(p) {
+            this.ops.push(["pipeline", p]);
+            if (p.invalid) device.rejectWith("[Invalid RenderPipeline] is invalid due to a previous error");
+            else for (const problem of rules.attachmentProblems(p.descriptor, this.descriptor)) device.rejectWith(problem);
+        }
         setBindGroup(i, g, dynamicOffsets) {
             this.ops.push(["bindGroup", i, g, dynamicOffsets]);
             calls.push(["setBindGroup", i, g, dynamicOffsets]);
         }
-        setViewport(...a) { this.ops.push(["viewport", ...a]); }
+        setViewport(...a) {
+            this.ops.push(["viewport", ...a]);
+            for (const problem of rules.viewportProblems(...a)) device.rejectWith(problem);
+        }
         setScissorRect(...a) {
             this.ops.push(["scissor", ...a]);
             calls.push(["setScissorRect", ...a]);
@@ -380,6 +391,7 @@ function makeFakeWebGPU(options) {
     class FakeEncoder {
         constructor() { this.passes = []; }
         beginRenderPass(descriptor) {
+            for (const problem of rules.passProblems(descriptor)) device.rejectWith(problem);
             const pass = new FakePass(descriptor);
             this.passes.push(pass);
             calls.push(["beginRenderPass", descriptor, pass]);
@@ -480,6 +492,7 @@ function makeFakeWebGPU(options) {
             return encoder;
         },
         createQuerySet(descriptor) {
+            for (const problem of rules.querySetProblems(descriptor)) device.rejectWith(problem);
             const querySet = { descriptor,
                 values: new BigUint64Array(descriptor.count),
                 destroy() { this.destroyed = true; } };
@@ -498,6 +511,11 @@ function makeFakeWebGPU(options) {
         },
         createRenderPipeline(descriptor) {
             const pipeline = { descriptor };
+            const problems = rules.renderPipelineProblems(descriptor, device.features);
+            if (problems.length) {
+                pipeline.invalid = true;
+                device.rejectWith(problems[0]);
+            }
             calls.push(["createRenderPipeline", descriptor, pipeline]);
             return pipeline;
         },
@@ -545,12 +563,18 @@ function makeFakeWebGPU(options) {
         } };
 }
 
+// Executors made by the running test: when it ends, any WebGPU rejection or
+// host error they recorded fails it, unless the test expects them
+// (executor.expectErrors = true)
+const liveExecutors = [];
+
 function makeExecutor(options = {}) {
     const { fakeOptions, ...executorOptions } = options;
     const fake = makeFakeWebGPU(fakeOptions);
     const canvas = { width: 1, height: 1, getContext: () => fake.context };
     const executor = new D3D9WebGPUExecutor(canvas,
-        { gpu: fake.gpu, ...executorOptions });
+        { gpu: fake.gpu, strict: true, ...executorOptions });
+    liveExecutors.push(executor);
     return { fake, executor, calls: fake.calls,
         find: name => fake.calls.filter(call => call[0] === name),
         last: name => {
@@ -587,8 +611,16 @@ const failures = [];
 let passed = 0;
 
 async function test(name, body) {
+    liveExecutors.length = 0;
     try {
         await body();
+        await settle();
+        for (const executor of liveExecutors) {
+            if (executor.expectErrors) continue;
+            const errors = [...(executor.gpuErrors ? executor.gpuErrors.errors : []).map(e => e.source + ": " + e.message),
+                ...executor.hostErrors.map(e => "host: " + e.message)];
+            if (errors.length) throw new Error("unexpected errors: " + errors.join("; "));
+        }
         ++passed;
     } catch (error) {
         failures.push({ name, error });
@@ -4397,6 +4429,7 @@ await test("a depth texture on a fixed-function stage reads the white fallback",
 await test("one failing command does not discard the rest of its batch",
         async () => {
     const { executor, fake } = makeExecutor();
+    executor.expectErrors = true;
     // Force a runtime failure that is not a framing error, the way a bad
     // binding resource used to be one.
     executor.handlers[OP.SET_RENDER_STATE] = () => {
@@ -4443,6 +4476,7 @@ await test("a framing error still fails the whole batch", async () => {
 
 await test("an unknown opcode is skipped, counted and reported, not silent", async () => {
     const { executor } = makeExecutor({ strict: true });
+    executor.expectErrors = true;
     await executor.submit(buildBatch([
         command(OP.CREATE_DEVICE, createDevicePayload(640, 480)),
         command(0x7ff, u32(DEVICE)),

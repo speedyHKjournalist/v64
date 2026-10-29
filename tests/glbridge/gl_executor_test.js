@@ -19,8 +19,14 @@ const { GPUErrorLog } = require("../../src/browser/glbridge/webgpu_host.js");
 
 let passed = 0;
 const failures = [];
+// Every executor a test makes, with the test: WebGPU rejections and host
+// errors arrive asynchronously, so they are checked once all tests have run
+// (executor.expectErrors = true for a test that wants them)
+const created = [];
+let currentTest = null;
 
 function test(name, fn) {
+    currentTest = name;
     try {
         fn();
         ++passed;
@@ -48,7 +54,8 @@ function asyncTest(name, fn) {
 function newExecutor(options) {
     const { host, log } = createFakeHost();
     const executor = new executorModule.GLWebGPUExecutor(null,
-        Object.assign({ host }, options || {}));
+        Object.assign({ host, strict: true }, options || {}));
+    created.push([currentTest, executor]);
     executor.initializeSync = () => {
         // initialize() is async only because a real adapter request is; the
         // fake resolves immediately, so the tests drive it synchronously.
@@ -1238,6 +1245,9 @@ test("bind groups use each uniform slice's page across a rollover", () => {
         .call("LINK_PROGRAM", 1).call("USE_PROGRAM", 1));
     executor.uniformCapacity = 1024;
     executor.uniformCursor = 768;
+    // (a pipeline with no vertex buffers is invalid; only its bind groups
+    // are under test)
+    executor.expectErrors = true;
     const original = executor.uniformRing;
     executor.ensurePass();
     const shaders = executor.resolveShaders();
@@ -1517,6 +1527,9 @@ asyncTest("glReadPixels writes the pixels and then the status word", async () =>
 
 test("pipeline cache separates constant attributes from vertex streams", () => {
     const { executor } = newExecutor();
+    // (a hand-made request with one attribute: the pipelines are invalid,
+    // only their cache keys are under test)
+    executor.expectErrors = true;
     run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64));
     executor.ensurePass();
     const shaders = executor.resolveShaders();
@@ -2427,12 +2440,20 @@ test("inactive uniform blocks allocate and upload nothing", () => {
 
 (async () => {
     for (const [name, fn] of asyncTests) {
+        currentTest = name;
         try {
             await fn();
             ++passed;
         } catch (error) {
             failures.push([name, error]);
         }
+    }
+    await settle();
+    for (const [name, executor] of created) {
+        if (executor.expectErrors) continue;
+        const errors = [...(executor.gpuErrors ? executor.gpuErrors.errors : []).map(e => e.source + ": " + e.message),
+            ...executor.hostErrors.map(e => "host: " + e.message)];
+        if (errors.length) failures.push([name, new Error("unexpected errors: " + errors.join("; "))]);
     }
     for (const [name, error] of failures)
         console.error("FAIL: " + name + "\n    " + (error && error.message));
