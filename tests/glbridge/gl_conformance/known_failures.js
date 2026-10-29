@@ -5,8 +5,6 @@
 // tile; a known failure that passes fails the run.
 "use strict";
 globalThis.GLConformanceKnownFailures = {
-    texenv_crossbar_unit1_off: "S1-2g: a COMBINE crossbar source on a disabled unit is invalid WGSL",
-    depth_range_reversed: "S1-2d: glDepthRange(n > f) is refused by WebGPU",
     clip_planes: { reason: "S2-10: user clip planes", tiles: [
         "plane1 keeps y<=10",
     ] },

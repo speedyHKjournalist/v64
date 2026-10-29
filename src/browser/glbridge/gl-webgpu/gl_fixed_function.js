@@ -825,7 +825,7 @@
 
         for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
             const unit = sig.texture[i];
-            if (!unit.enabled) continue;
+            if (!unit.enabled || readsDisabledUnit(sig, unit)) continue;
             emitTextureEnv(emit, sig, i, unit);
         }
 
@@ -1059,6 +1059,23 @@
         default:
             throw new Error("unknown texture environment mode " + env.mode);
         }
+    }
+
+    /*
+     * ARB_texture_env_crossbar: a unit whose combiner reads the texture of a
+     * unit that is disabled is as though its blending were disabled -- it
+     * passes the previous colour on (review S1-2g: the WGSL named a texture
+     * that was never declared). Only the sources its functions use count.
+     */
+    function readsDisabledUnit(sig, unit) {
+        const env = unit.env;
+        if (env.mode !== "COMBINE") return false;
+        const used = fn => fn === "REPLACE" ? 1 : fn === "INTERPOLATE" ? 3 : 2;
+        const sources = [...env.srcRGB.slice(0, used(env.combineRGB)), ...env.srcAlpha.slice(0, used(env.combineAlpha))];
+        return sources.some(source => {
+            const crossbar = /^TEXTURE(\d)$/.exec(source);
+            return crossbar && !sig.texture[+crossbar[1]].enabled;
+        });
     }
 
     function combineSource(source, unitIndex) {

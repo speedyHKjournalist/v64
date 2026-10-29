@@ -488,6 +488,23 @@ test("a GL_QUADS draw is issued as an indexed triangle list", () => {
         "triangle-list");
 });
 
+test("a reversed depth range draws with the flipped vertex stage and an ordered viewport", () => {
+    const { executor, log } = newExecutor();
+    const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64);
+    immediateTriangle(stream);
+    stream.call("DEPTH_RANGE", 1, 0);
+    immediateTriangle(stream);
+    stream.call("DEPTH_RANGE", 0.25, 0.75);
+    immediateTriangle(stream);
+    run(executor, stream);
+    assert.strictEqual(log.draws.length, 3);
+    const code = draw => draw.pipeline.descriptor.vertex.module.code;
+    assert.ok(code(log.draws[0]).includes("clip.z = (clip.z + clip.w) * 0.5;"));
+    assert.ok(code(log.draws[1]).includes("clip.z = (clip.w - clip.z) * 0.5;"),
+        "glDepthRange(1, 0) negates z, the viewport has it in order");
+    assert.strictEqual(log.draws[2].pipeline, log.draws[0].pipeline, "an ordered range is the plain pipeline again");
+});
+
 test("glPolygonMode line and point rasterize triangle edges and vertices", () => {
     const line = newExecutor();
     let stream = new GLStream().makeCurrent(1, 0, 0, 64, 64)

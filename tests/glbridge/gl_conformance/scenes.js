@@ -34,6 +34,12 @@ class Scene {
         const [x, y, w, h] = this.tileRect(i);
         this.tiles.push({ label: text, x, y, w, h });
     }
+    // The last tile's colour as the specification says it is (RGBA bytes),
+    // where the reference renderers disagree with it; `why` cites the clause
+    expect(rgba, why) {
+        Object.assign(this.tiles[this.tiles.length - 1], { expect: rgba, why });
+        return this;
+    }
     ortho2d() {
         return this.op("MatrixMode", "PROJECTION").op("LoadIdentity")
             .op("Ortho", 0, SIZE, 0, SIZE, -1, 1)
@@ -202,6 +208,9 @@ for (const enabled of [true, false]) scene("texenv_crossbar_" + (enabled ? "unit
     s.op("Color4f", 0.4, 0.2, 0.9, 0.6);
     s.ops_(combine("TEXTURE0", { rgb: "REPLACE", alpha: "REPLACE", src: ["TEXTURE1", "PREVIOUS", "CONSTANT"], srcA: ["TEXTURE1", "PREVIOUS", "CONSTANT"] }));
     s.tileQuad(0, enabled ? "unit0 = TEXTURE1 colour" : "unit1 off: primary colour", () => [["MultiTexCoord2f", "TEXTURE0", 0.5, 0.5], ["MultiTexCoord2f", "TEXTURE1", 0.5, 0.5]]);
+    // Apple's renderers give black here, the extension's older "undefined"
+    if (!enabled) s.expect([102, 51, 229, 153], "GL 2.1 §3.8.13: a unit whose environment references a disabled " +
+        "unit is as if its texture blending were disabled -- the primary colour passes");
 });
 
 /* ------------------------------------------------------------------ */

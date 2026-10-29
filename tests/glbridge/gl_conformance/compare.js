@@ -88,9 +88,22 @@
      * bytes as Uint8Array); got: the executor's { rgba, extra, error,
      * validation, exception }. Returns the verdict and what failed.
      */
+    // The references with the tiles the specification decides (tile.expect)
+    // painted in its colour: there the renderers' agreement does not count
+    function specified(scene, image) {
+        if (!image || !scene.tiles.some(tile => tile.expect)) return image;
+        const out = image.slice();
+        for (const tile of scene.tiles) {
+            if (!tile.expect) continue;
+            for (let y = tile.y; y < tile.y + tile.h; ++y)
+                for (let x = tile.x; x < tile.x + tile.w; ++x) out.set(tile.expect, (y * SIZE + x) * 4);
+        }
+        return out;
+    }
+
     function compareScene(scene, hw, sw, got, tol = 2) {
         const synth = synthetic(scene.name);
-        const ref = synth || hw.rgba, alt = synth ? null : sw.rgba;
+        const ref = specified(scene, synth || hw.rgba), alt = synth ? null : specified(scene, sw.rgba);
         // problems: everything, as text; failedTiles: the labels of the tiles
         // with interior failures; other: what is not a tile's (WebGPU errors,
         // ReadPixels results)

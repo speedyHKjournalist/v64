@@ -2937,6 +2937,24 @@
 
     /* Reads a name array record: {count u32, names u32[count]}. */
     /*
+     * glDepthRange(n, f) with n > f (review S1-2d): WebGPU's viewport wants
+     * its depth range in order. n + (f - n)(z + 1)/2 equals f + (n - f)(1 - z)/2,
+     * so the viewport gets (f, n) and the vertex stage negates z -- every
+     * generator (fixed function, GLSL, ARB) ends with the same conversion
+     * line, which the variant rewrites.
+     */
+    const DEPTH_CONVERSION = "clip.z = (clip.z + clip.w) * 0.5;";
+
+    function reversedDepthRange(s) {
+        return s.depthRange.near > s.depthRange.far;
+    }
+
+    function flipDepth(wgsl) {
+        if (!wgsl.includes(DEPTH_CONVERSION)) throw new Error("the vertex stage has no depth conversion to flip");
+        return wgsl.split(DEPTH_CONVERSION).join("clip.z = (clip.w - clip.z) * 0.5;");
+    }
+
+    /*
      * glLightiv, glMaterialiv and glLightModeliv: a colour's integers map to
      * [-1, 1] as GL 2.1's table 2.9 says, (2c + 1) / (2^32 - 1); a position,
      * direction, exponent, cutoff, attenuation, shininess or mode is the
@@ -7206,10 +7224,12 @@ ${fragmentCode}`;
             const vp = s.viewport;
             const x = clamp(vp.x, 0, width);
             const y = clamp(vp.y, 0, height);
+            // (a reversed range is the pipeline's flipped variant, flipDepth)
             pass.setViewport(x, y,
                 Math.max(0, Math.min(vp.width, width - x)),
                 Math.max(0, Math.min(vp.height, height - y)),
-                s.depthRange.near, s.depthRange.far);
+                Math.min(s.depthRange.near, s.depthRange.far),
+                Math.max(s.depthRange.near, s.depthRange.far));
             if (s.enabled.has(GL.SCISSOR_TEST) && s.scissor.set) {
                 const sx = clamp(s.scissor.x, 0, width);
                 const sy = clamp(s.scissor.y, 0, height);
@@ -7662,12 +7682,14 @@ ${fragmentCode}`;
                 targets ? targets.color.map(c => c ? c.format : "-").join(",") : "-",
                 targets ? (targets.depthFormat || "-") : "-",
                 s.enabled.has(GL.DEPTH_CLAMP) ? "clamp" : "-",
+                reversedDepthRange(s) ? "zflip" : "-",
             ].join("|");
 
             let pipeline = this.pipelineCache.get(signature);
             if (pipeline) return pipeline.glRejected ? null : pipeline;
 
-            const vertexModule = this.shaderModule(shaders.wgslVertex);
+            const vertexModule = this.shaderModule(reversedDepthRange(s) ?
+                flipDepth(shaders.wgslVertex) : shaders.wgslVertex);
             const fragmentModule = this.shaderModule(shaders.wgslFragment);
             const buffers = request.buffers.map(buffer => ({
                 arrayStride: buffer.stride,
