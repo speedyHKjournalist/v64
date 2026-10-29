@@ -939,7 +939,8 @@ scene("tex_formats_unpack", {
         ["RGBA", "RGBA", "UNSIGNED_SHORT_5_5_5_1", u16([0xF801, 0x07C1, 0x003F, 0x8420]), "RGBA 5_5_5_1"],
         ["RGBA", "BGRA", "UNSIGNED_INT_8_8_8_8_REV", { u32: [0xFF0000FF >>> 0, 0x8000FF00, 0x40FF0000, 0xFF808080 >>> 0] }, "BGRA 8_8_8_8_REV"],
         ["RGBA", "BGRA", "UNSIGNED_BYTE", { u8: [255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64, 10, 20, 30, 255] }, "BGRA ubyte"],
-        ["RGB", "RGB", "UNSIGNED_BYTE_3_3_2", { u8: [0xE0, 0x1C, 0x03, 0x92] }, "RGB 3_3_2"],
+        // (rows padded to UNPACK_ALIGNMENT 4: unpadded, row 1 was read from past the data)
+        ["RGB", "RGB", "UNSIGNED_BYTE_3_3_2", { u8: [0xE0, 0x1C, 0, 0, 0x03, 0x92] }, "RGB 3_3_2"],
         ["RGBA", "RGBA", "UNSIGNED_INT_8_8_8_8", { u32: [0xFF0000FF >>> 0, 0x00FF0080, 0x0000FF40, 0x808080FF >>> 0] }, "RGBA 8_8_8_8"],
         ["RGBA", "RGBA", "UNSIGNED_SHORT_4_4_4_4_REV", u16([0xF00F, 0x0F0F, 0x00FF, 0x8888]), "RGBA 4_4_4_4_REV"],
         ["LUMINANCE_ALPHA", "LUMINANCE_ALPHA", "FLOAT", { f32: [1, 0.5, 0.25, 1, 0.75, 0, 0, 1] }, "LA float"],

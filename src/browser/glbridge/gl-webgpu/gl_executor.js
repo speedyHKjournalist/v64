@@ -799,8 +799,31 @@
             // in the shader, the same way the D3D9 path handles P8.
             return { gpu: "r8uint", base: "COLOR_INDEX", palettised: true };
         default:
-            return { gpu: "rgba8unorm", base: base || "RGBA" };
+            return { gpu: "rgba8unorm", base: base || "RGBA",
+                ...(SIZED_BITS[internalFormat] ? { bits: SIZED_BITS[internalFormat] } : {}) };
         }
+    }
+
+    /*
+     * The bits a sized internal format keeps per channel (R, G, B, A), when
+     * fewer than eight: the image is stored at that precision as GL does
+     * (review S2-22: RGB5_A1 kept an alpha of 100 that has one bit)
+     */
+    const SIZED_BITS = {
+        [GL.R3_G3_B2]: [3, 3, 2, 8], [GL.RGB4]: [4, 4, 4, 8], [GL.RGB5]: [5, 5, 5, 8],
+        [GL.RGBA2]: [2, 2, 2, 2], [GL.RGBA4]: [4, 4, 4, 4], [GL.RGB5_A1]: [5, 5, 5, 1],
+        [GL.ALPHA4]: [8, 8, 8, 4], [GL.LUMINANCE4]: [4, 4, 4, 8], [GL.LUMINANCE4_ALPHA4]: [4, 4, 4, 4],
+    };
+
+    function quantize(pixels, bits) {
+        const tables = bits.map(b => {
+            const table = new Uint8Array(256);
+            const levels = (1 << b) - 1;
+            for (let v = 0; v < 256; ++v) table[v] = expandBits(Math.round(v * levels / 255), b);
+            return table;
+        });
+        for (let i = 0; i < pixels.length; i += 4)
+            for (let c = 0; c < 4; ++c) pixels[i + c] = tables[c][pixels[i + c]];
     }
 
     /* Components per texel in the *source* data, by format. */
@@ -847,118 +870,89 @@
     function expandBits(value, bits) {
         // Replicating the high bits is GL's rule for widening a packed
         // component, and it is why 5-bit 31 becomes 255 and not 248.
+        // Each copy goes right below the last one (3-bit 7 was 231 and 1-bit
+        // 1 was 129: the copies were all put at the bottom).
         if (bits >= 8) return (value >>> (bits - 8)) & 0xff;
-        let out = value << (8 - bits);
-        let filled = bits;
-        while (filled < 8) {
-            out |= value >>> (bits - Math.min(bits, 8 - filled));
-            filled += bits;
-        }
+        let out = 0;
+        for (let at = 8 - bits; at > -bits; at -= bits)
+            out |= at >= 0 ? value << at : value >>> -at;
         return out & 0xff;
     }
 
     /*
      * Reads one source texel into out[0..3] as 0..255, applying the source
-     * format's channel meaning but not the internal format's expansion.
+     * format's channel meaning but not the internal format's expansion. A
+     * packed type's fields are the format's components in order -- BGRA's
+     * first is blue (review S2-22: they were taken as RGBA) -- and `swap`
+     * is UNPACK_SWAP_BYTES, which reverses each multi-byte element.
      */
-    function readSourceTexel(view, byteOffset, format, type, out) {
-        const packed = PACKED_TYPES.has(type);
-        if (packed) {
+    function readSourceTexel(view, byteOffset, format, type, out, swap) {
+        const little = !swap;
+        const c = [0, 0, 0, 255];
+        let components;
+        if (PACKED_TYPES.has(type)) {
             let raw;
             switch (TYPE_BYTES[type]) {
             case 1: raw = view.getUint8(byteOffset); break;
-            case 2: raw = view.getUint16(byteOffset, true); break;
-            default: raw = view.getUint32(byteOffset, true); break;
+            case 2: raw = view.getUint16(byteOffset, little); break;
+            default: raw = view.getUint32(byteOffset, little); break;
             }
+            components = 4;
             switch (type) {
             case GL.UNSIGNED_BYTE_3_3_2:
-                out[0] = expandBits((raw >> 5) & 7, 3);
-                out[1] = expandBits((raw >> 2) & 7, 3);
-                out[2] = expandBits(raw & 3, 2);
-                out[3] = 255;
-                return;
+                c[0] = expandBits((raw >> 5) & 7, 3); c[1] = expandBits((raw >> 2) & 7, 3);
+                c[2] = expandBits(raw & 3, 2); components = 3; break;
             case GL.UNSIGNED_BYTE_2_3_3_REV:
-                out[0] = expandBits(raw & 7, 3);
-                out[1] = expandBits((raw >> 3) & 7, 3);
-                out[2] = expandBits((raw >> 6) & 3, 2);
-                out[3] = 255;
-                return;
+                c[0] = expandBits(raw & 7, 3); c[1] = expandBits((raw >> 3) & 7, 3);
+                c[2] = expandBits((raw >> 6) & 3, 2); components = 3; break;
             case GL.UNSIGNED_SHORT_5_6_5:
-                out[0] = expandBits((raw >> 11) & 31, 5);
-                out[1] = expandBits((raw >> 5) & 63, 6);
-                out[2] = expandBits(raw & 31, 5);
-                out[3] = 255;
-                return;
+                c[0] = expandBits((raw >> 11) & 31, 5); c[1] = expandBits((raw >> 5) & 63, 6);
+                c[2] = expandBits(raw & 31, 5); components = 3; break;
             case GL.UNSIGNED_SHORT_5_6_5_REV:
-                out[0] = expandBits(raw & 31, 5);
-                out[1] = expandBits((raw >> 5) & 63, 6);
-                out[2] = expandBits((raw >> 11) & 31, 5);
-                out[3] = 255;
-                return;
+                c[0] = expandBits(raw & 31, 5); c[1] = expandBits((raw >> 5) & 63, 6);
+                c[2] = expandBits((raw >> 11) & 31, 5); components = 3; break;
             case GL.UNSIGNED_SHORT_4_4_4_4:
-                out[0] = expandBits((raw >> 12) & 15, 4);
-                out[1] = expandBits((raw >> 8) & 15, 4);
-                out[2] = expandBits((raw >> 4) & 15, 4);
-                out[3] = expandBits(raw & 15, 4);
-                return;
+                c[0] = expandBits((raw >> 12) & 15, 4); c[1] = expandBits((raw >> 8) & 15, 4);
+                c[2] = expandBits((raw >> 4) & 15, 4); c[3] = expandBits(raw & 15, 4); break;
             case GL.UNSIGNED_SHORT_4_4_4_4_REV:
-                out[0] = expandBits(raw & 15, 4);
-                out[1] = expandBits((raw >> 4) & 15, 4);
-                out[2] = expandBits((raw >> 8) & 15, 4);
-                out[3] = expandBits((raw >> 12) & 15, 4);
-                return;
+                c[0] = expandBits(raw & 15, 4); c[1] = expandBits((raw >> 4) & 15, 4);
+                c[2] = expandBits((raw >> 8) & 15, 4); c[3] = expandBits((raw >> 12) & 15, 4); break;
             case GL.UNSIGNED_SHORT_5_5_5_1:
-                out[0] = expandBits((raw >> 11) & 31, 5);
-                out[1] = expandBits((raw >> 6) & 31, 5);
-                out[2] = expandBits((raw >> 1) & 31, 5);
-                out[3] = (raw & 1) ? 255 : 0;
-                return;
+                c[0] = expandBits((raw >> 11) & 31, 5); c[1] = expandBits((raw >> 6) & 31, 5);
+                c[2] = expandBits((raw >> 1) & 31, 5); c[3] = (raw & 1) ? 255 : 0; break;
             case GL.UNSIGNED_SHORT_1_5_5_5_REV:
-                out[0] = expandBits(raw & 31, 5);
-                out[1] = expandBits((raw >> 5) & 31, 5);
-                out[2] = expandBits((raw >> 10) & 31, 5);
-                out[3] = (raw & 0x8000) ? 255 : 0;
-                return;
+                c[0] = expandBits(raw & 31, 5); c[1] = expandBits((raw >> 5) & 31, 5);
+                c[2] = expandBits((raw >> 10) & 31, 5); c[3] = (raw & 0x8000) ? 255 : 0; break;
             case GL.UNSIGNED_INT_8_8_8_8:
-                out[0] = (raw >>> 24) & 0xff; out[1] = (raw >>> 16) & 0xff;
-                out[2] = (raw >>> 8) & 0xff; out[3] = raw & 0xff;
-                return;
+                c[0] = (raw >>> 24) & 0xff; c[1] = (raw >>> 16) & 0xff;
+                c[2] = (raw >>> 8) & 0xff; c[3] = raw & 0xff; break;
             case GL.UNSIGNED_INT_8_8_8_8_REV:
-                out[0] = raw & 0xff; out[1] = (raw >>> 8) & 0xff;
-                out[2] = (raw >>> 16) & 0xff; out[3] = (raw >>> 24) & 0xff;
-                return;
+                c[0] = raw & 0xff; c[1] = (raw >>> 8) & 0xff;
+                c[2] = (raw >>> 16) & 0xff; c[3] = (raw >>> 24) & 0xff; break;
             case GL.UNSIGNED_INT_10_10_10_2:
-                out[0] = expandBits((raw >>> 22) & 1023, 10);
-                out[1] = expandBits((raw >>> 12) & 1023, 10);
-                out[2] = expandBits((raw >>> 2) & 1023, 10);
-                out[3] = expandBits(raw & 3, 2);
-                return;
+                c[0] = expandBits((raw >>> 22) & 1023, 10); c[1] = expandBits((raw >>> 12) & 1023, 10);
+                c[2] = expandBits((raw >>> 2) & 1023, 10); c[3] = expandBits(raw & 3, 2); break;
             default:  // UNSIGNED_INT_2_10_10_10_REV
-                out[0] = expandBits(raw & 1023, 10);
-                out[1] = expandBits((raw >>> 10) & 1023, 10);
-                out[2] = expandBits((raw >>> 20) & 1023, 10);
-                out[3] = expandBits((raw >>> 30) & 3, 2);
-                return;
+                c[0] = expandBits(raw & 1023, 10); c[1] = expandBits((raw >>> 10) & 1023, 10);
+                c[2] = expandBits((raw >>> 20) & 1023, 10); c[3] = expandBits((raw >>> 30) & 3, 2); break;
+            }
+        } else {
+            const typeBytes = TYPE_BYTES[type];
+            components = SOURCE_COMPONENTS[format] || 1;
+            for (let i = 0; i < components; ++i) {
+                const at = byteOffset + i * typeBytes;
+                switch (type) {
+                case GL.UNSIGNED_BYTE: c[i] = view.getUint8(at); break;
+                case GL.BYTE: c[i] = clamp(view.getInt8(at), 0, 127) * 2; break;
+                case GL.UNSIGNED_SHORT: c[i] = view.getUint16(at, little) >>> 8; break;
+                case GL.SHORT: c[i] = clamp(view.getInt16(at, little), 0, 32767) >>> 7; break;
+                case GL.UNSIGNED_INT: c[i] = view.getUint32(at, little) >>> 24; break;
+                case GL.INT: c[i] = clamp(view.getInt32(at, little), 0, 0x7fffffff) >>> 23; break;
+                case GL.FLOAT: c[i] = clamp(Math.round(view.getFloat32(at, little) * 255), 0, 255); break;
+                default: c[i] = 0;
+                }
             }
         }
-
-        const typeBytes = TYPE_BYTES[type];
-        const components = SOURCE_COMPONENTS[format] || 1;
-        const read = i => {
-            const at = byteOffset + i * typeBytes;
-            switch (type) {
-            case GL.UNSIGNED_BYTE: return view.getUint8(at);
-            case GL.BYTE: return clamp(view.getInt8(at), 0, 127) * 2;
-            case GL.UNSIGNED_SHORT: return view.getUint16(at, true) >>> 8;
-            case GL.SHORT: return clamp(view.getInt16(at, true), 0, 32767) >>> 7;
-            case GL.UNSIGNED_INT: return view.getUint32(at, true) >>> 24;
-            case GL.INT: return clamp(view.getInt32(at, true), 0, 0x7fffffff) >>> 23;
-            case GL.FLOAT: return clamp(Math.round(view.getFloat32(at, true) * 255), 0, 255);
-            default: return 0;
-            }
-        };
-        const c = [];
-        for (let i = 0; i < components; ++i) c.push(read(i));
 
         switch (format) {
         case GL.RED: out[0] = c[0]; out[1] = 0; out[2] = 0; out[3] = 255; return;
@@ -978,9 +972,18 @@
         case GL.RGBA: out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = c[3]; return;
         case GL.BGRA: out[0] = c[2]; out[1] = c[1]; out[2] = c[0]; out[3] = c[3]; return;
         case GL.ABGR_EXT: out[0] = c[3]; out[1] = c[2]; out[2] = c[1]; out[3] = c[0]; return;
-        default: out[0] = c[0] || 0; out[1] = c[1] || 0; out[2] = c[2] || 0;
-                 out[3] = c[3] === undefined ? 255 : c[3];
+        default: out[0] = c[0]; out[1] = components > 1 ? c[1] : 0; out[2] = components > 2 ? c[2] : 0;
+                 out[3] = components > 3 ? c[3] : 255;
         }
+    }
+
+    // The pixel store's unpack state as convertPixels takes it
+    function unpackState(store) {
+        return {
+            rowLength: store.unpackRowLength, skipPixels: store.unpackSkipPixels, skipRows: store.unpackSkipRows,
+            skipImages: store.unpackSkipImages, imageHeight: store.unpackImageHeight,
+            alignment: store.unpackAlignment, swapBytes: !!store.unpackSwapBytes,
+        };
     }
 
     /* Applies the internal base format's expansion, in place. */
@@ -1032,6 +1035,7 @@
             source.byteLength);
         const limit = source.byteLength;
 
+        const swap = !!unpack.swapBytes;
         const fastCopy = type === GL.UNSIGNED_BYTE && format === GL.RGBA &&
             base === "RGBA";
         const fastBGRA = type === GL.UNSIGNED_BYTE && format === GL.BGRA &&
@@ -1046,7 +1050,19 @@
                     (skipImages + z) * imageHeight * srcRowBytes +
                     (skipRows + y) * srcRowBytes + skipPixels * texelBytes;
                 let dst = ((z * height + y) * width) * 4;
-                if (src + width * texelBytes > limit) return null;
+                // A record short of the rows its unpack state says (the last
+                // row's alignment padding, which applications often do not
+                // allocate) leaves those texels zero rather than losing the
+                // image (review S2-22's 3_3_2 case)
+                if (src + width * texelBytes > limit) {
+                    for (let x = 0; x < width && src + texelBytes <= limit; ++x) {
+                        readSourceTexel(view, src, format, type, texel, swap);
+                        applyBaseFormat(base, texel);
+                        out.set(texel, dst);
+                        src += texelBytes; dst += 4;
+                    }
+                    continue;
+                }
                 if (fastCopy) {
                     out.set(source.subarray(src, src + width * 4), dst);
                     continue;
@@ -1072,7 +1088,7 @@
                     continue;
                 }
                 for (let x = 0; x < width; ++x) {
-                    readSourceTexel(view, src, format, type, texel);
+                    readSourceTexel(view, src, format, type, texel, swap);
                     applyBaseFormat(base, texel);
                     out[dst] = texel[0]; out[dst + 1] = texel[1];
                     out[dst + 2] = texel[2]; out[dst + 3] = texel[3];
@@ -1111,10 +1127,10 @@
         return sign | ((exponent + 15) << 10) | (fraction & 0x3ff);
     }
 
-    function readSourceTexelFloat(view, byteOffset, format, type, out) {
+    function readSourceTexelFloat(view, byteOffset, format, type, out, swap) {
         if (PACKED_TYPES.has(type)) {
             const bytes = new Uint8Array(4);
-            readSourceTexel(view, byteOffset, format, type, bytes);
+            readSourceTexel(view, byteOffset, format, type, bytes, swap);
             for (let i = 0; i < 4; ++i) out[i] = bytes[i] / 255;
             return;
         }
@@ -1125,12 +1141,12 @@
             switch (type) {
             case GL.UNSIGNED_BYTE: return view.getUint8(at) / 255;
             case GL.BYTE: return Math.max(view.getInt8(at) / 127, -1);
-            case GL.UNSIGNED_SHORT: return view.getUint16(at, true) / 65535;
-            case GL.SHORT: return Math.max(view.getInt16(at, true) / 32767, -1);
-            case GL.UNSIGNED_INT: return view.getUint32(at, true) / 4294967295;
-            case GL.INT: return Math.max(view.getInt32(at, true) / 2147483647, -1);
-            case GL.FLOAT: return view.getFloat32(at, true);
-            case GL.HALF_FLOAT: return halfToFloat(view.getUint16(at, true));
+            case GL.UNSIGNED_SHORT: return view.getUint16(at, !swap) / 65535;
+            case GL.SHORT: return Math.max(view.getInt16(at, !swap) / 32767, -1);
+            case GL.UNSIGNED_INT: return view.getUint32(at, !swap) / 4294967295;
+            case GL.INT: return Math.max(view.getInt32(at, !swap) / 2147483647, -1);
+            case GL.FLOAT: return view.getFloat32(at, !swap);
+            case GL.HALF_FLOAT: return halfToFloat(view.getUint16(at, !swap));
             default: return 0;
             }
         };
@@ -1165,6 +1181,7 @@
         if (!storage.float && !storage.depth && !storage.palettised) {
             const pixels = convertPixels(source, byteOffset, width, height, depth,
                 format, type, storage.base, unpack);
+            if (pixels && storage.bits) quantize(pixels, storage.bits);
             return pixels ? { pixels, bytesPerTexel: 4, componentType: "u8",
                                componentCount: 4 } : null;
         }
@@ -1208,7 +1225,7 @@
                     (skipRows + y) * srcRowBytes + skipPixels * texelBytes;
                 if (src + width * texelBytes > source.byteLength) return null;
                 for (let x = 0; x < width; ++x) {
-                    readSourceTexelFloat(view, src, format, type, texel);
+                    readSourceTexelFloat(view, src, format, type, texel, unpack.swapBytes);
                     if (storage.palettised) {
                         output[dst++] = clamp(Math.round(texel[0] * 255), 0, 255);
                     } else if (componentCount === 1) {
@@ -4652,14 +4669,7 @@
             };
             if (data && data.byteLength) {
                 const converted = convertPixelsForStorage(data, 0, width, height,
-                    depth, format, type, storage, {
-                        rowLength: this.current.pixelStore.unpackRowLength,
-                        skipPixels: this.current.pixelStore.unpackSkipPixels,
-                        skipRows: this.current.pixelStore.unpackSkipRows,
-                        skipImages: this.current.pixelStore.unpackSkipImages,
-                        imageHeight: this.current.pixelStore.unpackImageHeight,
-                        alignment: this.current.pixelStore.unpackAlignment,
-                    });
+                    depth, format, type, storage, unpackState(this.current.pixelStore));
                 if (!converted)
                     return this.refuse("glTexImage", "unsupported pixel format",
                         { format, type, internalFormat }, GL.INVALID_ENUM);
@@ -4703,14 +4713,7 @@
                 depth: slot.base === "DEPTH",
                 palettised: slot.base === "COLOR_INDEX" };
             const converted = convertPixelsForStorage(data, 0, width, height,
-                depth, format, type, storage, {
-                    rowLength: this.current.pixelStore.unpackRowLength,
-                    skipPixels: this.current.pixelStore.unpackSkipPixels,
-                    skipRows: this.current.pixelStore.unpackSkipRows,
-                    skipImages: this.current.pixelStore.unpackSkipImages,
-                    imageHeight: this.current.pixelStore.unpackImageHeight,
-                    alignment: this.current.pixelStore.unpackAlignment,
-                });
+                depth, format, type, storage, unpackState(this.current.pixelStore));
             if (!converted)
                 return this.refuse("glTexSubImage", "unsupported pixel format",
                     { format, type }, GL.INVALID_ENUM);
@@ -9391,14 +9394,7 @@ struct BlitParams {
             const source = bytes.subarray(offset + 20, offset + 20 + dataSize);
             const store = this.current.pixelStore;
             const rgba = convertPixels(source, 0, width, height, 1,
-                format, type, "RGBA", {
-                    alignment: store.unpackAlignment,
-                    rowLength: store.unpackRowLength,
-                    skipPixels: store.unpackSkipPixels,
-                    skipRows: store.unpackSkipRows,
-                    imageHeight: store.unpackImageHeight,
-                    skipImages: store.unpackSkipImages,
-                });
+                format, type, "RGBA", unpackState(store));
             if (!rgba)
                 return this.refuse("glDrawPixels", "unsupported or truncated pixel data",
                     { width, height, format, type }, GL.INVALID_ENUM);

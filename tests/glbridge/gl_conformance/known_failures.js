@@ -9,12 +9,6 @@ globalThis.GLConformanceKnownFailures = {
         "CLAMP",
         "CLAMP_TO_BORDER",
     ] },
-    tex_formats_unpack: { reason: "S2-22: BGRA with packed _REV types swaps red and blue", tiles: [
-        "BGRA 8_8_8_8_REV",
-        "RGB 3_3_2",
-        "internal RGB5_A1",
-        "UNPACK_SWAP_BYTES 5_6_5 (= tile 0)",
-    ] },
     polymode_line: { reason: "S2-14: wireframe draws the triangulation's diagonal", tiles: [
         "LINE mode outline",
     ] },
