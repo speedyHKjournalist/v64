@@ -7244,13 +7244,18 @@ ${fragmentCode}`;
             const targets = this.passTargets;
             const width = targets ? targets.width : this.backBufferWidth;
             const height = targets ? targets.height : this.backBufferHeight;
+            // GL's viewport as it is: WebGPU lets one extend past the target
+            // (within twice the largest texture size; the target clips the
+            // fragments), so a viewport partly outside the window keeps its
+            // scale (review S2-7: it was clamped into the target, squashing
+            // the picture)
             const vp = s.viewport;
-            const x = clamp(vp.x, 0, width);
-            const y = clamp(vp.y, 0, height);
+            const limit = (this.limits && this.limits.maxTextureDimension2D) || 8192;
+            const vw = clamp(vp.width, 0, limit), vh = clamp(vp.height, 0, limit);
+            const x = clamp(vp.x, -2 * limit, 2 * limit - 1 - vw);
+            const y = clamp(vp.y, -2 * limit, 2 * limit - 1 - vh);
             // (a reversed range is the pipeline's flipped variant, flipDepth)
-            pass.setViewport(x, y,
-                Math.max(0, Math.min(vp.width, width - x)),
-                Math.max(0, Math.min(vp.height, height - y)),
+            pass.setViewport(x, y, vw, vh,
                 Math.min(s.depthRange.near, s.depthRange.far),
                 Math.max(s.depthRange.near, s.depthRange.far));
             if (s.enabled.has(GL.SCISSOR_TEST) && s.scissor.set) {

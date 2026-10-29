@@ -144,11 +144,17 @@ function passProblems(descriptor) {
     return problems;
 }
 
-function viewportProblems(x, y, width, height, minDepth, maxDepth) {
+// setViewport: a viewport may lie partly outside the target, within twice
+// the largest texture dimension (maxTextureDimension2D, 8192 by default)
+function viewportProblems(x, y, width, height, minDepth, maxDepth, maxDimension = 8192) {
     if (!(minDepth >= 0 && minDepth <= 1 && maxDepth >= 0 && maxDepth <= 1 && minDepth <= maxDepth))
         return ["Viewport minDepth (" + minDepth + ") and maxDepth (" + maxDepth +
             ") are not in [0, 1] or minDepth was greater than maxDepth"];
     if (width < 0 || height < 0) return ["a negative viewport size"];
+    const range = 2 * maxDimension;
+    if (width > maxDimension || height > maxDimension || x < -range || y < -range ||
+            x + width > range - 1 || y + height > range - 1)
+        return ["the viewport (" + [x, y, width, height] + ") is outside the range WebGPU allows"];
     return [];
 }
 

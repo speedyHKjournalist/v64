@@ -65,8 +65,4 @@ globalThis.GLConformanceKnownFailures = {
         "state.fog.color, FOG enabled",
         "state.light[0].diffuse in FP",
     ] },
-    viewport_offscreen: { reason: "S2-7: a viewport outside the window is squashed", tiles: [
-        "Viewport(-32,0,128,32): NDC x in [-.25,.25] -> window x 16..48",
-        "Viewport(0,32,128,128): NDC [-1,-.75]^2 -> window 0..16 x 32..48",
-    ] },
 };

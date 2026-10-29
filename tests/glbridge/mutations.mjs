@@ -136,6 +136,8 @@ const MUTATIONS = {
             "                else snapshot.clipPlanes[i].set(PASSING_PLANE);", "                else snapshot.clipPlanes[i].set(s.clipPlanes[i]);"],
         ["pipelines keyed by program name", G + "gl_executor.js",
             'kind: "program", key: "p" + entry.codeKey,', 'kind: "program", key: "p" + program.name + "|" + key,'],
+        ["the viewport is clamped into the target", G + "gl_executor.js",
+            "            const x = clamp(vp.x, -2 * limit, 2 * limit - 1 - vw);", "            const x = clamp(vp.x, 0, width);"],
         ["CONSTANT_ALPHA blends with the constant's RGB", G + "gl_executor.js",
             "return usesAlpha && !usesColor ? { r: a, g: a, b: a, a } : { r, g, b, a };", "return { r, g, b, a };"],
     ] },
