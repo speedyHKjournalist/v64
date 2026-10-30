@@ -355,6 +355,90 @@ test("boolean and sampler array updates reach every renderer element without ext
     assert.equal(p.samplerUnits.get("tex[0]"), 2); assert.equal(p.samplerUnits.get("tex[1]"), 5);
 });
 
+const RELINK_VS = "void main() { gl_Position = gl_Vertex; }";
+const RELINK_FS = "uniform vec4 tint; void main() { gl_FragColor = tint; }";
+const RELINK_BAD = "void main() { gl_FragColor = unknownValue; }";
+function relinkSetup() {
+    return new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1)
+        .call("CREATE_SHADER", 1, GL.VERTEX_SHADER).shaderSource(1, RELINK_VS).call("COMPILE_SHADER", 1)
+        .call("CREATE_SHADER", 2, GL.FRAGMENT_SHADER).shaderSource(2, RELINK_FS).call("COMPILE_SHADER", 2)
+        .call("CREATE_PROGRAM", 5).call("ATTACH_SHADER", 5, 1).call("ATTACH_SHADER", 5, 2)
+        .call("LINK_PROGRAM", 5).call("USE_PROGRAM", 5);
+}
+test("changing shader source preserves compiled code until CompileShader", async () => {
+    const shadow = newShadow(), { host } = createFakeHost(), executor = new GLWebGPUExecutor(null, { host });
+    await executor.initialize();
+    const s = relinkSetup().shaderSource(2, RELINK_BAD);
+    const compiled = s.queryObjectiv(SHADER, 2, GL.COMPILE_STATUS);
+    s.call("LINK_PROGRAM", 5);
+    const linked = s.queryObjectiv(PROGRAM, 5, GL.LINK_STATUS);
+    shadow.process(s.bytes()); executor.submit(s.bytes(), {});
+    const reference = require("./gl_conformance/glsl_relink_reference.json").cases;
+    assert.equal(int(compiled, "QUERY_OBJECT_IV", "value"), reference.source_only_compile_status);
+    assert.equal(int(linked, "QUERY_OBJECT_IV", "value"), reference.source_only_link_status);
+    assert.ok(executor.currentProgramObject().linked, "renderer must use the previously compiled source");
+});
+test("failed relinks preserve installed code and uniforms, successful relinks reset them", async () => {
+    const shadow = newShadow(), { host } = createFakeHost(), executor = new GLWebGPUExecutor(null, { host });
+    await executor.initialize();
+    const s = relinkSetup(), location = s.queryLocation(UNIFORM, 5, "tint", 32);
+    shadow.process(s.bytes()); executor.submit(s.bytes(), {});
+    const at = int(location, "QUERY_LOCATION", "result");
+    const values = new GLStream().uniformfv(at, 4, 1, [0.25, 0.5, 0.75, 1]);
+    shadow.process(values.bytes()); executor.submit(values.bytes(), {});
+    const gpu = executor.currentProgramObject(), oldLink = gpu.link, oldCompiled = gpu.compiled, oldSerial = gpu.serial;
+    const p = shadow.current.group.programs.get(5), oldInput = p.executableInput;
+    const fail = new GLStream().shaderSource(2, RELINK_BAD).call("COMPILE_SHADER", 2).call("LINK_PROGRAM", 5);
+    const linked = fail.queryObjectiv(PROGRAM, 5, GL.LINK_STATUS);
+    const guarded = fail.queryUniform(5, at, 1, 16); guarded.bytes.fill(0xA5, 32);
+    fail.uniformfv(at, 4, 1, [1, 0, 0, 1]).call("USE_PROGRAM", 5);
+    shadow.process(fail.bytes()); executor.submit(fail.bytes(), {});
+    assert.equal(int(linked, "QUERY_OBJECT_IV", "value"), 0);
+    assert.equal(status(guarded, "QUERY_UNIFORM"), FAILED);
+    assert.ok(guarded.bytes.subarray(32).every(v => v === 0xA5));
+    assert.equal(shadow.current.error, GL.INVALID_OPERATION); assert.equal(shadow.stats.rejected, 3);
+    assert.equal(shadow.current.program, 5); assert.equal(executor.currentProgramObject(), gpu);
+    assert.equal(gpu.linked, false); assert.equal(gpu.link, oldLink); assert.equal(gpu.compiled, oldCompiled);
+    assert.equal(gpu.serial, oldSerial); assert.equal(p.executableInput, oldInput);
+    assert.deepEqual(p.values.get(at), [0.25, 0.5, 0.75, 1]);
+    const uniform = gpu.uniformByName.get("tint");
+    assert.deepEqual(Array.from(gpu.uniformFloats.subarray(uniform.offsetBytes / 4, uniform.offsetBytes / 4 + 4)), p.values.get(at));
+    const fixed = new GLStream().shaderSource(2, RELINK_FS).call("COMPILE_SHADER", 2).call("LINK_PROGRAM", 5);
+    shadow.process(fixed.bytes()); executor.submit(fixed.bytes(), {});
+    assert.equal(p.values.size, 0); assert.notEqual(p.executableInput, oldInput);
+    assert.equal(executor.currentProgramObject(), gpu); assert.ok(gpu.linked); assert.ok(gpu.serial > oldSerial);
+    assert.ok(gpu.uniformData.every(v => v === 0));
+});
+test("snapshots retain the failed link and the previous executable's uniform values", () => {
+    const shadow = newShadow(), s = relinkSetup(), location = s.queryLocation(UNIFORM, 5, "tint", 32);
+    shadow.process(s.bytes()); const at = int(location, "QUERY_LOCATION", "result");
+    shadow.process(new GLStream().uniformfv(at, 4, 1, [0.25, 0.5, 0.75, 1])
+        .shaderSource(2, RELINK_BAD).call("COMPILE_SHADER", 2).call("LINK_PROGRAM", 5).bytes());
+    const copy = newShadow(); copy.setState(JSON.parse(JSON.stringify(shadow.getState())));
+    const p = copy.current.group.programs.get(5);
+    assert.equal(copy.linkedProgram(p).ok, false);
+    assert.deepEqual(p.values.get(at), [0.25, 0.5, 0.75, 1]);
+    assert.equal(p.executableInput.shaders.find(s => s.type === GL.FRAGMENT_SHADER).compileSource, RELINK_FS);
+    copy.process(new GLStream().call("USE_PROGRAM", 0).call("USE_PROGRAM", 5).bytes());
+    assert.equal(copy.current.program, 0); assert.equal(copy.current.error, GL.INVALID_OPERATION);
+});
+test("GLSL query errors are latched on the CPU and preserve output", () => {
+    for (const [make, expected] of [
+        [s => s.queryObjectiv(SHADER, 5, GL.COMPILE_STATUS), GL.INVALID_OPERATION],
+        [s => s.queryObjectiv(PROGRAM, 99, GL.LINK_STATUS), GL.INVALID_VALUE],
+        [s => s.queryObjectiv(PROGRAM, 5, 0), GL.INVALID_ENUM],
+        [s => s.queryObjectLog(PROGRAM, 1, 32), GL.INVALID_OPERATION],
+        [s => s.queryActive(1, 5, 99, 32), GL.INVALID_VALUE],
+        [s => s.queryLocation(UNIFORM, 1, "tint", 32), GL.INVALID_OPERATION],
+        [s => s.queryUniform(5, -1, 1, 16), GL.INVALID_OPERATION],
+    ]) {
+        const shadow = newShadow(), setup = relinkSetup(); shadow.process(setup.bytes());
+        const s = new GLStream(), r = make(s); r.bytes.fill(0xA5, 32);
+        shadow.process(s.bytes()); assert.equal(shadow.current.error, expected);
+        assert.equal(shadow.stats.rejected, 1); assert.ok(r.bytes.subarray(32).every(v => v === 0xA5));
+    }
+});
+
 (async () => {
     for (const { name, fn } of tests) {
         try {

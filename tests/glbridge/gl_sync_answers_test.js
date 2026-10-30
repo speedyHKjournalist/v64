@@ -132,6 +132,12 @@ async function guestAnswers(remote) {
     stream.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, 5, 0x8B82);
     const locationAt = stream.length + 4 + P.F.QUERY_LOCATION.status;
     stream.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, 5, "gain", 16);
+    stream.call("USE_PROGRAM", 5).uniformfv(5 * 4096, 1, 1, [2])
+        .shaderSource(2, "void main() { gl_FragColor = unknownValue; }").call("COMPILE_SHADER", 2).call("LINK_PROGRAM", 5);
+    const failedLinkAt = stream.length + 4 + P.F.QUERY_OBJECT_IV.status;
+    stream.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, 5, 0x8B82);
+    const failedUniformAt = stream.length + 4;
+    const guardedUniform = stream.queryUniform(5, 5 * 4096, 1, 16); guardedUniform.bytes.fill(0xA5, 32);
     // a framebuffer object with a texture: glCheckFramebufferStatus
     stream.call("BIND_TEXTURE", 0x0DE1, 7).texImage2D(0x0DE1, 0, 0x1908, 16, 16, 0x1908, 0x1401, null)
         .call("BIND_FRAMEBUFFER", 0x8D40, 3).call("FRAMEBUFFER_TEXTURE", 0x8D40, 0x8CE0, 0x0DE1, 7, 0, 0);
@@ -182,6 +188,9 @@ async function guestAnswers(remote) {
         lightPosition: answer(parameterAt + P.F.QUERY_PARAMETER.status, () => Array.from({ length: 4 },
             (_, i) => view.getFloat64(parameterAt + P.RECORDS.QUERY_PARAMETER.size + i * 8, true))),
         linked: answer(linkAt, () => view.getUint32(linkAt + 4, true)),
+        failedLink: answer(failedLinkAt, () => view.getUint32(failedLinkAt + 4, true)),
+        failedUniform: view.getUint32(failedUniformAt + P.F.QUERY_UNIFORM.status, true) === P.C.V86GL_SYNC_QUERY_STATUS_FAILED &&
+            new Uint8Array(memory.buffer, ARENA + HEADER + failedUniformAt + 32, 16).every(v => v === 0xA5),
         location: answer(locationAt, () => view.getInt32(locationAt + 4, true)),
         framebuffer: answer(fboAt, () => view.getUint32(fboAt + 4, true)),
         arb: answer(arbAt, () => view.getInt32(arbAt + 4, true)),
@@ -224,6 +233,8 @@ async function guestAnswers(remote) {
     assert.equal(results.page.fogDensity, 2.75); assert.equal(results.worker.fogDensity, results.page.fogDensity);
     assert.deepEqual(results.page.rasterPosition, [40, 29, 0.5, 2]); assert.deepEqual(results.worker.rasterPosition, results.page.rasterPosition);
     assert.deepEqual(results.page.pixelMap, [0, 32768, 65535, 16384]); assert.deepEqual(results.worker.pixelMap, results.page.pixelMap);
+    assert.equal(results.page.failedLink, 0); assert.equal(results.worker.failedLink, 0);
+    assert.equal(results.page.failedUniform, true); assert.equal(results.worker.failedUniform, true);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;

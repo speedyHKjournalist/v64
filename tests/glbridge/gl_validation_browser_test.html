@@ -145,6 +145,35 @@
             executor.submit(remote ? mapMemory.slice() : mapMemory, {}); await executor.idle();
             check(mapPixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "pixel-map readback must finish");
             check([255, 255, 191, 255].every((v, i) => Math.abs(mapPixel.bytes[32 + i] - v) <= 1), "integer/short pixel maps changed pixels");
+            const goodFS = "uniform vec4 tint; void main() { gl_FragColor = tint; }";
+            const relink = new GLStream().makeCurrent(50, 0, 0, 64, 64, 50, 50)
+                .call("CREATE_SHADER", 1, GL.VERTEX_SHADER).shaderSource(1, "void main() { gl_Position = gl_Vertex; }").call("COMPILE_SHADER", 1)
+                .call("CREATE_SHADER", 2, GL.FRAGMENT_SHADER).shaderSource(2, goodFS).call("COMPILE_SHADER", 2)
+                .call("CREATE_PROGRAM", 5).call("ATTACH_SHADER", 5, 1).call("ATTACH_SHADER", 5, 2)
+                .call("LINK_PROGRAM", 5).call("USE_PROGRAM", 5);
+            const tint = relink.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, 5, "tint", 32);
+            shadow.process(relink.bytes()); executor.submit(remote ? relink.bytes().slice() : relink.bytes(), {});
+            const tintAt = tint.view.getInt32(P.F.QUERY_LOCATION.result, true);
+            for (const repaired of [false, true]) {
+                const frame = new GLStream();
+                if (!repaired) frame.uniformfv(tintAt, 4, 1, [0.25, 0.5, 0.75, 1]);
+                frame.shaderSource(2, repaired ? goodFS : "void main() { gl_FragColor = unknownValue; }")
+                    .call("COMPILE_SHADER", 2).call("LINK_PROGRAM", 5);
+                const linked = frame.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, 5, GL.LINK_STATUS);
+                if (!repaired) frame.call("USE_PROGRAM", 5); // rejected; old executable stays current
+                frame.call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                    .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                    .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                const pixel = frame.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = frame.bytes();
+                shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+                check(linked.view.getInt32(P.F.QUERY_OBJECT_IV.value, true) === +repaired, "CPU link status must describe the last attempt");
+                check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "relink readback must finish");
+                const expected = repaired ? [0, 0, 0, 0] : [64, 128, 191, 255];
+                check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1),
+                    "failed link must keep installed code; successful link must zero uniforms: " + Array.from(pixel.bytes.subarray(32)));
+            }
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "relink frames must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

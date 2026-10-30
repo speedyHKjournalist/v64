@@ -204,7 +204,8 @@
         const a = this.args("CREATE_PROGRAM", view, offset, size);
         if (!a) return;
         this.current.group.programs.set(a[0], { name: a[0], attached: new Set(), bindings: new Map(),
-            linkInput: null, linked: null, validated: false, deleted: false, values: new Map() });
+            linkInput: null, linked: null, executableInput: null, resetValues: false,
+            validated: false, deleted: false, values: new Map() });
     };
 
     proto.attachShader = function(bytes, view, offset, size) {
@@ -234,19 +235,22 @@
             view.getInt32(offset + F.BIND_ATTRIB_LOCATION.location, true));
     };
 
-    // Linked when an answer needs it, from the shaders and bindings as they
-    // are now; the uniforms' values start over
+    // Freeze the compile inputs at LinkProgram, even if glslang arrives later.
+    // Only a successful link replaces installed code and zeros its uniforms
+    // (GL 2.1 section 2.15.2); failed links still replace the query result.
     proto.linkProgram = function(bytes, view, offset, size) {
         const a = this.args("LINK_PROGRAM", view, offset, size);
         const group = this.current.group;
         const program = a && group.programs.get(a[0]);
         if (!program) return;
+        this.linkedProgram(program);
         const shaders = [...program.attached].map(name => group.shaders.get(name)).filter(Boolean);
         program.linkInput = { shaders: shaders.map(s => ({ type: s.type, compileSource: s.compileSource })),
             bindings: [...program.bindings] };
         program.linked = null;
         program.validated = false;
-        program.values = new Map();
+        program.resetValues = true;
+        this.linkedProgram(program);
     };
 
     // The link's result: {ok, log, uniforms, attributes, byLocation}, or null without glslang
@@ -312,6 +316,9 @@
             for (let k = 0; k < n; ++k) used.add(base + k);
             attribute.location = base;
         }
+        if (program.resetValues) program.values = new Map();
+        program.resetValues = false;
+        program.executableInput = program.linkInput;
         return program.linked = linked;
     };
 
@@ -409,6 +416,11 @@
 
     const maxLength = list => list.reduce((n, e) => Math.max(n, e.length + 1), 0);
 
+    proto.failedGLSLQuery = function(name, view, offset, error) {
+        this.answered(name, view, offset, FAILED);
+        return error;
+    };
+
     proto.queryObjectIv = function(bytes, view, offset, size) {
         const R = F.QUERY_OBJECT_IV;
         if (!this.pending("QUERY_OBJECT_IV", view, offset, size)) return;
@@ -419,7 +431,7 @@
         let value = null;
         if (kind === C.V86GL_OBJECT_KIND_SHADER) {
             const shader = group.shaders.get(name);
-            if (!shader) return this.answered("QUERY_OBJECT_IV", view, offset, FAILED);
+            if (!shader) return this.failedGLSLQuery("QUERY_OBJECT_IV", view, offset, objectError(group, name, true));
             if (pname === GL.COMPILE_STATUS || pname === GL.INFO_LOG_LENGTH) {
                 const compiled = this.compiledShader(shader);
                 if (!compiled) return;
@@ -429,7 +441,7 @@
             else if (pname === GL.SHADER_SOURCE_LENGTH) value = shader.source ? shader.source.length + 1 : 0;
         } else if (kind === C.V86GL_OBJECT_KIND_PROGRAM) {
             const program = group.programs.get(name);
-            if (!program) return this.answered("QUERY_OBJECT_IV", view, offset, FAILED);
+            if (!program) return this.failedGLSLQuery("QUERY_OBJECT_IV", view, offset, objectError(group, name, false));
             if (pname === GL.DELETE_STATUS) value = +program.deleted;
             else if (pname === GL.ATTACHED_SHADERS) value = program.attached.size;
             else if (pname === GL.VALIDATE_STATUS) {
@@ -452,7 +464,7 @@
             // queries' results are the renderer's
             return;
         }
-        if (value === null) return this.answered("QUERY_OBJECT_IV", view, offset, FAILED);
+        if (value === null) return this.failedGLSLQuery("QUERY_OBJECT_IV", view, offset, GL.INVALID_ENUM);
         view.setInt32(offset + R.value, value, true);
         this.answered("QUERY_OBJECT_IV", view, offset, OK);
     };
@@ -468,9 +480,11 @@
         let result;
         if (kind === C.V86GL_OBJECT_KIND_SHADER) {
             const shader = group.shaders.get(name);
+            if (!shader) return this.failedGLSLQuery("QUERY_OBJECT_LOG", view, offset, objectError(group, name, true));
             result = shader ? this.compiledShader(shader) : undefined;
         } else if (kind === C.V86GL_OBJECT_KIND_PROGRAM) {
             const program = group.programs.get(name);
+            if (!program) return this.failedGLSLQuery("QUERY_OBJECT_LOG", view, offset, objectError(group, name, false));
             result = program ? this.linkedProgram(program) : undefined;
         } else {
             return;
@@ -486,6 +500,8 @@
         const R = F.QUERY_ACTIVE, header = RECORDS.QUERY_ACTIVE.size;
         if (!this.pending("QUERY_ACTIVE", view, offset, size)) return;
         const program = this.current.group.programs.get(view.getUint32(offset + R.program, true));
+        if (!program) return this.failedGLSLQuery("QUERY_ACTIVE", view, offset,
+            objectError(this.current.group, view.getUint32(offset + R.program, true), false));
         const linked = program ? this.linkedProgram(program) : undefined;
         if (linked === null) return;
         const kind = view.getUint32(offset + R.active_kind, true);
@@ -493,7 +509,8 @@
         const capacity = view.getUint32(offset + R.buf_size, true);
         const list = !linked ? [] : kind === C.V86GL_ACTIVE_KIND_ATTRIB ? linked.attributes : linked.uniforms;
         const entry = list[index];
-        if (!entry || header + capacity > size) return this.answered("QUERY_ACTIVE", view, offset, FAILED);
+        if (!entry) return this.failedGLSLQuery("QUERY_ACTIVE", view, offset, GL.INVALID_VALUE);
+        if (header + capacity > size) return this.answered("QUERY_ACTIVE", view, offset, FAILED);
         view.setUint32(offset + R.length, writeText(bytes, offset + header, capacity, entry.active || entry.name), true);
         view.setInt32(offset + R.size, entry.size, true);
         view.setUint32(offset + R.type, entry.type, true);
@@ -505,10 +522,13 @@
         const R = F.QUERY_LOCATION, header = RECORDS.QUERY_LOCATION.size;
         if (!this.pending("QUERY_LOCATION", view, offset, size)) return;
         const program = this.current.group.programs.get(view.getUint32(offset + R.program, true));
+        if (!program) return this.failedGLSLQuery("QUERY_LOCATION", view, offset,
+            objectError(this.current.group, view.getUint32(offset + R.program, true), false));
         const linked = program ? this.linkedProgram(program) : undefined;
         if (linked === null) return;
         const length = view.getUint32(offset + R.name_length, true);
-        if (!linked || !linked.ok || header + length > size) return this.answered("QUERY_LOCATION", view, offset, FAILED);
+        if (!linked || !linked.ok) return this.failedGLSLQuery("QUERY_LOCATION", view, offset, GL.INVALID_OPERATION);
+        if (header + length > size) return this.answered("QUERY_LOCATION", view, offset, FAILED);
         const name = readText(bytes, offset + header, length);
         let location = -1, type = 0, count = 0;
         if (view.getUint32(offset + R.location_kind, true) === C.V86GL_LOCATION_KIND_ATTRIB) {
@@ -541,11 +561,13 @@
         const R = F.QUERY_UNIFORM, header = RECORDS.QUERY_UNIFORM.size;
         if (!this.pending("QUERY_UNIFORM", view, offset, size)) return;
         const program = this.current.group.programs.get(view.getUint32(offset + R.program, true));
+        if (!program) return this.failedGLSLQuery("QUERY_UNIFORM", view, offset,
+            objectError(this.current.group, view.getUint32(offset + R.program, true), false));
         const linked = program ? this.linkedProgram(program) : undefined;
         if (linked === null) return;
         const location = view.getInt32(offset + R.location, true);
         const entry = linked && linked.ok ? linked.byLocation.get(location) : null;
-        if (!entry) return this.answered("QUERY_UNIFORM", view, offset, FAILED);
+        if (!entry) return this.failedGLSLQuery("QUERY_UNIFORM", view, offset, GL.INVALID_OPERATION);
         const [base, columns, rows] = typeOf(entry.uniform.type);
         const count = columns * rows;
         if (header + count * 4 > size) return this.answered("QUERY_UNIFORM", view, offset, FAILED);
@@ -600,7 +622,7 @@
                 key: group.key,
                 shaders: [...group.shaders.values()].map(s => [s.name, s.type, s.source, s.compileSource, s.deleted]),
                 programs: [...group.programs.values()].map(p => [p.name, [...p.attached], [...p.bindings], p.linkInput,
-                    p.validated, p.deleted, [...p.values]]),
+                    p.validated, p.deleted, [...p.values], p.executableInput, p.resetValues]),
             }));
         },
         setState(shadow, state) {
@@ -609,9 +631,10 @@
                 if (!group) continue;
                 for (const [name, type, source, compileSource, deleted] of saved.shaders)
                     group.shaders.set(name, { name, type, source, compileSource, compiled: null, deleted });
-                for (const [name, attached, bindings, linkInput, validated, deleted, values] of saved.programs)
+                for (const [name, attached, bindings, linkInput, validated, deleted, values, executableInput, resetValues] of saved.programs)
                     group.programs.set(name, { name, attached: new Set(attached), bindings: new Map(bindings), linkInput,
-                        linked: null, validated, deleted, values: new Map(values) });
+                        linked: null, executableInput: executableInput || null, resetValues: !!resetValues,
+                        validated, deleted, values: new Map(values) });
             }
         },
     });

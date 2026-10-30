@@ -3631,7 +3631,6 @@
                 return this.refuse("glShaderSource", "unknown shader",
                     { name }, GL.INVALID_VALUE);
             shader.source = readCString(bytes, offset + 8, length);
-            shader.compiled = null;
         });
         define("COMPILE_SHADER", function(a) {
             const shader = this.current.shareGroup.shaders.get(a[0] >>> 0);
@@ -5467,22 +5466,19 @@
                     GL.INVALID_VALUE);
             program.linked = false;
             program.log = "";
-            program.variants.clear();
-            program.adoptedAttribLocations.clear();
-            program.compiled = { vertex: null, fragment: null };
+            program.validateLog = "program is not validated";
+            const candidate = createProgram(name);
+            candidate.bindAttribLocations = new Map(program.bindAttribLocations);
             for (const shaderName of program.shaders) {
                 const shader = this.current.shareGroup.shaders.get(shaderName);
                 if (!shader) continue;
-                if (!shader.compiled)
-                    shader.compiled = translator.compileShader(shader.source,
-                        shader.stage, this.options.translator || {});
-                if (!shader.compiled.ok) {
-                    program.log = shader.compiled.log;
+                if (!shader.compiled || !shader.compiled.ok) {
+                    program.log = shader.compiled ? shader.compiled.log : "ERROR: a shader is not compiled";
                     return;
                 }
-                program.compiled[shader.stage] = shader.compiled;
+                candidate.compiled[shader.stage] = shader.compiled;
             }
-            if (!program.compiled.vertex || !program.compiled.fragment) {
+            if (!candidate.compiled.vertex || !candidate.compiled.fragment) {
                 program.log = "ERROR: a program needs both a vertex and a " +
                     "fragment shader";
                 return;
@@ -5491,11 +5487,14 @@
             // and the reflection, which every variant then shares -- so
             // glGetUniformLocation answers the same value no matter which
             // variant a later draw happens to need.
-            const link = this.linkVariant(program, {});
+            const link = this.linkVariant(candidate, {});
             if (!link.ok) {
                 program.log = link.log;
                 return;
             }
+            program.compiled = candidate.compiled;
+            program.variants.clear();
+            program.adoptedAttribLocations.clear();
             program.link = link;
             program.linked = true;
             program.log = link.log;
@@ -5590,12 +5589,14 @@
             const s = this.current;
             if (!s.currentProgram) return null;
             const program = s.shareGroup.programs.get(s.currentProgram);
-            return program && program.linked ? program : null;
+            // A failed relink changes LINK_STATUS, but its installed code,
+            // variant inputs and uniform storage remain usable until unbound.
+            return program && program.link ? program : null;
         },
 
         setUniformVector(view, offset, size, bytes, integer) {
             const program = this.currentProgramObject();
-            if (!program) return;
+            if (!program || !program.linked) return;
             const location = view.getInt32(offset, true);
             const components = view.getInt32(offset + 4, true);
             const count = view.getInt32(offset + 8, true);
@@ -5641,7 +5642,7 @@
         setUniformMatrix(location, columns, rows, count, transpose, view, offset,
                 size) {
             const program = this.currentProgramObject();
-            if (!program) return;
+            if (!program || !program.linked) return;
             const entry = program.uniformByLocation.get(location);
             if (!entry || !entry.uniform) return;
             const uniform = entry.uniform;

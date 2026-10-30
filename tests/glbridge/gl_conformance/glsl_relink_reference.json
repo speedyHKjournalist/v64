@@ -1,0 +1,21 @@
+{
+  "renderer":"Apple M1 Pro",
+  "version":"2.1 Metal - 91.7",
+  "cases":{
+    "source_only_compile_status":1,
+    "source_only_link_status":1,
+    "failed_link_status":0,
+    "failed_link_error":0,
+    "after_failure":[255,0,0,255],
+    "draw_error":1282,
+    "uniform_after_failure_error":1282,
+    "after_uniform":[255,0,0,255],
+    "query_after_failure_error":1282,
+    "query_preserves_output":1,
+    "use_failed_error":1282,
+    "after_rejected_use":[255,0,0,255],
+    "repaired_link_status":1,
+    "after_success":[0,0,0,0],
+    "final_error":1282
+  }
+}
