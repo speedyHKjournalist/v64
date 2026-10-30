@@ -157,7 +157,8 @@
             if (!method) return;
             // (a GL command needs a context; one without is the executor's to report)
             if (fn < 0xFF00 && fn !== GLFN.QUERY_INTEGER && fn !== GLFN.QUERY_GL_STRING &&
-                    fn !== GLFN.QUERY_STATE && fn !== GLFN.QUERY_PARAMETER && !this.current) return;
+                    fn !== GLFN.QUERY_STATE && fn !== GLFN.QUERY_PARAMETER && fn !== GLFN.QUERY_BUFFER_DATA &&
+                    fn !== GLFN.QUERY_BUFFER_MAP && fn !== GLFN.QUERY_BUFFER_UNMAP && !this.current) return;
             return this[method](bytes, view, offset, size);
         }
 

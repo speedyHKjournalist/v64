@@ -12,7 +12,8 @@
         const group = this.current.group;
         let buffer = group.buffers.get(name);
         if (!buffer) {
-            buffer = { name, id: group.nextBufferId++, created: false, deleted: false, size: 0, usage: GL.STATIC_DRAW_ARB, data: null };
+            buffer = { name, id: group.nextBufferId++, created: false, deleted: false, size: 0, usage: GL.STATIC_DRAW_ARB, data: null,
+                access: GL.READ_WRITE_ARB, mapped: false, pointer: 0 };
             group.buffers.set(name, buffer); group.bufferObjects.set(buffer.id, buffer);
         }
         return buffer;
@@ -37,6 +38,7 @@
                 else {
                     const buffer = c.group.buffers.get(name); if (!buffer) continue;
                     c.group.buffers.delete(name); buffer.deleted = true;
+                    buffer.mapped = false; buffer.pointer = 0;
                     for (const [target, id] of c.bufferBindings) if (id === buffer.id) c.bufferBindings.delete(target);
                 }
             }
@@ -56,6 +58,7 @@
             if (r.size < 0 || name === "BUFFER_SUB_DATA" && r.offset < 0) return GL.INVALID_VALUE;
             if (name === "BUFFER_DATA" && !usages.has(r.usage)) return GL.INVALID_ENUM;
             const buffer = s.boundBuffer(r.target); if (!buffer) return GL.INVALID_OPERATION;
+            if (name === "BUFFER_SUB_DATA" && buffer.mapped) return GL.INVALID_OPERATION;
             if (r.data_size > size - P.RECORDS[name].size || r.data_size && r.data_size < r.size ||
                 name === "BUFFER_SUB_DATA" && (r.offset + r.size > buffer.size || r.data_size < r.size)) return GL.INVALID_VALUE;
             if (name === "BUFFER_DATA") {
@@ -72,6 +75,7 @@
             if (name === "BUFFER_DATA") {
                 buffer.data = s.pendingBufferData; delete s.pendingBufferData;
                 buffer.size = r.size; buffer.usage = r.usage;
+                buffer.access = GL.READ_WRITE_ARB; buffer.mapped = false; buffer.pointer = 0;
             }
             if (data.length) buffer.data.set(data, name === "BUFFER_DATA" ? 0 : r.offset);
         };
@@ -85,10 +89,47 @@
         const buffer = s.boundBuffer(target); if (!buffer) return GL.INVALID_OPERATION;
         if (pname === GL.BUFFER_SIZE_ARB) return [[buffer.size], "i"];
         if (pname === GL.BUFFER_USAGE_ARB) return [[buffer.usage], "e"];
-        // Mapping and guest pointers have not been migrated yet.
-        if ([GL.BUFFER_ACCESS_ARB, GL.BUFFER_MAPPED_ARB, GL.BUFFER_MAP_POINTER_ARB].includes(pname)) return null;
+        if (pname === GL.BUFFER_ACCESS_ARB) return [[buffer.access], "e"];
+        if (pname === GL.BUFFER_MAPPED_ARB) return [[+buffer.mapped], "b"];
         return GL.INVALID_ENUM;
     });
+    state.parameter(P.C.V86GL_PARAMETER_BUFFER_POINTER, (s, target, pname) => {
+        if (!targets.has(target) || pname !== GL.BUFFER_MAP_POINTER_ARB) return GL.INVALID_ENUM;
+        const buffer = s.boundBuffer(target); if (!buffer) return GL.INVALID_OPERATION;
+        return [[buffer.pointer], "u"];
+    });
+    for (const name of ["QUERY_BUFFER_DATA", "QUERY_BUFFER_MAP", "QUERY_BUFFER_UNMAP"]) {
+        const method = "shadow" + name;
+        proto[method] = function(bytes, view, offset, size) {
+            if (!this.pending(name, view, offset, size)) return;
+            const r = P.decodeRecord(name, view, offset), header = P.RECORDS[name].size;
+            const fail = error => {
+                if (this.current && !this.current.error) this.current.error = error;
+                view.setUint32(offset + P.F[name].error, error, true);
+                this.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_FAILED);
+            };
+            if (!this.current || this.current.state.begin) return fail(GL.INVALID_OPERATION);
+            if (!targets.has(r.target)) return fail(GL.INVALID_ENUM);
+            const buffer = this.boundBuffer(r.target); if (!buffer) return fail(GL.INVALID_OPERATION);
+            if (name === "QUERY_BUFFER_DATA") {
+                if (r.offset < 0 || r.size < 0 || r.range_size < r.size || r.offset + r.range_size > buffer.size ||
+                    r.size > r.data_size || r.data_size > size - header) return fail(GL.INVALID_VALUE);
+                if (buffer.mapped) return fail(GL.INVALID_OPERATION);
+                if (r.size) bytes.set(buffer.data.subarray(r.offset, r.offset + r.size), offset + header);
+            } else if (name === "QUERY_BUFFER_MAP") {
+                if (![GL.READ_ONLY_ARB, GL.WRITE_ONLY_ARB, GL.READ_WRITE_ARB].includes(r.access)) return fail(GL.INVALID_ENUM);
+                if (buffer.mapped) return fail(GL.INVALID_OPERATION);
+                if (!r.pointer) return fail(GL.OUT_OF_MEMORY);
+                buffer.mapped = true; buffer.access = r.access; buffer.pointer = r.pointer;
+            } else {
+                if (!buffer.mapped) return fail(GL.INVALID_OPERATION);
+                buffer.mapped = false; buffer.pointer = 0;
+                view.setUint32(offset + P.F[name].result, 1, true);
+            }
+            this.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_OK);
+        };
+        GLShadow.install({ [P.GLFN[name]]: method });
+    }
     state.attributes("buffers", {
         capture(c, mask, client) {
             if (!client) return null;
@@ -111,7 +152,7 @@
             for (const item of saved.buffers?.groups || []) {
                 const g = s.groups.get(item.key); if (!g) continue; g.nextBufferId = item.nextBufferId;
                 for (const data of item.objects) {
-                    const buffer = { ...data, data: data.data && Uint8Array.from(data.data) };
+                    const buffer = { access: GL.READ_WRITE_ARB, mapped: false, pointer: 0, ...data, data: data.data && Uint8Array.from(data.data) };
                     g.bufferObjects.set(buffer.id, buffer); if (!buffer.deleted) g.buffers.set(buffer.name, buffer);
                 }
             }

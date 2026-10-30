@@ -245,6 +245,9 @@
         ["PRIORITIZE_TEXTURES", 221, null, "i:count"], // then count pairs of u32 name, f32 priority
         // A CPU link failure preserves the previously installed executable.
         ["PROGRAM_LINK_FAILED", 222, "ProgramLinkFailed", "u"],
+        ["QUERY_BUFFER_DATA", 223, null, "u:target i:offset i:size i:range_size u:status u:data_size u:error u:reserved"],
+        ["QUERY_BUFFER_MAP", 224, null, "u:target u:access u:pointer u:status u:error u:reserved"],
+        ["QUERY_BUFFER_UNMAP", 225, null, "u:target u:status u:result u:error"],
     ];
 
     // Composite records' optional headers and repeated elements. The common
@@ -336,6 +339,7 @@
         ["V86GL_PARAMETER_TEXTURE", 10],
         ["V86GL_PARAMETER_TEXTURE_LEVEL", 11],
         ["V86GL_PARAMETER_BUFFER", 12],
+        ["V86GL_PARAMETER_BUFFER_POINTER", 13],
         ["V86GL_OBJECT_KIND_SHADER", 1],
         ["V86GL_OBJECT_KIND_PROGRAM", 2],
         ["V86GL_OBJECT_KIND_QUERY", 3],

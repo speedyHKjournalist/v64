@@ -29,6 +29,15 @@ int main(void) {
     glBindBuffer(GL_PIXEL_PACK_BUFFER,b); glGetBufferParameteriv(GL_PIXEL_PACK_BUFFER,GL_BUFFER_SIZE,&n);
     printf(",\n    \"second_target_size\":%d",n);
     glBindBuffer(GL_ARRAY_BUFFER,0); glBufferSubData(GL_ARRAY_BUFFER,0,0,bytes); result("unbound_sub");
+    glBindBuffer(GL_ARRAY_BUFFER,b); glMapBuffer(GL_ARRAY_BUFFER,GL_READ_WRITE); result("valid_map");
+    glMapBuffer(GL_ARRAY_BUFFER,GL_READ_ONLY); result("already_mapped");
+    glBufferSubData(GL_ARRAY_BUFFER,0,1,bytes); result("mapped_sub");
+    glGetBufferSubData(GL_ARRAY_BUFFER,0,1,bytes); result("mapped_read");
+    glBufferData(GL_ARRAY_BUFFER,8,bytes,GL_DYNAMIC_DRAW); result("replace_mapped");
+    glGetBufferParameteriv(GL_ARRAY_BUFFER,GL_BUFFER_MAPPED,&n); printf(",\n    \"reset_mapped\":%d",n);
+    glUnmapBuffer(GL_ARRAY_BUFFER); result("not_mapped");
+    glMapBuffer(GL_ARRAY_BUFFER,0); result("bad_access");
+    glMapBuffer(GL_ARRAY_BUFFER,GL_READ_ONLY); glUnmapBuffer(GL_ARRAY_BUFFER); result("valid_unmap");
     glBindBuffer(GL_ARRAY_BUFFER,b); glBufferData(GL_ARRAY_BUFFER,0,NULL,GL_STREAM_READ); result("zero_size");
     glDeleteBuffers(1,&b); glGetIntegerv(GL_ARRAY_BUFFER_BINDING,&n); printf(",\n    \"deleted_binding\":%d",n);
     glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING,&n); printf(",\n    \"deleted_pack_binding\":%d",n);
