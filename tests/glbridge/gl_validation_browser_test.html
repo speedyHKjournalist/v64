@@ -32,6 +32,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_arb_program.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_executor.js"></script>
 <script src="gl_stream_builder.js"></script>
 <script src="gl_shader_units_cases.js"></script>
@@ -434,6 +435,24 @@
             executor.submit(remote ? namesMemory.slice() : namesMemory, {}); await executor.idle();
             check([20, 90, 170, 255].every((v, i) => namePixel.bytes[32 + i] === v), "allocating a new texture overwrote an application-named texture");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "name allocation must have no host errors");
+            const arbNames = new GLStream().makeCurrent(190, 0, 0, 64, 64, 190, 190)
+                .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1)
+                .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nMOV result.position,vertex.position;\nMOV result.color,vertex.color;\nEND");
+            const arbHeader = P.encodeRecord("QUERY_NAMES", { object_kind: P.C.V86GL_OBJECT_KIND_ARB_PROGRAM, count: 1, data_size: 4 });
+            const arbPayload = new Uint8Array(arbHeader.length + 4); arbPayload.set(arbHeader); arbNames.record(P.GLFN.QUERY_NAMES, arbPayload);
+            const arbName = arbNames.payloadView(); shadow.process(arbNames.bytes());
+            check(arbName.view.getUint32(arbHeader.length, true) === 2, "ARB allocation collided with an application-bound name");
+            executor.submit(remote ? arbNames.bytes().slice() : arbNames.bytes(), {}); await executor.idle();
+            const arbDraw = new GLStream().names(P.GLFN.GEN_PROGRAMS_ARB, [2]).call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 2)
+                .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nMOV result.position,vertex.position;\nMOV result.color,{0,0,1,1};\nEND")
+                .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1).call("ENABLE", GL.VERTEX_PROGRAM_ARB)
+                .call("COLOR4F", 1, 0, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const arbPixel = arbDraw.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), arbMemory = arbDraw.bytes();
+            shadow.process(arbMemory); executor.options.writeGuestMemory = (offset, data) => arbMemory.set(data, offset);
+            executor.submit(remote ? arbMemory.slice() : arbMemory, {}); await executor.idle();
+            check([255, 0, 0, 255].every((v, i) => arbPixel.bytes[32 + i] === v), "ARB allocation overwrote an application-named program");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "ARB name allocation must have no host errors");
             const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
                 .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                 .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")

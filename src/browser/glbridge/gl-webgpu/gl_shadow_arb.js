@@ -73,10 +73,15 @@
         return c.group.arbPrograms.get(name) || null;
     };
 
-    proto.genProgramsARB = function(bytes, view, offset, size) {
+    proto.arbNamedProgram = function(name) {
         const programs = this.current.group.arbPrograms;
+        if (!programs.has(name)) programs.set(name, newProgram(name, 0));
+        return programs.get(name);
+    };
+
+    proto.genProgramsARB = function(bytes, view, offset, size) {
         for (const name of this.names("GEN_PROGRAMS_ARB", view, offset, size) || [])
-            if (name && !programs.has(name)) programs.set(name, newProgram(name, 0));
+            if (name) this.arbNamedProgram(name);
     };
 
     // A deleted program bound here reverts to object 0

@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { GLStream, GL } = require("./gl_stream_builder.js");
 const tests = [], test = (name, fn) => tests.push({ name, fn });
@@ -18,7 +19,8 @@ function generate(stream, kind, count, capacity = Math.max(0, count * 4), declar
 const families = [[P.C.V86GL_OBJECT_KIND_TEXTURE, "BIND_TEXTURE", GL.TEXTURE_2D, "textures", "DELETE_TEXTURES"],
     [P.C.V86GL_OBJECT_KIND_BUFFER, "BIND_BUFFER", GL.ARRAY_BUFFER, "buffers", "DELETE_BUFFERS"],
     [P.C.V86GL_OBJECT_KIND_RENDERBUFFER, "BIND_RENDERBUFFER", GL.RENDERBUFFER_EXT, "renderbuffers", "DELETE_RENDERBUFFERS"],
-    [P.C.V86GL_OBJECT_KIND_FRAMEBUFFER, "BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, "framebuffers", "DELETE_FRAMEBUFFERS"]];
+    [P.C.V86GL_OBJECT_KIND_FRAMEBUFFER, "BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, "framebuffers", "DELETE_FRAMEBUFFERS"],
+    [P.C.V86GL_OBJECT_KIND_ARB_PROGRAM, "BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, "arbPrograms", "DELETE_PROGRAMS_ARB"]];
 test("CPU generators skip bound and reserved names in each public namespace", () => {
     for (const [kind, bind, target, field] of families) {
         const s = new GLShadow(), st = scene().call(bind, target, 1).call(bind, target, 3), q = generate(st, kind, 3);
@@ -26,10 +28,31 @@ test("CPU generators skip bound and reserved names in each public namespace", ()
         const owner = field === "framebuffers" ? s.current : s.current.group;
         for (const n of [2, 4, 5]) {
             const object = owner[field].get(n); assert.ok(object);
-            assert.equal(field === "textures" ? object.target : +object.created, 0, "generated names acquire object state on first binding");
+            assert.equal(field === "textures" || field === "arbPrograms" ? object.target : +object.created, 0, "generated names acquire object state on first binding");
         }
         const next = new GLStream().call(bind, target, 7), more = generate(next, kind, 3); s.process(next.bytes()); assert.deepEqual(more().values, [6, 8, 9]);
     }
+});
+test("ARB generated names become objects on first binding and remain allocated across snapshots and sharing", () => {
+    const kind = P.C.V86GL_OBJECT_KIND_ARB_PROGRAM, s = new GLShadow(), st = scene(), q = generate(st, kind, 2);
+    s.process(st.bytes()); assert.deepEqual(q().values, [1, 2]);
+    const isObject = (stream, id) => {
+        const header = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_IS_OBJECT, target: kind,
+            pname: id, value_kind: P.C.V86GL_STATE_BOOLEAN, data_size: 8 });
+        const payload = new Uint8Array(header.length + 8); payload.set(header); stream.record(P.GLFN.QUERY_PARAMETER, payload);
+        return stream.payloadView();
+    };
+    const queries = new GLStream(), before = isObject(queries, 1);
+    queries.call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1); const after = isObject(queries, 1);
+    queries.names(P.GLFN.DELETE_PROGRAMS_ARB, [1]); const deleted = isObject(queries, 1);
+    s.process(queries.bytes());
+    for (const [record, expected] of [[before, 0], [after, 1], [deleted, 0]]) {
+        assert.equal(record.view.getUint32(P.F.QUERY_PARAMETER.status, true), 1);
+        assert.equal(record.view.getFloat64(P.RECORDS.QUERY_PARAMETER.size, true), expected);
+    }
+    const copy = new GLShadow(); copy.setState(JSON.parse(JSON.stringify(s.getState())));
+    const more = new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1), next = generate(more, kind, 1);
+    copy.process(more.bytes()); assert.deepEqual(next().values, [3]); assert.equal(copy.current.group.arbPrograms.has(2), true);
 });
 test("name cursors wrap past zero, skip live names and survive deletion, sharing and snapshots", () => {
     const s = new GLShadow(); s.process(scene().call("BIND_BUFFER", GL.ARRAY_BUFFER, 1).bytes());

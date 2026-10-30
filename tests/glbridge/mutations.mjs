@@ -63,6 +63,10 @@ const MUTATIONS = {
         "gl_fixed_function_wgsl_test.js", "gl_arb_program_test.js", "graphics_checkpoint_test.js", "gl_shadow_state_test.js",
         "gl_async_answers_test.js", "gl_shadow_validation_test.js", "gl_shadow_raster_test.js", "gl_shadow_fixed_test.js", "gl_shadow_glsl_test.js", "gl_shadow_arb_test.js", "gl_shadow_misc_test.js", "gl_shadow_rasterpos_test.js", "gl_shadow_pixelmaps_test.js", "gl_shadow_objects_test.js", "gl_shadow_textures_test.js", "gl_shadow_buffers_test.js", "gl_shadow_arrays_test.js", "gl_shadow_names_test.js", "gl_shadow_queries_test.js"],
     pages: ["gl_conformance_browser_test.html", "gl_multipass_browser_test.html", "gl_validation_browser_test.html"], list: [
+        ["CPU ARB names: use the buffer namespace", G + "gl_shadow_names.js",
+            'case C.V86GL_OBJECT_KIND_ARB_PROGRAM: names = group.arbPrograms;', 'case C.V86GL_OBJECT_KIND_ARB_PROGRAM: names = group.buffers;'],
+        ["CPU ARB names: report unbound reservations as objects", G + "gl_shadow_images.js",
+            'case P.C.V86GL_OBJECT_KIND_ARB_PROGRAM: result = g.arbPrograms?.get(name)?.target;', 'case P.C.V86GL_OBJECT_KIND_ARB_PROGRAM: result = g.arbPrograms?.has(name);'],
         ["GLSL struct arrays: read widened member storage as a GLSL value", G + "gl_shader_translator.js",
             'return uniformArrayElementFor(node.type).read(expr);', 'return uniformStorageFor(node.type).read(expr);'],
         ["GLSL startup: release before the compiler arrives", "src/browser/glbridge/graphics_proxy.js",

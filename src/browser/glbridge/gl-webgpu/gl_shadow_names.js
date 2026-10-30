@@ -20,6 +20,7 @@
         const c = this.current, group = c.group;
         let names, allocate, pool, owner = group;
         switch (r.object_kind) {
+        case C.V86GL_OBJECT_KIND_ARB_PROGRAM: names = group.arbPrograms; allocate = n => this.arbNamedProgram(n); break;
         case C.V86GL_OBJECT_KIND_QUERY:
             if (c.activeQueryName) return fail(GL.INVALID_OPERATION);
             names = c.queryObjects; allocate = n => this.queryObject(n); owner = c; break;
