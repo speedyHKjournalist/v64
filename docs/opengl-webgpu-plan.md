@@ -320,6 +320,13 @@ game.exe
 > - 16 例本机参照、4 项纹理测试、实际 getter/优先级编码 C ABI、两种通道与边框像素验证。整数优先级按 [GL 2.1 §3.8.4](https://registry.khronos.org/OpenGL/specs/gl/glspec21.pdf) 归一化；Apple 直接钳制原整数，测试保留其原始结果并采用规范答案。40 组 Node、23 组站点、8 个 GPU 页面、构建、DLL、ESLint 通过；新增变异 3/3 被杀死。
 > - **继续推进：** 纹理图像/代理查询与上传校验、固定管线与着色器纹理单元的范围区分、FBO 来源/共享及设置校验、buffer/数组/其它对象、列表/选择/反馈/求值器、完整错误迁移和 C8。C 的退出条件尚未达到，后续 D–G 尚未整体完成。
 
+> **C3/C4/C6 sampler 能力、验证与链接失败转发（2026-10-30）：完成这一批迁移。**
+> - fragment、vertex、combined 纹理图像单元查询和 glslang 资源表统一为两端实际存储的 8 个单元；CPU 额外检查活动 sampler 数量，每个着色阶段分别计数，同一 uniform 用于两个阶段时占两个 combined 名额。客体实际 C 查询覆盖三个上限。
+> - Uniform1i 保留负数与越界值；ValidateProgram 和绘制检查索引以及不同 sampler 类型共用单元，失败的绘制在状态变更及 GPU 转发之前拒绝。验证状态和日志保留到下次 Link/Validate，存档保留验证结果；失败重链后的绘制使用旧可执行程序及其 uniform 值和反射，恢复后同样成立。
+> - 新增内部 opcode 222 PROGRAM_LINK_FAILED，CPU 的链接失败决定经现有记录空间转发；页面不再自行把该失败重链提交为成功，也不清除原代码和 uniform。客体不发送此 opcode，生成头文件和协议覆盖检查同步更新。
+> - 23 项 GLSL 单元测试、原生 setter/query 参照、本地/worker 副本通道的非法 sampler 像素测试、实际 C ABI 查询通过；40 组 Node、23 组站点、8 个 GPU 页面、构建、DLL 与 ESLint 通过，新增变异 5/5 被杀死。原生 fixture 仅记录赋值/查询，绘制错误采用 GL 2.1 §2.15.4 规则；Apple legacy 驱动在扩展验证试验中崩溃，没有伪造其验证结果。
+> - **继续推进：** glslang 未就绪时的统一行为、GLSL 多编译单元代码生成/结构数组反射、仅顶点程序与固定片段组合的资源验证、纹理图像查询/校验及其余 C3/C6、完整错误迁移与 C8。阶段 C 仍进行中，D–G 尚未整体完成。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

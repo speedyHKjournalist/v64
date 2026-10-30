@@ -118,6 +118,11 @@
                     if (this.current && !this.current.error) this.current.error = error;
                     view.setUint16(recordOffset, protocol.rejectedOpcode(fn, error), true);
                     ++this.stats.rejected;
+                } else {
+                    for (const part of PARTS) if (part.forwardOpcode) {
+                        const forwarded = part.forwardOpcode(this, fn, bytes, view, offset, size);
+                        if (forwarded !== undefined) view.setUint16(recordOffset, forwarded, true);
+                    }
                 }
                 offset += size;
             }
@@ -138,6 +143,10 @@
             const rule = RULES.get(fn);
             if (rule && this.current) {
                 const error = rule(this, bytes, view, offset, size);
+                if (error) return error;
+            }
+            for (const part of PARTS) if (part.checkCommand && this.current) {
+                const error = part.checkCommand(this, fn, bytes, view, offset, size);
                 if (error) return error;
             }
             // Keep our partial error state consumed by legacy glGetError;

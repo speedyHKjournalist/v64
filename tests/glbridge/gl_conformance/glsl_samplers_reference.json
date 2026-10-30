@@ -1,0 +1,10 @@
+{
+  "renderer":"Apple M1 Pro",
+  "maxCombined":16,
+  "cases":{
+    "last":[0,15],
+    "negative":[0,-1],
+    "past_end":[0,16],
+    "ignored":[0]
+  }
+}

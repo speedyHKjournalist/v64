@@ -242,6 +242,8 @@
         ["QUERY_STATE", 219, null, "u:pname u:value_kind u:status u:count u:data_size u:error"],
         ["QUERY_PARAMETER", 220, null, "u:pname u:value_kind u:status u:count u:data_size u:error u:query_kind u:target u:index u:reserved"],
         ["PRIORITIZE_TEXTURES", 221, null, "i:count"], // then count pairs of u32 name, f32 priority
+        // A CPU link failure preserves the previously installed executable.
+        ["PROGRAM_LINK_FAILED", 222, "ProgramLinkFailed", "u"],
     ];
 
     // Control records, outside the GLFN numbering: [name, code, layout]

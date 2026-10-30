@@ -3547,6 +3547,14 @@
                 shader.stage, this.options.translator || {});
         });
         define("LINK_PROGRAM", function(a) { this.linkProgram(a[0] >>> 0); });
+        define("PROGRAM_LINK_FAILED", function(a) {
+            const program = this.current.shareGroup.programs.get(a[0] >>> 0);
+            if (program) {
+                program.linked = false;
+                program.log = "ERROR: program link rejected by CPU validation\n";
+                program.validateLog = "program is not validated";
+            }
+        });
         define("USE_PROGRAM", function(a) {
             const group = this.current.shareGroup, previous = group.programs.get(this.current.currentProgram);
             this.current.currentProgram = a[0] >>> 0;

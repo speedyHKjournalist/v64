@@ -22,6 +22,7 @@
 
     const protocol = global.GLProtocol || require("./gl_protocol.js");
     const constants = global.GLWGConstants || require("./gl_constants.js");
+    const caps = global.GLCaps || require("./gl_caps.js");
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const { STAGE_OF_GL_TYPE } = global.V86GLGlslang || require("./gl_glslang.js");
     const { GLFN, C, F, RECORDS } = protocol;
@@ -32,6 +33,11 @@
     const PENDING = C.V86GL_SYNC_QUERY_STATUS_PENDING;
     const UNIFORM_LOCATIONS_PER_PROGRAM = 4096;
     const MAX_VERTEX_ATTRIBS = 16;
+    const RENDER_COMMANDS = new Set(["BEGIN", "DRAW_ARRAYS", "DRAW_ELEMENTS", "DRAW_ARRAYS_GL2",
+        "DRAW_ELEMENTS_GL2", "DRAW_ARRAYS_DIRECT", "DRAW_ELEMENTS_DIRECT", "DRAW_RANGE_ELEMENTS_DIRECT",
+        "MULTI_DRAW_ARRAYS_DIRECT", "MULTI_DRAW_ELEMENTS_DIRECT", "DRAW_PIXELS", "COPY_PIXELS", "BITMAP", "RASTER_POS4F"]
+        .map(name => GLFN[name]));
+    const SAMPLER_TYPES = new Set([0x8B5D, 0x8B5E, 0x8B5F, 0x8B60, 0x8B61, 0x8B62, 0x8B63, 0x8B64]);
     const CONVENTIONAL_SLOTS = {
         gl_Vertex: 0, gl_Normal: 2, gl_Color: 3, gl_SecondaryColor: 4, gl_FogCoord: 5,
         gl_MultiTexCoord0: 8, gl_MultiTexCoord1: 9, gl_MultiTexCoord2: 10, gl_MultiTexCoord3: 11,
@@ -120,7 +126,9 @@
         return {
             MaxLights: 8, MaxClipPlanes: 6, MaxTextureUnits: 8, MaxTextureCoords: 8,
             MaxVertexAttribs: MAX_VERTEX_ATTRIBS, MaxVertexUniformComponents: 1024, MaxVaryingFloats: 64,
-            MaxVertexTextureImageUnits: 16, MaxCombinedTextureImageUnits: 24, MaxTextureImageUnits: 16,
+            MaxVertexTextureImageUnits: caps.integer(capabilities, GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS),
+            MaxCombinedTextureImageUnits: caps.integer(capabilities, GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS),
+            MaxTextureImageUnits: caps.integer(capabilities, GL.MAX_TEXTURE_IMAGE_UNITS),
             MaxFragmentUniformComponents: 1024, MaxDrawBuffers: Math.min(8, limits.maxColorAttachments),
         };
     }
@@ -205,7 +213,7 @@
         if (!a) return;
         this.current.group.programs.set(a[0], { name: a[0], attached: new Set(), bindings: new Map(),
             linkInput: null, linked: null, executableInput: null, resetValues: false,
-            validated: false, deleted: false, values: new Map() });
+            validated: false, validation: null, installed: null, deleted: false, values: new Map() });
     };
 
     proto.attachShader = function(bytes, view, offset, size) {
@@ -249,6 +257,7 @@
             bindings: [...program.bindings] };
         program.linked = null;
         program.validated = false;
+        program.validation = null;
         program.resetValues = true;
         this.linkedProgram(program);
     };
@@ -269,6 +278,18 @@
         const result = this.glslang.link(shaders.map(s => ({ stage: STAGE_OF_GL_TYPE.get(s.type),
             source: s.compileSource })));
         if (!result.ok) return program.linked = failed(result.log);
+        // glslang's desktop resource table constrains built-ins, but does not
+        // reject every excess active user sampler. Count stage uses as GL 2.1
+        // requires: a uniform used by both stages consumes two combined slots.
+        let vertexSamplers = 0, fragmentSamplers = 0;
+        for (const uniform of result.uniforms) if (SAMPLER_TYPES.has(uniform.type)) {
+            if (uniform.stages & 1) vertexSamplers += Math.max(1, uniform.size);
+            if (uniform.stages & 16) fragmentSamplers += Math.max(1, uniform.size);
+        }
+        if (vertexSamplers > caps.integer(this.capabilities, GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS) ||
+                fragmentSamplers > caps.integer(this.capabilities, GL.MAX_TEXTURE_IMAGE_UNITS) ||
+                vertexSamplers + fragmentSamplers > caps.integer(this.capabilities, GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS))
+            return program.linked = failed("ERROR: active samplers exceed the available texture image units\n");
         const linked = { ok: true, log: result.log, uniforms: [], attributes: [], byLocation: new Map() };
         // uniforms: GL's list, built-ins too ("gl_" names have no location)
         let next = (program.name % (0x80000000 / UNIFORM_LOCATIONS_PER_PROGRAM)) * UNIFORM_LOCATIONS_PER_PROGRAM;
@@ -319,7 +340,46 @@
         if (program.resetValues) program.values = new Map();
         program.resetValues = false;
         program.executableInput = program.linkInput;
+        program.installed = linked;
         return program.linked = linked;
+    };
+
+    // The latest failed link does not replace code already installed by UseProgram.
+    // Reflection is reconstructed from the successful input after a snapshot.
+    proto.installedProgram = function(program) {
+        this.linkedProgram(program);
+        if (!program.installed && program.executableInput) {
+            program.installed = this.linkedProgram({ name: program.name, linkInput: program.executableInput,
+                values: new Map(), resetValues: false });
+        }
+        return program.installed;
+    };
+
+    proto.samplerValidation = function(program, linked) {
+        const units = new Map(), limit = caps.integer(this.capabilities, GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+        for (const uniform of linked.uniforms) {
+            if (!SAMPLER_TYPES.has(uniform.type) || uniform.location < 0) continue;
+            for (let i = 0; i < uniform.size; ++i) {
+                const unit = (program.values.get(uniform.location + i) || [0])[0];
+                if (unit < 0 || unit >= limit)
+                    return { ok: false, log: "ERROR: sampler '" + uniform.name + "' selects an unavailable texture unit\n" };
+                if (units.has(unit) && units.get(unit) !== uniform.type)
+                    return { ok: false, log: "ERROR: samplers of different types select the same texture unit\n" };
+                units.set(unit, uniform.type);
+            }
+        }
+        return { ok: true, log: "" };
+    };
+
+    proto.programValidation = function(program) {
+        if (!program.validated) return { ok: false, log: "" };
+        if (!program.validation) {
+            const linked = this.linkedProgram(program);
+            if (!linked) return null;
+            program.validation = linked.ok ? this.samplerValidation(program, linked) :
+                { ok: false, log: "ERROR: program is not linked\n" };
+        }
+        return program.validation;
     };
 
     proto.useProgram = function(bytes, view, offset, size) {
@@ -334,7 +394,11 @@
     proto.validateProgram = function(bytes, view, offset, size) {
         const a = this.args("VALIDATE_PROGRAM", view, offset, size);
         const program = a && this.current.group.programs.get(a[0]);
-        if (program) program.validated = true;
+        if (program) {
+            program.validated = true;
+            program.validation = null;
+            this.programValidation(program);
+        }
     };
 
     // A program flagged for deletion goes once no context uses it
@@ -445,15 +509,19 @@
             if (pname === GL.DELETE_STATUS) value = +program.deleted;
             else if (pname === GL.ATTACHED_SHADERS) value = program.attached.size;
             else if (pname === GL.VALIDATE_STATUS) {
-                const linked = this.linkedProgram(program);
-                if (!linked) return;
-                value = +(program.validated && linked.ok);
+                const validation = this.programValidation(program);
+                if (!validation) return;
+                value = +validation.ok;
             } else {
                 const linked = this.linkedProgram(program);
                 if (!linked) return;
                 switch (pname) {
                 case GL.LINK_STATUS: value = +linked.ok; break;
-                case GL.INFO_LOG_LENGTH: value = linked.log ? linked.log.length + 1 : 0; break;
+                case GL.INFO_LOG_LENGTH: {
+                    const result = program.validated ? this.programValidation(program) : linked;
+                    if (!result) return;
+                    value = result.log ? result.log.length + 1 : 0; break;
+                }
                 case GL.ACTIVE_UNIFORMS: value = linked.uniforms.length; break;
                 case GL.ACTIVE_ATTRIBUTES: value = linked.attributes.length; break;
                 case GL.ACTIVE_UNIFORM_MAX_LENGTH: value = maxLength(linked.uniforms.map(u => u.active)); break;
@@ -485,7 +553,7 @@
         } else if (kind === C.V86GL_OBJECT_KIND_PROGRAM) {
             const program = group.programs.get(name);
             if (!program) return this.failedGLSLQuery("QUERY_OBJECT_LOG", view, offset, objectError(group, name, false));
-            result = program ? this.linkedProgram(program) : undefined;
+            result = program.validated ? this.programValidation(program) : this.linkedProgram(program);
         } else {
             return;
         }
@@ -610,6 +678,18 @@
     // The objects, in snapshots: what was compiled and linked, and the
     // uniforms' values (glslang runs again when an answer needs it)
     GLShadow.part({
+        forwardOpcode(shadow, fn, bytes, view, offset, size) {
+            if (fn !== GLFN.LINK_PROGRAM || !shadow.current || size < 4) return;
+            const program = shadow.current.group.programs.get(view.getUint32(offset, true));
+            if (program && program.linked && !program.linked.ok) return GLFN.PROGRAM_LINK_FAILED;
+        },
+        checkCommand(shadow, fn) {
+            if (!RENDER_COMMANDS.has(fn) || !shadow.capabilities) return 0;
+            const program = shadow.current.group.programs.get(shadow.current.program);
+            if (!program) return 0;
+            const linked = shadow.installedProgram(program);
+            return linked && linked.ok && !shadow.samplerValidation(program, linked).ok ? GL.INVALID_OPERATION : 0;
+        },
         group(group) {
             group.shaders = new Map();
             group.programs = new Map();
@@ -622,7 +702,7 @@
                 key: group.key,
                 shaders: [...group.shaders.values()].map(s => [s.name, s.type, s.source, s.compileSource, s.deleted]),
                 programs: [...group.programs.values()].map(p => [p.name, [...p.attached], [...p.bindings], p.linkInput,
-                    p.validated, p.deleted, [...p.values], p.executableInput, p.resetValues]),
+                    p.validated, p.deleted, [...p.values], p.executableInput, p.resetValues, p.validation]),
             }));
         },
         setState(shadow, state) {
@@ -631,10 +711,10 @@
                 if (!group) continue;
                 for (const [name, type, source, compileSource, deleted] of saved.shaders)
                     group.shaders.set(name, { name, type, source, compileSource, compiled: null, deleted });
-                for (const [name, attached, bindings, linkInput, validated, deleted, values, executableInput, resetValues] of saved.programs)
+                for (const [name, attached, bindings, linkInput, validated, deleted, values, executableInput, resetValues, validation] of saved.programs)
                     group.programs.set(name, { name, attached: new Set(attached), bindings: new Map(bindings), linkInput,
                         linked: null, executableInput: executableInput || null, resetValues: !!resetValues,
-                        validated, deleted, values: new Map(values) });
+                        validated, validation: validation || null, installed: null, deleted, values: new Map(values) });
             }
         },
     });

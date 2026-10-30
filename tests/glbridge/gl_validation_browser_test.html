@@ -109,6 +109,19 @@
             check([0, 128, 192, 255].every((v, i) => Math.abs(out.bytes[32 + i] - v) <= 1),
                 "uniform arrays, booleans or deferred deletion changed GLSL pixels: " + Array.from(out.bytes.subarray(32)));
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "GLSL frame must have no host errors");
+            for (const unit of [-1, 8, 7]) {
+                const s = new GLStream().uniformiv(imagesAt + 1, 1, 1, [unit]).call("VALIDATE_PROGRAM", 5);
+                const validation = s.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, 5, GL.VALIDATE_STATUS);
+                s.call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).call("BEGIN", GL.QUADS)
+                    .call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0).call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                const pixel = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = s.bytes();
+                shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+                check(validation.view.getInt32(P.F.QUERY_OBJECT_IV.value, true) === +(unit === 7), "sampler validation status: " + unit);
+                const expected = unit === 7 ? [0, 128, 192, 255] : [255, 0, 0, 255];
+                check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "invalid sampler changed pixels: " + unit);
+                check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "sampler frame must have no host errors");
+            }
             const assembly = new GLStream().makeCurrent(20, 0, 0, 64, 64, 20, 20)
                 .programParameterARB(P.C.V86GL_PROGRAM_PARAMETER_ENV, GL.VERTEX_PROGRAM_ARB, 95, [0.25, 0.5, 0.75, 1])
                 .programParameterARB(P.C.V86GL_PROGRAM_PARAMETER_LOCAL, GL.VERTEX_PROGRAM_ARB, 95, [1, 1, 1, 1])
