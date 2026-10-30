@@ -132,7 +132,7 @@
         ["COMPRESSED_TEX_SUB_IMAGE_3D", 111, null, "u:target i:level i:xoffset i:yoffset i:zoffset i:width i:height i:depth u:format u:image_size"],
         ["WINDOW_POS3F", 112, "WindowPos3f", "fff"],
         ["POINT_PARAMETERI", 113, "PointParameteri", "ui"],
-        ["POINT_PARAMETERIV", 114],
+        ["POINT_PARAMETERIV", 114, "PointParameteriv3", "uiii"],
         ["POINT_SIZE", 115, "PointSize", "f"],
         ["LINE_STIPPLE", 116, "LineStipple", "iu"],
         ["LOGIC_OP", 117, "LogicOp", "u"],

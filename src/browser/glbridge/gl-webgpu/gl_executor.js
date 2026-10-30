@@ -4466,7 +4466,7 @@
             case GL.FOG_DENSITY: fog.density = values[0]; return;
             case GL.FOG_START: fog.start = values[0]; return;
             case GL.FOG_END: fog.end = values[0]; return;
-            case GL.FOG_COLOR: fog.color.set(values.slice(0, 4)); return;
+            case GL.FOG_COLOR: fog.color.set(values.slice(0, 4).map(v => clamp(v, 0, 1))); return;
             case GL.FOG_COORD_SRC: fog.coordSource = values[0] >>> 0; return;
             case GL.FOG_INDEX: return;
             default:

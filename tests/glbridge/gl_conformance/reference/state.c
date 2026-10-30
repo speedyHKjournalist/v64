@@ -51,6 +51,16 @@ int main(void) {
     glClientActiveTexture(GL_TEXTURE0); glEnableClientState(GL_TEXTURE_COORD_ARRAY); query("client0_enabled", GL_TEXTURE_COORD_ARRAY, 1);
     glClientActiveTexture(GL_TEXTURE3); query("client3_disabled", GL_TEXTURE_COORD_ARRAY, 1);
     glHint(GL_FOG_HINT, GL_NICEST); query("hint", GL_FOG_HINT, 1);
+    GLfloat fog_color[] = {.5f, -.25f, 2.f, .25f}; glFogfv(GL_FOG_COLOR, fog_color); query("fog_color", GL_FOG_COLOR, 4);
+    glFogf(GL_FOG_DENSITY, 2.75f); query("fog_density", GL_FOG_DENSITY, 1);
+    GLfloat attenuation[] = {1, 2, 3}; glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, attenuation); query("point_attenuation", GL_POINT_DISTANCE_ATTENUATION, 3);
+    glPointParameterf(GL_POINT_SIZE_MIN, 2.75f); query("point_min", GL_POINT_SIZE_MIN, 1);
+    glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, GL_LOWER_LEFT); query("point_origin", GL_POINT_SPRITE_COORD_ORIGIN, 1);
+    glPixelTransferf(GL_RED_SCALE, 2.75f); query("red_scale", GL_RED_SCALE, 1);
+    glPixelTransferf(GL_INDEX_SHIFT, 2.75f); query("index_shift", GL_INDEX_SHIFT, 1);
+    glPixelZoom(-2, .5f); query("zoom_x", GL_ZOOM_X, 1); query("zoom_y", GL_ZOOM_Y, 1);
+    glLogicOp(GL_XOR); query("logic_op", GL_LOGIC_OP_MODE, 1);
+    glEdgeFlag(GL_FALSE); query("edge_flag", GL_EDGE_FLAG, 1);
     printf("\n  }\n}\n");
     CGLSetCurrentContext(NULL); CGLDestroyContext(ctx); CGLDestroyPixelFormat(pf);
     return 0;

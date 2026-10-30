@@ -21,6 +21,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
@@ -106,6 +107,8 @@ async function guestAnswers(remote) {
     };
     const enabledAt = extraState(0x0DE1, P.C.V86GL_STATE_IS_ENABLED);
     const maskAt = extraState(0x0B93, P.C.V86GL_STATE_INTEGER);
+    stream.call("FOGF", 0x0B62, 2.75);
+    const fogAt = extraState(0x0B62, P.C.V86GL_STATE_DOUBLE);
     stream.call("TRANSLATEF", 2, 3, 4).call("LIGHTFV", 0x4002, 0x1203, 4, 1, 2, 3, 1).call("LOAD_IDENTITY");
     const parameterAt = stream.length + 4;
     const parameterHeader = P.encodeRecord("QUERY_PARAMETER", { pname: 0x1203, value_kind: P.C.V86GL_STATE_DOUBLE,
@@ -163,6 +166,7 @@ async function guestAnswers(remote) {
             (_, i) => view.getFloat64(stateAt + P.RECORDS.QUERY_STATE.size + i * 8, true))),
         enabled: answer(enabledAt + P.F.QUERY_STATE.status, () => view.getFloat64(enabledAt + P.RECORDS.QUERY_STATE.size, true)),
         stencilMask: answer(maskAt + P.F.QUERY_STATE.status, () => view.getFloat64(maskAt + P.RECORDS.QUERY_STATE.size, true)),
+        fogDensity: answer(fogAt + P.F.QUERY_STATE.status, () => view.getFloat64(fogAt + P.RECORDS.QUERY_STATE.size, true)),
         lightPosition: answer(parameterAt + P.F.QUERY_PARAMETER.status, () => Array.from({ length: 4 },
             (_, i) => view.getFloat64(parameterAt + P.RECORDS.QUERY_PARAMETER.size + i * 8, true))),
         linked: answer(linkAt, () => view.getUint32(linkAt + 4, true)),
@@ -205,6 +209,7 @@ async function guestAnswers(remote) {
     assert.equal(results.page.stencilMask, -1); assert.equal(results.worker.stencilMask, -1);
     assert.deepEqual(results.page.lightPosition, [3, 5, 7, 1]);
     assert.deepEqual(results.worker.lightPosition, results.page.lightPosition);
+    assert.equal(results.page.fogDensity, 2.75); assert.equal(results.worker.fogDensity, results.page.fogDensity);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;

@@ -21,6 +21,17 @@
     "texture3_enabled": {"integer":[1],"float":[1],"double":[1],"boolean":[1]},
     "client0_enabled": {"integer":[1],"float":[1],"double":[1],"boolean":[1]},
     "client3_disabled": {"integer":[0],"float":[0],"double":[0],"boolean":[0]},
-    "hint": {"integer":[4354],"float":[4354],"double":[4354],"boolean":[1]}
+    "hint": {"integer":[4354],"float":[4354],"double":[4354],"boolean":[1]},
+    "fog_color": {"integer":[1073741823,0,2147483647,536870911],"float":[0.5,0,1,0.25],"double":[0.5,0,1,0.25],"boolean":[1,0,1,1]},
+    "fog_density": {"integer":[3],"float":[2.75],"double":[2.75],"boolean":[1]},
+    "point_attenuation": {"integer":[1,2,3],"float":[1,2,3],"double":[1,2,3],"boolean":[1,1,1]},
+    "point_min": {"integer":[3],"float":[2.75],"double":[2.75],"boolean":[1]},
+    "point_origin": {"integer":[36001],"float":[36001],"double":[36001],"boolean":[1]},
+    "red_scale": {"integer":[3],"float":[2.75],"double":[2.75],"boolean":[1]},
+    "index_shift": {"integer":[3],"float":[3],"double":[3],"boolean":[1]},
+    "zoom_x": {"integer":[-2],"float":[-2],"double":[-2],"boolean":[1]},
+    "zoom_y": {"integer":[1],"float":[0.5],"double":[0.5],"boolean":[1]},
+    "logic_op": {"integer":[5382],"float":[5382],"double":[5382],"boolean":[1]},
+    "edge_flag": {"integer":[0],"float":[0],"double":[0],"boolean":[0]}
   }
 }
