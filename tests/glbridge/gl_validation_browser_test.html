@@ -16,6 +16,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -118,6 +119,18 @@
             check([64, 128, 191, 255].every((v, i) => Math.abs(arbOut.bytes[32 + i] - v) <= 1),
                 "ARB default programs or high vertex/local parameter layout changed pixels: " + Array.from(arbOut.bytes.subarray(32)));
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "ARB frame must have no host errors");
+            for (const [z, expected] of [[0.25, [0, 0, 0, 255]], [0.05, [255, 0, 0, 255]]]) {
+                const raster = new GLStream().makeCurrent(30, 0, 0, 64, 64, 30, 30).call("CLEAR_COLOR", 0, 0, 0, 1)
+                    .call("CLEAR_DEPTH", 0.3).call("CLEAR", GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT)
+                    .call("ENABLE", GL.DEPTH_TEST).call("DEPTH_FUNC", GL.LESS).call("DEPTH_RANGE", 0.25, 0.75)
+                    .call("COLOR4F", 1, 0, 0, 1).call("WINDOW_POS3F", 31, 31, z)
+                    .bitmap(1, 1, 0, 0, 0, 0, new Uint8Array([0x80, 0, 0, 0]));
+                const pixel = raster.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = raster.bytes();
+                shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+                check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "raster readback must finish");
+                check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "WindowPos depth range changed the bitmap: " + z);
+            }
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms and ARB high parameters preserve pixels in local and copied streams";
     } catch (error) {

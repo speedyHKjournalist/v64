@@ -269,6 +269,13 @@ game.exe
 > - 本机参照增加 11 例、四种查询转换；新增 4 项 CPU 测试，扩充客体 ABI、两种通道和 GPU 验证。37 组 v86 Node、18 组站点测试、8 个 GPU 页面、普通/诊断 DLL、构建和 ESLint 通过，新增变异 3/3 被杀死。
 > - **继续推进：** 光栅状态与光照锁存、像素映射、对象/数组查询、列表/选择/反馈/求值器及 GPU 资源存档仍未完成；C 的退出条件尚未达到。这里只完成状态答案和相应校验，像素传输的深度/模板渲染语义还需在 D4 检查。
 
+> **C3/C6 光栅位置与锁存状态（2026-10-30）：完成固定管线查询这一批。**
+> - `gl_shadow_rasterpos.js` 保存光栅位置/有效位/颜色/次颜色/眼距离和每单元纹理坐标；RasterPos 执行矩阵变换、裁剪、法线变换、固定光照和 texgen，按设置时锁存；WindowPos 绕过光照/矩阵/texgen/裁剪，按深度范围映射 z。Bitmap 移动光栅位置；CURRENT 属性组与快照恢复全部这些状态。
+> - 依据 [ARB_window_pos](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_window_pos.txt) 的实际规则，未采用 gl2.1 refpage 对 WindowPos 光照和 texgen 的错误描述。Apple 的 WindowPos 保留旧 w/眼距离；测试记录原始参照，并对这两项按规范设置 w=1、更新雾距离。RasterPos 选用与页面和 Apple 一致的眼 z 距离近似。
+> - 页面修正 RasterPos 保存 clip w（原先为其倒数），以及 WindowPos z 的深度范围映射。空 FBO 拒绝 RasterPos/Bitmap，WindowPos 仍可使用；Begin/End 内拒绝这三类命令。
+> - 新增独立完整离屏目标的 14 例本机参照、5 项 CPU 测试、实际客体 C ABI 和两种通道的查询测试；真实 GPU 位图测试验证深度范围。38 组 Node、18 组站点、8 个 GPU 页面、构建和 ESLint 通过；新增变异 4/4 被杀死。
+> - **未完成：** 页面光栅光照/texgen/次颜色的渲染仍需 D4 接入；ARB 顶点程序执行产生的光栅结果未迁移。对象/数组查询、像素映射、列表/选择/反馈/求值器及资源存档继续推进，阶段 C 尚未退出。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

@@ -140,7 +140,7 @@
         ["PIXEL_TRANSFERI", 119, "PixelTransferi", "ui"],
         ["PIXEL_ZOOM", 120, "PixelZoom", "ff"],
         ["DRAW_PIXELS", 121],
-        ["BITMAP", 122],
+        ["BITMAP", 122, null, "i:width i:height f:xorig f:yorig f:xmove f:ymove u:data_size"],
         ["COPY_PIXELS", 123, "CopyPixels", "iiiiu"],
         ["TEX_IMAGE_1D", 124, null, "u:target i:level i:internalformat i:width i:border u:format u:type u:data_size"],
         ["TEX_SUB_IMAGE_1D", 125, null, "u:target i:level i:xoffset i:width u:format u:type u:data_size"],

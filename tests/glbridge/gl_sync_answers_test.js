@@ -22,6 +22,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
@@ -99,10 +100,10 @@ async function guestAnswers(remote) {
     const statePayload = new Uint8Array(stateHeader.length + 128); statePayload.set(stateHeader);
     stream.record(P.GLFN.QUERY_STATE, statePayload);
     stream.call("ACTIVE_TEXTURE", 0x84C2).call("ENABLE", 0x0DE1);
-    const extraState = (pname, value_kind) => {
+    const extraState = (pname, value_kind, capacity = 8) => {
         const at = stream.length + 4;
-        const header = P.encodeRecord("QUERY_STATE", { pname, value_kind, data_size: 8 });
-        const payload = new Uint8Array(header.length + 8); payload.set(header);
+        const header = P.encodeRecord("QUERY_STATE", { pname, value_kind, data_size: capacity });
+        const payload = new Uint8Array(header.length + capacity); payload.set(header);
         stream.record(P.GLFN.QUERY_STATE, payload); return at;
     };
     const enabledAt = extraState(0x0DE1, P.C.V86GL_STATE_IS_ENABLED);
@@ -115,6 +116,8 @@ async function guestAnswers(remote) {
         data_size: 32, query_kind: P.C.V86GL_PARAMETER_LIGHT, target: 0x4002 });
     const parameterPayload = new Uint8Array(parameterHeader.length + 32); parameterPayload.set(parameterHeader);
     stream.record(P.GLFN.QUERY_PARAMETER, parameterPayload);
+    stream.call("RASTER_POS4F", 0, 0, 0, 2);
+    const rasterAt = extraState(0x0B07, P.C.V86GL_STATE_DOUBLE, 32);
     // a GLSL program: its link status and a uniform's location
     stream.call("CREATE_SHADER", 1, 0x8B31).shaderSource(1, "uniform float gain; void main() { gl_Position = gl_Vertex * gain; }")
         .call("COMPILE_SHADER", 1).call("CREATE_SHADER", 2, 0x8B30)
@@ -167,6 +170,8 @@ async function guestAnswers(remote) {
         enabled: answer(enabledAt + P.F.QUERY_STATE.status, () => view.getFloat64(enabledAt + P.RECORDS.QUERY_STATE.size, true)),
         stencilMask: answer(maskAt + P.F.QUERY_STATE.status, () => view.getFloat64(maskAt + P.RECORDS.QUERY_STATE.size, true)),
         fogDensity: answer(fogAt + P.F.QUERY_STATE.status, () => view.getFloat64(fogAt + P.RECORDS.QUERY_STATE.size, true)),
+        rasterPosition: answer(rasterAt + P.F.QUERY_STATE.status, () => Array.from({ length: 4 },
+            (_, i) => view.getFloat64(rasterAt + P.RECORDS.QUERY_STATE.size + i * 8, true))),
         lightPosition: answer(parameterAt + P.F.QUERY_PARAMETER.status, () => Array.from({ length: 4 },
             (_, i) => view.getFloat64(parameterAt + P.RECORDS.QUERY_PARAMETER.size + i * 8, true))),
         linked: answer(linkAt, () => view.getUint32(linkAt + 4, true)),
@@ -210,6 +215,7 @@ async function guestAnswers(remote) {
     assert.deepEqual(results.page.lightPosition, [3, 5, 7, 1]);
     assert.deepEqual(results.worker.lightPosition, results.page.lightPosition);
     assert.equal(results.page.fogDensity, 2.75); assert.equal(results.worker.fogDensity, results.page.fogDensity);
+    assert.deepEqual(results.page.rasterPosition, [40, 29, 0.5, 2]); assert.deepEqual(results.worker.rasterPosition, results.page.rasterPosition);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;

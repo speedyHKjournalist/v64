@@ -2731,7 +2731,7 @@
             // glWindowPos bypasses the transform: the value is already in
             // window coordinates and the position is always valid.
             const s = this.current;
-            s.current.rasterPos.set([a[0], a[1], clamp(a[2], 0, 1), 1]);
+            s.current.rasterPos.set([a[0], a[1], s.depthRange.near + clamp(a[2], 0, 1) * (s.depthRange.far - s.depthRange.near), 1]);
             s.current.rasterColor.set(s.current.color);
             s.current.rasterValid = true;
         });
@@ -11092,7 +11092,7 @@ struct Params { value : vec4<f32>, }
                 (ndcY * 0.5 + 0.5) * s.viewport.height;
             s.current.rasterPos[2] = s.depthRange.near +
                 (s.depthRange.far - s.depthRange.near) * (ndcZ * 0.5 + 0.5);
-            s.current.rasterPos[3] = 1 / cw;
+            s.current.rasterPos[3] = cw;
         },
         /*
          * glProgramStringARB compiles immediately, the way the extension
