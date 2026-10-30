@@ -30,7 +30,7 @@ function fakeHandle(memory) {
         needs_reset() { throw new Error("needs_reset"); },
         is_ram: () => true,
         read_memory: (address, length) => memory.subarray(address - ARENA, address - ARENA + length),
-        write_memory() {},
+        write_memory(bytes, address) { memory.set(bytes, address - ARENA); },
     };
 }
 
@@ -70,6 +70,16 @@ assert.equal(handle.replies.length, 9, "the ninth descriptor stays with the gues
 toDevice({ type: "available", value: false });
 assert.equal(handle.replies.length, 10);
 assert.equal(handle.replies[9], NO_RENDERER);
+
+// Inline GL responses have the lifetime of one command arena submission;
+// D3D response slots and heartbeat writes keep their arena lifetime.
+const latest = posted.filter(m => m.type === "batch").at(-1);
+toDevice({ type: "write", generation: latest.generation, inlineId: latest.id - 1, offset: 4096, bytes: new Uint8Array([7]) });
+assert.equal(memory[4096], 0, "a late inline answer cannot overwrite a newer batch");
+toDevice({ type: "write", generation: latest.generation, inlineId: latest.id, offset: 4096, bytes: new Uint8Array([8]) });
+assert.equal(memory[4096], 8, "the current inline response is accepted even after done");
+toDevice({ type: "write", generation: latest.generation, offset: 4096, bytes: new Uint8Array([9]) });
+assert.equal(memory[4096], 9, "arena-scoped responses do not depend on the inline lease");
 
 // The owner unmaps: the renderer hears once that its sessions are over
 handle.push([3, 0, 0, 0, 0, 0]);

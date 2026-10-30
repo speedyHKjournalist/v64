@@ -74,6 +74,13 @@ test("gl_constants.js takes the opcodes from the protocol", () => {
     for (const [name, value] of P.OPCODES) assert.equal(constants.NAME_BY_OPCODE[value], name);
 });
 
+test("the runtime response area agrees with the generated guest heartbeat layout", () => {
+    assert.equal(executorModule.GLWG_RESPONSE_REGION_BYTES, P.C.V86GL_RESPONSE_REGION_BYTES);
+    assert.equal(executorModule.GLWG_HEARTBEAT_OFFSET, P.C.V86GL_HEARTBEAT_OFFSET);
+    assert.equal(P.C.V86GL_HEARTBEAT_OFFSET + P.C.V86GL_HEARTBEAT_BYTES, P.C.V86GL_RESPONSE_REGION_BYTES);
+    assert.ok(P.C.V86GL_ASYNC_HOST_TIMEOUT_MS < P.C.V86GL_ASYNC_SILENCE_MS);
+});
+
 test("flat records and fixed headers round-trip", () => {
     for (const [name, [, types]] of Object.entries(P.SIGNATURES)) {
         const args = [...types].map((t, i) => t === "f" || t === "d" ? i + 0.5 : t === "i" ? -i - 1 : i + 7);

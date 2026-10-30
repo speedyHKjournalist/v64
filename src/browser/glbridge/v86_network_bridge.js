@@ -122,8 +122,8 @@
                 // (one made elsewhere still answers into guest memory through this bridge)
                 this.glExecutor = this.options.glExecutor;
                 if (this.glExecutor.options && !this.glExecutor.options.writeGuestMemory)
-                    this.glExecutor.options.writeGuestMemory = (offset, data, metadata) =>
-                        this.writeGLGuestMemory(offset, data, metadata);
+                    this.glExecutor.options.writeGuestMemory = (offset, data, metadata, inline) =>
+                        this.writeGLGuestMemory(offset, data, metadata, inline);
                 return;
             }
             const install = this.options.installGLWebGPUExecutor ||
@@ -150,19 +150,19 @@
                 }
                 if (typeof userSurface === "function") userSurface(surface, reason);
             };
-            executorOptions.writeGuestMemory = (offsetInBatch, data, metadata) =>
-                this.writeGLGuestMemory(offsetInBatch, data, metadata);
+            executorOptions.writeGuestMemory = (offsetInBatch, data, metadata, inline) =>
+                this.writeGLGuestMemory(offsetInBatch, data, metadata, inline);
             this.glExecutor = install(this.glCanvas, executorOptions);
         }
 
         // An answer the GL executor writes into the batch's record in guest memory
-        writeGLGuestMemory(offsetInBatch, data, metadata) {
+        writeGLGuestMemory(offsetInBatch, data, metadata, inline = true) {
             if (this.destroyed || this.suspended || this.restoringState || this.replayingState) return;
             if (metadata && metadata.graphicsGeneration !== undefined &&
                 metadata.graphicsGeneration !== this.memoryGeneration) return;
             if (!metadata || metadata.batchAddress === undefined) return;
             if (typeof metadata.writeGuestMemory === "function")
-                return metadata.writeGuestMemory(32 + offsetInBatch, asBytes(data));
+                return metadata.writeGuestMemory(32 + offsetInBatch, asBytes(data), inline);
             if (!this.emulator ||
                     typeof this.emulator.write_memory !== "function") return;
             this.emulator.write_memory(asBytes(data),
@@ -328,6 +328,7 @@
                 responseBase: event.responseBase,
                 writeGuestMemory: event.writeGuestMemory,
                 isMemoryValid: event.isMemoryValid,
+                isInlineMemoryValid: event.isInlineMemoryValid,
                 graphicsGeneration: this.memoryGeneration,
             });
             if (event.flags & 1) {

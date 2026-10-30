@@ -13,7 +13,9 @@
 //   released   {}                             the process that mapped the arena
 //                                             let it go (it exited or was killed)
 // host -> device:
-//   write      { generation, offset, bytes }  readback into the arena
+//   write      { generation, offset, bytes, inlineId? }  readback into the arena
+//              inlineId: GL command-memory response, expires on next submit;
+//              absent: dedicated response slots / heartbeat, arena lifetime
 //   done       { id }                         the batch no longer needs its capacity
 //   available  { value }                      whether a renderer takes batches
 //   capabilities { value }                    what the renderer's adapter backs
@@ -98,6 +100,10 @@
                     const offset = message.offset;
                     const bytes = message.bytes;
                     if (message.generation !== arenaGeneration || !arenaBytes) return;
+                    // A timed-out GL inline response must not overwrite the
+                    // next command stream, even when its page-side callback
+                    // ran before that newer batch reached the page.
+                    if (message.inlineId !== undefined && message.inlineId !== nextBatch) return;
                     if (!Number.isInteger(offset) || offset < 0 || offset + bytes.length > arenaBytes)
                         throw new RangeError("v86gl write outside registered arena");
                     dev.write_memory(bytes, arenaAddress + offset);

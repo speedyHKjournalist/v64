@@ -2,7 +2,7 @@
 
 审查对象：DirectDraw、Direct3D 1–7、Direct3D 8、Direct3D 9 四个客体前端，以及它们共用的 D9WG 协议和宿主执行器。
 基线：v86 `e92fd4f0`（`ios6` 分支，D3D 相关文件与 `master` 相同），retro-gaming-site `43c4d1e`。日期 2026-10-29。
-性质：只读审查，没有改动代码；本文尚未提交。
+性质：本文保留修复前的审查基线，已提交；后续实施进度记在第 7 节各阶段的状态块。
 OpenGL 路径的审查见姊妹篇 [`opengl-webgpu-review.md`](opengl-webgpu-review.md)。两条路径共用传输层和 `webgpu_host.js`，错误捕获与失败策略（本文 S1-1、S1-4）应一起修。
 
 ## 0. 结论摘要
@@ -690,6 +690,7 @@ game.exe
 >   - Tint 页 `d3d9_shader_tint_browser_test.html`。
 >   - 上述两页的每个新用例都在上一个提交上失败。
 > - 偏差：已登记在 `d3d9proxy/README.md` 的 “Deviations from D3D9”。
+> - 2026-10-30 共用传输回归：GL 的内联响应增加提交生命周期检查，D3D 的专用响应槽仍按 arena 生命周期处理；Node 的 D3D9/DDraw/桥接测试及 D3D9 一致性、Tint、旧格式等真 WebGPU 页面再次通过。D3D 客体仍未在 XP 里验收，阶段 3–6 尚未开始。
 
 - **目标：** 所有 S1 不再发生；任何 WebGPU 错误都能被看到、被计数、被测试断言。
 - **改动：**

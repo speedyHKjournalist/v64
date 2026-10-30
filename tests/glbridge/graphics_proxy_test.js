@@ -147,6 +147,14 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     assert.deepEqual(toDevice.at(-1), { type: "write", generation: 3, offset: 0x40, bytes: new Uint8Array([5]) },
         "a readback goes to the arena generation of its batch");
     assert.ok(pushed[0].isMemoryValid());
+    toHost({ type: "batch", id: 8, generation: 3, frameId: 10, bytes });
+    assert.ok(!pushed[0].isInlineMemoryValid(), "the next submission expires the inline arena");
+    assert.ok(pushed[0].isMemoryValid(), "dedicated response slots retain their arena lifetime");
+    const beforeLate = toDevice.length;
+    pushed[0].writeGuestMemory(0x40, new Uint8Array([6]), true);
+    assert.equal(toDevice.length, beforeLate, "an expired inline response is dropped on the local path too");
+    pushed[1].writeGuestMemory(0x40, new Uint8Array([7]), true);
+    assert.equal(toDevice.at(-1).inlineId, 8, "the device can also reject stale responses across threads");
     plugin.bridge.beginStateRestore = () => {};
     plugin.bridge.waitForIdle = async () => {};
     await plugin.before_restore();

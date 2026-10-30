@@ -210,6 +210,9 @@
         // Bumped whenever the guest's timeline is replaced: readbacks of
         // batches from before are dropped
         let epoch = 0;
+        // GL's inline answers alias the command arena, reused at the next
+        // submission. D3D's dedicated response slots have a different lifetime.
+        let inlineLease = null;
         // Across threads batches are handled one at a time
         let work = Promise.resolve();
         const stats = { graphics_batches: 0, graphics_bytes: 0, graphics_pending: 0, graphics_peak_pending: 0 };
@@ -251,6 +254,7 @@
 
         const onBatch = message => {
             const batchEpoch = epoch;
+            const lease = inlineLease = {};
             const generation = message.generation;
             const event = {
                 frameId: message.frameId,
@@ -264,10 +268,13 @@
                 submitCount: message.submitCount,
                 handled: false,
                 isMemoryValid: () => batchEpoch === epoch && !bridge.destroyed,
-                writeGuestMemory: (offset, bytes) => {
+                isInlineMemoryValid: () => lease === inlineLease && batchEpoch === epoch && !bridge.destroyed,
+                writeGuestMemory: (offset, bytes, inline) => {
                     if (batchEpoch !== epoch) return;
+                    if (inline && lease !== inlineLease) return;
                     const data = channel.remote ? new Uint8Array(bytes).slice() : bytes;
-                    channel.post({ type: "write", generation, offset, bytes: data },
+                    channel.post({ type: "write", generation, offset, bytes: data,
+                        ...(inline ? { inlineId: message.id } : {}) },
                         channel.remote ? [data.buffer] : undefined);
                 },
             };

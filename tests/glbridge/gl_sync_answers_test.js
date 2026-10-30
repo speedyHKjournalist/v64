@@ -131,6 +131,7 @@ async function guestAnswers(remote) {
     assert.equal(new DataView(memory.buffer, ARENA + HEADER).getUint32(stateAt + P.F.QUERY_STATE.status, true),
         SYNC_STATUS_OK, "typed state is answered before the request returns, including in worker mode");
     await plugin.idle();
+    await executor.idle();
     const view = new DataView(memory.buffer, ARENA + HEADER);
     const answer = (at, value) => view.getUint32(at, true) === SYNC_STATUS_OK ? value() : "status " + view.getUint32(at, true);
     return {

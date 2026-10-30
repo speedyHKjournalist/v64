@@ -153,12 +153,12 @@
     /* The response region carved out of the tail of v86gl.sys's DMA
      * allocation, mirroring D9WG's layout so both paths look the same to
      * anyone reading guest memory. See plan section 6.2. */
-    const GLWG_RESPONSE_REGION_BYTES = 4 * 1024 * 1024;
+    const GLWG_RESPONSE_REGION_BYTES = protocol.C.V86GL_RESPONSE_REGION_BYTES;
     const GLWG_SLOT_BYTES = 16;
     const GLWG_SLOT_COUNT = 1024;
     const GLWG_QUERY_REGION_BYTES = GLWG_SLOT_BYTES * GLWG_SLOT_COUNT;
     const GLWG_READBACK_REGION_OFFSET = GLWG_QUERY_REGION_BYTES;
-    const GLWG_HEARTBEAT_BYTES = 16;
+    const GLWG_HEARTBEAT_BYTES = protocol.C.V86GL_HEARTBEAT_BYTES;
     const GLWG_HEARTBEAT_OFFSET =
         GLWG_RESPONSE_REGION_BYTES - GLWG_HEARTBEAT_BYTES;
     const GLWG_RESPONSE_PENDING = 0;
@@ -2055,6 +2055,19 @@
             return operation;
         }
 
+        // Bound the GPU operation before attaching any guest-memory writes:
+        // a completion after timeout must not turn failure into late success.
+        awaitReadback(operation, label, cancel) {
+            let timer;
+            const timeout = new Promise((resolve, reject) => {
+                timer = setTimeout(() => {
+                    if (cancel) cancel();
+                    reject(new Error(label + " timed out"));
+                }, this.options.readbackTimeoutMs || protocol.C.V86GL_ASYNC_HOST_TIMEOUT_MS);
+            });
+            return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
+        }
+
         async idle() {
             if (this.readyPromise) await this.readyPromise;
             while (this.pendingReadbacks.size)
@@ -2552,7 +2565,7 @@
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, this.heartbeat, true);
             try {
-                write(metadata.responseBase + GLWG_HEARTBEAT_OFFSET, bytes, metadata);
+                write(metadata.responseBase + GLWG_HEARTBEAT_OFFSET, bytes, metadata, false);
             } catch (error) {
                 this.warnOnce("heartbeat", "could not write the heartbeat counter",
                     { message: String(error) });
@@ -4278,7 +4291,16 @@
         /* ---- pixel rectangles ---- */
 
         define("READ_PIXELS", function(a, bytes, view, offset, size, metadata) {
-            this.readPixels(bytes, view, offset, size, metadata);
+            try {
+                this.readPixels(bytes, view, offset, size, metadata);
+            } catch (error) {
+                if (size >= READ_PIXELS_HEADER_SIZE) {
+                    const status = new Uint8Array(4);
+                    new DataView(status.buffer).setUint32(0, SYNC_STATUS_FAILED, true);
+                    this.answerGuest(bytes, metadata, [[offset + protocol.F.READ_PIXELS.status, status]]);
+                }
+                throw error;
+            }
         });
         define("DRAW_PIXELS", function(a, bytes, view, offset, size) {
             this.drawPixels(bytes, view, offset, size);
@@ -7211,7 +7233,8 @@
 
         readQueryResults(resolved, frameValid) {
             const { queries, resolveBuffer, staging } = resolved;
-            this.trackReadback(Promise.all([staging.mapAsync(1 /* GPUMapMode.READ */), frameValid]).then(([, valid]) => {
+            const mapped = Promise.all([staging.mapAsync(1 /* GPUMapMode.READ */), frameValid]);
+            this.trackReadback(this.awaitReadback(mapped, "occlusion query", () => staging.destroy()).then(([, valid]) => {
                 const words = new Uint32Array(staging.getMappedRange().slice(0));
                 staging.unmap();
                 if (!valid) throw new Error("WebGPU rejected the frame");
@@ -10090,8 +10113,8 @@ struct BlitParams {
             // (review S2-23: always colour, in RGBA order of bytes)
             const kind = format === GL.DEPTH_COMPONENT ? "depth" : format === GL.STENCIL_INDEX ? "stencil" : "color";
             const source = kind === "color" ? this.readAttachmentView() : this.readDepthStencil(kind);
-            if (!source || width <= 0 || height <= 0 || !TYPE_BYTES[type]) {
-                view.setUint32(offset + F.status, SYNC_STATUS_FAILED, true);
+            if (READ_PIXELS_HEADER_SIZE + dataSize > size || !source || width <= 0 || height <= 0 || !TYPE_BYTES[type]) {
+                this.answerGuest(bytes, metadata, [[offset + F.status, status(SYNC_STATUS_FAILED)]]);
                 return;
             }
             // only the part inside the source is read (review S1-2i: the copy
@@ -10113,7 +10136,7 @@ struct BlitParams {
             this.endPass();
             const read = this.readRectangle(source, kind, rect);
             this.flushFrame();
-            this.trackReadback(read().then(finish).catch(error => {
+            this.trackReadback(this.awaitReadback(read(), "glReadPixels", read.cancel).then(finish).catch(error => {
                 this.warnOnce("readback", "glReadPixels mapping failed",
                     { message: String(error) });
                 // the guest is told, rather than left waiting out its deadline (review S1-7)
@@ -10194,17 +10217,18 @@ struct BlitParams {
             if (texture !== source.texture) this.retire(texture);
             const format = kind === "depth" ? (texelBytes === 2 ? "depth16" : "r32float") : kind === "stencil" ? "stencil8" :
                 source.format;
-            return () => staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
-                const mapped = new Uint8Array(staging.getMappedRange());
-                const skip = whole ? rect.y * bytesPerRow + rect.x * texelBytes : 0;
-                const values = unpackReadback(mapped.subarray(skip), bytesPerRow, rect.width, rect.height, format);
-                staging.unmap();
-                staging.destroy();
-                return values;
-            }, error => {
-                staging.destroy();
-                throw error;
-            });
+            const read = () => staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
+                try {
+                    const mapped = new Uint8Array(staging.getMappedRange());
+                    const skip = whole ? rect.y * bytesPerRow + rect.x * texelBytes : 0;
+                    return unpackReadback(mapped.subarray(skip), bytesPerRow, rect.width, rect.height, format);
+                } finally {
+                    staging.unmap();
+                    staging.destroy();
+                }
+            }, error => { staging.destroy(); throw error; });
+            read.cancel = () => staging.destroy();
+            return read;
         },
 
         // depth24plus's values, loaded into an r32float image of the rectangle
@@ -10341,6 +10365,7 @@ struct BlitParams {
          */
         answerGuest(bytes, metadata, writes) {
             if (metadata && metadata.isMemoryValid && !metadata.isMemoryValid()) return;
+            if (metadata && metadata.isInlineMemoryValid && !metadata.isInlineMemoryValid()) return;
             for (const [at, data] of writes) if (at + data.length <= bytes.byteLength) bytes.set(data, at);
             const writeGuest = this.options.writeGuestMemory;
             if (typeof writeGuest === "function")
@@ -10394,9 +10419,12 @@ struct BlitParams {
                 new DataView(status.buffer).setUint32(0, value, true);
                 this.answerGuest(bytes, metadata, [[offset, status]]);
             };
-            const done = this.device && this.device.queue.onSubmittedWorkDone ?
-                this.device.queue.onSubmittedWorkDone() : Promise.resolve();
-            this.trackReadback(done.then(() => answer(SYNC_STATUS_OK), () => answer(SYNC_STATUS_FAILED)));
+            const done = Promise.resolve().then(() => this.device && this.device.queue.onSubmittedWorkDone ?
+                this.device.queue.onSubmittedWorkDone() : undefined);
+            this.trackReadback(this.awaitReadback(done, "glFinish").then(() => answer(SYNC_STATUS_OK), error => {
+                this.warnOnce("finish", "glFinish fence failed", { message: String(error) });
+                answer(SYNC_STATUS_FAILED);
+            }));
         },
 
         /* ---- legacy pixel rectangles ---- */
