@@ -280,8 +280,23 @@
                         channel.remote ? [data.buffer] : undefined);
                 },
             };
+            const pushAccepted = () => {
+                if (!message.segments) return bridge.pushPCIBatch(event);
+                let end = 0;
+                for (const segment of message.segments) {
+                    if (!Number.isSafeInteger(segment.offset) || !Number.isSafeInteger(segment.length) ||
+                        segment.offset < end || segment.length <= 0 || segment.offset + segment.length > message.bytes.length)
+                        throw new Error("invalid CPU-validated graphics segment");
+                    end = segment.offset + segment.length;
+                }
+                for (const { offset, length } of message.segments) bridge.pushPCIBatch({ ...event,
+                    bytes: event.bytes.subarray(offset, offset + length), batchAddr: event.batchAddr + offset,
+                    responseBase: event.responseBase - offset,
+                    writeGuestMemory: (at, bytes, inline) => event.writeGuestMemory(at + offset, bytes, inline),
+                });
+            };
             if (!channel.remote) {
-                bridge.pushPCIBatch(event);
+                pushAccepted();
                 channel.post({ type: "done", id: message.id });
                 return;
             }
@@ -294,7 +309,7 @@
             // available (the executors report what failed)
             work = work.then(async () => {
                 if (batchEpoch !== epoch) return;
-                bridge.pushPCIBatch(event);
+                pushAccepted();
                 await bridge.waitForSubmittedBatches();
             }).catch(error => {
                 console.error("[v86gl] a graphics batch failed", error);

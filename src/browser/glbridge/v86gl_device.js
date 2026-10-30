@@ -243,9 +243,10 @@
 
             // A GL batch's answers, written into the guest's memory before
             // it is copied (a D3D batch is one envelope record, 0xFFE1)
+            let segments;
             if (shadow && !(length >= HEADER_BYTES + 4 && (header.getUint16(HEADER_BYTES, true) & 0xFFF0) === 0xFFE0 &&
                     header.getUint16(HEADER_BYTES + 2, true) === 0xFFFF))
-                shadow.process(raw.subarray(HEADER_BYTES));
+                segments = shadow.process(raw.subarray(HEADER_BYTES));
 
             const id = ++nextBatch;
             // Across threads a copy the renderer owns; never the guest's memory
@@ -266,6 +267,7 @@
                 responseBase: arenaBytes - RESPONSE_AREA_BYTES - HEADER_BYTES,
                 submitCount: submitCount + 1,
                 bytes,
+                ...(segments ? { segments } : {}),
             }, remote ? [bytes.buffer] : undefined);
             lastFrameId = frameId;
             lastBytes = commandBytes;

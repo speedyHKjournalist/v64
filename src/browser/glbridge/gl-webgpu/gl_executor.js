@@ -3659,13 +3659,21 @@
          * record the shadow answered is no longer PENDING here.
          */
 
-        define("QUERY_ERROR", function(a, bytes, view, offset, size) {
+        define("QUERY_ERROR", function(a, bytes, view, offset, size, metadata) {
             if (size < 16) throw new GLStreamError("query-error record is short");
             const state = this.current;
             const error = state ? state.error : GL.NO_ERROR;
+            const F = protocol.F.QUERY_ERROR;
+            if (view.getUint32(offset + F.status, true) !== SYNC_STATUS_PENDING) {
+                // Old unfiltered streams may have latched the same CPU
+                // rejection again. Consume that duplicate, preserving any
+                // different renderer error for the next query.
+                if (state && error === view.getUint32(offset + F.value, true)) state.error = GL.NO_ERROR;
+                return;
+            }
             if (state) state.error = GL.NO_ERROR;
-            view.setUint32(offset + protocol.F.QUERY_ERROR.status, SYNC_STATUS_OK, true);
-            view.setUint32(offset + protocol.F.QUERY_ERROR.value, error, true);
+            this.answerGuest(bytes, metadata, [[offset + F.value, new Uint8Array(new Uint32Array([error]).buffer)],
+                [offset + F.status, new Uint8Array(new Uint32Array([SYNC_STATUS_OK]).buffer)]]);
         }, { needsContext: false });
 
         // CPU-only query: it must never consult the page's state or write a

@@ -719,7 +719,25 @@
             check(mixedReference[entry.name].pixel.every((v, j) => Math.abs(pixel.bytes[32 + j] - v) <= 1), entry.name + " native pixel differs: " + Array.from(pixel.bytes.subarray(32)));
             check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, entry.name + " host failure");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation, texture readback, GLSL lifetime/units/mixed fixed stages, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize(); shadow.setCapabilities(executor.capabilities());
+            const s = new GLStream().makeCurrent(700, 0, 0, 64, 64, 700, 700).call("LINE_WIDTH", -1).call("LINE_WIDTH", 3);
+            const header = P.encodeRecord("BUFFER_DATA", { target: 0, size: 131072, data_size: 131072 }), invalid = new Uint8Array(header.length + 131072);
+            invalid.set(header); s.record(P.GLFN.BUFFER_DATA, invalid).call("CLEAR_COLOR", 0.25, 0.5, 0.75, 1).call("CLEAR", GL.COLOR_BUFFER_BIT);
+            s.queryError(); const error = s.payloadView(), pixel = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            const memory = s.bytes(), segments = shadow.process(memory);
+            executor.options.writeGuestMemory = (at, data, metadata) => memory.set(data, metadata.sourceOffset + at);
+            for (const { offset, length } of segments) {
+                const bytes = memory.subarray(offset, offset + length);
+                executor.submit(remote ? bytes.slice() : bytes, { sourceOffset: offset });
+            }
+            await executor.idle();
+            check(error.view.getUint32(P.F.QUERY_ERROR.status, true) === 1 && error.view.getUint32(P.F.QUERY_ERROR.value, true) === GL.INVALID_VALUE, "filtered CPU error query");
+            check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1 && [64, 128, 191, 255].every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "filtered stream readback offset/pixel");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "filtered stream host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, texture readback, GLSL lifetime/units/mixed fixed stages, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

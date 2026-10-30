@@ -139,6 +139,8 @@
             const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             const end = bytes.byteLength;
             let offset = 0;
+            const segments = [];
+            let accepted = 0, filtered = false;
             while (offset + 4 <= end) {
                 const recordOffset = offset;
                 const fn = view.getUint16(offset, true);
@@ -166,9 +168,16 @@
                     }
                 }
                 offset += size;
+                if (protocol.isRejected(view.getUint16(recordOffset, true))) {
+                    if (accepted < recordOffset) segments.push({ offset: accepted, length: recordOffset - accepted });
+                    accepted = offset; filtered = true;
+                }
             }
             if (offset !== end) ++this.stats.malformed;
             for (const part of PARTS) if (part.afterBatch) part.afterBatch(this);
+            if (offset !== end || !filtered) return;
+            if (accepted < end) segments.push({ offset: accepted, length: end - accepted });
+            return segments;
         }
 
         dispatch(fn, bytes, view, offset, size) {
@@ -190,9 +199,14 @@
                 const error = part.checkCommand(this, fn, bytes, view, offset, size);
                 if (error) return error;
             }
-            // Keep our partial error state consumed by legacy glGetError;
-            // it is not authoritative until every command family has rules.
-            if (fn === GLFN.QUERY_ERROR && this.current) this.current.error = 0;
+            // CPU errors are available inside the IOCTL, before the renderer
+            // sees accepted records. A zero CPU flag keeps the transitional
+            // renderer path for command families not migrated yet.
+            if (fn === GLFN.QUERY_ERROR && this.current?.error && this.pending("QUERY_ERROR", view, offset, size)) {
+                view.setUint32(offset + F.QUERY_ERROR.value, this.current.error, true);
+                this.current.error = 0;
+                this.answered("QUERY_ERROR", view, offset, OK);
+            }
             for (const part of PARTS) if (part.command) part.command(this, fn, bytes, view, offset, size);
             const method = HANDLERS.get(fn);
             if (!method) return;

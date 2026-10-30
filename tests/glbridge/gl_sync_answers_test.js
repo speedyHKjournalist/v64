@@ -6,11 +6,9 @@
 // writes its answers into IS guest memory, and the CPU worker's (the site's
 // default), where the batch crosses to the renderer as a copy.
 //
-// The worker mode loses the answers the executor writes (docs/opengl-webgpu-
-// review.md S1-1). Plan stage C moves them to the CPU side's shadow
-// (gl_shadow.js), which the device runs on the guest's memory before the
-// batch is copied, one kind at a time: the kinds it does not answer yet are
-// known failures here, and this test fails once one passes, to be updated.
+// CPU metadata is answered before copying. Remaining renderer answers use
+// the inline guest-memory writer, which also preserves their original
+// addresses when CPU validation removes rejected records from execution.
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -43,7 +41,7 @@ const { createFakeHost } = require("./gl_fake_gpu.js");
 const { GLStream } = require("./gl_stream_builder.js");
 
 // mode -> query kind -> why it is not answered there yet
-const KNOWN_FAILURES = { worker: { error: "S1-1: glGetError needs the shadow to validate every command (C3)" } };
+const KNOWN_FAILURES = {};
 
 const ARENA = 0x100000, ARENA_BYTES = 16 * 1024 * 1024, HEADER = 32;
 const SYNC_STATUS_OK = 1;
@@ -281,7 +279,5 @@ async function guestAnswers(remote) {
         process.exitCode = 1;
         return;
     }
-    console.log("gl_sync_answers_test: both modes answer typed state, capability, GLSL, framebuffer, ARB, glFinish and query " +
-        "results alike; the worker mode's other " +
-        "losses are known (passed)");
+    console.log("gl_sync_answers_test: both modes answer typed state, capability, GLSL, framebuffer, ARB, glFinish, query results and errors alike (passed)");
 })();
