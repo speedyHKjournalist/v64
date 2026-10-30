@@ -60,7 +60,7 @@ test("the generated headers compile, and a wrong offset assert fails the build",
 
 test("the header has every opcode and the name table every name", () => {
     const { protocol, names } = generate();
-    assert.equal(P.OPCODES.length, 219);
+    assert.equal(P.OPCODES.length, 220);
     for (const [name, value] of P.OPCODES) {
         assert.ok(protocol.includes("    GLFN_" + name + " = " + value), name);
         assert.ok(names.includes("[" + value + "] = \"" + name + "\""), name);
@@ -72,6 +72,13 @@ test("gl_constants.js takes the opcodes from the protocol", () => {
     assert.equal(constants.GLFN, P.GLFN);
     assert.equal(constants.CTRL, P.CTRL);
     for (const [name, value] of P.OPCODES) assert.equal(constants.NAME_BY_OPCODE[value], name);
+});
+
+test("typed state and parameter replies share the guest decoder's prefix", () => {
+    for (const field of ["pname", "value_kind", "status", "count", "data_size", "error"])
+        assert.equal(P.F.QUERY_PARAMETER[field], P.F.QUERY_STATE[field], field);
+    assert.equal(P.RECORDS.QUERY_STATE.size, 24);
+    assert.equal(P.RECORDS.QUERY_PARAMETER.size, 40);
 });
 
 test("rejected record tags preserve opcode and every GL error without colliding with controls", () => {

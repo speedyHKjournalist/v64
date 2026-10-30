@@ -23,7 +23,7 @@
     // pname -> [initial values, GL state type, glPushAttrib group]. Colors
     // and depth's normalized conversion are distinct from ordinary floats.
     const DEFAULTS = new Map();
-    const QUERIES = new Map(), ATTRIB_PARTS = new Map();
+    const QUERIES = new Map(), PARAMETERS = new Map(), ATTRIB_PARTS = new Map();
     const define = (names, values, kind, group) => {
         for (const name of names.split(" ")) {
             if (GL[name] === undefined) throw new Error("unknown GL state " + name);
@@ -70,7 +70,8 @@
         GL.CONSTANT_COLOR, GL.ONE_MINUS_CONSTANT_COLOR, GL.CONSTANT_ALPHA, GL.ONE_MINUS_CONSTANT_ALPHA]);
     const EQUATIONS = new Set([GL.FUNC_ADD, GL.FUNC_SUBTRACT, GL.FUNC_REVERSE_SUBTRACT, GL.MIN, GL.MAX]);
     const SETTERS = new Map();
-    const on = (name, fn) => SETTERS.set(GLFN[name], fn);
+    const WITHIN_BEGIN = new Set();
+    const on = (name, fn, withinBegin) => { SETTERS.set(GLFN[name], fn); if (withinBegin) WITHIN_BEGIN.add(GLFN[name]); };
     const set = (c, pname, values) => { c.state.values[pname] = values; };
     function rule(name, check, withinBegin) {
         GLShadow.rules({ [GLFN[name]]: (shadow, bytes, view, offset, size) => {
@@ -234,16 +235,31 @@
     };
 
     proto.queryState = function(bytes, view, offset, size) {
-        if (!this.pending("QUERY_STATE", view, offset, size)) return;
-        const r = P.decodeRecord("QUERY_STATE", view, offset);
-        const header = RECORDS.QUERY_STATE.size;
-        const fail = error => { view.setUint32(offset + F.QUERY_STATE.error, error, true); this.answered("QUERY_STATE", view, offset, C.V86GL_SYNC_QUERY_STATUS_FAILED); };
-        if (header + r.data_size > size || r.value_kind < C.V86GL_STATE_INTEGER || r.value_kind > C.V86GL_STATE_IS_ENABLED) return fail(GL.INVALID_VALUE);
+        return this.queryTyped("QUERY_STATE", view, offset, size);
+    };
+    proto.queryParameter = function(bytes, view, offset, size) {
+        return this.queryTyped("QUERY_PARAMETER", view, offset, size);
+    };
+    proto.queryTyped = function(name, view, offset, size) {
+        if (!this.pending(name, view, offset, size)) return;
+        const r = P.decodeRecord(name, view, offset);
+        const header = RECORDS[name].size;
+        const fail = error => {
+            if (this.current && !this.current.error) this.current.error = error;
+            view.setUint32(offset + F[name].error, error, true);
+            this.answered(name, view, offset, C.V86GL_SYNC_QUERY_STATUS_FAILED);
+        };
+        const parameter = name === "QUERY_PARAMETER";
+        if (header + r.data_size > size || r.value_kind < C.V86GL_STATE_INTEGER ||
+                r.value_kind > (parameter ? C.V86GL_STATE_BOOLEAN : C.V86GL_STATE_IS_ENABLED)) return fail(GL.INVALID_VALUE);
         if (!this.current || this.current.state.begin) return fail(GL.INVALID_OPERATION);
         const isEnabled = r.value_kind === C.V86GL_STATE_IS_ENABLED;
-        const result = isEnabled ? this.enableStateValue && this.enableStateValue(r.pname) : this.stateValue(r.pname);
+        const resolver = parameter && PARAMETERS.get(r.query_kind);
+        const result = parameter ? resolver && resolver(this, r.target, r.pname, r.index) :
+            isEnabled ? this.enableStateValue && this.enableStateValue(r.pname) : this.stateValue(r.pname);
+        if (typeof result === "number") return fail(result);
         if (isEnabled && !result) return fail(GL.INVALID_ENUM);
-        if (!result) { this.answered("QUERY_STATE", view, offset, C.V86GL_STATE_QUERY_UNSUPPORTED); return; }
+        if (!result) { this.answered(name, view, offset, C.V86GL_STATE_QUERY_UNSUPPORTED); return; }
         const [values, kind] = result;
         if (values.length * 8 > r.data_size) return fail(GL.INVALID_VALUE);
         for (let i = 0; i < values.length; ++i) {
@@ -254,15 +270,16 @@
                 // GL 2.1 oracle), unlike an ordinary float's nearest integer.
                 // Preserve the specified negative endpoint even though the
                 // Apple driver returns -INT_MAX there (glGet's refpage).
-                v = kind === "u" ? v | 0 : kind === "n" ? (v <= -1 ? -0x80000000 : Math.trunc(clamp(v, -1, 1) * 0x7FFFFFFF)) : Math.round(v);
+                v = kind === "u" ? v | 0 : kind === "n" ? (v <= -1 ? -0x80000000 : Math.trunc(clamp(v, -1, 1) * 0x7FFFFFFF)) :
+                    kind === "t" ? Math.trunc(v) : Math.round(v);
                 v = clamp(v, -0x80000000, 0x7FFFFFFF);
             } else if (r.value_kind === C.V86GL_STATE_FLOAT) v = Math.fround(v);
             view.setFloat64(offset + header + i * 8, v, true);
         }
-        view.setUint32(offset + F.QUERY_STATE.count, values.length, true);
-        this.answered("QUERY_STATE", view, offset, C.V86GL_SYNC_QUERY_STATUS_OK);
+        view.setUint32(offset + F[name].count, values.length, true);
+        this.answered(name, view, offset, C.V86GL_SYNC_QUERY_STATUS_OK);
     };
-    GLShadow.install({ [GLFN.QUERY_STATE]: "queryState" });
+    GLShadow.install({ [GLFN.QUERY_STATE]: "queryState", [GLFN.QUERY_PARAMETER]: "queryParameter" });
     GLShadow.part({
         context(c) {
             c.state = { values: Object.fromEntries([...DEFAULTS].map(([p, [v]]) => [p, v.slice()])),
@@ -283,8 +300,7 @@
             const state = c.state;
             if (fn === GLFN.BEGIN) { if (size >= 4 && view.getUint32(offset, true) <= GL.POLYGON) state.begin = true; return; }
             if (fn === GLFN.END) { state.begin = false; return; }
-            // None of these state changes is legal within Begin/End.
-            if (state.begin) return;
+            if (state.begin && !WITHIN_BEGIN.has(fn)) return;
             if (fn === GLFN.LOAD_MATRIXF || fn === GLFN.MULT_MATRIXF) {
                 if (size < 64) return;
                 const m = Array.from({ length: 16 }, (_, i) => view.getFloat32(offset + i * 4, true)), s = stack(c);
@@ -340,6 +356,7 @@
     // copy of typed conversion, command walking or snapshot serialization.
     const api = { define, on, set, rule,
         query(pnames, fn) { for (const pname of pnames) QUERIES.set(pname, fn); },
+        parameter(kind, fn) { PARAMETERS.set(kind, fn); },
         attributes(name, part) { ATTRIB_PARTS.set(name, part); } };
     global.V86GLShadowState = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;

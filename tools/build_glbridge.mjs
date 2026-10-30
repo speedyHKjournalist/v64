@@ -12,8 +12,8 @@ const files = [
     "webgpu_host.js",
     "d3d9-webgpu/d3d9_shader_pipeline.js", "d3d9-webgpu/d9wg_protocol.js", "d3d9-webgpu/d3d9_executor.js",
     "d3d9-webgpu/ddraw_ops.js", "gl-webgpu/gl_protocol.js",
-    "gl-webgpu/gl_constants.js", "gl-webgpu/gl_caps.js", "gl-webgpu/gl_glslang.js", "gl-webgpu/gl_shadow.js",
-    "gl-webgpu/gl_shadow_glsl.js", "gl-webgpu/gl_shadow_objects.js", "gl-webgpu/gl_shadow_state.js", "gl-webgpu/gl_shadow_raster.js", "gl-webgpu/gl_state_layout.js",
+    "gl-webgpu/gl_constants.js", "gl-webgpu/gl_caps.js", "gl-webgpu/gl_glslang.js", "gl-webgpu/gl_math.js", "gl-webgpu/gl_shadow.js",
+    "gl-webgpu/gl_shadow_glsl.js", "gl-webgpu/gl_shadow_objects.js", "gl-webgpu/gl_shadow_state.js", "gl-webgpu/gl_shadow_raster.js", "gl-webgpu/gl_shadow_fixed.js", "gl-webgpu/gl_state_layout.js",
     "gl-webgpu/gl_shader_translator.js", "gl-webgpu/gl_fixed_function.js",
     "gl-webgpu/gl_arb_program.js", "gl-webgpu/gl_shadow_arb.js", "gl-webgpu/gl_executor.js",
     "graphics_journal.js", "v86_network_bridge.js", "webgpu_compositor.js", "v86gl_device.js", "graphics_proxy.js",
@@ -61,7 +61,7 @@ const journal_worker = await read_file(new URL("graphics_journal_worker.js", sou
 // The device half alone, for the CPU worker (importScripts): the device and
 // the GL shadow it answers the guest's queries with
 const device = ["gl-webgpu/gl_protocol.js", "gl-webgpu/gl_constants.js", "gl-webgpu/gl_caps.js", "gl-webgpu/gl_glslang.js",
-    "gl-webgpu/gl_shadow.js", "gl-webgpu/gl_shadow_glsl.js", "gl-webgpu/gl_shadow_objects.js", "gl-webgpu/gl_shadow_state.js", "gl-webgpu/gl_shadow_raster.js",
+    "gl-webgpu/gl_math.js", "gl-webgpu/gl_shadow.js", "gl-webgpu/gl_shadow_glsl.js", "gl-webgpu/gl_shadow_objects.js", "gl-webgpu/gl_shadow_state.js", "gl-webgpu/gl_shadow_raster.js", "gl-webgpu/gl_shadow_fixed.js",
     "gl-webgpu/gl_state_layout.js", "gl-webgpu/gl_shader_translator.js", "gl-webgpu/gl_arb_program.js",
     "gl-webgpu/gl_shadow_arb.js", "v86gl_device.js"]
     .map(file => contents[files.indexOf(file)])

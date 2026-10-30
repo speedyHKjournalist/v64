@@ -240,6 +240,7 @@
         // CPU-side state queries. The data are already converted to the
         // requested GL type, stored as doubles (including exact 32-bit ints).
         ["QUERY_STATE", 219, null, "u:pname u:value_kind u:status u:count u:data_size u:error"],
+        ["QUERY_PARAMETER", 220, null, "u:pname u:value_kind u:status u:count u:data_size u:error u:query_kind u:target u:index u:reserved"],
     ];
 
     // Control records, outside the GLFN numbering: [name, code, layout]
@@ -302,6 +303,11 @@
         ["V86GL_STATE_DOUBLE", 3],
         ["V86GL_STATE_BOOLEAN", 4],
         ["V86GL_STATE_IS_ENABLED", 5, "glIsEnabled: capability validation and one boolean answer"],
+        ["V86GL_PARAMETER_LIGHT", 1],
+        ["V86GL_PARAMETER_MATERIAL", 2],
+        ["V86GL_PARAMETER_TEX_ENV", 3],
+        ["V86GL_PARAMETER_TEX_GEN", 4],
+        ["V86GL_PARAMETER_CLIP_PLANE", 5],
         ["V86GL_OBJECT_KIND_SHADER", 1],
         ["V86GL_OBJECT_KIND_PROGRAM", 2],
         ["V86GL_OBJECT_KIND_QUERY", 3],

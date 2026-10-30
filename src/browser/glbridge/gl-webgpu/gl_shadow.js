@@ -147,7 +147,7 @@
             if (!method) return;
             // (a GL command needs a context; one without is the executor's to report)
             if (fn < 0xFF00 && fn !== GLFN.QUERY_INTEGER && fn !== GLFN.QUERY_GL_STRING &&
-                    fn !== GLFN.QUERY_STATE && !this.current) return;
+                    fn !== GLFN.QUERY_STATE && fn !== GLFN.QUERY_PARAMETER && !this.current) return;
             this[method](bytes, view, offset, size);
         }
 

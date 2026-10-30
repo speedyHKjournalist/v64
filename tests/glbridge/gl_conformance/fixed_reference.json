@@ -1,0 +1,22 @@
+{
+  "renderer":"Apple M1 Pro",
+  "version":"2.1 Metal - 91.7",
+  "cases":{
+    "material_default": {"integer":[429496729,429496729,429496729,2147483647],"float":[0.20000000298023224,0.20000000298023224,0.20000000298023224,1],"double":[0,0,0,0]},
+    "position": {"integer":[4,11,28,1],"float":[4,11,28,1],"double":[0,0,0,0]},
+    "direction": {"integer":[4,12,-8],"float":[4,12,-8],"double":[0,0,0]},
+    "clip": {"integer":[0,0,0,0],"float":[0,0,0,0],"double":[0.5,0.5,0.5,3.5]},
+    "eye": {"integer":[0,0,0,3],"float":[0.5,0.5,0.5,3.5],"double":[0.5,0.5,0.5,3.5]},
+    "light_color": {"integer":[1073741823,536870911,0,2147483647],"float":[0.5,0.25,0,1],"double":[0,0,0,0]},
+    "material_int": {"integer":[2147483647,0,1073741823,2147483647],"float":[1,0,0.5,1],"double":[0,0,0,0]},
+    "exponent": {"integer":[13],"float":[12.75],"double":[0]},
+    "env_color": {"integer":[1073741823,536870911,0,2147483647],"float":[0.5,0.25,0,1],"double":[0,0,0,0]},
+    "env_int": {"integer":[2147483647,0,1073741823,2147483647],"float":[1,0,0.5,1],"double":[0,0,0,0]},
+    "combine": {"integer":[34165],"float":[34165],"double":[0]},
+    "bias": {"integer":[2],"float":[2.75],"double":[0]},
+    "replace": {"integer":[1],"float":[1],"double":[0]},
+    "gen_mode": {"integer":[9218],"float":[9218],"double":[9218]},
+    "env_unit0": {"integer":[8448],"float":[8448],"double":[0]},
+    "tracked": {"integer":[0,0,0,2147483647],"float":[0.25,0.5,0.75,1],"double":[0,0,0,0]}
+  }
+}
