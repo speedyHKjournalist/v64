@@ -28,7 +28,7 @@
     const stateLayout = (typeof require === "function" && typeof module !== "undefined") ?
         require("./gl_state_layout.js") : global.GLStateLayout;
 
-    const TRANSLATOR_REVISION = 3;
+    const TRANSLATOR_REVISION = 4;
 
     /* ================================================================== */
     /* Types                                                              */
@@ -3513,7 +3513,7 @@
             const type = FRAGMENT_VARYING_INPUTS[fsName];
             const frontWritten = vsUsage.varyings.has(link.front);
             const backWritten = link.back && vsUsage.varyings.has(link.back);
-            if (!frontWritten && !backWritten) continue;
+            if (!frontWritten && !backWritten && !options?.keepCompatInputs) continue;
             entries.push({
                 name: fsName, type, compat: true, components: componentCount(type),
                 vsFront: frontWritten ? link.front : null,
@@ -5271,7 +5271,7 @@
 
             /* ---- GL state fields: the union, plus what the variant needs ---- */
             const stateFields = new Set([...vs.usage.stateFields,
-                ...fs.usage.stateFields]);
+                ...fs.usage.stateFields, ...(opts.forceStateFields || [])]);
             if (variant.alphaTest && variant.alphaTest !== "always" &&
                     variant.alphaTest !== "never")
                 stateFields.add("alphaRef");
@@ -5302,6 +5302,7 @@
             const varyings = assignVaryings(vs.usage, fs.usage, {
                 twoSided: !!variant.twoSided,
                 flatShading: !!variant.flatShading,
+                keepCompatInputs: !!opts.keepCompatInputs,
             });
             let nextSlot = varyings.slotCount;
             const clipPlaneCount = variant.clipPlaneCount || 0;
@@ -5363,6 +5364,9 @@
                 ok: true,
                 log: log.join("\n"),
                 wgslVertex, wgslFragment, reflection,
+                varyingLayout: { entries: varyings.entries.map(({ name, index, components, slot, offset, flat }) =>
+                    ({ name, index, components, slot, offset, flat })),
+                clip: clipVaryingSlot, pointCoord: pointCoordSlot },
                 stats: {
                     vertex: vsGen.stats, fragment: fsGen.stats,
                     nonUniformSamples: vsGen.stats.nonUniformSamples +
@@ -5394,6 +5398,8 @@
             "r" + TRANSLATOR_REVISION,
             vs.sourceHash.toString(16), fs.sourceHash.toString(16),
             bindingText,
+            "s" + (opts.forceStateFields || []).slice().sort().join(","),
+            opts.keepCompatInputs ? "compat-inputs" : "-",
             "a" + (variant.alphaTest || "-"),
             "c" + (variant.clipPlaneCount || 0),
             variant.pointSprite ? "p" : "-",

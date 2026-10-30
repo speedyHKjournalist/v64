@@ -1,0 +1,158 @@
+{
+  "vs_color": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      64,
+      128,
+      191,
+      255
+    ]
+  },
+  "vs_texture": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      32,
+      128,
+      48,
+      255
+    ]
+  },
+  "vs_fog": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      48,
+      96,
+      207,
+      255
+    ]
+  },
+  "vs_secondary": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      64,
+      255,
+      191,
+      255
+    ]
+  },
+  "vs_back": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      64,
+      128,
+      191,
+      255
+    ]
+  },
+  "fs_color": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      64,
+      128,
+      191,
+      255
+    ]
+  },
+  "fs_texgen": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      128,
+      51,
+      77,
+      255
+    ]
+  },
+  "fs_lighting": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      51,
+      102,
+      153,
+      255
+    ]
+  },
+  "fs_fog": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      96,
+      96,
+      96,
+      255
+    ]
+  },
+  "fs_secondary": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      51,
+      102,
+      153,
+      255
+    ]
+  },
+  "vs_sampler": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      128,
+      128,
+      64,
+      255
+    ]
+  },
+  "vs_back_twoside": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      191,
+      64,
+      128,
+      255
+    ]
+  },
+  "fs_back": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      64,
+      128,
+      191,
+      255
+    ]
+  }
+}

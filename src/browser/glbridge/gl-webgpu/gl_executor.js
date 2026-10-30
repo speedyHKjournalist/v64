@@ -5549,9 +5549,8 @@
             }
             for (const stage of ["vertex", "fragment"]) if (units[stage].length)
                 candidate.compiled[stage] = translator.linkShaderUnits(units[stage], stage, this.options.translator || {});
-            if (!candidate.compiled.vertex || !candidate.compiled.fragment) {
-                program.log = "ERROR: a program needs both a vertex and a " +
-                    "fragment shader";
+            if (!candidate.compiled.vertex && !candidate.compiled.fragment) {
+                program.log = "ERROR: no shaders attached";
                 return;
             }
             // The base link (no pipeline variant) settles the uniform layout
@@ -5600,6 +5599,10 @@
                 nonUniformSampleStrategy:
                     this.options.nonUniformSampleStrategy || "grad",
             };
+            if (!program.compiled.vertex || !program.compiled.fragment) {
+                const signature = this.mixedGLSLSignature(program, variant);
+                return fixedFunction.linkGLSL(program.compiled.vertex, program.compiled.fragment, signature, options);
+            }
             // (the bindings are part of the key: a relink with others
             // assigns other locations)
             const key = translator.hashString(
@@ -6440,7 +6443,7 @@
          * from in the packed draw record. */
         wantedAttributes(program) {
             const ATTR = translator.COMPAT_ATTRIBUTE_LOCATIONS;
-            if (program && program.link) {
+            if (program && program.link && program.compiled.vertex) {
                 return program.link.reflection.attributes.map(a => ({
                     location: a.location,
                     components: a.components,
@@ -6470,7 +6473,7 @@
              * while the vertex layout omitted it, invalidating the pipeline.
              * One signature is now authoritative for both sides. */
             const attributes = this.fixedFunctionSignature(
-                this.currentVariant()).attributes;
+                this.currentVariant(), program?.compiled.fragment).attributes;
             const wanted = [{ location: ATTR.gl_Vertex, components: 4,
                               source: "vertex" }];
             if (attributes.color)
@@ -8054,7 +8057,8 @@ ${fragmentCode}`;
                     s.point.spriteCoordOrigin === GL.LOWER_LEFT,
                 polygonStipple: s.enabled.has(GL.POLYGON_STIPPLE),
                 logicOp: s.enabled.has(GL.COLOR_LOGIC_OP) ? s.logicOp : 0,
-                twoSided: s.lightModel.twoSide,
+                twoSided: this.currentProgramObject()?.compiled.vertex || s.enabled.has(GL.VERTEX_PROGRAM_ARB) ?
+                    s.enabled.has(GL.VERTEX_PROGRAM_TWO_SIDE) : s.lightModel.twoSide,
                 flatShading: s.shadeModel === GL.FLAT,
                 colorTargets: this.colorTargetCount(),
             };
@@ -8242,7 +8246,8 @@ ${fragmentCode}`;
             const program = this.currentProgramObject();
             const variant = this.currentVariant();
             if (program) {
-                const key = this.variantKeyFor(variant);
+                const mixed = !program.compiled.vertex || !program.compiled.fragment;
+                const key = this.variantKeyFor(variant) + (mixed ? "|" + fixedFunction.signatureKey(this.mixedGLSLSignature(program, variant)) : "");
                 let entry = program.variants.get(key);
                 if (!entry) {
                     const link = this.linkVariant(program, variant);
@@ -8266,6 +8271,7 @@ ${fragmentCode}`;
                     stateFloats: entry.link.reflection.stateFloats,
                     uniformBytes: entry.link.reflection.uniformBlockBytes,
                     colorTargets: entry.link.reflection.colorTargets,
+                    textures: entry.link.fixedTextures,
                 };
             }
             const signature = this.fixedFunctionSignature(variant);
@@ -8295,14 +8301,24 @@ ${fragmentCode}`;
             return clamp(bias, -16, 15.99);
         },
 
-        fixedFunctionSignature(variant) {
+        mixedGLSLSignature(program, variant) {
+            const sig = this.fixedFunctionSignature(variant, program.compiled.fragment);
+            if (program.compiled.vertex) {
+                sig.lighting.enabled = false;
+                sig.twoSidedColors = !!variant.twoSided;
+            }
+            return sig;
+        },
+
+        fixedFunctionSignature(variant, glslFragment) {
             const s = this.current;
             const colorSum = s.enabled.has(GL.COLOR_SUM);
             // before an ARB fragment program the fixed vertex stage feeds the
             // program's inputs: every texture coordinate it reads, whatever
             // the texture enables (review D-18)
             const fragmentProgram = this.fixedVertexFragmentProgram();
-            const programCoords = fragmentProgram &&
+            const programCoords = glslFragment ? new Set(Array.from({ length: glslFragment.usage.texCoordDynamic ? MAX_TEXTURE_COORDS :
+                glslFragment.usage.texCoordMax + 1 }, (_, i) => i)) : fragmentProgram &&
                 new Set(fragmentProgram.compiled.reflection.fragmentTexCoords || []);
 
             const texture = [];
@@ -8353,9 +8369,9 @@ ${fragmentCode}`;
                     // constant-rate vertex buffer, so the fixed shader must
                     // consume the attribute rather than bake white/defaults.
                     color: true,
-                    secondaryColor: s.enabled.has(GL.COLOR_SUM) ||
+                    secondaryColor: !!glslFragment || s.enabled.has(GL.COLOR_SUM) ||
                         s.lightModel.colorControl === GL.SEPARATE_SPECULAR_COLOR,
-                    fogCoord: (s.enabled.has(GL.FOG) || !!fragmentProgram) &&
+                    fogCoord: (s.enabled.has(GL.FOG) || !!fragmentProgram || !!glslFragment) &&
                         s.fog.coordSource === GL.FOG_COORD,
                     texCoord: Array.from({ length: MAX_TEXTURE_COORDS },
                         (unused, unit) => texture[unit] && texture[unit].enabled ?
@@ -8385,7 +8401,7 @@ ${fragmentCode}`;
                 // (the program's fragment.fogcoord: computed whatever FOG says)
                 ...(fragmentProgram ? { varyingInterface: "arb", arbFragment: true } : {}),
                 fog: {
-                    enabled: s.enabled.has(GL.FOG) || !!fragmentProgram,
+                    enabled: s.enabled.has(GL.FOG) || !!fragmentProgram || !!glslFragment,
                     mode: s.fog.mode === GL.EXP ? "exp" :
                         (s.fog.mode === GL.EXP2 ? "exp2" : "linear"),
                     coordSource: s.fog.coordSource === GL.FOG_COORD ?
@@ -8839,7 +8855,7 @@ ${fragmentCode}`;
 
         textureBindEntries(shaders) {
             const entries = [];
-            if (shaders.kind === "ff" || shaders.kind === "arb") {
+            if (shaders.textures) {
                 for (const item of shaders.textures) {
                     const unitState = this.current.textureUnits[item.unit];
                     // a fragment program samples the target its instruction
@@ -8853,7 +8869,7 @@ ${fragmentCode}`;
                     entries.push({ binding: item.samplerBinding,
                                    resource: this.samplerFor(object, item.shadow) });
                 }
-                return entries;
+                if (shaders.kind === "ff" || shaders.kind === "arb") return entries;
             }
             const program = shaders.program;
             for (const sampler of shaders.reflection.samplers) {

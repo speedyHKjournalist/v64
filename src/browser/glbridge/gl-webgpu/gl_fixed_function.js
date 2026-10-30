@@ -26,7 +26,7 @@
     const translator = (typeof require === "function" && typeof module !== "undefined") ?
         require("./gl_shader_translator.js") : global.GLShaderTranslator;
 
-    const FIXED_FUNCTION_REVISION = 2;
+    const FIXED_FUNCTION_REVISION = 3;
 
     const MAX_TEXTURE_UNITS = stateLayout.MAX_TEXTURE_UNITS;
     const MAX_LIGHTS = stateLayout.MAX_LIGHTS;
@@ -114,6 +114,9 @@
             // texture coordinates at 3+n. A fixed fragment stage paired with
             // one must consume that ABI instead of our compact internal one.
             varyingInterface: s.varyingInterface === "arb" ? "arb" : "packed",
+            glslInterface: s.glslInterface || null,
+            twoSidedColors: !!s.twoSidedColors,
+            textureBindingBase: s.textureBindingBase || 0,
             // the vertex stage before an ARB fragment program, which reads
             // every interface slot (gl_arb_program.js FSIn)
             arbFragment: !!s.arbFragment,
@@ -304,6 +307,23 @@
         const layout = { entries, color: null, secondary: null, backColor: null,
                          backSecondary: null, fog: null, texCoord: [],
                          clip: -1, pointCoord: -1, lineDistance: -1 };
+
+        if (sig.glslInterface) {
+            const names = { gl_Color: "color", gl_Color__back: "backColor",
+                gl_SecondaryColor: "secondary", gl_SecondaryColor__back: "backSecondary", gl_FogFragCoord: "fog" };
+            for (const item of sig.glslInterface.entries) {
+                const entry = { ...item };
+                entries.push(entry);
+                if (entry.name === "gl_TexCoord") layout.texCoord[entry.index] = entry;
+                else if (names[entry.name]) layout[names[entry.name]] = entry;
+            }
+            layout.clip = sig.glslInterface.clip;
+            layout.pointCoord = sig.glslInterface.pointCoord;
+            layout.slotIndices = [...new Set(entries.map(e => e.slot))].sort((a, b) => a - b);
+            layout.packedSlots = layout.slotIndices.length;
+            layout.slotCount = Math.max(-1, ...layout.slotIndices, layout.clip, layout.pointCoord) + 1;
+            return layout;
+        }
 
         if (sig.varyingInterface === "arb") {
             const fixed = (name, components, slot, extra) => {
@@ -556,10 +576,12 @@
         // (GL 2.1 section 2.14.6; review S2-17)
         if (!lighting.enabled) {
             writeVarying(emit, layout.color, "saturate(" + primary + ")", 4);
+            writeVarying(emit, layout.backColor, "saturate(" + primary + ")", 4);
             if (layout.secondary) {
                 const s = sig.attributes.secondaryColor ?
                     "saturate(vin.secondary.xyz)" : "vec3<f32>(0.0)";
                 writeVarying(emit, layout.secondary, s, 3);
+                writeVarying(emit, layout.backSecondary, s, 3);
             }
             return;
         }
@@ -567,6 +589,10 @@
         emit("    let vertexColor = " + primary + ";");
         emitLightingFace(emit, sig, layout, false);
         if (lighting.twoSide) emitLightingFace(emit, sig, layout, true);
+        else {
+            writeVarying(emit, layout.backColor, readVarying(layout.color, "out"), 4);
+            if (layout.secondary) writeVarying(emit, layout.backSecondary, readVarying(layout.secondary, "out"), layout.secondary.components);
+        }
     }
 
     /*
@@ -692,7 +718,7 @@
         const tmp = "_v" + entry.slot + "_" + entry.offset;
         emit("    let " + tmp + " = " + expr + ";");
         for (let i = 0; i < entry.components; ++i) {
-            const src = entry.components === 1 && components === 1 ?
+            const src = i >= components ? "1.0" : entry.components === 1 && components === 1 ?
                 tmp : tmp + "." + SWIZZLE[i];
             emit("    out.v" + entry.slot + "." + SWIZZLE[entry.offset + i] +
                 " = " + src + ";");
@@ -799,7 +825,7 @@
             if (unit.matrix)
                 emit("    tc" + i + " = glState.textureMatrix[" + i + "] * tc" + i + ";");
 
-            writeVarying(emit, entry, packedTexCoord(unit, "tc" + i), entry.components);
+            writeVarying(emit, entry, sig.glslInterface ? "tc" + i : packedTexCoord(unit, "tc" + i), entry.components);
         }
     }
 
@@ -818,7 +844,7 @@
         emit("@group(1) @binding(0) var<uniform> glState : GLState;");
         emit("");
 
-        let binding = 0;
+        let binding = sig.textureBindingBase;
         const bindings = [];
         for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
             const unit = sig.texture[i];
@@ -837,7 +863,7 @@
 
         emit("struct FSIn {");
         emit("    @builtin(position) position : vec4<f32>,");
-        if (sig.lighting.enabled && sig.lighting.twoSide && !sig.backFacing)
+        if ((sig.twoSidedColors || sig.lighting.enabled && sig.lighting.twoSide) && !sig.backFacing)
             emit("    @builtin(front_facing) frontFacing : bool,");
         for (const i of layout.slotIndices) {
             const flat = layout.entries.some(e => e.slot === i && e.flat);
@@ -874,7 +900,7 @@
         // a polygon's lines and points are not faces to WebGPU: the executor
         // says which side they came from
         const facing = sig.backFacing ? "false" : "fin.frontFacing";
-        if (sig.lighting.enabled && sig.lighting.twoSide && layout.backColor)
+        if ((sig.twoSidedColors || sig.lighting.enabled && sig.lighting.twoSide) && layout.backColor)
             emit("    let primary = select(" + readVarying(layout.backColor) +
                 ", " + colorRead + ", " + facing + ");");
         else
@@ -899,10 +925,9 @@
         }
 
         if (layout.secondary) {
-            const secondary = (sig.lighting.twoSide && layout.backSecondary) ?
-                "select(" + readVarying(layout.backSecondary) + ", " +
-                    readVarying(layout.secondary) + ", " + facing + ")" :
-                readVarying(layout.secondary);
+            const rgb = entry => readVarying({ ...entry, components: 3 });
+            const secondary = ((sig.twoSidedColors || sig.lighting.twoSide) && layout.backSecondary) ?
+                "select(" + rgb(layout.backSecondary) + ", " + rgb(layout.secondary) + ", " + facing + ")" : rgb(layout.secondary);
             emit("    frag = vec4<f32>(clamp(frag.rgb + " + secondary +
                 ", vec3<f32>(0.0), vec3<f32>(1.0)), frag.a);");
         }
@@ -943,11 +968,11 @@
         return L.join("\n") + "\n";
     }
 
-    function readVarying(entry) {
+    function readVarying(entry, input = "fin") {
         if (!entry) return "vec4<f32>(1.0)";
         if (entry.offset === 0 && entry.components === 4)
-            return "fin.v" + entry.slot;
-        return "fin.v" + entry.slot + "." + swz(entry.offset, entry.components);
+            return input + ".v" + entry.slot;
+        return input + ".v" + entry.slot + "." + swz(entry.offset, entry.components);
     }
 
     function emitPolygonStippleTest(emit, position) {
@@ -1063,7 +1088,7 @@
         const v = pointCoord || !entry ? null : readVarying(entry);
         if (pointCoord) return "vec4<f32>(fin.pointCoord, 0.0, 1.0)";
         if (!entry) return "vec4<f32>(0.0, 0.0, 0.0, 1.0)";
-        if (unit.shadow || unit.target === "3D") return v;
+        if (unit.shadow || unit.target === "3D" || sig.glslInterface) return v;
         if (unit.target === "1D") return "vec4<f32>((" + v + ").x, 0.0, 0.0, (" + v + ").y)";
         if (unit.target === "Cube") return "vec4<f32>(" + v + ", 1.0)";
         return "vec4<f32>((" + v + ").xy, 0.0, (" + v + ").z)";
@@ -1355,7 +1380,7 @@
                               components: 3 });
 
         const textures = [];
-        let binding = 0;
+        let binding = sig.textureBindingBase;
         for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) {
             if (!sig.texture[i].enabled) continue;
             textures.push({
@@ -1380,9 +1405,48 @@
         };
     }
 
+    // Link the application's one programmable stage against a compatibility
+    // interface, then generate the other stage with the same varying and GL
+    // state layouts. The interface shaders never replace application source
+    // or participate in CPU reflection.
+    function linkGLSL(vertex, fragment, signature, options) {
+        const programmable = vertex || fragment;
+        const sig = { ...signature, extraStateFields: [...new Set([
+            ...(signature.extraStateFields || []), ...programmable.usage.stateFields])],
+        textureBindingBase: vertex ? programmable.usage.samplers.reduce((n, s) => n + 2 * Math.max(1, s.arraySize), 0) : 0 };
+        let fixed = generate(sig);
+        let source;
+        if (vertex) {
+            const inputs = ["gl_Color"];
+            if (sig.colorSum || sig.lighting.enabled && sig.lighting.separateSpecular) inputs.push("gl_SecondaryColor");
+            if (sig.fog.enabled) inputs.push("vec4(gl_FogFragCoord)");
+            for (let i = 0; i < MAX_TEXTURE_UNITS; ++i) if (sig.texture[i].enabled) inputs.push("gl_TexCoord[" + i + "]");
+            source = "void main(){gl_FragColor=" + inputs.join("+") + ";}";
+        } else {
+            const outputs = ["gl_Position=ftransform()", "gl_FrontColor=gl_Color", "gl_BackColor=gl_Color",
+                "gl_FrontSecondaryColor=gl_SecondaryColor", "gl_BackSecondaryColor=gl_SecondaryColor", "gl_FogFragCoord=gl_FogCoord"];
+            const count = fragment.usage.texCoordDynamic ? MAX_TEXTURE_UNITS : fragment.usage.texCoordMax + 1;
+            for (let i = 0; i < count; ++i) outputs.push("gl_TexCoord[" + i + "]=gl_MultiTexCoord" + i);
+            source = "void main(){" + outputs.join(";") + ";}";
+        }
+        const placeholder = translator.compileShader(source, vertex ? "fragment" : "vertex");
+        const link = translator.linkProgram(vertex || placeholder, fragment || placeholder, {
+            ...options, forceStateFields: fixed.stateFields, keepCompatInputs: true,
+            variant: { ...options?.variant, twoSided: vertex ? !!sig.twoSidedColors : true },
+        });
+        if (!link.ok) return link;
+        sig.glslInterface = link.varyingLayout;
+        fixed = generate(sig);
+        if (vertex) link.wgslFragment = fixed.wgslFragment;
+        else link.wgslVertex = fixed.wgslVertex;
+        link.fixedTextures = vertex ? fixed.textures : [];
+        link.fixedKey = fixed.key;
+        return link;
+    }
+
     const api = {
         FIXED_FUNCTION_REVISION,
-        generate, signatureKey, normalizeSignature, stateFieldsFor,
+        generate, linkGLSL, signatureKey, normalizeSignature, stateFieldsFor,
         allocateVaryings,
         MAX_TEXTURE_UNITS, MAX_LIGHTS, DEPTH_OFFSET_LOCATION, LINE_ATTRIBUTE_LOCATION,
     };

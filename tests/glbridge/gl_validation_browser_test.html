@@ -37,6 +37,7 @@
 <script src="gl_stream_builder.js"></script>
 <script src="gl_shader_units_cases.js"></script>
 <script src="gl_texture_readback_cases.js"></script>
+<script src="gl_shader_mixed_cases.js"></script>
 <script>
 (async () => {
     "use strict";
@@ -696,7 +697,29 @@
             }
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "large texture host failure");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation, texture readback, GLSL lifetime/units, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
+        const mixedReference = await (await fetch("gl_conformance/shader_mixed_reference.json")).json();
+        for (const remote of [false, true]) for (const [i, entry] of GLShaderMixedCases.entries()) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize(); shadow.setCapabilities(executor.capabilities()); shadow.setGlslang(new V86GLGlslang.Glslang(compiler));
+            async function submit(s) {
+                const memory = s.bytes(); shadow.process(memory);
+                executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+            }
+            const base = 600 + i, s = new GLStream().makeCurrent(base, 0, 0, 64, 64, base, base);
+            GLShaderMixedCases.program(s, entry, 100);
+            const linked = s.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, 100, GL.LINK_STATUS);
+            const location = entry.sampler && s.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, 100, "probe", 64); await submit(s);
+            check(linked.view.getInt32(P.F.QUERY_OBJECT_IV.value, true) === 1, entry.name + " CPU link failed");
+            const draw = GLShaderMixedCases.setup(new GLStream(), entry);
+            if (location) draw.uniformiv(location.view.getInt32(P.F.QUERY_LOCATION.result, true), 1, 1, [1]);
+            GLShaderMixedCases.draw(draw, entry);
+            const pixel = draw.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4); await submit(draw);
+            check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, entry.name + " read failed");
+            check(mixedReference[entry.name].pixel.every((v, j) => Math.abs(pixel.bytes[32 + j] - v) <= 1), entry.name + " native pixel differs: " + Array.from(pixel.bytes.subarray(32)));
+            check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, entry.name + " host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation, texture readback, GLSL lifetime/units/mixed fixed stages, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }
