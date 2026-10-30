@@ -40,13 +40,18 @@ function query(stream) {
             header.setUint32(0, 0x324C4756, true); header.setUint32(4, 1, true); header.setUint32(8, +present, true); header.setUint32(20, bytes.length, true);
             memory.set(bytes, 32); request([2, 0, 0, bytes.length + 32, 0, 0]);
         }
-        const first = new GLStream().makeCurrent(1, 0, 0, 32, 32, 1, 1).call("LINE_WIDTH", 3).call("POINT_SIZE", 13).call("LINE_WIDTH", 5), answer = query(first);
+        let finishGPU;
+        gpu.onFinish = (bytes, view, offset, size, metadata) => { finishGPU = () => gpu.answerGuest(bytes, metadata, [[offset, new Uint8Array([1, 0, 0, 0])]]); };
+        const first = new GLStream().makeCurrent(1, 0, 0, 32, 32, 1, 1).call("LINE_WIDTH", 3).record(P.GLFN.FINISH, new Uint8Array(4)), finishReply = first.payloadView();
+        first.call("POINT_SIZE", 13).call("LINE_WIDTH", 5); const answer = query(first);
         submit(first, true); await proxy.idle();
         assert.deepEqual(replies, [0], "submitting IOCTL remains pending while CPU state depends on the GPU");
         assert.equal(gpu.current.lineWidth, 3); assert.equal(swaps, 0); assert.equal(waiting.current.state.values[GL.LINE_WIDTH][0], 3);
         waiting.current.state.values[GL.POINT_SIZE] = [7]; waiting.resumeCPU(next, [new GLStream().call("POINT_SIZE", 7).bytes()]); await proxy.idle(); await gpu.idle();
         assert.deepEqual(replies, [0, 0]); assert.equal(gpu.current.lineWidth, 5); assert.equal(gpu.current.pointSize, 7); assert.equal(swaps, 1, "present follows the final continuation only");
+        finishGPU();
         first.buffer.set(memory.subarray(32, 32 + first.length)); assert.equal(answer.view.getUint32(P.F.QUERY_STATE.status, true), 1); assert.equal(answer.view.getFloat64(24, true), 7);
+        assert.equal(finishReply.view.getUint32(0, true), 1, "a continuation preserves earlier asynchronous replies in the same submission");
         assert.ok(messages.filter(m => m.type === "batch" && m.continuation).length >= 2);
         const second = new GLStream().call("POINT_SIZE", 13); query(second); submit(second); await proxy.idle();
         request([3, 0, 0, 0, 0, 0]); assert.equal(replies.length, 2, "later descriptors stay queued behind the state dependency");

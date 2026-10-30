@@ -25,7 +25,7 @@
     const translator = nodeRequire ? nodeRequire("./gl_shader_translator.js") :
         global.GLShaderTranslator;
 
-    const ARB_REVISION = 3;
+    const ARB_REVISION = 4;
 
     /*
      * Vertex programs require at least 96 parameters. Fragment programs
@@ -821,6 +821,7 @@
             // value for undefined results.
             if (this.stage === "vertex") {
                 if (this.options.vertexCapture) this.usedResults.add("texcoord0");
+                if (this.options.vertexCaptureRaster) for (let i = 1; i < 8; ++i) this.usedResults.add("texcoord" + i);
                 for (const unit of this.options.forceVertexTexCoords || []) {
                     if (unit >= 0 && unit < MAX_TEXTURE_UNITS)
                         this.usedResults.add("texcoord" + unit);
@@ -907,7 +908,7 @@
             out.push("}");
             out.push("");
             if (capture) {
-                out.push(translator.vertexCaptureBindings());
+                out.push(translator.vertexCaptureBindings(this.options.vertexCaptureRaster));
                 out.push("@compute @workgroup_size(" + translator.VERTEX_CAPTURE.workgroupSize + ")");
                 out.push("fn capture_main(@builtin(global_invocation_id) id : vec3<u32>) {");
                 out.push("    if (id.x >= arrayLength(&glCaptureOutput)) { return; }");
@@ -960,6 +961,11 @@
                 // ARB_position_invariant supplies the fixed transformation.
                 out.push("    glCaptureOutput[id.x].eye = " + (this.parsed.options.has("ARB_position_invariant") ?
                     "glState.modelview * vin.gl_Vertex" : "vec4<f32>(0.0)") + ";");
+                if (this.options.vertexCaptureRaster) {
+                    out.push("    glCaptureOutput[id.x].secondary = saturate(frontSecondary);");
+                    out.push("    glCaptureOutput[id.x].fog = fogCoordValue;");
+                    for (let i = 1; i < 8; ++i) out.push("    glCaptureOutput[id.x].texExtra[" + (i - 1) + "] = texcoord" + i + ";");
+                }
                 out.push("}");
                 return;
             }

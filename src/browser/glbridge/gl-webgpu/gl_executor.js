@@ -1361,6 +1361,9 @@
                 rasterPos: new Float32Array([0, 0, 0, 1]),
                 // the colour when the raster position was set (GL 2.1 2.13)
                 rasterColor: new Float32Array([1, 1, 1, 1]),
+                rasterSecondaryColor: new Float32Array([0, 0, 0, 1]),
+                rasterDistance: 0, rasterFogCoord: 0,
+                rasterTexCoord: Array.from({ length: MAX_TEXTURE_COORDS }, () => new Float32Array([0, 0, 0, 1])),
                 rasterValid: true,
             },
 
@@ -2630,8 +2633,18 @@
             current.rasterValid = !!r.valid; current.rasterPos.set(r.position); current.rasterColor.set(r.color);
         });
         define("END", function() { this.endImmediate(); });
+        define("RESOLVED_RASTER_ALL", function(a, bytes, view, offset, size) {
+            if (size < protocol.RECORDS.RESOLVED_RASTER_ALL.size) throw new GLStreamError("resolved raster state is short");
+            const r = protocol.decodeRecord("RESOLVED_RASTER_ALL", view, offset), current = this.current.current;
+            current.rasterValid = !!r.valid; current.rasterPos.set(r.position); current.rasterColor.set(r.color); current.rasterSecondaryColor.set(r.secondary);
+            current.rasterDistance = r.distance; current.rasterFogCoord = r.fog;
+            current.rasterTexCoord.forEach((coord, i) => coord.set(r.coords.slice(i * 4, i * 4 + 4)));
+        });
         define("CAPTURE_VERTICES", function(a, bytes, view, offset, size, metadata) {
             this.captureVertices(bytes, view, offset, size, metadata);
+        });
+        define("CAPTURE_RASTER_VERTEX", function(a, bytes, view, offset, size, metadata) {
+            this.captureVertices(bytes, view, offset, size, metadata, true);
         });
         define("COLOR4F", function(a) {
             this.current.current.color.set([a[0], a[1], a[2], a[3]]);
@@ -5515,40 +5528,42 @@
 
         /* ---- programs ---- */
 
-        vertexCaptureShaders() {
+        vertexCaptureShaders(raster = false) {
             const program = this.currentProgramObject();
             if (program?.compiled.vertex) {
-                const link = translator.linkVertexCapture(program.compiled.vertex, { bindAttribLocations: this.attribBindings(program) });
+                const link = translator.linkVertexCapture(program.compiled.vertex, { bindAttribLocations: this.attribBindings(program), vertexCaptureRaster: raster });
                 if (!link.ok) throw new Error(link.log);
                 return { kind: "program", program, capture: true, key: "capture:" + link.cacheKey, wgslVertex: link.wgslCompute, wgslFragment: "",
                     reflection: link.reflection, stateFields: link.reflection.stateFields, uniformBytes: link.reflection.uniformBlockBytes };
             }
             const vertex = this.current.enabled.has(GL.VERTEX_PROGRAM_ARB) && this.arbProgramFor(GL.VERTEX_PROGRAM_ARB);
             if (!vertex?.compiled?.ok) throw new Error("vertex capture has no installed vertex program");
-            const compiled = arbProgram.compileARBProgram(vertex.source, { vertexCapture: true });
+            const compiled = arbProgram.compileARBProgram(vertex.source, { vertexCapture: true, vertexCaptureRaster: raster });
             if (!compiled.ok) throw new Error(compiled.log);
             return { kind: "arb", capture: true, key: "capture-arb:" + compiled.wgsl, wgslVertex: compiled.wgsl, wgslFragment: "",
                 stateFields: compiled.reflection.stateFields, arbVertex: vertex, textures: [] };
         },
 
-        captureVertices(bytes, view, offset, size, metadata) {
-            const r = protocol.decodeRecord("CAPTURE_VERTICES", view, offset), owned = [], notify = result => {
+        captureVertices(bytes, view, offset, size, metadata, raster = false) {
+            const record = raster ? "CAPTURE_RASTER_VERTEX" : "CAPTURE_VERTICES", r = protocol.decodeRecord(record, view, offset), header = protocol.RECORDS[record].size;
+            if (raster) Object.assign(r, { first: 0, count: 1, total: 1 });
+            const owned = [], notify = result => {
                 if (metadata?.isMemoryValid && !metadata.isMemoryValid()) return;
                 if (typeof metadata?.onVertexCapture !== "function") throw new Error("vertex capture has no CPU result channel");
                 metadata.onVertexCapture({ job: r.job, first: r.first, ...result });
             };
             let read;
             try {
-                if (!r.job || !r.count || r.count > 256 || r.first % 256 || r.first + r.count > r.total || size !== 16 + r.count * 256)
+                if (!r.job || !r.count || r.count > 256 || r.first % 256 || r.first + r.count > r.total || size !== header + r.count * 256)
                     throw new GLStreamError("invalid bounded vertex capture record");
                 this.flushFrame();
-                const shaders = this.vertexCaptureShaders();
+                const shaders = this.vertexCaptureShaders(raster);
                 const created = this.gpuErrors.scoped("vertex capture", () => {
                     const buffer = (size, usage) => { const b = this.device.createBuffer({ size, usage }); owned.push(b); return b; };
                     const input = buffer(r.count * 256, BUFFER_USAGE_STORAGE | BUFFER_USAGE_COPY_DST),
-                        output = buffer(r.count * 80, BUFFER_USAGE_STORAGE | BUFFER_USAGE_COPY_SRC);
+                        output = buffer(r.count * (raster ? translator.VERTEX_CAPTURE.rasterOutputBytes : translator.VERTEX_CAPTURE.outputBytes), BUFFER_USAGE_STORAGE | BUFFER_USAGE_COPY_SRC);
                     read = buffer(output.size, BUFFER_USAGE_MAP_READ | BUFFER_USAGE_COPY_DST);
-                    this.device.queue.writeBuffer(input, 0, bytes.subarray(offset + 16, offset + size));
+                    this.device.queue.writeBuffer(input, 0, bytes.subarray(offset + header, offset + size));
                     const module = this.device.createShaderModule({ code: shaders.wgslVertex }),
                         pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "capture_main" } });
                     pipeline.glActiveBindings = activeShaderBindings(shaders.wgslVertex, "", "capture_main");

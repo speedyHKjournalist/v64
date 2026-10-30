@@ -107,7 +107,7 @@
     function input(c, p, position, attributes = {}) {
         const values = c.state.values, slots = c.state.arrays.generic.map((a, i) => (attributes["generic" + i] || a.current).slice());
         const compat = { gl_Vertex: position, gl_Normal: attributes.normal || values[GL.CURRENT_NORMAL], gl_Color: attributes.color || values[GL.CURRENT_COLOR],
-            gl_SecondaryColor: attributes.secondaryColor || values[GL.CURRENT_SECONDARY_COLOR], gl_FogCoord: attributes.fogCoord || values[GL.CURRENT_FOG_COORDINATE] };
+            gl_SecondaryColor: attributes.secondaryColor || values[GL.CURRENT_SECONDARY_COLOR_EXT], gl_FogCoord: attributes.fogCoord || values[GL.CURRENT_FOG_COORDINATE_EXT] };
         for (let i = 0; i < 8; ++i) compat["gl_MultiTexCoord" + i] = attributes["texCoord" + i] || c.state.fixed.units[i].coord;
         const used = new Set(p.attributes.map(a => a.name || a.field));
         if (/\b(?:gl_Vertex|ftransform)\b/.test(p.sources || "") || p.invariant) used.add("gl_Vertex");
@@ -119,6 +119,26 @@
         slots[0] = position.slice();
         return slots.flat().map(Math.fround);
     }
+    function captureContext(c, p) {
+        const context = { state: { values: GLShadow.clone(c.state.values), raster: { enabled: GLShadow.clone(c.state.raster.enabled) }, fixed: { clip: GLShadow.clone(c.state.fixed.clip) } } };
+        if (!p.glsl && !p.invariant) for (let i = 0; i < 6; ++i) context.state.raster.enabled[GL.CLIP_PLANE0 + i] = false;
+        return context;
+    }
+    function rasterCommand(c) {
+        return arrays.record(P.GLFN.RESOLVED_RASTER_ALL, [P.encodeRecord("RESOLVED_RASTER_ALL", {
+            valid: c.state.values[GL.CURRENT_RASTER_POSITION_VALID][0], position: c.state.values[GL.CURRENT_RASTER_POSITION],
+            color: c.state.values[GL.CURRENT_RASTER_COLOR], secondary: c.state.values[GL.CURRENT_RASTER_SECONDARY_COLOR],
+            distance: c.state.values[GL.CURRENT_RASTER_DISTANCE][0], fog: c.state.rasterFogCoord, coords: c.state.rasterCoords.flat(),
+        })]);
+    }
+    function captureRaster(s, bytes, view, offset, size, p) {
+        const error = s.dispatch(P.GLFN.RASTER_POS4F, bytes, view, offset, size, true); if (error) return { error };
+        if (s.nextSelectionJob >= 0xFFFFFFFF) return { error: GL.OUT_OF_MEMORY };
+        const c = s.current, job = ++s.nextSelectionJob, attributes = input(c, p, s.args("RASTER_POS4F", view, offset, size));
+        const event = { kind: "raster", context: captureContext(c, p), total: 1 };
+        s.selectionJobs.set(job, { c, event }); s.blockCPU(job);
+        return { commands: [arrays.record(P.GLFN.CAPTURE_RASTER_VERTEX, [P.encodeRecord("CAPTURE_RASTER_VERTEX", { job }), new Uint8Array(new Float32Array(attributes).buffer)])] };
+    }
     function capture(s, mode, vertices, p) {
         const c = s.current, q = c.state.selection;
         if (!vertices.length) return [];
@@ -126,8 +146,7 @@
         for (const { event } of s.selectionJobs.values()) pending += event.total;
         if (vertices.length > MAX_CAPTURE_VERTICES || pending > MAX_PENDING_VERTICES || s.nextSelectionJob >= 0xFFFFFFFF) return null;
         const job = ++s.nextSelectionJob;
-        const context = { state: { values: GLShadow.clone(c.state.values), raster: { enabled: GLShadow.clone(c.state.raster.enabled) }, fixed: { clip: GLShadow.clone(c.state.fixed.clip) } } };
-        if (!p.glsl && !p.invariant) for (let i = 0; i < 6; ++i) context.state.raster.enabled[GL.CLIP_PLANE0 + i] = false;
+        const context = captureContext(c, p);
         const event = { kind: "capture", job, mode, context, total: vertices.length, received: 0, chunks: [], vertices: [], edges: vertices.map(v => v.edge), ready: false,
             twoSide: !!c.state.raster.enabled[GL.VERTEX_PROGRAM_TWO_SIDE] };
         q.events.push(event); s.selectionJobs.set(job, { c, q, out: q, event });
@@ -142,6 +161,24 @@
     GLShadow.prototype.completeVertexCapture = function(message) {
         const saved = this.selectionJobs.get(message.job); if (!saved) return;
         const { c, q, out, event } = saved, first = message.first, values = message.values, count = values?.length / 20;
+        if (event.kind === "raster") {
+            if (this.cpuBarrier?.token !== message.job) { this.selectionJobs.delete(message.job); return; }
+            if (!message.error && (!(values instanceof Float32Array) || values.length !== 56 || first !== 0)) return;
+            this.selectionJobs.delete(message.job);
+            const part = at => Array.from(values.subarray(at, at + 4));
+            const vertex = !message.error && { clip: part(0), color: part(4), backColor: part(8), tex: part(12), eye: part(16) },
+                valid = vertex && geometry.clip(event.context, [vertex], "point").length > 0;
+            state.set(c, GL.CURRENT_RASTER_POSITION_VALID, [+!!valid]);
+            if (message.error && !c.error) c.error = GL.INVALID_OPERATION;
+            if (valid) {
+                const position = geometry.window(event.context, vertex);
+                state.set(c, GL.CURRENT_RASTER_POSITION, position); state.set(c, GL.CURRENT_RASTER_COLOR, vertex.color);
+                state.set(c, GL.CURRENT_RASTER_SECONDARY_COLOR, part(20)); state.set(c, GL.CURRENT_RASTER_DISTANCE, [values[24]]);
+                c.state.rasterFogCoord = values[24]; c.state.rasterCoords = [vertex.tex, ...Array.from({ length: 7 }, (_, i) => part(28 + i * 4))];
+                if (c.state.selection.mode === GL.SELECT) hit(c.state.selection, [position[2]]);
+            }
+            this.resumeCPU(message.job, [rasterCommand(c)]); return;
+        }
         if (!message.error && (!(values instanceof Float32Array) || !Number.isInteger(first) || first < 0 || first >= event.total || first % 256 ||
             !Number.isInteger(count) || count <= 0 || count !== Math.min(256, event.total - first) || event.chunks.includes(first))) return;
         if (message.error) { event.error = GL.INVALID_OPERATION; event.ready = true; }
@@ -226,7 +263,8 @@
         if (r.operation === 1 && !q.names.length) return GL.INVALID_OPERATION;
         if (r.operation === 2 && q.names.length >= maxNames(s)) return GL.STACK_OVERFLOW;
         return r.operation === 3 && !q.names.length ? GL.STACK_UNDERFLOW : 0;
-    }, [P.GLFN.RESOLVED_RASTER_STATE]: () => GL.INVALID_OPERATION, [P.GLFN.CAPTURE_VERTICES]: () => GL.INVALID_OPERATION });
+    }, [P.GLFN.RESOLVED_RASTER_STATE]: () => GL.INVALID_OPERATION, [P.GLFN.CAPTURE_VERTICES]: () => GL.INVALID_OPERATION,
+    [P.GLFN.CAPTURE_RASTER_VERTEX]: () => GL.INVALID_OPERATION, [P.GLFN.RESOLVED_RASTER_ALL]: () => GL.INVALID_OPERATION });
     state.query([GL.RENDER_MODE], s => [[modeOf(s.current)], "e"]);
     state.query([GL.MAX_NAME_STACK_DEPTH], s => [[maxNames(s)], "i"]);
     state.query([0x0D70], s => [[s.current.state.selection.names.length], "i"]);
@@ -240,6 +278,7 @@
     });
     GLShadow.part({
         reset(s) { s.nextSelectionJob = 0; s.selectionJobs = new Map(); },
+        cancelCPU(s, barrier) { if (barrier) s.selectionJobs.delete(barrier.token); },
         destroy(s, c) {
             for (const [id, job] of s.selectionJobs) if (job.c === c) s.selectionJobs.delete(id);
             for (const out of c.state.selection.retired) if (out.close?.target.localId) s.responseTargets.delete(out.close.target.localId);
@@ -248,15 +287,15 @@
         routeRecord(s, fn, bytes, view, offset, size) {
             const c = s.current; if (!c) return;
             if (fn === P.GLFN.NAME_COMMAND) return { error: s.dispatch(fn, bytes, view, offset, size) || 0, commands: [] };
+            if (fn === P.GLFN.RASTER_POS4F || fn === P.GLFN.WINDOW_POS3F) {
+                const p = fn === P.GLFN.RASTER_POS4F && program(s);
+                if (p) return captureRaster(s, bytes, view, offset, size, p);
+                const failure = s.dispatch(fn, bytes, view, offset, size); if (failure) return { error: failure };
+                return { commands: [rasterCommand(c)] };
+            }
             const q = c.state.selection; if (q.mode === GL.RENDER) return;
             const name = P.NAME_BY_OPCODE[fn], vertex = ["VERTEX2F", "VERTEX3F", "VERTEX4F"].includes(name),
                 attribZero = name === "VERTEX_ATTRIB4F" && view.getUint32(offset, true) === 0 && c.state.begin;
-            if (fn === P.GLFN.RASTER_POS4F || fn === P.GLFN.WINDOW_POS3F) {
-                const failure = s.dispatch(fn, bytes, view, offset, size); if (failure) return { error: failure };
-                return { commands: [arrays.record(P.GLFN.RESOLVED_RASTER_STATE, [P.encodeRecord("RESOLVED_RASTER_STATE", {
-                    valid: c.state.values[GL.CURRENT_RASTER_POSITION_VALID][0], position: c.state.values[GL.CURRENT_RASTER_POSITION], color: c.state.values[GL.CURRENT_RASTER_COLOR],
-                })])] };
-            }
             if (fn === P.GLFN.BEGIN || fn === P.GLFN.END || vertex || attribZero) {
                 const failure = s.dispatch(fn, bytes, view, offset, size); if (failure) return { error: failure };
                 if (fn === P.GLFN.BEGIN) q.primitive = { mode: view.getUint32(offset, true), vertices: [], program: program(s) };

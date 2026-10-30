@@ -267,6 +267,8 @@
         ["NAME_COMMAND", 240, null, "u:operation u:name f:value"],
         ["RESOLVED_RASTER_STATE", 241, null, "u:valid f:position[4] f:color[4]"],
         ["CAPTURE_VERTICES", 242, null, "u:job u:first u:count u:total"],
+        ["CAPTURE_RASTER_VERTEX", 243, null, "u:job u:reserved"],
+        ["RESOLVED_RASTER_ALL", 244, null, "u:valid f:position[4] f:color[4] f:secondary[4] f:distance f:fog f:coords[32]"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

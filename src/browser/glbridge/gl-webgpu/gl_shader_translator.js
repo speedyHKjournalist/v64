@@ -28,16 +28,17 @@
     const stateLayout = (typeof require === "function" && typeof module !== "undefined") ?
         require("./gl_state_layout.js") : global.GLStateLayout;
 
-    const TRANSLATOR_REVISION = 5;
+    const TRANSLATOR_REVISION = 6;
 
     // A capture invocation runs the actual vertex program, with the same
     // uniforms and textures as a draw. Keep GL clip coordinates for the CPU
     // selection/feedback clipper; viewport conversion belongs to that clipper.
-    const VERTEX_CAPTURE = Object.freeze({ attributes: 16, inputBytes: 256, outputBytes: 80, workgroupSize: 64 });
-    function vertexCaptureBindings() {
+    const VERTEX_CAPTURE = Object.freeze({ attributes: 16, inputBytes: 256, outputBytes: 80, rasterOutputBytes: 224, workgroupSize: 64 });
+    function vertexCaptureBindings(raster = false) {
         return [
             "struct GLCaptureInput { attributes : array<vec4<f32>, 16>, }",
-            "struct GLCaptureOutput { clip : vec4<f32>, color : vec4<f32>, backColor : vec4<f32>, tex : vec4<f32>, eye : vec4<f32>, }",
+            "struct GLCaptureOutput { clip : vec4<f32>, color : vec4<f32>, backColor : vec4<f32>, tex : vec4<f32>, eye : vec4<f32>, " +
+                (raster ? "secondary : vec4<f32>, fog : vec4<f32>, texExtra : array<vec4<f32>, 7>, " : "") + "}",
             "@group(3) @binding(0) var<storage, read> glCaptureInput : array<GLCaptureInput>;",
             "@group(3) @binding(1) var<storage, read_write> glCaptureOutput : array<GLCaptureOutput>;",
         ].join("\n");
@@ -3801,7 +3802,7 @@
 
         emitIOStructs() {
             if (this.stage === "vertex" && this.options.vertexCapture) {
-                this.emitAll(vertexCaptureBindings().split("\n"));
+                this.emitAll(vertexCaptureBindings(this.options.vertexCaptureRaster).split("\n"));
                 return;
             }
             const varyings = this.iface.varyings;
@@ -4762,6 +4763,11 @@
                 output(field, this.usage.varyings.has(name) ? "saturate(" + name + ")" : "vec4<f32>(1.0)");
             output("tex", this.usage.varyings.has("gl_TexCoord") ? "gl_TexCoord[0]" : "vec4<f32>(0.0)");
             output("eye", this.usage.builtinOutputs.has("gl_ClipVertex") ? "gl_ClipVertex" : "vec4<f32>(0.0)");
+            if (this.options.vertexCaptureRaster) {
+                output("secondary", this.usage.varyings.has("gl_FrontSecondaryColor") ? "saturate(gl_FrontSecondaryColor)" : "vec4<f32>(0.0)");
+                output("fog", this.usage.varyings.has("gl_FogFragCoord") ? "vec4<f32>(gl_FogFragCoord, 0.0, 0.0, 0.0)" : "vec4<f32>(0.0)");
+                for (let i = 1; i < 8; ++i) output("texExtra[" + (i - 1) + "]", this.usage.varyings.has("gl_TexCoord") ? "gl_TexCoord[" + i + "]" : "vec4<f32>(0.0)");
+            }
             --this.indent;
             this.emit("}");
         }
@@ -5385,6 +5391,7 @@
             };
             const genOptions = {
                 vertexCapture: !!opts.vertexCapture,
+                vertexCaptureRaster: !!opts.vertexCaptureRaster,
                 pointSprite: !!variant.pointSprite,
                 programPointSize: !!variant.programPointSize,
                 pointCoordLowerLeft: !!variant.pointCoordLowerLeft,
@@ -5445,6 +5452,7 @@
             "s" + (opts.forceStateFields || []).slice().sort().join(","),
             opts.keepCompatInputs ? "compat-inputs" : "-",
             opts.vertexCapture ? "capture" : "render",
+            opts.vertexCaptureRaster ? "raster" : "vertices",
             "a" + (variant.alphaTest || "-"),
             "c" + (variant.clipPlaneCount || 0),
             variant.pointSprite ? "p" : "-",

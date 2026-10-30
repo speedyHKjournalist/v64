@@ -101,10 +101,12 @@ function opcodes(bytes) {
         // real compute output is checked by gl_validation_browser_test.html.
         const nativeCapture = gpu.captureVertices, callbacks = [];
         let holdCapture = false;
-        gpu.captureVertices = function(bytes, view, offset, size, metadata) {
-            const r = P.decodeRecord("CAPTURE_VERTICES", view, offset), values = new Float32Array(r.count * 20);
+        gpu.captureVertices = function(bytes, view, offset, size, metadata, raster = false) {
+            const r = P.decodeRecord(raster ? "CAPTURE_RASTER_VERTEX" : "CAPTURE_VERTICES", view, offset), header = raster ? 8 : 16;
+            if (raster) Object.assign(r, { first: 0, count: 1 });
+            const values = new Float32Array(r.count * (raster ? 56 : 20));
             for (let i = 0; i < r.count; ++i) {
-                const at = offset + 16 + i * 256, position = Array.from({ length: 4 }, (_, k) => view.getFloat32(at + k * 4, true));
+                const at = offset + header + i * 256, position = Array.from({ length: 4 }, (_, k) => view.getFloat32(at + k * 4, true));
                 values.set([position[0] * 2, ...position.slice(1), 1, 0, 0.5, 1, 0.25, 0.5, 0.75, 1, 5, 5, 5, 5, ...position], i * 20);
             }
             const done = () => metadata.onVertexCapture({ job: r.job, first: r.first, values });
@@ -122,6 +124,13 @@ function opcodes(bytes) {
         assert.equal(expired.response.view.getUint32(P.F.QUERY_RENDER_MODE.status, true), 0);
         await submit(new GLStream().call("LINE_WIDTH", 3)); const newerMemory = memory.slice(0, 1024);
         callbacks.shift()(); assert.deepEqual(memory.subarray(0, 1024), newerMemory, "expired CPU result cannot overwrite a later arena submission");
+        holdCapture = false;
+        const raster = new GLStream().call("RASTER_POS4F", 0.25, 0, 0, 1), rasterReply = new Uint8Array(56);
+        rasterReply.set(P.encodeRecord("QUERY_STATE", { pname: GL.CURRENT_RASTER_POSITION, value_kind: P.C.V86GL_STATE_FLOAT, data_size: 32 }));
+        raster.record(P.GLFN.QUERY_STATE, rasterReply); const rasterState = raster.payloadView(); await submit(raster);
+        assert.equal(rasterState.view.getUint32(P.F.QUERY_STATE.status, true), 1, "state query after programmable RasterPos is ready at IOCTL completion");
+        assert.deepEqual(Array.from({ length: 4 }, (_, i) => rasterState.view.getFloat64(24 + i * 8, true)), [48, 32, 0.5, 1]);
+        assert.deepEqual(Array.from(gpu.current.current.rasterPos), [48, 32, 0.5, 1]);
         gpu.captureVertices = nativeCapture; await submit(new GLStream().call("USE_PROGRAM", 0).makeCurrent(1300, 0, 0, 32, 32, 1300, 1300).call("CLEAR", GL.COLOR_BUFFER_BIT));
         gpu.current.error = GL.INVALID_ENUM; await error(GL.INVALID_ENUM); await error(GL.NO_ERROR);
         gpu.current.error = GL.INVALID_ENUM;
