@@ -251,6 +251,9 @@
         ["INDEX_POINTER_VBO", 226, null, "i:size u:type i:stride u:offset"],
         ["EDGE_FLAG_POINTER_VBO", 227, null, "i:size u:type i:stride u:offset"],
         ["QUERY_NAMES", 228, null, "u:object_kind i:count u:status u:error u:data_size u:reserved"],
+        ["FRAMEBUFFER_TEXTURE_1D", 229, "FramebufferTexture1DMapped", "uuuuii"],
+        ["FRAMEBUFFER_TEXTURE_2D", 230, "FramebufferTexture2DMapped", "uuuuii"],
+        ["FRAMEBUFFER_TEXTURE_3D", 231, "FramebufferTexture3DMapped", "uuuuii"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

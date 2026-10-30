@@ -3408,7 +3408,7 @@
             this.endPass();
             framebufferState.bind(this.current, map, target, name);
         });
-        define("FRAMEBUFFER_TEXTURE", function(a) {
+        for (const name of ["FRAMEBUFFER_TEXTURE", "FRAMEBUFFER_TEXTURE_1D", "FRAMEBUFFER_TEXTURE_2D", "FRAMEBUFFER_TEXTURE_3D"]) define(name, function(a) {
             this.framebufferTexture(a[0] >>> 0, a[1] >>> 0, a[2] >>> 0,
                 a[3] >>> 0, a[4] | 0, a[5] | 0);
         });

@@ -379,9 +379,9 @@
         const texture = group.textureImages.get(record.id);
         const layer = texture && texture.levels.get(texture.target === GL.TEXTURE_3D ? 0 : record.layer);
         const level = layer && layer.get(record.level);
-        if (!level) return null;
+        if (!level || !level.width || !level.height) return null;
         // a 3D texture's attached layer must be one it has
-        return texture.target === GL.TEXTURE_3D && record.layer >= level.depth ? null : level;
+        return texture.target === GL.TEXTURE_3D && (record.layer < 0 || record.layer >= level.depth) ? null : level;
     };
 
     // EXT_framebuffer_object's completeness. Two depth and stencil images
@@ -463,6 +463,9 @@
         [GLFN.DELETE_FRAMEBUFFERS]: "deleteFramebuffers",
         [GLFN.BIND_FRAMEBUFFER]: "bindFramebuffer",
         [GLFN.FRAMEBUFFER_TEXTURE]: "framebufferTexture",
+        [GLFN.FRAMEBUFFER_TEXTURE_1D]: "framebufferTexture",
+        [GLFN.FRAMEBUFFER_TEXTURE_2D]: "framebufferTexture",
+        [GLFN.FRAMEBUFFER_TEXTURE_3D]: "framebufferTexture",
         [GLFN.FRAMEBUFFER_RENDERBUFFER]: "framebufferRenderbuffer",
         [GLFN.DRAW_BUFFER]: "drawBuffer",
         [GLFN.DRAW_BUFFERS]: "drawBuffers",

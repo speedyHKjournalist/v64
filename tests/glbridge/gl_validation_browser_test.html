@@ -495,6 +495,22 @@
             executor.submit(remote ? glslMemory.slice() : glslMemory, {}); await executor.idle();
             check([64, 128, 191, 255].every((v, i) => Math.abs(glslPixel.bytes[32 + i] - v) <= 1), "CPU-generated GLSL names must render");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "GLSL name allocation must have no host errors");
+            const attachments = new GLStream().makeCurrent(194, 0, 0, 64, 64, 194, 194)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 1).texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 1)
+                .call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0, 0)
+                .call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 100, 0, 0)
+                .call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 99, 0)
+                .call("FRAMEBUFFER_TEXTURE_1D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0, 0)
+                .names(P.GLFN.GEN_RENDERBUFFERS, [2]).call("FRAMEBUFFER_RENDERBUFFER", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.RENDERBUFFER_EXT, 2)
+                .call("CLEAR_COLOR", 0.25, 0.5, 0.75, 1).call("CLEAR", GL.COLOR_BUFFER_BIT);
+            const attachmentPixel = attachments.readPixels(1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), attachmentMemory = attachments.bytes();
+            const attachmentRejected = shadow.stats.rejected; shadow.process(attachmentMemory);
+            check(shadow.stats.rejected === attachmentRejected + 4, "invalid attachments must be rejected before changing the FBO");
+            executor.options.writeGuestMemory = (offset, data) => attachmentMemory.set(data, offset);
+            executor.submit(remote ? attachmentMemory.slice() : attachmentMemory, {}); await executor.idle();
+            check([64, 128, 191, 255].every((v, i) => Math.abs(attachmentPixel.bytes[32 + i] - v) <= 1), "invalid FBO attachments changed the previous render target");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO attachment validation must have no host errors");
             const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
                 .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                 .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")

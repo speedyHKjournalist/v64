@@ -30,6 +30,33 @@
     state.rule("BIND_FRAMEBUFFER", (c, [target]) =>
         [GL.FRAMEBUFFER_EXT, GL.READ_FRAMEBUFFER, GL.DRAW_FRAMEBUFFER].includes(target) ? 0 : GL.INVALID_ENUM);
     const limit = (s, pname) => s.capabilities ? caps.integer(s.capabilities, pname) : caps.LIMITS.MAX_DRAW_BUFFERS;
+    function attachmentError(c, target, attachment, s) {
+        if (![GL.FRAMEBUFFER_EXT, GL.READ_FRAMEBUFFER, GL.DRAW_FRAMEBUFFER].includes(target)) return GL.INVALID_ENUM;
+        if (!(target === GL.READ_FRAMEBUFFER ? c.readFramebuffer : c.drawFramebuffer)) return GL.INVALID_OPERATION;
+        return [GL.DEPTH_ATTACHMENT, GL.STENCIL_ATTACHMENT, GL.DEPTH_STENCIL_ATTACHMENT].includes(attachment) ||
+            attachment >= GL.COLOR_ATTACHMENT0 && attachment < GL.COLOR_ATTACHMENT0 + limit(s, GL.MAX_COLOR_ATTACHMENTS) ? 0 : GL.INVALID_ENUM;
+    }
+    for (const [name, dimension] of [["FRAMEBUFFER_TEXTURE", 0], ["FRAMEBUFFER_TEXTURE_1D", 1],
+        ["FRAMEBUFFER_TEXTURE_2D", 2], ["FRAMEBUFFER_TEXTURE_3D", 3]])
+        state.rule(name, (c, [target, attachment, textarget, texture, level, slice], s) => {
+            const error = attachmentError(c, target, attachment, s); if (error || !texture) return error;
+            const cube = textarget >= GL.TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL.TEXTURE_CUBE_MAP_NEGATIVE_Z;
+            const dimensionality = textarget === GL.TEXTURE_1D ? 1 : textarget === GL.TEXTURE_3D ? 3 : textarget === GL.TEXTURE_2D || cube ? 2 : 0;
+            if (!dimensionality || dimension && dimensionality !== dimension) return GL.INVALID_ENUM;
+            const object = c.group.textures.get(texture);
+            if (!object?.target || object.target !== (cube ? GL.TEXTURE_CUBE_MAP : textarget)) return GL.INVALID_OPERATION;
+            const max = s.capabilities ? caps.integer(s.capabilities, dimensionality === 3 ? GL.MAX_3D_TEXTURE_SIZE :
+                cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : dimensionality === 3 ? 2048 : 16384;
+            if (level < 0 || level > Math.floor(Math.log2(max))) return GL.INVALID_VALUE;
+            // EXT_framebuffer_object only rejects slices above the maximum.
+            // An absent (including negative) slice makes the FBO incomplete.
+            return dimensionality === 3 && slice >= max ? GL.INVALID_VALUE : 0;
+        });
+    state.rule("FRAMEBUFFER_RENDERBUFFER", (c, [target, attachment, rbTarget, name], s) => {
+        const error = attachmentError(c, target, attachment, s); if (error || !name) return error;
+        if (rbTarget !== GL.RENDERBUFFER_EXT) return GL.INVALID_ENUM;
+        return c.group.renderbuffers.get(name)?.created ? 0 : GL.INVALID_OPERATION;
+    });
     state.query([0x0C01], s => [[s.current.drawBuffers[0] || GL.NONE], "e"]);
     state.query([0x0C02], s => [[s.current.readBuffer], "e"]);
     for (let i = 0; i < 16; ++i) state.query([GL.DRAW_BUFFER0 + i], s =>
