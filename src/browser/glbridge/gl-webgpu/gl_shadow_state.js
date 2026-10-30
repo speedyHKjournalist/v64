@@ -221,8 +221,7 @@
         // Format queries belong to the selected drawable, not the adapter.
         if (pname === GL.DOUBLEBUFFER) return [[+(!c.drawFramebuffer && !(state.format & C.V86GL_FORMAT_SINGLE_BUFFER))], "b"];
         if (pname === GL.SAMPLES || pname === GL.SAMPLE_BUFFERS) {
-            // FBO multisample storage has not been migrated yet.
-            if (c.drawFramebuffer) return null;
+            if (c.drawFramebuffer) return this.framebufferStateValue?.(pname) || null;
             const samples = (state.format & C.V86GL_FORMAT_SAMPLES_MASK) >>> C.V86GL_FORMAT_SAMPLES_SHIFT;
             return [[pname === GL.SAMPLES ? (samples > 1 ? samples : 0) : +(samples > 1)], "i"];
         }
@@ -230,7 +229,7 @@
             const max = caps.integer(this.capabilities, pname); return [[max, max], "i"];
         }
         // Do not use the adapter's unconditional bit-depth answers for FBOs.
-        if (c.drawFramebuffer && pname >= GL.RED_BITS && pname <= GL.STENCIL_BITS) return null;
+        if (c.drawFramebuffer && pname >= GL.RED_BITS && pname <= GL.STENCIL_BITS) return this.framebufferStateValue?.(pname) || null;
         const value = this.capabilities && caps.integer(this.capabilities, pname);
         return value !== undefined && value !== null ? [[value], "i"] : null;
     };

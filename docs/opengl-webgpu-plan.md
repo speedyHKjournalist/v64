@@ -463,6 +463,12 @@ game.exe
 > - 旧存档没有该表时，在恢复时按现有能力生成一次；无法凭旧数据重建历史版本未保存的字符串。资源内容读回、其它状态族的完整存档和退出日志重放仍属 C8 剩余工作。
 > - 46 组 Node、8 个 GPU 页面、构建和变更源码 ESLint 通过，新增变异 4/4 被杀死。阶段 C 尚未退出，D–G 未整体完成。
 
+> **C3 FBO 位数与采样查询（2026-10-31）：完成这一批迁移。**
+> - RED/GREEN/BLUE/ALPHA/DEPTH/STENCIL_BITS 改由 CPU 按当前 draw FBO 的真实附件元数据回答；DrawBuffer 为 NONE 不隐藏已有颜色附件，read FBO 不影响这些答案。当前 FBO 存储为单采样，SAMPLES/SAMPLE_BUFFERS 返回零。
+> - 旧 QUERY_INTEGER 路径也优先采用上下文的这组状态，避免用适配器默认深度或采样数覆盖 FBO 和 WGL 像素格式。默认窗口继续使用虚拟格式的 24 位深度，原生参照所选窗口为 32 位。
+> - 11 组原生配置覆盖四种标量类型、旧整数路径、低位颜色、深度纹理/渲染缓冲、packed renderbuffer、无颜色及空 FBO；原生 packed texture 另录作后续渲染工作参照，尚未加入能力声明。
+> - 实际 C 查询 ABI、两种模式真实 GPU 查询、47 组 Node、34 组站点、8 个 GPU 页面、构建与变更源码 ESLint 通过，新增变异 5/5 被杀死。其它 C3/C4/C6/C8 继续推进；阶段 C 尚未退出。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

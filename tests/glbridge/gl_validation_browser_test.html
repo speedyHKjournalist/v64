@@ -558,6 +558,21 @@
                 [privateFirst, [0, 0, 255, 255]], [privateSecond, [0, 255, 0, 255]]])
                 check(expected.every((v, i) => pixel.bytes[32 + i] === v), "FBO creation origin, deletion or name reuse changed pixels");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO origin/lifetimes must have no host errors");
+            const fboQueries = new GLStream().call("BIND_RENDERBUFFER", GL.RENDERBUFFER_EXT, 1)
+                .call("RENDERBUFFER_STORAGE", GL.RENDERBUFFER_EXT, GL.DEPTH_COMPONENT16, 4, 4)
+                .call("FRAMEBUFFER_RENDERBUFFER", GL.FRAMEBUFFER_EXT, GL.DEPTH_ATTACHMENT, GL.RENDERBUFFER_EXT, 1);
+            const scalarQueries = [];
+            for (const [pname, value] of [[GL.RED_BITS, 8], [GL.DEPTH_BITS, 16], [GL.STENCIL_BITS, 0], [GL.SAMPLE_BUFFERS, 0], [GL.SAMPLES, 0]]) {
+                const header = P.encodeRecord("QUERY_STATE", { pname, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
+                const payload = new Uint8Array(header.length + 8); payload.set(header); fboQueries.record(P.GLFN.QUERY_STATE, payload);
+                scalarQueries.push([fboQueries.payloadView(), value]);
+            }
+            const legacyDepthBits = fboQueries.queryInteger(GL.DEPTH_BITS), fboQueryMemory = fboQueries.bytes();
+            shadow.process(fboQueryMemory); executor.submit(remote ? fboQueryMemory.slice() : fboQueryMemory, {}); await executor.idle();
+            for (const [record, expected] of scalarQueries) check(record.view.getUint32(P.F.QUERY_STATE.status, true) === P.C.V86GL_SYNC_QUERY_STATUS_OK &&
+                record.view.getFloat64(P.RECORDS.QUERY_STATE.size, true) === expected, "FBO bit/sample queries must finish on CPU");
+            check(legacyDepthBits.view.getUint32(P.F.QUERY_INTEGER.value, true) === 16, "legacy integer queries must use the selected FBO's depth precision");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO scalar queries must have no host errors");
             const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
                 .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                 .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")

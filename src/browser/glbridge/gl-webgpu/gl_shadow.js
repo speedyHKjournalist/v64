@@ -250,9 +250,11 @@
 
         // A capability, or a part's state (with a context)
         integer(pname) {
-            const value = glCaps.integer(this.capabilities, pname);
             const method = INTEGERS.get(pname);
-            return value !== undefined || !method || !this.current ? value : this[method](pname);
+            if (method && this.current) {
+                const value = this[method](pname); if (value !== undefined) return value;
+            }
+            return glCaps.integer(this.capabilities, pname);
         }
 
         string(pname) {

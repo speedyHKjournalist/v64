@@ -9,6 +9,27 @@
     const caps = global.GLCaps || require("./gl_caps.js");
     const formats = global.GLImageFormats || require("./gl_image_formats.js");
     const targets = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D, GL.TEXTURE_CUBE_MAP]);
+    GLShadow.prototype.framebufferStateValue = function(pname) {
+        const fbo = this.boundFramebuffer(GL.DRAW_FRAMEBUFFER); if (!fbo) return null;
+        // The exposed renderbuffer/texture storage is single-sampled. Window
+        // multisampling is selected separately through its pixel format.
+        if (pname === GL.SAMPLES || pname === GL.SAMPLE_BUFFERS) return [[0], "i"];
+        const index = pname - GL.RED_BITS;
+        if (index < 0 || index > 5) return null;
+        // These describe the attached colour buffers, even with DrawBuffer
+        // NONE; EXT FBO requires matching formats across all colour images.
+        const record = index < 4 ? fbo.color.find(Boolean) : index === 4 ? fbo.depth : fbo.stencil;
+        const image = record && this.attachedImage(record);
+        if (!image) return [[0], "i"];
+        const bits = record.kind === "renderbuffer" ? image.componentBits :
+            formats.textureComponents(image.internalFormat, !!image.compressed, this.capabilities?.features);
+        return [[bits?.[record.kind === "renderbuffer" || index < 4 ? index : index + 2] || 0], "i"];
+    };
+    GLShadow.prototype.framebufferInteger = function(pname) {
+        const value = this.stateValue(pname); return value ? value[0][0] : undefined;
+    };
+    GLShadow.queries({ integers: Object.fromEntries([GL.RED_BITS, GL.GREEN_BITS, GL.BLUE_BITS, GL.ALPHA_BITS,
+        GL.DEPTH_BITS, GL.STENCIL_BITS, GL.SAMPLE_BUFFERS, GL.SAMPLES].map(pname => [pname, "framebufferInteger"])) });
     for (const [pname, target] of [[GL.TEXTURE_BINDING_1D, GL.TEXTURE_1D], [GL.TEXTURE_BINDING_2D, GL.TEXTURE_2D],
             [GL.TEXTURE_BINDING_3D, GL.TEXTURE_3D], [GL.TEXTURE_BINDING_CUBE_MAP, GL.TEXTURE_CUBE_MAP]])
         state.query([pname], s => [[s.current.units[s.current.activeTexture].get(target) || 0], "u"]);
