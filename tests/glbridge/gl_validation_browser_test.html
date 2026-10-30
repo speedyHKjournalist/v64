@@ -24,6 +24,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -376,6 +377,22 @@
             check(mipPixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "cube mipmap readback must finish");
             check([0, 0, 255, 255].every((v, i) => mipPixel.bytes[32 + i] === v), "rejected mipmap generation replaced an existing face");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "mipmap rejection must have no host errors");
+            const vertices = new Float32Array([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]);
+            const buffers = new GLStream().makeCurrent(160, 0, 0, 64, 64, 160, 160)
+                .call("BIND_BUFFER", GL.ARRAY_BUFFER, 7)
+                .bufferData(GL.ARRAY_BUFFER, vertices.byteLength, GL.STATIC_DRAW, new Uint8Array(vertices.buffer))
+                .bufferData(GL.ARRAY_BUFFER, vertices.byteLength, 0, new Uint8Array(vertices.byteLength))
+                .pointerVBO("VERTEX_POINTER_VBO", 3, GL.FLOAT, 0, 0).call("ENABLE_CLIENT_STATE", GL.VERTEX_ARRAY)
+                .call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("COLOR4F", 0.25, 0.5, 0.75, 1).call("DRAW_ARRAYS_DIRECT", GL.QUADS, 0, 4);
+            const bufferPixel = buffers.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), bufferMemory = buffers.bytes();
+            const rejectedBuffers = shadow.stats.rejected; shadow.process(bufferMemory);
+            check(shadow.stats.rejected === rejectedBuffers + 1, "invalid buffer usage must be rejected on CPU");
+            executor.options.writeGuestMemory = (offset, data) => bufferMemory.set(data, offset);
+            executor.submit(remote ? bufferMemory.slice() : bufferMemory, {}); await executor.idle();
+            check(bufferPixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "buffer validation readback must finish");
+            check([64, 128, 191, 255].every((v, i) => Math.abs(bufferPixel.bytes[32 + i] - v) <= 1), "rejected buffer replacement changed geometry");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "buffer rejection must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {
