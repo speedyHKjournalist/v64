@@ -8,7 +8,7 @@
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const state = global.V86GLShadowState || require("./gl_shadow_state.js");
     const { GLFN } = P;
-    const clone = value => JSON.parse(JSON.stringify(value));
+    const clone = GLShadow.clone;
     // cap -> [default, server attribute group]; ENABLE_BIT saves all caps.
     const ENABLES = new Map();
     function enables(names, group, initial = 0) {

@@ -649,7 +649,7 @@
         const values = program.values.get(location) || new Array(count).fill(0);
         const integer = view.getUint32(offset + R.value_kind, true) === 2;
         for (let i = 0; i < count; ++i) {
-            let v = values[i] || 0;
+            let v = values[i] ?? 0;
             if (base === "b") v = v ? 1 : 0;
             if (integer) view.setInt32(offset + header + i * 4, base === "f" ? Math.round(v) : v, true);
             else view.setFloat32(offset + header + i * 4, v, true);

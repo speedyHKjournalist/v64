@@ -42,6 +42,39 @@
     // of each part
     const PARTS = [];
 
+    // Attribute stacks copy live numeric state; JSON would turn NaN and
+    // infinities into null and -0 into +0 before a snapshot even begins.
+    function cloneState(value) {
+        if (Array.isArray(value)) return value.map(cloneState);
+        if (ArrayBuffer.isView(value)) return value instanceof DataView ?
+            new DataView(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)) : new value.constructor(value);
+        if (value instanceof ArrayBuffer) return value.slice(0);
+        if (value instanceof Map) return new Map([...value].map(([key, item]) => [cloneState(key), cloneState(item)]));
+        if (value instanceof Set) return new Set([...value].map(cloneState));
+        if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneState(item)]));
+        return value;
+    }
+    const NUMBER_TAG = "$v86glNumber";
+    function snapshotNumbers(value, decode) {
+        if (typeof value === "number" && !decode) {
+            const token = Number.isNaN(value) ? "nan" : value === Infinity ? "+inf" : value === -Infinity ? "-inf" : Object.is(value, -0) ? "-0" : null;
+            return token ? { [NUMBER_TAG]: token } : value;
+        }
+        if (Array.isArray(value)) return value.map(item => snapshotNumbers(item, decode));
+        if (value && typeof value === "object") {
+            if (decode && Object.keys(value).length === 1 && Object.hasOwn(value, NUMBER_TAG)) {
+                switch (value[NUMBER_TAG]) {
+                case "nan": return NaN;
+                case "+inf": return Infinity;
+                case "-inf": return -Infinity;
+                case "-0": return -0;
+                }
+            }
+            return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, snapshotNumbers(item, decode)]));
+        }
+        return value;
+    }
+
     class GLShadow {
         constructor() {
             // gl_caps.js's capabilities object; none until the renderer sends it
@@ -70,6 +103,8 @@
         static part(part) {
             PARTS.push(part);
         }
+
+        static clone(value) { return cloneState(value); }
 
         // A new owner of the arena, or a reset machine: no contexts
         reset() {
@@ -291,6 +326,7 @@
 
         getState() {
             const state = {
+                numberEncoding: 1,
                 capabilities: this.capabilities,
                 nextGroup: this.nextGroup,
                 contexts: [...this.contexts.values()].map(c => ({ key: c.key, id: c.id, group: c.group.key,
@@ -298,13 +334,14 @@
                 current: this.current ? this.current.key : null,
             };
             for (const part of PARTS) if (part.getState) part.getState(this, state);
-            return state;
+            return snapshotNumbers(state, false);
         }
 
         // A snapshot's capabilities stand: the guest was told those
         setState(state) {
             this.reset();
             if (!state) return;
+            state = state.numberEncoding === 1 ? snapshotNumbers(state, true) : cloneState(state);
             this.capabilities = glCaps.freeze(state.capabilities);
             this.nextGroup = state.nextGroup || 1;
             for (const c of state.contexts || []) {

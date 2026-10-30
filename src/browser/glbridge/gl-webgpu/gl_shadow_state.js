@@ -10,7 +10,7 @@
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const { GLFN, F, RECORDS, C } = P;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-    const clone = value => JSON.parse(JSON.stringify(value));
+    const clone = GLShadow.clone;
     const identity = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     function multiply(a, b) {
         return Array.from({ length: 16 }, (_, i) => {

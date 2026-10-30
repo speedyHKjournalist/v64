@@ -9,7 +9,7 @@
     const state = global.V86GLShadowState || require("./gl_shadow_state.js");
     const math = global.GLMath || require("./gl_math.js");
     const { C } = P;
-    const clone = value => JSON.parse(JSON.stringify(value));
+    const clone = GLShadow.clone;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const COLORS = new Set([GL.AMBIENT, GL.DIFFUSE, GL.SPECULAR, GL.EMISSION, GL.AMBIENT_AND_DIFFUSE]);
     const LIGHT_COUNTS = { [GL.AMBIENT]: 4, [GL.DIFFUSE]: 4, [GL.SPECULAR]: 4, [GL.POSITION]: 4,

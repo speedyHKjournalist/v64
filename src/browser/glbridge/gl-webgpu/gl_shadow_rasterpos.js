@@ -11,7 +11,7 @@
     if (typeof module !== "undefined" && module.exports) {
         require("./gl_shadow_objects.js"); require("./gl_shadow_raster.js"); require("./gl_shadow_fixed.js"); require("./gl_shadow_misc.js");
     }
-    const clone = v => JSON.parse(JSON.stringify(v));
+    const clone = GLShadow.clone;
     const dot = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0);
     const unit = a => { const n = Math.hypot(...a); return n ? a.map(v => v / n) : a.map(() => 0); };
     const clamp = v => Math.max(0, Math.min(1, v));

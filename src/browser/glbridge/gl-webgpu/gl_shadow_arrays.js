@@ -8,7 +8,7 @@
     const state = global.V86GLShadowState || require("./gl_shadow_state.js");
     const caps = global.GLCaps || require("./gl_caps.js");
     if (typeof module !== "undefined") { require("./gl_shadow_raster.js"); require("./gl_shadow_buffers.js"); }
-    const clone = value => JSON.parse(JSON.stringify(value));
+    const clone = GLShadow.clone;
     const FLOATS = [GL.FLOAT, GL.DOUBLE], VERTEX_TYPES = [GL.SHORT, GL.INT, ...FLOATS];
     const NORMAL_TYPES = [GL.BYTE, ...VERTEX_TYPES], COLOR_TYPES = [GL.UNSIGNED_BYTE, GL.UNSIGNED_SHORT, GL.UNSIGNED_INT, ...NORMAL_TYPES];
     // key, command, size, types, enable, size/type/stride/pointer/buffer pnames
