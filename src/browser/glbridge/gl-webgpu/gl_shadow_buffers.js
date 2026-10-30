@@ -141,6 +141,24 @@
         },
     });
     GLShadow.part({
+        afterBatch(s) {
+            const arrayIds = (formats, live) => {
+                for (const value of Object.values(formats || {})) for (const a of Array.isArray(value) ? value : [value])
+                    if (a.bufferId) live.add(a.bufferId);
+            };
+            for (const group of s.groups.values()) {
+                const live = new Set([...group.buffers.values()].map(b => b.id));
+                for (const c of s.contexts.values()) if (c.group === group) {
+                    for (const id of c.bufferBindings.values()) live.add(id);
+                    arrayIds(c.state.arrays, live);
+                    for (const saved of c.state.clientAttrib) {
+                        for (const [, id] of saved.parts?.buffers || []) if (id) live.add(id);
+                        arrayIds(saved.parts?.arrays?.formats, live);
+                    }
+                }
+                for (const id of group.bufferObjects.keys()) if (!live.has(id)) group.bufferObjects.delete(id);
+            }
+        },
         group(g) { g.buffers = new Map(); g.bufferObjects = new Map(); g.nextBufferId = 1; },
         context(c) { c.bufferBindings = new Map(); },
         getState(s, saved) {

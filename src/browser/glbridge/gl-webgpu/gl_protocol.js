@@ -248,6 +248,8 @@
         ["QUERY_BUFFER_DATA", 223, null, "u:target i:offset i:size i:range_size u:status u:data_size u:error u:reserved"],
         ["QUERY_BUFFER_MAP", 224, null, "u:target u:access u:pointer u:status u:error u:reserved"],
         ["QUERY_BUFFER_UNMAP", 225, null, "u:target u:status u:result u:error"],
+        ["INDEX_POINTER_VBO", 226, null, "i:size u:type i:stride u:offset"],
+        ["EDGE_FLAG_POINTER_VBO", 227, null, "i:size u:type i:stride u:offset"],
     ];
 
     // Composite records' optional headers and repeated elements. The common
@@ -340,6 +342,8 @@
         ["V86GL_PARAMETER_TEXTURE_LEVEL", 11],
         ["V86GL_PARAMETER_BUFFER", 12],
         ["V86GL_PARAMETER_BUFFER_POINTER", 13],
+        ["V86GL_PARAMETER_VERTEX_ATTRIB", 14],
+        ["V86GL_PARAMETER_ARRAY_POINTER", 15],
         ["V86GL_OBJECT_KIND_SHADER", 1],
         ["V86GL_OBJECT_KIND_PROGRAM", 2],
         ["V86GL_OBJECT_KIND_QUERY", 3],

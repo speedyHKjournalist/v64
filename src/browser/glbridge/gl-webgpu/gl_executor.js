@@ -3325,6 +3325,8 @@
         define("NORMAL_POINTER_VBO", pointerVBO("normal"));
         define("SECONDARY_COLOR_POINTER_VBO", pointerVBO("secondaryColor"));
         define("FOG_COORD_POINTER_VBO", pointerVBO("fogCoord"));
+        define("INDEX_POINTER_VBO", pointerVBO("index"));
+        define("EDGE_FLAG_POINTER_VBO", pointerVBO("edgeFlag"));
         define("TEX_COORD_POINTER_VBO", function(a, bytes, view, offset, size) {
             const R = protocol.F.TEX_COORD_POINTER_VBO;
             if (size < protocol.RECORDS.TEX_COORD_POINTER_VBO.size) throw new GLStreamError("VBO pointer record is short");

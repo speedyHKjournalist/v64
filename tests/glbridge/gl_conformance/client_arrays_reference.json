@@ -1,0 +1,28 @@
+{
+  "renderer":"Apple M1 Pro",
+  "cases":{
+    "default_vertex":[4,5126,0,0,0],
+    "default_texcoord":[4,5126,0,0,0],
+    "default_generic":[4,5126,0,0,0,0,0],
+    "vertex_buffer":[3,5122,16,7,12],
+    "vertex_size":[1281],
+    "vertex_type":[1280],
+    "normal_type":[1280],
+    "index_type":[1280],
+    "color_size":[1281],
+    "secondary_size":[1281],
+    "fog_type":[1280],
+    "generic_stride":[1281],
+    "unit1_texcoord":[2,5130,24,0,100],
+    "unit0_texcoord":[4,5126,0,0,0],
+    "generic_buffer":[2,5123,10,9,1,1,256],
+    "current_integer":[0,-2,3,1],
+    "current_zero":[1282],
+    "restored_generic":[2,5123,10,9,1,1,256],
+    "client_keeps_current":[7,8,9,10],
+    "restored_current":[7,8,9,10],
+    "deleted_buffer":[3,5122,16,0,12],
+    "interleaved_zero_offset":[3,5126,16,7,4],
+    "interleaved_disables":[0,0]
+  }
+}

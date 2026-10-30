@@ -25,6 +25,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -397,14 +398,18 @@
                 P.encodeRecord("QUERY_BUFFER_MAP", { target: GL.ARRAY_BUFFER, access: GL.READ_WRITE_ARB, pointer: 0x10000 }));
             const updateHeader = P.encodeRecord("BUFFER_SUB_DATA", { target: GL.ARRAY_BUFFER, offset: 0, size: vertices.byteLength, data_size: vertices.byteLength });
             const update = new Uint8Array(updateHeader.length + vertices.byteLength); update.set(updateHeader);
-            mappedBuffer.record(P.GLFN.BUFFER_SUB_DATA, update).record(P.GLFN.QUERY_BUFFER_UNMAP,
+            mappedBuffer.record(P.GLFN.BUFFER_SUB_DATA, update)
+                .call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).call("DRAW_ARRAYS_DIRECT", GL.QUADS, 0, 4);
+            const rejectedDrawPixel = mappedBuffer.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            mappedBuffer.record(P.GLFN.QUERY_BUFFER_UNMAP,
                 P.encodeRecord("QUERY_BUFFER_UNMAP", { target: GL.ARRAY_BUFFER }))
                 .call("CLEAR", GL.COLOR_BUFFER_BIT).call("DRAW_ARRAYS_DIRECT", GL.QUADS, 0, 4);
             const mappedPixel = mappedBuffer.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), mappedMemory = mappedBuffer.bytes();
             const rejectedMapped = shadow.stats.rejected; shadow.process(mappedMemory);
-            check(shadow.stats.rejected === rejectedMapped + 1, "updating mapped storage must be rejected on CPU");
+            check(shadow.stats.rejected === rejectedMapped + 2, "updating or drawing mapped storage must be rejected on CPU");
             executor.options.writeGuestMemory = (offset, data) => mappedMemory.set(data, offset);
             executor.submit(remote ? mappedMemory.slice() : mappedMemory, {}); await executor.idle();
+            check([255, 0, 0, 255].every((v, i) => rejectedDrawPixel.bytes[32 + i] === v), "mapped vertex data must not draw");
             check([64, 128, 191, 255].every((v, i) => Math.abs(mappedPixel.bytes[32 + i] - v) <= 1), "mapped storage rejection changed geometry");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "mapping replies must be CPU-only");
         }
