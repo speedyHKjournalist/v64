@@ -1493,6 +1493,7 @@
 
             drawFramebuffer: 0,
             readFramebuffer: 0,
+            privateFramebuffers: new Map(), drawFramebufferObject: null, readFramebufferObject: null,
             renderbuffer: 0,
             drawBuffers: [GL.BACK],
             readBuffer: GL.BACK,
@@ -1613,6 +1614,7 @@
             shaders: new Map(),
             programs: new Map(),
             renderbuffers: new Map(),
+            sharedFramebuffers: new Map(), framebufferReservations: new Map(),
             arbPrograms: new Map(),
             nextName: { texture: 1, buffer: 1, shader: 1, renderbuffer: 1,
                         arbProgram: 1 },
@@ -1674,6 +1676,7 @@
     function createFramebuffer(name) {
         return {
             name,
+            created: false, shared: false,
             ...framebufferState.initial(GL.COLOR_ATTACHMENT0),
             color: new Array(MAX_DRAW_BUFFERS).fill(null),
             depth: null, stencil: null,
@@ -2011,6 +2014,7 @@
                 if (this.current) this.current.activeQuery = this.activeQuery;
             }
             this.current = context;
+            framebufferState.sync(context, this.framebuffers.get(context.id));
             this.queries = context.queryObjects;
             this.activeQuery = context.activeQuery;
             if (width && height) {
@@ -3382,31 +3386,44 @@
 
         define("GEN_FRAMEBUFFERS", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
-            const map = this.framebuffers.get(this.current.id);
-            for (const name of names)
-                if (name && !map.has(name)) map.set(name, createFramebuffer(name));
+            for (const name of names) if (name) this.namedFramebuffer(name);
         });
         define("DELETE_FRAMEBUFFERS", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
             const map = this.framebuffers.get(this.current.id);
             for (const name of names) {
-                if (this.current.drawFramebuffer === name) this.endPass();
-                map.delete(name);
-                if (this.current.drawFramebuffer === name)
-                    this.current.drawFramebuffer = 0;
-                if (this.current.readFramebuffer === name)
-                    this.current.readFramebuffer = 0;
+                const object = name && this.findFramebuffer(name); if (!object) continue;
+                const s = this.current, g = s.shareGroup; this.endPass();
+                if (s.privateFramebuffers.get(name) === object) s.privateFramebuffers.delete(name);
+                if (g.sharedFramebuffers.get(name) === object) g.sharedFramebuffers.delete(name);
+                if (g.framebufferReservations.get(name) === object) g.framebufferReservations.delete(name);
+                for (const c of this.contexts.values()) if (c.shareGroup === g) {
+                    const visible = this.framebuffers.get(c.id); if (visible.get(name) === object) visible.delete(name);
+                }
+                if (s.drawFramebufferObject === object) { s.drawFramebuffer = 0; s.drawFramebufferObject = null; }
+                if (s.readFramebufferObject === object) { s.readFramebuffer = 0; s.readFramebufferObject = null; }
             }
             framebufferState.sync(this.current, map);
         });
-        define("BIND_FRAMEBUFFER", function(a) {
+        for (const kind of ["BIND_FRAMEBUFFER", "BIND_FRAMEBUFFER_EXT"]) define(kind, function(a) {
             const target = a[0] >>> 0, name = a[1] >>> 0;
-            const map = this.framebuffers.get(this.current.id);
-            if (name && !map.has(name)) map.set(name, createFramebuffer(name));
+            const s = this.current, g = s.shareGroup, map = this.framebuffers.get(s.id);
+            const object = name ? this.namedFramebuffer(name) : null;
+            if (object && !object.created) {
+                object.created = true; object.shared = kind === "BIND_FRAMEBUFFER_EXT";
+                g.framebufferReservations.delete(name);
+                if (object.shared) {
+                    g.sharedFramebuffers.set(name, object);
+                    for (const c of this.contexts.values()) if (c.shareGroup === g && !c.privateFramebuffers.has(name)) this.framebuffers.get(c.id).set(name, object);
+                } else {
+                    s.privateFramebuffers.set(name, object);
+                    for (const c of this.contexts.values()) if (c !== s && c.shareGroup === g && this.framebuffers.get(c.id).get(name) === object) this.framebuffers.get(c.id).delete(name);
+                }
+            }
             // Changing the render target ends the pass: WebGPU fixes the
             // attachments when the pass begins.
             this.endPass();
-            framebufferState.bind(this.current, map, target, name);
+            framebufferState.bind(s, map, target, name, object);
         });
         for (const name of ["FRAMEBUFFER_TEXTURE", "FRAMEBUFFER_TEXTURE_1D", "FRAMEBUFFER_TEXTURE_2D", "FRAMEBUFFER_TEXTURE_3D"]) define(name, function(a) {
             this.framebufferTexture(a[0] >>> 0, a[1] >>> 0, a[2] >>> 0,
@@ -4698,9 +4715,8 @@
 
         detachImage(kind, imageId) {
             this.endPass();
-            const s = this.current, map = this.framebuffers.get(s.id);
-            for (const name of new Set([s.drawFramebuffer, s.readFramebuffer])) {
-                const fbo = map.get(name); if (!fbo) continue;
+            for (const fbo of new Set([this.boundFramebufferObject(GL.DRAW_FRAMEBUFFER), this.boundFramebufferObject(GL.READ_FRAMEBUFFER)])) {
+                if (!fbo) continue;
                 const stale = r => r && r.kind === kind && r.imageId === imageId;
                 fbo.color = fbo.color.map(r => stale(r) ? null : r);
                 if (stale(fbo.depth)) fbo.depth = null;
@@ -4717,8 +4733,11 @@
                     live.add(c.renderbufferImage);
                     for (const fbo of this.framebuffers.get(c.id)?.values() || [])
                         for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.imageId);
+                    for (const fbo of [c.drawFramebufferObject, c.readFramebufferObject]) if (fbo)
+                        for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.imageId);
                     for (const a of c.attribStack) if (a.state.textureUnits) units(a.state.textureUnits);
                 }
+                for (const fbo of group.sharedFramebuffers.values()) for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.imageId);
                 for (const pool of [group.textureImages, group.renderbufferImages])
                     for (const [id, image] of pool) if ((image.deleted || !image.name) && !live.has(id)) {
                         this.retire(image.gpuTexture);
@@ -6925,7 +6944,7 @@
                     isDefault: true,
                 };
             }
-            const fbo = this.framebuffers.get(s.id).get(s.drawFramebuffer);
+            const fbo = this.boundFramebufferObject(GL.DRAW_FRAMEBUFFER);
             if (!fbo) return null;
             const color = [];
             for (const buffer of s.drawBuffers) {
@@ -9742,11 +9761,27 @@ struct BlitParams {
 
         /* ---- framebuffer objects ---- */
 
+        findFramebuffer(name) {
+            const s = this.current, g = s.shareGroup;
+            return s.privateFramebuffers.get(name) || g.sharedFramebuffers.get(name) || g.framebufferReservations.get(name) ||
+                this.framebuffers.get(s.id).get(name);
+        },
+
+        namedFramebuffer(name) {
+            const s = this.current, g = s.shareGroup;
+            let object = this.findFramebuffer(name);
+            if (!object) { object = createFramebuffer(name); g.framebufferReservations.set(name, object); }
+            this.framebuffers.get(s.id).set(name, object); return object;
+        },
+
+        boundFramebufferObject(target) {
+            const s = this.current, read = target === GL.READ_FRAMEBUFFER;
+            return (read ? s.readFramebuffer : s.drawFramebuffer) ? framebufferState.owner(s, this.framebuffers.get(s.id), read) : null;
+        },
+
         framebufferTexture(target, attachment, textarget, textureName, level, layer) {
             const s = this.current;
-            const name = target === GL.READ_FRAMEBUFFER ?
-                s.readFramebuffer : s.drawFramebuffer;
-            const fbo = this.framebuffers.get(s.id).get(name);
+            const fbo = this.boundFramebufferObject(target);
             if (!fbo)
                 return this.refuse("glFramebufferTexture2D",
                     "no framebuffer object is bound", { target },
@@ -9763,9 +9798,7 @@ struct BlitParams {
 
         framebufferRenderbuffer(target, attachment, rbTarget, rbName) {
             const s = this.current;
-            const name = target === GL.READ_FRAMEBUFFER ?
-                s.readFramebuffer : s.drawFramebuffer;
-            const fbo = this.framebuffers.get(s.id).get(name);
+            const fbo = this.boundFramebufferObject(target);
             if (!fbo)
                 return this.refuse("glFramebufferRenderbuffer",
                     "no framebuffer object is bound", { target },
@@ -9861,7 +9894,7 @@ struct BlitParams {
             const name = target === GL.READ_FRAMEBUFFER ?
                 s.readFramebuffer : s.drawFramebuffer;
             if (!name) return GL.FRAMEBUFFER_COMPLETE;
-            const fbo = this.framebuffers.get(s.id).get(name);
+            const fbo = this.boundFramebufferObject(target);
             if (!fbo) return GL.FRAMEBUFFER_UNDEFINED || 0x8219;
             let width = 0, height = 0, any = false;
             const check = record => {
@@ -9963,7 +9996,7 @@ struct BlitParams {
                     format: this.backBufferFormat,
                     width: this.backBufferWidth,
                     height: this.backBufferHeight } : null;
-            const fbo = this.framebuffers.get(s.id).get(s.readFramebuffer);
+            const fbo = this.boundFramebufferObject(GL.READ_FRAMEBUFFER);
             if (!fbo) return null;
             const index = s.readBuffer >= GL.COLOR_ATTACHMENT0 ?
                 s.readBuffer - GL.COLOR_ATTACHMENT0 : 0;
@@ -10152,7 +10185,7 @@ struct BlitParams {
                 return { texture: this.depthTarget, format: "depth24plus-stencil8", mipLevel: 0, layer: 0,
                     width: this.depthWidth, height: this.depthHeight };
             }
-            const fbo = this.framebuffers.get(s.id).get(s.readFramebuffer);
+            const fbo = this.boundFramebufferObject(GL.READ_FRAMEBUFFER);
             const record = fbo && (kind === "stencil" ? fbo.stencil || fbo.depth : fbo.depth || fbo.stencil);
             const resolved = record && this.resolveAttachment(record);
             if (!resolved) return null;

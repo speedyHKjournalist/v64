@@ -5,7 +5,8 @@
     const initial = first => ({ drawBuffers: [first], readBuffer: first });
     function owner(c, map, read) {
         const name = read ? c.readFramebuffer : c.drawFramebuffer;
-        return name ? map.get(name) : c.defaultFramebufferState;
+        const object = read ? c.readFramebufferObject : c.drawFramebufferObject;
+        return name ? object?.name === name ? object : map.get(name) : c.defaultFramebufferState;
     }
     function sync(c, map) {
         c.drawBuffers = owner(c, map, false).drawBuffers.slice();
@@ -17,12 +18,12 @@
     function read(c, map, value) {
         owner(c, map, true).readBuffer = value; sync(c, map);
     }
-    function bind(c, map, target, name) {
-        if (target !== GL.READ_FRAMEBUFFER) c.drawFramebuffer = name;
-        if (target !== GL.DRAW_FRAMEBUFFER) c.readFramebuffer = name;
+    function bind(c, map, target, name, object = name ? map.get(name) : null) {
+        if (target !== GL.READ_FRAMEBUFFER) { c.drawFramebuffer = name; c.drawFramebufferObject = object; }
+        if (target !== GL.DRAW_FRAMEBUFFER) { c.readFramebuffer = name; c.readFramebufferObject = object; }
         sync(c, map);
     }
-    const api = { initial, sync, draw, read, bind };
+    const api = { initial, owner, sync, draw, read, bind };
     global.GLFramebufferState = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

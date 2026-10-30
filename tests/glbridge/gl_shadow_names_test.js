@@ -85,11 +85,11 @@ test("name cursors wrap past zero, skip live names and survive deletion, sharing
     const separate = new GLStream().makeCurrent(3, 0, 0, 64, 64, 3, 3), own = generate(separate, P.C.V86GL_OBJECT_KIND_BUFFER, 2);
     copy.process(separate.bytes()); assert.deepEqual(own().values, [1, 2]);
 });
-test("framebuffer generators use the current context namespace while image names are shared", () => {
+test("framebuffer Gen aliases reserve shared names before their first core or EXT binding", () => {
     const s = new GLShadow(), a = scene(), first = generate(a, P.C.V86GL_OBJECT_KIND_FRAMEBUFFER, 2), texture = generate(a, P.C.V86GL_OBJECT_KIND_TEXTURE, 2);
     s.process(a.bytes()); assert.deepEqual(first().values, [1, 2]); assert.deepEqual(texture().values, [1, 2]);
     const b = new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1), second = generate(b, P.C.V86GL_OBJECT_KIND_FRAMEBUFFER, 2), shared = generate(b, P.C.V86GL_OBJECT_KIND_TEXTURE, 2);
-    s.process(b.bytes()); assert.deepEqual(second().values, [1, 2]); assert.deepEqual(shared().values, [3, 4]);
+    s.process(b.bytes()); assert.deepEqual(second().values, [3, 4]); assert.deepEqual(shared().values, [3, 4]);
 });
 test("invalid generation, zero count and Begin leave names, cursors and output unchanged", () => {
     for (const [kind, count, capacity, declared, expected] of [[P.C.V86GL_OBJECT_KIND_BUFFER, -1, 8, 8, GL.INVALID_VALUE],

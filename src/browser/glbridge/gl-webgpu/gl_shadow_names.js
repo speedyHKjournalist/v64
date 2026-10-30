@@ -34,7 +34,12 @@
         case C.V86GL_OBJECT_KIND_TEXTURE: names = group.textures; allocate = n => this.textureObject(n); pool = group.textureImages; break;
         case C.V86GL_OBJECT_KIND_RENDERBUFFER: names = group.renderbuffers; allocate = n => this.renderbufferObject(n); pool = group.renderbufferImages; break;
         case C.V86GL_OBJECT_KIND_BUFFER: names = group.buffers; allocate = n => this.bufferObject(n); pool = group.bufferObjects; break;
-        case C.V86GL_OBJECT_KIND_FRAMEBUFFER: names = c.framebuffers; allocate = n => this.framebufferObject(n); owner = c; break;
+        case C.V86GL_OBJECT_KIND_FRAMEBUFFER:
+            names = { size: group.framebufferObjects.size,
+                has: n => group.sharedFramebuffers.has(n) || group.framebufferReservations.has(n) ||
+                    [...this.contexts.values()].some(other => other.group === group && other.privateFramebuffers.has(n)),
+                delete: n => { group.framebufferReservations.delete(n); c.framebuffers.delete(n); } };
+            allocate = n => this.framebufferObject(n); pool = group.framebufferObjects; break;
         default: return fail(GL.INVALID_ENUM);
         }
         if (r.count > 0xFFFFFFFF - names.size) return fail(GL.OUT_OF_MEMORY);
@@ -44,12 +49,14 @@
             while (names.has(next) || used.has(next)) next = (next + 1) >>> 0 || 1;
             chosen.push(next); used.add(next); next = (next + 1) >>> 0 || 1;
         }
-        const created = [], nextImageId = group.nextImageId, nextBufferId = group.nextBufferId, nextArbProgramId = group.nextArbProgramId;
+        const created = [], nextImageId = group.nextImageId, nextBufferId = group.nextBufferId, nextArbProgramId = group.nextArbProgramId,
+            nextFramebufferId = group.nextFramebufferId;
         try { for (const n of chosen) created.push(allocate(n)); }
         catch (_) {
             for (const object of created) { names.delete(object.name); if (pool) pool.delete(object.id); }
             group.nextImageId = nextImageId; group.nextBufferId = nextBufferId;
             group.nextArbProgramId = nextArbProgramId;
+            group.nextFramebufferId = nextFramebufferId;
             return fail(GL.OUT_OF_MEMORY);
         }
         for (let i = 0; i < chosen.length; ++i) view.setUint32(offset + header + i * 4, chosen[i], true);

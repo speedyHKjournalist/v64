@@ -27,7 +27,7 @@
         const max = s.capabilities ? caps.integer(s.capabilities, GL.MAX_RENDERBUFFER_SIZE) : 16384;
         return width < 0 || height < 0 || width > max || height > max ? GL.INVALID_VALUE : 0;
     });
-    state.rule("BIND_FRAMEBUFFER", (c, [target]) =>
+    for (const name of ["BIND_FRAMEBUFFER", "BIND_FRAMEBUFFER_EXT"]) state.rule(name, (c, [target]) =>
         [GL.FRAMEBUFFER_EXT, GL.READ_FRAMEBUFFER, GL.DRAW_FRAMEBUFFER].includes(target) ? 0 : GL.INVALID_ENUM);
     const limit = (s, pname) => s.capabilities ? caps.integer(s.capabilities, pname) : caps.LIMITS.MAX_DRAW_BUFFERS;
     function attachmentError(c, target, attachment, s) {
@@ -102,7 +102,7 @@
         case P.C.V86GL_OBJECT_KIND_PROGRAM: result = g.programs?.has(name); break;
         case P.C.V86GL_OBJECT_KIND_TEXTURE: result = !!g.textures.get(name)?.target; break;
         case P.C.V86GL_OBJECT_KIND_RENDERBUFFER: result = g.renderbuffers.get(name)?.created; break;
-        case P.C.V86GL_OBJECT_KIND_FRAMEBUFFER: result = c.framebuffers.get(name)?.created; break;
+        case P.C.V86GL_OBJECT_KIND_FRAMEBUFFER: result = s.findFramebuffer(name)?.created; break;
         case P.C.V86GL_OBJECT_KIND_BUFFER: result = g.buffers?.get(name)?.created; break;
         case P.C.V86GL_OBJECT_KIND_QUERY: result = c.queryObjects?.get(name)?.created; break;
         case P.C.V86GL_OBJECT_KIND_ARB_PROGRAM: result = g.arbPrograms?.get(name)?.target; break;

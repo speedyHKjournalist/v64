@@ -529,6 +529,35 @@
                 failedFormatRead.bytes.subarray(32).every(v => v === 0xA5), "incomplete readback must preserve output and report FAILED");
             check([64, 128, 191, 255].every((v, i) => Math.abs(preservedFormatPixel.bytes[32 + i] - v) <= 1), "incomplete FBO rendering changed the old image");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO completeness rejection must have no host errors");
+            const sharing = new GLStream().makeCurrent(196, 0, 0, 64, 64, 196, 196);
+            const image = (name, bind) => {
+                sharing.call("BIND_TEXTURE", GL.TEXTURE_2D, name).texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+                    .call(bind, GL.FRAMEBUFFER_EXT, bind === "BIND_FRAMEBUFFER_EXT" ? 7 : 9)
+                    .call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, name, 0, 0);
+            };
+            image(1, "BIND_FRAMEBUFFER_EXT"); sharing.call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT);
+            image(2, "BIND_FRAMEBUFFER"); sharing.call("CLEAR_COLOR", 0, 0, 1, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .makeCurrent(197, 0, 0, 64, 64, 197, 196);
+            image(3, "BIND_FRAMEBUFFER"); sharing.call("CLEAR_COLOR", 0, 1, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 7).makeCurrent(196, 0, 0, 64, 64, 196, 196)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 7).names(P.GLFN.DELETE_FRAMEBUFFERS, [7]);
+            image(4, "BIND_FRAMEBUFFER_EXT"); sharing.call("CLEAR_COLOR", 0, 0, 1, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .makeCurrent(197, 0, 0, 64, 64, 197, 196).names(P.GLFN.DELETE_FRAMEBUFFERS, [7]);
+            const oldShared = sharing.readPixels(1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            sharing.makeCurrent(196, 0, 0, 64, 64, 196, 196);
+            const newShared = sharing.readPixels(1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            sharing.call("BIND_FRAMEBUFFER_EXT", GL.FRAMEBUFFER_EXT, 9);
+            const privateFirst = sharing.readPixels(1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            sharing.makeCurrent(197, 0, 0, 64, 64, 197, 196).call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 9);
+            const privateSecond = sharing.readPixels(1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), sharingMemory = sharing.bytes();
+            const sharingRejected = shadow.stats.rejected; shadow.process(sharingMemory);
+            check(shadow.stats.rejected === sharingRejected, "FBO origin and retained bindings must be valid on CPU");
+            executor.options.writeGuestMemory = (offset, data) => sharingMemory.set(data, offset);
+            executor.submit(remote ? sharingMemory.slice() : sharingMemory, {}); await executor.idle();
+            for (const [pixel, expected] of [[oldShared, [255, 0, 0, 255]], [newShared, [0, 0, 255, 255]],
+                [privateFirst, [0, 0, 255, 255]], [privateSecond, [0, 255, 0, 255]]])
+                check(expected.every((v, i) => pixel.bytes[32 + i] === v), "FBO creation origin, deletion or name reuse changed pixels");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO origin/lifetimes must have no host errors");
             const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
                 .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                 .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")

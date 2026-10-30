@@ -254,6 +254,7 @@
         ["FRAMEBUFFER_TEXTURE_1D", 229, "FramebufferTexture1DMapped", "uuuuii"],
         ["FRAMEBUFFER_TEXTURE_2D", 230, "FramebufferTexture2DMapped", "uuuuii"],
         ["FRAMEBUFFER_TEXTURE_3D", 231, "FramebufferTexture3DMapped", "uuuuii"],
+        ["BIND_FRAMEBUFFER_EXT", 232, "BindFramebufferEXT", "uu"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

@@ -275,11 +275,20 @@
         rb.height = storage ? a[3] : 0;
     };
 
-    proto.framebufferObject = function(name) {
+    proto.findFramebuffer = function(name) {
         const c = this.current;
-        let fbo = c.framebuffers.get(name);
-        if (!fbo) c.framebuffers.set(name, fbo = { name, created: false, ...buffers.initial(GL.COLOR_ATTACHMENT0), color: new Array(MAX_COLOR_ATTACHMENTS).fill(null),
-            depth: null, stencil: null });
+        return c.privateFramebuffers.get(name) || c.group.sharedFramebuffers.get(name) || c.group.framebufferReservations.get(name);
+    };
+
+    proto.framebufferObject = function(name) {
+        const c = this.current, g = c.group;
+        let fbo = this.findFramebuffer(name);
+        if (!fbo) {
+            fbo = { name, id: g.nextFramebufferId++, created: false, shared: false, deleted: false,
+                ...buffers.initial(GL.COLOR_ATTACHMENT0), color: new Array(MAX_COLOR_ATTACHMENTS).fill(null), depth: null, stencil: null };
+            g.framebufferObjects.set(fbo.id, fbo); g.framebufferReservations.set(name, fbo);
+        }
+        c.framebuffers.set(name, fbo);
         return fbo;
     };
 
@@ -290,26 +299,42 @@
     proto.deleteFramebuffers = function(bytes, view, offset, size) {
         const c = this.current;
         for (const name of this.names("DELETE_FRAMEBUFFERS", view, offset, size) || []) {
-            if (!name) continue;
-            c.framebuffers.delete(name);
-            if (c.drawFramebuffer === name) c.drawFramebuffer = 0;
-            if (c.readFramebuffer === name) c.readFramebuffer = 0;
+            const object = name && this.findFramebuffer(name); if (!object) continue;
+            if (c.privateFramebuffers.get(name) === object) c.privateFramebuffers.delete(name);
+            if (c.group.sharedFramebuffers.get(name) === object) c.group.sharedFramebuffers.delete(name);
+            if (c.group.framebufferReservations.get(name) === object) c.group.framebufferReservations.delete(name);
+            object.deleted = true;
+            for (const other of this.contexts.values()) if (other.group === c.group && other.framebuffers.get(name) === object) other.framebuffers.delete(name);
+            if (c.drawFramebufferObject === object) { c.drawFramebuffer = 0; c.drawFramebufferObject = null; }
+            if (c.readFramebufferObject === object) { c.readFramebuffer = 0; c.readFramebufferObject = null; }
         }
         buffers.sync(c, c.framebuffers);
     };
 
-    proto.bindFramebuffer = function(bytes, view, offset, size) {
+    proto.bindFramebuffer = function(bytes, view, offset, size, shared = false) {
         const a = this.args("BIND_FRAMEBUFFER", view, offset, size);
         if (!a) return;
         const c = this.current;
-        if (a[1]) this.framebufferObject(a[1]).created = true;
-        buffers.bind(c, c.framebuffers, a[0], a[1]);
+        const object = a[1] ? this.framebufferObject(a[1]) : null;
+        if (object && !object.created) {
+            object.created = true; object.shared = shared;
+            c.group.framebufferReservations.delete(a[1]);
+            if (shared) {
+                c.group.sharedFramebuffers.set(a[1], object);
+                for (const other of this.contexts.values()) if (other.group === c.group && !other.privateFramebuffers.has(a[1])) other.framebuffers.set(a[1], object);
+            } else {
+                c.privateFramebuffers.set(a[1], object);
+                for (const other of this.contexts.values()) if (other !== c && other.group === c.group && other.framebuffers.get(a[1]) === object) other.framebuffers.delete(a[1]);
+            }
+        }
+        buffers.bind(c, c.framebuffers, a[0], a[1], object);
     };
+    proto.bindFramebufferEXT = function(bytes, view, offset, size) { this.bindFramebuffer(bytes, view, offset, size, true); };
 
     proto.boundFramebuffer = function(target) {
         const c = this.current;
         const name = target === GL.READ_FRAMEBUFFER ? c.readFramebuffer : c.drawFramebuffer;
-        return name ? c.framebuffers.get(name) || null : null;
+        return name ? buffers.owner(c, c.framebuffers, target === GL.READ_FRAMEBUFFER) || null : null;
     };
 
     proto.attach = function(target, attachment, record) {
@@ -327,8 +352,7 @@
     // An object deleted while attached to a framebuffer object bound here
     proto.detach = function(kind, id) {
         const c = this.current;
-        for (const fboName of new Set([c.drawFramebuffer, c.readFramebuffer])) {
-            const fbo = fboName && c.framebuffers.get(fboName);
+        for (const fbo of new Set([this.boundFramebuffer(GL.DRAW_FRAMEBUFFER), this.boundFramebuffer(GL.READ_FRAMEBUFFER)])) {
             if (!fbo) continue;
             const stale = record => record && record.kind === kind && record.id === id;
             fbo.color = fbo.color.map(record => stale(record) ? null : record);
@@ -391,7 +415,7 @@
         const c = this.current;
         const name = target === GL.READ_FRAMEBUFFER ? c.readFramebuffer : c.drawFramebuffer;
         if (!name) return GL.FRAMEBUFFER_COMPLETE;
-        const fbo = c.framebuffers.get(name);
+        const fbo = this.boundFramebuffer(target);
         if (!fbo) return GL.FRAMEBUFFER_UNDEFINED;
         let width = 0, height = 0, any = false, dimensions = true;
         const colorFormats = new Set();
@@ -472,6 +496,7 @@
         [GLFN.GEN_FRAMEBUFFERS]: "genFramebuffers",
         [GLFN.DELETE_FRAMEBUFFERS]: "deleteFramebuffers",
         [GLFN.BIND_FRAMEBUFFER]: "bindFramebuffer",
+        [GLFN.BIND_FRAMEBUFFER_EXT]: "bindFramebufferEXT",
         [GLFN.FRAMEBUFFER_TEXTURE]: "framebufferTexture",
         [GLFN.FRAMEBUFFER_TEXTURE_1D]: "framebufferTexture",
         [GLFN.FRAMEBUFFER_TEXTURE_2D]: "framebufferTexture",
@@ -489,15 +514,22 @@
     function collectImages(shadow) {
         for (const group of shadow.groups.values()) {
             const live = new Set();
+            const held = new Set([...group.sharedFramebuffers.values(), ...group.framebufferReservations.values()]);
             const units = list => { for (const unit of list) for (const id of unit.values()) live.add(id); };
             for (const c of shadow.contexts.values()) if (c.group === group) {
                 units(c.unitImages); for (const id of c.defaultTextures.values()) live.add(id);
                 live.add(c.renderbufferImage);
-                for (const fbo of c.framebuffers.values()) for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.id);
+                for (const fbo of c.privateFramebuffers.values()) held.add(fbo);
+                if (c.drawFramebufferObject) held.add(c.drawFramebufferObject);
+                if (c.readFramebufferObject) held.add(c.readFramebufferObject);
                 for (const a of c.state?.attrib || []) {
                     const images = a.parts?.images;
                     if (images) units(images.unitImages.map(u => new Map(u)));
                 }
+            }
+            for (const [id, fbo] of group.framebufferObjects) {
+                if (!held.has(fbo)) { group.framebufferObjects.delete(id); continue; }
+                for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.id);
             }
             for (const pool of [group.textureImages, group.renderbufferImages])
                 for (const [id, image] of pool) if ((image.deleted || !image.name) && !live.has(id)) pool.delete(id);
@@ -511,7 +543,7 @@
                 shadow.autoMipmap(view.getUint32(offset, true), view.getInt32(offset + 4, true));
         },
         current(shadow, c, view, offset, size) {
-            if (c.buffersInitialized) return;
+            if (c.buffersInitialized) { buffers.sync(c, c.framebuffers); return; }
             const first = shadow.field("MAKE_CURRENT", "format", view, offset, size) & C.V86GL_FORMAT_SINGLE_BUFFER ? GL.FRONT : GL.BACK;
             c.defaultFramebufferState = buffers.initial(first); buffers.sync(c, c.framebuffers); c.buffersInitialized = true;
         },
@@ -521,6 +553,7 @@
             group.textureImages = new Map();
             group.renderbufferImages = new Map();
             group.nextImageId = 1;
+            group.framebufferObjects = new Map(); group.sharedFramebuffers = new Map(); group.framebufferReservations = new Map(); group.nextFramebufferId = 1;
         },
         context(context) {
             context.activeTexture = 0;
@@ -529,6 +562,8 @@
             context.defaultTextures = new Map();
             context.proxyImages = new Map();
             context.framebuffers = new Map();
+            context.privateFramebuffers = new Map();
+            context.drawFramebufferObject = context.readFramebufferObject = null;
             context.drawFramebuffer = 0;
             context.readFramebuffer = 0;
             context.renderbuffer = 0;
@@ -539,13 +574,17 @@
         },
         getState(shadow, state) {
             state.objects = {
-                version: 2,
+                version: 3,
                 groups: [...shadow.groups.values()].map(group => ({ key: group.key,
                     nextImageId: group.nextImageId,
                     textures: [...group.textureImages.values()].map(t => [t.name, t.target, levelsOut(t), t.id, t.deleted, t.parameters]),
-                    renderbuffers: [...group.renderbufferImages.values()] })),
+                    renderbuffers: [...group.renderbufferImages.values()], nextFramebufferId: group.nextFramebufferId,
+                    framebuffers: [...group.framebufferObjects.values()], sharedFramebuffers: [...group.sharedFramebuffers].map(([n, f]) => [n, f.id]),
+                    framebufferReservations: [...group.framebufferReservations].map(([n, f]) => [n, f.id]) })),
                 contexts: [...shadow.contexts.values()].map(c => ({ key: c.key, activeTexture: c.activeTexture,
-                    units: c.units.map(unit => [...unit]), framebuffers: [...c.framebuffers.values()],
+                    units: c.units.map(unit => [...unit]), framebuffers: [...c.framebuffers].map(([n, f]) => [n, f.id]),
+                    privateFramebuffers: [...c.privateFramebuffers].map(([n, f]) => [n, f.id]),
+                    drawFramebufferId: c.drawFramebufferObject?.id || 0, readFramebufferId: c.readFramebufferObject?.id || 0,
                     unitImages: c.unitImages.map(unit => [...unit]), defaultTextures: [...c.defaultTextures],
                     proxyImages: [...c.proxyImages].map(([target, levels]) => [target, [...levels]]),
                     renderbufferImage: c.renderbufferImage,
@@ -561,6 +600,10 @@
                 const group = shadow.groups.get(g.key);
                 if (!group) continue;
                 group.nextImageId = g.nextImageId || 1;
+                group.nextFramebufferId = g.nextFramebufferId || 1;
+                for (const fbo of g.framebuffers || []) group.framebufferObjects.set(fbo.id, fbo);
+                for (const [n, id] of g.sharedFramebuffers || []) group.sharedFramebuffers.set(n, group.framebufferObjects.get(id));
+                for (const [n, id] of g.framebufferReservations || []) group.framebufferReservations.set(n, group.framebufferObjects.get(id));
                 for (const [name, target, levels, savedId, deleted, parameters] of g.textures) {
                     const t = { name, target, levels: levelsIn(levels), id: savedId || group.nextImageId++, deleted: !!deleted, parameters };
                     group.textureImages.set(t.id, t); if (name && !deleted) group.textures.set(name, t);
@@ -585,10 +628,23 @@
                     defaultTextures: new Map(c.defaultTextures || []),
                     proxyImages: new Map((c.proxyImages || []).map(([target, levels]) => [target, new Map(levels)])),
                     renderbufferImage: c.renderbufferImage || context.group.renderbuffers.get(c.renderbuffer)?.id || 0,
-                    framebuffers: new Map(c.framebuffers.map(fbo => [fbo.name, fbo])), drawFramebuffer: c.drawFramebuffer,
+                    framebuffers: new Map(saved.version >= 3 ? c.framebuffers.map(([n, id]) => [n, context.group.framebufferObjects.get(id)]) : c.framebuffers.map(fbo => [fbo.name, fbo])), drawFramebuffer: c.drawFramebuffer,
                     readFramebuffer: c.readFramebuffer, renderbuffer: c.renderbuffer, drawBuffers: c.drawBuffers,
                     readBuffer: c.readBuffer });
                 context.defaultFramebufferState = c.defaultFramebufferState || buffers.initial(GL.BACK);
+                if (saved.version >= 3) {
+                    context.privateFramebuffers = new Map(c.privateFramebuffers.map(([n, id]) => [n, context.group.framebufferObjects.get(id)]));
+                    context.drawFramebufferObject = context.group.framebufferObjects.get(c.drawFramebufferId) || null;
+                    context.readFramebufferObject = context.group.framebufferObjects.get(c.readFramebufferId) || null;
+                } else {
+                    for (const fbo of context.framebuffers.values()) {
+                        fbo.id = context.group.nextFramebufferId++; fbo.shared = false; fbo.deleted = false;
+                        context.group.framebufferObjects.set(fbo.id, fbo);
+                        (fbo.created === false ? context.group.framebufferReservations : context.privateFramebuffers).set(fbo.name, fbo);
+                    }
+                    context.drawFramebufferObject = context.framebuffers.get(c.drawFramebuffer) || null;
+                    context.readFramebufferObject = context.framebuffers.get(c.readFramebuffer) || null;
+                }
                 for (const fbo of context.framebuffers.values()) {
                     if (!fbo.drawBuffers) fbo.drawBuffers = fbo.name === c.drawFramebuffer ? c.drawBuffers.slice() : [GL.COLOR_ATTACHMENT0];
                     if (fbo.readBuffer === undefined) fbo.readBuffer = fbo.name === c.readFramebuffer ? c.readBuffer : GL.COLOR_ATTACHMENT0;

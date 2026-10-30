@@ -55,6 +55,63 @@ const attachTexture = (stream, attachment, name, level = 0, target = GL.TEXTURE_
 const attachRenderbuffer = (stream, attachment, name) =>
     stream.call("FRAMEBUFFER_RENDERBUFFER", FRAMEBUFFER, attachment, RENDERBUFFER, name);
 
+test("EXT-created FBOs share by identity, core-created FBOs stay private and deleted bindings survive snapshots", async () => {
+    const native = require("./gl_conformance/framebuffer_sharing_reference.json");
+    assert.equal(native.foreignEXT, 1); assert.equal(native.crossBindError, 0); assert.equal(native.crossAttachment, 1);
+    const one = shadow(), stream = scene().call("BIND_TEXTURE", GL.TEXTURE_2D, 1)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+        .call("BIND_FRAMEBUFFER_EXT", FRAMEBUFFER, 7).call("FRAMEBUFFER_TEXTURE_2D", FRAMEBUFFER, COLOR0, GL.TEXTURE_2D, 1, 0, 0)
+        .makeCurrent(2, 0, 0, 64, 64, 2, 1).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 7)
+        .makeCurrent(1, 0, 0, 64, 64, 1, 1).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 9)
+        .makeCurrent(2, 0, 0, 64, 64, 2, 1).call("BIND_FRAMEBUFFER_EXT", FRAMEBUFFER, 9)
+        .call("BIND_FRAMEBUFFER", FRAMEBUFFER, 7).call("DRAW_BUFFER", GL.NONE);
+    one.process(stream.bytes()); assert.equal(one.stats.rejected, 0);
+    const group = one.current.group, contexts = [...one.contexts.values()], first = contexts.find(c => c.id === 1), second = contexts.find(c => c.id === 2);
+    assert.notEqual(first.privateFramebuffers.get(9), second.privateFramebuffers.get(9));
+    assert.equal(first.privateFramebuffers.get(9).shared, false);
+    // Context 2 first bound 9 through EXT, so it owns a different shared
+    // object; context 1's core-created 9 remains private in that context.
+    assert.equal(group.sharedFramebuffers.get(9), second.framebuffers.get(9));
+    assert.equal(second.drawFramebufferObject, group.sharedFramebuffers.get(7));
+    const old = second.drawFramebufferObject, imageId = old.color[0].id;
+    const changes = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 7);
+    one.process(changes.bytes()); assert.deepEqual(one.current.drawBuffers, [GL.NONE]);
+    const replace = new GLStream().call("DRAW_BUFFER", COLOR0).names(P.GLFN.DELETE_FRAMEBUFFERS, [7])
+        .call("BIND_FRAMEBUFFER_EXT", FRAMEBUFFER, 7).call("BIND_TEXTURE", GL.TEXTURE_2D, 2)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+        .call("FRAMEBUFFER_TEXTURE_2D", FRAMEBUFFER, COLOR0, GL.TEXTURE_2D, 2, 0, 0).names(P.GLFN.DELETE_TEXTURES, [1])
+        .makeCurrent(2, 0, 0, 64, 64, 2, 1).names(P.GLFN.DELETE_FRAMEBUFFERS, [7]);
+    one.process(replace.bytes()); assert.equal(one.stats.rejected, 0); assert.equal(one.boundFramebuffer(FRAMEBUFFER), old);
+    assert.equal(one.framebufferStatus(FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE); assert.equal(group.sharedFramebuffers.has(7), false);
+    assert.equal(group.textureImages.has(imageId), true, "deleted bound FBO retains its deleted attachment image");
+    const copy = shadow(); copy.setState(JSON.parse(JSON.stringify(one.getState())));
+    assert.equal(copy.boundFramebuffer(FRAMEBUFFER).id, old.id); assert.equal(copy.framebufferStatus(FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+    assert.equal(copy.boundFramebuffer(FRAMEBUFFER).color[0].name, 1);
+    copy.process(scene().call("BIND_FRAMEBUFFER_EXT", FRAMEBUFFER, 9).bytes());
+    assert.equal(copy.boundFramebuffer(FRAMEBUFFER), copy.current.privateFramebuffers.get(9), "EXT alias preserves an existing core object's private origin");
+    const { host } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host }); await gpu.initialize();
+    for (const batch of [stream, changes, replace]) gpu.submit(batch.bytes(), {});
+    assert.equal(gpu.stats.refusals, 0); assert.equal(gpu.boundFramebufferObject(FRAMEBUFFER).color[0].name, 1);
+    assert.equal(gpu.current.shareGroup.sharedFramebuffers.has(7), false);
+    const gpuFirst = [...gpu.contexts.values()].find(c => c.protocolId === 1);
+    assert.notEqual(gpuFirst.privateFramebuffers.get(9), gpu.current.shareGroup.sharedFramebuffers.get(9));
+    const end = new GLStream().record(P.CTRL.DESTROY_CONTEXT, P.encodeRecord("DESTROY_CONTEXT", { context_id: 2 }));
+    one.process(end.bytes()); assert.equal(group.textureImages.has(imageId), false, "last FBO binding releases its old image");
+});
+
+test("version 2 object snapshots restore their legacy private FBOs", () => {
+    const one = shadow(), stream = scene().call("BIND_TEXTURE", GL.TEXTURE_2D, 1)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+        .call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3).call("FRAMEBUFFER_TEXTURE", FRAMEBUFFER, COLOR0, GL.TEXTURE_2D, 1, 0, 0);
+    one.process(stream.bytes()); const saved = JSON.parse(JSON.stringify(one.getState())); saved.objects.version = 2;
+    const pool = new Map(saved.objects.groups[0].framebuffers.map(f => [f.id, f]));
+    for (const c of saved.objects.contexts) c.framebuffers = c.framebuffers.map(([, id]) => pool.get(id));
+    for (const g of saved.objects.groups) { delete g.framebuffers; delete g.sharedFramebuffers; delete g.framebufferReservations; delete g.nextFramebufferId; }
+    const copy = shadow(); copy.setState(saved);
+    assert.equal(copy.framebufferStatus(FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+    assert.equal(copy.current.privateFramebuffers.get(3).color[0].name, 1);
+});
+
 test("the default framebuffer is complete; an empty object is missing an attachment", () => {
     const s = scene().status().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3).status();
     shadow().process(s.bytes());
