@@ -34,6 +34,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_arb_program.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_executor.js"></script>
 <script src="gl_stream_builder.js"></script>
+<script src="gl_shader_units_cases.js"></script>
 <script>
 (async () => {
     "use strict";
@@ -460,7 +461,32 @@
                 "an empty query must complete without rendering into an incomplete framebuffer");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "empty queries must have no host errors");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
+        const unitReference = await (await fetch("gl_conformance/shader_units_reference.json")).json();
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(); shadow.setGlslang(new V86GLGlslang.Glslang(compiler));
+            const executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize(); shadow.setCapabilities(executor.capabilities());
+            for (const [i, entry] of GLShaderUnitCases.entries()) {
+                const base = 200 + i * 10;
+                const setup = new GLStream().makeCurrent(base, 0, 0, 64, 64, base, base);
+                GLShaderUnitCases.appendProgram(setup, entry, base);
+                const linked = setup.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, base, GL.LINK_STATUS);
+                const location = entry.uniform ? setup.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, base, entry.uniform, 64) : null;
+                shadow.process(setup.bytes()); executor.submit(remote ? setup.bytes().slice() : setup.bytes(), {}); await executor.idle();
+                check(linked.view.getInt32(P.F.QUERY_OBJECT_IV.value, true) === 1, entry.name + " CPU link failed");
+                const draw = new GLStream();
+                if (location) draw.uniformfv(location.view.getInt32(P.F.QUERY_LOCATION.result, true), 4, 1, entry.value);
+                draw.call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                    .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                const pixel = draw.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = draw.bytes();
+                shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+                check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, entry.name + " pixel read failed");
+                check(unitReference[entry.name].pixel.every((v, j) => Math.abs(pixel.bytes[32 + j] - v) <= 1), entry.name + " differs from native: " + Array.from(pixel.bytes.subarray(32)));
+                check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, entry.name + " host failure");
+            }
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms/compilation units, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

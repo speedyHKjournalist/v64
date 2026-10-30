@@ -1,0 +1,35 @@
+{
+  "shared_globals_separate_macros": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "pixel": [
+      159,
+      159,
+      128,
+      255
+    ]
+  },
+  "distinct_structs": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "pixel": [
+      191,
+      0,
+      0,
+      255
+    ]
+  },
+  "shared_struct_uniform": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "pixel": [
+      64,
+      128,
+      191,
+      255
+    ]
+  }
+}

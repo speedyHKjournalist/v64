@@ -3565,7 +3565,7 @@
                 return this.refuse("glCompileShader", "unknown shader",
                     { name: a[0] }, GL.INVALID_VALUE);
             shader.compiled = translator.compileShader(shader.source,
-                shader.stage, this.options.translator || {});
+                shader.stage, { ...this.options.translator, library: true });
         });
         define("LINK_PROGRAM", function(a) { this.linkProgram(a[0] >>> 0); });
         define("PROGRAM_LINK_FAILED", function(a) {
@@ -5497,6 +5497,7 @@
             program.validateLog = "program is not validated";
             const candidate = createProgram(name);
             candidate.bindAttribLocations = new Map(program.bindAttribLocations);
+            const units = { vertex: [], fragment: [] };
             for (const shaderName of program.shaders) {
                 const shader = this.current.shareGroup.shaders.get(shaderName);
                 if (!shader) continue;
@@ -5504,8 +5505,10 @@
                     program.log = shader.compiled ? shader.compiled.log : "ERROR: a shader is not compiled";
                     return;
                 }
-                candidate.compiled[shader.stage] = shader.compiled;
+                units[shader.stage].push(shader.compiled);
             }
+            for (const stage of ["vertex", "fragment"]) if (units[stage].length)
+                candidate.compiled[stage] = translator.linkShaderUnits(units[stage], stage, this.options.translator || {});
             if (!candidate.compiled.vertex || !candidate.compiled.fragment) {
                 program.log = "ERROR: a program needs both a vertex and a " +
                     "fragment shader";

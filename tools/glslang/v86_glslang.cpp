@@ -26,12 +26,14 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "glslang/Include/Types.h"
 #include "glslang/Public/ResourceLimits.h"
 #include "glslang/Public/ShaderLang.h"
+#include "glslang/MachineIndependent/localintermediate.h"
 #include "SPIRV/GlslangToSpv.h"
 
 namespace {
@@ -338,6 +340,45 @@ int v86_glslang_link(const uint8_t* packed, uint32_t length, uint32_t flags)
     return ok ? 1 : 0;
 }
 
+// glslang keeps ordinary global initializers as assignments, whereas its
+// cross-unit initializer check reads the linker symbol's constant array.
+// Populate that metadata from the already folded AST, so desktop GLSL 1.20
+// section 4.2 checks values (including constructors), not source spelling.
+void desktop_global_initializers(glslang::TShader& shader)
+{
+    class Initializers : public glslang::TIntermTraverser {
+    public:
+        std::map<long long, glslang::TConstUnionArray> values;
+        bool visitAggregate(glslang::TVisit, glslang::TIntermAggregate* node) override
+        {
+            return node->getOp() != glslang::EOpFunction && node->getOp() != glslang::EOpLinkerObjects;
+        }
+        bool visitBinary(glslang::TVisit, glslang::TIntermBinary* node) override
+        {
+            if(node->getOp() == glslang::EOpAssign)
+            {
+                auto* symbol = node->getLeft()->getAsSymbolNode();
+                auto* value = node->getRight()->getAsConstantUnion();
+                if(symbol && value && symbol->getQualifier().storage == glslang::EvqGlobal)
+                    values.emplace(symbol->getId(), value->getConstArray());
+            }
+            return true;
+        }
+    } initializers;
+    auto* intermediate = shader.getIntermediate();
+    if(!intermediate || !intermediate->getTreeRoot()) return;
+    intermediate->getTreeRoot()->traverse(&initializers);
+    auto* objects = intermediate->findLinkerObjects();
+    if(!objects) return;
+    for(auto* node : objects->getSequence())
+    {
+        auto* symbol = node->getAsSymbolNode();
+        if(!symbol) continue;
+        auto value = initializers.values.find(symbol->getId());
+        if(value != initializers.values.end()) symbol->setConstArray(value->second);
+    }
+}
+
 /** Desktop GLSL's limits, as v86_glslang_limits sets the ES ones */
 __attribute__((export_name("v86_glslang_desktop_limits")))
 void v86_glslang_desktop_limits(char* config)
@@ -383,6 +424,7 @@ int v86_glslang_desktop_link(const uint8_t* packed, uint32_t length)
         bool compiled;
         shaders.push_back(desktop_shader(source, compiled));
         if(!compiled) { ok = false; log += shaders.back()->getInfoLog(); }
+        if(compiled) desktop_global_initializers(*shaders.back());
         program.addShader(shaders.back().get());
     }
     if(ok && !program.link(EShMsgDefault)) ok = false;

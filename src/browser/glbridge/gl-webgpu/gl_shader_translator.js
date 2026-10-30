@@ -28,7 +28,7 @@
     const stateLayout = (typeof require === "function" && typeof module !== "undefined") ?
         require("./gl_state_layout.js") : global.GLStateLayout;
 
-    const TRANSLATOR_REVISION = 2;
+    const TRANSLATOR_REVISION = 3;
 
     /* ================================================================== */
     /* Types                                                              */
@@ -2123,7 +2123,7 @@
                 }
             }
             const main = this.functions.get("main");
-            if (!main || !main.some(o => o.def && !o.params.length))
+            if ((!main || !main.some(o => o.def && !o.params.length)) && !this.options.library)
                 fail(0, "no main() function");
             return this.usage;
         }
@@ -3623,6 +3623,7 @@
     /* ================================================================== */
 
     const WGSL_RESERVED = new Set([
+        "shared",
         "alias", "break", "case", "const", "const_assert", "continue",
         "continuing", "default", "diagnostic", "discard", "else", "enable",
         "false", "fn", "for", "if", "let", "loop", "override", "requires",
@@ -5103,6 +5104,7 @@
         try {
             const pp = new Preprocessor(stage, opts);
             const pre = pp.run(source);
+            result.preprocessedSource = pre.text;
             result.version = pre.version;
             result.extensions = pre.extensions;
             result.warnings = pre.warnings.slice();
@@ -5115,6 +5117,81 @@
             result.functions = analyzer.functions;
             result.ok = true;
             result.log = result.warnings.map(w => "WARNING: " + w).join("\n");
+        } catch (error) {
+            if (!(error instanceof GLSLError)) throw error;
+            result.log = "ERROR: 0:" + (error.glslLine || 0) + ": " + error.message;
+        }
+        return result;
+    }
+
+    // Preprocess compilation units independently, then merge their shared
+    // globals (GLSL 1.20 section 4.2). The CPU's glslang link has checked
+    // matching initializer values; retain one declaration and initializer.
+    function linkShaderUnits(units, stage, options) {
+        const opts = options || {};
+        if (units.length === 1) return units[0];
+        const result = { ok: false, stage, log: "", warnings: units.flatMap(u => u.warnings || []),
+            version: Math.max(110, ...units.map(u => u.version || 110)),
+            sourceHash: hashString(stage + " " + JSON.stringify(units.map(u => u.preprocessedSource))) };
+        try {
+            if (!units.length) fail(0, "the " + stage + " stage has no shaders");
+            const parsed = units.map(unit => {
+                if (!unit.ok || unit.stage !== stage || typeof unit.preprocessedSource !== "string")
+                    fail(0, "the " + stage + " shader unit is not compiled");
+                const ast = new Parser(lex(unit.preprocessedSource), stage).parseProgram();
+                new Analyzer(stage, ast, { ...opts, library: true }).run();
+                return ast;
+            });
+            const walk = (root, visit) => {
+                const seen = new Set();
+                const next = node => {
+                    if (!node || typeof node !== "object" || seen.has(node)) return;
+                    seen.add(node); visit(node);
+                    for (const [key, value] of Object.entries(node)) if (key !== "symbol" && key !== "overload") next(value);
+                };
+                next(root);
+            };
+            const allNames = new Set(), typeNames = new Set();
+            for (const ast of parsed) walk(ast, node => {
+                if (node.kind === "VarDecl") for (const d of node.declarators) allNames.add(d.name);
+                if (node.kind === "struct") typeNames.add(node.name);
+            });
+            const usedNames = new Set([...allNames, ...typeNames]);
+            const unique = (name, used) => { while (used.has(name)) name += "_"; used.add(name); return name; };
+            const typeKey = type => type.kind === "struct" ? [type.name, type.fields.map(f => [f.name, typeKey(f.type)])] :
+                type.kind === "array" ? [type.kind, type.size, typeKey(type.elem)] : type.name;
+            const types = new Map(), layoutsByName = new Map();
+            parsed.forEach((ast, unit) => {
+                const localTypes = new Map();
+                walk(ast, type => { if (type.kind === "struct") localTypes.set(type, JSON.stringify(typeKey(type))); });
+                for (const [type, key] of localTypes) {
+                    let name = types.get(key);
+                    if (!name) {
+                        name = layoutsByName.has(type.name) ? unique(type.name + "__vgl_unit" + unit, usedNames) : type.name;
+                        layoutsByName.set(type.name, key); types.set(key, name);
+                    }
+                    type.name = name;
+                }
+            });
+            const globals = new Map(), decls = [];
+            for (const ast of parsed) for (const decl of ast.decls) {
+                if (decl.kind === "VarDecl") {
+                    decl.declarators = decl.declarators.filter(d => {
+                        const previous = globals.get(d.name);
+                        if (!previous) { globals.set(d.name, { d, decl }); return true; }
+                        if (previous.decl.qualifiers.storage !== decl.qualifiers.storage || !sameType(previous.d.type, d.type))
+                            fail(d.line, "global variable '" + d.name + "' has conflicting shader-unit declarations");
+                        if (!previous.d.init && d.init) previous.d.init = d.init;
+                        previous.decl.qualifiers.centroid ||= decl.qualifiers.centroid;
+                        previous.decl.qualifiers.invariant ||= decl.qualifiers.invariant;
+                        return false;
+                    });
+                    if (!decl.declarators.length) continue;
+                }
+                decls.push(decl);
+            }
+            const ast = { kind: "Program", decls }, analyzer = new Analyzer(stage, ast, { ...opts, library: false });
+            result.usage = analyzer.run(); result.ast = ast; result.functions = analyzer.functions; result.ok = true;
         } catch (error) {
             if (!(error instanceof GLSLError)) throw error;
             result.log = "ERROR: 0:" + (error.glslLine || 0) + ": " + error.message;
@@ -5142,6 +5219,8 @@
             if (!fs || !fs.ok) throw new GLSLError("the fragment shader is not compiled", 0);
             if (vs.stage !== "vertex" || fs.stage !== "fragment")
                 throw new GLSLError("a program needs one vertex and one fragment shader", 0);
+            for (const shader of [vs, fs]) if (!shader.functions?.get("main")?.some(f => f.def && !f.params.length))
+                throw new GLSLError("the " + shader.stage + " stage has no main() function", 0);
 
             /* ---- uniforms: one namespace across both stages ---- */
             const uniformLayout = new UniformBlockLayout();
@@ -5413,7 +5492,7 @@
 
     const api = {
         TRANSLATOR_REVISION,
-        compileShader, linkProgram,
+        compileShader, linkShaderUnits, linkProgram,
         // Exported for the test suite and for gl_fixed_function.js, which
         // shares the state block and the attribute slot table.
         Preprocessor, lex, Parser, Analyzer, Generator,
