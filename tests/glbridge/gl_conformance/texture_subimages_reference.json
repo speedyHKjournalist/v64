@@ -1,0 +1,28 @@
+{
+  "renderer":"Apple M1 Pro",
+  "cases":{
+    "valid":0,
+    "undefined_level":1282,
+    "negative_offset":1281,
+    "past_edge":1281,
+    "negative_width":1281,
+    "empty_at_edge":0,
+    "empty_past_edge":1281,
+    "bad_format":1280,
+    "bad_type":1280,
+    "depth_as_color":1282,
+    "valid_3d":0,
+    "past_slice":1281,
+    "compressed_valid":0,
+    "compressed_unaligned":1281,
+    "compressed_partial_block":1281,
+    "compressed_edge":0,
+    "compressed_past_edge":1281,
+    "compressed_bad_size":1281,
+    "compressed_wrong_format":1282,
+    "compressed_unknown_format":1280,
+    "ordinary_partial_origin":0,
+    "ordinary_partial_non_origin":1282,
+    "undefined_empty":1282
+  }
+}

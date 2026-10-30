@@ -80,6 +80,44 @@
             return 0;
         } });
     }
+    for (const dimensions of [1, 2, 3]) for (const compressed of [false, true]) {
+        const name = (compressed ? "COMPRESSED_TEX_SUB_IMAGE_" : "TEX_SUB_IMAGE_") + dimensions + "D";
+        GLShadow.rules({ [P.GLFN[name]]: (s, b, v, o, size) => {
+            if (s.current.state.begin) return GL.INVALID_OPERATION;
+            const r = P.decodeRecord(name, v, o);
+            if (!IMAGE_TARGETS[dimensions].has(r.target) || formats.PROXY_TARGETS.has(r.target)) return GL.INVALID_ENUM;
+            const cube = dimensions === 2 && r.target !== GL.TEXTURE_2D;
+            const maximum = s.capabilities ? caps.integer(s.capabilities, dimensions === 3 ? GL.MAX_3D_TEXTURE_SIZE :
+                cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 8192;
+            if (r.level < 0 || r.level > Math.floor(Math.log2(maximum))) return GL.INVALID_VALUE;
+            const image = s.boundImage(r.target), info = image.texture.levels.get(image.layer)?.get(r.level);
+            if (!info) return GL.INVALID_OPERATION;
+            const lengths = [r.width, ...(dimensions >= 2 ? [r.height] : []), ...(dimensions >= 3 ? [r.depth] : [])];
+            const offsets = [r.xoffset, r.yoffset, r.zoffset], bounds = [info.width, info.height, info.depth], border = info.border || 0;
+            if (lengths.some((n, i) => n < 0 || offsets[i] < -border || offsets[i] + n > bounds[i] - border)) return GL.INVALID_VALUE;
+            const block = formats.COMPRESSED_FORMATS[info.internalFormat], isCompressed = info.compressed ?? !!block;
+            if (compressed) {
+                if (!formats.COMPRESSED_FORMATS[r.format] || dimensions !== 2) return GL.INVALID_ENUM;
+                if (!isCompressed || r.format !== info.internalFormat) return GL.INVALID_OPERATION;
+                if (r.image_size !== Math.ceil(r.width / 4) * Math.ceil(r.height / 4) * block.blockBytes) return GL.INVALID_VALUE;
+            } else {
+                const error = pixelError(r.format, r.type); if (error) return error;
+                const base = formats.storageFormatFor(info.internalFormat).base;
+                if ((base === "DEPTH") !== (r.format === GL.DEPTH_COMPONENT) || base === "COLOR_INDEX" && r.format !== GL.COLOR_INDEX)
+                    return GL.INVALID_OPERATION;
+            }
+            if (isCompressed && block) {
+                if (r.xoffset % 4 || r.yoffset % 4) return GL.INVALID_OPERATION;
+                if ((compressed || r.xoffset || r.yoffset) &&
+                    (r.width % 4 && r.xoffset + r.width !== info.width || r.height % 4 && r.yoffset + r.height !== info.height))
+                    return GL.INVALID_OPERATION;
+            }
+            const bytes = compressed ? r.image_size : r.data_size;
+            if (P.RECORDS[name].size + bytes > size) return GL.INVALID_VALUE;
+            if (!compressed && bytes && bytes < uploadSpan(s.current, r, dimensions)) return GL.INVALID_OPERATION;
+            return 0;
+        } });
+    }
     function command(name, a) {
         const scalar = name === "TEX_PARAMETERI" || name === "TEX_PARAMETERF";
         return parameters.normalize(a[1], scalar ? [a[2]] : a.slice(3, 3 + a[2]), name.endsWith("I") || name.endsWith("IV"), scalar);

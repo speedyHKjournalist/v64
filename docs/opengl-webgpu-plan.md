@@ -355,6 +355,13 @@ game.exe
 > - 原生 22 例、12 项纹理测试、两种通道的无效上传画面保护、40 组 Node、26 组站点、8 个 GPU 页面、构建、DLL 与 ESLint 通过，新增变异 5/5 被杀死。Apple 对非法 internalformat 返回 INVALID_ENUM，按规范改用 INVALID_VALUE；原始 fixture 不改写。
 > - **继续推进：** 子图、复制、GetTexImage/压缩内容、PBO 与其它对象/数组的迁移、FBO 完整校验、列表/选择/反馈/求值器、完整错误迁移及 C8。C 仍未退出，后续 D–G 未整体完成。
 
+> **C3/C6 TexSubImage 校验（2026-10-30）：完成这一批迁移。**
+> - CPU 校验普通/压缩 1D/2D/3D 子图的目标、已有层级、尺寸、边框坐标、切片、像素格式/类型、声明长度和 unpack 数据范围；未定义层级的零尺寸更新同样报 INVALID_OPERATION，合法零尺寸边界保留。错误更新在自动 mipmap 和转发前拒绝。
+> - S3TC 更新要求原格式匹配、精确块数据大小、对齐偏移和允许的末端块；普通像素更新按 [EXT_texture_compression_s3tc](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_texture_compression_s3tc.txt) 保留原点局部更新规则。两种块形状错误按扩展规范返回 INVALID_OPERATION，保留 Apple 返回 INVALID_VALUE 的原始参照。
+> - 客体三个普通子图头和压缩共享头改用生成结构，协议一致性检查覆盖；23 例原生参照、14 项纹理测试包含三维范围、缺失图像、源数据截断、有效边框偏移和失败更新不触发 mipmap。两种通道的真实像素证明无效子图保留原色、合法子图改变颜色。
+> - 40 组 Node、26 组站点、8 个 GPU 页面、构建、DLL 和 ESLint 通过；新增变异 6/6、此前上传变异 5/5 被杀死。
+> - **继续推进：** CopyTexImage/SubImage、mipmap 完整校验、GPU 对边框和压缩更新/生成的剩余支持、客体缓存/本地校验收缩，以及其余 C3/C6/C8。C 尚未退出，D–G 尚未整体完成。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

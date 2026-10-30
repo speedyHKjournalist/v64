@@ -310,6 +310,73 @@ test("uncompressed compression hints resolve to base formats and compressed payl
     }
 });
 
+test("ordinary and compressed subimages match native boundaries and S3TC operation errors", () => {
+    const native = require("./gl_conformance/texture_subimages_reference.json").cases;
+    for (const [key, fields, compressed, bytes = 1024] of [
+        ["valid", { xoffset: 1, yoffset: 1, width: 2, height: 2 }],
+        ["undefined_level", { level: 1 }], ["negative_offset", { xoffset: -1 }],
+        ["past_edge", { xoffset: 3, width: 2 }], ["negative_width", { width: -1 }],
+        ["empty_at_edge", { xoffset: 4, width: 0 }], ["empty_past_edge", { xoffset: 5, width: 0 }],
+        ["bad_format", { format: 0 }], ["bad_type", { type: 0 }], ["depth_as_color", { format: GL.DEPTH_COMPONENT, type: GL.FLOAT }],
+        ["valid_3d", { target: GL.TEXTURE_3D, zoffset: 1, depth: 1 }],
+        ["past_slice", { target: GL.TEXTURE_3D, zoffset: 2, depth: 1 }],
+        ["compressed_valid", { width: 4, height: 4 }, true, 8],
+        ["compressed_unaligned", { xoffset: 1, width: 4, height: 4 }, true, 8],
+        ["compressed_partial_block", { width: 2, height: 4 }, true, 8],
+        ["compressed_edge", { xoffset: 4, width: 4, height: 4 }, true, 8],
+        ["compressed_past_edge", { xoffset: 8, width: 4, height: 4 }, true, 8],
+        ["compressed_bad_size", { width: 4, height: 4 }, true, 7],
+        ["compressed_wrong_format", { width: 4, height: 4, format: GL.COMPRESSED_RGBA_S3TC_DXT3_EXT }, true, 16],
+        ["compressed_unknown_format", { width: 4, height: 4, format: GL.RGBA }, true, 8],
+        ["ordinary_partial_origin", { width: 2, height: 4 }],
+        ["ordinary_partial_non_origin", { xoffset: 4, width: 2, height: 4 }],
+        ["undefined_empty", { width: 0, height: 0 }],
+    ]) {
+        const s = shadow(), initial = scene();
+        upload(initial, "TEX_IMAGE_2D", {});
+        upload(initial, "TEX_IMAGE_3D", { target: GL.TEXTURE_3D, depth: 2 });
+        if (compressed || key.startsWith("ordinary_partial"))
+            upload(initial, "COMPRESSED_TEX_IMAGE_2D", { internalformat: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, width: 8, height: 8 }, new Uint8Array(32));
+        if (key === "undefined_empty") initial.call("BIND_TEXTURE", GL.TEXTURE_2D, 17);
+        s.process(initial.bytes()); assert.equal(s.current.error, 0);
+        const dimensions = fields.target === GL.TEXTURE_3D ? 3 : 2;
+        const stream = upload(new GLStream(), (compressed ? "COMPRESSED_TEX_SUB_IMAGE_" : "TEX_SUB_IMAGE_") + dimensions + "D",
+            { xoffset: 0, yoffset: 0, zoffset: 0, width: 1, height: 1, depth: 1,
+                ...(compressed ? { format: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT } : {}), ...fields }, new Uint8Array(bytes));
+        s.process(stream.bytes());
+        // EXT_texture_compression_s3tc requires INVALID_OPERATION here;
+        // Apple reports INVALID_VALUE for these two block-shape failures.
+        const error = ["compressed_unaligned", "compressed_partial_block"].includes(key) ? GL.INVALID_OPERATION : native[key];
+        assert.equal(s.current.error, error, key); assert.equal(s.stats.rejected, +!!error, key);
+    }
+});
+
+test("subimage payload failures preserve mipmaps and valid border offsets are accepted", () => {
+    const s = shadow(), initial = scene(); upload(initial, "TEX_IMAGE_2D", {}); upload(initial, "TEX_IMAGE_2D", { level: 1, width: 3, height: 3 });
+    initial.call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.GENERATE_MIPMAP, 1); s.process(initial.bytes());
+    const texture = s.boundImage(GL.TEXTURE_2D).texture;
+    const invalid = upload(new GLStream(), "TEX_SUB_IMAGE_2D", { width: 1, height: 1 }, new Uint8Array(3));
+    s.process(invalid.bytes()); assert.equal(s.current.error, GL.INVALID_OPERATION); assert.equal(texture.levels.get(0).get(1).width, 3);
+    const valid = upload(new GLStream(), "TEX_SUB_IMAGE_2D", { width: 1, height: 1 }, new Uint8Array(4));
+    s.process(valid.bytes()); assert.equal(s.stats.rejected, 1); assert.equal(texture.levels.get(0).get(1).width, 2);
+    const cut = shadow(), setup = upload(scene(), "TEX_IMAGE_2D", {}); cut.process(setup.bytes());
+    const truncated = upload(new GLStream(), "TEX_SUB_IMAGE_2D", { width: 1, height: 1, data_size: 4 }, new Uint8Array(3));
+    cut.process(truncated.bytes()); assert.equal(cut.current.error, GL.INVALID_VALUE);
+    for (const xoffset of [-1, -2]) {
+        const current = shadow(), stream = scene(); upload(stream, "TEX_IMAGE_2D", { width: 6, height: 6, border: 1 });
+        upload(stream, "TEX_SUB_IMAGE_2D", { xoffset, yoffset: -1, width: 2, height: 2 }, new Uint8Array(16));
+        current.process(stream.bytes()); assert.equal(current.current.error, xoffset === -1 ? 0 : GL.INVALID_VALUE);
+    }
+    for (const complete of [false, true]) {
+        const current = shadow(), stream = scene(); upload(stream, "TEX_IMAGE_3D", { target: GL.TEXTURE_3D, depth: 2 });
+        for (const [pname, value] of [[GL.UNPACK_ALIGNMENT, 8], [GL.UNPACK_ROW_LENGTH, 4], [GL.UNPACK_IMAGE_HEIGHT, 3],
+            [GL.UNPACK_SKIP_IMAGES, 1], [GL.UNPACK_SKIP_ROWS, 1], [GL.UNPACK_SKIP_PIXELS, 1]]) stream.call("PIXEL_STOREI", pname, value);
+        upload(stream, "TEX_SUB_IMAGE_3D", { target: GL.TEXTURE_3D, width: 2, height: 2, depth: 2, format: GL.RGB, type: GL.UNSIGNED_SHORT },
+            new Uint8Array(complete ? 210 : 209));
+        current.process(stream.bytes()); assert.equal(current.current.error, complete ? 0 : GL.INVALID_OPERATION);
+    }
+});
+
 (async () => {
     for (const { name, fn } of tests) {
         try { await fn(); console.log("ok   " + name); }

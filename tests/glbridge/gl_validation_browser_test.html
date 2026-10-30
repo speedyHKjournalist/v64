@@ -318,15 +318,22 @@
                 .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST).call("ENABLE", GL.TEXTURE_2D)
                 .call("TEX_ENVI", GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE, GL.REPLACE);
             shadow.process(validImage.bytes()); executor.submit(remote ? validImage.bytes().slice() : validImage.bytes(), {});
-            for (const [format, data] of [[0, new Uint8Array([255, 0, 0, 255])], [GL.RGBA8, new Uint8Array([255, 0, 0])]]) {
-                const s = new GLStream().texImage2D(GL.TEXTURE_2D, 0, format, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, data)
+            const oldColor = [20, 90, 170, 255], newColor = [40, 140, 200, 255];
+            for (const [update, expected] of [
+                [s => s.texImage2D(GL.TEXTURE_2D, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255])), oldColor],
+                [s => s.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 0])), oldColor],
+                [s => s.texSubImage2D(GL.TEXTURE_2D, 0, 1, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255])), oldColor],
+                [s => s.texSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 0])), oldColor],
+                [s => s.texSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(newColor)), newColor],
+            ]) {
+                const s = update(new GLStream())
                     .call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
                     .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                     .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
                 const pixel = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = s.bytes();
                 shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
                 executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
-                check([20, 90, 170, 255].every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "a rejected upload replaced the texture");
+                check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "texture update violated validation: " + Array.from(pixel.bytes.subarray(32)));
                 check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "rejected uploads must have no host errors");
             }
         }
