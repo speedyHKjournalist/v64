@@ -737,7 +737,31 @@
             check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1 && [64, 128, 191, 255].every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "filtered stream readback offset/pixel");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "filtered stream host failure");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, texture readback, GLSL lifetime/units/mixed fixed stages, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize(); shadow.setCapabilities(executor.capabilities());
+            const s = new GLStream().makeCurrent(800, 0, 0, 64, 64, 800, 800).call("BIND_BUFFER", GL.ARRAY_BUFFER, 7)
+                .bufferData(GL.ARRAY_BUFFER, 36, GL.STATIC_DRAW, new Uint8Array(new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]).buffer))
+                .call("BIND_BUFFER", GL.ELEMENT_ARRAY_BUFFER, 9).bufferData(GL.ELEMENT_ARRAY_BUFFER, 6, GL.STATIC_DRAW, new Uint8Array(new Uint16Array([0, 1, 2]).buffer))
+                .makeCurrent(801, 0, 0, 64, 64, 801, 800).call("BIND_BUFFER", GL.ARRAY_BUFFER, 7).call("BIND_BUFFER", GL.ELEMENT_ARRAY_BUFFER, 9)
+                .pointerVBO("VERTEX_POINTER_VBO", 3, GL.FLOAT, 0, 0).call("ENABLE_CLIENT_STATE", GL.VERTEX_ARRAY).call("COLOR4F", 1, 0, 0, 1)
+                .call("PUSH_CLIENT_ATTRIB", 3).makeCurrent(800, 0, 0, 64, 64, 800, 800).names(P.GLFN.DELETE_BUFFERS, [7, 9])
+                .call("BIND_BUFFER", GL.ARRAY_BUFFER, 7).bufferData(GL.ARRAY_BUFFER, 36, GL.STATIC_DRAW, new Uint8Array(new Float32Array([2, 2, 0, 3, 2, 0, 2, 3, 0]).buffer))
+                .call("BIND_BUFFER", GL.ELEMENT_ARRAY_BUFFER, 9).bufferData(GL.ELEMENT_ARRAY_BUFFER, 6, GL.STATIC_DRAW, new Uint8Array(new Uint16Array([0, 0, 0]).buffer))
+                .makeCurrent(801, 0, 0, 64, 64, 801, 800).call("BIND_BUFFER", GL.ARRAY_BUFFER, 0).call("BIND_BUFFER", GL.ELEMENT_ARRAY_BUFFER, 0)
+                .pointerVBO("VERTEX_POINTER_VBO", 3, GL.FLOAT, 0, 0).call("POP_CLIENT_ATTRIB")
+                .call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).drawElementsDirect(GL.TRIANGLES, 3, GL.UNSIGNED_SHORT, 0, 0, 2);
+            const filled = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            s.call("CLEAR", GL.COLOR_BUFFER_BIT).call("POLYGON_MODE", GL.FRONT_AND_BACK, GL.POINT).call("POINT_SIZE", 3)
+                .drawElementsDirect(GL.TRIANGLES, 3, GL.UNSIGNED_SHORT, 0, 0, 2);
+            const point = s.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = s.bytes();
+            shadow.process(memory); executor.options.writeGuestMemory = (at, data) => memory.set(data, at);
+            executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+            for (const pixel of [filled, point]) check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1 &&
+                [255, 0, 0, 255].every((v, i) => pixel.bytes[32 + i] === v), "retained vertex/index buffer pixel: " + Array.from(pixel.bytes.subarray(32)));
+            check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "retained buffer host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

@@ -38,7 +38,6 @@
                 else {
                     const buffer = c.group.buffers.get(name); if (!buffer) continue;
                     c.group.buffers.delete(name); buffer.deleted = true;
-                    buffer.mapped = false; buffer.pointer = 0;
                     for (const [target, id] of c.bufferBindings) if (id === buffer.id) c.bufferBindings.delete(target);
                 }
             }

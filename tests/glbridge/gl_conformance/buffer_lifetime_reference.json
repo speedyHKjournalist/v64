@@ -1,0 +1,12 @@
+{"renderer":"Apple M1 Pro","cases":[
+{"name":"first_before","isBuffer":1,"bindings":[7,7,7,7,7,7,7,7],"pointer":4,"size":16,"mapped":0,"data":[11,22,33,44],"error":0},
+{"name":"second_before","isBuffer":1,"bindings":[7,7,7,7,7,7,7,7],"pointer":4,"size":16,"mapped":0,"data":[11,22,33,44],"error":0},
+{"name":"first_deleted","isBuffer":0,"bindings":[0,0,0,0,0,0,0,0],"pointer":4,"size":0,"mapped":0,"data":[0,0,0,0],"error":0},
+{"name":"first_popped","isBuffer":1,"bindings":[7,7,7,7,7,7,7,7],"pointer":4,"size":0,"mapped":0,"data":[0,0,0,0],"error":0},
+{"name":"second_retained","isBuffer":1,"bindings":[7,7,7,7,7,7,7,7],"pointer":4,"size":16,"mapped":0,"data":[11,22,33,44],"error":0},
+{"name":"first_reused","isBuffer":1,"bindings":[7,7,7,7,7,7,7,7],"pointer":4,"size":16,"mapped":0,"data":[55,66,77,88],"error":0},
+{"name":"second_after_reuse","isBuffer":1,"bindings":[7,7,7,7,7,7,7,7],"pointer":4,"size":16,"mapped":0,"data":[11,22,33,44],"error":0},
+{"name":"second_deleted_public","isBuffer":0,"bindings":[0,0,0,0,0,0,0,0],"pointer":4,"size":0,"mapped":0,"data":[0,0,0,0],"error":0},
+{"name":"first_retained_new","isBuffer":0,"bindings":[7,7,7,7,7,7,7,7],"pointer":4,"size":16,"mapped":0,"data":[55,66,77,88],"error":0},
+{"name":"second_mapped_deleted","isBuffer":0,"bindings":[8,0,0,0,0,0,0,0],"pointer":4,"size":16,"mapped":1,"data":[0,0,0,0],"error":0}
+]}

@@ -53,6 +53,8 @@
     const GL = constants.GL;
     const GLFN = constants.GLFN;
     const CTRL = constants.CTRL;
+    const BUFFER_TARGET_FIELDS = new Map([[GL.ARRAY_BUFFER, "arrayBuffer"], [GL.ELEMENT_ARRAY_BUFFER, "elementArrayBuffer"],
+        [GL.PIXEL_PACK_BUFFER, "pixelPackBuffer"], [GL.PIXEL_UNPACK_BUFFER, "pixelUnpackBuffer"]]);
     // V86GL_CTRL_WINDOW_STATE flags: D9WGWindowState's (d3d9_protocol.h)
     const WINDOW_IS_WINDOW = 1 << 0;
     const WINDOW_VISIBLE = 1 << 1;
@@ -1483,6 +1485,7 @@
             elementArrayBuffer: 0,
             pixelPackBuffer: 0,
             pixelUnpackBuffer: 0,
+            arrayBufferId: 0, elementArrayBufferId: 0, pixelPackBufferId: 0, pixelUnpackBufferId: 0,
             queryObjects: new Map(), activeQuery: null,
             currentProgram: 0,
             arbVertexProgram: 0,
@@ -1610,7 +1613,7 @@
             id,
             textures: new Map(),
             textureImages: new Map(), renderbufferImages: new Map(), nextImageId: 1,
-            buffers: new Map(),
+            buffers: new Map(), bufferObjects: new Map(), nextBufferId: 1,
             shaders: new Map(),
             programs: new Map(),
             renderbuffers: new Map(),
@@ -1908,7 +1911,7 @@
                     texture.viewCache.clear();
                     texture.dirty = true;
                 }
-                for (const buffer of group.buffers.values()) buffer.gpuBuffer = null;
+                for (const buffer of group.bufferObjects.values()) buffer.gpuBuffer = null;
                 for (const rb of group.renderbufferImages.values()) rb.gpuTexture = null;
                 for (const program of group.programs.values())
                     program.variants.clear();
@@ -1916,7 +1919,7 @@
             this.readyPromise = null;
             return this.initialize().then(() => {
                 for (const group of this.shareGroups.values()) {
-                    for (const buffer of group.buffers.values())
+                    for (const buffer of group.bufferObjects.values())
                         if (buffer.shadow) this.replaceBufferStorage(buffer);
                     // (their contents were rendered on the lost device)
                     for (const rb of group.renderbufferImages.values())
@@ -2116,7 +2119,7 @@
                 if (!live) {
                     for (const texture of group.textureImages.values())
                         this.retire(texture.gpuTexture);
-                    for (const buffer of group.buffers.values()) {
+                    for (const buffer of group.bufferObjects.values()) {
                         this.invalidateVertexConversions(buffer);
                         this.retire(buffer.gpuBuffer);
                     }
@@ -2151,7 +2154,7 @@
             for (const group of this.shareGroups.values()) {
                 for (const texture of group.textureImages.values())
                     release(texture.gpuTexture);
-                for (const buffer of group.buffers.values()) {
+                for (const buffer of group.bufferObjects.values()) {
                     this.invalidateVertexConversions(buffer);
                     release(buffer.gpuBuffer);
                 }
@@ -2329,6 +2332,7 @@
                 offset += size;
             }
             this.collectImages();
+            this.collectBuffers();
             this.beat(metadata);
         }
 
@@ -2873,10 +2877,10 @@
             const mask = a[0] >>> 0;
             const fields = [];
             if (mask & CLIENT_ATTRIB.PIXEL_STORE)
-                fields.push("pixelStore", "pixelPackBuffer", "pixelUnpackBuffer");
+                fields.push("pixelStore", "pixelPackBuffer", "pixelUnpackBuffer", "pixelPackBufferId", "pixelUnpackBufferId");
             if (mask & CLIENT_ATTRIB.VERTEX_ARRAY)
                 fields.push("clientActiveTexture", "arrays", "arrayBuffer",
-                    "elementArrayBuffer", "genericAttribs");
+                    "elementArrayBuffer", "genericAttribs", "arrayBufferId", "elementArrayBufferId");
             s.clientAttribStack.push({ mask, fields, state: snapshotFields(s, fields) });
         });
         define("POP_CLIENT_ATTRIB", function() {
@@ -3255,10 +3259,7 @@
 
         define("GEN_BUFFERS", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
-            const group = this.current.shareGroup;
-            for (const name of names)
-                if (name && !group.buffers.has(name))
-                    group.buffers.set(name, createBuffer(name));
+            for (const name of names) if (name) this.namedBuffer(name);
         });
         define("DELETE_BUFFERS", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
@@ -3266,30 +3267,22 @@
             for (const name of names) {
                 const buffer = group.buffers.get(name);
                 if (!buffer) continue;
-                this.invalidateVertexConversions(buffer);
-                this.retire(buffer.gpuBuffer);
-                group.buffers.delete(name);
-                if (this.current.arrayBuffer === name) this.current.arrayBuffer = 0;
-                if (this.current.elementArrayBuffer === name)
-                    this.current.elementArrayBuffer = 0;
+                group.buffers.delete(name); buffer.deleted = true;
+                for (const field of BUFFER_TARGET_FIELDS.values()) if (this.current[field + "Id"] === buffer.id) {
+                    this.current[field] = 0; this.current[field + "Id"] = 0;
+                }
+                for (const array of Object.values(this.current.arrays || {})) if (array.bufferId === buffer.id) {
+                    array.buffer = 0; array.bufferId = 0;
+                }
             }
         });
         define("BIND_BUFFER", function(a) {
             const target = a[0] >>> 0, name = a[1] >>> 0;
-            const group = this.current.shareGroup;
-            if (name && !group.buffers.has(name))
-                group.buffers.set(name, createBuffer(name));
-            if (target === GL.ELEMENT_ARRAY_BUFFER)
-                this.current.elementArrayBuffer = name;
-            else if (target === GL.PIXEL_PACK_BUFFER)
-                this.current.pixelPackBuffer = name;
-            else if (target === GL.PIXEL_UNPACK_BUFFER)
-                this.current.pixelUnpackBuffer = name;
-            else if (target === GL.ARRAY_BUFFER)
-                this.current.arrayBuffer = name;
-            else
-                return this.refuse("glBindBuffer", "unknown buffer target",
+            const field = BUFFER_TARGET_FIELDS.get(target);
+            if (!field) return this.refuse("glBindBuffer", "unknown buffer target",
                     { target }, GL.INVALID_ENUM);
+            const buffer = name ? this.namedBuffer(name) : null;
+            this.current[field] = name; this.current[field + "Id"] = buffer?.id || 0;
         });
         /*
          * {target, size, usage, data_size} then the contents. The header is
@@ -3329,6 +3322,7 @@
             const s = this.current;
             const array = {
                 buffer: s.arrayBuffer,
+                bufferId: this.bufferFor(GL.ARRAY_BUFFER)?.id || 0,
                 size: view.getInt32(offset + R.size, true),
                 type: view.getUint32(offset + R.type, true),
                 stride: view.getInt32(offset + R.stride, true),
@@ -3352,6 +3346,7 @@
             const s = this.current;
             this.setArrayPointer("texCoord" + s.clientActiveTexture, {
                 buffer: s.arrayBuffer,
+                bufferId: this.bufferFor(GL.ARRAY_BUFFER)?.id || 0,
                 size: view.getInt32(offset + R.size, true),
                 type: view.getUint32(offset + R.type, true),
                 stride: view.getInt32(offset + R.stride, true),
@@ -3373,6 +3368,7 @@
                 // VBO instead of the current constant colour used by models.
                 enabled: this.current.genericAttribs[index].enabled,
                 buffer: this.current.arrayBuffer,
+                bufferId: this.bufferFor(GL.ARRAY_BUFFER)?.id || 0,
                 size: view.getInt32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.size, true),
                 type: view.getUint32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.type, true),
                 normalized: view.getUint32(offset + protocol.F.VERTEX_ATTRIB_POINTER_VBO.normalized, true) !== 0,
@@ -5431,14 +5427,41 @@
 
     Object.assign(GLWebGPUExecutor.prototype, {
 
+        namedBuffer(name) {
+            const group = this.current.shareGroup;
+            let buffer = group.buffers.get(name);
+            if (!buffer) {
+                buffer = createBuffer(name); buffer.id = group.nextBufferId++;
+                group.buffers.set(name, buffer); group.bufferObjects.set(buffer.id, buffer);
+            }
+            return buffer;
+        },
+
         bufferFor(target) {
-            const s = this.current;
-            const name = target === GL.ELEMENT_ARRAY_BUFFER ? s.elementArrayBuffer :
-                (target === GL.PIXEL_PACK_BUFFER ? s.pixelPackBuffer :
-                    (target === GL.PIXEL_UNPACK_BUFFER ? s.pixelUnpackBuffer :
-                        s.arrayBuffer));
-            if (!name) return null;
-            return s.shareGroup.buffers.get(name) || null;
+            const s = this.current, field = BUFFER_TARGET_FIELDS.get(target);
+            if (!s || !field || !s[field]) return null;
+            return s[field + "Id"] ? s.shareGroup.bufferObjects.get(s[field + "Id"]) || null : s.shareGroup.buffers.get(s[field]) || null;
+        },
+
+        arrayBufferObject(array) {
+            const group = this.current.shareGroup;
+            return array.bufferId ? group.bufferObjects.get(array.bufferId) : group.buffers.get(array.buffer);
+        },
+
+        collectBuffers() {
+            for (const group of this.shareGroups.values()) {
+                const live = new Set([...group.buffers.values()].map(b => b.id));
+                const arrays = state => {
+                    for (const a of Object.values(state.arrays || {})) if (a.bufferId) live.add(a.bufferId);
+                    for (const field of BUFFER_TARGET_FIELDS.values()) if (state[field + "Id"]) live.add(state[field + "Id"]);
+                };
+                for (const c of this.contexts.values()) if (c.shareGroup === group) {
+                    arrays(c); for (const saved of c.clientAttribStack) arrays(saved.state);
+                }
+                for (const [id, buffer] of group.bufferObjects) if (!live.has(id)) {
+                    this.invalidateVertexConversions(buffer); this.retire(buffer.gpuBuffer); group.bufferObjects.delete(id);
+                }
+            }
         },
 
         bufferData(target, byteCount, usage, data) {
@@ -6536,7 +6559,7 @@
                     return this.drawFromShadowBuffers(mode, first, count,
                         indexInfo, wanted);
                 }
-                const buffer = s.shareGroup.buffers.get(array.buffer);
+                const buffer = this.arrayBufferObject(array);
                 if (!buffer || !buffer.gpuBuffer) continue;
                 const size = Math.max(1, array.size || entry.components);
                 const normalized = this.arrayIsNormalized(source, array);
@@ -6631,7 +6654,7 @@
 
             let index = null;
             if (indexInfo) {
-                const buffer = s.shareGroup.buffers.get(s.elementArrayBuffer);
+                const buffer = this.bufferFor(GL.ELEMENT_ARRAY_BUFFER);
                 if (!buffer || !buffer.shadow)
                     return this.refuse("glDrawElements",
                         "no element array buffer is bound", {},
@@ -6722,7 +6745,7 @@
             let arrayVertexCount = count;
             let indices = null;
             if (indexInfo) {
-                const buffer = s.shareGroup.buffers.get(s.elementArrayBuffer);
+                const buffer = this.bufferFor(GL.ELEMENT_ARRAY_BUFFER);
                 if (buffer && buffer.shadow) {
                     const elementBytes = indexInfo.type === GL.UNSIGNED_BYTE ? 1 :
                         (indexInfo.type === GL.UNSIGNED_SHORT ? 2 : 4);
@@ -6742,7 +6765,7 @@
                 const array = s.arrays && s.arrays[source];
                 if (!array || !array.enabled) continue;
                 const buffer = array.buffer ?
-                    s.shareGroup.buffers.get(array.buffer) : null;
+                    this.arrayBufferObject(array) : null;
                 if (!buffer || !buffer.shadow) continue;
                 const size = Math.max(1, array.size || entry.components);
                 const stride = array.stride || size * componentBytes(array.type);

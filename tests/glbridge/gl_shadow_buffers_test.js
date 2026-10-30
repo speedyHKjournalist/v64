@@ -170,7 +170,7 @@ test("buffer mapping is shared CPU state with atomic errors, pointer queries, re
     map(GL.READ_WRITE_ARB);
     s.process(new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1).call("BIND_BUFFER", GL.ARRAY_BUFFER, 7)
         .makeCurrent(1, 0, 0, 64, 64, 1, 1).names(P.GLFN.DELETE_BUFFERS, [7]).makeCurrent(2, 0, 0, 64, 64, 2, 1).bytes());
-    assert.equal(s.boundBuffer(GL.ARRAY_BUFFER).mapped, false); assert.equal(s.boundBuffer(GL.ARRAY_BUFFER).pointer, 0);
+    assert.equal(s.boundBuffer(GL.ARRAY_BUFFER).mapped, true); assert.equal(s.boundBuffer(GL.ARRAY_BUFFER).pointer, 0xFEDCBA98);
 });
 
 (async () => { for (const { name, fn } of tests) { try { await fn(); console.log("ok   " + name); }
