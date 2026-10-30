@@ -4280,7 +4280,7 @@
             if (this.rootsAtUniform(node.object) &&
                     node.object.type.kind === "array" &&
                     (node.type.kind === "scalar" || node.type.kind === "vector"))
-                return uniformStorageFor(node.type).read(expr);
+                return uniformArrayElementFor(node.type).read(expr);
             return expr;
         }
 

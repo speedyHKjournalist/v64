@@ -29,9 +29,25 @@ try {
         const stream = new GLStream().makeCurrent(1, 0, 0, 4, 4, 1, 1);
         cases.appendProgram(stream, entry, 100);
         const link = stream.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, 100, GL.LINK_STATUS);
+        const locations = (entry.updates || []).map(update => stream.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, 100, update.name, 64));
         shadow.process(stream.bytes());
         assert.equal(link.view.getInt32(P.F.QUERY_OBJECT_IV.value, true), 1, "compiled source snapshot: " + entry.name);
         assert.equal(shadow.stats.rejected, 0);
+        const values = new GLStream(), reads = [];
+        for (const [i, update] of (entry.updates || []).entries()) {
+            const location = locations[i].view.getInt32(P.F.QUERY_LOCATION.result, true);
+            assert.ok(location >= 0, update.name);
+            if (update.matrix) values.uniformMatrixfv(location, update.matrix, update.count, false, update.value);
+            else values[update.integer ? "uniformiv" : "uniformfv"](location, update.components, update.count, update.value);
+            const components = update.matrix ? update.matrix ** 2 : update.components;
+            for (let k = 0; k < update.count; ++k) reads.push({ record: values.queryUniform(100, location + k, 1, 64), expected: update.value.slice(k * components, (k + 1) * components) });
+        }
+        shadow.process(values.bytes());
+        for (const { record, expected } of reads) {
+            assert.equal(record.view.getUint32(P.F.QUERY_UNIFORM.status, true), P.C.V86GL_SYNC_QUERY_STATUS_OK);
+            assert.equal(record.view.getInt32(P.F.QUERY_UNIFORM.value_count, true), expected.length);
+            assert.deepEqual(expected.map((_, i) => record.view.getFloat32(32 + i * 4, true)), expected);
+        }
     }
     const stages = (first, second) => pack({ vertex: [first + " float helper(); void main(){gl_Position=vec4(helper());}", second + " float helper(){return 0.0;}"], fragment: ["void main(){gl_FragColor=vec4(1.0);}"] });
     for (const [a, b] of [["float x=1.0;", "float x=2.0;"], ["vec4 x=vec4(1.0);", "vec4 x=vec4(1.0,2.0,1.0,1.0);"],
@@ -47,5 +63,12 @@ try {
     const library = t.compileShader("vec4 helper(){return vec4(1.0);}", "vertex", { library: true });
     assert.ok(library.ok, library.log);
     assert.equal(t.linkProgram(library, t.compileShader("void main(){gl_FragColor=vec4(1.0);}", "fragment")).ok, false);
+    for (const [type, read] of [["float", "a[chosen].v[1]"], ["vec2", "a[chosen].v[1].x"], ["ivec3", "float(a[chosen].v[1].x)"], ["bvec2", "float(a[chosen].v[1].x)"]]) {
+        const result = t.linkProgram(t.compileShader("void main(){gl_Position=gl_Vertex;}", "vertex"),
+            t.compileShader("struct S{" + type + " v[2];};uniform S a[2];uniform int chosen;void main(){gl_FragColor=vec4(" + read + ");}", "fragment"));
+        assert.ok(result.ok, result.log);
+        const file = path.join(dir, "member-" + type + ".wgsl"); fs.writeFileSync(file, result.wgslFragment);
+        execFileSync(naga, [file], { stdio: "pipe" });
+    }
     console.log("PASS: shader compilation units, shared global initialization, compiled-source snapshots and WGSL validation");
 } finally { fs.rmSync(dir, { recursive: true, force: true }); }

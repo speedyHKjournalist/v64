@@ -471,11 +471,17 @@
                 const setup = new GLStream().makeCurrent(base, 0, 0, 64, 64, base, base);
                 GLShaderUnitCases.appendProgram(setup, entry, base);
                 const linked = setup.queryObjectiv(P.C.V86GL_OBJECT_KIND_PROGRAM, base, GL.LINK_STATUS);
-                const location = entry.uniform ? setup.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, base, entry.uniform, 64) : null;
+                const updates = entry.updates || (entry.uniform ? [{ name: entry.uniform, components: 4, count: 1, value: entry.value }] : []);
+                const locations = updates.map(update => setup.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, base, update.name, 64));
                 shadow.process(setup.bytes()); executor.submit(remote ? setup.bytes().slice() : setup.bytes(), {}); await executor.idle();
                 check(linked.view.getInt32(P.F.QUERY_OBJECT_IV.value, true) === 1, entry.name + " CPU link failed");
                 const draw = new GLStream();
-                if (location) draw.uniformfv(location.view.getInt32(P.F.QUERY_LOCATION.result, true), 4, 1, entry.value);
+                for (const [j, update] of updates.entries()) {
+                    const location = locations[j].view.getInt32(P.F.QUERY_LOCATION.result, true);
+                    check(location >= 0, entry.name + " missing uniform " + update.name);
+                    if (update.matrix) draw.uniformMatrixfv(location, update.matrix, update.count, false, update.value);
+                    else draw[update.integer ? "uniformiv" : "uniformfv"](location, update.components, update.count, update.value);
+                }
                 draw.call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                     .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
                 const pixel = draw.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = draw.bytes();

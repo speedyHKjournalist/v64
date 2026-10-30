@@ -16,6 +16,15 @@
             "#version 120\nstruct State { vec4 tint; }; uniform State settings; vec4 unit_tint(); varying vec4 color; void main() { gl_Position = gl_Vertex; color = unit_tint(); }",
             "#version 120\nstruct State { vec4 tint; }; uniform State settings; vec4 unit_tint() { return settings.tint; }",
         ], fragment: ["#version 120\nvarying vec4 color; void main() { gl_FragColor = color; }"] },
+        { name: "uniform_struct_arrays", updates: [
+            { name: "lights[0].color", components: 4, count: 1, value: [0.125, 0.25, 0.5, 1] },
+            { name: "lights[1].color", components: 4, count: 1, value: [0.5, 0.25, 0.125, 1] },
+            { name: "lights[1].weights", components: 1, count: 3, value: [0, 0.25, 0.5] },
+            { name: "lights[1].basis", matrix: 2, count: 1, value: [1, 0, 0, 1] },
+            { name: "chosen", integer: true, components: 1, count: 1, value: [1] },
+        ], vertex: ["#version 120\nvoid main(){gl_Position=gl_Vertex;}"], fragment: [
+            "#version 120\nstruct Light { vec4 color; float weights[3]; mat2 basis; }; uniform Light lights[2]; uniform int chosen; void main(){ vec4 c=lights[chosen].color; gl_FragColor=vec4(c.rgb*lights[chosen].weights[2]+vec3(lights[1].basis[0][0]*0.125),1.0); }",
+        ] },
     ];
     cases.appendProgram = (stream, entry, base) => {
         let id = base + 1;

@@ -8,6 +8,13 @@
       159,
       128,
       255
+    ],
+    "uniforms": [
+      {
+        "name": "tint",
+        "size": 1,
+        "type": 35666
+      }
     ]
   },
   "distinct_structs": {
@@ -19,7 +26,8 @@
       0,
       0,
       255
-    ]
+    ],
+    "uniforms": []
   },
   "shared_struct_uniform": {
     "renderer": "Apple M1 Pro",
@@ -30,6 +38,61 @@
       128,
       191,
       255
+    ],
+    "uniforms": [
+      {
+        "name": "settings.tint",
+        "size": 1,
+        "type": 35666
+      }
+    ]
+  },
+  "uniform_struct_arrays": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "pixel": [
+      96,
+      64,
+      48,
+      255
+    ],
+    "uniforms": [
+      {
+        "name": "lights[0].color",
+        "size": 1,
+        "type": 35666
+      },
+      {
+        "name": "lights[0].weights[0]",
+        "size": 3,
+        "type": 5126
+      },
+      {
+        "name": "lights[0].basis",
+        "size": 1,
+        "type": 35674
+      },
+      {
+        "name": "lights[1].color",
+        "size": 1,
+        "type": 35666
+      },
+      {
+        "name": "lights[1].weights[0]",
+        "size": 3,
+        "type": 5126
+      },
+      {
+        "name": "lights[1].basis",
+        "size": 1,
+        "type": 35674
+      },
+      {
+        "name": "chosen",
+        "size": 1,
+        "type": 5124
+      }
     ]
   }
 }

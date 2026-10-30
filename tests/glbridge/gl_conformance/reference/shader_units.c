@@ -28,8 +28,18 @@ int main(int argc,char** argv) {
     if(glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT)!=GL_FRAMEBUFFER_COMPLETE_EXT)return 6;
     glViewport(0,0,4,4); glUseProgram(program); glUniform4f(glGetUniformLocation(program,"tint"),0,0.25,0,1);
     glUniform4f(glGetUniformLocation(program,"settings.tint"),0.25,0.5,0.75,1);
+    glUniform4f(glGetUniformLocation(program,"lights[0].color"),0.125,0.25,0.5,1);
+    glUniform4f(glGetUniformLocation(program,"lights[1].color"),0.5,0.25,0.125,1);
+    GLfloat weights[]={0,0.25,0.5},basis[]={1,0,0,1};
+    glUniform1fv(glGetUniformLocation(program,"lights[1].weights"),3,weights);
+    glUniformMatrix2fv(glGetUniformLocation(program,"lights[1].basis"),1,GL_FALSE,basis);
+    glUniform1i(glGetUniformLocation(program,"chosen"),1);
     glBegin(GL_QUADS); glVertex2f(-1,-1); glVertex2f(1,-1); glVertex2f(1,1); glVertex2f(-1,1); glEnd();
     GLubyte pixel[4]; glReadPixels(1,1,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel); if(glGetError())return 7;
-    printf("{\"renderer\":\"%s\",\"compile\":true,\"link\":true,\"pixel\":[%u,%u,%u,%u]}\n",glGetString(GL_RENDERER),pixel[0],pixel[1],pixel[2],pixel[3]);
+    printf("{\"renderer\":\"%s\",\"compile\":true,\"link\":true,\"pixel\":[%u,%u,%u,%u],\"uniforms\":[",glGetString(GL_RENDERER),pixel[0],pixel[1],pixel[2],pixel[3]);
+    glGetProgramiv(program,GL_ACTIVE_UNIFORMS,&n);
+    for(GLint i=0;i<n;i++) { char name[1024]; GLint size; GLenum type; glGetActiveUniform(program,i,sizeof(name),NULL,&size,&type,name);
+        printf("%s{\"name\":\"%s\",\"size\":%d,\"type\":%u}",i?",":"",name,size,type); }
+    printf("]}\n");
     CGLSetCurrentContext(NULL); CGLDestroyContext(ctx); CGLDestroyPixelFormat(pf); return 0;
 }

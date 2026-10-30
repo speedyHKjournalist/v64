@@ -477,6 +477,13 @@ class GLStream {
         return this.record(GLFN.UNIFORM_FV, payload);
     }
 
+    uniformMatrixfv(location, dimension, count, transpose, values) {
+        const header = wire.encodeRecord("UNIFORM_MATRIX_FV", { location, dimension, count, transpose: +transpose });
+        const payload = new Uint8Array(header.length + values.length * 4), view = new DataView(payload.buffer);
+        payload.set(header); values.forEach((value, i) => view.setFloat32(header.length + 4 * i, value, true));
+        return this.record(GLFN.UNIFORM_MATRIX_FV, payload);
+    }
+
     pixelMap(name, map, values) {
         const header = wire.encodeRecord(name, { map, count: values.length }), stride = name === "PIXEL_MAPUSV" ? 2 : 4;
         const payload = new Uint8Array(header.length + values.length * stride), view = new DataView(payload.buffer);
