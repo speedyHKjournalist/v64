@@ -20,7 +20,7 @@
         const c = this.current, group = c.group;
         let names, allocate, pool, owner = group;
         switch (r.object_kind) {
-        case C.V86GL_OBJECT_KIND_ARB_PROGRAM: names = group.arbPrograms; allocate = n => this.arbNamedProgram(n); break;
+        case C.V86GL_OBJECT_KIND_ARB_PROGRAM: names = group.arbPrograms; allocate = n => this.arbNamedProgram(n); pool = group.arbObjects; break;
         case C.V86GL_OBJECT_KIND_QUERY:
             if (c.activeQueryName) return fail(GL.INVALID_OPERATION);
             names = c.queryObjects; allocate = n => this.queryObject(n); owner = c; break;
@@ -37,11 +37,12 @@
             while (names.has(next) || used.has(next)) next = (next + 1) >>> 0 || 1;
             chosen.push(next); used.add(next); next = (next + 1) >>> 0 || 1;
         }
-        const created = [], nextImageId = group.nextImageId, nextBufferId = group.nextBufferId;
+        const created = [], nextImageId = group.nextImageId, nextBufferId = group.nextBufferId, nextArbProgramId = group.nextArbProgramId;
         try { for (const n of chosen) created.push(allocate(n)); }
         catch (_) {
             for (const object of created) { names.delete(object.name); if (pool) pool.delete(object.id); }
             group.nextImageId = nextImageId; group.nextBufferId = nextBufferId;
+            group.nextArbProgramId = nextArbProgramId;
             return fail(GL.OUT_OF_MEMORY);
         }
         for (let i = 0; i < chosen.length; ++i) view.setUint32(offset + header + i * 4, chosen[i], true);

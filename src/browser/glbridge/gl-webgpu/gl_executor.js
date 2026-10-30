@@ -1487,6 +1487,7 @@
             currentProgram: 0,
             arbVertexProgram: 0,
             arbFragmentProgram: 0,
+            arbBindings: new Map(),
             arbDefaults: { [GL.VERTEX_PROGRAM_ARB]: createARBProgram(0, GL.VERTEX_PROGRAM_ARB),
                 [GL.FRAGMENT_PROGRAM_ARB]: createARBProgram(0, GL.FRAGMENT_PROGRAM_ARB) },
 
@@ -3862,9 +3863,13 @@
             const names = readNameArray(view, offset, size);
             for (const name of names) {
                 if (!name) continue;
+                const object = this.current.shareGroup.arbPrograms.get(name);
                 this.current.shareGroup.arbPrograms.delete(name);
-                if (this.current.arbVertexProgram === name) this.current.arbVertexProgram = 0;
-                if (this.current.arbFragmentProgram === name) this.current.arbFragmentProgram = 0;
+                for (const [target, binding] of this.current.arbBindings) if (object && binding === object) {
+                    this.current.arbBindings.delete(target);
+                    if (target === GL.VERTEX_PROGRAM_ARB) this.current.arbVertexProgram = 0;
+                    else this.current.arbFragmentProgram = 0;
+                }
             }
         });
         define("BIND_PROGRAM_ARB", function(a) {
@@ -3872,6 +3877,7 @@
             const group = this.current.shareGroup;
             if (name && !group.arbPrograms.has(name))
                 group.arbPrograms.set(name, createARBProgram(name, target));
+            this.current.arbBindings.set(target, name ? group.arbPrograms.get(name) : null);
             if (target === GL.VERTEX_PROGRAM_ARB) this.current.arbVertexProgram = name;
             else this.current.arbFragmentProgram = name;
         });
@@ -11337,7 +11343,7 @@ struct Params { value : vec4<f32>, }
             if (target !== GL.VERTEX_PROGRAM_ARB && target !== GL.FRAGMENT_PROGRAM_ARB) return null;
             const name = target === GL.VERTEX_PROGRAM_ARB ?
                 s.arbVertexProgram : s.arbFragmentProgram;
-            return name ? s.shareGroup.arbPrograms.get(name) || null : s.arbDefaults[target];
+            return name ? s.arbBindings.get(target) || s.shareGroup.arbPrograms.get(name) || null : s.arbDefaults[target];
         },
     });
 

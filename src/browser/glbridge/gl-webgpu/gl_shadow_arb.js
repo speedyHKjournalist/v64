@@ -68,14 +68,15 @@
     proto.arbProgram = function(target) {
         const c = this.current;
         if (!TARGETS[target]) return null;
-        const name = c.arb.bound[target];
-        if (!name) return c.arb.defaults[target];
-        return c.group.arbPrograms.get(name) || null;
+        return c.arb.bindings[target] || c.arb.defaults[target];
     };
 
     proto.arbNamedProgram = function(name) {
-        const programs = this.current.group.arbPrograms;
-        if (!programs.has(name)) programs.set(name, newProgram(name, 0));
+        const group = this.current.group, programs = group.arbPrograms;
+        if (!programs.has(name)) {
+            const program = newProgram(name, 0); program.id = group.nextArbProgramId++; program.deleted = false;
+            programs.set(name, program); group.arbObjects.set(program.id, program);
+        }
         return programs.get(name);
     };
 
@@ -88,21 +89,24 @@
     proto.deleteProgramsARB = function(bytes, view, offset, size) {
         const c = this.current;
         for (const name of this.names("DELETE_PROGRAMS_ARB", view, offset, size) || []) {
-            if (!name || !c.group.arbPrograms.delete(name)) continue;
-            for (const target of Object.keys(c.arb.bound)) if (c.arb.bound[target] === name) c.arb.bound[target] = 0;
+            const program = c.group.arbPrograms.get(name);
+            if (!name || !program) continue;
+            c.group.arbPrograms.delete(name); program.deleted = true;
+            for (const target of Object.keys(c.arb.bound)) if (c.arb.bindings[target] === program) {
+                c.arb.bound[target] = 0; c.arb.bindings[target] = null;
+            }
         }
     };
 
     proto.bindProgramARB = function(bytes, view, offset, size) {
         const a = this.args("BIND_PROGRAM_ARB", view, offset, size);
         if (!a || !TARGETS[a[0]]) return;
-        const programs = this.current.group.arbPrograms;
-        let program = a[1] && programs.get(a[1]);
-        if (a[1] && !program) programs.set(a[1], program = newProgram(a[1], a[0]));
+        const program = a[1] ? this.arbNamedProgram(a[1]) : null;
         // (a program of the other target cannot be bound to this one)
         if (program && program.target && program.target !== a[0]) return;
         if (program) program.target = a[0];
         this.current.arb.bound[a[0]] = a[1];
+        this.current.arb.bindings[a[0]] = program;
     };
 
     // {target, format, length, reserved} then the text
@@ -298,9 +302,10 @@
     });
 
     // (a snapshot keeps the sources; they assemble again on restore)
-    const programOut = p => [p.name, p.target, p.source, [...p.local]];
-    const programIn = ([name, target, source, local]) => {
+    const programOut = p => [p.name, p.target, p.source, [...p.local], p.id || 0, !!p.deleted];
+    const programIn = ([name, target, source, local, id, deleted]) => {
         const program = newProgram(name, target);
+        program.id = id || 0; program.deleted = !!deleted;
         program.source = source;
         program.local.set(local);
         if (source) program.compiled = arb.compileARBProgram(source, {});
@@ -310,10 +315,12 @@
     GLShadow.part({
         group(group) {
             group.arbPrograms = new Map();
+            group.arbObjects = new Map(); group.nextArbProgramId = 1;
         },
         context(context) {
             context.arb = {
                 bound: { [GL.VERTEX_PROGRAM_ARB]: 0, [GL.FRAGMENT_PROGRAM_ARB]: 0 },
+                bindings: { [GL.VERTEX_PROGRAM_ARB]: null, [GL.FRAGMENT_PROGRAM_ARB]: null },
                 defaults: { [GL.VERTEX_PROGRAM_ARB]: newProgram(0, GL.VERTEX_PROGRAM_ARB),
                     [GL.FRAGMENT_PROGRAM_ARB]: newProgram(0, GL.FRAGMENT_PROGRAM_ARB) },
                 env: { [GL.VERTEX_PROGRAM_ARB]: new Float64Array(MAX_PARAMETERS * 4),
@@ -324,29 +331,47 @@
         },
         getState(shadow, state) {
             state.arb = {
-                groups: [...shadow.groups.values()].map(g => [g.key, [...g.arbPrograms.values()].map(programOut)]),
+                version: 2,
+                groups: [...shadow.groups.values()].map(g => [g.key, [...g.arbObjects.values()].map(programOut),
+                    [...g.arbPrograms].map(([name, p]) => [name, p.id]), g.nextArbProgramId]),
                 contexts: [...shadow.contexts.values()].map(c => [c.key, c.arb.bound,
                     Object.values(c.arb.defaults).map(programOut),
                     [GL.VERTEX_PROGRAM_ARB, GL.FRAGMENT_PROGRAM_ARB].map(t => [...c.arb.env[t]]),
-                    c.arb.errorPosition, c.arb.errorString]),
+                    c.arb.errorPosition, c.arb.errorString,
+                    Object.entries(c.arb.bindings).map(([target, p]) => [target, p?.id || 0])]),
             };
         },
         setState(shadow, state) {
             if (!state.arb) return;
-            for (const [key, programs] of state.arb.groups) {
+            for (const [key, programs, names, nextId] of state.arb.groups) {
                 const group = shadow.groups.get(key);
-                if (group) for (const saved of programs) group.arbPrograms.set(saved[0], programIn(saved));
+                if (!group) continue;
+                for (const saved of programs) {
+                    const p = programIn(saved); if (!p.id) p.id = group.nextArbProgramId++;
+                    group.arbObjects.set(p.id, p);
+                    if (!names) group.arbPrograms.set(p.name, p);
+                }
+                for (const [name, id] of names || []) group.arbPrograms.set(name, group.arbObjects.get(id));
+                group.nextArbProgramId = nextId || group.nextArbProgramId;
             }
-            for (const [key, bound, defaults, env, errorPosition, errorString] of state.arb.contexts) {
+            for (const [key, bound, defaults, env, errorPosition, errorString, bindings] of state.arb.contexts) {
                 const context = shadow.contexts.get(key);
                 if (!context) continue;
                 context.arb.bound = bound;
+                for (const target of Object.keys(bound)) context.arb.bindings[target] = bindings ?
+                    context.group.arbObjects.get(new Map(bindings).get(target)) || null : context.group.arbPrograms.get(bound[target]) || null;
                 for (const saved of defaults) context.arb.defaults[saved[1]] = programIn(saved);
                 context.arb.env[GL.VERTEX_PROGRAM_ARB].set(env[0]);
                 context.arb.env[GL.FRAGMENT_PROGRAM_ARB].set(env[1]);
                 context.arb.errorPosition = errorPosition;
                 context.arb.errorString = errorString;
             }
+        },
+        afterBatch(shadow) {
+            const held = new Set();
+            for (const c of shadow.contexts.values()) for (const p of Object.values(c.arb.bindings)) if (p) held.add(p);
+            for (const g of shadow.groups.values()) for (const [id, p] of g.arbObjects)
+                if (p.deleted && !held.has(p)) g.arbObjects.delete(id);
         },
     });
 })(typeof globalThis !== "undefined" ? globalThis : this);

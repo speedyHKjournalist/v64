@@ -14,6 +14,7 @@ const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_ex
 const { createFakeHost } = require("./gl_fake_gpu.js");
 const { GLStream, GL } = require("./gl_stream_builder.js");
 const reference = require("./gl_conformance/arb_reference.json").cases;
+const lifetime = require("./gl_conformance/arb_lifetime_reference.json");
 
 const OK = P.C.V86GL_SYNC_QUERY_STATUS_OK, FAILED = P.C.V86GL_SYNC_QUERY_STATUS_FAILED;
 const ENV = P.C.V86GL_PROGRAM_PARAMETER_ENV, LOCAL = P.C.V86GL_PROGRAM_PARAMETER_LOCAL;
@@ -46,6 +47,36 @@ function parameter(r) {
 }
 const string = r => String.fromCharCode(...r.bytes.subarray(24, 24 + r.view.getUint32(P.F.QUERY_PROGRAM_STRING_ARB.length,
     true)));
+
+test("deleted shared ARB programs retain their identity, parameters and target until the last context releases them", async () => {
+    const state = shadow(), stream = context().call("BIND_PROGRAM_ARB", VP, 7).programStringARB(VP, GOOD_VP)
+        .programParameterARB(LOCAL, VP, 3, [1, 2, 3, 4])
+        .makeCurrent(2, 0, 0, 64, 64, 2, 1).call("BIND_PROGRAM_ARB", VP, 7)
+        .makeCurrent(1, 0, 0, 64, 64, 1, 1).names(P.GLFN.DELETE_PROGRAMS_ARB, [7])
+        .call("BIND_PROGRAM_ARB", FP, 7).programStringARB(FP, GOOD_FP).programParameterARB(LOCAL, FP, 3, [9, 8, 7, 6])
+        .makeCurrent(2, 0, 0, 64, 64, 2, 1);
+    const oldLocal = stream.queryProgramParameterARB(LOCAL, VP, 3), oldSource = stream.queryProgramStringARB(VP, 1024);
+    stream.call("BIND_PROGRAM_ARB", VP, 7); // The reused public name now has the other target.
+    const binding = programiv(stream, VP, GL.PROGRAM_BINDING_ARB);
+    state.process(stream.bytes()); assert.equal(state.stats.rejected, 1);
+    assert.deepEqual(parameter(oldLocal), lifetime.retainedLocal); assert.equal(string(oldSource), GOOD_VP); assert.equal(value(binding), lifetime.retainedBinding);
+    const group = state.current.group; assert.equal(group.arbObjects.size, 2);
+    const old = state.arbProgram(VP), current = group.arbPrograms.get(7);
+    assert.notEqual(old, current); assert.equal(old.deleted, true); assert.equal(current.target, FP);
+    const saved = JSON.parse(JSON.stringify(state.getState())), copy = shadow(); copy.setState(saved);
+    const queries = new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1), restored = queries.queryProgramParameterARB(LOCAL, VP, 3);
+    copy.process(queries.bytes()); assert.deepEqual(parameter(restored), [1, 2, 3, 4]);
+    assert.equal(copy.current.group.arbObjects.size, 2); assert.equal(copy.arbProgram(VP).deleted, true);
+    copy.process(new GLStream().names(P.GLFN.DELETE_PROGRAMS_ARB, [7]).bytes());
+    assert.equal(copy.arbProgram(VP).source, GOOD_VP, "deleting the reused name must not detach another object with the same numeric name");
+    copy.process(new GLStream().call("BIND_PROGRAM_ARB", VP, 0).bytes()); assert.equal(copy.current.group.arbObjects.size, 1);
+    const { host } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host }); await gpu.initialize(); gpu.submit(stream.bytes(), {});
+    assert.equal(gpu.arbProgramFor(VP).source, GOOD_VP);
+    assert.deepEqual(Array.from(gpu.arbProgramFor(VP).local.slice(12, 16)), [1, 2, 3, 4]);
+    assert.notEqual(gpu.arbProgramFor(VP), gpu.current.shareGroup.arbPrograms.get(7));
+    gpu.submit(new GLStream().names(P.GLFN.DELETE_PROGRAMS_ARB, [7]).bytes(), {});
+    assert.equal(gpu.arbProgramFor(VP).source, GOOD_VP);
+});
 
 test("a program loads; its length, counts and text are answered", () => {
     const s = context().call("BIND_PROGRAM_ARB", VP, 4).programStringARB(VP, GOOD_VP);

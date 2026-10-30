@@ -453,6 +453,29 @@
             executor.submit(remote ? arbMemory.slice() : arbMemory, {}); await executor.idle();
             check([255, 0, 0, 255].every((v, i) => arbPixel.bytes[32 + i] === v), "ARB allocation overwrote an application-named program");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "ARB name allocation must have no host errors");
+            const lifetime = new GLStream().makeCurrent(191, 0, 0, 64, 64, 191, 191)
+                .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 7)
+                .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nMOV result.position,vertex.position;\nMOV result.color,program.local[3];\nEND")
+                .programParameterARB(P.C.V86GL_PROGRAM_PARAMETER_LOCAL, GL.VERTEX_PROGRAM_ARB, 3, [1, 0, 0, 1])
+                .makeCurrent(192, 0, 0, 64, 64, 192, 191).call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 7)
+                .makeCurrent(191, 0, 0, 64, 64, 191, 191).names(P.GLFN.DELETE_PROGRAMS_ARB, [7])
+                .call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 7)
+                .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nMOV result.position,vertex.position;\nMOV result.color,program.local[3];\nEND")
+                .programParameterARB(P.C.V86GL_PROGRAM_PARAMETER_LOCAL, GL.VERTEX_PROGRAM_ARB, 3, [0, 0, 1, 1])
+                .makeCurrent(192, 0, 0, 64, 64, 192, 191).names(P.GLFN.DELETE_PROGRAMS_ARB, [7]);
+            const lifetimePixels = [];
+            for (const id of [192, 191]) {
+                lifetime.makeCurrent(id, 0, 0, 64, 64, id, 191).call("ENABLE", GL.VERTEX_PROGRAM_ARB)
+                    .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                    .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                lifetimePixels.push(lifetime.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4));
+            }
+            const lifetimeMemory = lifetime.bytes(); shadow.process(lifetimeMemory);
+            executor.options.writeGuestMemory = (offset, data) => lifetimeMemory.set(data, offset);
+            executor.submit(remote ? lifetimeMemory.slice() : lifetimeMemory, {}); await executor.idle();
+            for (const [i, color] of [[0, [255, 0, 0, 255]], [1, [0, 0, 255, 255]]])
+                check(color.every((v, j) => lifetimePixels[i].bytes[32 + j] === v), "ARB deleted shared binding changed pixels in context " + i);
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "ARB lifetimes must have no host errors");
             const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
                 .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                 .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")
