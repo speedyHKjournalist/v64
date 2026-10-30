@@ -280,6 +280,22 @@
             check(texturePixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "texture parameter readback must finish");
             check([0, 128, 255, 255].every((v, i) => Math.abs(texturePixel.bytes[32 + i] - v) <= 1), "integer border color or texture attribute restore changed pixels");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "texture parameters must have no host errors");
+            const precision = new GLStream().makeCurrent(110, 0, 0, 64, 64, 110, 110)
+                .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA4, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([100, 150, 200, 255]))
+                .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST).call("ENABLE", GL.TEXTURE_2D)
+                .call("TEX_ENVI", GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE, GL.REPLACE)
+                .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const header = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_TEXTURE_LEVEL,
+                target: GL.TEXTURE_2D, pname: GL.TEXTURE_RED_SIZE, index: 0, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
+            const request = new Uint8Array(header.length + 8); request.set(header); precision.record(P.GLFN.QUERY_PARAMETER, request);
+            const bits = precision.payloadView(), precisePixel = precision.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = precision.bytes();
+            shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+            executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+            check(bits.view.getUint32(P.F.QUERY_PARAMETER.status, true) === 1 && bits.view.getFloat64(header.length, true) === 4,
+                "texture level must report the uploader's four-bit precision");
+            check([102, 153, 204, 255].every((v, i) => Math.abs(precisePixel.bytes[32 + i] - v) <= 1), "texture precision query disagrees with pixels");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "texture precision must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

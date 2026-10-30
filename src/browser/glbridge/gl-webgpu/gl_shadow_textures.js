@@ -5,6 +5,8 @@
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const state = global.V86GLShadowState || require("./gl_shadow_state.js");
     const parameters = global.GLTextureParameters || require("./gl_texture_parameters.js");
+    const formats = global.GLImageFormats || require("./gl_image_formats.js");
+    const caps = global.GLCaps || require("./gl_caps.js");
     const setters = new Set(["TEX_PARAMETERI", "TEX_PARAMETERF", "TEX_PARAMETERIV", "TEX_PARAMETERFV"]);
     const ensure = image => image.parameters || (image.parameters = parameters.initial());
     const copy = values => Object.fromEntries(Object.entries(values).map(([p, v]) => [p, v.slice()]));
@@ -33,6 +35,42 @@
         if (!parameters.targets.includes(target)) return GL.INVALID_ENUM;
         const d = parameters.definitions.get(pname); if (!d) return GL.INVALID_ENUM;
         return [ensure(s.boundImage(target).texture)[pname], d.kind];
+    });
+    state.parameter(P.C.V86GL_PARAMETER_TEXTURE_LEVEL, (s, target, pname, level) => {
+        const cube = target >= GL.TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL.TEXTURE_CUBE_MAP_NEGATIVE_Z;
+        if (![GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D].includes(target) && !cube) return GL.INVALID_ENUM;
+        const maximum = s.capabilities ? caps.integer(s.capabilities, target === GL.TEXTURE_3D ? GL.MAX_3D_TEXTURE_SIZE :
+            cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 16384;
+        if (level > Math.floor(Math.log2(maximum))) return GL.INVALID_VALUE;
+        const image = s.boundImage(target), info = image.texture.levels.get(image.layer)?.get(level);
+        const compressed = !!(info && (info.compressed ?? !!formats.COMPRESSED_FORMATS[info.internalFormat]));
+        switch (pname) {
+        case GL.TEXTURE_WIDTH: return [[info?.width || 0], "i"];
+        case GL.TEXTURE_HEIGHT: return [[info?.height || 0], "i"];
+        case GL.TEXTURE_DEPTH: return [[info?.depth || 0], "i"];
+        case GL.TEXTURE_INTERNAL_FORMAT:
+            return [[!info ? 1 : !compressed && formats.COMPRESSED_FORMATS[info.internalFormat] ?
+                formats.COMPRESSED_FORMATS[info.internalFormat].base === "RGB" ? GL.RGB8 : GL.RGBA8 : info.internalFormat], "e"];
+        case GL.TEXTURE_BORDER: return [[info?.border || 0], "i"];
+        case GL.TEXTURE_COMPRESSED: return [[+compressed], "b"];
+        case GL.TEXTURE_COMPRESSED_IMAGE_SIZE: {
+            if (!compressed) return GL.INVALID_OPERATION;
+            const block = formats.COMPRESSED_FORMATS[info.internalFormat]?.blockBytes || 0;
+            return [[info.compressedSize ?? Math.ceil(info.width / 4) * Math.ceil(info.height / 4) * info.depth * block], "i"];
+        }
+        default: {
+            if (pname >= 0x8C10 && pname <= 0x8C16) {
+                const channel = pname - 0x8C10;
+                const bits = info && formats.textureComponents(info.internalFormat, compressed, s.capabilities?.features)[channel];
+                const storage = info && formats.storageFormatFor(info.internalFormat, s.capabilities?.features);
+                return [[!bits ? GL.NONE : storage.float || storage.gpu === "depth32float" ? GL.FLOAT : 0x8C17], "e"];
+            }
+            const index = [GL.TEXTURE_RED_SIZE, GL.TEXTURE_GREEN_SIZE, GL.TEXTURE_BLUE_SIZE, GL.TEXTURE_ALPHA_SIZE,
+                GL.TEXTURE_LUMINANCE_SIZE, GL.TEXTURE_INTENSITY_SIZE, GL.TEXTURE_DEPTH_SIZE, GL.TEXTURE_STENCIL_SIZE_EXT, 0x80ED].indexOf(pname);
+            if (index < 0) return GL.INVALID_ENUM;
+            return [[info ? formats.textureComponents(info.internalFormat, compressed, s.capabilities?.features)[index] : 0], "i"];
+        }
+        }
     });
     state.attributes("textureParameters", {
         capture(c, mask, client) {

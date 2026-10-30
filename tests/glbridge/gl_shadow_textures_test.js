@@ -13,9 +13,9 @@ const { GLStream, GL } = require("./gl_stream_builder.js");
 const tests = [], test = (name, fn) => tests.push({ name, fn });
 const scene = () => new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1);
 const shadow = () => { const s = new GLShadow(); s.setCapabilities(caps.capabilities({}, {})); return s; };
-function query(s, pname, kind, target = GL.TEXTURE_2D) {
-    const at = s.length + 4, h = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_TEXTURE,
-        target, pname, value_kind: kind, data_size: 32 });
+function query(s, pname, kind, target = GL.TEXTURE_2D, family = P.C.V86GL_PARAMETER_TEXTURE, index = 0) {
+    const at = s.length + 4, h = P.encodeRecord("QUERY_PARAMETER", { query_kind: family,
+        target, pname, index, value_kind: kind, data_size: 32 });
     const payload = new Uint8Array(h.length + 32); payload.fill(0xA5, h.length); payload.set(h); s.record(P.GLFN.QUERY_PARAMETER, payload);
     return () => {
         const b = s.bytes(), v = new DataView(b.buffer, b.byteOffset, b.byteLength);
@@ -111,6 +111,74 @@ test("invalid parameter calls and failed queries preserve existing values and ou
     const s = shadow(), stream = scene(), q = query(stream, 0, P.C.V86GL_STATE_INTEGER);
     s.process(stream.bytes()); assert.equal(q().status, 2); assert.equal(q().error, GL.INVALID_ENUM); assert.ok(q().bytes.every(v => v === 0xA5));
 });
+test("texture level queries preserve dimensions, faces and effective component precision", () => {
+    const native = require("./gl_conformance/texture_levels_reference.json").cases;
+    const pnames = [GL.TEXTURE_WIDTH, GL.TEXTURE_HEIGHT, GL.TEXTURE_DEPTH, GL.TEXTURE_INTERNAL_FORMAT, GL.TEXTURE_BORDER,
+        GL.TEXTURE_RED_SIZE, GL.TEXTURE_GREEN_SIZE, GL.TEXTURE_BLUE_SIZE, GL.TEXTURE_ALPHA_SIZE,
+        GL.TEXTURE_LUMINANCE_SIZE, GL.TEXTURE_INTENSITY_SIZE, GL.TEXTURE_DEPTH_SIZE, GL.TEXTURE_COMPRESSED];
+    const s = shadow(); s.process(scene().bytes());
+    const image = (name, target, level, internalformat, width, height = 1, depth = 1) => stream => {
+        stream.record(P.GLFN[name], P.encodeRecord(name, { target, level, internalformat, width, height, depth,
+            border: 0, format: GL.RGBA, type: GL.UNSIGNED_BYTE, data_size: 0 }));
+    };
+    for (const [key, target, level, define] of [
+        ["undefined", GL.TEXTURE_2D, 0],
+        ["rgba4_level2", GL.TEXTURE_2D, 2, image("TEX_IMAGE_2D", GL.TEXTURE_2D, 2, GL.RGBA4, 3, 5)],
+        ["other_level", GL.TEXTURE_2D, 1],
+        ["zero_width", GL.TEXTURE_2D, 0, image("TEX_IMAGE_2D", GL.TEXTURE_2D, 0, GL.RGBA8, 0, 5)],
+        ["rgb1d", GL.TEXTURE_1D, 0, image("TEX_IMAGE_1D", GL.TEXTURE_1D, 0, GL.RGB8, 7)],
+        ["luminance3d", GL.TEXTURE_3D, 0, image("TEX_IMAGE_3D", GL.TEXTURE_3D, 0, GL.LUMINANCE4, 4, 3, 2)],
+        ["cube_positive_x", GL.TEXTURE_CUBE_MAP_POSITIVE_X, 0,
+            image("TEX_IMAGE_2D", GL.TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL.RGBA8, 4, 4)],
+        ["cube_negative_x", GL.TEXTURE_CUBE_MAP_NEGATIVE_X, 0],
+        ["depth16", GL.TEXTURE_2D, 0, image("TEX_IMAGE_2D", GL.TEXTURE_2D, 0, GL.DEPTH_COMPONENT16, 4, 4)],
+        ["rgba16f", GL.TEXTURE_2D, 0, image("TEX_IMAGE_2D", GL.TEXTURE_2D, 0, GL.RGBA16F_ARB, 4, 4)],
+        ["dxt1", GL.TEXTURE_2D, 0, stream => stream.compressedTexImage2D(GL.TEXTURE_2D, 0,
+            GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, 4, 4, new Uint8Array(8))],
+    ]) {
+        const stream = new GLStream(); if (define) define(stream);
+        const queries = pnames.map(pname => query(stream, pname, P.C.V86GL_STATE_INTEGER, target, P.C.V86GL_PARAMETER_TEXTURE_LEVEL, level));
+        s.process(stream.bytes()); const expected = native[key].slice(0, 13);
+        // Our uploader quantizes these formats instead of selecting Apple's
+        // eight-bit alternative; a never-defined cube face keeps GL's initial 1.
+        if (key === "rgba4_level2") { expected[3] = GL.RGBA4; expected.fill(4, 5, 9); }
+        if (key === "luminance3d") { expected[3] = GL.LUMINANCE4; expected[9] = 4; }
+        if (key === "cube_negative_x") expected[3] = 1;
+        assert.deepEqual(queries.map(q => q().values[0]), expected, key);
+        assert.ok(queries.every(q => q().status === 1));
+    }
+    const stream = new GLStream(), size = query(stream, GL.TEXTURE_COMPRESSED_IMAGE_SIZE, P.C.V86GL_STATE_INTEGER,
+        GL.TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL);
+    s.process(stream.bytes()); assert.deepEqual(size().values, [native.compressed_size[1]]);
+    const copy = shadow(); copy.setState(JSON.parse(JSON.stringify(s.getState())));
+    const check = new GLStream(), restored = query(check, GL.TEXTURE_COMPRESSED_IMAGE_SIZE, P.C.V86GL_STATE_INTEGER,
+        GL.TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL);
+    copy.process(check.bytes()); assert.deepEqual(restored().values, [8]);
+});
+
+test("texture level query errors preserve output and report bad target, level and compression", () => {
+    for (const [target, level, pname, error] of [[GL.TEXTURE_CUBE_MAP, 0, GL.TEXTURE_WIDTH, GL.INVALID_ENUM],
+        [GL.TEXTURE_2D, -1, GL.TEXTURE_WIDTH, GL.INVALID_VALUE], [GL.TEXTURE_3D, 12, GL.TEXTURE_WIDTH, GL.INVALID_VALUE],
+        [GL.TEXTURE_2D, 0, 0, GL.INVALID_ENUM], [GL.TEXTURE_2D, 0, GL.TEXTURE_COMPRESSED_IMAGE_SIZE, GL.INVALID_OPERATION]]) {
+        const s = shadow(), stream = scene(), q = query(stream, pname, P.C.V86GL_STATE_FLOAT, target, P.C.V86GL_PARAMETER_TEXTURE_LEVEL, level);
+        s.process(stream.bytes()); assert.equal(q().status, 2); assert.equal(q().error, error);
+        assert.ok(q().bytes.every(v => v === 0xA5));
+    }
+});
+
+test("automatic mipmap queries retain image metadata after definition and snapshot", () => {
+    const s = shadow(), stream = scene().call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.GENERATE_MIPMAP, 1)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA4, 8, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0));
+    const queries = [0, 1, 2, 3, 4].map(level => query(stream, GL.TEXTURE_WIDTH, P.C.V86GL_STATE_INTEGER,
+        GL.TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL, level));
+    s.process(stream.bytes()); assert.deepEqual(queries.map(q => q().values[0]), [8, 4, 2, 1, 0]);
+    const copy = shadow(); copy.setState(JSON.parse(JSON.stringify(s.getState())));
+    const check = new GLStream(), bits = query(check, GL.TEXTURE_RED_SIZE, P.C.V86GL_STATE_FLOAT,
+        GL.TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL, 2);
+    const type = query(check, 0x8C10, P.C.V86GL_STATE_INTEGER, GL.TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL, 2);
+    copy.process(check.bytes()); assert.deepEqual(bits().values, [4]); assert.deepEqual(type().values, [0x8C17]);
+});
+
 (async () => {
     for (const { name, fn } of tests) {
         try { await fn(); console.log("ok   " + name); }

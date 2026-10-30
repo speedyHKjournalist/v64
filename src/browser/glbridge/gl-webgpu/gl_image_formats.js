@@ -123,7 +123,25 @@
         return { ...storage, components: [bits, bits, bits, base === "RGBA" ? bits : 0, 0, 0] };
     }
 
-    const api = { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, SIZED_BITS, storageFormatFor, renderbufferFormatFor };
+    // Effective component resolutions, including the low-bit quantization
+    // performed before uploading to RGBA8 storage. Missing channels stay zero.
+    function textureComponents(format, compressed, features) {
+        const storage = storageFormatFor(format, features), base = storage.base;
+        const dxt = compressed && COMPRESSED_FORMATS[format];
+        if (dxt) return [5, 6, 5, base === "RGBA" ? dxt.dxt === 1 ? 1 : dxt.dxt === 3 ? 4 : 8 : 0, 0, 0, 0, 0, 0];
+        if (storage.depth) return [0, 0, 0, 0, 0, 0, storage.gpu === "depth16unorm" ? 16 : 32, 0, 0];
+        if (storage.palettised) return [0, 0, 0, 0, 0, 0, 0, 0, 8];
+        const n = storage.gpu === "rgba16float" ? 16 : storage.gpu === "rgba32float" ? 32 : 8;
+        const bits = storage.bits || [n, n, n, n];
+        return [base === "RGB" || base === "RGBA" ? bits[0] : 0,
+            base === "RGB" || base === "RGBA" ? bits[1] : 0,
+            base === "RGB" || base === "RGBA" ? bits[2] : 0,
+            ["RGBA", "ALPHA", "LUMINANCE_ALPHA"].includes(base) ? bits[3] : 0,
+            base === "LUMINANCE" || base === "LUMINANCE_ALPHA" ? bits[0] : 0,
+            base === "INTENSITY" ? bits[0] : 0, 0, 0, 0];
+    }
+
+    const api = { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, SIZED_BITS, storageFormatFor, renderbufferFormatFor, textureComponents };
     global.GLImageFormats = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

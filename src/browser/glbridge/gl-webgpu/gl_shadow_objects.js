@@ -25,6 +25,8 @@
     const PENDING = C.V86GL_SYNC_QUERY_STATUS_PENDING;
     const MAX_TEXTURE_UNITS = glCaps.LIMITS.MAX_TEXTURE_UNITS;
     const MAX_COLOR_ATTACHMENTS = glCaps.LIMITS.MAX_DRAW_BUFFERS;
+    const AUTO_MIPMAP_UPDATES = new Set([GLFN.TEX_SUB_IMAGE_1D, GLFN.TEX_SUB_IMAGE_2D, GLFN.TEX_SUB_IMAGE_3D,
+        GLFN.COPY_TEX_SUB_IMAGE_1D, GLFN.COPY_TEX_SUB_IMAGE_2D, GLFN.COPY_TEX_SUB_IMAGE_3D]);
 
     const DEPTH_FORMATS = new Set([GL.DEPTH_COMPONENT, GL.DEPTH_COMPONENT16, GL.DEPTH_COMPONENT24,
         GL.DEPTH_COMPONENT32, GL.DEPTH_COMPONENT32F, GL.DEPTH_STENCIL, GL.DEPTH24_STENCIL8, 0x8CAD]);
@@ -109,12 +111,12 @@
         return { texture: id ? c.group.textureImages.get(id) : this.defaultTexture(binding), layer };
     };
 
-    proto.defineLevel = function(target, level, width, height, depth, internalFormat) {
+    proto.defineLevel = function(target, level, width, height, depth, internalFormat, metadata) {
         const image = this.boundImage(target);
         if (!image || level < 0) return;
         let layer = image.texture.levels.get(image.layer);
         if (!layer) image.texture.levels.set(image.layer, layer = new Map());
-        if (width > 0 && height > 0 && depth > 0) layer.set(level, { width, height, depth, internalFormat });
+        if (width > 0 && height > 0 && depth > 0) layer.set(level, { width, height, depth, internalFormat, ...metadata });
         else layer.delete(level);
     };
 
@@ -124,7 +126,8 @@
             if (size < RECORDS[name].size) return;
             const r = protocol.decodeRecord(name, view, offset);
             this.defineLevel(r.target, r.level, r.width, dimensions >= 2 ? r.height : 1, dimensions >= 3 ? r.depth : 1,
-                r.internalformat >>> 0);
+                r.internalformat >>> 0, { border: r.border, compressed: false });
+            this.autoMipmap(r.target, r.level);
         };
     };
     proto.texImage1D = proto.texImage(1);
@@ -137,7 +140,7 @@
             if (size < RECORDS[name].size) return;
             const r = protocol.decodeRecord(name, view, offset);
             this.defineLevel(r.target, r.level, r.width, dimensions >= 2 ? r.height : 1, dimensions >= 3 ? r.depth : 1,
-                r.internalformat);
+                r.internalformat, { border: r.border, compressed: true, compressedSize: r.image_size });
         };
     };
     proto.compressedTexImage1D = proto.compressedTexImage(1);
@@ -147,13 +150,19 @@
     // glCopyTexImage1D (target, level, internalformat, x, y, width, border)
     proto.copyTexImage1D = function(bytes, view, offset, size) {
         const a = this.args("COPY_TEX_IMAGE_1D", view, offset, size);
-        if (a) this.defineLevel(a[0], a[1], a[5], 1, 1, a[2]);
+        if (a) {
+            this.defineLevel(a[0], a[1], a[5], 1, 1, a[2], { border: a[6], compressed: false });
+            this.autoMipmap(a[0], a[1]);
+        }
     };
 
     // glCopyTexImage2D (target, level, internalformat, x, y, width, height, border)
     proto.copyTexImage2D = function(bytes, view, offset, size) {
         const a = this.args("COPY_TEX_IMAGE_2D", view, offset, size);
-        if (a) this.defineLevel(a[0], a[1], a[5], a[6], 1, a[2]);
+        if (a) {
+            this.defineLevel(a[0], a[1], a[5], a[6], 1, a[2], { border: a[7], compressed: false });
+            this.autoMipmap(a[0], a[1]);
+        }
     };
 
     // Every level below the base, halving to 1, in the base level's format
@@ -161,6 +170,15 @@
         const a = this.args("GENERATE_MIPMAP", view, offset, size);
         const texture = a && this.boundImage(a[0]).texture;
         if (!texture) return;
+        this.generateMipmapForImage(texture);
+    };
+
+    proto.autoMipmap = function(target, level) {
+        const image = this.boundImage(target).texture;
+        if (!level && image.parameters?.[GL.GENERATE_MIPMAP]?.[0]) this.generateMipmapForImage(image);
+    };
+
+    proto.generateMipmapForImage = function(texture) {
         for (const layer of texture.levels.values()) {
             const base = layer.get(0);
             if (!base) continue;
@@ -169,7 +187,9 @@
                 width = Math.max(1, width >> 1);
                 height = Math.max(1, height >> 1);
                 depth = Math.max(1, depth >> 1);
-                layer.set(level, { width, height, depth, internalFormat: base.internalFormat });
+                layer.set(level, { ...base, width, height, depth, border: 0,
+                    ...(base.compressed ? { compressedSize: Math.ceil(width / 4) * Math.ceil(height / 4) * depth *
+                        (formats.COMPRESSED_FORMATS[base.internalFormat]?.blockBytes || 0) } : {}) });
             }
         }
     };
@@ -439,6 +459,10 @@
 
     GLShadow.part({
         afterBatch: collectImages,
+        command(shadow, fn, bytes, view, offset) {
+            if (AUTO_MIPMAP_UPDATES.has(fn) && shadow.current)
+                shadow.autoMipmap(view.getUint32(offset, true), view.getInt32(offset + 4, true));
+        },
         current(shadow, c, view, offset, size) {
             if (c.buffersInitialized) return;
             const first = shadow.field("MAKE_CURRENT", "format", view, offset, size) & C.V86GL_FORMAT_SINGLE_BUFFER ? GL.FRONT : GL.BACK;

@@ -333,6 +333,13 @@ game.exe
 > - MultiDraw 先校验整批长度，截断载荷不能先画出前几项。新增实际 C ABI 测试编译原编码函数，将 6 种 VBO 指针、通用属性、direct/range/multi draw 送到真实宿主解码器；协议测试同时检查截断批次的原子性。
 > - 40 组 Node、24 组站点、8 个真实 GPU 页面、构建、DLL 的 831 个导出和变更源码 ESLint 通过。可变数据的语义校验和 CPU 状态迁移仍按 C3/C6 继续；阶段 C 尚未退出。
 
+> **C3 普通纹理层级查询（2026-10-30）：完成这一批迁移。**
+> - 参数查询族 11 接通两个客体 GetTexLevelParameter：CPU 回答普通 1D/2D/3D、各立方体面的尺寸、格式、边框、有效分量位数/类型、压缩标记和压缩大小。无定义图像保留规范初始值；非法目标/层级/pname，以及未压缩图像的压缩大小查询，保留应用输出并报错。
+> - 层级记录补充 border、compressed 和 supplied compressed size；定义、复制、自动 mipmap、显式 mipmap 及存档携带相应元数据。自动生成层级与当前页面的 level-zero 行为一致，非零 BASE_LEVEL/MAX_LEVEL 的生成及压缩图像生成仍需后续渲染修复。
+> - 新增原生参照覆盖 11 组普通层级及两个压缩大小查询；另录两组 proxy 留待下一批迁移。RGBA4/LUMINANCE4 按本实现的上传量化报告 4 位，Apple 选择 8 位替代格式；未定义 cube 面保留初始 internal-format 1，没有照抄其联动分配行为。两种通道的 RGBA4 真实像素与 4 位查询相符。大于 8 位的固定点格式存储精度仍列入 D4，不伪造分量位数。
+> - 实际 getter C ABI、40 组 Node、24 组站点、8 个 GPU 页面、构建、DLL 和 ESLint 通过，新增变异 4/4 被杀死。
+> - **继续推进：** proxy 元数据与上传校验、其余 C3/C6 状态/对象与完整错误迁移、C8。C 的退出条件仍未满足，D–G 未整体完成。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；
