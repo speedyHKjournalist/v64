@@ -179,6 +179,62 @@ test("automatic mipmap queries retain image metadata after definition and snapsh
     copy.process(check.bytes()); assert.deepEqual(bits().values, [4]); assert.deepEqual(type().values, [0x8C17]);
 });
 
+test("proxy images are context-local metadata and never allocate renderer images", async () => {
+    const native = require("./gl_conformance/texture_levels_reference.json").cases;
+    const s = shadow(), { host, log } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host, strict: true }); await gpu.initialize();
+    const initial = scene(); s.process(initial.bytes()); gpu.submit(initial.bytes(), {});
+    const allocated = log.textures.length;
+    const stream = new GLStream().texImage2D(GL.PROXY_TEXTURE_2D, 0, GL.RGBA8, 64, 32, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0));
+    const pnames = [GL.TEXTURE_WIDTH, GL.TEXTURE_HEIGHT, GL.TEXTURE_DEPTH, GL.TEXTURE_INTERNAL_FORMAT, GL.TEXTURE_RED_SIZE];
+    const answers = pnames.map(pname => query(stream, pname, P.C.V86GL_STATE_INTEGER, GL.PROXY_TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL));
+    s.process(stream.bytes()); gpu.submit(stream.bytes().slice(), {});
+    assert.deepEqual(answers.map(q => q().values[0]), [native.proxy_ok[0], native.proxy_ok[1], native.proxy_ok[2], native.proxy_ok[3], native.proxy_ok[5]]);
+    assert.equal(log.textures.length, allocated); assert.equal(s.current.group.textureImages.size, 0);
+    assert.equal(gpu.current.shareGroup.textureImages.size, 0, "proxy metadata must remain entirely on the CPU");
+    const large = new GLStream().texImage2D(GL.PROXY_TEXTURE_2D, 0, GL.RGBA8, 1 << 30, 32, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0));
+    const old = query(large, GL.TEXTURE_WIDTH, P.C.V86GL_STATE_FLOAT, GL.PROXY_TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL);
+    s.process(large.bytes()); gpu.submit(large.bytes(), {});
+    // Apple preserves the previous probe and reports INVALID_VALUE. GL 2.1
+    // 3.8.11 instead requires an unsupported-size probe to clear without error.
+    assert.equal(native.proxy_oversized.at(-1), GL.INVALID_VALUE);
+    assert.equal(s.current.error, 0); assert.deepEqual(old().values, [0]);
+    const emptyProbe = new GLStream(), cleared = [GL.TEXTURE_HEIGHT, GL.TEXTURE_DEPTH, GL.TEXTURE_INTERNAL_FORMAT,
+        GL.TEXTURE_BORDER, GL.TEXTURE_RED_SIZE, GL.TEXTURE_COMPRESSED].map(pname => query(emptyProbe, pname,
+        P.C.V86GL_STATE_INTEGER, GL.PROXY_TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL));
+    s.process(emptyProbe.bytes()); assert.deepEqual(cleared.map(q => q().values[0]), [0, 0, 0, 0, 0, 0]);
+    const replacement = new GLStream().texImage2D(GL.PROXY_TEXTURE_2D, 0, GL.RGBA8, 64, 32, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0));
+    s.process(replacement.bytes());
+    const copy = shadow(); copy.setState(JSON.parse(JSON.stringify(s.getState())));
+    const other = new GLStream().makeCurrent(1, 0, 0, 64, 64, 2, 1);
+    const empty = query(other, GL.TEXTURE_WIDTH, P.C.V86GL_STATE_INTEGER, GL.PROXY_TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL);
+    copy.process(other.bytes()); assert.deepEqual(empty().values, [0]);
+    const back = scene(), restored = query(back, GL.TEXTURE_WIDTH, P.C.V86GL_STATE_INTEGER, GL.PROXY_TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL);
+    copy.process(back.bytes()); assert.deepEqual(restored().values, [64]);
+    assert.equal(log.textures.length, allocated); assert.equal(gpu.hostErrors.length, 0); assert.equal(gpu.stats.refusals, 0);
+});
+
+test("proxy validation rejects bad dimensions and formats without changing accepted metadata", () => {
+    for (const [name, fields, error] of [
+        ["TEX_IMAGE_1D", { target: GL.PROXY_TEXTURE_2D }, GL.INVALID_ENUM],
+        ["TEX_IMAGE_2D", { target: GL.PROXY_TEXTURE_CUBE_MAP, width: 4, height: 2 }, GL.INVALID_VALUE],
+        ["TEX_IMAGE_2D", { level: -1 }, GL.INVALID_VALUE],
+        ["TEX_IMAGE_2D", { internalformat: 0 }, GL.INVALID_VALUE],
+        ["TEX_IMAGE_2D", { format: 0 }, GL.INVALID_ENUM],
+        ["TEX_IMAGE_2D", { type: GL.UNSIGNED_SHORT_5_6_5, format: GL.RGBA }, GL.INVALID_OPERATION],
+        ["TEX_IMAGE_2D", { internalformat: GL.DEPTH_COMPONENT16, format: GL.RGBA }, GL.INVALID_OPERATION],
+        ["COMPRESSED_TEX_IMAGE_1D", { target: GL.PROXY_TEXTURE_1D, internalformat: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT }, GL.INVALID_ENUM],
+        ["COMPRESSED_TEX_IMAGE_2D", { internalformat: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, image_size: 7 }, GL.INVALID_VALUE],
+        ["COMPRESSED_TEX_IMAGE_2D", { internalformat: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, border: 1 }, GL.INVALID_OPERATION],
+    ]) {
+        const s = shadow(), initial = scene().texImage2D(GL.PROXY_TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0));
+        s.process(initial.bytes());
+        const stream = new GLStream().record(P.GLFN[name], P.encodeRecord(name, { target: GL.PROXY_TEXTURE_2D, level: 0,
+            internalformat: GL.RGBA8, width: 4, height: 4, depth: 1, border: 0, format: GL.RGBA, type: GL.UNSIGNED_BYTE, ...fields }));
+        s.process(stream.bytes()); assert.equal(s.current.error, error, name + JSON.stringify(fields));
+        assert.equal(s.current.proxyImages.get(GL.PROXY_TEXTURE_2D).get(0).width, 4);
+    }
+});
+
 (async () => {
     for (const { name, fn } of tests) {
         try { await fn(); console.log("ok   " + name); }

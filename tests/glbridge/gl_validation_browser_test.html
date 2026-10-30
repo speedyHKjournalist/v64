@@ -296,6 +296,23 @@
                 "texture level must report the uploader's four-bit precision");
             check([102, 153, 204, 255].every((v, i) => Math.abs(precisePixel.bytes[32 + i] - v) <= 1), "texture precision query disagrees with pixels");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "texture precision must have no host errors");
+            for (const [format, sourceFormat, type, data, expected] of [
+                [GL.ALPHA16F_ARB, GL.ALPHA, GL.FLOAT, new Float32Array([0.25]), [64, 128, 191, 64]],
+                [GL.LUMINANCE16F_ARB, GL.LUMINANCE, GL.FLOAT, new Float32Array([0.25]), [64, 64, 64, 255]],
+                [GL.SLUMINANCE8, GL.LUMINANCE, GL.UNSIGNED_BYTE, new Uint8Array([128]), [55, 55, 55, 255]],
+            ]) {
+                const s = new GLStream().makeCurrent(120, 0, 0, 64, 64, 120, 120)
+                    .texImage2D(GL.TEXTURE_2D, 0, format, 1, 1, sourceFormat, type, new Uint8Array(data.buffer))
+                    .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST).call("ENABLE", GL.TEXTURE_2D)
+                    .call("TEX_ENVI", GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE, GL.REPLACE).call("COLOR4F", 0.25, 0.5, 0.75, 1)
+                    .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                    .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                const pixel = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = s.bytes();
+                shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+                check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "texture base format storage changed pixels: " + format + " " + Array.from(pixel.bytes.subarray(32)));
+                check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "extended texture storage must have no host errors");
+            }
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

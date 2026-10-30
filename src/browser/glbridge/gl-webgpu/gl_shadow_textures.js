@@ -7,9 +7,51 @@
     const parameters = global.GLTextureParameters || require("./gl_texture_parameters.js");
     const formats = global.GLImageFormats || require("./gl_image_formats.js");
     const caps = global.GLCaps || require("./gl_caps.js");
+    const PIXEL_FORMATS = new Set([GL.COLOR_INDEX, GL.RED, GL.GREEN, GL.BLUE, GL.ALPHA, GL.RGB, GL.RGBA,
+        GL.LUMINANCE, GL.LUMINANCE_ALPHA, GL.BGR, GL.BGRA, GL.DEPTH_COMPONENT]);
+    const PIXEL_TYPES = new Set([GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT, GL.UNSIGNED_INT,
+        GL.FLOAT, GL.HALF_FLOAT_ARB, 0x1A00]); // BITMAP
+    const RGB_PACKED = new Set([GL.UNSIGNED_BYTE_3_3_2, GL.UNSIGNED_BYTE_2_3_3_REV, GL.UNSIGNED_SHORT_5_6_5, GL.UNSIGNED_SHORT_5_6_5_REV]);
+    const RGBA_PACKED = new Set([GL.UNSIGNED_SHORT_4_4_4_4, GL.UNSIGNED_SHORT_5_5_5_1, GL.UNSIGNED_SHORT_4_4_4_4_REV,
+        GL.UNSIGNED_SHORT_1_5_5_5_REV, GL.UNSIGNED_INT_8_8_8_8, GL.UNSIGNED_INT_8_8_8_8_REV,
+        GL.UNSIGNED_INT_10_10_10_2, GL.UNSIGNED_INT_2_10_10_10_REV]);
     const setters = new Set(["TEX_PARAMETERI", "TEX_PARAMETERF", "TEX_PARAMETERIV", "TEX_PARAMETERFV"]);
     const ensure = image => image.parameters || (image.parameters = parameters.initial());
     const copy = values => Object.fromEntries(Object.entries(values).map(([p, v]) => [p, v.slice()]));
+    for (const dimensions of [1, 2, 3]) for (const compressed of [false, true]) {
+        const name = (compressed ? "COMPRESSED_TEX_IMAGE_" : "TEX_IMAGE_") + dimensions + "D";
+        GLShadow.rules({ [P.GLFN[name]]: (s, b, v, o) => {
+            if (s.current.state.begin) return GL.INVALID_OPERATION;
+            const r = P.decodeRecord(name, v, o), target = formats.PROXY_TARGETS.get(r.target);
+            if (!target) return 0; // ordinary upload validation follows in C3
+            if (dimensions === 1 && target !== GL.TEXTURE_1D || dimensions === 2 &&
+                ![GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP].includes(target) || dimensions === 3 && target !== GL.TEXTURE_3D)
+                return GL.INVALID_ENUM;
+            const maximum = s.capabilities ? caps.integer(s.capabilities, target === GL.TEXTURE_3D ? GL.MAX_3D_TEXTURE_SIZE :
+                target === GL.TEXTURE_CUBE_MAP ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 8192;
+            if (r.level < 0 || r.level > Math.floor(Math.log2(maximum)) || r.border < 0 || r.border > 1) return GL.INVALID_VALUE;
+            const sizes = [r.width, ...(dimensions >= 2 ? [r.height] : []), ...(dimensions >= 3 ? [r.depth] : [])];
+            if (sizes.some(n => n < 2 * r.border) || target === GL.TEXTURE_CUBE_MAP && r.width !== r.height)
+                return GL.INVALID_VALUE;
+            const block = formats.COMPRESSED_FORMATS[r.internalformat];
+            if (compressed) {
+                if (!block || dimensions !== 2) return GL.INVALID_ENUM;
+                if (r.border) return GL.INVALID_OPERATION;
+                if (r.image_size !== Math.ceil(r.width / 4) * Math.ceil(r.height / 4) * block.blockBytes) return GL.INVALID_VALUE;
+            } else {
+                if ((!formats.BASE_INTERNAL_FORMATS[r.internalformat] && !block) || [GL.BGR, GL.BGRA, GL.RGB565].includes(r.internalformat))
+                    return GL.INVALID_VALUE;
+                if (!PIXEL_FORMATS.has(r.format) || !PIXEL_TYPES.has(r.type) && !RGB_PACKED.has(r.type) && !RGBA_PACKED.has(r.type)) return GL.INVALID_ENUM;
+                if (RGB_PACKED.has(r.type) && r.format !== GL.RGB || RGBA_PACKED.has(r.type) && ![GL.RGBA, GL.BGRA].includes(r.format) ||
+                    r.type === 0x1A00 && r.format !== GL.COLOR_INDEX) return GL.INVALID_OPERATION;
+                const base = formats.storageFormatFor(r.internalformat).base;
+                if ((base === "DEPTH") !== (r.format === GL.DEPTH_COMPONENT) ||
+                    base === "COLOR_INDEX" && r.format !== GL.COLOR_INDEX || base === "DEPTH" && ![GL.TEXTURE_1D, GL.TEXTURE_2D].includes(target))
+                    return GL.INVALID_OPERATION;
+            }
+            return 0;
+        } });
+    }
     function command(name, a) {
         const scalar = name === "TEX_PARAMETERI" || name === "TEX_PARAMETERF";
         return parameters.normalize(a[1], scalar ? [a[2]] : a.slice(3, 3 + a[2]), name.endsWith("I") || name.endsWith("IV"), scalar);
@@ -37,12 +79,13 @@
         return [ensure(s.boundImage(target).texture)[pname], d.kind];
     });
     state.parameter(P.C.V86GL_PARAMETER_TEXTURE_LEVEL, (s, target, pname, level) => {
+        const proxy = formats.PROXY_TARGETS.get(target);
         const cube = target >= GL.TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL.TEXTURE_CUBE_MAP_NEGATIVE_Z;
-        if (![GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D].includes(target) && !cube) return GL.INVALID_ENUM;
-        const maximum = s.capabilities ? caps.integer(s.capabilities, target === GL.TEXTURE_3D ? GL.MAX_3D_TEXTURE_SIZE :
-            cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 16384;
+        if (![GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D].includes(target) && !cube && !proxy) return GL.INVALID_ENUM;
+        const maximum = s.capabilities ? caps.integer(s.capabilities, (proxy || target) === GL.TEXTURE_3D ? GL.MAX_3D_TEXTURE_SIZE :
+            cube || proxy === GL.TEXTURE_CUBE_MAP ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 16384;
         if (level > Math.floor(Math.log2(maximum))) return GL.INVALID_VALUE;
-        const image = s.boundImage(target), info = image.texture.levels.get(image.layer)?.get(level);
+        const image = !proxy && s.boundImage(target), info = proxy ? s.current.proxyImages.get(target)?.get(level) : image.texture.levels.get(image.layer)?.get(level);
         const compressed = !!(info && (info.compressed ?? !!formats.COMPRESSED_FORMATS[info.internalFormat]));
         switch (pname) {
         case GL.TEXTURE_WIDTH: return [[info?.width || 0], "i"];
@@ -54,21 +97,21 @@
         case GL.TEXTURE_BORDER: return [[info?.border || 0], "i"];
         case GL.TEXTURE_COMPRESSED: return [[+compressed], "b"];
         case GL.TEXTURE_COMPRESSED_IMAGE_SIZE: {
-            if (!compressed) return GL.INVALID_OPERATION;
+            if (!compressed || proxy) return GL.INVALID_OPERATION;
             const block = formats.COMPRESSED_FORMATS[info.internalFormat]?.blockBytes || 0;
             return [[info.compressedSize ?? Math.ceil(info.width / 4) * Math.ceil(info.height / 4) * info.depth * block], "i"];
         }
         default: {
             if (pname >= 0x8C10 && pname <= 0x8C16) {
                 const channel = pname - 0x8C10;
-                const bits = info && formats.textureComponents(info.internalFormat, compressed, s.capabilities?.features)[channel];
+                const bits = info && !info.unsupported && formats.textureComponents(info.internalFormat, compressed, s.capabilities?.features)[channel];
                 const storage = info && formats.storageFormatFor(info.internalFormat, s.capabilities?.features);
                 return [[!bits ? GL.NONE : storage.float || storage.gpu === "depth32float" ? GL.FLOAT : 0x8C17], "e"];
             }
             const index = [GL.TEXTURE_RED_SIZE, GL.TEXTURE_GREEN_SIZE, GL.TEXTURE_BLUE_SIZE, GL.TEXTURE_ALPHA_SIZE,
                 GL.TEXTURE_LUMINANCE_SIZE, GL.TEXTURE_INTENSITY_SIZE, GL.TEXTURE_DEPTH_SIZE, GL.TEXTURE_STENCIL_SIZE_EXT, 0x80ED].indexOf(pname);
             if (index < 0) return GL.INVALID_ENUM;
-            return [[info ? formats.textureComponents(info.internalFormat, compressed, s.capabilities?.features)[index] : 0], "i"];
+            return [[info && !info.unsupported ? formats.textureComponents(info.internalFormat, compressed, s.capabilities?.features)[index] : 0], "i"];
         }
         }
     });

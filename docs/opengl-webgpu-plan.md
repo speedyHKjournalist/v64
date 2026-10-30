@@ -340,6 +340,13 @@ game.exe
 > - 实际 getter C ABI、40 组 Node、24 组站点、8 个 GPU 页面、构建、DLL 和 ESLint 通过，新增变异 4/4 被杀死。
 > - **继续推进：** proxy 元数据与上传校验、其余 C3/C6 状态/对象与完整错误迁移、C8。C 的退出条件仍未满足，D–G 未整体完成。
 
+> **C3 proxy 纹理与相关存储（2026-10-30）：完成这一批迁移。**
+> - 1D/2D/3D/cube proxy 的层级元数据由 CPU 按上下文保存及存档；两种 GetTexLevelParameter 可查询，页面直接跳过普通/压缩 proxy 记录，不生成图像对象或 GPU 存储。参数、层级、边框、立方体尺寸、像素格式/类型组合与 S3TC 探测校验在写状态前执行。
+> - 客体三个普通入口和压缩入口仅编码 probe 头，绕过像素指针、PBO、缓存及分配；使用生成结构。新增实际 C ABI 对所有读/缓存/分配路径设中止保护，带无效地址和已绑定 unpack PBO 的 5 种探测都能经真实 CPU/宿主解码完成。
+> - 按 [GL 2.1 §3.8.11](https://registry.khronos.org/OpenGL/specs/gl/glspec21.pdf)，尺寸不支持的 proxy 将图像状态清零且不报错；Apple 的原始参照保留旧结果并报 INVALID_VALUE，测试记录差异并采用规范行为。普通参数错误仍保留上次成功结果。
+> - 共享格式表补齐 alpha/luminance/intensity 浮点格式、sRGB luminance 及通用压缩提示的基础格式。新像素检查发现相同尺寸换格式复用旧存储的问题，现以独立 allocatedFormat 比较和替换 GPU 图像；RGBA16F 切换与 alpha/luminance/sRGB 三种真实像素验证通过。
+> - 40 组 Node、25 组站点、8 个 GPU 页面、构建、DLL 与 ESLint 通过，新增变异 5/5 被杀死。普通上传、子图、复制与压缩边界的完整校验，以及其余 C3/C6/C8，继续推进；未把 C 或 D–G 标为整体完成。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

@@ -112,6 +112,23 @@
     };
 
     proto.defineLevel = function(target, level, width, height, depth, internalFormat, metadata) {
+        if (formats.PROXY_TARGETS.has(target)) {
+            let levels = this.current.proxyImages.get(target);
+            if (!levels) this.current.proxyImages.set(target, levels = new Map());
+            const binding = formats.PROXY_TARGETS.get(target), border = metadata?.border || 0;
+            const maximum = this.capabilities ? glCaps.integer(this.capabilities, binding === GL.TEXTURE_3D ? GL.MAX_3D_TEXTURE_SIZE :
+                binding === GL.TEXTURE_CUBE_MAP ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 8192;
+            const limit = Math.max(1, Math.floor(maximum / 2 ** level)) + 2 * border;
+            if (width > limit || binding !== GL.TEXTURE_1D && height > limit || binding === GL.TEXTURE_3D && depth > limit) {
+                // GL 2.1 3.8.11: an unsupported probe clears its image state
+                // without a GL error, rather than retaining the last success.
+                levels.set(level, { width: 0, height: 0, depth: 0, border: 0, internalFormat: 0, compressed: false, unsupported: true });
+                return;
+            }
+            if (width && height && depth) levels.set(level, { width, height, depth, internalFormat, ...metadata });
+            else levels.delete(level);
+            return;
+        }
         const image = this.boundImage(target);
         if (!image || level < 0) return;
         let layer = image.texture.levels.get(image.layer);
@@ -174,6 +191,7 @@
     };
 
     proto.autoMipmap = function(target, level) {
+        if (formats.PROXY_TARGETS.has(target)) return;
         const image = this.boundImage(target).texture;
         if (!level && image.parameters?.[GL.GENERATE_MIPMAP]?.[0]) this.generateMipmapForImage(image);
     };
@@ -480,6 +498,7 @@
             context.units = Array.from({ length: MAX_TEXTURE_UNITS }, () => new Map());
             context.unitImages = Array.from({ length: MAX_TEXTURE_UNITS }, () => new Map());
             context.defaultTextures = new Map();
+            context.proxyImages = new Map();
             context.framebuffers = new Map();
             context.drawFramebuffer = 0;
             context.readFramebuffer = 0;
@@ -499,6 +518,7 @@
                 contexts: [...shadow.contexts.values()].map(c => ({ key: c.key, activeTexture: c.activeTexture,
                     units: c.units.map(unit => [...unit]), framebuffers: [...c.framebuffers.values()],
                     unitImages: c.unitImages.map(unit => [...unit]), defaultTextures: [...c.defaultTextures],
+                    proxyImages: [...c.proxyImages].map(([target, levels]) => [target, [...levels]]),
                     renderbufferImage: c.renderbufferImage,
                     defaultFramebufferState: c.defaultFramebufferState,
                     drawFramebuffer: c.drawFramebuffer, readFramebuffer: c.readFramebuffer, renderbuffer: c.renderbuffer,
@@ -534,6 +554,7 @@
                     unitImages: c.unitImages ? c.unitImages.map(unit => new Map(unit)) : c.units.map(unit =>
                         new Map(unit.map(([target, name]) => [target, context.group.textures.get(name)?.id]))),
                     defaultTextures: new Map(c.defaultTextures || []),
+                    proxyImages: new Map((c.proxyImages || []).map(([target, levels]) => [target, new Map(levels)])),
                     renderbufferImage: c.renderbufferImage || context.group.renderbuffers.get(c.renderbuffer)?.id || 0,
                     framebuffers: new Map(c.framebuffers.map(fbo => [fbo.name, fbo])), drawFramebuffer: c.drawFramebuffer,
                     readFramebuffer: c.readFramebuffer, renderbuffer: c.renderbuffer, drawBuffers: c.drawBuffers,

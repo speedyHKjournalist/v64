@@ -706,7 +706,7 @@
      * and getting one wrong is a colour shift nobody can trace back to here.
      */
 
-    const { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, storageFormatFor, renderbufferFormatFor } =
+    const { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, PROXY_TARGETS, storageFormatFor, renderbufferFormatFor } =
         nodeRequire ? nodeRequire("./gl_image_formats.js") : global.GLImageFormats;
 
     function quantize(pixels, bits) {
@@ -3114,6 +3114,7 @@
             if (size < header)
                 throw new GLStreamError("glTexImage record is too short");
             const r = protocol.decodeRecord(name, view, offset);
+            if (PROXY_TARGETS.has(r.target)) return;
             const data = r.data_size ?
                 bytes.subarray(offset + header, offset + header + r.data_size) :
                 null;
@@ -3153,6 +3154,7 @@
                 throw new GLStreamError("compressed texture record is too short");
             let at = offset;
             const target = view.getUint32(at, true); at += 4;
+            if (PROXY_TARGETS.has(target)) return;
             const level = view.getInt32(at, true); at += 4;
             const internalFormat = view.getUint32(at, true); at += 4;
             const width = view.getInt32(at, true); at += 4;
@@ -5005,7 +5007,7 @@
                 texture.gpuDepth !== wanted.depth ||
                 texture.gpuLayers !== wanted.layers ||
                 texture.gpuLevels !== wanted.levelCount ||
-                texture.gpuFormat !== wanted.format;
+                texture.allocatedFormat !== wanted.format;
             if (!shapeChanged && !texture.dirty) return texture.gpuTexture;
 
             if (shapeChanged) {
@@ -5015,7 +5017,7 @@
                 const oldDepth = texture.gpuDepth || 1;
                 const oldLayers = texture.gpuLayers || 1;
                 const oldLevels = texture.gpuLevels || 0;
-                const oldFormat = texture.gpuFormat;
+                const oldFormat = texture.allocatedFormat;
                 texture.viewCache.clear();
                 const dimension = texture.kind === "3D" ? "3d" : "2d";
                 // BC formats are sampled/copied block data; WebGPU does not
@@ -5045,6 +5047,7 @@
                 texture.gpuLayers = wanted.layers;
                 texture.gpuLevels = wanted.levelCount;
                 texture.gpuFormat = wanted.format;
+                texture.allocatedFormat = wanted.format;
 
                 // A level produced by CopyTexImage/FBO rendering has no CPU
                 // shadow.  Growing the texture to add mip levels must preserve

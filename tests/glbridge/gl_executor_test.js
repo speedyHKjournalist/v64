@@ -1583,6 +1583,19 @@ test("program bind groups omit resources used only by uncalled helpers", () => {
         "only the sampler reachable from fs_main belongs to the auto layout");
 });
 
+test("redefining a texture's format replaces its allocation even when dimensions stay equal", () => {
+    const { executor } = newExecutor();
+    run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64).call("BIND_TEXTURE", GL.TEXTURE_2D, 7)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([1, 2, 3, 4])));
+    const texture = executor.current.shareGroup.textures.get(7), old = executor.ensureTextureUploaded(texture);
+    run(executor, new GLStream().texImage2D(GL.TEXTURE_2D, 0, GL.RGBA16F_ARB, 1, 1, GL.RGBA, GL.FLOAT,
+        new Uint8Array(new Float32Array([0.25, 0.5, 0.75, 1]).buffer)));
+    const replacement = executor.ensureTextureUploaded(texture);
+    assert.notEqual(replacement, old); assert.equal(old.descriptor.format, "rgba8unorm");
+    assert.equal(replacement.descriptor.format, "rgba16float"); assert.equal(texture.allocatedFormat, "rgba16float");
+});
+
 /* ---- refusals ---- */
 
 test("the accumulation buffer implements clear, load, arithmetic and return", () => {

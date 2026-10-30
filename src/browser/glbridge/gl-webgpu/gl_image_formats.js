@@ -2,6 +2,8 @@
 (function(global) {
     "use strict";
     const { GL } = global.GLWGConstants || require("./gl_constants.js");
+    const PROXY_TARGETS = new Map([[GL.PROXY_TEXTURE_1D, GL.TEXTURE_1D], [GL.PROXY_TEXTURE_2D, GL.TEXTURE_2D],
+        [GL.PROXY_TEXTURE_3D, GL.TEXTURE_3D], [GL.PROXY_TEXTURE_CUBE_MAP, GL.TEXTURE_CUBE_MAP]]);
     const BASE_INTERNAL_FORMATS = {
         [GL.ALPHA]: "ALPHA", [GL.ALPHA4]: "ALPHA", [GL.ALPHA8]: "ALPHA",
         [GL.ALPHA12]: "ALPHA", [GL.ALPHA16]: "ALPHA",
@@ -15,6 +17,7 @@
         [GL.LUMINANCE16_ALPHA16]: "LUMINANCE_ALPHA",
         [GL.INTENSITY]: "INTENSITY", [GL.INTENSITY8]: "INTENSITY",
         [GL.INTENSITY16]: "INTENSITY",
+        0x804A: "INTENSITY", 0x804C: "INTENSITY", // INTENSITY4/12
         [GL.RGB]: "RGB", [GL.RGB4]: "RGB", [GL.RGB5]: "RGB", [GL.RGB8]: "RGB",
         [GL.RGB10]: "RGB", [GL.RGB12]: "RGB", [GL.RGB16]: "RGB",
         [GL.R3_G3_B2]: "RGB", [GL.RGB565]: "RGB",
@@ -31,6 +34,17 @@
         [GL.SRGB_ALPHA]: "RGBA", [GL.SRGB8_ALPHA8]: "RGBA",
         [GL.RGBA16F_ARB]: "RGBA", [GL.RGBA32F_ARB]: "RGBA",
         [GL.RGB16F_ARB]: "RGB", [GL.RGB32F_ARB]: "RGB",
+        [GL.ALPHA16F_ARB]: "ALPHA", [GL.ALPHA32F_ARB]: "ALPHA",
+        [GL.LUMINANCE16F_ARB]: "LUMINANCE", [GL.LUMINANCE32F_ARB]: "LUMINANCE",
+        [GL.LUMINANCE_ALPHA16F_ARB]: "LUMINANCE_ALPHA", [GL.LUMINANCE_ALPHA32F_ARB]: "LUMINANCE_ALPHA",
+        0x881D: "INTENSITY", 0x8817: "INTENSITY", // INTENSITY16F/32F_ARB
+        [GL.SLUMINANCE]: "LUMINANCE", [GL.SLUMINANCE8]: "LUMINANCE",
+        [GL.SLUMINANCE_ALPHA]: "LUMINANCE_ALPHA", [GL.SLUMINANCE8_ALPHA8]: "LUMINANCE_ALPHA",
+        [GL.COMPRESSED_ALPHA]: "ALPHA", [GL.COMPRESSED_LUMINANCE]: "LUMINANCE",
+        [GL.COMPRESSED_LUMINANCE_ALPHA]: "LUMINANCE_ALPHA", [GL.COMPRESSED_INTENSITY]: "INTENSITY",
+        [GL.COMPRESSED_RGB]: "RGB", [GL.COMPRESSED_RGBA]: "RGBA",
+        [GL.COMPRESSED_SRGB]: "RGB", [GL.COMPRESSED_SRGB_ALPHA]: "RGBA",
+        [GL.COMPRESSED_SLUMINANCE]: "LUMINANCE", [GL.COMPRESSED_SLUMINANCE_ALPHA]: "LUMINANCE_ALPHA",
         [GL.COLOR_INDEX]: "COLOR_INDEX",
         [GL.COLOR_INDEX8_EXT]: "COLOR_INDEX",
     };
@@ -75,12 +89,28 @@
         case GL.SRGB8:
         case GL.SRGB_ALPHA:
         case GL.SRGB8_ALPHA8:
+        case GL.SLUMINANCE:
+        case GL.SLUMINANCE8:
+        case GL.SLUMINANCE_ALPHA:
+        case GL.SLUMINANCE8_ALPHA8:
+        case GL.COMPRESSED_SRGB:
+        case GL.COMPRESSED_SRGB_ALPHA:
+        case GL.COMPRESSED_SLUMINANCE:
+        case GL.COMPRESSED_SLUMINANCE_ALPHA:
             return { gpu: "rgba8unorm-srgb", base: base || "RGBA" };
         case GL.RGBA16F_ARB:
         case GL.RGB16F_ARB:
+        case GL.ALPHA16F_ARB:
+        case GL.LUMINANCE16F_ARB:
+        case GL.LUMINANCE_ALPHA16F_ARB:
+        case 0x881D:
             return { gpu: "rgba16float", base: base || "RGBA", float: true };
         case GL.RGBA32F_ARB:
         case GL.RGB32F_ARB:
+        case GL.ALPHA32F_ARB:
+        case GL.LUMINANCE32F_ARB:
+        case GL.LUMINANCE_ALPHA32F_ARB:
+        case 0x8817:
             return { gpu: "rgba32float", base: base || "RGBA", float: true };
         case GL.COLOR_INDEX:
         case GL.COLOR_INDEX8_EXT:
@@ -102,6 +132,7 @@
         [GL.R3_G3_B2]: [3, 3, 2, 8], [GL.RGB4]: [4, 4, 4, 8], [GL.RGB5]: [5, 5, 5, 8],
         [GL.RGBA2]: [2, 2, 2, 2], [GL.RGBA4]: [4, 4, 4, 4], [GL.RGB5_A1]: [5, 5, 5, 1],
         [GL.ALPHA4]: [8, 8, 8, 4], [GL.LUMINANCE4]: [4, 4, 4, 8], [GL.LUMINANCE4_ALPHA4]: [4, 4, 4, 4],
+        0x804A: [4, 4, 4, 4],
     };
 
 
@@ -141,7 +172,7 @@
             base === "INTENSITY" ? bits[0] : 0, 0, 0, 0];
     }
 
-    const api = { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, SIZED_BITS, storageFormatFor, renderbufferFormatFor, textureComponents };
+    const api = { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, SIZED_BITS, PROXY_TARGETS, storageFormatFor, renderbufferFormatFor, textureComponents };
     global.GLImageFormats = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
