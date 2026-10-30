@@ -306,6 +306,41 @@ test("draw/read selection rejects invalid enums, unavailable buffers and duplica
     single.process(s.bytes()); assert.deepEqual(single.current.drawBuffers, [GL.FRONT]); assert.equal(single.current.readBuffer, GL.FRONT);
     single.process(new GLStream().call("DRAW_BUFFER", GL.BACK).bytes()); assert.equal(single.current.error, GL.INVALID_OPERATION);
 });
+test("framebuffer attachment queries match desktop GL for images, faces, slices and failures", () => {
+    const one = shadow(), s = scene().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3), cases = [];
+    const ask = (name, attachment, pname) => {
+        const at = s.length + 4, h = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_FRAMEBUFFER_ATTACHMENT,
+            target: FRAMEBUFFER, pname, index: attachment, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
+        const payload = new Uint8Array(h.length + 8); payload.set(h); new DataView(payload.buffer).setFloat64(h.length, 1234567, true);
+        s.record(P.GLFN.QUERY_PARAMETER, payload); cases.push([name, at]);
+    };
+    const T = GL.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT, N = GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME_EXT;
+    const L = GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL_EXT, F = GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE_EXT;
+    const Z = GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_3D_ZOFFSET_EXT;
+    ask("empty_type", COLOR0, T); ask("empty_name", COLOR0, N); ask("empty_level", COLOR0, L);
+    s.call("BIND_TEXTURE", GL.TEXTURE_2D, 11); attachTexture(s, COLOR0, 11, 2);
+    for (const [name, p] of [["texture_type", T], ["texture_name", N], ["texture_level", L], ["texture_face", F], ["texture_z", Z]]) ask(name, COLOR0, p);
+    s.call("BIND_TEXTURE", GL.TEXTURE_CUBE_MAP, 12); attachTexture(s, COLOR0 + 1, 12, 0, GL.TEXTURE_CUBE_MAP_NEGATIVE_Z);
+    ask("cube_face", COLOR0 + 1, F);
+    s.call("BIND_TEXTURE", GL.TEXTURE_3D, 13).call("FRAMEBUFFER_TEXTURE", FRAMEBUFFER, COLOR0 + 2, GL.TEXTURE_3D, 13, 0, 1);
+    ask("volume_z", COLOR0 + 2, Z);
+    s.call("BIND_RENDERBUFFER", RENDERBUFFER, 15); attachRenderbuffer(s, DEPTH, 15);
+    ask("renderbuffer_type", DEPTH, T); ask("renderbuffer_name", DEPTH, N); ask("renderbuffer_level", DEPTH, L);
+    ask("bad_attachment", 0, T); ask("bad_pname", COLOR0, 0);
+    s.call("BIND_FRAMEBUFFER", FRAMEBUFFER, 0).names(P.GLFN.DELETE_TEXTURES, [12])
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 12).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3);
+    ask("retained_cube_face", COLOR0 + 1, F);
+    s.call("BIND_FRAMEBUFFER", FRAMEBUFFER, 0); ask("default", COLOR0, T);
+    one.process(s.bytes()); const view = new DataView(s.bytes().buffer);
+    const reference = require("./gl_conformance/fbo_parameters_reference.json").cases;
+    // Core FBO queries allow default framebuffer attachments, whereas this
+    // extension's query on framebuffer zero is INVALID_OPERATION.
+    const expected = { ...reference, default: [1234567, GL.INVALID_OPERATION], retained_cube_face: reference.cube_face };
+    for (const [name, at] of cases) {
+        assert.deepEqual([view.getFloat64(at + P.RECORDS.QUERY_PARAMETER.size, true), view.getUint32(at + P.F.QUERY_PARAMETER.error, true)], expected[name], name);
+        assert.equal(view.getUint32(at + P.F.QUERY_PARAMETER.status, true), expected[name][1] ? P.C.V86GL_SYNC_QUERY_STATUS_FAILED : OK);
+    }
+});
 test("texture attribute bindings keep a deleted image alive until the saved binding is released", async () => {
     const one = shadow(), { host } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host }); await gpu.initialize();
     const send = s => { one.process(s.bytes()); gpu.submit(s.bytes(), {}); };

@@ -73,6 +73,29 @@
         }
         return [[+(!!name && !!result)], "b"];
     });
+    state.parameter(P.C.V86GL_PARAMETER_FRAMEBUFFER_ATTACHMENT, (s, target, pname, attachment) => {
+        if (![GL.FRAMEBUFFER_EXT, GL.READ_FRAMEBUFFER, GL.DRAW_FRAMEBUFFER].includes(target)) return GL.INVALID_ENUM;
+        const fbo = s.boundFramebuffer(target); if (!fbo) return GL.INVALID_OPERATION;
+        let record;
+        if (attachment === GL.DEPTH_ATTACHMENT) record = fbo.depth;
+        else if (attachment === GL.STENCIL_ATTACHMENT) record = fbo.stencil;
+        else if (attachment >= GL.COLOR_ATTACHMENT0 && attachment < GL.COLOR_ATTACHMENT0 + limit(s, GL.MAX_COLOR_ATTACHMENTS))
+            record = fbo.color[attachment - GL.COLOR_ATTACHMENT0];
+        else return GL.INVALID_ENUM;
+        if (pname === GL.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT)
+            return [[record ? record.kind === "texture" ? GL.TEXTURE : GL.RENDERBUFFER_EXT : GL.NONE], "e"];
+        if (pname === GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME_EXT) return [[record?.name || 0], "u"];
+        if (!record || record.kind !== "texture") return GL.INVALID_ENUM;
+        const texture = s.current.group.textureImages.get(record.id);
+        switch (pname) {
+        case GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL_EXT: return [[record.level], "i"];
+        case GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE_EXT:
+            return [[texture?.target === GL.TEXTURE_CUBE_MAP ? GL.TEXTURE_CUBE_MAP_POSITIVE_X + record.layer : 0], "e"];
+        case GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_3D_ZOFFSET_EXT:
+            return [[texture?.target === GL.TEXTURE_3D ? record.layer : 0], "i"];
+        default: return GL.INVALID_ENUM;
+        }
+    });
     state.attributes("images", {
         capture(c, mask, client) {
             return !client && mask & 0x40000 ? { activeTexture: c.activeTexture,

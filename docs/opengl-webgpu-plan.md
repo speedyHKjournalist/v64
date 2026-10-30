@@ -302,6 +302,12 @@ game.exe
 > - 本机参照记录 8 组切换及 3 类错误；Apple 的 PopAttrib 不恢复 FBO 选择，测试按 [EXT_framebuffer_object issue 81 和状态表](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_framebuffer_object.txt) 对相应两组设定规范答案，保留原始参照。新增对象/属性/快照、实际客体 C ABI、两种通道和多附件像素测试；39 组 Node、22 组站点、8 个 GPU 页面、构建、DLL、ESLint 通过；新增变异 3/3 被杀死。
 > - **发现并保留的剩余项：** 2016 年 EXT 规范区分 EXT 创建的共享 FBO 和 core 创建的私有 FBO；现有协议将两类 Bind 合并，仍采用私有名字空间，后续 C3/C6 需要编码来源并迁移生命周期。对象参数/附件查询、buffer/数组/ARB 对象、CPU 名字分配、列表/选择/反馈/求值器和 C8 也仍未完成，阶段 C 尚未退出。
 
+> **C3 FBO 附件参数查询（2026-10-30）：完成这一批迁移。**
+> - CPU 回答附件的对象类型、公开名字、纹理层级、立方体面与三维切片；查询保留的对象标识，删除后用同名二维纹理不会改变旧立方体附件的查询结果。查询检查目标、附件、pname、对象类型和默认 framebuffer；失败保留输出。
+> - 参数请求的 index 字段现在由实际客体 C 编码器发送。FBO getter 优先走 CPU，同步失败不进入本地缓存；实际 getter、请求编码、CPU 答案和 C 解码在同一 ABI 测试中验证。
+> - 增加 16 例本机参照和删除后名字重用用例，两种通道与输出边界测试。Apple 默认 framebuffer 查询采用 core 规则；本项目 EXT 接口按扩展要求报 INVALID_OPERATION，保留原始参照。39 组 Node、22 组站点、8 个 GPU 页面、构建、DLL 和 ESLint 通过；新增变异 3/3 被杀死。
+> - **继续推进：** renderbuffer/纹理参数与图像查询、附件设置的完整校验、EXT/core FBO 来源、其余 C3 与 C8。没有将阶段 C 或 C–G 整体标为完成。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；
