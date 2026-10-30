@@ -519,6 +519,7 @@
             for (const c of shadow.contexts.values()) if (c.group === group) {
                 units(c.unitImages); for (const id of c.defaultTextures.values()) live.add(id);
                 live.add(c.renderbufferImage);
+                if (c.textureRead) live.add(c.textureRead.imageId);
                 for (const fbo of c.privateFramebuffers.values()) held.add(fbo);
                 if (c.drawFramebufferObject) held.add(c.drawFramebufferObject);
                 if (c.readFramebufferObject) held.add(c.readFramebufferObject);

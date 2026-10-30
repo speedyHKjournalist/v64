@@ -1467,7 +1467,7 @@
                 unpackSkipRows: 0, unpackSkipImages: 0, unpackImageHeight: 0,
                 unpackSwapBytes: false, unpackLsbFirst: false,
                 packAlignment: 4, packRowLength: 0, packSkipPixels: 0,
-                packSkipRows: 0, packSwapBytes: false, packLsbFirst: false,
+                packSkipRows: 0, packSkipImages: 0, packImageHeight: 0, packSwapBytes: false, packLsbFirst: false,
             },
             pixelTransfer: { redScale: 1, greenScale: 1, blueScale: 1,
                              alphaScale: 1, redBias: 0, greenBias: 0,
@@ -3683,6 +3683,9 @@
             define(name, function(a, bytes, view, offset, size) {
                 if (size < protocol.RECORDS[name].size) throw new GLStreamError(name + " record is short");
             }, { needsContext: false });
+        define("QUERY_TEXTURE_IMAGE", function(a, bytes, view, offset, size, metadata) {
+            this.queryTextureImage(bytes, view, offset, size, metadata);
+        }, { needsContext: false });
 
         define("QUERY_INTEGER", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("query-integer record is short");
@@ -4577,6 +4580,8 @@
             case GL.UNPACK_LSB_FIRST: store.unpackLsbFirst = value !== 0; return;
             case GL.PACK_ALIGNMENT: store.packAlignment = value; return;
             case GL.PACK_ROW_LENGTH: store.packRowLength = value; return;
+            case GL.PACK_IMAGE_HEIGHT: store.packImageHeight = value; return;
+            case GL.PACK_SKIP_IMAGES: store.packSkipImages = value; return;
             case GL.PACK_SKIP_PIXELS: store.packSkipPixels = value; return;
             case GL.PACK_SKIP_ROWS: store.packSkipRows = value; return;
             case GL.PACK_SWAP_BYTES: store.packSwapBytes = value !== 0; return;
@@ -4731,6 +4736,7 @@
                 for (const c of this.contexts.values()) if (c.shareGroup === group) {
                     units(c.textureUnits); for (const id of Object.values(c.defaultTextures || {})) live.add(id);
                     live.add(c.renderbufferImage);
+                    if (c.textureRead) live.add(c.textureRead.imageId);
                     for (const fbo of this.framebuffers.get(c.id)?.values() || [])
                         for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.imageId);
                     for (const fbo of [c.drawFramebufferObject, c.readFramebufferObject]) if (fbo)
@@ -4926,6 +4932,7 @@
                 this.storeLevel(texture, kind, level, face, {
                     width, height, depth: 1, gpuFormat: "rgba8unorm",
                     base: storage.base, compressed: false, pixels,
+                    compressedPixels: data.slice(), compressedFormat: internalFormat,
                     bytesPerTexel: 4, componentType: "u8", componentCount: 4,
                 });
                 return;
@@ -4934,7 +4941,7 @@
                 width, height, depth,
                 gpuFormat: storage.gpu, base: storage.base,
                 compressed: true, blockBytes: storage.blockBytes,
-                pixels: data.slice(),
+                pixels: data.slice(), compressedPixels: data.slice(), compressedFormat: internalFormat,
             });
         },
 
@@ -4948,6 +4955,14 @@
             if (!slot)
                 return this.refuse("glCompressedTexSubImage", "level has no storage",
                     { level }, GL.INVALID_OPERATION);
+            if (slot.compressedPixels) {
+                const blockBytes = storageFormatFor(format, this.deviceFeatures).blockBytes ||
+                    (format === GL.COMPRESSED_RGB_S3TC_DXT1_EXT || format === GL.COMPRESSED_RGBA_S3TC_DXT1_EXT ? 8 : 16);
+                const sourceStride = Math.ceil(width / 4) * blockBytes, stride = Math.ceil(slot.width / 4) * blockBytes;
+                for (let row = 0; row < Math.ceil(height / 4); ++row)
+                    slot.compressedPixels.set(data.subarray(row * sourceStride, (row + 1) * sourceStride),
+                        (Math.floor(y / 4) + row) * stride + Math.floor(x / 4) * blockBytes);
+            }
             if (!slot.compressed) {
                 const storage = storageFormatFor(format, this.deviceFeatures);
                 if (!storage.decodeDXT) {
@@ -10100,9 +10115,121 @@ struct BlitParams {
             }
         },
 
+        // Metadata has already been validated by the CPU. It captures the
+        // object and PACK state once; data requests use its ticket, never a
+        // later public name or binding. Each mapping covers a bounded region.
+        queryTextureImage(bytes, view, offset, size, metadata) {
+            const name = "QUERY_TEXTURE_IMAGE", F = protocol.F[name], header = protocol.RECORDS[name].size;
+            if (size < header) throw new GLStreamError("texture image query is short");
+            const r = protocol.decodeRecord(name, view, offset), state = this.current;
+            const release = () => { if (r.mode === 2 && state?.textureRead?.ticket === r.ticket) state.textureRead = null; };
+            const fail = () => {
+                release();
+                this.answerGuest(bytes, metadata, [
+                    [offset + F.error, new Uint8Array(new Uint32Array([GL.INVALID_OPERATION]).buffer)],
+                    [offset + F.status, new Uint8Array(new Uint32Array([SYNC_STATUS_FAILED]).buffer)]]);
+            };
+            if (!state || r.status === SYNC_STATUS_FAILED) return;
+            if (r.mode === 3) {
+                if (state.textureRead?.ticket === r.ticket) state.textureRead = null;
+                return;
+            }
+            if (!r.mode) {
+                if (r.status !== SYNC_STATUS_OK || !r.ticket) return;
+                const texture = this.boundTexture(r.target), kind = this.textureTargetKind(r.target);
+                const face = CUBE_FACE_INDEX[r.target] || 0, slot = texture && this.levelSlot(texture, kind, r.level, face);
+                const gpu = slot && !slot.compressedPixels && !slot.pixels && this.ensureTextureUploaded(texture);
+                state.textureRead = { ...r, imageId: texture?.imageId, slot, pack: this.packState(), source: gpu && {
+                    texture: gpu, format: texture.gpuFormat, width: r.width, height: r.height,
+                    mipLevel: r.level, layer: face, forceDepthConversion: true,
+                } };
+                return;
+            }
+            if (r.status !== SYNC_STATUS_PENDING) return;
+            const saved = state.textureRead;
+            if (!saved || saved.ticket !== r.ticket || saved.context_id !== r.context_id ||
+                !saved.slot || r.data_size > size - header || r.offset + r.data_size > saved.span) return fail();
+            const out = bytes.slice(offset + header, offset + header + r.data_size);
+            const finish = () => {
+                release();
+                this.answerGuest(bytes, metadata, [[offset + header, out],
+                    [offset + F.status, new Uint8Array(new Uint32Array([SYNC_STATUS_OK]).buffer)]]);
+            };
+            if (saved.compressed) {
+                if (!saved.slot.compressedPixels || saved.slot.compressedPixels.length < r.offset + r.data_size) return fail();
+                out.set(saved.slot.compressedPixels.subarray(r.offset, r.offset + r.data_size));
+                return finish();
+            }
+            const work = async () => {
+                const { width, height, depth, format, type, pack, slot } = saved;
+                const bitmap = type === 0x1A00;
+                const group = bitmap ? 1 / 8 : TYPE_BYTES[type] * (PACKED_TYPES.has(type) ? 1 : SOURCE_COMPONENTS[format] || 1);
+                const stride = alignUp((pack.rowLength || width) * group, pack.alignment);
+                const imageStride = stride * (pack.imageHeight || height);
+                const base = (r.target === GL.TEXTURE_3D ? (pack.skipImages || 0) * imageStride : 0) +
+                    (pack.skipRows || 0) * stride + (pack.skipPixels || 0) * group;
+                const begin = r.offset, end = begin + out.length, rowSize = width * group;
+                const firstZ = Math.max(0, Math.floor((begin - base - (height - 1) * stride - rowSize) / imageStride) + 1);
+                const lastZ = Math.min(depth, Math.ceil((end - base) / imageStride));
+                for (let z = firstZ; z < lastZ; ++z) {
+                    const slice = base + z * imageStride;
+                    let y = Math.max(0, Math.floor((begin - slice - rowSize) / stride) + 1);
+                    const lastY = Math.min(height, Math.ceil((end - slice) / stride));
+                    while (y < lastY) {
+                        const rows = Math.min(lastY - y, Math.max(1, Math.floor(16384 / width)));
+                        let values;
+                        if (slot.compressedPixels) {
+                            const storage = storageFormatFor(slot.compressedFormat, {});
+                            const blockBytes = slot.compressedPixels.length / (Math.ceil(width / 4) * Math.ceil(height / 4));
+                            const by = Math.floor(y / 4), byEnd = Math.ceil((y + rows) / 4);
+                            const data = slot.compressedPixels.subarray(by * Math.ceil(width / 4) * blockBytes,
+                                byEnd * Math.ceil(width / 4) * blockBytes);
+                            const pixels = decodeDXT(storage.decodeDXT || (blockBytes === 8 ? 1 :
+                                slot.compressedFormat === GL.COMPRESSED_RGBA_S3TC_DXT3_EXT ? 3 : 5), data, width, (byEnd - by) * 4);
+                            values = unpackReadback(pixels.subarray((y - by * 4) * width * 4), width * 4, width, rows, "rgba8unorm");
+                        } else if (slot.pixels) {
+                            const at = ((z * height + y) * width) * slot.bytesPerTexel;
+                            values = unpackReadback(slot.pixels.subarray(at), width * slot.bytesPerTexel, width, rows,
+                                slot.base === "DEPTH" ? slot.gpuFormat === "depth16unorm" ? "depth16" : "r32float" : slot.gpuFormat);
+                        } else {
+                            if (!saved.source) throw new Error("texture image has no GPU storage");
+                            this.endPass();
+                            const read = this.readRectangle({ ...saved.source, layer: r.target === GL.TEXTURE_3D ? z : saved.source.layer },
+                                slot.base === "DEPTH" ? "depth" : slot.base === "COLOR_INDEX" ? "index" : "color", { x: 0, y, width, height: rows });
+                            this.flushFrame();
+                            values = await this.awaitReadback(read(), "glGetTexImage", read.cancel);
+                        }
+                        if (slot.base === "RGB") for (let i = 3; i < values.length; i += 4) values[i] = 1;
+                        if (bitmap) {
+                            for (let row = 0; row < rows; ++row) for (let col = 0; col < width; ++col) {
+                                const bit = (slice + (y + row) * stride) * 8 + col;
+                                const at = Math.floor(bit / 8) - begin;
+                                if (at >= 0 && at < out.length) {
+                                    const mask = 1 << (pack.lsbFirst ? bit % 8 : 7 - bit % 8);
+                                    out[at] = out[at] & ~mask | (values[row * width + col] & 1 ? mask : 0);
+                                }
+                            }
+                            y += rows; continue;
+                        }
+                        const packed = new Uint8Array(rowSize * rows);
+                        packPixels(packed, values, width, rows, 0, 0, width, format, type,
+                            { alignment: 1, swapBytes: pack.swapBytes, textureImage: true });
+                        for (let row = 0; row < rows; ++row) {
+                            const at = slice + (y + row) * stride, lo = Math.max(at, begin), hi = Math.min(at + rowSize, end);
+                            if (hi > lo) out.set(packed.subarray(row * rowSize + lo - at, row * rowSize + hi - at), lo - begin);
+                        }
+                        y += rows;
+                    }
+                }
+            };
+            this.trackReadback(work().then(finish).catch(error => {
+                this.warnOnce("texture-readback", "glGetTexImage mapping failed", { message: String(error) }); fail();
+            }));
+        },
+
         /* ---- glReadPixels ----
          *
-         * The only place the GL path genuinely needs a GPU round trip. The
+         * Like texture image reads, framebuffer reads need a GPU round trip. The
          * guest spins on the status word in the record it submitted, so the
          * answer is written back into that record when the mapping resolves --
          * and the heartbeat keeps a busy host from being mistaken for a dead
@@ -10167,7 +10294,8 @@ struct BlitParams {
         packState() {
             const store = this.current.pixelStore;
             return { alignment: store.packAlignment || 4, rowLength: store.packRowLength,
-                skipPixels: store.packSkipPixels, skipRows: store.packSkipRows, swapBytes: !!store.packSwapBytes };
+                skipPixels: store.packSkipPixels, skipRows: store.packSkipRows, swapBytes: !!store.packSwapBytes,
+                imageHeight: store.packImageHeight, skipImages: store.packSkipImages, lsbFirst: store.packLsbFirst };
         },
 
         // The read framebuffer's depth-stencil image
@@ -10205,10 +10333,12 @@ struct BlitParams {
             const encoder = this.ensureEncoder();
             let texture = source.texture, aspect = "all", texelBytes, origin = { x: rect.x, y: rect.y, z: source.layer || 0 };
             let mipLevel = source.mipLevel || 0;
-            if (kind === "stencil") {
+            if (kind === "index") {
+                texelBytes = 1;
+            } else if (kind === "stencil") {
                 aspect = "stencil-only";
                 texelBytes = 1;
-            } else if (kind === "depth" && (source.format === "depth32float" || source.format === "depth16unorm")) {
+            } else if (kind === "depth" && !source.forceDepthConversion && (source.format === "depth32float" || source.format === "depth16unorm")) {
                 aspect = "depth-only";
                 texelBytes = source.format === "depth32float" ? 4 : 2;
             } else if (kind === "depth") {
@@ -11417,7 +11547,7 @@ struct Params { value : vec4<f32>, }
      */
     function unpackReadback(mapped, bytesPerRow, width, height, format) {
         const view = new DataView(mapped.buffer, mapped.byteOffset, mapped.byteLength);
-        const scalar = format === "r32float" || format === "depth16" || format === "stencil8";
+        const scalar = format === "r32float" || format === "depth16" || format === "stencil8" || format === "r8uint";
         const values = new Float32Array(width * height * (scalar ? 1 : 4));
         const bgra = format.startsWith("bgra");
         let w = 0;
@@ -11427,7 +11557,7 @@ struct Params { value : vec4<f32>, }
                 switch (format) {
                 case "r32float": values[w++] = view.getFloat32(base + col * 4, true); break;
                 case "depth16": values[w++] = view.getUint16(base + col * 2, true) / 65535; break;
-                case "stencil8": values[w++] = mapped[base + col]; break;
+                case "stencil8": case "r8uint": values[w++] = mapped[base + col]; break;
                 case "rgba32float":
                     for (let c = 0; c < 4; ++c) values[w++] = view.getFloat32(base + col * 16 + c * 4, true);
                     break;
@@ -11476,7 +11606,7 @@ struct Params { value : vec4<f32>, }
         const little = !pack.swapBytes;
         const packed = PACKED_FIELDS[type];
         const elementBytes = TYPE_BYTES[type];
-        const scalar = format === GL.DEPTH_COMPONENT || format === GL.STENCIL_INDEX;
+        const scalar = format === GL.DEPTH_COMPONENT || format === GL.STENCIL_INDEX || format === GL.COLOR_INDEX;
         const components = packed ? 1 : scalar ? 1 : SOURCE_COMPONENTS[format] || 4;
         const groupBytes = packed ? elementBytes : components * elementBytes;
         const rowBytes = alignUp((pack.rowLength || requestWidth) * groupBytes, pack.alignment || 4);
@@ -11485,7 +11615,7 @@ struct Params { value : vec4<f32>, }
         const pick = (v, i) => {
             if (scalar) return [v[i]];
             const r = v[i * 4], g = v[i * 4 + 1], b = v[i * 4 + 2], a = v[i * 4 + 3];
-            const l = r + g + b;
+            const l = pack.textureImage ? r : r + g + b;
             switch (format) {
             case GL.RED: return [r];
             case GL.GREEN: return [g];
@@ -11502,8 +11632,8 @@ struct Params { value : vec4<f32>, }
         };
         const store = (at, value) => {
             // a stencil index is an integer; the rest are normalised
-            const c = format === GL.STENCIL_INDEX || !fixed ? value : clamp(value, 0, 1);
-            const n = format === GL.STENCIL_INDEX ? 1 : 0;
+            const c = format === GL.STENCIL_INDEX || format === GL.COLOR_INDEX || !fixed ? value : clamp(value, 0, 1);
+            const n = format === GL.STENCIL_INDEX || format === GL.COLOR_INDEX ? 1 : 0;
             switch (type) {
             case GL.UNSIGNED_BYTE: view.setUint8(at, n ? c & 0xff : Math.round(c * 255)); break;
             case GL.BYTE: view.setInt8(at, n ? c : Math.round(c * 127)); break;
@@ -11636,7 +11766,7 @@ struct Params { value : vec4<f32>, }
         GLWebGPUExecutor, installGLWebGPUExecutor,
         // Exported for the test suite.
         expandIndices, expandIndexArray, expandedIndexCount,
-        convertPixels, decodeDXT, storageFormatFor, readSourceTexel,
+        convertPixels, decodeDXT, storageFormatFor, readSourceTexel, unpackReadback,
         applyBaseFormat, normalMatrixOf, multiply4, invert4, transpose4,
         createContextState, buildHandlerTable, activeShaderBindings,
         colorCopyWGSL, MIPMAP_WGSL, COLOR_BLIT_WGSL,

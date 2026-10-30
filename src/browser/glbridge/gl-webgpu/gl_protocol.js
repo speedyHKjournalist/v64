@@ -255,6 +255,9 @@
         ["FRAMEBUFFER_TEXTURE_2D", 230, "FramebufferTexture2DMapped", "uuuuii"],
         ["FRAMEBUFFER_TEXTURE_3D", 231, "FramebufferTexture3DMapped", "uuuuii"],
         ["BIND_FRAMEBUFFER_EXT", 232, "BindFramebufferEXT", "uu"],
+        // Metadata reserves a CPU-validated image read; bounded chunks keep
+        // large textures independent of the guest DMA arena's size.
+        ["QUERY_TEXTURE_IMAGE", 233, null, "u:target i:level u:format u:type u:compressed u:mode u:pointer u:offset u:data_size u:span u:ticket u:status u:error u:width u:height u:depth u:context_id"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

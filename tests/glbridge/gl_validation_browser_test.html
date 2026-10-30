@@ -36,6 +36,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_executor.js"></script>
 <script src="gl_stream_builder.js"></script>
 <script src="gl_shader_units_cases.js"></script>
+<script src="gl_texture_readback_cases.js"></script>
 <script>
 (async () => {
     "use strict";
@@ -631,7 +632,71 @@
                 check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, entry.name + " host failure");
             }
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms/compilation units, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
+        const textureReference = await (await fetch("gl_conformance/texture_readback_reference.json")).json();
+        for (const remote of [false, true]) for (const [i, entry] of textureReference.cases.entries()) {
+            const shadow = new V86GLShadow.GLShadow();
+            const executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize(); shadow.setCapabilities(executor.capabilities());
+            async function submit(stream) {
+                const memory = stream.bytes(); shadow.process(memory);
+                executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+            }
+            const setup = GLTextureReadbackCases.setup(entry, 300 + i);
+            const meta = GLTextureReadbackCases.query(setup, { target: entry.target, level: entry.level,
+                format: entry.format, type: entry.type, compressed: +entry.compressed, pointer: entry.pointer });
+            await submit(setup);
+            const F = P.F.QUERY_TEXTURE_IMAGE, H = P.RECORDS.QUERY_TEXTURE_IMAGE.size;
+            check(meta.view.getUint32(F.error, true) === entry.error, entry.name + " metadata error");
+            check(meta.view.getUint32(F.status, true) === (entry.error ? 2 : 1), entry.name + " metadata status");
+            if (entry.error) continue;
+            const r = P.decodeRecord("QUERY_TEXTURE_IMAGE", meta.view, 0), result = new Uint8Array(entry.size).fill(0xA5);
+            for (let offset = 0; offset < r.span;) {
+                const size = Math.min(r.span - offset, 19), stream = new GLStream();
+                const q = GLTextureReadbackCases.query(stream, { mode: offset + size === r.span ? 2 : 1,
+                    ticket: r.ticket, context_id: r.context_id, offset, data_size: size }, result.subarray(offset, offset + size));
+                await submit(stream);
+                check(q.view.getUint32(F.status, true) === 1, entry.name + " texture bytes failed");
+                result.set(q.bytes.subarray(H), offset); offset += size;
+            }
+            if (entry.type === GL.FLOAT) {
+                const little = !entry.name.startsWith("swapped"), a = new DataView(result.buffer), b = new DataView(Uint8Array.from(entry.bytes).buffer);
+                for (let j = 0; j < result.length; j += 4)
+                    check(Math.abs(a.getFloat32(j, little) - b.getFloat32(j, little)) < 1e-6, entry.name + " float pixel differs");
+            } else check(entry.bytes.every((v, j) => result[j] === v), entry.name + " native bytes differ: " + Array.from(result));
+            check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, entry.name + " host failure");
+        }
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize(); shadow.setCapabilities(executor.capabilities());
+            async function submit(stream) {
+                const memory = stream.bytes(); shadow.process(memory);
+                executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+            }
+            const s = new GLStream().makeCurrent(500, 0, 0, 64, 64, 500, 500).call("BIND_TEXTURE", GL.TEXTURE_2D, 1);
+            GLTextureReadbackCases.image(s, GL.TEXTURE_2D, GL.RGBA8, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0), 512, 256);
+            s.call("BIND_FRAMEBUFFER_EXT", GL.FRAMEBUFFER_EXT, 1)
+                .call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0, 0)
+                .call("CLEAR_COLOR", 0.25, 0.5, 0.75, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).call("BIND_FRAMEBUFFER_EXT", GL.FRAMEBUFFER_EXT, 0);
+            const q = GLTextureReadbackCases.query(s, { target: GL.TEXTURE_2D, format: GL.RGBA, type: GL.UNSIGNED_BYTE }); await submit(s);
+            const r = P.decodeRecord("QUERY_TEXTURE_IMAGE", q.view, 0);
+            check(r.span === 524288, "large texture span");
+            // A public-name reuse must not redirect a pending image read.
+            const change = new GLStream().names(P.GLFN.DELETE_FRAMEBUFFERS, [1]).names(P.GLFN.DELETE_TEXTURES, [1]).call("BIND_TEXTURE", GL.TEXTURE_2D, 1);
+            GLTextureReadbackCases.image(change, GL.TEXTURE_2D, GL.RGBA8, GL.RGBA, GL.UNSIGNED_BYTE, Uint8Array.from([0, 0, 0, 0]), 1, 1);
+            await submit(change);
+            for (const offset of [0, 262144]) {
+                const chunk = new GLStream(), data = GLTextureReadbackCases.query(chunk, { mode: offset ? 2 : 1,
+                    ticket: r.ticket, context_id: r.context_id, offset, data_size: 262144 }, new Uint8Array(262144).fill(0xA5));
+                await submit(chunk);
+                check(data.view.getUint32(P.F.QUERY_TEXTURE_IMAGE.status, true) === 1, "large texture chunk failed");
+                const pixels = data.bytes.subarray(P.RECORDS.QUERY_TEXTURE_IMAGE.size), expected = [64, 128, 191, 255];
+                check(pixels.every((v, i) => v === expected[i % 4]), "large texture did not retain the rendered image");
+            }
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "large texture host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation, texture readback, GLSL lifetime/units, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

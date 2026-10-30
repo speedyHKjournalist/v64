@@ -5,6 +5,11 @@ const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_ex
 const { createFakeHost } = require("./gl_fake_gpu.js");
 const { GLStream, GL } = require("./gl_stream_builder.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+const { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js");
+const textureCases = require("./gl_texture_readback_cases.js");
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 async function fixture() {
@@ -54,6 +59,24 @@ test("glFinish has a bounded fence and never overwrites a timeout with late succ
     const count = writes.length; resolve();
     for (let i = 0; i < 10; ++i) await Promise.resolve();
     assert.equal(writes.length, count); assert.equal(response.view.getUint32(0, true), 2);
+});
+test("a texture mapping timeout preserves bytes, releases its image and ignores late success", async () => {
+    const { executor, log, writes } = await fixture(), shadow = new GLShadow(); let resolve;
+    const setup = textureCases.setup({ name: "rendered_unbound_fbo" }, 70);
+    const q = textureCases.query(setup, { target: GL.TEXTURE_2D, format: GL.RGBA, type: GL.UNSIGNED_BYTE });
+    shadow.process(setup.bytes()); executor.submit(setup.bytes(), {});
+    const r = P.decodeRecord("QUERY_TEXTURE_IMAGE", q.view, 0), create = executor.device.createBuffer.bind(executor.device);
+    executor.device.createBuffer = desc => { const b = create(desc); if (desc.label === "GL readback") b.mapAsync = () => new Promise(done => { resolve = done; }); return b; };
+    const s = new GLStream(), data = textureCases.query(s, { mode: 2, ticket: r.ticket, context_id: r.context_id, data_size: 4 }, new Uint8Array(4).fill(0xA5));
+    shadow.process(s.bytes()); executor.submit(s.bytes(), {}); await executor.idle();
+    assert.equal(data.view.getUint32(P.F.QUERY_TEXTURE_IMAGE.status, true), 2);
+    assert.equal(data.view.getUint32(P.F.QUERY_TEXTURE_IMAGE.error, true), GL.INVALID_OPERATION);
+    assert.deepEqual(Array.from(data.bytes.subarray(P.RECORDS.QUERY_TEXTURE_IMAGE.size)), [165, 165, 165, 165]);
+    assert.equal(executor.current.textureRead, null);
+    assert.ok(log.buffers.find(b => b.descriptor.label === "GL readback").destroyed);
+    const count = writes.length; resolve();
+    for (let i = 0; i < 10; ++i) await Promise.resolve();
+    assert.equal(writes.length, count);
 });
 test("a synchronous fence exception also completes glFinish with failure", async () => {
     const { executor } = await fixture(); executor.device.queue.onSubmittedWorkDone = () => { throw new Error("lost queue"); };

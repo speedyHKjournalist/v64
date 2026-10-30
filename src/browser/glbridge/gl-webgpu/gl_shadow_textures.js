@@ -31,9 +31,9 @@
             type === 0x1A00 && format !== GL.COLOR_INDEX) return GL.INVALID_ENUM;
         return RGB_PACKED.has(type) && format !== GL.RGB || RGBA_PACKED.has(type) && ![GL.RGBA, GL.BGRA].includes(format) ? GL.INVALID_OPERATION : 0;
     }
-    function uploadSpan(c, r, dimensions) {
+    function uploadSpan(c, r, dimensions, pack = false) {
         if (!r.width || dimensions >= 2 && !r.height || dimensions >= 3 && !r.depth) return 0;
-        const value = pname => c.state.values[pname]?.[0] || 0;
+        const value = pname => c.state.values[pack ? PACK_PNAMES.get(pname) : pname]?.[0] || 0;
         const height = dimensions >= 2 ? r.height : 1, depth = dimensions >= 3 ? r.depth : 1;
         let bits = r.type === 0x1A00 ? 1 : SCALAR_BYTES.get(r.type) * COMPONENTS.get(r.format) * 8;
         if (RGB_PACKED.has(r.type)) bits = [GL.UNSIGNED_BYTE_3_3_2, GL.UNSIGNED_BYTE_2_3_3_REV].includes(r.type) ? 8 : 16;
@@ -46,6 +46,73 @@
         return (dimensions >= 3 ? value(GL.UNPACK_SKIP_IMAGES) * imageStride : 0) + value(GL.UNPACK_SKIP_ROWS) * stride +
             Math.floor(skipBits / 8) + (depth - 1) * imageStride + (height - 1) * stride + Math.ceil((skipBits % 8 + r.width * bits) / 8);
     }
+    const PACK_PNAMES = new Map(["ALIGNMENT", "ROW_LENGTH", "IMAGE_HEIGHT", "SKIP_IMAGES", "SKIP_ROWS", "SKIP_PIXELS"]
+        .map(name => [GL["UNPACK_" + name], GL["PACK_" + name]]));
+    GLShadow.prototype.queryTextureImage = function(bytes, view, offset, size) {
+        const name = "QUERY_TEXTURE_IMAGE", fields = P.F[name], header = P.RECORDS[name].size;
+        if (!this.pending(name, view, offset, size)) return;
+        const r = P.decodeRecord(name, view, offset), c = this.current;
+        const fail = error => {
+            if (c && !c.error) c.error = error;
+            view.setUint32(offset + fields.error, error, true);
+            this.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_FAILED);
+        };
+        if (!c || c.state.begin) return fail(GL.INVALID_OPERATION);
+        if (r.mode === 3) {
+            if (c.textureRead?.ticket === r.ticket) c.textureRead = null;
+            return this.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_OK);
+        }
+        if (r.mode === 1 || r.mode === 2) {
+            const saved = c.textureRead;
+            if (!saved || saved.ticket !== r.ticket || saved.context_id !== r.context_id ||
+                !r.data_size || r.data_size > 262144 || r.data_size > size - header || r.offset + r.data_size > saved.span)
+                return fail(GL.INVALID_OPERATION);
+            for (const key of ["target", "level", "format", "type", "compressed", "span", "width", "height", "depth"])
+                view.setUint32(offset + fields[key], saved[key], true);
+            if (r.mode === 2) c.textureRead = null;
+            return; // The executor answers only the resource bytes.
+        }
+        if (r.mode !== 0 || r.data_size) return fail(GL.INVALID_VALUE);
+        const cube = r.target >= GL.TEXTURE_CUBE_MAP_POSITIVE_X && r.target <= GL.TEXTURE_CUBE_MAP_NEGATIVE_Z;
+        if (![GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D].includes(r.target) && !cube) return fail(GL.INVALID_ENUM);
+        const maximum = this.capabilities ? caps.integer(this.capabilities, r.target === GL.TEXTURE_3D ? GL.MAX_3D_TEXTURE_SIZE :
+            cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 8192;
+        if (r.level < 0 || r.level > Math.floor(Math.log2(maximum))) return fail(GL.INVALID_VALUE);
+        const image = this.boundImage(r.target), info = image.texture.levels.get(image.layer)?.get(r.level);
+        const base = info ? formats.storageFormatFor(info.internalFormat).base : "RGBA";
+        if (r.compressed) {
+            if (!info || !(info.compressed ?? !!formats.COMPRESSED_FORMATS[info.internalFormat])) return fail(GL.INVALID_OPERATION);
+        } else {
+            const error = pixelError(r.format, r.type); if (error) return fail(error);
+            if ((base === "DEPTH") !== (r.format === GL.DEPTH_COMPONENT) ||
+                (base === "COLOR_INDEX") !== (r.format === GL.COLOR_INDEX)) return fail(GL.INVALID_OPERATION);
+        }
+        const dimensions = r.target === GL.TEXTURE_3D ? 3 : r.target === GL.TEXTURE_1D ? 1 : 2;
+        const values = { ...r, imageId: image.texture.id, layer: image.layer,
+            width: info?.width || 0, height: info?.height || 0, depth: info?.depth || 0 };
+        const block = info && formats.COMPRESSED_FORMATS[info.internalFormat];
+        values.span = r.compressed ? info.compressedSize ?? Math.ceil(info.width / 4) * Math.ceil(info.height / 4) * info.depth * block.blockBytes :
+            uploadSpan(c, values, dimensions, true);
+        const pbo = this.boundBuffer?.(GL.PIXEL_PACK_BUFFER);
+        const elementBytes = r.compressed || r.type === 0x1A00 ? 1 : SCALAR_BYTES.get(r.type) ||
+            (RGB_PACKED.has(r.type) ? [GL.UNSIGNED_BYTE_3_3_2, GL.UNSIGNED_BYTE_2_3_3_REV].includes(r.type) ? 1 : 2 :
+                [GL.UNSIGNED_INT_8_8_8_8, GL.UNSIGNED_INT_8_8_8_8_REV, GL.UNSIGNED_INT_10_10_10_2, GL.UNSIGNED_INT_2_10_10_10_REV].includes(r.type) ? 4 : 2);
+        if (!Number.isSafeInteger(values.span) || values.span > 0xFFFFFFFF) return fail(GL.OUT_OF_MEMORY);
+        if (pbo && (pbo.mapped || r.pointer % elementBytes || r.pointer + values.span > pbo.size)) return fail(GL.INVALID_OPERATION);
+        values.ticket = values.span ? c.nextTextureRead = (c.nextTextureRead || 0) % 0xFFFFFFFF + 1 : 0;
+        values.context_id = c.id;
+        c.textureRead = values.span ? values : null;
+        for (const key of ["span", "ticket", "width", "height", "depth", "context_id"])
+            view.setUint32(offset + fields[key], values[key], true);
+        this.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_OK);
+    };
+    GLShadow.install({ [P.GLFN.QUERY_TEXTURE_IMAGE]: "queryTextureImage" });
+    GLShadow.part({
+        getState(s, saved) { saved.textureReads = [...s.contexts.values()].map(c => [c.key, c.nextTextureRead || 0, c.textureRead || null]); },
+        setState(s, saved) { for (const [key, next, read] of saved.textureReads || []) {
+            const c = s.contexts.get(key); if (c) { c.nextTextureRead = next; c.textureRead = read; }
+        } },
+    });
     function blockRegionError(info, r, compressed) {
         const block = formats.COMPRESSED_FORMATS[info.internalFormat];
         if (!(info.compressed ?? !!block) || !block) return 0;
