@@ -1,0 +1,8 @@
+{"renderer":"Apple M1 Pro","cases":[
+{"name":"glsl_vertex_select","result":0,"error":0,"values":[]},
+{"name":"glsl_vertex_feedback","result":13,"error":0,"values":[1793,12,8,0.5,1,1,0,0.5,1,5,5,5,5]},
+{"name":"glsl_vertex_back","result":38,"error":0,"values":[1795,3,12,4,0.5,1,0.25,0.5,0.75,1,5,5,5,5,4,4,0.5,1,0.25,0.5,0.75,1,5,5,5,5,8,12,0.5,1,0.25,0.5,0.75,1,5,5,5,5]},
+{"name":"glsl_fragment_select","result":0,"error":0,"values":[]},
+{"name":"glsl_fragment_feedback","result":13,"error":0,"values":[1793,12,8,0.5,1,1,0,0.5,1,5,5,5,5]},
+{"name":"glsl_fragment_back","result":38,"error":0,"values":[1795,3,12,4,0.5,1,0.25,0.5,0.75,1,5,5,5,5,4,4,0.5,1,0.25,0.5,0.75,1,5,5,5,5,8,12,0.5,1,0.25,0.5,0.75,1,5,5,5,5]}
+]}

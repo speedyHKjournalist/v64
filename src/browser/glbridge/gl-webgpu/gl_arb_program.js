@@ -25,7 +25,7 @@
     const translator = nodeRequire ? nodeRequire("./gl_shader_translator.js") :
         global.GLShaderTranslator;
 
-    const ARB_REVISION = 2;
+    const ARB_REVISION = 3;
 
     /*
      * Vertex programs require at least 96 parameters. Fragment programs
@@ -797,6 +797,7 @@
             // in the struct the shell then reads from.
             if (parsed.options.has("ARB_position_invariant")) {
                 this.stateFields.add("mvp");
+                if (this.options.vertexCapture) this.stateFields.add("modelview");
                 this.useAttribute("vertex.position",
                     VERTEX_ATTRIBUTES["vertex.position"]);
             }
@@ -819,6 +820,7 @@
             // materialise its missing output using this shell's existing zero
             // value for undefined results.
             if (this.stage === "vertex") {
+                if (this.options.vertexCapture) this.usedResults.add("texcoord0");
                 for (const unit of this.options.forceVertexTexCoords || []) {
                     if (unit >= 0 && unit < MAX_TEXTURE_UNITS)
                         this.usedResults.add("texcoord" + unit);
@@ -891,18 +893,28 @@
         }
 
         emitVertexShell(out, body) {
+            const capture = !!this.options.vertexCapture;
             const flatLocations = new Set(this.options.forceFlatVaryings || []);
             const varying = location => (flatLocations.has(location) ?
                 "    @interpolate(flat) " : "    ") +
                 "@location(" + location + ") ";
             out.push("struct VSIn {");
             for (const [, info] of this.usedAttributes)
-                out.push("    @location(" + info.location + ") " + info.field +
+                out.push("    " + (capture ? "" : "@location(" + info.location + ") ") + info.field +
                     " : " + vecType(info.components || 4) + ",");
             if (!this.usedAttributes.size)
-                out.push("    @builtin(vertex_index) vertexIndex : u32,");
+                out.push("    " + (capture ? "" : "@builtin(vertex_index) ") + "vertexIndex : u32,");
             out.push("}");
             out.push("");
+            if (capture) {
+                out.push(translator.vertexCaptureBindings());
+                out.push("@compute @workgroup_size(" + translator.VERTEX_CAPTURE.workgroupSize + ")");
+                out.push("fn capture_main(@builtin(global_invocation_id) id : vec3<u32>) {");
+                out.push("    if (id.x >= arrayLength(&glCaptureOutput)) { return; }");
+                out.push("    var vin : VSIn;");
+                for (const [, info] of this.usedAttributes)
+                    out.push("    vin." + info.field + " = glCaptureInput[id.x].attributes[" + info.location + "]." + "xyzw".slice(0, info.components || 4) + ";");
+            } else {
             out.push("struct VSOut {");
             out.push("    @invariant @builtin(position) position : vec4<f32>,");
             out.push(varying(0) + "frontColor : vec4<f32>,");
@@ -916,6 +928,7 @@
             out.push("");
             out.push("@vertex");
             out.push("fn vs_main(vin : VSIn) -> VSOut {");
+            }
             out.push("    var result_position = vec4<f32>(0.0, 0.0, 0.0, 1.0);");
             out.push("    var frontColor = vec4<f32>(1.0);");
             out.push("    var frontSecondary = vec4<f32>(0.0);");
@@ -937,6 +950,18 @@
                 // and the fixed-function transform supplies it -- and it must
                 // be the *same* expression, or a depth pre-pass z-fights.
                 out.push("    result_position = glState.mvp * vin.gl_Vertex;");
+            }
+            if (capture) {
+                out.push("    glCaptureOutput[id.x].clip = result_position;");
+                out.push("    glCaptureOutput[id.x].color = saturate(frontColor);");
+                out.push("    glCaptureOutput[id.x].backColor = saturate(backColor);");
+                out.push("    glCaptureOutput[id.x].tex = texcoord0;");
+                // ARB_vertex_program 2.11 disables user clip planes unless
+                // ARB_position_invariant supplies the fixed transformation.
+                out.push("    glCaptureOutput[id.x].eye = " + (this.parsed.options.has("ARB_position_invariant") ?
+                    "glState.modelview * vin.gl_Vertex" : "vec4<f32>(0.0)") + ";");
+                out.push("}");
+                return;
             }
             out.push("    var out : VSOut;");
             out.push("    var clip = result_position;");

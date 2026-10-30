@@ -28,7 +28,20 @@
     const stateLayout = (typeof require === "function" && typeof module !== "undefined") ?
         require("./gl_state_layout.js") : global.GLStateLayout;
 
-    const TRANSLATOR_REVISION = 4;
+    const TRANSLATOR_REVISION = 5;
+
+    // A capture invocation runs the actual vertex program, with the same
+    // uniforms and textures as a draw. Keep GL clip coordinates for the CPU
+    // selection/feedback clipper; viewport conversion belongs to that clipper.
+    const VERTEX_CAPTURE = Object.freeze({ attributes: 16, inputBytes: 256, outputBytes: 80, workgroupSize: 64 });
+    function vertexCaptureBindings() {
+        return [
+            "struct GLCaptureInput { attributes : array<vec4<f32>, 16>, }",
+            "struct GLCaptureOutput { clip : vec4<f32>, color : vec4<f32>, backColor : vec4<f32>, tex : vec4<f32>, eye : vec4<f32>, }",
+            "@group(3) @binding(0) var<storage, read> glCaptureInput : array<GLCaptureInput>;",
+            "@group(3) @binding(1) var<storage, read_write> glCaptureOutput : array<GLCaptureOutput>;",
+        ].join("\n");
+    }
 
     /* ================================================================== */
     /* Types                                                              */
@@ -3787,6 +3800,10 @@
         }
 
         emitIOStructs() {
+            if (this.stage === "vertex" && this.options.vertexCapture) {
+                this.emitAll(vertexCaptureBindings().split("\n"));
+                return;
+            }
             const varyings = this.iface.varyings;
             const slotDecls = [];
             const slotCount = new Map();
@@ -4719,8 +4736,34 @@
         /* ---- entry points ---- */
 
         emitEntryPoint() {
-            if (this.stage === "vertex") this.emitVertexEntry();
+            if (this.stage === "vertex" && this.options.vertexCapture) this.emitVertexCaptureEntry();
+            else if (this.stage === "vertex") this.emitVertexEntry();
             else this.emitFragmentEntry();
+        }
+
+        emitVertexCaptureEntry() {
+            this.emit("@compute @workgroup_size(" + VERTEX_CAPTURE.workgroupSize + ")");
+            this.emit("fn capture_main(@builtin(global_invocation_id) id : vec3<u32>) {");
+            ++this.indent;
+            this.emit("if (id.x >= arrayLength(&glCaptureOutput)) { return; }");
+            for (const [name, location] of this.iface.attributes) {
+                const type = this.usage.attributes.get(name).type;
+                const column = (slot, count) => "glCaptureInput[id.x].attributes[" + slot + "]." + SWIZZLE_CHARS.slice(0, count);
+                const expr = type.kind === "matrix" ? typeToWGSL(type) + "(" +
+                    Array.from({ length: type.cols }, (_, i) => column(location + i, type.rows)).join(", ") + ")" :
+                    column(location, componentCount(type));
+                this.emit(safeName(name) + " = " + (baseOf(type) === "float" ? expr : typeToWGSL(type) + "(" + expr + ")") + ";");
+            }
+            this.emitGlobalInits();
+            this.emit("glsl_main();");
+            const output = (field, expression) => this.emit("glCaptureOutput[id.x]." + field + " = " + expression + ";");
+            output("clip", "gl_Position");
+            for (const [field, name] of [["color", "gl_FrontColor"], ["backColor", "gl_BackColor"]])
+                output(field, this.usage.varyings.has(name) ? "saturate(" + name + ")" : "vec4<f32>(1.0)");
+            output("tex", this.usage.varyings.has("gl_TexCoord") ? "gl_TexCoord[0]" : "vec4<f32>(0.0)");
+            output("eye", this.usage.builtinOutputs.has("gl_ClipVertex") ? "gl_ClipVertex" : "vec4<f32>(0.0)");
+            --this.indent;
+            this.emit("}");
         }
 
         emitGlobalInits() {
@@ -5341,6 +5384,7 @@
                 colorTargets, twoSided: !!variant.twoSided,
             };
             const genOptions = {
+                vertexCapture: !!opts.vertexCapture,
                 pointSprite: !!variant.pointSprite,
                 programPointSize: !!variant.programPointSize,
                 pointCoordLowerLeft: !!variant.pointCoordLowerLeft,
@@ -5400,6 +5444,7 @@
             bindingText,
             "s" + (opts.forceStateFields || []).slice().sort().join(","),
             opts.keepCompatInputs ? "compat-inputs" : "-",
+            opts.vertexCapture ? "capture" : "render",
             "a" + (variant.alphaTest || "-"),
             "c" + (variant.clipPlaneCount || 0),
             variant.pointSprite ? "p" : "-",
@@ -5498,6 +5543,13 @@
 
     const api = {
         TRANSLATOR_REVISION,
+        VERTEX_CAPTURE, vertexCaptureBindings,
+        linkVertexCapture(vs, options) {
+            const fs = compileShader("void main() { gl_FragColor = vec4(1.0); }", "fragment");
+            const result = linkProgram(vs, fs, { ...options, variant: {}, vertexCapture: true });
+            if (result.ok) result.wgslCompute = result.wgslVertex;
+            return result;
+        },
         compileShader, linkShaderUnits, linkProgram,
         // Exported for the test suite and for gl_fixed_function.js, which
         // shares the state block and the attribute slot table.

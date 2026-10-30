@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GL programmable vertex capture</title>
+<pre id="result">RUNNING</pre>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_arb_program.js"></script>
+<script src="gl_vertex_capture_cases.js"></script>
+<script>
+(async () => {
+    "use strict";
+    const result = document.getElementById("result"), errors = [];
+    try {
+        const adapter = await navigator.gpu.requestAdapter(), device = await adapter.requestDevice();
+        device.addEventListener("uncapturederror", event => errors.push(event.error.message));
+        device.pushErrorScope("validation");
+        await GLVertexCaptureCases.run(device, (ok, message) => { if (!ok) throw new Error(message); });
+        await device.queue.onSubmittedWorkDone();
+        const error = await device.popErrorScope(); if (error) errors.push(error.message);
+        if (errors.length) throw new Error(errors.join("\n"));
+        device.destroy();
+        result.textContent = "PASS -- GLSL/ARB programmable vertex output, uniforms, matrix attributes, texture LOD and bounded compute capture";
+    } catch (error) { result.textContent = "FAIL " + (error.stack || error); }
+})();
+</script>
