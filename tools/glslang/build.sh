@@ -2,8 +2,8 @@
 # The GLES host's GLSL ES compiler (docs/gles3-plan.md L1): glslang, built
 # for WebAssembly with Emscripten, with v86_glslang.cpp's interface:
 # bios/glslang.wasm (src/gles/glslang.js loads it). Pinned source, checked;
-# one patch (es_spirv.patch: ES 1.00 and 3.00 shaders become SPIR-V under
-# Vulkan's relaxed rules, which glslang otherwise refuses below 310 es).
+# es_spirv.patch lets ES 1.00/3.00 reach SPIR-V under Vulkan relaxed rules;
+# desktop_lod.patch preserves desktop vertex explicit-LOD functions.
 #   tools/glslang/build.sh [work directory, default build/glslang]
 # needs emcc (an emsdk: source emsdk_env.sh), cmake and ninja.
 set -eu
@@ -34,6 +34,7 @@ rm -rf src build-wasm && mkdir src build-wasm
 tar -xzf dl/glslang-$GLSLANG_VERSION.tar.gz -C src
 glslang=$work/src/glslang-$GLSLANG_VERSION
 (cd "$glslang" && patch -p1 < "$here/es_spirv.patch")
+(cd "$glslang" && patch -p1 < "$here/desktop_lod.patch")
 
 # GLSL in, SPIR-V out: no HLSL, no optimizer (SPIRV-Tools), no binaries or tests
 (cd build-wasm &&
@@ -50,7 +51,7 @@ em++ -O2 -std=c++17 -fno-exceptions -I"$glslang" -I"$b" -I"$b/include" "$here/v8
 
 cp glslang.wasm "$root/bios/glslang.wasm"
 {
-    echo "bios/glslang.wasm: glslang $GLSLANG_VERSION with tools/glslang/es_spirv.patch, tools/glslang/build.sh"
+    echo "bios/glslang.wasm: glslang $GLSLANG_VERSION with tools/glslang/es_spirv.patch, tools/glslang/desktop_lod.patch, tools/glslang/build.sh"
     echo
     echo "==> glslang/LICENSE.txt <=="
     cat "$glslang/LICENSE.txt"

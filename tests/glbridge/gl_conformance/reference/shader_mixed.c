@@ -20,11 +20,11 @@ int main(int argc,char** argv) {
     glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT,GL_COLOR_ATTACHMENT0_EXT,GL_RENDERBUFFER_EXT,rb);glViewport(0,0,8,8);
     glUseProgram(program);glColor4f(0.25,0.5,0.75,1);glNormal3f(0,0,1);glFogCoordf(0.375);glSecondaryColor3f(0.2,0.4,0.6);glMultiTexCoord4f(GL_TEXTURE3,0.1,0.2,0.3,1);
     if(scene==0)glEnable(GL_LIGHTING);
-    if(scene==1||scene==10) {
+    if(scene==1||scene==10||scene==13) {
         GLubyte pixels[]={255,0,0,255,0,255,0,255,0,0,255,255,128,255,64,255};
         glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,1);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
-        if(scene==10) {
+        if(scene==10||scene==13) {
             GLubyte pixels[]={255,128,255,255};glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,2);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
             glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);glActiveTexture(GL_TEXTURE0);glUniform1i(glGetUniformLocation(program,"probe"),1);
         }

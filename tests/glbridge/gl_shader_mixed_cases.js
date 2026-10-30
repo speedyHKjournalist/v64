@@ -16,6 +16,7 @@
         { name: "vs_sampler", stage: "vertex", source: "#version 120\nuniform sampler2D probe;void main(){gl_Position=gl_Vertex;gl_FrontColor=texture2D(probe,vec2(0.75));gl_TexCoord[0]=vec4(1.5,1.5,0.0,2.0);}", sampler: true },
         { name: "vs_back_twoside", stage: "vertex", source: vertex, reverse: true },
         { name: "fs_back", stage: "fragment", source: "#version 120\nvoid main(){gl_FragColor=gl_Color;}", reverse: true },
+        { name: "vs_sampler_lod", stage: "vertex", source: "#version 120\nuniform sampler2D probe;void main(){gl_Position=gl_Vertex;gl_FrontColor=texture2DLod(probe,vec2(0.75),0.0);gl_TexCoord[0]=vec4(1.5,1.5,0.0,2.0);}", sampler: true },
     ];
     const vector = (s, call, args, values) => s.call(call, ...args, values.length, ...values, ...Array(4 - values.length).fill(0));
     cases.program = (s, entry, name) => s.call("CREATE_PROGRAM", name)
@@ -26,7 +27,7 @@
         s.call("COLOR4F", 0.25, 0.5, 0.75, 1).call("NORMAL3F", 0, 0, 1).call("FOG_COORDF", 0.375)
             .call("SECONDARY_COLOR3F", 0.2, 0.4, 0.6).call("MULTI_TEX_COORD4F", GL.TEXTURE0 + 3, 0.1, 0.2, 0.3, 1);
         if (entry.name === "vs_color") s.call("ENABLE", GL.LIGHTING);
-        if (entry.name === "vs_texture" || entry.name === "vs_sampler") {
+        if (entry.name === "vs_texture" || entry.sampler) {
             s.call("ENABLE", GL.TEXTURE_2D).call("BIND_TEXTURE", GL.TEXTURE_2D, 1)
                 .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
                 .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST)

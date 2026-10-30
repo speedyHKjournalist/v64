@@ -154,5 +154,17 @@
       191,
       255
     ]
+  },
+  "vs_sampler_lod": {
+    "renderer": "Apple M1 Pro",
+    "compile": true,
+    "link": true,
+    "error": 0,
+    "pixel": [
+      128,
+      128,
+      64,
+      255
+    ]
   }
 }

@@ -1,0 +1,16 @@
+--- a/glslang/MachineIndependent/ParseHelper.cpp
++++ b/glslang/MachineIndependent/ParseHelper.cpp
+@@ -1462,5 +1462,12 @@
+                 requireExtensions(loc, 1, &E_GL_EXT_shader_quad_control, fnCandidate->getName().c_str());
+ 
+-            if (builtIn && fnCandidate->getNumExtensions())
++            // Legacy desktop LOD functions are core in vertex shaders.
++            // Built-in symbols are shared across stages, so the fragment
++            // extension tag must be interpreted at the actual call site.
++            const bool desktopVertexLod = profile != EEsProfile && language == EShLangVertex && version < 130 &&
++                fnCandidate->getNumExtensions() == 1 &&
++                strcmp(fnCandidate->getExtensions()[0], E_GL_ARB_shader_texture_lod) == 0 &&
++                (fnCandidate->getBuiltInOp() == EOpTextureLod || fnCandidate->getBuiltInOp() == EOpTextureProjLod);
++            if (builtIn && fnCandidate->getNumExtensions() && !desktopVertexLod)
+                 requireExtensions(loc, fnCandidate->getNumExtensions(), fnCandidate->getExtensions(), fnCandidate->getName().c_str());
+ 

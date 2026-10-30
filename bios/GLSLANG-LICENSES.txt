@@ -1,4 +1,4 @@
-bios/glslang.wasm: glslang 16.6.0 with tools/glslang/es_spirv.patch, tools/glslang/build.sh
+bios/glslang.wasm: glslang 16.6.0 with tools/glslang/es_spirv.patch, tools/glslang/desktop_lod.patch, tools/glslang/build.sh
 
 ==> glslang/LICENSE.txt <==
 Here, glslang proper means core GLSL parsing, HLSL parsing, and SPIR-V code

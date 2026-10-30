@@ -483,6 +483,12 @@ game.exe
 > - 13 组原生 CGL 像素对照、两种模式真实 GPU、Naga 接口与代码检查、49 组 Node、35 组站点、8 个 GPU 页面、构建和变更源码 ESLint 通过，新增变异 6/6 被杀死。S2-42 的单阶段与此前多编译单元测试均已覆盖。
 > - 其它 C3/C6/C8 继续推进；阶段 C 尚未退出。另在扩展语料时发现 glslang 16.6 对 GLSL 1.20 顶点 texture*Lod 错加扩展要求，下一批修正此独立前端问题。
 
+> **C4 桌面顶点显式 LOD 编译规则（2026-10-31）：完成这一批修复。**
+> - glslang 共享的内建符号会带上片段阶段的扩展要求；在调用处按实际阶段识别 GLSL 1.10/1.20 已有的 texture/shadow Lod 与 ProjLod，恢复顶点阶段的核心语言支持。片段阶段仍需 ARB_shader_texture_lod，GradARB 仍需扩展，GLES 规则保持原样。
+> - 补丁独立保存为 tools/glslang/desktop_lod.patch，由正式构建脚本应用；重新构建共享 glslang.wasm，并核对补丁可逆应用。
+> - 13 个重载覆盖默认 110、显式 110/120、禁用扩展、片段扩展和链接；另测 ES 100 顶点/片段/扩展规则。原生与两种模式真实像素新增显式 LOD 组合，累计 14 组；50 组 Node、8 个 GPU 页面和构建通过。GLES 自带 7 组语料全部一致，无 Naga 错误；外部 dEQP APK 缺失，没有宣称运行外部语料。
+> - 其它 C3/C6/C8 继续推进；阶段 C 尚未退出。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；
