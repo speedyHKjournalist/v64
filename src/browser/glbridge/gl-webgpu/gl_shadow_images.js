@@ -77,6 +77,7 @@
         case P.C.V86GL_OBJECT_KIND_RENDERBUFFER: result = g.renderbuffers.get(name)?.created; break;
         case P.C.V86GL_OBJECT_KIND_FRAMEBUFFER: result = c.framebuffers.get(name)?.created; break;
         case P.C.V86GL_OBJECT_KIND_BUFFER: result = g.buffers?.get(name)?.created; break;
+        case P.C.V86GL_OBJECT_KIND_QUERY: result = c.queryObjects?.get(name)?.created; break;
         default: return GL.INVALID_ENUM;
         }
         return [[+(!!name && !!result)], "b"];

@@ -27,6 +27,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_queries.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -432,6 +433,32 @@
             executor.submit(remote ? namesMemory.slice() : namesMemory, {}); await executor.idle();
             check([20, 90, 170, 255].every((v, i) => namePixel.bytes[32 + i] === v), "allocating a new texture overwrote an application-named texture");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "name allocation must have no host errors");
+            const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
+                .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")
+                .names(P.GLFN.GEN_QUERIES, []).names(P.GLFN.DELETE_QUERIES, [999])
+                .makeCurrent(181, 0, 0, 64, 64, 181, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7).call("END_QUERY", GL.SAMPLES_PASSED)
+                .makeCurrent(180, 0, 0, 64, 64, 180, 180).call("END_QUERY", GL.SAMPLES_PASSED).call("FLUSH");
+            const queryRejected = shadow.stats.rejected; shadow.process(queries.bytes());
+            check(shadow.stats.rejected === queryRejected + 2, "active query name operations must be rejected on CPU");
+            executor.submit(remote ? queries.bytes().slice() : queries.bytes(), {}); await executor.idle();
+            const queryResults = new GLStream(), visibleQuery = queryResults.queryObjectiv(P.C.V86GL_OBJECT_KIND_QUERY, 7, GL.QUERY_RESULT);
+            queryResults.makeCurrent(181, 0, 0, 64, 64, 181, 180); const emptyQuery = queryResults.queryObjectiv(P.C.V86GL_OBJECT_KIND_QUERY, 7, GL.QUERY_RESULT);
+            const queryMemory = queryResults.bytes(); shadow.process(queryMemory); executor.options.writeGuestMemory = (offset, data) => queryMemory.set(data, offset);
+            executor.submit(remote ? queryMemory.slice() : queryMemory, {}); await executor.idle();
+            check(visibleQuery.view.getUint32(P.F.QUERY_OBJECT_IV.status, true) === 1 && emptyQuery.view.getUint32(P.F.QUERY_OBJECT_IV.status, true) === 1,
+                "query results must reach guest memory in both modes");
+            check(visibleQuery.view.getUint32(P.F.QUERY_OBJECT_IV.value, true) > 0 && emptyQuery.view.getUint32(P.F.QUERY_OBJECT_IV.value, true) === 0,
+                "identical query names in shared contexts must retain independent counts");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "private query objects must have no host errors");
+            const emptyFramebufferQuery = new GLStream().makeCurrent(182, 0, 0, 64, 64, 182, 182)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 99).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7).call("END_QUERY", GL.SAMPLES_PASSED);
+            const emptyResult = emptyFramebufferQuery.queryObjectiv(P.C.V86GL_OBJECT_KIND_QUERY, 7, GL.QUERY_RESULT), emptyMemory = emptyFramebufferQuery.bytes();
+            shadow.process(emptyMemory); executor.options.writeGuestMemory = (offset, data) => emptyMemory.set(data, offset);
+            executor.submit(remote ? emptyMemory.slice() : emptyMemory, {}); await executor.idle();
+            check(emptyResult.view.getUint32(P.F.QUERY_OBJECT_IV.status, true) === 1 && emptyResult.view.getUint32(P.F.QUERY_OBJECT_IV.value, true) === 0,
+                "an empty query must complete without rendering into an incomplete framebuffer");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "empty queries must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

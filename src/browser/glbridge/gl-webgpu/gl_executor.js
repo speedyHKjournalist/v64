@@ -1483,6 +1483,7 @@
             elementArrayBuffer: 0,
             pixelPackBuffer: 0,
             pixelUnpackBuffer: 0,
+            queryObjects: new Map(), activeQuery: null,
             currentProgram: 0,
             arbVertexProgram: 0,
             arbFragmentProgram: 0,
@@ -1639,6 +1640,10 @@
     function createBuffer(name) {
         return { name, size: 0, usage: GL.STATIC_DRAW, gpuBuffer: null,
                  shadow: null, target: 0, mapped: false };
+    }
+
+    function createQuery(name) {
+        return { name, target: 0, result: 0, ready: true, active: false, slot: -1, generation: 0 };
     }
 
     function createProgram(name) {
@@ -2000,8 +2005,13 @@
             context.hwnd = hwnd;
             context.samples = (format & protocol.C.V86GL_FORMAT_SAMPLES_MASK) >>>
                 protocol.C.V86GL_FORMAT_SAMPLES_SHIFT;
-            if (this.current !== context) this.endPass();
+            if (this.current !== context) {
+                this.endPass();
+                if (this.current) this.current.activeQuery = this.activeQuery;
+            }
             this.current = context;
+            this.queries = context.queryObjects;
+            this.activeQuery = context.activeQuery;
             if (width && height) {
                 if (!context.viewport.width) {
                     context.viewport = { x: 0, y: 0, width, height };
@@ -2069,7 +2079,9 @@
 
         releaseCurrent() {
             this.finishFrame(false);
+            if (this.current) this.current.activeQuery = this.activeQuery;
             this.current = null;
+            this.queries = new Map(); this.activeQuery = null;
         }
 
         destroyContext(payload) {
@@ -2087,7 +2099,9 @@
             for (const context of targets) {
                 this.contexts.delete(context.contextKey || ("hwnd:" + context.hwnd));
                 this.framebuffers.delete(context.id);
-                if (this.current === context) this.current = null;
+                for (const query of context.queryObjects.values()) ++query.generation;
+                context.queryObjects.clear(); context.activeQuery = null;
+                if (this.current === context) { this.current = null; this.queries = new Map(); this.activeQuery = null; }
                 for (const program of context.shareGroup.programs.values())
                     this.collectGLProgram(context.shareGroup, program);
             }
@@ -3450,13 +3464,14 @@
             const names = readNameArray(view, offset, size);
             for (const name of names)
                 if (name && !this.queries.has(name))
-                    this.queries.set(name, { name, result: 0, ready: true,
-                                             active: false, slot: -1,
-                                             generation: 0 });
+                    this.queries.set(name, createQuery(name));
         });
         define("DELETE_QUERIES", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
-            for (const name of names) this.queries.delete(name);
+            for (const name of names) {
+                const query = this.queries.get(name); if (query) ++query.generation;
+                this.queries.delete(name);
+            }
         });
         define("BEGIN_QUERY", function(a) { this.beginQuery(a[0] >>> 0, a[1] >>> 0); });
         define("END_QUERY", function(a) { this.endQuery(a[0] >>> 0); });
@@ -3742,17 +3757,29 @@
             const kind = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.object_kind, true);
             const name = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.name, true);
             const pname = view.getUint32(offset + protocol.F.QUERY_OBJECT_IV.pname, true);
-            const value = this.queryObjectiv(kind, name, pname);
             // a query object's result is this side's: the guest waits for it
             // in guest memory, in either mode
             if (kind === protocol.C.V86GL_OBJECT_KIND_QUERY) {
-                const answer = new Uint8Array(8);
-                const out = new DataView(answer.buffer);
-                out.setUint32(0, value === null ? SYNC_STATUS_FAILED : SYNC_STATUS_OK, true);
-                out.setUint32(4, value === null ? 0 : value >>> 0, true);
-                return this.answerGuest(bytes, metadata, [[offset + protocol.F.QUERY_OBJECT_IV.value, answer.subarray(4)],
-                    [offset + protocol.F.QUERY_OBJECT_IV.status, answer.subarray(0, 4)]]);
+                const query = this.queries.get(name), generation = query?.generation;
+                const answer = (ok, value) => {
+                    const data = new Uint8Array(8), out = new DataView(data.buffer);
+                    out.setUint32(0, ok ? SYNC_STATUS_OK : SYNC_STATUS_FAILED, true); out.setUint32(4, value >>> 0, true);
+                    return this.answerGuest(bytes, metadata, [...(ok ? [[offset + protocol.F.QUERY_OBJECT_IV.value, data.subarray(4)]] : []),
+                        [offset + protocol.F.QUERY_OBJECT_IV.status, data.subarray(0, 4)]]);
+                };
+                if (!query || query.active || ![GL.QUERY_RESULT, GL.QUERY_RESULT_AVAILABLE].includes(pname)) return answer(false, 0);
+                // Polling must submit the commands which produce the answer;
+                // RESULT waits for their readback, rather than reporting a
+                // provisional zero from an unsubmitted command encoder.
+                this.flushFrame();
+                if (pname === GL.QUERY_RESULT_AVAILABLE) return answer(true, +query.ready);
+                if (query.ready) return answer(true, query.result);
+                const pending = Promise.all([...this.pendingReadbacks]);
+                this.trackReadback(this.awaitReadback(pending, "glGetQueryObject").then(() =>
+                    answer(query.generation === generation && query.ready, query.result), () => answer(false, 0)));
+                return;
             }
+            const value = this.queryObjectiv(kind, name, pname);
             if (value === null) {
                 view.setUint32(offset + protocol.F.QUERY_OBJECT_IV.status, SYNC_STATUS_FAILED, true);
                 return;
@@ -10223,16 +10250,20 @@ struct BlitParams {
         /* ---- occlusion queries ---- */
 
         beginQuery(target, name) {
-            if (target !== GL.SAMPLES_PASSED && target !== GL.ANY_SAMPLES_PASSED)
+            if (target !== GL.SAMPLES_PASSED && target !== GL.ANY_SAMPLES_PASSED && target !== GL.ANY_SAMPLES_PASSED_CONSERVATIVE)
                 return this.refuse("glBeginQuery", "unsupported query target",
                     { target }, GL.INVALID_ENUM);
-            const query = this.queries.get(name);
-            if (!query)
-                return this.refuse("glBeginQuery", "unknown query object",
+            let query = this.queries.get(name);
+            if (!name)
+                return this.refuse("glBeginQuery", "zero query name",
                     { name }, GL.INVALID_OPERATION);
+            if (query?.target && query.target !== target)
+                return this.refuse("glBeginQuery", "query target changed", { name, target }, GL.INVALID_OPERATION);
             if (this.activeQuery)
                 return this.refuse("glBeginQuery", "a query is already active",
                     { name }, GL.INVALID_OPERATION);
+            if (!query) this.queries.set(name, query = createQuery(name));
+            query.target = target; query.active = true;
             query.generation = (query.generation || 0) + 1;
             query.ready = false;
             query.result = 0;
@@ -10241,20 +10272,26 @@ struct BlitParams {
             query.slot = -1;
             this.ensureOcclusionQuerySet();
             this.activeQuery = query;
+            this.current.activeQuery = query;
             // The set is created lazily, so the pass that is already open on
             // the first glBeginQuery of a session was built without it. Ending
             // it makes ensurePass rebuild one that carries it; the rebuilt
             // pass loads the attachments it just stored, so nothing is lost.
             if (this.pass && !this.passHasOcclusionQuerySet) this.endPass();
-            this.ensurePass();
+            // No rendering is implied by BeginQuery. An empty query is zero,
+            // including when the current framebuffer is incomplete. The
+            // first draw opens/resumes the GPU segment through ensurePass.
         },
 
         endQuery(target) {
-            void target;
             const query = this.activeQuery;
-            if (!query) return;
+            if (![GL.SAMPLES_PASSED, GL.ANY_SAMPLES_PASSED, GL.ANY_SAMPLES_PASSED_CONSERVATIVE].includes(target))
+                return this.refuse("glEndQuery", "unknown target", { target }, GL.INVALID_ENUM);
+            if (!query || query.target !== target)
+                return this.refuse("glEndQuery", "no matching active query", { target }, GL.INVALID_OPERATION);
             this.endOcclusionSegment();
             this.activeQuery = null;
+            this.current.activeQuery = null; query.active = false;
             query.ended = true;
             query.ready = query.pendingSegments === 0;
         },
@@ -10287,7 +10324,7 @@ struct BlitParams {
             if (query.generation !== generation) return;
             // D-07 exposes visibility, so OR all pass/submission segments.
             // A later zero must not erase visibility from an earlier pass.
-            if (result) query.result = OCCLUSION_VISIBLE_SAMPLES;
+            if (result) query.result = query.target === GL.SAMPLES_PASSED ? OCCLUSION_VISIBLE_SAMPLES : 1;
             --query.pendingSegments;
             query.ready = query.ended && query.pendingSegments === 0;
         },
@@ -10329,12 +10366,14 @@ struct BlitParams {
             const headerSize = protocol.RECORDS.QUERY_OBJECT_BATCH.size;
             const entrySize = protocol.RECORDS.QUERY_OBJECT_BATCH_ENTRY.size;
             if (size < headerSize) throw new GLStreamError("query batch is short");
+            if (view.getUint32(offset + R.status, true) !== SYNC_STATUS_PENDING) return;
             const count = view.getUint32(offset + R.count, true);
             const status = new Uint8Array(4);
             if (headerSize + count * entrySize > size) {
                 new DataView(status.buffer).setUint32(0, SYNC_STATUS_FAILED, true);
                 return this.answerGuest(bytes, metadata, [[offset + R.status, status]]);
             }
+            this.flushFrame();
             const entries = new Uint8Array(count * entrySize);
             const out = new DataView(entries.buffer);
             for (let i = 0; i < count; ++i) {

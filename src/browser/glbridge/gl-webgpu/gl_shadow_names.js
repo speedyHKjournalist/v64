@@ -20,6 +20,9 @@
         const c = this.current, group = c.group;
         let names, allocate, pool, owner = group;
         switch (r.object_kind) {
+        case C.V86GL_OBJECT_KIND_QUERY:
+            if (c.activeQueryName) return fail(GL.INVALID_OPERATION);
+            names = c.queryObjects; allocate = n => this.queryObject(n); owner = c; break;
         case C.V86GL_OBJECT_KIND_TEXTURE: names = group.textures; allocate = n => this.textureObject(n); pool = group.textureImages; break;
         case C.V86GL_OBJECT_KIND_RENDERBUFFER: names = group.renderbuffers; allocate = n => this.renderbufferObject(n); pool = group.renderbufferImages; break;
         case C.V86GL_OBJECT_KIND_BUFFER: names = group.buffers; allocate = n => this.bufferObject(n); pool = group.bufferObjects; break;

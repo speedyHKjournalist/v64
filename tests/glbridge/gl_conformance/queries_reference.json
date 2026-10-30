@@ -1,0 +1,27 @@
+{
+  "renderer":"Apple M1 Pro",
+  "cases":{
+    "reserved":0,
+    "unused_begin":0,
+    "created":1,
+    "current":7,
+    "zero_begin":1282,
+    "nested_begin":1282,
+    "active_gen_zero":0,
+    "active_delete_unused":0,
+    "active_result":1282,
+    "valid_end":0,
+    "missing_end":1282,
+    "bad_pname":1280,
+    "missing_result":1282,
+    "reserved_result":1282,
+    "changed_target":1280,
+    "bad_target":1280,
+    "shared_is_query":0,
+    "parallel_begin":0,
+    "first_current":7,
+    "empty_result":0,
+    "delete_unused":0,
+    "deleted":0
+  }
+}

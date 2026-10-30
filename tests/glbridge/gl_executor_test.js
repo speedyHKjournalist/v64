@@ -1787,6 +1787,7 @@ asyncTest("query slot exhaustion submits completed segments and resumes the same
     const { executor, log } = newExecutor();
     run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64)
         .names(GLFN.GEN_QUERIES, [1]).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 1));
+    executor.ensurePass();
     executor.occlusionCapacity = 2;
     executor.endPass(); executor.ensurePass();
     executor.endPass(); executor.ensurePass();
@@ -1804,6 +1805,7 @@ asyncTest("occlusion segments across passes are ORed, not overwritten", async ()
         const { executor, log } = newExecutor();
         run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64)
             .names(GLFN.GEN_QUERIES, [1]).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 1));
+        executor.ensurePass();
         executor.endPass();
         executor.ensurePass();
         executor.endQuery(GL.SAMPLES_PASSED);
@@ -1831,6 +1833,7 @@ asyncTest("query spanning submissions waits for every segment, even out of order
     };
     run(executor, new GLStream().makeCurrent(1, 0, 0, 64, 64)
         .names(GLFN.GEN_QUERIES, [1]).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 1));
+    executor.ensurePass();
     executor.flushFrame();
     const first = findBuffer(log, "GL occlusion readback");
     executor.ensurePass();

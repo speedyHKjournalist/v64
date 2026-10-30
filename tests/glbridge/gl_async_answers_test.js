@@ -65,6 +65,7 @@ test("a stalled occlusion mapping becomes available and conservatively visible",
     const create = executor.device.createBuffer.bind(executor.device);
     executor.device.createBuffer = desc => { const b = create(desc); if (desc.label === "GL occlusion readback") b.mapAsync = () => new Promise(() => {}); return b; };
     executor.submit(stream().names(P.GLFN.GEN_QUERIES, [1]).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 1)
+        .drawArrays(GL.TRIANGLES, 3, { vertex: { size: 3, type: GL.FLOAT, data: new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]) } })
         .call("END_QUERY", GL.SAMPLES_PASSED).bytes(), {});
     executor.flushFrame(); await executor.idle();
     assert.equal(executor.queries.get(1).ready, true); assert.ok(executor.queries.get(1).result > 0);

@@ -29,6 +29,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_queries.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
