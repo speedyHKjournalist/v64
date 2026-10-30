@@ -25,7 +25,8 @@ static void query(const char* name, GLenum pname, int n) {
     printf("]}");
 }
 int main(void) {
-    CGLPixelFormatAttribute attrs[] = { kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_Legacy, 0 };
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_Legacy,
+        kCGLPFAStencilSize, (CGLPixelFormatAttribute)8, 0 };
     CGLPixelFormatObj pf = NULL; CGLContextObj ctx = NULL; GLint count = 0;
     if (CGLChoosePixelFormat(attrs, &pf, &count) || !pf || CGLCreateContext(pf, NULL, &ctx)) return 2;
     CGLSetCurrentContext(ctx);
@@ -39,6 +40,17 @@ int main(void) {
     glMatrixMode(GL_TEXTURE); glActiveTexture(GL_TEXTURE3); glTranslatef(7, 8, 9); query("texture3", GL_TEXTURE_MATRIX, 16);
     glActiveTexture(GL_TEXTURE0); query("texture0", GL_TEXTURE_MATRIX, 16);
     glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT); glPixelStorei(GL_UNPACK_ROW_LENGTH, 31); glPopClientAttrib(); query("unpack", GL_UNPACK_ROW_LENGTH, 1);
+    query("mask_all", GL_STENCIL_VALUE_MASK, 1);
+    glStencilFuncSeparate(GL_FRONT, GL_LESS, -7, 0x80000001u); query("ref_front", GL_STENCIL_REF, 1); query("mask_high", GL_STENCIL_VALUE_MASK, 1);
+    glStencilFuncSeparate(GL_BACK, GL_GEQUAL, 1000, ~0u); query("ref_back", GL_STENCIL_BACK_REF, 1);
+    GLuint fbo; glGenFramebuffersEXT(1, &fbo); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo); query("ref_empty", GL_STENCIL_BACK_REF, 1);
+    glStencilFuncSeparate(GL_BACK, GL_GEQUAL, 42, ~0u); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0); query("ref_returned", GL_STENCIL_BACK_REF, 1);
+    glDeleteFramebuffersEXT(1, &fbo);
+    query("dither", GL_DITHER, 1);
+    glActiveTexture(GL_TEXTURE3); glEnable(GL_TEXTURE_2D); query("texture3_enabled", GL_TEXTURE_2D, 1);
+    glClientActiveTexture(GL_TEXTURE0); glEnableClientState(GL_TEXTURE_COORD_ARRAY); query("client0_enabled", GL_TEXTURE_COORD_ARRAY, 1);
+    glClientActiveTexture(GL_TEXTURE3); query("client3_disabled", GL_TEXTURE_COORD_ARRAY, 1);
+    glHint(GL_FOG_HINT, GL_NICEST); query("hint", GL_FOG_HINT, 1);
     printf("\n  }\n}\n");
     CGLSetCurrentContext(NULL); CGLDestroyContext(ctx); CGLDestroyPixelFormat(pf);
     return 0;

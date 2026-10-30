@@ -7637,7 +7637,8 @@ ${fragmentCode}`;
                 pass.setScissorRect(0, 0, width, height);
             }
             if (s.enabled.has(GL.STENCIL_TEST))
-                pass.setStencilReference(s.stencil.front.ref >>> 0);
+                pass.setStencilReference(clamp(s.stencil.front.ref, 0,
+                    this.passTargets && formatHasStencil(this.passTargets.depthFormat) ? 255 : 0));
             if (s.enabled.has(GL.BLEND))
                 pass.setBlendConstant(this.blendConstant(s.blend));
         },

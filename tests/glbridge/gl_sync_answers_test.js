@@ -19,6 +19,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
@@ -95,6 +96,15 @@ async function guestAnswers(remote) {
     const stateHeader = P.encodeRecord("QUERY_STATE", { pname: 0x0BA2, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 128 });
     const statePayload = new Uint8Array(stateHeader.length + 128); statePayload.set(stateHeader);
     stream.record(P.GLFN.QUERY_STATE, statePayload);
+    stream.call("ACTIVE_TEXTURE", 0x84C2).call("ENABLE", 0x0DE1);
+    const extraState = (pname, value_kind) => {
+        const at = stream.length + 4;
+        const header = P.encodeRecord("QUERY_STATE", { pname, value_kind, data_size: 8 });
+        const payload = new Uint8Array(header.length + 8); payload.set(header);
+        stream.record(P.GLFN.QUERY_STATE, payload); return at;
+    };
+    const enabledAt = extraState(0x0DE1, P.C.V86GL_STATE_IS_ENABLED);
+    const maskAt = extraState(0x0B93, P.C.V86GL_STATE_INTEGER);
     // a GLSL program: its link status and a uniform's location
     stream.call("CREATE_SHADER", 1, 0x8B31).shaderSource(1, "uniform float gain; void main() { gl_Position = gl_Vertex * gain; }")
         .call("COMPILE_SHADER", 1).call("CREATE_SHADER", 2, 0x8B30)
@@ -130,6 +140,8 @@ async function guestAnswers(remote) {
     assert.equal(await request([2, 0, 0, HEADER + bytes.byteLength, 0, 0]), 0, "the batch is taken");
     assert.equal(new DataView(memory.buffer, ARENA + HEADER).getUint32(stateAt + P.F.QUERY_STATE.status, true),
         SYNC_STATUS_OK, "typed state is answered before the request returns, including in worker mode");
+    assert.equal(new DataView(memory.buffer, ARENA + HEADER).getUint32(enabledAt + P.F.QUERY_STATE.status, true),
+        SYNC_STATUS_OK, "enable queries are also synchronous in worker mode");
     await plugin.idle();
     await executor.idle();
     const view = new DataView(memory.buffer, ARENA + HEADER);
@@ -142,6 +154,8 @@ async function guestAnswers(remote) {
         caps: answer(capsAt, () => view.getUint32(capsAt + 4, true)),
         state: answer(stateAt + P.F.QUERY_STATE.status, () => Array.from({ length: view.getUint32(stateAt + P.F.QUERY_STATE.count, true) },
             (_, i) => view.getFloat64(stateAt + P.RECORDS.QUERY_STATE.size + i * 8, true))),
+        enabled: answer(enabledAt + P.F.QUERY_STATE.status, () => view.getFloat64(enabledAt + P.RECORDS.QUERY_STATE.size, true)),
+        stencilMask: answer(maskAt + P.F.QUERY_STATE.status, () => view.getFloat64(maskAt + P.RECORDS.QUERY_STATE.size, true)),
         linked: answer(linkAt, () => view.getUint32(linkAt + 4, true)),
         location: answer(locationAt, () => view.getInt32(locationAt + 4, true)),
         framebuffer: answer(fboAt, () => view.getUint32(fboAt + 4, true)),
@@ -178,6 +192,8 @@ async function guestAnswers(remote) {
     if (results.page.arb !== 29) failures.push("the ARB error position is " + results.page.arb);
     assert.deepEqual(results.page.state, [-10, 4, 100, 50]);
     assert.deepEqual(results.worker.state, results.page.state);
+    assert.equal(results.page.enabled, 1); assert.equal(results.worker.enabled, 1);
+    assert.equal(results.page.stencilMask, -1); assert.equal(results.worker.stencilMask, -1);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;

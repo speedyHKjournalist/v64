@@ -231,7 +231,15 @@ game.exe
 > - 已接受但超过宣称上限的视口先规范化，再由两边使用同一矩形。补齐 `LOAD_MATRIXF`/`MULT_MATRIXF` 的固定头部；短头部不进入状态处理函数。
 > - 修正上一批的颜色矩阵模式：`GL_COLOR` 是 mode，`GL_COLOR_MATRIX_SGI` 是查询 pname；兼容已保存的内部栈键。按 [GL 2.1 BlendFuncSeparate](https://registry.khronos.org/OpenGL-Refpages/gl2.1/xhtml/glBlendFuncSeparate.xml) 允许源 alpha 使用 `SRC_ALPHA_SATURATE`。
 > - 验证：7 项 CPU 校验测试（含 19 组非法参数）、新增真 GPU 页面验证本地/复制命令流中错误与像素均保持正确；v86 34 组 Node 测试和 8 个 WebGPU 页面通过，相关变异 2/2 被杀死，协议/客体 ABI 检查、`make glbridge`、ESLint 及客体普通 DLL 构建通过。
-> - 下一批为启用位、客户端启用位、模板和提示状态。对象、GLSL/ARB 等命令族的完整校验仍未完成；C3/C6 整体继续进行中。
+> - 后续启用位、客户端启用位、模板和提示状态的进度见下。对象、GLSL/ARB 等命令族的完整校验仍未完成；C3/C6 整体继续进行中。
+
+> **C3/C6 启用位、模板与提示状态（2026-10-30）：完成这一批迁移。**
+> - `gl_shadow_raster.js` 接管全局启用位、按服务端活动单元的纹理/texgen 启用位、按客户端活动单元的纹理数组启用位，以及客户端其余数组启用位；校验 Enable/Disable 和对应的客户端调用。属性栈按 ENABLE、TEXTURE、客户端 VERTEX_ARRAY 等组恢复，快照可保存这些状态，旧快照补齐默认值。
+> - `glIsEnabled` 采用 `QUERY_STATE` 的独立查询种类，不能把任意可用于 `glGet` 的 pname 当作 capability；例如查询 `LINE_WIDTH` 会报 INVALID_ENUM。答案在两种模式的 IOCTL 返回前写好，客体 ABI 测试编译并验证实际编码/解码函数。
+> - 正背面模板函数、操作、引用值、掩码以及提示状态均由 CPU 查询；非法参数通过上一批的拒绝记录处理。无符号掩码保持原始 32 位：全位掩码的 int/float/double 分别为 -1、4294967296、4294967295，以 Apple GL 2.1 参照核对。
+> - 保留设定的原始模板引用值，查询时按当前 FBO 的模板位数钳制；在没有模板附件的 FBO 中设为 42，回默认 framebuffer 后仍查到 42。修正绘制使用的参考值钳制（审查 S3），不再将负数和过大值直接回绕为 8 位。
+> - 参照生成器增加上述情况；新增 9 项 CPU 状态测试，并扩充本地/worker 通道、原生客体 ABI 和 GPU 像素测试。35 组 v86 Node 测试、16 组站点测试、8 个 WebGPU 页面、普通/诊断 DLL 构建和 ESLint 均通过；新增变异 3/3 被杀死。
+> - **未完成：** 独立正背面参考值和读写掩码的渲染仍只取正面值（状态查询已区分），需要阶段 D2/D4 的绘制拆分或模拟及双面像素测试。其余 C3 状态族、对象/着色器校验、完整 `QUERY_ERROR`、显示列表与选择/反馈仍继续推进，XP 镜像未部署。
 
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；

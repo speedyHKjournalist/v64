@@ -23,6 +23,7 @@
     // pname -> [initial values, GL state type, glPushAttrib group]. Colors
     // and depth's normalized conversion are distinct from ordinary floats.
     const DEFAULTS = new Map();
+    const QUERIES = new Map(), ATTRIB_PARTS = new Map();
     const define = (names, values, kind, group) => {
         for (const name of names.split(" ")) {
             if (GL[name] === undefined) throw new Error("unknown GL state " + name);
@@ -201,6 +202,8 @@
         const c = this.current;
         if (!c) return null;
         const state = c.state;
+        const query = QUERIES.get(pname);
+        if (query) return query(this);
         if (DEFAULTS.has(pname)) return [state.values[pname], DEFAULTS.get(pname)[1]];
         if (pname === GL.BLEND_SRC) return [state.values[GL.BLEND_SRC_RGB], "i"];
         if (pname === GL.BLEND_DST) return [state.values[GL.BLEND_DST_RGB], "i"];
@@ -235,21 +238,23 @@
         const r = P.decodeRecord("QUERY_STATE", view, offset);
         const header = RECORDS.QUERY_STATE.size;
         const fail = error => { view.setUint32(offset + F.QUERY_STATE.error, error, true); this.answered("QUERY_STATE", view, offset, C.V86GL_SYNC_QUERY_STATUS_FAILED); };
-        if (header + r.data_size > size || r.value_kind < C.V86GL_STATE_INTEGER || r.value_kind > C.V86GL_STATE_BOOLEAN) return fail(GL.INVALID_VALUE);
+        if (header + r.data_size > size || r.value_kind < C.V86GL_STATE_INTEGER || r.value_kind > C.V86GL_STATE_IS_ENABLED) return fail(GL.INVALID_VALUE);
         if (!this.current || this.current.state.begin) return fail(GL.INVALID_OPERATION);
-        const result = this.stateValue(r.pname);
+        const isEnabled = r.value_kind === C.V86GL_STATE_IS_ENABLED;
+        const result = isEnabled ? this.enableStateValue && this.enableStateValue(r.pname) : this.stateValue(r.pname);
+        if (isEnabled && !result) return fail(GL.INVALID_ENUM);
         if (!result) { this.answered("QUERY_STATE", view, offset, C.V86GL_STATE_QUERY_UNSUPPORTED); return; }
         const [values, kind] = result;
         if (values.length * 8 > r.data_size) return fail(GL.INVALID_VALUE);
         for (let i = 0; i < values.length; ++i) {
             let v = values[i];
-            if (r.value_kind === C.V86GL_STATE_BOOLEAN) v = +!!v;
+            if (r.value_kind === C.V86GL_STATE_BOOLEAN || isEnabled) v = +!!v;
             else if (r.value_kind === C.V86GL_STATE_INTEGER) {
                 // Color/depth conversion scales then truncates (the Apple
                 // GL 2.1 oracle), unlike an ordinary float's nearest integer.
                 // Preserve the specified negative endpoint even though the
                 // Apple driver returns -INT_MAX there (glGet's refpage).
-                v = kind === "n" ? (v <= -1 ? -0x80000000 : Math.trunc(clamp(v, -1, 1) * 0x7FFFFFFF)) : Math.round(v);
+                v = kind === "u" ? v | 0 : kind === "n" ? (v <= -1 ? -0x80000000 : Math.trunc(clamp(v, -1, 1) * 0x7FFFFFFF)) : Math.round(v);
                 v = clamp(v, -0x80000000, 0x7FFFFFFF);
             } else if (r.value_kind === C.V86GL_STATE_FLOAT) v = Math.fround(v);
             view.setFloat64(offset + header + i * 8, v, true);
@@ -296,7 +301,8 @@
                     if (client ? STORE.has(p) && (mask & 1) : group && (mask & group)) values[p] = state.values[p].slice();
                 list.push({ values, mode: !client && (mask & 0x1000) ? state.mode : null,
                     clientTexture: client && (mask & 2) ? state.clientTexture : null,
-                    activeTexture: !client && (mask & 0x40000) ? c.activeTexture : null });
+                    activeTexture: !client && (mask & 0x40000) ? c.activeTexture : null,
+                    parts: Object.fromEntries([...ATTRIB_PARTS].map(([name, part]) => [name, part.capture(c, mask, client)])) });
                 return;
             }
             if (fn === GLFN.POP_ATTRIB || fn === GLFN.POP_CLIENT_ATTRIB) {
@@ -306,6 +312,7 @@
                 if (saved.mode !== null) state.mode = saved.mode;
                 if (saved.clientTexture !== null) state.clientTexture = saved.clientTexture;
                 if (saved.activeTexture !== null && saved.activeTexture !== undefined) c.activeTexture = saved.activeTexture;
+                for (const [name, part] of ATTRIB_PARTS) if (saved.parts && saved.parts[name]) part.restore(c, saved.parts[name]);
                 return;
             }
             if (fn === GLFN.CLIENT_ACTIVE_TEXTURE) {
@@ -320,6 +327,7 @@
             for (const [key, saved] of state.typed || []) {
                 const c = shadow.contexts.get(key); if (!c) continue;
                 c.state = clone(saved);
+                for (const [p, [values]] of DEFAULTS) if (!c.state.values[p]) c.state.values[p] = values.slice();
                 // The first typed-state snapshot used the query pname as a
                 // color stack key. Normalize that internal snapshot spelling.
                 if (!c.state.stacks[GL.COLOR]) c.state.stacks[GL.COLOR] = c.state.stacks[GL.COLOR_MATRIX_SGI] || [identity()];
@@ -328,4 +336,11 @@
             }
         },
     });
+    // State-family modules extend this registry, rather than adding another
+    // copy of typed conversion, command walking or snapshot serialization.
+    const api = { define, on, set, rule,
+        query(pnames, fn) { for (const pname of pnames) QUERIES.set(pname, fn); },
+        attributes(name, part) { ATTRIB_PARTS.set(name, part); } };
+    global.V86GLShadowState = api;
+    if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

@@ -10,6 +10,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -49,8 +50,24 @@
             if (!remote) check(error.view.getUint32(P.F.QUERY_ERROR.value, true) === GL.INVALID_VALUE, "first GL error must survive forwarding");
             check(!executor.gpuErrors.errors.length, "WebGPU must accept the whole frame");
             check(!executor.hostErrors.length && !executor.stats.refusals, "no host exception or unknown rejected opcode");
+            for (const [ref, clamped] of [[-7, 0], [1000, 255]]) {
+                const stencil = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1)
+                    .call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR_STENCIL", clamped)
+                    .call("CLEAR", GL.COLOR_BUFFER_BIT | GL.STENCIL_BUFFER_BIT)
+                    .call("ENABLE", GL.STENCIL_TEST).call("STENCIL_FUNC", GL.EQUAL, ref, 0xFFFFFFFF)
+                    .call("COLOR4F", 0.25, 0.75, 0.5, 1).call("BEGIN", GL.QUADS)
+                    .call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                    .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                const out = stencil.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+                const guest = stencil.bytes(); shadow.process(guest);
+                executor.options.writeGuestMemory = (offset, data) => guest.set(data, offset);
+                executor.submit(remote ? guest.slice() : guest, {}); await executor.idle();
+                check(out.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "stencil readback must finish");
+                check([64, 191, 128, 255].every((v, i) => Math.abs(out.bytes[32 + i] - v) <= 1),
+                    "stencil reference wrapped instead of clamping: " + ref);
+            }
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation preserves errors and pixels in local and copied streams";
+        document.getElementById("result").textContent = "PASS -- CPU validation and stencil clamping preserve errors/pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

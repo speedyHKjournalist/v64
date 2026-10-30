@@ -10,6 +10,17 @@
     "modelview": {"integer":[2,0,0,0,0,4,0,0,0,0,8,0,2,3,4,1],"float":[2,0,0,0,0,4,0,0,0,0,8,0,2,3,4,1],"double":[2,0,0,0,0,4,0,0,0,0,8,0,2,3,4,1],"boolean":[1,0,0,0,0,1,0,0,0,0,1,0,1,1,1,1]},
     "texture3": {"integer":[1,0,0,0,0,1,0,0,0,0,1,0,7,8,9,1],"float":[1,0,0,0,0,1,0,0,0,0,1,0,7,8,9,1],"double":[1,0,0,0,0,1,0,0,0,0,1,0,7,8,9,1],"boolean":[1,0,0,0,0,1,0,0,0,0,1,0,1,1,1,1]},
     "texture0": {"integer":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"float":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"double":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"boolean":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]},
-    "unpack": {"integer":[0],"float":[0],"double":[0],"boolean":[0]}
+    "unpack": {"integer":[0],"float":[0],"double":[0],"boolean":[0]},
+    "mask_all": {"integer":[-1],"float":[4294967296],"double":[4294967295],"boolean":[1]},
+    "ref_front": {"integer":[0],"float":[0],"double":[0],"boolean":[0]},
+    "mask_high": {"integer":[-2147483647],"float":[2147483648],"double":[2147483649],"boolean":[1]},
+    "ref_back": {"integer":[255],"float":[255],"double":[255],"boolean":[1]},
+    "ref_empty": {"integer":[0],"float":[0],"double":[0],"boolean":[0]},
+    "ref_returned": {"integer":[42],"float":[42],"double":[42],"boolean":[1]},
+    "dither": {"integer":[1],"float":[1],"double":[1],"boolean":[1]},
+    "texture3_enabled": {"integer":[1],"float":[1],"double":[1],"boolean":[1]},
+    "client0_enabled": {"integer":[1],"float":[1],"double":[1],"boolean":[1]},
+    "client3_disabled": {"integer":[0],"float":[0],"double":[0],"boolean":[0]},
+    "hint": {"integer":[4354],"float":[4354],"double":[4354],"boolean":[1]}
   }
 }

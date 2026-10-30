@@ -301,6 +301,7 @@
         ["V86GL_STATE_FLOAT", 2],
         ["V86GL_STATE_DOUBLE", 3],
         ["V86GL_STATE_BOOLEAN", 4],
+        ["V86GL_STATE_IS_ENABLED", 5, "glIsEnabled: capability validation and one boolean answer"],
         ["V86GL_OBJECT_KIND_SHADER", 1],
         ["V86GL_OBJECT_KIND_PROGRAM", 2],
         ["V86GL_OBJECT_KIND_QUERY", 3],
