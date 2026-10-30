@@ -26,6 +26,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -412,6 +413,25 @@
             check([255, 0, 0, 255].every((v, i) => rejectedDrawPixel.bytes[32 + i] === v), "mapped vertex data must not draw");
             check([64, 128, 191, 255].every((v, i) => Math.abs(mappedPixel.bytes[32 + i] - v) <= 1), "mapped storage rejection changed geometry");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "mapping replies must be CPU-only");
+            const names = new GLStream().makeCurrent(170, 0, 0, 64, 64, 170, 170)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 1).texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([20, 90, 170, 255]));
+            const namesHeader = P.encodeRecord("QUERY_NAMES", { object_kind: P.C.V86GL_OBJECT_KIND_TEXTURE, count: 1, data_size: 4 });
+            const namesPayload = new Uint8Array(namesHeader.length + 4); namesPayload.set(namesHeader); names.record(P.GLFN.QUERY_NAMES, namesPayload);
+            const generated = names.payloadView(); shadow.process(names.bytes());
+            check(generated.view.getUint32(P.F.QUERY_NAMES.status, true) === 1, "name allocation must finish on CPU");
+            const textureName = generated.view.getUint32(namesHeader.length, true); check(textureName !== 1 && textureName !== 0, "generated name collided with a bound name");
+            executor.submit(remote ? names.bytes().slice() : names.bytes(), {});
+            const generatedDraw = new GLStream().names(P.GLFN.GEN_TEXTURES, [textureName]).call("BIND_TEXTURE", GL.TEXTURE_2D, textureName)
+                .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255]))
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 1).call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+                .call("ENABLE", GL.TEXTURE_2D).call("TEX_ENVI", GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE, GL.REPLACE)
+                .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const namePixel = generatedDraw.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), namesMemory = generatedDraw.bytes();
+            shadow.process(namesMemory); executor.options.writeGuestMemory = (offset, data) => namesMemory.set(data, offset);
+            executor.submit(remote ? namesMemory.slice() : namesMemory, {}); await executor.idle();
+            check([20, 90, 170, 255].every((v, i) => namePixel.bytes[32 + i] === v), "allocating a new texture overwrote an application-named texture");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "name allocation must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

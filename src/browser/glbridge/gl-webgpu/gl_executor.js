@@ -3646,7 +3646,7 @@
             if (size < protocol.RECORDS.QUERY_PARAMETER.size)
                 throw new GLStreamError("query-parameter record is short");
         }, { needsContext: false });
-        for (const name of ["QUERY_BUFFER_DATA", "QUERY_BUFFER_MAP", "QUERY_BUFFER_UNMAP"])
+        for (const name of ["QUERY_BUFFER_DATA", "QUERY_BUFFER_MAP", "QUERY_BUFFER_UNMAP", "QUERY_NAMES"])
             define(name, function(a, bytes, view, offset, size) {
                 if (size < protocol.RECORDS[name].size) throw new GLStreamError(name + " record is short");
             }, { needsContext: false });

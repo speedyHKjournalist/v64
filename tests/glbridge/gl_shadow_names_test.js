@@ -1,0 +1,74 @@
+"use strict";
+const assert = require("node:assert/strict");
+const { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js");
+const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+const { GLStream, GL } = require("./gl_stream_builder.js");
+const tests = [], test = (name, fn) => tests.push({ name, fn });
+const scene = () => new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1);
+function generate(stream, kind, count, capacity = Math.max(0, count * 4), declared = capacity) {
+    const header = P.encodeRecord("QUERY_NAMES", { object_kind: kind, count, data_size: declared }), payload = new Uint8Array(header.length + capacity);
+    payload.fill(0xA5); payload.set(header); stream.record(P.GLFN.QUERY_NAMES, payload);
+    const offset = stream.length - payload.length;
+    return () => { const b = stream.bytes(), v = new DataView(b.buffer, b.byteOffset + offset, payload.length);
+        return { status: v.getUint32(P.F.QUERY_NAMES.status, true), error: v.getUint32(P.F.QUERY_NAMES.error, true),
+            values: Array.from({ length: Math.floor(capacity / 4) }, (_, i) => v.getUint32(header.length + i * 4, true)) }; };
+}
+const families = [[P.C.V86GL_OBJECT_KIND_TEXTURE, "BIND_TEXTURE", GL.TEXTURE_2D, "textures", "DELETE_TEXTURES"],
+    [P.C.V86GL_OBJECT_KIND_BUFFER, "BIND_BUFFER", GL.ARRAY_BUFFER, "buffers", "DELETE_BUFFERS"],
+    [P.C.V86GL_OBJECT_KIND_RENDERBUFFER, "BIND_RENDERBUFFER", GL.RENDERBUFFER_EXT, "renderbuffers", "DELETE_RENDERBUFFERS"],
+    [P.C.V86GL_OBJECT_KIND_FRAMEBUFFER, "BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, "framebuffers", "DELETE_FRAMEBUFFERS"]];
+test("CPU generators skip bound and reserved names in each public namespace", () => {
+    for (const [kind, bind, target, field] of families) {
+        const s = new GLShadow(), st = scene().call(bind, target, 1).call(bind, target, 3), q = generate(st, kind, 3);
+        s.process(st.bytes()); assert.deepEqual(q(), { status: 1, error: 0, values: [2, 4, 5] });
+        const owner = field === "framebuffers" ? s.current : s.current.group;
+        for (const n of [2, 4, 5]) {
+            const object = owner[field].get(n); assert.ok(object);
+            assert.equal(field === "textures" ? object.target : +object.created, 0, "generated names acquire object state on first binding");
+        }
+        const next = new GLStream().call(bind, target, 7), more = generate(next, kind, 3); s.process(next.bytes()); assert.deepEqual(more().values, [6, 8, 9]);
+    }
+});
+test("name cursors wrap past zero, skip live names and survive deletion, sharing and snapshots", () => {
+    const s = new GLShadow(); s.process(scene().call("BIND_BUFFER", GL.ARRAY_BUFFER, 1).bytes());
+    s.current.group.nameCursors.set(P.C.V86GL_OBJECT_KIND_BUFFER, 0xFFFFFFFF);
+    const st = new GLStream(), q = generate(st, P.C.V86GL_OBJECT_KIND_BUFFER, 3); s.process(st.bytes()); assert.deepEqual(q().values, [0xFFFFFFFF, 2, 3]);
+    s.process(new GLStream().names(P.GLFN.DELETE_BUFFERS, [2]).bytes());
+    const copy = new GLShadow(); copy.setState(JSON.parse(JSON.stringify(s.getState())));
+    const next = new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1), shared = generate(next, P.C.V86GL_OBJECT_KIND_BUFFER, 2);
+    copy.process(next.bytes()); assert.deepEqual(shared().values, [4, 5]);
+    const separate = new GLStream().makeCurrent(3, 0, 0, 64, 64, 3, 3), own = generate(separate, P.C.V86GL_OBJECT_KIND_BUFFER, 2);
+    copy.process(separate.bytes()); assert.deepEqual(own().values, [1, 2]);
+});
+test("framebuffer generators use the current context namespace while image names are shared", () => {
+    const s = new GLShadow(), a = scene(), first = generate(a, P.C.V86GL_OBJECT_KIND_FRAMEBUFFER, 2), texture = generate(a, P.C.V86GL_OBJECT_KIND_TEXTURE, 2);
+    s.process(a.bytes()); assert.deepEqual(first().values, [1, 2]); assert.deepEqual(texture().values, [1, 2]);
+    const b = new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1), second = generate(b, P.C.V86GL_OBJECT_KIND_FRAMEBUFFER, 2), shared = generate(b, P.C.V86GL_OBJECT_KIND_TEXTURE, 2);
+    s.process(b.bytes()); assert.deepEqual(second().values, [1, 2]); assert.deepEqual(shared().values, [3, 4]);
+});
+test("invalid generation, zero count and Begin leave names, cursors and output unchanged", () => {
+    for (const [kind, count, capacity, declared, expected] of [[P.C.V86GL_OBJECT_KIND_BUFFER, -1, 8, 8, GL.INVALID_VALUE],
+        [P.C.V86GL_OBJECT_KIND_TEXTURE, 3, 8, 8, GL.INVALID_VALUE], [P.C.V86GL_OBJECT_KIND_TEXTURE, 1, 4, 8, GL.INVALID_VALUE],
+        [999, 2, 8, 8, GL.INVALID_ENUM], [P.C.V86GL_OBJECT_KIND_BUFFER, 0, 8, 8, 0]]) {
+        const s = new GLShadow(), st = scene(), q = generate(st, kind, count, capacity, declared); s.process(st.bytes());
+        assert.equal(q().status, expected ? 2 : 1); assert.equal(q().error, expected); assert.ok(q().values.every(v => v === 0xA5A5A5A5));
+        assert.equal(s.current.group.textures.size, 0); assert.equal(s.current.group.buffers.size, 0); assert.equal(s.current.group.nameCursors.size, 0);
+    }
+    const s = new GLShadow(), st = scene().call("BEGIN", GL.POINTS), q = generate(st, P.C.V86GL_OBJECT_KIND_BUFFER, 0);
+    st.call("END"); s.process(st.bytes()); assert.equal(q().error, GL.INVALID_OPERATION);
+    const noContext = new GLShadow(), no = new GLStream(), failed = generate(no, P.C.V86GL_OBJECT_KIND_BUFFER, 1); noContext.process(no.bytes()); assert.equal(failed().error, GL.INVALID_OPERATION);
+});
+test("failed object reservation rolls back names and identity counters", () => {
+    const s = new GLShadow(); s.process(scene().bytes()); const next = s.current.group.nextImageId;
+    const create = s.textureObject; let calls = 0;
+    s.textureObject = function(name) { if (++calls === 2) throw new RangeError("allocation failed"); return create.call(this, name); };
+    const st = new GLStream(), q = generate(st, P.C.V86GL_OBJECT_KIND_TEXTURE, 3); s.process(st.bytes());
+    assert.equal(q().error, GL.OUT_OF_MEMORY); assert.deepEqual(q().values, [0xA5A5A5A5, 0xA5A5A5A5, 0xA5A5A5A5]);
+    assert.equal(s.current.group.textures.size, 0); assert.equal(s.current.group.textureImages.size, 0);
+    assert.equal(s.current.group.nextImageId, next); assert.equal(s.current.group.nameCursors.size, 0);
+});
+(async () => { for (const { name, fn } of tests) { try { await fn(); console.log("ok   " + name); }
+    catch (e) { console.error("FAIL " + name + "\n" + e.stack); process.exitCode = 1; return; } }
+console.log(tests.length + " CPU name allocation tests passed"); })();
