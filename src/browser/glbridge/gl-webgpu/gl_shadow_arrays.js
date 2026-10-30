@@ -95,19 +95,25 @@
     const draws = new Set([P.GLFN.DRAW_ARRAYS, P.GLFN.DRAW_ELEMENTS,
         P.GLFN.DRAW_ARRAYS_GL2, P.GLFN.DRAW_ELEMENTS_GL2, P.GLFN.DRAW_ARRAYS_DIRECT, P.GLFN.DRAW_ELEMENTS_DIRECT,
         P.GLFN.DRAW_RANGE_ELEMENTS_DIRECT, P.GLFN.MULTI_DRAW_ARRAYS_DIRECT, P.GLFN.MULTI_DRAW_ELEMENTS_DIRECT]);
+    GLShadow.prototype.arrayInputError = function(fn) {
+        const c = this.current, a = c.state.arrays, mapped = array => c.group.bufferObjects.get(array.bufferId)?.mapped;
+        if (a.generic.some(array => array.enabled && mapped(array))) return GL.INVALID_OPERATION;
+        for (const [key, , , , enable] of definitions) {
+            if (key === "texCoord") { if (a.texCoord.some((array, i) => c.state.raster.texcoord[i] && mapped(array))) return GL.INVALID_OPERATION; }
+            else if (c.state.raster.client[enable] && mapped(a[key])) return GL.INVALID_OPERATION;
+        }
+        if (P.NAME_BY_OPCODE[fn].includes("ELEMENTS") && this.boundBuffer(GL.ELEMENT_ARRAY_BUFFER)?.mapped) return GL.INVALID_OPERATION;
+        return 0;
+    };
     GLShadow.part({
         context(c) { c.state.arrays = arrays(); },
         setState(s) { for (const c of s.contexts.values()) if (!c.state.arrays) c.state.arrays = arrays(); },
         checkCommand(s, fn) {
             if (!draws.has(fn)) return 0;
-            const c = s.current, a = c.state.arrays, mapped = array => c.group.bufferObjects.get(array.bufferId)?.mapped;
-            if (a.generic.some(array => array.enabled && mapped(array))) return GL.INVALID_OPERATION;
-            for (const [key, , , , enable] of definitions) {
-                if (key === "texCoord") { if (a.texCoord.some((array, i) => c.state.raster.texcoord[i] && mapped(array))) return GL.INVALID_OPERATION; }
-                else if (c.state.raster.client[enable] && mapped(a[key])) return GL.INVALID_OPERATION;
-            }
-            if (P.NAME_BY_OPCODE[fn].includes("ELEMENTS") && s.boundBuffer(GL.ELEMENT_ARRAY_BUFFER)?.mapped) return GL.INVALID_OPERATION;
-            return 0;
+            // List draws own captured client bytes. Unrelated VBO mapping at
+            // call time does not participate in those frozen inputs.
+            if (s.current.listExecution && [P.GLFN.DRAW_ARRAYS, P.GLFN.DRAW_ELEMENTS, P.GLFN.DRAW_ARRAYS_GL2, P.GLFN.DRAW_ELEMENTS_GL2].includes(fn)) return 0;
+            return s.arrayInputError(fn);
         },
         command(s, fn, bytes, view, offset) {
             const c = s.current; if (!c) return;

@@ -6,6 +6,7 @@
     const { GL } = global.GLWGConstants || require("./gl_constants.js");
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const state = global.V86GLShadowState || require("./gl_shadow_state.js");
+    const arrays = global.GLListArrays || require("./gl_list_arrays.js");
     const INDEX = 0x0B33, MODE = 0x0B30, NESTING = 0x0B31;
     const MAX_DEPTH = 64, MAX_EXPANSION = 64 * 1024 * 1024;
     const immediateNames = new Set(("PIXEL_STOREI PIXEL_STOREF READ_PIXELS FINISH FLUSH CLIENT_ACTIVE_TEXTURE " +
@@ -101,17 +102,14 @@
                 return { commands: [] };
             }
             if (c.listCompile && !c.listExecution && !immediate(fn, bytes, view, offset)) {
-                // Build a fresh header: bytes before a payload may belong to a
-                // preceding record and must never determine this record's size.
-                const extended = size >= 0xFFFF, copy = new Uint8Array(size + (extended ? 8 : 4)), v = new DataView(copy.buffer);
-                v.setUint16(0, fn, true); v.setUint16(2, extended ? 0xFFFF : size, true); if (extended) v.setUint32(4, size, true);
-                copy.set(bytes.subarray(offset, offset + size), copy.length - size);
-                c.listCompile.entries.push(Array.from(copy));
+                const records = arrays.capture(s, fn, bytes, view, offset, size) ||
+                    [arrays.record(fn, [bytes.subarray(offset, offset + size)])];
+                for (const copy of records) c.listCompile.entries.push(Array.from(copy));
                 if (fn === P.GLFN.BEGIN) c.listCompile.begin = true;
                 if (fn === P.GLFN.END) c.listCompile.begin = false;
                 if (c.listCompile.mode === GL.COMPILE) return { commands: [] };
                 const execution = c.listExecution; c.listExecution = { depth: 0, bytes: 0 };
-                try { return { commands: s.expand(copy) }; } finally { c.listExecution = execution; }
+                try { return { commands: records.flatMap(copy => s.expand(copy)) }; } finally { c.listExecution = execution; }
             }
             if (control) {
                 if (r.operation === 3) return { commands: execute(s, r.name) };

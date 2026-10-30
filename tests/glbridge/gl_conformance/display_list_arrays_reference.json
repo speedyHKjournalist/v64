@@ -1,0 +1,5 @@
+{"renderer":"Apple M1 Pro","cases":[
+{"name":"arrays_frozen","pixel":[0,255,0,255],"error":0},
+{"name":"elements_frozen","pixel":[0,0,255,255],"error":0},
+{"name":"range_frozen","pixel":[0,0,255,255],"error":0}
+]}
