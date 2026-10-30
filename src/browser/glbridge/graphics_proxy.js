@@ -279,6 +279,12 @@
                         ...(inline ? { inlineId: message.id } : {}) },
                         channel.remote ? [data.buffer] : undefined);
                 },
+                onVertexCapture: result => {
+                    if (batchEpoch !== epoch || bridge.destroyed) return;
+                    const values = result.values && new Float32Array(result.values);
+                    channel.post({ type: "gl_vertex_result", generation, job: result.job, first: result.first, error: result.error, values },
+                        channel.remote && values ? [values.buffer] : undefined);
+                },
             };
             const pushAccepted = () => {
                 if (!message.segments) return bridge.pushPCIBatch(event);

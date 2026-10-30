@@ -266,6 +266,7 @@
         ["QUERY_RENDER_MODE", 239, null, "u:operation i:size u:type u:pointer u:offset u:data_size u:status u:error i:result u:ticket u:total"],
         ["NAME_COMMAND", 240, null, "u:operation u:name f:value"],
         ["RESOLVED_RASTER_STATE", 241, null, "u:valid f:position[4] f:color[4]"],
+        ["CAPTURE_VERTICES", 242, null, "u:job u:first u:count u:total"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

@@ -123,6 +123,7 @@
     const BUFFER_USAGE_INDEX = 0x0010;
     const BUFFER_USAGE_VERTEX = 0x0020;
     const BUFFER_USAGE_UNIFORM = 0x0040;
+    const BUFFER_USAGE_STORAGE = 0x0080;
     const BUFFER_USAGE_QUERY_RESOLVE = 0x0200;
     /* D-07. Matches V86GL_QUERY_VISIBLE_SAMPLES in the guest, which uses the
      * same value when it has to answer a blocking GL_QUERY_RESULT itself. */
@@ -255,9 +256,9 @@
         }
     }
 
-    function activeShaderBindings(wgslVertex, wgslFragment) {
+    function activeShaderBindings(wgslVertex, wgslFragment, vertexEntry = "vs_main") {
         const result = new Set();
-        collectReachableWgslBindings(wgslVertex, "vs_main", result);
+        collectReachableWgslBindings(wgslVertex, vertexEntry, result);
         collectReachableWgslBindings(wgslFragment, "fs_main", result);
         return result;
     }
@@ -2629,6 +2630,9 @@
             current.rasterValid = !!r.valid; current.rasterPos.set(r.position); current.rasterColor.set(r.color);
         });
         define("END", function() { this.endImmediate(); });
+        define("CAPTURE_VERTICES", function(a, bytes, view, offset, size, metadata) {
+            this.captureVertices(bytes, view, offset, size, metadata);
+        });
         define("COLOR4F", function(a) {
             this.current.current.color.set([a[0], a[1], a[2], a[3]]);
             this.latchColorMaterial();
@@ -5510,6 +5514,65 @@
         },
 
         /* ---- programs ---- */
+
+        vertexCaptureShaders() {
+            const program = this.currentProgramObject();
+            if (program?.compiled.vertex) {
+                const link = translator.linkVertexCapture(program.compiled.vertex, { bindAttribLocations: this.attribBindings(program) });
+                if (!link.ok) throw new Error(link.log);
+                return { kind: "program", program, capture: true, key: "capture:" + link.cacheKey, wgslVertex: link.wgslCompute, wgslFragment: "",
+                    reflection: link.reflection, stateFields: link.reflection.stateFields, uniformBytes: link.reflection.uniformBlockBytes };
+            }
+            const vertex = this.current.enabled.has(GL.VERTEX_PROGRAM_ARB) && this.arbProgramFor(GL.VERTEX_PROGRAM_ARB);
+            if (!vertex?.compiled?.ok) throw new Error("vertex capture has no installed vertex program");
+            const compiled = arbProgram.compileARBProgram(vertex.source, { vertexCapture: true });
+            if (!compiled.ok) throw new Error(compiled.log);
+            return { kind: "arb", capture: true, key: "capture-arb:" + compiled.wgsl, wgslVertex: compiled.wgsl, wgslFragment: "",
+                stateFields: compiled.reflection.stateFields, arbVertex: vertex, textures: [] };
+        },
+
+        captureVertices(bytes, view, offset, size, metadata) {
+            const r = protocol.decodeRecord("CAPTURE_VERTICES", view, offset), owned = [], notify = result => {
+                if (metadata?.isMemoryValid && !metadata.isMemoryValid()) return;
+                if (typeof metadata?.onVertexCapture !== "function") throw new Error("vertex capture has no CPU result channel");
+                metadata.onVertexCapture({ job: r.job, first: r.first, ...result });
+            };
+            let read;
+            try {
+                if (!r.job || !r.count || r.count > 256 || r.first % 256 || r.first + r.count > r.total || size !== 16 + r.count * 256)
+                    throw new GLStreamError("invalid bounded vertex capture record");
+                this.flushFrame();
+                const shaders = this.vertexCaptureShaders();
+                const created = this.gpuErrors.scoped("vertex capture", () => {
+                    const buffer = (size, usage) => { const b = this.device.createBuffer({ size, usage }); owned.push(b); return b; };
+                    const input = buffer(r.count * 256, BUFFER_USAGE_STORAGE | BUFFER_USAGE_COPY_DST),
+                        output = buffer(r.count * 80, BUFFER_USAGE_STORAGE | BUFFER_USAGE_COPY_SRC);
+                    read = buffer(output.size, BUFFER_USAGE_MAP_READ | BUFFER_USAGE_COPY_DST);
+                    this.device.queue.writeBuffer(input, 0, bytes.subarray(offset + 16, offset + size));
+                    const module = this.device.createShaderModule({ code: shaders.wgslVertex }),
+                        pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "capture_main" } });
+                    pipeline.glActiveBindings = activeShaderBindings(shaders.wgslVertex, "", "capture_main");
+                    const groups = this.buildBindGroups(pipeline, shaders);
+                    if (!groups) throw new Error("could not bind vertex capture resources");
+                    const encoder = this.device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline);
+                    for (let index = 0; index < 4; ++index) {
+                        const group = groups.find(entry => entry.index === index)?.group || this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(index),
+                            entries: index === 3 ? [{ binding: 0, resource: { buffer: input } }, { binding: 1, resource: { buffer: output } }] : [] });
+                        pass.setBindGroup(index, group);
+                    }
+                    pass.dispatchWorkgroups(Math.ceil(r.count / 64)); pass.end();
+                    encoder.copyBufferToBuffer(output, 0, read, 0, output.size); this.device.queue.submit([encoder.finish()]);
+                }, { job: r.job, first: r.first });
+                const done = Promise.all([read.mapAsync(1), created.checked]).then(([, error]) => {
+                    if (error) throw new Error(error);
+                    return new Float32Array(read.getMappedRange()).slice();
+                });
+                this.trackReadback(this.awaitReadback(done, "vertex capture", () => read.destroy()).then(values => notify({ values }), error => notify({ error: String(error) }))
+                    .finally(() => { for (const object of owned) object.destroy(); }));
+            } catch (error) {
+                for (const object of owned) object.destroy(); notify({ error: String(error) });
+            }
+        },
 
         collectGLShader(group, shader) {
             if (!shader.deleted) return;
@@ -8636,7 +8699,7 @@ ${fragmentCode}`;
                         group: this.cachedBindGroup(pipeline, 2, textureEntries),
                     });
                 }
-                if (this.current.enabled.has(GL.COLOR_LOGIC_OP) &&
+                if (!shaders.capture && this.current.enabled.has(GL.COLOR_LOGIC_OP) &&
                         this.current.logicOp !== GL.COPY) {
                     const views = this.logicTargetViews || [];
                     const logicEntries = Array.from({

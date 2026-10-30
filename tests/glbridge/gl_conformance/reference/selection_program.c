@@ -2,6 +2,7 @@
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
 #include <stdio.h>
+#include <string.h>
 
 static int first = 1;
 static GLuint program(int fragment) {
@@ -20,7 +21,7 @@ static void report(const char *name,int feedback,int triangle){
     if(triangle){glVertex3f(-0.25f,-0.5f,0);glVertex3f(0,0.5f,0);glVertex3f(0.25f,-0.5f,0);}else glVertex3f(feedback?0.25f:0.75f,0,0);
     glEnd();GLint result=glRenderMode(GL_RENDER);
     printf("%s{\"name\":\"%s\",\"result\":%d,\"error\":%u,\"values\":[",first?"":",\n",name,result,glGetError());first=0;
-    int count=feedback&&result>0?result:result>0?4:0;for(int i=0;i<count;i++)printf("%s%.9g",i?",":"",feedback?values[i]:(double)words[i]);printf("]}");
+    int count=feedback&&result>0?result:result>0?4:0;for(int i=0;i<count;i++){if(feedback)printf("%s%.9g",i?",":"",values[i]);else printf("%s%u",i?",":"",words[i]);}printf("]}");
 }
 int main(void){
     CGLPixelFormatAttribute a[]={kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_Legacy,0};CGLPixelFormatObj pf;CGLContextObj ctx;GLint n;
@@ -33,5 +34,12 @@ int main(void){
         glEnable(GL_VERTEX_PROGRAM_TWO_SIDE);snprintf(label,sizeof(label),"glsl_%s_back",fragment?"fragment":"vertex");report(label,1,1);glDisable(GL_VERTEX_PROGRAM_TWO_SIDE);
         glUseProgram(0);glDeleteProgram(p);
     }
+    GLuint vp;glGenProgramsARB(1,&vp);glBindProgramARB(GL_VERTEX_PROGRAM_ARB,vp);
+    const char *assembly="!!ARBvp1.0\nMUL result.position,vertex.position,program.env[0];MOV result.color.front.primary,program.local[0];MOV result.color.back.primary,vertex.color;ADD result.texcoord[0],vertex.texcoord[0],vertex.texcoord[1];END";
+    glProgramStringARB(GL_VERTEX_PROGRAM_ARB,GL_PROGRAM_FORMAT_ASCII_ARB,(GLsizei)strlen(assembly),assembly);
+    glProgramEnvParameter4fARB(GL_VERTEX_PROGRAM_ARB,0,2,1,1,1);glProgramLocalParameter4fARB(GL_VERTEX_PROGRAM_ARB,0,2,-1,0.5,1);glColor4f(0.25,0.5,0.75,1);glEnable(GL_VERTEX_PROGRAM_ARB);
+    report("arb_select",0,0);report("arb_feedback",1,0);glEnable(GL_VERTEX_PROGRAM_TWO_SIDE);report("arb_back",1,1);glDisable(GL_VERTEX_PROGRAM_TWO_SIDE);
+    GLuint p=program(0);glUniform1f(glGetUniformLocation(p,"scale"),0.5);report("glsl_over_arb_select",0,0);glUseProgram(0);glDeleteProgram(p);
+    glDisable(GL_VERTEX_PROGRAM_ARB);glDeleteProgramsARB(1,&vp);
     printf("\n]}\n");CGLSetCurrentContext(NULL);CGLDestroyContext(ctx);CGLDestroyPixelFormat(pf);return 0;
 }

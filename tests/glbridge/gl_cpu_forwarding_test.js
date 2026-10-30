@@ -7,6 +7,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_lists.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_select.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_glslang.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js");
 require("../../src/browser/glbridge/v86_network_bridge.js");
 const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
 const { createV86GLDevice } = require("../../src/browser/glbridge/v86gl_device.js");
@@ -15,6 +16,7 @@ const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_ex
 const { createFakeHost } = require("./gl_fake_gpu.js"), { GLStream, GL } = require("./gl_stream_builder.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const selectionCases = require("./gl_selection_cases.js");
+const programCases = require("./gl_selection_program_cases.js");
 const wasm = new WebAssembly.Module(fs.readFileSync(path.join(__dirname, "../../bios/glslang.wasm")));
 // Exercise the expansion boundary independently of a particular list/evaluator
 // implementation: generated commands must still pass normal CPU validation.
@@ -95,6 +97,32 @@ function opcodes(bytes) {
         selected = selectionCases.read(feeding.result); await submit(selected.stream);
         assert.deepEqual(feeding.expected, Array.from({ length: 5 }, (_, i) => selected.response.view.getFloat32(44 + i * 4, true)));
         assert.deepEqual(Array.from(gpu.current.current.rasterPos), [4, 6, 0.5, 1]);
+        // Keep the real device/proxy/bridge, replacing only GPU execution:
+        // real compute output is checked by gl_validation_browser_test.html.
+        const nativeCapture = gpu.captureVertices, callbacks = [];
+        let holdCapture = false;
+        gpu.captureVertices = function(bytes, view, offset, size, metadata) {
+            const r = P.decodeRecord("CAPTURE_VERTICES", view, offset), values = new Float32Array(r.count * 20);
+            for (let i = 0; i < r.count; ++i) {
+                const at = offset + 16 + i * 256, position = Array.from({ length: 4 }, (_, k) => view.getFloat32(at + k * 4, true));
+                values.set([position[0] * 2, ...position.slice(1), 1, 0, 0.5, 1, 0.25, 0.5, 0.75, 1, 5, 5, 5, 5, ...position], i * 20);
+            }
+            const done = () => metadata.onVertexCapture({ job: r.job, first: r.first, values });
+            if (holdCapture) callbacks.push(done); else this.trackReadback(Promise.resolve().then(done));
+        };
+        const setupProgram = programCases.setup(); await submit(setupProgram.stream);
+        const scale = setupProgram.location.view.getInt32(P.F.QUERY_LOCATION.result, true), programmed = programCases.draw("glsl_vertex_feedback", scale);
+        await submit(programmed.stream);
+        assert.equal(programmed.response.view.getUint32(P.F.QUERY_RENDER_MODE.status, true), 1, "CPU receives GPU output through the actual result channel");
+        assert.equal(programmed.response.view.getInt32(P.F.QUERY_RENDER_MODE.result, true), 13);
+        selected = programCases.read(programmed.response); await submit(selected.stream);
+        assert.deepEqual(Array.from({ length: 13 }, (_, i) => selected.response.view.getFloat32(44 + i * 4, true)), [1793, 48, 32, 0.5, 1, 1, 0, 0.5, 1, 5, 5, 5, 5]);
+        holdCapture = true;
+        const expired = programCases.draw("glsl_vertex_feedback", scale); await submit(expired.stream);
+        assert.equal(expired.response.view.getUint32(P.F.QUERY_RENDER_MODE.status, true), 0);
+        await submit(new GLStream().call("LINE_WIDTH", 3)); const newerMemory = memory.slice(0, 1024);
+        callbacks.shift()(); assert.deepEqual(memory.subarray(0, 1024), newerMemory, "expired CPU result cannot overwrite a later arena submission");
+        gpu.captureVertices = nativeCapture; await submit(new GLStream().call("USE_PROGRAM", 0).makeCurrent(1300, 0, 0, 32, 32, 1300, 1300).call("CLEAR", GL.COLOR_BUFFER_BIT));
         gpu.current.error = GL.INVALID_ENUM; await error(GL.INVALID_ENUM); await error(GL.NO_ERROR);
         gpu.current.error = GL.INVALID_ENUM;
         await submit(new GLStream().call("LINE_WIDTH", -2));

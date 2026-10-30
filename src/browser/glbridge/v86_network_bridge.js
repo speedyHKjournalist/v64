@@ -327,6 +327,7 @@
                     event.batchAddr >>> 0,
                 responseBase: event.responseBase,
                 writeGuestMemory: event.writeGuestMemory,
+                onVertexCapture: event.onVertexCapture,
                 isMemoryValid: event.isMemoryValid,
                 isInlineMemoryValid: event.isInlineMemoryValid,
                 graphicsGeneration: this.memoryGeneration,

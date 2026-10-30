@@ -79,6 +79,15 @@
         let processing = false;
         let processAgain = false;
 
+        if (shadow) shadow.writeResponse = (target, bytes, statusOffset) => {
+            if (target.generation !== arenaGeneration || target.batchId !== nextBatch || !arenaBytes) return;
+            const offset = HEADER_BYTES + target.offset;
+            if (offset < HEADER_BYTES || offset + bytes.length > arenaBytes) return;
+            dev.write_memory(bytes.subarray(0, statusOffset), arenaAddress + offset);
+            dev.write_memory(bytes.subarray(statusOffset + 4), arenaAddress + offset + statusOffset + 4);
+            dev.write_memory(bytes.subarray(statusOffset, statusOffset + 4), arenaAddress + offset + statusOffset);
+        };
+
         function releaseArena() {
             ++arenaGeneration;
             arenaAddress = 0;
@@ -124,6 +133,10 @@
                     processQueue();
                     break;
                 }
+                case "gl_vertex_result":
+                    if (message.generation === arenaGeneration && arenaBytes && shadow?.completeVertexCapture)
+                        shadow.completeVertexCapture(message);
+                    break;
                 case "capabilities":
                     // (a restored snapshot's stand: the guest was told those)
                     if (shadow && !shadow.capabilities) shadow.setCapabilities(message.value);
@@ -246,7 +259,7 @@
             let segments;
             if (shadow && !(length >= HEADER_BYTES + 4 && (header.getUint16(HEADER_BYTES, true) & 0xFFF0) === 0xFFE0 &&
                     header.getUint16(HEADER_BYTES + 2, true) === 0xFFFF))
-                segments = shadow.process(raw.subarray(HEADER_BYTES));
+                segments = shadow.process(raw.subarray(HEADER_BYTES), { generation: arenaGeneration, batchId: nextBatch + 1 });
 
             const id = ++nextBatch;
             // Across threads a copy the renderer owns; never the guest's memory

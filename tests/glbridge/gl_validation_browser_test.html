@@ -47,6 +47,8 @@
 <script src="gl_display_list_array_cases.js"></script>
 <script src="gl_display_list_pixel_cases.js"></script>
 <script src="gl_selection_cases.js"></script>
+<script src="gl_vertex_capture_cases.js"></script>
+<script src="gl_selection_program_cases.js"></script>
 <script>
 (async () => {
     "use strict";
@@ -874,7 +876,28 @@
             }
             check(!shadow.current.error && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "selection/feedback host failure");
         }
-        document.getElementById("result").textContent = "PASS -- CPU selection/feedback, validation/forwarding, captured display lists, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
+        const selectionPrograms = await (await fetch("gl_conformance/selection_program_reference.json")).json();
+        for (const remote of [false, true]) for (const entry of selectionPrograms.cases) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            shadow.setGlslang(new V86GLGlslang.Glslang(compiler)); await executor.initialize(); shadow.setCapabilities(executor.capabilities());
+            const submit = async stream => {
+                const memory = stream.bytes(), segments = shadow.process(memory);
+                for (const segment of segments || [{ offset: 0, length: memory.length }]) {
+                    const bytes = segment.bytes || memory.subarray(segment.offset, segment.offset + segment.length);
+                    executor.submit(remote ? bytes.slice() : bytes, { onVertexCapture: result => shadow.completeVertexCapture(result) });
+                }
+                await executor.idle();
+            };
+            const setup = GLSelectionProgramCases.setup(entry.name.includes("fragment"), entry.name.startsWith("arb_") ? "arb" : entry.name === "glsl_over_arb_select" ? "both" : "glsl"); await submit(setup.stream);
+            const draw = GLSelectionProgramCases.draw(entry.name, setup.location ? setup.location.view.getInt32(P.F.QUERY_LOCATION.result, true) : null); await submit(draw.stream);
+            check(draw.response.view.getUint32(P.F.QUERY_RENDER_MODE.status, true) === 1 && draw.response.view.getInt32(P.F.QUERY_RENDER_MODE.result, true) === entry.result, entry.name + " programmable result");
+            const read = GLSelectionProgramCases.read(draw.response); if (read.response) {
+                await submit(read.stream); check(entry.values.every((value, i) => Math.abs(value - read.response.view[entry.name.endsWith("select") ? "getUint32" : "getFloat32"](44 + i * 4, true)) <=
+                    (entry.name.endsWith("select") && (i === 1 || i === 2) ? 128 : 0.000001)), entry.name + " native programmable feedback");
+            }
+            check(!shadow.current.error && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, entry.name + " programmable host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU fixed/programmable selection/feedback, validation/forwarding, captured display lists, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

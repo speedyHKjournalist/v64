@@ -108,6 +108,8 @@
 
         // A new owner of the arena, or a reset machine: no contexts
         reset() {
+            this.responseTargets = new Map();
+            this.nextResponseTarget = 0;
             this.contexts = new Map();
             this.groups = new Map();
             this.nextGroup = 1;
@@ -134,7 +136,29 @@
          * written into). A malformed stream stops the walk: the executor
          * reports it.
          */
-        process(bytes) {
+        process(bytes, metadata = this.batchMetadata) {
+            const previous = this.batchMetadata;
+            this.batchMetadata = metadata;
+            try { return this.processBatch(bytes); }
+            finally { this.batchMetadata = previous; }
+        }
+
+        deferResponse(view, offset, length, local = false) {
+            if (this.batchMetadata && !local) return { ...this.batchMetadata, offset };
+            const id = ++this.nextResponseTarget;
+            this.responseTargets.set(id, new Uint8Array(view.buffer, view.byteOffset + offset, length));
+            return { localId: id };
+        }
+
+        completeResponse(target, bytes, statusOffset) {
+            if (target.localId) {
+                const output = this.responseTargets.get(target.localId);
+                this.responseTargets.delete(target.localId);
+                if (output) { output.set(bytes.subarray(0, statusOffset)); output.set(bytes.subarray(statusOffset + 4), statusOffset + 4); output.set(bytes.subarray(statusOffset, statusOffset + 4), statusOffset); }
+            } else if (this.writeResponse) this.writeResponse(target, bytes, statusOffset);
+        }
+
+        processBatch(bytes) {
             ++this.stats.batches;
             const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             const end = bytes.byteLength;
