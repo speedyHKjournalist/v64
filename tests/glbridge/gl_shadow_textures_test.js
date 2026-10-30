@@ -377,6 +377,76 @@ test("subimage payload failures preserve mipmaps and valid border offsets are ac
     }
 });
 
+function copySetup() {
+    return scene().call("BIND_TEXTURE", GL.TEXTURE_2D, 100)
+        .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0))
+        .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 1)
+        .call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 100, 0, 0)
+        .call("BIND_RENDERBUFFER", GL.RENDERBUFFER_EXT, 1).call("RENDERBUFFER_STORAGE", GL.RENDERBUFFER_EXT, GL.DEPTH_COMPONENT16, 4, 4)
+        .call("FRAMEBUFFER_RENDERBUFFER", GL.FRAMEBUFFER_EXT, GL.DEPTH_ATTACHMENT, GL.RENDERBUFFER_EXT, 1)
+        .call("BIND_TEXTURE", GL.TEXTURE_2D, 2);
+}
+
+test("CopyTexImage and CopyTexSubImage use native parameter and read-framebuffer errors", () => {
+    const native = require("./gl_conformance/texture_copies_reference.json").cases;
+    for (const [key, args, sub] of [
+        ["valid", [GL.TEXTURE_2D, 0, GL.RGBA8, 0, 0, 2, 2, 0]],
+        ["target", [GL.TEXTURE_CUBE_MAP, 0, GL.RGBA8, 0, 0, 2, 2, 0]],
+        ["negative_level", [GL.TEXTURE_2D, -1, GL.RGBA8, 0, 0, 2, 2, 0]],
+        ["negative_width", [GL.TEXTURE_2D, 0, GL.RGBA8, 0, 0, -1, 2, 0]],
+        ["bad_border", [GL.TEXTURE_2D, 0, GL.RGBA8, 0, 0, 2, 2, 2]],
+        ["bad_internal", [GL.TEXTURE_2D, 0, 0, 0, 0, 2, 2, 0]],
+        ["legacy_internal", [GL.TEXTURE_2D, 0, 1, 0, 0, 2, 2, 0]],
+        ["cube_rectangle", [GL.TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL.RGBA8, 0, 0, 4, 2, 0]],
+        ["depth", [GL.TEXTURE_2D, 0, GL.DEPTH_COMPONENT16, 0, 0, 2, 2, 0]],
+        ["outside_source", [GL.TEXTURE_2D, 0, GL.RGBA8, -2, -2, 2, 2, 0]],
+        ["sub_valid", [GL.TEXTURE_2D, 0, 1, 1, 0, 0, 2, 2], true],
+        ["undefined_level", [GL.TEXTURE_2D, 1, 0, 0, 0, 0, 1, 1], true],
+        ["negative_offset", [GL.TEXTURE_2D, 0, -1, 0, 0, 0, 1, 1], true],
+        ["past_edge", [GL.TEXTURE_2D, 0, 3, 0, 0, 0, 2, 1], true],
+        ["empty_at_edge", [GL.TEXTURE_2D, 0, 4, 0, 0, 0, 0, 1], true],
+        ["read_none_color", [GL.TEXTURE_2D, 0, GL.RGBA8, 0, 0, 2, 2, 0]],
+        ["read_none_depth", [GL.TEXTURE_2D, 0, GL.DEPTH_COMPONENT16, 0, 0, 2, 2, 0]],
+        ["missing_depth", [GL.TEXTURE_2D, 0, GL.DEPTH_COMPONENT16, 0, 0, 2, 2, 0]],
+        ["incomplete_source", [GL.TEXTURE_2D, 0, GL.RGBA8, 0, 0, 2, 2, 0]],
+    ]) {
+        const s = shadow(), initial = copySetup();
+        if (sub) initial.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0));
+        if (key.startsWith("read_none")) initial.call("READ_BUFFER", GL.NONE);
+        if (["missing_depth", "incomplete_source"].includes(key)) initial.call("FRAMEBUFFER_RENDERBUFFER", GL.FRAMEBUFFER_EXT, GL.DEPTH_ATTACHMENT, GL.RENDERBUFFER_EXT, 0);
+        if (key === "incomplete_source") initial.call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 0, 0, 0);
+        s.process(initial.bytes()); assert.equal(s.current.error, 0);
+        const texture = s.current.group.textures.get(2), before = texture.levels.get(0)?.get(0);
+        s.process(new GLStream().call(sub ? "COPY_TEX_SUB_IMAGE_2D" : "COPY_TEX_IMAGE_2D", ...args).bytes());
+        assert.equal(s.current.error, native[key], key); assert.equal(s.stats.rejected, +!!native[key], key);
+        if (native[key]) assert.equal(texture.levels.get(0)?.get(0), before, key + " changed the destination");
+        if (!native[key] && !sub) assert.equal(texture.levels.get(0).get(0).width, 2);
+    }
+});
+
+test("copy ranges include 1D, cube faces, 3D slices and split read/draw framebuffer selection", () => {
+    const s = shadow(), initial = copySetup();
+    initial.call("BIND_FRAMEBUFFER", GL.DRAW_FRAMEBUFFER, 9);
+    initial.call("COPY_TEX_IMAGE_1D", GL.TEXTURE_1D, 0, GL.RGB8, 0, 0, 4, 0);
+    initial.call("COPY_TEX_IMAGE_2D", GL.TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL.RGBA8, 0, 0, 4, 4, 0);
+    upload(initial, "TEX_IMAGE_3D", { target: GL.TEXTURE_3D, depth: 2 }); s.process(initial.bytes());
+    assert.equal(s.current.error, 0, "an incomplete draw FBO does not prevent a valid read copy");
+    for (const args of [["COPY_TEX_SUB_IMAGE_1D", GL.TEXTURE_1D, 0, 3, 0, 0, 1],
+        ["COPY_TEX_SUB_IMAGE_2D", GL.TEXTURE_CUBE_MAP_POSITIVE_X, 0, 3, 3, 0, 0, 1, 1],
+        ["COPY_TEX_SUB_IMAGE_3D", GL.TEXTURE_3D, 0, 3, 3, 1, 0, 0, 1, 1]]) {
+        s.process(new GLStream().call(...args).bytes()); assert.equal(s.current.error, 0);
+    }
+    s.process(new GLStream().call("COPY_TEX_SUB_IMAGE_3D", GL.TEXTURE_3D, 0, 0, 0, 2, 0, 0, 1, 1).bytes());
+    assert.equal(s.current.error, GL.INVALID_VALUE);
+    for (const sub of [false, true]) {
+        const current = shadow(), stream = copySetup();
+        if (sub) upload(stream, "TEX_IMAGE_2D", { internalformat: GL.COLOR_INDEX8_EXT, format: GL.COLOR_INDEX });
+        stream.call(sub ? "COPY_TEX_SUB_IMAGE_2D" : "COPY_TEX_IMAGE_2D", GL.TEXTURE_2D, 0,
+            ...(sub ? [0, 0, 0, 0, 1, 1] : [GL.COLOR_INDEX8_EXT, 0, 0, 1, 1, 0]));
+        current.process(stream.bytes()); assert.equal(current.current.error, sub ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
+    }
+});
+
 (async () => {
     for (const { name, fn } of tests) {
         try { await fn(); console.log("ok   " + name); }

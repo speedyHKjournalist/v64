@@ -46,6 +46,21 @@
         return (dimensions >= 3 ? value(GL.UNPACK_SKIP_IMAGES) * imageStride : 0) + value(GL.UNPACK_SKIP_ROWS) * stride +
             Math.floor(skipBits / 8) + (depth - 1) * imageStride + (height - 1) * stride + Math.ceil((skipBits % 8 + r.width * bits) / 8);
     }
+    function blockRegionError(info, r, compressed) {
+        const block = formats.COMPRESSED_FORMATS[info.internalFormat];
+        if (!(info.compressed ?? !!block) || !block) return 0;
+        if (r.xoffset % 4 || r.yoffset % 4) return GL.INVALID_OPERATION;
+        if ((compressed || r.xoffset || r.yoffset) &&
+            (r.width % 4 && r.xoffset + r.width !== info.width || r.height % 4 && r.yoffset + r.height !== info.height))
+            return GL.INVALID_OPERATION;
+        return 0;
+    }
+    function copySourceError(s, internalFormat) {
+        if (s.framebufferStatus(GL.READ_FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE) return GL.INVALID_FRAMEBUFFER_OPERATION;
+        const base = formats.storageFormatFor(internalFormat).base;
+        if (base === "DEPTH") return s.current.readFramebuffer && !s.boundFramebuffer(GL.READ_FRAMEBUFFER).depth ? GL.INVALID_OPERATION : 0;
+        return base === "COLOR_INDEX" || s.current.readBuffer === GL.NONE ? GL.INVALID_OPERATION : 0;
+    }
     for (const dimensions of [1, 2, 3]) for (const compressed of [false, true]) {
         const name = (compressed ? "COMPRESSED_TEX_IMAGE_" : "TEX_IMAGE_") + dimensions + "D";
         GLShadow.rules({ [P.GLFN[name]]: (s, b, v, o, size) => {
@@ -106,18 +121,45 @@
                 if ((base === "DEPTH") !== (r.format === GL.DEPTH_COMPONENT) || base === "COLOR_INDEX" && r.format !== GL.COLOR_INDEX)
                     return GL.INVALID_OPERATION;
             }
-            if (isCompressed && block) {
-                if (r.xoffset % 4 || r.yoffset % 4) return GL.INVALID_OPERATION;
-                if ((compressed || r.xoffset || r.yoffset) &&
-                    (r.width % 4 && r.xoffset + r.width !== info.width || r.height % 4 && r.yoffset + r.height !== info.height))
-                    return GL.INVALID_OPERATION;
-            }
+            const regionError = blockRegionError(info, r, compressed); if (regionError) return regionError;
             const bytes = compressed ? r.image_size : r.data_size;
             if (P.RECORDS[name].size + bytes > size) return GL.INVALID_VALUE;
             if (!compressed && bytes && bytes < uploadSpan(s.current, r, dimensions)) return GL.INVALID_OPERATION;
             return 0;
         } });
     }
+    for (const dimensions of [1, 2]) state.rule("COPY_TEX_IMAGE_" + dimensions + "D", (c, a, s) => {
+        const [target, level, internalFormat, , , width] = a, height = dimensions === 2 ? a[6] : 1, border = a[dimensions === 2 ? 7 : 6];
+        if (!IMAGE_TARGETS[dimensions].has(target) || formats.PROXY_TARGETS.has(target)) return GL.INVALID_ENUM;
+        const cube = dimensions === 2 && target !== GL.TEXTURE_2D;
+        const maximum = s.capabilities ? caps.integer(s.capabilities, cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 8192;
+        if (level < 0 || level > Math.floor(Math.log2(maximum)) || border < 0 || border > 1) return GL.INVALID_VALUE;
+        const max = Math.max(1, Math.floor(maximum / 2 ** level)) + 2 * border;
+        if (width < 2 * border || width > max || dimensions === 2 && (height < 2 * border || height > max) || cube && width !== height)
+            return GL.INVALID_VALUE;
+        if (internalFormat <= 4 || (!formats.BASE_INTERNAL_FORMATS[internalFormat] && !formats.COMPRESSED_FORMATS[internalFormat]) ||
+            [GL.BGR, GL.BGRA, GL.RGB565].includes(internalFormat) || formats.BASE_INTERNAL_FORMATS[internalFormat] === "COLOR_INDEX")
+            return GL.INVALID_ENUM;
+        if (cube && formats.storageFormatFor(internalFormat).depth) return GL.INVALID_OPERATION;
+        return copySourceError(s, internalFormat);
+    });
+    for (const dimensions of [1, 2, 3]) state.rule("COPY_TEX_SUB_IMAGE_" + dimensions + "D", (c, a, s) => {
+        const [target, level, xoffset] = a;
+        if (!IMAGE_TARGETS[dimensions].has(target) || formats.PROXY_TARGETS.has(target)) return GL.INVALID_ENUM;
+        const cube = dimensions === 2 && target !== GL.TEXTURE_2D;
+        const maximum = s.capabilities ? caps.integer(s.capabilities, dimensions === 3 ? GL.MAX_3D_TEXTURE_SIZE :
+            cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 8192;
+        if (level < 0 || level > Math.floor(Math.log2(maximum))) return GL.INVALID_VALUE;
+        const image = s.boundImage(target), info = image.texture.levels.get(image.layer)?.get(level);
+        if (!info) return GL.INVALID_OPERATION;
+        const width = a[dimensions + 4], height = dimensions >= 2 ? a[dimensions + 5] : 1;
+        const offsets = [xoffset, dimensions >= 2 ? a[3] : 0, dimensions === 3 ? a[4] : 0];
+        const counts = [width, height, 1], bounds = [info.width, info.height, info.depth], border = info.border || 0;
+        if (counts.slice(0, dimensions).some((n, i) => n < 0 || offsets[i] < -border || offsets[i] + n > bounds[i] - border))
+            return GL.INVALID_VALUE;
+        const regionError = blockRegionError(info, { xoffset, yoffset: offsets[1], width, height }, false);
+        return regionError || copySourceError(s, info.internalFormat);
+    });
     function command(name, a) {
         const scalar = name === "TEX_PARAMETERI" || name === "TEX_PARAMETERF";
         return parameters.normalize(a[1], scalar ? [a[2]] : a.slice(3, 3 + a[2]), name.endsWith("I") || name.endsWith("IV"), scalar);

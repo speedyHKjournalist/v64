@@ -1,0 +1,24 @@
+{
+  "renderer":"Apple M1 Pro",
+  "cases":{
+    "valid":0,
+    "target":1280,
+    "negative_level":1281,
+    "negative_width":1281,
+    "bad_border":1281,
+    "bad_internal":1280,
+    "legacy_internal":1280,
+    "cube_rectangle":1281,
+    "depth":0,
+    "outside_source":0,
+    "sub_valid":0,
+    "undefined_level":1282,
+    "negative_offset":1281,
+    "past_edge":1281,
+    "empty_at_edge":0,
+    "read_none_color":1282,
+    "read_none_depth":0,
+    "missing_depth":1282,
+    "incomplete_source":1286
+  }
+}

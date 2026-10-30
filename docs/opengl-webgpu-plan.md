@@ -362,6 +362,11 @@ game.exe
 > - 40 组 Node、26 组站点、8 个 GPU 页面、构建、DLL 和 ESLint 通过；新增变异 6/6、此前上传变异 5/5 被杀死。
 > - **继续推进：** CopyTexImage/SubImage、mipmap 完整校验、GPU 对边框和压缩更新/生成的剩余支持、客体缓存/本地校验收缩，以及其余 C3/C6/C8。C 尚未退出，D–G 尚未整体完成。
 
+> **C3/C6 CopyTexImage/SubImage 校验（2026-10-30）：完成这一批迁移。**
+> - CPU 校验复制目标、层级、尺寸、边框、内部格式、已有图像、子区域及压缩块约束；拒绝 CopyTexImage 的旧式数字格式和调色板格式。无效复制不改变图像元数据，也不触发自动 mipmap。
+> - 复制按独立读 FBO 检查完整性和读缓冲；颜色复制在 ReadBuffer(NONE) 时失败，深度复制要求深度源，绘制 FBO 的状态不影响合法的读操作。19 例原生参照、16 项纹理测试及两种通道的像素保护通过。
+> - 40 组 Node、26 组站点、8 个 GPU 页面、构建、ESLint 通过，新增变异 5/5 被杀死。页面深度/压缩复制的实现及客体 CopyTexImage2D 的同步读回缓存仍待 D4/F1；下一步继续 mipmap 和其余 C3/C6/C8，阶段 C 尚未退出。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

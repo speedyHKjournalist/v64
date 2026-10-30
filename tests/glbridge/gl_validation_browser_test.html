@@ -336,6 +336,29 @@
                 check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "texture update violated validation: " + Array.from(pixel.bytes.subarray(32)));
                 check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "rejected uploads must have no host errors");
             }
+            const copy = new GLStream().makeCurrent(140, 0, 0, 64, 64, 140, 140)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 100).texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0))
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 1)
+                .call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 100, 0, 0)
+                .call("CLEAR_COLOR", 0.2, 0.6, 0.8, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 2).call("COPY_TEX_IMAGE_2D", GL.TEXTURE_2D, 0, GL.RGBA8, 0, 0, 2, 2, 0)
+                .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 0).call("ENABLE", GL.TEXTURE_2D)
+                .call("TEX_ENVI", GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE, GL.REPLACE);
+            shadow.process(copy.bytes()); executor.submit(remote ? copy.bytes().slice() : copy.bytes(), {});
+            for (const valid of [true, false]) {
+                const s = new GLStream();
+                if (!valid) s.call("BIND_FRAMEBUFFER", GL.READ_FRAMEBUFFER, 1)
+                    .call("COPY_TEX_IMAGE_2D", GL.TEXTURE_2D, 0, 1, 0, 0, 1, 1, 0).call("BIND_FRAMEBUFFER", GL.READ_FRAMEBUFFER, 0);
+                s.call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                    .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                    .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                const pixel = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = s.bytes();
+                shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+                check([51, 153, 204, 255].every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "copy or rejected copy changed pixels: " + Array.from(pixel.bytes.subarray(32)));
+                check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "copies must have no host errors");
+            }
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {
