@@ -215,6 +215,7 @@
             [GL.TEXTURE_STACK_DEPTH]: GL.TEXTURE, [GL.COLOR_MATRIX_STACK_DEPTH_SGI]: GL.COLOR }[pname];
         if (depth) return [[(depth === GL.TEXTURE ? state.texture[c.activeTexture || 0] : state.stacks[depth]).length], "i"];
         if (pname === GL.MATRIX_MODE) return [[state.mode], "i"];
+        if (pname === GL.CURRENT_PROGRAM) return [[c.program], "i"];
         if (pname === GL.ACTIVE_TEXTURE) return [[GL.TEXTURE0 + (c.activeTexture || 0)], "i"];
         if (pname === GL.CLIENT_ACTIVE_TEXTURE) return [[GL.TEXTURE0 + state.clientTexture], "i"];
         // Format queries belong to the selected drawable, not the adapter.

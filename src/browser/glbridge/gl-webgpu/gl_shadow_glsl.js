@@ -49,6 +49,70 @@
         [0x8B68, ["f", 3, 4]], [0x8B69, ["f", 4, 2]], [0x8B6A, ["f", 4, 3]],
     ]);
     const typeOf = type => TYPES.get(type) || ["i", 1, 1];
+    const objectError = (group, name, shader) => (shader ? group.shaders : group.programs).has(name) ? 0 :
+        (shader ? group.programs : group.shaders).has(name) ? GL.INVALID_OPERATION : GL.INVALID_VALUE;
+    function rule(name, check) {
+        GLShadow.rules({ [GLFN[name]]: (shadow, bytes, view, offset, size) => {
+            if (shadow.current.state && shadow.current.state.begin) return GL.INVALID_OPERATION;
+            return check(shadow, bytes, view, offset, size);
+        } });
+    }
+    for (const name of ["CREATE_SHADER", "CREATE_PROGRAM"]) rule(name, (s, b, v, o, n) => {
+        const a = s.args(name, v, o, n), g = s.current.group;
+        if (name === "CREATE_SHADER" && !STAGE_OF_GL_TYPE.has(a[1])) return GL.INVALID_ENUM;
+        return !a[0] || g.shaders.has(a[0]) || g.programs.has(a[0]) ? GL.INVALID_VALUE : 0;
+    });
+    for (const [name, shader] of [["COMPILE_SHADER", true], ["DELETE_SHADER", true], ["LINK_PROGRAM", false],
+            ["DELETE_PROGRAM", false], ["VALIDATE_PROGRAM", false], ["USE_PROGRAM", false]]) rule(name, (s, b, v, o, n) => {
+        const id = s.args(name, v, o, n)[0];
+        if (!id && ["DELETE_SHADER", "DELETE_PROGRAM", "USE_PROGRAM"].includes(name)) return 0;
+        const error = objectError(s.current.group, id, shader); if (error) return error;
+        if (name === "USE_PROGRAM") {
+            const linked = s.linkedProgram(s.current.group.programs.get(id));
+            if (linked && !linked.ok) return GL.INVALID_OPERATION;
+        }
+        return 0;
+    });
+    for (const name of ["ATTACH_SHADER", "DETACH_SHADER"]) rule(name, (s, b, v, o, n) => {
+        const a = s.args(name, v, o, n), g = s.current.group;
+        const error = objectError(g, a[0], false) || objectError(g, a[1], true);
+        if (error) return error;
+        const attached = g.programs.get(a[0]).attached.has(a[1]);
+        return attached === (name === "ATTACH_SHADER") ? GL.INVALID_OPERATION : 0;
+    });
+    rule("SHADER_SOURCE", (s, b, v, o, n) => {
+        const r = protocol.decodeRecord("SHADER_SOURCE", v, o);
+        return objectError(s.current.group, r.shader, true) || (RECORDS.SHADER_SOURCE.size + r.length > n ? GL.INVALID_VALUE : 0);
+    });
+    rule("BIND_ATTRIB_LOCATION", (s, b, v, o, n) => {
+        const r = protocol.decodeRecord("BIND_ATTRIB_LOCATION", v, o), header = RECORDS.BIND_ATTRIB_LOCATION.size;
+        const error = objectError(s.current.group, r.program, false); if (error) return error;
+        if (header + r.name_length > n || r.location < 0 || r.location >= MAX_VERTEX_ATTRIBS) return GL.INVALID_VALUE;
+        return readText(b, o + header, r.name_length).startsWith("gl_") ? GL.INVALID_OPERATION : 0;
+    });
+
+    // Validate the entire update before either side writes any uniform. An
+    // array update stops at this uniform's end, never at the next location.
+    for (const name of ["UNIFORM_FV", "UNIFORM_IV", "UNIFORM_MATRIX_FV", "UNIFORM_MATRIX_RECT_FV"])
+        rule(name, (s, b, v, o, n) => {
+            const r = protocol.decodeRecord(name, v, o), matrix = name.includes("MATRIX");
+            const columns = matrix ? r.columns ?? r.dimension : 1, rows = matrix ? r.rows ?? r.dimension : r.components;
+            if (r.count < 0 || columns < (matrix ? 2 : 1) || columns > 4 || rows < (matrix ? 2 : 1) || rows > 4 ||
+                    RECORDS[name].size + r.count * columns * rows * 4 > n) return GL.INVALID_VALUE;
+            const program = s.current.group.programs.get(s.current.program);
+            if (!program) return GL.INVALID_OPERATION;
+            if (r.location === -1) return 0;
+            const linked = s.linkedProgram(program);
+            if (linked === null) return 0; // the existing late-glslang path
+            const entry = linked.ok && linked.byLocation.get(r.location);
+            if (!entry) return GL.INVALID_OPERATION;
+            const [base, c, rowsOfType] = typeOf(entry.uniform.type), integer = name === "UNIFORM_IV";
+            if (columns !== c || rows !== rowsOfType || base !== "b" && integer !== (base === "i") ||
+                    r.count > 1 && !entry.uniform.array) return GL.INVALID_OPERATION;
+            const count = Math.min(r.count, entry.uniform.size - entry.element);
+            v.setInt32(o + F[name].count, count, true);
+            return 0;
+        });
 
     // glslang's limits, from what the renderer backs (gl_caps.js)
     function glslangLimits(capabilities) {
@@ -231,12 +295,15 @@
             const bound = bindings.get(i.name);
             if (bound !== undefined) {
                 attribute.location = bound;
-                for (let k = 0; k < slots(i.type); ++k) used.add(bound + k);
+                const n = slots(i.type) * attribute.size;
+                if (bound + n > MAX_VERTEX_ATTRIBS)
+                    return program.linked = failed("ERROR: vertex attribute '" + i.name + "' exceeds the available slots\n");
+                for (let k = 0; k < n; ++k) used.add(bound + k);
             }
         }
         for (const attribute of linked.attributes) {
             if (attribute.name.startsWith("gl_") || attribute.location >= 0) continue;
-            const n = slots(attribute.type);
+            const n = slots(attribute.type) * attribute.size;
             let base = MAX_VERTEX_ATTRIBS - n;
             const free = b => { for (let k = 0; k < n; ++k) if (used.has(b + k)) return false; return true; };
             while (base >= 0 && !free(base)) --base;
@@ -288,8 +355,11 @@
     // glUniform*: the current program's values, by location
     proto.uniformValues = function(view, offset, size, header, location, columns, rows, count, transpose, integer) {
         const program = this.current.group.programs.get(this.current.program);
-        const linked = program && program.linked;
+        const linked = program && this.linkedProgram(program);
         if (!linked || !linked.ok) return;
+        const start = linked.byLocation.get(location);
+        if (!start) return;
+        count = Math.min(count, start.uniform.size - start.element);
         for (let m = 0; m < count; ++m) {
             const entry = linked.byLocation.get(location + m);
             if (!entry || entry.uniform.location + entry.uniform.size <= location + m) return;
@@ -298,7 +368,8 @@
                 const index = transpose ? r * columns + c : c * rows + r;
                 const at = offset + header + (m * columns * rows + index) * 4;
                 if (at + 4 > offset + size) return;
-                values.push(integer ? view.getInt32(at, true) : view.getFloat32(at, true));
+                const v = integer ? view.getInt32(at, true) : view.getFloat32(at, true);
+                values.push(typeOf(entry.uniform.type)[0] === "b" ? +!!v : v);
             }
             program.values.set(location + m, values);
         }
@@ -520,6 +591,9 @@
         group(group) {
             group.shaders = new Map();
             group.programs = new Map();
+        },
+        destroy(shadow, context) {
+            for (const program of context.group.programs.values()) shadow.collectProgram(context.group, program);
         },
         getState(shadow, state) {
             state.glsl = [...shadow.groups.values()].map(group => ({

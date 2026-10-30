@@ -103,11 +103,11 @@ test("compile and link status, logs and the active lists come from glslang", () 
 
 test("a shader that does not compile, and a program missing a function, say why", () => {
     const stream = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1)
-        .call("CREATE_SHADER", 1, GL.VERTEX_SHADER).shaderSource(1, "void main() { gl_Position = foo; }")
-        .call("COMPILE_SHADER", 1);
-    const status1 = stream.queryObjectiv(SHADER, 1, GL.COMPILE_STATUS);
-    const length = stream.queryObjectiv(SHADER, 1, GL.INFO_LOG_LENGTH);
-    const log = stream.queryObjectLog(SHADER, 1, 256);
+        .call("CREATE_SHADER", 9, GL.VERTEX_SHADER).shaderSource(9, "void main() { gl_Position = foo; }")
+        .call("COMPILE_SHADER", 9);
+    const status1 = stream.queryObjectiv(SHADER, 9, GL.COMPILE_STATUS);
+    const length = stream.queryObjectiv(SHADER, 9, GL.INFO_LOG_LENGTH);
+    const log = stream.queryObjectLog(SHADER, 9, 256);
     program(stream);
     stream.call("DETACH_SHADER", 5, 3).call("LINK_PROGRAM", 5);
     const linked = stream.queryObjectiv(PROGRAM, 5, GL.LINK_STATUS);
@@ -272,6 +272,87 @@ test("the executor adopts the shadow's uniform and attribute locations", async (
     executor.submit(new GLStream().uniformfv(gainAt, 1, 1, [4.5]).bytes(), {});
     const uniform = program.uniformByName.get("gain");
     assert.equal(program.uniformFloats[uniform.offsetBytes / 4], 4.5, "glUniform at the shadow's location reaches gain");
+});
+
+test("uniform type/shape errors leave storage unchanged and array updates stop at their own boundary", () => {
+    const s = program(new GLStream()), locations = {};
+    for (const name of ["scale", "mode", "light", "bones", "tex"]) locations[name] = s.queryLocation(UNIFORM, 5, name, 32);
+    const shadow = newShadow(); shadow.process(s.bytes());
+    const at = name => int(locations[name], "QUERY_LOCATION", "result");
+    const update = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1).call("USE_PROGRAM", 5)
+        .uniformfv(at("scale"), 1, 1, [7]).uniformiv(at("mode"), 1, 1, [9])
+        .uniformiv(at("scale"), 1, 1, [3]).uniformfv(at("mode"), 1, 1, [4])
+        .uniformfv(at("light"), 2, 1, [1, 2]).uniformfv(at("scale"), 1, 2, [1, 2])
+        .uniformfv(at("tex"), 1, 1, [2]).uniformfv(at("scale"), 1, -1, [])
+        .uniformfv(12345, 1, 1, [1]).uniformfv(-1, 4, 1, [1, 2, 3, 4]);
+    const matrix = new Uint8Array(16 + 3 * 64), v = new DataView(matrix.buffer);
+    v.setInt32(0, at("bones") + 1, true); v.setInt32(4, 4, true); v.setInt32(8, 3, true);
+    for (let i = 0; i < 48; ++i) v.setFloat32(16 + i * 4, i + 1, true);
+    update.record(P.GLFN.UNIFORM_MATRIX_FV, matrix);
+    const scale = update.queryUniform(5, at("scale"), 1, 64), mode = update.queryUniform(5, at("mode"), 2, 64);
+    const bones = update.queryUniform(5, at("bones") + 1, 1, 64);
+    shadow.process(update.bytes());
+    assert.equal(shadow.stats.rejected, 7);
+    assert.equal(scale.view.getFloat32(32, true), 7); assert.equal(mode.view.getInt32(32, true), 9);
+    assert.equal(bones.view.getFloat32(32 + 15 * 4, true), 16);
+    const p = shadow.current.group.programs.get(5);
+    assert.equal(p.values.size, 3, "an overlong matrix array must not create writes at adjacent uniforms");
+});
+
+test("a uniform write after restoring a snapshot relinks lazily before updating values", () => {
+    const s = program(new GLStream()).call("USE_PROGRAM", 5), location = s.queryLocation(UNIFORM, 5, "scale", 32), first = newShadow(); first.process(s.bytes());
+    const copy = newShadow(); copy.setState(JSON.parse(JSON.stringify(first.getState())));
+    const at = int(location, "QUERY_LOCATION", "result"), update = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1)
+        .uniformfv(at, 1, 1, [12.5]);
+    const value = update.queryUniform(5, at, 1, 4); copy.process(update.bytes());
+    assert.equal(value.view.getFloat32(32, true), 12.5);
+});
+
+test("objects share a namespace, shader/program kinds are checked and an invalid use keeps the current program", () => {
+    const shadow = newShadow(), s = program(new GLStream()).call("USE_PROGRAM", 5)
+        .call("CREATE_SHADER", 5, GL.VERTEX_SHADER).call("CREATE_PROGRAM", 1)
+        .call("COMPILE_SHADER", 5).call("USE_PROGRAM", 1).call("USE_PROGRAM", 999)
+        .call("ATTACH_SHADER", 5, 1).call("DETACH_SHADER", 5, 999).call("CREATE_PROGRAM", 7).call("USE_PROGRAM", 7);
+    shadow.process(s.bytes()); assert.equal(shadow.stats.rejected, 8);
+    assert.equal(shadow.current.program, 5); assert.ok(shadow.current.group.programs.has(5));
+    assert.ok(shadow.current.group.shaders.has(1)); assert.ok(!shadow.current.group.shaders.has(5));
+    s.call("USE_PROGRAM", 0);
+});
+
+test("deleting a shared current program retains it until the last context releases or is destroyed", async () => {
+    const { host } = createFakeHost(), executor = new GLWebGPUExecutor(null, { host }); await executor.initialize();
+    const shadow = newShadow(), s = program(new GLStream()).call("USE_PROGRAM", 5)
+        .makeCurrent(2, 0, 0, 64, 64, 2, 1).call("USE_PROGRAM", 5).call("DELETE_SHADER", 3).call("DELETE_PROGRAM", 5)
+        .makeCurrent(1, 0, 0, 64, 64, 1, 1).call("USE_PROGRAM", 0);
+    const bytes = s.bytes(); shadow.process(bytes); executor.submit(bytes, {});
+    const group = shadow.current.group, gpuGroup = executor.current.shareGroup;
+    assert.ok(group.programs.has(5)); assert.ok(gpuGroup.programs.has(5));
+    assert.ok(group.shaders.has(3)); assert.ok(gpuGroup.shaders.has(3));
+    const end = new GLStream().record(P.CTRL.DESTROY_CONTEXT, P.encodeRecord("DESTROY_CONTEXT", { context_id: 2 }));
+    shadow.process(end.bytes()); executor.submit(end.bytes(), {});
+    assert.ok(!group.programs.has(5)); assert.ok(!gpuGroup.programs.has(5));
+    assert.ok(!group.shaders.has(3)); assert.ok(!gpuGroup.shaders.has(3));
+    assert.ok(group.shaders.has(1)); assert.ok(gpuGroup.shaders.has(1));
+});
+
+test("boolean and sampler array updates reach every renderer element without extra location queries", async () => {
+    const { host } = createFakeHost(), executor = new GLWebGPUExecutor(null, { host }); await executor.initialize();
+    const s = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1)
+        .call("CREATE_SHADER", 1, GL.VERTEX_SHADER).shaderSource(1, "void main() { gl_Position = gl_Vertex; }").call("COMPILE_SHADER", 1)
+        .call("CREATE_SHADER", 2, GL.FRAGMENT_SHADER).shaderSource(2, "#version 120\nuniform bvec3 flags; uniform sampler2D tex[2]; void main() { gl_FragColor = vec4(vec3(flags), 1.0) + texture2D(tex[0], vec2(0.5)) + texture2D(tex[1], vec2(0.5)); }")
+        .call("COMPILE_SHADER", 2).call("CREATE_PROGRAM", 5).call("ATTACH_SHADER", 5, 1).call("ATTACH_SHADER", 5, 2).call("LINK_PROGRAM", 5).call("USE_PROGRAM", 5);
+    const flags = s.queryLocation(UNIFORM, 5, "flags", 32), tex = s.queryLocation(UNIFORM, 5, "tex[1]", 32);
+    const shadow = newShadow(); shadow.process(s.bytes()); executor.submit(s.bytes(), {});
+    const update = new GLStream().uniformfv(int(flags, "QUERY_LOCATION", "result"), 3, 1, [-0, 2, -3])
+        .uniformiv(int(tex, "QUERY_LOCATION", "result") - 1, 1, 2, [2, 7])
+        .uniformiv(int(tex, "QUERY_LOCATION", "result"), 1, 1, [5]);
+    const cpuFlags = update.queryUniform(5, int(flags, "QUERY_LOCATION", "result"), 2, 16);
+    shadow.process(update.bytes()); executor.submit(update.bytes(), {});
+    assert.equal(shadow.stats.rejected, 0);
+    assert.deepEqual([0, 1, 2].map(i => cpuFlags.view.getInt32(32 + i * 4, true)), [0, 1, 1]);
+    const p = executor.currentProgramObject(), uniform = p.uniformByName.get("flags");
+    assert.deepEqual(Array.from(p.uniformInts.subarray(uniform.offsetBytes / 4, uniform.offsetBytes / 4 + 3)), [0, 1, 1]);
+    assert.equal(p.samplerUnits.get("tex[0]"), 2); assert.equal(p.samplerUnits.get("tex[1]"), 5);
 });
 
 (async () => {

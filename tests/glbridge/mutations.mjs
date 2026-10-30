@@ -10,7 +10,7 @@
 //
 // Exits 1 when a family's kill rate is below its floor.
 import { cpSync as cp_sync, mkdtempSync as mkdtemp_sync, readFileSync as read_file_sync,
-    writeFileSync as write_file_sync, rmSync as rm_sync } from "node:fs";
+    writeFileSync as write_file_sync, rmSync as rm_sync, mkdirSync as mkdir_sync } from "node:fs";
 import { spawnSync as spawn_sync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -61,8 +61,16 @@ const MUTATIONS = {
     ] },
     gl: { floor: 0.9, node: ["gl_executor_test.js", "gl_shader_translator_test.js", "gl_shader_wgsl_validation_test.js",
         "gl_fixed_function_wgsl_test.js", "gl_arb_program_test.js", "graphics_checkpoint_test.js", "gl_shadow_state_test.js",
-        "gl_async_answers_test.js", "gl_shadow_validation_test.js", "gl_shadow_raster_test.js", "gl_shadow_fixed_test.js"],
+        "gl_async_answers_test.js", "gl_shadow_validation_test.js", "gl_shadow_raster_test.js", "gl_shadow_fixed_test.js", "gl_shadow_glsl_test.js"],
     pages: ["gl_conformance_browser_test.html", "gl_multipass_browser_test.html", "gl_validation_browser_test.html"], list: [
+        ["CPU GLSL: accept integer writes to float uniforms", G + "gl_shadow_glsl.js",
+            'base !== "b" && integer !== (base === "i")', "false"],
+        ["CPU GLSL: map only the first sampler array location", G + "gl_executor.js",
+            "i < Math.max(1, mapped.arraySize)", "i < 1"],
+        ["CPU GLSL: delete a shader which is still attached", G + "gl_executor.js",
+            "for (const program of group.programs.values()) if (program.shaders.has(shader.name)) return;", "void group;"],
+        ["CPU GLSL: a floating boolean is copied as raw bits", G + "gl_executor.js",
+            'if (uniform.baseType === "bool")', "if (false)"],
         ["CPU fixed: forget the light's set-time modelview", G + "gl_shadow_fixed.js",
             "transform(top(c), p === GL.POSITION ? v", "transform(math.identity4(), p === GL.POSITION ? v"],
         ["CPU fixed: normalize integer positions as if they were colors", G + "gl_shadow_fixed.js",
@@ -340,6 +348,8 @@ let below_floor = false;
 try {
     for(const part of ["src/browser/glbridge", "tests/glbridge"])
         cp_sync(join(root, part), join(copy, part), { recursive: true });
+    mkdir_sync(join(copy, "bios"));
+    cp_sync(join(root, "bios/glslang.wasm"), join(copy, "bios/glslang.wasm"));
     const run = (file, isPage) => {
         const result = isPage
             ? spawn_sync(process.execPath, [join(copy, "tests/glbridge/gl_multipass_browser_runner.js"), file],
@@ -350,6 +360,8 @@ try {
     for(const [name, set] of Object.entries(MUTATIONS)) {
         if(family && family !== name) continue;
         const suites = [...set.node.map(f => [f, false]), ...(node_only ? [] : set.pages.map(p => [p, true]))];
+        for(const [suite, isPage] of suites)
+            if(!run(suite, isPage)) throw new Error("Unmodified " + suite + " failed; mutation results would be unreliable");
         let killed = 0, applied = 0;
         for(const [label, file, from, to] of set.list) {
             if(filter && !label.includes(filter)) continue;

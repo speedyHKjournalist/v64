@@ -202,8 +202,10 @@
                 return;
             }
             const key = "context:" + view.getUint32(offset + F.DESTROY_CONTEXT.context_id, true);
+            const context = this.contexts.get(key);
             if (this.current && this.current.key === key) this.current = null;
             this.contexts.delete(key);
+            if (context) for (const part of PARTS) if (part.destroy) part.destroy(this, context);
             // a share group goes with its last context
             for (const [groupKey, group] of this.groups)
                 if (![...this.contexts.values()].some(c => c.group === group)) this.groups.delete(groupKey);

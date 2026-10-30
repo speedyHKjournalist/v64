@@ -9,6 +9,8 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_caps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_math.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js"></script>
@@ -25,8 +27,10 @@
     const { GLStream, GL } = GLTestStream, P = GLProtocol;
     const check = (value, message) => { if (!value) throw new Error(message); };
     try {
+        const compiler = await WebAssembly.compile(await (await fetch("../../bios/glslang.wasm")).arrayBuffer());
         for (const remote of [false, true]) {
             const shadow = new V86GLShadow.GLShadow();
+            shadow.setGlslang(new V86GLGlslang.Glslang(compiler));
             const s = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1)
                 .call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
                 .call("LINE_WIDTH", 3).call("LINE_WIDTH", 0)
@@ -68,8 +72,36 @@
                 check([64, 191, 128, 255].every((v, i) => Math.abs(out.bytes[32 + i] - v) <= 1),
                     "stencil reference wrapped instead of clamping: " + ref);
             }
+            const setup = new GLStream().makeCurrent(10, 0, 0, 64, 64, 10, 10)
+                .call("CREATE_SHADER", 1, GL.VERTEX_SHADER).shaderSource(1, "void main() { gl_Position = gl_Vertex; }").call("COMPILE_SHADER", 1)
+                .call("CREATE_SHADER", 2, GL.FRAGMENT_SHADER).shaderSource(2,
+                    "#version 120\nuniform bvec3 flags; uniform sampler2D images[2]; void main() { gl_FragColor = vec4(vec3(flags), 1.0) * texture2D(images[0], vec2(0.5)) * texture2D(images[1], vec2(0.5)); }")
+                .call("COMPILE_SHADER", 2).call("CREATE_PROGRAM", 5).call("ATTACH_SHADER", 5, 1).call("ATTACH_SHADER", 5, 2)
+                .call("LINK_PROGRAM", 5).call("USE_PROGRAM", 5);
+            const flags = setup.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, 5, "flags", 32);
+            const images = setup.queryLocation(P.C.V86GL_LOCATION_KIND_UNIFORM, 5, "images[1]", 32);
+            const first = setup.bytes(); shadow.process(first); executor.submit(remote ? first.slice() : first, {});
+            const flagsAt = flags.view.getInt32(P.F.QUERY_LOCATION.result, true), imagesAt = images.view.getInt32(P.F.QUERY_LOCATION.result, true) - 1;
+            check(flagsAt >= 0 && imagesAt >= 0, "CPU must link and reflect the GLSL program");
+            const draw = new GLStream().uniformfv(flagsAt, 3, 1, [-0, 2, -3]).uniformiv(imagesAt, 1, 3, [2, 0, 1])
+                .uniformiv(imagesAt + 1, 1, 1, [7])
+                .uniformfv(imagesAt, 1, 1, [0]).call("DELETE_SHADER", 2).call("DELETE_PROGRAM", 5);
+            for (const [unit, name, color] of [[2, 1, [255, 255, 255, 255]], [7, 2, [64, 128, 192, 255]]]) {
+                draw.call("ACTIVE_TEXTURE", GL.TEXTURE0 + unit).call("BIND_TEXTURE", GL.TEXTURE_2D, name)
+                    .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+                    .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(color));
+            }
+            draw.call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).call("BEGIN", GL.QUADS)
+                .call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0).call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const out = draw.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), guest = draw.bytes();
+            shadow.process(guest); executor.options.writeGuestMemory = (offset, data) => guest.set(data, offset);
+            executor.submit(remote ? guest.slice() : guest, {}); await executor.idle();
+            check(out.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "GLSL readback must finish");
+            check([0, 128, 192, 255].every((v, i) => Math.abs(out.bytes[32 + i] - v) <= 1),
+                "uniform arrays, booleans or deferred deletion changed GLSL pixels: " + Array.from(out.bytes.subarray(32)));
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "GLSL frame must have no host errors");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation and stencil clamping preserve errors/pixels in local and copied streams";
+        document.getElementById("result").textContent = "PASS -- CPU validation, stencil clamping and GLSL uniforms/lifetime preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

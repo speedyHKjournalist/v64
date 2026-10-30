@@ -1745,7 +1745,7 @@
     function createProgram(name) {
         return {
             name, shaders: new Set(),
-            linked: false, log: "",
+            linked: false, log: "", deleted: false,
             bindAttribLocations: new Map(),
             // the locations the CPU side's shadow gave the guest (adoptLocation)
             adoptedAttribLocations: new Map(),
@@ -2180,6 +2180,8 @@
                 this.contexts.delete(context.contextKey || ("hwnd:" + context.hwnd));
                 this.framebuffers.delete(context.id);
                 if (this.current === context) this.current = null;
+                for (const program of context.shareGroup.programs.values())
+                    this.collectGLProgram(context.shareGroup, program);
             }
             for (const [key, group] of this.shareGroups) {
                 const live = [...this.contexts.values()].some(context =>
@@ -3594,18 +3596,22 @@
             });
         });
         define("DELETE_PROGRAM", function(a) {
-            this.current.shareGroup.programs.delete(a[0] >>> 0);
+            const group = this.current.shareGroup, program = group.programs.get(a[0] >>> 0);
+            if (program) { program.deleted = true; this.collectGLProgram(group, program); }
         });
         define("DELETE_SHADER", function(a) {
-            this.current.shareGroup.shaders.delete(a[0] >>> 0);
+            const group = this.current.shareGroup, shader = group.shaders.get(a[0] >>> 0);
+            if (shader) { shader.deleted = true; this.collectGLShader(group, shader); }
         });
         define("ATTACH_SHADER", function(a) {
             const program = this.current.shareGroup.programs.get(a[0] >>> 0);
             if (program) program.shaders.add(a[1] >>> 0);
         });
         define("DETACH_SHADER", function(a) {
-            const program = this.current.shareGroup.programs.get(a[0] >>> 0);
+            const group = this.current.shareGroup, program = group.programs.get(a[0] >>> 0);
             if (program) program.shaders.delete(a[1] >>> 0);
+            const shader = group.shaders.get(a[1] >>> 0);
+            if (shader) this.collectGLShader(group, shader);
         });
         define("SHADER_SOURCE", function(a, bytes, view, offset, size) {
             if (size < 8) throw new GLStreamError("glShaderSource record is short");
@@ -3630,7 +3636,9 @@
         });
         define("LINK_PROGRAM", function(a) { this.linkProgram(a[0] >>> 0); });
         define("USE_PROGRAM", function(a) {
+            const group = this.current.shareGroup, previous = group.programs.get(this.current.currentProgram);
             this.current.currentProgram = a[0] >>> 0;
+            if (previous) this.collectGLProgram(group, previous);
         });
         define("VALIDATE_PROGRAM", function(a) {
             const program = this.current.shareGroup.programs.get(a[0] >>> 0);
@@ -5430,6 +5438,23 @@
 
         /* ---- programs ---- */
 
+        collectGLShader(group, shader) {
+            if (!shader.deleted) return;
+            for (const program of group.programs.values()) if (program.shaders.has(shader.name)) return;
+            group.shaders.delete(shader.name);
+        },
+
+        collectGLProgram(group, program) {
+            if (!program.deleted) return;
+            for (const context of this.contexts.values())
+                if (context.shareGroup === group && context.currentProgram === program.name) return;
+            group.programs.delete(program.name);
+            for (const name of program.shaders) {
+                const shader = group.shaders.get(name);
+                if (shader) this.collectGLShader(group, shader);
+            }
+        },
+
         linkProgram(name) {
             const program = this.current.shareGroup.programs.get(name);
             if (!program)
@@ -5576,10 +5601,13 @@
             if (entry.sampler) {
                 // glUniform1i on a sampler names a texture unit; it is a
                 // binding change, not a value in the uniform block.
-                const unit = view.getInt32(offset + 12, true);
-                const key = entry.sampler.name +
-                    (entry.sampler.arraySize ? "[" + entry.element + "]" : "");
-                program.samplerUnits.set(key, unit | 0);
+                for (let i = 0; i < count; ++i) {
+                    const element = entry.element + i;
+                    if (entry.sampler.arraySize && element >= entry.sampler.arraySize) break;
+                    const src = offset + 12 + i * 4; if (src + 4 > offset + size) return;
+                    const key = entry.sampler.name + (entry.sampler.arraySize ? "[" + element + "]" : "");
+                    program.samplerUnits.set(key, view.getInt32(src, true));
+                }
                 this.invalidateBindGroups();
                 return;
             }
@@ -5595,8 +5623,9 @@
                     const src = offset + 12 + (i * components + c) * 4;
                     if (src + 4 > offset + size) return;
                     const at = (base >> 2) + c;
-                    if (integer || uniform.baseType !== "float")
-                        program.uniformInts[at] = view.getInt32(src, true);
+                    if (uniform.baseType === "bool")
+                        program.uniformInts[at] = +(!!(integer ? view.getInt32(src, true) : view.getFloat32(src, true)));
+                    else if (integer || uniform.baseType !== "float") program.uniformInts[at] = view.getInt32(src, true);
                     else
                         program.uniformFloats[at] = view.getFloat32(src, true);
                 }
@@ -5669,8 +5698,13 @@
                 program.ownByLocation = program.uniformByLocation;
                 program.uniformByLocation = new Map();
             }
-            const entry = program.ownByLocation.get(mapped.location + (match ? +match[2] : 0));
-            if (entry) program.uniformByLocation.set(location, entry);
+            const element = match ? +match[2] : 0;
+            // Asking for any element also establishes base + i for all of
+            // the array. Applications need not query each element separately.
+            for (let i = 0; i < Math.max(1, mapped.arraySize); ++i) {
+                const entry = program.ownByLocation.get(mapped.location + i);
+                if (entry) program.uniformByLocation.set(location - element + i, entry);
+            }
         },
 
         /* ---- synchronous query answers ---- */
