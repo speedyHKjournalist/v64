@@ -122,6 +122,7 @@
                 offset += size;
             }
             if (offset !== end) ++this.stats.malformed;
+            for (const part of PARTS) if (part.afterBatch) part.afterBatch(this);
         }
 
         dispatch(fn, bytes, view, offset, size) {

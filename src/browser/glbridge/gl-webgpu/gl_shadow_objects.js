@@ -40,8 +40,22 @@
     proto.textureObject = function(name) {
         const group = this.current.group;
         let texture = group.textures.get(name);
-        if (!texture) group.textures.set(name, texture = { name, target: 0, levels: new Map() });
+        if (!texture) {
+            texture = { name, id: group.nextImageId++, target: 0, levels: new Map(), deleted: false };
+            group.textures.set(name, texture);
+            group.textureImages.set(texture.id, texture);
+        }
         return texture;
+    };
+
+    proto.defaultTexture = function(target) {
+        const c = this.current, group = c.group;
+        let id = c.defaultTextures.get(target);
+        if (!id) {
+            const texture = { name: 0, id: group.nextImageId++, target, levels: new Map(), deleted: false };
+            id = texture.id; group.textureImages.set(id, texture); c.defaultTextures.set(target, id);
+        }
+        return group.textureImages.get(id);
     };
 
     proto.genTextures = function(bytes, view, offset, size) {
@@ -53,9 +67,15 @@
     proto.deleteTextures = function(bytes, view, offset, size) {
         const c = this.current;
         for (const name of this.names("DELETE_TEXTURES", view, offset, size) || []) {
-            if (!name || !c.group.textures.delete(name)) continue;
-            for (const unit of c.units) for (const [target, bound] of unit) if (bound === name) unit.set(target, 0);
-            this.detach("texture", name);
+            const texture = c.group.textures.get(name);
+            if (!name || !texture) continue;
+            c.group.textures.delete(name); texture.deleted = true;
+            c.units.forEach((unit, i) => {
+                for (const [target] of unit) if (c.unitImages[i].get(target) === texture.id) {
+                    unit.set(target, 0); c.unitImages[i].delete(target);
+                }
+            });
+            this.detach("texture", texture.id);
         }
     };
 
@@ -64,6 +84,7 @@
         if (!a) return;
         const c = this.current;
         c.units[c.activeTexture].set(a[0], a[1]);
+        c.unitImages[c.activeTexture].set(a[0], a[1] ? this.textureObject(a[1]).id : this.defaultTexture(a[0]).id);
         if (a[1]) {
             const texture = this.textureObject(a[1]);
             if (!texture.target) texture.target = a[0];
@@ -80,8 +101,8 @@
     proto.boundImage = function(target) {
         const { binding, layer } = imageTarget(target);
         const c = this.current;
-        const name = c.units[c.activeTexture].get(binding) || 0;
-        return name ? { texture: this.textureObject(name), layer } : null;
+        const id = c.unitImages[c.activeTexture].get(binding);
+        return { texture: id ? c.group.textureImages.get(id) : this.defaultTexture(binding), layer };
     };
 
     proto.defineLevel = function(target, level, width, height, depth, internalFormat) {
@@ -134,9 +155,7 @@
     // Every level below the base, halving to 1, in the base level's format
     proto.generateMipmap = function(bytes, view, offset, size) {
         const a = this.args("GENERATE_MIPMAP", view, offset, size);
-        const c = this.current;
-        const name = a && c.units[c.activeTexture].get(a[0]);
-        const texture = name && c.group.textures.get(name);
+        const texture = a && this.boundImage(a[0]).texture;
         if (!texture) return;
         for (const layer of texture.levels.values()) {
             const base = layer.get(0);
@@ -152,34 +171,43 @@
     };
 
     proto.genRenderbuffers = function(bytes, view, offset, size) {
-        const group = this.current.group;
         for (const name of this.names("GEN_RENDERBUFFERS", view, offset, size) || [])
-            if (name && !group.renderbuffers.has(name)) group.renderbuffers.set(name, { name, width: 0, height: 0,
-                internalFormat: 0 });
+            if (name) this.renderbufferObject(name);
+    };
+
+    proto.renderbufferObject = function(name) {
+        const group = this.current.group;
+        let rb = group.renderbuffers.get(name);
+        if (!rb) {
+            rb = { name, id: group.nextImageId++, width: 0, height: 0, internalFormat: 0, deleted: false, created: false };
+            group.renderbuffers.set(name, rb); group.renderbufferImages.set(rb.id, rb);
+        }
+        return rb;
     };
 
     proto.deleteRenderbuffers = function(bytes, view, offset, size) {
         const c = this.current;
         for (const name of this.names("DELETE_RENDERBUFFERS", view, offset, size) || []) {
-            if (!name || !c.group.renderbuffers.delete(name)) continue;
-            if (c.renderbuffer === name) c.renderbuffer = 0;
-            this.detach("renderbuffer", name);
+            const rb = c.group.renderbuffers.get(name);
+            if (!name || !rb) continue;
+            c.group.renderbuffers.delete(name); rb.deleted = true;
+            if (c.renderbufferImage === rb.id) c.renderbuffer = c.renderbufferImage = 0;
+            this.detach("renderbuffer", rb.id);
         }
     };
 
     proto.bindRenderbuffer = function(bytes, view, offset, size) {
         const a = this.args("BIND_RENDERBUFFER", view, offset, size);
         if (!a) return;
-        const group = this.current.group;
-        if (a[1] && !group.renderbuffers.has(a[1]))
-            group.renderbuffers.set(a[1], { name: a[1], width: 0, height: 0, internalFormat: 0 });
+        this.current.renderbufferImage = a[1] ? this.renderbufferObject(a[1]).id : 0;
+        if (a[1]) this.renderbufferObject(a[1]).created = true;
         this.current.renderbuffer = a[1];
     };
 
     // glRenderbufferStorage (target, internalformat, width, height)
     proto.renderbufferStorage = function(bytes, view, offset, size) {
         const a = this.args("RENDERBUFFER_STORAGE", view, offset, size);
-        const rb = a && this.current.group.renderbuffers.get(this.current.renderbuffer);
+        const rb = a && this.current.group.renderbufferImages.get(this.current.renderbufferImage);
         if (!rb) return;
         rb.internalFormat = a[1];
         rb.width = Math.max(0, a[2]);
@@ -189,7 +217,7 @@
     proto.framebufferObject = function(name) {
         const c = this.current;
         let fbo = c.framebuffers.get(name);
-        if (!fbo) c.framebuffers.set(name, fbo = { name, color: new Array(MAX_COLOR_ATTACHMENTS).fill(null),
+        if (!fbo) c.framebuffers.set(name, fbo = { name, created: false, color: new Array(MAX_COLOR_ATTACHMENTS).fill(null),
             depth: null, stencil: null });
         return fbo;
     };
@@ -212,7 +240,7 @@
         const a = this.args("BIND_FRAMEBUFFER", view, offset, size);
         if (!a) return;
         const c = this.current;
-        if (a[1]) this.framebufferObject(a[1]);
+        if (a[1]) this.framebufferObject(a[1]).created = true;
         if (a[0] !== GL.READ_FRAMEBUFFER) c.drawFramebuffer = a[1];
         if (a[0] !== GL.DRAW_FRAMEBUFFER) c.readFramebuffer = a[1];
     };
@@ -236,12 +264,12 @@
     };
 
     // An object deleted while attached to a framebuffer object bound here
-    proto.detach = function(kind, name) {
+    proto.detach = function(kind, id) {
         const c = this.current;
         for (const fboName of new Set([c.drawFramebuffer, c.readFramebuffer])) {
             const fbo = fboName && c.framebuffers.get(fboName);
             if (!fbo) continue;
-            const stale = record => record && record.kind === kind && record.name === name;
+            const stale = record => record && record.kind === kind && record.id === id;
             fbo.color = fbo.color.map(record => stale(record) ? null : record);
             if (stale(fbo.depth)) fbo.depth = null;
             if (stale(fbo.stencil)) fbo.stencil = null;
@@ -254,13 +282,15 @@
         if (!a) return;
         const face = a[2] - GL.TEXTURE_CUBE_MAP_POSITIVE_X;
         this.attach(a[0], a[1], a[3] ? { kind: "texture", name: a[3], level: a[4],
+            id: this.current.group.textures.get(a[3])?.id,
             layer: face >= 0 && face < 6 ? face : a[5] } : null);
     };
 
     // glFramebufferRenderbuffer (target, attachment, renderbuffertarget, renderbuffer)
     proto.framebufferRenderbuffer = function(bytes, view, offset, size) {
         const a = this.args("FRAMEBUFFER_RENDERBUFFER", view, offset, size);
-        if (a) this.attach(a[0], a[1], a[3] ? { kind: "renderbuffer", name: a[3], level: 0, layer: 0 } : null);
+        if (a) this.attach(a[0], a[1], a[3] ? { kind: "renderbuffer", name: a[3], level: 0, layer: 0,
+            id: this.current.group.renderbuffers.get(a[3])?.id } : null);
     };
 
     proto.drawBuffer = function(bytes, view, offset, size) {
@@ -282,10 +312,10 @@
     proto.attachedImage = function(record) {
         const group = this.current.group;
         if (record.kind === "renderbuffer") {
-            const rb = group.renderbuffers.get(record.name);
+            const rb = group.renderbufferImages.get(record.id);
             return rb && rb.width && rb.height ? rb : null;
         }
-        const texture = group.textures.get(record.name);
+        const texture = group.textureImages.get(record.id);
         const layer = texture && texture.levels.get(texture.target === GL.TEXTURE_3D ? 0 : record.layer);
         const level = layer && layer.get(record.level);
         if (!level) return null;
@@ -325,7 +355,7 @@
             return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         if (!any) return GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
         if (!dimensions) return GL.FRAMEBUFFER_INCOMPLETE_DIMENSIONS_EXT;
-        const same = (x, y) => x.kind === y.kind && x.name === y.name && x.level === y.level && x.layer === y.layer;
+        const same = (x, y) => x.kind === y.kind && x.id === y.id && x.level === y.level && x.layer === y.layer;
         if (fbo.depth && fbo.stencil && !same(fbo.depth, fbo.stencil)) return GL.FRAMEBUFFER_UNSUPPORTED_EXT;
         // a buffer that is not an attachment (BACK on an FBO) means the first
         const index = buffer => buffer >= GL.COLOR_ATTACHMENT0 ? buffer - GL.COLOR_ATTACHMENT0 : 0;
@@ -378,28 +408,57 @@
     const levelsOut = texture => [...texture.levels].map(([layer, levels]) => [layer, [...levels]]);
     const levelsIn = saved => new Map(saved.map(([layer, levels]) => [layer, new Map(levels)]));
 
+    function collectImages(shadow) {
+        for (const group of shadow.groups.values()) {
+            const live = new Set();
+            const units = list => { for (const unit of list) for (const id of unit.values()) live.add(id); };
+            for (const c of shadow.contexts.values()) if (c.group === group) {
+                units(c.unitImages); for (const id of c.defaultTextures.values()) live.add(id);
+                live.add(c.renderbufferImage);
+                for (const fbo of c.framebuffers.values()) for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.id);
+                for (const a of c.state?.attrib || []) {
+                    const images = a.parts?.images;
+                    if (images) units(images.unitImages.map(u => new Map(u)));
+                }
+            }
+            for (const pool of [group.textureImages, group.renderbufferImages])
+                for (const [id, image] of pool) if ((image.deleted || !image.name) && !live.has(id)) pool.delete(id);
+        }
+    }
+
     GLShadow.part({
+        afterBatch: collectImages,
         group(group) {
             group.textures = new Map();
             group.renderbuffers = new Map();
+            group.textureImages = new Map();
+            group.renderbufferImages = new Map();
+            group.nextImageId = 1;
         },
         context(context) {
             context.activeTexture = 0;
             context.units = Array.from({ length: MAX_TEXTURE_UNITS }, () => new Map());
+            context.unitImages = Array.from({ length: MAX_TEXTURE_UNITS }, () => new Map());
+            context.defaultTextures = new Map();
             context.framebuffers = new Map();
             context.drawFramebuffer = 0;
             context.readFramebuffer = 0;
             context.renderbuffer = 0;
+            context.renderbufferImage = 0;
             context.drawBuffers = [GL.BACK];
             context.readBuffer = GL.BACK;
         },
         getState(shadow, state) {
             state.objects = {
+                version: 2,
                 groups: [...shadow.groups.values()].map(group => ({ key: group.key,
-                    textures: [...group.textures.values()].map(t => [t.name, t.target, levelsOut(t)]),
-                    renderbuffers: [...group.renderbuffers.values()] })),
+                    nextImageId: group.nextImageId,
+                    textures: [...group.textureImages.values()].map(t => [t.name, t.target, levelsOut(t), t.id, t.deleted]),
+                    renderbuffers: [...group.renderbufferImages.values()] })),
                 contexts: [...shadow.contexts.values()].map(c => ({ key: c.key, activeTexture: c.activeTexture,
                     units: c.units.map(unit => [...unit]), framebuffers: [...c.framebuffers.values()],
+                    unitImages: c.unitImages.map(unit => [...unit]), defaultTextures: [...c.defaultTextures],
+                    renderbufferImage: c.renderbufferImage,
                     drawFramebuffer: c.drawFramebuffer, readFramebuffer: c.readFramebuffer, renderbuffer: c.renderbuffer,
                     drawBuffers: c.drawBuffers, readBuffer: c.readBuffer })),
             };
@@ -410,17 +469,30 @@
             for (const g of saved.groups) {
                 const group = shadow.groups.get(g.key);
                 if (!group) continue;
-                for (const [name, target, levels] of g.textures)
-                    group.textures.set(name, { name, target, levels: levelsIn(levels) });
-                for (const rb of g.renderbuffers) group.renderbuffers.set(rb.name, { ...rb });
+                group.nextImageId = g.nextImageId || 1;
+                for (const [name, target, levels, savedId, deleted] of g.textures) {
+                    const t = { name, target, levels: levelsIn(levels), id: savedId || group.nextImageId++, deleted: !!deleted };
+                    group.textureImages.set(t.id, t); if (name && !deleted) group.textures.set(name, t);
+                }
+                for (const savedRb of g.renderbuffers) {
+                    const rb = { ...savedRb, id: savedRb.id || group.nextImageId++ };
+                    group.renderbufferImages.set(rb.id, rb); if (!rb.deleted) group.renderbuffers.set(rb.name, rb);
+                }
             }
             for (const c of saved.contexts) {
                 const context = shadow.contexts.get(c.key);
                 if (!context) continue;
                 Object.assign(context, { activeTexture: c.activeTexture, units: c.units.map(unit => new Map(unit)),
+                    unitImages: c.unitImages ? c.unitImages.map(unit => new Map(unit)) : c.units.map(unit =>
+                        new Map(unit.map(([target, name]) => [target, context.group.textures.get(name)?.id]))),
+                    defaultTextures: new Map(c.defaultTextures || []),
+                    renderbufferImage: c.renderbufferImage || context.group.renderbuffers.get(c.renderbuffer)?.id || 0,
                     framebuffers: new Map(c.framebuffers.map(fbo => [fbo.name, fbo])), drawFramebuffer: c.drawFramebuffer,
                     readFramebuffer: c.readFramebuffer, renderbuffer: c.renderbuffer, drawBuffers: c.drawBuffers,
                     readBuffer: c.readBuffer });
+                if (!saved.version) for (const fbo of context.framebuffers.values())
+                    for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r)
+                        r.id = (r.kind === "texture" ? context.group.textures : context.group.renderbuffers).get(r.name)?.id;
             }
         },
     });

@@ -24,6 +24,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
@@ -143,6 +144,11 @@ async function guestAnswers(remote) {
         .call("BIND_FRAMEBUFFER", 0x8D40, 3).call("FRAMEBUFFER_TEXTURE", 0x8D40, 0x8CE0, 0x0DE1, 7, 0, 0);
     const fboAt = stream.length + 4 + P.F.CHECK_FRAMEBUFFER_STATUS.status;
     stream.record(P.GLFN.CHECK_FRAMEBUFFER_STATUS, P.encodeRecord("CHECK_FRAMEBUFFER_STATUS", { target: 0x8D40 }));
+    const isTextureAt = stream.length + 4;
+    const objectHeader = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_IS_OBJECT,
+        target: P.C.V86GL_OBJECT_KIND_TEXTURE, pname: 7, value_kind: P.C.V86GL_STATE_BOOLEAN, data_size: 8 });
+    const objectPayload = new Uint8Array(objectHeader.length + 8); objectPayload.set(objectHeader);
+    stream.record(P.GLFN.QUERY_PARAMETER, objectPayload);
     // an ARB program that does not assemble: where it stopped
     stream.call("BIND_PROGRAM_ARB", 0x8804, 4).programStringARB(0x8804, "!!ARBfp1.0\nMOV result.color, nothing;\nEND\n");
     const arbAt = stream.length + 4 + 4;
@@ -193,6 +199,7 @@ async function guestAnswers(remote) {
             new Uint8Array(memory.buffer, ARENA + HEADER + failedUniformAt + 32, 16).every(v => v === 0xA5),
         location: answer(locationAt, () => view.getInt32(locationAt + 4, true)),
         framebuffer: answer(fboAt, () => view.getUint32(fboAt + 4, true)),
+        isTexture: answer(isTextureAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(isTextureAt + P.RECORDS.QUERY_PARAMETER.size, true)),
         arb: answer(arbAt, () => view.getInt32(arbAt + 4, true)),
         finish: answer(finishAt, () => "done"),
         queries: answer(batchAt, () => "done"),
@@ -235,6 +242,7 @@ async function guestAnswers(remote) {
     assert.deepEqual(results.page.pixelMap, [0, 32768, 65535, 16384]); assert.deepEqual(results.worker.pixelMap, results.page.pixelMap);
     assert.equal(results.page.failedLink, 0); assert.equal(results.worker.failedLink, 0);
     assert.equal(results.page.failedUniform, true); assert.equal(results.worker.failedUniform, true);
+    assert.equal(results.page.isTexture, 1); assert.equal(results.worker.isTexture, 1);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;

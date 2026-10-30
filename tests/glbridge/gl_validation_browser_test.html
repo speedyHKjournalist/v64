@@ -19,6 +19,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -174,6 +175,29 @@
                     "failed link must keep installed code; successful link must zero uniforms: " + Array.from(pixel.bytes.subarray(32)));
             }
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "relink frames must have no host errors");
+            const retained = new GLStream().makeCurrent(60, 0, 0, 64, 64, 60, 60)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 7).call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+                .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([64, 128, 192, 255]))
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 3).call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 7, 0, 0)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 0).makeCurrent(61, 0, 0, 64, 64, 61, 60)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 7).call("ENABLE", GL.TEXTURE_2D).call("TEX_ENVI", GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE, GL.REPLACE)
+                .makeCurrent(60, 0, 0, 64, 64, 60, 60).names(P.GLFN.DELETE_TEXTURES, [7])
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 7)
+                .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255]))
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 3).names(P.GLFN.DELETE_TEXTURES, [7]);
+            const oldAttachment = retained.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            retained.makeCurrent(61, 0, 0, 64, 64, 61, 60).call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const oldBinding = retained.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), retainedMemory = retained.bytes();
+            shadow.process(retainedMemory); executor.options.writeGuestMemory = (offset, data) => retainedMemory.set(data, offset);
+            executor.submit(remote ? retainedMemory.slice() : retainedMemory, {}); await executor.idle();
+            for (const pixel of [oldAttachment, oldBinding]) {
+                check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "retained image readback must finish");
+                check([64, 128, 192, 255].every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1),
+                    "name reuse redirected or destroyed a retained image: " + Array.from(pixel.bytes.subarray(32)));
+            }
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "retained images must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

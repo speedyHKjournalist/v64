@@ -1545,6 +1545,7 @@
             clientActiveTexture: 0,
             textureUnits: Array.from({ length: MAX_TEXTURE_UNITS }, () => ({
                 bindings: Object.create(null),   // target -> texture name
+                imageBindings: Object.create(null), // target -> retained object identity
                 enabledTargets: new Set(),
                 env: newTexEnv(),
                 texGen: Array.from({ length: 4 }, (unused, i) => ({
@@ -1702,6 +1703,7 @@
         return {
             id,
             textures: new Map(),
+            textureImages: new Map(), renderbufferImages: new Map(), nextImageId: 1,
             buffers: new Map(),
             shaders: new Map(),
             programs: new Map(),
@@ -1996,13 +1998,14 @@
                     "depthTarget", "accumBuffer", "uniformRing", "vertexRing"])
                 this[name] = null;
             for (const group of this.shareGroups.values()) {
-                for (const texture of group.textures.values()) {
+                for (const texture of group.textureImages.values()) {
                     texture.gpuTexture = null;
+                    texture.depthColor = null;
                     texture.viewCache.clear();
                     texture.dirty = true;
                 }
                 for (const buffer of group.buffers.values()) buffer.gpuBuffer = null;
-                for (const rb of group.renderbuffers.values()) rb.gpuTexture = null;
+                for (const rb of group.renderbufferImages.values()) rb.gpuTexture = null;
                 for (const program of group.programs.values())
                     program.variants.clear();
             }
@@ -2012,7 +2015,7 @@
                     for (const buffer of group.buffers.values())
                         if (buffer.shadow) this.replaceBufferStorage(buffer);
                     // (their contents were rendered on the lost device)
-                    for (const rb of group.renderbuffers.values())
+                    for (const rb of group.renderbufferImages.values())
                         if (rb.gpuFormat) this.allocateRenderbuffer(rb);
                 }
             });
@@ -2195,13 +2198,13 @@
                 const live = [...this.contexts.values()].some(context =>
                     context.shareGroup === group);
                 if (!live) {
-                    for (const texture of group.textures.values())
+                    for (const texture of group.textureImages.values())
                         this.retire(texture.gpuTexture);
                     for (const buffer of group.buffers.values()) {
                         this.invalidateVertexConversions(buffer);
                         this.retire(buffer.gpuBuffer);
                     }
-                    for (const rb of group.renderbuffers.values())
+                    for (const rb of group.renderbufferImages.values())
                         this.retire(rb.gpuTexture);
                     this.shareGroups.delete(key);
                 }
@@ -2230,13 +2233,13 @@
                 try { object.destroy(); } catch (ignored) { /* already gone */ }
             };
             for (const group of this.shareGroups.values()) {
-                for (const texture of group.textures.values())
+                for (const texture of group.textureImages.values())
                     release(texture.gpuTexture);
                 for (const buffer of group.buffers.values()) {
                     this.invalidateVertexConversions(buffer);
                     release(buffer.gpuBuffer);
                 }
-                for (const rb of group.renderbuffers.values())
+                for (const rb of group.renderbufferImages.values())
                     release(rb.gpuTexture);
             }
             release(this.backBuffer);
@@ -2409,6 +2412,7 @@
                 }
                 offset += size;
             }
+            this.collectImages();
             this.beat(metadata);
         }
 
@@ -3135,11 +3139,9 @@
 
         define("GEN_TEXTURES", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
-            const group = this.current.shareGroup;
             for (const name of names) {
                 if (!name) continue;
-                if (!group.textures.has(name))
-                    group.textures.set(name, createTexture(name));
+                this.namedImage("texture", name);
             }
         });
 
@@ -3149,14 +3151,17 @@
             for (const name of names) {
                 const texture = group.textures.get(name);
                 if (!texture) continue;
-                this.retire(texture.gpuTexture);
                 group.textures.delete(name);
+                texture.deleted = true;
                 // GL rebinds the default texture on every unit that held it,
                 // which is what keeps a later draw from sampling a dead object.
                 for (const unit of this.current.textureUnits) {
                     for (const target of Object.keys(unit.bindings))
-                        if (unit.bindings[target] === name) unit.bindings[target] = 0;
+                        if (unit.imageBindings[target] === texture.imageId) {
+                            unit.bindings[target] = 0; delete unit.imageBindings[target];
+                        }
                 }
+                this.detachImage("texture", texture.imageId);
                 this.invalidateBindGroups();
             }
         });
@@ -3165,15 +3170,9 @@
             const target = a[0] >>> 0, name = a[1] >>> 0;
             const unit = this.current.textureUnits[this.current.activeTexture];
             unit.bindings[target] = name;
-            if (name) {
-                const group = this.current.shareGroup;
-                let texture = group.textures.get(name);
-                if (!texture) {
-                    texture = createTexture(name);
-                    group.textures.set(name, texture);
-                }
-                if (!texture.target) texture.target = target;
-            }
+            const texture = name ? this.namedImage("texture", name) : this.defaultTexture(target);
+            unit.imageBindings[target] = texture.imageId;
+            if (!texture.target) texture.target = target;
             this.invalidateBindGroups();
         });
 
@@ -3456,6 +3455,7 @@
             const names = readNameArray(view, offset, size);
             const map = this.framebuffers.get(this.current.id);
             for (const name of names) {
+                if (this.current.drawFramebuffer === name) this.endPass();
                 map.delete(name);
                 if (this.current.drawFramebuffer === name)
                     this.current.drawFramebuffer = 0;
@@ -3489,26 +3489,24 @@
         });
         define("GEN_RENDERBUFFERS", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
-            const group = this.current.shareGroup;
             for (const name of names)
-                if (name && !group.renderbuffers.has(name))
-                    group.renderbuffers.set(name, createRenderbuffer(name));
+                if (name) this.namedImage("renderbuffer", name);
         });
         define("DELETE_RENDERBUFFERS", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
             const group = this.current.shareGroup;
             for (const name of names) {
                 const rb = group.renderbuffers.get(name);
-                if (rb) this.retire(rb.gpuTexture);
+                if (!rb) continue;
+                rb.deleted = true;
                 group.renderbuffers.delete(name);
-                if (this.current.renderbuffer === name) this.current.renderbuffer = 0;
+                if (this.current.renderbufferImage === rb.imageId) this.current.renderbuffer = this.current.renderbufferImage = 0;
+                this.detachImage("renderbuffer", rb.imageId);
             }
         });
         define("BIND_RENDERBUFFER", function(a) {
             const name = a[1] >>> 0;
-            const group = this.current.shareGroup;
-            if (name && !group.renderbuffers.has(name))
-                group.renderbuffers.set(name, createRenderbuffer(name));
+            this.current.renderbufferImage = name ? this.namedImage("renderbuffer", name).imageId : 0;
             this.current.renderbuffer = name;
         });
         define("RENDERBUFFER_STORAGE", function(a) {
@@ -4690,9 +4688,69 @@
             if (target >= GL.TEXTURE_CUBE_MAP_POSITIVE_X &&
                     target <= GL.TEXTURE_CUBE_MAP_NEGATIVE_Z)
                 key = GL.TEXTURE_CUBE_MAP;
-            const name = unit.bindings[key];
-            if (!name) return null;
-            return s.shareGroup.textures.get(name) || null;
+            return this.textureObjectFor(s.activeTexture, key);
+        },
+
+        namedImage(kind, name) {
+            const group = this.current.shareGroup, textures = kind === "texture";
+            const names = textures ? group.textures : group.renderbuffers;
+            const pool = textures ? group.textureImages : group.renderbufferImages;
+            let image = names.get(name);
+            if (!image) {
+                image = textures ? createTexture(name) : createRenderbuffer(name);
+                image.imageId = group.nextImageId++; pool.set(image.imageId, image); names.set(name, image);
+            }
+            return image;
+        },
+
+        defaultTexture(target) {
+            const c = this.current, group = c.shareGroup;
+            if (!c.defaultTextures) c.defaultTextures = Object.create(null);
+            let id = c.defaultTextures[target];
+            if (!id) {
+                const texture = createTexture(0); texture.target = target;
+                texture.imageId = group.nextImageId++; id = texture.imageId;
+                group.textureImages.set(id, texture); c.defaultTextures[target] = id;
+            }
+            return group.textureImages.get(id);
+        },
+
+        imageFor(record) {
+            const g = this.current.shareGroup, texture = record.kind === "texture";
+            return record.imageId !== undefined ? (texture ? g.textureImages : g.renderbufferImages).get(record.imageId) :
+                (texture ? g.textures : g.renderbuffers).get(record.name);
+        },
+
+        detachImage(kind, imageId) {
+            this.endPass();
+            const s = this.current, map = this.framebuffers.get(s.id);
+            for (const name of new Set([s.drawFramebuffer, s.readFramebuffer])) {
+                const fbo = map.get(name); if (!fbo) continue;
+                const stale = r => r && r.kind === kind && r.imageId === imageId;
+                fbo.color = fbo.color.map(r => stale(r) ? null : r);
+                if (stale(fbo.depth)) fbo.depth = null;
+                if (stale(fbo.stencil)) fbo.stencil = null;
+            }
+        },
+
+        collectImages() {
+            for (const group of this.shareGroups.values()) {
+                const live = new Set();
+                const units = list => { for (const unit of list) for (const id of Object.values(unit.imageBindings || {})) live.add(id); };
+                for (const c of this.contexts.values()) if (c.shareGroup === group) {
+                    units(c.textureUnits); for (const id of Object.values(c.defaultTextures || {})) live.add(id);
+                    live.add(c.renderbufferImage);
+                    for (const fbo of this.framebuffers.get(c.id)?.values() || [])
+                        for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r) live.add(r.imageId);
+                    for (const a of c.attribStack) if (a.state.textureUnits) units(a.state.textureUnits);
+                }
+                for (const pool of [group.textureImages, group.renderbufferImages])
+                    for (const [id, image] of pool) if ((image.deleted || !image.name) && !live.has(id)) {
+                        this.retire(image.gpuTexture);
+                        if (image.depthColor) this.retire(image.depthColor.texture);
+                        pool.delete(id);
+                    }
+            }
         },
 
         invalidateBindGroups() {
@@ -6916,7 +6974,7 @@
 
         resolveAttachment(attachment) {
             if (attachment.kind === "texture") {
-                const texture = this.current.shareGroup.textures.get(attachment.name);
+                const texture = this.imageFor(attachment);
                 if (!texture) return null;
                 const gpuTexture = this.ensureTextureUploaded(texture);
                 if (!gpuTexture) return null;
@@ -6937,7 +6995,7 @@
                     origin: { x: 0, y: 0, z: attachment.layer },
                 };
             }
-            const rb = this.current.shareGroup.renderbuffers.get(attachment.name);
+            const rb = this.imageFor(attachment);
             if (!rb || !rb.gpuTexture) return null;
             return { view: rb.gpuTexture.createView(), format: rb.gpuFormat,
                      texture: rb.gpuTexture, mipLevel: 0,
@@ -8366,9 +8424,8 @@ ${fragmentCode}`;
 
         textureObjectFor(unit, target) {
             const s = this.current;
-            const name = s.textureUnits[unit].bindings[target];
-            if (!name) return null;
-            return s.shareGroup.textures.get(name) || null;
+            const state = s.textureUnits[unit], id = state.imageBindings[target];
+            return id ? s.shareGroup.textureImages.get(id) || null : this.defaultTexture(target);
         },
 
         textureMatrixOf(unit) {
@@ -8795,9 +8852,7 @@ ${fragmentCode}`;
                     const unitState = this.current.textureUnits[
                         clamp(unit, 0, MAX_TEXTURE_UNITS - 1)];
                     const targetEnum = samplerTargetEnum(sampler.dim);
-                    const object = unitState ?
-                        (this.current.shareGroup.textures.get(
-                            unitState.bindings[targetEnum]) || null) : null;
+                    const object = unitState ? this.textureObjectFor(clamp(unit, 0, MAX_TEXTURE_UNITS - 1), targetEnum) : null;
                     entries.push({ binding: sampler.binding + i * 2,
                                    resource: this.textureViewFor(object,
                                        { target: sampler.dim, shadow: sampler.shadow }) });
@@ -9719,6 +9774,7 @@ struct BlitParams {
             const face = CUBE_FACE_INDEX[textarget];
             const record = textureName ? {
                 kind: "texture", name: textureName, level: level | 0,
+                imageId: s.shareGroup.textures.get(textureName)?.imageId,
                 layer: face !== undefined ? face : (layer | 0),
             } : null;
             this.attachTo(fbo, attachment, record);
@@ -9736,7 +9792,8 @@ struct BlitParams {
                     GL.INVALID_OPERATION);
             void rbTarget;
             this.attachTo(fbo, attachment,
-                rbName ? { kind: "renderbuffer", name: rbName, level: 0, layer: 0 } :
+                rbName ? { kind: "renderbuffer", name: rbName, level: 0, layer: 0,
+                    imageId: s.shareGroup.renderbuffers.get(rbName)?.imageId } :
                     null);
             this.endPass();
         },
@@ -9762,30 +9819,30 @@ struct BlitParams {
         attachmentSize(record) {
             if (!record) return null;
             if (record.kind === "texture") {
-                const texture = this.current.shareGroup.textures.get(record.name);
+                const texture = this.imageFor(record);
                 const slot = texture && texture.levels[record.layer] &&
                     texture.levels[record.layer][record.level];
                 return slot ? { width: slot.width, height: slot.height } : null;
             }
-            const rb = this.current.shareGroup.renderbuffers.get(record.name);
+            const rb = this.imageFor(record);
             return rb ? { width: rb.width, height: rb.height } : null;
         },
 
         attachmentFormat(record) {
             if (!record) return null;
             if (record.kind === "texture") {
-                const texture = this.current.shareGroup.textures.get(record.name);
+                const texture = this.imageFor(record);
                 const slot = texture && texture.levels[record.layer] &&
                     texture.levels[record.layer][record.level];
                 return slot ? slot.gpuFormat : null;
             }
-            const rb = this.current.shareGroup.renderbuffers.get(record.name);
+            const rb = this.imageFor(record);
             return rb ? rb.gpuFormat : null;
         },
 
         renderbufferStorage(internalFormat, width, height) {
             const s = this.current;
-            const rb = s.shareGroup.renderbuffers.get(s.renderbuffer);
+            const rb = s.shareGroup.renderbufferImages.get(s.renderbufferImage);
             if (!rb)
                 return this.refuse("glRenderbufferStorage",
                     "no renderbuffer is bound", {}, GL.INVALID_OPERATION);
@@ -9855,7 +9912,7 @@ struct BlitParams {
 
             if (fbo.depth && fbo.stencil &&
                     (fbo.depth.kind !== fbo.stencil.kind ||
-                     fbo.depth.name !== fbo.stencil.name ||
+                     this.imageFor(fbo.depth) !== this.imageFor(fbo.stencil) ||
                      fbo.depth.level !== fbo.stencil.level ||
                      fbo.depth.layer !== fbo.stencil.layer))
                 return GL.FRAMEBUFFER_UNSUPPORTED_EXT;
@@ -9930,7 +9987,7 @@ struct BlitParams {
             const record = fbo.color[index];
             if (!record) return null;
             if (record.kind === "texture") {
-                const texture = s.shareGroup.textures.get(record.name);
+                const texture = this.imageFor(record);
                 const gpuTexture = this.ensureTextureUploaded(texture);
                 return gpuTexture ? { texture: gpuTexture,
                     format: texture.gpuFormat,
@@ -9943,7 +10000,7 @@ struct BlitParams {
                     width: Math.max(1, texture.gpuWidth >> record.level),
                     height: Math.max(1, texture.gpuHeight >> record.level) } : null;
             }
-            const rb = s.shareGroup.renderbuffers.get(record.name);
+            const rb = this.imageFor(record);
             return rb && rb.gpuTexture ? { texture: rb.gpuTexture,
                 view: rb.gpuTexture.createView(),
                 format: rb.gpuFormat, width: rb.width, height: rb.height } : null;
