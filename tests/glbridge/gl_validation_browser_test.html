@@ -42,6 +42,7 @@
 <script src="gl_texture_readback_cases.js"></script>
 <script src="gl_shader_mixed_cases.js"></script>
 <script src="gl_display_list_array_cases.js"></script>
+<script src="gl_display_list_pixel_cases.js"></script>
 <script>
 (async () => {
     "use strict";
@@ -825,6 +826,27 @@
             for (const { name, read, pixel } of reads) check(read.view.getUint32(P.F.READ_PIXELS.status, true) === 1 &&
                 pixel.every((v, i) => read.bytes[32 + i] === v), name + " captured list pixel " + Array.from(read.bytes.subarray(32)));
             check(!shadow.current.error && !shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "captured list host failure");
+        }
+        const listPixelsReference = await (await fetch("gl_conformance/display_list_pixels_reference.json")).json();
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize();
+            const { stream, reads, queries, states } = GLDisplayListPixelCases.build(listPixelsReference.cases), memory = stream.bytes(), segments = shadow.process(memory);
+            executor.options.writeGuestMemory = (at, data, metadata) => memory.set(data, at + (metadata.originalOffset || 0));
+            for (const segment of segments) {
+                const bytes = segment.bytes || memory.subarray(segment.offset, segment.offset + segment.length);
+                executor.submit(remote ? bytes.slice() : bytes, { originalOffset: segment.bytes ? 0 : segment.offset });
+            }
+            await executor.idle();
+            for (const { name, read, expected } of reads) check(read.view.getUint32(P.F.READ_PIXELS.status, true) === 1 &&
+                expected.every((v, i) => read.bytes[32 + i] === v), name + " compiled pixel " + Array.from(read.bytes.subarray(32)));
+            for (const { name, read, expected, error, expectedError } of queries) check(read.view.getUint32(P.F.QUERY_POLYGON_STIPPLE.status, true) === 1 &&
+                expected.every((v, i) => read.bytes[48 + i] === v) && error.view.getUint32(P.F.QUERY_ERROR.status, true) === 1 &&
+                error.view.getUint32(P.F.QUERY_ERROR.value, true) === expectedError, name + " compiled stipple/error");
+            for (const { name, checks, expected } of states) check(checks.every((q, i) => q.view.getUint32(P.F.QUERY_STATE.status, true) === 1 &&
+                q.view.getFloat64(24, true) === expected[i]), name + " preserves client unpack state");
+            check(!shadow.current.error && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals,
+                "compiled pixel host failure " + JSON.stringify({ cpu: shadow.current.error, gpu: executor.gpuErrors.errors, host: executor.hostErrors, refusals: executor.stats.refusals }));
         }
         document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, captured display lists, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
     } catch (error) {

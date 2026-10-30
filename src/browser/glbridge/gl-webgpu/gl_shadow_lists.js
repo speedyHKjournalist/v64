@@ -9,6 +9,22 @@
     const arrays = global.GLListArrays || require("./gl_list_arrays.js");
     const INDEX = 0x0B33, MODE = 0x0B30, NESTING = 0x0B31;
     const MAX_DEPTH = 64, MAX_EXPANSION = 64 * 1024 * 1024;
+    const unpackFields = ["ALIGNMENT", "SWAP_BYTES", "LSB_FIRST", "ROW_LENGTH", "IMAGE_HEIGHT", "SKIP_PIXELS", "SKIP_ROWS", "SKIP_IMAGES"]
+        .map(name => GL["UNPACK_" + name]);
+    const pixelInputs = new Set(["BITMAP", "DRAW_PIXELS", "POLYGON_STIPPLE_BITMAP", "TEX_IMAGE_1D", "TEX_IMAGE_2D", "TEX_IMAGE_3D",
+        "TEX_SUB_IMAGE_1D", "TEX_SUB_IMAGE_2D", "TEX_SUB_IMAGE_3D"]);
+    const unpack = c => unpackFields.map(pname => c.state.values[pname][0]);
+    function expandEntry(s, entry) {
+        if (Array.isArray(entry)) return s.expand(Uint8Array.from(entry));
+        const saved = unpack(s.current), commands = [];
+        const apply = values => {
+            for (let i = 0; i < unpackFields.length; ++i) if (s.current.state.values[unpackFields[i]][0] !== values[i]) commands.push(...s.expand(arrays.record(P.GLFN.PIXEL_STOREI,
+                [P.encodeArgs("PIXEL_STOREI", [unpackFields[i], values[i]])])));
+        };
+        apply(entry.unpack);
+        try { commands.push(...s.expand(Uint8Array.from(entry.data))); } finally { apply(saved); }
+        return commands;
+    }
     const immediateNames = new Set(("PIXEL_STOREI PIXEL_STOREF READ_PIXELS FINISH FLUSH CLIENT_ACTIVE_TEXTURE " +
         "ENABLE_CLIENT_STATE DISABLE_CLIENT_STATE ENABLE_VERTEX_ATTRIB_ARRAY DISABLE_VERTEX_ATTRIB_ARRAY PUSH_CLIENT_ATTRIB POP_CLIENT_ATTRIB " +
         "GEN_TEXTURES DELETE_TEXTURES GEN_BUFFERS DELETE_BUFFERS BIND_BUFFER BUFFER_DATA BUFFER_SUB_DATA " +
@@ -60,6 +76,13 @@
         this.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_OK);
     };
     GLShadow.install({ [P.GLFN.QUERY_LIST]: "queryList" });
+    GLShadow.prototype.captureListFailure = function(fn, value) {
+        const c = this.current;
+        if (!c?.listCompile || c.listExecution) return false;
+        c.listCompile.entries.push(Array.from(arrays.record(P.rejectedOpcode(fn, value), [])));
+        if (c.listCompile.mode === GL.COMPILE_AND_EXECUTE) error(c, value);
+        return true;
+    };
     function execute(s, name) {
         const c = s.current;
         if (!name) { error(c, GL.INVALID_VALUE); return []; }
@@ -71,9 +94,9 @@
         ++execution.depth; const commands = [];
         try {
             for (const entry of entries) {
-                execution.bytes += entry.length;
+                execution.bytes += Array.isArray(entry) ? entry.length : entry.data.length;
                 if (execution.bytes > MAX_EXPANSION) { error(c, GL.OUT_OF_MEMORY); break; }
-                commands.push(...s.expand(Uint8Array.from(entry)));
+                commands.push(...expandEntry(s, entry));
             }
         } finally { --execution.depth; if (outer) c.listExecution = null; }
         return commands;
@@ -104,12 +127,13 @@
             if (c.listCompile && !c.listExecution && !immediate(fn, bytes, view, offset)) {
                 const records = arrays.capture(s, fn, bytes, view, offset, size) ||
                     [arrays.record(fn, [bytes.subarray(offset, offset + size)])];
-                for (const copy of records) c.listCompile.entries.push(Array.from(copy));
+                const entries = records.map(copy => pixelInputs.has(P.NAME_BY_OPCODE[fn]) ? { data: Array.from(copy), unpack: unpack(c) } : Array.from(copy));
+                c.listCompile.entries.push(...entries);
                 if (fn === P.GLFN.BEGIN) c.listCompile.begin = true;
                 if (fn === P.GLFN.END) c.listCompile.begin = false;
                 if (c.listCompile.mode === GL.COMPILE) return { commands: [] };
                 const execution = c.listExecution; c.listExecution = { depth: 0, bytes: 0 };
-                try { return { commands: records.flatMap(copy => s.expand(copy)) }; } finally { c.listExecution = execution; }
+                try { return { commands: entries.flatMap(entry => expandEntry(s, entry)) }; } finally { c.listExecution = execution; }
             }
             if (control) {
                 if (r.operation === 3) return { commands: execute(s, r.name) };

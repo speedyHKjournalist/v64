@@ -334,6 +334,8 @@
         ["V86GL_SYNC_QUERY_STATUS_OK", 1],
         ["V86GL_SYNC_QUERY_STATUS_FAILED", 2],
         ["V86GL_STATE_QUERY_UNSUPPORTED", 3, "state not migrated to the CPU shadow yet"],
+        ["V86GL_STIPPLE_SOURCE_PBO_BIT", 1],
+        ["V86GL_STIPPLE_CAPTURE_FAILURE_BIT", 2, "capture-only setter query stored a deferred list error"],
         ["V86GL_STATE_INTEGER", 1],
         ["V86GL_STATE_FLOAT", 2],
         ["V86GL_STATE_DOUBLE", 3],

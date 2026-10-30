@@ -4222,7 +4222,7 @@
             if (size < header) throw new GLStreamError(name + " record is short");
             if (view.getUint32(offset + fields.status, true) !== SYNC_STATUS_OK) return;
             if (name === "QUERY_POLYGON_STIPPLE" &&
-                (!view.getUint32(offset + fields.mode, true) || !view.getUint32(offset + fields.pbo, true))) return;
+                (view.getUint32(offset + fields.mode, true) !== 1 || !view.getUint32(offset + fields.pbo, true))) return;
             if (size < header + 128) throw new GLStreamError(name + " bitmap is short");
             if (!this.current) return;
             this.current.polygonStipple.set(bytes.subarray(offset + header, offset + header + 128));
@@ -10081,7 +10081,9 @@ struct BlitParams {
                 return gpuTexture ? { texture: gpuTexture,
                     format: texture.gpuFormat,
                     mipLevel: record.level, layer: record.layer,
-                    view: gpuTexture.createView({
+                    // ReadPixels copies a 3D z-slice directly. Such a texture
+                    // cannot have a 2D/array view; no view is needed for copy.
+                    view: texture.kind === "3D" ? undefined : gpuTexture.createView({
                         dimension: "2d", baseMipLevel: record.level,
                         mipLevelCount: 1, baseArrayLayer: record.layer,
                         arrayLayerCount: 1,

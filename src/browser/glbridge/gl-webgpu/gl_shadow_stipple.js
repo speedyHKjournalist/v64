@@ -26,6 +26,11 @@
         if (!s.pending(name, view, offset, size)) return;
         const fields = P.F[name], header = P.RECORDS[name].size, r = P.decodeRecord(name, view, offset), c = s.current;
         const fail = error => {
+            if (name === "QUERY_POLYGON_STIPPLE" && r.mode === 2 && s.captureListFailure?.(P.GLFN.POLYGON_STIPPLE, error)) {
+                view.setUint32(offset + fields.pbo, P.C.V86GL_STIPPLE_CAPTURE_FAILURE_BIT, true);
+                view.setUint32(offset + fields.error, 0, true);
+                return s.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_OK);
+            }
             if (c && !c.error) c.error = error;
             view.setUint32(offset + fields.error, error, true);
             s.answered(name, view, offset, P.C.V86GL_SYNC_QUERY_STATUS_FAILED);
@@ -35,10 +40,10 @@
         if (!Number.isSafeInteger(l.span) || l.span > 0xFFFFFFFF) return fail(GL.OUT_OF_MEMORY);
         const buffer = s.boundBuffer?.(query && r.mode === 0 ? GL.PIXEL_PACK_BUFFER : GL.PIXEL_UNPACK_BUFFER);
         if (query) {
-            if (r.mode > 1 || r.data_size !== 320 || size < header + 320) return fail(GL.INVALID_VALUE);
+            if (r.mode > 2 || r.data_size !== 320 || size < header + 320) return fail(GL.INVALID_VALUE);
             if (buffer && (buffer.mapped || r.pointer + l.span > buffer.size)) return fail(GL.INVALID_OPERATION);
             for (const [key, value] of Object.entries(l)) view.setUint32(offset + fields[key], value, true);
-            view.setUint32(offset + fields.pbo, buffer ? 1 : 0, true);
+            view.setUint32(offset + fields.pbo, buffer ? P.C.V86GL_STIPPLE_SOURCE_PBO_BIT : 0, true);
             const output = bytes.subarray(offset + header, offset + header + 320); output.fill(0);
             if (r.mode === 0) {
                 const count = 32 * l.row_bytes;
@@ -48,8 +53,9 @@
                     if (c.state.polygonStipple[row * 4 + Math.floor(x / 8)] & 0x80 >> (x % 8)) output[at] |= mask;
                 }
             } else if (buffer) {
-                c.state.polygonStipple = canonical(buffer.data, l, r.pointer);
-                output.set(c.state.polygonStipple);
+                const pattern = canonical(buffer.data, l, r.pointer);
+                if (r.mode === 1) c.state.polygonStipple = pattern;
+                output.set(pattern);
             }
         } else {
             if (buffer) return fail(GL.INVALID_OPERATION);
