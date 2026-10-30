@@ -100,8 +100,25 @@
             check([0, 128, 192, 255].every((v, i) => Math.abs(out.bytes[32 + i] - v) <= 1),
                 "uniform arrays, booleans or deferred deletion changed GLSL pixels: " + Array.from(out.bytes.subarray(32)));
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "GLSL frame must have no host errors");
+            const assembly = new GLStream().makeCurrent(20, 0, 0, 64, 64, 20, 20)
+                .programParameterARB(P.C.V86GL_PROGRAM_PARAMETER_ENV, GL.VERTEX_PROGRAM_ARB, 95, [0.25, 0.5, 0.75, 1])
+                .programParameterARB(P.C.V86GL_PROGRAM_PARAMETER_LOCAL, GL.VERTEX_PROGRAM_ARB, 95, [1, 1, 1, 1])
+                .programParameterARB(P.C.V86GL_PROGRAM_PARAMETER_LOCAL, GL.FRAGMENT_PROGRAM_ARB, 27, [1, 1, 1, 1])
+                .programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nMOV result.position,vertex.position;\nMUL result.color,program.env[95],program.local[95];\nEND")
+                .programStringARB(GL.FRAGMENT_PROGRAM_ARB, "!!ARBfp1.0\nMUL result.color,fragment.color,program.local[27];\nEND")
+                .call("ENABLE", GL.VERTEX_PROGRAM_ARB).call("ENABLE", GL.FRAGMENT_PROGRAM_ARB)
+                .call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const arbOut = assembly.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), arbBytes = assembly.bytes();
+            shadow.process(arbBytes); executor.options.writeGuestMemory = (offset, data) => arbBytes.set(data, offset);
+            executor.submit(remote ? arbBytes.slice() : arbBytes, {}); await executor.idle();
+            check(arbOut.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "ARB readback must finish");
+            check([64, 128, 191, 255].every((v, i) => Math.abs(arbOut.bytes[32 + i] - v) <= 1),
+                "ARB default programs or high vertex/local parameter layout changed pixels: " + Array.from(arbOut.bytes.subarray(32)));
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "ARB frame must have no host errors");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation, stencil clamping and GLSL uniforms/lifetime preserve pixels in local and copied streams";
+        document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms and ARB high parameters preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

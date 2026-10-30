@@ -13,6 +13,7 @@ const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");
 const { createFakeHost } = require("./gl_fake_gpu.js");
 const { GLStream, GL } = require("./gl_stream_builder.js");
+const reference = require("./gl_conformance/arb_reference.json").cases;
 
 const OK = P.C.V86GL_SYNC_QUERY_STATUS_OK, FAILED = P.C.V86GL_SYNC_QUERY_STATUS_FAILED;
 const ENV = P.C.V86GL_PROGRAM_PARAMETER_ENV, LOCAL = P.C.V86GL_PROGRAM_PARAMETER_LOCAL;
@@ -98,7 +99,7 @@ test("environment parameters are the target's, set with no program bound; local 
     const env5 = s.queryProgramParameterARB(ENV, VP, 3);
     const local5 = s.queryProgramParameterARB(LOCAL, VP, 1);
     const fragmentEnv = s.queryProgramParameterARB(ENV, FP, 3);
-    const beyond = s.queryProgramParameterARB(ENV, VP, 28);
+    const beyond = s.queryProgramParameterARB(ENV, VP, 96);
     shadow().process(s.bytes());
     assert.deepEqual(parameter(env4), [1, 2, 3, 4]);
     assert.deepEqual(parameter(local4), [5, 6, 7, 8]);
@@ -152,6 +153,98 @@ test("the executor leaves the answered ARB queries alone", async () => {
     shadow().process(s.bytes());
     executor.submit(s.bytes(), {});
     assert.deepEqual(parameter(env), [1, 2, 3, 4]);
+});
+
+test("vertex parameter 95 is stored, compiled and queried while fragment parameters retain their own limit", async () => {
+    const s = context().programParameterARB(ENV, VP, 95, [1, 2, 3, 4])
+        .programParameterARB(LOCAL, VP, 95, [5, 6, 7, 8])
+        .programStringARB(VP, "!!ARBvp1.0\nADD result.position, program.env[95], program.local[95];\nEND");
+    const maxVertex = programiv(s, VP, GL.MAX_PROGRAM_ENV_PARAMETERS_ARB), maxFragment = programiv(s, FP, GL.MAX_PROGRAM_ENV_PARAMETERS_ARB);
+    const env = s.queryProgramParameterARB(ENV, VP, 95), local = s.queryProgramParameterARB(LOCAL, VP, 95);
+    s.programParameterARB(ENV, VP, 96, [1, 1, 1, 1]).programParameterARB(ENV, FP, 28, [1, 1, 1, 1]);
+    const state = shadow(); state.process(s.bytes()); assert.equal(state.stats.rejected, 2);
+    assert.equal(value(maxVertex), 96); assert.equal(value(maxFragment), 28);
+    assert.deepEqual(parameter(env), [1, 2, 3, 4]); assert.deepEqual(parameter(local), [5, 6, 7, 8]);
+    const { host } = createFakeHost(), executor = new GLWebGPUExecutor(null, { host }); await executor.initialize(); executor.submit(s.bytes(), {});
+    assert.deepEqual(Array.from(executor.arbEnvironment(VP).subarray(95 * 4, 96 * 4)), [1, 2, 3, 4]);
+    assert.equal(executor.stats.refusals, 0, "program 0 has real source and local storage on the renderer too");
+    const saved = JSON.parse(JSON.stringify(state.getState())), copy = shadow(); copy.setState(saved);
+    assert.deepEqual(copy.getState(), saved);
+});
+
+test("program parameter use counts agree with native GL and distinguish usage from capacity", () => {
+    const cases = {
+        none: "MOV result.position, vertex.position;",
+        high: "ADD result.position, program.env[95], program.local[94];",
+        unused: "PARAM unused = {1};\nMOV result.position, vertex.position;",
+        matrix: "PARAM mvp[4] = {state.matrix.mvp};\n" + ["x", "y", "z", "w"].map((c, i) => "DP4 result.position." + c + ",mvp[" + i + "],vertex.position;").join("\n"),
+        duplicate: "PARAM c = {1,2,3,4};\nPARAM d = {1,2,3,4};\nADD result.position,c,d;",
+        relative_constants: "PARAM arr[2] = {{1,1,1,1},{1,1,1,1}};\nADDRESS a;\nARL a.x,vertex.position.x;\nMOV result.position,arr[a.x];",
+    };
+    for (const [name, source] of Object.entries(cases)) {
+        const s = context().programStringARB(VP, "!!ARBvp1.0\n" + source + "\nEND");
+        const used = programiv(s, VP, GL.PROGRAM_PARAMETERS_ARB), native = programiv(s, VP, GL.PROGRAM_NATIVE_PARAMETERS_ARB);
+        const max = programiv(s, VP, GL.MAX_PROGRAM_PARAMETERS_ARB); shadow().process(s.bytes());
+        // ARB_vertex_program 2.14.3.7 coalesces equal non-relative constants.
+        // Apple's logical counter reports two for the identical declarations;
+        // our generated code has one distinct binding, as the spec requires.
+        const expected = name === "duplicate" ? 1 : reference[name];
+        assert.equal(value(used), expected, name); assert.equal(value(native), expected); assert.equal(value(max), 4096);
+    }
+});
+
+test("invalid ARB commands preserve bindings, parameters and the last loaded program", () => {
+    const s = context().call("BIND_PROGRAM_ARB", VP, 4).programStringARB(VP, GOOD_VP)
+        .call("BIND_PROGRAM_ARB", FP, 4).call("BIND_PROGRAM_ARB", 0xDEAD, 4)
+        .programParameterARB(ENV, VP, 96, [1, 2, 3, 4]).programStringARB(VP, BAD_FP);
+    const binding = programiv(s, FP, GL.PROGRAM_BINDING_ARB), length = programiv(s, VP, GL.PROGRAM_LENGTH_ARB), invalid = programiv(s, VP, 0xDEAD);
+    const state = shadow(); state.process(s.bytes()); assert.equal(state.stats.rejected, 4);
+    assert.equal(value(binding), 0); assert.equal(value(length), GOOD_VP.length);
+    assert.equal(invalid.view.getUint32(P.F.QUERY_PROGRAM_IV_ARB.status, true), FAILED);
+    assert.equal(state.current.error, GL.INVALID_OPERATION);
+});
+
+test("cyclic aliases and duplicate state in relative parameter arrays fail safely", () => {
+    const s = context().programStringARB(VP, "!!ARBvp1.0\nALIAS a = b;\nALIAS b = a;\nMOV result.position,a;\nEND")
+        .programStringARB(VP, "!!ARBvp1.0\nPARAM arr[2] = {program.env[0],program.env[0]};\nADDRESS a;\nARL a.x,vertex.position.x;\nMOV result.position,arr[a.x];\nEND");
+    const state = shadow(); state.process(s.bytes()); assert.equal(state.stats.rejected, 2);
+    assert.match(state.current.arb.errorString, /state bound twice/);
+});
+
+test("fragment instruction and indirection queries follow the sequential-node rules", () => {
+    for (const [source, expected] of [
+        ["MOV result.color,fragment.color;", [1, 0, 1]],
+        ["TEMP t; TEX t,fragment.texcoord[0],texture[0],2D; TEX result.color,t,texture[1],2D;", [0, 2, 2]],
+        ["TEMP t; MOV t,fragment.texcoord[0]; TEX result.color,t,texture[0],2D;", [1, 1, 2]],
+        ["TEMP t; MOV result.color,t; TEX t,fragment.texcoord[0],texture[0],2D;", [1, 1, 2]],
+        ["TEMP t; TEX t,fragment.texcoord[0],texture[0],2D; TEX result.color,fragment.texcoord[0],texture[1],2D;", [0, 2, 1]],
+    ]) {
+        const s = context().programStringARB(FP, "!!ARBfp1.0\n" + source + "\nEND"), answers =
+            [GL.PROGRAM_ALU_INSTRUCTIONS_ARB, GL.PROGRAM_TEX_INSTRUCTIONS_ARB, GL.PROGRAM_TEX_INDIRECTIONS_ARB].map(p => programiv(s, FP, p));
+        const max = programiv(s, FP, GL.MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB);
+        shadow().process(s.bytes()); assert.deepEqual(answers.map(value), expected); assert.equal(value(max), 4096);
+    }
+});
+
+test("malformed ARB declarations, initializer sizes and huge ranges are rejected before WGSL generation", () => {
+    for (const [header, source] of [
+        ["vp", "TEMP t; PARAM t = 1; MOV result.position,vertex.position;"],
+        ["vp", "ALIAS a = missing; MOV result.position,vertex.position;"],
+        ["fp", "ADDRESS a; MOV result.color,fragment.color;"],
+        ["vp", "PARAM arr[3] = {state.matrix.mvp}; MOV result.position,vertex.position;"],
+        ["vp", "PARAM arr[0] = {1}; MOV result.position,vertex.position;"],
+        ["vp", "PARAM v = {1,2,3,4,5}; MOV result.position,vertex.position;"],
+        ["vp", "PARAM arr[] = {program.env[0..4294967295]}; MOV result.position,vertex.position;"],
+        ["vp", "ATTRIB v = program.env[0]; MOV result.position,v;"],
+        ["vp", "PARAM v = vertex.position; MOV result.position,v;"],
+        ["fp", "MOV result.color,fragment.texcoord[8];"],
+        ["vp", "MOV result.texcoord[8],vertex.position;"],
+        ["vp", "MOV result.position,state.matrix.mvp.row[4];"],
+        ["vp", "MOV result.position,state.light[8].position;"],
+    ]) {
+        const s = context().programStringARB(header === "vp" ? VP : FP, "!!ARB" + header + "1.0\n" + source + "\nEND"), state = shadow();
+        state.process(s.bytes()); assert.equal(state.stats.rejected, 1, source); assert.equal(state.current.error, GL.INVALID_OPERATION);
+    }
 });
 
 (async () => {

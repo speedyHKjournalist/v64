@@ -28,14 +28,16 @@
     const ARB_REVISION = 2;
 
     /*
-     * Twenty-eight, not the ARB minimum of twenty-four.
-     *
-     * openglproxy/README.md records why: WineD3D 1.7.52's fixed-function
-     * replacement writes program.env[27], and advertising 24 let it run four
-     * bytes past its own allocation. The number is part of the contract with
-     * the guest, which clamps to whatever is advertised here.
+     * Vertex programs require at least 96 parameters. Fragment programs
+     * retain 28 for WineD3D's program.env[27] (openglproxy/README.md).
+     * Storage has one shape for both stages; validation and advertised
+     * limits use the target's logical range.
      */
-    const MAX_PROGRAM_PARAMETERS = 28;
+    const MAX_PROGRAM_PARAMETERS = 96;
+    const MAX_FRAGMENT_PROGRAM_PARAMETERS = 28;
+    const MAX_PROGRAM_BINDINGS = 4096;
+    const MAX_ADDRESS_REGISTERS = 32;
+    const parameterLimit = target => target === "vertex" ? MAX_PROGRAM_PARAMETERS : MAX_FRAGMENT_PROGRAM_PARAMETERS;
     /* Group 1 binding 0 is the shared GL state block; each stage's ARB
      * parameter block gets a binding of its own. */
     const PARAMETER_BINDING = { vertex: 1, fragment: 2 };
@@ -347,6 +349,7 @@
             this.attribs = new Map();
             this.outputs = new Map();
             this.instructions = [];
+            this.declarations = new Set();
         }
 
         peek(offset) { return this.tokens[this.pos + (offset || 0)]; }
@@ -420,7 +423,8 @@
             }
             case "ADDRESS": {
                 this.next();
-                do { this.addresses.add(this.expectIdent()); }
+                if (this.target !== "vertex") throw new ARBError("fragment programs have no address registers", this.line);
+                do { const name = this.expectIdent(); this.declare(name); this.addresses.add(name); }
                 while (this.accept(","));
                 this.expect(";");
                 return;
@@ -429,23 +433,32 @@
                 this.next();
                 const name = this.expectIdent();
                 this.expect("=");
-                this.aliases.set(name, this.expectIdent());
+                const original = this.expectIdent();
+                if (!this.declarations.has(original)) throw new ARBError("alias refers to an undeclared variable", this.line);
+                this.declare(name); this.aliases.set(name, original);
                 this.expect(";");
                 return;
             }
             case "ATTRIB": {
                 this.next();
                 const name = this.expectIdent();
+                this.declare(name);
                 this.expect("=");
-                this.attribs.set(name, this.bindingPath());
+                const binding = this.bindingPath();
+                if (!binding.startsWith(this.target === "vertex" ? "vertex." : "fragment."))
+                    throw new ARBError("invalid attribute binding", this.line);
+                this.attribs.set(name, binding);
                 this.expect(";");
                 return;
             }
             case "OUTPUT": {
                 this.next();
                 const name = this.expectIdent();
+                this.declare(name);
                 this.expect("=");
-                this.outputs.set(name, this.bindingPath());
+                const binding = this.bindingPath();
+                if (!binding.startsWith("result.")) throw new ARBError("invalid output binding", this.line);
+                this.outputs.set(name, binding);
                 this.expect(";");
                 return;
             }
@@ -459,10 +472,16 @@
         }
 
         declareTemporary(name) {
+            this.declare(name);
             if (this.temporaries.size >= MAX_TEMPORARIES)
                 throw new ARBError("more than " + MAX_TEMPORARIES +
                     " temporaries", this.line);
             this.temporaries.add(name);
+        }
+
+        declare(name) {
+            if (this.declarations.has(name)) throw new ARBError("variable '" + name + "' declared twice", this.line);
+            this.declarations.add(name);
         }
 
         /*
@@ -521,10 +540,13 @@
          */
         paramStatement() {
             const name = this.expectIdent();
+            this.declare(name);
             let arraySize = 0;
             if (this.accept("[")) {
                 arraySize = this.at("]") ? -1 : this.next().value;
                 this.expect("]");
+                if (!Number.isInteger(arraySize) || arraySize !== -1 && arraySize < 1 || arraySize > MAX_PROGRAM_BINDINGS)
+                    throw new ARBError("invalid parameter array size", this.line);
             }
             this.expect("=");
             const items = [];
@@ -539,6 +561,7 @@
             let entries;
             if (!arraySize && items.every(item => item.kind === "number")) {
                 const values = items.map(item => item.value);
+                if (values.length > 4) throw new ARBError("a constant vector has more than four components", this.line);
                 /*
                  * ARB program scalar constants are scalar vector initialisers:
                  *
@@ -566,16 +589,20 @@
                                           item.value] };
                     if (item.kind === "vector") {
                         const values = item.values.slice();
+                        if (values.length > 4) throw new ARBError("a constant vector has more than four components", this.line);
                         while (values.length < 4)
                             values.push(values.length === 3 ? 1 : 0);
                         return { kind: "constant", values };
                     }
+                    if (!/^(state\.|program\.(env|local)\[)/.test(item.path)) throw new ARBError("invalid parameter binding", this.line);
                     return { kind: "binding", path: item.path };
                 });
                 // program.local[0..4]: one register a parameter (S2-48)
                 entries = entries.flatMap(entry => {
                     const range = entry.kind === "binding" && /^(.*)\[(\d+)\.\.(\d+)\]$/.exec(entry.path);
                     if (!range) return [entry];
+                    if (+range[3] < +range[2] || +range[3] - +range[2] >= MAX_PROGRAM_BINDINGS)
+                        throw new ARBError("invalid parameter range", this.line);
                     const out = [];
                     for (let i = +range[2]; i <= +range[3]; ++i)
                         out.push({ kind: "binding", path: range[1] + "[" + i + "]" });
@@ -662,6 +689,7 @@
             const item = this.paramItem();
             const values = item.kind === "vector" ? item.values.slice() :
                 [item.value, item.value, item.value, item.value];
+            if (values.length > 4) throw new ARBError("a constant vector has more than four components", this.line);
             while (values.length < 4) values.push(values.length === 3 ? 1 : 0);
             const name = "$constant" + this.params.size;
             this.params.set(name, { arraySize: 0, entries: [{ kind: "constant", values }] });
@@ -675,6 +703,7 @@
             const name = this.bindingPath(true);
             let mask = "xyzw";
             if (this.accept(".")) mask = normalizeMask(this.expectIdent());
+            if (!/^(?=.+)x?y?z?w?$/.test(mask)) throw new ARBError("invalid destination mask", this.line);
             return { name, mask, line: this.line, at };
         }
 
@@ -715,6 +744,7 @@
                 this.inlineConstant() : this.bindingPath(true);
             let swizzle = null;
             if (this.accept(".")) swizzle = String(this.next().value);
+            if (swizzle && !/^[xyzwrgba]{1,4}$/.test(swizzle)) throw new ARBError("invalid source swizzle", this.line);
             if (absolute) this.expect("|");
             return { name, swizzle, negate, absolute, line: this.line, at };
         }
@@ -742,7 +772,26 @@
             this.usesAddress = false;
             this.envUsed = false;
             this.localUsed = false;
+            this.parameterBindings = new Set();
+            this.inputBindings = new Set();
+            this.resolvingSources = new Set();
+            this.relativeArrays = new Set();
+            this.relativeStates = new Set();
+            this.relativeConstants = new Set();
+            this.relativeConstantCopies = 0;
             this.temporary = 0;
+            for (const param of parsed.params.values()) {
+                const count = param.entries.reduce((n, entry) => n + (entry.kind === "binding" &&
+                    this.stateMatrix(entry.path.replace(/^state\./, "")) ? 4 : 1), 0);
+                if (param.arraySize > 0 && param.arraySize !== count || !param.arraySize && count !== 1)
+                    throw new ARBError("parameter array size does not match its initializer", 0);
+                for (const entry of param.entries)
+                    if (entry.kind === "binding" && !this.stateMatrix(entry.path.replace(/^state\./, ""))) this.resolveSource(entry.path);
+            }
+            for (const name of parsed.attribs.keys()) this.resolveSource(name);
+            for (const name of parsed.outputs.keys()) this.resolveDestination({ name, mask: "xyzw", line: 0 });
+            this.stateFields.clear(); this.usedAttributes.clear(); this.usedResults.clear();
+            this.envUsed = this.localUsed = false;
             // Declared here rather than where it is emitted: the state layout
             // is built before the shell, so a field added later would not be
             // in the struct the shell then reads from.
@@ -759,6 +808,10 @@
             const body = [];
             for (const instruction of this.parsed.instructions)
                 body.push(...this.located(instruction, () => this.instruction(instruction)));
+            if (this.parsed.instructions.length > 4096) throw new ARBError("too many program instructions", 0);
+            if (this.parsed.addresses.size > MAX_ADDRESS_REGISTERS) throw new ARBError("too many address registers", 0);
+            if (this.parameterCount() > MAX_PROGRAM_BINDINGS)
+                throw new ARBError("too many parameter bindings", 0);
 
             // WebGPU validates the inter-stage interface strictly. Desktop GL
             // leaves an unwritten ARB vertex result undefined, so when a
@@ -969,6 +1022,7 @@
             } else if (info.address) {
                 const source = this.sourceExpression(instruction.sources[0]);
                 const target = this.resolveDestination(instruction.destination);
+                if (!target.address || !["x", "xyzw"].includes(instruction.destination.mask)) throw new ARBError("ARL must write an address register's x component", instruction.line);
                 this.usesAddress = true;
                 lines.push(target.name + " = vec4<i32>(i32(floor(" + source +
                     ".x)));");
@@ -985,6 +1039,7 @@
                 value = "clamp(" + value + ", vec4<f32>(0.0), vec4<f32>(1.0))";
 
             const destination = this.resolveDestination(instruction.destination);
+            if (destination.address) throw new ARBError("only ARL can write an address register", instruction.line);
             const mask = instruction.destination.mask;
             if (destination.name === "depthValue") {
                 // result.depth is a scalar: its z component is the depth
@@ -1055,6 +1110,7 @@
 
         sourceExpression(source) {
             let text = this.located(source, () => this.resolveSource(source.name));
+            this.recordBindings(source.name, text);
             if (source.swizzle) text = applySwizzle(text, source.swizzle);
             if (source.absolute) text = "abs(" + text + ")";
             if (source.negate) text = "(-(" + text + "))";
@@ -1062,6 +1118,46 @@
         }
 
         resolveSource(name) {
+            if (this.resolvingSources.has(name)) throw new ARBError("cyclic source alias '" + name + "'", 0);
+            this.resolvingSources.add(name);
+            try { return this.resolveSourceValue(name); }
+            finally { this.resolvingSources.delete(name); }
+        }
+
+        recordBindings(name, expression) {
+            while (this.parsed.aliases.has(name) || this.parsed.attribs.has(name))
+                name = this.parsed.aliases.get(name) || this.parsed.attribs.get(name);
+            const indexed = /^([A-Za-z_$][A-Za-z0-9_$]*)\[(.+)\]$/.exec(name);
+            if (indexed && this.parsed.params.has(indexed[1]) && !/^\d+$/.test(indexed[2].trim())) {
+                const array = indexed[1];
+                if (!this.relativeArrays.has(array)) {
+                    this.relativeArrays.add(array);
+                    for (const value of this.paramRegisters(array)) {
+                        this.parameterBindings.add(value);
+                        if (/^vec4<f32>\([0-9+eE., \-]+\)$/.test(value)) {
+                            this.relativeConstants.add(value); ++this.relativeConstantCopies;
+                        } else {
+                            if (this.relativeStates.has(value)) throw new ARBError("state bound twice in relatively addressed arrays", 0);
+                            this.relativeStates.add(value);
+                        }
+                    }
+                }
+            } else if (name.startsWith("program.") || name.startsWith("state.") || this.parsed.params.has(name) ||
+                    indexed && this.parsed.params.has(indexed[1])) {
+                const relative = /^program\.(env|local)\[(.+)\]$/.exec(name);
+                if (relative && !/^\d+$/.test(relative[2].trim())) {
+                    for (let i = 0; i < parameterLimit(this.stage); ++i)
+                        this.parameterBindings.add("arbParams." + relative[1] + "[" + i + "]");
+                } else this.parameterBindings.add(expression);
+            }
+            if (name.startsWith("fragment.")) this.inputBindings.add(expression);
+        }
+
+        parameterCount() {
+            return this.parameterBindings.size + this.relativeConstantCopies - this.relativeConstants.size;
+        }
+
+        resolveSourceValue(name) {
             const alias = this.parsed.aliases.get(name);
             if (alias) return this.resolveSource(alias);
 
@@ -1077,7 +1173,7 @@
                     // relative addressing, A0.x + k (review S2-48): the
                     // registers as an array the address register indexes,
                     // out of range reading as zero
-                    const relative = addressIndex(indexed[2]);
+                    const relative = this.relativeIndex(indexed[2]);
                     this.usesAddress = true;
                     const array = safe(indexed[1]) + "_registers";
                     if (!this.registerArrays.has(array))
@@ -1138,6 +1234,7 @@
                 const texcoord = /^fragment\.texcoord\[?(\d*)\]?$/.exec(name);
                 if (texcoord) {
                     const unit = texcoord[1] ? parseInt(texcoord[1], 10) : 0;
+                    if (unit >= MAX_TEXTURE_UNITS) throw new ARBError("texture coordinate is out of range", 0);
                     this.usedResults.add("in_texcoord" + unit);
                     return "fin.texcoord" + unit;
                 }
@@ -1149,16 +1246,22 @@
             const numeric = /^\d+$/.exec(text.trim());
             if (numeric) {
                 const index = parseInt(numeric[0], 10);
-                if (index >= MAX_PROGRAM_PARAMETERS)
+                if (index >= parameterLimit(this.stage))
                     throw new ARBError("program parameter " + index +
-                        " is beyond the " + MAX_PROGRAM_PARAMETERS +
+                        " is beyond the " + parameterLimit(this.stage) +
                         " this implementation provides", 0);
                 return String(index);
             }
             // Relative addressing: A0.x + k. WGSL indexes uniform arrays
             // dynamically, so this maps straight across.
             this.usesAddress = true;
-            return "clamp(" + addressIndex(text) + ", 0, " + (MAX_PROGRAM_PARAMETERS - 1) + ")";
+            return "clamp(" + this.relativeIndex(text) + ", 0, " + (parameterLimit(this.stage) - 1) + ")";
+        }
+
+        relativeIndex(text) {
+            const index = addressIndex(text), name = /^([A-Za-z_$][A-Za-z0-9_$]*)\.x(?:[+-]\d+)?$/.exec(text.replace(/\s+/g, ""));
+            if (!name || !this.parsed.addresses.has(name[1])) throw new ARBError("relative access needs a declared address register's x component", 0);
+            return index;
         }
 
         /* Flattens a PARAM declaration into the registers it occupies. */
@@ -1229,6 +1332,7 @@
                 if (binding && binding.matrix) {
                     this.stateFields.add(binding.field);
                     const index = parseInt(row[2], 10);
+                    if (index > 3) throw new ARBError("matrix row is out of range", 0);
                     // ARB rows are the matrix's rows; WGSL indexes columns, so
                     // the row is gathered rather than indexed.
                     return "vec4<f32>(" + [0, 1, 2, 3].map(c =>
@@ -1238,6 +1342,8 @@
             for (const entry of INDEXED_STATE) {
                 const match = entry.pattern.exec(path);
                 if (!match) continue;
+                const max = { lights: 8, frontLightProduct: 8, backLightProduct: 8, texEnvColor: 8, clipPlanes: 6, texGenPlanes: 8 }[entry.field];
+                if (+match[1] >= max) throw new ARBError("state index is out of range", 0);
                 this.stateFields.add(entry.field);
                 return entry.expr(match[1], match[2], match[3]);
             }
@@ -1245,6 +1351,7 @@
         }
 
         useAttribute(path, info) {
+            if (info.location < 0 || info.location >= 16) throw new ARBError("vertex attribute is out of range", 0);
             const field = info.name;
             if (!this.usedAttributes.has(field))
                 this.usedAttributes.set(field, {
@@ -1267,7 +1374,7 @@
             const alias = this.parsed.aliases.get(name);
             if (alias) return this.resolveDestination({ ...destination, name: alias });
             if (this.parsed.temporaries.has(name)) return { name: safe(name) };
-            if (this.parsed.addresses.has(name)) return { name: safe(name) };
+            if (this.parsed.addresses.has(name)) return { name: safe(name), address: true };
             const output = this.parsed.outputs.get(name);
             if (output) return this.resolveDestination({ ...destination, name: output });
 
@@ -1275,6 +1382,7 @@
                 const texcoord = /^result\.texcoord\[?(\d*)\]?$/.exec(name);
                 if (texcoord) {
                     const unit = texcoord[1] ? parseInt(texcoord[1], 10) : 0;
+                    if (unit >= MAX_TEXTURE_UNITS) throw new ARBError("texture coordinate result is out of range", 0);
                     this.usedResults.add("texcoord" + unit);
                     return { name: "texcoord" + unit };
                 }
@@ -1395,6 +1503,34 @@
     /* Public API                                                         */
     /* ================================================================== */
 
+    // ARB_fragment_program 3.11.6 counts sequential nodes, including a
+    // write-after-ALU-read hazard, rather than just texture dataflow depth.
+    function instructionCounts(parsed) {
+        const written = new Set(), aluUsed = new Set();
+        let texture = 0, indirections = 1;
+        const temporary = operand => {
+            let name = operand && operand.name;
+            while (parsed.aliases.has(name)) name = parsed.aliases.get(name);
+            return parsed.temporaries.has(name) ? name : null;
+        };
+        for (const instruction of parsed.instructions) {
+            const isTexture = instruction.info.texture || instruction.opcode === "KIL";
+            const dest = temporary(instruction.destination), sources = instruction.sources.map(temporary).filter(Boolean);
+            if (isTexture) {
+                ++texture;
+                if (sources.some(name => written.has(name)) || dest && aluUsed.has(dest)) {
+                    ++indirections; written.clear(); aluUsed.clear();
+                }
+            } else {
+                for (const name of sources) aluUsed.add(name);
+                if (dest) aluUsed.add(dest);
+            }
+            if (dest) written.add(dest);
+        }
+        return { textureInstructionCount: texture, aluInstructionCount: parsed.instructions.length - texture,
+            textureIndirections: indirections };
+    }
+
     function compileARBProgram(source, options) {
         const result = { ok: false, log: "", target: null, errorPosition: -1 };
         const parser = new Parser(source);
@@ -1405,6 +1541,7 @@
             result.target = parsed.target;
             result.stage = parsed.target;
             result.reflection = {
+                ...instructionCounts(parsed),
                 stateFields: [...generator.stateFields],
                 attributes: [...generator.usedAttributes.values()],
                 textures: [...generator.textureUnits.entries()].map(
@@ -1418,8 +1555,11 @@
                 usesLocal: generator.localUsed,
                 instructionCount: parsed.instructions.length,
                 temporaryCount: parsed.temporaries.size,
+                parameterCount: generator.parameterCount(),
+                attributeCount: parsed.target === "vertex" ? new Set([...generator.usedAttributes.values()].map(a => a.location)).size : generator.inputBindings.size,
+                addressRegisterCount: parsed.addresses.size,
                 positionInvariant: parsed.options.has("ARB_position_invariant"),
-                maxParameters: MAX_PROGRAM_PARAMETERS,
+                maxParameters: parameterLimit(parsed.target),
             };
             result.ok = true;
         } catch (error) {
@@ -1433,7 +1573,7 @@
     }
 
     const api = {
-        ARB_REVISION, MAX_PROGRAM_PARAMETERS, MAX_TEMPORARIES,
+        ARB_REVISION, MAX_PROGRAM_PARAMETERS, MAX_FRAGMENT_PROGRAM_PARAMETERS, MAX_PROGRAM_BINDINGS, MAX_ADDRESS_REGISTERS, parameterLimit, MAX_TEMPORARIES,
         PARAMETER_BINDING,
         compileARBProgram, lex, Parser, Generator, ARBError,
         INSTRUCTIONS, STATE_BINDINGS, applySwizzle,

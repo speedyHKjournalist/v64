@@ -8,8 +8,7 @@
 //   program object;
 // - program object 0 is a real (default) program of each target.
 // The assembler is gl_arb_program.js's (its parse and its checks). The
-// executor still keeps environment parameters per program when it renders
-// (plan E2).
+// renderer uses the same target limits and parameter storage layout.
 
 (function(global) {
     "use strict";
@@ -24,14 +23,46 @@
     const OK = C.V86GL_SYNC_QUERY_STATUS_OK;
     const FAILED = C.V86GL_SYNC_QUERY_STATUS_FAILED;
     const ENV = C.V86GL_PROGRAM_PARAMETER_ENV, LOCAL = C.V86GL_PROGRAM_PARAMETER_LOCAL;
-    // what the renderer has room for: the same for both targets
+    // Physical storage is shared in shape; logical limits depend on target.
     const MAX_PARAMETERS = arb.MAX_PROGRAM_PARAMETERS;
     const TARGETS = { [GL.VERTEX_PROGRAM_ARB]: "vertex", [GL.FRAGMENT_PROGRAM_ARB]: "fragment" };
+    const limit = target => arb.parameterLimit(TARGETS[target]);
+    for (const name of ["GEN_PROGRAMS_ARB", "DELETE_PROGRAMS_ARB", "BIND_PROGRAM_ARB", "PROGRAM_STRING_ARB",
+            "PROGRAM_PARAMETER_FV_ARB", "PROGRAM_PARAMETER_DV_ARB"]) GLShadow.rules({
+        [GLFN[name]]: (shadow, bytes, view, offset, size) => {
+            if (shadow.current.state && shadow.current.state.begin) return GL.INVALID_OPERATION;
+            if (name === "GEN_PROGRAMS_ARB" || name === "DELETE_PROGRAMS_ARB")
+                return shadow.names(name, view, offset, size) ? 0 : GL.INVALID_VALUE;
+            if (name === "BIND_PROGRAM_ARB") {
+                const a = shadow.args(name, view, offset, size), p = shadow.current.group.arbPrograms.get(a[1]);
+                return !TARGETS[a[0]] ? GL.INVALID_ENUM : p && p.target && p.target !== a[0] ? GL.INVALID_OPERATION : 0;
+            }
+            const r = protocol.decodeRecord(name, view, offset);
+            if (!TARGETS[r.target]) return GL.INVALID_ENUM;
+            if (name === "PROGRAM_STRING_ARB") return r.format !== GL.PROGRAM_FORMAT_ASCII_ARB ? GL.INVALID_ENUM :
+                r.length < 0 || RECORDS[name].size + r.length > size ? GL.INVALID_VALUE : 0;
+            if (![ENV, LOCAL].includes(r.parameter_kind)) return GL.INVALID_ENUM;
+            const count = name === "PROGRAM_PARAMETER_DV_ARB" ? 1 : r.count;
+            const end = name === "PROGRAM_PARAMETER_DV_ARB" ? RECORDS[name].size : RECORDS[name].size + count * 16;
+            return r.index >= limit(r.target) || count < 1 || count > limit(r.target) - r.index || end > size ? GL.INVALID_VALUE : 0;
+        },
+    });
 
     const newProgram = (name, target) => ({ name, target, source: "", compiled: null,
         local: new Float64Array(MAX_PARAMETERS * 4) });
 
     const proto = GLShadow.prototype;
+    proto.arbQueryFailure = function(name, view, offset, error) {
+        if (!this.current.error) this.current.error = error;
+        return this.answered(name, view, offset, FAILED);
+    };
+    proto.arbQueryPending = function(name, view, offset, size) {
+        if (!this.pending(name, view, offset, size)) return false;
+        if (this.current.state && this.current.state.begin) {
+            this.arbQueryFailure(name, view, offset, GL.INVALID_OPERATION); return false;
+        }
+        return true;
+    };
 
     // The program bound to a target here (object 0 is the context's own)
     proto.arbProgram = function(target) {
@@ -90,7 +121,7 @@
         if (!compiled.ok) {
             state.errorPosition = compiled.errorPosition >= 0 ? compiled.errorPosition : 0;
             state.errorString = compiled.log;
-            return;
+            return GL.INVALID_OPERATION;
         }
         program.source = source;
         program.compiled = compiled;
@@ -111,7 +142,7 @@
             const storage = this.arbParameters(view.getUint32(offset + R.parameter_kind, true), target);
             const at = doublePrecision ? F.PROGRAM_PARAMETER_DV_ARB.values : RECORDS.PROGRAM_PARAMETER_FV_ARB.size;
             const stride = doublePrecision ? 8 : 4;
-            if (!storage || index + count > MAX_PARAMETERS || at + count * 4 * stride > size) return;
+            if (!storage || index + count > limit(target) || at + count * 4 * stride > size) return;
             for (let i = 0; i < count * 4; ++i)
                 storage[index * 4 + i] = doublePrecision ? view.getFloat64(offset + at + i * 8, true) :
                     view.getFloat32(offset + at + i * 4, true);
@@ -131,6 +162,14 @@
         const program = this.arbProgram(target);
         const compiled = program && program.compiled;
         const reflection = compiled && compiled.reflection;
+        if (target === GL.FRAGMENT_PROGRAM_ARB && pname >= GL.PROGRAM_ADDRESS_REGISTERS_ARB &&
+                pname <= GL.MAX_PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB) return null;
+        if (pname >= GL.PROGRAM_ALU_INSTRUCTIONS_ARB && pname <= GL.MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB) {
+            if (target !== GL.FRAGMENT_PROGRAM_ARB) return null;
+            if (pname >= GL.MAX_PROGRAM_ALU_INSTRUCTIONS_ARB) return 4096;
+            const field = ["aluInstructionCount", "textureInstructionCount", "textureIndirections"][(pname - GL.PROGRAM_ALU_INSTRUCTIONS_ARB) % 3];
+            return reflection ? reflection[field] : 0;
+        }
         switch (pname) {
         case GL.PROGRAM_LENGTH_ARB: return program ? program.source.length : 0;
         case GL.PROGRAM_FORMAT_ARB: return GL.PROGRAM_FORMAT_ASCII_ARB;
@@ -143,11 +182,25 @@
             return reflection ? reflection.temporaryCount : 0;
         case GL.PROGRAM_PARAMETERS_ARB:
         case GL.PROGRAM_NATIVE_PARAMETERS_ARB:
+            return reflection ? reflection.parameterCount : 0;
+        case GL.PROGRAM_ATTRIBS_ARB:
+        case GL.PROGRAM_NATIVE_ATTRIBS_ARB:
+            return reflection ? reflection.attributeCount : 0;
+        case GL.PROGRAM_ADDRESS_REGISTERS_ARB:
+        case GL.PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB:
+            return reflection ? reflection.addressRegisterCount : 0;
+        case GL.MAX_PROGRAM_ATTRIBS_ARB:
+        case GL.MAX_PROGRAM_NATIVE_ATTRIBS_ARB:
+            return 16;
+        case GL.MAX_PROGRAM_ADDRESS_REGISTERS_ARB:
+        case GL.MAX_PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB:
+            return arb.MAX_ADDRESS_REGISTERS;
         case GL.MAX_PROGRAM_PARAMETERS_ARB:
         case GL.MAX_PROGRAM_NATIVE_PARAMETERS_ARB:
+            return arb.MAX_PROGRAM_BINDINGS;
         case GL.MAX_PROGRAM_ENV_PARAMETERS_ARB:
         case GL.MAX_PROGRAM_LOCAL_PARAMETERS_ARB:
-            return MAX_PARAMETERS;
+            return limit(target);
         case GL.MAX_PROGRAM_INSTRUCTIONS_ARB:
         case GL.MAX_PROGRAM_NATIVE_INSTRUCTIONS_ARB:
             return 4096;
@@ -156,17 +209,21 @@
             return arb.MAX_TEMPORARIES;
         case GL.PROGRAM_UNDER_NATIVE_LIMITS_ARB: return compiled ? 1 : 0;
         case GL.PROGRAM_ERROR_POSITION_ARB: return this.current.arb.errorPosition;
-        default: return 0;
+        default: return null;
         }
     };
 
     // {target, pname, status, value}
     proto.queryProgramIvARB = function(bytes, view, offset, size) {
         const R = F.QUERY_PROGRAM_IV_ARB;
-        if (!this.pending("QUERY_PROGRAM_IV_ARB", view, offset, size)) return;
+        if (!this.arbQueryPending("QUERY_PROGRAM_IV_ARB", view, offset, size)) return;
         const target = view.getUint32(offset + R.target, true);
-        if (!TARGETS[target]) return this.answered("QUERY_PROGRAM_IV_ARB", view, offset, FAILED);
-        view.setInt32(offset + R.value, this.programivARB(target, view.getUint32(offset + R.pname, true)), true);
+        if (!TARGETS[target]) return this.arbQueryFailure("QUERY_PROGRAM_IV_ARB", view, offset, GL.INVALID_ENUM);
+        const value = this.programivARB(target, view.getUint32(offset + R.pname, true));
+        if (value === null) {
+            return this.arbQueryFailure("QUERY_PROGRAM_IV_ARB", view, offset, GL.INVALID_ENUM);
+        }
+        view.setInt32(offset + R.value, value, true);
         this.answered("QUERY_PROGRAM_IV_ARB", view, offset, OK);
     };
 
@@ -175,12 +232,14 @@
         return function(bytes, view, offset, size) {
             const name = doublePrecision ? "QUERY_PROGRAM_PARAMETER_DV_ARB" : "QUERY_PROGRAM_PARAMETER_FV_ARB";
             const R = F[name], header = RECORDS[name].size, stride = doublePrecision ? 8 : 4;
-            if (!this.pending(name, view, offset, size)) return;
+            if (!this.arbQueryPending(name, view, offset, size)) return;
             const index = view.getUint32(offset + R.index, true);
-            const storage = this.arbParameters(view.getUint32(offset + R.parameter_kind, true),
-                view.getUint32(offset + R.target, true));
-            if (!storage || index >= MAX_PARAMETERS || header + 4 * stride > size)
-                return this.answered(name, view, offset, FAILED);
+            const target = view.getUint32(offset + R.target, true);
+            const kind = view.getUint32(offset + R.parameter_kind, true);
+            if (!TARGETS[target] || ![ENV, LOCAL].includes(kind)) return this.arbQueryFailure(name, view, offset, GL.INVALID_ENUM);
+            const storage = this.arbParameters(kind, target);
+            if (!storage || index >= limit(target) || header + 4 * stride > size)
+                return this.arbQueryFailure(name, view, offset, GL.INVALID_VALUE);
             for (let c = 0; c < 4; ++c) {
                 if (doublePrecision) view.setFloat64(offset + header + c * 8, storage[index * 4 + c], true);
                 else view.setFloat32(offset + header + c * 4, storage[index * 4 + c], true);
@@ -195,10 +254,13 @@
     // unterminated (the caller sized it from PROGRAM_LENGTH_ARB)
     proto.queryProgramStringARB = function(bytes, view, offset, size) {
         const R = F.QUERY_PROGRAM_STRING_ARB, header = RECORDS.QUERY_PROGRAM_STRING_ARB.size;
-        if (!this.pending("QUERY_PROGRAM_STRING_ARB", view, offset, size)) return;
+        if (!this.arbQueryPending("QUERY_PROGRAM_STRING_ARB", view, offset, size)) return;
         const program = this.arbProgram(view.getUint32(offset + R.target, true));
         const capacity = view.getUint32(offset + R.data_size, true);
-        if (!program || header + capacity > size) return this.answered("QUERY_PROGRAM_STRING_ARB", view, offset, FAILED);
+        if (!program || view.getUint32(offset + R.pname, true) !== GL.PROGRAM_STRING_ARB)
+            return this.arbQueryFailure("QUERY_PROGRAM_STRING_ARB", view, offset, GL.INVALID_ENUM);
+        if (header + capacity > size || capacity < program.source.length)
+            return this.arbQueryFailure("QUERY_PROGRAM_STRING_ARB", view, offset, GL.INVALID_VALUE);
         const written = Math.min(program.source.length, capacity);
         for (let i = 0; i < written; ++i) bytes[offset + header + i] = program.source.charCodeAt(i) & 0xff;
         view.setUint32(offset + R.length, written, true);

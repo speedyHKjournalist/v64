@@ -148,7 +148,7 @@
             // (a GL command needs a context; one without is the executor's to report)
             if (fn < 0xFF00 && fn !== GLFN.QUERY_INTEGER && fn !== GLFN.QUERY_GL_STRING &&
                     fn !== GLFN.QUERY_STATE && fn !== GLFN.QUERY_PARAMETER && !this.current) return;
-            this[method](bytes, view, offset, size);
+            return this[method](bytes, view, offset, size);
         }
 
         // A flat record's arguments, or null when it is short

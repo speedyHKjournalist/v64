@@ -269,8 +269,8 @@ END`, "params");
         "a program which reads parameters declares their uniform binding");
     assert.strictEqual(result.reflection.usesEnv, true);
     assert.strictEqual(result.reflection.usesLocal, true);
-    assert.strictEqual(result.reflection.maxParameters, 28,
-        "28, not the ARB minimum of 24 -- see openglproxy/README.md");
+    assert.strictEqual(result.reflection.maxParameters, 96,
+        "ARB vertex programs provide the required 96 parameters");
 });
 
 test("an ARB program without parameters omits their unused binding", () => {
@@ -286,10 +286,10 @@ END`, "no_params");
 
 test("a parameter beyond the advertised count is refused", () => {
     const result = arb.compileARBProgram(`!!ARBvp1.0
-MOV result.position, program.env[40];
+MOV result.position, program.env[96];
 END`, {});
     assert.strictEqual(result.ok, false);
-    assert.ok(result.log.indexOf("28") >= 0, result.log);
+    assert.ok(result.log.indexOf("96") >= 0, result.log);
 });
 
 test("relative addressing through ARL indexes the uniform array", () => {

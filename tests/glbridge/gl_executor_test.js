@@ -2628,7 +2628,7 @@ test("a vertex and a fragment program keep separate parameter namespaces", () =>
 
     // program.local is per-program: the vertex stage must not be handed the
     // fragment program's block, which is what one shared binding did.
-    const count = 28 * 4;
+    const count = 96 * 4; // both stages' physical blocks; logical FP limit is 28
     const localOf = binding => {
         const entry = group.descriptor.entries.find(e => e.binding === binding);
         return Array.from(new Float32Array(executor.uniformStaging.buffer,

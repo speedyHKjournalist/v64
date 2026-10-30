@@ -1,0 +1,12 @@
+{
+  "renderer":"Apple M1 Pro",
+  "version":"2.1 Metal - 91.7",
+  "cases":{
+    "none":0,
+    "high":2,
+    "unused":0,
+    "matrix":4,
+    "duplicate":2,
+    "relative_constants":2
+  }
+}

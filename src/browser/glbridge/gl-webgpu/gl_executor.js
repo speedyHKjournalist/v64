@@ -1580,6 +1580,8 @@
             currentProgram: 0,
             arbVertexProgram: 0,
             arbFragmentProgram: 0,
+            arbDefaults: { [GL.VERTEX_PROGRAM_ARB]: createARBProgram(0, GL.VERTEX_PROGRAM_ARB),
+                [GL.FRAGMENT_PROGRAM_ARB]: createARBProgram(0, GL.FRAGMENT_PROGRAM_ARB) },
 
             drawFramebuffer: 0,
             readFramebuffer: 0,
@@ -1760,6 +1762,10 @@
             serial: 1,
             validateLog: "",
         };
+    }
+
+    function createARBProgram(name, target) {
+        return { name, target, source: "", compiled: null, env: null, local: null, variants: new Map() };
     }
 
     function createFramebuffer(name) {
@@ -3899,23 +3905,22 @@
             const group = this.current.shareGroup;
             for (const name of names)
                 if (name && !group.arbPrograms.has(name))
-                    group.arbPrograms.set(name, {
-                        name, target: 0, source: "", compiled: null,
-                        env: null, local: null, variants: new Map(),
-                    });
+                    group.arbPrograms.set(name, createARBProgram(name, 0));
         });
         define("DELETE_PROGRAMS_ARB", function(a, bytes, view, offset, size) {
             const names = readNameArray(view, offset, size);
-            for (const name of names)
+            for (const name of names) {
+                if (!name) continue;
                 this.current.shareGroup.arbPrograms.delete(name);
+                if (this.current.arbVertexProgram === name) this.current.arbVertexProgram = 0;
+                if (this.current.arbFragmentProgram === name) this.current.arbFragmentProgram = 0;
+            }
         });
         define("BIND_PROGRAM_ARB", function(a) {
             const target = a[0] >>> 0, name = a[1] >>> 0;
             const group = this.current.shareGroup;
             if (name && !group.arbPrograms.has(name))
-                group.arbPrograms.set(name, { name, target, source: "",
-                    compiled: null, env: null, local: null,
-                    variants: new Map() });
+                group.arbPrograms.set(name, createARBProgram(name, target));
             if (target === GL.VERTEX_PROGRAM_ARB) this.current.arbVertexProgram = name;
             else this.current.arbFragmentProgram = name;
         });
@@ -11100,11 +11105,11 @@ struct Params { value : vec4<f32>, }
             if (!program)
                 return this.refuse("glProgramStringARB", "no ARB program bound",
                     { target }, GL.INVALID_OPERATION);
-            program.source = source;
-            program.target = target;
-            program.compiled = arbProgram.compileARBProgram(source, {});
-            if (program.variants) program.variants.clear();
-            if (!program.compiled.ok) {
+            const compiled = arbProgram.compileARBProgram(source, {});
+            if (compiled.ok && compiled.target !== (target === GL.VERTEX_PROGRAM_ARB ? "vertex" : "fragment")) {
+                compiled.ok = false; compiled.log = "ERROR: program header does not match the target"; compiled.errorPosition = 0;
+            }
+            if (!compiled.ok) {
                 /*
                  * A program the *application* wrote wrongly is not a host
                  * refusal: the extension defines exactly how to report it, and
@@ -11116,19 +11121,22 @@ struct Params { value : vec4<f32>, }
                  * the error string and the error position, and one warning
                  * rather than one error.
                  */
-                this.arbErrorString = program.compiled.log;
-                this.arbErrorPosition = program.compiled.errorPosition >= 0 ?
-                    program.compiled.errorPosition : 0;
+                this.arbErrorString = compiled.log;
+                this.arbErrorPosition = compiled.errorPosition >= 0 ? compiled.errorPosition : 0;
                 this.current.arbErrorString = this.arbErrorString;
                 this.current.arbErrorPosition = this.arbErrorPosition;
                 this.setError(GL.INVALID_OPERATION);
                 this.warnOnce("arbProgramCompile",
                     "an ARB program did not compile; the app can read the " +
                     "reason from GL_PROGRAM_ERROR_STRING_ARB",
-                    { target, log: program.compiled.log,
+                    { target, log: compiled.log,
                       position: this.arbErrorPosition });
                 return;
             }
+            program.source = source;
+            program.target = target;
+            program.compiled = compiled;
+            if (program.variants) program.variants.clear();
             this.arbErrorString = "";
             this.arbErrorPosition = -1;
             this.current.arbErrorString = "";
@@ -11163,8 +11171,8 @@ struct Params { value : vec4<f32>, }
                 return this.refuse("glProgramParameterARB",
                     "no ARB program is bound", { target },
                     GL.INVALID_OPERATION);
-            if (index >= arbProgram.MAX_PROGRAM_PARAMETERS ||
-                    count > arbProgram.MAX_PROGRAM_PARAMETERS - index)
+            const limit = arbProgram.parameterLimit(target === GL.VERTEX_PROGRAM_ARB ? "vertex" : "fragment");
+            if (index >= limit || count > limit - index)
                 return this.refuse("glProgramParameterARB",
                     "parameter index is beyond the advertised count",
                     { index, count }, GL.INVALID_VALUE);
@@ -11189,6 +11197,12 @@ struct Params { value : vec4<f32>, }
 
         queryProgramivARB(target, pname) {
             const program = this.arbProgramFor(target);
+            if (pname >= GL.PROGRAM_ALU_INSTRUCTIONS_ARB && pname <= GL.MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB) {
+                if (target !== GL.FRAGMENT_PROGRAM_ARB) return null;
+                if (pname >= GL.MAX_PROGRAM_ALU_INSTRUCTIONS_ARB) return 4096;
+                const field = ["aluInstructionCount", "textureInstructionCount", "textureIndirections"][(pname - GL.PROGRAM_ALU_INSTRUCTIONS_ARB) % 3];
+                return program && program.compiled && program.compiled.ok ? program.compiled.reflection[field] : 0;
+            }
             switch (pname) {
             case GL.PROGRAM_LENGTH_ARB:
                 return program ? program.source.length : 0;
@@ -11207,11 +11221,23 @@ struct Params { value : vec4<f32>, }
                     program.compiled.reflection.temporaryCount : 0;
             case GL.PROGRAM_PARAMETERS_ARB:
             case GL.PROGRAM_NATIVE_PARAMETERS_ARB:
+                return program && program.compiled && program.compiled.ok ? program.compiled.reflection.parameterCount : 0;
+            case GL.PROGRAM_ATTRIBS_ARB:
+            case GL.PROGRAM_NATIVE_ATTRIBS_ARB:
+                return program && program.compiled && program.compiled.ok ? program.compiled.reflection.attributeCount : 0;
+            case GL.PROGRAM_ADDRESS_REGISTERS_ARB:
+            case GL.PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB:
+                return program && program.compiled && program.compiled.ok ? program.compiled.reflection.addressRegisterCount : 0;
+            case GL.MAX_PROGRAM_ATTRIBS_ARB:
+            case GL.MAX_PROGRAM_NATIVE_ATTRIBS_ARB: return 16;
+            case GL.MAX_PROGRAM_ADDRESS_REGISTERS_ARB:
+            case GL.MAX_PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB: return arbProgram.MAX_ADDRESS_REGISTERS;
             case GL.MAX_PROGRAM_PARAMETERS_ARB:
             case GL.MAX_PROGRAM_NATIVE_PARAMETERS_ARB:
+                return arbProgram.MAX_PROGRAM_BINDINGS;
             case GL.MAX_PROGRAM_ENV_PARAMETERS_ARB:
             case GL.MAX_PROGRAM_LOCAL_PARAMETERS_ARB:
-                return arbProgram.MAX_PROGRAM_PARAMETERS;
+                return arbProgram.parameterLimit(target === GL.VERTEX_PROGRAM_ARB ? "vertex" : "fragment");
             case GL.MAX_PROGRAM_INSTRUCTIONS_ARB:
             case GL.MAX_PROGRAM_NATIVE_INSTRUCTIONS_ARB:
                 return 4096;
@@ -11244,7 +11270,7 @@ struct Params { value : vec4<f32>, }
             const env = kind === PROGRAM_PARAMETER_ENV;
             const program = env ? null : this.arbProgramFor(target);
             const stride = doublePrecision ? 8 : 4;
-            if ((!env && !program) || index >= arbProgram.MAX_PROGRAM_PARAMETERS ||
+            if ((!env && !program) || index >= arbProgram.parameterLimit(target === GL.VERTEX_PROGRAM_ARB ? "vertex" : "fragment") ||
                     24 + 4 * stride > size) {
                 view.setUint32(offset + F.status, SYNC_STATUS_FAILED, true);
                 return;
@@ -11259,9 +11285,10 @@ struct Params { value : vec4<f32>, }
         },
         arbProgramFor(target) {
             const s = this.current;
+            if (target !== GL.VERTEX_PROGRAM_ARB && target !== GL.FRAGMENT_PROGRAM_ARB) return null;
             const name = target === GL.VERTEX_PROGRAM_ARB ?
                 s.arbVertexProgram : s.arbFragmentProgram;
-            return name ? s.shareGroup.arbPrograms.get(name) || null : null;
+            return name ? s.shareGroup.arbPrograms.get(name) || null : s.arbDefaults[target];
         },
     });
 
