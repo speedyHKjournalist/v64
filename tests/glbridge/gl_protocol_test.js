@@ -74,6 +74,21 @@ test("gl_constants.js takes the opcodes from the protocol", () => {
     for (const [name, value] of P.OPCODES) assert.equal(constants.NAME_BY_OPCODE[value], name);
 });
 
+test("rejected record tags preserve opcode and every GL error without colliding with controls", () => {
+    for (const [name, opcode] of P.OPCODES) {
+        assert.ok(opcode <= P.C.V86GL_REJECTED_OPCODE_MASK, name);
+        assert.ok(!P.isRejected(opcode), name);
+        for (let error = 0x500; error <= 0x506; ++error) {
+            const encoded = P.rejectedOpcode(opcode, error);
+            assert.ok(P.isRejected(encoded)); assert.equal(P.rejectionError(encoded), error);
+            assert.equal(encoded & P.C.V86GL_REJECTED_OPCODE_MASK, opcode);
+        }
+    }
+    for (const opcode of Object.values(P.CTRL)) assert.ok(!P.isRejected(opcode));
+    assert.throws(() => P.rejectedOpcode(256, 0x500), RangeError);
+    assert.throws(() => P.rejectedOpcode(1, 0), RangeError);
+});
+
 test("the runtime response area agrees with the generated guest heartbeat layout", () => {
     assert.equal(executorModule.GLWG_RESPONSE_REGION_BYTES, P.C.V86GL_RESPONSE_REGION_BYTES);
     assert.equal(executorModule.GLWG_HEARTBEAT_OFFSET, P.C.V86GL_HEARTBEAT_OFFSET);

@@ -225,6 +225,14 @@ game.exe
 > - 验证：新增 7 项异步答案测试、实际 C 等待/分配器测试（心跳持续进展、停止进展、立即失败、32 位计时器回绕）、本地/worker 两路过期响应测试；v86 33 组 Node 测试、站点 16 组、7 个真 WebGPU 页面通过，新增异步变异 2/2 被杀死，ESLint 与普通/诊断 DLL 构建通过。
 > - 同步查询的完整迁移仍依赖 C3；本次不把整个阶段 C 标为完成，也未部署 XP 镜像。
 
+> **C3/C6 首批命令校验（2026-10-30）：完成。**
+> - 规则在所有 CPU 状态修改之前运行；现已覆盖前一批视口/混合/像素存储/矩阵状态及 Begin/End、活动纹理单元、栈上下界。非法参数不再只是影子静默忽略、页面却继续执行。
+> - 被拒绝的记录只替换 opcode（协议定义的拒绝标记包含原 opcode 和 GL 错误），保留载荷、长度和全部内联响应地址；页面记录该错误并跳过原调用。后续合法命令继续执行。CPU 错误状态随上下文/快照保存，但 `QUERY_ERROR` 仍不在 CPU 回答，直到其余命令族的校验完整。
+> - 已接受但超过宣称上限的视口先规范化，再由两边使用同一矩形。补齐 `LOAD_MATRIXF`/`MULT_MATRIXF` 的固定头部；短头部不进入状态处理函数。
+> - 修正上一批的颜色矩阵模式：`GL_COLOR` 是 mode，`GL_COLOR_MATRIX_SGI` 是查询 pname；兼容已保存的内部栈键。按 [GL 2.1 BlendFuncSeparate](https://registry.khronos.org/OpenGL-Refpages/gl2.1/xhtml/glBlendFuncSeparate.xml) 允许源 alpha 使用 `SRC_ALPHA_SATURATE`。
+> - 验证：7 项 CPU 校验测试（含 19 组非法参数）、新增真 GPU 页面验证本地/复制命令流中错误与像素均保持正确；v86 34 组 Node 测试和 8 个 WebGPU 页面通过，相关变异 2/2 被杀死，协议/客体 ABI 检查、`make glbridge`、ESLint 及客体普通 DLL 构建通过。
+> - 下一批为启用位、客户端启用位、模板和提示状态。对象、GLSL/ARB 等命令族的完整校验仍未完成；C3/C6 整体继续进行中。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

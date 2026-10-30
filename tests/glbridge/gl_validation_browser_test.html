@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GL CPU validation and forwarding</title>
+<canvas id="gpu" width="64" height="64"></canvas>
+<pre id="result">RUNNING</pre>
+<script src="../../src/browser/glbridge/webgpu_host.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_protocol.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_constants.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_caps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_arb_program.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_executor.js"></script>
+<script src="gl_stream_builder.js"></script>
+<script>
+(async () => {
+    "use strict";
+    const { GLStream, GL } = GLTestStream, P = GLProtocol;
+    const check = (value, message) => { if (!value) throw new Error(message); };
+    try {
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow();
+            const s = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1)
+                .call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("LINE_WIDTH", 3).call("LINE_WIDTH", 0)
+                .call("VIEWPORT", 0, 0, 0, -1).call("DEPTH_FUNC", 0)
+                .call("MATRIX_MODE", 0).call("LOAD_IDENTITY")
+                .call("COLOR4F", 0.25, 0.75, 0.5, 1).call("BEGIN", GL.QUADS)
+                .call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            s.queryError(); const error = s.payloadView();
+            const pixels = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            const bytes = s.bytes();
+            const executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), {
+                strict: true, writeGuestMemory: (offset, data) => bytes.set(data, offset),
+            });
+            await executor.initialize(); shadow.setCapabilities(executor.capabilities());
+            shadow.process(bytes); check(shadow.stats.rejected === 4, "CPU must reject all four invalid calls");
+            executor.submit(remote ? bytes.slice() : bytes, {}); await executor.idle();
+            await executor.device.queue.onSubmittedWorkDone();
+            for (let i = 0; i < 4; ++i) await new Promise(resolve => setTimeout(resolve, 0));
+            check(pixels.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "readback must finish");
+            const rgba = pixels.bytes.subarray(32);
+            check([64, 191, 128, 255].every((v, i) => Math.abs(rgba[i] - v) <= 1), "rejected state changed the pixels: " + Array.from(rgba));
+            if (!remote) check(error.view.getUint32(P.F.QUERY_ERROR.value, true) === GL.INVALID_VALUE, "first GL error must survive forwarding");
+            check(!executor.gpuErrors.errors.length, "WebGPU must accept the whole frame");
+            check(!executor.hostErrors.length && !executor.stats.refusals, "no host exception or unknown rejected opcode");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation preserves errors and pixels in local and copied streams";
+    } catch (error) {
+        document.getElementById("result").textContent = "FAIL " + (error.stack || error);
+    }
+})();
+</script>

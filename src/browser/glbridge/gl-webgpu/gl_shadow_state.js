@@ -71,10 +71,27 @@
     const SETTERS = new Map();
     const on = (name, fn) => SETTERS.set(GLFN[name], fn);
     const set = (c, pname, values) => { c.state.values[pname] = values; };
-    const scalar = (name, pname, valid, convert) => on(name, (c, a) => {
-        if (!valid || valid(a[0])) set(c, pname, [convert ? convert(a[0]) : a[0]]);
+    function rule(name, check, withinBegin) {
+        GLShadow.rules({ [GLFN[name]]: (shadow, bytes, view, offset, size) => {
+            const c = shadow.current;
+            if (c.state.begin && !withinBegin) return GL.INVALID_OPERATION;
+            const a = P.SIGNATURES[name] ? shadow.args(name, view, offset, size) : [];
+            return check ? check(c, a, shadow) : 0;
+        } });
+    }
+    const scalar = (name, pname, valid, convert, error = GL.INVALID_ENUM) => {
+        rule(name, (c, a) => valid && !valid(a[0]) ? error : 0);
+        on(name, (c, a) => set(c, pname, [convert ? convert(a[0]) : a[0]]));
+    };
+    on("VIEWPORT", (c, a, shadow, view, offset) => {
+        const limit = shadow.capabilities && caps.integer(shadow.capabilities, GL.MAX_VIEWPORT_DIMS);
+        if (limit) {
+            a[2] = Math.min(a[2], limit); a[3] = Math.min(a[3], limit);
+            // The page receives the same accepted, clamped rectangle.
+            view.setInt32(offset + 8, a[2], true); view.setInt32(offset + 12, a[3], true);
+        }
+        set(c, GL.VIEWPORT, a);
     });
-    on("VIEWPORT", (c, a) => { if (a[2] >= 0 && a[3] >= 0) set(c, GL.VIEWPORT, a); });
     on("SCISSOR", (c, a) => { if (a[2] >= 0 && a[3] >= 0) set(c, GL.SCISSOR_BOX, a); });
     on("DEPTH_RANGE", (c, a) => set(c, GL.DEPTH_RANGE, a.map(v => clamp(v, 0, 1))));
     on("CLEAR_COLOR", (c, a) => set(c, GL.COLOR_CLEAR_VALUE, a.map(v => clamp(v, 0, 1))));
@@ -87,8 +104,8 @@
     scalar("CULL_FACE", GL.CULL_FACE_MODE, v => [GL.FRONT, GL.BACK, GL.FRONT_AND_BACK].includes(v));
     scalar("FRONT_FACE", GL.FRONT_FACE, v => v === GL.CW || v === GL.CCW);
     scalar("SHADE_MODEL", GL.SHADE_MODEL, v => v === GL.FLAT || v === GL.SMOOTH);
-    scalar("LINE_WIDTH", GL.LINE_WIDTH, v => v > 0);
-    scalar("POINT_SIZE", GL.POINT_SIZE, v => v > 0);
+    scalar("LINE_WIDTH", GL.LINE_WIDTH, v => v > 0, null, GL.INVALID_VALUE);
+    scalar("POINT_SIZE", GL.POINT_SIZE, v => v > 0, null, GL.INVALID_VALUE);
     on("POLYGON_MODE", (c, a) => {
         if (![GL.FRONT, GL.BACK, GL.FRONT_AND_BACK].includes(a[0]) || ![GL.POINT, GL.LINE, GL.FILL].includes(a[1])) return;
         const modes = c.state.values[GL.POLYGON_MODE].slice();
@@ -99,7 +116,7 @@
     on("POLYGON_OFFSET", (c, a) => { set(c, GL.POLYGON_OFFSET_FACTOR, [a[0]]); set(c, GL.POLYGON_OFFSET_UNITS, [a[1]]); });
     on("LINE_STIPPLE", (c, a) => { set(c, GL.LINE_STIPPLE_REPEAT, [clamp(a[0], 1, 256)]); set(c, GL.LINE_STIPPLE_PATTERN, [a[1] & 65535]); });
     function blend(c, a) {
-        if (!a.every((v, i) => FACTORS.has(v) || i === 0 && v === GL.SRC_ALPHA_SATURATE)) return;
+        if (!a.every((v, i) => FACTORS.has(v) || i % 2 === 0 && v === GL.SRC_ALPHA_SATURATE)) return;
         [GL.BLEND_SRC_RGB, GL.BLEND_DST_RGB, GL.BLEND_SRC_ALPHA, GL.BLEND_DST_ALPHA].forEach((p, i) => set(c, p, [a[i]]));
     }
     on("BLEND_FUNC", (c, a) => {
@@ -122,7 +139,7 @@
         set(c, p, [value]);
     });
     function stack(c) { return c.state.mode === GL.TEXTURE ? c.state.texture[c.activeTexture || 0] : c.state.stacks[c.state.mode]; }
-    on("MATRIX_MODE", (c, [mode]) => { if ([GL.MODELVIEW, GL.PROJECTION, GL.TEXTURE, GL.COLOR_MATRIX_SGI].includes(mode)) c.state.mode = mode; });
+    on("MATRIX_MODE", (c, [mode]) => { c.state.mode = mode; });
     on("LOAD_IDENTITY", c => { const s = stack(c); s[s.length - 1] = identity(); });
     on("PUSH_MATRIX", c => { const s = stack(c), max = c.state.mode === GL.MODELVIEW ? caps.LIMITS.MODELVIEW_STACK_DEPTH : caps.LIMITS.OTHER_STACK_DEPTH; if (s.length < max) s.push(s[s.length - 1].slice()); });
     on("POP_MATRIX", c => { const s = stack(c); if (s.length > 1) s.pop(); });
@@ -145,6 +162,40 @@
         mult(c, [2*n/(r-l), 0, 0, 0, 0, 2*n/(t-b), 0, 0, (r+l)/(r-l), (t+b)/(t-b), -(f+n)/(f-n), -1, 0, 0, -2*f*n/(f-n), 0]);
     });
 
+    // These rules cover the state families above. Other families continue
+    // to migrate explicitly; QUERY_ERROR is still the renderer's for now.
+    for (const name of ["VIEWPORT", "SCISSOR"])
+        rule(name, (c, a) => a[2] < 0 || a[3] < 0 ? GL.INVALID_VALUE : 0);
+    for (const name of ["DEPTH_RANGE", "CLEAR_COLOR", "CLEAR_ACCUM", "COLOR_MASK", "POLYGON_OFFSET", "LINE_STIPPLE",
+            "BLEND_COLOR", "SAMPLE_COVERAGE", "LOAD_IDENTITY", "LOAD_MATRIXF", "MULT_MATRIXF", "TRANSLATEF", "SCALEF", "ROTATEF", "FLUSH", "FINISH"])
+        rule(name);
+    rule("POLYGON_MODE", (c, a) => [GL.FRONT, GL.BACK, GL.FRONT_AND_BACK].includes(a[0]) &&
+        [GL.POINT, GL.LINE, GL.FILL].includes(a[1]) ? 0 : GL.INVALID_ENUM);
+    rule("BLEND_FUNC", (c, a) => (FACTORS.has(a[0]) || a[0] === GL.SRC_ALPHA_SATURATE) && FACTORS.has(a[1]) ? 0 : GL.INVALID_ENUM);
+    rule("BLEND_FUNC_SEPARATE", (c, a) => a.every((v, i) => FACTORS.has(v) || i % 2 === 0 && v === GL.SRC_ALPHA_SATURATE) ? 0 : GL.INVALID_ENUM);
+    for (const name of ["BLEND_EQUATION", "BLEND_EQUATION_SEPARATE"])
+        rule(name, (c, a) => a.every(v => EQUATIONS.has(v)) ? 0 : GL.INVALID_ENUM);
+    rule("ALPHA_FUNC", (c, a) => COMPARE(a[0]) ? 0 : GL.INVALID_ENUM);
+    rule("PIXEL_STOREI", (c, [p, v]) => {
+        if (!STORE.has(p)) return GL.INVALID_ENUM;
+        if (p === GL.PACK_ALIGNMENT || p === GL.UNPACK_ALIGNMENT) return [1, 2, 4, 8].includes(v) ? 0 : GL.INVALID_VALUE;
+        return !STORE_BOOLEAN.has(p) && v < 0 ? GL.INVALID_VALUE : 0;
+    });
+    rule("MATRIX_MODE", (c, [mode]) => [GL.MODELVIEW, GL.PROJECTION, GL.TEXTURE, GL.COLOR].includes(mode) ? 0 : GL.INVALID_ENUM);
+    rule("PUSH_MATRIX", c => stack(c).length >= (c.state.mode === GL.MODELVIEW ? caps.LIMITS.MODELVIEW_STACK_DEPTH : caps.LIMITS.OTHER_STACK_DEPTH) ? GL.STACK_OVERFLOW : 0);
+    rule("POP_MATRIX", c => stack(c).length <= 1 ? GL.STACK_UNDERFLOW : 0);
+    rule("ORTHO", (c, [l, r, b, t, n, f]) => l === r || b === t || n === f ? GL.INVALID_VALUE : 0);
+    rule("FRUSTUM", (c, [l, r, b, t, n, f]) => l === r || b === t || n === f || n <= 0 || f <= 0 ? GL.INVALID_VALUE : 0);
+    for (const [push, pop, property] of [["PUSH_ATTRIB", "POP_ATTRIB", "attrib"], ["PUSH_CLIENT_ATTRIB", "POP_CLIENT_ATTRIB", "clientAttrib"]]) {
+        rule(push, c => c.state[property].length >= 16 ? GL.STACK_OVERFLOW : 0);
+        rule(pop, c => c.state[property].length === 0 ? GL.STACK_UNDERFLOW : 0);
+    }
+    for (const name of ["ACTIVE_TEXTURE", "CLIENT_ACTIVE_TEXTURE"])
+        rule(name, (c, [unit]) => unit >= GL.TEXTURE0 && unit < GL.TEXTURE0 + caps.LIMITS.MAX_TEXTURE_UNITS ? 0 : GL.INVALID_ENUM);
+    rule("BEGIN", (c, [mode]) => c.state.begin ? GL.INVALID_OPERATION : mode <= GL.POLYGON ? 0 : GL.INVALID_ENUM, true);
+    rule("END", c => c.state.begin ? 0 : GL.INVALID_OPERATION, true);
+    for (const name of ["VERTEX3F", "VERTEX4F"]) rule(name, c => c.state.begin ? 0 : GL.INVALID_OPERATION, true);
+
     const proto = GLShadow.prototype;
     proto.stateValue = function(pname) {
         const c = this.current;
@@ -154,10 +205,10 @@
         if (pname === GL.BLEND_SRC) return [state.values[GL.BLEND_SRC_RGB], "i"];
         if (pname === GL.BLEND_DST) return [state.values[GL.BLEND_DST_RGB], "i"];
         const matrix = { [GL.MODELVIEW_MATRIX]: GL.MODELVIEW, [GL.PROJECTION_MATRIX]: GL.PROJECTION,
-            [GL.TEXTURE_MATRIX]: GL.TEXTURE, [GL.COLOR_MATRIX_SGI]: GL.COLOR_MATRIX_SGI }[pname];
+            [GL.TEXTURE_MATRIX]: GL.TEXTURE, [GL.COLOR_MATRIX_SGI]: GL.COLOR }[pname];
         if (matrix) { const s = matrix === GL.TEXTURE ? state.texture[c.activeTexture || 0] : state.stacks[matrix]; return [s[s.length - 1], "f"]; }
         const depth = { [GL.MODELVIEW_STACK_DEPTH]: GL.MODELVIEW, [GL.PROJECTION_STACK_DEPTH]: GL.PROJECTION,
-            [GL.TEXTURE_STACK_DEPTH]: GL.TEXTURE, [GL.COLOR_MATRIX_STACK_DEPTH_SGI]: GL.COLOR_MATRIX_SGI }[pname];
+            [GL.TEXTURE_STACK_DEPTH]: GL.TEXTURE, [GL.COLOR_MATRIX_STACK_DEPTH_SGI]: GL.COLOR }[pname];
         if (depth) return [[(depth === GL.TEXTURE ? state.texture[c.activeTexture || 0] : state.stacks[depth]).length], "i"];
         if (pname === GL.MATRIX_MODE) return [[state.mode], "i"];
         if (pname === GL.ACTIVE_TEXTURE) return [[GL.TEXTURE0 + (c.activeTexture || 0)], "i"];
@@ -210,7 +261,7 @@
     GLShadow.part({
         context(c) {
             c.state = { values: Object.fromEntries([...DEFAULTS].map(([p, [v]]) => [p, v.slice()])),
-                mode: GL.MODELVIEW, stacks: { [GL.MODELVIEW]: [identity()], [GL.PROJECTION]: [identity()], [GL.COLOR_MATRIX_SGI]: [identity()] },
+                mode: GL.MODELVIEW, stacks: { [GL.MODELVIEW]: [identity()], [GL.PROJECTION]: [identity()], [GL.COLOR]: [identity()] },
                 texture: Array.from({ length: caps.LIMITS.MAX_TEXTURE_UNITS }, () => [identity()]),
                 attrib: [], clientAttrib: [], clientTexture: 0, format: 0, initialized: false, begin: false };
         },
@@ -262,9 +313,19 @@
                 return;
             }
             const setter = SETTERS.get(fn);
-            if (setter) { const a = shadow.args(P.NAME_BY_OPCODE[fn], view, offset, size); if (a) setter(c, a); }
+            if (setter) { const a = shadow.args(P.NAME_BY_OPCODE[fn], view, offset, size); if (a) setter(c, a, shadow, view, offset); }
         },
         getState(shadow, state) { state.typed = [...shadow.contexts.values()].map(c => [c.key, clone(c.state)]); },
-        setState(shadow, state) { for (const [key, saved] of state.typed || []) { const c = shadow.contexts.get(key); if (c) c.state = clone(saved); } },
+        setState(shadow, state) {
+            for (const [key, saved] of state.typed || []) {
+                const c = shadow.contexts.get(key); if (!c) continue;
+                c.state = clone(saved);
+                // The first typed-state snapshot used the query pname as a
+                // color stack key. Normalize that internal snapshot spelling.
+                if (!c.state.stacks[GL.COLOR]) c.state.stacks[GL.COLOR] = c.state.stacks[GL.COLOR_MATRIX_SGI] || [identity()];
+                delete c.state.stacks[GL.COLOR_MATRIX_SGI];
+                if (c.state.mode === GL.COLOR_MATRIX_SGI) c.state.mode = GL.COLOR;
+            }
+        },
     });
 })(typeof globalThis !== "undefined" ? globalThis : this);

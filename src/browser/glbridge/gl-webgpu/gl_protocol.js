@@ -87,8 +87,8 @@
         ["LIGHT_MODELI", 66, "LightModeli", "ui"],
         ["LIGHT_MODELFV", 67, "LightModelfv4", "uuffff"],
         ["LIGHT_MODELIV", 68, "LightModeliv4", "uuiiii"],
-        ["LOAD_MATRIXF", 69],
-        ["MULT_MATRIXF", 70],
+        ["LOAD_MATRIXF", 69, null, "f:values[16]"],
+        ["MULT_MATRIXF", 70, null, "f:values[16]"],
         ["DEPTH_RANGE", 71, "DepthRange", "dd"],
         ["CLEAR_STENCIL", 72, "ClearStencil", "i"],
         ["STENCIL_FUNC", 73, "StencilFunc", "uiu"],
@@ -275,6 +275,15 @@
         ["V86GL_FORMAT_SAMPLES_SHIFT", 8, "and the samples per pixel (0 or 1: one) in bits 8-15"],
         ["V86GL_FORMAT_SAMPLES_MASK", 0xFF00],
         ["V86GL_EXTENDED_RECORD_SIZE", 0xFFFF, "a record size of this is followed by a u32 size"],
+        // CPU validation replaces only the opcode of a rejected GL record.
+        // Keep its size/payload so every inline response retains its address.
+        // 0x8eoo: e = GL error - 0x500 (0..6), oo = original opcode (1..255).
+        ["V86GL_REJECTED_RECORD_BIT", 0x8000],
+        ["V86GL_REJECTED_RECORD_MASK", 0xF800],
+        ["V86GL_REJECTED_ERROR_SHIFT", 8],
+        ["V86GL_REJECTED_ERROR_MASK", 0x0700],
+        ["V86GL_REJECTED_ERROR_BASE", 0x0500],
+        ["V86GL_REJECTED_OPCODE_MASK", 0x00FF],
         ["V86GL_RESPONSE_REGION_BYTES", 4 * 1024 * 1024],
         ["V86GL_HEARTBEAT_BYTES", 16, "reserved at the end of the arena, outside the GL command stream"],
         ["V86GL_HEARTBEAT_OFFSET", 4 * 1024 * 1024 - 16],
@@ -426,8 +435,21 @@
         return bytes;
     }
 
+    function isRejected(opcode) {
+        return (opcode & C.V86GL_REJECTED_RECORD_MASK) === C.V86GL_REJECTED_RECORD_BIT;
+    }
+    function rejectionError(opcode) {
+        return C.V86GL_REJECTED_ERROR_BASE + ((opcode & C.V86GL_REJECTED_ERROR_MASK) >>> C.V86GL_REJECTED_ERROR_SHIFT);
+    }
+    function rejectedOpcode(opcode, error) {
+        if (!Number.isInteger(opcode) || opcode < 1 || opcode > C.V86GL_REJECTED_OPCODE_MASK ||
+                !Number.isInteger(error) || error < 0x500 || error > 0x506)
+            throw new RangeError("GL rejected-record opcode or error is out of range");
+        return C.V86GL_REJECTED_RECORD_BIT | (error - C.V86GL_REJECTED_ERROR_BASE) << C.V86GL_REJECTED_ERROR_SHIFT | opcode;
+    }
+
     const api = { OPCODES, CONTROL, CTRL, DEFINES, C, BYTES, C_TYPES, GLFN, NAME_BY_OPCODE, SIGNATURES, RECORDS, F,
-        payloadBytes, decodeArgs, decodeRecord, encodeRecord, encodeArgs };
+        payloadBytes, decodeArgs, decodeRecord, encodeRecord, encodeArgs, isRejected, rejectionError, rejectedOpcode };
     global.GLProtocol = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

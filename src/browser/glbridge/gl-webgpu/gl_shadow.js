@@ -32,6 +32,9 @@
 
     // record code -> method; the parts add theirs
     const HANDLERS = new Map();
+    // CPU rules run before any state mutation or query handler. Returning a
+    // GL error suppresses the original command in both halves of the stream.
+    const RULES = new Map();
     // glGetIntegerv and glGetString pnames the parts answer: pname -> method
     // of the shadow, giving the value (undefined: not this side's yet)
     const INTEGERS = new Map(), STRINGS = new Map();
@@ -45,13 +48,17 @@
             this.capabilities = null;
             // gl_glslang.js's Glslang; none until the renderer sends the module
             this.glslang = null;
-            this.stats = { batches: 0, records: 0, answered: 0, malformed: 0 };
+            this.stats = { batches: 0, records: 0, answered: 0, malformed: 0, rejected: 0 };
             this.reset();
         }
 
         // fn -> the method's name, for a part
         static install(handlers) {
             for (const [fn, method] of Object.entries(handlers)) HANDLERS.set(+fn, method);
+        }
+
+        static rules(rules) {
+            for (const [fn, rule] of Object.entries(rules)) RULES.set(+fn, rule);
         }
 
         // pname -> the method's name, for a part's glGetIntegerv and glGetString
@@ -92,6 +99,7 @@
             const end = bytes.byteLength;
             let offset = 0;
             while (offset + 4 <= end) {
+                const recordOffset = offset;
                 const fn = view.getUint16(offset, true);
                 let size = view.getUint16(offset + 2, true);
                 offset += 4;
@@ -105,13 +113,35 @@
                     return;
                 }
                 ++this.stats.records;
-                this.dispatch(fn, bytes, view, offset, size);
+                const error = this.dispatch(fn, bytes, view, offset, size);
+                if (error) {
+                    if (this.current && !this.current.error) this.current.error = error;
+                    view.setUint16(recordOffset, protocol.rejectedOpcode(fn, error), true);
+                    ++this.stats.rejected;
+                }
                 offset += size;
             }
             if (offset !== end) ++this.stats.malformed;
         }
 
         dispatch(fn, bytes, view, offset, size) {
+            if (protocol.isRejected(fn)) {
+                if (this.current && !this.current.error) this.current.error = protocol.rejectionError(fn);
+                return;
+            }
+            const name = protocol.NAME_BY_OPCODE[fn];
+            const signature = protocol.SIGNATURES[name];
+            const header = RECORDS[name];
+            const minimum = signature ? protocol.payloadBytes(signature[1]) : header ? header.size : 0;
+            if (size < minimum) { ++this.stats.malformed; return; }
+            const rule = RULES.get(fn);
+            if (rule && this.current) {
+                const error = rule(this, bytes, view, offset, size);
+                if (error) return error;
+            }
+            // Keep our partial error state consumed by legacy glGetError;
+            // it is not authoritative until every command family has rules.
+            if (fn === GLFN.QUERY_ERROR && this.current) this.current.error = 0;
             for (const part of PARTS) if (part.command) part.command(this, fn, bytes, view, offset, size);
             const method = HANDLERS.get(fn);
             if (!method) return;
@@ -156,7 +186,7 @@
                 for (const part of PARTS) if (part.group) part.group(group);
                 this.groups.set(groupKey, group);
             }
-            const context = { key, id, group, program: 0 };
+            const context = { key, id, group, program: 0, error: 0 };
             for (const part of PARTS) if (part.context) part.context(context);
             this.contexts.set(key, context);
             return context;
@@ -242,7 +272,7 @@
                 capabilities: this.capabilities,
                 nextGroup: this.nextGroup,
                 contexts: [...this.contexts.values()].map(c => ({ key: c.key, id: c.id, group: c.group.key,
-                    program: c.program })),
+                    program: c.program, error: c.error })),
                 current: this.current ? this.current.key : null,
             };
             for (const part of PARTS) if (part.getState) part.getState(this, state);
@@ -255,8 +285,11 @@
             if (!state) return;
             this.capabilities = state.capabilities || null;
             this.nextGroup = state.nextGroup || 1;
-            for (const c of state.contexts || [])
-                this.createContext(c.key, c.id, c.group || "private:" + c.key).program = c.program || 0;
+            for (const c of state.contexts || []) {
+                const context = this.createContext(c.key, c.id, c.group || "private:" + c.key);
+                context.program = c.program || 0;
+                context.error = c.error || 0;
+            }
             this.current = state.current ? this.contexts.get(state.current) || null : null;
             for (const part of PARTS) if (part.setState) part.setState(this, state);
         }

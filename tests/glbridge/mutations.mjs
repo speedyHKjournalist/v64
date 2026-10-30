@@ -61,8 +61,13 @@ const MUTATIONS = {
     ] },
     gl: { floor: 0.9, node: ["gl_executor_test.js", "gl_shader_translator_test.js", "gl_shader_wgsl_validation_test.js",
         "gl_fixed_function_wgsl_test.js", "gl_arb_program_test.js", "graphics_checkpoint_test.js", "gl_shadow_state_test.js",
-        "gl_async_answers_test.js"],
-    pages: ["gl_conformance_browser_test.html", "gl_multipass_browser_test.html"], list: [
+        "gl_async_answers_test.js", "gl_shadow_validation_test.js"],
+    pages: ["gl_conformance_browser_test.html", "gl_multipass_browser_test.html", "gl_validation_browser_test.html"], list: [
+        ["CPU validation: fails to mark a rejected command", G + "gl_shadow.js",
+            "view.setUint16(recordOffset, protocol.rejectedOpcode(fn, error), true);", "void recordOffset;"],
+        ["CPU validation: applies rejected arguments on the page", G + "gl_executor.js",
+            "this.setError(protocol.rejectionError(fn));\n                return;",
+            "this.setError(protocol.rejectionError(fn));\n                fn &= protocol.C.V86GL_REJECTED_OPCODE_MASK;"],
         ["GL async: early failures stay in the page copy", G + "gl_executor.js",
             "                this.answerGuest(bytes, metadata, [[offset + F.status, status(SYNC_STATUS_FAILED)]]);",
             "                view.setUint32(offset + F.status, SYNC_STATUS_FAILED, true);"],

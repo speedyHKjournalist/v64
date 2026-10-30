@@ -2516,6 +2516,13 @@
 
         dispatch(fn, bytes, view, offset, size, metadata) {
 
+            if (protocol.isRejected(fn)) {
+                // The CPU has already refused this call. Preserve its GL
+                // error during the migration, but never apply its arguments.
+                this.setError(protocol.rejectionError(fn));
+                return;
+            }
+
             if (fn === CTRL.MAKE_CURRENT)
                 return this.makeCurrent(bytes.subarray(offset, offset + size));
             if (fn === CTRL.RELEASE_CURRENT) return this.releaseCurrent();
