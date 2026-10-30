@@ -22,7 +22,8 @@
 //                                             (gl_caps.js), for the GL shadow
 //   machine_reset {}                          the guest was reset: no GL context
 //                                             outlives it
-//   glslang    { module }                     glslang's WebAssembly.Module, for
+//   initializing { value }                   hold descriptors until startup finishes
+//   glslang    { module } or { error }        glslang's WebAssembly.Module, for
 //                                             the GL shadow's GLSL answers
 //
 // The GL shadow (gl-webgpu/gl_shadow.js, when loaded) reads each GL batch in
@@ -71,6 +72,7 @@
         let lastBytes = 0;
         let submitCount = 0;
         let hostAvailable = false;
+        let initializing = false;
         let nextBatch = 0;
         const inflight = new Map();
         let inflightBytes = 0;
@@ -95,6 +97,10 @@
 
         channel.listen(message => {
             switch (message.type) {
+                case "initializing":
+                    initializing = !!message.value;
+                    if (!initializing && dev) processQueue();
+                    break;
                 case "write": {
                     // A readback lands in the arena of the batch that asked for it
                     const offset = message.offset;
@@ -128,11 +134,12 @@
                 case "glslang":
                     if (shadow && global.V86GLGlslang) {
                         try {
+                            if (!message.module) throw new Error(message.error || "no compiler module was supplied");
                             shadow.setGlslang(new global.V86GLGlslang.Glslang(message.module));
                         } catch (error) {
-                            console.warn("[virtio-v86gl] glslang does not load: GLSL queries are the renderer's", error);
+                            shadow.setGlslangFailure(error.message);
                         }
-                    }
+                    } else if (shadow) shadow.setGlslangFailure("the compiler loader is missing");
                     break;
                 case "available":
                     hostAvailable = !!message.value;
@@ -166,6 +173,7 @@
         }
 
         function processRequests() {
+            if (initializing) return;
             if (!dev.is_feature_negotiated(F_SHARED_ARENA) || !dev.is_feature_negotiated(F_VERSION_1)) return;
             // Leave descriptors with the guest until the renderer has room
             while (canAccept() && dev.has_request(0)) {

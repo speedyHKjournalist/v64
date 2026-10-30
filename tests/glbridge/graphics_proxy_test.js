@@ -130,9 +130,12 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     const started = plugin.start({ emulator: p.emulator, channel, screen: {
         canvas: p.screen, set_backend: value => p.backend.push(["set", value]),
         fallback: () => p.backend.push(["fallback"]), is_graphical: () => true } });
-    assert.deepEqual(toDevice, [{ type: "available", value: true }], "batches are taken while WebGPU starts");
+    assert.deepEqual(toDevice, [{ type: "initializing", value: true }], "startup batches wait for the CPU front end and capabilities");
     await started;
-    assert.equal(toDevice.length, 1, "and still once it is up");
+    assert.deepEqual(toDevice.filter(m => m.type === "available"), [{ type: "available", value: true }]);
+    assert.equal(toDevice.at(-1).type, "initializing");
+    assert.equal(toDevice.at(-1).value, false);
+    assert.ok(toDevice.some(m => m.type === "glslang" && m.error), "a missing compiler reaches the CPU as a terminal failure");
     assert.equal(p.backend[0][0], "set");
     const pushed = [];
     plugin.bridge.pushPCIBatch = event => pushed.push(event);
@@ -221,8 +224,30 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
         d3d9Executor: q.options.d3d9Executor });
     await failedPlugin.start({ emulator: q.emulator, channel: { remote: false, post: m => toFailedDevice.push(m), listen() {} },
         screen: { canvas: q.screen, set_backend() {}, fallback() {}, is_graphical: () => true } });
-    assert.deepEqual(toFailedDevice.map(m => m.value), [true, false]);
+    assert.deepEqual(toFailedDevice.filter(m => m.type === "initializing").map(m => m.value), [true, false]);
+    assert.ok(!toFailedDevice.some(m => m.type === "available" && m.value));
     await failedPlugin.destroy();
+
+    // A slow compiler cannot expose a window where CPU queries accidentally
+    // fall back to the renderer. WebGPU being ready is insufficient.
+    const slow = fixture(), startupMessages = [], oldFetch = global.fetch;
+    let finishFetch;
+    global.fetch = () => new Promise(resolve => { finishFetch = resolve; });
+    const slowPlugin = V86GraphicsProxy({ onError: slow.options.onError, glExecutor: slow.options.glExecutor,
+        d3d9Executor: slow.options.d3d9Executor, glslang: "https://compiler.invalid/glslang.wasm" });
+    try {
+        const startup = slowPlugin.start({ emulator: slow.emulator,
+            channel: { remote: true, post: m => startupMessages.push(m), listen() {} },
+            screen: { canvas: slow.screen, set_backend() {}, fallback() {}, is_graphical: () => true } });
+        await slowPlugin.bridge.ready;
+        assert.ok(!startupMessages.some(m => m.type === "available"));
+        assert.deepEqual(startupMessages.filter(m => m.type === "initializing").map(m => m.value), [true]);
+        finishFetch({ arrayBuffer: async () => new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]).buffer });
+        await startup;
+        const compilerAt = startupMessages.findIndex(m => m.type === "glslang" && m.module);
+        const releasedAt = startupMessages.findIndex(m => m.type === "initializing" && !m.value);
+        assert.ok(compilerAt > 0 && releasedAt > compilerAt, "release startup only after sending the CPU compiler");
+    } finally { global.fetch = oldFetch; await slowPlugin.destroy(); }
 
     console.log("graphics_proxy_test: ok");
 })().catch(error => { console.error(error); process.exitCode = 1; });

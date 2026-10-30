@@ -195,7 +195,7 @@ test("glUniform values come back from glGetUniform, converted as GL says", () =>
     assert.equal(status(nowhere, "QUERY_UNIFORM"), FAILED);
 });
 
-test("without glslang the GLSL queries wait for the executor; when it comes, the earlier shaders are compiled", () => {
+test("startup queries stay pending until glslang arrives and use the frozen compile inputs", () => {
     const shadow = newShadow(false);
     const stream = program(new GLStream());
     const before = stream.queryObjectiv(PROGRAM, 5, GL.LINK_STATUS);
@@ -206,6 +206,25 @@ test("without glslang the GLSL queries wait for the executor; when it comes, the
     const linked = after.queryObjectiv(PROGRAM, 5, GL.LINK_STATUS);
     shadow.process(after.bytes());
     assert.equal(int(linked, "QUERY_OBJECT_IV", "value"), 1);
+});
+
+test("a compiler load failure is answered on CPU with false compile/link status and a diagnostic", () => {
+    const shadow = newShadow(false); shadow.setGlslangFailure("fetch failed");
+    const stream = program(new GLStream());
+    const compiled = stream.queryObjectiv(SHADER, 2, GL.COMPILE_STATUS);
+    const linked = stream.queryObjectiv(PROGRAM, 5, GL.LINK_STATUS);
+    const shaderLog = stream.queryObjectLog(SHADER, 2, 256), programLog = stream.queryObjectLog(PROGRAM, 5, 256);
+    const location = stream.queryLocation(UNIFORM, 5, "scale", 32);
+    shadow.process(stream.bytes());
+    for (const query of [compiled, linked]) {
+        assert.equal(status(query, "QUERY_OBJECT_IV"), OK);
+        assert.equal(int(query, "QUERY_OBJECT_IV", "value"), 0);
+    }
+    for (const query of [shaderLog, programLog]) {
+        assert.equal(status(query, "QUERY_OBJECT_LOG"), OK);
+        assert.match(text(query, "QUERY_OBJECT_LOG", int(query, "QUERY_OBJECT_LOG", "length")), /compiler is unavailable: fetch failed/);
+    }
+    assert.equal(status(location, "QUERY_LOCATION"), FAILED);
 });
 
 test("a deleted shader stays while attached; a deleted program while current", () => {

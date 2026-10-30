@@ -94,4 +94,39 @@ device.notify();
 device.reset();
 assert.equal(posted.filter(m => m.type === "released").length, 1);
 
-console.log("v86gl_device_test: backpressure, renderer loss, owner release and queue reset passed");
+// Startup must not let either transport route GLSL queries to the page before
+// CPU glslang is ready. The virtqueue descriptor stays owned by the guest.
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_glslang.js");
+const { GLStream, GL } = require("./gl_stream_builder.js");
+const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+const caps = require("../../src/browser/glbridge/gl-webgpu/gl_caps.js").capabilities({}, {});
+const moduleBytes = require("node:fs").readFileSync(require("node:path").join(__dirname, "../../bios/glslang.wasm"));
+for (const remote of [false, true]) for (const failed of [false, true]) {
+    const guest = new Uint8Array(ARENA_BYTES), outgoing = []; let deliver;
+    const d = createV86GLDevice({ remote, post: m => outgoing.push(m), listen: f => { deliver = f; } });
+    const h = fakeHandle(guest); d.init(h);
+    h.push([1, ARENA, 0, ARENA_BYTES, 0, 0]); d.notify();
+    deliver({ type: "initializing", value: true }); deliver({ type: "available", value: true });
+    const stream = new GLStream().makeCurrent(1, 0, 0, 4, 4, 1, 1)
+        .call("CREATE_SHADER", 1, GL.VERTEX_SHADER).shaderSource(1, "void main(){gl_Position=gl_Vertex;}").call("COMPILE_SHADER", 1);
+    const query = stream.queryObjectiv(P.C.V86GL_OBJECT_KIND_SHADER, 1, GL.COMPILE_STATUS);
+    writeBatch(guest, stream.bytes().length); guest.set(stream.bytes(), 32);
+    h.push([2, 0, 0, 32 + stream.bytes().length, 0, 0]); d.notify();
+    assert.equal(h.replies.length, 1, "submission must wait for startup, including in local mode");
+    assert.equal(outgoing.filter(m => m.type === "batch").length, 0);
+    deliver({ type: "capabilities", value: caps });
+    deliver(failed ? { type: "glslang", error: "compiler download failed" } : { type: "glslang", module: new WebAssembly.Module(moduleBytes) });
+    assert.equal(h.replies.length, 1, "compiler arrival alone must not release the barrier");
+    deliver({ type: "initializing", value: false });
+    assert.deepEqual(h.replies, [OK, OK]);
+    const batch = outgoing.find(m => m.type === "batch");
+    // payloadView's offset is within the stream, shared by the copied batch.
+    const original = stream.bytes(), payloadOffset = query.bytes.byteOffset - original.byteOffset;
+    if (!Number.isInteger(payloadOffset) || payloadOffset < 0) throw new Error("invalid fixture query offset");
+    const view = new DataView(batch.bytes.buffer, batch.bytes.byteOffset + payloadOffset, query.bytes.length);
+    assert.equal(view.getUint32(P.F.QUERY_OBJECT_IV.status, true), P.C.V86GL_SYNC_QUERY_STATUS_OK);
+    assert.equal(view.getInt32(P.F.QUERY_OBJECT_IV.value, true), failed ? 0 : 1);
+}
+console.log("v86gl_device_test: backpressure, renderer loss, owner release, queue reset and compiler startup passed");

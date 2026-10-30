@@ -6,8 +6,9 @@
 //
 // glslang runs when an answer needs it, not at glCompileShader: the module
 // may arrive after the first shaders (the renderer sends it), and a guest
-// that never asks pays nothing. Until it is there these queries stay PENDING
-// for the executor.
+// that never asks pays nothing. The device holds startup submissions until
+// the compiler and capabilities arrive; a load failure is a CPU-side compile
+// and link failure with a log, consistently in local and worker modes.
 //
 // Locations are this side's. A uniform's are the program's name times
 // UNIFORM_LOCATIONS_PER_PROGRAM plus its position among the program's
@@ -180,6 +181,7 @@
     proto.compiledShader = function(shader) {
         if (shader.compileSource === null) return { ok: false, log: "" };
         if (!shader.compiled) {
+            if (this.glslangFailure) return shader.compiled = { ok: false, log: this.glslangFailure };
             if (!this.prepareGlslang()) return null;
             shader.compiled = this.glslang.compile(STAGE_OF_GL_TYPE.get(shader.type), shader.compileSource);
         }
@@ -266,8 +268,9 @@
     proto.linkedProgram = function(program) {
         if (program.linked) return program.linked;
         if (!program.linkInput) return { ok: false, log: "", uniforms: [], attributes: [], byLocation: new Map() };
-        if (!this.prepareGlslang()) return null;
         const failed = log => ({ ok: false, log, uniforms: [], attributes: [], byLocation: new Map() });
+        if (this.glslangFailure) return program.linked = failed(this.glslangFailure);
+        if (!this.prepareGlslang()) return null;
         const shaders = program.linkInput.shaders;
         if (!shaders.length) return program.linked = failed("ERROR: no shaders attached\n");
         for (const shader of shaders) {

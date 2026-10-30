@@ -230,12 +230,14 @@
             if (channel && gl && typeof gl.capabilities === "function")
                 channel.post({ type: "capabilities", value: gl.capabilities() });
         };
-        // The shadow's GLSL front end; until it arrives the executor answers
-        // those queries (in this thread's mode only)
+        // The device's startup barrier keeps compile/link/queries on the CPU
+        // even when fetching the front end takes longer than creating WebGPU.
         const sendGlslang = () => loadGlslang(options).then(module => {
-            if (module && channel) channel.post({ type: "glslang", module });
-        }).catch(error => console.warn("[v86gl] glslang.wasm is not available: the GL shadow cannot answer GLSL " +
-            "queries", error));
+            if (channel) channel.post(module ? { type: "glslang", module } :
+                { type: "glslang", error: "no compiler module was supplied" });
+        }).catch(error => {
+            if (channel) channel.post({ type: "glslang", error: error.message });
+        });
 
         // The arena's owner is gone: a journaled pseudo-batch ends every
         // session it submitted, behind its last batch
@@ -331,9 +333,12 @@
                     if (message.type === "batch") onBatch(message);
                     else if (message.type === "released") onReleased();
                 });
-                setAvailable(true);
+                channel.post({ type: "initializing", value: true });
                 return Promise.all([bridge.ready.then(sendCapabilities), sendGlslang()])
-                    .then(() => setAvailable(!bridge.failed));
+                    .finally(() => {
+                        setAvailable(!bridge.failed);
+                        channel.post({ type: "initializing", value: false });
+                    });
             },
             screen_changed() {
                 bridge.screenChanged();

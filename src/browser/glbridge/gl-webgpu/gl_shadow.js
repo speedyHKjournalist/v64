@@ -86,6 +86,12 @@
 
         setGlslang(glslang) {
             this.glslang = glslang;
+            this.glslangFailure = null;
+        }
+
+        setGlslangFailure(message) {
+            this.glslang = null;
+            this.glslangFailure = "ERROR: GLSL compiler is unavailable: " + message + "\n";
         }
 
         /*
