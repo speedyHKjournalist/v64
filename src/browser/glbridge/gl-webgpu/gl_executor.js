@@ -3302,15 +3302,16 @@
         /* ---- VBO-backed array pointers ---- */
 
         const pointerVBO = which => function(a, bytes, view, offset, size) {
-            if (size < 16)
+            const R = protocol.F.VERTEX_POINTER_VBO;
+            if (size < protocol.RECORDS.VERTEX_POINTER_VBO.size)
                 throw new GLStreamError("VBO pointer record is short");
             const s = this.current;
             const array = {
                 buffer: s.arrayBuffer,
-                size: view.getInt32(offset, true),
-                type: view.getUint32(offset + 4, true),
-                stride: view.getInt32(offset + 8, true),
-                offset: view.getUint32(offset + 12, true),
+                size: view.getInt32(offset + R.size, true),
+                type: view.getUint32(offset + R.type, true),
+                stride: view.getInt32(offset + R.stride, true),
+                offset: view.getUint32(offset + R.offset, true),
                 normalized: which === "color" || which === "secondaryColor" ||
                     which === "normal",
                 fromVBO: true,
@@ -3323,14 +3324,15 @@
         define("SECONDARY_COLOR_POINTER_VBO", pointerVBO("secondaryColor"));
         define("FOG_COORD_POINTER_VBO", pointerVBO("fogCoord"));
         define("TEX_COORD_POINTER_VBO", function(a, bytes, view, offset, size) {
-            if (size < 16) throw new GLStreamError("VBO pointer record is short");
+            const R = protocol.F.TEX_COORD_POINTER_VBO;
+            if (size < protocol.RECORDS.TEX_COORD_POINTER_VBO.size) throw new GLStreamError("VBO pointer record is short");
             const s = this.current;
             this.setArrayPointer("texCoord" + s.clientActiveTexture, {
                 buffer: s.arrayBuffer,
-                size: view.getInt32(offset, true),
-                type: view.getUint32(offset + 4, true),
-                stride: view.getInt32(offset + 8, true),
-                offset: view.getUint32(offset + 12, true),
+                size: view.getInt32(offset + R.size, true),
+                type: view.getUint32(offset + R.type, true),
+                stride: view.getInt32(offset + R.stride, true),
+                offset: view.getUint32(offset + R.offset, true),
                 normalized: false, fromVBO: true,
             });
         });
@@ -3915,15 +3917,16 @@
 
     function parseArrayBlocks(bytes, view, offset, end, count) {
         const blocks = [];
+        const R = protocol.F.CLIENT_ARRAY_BLOCK, header = protocol.RECORDS.CLIENT_ARRAY_BLOCK.size;
         let at = offset;
         for (let i = 0; i < count; ++i) {
-            if (at + 20 > end) return null;
-            const enabled = view.getUint32(at, true) !== 0;
-            const size = view.getInt32(at + 4, true);
-            const type = view.getUint32(at + 8, true);
-            const stride = view.getInt32(at + 12, true);
-            const dataSize = view.getUint32(at + 16, true);
-            at += 20;
+            if (at + header > end) return null;
+            const enabled = view.getUint32(at + R.enabled, true) !== 0;
+            const size = view.getInt32(at + R.size, true);
+            const type = view.getUint32(at + R.type, true);
+            const stride = view.getInt32(at + R.stride, true);
+            const dataSize = view.getUint32(at + R.data_size, true);
+            at += header;
             if (at + dataSize > end) return null;
             blocks.push({
                 enabled, size: enabled ? size : 0, type: enabled ? type : 0,
@@ -3938,17 +3941,18 @@
 
     function parseGenericBlocks(bytes, view, offset, end, count) {
         const blocks = [];
+        const R = protocol.F.GENERIC_ATTRIB_BLOCK, header = protocol.RECORDS.GENERIC_ATTRIB_BLOCK.size;
         let at = offset;
         for (let i = 0; i < count; ++i) {
-            if (at + 28 > end) return null;
-            const index = view.getUint32(at, true);
-            const normalized = view.getUint32(at + 4, true) !== 0;
-            const enabled = view.getUint32(at + 8, true) !== 0;
-            const size = view.getInt32(at + 12, true);
-            const type = view.getUint32(at + 16, true);
-            const stride = view.getInt32(at + 20, true);
-            const dataSize = view.getUint32(at + 24, true);
-            at += 28;
+            if (at + header > end) return null;
+            const index = view.getUint32(at + R.index, true);
+            const normalized = view.getUint32(at + R.normalized, true) !== 0;
+            const enabled = view.getUint32(at + R.enabled, true) !== 0;
+            const size = view.getInt32(at + R.size, true);
+            const type = view.getUint32(at + R.type, true);
+            const stride = view.getInt32(at + R.stride, true);
+            const dataSize = view.getUint32(at + R.data_size, true);
+            at += header;
             if (at + dataSize > end) return null;
             blocks.push({
                 index, normalized, enabled, size, type, stride,
@@ -3965,15 +3969,12 @@
 
         const decodePackedDraw = (indexed, gl2) => function(a, bytes, view, offset, size) {
             const end = offset + size;
-            let at = offset;
-            const mode = view.getUint32(at, true); at += 4;
-            const count = view.getInt32(at, true); at += 4;
-            let indexType = 0;
-            let indexDataSize = 0;
-            if (indexed) {
-                indexType = view.getUint32(at, true); at += 4;
-                indexDataSize = view.getUint32(at, true); at += 4;
-            }
+            const baseName = indexed ? "DRAW_ELEMENTS" : "DRAW_ARRAYS", base = protocol.RECORDS[baseName], R = protocol.F[baseName];
+            if (size < base.size) throw new GLStreamError("packed draw header is short");
+            const mode = view.getUint32(offset + R.mode, true);
+            const count = view.getInt32(offset + R.count, true);
+            const indexType = indexed ? view.getUint32(offset + R.type, true) : 0;
+            const indexDataSize = indexed ? view.getUint32(offset + R.index_data_size, true) : 0;
             let blocksAt;
             let texUnitCount = 0;
             let hasSecondary = false;
@@ -3992,22 +3993,21 @@
              * because the block offset below was computed correctly and
              * nothing downstream range-checks an index.
              */
-            const magicAt = indexed ? offset + 16 : offset + 8;
+            const magicAt = offset + base.size;
             const magic = magicAt + 4 <= end ? view.getUint32(magicAt, true) : 0;
             let indexAt;
             if (magic === CLIENT_ARRAY_MT_MAGIC) {
-                const encoded = view.getUint32(magicAt + 4, true);
+                const mtName = "PACKED_" + baseName + (gl2 ? "_GL2_MT" : "_MT"), mt = protocol.RECORDS[mtName], M = protocol.F[mtName];
+                if (size < mt.size) throw new GLStreamError("packed multitexture header is short");
+                const encoded = view.getUint32(offset + M.tex_unit_count, true);
                 hasSecondary = (encoded & CLIENT_ARRAY_MT_SECONDARY_COLOR_BIT) !== 0;
                 hasFog = (encoded & CLIENT_ARRAY_MT_FOG_COORD_BIT) !== 0;
                 texUnitCount = encoded &
                     ~(CLIENT_ARRAY_MT_SECONDARY_COLOR_BIT | CLIENT_ARRAY_MT_FOG_COORD_BIT);
                 if (texUnitCount > MAX_TEXTURE_COORDS)
                     throw new GLStreamError("too many texture-coordinate arrays");
-                let headerEnd = magicAt + 12;      // magic, count, clientActive
-                if (gl2) {
-                    genericCount = view.getUint32(headerEnd, true);
-                    headerEnd += 4;
-                }
+                const headerEnd = offset + mt.size;
+                if (gl2) genericCount = view.getUint32(offset + M.generic_attrib_count, true);
                 indexAt = headerEnd;
                 arrayCount = 3 + texUnitCount + (hasSecondary ? 1 : 0) +
                     (hasFog ? 1 : 0);
@@ -4085,34 +4085,39 @@
                 });
         });
         define("DRAW_RANGE_ELEMENTS_DIRECT", function(a, bytes, view, offset, size) {
-            if (size < 24) throw new GLStreamError("direct draw record is short");
-            this.drawFromBuffers(view.getUint32(offset, true), 0,
-                view.getInt32(offset + 12, true), {
-                    type: view.getUint32(offset + 16, true),
-                    bufferOffset: view.getUint32(offset + 20, true),
+            const R = protocol.F.DRAW_RANGE_ELEMENTS_DIRECT;
+            if (size < protocol.RECORDS.DRAW_RANGE_ELEMENTS_DIRECT.size) throw new GLStreamError("direct draw record is short");
+            this.drawFromBuffers(view.getUint32(offset + R.mode, true), 0,
+                view.getInt32(offset + R.count, true), {
+                    type: view.getUint32(offset + R.type, true),
+                    bufferOffset: view.getUint32(offset + R.offset, true),
                 });
         });
         define("MULTI_DRAW_ARRAYS_DIRECT", function(a, bytes, view, offset, size) {
-            if (size < 8) throw new GLStreamError("multi-draw record is short");
-            const mode = view.getUint32(offset, true);
-            const primcount = view.getUint32(offset + 4, true);
+            const R = protocol.F.MULTI_DRAW_ARRAYS_DIRECT, header = protocol.RECORDS.MULTI_DRAW_ARRAYS_DIRECT.size;
+            const E = protocol.F.MULTI_DRAW_ARRAYS_ENTRY, entrySize = protocol.RECORDS.MULTI_DRAW_ARRAYS_ENTRY.size;
+            if (size < header) throw new GLStreamError("multi-draw record is short");
+            const mode = view.getUint32(offset + R.mode, true);
+            const primcount = view.getInt32(offset + R.primcount, true);
+            if (primcount < 0 || header + primcount * entrySize > size) throw new GLStreamError("multi-draw entries are truncated");
             for (let i = 0; i < primcount; ++i) {
-                const at = offset + 8 + i * 8;
-                if (at + 8 > offset + size) break;
-                this.drawFromBuffers(mode, view.getInt32(at, true),
-                    view.getInt32(at + 4, true), null);
+                const at = offset + header + i * entrySize;
+                this.drawFromBuffers(mode, view.getInt32(at + E.first, true),
+                    view.getInt32(at + E.count, true), null);
             }
         });
         define("MULTI_DRAW_ELEMENTS_DIRECT", function(a, bytes, view, offset, size) {
-            if (size < 12) throw new GLStreamError("multi-draw record is short");
-            const mode = view.getUint32(offset, true);
-            const type = view.getUint32(offset + 4, true);
-            const primcount = view.getUint32(offset + 8, true);
+            const R = protocol.F.MULTI_DRAW_ELEMENTS_DIRECT, header = protocol.RECORDS.MULTI_DRAW_ELEMENTS_DIRECT.size;
+            const E = protocol.F.MULTI_DRAW_ELEMENTS_ENTRY, entrySize = protocol.RECORDS.MULTI_DRAW_ELEMENTS_ENTRY.size;
+            if (size < header) throw new GLStreamError("multi-draw record is short");
+            const mode = view.getUint32(offset + R.mode, true);
+            const type = view.getUint32(offset + R.type, true);
+            const primcount = view.getInt32(offset + R.primcount, true);
+            if (primcount < 0 || header + primcount * entrySize > size) throw new GLStreamError("multi-draw entries are truncated");
             for (let i = 0; i < primcount; ++i) {
-                const at = offset + 12 + i * 8;
-                if (at + 8 > offset + size) break;
-                this.drawFromBuffers(mode, 0, view.getInt32(at, true), {
-                    type, bufferOffset: view.getUint32(at + 4, true),
+                const at = offset + header + i * entrySize;
+                this.drawFromBuffers(mode, 0, view.getInt32(at + E.count, true), {
+                    type, bufferOffset: view.getUint32(at + E.offset, true),
                 });
             }
         });
@@ -4141,9 +4146,10 @@
             this.copyPixels(a[0] | 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] >>> 0);
         });
         define("POLYGON_STIPPLE", function(a, bytes, view, offset, size) {
-            if (size < 128) throw new GLStreamError("polygon stipple is short");
+            const header = protocol.RECORDS.POLYGON_STIPPLE.size;
+            if (size < header) throw new GLStreamError("polygon stipple is short");
             this.current.polygonStipple.set(
-                bytes.subarray(offset, offset + 128));
+                bytes.subarray(offset, offset + header));
             this.polygonStippleTexture = null;
         });
         const pixelMap = name => function(a, bytes, view, offset, size) {
@@ -10310,26 +10316,27 @@ struct BlitParams {
         // {count, kind, status, reserved} then {name, ready, result} each:
         // the results resolved so far, the rest not ready (GL permits it)
         queryObjectBatch(bytes, view, offset, size, metadata) {
-            const headerSize = 16;
-            const entrySize = 12;
+            const R = protocol.F.QUERY_OBJECT_BATCH, E = protocol.F.QUERY_OBJECT_BATCH_ENTRY;
+            const headerSize = protocol.RECORDS.QUERY_OBJECT_BATCH.size;
+            const entrySize = protocol.RECORDS.QUERY_OBJECT_BATCH_ENTRY.size;
             if (size < headerSize) throw new GLStreamError("query batch is short");
-            const count = view.getUint32(offset, true);
+            const count = view.getUint32(offset + R.count, true);
             const status = new Uint8Array(4);
             if (headerSize + count * entrySize > size) {
                 new DataView(status.buffer).setUint32(0, SYNC_STATUS_FAILED, true);
-                return this.answerGuest(bytes, metadata, [[offset + 8, status]]);
+                return this.answerGuest(bytes, metadata, [[offset + R.status, status]]);
             }
             const entries = new Uint8Array(count * entrySize);
             const out = new DataView(entries.buffer);
             for (let i = 0; i < count; ++i) {
-                const name = view.getUint32(offset + headerSize + i * entrySize, true);
+                const name = view.getUint32(offset + headerSize + i * entrySize + E.name, true);
                 const query = this.queries.get(name);
-                out.setUint32(i * entrySize, name, true);
-                out.setUint32(i * entrySize + 4, query && query.ready ? 1 : 0, true);
-                out.setUint32(i * entrySize + 8, query ? query.result >>> 0 : 0, true);
+                out.setUint32(i * entrySize + E.name, name, true);
+                out.setUint32(i * entrySize + E.available, query && query.ready ? 1 : 0, true);
+                out.setUint32(i * entrySize + E.result, query ? query.result >>> 0 : 0, true);
             }
             new DataView(status.buffer).setUint32(0, SYNC_STATUS_OK, true);
-            this.answerGuest(bytes, metadata, [[offset + headerSize, entries], [offset + 8, status]]);
+            this.answerGuest(bytes, metadata, [[offset + headerSize, entries], [offset + R.status, status]]);
         },
 
         // glFinish returns once the GPU has done the work before it: the
@@ -10365,17 +10372,18 @@ struct BlitParams {
         /* ---- legacy pixel rectangles ---- */
 
         drawPixels(bytes, view, offset, size) {
-            if (size < 20) throw new GLStreamError("glDrawPixels record is short");
-            const width = view.getInt32(offset, true);
-            const height = view.getInt32(offset + 4, true);
-            const format = view.getUint32(offset + 8, true);
-            const type = view.getUint32(offset + 12, true);
-            const dataSize = view.getUint32(offset + 16, true);
+            const R = protocol.F.DRAW_PIXELS, header = protocol.RECORDS.DRAW_PIXELS.size;
+            if (size < header) throw new GLStreamError("glDrawPixels record is short");
+            const width = view.getInt32(offset + R.width, true);
+            const height = view.getInt32(offset + R.height, true);
+            const format = view.getUint32(offset + R.format, true);
+            const type = view.getUint32(offset + R.type, true);
+            const dataSize = view.getUint32(offset + R.data_size, true);
             if (width <= 0 || height <= 0 || !this.current.current.rasterValid)
                 return;
-            if (20 + dataSize > size)
+            if (header + dataSize > size)
                 throw new GLStreamError("glDrawPixels data is truncated");
-            const source = bytes.subarray(offset + 20, offset + 20 + dataSize);
+            const source = bytes.subarray(offset + header, offset + header + dataSize);
             if (format === GL.DEPTH_COMPONENT || format === GL.STENCIL_INDEX)
                 return this.drawPixelValues(format, source, width, height, type);
             const store = this.current.pixelStore;

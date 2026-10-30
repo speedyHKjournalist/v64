@@ -74,6 +74,37 @@ test("gl_constants.js takes the opcodes from the protocol", () => {
     for (const [name, value] of P.OPCODES) assert.equal(constants.NAME_BY_OPCODE[value], name);
 });
 
+test("every opcode has a signature or fixed header, including composite prefixes", () => {
+    for (const [name] of P.OPCODES) assert.ok(P.SIGNATURES[name] || P.RECORDS[name], name + " has no wire layout");
+    for (const suffix of ["", "_GL2"]) {
+        for (const base of ["DRAW_ARRAYS", "DRAW_ELEMENTS"]) {
+            const record = P.RECORDS[base + suffix], full = P.RECORDS["PACKED_" + base + suffix + "_MT"];
+            for (const [field, layout] of Object.entries(record.fields)) assert.deepEqual(full.fields[field], layout);
+        }
+    }
+    for (const name of ["COLOR", "TEX_COORD", "NORMAL", "SECONDARY_COLOR", "FOG_COORD"])
+        assert.deepEqual(P.RECORDS[name + "_POINTER_VBO"], P.RECORDS.VERTEX_POINTER_VBO);
+});
+
+test("truncated multi-draw payloads never execute a partial batch", async () => {
+    const { GLStream, GL } = require("./gl_stream_builder.js");
+    const { host } = createFakeHost(), executor = new executorModule.GLWebGPUExecutor(null, { host, strict: true });
+    await executor.initialize(); executor.submit(new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1).bytes(), {});
+    const calls = []; executor.drawFromBuffers = (...args) => calls.push(args);
+    for (const name of ["MULTI_DRAW_ARRAYS_DIRECT", "MULTI_DRAW_ELEMENTS_DIRECT"]) {
+        const header = P.encodeRecord(name, { mode: GL.TRIANGLES, type: GL.UNSIGNED_SHORT, primcount: 2 });
+        const entryName = name === "MULTI_DRAW_ARRAYS_DIRECT" ? "MULTI_DRAW_ARRAYS_ENTRY" : "MULTI_DRAW_ELEMENTS_ENTRY";
+        const entry = P.encodeRecord(entryName, { first: 7, count: 3, offset: 12 });
+        const payload = new Uint8Array(header.length + entry.length); payload.set(header); payload.set(entry, header.length);
+        assert.throws(() => executor.handlers[P.GLFN[name]].call(executor, [], payload, new DataView(payload.buffer), 0, payload.length), /truncated/);
+        assert.equal(calls.length, 0);
+        new DataView(payload.buffer).setInt32(P.F[name].primcount, 1, true);
+        executor.handlers[P.GLFN[name]].call(executor, [], payload, new DataView(payload.buffer), 0, payload.length);
+        assert.deepEqual(calls.pop(), name === "MULTI_DRAW_ARRAYS_DIRECT" ? [GL.TRIANGLES, 7, 3, null] :
+            [GL.TRIANGLES, 0, 3, { type: GL.UNSIGNED_SHORT, bufferOffset: 12 }]);
+    }
+});
+
 test("typed state and parameter replies share the guest decoder's prefix", () => {
     for (const field of ["pname", "value_kind", "status", "count", "data_size", "error"])
         assert.equal(P.F.QUERY_PARAMETER[field], P.F.QUERY_STATE[field], field);

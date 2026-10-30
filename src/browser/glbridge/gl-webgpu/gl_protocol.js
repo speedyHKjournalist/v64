@@ -57,8 +57,8 @@
         ["TEX_COORD2F", 36, "TexCoord2f", "ff"],
         ["ENABLE_CLIENT_STATE", 37, "EnableClientState", "u"],
         ["DISABLE_CLIENT_STATE", 38, "DisableClientState", "u"],
-        ["DRAW_ARRAYS", 39],
-        ["DRAW_ELEMENTS", 40],
+        ["DRAW_ARRAYS", 39, null, "u:mode i:count"], // optional MT header, then array blocks
+        ["DRAW_ELEMENTS", 40, null, "u:mode i:count u:type u:index_data_size"],
         ["BLEND_FUNC", 41, "BlendFunc", "uu"],
         ["ALPHA_FUNC", 42, "AlphaFunc", "uf"],
         ["DEPTH_MASK", 43, "DepthMask", "u"],
@@ -139,7 +139,7 @@
         ["PIXEL_TRANSFERF", 118, "PixelTransferf", "uf"],
         ["PIXEL_TRANSFERI", 119, "PixelTransferi", "ui"],
         ["PIXEL_ZOOM", 120, "PixelZoom", "ff"],
-        ["DRAW_PIXELS", 121],
+        ["DRAW_PIXELS", 121, null, "i:width i:height u:format u:type u:data_size"],
         ["BITMAP", 122, null, "i:width i:height f:xorig f:yorig f:xmove f:ymove u:data_size"],
         ["COPY_PIXELS", 123, "CopyPixels", "iiiiu"],
         ["TEX_IMAGE_1D", 124, null, "u:target i:level i:internalformat i:width i:border u:format u:type u:data_size"],
@@ -148,7 +148,7 @@
         ["COPY_TEX_SUB_IMAGE_1D", 127, "CopyTexSubImage1D", "uiiiii"],
         ["CLEAR_ACCUM", 128, "ClearAccum", "ffff"],
         ["ACCUM", 129, "Accum", "uf"],
-        ["POLYGON_STIPPLE", 130],
+        ["POLYGON_STIPPLE", 130, null, "u:mask[32]"],
         ["PIXEL_MAPFV", 131, null, "u:map i:count"],
         ["PIXEL_MAPUIV", 132, null, "u:map i:count"],
         ["PIXEL_MAPUSV", 133, null, "u:map i:count"],
@@ -172,16 +172,17 @@
         ["USE_PROGRAM", 151, "UseProgramMapped", "u"],
         ["VALIDATE_PROGRAM", 152, "ValidateProgramMapped", "u"],
         ["BIND_ATTRIB_LOCATION", 153, null, "u:program i:location u:name_length"],
-        ["MAP_UNIFORM_LOCATION", 154],
-        ["MAP_ATTRIB_LOCATION", 155],
+        // Retired location-map records: their obsolete payload is ignored.
+        ["MAP_UNIFORM_LOCATION", 154, "MapUniformLocation", ""],
+        ["MAP_ATTRIB_LOCATION", 155, "MapAttribLocation", ""],
         ["UNIFORM_FV", 156, null, "i:location i:components i:count"],
         ["UNIFORM_IV", 157, null, "i:location i:components i:count"],
         ["UNIFORM_MATRIX_FV", 158, null, "i:location i:dimension i:count u:transpose"],
         ["VERTEX_ATTRIB4F", 159, "VertexAttrib4fMapped", "uffff"],
         ["ENABLE_VERTEX_ATTRIB_ARRAY", 160, "EnableVertexAttribArrayMapped", "u"],
         ["DISABLE_VERTEX_ATTRIB_ARRAY", 161, "DisableVertexAttribArrayMapped", "u"],
-        ["DRAW_ARRAYS_GL2", 162],
-        ["DRAW_ELEMENTS_GL2", 163],
+        ["DRAW_ARRAYS_GL2", 162, null, "u:mode i:count"],
+        ["DRAW_ELEMENTS_GL2", 163, null, "u:mode i:count u:type u:index_data_size"],
         ["UNIFORM_MATRIX_RECT_FV", 164, null, "i:location i:columns i:rows i:count u:transpose"],
         ["GEN_FRAMEBUFFERS", 165, null, "u:count"],
         ["DELETE_FRAMEBUFFERS", 166, null, "u:count"],
@@ -217,24 +218,24 @@
         ["BIND_BUFFER", 196, "BindBufferMapped", "uu"],
         ["BUFFER_DATA", 197, null, "u:target i:size u:usage u:data_size"],
         ["BUFFER_SUB_DATA", 198, null, "u:target i:offset i:size u:data_size"],
-        ["VERTEX_POINTER_VBO", 199],
-        ["COLOR_POINTER_VBO", 200],
-        ["TEX_COORD_POINTER_VBO", 201],
-        ["NORMAL_POINTER_VBO", 202],
-        ["SECONDARY_COLOR_POINTER_VBO", 203],
-        ["FOG_COORD_POINTER_VBO", 204],
+        ["VERTEX_POINTER_VBO", 199, null, "i:size u:type i:stride u:offset"],
+        ["COLOR_POINTER_VBO", 200, null, "i:size u:type i:stride u:offset"],
+        ["TEX_COORD_POINTER_VBO", 201, null, "i:size u:type i:stride u:offset"],
+        ["NORMAL_POINTER_VBO", 202, null, "i:size u:type i:stride u:offset"],
+        ["SECONDARY_COLOR_POINTER_VBO", 203, null, "i:size u:type i:stride u:offset"],
+        ["FOG_COORD_POINTER_VBO", 204, null, "i:size u:type i:stride u:offset"],
         ["VERTEX_ATTRIB_POINTER_VBO", 205, null, "u:index i:size u:type u:normalized i:stride u:offset"],
         ["DRAW_ARRAYS_DIRECT", 206, "DrawArraysDirect", "uii"],
         ["DRAW_ELEMENTS_DIRECT", 207, null, "u:mode u:start u:end i:count u:type u:offset"],
-        ["DRAW_RANGE_ELEMENTS_DIRECT", 208],
-        ["MULTI_DRAW_ARRAYS_DIRECT", 209],
-        ["MULTI_DRAW_ELEMENTS_DIRECT", 210],
+        ["DRAW_RANGE_ELEMENTS_DIRECT", 208, null, "u:mode u:start u:end i:count u:type u:offset"],
+        ["MULTI_DRAW_ARRAYS_DIRECT", 209, null, "u:mode i:primcount"],
+        ["MULTI_DRAW_ELEMENTS_DIRECT", 210, null, "u:mode u:type i:primcount"],
         ["QUERY_ERROR", 211, null, "u:status u:value u:reserved0 u:reserved1"],
         ["QUERY_LOCATION", 212, null, "u:location_kind u:program i:guest_location u:status i:result u:value_type i:value_count u:name_length"],
         ["QUERY_UNIFORM", 213, null, "u:program i:location u:value_kind u:status i:value_count u:data_size u:reserved0 u:reserved1"],
         ["INVALIDATE_PROGRAM_LOCATIONS", 214, "InvalidateProgramLocations", "u"],
         ["COPY_TEX_SUB_IMAGE_3D", 215, "CopyTexSubImage3D", "uiiiiiiii"],
-        ["QUERY_OBJECT_BATCH", 216],
+        ["QUERY_OBJECT_BATCH", 216, null, "u:count u:object_kind u:status u:reserved"],
         ["BLIT_FRAMEBUFFER", 217, "BlitFramebuffer", "iiiiiiiiuu"],
         ["EDGE_FLAG", 218, "EdgeFlag", "u"],
         // CPU-side state queries. The data are already converted to the
@@ -244,6 +245,20 @@
         ["PRIORITIZE_TEXTURES", 221, null, "i:count"], // then count pairs of u32 name, f32 priority
         // A CPU link failure preserves the previously installed executable.
         ["PROGRAM_LINK_FAILED", 222, "ProgramLinkFailed", "u"],
+    ];
+
+    // Composite records' optional headers and repeated elements. The common
+    // prefixes above remain readable in pre-multitexture snapshot journals.
+    const COMPOSITES = [
+        ["PACKED_DRAW_ARRAYS_MT", "u:mode i:count u:magic u:tex_unit_count u:client_active_texture"],
+        ["PACKED_DRAW_ARRAYS_GL2_MT", "u:mode i:count u:magic u:tex_unit_count u:client_active_texture u:generic_attrib_count"],
+        ["PACKED_DRAW_ELEMENTS_MT", "u:mode i:count u:type u:index_data_size u:magic u:tex_unit_count u:client_active_texture"],
+        ["PACKED_DRAW_ELEMENTS_GL2_MT", "u:mode i:count u:type u:index_data_size u:magic u:tex_unit_count u:client_active_texture u:generic_attrib_count"],
+        ["CLIENT_ARRAY_BLOCK", "u:enabled i:size u:type i:stride u:data_size"],
+        ["GENERIC_ATTRIB_BLOCK", "u:index u:normalized u:enabled i:size u:type i:stride u:data_size"],
+        ["MULTI_DRAW_ARRAYS_ENTRY", "i:first i:count"],
+        ["MULTI_DRAW_ELEMENTS_ENTRY", "i:count u:offset"],
+        ["QUERY_OBJECT_BATCH_ENTRY", "u:name u:available u:result"],
     ];
 
     // Control records, outside the GLFN numbering: [name, code, layout]
@@ -388,6 +403,7 @@
         else if (layout) describe(name, layout);
     }
     for (const [name, , layout] of CONTROL) if (layout) describe(name, layout);
+    for (const [name, layout] of COMPOSITES) describe(name, layout);
 
     function payloadBytes(types) {
         let n = 0;
