@@ -284,16 +284,35 @@
                 if (!message.segments) return bridge.pushPCIBatch(event);
                 let end = 0;
                 for (const segment of message.segments) {
+                    if (segment.bytes !== undefined) {
+                        if (!(segment.bytes instanceof Uint8Array) || !segment.bytes.length ||
+                            segment.offset !== undefined || segment.length !== undefined)
+                            throw new Error("invalid CPU-generated graphics segment");
+                        continue;
+                    }
                     if (!Number.isSafeInteger(segment.offset) || !Number.isSafeInteger(segment.length) ||
                         segment.offset < end || segment.length <= 0 || segment.offset + segment.length > message.bytes.length)
                         throw new Error("invalid CPU-validated graphics segment");
                     end = segment.offset + segment.length;
                 }
-                for (const { offset, length } of message.segments) bridge.pushPCIBatch({ ...event,
-                    bytes: event.bytes.subarray(offset, offset + length), batchAddr: event.batchAddr + offset,
-                    responseBase: event.responseBase - offset,
-                    writeGuestMemory: (at, bytes, inline) => event.writeGuestMemory(at + offset, bytes, inline),
-                });
+                for (const segment of message.segments) {
+                    if (segment.bytes) bridge.pushPCIBatch({ ...event,
+                        bytes: segment.bytes, batchAddr: 0,
+                        isInlineMemoryValid: () => false,
+                        writeGuestMemory: (at, bytes, inline) => {
+                            if (inline !== false) throw new Error("CPU-generated graphics records cannot write inline guest replies");
+                            return event.writeGuestMemory(at, bytes, false);
+                        },
+                    });
+                    else {
+                        const { offset, length } = segment;
+                        bridge.pushPCIBatch({ ...event,
+                            bytes: event.bytes.subarray(offset, offset + length), batchAddr: event.batchAddr + offset,
+                            responseBase: event.responseBase - offset,
+                            writeGuestMemory: (at, bytes, inline) => event.writeGuestMemory(at + offset, bytes, inline),
+                        });
+                    }
+                }
             };
             if (!channel.remote) {
                 pushAccepted();

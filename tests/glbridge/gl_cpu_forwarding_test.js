@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("node:assert/strict"), fs = require("node:fs"), path = require("node:path");
-require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
+const { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js");
@@ -13,6 +13,12 @@ const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_ex
 const { createFakeHost } = require("./gl_fake_gpu.js"), { GLStream, GL } = require("./gl_stream_builder.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const wasm = new WebAssembly.Module(fs.readFileSync(path.join(__dirname, "../../bios/glslang.wasm")));
+// Exercise the expansion boundary independently of a particular list/evaluator
+// implementation: generated commands must still pass normal CPU validation.
+GLShadow.part({ routeRecord(shadow, fn, bytes, view, offset) {
+    if (fn !== P.GLFN.LINE_WIDTH || view.getFloat32(offset, true) !== 17) return;
+    return { commands: shadow.expand(new GLStream().call("LINE_WIDTH", 5).call("LINE_WIDTH", -3).call("POINT_SIZE", 4).bytes()) };
+} });
 function opcodes(bytes) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), result = [];
     for (let at = 0; at < bytes.length;) {
@@ -79,20 +85,30 @@ function opcodes(bytes) {
         await submit(new GLStream().call("LINE_WIDTH", -2));
         await error(GL.INVALID_VALUE); await error(GL.INVALID_ENUM); await error(GL.NO_ERROR);
         assert.equal(gpu.stats.refusals, 0);
+        const generated = new GLStream().call("LINE_WIDTH", 17).call("LINE_WIDTH", 7);
+        const generatedPixel = generated.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+        await submit(generated);
+        const generatedMessage = messages.filter(m => m.type === "batch").at(-1);
+        assert.ok(generatedMessage.segments.some(segment => segment.bytes instanceof Uint8Array));
+        assert.equal(gpu.current.lineWidth, 7); assert.equal(gpu.current.pointSize, 4);
+        assert.equal(generatedPixel.view.getUint32(P.F.READ_PIXELS.status, true), 1);
+        assert.ok(executed.flatMap(opcodes).every(fn => !P.isRejected(fn)));
+        await error(GL.INVALID_VALUE); await error(GL.NO_ERROR);
         const last = messages.filter(m => m.type === "batch").at(-1), beforeInvalid = executed.length;
         const invalidRanges = [[{ offset: 0, length: 4 }, { offset: 2, length: 4 }],
-            [{ offset: -1, length: 4 }], [{ offset: 0, length: last.bytes.length + 1 }]];
+            [{ offset: -1, length: 4 }], [{ offset: 0, length: last.bytes.length + 1 }],
+            [{ bytes: [] }], [{ bytes: new Uint8Array() }], [{ offset: 0, length: 4, bytes: new Uint8Array([1]) }]];
         const originalError = console.error, errors = []; console.error = (...args) => errors.push(args);
         try {
             for (const segments of invalidRanges) {
                 const message = { ...last, id: last.id + 10000, segments };
                 if (remote) { hostListener(message); await proxy.idle(); }
-                else assert.throws(() => hostListener(message), /invalid CPU-validated graphics segment/);
+                else assert.throws(() => hostListener(message), /invalid CPU-(validated|generated) graphics segment/);
             }
         } finally { console.error = originalError; }
         assert.equal(executed.length, beforeInvalid, "validate all segment ranges before executing any prefix");
         assert.equal(errors.length, remote ? invalidRanges.length : 0);
         await proxy.destroy();
     }
-    console.log("gl_cpu_forwarding_test: actual device/proxy/bridge filter rejections, keep readback offsets and preserve CPU/renderer errors in both modes (passed)");
+    console.log("gl_cpu_forwarding_test: actual device/proxy/bridge filter rejections, execute CPU expansions, keep readback offsets and preserve errors in both modes (passed)");
 })().catch(error => { console.error(error); process.exitCode = 1; });

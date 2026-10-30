@@ -156,20 +156,28 @@
                     return;
                 }
                 ++this.stats.records;
-                const error = this.dispatch(fn, bytes, view, offset, size);
+                let routed;
+                const name = protocol.NAME_BY_OPCODE[fn], signature = protocol.SIGNATURES[name], header = RECORDS[name];
+                const minimum = signature ? protocol.payloadBytes(signature[1]) : header ? header.size : 0;
+                if (size >= minimum) for (const part of PARTS) if (part.routeRecord) {
+                    routed = part.routeRecord(this, fn, bytes, view, offset, size);
+                    if (routed !== undefined) break;
+                }
+                const error = routed ? routed.error || 0 : this.dispatch(fn, bytes, view, offset, size);
                 if (error) {
                     if (this.current && !this.current.error) this.current.error = error;
                     view.setUint16(recordOffset, protocol.rejectedOpcode(fn, error), true);
                     ++this.stats.rejected;
-                } else {
+                } else if (!routed) {
                     for (const part of PARTS) if (part.forwardOpcode) {
                         const forwarded = part.forwardOpcode(this, fn, bytes, view, offset, size);
                         if (forwarded !== undefined) view.setUint16(recordOffset, forwarded, true);
                     }
                 }
                 offset += size;
-                if (protocol.isRejected(view.getUint16(recordOffset, true))) {
+                if (routed || protocol.isRejected(view.getUint16(recordOffset, true))) {
                     if (accepted < recordOffset) segments.push({ offset: accepted, length: recordOffset - accepted });
+                    if (routed && !error) for (const command of routed.commands || []) segments.push({ bytes: command });
                     accepted = offset; filtered = true;
                 }
             }
@@ -178,6 +186,14 @@
             if (offset !== end || !filtered) return;
             if (accepted < end) segments.push({ offset: accepted, length: end - accepted });
             return segments;
+        }
+
+        // CPU-generated records own their storage and carry no guest reply
+        // addresses. Lists and evaluators use this to validate their expansion
+        // through exactly the same command rules as the original stream.
+        expand(bytes) {
+            const segments = this.process(bytes);
+            return segments ? segments.map(segment => segment.bytes || bytes.subarray(segment.offset, segment.offset + segment.length)) : [bytes];
         }
 
         dispatch(fn, bytes, view, offset, size) {
@@ -215,7 +231,7 @@
                     fn !== GLFN.QUERY_STATE && fn !== GLFN.QUERY_PARAMETER && fn !== GLFN.QUERY_BUFFER_DATA &&
                     fn !== GLFN.QUERY_BUFFER_MAP && fn !== GLFN.QUERY_BUFFER_UNMAP && fn !== GLFN.QUERY_NAMES &&
                     fn !== GLFN.QUERY_TEXTURE_IMAGE && fn !== GLFN.QUERY_POLYGON_STIPPLE &&
-                    fn !== GLFN.POLYGON_STIPPLE_BITMAP && !this.current) return;
+                    fn !== GLFN.POLYGON_STIPPLE_BITMAP && fn !== GLFN.QUERY_LIST && !this.current) return;
             return this[method](bytes, view, offset, size);
         }
 

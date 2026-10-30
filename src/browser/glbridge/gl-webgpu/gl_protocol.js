@@ -260,6 +260,9 @@
         ["QUERY_TEXTURE_IMAGE", 233, null, "u:target i:level u:format u:type u:compressed u:mode u:pointer u:offset u:data_size u:span u:ticket u:status u:error u:width u:height u:depth u:context_id"],
         ["QUERY_POLYGON_STIPPLE", 234, null, "u:mode u:pointer u:status u:error u:row_stride u:start u:row_bytes u:bit_offset u:lsb_first u:pbo u:span u:data_size"],
         ["POLYGON_STIPPLE_BITMAP", 235, null, "u:data_size u:status u:error u:reserved"],
+        ["LIST_COMMAND", 236, null, "u:operation u:name u:value"],
+        ["QUERY_LIST", 237, null, "u:operation u:name i:range u:status u:error u:result"],
+        ["LIST_CALLS", 238, null, "u:count u:data_size"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

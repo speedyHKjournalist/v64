@@ -1,0 +1,17 @@
+{"renderer":"Apple M1 Pro","cases":[
+{"name":"generated","isList":1,"index":0,"mode":0,"base":0,"color":[1,1,1,1],"x":0,"error":0},
+{"name":"compiling","isList":0,"index":10,"mode":4864,"base":0,"color":[1,1,1,1],"x":0,"error":0},
+{"name":"compiled","isList":1,"index":0,"mode":0,"base":0,"color":[1,1,1,1],"x":0,"error":0},
+{"name":"called","isList":1,"index":0,"mode":0,"base":0,"color":[1,0,0,1],"x":3,"error":0},
+{"name":"nested_redefined","isList":1,"index":0,"mode":0,"base":0,"color":[0,1,0,1],"x":8,"error":0},
+{"name":"compile_execute","isList":0,"index":12,"mode":4865,"base":0,"color":[0,0,1,1],"x":15,"error":0},
+{"name":"executed_again","isList":1,"index":0,"mode":0,"base":0,"color":[0,0,1,1],"x":22,"error":0},
+{"name":"deferred_error","isList":1,"index":0,"mode":0,"base":0,"color":[0,0,1,1],"x":22,"error":0},
+{"name":"called_error","isList":1,"index":0,"mode":0,"base":0,"color":[0,0,1,1],"x":22,"error":1281},
+{"name":"call_zero","isList":0,"index":0,"mode":0,"base":0,"color":[0,0,1,1],"x":22,"error":1281},
+{"name":"invalid_mode","isList":0,"index":0,"mode":0,"base":0,"color":[0,0,1,1],"x":22,"error":1280},
+{"name":"unmatched_end","isList":0,"index":0,"mode":0,"base":0,"color":[0,0,1,1],"x":22,"error":1282},
+{"name":"call_lists","isList":1,"index":0,"mode":0,"base":10,"color":[0,1,0,1],"x":32,"error":0},
+{"name":"base_restored","isList":1,"index":0,"mode":0,"base":10,"color":[0,1,0,1],"x":32,"error":0},
+{"name":"immediate","alignment":1,"binding":7,"error":0}
+]}

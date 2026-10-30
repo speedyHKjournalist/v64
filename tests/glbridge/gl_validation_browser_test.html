@@ -25,6 +25,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_stipple.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_lists.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js"></script>
@@ -786,7 +787,30 @@
             }
             check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "stipple host failure");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize();
+            const s = new GLStream().makeCurrent(1000, 0, 0, 64, 64, 1000, 1000), list = (operation, name = 0, value = 0) =>
+                s.record(P.GLFN.LIST_COMMAND, P.encodeRecord("LIST_COMMAND", { operation, name, value }));
+            s.call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT);
+            list(1, 10, GL.COMPILE); s.call("COLOR4F", 1, 0, 0, 1); list(2);
+            list(1, 11, GL.COMPILE); list(3, 10);
+            s.call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END"); list(2);
+            const before = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            list(1, 10, GL.COMPILE); s.call("COLOR4F", 0, 1, 0, 1); list(2); list(3, 11);
+            const after = s.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = s.bytes(), segments = shadow.process(memory);
+            executor.options.writeGuestMemory = (at, data, metadata) => memory.set(data, at + (metadata.originalOffset || 0));
+            for (const segment of segments) {
+                const bytes = segment.bytes || memory.subarray(segment.offset, segment.offset + segment.length);
+                executor.submit(remote ? bytes.slice() : bytes, { originalOffset: segment.bytes ? 0 : segment.offset });
+            }
+            await executor.idle();
+            for (const [read, expected] of [[before, [0, 0, 0, 255]], [after, [0, 255, 0, 255]]])
+                check(read.view.getUint32(P.F.READ_PIXELS.status, true) === 1 && expected.every((v, i) => read.bytes[32 + i] === v), "CPU display list pixel " + Array.from(read.bytes.subarray(32)));
+            check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "display list host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, display lists, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }
