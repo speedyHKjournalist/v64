@@ -263,6 +263,9 @@
         ["LIST_COMMAND", 236, null, "u:operation u:name u:value"],
         ["QUERY_LIST", 237, null, "u:operation u:name i:range u:status u:error u:result"],
         ["LIST_CALLS", 238, null, "u:count u:data_size"],
+        ["QUERY_RENDER_MODE", 239, null, "u:operation i:size u:type u:pointer u:offset u:data_size u:status u:error i:result u:ticket u:total"],
+        ["NAME_COMMAND", 240, null, "u:operation u:name f:value"],
+        ["RESOLVED_RASTER_STATE", 241, null, "u:valid f:position[4] f:color[4]"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

@@ -349,6 +349,12 @@
             for (const [key, saved] of state.typed || []) {
                 const c = shadow.contexts.get(key); if (!c) continue;
                 c.state = clone(saved);
+                // Early snapshots stored EdgeFlag under MAX_LIST_NESTING's
+                // enum. Migrate the current value and saved attribute values
+                // before filling defaults for the corrected pname.
+                for (const values of [c.state.values, ...(c.state.attrib || []).map(a => a.values)]) if (values && values[0x0B31] && !values[GL.CURRENT_EDGE_FLAG]) {
+                    values[GL.CURRENT_EDGE_FLAG] = values[0x0B31]; delete values[0x0B31];
+                }
                 for (const [p, [values]] of DEFAULTS) if (!c.state.values[p]) c.state.values[p] = values.slice();
                 // The first typed-state snapshot used the query pname as a
                 // color stack key. Normalize that internal snapshot spelling.

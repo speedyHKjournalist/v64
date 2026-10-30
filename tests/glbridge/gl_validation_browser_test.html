@@ -8,6 +8,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_constants.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_caps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_math.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_client_arrays.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_pixel_maps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
@@ -31,6 +32,8 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_queries.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_select_geometry.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_select.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -43,6 +46,7 @@
 <script src="gl_shader_mixed_cases.js"></script>
 <script src="gl_display_list_array_cases.js"></script>
 <script src="gl_display_list_pixel_cases.js"></script>
+<script src="gl_selection_cases.js"></script>
 <script>
 (async () => {
     "use strict";
@@ -848,7 +852,29 @@
             check(!shadow.current.error && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals,
                 "compiled pixel host failure " + JSON.stringify({ cpu: shadow.current.error, gpu: executor.gpuErrors.errors, host: executor.hostErrors, refusals: executor.stats.refusals }));
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, captured display lists, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize();
+            executor.options.writeGuestMemory = (at, data, metadata) => metadata.guestBytes.set(data, at + (metadata.originalOffset || 0));
+            const submit = async stream => {
+                const memory = stream.bytes(), segments = shadow.process(memory);
+                for (const segment of segments || [{ offset: 0, length: memory.length }]) {
+                    const bytes = segment.bytes || memory.subarray(segment.offset, segment.offset + segment.length);
+                    executor.submit(remote ? bytes.slice() : bytes, { guestBytes: memory, originalOffset: segment.bytes ? 0 : segment.offset });
+                }
+                await executor.idle();
+            };
+            for (const [kind, expectedPixel] of [["selection", [0, 0, 0, 255]], ["feedback", [255, 0, 0, 255]]]) {
+                const entry = GLSelectionCases[kind](); await submit(entry.stream);
+                check(entry.result.view.getInt32(P.F.QUERY_RENDER_MODE.result, true) === entry.expectedResult, kind + " result count");
+                check(entry.pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1 && expectedPixel.every((v, i) => entry.pixel.bytes[32 + i] === v), kind + " leaves/updates screen as specified");
+                const { stream, response } = GLSelectionCases.read(entry.result); await submit(stream);
+                check(response.view.getUint32(P.F.QUERY_RENDER_MODE.status, true) === 1 && entry.expected.every((v, i) =>
+                    response.view[kind === "selection" ? "getUint32" : "getFloat32"](44 + i * 4, true) === v), kind + " CPU result bytes");
+            }
+            check(!shadow.current.error && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "selection/feedback host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU selection/feedback, validation/forwarding, captured display lists, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

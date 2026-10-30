@@ -193,6 +193,7 @@
         "MULTI_DRAW_ELEMENTS_DIRECT", "DRAW_PIXELS", "COPY_PIXELS", "BITMAP", "BLIT_FRAMEBUFFER"].map(name => P.GLFN[name]));
     const reads = new Set(["READ_PIXELS", "COPY_PIXELS", "BLIT_FRAMEBUFFER"].map(name => P.GLFN[name]));
     GLShadow.part({ checkCommand(s, fn, bytes, view, offset) {
+        if (s.current.state.selection && s.current.state.selection.mode !== GL.RENDER && fn !== P.GLFN.READ_PIXELS) return 0;
         const badDraw = draws.has(fn) && s.framebufferStatus(GL.DRAW_FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE;
         const badRead = reads.has(fn) && s.framebufferStatus(GL.READ_FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE;
         if (!badDraw && !badRead) return 0;

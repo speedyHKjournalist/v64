@@ -84,6 +84,8 @@
     }
     state.rule("TEX_COORD2F", null, true);
     state.on("TEX_COORD2F", (c, a) => { c.state.fixed.units[0].coord = [...a, 0, 1]; }, true);
+    state.rule("TEX_COORD4F", null, true);
+    state.on("TEX_COORD4F", (c, a) => { c.state.fixed.units[0].coord = a.slice(); }, true);
     state.rule("MULTI_TEX_COORD4F", (c, a) => a[0] >= GL.TEXTURE0 && a[0] < GL.TEXTURE0 + caps.LIMITS.MAX_TEXTURE_UNITS ? 0 : GL.INVALID_ENUM, true);
     state.on("MULTI_TEX_COORD4F", (c, a) => { c.state.fixed.units[a[0] - GL.TEXTURE0].coord = a.slice(1); }, true);
     state.rule("COLOR_MATERIAL", (c, a) => [GL.FRONT, GL.BACK, GL.FRONT_AND_BACK].includes(a[0]) && COLORS.has(a[1]) ? 0 : GL.INVALID_ENUM);

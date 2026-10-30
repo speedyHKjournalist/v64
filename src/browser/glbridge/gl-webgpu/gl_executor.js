@@ -49,6 +49,8 @@
     const pixelMaps = nodeRequire ? nodeRequire("./gl_pixel_maps.js") : global.GLPixelMaps;
     const framebufferState = nodeRequire ? nodeRequire("./gl_framebuffer_state.js") : global.GLFramebufferState;
     const textureParameters = nodeRequire ? nodeRequire("./gl_texture_parameters.js") : global.GLTextureParameters;
+    const { parseArrayBlocks, parseGenericBlocks, componentBytes, readComponent } = nodeRequire ?
+        nodeRequire("./gl_client_arrays.js") : global.GLClientArrays;
 
     const GL = constants.GL;
     const GLFN = constants.GLFN;
@@ -2621,6 +2623,11 @@
         /* ---- current vertex attributes and immediate mode ---- */
 
         define("BEGIN", function(a) { this.beginImmediate(a[0] >>> 0); });
+        define("RESOLVED_RASTER_STATE", function(a, bytes, view, offset, size) {
+            if (size < protocol.RECORDS.RESOLVED_RASTER_STATE.size) throw new GLStreamError("resolved raster state is short");
+            const r = protocol.decodeRecord("RESOLVED_RASTER_STATE", view, offset), current = this.current.current;
+            current.rasterValid = !!r.valid; current.rasterPos.set(r.position); current.rasterColor.set(r.color);
+        });
         define("END", function() { this.endImmediate(); });
         define("COLOR4F", function(a) {
             this.current.current.color.set([a[0], a[1], a[2], a[3]]);
@@ -3683,7 +3690,7 @@
             if (size < protocol.RECORDS.QUERY_PARAMETER.size)
                 throw new GLStreamError("query-parameter record is short");
         }, { needsContext: false });
-        for (const name of ["QUERY_BUFFER_DATA", "QUERY_BUFFER_MAP", "QUERY_BUFFER_UNMAP", "QUERY_NAMES", "QUERY_LIST", "LIST_COMMAND", "LIST_CALLS"])
+        for (const name of ["QUERY_BUFFER_DATA", "QUERY_BUFFER_MAP", "QUERY_BUFFER_UNMAP", "QUERY_NAMES", "QUERY_LIST", "LIST_COMMAND", "LIST_CALLS", "QUERY_RENDER_MODE", "NAME_COMMAND"])
             define(name, function(a, bytes, view, offset, size) {
                 if (size < protocol.RECORDS[name].size) throw new GLStreamError(name + " record is short");
             }, { needsContext: false });
@@ -3980,54 +3987,6 @@
         "texCoord4", "texCoord5", "texCoord6", "texCoord7",
         "secondaryColor", "fogCoord"];
 
-    function parseArrayBlocks(bytes, view, offset, end, count) {
-        const blocks = [];
-        const R = protocol.F.CLIENT_ARRAY_BLOCK, header = protocol.RECORDS.CLIENT_ARRAY_BLOCK.size;
-        let at = offset;
-        for (let i = 0; i < count; ++i) {
-            if (at + header > end) return null;
-            const enabled = view.getUint32(at + R.enabled, true) !== 0;
-            const size = view.getInt32(at + R.size, true);
-            const type = view.getUint32(at + R.type, true);
-            const stride = view.getInt32(at + R.stride, true);
-            const dataSize = view.getUint32(at + R.data_size, true);
-            at += header;
-            if (at + dataSize > end) return null;
-            blocks.push({
-                enabled, size: enabled ? size : 0, type: enabled ? type : 0,
-                stride: enabled ? stride : 0,
-                data: enabled && dataSize ?
-                    bytes.subarray(at, at + dataSize) : null,
-            });
-            at += dataSize;
-        }
-        return { blocks, offset: at };
-    }
-
-    function parseGenericBlocks(bytes, view, offset, end, count) {
-        const blocks = [];
-        const R = protocol.F.GENERIC_ATTRIB_BLOCK, header = protocol.RECORDS.GENERIC_ATTRIB_BLOCK.size;
-        let at = offset;
-        for (let i = 0; i < count; ++i) {
-            if (at + header > end) return null;
-            const index = view.getUint32(at + R.index, true);
-            const normalized = view.getUint32(at + R.normalized, true) !== 0;
-            const enabled = view.getUint32(at + R.enabled, true) !== 0;
-            const size = view.getInt32(at + R.size, true);
-            const type = view.getUint32(at + R.type, true);
-            const stride = view.getInt32(at + R.stride, true);
-            const dataSize = view.getUint32(at + R.data_size, true);
-            at += header;
-            if (at + dataSize > end) return null;
-            blocks.push({
-                index, normalized, enabled, size, type, stride,
-                data: enabled && dataSize ?
-                    bytes.subarray(at, at + dataSize) : null,
-            });
-            at += dataSize;
-        }
-        return { blocks, offset: at };
-    }
 
     function installDrawHandlers(table) {
         const define = definer(table);
@@ -6022,47 +5981,6 @@
         [GL.SHORT]: { 2: "snorm16x2", 4: "snorm16x4" },
     };
 
-    function componentBytes(type) {
-        switch (type) {
-        case GL.BYTE: case GL.UNSIGNED_BYTE: return 1;
-        case GL.SHORT: case GL.UNSIGNED_SHORT: case GL.HALF_FLOAT: return 2;
-        case GL.INT: case GL.UNSIGNED_INT: case GL.FLOAT: return 4;
-        case GL.DOUBLE: return 8;
-        default: return 0;
-        }
-    }
-
-    function readComponent(view, at, type, normalized) {
-        switch (type) {
-        case GL.FLOAT: return view.getFloat32(at, true);
-        case GL.DOUBLE: return view.getFloat64(at, true);
-        case GL.BYTE: {
-            const v = view.getInt8(at);
-            return normalized ? Math.max(v / 127, -1) : v;
-        }
-        case GL.UNSIGNED_BYTE: {
-            const v = view.getUint8(at);
-            return normalized ? v / 255 : v;
-        }
-        case GL.SHORT: {
-            const v = view.getInt16(at, true);
-            return normalized ? Math.max(v / 32767, -1) : v;
-        }
-        case GL.UNSIGNED_SHORT: {
-            const v = view.getUint16(at, true);
-            return normalized ? v / 65535 : v;
-        }
-        case GL.INT: {
-            const v = view.getInt32(at, true);
-            return normalized ? Math.max(v / 2147483647, -1) : v;
-        }
-        case GL.UNSIGNED_INT: {
-            const v = view.getUint32(at, true);
-            return normalized ? v / 4294967295 : v;
-        }
-        default: return 0;
-        }
-    }
 
     Object.assign(GLWebGPUExecutor.prototype, {
 

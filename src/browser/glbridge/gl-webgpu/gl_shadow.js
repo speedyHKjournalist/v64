@@ -231,7 +231,7 @@
                     fn !== GLFN.QUERY_STATE && fn !== GLFN.QUERY_PARAMETER && fn !== GLFN.QUERY_BUFFER_DATA &&
                     fn !== GLFN.QUERY_BUFFER_MAP && fn !== GLFN.QUERY_BUFFER_UNMAP && fn !== GLFN.QUERY_NAMES &&
                     fn !== GLFN.QUERY_TEXTURE_IMAGE && fn !== GLFN.QUERY_POLYGON_STIPPLE &&
-                    fn !== GLFN.POLYGON_STIPPLE_BITMAP && fn !== GLFN.QUERY_LIST && !this.current) return;
+                    fn !== GLFN.POLYGON_STIPPLE_BITMAP && fn !== GLFN.QUERY_LIST && fn !== GLFN.QUERY_RENDER_MODE && !this.current) return;
             return this[method](bytes, view, offset, size);
         }
 

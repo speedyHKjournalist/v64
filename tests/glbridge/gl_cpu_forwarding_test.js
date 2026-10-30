@@ -4,6 +4,8 @@ const { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js"
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_lists.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_select.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_glslang.js");
 require("../../src/browser/glbridge/v86_network_bridge.js");
 const { V86WebGPUCompositor } = require("../../src/browser/glbridge/webgpu_compositor.js");
@@ -12,6 +14,7 @@ const { V86GraphicsProxy } = require("../../src/browser/glbridge/graphics_proxy.
 const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");
 const { createFakeHost } = require("./gl_fake_gpu.js"), { GLStream, GL } = require("./gl_stream_builder.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
+const selectionCases = require("./gl_selection_cases.js");
 const wasm = new WebAssembly.Module(fs.readFileSync(path.join(__dirname, "../../bios/glslang.wasm")));
 // Exercise the expansion boundary independently of a particular list/evaluator
 // implementation: generated commands must still pass normal CPU validation.
@@ -80,6 +83,18 @@ function opcodes(bytes) {
             assert.equal(q.view.getUint32(P.F.QUERY_ERROR.value, true), expected);
         };
         await error(GL.INVALID_VALUE); await error(GL.NO_ERROR);
+        const selecting = selectionCases.selection(), drawCount = gpu.stats.draws;
+        await submit(selecting.stream); assert.equal(selecting.result.view.getInt32(P.F.QUERY_RENDER_MODE.result, true), selecting.expectedResult);
+        assert.equal(gpu.stats.draws, drawCount, "selection expands lists on CPU without rendering their geometry");
+        assert.deepEqual(Array.from(gpu.current.current.rasterPos), [16, 16, 0.5, 1]);
+        assert.deepEqual(Array.from(gpu.current.current.rasterColor), [1, 0, 0, 1]);
+        let selected = selectionCases.read(selecting.result); await submit(selected.stream);
+        assert.deepEqual(selecting.expected, Array.from({ length: 8 }, (_, i) => selected.response.view.getUint32(44 + i * 4, true)));
+        const feeding = selectionCases.feedback(); await submit(feeding.stream);
+        assert.equal(feeding.result.view.getInt32(P.F.QUERY_RENDER_MODE.result, true), feeding.expectedResult);
+        selected = selectionCases.read(feeding.result); await submit(selected.stream);
+        assert.deepEqual(feeding.expected, Array.from({ length: 5 }, (_, i) => selected.response.view.getFloat32(44 + i * 4, true)));
+        assert.deepEqual(Array.from(gpu.current.current.rasterPos), [4, 6, 0.5, 1]);
         gpu.current.error = GL.INVALID_ENUM; await error(GL.INVALID_ENUM); await error(GL.NO_ERROR);
         gpu.current.error = GL.INVALID_ENUM;
         await submit(new GLStream().call("LINE_WIDTH", -2));

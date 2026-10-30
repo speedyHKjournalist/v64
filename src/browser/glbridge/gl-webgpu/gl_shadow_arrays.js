@@ -68,7 +68,8 @@
         if (pname === GL.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING) return [[nameOf(s.current, array)], "u"];
         return GL.INVALID_ENUM;
     });
-    state.parameter(P.C.V86GL_PARAMETER_ARRAY_POINTER, (s, target, pname, index) => {
+    GLShadow.prototype.arrayPointerParameter = function(target, pname, index) {
+        const s = this;
         if (target === GL.VERTEX_ATTRIB_ARRAY_POINTER) {
             if (index >= caps.LIMITS.MAX_VERTEX_ATTRIBS) return GL.INVALID_VALUE;
             return pname === GL.VERTEX_ATTRIB_ARRAY_POINTER ? [[s.current.state.arrays.generic[index].pointer], "u"] : GL.INVALID_ENUM;
@@ -77,7 +78,8 @@
         if (definition) return [[get(s.current, definition[0]).pointer], "u"];
         if ([0x0DF0, 0x0DF3].includes(pname)) return null; // selection/feedback buffers migrate with those modes
         return GL.INVALID_ENUM;
-    });
+    };
+    state.parameter(P.C.V86GL_PARAMETER_ARRAY_POINTER, (s, ...args) => s.arrayPointerParameter(...args));
     state.attributes("arrays", {
         capture(c, mask, client) {
             if (client) return mask & 2 ? { formats: clone(c.state.arrays) } : null;

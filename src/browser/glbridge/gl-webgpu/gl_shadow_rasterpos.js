@@ -36,8 +36,8 @@
         }
         return out;
     }
-    function lighting(c, eye, n) {
-        const m = c.state.fixed.materials[0], model = value(c, GL.LIGHT_MODEL_AMBIENT);
+    function lighting(c, eye, n, side = 0) {
+        const m = c.state.fixed.materials[side], model = value(c, GL.LIGHT_MODEL_AMBIENT);
         const color = [0, 1, 2].map(i => m[GL.EMISSION][i] + m[GL.AMBIENT][i] * model[i]);
         const specular = [0, 0, 0];
         const position = eye.slice(0, 3).map(v => eye[3] ? v / eye[3] : v);
@@ -82,7 +82,8 @@
         });
     }
     function set(c, p, values) { state.set(c, p, values); }
-    state.rule("RASTER_POS4F", (c, a, shadow) => shadow.framebufferStatus(GL.DRAW_FRAMEBUFFER) === GL.FRAMEBUFFER_COMPLETE ? 0 : GL.INVALID_FRAMEBUFFER_OPERATION);
+    state.rule("RASTER_POS4F", (c, a, shadow) => c.state.selection && c.state.selection.mode !== GL.RENDER ||
+        shadow.framebufferStatus(GL.DRAW_FRAMEBUFFER) === GL.FRAMEBUFFER_COMPLETE ? 0 : GL.INVALID_FRAMEBUFFER_OPERATION);
     state.on("RASTER_POS4F", (c, object) => {
         const eye = transform(top(c, GL.MODELVIEW), object), clip = transform(top(c, GL.PROJECTION), eye), w = clip[3];
         let valid = w > 0 && Math.abs(clip[0]) <= w && Math.abs(clip[1]) <= w &&
@@ -116,7 +117,8 @@
     });
     GLShadow.rules({ [P.GLFN.BITMAP]: (s, bytes, view, offset, size) => {
         if (s.current.state.begin) return GL.INVALID_OPERATION;
-        if (s.framebufferStatus(GL.DRAW_FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE) return GL.INVALID_FRAMEBUFFER_OPERATION;
+        if ((!s.current.state.selection || s.current.state.selection.mode === GL.RENDER) &&
+            s.framebufferStatus(GL.DRAW_FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE) return GL.INVALID_FRAMEBUFFER_OPERATION;
         const r = P.decodeRecord("BITMAP", view, offset);
         return r.width < 0 || r.height < 0 || P.RECORDS.BITMAP.size + r.data_size > size ? GL.INVALID_VALUE : 0;
     } });
@@ -138,4 +140,8 @@
             if (c.state.rasterFogCoord === undefined) c.state.rasterFogCoord = 0;
         } },
     });
+    // Selection/feedback uses the same fixed vertex operations as RasterPos.
+    const api = { transform, normal, lighting, coordinates };
+    global.GLFixedVertex = api;
+    if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
