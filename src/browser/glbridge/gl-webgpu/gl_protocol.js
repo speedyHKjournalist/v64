@@ -269,6 +269,12 @@
         ["CAPTURE_VERTICES", 242, null, "u:job u:first u:count u:total"],
         ["CAPTURE_RASTER_VERTEX", 243, null, "u:job u:reserved"],
         ["RESOLVED_RASTER_ALL", 244, null, "u:valid f:position[4] f:color[4] f:secondary[4] f:distance f:fog f:coords[32]"],
+        ["MAP_EVALUATOR", 245, null, "u:dimensions u:target i:uorder i:vorder i:ustride i:vstride u:data_size u:reserved d:domain[4]"],
+        ["EVALUATOR_GRID", 246, null, "u:dimensions i:un i:vn u:reserved d:domain[4]"],
+        ["EVAL_COORD", 247, null, "u:dimensions u:operation d:values[2]"],
+        ["EVAL_MESH", 248, null, "u:dimensions u:mode i:indices[4]"],
+        ["QUERY_EVALUATOR", 249, null, "u:pname u:value_kind u:status u:count u:data_size u:error u:target u:reserved"],
+        ["RESOLVED_EVAL_VERTEX", 250, null, "f:position[4] f:color[4] f:normal[4] f:texcoord[4]"],
     ];
 
     // Composite records' optional headers and repeated elements. The common
@@ -350,6 +356,8 @@
         ["V86GL_STATE_UNSIGNED_SHORT", 6, "pixel map unsigned short output"],
         ["V86GL_STATE_UNSIGNED_INT", 7, "pixel map unsigned integer output"],
         ["V86GL_MAX_TYPED_QUERY_VALUES", 256],
+        ["V86GL_MAX_EVAL_ORDER", 8],
+        ["V86GL_MAX_EVALUATOR_VALUES", 256],
         ["V86GL_PARAMETER_LIGHT", 1],
         ["V86GL_PARAMETER_MATERIAL", 2],
         ["V86GL_PARAMETER_TEX_ENV", 3],

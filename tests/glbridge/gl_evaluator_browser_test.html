@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CPU evaluators and GPU vertices</title>
+<canvas id="gpu" width="16" height="16"></canvas>
+<pre id="result">RUNNING</pre>
+<script src="../../src/browser/glbridge/webgpu_host.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_protocol.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_constants.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_caps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_math.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_client_arrays.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_pixel_maps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_image_formats.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_texture_parameters.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_framebuffer_state.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_stipple.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_list_arrays.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_lists.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_queries.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_select_geometry.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_select.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_evaluators.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_arb_program.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_executor.js"></script>
+<script src="gl_stream_builder.js"></script>
+<script src="gl_selection_cases.js"></script>
+<script src="gl_evaluator_cases.js"></script>
+<script>
+(async () => {
+    "use strict";
+    const P = GLProtocol, { GLStream, GL } = GLTestStream, cases = GLEvaluatorCases, check = (ok, message) => { if (!ok) throw new Error(message); };
+    try {
+        const compiler = await WebAssembly.compile(await (await fetch("../../bios/glslang.wasm")).arrayBuffer()), reference = (await (await fetch("gl_conformance/evaluator_reference.json")).json()).cases;
+        for (const copied of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), gpu = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true }), memories = new Map();
+            await gpu.initialize(); shadow.setCapabilities(gpu.capabilities()); shadow.setGlslang(new V86GLGlslang.Glslang(compiler));
+            let nextBatch = 0;
+            shadow.writeResponse = (target, bytes) => memories.get(target.batchId).set(bytes, target.offset);
+            gpu.options.writeGuestMemory = (at, bytes, metadata) => memories.get(metadata.batchId).set(bytes, at + metadata.originalOffset);
+            const submit = async stream => {
+                const memory = stream.bytes(), batchId = ++nextBatch; memories.set(batchId, memory);
+                const segments = shadow.process(memory, { generation: 1, batchId, root: true });
+                for (const segment of segments || [{ offset: 0, length: memory.length }]) {
+                    const bytes = segment.bytes || memory.subarray(segment.offset, segment.offset + segment.length);
+                    gpu.submit(copied ? bytes.slice() : bytes, { batchId, originalOffset: segment.bytes ? 0 : segment.offset, onVertexCapture: result => shadow.completeVertexCapture(result) });
+                }
+                await gpu.idle();
+            };
+            const readState = (q, name = "QUERY_STATE") => {
+                check(q.view.getUint32(P.F[name].status, true) === 1, name + " must complete");
+                return Array.from({ length: q.view.getUint32(P.F[name].count, true) }, (_, i) => q.view.getFloat64(P.RECORDS[name].size + i * 8, true));
+            };
+            for (const phase of cases.build()) {
+                await submit(phase.stream); if (phase.name === "setup") continue;
+                const e = cases.expected(reference.find(entry => entry.name === phase.name)); check(shadow.current.error === e.error, phase.name + " error " + shadow.current.error); shadow.current.error = 0;
+                if (phase.feedback) {
+                    const count = phase.response.view.getInt32(P.F.QUERY_RENDER_MODE.result, true); check(count >= 0, phase.name + " feedback count");
+                    const read = GLSelectionCases.read(phase.response); await submit(read.stream);
+                    const values = Array.from({ length: count }, (_, i) => read.response.view.getFloat32(44 + i * 4, true)); cases.compareFeedback(phase.name, values, e, check);
+                    check(JSON.stringify(phase.current.flatMap(q => readState(q))) === JSON.stringify(e.current), phase.name + " current attributes");
+                    check(readState(phase.material, "QUERY_PARAMETER").every((n, i) => Math.abs(n - e.material[i]) < 0.000002), phase.name + " material preservation");
+                } else if (phase.response) check(JSON.stringify(readState(phase.response, "QUERY_EVALUATOR")) === JSON.stringify(e.values), phase.name + " map query");
+                else if (phase.grid) check(JSON.stringify(phase.grid.flatMap(q => readState(q))) === JSON.stringify(e.values), phase.name + " grid query");
+            }
+            // Draw the evaluated surface, including color-material lighting;
+            // this exercises the internal vertex record in the render path.
+            const draw = cases.reset(new GLStream()).call("ENABLE", GL.MAP2_VERTEX_3).call("ENABLE", GL.MAP2_COLOR_4).call("ENABLE", GL.AUTO_NORMAL)
+                .call("ENABLE", GL.LIGHTING).call("ENABLE", GL.LIGHT0).call("ENABLE", GL.COLOR_MATERIAL).call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT);
+            cases.grid(draw, 2, 1, [0, 1, 0, 1], 1); cases.mesh(draw, 2, GL.FILL, [0, 1, 0, 1]);
+            const pixel = draw.readPixels(8, 8, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4); await submit(draw);
+            check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1 && [184, 61, 31, 255].every((n, i) => Math.abs(n - pixel.bytes[32 + i]) <= 1), "evaluated surface color-material pixel: " + pixel.bytes.subarray(32));
+            check(gpu.current.current.color.every((n, i) => n === [0.25, 0.5, 0.75, 1][i]), "GPU current color preserved");
+            check(!gpu.hostErrors.length && !gpu.gpuErrors.errors.length && !gpu.stats.refusals, "host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU maps, grids, curves, surfaces, shader analytic normals, feedback and lit rendered pixels in both modes";
+    } catch (error) { document.getElementById("result").textContent = "FAIL " + (error.stack || error); }
+})();
+</script>

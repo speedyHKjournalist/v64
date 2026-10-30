@@ -191,6 +191,17 @@
         }
         if (event.ready) { this.selectionJobs.delete(message.job); drain(this, c, q, out); }
     };
+    GLShadow.prototype.evaluatedVertex = function(position, attributes) {
+        const c = this.current, q = c.state.selection;
+        if (!c.state.begin) return [];
+        if (q.mode !== GL.RENDER) {
+            const primitive = q.primitive; if (!primitive) return [];
+            if (primitive.vertices.length >= (primitive.program ? MAX_CAPTURE_VERTICES : 1048576)) { if (!c.error) c.error = GL.OUT_OF_MEMORY; return []; }
+            primitive.vertices.push(primitive.program ? { input: input(c, primitive.program, position, attributes), edge: !!c.state.values[GL.EDGE_FLAG][0] } : geometry.vertex(c, position, attributes));
+            return [];
+        }
+        return [arrays.record(P.GLFN.RESOLVED_EVAL_VERTEX, [P.encodeRecord("RESOLVED_EVAL_VERTEX", { position, color: attributes.color, normal: [...attributes.normal, 0], texcoord: attributes.texCoord0 })])];
+    };
     const drawNames = new Set(["DRAW_ARRAYS", "DRAW_ELEMENTS", "DRAW_ARRAYS_GL2", "DRAW_ELEMENTS_GL2", "DRAW_ARRAYS_DIRECT", "DRAW_ELEMENTS_DIRECT",
         "DRAW_RANGE_ELEMENTS_DIRECT", "MULTI_DRAW_ARRAYS_DIRECT", "MULTI_DRAW_ELEMENTS_DIRECT"]);
     function draw(s, name, bytes, view, offset, size) {
@@ -363,7 +374,7 @@
             }
         },
     });
-    const api = { emit, write, modeOf, feedbackVertex };
+    const api = { emit, write, modeOf, feedbackVertex, vertexProgram: program };
     global.GLSelection = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

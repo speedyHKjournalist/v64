@@ -2646,6 +2646,14 @@
         define("CAPTURE_RASTER_VERTEX", function(a, bytes, view, offset, size, metadata) {
             this.captureVertices(bytes, view, offset, size, metadata, true);
         });
+        define("RESOLVED_EVAL_VERTEX", function(a, bytes, view, offset, size) {
+            if (size < protocol.RECORDS.RESOLVED_EVAL_VERTEX.size) throw new GLStreamError("evaluated vertex is short");
+            const r = protocol.decodeRecord("RESOLVED_EVAL_VERTEX", view, offset), current = this.current.current,
+                saved = { color: current.color, normal: current.normal, texcoord: current.texCoord[0] };
+            current.color = new Float32Array(r.color); current.normal = new Float32Array(r.normal.slice(0, 3)); current.texCoord[0] = new Float32Array(r.texcoord);
+            try { this.immediateVertex(...r.position); }
+            finally { current.color = saved.color; current.normal = saved.normal; current.texCoord[0] = saved.texcoord; }
+        });
         define("COLOR4F", function(a) {
             this.current.current.color.set([a[0], a[1], a[2], a[3]]);
             this.latchColorMaterial();
@@ -3707,7 +3715,8 @@
             if (size < protocol.RECORDS.QUERY_PARAMETER.size)
                 throw new GLStreamError("query-parameter record is short");
         }, { needsContext: false });
-        for (const name of ["QUERY_BUFFER_DATA", "QUERY_BUFFER_MAP", "QUERY_BUFFER_UNMAP", "QUERY_NAMES", "QUERY_LIST", "LIST_COMMAND", "LIST_CALLS", "QUERY_RENDER_MODE", "NAME_COMMAND"])
+        for (const name of ["QUERY_BUFFER_DATA", "QUERY_BUFFER_MAP", "QUERY_BUFFER_UNMAP", "QUERY_NAMES", "QUERY_LIST", "LIST_COMMAND", "LIST_CALLS", "QUERY_RENDER_MODE", "NAME_COMMAND",
+            "MAP_EVALUATOR", "EVALUATOR_GRID", "EVAL_COORD", "EVAL_MESH", "QUERY_EVALUATOR"])
             define(name, function(a, bytes, view, offset, size) {
                 if (size < protocol.RECORDS[name].size) throw new GLStreamError(name + " record is short");
             }, { needsContext: false });
