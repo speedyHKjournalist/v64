@@ -308,6 +308,12 @@ game.exe
 > - 增加 16 例本机参照和删除后名字重用用例，两种通道与输出边界测试。Apple 默认 framebuffer 查询采用 core 规则；本项目 EXT 接口按扩展要求报 INVALID_OPERATION，保留原始参照。39 组 Node、22 组站点、8 个 GPU 页面、构建、DLL 和 ESLint 通过；新增变异 3/3 被杀死。
 > - **继续推进：** renderbuffer/纹理参数与图像查询、附件设置的完整校验、EXT/core FBO 来源、其余 C3 与 C8。没有将阶段 C 或 C–G 整体标为完成。
 
+> **C3 renderbuffer 参数与存储校验（2026-10-30）：完成这一批迁移。**
+> - CPU 回答宽/高、内部格式、六种组件位数和样本数；默认对象无存储时为 RGBA、零尺寸和零组件位数。实际客体 getter 经 CPU 回答，快照保留精度，旧元数据恢复时补全。
+> - `gl_image_formats.js` 共用图像格式选择；renderbuffer 的模板 1/4/8/16 均选择实际八位模板存储，DEPTH_COMPONENT24 选择 depth32float，查询按采用的存储回答，模板参考值也按实际位数钳制。零尺寸不再变成 1×N 的 GPU 图像，改变存储先结束 pass。CPU 原子拒绝错误目标、不可渲染格式、未绑定对象、负尺寸和超限尺寸。
+> - 12 例本机参照。RGBA4 在页面使用 rgba8unorm，所以报告八位（本机选四位）；其它选取的精度和零尺寸参照一致。新增 CPU/页面一致性、失败保护、快照、实际 getter C ABI 与两种通道测试；GPU 验证三种模板格式。39 组 Node、22 组站点、8 个 GPU 页面、构建、DLL、ESLint 通过；新增变异 3/3 被杀死。
+> - **继续推进：** 纹理参数/图像查询与校验、FBO 来源/共享及设置校验、其它 C3/C6 与 C8。阶段 C 仍未退出，D–G 整体未完成。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

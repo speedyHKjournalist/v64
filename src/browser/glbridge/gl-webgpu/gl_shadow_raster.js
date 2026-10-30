@@ -119,6 +119,7 @@
         if (!c.drawFramebuffer) return 8;
         const fbo = c.framebuffers.get(c.drawFramebuffer), image = fbo && fbo.stencil && shadow.attachedImage(fbo.stencil);
         if (!image) return 0;
+        if (image.componentBits) return image.componentBits[5];
         return STENCIL_BITS.get(image.internalFormat) || 0;
     }
     for (const pname of [GL.STENCIL_REF, GL.STENCIL_BACK_REF]) state.query([pname], shadow =>

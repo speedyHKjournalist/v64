@@ -7,6 +7,7 @@
     const state = global.V86GLShadowState || require("./gl_shadow_state.js");
     const buffers = global.GLFramebufferState || require("./gl_framebuffer_state.js");
     const caps = global.GLCaps || require("./gl_caps.js");
+    const formats = global.GLImageFormats || require("./gl_image_formats.js");
     const targets = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D, GL.TEXTURE_CUBE_MAP]);
     for (const [pname, target] of [[GL.TEXTURE_BINDING_1D, GL.TEXTURE_1D], [GL.TEXTURE_BINDING_2D, GL.TEXTURE_2D],
             [GL.TEXTURE_BINDING_3D, GL.TEXTURE_3D], [GL.TEXTURE_BINDING_CUBE_MAP, GL.TEXTURE_CUBE_MAP]])
@@ -20,6 +21,12 @@
         return t?.target && t.target !== target ? GL.INVALID_OPERATION : 0;
     });
     state.rule("BIND_RENDERBUFFER", (c, [target]) => target === GL.RENDERBUFFER_EXT ? 0 : GL.INVALID_ENUM);
+    state.rule("RENDERBUFFER_STORAGE", (c, [target, format, width, height], s) => {
+        if (target !== GL.RENDERBUFFER_EXT || !formats.renderbufferFormatFor(format, s.capabilities?.features)) return GL.INVALID_ENUM;
+        if (!c.renderbufferImage) return GL.INVALID_OPERATION;
+        const max = s.capabilities ? caps.integer(s.capabilities, GL.MAX_RENDERBUFFER_SIZE) : 16384;
+        return width < 0 || height < 0 || width > max || height > max ? GL.INVALID_VALUE : 0;
+    });
     state.rule("BIND_FRAMEBUFFER", (c, [target]) =>
         [GL.FRAMEBUFFER_EXT, GL.READ_FRAMEBUFFER, GL.DRAW_FRAMEBUFFER].includes(target) ? 0 : GL.INVALID_ENUM);
     const limit = (s, pname) => s.capabilities ? caps.integer(s.capabilities, pname) : caps.LIMITS.MAX_DRAW_BUFFERS;
@@ -95,6 +102,20 @@
             return [[texture?.target === GL.TEXTURE_3D ? record.layer : 0], "i"];
         default: return GL.INVALID_ENUM;
         }
+    });
+    state.parameter(P.C.V86GL_PARAMETER_RENDERBUFFER, (s, target, pname) => {
+        if (target !== GL.RENDERBUFFER_EXT) return GL.INVALID_ENUM;
+        const rb = s.current.group.renderbufferImages.get(s.current.renderbufferImage);
+        if (!rb) return GL.INVALID_OPERATION;
+        if (pname === GL.RENDERBUFFER_WIDTH_EXT) return [[rb.width], "i"];
+        if (pname === GL.RENDERBUFFER_HEIGHT_EXT) return [[rb.height], "i"];
+        if (pname === GL.RENDERBUFFER_INTERNAL_FORMAT_EXT) return [[rb.internalFormat], "e"];
+        if (pname === 0x8CAB) return [[0], "i"]; // RENDERBUFFER_SAMPLES
+        const index = [GL.RENDERBUFFER_RED_SIZE_EXT, GL.RENDERBUFFER_GREEN_SIZE_EXT, GL.RENDERBUFFER_BLUE_SIZE_EXT,
+            GL.RENDERBUFFER_ALPHA_SIZE_EXT, GL.RENDERBUFFER_DEPTH_SIZE_EXT, GL.RENDERBUFFER_STENCIL_SIZE_EXT].indexOf(pname);
+        if (index < 0) return GL.INVALID_ENUM;
+        const bits = rb.componentBits || (rb.width && rb.height ? formats.renderbufferFormatFor(rb.internalFormat)?.components : null);
+        return [[bits?.[index] || 0], "i"];
     });
     state.attributes("images", {
         capture(c, mask, client) {

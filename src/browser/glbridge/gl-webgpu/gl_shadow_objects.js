@@ -16,6 +16,7 @@
     const constants = global.GLWGConstants || require("./gl_constants.js");
     const glCaps = global.GLCaps || require("./gl_caps.js");
     const buffers = global.GLFramebufferState || require("./gl_framebuffer_state.js");
+    const formats = global.GLImageFormats || require("./gl_image_formats.js");
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const { GLFN, C, F, RECORDS } = protocol;
     const GL = constants.GL;
@@ -182,7 +183,8 @@
         const group = this.current.group;
         let rb = group.renderbuffers.get(name);
         if (!rb) {
-            rb = { name, id: group.nextImageId++, width: 0, height: 0, internalFormat: 0, deleted: false, created: false };
+            rb = { name, id: group.nextImageId++, width: 0, height: 0, internalFormat: GL.RGBA,
+                componentBits: [0, 0, 0, 0, 0, 0], deleted: false, created: false };
             group.renderbuffers.set(name, rb); group.renderbufferImages.set(rb.id, rb);
         }
         return rb;
@@ -212,9 +214,11 @@
         const a = this.args("RENDERBUFFER_STORAGE", view, offset, size);
         const rb = a && this.current.group.renderbufferImages.get(this.current.renderbufferImage);
         if (!rb) return;
-        rb.internalFormat = a[1];
-        rb.width = Math.max(0, a[2]);
-        rb.height = Math.max(0, a[3]);
+        const storage = a[2] && a[3] ? formats.renderbufferFormatFor(a[1], this.capabilities?.features) : null;
+        rb.internalFormat = storage ? storage.internalFormat || a[1] : GL.RGBA;
+        rb.componentBits = storage ? storage.components : [0, 0, 0, 0, 0, 0];
+        rb.width = storage ? a[2] : 0;
+        rb.height = storage ? a[3] : 0;
     };
 
     proto.framebufferObject = function(name) {
@@ -490,6 +494,12 @@
                 }
                 for (const savedRb of g.renderbuffers) {
                     const rb = { ...savedRb, id: savedRb.id || group.nextImageId++ };
+                    if (!rb.componentBits) {
+                        const storage = rb.width && rb.height ? formats.renderbufferFormatFor(rb.internalFormat, shadow.capabilities?.features) : null;
+                        rb.internalFormat = storage ? storage.internalFormat || rb.internalFormat : GL.RGBA;
+                        rb.componentBits = storage ? storage.components : [0, 0, 0, 0, 0, 0];
+                        if (!storage) rb.width = rb.height = 0;
+                    }
                     group.renderbufferImages.set(rb.id, rb); if (!rb.deleted) group.renderbuffers.set(rb.name, rb);
                 }
             }

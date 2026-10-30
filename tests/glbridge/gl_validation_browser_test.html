@@ -12,6 +12,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_image_formats.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_framebuffer_state.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
@@ -226,6 +227,25 @@
                 check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "FBO read/draw selection leaked: " + Array.from(pixel.bytes.subarray(32)));
             }
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO selections must have no host errors");
+            for (const format of [GL.STENCIL_INDEX1_EXT, GL.STENCIL_INDEX4_EXT, GL.STENCIL_INDEX16_EXT]) {
+                const stencil = new GLStream().makeCurrent(90, 0, 0, 64, 64, 90, 90)
+                    .call("BIND_TEXTURE", GL.TEXTURE_2D, 1).texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, null)
+                    .call("BIND_RENDERBUFFER", GL.RENDERBUFFER_EXT, 9).call("RENDERBUFFER_STORAGE", GL.RENDERBUFFER_EXT, format, 1, 1)
+                    .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 3).call("VIEWPORT", 0, 0, 1, 1)
+                    .call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0, 0)
+                    .call("FRAMEBUFFER_RENDERBUFFER", GL.FRAMEBUFFER_EXT, GL.STENCIL_ATTACHMENT, GL.RENDERBUFFER_EXT, 9)
+                    .call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR_STENCIL", 255).call("CLEAR", GL.COLOR_BUFFER_BIT | GL.STENCIL_BUFFER_BIT)
+                    .call("ENABLE", GL.STENCIL_TEST).call("STENCIL_FUNC", GL.EQUAL, 1000, 0xFFFFFFFF)
+                    .call("COLOR4F", 0.25, 0.5, 0.75, 1).call("BEGIN", GL.QUADS)
+                    .call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0).call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+                const pixel = stencil.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), memory = stencil.bytes();
+                shadow.process(memory); executor.options.writeGuestMemory = (offset, data) => memory.set(data, offset);
+                executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+                check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "renderbuffer stencil readback must finish");
+                check([64, 128, 191, 255].every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1),
+                    "stencil precision must describe the actual eight-bit storage: " + format);
+            }
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "renderbuffer storage must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

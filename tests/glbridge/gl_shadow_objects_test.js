@@ -341,6 +341,49 @@ test("framebuffer attachment queries match desktop GL for images, faces, slices 
         assert.equal(view.getUint32(at + P.F.QUERY_PARAMETER.status, true), expected[name][1] ? P.C.V86GL_SYNC_QUERY_STATUS_FAILED : OK);
     }
 });
+test("renderbuffer queries describe the shared storage formats and zero storage", async () => {
+    const one = shadow(), { host } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host }); await gpu.initialize();
+    const reference = require("./gl_conformance/renderbuffer_parameters_reference.json").cases;
+    const pnames = [GL.RENDERBUFFER_WIDTH_EXT, GL.RENDERBUFFER_HEIGHT_EXT, GL.RENDERBUFFER_INTERNAL_FORMAT_EXT,
+        GL.RENDERBUFFER_RED_SIZE_EXT, GL.RENDERBUFFER_GREEN_SIZE_EXT, GL.RENDERBUFFER_BLUE_SIZE_EXT,
+        GL.RENDERBUFFER_ALPHA_SIZE_EXT, GL.RENDERBUFFER_DEPTH_SIZE_EXT, GL.RENDERBUFFER_STENCIL_SIZE_EXT];
+    for (const [name, format] of [["initial", null], ["rgba8", GL.RGBA8], ["rgb8", GL.RGB8], ["rgba4", GL.RGBA4],
+            ["depth16", GL.DEPTH_COMPONENT16], ["depth24", GL.DEPTH_COMPONENT24], ["stencil1", GL.STENCIL_INDEX1_EXT],
+            ["stencil4", GL.STENCIL_INDEX4_EXT], ["stencil8", GL.STENCIL_INDEX8_EXT], ["stencil16", GL.STENCIL_INDEX16_EXT],
+            ["rgba16f", GL.RGBA16F_ARB], ["zero_width", GL.RGBA8]]) {
+        const s = scene().call("BIND_RENDERBUFFER", RENDERBUFFER, 9), asks = [];
+        if (format) s.call("RENDERBUFFER_STORAGE", RENDERBUFFER, format, name === "zero_width" ? 0 : 7, 5);
+        for (const pname of pnames) {
+            const at = s.length + 4, h = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_RENDERBUFFER,
+                target: RENDERBUFFER, pname, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
+            const payload = new Uint8Array(h.length + 8); payload.set(h); s.record(P.GLFN.QUERY_PARAMETER, payload); asks.push(at);
+        }
+        one.process(s.bytes()); gpu.submit(s.bytes(), {}); const v = new DataView(s.bytes().buffer);
+        const values = asks.map(at => { assert.equal(v.getUint32(at + P.F.QUERY_PARAMETER.status, true), OK); return v.getFloat64(at + P.RECORDS.QUERY_PARAMETER.size, true); });
+        // WebGPU stores renderbuffer RGBA4 in rgba8unorm. Report that chosen
+        // precision, rather than Apple's four-bit choice or the requested size.
+        const expected = name === "rgba4" ? [7, 5, GL.RGBA4, 8, 8, 8, 8, 0, 0] : reference[name].values;
+        assert.deepEqual(values, expected, name);
+        const rb = gpu.current.shareGroup.renderbufferImages.get(gpu.current.renderbufferImage);
+        assert.deepEqual([rb.width, rb.height, rb.internalFormat, ...rb.componentBits], values, "renderer " + name);
+        if (name === "zero_width") assert.equal(rb.gpuTexture, null, "zero storage must not allocate a 1x5 image");
+        if (name.startsWith("stencil")) assert.equal(rb.gpuTexture.descriptor.format, "depth24plus-stencil8");
+    }
+    const copy = shadow(); copy.setState(JSON.parse(JSON.stringify(one.getState())));
+    assert.deepEqual(copy.current.group.renderbufferImages.get(copy.current.renderbufferImage).componentBits, [0, 0, 0, 0, 0, 0]);
+});
+test("invalid renderbuffer storage leaves the previous image intact", () => {
+    for (const [target, format, width, height, expected] of [[0, GL.RGBA8, 4, 4, GL.INVALID_ENUM],
+            [RENDERBUFFER, GL.ALPHA8, 4, 4, GL.INVALID_ENUM], [RENDERBUFFER, GL.RGBA8, -1, 4, GL.INVALID_VALUE],
+            [RENDERBUFFER, GL.RGBA8, 4, 20000, GL.INVALID_VALUE]]) {
+        const one = shadow(), s = scene(); renderbuffer(s, 9, GL.RGBA8, 7, 5); one.process(s.bytes());
+        one.process(new GLStream().call("RENDERBUFFER_STORAGE", target, format, width, height).bytes());
+        const rb = one.current.group.renderbuffers.get(9);
+        assert.equal(one.current.error, expected); assert.deepEqual([rb.width, rb.height, rb.internalFormat], [7, 5, GL.RGBA8]);
+    }
+    const one = shadow(); one.process(scene().call("RENDERBUFFER_STORAGE", RENDERBUFFER, GL.RGBA8, 1, 1).bytes());
+    assert.equal(one.current.error, GL.INVALID_OPERATION);
+});
 test("texture attribute bindings keep a deleted image alive until the saved binding is released", async () => {
     const one = shadow(), { host } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host }); await gpu.initialize();
     const send = s => { one.process(s.bytes()); gpu.submit(s.bytes(), {}); };

@@ -1,0 +1,18 @@
+{
+  "renderer":"Apple M1 Pro",
+  "version":"2.1 Metal - 91.7",
+  "cases":{
+    "initial":{"error":0,"values":[0,0,6408,0,0,0,0,0,0]},
+    "rgba8":{"error":0,"values":[7,5,32856,8,8,8,8,0,0]},
+    "rgb8":{"error":0,"values":[7,5,32849,8,8,8,0,0,0]},
+    "rgba4":{"error":0,"values":[7,5,32854,4,4,4,4,0,0]},
+    "depth16":{"error":0,"values":[7,5,33189,0,0,0,0,16,0]},
+    "depth24":{"error":0,"values":[7,5,33191,0,0,0,0,32,0]},
+    "stencil1":{"error":0,"values":[7,5,36166,0,0,0,0,0,8]},
+    "stencil4":{"error":0,"values":[7,5,36167,0,0,0,0,0,8]},
+    "stencil8":{"error":0,"values":[7,5,36168,0,0,0,0,0,8]},
+    "stencil16":{"error":0,"values":[7,5,36169,0,0,0,0,0,8]},
+    "rgba16f":{"error":0,"values":[7,5,34842,16,16,16,16,0,0]},
+    "zero_width":{"error":0,"values":[0,0,6408,0,0,0,0,0,0]}
+  }
+}

@@ -154,6 +154,10 @@ async function guestAnswers(remote) {
         target: 0x8D40, index: 0x8CE0, pname: 0x8CD1, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
     const attachmentPayload = new Uint8Array(attachmentHeader.length + 8); attachmentPayload.set(attachmentHeader);
     stream.record(P.GLFN.QUERY_PARAMETER, attachmentPayload);
+    stream.call("BIND_RENDERBUFFER", 0x8D41, 9).call("RENDERBUFFER_STORAGE", 0x8D41, 0x8D49, 7, 5);
+    const rbAt = stream.length + 4, rbHeader = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_RENDERBUFFER,
+        target: 0x8D41, pname: 0x8D55, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
+    const rbPayload = new Uint8Array(rbHeader.length + 8); rbPayload.set(rbHeader); stream.record(P.GLFN.QUERY_PARAMETER, rbPayload);
     stream.call("DRAW_BUFFER", 0x8CE1).call("READ_BUFFER", 0).call("BIND_FRAMEBUFFER", 0x8D40, 4).call("BIND_FRAMEBUFFER", 0x8D40, 3);
     const drawBufferAt = extraState(0x8825, P.C.V86GL_STATE_INTEGER);
     const readBufferAt = extraState(0x0C02, P.C.V86GL_STATE_INTEGER);
@@ -209,6 +213,7 @@ async function guestAnswers(remote) {
         framebuffer: answer(fboAt, () => view.getUint32(fboAt + 4, true)),
         isTexture: answer(isTextureAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(isTextureAt + P.RECORDS.QUERY_PARAMETER.size, true)),
         attachment: answer(attachmentAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(attachmentAt + P.RECORDS.QUERY_PARAMETER.size, true)),
+        renderbufferBits: answer(rbAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(rbAt + P.RECORDS.QUERY_PARAMETER.size, true)),
         drawBuffer: answer(drawBufferAt + P.F.QUERY_STATE.status, () => view.getFloat64(drawBufferAt + P.RECORDS.QUERY_STATE.size, true)),
         readBuffer: answer(readBufferAt + P.F.QUERY_STATE.status, () => view.getFloat64(readBufferAt + P.RECORDS.QUERY_STATE.size, true)),
         arb: answer(arbAt, () => view.getInt32(arbAt + 4, true)),
@@ -255,6 +260,7 @@ async function guestAnswers(remote) {
     assert.equal(results.page.failedUniform, true); assert.equal(results.worker.failedUniform, true);
     assert.equal(results.page.isTexture, 1); assert.equal(results.worker.isTexture, 1);
     assert.equal(results.page.attachment, 7); assert.equal(results.worker.attachment, 7);
+    assert.equal(results.page.renderbufferBits, 8); assert.equal(results.worker.renderbufferBits, 8);
     assert.equal(results.page.drawBuffer, 0x8CE1); assert.equal(results.worker.drawBuffer, 0x8CE1);
     assert.equal(results.page.readBuffer, 0); assert.equal(results.worker.readBuffer, 0);
     if (failures.length) {
