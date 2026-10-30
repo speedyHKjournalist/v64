@@ -12,6 +12,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_framebuffer_state.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js"></script>
@@ -198,6 +199,33 @@
                     "name reuse redirected or destroyed a retained image: " + Array.from(pixel.bytes.subarray(32)));
             }
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "retained images must have no host errors");
+            const fbos = new GLStream().makeCurrent(80, 0, 0, 64, 64, 80, 80);
+            for (const name of [1, 2, 3]) fbos.call("BIND_TEXTURE", GL.TEXTURE_2D, name)
+                .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([16, 32, 48, 255]));
+            fbos.call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 3)
+                .call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0, 0)
+                .call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0 + 1, GL.TEXTURE_2D, 2, 0, 0)
+                .call("DRAW_BUFFER", GL.COLOR_ATTACHMENT0 + 1).call("READ_BUFFER", GL.COLOR_ATTACHMENT0 + 1)
+                .call("CLEAR_COLOR", 0, 1, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 4)
+                .call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 3, 0, 0)
+                .call("CLEAR_COLOR", 0, 0, 1, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 3);
+            const previous = fbos.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            fbos.call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT);
+            const updated = fbos.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            fbos.call("READ_BUFFER", GL.COLOR_ATTACHMENT0);
+            const untouched = fbos.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            fbos.call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 4);
+            const otherFbo = fbos.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), fboMemory = fbos.bytes();
+            shadow.process(fboMemory); executor.options.writeGuestMemory = (offset, data) => fboMemory.set(data, offset);
+            executor.submit(remote ? fboMemory.slice() : fboMemory, {}); await executor.idle();
+            for (const [pixel, expected] of [[previous, [0, 255, 0, 255]], [updated, [255, 0, 0, 255]],
+                    [untouched, [16, 32, 48, 255]], [otherFbo, [0, 0, 255, 255]]]) {
+                check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "FBO selection readback must finish");
+                check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "FBO read/draw selection leaked: " + Array.from(pixel.bytes.subarray(32)));
+            }
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO selections must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

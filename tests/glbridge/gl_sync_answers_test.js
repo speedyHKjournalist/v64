@@ -149,6 +149,9 @@ async function guestAnswers(remote) {
         target: P.C.V86GL_OBJECT_KIND_TEXTURE, pname: 7, value_kind: P.C.V86GL_STATE_BOOLEAN, data_size: 8 });
     const objectPayload = new Uint8Array(objectHeader.length + 8); objectPayload.set(objectHeader);
     stream.record(P.GLFN.QUERY_PARAMETER, objectPayload);
+    stream.call("DRAW_BUFFER", 0x8CE1).call("READ_BUFFER", 0).call("BIND_FRAMEBUFFER", 0x8D40, 4).call("BIND_FRAMEBUFFER", 0x8D40, 3);
+    const drawBufferAt = extraState(0x8825, P.C.V86GL_STATE_INTEGER);
+    const readBufferAt = extraState(0x0C02, P.C.V86GL_STATE_INTEGER);
     // an ARB program that does not assemble: where it stopped
     stream.call("BIND_PROGRAM_ARB", 0x8804, 4).programStringARB(0x8804, "!!ARBfp1.0\nMOV result.color, nothing;\nEND\n");
     const arbAt = stream.length + 4 + 4;
@@ -200,6 +203,8 @@ async function guestAnswers(remote) {
         location: answer(locationAt, () => view.getInt32(locationAt + 4, true)),
         framebuffer: answer(fboAt, () => view.getUint32(fboAt + 4, true)),
         isTexture: answer(isTextureAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(isTextureAt + P.RECORDS.QUERY_PARAMETER.size, true)),
+        drawBuffer: answer(drawBufferAt + P.F.QUERY_STATE.status, () => view.getFloat64(drawBufferAt + P.RECORDS.QUERY_STATE.size, true)),
+        readBuffer: answer(readBufferAt + P.F.QUERY_STATE.status, () => view.getFloat64(readBufferAt + P.RECORDS.QUERY_STATE.size, true)),
         arb: answer(arbAt, () => view.getInt32(arbAt + 4, true)),
         finish: answer(finishAt, () => "done"),
         queries: answer(batchAt, () => "done"),
@@ -243,6 +248,8 @@ async function guestAnswers(remote) {
     assert.equal(results.page.failedLink, 0); assert.equal(results.worker.failedLink, 0);
     assert.equal(results.page.failedUniform, true); assert.equal(results.worker.failedUniform, true);
     assert.equal(results.page.isTexture, 1); assert.equal(results.worker.isTexture, 1);
+    assert.equal(results.page.drawBuffer, 0x8CE1); assert.equal(results.worker.drawBuffer, 0x8CE1);
+    assert.equal(results.page.readBuffer, 0); assert.equal(results.worker.readBuffer, 0);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;

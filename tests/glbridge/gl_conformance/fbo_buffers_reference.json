@@ -1,0 +1,17 @@
+{
+  "renderer":"Apple M1 Pro",
+  "version":"2.1 Metal - 91.7",
+  "cases":{
+    "initial_a":[36064,0,0,36064],
+    "configured_a":[36066,0,36065,36066],
+    "initial_b":[36064,0,0,36064],
+    "configured_b":[0,0,0,0],
+    "draw_a_read_b":[36066,0,36065,0],
+    "pop_on_b":[36067,0,0,36067],
+    "return_to_a":[36066,0,36065,36066],
+    "return_to_b":[36067,0,0,36067]
+  },
+  "duplicate_error":1282,
+  "fbo_back_error":1282,
+  "bad_enum_error":1280
+}

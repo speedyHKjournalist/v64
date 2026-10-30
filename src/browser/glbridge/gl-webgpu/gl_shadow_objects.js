@@ -4,8 +4,10 @@
 // object has attached, and the bindings -- so glCheckFramebufferStatus is
 // answered on the CPU side, by EXT_framebuffer_object's rules.
 //
-// Textures and renderbuffers belong to the share group; framebuffer objects,
-// the draw and read buffers to the context (as the executor keeps them).
+// Textures and renderbuffers belong to the share group. Framebuffer names
+// currently follow the executor's context-local namespace; distinguishing
+// shared EXT FBO creation from core creation remains part of C3/C6.
+// Draw/read buffer selection belongs to each framebuffer, including zero.
 
 (function(global) {
     "use strict";
@@ -13,6 +15,7 @@
     const protocol = global.GLProtocol || require("./gl_protocol.js");
     const constants = global.GLWGConstants || require("./gl_constants.js");
     const glCaps = global.GLCaps || require("./gl_caps.js");
+    const buffers = global.GLFramebufferState || require("./gl_framebuffer_state.js");
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const { GLFN, C, F, RECORDS } = protocol;
     const GL = constants.GL;
@@ -217,7 +220,7 @@
     proto.framebufferObject = function(name) {
         const c = this.current;
         let fbo = c.framebuffers.get(name);
-        if (!fbo) c.framebuffers.set(name, fbo = { name, created: false, color: new Array(MAX_COLOR_ATTACHMENTS).fill(null),
+        if (!fbo) c.framebuffers.set(name, fbo = { name, created: false, ...buffers.initial(GL.COLOR_ATTACHMENT0), color: new Array(MAX_COLOR_ATTACHMENTS).fill(null),
             depth: null, stencil: null });
         return fbo;
     };
@@ -234,6 +237,7 @@
             if (c.drawFramebuffer === name) c.drawFramebuffer = 0;
             if (c.readFramebuffer === name) c.readFramebuffer = 0;
         }
+        buffers.sync(c, c.framebuffers);
     };
 
     proto.bindFramebuffer = function(bytes, view, offset, size) {
@@ -241,8 +245,7 @@
         if (!a) return;
         const c = this.current;
         if (a[1]) this.framebufferObject(a[1]).created = true;
-        if (a[0] !== GL.READ_FRAMEBUFFER) c.drawFramebuffer = a[1];
-        if (a[0] !== GL.DRAW_FRAMEBUFFER) c.readFramebuffer = a[1];
+        buffers.bind(c, c.framebuffers, a[0], a[1]);
     };
 
     proto.boundFramebuffer = function(target) {
@@ -295,17 +298,17 @@
 
     proto.drawBuffer = function(bytes, view, offset, size) {
         const a = this.args("DRAW_BUFFER", view, offset, size);
-        if (a) this.current.drawBuffers = [a[0]];
+        if (a) buffers.draw(this.current, this.current.framebuffers, [a[0]]);
     };
 
     proto.drawBuffers = function(bytes, view, offset, size) {
-        const buffers = this.names("DRAW_BUFFERS", view, offset, size);
-        if (buffers) this.current.drawBuffers = buffers.length ? buffers : [GL.NONE];
+        const list = this.names("DRAW_BUFFERS", view, offset, size);
+        if (list) buffers.draw(this.current, this.current.framebuffers, list);
     };
 
     proto.readBuffer = function(bytes, view, offset, size) {
         const a = this.args("READ_BUFFER", view, offset, size);
-        if (a) this.current.readBuffer = a[0];
+        if (a) buffers.read(this.current, this.current.framebuffers, a[0]);
     };
 
     // What an attachment holds: {width, height, internalFormat}, or null
@@ -371,7 +374,11 @@
     proto.checkFramebufferStatus = function(bytes, view, offset, size) {
         const R = F.CHECK_FRAMEBUFFER_STATUS;
         if (size < RECORDS.CHECK_FRAMEBUFFER_STATUS.size || view.getUint32(offset + R.status, true) !== PENDING) return;
-        view.setUint32(offset + R.result, this.framebufferStatus(view.getUint32(offset + R.target, true)), true);
+        const target = view.getUint32(offset + R.target, true);
+        const error = this.current.state?.begin ? GL.INVALID_OPERATION :
+            [GL.FRAMEBUFFER_EXT, GL.READ_FRAMEBUFFER, GL.DRAW_FRAMEBUFFER].includes(target) ? 0 : GL.INVALID_ENUM;
+        if (error) { this.answered("CHECK_FRAMEBUFFER_STATUS", view, offset, C.V86GL_SYNC_QUERY_STATUS_FAILED); return error; }
+        view.setUint32(offset + R.result, this.framebufferStatus(target), true);
         view.setUint32(offset + R.status, OK, true);
         ++this.stats.answered;
     };
@@ -428,6 +435,11 @@
 
     GLShadow.part({
         afterBatch: collectImages,
+        current(shadow, c, view, offset, size) {
+            if (c.buffersInitialized) return;
+            const first = shadow.field("MAKE_CURRENT", "format", view, offset, size) & C.V86GL_FORMAT_SINGLE_BUFFER ? GL.FRONT : GL.BACK;
+            c.defaultFramebufferState = buffers.initial(first); buffers.sync(c, c.framebuffers); c.buffersInitialized = true;
+        },
         group(group) {
             group.textures = new Map();
             group.renderbuffers = new Map();
@@ -447,6 +459,7 @@
             context.renderbufferImage = 0;
             context.drawBuffers = [GL.BACK];
             context.readBuffer = GL.BACK;
+            context.defaultFramebufferState = buffers.initial(GL.BACK);
         },
         getState(shadow, state) {
             state.objects = {
@@ -459,6 +472,7 @@
                     units: c.units.map(unit => [...unit]), framebuffers: [...c.framebuffers.values()],
                     unitImages: c.unitImages.map(unit => [...unit]), defaultTextures: [...c.defaultTextures],
                     renderbufferImage: c.renderbufferImage,
+                    defaultFramebufferState: c.defaultFramebufferState,
                     drawFramebuffer: c.drawFramebuffer, readFramebuffer: c.readFramebuffer, renderbuffer: c.renderbuffer,
                     drawBuffers: c.drawBuffers, readBuffer: c.readBuffer })),
             };
@@ -490,6 +504,17 @@
                     framebuffers: new Map(c.framebuffers.map(fbo => [fbo.name, fbo])), drawFramebuffer: c.drawFramebuffer,
                     readFramebuffer: c.readFramebuffer, renderbuffer: c.renderbuffer, drawBuffers: c.drawBuffers,
                     readBuffer: c.readBuffer });
+                context.defaultFramebufferState = c.defaultFramebufferState || buffers.initial(GL.BACK);
+                for (const fbo of context.framebuffers.values()) {
+                    if (!fbo.drawBuffers) fbo.drawBuffers = fbo.name === c.drawFramebuffer ? c.drawBuffers.slice() : [GL.COLOR_ATTACHMENT0];
+                    if (fbo.readBuffer === undefined) fbo.readBuffer = fbo.name === c.readFramebuffer ? c.readBuffer : GL.COLOR_ATTACHMENT0;
+                }
+                if (!c.defaultFramebufferState) {
+                    if (!c.drawFramebuffer) context.defaultFramebufferState.drawBuffers = c.drawBuffers.slice();
+                    if (!c.readFramebuffer) context.defaultFramebufferState.readBuffer = c.readBuffer;
+                }
+                context.buffersInitialized = true;
+                buffers.sync(context, context.framebuffers);
                 if (!saved.version) for (const fbo of context.framebuffers.values())
                     for (const r of [...fbo.color, fbo.depth, fbo.stencil]) if (r)
                         r.id = (r.kind === "texture" ? context.group.textures : context.group.renderbuffers).get(r.name)?.id;

@@ -47,6 +47,7 @@
     const gpuHost = nodeRequire ? nodeRequire("../webgpu_host.js") :
         global.V86GPUHost;
     const pixelMaps = nodeRequire ? nodeRequire("./gl_pixel_maps.js") : global.GLPixelMaps;
+    const framebufferState = nodeRequire ? nodeRequire("./gl_framebuffer_state.js") : global.GLFramebufferState;
 
     const GL = constants.GL;
     const GLFN = constants.GLFN;
@@ -1591,6 +1592,7 @@
             renderbuffer: 0,
             drawBuffers: [GL.BACK],
             readBuffer: GL.BACK,
+            defaultFramebufferState: framebufferState.initial(GL.BACK),
 
             activeQueries: Object.create(null),
 
@@ -1694,10 +1696,9 @@
     /*
      * A share group owns the objects wglShareLists makes common: textures,
      * buffers, display lists, shaders, programs and renderbuffers. Framebuffer
-     * objects, vertex array state and query objects are per context, which is
-     * what desktop GL specifies -- and getting that split wrong is how a
-     * capability-probe context ends up destroying the real one's state, the
-     * failure the old bridge's README documented as unfixed.
+     * objects currently use the core context-local namespace, as do vertex
+     * array state and query objects. C3/C6 still needs to encode the creation
+     * interface: EXT-created FBOs are shared, unlike core-created FBOs.
      */
     function createShareGroup(id) {
         return {
@@ -1775,6 +1776,7 @@
     function createFramebuffer(name) {
         return {
             name,
+            ...framebufferState.initial(GL.COLOR_ATTACHMENT0),
             color: new Array(MAX_DRAW_BUFFERS).fill(null),
             depth: null, stencil: null,
             width: 0, height: 0,
@@ -2093,6 +2095,7 @@
                 if (format & protocol.C.V86GL_FORMAT_SINGLE_BUFFER) {
                     context.drawBuffers = [GL.FRONT];
                     context.readBuffer = GL.FRONT;
+                    context.defaultFramebufferState = framebufferState.initial(GL.FRONT);
                 }
                 context.hwnd = hwnd;
                 context.protocolId = protocolId;
@@ -2104,6 +2107,7 @@
             context.hwnd = hwnd;
             context.samples = (format & protocol.C.V86GL_FORMAT_SAMPLES_MASK) >>>
                 protocol.C.V86GL_FORMAT_SAMPLES_SHIFT;
+            if (this.current !== context) this.endPass();
             this.current = context;
             if (width && height) {
                 if (!context.viewport.width) {
@@ -2935,6 +2939,9 @@
             }
             const snapshot = s.attribStack.pop();
             restoreFields(s, snapshot.state, snapshot.fields);
+            const draw = s.drawBuffers.slice(), read = s.readBuffer;
+            if (snapshot.state.drawBuffers) framebufferState.draw(s, this.framebuffers.get(s.id), draw);
+            if (Object.prototype.hasOwnProperty.call(snapshot.state, "readBuffer")) framebufferState.read(s, this.framebuffers.get(s.id), read);
             if (snapshot.enableState) restoreEnableState(s, snapshot.enableState);
             this.endPass();
             this.invalidateBindGroups();
@@ -3462,6 +3469,7 @@
                 if (this.current.readFramebuffer === name)
                     this.current.readFramebuffer = 0;
             }
+            framebufferState.sync(this.current, map);
         });
         define("BIND_FRAMEBUFFER", function(a) {
             const target = a[0] >>> 0, name = a[1] >>> 0;
@@ -3470,14 +3478,7 @@
             // Changing the render target ends the pass: WebGPU fixes the
             // attachments when the pass begins.
             this.endPass();
-            if (target === GL.READ_FRAMEBUFFER) {
-                this.current.readFramebuffer = name;
-            } else if (target === GL.DRAW_FRAMEBUFFER) {
-                this.current.drawFramebuffer = name;
-            } else {
-                this.current.drawFramebuffer = name;
-                this.current.readFramebuffer = name;
-            }
+            framebufferState.bind(this.current, map, target, name);
         });
         define("FRAMEBUFFER_TEXTURE", function(a) {
             this.framebufferTexture(a[0] >>> 0, a[1] >>> 0, a[2] >>> 0,
@@ -3514,16 +3515,16 @@
         });
         define("DRAW_BUFFER", function(a) {
             this.endPass();
-            this.current.drawBuffers = [a[0] >>> 0];
+            framebufferState.draw(this.current, this.framebuffers.get(this.current.id), [a[0] >>> 0]);
         });
-        define("READ_BUFFER", function(a) { this.current.readBuffer = a[0] >>> 0; });
+        define("READ_BUFFER", function(a) { framebufferState.read(this.current, this.framebuffers.get(this.current.id), a[0] >>> 0); });
         define("DRAW_BUFFERS", function(a, bytes, view, offset, size) {
             const count = size >= 4 ? view.getUint32(offset, true) : 0;
             const buffers = [];
             for (let i = 0; i < count && 4 + i * 4 + 4 <= size; ++i)
                 buffers.push(view.getUint32(offset + 4 + i * 4, true));
             this.endPass();
-            this.current.drawBuffers = buffers.length ? buffers : [GL.NONE];
+            framebufferState.draw(this.current, this.framebuffers.get(this.current.id), buffers);
         });
         define("BLIT_FRAMEBUFFER", function(a) {
             this.blitFramebuffer(a[0] | 0, a[1] | 0, a[2] | 0, a[3] | 0,

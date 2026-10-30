@@ -5,6 +5,8 @@
     const { GL } = global.GLWGConstants || require("./gl_constants.js");
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
     const state = global.V86GLShadowState || require("./gl_shadow_state.js");
+    const buffers = global.GLFramebufferState || require("./gl_framebuffer_state.js");
+    const caps = global.GLCaps || require("./gl_caps.js");
     const targets = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D, GL.TEXTURE_CUBE_MAP]);
     for (const [pname, target] of [[GL.TEXTURE_BINDING_1D, GL.TEXTURE_1D], [GL.TEXTURE_BINDING_2D, GL.TEXTURE_2D],
             [GL.TEXTURE_BINDING_3D, GL.TEXTURE_3D], [GL.TEXTURE_BINDING_CUBE_MAP, GL.TEXTURE_CUBE_MAP]])
@@ -20,6 +22,38 @@
     state.rule("BIND_RENDERBUFFER", (c, [target]) => target === GL.RENDERBUFFER_EXT ? 0 : GL.INVALID_ENUM);
     state.rule("BIND_FRAMEBUFFER", (c, [target]) =>
         [GL.FRAMEBUFFER_EXT, GL.READ_FRAMEBUFFER, GL.DRAW_FRAMEBUFFER].includes(target) ? 0 : GL.INVALID_ENUM);
+    const limit = (s, pname) => s.capabilities ? caps.integer(s.capabilities, pname) : caps.LIMITS.MAX_DRAW_BUFFERS;
+    state.query([0x0C01], s => [[s.current.drawBuffers[0] || GL.NONE], "e"]);
+    state.query([0x0C02], s => [[s.current.readBuffer], "e"]);
+    for (let i = 0; i < 16; ++i) state.query([GL.DRAW_BUFFER0 + i], s =>
+        i < limit(s, GL.MAX_DRAW_BUFFERS) ? [[s.current.drawBuffers[i] || GL.NONE], "e"] : GL.INVALID_ENUM);
+    function selection(c, value, read, many, s) {
+        if (value === GL.NONE) return 0;
+        const window = value >= 0x400 && value <= 0x40C && (!read || value !== 0x408);
+        const color = value >= GL.COLOR_ATTACHMENT0 && value < GL.COLOR_ATTACHMENT0 + 32;
+        if (!window && !color) return GL.INVALID_ENUM;
+        if (many && value >= GL.FRONT && value <= GL.FRONT_AND_BACK) return GL.INVALID_OPERATION;
+        if (read ? c.readFramebuffer : c.drawFramebuffer)
+            return color && value < GL.COLOR_ATTACHMENT0 + limit(s, GL.MAX_COLOR_ATTACHMENTS) ? 0 : GL.INVALID_OPERATION;
+        if (color || [0x401, 0x403, 0x407].includes(value) || value >= 0x409) return GL.INVALID_OPERATION;
+        if (c.state.format & P.C.V86GL_FORMAT_SINGLE_BUFFER && [GL.BACK, 0x402].includes(value)) return GL.INVALID_OPERATION;
+        return 0;
+    }
+    state.rule("DRAW_BUFFER", (c, [value], s) => selection(c, value, false, false, s));
+    state.rule("READ_BUFFER", (c, [value], s) => selection(c, value, true, false, s));
+    GLShadow.rules({ [P.GLFN.DRAW_BUFFERS]: (s, bytes, v, o, size) => {
+        if (s.current.state.begin) return GL.INVALID_OPERATION;
+        const count = v.getInt32(o, true);
+        if (count < 0 || count > limit(s, GL.MAX_DRAW_BUFFERS) || 4 + count * 4 > size) return GL.INVALID_VALUE;
+        const seen = new Set();
+        for (let i = 0; i < count; ++i) {
+            const value = v.getUint32(o + 4 + i * 4, true), error = selection(s.current, value, false, true, s);
+            if (error) return error;
+            if (value !== GL.NONE && seen.has(value)) return GL.INVALID_OPERATION;
+            seen.add(value);
+        }
+        return 0;
+    } });
     for (const name of ["GEN_TEXTURES", "DELETE_TEXTURES", "GEN_RENDERBUFFERS", "DELETE_RENDERBUFFERS", "GEN_FRAMEBUFFERS", "DELETE_FRAMEBUFFERS"])
         GLShadow.rules({ [P.GLFN[name]]: (s, bytes, v, o, size) => {
             if (s.current.state.begin) return GL.INVALID_OPERATION;
@@ -47,6 +81,16 @@
         restore(c, saved) {
             c.activeTexture = saved.activeTexture;
             c.units = saved.units.map(u => new Map(u)); c.unitImages = saved.unitImages.map(u => new Map(u));
+        },
+    });
+    state.attributes("framebufferSelection", {
+        capture(c, mask, client) {
+            return client ? null : { ...(mask & 0x4000 ? { draw: c.drawBuffers.slice() } : {}),
+                ...(mask & 0x20 ? { read: c.readBuffer } : {}) };
+        },
+        restore(c, saved) {
+            if (saved.draw) buffers.draw(c, c.framebuffers, saved.draw);
+            if (saved.read !== undefined) buffers.read(c, c.framebuffers, saved.read);
         },
     });
 })(typeof globalThis !== "undefined" ? globalThis : this);

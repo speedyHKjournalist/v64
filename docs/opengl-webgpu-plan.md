@@ -296,6 +296,12 @@ game.exe
 > - 新增 4 项对象测试、5 个实际 C getter ABI 测试、C 请求/回答编解码和两种通道测试；GPU 验证名字重复删除/重用后旧 FBO 读回与旧上下文采样的像素。39 组 Node、21 组站点、8 个 GPU 页面、构建、DLL 和 ESLint 通过；对象测试加入变异运行器，新增变异 4/4 被杀死。
 > - **继续推进：** 纹理参数与图像查询/校验、每个 FBO 的 draw/read 状态、buffer/数组/ARB 对象生命周期、CPU 名字分配、解析标识的统一转发，以及列表/选择/反馈/求值器和 C8。GPU 内容存档仍用日志，未把它记为完成。
 
+> **C3/C6 FBO 读写缓冲选择（2026-10-30）：完成这一批迁移。**
+> - 每个 FBO 及默认 framebuffer 独立保存 draw/read 选择，分离 DRAW/READ 绑定只切换相应状态；删除绑定的 FBO 恢复默认目标的选择。CPU 与页面共用选择逻辑，快照保存每个对象的值。属性恢复更新当前绑定对象的选择。
+> - CPU 回答 DRAW_BUFFER、READ_BUFFER、DRAW_BUFFERi，并验证目标、选择枚举、不可用的窗口缓冲、重复目的地、数量和 Begin/End。无效调用原子拒绝。客体 DrawBuffers 容量从 4 改为 8，与宿主上限一致，设备实际限制仍由 CPU 校验。
+> - 本机参照记录 8 组切换及 3 类错误；Apple 的 PopAttrib 不恢复 FBO 选择，测试按 [EXT_framebuffer_object issue 81 和状态表](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_framebuffer_object.txt) 对相应两组设定规范答案，保留原始参照。新增对象/属性/快照、实际客体 C ABI、两种通道和多附件像素测试；39 组 Node、22 组站点、8 个 GPU 页面、构建、DLL、ESLint 通过；新增变异 3/3 被杀死。
+> - **发现并保留的剩余项：** 2016 年 EXT 规范区分 EXT 创建的共享 FBO 和 core 创建的私有 FBO；现有协议将两类 Bind 合并，仍采用私有名字空间，后续 C3/C6 需要编码来源并迁移生命周期。对象参数/附件查询、buffer/数组/ARB 对象、CPU 名字分配、列表/选择/反馈/求值器和 C8 也仍未完成，阶段 C 尚未退出。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

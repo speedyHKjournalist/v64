@@ -255,6 +255,57 @@ test("default textures are per-context objects and snapshots preserve retained i
     assert.equal(copy.attachedImage(copy.current.framebuffers.get(3).color[0]).width, 32);
     assert.deepEqual(back.answers(), [GL.FRAMEBUFFER_COMPLETE]);
 });
+test("FBO draw/read selections match desktop GL and attribute restoration follows EXT issue 81", async () => {
+    const one = shadow(), { host } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host }); await gpu.initialize();
+    const reference = require("./gl_conformance/fbo_buffers_reference.json").cases;
+    const expected = { ...reference, pop_on_b: [COLOR0 + 2, 0, COLOR0 + 1, 0], return_to_b: [COLOR0 + 2, 0, COLOR0 + 1, 0] };
+    // Apple does not restore FBO selections at PopAttrib. EXT_framebuffer_object
+    // issue 81 and the state tables specify restoration to the currently bound FBO.
+    const step = (name, stream) => {
+        const asks = [];
+        for (const pname of [GL.DRAW_BUFFER0, GL.DRAW_BUFFER0 + 1, GL.DRAW_BUFFER0 + 2, 0x0C02]) {
+            const at = stream.length + 4, h = P.encodeRecord("QUERY_STATE", { pname, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
+            const payload = new Uint8Array(h.length + 8); payload.set(h); stream.record(P.GLFN.QUERY_STATE, payload); asks.push(at);
+        }
+        const bytes = stream.bytes(); one.process(bytes); gpu.submit(bytes, {});
+        const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        assert.deepEqual(asks.map(at => { assert.equal(v.getUint32(at + P.F.QUERY_STATE.status, true), OK); return v.getFloat64(at + P.RECORDS.QUERY_STATE.size, true); }), expected[name], name);
+        const c = gpu.current;
+        assert.deepEqual([c.drawBuffers[0] || 0, c.drawBuffers[1] || 0, c.drawBuffers[2] || 0, c.readBuffer], expected[name], "renderer " + name);
+    };
+    step("initial_a", scene().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3));
+    step("configured_a", new GLStream().names(P.GLFN.DRAW_BUFFERS, [COLOR0 + 2, 0, COLOR0 + 1]).call("READ_BUFFER", COLOR0 + 2));
+    step("initial_b", new GLStream().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 4));
+    step("configured_b", new GLStream().call("DRAW_BUFFER", GL.NONE).call("READ_BUFFER", GL.NONE));
+    step("draw_a_read_b", new GLStream().call("BIND_FRAMEBUFFER", GL.DRAW_FRAMEBUFFER, 3));
+    step("pop_on_b", new GLStream().call("PUSH_ATTRIB", 0x4020).call("BIND_FRAMEBUFFER", FRAMEBUFFER, 4)
+        .call("DRAW_BUFFER", COLOR0 + 3).call("READ_BUFFER", COLOR0 + 3).call("POP_ATTRIB"));
+    step("return_to_a", new GLStream().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3));
+    step("return_to_b", new GLStream().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 4));
+    const copy = shadow(); copy.setState(JSON.parse(JSON.stringify(one.getState())));
+    copy.process(scene().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3).bytes());
+    assert.deepEqual(copy.current.drawBuffers, [COLOR0 + 2, 0, COLOR0 + 1]); assert.equal(copy.current.readBuffer, COLOR0 + 2);
+    const remove = scene().names(P.GLFN.DELETE_FRAMEBUFFERS, [4]); one.process(remove.bytes()); gpu.submit(remove.bytes(), {});
+    assert.deepEqual(one.current.drawBuffers, [GL.BACK]); assert.equal(one.current.readBuffer, GL.BACK);
+    assert.deepEqual(gpu.current.drawBuffers, [GL.BACK]); assert.equal(gpu.current.readBuffer, GL.BACK);
+});
+test("draw/read selection rejects invalid enums, unavailable buffers and duplicates atomically", () => {
+    for (const [stream, error] of [
+        [new GLStream().call("DRAW_BUFFER", GL.BACK), GL.INVALID_OPERATION],
+        [new GLStream().call("READ_BUFFER", 0xFFFFFFFF), GL.INVALID_ENUM],
+        [new GLStream().names(P.GLFN.DRAW_BUFFERS, [COLOR0, COLOR0]), GL.INVALID_OPERATION],
+        [new GLStream().names(P.GLFN.DRAW_BUFFERS, [COLOR0 + 2, 0xFFFFFFFF]), GL.INVALID_ENUM],
+        [new GLStream().names(P.GLFN.DRAW_BUFFERS, new Array(9).fill(GL.NONE)), GL.INVALID_VALUE],
+        [new GLStream().call("BEGIN", GL.POINTS).call("DRAW_BUFFER", GL.NONE), GL.INVALID_OPERATION],
+    ]) {
+        const one = shadow(); one.process(scene().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3).bytes());
+        one.process(stream.bytes()); assert.equal(one.current.error, error); assert.deepEqual(one.current.drawBuffers, [COLOR0]);
+        assert.equal(one.current.readBuffer, COLOR0);
+    }
+    const single = shadow(), s = new GLStream().makeCurrent(1, 0, 0, 64, 64, 1, 1, P.C.V86GL_FORMAT_SINGLE_BUFFER);
+    single.process(s.bytes()); assert.deepEqual(single.current.drawBuffers, [GL.FRONT]); assert.equal(single.current.readBuffer, GL.FRONT);
+    single.process(new GLStream().call("DRAW_BUFFER", GL.BACK).bytes()); assert.equal(single.current.error, GL.INVALID_OPERATION);
+});
 test("texture attribute bindings keep a deleted image alive until the saved binding is released", async () => {
     const one = shadow(), { host } = createFakeHost(), gpu = new GLWebGPUExecutor(null, { host }); await gpu.initialize();
     const send = s => { one.process(s.bytes()); gpu.submit(s.bytes(), {}); };
