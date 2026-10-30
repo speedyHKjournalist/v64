@@ -112,6 +112,7 @@
     };
 
     proto.defineLevel = function(target, level, width, height, depth, internalFormat, metadata) {
+        if (metadata && !metadata.compressed) internalFormat = formats.uncompressedInternalFormat(internalFormat);
         if (formats.PROXY_TARGETS.has(target)) {
             let levels = this.current.proxyImages.get(target);
             if (!levels) this.current.proxyImages.set(target, levels = new Map());

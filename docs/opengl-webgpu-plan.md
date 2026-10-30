@@ -347,6 +347,14 @@ game.exe
 > - 共享格式表补齐 alpha/luminance/intensity 浮点格式、sRGB luminance 及通用压缩提示的基础格式。新像素检查发现相同尺寸换格式复用旧存储的问题，现以独立 allocatedFormat 比较和替换 GPU 图像；RGBA16F 切换与 alpha/luminance/sRGB 三种真实像素验证通过。
 > - 40 组 Node、25 组站点、8 个 GPU 页面、构建、DLL 与 ESLint 通过，新增变异 5/5 被杀死。普通上传、子图、复制与压缩边界的完整校验，以及其余 C3/C6/C8，继续推进；未把 C 或 D–G 标为整体完成。
 
+> **C3/C6 TexImage 上传校验（2026-10-30）：完成这一批迁移。**
+> - 普通/压缩 1D/2D/3D 定义在 CPU 校验目标、层级、尺寸、边框、格式和像素类型组合；深度格式与颜色格式不能混用。S3TC 压缩定义仅接受 2D、零边框及精确块大小。错误在定义层级、自动 mipmap 或转发之前拒绝，原图像保持有效。
+> - 上传长度包括行对齐、row length、image height、三维 skip images、skip rows/pixels 及 bitmap 起始位；允许合法的重叠行，最后一行无需尾部填充，2D 忽略 skip images。NULL 数据仍校验格式；截断的声明长度和不足的有效数据分别拒绝。
+> - 通用压缩提示和本实现不压缩的 specific 请求按 [GL 2.1 §3.8.1](https://registry.khronos.org/OpenGL/specs/gl/glspec21.pdf) 解析为基础格式，不把通用 token 保存为实际格式。补齐亮度/alpha 与调色板格式映射；高位调色板和固定点的有效精度仍按已有实现处理。
+> - 客体行计算不再强制 row length ≥ width；bitmap 范围包括 skip pixels 的起始位；二维/三维大小、对齐和乘法溢出在复制前拦截。补上 COLOR_INDEX/STENCIL_INDEX 单分量大小。实际 C 边界测试核对重叠、位偏移和溢出，并把其 3D 长度交给 CPU 校验。客体 GL_BITMAP TexImage 编码、PBO 映射/指针与本地缓存的进一步收缩仍留在后续迁移范围内。
+> - 原生 22 例、12 项纹理测试、两种通道的无效上传画面保护、40 组 Node、26 组站点、8 个 GPU 页面、构建、DLL 与 ESLint 通过，新增变异 5/5 被杀死。Apple 对非法 internalformat 返回 INVALID_ENUM，按规范改用 INVALID_VALUE；原始 fixture 不改写。
+> - **继续推进：** 子图、复制、GetTexImage/压缩内容、PBO 与其它对象/数组的迁移、FBO 完整校验、列表/选择/反馈/求值器、完整错误迁移及 C8。C 仍未退出，后续 D–G 未整体完成。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

@@ -1,0 +1,27 @@
+{
+  "renderer":"Apple M1 Pro",
+  "cases":{
+    "valid":0,
+    "target":1280,
+    "negative_level":1281,
+    "large_level":1281,
+    "negative_width":1281,
+    "border2":1281,
+    "border_too_large":1281,
+    "bad_internal":1280,
+    "bgr_internal":1280,
+    "rgb565_internal":1280,
+    "bad_format":1280,
+    "bad_type":1280,
+    "bgr565":1282,
+    "rgb565":0,
+    "rgba565":1282,
+    "bgra4444":0,
+    "rgb4444":1282,
+    "bitmap_rgb":1280,
+    "bitmap_index":0,
+    "depth_as_color":1282,
+    "color_as_depth":1282,
+    "cube_rectangle":1281
+  }
+}

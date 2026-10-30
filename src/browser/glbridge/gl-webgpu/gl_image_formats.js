@@ -15,6 +15,7 @@
         [GL.LUMINANCE8_ALPHA8]: "LUMINANCE_ALPHA",
         [GL.LUMINANCE12_ALPHA12]: "LUMINANCE_ALPHA",
         [GL.LUMINANCE16_ALPHA16]: "LUMINANCE_ALPHA",
+        0x8044: "LUMINANCE_ALPHA", 0x8046: "LUMINANCE_ALPHA", // LUMINANCE6_ALPHA2 / LUMINANCE12_ALPHA4
         [GL.INTENSITY]: "INTENSITY", [GL.INTENSITY8]: "INTENSITY",
         [GL.INTENSITY16]: "INTENSITY",
         0x804A: "INTENSITY", 0x804C: "INTENSITY", // INTENSITY4/12
@@ -47,6 +48,8 @@
         [GL.COMPRESSED_SLUMINANCE]: "LUMINANCE", [GL.COMPRESSED_SLUMINANCE_ALPHA]: "LUMINANCE_ALPHA",
         [GL.COLOR_INDEX]: "COLOR_INDEX",
         [GL.COLOR_INDEX8_EXT]: "COLOR_INDEX",
+        0x80E2: "COLOR_INDEX", 0x80E3: "COLOR_INDEX", 0x80E4: "COLOR_INDEX", // COLOR_INDEX1/2/4_EXT
+        0x80E6: "COLOR_INDEX", 0x80E7: "COLOR_INDEX", // COLOR_INDEX12/16_EXT
     };
 
     const COMPRESSED_FORMATS = {
@@ -114,6 +117,11 @@
             return { gpu: "rgba32float", base: base || "RGBA", float: true };
         case GL.COLOR_INDEX:
         case GL.COLOR_INDEX8_EXT:
+        case 0x80E2:
+        case 0x80E3:
+        case 0x80E4:
+        case 0x80E6:
+        case 0x80E7:
             // Palettised textures keep their index on the GPU and are resolved
             // in the shader, the same way the D3D9 path handles P8.
             return { gpu: "r8uint", base: "COLOR_INDEX", palettised: true };
@@ -172,7 +180,20 @@
             base === "INTENSITY" ? bits[0] : 0, 0, 0, 0];
     }
 
-    const api = { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, SIZED_BITS, PROXY_TARGETS, storageFormatFor, renderbufferFormatFor, textureComponents };
+    const UNCOMPRESSED_HINTS = new Map([
+        [GL.COMPRESSED_ALPHA, GL.ALPHA], [GL.COMPRESSED_LUMINANCE, GL.LUMINANCE],
+        [GL.COMPRESSED_LUMINANCE_ALPHA, GL.LUMINANCE_ALPHA], [GL.COMPRESSED_INTENSITY, GL.INTENSITY],
+        [GL.COMPRESSED_RGB, GL.RGB], [GL.COMPRESSED_RGBA, GL.RGBA],
+        [GL.COMPRESSED_SRGB, GL.SRGB], [GL.COMPRESSED_SRGB_ALPHA, GL.SRGB_ALPHA],
+        [GL.COMPRESSED_SLUMINANCE, GL.SLUMINANCE], [GL.COMPRESSED_SLUMINANCE_ALPHA, GL.SLUMINANCE_ALPHA],
+    ]);
+    function uncompressedInternalFormat(format) {
+        const block = COMPRESSED_FORMATS[format];
+        return block ? block.base === "RGB" ? GL.RGB : GL.RGBA : UNCOMPRESSED_HINTS.get(format) || format;
+    }
+
+    const api = { BASE_INTERNAL_FORMATS, COMPRESSED_FORMATS, SIZED_BITS, PROXY_TARGETS, storageFormatFor,
+        renderbufferFormatFor, textureComponents, uncompressedInternalFormat };
     global.GLImageFormats = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

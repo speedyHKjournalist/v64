@@ -7,10 +7,18 @@
     const parameters = global.GLTextureParameters || require("./gl_texture_parameters.js");
     const formats = global.GLImageFormats || require("./gl_image_formats.js");
     const caps = global.GLCaps || require("./gl_caps.js");
+    const IMAGE_TARGETS = [null, new Set([GL.TEXTURE_1D, GL.PROXY_TEXTURE_1D]),
+        new Set([GL.TEXTURE_2D, GL.PROXY_TEXTURE_2D, GL.PROXY_TEXTURE_CUBE_MAP,
+            ...Array.from({ length: 6 }, (_, i) => GL.TEXTURE_CUBE_MAP_POSITIVE_X + i)]),
+        new Set([GL.TEXTURE_3D, GL.PROXY_TEXTURE_3D])];
     const PIXEL_FORMATS = new Set([GL.COLOR_INDEX, GL.RED, GL.GREEN, GL.BLUE, GL.ALPHA, GL.RGB, GL.RGBA,
         GL.LUMINANCE, GL.LUMINANCE_ALPHA, GL.BGR, GL.BGRA, GL.DEPTH_COMPONENT]);
     const PIXEL_TYPES = new Set([GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT, GL.UNSIGNED_INT,
         GL.FLOAT, GL.HALF_FLOAT_ARB, 0x1A00]); // BITMAP
+    const COMPONENTS = new Map([[GL.COLOR_INDEX, 1], [GL.RED, 1], [GL.GREEN, 1], [GL.BLUE, 1], [GL.ALPHA, 1],
+        [GL.LUMINANCE, 1], [GL.LUMINANCE_ALPHA, 2], [GL.RGB, 3], [GL.BGR, 3], [GL.RGBA, 4], [GL.BGRA, 4], [GL.DEPTH_COMPONENT, 1]]);
+    const SCALAR_BYTES = new Map([[GL.BYTE, 1], [GL.UNSIGNED_BYTE, 1], [GL.SHORT, 2], [GL.UNSIGNED_SHORT, 2],
+        [GL.INT, 4], [GL.UNSIGNED_INT, 4], [GL.FLOAT, 4], [GL.HALF_FLOAT_ARB, 2]]);
     const RGB_PACKED = new Set([GL.UNSIGNED_BYTE_3_3_2, GL.UNSIGNED_BYTE_2_3_3_REV, GL.UNSIGNED_SHORT_5_6_5, GL.UNSIGNED_SHORT_5_6_5_REV]);
     const RGBA_PACKED = new Set([GL.UNSIGNED_SHORT_4_4_4_4, GL.UNSIGNED_SHORT_5_5_5_1, GL.UNSIGNED_SHORT_4_4_4_4_REV,
         GL.UNSIGNED_SHORT_1_5_5_5_REV, GL.UNSIGNED_INT_8_8_8_8, GL.UNSIGNED_INT_8_8_8_8_REV,
@@ -18,20 +26,39 @@
     const setters = new Set(["TEX_PARAMETERI", "TEX_PARAMETERF", "TEX_PARAMETERIV", "TEX_PARAMETERFV"]);
     const ensure = image => image.parameters || (image.parameters = parameters.initial());
     const copy = values => Object.fromEntries(Object.entries(values).map(([p, v]) => [p, v.slice()]));
+    function pixelError(format, type) {
+        if (!PIXEL_FORMATS.has(format) || !PIXEL_TYPES.has(type) && !RGB_PACKED.has(type) && !RGBA_PACKED.has(type) ||
+            type === 0x1A00 && format !== GL.COLOR_INDEX) return GL.INVALID_ENUM;
+        return RGB_PACKED.has(type) && format !== GL.RGB || RGBA_PACKED.has(type) && ![GL.RGBA, GL.BGRA].includes(format) ? GL.INVALID_OPERATION : 0;
+    }
+    function uploadSpan(c, r, dimensions) {
+        if (!r.width || dimensions >= 2 && !r.height || dimensions >= 3 && !r.depth) return 0;
+        const value = pname => c.state.values[pname]?.[0] || 0;
+        const height = dimensions >= 2 ? r.height : 1, depth = dimensions >= 3 ? r.depth : 1;
+        let bits = r.type === 0x1A00 ? 1 : SCALAR_BYTES.get(r.type) * COMPONENTS.get(r.format) * 8;
+        if (RGB_PACKED.has(r.type)) bits = [GL.UNSIGNED_BYTE_3_3_2, GL.UNSIGNED_BYTE_2_3_3_REV].includes(r.type) ? 8 : 16;
+        if (RGBA_PACKED.has(r.type)) bits = [GL.UNSIGNED_INT_8_8_8_8, GL.UNSIGNED_INT_8_8_8_8_REV,
+            GL.UNSIGNED_INT_10_10_10_2, GL.UNSIGNED_INT_2_10_10_10_REV].includes(r.type) ? 32 : 16;
+        const alignment = value(GL.UNPACK_ALIGNMENT) || 4;
+        const stride = Math.ceil(Math.ceil((value(GL.UNPACK_ROW_LENGTH) || r.width) * bits / 8) / alignment) * alignment;
+        const imageStride = stride * (value(GL.UNPACK_IMAGE_HEIGHT) || height);
+        const skipBits = value(GL.UNPACK_SKIP_PIXELS) * bits;
+        return (dimensions >= 3 ? value(GL.UNPACK_SKIP_IMAGES) * imageStride : 0) + value(GL.UNPACK_SKIP_ROWS) * stride +
+            Math.floor(skipBits / 8) + (depth - 1) * imageStride + (height - 1) * stride + Math.ceil((skipBits % 8 + r.width * bits) / 8);
+    }
     for (const dimensions of [1, 2, 3]) for (const compressed of [false, true]) {
         const name = (compressed ? "COMPRESSED_TEX_IMAGE_" : "TEX_IMAGE_") + dimensions + "D";
-        GLShadow.rules({ [P.GLFN[name]]: (s, b, v, o) => {
+        GLShadow.rules({ [P.GLFN[name]]: (s, b, v, o, size) => {
             if (s.current.state.begin) return GL.INVALID_OPERATION;
-            const r = P.decodeRecord(name, v, o), target = formats.PROXY_TARGETS.get(r.target);
-            if (!target) return 0; // ordinary upload validation follows in C3
-            if (dimensions === 1 && target !== GL.TEXTURE_1D || dimensions === 2 &&
-                ![GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP].includes(target) || dimensions === 3 && target !== GL.TEXTURE_3D)
-                return GL.INVALID_ENUM;
+            const r = P.decodeRecord(name, v, o), proxy = formats.PROXY_TARGETS.get(r.target);
+            if (!IMAGE_TARGETS[dimensions].has(r.target)) return GL.INVALID_ENUM;
+            const target = proxy || (dimensions === 2 && r.target !== GL.TEXTURE_2D ? GL.TEXTURE_CUBE_MAP : r.target);
             const maximum = s.capabilities ? caps.integer(s.capabilities, target === GL.TEXTURE_3D ? GL.MAX_3D_TEXTURE_SIZE :
                 target === GL.TEXTURE_CUBE_MAP ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE) : 8192;
             if (r.level < 0 || r.level > Math.floor(Math.log2(maximum)) || r.border < 0 || r.border > 1) return GL.INVALID_VALUE;
             const sizes = [r.width, ...(dimensions >= 2 ? [r.height] : []), ...(dimensions >= 3 ? [r.depth] : [])];
-            if (sizes.some(n => n < 2 * r.border) || target === GL.TEXTURE_CUBE_MAP && r.width !== r.height)
+            const maximumSize = Math.max(1, Math.floor(maximum / 2 ** r.level)) + 2 * r.border;
+            if (sizes.some(n => n < 2 * r.border || !proxy && n > maximumSize) || target === GL.TEXTURE_CUBE_MAP && r.width !== r.height)
                 return GL.INVALID_VALUE;
             const block = formats.COMPRESSED_FORMATS[r.internalformat];
             if (compressed) {
@@ -41,14 +68,15 @@
             } else {
                 if ((!formats.BASE_INTERNAL_FORMATS[r.internalformat] && !block) || [GL.BGR, GL.BGRA, GL.RGB565].includes(r.internalformat))
                     return GL.INVALID_VALUE;
-                if (!PIXEL_FORMATS.has(r.format) || !PIXEL_TYPES.has(r.type) && !RGB_PACKED.has(r.type) && !RGBA_PACKED.has(r.type)) return GL.INVALID_ENUM;
-                if (RGB_PACKED.has(r.type) && r.format !== GL.RGB || RGBA_PACKED.has(r.type) && ![GL.RGBA, GL.BGRA].includes(r.format) ||
-                    r.type === 0x1A00 && r.format !== GL.COLOR_INDEX) return GL.INVALID_OPERATION;
+                const error = pixelError(r.format, r.type); if (error) return error;
                 const base = formats.storageFormatFor(r.internalformat).base;
                 if ((base === "DEPTH") !== (r.format === GL.DEPTH_COMPONENT) ||
                     base === "COLOR_INDEX" && r.format !== GL.COLOR_INDEX || base === "DEPTH" && ![GL.TEXTURE_1D, GL.TEXTURE_2D].includes(target))
                     return GL.INVALID_OPERATION;
             }
+            const bytes = compressed ? r.image_size : r.data_size;
+            if (!proxy && P.RECORDS[name].size + bytes > size) return GL.INVALID_VALUE;
+            if (!proxy && !compressed && bytes && bytes < uploadSpan(s.current, r, dimensions)) return GL.INVALID_OPERATION;
             return 0;
         } });
     }

@@ -119,7 +119,7 @@ test("texture level queries preserve dimensions, faces and effective component p
     const s = shadow(); s.process(scene().bytes());
     const image = (name, target, level, internalformat, width, height = 1, depth = 1) => stream => {
         stream.record(P.GLFN[name], P.encodeRecord(name, { target, level, internalformat, width, height, depth,
-            border: 0, format: GL.RGBA, type: GL.UNSIGNED_BYTE, data_size: 0 }));
+            border: 0, format: internalformat === GL.DEPTH_COMPONENT16 ? GL.DEPTH_COMPONENT : GL.RGBA, type: GL.UNSIGNED_BYTE, data_size: 0 }));
     };
     for (const [key, target, level, define] of [
         ["undefined", GL.TEXTURE_2D, 0],
@@ -232,6 +232,81 @@ test("proxy validation rejects bad dimensions and formats without changing accep
             internalformat: GL.RGBA8, width: 4, height: 4, depth: 1, border: 0, format: GL.RGBA, type: GL.UNSIGNED_BYTE, ...fields }));
         s.process(stream.bytes()); assert.equal(s.current.error, error, name + JSON.stringify(fields));
         assert.equal(s.current.proxyImages.get(GL.PROXY_TEXTURE_2D).get(0).width, 4);
+    }
+});
+
+function upload(stream, name, fields, data = new Uint8Array(0)) {
+    const header = P.encodeRecord(name, { target: GL.TEXTURE_2D, level: 0, internalformat: GL.RGBA8,
+        width: 4, height: 4, depth: 1, border: 0, format: GL.RGBA, type: GL.UNSIGNED_BYTE,
+        data_size: data.length, image_size: data.length, ...fields });
+    const payload = new Uint8Array(header.length + data.length); payload.set(header); payload.set(data, header.length);
+    return stream.record(P.GLFN[name], payload);
+}
+
+test("ordinary texture uploads reject invalid parameters atomically against desktop GL", () => {
+    const native = require("./gl_conformance/texture_uploads_reference.json").cases;
+    for (const [key, fields] of [["valid", {}], ["target", { target: GL.TEXTURE_CUBE_MAP }],
+        ["negative_level", { level: -1 }], ["large_level", { level: 1000 }], ["negative_width", { width: -1 }],
+        ["border2", { border: 2 }], ["border_too_large", { width: 1, height: 1, border: 1 }],
+        ["bad_internal", { internalformat: 0 }], ["bgr_internal", { internalformat: GL.BGR }],
+        ["rgb565_internal", { internalformat: GL.RGB565, format: GL.RGB, type: GL.UNSIGNED_SHORT_5_6_5 }],
+        ["bad_format", { format: 0 }], ["bad_type", { type: 0 }],
+        ["bgr565", { internalformat: GL.RGB8, format: GL.BGR, type: GL.UNSIGNED_SHORT_5_6_5 }],
+        ["rgb565", { internalformat: GL.RGB8, format: GL.RGB, type: GL.UNSIGNED_SHORT_5_6_5 }],
+        ["rgba565", { type: GL.UNSIGNED_SHORT_5_6_5 }], ["bgra4444", { format: GL.BGRA, type: GL.UNSIGNED_SHORT_4_4_4_4 }],
+        ["rgb4444", { internalformat: GL.RGB8, format: GL.RGB, type: GL.UNSIGNED_SHORT_4_4_4_4 }],
+        ["bitmap_rgb", { internalformat: GL.RGB8, format: GL.RGB, type: 0x1A00 }],
+        ["bitmap_index", { internalformat: GL.RGB8, format: GL.COLOR_INDEX, type: 0x1A00 }],
+        ["depth_as_color", { format: GL.DEPTH_COMPONENT, type: GL.FLOAT }],
+        ["color_as_depth", { internalformat: GL.DEPTH_COMPONENT16 }],
+        ["cube_rectangle", { target: GL.TEXTURE_CUBE_MAP_POSITIVE_X, height: 2 }]]) {
+        const s = shadow(), initial = scene().texImage2D(GL.TEXTURE_2D, 0, GL.RGBA4, 3, 5, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(0));
+        s.process(initial.bytes());
+        const image = s.boundImage(GL.TEXTURE_2D).texture, previous = image.levels.get(0).get(0);
+        const stream = upload(new GLStream(), "TEX_IMAGE_2D", fields); s.process(stream.bytes());
+        // GL 2.1 3.8.1 specifies INVALID_VALUE for an invalid internal format;
+        // Apple's driver reports INVALID_ENUM instead. Keep its raw fixture.
+        const error = ["bad_internal", "bgr_internal", "rgb565_internal"].includes(key) ? GL.INVALID_VALUE : native[key];
+        assert.equal(s.current.error, error, key); assert.equal(s.stats.rejected, +!!error, key);
+        if (error) assert.equal(image.levels.get(0).get(0), previous, key + " replaced the old image");
+    }
+});
+
+test("upload bounds honor row padding, image strides, skipped pixels and bitmap bit offsets", () => {
+    const cases = [
+        ["TEX_IMAGE_2D", { width: 1, height: 2, format: GL.RGB }, [], 7],
+        ["TEX_IMAGE_3D", { target: GL.TEXTURE_3D, width: 2, height: 2, depth: 2, format: GL.RGB, type: GL.UNSIGNED_SHORT },
+            [[GL.UNPACK_ALIGNMENT, 8], [GL.UNPACK_ROW_LENGTH, 4], [GL.UNPACK_IMAGE_HEIGHT, 3], [GL.UNPACK_SKIP_IMAGES, 1],
+                [GL.UNPACK_SKIP_ROWS, 1], [GL.UNPACK_SKIP_PIXELS, 1]], 210],
+        ["TEX_IMAGE_2D", { width: 1, height: 1 }, [[GL.UNPACK_ROW_LENGTH, 3], [GL.UNPACK_SKIP_ROWS, 2],
+            [GL.UNPACK_SKIP_PIXELS, 1], [GL.UNPACK_SKIP_IMAGES, 7]], 32],
+        ["TEX_IMAGE_2D", { width: 6, height: 2, format: GL.COLOR_INDEX, type: 0x1A00 },
+            [[GL.UNPACK_ROW_LENGTH, 9], [GL.UNPACK_SKIP_ROWS, 1], [GL.UNPACK_SKIP_PIXELS, 3]], 10],
+        ["TEX_IMAGE_2D", { width: 3, height: 2 }, [[GL.UNPACK_ROW_LENGTH, 1]], 16],
+    ];
+    for (const [name, fields, stores, required] of cases) for (const complete of [false, true]) {
+        const s = shadow(), stream = scene(); for (const [pname, value] of stores) stream.call("PIXEL_STOREI", pname, value);
+        upload(stream, name, fields, new Uint8Array(required - (complete ? 0 : 1))); s.process(stream.bytes());
+        assert.equal(s.current.error, complete ? 0 : GL.INVALID_OPERATION, JSON.stringify([name, fields, stores, complete]));
+        assert.equal(s.stats.rejected, +!complete);
+    }
+    const s = shadow(), stream = scene(); upload(stream, "TEX_IMAGE_2D", { width: 1, height: 1, data_size: 5 }, new Uint8Array(4));
+    s.process(stream.bytes()); assert.equal(s.current.error, GL.INVALID_VALUE, "a truncated declared payload is rejected before storage");
+});
+
+test("uncompressed compression hints resolve to base formats and compressed payloads require exact sizes", () => {
+    for (const format of [GL.COMPRESSED_RGB, GL.COMPRESSED_RGBA, GL.COMPRESSED_RGBA_S3TC_DXT1_EXT]) {
+        const s = shadow(), stream = scene(); upload(stream, "TEX_IMAGE_2D", { internalformat: format });
+        const q = query(stream, GL.TEXTURE_INTERNAL_FORMAT, P.C.V86GL_STATE_INTEGER, GL.TEXTURE_2D, P.C.V86GL_PARAMETER_TEXTURE_LEVEL);
+        s.process(stream.bytes()); assert.equal(s.current.error, 0); assert.deepEqual(q().values, [format === GL.COMPRESSED_RGB ? GL.RGB : GL.RGBA]);
+    }
+    for (const [fields, bytes, error] of [
+        [{}, 8, 0], [{ image_size: 7 }, 7, GL.INVALID_VALUE], [{ image_size: 8 }, 7, GL.INVALID_VALUE],
+        [{ border: 1 }, 8, GL.INVALID_OPERATION], [{ internalformat: GL.COMPRESSED_RGB }, 8, GL.INVALID_ENUM],
+    ]) {
+        const s = shadow(), stream = scene(); upload(stream, "COMPRESSED_TEX_IMAGE_2D",
+            { internalformat: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, ...fields }, new Uint8Array(bytes));
+        s.process(stream.bytes()); assert.equal(s.current.error, error); assert.equal(s.stats.rejected, +!!error);
     }
 });
 
