@@ -78,6 +78,7 @@
         let inflightBytes = 0;
         let processing = false;
         let processAgain = false;
+        let heldRequest = null;
 
         if (shadow) shadow.writeResponse = (target, bytes, statusOffset) => {
             if (target.generation !== arenaGeneration || target.batchId !== nextBatch || !arenaBytes) return;
@@ -87,6 +88,27 @@
             dev.write_memory(bytes.subarray(statusOffset + 4), arenaAddress + offset + statusOffset + 4);
             dev.write_memory(bytes.subarray(statusOffset, statusOffset + 4), arenaAddress + offset + statusOffset);
         };
+        if (shadow) shadow.onCPUResume = (bytes, segments, metadata) => {
+            if (metadata?.generation !== arenaGeneration || !arenaBytes) return;
+            const offset = metadata.offset || 0;
+            channel.post({ type: "batch", continuation: true, generated: !!metadata.generated, id: metadata.batchId, generation: arenaGeneration,
+                frameId: metadata.frameId, flags: metadata.generated || shadow.cpuBarrier || !metadata.root ? 0 : metadata.flags,
+                commandCount: metadata.commandCount, descAddr: arenaAddress, descLen: bytes.length + HEADER_BYTES,
+                batchAddr: metadata.generated ? 0 : arenaAddress + HEADER_BYTES + offset,
+                responseBase: arenaBytes - RESPONSE_AREA_BYTES - HEADER_BYTES - (metadata.generated ? 0 : offset),
+                submitCount: metadata.submitCount, bytes, ...(segments ? { segments } : {}) }, remote && bytes.buffer.byteLength ? [bytes.buffer] : undefined);
+        };
+        if (shadow) shadow.onCPUComplete = metadata => {
+            if (heldRequest?.id === metadata.batchId && heldRequest.generation === metadata.generation) completeHeld(OK);
+        };
+
+        function completeHeld(status) {
+            if (!heldRequest) return;
+            const held = heldRequest; heldRequest = null;
+            const response = held.response.slice(); response[0] = status;
+            held.request.write(new Uint8Array(response.buffer)); held.request.complete(); dev.flush(0);
+            processQueue();
+        }
 
         function releaseArena() {
             ++arenaGeneration;
@@ -100,8 +122,8 @@
         }
 
         function canAccept() {
-            return !remote || inflight.size < MAX_INFLIGHT_BATCHES &&
-                inflightBytes <= MAX_INFLIGHT_BYTES - ARENA_BYTES;
+            return !heldRequest && !shadow?.cpuBarrier && (!remote || inflight.size < MAX_INFLIGHT_BATCHES &&
+                inflightBytes <= MAX_INFLIGHT_BYTES - ARENA_BYTES);
         }
 
         channel.listen(message => {
@@ -143,6 +165,7 @@
                     break;
                 case "machine_reset":
                     if (shadow) shadow.reset();
+                    completeHeld(INVALID);
                     break;
                 case "glslang":
                     if (shadow && global.V86GLGlslang) {
@@ -156,6 +179,7 @@
                     break;
                 case "available":
                     hostAvailable = !!message.value;
+                    if (!hostAvailable) { if (shadow?.cpuBarrier) shadow.cancelCPU(); completeHeld(NO_RENDERER); }
                     // A renderer that is gone acknowledges nothing: answer the
                     // descriptors left with the guest (NO_RENDERER) rather than
                     // leave its driver waiting until it resets the queue
@@ -202,7 +226,12 @@
                 } catch (error) {
                     console.error("[virtio-v86gl] request failed", error);
                 }
-                request.write(new Uint8Array(new Uint32Array([result, lastFrameId, lastBytes, submitCount]).buffer));
+                const response = new Uint32Array([result, lastFrameId, lastBytes, submitCount]);
+                if (result === OK && shadow?.cpuBarrier) {
+                    heldRequest = { request, response, generation: arenaGeneration, id: nextBatch };
+                    break;
+                }
+                request.write(new Uint8Array(response.buffer));
                 request.complete();
             }
             dev.flush(0);
@@ -253,26 +282,27 @@
                     commandBytes !== length - HEADER_BYTES || (header.getUint32(8, true) & ~1))
                 return INVALID;
             if (!hostAvailable) return NO_RENDERER;
+            const id = ++nextBatch;
+            const frameId = header.getUint32(12, true);
 
             // A GL batch's answers, written into the guest's memory before
             // it is copied (a D3D batch is one envelope record, 0xFFE1)
             let segments;
             if (shadow && !(length >= HEADER_BYTES + 4 && (header.getUint16(HEADER_BYTES, true) & 0xFFF0) === 0xFFE0 &&
                     header.getUint16(HEADER_BYTES + 2, true) === 0xFFFF))
-                segments = shadow.process(raw.subarray(HEADER_BYTES), { generation: arenaGeneration, batchId: nextBatch + 1 });
+                segments = shadow.process(raw.subarray(HEADER_BYTES), { generation: arenaGeneration, batchId: id, root: true, offset: 0,
+                    frameId, flags: header.getUint32(8, true) | flags, commandCount: header.getUint32(16, true), submitCount: submitCount + 1 });
 
-            const id = ++nextBatch;
             // Across threads a copy the renderer owns; never the guest's memory
             const bytes = remote ? raw.slice(HEADER_BYTES) : raw.subarray(HEADER_BYTES);
             inflight.set(id, bytes.byteLength);
             inflightBytes += bytes.byteLength;
-            const frameId = header.getUint32(12, true);
             channel.post({
                 type: "batch",
                 id,
                 generation: arenaGeneration,
                 frameId,
-                flags: header.getUint32(8, true) | flags,
+                flags: shadow?.cpuBarrier ? 0 : header.getUint32(8, true) | flags,
                 commandCount: header.getUint32(16, true),
                 descAddr: arenaAddress,
                 descLen: length,
@@ -285,7 +315,7 @@
             lastFrameId = frameId;
             lastBytes = commandBytes;
             ++submitCount;
-            return OK;
+            return hostAvailable ? OK : NO_RENDERER;
         }
 
         return {
@@ -319,6 +349,8 @@
                 return shadow ? shadow.stats : null;
             },
             reset() {
+                heldRequest = null;
+                shadow?.cancelCPU();
                 releaseArena();
                 lastFrameId = lastBytes = submitCount = 0;
                 forgetInflight();
@@ -334,6 +366,7 @@
                 // version 2 has no shadow state: the renderer sends its capabilities again
                 if (!Array.isArray(state) || state[0] !== STATE_VERSION && state[0] !== 2)
                     throw new Error("Unsupported virtio-v86gl state in snapshot");
+                heldRequest = null;
                 const [, address, bytes, frameId, last, count, shadowState] = state;
                 if (shadow) shadow.setState(shadowState ? JSON.parse(shadowState) : null);
                 if (bytes && (bytes !== ARENA_BYTES || !dev.is_ram(address, bytes)))

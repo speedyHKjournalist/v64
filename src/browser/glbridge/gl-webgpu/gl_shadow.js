@@ -110,6 +110,11 @@
         reset() {
             this.responseTargets = new Map();
             this.nextResponseTarget = 0;
+            this.cpuBarrier = null;
+            this.deferredCPU = [];
+            this.deferredCPUBytes = 0;
+            this.cpuResumeInsertion = null;
+            this.completedCPUBatches = null;
             this.contexts = new Map();
             this.groups = new Map();
             this.nextGroup = 1;
@@ -137,14 +142,66 @@
          * reports it.
          */
         process(bytes, metadata = this.batchMetadata) {
+            if (this.cpuBarrier) { this.deferCPU(bytes, metadata); return []; }
             const previous = this.batchMetadata;
             this.batchMetadata = metadata;
-            try { return this.processBatch(bytes); }
+            try {
+                const result = this.processBatch(bytes);
+                if (!this.cpuBarrier && metadata?.root) {
+                    if (this.completedCPUBatches) this.completedCPUBatches.push(metadata);
+                    else this.onCPUComplete?.(metadata);
+                }
+                return result;
+            }
             finally { this.batchMetadata = previous; }
         }
 
+        blockCPU(token) {
+            if (this.cpuBarrier) throw new Error("a GL CPU state dependency is already pending");
+            this.cpuBarrier = { token, metadata: this.batchMetadata };
+        }
+
+        deferCPU(bytes, metadata) {
+            const task = { bytes: bytes.slice(), metadata: metadata && { ...metadata, deferred: true } };
+            if (this.current?.listExecution) task.execution = { context: this.current.key, ...GLShadow.clone(this.current.listExecution) };
+            (this.cpuResumeInsertion || this.deferredCPU).push(task); this.deferredCPUBytes += task.bytes.length;
+        }
+
+        cancelCPU() {
+            const barrier = this.cpuBarrier;
+            this.cpuBarrier = null; this.deferredCPU = []; this.deferredCPUBytes = 0;
+            for (const part of PARTS) if (part.cancelCPU) part.cancelCPU(this, barrier);
+        }
+
+        resumeCPU(token, commands = []) {
+            if (this.cpuBarrier?.token !== token) return false;
+            if (this.completedCPUBatches) { Promise.resolve().then(() => this.resumeCPU(token, commands)); return true; }
+            const metadata = this.cpuBarrier.metadata;
+            this.cpuBarrier = null; this.completedCPUBatches = [];
+            try {
+                if (commands.length) this.onCPUResume?.(new Uint8Array(), commands.map(bytes => ({ bytes })), { ...metadata, generated: true, root: false, offset: 0 });
+                while (!this.cpuBarrier && this.deferredCPU.length) {
+                    const task = this.deferredCPU.shift(); this.deferredCPUBytes -= task.bytes.length;
+                    const context = task.execution && this.contexts.get(task.execution.context), previous = context?.listExecution;
+                    if (context) context.listExecution = { depth: task.execution.depth, bytes: task.execution.bytes };
+                    this.cpuResumeInsertion = [];
+                    try {
+                        const segments = this.process(task.bytes, task.metadata);
+                        this.onCPUResume?.(task.bytes, segments, task.metadata);
+                    } finally {
+                        this.deferredCPU.unshift(...this.cpuResumeInsertion); this.cpuResumeInsertion = null;
+                        if (context) context.listExecution = previous;
+                    }
+                }
+                // Publish continuations before releasing the submitting IOCTL:
+                // a newly accepted batch must follow their rendering work.
+                for (const completed of this.completedCPUBatches) this.onCPUComplete?.(completed);
+            } finally { this.completedCPUBatches = null; }
+            return true;
+        }
+
         deferResponse(view, offset, length, local = false) {
-            if (this.batchMetadata && !local) return { ...this.batchMetadata, offset };
+            if (this.batchMetadata?.batchId !== undefined && !local) return { ...this.batchMetadata, offset: (this.batchMetadata.offset || 0) + offset };
             const id = ++this.nextResponseTarget;
             this.responseTargets.set(id, new Uint8Array(view.buffer, view.byteOffset + offset, length));
             return { localId: id };
@@ -198,11 +255,20 @@
                         if (forwarded !== undefined) view.setUint16(recordOffset, forwarded, true);
                     }
                 }
+                const statusOffset = protocol.F[name]?.status;
+                if (this.batchMetadata?.deferred && !this.batchMetadata.generated && statusOffset !== undefined && size >= minimum &&
+                    view.getUint32(offset + statusOffset, true) !== PENDING && this.writeResponse)
+                    this.completeResponse({ ...this.batchMetadata, offset: (this.batchMetadata.offset || 0) + offset }, bytes.slice(offset, offset + size), statusOffset);
                 offset += size;
                 if (routed || protocol.isRejected(view.getUint16(recordOffset, true))) {
                     if (accepted < recordOffset) segments.push({ offset: accepted, length: recordOffset - accepted });
                     if (routed && !error) for (const command of routed.commands || []) segments.push({ bytes: command });
                     accepted = offset; filtered = true;
+                }
+                if (this.cpuBarrier) {
+                    this.deferCPU(bytes.subarray(offset), this.batchMetadata && { ...this.batchMetadata, offset: (this.batchMetadata.offset || 0) + offset });
+                    if (accepted < offset) segments.push({ offset: accepted, length: offset - accepted });
+                    return segments;
                 }
             }
             if (offset !== end) ++this.stats.malformed;
@@ -216,11 +282,11 @@
         // addresses. Lists and evaluators use this to validate their expansion
         // through exactly the same command rules as the original stream.
         expand(bytes) {
-            const segments = this.process(bytes);
+            const segments = this.process(bytes, this.batchMetadata && { ...this.batchMetadata, generated: true, root: false, offset: 0 });
             return segments ? segments.map(segment => segment.bytes || bytes.subarray(segment.offset, segment.offset + segment.length)) : [bytes];
         }
 
-        dispatch(fn, bytes, view, offset, size) {
+        dispatch(fn, bytes, view, offset, size, validateOnly = false) {
             if (protocol.isRejected(fn)) {
                 if (this.current && !this.current.error) this.current.error = protocol.rejectionError(fn);
                 return;
@@ -239,6 +305,7 @@
                 const error = part.checkCommand(this, fn, bytes, view, offset, size);
                 if (error) return error;
             }
+            if (validateOnly) return 0;
             // CPU errors are available inside the IOCTL, before the renderer
             // sees accepted records. A zero CPU flag keeps the transitional
             // renderer path for command families not migrated yet.

@@ -213,6 +213,7 @@
         // GL's inline answers alias the command arena, reused at the next
         // submission. D3D's dedicated response slots have a different lifetime.
         let inlineLease = null;
+        let inlineBatchId = 0;
         // Across threads batches are handled one at a time
         let work = Promise.resolve();
         const stats = { graphics_batches: 0, graphics_bytes: 0, graphics_pending: 0, graphics_peak_pending: 0 };
@@ -256,7 +257,8 @@
 
         const onBatch = message => {
             const batchEpoch = epoch;
-            const lease = inlineLease = {};
+            const lease = message.continuation ? (message.id === inlineBatchId ? inlineLease : {}) : inlineLease = {};
+            if (!message.continuation) inlineBatchId = message.id;
             const generation = message.generation;
             const event = {
                 frameId: message.frameId,
@@ -270,9 +272,10 @@
                 submitCount: message.submitCount,
                 handled: false,
                 isMemoryValid: () => batchEpoch === epoch && !bridge.destroyed,
-                isInlineMemoryValid: () => lease === inlineLease && batchEpoch === epoch && !bridge.destroyed,
+                isInlineMemoryValid: () => !message.generated && lease === inlineLease && batchEpoch === epoch && !bridge.destroyed,
                 writeGuestMemory: (offset, bytes, inline) => {
                     if (batchEpoch !== epoch) return;
+                    if (message.generated && inline !== false) throw new Error("CPU-generated graphics records cannot write inline guest replies");
                     if (inline && lease !== inlineLease) return;
                     const data = channel.remote ? new Uint8Array(bytes).slice() : bytes;
                     channel.post({ type: "write", generation, offset, bytes: data,
@@ -301,9 +304,10 @@
                         throw new Error("invalid CPU-validated graphics segment");
                     end = segment.offset + segment.length;
                 }
-                for (const segment of message.segments) {
+                for (let index = 0; index < message.segments.length; ++index) {
+                    const segment = message.segments[index], flags = index === message.segments.length - 1 ? event.flags : event.flags & ~1;
                     if (segment.bytes) bridge.pushPCIBatch({ ...event,
-                        bytes: segment.bytes, batchAddr: 0,
+                        bytes: segment.bytes, batchAddr: 0, flags,
                         isInlineMemoryValid: () => false,
                         writeGuestMemory: (at, bytes, inline) => {
                             if (inline !== false) throw new Error("CPU-generated graphics records cannot write inline guest replies");
@@ -313,12 +317,14 @@
                     else {
                         const { offset, length } = segment;
                         bridge.pushPCIBatch({ ...event,
+                            flags,
                             bytes: event.bytes.subarray(offset, offset + length), batchAddr: event.batchAddr + offset,
                             responseBase: event.responseBase - offset,
                             writeGuestMemory: (at, bytes, inline) => event.writeGuestMemory(at + offset, bytes, inline),
                         });
                     }
                 }
+                if (!message.segments.length && event.flags & 1) bridge.pushPCIBatch({ ...event, bytes: new Uint8Array() });
             };
             if (!channel.remote) {
                 pushAccepted();
