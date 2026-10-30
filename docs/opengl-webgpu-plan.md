@@ -444,6 +444,12 @@ game.exe
 > - 26 组原生 CGL 对照、八个实际 C 附件入口的 ABI 和两种模式真实像素通过。46 组 Node、33 组站点、8 个 GPU 页面、构建、831 个 DLL 导出和变更源码 ESLint 通过，新增变异 6/6 被杀死。
 > - FBO 完整性的剩余格式规则、EXT/core 来源与共享、其它 C3/C6/C8 继续推进；阶段 C 尚未退出。
 
+> **C3/C6/C7 FBO 格式完整性与绘制拒绝（2026-10-31）：完成这一批迁移。**
+> - 颜色附件要求可渲染的非压缩 RGB/RGBA 格式；以实际存储和分量精度比较 EXT 要求的格式一致性，unsized RGBA 与 RGBA8 一致。采样时解码成 RGBA 的压缩纹理仍不能作颜色附件。
+> - CPU 在不完整的 draw/read FBO 上拒绝相应清除、绘制、像素操作和 blit。失败 ReadPixels 立即写 FAILED 并保留输出，页面不再尝试绘制或读回。
+> - 新增 16 组格式/零尺寸/边框原生参照及清除、读回错误。Apple 同时公布 ARB FBO，允许不同颜色格式；本实现目前只公布 EXT FBO，按 EXT 返回 INCOMPLETE_FORMATS。不可渲染格式采用规范允许的 INCOMPLETE_ATTACHMENT，而 Apple 返回 UNSUPPORTED。
+> - 累计 42 组原生 FBO 用例、46 组 Node、33 组站点、8 个 GPU 页面、构建与变更源码 ESLint 通过，新增变异 5/5 被杀死。EXT/core 来源与共享、其它 C3/C6/C8 继续推进；阶段 C 尚未退出。
+
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；
   - 由它生成客体 C 结构、`gl_opcode_names.h`、`gl_wire.js`、`gl_constants.js` 和测试编码器；

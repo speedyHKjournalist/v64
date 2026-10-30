@@ -299,7 +299,9 @@ test("draw/read selection rejects invalid enums, unavailable buffers and duplica
         [new GLStream().names(P.GLFN.DRAW_BUFFERS, new Array(9).fill(GL.NONE)), GL.INVALID_VALUE],
         [new GLStream().call("BEGIN", GL.POINTS).call("DRAW_BUFFER", GL.NONE), GL.INVALID_OPERATION],
     ]) {
-        const one = shadow(); one.process(scene().call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3).bytes());
+        const one = shadow(); one.process(scene().call("BIND_TEXTURE", GL.TEXTURE_2D, 1)
+            .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+            .call("BIND_FRAMEBUFFER", FRAMEBUFFER, 3).call("FRAMEBUFFER_TEXTURE", FRAMEBUFFER, COLOR0, GL.TEXTURE_2D, 1, 0, 0).bytes());
         one.process(stream.bytes()); assert.equal(one.current.error, error); assert.deepEqual(one.current.drawBuffers, [COLOR0]);
         assert.equal(one.current.readBuffer, COLOR0);
     }

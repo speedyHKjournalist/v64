@@ -167,4 +167,15 @@
             if (saved.read !== undefined) buffers.read(c, c.framebuffers, saved.read);
         },
     });
+    const draws = new Set(["CLEAR", "BEGIN", "DRAW_ARRAYS", "DRAW_ELEMENTS", "DRAW_ARRAYS_GL2", "DRAW_ELEMENTS_GL2",
+        "DRAW_ARRAYS_DIRECT", "DRAW_ELEMENTS_DIRECT", "DRAW_RANGE_ELEMENTS_DIRECT", "MULTI_DRAW_ARRAYS_DIRECT",
+        "MULTI_DRAW_ELEMENTS_DIRECT", "DRAW_PIXELS", "COPY_PIXELS", "BITMAP", "BLIT_FRAMEBUFFER"].map(name => P.GLFN[name]));
+    const reads = new Set(["READ_PIXELS", "COPY_PIXELS", "BLIT_FRAMEBUFFER"].map(name => P.GLFN[name]));
+    GLShadow.part({ checkCommand(s, fn, bytes, view, offset) {
+        const badDraw = draws.has(fn) && s.framebufferStatus(GL.DRAW_FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE;
+        const badRead = reads.has(fn) && s.framebufferStatus(GL.READ_FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE;
+        if (!badDraw && !badRead) return 0;
+        if (fn === P.GLFN.READ_PIXELS) s.answered("READ_PIXELS", view, offset, P.C.V86GL_SYNC_QUERY_STATUS_FAILED);
+        return GL.INVALID_FRAMEBUFFER_OPERATION;
+    } });
 })(typeof globalThis !== "undefined" ? globalThis : this);

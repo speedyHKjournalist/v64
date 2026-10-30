@@ -1,0 +1,18 @@
+{"renderer":"Apple M1 Pro","arbFramebuffer":true,"cases":[
+{"name":"rgba8","format":32856,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"rgb8","format":32849,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"luminance8","format":32832,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36061,"clearError":1286,"readError":1286,"readPreserved":true},
+{"name":"alpha8","format":32828,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36061,"clearError":1286,"readError":1286,"readPreserved":true},
+{"name":"intensity8","format":32843,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36061,"clearError":1286,"readError":1286,"readPreserved":true},
+{"name":"luminance_alpha8","format":32837,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36061,"clearError":1286,"readError":1286,"readPreserved":true},
+{"name":"rgba4","format":32854,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"rgb5_a1","format":32855,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"rgba16f","format":34842,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"rgba32f","format":34836,"secondFormat":0,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"zero_width","format":32856,"secondFormat":0,"width":0,"height":4,"border":0,"imageError":0,"error":0,"status":36054,"clearError":1286,"readError":1286,"readPreserved":true},
+{"name":"border","format":32856,"secondFormat":0,"width":6,"height":6,"border":1,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"same_formats","format":32856,"secondFormat":32856,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"different_channels","format":32856,"secondFormat":32849,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"different_precision","format":32856,"secondFormat":32854,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false},
+{"name":"different_numeric_type","format":32856,"secondFormat":34842,"width":4,"height":4,"border":0,"imageError":0,"error":0,"status":36053,"clearError":0,"readError":0,"readPreserved":false}
+]}

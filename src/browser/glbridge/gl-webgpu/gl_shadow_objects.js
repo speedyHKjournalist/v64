@@ -394,10 +394,11 @@
         const fbo = c.framebuffers.get(name);
         if (!fbo) return GL.FRAMEBUFFER_UNDEFINED;
         let width = 0, height = 0, any = false, dimensions = true;
+        const colorFormats = new Set();
         const complete = (record, accept) => {
             if (!record) return true;
             const image = this.attachedImage(record);
-            if (!image || !accept(image.internalFormat >>> 0)) return false;
+            if (!image || !accept(image.internalFormat >>> 0, image, record)) return false;
             if (!any) {
                 width = image.width;
                 height = image.height;
@@ -408,7 +409,13 @@
             return true;
         };
         for (const record of fbo.color)
-            if (!complete(record, format => !DEPTH_FORMATS.has(format) && !STENCIL_FORMATS.has(format)))
+            if (!complete(record, (format, image, record) => {
+                if (formats.COMPRESSED_FORMATS[format] || !["RGB", "RGBA"].includes(formats.BASE_INTERNAL_FORMATS[format])) return false;
+                const storage = formats.storageFormatFor(format, this.capabilities?.features);
+                const bits = record.kind === "renderbuffer" ? image.componentBits : formats.textureComponents(format, false, this.capabilities?.features);
+                colorFormats.add(JSON.stringify([storage.gpu, storage.base, bits.slice(0, 4)]));
+                return true;
+            }))
                 return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         if (!complete(fbo.depth, format => DEPTH_FORMATS.has(format)))
             return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
@@ -416,6 +423,9 @@
             return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         if (!any) return GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
         if (!dimensions) return GL.FRAMEBUFFER_INCOMPLETE_DIMENSIONS_EXT;
+        // This profile exposes EXT_framebuffer_object, whose colour images
+        // must share an internal format. ARB FBO's relaxed rule is not exposed.
+        if (colorFormats.size > 1) return GL.FRAMEBUFFER_INCOMPLETE_FORMATS_EXT;
         const same = (x, y) => x.kind === y.kind && x.id === y.id && x.level === y.level && x.layer === y.layer;
         if (fbo.depth && fbo.stencil && !same(fbo.depth, fbo.stencil)) return GL.FRAMEBUFFER_UNSUPPORTED_EXT;
         // a buffer that is not an attachment (BACK on an FBO) means the first

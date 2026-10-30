@@ -511,6 +511,24 @@
             executor.submit(remote ? attachmentMemory.slice() : attachmentMemory, {}); await executor.idle();
             check([64, 128, 191, 255].every((v, i) => Math.abs(attachmentPixel.bytes[32 + i] - v) <= 1), "invalid FBO attachments changed the previous render target");
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO attachment validation must have no host errors");
+            const formats = new GLStream().makeCurrent(195, 0, 0, 64, 64, 195, 195)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 1).texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 2).texImage2D(GL.TEXTURE_2D, 0, GL.LUMINANCE8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(64))
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 1).call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0, 0)
+                .call("CLEAR_COLOR", 0.25, 0.5, 0.75, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0 + 1, GL.TEXTURE_2D, 2, 0, 0)
+                .call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT);
+            const failedFormatRead = formats.readPixels(1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4); failedFormatRead.bytes.fill(0xA5, 32);
+            formats.call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0 + 1, 0, 0, -1, -1);
+            const preservedFormatPixel = formats.readPixels(1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), formatMemory = formats.bytes();
+            const formatRejected = shadow.stats.rejected; shadow.process(formatMemory);
+            check(shadow.stats.rejected === formatRejected + 2, "incomplete FBO clear and readback must fail on CPU");
+            executor.options.writeGuestMemory = (offset, data) => formatMemory.set(data, offset);
+            executor.submit(remote ? formatMemory.slice() : formatMemory, {}); await executor.idle();
+            check(failedFormatRead.view.getUint32(P.F.READ_PIXELS.status, true) === P.C.V86GL_SYNC_QUERY_STATUS_FAILED &&
+                failedFormatRead.bytes.subarray(32).every(v => v === 0xA5), "incomplete readback must preserve output and report FAILED");
+            check([64, 128, 191, 255].every((v, i) => Math.abs(preservedFormatPixel.bytes[32 + i] - v) <= 1), "incomplete FBO rendering changed the old image");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "FBO completeness rejection must have no host errors");
             const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
                 .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                 .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")
