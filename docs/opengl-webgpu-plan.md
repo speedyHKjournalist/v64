@@ -207,7 +207,15 @@ game.exe
 >   - `glReadPixels` 映射失败时写 FAILED（S1-7），客体不再等满 5 秒。
 >   - 客体（站点 `opengl32_proxy.c`）对这三种记录改用 `wait_for_host_status` 等状态字。着色器和程序的答案仍在请求返回时就有，所以不等。
 >   - 期限仍是挂钟 5 秒，以心跳为准的期限留到阶段 F。
-> - 下一步：全部命令的校验（之后 `QUERY_ERROR` 才能搬过来），以及 `QUERY_INTEGER` 的状态查询。
+> - **C3 第四步（2026-10-30）：首批有类型的状态查询完成。**
+>   - 新增 `QUERY_STATE`（opcode 219），头部由同一份协议生成；支持整数、浮点、双精度和布尔查询、最多 16 个分量，避免旧 `QUERY_INTEGER` 只能返回一个整数的问题。已转换的值以 double 编码，32 位整数不会失真。
+>   - `gl_shadow_state.js` 在 CPU 侧保存视口、剪裁框、深度范围、清除值、混合/alpha 状态、颜色/深度写掩码、面/线/点状态、像素打包参数和矩阵栈；按属性组恢复 `PushAttrib`/`PushClientAttrib`，并保存到快照。纹理矩阵按服务端活动单元独立保存。
+>   - 客体四个 `glGet*v` 优先取该答案；尚未接管的状态明确返回 UNSUPPORTED，暂走原客体路径。查询失败不改应用输出，也不伪装成回退成功。页面不回答新查询。
+>   - 样本数和双缓冲查询来自窗口的像素格式；`MAX_VIEWPORT_DIMS` 返回两个分量。FBO 的采样数和位深尚未接管，不能用适配器常数代替。
+>   - 验证：`gl_shadow_state_test.js` 8 项（含 9 个场景 × 4 种类型的 Apple GL 2.1 参照）、`gl_sync_answers_test.js` 验证请求返回前两种模式均已写回答案；站点 `gl_state_query_abi_test.js` 原生编译实际 C 编码/解码函数，往返真实影子和执行器，并检查输出边界。参照生成器和金数据在 `tests/glbridge/gl_conformance/reference/state.c`、`state_reference.json`。
+>   - 归一化整数转换以 Apple 参照核对；-1 的端点按 [GL 2.1 glGet 参考页](https://registry.khronos.org/OpenGL-Refpages/gl2.1/xhtml/glGet.xml) 保留 INT_MIN，Apple 的 -INT_MAX 作为参照差异在测试中明确处理。
+>   - 本批检查：v86 的 32 组 Node 测试、站点的 15 组测试、7 个真 WebGPU 页面、新增查询变异 4/4 被杀死、变更文件 ESLint、`make glbridge` 和客体 DLL（普通/诊断）交叉编译通过（各 831 个导出，无 C 运行库依赖）。发布 DLL/镜像尚未替换。
+> - **C3 整体仍进行中。** 下一步：补齐其余状态族和全部命令校验、只转发接受的命令（C6）；之后才能迁移 `QUERY_ERROR`。现有 worker `glGetError` 已知失败继续保留。显示列表、选择/反馈、名字分配及 C8 快照架构尚未完成。
 
 - **C1 协议单一来源。**
   - 恢复 `gl_protocol.json`（站点 `8bcd2f7^` 里有最后一版），放进 v86 作为唯一来源；

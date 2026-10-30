@@ -112,10 +112,12 @@
         }
 
         dispatch(fn, bytes, view, offset, size) {
+            for (const part of PARTS) if (part.command) part.command(this, fn, bytes, view, offset, size);
             const method = HANDLERS.get(fn);
             if (!method) return;
             // (a GL command needs a context; one without is the executor's to report)
-            if (fn < 0xFF00 && fn !== GLFN.QUERY_INTEGER && fn !== GLFN.QUERY_GL_STRING && !this.current) return;
+            if (fn < 0xFF00 && fn !== GLFN.QUERY_INTEGER && fn !== GLFN.QUERY_GL_STRING &&
+                    fn !== GLFN.QUERY_STATE && !this.current) return;
             this[method](bytes, view, offset, size);
         }
 
@@ -144,6 +146,7 @@
                 context = this.createContext(key, id, shareGroup ? "guest:" + shareGroup : "private:" + this.nextGroup++);
             }
             this.current = context;
+            for (const part of PARTS) if (part.current) part.current(this, context, view, offset, size);
         }
 
         createContext(key, id, groupKey) {

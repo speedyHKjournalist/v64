@@ -3790,6 +3790,14 @@
             view.setUint32(offset + protocol.F.QUERY_ERROR.value, error, true);
         }, { needsContext: false });
 
+        // CPU-only query: it must never consult the page's state or write a
+        // late answer into its copy of guest memory. Old query records keep
+        // their existing path while the shadow's state coverage grows.
+        define("QUERY_STATE", function(a, bytes, view, offset, size) {
+            if (size < protocol.RECORDS.QUERY_STATE.size)
+                throw new GLStreamError("query-state record is short");
+        }, { needsContext: false });
+
         define("QUERY_INTEGER", function(a, bytes, view, offset, size) {
             if (size < 16) throw new GLStreamError("query-integer record is short");
             // answered on the CPU side already (gl_shadow.js)

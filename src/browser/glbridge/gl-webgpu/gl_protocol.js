@@ -237,6 +237,9 @@
         ["QUERY_OBJECT_BATCH", 216],
         ["BLIT_FRAMEBUFFER", 217, "BlitFramebuffer", "iiiiiiiiuu"],
         ["EDGE_FLAG", 218, "EdgeFlag", "u"],
+        // CPU-side state queries. The data are already converted to the
+        // requested GL type, stored as doubles (including exact 32-bit ints).
+        ["QUERY_STATE", 219, null, "u:pname u:value_kind u:status u:count u:data_size u:error"],
     ];
 
     // Control records, outside the GLFN numbering: [name, code, layout]
@@ -279,6 +282,11 @@
         ["V86GL_SYNC_QUERY_STATUS_PENDING", 0],
         ["V86GL_SYNC_QUERY_STATUS_OK", 1],
         ["V86GL_SYNC_QUERY_STATUS_FAILED", 2],
+        ["V86GL_STATE_QUERY_UNSUPPORTED", 3, "state not migrated to the CPU shadow yet"],
+        ["V86GL_STATE_INTEGER", 1],
+        ["V86GL_STATE_FLOAT", 2],
+        ["V86GL_STATE_DOUBLE", 3],
+        ["V86GL_STATE_BOOLEAN", 4],
         ["V86GL_OBJECT_KIND_SHADER", 1],
         ["V86GL_OBJECT_KIND_PROGRAM", 2],
         ["V86GL_OBJECT_KIND_QUERY", 3],

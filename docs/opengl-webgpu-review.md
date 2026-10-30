@@ -2,7 +2,7 @@
 
 审查对象：Windows XP 客体的 `opengl32.dll` 代理（OpenGL 1.1–2.1 + WGL），以及宿主的 `gl-webgpu` 执行器、GLSL/ARB 翻译器和固定管线生成器。
 基线：v86 `e92fd4f0`（`ios6` 分支；`gl-webgpu/` 中只有 `gl_shader_translator.js` 与 `master` 不同，多了 GLES 3.x L0 的 240 行），retro-gaming-site `43c4d1e`。日期 2026-10-29。
-性质：只读审查，没有改动代码；本文尚未提交。它是 [`d3d-webgpu-review.md`](d3d-webgpu-review.md) 的姊妹篇。两条路径共用 `v86gl.sys`、`v86gl_device.js`、`graphics_proxy.js`、`v86_network_bridge.js` 和 `webgpu_host.js`，交叉问题在文中注明。
+性质：本文保留修复前的审查基线，已提交；当前修复进度和验收结果见 [`opengl-webgpu-plan.md`](opengl-webgpu-plan.md)。它是 [`d3d-webgpu-review.md`](d3d-webgpu-review.md) 的姊妹篇。两条路径共用 `v86gl.sys`、`v86gl_device.js`、`graphics_proxy.js`、`v86_network_bridge.js` 和 `webgpu_host.js`，交叉问题在文中注明。
 
 ## 0. 结论摘要
 
