@@ -4,6 +4,7 @@ const { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js"
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { GLStream, GL } = require("./gl_stream_builder.js");
 const tests = [], test = (name, fn) => tests.push({ name, fn });
@@ -54,6 +55,25 @@ test("ARB generated names become objects on first binding and remain allocated a
     const more = new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1), next = generate(more, kind, 1);
     copy.process(more.bytes()); assert.deepEqual(next().values, [3]); assert.equal(copy.current.group.arbPrograms.has(2), true);
 });
+test("GLSL reserves one shared shader/program namespace and consumes each reservation with its matching creation", () => {
+    const s = new GLShadow(), st = scene().call("CREATE_SHADER", 1, GL.VERTEX_SHADER).call("CREATE_PROGRAM", 3);
+    const programs = generate(st, P.C.V86GL_OBJECT_KIND_PROGRAM, 2), shaders = generate(st, P.C.V86GL_OBJECT_KIND_SHADER, 2);
+    s.process(st.bytes()); assert.deepEqual(programs().values, [2, 4]); assert.deepEqual(shaders().values, [5, 6]);
+    assert.equal(s.current.group.programs.has(2), false); assert.equal(s.current.group.shaders.has(5), false);
+    s.process(new GLStream().call("CREATE_SHADER", 2, GL.VERTEX_SHADER).call("CREATE_PROGRAM", 2)
+        .call("CREATE_SHADER", 5, GL.VERTEX_SHADER).call("CREATE_SHADER", 6, GL.FRAGMENT_SHADER).call("CREATE_PROGRAM", 2).bytes());
+    assert.equal(s.stats.rejected, 2); assert.deepEqual([...s.current.group.glslNames], [[4, P.C.V86GL_OBJECT_KIND_PROGRAM]]);
+    assert.equal(s.current.group.programs.has(2), true); assert.equal(s.current.group.shaders.has(2), false);
+    const copy = new GLShadow(); copy.setState(JSON.parse(JSON.stringify(s.getState())));
+    const shared = new GLStream().makeCurrent(2, 0, 0, 64, 64, 2, 1), next = generate(shared, P.C.V86GL_OBJECT_KIND_SHADER, 1);
+    copy.process(shared.bytes()); assert.deepEqual(next().values, [7]); assert.equal(copy.current.group.glslNames.get(4), P.C.V86GL_OBJECT_KIND_PROGRAM);
+    copy.current.group.nameCursors.set(P.C.V86GL_OBJECT_KIND_SHADER, 0xFFFFFFFF);
+    const wrap = new GLStream(), wrapped = generate(wrap, P.C.V86GL_OBJECT_KIND_PROGRAM, 2); copy.process(wrap.bytes());
+    assert.deepEqual(wrapped().values, [0xFFFFFFFF, 8]);
+    const privateContext = new GLStream().makeCurrent(3, 0, 0, 64, 64, 3, 3), own = generate(privateContext, P.C.V86GL_OBJECT_KIND_PROGRAM, 1);
+    copy.process(privateContext.bytes()); assert.deepEqual(own().values, [1]);
+});
+
 test("name cursors wrap past zero, skip live names and survive deletion, sharing and snapshots", () => {
     const s = new GLShadow(); s.process(scene().call("BIND_BUFFER", GL.ARRAY_BUFFER, 1).bytes());
     s.current.group.nameCursors.set(P.C.V86GL_OBJECT_KIND_BUFFER, 0xFFFFFFFF);

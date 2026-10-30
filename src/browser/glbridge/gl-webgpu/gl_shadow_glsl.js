@@ -67,6 +67,8 @@
     for (const name of ["CREATE_SHADER", "CREATE_PROGRAM"]) rule(name, (s, b, v, o, n) => {
         const a = s.args(name, v, o, n), g = s.current.group;
         if (name === "CREATE_SHADER" && !STAGE_OF_GL_TYPE.has(a[1])) return GL.INVALID_ENUM;
+        const kind = name === "CREATE_SHADER" ? C.V86GL_OBJECT_KIND_SHADER : C.V86GL_OBJECT_KIND_PROGRAM;
+        if (g.glslNames?.has(a[0]) && g.glslNames.get(a[0]) !== kind) return GL.INVALID_VALUE;
         return !a[0] || g.shaders.has(a[0]) || g.programs.has(a[0]) ? GL.INVALID_VALUE : 0;
     });
     for (const [name, shader] of [["COMPILE_SHADER", true], ["DELETE_SHADER", true], ["LINK_PROGRAM", false],
@@ -156,6 +158,7 @@
     proto.createShader = function(bytes, view, offset, size) {
         const a = this.args("CREATE_SHADER", view, offset, size);
         if (!a || !STAGE_OF_GL_TYPE.has(a[1])) return;
+        this.current.group.glslNames?.delete(a[0]);
         this.current.group.shaders.set(a[0], { name: a[0], type: a[1], source: "", compileSource: null,
             compiled: null, deleted: false });
     };
@@ -213,6 +216,7 @@
     proto.createProgram = function(bytes, view, offset, size) {
         const a = this.args("CREATE_PROGRAM", view, offset, size);
         if (!a) return;
+        this.current.group.glslNames?.delete(a[0]);
         this.current.group.programs.set(a[0], { name: a[0], attached: new Set(), bindings: new Map(),
             linkInput: null, linked: null, executableInput: null, resetValues: false,
             validated: false, validation: null, installed: null, deleted: false, values: new Map() });

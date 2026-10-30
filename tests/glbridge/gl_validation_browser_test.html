@@ -476,6 +476,25 @@
             for (const [i, color] of [[0, [255, 0, 0, 255]], [1, [0, 0, 255, 255]]])
                 check(color.every((v, j) => lifetimePixels[i].bytes[32 + j] === v), "ARB deleted shared binding changed pixels in context " + i);
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "ARB lifetimes must have no host errors");
+            const glslNames = new GLStream().makeCurrent(193, 0, 0, 64, 64, 193, 193).call("CREATE_SHADER", 1, GL.VERTEX_SHADER);
+            for (const [kind, count] of [[P.C.V86GL_OBJECT_KIND_PROGRAM, 1], [P.C.V86GL_OBJECT_KIND_SHADER, 2]]) {
+                const header = P.encodeRecord("QUERY_NAMES", { object_kind: kind, count, data_size: count * 4 });
+                const payload = new Uint8Array(header.length + count * 4); payload.set(header); glslNames.record(P.GLFN.QUERY_NAMES, payload);
+            }
+            shadow.process(glslNames.bytes()); executor.submit(remote ? glslNames.bytes().slice() : glslNames.bytes(), {}); await executor.idle();
+            const glslDraw = new GLStream().call("CREATE_PROGRAM", 2).call("CREATE_SHADER", 3, GL.VERTEX_SHADER)
+                .shaderSource(3, "void main(){gl_Position=gl_Vertex;}").call("COMPILE_SHADER", 3).call("ATTACH_SHADER", 2, 3)
+                .call("CREATE_SHADER", 4, GL.FRAGMENT_SHADER).shaderSource(4, "void main(){gl_FragColor=vec4(0.25,0.5,0.75,1.0);}")
+                .call("COMPILE_SHADER", 4).call("ATTACH_SHADER", 2, 4).call("LINK_PROGRAM", 2).call("USE_PROGRAM", 2)
+                .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const glslPixel = glslDraw.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), glslMemory = glslDraw.bytes();
+            const glslRejected = shadow.stats.rejected; shadow.process(glslMemory);
+            check(shadow.stats.rejected === glslRejected, "matching GLSL reservations must accept creation");
+            executor.options.writeGuestMemory = (offset, data) => glslMemory.set(data, offset);
+            executor.submit(remote ? glslMemory.slice() : glslMemory, {}); await executor.idle();
+            check([64, 128, 191, 255].every((v, i) => Math.abs(glslPixel.bytes[32 + i] - v) <= 1), "CPU-generated GLSL names must render");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "GLSL name allocation must have no host errors");
             const queries = new GLStream().makeCurrent(180, 0, 0, 64, 64, 180, 180).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7)
                 .call("COLOR4F", 0, 1, 0, 1).call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
                 .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END")

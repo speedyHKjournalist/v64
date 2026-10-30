@@ -63,6 +63,12 @@ const MUTATIONS = {
         "gl_fixed_function_wgsl_test.js", "gl_arb_program_test.js", "graphics_checkpoint_test.js", "gl_shadow_state_test.js",
         "gl_async_answers_test.js", "gl_shadow_validation_test.js", "gl_shadow_raster_test.js", "gl_shadow_fixed_test.js", "gl_shadow_glsl_test.js", "gl_shadow_arb_test.js", "gl_shadow_misc_test.js", "gl_shadow_rasterpos_test.js", "gl_shadow_pixelmaps_test.js", "gl_shadow_objects_test.js", "gl_shadow_textures_test.js", "gl_shadow_buffers_test.js", "gl_shadow_arrays_test.js", "gl_shadow_names_test.js", "gl_shadow_queries_test.js"],
     pages: ["gl_conformance_browser_test.html", "gl_multipass_browser_test.html", "gl_validation_browser_test.html"], list: [
+        ["CPU GLSL names: ignore unconsumed reservations", G + "gl_shadow_names.js",
+            'group.shaders.has(n) || group.programs.has(n) || group.glslNames.has(n)', 'group.shaders.has(n) || group.programs.has(n)'],
+        ["CPU GLSL names: let shader creation consume a program reservation", G + "gl_shadow_glsl.js",
+            'if (g.glslNames?.has(a[0]) && g.glslNames.get(a[0]) !== kind)', 'if (false)'],
+        ["CPU GLSL names: drop reservations on snapshot restore", G + "gl_shadow_names.js",
+            'g.glslNames = new Map(glsl || []);', 'g.glslNames = new Map();'],
         ["CPU ARB lifetimes: look up retained bindings by public name", G + "gl_shadow_arb.js",
             'return c.arb.bindings[target] || c.arb.defaults[target];', 'return c.group.arbPrograms.get(c.arb.bound[target]) || c.arb.defaults[target];'],
         ["CPU ARB lifetimes: release a deleted program still bound elsewhere", G + "gl_shadow_arb.js",

@@ -18,8 +18,15 @@
         if (!this.current || this.current.state.begin) return fail(GL.INVALID_OPERATION);
         if (r.count < 0 || r.count * 4 > r.data_size || r.data_size > size - header) return fail(GL.INVALID_VALUE);
         const c = this.current, group = c.group;
-        let names, allocate, pool, owner = group;
+        let names, allocate, pool, owner = group, cursorKind = r.object_kind;
         switch (r.object_kind) {
+        case C.V86GL_OBJECT_KIND_SHADER:
+        case C.V86GL_OBJECT_KIND_PROGRAM:
+            cursorKind = C.V86GL_OBJECT_KIND_SHADER;
+            names = { size: group.shaders.size + group.programs.size + group.glslNames.size,
+                has: n => group.shaders.has(n) || group.programs.has(n) || group.glslNames.has(n),
+                delete: n => group.glslNames.delete(n) };
+            allocate = n => { group.glslNames.set(n, r.object_kind); return { name: n }; }; break;
         case C.V86GL_OBJECT_KIND_ARB_PROGRAM: names = group.arbPrograms; allocate = n => this.arbNamedProgram(n); pool = group.arbObjects; break;
         case C.V86GL_OBJECT_KIND_QUERY:
             if (c.activeQueryName) return fail(GL.INVALID_OPERATION);
@@ -31,7 +38,7 @@
         default: return fail(GL.INVALID_ENUM);
         }
         if (r.count > 0xFFFFFFFF - names.size) return fail(GL.OUT_OF_MEMORY);
-        let next = owner.nameCursors.get(r.object_kind) || 1;
+        let next = owner.nameCursors.get(cursorKind) || 1;
         const chosen = [], used = new Set();
         for (let i = 0; i < r.count; ++i) {
             while (names.has(next) || used.has(next)) next = (next + 1) >>> 0 || 1;
@@ -46,19 +53,21 @@
             return fail(GL.OUT_OF_MEMORY);
         }
         for (let i = 0; i < chosen.length; ++i) view.setUint32(offset + header + i * 4, chosen[i], true);
-        if (r.count) owner.nameCursors.set(r.object_kind, next);
+        if (r.count) owner.nameCursors.set(cursorKind, next);
         this.answered(name, view, offset, C.V86GL_SYNC_QUERY_STATUS_OK);
     };
     GLShadow.install({ [P.GLFN.QUERY_NAMES]: "queryNames" });
     GLShadow.part({
-        group(g) { g.nameCursors = new Map(); },
+        group(g) { g.nameCursors = new Map(); g.glslNames = new Map(); },
         context(c) { c.nameCursors = new Map(); },
         getState(s, saved) {
-            saved.names = { groups: [...s.groups.values()].map(g => [g.key, [...g.nameCursors]]),
+            saved.names = { groups: [...s.groups.values()].map(g => [g.key, [...g.nameCursors], [...g.glslNames]]),
                 contexts: [...s.contexts.values()].map(c => [c.key, [...c.nameCursors]]) };
         },
         setState(s, saved) {
-            for (const [key, values] of saved.names?.groups || []) { const g = s.groups.get(key); if (g) g.nameCursors = new Map(values); }
+            for (const [key, values, glsl] of saved.names?.groups || []) {
+                const g = s.groups.get(key); if (g) { g.nameCursors = new Map(values); g.glslNames = new Map(glsl || []); }
+            }
             for (const [key, values] of saved.names?.contexts || []) { const c = s.contexts.get(key); if (c) c.nameCursors = new Map(values); }
         },
     });
