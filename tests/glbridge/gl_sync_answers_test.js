@@ -23,6 +23,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
@@ -118,6 +119,10 @@ async function guestAnswers(remote) {
     stream.record(P.GLFN.QUERY_PARAMETER, parameterPayload);
     stream.call("RASTER_POS4F", 0, 0, 0, 2);
     const rasterAt = extraState(0x0B07, P.C.V86GL_STATE_DOUBLE, 32);
+    stream.pixelMap("PIXEL_MAPUSV", 0x0C76, [0, 32768, 65535, 16384]);
+    const mapAt = stream.length + 4, mapHeader = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_PIXEL_MAP,
+        target: 0x0C76, value_kind: P.C.V86GL_STATE_UNSIGNED_SHORT, data_size: 32 });
+    const mapPayload = new Uint8Array(mapHeader.length + 32); mapPayload.set(mapHeader); stream.record(P.GLFN.QUERY_PARAMETER, mapPayload);
     // a GLSL program: its link status and a uniform's location
     stream.call("CREATE_SHADER", 1, 0x8B31).shaderSource(1, "uniform float gain; void main() { gl_Position = gl_Vertex * gain; }")
         .call("COMPILE_SHADER", 1).call("CREATE_SHADER", 2, 0x8B30)
@@ -172,6 +177,8 @@ async function guestAnswers(remote) {
         fogDensity: answer(fogAt + P.F.QUERY_STATE.status, () => view.getFloat64(fogAt + P.RECORDS.QUERY_STATE.size, true)),
         rasterPosition: answer(rasterAt + P.F.QUERY_STATE.status, () => Array.from({ length: 4 },
             (_, i) => view.getFloat64(rasterAt + P.RECORDS.QUERY_STATE.size + i * 8, true))),
+        pixelMap: answer(mapAt + P.F.QUERY_PARAMETER.status, () => Array.from({ length: 4 },
+            (_, i) => view.getFloat64(mapAt + P.RECORDS.QUERY_PARAMETER.size + i * 8, true))),
         lightPosition: answer(parameterAt + P.F.QUERY_PARAMETER.status, () => Array.from({ length: 4 },
             (_, i) => view.getFloat64(parameterAt + P.RECORDS.QUERY_PARAMETER.size + i * 8, true))),
         linked: answer(linkAt, () => view.getUint32(linkAt + 4, true)),
@@ -216,6 +223,7 @@ async function guestAnswers(remote) {
     assert.deepEqual(results.worker.lightPosition, results.page.lightPosition);
     assert.equal(results.page.fogDensity, 2.75); assert.equal(results.worker.fogDensity, results.page.fogDensity);
     assert.deepEqual(results.page.rasterPosition, [40, 29, 0.5, 2]); assert.deepEqual(results.worker.rasterPosition, results.page.rasterPosition);
+    assert.deepEqual(results.page.pixelMap, [0, 32768, 65535, 16384]); assert.deepEqual(results.worker.pixelMap, results.page.pixelMap);
     if (failures.length) {
         console.error(failures.join("\n"));
         process.exitCode = 1;

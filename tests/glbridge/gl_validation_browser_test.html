@@ -8,6 +8,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_constants.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_caps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_math.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_pixel_maps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js"></script>
@@ -17,6 +18,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -131,8 +133,20 @@
                 check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "raster readback must finish");
                 check(expected.every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "WindowPos depth range changed the bitmap: " + z);
             }
+            const mapped = new GLStream().makeCurrent(40, 0, 0, 64, 64, 40, 40)
+                .pixelMap("PIXEL_MAPUIV", GL.PIXEL_MAP_R_TO_R, [0, 0xFFFFFFFF, 0, 0xFFFFFFFF])
+                .pixelMap("PIXEL_MAPUSV", GL.PIXEL_MAP_G_TO_G, [65535, 0, 65535, 0])
+                .pixelMap("PIXEL_MAPFV", GL.PIXEL_MAP_B_TO_B, [0.25, 0.5, 0.75, 1]).pixelMap("PIXEL_MAPFV", GL.PIXEL_MAP_A_TO_A, [1])
+                .call("PIXEL_TRANSFERI", GL.MAP_COLOR, 1).call("WINDOW_POS3F", 31, 31, 0.5)
+                .drawPixels(1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 0, 170, 255]))
+                .call("PIXEL_TRANSFERI", GL.MAP_COLOR, 0);
+            const mapPixel = mapped.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), mapMemory = mapped.bytes();
+            shadow.process(mapMemory); executor.options.writeGuestMemory = (offset, data) => mapMemory.set(data, offset);
+            executor.submit(remote ? mapMemory.slice() : mapMemory, {}); await executor.idle();
+            check(mapPixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "pixel-map readback must finish");
+            check([255, 255, 191, 255].every((v, i) => Math.abs(mapPixel.bytes[32 + i] - v) <= 1), "integer/short pixel maps changed pixels");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms and ARB high parameters preserve pixels in local and copied streams";
+        document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

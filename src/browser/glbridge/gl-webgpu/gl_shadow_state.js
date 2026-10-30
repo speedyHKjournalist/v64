@@ -252,7 +252,8 @@
         };
         const parameter = name === "QUERY_PARAMETER";
         if (header + r.data_size > size || r.value_kind < C.V86GL_STATE_INTEGER ||
-                r.value_kind > (parameter ? C.V86GL_STATE_BOOLEAN : C.V86GL_STATE_IS_ENABLED)) return fail(GL.INVALID_VALUE);
+                r.value_kind > (parameter ? C.V86GL_STATE_UNSIGNED_INT : C.V86GL_STATE_IS_ENABLED) ||
+                parameter && r.value_kind === C.V86GL_STATE_IS_ENABLED) return fail(GL.INVALID_VALUE);
         if (!this.current || this.current.state.begin) return fail(GL.INVALID_OPERATION);
         const isEnabled = r.value_kind === C.V86GL_STATE_IS_ENABLED;
         const resolver = parameter && PARAMETERS.get(r.query_kind);
@@ -266,6 +267,11 @@
         for (let i = 0; i < values.length; ++i) {
             let v = values[i];
             if (r.value_kind === C.V86GL_STATE_BOOLEAN || isEnabled) v = +!!v;
+            else if (r.value_kind === C.V86GL_STATE_UNSIGNED_SHORT || r.value_kind === C.V86GL_STATE_UNSIGNED_INT) {
+                const max = r.value_kind === C.V86GL_STATE_UNSIGNED_SHORT ? 65535 : 0xFFFFFFFF;
+                v = kind === "n" ? (max === 65535 ? Math.round(clamp(v, 0, 1) * max) : Math.trunc(clamp(v, 0, 1) * max)) : Math.trunc(v) >>> 0;
+                if (max === 65535) v &= max;
+            }
             else if (r.value_kind === C.V86GL_STATE_INTEGER) {
                 // Color/depth conversion scales then truncates (the Apple
                 // GL 2.1 oracle), unlike an ordinary float's nearest integer.

@@ -577,6 +577,15 @@ class GLStream {
         return this.record(GLFN.UNIFORM_FV, payload);
     }
 
+    pixelMap(name, map, values) {
+        const header = wire.encodeRecord(name, { map, count: values.length }), stride = name === "PIXEL_MAPUSV" ? 2 : 4;
+        const payload = new Uint8Array(header.length + values.length * stride), view = new DataView(payload.buffer);
+        payload.set(header);
+        values.forEach((value, i) => name === "PIXEL_MAPUSV" ? view.setUint16(header.length + i * 2, value, true) :
+            name === "PIXEL_MAPUIV" ? view.setUint32(header.length + i * 4, value, true) : view.setFloat32(header.length + i * 4, value, true));
+        return this.record(GLFN[name], payload);
+    }
+
     uniformiv(location, components, count, values) {
         const payload = new Uint8Array(12 + values.length * 4);
         const view = new DataView(payload.buffer);

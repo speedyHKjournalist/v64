@@ -21,6 +21,7 @@
         MAX_CLIP_PLANES: 6,
         MAX_VERTEX_ATTRIBS: 16,
         MAX_DRAW_BUFFERS: 8,
+        MAX_PIXEL_MAP_TABLE: protocol.C.V86GL_MAX_TYPED_QUERY_VALUES,
         MODELVIEW_STACK_DEPTH: 32,
         OTHER_STACK_DEPTH: 4,
         // gl_shader_translator.js's MAX_INTER_STAGE_SLOTS vec4s
@@ -134,6 +135,7 @@
         case GL.MAX_RENDERBUFFER_SIZE:
             return Math.min(16384, limits.maxTextureDimension2D);
         case GL.MAX_LIGHTS: return LIMITS.MAX_LIGHTS;
+        case GL.MAX_PIXEL_MAP_TABLE: return LIMITS.MAX_PIXEL_MAP_TABLE;
         case GL.MAX_CLIP_PLANES: return LIMITS.MAX_CLIP_PLANES;
         case GL.MAX_MODELVIEW_STACK_DEPTH: return LIMITS.MODELVIEW_STACK_DEPTH;
         case GL.MAX_PROJECTION_STACK_DEPTH: return LIMITS.OTHER_STACK_DEPTH;

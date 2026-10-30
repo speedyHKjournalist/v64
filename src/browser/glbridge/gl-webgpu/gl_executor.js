@@ -46,6 +46,7 @@
         global.GLARBProgram;
     const gpuHost = nodeRequire ? nodeRequire("../webgpu_host.js") :
         global.V86GPUHost;
+    const pixelMaps = nodeRequire ? nodeRequire("./gl_pixel_maps.js") : global.GLPixelMaps;
 
     const GL = constants.GL;
     const GLFN = constants.GLFN;
@@ -1373,7 +1374,7 @@
         [ATTRIB.LINE, ["lineWidth", "lineStipple"]],
         [ATTRIB.POLYGON, ["cullFace", "frontFace", "polygonMode", "polygonOffset"]],
         [ATTRIB.POLYGON_STIPPLE, ["polygonStipple"]],
-        [ATTRIB.PIXEL_MODE, ["pixelTransfer", "pixelZoom", "readBuffer"]],
+        [ATTRIB.PIXEL_MODE, ["pixelTransfer", "pixelZoom", "pixelMaps", "readBuffer"]],
         [ATTRIB.LIGHTING, ["lightModel", "lights", "material", "colorMaterial",
                            "shadeModel"]],
         [ATTRIB.FOG, ["fog"]],
@@ -1572,6 +1573,7 @@
                              postColorMatrixBias:
                                 new Float32Array([0, 0, 0, 0]) },
             pixelZoom: { x: 1, y: 1 },
+            pixelMaps: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [GL.PIXEL_MAP_I_TO_I + i, new Float32Array(1)])),
 
             arrayBuffer: 0,
             elementArrayBuffer: 0,
@@ -2257,7 +2259,6 @@
             this.nextQuerySlot = 0;
             this.uniformValueCache.clear();
             this.stateUniformLayouts = new WeakMap();
-            this.pixelMaps = Object.create(null);
             this.nextContextId = 1;
             this.nextShareGroupId = 1;
             this.nextUniformLocation = 1;
@@ -4232,22 +4233,21 @@
                 bytes.subarray(offset, offset + 128));
             this.polygonStippleTexture = null;
         });
-        const pixelMap = () => function(a, bytes, view, offset, size) {
+        const pixelMap = name => function(a, bytes, view, offset, size) {
             // Pixel maps only affect glDrawPixels/glReadPixels colour transfer,
             // which the executor applies on the CPU; the table is stored so the
             // path stays exact when GL_MAP_COLOR is on.
             if (size < 8) throw new GLStreamError("pixel map record is short");
             const map = view.getUint32(offset, true);
             const count = view.getUint32(offset + 4, true);
-            const values = new Float32Array(count);
-            for (let i = 0; i < count && 8 + i * 4 + 4 <= size; ++i)
-                values[i] = view.getFloat32(offset + 8 + i * 4, true);
-            this.pixelMaps = this.pixelMaps || Object.create(null);
-            this.pixelMaps[map] = values;
+            if (count < 1 || count > glCaps.LIMITS.MAX_PIXEL_MAP_TABLE || 8 + count * (name === "PIXEL_MAPUSV" ? 2 : 4) > size)
+                throw new GLStreamError("pixel map record is invalid");
+            const result = pixelMaps.decode(name, view, offset);
+            this.current.pixelMaps[map] = Float64Array.from(result.values);
         };
-        define("PIXEL_MAPFV", pixelMap());
-        define("PIXEL_MAPUIV", pixelMap());
-        define("PIXEL_MAPUSV", pixelMap());
+        define("PIXEL_MAPFV", pixelMap("PIXEL_MAPFV"));
+        define("PIXEL_MAPUIV", pixelMap("PIXEL_MAPUIV"));
+        define("PIXEL_MAPUSV", pixelMap("PIXEL_MAPUSV"));
         define("ACCUM", function(a) { this.accum(a[0] >>> 0, a[1]); });
 
         define("QUERY_OBJECT_BATCH", function(a, bytes, view, offset, size, metadata) {
@@ -10655,7 +10655,7 @@ ${targets.color.map((target, i) => target ? "    out.color" + i + " = raster.col
 
         applyPixelTransfer(rgba) {
             const transfer = this.current.pixelTransfer;
-            const maps = this.pixelMaps || Object.create(null);
+            const maps = this.current.pixelMaps;
             const scales = [transfer.redScale, transfer.greenScale,
                 transfer.blueScale, transfer.alphaScale];
             const biases = [transfer.redBias, transfer.greenBias,
