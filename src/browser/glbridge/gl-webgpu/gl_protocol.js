@@ -241,6 +241,7 @@
         // requested GL type, stored as doubles (including exact 32-bit ints).
         ["QUERY_STATE", 219, null, "u:pname u:value_kind u:status u:count u:data_size u:error"],
         ["QUERY_PARAMETER", 220, null, "u:pname u:value_kind u:status u:count u:data_size u:error u:query_kind u:target u:index u:reserved"],
+        ["PRIORITIZE_TEXTURES", 221, null, "i:count"], // then count pairs of u32 name, f32 priority
     ];
 
     // Control records, outside the GLFN numbering: [name, code, layout]
@@ -315,6 +316,7 @@
         ["V86GL_PARAMETER_IS_OBJECT", 7],
         ["V86GL_PARAMETER_FRAMEBUFFER_ATTACHMENT", 8],
         ["V86GL_PARAMETER_RENDERBUFFER", 9],
+        ["V86GL_PARAMETER_TEXTURE", 10],
         ["V86GL_OBJECT_KIND_SHADER", 1],
         ["V86GL_OBJECT_KIND_PROGRAM", 2],
         ["V86GL_OBJECT_KIND_QUERY", 3],

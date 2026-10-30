@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js");
 const glCaps = require("../../src/browser/glbridge/gl-webgpu/gl_caps.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js");

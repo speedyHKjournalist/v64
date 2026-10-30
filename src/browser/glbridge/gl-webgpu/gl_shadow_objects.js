@@ -470,7 +470,7 @@
                 version: 2,
                 groups: [...shadow.groups.values()].map(group => ({ key: group.key,
                     nextImageId: group.nextImageId,
-                    textures: [...group.textureImages.values()].map(t => [t.name, t.target, levelsOut(t), t.id, t.deleted]),
+                    textures: [...group.textureImages.values()].map(t => [t.name, t.target, levelsOut(t), t.id, t.deleted, t.parameters]),
                     renderbuffers: [...group.renderbufferImages.values()] })),
                 contexts: [...shadow.contexts.values()].map(c => ({ key: c.key, activeTexture: c.activeTexture,
                     units: c.units.map(unit => [...unit]), framebuffers: [...c.framebuffers.values()],
@@ -488,8 +488,8 @@
                 const group = shadow.groups.get(g.key);
                 if (!group) continue;
                 group.nextImageId = g.nextImageId || 1;
-                for (const [name, target, levels, savedId, deleted] of g.textures) {
-                    const t = { name, target, levels: levelsIn(levels), id: savedId || group.nextImageId++, deleted: !!deleted };
+                for (const [name, target, levels, savedId, deleted, parameters] of g.textures) {
+                    const t = { name, target, levels: levelsIn(levels), id: savedId || group.nextImageId++, deleted: !!deleted, parameters };
                     group.textureImages.set(t.id, t); if (name && !deleted) group.textures.set(name, t);
                 }
                 for (const savedRb of g.renderbuffers) {

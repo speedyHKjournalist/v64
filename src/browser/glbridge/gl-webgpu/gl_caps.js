@@ -141,6 +141,7 @@
         case GL.MAX_PROJECTION_STACK_DEPTH: return LIMITS.OTHER_STACK_DEPTH;
         case GL.MAX_TEXTURE_STACK_DEPTH: return LIMITS.OTHER_STACK_DEPTH;
         case GL.MAX_TEXTURE_MAX_ANISOTROPY_EXT: return 16;
+        case GL.MAX_TEXTURE_LOD_BIAS: return 16;
         case GL.MAX_ELEMENTS_VERTICES: return 65536;
         case GL.MAX_ELEMENTS_INDICES: return 65536;
         case GL.SAMPLE_BUFFERS: return 0;

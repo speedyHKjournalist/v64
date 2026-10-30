@@ -1,0 +1,22 @@
+{
+  "renderer":"Apple M1 Pro",
+  "version":"2.1 Metal - 91.7",
+  "cases":{
+    "default_min":{"float":[9986],"int":[9986],"error":0},
+    "default_priority":{"float":[1],"int":[1],"error":0},
+    "default_border":{"float":[0,0,0,0],"int":[0,0,0,0],"error":0},
+    "default_compare":{"float":[515],"int":[515],"error":0},
+    "float_border":{"float":[0,0.5,1,1],"int":[0,1073741823,2147483647,2147483647],"error":0},
+    "int_border":{"float":[0,0,0.5,1],"int":[0,0,1073741823,2147483647],"error":0},
+    "int_priority":{"float":[1],"int":[1],"error":0},
+    "float_priority":{"float":[0.75],"int":[1],"error":0},
+    "float_base":{"float":[3],"int":[3],"error":0},
+    "float_boolean":{"float":[0],"int":[0],"error":0},
+    "float_boolean_high":{"float":[0],"int":[0],"error":0},
+    "min_lod":{"float":[-2.75],"int":[-3],"error":0},
+    "lod_bias":{"float":[100],"int":[100],"error":0},
+    "anisotropy":{"float":[2.5],"int":[3],"error":0},
+    "float_enum":{"float":[9729],"int":[9729],"error":0},
+    "float_enum_high":{"float":[9729],"int":[9729],"error":0}
+  }
+}

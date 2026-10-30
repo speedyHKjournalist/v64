@@ -13,6 +13,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_image_formats.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_texture_parameters.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_framebuffer_state.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
@@ -22,6 +23,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
@@ -246,6 +248,25 @@
                     "stencil precision must describe the actual eight-bit storage: " + format);
             }
             check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "renderbuffer storage must have no host errors");
+            const textureState = new GLStream().makeCurrent(100, 0, 0, 64, 64, 100, 100)
+                .call("BIND_TEXTURE", GL.TEXTURE_2D, 7).texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]))
+                .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_LINEAR)
+                .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_BORDER)
+                .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_BORDER)
+                .call("TEX_PARAMETERF", GL.TEXTURE_2D, GL.TEXTURE_MAX_ANISOTROPY_EXT, 2.5)
+                .call("TEX_PARAMETERF", GL.TEXTURE_2D, GL.TEXTURE_MIN_LOD, 10).call("TEX_PARAMETERF", GL.TEXTURE_2D, GL.TEXTURE_MAX_LOD, -10)
+                .call("TEX_PARAMETERIV", GL.TEXTURE_2D, GL.TEXTURE_BORDER_COLOR, 4, 0, 1073741824, 2147483647, 2147483647)
+                .call("PUSH_ATTRIB", 0x40000).call("TEX_PARAMETERFV", GL.TEXTURE_2D, GL.TEXTURE_BORDER_COLOR, 4, 1, 0, 0, 1).call("POP_ATTRIB")
+                .call("ENABLE", GL.TEXTURE_2D).call("TEX_ENVI", GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE, GL.REPLACE)
+                .call("CLEAR_COLOR", 1, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).call("TEX_COORD2F", -2, -2)
+                .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const texturePixel = textureState.readPixels(31, 31, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), textureMemory = textureState.bytes();
+            shadow.process(textureMemory); executor.options.writeGuestMemory = (offset, data) => textureMemory.set(data, offset);
+            executor.submit(remote ? textureMemory.slice() : textureMemory, {}); await executor.idle();
+            check(texturePixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "texture parameter readback must finish");
+            check([0, 128, 255, 255].every((v, i) => Math.abs(texturePixel.bytes[32 + i] - v) <= 1), "integer border color or texture attribute restore changed pixels");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "texture parameters must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

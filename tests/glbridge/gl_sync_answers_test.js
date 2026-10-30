@@ -25,6 +25,7 @@ require("../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js");
 require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js");
 const { readFileSync } = require("node:fs");
@@ -158,6 +159,11 @@ async function guestAnswers(remote) {
     const rbAt = stream.length + 4, rbHeader = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_RENDERBUFFER,
         target: 0x8D41, pname: 0x8D55, value_kind: P.C.V86GL_STATE_INTEGER, data_size: 8 });
     const rbPayload = new Uint8Array(rbHeader.length + 8); rbPayload.set(rbHeader); stream.record(P.GLFN.QUERY_PARAMETER, rbPayload);
+    stream.call("TEX_PARAMETERIV", 0x0DE1, 0x1004, 4, -2147483648, 0, 1073741824, 2147483647);
+    const textureAt = stream.length + 4, textureHeader = P.encodeRecord("QUERY_PARAMETER", { query_kind: P.C.V86GL_PARAMETER_TEXTURE,
+        target: 0x0DE1, pname: 0x1004, value_kind: P.C.V86GL_STATE_FLOAT, data_size: 32 });
+    const texturePayload = new Uint8Array(textureHeader.length + 32); texturePayload.set(textureHeader);
+    stream.record(P.GLFN.QUERY_PARAMETER, texturePayload);
     stream.call("DRAW_BUFFER", 0x8CE1).call("READ_BUFFER", 0).call("BIND_FRAMEBUFFER", 0x8D40, 4).call("BIND_FRAMEBUFFER", 0x8D40, 3);
     const drawBufferAt = extraState(0x8825, P.C.V86GL_STATE_INTEGER);
     const readBufferAt = extraState(0x0C02, P.C.V86GL_STATE_INTEGER);
@@ -214,6 +220,8 @@ async function guestAnswers(remote) {
         isTexture: answer(isTextureAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(isTextureAt + P.RECORDS.QUERY_PARAMETER.size, true)),
         attachment: answer(attachmentAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(attachmentAt + P.RECORDS.QUERY_PARAMETER.size, true)),
         renderbufferBits: answer(rbAt + P.F.QUERY_PARAMETER.status, () => view.getFloat64(rbAt + P.RECORDS.QUERY_PARAMETER.size, true)),
+        textureBorder: answer(textureAt + P.F.QUERY_PARAMETER.status, () => Array.from({ length: 4 },
+            (_, i) => view.getFloat64(textureAt + P.RECORDS.QUERY_PARAMETER.size + i * 8, true))),
         drawBuffer: answer(drawBufferAt + P.F.QUERY_STATE.status, () => view.getFloat64(drawBufferAt + P.RECORDS.QUERY_STATE.size, true)),
         readBuffer: answer(readBufferAt + P.F.QUERY_STATE.status, () => view.getFloat64(readBufferAt + P.RECORDS.QUERY_STATE.size, true)),
         arb: answer(arbAt, () => view.getInt32(arbAt + 4, true)),
@@ -261,6 +269,7 @@ async function guestAnswers(remote) {
     assert.equal(results.page.isTexture, 1); assert.equal(results.worker.isTexture, 1);
     assert.equal(results.page.attachment, 7); assert.equal(results.worker.attachment, 7);
     assert.equal(results.page.renderbufferBits, 8); assert.equal(results.worker.renderbufferBits, 8);
+    assert.deepEqual(results.page.textureBorder, [0, 0, 0.5, 1]); assert.deepEqual(results.worker.textureBorder, results.page.textureBorder);
     assert.equal(results.page.drawBuffer, 0x8CE1); assert.equal(results.worker.drawBuffer, 0x8CE1);
     assert.equal(results.page.readBuffer, 0); assert.equal(results.worker.readBuffer, 0);
     if (failures.length) {

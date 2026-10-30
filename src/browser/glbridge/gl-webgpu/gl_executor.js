@@ -48,6 +48,7 @@
         global.V86GPUHost;
     const pixelMaps = nodeRequire ? nodeRequire("./gl_pixel_maps.js") : global.GLPixelMaps;
     const framebufferState = nodeRequire ? nodeRequire("./gl_framebuffer_state.js") : global.GLFramebufferState;
+    const textureParameters = nodeRequire ? nodeRequire("./gl_texture_parameters.js") : global.GLTextureParameters;
 
     const GL = constants.GL;
     const GLFN = constants.GLFN;
@@ -1628,18 +1629,8 @@
             levelCount: 0,
             dirty: true,
             viewCache: new Map(),
-            sampler: {
-                minFilter: GL.NEAREST_MIPMAP_LINEAR,
-                magFilter: GL.LINEAR,
-                wrapS: GL.REPEAT, wrapT: GL.REPEAT, wrapR: GL.REPEAT,
-                minLod: -1000, maxLod: 1000,
-                baseLevel: 0, maxLevel: 1000,
-                lodBias: 0,
-                maxAnisotropy: 1,
-                borderColor: new Float32Array([0, 0, 0, 0]),
-                compareMode: GL.NONE, compareFunc: GL.LEQUAL,
-                depthTextureMode: GL.LUMINANCE,
-            },
+            sampler: textureParameters.samplerDefaults(),
+            priority: 1,
             generateMipmapHint: false,
             immutableSampleCount: 1,
         };
@@ -2831,6 +2822,7 @@
             const mask = a[0] >>> 0;
             const fields = fieldsForServerAttrib(mask);
             s.attribStack.push({ mask, fields, state: snapshotFields(s, fields),
+                textureParameters: mask & ATTRIB.TEXTURE ? this.captureTextureParameters() : null,
                 enableState: mask & ATTRIB.ENABLE ? captureEnableState(s) : null });
         });
         define("POP_ATTRIB", function() {
@@ -2841,6 +2833,11 @@
             }
             const snapshot = s.attribStack.pop();
             restoreFields(s, snapshot.state, snapshot.fields);
+            if (snapshot.textureParameters) for (const item of snapshot.textureParameters) {
+                const image = s.shareGroup.textureImages.get(item.id); if (!image) continue;
+                image.sampler = cloneStateValue(item.sampler); image.priority = item.priority;
+                image.generateMipmapHint = item.generateMipmapHint; image.viewCache.clear();
+            }
             const draw = s.drawBuffers.slice(), read = s.readBuffer;
             if (snapshot.state.drawBuffers) framebufferState.draw(s, this.framebuffers.get(s.id), draw);
             if (Object.prototype.hasOwnProperty.call(snapshot.state, "readBuffer")) framebufferState.read(s, this.framebuffers.get(s.id), read);
@@ -3086,16 +3083,24 @@
         });
 
         define("TEX_PARAMETERI", function(a) {
-            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, [a[2]]);
+            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, [a[2]], true, true);
         });
         define("TEX_PARAMETERF", function(a) {
-            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, [a[2]]);
+            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, [a[2]], false, true);
         });
         define("TEX_PARAMETERIV", function(a) {
-            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, [a[3], a[4], a[5], a[6]]);
+            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, a.slice(3, 3 + a[2]), true, false);
         });
         define("TEX_PARAMETERFV", function(a) {
-            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, [a[3], a[4], a[5], a[6]]);
+            this.setTexParameter(a[0] >>> 0, a[1] >>> 0, a.slice(3, 3 + a[2]), false, false);
+        });
+        define("PRIORITIZE_TEXTURES", function(a, bytes, view, offset, size) {
+            const count = view.getInt32(offset, true);
+            if (count < 0 || 4 + count * 8 > size) throw new GLStreamError("texture priorities are truncated");
+            for (let i = 0; i < count; ++i) {
+                const image = this.current.shareGroup.textures.get(view.getUint32(offset + 4 + i * 8, true));
+                if (image?.target) image.priority = clamp(view.getFloat32(offset + 8 + i * 8, true), 0, 1);
+            }
         });
 
         /*
@@ -4439,7 +4444,19 @@
             }
         },
 
-        setTexParameter(target, pname, values) {
+        captureTextureParameters() {
+            const images = new Set();
+            for (let unit = 0; unit < this.current.textureUnits.length; ++unit)
+                for (const target of textureParameters.targets) images.add(this.textureObjectFor(unit, target));
+            return [...images].filter(Boolean).map(image => ({ id: image.imageId, sampler: cloneStateValue(image.sampler),
+                priority: image.priority, generateMipmapHint: image.generateMipmapHint }));
+        },
+
+        setTexParameter(target, pname, values, integer, scalar) {
+            if (!textureParameters.targets.includes(target)) return this.setError(GL.INVALID_ENUM);
+            const result = textureParameters.normalize(pname, values, integer, scalar);
+            if (result.error) return this.setError(result.error);
+            values = result.values;
             const texture = this.boundTexture(target);
             if (!texture)
                 return this.refuse("glTexParameter", "no texture bound",
@@ -4460,13 +4477,13 @@
                 sampler.borderColor.set(values.slice(0, 4));
                 break;
             case GL.TEXTURE_MAX_ANISOTROPY_EXT:
-                sampler.maxAnisotropy = clamp(Math.round(values[0]), 1, 16);
+                sampler.maxAnisotropy = values[0];
                 break;
             case GL.TEXTURE_COMPARE_MODE: sampler.compareMode = values[0] >>> 0; break;
             case GL.TEXTURE_COMPARE_FUNC: sampler.compareFunc = values[0] >>> 0; break;
             case GL.DEPTH_TEXTURE_MODE: sampler.depthTextureMode = values[0] >>> 0; break;
             case GL.GENERATE_MIPMAP: texture.generateMipmapHint = values[0] !== 0; break;
-            case GL.TEXTURE_PRIORITY: break;
+            case GL.TEXTURE_PRIORITY: texture.priority = values[0]; break;
             default:
                 return this.refuse("glTexParameter", "unknown parameter",
                     { pname }, GL.INVALID_ENUM);
@@ -8820,7 +8837,8 @@ ${fragmentCode}`;
                 // WebGPU rejects anisotropy unless all three filters are
                 // linear, so it is clamped rather than the sampler refused.
                 const anisotropy = (minLinear && magLinear && mipLinear) ?
-                    sampler.maxAnisotropy : 1;
+                    clamp(Math.round(sampler.maxAnisotropy), 1, 16) : 1;
+                const maxLod = clamp(sampler.maxLod, 0, 32), minLod = Math.min(maxLod, clamp(sampler.minLod, 0, 32));
                 gpuSampler = this.device.createSampler({
                     addressModeU: ADDRESS_MODES[sampler.wrapS] || "repeat",
                     addressModeV: ADDRESS_MODES[sampler.wrapT] || "repeat",
@@ -8828,8 +8846,8 @@ ${fragmentCode}`;
                     magFilter: magLinear ? "linear" : "nearest",
                     minFilter: minLinear ? "linear" : "nearest",
                     mipmapFilter: mipLinear ? "linear" : "nearest",
-                    lodMinClamp: Math.max(0, sampler.minLod),
-                    lodMaxClamp: Math.min(32, sampler.maxLod),
+                    lodMinClamp: minLod,
+                    lodMaxClamp: maxLod,
                     maxAnisotropy: anisotropy,
                     ...(shadow ? {
                         compare: COMPARE_FUNCTIONS[sampler.compareFunc] ||
