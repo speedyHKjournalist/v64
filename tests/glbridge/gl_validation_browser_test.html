@@ -359,6 +359,23 @@
                 check([51, 153, 204, 255].every((v, i) => Math.abs(pixel.bytes[32 + i] - v) <= 1), "copy or rejected copy changed pixels: " + Array.from(pixel.bytes.subarray(32)));
                 check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "copies must have no host errors");
             }
+            const mipmap = new GLStream().makeCurrent(150, 0, 0, 64, 64, 150, 150)
+                .call("BIND_TEXTURE", GL.TEXTURE_CUBE_MAP, 7)
+                .texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE,
+                    new Uint8Array(Array.from({ length: 16 }, () => [255, 0, 0, 255]).flat()))
+                .texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X, 1, GL.RGBA8, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE,
+                    new Uint8Array(Array.from({ length: 4 }, () => [0, 0, 255, 255]).flat()))
+                .call("GENERATE_MIPMAP", GL.TEXTURE_CUBE_MAP)
+                .call("BIND_FRAMEBUFFER", GL.FRAMEBUFFER_EXT, 1)
+                .call("FRAMEBUFFER_TEXTURE", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_CUBE_MAP_POSITIVE_X, 7, 1, 0);
+            const mipPixel = mipmap.readPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4), mipMemory = mipmap.bytes();
+            const rejectedBefore = shadow.stats.rejected;
+            shadow.process(mipMemory); check(shadow.stats.rejected === rejectedBefore + 1, "incomplete cube generation must be rejected on CPU");
+            executor.options.writeGuestMemory = (offset, data) => mipMemory.set(data, offset);
+            executor.submit(remote ? mipMemory.slice() : mipMemory, {}); await executor.idle();
+            check(mipPixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "cube mipmap readback must finish");
+            check([0, 0, 255, 255].every((v, i) => mipPixel.bytes[32 + i] === v), "rejected mipmap generation replaced an existing face");
+            check(!executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "mipmap rejection must have no host errors");
         }
         document.getElementById("result").textContent = "PASS -- CPU validation, GLSL lifetime/uniforms, ARB parameters and typed pixel maps preserve pixels in local and copied streams";
     } catch (error) {

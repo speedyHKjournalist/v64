@@ -447,6 +447,98 @@ test("copy ranges include 1D, cube faces, 3D slices and split read/draw framebuf
     }
 });
 
+test("mipmap validation and metadata match desktop GL with explicit specification corrections", () => {
+    const native = require("./gl_conformance/texture_mipmaps_reference.json").cases;
+    const s = shadow(); s.process(scene().bytes());
+    const current = (stream, key, level, expected = native[key], target = GL.TEXTURE_2D) => {
+        s.current.error = 0;
+        const answers = [GL.TEXTURE_WIDTH, GL.TEXTURE_HEIGHT, GL.TEXTURE_DEPTH, GL.TEXTURE_BORDER, GL.TEXTURE_INTERNAL_FORMAT]
+            .map(pname => query(stream, pname, P.C.V86GL_STATE_INTEGER, target, P.C.V86GL_PARAMETER_TEXTURE_LEVEL, level));
+        s.process(stream.bytes()); assert.deepEqual([s.current.error, ...answers.map(q => q().values[0])], expected, key);
+    };
+    current(new GLStream().call("GENERATE_MIPMAP", GL.TEXTURE_2D), "undefined", 1);
+    current(new GLStream().call("GENERATE_MIPMAP", GL.PROXY_TEXTURE_2D), "proxy_target", 1);
+    const setup = new GLStream().texImage2D(GL.TEXTURE_2D, 2, GL.RGBA8, 8, 4, GL.RGBA, GL.UNSIGNED_BYTE, null)
+        .texImage2D(GL.TEXTURE_2D, 5, GL.RGB8, 1, 1, GL.RGB, GL.UNSIGNED_BYTE, null)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_BASE_LEVEL, 2)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MAX_LEVEL, 4).call("GENERATE_MIPMAP", GL.TEXTURE_2D);
+    current(setup, "nonzero_base", 3); current(new GLStream(), "maximum", 4);
+    // Apple generates beyond MAX_LEVEL. EXT/ARB_framebuffer_object limits
+    // manual generation to q; level 5 must retain its RGB8 definition.
+    current(new GLStream(), "beyond_maximum", 5, [0, 1, 1, 1, 0, GL.RGB8]);
+    current(new GLStream().call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.GENERATE_MIPMAP, 1)
+        .texImage2D(GL.TEXTURE_2D, 2, GL.RGBA8, 4, 2, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(32)),
+    "auto_base", 3, [0, 2, 1, 1, 0, GL.RGBA8]);
+    current(new GLStream().texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 64, 32, GL.RGBA, GL.UNSIGNED_BYTE, null),
+        "auto_other", 3, [0, 2, 1, 1, 0, GL.RGBA8]);
+    current(new GLStream().call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MAX_LEVEL, 1).call("GENERATE_MIPMAP", GL.TEXTURE_2D),
+        "inverted_range", 3, [0, 2, 1, 1, 0, GL.RGBA8]);
+    const border = new GLStream().call("BIND_TEXTURE", GL.TEXTURE_2D, 2);
+    upload(border, "TEX_IMAGE_2D", { width: 10, height: 6, border: 1 }); border.call("GENERATE_MIPMAP", GL.TEXTURE_2D);
+    current(border, "border_level1", 1); current(new GLStream(), "border_level3", 3);
+    const cube = new GLStream().call("BIND_TEXTURE", GL.TEXTURE_CUBE_MAP, 3);
+    const cubeStep = (stream, key, level = 1) => {
+        s.current.error = 0; s.process(stream.call("GENERATE_MIPMAP", GL.TEXTURE_CUBE_MAP).bytes());
+        assert.equal(s.current.error, native[key][0], key);
+        if (s.current.error) assert.ok(!s.boundImage(GL.TEXTURE_CUBE_MAP).texture.levels.get(0)?.has(level), "failed cube generation changed level " + key);
+    };
+    cubeStep(cube, "cube_empty");
+    const faces = new GLStream(); for (let face = 0; face < 5; ++face)
+        faces.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL.RGBA8, 8, 8, GL.RGBA, GL.UNSIGNED_BYTE, null);
+    cubeStep(faces, "cube_missing");
+    cubeStep(new GLStream().texImage2D(GL.TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE, null), "cube_size");
+    cubeStep(new GLStream().texImage2D(GL.TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL.RGB8, 8, 8, GL.RGB, GL.UNSIGNED_BYTE, null), "cube_format");
+    cubeStep(new GLStream().texImage2D(GL.TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL.RGBA8, 8, 8, GL.RGBA, GL.UNSIGNED_BYTE, null), "cube_complete");
+    current(new GLStream(), "cube_complete", 3, native.cube_complete, GL.TEXTURE_CUBE_MAP_NEGATIVE_Z);
+    const volume = new GLStream().call("BIND_TEXTURE", GL.TEXTURE_3D, 4);
+    upload(volume, "TEX_IMAGE_3D", { width: 9, height: 5, depth: 3, target: GL.TEXTURE_3D });
+    current(volume.call("GENERATE_MIPMAP", GL.TEXTURE_3D), "volume", 1, native.volume, GL.TEXTURE_3D);
+});
+
+test("automatic mipmaps follow the changed base face and ignore MAX_LEVEL while manual generation preserves other levels", () => {
+    const s = shadow(), stream = scene().call("BIND_TEXTURE", GL.TEXTURE_CUBE_MAP, 7)
+        .call("TEX_PARAMETERI", GL.TEXTURE_CUBE_MAP, GL.TEXTURE_BASE_LEVEL, 1)
+        .call("TEX_PARAMETERI", GL.TEXTURE_CUBE_MAP, GL.TEXTURE_MAX_LEVEL, 1)
+        .call("TEX_PARAMETERI", GL.TEXTURE_CUBE_MAP, GL.GENERATE_MIPMAP, 1);
+    stream.texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X, 1, GL.RGBA8, 8, 8, GL.RGBA, GL.UNSIGNED_BYTE, null);
+    stream.texImage2D(GL.TEXTURE_CUBE_MAP_NEGATIVE_X, 1, GL.RGB8, 4, 4, GL.RGB, GL.UNSIGNED_BYTE, null);
+    s.process(stream.bytes()); assert.equal(s.current.error, 0);
+    const image = s.boundImage(GL.TEXTURE_CUBE_MAP).texture;
+    assert.equal(image.levels.get(0).get(2).width, 4); assert.equal(image.levels.get(1).get(2).width, 2);
+    assert.equal(image.levels.get(0).get(4).internalFormat, GL.RGBA8);
+    s.process(new GLStream().texImage2D(GL.TEXTURE_CUBE_MAP_NEGATIVE_X, 2, GL.RGB8, 3, 3, GL.RGB, GL.UNSIGNED_BYTE, null).bytes());
+    const update = new GLStream().texImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X, 1, GL.RGBA8, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, null);
+    s.process(update.bytes()); assert.equal(image.levels.get(0).get(2).width, 1);
+    assert.equal(image.levels.get(1).get(2).width, 3, "a different face must retain its explicitly replaced image");
+    assert.equal(image.levels.get(0).get(4).width, 1, "levels beyond the replacement pyramid survive");
+    const volume = scene().call("BIND_TEXTURE", GL.TEXTURE_3D, 8);
+    upload(volume, "TEX_IMAGE_3D", { target: GL.TEXTURE_3D, width: 10, height: 6, depth: 4, border: 1 });
+    volume.call("GENERATE_MIPMAP", GL.TEXTURE_3D); s.process(volume.bytes());
+    assert.deepEqual(s.boundImage(GL.TEXTURE_3D).texture.levels.get(0).get(1),
+        { width: 6, height: 4, depth: 3, internalFormat: GL.RGBA8, border: 1, compressed: false });
+    const copy = shadow(); copy.setState(JSON.parse(JSON.stringify(s.getState())));
+    assert.deepEqual(copy.boundImage(GL.TEXTURE_3D).texture.levels.get(0).get(1), s.boundImage(GL.TEXTURE_3D).texture.levels.get(0).get(1));
+    const one = new GLStream().call("BIND_TEXTURE", GL.TEXTURE_1D, 9);
+    upload(one, "TEX_IMAGE_1D", { target: GL.TEXTURE_1D, width: 10, border: 1 });
+    one.call("GENERATE_MIPMAP", GL.TEXTURE_1D); s.process(one.bytes());
+    assert.deepEqual(s.boundImage(GL.TEXTURE_1D).texture.levels.get(0).get(1),
+        { width: 6, height: 1, depth: 1, internalFormat: GL.RGBA8, border: 1, compressed: false });
+});
+
+test("compressed definitions and updates regenerate mipmap metadata at a nonzero base", () => {
+    const s = shadow(), stream = scene().call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_BASE_LEVEL, 1)
+        .call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.GENERATE_MIPMAP, 1);
+    upload(stream, "COMPRESSED_TEX_IMAGE_2D", { level: 1, width: 8, height: 8, internalformat: GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, image_size: 64 }, new Uint8Array(64));
+    s.process(stream.bytes()); const layer = s.boundImage(GL.TEXTURE_2D).texture.levels.get(0);
+    assert.equal(s.current.error, 0); assert.deepEqual([2, 3, 4].map(level => [layer.get(level).width, layer.get(level).compressedSize]), [[4, 16], [2, 16], [1, 16]]);
+    layer.delete(3);
+    const update = new GLStream(); upload(update, "COMPRESSED_TEX_SUB_IMAGE_2D",
+        { level: 1, width: 4, height: 4, format: GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, image_size: 16 }, new Uint8Array(16));
+    s.process(update.bytes()); assert.equal(s.current.error, 0); assert.equal(layer.get(3).width, 2);
+    const during = new GLStream().call("BEGIN", GL.POINTS).call("GENERATE_MIPMAP", GL.TEXTURE_2D).call("END");
+    s.process(during.bytes()); assert.equal(s.current.error, GL.INVALID_OPERATION);
+});
+
 (async () => {
     for (const { name, fn } of tests) {
         try { await fn(); console.log("ok   " + name); }

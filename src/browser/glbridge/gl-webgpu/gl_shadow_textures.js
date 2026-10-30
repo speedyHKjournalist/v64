@@ -61,6 +61,22 @@
         if (base === "DEPTH") return s.current.readFramebuffer && !s.boundFramebuffer(GL.READ_FRAMEBUFFER).depth ? GL.INVALID_OPERATION : 0;
         return base === "COLOR_INDEX" || s.current.readBuffer === GL.NONE ? GL.INVALID_OPERATION : 0;
     }
+    GLShadow.rules({ [P.GLFN.GENERATE_MIPMAP]: (s, b, v, o, size) => {
+        if (s.current.state.begin) return GL.INVALID_OPERATION;
+        const [target] = s.args("GENERATE_MIPMAP", v, o, size);
+        if (![GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D, GL.TEXTURE_CUBE_MAP].includes(target)) return GL.INVALID_ENUM;
+        if (target === GL.TEXTURE_CUBE_MAP) {
+            const image = s.boundImage(target).texture, level = ensure(image)[GL.TEXTURE_BASE_LEVEL][0];
+            const base = image.levels.get(0)?.get(level);
+            if (!base || base.width <= 0 || base.height !== base.width) return GL.INVALID_OPERATION;
+            for (let face = 1; face < 6; ++face) {
+                const info = image.levels.get(face)?.get(level);
+                if (!info || info.width !== base.width || info.height !== base.height ||
+                    info.internalFormat !== base.internalFormat || (info.border || 0) !== (base.border || 0)) return GL.INVALID_OPERATION;
+            }
+        }
+        return 0;
+    } });
     for (const dimensions of [1, 2, 3]) for (const compressed of [false, true]) {
         const name = (compressed ? "COMPRESSED_TEX_IMAGE_" : "TEX_IMAGE_") + dimensions + "D";
         GLShadow.rules({ [P.GLFN[name]]: (s, b, v, o, size) => {

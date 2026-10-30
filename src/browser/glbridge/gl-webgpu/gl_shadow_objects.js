@@ -26,6 +26,7 @@
     const MAX_TEXTURE_UNITS = glCaps.LIMITS.MAX_TEXTURE_UNITS;
     const MAX_COLOR_ATTACHMENTS = glCaps.LIMITS.MAX_DRAW_BUFFERS;
     const AUTO_MIPMAP_UPDATES = new Set([GLFN.TEX_SUB_IMAGE_1D, GLFN.TEX_SUB_IMAGE_2D, GLFN.TEX_SUB_IMAGE_3D,
+        GLFN.COMPRESSED_TEX_SUB_IMAGE_1D, GLFN.COMPRESSED_TEX_SUB_IMAGE_2D, GLFN.COMPRESSED_TEX_SUB_IMAGE_3D,
         GLFN.COPY_TEX_SUB_IMAGE_1D, GLFN.COPY_TEX_SUB_IMAGE_2D, GLFN.COPY_TEX_SUB_IMAGE_3D]);
 
     const DEPTH_FORMATS = new Set([GL.DEPTH_COMPONENT, GL.DEPTH_COMPONENT16, GL.DEPTH_COMPONENT24,
@@ -159,6 +160,7 @@
             const r = protocol.decodeRecord(name, view, offset);
             this.defineLevel(r.target, r.level, r.width, dimensions >= 2 ? r.height : 1, dimensions >= 3 ? r.depth : 1,
                 r.internalformat, { border: r.border, compressed: true, compressedSize: r.image_size });
+            this.autoMipmap(r.target, r.level);
         };
     };
     proto.compressedTexImage1D = proto.compressedTexImage(1);
@@ -183,7 +185,9 @@
         }
     };
 
-    // Every level below the base, halving to 1, in the base level's format
+    // Manual generation stops at q=min(p,MAX_LEVEL); automatic generation
+    // replaces the full pyramid through p, including border texels (GL 2.1
+    // 3.8.8 and EXT_framebuffer_object's Manual Mipmap Generation).
     proto.generateMipmap = function(bytes, view, offset, size) {
         const a = this.args("GENERATE_MIPMAP", view, offset, size);
         const texture = a && this.boundImage(a[0]).texture;
@@ -194,19 +198,30 @@
     proto.autoMipmap = function(target, level) {
         if (formats.PROXY_TARGETS.has(target)) return;
         const image = this.boundImage(target).texture;
-        if (!level && image.parameters?.[GL.GENERATE_MIPMAP]?.[0]) this.generateMipmapForImage(image);
+        if (level === (image.parameters?.[GL.TEXTURE_BASE_LEVEL]?.[0] || 0) && image.parameters?.[GL.GENERATE_MIPMAP]?.[0])
+            this.generateMipmapForImage(image, target);
     };
 
-    proto.generateMipmapForImage = function(texture) {
-        for (const layer of texture.levels.values()) {
-            const base = layer.get(0);
+    proto.generateMipmapForImage = function(texture, changedTarget) {
+        const first = texture.parameters?.[GL.TEXTURE_BASE_LEVEL]?.[0] || 0;
+        const maximum = changedTarget === undefined ? texture.parameters?.[GL.TEXTURE_MAX_LEVEL]?.[0] ?? 1000 : Infinity;
+        const dimensions = texture.target === GL.TEXTURE_1D ? 1 : texture.target === GL.TEXTURE_3D ? 3 : 2;
+        for (const [face, layer] of texture.levels) {
+            if (changedTarget !== undefined && face !== imageTarget(changedTarget).layer) continue;
+            const base = layer.get(first);
             if (!base) continue;
+            const border = base.border || 0;
             let { width, height, depth } = base;
-            for (let level = 1; width > 1 || height > 1 || depth > 1; ++level) {
-                width = Math.max(1, width >> 1);
-                height = Math.max(1, height >> 1);
-                depth = Math.max(1, depth >> 1);
-                layer.set(level, { ...base, width, height, depth, border: 0,
+            width -= 2 * border;
+            if (dimensions >= 2) height -= 2 * border;
+            if (dimensions >= 3) depth -= 2 * border;
+            if (width < 1 || height < 1 || depth < 1) continue;
+            for (let level = first + 1; level <= maximum && (width > 1 || height > 1 || depth > 1); ++level) {
+                width = Math.max(1, Math.floor(width / 2));
+                height = Math.max(1, Math.floor(height / 2));
+                depth = Math.max(1, Math.floor(depth / 2));
+                layer.set(level, { ...base, width: width + 2 * border,
+                    height: height + (dimensions >= 2 ? 2 * border : 0), depth: depth + (dimensions >= 3 ? 2 * border : 0),
                     ...(base.compressed ? { compressedSize: Math.ceil(width / 4) * Math.ceil(height / 4) * depth *
                         (formats.COMPRESSED_FORMATS[base.internalFormat]?.blockBytes || 0) } : {}) });
             }
