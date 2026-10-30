@@ -24,6 +24,7 @@
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_stipple.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
 <script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js"></script>
@@ -761,7 +762,31 @@
                 [255, 0, 0, 255].every((v, i) => pixel.bytes[32 + i] === v), "retained vertex/index buffer pixel: " + Array.from(pixel.bytes.subarray(32)));
             check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "retained buffer host failure");
         }
-        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
+        for (const remote of [false, true]) {
+            const shadow = new V86GLShadow.GLShadow(), executor = new GLWebGPUExecutorModule.GLWebGPUExecutor(document.getElementById("gpu"), { strict: true });
+            await executor.initialize();
+            const bitmap = new Uint8Array(128).fill(0xAA), s = new GLStream().makeCurrent(900, 0, 0, 64, 64, 900, 900);
+            const header = P.encodeRecord("POLYGON_STIPPLE_BITMAP", { data_size: 128 }), payload = new Uint8Array(header.length + 128);
+            payload.set(header); payload.set(bitmap, header.length); s.record(P.GLFN.POLYGON_STIPPLE_BITMAP, payload);
+            s.call("ENABLE", GL.POLYGON_STIPPLE).call("COLOR4F", 1, 0, 0, 1).call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)
+                .call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const pixels = s.readPixels(0, 8, 32, 1, GL.RGBA, GL.UNSIGNED_BYTE, 128);
+            s.call("BIND_BUFFER", GL.PIXEL_UNPACK_BUFFER, 1).bufferData(GL.PIXEL_UNPACK_BUFFER, 128, GL.STATIC_DRAW, new Uint8Array(128));
+            const query = P.encodeRecord("QUERY_POLYGON_STIPPLE", { mode: 1, pointer: 0, data_size: 320 }), data = new Uint8Array(query.length + 320);
+            data.set(query); s.record(P.GLFN.QUERY_POLYGON_STIPPLE, data);
+            s.call("BEGIN", GL.QUADS).call("VERTEX3F", -1, -1, 0).call("VERTEX3F", 1, -1, 0)
+                .call("VERTEX3F", 1, 1, 0).call("VERTEX3F", -1, 1, 0).call("END");
+            const unchanged = s.readPixels(0, 8, 32, 1, GL.RGBA, GL.UNSIGNED_BYTE, 128), memory = s.bytes();
+            shadow.process(memory); executor.options.writeGuestMemory = (at, bytes) => memory.set(bytes, at);
+            executor.submit(remote ? memory.slice() : memory, {}); await executor.idle();
+            for (const read of [pixels, unchanged]) {
+                check(read.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "stipple pixel status");
+                for (let x = 0; x < 32; ++x) check(read.bytes[32 + x * 4] === (x % 2 ? 0 : 255), "stipple bit orientation at " + x);
+            }
+            check(!shadow.stats.rejected && !executor.gpuErrors.errors.length && !executor.hostErrors.length && !executor.stats.refusals, "stipple host failure");
+        }
+        document.getElementById("result").textContent = "PASS -- CPU validation/forwarding, polygon stipple, retained buffers, texture readback, GLSL lifetime/units/mixed fixed stages and ARB parameters preserve pixels in local and copied streams";
     } catch (error) {
         document.getElementById("result").textContent = "FAIL " + (error.stack || error);
     }

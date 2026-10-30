@@ -4217,6 +4217,17 @@
                 bytes.subarray(offset, offset + header));
             this.polygonStippleTexture = null;
         });
+        for (const name of ["QUERY_POLYGON_STIPPLE", "POLYGON_STIPPLE_BITMAP"]) define(name, function(a, bytes, view, offset, size) {
+            const header = protocol.RECORDS[name].size, fields = protocol.F[name];
+            if (size < header) throw new GLStreamError(name + " record is short");
+            if (view.getUint32(offset + fields.status, true) !== SYNC_STATUS_OK) return;
+            if (name === "QUERY_POLYGON_STIPPLE" &&
+                (!view.getUint32(offset + fields.mode, true) || !view.getUint32(offset + fields.pbo, true))) return;
+            if (size < header + 128) throw new GLStreamError(name + " bitmap is short");
+            if (!this.current) return;
+            this.current.polygonStipple.set(bytes.subarray(offset + header, offset + header + 128));
+            this.polygonStippleTexture = null;
+        }, { needsContext: false });
         const pixelMap = name => function(a, bytes, view, offset, size) {
             // Pixel maps only affect glDrawPixels/glReadPixels colour transfer,
             // which the executor applies on the CPU; the table is stored so the
