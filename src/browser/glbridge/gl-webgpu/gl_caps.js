@@ -53,7 +53,7 @@
         "GL_EXT_packed_pixels", "GL_EXT_rescale_normal",
         "GL_EXT_separate_specular_color", "GL_EXT_bgra",
         "GL_EXT_framebuffer_object", "GL_EXT_framebuffer_blit",
-        "GL_EXT_paletted_texture", "GL_EXT_generate_mipmap",
+        "GL_EXT_generate_mipmap",
         "GL_SGIS_generate_mipmap", "GL_SGIS_texture_edge_clamp",
         "GL_SGIS_texture_lod", "GL_NV_blend_square",
     ];
@@ -81,6 +81,7 @@
     }
 
     function extensions(caps) {
+        if (caps.profile) return caps.profile.strings[GL.EXTENSIONS];
         const list = [...BASE_EXTENSIONS];
         // Only advertised when the adapter really has the BC formats: the
         // CPU decode path keeps the picture right, but a guest that sees
@@ -98,6 +99,7 @@
 
     // glGetString's answer, or undefined when pname is not a capability
     function string(caps, pname) {
+        if (caps.profile) return caps.profile.strings[pname];
         switch (pname) {
         case GL.VENDOR: return "Anthropic v86gl";
         case GL.RENDERER: return "v86 WebGPU bridge";
@@ -110,6 +112,7 @@
 
     // glGetIntegerv's answer, or undefined when pname is not a capability
     function integer(caps, pname) {
+        if (caps.profile) return caps.profile.integers[pname];
         const limits = caps.limits;
         const C = protocol.C;
         switch (pname) {
@@ -165,7 +168,27 @@
         }
     }
 
-    const api = { LIMITS, capabilities, extensions, string, integer };
+    // Keep the virtual device's advertised values independent of later host
+    // adapters and bridge revisions. Copy first: the renderer owns its input.
+    function freeze(caps) {
+        if (!caps) return null;
+        const result = capabilities(caps.limits, caps.features);
+        let integers = {}, strings = {};
+        if (caps.profile) {
+            integers = { ...caps.profile.integers }; strings = { ...caps.profile.strings };
+        } else {
+            for (const pname of new Set([...Object.values(GL), protocol.C.V86GL_QUERY_HOST_CAPABILITIES])) {
+                const value = integer(result, pname), text = string(result, pname);
+                if (value !== undefined) integers[pname] = value;
+                if (text !== undefined) strings[pname] = text;
+            }
+        }
+        result.profile = Object.freeze({ version: 1, integers: Object.freeze(integers), strings: Object.freeze(strings) });
+        Object.freeze(result.limits); Object.freeze(result.features);
+        return Object.freeze(result);
+    }
+
+    const api = { LIMITS, capabilities, extensions, string, integer, freeze };
     global.GLCaps = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

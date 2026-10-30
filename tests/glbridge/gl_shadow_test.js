@@ -52,6 +52,7 @@ test("capability integers and strings are answered in place", () => {
     const extensions = text(bytes, at.extensions + header, u32(bytes, at.extensions + S.length) - 1);
     assert.equal(extensions, glCaps.extensions(CAPS));
     assert.ok(extensions.includes("GL_EXT_texture_compression_s3tc"));
+    assert.ok(!extensions.split(" ").includes("GL_EXT_paletted_texture"), "palette API is not implemented");
     // a buffer too small takes what fits; length says how long it is
     assert.equal(u32(bytes, at.short + S.status), OK);
     assert.equal(text(bytes, at.short + header, 4), "Anth");
@@ -101,6 +102,34 @@ test("the capability limits agree with the translator's", () => {
     assert.equal(glCaps.LIMITS.MAX_VARYING_FLOATS, translator.MAX_INTER_STAGE_SLOTS * 4);
 });
 
+test("capability profiles survive backend revisions, isolate host input and keep restored strings", () => {
+    const raw = glCaps.capabilities({ maxTextureDimension2D: 4096 }, { bc: true }), one = new GLShadow(); one.setCapabilities(raw);
+    raw.limits.maxTextureDimension2D = 16384; raw.features.bc = false;
+    assert.equal(glCaps.integer(one.capabilities, GL.MAX_TEXTURE_SIZE), 4096);
+    assert.ok(glCaps.extensions(one.capabilities).includes("GL_EXT_texture_compression_s3tc"));
+    const saved = JSON.parse(JSON.stringify(one.getState())), maxLights = glCaps.LIMITS.MAX_LIGHTS;
+    saved.capabilities.profile.strings[GL.RENDERER] = "Saved GL renderer";
+    saved.capabilities.profile.strings[GL.EXTENSIONS] = "GL_EXT_framebuffer_object";
+    try {
+        glCaps.LIMITS.MAX_LIGHTS = 99;
+        const copy = new GLShadow(); copy.setState(saved);
+        saved.capabilities.profile.integers[GL.MAX_LIGHTS] = 77;
+        assert.equal(glCaps.integer(glCaps.capabilities({}, {}), GL.MAX_LIGHTS), 99, "a fresh device sees the changed implementation");
+        assert.equal(glCaps.integer(copy.capabilities, GL.MAX_LIGHTS), maxLights);
+        assert.equal(glCaps.extensions(copy.capabilities), "GL_EXT_framebuffer_object");
+        const { bytes, at } = queries((s, mark) => {
+            mark("limit"); s.queryInteger(GL.MAX_LIGHTS); mark("renderer"); s.queryString(GL.RENDERER, 128);
+            mark("extensions"); s.queryString(GL.EXTENSIONS, 128);
+        });
+        copy.process(bytes); assert.equal(u32(bytes, at.limit + P.F.QUERY_INTEGER.value), maxLights);
+        const stringAt = name => text(bytes, at[name] + P.RECORDS.QUERY_GL_STRING.size, u32(bytes, at[name] + P.F.QUERY_GL_STRING.length) - 1);
+        assert.equal(stringAt("renderer"), "Saved GL renderer"); assert.equal(stringAt("extensions"), "GL_EXT_framebuffer_object");
+        assert.ok(Object.isFrozen(copy.capabilities.profile.integers));
+        const legacy = new GLShadow(); legacy.setState({ ...saved, capabilities: raw });
+        assert.equal(glCaps.integer(legacy.capabilities, GL.MAX_LIGHTS), 99, "older snapshots without profiles acquire the current table once");
+    } finally { glCaps.LIMITS.MAX_LIGHTS = maxLights; }
+});
+
 test("contexts follow MAKE_CURRENT and DESTROY_CONTEXT, and survive a snapshot", () => {
     const shadow = new GLShadow();
     shadow.setCapabilities(CAPS);
@@ -111,7 +140,7 @@ test("contexts follow MAKE_CURRENT and DESTROY_CONTEXT, and survive a snapshot",
     const copy = new GLShadow();
     copy.setState(JSON.parse(JSON.stringify(shadow.getState())));
     assert.deepEqual(copy.getState(), shadow.getState());
-    assert.deepEqual(copy.capabilities, CAPS);
+    assert.deepEqual(copy.capabilities, glCaps.freeze(CAPS));
     shadow.process(new GLStream().record(P.CTRL.DESTROY_CONTEXT, new Uint8Array(new Uint32Array([8]).buffer)).bytes());
     assert.deepEqual([...shadow.contexts.keys()], ["context:7"]);
     assert.equal(shadow.current, null);

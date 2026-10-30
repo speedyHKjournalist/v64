@@ -81,7 +81,7 @@
         }
 
         setCapabilities(capabilities) {
-            this.capabilities = capabilities;
+            this.capabilities = glCaps.freeze(capabilities);
         }
 
         setGlslang(glslang) {
@@ -302,7 +302,7 @@
         setState(state) {
             this.reset();
             if (!state) return;
-            this.capabilities = state.capabilities || null;
+            this.capabilities = glCaps.freeze(state.capabilities);
             this.nextGroup = state.nextGroup || 1;
             for (const c of state.contexts || []) {
                 const context = this.createContext(c.key, c.id, c.group || "private:" + c.key);
