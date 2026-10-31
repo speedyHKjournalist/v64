@@ -1,0 +1,19 @@
+{"renderer":"Apple M1 Pro","cases":[
+{"name":"point_range","pname":2834,"error":0,"values":[1,64]},
+{"name":"point_granularity","pname":2835,"error":0,"values":[9.9999997473787516e-05]},
+{"name":"line_range","pname":2850,"error":0,"values":[1,16]},
+{"name":"aliased_line_range","pname":33902,"error":0,"values":[1,16]},
+{"name":"max_attrib","pname":3381,"error":0,"values":[16]},
+{"name":"max_client_attrib","pname":3387,"error":0,"values":[16]},
+{"name":"max_color_matrix","pname":32947,"error":0,"values":[10]},
+{"name":"rgba","pname":3121,"error":0,"values":[1]},
+{"name":"stereo","pname":3123,"error":0,"values":[0]},
+{"name":"attrib_initial","pname":2992,"error":0,"values":[0]},
+{"name":"client_initial","pname":2993,"error":0,"values":[0]},
+{"name":"attrib_pushed","pname":2992,"error":0,"values":[2]},
+{"name":"client_pushed","pname":2993,"error":0,"values":[1]},
+{"name":"attrib_popped","pname":2992,"error":0,"values":[0]},
+{"name":"client_popped","pname":2993,"error":0,"values":[0]},
+{"name":"arb_error_initial","pname":34379,"error":0,"values":[-1]},
+{"name":"compressed_formats","pname":34467,"error":0,"values":[33776,33778,33779]}
+]}

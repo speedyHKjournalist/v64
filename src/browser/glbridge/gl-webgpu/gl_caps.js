@@ -25,6 +25,10 @@
         MAX_VERTEX_ATTRIBS: 16,
         MAX_NAME_STACK_DEPTH: 64,
         MAX_EVAL_ORDER: protocol.C.V86GL_MAX_EVAL_ORDER,
+        MAX_ATTRIB_STACK_DEPTH: 16,
+        MAX_CLIENT_ATTRIB_STACK_DEPTH: 16,
+        MAX_POINT_SIZE: 64,
+        MAX_LINE_WIDTH: 64,
         MAX_DRAW_BUFFERS: 8,
         MAX_PIXEL_MAP_TABLE: protocol.C.V86GL_MAX_TYPED_QUERY_VALUES,
         MODELVIEW_STACK_DEPTH: 32,
@@ -130,6 +134,11 @@
             return Math.min(16384, limits.maxTextureDimension2D);
         case GL.MAX_TEXTURE_UNITS: return LIMITS.MAX_TEXTURE_UNITS;
         case GL.MAX_EVAL_ORDER: return LIMITS.MAX_EVAL_ORDER;
+        case GL.MAX_ATTRIB_STACK_DEPTH: return LIMITS.MAX_ATTRIB_STACK_DEPTH;
+        case GL.MAX_CLIENT_ATTRIB_STACK_DEPTH: return LIMITS.MAX_CLIENT_ATTRIB_STACK_DEPTH;
+        case GL.MAX_COLOR_MATRIX_STACK_DEPTH_SGI: return LIMITS.OTHER_STACK_DEPTH;
+        case GL.RGBA_MODE: return 1;
+        case GL.STEREO: return 0;
         case GL.MAX_TEXTURE_COORDS: return LIMITS.MAX_TEXTURE_COORDS;
         case GL.MAX_TEXTURE_IMAGE_UNITS: return LIMITS.MAX_TEXTURE_IMAGE_UNITS;
         case GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS: return LIMITS.MAX_VERTEX_TEXTURE_IMAGE_UNITS;
@@ -172,14 +181,31 @@
         }
     }
 
+    function vector(caps, pname) {
+        if (caps.profile?.vectors && Object.hasOwn(caps.profile.vectors, pname)) return caps.profile.vectors[pname];
+        switch (pname) {
+        case GL.POINT_SIZE_RANGE: return [1, LIMITS.MAX_POINT_SIZE];
+        case GL.LINE_WIDTH_RANGE: case GL.ALIASED_LINE_WIDTH_RANGE: return [1, LIMITS.MAX_LINE_WIDTH];
+        case GL.POINT_SIZE_GRANULARITY: return [1];
+        case GL.COMPRESSED_TEXTURE_FORMATS:
+            return [GL.COMPRESSED_RGB_S3TC_DXT1_EXT, GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, GL.COMPRESSED_RGBA_S3TC_DXT3_EXT, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT]
+                .slice(0, integer(caps, GL.NUM_COMPRESSED_TEXTURE_FORMATS));
+        default: return undefined;
+        }
+    }
+
     // Keep the virtual device's advertised values independent of later host
     // adapters and bridge revisions. Copy first: the renderer owns its input.
     function freeze(caps) {
         if (!caps) return null;
         const result = capabilities(caps.limits, caps.features);
-        let integers = {}, strings = {};
+        let integers = {}, strings = {}, vectors = {};
         if (caps.profile) {
             integers = { ...caps.profile.integers }; strings = { ...caps.profile.strings };
+            // Values formerly answered by the DLL remain stable in saves
+            // predating the CPU vector capability table.
+            for (const [pname, value] of [[GL.MAX_ATTRIB_STACK_DEPTH, 16], [GL.MAX_CLIENT_ATTRIB_STACK_DEPTH, 16],
+                [GL.MAX_COLOR_MATRIX_STACK_DEPTH_SGI, 2], [GL.RGBA_MODE, 1], [GL.STEREO, 0]]) if (integers[pname] === undefined) integers[pname] = value;
         } else {
             for (const pname of new Set([...Object.values(GL), protocol.C.V86GL_QUERY_HOST_CAPABILITIES])) {
                 const value = integer(result, pname), text = string(result, pname);
@@ -187,12 +213,14 @@
                 if (text !== undefined) strings[pname] = text;
             }
         }
-        result.profile = Object.freeze({ version: 1, integers: Object.freeze(integers), strings: Object.freeze(strings) });
+        for (const pname of [GL.POINT_SIZE_RANGE, GL.LINE_WIDTH_RANGE, GL.ALIASED_LINE_WIDTH_RANGE, GL.POINT_SIZE_GRANULARITY, GL.COMPRESSED_TEXTURE_FORMATS])
+            vectors[pname] = Object.freeze(Array.from(vector(caps, pname)));
+        result.profile = Object.freeze({ version: 2, integers: Object.freeze(integers), strings: Object.freeze(strings), vectors: Object.freeze(vectors) });
         Object.freeze(result.limits); Object.freeze(result.features);
         return Object.freeze(result);
     }
 
-    const api = { LIMITS, capabilities, extensions, string, integer, freeze };
+    const api = { LIMITS, capabilities, extensions, string, integer, vector, freeze };
     global.GLCaps = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

@@ -284,7 +284,7 @@
     const FRONT_BUFFERS = new Set([GL.FRONT, GL.FRONT_AND_BACK, GL.FRONT_LEFT, GL.LEFT]);
 
     // the widest aliased line drawn (ALIASED_LINE_WIDTH_RANGE)
-    const MAX_LINE_WIDTH = 64;
+    const MAX_LINE_WIDTH = glCaps.LIMITS.MAX_LINE_WIDTH;
 
     const COMPARE_FUNCTIONS = {
         [GL.NEVER]: "never", [GL.LESS]: "less", [GL.EQUAL]: "equal",

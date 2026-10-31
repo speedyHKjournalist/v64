@@ -141,9 +141,11 @@
         set(c, p, [value]);
     });
     function stack(c) { return c.state.mode === GL.TEXTURE ? c.state.texture[c.activeTexture || 0] : c.state.stacks[c.state.mode]; }
+    const matrixLimit = (c, shadow) => c.state.mode === GL.MODELVIEW ? caps.LIMITS.MODELVIEW_STACK_DEPTH :
+        c.state.mode === GL.COLOR && shadow.capabilities ? caps.integer(shadow.capabilities, GL.MAX_COLOR_MATRIX_STACK_DEPTH_SGI) ?? caps.LIMITS.OTHER_STACK_DEPTH : caps.LIMITS.OTHER_STACK_DEPTH;
     on("MATRIX_MODE", (c, [mode]) => { c.state.mode = mode; });
     on("LOAD_IDENTITY", c => { const s = stack(c); s[s.length - 1] = identity(); });
-    on("PUSH_MATRIX", c => { const s = stack(c), max = c.state.mode === GL.MODELVIEW ? caps.LIMITS.MODELVIEW_STACK_DEPTH : caps.LIMITS.OTHER_STACK_DEPTH; if (s.length < max) s.push(s[s.length - 1].slice()); });
+    on("PUSH_MATRIX", (c, a, shadow) => { const s = stack(c); if (s.length < matrixLimit(c, shadow)) s.push(s[s.length - 1].slice()); });
     on("POP_MATRIX", c => { const s = stack(c); if (s.length > 1) s.pop(); });
     const mult = (c, m) => { const s = stack(c); s[s.length - 1] = multiply(s[s.length - 1], m).map(Math.fround); };
     on("TRANSLATEF", (c, [x, y, z]) => { const m = identity(); m[12] = x; m[13] = y; m[14] = z; mult(c, m); });
@@ -184,12 +186,12 @@
         return !STORE_BOOLEAN.has(p) && v < 0 ? GL.INVALID_VALUE : 0;
     });
     rule("MATRIX_MODE", (c, [mode]) => [GL.MODELVIEW, GL.PROJECTION, GL.TEXTURE, GL.COLOR].includes(mode) ? 0 : GL.INVALID_ENUM);
-    rule("PUSH_MATRIX", c => stack(c).length >= (c.state.mode === GL.MODELVIEW ? caps.LIMITS.MODELVIEW_STACK_DEPTH : caps.LIMITS.OTHER_STACK_DEPTH) ? GL.STACK_OVERFLOW : 0);
+    rule("PUSH_MATRIX", (c, a, shadow) => stack(c).length >= matrixLimit(c, shadow) ? GL.STACK_OVERFLOW : 0);
     rule("POP_MATRIX", c => stack(c).length <= 1 ? GL.STACK_UNDERFLOW : 0);
     rule("ORTHO", (c, [l, r, b, t, n, f]) => l === r || b === t || n === f ? GL.INVALID_VALUE : 0);
     rule("FRUSTUM", (c, [l, r, b, t, n, f]) => l === r || b === t || n === f || n <= 0 || f <= 0 ? GL.INVALID_VALUE : 0);
     for (const [push, pop, property] of [["PUSH_ATTRIB", "POP_ATTRIB", "attrib"], ["PUSH_CLIENT_ATTRIB", "POP_CLIENT_ATTRIB", "clientAttrib"]]) {
-        rule(push, c => c.state[property].length >= 16 ? GL.STACK_OVERFLOW : 0);
+        rule(push, c => c.state[property].length >= (property === "attrib" ? caps.LIMITS.MAX_ATTRIB_STACK_DEPTH : caps.LIMITS.MAX_CLIENT_ATTRIB_STACK_DEPTH) ? GL.STACK_OVERFLOW : 0);
         rule(pop, c => c.state[property].length === 0 ? GL.STACK_UNDERFLOW : 0);
     }
     for (const name of ["ACTIVE_TEXTURE", "CLIENT_ACTIVE_TEXTURE"])
@@ -216,6 +218,10 @@
         if (depth) return [[(depth === GL.TEXTURE ? state.texture[c.activeTexture || 0] : state.stacks[depth]).length], "i"];
         if (pname === GL.MATRIX_MODE) return [[state.mode], "i"];
         if (pname === GL.CURRENT_PROGRAM) return [[c.program], "i"];
+        if (pname === GL.ATTRIB_STACK_DEPTH || pname === GL.CLIENT_ATTRIB_STACK_DEPTH) return [[(pname === GL.ATTRIB_STACK_DEPTH ? state.attrib : state.clientAttrib).length], "i"];
+        if (pname === GL.PROGRAM_ERROR_POSITION_ARB) return [[this.programErrorPosition?.() ?? -1], "i"];
+        const vector = this.capabilities && caps.vector(this.capabilities, pname);
+        if (vector) return [vector, pname === GL.COMPRESSED_TEXTURE_FORMATS ? "i" : "f"];
         if (pname === GL.ACTIVE_TEXTURE) return [[GL.TEXTURE0 + (c.activeTexture || 0)], "i"];
         if (pname === GL.CLIENT_ACTIVE_TEXTURE) return [[GL.TEXTURE0 + state.clientTexture], "i"];
         // Format queries belong to the selected drawable, not the adapter.
