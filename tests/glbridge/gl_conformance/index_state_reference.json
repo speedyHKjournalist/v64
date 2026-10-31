@@ -1,0 +1,19 @@
+{"renderer":"Apple M1 Pro","cases":[
+{"name":"current_default","pname":2817,"error":0,"values":[1,1,1,1]},
+{"name":"clear_default","pname":3104,"error":0,"values":[0,0,0,0]},
+{"name":"mask_default","pname":3105,"error":0,"values":[4294967295,4294967296,-1,1]},
+{"name":"double_precision","pname":2817,"error":0,"values":[16777218,16777218,16777218,1]},
+{"name":"negative_half","pname":2817,"error":0,"values":[-3.5,-3.5,-4,1]},
+{"name":"negative_small_half","pname":2817,"error":0,"values":[-0.5,-0.5,-1,1]},
+{"name":"byte_value","pname":2817,"error":0,"values":[255,255,255,1]},
+{"name":"clear_value","pname":3104,"error":0,"values":[-3.5,-3.5,-4,1]},
+{"name":"mask_value","pname":3105,"error":0,"values":[2147483649,2147483648,-2147483647,1]},
+{"name":"current_restored","pname":2817,"error":0,"values":[255,255,255,1]},
+{"name":"clear_restored","pname":3104,"error":0,"values":[-3.5,-3.5,-4,1]},
+{"name":"mask_restored","pname":3105,"error":0,"values":[2147483649,2147483648,-2147483647,1]},
+{"name":"list_compile","pname":2817,"error":0,"values":[255,255,255,1]},
+{"name":"list_call","pname":2817,"error":0,"values":[9.5,9.5,10,1]},
+{"name":"index_inside_begin","pname":2817,"error":0,"values":[2.75,2.75,3,1]},
+{"name":"clear_inside_begin","error":1282},
+{"name":"mask_inside_begin","error":1282}
+]}

@@ -276,6 +276,7 @@
         ["QUERY_EVALUATOR", 249, null, "u:pname u:value_kind u:status u:count u:data_size u:error u:target u:reserved"],
         ["RESOLVED_EVAL_VERTEX", 250, null, "f:position[4] f:color[4] f:normal[4] f:texcoord[4]"],
         ["RESOLVED_PROGRAM_INTERFACE", 251, null, "u:program u:object_id u:link_generation u:entry_count u:data_size u:reserved"],
+        ["INDEX_STATE", 252, null, "u:operation u:mask d:value"],
     ];
 
     // Composite records' optional headers and repeated elements. The common

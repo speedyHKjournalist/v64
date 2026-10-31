@@ -2667,6 +2667,9 @@
             try { this.immediateVertex(...r.position); }
             finally { current.color = saved.color; current.normal = saved.normal; current.texCoord[0] = saved.texcoord; }
         });
+        // Index state remains queryable in an RGBA drawable; it does not
+        // participate in that drawable's rendering.
+        define("INDEX_STATE", function() {});
         define("COLOR4F", function(a) {
             this.current.current.color.set([a[0], a[1], a[2], a[3]]);
             this.latchColorMaterial();

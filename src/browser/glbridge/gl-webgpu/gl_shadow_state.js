@@ -34,6 +34,9 @@
     define("SCISSOR_BOX", [0, 0, 0, 0], "i", 0x80000);
     define("DEPTH_RANGE", [0, 1], "n", 0x800);
     define("COLOR_CLEAR_VALUE ACCUM_CLEAR_VALUE", [0, 0, 0, 0], "n", 0x4000);
+    define("CURRENT_INDEX", [1], "f", 1);
+    define("INDEX_CLEAR_VALUE", [0], "f", 0x4000);
+    define("INDEX_WRITEMASK", [0xFFFFFFFF], "u", 0x4000);
     DEFAULTS.get(GL.ACCUM_CLEAR_VALUE)[2] = 0x200;
     define("DEPTH_CLEAR_VALUE", [1], "n", 0x100);
     define("STENCIL_CLEAR_VALUE", [0], "i", 0x400);
@@ -201,6 +204,15 @@
     for (const name of ["VERTEX3F", "VERTEX4F"]) rule(name, c => c.state.begin ? 0 : GL.INVALID_OPERATION, true);
 
     const proto = GLShadow.prototype;
+    GLShadow.rules({ [GLFN.INDEX_STATE]: (shadow, bytes, view, offset) => {
+        const r = P.decodeRecord("INDEX_STATE", view, offset);
+        return r.operation > 2 ? GL.INVALID_ENUM : r.operation && shadow.current.state.begin ? GL.INVALID_OPERATION : 0;
+    } });
+    proto.indexState = function(bytes, view, offset) {
+        const r = P.decodeRecord("INDEX_STATE", view, offset);
+        set(this.current, [GL.CURRENT_INDEX, GL.INDEX_CLEAR_VALUE, GL.INDEX_WRITEMASK][r.operation], [r.operation === 2 ? r.mask : Math.fround(r.value)]);
+    };
+    GLShadow.install({ [GLFN.INDEX_STATE]: "indexState" });
     proto.stateValue = function(pname) {
         const c = this.current;
         if (!c) return null;
@@ -283,7 +295,7 @@
                 // Preserve the specified negative endpoint even though the
                 // Apple driver returns -INT_MAX there (glGet's refpage).
                 v = kind === "u" ? v | 0 : kind === "n" ? (v <= -1 ? -0x80000000 : Math.trunc(clamp(v, -1, 1) * 0x7FFFFFFF)) :
-                    kind === "t" ? Math.trunc(v) : Math.round(v);
+                    kind === "t" ? Math.trunc(v) : v < 0 ? -Math.round(-v) : Math.round(v);
                 v = clamp(v, -0x80000000, 0x7FFFFFFF);
             } else if (r.value_kind === C.V86GL_STATE_FLOAT) v = Math.fround(v);
             view.setFloat64(offset + header + i * 8, v, true);
