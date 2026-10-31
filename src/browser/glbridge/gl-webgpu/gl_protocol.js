@@ -275,6 +275,7 @@
         ["EVAL_MESH", 248, null, "u:dimensions u:mode i:indices[4]"],
         ["QUERY_EVALUATOR", 249, null, "u:pname u:value_kind u:status u:count u:data_size u:error u:target u:reserved"],
         ["RESOLVED_EVAL_VERTEX", 250, null, "f:position[4] f:color[4] f:normal[4] f:texcoord[4]"],
+        ["RESOLVED_PROGRAM_INTERFACE", 251, null, "u:program u:object_id u:link_generation u:entry_count u:data_size u:reserved"],
     ];
 
     // Composite records' optional headers and repeated elements. The common
@@ -289,6 +290,7 @@
         ["MULTI_DRAW_ARRAYS_ENTRY", "i:first i:count"],
         ["MULTI_DRAW_ELEMENTS_ENTRY", "i:count u:offset"],
         ["QUERY_OBJECT_BATCH_ENTRY", "u:name u:available u:result"],
+        ["PROGRAM_INTERFACE_ENTRY", "u:location_kind i:location u:value_type i:value_count u:name_length"],
     ];
 
     // Control records, outside the GLFN numbering: [name, code, layout]
@@ -514,6 +516,36 @@
         return bytes;
     }
 
+    function encodeProgramInterface(fields, entries) {
+        const text = new TextEncoder(), rows = entries.map(entry => ({ entry, name: text.encode(entry.name) })), header = RECORDS.RESOLVED_PROGRAM_INTERFACE.size,
+            dataSize = rows.reduce((sum, row) => sum + RECORDS.PROGRAM_INTERFACE_ENTRY.size + Math.ceil(row.name.length / 4) * 4, 0), bytes = new Uint8Array(header + dataSize);
+        bytes.set(encodeRecord("RESOLVED_PROGRAM_INTERFACE", { ...fields, entry_count: rows.length, data_size: dataSize }));
+        let at = header;
+        for (const { entry, name } of rows) {
+            bytes.set(encodeRecord("PROGRAM_INTERFACE_ENTRY", { ...entry, name_length: name.length }), at); at += RECORDS.PROGRAM_INTERFACE_ENTRY.size;
+            bytes.set(name, at); at += Math.ceil(name.length / 4) * 4;
+        }
+        return bytes;
+    }
+
+    function decodeProgramInterface(view, offset, size) {
+        const header = RECORDS.RESOLVED_PROGRAM_INTERFACE.size, rowSize = RECORDS.PROGRAM_INTERFACE_ENTRY.size;
+        if (size < header) throw new Error("short GL program interface");
+        const r = decodeRecord("RESOLVED_PROGRAM_INTERFACE", view, offset), entries = [], text = new TextDecoder("utf-8", { fatal: true });
+        if (!r.object_id || !r.link_generation || r.entry_count > 32768 || r.data_size !== size - header) throw new Error("invalid GL program interface header");
+        let at = offset + header;
+        for (let i = 0; i < r.entry_count; ++i) {
+            if (at + rowSize > offset + size) throw new Error("short GL program interface entry");
+            const entry = decodeRecord("PROGRAM_INTERFACE_ENTRY", view, at); at += rowSize;
+            if (![C.V86GL_LOCATION_KIND_UNIFORM, C.V86GL_LOCATION_KIND_ATTRIB].includes(entry.location_kind) || entry.location < 0 || entry.value_count < 1 ||
+                entry.name_length > offset + size - at) throw new Error("invalid GL program interface entry");
+            entry.name = text.decode(new Uint8Array(view.buffer, view.byteOffset + at, entry.name_length));
+            at += Math.ceil(entry.name_length / 4) * 4; entries.push(entry);
+        }
+        if (at !== offset + size) throw new Error("invalid GL program interface span");
+        return { ...r, entries };
+    }
+
     function isRejected(opcode) {
         return (opcode & C.V86GL_REJECTED_RECORD_MASK) === C.V86GL_REJECTED_RECORD_BIT;
     }
@@ -528,7 +560,7 @@
     }
 
     const api = { OPCODES, CONTROL, CTRL, DEFINES, C, BYTES, C_TYPES, GLFN, NAME_BY_OPCODE, SIGNATURES, RECORDS, F,
-        payloadBytes, decodeArgs, decodeRecord, encodeRecord, encodeArgs, isRejected, rejectionError, rejectedOpcode };
+        payloadBytes, decodeArgs, decodeRecord, encodeRecord, encodeArgs, encodeProgramInterface, decodeProgramInterface, isRejected, rejectionError, rejectedOpcode };
     global.GLProtocol = api;
     if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

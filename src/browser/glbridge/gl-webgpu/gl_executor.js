@@ -3627,6 +3627,18 @@
                 shader.stage, { ...this.options.translator, library: true });
         });
         define("LINK_PROGRAM", function(a) { this.linkProgram(a[0] >>> 0); });
+        define("RESOLVED_PROGRAM_INTERFACE", function(a, bytes, view, offset, size) {
+            const r = protocol.decodeProgramInterface(view, offset, size), program = this.current.shareGroup.programs.get(r.program);
+            if (!program || !program.linked) return;
+            const attributes = new Map(r.entries.filter(entry => entry.location_kind === LOCATION_KIND_ATTRIB).map(entry => [entry.name, entry.location]));
+            program.adoptedAttribLocations = attributes;
+            const link = this.linkVariant(program, {});
+            if (!link.ok) throw new GLStreamError("CPU program interface could not be installed: " + link.log);
+            program.link = link; program.variants.clear();
+            program.cpuObjectId = r.object_id; program.cpuLinkGeneration = r.link_generation;
+            for (const entry of r.entries) if (entry.location_kind === protocol.C.V86GL_LOCATION_KIND_UNIFORM)
+                this.adoptLocation(entry.location_kind, r.program, entry.name, entry.location);
+        });
         define("PROGRAM_LINK_FAILED", function(a) {
             const program = this.current.shareGroup.programs.get(a[0] >>> 0);
             if (program) {

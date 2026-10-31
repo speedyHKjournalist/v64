@@ -25,6 +25,7 @@
     const constants = global.GLWGConstants || require("./gl_constants.js");
     const caps = global.GLCaps || require("./gl_caps.js");
     const { GLShadow } = global.V86GLShadow || require("./gl_shadow.js");
+    const record = (fn, parts) => (global.GLListArrays || require("./gl_list_arrays.js")).record(fn, parts);
     const { STAGE_OF_GL_TYPE } = global.V86GLGlslang || require("./gl_glslang.js");
     const { GLFN, C, F, RECORDS } = protocol;
     const GL = constants.GL;
@@ -58,6 +59,7 @@
     const typeOf = type => TYPES.get(type) || ["i", 1, 1];
     const objectError = (group, name, shader) => (shader ? group.shaders : group.programs).has(name) ? 0 :
         (shader ? group.programs : group.shaders).has(name) ? GL.INVALID_OPERATION : GL.INVALID_VALUE;
+    GLShadow.rules({ [GLFN.RESOLVED_PROGRAM_INTERFACE]: () => GL.INVALID_OPERATION, [GLFN.PROGRAM_LINK_FAILED]: () => GL.INVALID_OPERATION });
     function rule(name, check) {
         GLShadow.rules({ [GLFN[name]]: (shadow, bytes, view, offset, size) => {
             if (shadow.current.state && shadow.current.state.begin) return GL.INVALID_OPERATION;
@@ -67,6 +69,7 @@
     for (const name of ["CREATE_SHADER", "CREATE_PROGRAM"]) rule(name, (s, b, v, o, n) => {
         const a = s.args(name, v, o, n), g = s.current.group;
         if (name === "CREATE_SHADER" && !STAGE_OF_GL_TYPE.has(a[1])) return GL.INVALID_ENUM;
+        if (name === "CREATE_PROGRAM" && g.nextProgramObjectId > 0xFFFFFFFF) return GL.OUT_OF_MEMORY;
         const kind = name === "CREATE_SHADER" ? C.V86GL_OBJECT_KIND_SHADER : C.V86GL_OBJECT_KIND_PROGRAM;
         if (g.glslNames?.has(a[0]) && g.glslNames.get(a[0]) !== kind) return GL.INVALID_VALUE;
         return !a[0] || g.shaders.has(a[0]) || g.programs.has(a[0]) ? GL.INVALID_VALUE : 0;
@@ -76,6 +79,7 @@
         const id = s.args(name, v, o, n)[0];
         if (!id && ["DELETE_SHADER", "DELETE_PROGRAM", "USE_PROGRAM"].includes(name)) return 0;
         const error = objectError(s.current.group, id, shader); if (error) return error;
+        if (name === "LINK_PROGRAM" && s.current.group.programs.get(id).linkGeneration >= 0xFFFFFFFF) return GL.OUT_OF_MEMORY;
         if (name === "USE_PROGRAM") {
             const linked = s.linkedProgram(s.current.group.programs.get(id));
             if (linked && !linked.ok) return GL.INVALID_OPERATION;
@@ -217,7 +221,7 @@
         const a = this.args("CREATE_PROGRAM", view, offset, size);
         if (!a) return;
         this.current.group.glslNames?.delete(a[0]);
-        this.current.group.programs.set(a[0], { name: a[0], attached: new Set(), bindings: new Map(),
+        this.current.group.programs.set(a[0], { name: a[0], objectId: this.current.group.nextProgramObjectId++, linkGeneration: 0, attached: new Set(), bindings: new Map(),
             linkInput: null, linked: null, executableInput: null, resetValues: false,
             validated: false, validation: null, installed: null, deleted: false, values: new Map() });
     };
@@ -259,7 +263,7 @@
         if (!program) return;
         this.linkedProgram(program);
         const shaders = [...program.attached].map(name => group.shaders.get(name)).filter(Boolean);
-        program.linkInput = { shaders: shaders.map(s => ({ type: s.type, compileSource: s.compileSource })),
+        program.linkInput = { generation: ++program.linkGeneration, shaders: shaders.map(s => ({ type: s.type, compileSource: s.compileSource })),
             bindings: [...program.bindings] };
         program.linked = null;
         program.validated = false;
@@ -347,6 +351,7 @@
         if (program.resetValues) program.values = new Map();
         program.resetValues = false;
         program.executableInput = program.linkInput;
+        program.executableGeneration = program.linkInput.generation || 1;
         program.installed = linked;
         return program.linked = linked;
     };
@@ -685,6 +690,21 @@
     // The objects, in snapshots: what was compiled and linked, and the
     // uniforms' values (glslang runs again when an answer needs it)
     GLShadow.part({
+        routeRecord(shadow, fn, bytes, view, offset, size) {
+            if (fn !== GLFN.LINK_PROGRAM || !shadow.current) return;
+            const error = shadow.dispatch(fn, bytes, view, offset, size); if (error) return { error };
+            const program = shadow.current.group.programs.get(view.getUint32(offset, true)), linked = program.linked;
+            if (!linked) return { commands: [record(fn, [bytes.subarray(offset, offset + size)])] };
+            if (!linked.ok) {
+                view.setUint16(offset - 4, GLFN.PROGRAM_LINK_FAILED, true);
+                return { commands: [record(GLFN.PROGRAM_LINK_FAILED, [bytes.subarray(offset, offset + size)])] };
+            }
+            const entry = (row, kind) => ({ name: row.name, location_kind: kind, location: row.location, value_type: row.type, value_count: row.size });
+            const entries = [...linked.attributes.filter(a => a.location >= 0).map(a => entry(a, C.V86GL_LOCATION_KIND_ATTRIB)),
+                ...linked.uniforms.filter(u => u.location >= 0).map(u => entry(u, C.V86GL_LOCATION_KIND_UNIFORM))];
+            return { commands: [record(fn, [bytes.subarray(offset, offset + size)]), record(GLFN.RESOLVED_PROGRAM_INTERFACE,
+                [protocol.encodeProgramInterface({ program: program.name, object_id: program.objectId, link_generation: program.executableGeneration }, entries)])] };
+        },
         forwardOpcode(shadow, fn, bytes, view, offset, size) {
             if (fn !== GLFN.LINK_PROGRAM || !shadow.current || size < 4) return;
             const program = shadow.current.group.programs.get(view.getUint32(offset, true));
@@ -698,6 +718,7 @@
             return linked && linked.ok && !shadow.samplerValidation(program, linked).ok ? GL.INVALID_OPERATION : 0;
         },
         group(group) {
+            group.nextProgramObjectId = 1;
             group.shaders = new Map();
             group.programs = new Map();
         },
@@ -707,19 +728,22 @@
         getState(shadow, state) {
             state.glsl = [...shadow.groups.values()].map(group => ({
                 key: group.key,
+                nextProgramObjectId: group.nextProgramObjectId,
                 shaders: [...group.shaders.values()].map(s => [s.name, s.type, s.source, s.compileSource, s.deleted]),
                 programs: [...group.programs.values()].map(p => [p.name, [...p.attached], [...p.bindings], p.linkInput,
-                    p.validated, p.deleted, [...p.values], p.executableInput, p.resetValues, p.validation]),
+                    p.validated, p.deleted, [...p.values], p.executableInput, p.resetValues, p.validation, p.objectId, p.linkGeneration, p.executableGeneration]),
             }));
         },
         setState(shadow, state) {
             for (const saved of state.glsl || []) {
                 const group = shadow.groups.get(saved.key);
                 if (!group) continue;
+                group.nextProgramObjectId = saved.nextProgramObjectId || 1;
                 for (const [name, type, source, compileSource, deleted] of saved.shaders)
                     group.shaders.set(name, { name, type, source, compileSource, compiled: null, deleted });
-                for (const [name, attached, bindings, linkInput, validated, deleted, values, executableInput, resetValues, validation] of saved.programs)
+                for (const [name, attached, bindings, linkInput, validated, deleted, values, executableInput, resetValues, validation, objectId, linkGeneration, executableGeneration] of saved.programs)
                     group.programs.set(name, { name, attached: new Set(attached), bindings: new Map(bindings), linkInput,
+                        objectId: objectId || group.nextProgramObjectId++, linkGeneration: linkGeneration || linkInput?.generation || 0, executableGeneration: executableGeneration || executableInput?.generation || 0,
                         linked: null, executableInput: executableInput || null, resetValues: !!resetValues,
                         validated, validation: validation || null, installed: null, deleted, values: new Map(values) });
             }
