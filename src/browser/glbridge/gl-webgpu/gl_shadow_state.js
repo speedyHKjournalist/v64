@@ -225,6 +225,12 @@
         const matrix = { [GL.MODELVIEW_MATRIX]: GL.MODELVIEW, [GL.PROJECTION_MATRIX]: GL.PROJECTION,
             [GL.TEXTURE_MATRIX]: GL.TEXTURE, [GL.COLOR_MATRIX_SGI]: GL.COLOR }[pname];
         if (matrix) { const s = matrix === GL.TEXTURE ? state.texture[c.activeTexture || 0] : state.stacks[matrix]; return [s[s.length - 1], "f"]; }
+        const transposed = { [GL.TRANSPOSE_MODELVIEW_MATRIX]: GL.MODELVIEW, [GL.TRANSPOSE_PROJECTION_MATRIX]: GL.PROJECTION,
+            [GL.TRANSPOSE_TEXTURE_MATRIX]: GL.TEXTURE, [GL.TRANSPOSE_COLOR_MATRIX]: GL.COLOR }[pname];
+        if (transposed) {
+            const s = transposed === GL.TEXTURE ? state.texture[c.activeTexture || 0] : state.stacks[transposed], m = s[s.length - 1];
+            return [Array.from({ length: 16 }, (_, i) => m[(i % 4) * 4 + (i >> 2)]), "f"];
+        }
         const depth = { [GL.MODELVIEW_STACK_DEPTH]: GL.MODELVIEW, [GL.PROJECTION_STACK_DEPTH]: GL.PROJECTION,
             [GL.TEXTURE_STACK_DEPTH]: GL.TEXTURE, [GL.COLOR_MATRIX_STACK_DEPTH_SGI]: GL.COLOR }[pname];
         if (depth) return [[(depth === GL.TEXTURE ? state.texture[c.activeTexture || 0] : state.stacks[depth]).length], "i"];

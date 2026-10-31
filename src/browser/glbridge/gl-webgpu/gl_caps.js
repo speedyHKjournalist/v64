@@ -139,6 +139,8 @@
         case GL.MAX_COLOR_MATRIX_STACK_DEPTH_SGI: return LIMITS.OTHER_STACK_DEPTH;
         case GL.RGBA_MODE: return 1;
         case GL.STEREO: return 0;
+        case GL.AUX_BUFFERS: case GL.INDEX_MODE: case GL.INDEX_BITS:
+        case GL.ACCUM_RED_BITS: case GL.ACCUM_GREEN_BITS: case GL.ACCUM_BLUE_BITS: case GL.ACCUM_ALPHA_BITS: return 0;
         case GL.MAX_TEXTURE_COORDS: return LIMITS.MAX_TEXTURE_COORDS;
         case GL.MAX_TEXTURE_IMAGE_UNITS: return LIMITS.MAX_TEXTURE_IMAGE_UNITS;
         case GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS: return LIMITS.MAX_VERTEX_TEXTURE_IMAGE_UNITS;
@@ -184,9 +186,9 @@
     function vector(caps, pname) {
         if (caps.profile?.vectors && Object.hasOwn(caps.profile.vectors, pname)) return caps.profile.vectors[pname];
         switch (pname) {
-        case GL.POINT_SIZE_RANGE: return [1, LIMITS.MAX_POINT_SIZE];
+        case GL.POINT_SIZE_RANGE: case GL.ALIASED_POINT_SIZE_RANGE: return [1, LIMITS.MAX_POINT_SIZE];
         case GL.LINE_WIDTH_RANGE: case GL.ALIASED_LINE_WIDTH_RANGE: return [1, LIMITS.MAX_LINE_WIDTH];
-        case GL.POINT_SIZE_GRANULARITY: return [1];
+        case GL.POINT_SIZE_GRANULARITY: case GL.LINE_WIDTH_GRANULARITY: return [1];
         case GL.COMPRESSED_TEXTURE_FORMATS:
             return [GL.COMPRESSED_RGB_S3TC_DXT1_EXT, GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, GL.COMPRESSED_RGBA_S3TC_DXT3_EXT, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT]
                 .slice(0, integer(caps, GL.NUM_COMPRESSED_TEXTURE_FORMATS));
@@ -206,6 +208,8 @@
             // predating the CPU vector capability table.
             for (const [pname, value] of [[GL.MAX_ATTRIB_STACK_DEPTH, 16], [GL.MAX_CLIENT_ATTRIB_STACK_DEPTH, 16],
                 [GL.MAX_COLOR_MATRIX_STACK_DEPTH_SGI, 2], [GL.RGBA_MODE, 1], [GL.STEREO, 0]]) if (integers[pname] === undefined) integers[pname] = value;
+            for (const pname of [GL.AUX_BUFFERS, GL.INDEX_MODE, GL.INDEX_BITS, GL.ACCUM_RED_BITS, GL.ACCUM_GREEN_BITS, GL.ACCUM_BLUE_BITS, GL.ACCUM_ALPHA_BITS])
+                if (integers[pname] === undefined) integers[pname] = 0;
         } else {
             for (const pname of new Set([...Object.values(GL), protocol.C.V86GL_QUERY_HOST_CAPABILITIES])) {
                 const value = integer(result, pname), text = string(result, pname);
@@ -213,7 +217,7 @@
                 if (text !== undefined) strings[pname] = text;
             }
         }
-        for (const pname of [GL.POINT_SIZE_RANGE, GL.LINE_WIDTH_RANGE, GL.ALIASED_LINE_WIDTH_RANGE, GL.POINT_SIZE_GRANULARITY, GL.COMPRESSED_TEXTURE_FORMATS])
+        for (const pname of [GL.POINT_SIZE_RANGE, GL.ALIASED_POINT_SIZE_RANGE, GL.LINE_WIDTH_RANGE, GL.ALIASED_LINE_WIDTH_RANGE, GL.POINT_SIZE_GRANULARITY, GL.LINE_WIDTH_GRANULARITY, GL.COMPRESSED_TEXTURE_FORMATS])
             vectors[pname] = Object.freeze(Array.from(vector(caps, pname)));
         result.profile = Object.freeze({ version: 2, integers: Object.freeze(integers), strings: Object.freeze(strings), vectors: Object.freeze(vectors) });
         Object.freeze(result.limits); Object.freeze(result.features);

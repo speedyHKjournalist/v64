@@ -63,6 +63,10 @@ const MUTATIONS = {
         "gl_fixed_function_wgsl_test.js", "gl_arb_program_test.js", "graphics_checkpoint_test.js", "gl_shadow_state_test.js", "gl_shadow_numeric_state_test.js",
         "gl_async_answers_test.js", "gl_shadow_validation_test.js", "gl_shadow_raster_test.js", "gl_shadow_fixed_test.js", "gl_shadow_glsl_test.js", "gl_shadow_arb_test.js", "gl_shadow_misc_test.js", "gl_shadow_rasterpos_test.js", "gl_shadow_pixelmaps_test.js", "gl_shadow_objects_test.js", "gl_shadow_textures_test.js", "gl_shadow_buffers_test.js", "gl_shadow_arrays_test.js", "gl_shadow_names_test.js", "gl_shadow_queries_test.js"],
     pages: ["gl_conformance_browser_test.html", "gl_multipass_browser_test.html", "gl_validation_browser_test.html", "gl_gpu_snapshot_browser_test.html", "gl_renderer_snapshot_browser_test.html"], list: [
+        ["Core queries: return matrices without transposing", G + "gl_shadow_state.js",
+            'm[(i % 4) * 4 + (i >> 2)]', 'm[i]'],
+        ["Core queries: read the first texture matrix for every unit", G + "gl_shadow_state.js",
+            'const s = transposed === GL.TEXTURE ? state.texture[c.activeTexture || 0]', 'const s = transposed === GL.TEXTURE ? state.texture[0]'],
         ["Index state: round negative halves toward positive infinity", G + "gl_shadow_state.js",
             'kind === "t" ? Math.trunc(v) : v < 0 ? -Math.round(-v) : Math.round(v)', 'kind === "t" ? Math.trunc(v) : Math.round(v)'],
         ["Index state: keep double precision instead of GL float state", G + "gl_shadow_state.js",

@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("node:assert/strict"), { GLShadow } = require("../../src/browser/glbridge/gl-webgpu/gl_shadow.js");
-require("../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
+require("../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"); require("../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js");
 const caps = require("../../src/browser/glbridge/gl-webgpu/gl_caps.js"), P = require("../../src/browser/glbridge/gl-webgpu/gl_protocol.js"),
     { GLWebGPUExecutor } = require("../../src/browser/glbridge/gl-webgpu/gl_executor.js"), { createFakeHost } = require("./gl_fake_gpu.js"), { GLStream, GL } = require("./gl_stream_builder.js"),
     reference = require("./gl_conformance/state_queries_reference.json").cases;
@@ -17,9 +17,19 @@ function query(s, pname, kind, count) {
         for (const entry of reference) {
             if (entry.name === "attrib_pushed") submit(new GLStream().call("PUSH_ATTRIB", 1).call("PUSH_ATTRIB", 0x4000).call("PUSH_CLIENT_ATTRIB", 2));
             if (entry.name === "attrib_popped") submit(new GLStream().call("POP_ATTRIB").call("POP_ATTRIB").call("POP_CLIENT_ATTRIB"));
+            const load = (mode, values, unit) => {
+                const s = new GLStream(); if (unit !== undefined) s.call("ACTIVE_TEXTURE", GL.TEXTURE0 + unit);
+                s.call("MATRIX_MODE", mode).record(P.GLFN.LOAD_MATRIXF, P.encodeRecord("LOAD_MATRIXF", { values })); submit(s);
+            };
+            if (entry.name === "transpose_mv") load(GL.MODELVIEW, Array.from({ length: 16 }, (_, i) => i + 1));
+            if (entry.name === "transpose_projection") load(GL.PROJECTION, Array.from({ length: 16 }, (_, i) => (i + 1) * 2));
+            if (entry.name === "transpose_tex0") load(GL.TEXTURE, Array.from({ length: 16 }, (_, i) => i + 2), 0);
+            if (entry.name === "transpose_tex3") load(GL.TEXTURE, Array.from({ length: 16 }, (_, i) => -i - 0.5), 3);
+            if (entry.name === "transpose_tex0_unchanged") submit(new GLStream().call("ACTIVE_TEXTURE", GL.TEXTURE0));
+            if (entry.name === "transpose_color") load(GL.COLOR, Array.from({ length: 16 }, (_, i) => i % 5 === 0 ? i + 1 : 0));
             let expected = entry.values;
             if (["line_range", "aliased_line_range"].includes(entry.name)) expected = [1, 64];
-            if (entry.name === "point_granularity") expected = [1];
+            if (entry.name === "point_granularity" || entry.name === "line_granularity") expected = [1];
             if (entry.name === "max_color_matrix") expected = [4];
             if (entry.name === "compressed_formats") expected = bc ? [33776, 33777, 33778, 33779] : [];
             assert.equal(entry.error, 0, entry.name);
@@ -27,7 +37,8 @@ function query(s, pname, kind, count) {
                 const s = new GLStream(), q = query(s, entry.pname, kind, expected.length); submit(s);
                 assert.equal(q.view.getUint32(P.F.QUERY_STATE.status, true), 1, entry.name); assert.equal(q.view.getUint32(P.F.QUERY_STATE.count, true), expected.length);
                 const values = expected.map((n, i) => q.view.getFloat64(24 + i * 8, true));
-                assert.deepEqual(values, expected.map(n => kind === P.C.V86GL_STATE_BOOLEAN ? +!!n : kind === P.C.V86GL_STATE_FLOAT ? Math.fround(n) : n), entry.name);
+                assert.deepEqual(values, expected.map(n => kind === P.C.V86GL_STATE_BOOLEAN ? +!!n : kind === P.C.V86GL_STATE_FLOAT ? Math.fround(n) :
+                    kind === P.C.V86GL_STATE_INTEGER ? n < 0 ? -Math.round(-n) : Math.round(n) : n), entry.name);
             }
         }
         const bad = new GLStream().call("BIND_PROGRAM_ARB", GL.VERTEX_PROGRAM_ARB, 1).programStringARB(GL.VERTEX_PROGRAM_ARB, "!!ARBvp1.0\nBROKEN; END"); submit(bad);
