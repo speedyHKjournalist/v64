@@ -5181,6 +5181,8 @@
         if (units.length === 1) return units[0];
         const result = { ok: false, stage, log: "", warnings: units.flatMap(u => u.warnings || []),
             version: Math.max(110, ...units.map(u => u.version || 110)),
+            unitSources: units.map(u => ({ stage, preprocessedSource: u.preprocessedSource, version: u.version, extensions: u.extensions,
+                sourceHash: u.sourceHash, warnings: u.warnings, log: u.log })),
             sourceHash: hashString(stage + " " + JSON.stringify(units.map(u => u.preprocessedSource))) };
         try {
             if (!units.length) fail(0, "the " + stage + " stage has no shaders");

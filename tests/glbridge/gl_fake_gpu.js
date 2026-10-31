@@ -121,6 +121,7 @@ class FakeRenderPass {
 
 class FakeEncoder {
     constructor(log, device) { this.log = log; this.device = device; this.copies = []; }
+    beginComputePass() { return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; }
     beginRenderPass(descriptor) {
         for (const problem of rules.passProblems(descriptor)) this.device.rejectWith(problem);
         const attachment = descriptor.depthStencilAttachment;
@@ -178,7 +179,7 @@ class FakeDevice {
                 const format = destination.texture &&
                     destination.texture.descriptor.format || "";
                 // (Chrome: "Cannot copy into the depth aspect")
-                if (/^depth(24plus|32float)/.test(format))
+                if (/^depth(24plus|32float)/.test(format) && destination.aspect !== "stencil-only")
                     this.rejectWith("writeTexture into the depth aspect of " + format);
                 if (/^bc\d-/.test(format)) {
                     if ((size.width & 3) || (size.height & 3))
@@ -218,6 +219,9 @@ class FakeDevice {
         const module = { code: descriptor.code };
         this.log.modules.push(module);
         return module;
+    }
+    createComputePipeline(descriptor) {
+        return { descriptor, getBindGroupLayout: index => ({ index }) };
     }
     createRenderPipeline(descriptor) {
         const pipeline = {

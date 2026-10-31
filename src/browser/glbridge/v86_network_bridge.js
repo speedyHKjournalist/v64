@@ -10,6 +10,10 @@
 
     const GraphicsJournal = global.V86GraphicsJournal ||
         (typeof require === "function" ? require("./graphics_journal.js").GraphicsJournal : null);
+    const snapshotCodec = global.GLSnapshotCodec ||
+        (typeof require === "function" ? require("./gl-webgpu/gl_snapshot_codec.js") : null);
+    const rendererSnapshot = global.GLRendererSnapshot ||
+        (typeof require === "function" ? require("./gl-webgpu/gl_renderer_snapshot.js") : null);
     const V86GL_BRIDGE_VERSION = "gl-webgpu-only-v1-20260824";
     // The retired D8WG renderer's envelope: a d3d8.dll from before D3D8 was
     // translated onto D9WG. Refused, with a message.
@@ -379,6 +383,8 @@
 
         recordGraphicsBatch(event, bytes) {
             this.preparedCheckpoint = null;
+            if (this.glExecutor?.saveSnapshot && !event.barrier && !this.isEnvelope(bytes, CTRL_D3D9_BATCH) &&
+                !this.isEnvelope(bytes, CTRL_OWNER_RELEASED)) return;
             this.graphicsJournal.append(event, bytes);
             this.graphicsJournalBytes += JOURNAL_ENTRY_BYTES + bytes.byteLength;
             if (!event.barrier && !this.isEnvelope(bytes, CTRL_D3D9_BATCH))
@@ -404,6 +410,15 @@
 
         parseCheckpoint(checkpoint) {
             const bytes = asBytes(checkpoint);
+            if (bytes.length >= 4 && u32(bytes, 0) === 0x31534C47) {
+                try {
+                    const resources = snapshotCodec.decode(bytes);
+                    if (resources.version !== 4 || !(resources.history instanceof Uint8Array) || !(resources.renderer instanceof Uint8Array))
+                        throw new Error("invalid resource checkpoint");
+                    rendererSnapshot.inspect(resources.renderer);
+                    return { ...this.parseCheckpoint(resources.history), resourceState: resources };
+                } catch (error) { throw new Error("invalid graphics resource checkpoint: " + error.message); }
+            }
             if (bytes.byteLength < CHECKPOINT_HEADER_BYTES)
                 throw new Error("graphics checkpoint is truncated");
             const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -510,7 +525,16 @@
             // Flushes can split an unfinished frame/query. Replay that boundary
             // too, including when this checkpoint later becomes a parent save.
             this.recordGraphicsBatch({ barrier: true }, new Uint8Array(0));
-            this.preparedCheckpoint = await this.graphicsJournal.snapshot(this.legacyCheckpoint);
+            if (this.glExecutor?.saveSnapshot) {
+                const renderer = await this.glExecutor.saveSnapshot();
+                // Version-one legacy checkpoints contain only GL history.
+                // Live resources now replace that ancestry as well.
+                this.legacyCheckpoint = new Uint8Array(0);
+                const history = await this.graphicsJournal.snapshot(this.legacyCheckpoint);
+                this.preparedCheckpoint = snapshotCodec.encode({ version: 4, renderer, history,
+                    activeOwner: this.activeOwner, glSurface: this.glSurface, d3d9Surface: this.d3d9Surface,
+                    d3d9OwnerSessionKey: this.d3d9OwnerSessionKey });
+            } else this.preparedCheckpoint = await this.graphicsJournal.snapshot(this.legacyCheckpoint);
             return { entries: this.graphicsJournal.count, bytes: this.preparedCheckpoint.byteLength };
         }
 
@@ -579,6 +603,14 @@
                     // Do not accumulate an entire decompressed history during
                     // restore. Compression and disk writes keep pace with replay.
                     await this.graphicsJournal.work;
+                }
+                if (parsed.resourceState) {
+                    const saved = parsed.resourceState;
+                    await this.glExecutor.restoreSnapshot(saved.renderer);
+                    this.glExecutor.presentToCanvas(); this.glExecutor.flushFrame();
+                    this.activeOwner = saved.activeOwner;
+                    this.glSurface = saved.glSurface; this.d3d9Surface = saved.d3d9Surface;
+                    this.d3d9OwnerSessionKey = saved.d3d9OwnerSessionKey;
                 }
                 await this.waitForIdle(false);
                 complete = true;

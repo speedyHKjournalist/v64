@@ -108,18 +108,28 @@ for accepted GPU work and readbacks, and resumes it after success. Saves and
 restores on the same instance are serialized. A failed restore leaves the guest
 stopped. `initial_state` also restores graphics before `emulator-loaded`.
 Historical graphics surfaces stay hidden during reconstruction; the final
-surface is revealed after replay completes. Loading still takes time proportional
-to the history. Browser audio is paused during the operation. Restoring clears
+surface is revealed after reconstruction completes. GL loading takes time
+proportional to live resources; D3D loading depends on its retained history. Browser audio is paused during the operation. Restoring clears
 audio from the discarded timeline and reapplies the saved SB16 sampling rate
 before playback resumes.
 
-Checkpoint version 3 records OpenGL, Direct3D 8, Direct3D 9 and DirectDraw batches
-in order, including Present and checkpoint flush boundaries. On restore the
-adapter rebuilds clean executors and replays the history. This reconstructs
-resource handles, shaders, render state, palettes, queries and GPU-rendered
-contents, rather than relying only on CPU upload shadows. Historical readbacks
-never write to the restored guest memory. D3D8 uses an owned back buffer so
-unfinished frames survive browser frame boundaries and checkpoint flushes.
+Checkpoint version 4 stores GL's live renderer graph and GPU contents. Shared
+objects and retained bindings keep their identity; typed array views keep their
+common storage. GLSL compiler state is rebuilt from the preprocessed sources of
+the installed compilation units, while uniform values and locations survive.
+Textures include every mip/layer and 3D slice, including GPU-rendered contents.
+Window buffers, renderbuffers, accumulation, depth/stencil and individual MSAA
+samples are saved as resources. Large transfers use bounded slices. The CPU
+shadow's GL state and frozen capabilities travel with the virtio device state.
+A retained IOCTL waiting for GPU-derived CPU state must complete before saving.
+
+New GL draws are no longer journaled. Version 4 includes the version 3 paged
+Direct3D 8/9 and DirectDraw history, with Present and checkpoint flush boundaries.
+Their handles, shaders, render state, palettes, queries and GPU-rendered contents
+are reconstructed in order. Historical readbacks never write restored guest RAM.
+Older GL histories remain readable and become live resource snapshots on the
+next save. Malformed resource graphs are checked before replacing live state;
+GPU mapping and validation failures fail the operation.
 
 Commands are copied directly into contiguous pages, avoiding allocations per
 batch. In browsers, completed page buffers are transferred to a dedicated
@@ -137,9 +147,9 @@ and the current page also use memory outside this cache budget.
 Saving packs all pages into a portable checkpoint; loading needs no original
 browser database. It decompresses and replays one page at a time. Saving still
 needs memory for the complete output, and the emulator's overall state format
-uses signed 32-bit offsets. History size and restore time grow with the recorded
-workload. This remains a replay checkpoint, rather than a compact snapshot of
-only live resources, and GPU results need the same supported features.
+uses signed 32-bit offsets. The D3D history size and restore time grow with its recorded workload. GL
+checkpoint size instead depends on live resources. GPU results need the same
+supported features.
 
 Snapshots from before `virtio_devices` (the device state of `v86gl_pci.js` in
 `state[92]`) still restore: the device recognizes and converts them.

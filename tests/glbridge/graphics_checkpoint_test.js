@@ -82,6 +82,8 @@ const timeout = setTimeout(() => { throw new Error("checkpoint test timed out");
             sourceRect: [0, 0, 2, 2], destinationRect: [0, 0, 2, 2] })),
     ], { sessionLow: 2 })));
     const snapshot = await a.save();
+    assert.ok(a.bridge.parseCheckpoint(snapshot).resourceState, "GL uses a live resource checkpoint");
+    assert.equal(a.bridge.glJournalBytes, 0, "GL commands no longer accumulate in the journal");
     const queryState = a.gl.queries.get(7);
     assert.equal(queryState.ended, false);
     const expected9 = a.direct9.executor.sessionStates.get("0000000000000001");

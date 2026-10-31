@@ -1886,6 +1886,16 @@
                 await Promise.all(Array.from(this.pendingReadbacks));
         }
 
+        saveSnapshot() {
+            const snapshot = nodeRequire ? nodeRequire("./gl_renderer_snapshot.js") : global.GLRendererSnapshot;
+            return snapshot.capture(this);
+        }
+
+        restoreSnapshot(bytes) {
+            const snapshot = nodeRequire ? nodeRequire("./gl_renderer_snapshot.js") : global.GLRendererSnapshot;
+            return snapshot.restore(this, bytes);
+        }
+
         onDeviceLost() {
             // Every GPU object belonged to the old device and may be neither
             // used nor destroyed now. The GL state machine is plain
@@ -2169,9 +2179,10 @@
             }
             release(this.backBuffer);
             release(this.depthTarget);
+            release(this.multisampleTarget);
             if (this.accumBuffer) {
-                release(this.accumBuffer.textures && this.accumBuffer.textures[0]);
-                release(this.accumBuffer.textures && this.accumBuffer.textures[1]);
+                release(this.accumBuffer.currentTexture);
+                release(this.accumBuffer.nextTexture);
             }
             for (const texture of this.logicTargetTextures || []) release(texture);
             this.releaseRetired();
@@ -2206,6 +2217,8 @@
             this.backBufferView = null;
             this.depthTarget = null;
             this.depthTargetView = null;
+            this.multisampleTarget = null;
+            this.multisampleView = null;
             this.accumBuffer = null;
             this.logicTargetTextures = [];
             this.logicTargetViews = [];
@@ -7126,7 +7139,7 @@
                 label: "GL multisampled colour",
                 size: { width, height, depthOrArrayLayers: 1 },
                 format: this.backBufferFormat, sampleCount: samples,
-                usage: TEXTURE_USAGE_RENDER_ATTACHMENT,
+                usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_TEXTURE_BINDING,
             });
             this.multisampleView = this.multisampleTarget.createView();
             this.multisampleWidth = width;

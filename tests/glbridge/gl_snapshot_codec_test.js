@@ -1,0 +1,22 @@
+"use strict";
+const assert = require("node:assert/strict"), codec = require("../../src/browser/glbridge/gl-webgpu/gl_snapshot_codec.js");
+const buffer = new ArrayBuffer(64), integers = new Uint32Array(buffer, 8, 4), floats = new Float64Array(buffer, 24, 3), sparse = [];
+integers.set([0x12345678, 0xFFFFFFFF, 3, 4]); floats.set([NaN, -0, Infinity]); sparse[3] = undefined; sparse[7] = 42;
+const shared = { name: 9 }, root = { shared, again: shared, sparse, integers, floats, data: new DataView(buffer, 12, 17), map: new Map(), set: new Set(), plain: Object.create(null), numbers: [NaN, -0, Infinity, -Infinity, undefined] };
+root.self = root; root.map.set(shared, root); root.set.add(root.map); root.plain.__proto__ = { retained: true };
+const bytes = codec.encode(root), copy = codec.decode(bytes);
+assert.equal(copy.self, copy); assert.equal(copy.shared, copy.again); assert.equal(copy.map.get(copy.shared), copy); assert.ok(copy.set.has(copy.map));
+assert.equal(copy.sparse.length, 8); assert.equal(0 in copy.sparse, false); assert.equal(3 in copy.sparse, true); assert.equal(copy.sparse[3], undefined);
+assert.deepEqual(copy.integers, integers); assert.deepEqual(copy.floats, floats); assert.equal(copy.integers.buffer, copy.floats.buffer); assert.equal(copy.data.buffer, copy.floats.buffer);
+assert.equal(copy.data.byteOffset, 12); assert.equal(copy.data.byteLength, 17); assert.deepEqual(copy.numbers, root.numbers); assert.equal(Object.getPrototypeOf(copy.plain), null);
+integers[0] = 0; assert.equal(copy.integers[0], 0x12345678, "snapshot owns bytes independently of the source");
+const external = new Date(), encoded = codec.encode({ a: external, b: external }, { external: v => v === external ? { index: 4 } : undefined }), resource = {};
+let resolves = 0;
+const restored = codec.decode(encoded, { external: v => { ++resolves; assert.equal(v.index, 4); return resource; } });
+assert.equal(restored.a, resource); assert.equal(restored.b, resource); assert.equal(resolves, 1);
+assert.throws(() => codec.decode(encoded), /external resources/); assert.throws(() => codec.encode({ fn() {} }), /Unsupported/); assert.throws(() => codec.encode(new Date()), /Unsupported/);
+for (const at of [0, 4, 8, 12, 16, 20]) { const corrupt = bytes.slice(); new DataView(corrupt.buffer).setUint32(at, 0xFFFFFFFF, true); assert.throws(() => codec.decode(corrupt)); }
+for (let size = 0; size < 24; ++size) assert.throws(() => codec.decode(bytes.subarray(0, size)));
+assert.throws(() => codec.decode(bytes.subarray(0, bytes.length - 1)), /header/);
+const projected = codec.decode(codec.encode({ live: 3, cache: new Date() }, { project: v => ({ live: v.live }) })); assert.deepEqual(projected, { live: 3 });
+console.log("gl_snapshot_codec_test: owned binary graphs, shared identities/views, sparse arrays, cycles, Map/Set, special numbers and malformed bounds passed");

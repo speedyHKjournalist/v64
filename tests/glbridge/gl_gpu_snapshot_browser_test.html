@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GPU resource snapshots</title>
+<pre id="result">RUNNING</pre>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_gpu_snapshot.js"></script>
+<script>
+(async () => {
+    "use strict";
+    const check = (ok, message) => { if (!ok) throw new Error(message); };
+    try {
+        const adapter = await navigator.gpu.requestAdapter(), bc = adapter.features.has("texture-compression-bc"), device = await adapter.requestDevice({ requiredFeatures: bc ? ["texture-compression-bc"] : [] }),
+            errors = [], executor = { device, awaitReadback: promise => promise };
+        device.addEventListener("uncapturederror", event => errors.push(event.error.message));
+        const archive = GLGPUArchive;
+        const descriptor = (format, width, height, layers = 1, levels = 1, samples = 1, dimension = "2d") => ({ size: { width, height, depthOrArrayLayers: layers },
+            dimension, mipLevelCount: levels, sampleCount: samples, format, usage: samples > 1 ? 20 : 23 });
+        const same = (a, b, name) => check(a.length === b.length && a.every((n, i) => n === b[i]), name + ": " + a.slice(0, 20) + " expected " + b.slice(0, 20));
+        const roundTrip = async (saved, label) => {
+            device.pushErrorScope("validation");
+            const first = await archive.restore(executor, saved), captured = await archive.capture(executor, first), second = await archive.restore(executor, captured), again = await archive.capture(executor, second);
+            if (saved.kind === "buffer") { same(captured.data, saved.data, label); same(again.data, saved.data, label + " restored"); }
+            else for (let i = 0; i < saved.levels.length; ++i) {
+                const original = saved.levels[i], image = captured.levels.find(e => e.level === original.level && e.layer === original.layer && e.aspect === original.aspect), next = again.levels.find(e => e.level === original.level && e.layer === original.layer && e.aspect === original.aspect);
+                check(image && next, label + " subresource " + i);
+                if (original.aspect === "depth" || original.aspect === "samples") {
+                    const expected = new Float32Array(original.data.buffer, original.data.byteOffset, original.data.byteLength / 4), actual = new Float32Array(image.data.buffer), restored = new Float32Array(next.data.buffer);
+                    check(actual.length === expected.length && actual.every((n, j) => Math.abs(n - expected[j]) < 0.00002), label + " samples " + actual.slice(0, 16) + " expected " + expected.slice(0, 16));
+                    check(restored.every((n, j) => n === actual[j]), label + " stable samples");
+                } else { same(image.data, original.data, label); same(next.data, original.data, label + " restored"); }
+            }
+            const error = await device.popErrorScope(); check(!error, label + ": " + error?.message); first.destroy(); second.destroy();
+        };
+        await roundTrip({ kind: "buffer", descriptor: { size: 256, usage: 44 }, data: Uint8Array.from({ length: 256 }, (_, i) => i) }, "buffer");
+        const color = (format, width, height, layers, levels, dimension, bytes = 4, block = 1) => {
+            const images = [];
+            for (let level = 0; level < levels; ++level) for (let layer = 0; layer < (dimension === "3d" ? Math.max(1, layers >> level) : layers); ++layer) {
+                const w = Math.ceil(Math.max(1, width >> level) / block) * block, h = Math.ceil(Math.max(1, height >> level) / block) * block, rows = h / block, rowBytes = w / block * bytes;
+                images.push({ level, layer, width: w, height: h, rows, rowBytes, aspect: "all", data: Uint8Array.from({ length: rows * rowBytes }, (_, i) => (i * 7 + level * 13 + layer * 41) & 255) });
+            }
+            const d = descriptor(format, width, height, layers, levels, 1, dimension); if (format.startsWith("bc")) d.usage = 7;
+            return { kind: "texture", descriptor: d, levels: images };
+        };
+        for (const format of ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "rgba16float", "rgba32float", "r8uint"])
+            await roundTrip(color(format, 4, 4, 2, 3, "2d", format === "rgba16float" ? 8 : format === "rgba32float" ? 16 : format === "r8uint" ? 1 : 4), format + " layers/mips");
+        await roundTrip(color("rgba8unorm", 3, 5, 1, 1, "2d"), "unaligned rows");
+        await roundTrip(color("rgba8unorm", 4, 4, 3, 2, "3d"), "3D mip slices");
+        await roundTrip(color("rgba32float", 1024, 512, 1, 1, "2d", 16), "bounded large color copies");
+        if (bc) await roundTrip(color("bc1-rgba-unorm", 4, 4, 2, 3, "2d", 8, 4), "BC1 physical tail mips");
+        for (const samples of [1, 4]) {
+            const width = 3, height = 2, count = width * height * samples;
+            for (const format of samples === 1 ? ["depth16unorm", "depth32float", "depth24plus-stencil8"] : ["depth24plus-stencil8"]) {
+                const depth = Float32Array.from({ length: count }, (_, i) => (i + 1) / (count + 2)), images = [{ level: 0, layer: 0, width, height, aspect: "depth", data: new Uint8Array(depth.buffer) }];
+                if (format.includes("stencil")) images.push({ level: 0, layer: 0, width, height, rows: height, rowBytes: width, aspect: samples > 1 ? "stencil-samples" : "stencil-only", data: Uint8Array.from({ length: count }, (_, i) => [0, 7, 19, 255][i % 4]) });
+                await roundTrip({ kind: "texture", descriptor: descriptor(format, width, height, 1, 1, samples), levels: images }, format + " " + samples + " samples");
+            }
+            if (samples > 1) {
+                const values = Float32Array.from({ length: count * 4 }, (_, i) => (i * 7 % 256) / 255);
+                await roundTrip({ kind: "texture", descriptor: descriptor("rgba8unorm", width, height, 1, 1, samples), levels: [{ level: 0, layer: 0, width, height, aspect: "samples", data: new Uint8Array(values.buffer) }] }, "MSAA individual colors");
+            }
+        }
+        const largeWidth = 512, largeHeight = 256, large = Float32Array.from({ length: largeWidth * largeHeight * 4 * 4 }, (_, i) => (i * 11 % 256) / 255);
+        await roundTrip({ kind: "texture", descriptor: descriptor("rgba8unorm", largeWidth, largeHeight, 1, 1, 4), levels: [
+            { level: 0, layer: 0, width: largeWidth, height: largeHeight, aspect: "samples", data: new Uint8Array(large.buffer) }] }, "bounded MSAA sample transfers");
+        await device.queue.onSubmittedWorkDone(); check(!errors.length, errors.join("; ")); device.destroy();
+        document.getElementById("result").textContent = "PASS -- GPU buffers, byte-exact color/float/BC mip layers, 3D slices, depth/stencil and individual MSAA samples restored";
+    } catch (error) { document.getElementById("result").textContent = "FAIL " + (error.stack || error); }
+})();
+</script>

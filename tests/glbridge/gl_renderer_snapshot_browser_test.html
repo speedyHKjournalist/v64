@@ -1,0 +1,123 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OpenGL resource checkpoint and continuation</title>
+<canvas id="gpu" width="16" height="16"></canvas>
+<pre id="result">RUNNING</pre>
+<script src="../../src/browser/glbridge/webgpu_host.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_protocol.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_constants.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_caps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_math.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_client_arrays.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_pixel_maps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_glslang.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_glsl.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_image_formats.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_texture_parameters.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_framebuffer_state.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_objects.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_state.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_raster.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_fixed.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_misc.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_rasterpos.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_pixelmaps.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_images.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_textures.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_stipple.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_list_arrays.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_lists.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_buffers.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arrays.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_names.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_queries.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_select_geometry.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_select.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_evaluators.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_state_layout.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shader_translator.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_fixed_function.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_arb_program.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_shadow_arb.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_snapshot_codec.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_gpu_snapshot.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_renderer_snapshot.js"></script>
+<script src="../../src/browser/glbridge/gl-webgpu/gl_executor.js"></script>
+<script src="../../src/browser/glbridge/graphics_journal.js"></script>
+<script src="../../src/browser/glbridge/webgpu_compositor.js"></script>
+<script src="../../src/browser/glbridge/v86_network_bridge.js"></script>
+<script src="gl_stream_builder.js"></script>
+<script src="gl_selection_cases.js"></script>
+<script src="gl_evaluator_cases.js"></script>
+<script>
+(async () => {
+    "use strict";
+    const P = GLProtocol, { GLStream, GL } = GLTestStream, check = (ok, message) => { if (!ok) throw new Error(message); };
+    try {
+        const compiler = new V86GLGlslang.Glslang(await WebAssembly.compile(await (await fetch("../../bios/glslang.wasm")).arrayBuffer())),
+            shadow = new V86GLShadow.GLShadow(), options = { strict: true }, canvas = document.getElementById("gpu");
+        let gpu = new GLWebGPUExecutorModule.GLWebGPUExecutor(canvas, options), writes = 0;
+        await gpu.initialize(); shadow.setCapabilities(gpu.capabilities()); shadow.setGlslang(compiler);
+        const mockD3D = () => ({ options: {}, work: Promise.resolve(), endOwnerSessions() {}, resetForReplay() {} });
+        const bridgeFor = executor => {
+            const bridge = installV86GLNetworkBridge(null, null, { glExecutor: executor, d3d9Executor: mockD3D(), compositor: new V86WebGPUCompositor({ width: 16, height: 16 }) });
+            bridge.activeOwner = "gl"; bridge.glSurface = { ...executor.surface }; return bridge;
+        };
+        let bridge = bridgeFor(gpu);
+        const submit = async stream => {
+            const memory = stream.bytes(), segments = shadow.process(memory);
+            gpu.options.writeGuestMemory = (at, data, metadata) => { ++writes; metadata.memory.set(data, at + metadata.baseOffset); };
+            for (const segment of segments || [{ offset: 0, length: memory.length }]) {
+                const bytes = segment.bytes || memory.subarray(segment.offset, segment.offset + segment.length), baseOffset = segment.bytes ? 0 : segment.offset;
+                bridge.pushPCIBatch({ bytes: bytes.slice(), flags: 0, memory, baseOffset });
+            }
+            await gpu.idle(); check(!shadow.current.error, "CPU error " + shadow.current.error);
+        };
+        // The bridge attaches its own metadata; use its writer for actual
+        // readback into each test stream, as the transport does for guest RAM.
+        const readPixel = async expected => {
+            const s = new GLStream(), pixel = s.readPixels(8, 8, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, 4);
+            const memory = s.bytes(), segments = shadow.process(memory);
+            for (const segment of segments || [{ offset: 0, length: memory.length }]) {
+                const bytes = segment.bytes || memory.subarray(segment.offset, segment.offset + segment.length);
+                gpu.submit(bytes.slice(), { memory, baseOffset: segment.offset || 0 });
+            }
+            await gpu.idle(); check(pixel.view.getUint32(P.F.READ_PIXELS.status, true) === 1, "readback completes");
+            check(expected.every((n, i) => Math.abs(n - pixel.bytes[32 + i]) <= 1), "restored pixel " + pixel.bytes.subarray(32));
+        };
+        const quad = () => new GLStream().call("BEGIN", GL.QUADS).call("TEX_COORD4F", 0, 0, 0, 1).call("VERTEX3F", -1, -1, 0)
+            .call("TEX_COORD4F", 1, 0, 0, 1).call("VERTEX3F", 1, -1, 0).call("TEX_COORD4F", 1, 1, 0, 1).call("VERTEX3F", 1, 1, 0)
+            .call("TEX_COORD4F", 0, 1, 0, 1).call("VERTEX3F", -1, 1, 0).call("END");
+        const blue = new Uint8Array(16 * 16 * 4); for (let i = 0; i < blue.length; i += 4) blue.set([0, 0, 255, 255], i);
+        const setup = new GLStream().makeCurrent(1, 0, 0, 16, 16, 1, 1).call("VIEWPORT", 0, 0, 16, 16)
+            .call("BIND_TEXTURE", GL.TEXTURE_2D, 5).call("TEX_PARAMETERI", GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST)
+            .texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 16, 16, GL.RGBA, GL.UNSIGNED_BYTE, blue)
+            .call("BIND_FRAMEBUFFER_EXT", GL.FRAMEBUFFER_EXT, 9).call("FRAMEBUFFER_TEXTURE_2D", GL.FRAMEBUFFER_EXT, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 5, 0)
+            .call("CLEAR_COLOR", 0.8, 0.2, 0.4, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).call("BIND_FRAMEBUFFER_EXT", GL.FRAMEBUFFER_EXT, 0)
+            .call("CREATE_PROGRAM", 100).call("CREATE_SHADER", 101, GL.VERTEX_SHADER).shaderSource(101, "#version 120\nvoid main(){gl_Position=gl_Vertex;gl_TexCoord[0]=gl_MultiTexCoord0;}")
+            .call("COMPILE_SHADER", 101).call("ATTACH_SHADER", 100, 101).call("CREATE_SHADER", 102, GL.FRAGMENT_SHADER)
+            .shaderSource(102, "#version 120\nuniform sampler2D image;void main(){gl_FragColor=texture2D(image,gl_TexCoord[0].xy);}")
+            .call("COMPILE_SHADER", 102).call("ATTACH_SHADER", 100, 102).call("LINK_PROGRAM", 100).call("USE_PROGRAM", 100).call("BEGIN_QUERY", GL.SAMPLES_PASSED, 7);
+        await submit(setup); await submit(quad()); await readPixel([204, 51, 102, 255]);
+        const cpu = JSON.parse(JSON.stringify(shadow.getState()));
+        await bridge.prepareSaveState(); const saved = bridge.serializeCheckpoint(), parsed = bridge.parseCheckpoint(saved);
+        check(parsed.resourceState && bridge.graphicsJournal.count === 1 && bridge.glJournalBytes === 0, "GL draws are absent from the checkpoint journal");
+        for (const cold of [false, true]) {
+            if (cold) {
+                gpu = new GLWebGPUExecutorModule.GLWebGPUExecutor(canvas, { strict: true }); await gpu.initialize(); bridge = bridgeFor(gpu);
+                gpu.options.writeGuestMemory = (at, data, metadata) => { ++writes; metadata.memory.set(data, at + metadata.baseOffset); };
+            } else await submit(new GLStream().call("END_QUERY", GL.SAMPLES_PASSED).call("USE_PROGRAM", 0).call("BIND_FRAMEBUFFER_EXT", GL.FRAMEBUFFER_EXT, 9)
+                .call("CLEAR_COLOR", 0, 1, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).call("BIND_FRAMEBUFFER_EXT", GL.FRAMEBUFFER_EXT, 0).call("CLEAR", GL.COLOR_BUFFER_BIT));
+            const before = writes; bridge.beginStateRestore(); bridge.onPCIStateRestored(saved); await bridge.finishStateRestore(); shadow.setState(cpu);
+            check(writes === before, "restoration never writes historical guest responses");
+            check(gpu.current.currentProgram === 100 && gpu.current.activeQuery?.name === 7, "installed program and active query restored");
+            await readPixel([204, 51, 102, 255]);
+            await submit(new GLStream().call("CLEAR_COLOR", 0, 0, 0, 1).call("CLEAR", GL.COLOR_BUFFER_BIT)); await submit(quad());
+            await readPixel([204, 51, 102, 255]); await submit(new GLStream().call("END_QUERY", GL.SAMPLES_PASSED));
+            check(!gpu.hostErrors.length && !gpu.gpuErrors.errors.length && !gpu.stats.refusals, "renderer failure");
+        }
+        document.getElementById("result").textContent = "PASS -- live GPU texture contents replace GL draw history; hot/cold checkpoints retain linked shaders, queries and subsequent textured draws";
+    } catch (error) { document.getElementById("result").textContent = "FAIL " + (error.stack || error); }
+})();
+</script>
