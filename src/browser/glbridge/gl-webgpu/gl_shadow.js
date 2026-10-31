@@ -447,6 +447,8 @@
         }
 
         getState() {
+            if (this.cpuBarrier || this.deferredCPU.length)
+                throw new Error("GL snapshot requires completed CPU state dependencies");
             const state = {
                 numberEncoding: 1,
                 capabilities: this.capabilities,

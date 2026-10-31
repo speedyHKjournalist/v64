@@ -390,10 +390,14 @@
                 bridge.screenChanged();
             },
             // Settles when every batch received so far is acknowledged
-            idle() {
-                return work;
+            async idle() {
+                // A GPU result may enqueue another continuation while the
+                // work being awaited is completing. Include that new work.
+                let observed;
+                do { observed = work; await observed; } while (observed !== work);
             },
             async prepare_save() {
+                await plugin.idle();
                 await bridge.prepareSaveState();
                 return bridge.serializeCheckpoint();
             },

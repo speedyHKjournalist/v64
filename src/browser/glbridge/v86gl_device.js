@@ -342,7 +342,10 @@
             },
             // Batches the renderer has not acknowledged yet
             busy() {
-                return inflight.size;
+                // A renderer acknowledgement can precede the CPU's delivery
+                // of a vertex result. The retained IOCTL is still live even
+                // after its original rendering batch has been acknowledged.
+                return inflight.size + +(!!heldRequest || !!shadow?.cpuBarrier);
             },
             // What the GL shadow did (tests)
             shadow_stats() {
@@ -359,6 +362,8 @@
                 // renderer says when the machine was reset)
             },
             get_state() {
+                if (heldRequest || shadow?.cpuBarrier)
+                    throw new Error("GL snapshot requires completed CPU state dependencies");
                 return [STATE_VERSION, arenaAddress, arenaBytes, lastFrameId, lastBytes, submitCount,
                     shadow ? JSON.stringify(shadow.getState()) : ""];
             },

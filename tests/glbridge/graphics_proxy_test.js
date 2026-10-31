@@ -202,6 +202,22 @@ const placed = layer => [layer.x, layer.y, layer.width, layer.height, layer.visi
     await remote.idle();
     assert.ok(toRemote.some(([m]) => m.type === "done" && m.id === 2));
     assert.equal(remote.stats.graphics_pending, 0);
+    // A completed GPU job can append its CPU continuation during draining.
+    // A save must include the appended work before preparing its checkpoint.
+    let prepared = false, saved = false, continuation;
+    const oldPrepare = remote.bridge.prepareSaveState, oldSerialize = remote.bridge.serializeCheckpoint;
+    remote.bridge.prepareSaveState = async () => { prepared = true; };
+    remote.bridge.serializeCheckpoint = () => new Uint8Array([42]);
+    remote.bridge.waitForSubmittedBatches = () => {
+        if (remote.lastEvent.frameId === 20) { batch(5, 21); return Promise.resolve(); }
+        return new Promise(resolve => { continuation = resolve; });
+    };
+    batch(4, 20);
+    const saving = remote.prepare_save().then(value => { saved = true; return value; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(prepared, false); assert.equal(saved, false, "save waits for work appended by a completing GPU job");
+    continuation(); assert.deepEqual(await saving, new Uint8Array([42])); assert.equal(prepared, true);
+    remote.bridge.prepareSaveState = oldPrepare; remote.bridge.serializeCheckpoint = oldSerialize;
     // A batch that fails loses only itself: acknowledged, renderer still available
     remote.bridge.waitForSubmittedBatches = () => Promise.reject(new Error("a host bug"));
     batch(3, 12);

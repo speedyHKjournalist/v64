@@ -46,9 +46,13 @@ function query(stream) {
         first.call("POINT_SIZE", 13).call("LINE_WIDTH", 5); const answer = query(first);
         submit(first, true); await proxy.idle();
         assert.deepEqual(replies, [0], "submitting IOCTL remains pending while CPU state depends on the GPU");
+        assert.ok(device.busy() > 0, "snapshot drain includes the held IOCTL after rendering is acknowledged");
+        assert.throws(() => device.get_state(), /completed CPU state dependencies/);
+        assert.throws(() => waiting.getState(), /completed CPU state dependencies/);
         assert.equal(gpu.current.lineWidth, 3); assert.equal(swaps, 0); assert.equal(waiting.current.state.values[GL.LINE_WIDTH][0], 3);
         waiting.current.state.values[GL.POINT_SIZE] = [7]; waiting.resumeCPU(next, [new GLStream().call("POINT_SIZE", 7).bytes()]); await proxy.idle(); await gpu.idle();
         assert.deepEqual(replies, [0, 0]); assert.equal(gpu.current.lineWidth, 5); assert.equal(gpu.current.pointSize, 7); assert.equal(swaps, 1, "present follows the final continuation only");
+        assert.equal(device.busy(), 0); assert.ok(device.get_state()[6], "completed CPU state can be saved");
         finishGPU();
         first.buffer.set(memory.subarray(32, 32 + first.length)); assert.equal(answer.view.getUint32(P.F.QUERY_STATE.status, true), 1); assert.equal(answer.view.getFloat64(24, true), 7);
         assert.equal(finishReply.view.getUint32(0, true), 1, "a continuation preserves earlier asynchronous replies in the same submission");
